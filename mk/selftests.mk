@@ -97,10 +97,6 @@ vfpu-tables-selftest:
 		tests/native/vfpu_tables_selftest.c src/rt/vfpu_tables.c $(LIBS)
 	$(BUILD_DIR)/vfpu_tables_selftest.exe
 
-# watchpoints-file-selftest — bounded parser regression for the derived
-# watchpoints.json runtime artifact (issue #188): the canonical JSON
-# fixture round-trips into the expected native watchpoint set, plus fail-closed
-# cases (wrong version/format, malformed JSON, out-of-range/reversed/oversized
 # strbuf-selftest — unit and adversarial tests for sr_buf_append / strbuf.h.
 # Exercises bounded formatting, hostile cursors, negative returns, canary bounds,
 # and golden trace formatting invariants.
@@ -122,6 +118,12 @@ xr-selftest:
 
 native-core-tests: xr-selftest
 
+# watchpoints-file-selftest — bounded parser regression for the derived
+# watchpoints.json runtime artifact (issue #188): the canonical JSON
+# fixture round-trips into the expected native watchpoint set, plus fail-closed
+# cases (wrong version/format, malformed JSON, out-of-range/reversed/oversized
+# spans, bad labels, duplicates, over-capacity lists, escapes) and the legacy
+# bare-array form. No game inputs required.
 watchpoints-file-selftest:
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/watchpoints_file_selftest.exe \
 		tests/native/watchpoints_file_selftest.c src/rt/watchpoints_file.c $(LIBS)
@@ -209,6 +211,20 @@ motion-match-selftest:
 		-o $(BUILD_DIR)/motion_match_selftest$(EXE_EXT) tests/native/motion_match_selftest.c \
 		src/rt/motion_match.c -lm
 	$(BUILD_DIR)/motion_match_selftest$(EXE_EXT)
+
+# motion-tap-selftest - the frame store, the bridge to the matcher and the in-between builder of
+# render-state motion (src/rt/motion_tap.c, #2081) on synthetic tap records, with the real matcher
+# between the two frames: built positions against a double-precision reference (a translating
+# quad, a strip skinned by two bones, a morph), the 28.4 tie, the sprite floor rule, fog, t = 1
+# giving B bit for bit, the index-hash gate, an unpaired draw drawn as in B, a held frame, each
+# reason that stops a frame, and overflow. Built from motion_tap.c, motion_match.c and its test
+# alone (pure C); ge-cpu-profile-validate-selftest runs the tap and the builder on the real ge.o.
+native-core-tests: motion-tap-selftest
+motion-tap-selftest:
+	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt \
+		-o $(BUILD_DIR)/motion_tap_selftest$(EXE_EXT) tests/native/motion_tap_selftest.c \
+		src/rt/motion_tap.c src/rt/motion_match.c -lm
+	$(BUILD_DIR)/motion_tap_selftest$(EXE_EXT)
 
 # fsr3-host-selftest - FSR 3's CPU side (src/rt/fsr3_host.c, src/rt/fsr3_jitter.c) against the record
 # of AMD's own host code (tests/native/fsr3_host_oracle.md): every clear, discard and dispatch, the
@@ -441,12 +457,16 @@ native-core-tests: ge-float24-selftest
 # per-draw vertex cache off for the scenes (its own case compares the cache on and off in
 # every run).  The binary sets both switches from its arguments, so an SR_GE_*_DISABLE the
 # caller exported cannot turn a run into another leg.  No game input.
+# It is also where the render-state motion tap (#2081) meets that object: one list drawn with
+# no listener, with one and with none again must leave the same guest VRAM, depth, GE state,
+# counters and GE clock, and the listener's store (src/rt/motion_tap.c) must hold what ge.c
+# drew and give frame B's own vertices back at t = 1, bit for bit.
 GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftest$(EXE_EXT)
 
 ge-cpu-profile-validate-selftest: $(RT_GE_O)
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_CPU_PROFILE_VALIDATE_SELFTEST) \
 		tests/native/ge_cpu_profile_validate_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/motion_tap.c src/rt/motion_match.c src/rt/ace.c -lm
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --vertex-cache-disabled
@@ -483,7 +503,7 @@ ge-vertex-cache-mutants: $(RT_GE_O)
 		bin=$(BUILD_DIR)/ge-vertex-cache-mutants/ge_vertex_cache_mutant$$m$(EXE_EXT); \
 		$(CC) $(GE_CFLAGS) -DSR_GE_VERTEX_CACHE_MUTANT=$$m -c src/rt/ge.c -o $$obj || exit 1; \
 		$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $$bin tests/native/ge_cpu_profile_validate_selftest.c \
-			$$obj src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm || exit 1; \
+			$$obj src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/motion_tap.c src/rt/motion_match.c src/rt/ace.c -lm || exit 1; \
 		$$bin > $$bin.log 2>&1; result=$$?; \
 		if test $$result -eq 0; then cat $$bin.log; echo "vertex cache mutant $$m unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "vertex cache mutant $$m failed for another reason" >&2; exit 1; fi; \
@@ -555,7 +575,7 @@ native-core-tests: ge-scene-selftest
 GE_FLIGHT_DIR := $(BUILD_DIR)/ge-flight-overhead
 GE_FLIGHT_ROUNDS ?= 30
 GE_FLIGHT_PAIRS ?= 5
-GE_FLIGHT_SRCS := tests/native/ge_cpu_profile_validate_selftest.c src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c
+GE_FLIGHT_SRCS := tests/native/ge_cpu_profile_validate_selftest.c src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/motion_tap.c src/rt/motion_match.c src/rt/ace.c
 
 ge-flight-overhead:
 	"$(PYTHON)" -c "import os, sys; [os.makedirs(d, exist_ok=True) for d in sys.argv[1:]]" $(GE_FLIGHT_DIR)/linked $(GE_FLIGHT_DIR)/absent
@@ -760,7 +780,7 @@ hle-thread-selftest-build: $(RT_GE_O) $(H264_SUB_OBJS) $(GENERIC_TITLE_CONFIG_HE
 		-ffunction-sections -fdata-sections \
 		-fno-asynchronous-unwind-tables -fno-unwind-tables -Wno-unused-function \
 		$(LDFLAGS) $(LD_GC_SECTIONS) $(REPRODUCIBLE_LINK_FLAG) -o $(BUILD_DIR)/hle_thread_selftest.exe \
-		$(HLE_THREAD_SELFTEST_SOURCE) $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
+		$(HLE_THREAD_SELFTEST_SOURCE) $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/cheats.c src/core/nk_cheats.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
 		src/rt/atrac3p_bridge.c $(ATRAC3P_SRCS) src/rt/mp3_bridge.c src/rt/vfpu_tables.c \
 		src/rt/h264_mf.c src/rt/h264_null.c src/rt/h264_ffmpeg.c $(H264_SUB_OBJS) \
 		src/rt/fbcap_policy.c $(RT_GE_O) src/rt/ge_capture.c $(LIBS)
@@ -800,7 +820,7 @@ hle-title-selftest-one: $(RT_GE_O) $(H264_SUB_OBJS) $(TITLE_CONFIG_TOOL) tools/t
 		-ffunction-sections -fdata-sections \
 		-fno-asynchronous-unwind-tables -fno-unwind-tables -Wno-unused-function \
 		$(LDFLAGS) $(LD_GC_SECTIONS) $(REPRODUCIBLE_LINK_FLAG) -o $(HLE_TITLE_SELFTEST_EXE) \
-		tests/native/hle_thread_selftest.c $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
+		tests/native/hle_thread_selftest.c $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/cheats.c src/core/nk_cheats.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
 		src/rt/atrac3p_bridge.c $(ATRAC3P_SRCS) src/rt/mp3_bridge.c src/rt/vfpu_tables.c \
 		src/rt/h264_mf.c src/rt/h264_null.c src/rt/h264_ffmpeg.c $(H264_SUB_OBJS) \
 		src/rt/fbcap_policy.c $(RT_GE_O) src/rt/ge_capture.c $(LIBS)
@@ -840,7 +860,7 @@ $(PSP_ORACLE_SMOKE_EXE): $(PSP_ORACLE_SMOKE_STAMP) $(H264_SUB_OBJS) $(PSP_ORACLE
 		-Wno-infinite-recursion -Wno-sign-compare -Wno-unused-parameter -Wno-parentheses -Wno-pointer-sign \
 		-I"$(PSP_ORACLE_SMOKE_DIR)" $(LDFLAGS) \
 		$(LD_GC_SECTIONS) $(REPRODUCIBLE_LINK_FLAG) -o "$(PSP_ORACLE_SMOKE_EXE)" \
-		tests/native/hle_thread_selftest.c $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
+		tests/native/hle_thread_selftest.c $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/cheats.c src/core/nk_cheats.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
 		src/rt/atrac3p_bridge.c $(ATRAC3P_SRCS) src/rt/mp3_bridge.c src/rt/vfpu_tables.c \
 		src/rt/h264_mf.c src/rt/h264_null.c src/rt/h264_ffmpeg.c $(H264_SUB_OBJS) \
 		src/rt/fbcap_policy.c $(RT_GE_O) src/rt/ge_capture.c \
@@ -1249,7 +1269,8 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 # gpu-coherence-pcache-mutant - pipeline-cache-cold must kill SR_PCACHE_SELFTEST_NULL_MUTANT, a
 # build whose pipe_create passes VK_NULL_HANDLE instead of the pipeline cache (#2149): no create
 # then takes the cache's handle, on any driver (lavapipe keeps no pipeline data, so the cache's
-# size cannot tell). Exit 77 (no Vulkan device) is a SKIP.
+# size cannot tell). Exit 77 (no Vulkan device) prints a SKIP line and fails the target with status
+# 77 (make reports Error 77), so a host without a device never counts the mutant killed.
 gpu-coherence-pcache-mutant: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_mutant', ignore_errors=True)"
@@ -1268,7 +1289,7 @@ gpu-coherence-pcache-mutant: shader-verify $(RT_GE_O)
 # SR_GPU_SNAPBAR_MUTANT in ge_gpu.c: 1 records one barrier command per image (the stream before
 # the pair), 2 leaves the target SHADER_READ_ONLY after a copy op, 3 drops the write from the
 # barriers' destination access. Each builds its own binary and must fail with its own message;
-# exit 77 (no Vulkan device) is a SKIP, as for the selftest itself.
+# exit 77 (no Vulkan device) prints a SKIP line and fails the target with status 77.
 gpu-coherence-selftest-snapbar-mutants: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in 1 2 3; do \
@@ -1302,7 +1323,7 @@ gpu-coherence-selftest-snapbar-mutants: shader-verify $(RT_GE_O)
 # samples as full colour: `--ssaa 2 --twin-key off`. The ge.c mutants build their own ge.o. Each builds
 # its own binary, so fourteen are built; the target is not part of
 # gpu-coherence-selftest or native-core-tests. Each mutant must fail with its own message; exit 77
-# (no Vulkan device) is a SKIP, as for the selftest itself.
+# (no Vulkan device) prints a SKIP line and fails the target with status 77.
 gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@rc=0; $(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_mutant_s2.txt || rc=$$?; \
@@ -1348,7 +1369,7 @@ gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 # fail with "movie frame not found". A second build, NK_MOVIE_MUTANT_COPY_HASH in ge.c, judges a copy of a
 # picture by the word-wise FNV fold instead of comparing bytes: movie-texture's alpha-bit cell (two pixels
 # that differ only in their top bit) must then fail with "a copy that differs from the picture was found
-# (two alpha bits)". Exit 77 (no Vulkan device) is a SKIP, as for the selftest itself.
+# (two alpha bits)". Exit 77 (no Vulkan device) prints a SKIP line and fails the target with status 77.
 gpu-coherence-selftest-movie-mutant: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@bin=$(BUILD_DIR)/gpu_coherence_movie_mutant.exe; kill="FAIL movie frame not found"; \
@@ -1450,8 +1471,9 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 # and the sprite behind it differ from the image (dst-read-depth with the native twin), and 17 lets a
 # shader-depth run write depth for a batch whose depth writes are off (dst-read-depth: Q's depth).
 # Mutants 1 to 3 and 5 to 17 run on the interlock path, 4 on the snapshot path. Each builds its own
-# binary and must fail with its own message. Exit 77 (no Vulkan device, or a device without the
-# interlock for 1 to 3 and 5 to 17) is a SKIP of that mutant.
+# binary and must fail with its own message. Exit 77 for 1 to 3 and 5 to 17 (no Vulkan device, or a
+# device without the interlock) is a SKIP of that mutant; for 4, which needs only a device, it prints
+# a SKIP line and fails the target with status 77.
 gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do \
@@ -1480,7 +1502,7 @@ gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
 		$$bin $$args > $$bin.log 2>&1; result=$$?; \
-		if test $$result -eq 77; then echo "dst-read mutant $$m: SKIP (no Vulkan device, or no interlock)"; continue; fi; \
+		if test $$result -eq 77 && test $$m -eq 4; then echo "dst-read mutant 4: SKIP (no Vulkan device)"; exit 77; fi; if test $$result -eq 77; then echo "dst-read mutant $$m: SKIP (no Vulkan device, or no interlock)"; continue; fi; \
 		if test $$result -eq 0; then cat $$bin.log; echo "dst-read mutant $$m unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "dst-read mutant $$m failed for another reason" >&2; exit 1; fi; \
 		echo "gpu-dst-read-mutants: mutant $$m killed ($$kill)"; \
@@ -1491,7 +1513,8 @@ gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 # where two overlap), 2 calls every stencil state with a KEEP stencil-fail op write-once (the
 # matrix), and 3 drops the depth condition (the GEQUAL depth leg with depth writes on). All run on
 # the snapshot path, where the batch is reordered. Each builds its own binary and must fail with
-# its own message. Exit 77 (no Vulkan device) is a SKIP of that mutant.
+# its own message. Exit 77 (no Vulkan device: the snapshot path needs nothing more) prints a SKIP
+# line and fails the target with status 77.
 gpu-stencil-once-mutants: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in 1 2 3; do \
@@ -1506,7 +1529,7 @@ gpu-stencil-once-mutants: shader-verify $(RT_GE_O)
 			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
 		$$bin --dst-read snapshot --case stencil-once > $$bin.log 2>&1; result=$$?; \
-		if test $$result -eq 77; then echo "stencil-once mutant $$m: SKIP (no Vulkan device)"; continue; fi; \
+		if test $$result -eq 77; then echo "stencil-once mutant $$m: SKIP (no Vulkan device)"; exit 77; fi; \
 		if test $$result -eq 0; then cat $$bin.log; echo "stencil-once mutant $$m unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "stencil-once mutant $$m failed for another reason" >&2; exit 1; fi; \
 		echo "gpu-stencil-once-mutants: mutant $$m killed ($$kill)"; \
@@ -1537,12 +1560,16 @@ gpu-ace-selftest: shader-verify $(RT_GE_O)
 # wrap and clamp borders, the job queue, the settings and the smart 2D classifier, and soft
 # shadows' copy (exact texels of a synthetic disc, the interior and mass rules, the bounds) and
 # their texture digest (RFC 4231 HMAC-SHA-256 vectors, then the match rule). No GPU; the
-# worker threads need SDL3, so without it the recipe reports SKIP.
+# worker threads need SDL3, so without it the recipe reports SKIP. NK_REQUIRE_SDL3=1 makes that
+# SKIP a failure, for a job that installs SDL3: a build discovery that misses it must not pass.
+NK_REQUIRE_SDL3 ?=
 TEX_SCALE_SDL_READY := $(and $(filter-out none,$(SDL3_PROVIDER)),$(if $(strip $(SDL3_ERROR)),,yes))
 tex-scale-selftest:
 	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
-	@if [ -z "$(TEX_SCALE_SDL_READY)" ]; then echo "SKIP tex-scale-selftest (SDL3 not found by build discovery)"; exit 0; fi; \
+	@if [ -z "$(TEX_SCALE_SDL_READY)" ] && [ "$(NK_REQUIRE_SDL3)" = 1 ]; then \
+		echo "FAIL tex-scale-selftest (SDL3 not found by build discovery, but NK_REQUIRE_SDL3=1 requires it)"; exit 1; fi; \
+	if [ -z "$(TEX_SCALE_SDL_READY)" ]; then echo "SKIP tex-scale-selftest (SDL3 not found by build discovery)"; exit 0; fi; \
 	$(CC) $(CFLAGS) -O2 -ffunction-sections -fdata-sections $(LDFLAGS) $(LD_GC_SECTIONS) \
 		-o $(BUILD_DIR)/tex_scale_selftest$(EXE_EXT) \
 		src/rt/gpu_sdl3vk/tex_scale_selftest.c src/rt/gpu_sdl3vk/tex_scale.c third_party/xbrz/xbrz.c src/rt/vfpu_tables.c \
@@ -1690,14 +1717,20 @@ native-core-tests: pipeline-cache-selftest
 # reads, the wildcard lookup order, the palette identity, ZIP packs read in place (nk_zip.c and its
 # inflater), malformed packs and archives refused whole, and the decoded-image budget. Synthetic
 # packs written by the test; no GPU, no SDL, no game data. Once built, the same program measures a
-# large synthetic pack: $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) --bench 10000.
+# large synthetic pack: $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) --bench 10000. Exit 77 is a Windows
+# host that could not make a link a hostile case needs (a file symbolic link without Developer
+# Mode): the SKIP is printed with the cases left out. On POSIX a link that cannot be made fails.
 texrepl-selftest:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/core -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS -DNK_TEXREPL_TEST_HOOKS tests/native/texrepl_selftest.c src/rt/texrepl.c src/core/nk_zip.c src/core/nk_psp_inflate.c \
 		src/core/nk_shared_helpers.c \
 		$(PLAYER_PLATFORM_SRC) $(PLAYER_PLATFORM_LIBS) \
-		-o $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) && $(BUILD_DIR)/texrepl_selftest$(EXE_EXT)
+		-o $(BUILD_DIR)/texrepl_selftest$(EXE_EXT)
+	@rc=0; $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) || rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP texrepl-selftest link containment (exit 77; the hostile cases this host could not set up are printed above)"; \
+	elif [ $$rc -ne 0 ]; then exit $$rc; fi
 
 native-core-tests: texrepl-selftest
 
@@ -1949,8 +1982,9 @@ ge-replay: shader-verify $(RT_GE_O)
 # draw is NO_DRAWS (exit 6); none is ever NO_DIFFERENCE.
 # Exit 77 (no Vulkan device) is a SKIP, as for gpu-coherence-selftest (GE_FBD_SKIP_STATUS).
 GE_FBD_DIR = $(BUILD_DIR)/ge_first_bad_draw
-# The exit status of a skip: 77 run alone; gpu-coherence-selftest passes 0, so a host with no
-# Vulkan device gets SKIP lines there, as for its other skipped cases, not a make error.
+# The exit status of a skip: 77 run alone, which fails the target. gpu-coherence-selftest passes
+# 0, so these legs print SKIP lines there instead; a host with no Vulkan device never reaches
+# them, because the selftest's first leg has already failed the target with status 77.
 GE_FBD_SKIP_STATUS ?= 77
 ge-first-bad-draw-selftest: ge-replay
 	$(NK_REQUIRE_POSIX_SHELL)

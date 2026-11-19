@@ -8,6 +8,7 @@
    saved as it is made. */
 
 #include "player_ui_nk.h"
+#include "player_state.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
@@ -37,32 +38,8 @@ static PlayerUiAction settings_op(PlayerUiSettingsOp op) {
     result.kind = PLAYER_UI_ACTION_SETTINGS;
     result.primary = (PlayerUiPrimaryAction)op;
     result.title_index = 0u;
+    result.choice_index = -1;
     return result;
-}
-
-/* Of a row's value now, its other values, its library value and the value another setting
-   can give it (any may be NULL), the one whose button, "name: value", is widest. */
-static const char *settings_widest_value(NkUi *ui, const char *name, const char *value,
-                                         const char *const *others, int other_count,
-                                         const char *library_value, const char *other_value) {
-    const char *widest = value;
-    float widest_width = -1.0f;
-    char label[96];
-    for (int i = -3; i < other_count; i++) {
-        const char *candidate = i == -3 ? value
-                                : i == -2 ? library_value
-                                : i == -1 ? other_value
-                                          : others[i];
-        float width;
-        if (candidate == NULL || (i >= 0 && others == NULL)) continue;
-        (void)snprintf(label, sizeof(label), "%s: %s", name, candidate);
-        width = nk_ui_button_width(ui, label, 0u);
-        if (width > widest_width) {
-            widest = candidate;
-            widest_width = width;
-        }
-    }
-    return widest;
 }
 
 static const char *settings_on_off(bool on) {
@@ -179,8 +156,7 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
         /* The names take what the widest value button leaves, at least its
            design 190 px; at a larger text size the names wrap instead. */
         const char *values[] = {
-            safe_text(model->resolution, "2x"), safe_text(model->pacing, "PSP timing"),
-            safe_text(model->scaling, "Sharp"), safe_text(model->preset, "Custom"),
+            safe_text(model->resolution, "2x"), safe_text(model->scaling, "Sharp"),
             "Size, contrast, motion",
             "Controller and keyboard", "Check for updates", "Off", "Off: options"
         };
@@ -208,16 +184,13 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                 nk_ui_text_role(ui, SET_ID_TEXT + 0u, "SETTINGS", NK_UI_TYPE_DISPLAY,
                                 theme->paper);
             }
-            /* A notice (a failed save) comes first, then the graphics preset's note
-               (#2150), then the page's own line. */
+            /* A notice (a failed save) comes first, then the page's own line. The graphics
+               preset's note (#2150) is on Settings > Enhanced, with the preset's row. */
             bool has_notice = model->notice != NULL && model->notice[0] != '\0';
-            bool has_preset = !has_notice && model->preset_notice != NULL &&
-                              model->preset_notice[0] != '\0';
             nk_ui_text_role(ui, SET_ID_TEXT + 1u,
                             has_notice ? model->notice
-                            : has_preset ? model->preset_notice
-                                         : "Changes are saved as you make them. Game settings "
-                                           "apply the next time a game starts.",
+                                       : "Changes are saved as you make them. Game settings "
+                                         "apply the next time a game starts.",
                             NK_UI_TYPE_BODY_S,
                             has_notice ? theme->warning : theme->muted);
             if (advisory[0] != '\0') {
@@ -234,10 +207,6 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
             if (settings_row(ui, 0u, PLAYER_UI_ID_SETTINGS_RESOLUTION, "Resolution",
                              safe_text(model->resolution, "2x"), false, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_RESOLUTION);
-            }
-            if (settings_row(ui, 1u, PLAYER_UI_ID_SETTINGS_PACING, "Frame pacing",
-                             safe_text(model->pacing, "PSP timing"), false, name_width)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_PACING);
             }
             if (settings_row(ui, 2u, PLAYER_UI_ID_SETTINGS_VSYNC, "VSync",
                              settings_on_off(model->vsync), model->vsync, name_width)) {
@@ -259,14 +228,6 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                                                         : "Authentic: options",
                              model->enhanced_library_on, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_ACE);
-            }
-            /* A graphics preset (#2150) stands in for the display rows above it in Enhanced
-               and Ace sessions; Authentic keeps those rows, and editing one makes the preset
-               Custom. Last on the card, so the rows above keep their places beside the
-               LAUNCHER AND SOUND rows. */
-            if (settings_row(ui, 13u, PLAYER_UI_ID_SETTINGS_PRESET, "Graphics preset",
-                             safe_text(model->preset, "Custom"), false, name_width)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PRESET);
             }
             nk_ui_end_container(ui);
         }
@@ -493,15 +454,22 @@ static void settings_problem_report(NkUi *ui, const PlayerUiSettingsModel *model
 
 /* Text only wraps at spaces, so a folder path is one word that would run out of
    the card. Each word longer than max_word bytes keeps its start and its end
-   (the folder's own name) around "...". */
-static void settings_shorten_words(const char *in, char *out, size_t cap, size_t max_word) {
+   (the folder's own name) around "...", both cut at a character boundary. The
+   host's display rule (the profile folder as "~") runs first, on the whole
+   text: a cut made before it could keep part of the user name, which the
+   draw-time rule can then no longer match. The result is never longer than the
+   text, so a buffer that holds the text holds it whole. */
+static void settings_shorten_words(NkUi *ui, const char *in, char *out, size_t cap,
+                                   size_t max_word) {
     size_t used = 0u;
     if (cap == 0u) return;
+    in = nk_ui_frame_text(ui, in);
     while (*in != '\0' && used + 1u < cap) {
         size_t word = strcspn(in, " ");
         if (word > max_word) {
             size_t head = 12u;
             size_t tail = max_word - head - 3u;
+            while (head > 0u && ((unsigned char)in[head] & 0xC0u) == 0x80u) --head;
             while (tail > 0u && ((unsigned char)in[word - tail] & 0xC0u) == 0x80u) --tail;
             (void)snprintf(out + used, cap - used, "%.*s…%.*s", (int)head, in, (int)tail,
                            in + word - tail);
@@ -526,7 +494,7 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
     bool busy = step == PLAYER_UI_UPDATE_CHECKING || step == PLAYER_UI_UPDATE_DOWNLOADING ||
                 step == PLAYER_UI_UPDATE_INSTALLING;
     char lead[192];
-    char line[640];
+    char line[800]; /* a sentence around a whole folder (folder[] below) */
     char a[32];
     char b[32];
     uint32_t lead_rgba = theme->muted;
@@ -645,8 +613,10 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
                 nk_ui_text_role(ui, SET_ID_TEXT + 0xD4u, line, NK_UI_TYPE_DATA, theme->muted);
                 break;
             case PLAYER_UI_UPDATE_DOWNLOADED: {
-                char folder[96];
-                settings_shorten_words(safe_text(model->update_folder, "the downloads folder"),
+                /* Holds any folder whole (NK_MAX_PATH): a shorter buffer cut the
+                   folder's own name off its end with no mark. */
+                char folder[600];
+                settings_shorten_words(ui, safe_text(model->update_folder, "the downloads folder"),
                                        folder, sizeof(folder), 72u);
                 (void)snprintf(line, sizeof(line),
                                "Its SHA-256 matches the release's signed checksum. Saved in "
@@ -657,8 +627,8 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
                 break;
             }
             case PLAYER_UI_UPDATE_INSTALLED: {
-                char folder[96];
-                settings_shorten_words(safe_text(model->update_folder, "a new folder"), folder,
+                char folder[600];
+                settings_shorten_words(ui, safe_text(model->update_folder, "a new folder"), folder,
                                        sizeof(folder), 72u);
                 (void)snprintf(line, sizeof(line),
                                "It is in %s. Close Nakagawa, then start bin\\nakagawa_player.exe "
@@ -670,7 +640,7 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
             }
             case PLAYER_UI_UPDATE_FAILED:
                 text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->paper);
-                settings_shorten_words(safe_text(model->update_error_message, ""), line,
+                settings_shorten_words(ui, safe_text(model->update_error_message, ""), line,
                                        sizeof(line), 72u);
                 nk_ui_text(ui, SET_ID_TEXT + 0xD2u,
                            nk_ui_text_clamp(ui, line, &text, inner - 32.0f, 5), &text);
@@ -836,136 +806,1028 @@ static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model,
     }
 }
 
-/* Settings > Enhanced's text ids: the play mode at 0x400, part row i at 0x404 + 4i, room for every
-   part PLAYER_UI_ID_ENHANCED_PART can name, then the texture pack rows at 0x500 and 0x504. */
-#define SET_ID_ENHANCED_TEXT_END \
-    (0x404u + 4u * (PLAYER_UI_ENHANCED_FIRST_IDS + PLAYER_UI_ENHANCED_MORE_IDS))
-typedef char settings_texpack_text_after_parts[SET_ID_ENHANCED_TEXT_END <= 0x500u ? 1 : -1];
+/* Settings > Enhanced (#2055; src/rt/ace.h): the global graphics preset and the play mode above
+   six category tabs, the active tab's options as one compact row each, and one panel for the
+   focused option's name, value, help and caveats. The library's page sets the defaults; a
+   title's page sets that game's choices, where a part on Library default follows the library.
+   A row is one focus stop: Left and Right step its value, the select button takes the next
+   one, and a pointer picks any value. A row that cannot apply stays in the walk, dimmed and
+   inert, so the panel can say why. The rows and the two pinned controls keep the shared
+   PLAYER_UI_ID_* ids; the ids below are the page's own parts. */
+#define SET_ID_ENHANCED_TABS SET_ID(0x000520u)
+#define SET_ID_ENHANCED_TABS_SPAN 0x10u
+#define SET_ID_ENHANCED_PAGE SET_ID(0x000540u)
+#define SET_ID_ENHANCED_MAIN SET_ID(0x000541u)
+#define SET_ID_ENHANCED_LEFT SET_ID(0x000542u)
+#define SET_ID_ENHANCED_PINNED SET_ID(0x000543u)
+#define SET_ID_ENHANCED_LIST_ROW SET_ID(0x000544u)
+#define SET_ID_ENHANCED_SCROLLBAR SET_ID(0x000545u)
+#define SET_ID_ENHANCED_LIST SET_ID(0x000550u)       /* + the tab: one scroll position each */
+#define SET_ID_ENHANCED_LIST_SPAN 0x08u
+/* A part's values as pointer targets: part p's choice c. Eight choices a part, forty parts. */
+#define SET_ID_ENHANCED_CHOICES(part, choice) \
+    SET_ID(0x000600u + (uint32_t)(part) * 0x20u + (uint32_t)(choice) * 4u)
+#define SET_ID_ENHANCED_DETAIL SET_ID(0x000B00u)
+#define SET_ID_ENHANCED_DIVIDER SET_ID(0x000D00u)    /* + the row's place in its list */
+#define SET_ID_ENHANCED_DIVIDER_SPAN 0x40u
+typedef char settings_enhanced_tabs_have_lists[
+    PLAYER_UI_ENHANCED_GROUP_COUNT <= SET_ID_ENHANCED_LIST_SPAN ? 1 : -1];
+typedef char settings_enhanced_choice_ids_end_before_the_panel[
+    0x000600u + PLAYER_UI_ENHANCED_ROWS * 0x20u <= 0x000B00u ? 1 : -1];
+typedef char settings_enhanced_rows_have_dividers[
+    PLAYER_UI_ENHANCED_ROWS + 3 <= SET_ID_ENHANCED_DIVIDER_SPAN ? 1 : -1];
 
-/* Settings > Enhanced (#2055; src/rt/ace.h): the play mode, then one row per Enhanced part, with a
-   sentence beside each that says what it does and what it costs. The library's page sets the
-   default; a title's page (opened from its Enhanced options) sets that game's choice, where a
-   part on Library default follows the library. While the mode is Authentic the part rows are
-   dim and cannot be focused; their values are kept. */
-static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inner,
-                         PlayerUiAction *result) {
-    const NkUiTheme *theme = nk_ui_theme(ui);
-    const bool off = !model->enhanced_on;
-    char lead[320];
-    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, model->enhanced_title != NULL ? "Game" : "Settings",
-                     theme->accent_dark);
-    nk_ui_text_role(ui, FLOW_ID_TITLE, "Enhanced", NK_UI_TYPE_TITLE, theme->paper);
-    if (model->enhanced_title != NULL) {
-        (void)snprintf(lead, sizeof(lead),
-                       "For %s alone. Library follows Settings > Enhanced.",
-                       model->enhanced_title);
-    } else {
-        (void)snprintf(lead, sizeof(lead), "%s",
-                       "Enhanced adds modern touches that work for every game, such as sharper "
-                       "textures and crisp system text. The games themselves run as released.");
+#define ENHANCED_BOX_PAD 8.0f        /* inside the list box */
+#define ENHANCED_BOX_TOP 12.0f       /* above its first row: room for that row's focus ring */
+#define ENHANCED_BOX_GAP 2.0f        /* between the pinned rows, the tabs and the list */
+#define ENHANCED_PAGE_GAP 14.0f      /* between the page's parts, as in the card */
+/* Inside the scrolling list, around its rows: room for a row's focus ring, the high-contrast
+   one included, which the list would clip. */
+#define ENHANCED_LIST_PAD 8.0f
+
+#define ENHANCED_SCROLLBAR_ROOM 8.0f /* right of the list, kept on every tab so rows line up */
+#define ENHANCED_TABS_HEIGHT 44.0f
+#define ENHANCED_STEP_ARROW 28.0f
+#define ENHANCED_CHIP_GAP 4.0f
+
+/* A row and its value box keep the design system's target sizes (44 and 34 px) and grow with
+   the text size. */
+static float settings_enhanced_row_height(const NkUi *ui) {
+    NkUiTextStyle name = nk_ui_type(NK_UI_TYPE_BODY, 0u);
+    return nk_ui_line_box(ui, NK_UI_CONTROL_HEIGHT, &name);
+}
+
+static float settings_enhanced_value_height(const NkUi *ui) {
+    NkUiTextStyle value = nk_ui_type(NK_UI_TYPE_LABEL, 0u);
+    return nk_ui_line_box(ui, NK_UI_CONTROL_HEIGHT_SMALL, &value);
+}
+
+static float settings_enhanced_chip_width(const NkUi *ui, const char *label) {
+    NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_LABEL, 0u);
+    float width = ceilf(nk_ui_text_width(ui, label, &text)) + 2.0f * NK_UI_SPACE_3;
+    return width < NK_UI_CONTROL_HEIGHT ? NK_UI_CONTROL_HEIGHT : width;
+}
+
+/* How wide a "< value >" box is for the widest of these values, so stepping never resizes it. */
+static float settings_enhanced_stepper_width(const NkUi *ui, const char *const *values, int count,
+                                             const char *extra) {
+    NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_LABEL, 0u);
+    float widest = extra != NULL ? nk_ui_text_width(ui, extra, &text) : 0.0f;
+    for (int i = 0; i < count; ++i) {
+        float width = values[i] != NULL ? nk_ui_text_width(ui, values[i], &text) : 0.0f;
+        if (width > widest) widest = width;
     }
-    nk_ui_text_role(ui, FLOW_ID_LEAD, nk_ui_frame_text(ui, lead), NK_UI_TYPE_BODY_S,
-                    theme->muted);
-    if (scr_wizard_box_begin(ui, 0u)) {
-        WizardRow rows[1 + PLAYER_UI_ENHANCED_ROWS + 2];
-        size_t measured;
-        int count = model->enhanced_row_count < PLAYER_UI_ENHANCED_ROWS
-            ? model->enhanced_row_count : PLAYER_UI_ENHANCED_ROWS;
-        if (count < 0) count = 0;
-        rows[0].name = "Play mode";
-        rows[0].value = safe_text(model->enhanced_mode, "Authentic");
-        rows[0].sentence = safe_text(model->enhanced_mode_sentence, "");
-        for (int i = 0; i < count; i++) {
-            rows[i + 1].name = safe_text(model->enhanced_rows[i].name, "");
-            rows[i + 1].value = safe_text(model->enhanced_rows[i].value, "Off");
-            rows[i + 1].sentence = safe_text(model->enhanced_rows[i].sentence, "");
-        }
-        measured = (size_t)count + 1u;
-        if (model->texpack_row) {
-            rows[measured].name = "Texture pack folder";
-            rows[measured].value = safe_text(model->texpack_value, "None");
-            rows[measured].sentence = safe_text(model->texpack_sentence, "");
-            measured++;
-            if (model->texpack_chosen) {
-                rows[measured].name = "Remove texture pack";
-                rows[measured].value = "Remove";
-                rows[measured].sentence =
-                    "Forgets the folder for this game. The folder is not deleted.";
-                measured++;
-            }
-        }
-        /* The column is sized from the widest value each row can show on this page, not
-           the one it shows now, so stepping a setting (Smooth motion turning Widescreen
-           off, say) never moves or restacks the rows. The texture pack rows change only when
-           a pack is chosen or removed, never when a setting steps, so they are measured as
-           they are. */
-        WizardRow widest[1 + PLAYER_UI_ENHANCED_ROWS + 2];
-        memcpy(widest, rows, sizeof(rows[0]) * measured);
-        widest[0].value = settings_widest_value(ui, rows[0].name, rows[0].value,
-                                                model->enhanced_modes,
-                                                model->enhanced_mode_count, NULL, NULL);
-        for (int i = 0; i < count; i++) {
-            const PlayerUiEnhancedRow *row = &model->enhanced_rows[i];
-            widest[i + 1].value = settings_widest_value(ui, rows[i + 1].name, rows[i + 1].value,
-                                                        row->labels, row->label_count,
-                                                        row->library_value,
-                                                        row->other_value);
-        }
-        WizardColumn column = scr_wizard_column(ui, widest, measured, inner - 32.0f, true);
-        if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACE_MODE, SET_ID_TEXT + 0x400u, rows[0].name,
-                             rows[0].value, rows[0].sentence, model->enhanced_on, inner - 32.0f,
-                             &column)) {
-            *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE);
-        }
-        for (int i = 0; i < count; i++) {
-            if (scr_wizard_value_state(ui, PLAYER_UI_ID_ENHANCED_PART(i),
-                                       SET_ID_TEXT + 0x404u + 4u * (NkUiId)i, rows[i + 1].name,
-                                       rows[i + 1].value, rows[i + 1].sentence,
-                                       model->enhanced_rows[i].on, off, inner - 32.0f, &column)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART);
-                result->title_index = (size_t)i;
-            }
-        }
-        /* A title's page: its texture pack's folder, which can be chosen in any play mode. Its
-           rows' text ids sit past every part row's (SET_ID_ENHANCED_TEXT_END), so a later part
-           takes the next part id and moves no other row's text. */
-        if (model->texpack_row) {
-            const size_t at = (size_t)count + 1u;
-            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE, SET_ID_TEXT + 0x500u,
-                                 rows[at].name, rows[at].value, rows[at].sentence,
-                                 model->texpack_chosen, inner - 32.0f, &column)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_CHOOSE_TEXPACK);
-            }
-            if (model->texpack_chosen &&
-                scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE, SET_ID_TEXT + 0x504u,
-                                 rows[at + 1u].name, rows[at + 1u].value, rows[at + 1u].sentence,
-                                 false, inner - 32.0f, &column)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_REMOVE_TEXPACK);
-            }
-        }
+    return ceilf(widest) + 2.0f * ENHANCED_STEP_ARROW + 2.0f * NK_UI_SPACE_2;
+}
+
+/* Opens one option row, the focus stop: its name, and its tag beside the name, on the left. The
+   caller adds the value on the right and closes the row. A blank row is in the list and in the
+   walk with nothing drawn in it (settings_enhanced_row_blank). */
+static bool settings_enhanced_row_begin(NkUi *ui, NkUiId id, const char *name, const char *tag,
+                                        bool dimmed, uint32_t flags, float name_limit,
+                                        NkUiId up, NkUiId down, bool blank) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    bool focused = nk_ui_button_focused(ui, id);
+    NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(),
+                                 sizing_fixed(settings_enhanced_row_height(ui)), NK_UI_SPACE_3);
+    NkUiStyle style;
+    NkUiTextStyle name_style = nk_ui_type(NK_UI_TYPE_BODY, dimmed ? theme->muted : theme->paper);
+    memset(&style, 0, sizeof(style));
+    row.align_y = NK_UI_ALIGN_CENTER;
+    row.padding_left = row.padding_right = NK_UI_SPACE_3;
+    style.corner_radius = NK_UI_RADIUS_CONTROL;
+    style.fill_rgba = nk_ui_pressed(ui, id) ? theme->pressed
+                      : focused || nk_ui_hovered(ui, id) ? theme->surface_high : 0u;
+    name_style.wrap = false;
+    if (name_limit < 40.0f) name_limit = 40.0f;
+    nk_ui_register_button_between(ui, id, flags, up, down);
+    if (!nk_ui_begin_container(ui, id, &row, &style)) return false;
+    if (focused) nk_ui_focus_ring(ui, id, NK_UI_RADIUS_CONTROL);
+    if (!blank) {
+        nk_ui_text(ui, nk_ui_child_id(id, 2u),
+                   nk_ui_text_clamp(ui, safe_text(name, ""), &name_style, name_limit, 1),
+                   &name_style);
+        if (tag != NULL) nk_ui_tag(ui, nk_ui_child_id(id, 3u), tag);
+    }
+    nk_ui_spacer(ui, nk_ui_child_id(id, 1u), sizing_grow(), sizing_fixed(1.0f));
+    return true;
+}
+
+/* One arrow of a "< value >" box: a pointer target when the row can change. */
+static bool settings_enhanced_arrow(NkUi *ui, NkUiId id, const char *mark, bool live) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    NkUiLayout cell = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(ENHANCED_STEP_ARROW),
+                                  sizing_grow(), 0.0f);
+    NkUiStyle style;
+    bool hovered = live && nk_ui_hovered(ui, id);
+    bool clicked = false;
+    memset(&style, 0, sizeof(style));
+    cell.align_x = NK_UI_ALIGN_CENTER;
+    cell.align_y = NK_UI_ALIGN_CENTER;
+    style.corner_radius = NK_UI_RADIUS_CONTROL - 1.0f;
+    if (live) {
+        nk_ui_register_button(ui, id, NK_UI_BUTTON_POINTER_ONLY);
+        style.fill_rgba = nk_ui_pressed(ui, id) ? theme->pressed
+                          : hovered ? theme->surface_high : 0u;
+    }
+    if (nk_ui_begin_container(ui, id, &cell, &style)) {
+        nk_ui_text_role(ui, nk_ui_child_id(id, 1u), mark, NK_UI_TYPE_LABEL,
+                        !live ? theme->dim : hovered ? theme->paper : theme->muted);
         nk_ui_end_container(ui);
     }
+    if (live) clicked = nk_ui_take_activation(ui, id);
+    return clicked;
+}
+
+/* A row's value as "< value >" in its own box, the row's part 4. Returns -1 or 1 when the
+   pointer clicked an arrow; the keys go to the row. */
+static int settings_enhanced_stepper(NkUi *ui, NkUiId row_id, const char *value, float width,
+                                     bool dimmed, bool value_muted) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    NkUiId prev = nk_ui_child_id(row_id, 5u);
+    NkUiId next = nk_ui_child_id(row_id, 6u);
+    bool row_focused = nk_ui_button_focused(ui, row_id) || nk_ui_button_focused(ui, prev) ||
+                       nk_ui_button_focused(ui, next);
+    NkUiLayout box = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(width),
+                                 sizing_fixed(settings_enhanced_value_height(ui)), 0.0f);
+    NkUiLayout cell = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_grow(), 0.0f);
+    NkUiStyle style;
+    NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_LABEL,
+                                    dimmed || value_muted ? theme->muted : theme->paper);
+    int step = 0;
+    memset(&style, 0, sizeof(style));
+    box.align_y = NK_UI_ALIGN_CENTER;
+    cell.align_x = NK_UI_ALIGN_CENTER;
+    cell.align_y = NK_UI_ALIGN_CENTER;
+    style.fill_rgba = theme->surface;
+    style.border_rgba = row_focused && !dimmed ? theme->accent_dark : theme->line_strong;
+    style.border_width = NK_UI_BORDER_HAIRLINE;
+    style.corner_radius = NK_UI_RADIUS_CONTROL;
+    if (!nk_ui_begin_container(ui, nk_ui_child_id(row_id, 4u), &box, &style)) return 0;
+    if (settings_enhanced_arrow(ui, prev, "<", !dimmed)) step = -1;
+    if (nk_ui_begin_container(ui, nk_ui_child_id(row_id, 7u), &cell, NULL)) {
+        nk_ui_text(ui, nk_ui_child_id(row_id, 8u),
+                   nk_ui_text_clamp(ui, safe_text(value, ""), &text,
+                                    width - 2.0f * ENHANCED_STEP_ARROW - NK_UI_SPACE_2, 1),
+                   &text);
+        nk_ui_end_container(ui);
+    }
+    if (settings_enhanced_arrow(ui, next, ">", !dimmed)) step = 1;
+    nk_ui_end_container(ui);
+    /* The keys stay with the row: a clicked arrow hands focus back to it. */
+    if (nk_ui_button_focused(ui, prev) || nk_ui_button_focused(ui, next)) nk_ui_focus(ui, row_id);
+    return step;
+}
+
+/* What the keys did to the row `id`: -1 or 1 for Left and Right on the focused row, and
+   whether the select button, or a click on the row itself, asked for the next value. A press
+   is the row's when the row had the focus as it was made (nk_ui_take_activation), so a row
+   takes its press even when a move queued after it has taken the focus on in the same
+   frame. */
+static int settings_enhanced_row_keys(NkUi *ui, NkUiId id, bool *activated) {
+    NkUiNavDir direction = NK_UI_DIR_NONE;
+    *activated = false;
+    if (nk_ui_button_focused(ui, id) && nk_ui_take_event(ui, NK_UI_EV_NAV, &direction)) {
+        return direction == NK_UI_DIR_LEFT ? -1 : direction == NK_UI_DIR_RIGHT ? 1 : 0;
+    }
+    *activated = nk_ui_take_activation(ui, id);
+    return 0;
+}
+
+/* A pinned row or Frame pacing: a name and "< value >". Sets *step to -1 or 1 for Left, Right
+   or a clicked arrow, and *activated for the select button; returns whether it has focus. */
+static bool settings_enhanced_step_row(NkUi *ui, NkUiId id, const char *name, const char *value,
+                                       float width, float box_width, NkUiId up, NkUiId down,
+                                       bool blank, int *step, bool *activated) {
+    bool focused;
+    int keys;
+    *step = 0;
+    *activated = false;
+    if (!settings_enhanced_row_begin(ui, id, name, NULL, false, NK_UI_BUTTON_OWNS_HORIZONTAL,
+                                     width - box_width - 3.0f * NK_UI_SPACE_3, up, down,
+                                     blank)) {
+        return false;
+    }
+    if (!blank) *step = settings_enhanced_stepper(ui, id, value, box_width, false, false);
+    nk_ui_end_container(ui);
+    focused = nk_ui_button_focused(ui, id);
+    keys = settings_enhanced_row_keys(ui, id, activated);
+    if (keys != 0) *step = keys;
+    return focused;
+}
+
+/* One value of a part, in its own box. A pointer picks it; the keys go to its row. `on` is
+   whether the row's value is other than Off: the accent marks a value that is on or chosen
+   (16x, On), and a selected Off is marked as the library's value is, by the raised box with
+   an edge that stands 3:1 or more from the list and from the box (selected_neutral_edge),
+   and by primary text, so a tab of options that are off is not a column of accent boxes. A
+   dimmed row's mark has a weaker edge (selected_neutral_edge_dimmed, still 3:1 from the
+   list), so that an inert row does not look as live as the rows around it. */
+static bool settings_enhanced_chip(NkUi *ui, NkUiId id, const char *label, bool selected,
+                                   bool inherited, bool dimmed, bool on) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    bool live = !dimmed;
+    bool hovered = live && nk_ui_hovered(ui, id);
+    bool lit = selected && on && !inherited && !dimmed;
+    NkUiLayout chip = layout_make(NK_UI_LAYOUT_ROW,
+                                  sizing_fixed(settings_enhanced_chip_width(ui, label)),
+                                  sizing_fixed(settings_enhanced_value_height(ui)), 0.0f);
+    NkUiStyle style;
+    /* Ink on the accent fill, as a primary button; a selected Off, the library's value and a
+       dimmed row's value are marked by a raised box and never by the accent. */
+    NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_LABEL,
+                                    lit ? theme->ink
+                                    : selected || hovered ? theme->paper
+                                    : dimmed ? theme->dim : theme->muted);
+    memset(&style, 0, sizeof(style));
+    chip.align_x = NK_UI_ALIGN_CENTER;
+    chip.align_y = NK_UI_ALIGN_CENTER;
+    style.corner_radius = NK_UI_RADIUS_CONTROL;
+    style.fill_rgba = lit ? (live && nk_ui_pressed(ui, id) ? theme->accent_pressed
+                             : hovered ? theme->accent_hover : theme->accent_dark)
+                      : live && nk_ui_pressed(ui, id) ? theme->pressed
+                      : selected || hovered ? theme->surface_high : theme->surface;
+    style.border_rgba = lit ? style.fill_rgba
+                        : !selected ? theme->line
+                        : dimmed ? theme->selected_neutral_edge_dimmed
+                                 : theme->selected_neutral_edge;
+    style.border_width = NK_UI_BORDER_HAIRLINE;
+    if (selected && dimmed) text.rgba = theme->muted;
+    if (selected && inherited && !dimmed) text.rgba = theme->muted;
+    if (live) nk_ui_register_button(ui, id, NK_UI_BUTTON_POINTER_ONLY);
+    if (nk_ui_begin_container(ui, id, &chip, &style)) {
+        nk_ui_text(ui, nk_ui_child_id(id, 1u), label, &text);
+        nk_ui_end_container(ui);
+    }
+    return live && nk_ui_take_activation(ui, id);
+}
+
+static void settings_enhanced_choice_action(PlayerUiAction *result, int part, bool title,
+                                            int choice) {
+    *result = settings_op(PLAYER_UI_SETTINGS_SET_ENHANCED_PART);
+    result->title_index = (size_t)part;
+    result->choice_index = title ? choice - 1 : choice;
+}
+
+/* A part's row: its name, its tag, and every value it can take, the current one marked. When
+   the values do not fit beside the name (a larger text size) the row shows "< value >"
+   instead. Returns whether the row has focus. */
+static bool settings_enhanced_part_row(NkUi *ui, const PlayerUiSettingsModel *model,
+                                       const PlayerUiEnhancedRow *row, float width, NkUiId up,
+                                       bool blank, PlayerUiAction *result) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    const bool title = model->enhanced_title != NULL;
+    const int choice_count = row->label_count + (title ? 1 : 0);
+    const NkUiId id = PLAYER_UI_ID_ENHANCED_PART(row->part);
+    const char *labels[8];
+    NkUiTextStyle name_style = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
+    NkUiTextStyle tag_style = nk_ui_type(NK_UI_TYPE_LABEL_S, theme->muted);
+    float inner = width - 2.0f * NK_UI_SPACE_3;
+    float choices_width = 0.0f;
+    float tag_width = row->tag != NULL
+        ? ceilf(nk_ui_text_width(ui, nk_ui_caps(ui, row->tag), &tag_style)) + 20.0f + NK_UI_SPACE_3
+        : 0.0f;
+    float name_width = ceilf(nk_ui_text_width(ui, safe_text(row->name, ""), &name_style));
+    int selected = row->selected_index;
+    int step = 0;
+    int picked = -1;
+    bool focused = false;
+    bool activated = false;
+    bool compact;
+    if (choice_count <= 0 || choice_count > (int)(sizeof(labels) / sizeof(labels[0]))) {
+        return false;
+    }
+    if (selected < 0 || selected >= choice_count) selected = 0;
+    for (int choice = 0; choice < choice_count; ++choice) {
+        labels[choice] = title && choice == 0 ? safe_text(row->library_value, "Library")
+                                              : safe_text(row->labels[choice - (title ? 1 : 0)],
+                                                          "Off");
+        choices_width += settings_enhanced_chip_width(ui, labels[choice]);
+    }
+    choices_width += ENHANCED_CHIP_GAP * (float)(choice_count - 1);
+    compact = name_width + NK_UI_SPACE_3 + tag_width + choices_width > inner;
+    if (compact) {
+        choices_width = settings_enhanced_stepper_width(ui, labels, choice_count, NULL);
+        if (choices_width > inner * 0.6f) choices_width = inner * 0.6f;
+    }
+    if (!settings_enhanced_row_begin(ui, id, row->name, row->tag, row->disabled,
+                                     NK_UI_BUTTON_OWNS_HORIZONTAL,
+                                     inner - NK_UI_SPACE_3 - tag_width - choices_width, up, 0u,
+                                     blank)) {
+        return false;
+    }
+    if (blank) {
+        /* nothing: see settings_enhanced_row_blank */
+    } else if (compact) {
+        step = settings_enhanced_stepper(ui, id, labels[selected], choices_width, row->disabled,
+                                         title && selected == 0);
+    } else {
+        NkUiLayout choices = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                         ENHANCED_CHIP_GAP);
+        if (nk_ui_begin_container(ui, nk_ui_child_id(id, 4u), &choices, NULL)) {
+            for (int choice = 0; choice < choice_count; ++choice) {
+                NkUiId chip = SET_ID_ENHANCED_CHOICES(row->part, choice);
+                if (settings_enhanced_chip(ui, chip, labels[choice], choice == selected,
+                                           title && choice == 0, row->disabled, row->on)) {
+                    picked = choice;
+                }
+                /* The keys stay with the row: a clicked value hands focus back to it. */
+                if (nk_ui_button_focused(ui, chip)) nk_ui_focus(ui, id);
+            }
+            nk_ui_end_container(ui);
+        }
+    }
+    nk_ui_end_container(ui);
+    focused = nk_ui_button_focused(ui, id);
     {
-        NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
-        row.padding_top = NK_UI_SPACE_1;
-        if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-            if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Done", NK_UI_BUTTON_PRIMARY)) {
+        int keys = settings_enhanced_row_keys(ui, id, &activated);
+        if (keys != 0) step = keys;
+    }
+    if (row->disabled) return focused;
+    if (picked >= 0) {
+        settings_enhanced_choice_action(result, row->part, title, picked);
+    } else if (step != 0) {
+        settings_enhanced_choice_action(result, row->part, title,
+                                        (selected + step + choice_count) % choice_count);
+    } else if (activated) {
+        *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART);
+        result->title_index = (size_t)row->part;
+    }
+    return focused;
+}
+
+/* A game's texture pack rows: the name, what is chosen, and the action in its own box. */
+static bool settings_enhanced_action_row(NkUi *ui, NkUiId id, const char *name,
+                                         const char *value, const char *action, float width,
+                                         NkUiId up, bool blank, PlayerUiAction *result,
+                                         PlayerUiSettingsOp op) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    NkUiTextStyle name_style = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
+    NkUiTextStyle value_text = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
+    NkUiTextStyle action_text = nk_ui_type(NK_UI_TYPE_LABEL, theme->paper);
+    NkUiLayout button = layout_make(NK_UI_LAYOUT_ROW,
+                                    sizing_fixed(settings_enhanced_chip_width(ui, action)),
+                                    sizing_fixed(settings_enhanced_value_height(ui)), 0.0f);
+    NkUiStyle button_style;
+    float inner = width - 2.0f * NK_UI_SPACE_3;
+    float name_width = ceilf(nk_ui_text_width(ui, name, &name_style));
+    float value_room = inner - name_width - settings_enhanced_chip_width(ui, action) -
+                       2.0f * NK_UI_SPACE_3;
+    bool focused;
+    memset(&button_style, 0, sizeof(button_style));
+    value_text.wrap = false;
+    button.align_x = NK_UI_ALIGN_CENTER;
+    button.align_y = NK_UI_ALIGN_CENTER;
+    if (!settings_enhanced_row_begin(ui, id, name, NULL, false, 0u, name_width + 1.0f, up, 0u,
+                                     blank)) {
+        return false;
+    }
+    focused = nk_ui_button_focused(ui, id);
+    if (blank) {
+        nk_ui_end_container(ui);
+        if (nk_ui_take_activation(ui, id)) *result = settings_op(op);
+        return focused;
+    }
+    if (value != NULL && value[0] != '\0' && value_room >= 60.0f) {
+        /* The whole value is in the panel; here it is cut to the room the row has. */
+        nk_ui_text(ui, nk_ui_child_id(id, 4u),
+                   nk_ui_text_clamp(ui, value, &value_text, value_room, 1), &value_text);
+    }
+    button_style.fill_rgba = theme->surface;
+    button_style.border_rgba = focused ? theme->accent_dark : theme->line_strong;
+    button_style.border_width = NK_UI_BORDER_HAIRLINE;
+    button_style.corner_radius = NK_UI_RADIUS_CONTROL;
+    if (nk_ui_begin_container(ui, nk_ui_child_id(id, 5u), &button, &button_style)) {
+        nk_ui_text(ui, nk_ui_child_id(id, 6u), action, &action_text);
+        nk_ui_end_container(ui);
+    }
+    nk_ui_end_container(ui);
+    if (nk_ui_take_activation(ui, id)) *result = settings_op(op);
+    return focused;
+}
+
+/* What the panel says about one control. */
+typedef struct {
+    bool focused;          /* it is the focused control, not the tab's first one */
+    const char *name;
+    const char *value;
+    const char *sentence;
+    const char *note;      /* why the row is dimmed, or the preset's note; NULL for none */
+    const char *tag;       /* the row's tag ("Ace only"); NULL for none */
+    const char *scope;     /* on a game's page, whose value it is; NULL for none */
+    bool value_muted;      /* the library's value on a game's page, or a dimmed row's */
+} SettingsEnhancedDetail;
+
+/* The panel beside the list: the option's name, value and whole description. It is as tall as
+   the list box and wraps every sentence whole. Text that needs more room than that (a larger
+   text size) makes the panel, and the page with it, taller: the card then scrolls, as every
+   page of the player does, and nothing is cut or drawn over what is under it. */
+static void settings_enhanced_details(NkUi *ui, const SettingsEnhancedDetail *detail,
+                                      float width) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    NkUiLayout panel = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(width), sizing_grow(),
+                                   NK_UI_SPACE_3);
+    NkUiStyle style = scr_flow_box_style(theme, theme->surface);
+    NkUiTextStyle name = nk_ui_type(NK_UI_TYPE_HEADING, theme->paper);
+    NkUiTextStyle value = nk_ui_type(NK_UI_TYPE_BODY,
+                                     detail->value_muted ? theme->muted : theme->paper);
+    NkUiTextStyle sentence = nk_ui_type(NK_UI_TYPE_BODY_S, theme->muted);
+    panel.padding_left = panel.padding_right = NK_UI_SPACE_4;
+    panel.padding_top = panel.padding_bottom = NK_UI_SPACE_4;
+    if (!nk_ui_begin_container(ui, SET_ID_ENHANCED_DETAIL, &panel, &style)) return;
+    if (detail->focused) nk_ui_eyebrow(ui, SET_ID_TEXT + 0x701u, "Focused option");
+    nk_ui_text(ui, SET_ID_TEXT + 0x702u, safe_text(detail->name, "Enhanced"), &name);
+    if (detail->value != NULL && detail->value[0] != '\0') {
+        nk_ui_text(ui, SET_ID_TEXT + 0x703u, detail->value, &value);
+    }
+    if (detail->tag != NULL || detail->scope != NULL) {
+        NkUiLayout tags = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_2);
+        if (nk_ui_begin_container(ui, SET_ID_TEXT + 0x708u, &tags, NULL)) {
+            if (detail->tag != NULL) nk_ui_tag(ui, SET_ID_TEXT + 0x704u, detail->tag);
+            if (detail->scope != NULL) nk_ui_tag(ui, SET_ID_TEXT + 0x705u, detail->scope);
+            nk_ui_end_container(ui);
+        }
+    }
+    if (detail->sentence != NULL && detail->sentence[0] != '\0') {
+        nk_ui_text(ui, SET_ID_TEXT + 0x706u, detail->sentence, &sentence);
+    }
+    if (detail->note != NULL && detail->note[0] != '\0') {
+        nk_ui_text(ui, SET_ID_TEXT + 0x707u, detail->note, &sentence);
+    }
+    nk_ui_end_container(ui);
+}
+
+static void settings_enhanced_row_detail(SettingsEnhancedDetail *detail,
+                                         const PlayerUiEnhancedRow *row, bool title,
+                                         bool focused) {
+    memset(detail, 0, sizeof(*detail));
+    detail->focused = focused;
+    detail->name = row->name;
+    detail->value = row->value;
+    detail->sentence = row->sentence;
+    detail->note = row->disabled ? row->disabled_reason : NULL;
+    detail->tag = row->tag;
+    /* Whose value it is; a value the page forces (a dimmed row's Off) is nobody's choice. */
+    detail->scope = !title ? NULL
+                    : row->inherited ? "Library default"
+                    : row->disabled ? NULL : "This game";
+    detail->value_muted = row->inherited || row->disabled;
+}
+
+/* The row of which list Settings > Enhanced last kept its padding for, and for how many
+   frames more: the frame focus enters a row and the frames after it in which the focus graph
+   brings it into view again (NK_UI_FOCUS_REVEAL_FRAMES in nk_ui_focus.c). The page is drawn
+   from one thread; a frame with no row focused clears it, so a new NkUi starts afresh. */
+#define ENHANCED_PAD_FRAMES 3
+static struct {
+    const NkUi *ui;
+    NkUiId list;
+    NkUiId row;
+    int frames;
+} s_enhanced_pad;
+
+/* How tall `text` is wrapped in `width`, for the room the page keeps for its list:
+   nk_ui_text_clamp wraps as the layout does, so the first line count at which it gives the
+   whole text back is the text's. The whole text is what a clamp to the most lines returns: an
+   ellipsis the text has of its own (a game's title can) is not a cut. */
+static float settings_enhanced_text_height(NkUi *ui, const char *text, NkUiTypeRole role,
+                                           float width) {
+    enum { MOST_LINES = 12 };
+    NkUiTextStyle style = nk_ui_type(role, 0u);
+    const char *whole;
+    int lines = 1;
+    if (text == NULL || text[0] == '\0') return 0.0f;
+    whole = nk_ui_text_clamp(ui, text, &style, width, MOST_LINES);
+    while (lines < MOST_LINES &&
+           strcmp(nk_ui_text_clamp(ui, text, &style, width, lines), whole) != 0) {
+        ++lines;
+    }
+    return (float)lines * nk_ui_line_height(ui, &style);
+}
+
+/* The rows a list at rest shows whole, and whether row `place` is the one just above or just
+   below them. The list's padding, there for the focus ring, shows a few pixels of that row: the
+   edge of its value boxes, which reads as a drawing fault. So while the list rests on a row
+   boundary that row is drawn blank, unless it has focus (it is about to scroll in). A list the
+   pointer has scrolled between two rows draws every row. */
+typedef struct {
+    bool at_rest;
+    int first;      /* the first whole row */
+    int count;      /* how many whole rows */
+} SettingsEnhancedWindow;
+
+static SettingsEnhancedWindow settings_enhanced_window(NkUi *ui, NkUiId list, float pitch,
+                                                       int count) {
+    SettingsEnhancedWindow window = {true, 0, count};
+    NkUiScrollState state;
+    if (nk_ui_scroll_state(ui, list, &state) && state.max_offset > 0.5f) {
+        float rows = state.offset / pitch;
+        window.first = (int)floorf(rows + 0.5f);
+        window.at_rest = fabsf(rows - (float)window.first) * pitch < 0.75f;
+    }
+    return window;
+}
+
+static bool settings_enhanced_row_blank(NkUi *ui, const SettingsEnhancedWindow *window,
+                                        int place, NkUiId id) {
+    return window->at_rest && !nk_ui_button_focused(ui, id) &&
+           (place == window->first - 1 || place == window->first + window->count);
+}
+
+/* A thin thumb beside a list that scrolls: where the window on the rows is. */
+static void settings_enhanced_scrollbar(NkUi *ui, NkUiId list) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    NkUiLayout track = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(ENHANCED_SCROLLBAR_ROOM),
+                                   sizing_grow(), 0.0f);
+    NkUiScrollState state;
+    track.align_x = NK_UI_ALIGN_END;
+    if (!nk_ui_begin_container(ui, SET_ID_ENHANCED_SCROLLBAR, &track, NULL)) return;
+    if (nk_ui_scroll_state(ui, list, &state) && state.max_offset > 0.5f &&
+        state.viewport > 1.0f) {
+        float content = state.max_offset + state.viewport;
+        float thumb = state.viewport * state.viewport / content;
+        float top;
+        NkUiStyle fill;
+        NkUiLayout bar;
+        if (thumb < 24.0f) thumb = 24.0f;
+        if (thumb > state.viewport) thumb = state.viewport;
+        top = (state.viewport - thumb) * (state.offset / state.max_offset);
+        if (top < 0.0f) top = 0.0f;
+        if (top > state.viewport - thumb) top = state.viewport - thumb;
+        memset(&fill, 0, sizeof(fill));
+        fill.fill_rgba = theme->line_strong;
+        fill.corner_radius = 2.0f;
+        bar = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(4.0f), sizing_fixed(thumb), 0.0f);
+        nk_ui_spacer(ui, nk_ui_child_id(SET_ID_ENHANCED_SCROLLBAR, 1u), sizing_fixed(4.0f),
+                     sizing_fixed(top));
+        if (nk_ui_begin_container(ui, nk_ui_child_id(SET_ID_ENHANCED_SCROLLBAR, 2u), &bar,
+                                  &fill)) {
+            nk_ui_end_container(ui);
+        }
+    }
+    nk_ui_end_container(ui);
+}
+
+const char *player_ui_enhanced_group_label(PlayerUiEnhancedGroup group) {
+    switch (group) {
+    case PLAYER_UI_ENHANCED_GROUP_PICTURE: return "Picture";
+    case PLAYER_UI_ENHANCED_GROUP_MOTION: return "Motion";
+    case PLAYER_UI_ENHANCED_GROUP_SOUND: return "Sound";
+    case PLAYER_UI_ENHANCED_GROUP_CONTROLS: return "Controls";
+    case PLAYER_UI_ENHANCED_GROUP_ON_SCREEN: return "On-screen";
+    case PLAYER_UI_ENHANCED_GROUP_ADVANCED: return "Advanced";
+    default: return "";
+    }
+}
+
+static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inner, float height,
+                         PlayerUiAction *result) {
+    static const NkUiId tab_ids[PLAYER_UI_ENHANCED_GROUP_COUNT] = {
+        SET_ID(0x000500u), SET_ID(0x000504u), SET_ID(0x000508u), SET_ID(0x00050Cu),
+        SET_ID(0x000510u), SET_ID(0x000514u)
+    };
+    static const char *const preset_labels[] = {
+        "Custom", "Low", "Medium", "High", "Ultra", "Handheld"
+    };
+    static const char *const pacing_values[] = {"PSP timing", "No extra cap"};
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    const bool title = model->enhanced_title != NULL;
+    const bool has_notice = model->notice != NULL && model->notice[0] != '\0';
+    const float row_height = settings_enhanced_row_height(ui);
+    const float pitch = row_height + 1.0f;
+    float detail_width;
+    float left_width;
+    float row_width;
+    NkUiSection active_tabs[PLAYER_UI_ENHANCED_GROUP_COUNT];
+    SettingsEnhancedDetail detail;
+    SettingsEnhancedDetail first_detail;
+    SettingsEnhancedWindow window;
+    const char *lead;
+    char lead_text[256];
+    int active_group = model->enhanced_tab;
+    int preset_index = 0;
+    int mode_index;
+    int pacing_index = strcmp(safe_text(model->pacing, pacing_values[0]), pacing_values[1]) == 0;
+    int tab_rows[PLAYER_UI_ENHANCED_GROUP_COUNT] = {0};
+    int most_rows = 0;
+    int visible_rows;
+    int listed = 0;
+    int focused_place = -1;
+    float box_width;
+    float page_room;
+    bool have_detail = false;
+    bool have_first = false;
+    NkUiId active_tab_id;
+    NkUiId list_id;
+    NkUiId first_row = 0u;
+    NkUiId last_row = 0u;
+    NkUiLayout page;
+    if (active_group < 0 || active_group >= PLAYER_UI_ENHANCED_GROUP_COUNT) {
+        active_group = PLAYER_UI_ENHANCED_GROUP_PICTURE;
+    }
+    /* The panel has a third of the width, and less where the six tabs need more than the rest
+       (a larger text size): the strip is never cut. Rows whose values no longer fit beside the
+       name show "< value >" instead. */
+    detail_width = floorf(inner * 0.34f);
+    {
+        NkUiTextStyle tab = nk_ui_type(NK_UI_TYPE_LABEL, 0u);
+        float strip = 2.0f * ENHANCED_BOX_PAD + ENHANCED_LIST_PAD + NK_UI_SPACE_2;
+        tab.letter_spacing = 1.2f; /* as nk_ui_section_tabs draws its labels */
+        for (int i = 0; i < PLAYER_UI_ENHANCED_GROUP_COUNT; ++i) {
+            const char *label = player_ui_enhanced_group_label((PlayerUiEnhancedGroup)i);
+            strip += ceilf(nk_ui_text_width(ui, nk_ui_caps(ui, label), &tab)) +
+                     2.0f * NK_UI_SPACE_3 + (i > 0 ? NK_UI_SPACE_1 : 0.0f);
+        }
+        if (inner - detail_width - NK_UI_SPACE_4 < strip) {
+            detail_width = floorf(inner - NK_UI_SPACE_4 - strip);
+        }
+        if (detail_width < floorf(inner * 0.24f)) detail_width = floorf(inner * 0.24f);
+    }
+    left_width = inner - detail_width - NK_UI_SPACE_4;
+    row_width = left_width - 2.0f * ENHANCED_BOX_PAD - 2.0f * ENHANCED_LIST_PAD -
+                ENHANCED_SCROLLBAR_ROOM;
+    active_tab_id = tab_ids[active_group];
+    list_id = SET_ID_ENHANCED_LIST + (uint32_t)active_group;
+    memset(&detail, 0, sizeof(detail));
+    memset(&first_detail, 0, sizeof(first_detail));
+    if (title) {
+        (void)snprintf(lead_text, sizeof(lead_text),
+                       "For %s alone. Library follows Settings > Enhanced.",
+                       model->enhanced_title);
+        lead = nk_ui_frame_text(ui, lead_text);
+    } else {
+        lead = "Enhanced adds modern touches that work for every game, such as sharper "
+               "textures and crisp system text. The games themselves run as released.";
+    }
+    if (model->preset != NULL) {
+        for (int i = 0; i < (int)(sizeof(preset_labels) / sizeof(preset_labels[0])); ++i) {
+            if (strcmp(model->preset, preset_labels[i]) == 0) preset_index = i;
+        }
+    }
+    /* -1: the mode is none of the list's, a saved Ace whose package has gone. It sits where
+       Ace would, after the last mode: Right goes round to the first, Left to the last, as the
+       select button steps it (player_app_cycle_title_play_mode). */
+    mode_index = -1;
+    for (int i = 0; i < model->enhanced_mode_count; ++i) {
+        if (strcmp(safe_text(model->enhanced_mode, ""),
+                   safe_text(model->enhanced_modes[i], "")) == 0) mode_index = i;
+    }
+    for (int i = 0; i < model->enhanced_row_count && i < PLAYER_UI_ENHANCED_ROWS; ++i) {
+        int group = (int)model->enhanced_rows[i].group;
+        if (group >= 0 && group < PLAYER_UI_ENHANCED_GROUP_COUNT) ++tab_rows[group];
+        if (group == active_group && first_row == 0u) {
+            first_row = PLAYER_UI_ID_ENHANCED_PART(model->enhanced_rows[i].part);
+        }
+    }
+    /* The row a Down move from the tab strip lands on: the list's first, as its parts come
+       before Frame pacing and the texture pack rows. */
+    if (first_row == 0u && active_group == PLAYER_UI_ENHANCED_GROUP_MOTION) {
+        first_row = PLAYER_UI_ID_SETTINGS_PACING;
+    }
+    if (first_row == 0u && active_group == PLAYER_UI_ENHANCED_GROUP_PICTURE &&
+        model->texpack_row) {
+        first_row = PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE;
+    }
+    ++tab_rows[PLAYER_UI_ENHANCED_GROUP_MOTION];
+    if (model->texpack_row) {
+        tab_rows[PLAYER_UI_ENHANCED_GROUP_PICTURE] += model->texpack_chosen ? 2 : 1;
+    }
+    for (int i = 0; i < PLAYER_UI_ENHANCED_GROUP_COUNT; ++i) {
+        if (tab_rows[i] > most_rows) most_rows = tab_rows[i];
+    }
+    /* One width for the three "< value >" boxes that are always that: the widest value. */
+    box_width = settings_enhanced_stepper_width(
+        ui, preset_labels, (int)(sizeof(preset_labels) / sizeof(preset_labels[0])),
+        pacing_values[1]);
+    {
+        float modes = settings_enhanced_stepper_width(ui, model->enhanced_modes,
+                                                      model->enhanced_mode_count, NULL);
+        if (modes > box_width) box_width = modes;
+        if (box_width < 220.0f) box_width = 220.0f;
+        if (box_width > row_width * 0.6f) box_width = row_width * 0.6f;
+    }
+    /* The page fits the room between the bars: its list shows as many whole rows as the rest
+       of the page leaves there, the same number on every tab so that changing tabs moves
+       nothing, and never more than the longest tab has. A longer tab scrolls inside the list,
+       so the panel and Back stay on screen. Where fewer than two rows would be left (a
+       larger text size in a small window) the list keeps two and the card scrolls as a whole
+       instead. */
+    page_room = height - NK_UI_TOP_BAR_HEIGHT - NK_UI_PROMPT_BAR_HEIGHT - 2.0f * NK_UI_SPACE_4 -
+                48.0f;
+    {
+        NkUiTextStyle eyebrow = nk_ui_type(NK_UI_TYPE_EYEBROW, 0u);
+        NkUiTextStyle heading = nk_ui_type(NK_UI_TYPE_TITLE, 0u);
+        NkUiTextStyle label = nk_ui_type(NK_UI_TYPE_LABEL, 0u);
+        /* Everything on the page but the list's rows: the heading, the box around the pinned
+           rows, the tabs and the list's own padding, the notice, and Back. */
+        float fixed = nk_ui_line_height(ui, &eyebrow) + nk_ui_line_height(ui, &heading) +
+                      settings_enhanced_text_height(ui, lead, NK_UI_TYPE_BODY_S, inner) +
+                      (has_notice ? settings_enhanced_text_height(ui, model->notice,
+                                                                  NK_UI_TYPE_CAPTION, inner) +
+                                    ENHANCED_PAGE_GAP : 0.0f) +
+                      4.0f * ENHANCED_PAGE_GAP + ENHANCED_BOX_TOP + ENHANCED_BOX_PAD +
+                      2.0f * row_height + ENHANCED_TABS_HEIGHT + 1.0f + 4.0f * ENHANCED_BOX_GAP +
+                      2.0f * ENHANCED_LIST_PAD +
+                      nk_ui_line_box(ui, NK_UI_CONTROL_HEIGHT, &label);
+        /* The last row has no divider under it. */
+        visible_rows = (int)floorf((page_room - fixed + 1.0f) / pitch);
+        if (visible_rows > most_rows) visible_rows = most_rows;
+        if (visible_rows < 2) visible_rows = most_rows < 2 ? most_rows : 2;
+    }
+    page = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(), ENHANCED_PAGE_GAP);
+    if (!nk_ui_begin_container(ui, SET_ID_ENHANCED_PAGE, &page, NULL)) return;
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, title ? "Game" : "Settings", theme->accent_dark);
+    nk_ui_text_role(ui, FLOW_ID_TITLE, "Enhanced", NK_UI_TYPE_TITLE, theme->paper);
+    nk_ui_text_role(ui, FLOW_ID_LEAD, lead, NK_UI_TYPE_BODY_S, theme->muted);
+    {
+        NkUiLayout main = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
+                                      NK_UI_SPACE_4);
+        NkUiLayout left = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(left_width),
+                                      sizing_grow(), ENHANCED_BOX_GAP);
+        NkUiLayout pinned = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(),
+                                        ENHANCED_BOX_GAP);
+        NkUiStyle box = scr_flow_box_style(theme, theme->surface);
+        left.padding_left = left.padding_right = ENHANCED_BOX_PAD;
+        left.padding_top = ENHANCED_BOX_TOP;
+        left.padding_bottom = ENHANCED_BOX_PAD;
+        pinned.padding_left = ENHANCED_LIST_PAD;
+        pinned.padding_right = ENHANCED_LIST_PAD + ENHANCED_SCROLLBAR_ROOM;
+        if (!nk_ui_begin_container(ui, SET_ID_ENHANCED_MAIN, &main, NULL)) {
+            nk_ui_end_container(ui);
+            return;
+        }
+        if (nk_ui_begin_container(ui, SET_ID_ENHANCED_LEFT, &left, &box)) {
+            if (nk_ui_begin_container(ui, SET_ID_ENHANCED_PINNED, &pinned, NULL)) {
+                int step = 0;
+                bool activated = false;
+                if (settings_enhanced_step_row(ui, PLAYER_UI_ID_SETTINGS_PRESET,
+                                               "Graphics preset", preset_labels[preset_index],
+                                               row_width, box_width, 0u, 0u, false, &step,
+                                               &activated)) {
+                    detail.focused = true;
+                    detail.name = "Graphics preset";
+                    detail.value = preset_labels[preset_index];
+                    detail.sentence = "Library-wide for Enhanced and Ace; Authentic ignores it, "
+                                      "and each game's part choices win.";
+                    detail.note = model->preset_notice;
+                    have_detail = true;
+                }
+                if (step != 0 || activated) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PRESET);
+                    result->choice_index = step < 0 ? -1 : 1;
+                }
+                /* Up and Down between the play mode and the list go by the active tab, which
+                   may sit far to one side of these full-width rows. */
+                if (settings_enhanced_step_row(ui, PLAYER_UI_ID_SETTINGS_ACE_MODE, "Play mode",
+                                               safe_text(model->enhanced_mode, "Authentic"),
+                                               row_width, box_width, 0u, active_tab_id, false,
+                                               &step, &activated)) {
+                    detail.focused = true;
+                    detail.name = "Play mode";
+                    detail.value = safe_text(model->enhanced_mode, "Authentic");
+                    detail.sentence = model->enhanced_mode_sentence;
+                    have_detail = true;
+                }
+                if (step != 0 && model->enhanced_mode_count > 0) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_SET_PLAY_MODE);
+                    result->choice_index =
+                        mode_index < 0 ? (step > 0 ? 0 : model->enhanced_mode_count - 1)
+                                       : (mode_index + step + model->enhanced_mode_count) %
+                                             model->enhanced_mode_count;
+                } else if (activated) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE);
+                }
+                nk_ui_end_container(ui);
+            }
+            for (int i = 0; i < PLAYER_UI_ENHANCED_GROUP_COUNT; ++i) {
+                active_tabs[i].label = player_ui_enhanced_group_label((PlayerUiEnhancedGroup)i);
+                active_tabs[i].active = i == active_group;
+                active_tabs[i].id = tab_ids[i];
+                /* Down from the strip enters the list at its top. By position alone a short
+                   list loses to Back: a tab sits over Back, far from the middle of a
+                   full-width row (two rows at Larger text; review of #2644, N1). A named
+                   neighbour is taken whether or not the list has it scrolled out of view. */
+                active_tabs[i].down = first_row;
+            }
+            {
+                /* The strip starts where the rows do. */
+                NkUiLayout strip = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
+                                               0.0f);
+                int chosen = -1;
+                strip.padding_left = ENHANCED_LIST_PAD;
+                if (nk_ui_begin_container(ui, SET_ID_ENHANCED_TABS + 2u, &strip, NULL)) {
+                    chosen = nk_ui_section_tabs(ui, SET_ID_ENHANCED_TABS, active_tabs,
+                                                PLAYER_UI_ENHANCED_GROUP_COUNT,
+                                                ENHANCED_TABS_HEIGHT);
+                    nk_ui_end_container(ui);
+                }
+                nk_ui_divider(ui, SET_ID_ENHANCED_TABS + 1u, true);
+                if (chosen >= 0 && chosen < PLAYER_UI_ENHANCED_GROUP_COUNT) {
+                    if (model->enhanced_tab_chosen != NULL) *model->enhanced_tab_chosen = chosen;
+                    nk_ui_focus(ui, active_tabs[chosen].id);
+                }
+            }
+            {
+                NkUiLayout list_row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
+                                                  0.0f);
+                NkUiLayout list = layout_make(
+                    NK_UI_LAYOUT_COLUMN, sizing_grow(),
+                    sizing_fixed(2.0f * ENHANCED_LIST_PAD + (float)visible_rows * pitch - 1.0f),
+                    0.0f);
+                list.padding_left = list.padding_right = ENHANCED_LIST_PAD;
+                list.padding_top = ENHANCED_LIST_PAD;
+                list.padding_bottom = ENHANCED_LIST_PAD;
+                list.scroll = true;
+                window = settings_enhanced_window(ui, list_id, pitch, visible_rows);
+                if (nk_ui_begin_container(ui, SET_ID_ENHANCED_LIST_ROW, &list_row, NULL)) {
+                    if (nk_ui_begin_container(ui, list_id, &list, NULL)) {
+                        for (int i = 0; i < model->enhanced_row_count &&
+                                        i < PLAYER_UI_ENHANCED_ROWS; ++i) {
+                            const PlayerUiEnhancedRow *row = &model->enhanced_rows[i];
+                            bool focused;
+                            if ((int)row->group != active_group) continue;
+                            if (listed > 0) {
+                                nk_ui_divider(ui, SET_ID_ENHANCED_DIVIDER + (uint32_t)listed,
+                                              true);
+                            }
+                            focused = settings_enhanced_part_row(
+                                ui, model, row, row_width, listed == 0 ? active_tab_id : 0u,
+                                settings_enhanced_row_blank(
+                                    ui, &window, listed, PLAYER_UI_ID_ENHANCED_PART(row->part)),
+                                result);
+                            if (focused) {
+                                settings_enhanced_row_detail(&detail, row, title, true);
+                                have_detail = true;
+                                focused_place = listed;
+                            }
+                            if (!have_first) {
+                                settings_enhanced_row_detail(&first_detail, row, title, false);
+                                have_first = true;
+                            }
+                            last_row = PLAYER_UI_ID_ENHANCED_PART(row->part);
+                            ++listed;
+                        }
+                        if (active_group == PLAYER_UI_ENHANCED_GROUP_MOTION) {
+                            int step = 0;
+                            bool activated = false;
+                            /* The library's frame pacing (fps_cap): one value for every game. */
+                            if (listed > 0) {
+                                nk_ui_divider(ui, SET_ID_ENHANCED_DIVIDER + (uint32_t)listed,
+                                              true);
+                            }
+                            if (settings_enhanced_step_row(
+                                    ui, PLAYER_UI_ID_SETTINGS_PACING, "Frame pacing",
+                                    pacing_values[pacing_index], row_width, box_width,
+                                    listed == 0 ? active_tab_id : 0u, 0u,
+                                    settings_enhanced_row_blank(ui, &window, listed,
+                                                                PLAYER_UI_ID_SETTINGS_PACING),
+                                    &step, &activated)) {
+                                detail.focused = true;
+                                detail.name = "Frame pacing";
+                                detail.value = pacing_values[pacing_index];
+                                detail.sentence = model->pacing_sentence;
+                                /* fps_cap is the library's: a game's page says so. */
+                                detail.scope = title ? "All games" : NULL;
+                                have_detail = true;
+                                focused_place = listed;
+                            }
+                            if (step != 0 || activated) {
+                                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_PACING);
+                            }
+                            last_row = PLAYER_UI_ID_SETTINGS_PACING;
+                            ++listed;
+                        }
+                        if (active_group == PLAYER_UI_ENHANCED_GROUP_PICTURE &&
+                            model->texpack_row) {
+                            if (listed > 0) {
+                                nk_ui_divider(ui, SET_ID_ENHANCED_DIVIDER + (uint32_t)listed,
+                                              true);
+                            }
+                            if (settings_enhanced_action_row(
+                                    ui, PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE,
+                                    "Texture pack folder", model->texpack_value, "Choose",
+                                    row_width, listed == 0 ? active_tab_id : 0u,
+                                    settings_enhanced_row_blank(
+                                        ui, &window, listed,
+                                        PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE),
+                                    result, PLAYER_UI_SETTINGS_CHOOSE_TEXPACK)) {
+                                detail.focused = true;
+                                detail.name = "Texture pack folder";
+                                detail.value = safe_text(model->texpack_value, "None");
+                                detail.sentence = model->texpack_sentence;
+                                detail.scope = "This game";
+                                have_detail = true;
+                                focused_place = listed;
+                            }
+                            last_row = PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE;
+                            ++listed;
+                            if (model->texpack_chosen) {
+                                nk_ui_divider(ui, SET_ID_ENHANCED_DIVIDER + (uint32_t)listed,
+                                              true);
+                                if (settings_enhanced_action_row(
+                                        ui, PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE,
+                                        "Remove texture pack", NULL, "Remove", row_width, 0u,
+                                        settings_enhanced_row_blank(
+                                            ui, &window, listed,
+                                            PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE),
+                                        result, PLAYER_UI_SETTINGS_REMOVE_TEXPACK)) {
+                                    detail.focused = true;
+                                    detail.name = "Remove texture pack";
+                                    detail.value = safe_text(model->texpack_value, "None");
+                                    detail.sentence = "Forgets the folder for this game. The "
+                                                      "folder is not deleted.";
+                                    detail.scope = "This game";
+                                    have_detail = true;
+                                    focused_place = listed;
+                                }
+                                last_row = PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE;
+                                ++listed;
+                            }
+                        }
+                        /* A short tab keeps the list's height. */
+                        if (listed < visible_rows) {
+                            nk_ui_spacer(ui, nk_ui_child_id(list_id, 1u), sizing_fixed(1.0f),
+                                         sizing_fixed((float)(visible_rows - listed) * pitch));
+                        }
+                        nk_ui_end_container(ui);
+                    }
+                    settings_enhanced_scrollbar(ui, list_id);
+                    nk_ui_end_container(ui);
+                }
+            }
+            nk_ui_end_container(ui);
+        }
+        /* The focused row scrolls into view flush with the list's edge, which would cut its
+           focus ring there: keep the list's own padding between them. Only in the frames
+           just after focus enters the row, as the focus graph brings it into view: after
+           that the list stays where the wheel or a drag puts it, focused row or not. */
+        if (focused_place < 0) {
+            s_enhanced_pad.row = 0u;
+        } else {
+            NkUiScrollState state;
+            const NkUiId row = nk_ui_focused(ui);
+            memset(&state, 0, sizeof(state));
+            if (s_enhanced_pad.ui != ui || s_enhanced_pad.list != list_id ||
+                s_enhanced_pad.row != row) {
+                s_enhanced_pad.ui = ui;
+                s_enhanced_pad.list = list_id;
+                s_enhanced_pad.row = row;
+                s_enhanced_pad.frames = ENHANCED_PAD_FRAMES;
+            }
+            /* A frame before the list's first layout knows no offset and does not count. */
+            if (s_enhanced_pad.frames > 0 && nk_ui_scroll_state(ui, list_id, &state)) {
+                --s_enhanced_pad.frames;
+            } else {
+                state.max_offset = 0.0f;
+            }
+            if (state.max_offset > 0.5f) {
+                float top = ENHANCED_LIST_PAD + (float)focused_place * pitch;
+                float want = state.offset;
+                if (top - want < ENHANCED_LIST_PAD) want = top - ENHANCED_LIST_PAD;
+                if (top + row_height - want > state.viewport - ENHANCED_LIST_PAD) {
+                    want = top + row_height + ENHANCED_LIST_PAD - state.viewport;
+                }
+                if (want > state.max_offset) want = state.max_offset;
+                if (want < 0.0f) want = 0.0f;
+                if (fabsf(want - state.offset) > 0.5f) nk_ui_scroll_to(ui, list_id, want);
+            }
+        }
+        /* With a tab or Back focused the panel shows the tab's first option. */
+        settings_enhanced_details(ui, have_detail ? &detail : &first_detail, detail_width);
+        nk_ui_end_container(ui);
+    }
+    if (has_notice) {
+        nk_ui_text_role(ui, SET_ID_TEXT + 0x710u, model->notice, NK_UI_TYPE_CAPTION,
+                        theme->warning);
+    }
+    {
+        NkUiLayout actions = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
+        if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &actions, NULL)) {
+            /* Up from Back enters the list at its end, whatever tab sits above the button. */
+            if (nk_ui_button_between(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back",
+                                     NK_UI_BUTTON_PRIMARY, last_row, 0u)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_BACK);
             }
             nk_ui_end_container(ui);
         }
     }
+    nk_ui_end_container(ui);
 }
 
-/* The Settings pages that are a dialog card over the flow frame. */
 static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float width,
                             float height, PlayerUiAction *result) {
     static const NkUiPromptItem prompts[] = {
         {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
         {NK_UI_PROMPT_ACT_BACK, "Back to settings"}
     };
+    static const NkUiPromptItem enhanced_prompts[] = {
+        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_TAB_PREV, "Prev tab"},
+        {NK_UI_PROMPT_ACT_TAB_NEXT, "Next tab"},
+        {NK_UI_PROMPT_ACT_CONFIRM, "Change value"}, {NK_UI_PROMPT_ACT_BACK, "Back"}
+    };
     const NkUiTheme *theme = nk_ui_theme(ui);
-    float inner = scr_flow_begin(ui, width, height, 760.0f);
+    float inner = scr_flow_begin(ui, width, height,
+                                 model->page == PLAYER_UI_SETTINGS_PAGE_ACE ? 1120.0f : 760.0f);
     if (inner <= 0.0f) return;
     switch (model->page) {
     case PLAYER_UI_SETTINGS_PAGE_ONLINE:
@@ -988,7 +1850,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             static const char k_cover_art_sentence[] =
                 "Fetch Redump-matched box art from thumbnails.libretro.com to cache; "
                 "unmatched discs keep disc art.";
-            WizardRow rows[5];
+            /* Cheats (#2639): the user's own CWCheat file; the game marks a run that applies one. */
+            static const char k_cheats_sentence[] =
+                "Apply your CWCheat file, cheats/<disc ID>.ini in the data folder. "
+                "The game shows a marker while any cheat is on.";
+            WizardRow rows[6];
             size_t row_count = 0u;
             if (model->online_mode) {
                 rows[row_count++] = (WizardRow){"Online mode", "On",
@@ -1006,6 +1872,8 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             rows[row_count++] = (WizardRow){"Download cover art",
                                             settings_on_off(model->download_cover_art),
                                             k_cover_art_sentence};
+            rows[row_count++] = (WizardRow){"Cheats", settings_on_off(model->cheats),
+                                            k_cheats_sentence};
             WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
@@ -1043,6 +1911,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                   model->download_cover_art, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_COVER_ART);
             }
+            if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_CHEATS, SET_ID_TEXT + 0xBCu,
+                                  "Cheats", k_cheats_sentence, model->cheats, inner - 32.0f,
+                                  &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_CHEATS);
+            }
             nk_ui_end_container(ui);
         }
         {
@@ -1066,7 +1939,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         settings_accessibility(ui, model, inner, result);
         break;
     case PLAYER_UI_SETTINGS_PAGE_ACE:
-        settings_ace(ui, model, inner, result);
+        settings_ace(ui, model, inner, height, result);
         break;
     case PLAYER_UI_SETTINGS_PAGE_NOTICES:
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Third-party notices", theme->accent_dark);
@@ -1307,7 +2180,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 /* The folders differ at their ends (config, data, cache,
                    saves), so a long one keeps its end and loses its middle. */
                 char folder[600];
-                settings_shorten_words(safe_text(model->reset_folders[i], ""), folder,
+                settings_shorten_words(ui, safe_text(model->reset_folders[i], ""), folder,
                                        sizeof(folder), 72u);
                 nk_ui_text(ui, (NkUiId)(SET_ID_TEXT + 0x201u + (NkUiId)i),
                            nk_ui_text_clamp(ui, folder, &data, inner - 32.0f, 1), &data);
@@ -1366,7 +2239,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         }
         break;
     }
-    scr_flow_end(ui, "", prompts, 3u);
+    if (model->page == PLAYER_UI_SETTINGS_PAGE_ACE) {
+        scr_flow_end(ui, "", enhanced_prompts,
+                     sizeof(enhanced_prompts) / sizeof(enhanced_prompts[0]));
+    } else {
+        scr_flow_end(ui, "", prompts, sizeof(prompts) / sizeof(prompts[0]));
+    }
 }
 
 PlayerUiAction player_ui_screen_settings(NkUi *ui, const PlayerUiSettingsModel *model) {

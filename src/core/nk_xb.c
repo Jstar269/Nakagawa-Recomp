@@ -621,6 +621,52 @@ static NkResult decode_prefixed(const uint8_t *payload, size_t payload_size,
                    "unsupported XB compression tag");
 }
 
+/* The checks a compressed entry's 8-byte size header passes against its FST row and
+ * its span, and the span bytes the entry stores. The whole-file reader runs them for
+ * every entry at open. A lazy mount holds no payload bytes, so it runs them on each
+ * member read, before decoding, and refuses what the whole-file reader refuses with
+ * the same text. */
+static NkResult xb_check_compressed_header(const uint8_t *payload, uint64_t span_size,
+                                           NkXbCompression compression,
+                                           uint64_t fst_expanded_size,
+                                           const NkXbLimits *limits, bool big_endian,
+                                           uint64_t *stored_size, char *error_message,
+                                           size_t error_message_size) {
+    if (!payload || span_size < 8u) {
+        return xb_fail(error_message, error_message_size,
+                       "compressed entry is missing its size header");
+    }
+    XbReader header = { payload, 8u, 0, big_endian };
+    uint32_t header_expanded = 0;
+    uint32_t header_compressed = 0;
+    if (!reader_u32(&header, &header_expanded) ||
+        !reader_u32(&header, &header_compressed) ||
+        header_expanded == 0 || header_expanded > limits->max_entry_bytes ||
+        header_expanded > NK_XB_MAX_ENTRY_BYTES) {
+        return xb_fail(error_message, error_message_size,
+                       "invalid compressed entry expanded size");
+    }
+    if ((compression == NK_XB_COMPRESSION_LZS ||
+         compression == NK_XB_COMPRESSION_HUFFMAN) &&
+        header_expanded != fst_expanded_size) {
+        return xb_fail(error_message, error_message_size,
+                       "compressed entry expanded size disagrees with FST");
+    }
+    uint64_t compressed_body_size = header_compressed == 0
+        ? (uint64_t)header_expanded : (uint64_t)header_compressed;
+    if (compression == NK_XB_COMPRESSION_DEFLATE) {
+        *stored_size = span_size;
+    } else if (header_compressed > 8u && (uint64_t)header_compressed <= span_size) {
+        *stored_size = (uint64_t)header_compressed;
+    } else if (8u + compressed_body_size <= span_size) {
+        *stored_size = 8u + compressed_body_size;
+    } else {
+        return xb_fail(error_message, error_message_size,
+                       "compressed entry exceeds its FST span");
+    }
+    return NK_OK;
+}
+
 static int offset_index_compare(const void *left, const void *right) {
     const XbOffsetIndex *a = (const XbOffsetIndex *)left;
     const XbOffsetIndex *b = (const XbOffsetIndex *)right;
@@ -643,10 +689,24 @@ static unsigned long long s_xb_test_lazy_path_calls;
 unsigned long long nk_xb_test_lazy_path_calls(void);
 void nk_xb_test_reset_lazy_path_calls(void);
 unsigned long long nk_xb_test_lazy_path_calls(void) { return s_xb_test_lazy_path_calls; }
-void nk_xb_test_reset_lazy_path_calls(void) { s_xb_test_lazy_path_calls = 0u; }
+/* Lazy mounts whose metadata buffer held the whole archive, member data included;
+ * reset with the path-call count. */
+static unsigned long long s_xb_test_lazy_whole_archive_buffers;
+void nk_xb_test_reset_lazy_path_calls(void) {
+    s_xb_test_lazy_path_calls = 0u;
+    s_xb_test_lazy_whole_archive_buffers = 0u;
+}
 #define XB_TEST_COUNT_LAZY_PATH_CALL() (s_xb_test_lazy_path_calls++)
+unsigned long long nk_xb_test_lazy_whole_archive_buffers(void);
+unsigned long long nk_xb_test_lazy_whole_archive_buffers(void) {
+    return s_xb_test_lazy_whole_archive_buffers;
+}
+#define XB_TEST_NOTE_LAZY_METADATA(archive) \
+    ((archive)->data_size >= (archive)->source_size \
+         ? (void)s_xb_test_lazy_whole_archive_buffers++ : (void)0)
 #else
 #define XB_TEST_COUNT_LAZY_PATH_CALL() ((void)0)
+#define XB_TEST_NOTE_LAZY_METADATA(archive) ((void)0)
 #endif
 
 /* The size of an open archive, through the handle: the file the metadata is read
@@ -656,34 +716,44 @@ static int64_t xb_file_handle_size(FILE *file) {
     return nk_ftell64(file);
 }
 
+/* Grows a lazy mount's metadata prefix to the archive's first `end` bytes, or to its
+ * end when the file is shorter, reading the new bytes from the file. Returns 1, 0 when
+ * a read fails, or -1 when memory runs out. */
+static int xb_file_extend_metadata(FILE *file, NkXbArchive *archive, uint64_t end) {
+    if (end > archive->source_size) end = archive->source_size;
+    if (end <= (uint64_t)archive->data_size) return 1;
+    uint8_t *grown = (uint8_t *)realloc((void *)archive->data, (size_t)end);
+    if (!grown) return -1;
+    archive->data = grown;
+    if (!xb_file_read_at(file, (uint64_t)archive->data_size, grown + archive->data_size,
+                         (size_t)end - archive->data_size)) return 0;
+    archive->data_size = (size_t)end;
+    return 1;
+}
+
+/* Loads a lazy mount's metadata prefix: everything parse_archive reads before the data
+ * section (the header, the FST and its padding, the string-table header, the string
+ * table and its padding), never the member data. A region that runs past the end of
+ * the file is loaded up to that end, so the parser sees exactly the bytes the
+ * whole-file reader parses and fails where it fails. Returns 1, 0 when a read fails,
+ * or -1 when memory runs out. */
 static int xb_file_load_metadata(FILE *file, NkXbArchive *archive) {
-    if (!file || !archive || !archive->data || archive->source_size < 8u) return 0;
-    uint8_t fixed[8];
-    if (!xb_file_read_at(file, 0u, fixed, sizeof(fixed))) return 0;
-    memcpy((void *)archive->data, fixed, sizeof(fixed));
-    XbReader count_reader = { fixed + 4u, 4u, 0u, archive->big_endian };
+    if (!file || !archive || archive->source_size < 8u) return 0;
+    int loaded = xb_file_extend_metadata(file, archive, 8u);
+    if (loaded != 1) return loaded;
+    XbReader count_reader = { archive->data + 4u, 4u, 0u, archive->big_endian };
     uint32_t file_count = 0;
     if (!reader_u32(&count_reader, &file_count) || file_count == 0u ||
         file_count > archive->limits.max_files || file_count > NK_XB_MAX_FILES) {
         return 1;
     }
-    size_t fst_bytes = 0;
-    if (!checked_mul_size((size_t)file_count, 8u, &fst_bytes) ||
-        fst_bytes > archive->source_size - 8u) return 1;
-    if (!xb_file_read_at(file, 8u, (void *)(archive->data + 8u), fst_bytes)) return 0;
-
-    size_t table_end = 8u + fst_bytes;
-    size_t padding = (4u - (table_end & 3u)) & 3u;
-    if (padding > archive->source_size - table_end) return 1;
-    size_t string_header_offset = table_end + padding;
-    if (string_header_offset > archive->source_size ||
-        8u > archive->source_size - string_header_offset) return 1;
-    uint8_t string_header[8];
-    if (!xb_file_read_at(file, string_header_offset, string_header,
-                         sizeof(string_header))) return 0;
-    memcpy((void *)(archive->data + string_header_offset), string_header,
-           sizeof(string_header));
-    XbReader string_reader = { string_header, sizeof(string_header), 0u,
+    /* file_count is at most NK_XB_MAX_FILES, so these sums cannot overflow. */
+    uint64_t string_header_offset = (8u + (uint64_t)file_count * 8u + 3u) & ~(uint64_t)3u;
+    loaded = xb_file_extend_metadata(file, archive, string_header_offset + 8u);
+    if (loaded != 1 || (uint64_t)archive->data_size < string_header_offset + 8u) {
+        return loaded;
+    }
+    XbReader string_reader = { archive->data + (size_t)string_header_offset, 8u, 0u,
                                archive->big_endian };
     uint32_t string_expanded = 0;
     uint32_t string_compressed = 0;
@@ -696,20 +766,30 @@ static int xb_file_load_metadata(FILE *file, NkXbArchive *archive) {
         string_compressed > NK_XB_MAX_STRING_TABLE_BYTES) {
         return 1;
     }
-    size_t string_offset = string_header_offset + 8u;
-    size_t string_size = string_compressed == 0u
-        ? (size_t)string_expanded : (size_t)string_compressed;
-    if (string_size > archive->source_size - string_offset) return 1;
-    if (string_size != 0u &&
-        !xb_file_read_at(file, string_offset, (void *)(archive->data + string_offset),
-                         string_size)) return 0;
-    size_t string_end = string_offset + string_size;
-    size_t end_padding = (4u - (string_end & 3u)) & 3u;
-    if (end_padding > archive->source_size - string_end) return 1;
-    if (end_padding != 0u &&
-        !xb_file_read_at(file, string_end, (void *)(archive->data + string_end),
-                         end_padding)) return 0;
-    return 1;
+    uint64_t string_offset = string_header_offset + 8u;
+    uint64_t string_size = string_compressed == 0u ? string_expanded : string_compressed;
+    /* A retail table's compressed size counts its own 8-byte header, so its body and
+     * its padding also end inside this region. */
+    return xb_file_extend_metadata(file, archive,
+                                   (string_offset + string_size + 3u) & ~(uint64_t)3u);
+}
+
+/* Decodes a lazy mount's compressed member from its span, read from the file: first
+ * the header checks the whole-file reader ran at open, then the payload. */
+static NkResult xb_decode_file_payload(const NkXbArchive *archive, const NkXbEntry *entry,
+                                       const uint8_t *payload, size_t payload_size,
+                                       uint8_t *decoded, char *error_message,
+                                       size_t error_message_size) {
+    uint64_t stored_size = 0;
+    NkResult result = xb_check_compressed_header(payload, payload_size, entry->compression,
+                                                 entry->expanded_size, &archive->limits,
+                                                 archive->big_endian, &stored_size,
+                                                 error_message, error_message_size);
+    if (result != NK_OK) return result;
+    return decode_prefixed(payload, payload_size, entry->compression,
+                           (size_t)entry->expanded_size, &archive->limits,
+                           archive->big_endian, decoded, error_message,
+                           error_message_size);
 }
 
 static NkResult xb_file_read_entry(const NkXbArchive *archive,
@@ -740,10 +820,8 @@ static NkResult xb_file_read_entry(const NkXbArchive *archive,
             result = NK_ERROR_IO;
         } else {
             char error[128];
-            result = decode_prefixed(payload, payload_size, entry->compression,
-                                     (size_t)entry->expanded_size,
-                                     &archive->limits, archive->big_endian,
-                                     decoded, error, sizeof(error));
+            result = xb_decode_file_payload(archive, entry, payload, payload_size,
+                                            decoded, error, sizeof(error));
         }
         free(payload);
     }
@@ -811,6 +889,9 @@ static NkResult parse_archive(NkXbArchive *archive, char *error_message,
                        "archive is shorter than its header");
     }
 
+    /* The metadata is read from data: the whole archive, or for a lazy mount only the
+     * metadata prefix it loaded. The data section is bounded by source_size, the
+     * archive's size, which is data_size whenever the whole archive is in memory. */
     XbReader reader = { archive->data, archive->data_size, 0, archive->big_endian };
     const uint8_t signature[4] = {
         NK_XB_SIGNATURE_0, NK_XB_SIGNATURE_1,
@@ -971,7 +1052,7 @@ static NkResult parse_archive(NkXbArchive *archive, char *error_message,
     free(string_table);
 
     size_t data_start = reader.pos;
-    if (data_start >= archive->data_size) {
+    if (data_start >= archive->source_size) {
         free(fst); free(entries); free(offsets);
         return xb_fail(error_message, error_message_size,
                        "archive has no file-data section");
@@ -991,7 +1072,7 @@ static NkResult parse_archive(NkXbArchive *archive, char *error_message,
         XbFstRow row = fst[index];
         if (row.expanded_size == 0 || row.expanded_size > archive->limits.max_entry_bytes ||
             row.expanded_size > NK_XB_MAX_ENTRY_BYTES ||
-            offset < data_start || offset >= archive->data_size || (offset & 3u) != 0) {
+            offset < data_start || offset >= archive->source_size || (offset & 3u) != 0) {
             free(fst); free(entries); free(offsets);
             return xb_fail(error_message, error_message_size,
                            "FST entry is outside the bounded data section");
@@ -1003,60 +1084,31 @@ static NkResult parse_archive(NkXbArchive *archive, char *error_message,
         }
         previous_offset = offset;
         uint64_t next_offset = position + 1 < file_count
-            ? offsets[position + 1].offset : (uint64_t)archive->data_size;
-        if (next_offset <= offset || next_offset > archive->data_size) {
+            ? offsets[position + 1].offset : archive->source_size;
+        if (next_offset <= offset || next_offset > archive->source_size) {
             free(fst); free(entries); free(offsets);
             return xb_fail(error_message, error_message_size,
                            "FST data offsets are not increasing");
         }
         uint64_t span_size = next_offset - offset;
-        const uint8_t *payload = archive->data + (size_t)offset;
-        size_t payload_size = (size_t)span_size;
         uint64_t stored_size = row.expanded_size;
         if (row.compression != NK_XB_COMPRESSION_NONE) {
-            if (payload_size < 8) {
+            if (span_size < 8u) {
                 free(fst); free(entries); free(offsets);
                 return xb_fail(error_message, error_message_size,
                                "compressed entry is missing its size header");
             }
             if (archive->file_backed) {
+                /* The header is checked on the member's first read. */
                 stored_size = span_size;
             } else {
-                XbReader header = { payload, payload_size, 0, archive->big_endian };
-                uint32_t header_expanded = 0;
-                uint32_t header_compressed = 0;
-                if (!reader_u32(&header, &header_expanded) ||
-                    !reader_u32(&header, &header_compressed) ||
-                    header_expanded == 0 || header_expanded > archive->limits.max_entry_bytes ||
-                    header_expanded > NK_XB_MAX_ENTRY_BYTES) {
+                NkResult header_result = xb_check_compressed_header(
+                    archive->data + (size_t)offset, span_size, row.compression,
+                    row.expanded_size, &archive->limits, archive->big_endian,
+                    &stored_size, error_message, error_message_size);
+                if (header_result != NK_OK) {
                     free(fst); free(entries); free(offsets);
-                    return xb_fail(error_message, error_message_size,
-                                   "invalid compressed entry expanded size");
-                }
-                if ((row.compression == NK_XB_COMPRESSION_LZS ||
-                     row.compression == NK_XB_COMPRESSION_HUFFMAN) &&
-                    header_expanded != row.expanded_size) {
-                    free(fst); free(entries); free(offsets);
-                    return xb_fail(error_message, error_message_size,
-                                   "compressed entry expanded size disagrees with FST");
-                }
-                uint64_t compressed_body_size = header_compressed == 0
-                    ? (uint64_t)header_expanded : (uint64_t)header_compressed;
-                if (compressed_body_size > UINT64_MAX - 8u) {
-                    free(fst); free(entries); free(offsets);
-                    return xb_fail(error_message, error_message_size,
-                                   "compressed entry size overflows");
-                }
-                if (row.compression == NK_XB_COMPRESSION_DEFLATE) {
-                    stored_size = span_size;
-                } else if (header_compressed > 8u && (uint64_t)header_compressed <= span_size) {
-                    stored_size = (uint64_t)header_compressed;
-                } else if (8u + compressed_body_size <= span_size) {
-                    stored_size = 8u + compressed_body_size;
-                } else {
-                    free(fst); free(entries); free(offsets);
-                    return xb_fail(error_message, error_message_size,
-                                   "compressed entry exceeds its FST span");
+                    return header_result;
                 }
             }
         } else if (stored_size > span_size) {
@@ -1289,25 +1341,23 @@ NkResult nk_xb_open_file_lazy(const char *path, bool big_endian,
         return xb_fail(error_message, error_message_size,
                        "archive exceeds the configured byte limit");
     }
-    size_t size = (size_t)file_size;
-    uint8_t *data = (uint8_t *)malloc(size);
-    if (!data) {
-        fclose(file);
-        return NK_ERROR_OUT_OF_MEMORY;
-    }
+    /* Only the metadata prefix is held in memory, never the member data. */
     memset(out_archive, 0, sizeof(*out_archive));
-    out_archive->data = data;
-    out_archive->data_size = size;
+    out_archive->data = NULL;
+    out_archive->data_size = 0u;
     out_archive->owns_data = true;
     out_archive->file_backed = true;
     out_archive->file_path = xb_strdup(path);
     out_archive->file_handle = file;
-    out_archive->source_size = size;
+    out_archive->source_size = (uint64_t)file_size;
     out_archive->limits = effective;
     out_archive->big_endian = big_endian;
     snprintf(out_archive->source_name, sizeof(out_archive->source_name), "%s", path);
-    if (!out_archive->file_path || !xb_file_load_metadata(file, out_archive)) {
+    int loaded = out_archive->file_path ? xb_file_load_metadata(file, out_archive) : 0;
+    XB_TEST_NOTE_LAZY_METADATA(out_archive);
+    if (loaded != 1) {
         nk_xb_close(out_archive);
+        if (loaded < 0) return NK_ERROR_OUT_OF_MEMORY;
         return xb_fail(error_message, error_message_size,
                        "XB archive metadata could not be read");
     }
@@ -1384,10 +1434,8 @@ NkResult nk_xb_read_entry_range(const NkXbArchive *archive, size_t entry_index,
                 result = xb_fail(error_message, error_message_size,
                                  "cannot read XB archive member");
             } else {
-                result = decode_prefixed(payload, payload_size, entry->compression,
-                                         (size_t)entry->expanded_size,
-                                         &archive->limits, archive->big_endian,
-                                         decoded, error_message, error_message_size);
+                result = xb_decode_file_payload(archive, entry, payload, payload_size,
+                                                decoded, error_message, error_message_size);
                 if (result == NK_OK) {
                     memcpy(output, decoded + (size_t)offset, amount);
                 }
@@ -1454,14 +1502,26 @@ static bool make_member_path(const char *root, const char *member,
     return written >= 0 && (size_t)written < out_size;
 }
 
+/* The last path separator in a host path: '/' or the host's own separator. On POSIX a
+   member name keeps its Shift-JIS bytes, where 0x5C is the trail byte of a character
+   such as 0x83 0x5C, never a separator (the parser has already turned every
+   standalone backslash into '/'). */
+static char *last_host_separator(char *path) {
+    char *slash = strrchr(path, '/');
+    char host_separator = nk_platform_path_separator();
+    if (host_separator != '/') {
+        char *other = strrchr(path, host_separator);
+        if (other && (!slash || other > slash)) slash = other;
+    }
+    return slash;
+}
+
 static bool make_parent_directory(const char *path) {
     char parent[4096];
     size_t length = strlen(path);
     if (length >= sizeof(parent)) return false;
     memcpy(parent, path, length + 1);
-    char *slash = strrchr(parent, '/');
-    char *backslash = strrchr(parent, '\\');
-    if (backslash && (!slash || backslash > slash)) slash = backslash;
+    char *slash = last_host_separator(parent);
     if (!slash) return false;
     *slash = '\0';
     return nk_platform_mkdir_p_private(parent);
@@ -1474,12 +1534,203 @@ static bool parent_path_exceeds_limit(const char *path) {
     size_t length = strlen(path);
     if (length >= sizeof(parent)) return true;
     memcpy(parent, path, length + 1);
-    char *slash = strrchr(parent, '/');
-    char *backslash = strrchr(parent, '\\');
-    if (backslash && (!slash || backslash > slash)) slash = backslash;
+    char *slash = last_host_separator(parent);
     if (!slash) return false;
     *slash = '\0';
     return nk_platform_path_exceeds_limit(parent, true);
+}
+
+static char xb_ascii_upper(char c) { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; }
+
+/* A Windows device name, alone or before an extension ("NUL", "con.txt"), with the
+   blanks Windows drops before the extension ignored ("CON .png" is CON); the same rule
+   as a ZIP entry name's (nk_zip.c). The component is parser-normalized Shift-JIS, so a
+   stem holding a two-byte character never matches. */
+static bool xb_reserved_device(const char *seg, size_t n) {
+    static const char *const names[] = { "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$" };
+    char stem[8];
+    size_t len = 0;
+    while (len < n && seg[len] != '.') ++len;
+    while (len > 0 && seg[len - 1] == ' ') --len;
+    if (len < 3 || len > 7) return false;
+    for (size_t i = 0; i < len; ++i) stem[i] = xb_ascii_upper(seg[i]);
+    stem[len] = '\0';
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        if (strcmp(stem, names[i]) == 0) return true;
+    }
+    if (memcmp(stem, "COM", 3) != 0 && memcmp(stem, "LPT", 3) != 0) return false;
+    return len == 4 && stem[3] >= '1' && stem[3] <= '9';
+}
+
+/* Refuses a member name Windows would write somewhere other than the file it names: a
+   component ending in a dot or a space, which Windows drops ("a." lands on "a"), or a
+   device name (a member "NUL" would be written to the null device). It applies on
+   every host, as the ZIP name rules do, so one archive unpacks the same everywhere. A
+   Shift-JIS trail byte is never '.' or ' ', so the last byte of a component is ASCII
+   when it is one of them. */
+static NkResult xb_check_host_member_name(const char *member, char *error_message,
+                                          size_t error_message_size) {
+    size_t start = 0;
+    for (size_t i = 0;; ++i) {
+        if (member[i] != '/' && member[i] != '\0') continue;
+        const char *seg = member + start;
+        size_t len = i - start;
+        if (len > 0 && (seg[len - 1] == '.' || seg[len - 1] == ' ')) {
+            return xb_fail(error_message, error_message_size,
+                           "an XB member name ends in a dot or a space, which Windows "
+                           "drops, so it would replace another file");
+        }
+        if (xb_reserved_device(seg, len)) {
+            return xb_fail(error_message, error_message_size,
+                           "an XB member is named like a Windows device (CON, NUL, COM1 "
+                           "and the like), so it cannot be written as a file");
+        }
+        if (member[i] == '\0') break;
+        start = i + 1u;
+    }
+    return NK_OK;
+}
+
+/* The trail byte of the upper-case letter a two-byte Shift-JIS full-width Latin
+   (U+FF41 onto U+FF21), Greek or Cyrillic letter folds onto, or the trail byte itself:
+   the letter pairs CP932 encodes after the lead bytes 0x82, 0x83 and 0x84, refused on
+   every host so an archive with them unpacks nowhere. Katakana (0x83 0x41 and 0x83
+   0x61) are distinct characters. This is not every pair Windows writes as one file:
+   CP932 has two encodings of some characters (0xED 0x40 and 0xFA 0x5C are both
+   U+7E8A) and NTFS folds other cases (small Roman numerals, 0xFA 0x40, onto capital
+   ones, 0x87 0x54); xb_check_host_names_distinct finds those on such a host from the
+   names it writes. */
+static uint8_t xb_sjis_upper_trail(uint8_t lead, uint8_t trail) {
+    if (lead == 0x82u && trail >= 0x81u && trail <= 0x9au) return (uint8_t)(trail - 0x21u);
+    if (lead == 0x83u && trail >= 0xbfu && trail <= 0xd6u) return (uint8_t)(trail - 0x20u);
+    if (lead == 0x84u && trail >= 0x70u && trail <= 0x7eu) return (uint8_t)(trail - 0x30u);
+    if (lead == 0x84u && trail >= 0x80u && trail <= 0x91u) return (uint8_t)(trail - 0x31u);
+    return trail;
+}
+
+/* Member names compared with ASCII letters folded to upper case and each two-byte
+   Shift-JIS character folded by xb_sjis_upper_trail; the hash and the comparison fold
+   the same way. The parser has validated every pair. */
+static uint32_t xb_folded_name_hash(const char *name) {
+    uint32_t value = 2166136261u;
+    for (size_t i = 0; name[i] != '\0'; i++) {
+        bool pair = sjis_lead((uint8_t)name[i]) && name[i + 1] != '\0';
+        value ^= (uint8_t)xb_ascii_upper(name[i]);
+        value *= 16777619u;
+        if (pair) {
+            value ^= xb_sjis_upper_trail((uint8_t)name[i], (uint8_t)name[i + 1]);
+            value *= 16777619u;
+            i++;
+        }
+    }
+    return value;
+}
+
+static bool xb_folded_names_equal(const char *a, const char *b) {
+    for (size_t i = 0;; i++) {
+        if (xb_ascii_upper(a[i]) != xb_ascii_upper(b[i])) return false;
+        if (a[i] == '\0') return true;
+        if (sjis_lead((uint8_t)a[i]) && a[i + 1] != '\0') {
+            /* a[i] == b[i]: a lead byte is not a letter. */
+            uint8_t lead = (uint8_t)a[i];
+            i++;
+            if (xb_sjis_upper_trail(lead, (uint8_t)a[i]) !=
+                xb_sjis_upper_trail(lead, (uint8_t)b[i])) return false;
+        }
+    }
+}
+
+/* Refuses two members whose names differ only in letter case (ASCII, or the
+   full-width Latin, Greek and Cyrillic letters of xb_sjis_upper_trail): Windows opens
+   both as one file, so the second would silently replace the first. It applies on
+   every host, as the ZIP reader's duplicate rule does; xb_check_host_names_distinct
+   adds the rest of the host's own aliases. Names that are byte-identical are the
+   parser's accepted duplicates (their bytes were found identical), and writing
+   either gives the same file. */
+static NkResult xb_check_member_names_distinct(const NkXbArchive *archive,
+                                               char *error_message,
+                                               size_t error_message_size) {
+    size_t count = archive->entry_count;
+    if (count < 2u) return NK_OK;
+    size_t slot_count = 1u;
+    while (slot_count < count * 2u) slot_count <<= 1;
+    int32_t *slots = (int32_t *)malloc(slot_count * sizeof(int32_t));
+    if (!slots) return NK_ERROR_OUT_OF_MEMORY;
+    for (size_t s = 0; s < slot_count; s++) slots[s] = -1;
+    NkResult result = NK_OK;
+    for (size_t i = 0; i < count && result == NK_OK; i++) {
+        const char *name = archive->entries[i].path;
+        size_t slot = (size_t)xb_folded_name_hash(name) & (slot_count - 1u);
+        while (slots[slot] != -1) {
+            const char *prev = archive->entries[(size_t)slots[slot]].path;
+            if (xb_folded_names_equal(prev, name)) {
+                if (strcmp(prev, name) != 0) {
+                    result = xb_fail(error_message, error_message_size,
+                                     "two XB members have names that differ only in letter "
+                                     "case, so one would replace the other on Windows");
+                }
+                break;
+            }
+            slot = (slot + 1u) & (slot_count - 1u);
+        }
+        if (result == NK_OK && slots[slot] == -1) slots[slot] = (int32_t)i;
+    }
+    free(slots);
+    return result;
+}
+
+typedef struct {
+    char *host;          /* the name as the host writes it (UTF-8) */
+    const char *member;  /* the archive's Shift-JIS name */
+} XbHostName;
+
+static int xb_host_name_order(const void *a, const void *b) {
+    return nk_platform_compare_file_names(((const XbHostName *)a)->host,
+                                          ((const XbHostName *)b)->host);
+}
+
+/* Refuses two members the host writes as one file, judged on the names it is given:
+   on Windows the CP932 name converted to UTF-16, compared as the file system matches
+   names (nk_platform_compare_file_names). That covers what xb_sjis_upper_trail does
+   not: two CP932 encodings of one character, and case pairs outside its letters. On a
+   host whose names are bytes there is nothing more to find. Byte-identical names stay
+   the parser's accepted duplicates. A name that cannot be converted is refused here,
+   as the unpack would refuse it, so nothing is written. */
+static NkResult xb_check_host_names_distinct(const NkXbArchive *archive,
+                                             char *error_message,
+                                             size_t error_message_size) {
+    size_t count = archive->entry_count;
+    if (count < 2u || !nk_platform_paths_fold_case()) return NK_OK;
+    if (count > SIZE_MAX / sizeof(XbHostName)) return NK_ERROR_OUT_OF_MEMORY;
+    XbHostName *names = (XbHostName *)calloc(count, sizeof(XbHostName));
+    if (!names) return NK_ERROR_OUT_OF_MEMORY;
+    NkResult result = NK_OK;
+    char host[NK_PLATFORM_FILE_NAME_UNITS];
+    for (size_t i = 0; i < count && result == NK_OK; i++) {
+        names[i].member = archive->entries[i].path;
+        if (!xb_member_path_to_host_utf8(names[i].member, host, sizeof(host))) {
+            result = xb_fail(error_message, error_message_size,
+                             "XB member path is too long or cannot be contained");
+        } else if (!(names[i].host = xb_strdup(host))) {
+            result = NK_ERROR_OUT_OF_MEMORY;
+        }
+    }
+    if (result == NK_OK) {
+        qsort(names, count, sizeof(XbHostName), xb_host_name_order);
+        for (size_t i = 1; i < count; i++) {
+            if (nk_platform_compare_file_names(names[i - 1u].host, names[i].host) == 0 &&
+                strcmp(names[i - 1u].member, names[i].member) != 0) {
+                result = xb_fail(error_message, error_message_size,
+                                 "two XB members have different names that are one file on "
+                                 "this host (letter case, or two Shift-JIS spellings of one "
+                                 "character), so one would replace the other");
+                break;
+            }
+        }
+    }
+    for (size_t i = 0; i < count; i++) free(names[i].host);
+    free(names);
+    return result;
 }
 
 NkResult nk_xb_unpack(const char *archive_path, const char *destination_root,
@@ -1505,6 +1756,27 @@ NkResult nk_xb_unpack(const char *archive_path, const char *destination_root,
     NkResult result = nk_xb_open_file(archive_path, false, NULL, &archive,
                                       error_message, error_message_size);
     if (result != NK_OK) return result;
+
+    /* Every name is checked before the first member is written, so a refused archive
+       writes no member at all. */
+    for (size_t i = 0; i < archive.entry_count && result == NK_OK; i++) {
+        result = xb_check_host_member_name(archive.entries[i].path, error_message,
+                                           error_message_size);
+    }
+    if (result == NK_OK) {
+        result = xb_check_member_names_distinct(&archive, error_message, error_message_size);
+    }
+    if (result == NK_OK) {
+        result = xb_check_host_names_distinct(&archive, error_message, error_message_size);
+    }
+    if (result != NK_OK) {
+        nk_xb_close(&archive);
+        if (result == NK_ERROR_OUT_OF_MEMORY && error_message && error_message_size > 0) {
+            xb_error(error_message, error_message_size,
+                     "out of memory while checking XB member names");
+        }
+        return result;
+    }
 
     for (size_t i = 0; i < archive.entry_count; i++) {
         const NkXbEntry *entry = &archive.entries[i];

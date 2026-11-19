@@ -65,6 +65,13 @@ We aim to respond promptly and will remove material where appropriate.
   `proAdhocServer.cpp`, and its port offset from
   PPSSPP's `Core/HLE/sceNetAdhoc.cpp` (Copyright (c) 2013- PPSSPP Project) at the
   same revision, and it is conveyed as GPL-3.0-or-later. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
+- **Cheat files (#2639)** — the CWCheat reader, the decode of each code form and
+  the applier (`src/core/nk_cheats.c`, `src/core/nk_cheats.h`) are translated
+  from PPSSPP's `Core/CwCheat.cpp` and `Core/CwCheat.h` at
+  `c437463bc5cb78a0236312ad23f9c3b56fb9ae67` (GPL-2.0-or-later), conveyed as
+  GPL-3.0-or-later. Neither upstream file carries a notice of its own; the files
+  here carry the notice of PPSSPP's source files (Copyright (c) 2012- PPSSPP
+  Project, as `Core/Core.cpp` has it at that revision). Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
 - **PSPSDK / PSPDEV** — permissive per-component declarations and BSD-family
   notices for public ABI definitions and source-owned fixtures. The applicable
   notices are in `third_party/licenses/PSPSDK.txt` and `assets/upstream/`.
@@ -105,9 +112,11 @@ We aim to respond promptly and will remove material where appropriate.
   `47d794151b2b64f6aba60304e6480f4f5a2bc24b`, with the codecs it carries: miniz 3.1.2
   (`MIT`), the Zstandard 1.5.7 single-file decompressor (`BSD-3-Clause`, elected from
   upstream's `BSD-3-Clause OR GPL-2.0-only`), the LZMA SDK decoder (public domain) and
-  dr_flac v0.13.4 (the Unlicense, elected from its Unlicense or `MIT-0` choice). Every file
-  keeps its upstream bytes apart from LF line endings and one added final newline (recorded as
-  LOCAL DELTA); the licence texts and the pinned manifest are under `third_party/libchdr/`. It is compiled into the native player, which uses it only
+  the dr_flac v0.13.4 development snapshot libchdr carries at that pin (the Unlicense, elected from its Unlicense or `MIT-0` choice). Every file
+  keeps its upstream bytes apart from LF line endings, one added final newline and two small code fixes in
+  `src/libchdr_codec_flac.c` and `src/libchdr_huffman.c`, all recorded as LOCAL DELTA in
+  `third_party/libchdr/PROVENANCE.md`; the
+  licence texts and the pinned manifest are under `third_party/libchdr/`. It is compiled into the native player, which uses it only
   to expand a CHD disc image into a plain `.iso` when the image is added; it is not in the
   runtime.
 - **xBRZ 1.9** — `GPL-3.0-only`, Copyright (C) Zenju, with the author's linking exception for
@@ -270,7 +279,11 @@ license text, copied verbatim from the MSYS2 UCRT64 toolchain packages
 License choices and combination notes:
 
 - **FreeType** is dual-licensed FTL or GPL-2.0-or-later; this distribution uses
-  the **FTL** option, which the FSF lists as GPL-compatible.
+  the **FTL** option, which the FSF lists as GPL-compatible. As the FTL asks of
+  a binary distribution: portions of this software are copyright (C) 1996-2026
+  The FreeType Project (<https://freetype.org>), and this software is based in
+  part on the work of the FreeType Team. The package's `THIRD_PARTY_NOTICES.txt`
+  repeats that statement.
 - **Graphite2** is granted under four licenses (LGPL-2.1+, MPL-2.0, GPL-2.0+,
   or MIT) by its upstream `LICENSE`; this distribution uses the **MIT** option.
 - **GLib, libintl and libiconv** are LGPL-2.1-or-later and are dynamically

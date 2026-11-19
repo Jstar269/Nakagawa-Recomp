@@ -6,13 +6,86 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
+import types
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import psp_readiness  # noqa: E402
+
+
+class ReadinessAggregationTests(unittest.TestCase):
+    def collect_on_synthetic_root(self, *, platform: str, tools: dict[str, str], with_hst: bool) -> dict:
+        with tempfile.TemporaryDirectory(prefix="psp-readiness-") as scratch:
+            root = Path(scratch)
+            (root / "tools" / "psp_oracle").mkdir(parents=True)
+            (root / "tests" / "fixtures" / "psp_oracle").mkdir(parents=True)
+            (root / "tools" / "psp_oracle" / "manifest.json").write_text("{}", encoding="utf-8")
+            probe_root = root / "tests" / "fixtures" / "psp_oracle"
+            (probe_root / "probe.c").write_text("/* synthetic */\n", encoding="utf-8")
+            (probe_root / "Makefile").write_text("# synthetic\n", encoding="utf-8")
+            if with_hst:
+                hst = root / "build" / "hst"
+                hst.mkdir(parents=True)
+                (hst / "hst.exe").write_bytes(b"synthetic executable")
+                (hst / "hst_recomp_0.c").write_text("/* synthetic */\n", encoding="utf-8")
+
+            lock_module = types.ModuleType("pspdev_lock")
+            lock_module.load_lock = lambda _path: ({}, False)  # type: ignore[attr-defined]
+
+            def fake_run(command, *, timeout=5.0):
+                if len(command) > 1 and command[1].startswith("-print-file-name="):
+                    return 0, f"/synthetic/{command[1].split('=', 1)[1]}"
+                return 1, "not installed"
+
+            with mock.patch.object(psp_readiness, "ROOT", root), \
+                 mock.patch.object(psp_readiness.sys, "platform", platform), \
+                 mock.patch.object(psp_readiness.sys, "path", list(sys.path)), \
+                 mock.patch.object(psp_readiness.shutil, "which", side_effect=lambda name: tools.get(name)), \
+                 mock.patch.object(psp_readiness, "_git_dirty", return_value=False), \
+                 mock.patch.object(psp_readiness, "_run", side_effect=fake_run), \
+                 mock.patch.object(psp_readiness, "_wsl_pspdev_tools", return_value=set()), \
+                 mock.patch.object(psp_readiness, "_client_dir_tools", return_value=set()), \
+                 mock.patch.object(psp_readiness, "_ppsspp_headless", return_value=None), \
+                 mock.patch.object(psp_readiness, "_psplink_device", return_value=(False, "offline")), \
+                 mock.patch.dict(os.environ, {
+                     psp_readiness.ENV_CLIENT_DIR: "",
+                     psp_readiness.ENV_PPSSPP_HEADLESS: "",
+                 }), \
+                 mock.patch.dict(sys.modules, {"pspdev_lock": lock_module}):
+                report: dict = psp_readiness.collect()
+                return report
+
+    def test_linux_host_tools_use_current_python_and_make(self) -> None:
+        report = self.collect_on_synthetic_root(
+            platform="linux",
+            tools={"git": "/usr/bin/git", "gcc": "/usr/bin/gcc", "make": "/usr/bin/make"},
+            with_hst=True,
+        )
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertTrue(report["software_ready"], report["software_failures"])
+        self.assertEqual(checks["host_tool:python"]["status"], "PASS")
+        self.assertEqual(checks["host_tool:make"]["status"], "PASS")
+        self.assertNotIn("host_tool:mingw32-make", checks)
+
+    def test_missing_private_hst_build_is_optional_and_not_a_software_failure(self) -> None:
+        report = self.collect_on_synthetic_root(
+            platform="win32",
+            tools={
+                "python": "python.exe",
+                "git": "git.exe",
+                "gcc": "gcc.exe",
+                "mingw32-make": "mingw32-make.exe",
+            },
+            with_hst=False,
+        )
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertEqual(checks["hst_buildfull_artifact"]["status"], "OPTIONAL_MISSING")
+        self.assertTrue(report["software_ready"], report["software_failures"])
+        self.assertNotIn("hst_buildfull_artifact", report["software_failures"])
 
 
 class ClientDirDiscoveryTests(unittest.TestCase):
@@ -130,6 +203,15 @@ class PsplinkDeviceDetectionTests(unittest.TestCase):
         self.assertTrue(connected)
         self.assertIn("via WSL lsusb", detail)
         self.assertTrue(any(command[-1] == "lsusb 2>/dev/null" for command in calls))
+
+    def test_early_psplink_line_is_found_in_long_lsusb_output(self) -> None:
+        output = "Bus 001 Device 004: ID 054c:01c9 Sony Corp. PSP Type B\n" + "x" * 2100
+        completed = subprocess.CompletedProcess(["wsl"], 0, output, "")
+        which = lambda name: "wsl.exe" if name == "wsl.exe" else None
+        with mock.patch.object(psp_readiness.shutil, "which", side_effect=which), \
+             mock.patch.object(psp_readiness.subprocess, "run", return_value=completed):
+            connected, detail = psp_readiness._psplink_wsl_device()
+        self.assertTrue(connected, detail)
 
 
 if __name__ == "__main__":

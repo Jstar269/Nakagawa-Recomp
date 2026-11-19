@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -58,6 +59,7 @@ from psp_oracle.run_psplink import (
     CAMPAIGN_QUEUE_CASES,
     PsplinkCampaignRunner,
     PsplinkSnapshot,
+    _run_command,
     _campaign_completeness_contract,
     _campaign_host0_log_path,
     _campaign_stream_complete,
@@ -320,6 +322,19 @@ class PspOracleProtocolTests(unittest.TestCase):
         self.assertEqual(fields["MODEL_INTERPRETATION_RULE"], PSP_MODEL_INTERPRETATION_RULE)
         self.assertEqual(fields["MODEL_IDENTITY_AGREEMENT"], "AGREES")
 
+    def test_model_identity_accepts_retail_region_suffixes(self) -> None:
+        for label, raw_code, expected in (
+            ("PSP-3001", "3", "PSP-3000"),
+            ("PSP-1004", "0", "PSP-1000"),
+            ("PSP-2001", "1", "PSP-2000"),
+            ("PSP-3004", "3", "PSP-3000"),
+            ("PSP-N1001", "4", "PSP-N1000"),
+        ):
+            with self.subTest(label=label):
+                fields = model_identity_fields(label, raw_code)
+                self.assertEqual(fields["INTERPRETED_MODEL_FAMILY"], expected)
+                self.assertEqual(fields["MODEL_IDENTITY_AGREEMENT"], "AGREES")
+
     def test_unknown_model_rule_leaves_the_raw_value_untouched(self) -> None:
         stored_envelope = {
             "PHYSICAL_MODEL_LABEL": "PSP-3000",
@@ -334,6 +349,48 @@ class PspOracleProtocolTests(unittest.TestCase):
         self.assertEqual(stored_envelope["SOFTWARE_MODEL_RAW_VALUE"], "0x03")
         self.assertEqual(fields["INTERPRETED_MODEL_FAMILY"], "UNKNOWN")
         self.assertEqual(fields["MODEL_IDENTITY_AGREEMENT"], "UNKNOWN")
+
+    def test_campaign_registration_rejects_unpaired_cases_and_supports_ordered_rows(self) -> None:
+        probe_case = "u09-registration-test"
+        with self.assertRaisesRegex(ValueError, "out_counts keys must match"):
+            parse_golden._register_campaign_probe(
+                probe_case, "PSP-TEST-001", ("first", "second"), {"first": 1}
+            )
+        self.assertNotIn(probe_case, parse_golden.CAMPAIGN_PROBE_CASES)
+        parse_golden._register_campaign_probe(
+            probe_case, "PSP-TEST-001", (("first", 2), ("second", 1)),
+            terminal_case="done",
+        )
+        spec, counts = parse_golden.CAMPAIGN_PROBE_CASES[probe_case]
+        self.assertEqual(spec.semantic_cases, ("first", "second"))
+        self.assertEqual(counts, {"first": 2, "second": 1, "done": 1})
+        del parse_golden.CAMPAIGN_PROBE_CASES[probe_case]
+        parse_golden._register_campaign_probe(
+            probe_case, "PSP-TEST-001", {"first": 2, "second": 1, "done": 1},
+            terminal_case="done",
+        )
+        spec, counts = parse_golden.CAMPAIGN_PROBE_CASES[probe_case]
+        self.assertEqual(spec.semantic_cases, ("first", "second"))
+        self.assertEqual(counts, {"first": 2, "second": 1, "done": 1})
+        del parse_golden.CAMPAIGN_PROBE_CASES[probe_case]
+
+    def test_vcodec_failure_fields_are_declared_per_case(self) -> None:
+        spec, counts = parse_golden.CAMPAIGN_PROBE_CASES["vcodec-words"]
+        self.assertEqual(
+            dict(spec.fail_optional_fields)["vc-csc-struct"], frozenset({"result"})
+        )
+        fields = " ".join(f"out{index}=0x0" for index in range(counts["vc-csc-struct"]))
+        raw = META.format(
+            source="psp", model="PSP-3000", firmware="6.61-ARK",
+            binary=MEASURED_SHA, commit=MEASURED_COMMIT,
+        ) + (
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-VCODEC-001 "
+            f"case_id=vc-csc-struct status=FAIL {fields}\n"
+        )
+        parsed = parse_golden.parse_campaign_probe_output(
+            raw, "vcodec-words", require_complete=False
+        )
+        self.assertIn("vc-csc-struct", parsed.results)
 
     def test_parser_requires_metadata_and_orders_records(self) -> None:
         parsed = parse_output(stream("psp"))
@@ -926,6 +983,30 @@ class NewProbeResultParserTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             parse_registry_readonly_output(self._stream(moved))
 
+    def test_registry_non_strict_mode_accepts_one_record_header_prefix(self) -> None:
+        first = self._row("PSP-REGISTRY-001", "registry-open", 2)
+        report = parse_registry_readonly_output(self._stream([first]), require_complete=False)
+        self.assertFalse(report.complete)
+        self.assertEqual(report.categories, ())
+        self.assertEqual(report.keys, ())
+
+    def test_hle_intr_failed_vblank_register_without_result_is_protocol_error(self) -> None:
+        raw = self._stream([
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-HLE-INTR-001 "
+            "case_id=vbl-register status=FAIL out0=0xffffffff out1=0x0\n"
+        ])
+        with self.assertRaisesRegex(ProtocolError, "vbl-register FAIL has no result"):
+            parse_hle_intr_cells_output(raw, require_complete=False)
+
+    def test_vram_integer_reads_reuse_the_parsed_value_map(self) -> None:
+        record = parse_output(self._stream([
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-VRAM-MIRROR-001 "
+            "case_id=vram-info status=PASS result=0x0 out0=0x00001000 out1=0x00000002\n"
+        ])).results[0]
+        first = parse_golden._vram_mirror_values(record)
+        self.assertIs(first, parse_golden._vram_mirror_values(record))
+        self.assertEqual(parse_golden._vram_mirror_integer(record, "out0"), 0x1000)
+
 
 class GeCorpusGateTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1000,6 +1081,16 @@ class GeCorpusGateTests(unittest.TestCase):
         report = ge_corpus_report(self.corpus, schema)
         self.assertEqual(report["status"], "REFUSED")
         self.assertIn("minium", report["cases"][0]["reason"])
+
+    def test_ref_with_an_enforced_sibling_keyword_is_refused(self) -> None:
+        schema = self._schema()
+        schema["$defs"]["probe_run"]["properties"]["evidence_envelope"]["required"] = [
+            "unvalidated_sibling"
+        ]
+        report = ge_corpus_report(self.corpus, schema)
+        self.assertEqual(report["status"], "REFUSED")
+        self.assertIn("$ref", report["cases"][0]["reason"])
+        self.assertIn("sibling", report["cases"][0]["reason"])
 
     def test_packed_pixel_values_must_fit_the_declared_format(self) -> None:
         document = json.loads(json.dumps(self.corpus))
@@ -1131,6 +1222,109 @@ class GeCorpusGateTests(unittest.TestCase):
             },
         }
         return document
+
+    def _measured_case_record(
+        self,
+        *,
+        metadata: dict[str, str] | None = None,
+        envelope_case_id: str | None = None,
+        record_framebuffer_sha256: str | None = None,
+        pixels: dict[tuple[int, int], int | str] | None = None,
+        omitted_pixels: set[tuple[int, int]] | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        document: dict[str, Any] = json.loads(json.dumps(self.corpus))
+        case = document["cases"][0]
+        case["source_tier"] = "PSP_HARDWARE"
+        framebuffer_sha = "a" * 64
+        case["framebuffer_sha256"] = framebuffer_sha
+        for pixel in case["selected_pixels"]:
+            pixel["pixel_value"] = 0
+        identity = {
+            "source": "psp",
+            "model": "PSP-3000",
+            "firmware": "6.61-ARK",
+            "binary": MEASURED_SHA,
+            "commit": MEASURED_COMMIT,
+            **(metadata or {}),
+        }
+        case_id = case["case_id"]
+        fields = [f"framebuffer_sha256={record_framebuffer_sha256 or framebuffer_sha}"]
+        for pixel in case["selected_pixels"]:
+            coordinates = (pixel["x"], pixel["y"])
+            if coordinates in (omitted_pixels or set()):
+                continue
+            value = (pixels or {}).get(coordinates, pixel["pixel_value"])
+            formatted = value if isinstance(value, str) else f"0x{value:08x}"
+            fields.append(f"pixel_{pixel['x']}_{pixel['y']}={formatted}")
+        raw = META.format(**identity) + (
+            f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-001 case_id={case_id} "
+            "status=PASS " + " ".join(fields) + "\n"
+        )
+        case["evidence_envelope"] = {
+            "EVIDENCE_CLASS": "PSP_HARDWARE",
+            "ACCEPTANCE_ELIGIBLE": True,
+            "CASE_ID": envelope_case_id or case_id,
+            "CONSOLE_MODEL": "PSP-3000",
+            "FW": "6.61-ARK",
+            "SOURCE_COMMIT": MEASURED_COMMIT,
+            "BINARY_SHA256": MEASURED_SHA,
+            "RESULT_RECORD": {
+                "path": "ge/run.txt",
+                "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+            },
+        }
+        return document, raw
+
+    def test_measured_hardware_case_rederives_identity_digest_case_and_pixels(self) -> None:
+        document, raw = self._measured_case_record()
+        completed = self._run_gate(document, {"ge/run.txt": raw})
+        measured = self._report(completed)["cases"][0]
+        self.assertEqual(measured["status"], "MEASURED")
+        self.assertIn("matches this case and its pixel results", measured["reason"])
+
+        identity_failures = (
+            ({"model": "PSP-2000"}, "model does not match CONSOLE_MODEL"),
+            ({"firmware": "6.60-ARK"}, "firmware does not match FW"),
+            ({"commit": "c" * 40}, "source_commit does not match SOURCE_COMMIT"),
+            ({"binary": "c" * 64}, "binary_sha256 does not match BINARY_SHA256"),
+        )
+        for metadata, reason in identity_failures:
+            with self.subTest(metadata=tuple(metadata)):
+                document, raw = self._measured_case_record(metadata=metadata)
+                completed = self._run_gate(document, {"ge/run.txt": raw})
+                refused = self._report(completed)["cases"][0]
+                self.assertEqual(refused["status"], "REFUSED")
+                self.assertIn(reason, refused["reason"])
+
+        with self.subTest(boundary="CASE_ID"):
+            document, raw = self._measured_case_record(envelope_case_id="another-case")
+            completed = self._run_gate(document, {"ge/run.txt": raw})
+            refused = self._report(completed)["cases"][0]
+            self.assertEqual(refused["status"], "REFUSED")
+            self.assertIn("oracle CASE_ID does not match", refused["reason"])
+
+        first_pixel = self.corpus["cases"][0]["selected_pixels"][0]
+        coordinates = (first_pixel["x"], first_pixel["y"])
+        pixel_key = f"pixel_{coordinates[0]}_{coordinates[1]}"
+        pixel_failures = (
+            ({"omitted_pixels": {coordinates}}, f"missing a valid {pixel_key}"),
+            ({"pixels": {coordinates: "not-a-pixel"}}, f"missing a valid {pixel_key}"),
+            ({"pixels": {coordinates: 1}}, f"{pixel_key} does not match the case pixel vector"),
+        )
+        for options, reason in pixel_failures:
+            with self.subTest(pixel_case=tuple(options)):
+                document, raw = self._measured_case_record(**options)
+                completed = self._run_gate(document, {"ge/run.txt": raw})
+                refused = self._report(completed)["cases"][0]
+                self.assertEqual(refused["status"], "REFUSED")
+                self.assertIn(reason, refused["reason"])
+
+        with self.subTest(boundary="framebuffer digest"):
+            document, raw = self._measured_case_record(record_framebuffer_sha256="b" * 64)
+            completed = self._run_gate(document, {"ge/run.txt": raw})
+            refused = self._report(completed)["cases"][0]
+            self.assertEqual(refused["status"], "REFUSED")
+            self.assertIn("framebuffer_sha256 does not match the case digest", refused["reason"])
 
     def test_hardware_claim_without_a_results_directory_is_not_run(self) -> None:
         document = self._hardware_case(stream("psp"))
@@ -1320,6 +1514,13 @@ class GeCorpusGateTests(unittest.TestCase):
                 "path": f"ge-corpus/PSP-GE-RTT-001-{MEASURED_COMMIT[:12]}.txt",
                 "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()})
             self.assertEqual((results / record_ref["path"]).read_text(encoding="utf-8"), raw)
+            wrong_identity = json.loads(json.dumps(written))
+            wrong_identity["probe_runs"][0]["evidence_envelope"]["FW"] = "6.60"
+            refused_identity = ge_corpus_report(
+                wrong_identity, self._schema(), results
+            )["probe_runs"][0]
+            self.assertEqual(refused_identity["status"], "REFUSED")
+            self.assertIn("raw result firmware does not match FW", refused_identity["reason"])
             self.assertEqual(run["cells"][0]["records"][0]["words"],
                              " ".join(f"{(1 * 0x10001 + i * 0x101):08x}" for i in range(16)))
             # A corpus row that is not the record's, with its digest made consistent, is refused.
@@ -1759,6 +1960,419 @@ class PspOracleDeviceIdentityTests(unittest.TestCase):
 
 
 class PspOracleRunnerTests(unittest.TestCase):
+    def test_unknown_campaign_contract_refuses_direct_record_parsing(self) -> None:
+        text = META.format(
+            source="psp",
+            model="synthetic",
+            firmware="test",
+            binary="0" * 64,
+            commit="0" * 40,
+        ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
+        with self.assertRaisesRegex(ProtocolError, "no registered completion contract"):
+            _parse_campaign_records(text, "unregistered-synthetic-case")
+
+    def test_campaign_completeness_contract_tracks_parser_registries(self) -> None:
+        from psp_oracle import run_psplink
+
+        text = META.format(
+            source="psp",
+            model="synthetic",
+            firmware="test",
+            binary="0" * 64,
+            commit="0" * 40,
+        ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
+        cache_clear = getattr(run_psplink._parse_campaign_records, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
+        try:
+            with patch.dict(
+                "psp_oracle.run_psplink._COMPLETE_CAMPAIGN_PARSERS",
+                {"new-complete-case": lambda _text, *, require_complete: None},
+            ):
+                self.assertTrue(_campaign_stream_complete(text, "new-complete-case"))
+            with patch.dict(
+                "psp_oracle.run_psplink._SINGLE_RECORD_CAMPAIGN_CASES",
+                {"new-single-case": ("SMOKE", "one")},
+            ):
+                self.assertTrue(_campaign_stream_complete(text, "new-single-case"))
+        finally:
+            if cache_clear is not None:
+                cache_clear()
+
+    def _compare_output_report(
+        self,
+        source: str,
+        *,
+        device_binary_sha: str | None = None,
+        device_source_commit: str | None = None,
+    ) -> dict[str, Any]:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="compare-output-", dir=build_root
+        ) as name:
+            scratch = Path(name)
+            binary = scratch / "probe.prx"
+            binary.write_bytes(STAGED_PRX)
+            digest = hashlib.sha256(STAGED_PRX).hexdigest()
+            psp_text = META.format(
+                source=source,
+                model="PSP-3000",
+                firmware="6.61-ARK",
+                binary=device_binary_sha or digest,
+                commit=device_source_commit or MEASURED_COMMIT,
+            ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
+            nakagawa_text = META.format(
+                source="nakagawa",
+                model="PSP-3000",
+                firmware="6.61-ARK",
+                binary=digest,
+                commit=MEASURED_COMMIT,
+            ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
+            psp_path = scratch / "psp.txt"
+            nakagawa_path = scratch / "nakagawa.txt"
+            results = scratch / "results"
+            report_path = scratch / "report.json"
+            psp_path.write_text(psp_text, encoding="utf-8")
+            nakagawa_path.write_text(nakagawa_text, encoding="utf-8")
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                return_value={"boot_number": 42},
+            ), patch(
+                "psp_oracle.run_psplink._run_command",
+                return_value=(0, "synthetic capture\n", "", "PROCESS_EXITED"),
+            ):
+                code = run_psplink_main([
+                    "--command", "fake-pspsh",
+                    "--session-id", "synthetic-session",
+                    "--results-directory", str(results),
+                    "--out", str(report_path),
+                    "--psp-output", str(psp_path),
+                    "--nakagawa-output", str(nakagawa_path),
+                    "--binary", str(binary),
+                    "--source-commit", MEASURED_COMMIT,
+                    "--model", "PSP-3000",
+                    "--firmware", "6.61-ARK",
+                ])
+            self.assertEqual(code, 0)
+            return cast(dict[str, Any], json.loads(report_path.read_text(encoding="utf-8")))
+
+    def _capture_argv(
+        self,
+        scratch: Path,
+        *,
+        results_directory: Path | None = None,
+        psp_text: str | None = None,
+        nakagawa_text: str | None = None,
+        report_name: str = "report.json",
+    ) -> tuple[list[str], Path]:
+        binary = scratch / "probe.prx"
+        binary.write_bytes(STAGED_PRX)
+        report = scratch / report_name
+        results = results_directory or scratch / "results"
+        args = [
+            "--command", "fake-pspsh",
+            "--session-id", "synthetic-session",
+            "--results-directory", str(results),
+            "--out", str(report),
+            "--binary", str(binary),
+            "--source-commit", MEASURED_COMMIT,
+            "--model", "PSP-3000",
+            "--firmware", "6.61-ARK",
+        ]
+        if psp_text is not None and nakagawa_text is not None:
+            psp_path = scratch / f"{report.stem}-psp.txt"
+            nakagawa_path = scratch / f"{report.stem}-nakagawa.txt"
+            psp_path.write_text(psp_text, encoding="utf-8")
+            nakagawa_path.write_text(nakagawa_text, encoding="utf-8")
+            args.extend(["--psp-output", str(psp_path), "--nakagawa-output", str(nakagawa_path)])
+        return args, report
+
+    def test_results_directory_must_be_git_ignored(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="results-policy-", dir=build_root) as name:
+            args, _report = self._capture_argv(
+                Path(name), results_directory=root / "docs"
+            )
+            from psp_oracle import run_psplink
+
+            stderr = io.StringIO()
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                side_effect=run_psplink.HardwareLockError("HARDWARE_LOCK_NOT_HELD"),
+            ), redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as raised:
+                    run_psplink_main(args)
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("ignored", stderr.getvalue())
+
+    def test_command_captures_in_the_same_second_do_not_overwrite(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="capture-unique-", dir=build_root) as name:
+            scratch = Path(name)
+            first_args, first_report_path = self._capture_argv(scratch, report_name="first.json")
+            second_args, second_report_path = self._capture_argv(scratch, report_name="second.json")
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                return_value={"boot_number": 42},
+            ), patch(
+                "psp_oracle.run_psplink._run_command",
+                side_effect=[
+                    (0, "first synthetic capture\n", "", "PROCESS_EXITED"),
+                    (0, "second synthetic capture\n", "", "PROCESS_EXITED"),
+                ],
+            ), patch("psp_oracle.run_psplink.time.strftime", return_value="same-second"):
+                self.assertEqual(run_psplink_main(first_args), 0)
+                self.assertEqual(run_psplink_main(second_args), 0)
+            first_report = json.loads(first_report_path.read_text(encoding="utf-8"))
+            second_report = json.loads(second_report_path.read_text(encoding="utf-8"))
+            first_capture = (root / first_report["stdout_file"]).resolve()
+            second_capture = (root / second_report["stdout_file"]).resolve()
+            self.assertNotEqual(first_capture, second_capture)
+            self.assertEqual(first_capture.read_text(encoding="utf-8"), "first synthetic capture\n")
+            self.assertEqual(second_capture.read_text(encoding="utf-8"), "second synthetic capture\n")
+
+    def test_malformed_psp_compare_writes_an_inconclusive_report(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="malformed-compare-", dir=build_root) as name:
+            args, report_path = self._capture_argv(
+                Path(name),
+                psp_text="malformed PSP stream\n",
+                nakagawa_text=measured_stream("nakagawa"),
+            )
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                return_value={"boot_number": 42},
+            ), patch(
+                "psp_oracle.run_psplink._run_command",
+                return_value=(0, "synthetic capture\n", "", "PROCESS_EXITED"),
+            ):
+                try:
+                    code = run_psplink_main(args)
+                except Exception as exc:
+                    self.fail(f"malformed comparison escaped without a report: {type(exc).__name__}")
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(code, 2)
+        self.assertEqual(report["comparison"]["classification"], "INCONCLUSIVE")
+        self.assertFalse(report["comparison"]["acceptance_eligible"])
+
+    def test_inconclusive_comparison_returns_nonzero(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="inconclusive-compare-", dir=build_root) as name:
+            psp_text = measured_stream("psp")
+            args, report_path = self._capture_argv(
+                Path(name), psp_text=psp_text, nakagawa_text="not a Nakagawa stream\n"
+            )
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                return_value={"boot_number": 42},
+            ), patch(
+                "psp_oracle.run_psplink._run_command",
+                return_value=(0, "synthetic capture\n", "", "PROCESS_EXITED"),
+            ):
+                code = run_psplink_main(args)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["comparison"]["classification"], "INCONCLUSIVE")
+        self.assertNotEqual(code, 0)
+
+    def test_compare_cli_preserves_emulator_source_for_acceptance_gate(self) -> None:
+        comparison = self._compare_output_report("ppsspp")["comparison"]
+        self.assertEqual(comparison["classification"], "MATCH")
+        self.assertFalse(comparison["acceptance_eligible"])
+        self.assertIn(
+            "psp: stream declares source='ppsspp', not 'psp'",
+            comparison["acceptance_blockers"],
+        )
+
+    def test_compare_cli_closes_acceptance_for_placeholder_device_identity(self) -> None:
+        comparison = self._compare_output_report(
+            "psp", device_binary_sha="0" * 64, device_source_commit="0" * 40
+        )["comparison"]
+        self.assertFalse(comparison["acceptance_eligible"])
+        self.assertEqual(comparison["SOURCE_COMMIT_BINDING"], "PLACEHOLDER")
+        self.assertIn("IDENTITY_NOT_BOUND", " | ".join(comparison["DEVICE_IDENTITY_BLOCKERS"]))
+
+    def test_run_command_retains_stdout_beyond_64k_on_exit_and_timeout(self) -> None:
+        large_stdout = "x" * 65536 + "NAKAGAWA_PSP_META schema=1 source=psp\n"
+        large_stderr = "e" * 65536 + "final diagnostic\n"
+        with patch(
+            "psp_oracle.run_psplink.subprocess.run",
+            return_value=SimpleNamespace(
+                returncode=0, stdout=large_stdout, stderr=large_stderr
+            ),
+        ):
+            code, stdout, stderr, status = _run_command(["synthetic"], 1)
+        self.assertEqual((code, status), (0, "PROCESS_EXITED"))
+        self.assertEqual(stdout, large_stdout)
+        self.assertEqual(stderr, large_stderr)
+
+        timeout = subprocess.TimeoutExpired(
+            ["synthetic"], 1, output=large_stdout.encode(), stderr=large_stderr.encode()
+        )
+        with patch("psp_oracle.run_psplink.subprocess.run", side_effect=timeout):
+            code, stdout, stderr, status = _run_command(["synthetic"], 1)
+        self.assertEqual((code, status), (None, "TIMEOUT"))
+        self.assertEqual(stdout, large_stdout)
+        self.assertEqual(stderr, large_stderr)
+
+    def test_resumed_campaign_case_resets_before_first_launch(self) -> None:
+        runner = PsplinkCampaignRunner(
+            SimpleNamespace(), console_model="synthetic", source_commit="0" * 40
+        )
+        case = SimpleNamespace(case_id="resumed-case", binary=Path("resumed.prx"), timeout=1.0)
+        phases: list[str] = []
+        with patch.object(runner, "_hardware_lock_held", return_value=True), patch.object(
+            runner, "_reset_once", return_value=False
+        ) as reset:
+            runner._run_case(
+                case,
+                case_index=1,
+                local_index=0,
+                cases=[case],
+                host0_path=None,
+                progress=SimpleNamespace(),
+                reset_between_cases=True,
+                stop_on_incomplete=True,
+                on_case_start=lambda _index, _case, phase: phases.append(phase),
+                on_case_complete=None,
+            )
+        reset.assert_called_once_with("campaign soft reset before resumed-case")
+        self.assertEqual(phases, ["RESET_BEFORE_CASE"])
+
+    def test_failed_reset_before_a_resumed_first_case_names_no_queued_case(self) -> None:
+        runner = PsplinkCampaignRunner(
+            SimpleNamespace(), console_model="synthetic", source_commit="0" * 40
+        )
+        first = SimpleNamespace(case_id="resumed-case", binary=Path("resumed.prx"), timeout=1.0)
+        last = SimpleNamespace(case_id="last-queued-case", binary=Path("last.prx"), timeout=1.0)
+
+        def failed_reset(_detail: str) -> bool:
+            runner._physical_intervention("synthetic reset failure")
+            return False
+
+        with patch.object(runner, "_hardware_lock_held", return_value=True), patch.object(
+            runner, "_reset_once", side_effect=failed_reset
+        ):
+            kept_going = runner._run_case(
+                first,
+                case_index=3,
+                local_index=0,
+                cases=[first, last],
+                host0_path=None,
+                progress=SimpleNamespace(),
+                reset_between_cases=True,
+                stop_on_incomplete=True,
+                on_case_start=None,
+                on_case_complete=None,
+            )
+        self.assertFalse(kept_going)
+        self.assertEqual(runner.terminal_reason, "PHYSICAL_INTERVENTION_REQUIRED")
+        # The case before a resumed first case ran in an earlier run; no case in
+        # this run's list was launched, so none is named.
+        self.assertIsNone(runner.intervention_case_id)
+        self.assertEqual(runner.resume_case_index, 3)
+
+    def test_reset_campaign_case_verifies_and_removes_host0_roundtrip_file(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(
+            prefix="campaign-roundtrip-", dir=root / "tests" / "fixtures" / "psp_oracle"
+        ) as name:
+            host0_root = Path(name)
+            binary = host0_root / "later.prx"
+            binary.write_bytes(STAGED_PRX)
+            roundtrip = host0_root / "nakagawa_transport_write.bin"
+            roundtrip.write_bytes(bytes(
+                (0x5A ^ (index * 0x25 + (index >> 3))) & 0xFF
+                for index in range(64)
+            ))
+            prior = SimpleNamespace(case_id="prior-case", binary=binary, timeout=1.0)
+            case = SimpleNamespace(case_id="later-case", binary=binary, timeout=1.0)
+            runner = PsplinkCampaignRunner(
+                SimpleNamespace(host0_root=host0_root),
+                console_model="synthetic",
+                source_commit="0" * 40,
+            )
+            host0_text = "NAKAGAWA_PSP_COMPLETE schema=1 status=PASS\n"
+            with patch.object(runner, "_hardware_lock_held", return_value=True), patch.object(
+                runner, "_reset_once", return_value=True
+            ), patch.object(runner, "_take_baseline", return_value=(object(), None)), patch.object(
+                runner, "_take_snapshot", return_value=(object(), None)
+            ), patch.object(
+                runner, "_request", side_effect=[
+                    (0, "UID: 0x00000008", "", "PROCESS_EXITED"),
+                    (0, "", "", "PROCESS_EXITED"),
+                ]
+            ), patch.object(
+                runner, "_module_threads", return_value=(frozenset(), None)
+            ), patch.object(
+                runner, "_unload_status", return_value="PASS"
+            ), patch.object(
+                runner, "_settle_after_unload", return_value=("PASS", 1)
+            ), patch.object(
+                runner, "_shell_qualified", return_value=True
+            ), patch.object(
+                runner, "_probe_case_succeeded", return_value=True
+            ), patch(
+                "psp_oracle.run_psplink._wait_for_host0_output",
+                return_value=(host0_text, time.time_ns()),
+            ), patch(
+                "psp_oracle.run_psplink.evaluate_teardown_snapshots",
+                return_value={"status": "PASS", "issues": [], "recovery_eligible": False},
+            ), patch.object(
+                runner, "_envelope", return_value={"CASE_ID": "later-case"}
+            ), patch.object(
+                runner, "_verify_host0_roundtrip", wraps=runner._verify_host0_roundtrip
+            ) as verify_roundtrip:
+                kept_going = runner._run_case(
+                    case,
+                    case_index=1,
+                    local_index=1,
+                    cases=[prior, case],
+                    host0_path=host0_root,
+                    progress=SimpleNamespace(),
+                    reset_between_cases=True,
+                    stop_on_incomplete=True,
+                    on_case_start=None,
+                    on_case_complete=None,
+                )
+            self.assertTrue(kept_going)
+            verify_roundtrip.assert_called_once_with()
+            self.assertFalse(roundtrip.exists())
+
+    def test_campaign_plan_exprint_status_reports_the_command_status(self) -> None:
+        before = PsplinkSnapshot(
+            threads=frozenset({("0x00000001", "PspLink")}),
+            memory_free_bytes=(),
+            modules=frozenset({("0x00000003", "PspLink")}),
+        )
+        report = evaluate_teardown_snapshots(
+            before,
+            before,
+            before,
+            "0x00000008",
+            frozenset(),
+            unload_confirmed=True,
+            sentinel_status="PASS",
+            shell_qualified=True,
+            host0_roundtrip=True,
+            exprint_command_status="PROCESS_EXITED",
+        )
+        self.assertEqual(report["exprint_status"], "PROCESS_EXITED")
+
     def test_dmac_host0_capture_uses_the_runner_validation_path(self) -> None:
         args = SimpleNamespace(
             validate_dmac_size_matrix=True,
@@ -1771,7 +2385,74 @@ class PspOracleRunnerTests(unittest.TestCase):
         report = _validate_host0_capture(dmac_matrix_stream(), args)
         self.assertEqual(report["classification"], "PASS")
         self.assertEqual(report["test_record_count"], 16)
-        self.assertTrue(report["acceptance_eligible"])
+        self.assertFalse(report["acceptance_eligible"])
+        self.assertIn("IDENTITY_NOT_BOUND", " | ".join(report["acceptance_blockers"]))
+
+    def test_campaign_parse_cache_validates_each_identical_stream_once(self) -> None:
+        from psp_oracle import run_psplink
+
+        text = META.format(
+            source="psp",
+            model="PSP-3000",
+            firmware="6.61-ARK",
+            binary="0" * 64,
+            commit="0" * 40,
+        ) + "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id=model-profile status=PASS result=0x3 out0=0x3 out1=0x06060110 out2=0xde\n"
+        text += "NAKAGAWA_PSP_COMPLETE schema=1 status=PASS\n"
+        records = text.split("NAKAGAWA_PSP_COMPLETE", 1)[0]
+        normalized = run_psplink._normalise_unbound_identity_fields(records)
+        cache_clear = getattr(run_psplink._parse_campaign_records, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
+        original = run_psplink._validate_campaign_contract
+        with patch.object(
+            run_psplink, "_validate_campaign_contract", wraps=original
+        ) as validate:
+            self.assertTrue(run_psplink._campaign_stream_complete(text, "model-profile"))
+            run_psplink._parse_campaign_records(normalized, "model-profile")
+        self.assertEqual(validate.call_count, 1)
+        if cache_clear is not None:
+            cache_clear()
+
+    def test_canonicalization_and_identity_share_one_binary_hash_per_args(self) -> None:
+        from psp_oracle import run_psplink
+
+        with tempfile.TemporaryDirectory(prefix="binary-hash-cache-") as name:
+            args = identity_args(Path(name))
+            text = device_identity_stream(binary="0" * 64, commit="0" * 40)
+            with patch.object(
+                run_psplink,
+                "_host_binary_sha256",
+                wraps=run_psplink._host_binary_sha256,
+            ) as hash_binary:
+                run_psplink._device_identity(text, args)
+                run_psplink._canonicalize_psp(text, args)
+                run_psplink._canonicalize_psp(text, args)
+            self.assertEqual(hash_binary.call_count, 1)
+
+    def test_progress_detail_ignores_an_unterminated_final_step(self) -> None:
+        from psp_oracle import run_psplink
+
+        text = (
+            "NAKAGAWA_PSP_STEP schema=1 case_id=registry-readonly step=last-complete\n"
+            "NAKAGAWA_PSP_STEP schema=1 case_id=registry-readonly step=partial"
+        )
+        detail = run_psplink._host0_progress_detail(text, 2_000_000_000, 1_000_000_000)
+        self.assertIn("last step marker: last-complete", detail)
+        self.assertNotIn("partial", detail)
+
+    def test_dmac_host0_readiness_derives_its_record_count_from_protocol(self) -> None:
+        from psp_oracle import run_psplink
+
+        nine_sizes = tuple(range(9))
+        with patch.object(
+            run_psplink, "DMAC_SIZE_MATRIX_SIZES", nine_sizes, create=True
+        ), patch.object(
+            run_psplink, "_canonicalize_psp", side_effect=lambda text, _args: text
+        ), patch.object(
+            run_psplink, "parse_output", return_value=SimpleNamespace(results=[None] * 18)
+        ):
+            self.assertTrue(run_psplink._host0_capture_complete("synthetic", SimpleNamespace()))
 
     def test_capture_records_distinguish_result_skip_and_no_record(self) -> None:
         self.assertEqual(_record_summary("transport only\n"), ("NO_RECORD", 0))
@@ -1982,6 +2663,63 @@ class PspOracleRunnerTests(unittest.TestCase):
         self.assertIn("nakagawa_psp_oracle_sum_u32", text)
         self.assertNotIn("NAKAGAWA_PSP_TEST", text)
 
+    def test_smoke_builder_looks_up_symbols_through_analyze_elf(self) -> None:
+        from psp_oracle import build_nakagawa_smoke  # noqa: PLC0415
+
+        strings = b"\0target\0"
+        def fake_elf(addresses):
+            symbols = bytearray(16 * (len(addresses) + 1))
+            for index, address in enumerate(addresses, 1):
+                struct.pack_into("<IIIBBH", symbols, 16 * index, 1, address, 4, 0x12, 0, 1)
+            data = bytes(symbols) + strings
+
+            class FakeElf:
+                def __init__(self, _path):
+                    self.data = data
+
+                def sec(self, name):
+                    return {
+                        ".symtab": {"off": 0, "size": len(symbols), "entsz": 16},
+                        ".strtab": {"off": len(symbols), "size": len(strings)},
+                    }.get(name)
+
+            return FakeElf(Path("synthetic.elf"))
+
+        with patch.object(build_nakagawa_smoke.analyze, "Elf", side_effect=[
+            fake_elf([0x08801234]), fake_elf([0x08801234, 0x08805678])
+        ]):
+            self.assertEqual(
+                build_nakagawa_smoke._symbol_address(Path("synthetic.elf"), "target"),
+                0x08801234,
+            )
+            with self.assertRaisesRegex(ValueError, "expected one target function, found 2"):
+                build_nakagawa_smoke._symbol_address(Path("synthetic.elf"), "target")
+
+    def test_smoke_builder_does_not_write_unused_absolute_path_manifest(self) -> None:
+        from psp_oracle import build_nakagawa_smoke  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory(prefix="smoke-builder-") as scratch:
+            root = Path(scratch)
+            elf = root / "guest.elf"
+            elf.write_bytes(b"synthetic source ELF")
+            out_dir = root / "out"
+
+            def build_chunks(command, **_kwargs):
+                base = Path(command[3])
+                base.with_name("smoke_recomp_funcs.h").write_text(
+                    "void f_08800000(CpuState *s);\n", encoding="utf-8"
+                )
+                base.with_name("smoke_recomp_0.c").write_text("/* synthetic */\n", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch.object(build_nakagawa_smoke, "_symbol_address", return_value=0x08800000), \
+                 patch.object(build_nakagawa_smoke.subprocess, "run", side_effect=build_chunks):
+                self.assertEqual(
+                    build_nakagawa_smoke.main(["--elf", str(elf), "--out-dir", str(out_dir)]),
+                    0,
+                )
+            self.assertFalse((out_dir / "smoke_manifest.json").exists())
+
     def test_oracle_capture_launcher_preserves_child_stdout(self) -> None:
         # The capture holds exactly the child's stdout bytes (no newline translation, no
         # stderr), and the launcher returns the child's exit code.
@@ -1999,6 +2737,30 @@ class PspOracleRunnerTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), b"NAKAGAWA_PSP_TEST a=1\r\nrow 2\n\x00end")
         self.assertEqual(completed.stdout, b"")
         self.assertIn(b"not a record", completed.stderr)
+
+    def test_oracle_capture_launchers_report_timeout_and_preserve_partial_stdout(self) -> None:
+        from psp_oracle import run_nakagawa, run_nakagawa_vfpu  # noqa: PLC0415
+
+        for launcher in (run_nakagawa, run_nakagawa_vfpu):
+            with self.subTest(launcher=launcher.__name__), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                exe = root / "synthetic.exe"
+                exe.write_bytes(b"synthetic executable")
+                output = root / "partial.txt"
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch.object(sys, "argv", [
+                    launcher.__name__, "--executable", str(exe), "--output", str(output),
+                    "--timeout", "3", "--", "arg",
+                ]), patch.object(
+                    launcher.subprocess, "run",
+                    side_effect=subprocess.TimeoutExpired(
+                        "synthetic.exe", 3, output=b"partial record\n"
+                    ),
+                ) as run, redirect_stdout(stdout), redirect_stderr(stderr):
+                    self.assertEqual(launcher.main(), 124)
+                self.assertEqual(output.read_bytes(), b"partial record\n")
+                self.assertIn("TIMEOUT", stderr.getvalue())
+                self.assertEqual(run.call_args.kwargs["timeout"], 3.0)
 
 
 class PspLinkTeardownSnapshotTests(unittest.TestCase):
@@ -2273,7 +3035,7 @@ class PspLinkTeardownSnapshotTests(unittest.TestCase):
             exprint_command_status="PROCESS_EXITED",
         )
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(report["exprint_status"], "NOT_RUN")
+        self.assertEqual(report["exprint_status"], "PROCESS_EXITED")
         self.assertEqual(report["exprint_command_status"], "PROCESS_EXITED")
 
     def test_three_snapshot_check_reports_allocator_drift_without_failing_teardown(self) -> None:
@@ -3732,10 +4494,10 @@ class PspDmacProbeTests(unittest.TestCase):
         """`status` stays probe-source prose; the hardware tier comes from the cited run."""
         manifest = self._oracle_manifest()
         by_id = {entry["id"]: entry for entry in manifest["tests"]}
-        for test_id in ("PSP-FPU-001", "PSP-CACHE-001"):
+        for test_id in ("PSP-FPU-001", "PSP-GE-001", "PSP-MUTEX-001", "PSP-CACHE-001"):
             self.assertEqual(
                 by_id[test_id]["status"],
-                "implemented" if test_id == "PSP-CACHE-001" else "planned",
+                "implemented",
             )
             self.assertEqual(by_id[test_id]["hardware_evidence"], "MEASURED")
             self.assertEqual(
@@ -4063,7 +4825,7 @@ class PspDmacProbeTests(unittest.TestCase):
                 if test_id in {"PSP-AUDIO-001", "PSP-GE-001"}:
                     self.assertEqual(
                         entry["status"],
-                        "implemented" if test_id == "PSP-AUDIO-001" else "planned",
+                        "implemented",
                     )
                     self.assertEqual(entry["hardware_evidence"], "MEASURED")
                     self.assertEqual(entry["evidence_cases"], entry["case_ids"])
@@ -4492,6 +5254,23 @@ class UserModeImportGateTests(unittest.TestCase):
         status, out, _err = self._run_main(data)
         self.assertEqual(status, user_mode_imports.EXIT_OK)
         self.assertIn("kernel-mode module (SceModuleInfo attribute 0x1000)", out)
+
+    def test_kernel_mode_registry_driver_import_fails_closed(self) -> None:
+        data = build_import_elf(
+            [("sceReg_driver", [0x17768E14])],
+            module_attributes=user_mode_imports.PSP_MODULE_KERNEL,
+        )
+        result = user_mode_imports.check_module(data)
+        self.assertFalse(result.passed)
+        self.assertEqual(
+            [(violation.library, violation.nids) for violation in result.violations],
+            [("sceReg_driver", (0x17768E14,))],
+        )
+        status, out, err = self._run_main(data)
+        self.assertEqual(status, user_mode_imports.EXIT_KERNEL_IMPORT)
+        self.assertEqual(out, "")
+        self.assertIn("sceReg_driver", err)
+        self.assertIn("sceRegSetKeyValue", err)
 
     def test_unattributed_stub_slots_fail_closed(self) -> None:
         user_shape = [(name.replace("ForKernel", "ForUser"), first, count)
@@ -7600,22 +8379,25 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
                 self.assertNotIn("NULL is the only invalid pointer", other["risk"])
 
     def test_manual_campaign_refuses_retired_null_out_case(self) -> None:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(self.h.root / "tools" / "psp_oracle" / "run_psplink.py"),
-                "--campaign-case", f"{self.NULL_CASE}=not-present.prx",
-                "--source-commit", "0" * 40,
-                "--model", "PSP-3000",
-                "--firmware", "6.6.1",
-                "--host0-root", str(self.h.fixture),
-                "--session-id", "test-retired-case",
-            ],
-            cwd=self.h.root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        build_root = self.h.fixture / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="retired-case-", dir=build_root) as scratch:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(self.h.root / "tools" / "psp_oracle" / "run_psplink.py"),
+                    "--campaign-case", f"{self.NULL_CASE}=not-present.prx",
+                    "--source-commit", "0" * 40,
+                    "--model", "PSP-3000",
+                    "--firmware", "6.6.1",
+                    "--host0-root", scratch,
+                    "--session-id", "test-retired-case",
+                ],
+                cwd=self.h.root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("retired and cannot be scheduled", completed.stderr)
         self.assertNotIn("campaign PRX is missing", completed.stderr)

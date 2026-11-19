@@ -114,6 +114,15 @@ static int test_theme_tokens(void) {
     CHECK(theme->warning == 0xDBB024FFu, "warning gold token");
     CHECK(theme->ink == 0x10151CFFu && theme->paper == 0xF5F7FAFFu,
           "N1 ink and paper tokens");
+    /* The type scale lists only tracking the measure and the draw apply: they
+       drop a negative letter spacing, so TITLE_XL's design value is 0
+       (docs/PLAYER_UI_DESIGN.md), not the -0.01 em that was never drawn. */
+    for (int role = 0; role < (int)NK_UI_TYPE_COUNT; ++role) {
+        CHECK(nk_ui_type((NkUiTypeRole)role, 0u).letter_spacing >= 0.0f,
+              "no type role lists a negative letter spacing");
+    }
+    CHECK(nk_ui_type(NK_UI_TYPE_TITLE_XL, 0u).letter_spacing == 0.0f,
+          "TITLE_XL has no tracking, as the design table says");
     return 1;
 }
 
@@ -231,6 +240,278 @@ static int text_size_runs(const NkUiDrawList *list, uint32_t id) {
         if (list->cmd[i].element_id == id && list->cmd[i].kind == NK_UI_DRAW_TEXT) ++runs;
     }
     return runs;
+}
+
+/* A text backend that measures as a font engine does: each character advances the pen by a
+   fraction of a pixel (a space and a narrow letter about a quarter of the size, any other
+   character about half), and a run's width is the whole pixels of the sum. */
+static NkUiTextSize whole_pixel_measure(void *user, int font, int px, const char *text,
+                                        size_t length) {
+    NkUiTextSize measured = {0.0f, 0.0f, 0.0f};
+    float pen = 0.0f;
+    (void)user;
+    (void)font;
+    if (text == NULL || px <= 0) return measured;
+    for (size_t i = 0u; i < length; ++i) {
+        unsigned char c = (unsigned char)text[i];
+        if ((c & 0xC0u) == 0x80u) continue;
+        pen += (c == ' ' ? 0.25f : c != 0u && strchr("iljtf.,;'", (int)c) != NULL ? 0.24f : 0.52f) *
+               (float)px;
+    }
+    measured.width = floorf(pen);
+    measured.height = (float)px;
+    measured.baseline = (float)px * 0.8f;
+    return measured;
+}
+
+/* One frame, laid out twice: `text` as card text in a column `width` px wide (element 7),
+   and as one line in a box that fits it (element 9). */
+static const NkUiDrawList *wrapped_lines_frame(NkUi *ui, const char *text, float width) {
+    NkUiViewport viewport;
+    NkUiLayout layout;
+    NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+    NkUiTextStyle line = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+    const NkUiDrawList *list = NULL;
+    line.wrap = false;
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.pixel_w = 1600;
+    viewport.pixel_h = 400;
+    viewport.display_scale = 1.0f;
+    viewport.ui_scale_pct = 100;
+    viewport.text_size_pct = 100;
+    nk_ui_set_viewport(ui, &viewport);
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 37.0);
+        memset(&layout, 0, sizeof(layout));
+        layout.width = (NkUiSizing){NK_UI_SIZE_GROW, 0.0f, 0.0f, 0.0f};
+        layout.height = (NkUiSizing){NK_UI_SIZE_GROW, 0.0f, 0.0f, 0.0f};
+        layout.direction = NK_UI_LAYOUT_COLUMN;
+        layout.gap = 10.0f;
+        if (!nk_ui_begin_container(ui, 1u, &layout, NULL)) return NULL;
+        memset(&layout, 0, sizeof(layout));
+        layout.width = (NkUiSizing){NK_UI_SIZE_FIXED, width, 0.0f, 0.0f};
+        layout.height = (NkUiSizing){NK_UI_SIZE_FIT, 0.0f, 0.0f, 0.0f};
+        layout.direction = NK_UI_LAYOUT_COLUMN;
+        if (nk_ui_begin_container(ui, 6u, &layout, NULL)) {
+            nk_ui_text(ui, 7u, text, &body);
+            nk_ui_end_container(ui);
+        }
+        memset(&layout, 0, sizeof(layout));
+        layout.width = (NkUiSizing){NK_UI_SIZE_FIT, 0.0f, 0.0f, 0.0f};
+        layout.height = (NkUiSizing){NK_UI_SIZE_FIT, 0.0f, 0.0f, 0.0f};
+        layout.direction = NK_UI_LAYOUT_ROW;
+        if (nk_ui_begin_container(ui, 8u, &layout, NULL)) {
+            nk_ui_text(ui, 9u, text, &line);
+            nk_ui_end_container(ui);
+        }
+        nk_ui_end_container(ui);
+        list = nk_ui_end(ui);
+    }
+    return list;
+}
+
+/* Wrapped text stays inside its box, and a one-line run's box is as wide as the run (review of
+   #2644). The layout adds a run up word by word, and a backend that measures in whole pixels
+   drops a fraction with every word and every space measured alone: the sum fell short of the
+   line as drawn, by 8 px for a ten-word line of 14 px type, so a line was kept that ran past
+   its box into the padding beside it, and a one-line run got a box narrower than its glyphs.
+   Each paragraph is wrapped at every width from 150 to 420 px. No line may measure wider than
+   the column, the lines together are the paragraph, and the paragraph takes as many lines as
+   nk_ui_text_clamp, which measures each line whole, says it needs (one more is allowed where
+   a word fits a line only without the space after it, which the layout counts). The last
+   paragraph is longer than the layout measures a word in (256 bytes of its line): there each
+   128-byte step of that context may shift the sum by a pixel either way, so its lines get
+   2 px, its line count one either way, and its one-line box a pixel a step. */
+static int test_wrapped_lines_fit_their_box(void) {
+    static const char *const paragraphs[] = {
+        "The game's speed and frame rate in a corner, over its HUD.",
+        "Library-wide for Enhanced and Ace; Authentic ignores it, and each game's part choices win.",
+        "More triangles per curved patch. Slower; alters GE timing; the game receives changed "
+        "pictures.",
+        "Ultra is used in Enhanced and Ace, with crisp text, FSR 1 and full 32-bit colour on. "
+        "Authentic uses your settings. This build smooths only 30 FPS games. The choice here "
+        "applies when this game's 60 FPS game logic is off. Shows more 3D space; HUD stays "
+        "shaped. Some objects pop in. It is still the same game, if a little wider than it was.",
+    };
+    NkUiConfig config;
+    NkUiTextBackend whole = nk_ui_text_fixed();
+    NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+    NkUi *ui;
+    whole.measure = whole_pixel_measure;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &whole;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create a context that measures in whole pixels");
+    for (size_t p = 0u; p < sizeof(paragraphs) / sizeof(paragraphs[0]); ++p) {
+        const size_t length = strlen(paragraphs[p]);
+        const float line_width = whole_pixel_measure(NULL, 0, body.size_px, paragraphs[p],
+                                                     length).width;
+        const bool in_context = length <= 256u;
+        const float line_slack = in_context ? 0.0f : 2.0f;
+        const float box_slack = in_context ? 0.0f : (float)(length / 128u);
+        for (int width = 150; width <= 420; ++width) {
+            const NkUiDrawList *list = wrapped_lines_frame(ui, paragraphs[p], (float)width);
+            char joined[512];
+            size_t used = 0u;
+            int lines = 0;
+            int needed = 1;
+            CHECK(list != NULL, "lay out the wrapped paragraph");
+            for (uint32_t i = 0u; i < list->ncmd; ++i) {
+                const NkUiDrawCmd *cmd = &list->cmd[i];
+                const NkUiTextRun *run = cmd->kind == NK_UI_DRAW_TEXT
+                                             ? (const NkUiTextRun *)cmd->custom : NULL;
+                float measured;
+                if (run == NULL || run->text == NULL) continue;
+                measured = whole_pixel_measure(NULL, run->font, run->size_px, run->text,
+                                               run->length).width;
+                if (cmd->element_id == 9u) {
+                    if ((float)(cmd->bounds[2] - cmd->bounds[0]) < line_width - box_slack ||
+                        (float)(cmd->bounds[2] - cmd->bounds[0]) > line_width + 1.0f + box_slack) {
+                        fprintf(stderr,
+                                "FAIL: a one-line run %.0f px wide has a box %d px wide: "
+                                "\"%s\"\n", (double)line_width,
+                                cmd->bounds[2] - cmd->bounds[0], paragraphs[p]);
+                        nk_ui_destroy(ui);
+                        return 0;
+                    }
+                    continue;
+                }
+                if (cmd->element_id != 7u) continue;
+                if (measured > (float)width + line_slack) {
+                    fprintf(stderr,
+                            "FAIL: in a %d px column the wrapped line \"%.*s\" is %.0f px "
+                            "wide\n", width, (int)run->length, run->text, (double)measured);
+                    nk_ui_destroy(ui);
+                    return 0;
+                }
+                if (used + run->length + 2u < sizeof(joined)) {
+                    if (lines > 0) joined[used++] = ' ';
+                    memcpy(joined + used, run->text, run->length);
+                    used += run->length;
+                }
+                ++lines;
+            }
+            joined[used] = '\0';
+            while (used > 0u && joined[used - 1u] == ' ') joined[--used] = '\0';
+            CHECK(strcmp(joined, paragraphs[p]) == 0,
+                  "the wrapped lines together are the paragraph");
+            while (needed < 40 &&
+                   strcmp(nk_ui_text_clamp(ui, paragraphs[p], &body, (float)width, needed),
+                          paragraphs[p]) != 0) {
+                ++needed;
+            }
+            if (lines < needed - (in_context ? 0 : 1) || lines > needed + 1) {
+                fprintf(stderr,
+                        "FAIL: in a %d px column the paragraph wraps to %d lines where "
+                        "nk_ui_text_clamp counts %d: \"%s\"\n", width, lines, needed,
+                        paragraphs[p]);
+                nk_ui_destroy(ui);
+                return 0;
+            }
+        }
+    }
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* Each measure the layout asks of the backend, in order (audit 2026-11-17). */
+#define MEASURE_LOG_CAP 4096
+static struct {
+    const char *text;
+    size_t length;
+} g_measure_log[MEASURE_LOG_CAP];
+static size_t g_measure_count;
+
+static NkUiTextSize logging_measure(void *user, int font, int px, const char *text,
+                                    size_t length) {
+    if (g_measure_count < MEASURE_LOG_CAP) {
+        g_measure_log[g_measure_count].text = text;
+        g_measure_log[g_measure_count].length = length;
+    }
+    ++g_measure_count;
+    return whole_pixel_measure(user, font, px, text, length);
+}
+
+/* The word measure of a long paragraph after a line break (audit 2026-11-17). F-5843d890: a
+   word slice was measured twice in a row, once to test its width and once more as the word
+   alone. F-a2c8c85a: to place the grid its measuring starts on, every word read back to the
+   start of its paragraph, so a long paragraph cost its length for each of its words; the grid
+   is now the run's, found within the measuring context. Here the run starts with a short line,
+   so the paragraph's grid and the run's differ: a word starts at byte 129 of the run, just
+   after the run's grid point 128 and before the paragraph's, 132. Every measure of text that
+   holds a space starts at the start of a line, or at the first word at or after a point of
+   the run's 128-byte grid. */
+static int test_word_measure_reads_a_bounded_context(void) {
+    char text[640];
+    NkUiConfig config;
+    NkUiTextBackend logging = nk_ui_text_fixed();
+    NkUi *ui;
+    const char *base = NULL;
+    size_t used;
+    size_t gridded = 0u;
+    memcpy(text, "Hi.\n", 4u);
+    used = 4u;
+    /* Words of seven letters and a space start at 4 + 8k; one of four letters at byte 124
+       puts the next word start at 129, and the rest at 129 + 8k. */
+    while (used < 600u) {
+        const char *word = used == 124u ? "abcd " : "abcdefg ";
+        memcpy(text + used, word, strlen(word));
+        used += strlen(word);
+    }
+    text[used - 1u] = '.';
+    text[used] = '\0';
+    CHECK(text[128] == ' ' && text[129] != ' ', "a word of the paragraph starts at byte 129");
+    logging.measure = logging_measure;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &logging;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create a context that logs its measures");
+    g_measure_count = 0u;
+    CHECK(wrapped_lines_frame(ui, text, 300.0f) != NULL, "lay out the two-line run");
+    CHECK(g_measure_count > 0u && g_measure_count <= MEASURE_LOG_CAP, "the measures fit the log");
+    for (size_t i = 0u; i < g_measure_count; ++i) {
+        if (g_measure_log[i].length >= 3u && memcmp(g_measure_log[i].text, "Hi.", 3u) == 0 &&
+            (base == NULL || g_measure_log[i].text < base)) {
+            base = g_measure_log[i].text;
+        }
+    }
+    CHECK(base != NULL, "the run's first word is measured from its start");
+    for (size_t i = 0u; i < g_measure_count; ++i) {
+        const char *start = g_measure_log[i].text;
+        size_t offset;
+        size_t grid;
+        bool first_word = true;
+        if (i > 0u && start == g_measure_log[i - 1u].text &&
+            g_measure_log[i].length == g_measure_log[i - 1u].length && start >= base &&
+            start < base + used && g_measure_log[i].length > 1u) {
+            fprintf(stderr, "FAIL: the slice at byte %zu is measured twice in a row\n",
+                    (size_t)(start - base));
+            nk_ui_destroy(ui);
+            return 0;
+        }
+        if (start < base || start >= base + used ||
+            memchr(start, ' ', g_measure_log[i].length) == NULL ||
+            start == base || start[-1] == '\n') {
+            continue;
+        }
+        offset = (size_t)(start - base);
+        grid = offset / 128u * 128u;
+        for (size_t t = grid; t < offset; ++t) {
+            if (t > 0u && base[t - 1u] == ' ') first_word = false;
+        }
+        if (start[-1] != ' ' || !first_word) {
+            fprintf(stderr, "FAIL: a measure starts at byte %zu, not at the first word after "
+                    "the run's grid point %zu\n", offset, grid);
+            nk_ui_destroy(ui);
+            return 0;
+        }
+        ++gridded;
+    }
+    CHECK(gridded > 0u, "words past the context are measured from a grid point");
+    nk_ui_destroy(ui);
+    return 1;
 }
 
 /* The text size scales type only: the glyphs, their measured width, the line
@@ -379,13 +660,28 @@ static int test_typed_prefs_and_events(void) {
           NK_UI_REPEAT_SLOW != NK_UI_REPEAT_FAST, "repeat rates are distinct");
     prefs.prompt_style = NK_UI_PROMPT_KEYCAPS;
     prefs.repeat = NK_UI_REPEAT_FAST;
-    event.type = NK_UI_EV_NAV;
+    event.type = NK_UI_EV_TAB;
     event.dir = NK_UI_DIR_LEFT;
     event.pad_family = NK_UI_PAD_LETTERS_A_EAST;
+    event.down = true; /* a press of a shoulder button: the screen takes it */
     ui = nk_ui_create(NULL);
     CHECK(ui != NULL, "create context for typed prefs");
+    CHECK(nk_ui_prompt_style(ui) == NK_UI_PROMPT_NEUTRAL, "a new context starts with neutral prompts");
     nk_ui_set_prefs(ui, &prefs);
+    CHECK(nk_ui_prompt_style(ui) == NK_UI_PROMPT_KEYCAPS, "the prefs set the prompt style");
     nk_ui_push_event(ui, &event);
+    {
+        NkUiNavDir dir = NK_UI_DIR_NONE;
+        bool took;
+        nk_ui_begin(ui, 0.0);
+        took = nk_ui_take_event(ui, NK_UI_EV_TAB, &dir);
+        (void)nk_ui_end(ui);
+        CHECK(took && dir == NK_UI_DIR_LEFT, "the pushed event is queued with its direction");
+        nk_ui_begin(ui, 0.1);
+        took = nk_ui_take_event(ui, NK_UI_EV_TAB, &dir);
+        (void)nk_ui_end(ui);
+        CHECK(!took, "a taken event is gone");
+    }
     nk_ui_destroy(ui);
     return 1;
 }
@@ -1398,7 +1694,8 @@ static int test_focus_ring_moves(void) {
 static int draw_tab_bar(NkUi *ui, double now_s, int active) {
     const NkUiTheme *theme = nk_ui_theme_n1();
     const NkUiSection sections[] = {
-        {"Library", false, 0u}, {"Settings", active == 1, 0u}, {"Controller", active == 2, 0u}
+        {"Library", false, 0u, 0u}, {"Settings", active == 1, 0u, 0u},
+        {"Controller", active == 2, 0u, 0u}
     };
     const NkUiDrawList *list;
     uint32_t i;
@@ -1694,6 +1991,18 @@ static int test_layout_debug(void) {
     CHECK(nk_ui_dump(ui, dump, sizeof(dump)) < sizeof(dump) &&
               strstr(dump, "nk_ui.container") != NULL,
           "the inspector lists the layout's elements");
+    CHECK(nk_ui_layout_debug(ui), "the inspector reads on");
+    /* Audit F-0ce70310: the panel's own close button (its x, 20 px square, 10 px in
+       from the window's top right corner) turns it off, and the host can read that. */
+    push_pointer(ui, 620.0f, 15.0f, false);
+    (void)draw_button_pair(ui, 10u, 0u);
+    push_pointer(ui, 620.0f, 15.0f, true);
+    (void)draw_button_pair(ui, 10u, 0u);
+    push_pointer(ui, 620.0f, 15.0f, false);
+    (void)draw_button_pair(ui, 10u, 0u);
+    CHECK(!nk_ui_layout_debug(ui), "the panel's close button turns the inspector off");
+    nk_ui_set_layout_debug(ui, true);
+    for (frame = 0; frame < 2; ++frame) (void)draw_button_pair(ui, 10u, 0u);
     nk_ui_set_layout_debug(ui, false);
     for (frame = 0; frame < 2; ++frame) (void)draw_button_pair(ui, 10u, 0u);
     (void)nk_ui_dump(ui, dump, sizeof(dump));
@@ -1797,6 +2106,199 @@ static size_t png_header_only(uint8_t *out, uint32_t w, uint32_t h) {
     out[24] = 8u; out[25] = 6u; out[26] = 0u; out[27] = 0u; out[28] = 0u;
     memset(out + 29, 0, 4u); /* CRC, not checked by the header read */
     return 33u;
+}
+
+/* PNG building for the decoder bounds: chunks with their CRC, and zlib streams
+   (stored, or fixed-Huffman runs of one repeated byte) with their Adler-32. */
+static uint32_t png_crc(const uint8_t *data, size_t length, uint32_t crc) {
+    size_t i;
+    int bit;
+    for (i = 0; i < length; ++i) {
+        crc ^= data[i];
+        for (bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return crc;
+}
+
+static size_t png_put_be32(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)(value >> 24); out[1] = (uint8_t)(value >> 16);
+    out[2] = (uint8_t)(value >> 8); out[3] = (uint8_t)value;
+    return 4u;
+}
+
+static size_t png_chunk(uint8_t *out, const char *type, const uint8_t *data, uint32_t length) {
+    uint32_t crc;
+    png_put_be32(out, length);
+    memcpy(out + 4, type, 4u);
+    if (length != 0u) memcpy(out + 8, data, length);
+    crc = png_crc(out + 4, (size_t)length + 4u, 0xFFFFFFFFu) ^ 0xFFFFFFFFu;
+    png_put_be32(out + 8 + length, crc);
+    return (size_t)length + 12u;
+}
+
+static size_t png_start(uint8_t *out, uint32_t w, uint32_t h, uint8_t depth, uint8_t color,
+                        uint8_t interlace) {
+    static const uint8_t signature[8] = {0x89u, 'P', 'N', 'G', '\r', '\n', 0x1Au, '\n'};
+    uint8_t ihdr[13];
+    memcpy(out, signature, sizeof(signature));
+    png_put_be32(ihdr, w);
+    png_put_be32(ihdr + 4, h);
+    ihdr[8] = depth; ihdr[9] = color; ihdr[10] = 0u; ihdr[11] = 0u; ihdr[12] = interlace;
+    return 8u + png_chunk(out + 8, "IHDR", ihdr, 13u);
+}
+
+static uint32_t png_adler(const uint8_t *data, size_t length) {
+    uint32_t a = 1u;
+    uint32_t b = 0u;
+    size_t i;
+    for (i = 0; i < length; ++i) {
+        a = (a + data[i]) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    return (b << 16) | a;
+}
+
+/* A zlib stream holding raw in one stored block (raw under 64 KiB). */
+static size_t png_zlib_stored(uint8_t *out, const uint8_t *raw, uint16_t length) {
+    out[0] = 0x78u; out[1] = 0x01u;
+    out[2] = 0x01u; /* final stored block */
+    out[3] = (uint8_t)length; out[4] = (uint8_t)(length >> 8);
+    out[5] = (uint8_t)~length; out[6] = (uint8_t)(~length >> 8);
+    memcpy(out + 7, raw, length);
+    return 7u + length + png_put_be32(out + 7 + length, png_adler(raw, length));
+}
+
+typedef struct {
+    uint8_t *out;
+    size_t bytes;
+    unsigned bit;
+} PngBits;
+
+/* Huffman codes go most significant bit first into the LSB-first stream. */
+static void png_bits_code(PngBits *bits, uint32_t code, unsigned length) {
+    while (length-- > 0u) {
+        if (bits->bit == 0u) bits->out[bits->bytes] = 0u;
+        if ((code >> length) & 1u) bits->out[bits->bytes] |= (uint8_t)(1u << bits->bit);
+        if (++bits->bit == 8u) {
+            bits->bit = 0u;
+            ++bits->bytes;
+        }
+    }
+}
+
+/* A zlib stream that inflates to 1 + 258 * runs zero bytes: a literal zero,
+   then `runs` fixed-Huffman copies of length 258 at distance 1. Each copy is
+   13 bits, so the stream grows about 1 byte for every 160 it inflates to. */
+static size_t png_zlib_zero_runs(uint8_t *out, uint32_t runs) {
+    PngBits bits;
+    uint64_t inflated = 1u + 258u * (uint64_t)runs;
+    uint32_t i;
+    out[0] = 0x78u; out[1] = 0x01u;
+    bits.out = out + 2;
+    bits.bytes = 0u;
+    bits.bit = 0u;
+    png_bits_code(&bits, 1u, 1u);       /* BFINAL */
+    png_bits_code(&bits, 1u, 1u);       /* BTYPE 01, fixed Huffman, LSB first */
+    png_bits_code(&bits, 0u, 1u);
+    png_bits_code(&bits, 0x30u, 8u);    /* literal 0 */
+    for (i = 0; i < runs; ++i) {
+        png_bits_code(&bits, 0xC5u, 8u); /* length code 285: 258 bytes */
+        png_bits_code(&bits, 0u, 5u);    /* distance code 0: distance 1 */
+    }
+    png_bits_code(&bits, 0u, 7u);       /* end of block */
+    if (bits.bit != 0u) ++bits.bytes;
+    /* Adler-32 of `inflated` zero bytes: a stays 1, b adds it once a byte. */
+    return 2u + bits.bytes +
+           png_put_be32(out + 2 + bits.bytes, (uint32_t)((inflated % 65521u) << 16) | 1u);
+}
+
+/* The decoder's memory follows the PNG's own size, not its inflated data:
+   image data that inflates far past what the header's image needs is refused
+   before stb_image grows its buffer to match, a zero-length first IDAT never
+   reaches stb_image (which copies into a NULL buffer for it), and genuine
+   small and interlaced images still decode. */
+static int test_image_decode_bounds(void) {
+    enum { RUNS = 65536 };
+    NkUiImageLimits limits = {1024u * 1024u, 256u, 256u};
+    NkUiImage image;
+    uint8_t *png = (uint8_t *)malloc(256u * 1024u);
+    uint8_t *zlib = (uint8_t *)malloc(256u * 1024u);
+    uint8_t raw[16];
+    size_t zlib_size;
+    size_t size;
+    CHECK(png != NULL && zlib != NULL, "PNG build buffers");
+
+    /* One opaque red RGBA pixel: filter byte 0, then the pixel. */
+    raw[0] = 0u; raw[1] = 255u; raw[2] = 0u; raw[3] = 0u; raw[4] = 255u;
+    zlib_size = png_zlib_stored(zlib, raw, 5u);
+    size = png_start(png, 1u, 1u, 8u, 6u, 0u);
+    size += png_chunk(png + size, "IDAT", zlib, (uint32_t)zlib_size);
+    size += png_chunk(png + size, "IEND", NULL, 0u);
+    CHECK(nk_ui_image_decode_png(png, size, &limits, &image) == NK_UI_IMAGE_OK &&
+              image.width == 1u && image.height == 1u &&
+              memcmp(image.rgba_pm, "\xFF\x00\x00\xFF", 4u) == 0,
+          "a built 1 x 1 PNG decodes");
+    nk_ui_image_free(&image);
+
+    /* An 8 x 1 one-bit grey image, Adam7: four passes of one row, 8 bytes of
+       image data where the plain image needs 2. */
+    {
+        static const uint8_t passes[8] = {0u, 0x80u, 0u, 0x80u, 0u, 0xC0u, 0u, 0xF0u};
+        zlib_size = png_zlib_stored(zlib, passes, 8u);
+        size = png_start(png, 8u, 1u, 1u, 0u, 1u);
+        size += png_chunk(png + size, "IDAT", zlib, (uint32_t)zlib_size);
+        size += png_chunk(png + size, "IEND", NULL, 0u);
+        CHECK(nk_ui_image_decode_png(png, size, &limits, &image) == NK_UI_IMAGE_OK &&
+                  image.width == 8u && image.height == 1u && image.rgba_pm[0] == 255u &&
+                  image.rgba_pm[4] == 255u, "an interlaced one-bit image decodes");
+        nk_ui_image_free(&image);
+    }
+
+    /* A 1 x 1 image whose data inflates to about 17 MB. */
+    zlib_size = png_zlib_zero_runs(zlib, RUNS);
+    CHECK(zlib_size < 200u * 1024u, "the inflate bomb stream is small");
+    size = png_start(png, 1u, 1u, 8u, 6u, 0u);
+    size += png_chunk(png + size, "IDAT", zlib, (uint32_t)zlib_size);
+    size += png_chunk(png + size, "IEND", NULL, 0u);
+    CHECK(nk_ui_image_decode_png(png, size, &limits, &image) == NK_UI_IMAGE_DECODE_FAILED &&
+              image.rgba_pm == NULL,
+          "image data inflating far past a 1 x 1 image is refused");
+
+    /* A zero-length IDAT before the data. */
+    zlib_size = png_zlib_stored(zlib, raw, 5u);
+    size = png_start(png, 1u, 1u, 8u, 6u, 0u);
+    size += png_chunk(png + size, "IDAT", NULL, 0u);
+    size += png_chunk(png + size, "IDAT", zlib, (uint32_t)zlib_size);
+    size += png_chunk(png + size, "IEND", NULL, 0u);
+    CHECK(nk_ui_image_decode_png(png, size, &limits, &image) == NK_UI_IMAGE_DECODE_FAILED &&
+              image.rgba_pm == NULL, "a zero-length first IDAT is refused before stb_image");
+    free(zlib);
+    free(png);
+    return 1;
+}
+
+/* A destination pixel averaging more source pixels than a 32-bit channel sum
+   holds (16.8 M of value 255): 4105 x 4105 opaque white drawn at 1 x 1 is
+   still opaque white. A 32-bit sum wrapped and gave a near-black pixel. */
+static int test_image_resample_wide_average(void) {
+    enum { SIDE = 4105 };
+    NkUiImage source;
+    uint8_t one[4] = {0u, 0u, 0u, 0u};
+    size_t bytes = (size_t)SIDE * SIDE * 4u;
+    memset(&source, 0, sizeof(source));
+    source.width = SIDE;
+    source.height = SIDE;
+    source.rgba_pm = (uint8_t *)malloc(bytes);
+    source.serial = 1u;
+    CHECK(source.rgba_pm != NULL, "allocate the 4105 x 4105 source");
+    memset(source.rgba_pm, 0xFF, bytes);
+    CHECK(nk_ui_image_resample(&source, 1u, 1u, one), "resample to one pixel");
+    free(source.rgba_pm);
+    CHECK(one[0] == 255u && one[1] == 255u && one[2] == 255u && one[3] == 255u,
+          "16.85 M white pixels average to white");
+    return 1;
 }
 
 /* The decoder: limits are applied before decoding, failures own nothing, and
@@ -2134,6 +2636,43 @@ static int test_draw_clips_nest(void) {
     return 1;
 }
 
+/* Text runs live one frame: a reset keeps their storage for the next frame, and a
+   reused run carries only what its new command says (its text, a longer one
+   included, and no centring left from the run before). */
+static int test_draw_text_runs_reused(void) {
+    static const NkUiPixelRect box = {0, 0, 100, 20};
+    static const char longer[] = "a much longer label than the one before it";
+    NkUiDrawBuffer buffer;
+    const NkUiTextRun *first;
+    const NkUiTextRun *second;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(nk_ui_draw_add_text_centered(&buffer, box, "ok", 2u, 0, 12, 0xFFFFFFFFu, 1u) &&
+              nk_ui_draw_add_text(&buffer, box, "two", 3u, 1, 14, 0xFFFFFFFFu, 2u),
+          "two text runs");
+    first = buffer.text_runs[0];
+    CHECK(first->center && strcmp(first->text, "ok") == 0, "the first run is centred");
+    nk_ui_draw_buffer_reset(&buffer);
+    CHECK(buffer.text_run_count == 0u && buffer.list.ncmd == 0u, "a reset empties the frame");
+    CHECK(nk_ui_draw_add_text_spaced(&buffer, box, longer, sizeof(longer) - 1u, 2, 16, 1.5f,
+                                     0xFFFFFFFFu, 3u),
+          "a longer text after the reset");
+    second = (const NkUiTextRun *)buffer.list.cmd[0].custom;
+    CHECK(second == buffer.text_runs[0] && buffer.text_run_count == 1u,
+          "the command points at the frame's run");
+    CHECK(second->length == sizeof(longer) - 1u && strcmp(second->text, longer) == 0 &&
+              second->text_capacity >= sizeof(longer),
+          "the reused run holds the whole longer text");
+    CHECK(!second->center && second->font == 2 && second->size_px == 16 &&
+              second->letter_spacing == 1.5f,
+          "the reused run keeps nothing from the run before");
+    CHECK(nk_ui_draw_add_text(&buffer, box, NULL, 0u, 0, 12, 0xFFFFFFFFu, 4u) &&
+              buffer.text_runs[1]->length == 0u && buffer.text_runs[1]->text[0] == '\0',
+          "an empty text reuses the second run");
+    nk_ui_draw_buffer_destroy(&buffer);
+    CHECK(buffer.text_runs == NULL && buffer.text_run_pool == 0u, "destroy frees every run");
+    return 1;
+}
+
 /* Every Clay error type has a name, and only the ones that leave a whole
    layout keep their frame. A type Clay adds later is fatal until it is named. */
 static int test_layout_error_kinds(void) {
@@ -2293,11 +2832,379 @@ static int test_undrawn_command_is_reported(void) {
     return 1;
 }
 
+/* The developer log on a tall window: a hundred long lines, each clamped and
+   then drawn (nk_ui_text of nk_ui_text_clamp), past 16 KB of frame text. The
+   frame is drawn, nothing is reported, the first line's storage holds while
+   more text is added, and a clamp's result is drawn where it is, not copied
+   again. */
+static int test_frame_text_grows(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiTextStyle style = nk_ui_type(NK_UI_TYPE_DATA, 0xFFFFFFFFu);
+    LayoutErrorLog log;
+    NkUiConfig config;
+    NkUiViewport viewport;
+    NkUiLayout layout;
+    NkUi *ui;
+    int frame;
+    memset(&log, 0, sizeof(log));
+    log.all_have_text = true;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    config.display_text = synth_display_text;
+    config.report_error = record_layout_error;
+    config.report_user = &log;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create frame text context");
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.pixel_w = 2560;
+    viewport.pixel_h = 1440;
+    viewport.display_scale = 1.0f;
+    viewport.ui_scale_pct = 100;
+    viewport.text_size_pct = 100;
+    nk_ui_set_viewport(ui, &viewport);
+    memset(&layout, 0, sizeof(layout));
+    layout.width = (NkUiSizing){NK_UI_SIZE_FIXED, 2400.0f, 0.0f, 0.0f};
+    layout.height = (NkUiSizing){NK_UI_SIZE_FIT, 0.0f, 0.0f, 0.0f};
+    layout.direction = NK_UI_LAYOUT_COLUMN;
+    for (frame = 0; frame < 2; ++frame) {
+        const char *first = NULL;
+        unsigned i;
+        nk_ui_begin(ui, 1.0 + frame);
+        CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open the log column");
+        for (i = 0u; i < 100u; ++i) {
+            char line[241];
+            const char *shown;
+            size_t used = (size_t)snprintf(line, sizeof(line), "%03u ", i);
+            while (used + 5u < sizeof(line)) {
+                memcpy(line + used, "word ", 5u);
+                used += 5u;
+            }
+            line[used] = '\0';
+            shown = nk_ui_text_clamp(ui, line, &style, 2400.0f, 1);
+            if (i == 0u) {
+                first = shown;
+                CHECK(nk_ui_frame_text(ui, shown) == shown,
+                      "text already in the frame is not copied again");
+            }
+            nk_ui_text(ui, (NkUiId)(1000u + i), shown, &style);
+        }
+        nk_ui_end_container(ui);
+        CHECK(first != NULL && strncmp(first, "000 word ", 9u) == 0,
+              "the first line keeps its storage while more text is added");
+        CHECK(nk_ui_end(ui) != NULL, "a frame with more than 16 KB of text is drawn");
+        CHECK(log.count == 0, "and nothing is reported");
+    }
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* An Enter pressed just before a held arrow repeats, in one frame's queue:
+   it fires the control that was focused when it was pressed, and the repeat
+   still moves focus. A click released just before an arrow fires the control
+   clicked. */
+static int test_activation_belongs_to_its_focus(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUiEvent activate;
+    NkUiEvent repeat;
+    NkUi *ui;
+    int frame;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create activation order context");
+    for (frame = 0; frame < 3; ++frame) (void)draw_button_pair(ui, 10u, frame == 0 ? 10u : 0u);
+    CHECK(nk_ui_focused(ui) == 10u, "the pair opens on its first button");
+    memset(&activate, 0, sizeof(activate));
+    activate.type = NK_UI_EV_ACTIVATE;
+    activate.down = true;
+    memset(&repeat, 0, sizeof(repeat));
+    repeat.type = NK_UI_EV_NAV;
+    repeat.dir = NK_UI_DIR_RIGHT;
+    repeat.down = true;
+    repeat.repeat = true;
+    nk_ui_push_event(ui, &activate);
+    nk_ui_push_event(ui, &repeat);
+    CHECK(draw_button_pair(ui, 10u, 0u) == 10u,
+          "Enter fires the button focused when it was pressed");
+    CHECK(nk_ui_focused(ui) == 11u, "and the arrow after it still moves focus");
+    nk_ui_focus(ui, 10u);
+    (void)draw_button_pair(ui, 10u, 0u);
+    CHECK(nk_ui_focused(ui) == 10u, "focus is back on the first button");
+    push_pointer(ui, 10.0f, 10.0f, true);
+    (void)draw_button_pair(ui, 10u, 0u);
+    push_pointer(ui, 10.0f, 10.0f, false);
+    repeat.repeat = false;
+    nk_ui_push_event(ui, &repeat);
+    CHECK(draw_button_pair(ui, 10u, 0u) == 10u,
+          "a click released before an arrow fires the button clicked");
+    CHECK(nk_ui_focused(ui) == 11u, "and the arrow moves focus on");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* nk_ui_focus(ui, 0) drops the focus for good: the frame ends on the screen's
+   default control, not on the control that had it. */
+static int test_focus_zero_returns_to_default(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUi *ui;
+    int frame;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create focus reset context");
+    for (frame = 0; frame < 3; ++frame) (void)draw_button_pair(ui, 10u, 0u);
+    CHECK(nk_ui_focused(ui) == 10u, "the pair's default is its first button");
+    (void)draw_button_pair(ui, 10u, 11u);
+    (void)draw_button_pair(ui, 10u, 0u);
+    CHECK(nk_ui_focused(ui) == 11u, "focus moves to the second button");
+    nk_ui_focus(ui, 0u);
+    (void)draw_button_pair(ui, 10u, 0u);
+    CHECK(nk_ui_focused(ui) == 10u, "focus 0 returns to the default button");
+    (void)draw_button_pair(ui, 10u, 0u);
+    CHECK(nk_ui_focused(ui) == 10u, "and stays there");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* A stalled frame under a fast mouse: a press on one button, more held moves
+   onto the other than the queue holds, and the release there. The queue drops
+   moves, never the press, so this drag clicks neither button. */
+static int test_full_queue_keeps_pointer_edges(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUi *ui;
+    NkUiId activated = 0u;
+    int frame;
+    int move;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create full queue context");
+    for (frame = 0; frame < 3; ++frame) (void)draw_button_pair(ui, 10u, frame == 0 ? 10u : 0u);
+    push_pointer(ui, 100.0f, 10.0f, true);
+    push_pointer(ui, 100.0f, 10.0f, false);
+    CHECK(draw_button_pair(ui, 10u, 0u) == 11u, "a click at x 100 fires the second button");
+    push_pointer(ui, 10.0f, 10.0f, true);
+    for (move = 0; move < 80; ++move) push_pointer(ui, 100.0f, 10.0f, true);
+    push_pointer(ui, 100.0f, 10.0f, false);
+    for (frame = 0; frame < 3 && activated == 0u; ++frame) {
+        activated = draw_button_pair(ui, 10u, 0u);
+    }
+    CHECK(activated == 0u, "a drag from one button to the other clicks neither");
+    CHECK(nk_ui_focused(ui) == 10u, "the press kept its place in the queue");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* nk_ui's own limits drop a frame and say why, through report_error, once
+   when they start: a container left open, too many scroll containers. */
+static int test_own_errors_reported(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    LayoutErrorLog log;
+    NkUiConfig config;
+    NkUiLayout layout;
+    NkUi *ui;
+    int frame;
+    memset(&log, 0, sizeof(log));
+    log.all_have_text = true;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    config.report_error = record_layout_error;
+    config.report_user = &log;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create own error context");
+    memset(&layout, 0, sizeof(layout));
+    layout.width = (NkUiSizing){NK_UI_SIZE_FIXED, 100.0f, 0.0f, 0.0f};
+    layout.height = (NkUiSizing){NK_UI_SIZE_FIXED, 100.0f, 0.0f, 0.0f};
+    for (frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 1.0 + frame);
+        CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open a container");
+        CHECK(nk_ui_end(ui) == NULL, "a frame left with a container open is dropped");
+    }
+    CHECK(log.count == 1 && strcmp(log.kinds, "CONTAINER_LEFT_OPEN ") == 0 &&
+          log.fatal == 1 && log.all_have_text,
+          "and reported once, as fatal, with its text");
+    layout.scroll = true;
+    nk_ui_begin(ui, 3.0);
+    {
+        unsigned i;
+        for (i = 0u; i <= NK_UI_SCROLL_MAX; ++i) {
+            if (nk_ui_begin_container(ui, (NkUiId)(10u + i), &layout, NULL)) {
+                nk_ui_end_container(ui);
+            }
+        }
+    }
+    CHECK(nk_ui_end(ui) == NULL, "a frame past the scroll containers it can hold is dropped");
+    CHECK(log.count == 2 && strstr(log.kinds, "SCROLL_CONTAINERS_EXCEEDED ") != NULL,
+          "and the limit is named");
+    /* Each line height is its own text style in the measure cache's key; a
+       frame with more styles than the table holds is dropped by name, and the
+       next frame starts the table over. */
+    layout.scroll = false;
+    layout.direction = NK_UI_LAYOUT_COLUMN;
+    {
+        NkUiTextStyle style = nk_ui_type(NK_UI_TYPE_BODY, 0u);
+        unsigned i;
+        style.size_px = 16;
+        style.wrap = false;
+        nk_ui_begin(ui, 4.0);
+        CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open the text-style column");
+        for (i = 0u; i < 300u; ++i) {
+            style.line_height = 16.0f + (float)i;
+            nk_ui_text(ui, (NkUiId)(100u + i), "x", &style);
+        }
+        nk_ui_end_container(ui);
+        CHECK(nk_ui_end(ui) == NULL, "a frame past the text styles it can tell apart is dropped");
+        CHECK(log.count == 3 && strstr(log.kinds, "TEXT_STYLES_EXCEEDED ") != NULL,
+              "and the limit is named");
+        nk_ui_begin(ui, 5.0);
+        CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open the next text-style column");
+        nk_ui_text(ui, 100u, "x", &style);
+        nk_ui_end_container(ui);
+        CHECK(nk_ui_end(ui) != NULL, "the next frame starts the text styles over and draws");
+    }
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* A label formatted into a buffer the caller reuses before the frame ends
+   draws what it was given: the text is copied into the frame. */
+static int test_label_copies_text(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUiLayout layout;
+    NkUi *ui;
+    char buffer[32];
+    char dump[4096];
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    memset(&layout, 0, sizeof(layout));
+    layout.width = (NkUiSizing){NK_UI_SIZE_FIXED, 400.0f, 0.0f, 0.0f};
+    layout.height = (NkUiSizing){NK_UI_SIZE_FIXED, 100.0f, 0.0f, 0.0f};
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create label copy context");
+    nk_ui_begin(ui, 0.0);
+    CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open label container");
+    strcpy(buffer, "First label");
+    nk_ui_label(ui, 2u, buffer, 0, 16);
+    strcpy(buffer, "Wrong label");
+    nk_ui_end_container(ui);
+    CHECK(nk_ui_end(ui) != NULL, "complete label frame");
+    CHECK(nk_ui_dump(ui, dump, sizeof(dump)) < sizeof(dump), "label dump fits");
+    CHECK(strstr(dump, "First label") != NULL && strstr(dump, "Wrong label") == NULL,
+          "the label draws the text it was given");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* A clamp's input longer than the text it measures (2043 bytes) is cut there
+   and ends with the ellipsis even when the part measured fits, and the cut
+   never splits a character. */
+static int test_clamp_cuts_long_text(void) {
+    static const char ellipsis[] = "\xE2\x80\xA6";
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiTextStyle style = nk_ui_type(NK_UI_TYPE_BODY, 0xFFFFFFFFu);
+    NkUiConfig config;
+    NkUi *ui;
+    char text[2201];
+    const char *shown;
+    size_t length;
+    size_t i;
+    for (i = 0u; i < 1100u; ++i) {
+        text[2u * i] = (char)0xC3;
+        text[2u * i + 1u] = (char)0xA9;
+    }
+    text[2200] = '\0';
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create long clamp context");
+    nk_ui_begin(ui, 0.0);
+    shown = nk_ui_text_clamp(ui, text, &style, 1.0e9f, 1);
+    length = strlen(shown);
+    CHECK(length > sizeof(ellipsis) - 1u && length < sizeof(text) - 1u &&
+          memcmp(shown + length - (sizeof(ellipsis) - 1u), ellipsis, sizeof(ellipsis) - 1u) == 0,
+          "a text past what the clamp measures is cut with an ellipsis");
+    CHECK((length - (sizeof(ellipsis) - 1u)) % 2u == 0u,
+          "the cut ends on a whole character");
+    (void)nk_ui_end(ui);
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* Two runs of the same words, face, size and spacing that differ only in
+   their line height each draw in their own line box. The measured height
+   includes the line height, so Clay's text-measure cache must key on it: when
+   it did not, the second run reused the first run's 40 px height and was drawn
+   10 px above its 20 px box. */
+static int test_line_height_keys_the_measure_cache(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUiViewport viewport;
+    NkUiLayout layout;
+    NkUiTextStyle tall = nk_ui_type(NK_UI_TYPE_BODY, 0u);
+    NkUiTextStyle short_line;
+    const NkUiDrawList *list;
+    const NkUiDrawCmd *first;
+    const NkUiDrawCmd *second;
+    NkUi *ui;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    memset(&layout, 0, sizeof(layout));
+    layout.width = (NkUiSizing){NK_UI_SIZE_FIXED, 400.0f, 0.0f, 0.0f};
+    layout.height = (NkUiSizing){NK_UI_SIZE_FIXED, 200.0f, 0.0f, 0.0f};
+    layout.direction = NK_UI_LAYOUT_COLUMN;
+    tall.size_px = 16;
+    tall.letter_spacing = 0.0f;
+    tall.wrap = false;
+    tall.line_height = 40.0f;
+    short_line = tall;
+    short_line.line_height = 20.0f;
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.pixel_w = 640;
+    viewport.pixel_h = 400;
+    viewport.display_scale = 1.0f;
+    viewport.ui_scale_pct = 100;
+    viewport.text_size_pct = 100;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create the line-height context");
+    nk_ui_set_viewport(ui, &viewport);
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 1.0 + frame);
+        CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open the line-height column");
+        nk_ui_text(ui, 2u, "Same words", &tall);
+        nk_ui_text(ui, 3u, "Same words", &short_line);
+        nk_ui_end_container(ui);
+        list = nk_ui_end(ui);
+        CHECK(list != NULL, "lay out the line-height frame");
+    }
+    first = text_size_command(list, 2u, NK_UI_DRAW_TEXT);
+    second = text_size_command(list, 3u, NK_UI_DRAW_TEXT);
+    CHECK(first != NULL && second != NULL, "both runs draw");
+    CHECK(first->bounds[1] == 0 && text_size_height(first) == 40,
+          "the 40 px run fills its own line box");
+    CHECK(second->bounds[1] == 40 && text_size_height(second) == 20,
+          "the 20 px run draws in its own box, not offset by the 40 px run's height");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
 int main(int argc, char **argv) {
     char actual[32768];
     size_t actual_size;
     if (!test_no_platform_headers() || !test_theme_tokens() || !test_scale_model() ||
         !test_text_size_scales_type_only() ||
+        !test_wrapped_lines_fit_their_box() || !test_word_measure_reads_a_bounded_context() ||
         !test_explicit_ui_scale_values() || !test_typed_prefs_and_events() ||
         !test_theme_access() || !test_overlay_rejects_waves() ||
         !test_container_return_contract() || !test_backend_declarations() ||
@@ -2305,16 +3212,22 @@ int main(int argc, char **argv) {
         !test_input_waits_for_a_new_screen_layout() ||
         !test_click_needs_press_and_release_on_one_control() ||
         !test_control_owns_horizontal() || !test_wave_caps() ||
-        !test_image_decode() || !test_image_command() || !test_app_icon() ||
+        !test_image_decode() || !test_image_decode_bounds() ||
+        !test_image_resample_wide_average() || !test_image_command() || !test_app_icon() ||
         !test_display_text_rules() || !test_list_lines() || !test_layout_error_kinds() ||
         !test_layout_errors_reported() || !test_pointer_hover_and_press() ||
         !test_pointer_respects_clip() || !test_scroll_container() ||
-        !test_draw_clips_nest() || !test_modal_card_floats() || !test_focus_ring_floats() ||
+        !test_draw_clips_nest() || !test_draw_text_runs_reused() ||
+        !test_modal_card_floats() || !test_focus_ring_floats() ||
         !test_focus_ring_moves() || !test_hover_fill_eases() || !test_tab_rule_slides() ||
         !test_wait_follows_motion() || !test_art_fades_in() ||
         !test_backdrop_rests_and_fades() ||
         !test_layout_debug() || !test_pointer_state_once_a_frame() ||
-        !test_undrawn_command_is_reported()) {
+        !test_undrawn_command_is_reported() || !test_frame_text_grows() ||
+        !test_activation_belongs_to_its_focus() || !test_focus_zero_returns_to_default() ||
+        !test_full_queue_keeps_pointer_edges() || !test_own_errors_reported() ||
+        !test_label_copies_text() || !test_clamp_cuts_long_text() ||
+        !test_line_height_keys_the_measure_cache()) {
         return 1;
     }
     if (!build_golden_output(actual, sizeof(actual))) {

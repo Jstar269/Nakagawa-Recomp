@@ -48,6 +48,7 @@ static inline PlayerUiAction action(PlayerUiActionKind kind, size_t title_index,
     result.kind = kind;
     result.primary = primary;
     result.title_index = title_index;
+    result.choice_index = -1;
     return result;
 }
 
@@ -122,6 +123,11 @@ static inline uint32_t note_rgba(const NkUiTheme *theme, PlayerUiNoteKind kind) 
 #define FLOW_MARK_TRIANGLE "\xE2\x96\xB2"
 #define FLOW_MARK_CHECK "\xE2\x9C\x93 "
 #define FLOW_MIDDOT " \xC2\xB7 "
+
+/* The room a setting button's "name: value" is formatted in: a texture pack row's value
+   (its folder and texture count) is up to 200 bytes, so the whole label fits, and the
+   column is measured on the label its button shows. */
+#define SCR_WIZARD_LABEL_MAX 256u
 
 /* What one setting row shows: its button reads "name: value". */
 typedef struct {

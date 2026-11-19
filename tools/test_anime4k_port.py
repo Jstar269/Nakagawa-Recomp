@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
+import re
 import sys
 import unittest
 
@@ -46,6 +48,24 @@ class Anime4kPortTests(unittest.TestCase):
         for pair in anime4k_port.shader_list():
             with self.subTest(pair=pair):
                 self.assertIn(pair, listed)
+
+    def test_manifest_records_each_derived_shader_hash(self) -> None:
+        # The Derived files table of third_party/anime4k/PROVENANCE.md records a SHA-256 for each
+        # generated shader. Nothing else reads it, so a wrapper change in anime4k_port.py that is
+        # regenerated would leave the record stale with every other gate green.
+        manifest = (anime4k_port.UPSTREAM / "PROVENANCE.md").read_text(encoding="utf-8")
+        derived = manifest.split("## Derived files", 1)[1].split("\n## ", 1)[0]
+        rows = re.findall(r"^\| `shaders/(anime4k_cnn_x2_m_\d+\.comp)` \(under `src/rt/gpu_sdl3vk/`\) \|.*\| `([0-9a-f]{64})` \|$",
+                          derived, flags=re.MULTILINE)
+        recorded = dict(rows)
+        self.assertEqual(len(rows), len(recorded), "one row per shader")
+        generated = {path.name: text for path, text in anime4k_port.outputs().items() if path.suffix == ".comp"}
+        self.assertEqual(sorted(recorded), sorted(generated), "the table lists exactly the generated shaders")
+        for name, text in generated.items():
+            with self.subTest(shader=name):
+                self.assertEqual(recorded[name], hashlib.sha256(text.encode("utf-8")).hexdigest())
+                self.assertEqual(recorded[name],
+                                 hashlib.sha256((anime4k_port.SHADER_DIR / name).read_bytes()).hexdigest())
 
     def test_unsupported_size_expression_is_refused(self) -> None:
         text = SOURCE.read_text(encoding="utf-8").replace("//!WIDTH conv2d_last_tf.w 2 *", "//!WIDTH conv2d_last_tf.w 3 *", 1)

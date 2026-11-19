@@ -103,6 +103,7 @@ struct PlayerUiNk {
     NkUiRouter *router;
     NkUiViewport viewport;
     size_t library_page;
+    int enhanced_tab;       /* session UI state; never serialized with player settings */
     /* The art rest: the card focus rests on and since when, and the game whose
        picture is behind the library (SIZE_MAX: none) and when it stopped being
        shown, so it is kept while it fades out. */
@@ -303,9 +304,10 @@ struct PlayerUiNk {
        part, whose value is at most enhanced_values' 48 bytes. Sized by the part count, so one more
        part cannot cut the line short. */
     char enhanced_reported[PLAYER_PART_COUNT * 64 + 256];
+    char enhanced_layout_reported[1024];
     char ace_line_reported[PLAYER_PART_COUNT * 64 + 192]; /* the play line last printed */
     char enhancement_tag_reported[PLAYER_UI_TITLE_CAP][16]; /* the ENHANCEMENTS tag printed */
-    char preset_note_reported[200];                /* the main Settings page's preset note */
+    char preset_note_reported[200];                /* the global preset's page note */
     int disc_reported_view;  /* the game-found card whose rows were printed, or -1 */
 #endif
     bool ready;
@@ -344,10 +346,12 @@ static void player_ui_display_in_place(char *text, size_t size) {
     snprintf(text, size, "%s", shown);
 }
 
+/* The path is UTF-8 (SDL_GetBasePath), so it opens through nk_fopen_utf8: the
+   narrow fopen reads it in the ANSI code page on Windows (nk_platform.h). */
 static bool player_ui_file_exists(const char *path) {
     FILE *file;
     if (path == NULL || path[0] == '\0') return false;
-    file = fopen(path, "rb");
+    file = nk_fopen_utf8(path, "rb");
     if (file == NULL) return false;
     fclose(file);
     return true;
@@ -365,6 +369,20 @@ static bool player_ui_join_path(const char *root, const char *relative,
                                NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
 }
 
+/* The fonts and the music track are read from beside the player only: `make
+   player` and every install stage them there. A player never parses a font or a
+   track from its working folder, which a shortcut or file association may set to
+   any folder (a Downloads folder). The regression build alone, run from the
+   source tree without staged assets, reads them from there; a test can turn that
+   off to see what a release build does. */
+static bool player_ui_assets_from_working_folder(void) {
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    return getenv("NK_UI_TEST_ASSETS_BESIDE_ONLY") == NULL;
+#else
+    return false;
+#endif
+}
+
 static bool player_ui_add_font(NkUiTtf *ttf, int font, const char *base_path,
                                const char *relative_path) {
     char path[2u * NK_MAX_PATH];
@@ -373,7 +391,7 @@ static bool player_ui_add_font(NkUiTtf *ttf, int font, const char *base_path,
         player_ui_file_exists(path) && nk_ui_ttf_add_font(ttf, font, path)) {
         return true;
     }
-    if (player_ui_file_exists(relative_path) &&
+    if (player_ui_assets_from_working_folder() && player_ui_file_exists(relative_path) &&
         nk_ui_ttf_add_font(ttf, font, relative_path)) {
         return true;
     }
@@ -429,11 +447,10 @@ static void player_ui_report_layout_error(void *user, const NkUiLayoutError *err
                        error->fatal ? "frame dropped" : "frame drawn", length, error->text);
 }
 
-/* The launcher music's track: beside the player, as the fonts are, else from
-   the working folder. The working folder is only for a development run from the
-   source tree; a packaged player has the track beside it. A track found in
-   neither is still looked for beside the player, so the missing file is named
-   there. */
+/* The launcher music's track: beside the player, as the fonts are (the
+   regression build alone also looks in the working folder,
+   player_ui_assets_from_working_folder). A track not found is still looked for
+   beside the player, so the missing file is named there. */
 static PlayerUiMusic *player_ui_music_create_beside(const char *base_path) {
     char path[2u * NK_MAX_PATH];
     const char *track = PLAYER_UI_MUSIC_TRACK;
@@ -452,11 +469,15 @@ static PlayerUiMusic *player_ui_music_create_beside(const char *base_path) {
         player_ui_file_exists(path)) {
         return player_ui_music_create(path, track);
     }
-    if (player_ui_file_exists(track)) return player_ui_music_create(track, track);
+    if (player_ui_assets_from_working_folder() && player_ui_file_exists(track)) {
+        return player_ui_music_create(track, track);
+    }
     if (base_path != NULL && player_ui_join_path(base_path, track, path, sizeof(path))) {
         return player_ui_music_create(path, track);
     }
-    return player_ui_music_create(track, track);
+    /* No folder beside the player to name: the fonts failed the same way first. */
+    return player_ui_assets_from_working_folder() ? player_ui_music_create(track, track)
+                                                  : NULL;
 }
 
 bool player_ui_nk_built_with_launcher(void) {
@@ -484,6 +505,7 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
                             "The next UI could not allocate its renderer state.");
         return NULL;
     }
+    player->enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
     player->window = window;
     /* A launcher that opens behind another window gets no focus event: the music
        waits for focus (SDL_EVENT_WINDOW_FOCUS_GAINED) rather than assuming it. */
@@ -747,6 +769,20 @@ static PlayerUiNoteKind player_ui_note_kind(PlayerNoteKind kind) {
     }
 }
 
+/* The PSP font lines the wizard's fonts step and Settings > PSP fonts list:
+   Japanese, each Latin index, then Korean, up to `cap` lines. */
+static size_t player_ui_font_lines(const PlayerApp *app, const char **lines, size_t cap) {
+    size_t count = 0u;
+    for (int item = 0; item < NK_FONT_LATIN_INDEX_COUNT + 2 && count < cap; ++item) {
+        lines[count++] = item == 0
+            ? app->wizard.font_slot_detail[NK_FONT_SLOT_JAPANESE]
+            : item == NK_FONT_LATIN_INDEX_COUNT + 1
+                ? app->wizard.font_slot_detail[NK_FONT_SLOT_KOREAN]
+                : app->wizard.font_latin_index_detail[item - 1];
+    }
+    return count;
+}
+
 /* The setup wizard's model, from the player's wizard state. */
 static bool player_ui_unrecorded_experimental(const GameRecord *game);
 
@@ -827,14 +863,8 @@ static PlayerUiAction player_ui_render_wizard(PlayerUiNk *player, PlayerApp *app
                                                         : "keyboard and mouse");
             model.resolution_line = player->wizard_resolution;
             model.controller_line = player->wizard_controller;
-            for (int item = 0; item < NK_FONT_LATIN_INDEX_COUNT + 2 &&
-                               (size_t)item < PLAYER_UI_WIZARD_FONT_LINES; ++item) {
-                model.font_lines[model.font_line_count++] = item == 0
-                    ? app->wizard.font_slot_detail[NK_FONT_SLOT_JAPANESE]
-                    : item == NK_FONT_LATIN_INDEX_COUNT + 1
-                        ? app->wizard.font_slot_detail[NK_FONT_SLOT_KOREAN]
-                        : app->wizard.font_latin_index_detail[item - 1];
-            }
+            model.font_line_count = player_ui_font_lines(
+                app, model.font_lines, sizeof(model.font_lines) / sizeof(model.font_lines[0]));
             model.font_message = app->wizard.font_message;
             model.font_message_kind = player_ui_note_kind(app->wizard.font_message_kind);
             model.font_summary = app->wizard.font_summary;
@@ -958,6 +988,19 @@ static double player_ui_display_refresh_hz(SDL_Window *window) {
 }
 
 typedef char player_ui_enhanced_rows_fit[PLAYER_PART_COUNT <= PLAYER_UI_ENHANCED_ROWS ? 1 : -1];
+typedef struct {
+    int part;
+    PlayerUiEnhancedGroup group;
+} PlayerUiEnhancedLayout;
+#define PLAYER_UI_ENHANCED_LAYOUT_ENTRY(part, group) {part, group},
+static const PlayerUiEnhancedLayout k_player_ui_enhanced_layout[] = {
+    PLAYER_UI_ENHANCED_LAYOUT(PLAYER_UI_ENHANCED_LAYOUT_ENTRY)
+};
+#undef PLAYER_UI_ENHANCED_LAYOUT_ENTRY
+typedef char player_ui_enhanced_layout_covers_every_part[
+    sizeof(k_player_ui_enhanced_layout) / sizeof(k_player_ui_enhanced_layout[0]) ==
+            PLAYER_PART_COUNT
+        ? 1 : -1];
 /* The part rows' element ids (PLAYER_UI_ID_ENHANCED_PART): each range ends before the next id in
    use, and the two hold every row. */
 typedef char player_ui_enhanced_row_ids_fit[
@@ -973,9 +1016,22 @@ typedef char player_ui_enhanced_more_row_ids_fit[
 /* Why a title offers no Ace: it has no usable package of its own (#2055). */
 #define PLAYER_UI_ACE_NEEDS_PACKAGE "Ace needs a package made for this game."
 
+static int player_ui_enhanced_value_index(int part, int value) {
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
+    for (int i = 0; info && i < info->value_count; ++i) {
+        if (info->values[i] == value) return i;
+    }
+    return 0;
+}
+
+/* The part table says which parts act only in Ace (PlayerEnhancedPartInfo.ace_only). */
+static const char *player_ui_enhanced_tag(int part) {
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
+    return info != NULL && info->ace_only ? "Ace only" : NULL;
+}
+
 /* Settings > Enhanced (#2055): the library's page, or one title's
-   (player_app_open_title_enhanced). One row per part from player_enhanced_part(), so a new
-   part needs no change here. */
+   (player_app_open_title_enhanced). The explicit layout table gives every part its visual group. */
 static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                                     PlayerUiSettingsModel *model) {
     const PlayerSettings *settings = &app->settings;
@@ -993,9 +1049,10 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
     model->enhanced_mode_count = 2;
     bool logic_60 = false;
     bool smooth_on = player_settings_library_part(settings, PLAYER_PART_SMOOTH) != 0;
+    PlayerPlayMode chosen = PLAYER_PLAY_LIBRARY;
     if (title >= 0) {
         const GameRecord *game = &app->games[title];
-        PlayerPlayMode chosen = player_app_title_play_mode(app, title);
+        chosen = player_app_title_play_mode(app, title);
         PlayerPlayResolved play;
         player_play_resolve(settings, game->disc_id, &play);
         /* What its launch runs (player_launch_work_run): with its 60 FPS game logic, smooth
@@ -1016,7 +1073,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         player->enhanced_modes[1] = player_play_mode_name(PLAYER_PLAY_AUTHENTIC);
         player->enhanced_modes[2] = player_play_mode_name(PLAYER_PLAY_ENHANCED);
         player->enhanced_modes[3] = player_play_mode_name(PLAYER_PLAY_ACE);
-        model->enhanced_mode_count = 4;
+        model->enhanced_mode_count = app->title_enhancements[title].available ? 4 : 3;
         model->enhanced_mode_sentence = app->title_enhancements[title].available
             ? "Ace is Enhanced plus this game's own 60 FPS game logic."
             : "Enhanced adds the parts below. " PLAYER_UI_ACE_NEEDS_PACKAGE;
@@ -1046,22 +1103,31 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         model->texpack_value = player->texpack_value;
         model->texpack_sentence = player->texpack_sentence;
     }
+    model->enhanced_tab = player->enhanced_tab;
     model->enhanced_row_count = 0;
-    for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+    /* The library's value as a session uses it: the graphics preset's where it sets the
+       part (#2150), which the library page names, "On (Ultra)". */
+    const PlayerGraphicsPresetRow *preset =
+        player_graphics_preset_row(player_app_graphics_preset(app));
+    for (size_t layout_index = 0;
+         layout_index < sizeof(k_player_ui_enhanced_layout) / sizeof(k_player_ui_enhanced_layout[0]);
+         layout_index++) {
+        const int p = k_player_ui_enhanced_layout[layout_index].part;
         const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
         PlayerUiEnhancedRow *row = &model->enhanced_rows[model->enhanced_row_count++];
-        /* The library's value as a session uses it: the graphics preset's where it sets the
-           part (#2150), which the library page names, "On (Ultra)". */
         int library = player_settings_library_part(settings, p);
-        const PlayerGraphicsPresetRow *preset =
-            player_graphics_preset_row(player_app_graphics_preset(app));
+        row->part = p;
+        row->group = k_player_ui_enhanced_layout[layout_index].group;
         row->name = info->name;
         row->sentence = info->sentence;
         row->labels = info->labels;
         row->label_count = info->value_count;
         row->library_value = NULL;
-        row->other_value = title >= 0 && p == PLAYER_PART_SMOOTH ? ENHANCED_SMOOTH_AT_60_VALUE
-                                                                  : NULL;
+        row->selected_index = player_ui_enhanced_value_index(p, library);
+        row->inherited = false;
+        row->disabled = false;
+        row->disabled_reason = NULL;
+        row->tag = player_ui_enhanced_tag(p);
         row->value = player_enhanced_part_label(p, library);
         row->on = library != 0;
         if (title < 0 && preset && preset->part[p] >= 0) {
@@ -1071,6 +1137,9 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         }
         if (title >= 0) {
             int own = player_app_title_part(app, title, p);
+            row->inherited = own < 0;
+            row->selected_index = own < 0 ? 0 :
+                player_ui_enhanced_value_index(p, own) + 1;
             snprintf(player->enhanced_library_values[p], sizeof(player->enhanced_library_values[p]),
                      "Library (%s)", player_enhanced_part_label(p, library));
             row->library_value = player->enhanced_library_values[p];
@@ -1092,6 +1161,9 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                          "when this game's 60 FPS game logic is off.", row->value);
                 row->value = ENHANCED_SMOOTH_AT_60_VALUE;
                 row->sentence = player->enhanced_smooth_sentence;
+                /* The row marks what runs, Off; its sentence names the choice it keeps. */
+                row->selected_index = player_ui_enhanced_value_index(p, 0) + 1;
+                row->inherited = false;
                 row->on = false;
             }
         }
@@ -1106,9 +1178,31 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
             const char *unavailable =
                 player_enhanced_part_unavailable_label(p, row->on, smooth_on);
             if (unavailable) {
+                /* The row shows what runs, as its line did before the tabs: "Off" while Smooth
+                   motion is on. The choice it keeps is in the settings and comes back with
+                   Smooth motion off. Widescreen is the one part with such a value
+                   (player_enhanced_part_unavailable_label). */
+                row->disabled = true;
+                row->disabled_reason = "Smooth motion disables Widescreen.";
                 row->value = unavailable;
+                row->selected_index = player_ui_enhanced_value_index(p, 0) + (title >= 0 ? 1 : 0);
+                row->inherited = false;
                 row->on = false;
             }
+        }
+        if (!model->enhanced_on) {
+            row->disabled = true;
+            row->disabled_reason = "Play mode is Authentic.";
+        } else if (title >= 0 && row->tag != NULL &&
+                   (chosen != PLAYER_PLAY_ACE || !app->title_enhancements[title].available)) {
+            /* A saved Ace whose package has gone is no Ace: its Ace-only rows stay dimmed. */
+            row->disabled = true;
+            row->disabled_reason = app->title_enhancements[title].available
+                ? "Available only in Ace."
+                : PLAYER_UI_ACE_NEEDS_PACKAGE;
+        } else if (p == PLAYER_PART_SMOOTH && title >= 0 && logic_60) {
+            row->disabled = true;
+            row->disabled_reason = "This game's 60 FPS game logic is on.";
         }
     }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
@@ -1121,16 +1215,57 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         for (int p = 0; p < (int)model->enhanced_row_count && used > 0 &&
                         (size_t)used < sizeof(line); p++) {
             used += snprintf(line + used, sizeof(line) - (size_t)used, "|%s=%s",
-                             player_enhanced_part(p)->key, model->enhanced_rows[p].value);
+                             player_enhanced_part(model->enhanced_rows[p].part)->key,
+                             model->enhanced_rows[p].value);
         }
         /* Supersampling's sentence, which warns at a render scale of 3x or 4x. */
-        if (used > 0 && (size_t)used < sizeof(line) && model->enhanced_row_count > PLAYER_PART_SSAA) {
-            used += snprintf(line + used, sizeof(line) - (size_t)used, "|ssaa_sentence=%s",
-                             model->enhanced_rows[PLAYER_PART_SSAA].sentence);
+        for (int p = 0; p < (int)model->enhanced_row_count; p++) {
+            if (model->enhanced_rows[p].part == PLAYER_PART_SSAA && used > 0 &&
+                (size_t)used < sizeof(line)) {
+                used += snprintf(line + used, sizeof(line) - (size_t)used,
+                                 "|ssaa_sentence=%s", model->enhanced_rows[p].sentence);
+                break;
+            }
         }
         if (strcmp(line, player->enhanced_reported) != 0) {
             snprintf(player->enhanced_reported, sizeof(player->enhanced_reported), "%s", line);
             printf("[PLAYER_UI_TEST] next_ui_enhanced_page %s\n", line);
+        }
+    }
+    {
+        char groups[768] = "";
+        char line[sizeof(player->enhanced_layout_reported)];
+        size_t used = 0u;
+        PlayerUiEnhancedGroup previous = PLAYER_UI_ENHANCED_GROUP_COUNT;
+        for (int i = 0; i < model->enhanced_row_count && used < sizeof(groups); i++) {
+            const PlayerUiEnhancedRow *row = &model->enhanced_rows[i];
+            if (row->group != previous) {
+                int n = snprintf(groups + used, sizeof(groups) - used, "%s%s:",
+                                 used == 0u ? "" : ";",
+                                 player_ui_enhanced_group_label(row->group));
+                if (n < 0 || (size_t)n >= sizeof(groups) - used) break;
+                used += (size_t)n;
+                previous = row->group;
+            } else {
+                int n = snprintf(groups + used, sizeof(groups) - used, ",");
+                if (n < 0 || (size_t)n >= sizeof(groups) - used) break;
+                used += (size_t)n;
+            }
+            {
+                const char *key = player_enhanced_part(row->part)->key;
+                int n = snprintf(groups + used, sizeof(groups) - used, "%s", key);
+                if (n < 0 || (size_t)n >= sizeof(groups) - used) break;
+                used += (size_t)n;
+            }
+        }
+        snprintf(line, sizeof(line), "title=%s|preset=%s|groups=%s|tab=%d",
+                 title >= 0 ? app->games[title].disc_id : "library",
+                 model->preset != NULL ? model->preset : "Custom", groups,
+                 model->enhanced_tab);
+        if (strcmp(line, player->enhanced_layout_reported) != 0) {
+            snprintf(player->enhanced_layout_reported, sizeof(player->enhanced_layout_reported),
+                     "%s", line);
+            printf("[PLAYER_UI_TEST] next_ui_enhanced_layout %s\n", line);
         }
     }
 #endif
@@ -1167,13 +1302,8 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         case VIEW_PSP_FONTS:
             model.page = PLAYER_UI_SETTINGS_PAGE_FONTS;
             if (app->wizard.font_slot_detail[0][0] == '\0') player_app_refresh_font_status(app);
-            for (int item = 0; item < NK_FONT_LATIN_INDEX_COUNT + 2 && item < 18; ++item) {
-                model.font_lines[model.font_line_count++] = item == 0
-                    ? app->wizard.font_slot_detail[NK_FONT_SLOT_JAPANESE]
-                    : item == NK_FONT_LATIN_INDEX_COUNT + 1
-                        ? app->wizard.font_slot_detail[NK_FONT_SLOT_KOREAN]
-                        : app->wizard.font_latin_index_detail[item - 1];
-            }
+            model.font_line_count = player_ui_font_lines(
+                app, model.font_lines, sizeof(model.font_lines) / sizeof(model.font_lines[0]));
             model.font_message = app->wizard.font_message;
             model.font_message_kind = player_ui_note_kind(app->wizard.font_message_kind);
             model.font_summary = app->wizard.font_summary;
@@ -1184,6 +1314,8 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     }
     model.resolution = player_ui_resolution_word(app->settings.resolution_scale);
     model.pacing = app->settings.fps_cap < 0 ? "PSP timing" : "No extra cap";
+    model.pacing_sentence = "Sets whether every game, in every play mode, follows PSP timing "
+                            "or adds no frame cap.";
     model.scaling = player_present_scaling_label(app->settings.present_scaling);
     model.preset = player_app_graphics_preset_label(app);
     model.vsync = app->settings.vsync;
@@ -1248,6 +1380,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.online_reports = app->settings.online_reports;
     model.developer_mode = app->settings.developer_mode;
     model.download_cover_art = app->settings.download_cover_art;
+    model.cheats = app->settings.cheats;
     model.cover_art_cache_size = app->cover_art_cache_size_label;
     model.share_system_libraries = app->settings.share_system_libraries;
     /* The build tools and cache page says what its clear button did. */
@@ -1259,17 +1392,17 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     if (app->settings_newer_schema && app->settings_notice[0] != '\0') {
         model.notice = app->settings_notice;
     }
-    /* The graphics preset (#2150) says on the main page, where its row is, that it is used
-       in Enhanced and Ace only and what it could not set. It is derived from the choice, so
-       it goes with Custom and is back after a restart. */
-    if (model.page == PLAYER_UI_SETTINGS_PAGE_MAIN &&
+    /* The graphics preset's note (#2150) says where it applies, on the page that has its row:
+       Settings > Enhanced. It is derived from the choice, so it goes with Custom and is back
+       after a restart. */
+    if (model.page == PLAYER_UI_SETTINGS_PAGE_ACE &&
         player_app_graphics_preset_note(app, player->settings_preset_note,
                                         sizeof(player->settings_preset_note))) {
         model.preset_notice = player->settings_preset_note;
     }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
-    if (model.page == PLAYER_UI_SETTINGS_PAGE_MAIN) {
-        /* The preset row and note the main page draws; printed on change. */
+    if (model.page == PLAYER_UI_SETTINGS_PAGE_ACE) {
+        /* The Enhanced page's first row shows the global preset; printed on change. */
         char line[sizeof(player->preset_note_reported)];
         snprintf(line, sizeof(line), "value=%s|note=%s", model.preset,
                  model.preset_notice != NULL ? model.preset_notice : "");
@@ -1376,7 +1509,17 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     }
     model.logical_width = scale.logical_w;
     model.logical_height = scale.logical_h;
-    return player_ui_screen_settings(player->ui, &model);
+    {
+        /* The tab is the page's session state: the screen hands a chosen one back here, apart
+           from the frame's action. */
+        int chosen_tab = -1;
+        PlayerUiAction action;
+        model.enhanced_tab_chosen = &chosen_tab;
+        action = player_ui_screen_settings(player->ui, &model);
+        if (chosen_tab >= 0 && chosen_tab < PLAYER_UI_ENHANCED_GROUP_COUNT)
+            player->enhanced_tab = chosen_tab;
+        return action;
+    }
 }
 
 /* A share of the full axis range, as a whole percent. */
@@ -1631,19 +1774,25 @@ static PlayerUiAction player_ui_render_developer_log(PlayerUiNk *player, PlayerA
 }
 
 /* The build queue screen's games: the one building, then the ones that wait,
-   in queue order, as indices into app->rebuild_queue.entries. A game no longer
-   in the library is left out (the queue skips it). */
-static size_t player_ui_queue_list(const PlayerApp *app, int *list, size_t cap) {
+   in queue order, as indices into app->rebuild_queue.entries, with each one's
+   library index in `games`. A game no longer in the library is left out (the
+   queue skips it). Each entry's game is looked up once. */
+static size_t player_ui_queue_list(const PlayerApp *app, int *list, int *games, size_t cap) {
+    static int entry_game[MAX_LIBRARY_GAMES];
     const PlayerRebuildQueue *queue = &app->rebuild_queue;
+    int entries = queue->count < MAX_LIBRARY_GAMES ? queue->count : MAX_LIBRARY_GAMES;
     size_t count = 0u;
     if (!queue->active) return 0u;
+    for (int i = 0; i < entries; ++i) {
+        entry_game[i] = queue->entries[i].state == PLAYER_REBUILD_ACTIVE ||
+                        queue->entries[i].state == PLAYER_REBUILD_PENDING
+            ? player_app_find_game_by_disc_id(app, queue->entries[i].disc_id) : -1;
+    }
     for (int pass = 0; pass < 2; ++pass) {
         PlayerRebuildState want = pass == 0 ? PLAYER_REBUILD_ACTIVE : PLAYER_REBUILD_PENDING;
-        for (int i = 0; i < queue->count && count < cap; ++i) {
-            if (queue->entries[i].state != want ||
-                player_app_find_game_by_disc_id(app, queue->entries[i].disc_id) < 0) {
-                continue;
-            }
+        for (int i = 0; i < entries && count < cap; ++i) {
+            if (queue->entries[i].state != want || entry_game[i] < 0) continue;
+            games[count] = entry_game[i];
             list[count++] = i;
         }
     }
@@ -1664,10 +1813,11 @@ static size_t player_ui_queue_find(const PlayerApp *app, const int *list, size_t
 static PlayerUiAction player_ui_render_queue(PlayerUiNk *player, const PlayerApp *app,
                                              NkUiScale scale) {
     static int list[MAX_LIBRARY_GAMES];
+    static int list_games[MAX_LIBRARY_GAMES];
     const PlayerRebuildQueue *queue = &app->rebuild_queue;
     PlayerUiQueueModel model;
     PlayerUiAction result;
-    size_t total = player_ui_queue_list(app, list, MAX_LIBRARY_GAMES);
+    size_t total = player_ui_queue_list(app, list, list_games, MAX_LIBRARY_GAMES);
     size_t follow = total;
     size_t shown;
     if (player->queue_follow_disc[0] != '\0') {
@@ -1683,7 +1833,7 @@ static PlayerUiAction player_ui_render_queue(PlayerUiNk *player, const PlayerApp
     for (size_t r = 0u; r < shown; ++r) {
         size_t at = player->queue_first + r;
         const PlayerRebuildEntry *entry = &queue->entries[list[at]];
-        int game = player_app_find_game_by_disc_id(app, entry->disc_id);
+        int game = list_games[at];
         PlayerUiQueueRow *row = &player->queue_rows[r];
         bool first_waiting = at == 0u ||
             (at == 1u && queue->entries[list[0]].state == PLAYER_REBUILD_ACTIVE);
@@ -1776,7 +1926,7 @@ static PlayerUiAction player_ui_render_queue(PlayerUiNk *player, const PlayerApp
 
 static PlayerUiAction player_ui_render_flow(PlayerUiNk *player, PlayerApp *app,
                                             NkUiScale scale, double now_s) {
-    PlayerUiAction none = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    PlayerUiAction none = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
     if (app->active_view == VIEW_SETUP_WIZARD) {
         return player_ui_render_wizard(player, app, scale);
     }
@@ -1962,7 +2112,9 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                 break;
             case VIEW_PREREQ_CONSENT: focus = PLAYER_UI_ID_PREREQ_ACCEPT; break;
             case VIEW_PREREQ_PROGRESS: focus = PLAYER_UI_ID_PREREQ_CANCEL; break;
-            case VIEW_ERROR:
+            /* The error card draws its own buttons (scr_error.c), never the
+               disc card's: its recovery action has the focus. */
+            case VIEW_ERROR: focus = PLAYER_UI_ID_ERROR_RECOVER; break;
             case VIEW_INSPECTING:
             case VIEW_SUPPORTED_TITLE:
             case VIEW_EXPERIMENTAL_TITLE:
@@ -2038,9 +2190,15 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                 focus = app->report.phase == PLAYER_REPORT_PREVIEWED
                     ? PLAYER_UI_ID_REPORT_CREATE : PLAYER_UI_ID_SETTINGS_BACK;
                 break;
-            case VIEW_ONLINE_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_ONLINE_MODE; break;
+            case VIEW_ONLINE_SETTINGS:
+                /* The Online mode switch is drawn only while online mode is stored
+                   On (scr_settings.c); otherwise Developer mode is the first row. */
+                focus = app->settings.online_mode ? PLAYER_UI_ID_SETTINGS_ONLINE_MODE
+                                                  : PLAYER_UI_ID_SETTINGS_DEVELOPER;
+                break;
             case VIEW_ACCESSIBILITY_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE; break;
-            case VIEW_ACE_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_ACE_MODE; break;
+            /* Settings > Enhanced, the library's or a game's, opens on its first row. */
+            case VIEW_ACE_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_PRESET; break;
             case VIEW_PREREQ_ABOUT:
             case VIEW_CONFIRM_REMOVE_TOOLS:
             /* The safe answer, Keep everything, has the focus. */
@@ -2500,11 +2658,15 @@ static void player_ui_find_close(PlayerUiNk *player) {
    a whole UTF-8 character are left out. */
 static void player_ui_find_type(PlayerUiNk *player, const char *text) {
     if (ui_keyboard_type(&player->find_keyboard, text)) player->library_page = 0u;
+    /* As in a box opened from the keyboard: Enter after typing moves on to the
+       matches, never types the on-screen key that had focus. */
+    player->find_focus = PLAYER_UI_ID_LIBRARY_FIND_DONE;
 }
 
 /* Removes the last character, all of its UTF-8 bytes. */
 static void player_ui_find_delete(PlayerUiNk *player) {
     if (ui_keyboard_delete(&player->find_keyboard)) player->library_page = 0u;
+    player->find_focus = PLAYER_UI_ID_LIBRARY_FIND_DONE;
 }
 
 /* The nickname editor starts empty, showing the nickname in use until
@@ -2564,6 +2726,27 @@ bool player_ui_nk_find_open(const PlayerUiNk *player) {
            nk_ui_router_current(player->router) == PLAYER_UI_ROUTE_LIBRARY;
 }
 
+/* A text box (the find box, the nickname editor) takes what is typed: SDL's text
+   input brings the characters, Backspace deletes one, and a printable key is not
+   also a shortcut (D, Q, E). Returns true when the event was the box's. */
+static bool player_ui_take_typing(PlayerUiNk *player, const SDL_Event *event,
+                                  void (*type)(PlayerUiNk *, const char *),
+                                  void (*erase)(PlayerUiNk *)) {
+    if (event->type == SDL_EVENT_TEXT_INPUT && event->text.text != NULL) {
+        type(player, event->text.text);
+        return true;
+    }
+    if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
+        bool control = (event->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) != 0;
+        if (event->key.key == SDLK_BACKSPACE) {
+            if (event->type == SDL_EVENT_KEY_DOWN) erase(player);
+            return true;
+        }
+        if (!control && event->key.key >= 0x20u && event->key.key < 0x7Fu) return true;
+    }
+    return false;
+}
+
 bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     NkUiEvent translated[8];
     size_t count;
@@ -2571,35 +2754,16 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     if (player == NULL || !player->ready || event == NULL) return false;
     now_s = player_ui_nk_now_s(player);
     if (player->nickname_open) {
-        /* The nickname editor takes what is typed as the find box does, below;
-           Esc or the pad's B is its Skip or Cancel. */
-        if (event->type == SDL_EVENT_TEXT_INPUT && event->text.text != NULL) {
-            player_ui_nickname_type(player, event->text.text);
+        /* The nickname editor takes what is typed as the find box does; Esc or the
+           pad's B is its Skip or Cancel, below. */
+        if (player_ui_take_typing(player, event, player_ui_nickname_type,
+                                  player_ui_nickname_delete)) {
             return true;
-        }
-        if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
-            bool control = (event->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) != 0;
-            if (event->key.key == SDLK_BACKSPACE) {
-                if (event->type == SDL_EVENT_KEY_DOWN) player_ui_nickname_delete(player);
-                return true;
-            }
-            if (!control && event->key.key >= 0x20u && event->key.key < 0x7Fu) return true;
         }
     } else if (player_ui_nk_find_open(player)) {
-        /* The box takes what is typed: SDL's text input brings the characters,
-           Backspace deletes one, and a printable key is not also a shortcut
-           (D, Q, E). Esc or the pad's B clears and closes it, below. */
-        if (event->type == SDL_EVENT_TEXT_INPUT && event->text.text != NULL) {
-            player_ui_find_type(player, event->text.text);
+        /* Esc or the pad's B clears and closes the find box, below. */
+        if (player_ui_take_typing(player, event, player_ui_find_type, player_ui_find_delete)) {
             return true;
-        }
-        if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
-            bool control = (event->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) != 0;
-            if (event->key.key == SDLK_BACKSPACE) {
-                if (event->type == SDL_EVENT_KEY_DOWN) player_ui_find_delete(player);
-                return true;
-            }
-            if (!control && event->key.key >= 0x20u && event->key.key < 0x7Fu) return true;
         }
     } else if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat &&
                nk_ui_router_current(player->router) == PLAYER_UI_ROUTE_LIBRARY &&
@@ -2625,6 +2789,12 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
             if (translated[i].down) nk_ui_push_event(player->ui, &translated[i]);
         } else if (translated[i].type == NK_UI_EV_BACK && player_ui_nk_find_open(player)) {
             if (translated[i].down) player_ui_find_close(player);
+        } else if (translated[i].type == NK_UI_EV_BACK &&
+                   nk_ui_router_current(player->router) == PLAYER_UI_ROUTE_SAVES &&
+                   player->saves_ask != PLAYER_UI_SAVES_ASK_NONE) {
+            /* The Saves card's question answers Back with Cancel and the card
+               stays (docs/PLAYER_UI_DESIGN.md); the router would close it. */
+            if (translated[i].down) nk_ui_push_event(player->ui, &translated[i]);
         } else if (translated[i].type == NK_UI_EV_BACK) {
             nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
             (void)nk_ui_router_handle_event(player->router, &translated[i]);
@@ -2640,10 +2810,21 @@ void player_ui_nk_note_window_focus(PlayerUiNk *player, bool focused) {
     player->window_unfocused = !focused;
 }
 
+/* Sounds follow the setting, and stay closed while a game starts or runs so its own
+   audio is left alone: the launch starts the game's process only once they have let
+   go of the device (player_ui_nk_launcher_audio_closed). */
+static void player_ui_nk_follow_sounds(PlayerUiNk *player, const PlayerApp *app) {
+    player_ui_sounds_set_enabled(player->sounds, app->settings.ui_sounds &&
+                                                     !app->is_game_running &&
+                                                     !app->launch_pending);
+}
+
 void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app) {
     PlayerUiMusicRequest request;
     PlayerUiMusicState state;
     if (player == NULL || app == NULL) return;
+    /* The launch waits on the sounds as on the music, so they follow it here too. */
+    player_ui_nk_follow_sounds(player, app);
     request.enabled = app->settings.launcher_music;
     /* A game that is starting counts as running: the music fades out and lets go
        of the audio device before the launch starts the game's process. */
@@ -2677,7 +2858,12 @@ void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app) {
 
 bool player_ui_nk_launcher_audio_closed(const PlayerUiNk *player) {
     return player == NULL || (!player_ui_music_holds_audio(player->music) &&
-                              !player_ui_music_decoding(player->music));
+                              !player_ui_music_decoding(player->music) &&
+                              !player_ui_sounds_hold_audio(player->sounds));
+}
+
+bool player_ui_nk_ui_sounds_hold_audio(const PlayerUiNk *player) {
+    return player != NULL && player_ui_sounds_hold_audio(player->sounds);
 }
 
 bool player_ui_nk_music_decoding(const PlayerUiNk *player) {
@@ -2759,16 +2945,6 @@ static const char *player_ui_compatibility_words(const GameRecord *game, const c
     }
 }
 
-static const char *player_ui_compatibility(const GameRecord *game, const char **expect,
-                                           const char **known_issues, PlayerUiTier *tier) {
-    PlayerUiTier record_tier;
-    const char *category =
-        player_ui_compatibility_words(game, expect, known_issues, &record_tier);
-    *tier = record_tier != PLAYER_UI_TIER_NONE ? record_tier
-                                               : player_ui_tier_for_category(category);
-    return category;
-}
-
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
 void player_ui_nk_test_report_compatibility(void) {
     for (size_t i = 0u;
@@ -2804,10 +2980,12 @@ static bool player_ui_unrecorded_experimental(const GameRecord *game) {
     return record_tier == PLAYER_UI_TIER_NONE;
 }
 
+/* `unrecorded`: the title is an experimental entry nobody has recorded a result for
+   (player_ui_unrecorded_experimental), looked up once per title. */
 static const char *player_ui_library_status_word(const GameRecord *game,
-                                                 bool package_ready) {
+                                                 bool package_ready, bool unrecorded) {
     if (package_ready) return "Ready";
-    if (player_ui_unrecorded_experimental(game)) {
+    if (unrecorded) {
         return player_ui_has_seen_boot(game) ? "Experimental" : "Untested";
     }
     return "Needs setup";
@@ -2815,10 +2993,9 @@ static const char *player_ui_library_status_word(const GameRecord *game,
 
 /* Status colours follow the design system: Ready teal, experimental and
    untested info blue (with their own shapes), needs setup warning gold. */
-static uint32_t player_ui_library_status_color(const GameRecord *game,
-                                              bool package_ready) {
+static uint32_t player_ui_library_status_color(bool package_ready, bool unrecorded) {
     if (package_ready) return PLAYER_UI_READY;
-    if (player_ui_unrecorded_experimental(game)) return PLAYER_UI_INFO;
+    if (unrecorded) return PLAYER_UI_INFO;
     return PLAYER_UI_WARNING;
 }
 
@@ -2831,9 +3008,9 @@ static unsigned player_ui_art_kind(const GameRecord *game) {
 }
 
 static const char *player_ui_library_status_marker(const GameRecord *game,
-                                                   bool package_ready) {
+                                                   bool package_ready, bool unrecorded) {
     if (package_ready) return "●";
-    if (player_ui_unrecorded_experimental(game)) {
+    if (unrecorded) {
         return player_ui_has_seen_boot(game) ? "◆" : "?";
     }
     return "▲";
@@ -2972,12 +3149,20 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
     bool starting;
     bool running;
     const PlayerPreflightCheck *build_blocker;
+    const char *compatibility_category;
+    PlayerUiTier record_tier;
+    bool unrecorded;
     PlayerUiPrimaryAction primary = PLAYER_UI_PRIMARY_NONE;
     if (player == NULL || app == NULL || out == NULL || index < 0 ||
         index >= app->game_count || index >= (int)PLAYER_UI_TITLE_CAP) {
         return primary;
     }
     game = &app->games[index];
+    /* One compatibility lookup for the title: its words and tier, and whether it is
+       an experimental entry nobody has recorded (player_ui_unrecorded_experimental). */
+    compatibility_category = player_ui_compatibility_words(
+        game, &out->compatibility_expect, &out->compatibility_known_issues, &record_tier);
+    unrecorded = game->is_experimental && record_tier == PLAYER_UI_TIER_NONE;
     package_status = player_app_cached_runtime_package_status(app, game);
     package_ready = player_app_cached_game_has_runtime(app, game);
     checking = player_app_runtime_package_check_pending(app, game);
@@ -2999,7 +3184,7 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
                                sizeof(player->status_text[index]));
     out->title = game->title_name;
     out->disc_id = game->disc_id;
-    out->library_status = player_ui_library_status_word(game, package_ready);
+    out->library_status = player_ui_library_status_word(game, package_ready, unrecorded);
     out->library_status_detail = package_ready || checking
         ? "" : player->status_text[index];
     /* The package card's text follows the package, not the primary action
@@ -3031,9 +3216,9 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         ? player_preflight_plain_message(build_blocker) : "";
     out->build_preflight_folder = build_blocker
         ? app->package_build_preflight.action_folder : "";
-    out->compatibility_category = player_ui_compatibility(
-        game, &out->compatibility_expect, &out->compatibility_known_issues,
-        &out->compatibility_tier);
+    out->compatibility_category = compatibility_category;
+    out->compatibility_tier = record_tier != PLAYER_UI_TIER_NONE
+        ? record_tier : player_ui_tier_for_category(compatibility_category);
     if (!app->settings.developer_mode) out->compatibility_category = NULL;
     /* The disc's executable is encrypted: the player decrypts it from the
        disc (#295). The title screen shows this only while the package still
@@ -3043,14 +3228,13 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         game->executable_selection == NK_ISO_EXEC_SELECTION_NONE
             ? "Nakagawa decrypts this game's program from your own disc, on this PC."
             : "";
-    out->status_rgba = player_ui_library_status_color(game, package_ready);
-    out->status_marker = player_ui_library_status_marker(game, package_ready);
+    out->status_rgba = player_ui_library_status_color(package_ready, unrecorded);
+    out->status_marker = player_ui_library_status_marker(game, package_ready, unrecorded);
     if (starting) {
         out->library_status = "Starting";
         out->status_rgba = PLAYER_UI_INFO;
         out->status_marker = "◆";
-    } else if (out->package_state == PLAYER_UI_PACKAGE_CHECKING &&
-               !player_ui_unrecorded_experimental(game)) {
+    } else if (out->package_state == PLAYER_UI_PACKAGE_CHECKING && !unrecorded) {
         /* Launcher review B4: until the background check has looked at the
            package, the card does not know it needs setup. */
         out->library_status = "Checking";
@@ -3135,10 +3319,10 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
 #endif
     out->save_folder_enabled = game->disc_id[0] != '\0';
     out->can_remove = player_app_removal_blocker(app, index) == NULL;
-    {
-        char value[PLAYER_LAUNCH_TITLE_VALUE_MAX];
-        out->can_add_to_steam = player_app_launch_title_value(app, index, value, sizeof(value));
-    }
+    /* Only the title page offers Add to Steam, so only it pays for the shared
+       disc ID scan (player_ui_fill_title_page): the library fills every title
+       each frame. */
+    out->can_add_to_steam = false;
     {
         const PlayerTitleEnhancement *enhancement = &app->title_enhancements[index];
         bool saved = player_app_title_60hz_saved(app, game->disc_id);
@@ -3449,7 +3633,8 @@ static size_t player_ui_focused_title_index(NkUiId focused, size_t count) {
 
 /* Shows library page `page`. A card with focus hands it to the card in the
    same place on the new page (the last one when the page is shorter), since
-   the page shown follows the focused card. */
+   the page shown follows the focused card. The grid's last slot is the add
+   card only outside find mode; while finding, every slot is a match. */
 static void player_ui_library_turn_page(PlayerUiNk *player, size_t count, size_t page_size,
                                         size_t slots, size_t page) {
     NkUiId focused = nk_ui_focused(player->ui);
@@ -3466,7 +3651,8 @@ static void player_ui_library_turn_page(PlayerUiNk *player, size_t count, size_t
     if (slot != SIZE_MAX) {
         size_t position = page * page_size + slot;
         if (position >= slots) position = slots - 1u;
-        index = position + 1u < slots ? player_ui_library_grid_title(&view, position) : count;
+        index = !player->find_open && position + 1u == slots
+            ? count : player_ui_library_grid_title(&view, position);
         nk_ui_focus(player->ui, index < count ? PLAYER_UI_ID_LIBRARY_ITEM(index)
                                               : PLAYER_UI_ID_LIBRARY_ADD);
     }
@@ -3486,8 +3672,8 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     NkUiEvent repeats[8];
     size_t repeat_count;
     const NkUiDrawList *draw_list;
-    PlayerUiAction action = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
-    PlayerUiAction rebuild_answer = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    PlayerUiAction action = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
+    PlayerUiAction rebuild_answer = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
     PlayerUiRoute route;
     if (out_action != NULL) {
         out_action->kind = PLAYER_UI_ACTION_NONE;
@@ -3554,10 +3740,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         nk_ui_push_event(player->ui, &repeats[i]);
     }
     player_ui_art_pump(player->art);
-    /* Sounds follow the setting, and stay closed while a game runs so its own
-       audio is left alone. */
-    player_ui_sounds_set_enabled(player->sounds,
-                                 app->settings.ui_sounds && !app->is_game_running);
+    player_ui_nk_follow_sounds(player, app);
     {
         /* The owner's first run: one click on COPY FILES AND CONTINUE swapped
            in the copy screen, whose CANCEL sits where the button was, and the
@@ -3896,9 +4079,13 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 !player_app_runtime_package_check_failed(app, game)) {
                 (void)player_app_build_package_preflight(app, index, false);
             }
-            player_ui_fill_titles(player, app, (size_t)app->game_count >
-                                  PLAYER_UI_TITLE_CAP ? PLAYER_UI_TITLE_CAP :
-                                  (size_t)app->game_count);
+            /* The page shows this title alone, so only it is filled. */
+            (void)player_ui_fill_title(player, app, index, &player->titles[index]);
+            {
+                char value[PLAYER_LAUNCH_TITLE_VALUE_MAX];
+                player->titles[index].can_add_to_steam =
+                    player_app_launch_title_value(app, index, value, sizeof(value));
+            }
             player_ui_title_art(player, app, (size_t)index, true);
             memset(&model, 0, sizeof(model));
             model.title = &player->titles[index];
@@ -3998,6 +4185,16 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 if (player_ui_open_remove(player, app, index)) {
                     nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
                     (void)nk_ui_router_push(player->router, PLAYER_UI_ROUTE_REMOVE);
+                } else {
+                    /* No plan, so nothing is removed: say why rather than ignore the press. */
+                    const char *blocker = player_app_removal_blocker(app, index);
+                    player_app_set_error(
+                        app, "REMOVE_PLAN_FAILED", "The game was not removed",
+                        blocker != NULL
+                            ? blocker
+                            : "Nakagawa could not list this game's files safely: a folder "
+                              "path is too long. Nothing was removed.",
+                        "Back", VIEW_LIBRARY);
                 }
                 action.kind = PLAYER_UI_ACTION_NONE;
             } else if (action.kind == PLAYER_UI_ACTION_PRIMARY &&
@@ -4133,6 +4330,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             model.row_count = player_ui_saves_page_rows(player);
             model.first_row = player->saves_first;
             model.total = player->saves_total;
+            model.listed = player->saves_list_count;
             model.ask = player->saves_ask;
             model.ask_row = player->saves_ask_row;
             model.ask_name = player->saves_ask_name;
@@ -4245,8 +4443,31 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         nk_ui_focus(player->ui, PLAYER_UI_ID_TAB_LIBRARY);
         action.kind = PLAYER_UI_ACTION_NONE;
     }
+    /* The action is handed back before the frame is finished: its route has
+       already changed (a confirmation dialog closed, the rebuild prompt was
+       answered), so a frame that cannot be drawn must not drop it. */
+    if (action.kind == PLAYER_UI_ACTION_NONE) action = rebuild_answer;
+    if (out_action != NULL && action.kind != PLAYER_UI_ACTION_NONE) {
+        *out_action = action;
+    }
     nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
     draw_list = nk_ui_end(player->ui);
+    /* The inspector's own close button turns it off in Clay; the setting follows, so the
+       next frame does not turn the panel on again. */
+    if (app->settings.developer_mode && app->dev_log.inspect_layout &&
+        !nk_ui_layout_debug(player->ui)) {
+        app->dev_log.inspect_layout = false;
+        player_dev_log_add(app, "ui", "layout inspector off (closed from its panel)");
+    }
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    /* Stands in for a frame nk_ui could not finish, on the frame that confirms
+       Remove from library. */
+    if (getenv("NK_UI_TEST_FAIL_REMOVE_CONFIRM_FRAME") != NULL && out_action != NULL &&
+        out_action->kind == PLAYER_UI_ACTION_REMOVE_CONFIRM) {
+        puts("[PLAYER_UI_TEST] UI_FRAME_NOT_DRAWN");
+        draw_list = NULL;
+    }
+#endif
     if (draw_list == NULL) return false;
     {
         NkUiId focus_now = nk_ui_focused(player->ui);
@@ -4264,9 +4485,5 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     (void)SDL_RenderClear(renderer);
     if (!nk_ui_sdlr_render(player->backend, draw_list)) return false;
     SDL_RenderPresent(renderer);
-    if (action.kind == PLAYER_UI_ACTION_NONE) action = rebuild_answer;
-    if (out_action != NULL && action.kind != PLAYER_UI_ACTION_NONE) {
-        *out_action = action;
-    }
     return true;
 }
