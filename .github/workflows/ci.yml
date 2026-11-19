@@ -1296,12 +1296,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
             make CC=gcc gpu-ace-selftest gpu-mips-selftest gpu-mips-mutant tex-scale-gate-mutant gpu-coherence-selftest-movie-mutant 2>&1 \
             | tee "$RUNNER_TEMP/gpu-ace-mips.log"
@@ -1316,12 +1311,7 @@ jobs:
         if: matrix.part == 'translation' && github.event_name == 'schedule'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
             make CC=gcc gpu-coherence-twin-mutants
 

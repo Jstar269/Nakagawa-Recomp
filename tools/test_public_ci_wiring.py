@@ -489,7 +489,8 @@ class PublicCiWiringTests(unittest.TestCase):
         assert step is not None
         text = "\n".join(step)
         self.assertIn("set -euo pipefail", text)
-        self.assertIn('export VK_ICD_FILENAMES="$lvp_icd"', text)
+        # The job's "Select the lavapipe Vulkan ICD" step found the ICD and recorded it.
+        self.assertIn('export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"', text)
         self.assertIn('xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11', text)
         for target in ("gpu-ace-selftest", "gpu-mips-selftest", "gpu-mips-mutant", "tex-scale-gate-mutant",
                        "gpu-coherence-selftest-movie-mutant"):
