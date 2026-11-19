@@ -16,9 +16,11 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 RT = ROOT / "src" / "rt"
@@ -268,13 +270,13 @@ class TestTransitionTraceC(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def run_harness(self, arg: str, *extra: str) -> subprocess.CompletedProcess:
+    def run_harness(self, arg: str, *extra: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env.pop("SR_GE_TRANSITION_TRACE", None)
         env.pop("SR_GESTAT", None)
         env.pop("SR_RTRACE", None)
         return subprocess.run([os.fspath(self.exe), arg, *extra], capture_output=True, text=True,
-                              cwd=self.tmp, env=env)
+                              cwd=cwd or self.tmp, env=env)
 
     def test_weighted_draw_records(self):
         trace = self.tmp / "transition.jsonl"
@@ -395,12 +397,16 @@ class TestTransitionTraceC(unittest.TestCase):
         self.assertIn("GE_LATE_WRITE frame=42 draw=0", result.stderr)
 
     def test_trace_off_by_default(self):
-        sentinel = self.tmp / "should_not_exist.jsonl"
-        result = self.run_harness("off")
+        # With no SR_GE_TRANSITION_TRACE the trace neither arms nor tries to open anything:
+        # run in a fresh, empty folder, which must still be empty afterwards (a default path
+        # would land there), and the stderr carries no trace line at all.
+        cwd = Path(tempfile.mkdtemp(prefix="off_", dir=self.tmp))
+        result = self.run_harness("off", cwd=cwd)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("DONE", result.stdout)
-        self.assertNotIn("GE_TRANSITION_TRACE: armed", result.stderr)
-        self.assertFalse(sentinel.exists())
+        self.assertNotIn("GE_TRANSITION_TRACE:", result.stderr)
+        self.assertEqual(sorted(path.name for path in cwd.rglob("*")), [],
+                         "the trace wrote a file although it was never armed")
 
     def test_non_finite_bone_values_are_emitted_as_json_null(self):
         # A real #69 trace put `-nan(ind)` in the JSONL (printf's NaN spelling) and
@@ -429,15 +435,15 @@ class TestTransitionTraceC(unittest.TestCase):
             self.assertEqual(nf[side][3], None, f"{side}[3] must be JSON null for NaN")
             self.assertIsNone(nf[side][5], f"{side}[5] must be JSON null for -Inf")
             self.assertEqual(nf[side][0], 0.0)
+            self.assertEqual(nf[side][1], 1.0)
+            self.assertEqual(nf[side][4], -1.0)
+            self.assertEqual(len(nf[side]), 96)
         # The record also counts them, so the draw that cannot be drawn is named
         # by one number instead of by counting nulls by hand. This is the field
         # that joins an SR_NAN_TRAP line (same vblank) to the GE's drop.
         self.assertEqual(nf["non_finite"], 3)
         for record in records[:3]:
             self.assertEqual(record["non_finite"], 0, record["frame"])
-            self.assertEqual(nf[side][1], 1.0)
-            self.assertEqual(nf[side][4], -1.0)
-            self.assertEqual(len(nf[side]), 96)
         # Unrelated matrices keep their finite numbers (no null leakage).
         for side in ("world_effective", "view_effective", "proj_effective"):
             self.assertNotIn(None, nf[side], f"{side} must stay finite")
@@ -469,8 +475,17 @@ def make_record(frame: int, draw: int, draw_id: str, **overrides) -> dict:
 
 class TestTransitionDiff(unittest.TestCase):
     def run_diff(self, trace: Path, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["python", os.fspath(DIFF_SCRIPT), os.fspath(trace), *args],
+        # The interpreter running this suite, not whatever `python` is first on PATH (none on
+        # stock Ubuntu 24.04, the Store alias on Windows, another version under a venv).
+        return subprocess.run([sys.executable, "-I", os.fspath(DIFF_SCRIPT), os.fspath(trace), *args],
                               capture_output=True, text=True, cwd=ROOT)
+
+    def test_the_diff_runs_under_this_interpreter(self):
+        trace = self.write_three_frame_trace()
+        with mock.patch.object(subprocess, "run", wraps=subprocess.run) as run:
+            result = self.run_diff(trace, "--frames", "30:31")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(run.call_args.args[0][:2], [sys.executable, "-I"])
 
     def write_three_frame_trace(self) -> Path:
         tmp = Path(tempfile.mkdtemp(prefix="getransitiondiff_"))

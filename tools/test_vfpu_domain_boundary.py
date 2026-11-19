@@ -49,6 +49,8 @@ COMPATIBILITY_MD = ROOT / "docs" / "COMPATIBILITY.md"
 HARDWARE_ORACLE_MD = ROOT / "docs" / "HARDWARE_ORACLE.md"
 VFPU_INTERP_SELFTEST_C = ROOT / "tests" / "native" / "vfpu_interp_selftest.c"
 VFPU_PROBE_C = ROOT / "tests" / "fixtures" / "vfpu_oracle" / "vfpu_probe.c"
+#: The probe and the Nakagawa-side emitter share their input words through this header.
+VFPU_ORACLE_CASES_H = ROOT / "tests" / "fixtures" / "vfpu_oracle" / "vfpu_oracle_cases.h"
 
 #: `|x| = 1.0` in raw bits: the documented end of the arc-sine domain.
 DOMAIN_LIMIT_WORD = 0x3F800000
@@ -192,9 +194,11 @@ class NamedBoundaryTests(unittest.TestCase):
 
     def test_oracle_table_inputs_are_the_words_the_probe_fed_the_console(self) -> None:
         probe_src = VFPU_PROBE_C.read_text(encoding="utf-8")
-        start = probe_src.index("VASIN_DOMAIN_INPUTS[] = {")
+        cases_src = VFPU_ORACLE_CASES_H.read_text(encoding="utf-8")
+        self.assertIn('#include "vfpu_oracle_cases.h"', probe_src)
+        start = cases_src.index("VASIN_DOMAIN_INPUTS[] = {")
         probe_inputs = re.findall(
-            r"0x([0-9A-Fa-f]{8})u", probe_src[start:probe_src.index("};", start)])
+            r"0x([0-9A-Fa-f]{8})u", cases_src[start:cases_src.index("};", start)])
         self.assertEqual(len(probe_inputs), 14)
         start = self.oracle.index("Out-of-domain transcendental arguments")
         cell = self.oracle[start:self.oracle.index("\n- ", start + 1)]

@@ -171,9 +171,14 @@ class VcountCadenceSourceTests(unittest.TestCase):
     class, and the only harness that links the tick (hle-thread-selftest) builds on
     Windows alone, so this pins the call sites on every host: an exact modulus on VCOUNT
     anywhere in the tick reintroduces the lost and doubled boundaries.
+
+    The bodies are read with comments and string literals blanked, so any `%` or `&` mask
+    applied to VCOUNT in code is flagged in whatever form it takes (`frame % 60 == 0`,
+    `!(s_vcount % 64u)`, `0 == s_vcount % 64`, `(s_vcount & 63u) == 0`), while the comment
+    that names the old `frame % 60 == 0` defect and the `%u` of a log format are not.
     """
 
-    EXACT_MODULUS = re.compile(r"\((?:s_vcount|frame)\s*(?:%\s*\w+|&\s*0x[0-9a-fA-F]+)\)\s*==\s*0")
+    VCOUNT_MODULUS = re.compile(r"\b(?:s_vcount|frame|vcount)\s*(?:%|&(?!&))")
 
     @staticmethod
     def _body(source: str, signature: str) -> str:
@@ -188,12 +193,41 @@ class VcountCadenceSourceTests(unittest.TestCase):
                     return source[start:index + 1]
         raise AssertionError(f"unbalanced body for {signature}")
 
+    @classmethod
+    def _modulus(cls, body: str) -> re.Match[str] | None:
+        return cls.VCOUNT_MODULUS.search(hle_sources.blank_comments_and_literals(body))
+
+    def test_modulus_guard_flags_every_form_and_ignores_comments(self) -> None:
+        for code in (
+            "if (frame % 60 == 0) dump();",
+            "if ((frame % 60) == 0) dump();",
+            "if (s_vcount % 64u == 0u) log();",
+            "if (!(s_vcount % 64u)) log();",
+            "if (0 == s_vcount % 64) log();",
+            "if ((s_vcount & 63u) == 0) log();",
+            "if ((s_vcount & 0x3Fu) == 0) log();",
+            "if (vcount%120u == 0u) dump();",
+        ):
+            with self.subTest(code=code):
+                self.assertIsNotNone(self._modulus(code))
+        for code in (
+            "/* an exact `frame % 60 == 0` test lost the window */",
+            "// frame % 60 == 0 was the old test",
+            'fprintf(stderr, "VBLANK tick %u frame %u\\n", s_vcount, frame);',
+            "if (sr_vcount_window_crossed(s_vcount, 64u, &tick_log_window)) log();",
+            "if (frame && s_vcount) log();",
+            "if (s_ge_frame % 2u) skip();",
+        ):
+            with self.subTest(code=code):
+                self.assertIsNone(self._modulus(code))
+
     def test_vblank_tick_and_ge_window_have_no_exact_modulus(self) -> None:
         tick = self._body(hle_sources.text(), "void sr_vblank_tick(void) {")
         frame = self._body((ROOT / "src" / "rt" / "ge.c").read_text(encoding="utf-8"), "void ge_set_frame(uint32_t frame) {")
         for name, body in (("sr_vblank_tick", tick), ("ge_set_frame", frame)):
             with self.subTest(function=name):
-                self.assertIsNone(self.EXACT_MODULUS.search(body), name)
+                found = self._modulus(body)
+                self.assertIsNone(found, f"{name}: {found.group(0) if found else ''}")
         self.assertEqual(tick.count("sr_vcount_window_crossed("), 2,
                          "the GE log cadence and the profile dump both cross boundaries")
         self.assertEqual(frame.count("sr_vcount_window_crossed("), 1)

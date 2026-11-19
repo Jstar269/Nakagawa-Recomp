@@ -83,5 +83,26 @@ int main(int argc, char **argv) {
                CASES[c].case_id, digest, spot[0], spot[1], spot[2],
                (unsigned int)VFPU_ORACLE_INPUT_COUNT);
     }
+
+    /* The probe's per-word records, in its order: the vasin domain words (issue #69), then
+       vsin and vcos over the large-argument region one input at a time. A digest says THAT
+       these divergence-prone cells differ; only per-word records say WHERE. */
+    for (unsigned i = 0; i < sizeof(VASIN_DOMAIN_INPUTS) / sizeof(VASIN_DOMAIN_INPUTS[0]); ++i) {
+        const uint32_t in = VASIN_DOMAIN_INPUTS[i];
+        const uint32_t out = f2b(sr_vfpu_asin(b2f(in)));
+        printf("NAKAGAWA_PSP_TEST schema=1 test_id=PSP-VFPU-001 "
+               "case_id=vfpu-vasin-domain-arg%02u status=PASS "
+               "result=0x%08x out0=0x%08x\n",
+               i, (unsigned int)out, (unsigned int)in);
+    }
+    for (unsigned c = 5; c <= 6; ++c) {   /* CASES[5] is vsin, CASES[6] vcos, as in the probe */
+        for (unsigned i = VFPU_ORACLE_LARGE_ARG_FIRST; i < VFPU_ORACLE_INPUT_COUNT; ++i) {
+            const uint32_t in = VFPU_ORACLE_INPUTS[i];
+            const uint32_t out = f2b(CASES[c].fn(b2f(in)));
+            printf("NAKAGAWA_PSP_TEST schema=1 test_id=PSP-VFPU-001 case_id=%s-arg%02u "
+                   "status=PASS result=0x%08x out0=0x%08x\n",
+                   CASES[c].case_id, i, (unsigned int)out, (unsigned int)in);
+        }
+    }
     return 0;
 }

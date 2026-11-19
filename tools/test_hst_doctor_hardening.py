@@ -26,6 +26,23 @@ import nk_doctor_core  # noqa: E402
 from hst_test_fixtures import write_elf, write_iso, write_psp_header  # noqa: E402
 from nk_core.git_isolation import isolated_git_env, run_git  # noqa: E402
 
+# The doctor reads these from the caller's environment, and a developer shell or the
+# documented Make route may export them. Every test here starts without them, so none
+# validates or probes the caller's real title manifest, data root or Memory Stick
+# folder; a test that needs one sets it inside its own mock.patch.dict.
+CALLER_INPUT_VARIABLES = ("TITLE_MANIFEST", "SR_DATAROOT", "SR_MEMSTICK")
+_caller_environment = mock.patch.dict(os.environ)
+
+
+def setUpModule() -> None:
+    _caller_environment.start()
+    for name in CALLER_INPUT_VARIABLES:
+        os.environ.pop(name, None)
+
+
+def tearDownModule() -> None:
+    _caller_environment.stop()
+
 
 def retail_manifest() -> dict[str, object]:
     return {
@@ -254,23 +271,13 @@ This remains subject to legal review.
 
 
 class ManagerExitPropagationHardeningTests(unittest.TestCase):
-    def test_parameterized_manager_actions_fail_closed(self) -> None:
+    def test_run_action_without_a_result_fails_closed(self) -> None:
+        # Source-shape tripwire for the Run action only, which needs a launched player.
+        # BuildFull, BuildFast, Test and Fuzz are run against a failing Make target in
+        # test_hst_manager_manifest.test_a_failing_make_target_makes_each_action_exit_nonzero.
         manager = (ROOT / "tools" / "nk_manager.ps1").read_text(encoding="utf-8-sig")
-        # Each failing action records a nonzero termination code and breaks out of the
-        # switch; the single `exit` after the finally block applies it, so the caller
-        # sees a nonzero status AND the caller's location is restored first.
-        self.assertIn(
-            '"BuildFull" { if (-not (Invoke-NkBuild -Mode "Full")) { $script:ManagerExitCode = 1; break } }',
-            manager,
-        )
-        self.assertIn(
-            '"BuildFast" { if (-not (Invoke-NkBuild -Mode "Fast")) { $script:ManagerExitCode = 1; break } }',
-            manager,
-        )
-        self.assertIn('if (-not (Invoke-Selftest)) { $script:ManagerExitCode = 1; break }', manager)
         self.assertIn('$script:LastRunResult = $null', manager)
         self.assertIn('if ($null -eq $script:LastRunResult) { $script:ManagerExitCode = 1; break }', manager)
-        self.assertIn('if ($Action -and $script:ManagerExitCode -ne 0) {\n    exit $script:ManagerExitCode', manager)
 
     def test_frontend_does_not_mask_manager_failure(self) -> None:
         frontend = (ROOT / "nk.ps1").read_text(encoding="utf-8-sig")
@@ -484,6 +491,8 @@ class SetupMatrixScenariosTests(unittest.TestCase):
             nk_doctor_checks.check_save_root(report, root)
             failures = [res for res in report.results if res.status == "FAIL"]
             self.assertEqual(failures, [])
+            save_root = next(res for res in report.results if res.code == "SAVE_ROOT")
+            self.assertEqual(Path(save_root.path), Path("memstick"), "the default branch ran")
 
     def test_case_h_missing_lawful_inputs_fail_closed(self) -> None:
         """The doctor must FAIL CLOSED when the lawful retail inputs are absent.

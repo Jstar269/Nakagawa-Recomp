@@ -196,9 +196,12 @@ class VfpuTableManifestTests(unittest.TestCase):
         loader = TABLES_C.read_text(encoding="utf-8")
         self.assertIn("little-endian host is required", loader)
         # Evidence must report whether PSP_VFPU_TABLES is REALLY set, so a
-        # default run never masquerades as an override run (and vice versa).
+        # default run never masquerades as an override run (and vice versa), and
+        # a caller's explicit root is labelled as neither.
         self.assertNotIn("env_root != NULL", loader)
-        self.assertIn("sr_vfpu_evidence(effective, env_overridden)", loader)
+        self.assertIn('sr_vfpu_evidence(effective, root ? "explicit"\n'
+                      '                                     : env_overridden ? "PSP_VFPU_TABLES" '
+                      ': "default-assets/vfpu");', loader)
 
     def test_selftest_and_makefile_target_present(self):
         self.assertTrue(SELFTEST_C.is_file(), "vfpu_tables_selftest.c missing")

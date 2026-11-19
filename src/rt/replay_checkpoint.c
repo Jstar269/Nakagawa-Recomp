@@ -251,6 +251,11 @@ static int ckpt_take(uint32_t vcount) {
     sched_for_each_thread_cpu(ckpt_visit_thread, &visit);
     if (visit.sched_overflow) s_ckpt.overflow = 1;
     nk_ckpt_add(&s_ckpt, "sched", visit.sched, visit.sched_len);
+    /* VRAM a renderer or the depth surface still owns is materialized first, as for every
+     * bulk VRAM reader, so the digest is the VRAM the guest would read
+     * (sr_ge_vram_read_prepare stops the run by name when it cannot be). */
+    if (g_sr_vram_read_pending)
+        sr_ge_vram_read_prepare(sr_vram_cpu_address(CKPT_VRAM_BASE), CKPT_VRAM_SIZE);
     nk_ckpt_add_chunks(&s_ckpt, "vram", CKPT_VRAM_BASE, SR_HOST_LINEAR(CKPT_VRAM_BASE), CKPT_VRAM_SIZE, CKPT_CHUNK);
     nk_ckpt_add_chunks(&s_ckpt, "ram", SR_RAM_BASE, g_mem, CKPT_RAM_SIZE, CKPT_CHUNK);
     s_ckpt_taken = 1;
@@ -687,7 +692,9 @@ static void replay_setup(const char *path) {
             static OskAnswer a;
             if (s_rep_have_end_line) refuse("after-end", line_no);
             if (!parse_answer(p + 11, &a)) refuse("malformed-answer", line_no);
-            if (a.request + 1u == s_rep_answ_count && s_rep_answ[a.request].result == ANSW_OPEN &&
+            /* In size_t: a 32-bit request + 1 wraps to 0 and matched an empty answer list. */
+            if (s_rep_answ_count != 0u && (size_t)a.request == s_rep_answ_count - 1u &&
+                s_rep_answ[a.request].result == ANSW_OPEN &&
                 a.pending >= s_rep_answ[a.request].pending) {
                 s_rep_answ[a.request] = a; /* a later line for a request still open */
             } else if (a.request == s_rep_answ_count) {
@@ -837,11 +844,15 @@ static void rr_vblank(uint32_t vcount) {
         const size_t index = s_rep_ckpt_next;
         if (!nk_ckpt_parse(s_rep_ckpt[index], &s_rep_expect, detail, sizeof detail))
             refuse("malformed-checkpoint", 0);
-        if (!ckpt_take(vcount)) die("REPLAY_MISMATCH reason=checkpoint-overflow");
-        const NkCkptDiff diff = nk_ckpt_compare(&s_rep_expect, &s_ckpt, &m);
-        if (diff != NK_CKPT_SAME) {
+        /* A replay checkpoint that does not fit (more threads than a checkpoint holds)
+         * means the run has diverged from the recording here: this checkpoint's mismatch,
+         * kind=overflow, in the one documented verdict shape. */
+        const int taken = ckpt_take(vcount);
+        const NkCkptDiff diff = taken ? nk_ckpt_compare(&s_rep_expect, &s_ckpt, &m) : NK_CKPT_SAME;
+        if (!taken || diff != NK_CKPT_SAME) {
             fprintf(stderr, "REPLAY_MISMATCH frame=%" PRIu32 " index=%zu kind=%s digest=%s\n", vcount, index,
-                    nk_ckpt_diff_name(diff), diff == NK_CKPT_FRAME ? "-" : m.name);
+                    taken ? nk_ckpt_diff_name(diff) : "overflow",
+                    !taken || diff == NK_CKPT_FRAME ? "-" : m.name);
             flight_divergence();
             fflush(stderr);
             s_rr = RR_OFF;

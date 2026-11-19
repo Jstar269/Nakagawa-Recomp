@@ -1360,6 +1360,21 @@ static void test_title_config_hle_bindings(void) {
         expect(sr_title_config_diagnostics_enabled() == expected,
                "title diagnostic profile matches the explicit selftest expectation");
     }
+    /* The data-file census binding the manifest configured reaches the accessor hle_data.c
+     * checks every index against; the line lets the driver see the check ran. */
+    {
+        const char *expected_count = getenv("SR_EXPECT_DATA_FILE_COUNT");
+        if (expected_count && expected_count[0]) {
+            char *end = NULL;
+            unsigned long want = strtoul(expected_count, &end, 10);
+            uint32_t got = sr_title_config_expected_data_file_count();
+            expect(end && *end == '\0' && want <= UINT32_MAX,
+                   "SR_EXPECT_DATA_FILE_COUNT is a decimal 32-bit count");
+            expect(got == (uint32_t)want,
+                   "the configured expected data-file count reaches the runtime accessor");
+            fprintf(stderr, "title_config: expected data-file count %u\n", (unsigned)got);
+        }
+    }
 
     expect(strcmp(cfg->source_id, "none") == 0 || cfg->valid != 0u,
            "the HLE probe has an explicit source identity");

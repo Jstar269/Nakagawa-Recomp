@@ -99,18 +99,20 @@ class GeneratedHeader:
 
 @dataclass(frozen=True)
 class StrictUnit:
-    """The extra flags the Makefile compiles one source with.
+    """The extra flags the build compiles one source with.
 
     *recipes* name the Makefile rules (their target text) whose compile line
-    these flags come from; ``tools/test_contrib_check.py`` reads those recipes
-    and fails if a define, include or warning listed here is not on them, so
-    this table cannot drift from the build.
+    these flags come from; *builder* names a ``(path, function)`` Python
+    helper when a tool builds the source directly instead of a Makefile rule.
+    ``tools/test_contrib_check.py`` reads those recipes or that builder and
+    fails if a define, include or warning listed here drifts from the build.
     """
 
-    recipes: tuple[str, ...]
+    recipes: tuple[str, ...] = ()
+    builder: tuple[str, str] | None = None
     defines: tuple[str, ...] = ()
     includes: tuple[str, ...] = ()
-    #: ``-Wno-*`` suppressions the Makefile owns, with their reason, for this
+    #: ``-Wno-*`` suppressions the build owns, with their reason, for this
     #: source's warning-audited build.  Only the ones this source needs.
     warnings: tuple[str, ...] = ()
     generated: tuple[GeneratedHeader, ...] = ()
@@ -226,6 +228,13 @@ STRICT_C_UNITS: dict[str, StrictUnit] = {
     "tests/native/texrepl_selftest.c": StrictUnit(
         recipes=("texrepl-selftest",),
         defines=("NK_SORT_COUNT_COMPARES", "NK_INFLATE_COUNT_BUILDS", "NK_TEXREPL_TEST_HOOKS"),
+    ),
+    # The standalone GE VRAM decoder is compiled by tools/nk_cli.py
+    # (_build_vram_decoder) with -DSR_GE_VRAM_DECODER_CLI and the common
+    # include paths (-Isrc/rt, -Isrc/core, -Isrc/core/generated, -Isrc/player).
+    "src/rt/ge_vram_cli.c": StrictUnit(
+        builder=("tools/nk_cli.py", "_build_vram_decoder"),
+        defines=("SR_GE_VRAM_DECODER_CLI",),
     ),
 }
 

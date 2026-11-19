@@ -1535,7 +1535,7 @@ reaches it and writes exactly one verdict to stderr:
 | Verdict | Meaning |
 | --- | --- |
 | `REPLAY_REFUSED reason=<name> line=<n>` | exit 1 before the guest runs: another executable, disc, `CpuState` ABI or clock, or a line it cannot read |
-| `REPLAY_MISMATCH frame=<f> index=<i> kind=<k> digest=<name>` | exit 1 at the first checkpoint that differs, naming the thread, scheduler or memory chunk |
+| `REPLAY_MISMATCH frame=<f> index=<i> kind=<k> digest=<name>` | exit 1 at the first checkpoint that differs, naming the thread, scheduler or memory chunk. `kind=overflow digest=-` means the replay's own checkpoint did not fit (more threads than a checkpoint holds), so the run diverged there |
 | `REPLAY_MISSING_ANSWER call=osk request=<k> frame=<f> detail=<why>` | exit 1: the guest asked for an answer the recording does not hold. Nothing is made up |
 | `REPLAY_COMPLETE frame=<f> checkpoints=<n> answers=<k>` | every checkpoint matched. Input recorded after the last one is still served; the pad and the keyboard each go live when the recording runs out |
 | `REPLAY_NOT_RUN reached=<f> end=<f> checkpoints=<i>/<n>` | at exit, when the run stopped before the recording was used up. This is never a pass |
@@ -1639,10 +1639,11 @@ python tools/soak_audit.py --perf logs/perf.csv --proc proc.csv --stderr logs/st
 | `compat_patches` | never: it names each temporary compatibility patch that fired (the runtime's `COMPAT_PATCH_REPORT`, #1274), so a defect can be traced to an active patch; `--compat-counts-only` keeps the ids out of a summary you will publish |
 
 Output is one `SOAK_CHECK:` line per assertion plus a `SOAK_AUDIT:` verdict line, and the exit
-status is non-zero if any assertion failed. Two rules keep it honest: an input it was not
-given reports `SKIP` with the reason rather than passing, and a quantity the runtime does not
-publish is reported as absent. When every check is `SKIP` (no input judged anything), the
-verdict is `SKIP` and the exit status is 2, never a pass.
+status is 1 if any assertion failed. Three rules keep it honest: an input it was not
+given reports `SKIP` with the reason rather than passing, a quantity the runtime does not
+publish is reported as absent, and a run in which nothing was judged (`compat_patches` only
+reports) is `verdict=SKIP` with exit status 77, never a pass. `--compat-counts-only` also
+names only the kinds of fatal marker, not the raw line, which can carry a host path.
 
 **Audio drift** is the one that was unmeasurable until the telemetry published it. The runtime
 reads the queue depth the blocking output paces against in `src/rt/hle_audio.c`
@@ -1718,7 +1719,7 @@ scan: they are excluded from `presenting` and never counted as a stall.
 | `SR_VIDEOREC_DIR=PATH` | Record the run: one video frame per VBLANK at the presenter's output size plus the game's mixed audio, on one guest timeline. Needs `SR_DETERMINISTIC_CLOCK=1`; without it the recording is refused ([Recording a video of a run](#recording-a-video-of-a-run)) |
 | `SR_VIDEOREC_CODEC=ffv1\|x264rgb\|nvenc\|raw` | Encoder for a recording (default `ffv1`, lossless); `raw` writes unencoded frames and needs no FFmpeg. An encoder that cannot run refuses the recording; it never falls back to `raw` |
 | `SR_VIDEOREC_SIZE=WxH` | Output size of a recording, independent of the window (even numbers); default: the window's size at the first recorded present |
-| `SR_VIDEOREC_START=V` | Start the recording at VBLANK V (its first presented picture from there on); earlier pictures and sound are not recorded |
+| `SR_VIDEOREC_START=V` | Start the recording at VBLANK V (its first presented picture from there on); earlier pictures and sound are not recorded. V is decimal digits only, at most 4294967295; any other value (a sign, a space, a suffix) refuses the recording by name |
 | `SR_VIDEOREC_FFMPEG=PATH` | Absolute path of the FFmpeg a recording uses; default: the first absolute `PATH` entry that holds it |
 | `SR_DEVELOPER_MODE=0\|1` | Developer mode (the launcher exports its setting): `F3`'s profile HUD and the pause menu's VRAM viewer and Profile page |
 | `SR_REDUCE_MOTION=on\|off\|system` | The launcher's Reduce motion choice (it always exports one): `on` makes the pause overlay's transitions cuts, `off` lets them ease, and `system` (the launcher's Automatic), unset or anything else follows Windows' Animation effects as the overlay draws |
@@ -2545,7 +2546,8 @@ one subtitle per 60 frames (`game 29.9 fps (30 frames)`), and `record.json` give
 
 The folder receives `video.mkv` (FFV1, piped to FFmpeg's standard input), `audio.wav`, `frames.csv`
 (one row per frame: VBLANK, guest time, whether it is a `new` picture, a `repeat` or a `gap`, and its
-guest flips), `logic.srt`, `record.json` (the summary, `PASS` or `FAIL` with the reason) and
+guest flips; a `gap` row carries the guest time of the VBLANK that wrote it, since none was serviced
+at its own), `logic.srt`, `record.json` (the summary, `PASS` or `FAIL` with the reason) and
 `recording.mkv`: picture, sound and the frame-rate subtitles (a track that is off by default) muxed
 without re-encoding. With `SR_VIDEOREC_CODEC=raw` the frames go to `video.bgr0` instead (raw BGRX,
 size and rate in `record.json`, no mux, `"muxed": null`).
@@ -2578,7 +2580,8 @@ if another program creates one of those names after the clear, the start is refu
 `video.bgr0`, made at the first picture, the recording is `FAIL`), naming the file, and that
 program's file is left as it was. FFmpeg runs with `-n` for the same reason. An encoded recording is `PASS` only when the encoder and the mux both exited 0, so
 `PASS` always comes with `"muxed": true`. Under 1 GiB free during the run the recorder stops writing
-video and the recording is `FAIL`; so is any write that fails.
+video and audio (`audio.wav` ends with the last video frame) and the recording is `FAIL`; an encoder
+that stops taking frames stops both the same way. Any write that fails is `FAIL` too.
 
 FFmpeg is the user's own local tool: Nakagawa never ships, downloads or bundles it. The recorder
 starts the FFmpeg it finds in an absolute `PATH` entry, or the one `SR_VIDEOREC_FFMPEG` names, without
