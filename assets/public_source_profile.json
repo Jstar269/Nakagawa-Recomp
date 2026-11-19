@@ -1580,6 +1580,7 @@
     "third_party/licenses/bzip2.txt",
     "third_party/licenses/gcc-libs/COPYING.RUNTIME.txt",
     "third_party/licenses/gcc-libs/COPYING3.txt",
+    "third_party/licenses/harfbuzz/ms-use-COPYING.txt",
     "third_party/licenses/libiconv.txt",
     "third_party/licenses/libintl.txt",
     "third_party/licenses/libpng.txt",

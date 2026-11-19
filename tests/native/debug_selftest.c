@@ -252,7 +252,17 @@ int main(int argc, char **argv) {
     cpu.fi[22] = 0x440b4000u;
     s_cpu = &cpu;
     sr_log_mem_watch_context(0x00001230u);
+    if (g_sr_mem_watch_context_count != 0u) {
+        fprintf(stderr, "debug value watch selftest: context PC filter mismatch\n");
+        return 1;
+    }
+    /* f20 does not hold the configured value yet, so the FPR filter rejects this
+     * call. Checked before the limit can mask a filter that is ignored. */
     sr_log_mem_watch_context(0x00001234u);
+    if (g_sr_mem_watch_context_count != 0u) {
+        fprintf(stderr, "debug value watch selftest: context FPR filter mismatch\n");
+        return 1;
+    }
     cpu.fi[20] = 0x436e0000u;
     sr_log_mem_watch_context(0x00001234u);
     sr_log_mem_watch_context(0x00001234u);
@@ -267,8 +277,15 @@ int main(int argc, char **argv) {
     uint32_t context_words[3] = {0x00000001u, 0x00000005u, 0x00000002u};
     memcpy(g_mem + 0x24u, context_words, sizeof context_words);
     sr_log_store_context(0x09000000u, 0x43110000u, 4u, 0x1234u);
+    if (g_sr_store_context_count != 0u) {
+        fprintf(stderr, "debug value watch selftest: store context PC filter mismatch\n");
+        return 1;
+    }
+    /* Three matching stores against SR_STORE_CONTEXT_LIMIT=2: the third is capped. */
     sr_log_store_context(0x09000000u, 0x43110000u, 4u, 0x5678u);
-    if (g_sr_store_context_count != 1u) {
+    sr_log_store_context(0x09000000u, 0x43110000u, 4u, 0x5678u);
+    sr_log_store_context(0x09000000u, 0x43110000u, 4u, 0x5678u);
+    if (g_sr_store_context_count != 2u) {
         fprintf(stderr, "debug value watch selftest: store context mismatch\n");
         return 1;
     }

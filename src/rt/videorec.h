@@ -164,6 +164,10 @@ int sr_videorec_test_start_from_env(void);
 /* The free space the recorder sees (the reset sets 1 TiB), and failing audio.wav writes. */
 void sr_videorec_test_set_free_bytes(uint64_t bytes);
 void sr_videorec_test_fail_audio_writes(int on);
+/* Samples the finish adds to audio.wav's count for its header, to reach the 4 GiB WAV limit. */
+void sr_videorec_test_wav_extra_samples(uint64_t samples);
+/* Make the frame store's Nth allocation (1-based) fail; 0 clears. */
+void sr_videorec_test_fail_store_alloc(int nth);
 /* Make the clear's move aside of one output file (by name, e.g. "audio.wav") fail; NULL clears. */
 void sr_videorec_test_fail_clear_at(const char *name);
 /* Create one output name (e.g. "audio.wav") right after the clear, as another program could;

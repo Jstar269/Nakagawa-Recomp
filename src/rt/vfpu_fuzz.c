@@ -39,9 +39,20 @@ static uint32_t rng(void) {
     return s_rng;
 }
 
-static float rand_float(void) {
+/* FUZZ_CONSTRAINT, read once in main: rand_float runs 128 times per trial. */
+typedef enum { FUZZ_FINITE = 0, FUZZ_ALLOW_NAN_INF, FUZZ_POSITIVE, FUZZ_NO_ZERO } FuzzConstraint;
+static FuzzConstraint s_constraint = FUZZ_FINITE;
+
+static FuzzConstraint fuzz_constraint_from_env(void) {
     const char *constraint = getenv("FUZZ_CONSTRAINT");
-    if (constraint && strcmp(constraint, "allow_nan_inf") == 0) {
+    if (constraint && strcmp(constraint, "allow_nan_inf") == 0) return FUZZ_ALLOW_NAN_INF;
+    if (constraint && strcmp(constraint, "positive") == 0) return FUZZ_POSITIVE;
+    if (constraint && strcmp(constraint, "no_zero") == 0) return FUZZ_NO_ZERO;
+    return FUZZ_FINITE;
+}
+
+static float rand_float(void) {
+    if (s_constraint == FUZZ_ALLOW_NAN_INF) {
         switch (rng() % 12) {
         case 0: return 0.0f;
         case 1: return 1.0f;
@@ -55,7 +66,7 @@ static float rand_float(void) {
             return (float)m / 16.0f;
         }
         }
-    } else if (constraint && strcmp(constraint, "positive") == 0) {
+    } else if (s_constraint == FUZZ_POSITIVE) {
         switch (rng() % 8) {
         case 0: return 0.0f;
         case 1: return 1.0f;
@@ -65,7 +76,7 @@ static float rand_float(void) {
             return (float)m / 16.0f;
         }
         }
-    } else if (constraint && strcmp(constraint, "no_zero") == 0) {
+    } else if (s_constraint == FUZZ_NO_ZERO) {
         switch (rng() % 7) {
         case 0: return 1.0f;
         case 1: return -1.0f;
@@ -251,6 +262,7 @@ static int fuzz_parse_shard(const char *spec, unsigned *k, unsigned *n) {
 }
 
 int main(int argc, char **argv) {
+    s_constraint = fuzz_constraint_from_env();
     int trials = argc > 1 ? atoi(argv[1]) : 200;
     if (getenv("FUZZ_TRIALS")) {
         trials = atoi(getenv("FUZZ_TRIALS"));

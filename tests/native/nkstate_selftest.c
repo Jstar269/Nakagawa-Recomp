@@ -43,9 +43,24 @@
 #endif
 #include <wchar.h>
 
-/* No GE renderer is linked by this harness. */
+/* No GE renderer is linked by this harness. A test may stand one in: while it holds VRAM
+ * bytes not yet written back (g_sr_vram_read_pending), a CPU read first materializes them,
+ * as ge.c's sr_ge_vram_read_prepare does. */
 volatile int g_sr_vram_read_pending;
-void sr_ge_vram_read_prepare(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
+#define TEST_RENDERER_VRAM 0x04000100u
+static const uint8_t k_test_renderer_bytes[8] = {0x5a, 0xa5, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+static int g_test_renderer_owns_vram;
+static unsigned g_test_renderer_readbacks;
+void sr_ge_vram_read_prepare(uint32_t addr, uint32_t width) {
+    if (!g_test_renderer_owns_vram) return;
+    if (addr > TEST_RENDERER_VRAM ||
+        (uint64_t)addr + width < (uint64_t)TEST_RENDERER_VRAM + sizeof k_test_renderer_bytes)
+        return;
+    memcpy(SR_HOST_LINEAR(TEST_RENDERER_VRAM), k_test_renderer_bytes, sizeof k_test_renderer_bytes);
+    g_test_renderer_owns_vram = 0;
+    g_test_renderer_readbacks++;
+    g_sr_vram_read_pending = 0;
+}
 void sr_ge_vram_write_prepare(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
 void sr_ge_vram_write_commit(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
 
@@ -94,10 +109,14 @@ void sr_yield(CpuState *s) { (void)s; }
 int sr_vfpu_interp(CpuState *s, uint32_t op) { (void)s; (void)op; return 0; }
 uint64_t SDL_GetTicksNS(void) { return 0u; }
 
-/* The scheduler side of the checkpoint stream: one thread, the test machine. */
+/* The scheduler side of the checkpoint stream: one thread, the test machine, plus
+ * g_visit_crowd more that share its state (the child's crowd=<frame> option). */
 static CpuState *g_visit_cpu;
+static unsigned g_visit_crowd;
 void sched_for_each_thread_cpu(SrSchedThreadVisit visit, void *ctx) {
-    if (g_visit_cpu) visit(ctx, 1u, 2, 0x20, 0u, g_visit_cpu);
+    if (!g_visit_cpu) return;
+    visit(ctx, 1u, 2, 0x20, 0u, g_visit_cpu);
+    for (unsigned i = 0; i < g_visit_crowd; i++) visit(ctx, 0x100u + i, 2, 0x20, 0u, g_visit_cpu);
 }
 uint64_t sched_vtime_us(void) { return 1234u; }
 static int g_child_host_clock; /* the record/replay child's host-clock case */
@@ -869,6 +888,10 @@ static void test_checkpoints(void) {
         nk_ckpt_begin(&d, 1u);
         CHECK(nk_ckpt_compare(&c, &d, &m) == NK_CKPT_NAMES && strcmp(m.name, "abcdefghijklmnopqrstuvw") == 0,
               "a missing digest was not reported by name");
+        /* An actual list longer than the expected one: the extra digest is named from the
+         * actual list, as replay_checkpoint.h and tools/nkstate.py ckpt-diff say. */
+        CHECK(nk_ckpt_compare(&d, &c, &m) == NK_CKPT_NAMES && strcmp(m.name, "abcdefghijklmnopqrstuvw") == 0,
+              "an extra actual digest was not reported by its actual name (got '%s')", m.name);
         nk_ckpt_begin(&d, 2u);
         CHECK(nk_ckpt_compare(&c, &d, &m) == NK_CKPT_FRAME, "different frames were not reported");
     }
@@ -893,6 +916,8 @@ static void test_checkpoint_stream(void) {
     FrameTrace t;
     char detail[128];
 
+    /* No file from an earlier run may stand in for the stream this run writes. */
+    remove(path);
     set_env("SR_REPLAY_CHECKPOINTS", path);
     set_env("SR_REPLAY_CHECKPOINT_EVERY", "2");
     fresh_machine(&s);
@@ -930,6 +955,41 @@ static void test_checkpoint_stream(void) {
     }
     CHECK(n == sizeof want_frames / sizeof want_frames[0], "the stream holds %zu checkpoints, want %zu", n,
           sizeof want_frames / sizeof want_frames[0]);
+
+    /* VRAM the renderer still owns is the VRAM the guest would read: the checkpoint
+     * materializes it before hashing, as every other bulk VRAM reader does, rather than
+     * hashing host bytes that are not yet written back. */
+    {
+        static uint8_t want_chunk[1u << 20];
+        static NkCheckpoint want;
+        memcpy(want_chunk, SR_HOST_LINEAR(0x04000000u), sizeof want_chunk);
+        memcpy(want_chunk + (TEST_RENDERER_VRAM - 0x04000000u), k_test_renderer_bytes,
+               sizeof k_test_renderer_bytes);
+        nk_ckpt_begin(&want, 10u);
+        nk_ckpt_add(&want, "vram.04000000", want_chunk, sizeof want_chunk);
+        g_test_renderer_owns_vram = 1;
+        g_test_renderer_readbacks = 0;
+        g_sr_vram_read_pending = 1;
+        g_visit_cpu = &s;
+        sr_replay_checkpoint_vblank(10u); /* window 5: a new checkpoint */
+        g_visit_cpu = NULL;
+        const int materialized = g_test_renderer_readbacks == 1u && !g_sr_vram_read_pending;
+        g_test_renderer_owns_vram = 0;
+        g_sr_vram_read_pending = 0;
+        fp = fopen(path, "rb");
+        got = fp ? fread(text, 1, sizeof text - 1u, fp) : 0u;
+        if (fp) fclose(fp);
+        text[got] = '\0';
+        char *last = NULL;
+        for (char *l = strchr(text, '\n'); l && l[1]; l = strchr(l + 1, '\n')) last = l + 1;
+        if (last && strchr(last, '\n')) *strchr(last, '\n') = '\0';
+        const int parsed = last && nk_ckpt_parse(last, &c, detail, sizeof detail);
+        CHECK(materialized, "the checkpoint did not materialize renderer-owned VRAM (readbacks=%u)",
+              g_test_renderer_readbacks);
+        CHECK(parsed && c.frame == 10u && c.count > 2u && strcmp(c.digests[2].name, "vram.04000000") == 0 &&
+                  memcmp(c.digests[2].sha256, want.digests[0].sha256, 32u) == 0,
+              "the frame-10 checkpoint's vram.04000000 digest is not the renderer's VRAM contents");
+    }
 }
 
 /* ---- recording and replay in fresh processes (SR_RECORD / SR_REPLAY) ------------------ */
@@ -945,7 +1005,8 @@ static void test_checkpoint_stream(void) {
  * requested.
  * Each answer is folded into guest memory, so it decides the rest of the run. Test-only
  * options: perturb=<frame> writes one guest word after that frame; hostclock reports the host
- * clock; hardexit=<frame> stops with _Exit after that frame's VBLANK.
+ * clock; hardexit=<frame> stops with _Exit after that frame's VBLANK; crowd=<frame> makes the
+ * scheduler report 300 more threads after that frame, more than a checkpoint holds.
  * At a normal end it prints CHILD_FINAL with the machine's state and the live keyboard calls. */
 
 #define RR_SCRATCH (DATA_BASE + 0x3000u)
@@ -959,9 +1020,10 @@ typedef struct {
     char text[16];
     unsigned pad_seed;
     int pause;
+    int crowd;
 } ChildOptions;
 
-static ChildOptions g_child = {24u, -1, -1, 0, "HELLO", 1u, -1};
+static ChildOptions g_child = {24u, -1, -1, 0, "HELLO", 1u, -1, -1};
 
 /* "--rr-child" alone, or followed by ":" and comma-separated options. Returns 0 on a bad one. */
 static int parse_child_options(const char *arg) {
@@ -980,6 +1042,7 @@ static int parse_child_options(const char *arg) {
         if (strncmp(opt, "frames=", 7) == 0) g_child.frames = (unsigned)atoi(opt + 7);
         else if (strncmp(opt, "perturb=", 8) == 0) g_child.perturb = atoi(opt + 8);
         else if (strncmp(opt, "hardexit=", 9) == 0) g_child.hard_exit = atoi(opt + 9);
+        else if (strncmp(opt, "crowd=", 6) == 0) g_child.crowd = atoi(opt + 6);
         else if (strcmp(opt, "extra") == 0) g_child.osk_extra = 1;
         else if (strncmp(opt, "pad=", 4) == 0) g_child.pad_seed = (unsigned)atoi(opt + 4);
         else if (strncmp(opt, "pause=", 6) == 0) g_child.pause = atoi(opt + 6);
@@ -1052,6 +1115,7 @@ static int rr_child(void) {
          * replay mismatch freezes. It reads nothing and changes no guest state. */
         sr_flight_record(SR_FLIGHT_CLASS_SCHED, SR_FLIGHT_KIND_SCHED_PICK, f, 0u, 0u, 0u);
         if ((int)f == perturb) MEM_W32(RR_PERTURB, 0xDEADBEEFu);
+        if ((int)f == g_child.crowd) g_visit_crowd = 300u;
         wchar_t out[64] = L"init";
         if ((request == 0u && f >= 2u) || (request == 1u && f >= 9u)) {
             const int r = sr_replay_osk_poll(L"name", L"init", out, 64, 0u, fake_live);
@@ -1368,7 +1432,9 @@ static void test_record_replay(void) {
     char want[160], got[160], line[200];
     size_t rec_len = 0;
 
-    /* Record, with a pause requested at frame 11. */
+    /* Record, with a pause requested at frame 11. The file is removed first, so a recording
+     * left by an earlier run cannot stand in for one this child never wrote. */
+    remove(RR_REC);
     rr_env(RR_REC, "");
     rr_opt("pause=11");
     log = rr_run(&st);
@@ -1456,6 +1522,18 @@ static void test_record_replay(void) {
     free(log);
     test_replay_mismatch_flight();
 
+    /* 300 more threads after frame 6: the frame-8 checkpoint cannot hold them. The verdict
+     * keeps the documented shape, with the frame and index where the replay stopped. */
+    rr_env("", RR_REC);
+    rr_opt("crowd=6");
+    log = rr_run(&st);
+    CHECK(st == 1 && strstr(log, "REPLAY_MISMATCH frame=8 index=2 kind=overflow digest=-\n") != NULL,
+          "overflowing replay checkpoint: exit %d: %.300s", st, log);
+    CHECK(strstr(log, "reason=checkpoint-overflow") == NULL && strstr(log, "REPLAY_NOT_RUN") == NULL &&
+              strstr(log, "CHILD_FINAL") == NULL,
+          "an overflowing replay checkpoint did not stop with one documented verdict: %.300s", log);
+    free(log);
+
     /* The guest polls a request the recording abandoned. */
     rr_env("", RR_REC);
     rr_opt("extra");
@@ -1483,6 +1561,9 @@ static void test_record_replay(void) {
             {"a host-clock recording", "clock=deterministic", "clock=host", "REPLAY_REFUSED reason=clock-not-deterministic line=1\n"},
             {"an unknown line", "\nNKREC_END", "\nNKWHAT x=1\nNKREC_END", "REPLAY_REFUSED reason=unknown-line line="},
             {"a request out of order", "request=1 pending=1", "request=4 pending=1", "REPLAY_REFUSED reason=answer-order line="},
+            /* request + 1 wraps to 0 in 32 bits, which once matched an empty answer list. */
+            {"the largest request first", "call=osk request=0 ", "call=osk request=4294967295 ",
+             "REPLAY_REFUSED reason=answer-order line="},
             {"a bad answer unit", "units=00000048", "units=0000004G", "REPLAY_REFUSED reason=malformed-answer line="},
             {"a not-a-recording file", "NKREC v=1 ", "NKREX v=1 ", "REPLAY_REFUSED reason=bad-magic line=1\n"},
             {"a gap in the pad samples", "NKPAD v=1 first=0 count=", "NKPAD v=1 first=1 count=", "REPLAY_REFUSED reason=pad-order line="},
@@ -1538,6 +1619,7 @@ static void test_record_replay(void) {
     /* A recording cut by _Exit right after the frame-16 checkpoint has no end line: it replays
      * to that checkpoint, request 2's polls before it are answered from the open line, and
      * the abandon at frame 17 is the live run's. */
+    remove(RR_CUT);
     rr_env(RR_CUT, "");
     rr_opt("hardexit=16");
     log = rr_run(&st);

@@ -56,6 +56,8 @@ typedef struct {
     uint32_t pc;
     uint64_t call_count;
     uint64_t block_count;
+    /* Inclusive host wall time of each dispatched call: a body that yields or blocks is
+     * charged with the time other guest threads ran before it returned (docs/TITLE_TESTING.md). */
     uint64_t duration_ns;
     uint8_t used;
 } SrProfEntry;
@@ -299,10 +301,15 @@ void sr_loaded_end_set(uint32_t end) {
     g_loaded_end = end;
 }
 
+static void sr_heap_reset(void);
+
 void sr_mem_reset(void) {
     sr_mem_init();
     /* g_mem points at guest RAM 0x08000000 inside the full physical arena. */
     memset(g_mem - 0x08000000u, 0, 0x0c000000u);
+    /* The memset zeroed the newlib heap arena too, so its allocator metadata (bump
+     * pointer, free list, header bits) now describes bytes that no longer exist. */
+    sr_heap_reset();
     g_loaded_end = 0u;
     g_loaded_base = UINT32_MAX;
     sr_exec_span_reset();
@@ -371,8 +378,28 @@ static uint32_t s_heap_fail_count = 0u;
 static uint8_t s_heap_header_bits[(SR_HEAP_HEADER_SLOTS + 7u) / 8u];
 static uint8_t s_heap_free_bits[(SR_HEAP_HEADER_SLOTS + 7u) / 8u];
 static uint8_t s_heap_watch_reported_bits[(SR_HEAP_HEADER_SLOTS + 7u) / 8u];
+/* One bit per header slot: the block is on the free list. A quarantine drops the whole
+ * list, and the blocks it held keep their free-looking metadata while no list reaches
+ * them; this bit tells a listed free block from such an orphan. */
+static uint8_t s_heap_listed_bits[(SR_HEAP_HEADER_SLOTS + 7u) / 8u];
 static unsigned s_heap_watch_report_count = 0;
 static int s_heap_internal_write = 0;
+
+static void sr_heap_set_listed(uint32_t hdr, int listed) {
+    uint32_t delta = hdr - SR_HEAP_BASE;
+    if (hdr < SR_HEAP_BASE || hdr >= SR_HEAP_END || (delta & 15u) != 0u) return;
+    uint32_t slot = delta >> 4;
+    uint8_t mask = (uint8_t)(1u << (slot & 7u));
+    if (listed) s_heap_listed_bits[slot >> 3] |= mask;
+    else s_heap_listed_bits[slot >> 3] &= (uint8_t)~mask;
+}
+
+static int sr_heap_is_listed(uint32_t hdr) {
+    uint32_t delta = hdr - SR_HEAP_BASE;
+    if (hdr < SR_HEAP_BASE || hdr >= SR_HEAP_END || (delta & 15u) != 0u) return 0;
+    uint32_t slot = delta >> 4;
+    return (s_heap_listed_bits[slot >> 3] & (uint8_t)(1u << (slot & 7u))) != 0u;
+}
 
 static int sr_heap_header_slot(uint32_t hdr, uint32_t *slot) {
     if (hdr < SR_HEAP_BASE || hdr >= SR_HEAP_END) return 0;
@@ -481,6 +508,67 @@ static int sr_heap_free_list_valid(void) {
 static uint32_t s_heap_full_check_credit = 0u;
 static uint32_t s_heap_full_check_len = 0u;   /* 0: walk on the next allocation */
 
+/* Drop a damaged free list. The blocks it held become orphans: still free-looking, but no
+ * list reaches them, so no merge may treat one as listed. */
+static void sr_heap_quarantine_list(void) {
+    s_heap_free_list = 0u;
+    s_heap_full_check_len = 0u;
+    memset(s_heap_listed_bits, 0, sizeof s_heap_listed_bits);
+}
+
+/* An empty heap: what the arena is once sr_mem_reset has zeroed it. */
+static void sr_heap_reset(void) {
+    s_heap_bump_ptr = SR_HEAP_BASE;
+    s_heap_free_list = 0u;
+    s_heap_fail_count = 0u;
+    memset(s_heap_header_bits, 0, sizeof s_heap_header_bits);
+    memset(s_heap_free_bits, 0, sizeof s_heap_free_bits);
+    memset(s_heap_watch_reported_bits, 0, sizeof s_heap_watch_reported_bits);
+    memset(s_heap_listed_bits, 0, sizeof s_heap_listed_bits);
+    s_heap_watch_report_count = 0u;
+    s_heap_full_check_credit = 0u;
+    s_heap_full_check_len = 0u;
+}
+
+/* A live block's size word is guest-writable. Before free or realloc acts on it, the block
+ * it claims must be exactly one block: a 16-aligned size of at least 16 that ends at the
+ * bump pointer or at the next block's header, with no block header inside it. Every block
+ * the allocator carves has its header marked and every header a merge absorbs is unmarked,
+ * so an honest block passes and a raised or lowered size word does not. */
+static int sr_heap_live_extent_valid(uint32_t hdr, uint32_t size) {
+    if (size < 16u || (size & 15u) != 0u) return 0;
+    uint32_t end = hdr + size;
+    if (end < hdr || end > s_heap_bump_ptr) return 0;
+    if (end != s_heap_bump_ptr && !sr_heap_is_header(end)) return 0;
+    uint32_t slot = ((hdr - SR_HEAP_BASE) >> 4) + 1u;
+    uint32_t end_slot = (end - SR_HEAP_BASE) >> 4;
+    while (slot < end_slot && (slot & 7u) != 0u) {
+        if (s_heap_header_bits[slot >> 3] & (uint8_t)(1u << (slot & 7u))) return 0;
+        slot++;
+    }
+    while (slot + 8u <= end_slot) {
+        if (s_heap_header_bits[slot >> 3] != 0u) return 0;
+        slot += 8u;
+    }
+    while (slot < end_slot) {
+        if (s_heap_header_bits[slot >> 3] & (uint8_t)(1u << (slot & 7u))) return 0;
+        slot++;
+    }
+    return 1;
+}
+
+/* A free or realloc refused because the block's size word does not describe one block. */
+static void sr_heap_report_live_smash(const char *op, uint32_t ptr, uint32_t sizeflags,
+                                      uint32_t guest_ra) {
+    static int smash_n = 0;
+    if (smash_n++ >= 8) return;
+    fprintf(stderr,
+        "HEAP_SMASH: %s of ptr=0x%08" PRIx32 " refused: header=0x%08" PRIx32 " size word 0x%08" PRIx32 " "
+        "does not end at the next block, so the block stays allocated "
+        "(the block below it is the prime overrun suspect) callsite=0x%08" PRIx32 " uid=0x%" PRIx32 "\n",
+        op, ptr, ptr - 8u, sizeflags, guest_ra >= 8u ? guest_ra - 8u : 0u, sched_current_uid());
+}
+
 static void sr_heap_set_free_state(uint32_t hdr, int is_free) {
     if (!g_sr_heap_watch) return;
     uint32_t slot;
@@ -552,6 +640,9 @@ typedef struct {
     uint32_t allocated_blocks, free_blocks;
     uint64_t allocated_bytes, free_bytes;
     uint32_t largest_free;
+    /* Free-looking blocks a quarantine took off the list: no allocation can reuse them. */
+    uint32_t orphan_blocks;
+    uint64_t orphan_bytes;
     uint32_t largest_addr[8], largest_size[8];
     int metadata_valid;
     /* When the linear walk breaks: the smashed header and the block just below it
@@ -598,6 +689,9 @@ static SrHeapStats sr_heap_stats(void) {
                 st.largest_addr[i] = cur;
                 break;
             }
+        } else if (!sr_heap_is_listed(cur)) {
+            st.orphan_blocks++;
+            st.orphan_bytes += size;
         } else {
             st.free_blocks++;
             st.free_bytes += size;
@@ -620,11 +714,12 @@ static void sr_heap_dump_failure(uint32_t requested) {
     SrHeapStats st = sr_heap_stats();
     fprintf(stderr,
         "HEAP_STATE: request=0x%" PRIx32 " carved=0x%" PRIx32 " live=%" PRIu32 "/0x%llx free=%" PRIu32 "/0x%llx "
-        "largest_free=0x%" PRIx32 " metadata=%s\n",
+        "largest_free=0x%" PRIx32 " orphaned=%" PRIu32 "/0x%llx metadata=%s\n",
         requested, s_heap_bump_ptr - SR_HEAP_BASE,
         st.allocated_blocks, (unsigned long long)st.allocated_bytes,
         st.free_blocks, (unsigned long long)st.free_bytes,
-        st.largest_free, st.metadata_valid ? "valid" : "INVALID");
+        st.largest_free, st.orphan_blocks, (unsigned long long)st.orphan_bytes,
+        st.metadata_valid ? "valid" : "INVALID");
     if (!st.metadata_valid) {
         fprintf(stderr,
             "HEAP_SMASH: header=0x%08" PRIx32 " words=0x%08" PRIx32 "/0x%08" PRIx32 " prev=0x%08" PRIx32 " prev_size=0x%" PRIx32 " "
@@ -657,6 +752,7 @@ static void sr_heap_unmark_header(uint32_t hdr) {
     uint32_t slot;
     if (sr_heap_header_slot(hdr, &slot))
         s_heap_header_bits[slot >> 3] &= (uint8_t)~(1u << (slot & 7u));
+    sr_heap_set_listed(hdr, 0);
 }
 
 /* Remove one block from the singly-linked free list.  O(position of the block),
@@ -687,11 +783,11 @@ static int sr_heap_freelist_unlink(uint32_t target) {
                 fprintf(stderr,
                     "HEAP_FREE_LIST_CORRUPT: unlink of 0x%08" PRIx32 " met a damaged node 0x%08" PRIx32 "; quarantining list\n",
                     target, cur);
-            s_heap_free_list = 0u;
-            s_heap_full_check_len = 0u;
+            sr_heap_quarantine_list();
             return 0;
         }
         if (cur == target) {
+            sr_heap_set_listed(cur, 0);
             if (prev == 0u) s_heap_free_list = next;
             else {
                 s_heap_internal_write++;
@@ -719,10 +815,13 @@ static int sr_heap_freelist_unlink(uint32_t target) {
  * allocator header (bitmap), the sizes make the blocks exactly physically
  * adjacent, and the neighbour's allocation bit is clear.  A stray footer-shaped
  * word inside an allocated neighbour's payload therefore cannot trigger a bad
- * merge.  Absorbed metadata words are zeroed so the merged block keeps free()'s
- * clean-payload guarantee.  The caller must have marked hdr and prepared its
- * payload.  Because merging keeps the free list short, the first-fit allocation
- * scan stays O(small) instead of degrading with fragmentation. */
+ * merge.  Absorbed header and footer words are zeroed so no stale tag survives
+ * as interior payload for the boundary-tag and free-list checks to misread.  A
+ * free block otherwise keeps its payload (sr_newlib_free); handing out zeroed
+ * payload is the job of sr_newlib_malloc's reuse clear and sr_newlib_realloc's
+ * growth clear.  The caller must have marked hdr and prepared its payload.
+ * Because merging keeps the free list short, the first-fit allocation scan
+ * stays O(small) instead of degrading with fragmentation. */
 static void sr_heap_free_block(uint32_t hdr, uint32_t size) {
     /* Forward: absorb the next physical block if it is a valid free block. */
     uint32_t next_hdr = hdr + size;
@@ -750,15 +849,24 @@ static void sr_heap_free_block(uint32_t hdr, uint32_t size) {
         }
     }
     /* Backward: fold into the previous physical block if it is a valid free block,
-     * located via its footer.  The predecessor is already linked, so grow it in
-     * place and leave it where it sits in the list. */
+     * located via its footer, and it is on the free list.  A listed predecessor is
+     * grown in place and left where it sits in the list. A free-looking predecessor
+     * that a quarantine orphaned is reached by no list: folding into it would lose
+     * this block with it, so this block is published on its own instead. */
     if (hdr > SR_HEAP_BASE) {
         uint32_t pfoot = MEM_R32(hdr - 4u);
         if (pfoot >= 16u && (pfoot & 15u) == 0u && pfoot <= hdr - SR_HEAP_BASE) {
             uint32_t prev_hdr = hdr - pfoot;
             if (sr_heap_is_header(prev_hdr)) {
                 uint32_t psf = MEM_R32(prev_hdr + 4u);
-                if ((psf & 1u) == 0u && (psf & ~1u) == pfoot && prev_hdr + pfoot == hdr) {
+                int adjacent_free = (psf & 1u) == 0u && (psf & ~1u) == pfoot && prev_hdr + pfoot == hdr;
+                if (adjacent_free && !sr_heap_is_listed(prev_hdr)) {
+                    static int refused_back_n = 0;
+                    if (refused_back_n++ < 8)
+                        fprintf(stderr,
+                            "HEAP_FREE_MERGE_REFUSED: free of 0x%08" PRIx32 " did not fold into 0x%08" PRIx32 " size=0x%" PRIx32 ": not on a validated free list\n",
+                            hdr, prev_hdr, pfoot);
+                } else if (adjacent_free) {
                     sr_heap_set_free_state(hdr, 0);
                     sr_heap_unmark_header(hdr);
                     size += pfoot;
@@ -781,7 +889,29 @@ static void sr_heap_free_block(uint32_t hdr, uint32_t size) {
     MEM_W32(hdr + 0u, s_heap_free_list);
     s_heap_internal_write--;
     s_heap_free_list = hdr;
+    sr_heap_set_listed(hdr, 1);
     sr_heap_set_free_state(hdr, 1);
+}
+
+/* Zero guest [from, to), a word-aligned span of the heap arena (plain main RAM).
+ * With no store instrumentation armed (sr_store_plain) each MEM_W32 is a plain
+ * host write, so one bulk fill writes the same bytes; with any watch armed every
+ * word still passes the store hooks it always did. */
+static void sr_heap_zero_span(uint32_t from, uint32_t to) {
+    if (to <= from) return;
+    if (sr_store_plain() && sr_guest_fill(from, 0u, to - from)) return;
+    for (uint32_t a = from; a < to; a += 4u) MEM_W32(a, 0u);
+}
+
+/* Copy guest [src, src+size) to [dst, dst+size), two distinct heap blocks, with the
+ * same plain-store shortcut as sr_heap_zero_span. */
+static void sr_heap_copy_span(uint32_t dst, uint32_t src, uint32_t size) {
+    if (sr_store_plain() && sr_guest_memmove(dst, src, size)) return;
+    uint32_t off = 0u;
+    for (; off + 4u <= size; off += 4u)
+        MEM_W32(dst + off, MEM_R32(src + off));
+    for (; off < size; ++off)
+        MEM_W8(dst + off, MEM_R8(src + off));
 }
 
 /* Insert one already-partitioned block into the host free list.  Callers write
@@ -789,9 +919,7 @@ static void sr_heap_free_block(uint32_t hdr, uint32_t size) {
  * not mistake allocator-owned metadata initialization for a guest overwrite. */
 static void sr_heap_link_free_block(uint32_t hdr, uint32_t size, int clear_payload) {
     sr_heap_mark_header(hdr);
-    if (clear_payload) {
-        for (uint32_t off = 8u; off < size; off += 4u) MEM_W32(hdr + off, 0u);
-    }
+    if (clear_payload) sr_heap_zero_span(hdr + 8u, hdr + size);
     sr_heap_free_block(hdr, size);
 }
 
@@ -822,7 +950,7 @@ uint32_t sr_newlib_malloc(uint32_t size, uint32_t guest_ra) {
                     fprintf(stderr,
                         "HEAP_FREE_LIST_CORRUPT: quarantining invalid/cyclic list head=0x%08" PRIx32 "\n",
                         s_heap_free_list);
-                s_heap_free_list = 0u;
+                sr_heap_quarantine_list();
             }
         }
     }
@@ -849,12 +977,12 @@ uint32_t sr_newlib_malloc(uint32_t size, uint32_t guest_ra) {
                     "HEAP_FREE_LIST_CORRUPT: header=0x%08" PRIx32 " size=0x%" PRIx32 " next=0x%08" PRIx32 "; quarantining list\n",
                     cur, sr_heap_is_header(cur) ? MEM_R32(cur + 4u) : 0u,
                     sr_heap_is_header(cur) ? MEM_R32(cur + 0u) : 0u);
-            s_heap_free_list = 0u;
-            s_heap_full_check_len = 0u;
+            sr_heap_quarantine_list();
             break;
         }
         if (block_size >= alloc) {
             sr_heap_set_free_state(cur, 0);
+            sr_heap_set_listed(cur, 0);
             if (prev == 0u) s_heap_free_list = next;
             else {
                 s_heap_internal_write++;
@@ -879,10 +1007,7 @@ uint32_t sr_newlib_malloc(uint32_t size, uint32_t guest_ra) {
             /* A freed block keeps its last occupant's bytes (sr_newlib_free). Clear the
              * part this allocation takes, so a reused block starts as clean as a fresh one;
              * a split-off remainder is cleared when it is handed out in turn. */
-            {
-                uint32_t used = remainder >= 16u ? alloc : block_size;
-                for (uint32_t off = 8u; off < used; off += 4u) MEM_W32(cur + off, 0u);
-            }
+            sr_heap_zero_span(cur + 8u, cur + (remainder >= 16u ? alloc : block_size));
             if (remainder >= 16u) {
                 MEM_W32(cur + 4u, alloc | 1u);
                 uint32_t new_block = cur + alloc;
@@ -972,6 +1097,10 @@ void sr_newlib_free(uint32_t ptr, uint32_t guest_ra) {
     }
     uint32_t sizeflags = MEM_R32(hdr + 4u);
     if ((sizeflags & 1u) == 0u) return;   /* double-free or foreign pointer: ignore, don't corrupt the list */
+    if (!sr_heap_live_extent_valid(hdr, sizeflags & ~1u)) {
+        sr_heap_report_live_smash("free", ptr, sizeflags, guest_ra);
+        return;
+    }
     {
         static int trace_on = -1;
         if (trace_on < 0) trace_on = getenv("SR_ALLOC_TRACE") ? 1 : 0;
@@ -1047,8 +1176,9 @@ uint32_t sr_newlib_realloc(uint32_t ptr, uint32_t size, uint32_t guest_ra) {
         return 0u;
     uint32_t sizeflags = MEM_R32(hdr + 4u);
     uint32_t old_total = sizeflags & ~1u;
-    if ((sizeflags & 1u) == 0u || old_total < 16u || (old_total & 15u) != 0u ||
-        hdr + old_total < hdr || hdr + old_total > s_heap_bump_ptr) {
+    if ((sizeflags & 1u) == 0u) return 0u;
+    if (!sr_heap_live_extent_valid(hdr, old_total)) {
+        sr_heap_report_live_smash("realloc", ptr, sizeflags, guest_ra);
         return 0u;
     }
 
@@ -1089,10 +1219,7 @@ uint32_t sr_newlib_realloc(uint32_t ptr, uint32_t size, uint32_t guest_ra) {
                 uint32_t trailing = combined - wanted_total;
                 /* The absorbed successor still holds its last occupant's bytes; the
                  * grown part of the allocation starts clean. */
-                {
-                    uint32_t grown_end = hdr + (trailing >= 16u ? wanted_total : combined);
-                    for (uint32_t a = next_hdr + 8u; a < grown_end; a += 4u) MEM_W32(a, 0u);
-                }
+                sr_heap_zero_span(next_hdr + 8u, hdr + (trailing >= 16u ? wanted_total : combined));
                 if (trailing >= 16u) {
                     MEM_W32(hdr + 4u, wanted_total | 1u);
                     sr_heap_link_free_block(hdr + wanted_total, trailing, 1);
@@ -1108,11 +1235,7 @@ uint32_t sr_newlib_realloc(uint32_t ptr, uint32_t size, uint32_t guest_ra) {
     if (replacement == 0u) return 0u;  /* realloc leaves the old allocation intact */
     uint32_t copy_size = old_total - 8u;
     if (copy_size > size) copy_size = size;
-    uint32_t off = 0u;
-    for (; off + 4u <= copy_size; off += 4u)
-        MEM_W32(replacement + off, MEM_R32(ptr + off));
-    for (; off < copy_size; ++off)
-        MEM_W8(replacement + off, MEM_R8(ptr + off));
+    sr_heap_copy_span(replacement, ptr, copy_size);
     sr_newlib_free(ptr, guest_ra);
     return replacement;
 }
@@ -1160,7 +1283,9 @@ void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) {
     /* Production behavior: unsupported raw MIPS syscall is explicit/fatal/diagnostic. */
     fprintf(stderr, "Fatal error: unsupported raw MIPS syscall 0x%" PRIx32 " at pc=0x%08" PRIx32 "\n", code, pc);
     sr_flight_fatal(SR_FLIGHT_KIND_FATAL_RAW_SYSCALL, pc, code, 0u);
-    abort();
+    /* A named stop, not a host crash (AGENTS.md section 6). */
+    fflush(stderr);
+    exit(1);
 }
 #endif
 
@@ -1473,8 +1598,10 @@ void sr_vread(float *r, const CpuState *s, const uint8_t *idx, int n, uint32_t p
     }
 }
 
+/* PPSSPP vfpu_clamp (Core/MIPS/MIPSVFPUUtils.h at 94b9086a9ef30e87c6b6774ab198c2babba40d4e),
+ * PPSSPP-derived, not PSP-measured: NaN is kept, and -0.0 becomes +0.0 when lo is +0.0. */
 static float sr_clamp(float x, float lo, float hi) {
-    return x < lo ? lo : (x > hi ? hi : x);
+    return x >= hi ? hi : (x <= lo ? lo : x);
 }
 
 void sr_vwrite(CpuState *s, const uint8_t *idx, float *d, int n, uint32_t dprefix) {
@@ -1539,7 +1666,8 @@ RecompFn sr_lookup(uint32_t addr) {
     RecompFn module_fn = sr_module_code_lookup(addr, &in_bound_module);
     if (in_bound_module) return module_fn;
     RecompFn fn = (RecompFn)sr_dtab_lookup(&g_dtab, addr);
-    return fn && sr_exec_span_owns_fetch(addr) ? fn : NULL;
+    /* Outside every bound image, so only the static spans can own the fetch. */
+    return fn && sr_exec_span_owns_static_fetch(addr) ? fn : NULL;
 }
 
 /* Registered once from sr_register_all() before any guest thread runs; read-only after. */
@@ -1817,7 +1945,9 @@ void sr_stack_census_report(void) {
 #endif
 
 #define MISS_HASH_SIZE 128
-typedef struct { uint32_t target; uint32_t pc; uint32_t ra; } DispatchMissEntry;
+/* `used` marks a filled slot: guest address 0 is a real miss target on a zero-based image
+ * (#1375), so the target cannot double as the empty-slot sentinel. */
+typedef struct { uint32_t target; uint32_t pc; uint32_t ra; uint8_t used; } DispatchMissEntry;
 static DispatchMissEntry g_miss_table[MISS_HASH_SIZE];
 static int g_miss_count = 0;
 
@@ -1825,7 +1955,7 @@ static void dump_dispatch_misses(void) {
     if (g_miss_count == 0) return;
     fprintf(stderr, "\n--- UNIQUE DISPATCH MISSES SUMMARY (%d entries) ---\n", g_miss_count);
     for (int i = 0; i < MISS_HASH_SIZE; i++) {
-        if (g_miss_table[i].target != 0) {
+        if (g_miss_table[i].used) {
             fprintf(stderr, "  target=0x%08" PRIx32 " pc=0x%08" PRIx32 " ra=0x%08" PRIx32 "\n",
                     g_miss_table[i].target, g_miss_table[i].pc, g_miss_table[i].ra);
         }
@@ -2783,6 +2913,13 @@ static int dispatch_try_with_boundary(
                     pc, op, target, s->pc, s->r[31], s->r[29], s->r[4], s->r[5], s->r[6]);
             sr_unimplemented(pc,"VFPU runtime interpreter returned SR_VFPU_OTHER");
         }
+        if (vfpu_result==SR_VFPU_ACCESS_REFUSED) {
+            /* A known VFPU load or store whose guest span is out of range: named as that,
+             * not as a missing encoding. Nothing was read or written. */
+            fprintf(stderr, "VFPU_ACCESS_OUT_OF_RANGE: pc=0x%08" PRIx32 " op=0x%08" PRIx32 " addr=0x%08" PRIx32 "\n",
+                    pc, op, s->r[(op >> 21) & 0x1Fu] + (uint32_t)(int32_t)(int16_t)(op & 0xFFFCu));
+            sr_unimplemented(pc,"VFPU load or store outside guest memory");
+        }
         s->pc=pc+4;
         return SR_GUEST_INTERP_AOT_HANDOFF;
     }
@@ -2807,8 +2944,10 @@ static int dispatch_try_with_boundary(
      * worker thread, one for every other thread) were a defensive backstop against
      * priority inversion. Removed per Phase 1.4 — pure dispatch overhead. The launcher
      * demotion that replaced them is retired too (#363): pick_next is strict priority, and
-     * every thread keeps the priority its creator passed. */
-    SR_YIELD(s, s->pc);
+     * every thread keeps the priority its creator passed. The yield point keeps s->pc, the
+     * last return or yield point, and counts no SR_PROFILE block: s->pc is not this
+     * dispatch's target, and the entered body's own entry yield counts its block. */
+    SR_YIELD_UNPROFILED(s, s->pc);
 
     /* Record every dispatch in circular trace buffer.
      * The trace is circular by design (DISPATCH_TRACE_SIZE = 32); g_dtrace_idx wraps
@@ -2854,6 +2993,12 @@ static int dispatch_try_with_boundary(
         if (sr_title_config_dispatch_alias(target, &alias_target)) {
             RecompFn aliased = sr_lookup(alias_target);
             if (aliased) {
+                /* The aliased body is a registered body like any other: when the guest
+                 * has overwritten its bytes, run the live ones (TD-27, as below). */
+                if (sr_stale_block_is_stale(alias_target)) {
+                    sr_perf_interp_set_reason(SR_PERF_INTERP_STALE_BLOCK);
+                    return dispatch_run_interp(s, alias_target, call_boundary, drain);
+                }
                 dispatch_call_aot(aliased, s, alias_target, call_boundary, drain);
                 return dispatch_after_aot(s, call_boundary, drain);
             }
@@ -3001,8 +3146,9 @@ static int dispatch_try_with_boundary(
             int found = 0;
             for (int i = 0; i < 16; i++) {
                 uint32_t idx = (h + i) & (MISS_HASH_SIZE - 1);
-                if (g_miss_table[idx].target == target) { found = 1; break; }
-                if (g_miss_table[idx].target == 0 && g_miss_count < MISS_HASH_SIZE) {
+                if (g_miss_table[idx].used && g_miss_table[idx].target == target) { found = 1; break; }
+                if (!g_miss_table[idx].used && g_miss_count < MISS_HASH_SIZE) {
+                    g_miss_table[idx].used = 1u;
                     g_miss_table[idx].target = target;
                     g_miss_table[idx].pc = s->pc;
                     g_miss_table[idx].ra = s->r[31];
@@ -3532,7 +3678,9 @@ void sr_hle_call(CpuState *s, uint32_t nid) {
 void sr_unimplemented(uint32_t pc, const char *reason) {
     fprintf(stderr, "sr_unimplemented: function 0x%08" PRIx32 ": %s\n", pc, reason);
     sr_flight_fatal(SR_FLIGHT_KIND_FATAL_UNIMPLEMENTED, pc, 0u, 0u);
-    abort();
+    /* A named stop, not a host crash (AGENTS.md section 6). */
+    fflush(stderr);
+    exit(1);
 }
 
 /* ---- tracing ---- */
@@ -3543,6 +3691,10 @@ static FILE *s_fp = NULL;
 int sr_trace_active = 0;
 static uint32_t s_r[32], s_fi[32], s_vi[128], s_hi, s_lo, s_fcr31, s_pc, s_op;
 static unsigned long long s_step = 0;
+/* 1 when the instruction sr_begin_impl last saw was admitted and snapshotted. An armed
+ * window's sr_end_impl reads this instead of re-testing the window on s_pc, which still
+ * names the last ADMITTED instruction when an out-of-window one skipped the snapshot. */
+static int s_trace_admitted = 0;
 
 int sr_trace_open(const char *path, const char *target, uint32_t start_pc) {
     s_fp = fopen(path, "wb");
@@ -3564,7 +3716,9 @@ void sr_begin_impl(CpuState *s, uint32_t pc, uint32_t op) {
     /* An armed SR_TRACE_PC window gates the snapshot, not the other way round: the
      * gate costs one range compare per guest instruction and the snapshot runs only
      * for in-window instructions. With no window this test is a single load. */
+    s_trace_admitted = 0;
     if (sr_trace_window_armed() && !sr_trace_window_begin_instruction(pc)) return;
+    s_trace_admitted = 1;
     memcpy(s_r, s->r, sizeof(s_r));
     memcpy(s_fi, s->fi, sizeof(s_fi));
     memcpy(s_vi, s->v, sizeof(s_vi));
@@ -3574,7 +3728,9 @@ void sr_begin_impl(CpuState *s, uint32_t pc, uint32_t op) {
 
 void sr_end_impl(CpuState *s, uint32_t mem_addr, int mem_size) {
     if (!s_fp) return;
-    if (sr_trace_window_armed() && !sr_trace_window_begin_instruction(s_pc)) return;
+    /* Not cleared here: an import stub's sr_end follows no sr_begin of its own and
+     * records the handler's register writes against the instruction begun last. */
+    if (sr_trace_window_armed() && !s_trace_admitted) return;
     char line[4096];
     size_t n = 0;
     n = sr_buf_append(line, sizeof(line), n, "%llu pc=0x%08" PRIx32 " op=0x%08" PRIx32,
@@ -3632,10 +3788,12 @@ void sr_end_impl(CpuState *s, uint32_t mem_addr, int mem_size) {
         fwrite(line, 1, n + 1, s_fp);
     }
     s_step++;
+    /* A plain trace stops growing past 50M records: the trace closes with a comment line
+     * that says so, and the run goes on untraced, as a closed SR_TRACE_PC window does. */
     if (s_step > 50000000ULL) {
-        fprintf(stderr, "sr_end: trace exceeded 50M steps\n");
+        fprintf(s_fp, "# trace closed: past 50000000 records; the run continued untraced\n");
+        fprintf(stderr, "sr_end: trace exceeded 50000000 records; trace closed, the run continues untraced\n");
         sr_trace_close();
-        abort();
     }
 }
 
