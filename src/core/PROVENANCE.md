@@ -3,8 +3,8 @@
 The decryption boundary that turns the encrypted executable and modules of a game the user owns into plain ELF files,
 locally, from the user's own disc image (issue #295). It was added in PRs #548 and #550, removed as a temporary measure
 in PR #1187, and restored with built-in key tables after the maintainer's decision of 2026-10-27 to decrypt the way
-PPSSPP does. Firmware is never decrypted: updater PSAR archives, the IPL, the Media Engine image and system-menu files are
-refused by name before any decryption step runs (`AGENTS.md` section 5).
+PPSSPP does. Firmware is never decrypted: updater PSAR archives, the IPL, the Media Engine image, system-menu files and
+encrypted `flash0` kernel and VSH modules are refused by name before any decryption step runs (`AGENTS.md` section 5).
 
 Every derived file below is labelled `derived-translated` in the trusted provenance record
 (`docs/provenance/INDEPENDENCE_MODEL.md`); none is "independent". The project-authored files are listed last.
@@ -35,6 +35,11 @@ Every derived file below is labelled `derived-translated` in the trusted provena
     3.60 index.dat) are the two tags PPSSPP added after the pin, in `fb371af6bb7d13406fdfe7f23b6bbad6c47629a0` and `6a9b84a714e2e03470dcfebb223c8c4688e61e99`; a review on 2026-11-05 of
     the five upstream commits to `Core/ELF/PrxDecrypter.*` and `ext/libkirk` between the pin and
     `5b3ddcc0628585b7b091c9a9904dba58bb4118c8` found no new or changed game key, tag recipe or cipher fix missing here;
+  - every `flash0` firmware-module tag, removed on 2026-11-17: the kernel-module families `0x4C94xxF0` (with
+    `key_2DA8`), `0xCFEFxxF0` and `0x16D59E03`, and the VSH-module families `0x457BxxF0`, `0x3802xxF0` (with
+    `key_380210F0`, `key_380280F0` and `key_380283F0`), `0x76202403` and `0x0F037303`, with their key arrays and the
+    keyvault row `0x62` that only they name. They are listed in `nk_psp_firmware_tags` with the firmware container
+    tags, so an encrypted module copied from a console's `flash0` is refused by name before any key lookup;
   - the type-3 DRM BB patch tag `0x89742B04`, the SPRX decrypt-mode pad `xor_91E0A9AD` and the KIRK command-2 results,
     which need the installing console's context (PBP/NPDRM);
   - amctrl's fixed-key tables (`key_357C`, `key_363C`, `dnas_key1A90`, `dnas_key1AA0`), which only PGD data and
@@ -58,6 +63,12 @@ Every derived file below is labelled `derived-translated` in the trusted provena
 - LOCAL DELTA: portable C99; every embedded key, tag table and PSAR constant removed (recipes come from the KeyStore,
   which the built-in tables above fill); KIRK operations thread a context so a missing entry fails closed by name. Each
   file header lists its own changes. The 2026-10-27 restoration changed only `nk_psp_prx.c`'s missing-recipe message.
+- LOCAL DELTA, 2026-11-18: `nk_psp_kle.c` takes its probability contexts from the output offset and the
+  `copyCountBitsProbs` index instead of the low bits of host pointers, and drops a pointer comparison that could never
+  be true; `nk_psp_aes.c`'s `AES_cbc_decrypt` returns at once for an empty run; `nk_psp_kirk.c`'s `kirk4`/`kirk7`
+  refuse an empty pass. In `nk_psp_kirk.c/.h` the CMD1 wrapping key is read from the caller's context for each
+  command instead of a process-wide AES schedule, and CMD1, CMD4, CMD7 and CMD11 refuse an output size smaller than
+  what they write. Each file header records its change.
 - Licence note: a GPL-3.0-only file can be combined with the project's GPL-3.0-or-later files; the player and
   `nk_decrypt`, which link them, are conveyed under the GNU GPL version 3 (`NOTICE.md`).
 
@@ -77,7 +88,8 @@ it; the phase-1 disc route then runs unchanged.
   the engine's `kirk4`/`kirk7` and the constants come from the KeyStore, so a missing one fails closed by name; the
   fuse-ID types (MAC type 2, cipher type 2, KIRK commands 5 and 8) fail `CONTEXT_REQUIRED` instead of running with a
   default fuse ID; local bounded buffers; a cipher run that is not a multiple of 16 derives its last keystream block in
-  full; a MAC update that leaves only the previous full pad block chains it instead of dropping it. Not ported:
+  full; a MAC update that leaves only the previous full pad block chains it instead of dropping it; since 2026-11-18
+  the cipher's counter base is derived once per `sceDrmBBCipherInit` instead of once per 2 KiB chunk. Not ported:
   `sceDrmBBMacFinal2`, `sceNpDrmGetFixedKey`, the PGD functions and the encrypt direction.
 - `nk_psp_lzrc.c/.h` from `Core/FileSystems/tlzrc.cpp` (SHA-256
   `ccf084593f0de93154597d47a470a7b539d4ca0cfa4773fddfd91c9a9e8a026a`), "based on benhur's code, rewrite by tpu",
@@ -99,9 +111,11 @@ it; the phase-1 disc route then runs unchanged.
 Every file except the built-in tables comes from this repository's own public history: the tree before PR #1187, at
 commit `8ca38e6399064e1d76f9670ed4722d521fd21a9a^`. No code, table or key value came from any other tool.
 
-- Byte-identical to those bytes: `nk_psp_aes.c/.h`, `nk_psp_sha1.c/.h`, `nk_psp_kirk.c/.h`, `nk_psp_kle.c/.h`,
-  `nk_psp_ec.c/.h`, `nk_psp_inflate.c/.h` and `nk_psp_prx.h`. The AES and SHA-1 ports keep their upstream layout and
-  stay excluded from the trailing-whitespace hook (`.pre-commit-config.yaml`), as before PR #1187.
+- Byte-identical to those bytes when restored: `nk_psp_aes.c/.h`, `nk_psp_sha1.c/.h`, `nk_psp_kirk.c/.h`,
+  `nk_psp_kle.c/.h`, `nk_psp_ec.c/.h`, `nk_psp_inflate.c/.h` and `nk_psp_prx.h`. Later changes are dated in each file's
+  header and in this manifest (above for the ports, below for the project-authored files). The AES and SHA-1 ports
+  keep their upstream layout and stay excluded from the trailing-whitespace hook (`.pre-commit-config.yaml`), as
+  before PR #1187.
 - Changed on restoration (each file's header or this manifest says how): `nk_psp_prx.c`, `nk_psp_container.c/.h`,
   `nk_psp_crypto.c/.h`, `nk_psp_keystore.c/.h`, `nk_decrypt_main.c`, `tools/nk_core/decrypt_tool.py` and
   `tools/test_psp_decrypt.py`.
@@ -112,7 +126,10 @@ commit `8ca38e6399064e1d76f9670ed4722d521fd21a9a^`. No code, table or key value 
 key-file loading, no PSAR entry name), `nk_psp_crypto.c/.h` (the error contract and result names), `nk_psp_ec.c/.h`,
 `nk_psp_inflate.c/.h` and `nk_decrypt_main.c` (the `nk_decrypt` command line, with its `npumdimg` subcommand) are
 project-authored from the format rules
-and the standards their headers cite (FIPS 197, RFC 4493, FIPS 180, RFC 1950-1952, SEC 1).
+and the standards their headers cite (FIPS 197, RFC 4493, FIPS 180, RFC 1950-1952, SEC 1). Since 2026-11-18,
+`nk_psp_ec.c`'s `point_on_curve` refuses a coordinate that is not below the field prime (SEC 1 3.2.2.1), and in
+`nk_psp_inflate.c` a failed raw retry of a zlib-looking stream reports into no buffer, so the zlib attempt's message
+stays with the code it returns.
 
 ## Ad hoc transport (`nk_adhoc_*`, issue #1139)
 

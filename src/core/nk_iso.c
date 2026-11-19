@@ -58,11 +58,19 @@
 #define SECTOR_SIZE 2048
 #define PVD_SECTOR 16
 #define NK_ISO_MAX_DEPTH 16
-/* Upper bound on a directory extent we are willing to buffer. A recorded size
-   above this is treated as unusable and replaced by a conservative window.
-   Both readers must agree: two different limits for the same field mean the
+/* Upper bound on a directory extent we are willing to buffer. A root or
+   PSP_GAME extent recorded above this (or as zero) makes the image invalid.
+   Every reader must agree: two different limits for the same field mean the
    inspect and extract paths disagree about what a valid image looks like. */
 #define NK_ISO_MAX_DIR_BYTES (512u * 1024u)
+/* The longest disc path a lookup resolves: NK_ISO_MAX_DEPTH components of at
+   most 222 bytes (a 255-byte record less its 33-byte header) plus separators
+   fit, and so does every path the module walk builds. */
+#define NK_ISO_LOOKUP_MAX_PATH_BYTES 4096u
+_Static_assert(NK_ISO_LOOKUP_MAX_PATH_BYTES >= NK_ISO_MODULE_TREE_MAX_PATH_BYTES,
+               "a lookup must accept every path the module walk builds");
+_Static_assert(NK_ISO_LOOKUP_MAX_PATH_BYTES > NK_ISO_MAX_DEPTH * 223u,
+               "a lookup must accept every path of NK_ISO_MAX_DEPTH components");
 #define NK_ISO_MAX_SFO_BYTES (64u * 1024u)
 #define NK_ISO_MAX_EXECUTABLE_BYTES (512u * 1024u * 1024u)
 
@@ -116,6 +124,25 @@ uint64_t nk_iso_reader_file_size(const NkIsoReader *reader) {
     return reader ? reader->file_size : 0;
 }
 
+/* The root directory extent named by a primary volume descriptor. Every
+   reader in this file applies this one rule, so they agree on which images
+   are valid: both-endian copies equal (ECMA-119 7.3.3), a size above zero and
+   at most NK_ISO_MAX_DIR_BYTES, and the extent inside the file. */
+static bool nk_iso_pvd_root_extent(const uint8_t *pvd, uint64_t file_size,
+                                   uint32_t *out_lba, uint32_t *out_size) {
+    uint32_t root_lba_le = read_le32(&pvd[158]);
+    uint32_t root_lba_be = read_be32(&pvd[162]);
+    uint32_t root_sz_le = read_le32(&pvd[166]);
+    uint32_t root_sz_be = read_be32(&pvd[170]);
+    if (root_lba_le != root_lba_be || root_sz_le != root_sz_be) return false;
+    uint64_t root_offset = (uint64_t)root_lba_le * SECTOR_SIZE;
+    if (root_offset > file_size || (uint64_t)root_sz_le > file_size - root_offset ||
+        root_sz_le == 0 || root_sz_le > NK_ISO_MAX_DIR_BYTES) return false;
+    *out_lba = root_lba_le;
+    *out_size = root_sz_le;
+    return true;
+}
+
 NkIsoReader *nk_iso_reader_open(const char *iso_path) {
     if (!iso_path || !iso_path[0]) return NULL;
 
@@ -145,19 +172,9 @@ NkIsoReader *nk_iso_reader_open(const char *iso_path) {
         return NULL;
     }
 
-    uint32_t root_lba_le = read_le32(&pvd[158]);
-    uint32_t root_lba_be = read_be32(&pvd[162]);
-    uint32_t root_sz_le = read_le32(&pvd[166]);
-    uint32_t root_sz_be = read_be32(&pvd[170]);
-
-    if (root_lba_le != root_lba_be || root_sz_le != root_sz_be) {
-        fclose(f);
-        return NULL;
-    }
-
-    uint64_t root_offset = (uint64_t)root_lba_le * SECTOR_SIZE;
-    if (root_offset > file_size || (uint64_t)root_sz_le > file_size - root_offset ||
-        root_sz_le == 0 || root_sz_le > NK_ISO_MAX_DIR_BYTES) {
+    uint32_t root_lba_le = 0;
+    uint32_t root_sz_le = 0;
+    if (!nk_iso_pvd_root_extent(pvd, file_size, &root_lba_le, &root_sz_le)) {
         fclose(f);
         return NULL;
     }
@@ -251,26 +268,33 @@ static bool nk_iso_name_matches(const char *token, const uint8_t *name_bytes, ui
     return false;
 }
 
-static bool nk_iso_find_in_dir(NkIsoReader *reader, uint32_t dir_lba, uint32_t dir_size,
-                               const char *token, uint32_t *out_lba, uint32_t *out_size,
-                               bool *out_is_dir) {
-    if (!reader || !reader->f || dir_size == 0 || dir_size > NK_ISO_MAX_DIR_BYTES) return false;
+/* One directory search. A directory whose bytes cannot be read, or that holds a
+ * malformed record or a record whose both-endian copies disagree (ECMA-119
+ * 7.3.3), is NK_ERROR_INVALID_ISO, as nk_iso_reader_list and the stager treat
+ * it: a damaged directory is not reported as one without the wanted name. A
+ * record whose extent leaves the image is passed over. */
+static NkResult nk_iso_find_in_dir(NkIsoReader *reader, uint32_t dir_lba, uint32_t dir_size,
+                                   const char *token, uint32_t *out_lba, uint32_t *out_size,
+                                   bool *out_is_dir) {
+    if (!reader || !reader->f || dir_size == 0 || dir_size > NK_ISO_MAX_DIR_BYTES) {
+        return NK_ERROR_INVALID_ISO;
+    }
 
     uint64_t offset = (uint64_t)dir_lba * SECTOR_SIZE;
     if (offset > reader->file_size || (uint64_t)dir_size > reader->file_size - offset) {
-        return false;
+        return NK_ERROR_INVALID_ISO;
     }
 
     uint8_t *buf = (uint8_t *)malloc(dir_size);
-    if (!buf) return false;
+    if (!buf) return NK_ERROR_OUT_OF_MEMORY;
 
     if (nk_iso_fseek64(reader->f, (int64_t)offset, SEEK_SET) != 0 ||
         fread(buf, 1, dir_size, reader->f) != dir_size) {
         free(buf);
-        return false;
+        return NK_ERROR_INVALID_ISO;
     }
 
-    bool found = false;
+    NkResult result = NK_ERROR_FILE_NOT_FOUND;
     size_t pos = 0;
     while (pos < dir_size) {
         uint8_t rec_len = buf[pos];
@@ -279,10 +303,12 @@ static bool nk_iso_find_in_dir(NkIsoReader *reader, uint32_t dir_lba, uint32_t d
             continue;
         }
         if (rec_len < 34u || rec_len > dir_size - pos || (pos % SECTOR_SIZE) + rec_len > SECTOR_SIZE) {
+            result = NK_ERROR_INVALID_ISO;
             break;
         }
         uint8_t name_len = buf[pos + 32];
         if (name_len == 0 || 33u + name_len > rec_len) {
+            result = NK_ERROR_INVALID_ISO;
             break;
         }
 
@@ -299,8 +325,8 @@ static bool nk_iso_find_in_dir(NkIsoReader *reader, uint32_t dir_lba, uint32_t d
         uint32_t ext_sz_be = read_be32(&buf[pos + 14]);
 
         if (ext_lba_le != ext_lba_be || ext_sz_le != ext_sz_be) {
-            pos += rec_len;
-            continue;
+            result = NK_ERROR_INVALID_ISO;
+            break;
         }
 
         uint64_t ext_off = (uint64_t)ext_lba_le * SECTOR_SIZE;
@@ -313,7 +339,7 @@ static bool nk_iso_find_in_dir(NkIsoReader *reader, uint32_t dir_lba, uint32_t d
             if (out_lba) *out_lba = ext_lba_le;
             if (out_size) *out_size = ext_sz_le;
             if (out_is_dir) *out_is_dir = (buf[pos + 25] & 0x02u) != 0;
-            found = true;
+            result = NK_OK;
             break;
         }
 
@@ -321,11 +347,17 @@ static bool nk_iso_find_in_dir(NkIsoReader *reader, uint32_t dir_lba, uint32_t d
     }
 
     free(buf);
-    return found;
+    return result;
 }
 
-int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lba, uint32_t *out_size, bool *out_is_dir) {
-    if (!reader || !path) return -1;
+/* nk_iso_reader_lookup with the reason for a failure: NK_ERROR_GENERIC for a
+ * path refused before the disc is read (too long, or a ".." component),
+ * NK_ERROR_FILE_NOT_FOUND when a component is not on the disc or an
+ * intermediate component is a file, NK_ERROR_INVALID_ISO for a damaged
+ * directory or a path deeper than NK_ISO_MAX_DEPTH. */
+static NkResult nk_iso_reader_resolve(NkIsoReader *reader, const char *path, uint32_t *out_lba,
+                                      uint32_t *out_size, bool *out_is_dir) {
+    if (!reader || !path) return NK_ERROR_GENERIC;
 
     while (*path == '/' || *path == '\\') path++;
 
@@ -333,11 +365,14 @@ int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lb
         if (out_lba) *out_lba = reader->root_lba;
         if (out_size) *out_size = reader->root_size;
         if (out_is_dir) *out_is_dir = true;
-        return 0;
+        return NK_OK;
     }
 
-    char path_copy[512];
-    snprintf(path_copy, sizeof(path_copy), "%s", path);
+    /* A path longer than the buffer is refused, never cut: a cut last
+     * component could name a different entry (ABC beside ABCDEF). */
+    char path_copy[NK_ISO_LOOKUP_MAX_PATH_BYTES];
+    int path_written = snprintf(path_copy, sizeof(path_copy), "%s", path);
+    if (path_written < 0 || (size_t)path_written >= sizeof(path_copy)) return NK_ERROR_GENERIC;
 
     char *saveptr = NULL;
     char *token = strtok_r(path_copy, "/\\", &saveptr);
@@ -345,7 +380,7 @@ int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lb
         if (out_lba) *out_lba = reader->root_lba;
         if (out_size) *out_size = reader->root_size;
         if (out_is_dir) *out_is_dir = true;
-        return 0;
+        return NK_OK;
     }
 
     uint32_t cur_lba = reader->root_lba;
@@ -354,7 +389,7 @@ int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lb
 
     while (token != NULL) {
         if (++depth > NK_ISO_MAX_DEPTH) {
-            return -1;
+            return NK_ERROR_INVALID_ISO;
         }
 
         if (strcmp(token, ".") == 0) {
@@ -362,7 +397,7 @@ int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lb
             continue;
         }
         if (strcmp(token, "..") == 0) {
-            return -1;
+            return NK_ERROR_GENERIC;
         }
 
         char *next_token = strtok_r(NULL, "/\\", &saveptr);
@@ -372,19 +407,19 @@ int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lb
         uint32_t entry_size = 0;
         bool entry_is_dir = false;
 
-        if (!nk_iso_find_in_dir(reader, cur_lba, cur_size, token, &entry_lba, &entry_size, &entry_is_dir)) {
-            return -1;
-        }
+        NkResult found = nk_iso_find_in_dir(reader, cur_lba, cur_size, token, &entry_lba,
+                                            &entry_size, &entry_is_dir);
+        if (found != NK_OK) return found;
 
         if (is_last) {
             if (out_lba) *out_lba = entry_lba;
             if (out_size) *out_size = entry_size;
             if (out_is_dir) *out_is_dir = entry_is_dir;
-            return 0;
+            return NK_OK;
         }
 
         if (!entry_is_dir) {
-            return -1;
+            return NK_ERROR_FILE_NOT_FOUND;
         }
 
         cur_lba = entry_lba;
@@ -392,7 +427,12 @@ int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lb
         token = next_token;
     }
 
-    return -1;
+    /* A path that ends in "." components resolves to nothing, as before. */
+    return NK_ERROR_FILE_NOT_FOUND;
+}
+
+int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lba, uint32_t *out_size, bool *out_is_dir) {
+    return nk_iso_reader_resolve(reader, path, out_lba, out_size, out_is_dir) == NK_OK ? 0 : -1;
 }
 
 int nk_iso_reader_list(NkIsoReader *reader, const char *dir_path, uint32_t index, NkIsoDirEntry *out_entry) {
@@ -458,15 +498,19 @@ int nk_iso_reader_list(NkIsoReader *reader, const char *dir_path, uint32_t index
         uint32_t ext_sz_le = read_le32(&buf[pos + 10]);
         uint32_t ext_sz_be = read_be32(&buf[pos + 14]);
 
+        /* A record whose both-endian copies disagree, or whose extent leaves
+         * the image, makes the listing fail as the stager's walk does
+         * (nk_iso_stage_directory_records): skipping it would drop a member
+         * from a listing reported as complete. */
         if (ext_lba_le != ext_lba_be || ext_sz_le != ext_sz_be) {
-            pos += rec_len;
-            continue;
+            free(buf);
+            return -1;
         }
 
         uint64_t ext_off = (uint64_t)ext_lba_le * SECTOR_SIZE;
         if (ext_off > reader->file_size || (uint64_t)ext_sz_le > reader->file_size - ext_off) {
-            pos += rec_len;
-            continue;
+            free(buf);
+            return -1;
         }
 
         if (cur_index == index) {
@@ -738,108 +782,6 @@ static void sfo_copy_disc_id(char *dest, size_t dest_size, const char *value) {
         dest[output++] = (char)(c >= 'a' && c <= 'z' ? c - ('a' - 'A') : c);
     }
     dest[output] = '\0';
-}
-
-/* SHA-256 (FIPS 180-4); declared in nk_iso.h. */
-static uint32_t nk_sha256_rotr(uint32_t value, unsigned int amount) {
-    return (value >> amount) | (value << (32u - amount));
-}
-
-static void nk_sha256_transform(NkSha256 *ctx, const uint8_t block[64]) {
-    static const uint32_t k[64] = {
-        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
-        0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
-        0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
-        0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
-        0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
-        0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
-        0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
-        0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
-        0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
-        0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
-        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
-        0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
-        0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
-        0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
-        0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
-        0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
-    };
-    uint32_t words[64];
-    for (size_t i = 0; i < 16; i++) {
-        words[i] = ((uint32_t)block[i * 4] << 24) |
-                   ((uint32_t)block[i * 4 + 1] << 16) |
-                   ((uint32_t)block[i * 4 + 2] << 8) |
-                   (uint32_t)block[i * 4 + 3];
-    }
-    for (size_t i = 16; i < 64; i++) {
-        uint32_t s0 = nk_sha256_rotr(words[i - 15], 7) ^
-                      nk_sha256_rotr(words[i - 15], 18) ^ (words[i - 15] >> 3);
-        uint32_t s1 = nk_sha256_rotr(words[i - 2], 17) ^
-                      nk_sha256_rotr(words[i - 2], 19) ^ (words[i - 2] >> 10);
-        words[i] = words[i - 16] + s0 + words[i - 7] + s1;
-    }
-
-    uint32_t a = ctx->state[0], b = ctx->state[1], c = ctx->state[2], d = ctx->state[3];
-    uint32_t e = ctx->state[4], f = ctx->state[5], g = ctx->state[6], h = ctx->state[7];
-    for (size_t i = 0; i < 64; i++) {
-        uint32_t sum1 = nk_sha256_rotr(e, 6) ^ nk_sha256_rotr(e, 11) ^ nk_sha256_rotr(e, 25);
-        uint32_t choose = (e & f) ^ (~e & g);
-        uint32_t t1 = h + sum1 + choose + k[i] + words[i];
-        uint32_t sum0 = nk_sha256_rotr(a, 2) ^ nk_sha256_rotr(a, 13) ^ nk_sha256_rotr(a, 22);
-        uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
-        uint32_t t2 = sum0 + majority;
-        h = g; g = f; f = e; e = d + t1;
-        d = c; c = b; b = a; a = t1 + t2;
-    }
-    ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
-    ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
-}
-
-void nk_sha256_init(NkSha256 *ctx) {
-    static const uint32_t initial[8] = {
-        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
-    };
-    memcpy(ctx->state, initial, sizeof(initial));
-    ctx->bit_count = 0;
-    ctx->block_len = 0;
-}
-
-void nk_sha256_update(NkSha256 *ctx, const uint8_t *data, size_t len) {
-    ctx->bit_count += (uint64_t)len * 8u;
-    while (len > 0) {
-        size_t room = sizeof(ctx->block) - ctx->block_len;
-        size_t take = len < room ? len : room;
-        memcpy(ctx->block + ctx->block_len, data, take);
-        ctx->block_len += take;
-        data += take;
-        len -= take;
-        if (ctx->block_len == sizeof(ctx->block)) {
-            nk_sha256_transform(ctx, ctx->block);
-            ctx->block_len = 0;
-        }
-    }
-}
-
-void nk_sha256_finish(NkSha256 *ctx, uint8_t digest[32]) {
-    uint64_t bits = ctx->bit_count;
-    ctx->block[ctx->block_len++] = 0x80;
-    if (ctx->block_len > 56) {
-        memset(ctx->block + ctx->block_len, 0, sizeof(ctx->block) - ctx->block_len);
-        nk_sha256_transform(ctx, ctx->block);
-        ctx->block_len = 0;
-    }
-    memset(ctx->block + ctx->block_len, 0, 56 - ctx->block_len);
-    for (size_t i = 0; i < 8; i++) {
-        ctx->block[63 - i] = (uint8_t)(bits >> (i * 8));
-    }
-    nk_sha256_transform(ctx, ctx->block);
-    for (size_t i = 0; i < 8; i++) {
-        digest[i * 4] = (uint8_t)(ctx->state[i] >> 24);
-        digest[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
-        digest[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
-        digest[i * 4 + 3] = (uint8_t)ctx->state[i];
-    }
 }
 
 /* A normalised nine-character ID that is its own library key: a retail ID
@@ -1223,17 +1165,18 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
     snprintf(out_meta->volume_id, sizeof(out_meta->volume_id), "%s", vol_id);
 
     /* Search for PARAM.SFO by reading root directory and PSP_GAME */
-    uint32_t root_lba = read_le32(&pvd[158]);
-    uint32_t root_size = read_le32(&pvd[166]);
-    if (root_size > NK_ISO_MAX_DIR_BYTES || root_size == 0) root_size = 4 * SECTOR_SIZE;
-
-    /* Check root directory 64-bit bounds */
-    uint64_t root_offset = (uint64_t)root_lba * SECTOR_SIZE;
-    if (root_offset > file_size || (uint64_t)root_size > file_size - root_offset) {
+    /* The root extent rule nk_iso_reader_open applies, so a disc this accepts
+       is one the reader, the classifier and the stager can open too. */
+    uint32_t root_lba = 0;
+    uint32_t root_size = 0;
+    if (!nk_iso_pvd_root_extent(pvd, file_size, &root_lba, &root_size)) {
         fclose(f);
-        snprintf(out_meta->error_message, sizeof(out_meta->error_message), "Root directory extends beyond ISO file bounds");
+        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
+                 "Root directory extent is invalid (its both-endian copies differ, it is "
+                 "empty or too large, or it extends beyond the ISO file)");
         return NK_ERROR_INVALID_ISO;
     }
+    uint64_t root_offset = (uint64_t)root_lba * SECTOR_SIZE;
 
     uint8_t *dir_buf = (uint8_t *)malloc(root_size);
     uint32_t psp_game_lba = 0;
@@ -1278,10 +1221,15 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
             uint32_t extent_size_le = read_le32(&dir_buf[off + 10]);
             uint32_t extent_size_be = read_be32(&dir_buf[off + 14]);
 
-            /* Both-endian verification (ECMA-119 7.3.3) */
+            /* Both-endian verification (ECMA-119 7.3.3). A record whose copies
+               disagree refuses the disc, as the stager and iso_inspect.py do:
+               skipping it would report a damaged disc as one without PSP_GAME. */
             if (extent_lba_le != extent_lba_be || extent_size_le != extent_size_be) {
-                off += rec_len;
-                continue;
+                snprintf(out_meta->error_message, sizeof(out_meta->error_message),
+                    "Malformed ISO: root directory record at offset %zu has conflicting both-endian extent copies (ECMA-119 7.3.3)", off);
+                free(dir_buf);
+                fclose(f);
+                return NK_ERROR_INVALID_ISO;
             }
 
             uint32_t extent_lba = extent_lba_le;
@@ -1315,8 +1263,16 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
        must never satisfy the catalog and mark the disc supported/verified. */
     bool identity_structured = false;
 
+    if (psp_game_size > NK_ISO_MAX_DIR_BYTES) {
+        /* The reader refuses to buffer this directory, so no later step could
+           open PSP_GAME either: refuse it here, not through a smaller window. */
+        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
+                 "PSP_GAME directory extent is larger than %u bytes",
+                 (unsigned int)NK_ISO_MAX_DIR_BYTES);
+        fclose(f);
+        return NK_ERROR_INVALID_ISO;
+    }
     if (psp_game_size > 0) {
-        if (psp_game_size > NK_ISO_MAX_DIR_BYTES || psp_game_size == 0) psp_game_size = 4 * SECTOR_SIZE;
         uint64_t psp_game_offset = (uint64_t)psp_game_lba * SECTOR_SIZE;
 
         if (psp_game_offset <= file_size && (uint64_t)psp_game_size <= file_size - psp_game_offset) {
@@ -1360,10 +1316,14 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
                     uint32_t extent_size_le = read_le32(&dir_buf[off + 10]);
                     uint32_t extent_size_be = read_be32(&dir_buf[off + 14]);
 
-                    /* Both-endian verification (ECMA-119 7.3.3) */
+                    /* Both-endian verification (ECMA-119 7.3.3): refused, as in
+                       the root scan above. */
                     if (extent_lba_le != extent_lba_be || extent_size_le != extent_size_be) {
-                        off += rec_len;
-                        continue;
+                        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
+                            "Malformed ISO: PSP_GAME directory record at offset %zu has conflicting both-endian extent copies (ECMA-119 7.3.3)", off);
+                        free(dir_buf);
+                        fclose(f);
+                        return NK_ERROR_INVALID_ISO;
                     }
 
                     uint32_t extent_lba = extent_lba_le;
@@ -1845,178 +1805,60 @@ NkResult nk_iso_classify_executables(const char *iso_path,
 NkResult nk_iso_extract_file(const char *iso_path, const char *disc_rel_path, const char *host_dest_path) {
     if (!iso_path || !disc_rel_path || !host_dest_path) return NK_ERROR_GENERIC;
 
-    FILE *f_iso = nk_fopen_utf8(iso_path, "rb");
-    if (!f_iso) return NK_ERROR_FILE_NOT_FOUND;
+    /* The path resolves through nk_iso_reader_open and the reader's lookup, so
+       this route accepts exactly the images, directory sizes
+       (NK_ISO_MAX_DIR_BYTES) and records the other readers accept. */
+    FILE *probe = nk_fopen_utf8(iso_path, "rb");
+    if (!probe) return NK_ERROR_FILE_NOT_FOUND;
+    fclose(probe);
+    NkIsoReader *reader = nk_iso_reader_open(iso_path);
+    if (!reader) return NK_ERROR_INVALID_ISO;
 
-    nk_fseek64(f_iso, 0, SEEK_END);
-    int64_t raw_sz = nk_ftell64(f_iso);
-    nk_fseek64(f_iso, 0, SEEK_SET);
-
-    if (raw_sz <= 0) {
-        fclose(f_iso);
-        return NK_ERROR_INVALID_ISO;
-    }
-    uint64_t file_size = (uint64_t)raw_sz;
-
-    uint8_t pvd[SECTOR_SIZE];
-    nk_fseek64(f_iso, (int64_t)PVD_SECTOR * SECTOR_SIZE, SEEK_SET);
-    if (fread(pvd, 1, SECTOR_SIZE, f_iso) != SECTOR_SIZE || pvd[0] != 0x01) {
-        fclose(f_iso);
-        return NK_ERROR_INVALID_ISO;
-    }
-
-    /* Parse root dir */
-    uint32_t cur_lba = read_le32(&pvd[158]);
-    uint32_t cur_size = read_le32(&pvd[166]);
-    if (cur_size > NK_ISO_MAX_DIR_BYTES || cur_size == 0) cur_size = 4 * SECTOR_SIZE;
-
-    uint64_t cur_offset = (uint64_t)cur_lba * SECTOR_SIZE;
-    if (cur_offset > file_size || (uint64_t)cur_size > file_size - cur_offset) {
-        fclose(f_iso);
-        return NK_ERROR_INVALID_ISO;
-    }
-
-    /* Parse path segments */
-    char path_copy[512];
-    snprintf(path_copy, sizeof(path_copy), "%s", disc_rel_path);
-
-    char *saveptr = NULL;
-    char *token = strtok_r(path_copy, "/\\", &saveptr);
     uint32_t target_lba = 0;
     uint32_t target_size = 0;
-
-    int depth = 0;
-    while (token != NULL) {
-        if (++depth > NK_ISO_MAX_DEPTH) {
-            /* Maximum directory depth exceeded: reject potential loop/attack */
-            fclose(f_iso);
-            return NK_ERROR_INVALID_ISO;
-        }
-
-        char *next_token = strtok_r(NULL, "/\\", &saveptr);
-        bool is_last = (next_token == NULL);
-
-        if (cur_size > 4 * 1024 * 1024) {
-            fclose(f_iso);
-            return NK_ERROR_INVALID_ISO;
-        }
-
-        cur_offset = (uint64_t)cur_lba * SECTOR_SIZE;
-        if (cur_offset > file_size || (uint64_t)cur_size > file_size - cur_offset) {
-            fclose(f_iso);
-            return NK_ERROR_INVALID_ISO;
-        }
-
-        uint8_t *dir_buf = (uint8_t *)malloc(cur_size);
-        if (!dir_buf) {
-            fclose(f_iso);
-            return NK_ERROR_OUT_OF_MEMORY;
-        }
-
-        nk_fseek64(f_iso, (int64_t)cur_offset, SEEK_SET);
-        size_t read_bytes = fread(dir_buf, 1, cur_size, f_iso);
-
-        bool found = false;
-        size_t off = 0;
-        while (off < read_bytes) {
-            uint8_t rec_len = dir_buf[off];
-            if (rec_len == 0) {
-                off = ((off / SECTOR_SIZE) + 1) * SECTOR_SIZE;
-                continue;
-            }
-            if (off + rec_len > read_bytes) break;
-
-            /* ECMA-119 6.8.1.1: Directory record must not cross sector boundary */
-            if ((off % SECTOR_SIZE) + rec_len > SECTOR_SIZE) {
-                off = ((off / SECTOR_SIZE) + 1) * SECTOR_SIZE;
-                continue;
-            }
-            if (!nk_iso_dir_record_fits(&dir_buf[off], rec_len)) {
-                free(dir_buf);
-                fclose(f_iso);
-                return NK_ERROR_INVALID_ISO;
-            }
-
-            uint32_t ext_lba_le = read_le32(&dir_buf[off + 2]);
-            uint32_t ext_lba_be = read_be32(&dir_buf[off + 6]);
-            uint32_t ext_size_le = read_le32(&dir_buf[off + 10]);
-            uint32_t ext_size_be = read_be32(&dir_buf[off + 14]);
-
-            /* Both-endian verification (ECMA-119 7.3.3) */
-            if (ext_lba_le != ext_lba_be || ext_size_le != ext_size_be) {
-                off += rec_len;
-                continue;
-            }
-
-            uint32_t ext_lba = ext_lba_le;
-            uint32_t ext_size = ext_size_le;
-            uint8_t name_len = dir_buf[off + 32];
-            const char *name = (const char *)&dir_buf[off + 33];
-
-            /* Strip the ;version suffix from the ISO9660 filename if present */
-            size_t comp_len = nk_iso_name_without_version(name, name_len);
-
-            if (strlen(token) == comp_len && strncasecmp(token, name, comp_len) == 0) {
-                cur_lba = ext_lba;
-                cur_size = ext_size;
-                if (is_last) {
-                    target_lba = ext_lba;
-                    target_size = ext_size;
-                }
-                found = true;
-                break;
-            }
-            off += rec_len;
-        }
-        free(dir_buf);
-
-        if (!found) {
-            fclose(f_iso);
-            return NK_ERROR_FILE_NOT_FOUND;
-        }
-
-        token = next_token;
+    bool target_is_dir = false;
+    NkResult found = nk_iso_reader_resolve(reader, disc_rel_path, &target_lba, &target_size,
+                                           &target_is_dir);
+    /* A directory is not a file: its extent is never written out as one. */
+    if (found == NK_OK && target_is_dir) found = NK_ERROR_FILE_NOT_FOUND;
+    if (found != NK_OK) {
+        nk_iso_reader_close(reader);
+        return found;
     }
 
-    if (target_lba == 0 || target_size == 0) {
-        fclose(f_iso);
-        return NK_ERROR_FILE_NOT_FOUND;
-    }
-
-    /* Checked bounds on target file extraction */
-    uint64_t target_offset = (uint64_t)target_lba * SECTOR_SIZE;
-    if (target_offset > file_size || (uint64_t)target_size > file_size - target_offset) {
-        fclose(f_iso);
-        return NK_ERROR_INVALID_ISO;
-    }
-
-    /* Extract to host_dest_path */
     FILE *f_out = nk_fopen_utf8(host_dest_path, "wb");
     if (!f_out) {
-        fclose(f_iso);
+        nk_iso_reader_close(reader);
         return NK_ERROR_IO;
     }
 
-    nk_fseek64(f_iso, (int64_t)target_offset, SEEK_SET);
+    /* A zero-length file is extracted as an empty file. Every byte of a
+       non-empty one is read from inside its extent (nk_iso_read_extent_exact),
+       and a short read or write fails the extraction. */
     uint8_t buf[8192];
-    uint32_t remaining = target_size;
-    while (remaining > 0) {
-        size_t to_read = remaining < sizeof(buf) ? (size_t)remaining : sizeof(buf);
-        size_t n = fread(buf, 1, to_read, f_iso);
-        if (n == 0) break;
-        /* Count what was persisted, not what was read. Ignoring a short write
-           let a full destination filesystem consume the whole source and still
-           report success with a truncated file. */
-        size_t written = fwrite(buf, 1, n, f_out);
-        remaining -= (uint32_t)written;
-        if (written != n) break;
+    uint64_t offset = 0;
+    bool copied = true;
+    while (offset < target_size) {
+        uint64_t left = (uint64_t)target_size - offset;
+        uint32_t chunk = left < sizeof(buf) ? (uint32_t)left : (uint32_t)sizeof(buf);
+        if (!nk_iso_read_extent_exact(reader, target_lba, target_size, offset, buf, chunk) ||
+            fwrite(buf, 1, chunk, f_out) != chunk) {
+            copied = false;
+            break;
+        }
+        offset += chunk;
     }
+    nk_iso_reader_close(reader);
 
     /* A close failure can be the first report of a write that never reached
-       the disk, so it must fail the extraction rather than be discarded. */
-    int close_failed = (fclose(f_out) != 0);
-    fclose(f_iso);
-    return (remaining == 0 && !close_failed) ? NK_OK : NK_ERROR_IO;
+       the disk, so it must fail the extraction rather than be discarded. A
+       failed extraction leaves no partial file at host_dest_path. */
+    bool close_failed = fclose(f_out) != 0;
+    if (!copied || close_failed) {
+        nk_remove_utf8(host_dest_path);
+        return NK_ERROR_IO;
+    }
+    return NK_OK;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2051,7 +1893,11 @@ typedef struct {
     uint32_t visited_lbas[NK_ISO_STAGE_MAX_VISITED_DIRS];
     size_t visited_count;
     /* Why a member could not be written when that is not the disc's fault:
-       NK_ERROR_PATH_TOO_LONG when its host path is past the host's limit. */
+       NK_ERROR_PATH_TOO_LONG when its host path is past the host's limit,
+       NK_ERROR_IO when a host directory or file cannot be made, written or
+       closed, NK_ERROR_CANCELLED when the progress callback stopped the copy.
+       Nested directory walks share this context, so the reason reaches
+       nk_iso_extract_game from any depth. */
     NkResult write_failure;
 } NkIsoStageContext;
 
@@ -2171,7 +2017,13 @@ static bool nk_iso_stage_directory_records(FILE *iso, uint64_t file_size,
             if (!okay) break;
             size_t component_length = nk_iso_name_without_version((const char *)name_bytes,
                                                                   name_length);
-            if (component_length == 0 || component_length >= 256 ||
+            /* An extensionless file keeps ECMA-119's separator ("DATA.;1"). One trailing
+             * '.' is dropped, as nk_iso_reader_list and iso_inspect.py drop it, so the
+             * member stages as "DATA" on every host rather than as "DATA." on POSIX. */
+            if (component_length > 0 && name_bytes[component_length - 1] == '.') {
+                component_length--;
+            }
+            if (component_length == 0|| component_length >= 256 ||
                 !nk_iso_stage_component_valid(name_bytes, component_length)) {
                 okay = false;
                 break;
@@ -2221,7 +2073,7 @@ static NkResult nk_iso_stage_find_child(FILE *iso, uint64_t file_size,
     if (!nk_iso_stage_directory_records(iso, file_size, directory_lba,
                                         directory_size, nk_iso_stage_find_callback,
                                         &find)) {
-        return find.conflict ? NK_ERROR_INVALID_ISO : NK_ERROR_INVALID_ISO;
+        return NK_ERROR_INVALID_ISO;
     }
     if (!find.found_any) return NK_ERROR_FILE_NOT_FOUND;
     *out_entry = find.found;
@@ -2238,6 +2090,10 @@ static bool nk_iso_stage_root_path_valid(const char *path) {
             if (length == 0u || length >= 256u ||
                 !nk_iso_stage_component_valid((const uint8_t *)part, length) ||
                 nk_iso_stage_device_name((const uint8_t *)part, length)) return false;
+            /* Win32 drops a trailing '.' or ' ', so "DATA." and "DATA " would stage into the
+             * host folder of "DATA" while nk_iso_stage_root_paths_overlap, which compares
+             * spellings, judged them apart. A root is spelled without them. */
+            if (part[length - 1] == '.' || part[length - 1] == ' ') return false;
             for (size_t i = 0; i < length; i++) {
                 if ((unsigned char)part[i] >= 0x80u) return false;
             }
@@ -2576,38 +2432,41 @@ static bool nk_iso_stage_walk_callback(const NkIsoDirectoryEntry *entry,
     if (!last_slash) return false;
     *last_slash = '\0';
     if (!nk_platform_mkdir_p_private(parent)) {
-        if (nk_platform_path_exceeds_limit(parent, true)) {
-            stage->write_failure = NK_ERROR_PATH_TOO_LONG;
-        }
+        stage->write_failure = nk_platform_path_exceeds_limit(parent, true)
+            ? NK_ERROR_PATH_TOO_LONG : NK_ERROR_IO;
         return false;
     }
 
     FILE *out = nk_platform_fopen_private(host_path, "wb");
     if (!out) {
-        if (nk_platform_path_exceeds_limit(host_path, false)) {
-            stage->write_failure = NK_ERROR_PATH_TOO_LONG;
-        }
+        stage->write_failure = nk_platform_path_exceeds_limit(host_path, false)
+            ? NK_ERROR_PATH_TOO_LONG : NK_ERROR_IO;
         return false;
     }
     uint64_t source_offset = (uint64_t)entry->lba * SECTOR_SIZE;
     if (nk_fseek64(stage->iso, (int64_t)source_offset, SEEK_SET) != 0) {
         fclose(out);
         nk_remove_utf8(host_path);
+        stage->write_failure = NK_ERROR_IO;
         return false;
     }
     uint8_t buffer[64 * 1024];
     uint32_t remaining = entry->size;
-    bool okay = true;
+    /* Why the copy stopped, when it did: a read, write or close failure is
+       NK_ERROR_IO (the extent was validated, so the disc is not at fault) and
+       a progress callback returning false is NK_ERROR_CANCELLED, as for
+       EBOOT.BIN (nk_iso.h). */
+    NkResult failure = NK_OK;
     while (remaining > 0) {
         size_t requested = remaining < sizeof(buffer) ? (size_t)remaining : sizeof(buffer);
         size_t read_count = fread(buffer, 1, requested, stage->iso);
         if (read_count == 0) {
-            okay = false;
+            failure = NK_ERROR_IO;
             break;
         }
         size_t write_count = fwrite(buffer, 1, read_count, out);
         if (write_count != read_count) {
-            okay = false;
+            failure = NK_ERROR_IO;
             break;
         }
         remaining -= (uint32_t)read_count;
@@ -2616,20 +2475,25 @@ static bool nk_iso_stage_walk_callback(const NkIsoDirectoryEntry *entry,
             !stage->progress(child_path, stage->bytes_complete, stage->bytes_total,
                              stage->files_complete, stage->total_files,
                              stage->progress_userdata)) {
-            okay = false;
+            failure = NK_ERROR_CANCELLED;
             break;
         }
     }
     int close_failed = fclose(out) != 0;
-    if (!okay || remaining != 0 || close_failed) {
+    if (failure == NK_OK && close_failed) failure = NK_ERROR_IO;
+    if (failure != NK_OK) {
         nk_remove_utf8(host_path);
+        stage->write_failure = failure;
         return false;
     }
     stage->files_complete++;
     if (stage->progress &&
         !stage->progress(child_path, stage->bytes_complete, stage->bytes_total,
                          stage->files_complete, stage->total_files,
-                         stage->progress_userdata)) return false;
+                         stage->progress_userdata)) {
+        stage->write_failure = NK_ERROR_CANCELLED;
+        return false;
+    }
     return true;
 }
 

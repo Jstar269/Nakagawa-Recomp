@@ -155,6 +155,12 @@ def _have_compiler() -> bool:
     return bool(os.environ.get("CC") or shutil.which("gcc") or shutil.which("cc"))
 
 
+def expanded_name_pattern(extension: str) -> str:
+    """The per-title expansion's name: <DISC_ID>.<16 hex digits of the source's
+    fingerprint>.<extension>.iso (src/core/nk_disc_expand.h)."""
+    return rf"^TEST00042\.[0-9a-f]{{16}}\.{extension}\.iso$"
+
+
 @unittest.skipUnless(_have_compiler(), "no C compiler to build nk_disc_expand (SKIP, not a pass)")
 class DiscExpandToolTests(unittest.TestCase):
     _tmp: ClassVar[tempfile.TemporaryDirectory[str]]
@@ -203,8 +209,9 @@ class DiscExpandToolTests(unittest.TestCase):
             with self.subTest(name=name):
                 data_root = self.root / f"data-{name}"
                 first = disc_expand_tool.import_image(image, data_root)
-                expected = data_root / "discs" / "TEST00042" / f"TEST00042.{name}.iso"
-                self.assertEqual(Path(first["iso_path"]), expected)
+                expected = Path(first["iso_path"])
+                self.assertEqual(expected.parent, data_root / "discs" / "TEST00042")
+                self.assertRegex(expected.name, expanded_name_pattern(name))
                 self.assertEqual(first["disc_id"], "TEST00042")
                 self.assertFalse(first["reused"])
                 self.assertEqual(expected.read_bytes(), self.iso)
@@ -230,8 +237,10 @@ class DiscExpandToolTests(unittest.TestCase):
                     container=dict(info.container_metadata),
                 )
                 self.assertNotIn("source_format", identity["container"])
-                expanded = data_root / "discs" / "TEST00042" / f"TEST00042.{name}.iso"
-                self.assertEqual(expanded.read_bytes(), self.iso)
+                found = sorted((data_root / "discs" / "TEST00042").glob(f"TEST00042.*.{name}.iso"))
+                self.assertEqual(len(found), 1, found)
+                self.assertRegex(found[0].name, expanded_name_pattern(name))
+                self.assertEqual(found[0].read_bytes(), self.iso)
 
     def test_a_refused_image_keeps_its_named_boundary(self) -> None:
         bad = bytearray(self.images["cso"].read_bytes())
@@ -313,7 +322,7 @@ class BringupAcceptsCompressedImagesTests(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertEqual(report["failure_class"], "EXECUTABLE_UNSUPPORTED")
                 self.assertEqual(len(seen), 1)
-                self.assertEqual(seen[0].name, f"TEST00042.{name}.iso")
+                self.assertRegex(seen[0].name, expanded_name_pattern(name))
                 self.assertEqual(seen[0].read_bytes(), self.iso)
                 user_data = (self.root / f"case-{name}" / "work" / "user-data").resolve()
                 self.assertTrue(seen[0].resolve().is_relative_to(user_data))

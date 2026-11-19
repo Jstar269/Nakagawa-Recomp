@@ -208,7 +208,9 @@ typedef struct {
  * shared contract in generated/nk_title_catalog.h); an unknown title, or a
  * workspace holding only another title's build, is not "available". This is
  * the same probe used by nk_launch_prepare_session, so UI readiness cannot
- * drift from the eventual launch path. */
+ * drift from the eventual launch path. A NULL or empty `root` stands for the
+ * per-user data directory (or "." when the platform names none), exactly as
+ * it does for nk_launch_prepare_session. */
 bool nk_launch_runtime_available(const char *root, const char *title_id);
 
 /* True only when the selected title's identity-matched runtime executable and
@@ -299,8 +301,16 @@ bool nk_launch_format_input_profile_env(
 /* Check if runtime child process is currently running */
 bool nk_launch_is_running(NkLaunchSession *session);
 
-/* Wait for runtime process to exit (timeout_ms < 0 for infinite) */
+/* Wait for runtime process to exit (timeout_ms < 0 for infinite). Returns the
+ * exit code, or -1 when a bounded wait expired with the child still running;
+ * a child that ended with no exit status (a signal on POSIX) also returns -1,
+ * so a caller that must tell the two apart uses nk_launch_wait_status. */
 int nk_launch_wait(NkLaunchSession *session, int timeout_ms);
+
+/* nk_launch_wait that also says why it returned: *timed_out (when not NULL)
+ * is true only when a bounded wait expired with the child still running, which
+ * leaves the session running and the caller's to wait on again or stop. */
+int nk_launch_wait_status(NkLaunchSession *session, int timeout_ms, bool *timed_out);
 
 /* Terminate child process cleanly if running */
 void nk_launch_stop(NkLaunchSession *session);

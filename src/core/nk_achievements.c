@@ -27,6 +27,8 @@ struct NkAch {
     size_t event_head; /* oldest */
     size_t event_count;
     uint32_t events_dropped;
+    size_t in_flight; /* requests the transport has not answered yet */
+    bool closing;     /* nk_ach_destroy ran; freed when the last answer arrives */
 };
 
 bool nk_ach_url_allowed(const char *url) {
@@ -94,14 +96,51 @@ static uint32_t RC_CCONV ach_read(uint32_t address, uint8_t *buffer, uint32_t nu
     return ach ? nk_ach_read_memory(&ach->mem, address, buffer, num_bytes) : 0u;
 }
 
-/* One request in flight: rc_client's callback, carried through the caller's transport. */
+/* One request in flight: rc_client's callback, carried through the caller's transport, and the
+ * bridge's own copy of the request's strings. rc_client builds a request in a buffer it frees as
+ * soon as server_call returns (rc_client.c calls rc_api_destroy_request right after it), so the
+ * transport is handed these copies, which live until done is called. */
 typedef struct AchCall {
+    NkAch *ach;
     rc_client_server_callback_t callback;
     void *callback_data;
+    char *url;
+    char *post_data;
+    char *content_type;
 } AchCall;
+
+/* What a failed request reports when the transport reached no server and gave no text:
+ * rc_client would otherwise pass on an empty error message. */
+static const char k_no_response[] = "no response from the RetroAchievements server";
+static const char k_closing[] = "refused: achievements are closing";
+
+static char *ach_copy(const char *s, bool *ok) {
+    if (!s) return NULL;
+    const size_t n = strlen(s) + 1u;
+    char *copy = (char *)malloc(n);
+    if (!copy) {
+        *ok = false;
+        return NULL;
+    }
+    memcpy(copy, s, n);
+    return copy;
+}
+
+static void ach_call_free(AchCall *call) {
+    free(call->url);
+    free(call->post_data);
+    free(call->content_type);
+    free(call);
+}
+
+static void ach_finish(NkAch *ach) {
+    rc_client_destroy(ach->client);
+    free(ach);
+}
 
 static void ach_done(const NkAchResponse *response, void *done_ctx) {
     AchCall *call = (AchCall *)done_ctx;
+    NkAch *ach = call->ach;
     rc_api_server_response_t server;
     memset(&server, 0, sizeof server);
     if (response) {
@@ -111,8 +150,23 @@ static void ach_done(const NkAchResponse *response, void *done_ctx) {
     } else {
         server.http_status_code = RC_API_SERVER_RESPONSE_CLIENT_ERROR;
     }
+    if (server.http_status_code < 0 && server.body_length == 0u) {
+        server.body = k_no_response;
+        server.body_length = sizeof k_no_response - 1u;
+    }
+    /* After nk_ach_destroy the client is still whole: it is destroyed below, once every request
+     * it sent has its answer, so a late answer never reaches freed memory. That answer is
+     * dropped and rc_client is told the request was refused, so it only releases the request's
+     * state: nothing is loaded or activated (which would read guest memory the caller may
+     * already have released) and no game state is touched. */
+    if (ach->closing) {
+        server.body = k_closing;
+        server.body_length = sizeof k_closing - 1u;
+        server.http_status_code = RC_API_SERVER_RESPONSE_CLIENT_ERROR;
+    }
     call->callback(&server, call->callback_data);
-    free(call);
+    ach_call_free(call);
+    if (--ach->in_flight == 0u && ach->closing) ach_finish(ach);
 }
 
 static void ach_refuse(rc_client_server_callback_t callback, void *callback_data,
@@ -137,15 +191,33 @@ static void RC_CCONV ach_server_call(const rc_api_request_t *request,
         ach_refuse(callback, callback_data, "refused: online achievements are off");
         return;
     }
-    AchCall *call = (AchCall *)malloc(sizeof *call);
-    if (!call) {
+    if (ach->closing) {
+        ach_refuse(callback, callback_data, k_closing);
+        return;
+    }
+    AchCall *call = (AchCall *)calloc(1u, sizeof *call);
+    bool ok = call != NULL;
+    if (call) {
+        call->ach = ach;
+        call->callback = callback;
+        call->callback_data = callback_data;
+        call->url = ach_copy(request->url, &ok);
+        call->post_data = ach_copy(request->post_data, &ok);
+        call->content_type = ach_copy(request->content_type, &ok);
+    }
+    if (!ok) {
+        if (call) ach_call_free(call);
         ach_refuse(callback, callback_data, "refused: out of memory");
         return;
     }
-    call->callback = callback;
-    call->callback_data = callback_data;
-    NkAchRequest out = {request->url, request->post_data, request->content_type};
+    ach->in_flight++;
+    NkAchRequest out = {call->url, call->post_data, call->content_type};
     ach->transport(ach->transport_ctx, &out, ach_done, call);
+}
+
+/* rc_client's error text, or rcheevos' name for result when that text is missing or empty. */
+static const char *ach_reason(const char *error_message, int result) {
+    return (error_message && *error_message) ? error_message : rc_error_str(result);
 }
 
 static void RC_CCONV ach_event(const rc_client_event_t *event, rc_client_t *client) {
@@ -160,7 +232,8 @@ static void RC_CCONV ach_event(const rc_client_event_t *event, rc_client_t *clie
     case RC_CLIENT_EVENT_SERVER_ERROR:
         ach_push(ach, NK_ACH_EVENT_SERVER_ERROR,
                  event->server_error ? event->server_error->related_id : 0u, 0u, 0u, NULL,
-                 event->server_error ? event->server_error->error_message : NULL);
+                 ach_reason(event->server_error ? event->server_error->error_message : NULL,
+                            event->server_error ? event->server_error->result : RC_API_FAILURE));
         break;
     case RC_CLIENT_EVENT_DISCONNECTED:
         ach_push(ach, NK_ACH_EVENT_DISCONNECTED, 0u, 0u, 0u, NULL, NULL);
@@ -173,20 +246,34 @@ static void RC_CCONV ach_event(const rc_client_event_t *event, rc_client_t *clie
     }
 }
 
-/* rc_client raises no event when a short read turns an achievement off; it only logs
- * "Disabled achievement <id>. Invalid address <addr>" (rc_client.c,
- * rc_client_invalidate_memref_achievements). That warning becomes a DISABLED event, so the user is
- * told. achievements-selftest checks the text, so an rcheevos update that changes it fails there. */
+/* rc_client raises no event when it turns an achievement off; it only logs a warning. A short
+ * read logs "Disabled achievement <id>. Invalid address <addr>" (rc_client.c,
+ * rc_client_invalidate_memref_achievements), and a trigger this rcheevos cannot parse logs
+ * "Parse error <code> processing achievement <id>" while the set loads (rc_client.c,
+ * rc_client_copy_achievements). Each becomes a DISABLED event, so the user is told.
+ * achievements-selftest checks both texts, so an rcheevos update that changes one fails there. */
 static const char k_disabled_prefix[] = "Disabled achievement ";
+static const char k_parse_error_prefix[] = "Parse error ";
+static const char k_parse_error_infix[] = " processing achievement ";
+
+static uint32_t ach_parse_id(const char *p) {
+    uint32_t id = 0u;
+    while (*p >= '0' && *p <= '9' && id <= 0x0fffffffu) id = id * 10u + (uint32_t)(*p++ - '0');
+    return id;
+}
 
 static void RC_CCONV ach_log(const char *message, const rc_client_t *client) {
     NkAch *ach = (NkAch *)rc_client_get_userdata(client);
-    if (!ach || !message || strncmp(message, k_disabled_prefix, sizeof k_disabled_prefix - 1u))
-        return;
-    const char *p = message + sizeof k_disabled_prefix - 1u;
-    uint32_t id = 0u;
-    while (*p >= '0' && *p <= '9' && id <= 0x0fffffffu) id = id * 10u + (uint32_t)(*p++ - '0');
-    ach_push(ach, NK_ACH_EVENT_DISABLED, id, 0u, 0u, NULL, message);
+    if (!ach || !message) return;
+    if (strncmp(message, k_disabled_prefix, sizeof k_disabled_prefix - 1u) == 0) {
+        ach_push(ach, NK_ACH_EVENT_DISABLED,
+                 ach_parse_id(message + sizeof k_disabled_prefix - 1u), 0u, 0u, NULL, message);
+    } else if (strncmp(message, k_parse_error_prefix, sizeof k_parse_error_prefix - 1u) == 0) {
+        const char *infix = strstr(message, k_parse_error_infix);
+        if (infix)
+            ach_push(ach, NK_ACH_EVENT_DISABLED,
+                     ach_parse_id(infix + sizeof k_parse_error_infix - 1u), 0u, 0u, NULL, message);
+    }
 }
 
 NkAch *nk_ach_create(const NkAchMemory *mem, NkAchTransport transport, void *transport_ctx) {
@@ -210,9 +297,9 @@ NkAch *nk_ach_create(const NkAchMemory *mem, NkAchTransport transport, void *tra
 }
 
 void nk_ach_destroy(NkAch *ach) {
-    if (!ach) return;
-    rc_client_destroy(ach->client);
-    free(ach);
+    if (!ach || ach->closing) return;
+    ach->closing = true;
+    if (ach->in_flight == 0u) ach_finish(ach);
 }
 
 static void RC_CCONV ach_login_done(int result, const char *error_message,
@@ -226,7 +313,7 @@ static void RC_CCONV ach_login_done(int result, const char *error_message,
                  user ? user->display_name : NULL, NULL);
     } else {
         ach_push(ach, NK_ACH_EVENT_LOGIN_FAILED, 0u, 0u, 0u, NULL,
-                 error_message ? error_message : rc_error_str(result));
+                 ach_reason(error_message, result));
     }
 }
 
@@ -244,7 +331,15 @@ static void RC_CCONV ach_load_done(int result, const char *error_message,
     NkAch *ach = (NkAch *)rc_client_get_userdata(client);
     if (!ach) return;
     const rc_client_game_t *game = rc_client_get_game_info(client);
-    if (result == RC_OK && game) {
+    if (result == RC_OK && game && game->console_id != NK_ACH_CONSOLE_PSP) {
+        /* A load by hash takes the console from the server's answer; the bridge reads guest
+         * memory through the PSP map only, so a set made for another console is not run. */
+        char why[96];
+        snprintf(why, sizeof why, "the server's set for this disc is for console %u, not the PSP (%u)",
+                 (unsigned)game->console_id, (unsigned)NK_ACH_CONSOLE_PSP);
+        rc_client_unload_game(client);
+        ach_push(ach, NK_ACH_EVENT_GAME_FAILED, 0u, 0u, 0u, NULL, why);
+    } else if (result == RC_OK && game) {
         rc_client_user_game_summary_t summary;
         memset(&summary, 0, sizeof summary);
         rc_client_get_user_game_summary(client, &summary);
@@ -252,7 +347,7 @@ static void RC_CCONV ach_load_done(int result, const char *error_message,
                  game->title, NULL);
     } else {
         ach_push(ach, NK_ACH_EVENT_GAME_FAILED, 0u, 0u, 0u, NULL,
-                 error_message ? error_message : rc_error_str(result));
+                 ach_reason(error_message, result));
     }
 }
 

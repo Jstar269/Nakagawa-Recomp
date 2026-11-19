@@ -602,6 +602,46 @@ static void test_render_fallback_window(void) {
     CHECK(crossed == 0u, "one cheap software primitive a present is never reported");
 }
 
+/* The one SHA-256 the player and the runtime share (the disc, package and font identities),
+   against the FIPS 180-2 examples, the last fed in uneven pieces across block boundaries. */
+static void sha256_hex(const uint8_t *data, size_t length, size_t piece, char out[65]) {
+    NkSha256 sha;
+    uint8_t digest[32];
+    nk_sha256_init(&sha);
+    while (length > 0) {
+        size_t take = length < piece ? length : piece;
+        nk_sha256_update(&sha, data, take);
+        data += take;
+        length -= take;
+    }
+    nk_sha256_finish(&sha, digest);
+    for (size_t i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", digest[i]);
+    out[64] = '\0';
+}
+
+static void test_sha256(void) {
+    static const char two_blocks[] = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    char hex[65];
+    sha256_hex((const uint8_t *)"", 0, 1, hex);
+    CHECK(strcmp(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0,
+          "SHA-256 of the empty message");
+    sha256_hex((const uint8_t *)"abc", 3, 3, hex);
+    CHECK(strcmp(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") == 0,
+          "SHA-256 of abc");
+    sha256_hex((const uint8_t *)two_blocks, sizeof(two_blocks) - 1, 7, hex);
+    CHECK(strcmp(hex, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1") == 0,
+          "SHA-256 of the 448-bit message (padding spills into a second block)");
+    uint8_t *million = (uint8_t *)malloc(1000000u);
+    CHECK(million != NULL, "SHA-256 million-byte buffer");
+    if (million) {
+        memset(million, 'a', 1000000u);
+        sha256_hex(million, 1000000u, 997, hex);
+        CHECK(strcmp(hex, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0") == 0,
+              "SHA-256 of one million 'a' bytes fed in 997-byte pieces");
+        free(million);
+    }
+}
+
 int main(void) {
     test_path_joins();
     test_legacy_path_contracts();
@@ -612,6 +652,7 @@ int main(void) {
     test_render_path();
     test_render_fallback_event();
     test_render_fallback_window();
+    test_sha256();
     if (failures != 0) {
         fprintf(stderr, "shared helper selftest: %d failure(s)\n", failures);
         return 1;

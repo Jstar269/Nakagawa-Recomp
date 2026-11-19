@@ -750,6 +750,34 @@ class TitleManifestParityTests(unittest.TestCase):
             self.assertFalse(py_ok, f"Python should reject duplicate key: {py_err}")
             self.assertFalse(c_ok, f"Native should reject duplicate key: {c_err}")
 
+    def test_leading_zero_numbers_parity(self):
+        """Both parsers refuse a number with a leading zero (audit 2026-11-17, F-e31fe5c0).
+
+        The native reader used to accept ``01`` as 1, and cut a zero-padded
+        70-digit value to its first 63 bytes, where Python's json refuses both.
+        """
+        text = (ROOT / "assets" / "titles" / "synthetic.json").read_text(encoding="utf-8")
+        compact = json.dumps(json.loads(text))
+        self.assertIn('"schema_version": 1,', compact)
+        cases = {
+            "control": compact,
+            "leading-zero": compact.replace('"schema_version": 1,', '"schema_version": 01,', 1),
+            "negative-leading-zero": compact.replace(
+                '"schema_version": 1,', '"schema_version": -01,', 1),
+            "zero-padded-70-digits": compact.replace(
+                '"schema_version": 1,', '"schema_version": ' + "0" * 69 + "1,", 1),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name, body in cases.items():
+                with self.subTest(case=name):
+                    mf = Path(tmpdir) / f"numbers-{name}.json"
+                    mf.write_text(body, encoding="utf-8")
+                    py_ok, py_msg = self._run_python(mf)
+                    c_ok, c_msg = self._run_native(mf, allow_override=True)
+                    expected = name == "control"
+                    self.assertEqual(py_ok, expected, py_msg)
+                    self.assertEqual(c_ok, expected, c_msg)
+
     def test_declared_input_locations_parity(self):
         """Both parsers accept a declared executable and an ordinary dump-named disc image."""
         base = {

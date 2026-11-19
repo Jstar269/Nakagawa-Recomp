@@ -7167,7 +7167,8 @@ class FirstRunRouteTests(unittest.TestCase):
             games = json.loads(libraries[0].read_text(encoding="utf-8"))["games"]
             self.assertEqual([game["disc_id"] for game in games], ["TEST00002"])
             expanded = Path(games[0]["iso_path"])
-            self.assertEqual(expanded.name, "TEST00002.cso.iso")
+            # <DISC_ID>.<16 hex digits of the source fingerprint>.cso.iso
+            self.assertRegex(expanded.name, r"^TEST00002\.[0-9a-f]{16}\.cso\.iso$")
             self.assertEqual(expanded.parent.name, "TEST00002")
             self.assertEqual(expanded.parent.parent.name, "discs")
             self.assertEqual(expanded.read_bytes(), iso.read_bytes())

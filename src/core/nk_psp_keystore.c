@@ -157,6 +157,10 @@ static int flat_entry_length(const char *name)
     if (strncmp(name, "kirk.keyvault.", 14) == 0) {
         const char *p = name + 14;
         if (*p == '\0') return -1;
+        /* One spelling per slot: kirk_keyvault_key looks a slot up as
+         * "kirk.keyvault.%d", so a padded "066" would load and never be found,
+         * and would slip past the duplicate check beside "66". */
+        if (p[0] == '0' && p[1] != '\0') return -1;
         long keyvault_index = 0;
         for (; *p; p++) {
             if (*p < '0' || *p > '9') return -1;
@@ -233,8 +237,9 @@ static int load_tag_field(const char *name, const char *field,
     return 0;
 }
 
-static int load_tag_entry(NkKeystore *ks, const char *name,
-                          const NkJsonNode *value, char *err, size_t err_len)
+static int load_tag_entry_into(NkKeystore *ks, const char *name,
+                               const NkJsonNode *value, TagEntry *entry,
+                               char *err, size_t err_len)
 {
     uint32_t tag = 0;
     if (parse_tag_name(name, &tag) != 0) {
@@ -259,9 +264,8 @@ static int load_tag_entry(NkKeystore *ks, const char *name,
             return -1;
         }
     }
-    TagEntry entry;
-    memset(&entry, 0, sizeof(entry));
-    entry.tag = tag;
+    memset(entry, 0, sizeof(*entry));
+    entry->tag = tag;
 
     NkJsonNode *code_node = nk_json_obj_get(value, "code");
     if (code_node == NULL || !nk_json_is_number(code_node)) {
@@ -275,8 +279,8 @@ static int load_tag_entry(NkKeystore *ks, const char *name,
         snprintf(err, err_len, "entry '%s': \"code\" must be an integer in 0..127", name);
         return -1;
     }
-    entry.have_code = 1;
-    entry.code = (int)code_number;
+    entry->have_code = 1;
+    entry->code = (int)code_number;
 
     static const char *const recipe_fields[] = {"key", "key144", "seed", "xor"};
     const NkJsonNode *field_values[4];
@@ -295,26 +299,37 @@ static int load_tag_entry(NkKeystore *ks, const char *name,
         }
     }
     if (field_values[0] != NULL &&
-        load_tag_field(name, "key", field_values[0], entry.key,
-                       &entry.have_key, 16, err, err_len) != 0) return -1;
+        load_tag_field(name, "key", field_values[0], entry->key,
+                       &entry->have_key, 16, err, err_len) != 0) return -1;
     if (field_values[1] != NULL &&
-        load_tag_field(name, "key144", field_values[1], entry.key144,
-                       &entry.have_key144, 144, err, err_len) != 0) return -1;
+        load_tag_field(name, "key144", field_values[1], entry->key144,
+                       &entry->have_key144, 144, err, err_len) != 0) return -1;
     if (field_values[2] != NULL &&
-        load_tag_field(name, "seed", field_values[2], entry.seed,
-                       &entry.have_seed, 16, err, err_len) != 0) return -1;
+        load_tag_field(name, "seed", field_values[2], entry->seed,
+                       &entry->have_seed, 16, err, err_len) != 0) return -1;
     if (field_values[3] != NULL &&
-        load_tag_field(name, "xor", field_values[3], entry.xorpad,
-                       &entry.have_xorpad, 16, err, err_len) != 0) return -1;
-    if (!entry.have_key && !entry.have_key144) {
+        load_tag_field(name, "xor", field_values[3], entry->xorpad,
+                       &entry->have_xorpad, 16, err, err_len) != 0) return -1;
+    if (!entry->have_key && !entry->have_key144) {
         snprintf(err, err_len,
                  "entry '%s': recipe needs one of \"key\" (16 bytes) or "
                  "\"key144\" (144 bytes)", name);
         return -1;
     }
 
-    ks->tags[ks->tag_count++] = entry;
+    ks->tags[ks->tag_count++] = *entry;
     return 0;
+}
+
+/* The recipe is assembled in a stack copy before it joins ks->tags; that copy
+ * holds the same key bytes, so it is wiped on every exit, failure included. */
+static int load_tag_entry(NkKeystore *ks, const char *name,
+                          const NkJsonNode *value, char *err, size_t err_len)
+{
+    TagEntry entry;
+    int rc = load_tag_entry_into(ks, name, value, &entry, err, err_len);
+    nk_secure_zero(&entry, sizeof(entry));
+    return rc;
 }
 
 int nk_keystore_load_json(NkKeystore *ks, const char *text, size_t len,
@@ -460,6 +475,9 @@ int nk_keystore_load_file(NkKeystore *ks, const char *path,
         snprintf(err, err_len, "no key file at %s", path);
         return NK_PSP_ERR_KEYFILE;
     }
+    /* Unbuffered, so the text goes straight into the buffer wiped below
+     * instead of also through a stdio buffer this module cannot wipe. */
+    (void)setvbuf(stream, NULL, _IONBF, 0);
     char *buffer = (char *)malloc(NK_KEYSTORE_MAX_BYTES + 1);
     if (buffer == NULL) {
         fclose(stream);

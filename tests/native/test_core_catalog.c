@@ -223,6 +223,31 @@ static void test_nk_library_save_load_escaping_and_samples(void) {
     assert(nk_library_find_by_disc_id(&loaded, "TEST00002") == NULL);
 }
 
+/* F-c01f8c97: last_played is escaped like every other string field. The loader
+   decodes escapes, so a value read from a hand-edited or tool-written library can
+   hold a quote, a backslash or a control character. Failing before: the value was
+   written raw, the saved file was not JSON, and the next load refused it. */
+static void test_nk_library_last_played_escaped(void) {
+    printf("[NATIVE_TEST] Testing that last_played is escaped on save...\n");
+    char path[NATIVE_TEST_PATH_MAX];
+    snprintf(path, sizeof(path), "%s%clibrary_last_played.json", native_test_get_root(),
+             nk_platform_path_separator());
+    static NkLibrary lib;
+    nk_library_init(&lib);
+    NkGameEntry g;
+    seed_game_entry(&g, "TEST00003", "Last Played");
+    snprintf(g.last_played, sizeof(g.last_played), "a\"b\\" "c\x01" "d");
+    assert(nk_library_add_or_update(&lib, &g) == NK_OK);
+    assert(nk_library_save(&lib, path) == NK_OK);
+
+    static NkLibrary loaded;
+    nk_library_init(&loaded);
+    assert(nk_library_load(&loaded, path) == NK_OK);
+    const NkGameEntry *got = nk_library_find_by_disc_id(&loaded, "TEST00003");
+    assert(got != NULL);
+    assert(strcmp(got->last_played, g.last_played) == 0);
+}
+
 /* A full library (NK_MAX_GAMES titles, the tools' record limit) saves and
    loads whole; one title more is refused, never truncated. The player held 64
    titles before, and the first library of a whole collection loaded as empty. */
@@ -477,6 +502,259 @@ static void test_nk_library_corrupt_load_and_backup_recovery(void) {
     assert(nk_library_count(&loaded) == 1);
 }
 
+static void library_test_path(char *out, size_t out_size, const char *name) {
+    int written = snprintf(out, out_size, "%s%c%s", native_test_get_root(),
+                           nk_platform_path_separator(), name);
+    assert(written > 0 && (size_t)written < out_size);
+}
+
+static void library_write_text(const char *path, const char *text) {
+    FILE *f = fopen(path, "wb");
+    assert(f != NULL);
+    assert(fwrite(text, 1, strlen(text), f) == strlen(text));
+    assert(fclose(f) == 0);
+}
+
+static long library_read_text(const char *path, char *out, size_t out_size) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t got = fread(out, 1, out_size - 1u, f);
+    fclose(f);
+    out[got] = '\0';
+    return (long)got;
+}
+
+/* A string value longer than its field ends at the last code point that fits:
+ * a code point that did not fit used to be dropped while a later, shorter one
+ * was still appended, leaving a hole in the middle of a title or path. A value
+ * that fits exactly loads whole, and an unknown key's long value is skipped. */
+static void test_nk_library_overlong_field_cut_cleanly(void) {
+    printf("[NATIVE_TEST] Testing nk_library cuts a value longer than its field at its end...\n");
+    static NkLibrary lib;  /* too large for the stack (NK_MAX_GAMES) */
+    NkGameEntry probe;
+    const size_t title_cap = sizeof(probe.title_name);
+    char path[NATIVE_TEST_PATH_MAX];
+    library_test_path(path, sizeof(path), "overlong_field_lib.json");
+    char bak[NATIVE_TEST_PATH_MAX + 8];
+    snprintf(bak, sizeof(bak), "%s.bak", path);
+    remove(bak);
+
+    /* title_cap - 3 ASCII bytes, then a 3-byte character that does not fit,
+       then one ASCII byte that would. */
+    char title[NK_MAX_TITLE_LEN + 16];
+    memset(title, 'a', title_cap - 3u);
+    title[title_cap - 3u] = '\0';
+    char json[1024];
+    snprintf(json, sizeof(json),
+             "{\n  \"schema_version\": 1,\n  \"games\": [\n    {\n"
+             "      \"disc_id\": \"LONG00001\",\n"
+             "      \"title_name\": \"%s\\u30cax\"\n    }\n  ]\n}\n", title);
+    library_write_text(path, json);
+    assert(nk_library_load(&lib, path) == NK_OK);
+    assert(nk_library_count(&lib) == 1);
+    assert(strcmp(nk_library_get(&lib, 0)->title_name, title) == 0);
+
+    /* The longest value the field holds loads whole. */
+    memset(title, 'b', title_cap - 1u);
+    title[title_cap - 1u] = '\0';
+    char unknown[300];
+    memset(unknown, 'u', sizeof(unknown) - 1u);
+    unknown[sizeof(unknown) - 1u] = '\0';
+    snprintf(json, sizeof(json),
+             "{\n  \"schema_version\": 1,\n  \"games\": [\n    {\n"
+             "      \"disc_id\": \"LONG00001\",\n"
+             "      \"some_future_field\": \"%s\",\n"
+             "      \"title_name\": \"%s\"\n    }\n  ]\n}\n", unknown, title);
+    library_write_text(path, json);
+    assert(nk_library_load(&lib, path) == NK_OK);
+    assert(nk_library_count(&lib) == 1);
+    assert(strcmp(nk_library_get(&lib, 0)->title_name, title) == 0);
+    remove(path);
+}
+
+/* With library.json missing, a .bak that fails part way is no library: the
+ * entries it gave before the damaged member are not handed back as the whole
+ * library (a commit would then save the truncation as the primary). */
+static void test_nk_library_partial_backup_without_primary(void) {
+    printf("[NATIVE_TEST] Testing a damaged .bak with no primary is refused whole...\n");
+    static NkLibrary lib;  /* too large for the stack (NK_MAX_GAMES) */
+    char path[NATIVE_TEST_PATH_MAX];
+    library_test_path(path, sizeof(path), "partial_bak_lib.json");
+    char bak[NATIVE_TEST_PATH_MAX + 8];
+    snprintf(bak, sizeof(bak), "%s.bak", path);
+    remove(path);
+    remove(bak);
+
+    nk_library_init(&lib);
+    NkGameEntry entry;
+    seed_game_entry(&entry, "PART00001", "Before the damage");
+    assert(nk_library_add_or_update(&lib, &entry) == NK_OK);
+    assert(nk_library_save(&lib, bak) == NK_OK);
+    char text[8192];
+    long length = library_read_text(bak, text, sizeof(text) - 64u);
+    assert(length > 0);
+    char *close = strstr(text, "  ]\n}\n");
+    assert(close != NULL);
+    snprintf(close, sizeof(text) - (size_t)(close - text),
+             "    ,{ \"disc_id\": 12 }\n  ]\n}\n");
+    library_write_text(bak, text);
+    assert(!nk_platform_file_exists(path));
+
+    assert(nk_library_load(&lib, path) == NK_ERROR_GENERIC);
+    assert(nk_library_count(&lib) == 0);
+    assert(strcmp(lib.library_path, path) == 0);
+    remove(bak);
+}
+
+/* Holds or releases a block on reading path: a handle that shares nothing on
+ * Windows, no permissions on POSIX. False where the host cannot block it (a
+ * POSIX root reads any file). */
+#if defined(_WIN32) || defined(_WIN64)
+static HANDLE s_library_block = INVALID_HANDLE_VALUE;
+#endif
+static bool library_block_reading(const char *path, bool block) {
+#if defined(_WIN32) || defined(_WIN64)
+    if (block) {
+        s_library_block = CreateFileA(path, GENERIC_READ, 0, NULL, OPEN_EXISTING,
+                                      FILE_ATTRIBUTE_NORMAL, NULL);
+        return s_library_block != INVALID_HANDLE_VALUE;
+    }
+    if (s_library_block != INVALID_HANDLE_VALUE) CloseHandle(s_library_block);
+    s_library_block = INVALID_HANDLE_VALUE;
+    return true;
+#else
+    if (block && geteuid() == 0) return false;
+    return chmod(path, block ? 0 : 0600) == 0;
+#endif
+}
+
+/* A library file that is there but cannot be read now (another program holds
+ * it) is not damaged: its older .bak is not loaded in its place, and a commit
+ * does not write over it. */
+static void test_nk_library_unreadable_primary_kept(void) {
+    printf("[NATIVE_TEST] Testing an unreadable library file is neither replaced nor stood in for...\n");
+    static NkLibrary lib;  /* too large for the stack (NK_MAX_GAMES) */
+    static NkLibrary mine;
+    char path[NATIVE_TEST_PATH_MAX];
+    library_test_path(path, sizeof(path), "unreadable_lib.json");
+    char bak[NATIVE_TEST_PATH_MAX + 8];
+    snprintf(bak, sizeof(bak), "%s.bak", path);
+    remove(path);
+    remove(bak);
+
+    nk_library_init(&lib);
+    NkGameEntry entry;
+    seed_game_entry(&entry, "READ00001", "Older");
+    assert(nk_library_add_or_update(&lib, &entry) == NK_OK);
+    assert(nk_library_save(&lib, path) == NK_OK);
+    seed_game_entry(&entry, "READ00002", "Newer");
+    assert(nk_library_add_or_update(&lib, &entry) == NK_OK);
+    assert(nk_library_save(&lib, path) == NK_OK);
+    assert(nk_platform_file_exists(bak));  /* holds READ00001 only */
+    char before[8192];
+    assert(library_read_text(path, before, sizeof(before)) > 0);
+
+    if (!library_block_reading(path, true)) {
+        printf("[NATIVE_TEST] SKIP: this host reads any file (root); the unreadable-library case is not run\n");
+        remove(path);
+        remove(bak);
+        return;
+    }
+    nk_library_init(&lib);
+    NkResult load_result = nk_library_load(&lib, path);
+    nk_library_init(&mine);
+    seed_game_entry(&entry, "READ00003", "Committed while unreadable");
+    NkResult commit_result = nk_library_commit_entry(&mine, &entry, path);
+    assert(library_block_reading(path, false));
+
+    assert(load_result == NK_ERROR_IO);
+    assert(nk_library_count(&lib) == 0);
+    assert(commit_result == NK_ERROR_IO);
+    char after[8192];
+    assert(library_read_text(path, after, sizeof(after)) > 0);
+    assert(strcmp(after, before) == 0);
+    assert(nk_library_load(&lib, path) == NK_OK);
+    assert(nk_library_count(&lib) == 2);
+    remove(path);
+    remove(bak);
+}
+
+/* The default library path (the data folder plus library.json) that does not
+ * fit is refused by name, not cut to a file of another name. */
+static void test_nk_library_default_path_too_long(void) {
+    printf("[NATIVE_TEST] Testing a default library path that does not fit is refused...\n");
+    char sep = nk_platform_path_separator();
+    char data_dir[NK_MAX_PATH];
+    size_t used = (size_t)snprintf(data_dir, sizeof(data_dir), "%s%clong-data",
+                                   native_test_get_root(), sep);
+    assert(used + 20u < NK_MAX_PATH);
+    /* Folder names of at most 64 bytes up to a few bytes short of the limit, so
+       the folder fits but "<sep>library.json" after it does not. */
+    while (used < NK_MAX_PATH - 8u) {
+        size_t room = NK_MAX_PATH - 8u - used;
+        size_t name = room > 65u ? 64u : room - 1u;
+        if (name == 0) break;
+        data_dir[used++] = sep;
+        memset(data_dir + used, 'd', name);
+        used += name;
+        data_dir[used] = '\0';
+    }
+    assert(used + 14u > NK_MAX_PATH && used < NK_MAX_PATH);
+    assert(nk_platform_set_app_data_dir_override(data_dir));
+
+    static NkLibrary lib;  /* too large for the stack (NK_MAX_GAMES) */
+    nk_library_init(&lib);
+    NkResult load_result = nk_library_load(&lib, NULL);
+    NkGameEntry entry;
+    seed_game_entry(&entry, "PATH00001", "Default path");
+    nk_library_init(&lib);
+    assert(nk_library_add_or_update(&lib, &entry) == NK_OK);
+    NkResult save_result = nk_library_save(&lib, NULL);
+    assert(nk_platform_set_app_data_dir_override(NULL));
+
+    assert(load_result == NK_ERROR_PATH_TOO_LONG);
+    assert(save_result == NK_ERROR_PATH_TOO_LONG);
+}
+
+#if !defined(_WIN32) && !defined(_WIN64)
+/* A save whose bytes cannot be made durable (here the temp file is /dev/null,
+ * where fsync fails) is not promoted over the library. */
+static void test_nk_library_save_refuses_unsynced_file(void) {
+    printf("[NATIVE_TEST] Testing a library save that cannot sync leaves the library as it was...\n");
+    static NkLibrary lib;  /* too large for the stack (NK_MAX_GAMES) */
+    char path[NATIVE_TEST_PATH_MAX];
+    library_test_path(path, sizeof(path), "unsynced_lib.json");
+    char bak[NATIVE_TEST_PATH_MAX + 8];
+    char tmp[NATIVE_TEST_PATH_MAX + 8];
+    snprintf(bak, sizeof(bak), "%s.bak", path);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    remove(path);
+    remove(bak);
+    remove(tmp);
+
+    nk_library_init(&lib);
+    NkGameEntry entry;
+    seed_game_entry(&entry, "SYNC00001", "Saved");
+    assert(nk_library_add_or_update(&lib, &entry) == NK_OK);
+    assert(nk_library_save(&lib, path) == NK_OK);
+    char before[8192];
+    assert(library_read_text(path, before, sizeof(before)) > 0);
+
+    assert(symlink("/dev/null", tmp) == 0);
+    seed_game_entry(&entry, "SYNC00002", "Not durable");
+    assert(nk_library_add_or_update(&lib, &entry) == NK_OK);
+    assert(nk_library_save(&lib, path) == NK_ERROR_IO);
+    struct stat st;
+    assert(lstat(path, &st) == 0 && S_ISREG(st.st_mode));
+    char after[8192];
+    assert(library_read_text(path, after, sizeof(after)) > 0);
+    assert(strcmp(after, before) == 0);
+    assert(lstat(tmp, &st) != 0);
+    remove(path);
+    remove(bak);
+}
+#endif
+
 static void test_nk_font_classify_verdict(void) {
     printf("[NATIVE_TEST] Testing nk_font_classify_verdict...\n");
     char reason[128];
@@ -555,11 +833,19 @@ int main(void) {
     test_nk_library_init_and_null_guards();
     test_nk_library_add_update_remove_bounds();
     test_nk_library_save_load_escaping_and_samples();
+    test_nk_library_last_played_escaped();
     test_nk_library_full_library_round_trip();
     test_nk_library_null_path_default_routing();
     test_nk_library_corrupt_load_and_backup_recovery();
     test_nk_library_commit_keeps_other_writers_titles();
     test_nk_library_lock_has_one_holder();
+    test_nk_library_overlong_field_cut_cleanly();
+    test_nk_library_partial_backup_without_primary();
+    test_nk_library_unreadable_primary_kept();
+    test_nk_library_default_path_too_long();
+#if !defined(_WIN32) && !defined(_WIN64)
+    test_nk_library_save_refuses_unsynced_file();
+#endif
     test_nk_font_classify_verdict();
 
     /* Catalog SIZE is deliberately not asserted here. It is a literal that every

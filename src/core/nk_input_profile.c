@@ -1104,7 +1104,13 @@ static void format_binding_source(const NkBindingSource *src, char *out, size_t 
         snprintf(out, out_sz, "%s", nk_host_button_name((NkHostGamepadButton)src->index));
         break;
     case NK_BINDING_HOST_TRIGGER:
-        snprintf(out, out_sz, "%s", nk_host_axis_name((NkHostGamepadAxis)src->index));
+        /* The bare name reads back as a trigger only for the two trigger axes
+           (parse_binding_source_str), so any other axis keeps its "trigger:" prefix. */
+        if (src->index == NK_HOST_AXIS_LEFT_TRIGGER || src->index == NK_HOST_AXIS_RIGHT_TRIGGER) {
+            snprintf(out, out_sz, "%s", nk_host_axis_name((NkHostGamepadAxis)src->index));
+        } else {
+            snprintf(out, out_sz, "trigger:%s", nk_host_axis_name((NkHostGamepadAxis)src->index));
+        }
         break;
     case NK_BINDING_HOST_AXIS_POS:
     case NK_BINDING_HOST_AXIS_NEG:
@@ -1519,6 +1525,20 @@ static bool parse_aim_node(const JsonNode *aim, NkAimConfig *out,
     return true;
 }
 
+/* Copy a decoded JSON string into a fixed field. nk_json validated it as UTF-8, so a value
+ * longer than the field is cut before the character that does not fit, never inside it: a
+ * cut sequence would make the next save invalid UTF-8, which the loader refuses whole. */
+static void copy_utf8_bounded(char *dst, size_t dst_sz, const char *src) {
+    if (!dst || dst_sz == 0) return;
+    size_t n = src ? strlen(src) : 0;
+    if (n >= dst_sz) {
+        n = dst_sz - 1;
+        while (n > 0 && ((unsigned char)src[n] & 0xC0u) == 0x80u) n--;
+    }
+    if (n > 0) memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
 static bool parse_mapping_node(
     const JsonNode *node,
     int doc_version,
@@ -1541,11 +1561,11 @@ static bool parse_mapping_node(
         nk_input_profile_init_default(out);
         return false;
     }
-    snprintf(out->guid, sizeof(out->guid), "%s", guid->u.str_val);
+    copy_utf8_bounded(out->guid, sizeof(out->guid), guid->u.str_val);
 
     JsonNode *name = obj_get(dev, "name_hint");
     if (name && name->type == JSON_STRING) {
-        snprintf(out->name_hint, sizeof(out->name_hint), "%s", name->u.str_val);
+        copy_utf8_bounded(out->name_hint, sizeof(out->name_hint), name->u.str_val);
     } else {
         snprintf(out->name_hint, sizeof(out->name_hint), "Generic Controller");
     }
@@ -1938,24 +1958,40 @@ NkResult nk_input_profile_file_parse_json(
         nk_input_profile_file_init_default(doc);
         return NK_ERROR_GENERIC;
     }
-    int ver = (int)sv->u.num.num_val;
-    if (ver > NK_INPUT_PROFILE_SCHEMA_VERSION) {
-        diag_set(diag_buf, diag_buf_sz,
-                 "unsupported future schema_version %d (current version is %d): a newer "
-                 "Nakagawa saved this profile; it is kept as it is and changes here are "
-                 "not saved", ver, NK_INPUT_PROFILE_SCHEMA_VERSION);
-        json_free(root);
-        nk_input_profile_file_init_default(doc);
-        return NK_ERROR_NEWER_SCHEMA;
-    }
-    if (ver < NK_INPUT_PROFILE_MIN_SCHEMA_VERSION) {
-        diag_set(diag_buf, diag_buf_sz,
-                 "unsupported schema_version %d (supported versions are %d to %d)",
-                 ver, NK_INPUT_PROFILE_MIN_SCHEMA_VERSION, NK_INPUT_PROFILE_SCHEMA_VERSION);
+    /* The version is a whole number, compared as the parsed double before it
+     * becomes an int: 6.9 is not version 6, and a value past the int range
+     * (1e12) is a newer schema, not an undefined conversion. Every double of
+     * magnitude 2^53 or more is whole; below that the int64 round trip is exact. */
+    double version_value = sv->u.num.num_val;
+    bool version_finite = version_value == version_value && version_value - version_value == 0.0;
+    bool version_whole = version_finite &&
+        (version_value >= 9007199254740992.0 || version_value <= -9007199254740992.0 ||
+         version_value == (double)(int64_t)version_value);
+    if (!version_whole) {
+        diag_set(diag_buf, diag_buf_sz, "schema_version must be a whole number");
         json_free(root);
         nk_input_profile_file_init_default(doc);
         return NK_ERROR_GENERIC;
     }
+    if (version_value > (double)NK_INPUT_PROFILE_SCHEMA_VERSION) {
+        diag_set(diag_buf, diag_buf_sz,
+                 "unsupported future schema_version %.0f (current version is %d): a newer "
+                 "Nakagawa saved this profile; it is kept as it is and changes here are "
+                 "not saved", version_value, NK_INPUT_PROFILE_SCHEMA_VERSION);
+        json_free(root);
+        nk_input_profile_file_init_default(doc);
+        return NK_ERROR_NEWER_SCHEMA;
+    }
+    if (version_value < (double)NK_INPUT_PROFILE_MIN_SCHEMA_VERSION) {
+        diag_set(diag_buf, diag_buf_sz,
+                 "unsupported schema_version %.0f (supported versions are %d to %d)",
+                 version_value, NK_INPUT_PROFILE_MIN_SCHEMA_VERSION,
+                 NK_INPUT_PROFILE_SCHEMA_VERSION);
+        json_free(root);
+        nk_input_profile_file_init_default(doc);
+        return NK_ERROR_GENERIC;
+    }
+    int ver = (int)version_value;
 
     /* 2. The global mapping every disc inherits. */
     if (!parse_mapping_node(root, ver, &doc->global, diag_buf, diag_buf_sz)) {
@@ -2070,23 +2106,41 @@ NkResult nk_input_profile_parse_json(
  * File Load and Atomic Save
  * -------------------------------------------------------------------------- */
 
+/* Every byte below 0x20 is escaped, with the short form where JSON has one and \u00XX
+ * otherwise, so the loader (which refuses raw control bytes) reads back what it decoded.
+ * The worst case is six output bytes per input byte, and callers size dst for it with
+ * NK_JSON_ESCAPED_SIZE. A value that would not fit stops after the last whole escape,
+ * never inside one. */
+#define NK_JSON_ESCAPED_SIZE(n) ((size_t)(n) * 6u + 1u)
 static void escape_json(const char *src, char *dst, size_t dst_sz) {
+    static const char hex[] = "0123456789abcdef";
     if (!dst || dst_sz == 0) return;
     size_t d = 0;
-    for (size_t s = 0; src && src[s] && d + 2 < dst_sz; s++) {
-        char c = src[s];
+    for (size_t s = 0; src && src[s]; s++) {
+        unsigned char c = (unsigned char)src[s];
+        char esc[6];
+        size_t n = 0;
         if (c == '"' || c == '\\') {
-            dst[d++] = '\\';
-            dst[d++] = c;
+            esc[n++] = '\\'; esc[n++] = (char)c;
         } else if (c == '\n') {
-            dst[d++] = '\\'; dst[d++] = 'n';
+            esc[n++] = '\\'; esc[n++] = 'n';
         } else if (c == '\r') {
-            dst[d++] = '\\'; dst[d++] = 'r';
+            esc[n++] = '\\'; esc[n++] = 'r';
         } else if (c == '\t') {
-            dst[d++] = '\\'; dst[d++] = 't';
+            esc[n++] = '\\'; esc[n++] = 't';
+        } else if (c == '\b') {
+            esc[n++] = '\\'; esc[n++] = 'b';
+        } else if (c == '\f') {
+            esc[n++] = '\\'; esc[n++] = 'f';
+        } else if (c < 0x20u) {
+            esc[n++] = '\\'; esc[n++] = 'u'; esc[n++] = '0'; esc[n++] = '0';
+            esc[n++] = hex[c >> 4]; esc[n++] = hex[c & 0x0fu];
         } else {
-            dst[d++] = c;
+            esc[n++] = (char)c;
         }
+        if (d + n >= dst_sz) break;
+        memcpy(dst + d, esc, n);
+        d += n;
     }
     dst[d] = '\0';
 }
@@ -2099,8 +2153,8 @@ static void write_mapping_body(FILE *f, const NkInputProfile *profile, int inden
     pad[width] = '\0';
     snprintf(pad2, sizeof(pad2), "%s  ", pad);
 
-    char esc_guid[NK_INPUT_GUID_MAX_LEN * 2];
-    char esc_name[NK_INPUT_NAME_HINT_MAX_LEN * 2];
+    char esc_guid[NK_JSON_ESCAPED_SIZE(NK_INPUT_GUID_MAX_LEN)];
+    char esc_name[NK_JSON_ESCAPED_SIZE(NK_INPUT_NAME_HINT_MAX_LEN)];
     escape_json(profile->guid, esc_guid, sizeof(esc_guid));
     escape_json(profile->name_hint, esc_name, sizeof(esc_name));
 
@@ -2259,7 +2313,7 @@ static NkResult profile_document_write(
     fprintf(f, ",\n");
     fprintf(f, "  \"per_title\": [\n");
     for (int i = 0; i < doc->title_count; i++) {
-        char esc_disc[NK_MAX_DISC_ID_LEN * 2];
+        char esc_disc[NK_JSON_ESCAPED_SIZE(NK_MAX_DISC_ID_LEN)];
         escape_json(doc->title_disc_id[i], esc_disc, sizeof(esc_disc));
         fprintf(f, "    {\n");
         fprintf(f, "      \"disc_id\": \"%s\",\n", esc_disc);
