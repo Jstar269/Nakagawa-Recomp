@@ -1655,7 +1655,7 @@
     }
   ],
   "lineage_header_files": {
-    "description": "Tracked files that carry the sal063 immediate-upstream header but have no exact counterpart at the pinned revision in the inventory above: the build files split out of the root Makefile the runtime and tool files split out of inherited ones after the campaign, and the files that restate parts of inherited ones (src/rt/motion_tap.c and its selftest restate src/rt/ge.c and src/rt/gpu_sdl3vk/ge_gpu.c functions). tools/modified_file_notice_audit.py keeps each one's SPDX identifier, sal063 attribution, modified-file notice and pointer, and fails for any tracked file whose header names sal063 but is listed neither here nor in files.",
+    "description": "Tracked files that carry the sal063 immediate-upstream header but have no exact counterpart at the pinned revision in the inventory above: the build files split out of the root Makefile, the runtime and tool files split out of inherited ones after the campaign, and the files that restate parts of inherited ones (src/rt/motion_tap.c and its selftest restate src/rt/ge.c and src/rt/gpu_sdl3vk/ge_gpu.c functions). tools/modified_file_notice_audit.py keeps each one's SPDX identifier, sal063 attribution, modified-file notice and pointer, and fails for any tracked file whose header names sal063 but is listed neither here nor in files.",
     "files": [
       {
         "path": "Makefile",
