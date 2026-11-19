@@ -8032,10 +8032,9 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             assert(!nk_platform_path_missing(record_path));
         }
         /* The same folder by another name (N2): a link named ALIAS to MYHB has MYHB's real
-           path. On Windows the picked path keeps the link's name, so the program's folder on
-           the Memory Stick would be ALIAS: the import stops, naming MYHB. On POSIX the
-           picked path is resolved (realpath), so ALIAS is MYHB by name too and imports as
-           the same folder. */
+           path. The picked path keeps the link's name on every host (on POSIX only the
+           folder's parent is resolved), so the program's folder on the Memory Stick would
+           be ALIAS: the import stops, naming MYHB. */
         {
             char alias_dir[NATIVE_TEST_PATH_MAX + 128];
             char alias_path[NATIVE_TEST_PATH_MAX + 160];
@@ -8043,9 +8042,7 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             snprintf(alias_path, sizeof(alias_path), "%s%cEBOOT.PBP", alias_dir, sep);
 #ifndef _WIN32
             assert(symlink(folder_path, alias_dir) == 0);
-            assert(player_psn_package_inspect(alias_path, &second, code, sizeof(code), message,
-                                              sizeof(message)));
-            assert(second.homebrew && second.iso_ready);
+            psn_test_refused(alias_path, "HOMEBREW_ALREADY_ADDED", "MYHB");
             assert(unlink(alias_dir) == 0);
 #else
             {
@@ -8534,6 +8531,41 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         }
         nk_ps_set_env(home_name, had_home ? saved : NULL);
     }
+#if defined(_WIN32) || defined(_WIN64)
+    /* The cloud-sync root (OneDriveConsumer) is read from the wide environment: a root whose
+       name is outside the ANSI code page (here under a profile folder named so) was '?'
+       bytes through getenv, the path resolver refused it, and a package picked in it took
+       the whole root along as the program's folder. */
+    {
+        char sync_profile[NATIVE_TEST_PATH_MAX + 64];
+        char sync_root[NATIVE_TEST_PATH_MAX + 96];
+        char loose_path[NATIVE_TEST_PATH_MAX + 160];
+        WCHAR wsync_root[NATIVE_TEST_PATH_MAX + 96];
+        static WCHAR saved_sync[32768];
+        DWORD saved_sync_len = GetEnvironmentVariableW(L"OneDriveConsumer", saved_sync, 32768);
+        int sync_written = snprintf(sync_profile, sizeof(sync_profile),
+                                    "%s%cJos\xC3\xA9_\xE6\x97\xA5", base, sep);
+        assert(sync_written > 0 && (size_t)sync_written < sizeof(sync_profile));
+        sync_written = snprintf(sync_root, sizeof(sync_root), "%s%cOneDrive", sync_profile, sep);
+        assert(sync_written > 0 && (size_t)sync_written < sizeof(sync_root));
+        assert(nk_platform_mkdir_p(sync_root));
+        snprintf(loose_path, sizeof(loose_path), "%s%cEBOOT.PBP", sync_root, sep);
+        pbp = homebrew_pbp("Synced", program, 88u, NULL, 0, &pbp_len);
+        FILE *synced = nk_fopen_utf8(loose_path, "wb");
+        assert(synced != NULL);
+        assert(fwrite(pbp, 1, pbp_len, synced) == pbp_len);
+        assert(fclose(synced) == 0);
+        free(pbp);
+        assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, sync_root, -1, wsync_root,
+                                   (int)(sizeof(wsync_root) / sizeof(wsync_root[0]))) > 0);
+        assert(_wputenv_s(L"OneDriveConsumer", wsync_root) == 0);
+        psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED", "which holds your own files");
+        assert(_wputenv_s(L"OneDriveConsumer",
+                          saved_sync_len > 0 && saved_sync_len < 32768 ? saved_sync : L"") == 0);
+        /* The narrow-API cleanup of base cannot open a non-code-page name. */
+        assert(nk_platform_remove_tree(sync_profile, NULL));
+    }
+#endif
 
     /* An encrypted program and a file that is not a program are refused by name, and nothing
        is written. */
@@ -16263,6 +16295,33 @@ int main(int argc, char **argv) {
             assert(nk_font_check_cache(font_root, msg, sizeof(msg)) == NK_FONT_STATUS_MISSING);
         }
 
+        /* 14j: the Latin file's target is blocked, so the commit stops after the Japanese file is
+           renamed into place. The manifest still names the Japanese file it now holds (the cache
+           stays valid and serves it), and the Korean file staged for the same import is not left
+           behind. */
+        {
+            char blocker[NATIVE_TEST_PATH_MAX + 32];
+            snprintf(path, sizeof(path), "%s%cfonts%cv2%cnkltn.pgf", font_root, sep, sep, sep);
+            assert(nk_platform_mkdir_p(path));
+            snprintf(blocker, sizeof(blocker), "%s%cblock.txt", path, sep);
+            write_text_file(blocker, "a directory is not replaced by a rename");
+            memset(&result, 0, sizeof(result));
+            assert(!nk_font_import_folder(font_root, source_dir, no_choice, &result, err, sizeof(err)));
+            assert(strstr(err, "could not be committed") != NULL);
+            assert(result.slot_imported[NK_FONT_SLOT_JAPANESE]);
+            assert(!result.slot_imported[NK_FONT_SLOT_LATIN]);
+            assert(!result.slot_imported[NK_FONT_SLOT_KOREAN]);
+            assert(nk_font_check_cache(font_root, msg, sizeof(msg)) == NK_FONT_STATUS_OK);
+            nk_font_slot_states(font_root, font_root, states);
+            assert(states[NK_FONT_SLOT_JAPANESE].source == NK_FONT_SOURCE_USER);
+            snprintf(path, sizeof(path), "%s%cfonts%cv2%cnkkr.pgf.tmp", font_root, sep, sep, sep);
+            assert(!nk_platform_file_exists(path));
+            snprintf(path, sizeof(path), "%s%cfonts%cv2%cnkltn.pgf", font_root, sep, sep, sep);
+            assert(test_remove_tree(path));
+            assert(nk_font_remove_imports(font_root, remove_all, err, sizeof(err)) == 1);
+            assert(nk_font_check_cache(font_root, msg, sizeof(msg)) == NK_FONT_STATUS_MISSING);
+        }
+
         /* A corrupt manifest is INVALID, and the preflight names the issue (#313). */
         snprintf(path, sizeof(path), "%s%cfonts%cv2", font_root, sep, sep);
         assert(nk_platform_mkdir_p(path));
@@ -16457,6 +16516,17 @@ int main(int argc, char **argv) {
            Latin indices are served by a stand-in. */
         assert(psp_app->wizard.font_own_count == 3);
         assert(nk_font_own_font_count(per_user, per_user) == 3);
+        /* The status refresh counts from the states it already read, with the same result. */
+        {
+            NkFontSlotState own_states[NK_FONT_SLOT_COUNT];
+            NkFontLatinIndexState own_latin[NK_FONT_LATIN_INDEX_COUNT];
+            char own_font_dir[NK_MAX_PATH * 2];
+            nk_font_slot_states(per_user, per_user, own_states);
+            snprintf(own_font_dir, sizeof(own_font_dir), "%s%c%s", per_user,
+                     nk_platform_path_separator(), NK_FONT_PROJECT_SUBDIR);
+            nk_font_latin_index_states(per_user, own_font_dir, own_latin);
+            assert(nk_font_own_font_count_from_states(own_states, own_latin) == 3);
+        }
         assert(strstr(psp_app->wizard.font_summary,
                       "3 of the 18 PSP fonts are your PSP's originals") != NULL);
         assert(strcmp(psp_app->wizard.font_latin_index_detail[0], "L1 exact ltn0.pgf") == 0);

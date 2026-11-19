@@ -300,8 +300,10 @@ typedef struct {
     bool has_cached_exit;
     int cached_exit_code;
     /* Why the last nk_platform_spawn_process into this handle failed, as the
-       OS said it: GetLastError() after CreateProcessW on Win32, errno on POSIX.
-       0 when the spawn succeeded or failed before the OS was asked. */
+       OS said it: GetLastError() after CreateProcessW on Win32, errno on POSIX,
+       where a failed exec (EACCES, ENOENT, ENOEXEC) or child set-up fails the
+       spawn with its own errno. 0 when the spawn succeeded or failed before the
+       OS was asked. */
     int spawn_error;
     /* Set by nk_platform_spawn_tool on Android, where a tool program is an ordinary forked
        child and a title is another app process: the process calls below take this handle
