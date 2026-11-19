@@ -5614,13 +5614,9 @@ class RuntimeModuleTranslation:
         return f"m{self.index}"
 
 
-def fnv1a64(data):
-    """FNV-1a, 64-bit; mirrors src/rt/guest_interp.c sr_module_code_fnv1a64."""
-    h = 0xCBF29CE484222325
-    for byte in data:
-        h ^= byte
-        h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-    return h
+#: FNV-1a, 64-bit; mirrors src/rt/guest_interp.c sr_module_code_fnv1a64. It lives in the
+#: leaf module code_capture so a capture can be named without importing codegen.
+fnv1a64 = code_capture.fnv1a64
 
 
 def c_string(text):
@@ -5959,7 +5955,6 @@ def translate_code_capture(index, image, profile=None, cfg_gate=False, options=N
     (outside the range, with a capture of its own). A target the translation does not give a
     body is named here."""
     options = _options_for_call(options)
-    import code_capture
     module = translate_runtime_module(index, None, profile=profile, cfg_gate=cfg_gate,
                                       data=code_capture.image_overlay_elf(image),
                                       name=image.name, entries=image.targets, options=options)

@@ -68,6 +68,8 @@ not cover and which #363 still owns.
 
 from typing import Any
 
+import ast
+import functools
 import re
 import sys
 from pathlib import Path
@@ -729,8 +731,13 @@ def has_no_test(patch: dict) -> bool:
 
 
 #: References a ``test`` field can name that a gate can check: a tools Python
-#: test file, or a target of the repository Makefile.
-TEST_PATH_RE = re.compile(r"(?<![\w./-])tools/(?:[\w.-]+/)*[\w.-]+\.py(?![\w.-])")
+#: test file, or a target of the repository Makefile.  A file reference may name
+#: a symbol in it, ``path::Class::method`` or ``path:test_name`` (a top-level
+#: definition or a method of a top-level class), and a ``+ Class.method`` after
+#: it names another symbol in the same file; each named symbol must exist.
+TEST_PATH_RE = re.compile(
+    r"(?<![\w./-])(tools/(?:[\w.-]+/)*[\w.-]+\.py)((?:::?[A-Za-z_]\w*)*)(?![\w:-]|\.\w)")
+TEST_SYMBOL_RE = re.compile(r"\+\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\b")
 MAKE_REFERENCE_RE = re.compile(r"\bmake\s+([A-Za-z0-9_.-]+)\b")
 # A rule line starts in column 0 and names its targets before a ":" or "::"
 # that is not an assignment (":=", "::=").  Recipe lines start with a tab, so
@@ -746,7 +753,18 @@ WAIVABLE_TEST_DEFECTS = frozenset({NO_TEST_DEFECT, NO_REFERENCE_DEFECT})
 
 def makefile_targets(makefile: "Path | None" = None) -> "frozenset[str]":
     """The literal rule targets the Makefile declares (not variables, not recipe text)."""
-    text = makefile.read_text(encoding="utf-8") if makefile else read_makefile(ROOT)
+    if makefile is None:
+        return _repository_makefile_targets()
+    return _rule_targets(makefile.read_text(encoding="utf-8"))
+
+
+@functools.cache
+def _repository_makefile_targets() -> "frozenset[str]":
+    """The repository Makefile's targets, read once: every census entry asks for them."""
+    return _rule_targets(read_makefile(ROOT))
+
+
+def _rule_targets(text: str) -> "frozenset[str]":
     targets: "set[str]" = set()
     for line in text.splitlines():
         match = _MAKE_RULE_RE.match(line)
@@ -759,16 +777,60 @@ def makefile_targets(makefile: "Path | None" = None) -> "frozenset[str]":
     return frozenset(targets)
 
 
+_DEFINITIONS = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _symbol_exists(module: ast.Module, names: "list[str]") -> bool:
+    """True when ``names`` is a nested definition path in ``module``.
+
+    The first name is a top-level definition, or a method of a top-level class
+    (the ``path:test_name`` form names a test without its class); each later
+    name is a definition directly inside the previous one.
+    """
+    def child(body, name):
+        return next((node for node in body if isinstance(node, _DEFINITIONS) and node.name == name), None)
+
+    node = child(module.body, names[0])
+    if node is None and len(names) == 1:
+        node = next((method for cls in module.body if isinstance(cls, ast.ClassDef)
+                     for method in [child(cls.body, names[0])] if method is not None), None)
+    for name in names[1:]:
+        if node is None:
+            return False
+        node = child(node.body, name)
+    return node is not None
+
+
 def test_references(test_field) -> "tuple[list[str], list[str]]":
     """Split the references a ``test`` field names into (resolved, unresolved)."""
     field = str(test_field or "")
     resolved: "list[str]" = []
     unresolved: "list[str]" = []
     tools_root = (ROOT / "tools").resolve()
-    for path in TEST_PATH_RE.findall(field):
-        candidate = (ROOT / path).resolve()
-        (resolved if candidate.is_file() and tools_root in candidate.parents
-         else unresolved).append(path)
+    modules: "dict[str, ast.Module | None]" = {}
+
+    def module_of(path: str) -> "ast.Module | None":
+        if path not in modules:
+            candidate = (ROOT / path).resolve()
+            modules[path] = (ast.parse(candidate.read_text(encoding="utf-8"), filename=path)
+                             if candidate.is_file() and tools_root in candidate.parents else None)
+        return modules[path]
+
+    last_path: "str | None" = None
+    events = sorted([(m.start(), "path", m) for m in TEST_PATH_RE.finditer(field)]
+                    + [(m.start(), "symbol", m) for m in TEST_SYMBOL_RE.finditer(field)],
+                    key=lambda event: event[0])
+    for _start, kind, match in events:
+        if kind == "path":
+            last_path = match.group(1)
+            names = [name for name in re.split(r"::?", match.group(2)) if name]
+            reference = match.group(0)
+        else:
+            names = match.group(1).split(".")
+            reference = f"{last_path}::{'::'.join(names)}" if last_path else f"+ {match.group(1)}"
+        module = module_of(last_path) if last_path else None
+        ok = module is not None and (not names or _symbol_exists(module, names))
+        (resolved if ok else unresolved).append(reference)
     targets = makefile_targets()
     for match in MAKE_REFERENCE_RE.finditer(field):
         reference = f"make {match.group(1)}"
@@ -925,8 +987,8 @@ def format_debt_census() -> str:
     allowlist, is tools/test_compat_manifest.TemporaryCompatibilityDebtGateTests.
     """
     patches = temporary_compatibility_patches()
-    active = [patch for patch in patches if not is_retired_patch(patch)]
-    retired = [patch for patch in patches if is_retired_patch(patch)]
+    active = active_temporary_compatibility_patches()
+    retired = retired_temporary_compatibility_patches()
     found = [(patch, temporary_patch_defects(patch)) for patch in patches]
     defects = [(patch, problems) for patch, problems in found if problems]
     untested_others = untested_non_temporary_entries()

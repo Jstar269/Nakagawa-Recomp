@@ -9,13 +9,15 @@
 #ifndef NK_XR_LAYOUT_H
 #define NK_XR_LAYOUT_H
 
+#include "../../core/nk_display_size.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 // PSP picture size, the aspect of the big-screen quad (480:272).
-#define NK_XR_PSP_WIDTH 480.0f
-#define NK_XR_PSP_HEIGHT 272.0f
+#define NK_XR_PSP_WIDTH NK_PSP_DISPLAY_WIDTH_F
+#define NK_XR_PSP_HEIGHT NK_PSP_DISPLAY_HEIGHT_F
 
 // Size of the quad that shows the PSP picture: `*w` is `width_m`, `*h` follows
 // the 480:272 aspect. Returns 0, or -1 (outputs untouched) for a NULL output or a

@@ -73,6 +73,14 @@ REASONS = (
     "trailing-bytes",
 )
 
+#: Refusals the runner prints that are not format checks: the C loader could not open or read the
+#: file (``io-error``) or could not allocate it (``out-of-memory``). ``SnapshotError`` never carries
+#: them, because the Python reader never refuses for either.
+RUNNER_REFUSALS = (
+    "io-error",
+    "out-of-memory",
+)
+
 
 class SnapshotError(ValueError):
     """A snapshot the loader refuses; ``reason`` is one of ``REASONS``."""
@@ -307,6 +315,6 @@ def parse_verdict(line: str) -> Verdict:
         )
         return Verdict("NOT_CHECKED", reason=reason, details=details)
     reason = match.group("refused")
-    if reason not in REASONS:
+    if reason not in REASONS and reason not in RUNNER_REFUSALS:
         raise ValueError(f"unknown REFUSED reason {reason!r}")
     return Verdict("REFUSED", reason=reason)

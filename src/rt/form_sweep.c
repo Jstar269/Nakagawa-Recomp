@@ -42,8 +42,9 @@
  * an instruction the reference ran. Exit status: 0 when no instance mismatched or failed,
  * 1 otherwise, 2 for a usage or input error.
  *
- * The harness links snapshot_runner.c for its stand-ins of the scheduler, GE and host
- * symbols (see that file) and reuses its stop handling; only main is renamed.
+ * The harness includes snapshot_runner.c for its stop handling and its AOT and reference
+ * state, with only main renamed, and links src/rt/harness_stubs.c for the stand-ins of the
+ * scheduler, GE and host symbols, as the runner does.
  */
 
 #define main snapshot_runner_main
@@ -277,7 +278,7 @@ int main(int argc, char **argv) {
         } else if (positional == 0) {
             image_path = argv[i]; positional++;
         } else if (positional == 1) {
-            if (!parse_u32(argv[i], &base)) return 2;
+            if (!sr_harness_parse_hex32(argv[i], &base)) return 2;
             positional++;
         } else if (positional == 2) {
             plan_path = argv[i]; positional++;
@@ -297,7 +298,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     uint32_t image_len = 0u;
-    uint8_t *image = read_image(image_path, &image_len);
+    uint8_t *image = sr_harness_read_image(image_path, &image_len);
     if (!image) {
         fprintf(stderr, "form_sweep: cannot read %s\n", image_path);
         return 2;

@@ -159,6 +159,73 @@ class BootGateTests(unittest.TestCase):
         self.assertNotIn("stalled", result["disqualifyingReasons"])
         self.assertIn("no-frame-observation", result["observations"])
 
+    def test_dark_picture_observation_is_reported_not_disqualifying(self) -> None:
+        # src/rt/hle_display.c reports a long dark stretch (a fade) as a neutral observation.
+        result = self.parse(
+            self.ordered_prefix()
+            + [
+                event("first_frame", source="cpu", nonzero_pixels=1),
+                event("stalled", observation="dark_picture", dark_vblanks="600", seconds="10"),
+            ]
+        )
+        self.assertTrue(result["ok"], result["disqualifyingReasons"])
+        self.assertEqual(result["observations"], ["dark-picture-observation"])
+
+    def test_a_neutral_observation_does_not_hide_a_bare_stall(self) -> None:
+        result = self.parse(
+            self.ordered_prefix()
+            + [
+                event("stalled", observation="no_new_flip", no_frame_vblanks="600", seconds="10"),
+                event("stalled"),
+                event("first_frame", source="cpu", nonzero_pixels=1),
+            ]
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("stalled", result["disqualifyingReasons"])
+        self.assertIn("no-frame-observation", result["observations"])
+
+    def test_an_unknown_stall_observation_is_disqualifying(self) -> None:
+        result = self.parse(
+            self.ordered_prefix()
+            + [event("first_frame", source="cpu", nonzero_pixels=1), event("stalled", observation="new_kind")]
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("stalled", result["disqualifyingReasons"])
+
+    def test_a_run_that_stopped_at_a_named_boundary_after_its_first_frame_fails(self) -> None:
+        # The runtime's unsupported-import stop (src/rt/hle.c): the stderr lines, then the
+        # boot event, then the run exits. A content-validated first frame does not make it fault-free.
+        result = self.parse(
+            self.ordered_prefix()
+            + [
+                event("first_frame", source="cpu", nonzero_pixels=1),
+                event("stop", reason="semantic-boundary", boundary="unsupported-import-sceFoo", issue=308),
+            ]
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("semantic-stop", result["disqualifyingReasons"])
+        self.assertEqual(result["stops"], ["semantic-boundary:unsupported-import-sceFoo at line 7"])
+        for line in ("HLE: unimplemented nid 0x12345678 (unknown) (thread uid 0x1)\n",
+                     "UNSUPPORTED_IMPORT: sceFoo 0x12345678; the run stops here (#308)\n"):
+            with self.subTest(line=line):
+                result = self.parse(
+                    self.ordered_prefix() + [event("first_frame", source="cpu", nonzero_pixels=1), line]
+                )
+                self.assertFalse(result["ok"])
+                self.assertIn("disqualifying-fault", result["disqualifyingReasons"])
+
+    def test_a_semantic_boundary_note_alone_is_not_a_stop(self) -> None:
+        # The runtime prints SEMANTIC_BOUNDARY for a modeled PSP error it returns to the guest.
+        result = self.parse(
+            self.ordered_prefix()
+            + [
+                "SEMANTIC_BOUNDARY: IO_LSEEK_OUT_OF_RANGE: sceIoLseek to a destination beyond the "
+                "descriptor's 32-bit position is not supported yet (0x80010086)\n",
+                event("first_frame", source="cpu", nonzero_pixels=1),
+            ]
+        )
+        self.assertTrue(result["ok"], result["disqualifyingReasons"])
+
     def test_gpu_present_only_is_liveness_not_visual_success(self) -> None:
         lines = self.ordered_prefix() + [event("first_frame", source="gpu")]
         strict = self.parse(lines)

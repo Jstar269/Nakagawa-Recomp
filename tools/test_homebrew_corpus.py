@@ -68,6 +68,14 @@ class CorpusPinTests(unittest.TestCase):
         refused(lambda c: c["programs"][0].pop("sample_dir"), "sample_dir is required")
         refused(lambda c: c["programs"][0].update(smoke_checks=["first_frame", "bogus"]), "only the vocabulary")
         refused(lambda c: c["programs"][0]["files"][0].update(upstream_path="elsewhere/x.c"), "under src/samples/")
+        # Windows joins a backslash or drive-qualified path outside the root, so none passes.
+        for escape in ("..\\..\\x.c", "gu\\cube\\..\\..\\..\\x.c", "C:/Windows/win.ini", "C:x.c",
+                       "gu//cube.c", "./gu/cube.c", "gu/./cube.c", "/abs.c"):
+            refused(lambda c, p=escape: c["programs"][0]["files"][0].update(path=p), "inside the samples root")
+        refused(lambda c: c["programs"][0].update(sample_dir="..\\..\\gu"), "sample_dir must be relative")
+        refused(lambda c: c["programs"][0].update(sample_dir="C:/gu/cube"), "sample_dir must be relative")
+        refused(lambda c: c["programs"][0]["files"][0].update(upstream_path="src/samples/../../x.c"),
+                "under src/samples/")
 
     def test_a_result_without_backing_evidence_is_refused(self) -> None:
         def refused(**expected: object) -> None:
@@ -117,6 +125,21 @@ class CorpusPinTests(unittest.TestCase):
             differences = homebrew_corpus.verify_sources(self.corpus, root)
         self.assertTrue(any(first["path"] in line and "pinned" in line for line in differences))
         self.assertTrue(any("missing" in line for line in differences))
+
+    def test_verify_sources_never_reads_outside_the_samples_root(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="nk-corpus-") as tmp:
+            outside = Path(tmp) / "outside.c"
+            outside.write_bytes(b"outside")
+            root = Path(tmp) / "samples"
+            root.mkdir()
+            broken = copy.deepcopy(self.corpus)
+            entry = broken["programs"][0]["files"][0]
+            entry.update(path="..\\outside.c", git_blob_sha1=homebrew_corpus.git_blob_sha1(b"outside"))
+            differences = homebrew_corpus.verify_sources(broken, root)
+        self.assertTrue(any("outside.c" in line and "inside the samples root" in line
+                            for line in differences), differences)
 
 
 class CorpusRecordsTests(unittest.TestCase):

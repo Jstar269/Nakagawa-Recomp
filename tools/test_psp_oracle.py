@@ -19958,6 +19958,69 @@ class Record20261015Tests(unittest.TestCase):
         self.assertEqual(mpeg["hardware_evidence"], "NOT_RUN")
         self.assertIn("2026-11-12 boot 202", mpeg["evidence_note"])
 
+    def test_the_std_handles_xmb_reread_names_the_launch_context(self) -> None:
+        """#341, #2397: the 2026-11-17 XMB launch under ARK-5 5.2.0 read the close value of the
+        XMB launch under 5.1.0, where the game-context launch under 5.2.0 had read another. The
+        record names the launch context as what decides it, and keeps what was not measured."""
+        row = self.rows["PSP-HLE-STDIO-001"]
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_ref"], self.ANCHOR)
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        note = row["measurement_note"]
+        for term in ("2026-11-17", "boot 222, XMB context", "same commit 3872796c", "0x06060010",
+                     "ARK-5 5.2.0 (operator-declared, not read by a tool)", "PSPLink v3.2.1",
+                     "the runner exited 0", "acceptance-eligible with 0 blockers",
+                     "the launch context decides the close's answer and the ARK-5 version does not",
+                     "0x800200d1 in the XMB context under ARK-5 5.1.0 and under 5.2.0",
+                     "0x80020325 in the game context under 5.2.0",
+                     "Not measured: the game context under ARK-5 5.1.0, a launch without PSPLink"):
+            self.assertIn(term, note)
+        unmeasured = "which factor decides"
+        self.assertNotIn(unmeasured, note)
+        entry = self._entry("- **PSP-3000 single-case run of `hle-std-handles` in the XMB context "
+                            "under ARK-5 5.2.0 (2026-11-17 UTC)**")
+        flat = " ".join(entry.split())
+        for term in ("boot 222", "`0x06060010`", "version 5.2.0 (operator-declared, not read by a tool)",
+                     "PSPLink v3.2.1", "at `3872796c`", "The runner exited 0",
+                     "acceptance-eligible with 0 blockers",
+                     "the launch context decides the close's answer and the ARK-5 version does not",
+                     "Not measured: the game context under ARK-5 5.1.0, a launch without PSPLink"):
+            self.assertIn(term, flat)
+        # The record table names every row once, in stream order, PASS, with the row's word
+        # count; the done record counts the four rows.
+        tables = self._table_rows(entry)
+        records = [cells for cells in tables if len(cells) == 4 and cells[1] == "PASS"]
+        expected = [*parse_golden.HLE_STD_HANDLES_ROWS, ("hle-std-handles-done", 1)]
+        self.assertEqual([cells[0] for cells in records], [name for name, _ in expected])
+        for cells, (name, words) in zip(records, expected, strict=True):
+            with self.subTest(row=name):
+                self.assertRegex(cells[2], r"^0x[0-9a-f]{8}$")
+                self.assertEqual(len(re.findall(r"0x[0-9a-f]{8}", cells[3])), words)
+        by_case = {cells[0]: cells for cells in records}
+        self.assertEqual(by_case["stdio-close-stdout"][2], "0x800200d1")
+        self.assertEqual(by_case["stdio-close-stdout"][3].split()[0], "0x00000001")
+        self.assertEqual(by_case["hle-std-handles-done"][3], "0x00000004")
+        # One cell per launch context and ARK-5 version; the fourth stays unmeasured.
+        grid = {cells[0]: cells[1:] for cells in tables if len(cells) == 3}
+        self.assertEqual(grid["Launch context"], ("ARK-5 5.1.0", "ARK-5 5.2.0"))
+        self.assertEqual(grid["XMB"], ("0x800200d1 (boot 135, d5fed0ba)", "0x800200d1 (boot 222, 3872796c)"))
+        self.assertEqual(grid["game"], ("not measured", "0x80020325 (boot 200, 3872796c)"))
+        # The earlier game-context entry, the campaign index row and the fixtures README row no
+        # longer call the deciding factor unmeasured, and each names the new launch.
+        earlier = self._entry("- **PSP-3000 single-case run of `hle-std-handles` in the game context "
+                              "(2026-11-12 UTC)**")
+        self.assertIn("The 2026-11-17 XMB run above does: the launch context decides the close's answer.",
+                      " ".join(earlier.split()))
+        index = {cells[0]: cells for cells in self._table_rows(self.doc) if len(cells) == 4}
+        readme = {cells[0]: cells for cells in self._table_rows(self.readme) if len(cells) == 3}
+        for text in (index["hle-std-handles"][2] + " " + index["hle-std-handles"][3],
+                     readme["hle-std-handles"][2]):
+            for term in ("2026-11-17 utc", "boot 222", "the launch context decides",
+                         "not the ark-5 version", "the game context under ark-5 5.1.0 is not measured"):
+                self.assertIn(term, text.lower())
+            self.assertNotIn(unmeasured, text)
+        self.assertNotIn(unmeasured, self.doc)
+
     def test_the_audio_src_and_timer_comparisons_are_recorded_and_pinned(self) -> None:
         for name in ("test_audio_src_matches_the_measured_contract",
                      "test_alarm_delivery_order_matches_the_timer_order_probe"):

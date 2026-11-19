@@ -886,6 +886,35 @@ class TestToolchainPolicyVerification(unittest.TestCase):
         errors = verify_sbom.verify_release_locks(self.MANIFEST_PATH, observed_toolchain=recorded)
         self.assertEqual(errors, [])
 
+    def test_vulkan_version_from_header_names_the_sdk_minor(self):
+        # A non-numeric SDK directory falls back to vulkan_core.h. Headers before
+        # 1.2.175 spell the complete version with VK_MAKE_VERSION, and every header
+        # defines VK_API_VERSION_1_0 before the higher minors.
+        older = (
+            "#define VK_API_VERSION_1_0 VK_MAKE_VERSION(1, 0, 0)\n"
+            "#define VK_API_VERSION_1_1 VK_MAKE_VERSION(1, 1, 0)\n"
+            "#define VK_API_VERSION_1_2 VK_MAKE_VERSION(1, 2, 0)\n"
+            "#define VK_HEADER_VERSION 162\n"
+            "#define VK_HEADER_VERSION_COMPLETE VK_MAKE_VERSION(1, 2, VK_HEADER_VERSION)\n"
+        )
+        no_complete = (
+            "#define VK_API_VERSION_1_0 VK_MAKE_VERSION(1, 0, 0)\n"
+            "#define VK_API_VERSION_1_1 VK_MAKE_VERSION(1, 1, 0)\n"
+            "#define VK_HEADER_VERSION 131\n"
+        )
+        newer = (
+            "#define VK_API_VERSION_1_0 VK_MAKE_API_VERSION(0, 1, 0, 0)\n"
+            "#define VK_API_VERSION_1_3 VK_MAKE_API_VERSION(0, 1, 3, 0)\n"
+            "#define VK_HEADER_VERSION 290\n"
+            "#define VK_HEADER_VERSION_COMPLETE VK_MAKE_API_VERSION(0, 1, 3, VK_HEADER_VERSION)\n"
+        )
+        for text, expected in ((older, "1.2.162"), (no_complete, "1.1.131"), (newer, "1.3.290")):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as tmp:
+                sdk = Path(tmp) / "VulkanSDK-current"
+                (sdk / "Include" / "vulkan").mkdir(parents=True)
+                (sdk / "Include" / "vulkan" / "vulkan_core.h").write_text(text, encoding="utf-8")
+                self.assertEqual(record_toolchain._detect_vulkan_version(sdk), expected)
+
     def test_record_toolchain_rejects_ambiguous_path_binary(self):
         dummy_candidate = {
             "commit": "0" * 40,

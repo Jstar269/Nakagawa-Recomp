@@ -834,8 +834,10 @@ $env:SR_NOINPUT = "1"
 
 The converter expands shorter presses so a replay holds each press for as many
 vblanks as a person would. A one-vblank pulse can no longer fall between the
-game's controller reads, because scripted input waits for a read (below). Use
-`--minimum-width 1` only when an exact-width replay is required.
+game's controller reads, because scripted input waits for a read (below). An
+expanded press stops where the next row starts (a vblank earlier for the same
+button), so it never replays a chord or merges two presses the recording did not
+hold. Use `--minimum-width 1` only when an exact-width replay is required.
 
 The left stick is recorded with the buttons. Each `ctrl_latch:` line carries the
 stick the guest was handed (`lx=`, `ly=`; a title in digital mode reads 128, 128),
@@ -1596,9 +1598,11 @@ frames, which is tracked in #2172.
 A soak or title route writes to whichever Memory Stick the session resolves.
 `tools/isolated_run.py` copies the stick (and optional settings files) into a new folder
 under a private work directory, points `SR_MEMSTICK` at the copy, runs your command, and
-re-hashes the originals. It prints `ORIGINALS_UNCHANGED`, or `ORIGINAL_CHANGED` naming the
-first differing path (exit status 3). It does not stop the guest writing; keep the work
-directory private, because the copy can hold save data.
+re-hashes the originals. It prints `ORIGINALS_UNCHANGED: command_status=N` and exits with
+the command's own status, or prints `ORIGINAL_CHANGED` naming the first differing path and
+exits 121. A setup failure, or a command that cannot be started, exits 120; neither code
+collides with the small statuses the wrapped tools use. It does not stop the guest writing;
+keep the work directory private, because the copy can hold save data.
 
 The copy is only used by a command that honours an inherited `SR_MEMSTICK`: the bare
 runtime and the launcher route (`nk_launch.c` keeps an explicit `SR_MEMSTICK` instead of

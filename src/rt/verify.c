@@ -9,9 +9,10 @@
  * returns or reaches a syscall, and then lets the real translated call run. When the real
  * call returns (sr_aot_return_boundary_end) or reaches the same host boundary
  * (sr_syscall, sr_raw_syscall) the two end states are compared: the stop kind, r1..r31,
- * hi, lo, f0..f31, fcr31, the out-of-range access counts, then RAM and VRAM from the
- * lowest address up. The order and the field names are those of src/rt/snapshot_runner.c,
- * so a captured mismatch replays to the same first difference.
+ * hi, lo, f0..f31, fcr31, the out-of-range access counts, then VRAM and RAM from the
+ * lowest address up. The walk and its wording are src/rt/end_state_compare.h's, which
+ * src/rt/snapshot_runner.c reports through as well, so a captured mismatch replays to the
+ * same first difference.
  *
  * The reference runs on a private copy of RAM taken when the call starts, and runs when the
  * translated call stops, so nothing it does is visible to the guest and it sees exactly the
@@ -34,6 +35,7 @@
 #ifdef SR_VERIFY
 
 #include "verify.h"
+#include "end_state_compare.h"
 #include "nksnap.h"
 #include "../ref/snapshot_ref.h"
 
@@ -68,7 +70,7 @@ typedef struct {
     uint64_t checked_at[CHECKED_AT_MAX];
     unsigned checked_at_n;
     int has_first;
-    char first_mismatch[112];
+    char first_mismatch[SR_END_DIFFERENCE_MAX];
 } VFn;
 
 typedef struct {
@@ -302,16 +304,6 @@ static int call_target(uint32_t call_pc, uint32_t *target) {
     return 0;
 }
 
-static int is_vfpu_opcode(uint32_t op) {
-    switch (op >> 26) {
-    case 0x12: case 0x18: case 0x19: case 0x1b: case 0x32: case 0x34: case 0x35:
-    case 0x36: case 0x37: case 0x3a: case 0x3c: case 0x3d: case 0x3e: case 0x3f:
-        return 1;
-    default:
-        return 0;
-    }
-}
-
 static int ensure_buffers(void) {
     if (!s_ref) s_ref = nk_ref_create();
     if (!s_vram_base) s_vram_base = (uint8_t *)malloc(VRAM_SIZE);
@@ -373,71 +365,19 @@ void sr_verify_begin(CpuState *s, uint32_t target, uint32_t call_pc, uint32_t re
 
 /* ---- comparison and verdicts -------------------------------------------------------- */
 
-static uint32_t first_difference(const uint8_t *a, const uint8_t *b, uint32_t n) {
-    for (uint32_t i = 0; i < n; i += 4096u) {
-        uint32_t len = n - i < 4096u ? n - i : 4096u;
-        if (memcmp(a + i, b + i, len) != 0) {
-            for (uint32_t j = 0; j < len; j++)
-                if (a[i + j] != b[i + j]) return i + j;
-        }
-    }
-    return n;
-}
-
-static int mismatch_hex(char *out, size_t cap, const char *field, uint32_t aot, uint32_t ref) {
-    snprintf(out, cap, "%s aot=0x%08" PRIx32 " ref=0x%08" PRIx32, field, aot, ref);
-    return 1;
-}
-
-/* Same order and wording as src/rt/snapshot_runner.c compare(). */
-static int compare(const Active *a, const CpuState *aot, int aot_stop, uint32_t stop_pc,
+/* The walk, its order and its wording are sr_end_state_difference's. The reference does
+ * not know the import tables, so an import stop is compared by its kind alone. */
+static int compare(const Active *a, const CpuState *aot, SrEndStopKind aot_stop, uint32_t stop_pc,
                    uint32_t stop_code, char *out, size_t cap) {
-    static const char *const names[] = { "return", "syscall", "import" };
-    const CpuState *r = &a->ref_cpu;
-    int ref_stop = a->rr.stop == NK_REF_IMPORT ? 2 : a->rr.stop == NK_REF_SYSCALL ? 1 : 0;
-    if (aot_stop != ref_stop) {
-        snprintf(out, cap, "stop aot=%s ref=%s", names[aot_stop], names[ref_stop]);
-        return 1;
-    }
-    if (aot_stop == 1) {
-        if (stop_pc != a->rr.pc) return mismatch_hex(out, cap, "syscall_pc", stop_pc, a->rr.pc);
-        uint32_t ref_code = (a->rr.op >> 6) & 0xFFFFFu;
-        if (stop_code != ref_code) return mismatch_hex(out, cap, "syscall_code", stop_code, ref_code);
-    }
-    char name[16];
-    for (int i = 1; i < 32; i++) {
-        if (aot->r[i] != r->r[i]) {
-            snprintf(name, sizeof name, "r%d", i);
-            return mismatch_hex(out, cap, name, aot->r[i], r->r[i]);
-        }
-    }
-    if (aot->hi != r->hi) return mismatch_hex(out, cap, "hi", aot->hi, r->hi);
-    if (aot->lo != r->lo) return mismatch_hex(out, cap, "lo", aot->lo, r->lo);
-    for (int i = 0; i < 32; i++) {
-        if (aot->fi[i] != r->fi[i]) {
-            snprintf(name, sizeof name, "f%d", i);
-            return mismatch_hex(out, cap, name, aot->fi[i], r->fi[i]);
-        }
-    }
-    if (aot->fcr31 != r->fcr31) return mismatch_hex(out, cap, "fcr31", aot->fcr31, r->fcr31);
-    if (g_oor_reads != a->oor_reads0)
-        return mismatch_hex(out, cap, "oor_loads", (uint32_t)(g_oor_reads - a->oor_reads0), 0u);
-    if (g_oor_writes != a->oor_writes0)
-        return mismatch_hex(out, cap, "oor_stores", (uint32_t)(g_oor_writes - a->oor_writes0), 0u);
-    uint32_t low = first_difference(arena_base() + VRAM_BASE, s_vram_base, VRAM_SIZE);
-    if (low < VRAM_SIZE) {
-        snprintf(out, cap, "mem[0x%08" PRIx32 "] aot=0x%02x ref=0x%02x", VRAM_BASE + low,
-                 arena_base()[VRAM_BASE + low], s_vram_base[low]);
-        return 1;
-    }
-    const uint8_t *ref_ram = nk_ref_ram(s_ref);
-    uint32_t ram = first_difference(g_mem, ref_ram, NK_REF_RAM_SIZE);
-    if (ram < NK_REF_RAM_SIZE) {
-        snprintf(out, cap, "mem[0x%08" PRIx32 "] aot=0x%02x ref=0x%02x", SR_RAM_BASE + ram,
-                 g_mem[ram], ref_ram[ram]);
-        return 1;
-    }
-    return 0;
+    const SrEndStop aot_end = { aot_stop, stop_pc, stop_code, 0u };
+    const SrEndStop ref_end = sr_end_stop_of_reference(&a->rr);
+    const SrEndSpan spans[] = {
+        { VRAM_BASE, arena_base() + VRAM_BASE, s_vram_base, VRAM_SIZE },
+        { SR_RAM_BASE, g_mem, nk_ref_ram(s_ref), NK_REF_RAM_SIZE },
+    };
+    return sr_end_state_difference(&aot_end, aot, &ref_end, &a->ref_cpu, 0,
+                                   g_oor_reads - a->oor_reads0, g_oor_writes - a->oor_writes0,
+                                   spans, sizeof spans / sizeof spans[0], out, cap);
 }
 
 static void capture(const Active *a, const char *why) {
@@ -487,15 +427,16 @@ static void finish_skip(SkipReason why) {
 /* Run the reference over the call that just stopped. An import stop names the stub the
  * runtime entered last (the sampled function itself when nothing else was entered): the
  * stub's own bytes are `jr $ra; nop` in a PRX image, so only its address marks the stop. */
-static int run_reference(int aot_stop) {
+static int run_reference(SrEndStopKind aot_stop) {
     Active *a = &s_active;
     uint32_t stub = s_entered ? s_entered : a->target;
     nk_ref_run_call(s_ref, &a->ref_cpu, a->target, a->resume_pc, a->entry_sp,
-                    aot_stop == 2 ? &stub : NULL, aot_stop == 2 ? 1u : 0u, s_cfg.max_steps, &a->rr);
+                    aot_stop == SR_END_STOP_IMPORT ? &stub : NULL,
+                    aot_stop == SR_END_STOP_IMPORT ? 1u : 0u, s_cfg.max_steps, &a->rr);
     SkipReason why = SKIP_COUNT;
     switch (a->rr.stop) {
     case NK_REF_UNIMPLEMENTED:
-        why = is_vfpu_opcode(a->rr.op) ? SKIP_REF_NO_VFPU : SKIP_REF_UNIMPLEMENTED; break;
+        why = sr_end_is_vfpu_opcode(a->rr.op) ? SKIP_REF_NO_VFPU : SKIP_REF_UNIMPLEMENTED; break;
     case NK_REF_MEMORY_FAULT: why = SKIP_REF_FAULT; break;
     case NK_REF_BREAK: why = SKIP_REF_BREAK; break;
     case NK_REF_STEP_LIMIT: why = SKIP_REF_STEP_LIMIT; break;
@@ -506,7 +447,7 @@ static int run_reference(int aot_stop) {
     return 0;
 }
 
-static void finish(CpuState *s, int aot_stop, uint32_t pc, uint32_t code) {
+static void finish(CpuState *s, SrEndStopKind aot_stop, uint32_t pc, uint32_t code) {
     Active *a = &s_active;
     if (a->preempted) { finish_skip(SKIP_PREEMPTED); return; }
     if (!run_reference(aot_stop)) return;
@@ -540,13 +481,13 @@ void sr_verify_end(CpuState *s, const SrAotReturnBoundary *b) {
         finish_skip(SKIP_NONLOCAL);
         return;
     }
-    finish(s, 0, 0u, 0u);
+    finish(s, SR_END_STOP_RETURN, 0u, 0u);
 }
 
 void sr_verify_at_stop(CpuState *s, int kind, uint32_t code, uint32_t pc) {
     Active *a = &s_active;
     if (!a->live || s != a->state) return;
-    finish(s, kind == SR_VERIFY_STOP_IMPORT ? 2 : 1, pc, code);
+    finish(s, kind == SR_VERIFY_STOP_IMPORT ? SR_END_STOP_IMPORT : SR_END_STOP_SYSCALL, pc, code);
 }
 
 void sr_verify_note_preempt(const char *why) {
