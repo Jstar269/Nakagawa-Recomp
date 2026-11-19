@@ -51,7 +51,8 @@ STALE_C = (RT / "stale_code.c").read_text(encoding="utf-8")
 SELFTEST_C = ROOT / "tests" / "native" / "stale_code_selftest.c"
 SELFTEST_TEXT = SELFTEST_C.read_text(encoding="utf-8")
 HLE_C = hle_sources.text()
-HLE_CACHE_DMA_C = (RT / "hle_cache_dma.c").read_text(encoding="utf-8")
+# The cache-op HLE unit, found through tools/hle_sources.py by the function it defines.
+HLE_CACHE_DMA_C = dict(hle_sources.sources())[hle_sources.defining_file("h_cache_invalidate_all_common")]
 RECOMP_H = (RT / "recomp.h").read_text(encoding="utf-8")
 MAKEFILE = read_makefile(ROOT)
 CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
