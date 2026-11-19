@@ -87,9 +87,12 @@ class TestGateStubLink(unittest.TestCase):
             assert driver is not None
             self.assertTrue(Path(driver).is_file())
             linked = {Path(part).name for part in argv if part.endswith(".c")}
-            for unit in ("recomp.c", "guest_interp.c", "cpu_lle.c", "stale_code.c", "driver.c",
-                         "videorec.c", "title_config.c", "gate_stub.c", "gen_0.c"):
-                self.assertIn(unit, linked)
+            # Every unit the gate's driver link names (codegen_gate.build_traced_driver), so a link
+            # that loses one, domain_mode.c beside guest_interp.c included, fails here by name.
+            for unit in ("gen.c", "gen_0.c", "recomp.c", "guest_interp.c", "cpu_lle.c", "domain_mode.c",
+                         "stale_code.c", "vfpu_tables.c", "driver.c", "nk_shared_helpers.c", "ace.c",
+                         "videorec.c", "title_config.c", "gate_stub.c"):
+                self.assertIn(unit, linked, f"codegen_gate's driver link no longer names {unit}")
             includes = [Path(argv[i + 1]).resolve() for i, part in enumerate(argv[:-1]) if part == "-I"]
             self.assertIn(RT.resolve(), includes)
             self.assertIn((work / "title-config").resolve(), includes)
