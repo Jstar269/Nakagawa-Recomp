@@ -220,8 +220,13 @@ class TestGimBounds(unittest.TestCase):
         self.assertIsNone(decode_gim_data(gim(block(0x0005, b"\0" * 8))))
 
     def test_dimensions_are_rejected_before_pixel_allocation(self) -> None:
-        self.assertIsNone(decode_gim_data(gim(image_block(width=5000, raw=b"x"))))
-        self.assertIsNone(decode_gim_data(gim(image_block(width=0, raw=b"x"))))
+        self.assertIsNotNone(
+            decode_gim_data(gim(image_block(width=4096, height=1, raw=b"\0" * 4096), palette_block()))
+        )
+        self.assertIsNone(decode_gim_data(gim(image_block(width=4097, height=1, raw=b"\0" * 4097), palette_block())))
+        self.assertIsNone(decode_gim_data(gim(image_block(width=1, height=4097, raw=b"\0" * 4097), palette_block())))
+        self.assertIsNone(decode_gim_data(gim(image_block(width=0, height=1, raw=b""))))
+        self.assertIsNone(decode_gim_data(gim(image_block(width=1, height=0, raw=b""))))
         self.assertIsNone(decode_gim_data(gim(image_block(width=2, height=2, raw=b"x"))))
 
     def test_image_and_palette_offsets_stay_inside_their_blocks(self) -> None:

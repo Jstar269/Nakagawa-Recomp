@@ -38,11 +38,20 @@ function Assert-True {
 # A child process that exits after N seconds, with no console window of its own.
 # `ping -n` rather than `timeout`: timeout refuses to run without an interactive console
 # and exits 125 immediately, which would make the deadline test vacuously pass.
+# ping.exe is started directly, not under `cmd.exe /c`: the deadline test kills the process
+# it was handed, and a cmd.exe wrapper would leave its ping.exe child running on its own.
 function Start-SleeperProcess {
     param([int]$Seconds)
-    return Start-Process -FilePath "cmd.exe" `
-        -ArgumentList @("/c", "ping -n $($Seconds + 1) 127.0.0.1 > nul") `
+    return Start-Process -FilePath "ping.exe" `
+        -ArgumentList @("-n", "$($Seconds + 1)", "127.0.0.1") `
         -PassThru -WindowStyle Hidden
+}
+
+# The live processes whose parent is `$ProcessId` (Win32_Process lists only running
+# processes, so no second liveness filter is needed).
+function Get-LiveChildProcess {
+    param([int]$ProcessId)
+    return @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId")
 }
 
 # --- Wait-ProcessOrKill: early exit -------------------------------------------------
@@ -68,8 +77,29 @@ Test-Case "wait kills and reports a timeout at the deadline" {
     $r = Wait-ProcessOrKill -Process $p -TimeoutSeconds 2
     Assert-True ($r.TimedOut) "should have reported a timeout"
     Assert-True ($p.HasExited) "the process should have been killed"
+    $orphans = Get-LiveChildProcess -ProcessId $p.Id
+    Assert-True ($orphans.Count -eq 0) `
+        "the sleeper left $($orphans.Count) child process(es) running after its kill"
     Assert-True ($r.ElapsedSeconds -lt 30) `
         "took $($r.ElapsedSeconds)s to enforce a 2s deadline"
+}
+
+# A process the manager cannot terminate (access denied, or a kill still pending in a driver
+# call) must not turn the deadline into an unbounded wait. The refusal is modelled by a
+# Stop-Process function, which PowerShell resolves before the cmdlet of the same name.
+Test-Case "wait returns at the deadline when the kill is refused" {
+    function Stop-Process { throw "access is denied (test: a process the manager cannot terminate)" }
+    $p = Start-SleeperProcess -Seconds 40
+    try {
+        $r = Wait-ProcessOrKill -Process $p -TimeoutSeconds 1
+        Assert-True ($r.TimedOut) "should have reported a timeout"
+        Assert-True (-not $r.Killed) "a refused kill must not be reported as a kill"
+        Assert-True ($r.ElapsedSeconds -lt 20) `
+            "blocked $($r.ElapsedSeconds)s on a process that outlived its refused kill"
+        Assert-True ($null -eq $r.ExitCode) "a process still running has no exit code, got $($r.ExitCode)"
+    } finally {
+        try { $p.Kill($true) } catch { }
+    }
 }
 
 # Redirection is not incidental here: it is the configuration the real runner uses, and
@@ -353,6 +383,26 @@ try {
             Set-Content -LiteralPath $log
         $o = Read-RouteOutcome -StderrPath $log
         Assert-True ($o.Kind -eq "failed") "an unusable route file must fail the run, got $($o.Kind)"
+        # The generic ROUTE_FAIL that follows must not erase the line and cause the parse named.
+        Assert-True ($o.FailReason -match "undefined checkpoints") "the ROUTE_FAIL reason was lost: $($o.FailReason)"
+        Assert-True ($o.FailReason -match "r\.pad:7: no CHECKPOINT defines 'EXHIBITION_SETUP'") `
+            "the ROUTE_PARSE line and cause were lost: $($o.FailReason)"
+    }
+
+    # The runtime prints this one ROUTE_PARSE line and runs on with no route when fopen fails
+    # (src/rt/hle_route.c), so no ROUTE_FAIL follows; the run must still not read as complete.
+    Test-Case "a route file the runtime could not open fails the run" {
+        $log = Join-Path $routeTmp "unopened.log"
+        @("ROUTE_PARSE: cannot open route file 'C:\r.pad'",
+          "BOOT_EVENT phase=exit_at_vblank vblanks=44000 (SR_EXIT_AT_VBLANK=44000)") |
+            Set-Content -LiteralPath $log
+        $o = Read-RouteOutcome -StderrPath $log
+        Assert-True ($o.Kind -eq "failed") "a route that never opened must fail the run, got $($o.Kind)"
+        Assert-True ($o.FailReason -match "cannot open route file") "the runtime's reason should be kept"
+        $v = Get-OracleVerdict -ReachedExit $true -TimedOut $false -ExitCode 0 `
+                 -CaptureCount 18 -RequestedVblank 44000 -ObservedVblank 44000 `
+                 -RouteKind $o.Kind -RouteFailReason $o.FailReason
+        Assert-True (-not $v.Complete) "captures from a run whose route never ran are not admissible"
     }
 } finally {
     Remove-Item -LiteralPath $routeTmp -Recurse -Force -ErrorAction SilentlyContinue

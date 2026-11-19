@@ -9,6 +9,7 @@ import importlib.util
 import json
 from io import StringIO
 from pathlib import Path
+import re
 import struct
 import sys
 import tempfile
@@ -220,7 +221,8 @@ class TestPackageNotices(unittest.TestCase):
             "glib2": "2.90.1-1",
             "gettext-runtime": "1.0-1",
             "libiconv": "1.19-1",
-            "gcc-libs": "16.2.0-6",
+            "libgcc": "16.2.0-6",
+            "libstdc++": "16.2.0-6",
         }
         msys_root = self.pkg_dir / "synthetic-msys64"
         toolchain_root = msys_root / "ucrt64"
@@ -303,7 +305,7 @@ class TestPackageNotices(unittest.TestCase):
                             "upstream_revision": "n4.4 / synthetic revision",
                             "disposition": "statically_linked_subset",
                             "notice_file": "FFmpeg-H264.txt",
-                            "object_glob": "build/*/h264sub_*.o",
+                            "object_globs": ["build/*/h264sub_*.o"],
                             "relink_doc": "RELINK.md",
                             "license_texts": [{"file": h264_license}],
                         }],
@@ -641,11 +643,103 @@ class TestPackageNotices(unittest.TestCase):
         """RELINK.md lists exactly the ATRAC3+ objects the Makefile builds, plus the bridge."""
         objects = package_notices.atrac3p_object_names(ROOT)
         makefile = read_makefile(ROOT)
-        self.assertGreater(len(objects), 1)
-        for obj in objects[:-1]:
-            source = "src/rt/atrac3p/" + obj[len("$(BUILD_DIR)/atrac3p_"):-2] + ".c"
-            self.assertIn(source, makefile)
-        self.assertEqual(objects[-1], "$(BUILD_DIR)/atrac3p_bridge.o")
+        runtime_mk = (ROOT / "mk" / "runtime_sources.mk").read_text(encoding="utf-8")
+        pat_match = re.search(
+            r"^ATRAC3P_OBJS\s*:=\s*\$\(patsubst\s+([^,]+),([^,]+),\$\(ATRAC3P_SRCS\)\)",
+            runtime_mk,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(pat_match)
+        assert pat_match is not None
+        src_pat, obj_pat = pat_match.group(1).strip(), pat_match.group(2).strip()
+        src_prefix, src_suffix = src_pat.split("%", 1)
+        obj_prefix, obj_suffix = obj_pat.split("%", 1)
+        srcs_match = re.search(r"^ATRAC3P_SRCS\s*:?=\s*((?:.*\\\n)*.*)$", makefile, re.MULTILINE)
+        self.assertIsNotNone(srcs_match)
+        assert srcs_match is not None
+        srcs = srcs_match.group(1).replace("\\\n", " ").split()
+        expected = [
+            obj_prefix + src[len(src_prefix):-len(src_suffix)] + obj_suffix
+            for src in srcs
+            if src.startswith(src_prefix) and src.endswith(src_suffix)
+        ] + ["$(BUILD_DIR)/atrac3p_bridge.o"]
+        self.assertGreater(len(expected), 1)
+        self.assertEqual(objects, expected)
+
+    def test_recorded_relink_globs_match_every_lgpl_object_the_makefile_builds(self) -> None:
+        """Each LGPL subset's object_globs find every object its Makefile rule derives, subdirectories included."""
+        makefile = read_makefile(ROOT)
+
+        def sources(variable: str) -> list[str]:
+            for match in re.finditer(rf"^{variable}\s*:?=\s*((?:.*\\\n)*.*)$", makefile, re.MULTILINE):
+                found = match.group(1).replace("\\\n", " ").split()
+                if found:
+                    return found
+            return []
+
+        # mk/runtime_sources.mk: $(patsubst <dir>/%.c,$(BUILD_DIR)/<prefix>%.o,$(<VAR>)).
+        rules = {
+            "ffmpeg-atrac3p": ("ATRAC3P_SRCS", "src/rt/atrac3p/", "atrac3p_", ["atrac3p_bridge.o"]),
+            "ffmpeg-h264": ("H264_SUB_SRCS", "src/rt/h264_ffmpeg_sub/", "h264sub_", []),
+        }
+        for variable, directory, prefix, _extra in rules.values():
+            self.assertIn(
+                f"$(patsubst {directory}%.c,$(BUILD_DIR)/{prefix}%.o,$({variable}))",
+                (ROOT / "mk" / "runtime_sources.mk").read_text(encoding="utf-8"),
+            )
+        inventory = package_notices.load_component_inventory()
+        by_id = {c.get("id"): c for c in inventory["native"]["linked_components"]}
+        for component_id, (variable, directory, prefix, extra) in rules.items():
+            with self.subTest(component=component_id):
+                srcs = [s for s in sources(variable) if s.startswith(directory) and s.endswith(".c")]
+                self.assertGreater(len(srcs), 1)
+                expected = {f"build/game/{prefix}{s[len(directory):-2]}.o" for s in srcs}
+                expected.update(f"build/game/{name}" for name in extra)
+                self.assertTrue(any("/" in o[len("build/game/"):] for o in expected))
+                with tempfile.TemporaryDirectory() as tree_dir:
+                    tree = Path(tree_dir)
+                    for obj in expected:
+                        (tree / obj).parent.mkdir(parents=True, exist_ok=True)
+                        (tree / obj).write_bytes(b"")
+                    globs = by_id[component_id].get("object_globs")
+                    self.assertIsInstance(globs, list)
+                    matched = {
+                        path.relative_to(tree).as_posix()
+                        for pattern in globs for path in tree.glob(pattern) if path.is_file()
+                    }
+                self.assertEqual(matched, expected)
+
+    def test_relink_objects_in_the_package_index_carry_every_recorded_glob(self) -> None:
+        (self.pkg_dir / "game.exe").write_bytes(b"MZ\0\0exe")
+        result = package_notices.generate_package_notices(
+            self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+        )
+        atrac = next(c for c in result["components"] if c["name"] == "FFmpeg ATRAC3+ subset")
+        self.assertEqual(atrac["relink_objects"], ["build/*/atrac3p_*.o", "build/*/atrac3p_*/**/*.o"])
+
+    def test_malformed_relink_globs_fail_closed(self) -> None:
+        """A single-string glob (which cannot reach the per-library subdirectories) is a named failure."""
+        (self.pkg_dir / "game.exe").write_bytes(b"MZ\0\0exe")
+        real = package_notices.load_component_inventory()
+        cases: tuple[tuple[str, object], ...] = (
+            ("object_glob", "build/*/atrac3p_*.o"),
+            ("object_globs", "build/*/atrac3p_*.o"),
+            ("object_globs", []),
+            ("object_globs", ["build/*/atrac3p_*.o", 3]),
+        )
+        for key, bad in cases:
+            inventory = json.loads(json.dumps(real))
+            linked = next(c for c in inventory["native"]["linked_components"] if c["id"] == "ffmpeg-atrac3p")
+            linked.pop("object_globs")
+            linked[key] = bad
+            with self.subTest(key=key, value=bad):
+                with mock.patch.object(package_notices, "load_component_inventory", return_value=inventory):
+                    with self.assertRaises(PackageRouteError) as ctx:
+                        package_notices.generate_package_notices(
+                            self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+                        )
+                self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_RECORD_MISSING")
+                self.assertIn("LICENSE_RECORD_MALFORMED", str(ctx.exception))
 
     def test_installed_package_version_reads_pacman_database(self) -> None:
         """Component versions come from the toolchain's package database, never a literal."""
@@ -671,11 +765,11 @@ class TestPackageNotices(unittest.TestCase):
             package_version = "16.2.0-6"
             entry = (
                 msys_root / "var" / "lib" / "pacman" / "local"
-                / f"mingw-w64-ucrt-x86_64-gcc-libs-{package_version}"
+                / f"mingw-w64-ucrt-x86_64-libgcc-{package_version}"
             )
             entry.mkdir(parents=True)
             (entry / "desc").write_text(
-                f"%NAME%\nmingw-w64-ucrt-x86_64-gcc-libs\n\n%VERSION%\n{package_version}\n",
+                f"%NAME%\nmingw-w64-ucrt-x86_64-libgcc\n\n%VERSION%\n{package_version}\n",
                 encoding="utf-8",
             )
             result = package_notices.generate_package_notices(

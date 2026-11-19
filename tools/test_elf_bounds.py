@@ -504,6 +504,26 @@ class ProgramImageTests(unittest.TestCase):
         )
         self.assertEqual(functions, (base + 0x40,))
 
+        # A len=5 or len=6 SceLibraryEntryTable entry still uses the 16-byte header
+        # (entrytable at offset 12, extra words skipped), not the legacy synthetic layout.
+        for size_words in (5, 6):
+            data5 = bytearray(0x100)
+            data5[0x70:0x7B] = b"sceFixture\0"
+            struct.pack_into(
+                "<I2sHBBHI", data5, 0x20,
+                base + 0x70, b"\x01\x00", 0, size_words, 1, 1, base + 0x80,
+            )
+            struct.pack_into("<4I", data5, 0x80, 0x11111111, 0x22222222,
+                             base + 0x40, base + 0x50)
+            findings5 = []
+            entries5 = prxload._program_image_table(
+                data5, loads, base + 0x20, base + 0x20 + size_words * 4, "module.exports",
+                findings5, base, "export",
+            )
+            self.assertEqual(findings5, [])
+            self.assertEqual(len(entries5), 1)
+            self.assertEqual(entries5[0][6:], (base + 0x88, base + 0x8C))
+
     def test_standard_psp_export_entry_table_must_be_mapped(self):
         base = 0x1000
         data = bytearray(0x100)
@@ -620,12 +640,17 @@ class ProgramImageTests(unittest.TestCase):
         module_off = 0x40
         name_off = 0x90
         nid_off = (name_off + len(name) + 1 + 3) & ~3
-        entry_off = nid_off + 4
-        # Turn the fixture's library entry into an export and make its function
-        # pointer leave the only validated PT_LOAD segment.
-        struct.pack_into("<2I", blob, data_off + module_off + 36, base + entry_off, base + entry_off + 20)
+        entry_off = nid_off + 8
+        # Turn the fixture's library entry into a 4-word export whose entrytable
+        # (1 NID followed by 1 function address) has a function pointer outside
+        # the only validated PT_LOAD segment.
+        struct.pack_into("<2I", blob, data_off + module_off + 36, base + entry_off, base + entry_off + 16)
         struct.pack_into("<2I", blob, data_off + module_off + 44, 0, 0)
-        struct.pack_into("<I", blob, data_off + nid_off, base + 0x5000)
+        struct.pack_into("<2I", blob, data_off + nid_off, 0x12345678, base + 0x5000)
+        struct.pack_into(
+            "<I2sHBBHI", blob, data_off + entry_off,
+            base + name_off, b"\x01\x01", 0, 4, 0, 1, base + nid_off,
+        )
         self.assert_invalid(blob, "pointer-target-oob", base=base, name="export-pointer-oob.prx")
 
     def test_string_bounds_cover_missing_nul_and_overlong_import_names(self):
@@ -645,6 +670,76 @@ class ProgramImageTests(unittest.TestCase):
             ), ""
         )
         self.assertIn("string-overlong", {finding.code for finding in long_findings})
+
+    def test_sectioned_packed_relocation_and_stripped_phdr_relocations_are_validated(self):
+        # 1. Sectioned PRX where 0x700000A1 packed relocations live in their own 0x700000A1 phdr
+        #    outside the PT_LOAD file span.
+        flag_bits, type_bits, seg_bits = 2, 2, 1
+        header = bytes([0, 0, flag_bits, type_bits, 3, 0x00, 0x01, 3, 0, 2])
+        set_base = (0 << (seg_bits + flag_bits)) | (0 << flag_bits) | 1
+        reloc = (0 << (type_bits + seg_bits + flag_bits)) | (2 << (seg_bits + flag_bits)) | (0 << flag_bits) | 2
+        packed_table = header + struct.pack("<HH", set_base, reloc)
+
+        phoff = 52
+        payload_off = phoff + 32 * 2
+        reloc_off = payload_off + 0x20
+        shstr = b"\x00.shstrtab\x00.reloc\x00"
+        shstr_off = reloc_off + ((len(packed_table) + 3) & ~3)
+        shoff = shstr_off + ((len(shstr) + 3) & ~3)
+        blob = bytearray(shoff + 3 * 40)
+        blob[:8] = b"\x7fELF\x01\x01\x01\x00"
+        struct.pack_into("<HHIIIIIHHHHHH", blob, 16, 0xFFA0, 8, 1, 0, phoff, shoff, 0, 52, 32, 2, 40, 3, 1)
+        struct.pack_into("<8I", blob, phoff, 1, payload_off, 0, 0, 0x20, 0x20, 5, 4)
+        struct.pack_into("<8I", blob, phoff + 32, 0x700000A1, reloc_off, 0, 0, len(packed_table), 0, 0, 4)
+        blob[reloc_off:reloc_off + len(packed_table)] = packed_table
+        blob[shstr_off:shstr_off + len(shstr)] = shstr
+        struct.pack_into("<10I", blob, shoff + 40, 1, 3, 0, 0, shstr_off, len(shstr), 0, 0, 1, 0)
+        struct.pack_into(
+            "<10I", blob, shoff + 80,
+            shstr.index(b".reloc"), 0x700000A1, 0, 0, reloc_off, len(packed_table), 0, 0, 4, 0,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_blob(Path(td), "packed.prx", blob)
+            image = prxload.load_program_image(path, base=0x1000)
+            legacy_packed = prxload.Prx(str(path), 0x1000)
+            applied_packed = legacy_packed.relocate()
+        self.assertEqual(len(image.relocations), 1)
+        self.assertEqual(image.relocations[0].relocation_type, 0x700000A1)
+        self.assertEqual(applied_packed, 1)
+        self.assertEqual(legacy_packed.r32(0x1000), 0x1000)
+
+        # 2. Stripped PRX (shnum == 0) with a 0x700000A0 relocation phdr.
+        stripped = bytearray(payload_off + 0x28)
+        stripped[:8] = b"\x7fELF\x01\x01\x01\x00"
+        struct.pack_into("<HHIIIIIHHHHHH", stripped, 16, 0xFFA0, 8, 1, 0, phoff, 0, 0, 52, 32, 2, 0, 0, 0)
+        struct.pack_into("<8I", stripped, phoff, 1, payload_off, 0, 0, 0x20, 0x20, 5, 4)
+        struct.pack_into("<8I", stripped, phoff + 32, 0x700000A0, payload_off + 0x20, 0, 0, 8, 0, 0, 4)
+        struct.pack_into("<II", stripped, payload_off + 0x20, 0, 2)  # valid R_MIPS_32 at offset 0
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_blob(Path(td), "stripped.prx", stripped)
+            image_stripped = prxload.load_program_image(path, base=0x1000)
+        self.assertEqual(len(image_stripped.relocations), 1)
+        self.assertEqual(image_stripped.relocations[0].target_address, 0x1000)
+
+        # 3. Sectioned PRX where 0x700000A1 lives in a phdr AND sections are present (no 0x700000A1 shdr).
+        phdr_only_packed = bytearray(blob)
+        struct.pack_into("<H", phdr_only_packed, 48, 2)  # shnum = 2 (drop the .reloc section header)
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_blob(Path(td), "phdr-only-packed.prx", phdr_only_packed)
+            legacy_phdr_packed = prxload.Prx(str(path), 0x1000)
+            self.assertEqual(legacy_phdr_packed.relocate(), 1)
+            self.assertEqual(legacy_phdr_packed.r32(0x1000), 0x1000)
+
+        # 4. Fixed-address ET_EXEC at its link-time base with non-empty relocation records must raise.
+        fixed_base = 0x08804000
+        fixed_with_reloc = bytearray(stripped)
+        struct.pack_into("<H", fixed_with_reloc, 16, 2)  # ET_EXEC
+        struct.pack_into("<II", fixed_with_reloc, phoff + 8, fixed_base, fixed_base)  # vaddr, paddr
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_blob(Path(td), "fixed-with-reloc.elf", fixed_with_reloc)
+            legacy_fixed = prxload.Prx(str(path), fixed_base)
+            with self.assertRaisesRegex(ValueError, "fixed-address module carries relocation records"):
+                legacy_fixed.relocate()
 
 
 class FakeCodeImage:

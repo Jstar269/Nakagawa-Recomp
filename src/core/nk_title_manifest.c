@@ -51,12 +51,14 @@ static int nk_ascii_casecmp(const char *a, const char *b) {
 }
 
 /* Mirrors MAX_TITLE_MODULES in tools/title_manifest.py: the disc module-discovery cap. */
-#define MAX_MODULES 256
-#define MAX_COMPAT_DISC_IDS 16
+/* The catalog limits come from the generated nk_title_catalog.h, so a manifest
+ * this parser accepts always fits the catalog's registry and snapshot copies. */
+#define MAX_MODULES NK_TITLE_MAX_MODULES
+#define MAX_COMPAT_DISC_IDS NK_TITLE_MAX_COMPATIBLE_DISC_IDS
 #define MAX_DISC_BUILDS 16
-#define MAX_LOOSE_CONTENT_ROOTS 16
-#define MAX_LOOSE_CONTENT_EXCLUDES 2
-#define NK_MANIFEST_MAX_OVERLAYS 8
+#define MAX_LOOSE_CONTENT_ROOTS NK_TITLE_MAX_LOOSE_CONTENT_ROOTS
+#define MAX_LOOSE_CONTENT_EXCLUDES NK_TITLE_MAX_LOOSE_CONTENT_EXCLUDES
+#define NK_MANIFEST_MAX_OVERLAYS NK_TITLE_MAX_OVERLAYS
 
 /* The window a guest module's base must lie in: its code and data are both placed there, so a
  * base outside it lets translated code run while every data write is dropped. Mirrors
@@ -1832,7 +1834,8 @@ static bool manifest_check_collision(const OverlayStorageSlot *temp, bool allow_
 
 /* Store the accepted manifest in the caller slot, or publish it as a catalog generation (#670). */
 static bool manifest_publish_slot(const OverlayStorageSlot *temp, NkTitleEntry *out_entry,
-                                  OverlayStorageSlot *validate_into) {
+                                  OverlayStorageSlot *validate_into,
+                                  char *error_buf, size_t error_buf_len) {
     if (validate_into) {
         *validate_into = *temp;
         overlay_slot_anchor(validate_into);
@@ -1849,11 +1852,17 @@ static bool manifest_publish_slot(const OverlayStorageSlot *temp, NkTitleEntry *
         }
     }
     if (target_slot == -1) {
-        if (s_overlay_slot_count < NK_MANIFEST_MAX_OVERLAYS) {
-            target_slot = s_overlay_slot_count++;
-        } else {
-            target_slot = NK_MANIFEST_MAX_OVERLAYS - 1; /* bounded replacement of last slot */
+        if (s_overlay_slot_count >= NK_MANIFEST_MAX_OVERLAYS) {
+            /* Every slot backs another title (possibly a registered one):
+               refuse instead of overwriting a loaded title's storage. */
+            if (error_buf) {
+                snprintf(error_buf, error_buf_len,
+                    "Overlay '%s' refused: at most %d title manifests are loaded",
+                    temp->entry.id, NK_MANIFEST_MAX_OVERLAYS);
+            }
+            return false;
         }
+        target_slot = s_overlay_slot_count++;
     }
 
     nk_title_catalog_set_overlay_storage_reset_locked(nk_manifest_reset_overlay_storage);
@@ -1925,7 +1934,8 @@ static bool nk_manifest_parse_locked(
         OverlayStorageSlot temp;
         manifest_build_slot(&mp, &temp);
         ok = manifest_check_collision(&temp, allow_override, error_buf, error_buf_len) &&
-             manifest_publish_slot(&temp, out_entry, validate_into);
+             manifest_publish_slot(&temp, out_entry, validate_into,
+                                   error_buf, error_buf_len);
     }
     json_free(root);
     return ok;
@@ -2047,7 +2057,14 @@ bool nk_title_manifest_load_overlay_ext(
         /* Find matching slot and register with catalog */
         for (int i = 0; i < s_overlay_slot_count; i++) {
             if (strcmp(s_overlay_slots[i].entry.id, entry.id) == 0) {
-                nk_title_catalog_register_overlay_locked(&s_overlay_slots[i].entry);
+                if (!nk_title_catalog_register_overlay_locked(&s_overlay_slots[i].entry)) {
+                    ok = false;
+                    if (error_buf) {
+                        snprintf(error_buf, error_buf_len,
+                            "Overlay '%s' refused: the title catalog already holds %d overlays",
+                            s_overlay_slots[i].entry.id, NK_TITLE_MAX_OVERLAYS);
+                    }
+                }
                 break;
             }
         }

@@ -36,9 +36,13 @@ typedef struct GeCaptureFixture {
 extern int g_ge_capture_active;
 
 /* Capture is scoped to one GE frame. The caller materializes any GPU-only target/depth state
- * before begin, records each list, then routes GE memory access through note_memory. VRAM and
- * the software depth buffer are copied eagerly; other guest memory is saved by first-touched
- * 4 KiB page, preserving list/vertex/index/texture/CLUT bytes actually consumed. */
+ * before begin, records each list, then routes GE memory access through note_memory (GE
+ * reads) and note_write (GE writes). VRAM and the software depth buffer are copied eagerly;
+ * other guest memory is saved by touched 4 KiB page, and each byte is recorded as the GE
+ * first consumes it, so a list the CPU streams past a stall, or a buffer it fills after an
+ * earlier draw touched the page, is saved as the GE read it. A byte the CPU changes after
+ * the GE consumed it, or a CPU store to VRAM followed by more GE work, cannot be replayed
+ * from one copy: the capture is dropped by name and the next list may begin it again. */
 /* Begin at the exact command address of the invocation that crossed into the
  * armed frame.  This may be a fresh list or a resumed stall PC; either is a
  * complete replay start when paired with the captured GE state and memory. */
@@ -46,6 +50,13 @@ int  ge_capture_begin(const char *path, uint32_t frame, uint32_t start_list_addr
                       const GeState *state, const uint16_t *zbuf);
 int  ge_capture_add_list(uint32_t list_addr);
 void ge_capture_note_memory(uint32_t addr, uint32_t bytes);
+/* The GE is about to write `bytes` bytes from `src` at `addr`. */
+void ge_capture_note_write(uint32_t addr, const void *src, uint32_t bytes);
+/* A CPU-side store to VRAM (sr_ge_vram_write_commit outside the GE's own stores). */
+void ge_capture_note_cpu_vram_store(uint32_t addr, uint32_t bytes);
+/* Called before each GE list run: drops the capture (returning 1) when a CPU VRAM store
+ * noted since begin would reach the GE. */
+int  ge_capture_drop_after_cpu_vram_store(void);
 int  ge_capture_end(const GeState *final_state);
 void ge_capture_abort(void);
 int  ge_capture_active(void);

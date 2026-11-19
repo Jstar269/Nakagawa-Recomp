@@ -98,7 +98,43 @@ static void expect_fail(const char *json, const char *name) {
     if (n != -1) fprintf(stderr, "  unexpected success parsing: %.60s...\n", json);
 }
 
-int main(void) {
+/* Fill `out` with a pattern, parse a document that must fail, and require that `out` still
+ * holds the pattern (the header's no-partial-fill rule). */
+static void expect_untouched_on_failure(const char *json, const char *name) {
+    SrWatchpointEntry out[16];
+    SrWatchpointEntry pattern;
+    char errbuf[256];
+    memset(out, 0xA5, sizeof(out));
+    memset(&pattern, 0xA5, sizeof(pattern));
+    int n = sr_parse_watchpoints_buffer(json, out, 16, errbuf, sizeof(errbuf));
+    CHECK(n == -1 && memcmp(&out[0], &pattern, sizeof(pattern)) == 0, name);
+}
+
+/* The scratch file lives next to this executable (the build directory under make and CI). */
+static int scratch_path(char *out, size_t cap, const char *argv0) {
+    static const char name[] = "watchpoints_file_selftest_scratch.json";
+    size_t dir_len = 0;
+    if (argv0) {
+        const char *slash = strrchr(argv0, '/');
+        const char *bslash = strrchr(argv0, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+        if (slash) dir_len = (size_t)(slash - argv0) + 1u;
+    }
+    if (dir_len + sizeof(name) > cap) return 0;
+    if (dir_len > 0) memcpy(out, argv0, dir_len);
+    memcpy(out + dir_len, name, sizeof(name));
+    return 1;
+}
+
+static int write_scratch(const char *path, const char *bytes, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return 0;
+    int ok = fwrite(bytes, 1, len, f) == len;
+    if (fclose(f) != 0) ok = 0;
+    return ok;
+}
+
+int main(int argc, char **argv) {
     SrWatchpointEntry out[16];
     char errbuf[256];
 
@@ -229,12 +265,61 @@ int main(void) {
         expect_fail(buf, "missing watchpoints rejected");
     }
 
+    /* 8b. An error after a non-empty "watchpoints" array still rejects the whole file: the
+     * parsed count must not leak out as success. */
+    expect_fail("{\"watchpoints\":[{\"start\":1,\"end\":2,\"label\":\"a\"}],"
+                "\"version\":2,\"format\":\"nk-watchpoints\"}",
+                "bad version after watchpoints rejected");
+    expect_fail("{\"watchpoints\":[{\"start\":1,\"end\":2,\"label\":\"a\"}],"
+                "\"version\":1,\"format\":\"bogus\"}",
+                "bad format after watchpoints rejected");
+    expect_fail("{\"format\":\"nk-watchpoints\",\"version\":1,"
+                "\"watchpoints\":[{\"start\":1,\"end\":2,\"label\":\"a\"}] garbage}",
+                "garbage after watchpoints inside envelope rejected");
+    expect_fail("{\"format\":\"nk-watchpoints\",\"version\":1,"
+                "\"watchpoints\":[{\"start\":1,\"end\":2,\"label\":\"a\"}]",
+                "envelope missing its closing brace rejected");
+
+    /* 8c. A repeated envelope key is rejected, never last-one-wins. */
+    expect_fail("{\"format\":\"nk-watchpoints\",\"version\":1,"
+                "\"watchpoints\":[{\"start\":1,\"end\":2,\"label\":\"a\"},"
+                "{\"start\":3,\"end\":4,\"label\":\"b\"}],"
+                "\"watchpoints\":[{\"start\":5,\"end\":6,\"label\":\"c\"}]}",
+                "repeated watchpoints key rejected");
+    expect_fail("{\"format\":\"nk-watchpoints\",\"format\":\"nk-watchpoints\",\"version\":1,"
+                "\"watchpoints\":[]}",
+                "repeated format key rejected");
+    expect_fail("{\"format\":\"nk-watchpoints\",\"version\":1,\"version\":1,"
+                "\"watchpoints\":[]}",
+                "repeated version key rejected");
+
+    /* 8d. A rejected file leaves `out` untouched, even when valid entries came first. */
+    expect_untouched_on_failure("[{\"start\":1,\"end\":2,\"label\":\"a\"},"
+                                "{\"start\":3,\"end\":4,\"label\":\"b\"},"
+                                "{\"start\":9,\"end\":5,\"label\":\"reversed\"}]",
+                                "bare array: out untouched when the third entry is bad");
+    expect_untouched_on_failure("{\"format\":\"nk-watchpoints\","
+                                "\"watchpoints\":[{\"start\":1,\"end\":2,\"label\":\"a\"}],"
+                                "\"version\":2}",
+                                "envelope: out untouched when the version is bad");
+
+    /* 8e. A \u0000 escape is rejected: it would cut a label or key short before the
+     * charset and unknown-key checks see the rest. */
+    expect_fail("[{\"start\":1,\"end\":2,\"label\":\"ok\\u0000$$\"}]",
+                "NUL escape in a label rejected");
+    expect_fail("[{\"start\":1,\"end\\u0000junk\":2,\"label\":\"x\"}]",
+                "NUL escape in a key rejected");
+
     /* 9. Malformed JSON shapes fail closed. */
     expect_fail("", "empty input rejected");
     expect_fail("{", "truncated envelope rejected");
     expect_fail("[{\"start\":1,\"end\":2}]", "missing label rejected");
     expect_fail("[{\"start\":1,\"end\":2,\"label\":\"x\",\"extra\":1}]", "unknown key rejected");
-    expect_fail("[{\"start\":\"0x10\",\"end\":2,\"label\":\"x\"}]", "hex number rejected (decimal only)");
+    expect_fail("[{\"start\":0x10,\"end\":32,\"label\":\"x\"}]", "unquoted hex number rejected (decimal only)");
+    expect_fail("[{\"start\":\"0x10\",\"end\":2,\"label\":\"x\"}]", "string where a number is expected rejected");
+    expect_fail("[{\"start\":-1,\"end\":2,\"label\":\"x\"}]", "negative number rejected");
+    expect_fail("[{\"start\":1.5,\"end\":2,\"label\":\"x\"}]", "fractional number rejected");
+    expect_fail("[{\"start\":1e3,\"end\":2000,\"label\":\"x\"}]", "exponent number rejected");
     expect_fail("[{\"start\":1,\"end\":2,\"label\":\"x\"}]extra", "trailing garbage rejected");
 
     /* 10. Empty list is valid in both canonical and legacy formats. */
@@ -243,12 +328,64 @@ int main(void) {
     expect_parse("{\"format\":\"hst-watchpoints\",\"version\":1,\"watchpoints\":[]}",
                  0, "empty watchpoints list (legacy)");
 
-    /* 11. File-level behavior: missing file and bounded read. */
+    /* 11. File-level behavior: missing file and bounded read. The earlier calls that used
+     * errbuf all succeeded and left it unwritten, so clear it here: the message check below
+     * must see what the failing call wrote, never leftover stack bytes. */
     {
+        errbuf[0] = '\0';
         int n = sr_parse_watchpoints_file(
             "watchpoints_selftest_does_not_exist.json", out, 16, errbuf, sizeof(errbuf));
         CHECK(n == -1, "missing file rejected");
         CHECK(strlen(errbuf) > 0, "error message populated");
+    }
+
+    /* 11b. The read path the runtime uses: a real file next to this executable. */
+    {
+        char path[1024];
+        if (!scratch_path(path, sizeof(path), argc > 0 ? argv[0] : NULL)) {
+            CHECK(0, "scratch path fits");
+        } else {
+            static char doc[SR_WATCHPOINTS_FILE_MAX_BYTES + 1u];
+            size_t fixture_len = strlen(CANONICAL_FIXTURE);
+
+            /* The canonical fixture read from disk parses to its two entries. */
+            int n = -2;
+            if (write_scratch(path, CANONICAL_FIXTURE, fixture_len))
+                n = sr_parse_watchpoints_file(path, out, 16, errbuf, sizeof(errbuf));
+            CHECK(n == 2, "canonical fixture read from a file");
+            if (n == 2) {
+                expect_watchpoint(&out[0], 0x08001000u, 0x08001100u, "Font Engine", "file watch 0");
+                expect_watchpoint(&out[1], 0x08800000u, 0x08800100u, "Vertex Pool", "file watch 1");
+            }
+
+            /* Exactly the size bound (fixture padded with whitespace) is read. */
+            memcpy(doc, CANONICAL_FIXTURE, fixture_len);
+            memset(doc + fixture_len, ' ', SR_WATCHPOINTS_FILE_MAX_BYTES - fixture_len);
+            n = -2;
+            if (write_scratch(path, doc, SR_WATCHPOINTS_FILE_MAX_BYTES))
+                n = sr_parse_watchpoints_file(path, out, 16, errbuf, sizeof(errbuf));
+            CHECK(n == 2, "file of exactly the size bound accepted");
+
+            /* One byte over the bound is refused by the size check. */
+            doc[SR_WATCHPOINTS_FILE_MAX_BYTES] = ' ';
+            n = -2;
+            errbuf[0] = '\0';
+            if (write_scratch(path, doc, SR_WATCHPOINTS_FILE_MAX_BYTES + 1u))
+                n = sr_parse_watchpoints_file(path, out, 16, errbuf, sizeof(errbuf));
+            CHECK(n == -1 && strstr(errbuf, "size bound") != NULL,
+                  "file over the size bound refused");
+
+            /* Bytes after an embedded NUL are not ignored: the file is refused. */
+            memcpy(doc, CANONICAL_FIXTURE, fixture_len);
+            doc[fixture_len] = '\0';
+            memcpy(doc + fixture_len + 1, "{garbage", 8);
+            n = -2;
+            if (write_scratch(path, doc, fixture_len + 9))
+                n = sr_parse_watchpoints_file(path, out, 16, errbuf, sizeof(errbuf));
+            CHECK(n == -1, "file with an embedded NUL refused");
+
+            remove(path);
+        }
     }
 
     if (g_failures == 0) {

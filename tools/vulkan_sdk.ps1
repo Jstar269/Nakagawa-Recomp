@@ -35,9 +35,14 @@ function Test-UsableVulkanSdk {
         (Join-Path $resolved "Include\vulkan\vulkan.h"),
         (Join-Path $resolved "include\vulkan\vulkan.h")
     )
+    # Keep both lists equal to HEADER_CANDIDATES and LIBRARY_CANDIDATES in
+    # tools/vulkan_sdk.py; tools/test_vulkan_sdk.py checks that they agree.
     $libraries = @(
         (Join-Path $resolved "Lib\vulkan-1.lib"),
-        (Join-Path $resolved "lib\vulkan-1.lib")
+        (Join-Path $resolved "lib\vulkan-1.lib"),
+        # The official MSYS2 UCRT64 loader package ships a GCC import archive.
+        (Join-Path $resolved "lib\libvulkan-1.dll.a"),
+        (Join-Path $resolved "Lib\libvulkan-1.dll.a")
     )
 
     $header = $headers | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
@@ -79,17 +84,29 @@ function Resolve-VulkanSdk {
     $versioned = @()
     if (Test-Path -LiteralPath $InstallRoot -PathType Container) {
         foreach ($directory in @(Get-ChildItem -LiteralPath $InstallRoot -Directory -ErrorAction SilentlyContinue)) {
-            $parsedVersion = $null
-            if ([version]::TryParse($directory.Name, [ref]$parsedVersion)) {
+            # The same filter as tools/vulkan_sdk.py: two or more dot-separated
+            # numbers, compared part by part as integers, where a longer name with
+            # an equal prefix is newer. Each part is zero-padded to one width so an
+            # ordinal string sort orders the names numerically.
+            if ($directory.Name -match '^\d+(\.\d+)+$') {
+                $parts = foreach ($part in $directory.Name.Split('.')) {
+                    $part.TrimStart('0').PadLeft(32, '0')
+                }
                 $versioned += [pscustomobject]@{
-                    Path    = $directory.FullName
-                    Version = $parsedVersion
+                    Path       = $directory.FullName
+                    VersionKey = ($parts -join '.')
                 }
             }
         }
     }
 
-    foreach ($candidate in ($versioned | Sort-Object Version -Descending)) {
+    $ordered = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in $versioned) { $ordered.Add($item) }
+    $ordered.Sort([System.Comparison[object]] {
+        param($left, $right)
+        [string]::CompareOrdinal($right.VersionKey, $left.VersionKey)
+    })
+    foreach ($candidate in $ordered) {
         if (Test-UsableVulkanSdk -Path $candidate.Path) {
             return (Resolve-Path -LiteralPath $candidate.Path -ErrorAction Stop).Path
         }

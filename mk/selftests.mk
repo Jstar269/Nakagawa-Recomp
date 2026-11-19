@@ -438,17 +438,17 @@ native-core-tests: ge-float24-selftest
 # SR_VRAMDUMP captures (#314): two captures are written next to the binary and removed.  Run
 # twice because ge.c latches the strip-cache switch per process, and a third time with the
 # per-draw vertex cache off for the scenes (its own case compares the cache on and off in
-# every run).  No game input.
+# every run).  The binary sets both switches from its arguments, so an SR_GE_*_DISABLE the
+# caller exported cannot turn a run into another leg.  No game input.
 GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftest$(EXE_EXT)
 
 ge-cpu-profile-validate-selftest: $(RT_GE_O)
-	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_CPU_PROFILE_VALIDATE_SELFTEST) \
 		tests/native/ge_cpu_profile_validate_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
 		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
-	SR_GE_VERTEX_CACHE_DISABLE=1 $(GE_CPU_PROFILE_VALIDATE_SELFTEST)
+	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --vertex-cache-disabled
 
 native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants
 
@@ -515,14 +515,15 @@ native-core-tests: ge-tnl-census-selftest
 # patches at every factor, and a crack the check finds when the two are drawn at different
 # factors; line and point patches keep the PSP's division; the vertex cap lowers the factor
 # along its divisor chain, after the PSP's own cap; with the GE timing model on, factor F costs
-# the clocks of division d*F, not the PSP's d; the PATCH_TESS: exit line. It writes one scratch file under
+# the clocks of division d*F, not the PSP's d; a draw whose buffers cannot be allocated (malloc is
+# wrapped so one chosen call fails) is counted and draws nothing; the PATCH_TESS: exit line. It writes one scratch file under
 # BUILD_ROOT. No game input.
 GE_PATCH_TESS_SELFTEST := $(BUILD_DIR)/ge_patch_tess_selftest$(EXE_EXT)
 
 ge-patch-tess-selftest: $(RT_GE_O)
 	$(CC) $(CFLAGS) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -o $(GE_PATCH_TESS_SELFTEST) \
 		tests/native/ge_patch_tess_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm -Wl,--wrap=malloc
 	$(GE_PATCH_TESS_SELFTEST)
 
 native-core-tests: ge-patch-tess-selftest
@@ -1353,10 +1354,12 @@ gpu-coherence-selftest-movie-mutant: shader-verify $(RT_GE_O)
 # ge.c's lists run on ge_gpu.c's real targets: each frame draws a target, stores into it
 # from the CPU, draws it as a texture into the shown target and presents that with a capture
 # armed. A run without the viewer writes the digest (every presented frame, the lists' return
-# codes, then guest VRAM and RAM as a guest read sees them and the GE state); runs with the
+# codes, then all of guest VRAM and RAM as a guest read sees them and the GE state); runs with the
 # viewer's decodes at one frame's VBLANK must match it, and the decodes must show the scene and
 # move bytes into guest VRAM, so the match is not trivial. Again at render scale 2. Last, a
-# mutant whose viewer stores one byte into guest VRAM must fail on the next presented frame.
+# mutant whose viewer stores one byte into guest VRAM must fail on the next presented frame, and
+# the same mutant storing past the depth buffer or into RAM no list uses must fail on the
+# end-of-run vram or ram line.
 # Exit 77 (no Vulkan device) fails the recipe, as gpu-coherence-selftest's does on hosted CI.
 VRAM_VIEW_BIN := $(BUILD_DIR)/vram_view_identity_selftest.exe
 
@@ -1383,6 +1386,16 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 	if ! grep -Fq 'FAIL want "present 2 ' $$log; then \
 		cat $$log; echo "vram-view-identity-selftest: the mutant failed for another reason" >&2; exit 1; fi; \
 	echo "vram-view-identity-selftest: the writing-viewer mutant is caught at the next presented frame"
+	@for spec in "0x041F0000 vram" "0x09000000 ram"; do \
+		set -- $$spec; log=$(BUILD_DIR)/vram_view_identity_mutant_$$2.log; \
+		if $(BUILD_DIR)/vram_view_identity_mutant.exe --check $(BUILD_DIR)/vram_view_ref_s1.txt --view-at 1 \
+			--mutant-store $$1 > $$log 2>&1; then \
+			cat $$log; echo "vram-view-identity-selftest: the mutant storing at $$1 passed" >&2; exit 1; fi; \
+		if ! grep -Fq "FAIL want \"$$2 " $$log; then \
+			cat $$log; echo "vram-view-identity-selftest: the mutant storing at $$1 failed for another reason" >&2; \
+			exit 1; fi; \
+		echo "vram-view-identity-selftest: a viewer store at $$1 no frame presents is caught on the $$2 line"; \
+	done
 
 # gpu-dst-read-mutants — the dst-read cells must kill each SR_GPU_DSTREAD_MUTANT in ge_gpu.c (#2109):
 # 1 merges every channel from the loaded destination, so the RMW store has no effect
@@ -1653,7 +1666,7 @@ native-core-tests: pipeline-cache-selftest
 texrepl-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/core -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS tests/native/texrepl_selftest.c src/rt/texrepl.c src/core/nk_zip.c src/core/nk_psp_inflate.c \
+		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS -DNK_TEXREPL_TEST_HOOKS tests/native/texrepl_selftest.c src/rt/texrepl.c src/core/nk_zip.c src/core/nk_psp_inflate.c \
 		src/core/nk_shared_helpers.c \
 		$(PLAYER_PLATFORM_SRC) $(PLAYER_PLATFORM_LIBS) \
 		-o $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) && $(BUILD_DIR)/texrepl_selftest$(EXE_EXT)
@@ -1667,7 +1680,7 @@ texrepl-mutant:
 	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	@$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/core -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS -DNK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR tests/native/texrepl_selftest.c src/rt/texrepl.c \
+		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS -DNK_TEXREPL_TEST_HOOKS -DNK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR tests/native/texrepl_selftest.c src/rt/texrepl.c \
 		src/core/nk_zip.c src/core/nk_psp_inflate.c src/core/nk_shared_helpers.c $(PLAYER_PLATFORM_SRC) \
 		$(PLAYER_PLATFORM_LIBS) -o $(BUILD_DIR)/texrepl_mutant$(EXE_EXT)
 	@rc=0; $(BUILD_DIR)/texrepl_mutant$(EXE_EXT) > $(BUILD_DIR)/texrepl_mutant.log 2>&1 || rc=$$?; \
@@ -2001,7 +2014,7 @@ ge-first-bad-draw-selftest: ge-replay
 # Requires g++ with C++17. Exit code 0 = all tests passed.
 selftest:
 	g++ -std=c++17 -O1 -Isrc/ref -Isrc/rt -o $(BUILD_DIR)/selftest.exe \
-		src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp \
+		src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp src/ref/snapshot_ref.cpp \
 		-DSR_SELFTEST_ONLY -fno-exceptions
 	$(BUILD_DIR)/selftest.exe
 	@echo "selftest passed"

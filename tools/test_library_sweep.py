@@ -614,7 +614,8 @@ class LibrarySweepTests(unittest.TestCase):
         self.assertEqual(row["build_diagnostic"], outcome.build_diagnostic)
         self.assertEqual(row["build_log_path"], outcome.build_log_path)
         self.assertNotIn("DIAGNOSTIC_PRIVATE_SENTINEL", public_text)
-        self.assertNotIn(str(work_dir), public_text)
+        for form in (str(work_dir), json.dumps(str(work_dir))[1:-1], work_dir.as_posix()):
+            self.assertNotIn(form, public_text)
 
     def test_prepare_import_module_layout_failure_keeps_diagnostic_only_in_private_report(self) -> None:
         work_dir = self.private_dir / "layout-failure-work"
@@ -677,7 +678,8 @@ class LibrarySweepTests(unittest.TestCase):
         row = private["rows"][0]
         self.assertEqual(row["module_layout_diagnostic"], outcome.module_layout_diagnostic)
         self.assertNotIn("DIAGNOSTIC_LAYOUT_SENTINEL", public_text)
-        self.assertNotIn(str(work_dir), public_text)
+        for form in (str(work_dir), json.dumps(str(work_dir))[1:-1], work_dir.as_posix()):
+            self.assertNotIn(form, public_text)
 
     def test_analysis_failure_keeps_first_diagnostic_only_in_private_report(self) -> None:
         iso = _write_iso(

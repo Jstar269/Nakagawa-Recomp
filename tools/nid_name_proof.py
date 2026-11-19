@@ -87,6 +87,7 @@ class Entry(NamedTuple):
     name: str
     classification: str
     rationale: str
+    detail: str | None = None
 
 
 def nid_of(name: str) -> int:
@@ -98,9 +99,17 @@ def parse_header(text: str) -> list[tuple[int, str]]:
     return [(int(m["nid"], 16), m["name"]) for m in ENTRY_RE.finditer(text)]
 
 
-def classify(nid: int, name: str, verified_names: set[str]) -> Entry:
-    if nid_of(name) == nid:
+def classify(nid: int, name: str, verified_names: set[str], *, is_verified: bool | None = None) -> Entry:
+    if is_verified if is_verified is not None else (nid_of(name) == nid):
         return Entry(nid, name, "verified", "nid == sha1(name)[0:4] little-endian")
+
+    if name.startswith("__") or f"{nid:08x}".startswith(SENTINEL_PREFIXES):
+        return Entry(
+            nid,
+            name,
+            "emulator-internal-sentinel",
+            "reserved identifier and/or sentinel-allocated NID; not digest-derived",
+        )
 
     placeholder = LIBRARY_PLACEHOLDER_RE.match(name)
     if placeholder and placeholder["hex"].lower() == f"{nid:08x}":
@@ -110,14 +119,7 @@ def classify(nid: int, name: str, verified_names: set[str]) -> Entry:
             "library-attributed-unknown-name",
             f"name encodes the NID itself; records library {placeholder['library']!r} "
             "but no export name",
-        )
-
-    if name.startswith("__") or f"{nid:08x}".startswith(SENTINEL_PREFIXES):
-        return Entry(
-            nid,
-            name,
-            "emulator-internal-sentinel",
-            "reserved identifier and/or sentinel-allocated NID; not digest-derived",
+            placeholder["library"],
         )
 
     composite = COMPOSITE_SUFFIX_RE.match(name)
@@ -128,6 +130,7 @@ def classify(nid: int, name: str, verified_names: set[str]) -> Entry:
             "editorial-alias",
             f"firmware-range suffix on {composite['base']!r}, which is itself "
             "present and verifiable in this table",
+            composite["base"],
         )
 
     return Entry(
@@ -142,7 +145,7 @@ def classify(nid: int, name: str, verified_names: set[str]) -> Entry:
 def classify_all(pairs: Iterable[tuple[int, str]]) -> list[Entry]:
     pairs = list(pairs)
     verified_names = {name for nid, name in pairs if nid_of(name) == nid}
-    return [classify(nid, name, verified_names) for nid, name in pairs]
+    return [classify(nid, name, verified_names, is_verified=(name in verified_names and nid_of(name) == nid)) for nid, name in pairs]
 
 
 def build_report(entries: list[Entry]) -> dict:
@@ -183,11 +186,10 @@ CORPUS_CLASSES = (
 def build_corpus(entries: list[Entry], pspsdk_names: set[str]) -> dict:
     """Project the classification into the generator's tracked input.
 
-    Sentinel entries are dropped (finding PROV-F5).  Every other entry is kept,
+    Sentinel entries are dropped.  Every other entry is kept,
     including the ones that fail the derivation rule: failing it means unproven,
     not wrong.
     """
-    verified_names = {e.name for e in entries if e.classification == "verified"}
     out: list[dict] = []
     for entry in entries:
         if entry.classification == "emulator-internal-sentinel":
@@ -207,14 +209,19 @@ def build_corpus(entries: list[Entry], pspsdk_names: set[str]) -> dict:
             "name": entry.name,
             "nid": f"0x{entry.nid:08x}",
         }
+        detail = entry.detail
         if record["class"] == "library-attributed":
-            match = LIBRARY_PLACEHOLDER_RE.match(entry.name)
-            if match:
-                record["library"] = match["library"]
+            if detail is None:
+                match = LIBRARY_PLACEHOLDER_RE.match(entry.name)
+                detail = match["library"] if match else None
+            if detail:
+                record["library"] = detail
         elif record["class"] == "editorial-alias":
-            composite = COMPOSITE_SUFFIX_RE.match(entry.name)
-            if composite and composite["base"] in verified_names:
-                record["alias_of"] = composite["base"]
+            if detail is None:
+                composite = COMPOSITE_SUFFIX_RE.match(entry.name)
+                detail = composite["base"] if composite else None
+            if detail:
+                record["alias_of"] = detail
         out.append(record)
 
     out.sort(key=lambda r: (CORPUS_CLASSES.index(r["class"]), r["name"]))
@@ -243,8 +250,8 @@ def build_corpus(entries: list[Entry], pspsdk_names: set[str]) -> dict:
                 "are reproducible with no PPSSPP input at all."
             ),
             "dropped": (
-                "Sentinel-shaped entries are excluded; see finding PROV-F5 in "
-                "the public provenance ledger and independence model."
+                "Sentinel-shaped entries are excluded; see the public provenance "
+                "ledger and independence model."
             ),
             "regeneration": (
                 "python tools/nid_name_proof.py --emit-corpus tools/nid_corpus.json "
@@ -252,7 +259,7 @@ def build_corpus(entries: list[Entry], pspsdk_names: set[str]) -> dict:
                 "identifier set of the pinned PSPSDK headers, obtained with: "
                 "grep -rhoE '[A-Za-z_][A-Za-z0-9_]{3,}' $PSPDEV/psp/sdk/include "
                 "| sort -u. Corpus -> header -> corpus is a verified fixed point. "
-                "Omitting --pspsdk-names reclassifies the 840 pspsdk-sourced "
+                f"Omitting --pspsdk-names reclassifies the {counts['pspsdk-sourced']} pspsdk-sourced "
                 "entries as hash-verified; it changes no NID and drops no entry."
             ),
         },
@@ -299,10 +306,16 @@ def main(argv: list[str]) -> int:
             encoding="utf-8",
             newline="\n",
         )
+        dropped = [e.name for e in entries if e.classification == "emulator-internal-sentinel"]
+        dropped_note = (
+            f", dropped {len(dropped)} sentinel(s): {', '.join(dropped)}"
+            if dropped else ", dropped 0 sentinels"
+        )
         print(
             f"nid_name_proof: wrote {args.emit_corpus} "
             f"({len(corpus['entries'])} entries, "
-            f"{sum(corpus['counts'][c] for c in DERIVABLE_CLASSES)} with derived NIDs)"
+            f"{sum(corpus['counts'][c] for c in DERIVABLE_CLASSES)} with derived NIDs"
+            f"{dropped_note})"
         )
         return 0
 

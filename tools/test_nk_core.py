@@ -1733,12 +1733,8 @@ int main(int argc, char **argv) {
         if not cls.gcc:
             return
         cls._class_temp = Path(tempfile.mkdtemp(prefix="nk_launch_parity_class_"))
+        cls.addClassCleanup(shutil.rmtree, cls._class_temp, ignore_errors=True)
         cls._harness = cls._compile_harness_class(cls._class_temp, cls.gcc)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        if hasattr(cls, "_class_temp"):
-            shutil.rmtree(cls._class_temp, ignore_errors=True)
 
     def setUp(self) -> None:
         if not self.gcc:

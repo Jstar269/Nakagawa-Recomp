@@ -10,11 +10,12 @@ The suite pins the claims the Python preparation route previously got wrong:
 
 * a ``claphanz_xb`` profile is never staged by Python: without the native
   player's staging transaction it is refused before any filesystem mutation,
-  and with it the disc is handed to that transaction, never promoted as READY
-  on the strength of a Python-side no-op;
-* hostile XB archive bytes -- truncated FST, unsafe member path, decode
-  failure -- and an XB-parser import failure cannot convert preparation into
-  success, and a previous install survives every failure untouched;
+  even when archive bytes (including truncated FST, unsafe member path, or
+  decode-failure payloads) are present on the disc, and with it the disc is
+  handed to that transaction, never promoted as READY on the strength of a
+  Python-side no-op;
+* the Python preparation route never imports ``xb_probe``, and a previous
+  install survives every refused or failed preparation untouched;
 * required-output completeness is checked before atomic promotion: a manifest
   that is not attributable to the selected disc, a staging write failure, or a
   promotion rename failure all fail the transaction with the previous install
@@ -210,7 +211,7 @@ class RouteBlockedTests(PreparationFailClosedCase):
     def test_hostile_xb_iso_fixtures_fail_closed_and_preserve_previous_install(
         self,
     ) -> None:
-        """Truncated FST, unsafe path, and decode-failure discs all refuse."""
+        """The Python route gate refuses before reading any appended XB payload."""
         for variant, payload in _hostile_xb_payloads().items():
             with self.subTest(variant=variant):
                 case_dir = self.temp_dir / variant
@@ -252,10 +253,22 @@ class RouteBlockedTests(PreparationFailClosedCase):
                 )
 
     def test_xb_probe_import_failure_cannot_become_success(self) -> None:
-        """No import problem may be converted to success, on either route."""
+        """Preparation does not import xb_probe, and an unimportable xb_probe cannot become success."""
+        saved_modules = {
+            name: mod
+            for name, mod in list(sys.modules.items())
+            if name == "xb_probe" or name.startswith("xb_probe.")
+        }
+        for name in saved_modules:
+            sys.modules.pop(name, None)
         blocker = _ImportBlocker("xb_probe")
         sys.meta_path.insert(0, blocker)
         try:
+            with self.assertRaises(ImportError):
+                __import__("xb_probe")
+            self.assertEqual(blocker.attempts, ["xb_probe"])
+            blocker.attempts.clear()
+
             claphanz_iso = self.temp_dir / "claphanz.iso"
             _create_mock_iso(claphanz_iso, disc_id=CLAPHANZ_ISO)
             blocked = self._engine(claphanz=True).prepare_game(
@@ -269,8 +282,10 @@ class RouteBlockedTests(PreparationFailClosedCase):
                 raw_iso,
                 destination_root=self.dest_root,
             )
+            self.assertEqual(blocker.attempts, [])
         finally:
             sys.meta_path.remove(blocker)
+            sys.modules.update(saved_modules)
 
         self.assertFalse(blocked.success)
         self.assertEqual(blocked.error_code, "PREPARATION_ROUTE_UNSUPPORTED")

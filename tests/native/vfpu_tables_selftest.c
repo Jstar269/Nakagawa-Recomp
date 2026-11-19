@@ -280,7 +280,10 @@ static void test_loader_rejects_corrupt_roots(void) {
     snprintf(g_root, sizeof g_root, SR_SELFTEST_BUILD_ROOT "/vfpu_selftest_tmp_%d", (int)SR_GETPID());
     wipe_tree(g_root);
     CHECK(setup_temp_root() == 0, "could not stage genuine tables into %s", g_root);
-    if (sr_rcp_lut != NULL) return;
+    if (sr_rcp_lut != NULL) {
+        wipe_tree(g_root); /* the staged copies go even on this already-failing path */
+        return;
+    }
 
     SrVfpuTables agg;
     memset(&agg, 0, sizeof agg);
@@ -440,6 +443,16 @@ static void test_loader_rejects_corrupt_roots(void) {
 
 /* ---- success path --------------------------------------------------------- */
 
+/* Whether all 15 published table pointers are set. */
+static int all_published(void) {
+    return sr_rcp_lut != NULL && sr_sqrt_lut != NULL && sr_rsqrt_lut != NULL &&
+           sr_sin_lut8192 != NULL && sr_sin_lut_delta != NULL &&
+           sr_sin_lut_interval_delta != NULL && sr_sin_lut_exceptions != NULL &&
+           sr_exp2_lut65536 != NULL && sr_exp2_lut != NULL && sr_log2_lut65536 != NULL &&
+           sr_log2_lut65536_quadratic != NULL && sr_log2_lut != NULL &&
+           sr_asin_lut65536 != NULL && sr_asin_lut_deltas != NULL && sr_asin_lut_indices != NULL;
+}
+
 static void test_pure_load_and_publish(void) {
     SrVfpuTables agg;
     memset(&agg, 0, sizeof agg);
@@ -465,8 +478,7 @@ static void test_pure_load_and_publish(void) {
           "genuine sin interval deltas violate the validator");
 
     sr_vfpu_tables_publish(&agg);
-    CHECK(sr_rcp_lut != NULL && sr_asin_lut_indices != NULL,
-          "publish must install the global pointers");
+    CHECK(all_published(), "publish must install every global pointer");
 }
 
 static void test_once_only_and_repeated_init(void) {
@@ -478,17 +490,34 @@ static void test_once_only_and_repeated_init(void) {
 }
 
 #if defined(SR_CONCURRENCY_AVAILABLE)
+/* The 15 published table pointers: the race below starts from all of them unset and checks
+ * each one, so a table a regressed load or publish leaves out cannot hide behind an earlier
+ * publish. */
+static void reset_published(void) {
+    sr_rcp_lut = NULL;
+    sr_sqrt_lut = NULL;
+    sr_rsqrt_lut = NULL;
+    sr_sin_lut8192 = NULL;
+    sr_sin_lut_delta = NULL;
+    sr_sin_lut_interval_delta = NULL;
+    sr_sin_lut_exceptions = NULL;
+    sr_exp2_lut65536 = NULL;
+    sr_exp2_lut = NULL;
+    sr_log2_lut65536 = NULL;
+    sr_log2_lut65536_quadratic = NULL;
+    sr_log2_lut = NULL;
+    sr_asin_lut65536 = NULL;
+    sr_asin_lut_deltas = NULL;
+    sr_asin_lut_indices = NULL;
+}
+
 static atomic_int g_thread_fail = 0;
 
 /* Both threads race the real first-use critical section and then check that
  * the published globals are complete and identical. */
 static void concurrent_worker(void) {
     sr_vfpu_load_with_root("assets/vfpu");
-    if (sr_rcp_lut == NULL || sr_asin_lut_indices == NULL ||
-        sr_sin_lut8192 == NULL || sr_sin_lut_interval_delta == NULL ||
-        sr_asin_lut_deltas == NULL || sr_asin_lut_indices == NULL) {
-        atomic_store(&g_thread_fail, 1);
-    }
+    if (!all_published()) atomic_store(&g_thread_fail, 1);
 }
 #if defined(SR_HAVE_THREADS)
 static int concurrent_loader_c11(void *unused) {
@@ -512,9 +541,7 @@ static void test_concurrent_first_use(void) {
     /* Reset the global pointers so the racing load is a genuine first use
      * (the load-state machine is still at 0 here: nothing has called
      * sr_vfpu_load_with_root yet). */
-    sr_rcp_lut = NULL;
-    sr_asin_lut_indices = NULL;
-    sr_sin_lut8192 = NULL;
+    reset_published();
     atomic_store(&g_thread_fail, 0);
 #if defined(SR_HAVE_THREADS)
     thrd_t a, b;
@@ -536,8 +563,7 @@ static void test_concurrent_first_use(void) {
 #endif
     CHECK(atomic_load(&g_thread_fail) == 0,
           "a concurrent loader observed null or partial globals");
-    CHECK(sr_rcp_lut != NULL && sr_asin_lut_indices != NULL,
-          "concurrent first use must publish complete globals");
+    CHECK(all_published(), "concurrent first use must publish complete globals");
 #endif
 }
 

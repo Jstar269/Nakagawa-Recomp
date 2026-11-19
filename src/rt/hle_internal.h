@@ -572,6 +572,7 @@ enum {
  * gamedata-install and game-sharing, which fail closed the same way. */
 typedef struct UtilityDialog {
     uint32_t param;
+    uint32_t param_size;      /* the block's size word as InitStart proved it */
     uint32_t result;
     uint32_t generation;
     int status;
@@ -773,14 +774,16 @@ typedef struct {
     size_t archive_mount;
     size_t archive_entry;
     const uint8_t *enhancement_data; /* rewritten bytes of an enhancement data file, or NULL */
-    char guest_path[256];        /* the path the guest opened it with ("" if too long) */
+    /* The path the guest opened it with. As large as the io_guest_path buffer sceIoOpen
+     * reads into, so the device rules (disc0: seek bounds, ms0: EINVAL and ioctl refusals)
+     * see every accepted path; "" only for a longer path from another caller. */
+    char guest_path[512];
 } Fd;
 
 typedef struct {
     int used;
-    int backend;                 /* 0 = ISO9660, 1 = merged host VFS namespace */
     uint32_t index;
-    SrVfsDirList list;           /* backend 1: fully materialized at Dopen */
+    SrVfsDirList list;           /* merged namespace, fully materialized at Dopen */
     char *path;
 } DirFd;
 
@@ -1154,6 +1157,10 @@ int guest_cstr(uint32_t addr, char *out, int max);
 uint32_t free_block(uint32_t uid);
 /* sceNet core library state (hle_network.c): reset at LoadExec and by the self-tests. */
 void hle_net_reset(void);
+/* sceReg handles (hle_system.c): closed at LoadExec; the registry stays. */
+void hle_sysreg_loadexec_reset(void);
+void sr_hle_umd_loadexec_reset(void);  /* LoadExec: drop the UMD callback, drive at entry state */
+void hle_font_loadexec_reset(void);    /* LoadExec: drop the old program's sceFont libraries and fonts */
 int sr_hle_test_net_inited(void);
 uint32_t sr_hle_test_net_pool_uid(void);
 extern FplPool s_fpls[FPL_MAX];
@@ -1448,6 +1455,7 @@ extern uint8_t s_ge_free_slots[GE_LIST_MAX];
 extern unsigned s_ge_free_head, s_ge_free_count;
 extern uint64_t s_ge_list_order;
 void ge_free_rebuild(void);
+unsigned ge_lists_reset(void);
 void ge_free_push(int slot);
 uint64_t ge_slot_bit(int slot);
 void ge_list_completed(int slot);

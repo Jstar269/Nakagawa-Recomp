@@ -955,7 +955,7 @@ class PackageCacheTests(unittest.TestCase):
                     manifest, manifest_path, executable_hash, None, None, public_safe=mode
                     , title_input_identity=identity
                 )
-            planner_key = title_codegen_plan._cache_key_for_build(
+            planner_key, _planner_options, _tool_digests = title_codegen_plan._cache_key_for_build(
                 input_hashes=input_hashes,
                 title_input_identity=identity,
                 plan=plan,

@@ -205,6 +205,18 @@ static void test_activity_make(void) {
     /* A title cut short upstream inside a character keeps everything before it. */
     assert(nk_discord_activity_make(&a, "Test Game \xE3\x81", "Enhanced", 5) &&
            strcmp(a.details, "Test Game") == 0);
+    /* Only a partial character at the end is dropped: an invalid byte near the end, with
+       valid bytes after it, leaves the title out rather than cut (audit 2026-11-17). */
+    assert(nk_discord_activity_make(&a, "Game \xFF" "1", "Enhanced", 5) && a.details[0] == '\0');
+    assert(nk_discord_activity_make(&a, "Game \x81" "12", "Enhanced", 5) &&
+           a.details[0] == '\0');
+    assert(nk_discord_activity_make(&a, "Game \xC3\x28", "Enhanced", 5) &&
+           a.details[0] == '\0');
+    /* A complete character at the end stays; a partial 4-byte character goes. */
+    assert(nk_discord_activity_make(&a, "Game \xF0\x9F\x8E\xBE", "Enhanced", 5) &&
+           strcmp(a.details, "Game \xF0\x9F\x8E\xBE") == 0);
+    assert(nk_discord_activity_make(&a, "Game \xF0\x9F\x8E", "Enhanced", 5) &&
+           strcmp(a.details, "Game") == 0);
     /* Nothing left to show. */
     assert(!nk_discord_activity_make(&a, "", NULL, 5));
     assert(!nk_discord_activity_make(&a, NULL, "", 5));
@@ -477,8 +489,11 @@ static void server_expect(HANDLE pipe, uint32_t opcode, const char *json) {
     unsigned char header[8];
     char payload[2048];
     server_read_exact(pipe, header, 8);
-    uint32_t op = (uint32_t)header[0] | ((uint32_t)header[1] << 8);
-    uint32_t len = (uint32_t)header[4] | ((uint32_t)header[5] << 8);
+    /* Both header fields are little-endian uint32: all four bytes count. */
+    uint32_t op = (uint32_t)header[0] | ((uint32_t)header[1] << 8) |
+                  ((uint32_t)header[2] << 16) | ((uint32_t)header[3] << 24);
+    uint32_t len = (uint32_t)header[4] | ((uint32_t)header[5] << 8) |
+                   ((uint32_t)header[6] << 16) | ((uint32_t)header[7] << 24);
     assert(op == opcode && len < sizeof(payload));
     server_read_exact(pipe, payload, len);
     payload[len] = '\0';

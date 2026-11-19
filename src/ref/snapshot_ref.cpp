@@ -19,7 +19,12 @@ struct NkRef {
 };
 
 extern "C" NkRef *nk_ref_create(void) {
-	return new (std::nothrow) NkRef();
+	NkRef *r = new (std::nothrow) NkRef();
+	if (r && !r->mem.ok()) {  // the 64 MiB RAM could not be allocated
+		delete r;
+		return nullptr;
+	}
+	return r;
 }
 
 extern "C" void nk_ref_destroy(NkRef *r) {
@@ -36,7 +41,12 @@ static void run_until(NkRef *r, void *cpu, uint32_t entry_pc, uint32_t return_pc
                       uint64_t max_steps, NkRefResult *out) {
 	ref::CpuState s;
 	std::memcpy(&s, cpu, sizeof s);
+	// A call starts at entry_pc outside a delay slot. The runtime's delay-slot fields mean
+	// something else (next_pc holds the branch PC there, src/rt/cpu_lle.c), so a state taken
+	// inside such a window must not make the reference jump to a stale next_pc.
 	s.pc = entry_pc;
+	s.next_pc = 0;
+	s.in_delay_slot = 0;
 	std::memset(out, 0, sizeof *out);
 	uint64_t executed = 0;
 	for (;;) {
@@ -50,8 +60,8 @@ static void run_until(NkRef *r, void *cpu, uint32_t entry_pc, uint32_t return_pc
 				break;
 			}
 			bool at_import = false;
-			for (uint32_t i = 0; i < import_count; i++)
-				if (import_stubs[i] == s.pc) at_import = true;
+			for (uint32_t i = 0; i < import_count && !at_import; i++)
+				at_import = import_stubs[i] == s.pc;
 			if (at_import) {
 				out->stop = NK_REF_IMPORT;
 				out->pc = s.pc;
