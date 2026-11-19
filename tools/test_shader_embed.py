@@ -164,7 +164,7 @@ class ShaderEmbedTests(unittest.TestCase):
         pinned_raw = recorded["compiler"]["version"].strip()
         pinned_summary = shader_embed.glslc_version_summary(pinned_raw)
         other_raw = "shaderc 2023.8-1build1\nspirv-tools 2023.6~rc1-2\nglslang 14.0.0-2\n\nTarget: SPIR-V 1.0"
-        embedded_by_source = {
+        embedded_by_source: dict[Path, bytes] = {
             (shader_embed.UI_DIR / src).resolve(): shader_embed.parse_embedding(
                 (shader_embed.UI_DIR / emb).read_text(encoding="ascii")
             )

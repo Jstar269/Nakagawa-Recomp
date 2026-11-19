@@ -614,8 +614,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"shader verification failed: {error}", file=sys.stderr)
         return 1
     if skipped:
-        # Exit 77, the selftests' SKIP: reproduction was asked for and did not happen, so a caller
-        # that needs it fails, and make reports the SKIP.
+        # Exit 77, the selftests' SKIP status: reproduction was asked for and did not happen, so
+        # a caller that needs it (make shader-repro-verify) stops on this status with the reason
+        # printed; it is never reported as verified.
         print(f"{args.shader_set} shader provenance verified; SKIP byte reproduction: {skipped}")
         return 77
     suffix = " plus byte-for-byte compiler reproduction" if args.recompile else ""
