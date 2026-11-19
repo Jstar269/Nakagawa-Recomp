@@ -13,6 +13,8 @@ regenerating the controls from the private trusted ledger.
 from __future__ import annotations
 
 import ast
+from contextlib import redirect_stdout
+import io
 import os
 from pathlib import Path
 import re
@@ -55,6 +57,51 @@ class TestRouting(unittest.TestCase):
     def test_a_tool_with_a_companion_test_runs_that_test(self) -> None:
         modules = contrib_check.python_test_modules(["tools/policy_sync.py"])
         self.assertIn("tools.test_publication_policy_gate", modules)
+
+    def test_a_deleted_file_is_not_handed_to_a_gate_that_opens_it(self) -> None:
+        """Failing-before: a file the branch deleted went to ruff (E902), unittest (an import error) and
+        markdownlint, so a valid deletion failed contrib-check."""
+        deleted = ["docs/no_such_page.md", "tools/no_such_tool.py", "tools/test_no_such_tool.py"]
+        gate = contrib_check.Gate("x", contrib_check.NOT_RUN)
+        with mock.patch.object(contrib_check, "changed_paths", return_value=deleted), \
+                mock.patch.object(contrib_check, "ruff_gate", return_value=gate) as ruff, \
+                mock.patch.object(contrib_check, "unit_gate", return_value=gate) as unit, \
+                mock.patch.object(contrib_check, "markdown_gate", return_value=gate) as markdown, \
+                mock.patch.object(contrib_check, "c_gate", return_value=gate), \
+                mock.patch.object(contrib_check, "docs_gate", return_value=gate) as docs, \
+                mock.patch.object(contrib_check, "purity_gate", return_value=gate), \
+                mock.patch.object(contrib_check, "publication_gate", return_value=(gate, gate)), \
+                mock.patch("sys.stdout"):
+            contrib_check.run("origin/main")
+        ruff.assert_called_once_with([])
+        unit.assert_called_once_with([])
+        markdown.assert_called_once_with([])
+        # The deletion still routes: the documentation check runs over what remains.
+        docs.assert_called_once_with(deleted)
+
+    def test_a_module_whose_test_has_another_name_selects_that_test(self) -> None:
+        """Failing-before: routing went by basename only, so these selected no test module."""
+        for path, module in (
+            ("tools/nk_core/disc_expand_tool.py", "tools.test_disc_expand"),
+            ("tests/fixtures/cosim/mutate.py", "tools.test_cosim_mutation_gate_outcome"),
+        ):
+            with self.subTest(path=path):
+                self.assertTrue((ROOT / path).is_file())
+                self.assertTrue((ROOT / (module.replace(".", "/") + ".py")).is_file())
+                self.assertIn(module, contrib_check.python_test_modules([path]))
+
+    def test_an_unknown_base_is_the_named_stop_not_a_traceback(self) -> None:
+        """Failing-before: `git merge-base` exiting non-zero raised CalledProcessError."""
+        with self.assertRaises(SystemExit) as raised:
+            contrib_check.changed_paths("refs/heads/contrib-check-no-such-base")
+        self.assertIn("cannot resolve a merge base with refs/heads/contrib-check-no-such-base",
+                      str(raised.exception))
+
+    def test_a_base_with_no_common_ancestor_is_the_named_stop(self) -> None:
+        with mock.patch.object(contrib_check, "_git", return_value=_Completed(1)):
+            with self.assertRaises(SystemExit) as raised:
+                contrib_check.changed_paths("unrelated")
+        self.assertIn("no common ancestor", str(raised.exception))
 
     def test_documentation_and_build_files_select_no_python_module(self) -> None:
         self.assertEqual(
@@ -326,6 +373,32 @@ class TestSourceFileTestSelection(unittest.TestCase):
 
 
 class TestGateStatusVocabulary(unittest.TestCase):
+    def test_a_header_only_native_change_names_the_hosted_build(self) -> None:
+        """The hosted classifier routes a header to native_runtime; the local NOT_RUN says so."""
+        gate = contrib_check.c_gate(["src/core/nk_example.h"])
+        self.assertEqual(gate.status, contrib_check.NOT_RUN)
+        self.assertIn("native_runtime", gate.detail)
+        self.assertIn("hosted CI", gate.detail)
+
+    def test_a_changed_header_is_named_unchecked_and_ok_says_so(self) -> None:
+        """Failing-before: a header-only change printed a bare NOT_RUN and `contrib-check: OK`."""
+        header = "src/rt/recomp.h"
+        self.assertTrue((ROOT / header).is_file())
+        gate = contrib_check.c_gate([header])
+        self.assertEqual(gate.status, contrib_check.NOT_RUN)
+        self.assertTrue(gate.unchecked)
+        self.assertIn(f"changed header(s) not compiled: {header}", gate.detail)
+        out = io.StringIO()
+        with mock.patch.object(contrib_check, "run", return_value=[gate]), redirect_stdout(out):
+            self.assertEqual(contrib_check.main([]), 0)
+        self.assertIn("NOT CHECKED here, although the change touches it: strict-c-compile", out.getvalue())
+        # A surface the change does not touch is NOT_RUN without that line.
+        out = io.StringIO()
+        with mock.patch.object(contrib_check, "run", return_value=[contrib_check.c_gate(["docs/a.md"])]), \
+                redirect_stdout(out):
+            contrib_check.main([])
+        self.assertNotIn("NOT CHECKED", out.getvalue())
+
     def test_an_untouched_surface_is_not_run_not_pass(self) -> None:
         self.assertEqual(contrib_check.c_gate(["docs/a.md"]).status, contrib_check.NOT_RUN)
         self.assertEqual(contrib_check.markdown_gate(["tools/a.py"]).status, contrib_check.NOT_RUN)
@@ -773,6 +846,23 @@ class TestStrictCompileUnavailableInputs(unittest.TestCase):
                 self.assertEqual(gate.status, contrib_check.FAIL)
                 self.assertIn("unknown type name", gate.detail)
 
+    def test_a_real_error_far_above_a_missing_sdk_header_still_fails(self) -> None:
+        """Failing-before: the SDK classification read only the six lines shown in the detail, so an error with
+        its source and caret lines above the missing header's block was classified as a missing SDK (SKIP)."""
+        source = "tests/fixtures/psp_oracle/probe_ge_sample.c"
+        gate = self._gate_for_output(
+            source,
+            "In file included from tests/fixtures/psp_oracle/probe_ge_sample.c:1:\n"
+            "tests/fixtures/psp_oracle/h.h:1:1: error: unknown type name 'foo_t'\n"
+            "    1 | foo_t x;\n"
+            "      | ^~~~~\n"
+            f"{source}:2:10: fatal error: vulkan/vulkan.h: No such file or directory\n"
+            "    2 | #include <vulkan/vulkan.h>\n"
+            "      |          ^~~~~~~~~~~~~~~~~\n"
+            "compilation terminated.",
+        )
+        self.assertEqual(gate.status, contrib_check.FAIL, gate.detail)
+
     def test_a_discovered_vulkan_sdk_is_on_the_include_path(self) -> None:
         sdk = Path(tempfile.gettempdir()) / "VulkanSDK" / "1.4.0"
         with mock.patch.object(contrib_check, "discover_vulkan_sdk", return_value=sdk):
@@ -830,7 +920,31 @@ class TestStrictCompileOnUnchangedMain(unittest.TestCase):
         for source in self.SOURCES:
             with self.subTest(source=source):
                 gate = contrib_check.c_gate([source])
-                self.assertNotEqual(gate.status, contrib_check.FAIL, gate.detail)
+                if gate.status in (contrib_check.SKIP, contrib_check.NOT_RUN):
+                    # Not compiled here: a skipped subtest, never a pass (AGENTS.md section 9).
+                    self.skipTest(f"{gate.status}: {gate.detail}")
+                self.assertEqual(gate.status, contrib_check.PASS, gate.detail)
+
+    def test_an_uncompiled_source_is_reported_skipped_not_passed(self) -> None:
+        """Failing-before: the test asserted only `!= FAIL`, so a source the gate never compiled
+        (an absent SDK or generated header) counted as a pass."""
+        for status in (contrib_check.SKIP, contrib_check.NOT_RUN):
+            with self.subTest(status=status):
+                inner = TestStrictCompileOnUnchangedMain("test_no_unchanged_source_fails_the_strict_compile")
+                result = unittest.TestResult()
+                with mock.patch.object(contrib_check, "find_tool", return_value="gcc"), \
+                        mock.patch.object(contrib_check, "c_gate",
+                                          return_value=contrib_check.Gate("C", status, "not compiled")):
+                    inner.run(result)
+                self.assertEqual(len(result.skipped), len(self.SOURCES), result.skipped)
+                self.assertEqual(result.failures + result.errors, [])
+        inner = TestStrictCompileOnUnchangedMain("test_no_unchanged_source_fails_the_strict_compile")
+        result = unittest.TestResult()
+        with mock.patch.object(contrib_check, "find_tool", return_value="gcc"), \
+                mock.patch.object(contrib_check, "c_gate",
+                                  return_value=contrib_check.Gate("C", "BLOCKED", "odd")):
+            inner.run(result)
+        self.assertEqual(len(result.failures), len(self.SOURCES))
 
 
 class TestPublicationGateSplit(unittest.TestCase):
@@ -865,6 +979,22 @@ class TestPublicationGateSplit(unittest.TestCase):
     def test_a_clean_audit_passes(self) -> None:
         _policy, audit = self._run("publication audit: OK\n", audit_returncode=0)
         self.assertEqual(audit.status, contrib_check.PASS)
+
+    def test_the_stale_control_hint_does_not_turn_maintainer_side_into_a_failure(self) -> None:
+        """publish_audit prints its regen hint after a stale-control finding; the hint is not a finding."""
+        import publish_audit
+
+        _policy, audit = self._run(f"{MAINTAINER_LINE}\n{SUMMARY_LINE}\n{publish_audit.STALE_CONTROL_FIX}\n")
+        self.assertEqual(audit.status, contrib_check.MAINTAINER_SIDE, audit.detail)
+
+    def test_an_audit_without_a_complete_verdict_fails_rather_than_passes(self) -> None:
+        """A killed, crashed or silent audit with no finding line never reports a pass."""
+        for stdout, returncode in (("", 1), ("", -9), ("MemoryError\n", 1), ("", 0),
+                                   ("publication audit: FAIL (0 findings)\n", 1)):
+            with self.subTest(stdout=stdout, returncode=returncode):
+                _policy, audit = self._run(stdout, audit_returncode=returncode)
+                self.assertEqual(audit.status, contrib_check.FAIL)
+                self.assertIn(f"exited {returncode}", audit.detail)
 
     def test_policy_drift_fails_before_the_audit_runs(self) -> None:
         def fake_run(command, **kwargs):

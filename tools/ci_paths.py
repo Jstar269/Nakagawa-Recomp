@@ -235,23 +235,6 @@ def _is_public_surface(path: str) -> bool:
         return True
 
 
-def _is_policy_included(path: str) -> bool:
-    """True when the publication policy explicitly includes this path.
-
-    Fails closed (returns False) when the policy is unreadable or raises an error,
-    so an unreadable policy forces full validation via unknown paths rather than
-    silently classifying everything as recognized.
-    """
-    policy = _public_policy()
-    if policy is None:
-        return False
-    try:
-        returned: bool = policy.resolve(path).disposition == "included"
-        return returned
-    except Exception:
-        return False
-
-
 def _is_manager(path: str) -> bool:
     return PurePosixPath(path).suffix.lower() in {".ps1", ".psm1"}
 
@@ -593,7 +576,65 @@ def _is_native_tool(path: str) -> bool:
         "verify_gates",
         "vfpu_",
     )
-    return name.startswith(prefixes) or name.endswith("_c.py")
+    if name.startswith(prefixes) or name.endswith("_c.py"):
+        return True
+    closure = _codegen_import_closure()
+    if closure is None:
+        return True
+    return logical_path in closure or any(
+        logical_path.startswith(entry) for entry in closure if entry.endswith("/")
+    )
+
+
+#: The code generator and the analyzer: every tools module they import, directly or not,
+#: shapes the generated C, so editing it must run the native and Windows gates.
+_CODEGEN_ROOTS = ("codegen", "analyze", "imports")
+
+
+def _tools_module_path(name: str) -> str | None:
+    """``tools/<name>.py``, or ``tools/<name>/`` for a package, when it exists in this tree."""
+
+    if (ROOT / "tools" / f"{name}.py").is_file():
+        return f"tools/{name}.py"
+    if (ROOT / "tools" / name / "__init__.py").is_file():
+        return f"tools/{name}/"
+    return None
+
+
+@lru_cache(maxsize=1)
+def _codegen_import_closure() -> frozenset[str] | None:
+    """The tools modules the code generator and the analyzer load, or None when unreadable.
+
+    Read from the imports themselves, so a new helper module (``entry_frame_balance``,
+    ``elf_bounds``) routes the native gates without a name prefix being added here. A
+    package is named by its folder (``tools/<name>/``). None makes every tools module a
+    native tool.
+    """
+
+    found: set[str] = set()
+    pending = [path for path in (_tools_module_path(name) for name in _CODEGEN_ROOTS) if path]
+    try:
+        while pending:
+            path = pending.pop()
+            if path in found:
+                continue
+            found.add(path)
+            source = ROOT / (path + "__init__.py" if path.endswith("/") else path)
+            tree = ast.parse(source.read_text(encoding="utf-8"), filename=path)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    names = [node.module]
+                else:
+                    continue
+                for module in names:
+                    target = _tools_module_path(module.split(".", 1)[0])
+                    if target is not None and target not in found:
+                        pending.append(target)
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        return None
+    return frozenset(found)
 
 
 def _logical_tool_path(path: str) -> str | None:
@@ -647,6 +688,63 @@ def _is_python_tool(path: str) -> bool:
             "tools/README.md",
         }
     )
+
+
+#: Python sources whose text can pin a documentation file: every module under tools/, since
+#: a test reads a document directly (``ROOT / "docs" / "SETUP.md"``) or runs a tool that does.
+#: This classifier and its own test are left out: they name documentation paths only as
+#: routing fixtures.
+_DOCS_READER_GLOB = "tools/**/*.py"
+_DOCS_READER_EXCLUDED = frozenset({"tools/ci_paths.py", "tools/test_ci_paths.py"})
+_NAME_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+
+@lru_cache(maxsize=1)
+def _docs_reader_sources() -> str | None:
+    """Text of every tools Python module that can read a document, or None when unreadable."""
+
+    chunks: list[str] = []
+    try:
+        for path in sorted(ROOT.glob(_DOCS_READER_GLOB)):
+            if path.relative_to(ROOT).as_posix() in _DOCS_READER_EXCLUDED or not path.is_file():
+                continue
+            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    return "\n".join(chunks)
+
+
+def _names_file(text: str, name: str) -> bool:
+    """Whether ``text`` names the file ``name`` whole (``CI.md`` is not in ``PUBLIC_CI.md``)."""
+
+    start = text.find(name)
+    while start != -1:
+        before = text[start - 1] if start else ""
+        end = start + len(name)
+        after = text[end] if end < len(text) else ""
+        if before not in _NAME_CHARACTERS and before != "." and after not in _NAME_CHARACTERS:
+            return True
+        start = text.find(name, start + 1)
+    return False
+
+
+@lru_cache(maxsize=256)
+def _is_test_read_doc(path: str) -> bool:
+    """True for a documentation path whose file name a tools Python module names.
+
+    Such a document can be the subject of a Python test (``test_prereq_fetcher`` pins every
+    allowlisted host in docs/SETUP.md), so an edit to it alone must run the Python suite:
+    routed to the docs gate only, the hosted ``python_tests`` job was skipped for exactly the
+    edit that breaks the test, and main stayed red until the nightly run. The match is on the
+    file name, so it errs toward running the suite. A document no module names keeps the
+    cheap docs-only route; one a tool reaches only through a glob (``docs/*.md``) is not seen
+    here. An unreadable tools tree counts as naming every document.
+    """
+
+    sources = _docs_reader_sources()
+    if sources is None:
+        return True
+    return _names_file(sources, PurePosixPath(_normalise(path)).name)
 
 
 #: Files whose text decides which Python test modules the native and Windows gates run.
@@ -818,6 +916,17 @@ def _is_plain_path(path: str) -> bool:
         and path == path.strip()
         and not any(ord(char) < 0x20 or ord(char) == 0x7F or char in QUOTING_CHARACTERS for char in path)
     )
+
+
+def _printable_paths(paths: Iterable[str]) -> str:
+    """The sorted names joined for the job log, each one that is not plain JSON-quoted.
+
+    ``git diff -z`` keeps a newline or carriage return in a name. Printed raw, a line of
+    such a name that starts with ``::`` is a workflow command in the job that prints it
+    (the trusted CodeQL scope job included), so no raw control character reaches stdout.
+    """
+
+    return ",".join(path if _is_plain_path(path) else json.dumps(path) for path in sorted(paths))
 
 
 def codeql_scope_from_git(base: str, head: str, cwd: Path | None = None) -> list[str]:
@@ -1495,16 +1604,21 @@ def _is_makefile_source(path: str) -> bool:
     return path == "Makefile" or (path.startswith("mk/") and path.endswith(".mk"))
 
 
-def _makefile_text_at(revision: str, path: str = "Makefile", seen: tuple[str, ...] = ()) -> str:
+def _makefile_text_at(
+    revision: str, path: str = "Makefile", seen: tuple[str, ...] = (), inlined: set[str] | None = None,
+) -> str:
     """The Makefile at ``revision`` with each literal ``include mk/<name>.mk`` inlined.
 
     The root Makefile includes its fragments where their text used to be, so the
     inlined text is the single text GNU Make evaluates.  A fragment that is missing
-    at the revision raises, and the caller keeps the full routing.
+    at the revision raises, and the caller keeps the full routing.  ``inlined``, when
+    given, collects every file whose text was read, the root Makefile included.
     """
 
     if path in seen:
         raise ValueError(f"include cycle through {path}")
+    if inlined is not None:
+        inlined.add(path)
     result = subprocess.run(
         ["git", "show", f"{revision}:{path}"],
         cwd=ROOT,
@@ -1515,30 +1629,40 @@ def _makefile_text_at(revision: str, path: str = "Makefile", seen: tuple[str, ..
     for line in result.stdout.decode("utf-8").split("\n"):
         match = _MAKEFILE_INCLUDE_RE.match(line)
         if match is not None:
-            lines.append(_makefile_text_at(revision, match.group(1), seen + (path,)).rstrip("\n"))
+            lines.append(_makefile_text_at(revision, match.group(1), seen + (path,), inlined).rstrip("\n"))
         else:
             lines.append(line)
     return "\n".join(lines)
 
 
-def _makefile_revisions(left: str, right: str) -> tuple[str, str] | None:
+def _makefile_revisions(left: str, right: str, changed: Iterable[str] = ()) -> tuple[str, str] | None:
     texts: list[str] = []
+    fragments = {path for path in (_normalise(item) for item in changed)
+                 if _is_makefile_source(path) and path != "Makefile"}
     for revision in (left, right):
+        inlined: set[str] = set()
         try:
-            texts.append(_makefile_text_at(revision))
+            texts.append(_makefile_text_at(revision, inlined=inlined))
         except (OSError, ValueError, subprocess.CalledProcessError, UnicodeDecodeError):
+            return None
+        # A changed fragment the Makefile does not inline at this revision (pulled in by
+        # ``-include``, by an include with a comment or a variable, or by nothing) is
+        # invisible in the inlined text, so equal texts would prove nothing about it.
+        if not fragments <= inlined:
             return None
     return texts[0], texts[1]
 
 
-def makefile_change_from_git(left: str, right: str) -> tuple[str, ...] | None:
+def makefile_change_from_git(left: str, right: str, changed: Iterable[str] = ()) -> tuple[str, ...] | None:
     """Return ``makefile_recipe_only_targets`` for the Makefile between two revisions.
 
     None when either revision lacks a readable Makefile, so an added, deleted or
-    unreadable Makefile keeps the full build-system routing.
+    unreadable Makefile keeps the full build-system routing. ``changed`` is the
+    change's paths: a changed ``mk/*.mk`` fragment that is not inlined into the
+    Makefile at both revisions makes it None too.
     """
 
-    revisions = _makefile_revisions(left, right)
+    revisions = _makefile_revisions(left, right, changed)
     if revisions is None:
         return None
     return makefile_recipe_only_targets(*revisions)
@@ -1616,17 +1740,29 @@ def classify(
     # so a local readiness check can route the same decision, where no ungated
     # equivalent runs.
     #
+    # A document a tools module names can be the subject of a Python test, so it routes
+    # the whole suite too (``_is_test_read_doc``); ``docs_only`` keeps saying what the
+    # paths are, as it does for tools/README.md.
+    test_read_docs = not force_full and any(
+        _is_docs(path) and _is_test_read_doc(path) for path in files
+    )
     # A generator's output (docs/HLE_COVERAGE.md, for one) is checked for freshness only by
     # the quick checks of a light run and by the Python tooling job of a full one, so a
     # change to one routes that job even when every path is documentation.
     regenerated_output = any(_is_regenerated_output(path) for path in files)
     python_full = (
-        python_tools or native_without_recipe or workflow_ci or security_publication or regenerated_output
+        python_tools
+        or native_without_recipe
+        or workflow_ci
+        or security_publication
+        or test_read_docs
+        or regenerated_output
     )
     run_python = python_full or makefile_recipe_only
     # #702: when the recipe-only Makefile edit is the only reason to run Python, run
-    # just the modules that can observe it, on fewer runners. Anything else that
-    # routes Python restores the complete suite.
+    # just the modules that can observe it, on the same four shards
+    # (``PYTHON_SHARDS_MAKEFILE``). Anything else that routes Python restores the
+    # complete suite.
     python_scope = "all" if python_full or not makefile_recipe_only else "makefile"
     python_num_shards = PYTHON_SHARDS_FULL if python_scope == "all" else PYTHON_SHARDS_MAKEFILE
     run_windows = run_native
@@ -1746,7 +1882,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         scan = codeql_scan_needed(changed)
         _write_outputs({"scan": str(scan).lower()}, args.github_output)
         print(f"changed_files={len(changed)}")
-        print("changed_paths=" + ",".join(sorted(changed)))
+        print("changed_paths=" + _printable_paths(changed))
         print(f"scan={str(scan).lower()}")
         return 0
 
@@ -1772,7 +1908,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.files is None and any(_is_makefile_source(_normalise(path)) for path in paths):
         endpoints = _diff_endpoints(args.event_name, event)
         if endpoints is not None:
-            makefile_change = makefile_change_from_git(*endpoints)
+            makefile_change = makefile_change_from_git(*endpoints, paths)
     tier, label_note = run_tier(args.event_name, event)
     outputs = classify(
         paths,
@@ -1787,7 +1923,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"event={args.event_name}")
     print(f"changed_files={len(paths)}")
     if paths:
-        print("changed_paths=" + ",".join(sorted(paths)))
+        print("changed_paths=" + _printable_paths(paths))
     if makefile_change is not None:
         print("makefile_recipe_targets=" + ",".join(makefile_change))
     if label_note:

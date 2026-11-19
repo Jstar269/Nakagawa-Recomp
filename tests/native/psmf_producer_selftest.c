@@ -234,8 +234,11 @@ static const uint8_t k_picture3_body[2] = {0x33, 0x33};
 static const uint8_t k_aud[4] = {0, 0, 1, 0x09};
 static const uint8_t k_sps[6] = {0, 0, 1, 0x67, 0x4d, 0x40};
 
+/* Bytes of the incomplete third ATRAC frame that ends the fixture's audio stream. */
+#define FIXTURE_AUDIO_TAIL 20u
+
 /* Build a 4-picture annex-B stream split over three video PES packets, plus two
- * ATRAC frames spread over two audio PES packets. */
+ * ATRAC frames and a truncated third one spread over two audio PES packets. */
 static uint8_t *fixture(uint32_t *size_out, int variant) {
     Buf b;
     b.cap = variant == 7 ? 131072u : 65536u;
@@ -310,6 +313,10 @@ static uint8_t *fixture(uint32_t *size_out, int variant) {
     Buf aes = { abuf, 0, sizeof(abuf), 0 };
     audio_frame(&aes, 0x28, 6, 0xa5);      /* 64 bytes total */
     audio_frame(&aes, 0x28, 7, 0x5a);      /* 72 bytes total */
+    /* The truncated tail: a frame header that declares 64 bytes, then only 12 of its 56
+     * data bytes before the stream ends (FIXTURE_AUDIO_TAIL bytes in all). */
+    raw(&aes, (const uint8_t[]){0x0f, 0xd0, 0x28, 6, 0, 0, 0, 0}, 8);
+    bytes(&aes, 0xc3, FIXTURE_AUDIO_TAIL - 8u);
     CHECK(!aes.overflow, "fixture audio ES fits its buffer");
 
     add_pack(&b);
@@ -494,6 +501,9 @@ static void test_access_unit_formation(void) {
     CHECK(au.data && au.data[8] == 0x5a, "straddling frame body survives the PES cut");
     sr_psmf_au_release(&au);
     CHECK(sr_psmf_producer_pop(p, SR_PSMF_AU_AUDIO, &au) == 0, "truncated trailing frame is not emitted");
+    SrPsmfProducerStats tail; sr_psmf_producer_stats(p, &tail);
+    CHECK(tail.audio_aus == 2 && tail.audio_buffered == FIXTURE_AUDIO_TAIL,
+          "the truncated trailing frame stays buffered, never formed into an access unit");
     /* Picture 2's starting packet has no PTS, picture 3's delimiter begins in that same
      * packet, and the second ATRAC frame starts in the PTS-less audio packet. */
     CHECK(st.aus_without_pts == 3, "PTS-less access units are counted, not invented");
@@ -731,6 +741,107 @@ static void test_streaming_demux_cursor_progress_without_access_units(void) {
     free(bytes);
 }
 
+/* Feed one raw program stream (no PSMF header) to a streaming audio-only demux, cut
+ * at each offset in `cuts` and pumped after each piece, and count the ATRAC frames it
+ * emits. */
+static uint32_t stream_audio_frames(const uint8_t *ps, uint32_t len, const uint32_t *cuts,
+                                    int ncuts, uint32_t sizes[], int max, int *failed) {
+    SrPsmfProducer *p = sr_psmf_producer_open_stream(0);
+    CHECK(p != NULL, "audio resync stream producer opens");
+    if (!p) { *failed = 1; return 0; }
+    CHECK(sr_psmf_producer_select_streams(p, SR_PSMF_STREAM_NONE, 0) &&
+          sr_psmf_producer_select_audio_substream(p, 0),
+          "audio resync stream selects ATRAC sub-stream 0 only");
+    uint32_t fed = 0;
+    int count = 0;
+    for (int i = 0; i <= ncuts; i++) {
+        uint32_t end = i < ncuts ? cuts[i] : len;
+        CHECK(sr_psmf_producer_feed_stream(p, ps + fed, end - fed, i == ncuts) == 0,
+              "audio resync stream input is accepted");
+        fed = end;
+        sr_psmf_producer_pump(p, 64);
+        SrPsmfAu au;
+        while (sr_psmf_producer_pop(p, SR_PSMF_AU_AUDIO, &au)) {
+            if (count < max) sizes[count] = au.size;
+            count++;
+            sr_psmf_au_release(&au);
+        }
+    }
+    *failed = sr_psmf_producer_failed(p);
+    sr_psmf_producer_close(p);
+    return (uint32_t)count;
+}
+
+/* After stray bytes the audio demux resyncs on the next 0F D0 header.  A header whose
+ * first bytes end one PES payload and whose rest starts the next must stay buffered
+ * rather than be skipped with the stray bytes, and a 0F D0 pair inside the stray bytes
+ * whose size field is outside the accepted frame range is not a header to fail on. */
+static void test_audio_resync_keeps_split_header_and_skips_false_sync(void) {
+    uint8_t es_a[16], frame[32 + 48];
+    Buf f = {frame, 0, sizeof(frame), 0};
+    audio_frame(&f, 0x00, 0x02, 0x77);   /* 32-byte frame */
+    audio_frame(&f, 0x00, 0x04, 0x66);   /* 48-byte frame */
+    CHECK(!f.overflow && f.at == 80u, "two resync frames are built");
+
+    /* Split header: five stray bytes, then the first four header bytes end payload A. */
+    uint8_t ps[512];
+    Buf b = {ps, 0, sizeof(ps), 0};
+    memset(es_a, 0x55, 5);
+    memcpy(es_a + 5, frame, 4);
+    add_audio_pes(&b, 1, 9000, es_a, 9);
+    uint32_t cut = b.at;
+    add_audio_pes(&b, 0, 0, frame + 4, 76);
+    CHECK(!b.overflow, "split-header program stream is built");
+    uint32_t sizes[4] = {0};
+    int failed = 0;
+    uint32_t n = stream_audio_frames(ps, b.at, &cut, 1, sizes, 4, &failed);
+    CHECK(!failed, "a header split across PES payloads after stray bytes does not fail the stream");
+    CHECK(n == 2u && sizes[0] == 32u && sizes[1] == 48u,
+          "a header split across PES payloads after stray bytes is kept, not skipped");
+
+    /* False sync: stray bytes carry 0F D0 03 FF (a 0x2008-byte size, above the parser's
+     * frame bound) before the real header. */
+    static const uint8_t false_sync[8] = {0x55, 0x0f, 0xd0, 0x03, 0xff, 0x55, 0x55, 0x55};
+    uint8_t es_c[8 + 80];
+    memcpy(es_c, false_sync, 8);
+    memcpy(es_c + 8, frame, 80);
+    b.at = 0;
+    add_audio_pes(&b, 1, 9000, es_c, sizeof(es_c));
+    CHECK(!b.overflow, "false-sync program stream is built");
+    memset(sizes, 0, sizeof(sizes));
+    n = stream_audio_frames(ps, b.at, NULL, 0, sizes, 4, &failed);
+    CHECK(!failed, "a false 0F D0 pair inside resync bytes does not fail the stream");
+    CHECK(n == 2u && sizes[0] == 32u && sizes[1] == 48u,
+          "the resync scan passes a false 0F D0 pair and finds the real header");
+}
+
+/* A file-mode source that delivers all but the last header byte and then reports
+ * PENDING.  The header is incomplete, so the producer must not open on it. */
+typedef struct { MemSource inner; uint64_t pending_at; } PendingSource;
+static int pending_mem_read(void *opaque, uint64_t off, void *dst, uint32_t cap, uint32_t *got) {
+    PendingSource *s = (PendingSource *)opaque;
+    if (!s || !got) return SR_PSMF_SOURCE_ERROR;
+    if (off >= s->pending_at) { *got = 0; return SR_PSMF_SOURCE_PENDING; }
+    if (cap > s->pending_at - off) cap = (uint32_t)(s->pending_at - off);
+    return mem_read(&s->inner, off, dst, cap, got);
+}
+
+static void test_file_header_pending_is_not_a_header(void) {
+    uint32_t size = 0;
+    uint8_t *bytes = fixture(&size, 0);
+    if (!bytes) { CHECK(0, "pending-header fixture allocated"); return; }
+    PendingSource ps = {{bytes, size, 0, 0}, 2047u};
+    SrPsmfSource source = {pending_mem_read, &ps, size};
+    SrPsmfProducer *p = sr_psmf_producer_open(&source, 0);
+    CHECK(p == NULL, "a file-mode header read that ends PENDING does not open the producer");
+    sr_psmf_producer_close(p);
+    ps.pending_at = UINT64_MAX;
+    p = sr_psmf_producer_open(&source, 0);
+    CHECK(p != NULL, "the same source opens once the whole header is delivered");
+    sr_psmf_producer_close(p);
+    free(bytes);
+}
+
 static void test_backpressure_keeps_order(void) {
     uint32_t size = 0; uint8_t *bytes = fixture(&size, 4);
     MemSource mem = {bytes, size, 0, 0};
@@ -929,7 +1040,10 @@ static void test_lifecycle_and_source_failure(void) {
         mem.fail = 1;
         sr_psmf_producer_pump(p, 20);
         sr_psmf_producer_stats(p, &st);
-        CHECK(st.source_failures > 0 || st.parser_failures > 0, "source failure is observable");
+        /* The read error itself must land in source_failures; the parse it stops is also
+         * counted as a parser stop, so parser_failures alone never proves a source failure. */
+        CHECK(st.source_failures > 0 && st.failed,
+              "source failure is observable as a source failure that stops the stream");
         sr_psmf_producer_close(p);
     }
     free(bytes);
@@ -1725,6 +1839,13 @@ static void psmf_drain(SrPsmfProducer *producer) {
         sr_psmf_au_release(&au);
 }
 
+/* Floors that keep the seeded campaign from passing while it exercises nothing.  Measured
+ * from this seed: about 34 % of all iterations open a producer (a third use the refused
+ * INT64_MIN base) and about 11 % reach a clean EOF, at 100, 5000 and 100000 iterations.
+ * Below MUTATION_FLOOR_MIN_ITERATIONS the shares are too noisy to bound. */
+#define MUTATION_OPEN_FLOOR_PERCENT 25u
+#define MUTATION_FLOOR_MIN_ITERATIONS 100u
+
 static void test_seeded_mutation(unsigned iterations) {
     psmf_fuzz_state = 0x319503A11F00D123ULL;
     uint32_t seed_size = 0;
@@ -1781,6 +1902,11 @@ static void test_seeded_mutation(unsigned iterations) {
     free(seed);
     printf("PSMF seeded mutation: %u iterations, %u opened, %u completed, 0 crashes\n",
            iterations, opened, completed);
+    if (iterations >= MUTATION_FLOOR_MIN_ITERATIONS) {
+        CHECK((uint64_t)opened * 100u >= (uint64_t)iterations * MUTATION_OPEN_FLOOR_PERCENT,
+              "mutation campaign opens a producer for its measured share of mutants");
+        CHECK(completed > 0, "mutation campaign drives some mutant to a clean EOF");
+    }
 }
 
 static void test_conformance_corpus(void) {
@@ -1998,14 +2124,28 @@ static void test_pts_advance_no_drift_over_long_run(void) {
 }
 
 int main(int argc, char **argv) {
+    /* --fuzz-iters N: 0 (the make default) runs no seeded mutation; 1-100000 runs that many.
+     * A value that is missing, malformed or out of range, or an unknown argument, is
+     * refused: a mistyped fuzz request must not pass as a run that never fuzzed. */
     unsigned fuzz_iterations = 0;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--fuzz-iters") == 0 && i + 1 < argc) {
-            char *end = NULL;
-            unsigned long value = strtoul(argv[++i], &end, 10);
-            if (end && *end == '\0' && value > 0 && value <= 100000ul) {
-                fuzz_iterations = (unsigned)value;
+        if (strcmp(argv[i], "--fuzz-iters") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "psmf_producer_selftest: --fuzz-iters needs a count (0-100000)\n");
+                return 2;
             }
+            const char *text = argv[++i];
+            char *end = NULL;
+            unsigned long value = strtoul(text, &end, 10);
+            if (text[0] < '0' || text[0] > '9' || !end || *end != '\0' || value > 100000ul) {
+                fprintf(stderr, "psmf_producer_selftest: --fuzz-iters %s is not a count from 0 to 100000\n",
+                        text);
+                return 2;
+            }
+            fuzz_iterations = (unsigned)value;
+        } else {
+            fprintf(stderr, "psmf_producer_selftest: unknown argument %s\n", argv[i]);
+            return 2;
         }
     }
     test_access_unit_formation();
@@ -2015,6 +2155,8 @@ int main(int argc, char **argv) {
     test_streaming_demux_rejects_incomplete_pes_at_eos();
     test_streaming_demux_input_window_limit();
     test_streaming_demux_cursor_progress_without_access_units();
+    test_audio_resync_keeps_split_header_and_skips_false_sync();
+    test_file_header_pending_is_not_a_header();
     test_backpressure_keeps_order();
     test_no_aud_scan_work_bound();
     test_aud_split_across_pes();

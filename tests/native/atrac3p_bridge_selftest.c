@@ -21,6 +21,10 @@
 //     reset,
 //   - determinism: byte-identical PCM across instances, after bridge reset,
 //     and after destroy/recreate (the HLE seek/loop-rewind primitive),
+//   - the plain-AT3 half (atrac3_bridge_*): config validation, create refusals,
+//     the exact-frame contract with samples_out = 0, a silent frame's 1024 zero
+//     samples, a decoder failure that latches without re-entering the decoder,
+//     and reset clearing the latch,
 //   - destroy(NULL) no-op.
 //
 // Exit code 0 = all checks passed.
@@ -56,6 +60,12 @@
 #include "vfpu_tables.h"
 #include "perf.h"
 #include "pcm_wav_dump.h"
+
+/* White-box: the private title acceptance tool's container parser and entry point, compiled into
+ * this TU so its refusals are checked on synthetic containers (no title input). */
+#define main atrac3p_title_accept_main
+#include "atrac3p_title_accept.c"
+#undef main
 
 static int g_checks = 0;
 static int g_failures = 0;
@@ -353,6 +363,179 @@ static void test_invalid_gain_frame_refuses_once(void)
     atrac3p_bridge_destroy(bridge);
 }
 
+/* Plain ATRAC3 (RIFF format 0x0270): the 14-byte WAV fmt extension.  Bytes 6-7 are the
+ * coding mode (0 = one sound unit per channel, nonzero = joint stereo) and bytes 10-11 the
+ * frame factor; the others are not gates (atrac3_config_valid). */
+static void at3_extradata(uint8_t ext[14], unsigned coding_mode, unsigned frame_factor)
+{
+    memset(ext, 0, 14);
+    ext[0] = 1;
+    ext[6] = (uint8_t)coding_mode;
+    ext[8] = (uint8_t)coding_mode;
+    ext[10] = (uint8_t)frame_factor;
+}
+
+/* A mono 96-byte plain AT3 frame that decodes to silence: sound unit id 0x28 (101000b),
+ * then zero coded bands, gain points, tonal components and subband VLC indices.  An
+ * all-zero frame carries unit id 0 and is refused as invalid data. */
+#define AT3_MONO_ALIGN 96
+static void make_at3_silent_frame(uint8_t frame[AT3_MONO_ALIGN])
+{
+    memset(frame, 0, AT3_MONO_ALIGN);
+    frame[0] = 0xA0;
+}
+
+static void test_atrac3_bridge(void)
+{
+    uint8_t ext[14], good[AT3_MONO_ALIGN], bad[AT3_MONO_ALIGN];
+    int16_t pcm[2 * ATRAC3_FRAME_SAMPLES];
+    Atrac3Bridge *b = NULL;
+    int samples = -1;
+
+    /* Configuration: the format tag, mono or stereo, the 14-byte extension, a frame factor,
+     * joint stereo only with two channels, and a block size of 96, 152 or 192 bytes per
+     * channel per frame factor. */
+    at3_extradata(ext, 0, 1);
+    CHECK(atrac3_config_valid(0x0270, 1, 96, ext, 14), "at3: a mono 96-byte config is valid");
+    CHECK(atrac3_config_valid(0x0270, 2, 304, ext, 14), "at3: a stereo 304-byte config is valid");
+    CHECK(!atrac3_config_valid(0xFFFE, 1, 96, ext, 14), "at3: another format tag is refused");
+    CHECK(!atrac3_config_valid(0x0270, 3, 288, ext, 14), "at3: three channels are refused");
+    CHECK(!atrac3_config_valid(0x0270, 1, 100, ext, 14), "at3: an off-table block size is refused");
+    CHECK(!atrac3_config_valid(0x0270, 1, 96, ext, 10), "at3: a 10-byte extension is refused");
+    CHECK(!atrac3_config_valid(0x0270, 1, 96, NULL, 14), "at3: a missing extension is refused");
+    at3_extradata(ext, 0, 0);
+    CHECK(!atrac3_config_valid(0x0270, 1, 96, ext, 14), "at3: frame factor 0 is refused");
+    at3_extradata(ext, 1, 1);
+    CHECK(!atrac3_config_valid(0x0270, 1, 96, ext, 14), "at3: joint stereo on one channel is refused");
+    CHECK(atrac3_config_valid(0x0270, 2, 192, ext, 14), "at3: joint stereo on two channels is valid");
+
+    /* create() refuses what the config check refuses and leaves no instance behind. */
+    at3_extradata(ext, 0, 1);
+    b = (Atrac3Bridge *)&samples;   /* not NULL, so the failure must clear it */
+    CHECK(atrac3_bridge_create(1, 100, ext, &b) < 0 && b == NULL,
+          "at3: create refuses an off-table block size and clears its output");
+    CHECK(atrac3_bridge_create(1, 96, NULL, &b) < 0 && b == NULL,
+          "at3: create refuses a missing extension");
+    CHECK(atrac3_bridge_create(1, 96, ext, NULL) < 0, "at3: create refuses a NULL output");
+    CHECK(atrac3_bridge_create(1, 96, ext, &b) == 0 && b != NULL, "at3: create a mono bridge");
+    if (!b) return;
+
+    make_at3_silent_frame(good);
+    memset(bad, 0, sizeof(bad));
+
+    /* The exact-frame contract: NULL arguments and a frame of another size are refused with
+     * samples_out at 0, and such a refusal is not a decoder failure that latches. */
+    CHECK(atrac3_bridge_decode(NULL, good, AT3_MONO_ALIGN, pcm, &samples) < 0 &&
+              atrac3_bridge_decode(b, NULL, AT3_MONO_ALIGN, pcm, &samples) < 0 &&
+              atrac3_bridge_decode(b, good, AT3_MONO_ALIGN, NULL, &samples) < 0 &&
+              atrac3_bridge_decode(b, good, AT3_MONO_ALIGN, pcm, NULL) < 0,
+          "at3: decode refuses each NULL argument");
+    samples = -1;
+    CHECK(atrac3_bridge_decode(b, good, AT3_MONO_ALIGN - 1, pcm, &samples) == AVERROR(EINVAL) &&
+              samples == 0,
+          "at3: a frame shorter than the block is refused with no samples");
+    memset(pcm, 0x55, sizeof(pcm));
+    samples = -1;
+    int ret = atrac3_bridge_decode(b, good, AT3_MONO_ALIGN, pcm, &samples);
+    int silent = 1;
+    for (int i = 0; i < ATRAC3_FRAME_SAMPLES; i++)
+        if (pcm[i] != 0) silent = 0;
+    CHECK(ret == 0 && samples == ATRAC3_FRAME_SAMPLES && silent,
+          "at3: a silent frame decodes to 1024 zero samples after a size refusal");
+
+    /* A decoder failure latches: the bad frame enters the decoder once, a later good frame
+     * gets the same error without decoding, and only reset() clears it. */
+    FILE *capture = tmpfile();
+    int stderr_fd = SR_FILENO(stderr);
+    int saved_stderr = capture ? SR_DUP(stderr_fd) : -1;
+    int redirected = saved_stderr >= 0 && SR_DUP2(SR_FILENO(capture), stderr_fd) != -1;
+    CHECK(redirected, "at3: capture the decoder's error line");
+    int samples1 = -1, samples2 = -1;
+    int ret1 = atrac3_bridge_decode(b, bad, AT3_MONO_ALIGN, pcm, &samples1);
+    int ret2 = atrac3_bridge_decode(b, good, AT3_MONO_ALIGN, pcm, &samples2);
+    int entered = -1;
+    if (redirected) {
+        fflush(stderr);
+        SR_DUP2(saved_stderr, stderr_fd);
+        entered = count_captured_text(capture, "Sound Unit id != 0x28");
+    }
+    if (saved_stderr >= 0) SR_CLOSE(saved_stderr);
+    if (capture) fclose(capture);
+    CHECK(ret1 == AVERROR_INVALIDDATA && samples1 == 0,
+          "at3: a frame with a bad sound unit id is refused as invalid data, with no samples");
+    CHECK(ret2 == AVERROR_INVALIDDATA && samples2 == 0,
+          "at3: the refusal latches, so a good frame after it gets the same error");
+    CHECK(entered == 1, "at3: the latched refusal does not re-enter the decoder");
+    CHECK(atrac3_bridge_reset(b) == 0, "at3: reset succeeds");
+    samples = -1;
+    CHECK(atrac3_bridge_decode(b, good, AT3_MONO_ALIGN, pcm, &samples) == 0 &&
+              samples == ATRAC3_FRAME_SAMPLES,
+          "at3: reset clears the latch and the good frame decodes");
+    CHECK(atrac3_bridge_reset(NULL) < 0, "at3: reset refuses a NULL bridge");
+
+    atrac3_bridge_destroy(b);
+    atrac3_bridge_destroy(NULL);   /* no-op */
+}
+
+/* A synthetic RIFF/WAVE ATRAC3+ container of the layout the title tool parses: fmt (16 bytes),
+ * fact (4 bytes), then `frames` copies of `frame` (and the pad byte an odd chunk takes).  Returns its
+ * size, or 0 when it does not fit in `cap`. */
+static size_t title_riff(uint8_t *out, size_t cap, uint16_t channels, uint32_t rate, uint16_t align,
+                         uint32_t fact, uint32_t frames, const uint8_t *frame)
+{
+    const size_t data = (size_t)frames * align;
+    const size_t total = 12u + 8u + 16u + 8u + 4u + 8u + data + (data & 1u);   /* RIFF pad byte */
+    if (total > cap) return 0;
+    memset(out, 0, total);
+    memcpy(out, "RIFF", 4u);
+    const uint32_t riff = (uint32_t)(total - 8u);
+    for (int i = 0; i < 4; i++) out[4 + i] = (uint8_t)(riff >> (8 * i));
+    memcpy(out + 8, "WAVEfmt ", 8u);
+    out[16] = 16u;
+    out[20] = 0xfeu; out[21] = 0xffu;   /* WAVE_FORMAT_EXTENSIBLE, as the title stream */
+    out[22] = (uint8_t)channels;
+    for (int i = 0; i < 4; i++) out[24 + i] = (uint8_t)(rate >> (8 * i));
+    out[32] = (uint8_t)align; out[33] = (uint8_t)(align >> 8);
+    memcpy(out + 36, "fact", 4u);
+    out[40] = 4u;
+    for (int i = 0; i < 4; i++) out[44 + i] = (uint8_t)(fact >> (8 * i));
+    memcpy(out + 48, "data", 4u);
+    for (int i = 0; i < 4; i++) out[52 + i] = (uint8_t)((uint32_t)data >> (8 * i));
+    for (uint32_t f = 0; f < frames; f++) memcpy(out + 56 + (size_t)f * align, frame, align);
+    return total;
+}
+
+static void test_title_accept_refusals(void)
+{
+    uint8_t buf[256];
+    TitleStream ts;
+    size_t n = title_riff(buf, sizeof(buf), 1u, 44100u, sizeof(MONO_UNIT_FRAME), 2048u, 1u,
+                          MONO_UNIT_FRAME);
+    CHECK(n && accept_parse(buf, n, &ts) && ts.channels == 1u && ts.fact_samples == 2048u,
+          "title-accept: a well-formed synthetic container parses");
+    /* A fact count past 0x7fffffff, as atrac_parse_track refuses: its frame rounding once wrapped
+     * in 32 bits, so a stream far shorter than it declared passed the truncation check. */
+    n = title_riff(buf, sizeof(buf), 1u, 44100u, sizeof(MONO_UNIT_FRAME), 0xfffff900u, 1u,
+                   MONO_UNIT_FRAME);
+    CHECK(n && !accept_parse(buf, n, &ts), "title-accept: a fact count above 0x7fffffff is refused");
+    CHECK(accept_fact_frames(0xffffffffu) == 0x200000u && accept_fact_frames(2049u) == 2u,
+          "title-accept: the declared frame count rounds up without wrapping");
+    /* A zero sample rate has no duration: refused by name, not printed as inf. */
+    n = title_riff(buf, sizeof(buf), 1u, 0u, sizeof(MONO_UNIT_FRAME), 2048u, 1u, MONO_UNIT_FRAME);
+    CHECK(n && !accept_parse(buf, n, &ts), "title-accept: a zero sample rate is refused");
+    /* Only a missing input is SKIP (77); one that exists but cannot be opened as a file (here a
+     * directory) is a FAIL, never "not run". */
+    char missing[] = "atrac3p-title-accept-input-that-does-not-exist.sgb";
+    char dir[] = ".";
+    char tool[] = "atrac3p_title_accept";
+    char *argv_missing[] = { tool, missing, NULL };
+    char *argv_dir[] = { tool, dir, NULL };
+    CHECK(atrac3p_title_accept_main(2, argv_missing) == 77,
+          "title-accept: a missing input is SKIP (77)");
+    CHECK(atrac3p_title_accept_main(2, argv_dir) == 1,
+          "title-accept: an input that exists but cannot be read is FAIL, not SKIP");
+}
+
 // av_size_mult() is the overflow-checked multiply the decoder's array helpers
 // call before any allocation. The vendored n4.4 form carried a glibc-inspired
 // bit trick that skipped the division below sqrt(SIZE_MAX); this project's
@@ -405,6 +588,8 @@ int main(void)
     test_terminator_decode();
     test_imdct_path_decode();
     test_invalid_gain_frame_refuses_once();
+    test_atrac3_bridge();
+    test_title_accept_refusals();
     test_av_size_mult();
 
     atrac3p_bridge_destroy(NULL);   /* no-op */

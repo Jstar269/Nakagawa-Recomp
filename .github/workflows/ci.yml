@@ -741,6 +741,13 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
+      - name: Fetch the real-history parity commits
+        # RealHistoryParityTests (tools/test_provenance_attest_verify.py) replays two fixed
+        # commits that the depth-1 checkout lacks, and fails rather than skips here when they
+        # are missing. The candidate is #183's head and its grandparent is the base, so a
+        # depth-3 fetch brings both with the ancestry the verifier checks.
+        run: git fetch --no-tags --depth=3 origin 70a4aec365bd5ffceda504c7c003e4b38db432c2
+
       - name: Fetch the profile-zero fixture built from source
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -2941,8 +2948,9 @@ jobs:
       # The Windows build decodes H.264 through Media Foundation (src/rt/h264_mf.c), so this
       # runs the source-authored PSMF/H.264 fixture on that backend (#283); native_tools runs
       # the same fixture on the vendored FFmpeg subset. When no decoder instance can be
-      # created, the selftest prints SKIP for its decode checks and still exits 0, so any SKIP
-      # line fails the step. The CSC no-write mutant must then die on the same backend.
+      # created, the selftest prints SKIP for its decode checks and then fails its own
+      # no-SKIP check; any SKIP line also fails the step. The CSC no-write mutant must then
+      # die on the same backend.
       - name: Build and run the Media Foundation H.264 media selftest
         if: contains(matrix.parts, 'selftests')
         shell: msys2 {0}

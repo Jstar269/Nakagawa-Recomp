@@ -330,6 +330,21 @@ class TestReleaseAnchorRejectsSelfAuthorization(unittest.TestCase):
         repo._stage(paths)
         return paths
 
+    def _assert_rejected_by_name(self, repo: _AttestationRepo, paths, message: str) -> None:
+        """The release anchor rejects the change and names each laundered path.
+
+        An exit code of 1 alone is not enough: a crashing audit, or one that fails for an
+        unrelated reason, exits 1 too.
+        """
+        result = repo.run_audit("--provenance-ledger", str(repo.trusted_ledger_path()))
+        self.assertNotIn("Traceback", result.stderr, "the audit crashed instead of judging the change")
+        self.assertEqual(result.returncode, 1, message)
+        findings = repo.findings(result)
+        self.assertIn("PROVENANCE_LEDGER_MISMATCH", {c for c, _ in findings}, message)
+        missing = {p for c, p in findings if c == "PROVENANCE_MISSING"}
+        for path in paths:
+            self.assertIn(path, missing, f"{message}: {path} is not named")
+
     def test_bare_audit_fails_closed_without_external_ledger(self):
         """A bare audit cannot attest anything: no external ledger, no claims
         verified, PROVENANCE_UNVERIFIED -- even on a clean tree."""
@@ -363,8 +378,7 @@ class TestReleaseAnchorRejectsSelfAuthorization(unittest.TestCase):
             "sha256": hashlib.sha256(SPDX_PY.encode("utf-8")).hexdigest(),
         })
         repo._stage({path: SPDX_PY})
-        rc, findings = repo.audit_result("--provenance-ledger", str(repo.trusted_ledger_path()))
-        self.assertEqual(rc, 1, "laundered unresolved record must fail the release anchor")
+        self._assert_rejected_by_name(repo, [path], "laundered unresolved record must fail the release anchor")
 
     def test_laundered_fixture_config_doc_relabels_rejected_at_release_anchor(self):
         repo = _AttestationRepo(self)
@@ -386,8 +400,7 @@ class TestReleaseAnchorRejectsSelfAuthorization(unittest.TestCase):
                 "sha256": hashlib.sha256(SPDX_PY.encode("utf-8")).hexdigest(),
             })
         repo._stage(dict.fromkeys(attacks, SPDX_PY))
-        rc, findings = repo.audit_result("--provenance-ledger", str(repo.trusted_ledger_path()))
-        self.assertEqual(rc, 1, "relabeling implementation paths must fail the release anchor")
+        self._assert_rejected_by_name(repo, attacks, "relabeling implementation paths must fail the release anchor")
 
     def test_laundered_attestation_claim_on_fixture_path_rejected_at_release_anchor(self):
         repo = _AttestationRepo(self)
@@ -400,8 +413,7 @@ class TestReleaseAnchorRejectsSelfAuthorization(unittest.TestCase):
             "sha256": hashlib.sha256(SPDX_C.encode("utf-8")).hexdigest(),
         })
         repo._stage({path: SPDX_C})
-        rc, findings = repo.audit_result("--provenance-ledger", str(repo.trusted_ledger_path()))
-        self.assertEqual(rc, 1, "fixture paths cannot self-attest a detailed-ledger claim")
+        self._assert_rejected_by_name(repo, [path], "fixture paths cannot self-attest a detailed-ledger claim")
 
     def test_clean_tree_passes_release_anchor(self):
         repo = _AttestationRepo(self)

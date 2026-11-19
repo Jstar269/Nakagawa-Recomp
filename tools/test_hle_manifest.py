@@ -1470,9 +1470,9 @@ static uint32_t h_SynthReal(CpuState *s) {
             fake,
             {
                 # sceKernelVolatileMemUnlock left this list once its PSP-measured states were
-                # implemented (#1135), and sceUtilityOskUpdate once its #363-measured states
-                # were checked under the dialog lock (#1386).
-                "0xb3b5d042": "sceAtracGetOutputChannel",
+                # implemented (#1135), sceUtilityOskUpdate once its #363-measured states
+                # were checked under the dialog lock (#1386), and sceAtracGetOutputChannel
+                # once it checked its ID and wrote the channel count DecodeData interleaves.
                 # Profiler refers return NULL because no profiler is modeled, which is what
                 # firmware with profiling off reports. The body is a bare `return 0`, so the
                 # mechanical stub detector classifies it fake_success; the handler is curated
@@ -1543,7 +1543,7 @@ static uint32_t h_SynthReal(CpuState *s) {
              for r in manifest["registrations"] if r["name"] == "sceUmdGetErrorStat"],
             [("0x20628e6f", "sceUmdGetErrorStat", "dedicated", "compatibility")],
         )
-        self.assertEqual(len(fake), 4, "expected 4 fake_success registrations in the live census")
+        self.assertEqual(len(fake), 3, "expected 3 fake_success registrations in the live census")
 
 
 class ControlledRefusalDiagnosticTests(unittest.TestCase):

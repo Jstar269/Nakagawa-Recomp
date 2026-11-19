@@ -101,7 +101,7 @@ vfpu-tables-selftest:
 # Exercises bounded formatting, hostile cursors, negative returns, canary bounds,
 # and golden trace formatting invariants.
 strbuf-selftest:
-	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Isrc/rt \
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Isrc/rt $(REPRODUCIBLE_COMPILE_FLAG) $(REPRODUCIBLE_LINK_FLAG) \
 		-o $(BUILD_DIR)/strbuf_selftest.exe tests/native/strbuf_selftest.c
 	$(BUILD_DIR)/strbuf_selftest.exe
 
@@ -111,7 +111,7 @@ strbuf-selftest:
 # not reachable from the player. Built with -Wpedantic: the module converts no function
 # pointer to or from an object pointer.
 xr-selftest:
-	$(CC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt \
+	$(CC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt $(REPRODUCIBLE_COMPILE_FLAG) $(REPRODUCIBLE_LINK_FLAG) \
 		-o $(BUILD_DIR)/xr_selftest.exe tests/native/xr_selftest.c \
 		src/rt/xr/nk_xr.c src/rt/xr/nk_xr_mailbox.c src/rt/xr/nk_xr_layout.c -lm
 	$(BUILD_DIR)/xr_selftest.exe
@@ -408,7 +408,7 @@ atrac3p-title-accept:
 	$(CC) $(CFLAGS) -Isrc/rt/atrac3p -Isrc/rt/atrac3p/libavcodec \
 		-Isrc/rt/atrac3p/libavutil $(LDFLAGS) \
 		-o $(BUILD_DIR)/atrac3p_title_accept.exe \
-		src/rt/atrac3p_title_accept.c src/rt/atrac3p_bridge.c \
+		src/rt/atrac3p_title_accept.c src/rt/atrac3p_bridge.c src/rt/perf.c \
 		$(ATRAC3P_SRCS) src/rt/vfpu_tables.c -lm
 	$(BUILD_DIR)/atrac3p_title_accept.exe "$(ATRAC3P_TITLE)"
 
