@@ -55,7 +55,7 @@ except ImportError:  # direct script execution
     import pgf_writer  # type: ignore[no-redef]
 
 CONVERTER_NAME = "ttf2pgf"
-CONVERTER_VERSION = "0.6.0"
+CONVERTER_VERSION = "0.7.0"
 SPEC_PATH = "docs/cleanroom/PGF_CONVERTER_SPEC.md"
 PIN_SCHEMA = "font-pin/v1"
 
@@ -1153,6 +1153,29 @@ def _rasterize(raster: _Raster, embolden_x: int = 0, embolden_y: int = 0) -> tup
     return width, height, samples
 
 
+def _trim_to_ink(
+    left: int, top: int, width: int, height: int, samples: tuple[int, ...]
+) -> tuple[int, int, int, int, tuple[int, ...]]:
+    """Cut a rasterized image to its inked columns and rows (specification section 3, rule 15).
+
+    ``left`` and ``top`` are the image's left column and top row in pixels from the pen and the
+    baseline (y up); they move by the columns and rows cut, so every kept sample lands on the same
+    pixel. An image with no nonzero sample becomes the zero-area ``(0, 0, 0, 0, ())``.
+    """
+    columns = [column for column in range(width) if any(samples[column::width])]
+    if not columns:
+        return 0, 0, 0, 0, ()
+    rows = [row for row in range(height) if any(samples[row * width:(row + 1) * width])]
+    first_column, last_column = columns[0], columns[-1] + 1
+    first_row, last_row = rows[0], rows[-1] + 1
+    trimmed = tuple(
+        samples[row * width + column]
+        for row in range(first_row, last_row)
+        for column in range(first_column, last_column)
+    )
+    return left + first_column, top - first_row, last_column - first_column, last_row - first_row, trimmed
+
+
 # ---------------------------------------------------------------------------
 # Conversion pipeline
 # ---------------------------------------------------------------------------
@@ -2050,6 +2073,11 @@ def convert(
             glyphs.append(pgf_writer.Glyph(code=code, width=0, height=0, samples=(), advance_x=advance_x))
             continue
         width, height, samples = _rasterize(raster, embolden_x, embolden_y)
+        left, top, width, height, samples = _trim_to_ink(raster.left, raster.top, width, height, samples)
+        if width <= 0 or height <= 0:
+            zero_area.append(code)
+            glyphs.append(pgf_writer.Glyph(code=code, width=0, height=0, samples=(), advance_x=advance_x))
+            continue
         max_width = max(max_width, width)
         max_height = max(max_height, height)
         glyphs.append(
@@ -2058,14 +2086,14 @@ def convert(
                 width=width,
                 height=height,
                 samples=samples,
-                adjust_x=raster.left,
-                adjust_y=raster.top,
+                adjust_x=left,
+                adjust_y=top,
                 advance_x=advance_x,
                 advance_y=0,
                 dimension_width=width * pgf_writer.POINTS,
                 dimension_height=height * pgf_writer.POINTS,
-                x_left=raster.left * pgf_writer.POINTS,
-                y_base=raster.top * pgf_writer.POINTS,
+                x_left=left * pgf_writer.POINTS,
+                y_base=top * pgf_writer.POINTS,
             )
         )
 

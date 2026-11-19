@@ -306,6 +306,26 @@ manifest in memory first and writes only after every stage succeeds.
     source face; the project's parameters were tuned against a private
     comparison with the console's own fonts, and only those parameters are
     recorded.
+15. **Ink trim** (always on, from converter 0.7.0). After rule 6, each glyph
+    image is cut to the columns and rows that hold a nonzero sample: the
+    empty columns at its left and right and the empty rows at its top and
+    bottom are removed, and the box's `left` grows by the columns cut on the
+    left and its `top` falls by the rows cut on the top, so every kept sample
+    stays on the same pixel relative to the pen and the baseline. The advance
+    (rule 7) is not changed. A glyph with no nonzero sample becomes a
+    zero-area record with only its advance, like a space. Rule 3's box holds
+    every covered sub-sample, but a pixel with one or two covered sub-samples
+    rounds to 0 under rule 6, and rule 10 grows the box by whole pixels for
+    ink that may not reach the new column or row, so without the cut an image
+    could start or end in a blank column or row.
+    *Project decision* (#1300), from a measurement: the console's Latin fonts
+    store their images cut to the ink in both directions (in three of them,
+    at most 9 of the 94 printable ASCII images have a blank column or row on
+    any one side, against 82 blank last columns in a 0.6.0 stand-in),
+    and their space is a zero-area record. A game may place text by the image
+    rather than by the advance: Hot Shots Tennis puts each glyph one pixel
+    after the previous image's right edge, so every blank column widened its
+    lines. Only that rule is taken from the measurement; no glyph data is.
 
 Same pinned input plus same parameters plus same converter version therefore
 produce byte-identical `.pgf` and manifest output on every supported host,
@@ -313,8 +333,9 @@ which `tools/test_ttf2pgf.py` asserts by repeated runs.
 
 ## 4. Geometry to PGF metrics
 
-For a glyph whose raster box is `left, bottom, right, top` in whole pixels
-(relative to the origin on the baseline, y up):
+For a glyph whose raster box, cut to its ink by rule 15, is
+`left, bottom, right, top` in whole pixels (relative to the origin on the
+baseline, y up):
 
 | Field | Value |
 | --- | --- |
@@ -324,7 +345,7 @@ For a glyph whose raster box is `left, bottom, right, top` in whole pixels
 | `x_center` | writer default: `x_left + advance_x // 2`. |
 | `y_base` | `top * 64` (pixels of bitmap above the baseline). |
 | descender (derived) | `y_base - dimension_height = bottom * 64`, matching `PGF_SPEC.md` section 3.9. |
-| `adjust_x`, `adjust_y` | 0; positioning is carried by the 26.6 metrics, and the reader's draw path uses only the caller's position (`PGF_SPEC.md` section 3.10). |
+| `adjust_x`, `adjust_y` | `left`, `top`: the reader returns them as the character information's bitmap left and top (`0x08`, `0x0C`); its draw path uses only the caller's position (`PGF_SPEC.md` section 3.10). |
 | `row_order` | 1 (raster order). |
 
 Header extrema are then whatever `pgf_writer` derives from those records:
@@ -471,5 +492,6 @@ Generated PGFs are fixtures, never an authenticity claim.
 | Built-in Latin, Japanese and Korean sets and the pinned fonts' coverage of them | `ProjectCodePointCoverageTests`, `JapaneseCodePointCoverageTests` |
 | Project Latin faces: one per console index, line widths, class widths, ink, and the sans faces' x-height and cap-height rows | `ProjectLatinStrikeTests` |
 | Overshoot alignment: round and flat letters share their rows, flat letters and deep features unchanged, manifest record and refusals | `OvershootSnapTests`, `ProjectLatinStrikeTests` |
+| Ink trim: no image starts or ends in a blank column or row, a string drawn through the reader by advance keeps every pixel, advances unchanged | `InkTrimTests`, `ReaderRoundTripTests` |
 | Project Japanese and Korean nominal size and advances | `ProjectCjkSizeTests` |
 | Independent structural validation | `nk_core.fonts.validate_pgf_data` on the output |
