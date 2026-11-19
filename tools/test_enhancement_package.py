@@ -5004,7 +5004,7 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             read_words, read_data = self._readers(elf_bytes)
 
             def publish(address: str) -> dict[str, Any]:
-                return enhancement_package.publish_package(
+                published: dict[str, Any] = enhancement_package.publish_package(
                     private,
                     {name: int(value, 16) for name, value in {**symbols, "synth_byte_table": address}.items()},
                     executable=elf_bytes,
@@ -5013,6 +5013,7 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                     read_words_fn=read_words,
                     read_data_fn=read_data,
                 )
+                return published
 
             with self.assertRaisesRegex(EnhancementPackageError, refusal):
                 publish("0x00002001")
