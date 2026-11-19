@@ -57,7 +57,6 @@ if name.startswith("busy"):
         with open(log, "a", encoding="utf-8") as stream:
             stream.write("OVERLAP\n")
     else:
-        time.sleep(1)
         marker.unlink()
 if name.startswith("crash"):
     sys.exit(3)
@@ -216,7 +215,32 @@ class LibraryBuildTests(unittest.TestCase):
         translated.parent.mkdir(parents=True)
         create_test_iso(translated, disc_id="TEST70016", title="Title TEST70016 [T-En]")
         self.disc("c/ok-test70017.iso", "TEST70017")
-        result = self.build(jobs=2).run()
+        import queue
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        started: queue.Queue[str] = queue.Queue()
+        release_first_command = threading.Event()
+
+        def synchronized_command(iso: Path, data: Path, work: Path,
+                                 launch_timeout: int) -> list[str]:
+            source = iso.relative_to(self.discs).as_posix()
+            started.put(source)
+            if source == "a/busy-test70016.iso" and not release_first_command.wait(timeout=10):
+                raise TimeoutError("test did not release the first bring-up")
+            return self.command(iso, data, work, launch_timeout)
+
+        build = self.build(jobs=2, command=synchronized_command)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(build.run)
+            try:
+                first_two = [started.get(timeout=10) for _ in range(2)]
+                self.assertCountEqual(first_two, [
+                    "a/busy-test70016.iso", "c/ok-test70017.iso",
+                ], "a same-ID image must wait while the first build is still in flight")
+            finally:
+                release_first_command.set()
+            result = future.result(timeout=60)
         records = self.by_source(result)
         self.assertEqual([records[key]["outcome"] for key in sorted(records)], ["BUILT"] * 3)
         # No overlap was logged: the second image started only after the first one ended.
@@ -369,13 +393,23 @@ class LibraryBuildTests(unittest.TestCase):
             return bool(orig_wait())
 
         build._wait_while_paused = tracked_wait  # type: ignore[method-assign]
+        paused_sleeping = threading.Event()
+        release_pause_poll = threading.Event()
+
+        def controlled_pause_sleep(_seconds: float) -> None:
+            paused_sleeping.set()
+            if not release_pause_poll.wait(timeout=10):
+                raise TimeoutError("test did not release the paused build")
+
         runner = threading.Thread(target=lambda: finished.append(build.run()), daemon=True)
-        runner.start()
-        self.assertTrue(entered_pause.wait(timeout=10), "runner did not reach PAUSE check")
-        time.sleep(0.1)
-        self.assertEqual(self.calls(), [], "nothing starts while PAUSE is there")
-        (self.work / "PAUSE").unlink()
-        runner.join(timeout=60)
+        with mock.patch.object(library_build.time, "sleep", controlled_pause_sleep):
+            runner.start()
+            self.assertTrue(entered_pause.wait(timeout=10), "runner did not reach PAUSE check")
+            self.assertTrue(paused_sleeping.wait(timeout=10), "runner did not wait on PAUSE")
+            self.assertEqual(self.calls(), [], "nothing starts while PAUSE is there")
+            (self.work / "PAUSE").unlink()
+            release_pause_poll.set()
+            runner.join(timeout=60)
         self.assertFalse(runner.is_alive())
         self.assertEqual(finished[0]["counts"], {"BUILT": 3})
 
