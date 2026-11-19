@@ -2261,7 +2261,7 @@ static void player_ui_nk_apply_action(PlayerApp *app,
 /* nk_ui draws the frame at the window's real size, from the output's pixels. */
 static void player_render_active_ui(PlayerUiNk *next_ui, PlayerApp *app,
                                     SDL_Renderer *renderer, SDL_Window *window) {
-    PlayerUiAction action = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    PlayerUiAction action = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
     bool drawn = player_ui_nk_view_active(next_ui, app) &&
                  player_ui_nk_render(next_ui, app, renderer, window, &action);
     /* An action the frame committed (its dialog already closed) runs even when
