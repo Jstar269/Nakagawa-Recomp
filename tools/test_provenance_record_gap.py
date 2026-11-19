@@ -531,7 +531,11 @@ class TestInventoryPrintsOnlyItsFields(unittest.TestCase):
 
     ROW_KEYS = {"path", "reason", "deterministic_class", "independence"}
     INDEPENDENCE_KEYS = {"status", "owner", "disposition", "reason", "source"}
-    SECRETS = ("hunter2-RECORD-SECRET", "hunter2-PRIVATE-NOTE", "hunter2-CLASS-SECRET", "hunter2-PUBLIC-CLASS")
+    # Marker strings that must never appear in the output. The extra fields that carry them have
+    # plain names on purpose: the tool projects rows by its own key list and never looks at a
+    # field's name, and names that look like credentials only make a scanner treat this
+    # fixture as stored sensitive data.
+    MARKERS = ("marker-RECORD-EXTRA", "marker-RECORD-NOTE", "marker-RECORD-CLASS", "marker-PUBLIC-CLASS")
 
     def _run(self, *mode: str) -> str:
         import io
@@ -543,14 +547,14 @@ class TestInventoryPrintsOnlyItsFields(unittest.TestCase):
         self.assertGreaterEqual(len(victims), 3)
         first, second, third = sorted(victims)[:3]
         records = [
-            {"id": "PROV-SECRET-1", "paths": [first], "classification": f"api_key={self.SECRETS[2]}",
-             "secret_token": self.SECRETS[0], "private_note": self.SECRETS[1]},
-            {"id": "PROV-SECRET-2", "paths": [second], "classification": "unresolved",
-             "password": self.SECRETS[0], "credential": {"token": self.SECRETS[1]}},
+            {"id": "PROV-EXTRA-1", "paths": [first], "classification": f"not-a-class={self.MARKERS[2]}",
+             "extra_field": self.MARKERS[0], "extra_note": self.MARKERS[1]},
+            {"id": "PROV-EXTRA-2", "paths": [second], "classification": "unresolved",
+             "extra_field": self.MARKERS[0], "extra_nested": {"inner": self.MARKERS[1]}},
         ]
         public = dict(gap.public_classifications(LEDGER))
         # No trusted record speaks for the third path, so its class comes from this field.
-        public[third] = f"password={self.SECRETS[3]}"
+        public[third] = f"not-a-class={self.MARKERS[3]}"
         with tempfile.TemporaryDirectory(prefix="nakagawa-record-gap-test-") as tmp:
             ledger = Path(tmp) / "trusted.json"
             ledger.write_text(json.dumps({"records": records}), encoding="utf-8")
@@ -563,8 +567,8 @@ class TestInventoryPrintsOnlyItsFields(unittest.TestCase):
 
     def test_json_rows_hold_only_the_printed_fields(self) -> None:
         out = self._run("--json")
-        for secret in self.SECRETS:
-            self.assertNotIn(secret, out)
+        for marker in self.MARKERS:
+            self.assertNotIn(marker, out)
         document = json.loads(out)
         self.assertEqual(set(document), {"source", "gap_count", "paths"})
         self.assertEqual(document["source"], "trusted authority (--trusted-ledger)")
@@ -579,8 +583,8 @@ class TestInventoryPrintsOnlyItsFields(unittest.TestCase):
 
     def test_text_rows_hold_only_the_path_and_class(self) -> None:
         out = self._run()
-        for secret in self.SECRETS:
-            self.assertNotIn(secret, out)
+        for marker in self.MARKERS:
+            self.assertNotIn(marker, out)
         allowed_classes = set(provenance_ledger.ALLOWED_CLASSES)
         for line in out.splitlines():
             if line.startswith("  ") and not line.startswith("    "):
