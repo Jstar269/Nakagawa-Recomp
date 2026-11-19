@@ -388,13 +388,28 @@ static int test_typed_prefs_and_events(void) {
           NK_UI_REPEAT_SLOW != NK_UI_REPEAT_FAST, "repeat rates are distinct");
     prefs.prompt_style = NK_UI_PROMPT_KEYCAPS;
     prefs.repeat = NK_UI_REPEAT_FAST;
-    event.type = NK_UI_EV_NAV;
+    event.type = NK_UI_EV_TAB;
     event.dir = NK_UI_DIR_LEFT;
     event.pad_family = NK_UI_PAD_LETTERS_A_EAST;
+    event.down = true; /* a press of a shoulder button: the screen takes it */
     ui = nk_ui_create(NULL);
     CHECK(ui != NULL, "create context for typed prefs");
+    CHECK(nk_ui_prompt_style(ui) == NK_UI_PROMPT_NEUTRAL, "a new context starts with neutral prompts");
     nk_ui_set_prefs(ui, &prefs);
+    CHECK(nk_ui_prompt_style(ui) == NK_UI_PROMPT_KEYCAPS, "the prefs set the prompt style");
     nk_ui_push_event(ui, &event);
+    {
+        NkUiNavDir dir = NK_UI_DIR_NONE;
+        bool took;
+        nk_ui_begin(ui, 0.0);
+        took = nk_ui_take_event(ui, NK_UI_EV_TAB, &dir);
+        (void)nk_ui_end(ui);
+        CHECK(took && dir == NK_UI_DIR_LEFT, "the pushed event is queued with its direction");
+        nk_ui_begin(ui, 0.1);
+        took = nk_ui_take_event(ui, NK_UI_EV_TAB, &dir);
+        (void)nk_ui_end(ui);
+        CHECK(!took, "a taken event is gone");
+    }
     nk_ui_destroy(ui);
     return 1;
 }

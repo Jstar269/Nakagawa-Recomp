@@ -261,6 +261,7 @@ extern unsigned long long sr_hle_test_data_scan_names(void);
 extern unsigned long long sr_hle_test_data_scan_probes(void);
 extern unsigned long long nk_xb_test_lazy_path_calls(void);
 extern void nk_xb_test_reset_lazy_path_calls(void);
+extern unsigned long long nk_xb_test_lazy_whole_archive_buffers(void);
 extern unsigned long sr_hle_test_data_build_attempts(void);
 extern unsigned long sr_hle_test_data_builds_after_guest(void);
 extern int sr_hle_test_data_state(void);
@@ -20346,6 +20347,10 @@ static void test_archive_discovery_skips_unpack_folders_only(void) {
      * lookup added there without its marker would not fail this check. */
     expect(nk_xb_test_lazy_path_calls() == 3u,
            "each archive mount passes its one marked lookup by path");
+    /* A mount loads only its archive's metadata (header, FST, string table), never a
+     * buffer the size of the whole archive, member data included. */
+    expect(nk_xb_test_lazy_whole_archive_buffers() == 0u,
+           "no archive mount holds a buffer the size of its whole archive");
 
     expect(hle_archive_route_file_matches("disc0:/PSP_GAME/USRDIR/data/menu/inpack.to",
                                           "outer-archive"),

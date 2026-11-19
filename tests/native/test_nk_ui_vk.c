@@ -671,9 +671,9 @@ static bool frame(Target *t, NkUiVk *vk, const NkUiDrawList *drawn, const NkUiDr
     pass.clearValueCount = 1;
     pass.pClearValues = &clear;
     g_gpu.CmdBeginRenderPass(cb, &pass, VK_SUBPASS_CONTENTS_INLINE);
-    if (*prepare_ok) {
-        *render_ok = nk_ui_vk_render(vk, rendered, cb, (uint32_t)t->w, (uint32_t)t->h);
-    }
+    /* Render runs after a refused prepare too, so a check that the target holds
+       only the clear colour tests that render itself drew nothing. */
+    *render_ok = nk_ui_vk_render(vk, rendered, cb, (uint32_t)t->w, (uint32_t)t->h);
     g_gpu.CmdEndRenderPass(cb);
     memset(&copy, 0, sizeof(copy));
     copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -1554,11 +1554,12 @@ static int test_fail_closed(void) {
 
     list.idx = bad_indices;
     CHECK(frame(&target, vk, &list, &list, 0x000000FFu, &prepared, &rendered), "submit a bad-index frame");
-    CHECK(!prepared && target_pixel(&target, 4, 4) == 0x000000FFu, "an index past the vertices is refused");
+    CHECK(!prepared && !rendered && target_pixel(&target, 4, 4) == 0x000000FFu,
+          "an index past the vertices is refused and render draws nothing");
     list.idx = good_indices;
     commands[0].first = 1;
     CHECK(frame(&target, vk, &list, &list, 0x000000FFu, &prepared, &rendered), "submit a bad-range frame");
-    CHECK(!prepared, "a command range past the indices is refused");
+    CHECK(!prepared && !rendered, "a command range past the indices is refused");
     commands[0].first = 0;
 
     /* Scissor nesting: NK_UI_DRAW_CLIP_DEPTH deep is fine, one more is not, and
@@ -1573,11 +1574,12 @@ static int test_fail_closed(void) {
     commands[NK_UI_DRAW_CLIP_DEPTH + 1u] = commands[1];
     list.ncmd = NK_UI_DRAW_CLIP_DEPTH + 2u;
     CHECK(frame(&target, vk, &list, &list, 0x000000FFu, &prepared, &rendered), "submit the deep frame");
-    CHECK(!prepared && target_pixel(&target, 4, 4) == 0x000000FFu, "one level deeper is refused");
+    CHECK(!prepared && !rendered && target_pixel(&target, 4, 4) == 0x000000FFu,
+          "one level deeper is refused and render draws nothing");
     commands[1].kind = NK_UI_DRAW_SCISSOR_END;
     list.ncmd = 2;
     CHECK(frame(&target, vk, &list, &list, 0x000000FFu, &prepared, &rendered), "submit the stray end");
-    CHECK(!prepared, "a scissor end with none open is refused");
+    CHECK(!prepared && !rendered, "a scissor end with none open is refused");
     CHECK(!nk_ui_vk_render(vk, &list, g_gpu.cb, 16, 16), "render refuses after a failed prepare");
 
     list.ncmd = 1;

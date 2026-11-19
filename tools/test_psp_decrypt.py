@@ -748,6 +748,58 @@ class TestKnownAnswers(unittest.TestCase):
         got = json.loads(out.stdout)
         self.assertEqual(got["digest"], SHA1_ABC_DIGEST.hex())
 
+    def test_prx_sha1_wipes_its_whole_context(self):
+        """sha1_parts, the SHA-1 every PRX decoder hashes decrypted header and
+        key-derived bytes through, wipes its whole SHA_CTX after SHAFinal: the
+        vendored SHAFinal clears only sizeof(pointer) bytes of it."""
+        from tools.nk_core import decrypt_tool
+
+        harness = self.tmp / "prx_sha1_wipe.c"
+        harness.write_text(r"""
+#include <stdio.h>
+#include <string.h>
+#define SHAFinal harness_sha_final
+#define nk_secure_zero harness_secure_zero
+#include "nk_psp_prx.c"
+#undef SHAFinal
+#undef nk_secure_zero
+void SHAFinal(BYTE *output, SHA_CTX *shsInfo);
+void nk_secure_zero(void *p, size_t len);
+static const void *final_ctx;
+static int finals, wiped;
+void harness_sha_final(BYTE *output, SHA_CTX *shsInfo) {
+    final_ctx = shsInfo;
+    finals++;
+    SHAFinal(output, shsInfo);
+}
+void harness_secure_zero(void *p, size_t len) {
+    if (finals > 0 && p == final_ctx && len >= sizeof(SHA_CTX)) wiped++;
+    nk_secure_zero(p, len);
+}
+int main(void) {
+    static const u8 ab[2] = { 'a', 'b' }, c[1] = { 'c' };
+    ShaPart parts[3] = { { ab, 2 }, { NULL, 0 }, { c, 1 } };
+    u8 digest[0x14];
+    sha1_parts(parts, 3, digest);
+    printf("finals %d wiped %d digest ", finals, wiped);
+    for (size_t i = 0; i < sizeof(digest); i++) printf("%02x", digest[i]);
+    printf("\n");
+    return 0;
+}
+""", encoding="utf-8")
+        exe = self.tmp / "prx_sha1_wipe.exe"
+        cmd = [cast(str, CC), "-std=c99", "-O2", "-I", str(ROOT / "src" / "core"),
+               str(harness)]
+        cmd.extend(str(ROOT / rel) for rel in decrypt_tool.SOURCES
+                   if not rel.endswith(("nk_decrypt_main.c", "nk_psp_prx.c")))
+        cmd.extend(["-o", str(exe)])
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = subprocess.run([str(exe)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(out.stdout.split(),
+                         ["finals", "1", "wiped", "1", "digest", SHA1_ABC_DIGEST.hex()])
+
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
 class TestSyntheticEndToEnd(unittest.TestCase):
@@ -2174,6 +2226,45 @@ int main(int argc, char **argv) {
         out = run_bounded([str(exe), str(stream), str(len(clear) - 1), str(result)],
                           capture_output=True)
         self.assertEqual(out.returncode, 1, out.stdout)
+
+    def test_stored_stream_that_overstates_its_size_fails(self):
+        """A stored (plain-text) stream is a 0x80 flag byte, a big-endian length and the
+        bytes. One whose length passes its input or the output is refused, never cut
+        short and returned as a decoded block."""
+        harness = self.tmp / "lzrc_stored.c"
+        harness.write_text(r"""
+#include <stdio.h>
+#include <string.h>
+#include "nk_psp_lzrc.h"
+static int run(unsigned declared, size_t body, size_t out_len) {
+    static unsigned char in[5 + 256], out[256];
+    in[0] = 0x80;
+    in[1] = (unsigned char)(declared >> 24); in[2] = (unsigned char)(declared >> 16);
+    in[3] = (unsigned char)(declared >> 8);  in[4] = (unsigned char)declared;
+    for (size_t i = 0; i < body; i++) in[5 + i] = (unsigned char)(i * 7u + 1u);
+    memset(out, 0, sizeof(out));
+    int got = nk_psp_lzrc_decompress(out, out_len, in, 5 + body);
+    if (got > 0 && memcmp(out, in + 5, (size_t)got) != 0) return -2;
+    return got;
+}
+int main(void) {
+    printf("exact %d\n", run(100, 100, 100));
+    printf("short_input %d\n", run(200, 100, 256));
+    printf("short_output %d\n", run(100, 100, 64));
+    return 0;
+}
+""", encoding="utf-8")
+        exe = self.tmp / "lzrc_stored.exe"
+        proc = subprocess.run([CC, "-std=c99", "-O2", "-I", str(ROOT / "src" / "core"),
+                               str(harness), str(ROOT / "src" / "core" / "nk_psp_lzrc.c"),
+                               "-o", str(exe)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = subprocess.run([str(exe)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        got = dict(line.split(" ", 1) for line in out.stdout.splitlines())
+        self.assertEqual(got["exact"], "100")
+        self.assertEqual(got["short_input"], "-1")
+        self.assertEqual(got["short_output"], "-1")
 
 
 if __name__ == "__main__":

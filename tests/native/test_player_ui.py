@@ -1260,8 +1260,8 @@ class NativePlayerUiTests(unittest.TestCase):
                             "revision_policy": "exact-disc-id",
                         },
                         "executable": {
-                            "base": "0x08800000",
-                            "entry": "0x08804000",
+                            "base": 142606336,
+                            "entry": 142622720,
                             "bss_metadata_source": "elf",
                             "extra_executable_spans": [],
                         },
@@ -1276,7 +1276,7 @@ class NativePlayerUiTests(unittest.TestCase):
                         "verification_profile": "unverified",
                         "runtime_bindings": {
                             "schema_version": 1,
-                            "vblank_frame_counter_addr": "0x08804000",
+                            "vblank_frame_counter_addr": 142622720,
                         },
                     }, separators=(",", ":")) + "\n",
                     encoding="utf-8",
@@ -1344,8 +1344,8 @@ class NativePlayerUiTests(unittest.TestCase):
                                 "revision_policy": "exact-disc-id",
                             },
                             "executable": {
-                                "base": "0x08800000",
-                                "entry": "0x08800000",
+                                "base": 142606336,
+                                "entry": 142606336,
                                 "bss_metadata_source": "elf",
                                 "extra_executable_spans": [],
                             },
@@ -5343,7 +5343,7 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertTrue(ready_frames)
         self.assertRegex(
             run["stdout"],
-            r"\[PLAYER_UI_TEST\] post_build_validation status=0 reason=Runtime package v2 is valid",
+            r"\[PLAYER_UI_TEST\] post_build_validation status=0 reason=Runtime package is valid",
         )
         self.assertRegex(
             run["stdout"],
@@ -5369,7 +5369,7 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertRegex(
             run["stdout"],
             r"\[PLAYER_UI_TEST\] post_build_validation status=0 "
-            r"reason=Runtime package v\d is valid for TEST00009",
+            r"reason=Runtime package is valid for TEST00009",
         )
         self.assertRegex(
             run["stdout"],
