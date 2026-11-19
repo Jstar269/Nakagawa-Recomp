@@ -101,15 +101,17 @@ REQUIRED_FILES = {
 
 
 class TestPolicySyncTrackedPaths(unittest.TestCase):
-    def test_worktree_deletions_are_not_reported_as_unclassified(self):
+    def test_worktree_deletions_stay_in_the_check(self):
+        """A tracked path missing from disk is still tracked, so it is still classified."""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "kept.txt").write_text("kept\n", encoding="utf-8")
             result = subprocess.CompletedProcess(
-                args=["git", "ls-files"], returncode=0,
-                stdout="kept.txt\ndeleted.txt\n", stderr="")
-            with mock.patch.object(policy_sync.subprocess, "run", return_value=result):
-                self.assertEqual(policy_sync.tracked_paths(root), ["kept.txt"])
+                args=["git", "ls-files", "-z"], returncode=0,
+                stdout=b"kept.txt\0deleted.txt\0", stderr=b"")
+            with mock.patch.object(policy_sync.subprocess, "run", return_value=result) as run:
+                self.assertEqual(policy_sync.tracked_paths(root), ["kept.txt", "deleted.txt"])
+            self.assertEqual(run.call_args.args[0], ["git", "ls-files", "-z"])
 
 class TestGeneratedDocumentBytes(unittest.TestCase):
     def test_json_writer_uses_lf_bytes_on_every_host(self) -> None:

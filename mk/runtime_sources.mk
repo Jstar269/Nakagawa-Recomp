@@ -288,6 +288,11 @@ PORTABLE_CORE_SRCS := src/rt/recomp.c \
 PORTABLE_CORE_OBJS := $(patsubst src/rt/%.c,$(PORTABLE_CORE_DIR)/%.o,$(PORTABLE_CORE_SRCS))
 PORTABLE_CORE_CFLAGS ?= -D_GNU_SOURCE -std=c11 -O0 -fno-strict-aliasing -Isrc/rt -Isrc/core -Wall -Wextra -Werror=format
 override PORTABLE_CORE_CFLAGS += -DSR_FLIGHT_RECORDER_LINKED
+ifneq ($(strip $(REPRODUCIBLE_COMPILE_FLAG)),)
+ifeq ($(filter $(REPRODUCIBLE_COMPILE_FLAG),$(PORTABLE_CORE_CFLAGS)),)
+override PORTABLE_CORE_CFLAGS += $(REPRODUCIBLE_COMPILE_FLAG)
+endif
+endif
 
 # Reproducible build identity for the flight recorder's build block
 # (src/rt/flight_recorder.c, assets/flight_recorder_schema.json). The old
