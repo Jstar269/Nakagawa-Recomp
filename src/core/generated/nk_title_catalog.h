@@ -10,6 +10,12 @@
 #include <stdint.h>
 
 #define NK_TITLE_CATALOG_SCHEMA_VERSION 1
+/* Title limits shared by this catalog and the manifest parser
+ * (src/core/nk_title_manifest.c): a manifest the parser accepts always
+ * fits the catalog's registry and snapshot copies. */
+#define NK_TITLE_MAX_OVERLAYS 8
+#define NK_TITLE_MAX_COMPATIBLE_DISC_IDS 16
+#define NK_TITLE_MAX_MODULES 256
 #define NK_TITLE_MAX_LOOSE_CONTENT_ROOTS 16
 #define NK_TITLE_MAX_LOOSE_CONTENT_EXCLUDES 2
 #define NK_TITLE_CATALOG_DIGEST "e5612eb3e86f66f2"
@@ -91,7 +97,6 @@ extern const NkTitleEntry nk_title_catalog_entries[];
  * snapshot with nk_title_catalog_snapshot_release(). */
 bool nk_title_catalog_find_by_disc_id(const char *disc_id, NkTitleEntrySnapshot *out_snapshot);
 bool nk_title_catalog_find_by_id(const char *title_id, NkTitleEntrySnapshot *out_snapshot);
-bool nk_title_catalog_get_overlay(NkTitleEntrySnapshot *out_snapshot);
 bool nk_title_catalog_snapshot_copy_locked(const NkTitleEntry *entry, NkTitleEntrySnapshot *out_snapshot);
 void nk_title_catalog_snapshot_release(NkTitleEntrySnapshot *snapshot);
 
@@ -110,7 +115,6 @@ void nk_title_catalog_advance_epoch_locked(void);
  * beyond the critical section. */
 const NkTitleEntry *nk_title_catalog_find_by_disc_id_locked(const char *disc_id);
 const NkTitleEntry *nk_title_catalog_find_by_id_locked(const char *title_id);
-const NkTitleEntry *nk_title_catalog_get_overlay_locked(void);
 
 /* Runtime private overlay registration (for local private acceptance testing) */
 /* The registry holds POINTERS to overlay entries whose storage belongs
@@ -123,11 +127,14 @@ const NkTitleEntry *nk_title_catalog_get_overlay_locked(void);
  * non-recursive catalog lock is held, must not call catalog APIs, and
  * returns true only if it released parser-owned storage. */
 typedef bool (*NkOverlayStorageResetFn)(void);
-void nk_title_catalog_set_overlay_storage_reset(NkOverlayStorageResetFn reset_fn);
 void nk_title_catalog_set_overlay_storage_reset_locked(NkOverlayStorageResetFn reset_fn);
 
-void nk_title_catalog_register_overlay(const NkTitleEntry *overlay_entry);
-void nk_title_catalog_register_overlay_locked(const NkTitleEntry *overlay_entry);
+/* Register an overlay entry. Returns true when the entry is registered:
+ * newly, already, or in the slot of the registered entry with the same id.
+ * Returns false for NULL and when all NK_TITLE_MAX_OVERLAYS slots hold
+ * other titles; the registry is then unchanged. */
+bool nk_title_catalog_register_overlay(const NkTitleEntry *overlay_entry);
+bool nk_title_catalog_register_overlay_locked(const NkTitleEntry *overlay_entry);
 void nk_title_catalog_clear_overlay(void);
 
 

@@ -61,6 +61,7 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/mygame/ge_float24_selftest",
     "build/mygame/ge_cpu_profile_validate_selftest",
     "build/mygame/ge_cpu_profile_validate_selftest --strip-cache-disabled",
+    "build/mygame/ge_cpu_profile_validate_selftest --vertex-cache-disabled",
     "build/mygame/ge_tnl_census_selftest",
     "build/mygame/ge_patch_tess_selftest",
     'build/mygame/ge_scene_selftest "build/mygame/ge-scene-selftest"',

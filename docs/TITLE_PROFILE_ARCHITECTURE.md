@@ -122,7 +122,7 @@ revision needs an explicit local qualification. That switch contains no retail
 hashes: the user's package builder records exact executable/module inputs under
 the per-user data root. A missing or changed record is reported as an
 `Unqualified revision` boundary; the registry does not select a nearby profile
-or infer compatibility from DISC_ID alone. See [issue #315](https://github.com/Jstar269/nakagawa-recomp/issues/315) and the [runtime package identity contract](RUNTIME_PACKAGING_ARCHITECTURE.md#5-local-aot-package-contract-v2).
+or infer compatibility from DISC_ID alone. See [issue #315](https://github.com/Jstar269/nakagawa-recomp/issues/315) and the [runtime package identity contract](RUNTIME_PACKAGING_ARCHITECTURE.md#5-local-aot-package-contract-v3).
 
 ### Temporary compatibility configuration
 

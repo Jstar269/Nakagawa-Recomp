@@ -154,7 +154,7 @@ Additions the mission list missed (all `upstream_derived` in the ledger):
   (LGPL-2.1-or-later) with a byte-exact blob manifest in
   `src/rt/atrac3p/PROVENANCE.md`. Dependency, not campaign code (see §3).
 - `src/rt/h264_ffmpeg_sub/*` — ~210-file FFmpeg n4.4 H.264 decoder subset
-  (LGPL-2.1-or-later; 208 byte-identical upstream files plus a few authored configuration
+  (LGPL-2.1-or-later; 209 byte-identical upstream files plus a few authored configuration
   stand-ins and the `nk_h264_api` layer) with a byte-exact blob manifest in
   `src/rt/h264_ffmpeg_sub/PROVENANCE.md`. Dependency, not campaign code (see §3).
 - `src/rt/minimp3/*` — minimp3 MP3 frame decoder (CC0-1.0; `minimp3.h` and the upstream
@@ -188,7 +188,7 @@ Sizes are `wc -l` at base `6a4f359`, as above, and are not refreshed.
 | G14 | PGD/amctrl (excluded `src/rt/pgd.c`/`.h`, `tools/pgd_decrypt.py` + pgd tests) | excluded pending qualified provenance/distribution review | UNKNOWN in public tree | `pgd_api.h` seam (`pgd_unavailable.c` linked) | Excluded tests only (`test_pgd_*`, harness — all excluded) | None today: stays excluded; see §4 disposition (c) |
 | G15 | Behaviour-hardening (no rewrite): `evf.h` (64), `fp_convert.h` (360), `guest_interp.c`/`.h` (704) | project-authored expression, PPSSPP-consulted (tiers R/R/S) | 1,128 | `hle.c` event-flag + float paths; AOT-gap execution floor; cosim lane | `evf_selftest` + `test_evf_c.py`, `fp-convert-selftest` + `test_fp_scalar_mutations.py`, cosim suite + `test_cosim_fixture.py` | Medium: `fp_convert` is nearest to independent (PSPAutotests pin + MIPS32 rationale already in its header); `guest_interp` blocked on the maintainer attestation item (§1.3) |
 | G16 | Plain AT3 decoder subset `src/rt/atrac3p/libavcodec/atrac3.c` + `src/rt/atrac3p/libavcodec/atrac3data.h` + `src/rt/atrac3p/libavcodec/bytestream.h` | FFmpeg n4.4, LGPL-2.1-or-later (exact pin and file deltas in `src/rt/atrac3p/PROVENANCE.md`) | 1,360 | `hle.c` sceAtrac codecType `0x1001` bridge | `atrac3p-bridge-selftest`, `hle-thread-selftest` (synthetic RIFF/header and decode bookkeeping) | Low: host decoder at the explicit sceAtrac boundary; first-frame `fact` delay remains `NOT_MEASURED` pending a PSP measurement |
-| G17 | H.264 decoder subset `src/rt/h264_ffmpeg_sub/*` (208 byte-identical upstream files, authored configuration stand-ins and the `nk_h264_api` layer) | FFmpeg n4.4, LGPL-2.1-or-later (exact pin and blob manifest in `src/rt/h264_ffmpeg_sub/PROVENANCE.md`) | ~210 files | `src/rt/h264_ffmpeg.c` (`sr_h264` seam backend on Linux, later Android) | `psmf-media-selftest` (`H264_FFMPEG=1`, source-authored H.264 fixture) | Low: host decoder at the `sceMpeg`/`sceVideocodec` boundary; Media Foundation stays the Windows backend |
+| G17 | H.264 decoder subset `src/rt/h264_ffmpeg_sub/*` (209 byte-identical upstream files, authored configuration stand-ins and the `nk_h264_api` layer) | FFmpeg n4.4, LGPL-2.1-or-later (exact pin and blob manifest in `src/rt/h264_ffmpeg_sub/PROVENANCE.md`) | ~210 files | `src/rt/h264_ffmpeg.c` (`sr_h264` seam backend on Linux, later Android) | `psmf-media-selftest` (`H264_FFMPEG=1`, source-authored H.264 fixture) | Low: host decoder at the `sceMpeg`/`sceVideocodec` boundary; Media Foundation stays the Windows backend |
 | G18 | MP3 frame decoder `src/rt/minimp3/minimp3.h` + `src/rt/minimp3/LICENSE` (byte-identical upstream) | minimp3, CC0-1.0 (exact pin and blob manifest in `src/rt/minimp3/PROVENANCE.md`) | 1 header | `src/rt/mp3_bridge.c` (project-authored) for the `hle.c` sceMp3 handlers | `hle-thread-selftest`, `tools/test_mp3_tone_fixture.py` (synthetic tone fixture) | Low: host decoder at the `sceMp3` boundary |
 | G19 | Texture replacement `src/rt/texrepl.c` (quick hash, palette hash and pack lookup; added 2026-11-06, #1880) | PPSSPP (`GPU/Common/TextureDecoder.cpp`, `GPU/Common/TextureReplacer.cpp`, `GPU/Common/TextureCacheCommon.cpp`) at 3bc60270, derived-translated | 965 | Ace texture replacement (`tex_xs_offer` in `ge_gpu.c`) | `texrepl-selftest` (PPSSPP hash vectors), `gpu-texscale-selftest` replace cell | None: host-only lookup of user packs; must stay bit-compatible with PPSSPP packs |
 | G20 | FSR 3.1.6 host and passes `src/rt/fsr3_host.c` + `src/rt/fsr3_host.h` + `src/rt/fsr3_jitter.c` + `src/rt/fsr3_jitter.h` + `src/rt/gpu_sdl3vk/fsr3_pass.c` (upscaler) and `src/rt/fsr3_fg_host.c` + `src/rt/fsr3_fg_host.h` + `src/rt/gpu_sdl3vk/fsr3_fg_pass.c` (frame generation); added 2026-11-06, #2081 | AMD FidelityFX SDK v2.4.0 at 7539ae8b6, MIT, derived-translated from its C++ host and Vulkan backend (sources named in each file and in `third_party/fidelityfx_sdk/PROVENANCE.md`) | 3,857 | The imported FSR 3 HLSL passes (`third_party/fidelityfx_sdk/`) and their `fsr3*_comp.inc` embeddings | `fsr3-host-selftest` and `fsr3-fg-host-selftest` (records of AMD's unmodified code on synthetic inputs), `fsr3-mutants`, `fsr3-fg-mutants`, `fsr3-pass-selftest` | None: opt-in host presentation; must stay equivalent to AMD's host so the passes get the inputs they were designed for |
@@ -591,10 +591,10 @@ that authority.
    trusted-record update and the #304 licensing decision), and document the
    remaining live tool lineage suites separately (test_funcdiff_cmp.py and
    test_nidseq.py; #342 addresses the EVF header/ledger mismatch).
-5. PGF payload admission ultimately needs counsel answers (font-origins
-   §8: OFL aggregation vs GPL program, RFN rename sufficiency, metric
-   reproduction exposure, camouflage-name redistribution). Is counsel
-   engaged, and does the G4 converter start before those answers?
+5. PGF payload admission ultimately needs counsel answers on four questions: OFL aggregation
+   versus running under GPL, whether RFN renaming is sufficient, the exposure from reproducing
+   metrics, and redistributing camouflage-named outlines. Is counsel engaged, and does the G4
+   converter start before those answers?
 6. PGD/amctrl (G14): is qualified review active, dormant, or out of scope
    for this campaign? The plan assumes dormant-but-open.
 7. Threshold calibration for the similarity check (§5.1.3): accept the

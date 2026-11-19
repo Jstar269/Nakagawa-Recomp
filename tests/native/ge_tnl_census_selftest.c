@@ -252,6 +252,8 @@ typedef struct {
     float far_x;      /* first vertex x (BIG for the vertex-range case) */
     float z0;         /* first vertex z (+1 is behind the camera) */
     int decline;      /* the stand-in's tnl_prim declines */
+    unsigned tris;    /* triangles the CPU rasterizer draws for a PRIM kept on the CPU: the
+                       * near-clipped one splits in two, one pushed far off screen draws none */
 } Scenario;
 
 static void st_none(void) {}
@@ -270,19 +272,19 @@ static void st_specular(void) { W(0x17, 1); W(0x18, 1); W(0x5F, 1); }
 static void st_light(void) { W(0x17, 1); W(0x18, 1); W(0x63, f24(BIG)); }
 
 static const Scenario k_scenarios[] = {
-    { "eligible", SC_TAKEN, st_none, -0.4f, -5.0f, 0 },
-    { "clear", GE_TNL_WHY_CLEAR, st_clear, -0.4f, -5.0f, 0 },
-    { "flat", GE_TNL_WHY_FLAT, st_flat, -0.4f, -5.0f, 0 },
-    { "texgen", GE_TNL_WHY_TEXGEN, st_texgen, -0.4f, -5.0f, 0 },
-    { "matrix", GE_TNL_WHY_MATRIX_RANGE, st_matrix, -0.4f, -5.0f, 0 },
-    { "viewport", GE_TNL_WHY_VIEWPORT_RANGE, st_viewport, -0.4f, -5.0f, 0 },
-    { "texcoord", GE_TNL_WHY_TEXCOORD_RANGE, st_texcoord, -0.4f, -5.0f, 0 },
-    { "fog", GE_TNL_WHY_FOG_RANGE, st_fog, -0.4f, -5.0f, 0 },
-    { "specular", GE_TNL_WHY_SPECULAR_POW, st_specular, -0.4f, -5.0f, 0 },
-    { "light", GE_TNL_WHY_LIGHT_RANGE, st_light, -0.4f, -5.0f, 0 },
-    { "vertex", GE_TNL_WHY_VERTEX_RANGE, st_none, BIG, -5.0f, 0 },
-    { "clip", GE_TNL_WHY_CLIP, st_none, -0.4f, 1.0f, 0 },
-    { "backend", GE_TNL_WHY_BACKEND, st_none, -0.4f, -5.0f, 1 },
+    { "eligible", SC_TAKEN, st_none, -0.4f, -5.0f, 0, 0u },
+    { "clear", GE_TNL_WHY_CLEAR, st_clear, -0.4f, -5.0f, 0, 1u },
+    { "flat", GE_TNL_WHY_FLAT, st_flat, -0.4f, -5.0f, 0, 1u },
+    { "texgen", GE_TNL_WHY_TEXGEN, st_texgen, -0.4f, -5.0f, 0, 1u },
+    { "matrix", GE_TNL_WHY_MATRIX_RANGE, st_matrix, -0.4f, -5.0f, 0, 0u },
+    { "viewport", GE_TNL_WHY_VIEWPORT_RANGE, st_viewport, -0.4f, -5.0f, 0, 0u },
+    { "texcoord", GE_TNL_WHY_TEXCOORD_RANGE, st_texcoord, -0.4f, -5.0f, 0, 1u },
+    { "fog", GE_TNL_WHY_FOG_RANGE, st_fog, -0.4f, -5.0f, 0, 1u },
+    { "specular", GE_TNL_WHY_SPECULAR_POW, st_specular, -0.4f, -5.0f, 0, 1u },
+    { "light", GE_TNL_WHY_LIGHT_RANGE, st_light, -0.4f, -5.0f, 0, 1u },
+    { "vertex", GE_TNL_WHY_VERTEX_RANGE, st_none, BIG, -5.0f, 0, 0u },
+    { "clip", GE_TNL_WHY_CLIP, st_none, -0.4f, 1.0f, 0, 2u },
+    { "backend", GE_TNL_WHY_BACKEND, st_none, -0.4f, -5.0f, 1, 1u },
 };
 
 static void run_scenario(const Scenario *sc, int reset_by_reason) {
@@ -301,6 +303,7 @@ static void run_scenario(const Scenario *sc, int reset_by_reason) {
     ge_tnl_reason_counts(NULL, 1);
     s_decline = sc->decline;
     s_tnl_calls = 0;
+    s_cpu_tris = 0;
     expect(ge_run_list(LIST, 0) == 0, sc->name, "list did not reach END");
     ge_tnl_counts(&taken, &cpu, 0);
     ge_tnl_reason_counts(why, 0);
@@ -318,10 +321,14 @@ static void run_scenario(const Scenario *sc, int reset_by_reason) {
     expect(sum == cpu, sc->name, "the reasons do not sum to cpu");
     if (sc->why == SC_TAKEN) {
         expect(taken == 1u && cpu == 0u && s_tnl_calls == 1u, sc->name, "the eligible PRIM was not taken");
+        expect(s_cpu_tris == 0u, sc->name, "the PRIM the backend took was also rasterized on the CPU");
     } else {
         expect(taken == 0u && cpu == 1u, sc->name, "the PRIM was not counted as kept on the CPU");
         expect(s_tnl_calls == (sc->decline ? 1u : 0u), sc->name,
                "the backend was offered a PRIM ge.c had ruled out");
+        char what[96];
+        snprintf(what, sizeof what, "the CPU rasterizer drew %u triangles, not %u", s_cpu_tris, sc->tris);
+        expect(s_cpu_tris == sc->tris, sc->name, what);
     }
     /* A reset through either function clears both: the scenarios alternate between them. */
     if (reset_by_reason) ge_tnl_reason_counts(NULL, 1);
@@ -387,6 +394,23 @@ static void expect_window_line(uint32_t frame, const char *scenario, const char 
         expect(0, scenario, "the GESTAT-TNL line differs");
     }
     expect(strstr(line + len, "GESTAT-TNL ") == NULL, scenario, "more than one GESTAT-TNL line");
+}
+
+/* The window closing at `frame` prints a GESTAT line that starts with `want`. */
+static void expect_gestat_wall(uint32_t frame, const char *scenario, const char *want) {
+    static char out[16384];
+    if (set_frame_captured(frame, out, sizeof out) != 0) {
+        expect(0, scenario, "stderr could not be redirected");
+        return;
+    }
+    const char *line = strstr(out, "GESTAT f=");
+    if (!line || strncmp(line, want, strlen(want)) != 0) {
+        const char *end = line ? strchr(line, '\n') : NULL;
+        fprintf(stderr, "ge_tnl_census_selftest: %s: got  \"%.*s\"\n", scenario,
+                line ? (int)(end ? (size_t)(end - line) : strlen(line)) : 0, line ? line : "");
+        fprintf(stderr, "ge_tnl_census_selftest: %s: want \"%s...\"\n", scenario, want);
+        expect(0, scenario, "the GESTAT wall time is not the monotonic clock's");
+    }
 }
 
 /* Removes every SR_ variable, one at a time so the environment is never walked while it
@@ -466,9 +490,15 @@ int main(void) {
         " texcoord=1 fog=1 specular=1 light=1 alloc=0 vertex=1 clip=1 backend=1");
     run_scenario(&k_scenarios[0], 0);   /* eligible */
     run_scenario(&k_scenarios[3], 1);   /* texgen */
+    s_clock_ns = 2000000000u;           /* window 2 closes at 2 s on the monotonic clock */
     expect_window_line(120u, "window-2",
         "GESTAT-TNL f=120 taken=1 cpu=1: clear=0 flat=0 diagnostic=0 texgen=1 matrix=0 viewport=0"
         " texcoord=0 fog=0 specular=0 light=0 alloc=0 vertex=0 clip=0 backend=0");
+    /* GESTAT's wall= is the monotonic clock's time across the window, here 5 s with no CPU
+     * spent. Before, it was clock(): CPU time over all threads on glibc, and on any host it
+     * did not follow the clock the runtime paces frames by, so this window read 0 ms. */
+    s_clock_ns = 7000000000u;
+    expect_gestat_wall(180u, "window-3", "GESTAT f=180 wall=5000ms ");
 
     /* A motion tap (#2081) needs ge.c's clip positions, which this route never forms: while one
      * is set the eligible PRIM is not offered and is in neither count, ge.c's own T&L draws it,

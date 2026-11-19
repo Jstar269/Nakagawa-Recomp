@@ -43,5 +43,5 @@
     "vulkan",
     "sdl3"
   ],
-  "notes": "Part of the Nakagawa family. Bring your own copy of the game: nothing is downloaded, Nakagawa does not decrypt games, and no game data, keys or firmware are included. Other PSP titles are Experimental or Untested until the maintainer tests them. Contributions welcome."
+  "notes": "Part of the Nakagawa family. Bring your own copy of the game: nothing is downloaded. Nakagawa decrypts your own disc locally with the public game key tables PPSSPP ships, and it never decrypts firmware; no game data, firmware or console-bound keys are included. Other PSP titles are Experimental or Untested until the maintainer tests them. Contributions welcome."
 }

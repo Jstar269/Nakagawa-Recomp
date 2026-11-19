@@ -2331,10 +2331,12 @@ static void test_ge_vram_view_decode(void) {
     memcpy(SR_HOST(base + 0x120u), &v8888, 4u);
     expect(ge_vram_decode_surface(base + 0x120u, 1u, 1u, 1u, 3u, out) == 1 &&
            out[0] == 0x80402010u, "vram_view", "8888 is the stored word");
+    /* The GE stores a depth pixel at its linear address XOR 0x2040 (ge_zbuf_guest_address). */
     uint16_t depth = 0xABCDu;
-    memcpy(SR_HOST(base + 0x130u), &depth, 2u);
+    memcpy(SR_HOST((base + 0x130u) ^ 0x2040u), &depth, 2u);
     expect(ge_vram_decode_surface(base + 0x130u, 1u, 1u, 1u, 11u, out) == 1 &&
-           out[0] == 0xFFABABABu, "vram_view", "DEPTH16 is its high byte as opaque grey");
+           out[0] == 0xFFABABABu, "vram_view",
+           "DEPTH16 is its high byte as opaque grey, read where the GE stored it");
 
     memset(out, 0xA5, sizeof out);
     expect(!ge_vram_decode_surface(base, 0u, 1u, 4u, 0u, out) &&
@@ -2525,8 +2527,19 @@ static void test_ge_vram_capture(const char *dir) {
     state->tex_bufw = 2u;
     state->tex_fmt = 3u;
     memcpy(SR_HOST(0x04000000u), &display_px, 4u);
-    memcpy(SR_HOST(0x04110000u), &depth_z, 2u);
+    /* The GE stores depth pixel (x, y) at (zbp + 2 * (y * zbw + x)) ^ 0x2040 (measured on a
+     * PSP-3000, PSP-VRAM-MIRROR-001), so pixel (0, 0) of this surface sits at 0x04112040. The
+     * word at the linear address holds a different value: a decoder that read the surface
+     * linearly would show it. */
+    memcpy(SR_HOST(0x04110000u ^ 0x2040u), &depth_z, 2u);
+    {
+        const uint16_t linear_z = 0x1100u;
+        memcpy(SR_HOST(0x04110000u), &linear_z, 2u);
+    }
     memcpy(SR_HOST(texture.addr), texels, sizeof texels);
+    expect(ge_vram_view_decode(0, &depth, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+           out[0] == 0xFFABABABu, "vram_capture",
+           "the live depth view reads each pixel where the GE stored it, not linearly");
     expect(ge_vramdump_write(dir, first, 0x44000000u, 512u, 3u) == 1,
            "vram_capture", "the capture is written");
     expect(ge_vram_capture_count() == 1u && ge_vram_capture_info(0u, &vblank, &src) &&
@@ -2540,7 +2553,7 @@ static void test_ge_vram_capture(const char *dir) {
 
     /* The game runs on: VRAM and the GE state change after the capture. */
     memcpy(SR_HOST(0x04000000u), &live_px, 4u);
-    memset(SR_HOST(0x04110000u), 0, 2u);
+    memset(SR_HOST(0x04110000u ^ 0x2040u), 0, 2u);
     memset(SR_HOST(texture.addr), 0, sizeof texels);
     state->fbp = 0x00088000u;
     expect(ge_vram_capture_info(0u, NULL, &src) &&
@@ -2552,7 +2565,8 @@ static void test_ge_vram_capture(const char *dir) {
            out[0] == 0xFF112233u && w == 1u && h == 1u,
            "vram_capture", "the capture shows the pixel it captured, opaque, uncached view folded");
     expect(ge_vram_capture_decode(0u, 0, &depth, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
-           out[0] == 0xFFABABABu, "vram_capture", "a captured depth buffer decodes as DEPTH16");
+           out[0] == 0xFFABABABu, "vram_capture",
+           "a captured depth buffer decodes as DEPTH16, each pixel where the GE stored it");
     expect(ge_vram_capture_decode(0u, 1, &texture, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
            out[0] == 0xFF405060u && out[1] == 0xFF020304u && w == 2u && h == 1u,
            "vram_capture", "a captured linear 8888 texture decodes from the image");
@@ -4414,17 +4428,21 @@ int main(int argc, char **argv) {
         }
         return bench_main((uint32_t)rounds);
     }
-    if (argc == 2 && strcmp(argv[1], "--strip-cache-disabled") == 0) strip_cache = 0;
-    else if (argc != 1) {
-        fprintf(stderr, "usage: %s [--strip-cache-disabled]\n", argv[0]);
-        return 2;
+    /* The scenes below run with the vertex cache as the arguments set it, never as the caller's
+     * environment left it, so each Makefile run covers the leg it names (the third run passes
+     * --vertex-cache-disabled); test_ge_vertex_cache sets both modes itself. */
+    int vertex_cache = 1;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--strip-cache-disabled") == 0 && strip_cache) strip_cache = 0;
+        else if (strcmp(argv[i], "--vertex-cache-disabled") == 0 && vertex_cache) vertex_cache = 0;
+        else {
+            fprintf(stderr, "usage: %s [--strip-cache-disabled] [--vertex-cache-disabled]\n", argv[0]);
+            return 2;
+        }
     }
     env_set("SR_GE_STRIP_CACHE_DISABLE", strip_cache ? NULL : "1");
-    /* The scenes below run with the vertex cache as the environment sets it (the Makefile
-     * runs once more with SR_GE_VERTEX_CACHE_DISABLE=1); test_ge_vertex_cache sets both. */
-    const char *vertex_cache_disable = getenv("SR_GE_VERTEX_CACHE_DISABLE");
-    int vertex_cache = !(vertex_cache_disable && vertex_cache_disable[0] &&
-                         strcmp(vertex_cache_disable, "0") != 0);
+    env_set("SR_GE_VERTEX_CACHE_DISABLE", vertex_cache ? NULL : "1");
+    ge_vertex_cache_reload_env();
 
     uint8_t *arena = (uint8_t *)calloc(0x0c000000u, 1);
     if (!arena) {
