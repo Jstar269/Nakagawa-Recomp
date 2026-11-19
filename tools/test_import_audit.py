@@ -20,6 +20,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
+import hle_sources
 import import_audit
 import import_audit_gate
 from import_fixtures import (
@@ -264,12 +265,14 @@ class ExportTableTests(unittest.TestCase):
         self.assertIn("exceeds cap", str(ctx.exception))
 
     def test_export_library_count_matches_the_runtime_loader_limit(self) -> None:
-        runtime = (ROOT / "src" / "rt" / "hle_kernel_module.c").read_text(encoding="utf-8")
-        loader = runtime.split("unsigned register_prx_exports", 1)[1].split("\n}", 1)[0]
+        # The runtime HLE sources are read only through tools/hle_sources.py (test_hle_sources).
+        loader = hle_sources.function_text("unsigned register_prx_exports(")
         match = re.search(r"\bcount\s*>\s*(\d+)", loader)
-        self.assertIsNotNone(match, "runtime export count cap was not found")
+        assert match is not None, "runtime export count cap was not found"
         runtime_cap = int(match.group(1))
-        exports = [("SyntheticLarge", 0x4000, list(range(runtime_cap + 1)), [])]
+        exports: list[tuple[str | None, int, list[int], list[int]]] = [
+            ("SyntheticLarge", 0x4000, list(range(runtime_cap + 1)), [])
+        ]
         with self.assertRaises(ImportTableError):
             parse_export_table(build_module_elf(exports))
         self.assertEqual(psp_import_table.MAX_EXPORTS_PER_LIB, runtime_cap)

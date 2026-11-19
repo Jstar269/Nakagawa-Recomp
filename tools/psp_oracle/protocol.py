@@ -143,6 +143,7 @@ def model_identity_fields(
 
         normalized_physical = re.sub(r"[^a-z0-9]", "", physical_label.lower())
         retail_model = re.fullmatch(r"psp([123])\d{3}(?:series)?", normalized_physical)
+        physical_family: str | None
         if retail_model:
             physical_family = f"PSP-{retail_model.group(1)}000"
         elif re.fullmatch(r"pspn100\d(?:series)?", normalized_physical):

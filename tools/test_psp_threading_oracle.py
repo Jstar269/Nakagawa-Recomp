@@ -460,7 +460,8 @@ class AnalyzerCliTests(unittest.TestCase):
                 with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                     code = analyzer.main([*(extra_args or []), *(str(path) for path in paths)])
             except SystemExit as exc:
-                code = int(exc.code)
+                assert isinstance(exc.code, int), exc.code
+                code = exc.code
             return code, stdout.getvalue() + stderr.getvalue(), paths
 
     def test_incomplete_required_cases_return_nonzero(self) -> None:

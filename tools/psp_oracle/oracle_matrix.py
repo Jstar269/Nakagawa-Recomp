@@ -698,7 +698,7 @@ def run_command(argv: list[str], timeout: float, stdin: str | None = None) -> tu
         return (value or b"").decode("utf-8", "replace")
 
     env = {**os.environ, "MSYS_NO_PATHCONV": "1"}
-    process_options: dict[str, object] = {}
+    process_options: dict[str, Any] = {}
     if os.name == "nt":
         process_options["creationflags"] = getattr(
             subprocess, "CREATE_NEW_PROCESS_GROUP", 0

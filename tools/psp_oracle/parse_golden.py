@@ -1438,6 +1438,8 @@ def _register_campaign_probe(
     fail_optional_fields: dict[str, set[str] | frozenset[str]] | None = None,
 ) -> None:
     terminal = terminal_case or f"{campaign_case}-done"
+    case_ids: tuple[str, ...]
+    case_counts: dict[str, int]
     if out_counts is None:
         rows = tuple(semantic_cases.items()) if isinstance(semantic_cases, dict) else tuple(semantic_cases)
         if not all(
@@ -1446,43 +1448,45 @@ def _register_campaign_probe(
             for row in rows
         ):
             raise ValueError(f"{campaign_case}: registration rows must be (case_id, out_count) pairs")
-        terminal_rows = tuple(row for row in rows if row[0] == terminal)
+        pairs = cast("tuple[tuple[str, int], ...]", rows)
+        terminal_rows = tuple(row for row in pairs if row[0] == terminal)
         if terminal_rows and (len(terminal_rows) != 1 or terminal_rows[0][1] != 1):
             raise ValueError(f"{campaign_case}: terminal registration row must have count one")
-        semantic_rows = tuple(row for row in rows if row[0] != terminal)
-        semantic_cases = tuple(row[0] for row in semantic_rows)
-        out_counts = dict(rows)
-        if len(out_counts) != len(rows):
+        semantic_rows = tuple(row for row in pairs if row[0] != terminal)
+        case_ids = tuple(row[0] for row in semantic_rows)
+        case_counts = dict(pairs)
+        if len(case_counts) != len(pairs):
             raise ValueError(f"{campaign_case}: registration rows contain duplicate case IDs")
-        out_counts.pop(terminal, None)
+        case_counts.pop(terminal, None)
     else:
-        semantic_cases = tuple(semantic_cases)
-    if len(set(semantic_cases)) != len(semantic_cases):
+        case_ids = cast("tuple[str, ...]", tuple(semantic_cases))
+        case_counts = out_counts
+    if len(set(case_ids)) != len(case_ids):
         raise ValueError(f"{campaign_case}: semantic case list contains duplicates")
-    if terminal in semantic_cases:
+    if terminal in case_ids:
         raise ValueError(f"{campaign_case}: terminal case is also a semantic case")
-    count_cases = set(out_counts)
-    semantic_set = set(semantic_cases)
+    count_cases = set(case_counts)
+    semantic_set = set(case_ids)
     if count_cases != semantic_set and not (
         terminal in count_cases and count_cases - {terminal} == semantic_set
     ):
         raise ValueError(f"{campaign_case}: out_counts keys must match semantic cases exactly")
     optional = fail_optional_fields or {}
-    if set(optional) - set(semantic_cases):
+    if set(optional) - set(case_ids):
         raise ValueError(f"{campaign_case}: failure-field exceptions name an unregistered case")
     for case_id, fields in optional.items():
-        allowed_fields = {"result", *(f"out{i}" for i in range(out_counts[case_id]))}
+        allowed_fields = {"result", *(f"out{i}" for i in range(case_counts[case_id]))}
         if set(fields) - allowed_fields:
             raise ValueError(f"{campaign_case}: failure-field exception names an absent field")
     spec = StreamSpec(
         test_id,
-        semantic_cases,
+        case_ids,
         terminal,
         fail_optional_fields=tuple(
             (case_id, frozenset(fields)) for case_id, fields in sorted(optional.items())
         ),
     )
-    counts = dict(out_counts)
+    counts = dict(case_counts)
     counts[spec.terminal_case] = 1
     CAMPAIGN_PROBE_CASES[campaign_case] = (spec, counts)
 
@@ -3742,7 +3746,7 @@ def parse_registry_readonly_output(
     terminal = records[-1].case_id == "registry-done"
     body = records[2: -1 if terminal else None]
     for index, record in enumerate(body):
-        values = dict(record.values)
+        raw_fields = dict(record.values)
         if record.case_id == "registry-bad-handle":
             # The forged-handle call runs last so a fault there cannot hide
             # the census; nothing but registry-done may follow it.
@@ -3755,16 +3759,18 @@ def parse_registry_readonly_output(
             values = _io_fields(
                 REGISTRY_TEST_ID, record, {"result", "out0", "out1", "detail"}, {"detail"}
             )
-            _validate_registry_name(values["detail"], category=True)
-            categories.append(values["detail"])
+            detail = str(values["detail"])
+            _validate_registry_name(detail, category=True)
+            categories.append(detail)
         elif record.case_id.startswith("registry-key-"):
             common = {"result", "out0", "out1", "out2", "out3", "detail"}
-            expected_fields = common | ({"value_hex"} if "value_hex" in values else set())
+            expected_fields = common | ({"value_hex"} if "value_hex" in raw_fields else set())
             values = _io_fields(
                 REGISTRY_TEST_ID, record, expected_fields, {"detail", "value_hex"}
             )
-            _validate_registry_name(values["detail"], category=False)
-            name = values["detail"].rsplit("/", 1)[-1]
+            detail = str(values["detail"])
+            _validate_registry_name(detail, category=False)
+            name = detail.rsplit("/", 1)[-1]
             has_value = values["out2"] == 1
             if name in REGISTRY_MODELED_KEYS:
                 if has_value != ("value_hex" in values):
@@ -3775,9 +3781,11 @@ def parse_registry_readonly_output(
                 raise ProtocolError(
                     f"{REGISTRY_TEST_ID}: non-modeled key value must not be recorded"
                 )
-            if "value_hex" in values and not re.fullmatch(r"(?:[0-9a-fA-F]{2})*", values["value_hex"]):
+            if "value_hex" in values and not re.fullmatch(
+                r"(?:[0-9a-fA-F]{2})*", str(values["value_hex"])
+            ):
                 raise ProtocolError(f"{REGISTRY_TEST_ID}: value_hex is not byte encoded")
-            keys.append(values["detail"])
+            keys.append(detail)
         else:
             raise ProtocolError(f"{REGISTRY_TEST_ID}: unexpected record {record.case_id!r}")
 
@@ -4205,8 +4213,8 @@ class FontFilesReport:
 def _io_fields(
     test_id: str,
     record: TestResult,
-    expected: set[str],
-    text: set[str],
+    expected: set[str] | frozenset[str],
+    text: set[str] | frozenset[str],
     *,
     byte_hex_fields: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, int | str]:

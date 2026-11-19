@@ -142,7 +142,7 @@ class FakeDevice:
         if behaviour == "wrong-commit":
             envelopes[1]["SOURCE_COMMIT"] = "f" * 40
         out.write_text(json.dumps({"envelopes": envelopes, "terminal_reason": None}), encoding="utf-8")
-        command_report = {"verdict": "ok"}
+        command_report: dict[str, Any] = {"verdict": "ok"}
         if not omit_boots:
             command_report["boots"] = boots
         return 0, json.dumps(command_report), ""

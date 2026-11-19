@@ -39,8 +39,8 @@ try:
     from . import parse_golden as _parse_golden
     from . import protocol as _protocol
 except ImportError:  # direct ``python tools/psp_oracle/run_psplink.py`` invocation
-    from psp_oracle import parse_golden as _parse_golden
-    from psp_oracle import protocol as _protocol
+    from psp_oracle import parse_golden as _parse_golden  # type: ignore[no-redef]
+    from psp_oracle import protocol as _protocol  # type: ignore[no-redef]
 
 ParsedOutput = _protocol.ParsedOutput
 ProtocolError = _protocol.ProtocolError
@@ -3254,7 +3254,7 @@ def _campaign_queue_summary() -> dict[str, object]:
          "estimated_seconds": CAMPAIGN_CASE_ESTIMATE_SECONDS[case_id]}
         for index, case_id in enumerate(CAMPAIGN_QUEUE_CASES)
     ]
-    case_seconds = sum(row["estimated_seconds"] for row in queue)
+    case_seconds = sum(CAMPAIGN_CASE_ESTIMATE_SECONDS[case_id] for case_id in CAMPAIGN_QUEUE_CASES)
     reset_count = len(CAMPAIGN_QUEUE_CASES) - 1
     reset_seconds = reset_count * CAMPAIGN_RESET_ESTIMATE_SECONDS
     return {
@@ -3693,7 +3693,7 @@ def run_campaign_plan(
     if start_index >= len(cases):
         failed_case_id = carried.get("failed_case_id")
         if failed_case_id is not None:
-            state = {
+            incomplete_state: dict[str, object] = {
                 "schema": 2,
                 "campaign_id": plan["campaign_id"],
                 "source_commit": plan["source_commit"],
@@ -3708,7 +3708,7 @@ def run_campaign_plan(
                 "phase": None,
                 "failed_case_id": failed_case_id,
             }
-            _write_campaign_json(checkpoint_path, state)
+            _write_campaign_json(checkpoint_path, incomplete_state)
             report = {
                 "status": "INCOMPLETE",
                 "campaign_id": plan["campaign_id"],

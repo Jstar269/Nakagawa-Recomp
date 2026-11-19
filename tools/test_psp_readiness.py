@@ -56,7 +56,8 @@ class ReadinessAggregationTests(unittest.TestCase):
                      psp_readiness.ENV_PPSSPP_HEADLESS: "",
                  }), \
                  mock.patch.dict(sys.modules, {"pspdev_lock": lock_module}):
-                return psp_readiness.collect()
+                report: dict = psp_readiness.collect()
+                return report
 
     def test_linux_host_tools_use_current_python_and_make(self) -> None:
         report = self.collect_on_synthetic_root(
