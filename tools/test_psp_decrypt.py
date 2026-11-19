@@ -2071,6 +2071,16 @@ class TestNpumdimg(unittest.TestCase):
         self._refused(out, dst, 4, "MALFORMED_INPUT")
 
 
+# The clear text of the well-formed coded stream the LZRC corpus below mutates
+# (synthetic bytes; lzrc_literals encodes them).
+_LZRC_SEED_CLEAR = bytes(range(0x20, 0x60)) * 2 + b"NK295 synthetic literals. " * 6
+
+
+def _c_bytes(data: bytes) -> str:
+    """``data`` as the body of a C array initialiser."""
+    return ", ".join(str(byte) for byte in data)
+
+
 # The DRM BB fuse-ID types and the LZRC decoder's bounds, through the C API.
 _AMCTRL_HARNESS_C = r"""
 #include <stdio.h>
@@ -2084,6 +2094,13 @@ _AMCTRL_HARNESS_C = r"""
 #define GUARD 64
 #define CAP 4096
 #define STREAMS 20000
+#define IN_MAX 512
+#define NO_ANSWER (-2) /* only the bounds are checked */
+
+/* A well-formed coded stream and the bytes it decodes to. */
+static const unsigned char seed[] = {@LZRC_SEED@};
+static const unsigned char seed_clear[] = {@LZRC_SEED_CLEAR@};
+typedef char seed_fits_the_input_buffer[sizeof(seed) <= IN_MAX ? 1 : -1];
 
 static unsigned long long rng = 0x5EED2951u;
 static unsigned rnd(void) {
@@ -2097,8 +2114,9 @@ int main(void) {
     CIPHER_KEY cipher;
     unsigned char key16[16] = {0};
     unsigned char *out = malloc(CAP + 2 * GUARD);
-    unsigned char in[512];
+    unsigned char in[IN_MAX];
     int mac2, cipher2, mac1, mode1, worst = 0, overruns = 0, accepted = 0;
+    int stored_ok = 0, coded_ok = 0, wrong = 0;
     nk_psp_ctx_init(&ctx, NULL);
     mac2 = sceDrmBBMacInit(&ctx, &mac, 2);
     printf("mac2 %s %s\n", nk_psp_status_name(mac2), ctx.message);
@@ -2115,29 +2133,86 @@ int main(void) {
     for (int iter = 0; iter < STREAMS; iter++) {
         size_t in_len = (size_t)(rnd() % sizeof(in));
         size_t out_len = (size_t)(rnd() % CAP);
-        int got;
+        const unsigned char *clear = NULL;
+        int got, want = NO_ANSWER;
         for (size_t i = 0; i < in_len; i++) in[i] = (unsigned char)rnd();
-        if (in_len > 0 && (iter & 1)) in[0] &= 0x7F; /* mostly coded streams */
+        switch (iter & 3) {
+        case 0: /* random bytes: half of them stored streams with a random 32-bit size */
+            break;
+        case 1: /* random bytes as a coded stream */
+            if (in_len > 0) in[0] &= 0x7F;
+            break;
+        case 2: /* a stored stream whose declared size is under, at or one past what fits */
+            if (in_len >= 5) {
+                size_t body = in_len - 5;
+                size_t declared = (size_t)(rnd() % (body + 2));
+                if (rnd() & 1) out_len = (size_t)(rnd() % (body + 2));
+                in[0] |= 0x80;
+                in[1] = 0;
+                in[2] = 0;
+                in[3] = (unsigned char)(declared >> 8);
+                in[4] = (unsigned char)declared;
+                want = (declared <= body && declared <= out_len) ? (int)declared : -1;
+                clear = in + 5;
+            }
+            break;
+        default: /* the well-formed coded stream: whole, short of room, cut short, bits flipped */
+            memcpy(in, seed, sizeof(seed));
+            in_len = sizeof(seed);
+            switch (rnd() % 4) {
+            case 0:
+                out_len = sizeof(seed_clear) + (size_t)(rnd() % GUARD);
+                want = (int)sizeof(seed_clear);
+                clear = seed_clear;
+                break;
+            case 1:
+                out_len = (size_t)(rnd() % sizeof(seed_clear));
+                want = -1;
+                break;
+            case 2:
+                in_len = (size_t)(rnd() % sizeof(seed));
+                break;
+            default:
+                for (unsigned flips = 1 + rnd() % 3; flips > 0; flips--)
+                    in[rnd() % sizeof(seed)] ^= (unsigned char)(1u << (rnd() % 8));
+                break;
+            }
+            break;
+        }
         memset(out, 0xA5, CAP + 2 * GUARD);
         got = nk_psp_lzrc_decompress(out + GUARD, out_len, in, in_len);
         if (got > (int)out_len) worst = got;
-        if (got >= 0) accepted++;
+        if (got >= 0) {
+            accepted++;
+            if (in[0] & 0x80) stored_ok++; else coded_ok++;
+        }
+        if (want != NO_ANSWER &&
+            (got != want || (want > 0 && memcmp(out + GUARD, clear, (size_t)want) != 0)))
+            wrong++;
         for (size_t i = 0; i < GUARD; i++) {
             if (out[i] != 0xA5 || out[GUARD + out_len + i] != 0xA5) { overruns++; break; }
         }
     }
-    printf("lzrc streams=%d accepted=%d past_len=%d overruns=%d\n", STREAMS, accepted,
-           worst, overruns);
+    printf("lzrc streams=%d accepted=%d stored_ok=%d coded_ok=%d wrong=%d past_len=%d overruns=%d\n",
+           STREAMS, accepted, stored_ok, coded_ok, wrong, worst, overruns);
     free(out);
     return 0;
 }
-"""
+""".replace("@LZRC_SEED@", _c_bytes(lzrc_literals(_LZRC_SEED_CLEAR))).replace(
+    "@LZRC_SEED_CLEAR@", _c_bytes(_LZRC_SEED_CLEAR))
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
 class TestAmctrlAndLzrcBounds(unittest.TestCase):
     """The fuse-ID DRM types are refused as CONTEXT_REQUIRED, and malformed LZRC
-    streams fail closed without writing outside the caller's buffer."""
+    streams fail closed without writing outside the caller's buffer.
+
+    The LZRC corpus is 20,000 streams of four kinds: random bytes, random bytes
+    as a coded stream, stored streams whose declared size is under, at or one
+    past what the input and the output hold, and one well-formed coded stream
+    taken whole, with too little room, cut short or with flipped bits.  Random
+    bytes alone never reach an accepting path: a coded stream is accepted only at
+    its end marker, and a stored one only when its declared size fits."""
 
     @classmethod
     def setUpClass(cls):
@@ -2174,11 +2249,16 @@ class TestAmctrlAndLzrcBounds(unittest.TestCase):
         fields = dict(item.split("=") for item in report.split()[1:])
         self.assertEqual(fields["past_len"], "0")
         self.assertEqual(fields["overruns"], "0")
-        # The bound checks mean something only if the random corpus reaches both
-        # the decoder's accepting path and its rejecting path.
+        # The bound checks mean something only if the corpus reaches the decoder's
+        # rejecting path and both of its accepting paths (a stored copy, a coded
+        # stream's end marker), and an accepted stream is one it decoded: where
+        # the answer is known, the size and the bytes are the expected ones.
         accepted = int(fields["accepted"])
         self.assertGreater(accepted, 0, report)
         self.assertLess(accepted, int(fields["streams"]), report)
+        self.assertGreater(int(fields["stored_ok"]), 0, report)
+        self.assertGreater(int(fields["coded_ok"]), 0, report)
+        self.assertEqual(fields["wrong"], "0", report)
 
     def test_the_literal_writer_round_trips_through_the_decoder(self):
         from tools.nk_core import decrypt_tool
