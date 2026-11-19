@@ -21,7 +21,7 @@ import subprocess
 import sys
 from typing import Any
 
-from nk_powershell import powershell_exe
+from nk_powershell import powershell_env, powershell_exe
 
 ROOT = Path(__file__).resolve().parents[1]
 # The PSPDEV build toolchain and the PSPLINK PC clients need not live in the same
@@ -50,6 +50,7 @@ def _run(command: list[str], *, timeout: float = 5.0) -> tuple[int | None, str]:
         completed = subprocess.run(
             command,
             cwd=ROOT,
+            env=powershell_env() if sys.platform.startswith("win") else None,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
