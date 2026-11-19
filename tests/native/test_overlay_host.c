@@ -281,9 +281,40 @@ static bool copy_font(const char *root, const char *folder, const char *relative
     return saved;
 }
 
+/* After the folder it is given, the host looks for a face in SDL's base path (this executable's
+   folder) and the working directory. The font fixtures run from the executable's own folder,
+   which the make target keeps apart from the build folder, where `make player` stages the fonts
+   beside the player: a copy in either fallback would let the host load the face and the check
+   pass, or fail, for the wrong reason. False, after a failed CHECK naming `label`'s copy, when
+   the folder holds a face or cannot become the working directory. */
+static bool enter_fontless_exe_folder(const char *label) {
+    const char *base = SDL_GetBasePath();
+    char probe[1200];
+    if (base == NULL || base[0] == '\0') {
+        CHECK(false, "font fixture: SDL knows this executable's folder");
+        fprintf(stderr, "  (%s)\n", label);
+        return false;
+    }
+    for (int font = 0; font < NK_UI_FONT_COUNT; ++font) {
+        if (snprintf(probe, sizeof(probe), "%s%s", base, nk_ui_font_path(font)) >=
+                (int)sizeof(probe) ||
+            SDL_GetPathInfo(probe, NULL)) {
+            CHECK(false, "font fixture: the executable's folder holds no UI font to fall back to");
+            fprintf(stderr, "  (%s: %s)\n", label, probe);
+            return false;
+        }
+    }
+    if (test_chdir(base) != 0) {
+        CHECK(false, "font fixture: the executable's folder becomes the working directory");
+        fprintf(stderr, "  (%s)\n", label);
+        return false;
+    }
+    return true;
+}
+
 /* Audit 2026-11-17: the player's folder may sit under a name outside the ANSI code page (a
    user name in Japanese, say). SDL's base path and the launcher's SR_UI_ROOT are UTF-8, so the
-   host finds the fonts there, from a working directory that has none. */
+   host finds the fonts there, from an executable folder and a working directory that have none. */
 static void test_fonts_from_a_utf8_folder(const char *root) {
     static const char leaf[] = "overlay-host-fonts-\xE6\x97\xA5\xE6\x9C\xAC-\xC3\xBC";
     const char *build = SR_SELFTEST_BUILD_ROOT;
@@ -313,11 +344,8 @@ static void test_fonts_from_a_utf8_folder(const char *root) {
     }
     CHECK(copied, "utf-8 fonts: the fonts are copied into a non-ASCII folder");
     if (!copied) return;
-    /* The build folder has no fonts, so only the UTF-8 root can supply them. */
-    if (test_chdir(build_abs) != 0) {
-        CHECK(false, "utf-8 fonts: the build folder becomes the working directory");
-        return;
-    }
+    /* Neither fallback has the fonts, so only the UTF-8 root can supply them. */
+    if (!enter_fontless_exe_folder("utf-8 fonts")) return;
     host = nk_overlay_host_create(folder, error, sizeof(error));
     CHECK(host != NULL, "utf-8 fonts: the host loads the fonts from a non-ASCII folder");
     if (host == NULL) fprintf(stderr, "  (%s)\n", error);
@@ -327,7 +355,7 @@ static void test_fonts_from_a_utf8_folder(const char *root) {
 
 /* Audit 2026-11-17: a face that is there but cannot be read (empty, truncated, too large) is
    reported as unreadable, by its path, not as missing. The folder holds every face but an empty
-   Geist; the build folder, the working directory here, has none to fall back to. */
+   Geist; the executable's folder, the working directory here, has none to fall back to. */
 static void test_unreadable_font_is_not_reported_missing(const char *root) {
     const char *build = SR_SELFTEST_BUILD_ROOT;
     bool absolute = build[0] == '/' || build[0] == '\\' || (build[0] != '\0' && build[1] == ':');
@@ -361,10 +389,7 @@ static void test_unreadable_font_is_not_reported_missing(const char *root) {
     copied = copied && SDL_SaveFile(empty, "", 0u);
     CHECK(copied, "unreadable font: the fonts are copied and Geist is emptied");
     if (!copied) return;
-    if (test_chdir(build_abs) != 0) {
-        CHECK(false, "unreadable font: the build folder becomes the working directory");
-        return;
-    }
+    if (!enter_fontless_exe_folder("unreadable font")) return;
     error[0] = '\0';
     host = nk_overlay_host_create(folder, error, sizeof(error));
     CHECK(host == NULL, "unreadable font: an empty face fails the host");

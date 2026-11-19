@@ -301,10 +301,12 @@ endif
 # backend over a base surface, a resize onto a new renderer. Like nk-ui-sdlr-selftest it builds
 # the SKIP variant without the SDL3 or SDL3_ttf headers and skips when the library cannot load.
 # The host is runtime code and always needs SDL3, so the SKIP variant builds the test alone.
+# The test lives in its own folder: SDL's base path is one of the host's font fallbacks, and
+# `make player` stages the fonts in $(BUILD_ROOT), so its font fixtures need a folder without them.
 .PHONY: nk-ui-overlay-host-selftest
 nk-ui-overlay-host-selftest:
 	$(NK_REQUIRE_POSIX_SHELL)
-	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)/overlay-host').mkdir(parents=True, exist_ok=True)"
 	@sdl_defs=""; sdl_libs=""; host_srcs=""; \
 	if printf '%s\n' '#include <SDL3/SDL.h>' '#include <SDL3_ttf/SDL_ttf.h>' '#include <SDL3_ttf/SDL_textengine.h>' | $(CC) -E -x c $(SDL3_INC_FLAGS) - >/dev/null 2>&1; then \
 		sdl_defs="-DNK_UI_WITH_SDL -DNK_UI_WITH_SDL3 -DNK_UI_WITH_SDL_TTF"; sdl_libs="$(LDFLAGS) -lSDL3"; \
@@ -315,8 +317,8 @@ nk-ui-overlay-host-selftest:
 	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/ui -Isrc/rt/overlay -Isrc/core -Ithird_party/clay \
 		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		$(SDL3_INC_FLAGS) $$sdl_defs $$host_srcs tests/native/test_overlay_host.c \
-		$$sdl_libs $(PLAYER_PLATFORM_LIBS) -lm -o $(BUILD_ROOT)/test_overlay_host$(EXE_EXT) || exit 1; \
-	rc=0; $(BUILD_ROOT_RUN)/test_overlay_host$(EXE_EXT) . || rc=$$?; \
+		$$sdl_libs $(PLAYER_PLATFORM_LIBS) -lm -o $(BUILD_ROOT)/overlay-host/test_overlay_host$(EXE_EXT) || exit 1; \
+	rc=0; $(BUILD_ROOT_RUN)/overlay-host/test_overlay_host$(EXE_EXT) . || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP nk-ui-overlay-host-selftest (exit 77; the reason is printed above)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL nk-ui-overlay-host-selftest (exit $$rc)"; exit $$rc; fi
 
