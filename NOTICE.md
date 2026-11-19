@@ -199,8 +199,8 @@ We aim to respond promptly and will remove material where appropriate.
   converts them into the stand-in PSP fonts that a build puts in its `font/` folder
   and the release ships (`font/README.md`). Liberation makes the Latin `nkltn*.pgf`
   fonts and Gowun Dodum makes `nkkr.pgf`. `nkjpn.pgf` is made from Noto Sans JP (see
-  Project UI fonts below), with M+ 1p drawing the one character Noto Sans JP lacks
-  (U+2252). Each generated font is shipped with its conversion manifest and the licence
+  Project UI fonts below), with M+ 1p drawing the 341 characters of its set Noto Sans JP
+  lacks (U+2252 among them). Each generated font is shipped with its conversion manifest and the licence
   text of every font it draws from; `nkjpn-OFL.txt` carries both Noto Sans JP's and
   M+ 1p's. The generated fonts carry project-owned names (`Nakagawa Open Latin`,
   `Nakagawa Open Japanese`, `Nakagawa Open Korean`), so no Reserved Font Name is used.

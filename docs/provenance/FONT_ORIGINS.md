@@ -379,14 +379,19 @@ covers the whole Latin repertoire below. No candidate has the console's
 capital-to-lowercase width ratio (1.28; Liberation Sans 1.38), so the per-face
 spacing balances the two lines.
 
-Repertoire. The built-in `--latin-cyrillic-text` set is the first set (section
-6.3) without U+2011, U+2023, U+2024, U+2025 and U+2027, which no console Latin
-font carries, plus the 111 characters the console fonts carry that it lacked:
-95 WGL4 Cyrillic letters and U+04C0, `ƒ ˆ ˜`, the combining accents U+0301,
-U+0306, U+0308 and U+0338, and `№ ∆ ∙ √ ∞ ≈ ≠ ≤ ≥`. It has 454 points with
-canonical SHA-256
-`6b8511988b7ce6199c99a45ab3a00ee498986067343117205c22031e2b8b330d`, and each of
-the eight faces covers every point.
+Repertoire. The `--latin-cyrillic-text` set is a rule over public standards
+(#1300): every character of the Unicode blocks Basic Latin, Latin-1
+Supplement, Latin Extended-A, Spacing Modifier Letters, General Punctuation
+and Letterlike Symbols and of the code pages Windows-1250, -1251, -1252, -1254
+and -1257, ISO 8859-16 and Mac Cyrillic that the face draws, without invisible
+format controls but with the soft hyphen. It is computed from each face's
+character map at conversion time; no list of characters is taken from a
+console font. Each of the eight faces gives the same 556 points, canonical
+SHA-256 `7eb9461a9b5e1012ff653746e9b0e3ff7947b8d51b27cc9fa224003a1705647d`.
+`docs/cleanroom/PGF_CONVERTER_SPEC.md` gives the reason for each block and code
+page and for those left out. Until 2026-11-19 the set was the first set
+(section 6.3) plus a list of 111 characters taken from the console fonts'
+character maps (#2005); the rule replaced it.
 
 Build. `mk/housekeeping.mk` maps Latin index `i` to face `i mod 8` in the
 console order (sans-serif regular, serif regular, sans-serif italic, serif
@@ -412,22 +417,27 @@ samples of each glyph, and average over the 52 glyphs. The test applies the same
 stand-in and requires a result within 2 % of the recorded number. The measured values are 68.5, 68.4, 104.5 and
 104.4 (indices 0, 2, 4 and 6) and 30.8, 30.8, 46.9 and 46.9 (indices 8, 10, 12 and 14).
 
-**Japanese: Noto Sans JP, with M PLUS 1p for one point.** The Japanese input is
+**Japanese: Noto Sans JP, with M PLUS 1p for the points it lacks.** The Japanese input is
 the project UI font `assets/fonts/ui/noto-sans-jp/NotoSansJP-Regular.ttf`
 (section 8; 5,766,828 bytes, SHA-256
 `a66655d7b24ac6f793f73914c60ad44522b9fbd9e5f9b3706220b66c44fdaad2`), pinned for
 the converter by `tests/fixtures/fonts/notosansjp/PIN.json`, which points at that
 file and its `OFL.txt` instead of carrying a second copy. Its Reserved Font
 Name `Source` is not used; the PGF is named `Nakagawa Open Japanese`. The
-built-in `--japanese-text` set is the first set (section 6.1) widened to all of
-JIS X 0208 (the 6,355 kanji of levels 1 and 2), every character of code page
-932 outside its user-defined area (Python's standard `cp932` table, with its
-NEC and IBM extensions) and the Latin-1 Supplement: 7,575 points, canonical
-SHA-256 `7c737cfedb45385d553dbfeecce9949135f185b5ca31ce486428cd4082904497`.
-Noto Sans JP draws 7,574 of them. The converter's `--fallback` option draws
-the remaining U+2252 from the pinned M PLUS 1p (section 6.1), and the
-conversion manifest lists that one point under `fallback.codes` with M PLUS
-1p's digest and licence. `nkjpn-OFL.txt` carries both licence texts.
+`--japanese-text` set has a pinned core, the first set (section 6.1) widened to
+all of JIS X 0208 (the 6,355 kanji of levels 1 and 2), every character of code
+page 932 outside its user-defined area (Python's standard `cp932` table, with
+its NEC and IBM extensions) and the Latin-1 Supplement: 7,575 points. The
+build adds every character of JIS X 0213:2004 and of 23 named Unicode blocks
+(kana, radicals, kanji outside JIS X 0208, enclosed and squared characters,
+symbols and box drawing) that these two faces draw (#1300), computed from their
+character maps at conversion time; no list of characters is taken from a
+console font. The set has 15,631 points; `docs/cleanroom/PGF_CONVERTER_SPEC.md`
+gives each block's reason and the blocks left out. Noto Sans JP draws 15,290 of
+them. The converter's `--fallback` option draws the remaining 341 (U+2252 and
+kanji, symbols and letters Noto Sans JP lacks) from the pinned M PLUS 1p
+(section 6.1), and the conversion manifest lists those points under
+`fallback.codes` with M PLUS 1p's digest and licence. `nkjpn-OFL.txt` carries both licence texts.
 
 **Sizes.** Both CJK fonts carry the console's nominal 10.125 points (648 in
 26.6) at 128 dpi. Japanese is drawn at 18 ppem, so kana and kanji advance

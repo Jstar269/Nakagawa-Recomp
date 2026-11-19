@@ -64,9 +64,11 @@ endef
 # baseline, x-height and cap height of the face's flat letters, so an e or an o ends on the row an R ends
 # on (#1300, docs/cleanroom/PGF_CONVERTER_SPEC.md section 3, rule 13). Each face then has its own spacing,
 # chosen so that its lines are as long as the console face's of the same index; the sans-serif faces also
-# get the console's digit width. The vertical advance is the console fonts' (0.950 em at the larger size,
-# 0.917 em at the smaller), with each glyph's vertical bearing Y at the margin above the ascender
-# (#1300, rule 16).
+# get the console's digit width. The vertical advance (0.950 em at the larger size, 0.917 em at the
+# smaller) and the other vertical settings below are rounded design proportions, tuned against a private
+# comparison with the console's fonts (#1300, rule 16); each glyph's vertical bearing Y sits at the margin
+# above the ascender. The repertoire is the Latin text rule over Unicode blocks and code pages, as far as
+# each face draws it (docs/cleanroom/PGF_CONVERTER_SPEC.md, --latin-cyrillic-text).
 LIBERATION := tests/fixtures/fonts/liberation
 PROJECT_LATIN_STRIKE_ARGS := --ppem 20 --snap-overshoot 3 --embolden-x 4 --embolden-advance 4 --nominal-size 648 --resolution 8192 --header-ascender 863 --header-descender -196 --vertical-advance 950
 PROJECT_LATIN_SMALL_STRIKE_ARGS := --ppem 13 --snap-overshoot 3 --embolden-x 2 --embolden-advance 2 --nominal-size 448 --resolution 8192 --header-ascender 576 --header-descender -131 --vertical-advance 917
@@ -137,11 +139,13 @@ $(eval $(call PROJECT_LATIN_FACE_RULE,14,latin-14,nkltn14.pgf,6,$(PROJECT_LATIN_
 $(eval $(call PROJECT_LATIN_FACE_RULE,15,latin-15,nkltn15.pgf,7,$(PROJECT_LATIN_SMALL_STRIKE_ARGS)))
 
 # Japanese and Korean at the console's 10.125 points (18 pixels per em at 128 dpi). The Japanese
-# font draws CP932 and both JIS kanji levels from Noto Sans JP (the UI font's pinned instance); the
-# one character of that set Noto Sans JP lacks comes from M PLUS 1p. Its licence file carries both
-# licences. The header ascender and descender are the console fonts'. Vertical metrics as the
-# console fonts' (#1300, rule 16): Japanese advances one em down from an origin 0.88 em above the
-# baseline; Korean advances 1.185 em with bearing Y at the margin.
+# font draws CP932, both JIS kanji levels, JIS X 0213 and the named Unicode blocks of the Japanese text
+# rule (docs/cleanroom/PGF_CONVERTER_SPEC.md, --japanese-text) from Noto Sans JP (the UI font's pinned
+# instance); the 341 characters of that set Noto Sans JP lacks come from M PLUS 1p. Its licence file
+# carries both licences. The header ascender and descender are the console fonts'. Vertical metrics
+# (#1300, rule 16): Japanese advances one em down from an origin 0.88 em above the baseline; Korean
+# advances 1.185 em with bearing Y at the margin. Like the Latin vertical settings, these are rounded
+# design proportions tuned against a private comparison with the console's fonts.
 PROJECT_JAPANESE_FONT_ARGS := --ppem 18 --nominal-size 648 --resolution 8192 --header-ascender 1013 --header-descender -139 --baseline-ellipsis --vertical-origin 880
 PROJECT_KOREAN_FONT_ARGS := --ppem 20 --tracking 1 --nominal-size 648 --resolution 8192 --header-ascender 1000 --header-descender -250 --vertical-advance 1185
 NOTO_SANS_JP := assets/fonts/ui/noto-sans-jp
@@ -149,7 +153,7 @@ project-japanese-font: $(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf
 $(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf: $(NOTO_SANS_JP)/NotoSansJP-Regular.ttf tests/fixtures/fonts/notosansjp/PIN.json $(NOTO_SANS_JP)/OFL.txt tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf tests/fixtures/fonts/mplus1p/PIN.json tests/fixtures/fonts/mplus1p/OFL.txt tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md mk/housekeeping.mk
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(PROJECT_FONT_GENERATED_DIR_PY)').mkdir(parents=True, exist_ok=True)"
 	"$(PYTHON)" tools/ttf2pgf.py "$@" "$(NOTO_SANS_JP)/NotoSansJP-Regular.ttf" --pin tests/fixtures/fonts/notosansjp/PIN.json --fallback tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf --fallback-pin tests/fixtures/fonts/mplus1p/PIN.json --japanese-text $(PROJECT_JAPANESE_FONT_ARGS) --font-name "Nakagawa Open Japanese" --font-type "Regular" --manifest "$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn.json"
-	"$(PYTHON)" -c "from pathlib import Path; parts = [Path(p).read_text(encoding='utf-8') for p in ('$(NOTO_SANS_JP)/OFL.txt', 'tests/fixtures/fonts/mplus1p/OFL.txt')]; Path('$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn-OFL.txt').write_text('Noto Sans JP:\n\n' + parts[0] + '\n\nM PLUS 1p (U+2252 only):\n\n' + parts[1], encoding='utf-8')"
+	"$(PYTHON)" -c "from pathlib import Path; parts = [Path(p).read_text(encoding='utf-8') for p in ('$(NOTO_SANS_JP)/OFL.txt', 'tests/fixtures/fonts/mplus1p/OFL.txt')]; Path('$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn-OFL.txt').write_text('Noto Sans JP:\n\n' + parts[0] + '\n\nM PLUS 1p (the characters Noto Sans JP lacks):\n\n' + parts[1], encoding='utf-8')"
 $(eval $(call PROJECT_FONT_RULE,korean,nkkr.pgf,tests/fixtures/fonts/gowundodum/GowunDodum-Regular.ttf,tests/fixtures/fonts/gowundodum/PIN.json,tests/fixtures/fonts/gowundodum/OFL.txt,--ks-x-1001-korean,Nakagawa Open Korean,$(PROJECT_KOREAN_FONT_ARGS),Regular))
 
 project-fonts: $(PROJECT_FONT_SLOT_TARGETS)

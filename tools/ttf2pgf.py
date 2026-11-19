@@ -39,6 +39,8 @@ import math
 import re
 import struct
 import sys
+import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
@@ -109,9 +111,10 @@ DEFAULT_FONT_NAME = "Nakagawa Open Latin"
 DEFAULT_FONT_TYPE = "Regular"
 JAPANESE_CODE_POINTS_SHA256 = "abc5302681a3c700179f29ac22a7c8082ed087a07b4cf8c3de4de5f73e7e0889"
 LATIN_CODE_POINTS_SHA256 = "7fbcaac92248acdb1c2704c3fef2181e7bc49f2b0e9d0f970cd029fb58057340"
-LATIN_CYRILLIC_CODE_POINTS_SHA256 = "6b8511988b7ce6199c99a45ab3a00ee498986067343117205c22031e2b8b330d"
 JAPANESE_TEXT_CODE_POINTS_SHA256 = "7c737cfedb45385d553dbfeecce9949135f185b5ca31ce486428cd4082904497"
 JAPANESE_TEXT_CODE_POINT_COUNT = 7575
+JIS_X_0213_CODE_POINTS_SHA256 = "5e98d45edcb70dd3a969c30c07b5630fab2b3fe8c79e8dcefa42d07b97029fb7"
+JIS_X_0213_CODE_POINT_COUNT = 10905
 KOREAN_CODE_POINTS_SHA256 = "50596a7f6e0e5158561147eae40a38edc12c28b1a4be3efff6d717c74b638bc4"
 
 SCALER_TRUE = 0x00010000
@@ -1393,51 +1396,69 @@ def latin_1_text_code_points() -> CodePointSet:
     return CodePointSet(codes=codes, sha256=digest, source="builtin:latin-1-text")
 
 
-#: The Latin text set's additions over ``latin_1_text_code_points``: the characters the console's
-#: Latin fonts carry that the first set lacked (font/README.md, "Measured differences", #2005).
-#: Cyrillic as in the Windows Glyph List 4 set (U+0401-040C, U+040E-044F, U+0451-045C, U+045E-045F,
-#: U+0490-0491) and U+04C0; Latin and modifier letters; four combining accents; and nine symbols.
-_LATIN_CYRILLIC_ADDITIONS = (
-    tuple(range(0x0401, 0x040D)) + tuple(range(0x040E, 0x0450)) + tuple(range(0x0451, 0x045D))
-    + (0x045E, 0x045F, 0x0490, 0x0491, 0x04C0)
-    + (0x0192, 0x02C6, 0x02DC, 0x0301, 0x0306, 0x0308, 0x0338)
-    + (0x2116, 0x2206, 0x2219, 0x221A, 0x221E, 0x2248, 0x2260, 0x2264, 0x2265)
+#: The Unicode blocks of the Latin text set (#2005, #1300): every code point of these blocks that the
+#: face being converted draws. The reason for each block, and for the blocks left out, is in
+#: docs/cleanroom/PGF_CONVERTER_SPEC.md.
+LATIN_TEXT_BLOCKS: tuple[tuple[str, int, int], ...] = (
+    ("Basic Latin", 0x0020, 0x007E),
+    ("Latin-1 Supplement", 0x00A0, 0x00FF),
+    ("Latin Extended-A", 0x0100, 0x017F),
+    ("Spacing Modifier Letters", 0x02B0, 0x02FF),
+    ("General Punctuation", 0x2000, 0x206F),
+    ("Letterlike Symbols", 0x2100, 0x214F),
 )
-#: Punctuation in the first set that no console Latin font carries (its symbol block holds the 17 of
-#: Windows-1252 and the nine above) and that the Latin source fonts do not all draw.
-_LATIN_CYRILLIC_REMOVED = (0x2011, 0x2023, 0x2024, 0x2025, 0x2027)
+#: Single-byte code pages whose characters the Latin text set also holds, as far as the face draws
+#: them: the Windows code pages of European text (Central European, Cyrillic, Western, Turkish and
+#: Baltic), ISO 8859-16 for Romanian and the Macintosh Cyrillic set (#1300).
+LATIN_TEXT_CODE_PAGES: tuple[str, ...] = (
+    "cp1250", "cp1251", "cp1252", "cp1254", "cp1257", "iso8859_16", "mac_cyrillic",
+)
 
 
-def latin_cyrillic_text_code_points() -> CodePointSet:
-    """Return the project Latin repertoire that matches the console's Latin fonts (#2005).
+def _code_page_characters(codec: str) -> set[int]:
+    """The printable characters of a single-byte code page, through Python's standard codec."""
+    codes: set[int] = set()
+    for byte in range(0x20, 0x100):
+        try:
+            character = bytes((byte,)).decode(codec)
+        except UnicodeDecodeError:
+            continue
+        except LookupError as exc:  # pragma: no cover - these are standard Python codecs
+            raise _refuse("latin-codec-unavailable", f"Python's {codec} codec is unavailable") from exc
+        code = ord(character)
+        if code >= 0x20 and not 0x7F <= code <= 0x9F and not 0xE000 <= code <= 0xF8FF:
+            codes.add(code)
+    return codes
 
-    It is :func:`latin_1_text_code_points` (ASCII, Latin-1 Supplement, Latin Extended-A and common
-    punctuation) without five punctuation marks the console fonts lack, plus the 111 characters
-    they carry that the first set lacked: 95 Cyrillic letters, ``ƒ ˆ ˜``, four combining accents and
-    nine symbols. That is 454 code points; a canonical digest makes mapping drift a named refusal.
+
+def _drawn_in_blocks(blocks: tuple[tuple[str, int, int], ...], draws: Callable[[int], bool]) -> set[int]:
+    """Every code point of ``blocks`` that ``draws`` accepts."""
+    return {code for _, first, last in blocks for code in range(first, last + 1) if draws(code)}
+
+
+def _set_from(codes: set[int], source: str) -> CodePointSet:
+    ordered = tuple(sorted(codes))
+    canonical = "".join(f"U+{code:04X}\n" for code in ordered).encode("ascii")
+    return CodePointSet(codes=ordered, sha256=hashlib.sha256(canonical).hexdigest(), source=source)
+
+
+def latin_cyrillic_text_code_points(draws: Callable[[int], bool]) -> CodePointSet:
+    """Return the project Latin repertoire: the Latin text blocks as far as the face draws them.
+
+    :data:`LATIN_TEXT_BLOCKS` names public Unicode blocks (Latin, Cyrillic, punctuation and
+    symbols) and :data:`LATIN_TEXT_CODE_PAGES` public code pages; the set is every code point in
+    them that ``draws`` (the face's own character map) accepts, so it depends on no console font.
+    Invisible format controls (Unicode general category Cf, such as the bidirectional marks) are
+    left out, except the soft hyphen U+00AD that Latin-1 text writes. The set's digest is recorded
+    in the manifest.
     """
-    first = set(latin_1_text_code_points().codes)
-    additions = set(_LATIN_CYRILLIC_ADDITIONS)
-    removed = set(_LATIN_CYRILLIC_REMOVED)
-    if len(additions) != 111 or additions & first or not removed <= first:
-        raise _refuse(
-            "latin-mapping-invalid",
-            f"the Latin text additions hold {len(additions)} new code points; expected 111 outside the first set",
-        )
-    codes = tuple(sorted((first - removed) | additions))
-    if len(codes) != 454:
-        raise _refuse(
-            "latin-mapping-invalid",
-            f"the built-in tables produced {len(codes)} unique code points; expected 454",
-        )
-    canonical = "".join(f"U+{code:04X}\n" for code in codes).encode("ascii")
-    digest = hashlib.sha256(canonical).hexdigest()
-    if digest != LATIN_CYRILLIC_CODE_POINTS_SHA256:
-        raise _refuse(
-            "latin-mapping-invalid",
-            f"the built-in code-point mapping SHA-256 is {digest}, expected {LATIN_CYRILLIC_CODE_POINTS_SHA256}",
-        )
-    return CodePointSet(codes=codes, sha256=digest, source="builtin:latin-cyrillic-text")
+    codes = _drawn_in_blocks(LATIN_TEXT_BLOCKS, draws)
+    for codec in LATIN_TEXT_CODE_PAGES:
+        codes |= {code for code in _code_page_characters(codec) if draws(code)}
+    codes = {code for code in codes if code == 0x00AD or unicodedata.category(chr(code)) != "Cf"}
+    if not set(range(0x20, 0x7F)) <= codes:
+        raise _refuse("latin-mapping-invalid", "the face does not draw all of printable ASCII")
+    return _set_from(codes, "builtin:latin-text-blocks")
 
 
 def _cp932_double_byte_codes() -> tuple[int, ...]:
@@ -1465,14 +1486,78 @@ def _cp932_double_byte_codes() -> tuple[int, ...]:
     return tuple(sorted(codes))
 
 
-def japanese_text_code_points() -> CodePointSet:
-    """Return the project Japanese repertoire: both JIS kanji levels and CP932 (#2005).
+#: The Unicode blocks of the Japanese text set beyond JIS X 0208, CP932 and JIS X 0213 (#1300): every
+#: code point of these blocks that the stand-in's faces draw. The reason for each block, and for the
+#: blocks left out, is in docs/cleanroom/PGF_CONVERTER_SPEC.md.
+JAPANESE_TEXT_BLOCKS: tuple[tuple[str, int, int], ...] = (
+    ("Latin Extended-A", 0x0100, 0x017F),
+    ("Superscripts and Subscripts", 0x2070, 0x209F),
+    ("Combining Diacritical Marks for Symbols", 0x20D0, 0x20FF),
+    ("Letterlike Symbols", 0x2100, 0x214F),
+    ("Number Forms", 0x2150, 0x218F),
+    ("Arrows", 0x2190, 0x21FF),
+    ("Miscellaneous Technical", 0x2300, 0x23FF),
+    ("Enclosed Alphanumerics", 0x2460, 0x24FF),
+    ("Box Drawing", 0x2500, 0x257F),
+    ("Block Elements", 0x2580, 0x259F),
+    ("Geometric Shapes", 0x25A0, 0x25FF),
+    ("Dingbats", 0x2700, 0x27BF),
+    ("CJK Radicals Supplement", 0x2E80, 0x2EFF),
+    ("Kangxi Radicals", 0x2F00, 0x2FDF),
+    ("Hiragana", 0x3040, 0x309F),
+    ("Katakana", 0x30A0, 0x30FF),
+    ("Katakana Phonetic Extensions", 0x31F0, 0x31FF),
+    ("Enclosed CJK Letters and Months", 0x3200, 0x32FF),
+    ("CJK Compatibility", 0x3300, 0x33FF),
+    ("CJK Unified Ideographs Extension A", 0x3400, 0x4DBF),
+    ("CJK Unified Ideographs", 0x4E00, 0x9FFF),
+    ("Alphabetic Presentation Forms", 0xFB00, 0xFB4F),
+    ("CJK Compatibility Forms", 0xFE30, 0xFE4F),
+)
 
-    This is the first set (:func:`jis_x_0208_japanese_code_points`) widened to all of JIS X 0208
-    (rows 1-8 and the 6,355 kanji of levels 1 and 2 in rows 16-84), every character of CP932, the
-    Shift JIS that PSP games write (its NEC and IBM extensions and its own mappings of six JIS
-    cells), and the Latin-1 Supplement U+00A0-00FF that Latin text in Japanese games uses. A
-    canonical digest makes mapping drift a named refusal.
+
+def jis_x_0213_code_points() -> tuple[int, ...]:
+    """Every character of JIS X 0213:2004 in the 16-bit range, through Python's ``shift_jis_2004``.
+
+    Both planes, as Shift_JIS-2004 encodes them (lead bytes 0x81-0x9F and 0xE0-0xFC). A cell that
+    maps to a sequence of two code points (a kana or letter with a combining mark) has no single
+    code and is left out, as is a character past U+FFFF, which a PGF character code cannot name.
+    A canonical digest makes mapping drift a named refusal.
+    """
+    codes: set[int] = set()
+    for lead in (*range(0x81, 0xA0), *range(0xE0, 0xFD)):
+        for trail in (*range(0x40, 0x7F), *range(0x80, 0xFD)):
+            try:
+                character = bytes((lead, trail)).decode("shift_jis_2004")
+            except UnicodeDecodeError:
+                continue
+            except LookupError as exc:  # pragma: no cover - shift_jis_2004 is a standard Python codec
+                raise _refuse("japanese-codec-unavailable", "Python's shift_jis_2004 codec is unavailable") from exc
+            if len(character) == 1 and ord(character) <= 0xFFFF:
+                codes.add(ord(character))
+    ordered = tuple(sorted(codes))
+    canonical = "".join(f"U+{code:04X}\n" for code in ordered).encode("ascii")
+    digest = hashlib.sha256(canonical).hexdigest()
+    if len(ordered) != JIS_X_0213_CODE_POINT_COUNT or digest != JIS_X_0213_CODE_POINTS_SHA256:
+        raise _refuse(
+            "japanese-mapping-invalid",
+            f"the built-in JIS X 0213 table produced {len(ordered)} code points with SHA-256 {digest}; "
+            f"expected {JIS_X_0213_CODE_POINT_COUNT} with {JIS_X_0213_CODE_POINTS_SHA256}",
+        )
+    return ordered
+
+
+def japanese_text_code_points(draws: Callable[[int], bool] | None = None) -> CodePointSet:
+    """Return the project Japanese repertoire (#2005, #1300).
+
+    The pinned core is the first set (:func:`jis_x_0208_japanese_code_points`) widened to all of
+    JIS X 0208 (rows 1-8 and the 6,355 kanji of levels 1 and 2 in rows 16-84), every character of
+    CP932, the Shift JIS that PSP games write (its NEC and IBM extensions and its own mappings of
+    six JIS cells), and the Latin-1 Supplement U+00A0-00FF that Latin text in Japanese games uses;
+    a canonical digest makes mapping drift a named refusal. With ``draws`` (the stand-in's faces'
+    own character maps) the set adds every character of JIS X 0213:2004
+    (:func:`jis_x_0213_code_points`) and of :data:`JAPANESE_TEXT_BLOCKS` that ``draws`` accepts;
+    no console font enters the rule.
     """
     first = set(jis_x_0208_japanese_code_points().codes)
     level2 = set(_jis_x_0208_rows(range(48, 85)))
@@ -1497,7 +1582,10 @@ def japanese_text_code_points() -> CodePointSet:
             "japanese-mapping-invalid",
             f"the built-in code-point mapping SHA-256 is {digest}, expected {JAPANESE_TEXT_CODE_POINTS_SHA256}",
         )
-    return CodePointSet(codes=codes, sha256=digest, source="builtin:jis-x-0208-cp932-japanese")
+    if draws is None:
+        return CodePointSet(codes=codes, sha256=digest, source="builtin:jis-x-0208-cp932-japanese")
+    added = {code for code in jis_x_0213_code_points() if draws(code)} | _drawn_in_blocks(JAPANESE_TEXT_BLOCKS, draws)
+    return _set_from(set(codes) | added, "builtin:jis-x-0208-cp932-japanese+jis-x-0213+blocks")
 
 
 def _ks_x_1001_rows(rows: tuple[int, ...] | list[int] | range) -> tuple[int, ...]:
@@ -2566,10 +2654,17 @@ def _main(argv: list[str]) -> int:
             code_points = jis_x_0208_japanese_code_points()
         elif args.latin_1_text:
             code_points = latin_1_text_code_points()
-        elif args.latin_cyrillic_text:
-            code_points = latin_cyrillic_text_code_points()
-        elif args.japanese_text:
-            code_points = japanese_text_code_points()
+        elif args.latin_cyrillic_text or args.japanese_text:
+            faces = [_Ttf(args.input.read_bytes())]
+            if args.fallback is not None:
+                faces.append(_Ttf(args.fallback.read_bytes()))
+
+            def draws(code: int) -> bool:
+                return any(face.glyph_id(code) is not None for face in faces)
+
+            code_points = (latin_cyrillic_text_code_points if args.latin_cyrillic_text else japanese_text_code_points)(
+                draws
+            )
         elif args.ks_x_1001_korean:
             code_points = ks_x_1001_korean_code_points()
         else:

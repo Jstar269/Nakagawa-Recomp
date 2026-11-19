@@ -42,6 +42,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 from fractions import Fraction
 from unittest import mock
@@ -1028,6 +1029,7 @@ class JapaneseCodePointCoverageTests(unittest.TestCase):
         """#2005: the first set stopped at JIS level 1; the text set adds level 2 and CP932."""
         points = ttf2pgf.japanese_text_code_points()
         self.assertEqual(len(points.codes), 7575)
+        self.assertEqual(len(points.codes), ttf2pgf.JAPANESE_TEXT_CODE_POINT_COUNT)
         self.assertEqual(points.codes, tuple(sorted(set(points.codes))))
         self.assertEqual(points.source, "builtin:jis-x-0208-cp932-japanese")
         self.assertEqual(points.sha256, ttf2pgf.JAPANESE_TEXT_CODE_POINTS_SHA256)
@@ -1042,16 +1044,69 @@ class JapaneseCodePointCoverageTests(unittest.TestCase):
         self.assertTrue({0x5F0C, 0x9ED1, 0x2460, 0x2252, 0x7E8A}.issubset(codes))
         self.assertFalse(any(0xE000 <= code <= 0xF8FF for code in codes), "no user-defined area")
 
-    def test_noto_sans_jp_draws_the_text_set_with_m_plus_for_one_point(self) -> None:
+    def test_jis_x_0213_set_is_codec_derived(self) -> None:
+        codes = ttf2pgf.jis_x_0213_code_points()
+        self.assertEqual(len(codes), ttf2pgf.JIS_X_0213_CODE_POINT_COUNT)
+        self.assertEqual(len(codes), 10905)
+        self.assertEqual(codes, tuple(sorted(set(codes))))
+        self.assertTrue(set(ttf2pgf._jis_x_0208_rows(range(16, 85))) <= set(codes))
+        # Plane 1's additions: a kanji outside JIS X 0208, katakana for Ainu and a Latin letter.
+        self.assertTrue({0x4FF1, 0x31F0, 0x0101} <= set(codes))
+        self.assertFalse(any(code > 0xFFFF for code in codes))
+
+    @staticmethod
+    def _stand_in_faces() -> tuple[ttf2pgf._Ttf, ttf2pgf._Ttf]:
+        return ttf2pgf._Ttf(NOTO_JP_FONT.read_bytes()), ttf2pgf._Ttf(JAPANESE_FONT.read_bytes())
+
+    def test_japanese_text_set_adds_jis_x_0213_and_the_named_blocks_the_faces_draw(self) -> None:
+        """#1300: the stand-in drew the replacement character for every character outside CP932,
+        the trade mark sign among them (Ace Combat: Joint Assault writes "Memory Stick™" with it).
+        The set the build converts adds every character of JIS X 0213 and of the named Unicode
+        blocks that the faces draw; it is computed from the faces' character maps."""
+        noto, mplus = self._stand_in_faces()
+
+        def draws(code: int) -> bool:
+            return noto.glyph_id(code) is not None or mplus.glyph_id(code) is not None
+
+        points = ttf2pgf.japanese_text_code_points(draws)
+        codes = set(points.codes)
+        self.assertEqual(points.codes, tuple(sorted(codes)))
+        self.assertEqual(points.source, "builtin:jis-x-0208-cp932-japanese+jis-x-0213+blocks")
+        core = set(ttf2pgf.japanese_text_code_points().codes)
+        jis_x_0213 = {code for code in ttf2pgf.jis_x_0213_code_points() if draws(code)}
+        blocks = {code for _, first, last in ttf2pgf.JAPANESE_TEXT_BLOCKS for code in range(first, last + 1)
+                  if draws(code)}
+        self.assertTrue(core <= codes)
+        self.assertTrue(jis_x_0213 <= codes)
+        self.assertTrue(blocks <= codes)
+        self.assertEqual(codes, core | jis_x_0213 | blocks)
+        self.assertTrue(all(draws(code) for code in codes - core))
+        self.assertEqual(len(codes), 15631)
+        # The trade mark sign, a Kangxi radical, a kanji outside JIS X 0208, a squared word,
+        # parenthesized numbers, a Latin letter with a macron and a box-drawing arc.
+        self.assertTrue({0x2122, 0x2F00, 0x4E04, 0x3300, 0x2474, 0x0100, 0x256D} <= codes)
+        # Two blocks stay out (their wider and taller glyphs would grow the font's glyph box); what
+        # CP932 and JIS X 0213 hold of them is in.
+        names = {name for name, _, _ in ttf2pgf.JAPANESE_TEXT_BLOCKS}
+        self.assertFalse({"Mathematical Operators", "CJK Symbols and Punctuation"} & names)
+        self.assertFalse({0x2230, 0x3031} & codes)
+        self.assertTrue({0x2212, 0x221E, 0x3005, 0x3033} <= codes)
+        self.assertFalse(any(0xE000 <= code <= 0xF8FF for code in codes), "no user-defined area")
+
+    def test_noto_sans_jp_draws_the_text_set_with_m_plus_for_what_it_lacks(self) -> None:
         data = NOTO_JP_FONT.read_bytes()
         pin = load_pin(NOTO_JP_PIN, data)
         self.assertEqual(pin.spdx, "OFL-1.1")
         ttf2pgf.validate_output_name("Nakagawa Open Japanese", pin)
-        noto = ttf2pgf._Ttf(data)
-        mplus = ttf2pgf._Ttf(JAPANESE_FONT.read_bytes())
-        codes = ttf2pgf.japanese_text_code_points().codes
-        self.assertEqual([code for code in codes if noto.glyph_id(code) is None], [0x2252])
-        self.assertIsNotNone(mplus.glyph_id(0x2252))
+        noto, mplus = self._stand_in_faces()
+        core = ttf2pgf.japanese_text_code_points().codes
+        self.assertEqual([code for code in core if noto.glyph_id(code) is None], [0x2252])
+        codes = ttf2pgf.japanese_text_code_points(
+            lambda code: noto.glyph_id(code) is not None or mplus.glyph_id(code) is not None).codes
+        lacking = [code for code in codes if noto.glyph_id(code) is None]
+        self.assertEqual(len(lacking), 341)
+        self.assertEqual([code for code in lacking if mplus.glyph_id(code) is None], [])
+        self.assertIsNotNone(noto.glyph_id(0x2122), "Noto Sans JP draws the trade mark sign")
 
 
 class ProjectCodePointCoverageTests(unittest.TestCase):
@@ -1078,32 +1133,41 @@ class ProjectCodePointCoverageTests(unittest.TestCase):
         missing = [code for code in points.codes if font.glyph_id(code) is None]
         self.assertEqual(missing, [], "M PLUS 1p must cover all 348 Latin text points")
 
-    def test_latin_cyrillic_set_adds_the_111_console_characters(self) -> None:
-        """#2005: 111 of the console Latin fonts' 322 non-ASCII characters were missing."""
-        points = ttf2pgf.latin_cyrillic_text_code_points()
-        self.assertEqual(len(points.codes), 454)
-        self.assertEqual(points.codes, tuple(sorted(set(points.codes))))
-        self.assertEqual(points.source, "builtin:latin-cyrillic-text")
-        self.assertEqual(points.sha256, ttf2pgf.LATIN_CYRILLIC_CODE_POINTS_SHA256)
-        codes = set(points.codes)
-        first = set(ttf2pgf.latin_1_text_code_points().codes)
-        added = codes - first
-        self.assertEqual(len(added), 111)
-        cyrillic = set(range(0x0401, 0x040D)) | set(range(0x040E, 0x0450)) | set(range(0x0451, 0x045D)) \
-            | {0x045E, 0x045F, 0x0490, 0x0491, 0x04C0}
-        self.assertEqual(len(cyrillic), 95)
-        self.assertTrue(cyrillic <= added)
-        self.assertEqual(added - cyrillic, {0x0192, 0x02C6, 0x02DC, 0x0301, 0x0306, 0x0308, 0x0338, 0x2116,
-                                            0x2206, 0x2219, 0x221A, 0x221E, 0x2248, 0x2260, 0x2264, 0x2265})
-        self.assertEqual(first - codes, {0x2011, 0x2023, 0x2024, 0x2025, 0x2027})
-        # Every Windows-1252 character is in it.
-        cp1252 = {ord(bytes((byte,)).decode("cp1252")) for byte in (*range(0x20, 0x7F), *range(0x80, 0x100))
-                  if byte not in (0x81, 0x8D, 0x8F, 0x90, 0x9D)}
-        self.assertTrue(cp1252 <= codes)
+    def test_latin_cyrillic_set_is_the_named_blocks_and_code_pages_the_face_draws(self) -> None:
+        """#2005, #1300: the Latin text set is every character of the named Unicode blocks and code
+        pages that the face draws, computed from the face's character map."""
+        font = ttf2pgf._Ttf((LIBERATION_DIR / "LiberationSans-Regular.ttf").read_bytes())
 
-    def test_every_liberation_face_draws_the_latin_cyrillic_set(self) -> None:
-        codes = ttf2pgf.latin_cyrillic_text_code_points().codes
+        def draws(code: int) -> bool:
+            return font.glyph_id(code) is not None
+
+        points = ttf2pgf.latin_cyrillic_text_code_points(draws)
+        codes = set(points.codes)
+        self.assertEqual(points.codes, tuple(sorted(codes)))
+        self.assertEqual(points.source, "builtin:latin-text-blocks")
+        self.assertEqual(len(codes), 556)
+        self.assertEqual(points.sha256, "7eb9461a9b5e1012ff653746e9b0e3ff7947b8d51b27cc9fa224003a1705647d")
+        blocks = {code for _, first, last in ttf2pgf.LATIN_TEXT_BLOCKS for code in range(first, last + 1)}
+        pages: set[int] = set()
+        for codec in ttf2pgf.LATIN_TEXT_CODE_PAGES:
+            pages |= ttf2pgf._code_page_characters(codec)
+        expected = {code for code in blocks | pages if draws(code)}
+        format_controls = {code for code in expected if unicodedata.category(chr(code)) == "Cf"}
+        self.assertEqual(codes, (expected - format_controls) | {0x00AD})
+        self.assertIn(0x200F, format_controls, "the bidirectional marks are format controls")
+        # The 348-point Latin-1 text set, every letter of Windows-1251 Cyrillic and the
+        # Romanian letters with a comma below are in it.
+        self.assertTrue({code for code in ttf2pgf.latin_1_text_code_points().codes if draws(code)} <= codes)
+        self.assertTrue(set(range(0x0410, 0x0450)) | {0x0401, 0x0451, 0x0490, 0x0491} <= codes)
+        self.assertTrue({0x0218, 0x0219, 0x021A, 0x021B, 0x0192, 0x20AC, 0x2116, 0x2122} <= codes)
+        # Hot Shots Tennis writes the minus sign U+2212 in its dialog and draws its own character
+        # where the font has none: the set stays out of Mathematical Operators beyond the code pages.
+        self.assertNotIn(0x2212, codes)
+        self.assertFalse(set(range(0x0300, 0x0370)) & codes, "no combining marks")
+
+    def test_every_liberation_face_draws_the_same_latin_cyrillic_set(self) -> None:
         license_text = (LIBERATION_DIR / "OFL.txt").read_text(encoding="utf-8")
+        digests = set()
         for stem, _style in LATIN_FACES:
             with self.subTest(face=stem):
                 data = (LIBERATION_DIR / f"{stem}.ttf").read_bytes()
@@ -1113,7 +1177,33 @@ class ProjectCodePointCoverageTests(unittest.TestCase):
                 self.assertIn("Liberation", pin.reserved_font_names)
                 ttf2pgf.validate_output_name("Nakagawa Open Latin", pin)
                 font = ttf2pgf._Ttf(data)
-                self.assertEqual([code for code in codes if font.glyph_id(code) is None], [])
+                points = ttf2pgf.latin_cyrillic_text_code_points(lambda code, font=font: font.glyph_id(code) is not None)
+                self.assertTrue(set(range(0x20, 0x7F)) <= set(points.codes))
+                digests.add(points.sha256)
+        self.assertEqual(len(digests), 1, "every face of the build draws the same Latin text set")
+
+    def test_latin_set_keeps_the_small_sans_glyph_box(self) -> None:
+        """#1300: Hot Shots Tennis places the second line of its dialogs from the font's glyph box.
+        A wider set whose wide or tall glyphs (Latin Extended-B digraphs, historic Cyrillic letters,
+        box drawing) grew the box moved that line; the set must leave the small sans face's box as
+        the Latin-1, Cyrillic and punctuation text set had it."""
+        stem = _makefile_flags("PROJECT_LATIN_0_FACE")[0]
+        data = (LIBERATION_DIR / f"{stem}.ttf").read_bytes()
+        font = ttf2pgf._Ttf(data)
+        points = ttf2pgf.latin_cyrillic_text_code_points(lambda code: font.glyph_id(code) is not None)
+        tokens = _makefile_flags("PROJECT_LATIN_SMALL_STRIKE_ARGS") + _makefile_flags("PROJECT_LATIN_8_SPACING")
+        image = convert(data, input_path=f"{stem}.ttf", output_path="nkltns.pgf", code_points=points,
+                        font_name="Nakagawa Open Latin", font_type="Regular",
+                        pin=load_pin(LIBERATION_DIR / f"{stem}.pin.json", data), **_convert_arguments(tokens)).image
+        box = (struct.unpack_from("<i", image, 0xE0)[0], struct.unpack_from("<i", image, 0xE8)[0],
+               struct.unpack_from("<i", image, 0xEC)[0], struct.unpack_from("<2i", image, 0xF4),
+               struct.unpack_from("<2H", image, 0xFC))
+        self.assertEqual(box, (832, 11, 975, (896, 896), (14, 14)))
+
+    def test_latin_set_refuses_a_face_without_ascii(self) -> None:
+        with self.assertRaises(ttf2pgf.TtfConvertError) as caught:
+            ttf2pgf.latin_cyrillic_text_code_points(lambda code: code != 0x41)
+        self.assertEqual(caught.exception.reason, "latin-mapping-invalid")
 
     def test_korean_set_is_codec_derived_and_gowun_covers_every_assigned_point(self) -> None:
         points = ttf2pgf.ks_x_1001_korean_code_points()
