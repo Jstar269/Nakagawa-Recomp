@@ -6956,6 +6956,11 @@ class NativePlayerUiTests(unittest.TestCase):
                     "title_play": {"TEST00006": {"mode": "authentic"}}}
         culling = {"id": "fixture-cull", "target_title_id": "display-smoke-v1",
                    "category": "guest_memory_code_hook"}
+        # Wider culling's place on Settings > Enhanced: its tab on the strip, its row under it.
+        cull = self.ENHANCED_PART_KEYS.index("cull")
+        tab = next(index for index, (_, parts) in enumerate(self.ENHANCED_GROUPS)
+                   if cull in parts)
+        row = self.ENHANCED_GROUPS[tab][1].index(cull)
         run = self.next_ui_run(
             "ready",
             # Open the title and step its Play mode to Enhanced, then Ace (with culling),
@@ -6963,13 +6968,18 @@ class NativePlayerUiTests(unittest.TestCase):
             ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *self.DOWN_TO_PLAY_MODE,
              "KEY_RETURN", "WAIT_MS=200", "KEY_RETURN", "WAIT_MS=800",
              # Back to the library, Settings (F1), its Play mode row opens the library's
-             # Settings > Enhanced, and Down to Wider culling turns it off.
-             "KEY_ESCAPE", "WAIT_MS=200", "KEY_F1", "WAIT_MS=200", *("KEY_DOWN",) * 5,
-             "KEY_RETURN", "WAIT_MS=200", *("KEY_DOWN", "WAIT_MS=50") * 9, "KEY_RETURN",
-             "WAIT_MS=300"),
+             # Settings > Enhanced. Down from Graphics preset is Play mode, then the active
+             # tab; E moves along the strip to Wider culling's tab, Down reaches its row and
+             # Enter turns it off.
+             "KEY_ESCAPE", "WAIT_MS=200", "KEY_F1", "WAIT_MS=200", *self.OPEN_ENHANCED,
+             *("KEY_DOWN", "WAIT_MS=50") * 2,
+             *("KEY_E", "WAIT_MS=80") * tab, *("KEY_DOWN", "WAIT_MS=50") * (row + 1),
+             "KEY_RETURN", "WAIT_MS=300"),
             post_build_ready=True, wait_background=True, settings=settings,
             enhancement_packages={"TEST00006": "display-smoke-v1"},
             culling_packages={"TEST00006": culling})
+        self.assertIn(self.enhanced_row_focus(cull), self.focus_trail(run),
+                      "the walk reaches Wider culling's row: " + str(run["stdout"]))
         play_lines = re.findall(r"next_ui_title_play_line disc=TEST00006 line=(.+?)\r?$",
                                 str(run["stdout"]), re.M)
         self.assertTrue(play_lines and play_lines[-1].startswith("Ace for this game: ") and
