@@ -7,7 +7,7 @@
  * verdicts to the report (SR_VERIFY_REPORT) and the captures (SR_VERIFY_CAPTURE).
  *
  *   verify_harness [--call ADDR:COUNT[:A0[:A1[:A2]]]]... [--sched-slice N] [--frozen-clock]
- *                  [--hard-exit] <image.bin> <base-hex>
+ *                  [--hard-exit] [--selftest-corrupt FIELD] <image.bin> <base-hex>
  *
  * Each --call enters the translated function at ADDR (hex) COUNT times (decimal) through
  * production dispatch as a host entry, with the arguments in hex (default: the data block
@@ -17,6 +17,10 @@
  * --frozen-clock fixes the verifier's clock at zero, to test the rate budget.
  * --hard-exit ends the run with _Exit, which skips atexit, after the report call the
  * runtime's own _Exit paths make (SR_VERIFY_REPORT_NOW).
+ * --selftest-corrupt FIELD changes that compared field of the translated side at each
+ * syscall or import stop (sr_end_state_selftest_corrupt in src/rt/end_state_compare.h), so
+ * the checker must report it; src/rt/snapshot_runner.c takes the same option, and the gate
+ * requires the same first difference from both.
  *
  * The harness links the generated module, recomp.c and the dispatch and interpreter units
  * but no scheduler, HLE, GE or host platform. src/rt/harness_stubs.c stands in for those,
@@ -26,6 +30,7 @@
  */
 
 #include "recomp.h"
+#include "end_state_compare.h"
 #include "harness_stubs.h"
 #include "nested_frames.h"
 #include "verify.h"
@@ -51,13 +56,30 @@ void sr_yield(CpuState *s) {
     atomic_store(&sr_timeslice, (int_least32_t)s_slice);
 }
 
+#define ARENA_SIZE 0x0c000000u   /* the runtime arena: guest physical [0, 0x0c000000) */
+
+static const char *s_selftest_corrupt;
+
+/* Self-test only: change one compared field of the translated side at this stop. */
+static void selftest_corrupt_at_stop(CpuState *s, SrEndStop *stop) {
+    if (!s_selftest_corrupt) return;
+    if (!sr_end_state_selftest_corrupt(s_selftest_corrupt, s, stop, g_mem - SR_RAM_BASE, ARENA_SIZE)) {
+        fprintf(stderr, "verify_harness: --selftest-corrupt does not know %s\n", s_selftest_corrupt);
+        exit(2);
+    }
+}
+
 uint32_t sr_syscall(CpuState *s, uint32_t nid) {
-    sr_verify_at_stop(s, SR_VERIFY_STOP_IMPORT, nid, 0u);
+    SrEndStop stop = { SR_END_STOP_IMPORT, 0u, 0u, nid };
+    selftest_corrupt_at_stop(s, &stop);
+    sr_verify_at_stop(s, SR_VERIFY_STOP_IMPORT, stop.import_nid, 0u);
     return 0u;
 }
 
 void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) {
-    sr_verify_at_stop(s, SR_VERIFY_STOP_SYSCALL, code, pc);
+    SrEndStop stop = { SR_END_STOP_SYSCALL, pc, code, 0u };
+    selftest_corrupt_at_stop(s, &stop);
+    sr_verify_at_stop(s, SR_VERIFY_STOP_SYSCALL, stop.syscall_code, stop.syscall_pc);
 }
 
 static uint64_t frozen_clock(void) { return 0u; }
@@ -101,7 +123,8 @@ static int parse_call(const char *text, CallSpec *c) {
 static int usage(void) {
     fprintf(stderr,
             "usage: verify_harness [--call ADDR:COUNT[:A0[:A1[:A2]]]]... [--sched-slice N]\n"
-            "                      [--frozen-clock] [--hard-exit] <image.bin> <base-hex>\n");
+            "                      [--frozen-clock] [--hard-exit] [--selftest-corrupt FIELD]\n"
+            "                      <image.bin> <base-hex>\n");
     return 2;
 }
 
@@ -125,6 +148,8 @@ int main(int argc, char **argv) {
             frozen = 1;
         } else if (!strcmp(a, "--hard-exit")) {
             hard_exit = 1;
+        } else if (!strcmp(a, "--selftest-corrupt") && i + 1 < argc) {
+            s_selftest_corrupt = argv[++i];
         } else if (a[0] == '-' && a[1] == '-') {
             return usage();
         } else if (positional == 0) {

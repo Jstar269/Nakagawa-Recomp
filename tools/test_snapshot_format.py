@@ -25,6 +25,9 @@ ROOT = Path(__file__).resolve().parents[1]
 RECOMP_H = (ROOT / "src" / "rt" / "recomp.h").read_text(encoding="utf-8")
 NKSNAP_C = (ROOT / "src" / "rt" / "nksnap.c").read_text(encoding="utf-8")
 RUNNER_C = (ROOT / "src" / "rt" / "snapshot_runner.c").read_text(encoding="utf-8")
+# The comparison the runner and src/rt/verify.c both report through (audit F-2829a72a).
+COMPARE_H = (ROOT / "src" / "rt" / "end_state_compare.h").read_text(encoding="utf-8")
+VERIFY_C = (ROOT / "src" / "rt" / "verify.c").read_text(encoding="utf-8")
 
 DATA = 0x09000000
 
@@ -236,22 +239,36 @@ class VerdictGrammarTests(unittest.TestCase):
         self.assertEqual(printed, set(nksnap.NOT_CHECKED_REASONS))
 
     def test_runner_mismatch_fields_parse(self):
-        fields = set(re.findall(r'verdict_mismatch_hex\("([a-z_0-9]+)"', RUNNER_C))
+        fields = set(re.findall(r'sr_end_difference_hex\(out, cap, "([a-z_0-9]+)"', COMPARE_H))
         self.assertTrue({"syscall_pc", "syscall_code", "import_nid", "hi", "lo", "fcr31",
                          "oor_loads", "oor_stores"} <= fields)
         for name in fields:
             with self.subTest(field=name):
                 nksnap.parse_verdict(f"MISMATCH {name} aot=0x00000000 ref=0x00000001")
-        self.assertIn('"MISMATCH stop aot=%s ref=%s\\n"', RUNNER_C)
-        self.assertIn('"r%d"', RUNNER_C)
-        self.assertIn('"f%d"', RUNNER_C)
-        self.assertIn('"MISMATCH mem[0x%08" PRIx32 "] aot=0x%02x ref=0x%02x\\n"', RUNNER_C)
+        self.assertIn('"stop aot=%s ref=%s"', COMPARE_H)
+        self.assertIn('"r%d"', COMPARE_H)
+        self.assertIn('"f%d"', COMPARE_H)
+        self.assertIn('"mem[0x%08" PRIx32 "] aot=0x%02x ref=0x%02x"', COMPARE_H)
+        self.assertIn('printf("MISMATCH %s\\n", what);', RUNNER_C)
         self.assertIn('"MATCH\\n"', RUNNER_C)
 
     def test_runner_stop_names_are_the_grammar(self):
-        names = re.search(r"k_stop_names\[\] = \{ ([^}]*) \}", RUNNER_C)
+        names = re.search(r"sr_end_stop_names\[\] = \{ ([^}]*) \}", COMPARE_H)
         self.assertIsNotNone(names)
         self.assertEqual(tuple(re.findall(r'"(\w+)"', names.group(1))), nksnap.STOP_KINDS)
+
+    def test_the_runner_and_the_checker_share_one_field_walk(self):
+        """A captured mismatch replays to the same first difference (audit F-2829a72a).
+
+        Each program used to carry its own copy of the walk, kept in step by a comment. Both
+        now call sr_end_state_difference, and neither formats a field of its own.
+        """
+        for name, text in (("snapshot_runner.c", RUNNER_C), ("verify.c", VERIFY_C)):
+            with self.subTest(source=name):
+                self.assertEqual(text.count("sr_end_state_difference("), 1)
+                for own in ("aot=0x", "aot=%s", '"r%d"', '"f%d"', "static int is_vfpu_opcode",
+                            "first_difference(const uint8_t"):
+                    self.assertNotIn(own, text)
 
 
 _COUNTING_DRIVER = """\
