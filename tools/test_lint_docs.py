@@ -446,8 +446,9 @@ class TestDocTruthInvariants(unittest.TestCase):
             run_git(["commit", "-qm", "x"], cwd=root, check=True)
 
             def rev(name: str) -> str:
-                return run_git(["rev-parse", name], cwd=root, capture_output=True, text=True,
-                               check=True).stdout.strip()
+                out: str = run_git(["rev-parse", name], cwd=root, capture_output=True, text=True,
+                                   check=True).stdout
+                return out.strip()
 
             public = rev("HEAD")
             tree = rev("HEAD^{tree}")

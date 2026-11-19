@@ -57,7 +57,7 @@ def _isolate_git(case: unittest.TestCase, root: Path) -> dict[str, str]:
     ``git rebase --exec``, a worktree tool), and the verifier's own git calls inherit ``os.environ``, so both the
     scratch commands and the code under test run in ``isolated_git_env``. Returns that environment.
     """
-    env = isolated_git_env(root=root)
+    env: dict[str, str] = isolated_git_env(root=root)
     patcher = mock.patch.dict(os.environ, env, clear=True)
     patcher.start()
     case.addCleanup(patcher.stop)
