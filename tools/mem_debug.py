@@ -893,6 +893,8 @@ class MemoryDebugger:
         if h_process:
             kernel32.CloseHandle(h_process)
 
+        # exited.flag is written beside the executable at sceKernelExitGame only when the
+        # runtime was started with SR_EXIT_DUMP set.
         status, stale = self._run_status()
 
         result = {
@@ -1300,7 +1302,9 @@ class MemoryDebugger:
     def trace_exit(self):
         dump_path = os.path.join(build_artifact_dir(self.attached_exe_path()), "crash_dump.bin")
         if not os.path.exists(dump_path):
-            return {"error": "crash_dump.bin not found. Did the game exit?"}
+            return {"error": "crash_dump.bin not found. Did the game exit? The runtime "
+                             "writes it at sceKernelExitGame only when started with "
+                             "SR_EXIT_DUMP set."}
         if not self._artifact_from_this_run(dump_path):
             return {"error": ("crash_dump.bin predates the attached process (pid %d); "
                               "it is from an earlier run of this build" % self.pid)}

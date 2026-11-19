@@ -754,7 +754,10 @@ have_image:;
         (void)sr_audio_init();
         for (;;) {
             sr_driver_boot_event("BOOT_EVENT phase=guest_start mode=scheduler entry=0x%08x", entry);
-            sched_run(entry, s.r[4], s.r[5]);
+            /* No entry thread (the title's module_start parameters refused): nothing ran, so
+             * the run ends with a failure status, not as a run that returned normally. */
+            if (sched_run(entry, s.r[4], s.r[5]) != 0)
+                return driver_run_end(2, "the module_start thread could not be created");
 
             /* A run stopped from outside the guest ends here, even with a LoadExec queued, and
              * so does one the person asked to quit before the stop was due (a LoadExec from the
