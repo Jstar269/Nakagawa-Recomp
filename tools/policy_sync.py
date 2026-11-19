@@ -46,8 +46,18 @@ HIGH_RISK = (
 
 
 def tracked_paths(repo_root: Path) -> list[str]:
-    out = subprocess.run(["git", "ls-files"], cwd=repo_root, capture_output=True, text=True, check=True)
-    return [path for path in out.stdout.split() if (repo_root / path).exists()]
+    """Every path in the index, exactly as Git names it.
+
+    ``-z`` keeps a name with spaces whole and stops Git quoting a non-ASCII
+    one. A tracked path missing from disk is still tracked, so it is classified
+    like any other rather than dropped from the check.
+    """
+    out = subprocess.run(["git", "ls-files", "-z"], cwd=repo_root, capture_output=True, check=True)
+    return [
+        item.decode("utf-8", errors="surrogateescape")
+        for item in out.stdout.split(b"\0")
+        if item
+    ]
 
 
 def is_high_risk(path: str) -> bool:

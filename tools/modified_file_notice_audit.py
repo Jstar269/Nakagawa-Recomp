@@ -15,8 +15,13 @@ import json
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+
+try:
+    from nk_core.git_isolation import isolated_git_env
+except ModuleNotFoundError:  # imported as tools.modified_file_notice_audit
+    from tools.nk_core.git_isolation import isolated_git_env
 
 
 MANIFEST_DEFAULT = Path("docs/provenance/MODIFIED_FILE_NOTICES.json")
@@ -26,6 +31,41 @@ GPL2_MARKERS = (
     "This License applies to any program or other work",
 )
 GPL3_MARKERS = ("GNU GENERAL PUBLIC LICENSE", "Version 3")
+#: The immediate-upstream line a sal063-derived file carries in its header. Every tracked file
+#: whose first ``HEADER_LINES`` lines hold it must be in the manifest (``files`` or
+#: ``lineage_header_files``), so its notices are checked.
+LINEAGE_HEADER = "Derived from sal063/PSP-recompilation-project"
+HEADER_LINES = 12
+_LINEAGE_LINE = re.compile(r"^\W*" + re.escape(LINEAGE_HEADER) + r"\b")
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    """Run git on ``root``'s repository, never one an inherited GIT_DIR or GIT_WORK_TREE names.
+
+    A pre-commit hook's GIT_INDEX_FILE is kept when it indexes ``root`` (``isolated_git_env``).
+    """
+    return subprocess.run(
+        ["git", *args],
+        cwd=root,
+        env=isolated_git_env(root=root),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _repository_path(path: object) -> str | None:
+    """``path`` when it names a file inside the repository: relative POSIX, no ``..``, no drive.
+
+    A leading ``/`` would read outside the tree (Windows does not call ``/x`` absolute) and, as
+    ``git show :/x``, would search commit messages instead of reading the index.
+    """
+    if not isinstance(path, str) or not path or "\\" in path or ":" in path:
+        return None
+    pure = PurePosixPath(path)
+    if pure.is_absolute() or ".." in pure.parts or pure.as_posix() != path:
+        return None
+    return path
 
 
 def _read_worktree(root: Path, relative: str) -> bytes | None:
@@ -37,18 +77,31 @@ def _read_worktree(root: Path, relative: str) -> bytes | None:
 
 
 def _read_index(root: Path, relative: str) -> bytes | None:
-    proc = subprocess.run(
-        ["git", "show", f":{relative}"],
-        cwd=root,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
+    proc = _git(root, "cat-file", "blob", f":0:{relative}")
     return proc.stdout if proc.returncode == 0 else None
 
 
 def _read(root: Path, relative: str, tracked_only: bool) -> bytes | None:
+    if _repository_path(relative) is None:
+        return None
     return _read_index(root, relative) if tracked_only else _read_worktree(root, relative)
+
+
+def _lineage_header_paths(root: Path, tracked_only: bool) -> list[str] | None:
+    """Tracked files whose header carries ``LINEAGE_HEADER`` (``None``: git could not list them)."""
+    scope = ["--cached"] if tracked_only else []
+    proc = _git(root, "grep", *scope, "-z", "-l", "-I", "-F", "-e", LINEAGE_HEADER)
+    if proc.returncode not in (0, 1):
+        return None
+    paths = []
+    for raw in proc.stdout.split(b"\0"):
+        if not raw:
+            continue
+        path = raw.decode("utf-8", errors="surrogateescape")
+        lines = _text(_read(root, path, tracked_only)).splitlines()[:HEADER_LINES]
+        if any(_LINEAGE_LINE.match(line) for line in lines):
+            paths.append(path)
+    return sorted(paths)
 
 
 def _text(data: bytes | None) -> str:
@@ -78,6 +131,9 @@ def audit(root: Path, manifest_relative: Path, tracked_only: bool) -> tuple[list
             _add(findings, "manifest contains an invalid required license-file entry")
             continue
         path = entry["path"]
+        if _repository_path(path) is None:
+            _add(findings, f"manifest path escapes repository scope: {path}")
+            continue
         content = _read(root, path, tracked_only)
         if not content:
             _add(findings, f"required license/notice file missing or empty: {path}")
@@ -105,7 +161,7 @@ def audit(root: Path, manifest_relative: Path, tracked_only: bool) -> tuple[list
         if path in seen:
             _add(findings, f"manifest contains a duplicate path: {path}")
         seen.add(path)
-        if Path(path).is_absolute() or ".." in Path(path).parts:
+        if _repository_path(path) is None:
             _add(findings, f"manifest path escapes repository scope: {path}")
             continue
         data = _read(root, path, tracked_only)
@@ -115,7 +171,10 @@ def audit(root: Path, manifest_relative: Path, tracked_only: bool) -> tuple[list
             source = record.get("generated_from")
             if data is None:
                 _add(findings, f"generated output is missing: {path}")
-            if not isinstance(source, str) or _read(root, source, tracked_only) is None:
+            source_path = _repository_path(source)
+            if source_path is None:
+                _add(findings, f"manifest generated_from escapes repository scope for {path}: {source}")
+            elif _read(root, source_path, tracked_only) is None:
                 _add(findings, f"generated source is missing for {path}: {source}")
             continue
         checked_text += 1
@@ -143,6 +202,53 @@ def audit(root: Path, manifest_relative: Path, tracked_only: bool) -> tuple[list
             pointer = expected.get("pointer")
             if not isinstance(pointer, str) or pointer not in text:
                 _add(findings, f"{path}: provenance pointer is absent")
+
+    # Files split out of inherited ones, and the build files, carry the same lineage header
+    # without an exact counterpart at the pinned revision; they keep the notices they carry.
+    lineage = manifest.get("lineage_header_files", {"files": []})
+    lineage_records = lineage.get("files") if isinstance(lineage, dict) else None
+    if not isinstance(lineage_records, list):
+        _add(findings, "manifest lineage_header_files.files must be a list")
+        lineage_records = []
+    for record in lineage_records:
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+            _add(findings, "manifest contains a lineage header entry without a path")
+            continue
+        path = record["path"]
+        if path in seen:
+            _add(findings, f"manifest contains a duplicate path: {path}")
+        seen.add(path)
+        if _repository_path(path) is None:
+            _add(findings, f"manifest path escapes repository scope: {path}")
+            continue
+        checked_text += 1
+        data = _read(root, path, tracked_only)
+        if data is None:
+            _add(findings, f"manifest source file is missing: {path}")
+            continue
+        text = _text(data)
+        spdx = record.get("spdx")
+        if not isinstance(spdx, str) or f"SPDX-License-Identifier: {spdx}" not in text:
+            _add(findings, f"{path}: expected SPDX identifier is absent")
+        if LINEAGE_HEADER not in text:
+            _add(findings, f"{path}: immediate sal063 attribution is absent")
+        recorded_notice = record.get("modified_notice")
+        if not isinstance(recorded_notice, str) or not recorded_notice.startswith(
+                "Modified by Nakagawa Recomp contributors"):
+            _add(findings, f"{path}: manifest does not record the file's modified-file notice")
+        elif recorded_notice not in text:
+            _add(findings, f"{path}: explicit modified-file notice is absent")
+        pointer = record.get("pointer")
+        if not isinstance(pointer, str) or pointer not in text:
+            _add(findings, f"{path}: provenance pointer is absent")
+
+    carriers = _lineage_header_paths(root, tracked_only)
+    if carriers is None:
+        _add(findings, "cannot list the tracked files that carry the sal063 lineage header (git grep failed)")
+    else:
+        for path in carriers:
+            if path not in seen:
+                _add(findings, f"{path}: carries the sal063 lineage header but is not in the notice manifest")
 
     return findings, {"textual": checked_text, "generated": checked_generated}
 

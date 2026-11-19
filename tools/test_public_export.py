@@ -135,7 +135,15 @@ def _read_only_public_export() -> tuple[bool, Path]:
     global _READ_ONLY_EXPORT
     if _READ_ONLY_EXPORT is None:
         temp = tempfile.TemporaryDirectory(prefix="public_export_shared_")
-        unittest.addModuleCleanup(temp.cleanup)
+
+        def remove_shared_export() -> None:
+            # Forget the export with its directory, so a later run in the same
+            # process builds a new one instead of reading a removed path.
+            global _READ_ONLY_EXPORT
+            _READ_ONLY_EXPORT = None
+            temp.cleanup()
+
+        unittest.addModuleCleanup(remove_shared_export)
         target = Path(temp.name) / "public_export"
         _READ_ONLY_EXPORT = (export_sanitized_public_tree(target, public_safe_profile=True), target)
     return _READ_ONLY_EXPORT
@@ -170,6 +178,28 @@ class TestPublicExport(unittest.TestCase):
         res = check_unresolved_legal_blockers(public_safe_profile=True)
         self.assertTrue(res.passed)
         self.assertIn("PUBLIC-SAFE PROFILE ACTIVE", res.detail)
+
+    def test_legal_blockers_fail_when_the_profile_includes_a_blocked_component(self):
+        # The gate's PASS claims the profile excludes the unreviewed components, so a
+        # profile that includes one of them must fail it.
+        profile = json.loads((ROOT / "assets" / "public_source_profile.json").read_text(encoding="utf-8"))
+        for blocked, change in (
+            ("src/rt/pgf.c", lambda d: d["exclude_paths"].remove("src/rt/pgf.c")),
+            ("font/jpn0.pgf", lambda d: d["exclude_globs"].remove("font/*.pgf")),
+        ):
+            with self.subTest(blocked=blocked), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "assets").mkdir()
+                shutil.copy2(ROOT / "assets" / "release_manifest.json", root / "assets" / "release_manifest.json")
+                document = json.loads(json.dumps(profile))
+                change(document)
+                document["include_paths"] = sorted([*document["include_paths"], blocked])
+                (root / "assets" / "public_source_profile.json").write_text(
+                    json.dumps(document, indent=2) + "\n", encoding="utf-8")
+                with mock.patch.object(build_public_export, "ROOT", root):
+                    res = check_unresolved_legal_blockers(public_safe_profile=True)
+                self.assertFalse(res.passed, res.detail)
+                self.assertIn(blocked, res.detail)
 
     def test_publish_audit_gate(self):
         res = run_publish_audit()
@@ -888,6 +918,114 @@ class TestCandidateImmutability293(unittest.TestCase):
             self.assertIn("EXPORT_IDENTITY_MISSING", stderr.getvalue())
             self.assertFalse(target.exists())
             self.assertEqual(sorted(path.name for path in Path(tmpdir).iterdir()), ["source"])
+
+
+class TestSharedExportCache(unittest.TestCase):
+    def test_a_second_run_in_the_same_process_rebuilds_the_removed_export(self):
+        # The shared export's directory is removed by the module cleanup; a runner that
+        # runs this module again in the same process must get a new export, not the
+        # removed path.
+        module = sys.modules[__name__]
+
+        def fake_export(target: Path, public_safe_profile: bool) -> bool:
+            target.mkdir(parents=True)
+            return public_safe_profile
+
+        with mock.patch.object(unittest.case, "_module_cleanups", []), \
+                mock.patch.object(module, "_READ_ONLY_EXPORT", None), \
+                mock.patch.object(module, "export_sanitized_public_tree", fake_export):
+            first = _read_only_public_export()
+            self.assertTrue(first[1].is_dir())
+            unittest.case.doModuleCleanups()
+            self.assertFalse(first[1].exists())
+            second = _read_only_public_export()
+            self.assertTrue(second[0])
+            self.assertTrue(second[1].is_dir(), "the cached export points at a removed directory")
+            unittest.case.doModuleCleanups()
+
+
+class TestIndexFilesReadsTheWholeIndex(unittest.TestCase):
+    """``index_files`` is the tree policy_sync and admit_paths compute the export over.
+
+    Every staged blob comes back under its exact name with its own bytes, and a tree it
+    cannot read completely is an error, never a shorter list.
+    """
+
+    def _repo(self, root: Path) -> None:
+        _git(["init", "-q"], root)
+
+    def _stage_blob(self, root: Path, path: str, data: bytes) -> str:
+        sha: str = run_git(["hash-object", "-w", "--stdin"], cwd=root, check=True,
+                           capture_output=True, input=data).stdout.decode("ascii").strip()
+        _git(["update-index", "--add", "--cacheinfo", f"100644,{sha},{path}"], root)
+        return sha
+
+    def test_a_path_with_leading_whitespace_keeps_its_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo(root)
+            self._stage_blob(root, " lead.md", b"lead\n")
+            self._stage_blob(root, "plain.md", b"plain\n")
+            self.assertEqual(
+                public_export.index_files(repo_root=root),
+                [(" lead.md", b"lead\n"), ("plain.md", b"plain\n")],
+            )
+
+    def test_a_gitlink_does_not_shift_the_bytes_of_later_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo(root)
+            self._stage_blob(root, "seed.md", b"seed\n")
+            _git(["-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                  "commit", "-qm", "seed"], root)
+            commit = run_git(["rev-parse", "HEAD"], cwd=root, check=True,
+                             capture_output=True).stdout.decode("ascii").strip()
+            # The gitlink's commit object is in this object store, so cat-file would
+            # print its payload; it sorts before the blob that follows it.
+            _git(["update-index", "--add", "--cacheinfo", f"160000,{commit},a_sub"], root)
+            self._stage_blob(root, "b.md", b"after the gitlink\n")
+            self.assertEqual(
+                public_export.index_files(repo_root=root),
+                [("b.md", b"after the gitlink\n"), ("seed.md", b"seed\n")],
+            )
+
+    def test_an_unreadable_staged_object_is_an_error_not_a_shorter_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo(root)
+            self._stage_blob(root, "kept.md", b"kept\n")
+            absent = "1" * 40
+            _git(["update-index", "--add", "--info-only", "--cacheinfo",
+                  f"100644,{absent},lost.md"], root)
+            with self.assertRaises(public_export.IndexReadError) as caught:
+                public_export.index_files(repo_root=root)
+            self.assertIn("lost.md", str(caught.exception))
+
+    def test_a_failing_cat_file_is_an_error_not_a_shorter_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo(root)
+            self._stage_blob(root, "one.md", b"one\n")
+            self._stage_blob(root, "two.md", b"two\n")
+            real_popen = subprocess.Popen
+
+            def truncated_cat_file(argv, *args, **kwargs):
+                if list(argv[:2]) == ["git", "cat-file"]:
+                    # A cat-file that answers the first request, then dies.
+                    script = (
+                        "import subprocess, sys\n"
+                        "first = sys.stdin.readline()\n"
+                        "out = subprocess.run(['git', 'cat-file', '--batch'], input=first.encode(),"
+                        " capture_output=True).stdout\n"
+                        "sys.stdout.buffer.write(out)\n"
+                        "sys.exit(128)\n"
+                    )
+                    argv = [sys.executable, "-c", script]
+                return real_popen(argv, *args, **kwargs)
+
+            with mock.patch.object(public_export.subprocess, "Popen", truncated_cat_file):
+                with self.assertRaises(public_export.IndexReadError):
+                    public_export.index_files(repo_root=root)
 
 
 class TestToolGitNeverDetachesMaintenance(unittest.TestCase):

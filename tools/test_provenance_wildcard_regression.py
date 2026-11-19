@@ -49,10 +49,13 @@ class TestWildcardBackedClassificationRepair(unittest.TestCase):
                 "statement": "fixture or test data is synthetic and contains no retail bytes",
             },
         )
-        # The deterministic rule must be reachable for this exact path shape,
+        # The deterministic rule covers the path shape, not only this one name: any
+        # other unrecorded tools/test_* or nested test_ path classifies the same way,
         # so a future classifier change cannot silently restore record-backed
         # authority for unrecorded test paths without this test noticing.
-        self.assertTrue(PATH.startswith("tools/test_") or "/test_" in PATH)
+        for other in ("tools/test_wildcard_shape_probe.py", "tests/unit/test_wildcard_shape_probe.py"):
+            with self.subTest(path=other):
+                self.assertEqual(provenance_ledger._class_for(other, None), (classification, evidence))
 
     def test_checked_in_entry_matches_classifier_and_carries_no_hash(self):
         entries = {e["path"]: e for e in self._ledger()["entries"]}
