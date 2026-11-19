@@ -11,20 +11,23 @@ from the disc into the title's folder, ``nk_core.decrypt_tool.decrypt_disc``), t
 production bring-up (``nk_cli.py bringup --user-data-root``): identify, import, analyse,
 generate, compile and package into the shared data folder, then a short hidden launch that names
 the first failure. The player opened with ``--user-data-root`` on
-the same folder lists every title that built.
+the same folder lists the current package for each disc ID. A later successful image with the
+same ID replaces the earlier shared package; the older manifest record is marked ``REPLACED``.
 
-The run never stops on one title: each disc ends with a record (built, or the exact failure)
+The run never stops on one title: each disc ends with a record (built, replaced, or the exact failure)
 in ``library-build.json`` and ``library-build.md``, written after every title to the data
 folder and to ``--manifest-dir``. A stopped run resumes where it left off. Only ``.iso``
 files are discs; other files are counted by kind and skipped. ``--only`` names the discs to
-build (by their path in the disc folder, either slash, any case); every other record is kept
-as it was, and a name that matches no disc stops the run before anything builds.
+build by their relative paths, with either slash; matching ignores case on Windows and preserves
+case on POSIX. Every other record is kept as it was, and a name that matches no disc stops the
+run before anything builds.
 
 Discs are keyed by disc ID plus the hash of the whole image (``nk_core.disc_verify``): a
 file with the disc ID and the same SHA-1 as one seen before is recorded as a duplicate of the
-first, while a fan translation or other modified image with a retail disc's ID is built as a
-disc of its own. Only discs that share a disc ID are hashed, unless ``--redump-dat`` names the
-user's Redump PSP datafile: then every disc is hashed and given its verification tier
+first. A fan translation or other modified image with a retail disc's ID is built separately,
+then replaces the earlier package for that ID if it succeeds. Only discs that share a disc ID
+are hashed, unless ``--redump-dat`` names the user's Redump PSP datafile: then every disc is
+hashed and given its verification tier
 (verified retail, modified or unknown), the list is imported into the data folder for the
 player, and ``--verify-only`` hashes and classifies without building. Hashes are kept in the
 manifest and reused while a file's size and modification time stay the same.
@@ -66,7 +69,7 @@ MANIFEST_NAME = "library-build"
 DISC_SUFFIXES = frozenset({".iso"})
 STAGES = ("inspect", "prepare_import", "analyze", "codegen", "compile", "build_package", "launch")
 # A title that has ended; RUNNING and PENDING titles run again on resume.
-FINAL_OUTCOMES = frozenset({"BUILT", "BUILD_FAILED", "TIMED_OUT", "NO_REPORT", "DUPLICATE"})
+FINAL_OUTCOMES = frozenset({"BUILT", "BUILD_FAILED", "TIMED_OUT", "NO_REPORT", "DUPLICATE", "REPLACED"})
 RETRY_OUTCOMES = frozenset({"BUILD_FAILED", "TIMED_OUT", "NO_REPORT"})
 DEFAULT_TITLE_TIMEOUT_SECONDS = 2400
 DEFAULT_LAUNCH_TIMEOUT_SECONDS = 30
@@ -82,9 +85,12 @@ class OnlyListError(ValueError):
 
 def read_only_list(path: Path) -> frozenset[str]:
     """The source keys of an --only file: one disc path per line, relative to the disc folder,
-    with either slash and in any case."""
-    return frozenset(line.strip().replace("\\", "/").casefold()
-                     for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+    with either slash and platform-appropriate case matching."""
+    return frozenset(
+        (value.casefold() if os.name == "nt" else value)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if (value := line.strip().replace("\\", "/"))
+    )
 
 
 def default_jobs(cpu_count: int | None) -> int:
@@ -102,7 +108,8 @@ def _utc_now() -> str:
 
 
 def _source_key(path: Path, disc_root: Path) -> str:
-    return path.relative_to(disc_root).as_posix().casefold()
+    relative = path.relative_to(disc_root).as_posix()
+    return relative.casefold() if os.name == "nt" else relative
 
 
 def discover(disc_root: Path) -> tuple[list[Path], Counter]:
@@ -175,10 +182,13 @@ class DiscDecryption:
 
     def __init__(self) -> None:
         self.tool: Path | None = None
+        self._tool_lock = threading.Lock()
 
     def __call__(self, iso: Path, user_data_root: Path, disc_id: str) -> list[dict]:
         if self.tool is None:
-            self.tool = decrypt_tool.find_or_build_tool(ROOT)
+            with self._tool_lock:
+                if self.tool is None:
+                    self.tool = decrypt_tool.find_or_build_tool(ROOT)
         returned: list[dict[str, Any]] = decrypt_tool.decrypt_disc(iso, user_data_root, disc_id, self.tool)
         return returned
 
@@ -206,26 +216,20 @@ def _creation_flags(priority: str) -> int:
     return flags
 
 
-def _preexec(priority: str) -> Callable[[], None] | None:
-    if os.name == "nt" or priority == "normal":
-        return None
-    increment = 10 if priority == "below" else 19
-
-    def lower_priority() -> None:
-        os.nice(increment)
-
-    return lower_priority
-
-
 def _directory_bytes(path: Path) -> int | None:
     if not path.is_dir():
         return None
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
+def _read_json_strict(path: Path) -> Any:
+    """Parse one JSON file and preserve the reader error for strict consumers."""
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _read_json(path: Path) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _read_json_strict(path)
     except (OSError, ValueError):
         return None
 
@@ -246,14 +250,24 @@ def summarize_report(report: dict) -> dict[str, Any]:
     built = stage_rows.get("build_package", {}).get("status") == "PASS"
     raw_counts = report.get("counts")
     counts = raw_counts if isinstance(raw_counts, dict) else {}
+    unsupported_rows = report.get("unsupported_imports")
+    if unsupported_rows is None:
+        unsupported_rows = []
+    runtime_rows = report.get("runtime_imports")
+    if runtime_rows is None:
+        runtime_rows = []
     imports = sorted({
         f"{row.get('library')}:{row.get('nid_name') or '?'}"
-        for row in report.get("unsupported_imports", []) if isinstance(row, dict)
+        for row in unsupported_rows if isinstance(row, dict)
     })
-    runtime_imports = sorted({
-        json.dumps(row, sort_keys=True) if not isinstance(row, str) else row
-        for row in report.get("runtime_imports", [])
-    })
+    runtime_imports: list[Any] = []
+    seen_runtime_imports: set[str] = set()
+    for row in runtime_rows:
+        encoded = row if isinstance(row, str) else json.dumps(row, sort_keys=True)
+        if encoded in seen_runtime_imports:
+            continue
+        seen_runtime_imports.add(encoded)
+        runtime_imports.append(dict(row) if isinstance(row, dict) else encoded)
     raw_presentation = report.get("presentation")
     presentation = raw_presentation if isinstance(raw_presentation, dict) else {}
     return {
@@ -402,6 +416,9 @@ class LibraryBuild:
             record = self.records.get(key)
             unchanged = (record is not None and record.get("size_bytes") == stat.st_size
                          and record.get("mtime_ns") == stat.st_mtime_ns)
+            needs_identification = (
+                record is None or not unchanged or bool(record.get("identify_error"))
+            )
             if record is None or not unchanged:
                 record = {
                     "source_key": key,
@@ -410,6 +427,7 @@ class LibraryBuild:
                     "mtime_ns": stat.st_mtime_ns,
                     "outcome": "PENDING",
                 }
+            if needs_identification:
                 try:
                     record.update(self.identify_disc(path))
                     record["identify_error"] = None
@@ -450,10 +468,11 @@ class LibraryBuild:
             if self.verify_only or (outcome in FINAL_OUTCOMES
                                     and not (self.retry_failed and outcome in RETRY_OUTCOMES)):
                 continue
-            record["outcome"] = "PENDING"
             todo.append(record)
         if self.limit is not None:
             todo = todo[:self.limit]
+        for record in todo:
+            record["outcome"] = "PENDING"
         return todo
 
     # -- verification --------------------------------------------------------------------
@@ -572,16 +591,36 @@ class LibraryBuild:
         return_code: int | None = None
         try:
             with open(work_dir / "bringup-stdout.log", "wb") as output:
-                process = subprocess.Popen(
-                    command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL, creationflags=_creation_flags(self.priority),
-                    preexec_fn=_preexec(self.priority),
-                )
+                popen_options: dict[str, Any] = {
+                    "cwd": ROOT,
+                    "stdout": output,
+                    "stderr": subprocess.STDOUT,
+                    "stdin": subprocess.DEVNULL,
+                    "creationflags": _creation_flags(self.priority),
+                }
+                if os.name != "nt":
+                    popen_options["start_new_session"] = True
+                process = subprocess.Popen(command, **popen_options)
+                if os.name != "nt" and self.priority != "normal":
+                    increment = 10 if self.priority == "below" else 19
+                    try:
+                        current_nice = os.getpriority(os.PRIO_PROCESS, process.pid)
+                        os.setpriority(
+                            os.PRIO_PROCESS,
+                            process.pid,
+                            min(19, current_nice + increment),
+                        )
+                    except OSError:
+                        _terminate_process_tree(process, process_group=True)
+                        raise
                 try:
                     return_code = process.wait(timeout=self.title_timeout_seconds)
                 except subprocess.TimeoutExpired:
                     timed_out = True
-                    _terminate_process_tree(process)
+                    if os.name != "nt":
+                        _terminate_process_tree(process, process_group=True)
+                    else:
+                        _terminate_process_tree(process)
         except OSError as exc:
             result: dict[str, Any] = {"outcome": "NO_REPORT", "failure_class": None,
                                       "error": f"{type(exc).__name__}: {exc}"}
@@ -611,6 +650,18 @@ class LibraryBuild:
                 "package_bytes": package_bytes,
                 "finished_at": _utc_now(),
             })
+            if record.get("outcome") == "BUILT" and disc_id and package_bytes is not None:
+                current_content = content_key(record)
+                for previous in self.records.values():
+                    if (previous is record or previous.get("outcome") != "BUILT"
+                            or previous.get("disc_id") != disc_id
+                            or content_key(previous) == current_content):
+                        continue
+                    previous.update({
+                        "outcome": "REPLACED",
+                        "replaced_by": record["source"],
+                        "package_bytes": None,
+                    })
         self.write_manifest()
         self.log(f"{record.get('disc_id') or record['source']}: {record['outcome']}"
                  f"{' ' + str(record.get('failure_class')) if record['outcome'] != 'BUILT' else ''}"
@@ -626,11 +677,12 @@ class LibraryBuild:
             # Each running build's disc ID. Images that share one (a fan translation and its
             # retail disc) share the data folder's per-disc paths and the bring-up's build lock,
             # so they build one after the other; discs with other IDs run beside them.
-            pending: dict[concurrent.futures.Future, str | None] = {}
+            pending: dict[concurrent.futures.Future, dict[str, Any]] = {}
             queue = list(todo)
             while queue or pending:
                 while queue and len(pending) < self.jobs and not stopped:
-                    running = {disc_id for disc_id in pending.values() if disc_id}
+                    running = {record.get("disc_id") for record in pending.values()
+                               if record.get("disc_id")}
                     index = next((index for index, record in enumerate(queue)
                                   if record.get("disc_id") not in running), None)
                     if index is None:
@@ -639,7 +691,7 @@ class LibraryBuild:
                         stopped = True
                         break
                     record = queue.pop(index)
-                    pending[pool.submit(self.build_one, record)] = record.get("disc_id")
+                    pending[pool.submit(self.build_one, record)] = record
                 if stopped:
                     queue.clear()
                 if not pending:
@@ -647,9 +699,23 @@ class LibraryBuild:
                 done, _ = concurrent.futures.wait(
                     pending, return_when=concurrent.futures.FIRST_COMPLETED)
                 for future in done:
-                    del pending[future]
+                    record = pending.pop(future)
                     exception = future.exception()
-                    if exception is not None:  # recorded per title; the batch goes on
+                    if exception is not None:
+                        with self.lock:
+                            for stale in (
+                                "failed_stage", "stages", "decrypt", "unsupported_imports",
+                                "launch", "reached_stage", "exit_code", "package_bytes",
+                                "wall_seconds",
+                            ):
+                                record.pop(stale, None)
+                            record.update({
+                                "outcome": "NO_REPORT",
+                                "failure_class": None,
+                                "error": f"{type(exception).__name__}: {exception}",
+                                "finished_at": _utc_now(),
+                            })
+                        self.write_manifest()
                         self.log(f"title worker raised {type(exception).__name__}: {exception}")
         for record in self.records.values():
             if record.get("outcome") == "RUNNING":
@@ -734,6 +800,8 @@ def render_markdown(manifest: dict[str, Any]) -> str:
         failure = record.get("failure_class") if record["outcome"] != "BUILT" else ""
         if record["outcome"] == "DUPLICATE":
             failure = f"same disc as {record.get('duplicate_of')}".replace("|", "/")
+        elif record["outcome"] == "REPLACED":
+            failure = f"package replaced by {record.get('replaced_by')}".replace("|", "/")
         launch_text = (f"{launch.get('exit_classification')} {launch.get('runtime_output_kind')}"
                        if record["outcome"] == "BUILT" else "")
         lines.append(

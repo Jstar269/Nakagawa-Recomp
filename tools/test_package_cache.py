@@ -1004,6 +1004,88 @@ class PackageCacheTests(unittest.TestCase):
             "fixture-target",
         )
 
+    def test_compiler_target_reuses_the_shared_compiler_query(self) -> None:
+        environment = {"CC": "synthetic-compiler", "PATH": ""}
+        with (
+            mock.patch.object(
+                package_cache, "_compiler_executable", return_value="resolved-compiler"
+            ),
+            mock.patch.object(
+                package_cache, "_compiler_query", return_value="synthetic-target"
+            ) as query,
+        ):
+            target = package_cache.compiler_target(environment)
+
+        self.assertEqual(target, "synthetic-target")
+        query.assert_called_once_with("resolved-compiler", "-dumpmachine", environment)
+
+    def test_llvm_tool_probe_failures_are_named_package_cache_errors(self) -> None:
+        environment = {"PATH": "synthetic-path"}
+        failures = (
+            OSError("synthetic executable failure"),
+            subprocess.TimeoutExpired("synthetic clang", 60),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                with (
+                    mock.patch.object(
+                        package_cache.shutil, "which", return_value="synthetic-clang"
+                    ),
+                    mock.patch.object(package_cache.subprocess, "run", side_effect=failure),
+                ):
+                    with self.assertRaisesRegex(
+                        package_cache.PackageCacheError, "clang -v could not run"
+                    ):
+                        package_cache._llvm_tool_identity("clang", environment, "-v")
+
+    def test_enhancement_package_location_is_shared_by_guard_and_cache_key(self) -> None:
+        import enhancement_package
+
+        package_path = self.root / "synthetic-enhancement.json"
+        environments = (
+            ({"MAKEFLAGS": f"-j3 ENHANCEMENT_PACKAGE={package_path}"},
+             "MAKEFLAGS ENHANCEMENT_PACKAGE"),
+            ({"CODEGEN_USER_ARGS": f"--enhancement-package {package_path}"},
+             "CODEGEN_USER_ARGS --enhancement-package"),
+            ({"CODEGEN_USER_ARGS": f"--enhancement-package={package_path}"},
+             "CODEGEN_USER_ARGS --enhancement-package"),
+        )
+        with (
+            mock.patch.object(
+                enhancement_package,
+                "load_and_validate_package",
+                return_value={"id": "synthetic.enhancement"},
+            ),
+            mock.patch.object(
+                enhancement_package, "compute_package_digest", return_value="a" * 64
+            ),
+        ):
+            for environment, expected_source in environments:
+                with self.subTest(environment=environment):
+                    self.assertEqual(
+                        package_cache.ambient_enhancement_package(environment),
+                        expected_source,
+                    )
+                    options = package_cache.enhancement_package_options(environment)
+                    self.assertEqual(
+                        options["enhancement_package_id"], "synthetic.enhancement"
+                    )
+
+    def test_completion_manifest_checks_aot_key_components_once(self) -> None:
+        package_dir, key, _ = self._new_package_dir("single-aot-key-check")
+        package_cache.write_completion_manifest(package_dir, key)
+        original = package_cache._key_components
+
+        with mock.patch.object(package_cache, "_key_components", wraps=original) as check:
+            status, reason, _document = package_cache._check_completion_manifest(
+                package_dir, expected_key=key
+            )
+
+        self.assertEqual(status, package_cache._COMPLETION_OK, reason)
+        self.assertEqual(
+            sum(call.args[1] == "aot" for call in check.call_args_list), 1
+        )
+
     def test_relative_cc_resolves_identity_and_target_to_the_same_compiler(self) -> None:
         # A relative CC that PATH does not provide names a file under the repository root.
         # The identity and the target must resolve that one file: otherwise the key could
@@ -1141,6 +1223,36 @@ class PackageCacheTests(unittest.TestCase):
                 path = root / relative
                 path.write_bytes(path.read_bytes() + b"/* changed */\n")
                 self.assertEqual(package_cache.source_tree_digest(root), base, relative)
+
+    def test_runtime_digest_changes_when_an_embedded_shader_blob_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            shader_root = root / "src" / "rt" / "gpu_sdl3vk"
+            shader_root.mkdir(parents=True)
+            shader_blobs = [shader_root / f"synthetic_shader{suffix}"
+                            for suffix in (".inc", ".comp", ".vert", ".frag")]
+            for shader_blob in shader_blobs:
+                shader_blob.write_bytes(b"first embedded shader bytes")
+            first = package_cache.source_tree_digest(root, directories=("src/rt",))
+
+            for shader_blob in shader_blobs:
+                with self.subTest(suffix=shader_blob.suffix):
+                    shader_blob.write_bytes(b"updated embedded shader bytes")
+                    self.assertNotEqual(
+                        package_cache.source_tree_digest(root, directories=("src/rt",)),
+                        first,
+                    )
+                    shader_blob.write_bytes(b"first embedded shader bytes")
+
+
+    def test_player_runtime_digest_counts_the_same_source_suffixes(self) -> None:
+        text = (ROOT / "src" / "core" / "nk_title_manifest.c").read_text(encoding="utf-8")
+        start = text.index("static bool package_source_suffix_counts(")
+        block = re.search(r"suffixes\[\]\s*=\s*\{(.*?)\};", text[start:], re.S)
+        self.assertIsNotNone(block)
+        assert block is not None
+        native_suffixes = set(re.findall(r'"([^"]+)"', block.group(1)))
+        self.assertEqual(native_suffixes, package_cache.RUNTIME_SOURCE_SUFFIXES)
 
     def test_runtime_digest_lists_every_third_party_directory_the_runtime_uses(self) -> None:
         # A runtime source that includes a third-party header, or a runtime flag that
@@ -2028,6 +2140,11 @@ class BoundedJsonArtifactTests(unittest.TestCase):
 
     def _deep_text(self, depth: int, payload: str = '1') -> str:
         return '{"format": "nakagawa-aot-package", "n": ' + '{"n":' * depth + payload + '}' * depth + '}'
+
+    def test_bounded_json_text_validator_checks_structure_without_parsing(self) -> None:
+        self.assertIsNone(package_cache.validate_bounded_json_text('{"item": [1, 2]}'))
+        with self.assertRaisesRegex(package_cache.BoundedJsonError, "nesting exceeds"):
+            package_cache.validate_bounded_json_text('{"item": [1]}', max_depth=1)
 
     def test_object_separators_are_diagnosed_as_separators(self) -> None:
         with self.assertRaisesRegex(package_cache.BoundedJsonError, "comma separators"):
