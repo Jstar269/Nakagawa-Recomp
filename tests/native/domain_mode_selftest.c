@@ -57,6 +57,13 @@ void sr_ge_vram_write_commit(uint32_t addr, uint32_t width) {
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include <process.h>
+#define DM_SELFTEST_PID() ((unsigned long)_getpid())
+#else
+#include <unistd.h>
+#define DM_SELFTEST_PID() ((unsigned long)getpid())
+#endif
 
 /* ---- stubs for runtime symbols recomp.c references -------------------------------- */
 
@@ -767,14 +774,28 @@ static void test_cosim_dual_run(void) {
     {
         char events_path[512];
         const char *tmp = getenv("TEMP") ? getenv("TEMP") : getenv("TMPDIR");
-        snprintf(events_path, sizeof events_path, "%s/nk_domain_mode_events_%lu.txt",
-                 tmp ? tmp : ".", (unsigned long)time(NULL));
+        /* The process id keeps two runs started in the same second apart. */
+        snprintf(events_path, sizeof events_path, "%s/nk_domain_mode_events_%lu_%lu.txt",
+                 tmp ? tmp : ".", DM_SELFTEST_PID(), (unsigned long)time(NULL));
         remove(events_path);
 #ifdef _WIN32
         _putenv_s("SR_BOOT_EVENT_FILE", events_path);
 #else
         setenv("SR_BOOT_EVENT_FILE", events_path, 1);
 #endif
+        /* Positive control: the runtime's own writer must reach this file, or the
+         * no-stop check after the cells would pass whatever the code does. */
+        {
+            dispatch_record_semantic_stop("selftest-control");
+            FILE *control = fopen(events_path, "rb");
+            char line[160] = {0};
+            int live = control != NULL && fgets(line, sizeof line, control) != NULL &&
+                       strstr(line, "boundary=selftest-control") != NULL;
+            if (control) fclose(control);
+            CHECK(live, "the boot-event sink is not writable, so the refusal cells cannot "
+                        "prove no stop is recorded (%s)", events_path);
+            remove(events_path);
+        }
         static const struct { uint32_t export_addr; const char *what; } cells[] = {
             { EXP_INTERP_JAL, "an interpreted jal to a stub (the interpreter's linked call)" },
             { EXP_TAIL, "a computed TAIL to a body that calls a stub (dispatch_tail_step)" },
@@ -1003,7 +1024,6 @@ static void test_fallback_lane(void) {
 }
 
 int main(void) {
-    CpuState warm;
     sr_mem_init();
     sr_exec_span_reset();
     /* The production lookup only resolves bodies with executable-span
@@ -1014,9 +1034,6 @@ int main(void) {
         fprintf(stderr, "FAIL: export span rejected\n");
         return 1;
     }
-    /* Warm the dispatch miss tracker off the measured paths so the
-     * rejection cases below log their own miss deterministically. */
-    memset(&warm, 0, sizeof warm);
     test_defaults();
     test_set_get_reset();
     test_lock();

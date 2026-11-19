@@ -18,9 +18,23 @@ import shutil
 ENV_OVERRIDE = "NK_POWERSHELL"
 
 
+def _which(name: str) -> str | None:
+    """Find ``name`` through PATH only, never in the working directory.
+
+    On Windows, ``shutil.which`` looks in the current directory before PATH unless
+    ``NoDefaultCurrentDirectoryInExePath`` is set, so a ``pwsh.exe`` left in the folder a tool
+    was started from would run instead of the installed one. Setting it here protects every
+    tool that starts PowerShell, not only the ``nk`` CLI (which sets it at import), and the
+    children those tools start inherit it.
+    """
+    if os.name == "nt":
+        os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
+    return shutil.which(name)
+
+
 def windows_powershell_exe() -> str:
     """Windows PowerShell 5.1: from PATH, else the in-box System32 location."""
-    found = shutil.which("powershell")
+    found = _which("powershell")
     if found:
         return found
     root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
@@ -32,4 +46,4 @@ def powershell_exe() -> str:
     override = os.environ.get(ENV_OVERRIDE)
     if override:
         return override
-    return shutil.which("pwsh") or windows_powershell_exe()
+    return _which("pwsh") or windows_powershell_exe()

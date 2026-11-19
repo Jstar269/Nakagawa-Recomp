@@ -141,7 +141,9 @@ proposals. Each claim covers only the exact fixture named:
   for these 14 exact raw words on the authorized PSP-3000-series / 6.61 /
   ARK-5.1.0 route (2026-09-30). Fixture: `tests/fixtures/vfpu_oracle/vfpu_probe.c`
   (`FIXTURE_BUILD_ID nakagawa-vfpu-oracle-v1`), whose source-owned
-  `VASIN_DOMAIN_INPUTS` list fed the console; each word produced one record,
+  `VASIN_DOMAIN_INPUTS` list (now in the shared
+  `tests/fixtures/vfpu_oracle/vfpu_oracle_cases.h`, so `src/rt/vfpu_oracle_host.c`
+  prints the same records) fed the console; each word produced one record,
   `vfpu-vasin-domain-arg00` through `vfpu-vasin-domain-arg13`, in the table's
   order. These were two fresh USBHostFS/PSPLink sessions of that single probe
   (no multi-fixture campaign identifier applies); both returned
@@ -1667,6 +1669,57 @@ One console is one data point; see §11. Nothing here closes issue #70
   The values are listed in the `sas-adsr` row of `tests/fixtures/psp_oracle/README.md` and under
   [PSP-SAS-002 capture 2026-11-10](#psp-sas-002-capture-2026-11-10).
 
+- **PSP-3000 single-case run of `hle-std-handles` in the XMB context under ARK-5 5.2.0 (2026-11-17 UTC)**: one
+  PSP-3000, XMB context, one launch on its own boot (boot 222) after the `transport-write` preflight
+  (PSP-TRANSPORT-001 is not re-cited). Firmware identity as for the `safe-scalar` run of the same day (boot 221):
+  console PSP-3000 (operator-recorded label); system software 6.61 (operator-declared); PSPLink `pspver` printed
+  `0x06060010` ("6.6.0") in the XMB context on this boot, before and after the launch, which the runner records as
+  6.6.0; custom firmware ARK-5, version 5.2.0 (operator-declared, not read by a tool); PSPLink v3.2.1.
+  `hle-std-handles` (case 156, `tests/fixtures/psp_oracle/probe_hle_measure.c`) at `3872796c`, the commit of the
+  game-context run below; the source of the case is the same at `d5fed0ba`, at `3872796c` and in this tree.
+  4 records and the done record (out0 4), all PASS, COMPLETE PASS. The runner exited 0 and both envelopes of its
+  report (`transport-write` and `hle-std-handles`) are acceptance-eligible with 0 blockers (evidence class
+  `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, teardown check PASS, the runner's state
+  `READY` with no terminal reason). The raw envelope and host0 log stay in the private campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-17, `3872796c`) |
+  | --- | --- | --- | --- |
+  | `PSP-HLE-STDIO-001` | `stdio-handles`, `stdio-write-stdout`, `stdio-write-stderr`, `stdio-close-stdout`, `hle-std-handles-done` (boot 222, XMB context) | a read from Stdin, the game context under ARK-5 5.1.0, a launch without PSPLink, the UID values on other boots | MEASURED (`hle-std-handles`) |
+
+  The records, as the runner's strict parser reads them from the envelope (`tools/psp_oracle/parse_golden.py`,
+  `HLE_STD_HANDLES_ROWS`, gives each row's word count):
+
+  | Case id | Status | Result | Output words (out0 onward) |
+  | --- | --- | --- | --- |
+  | `stdio-handles` | PASS | `0x00938a15` | `0x0093a513` `0x00938a15` `0x00936f17` |
+  | `stdio-write-stdout` | PASS | `0x00000001` | `0x00938a15` `0x00938a15` |
+  | `stdio-write-stderr` | PASS | `0x00000001` | `0x00936f17` `0x00936f17` |
+  | `stdio-close-stdout` | PASS | `0x800200d1` | `0x00000001` `0x00938a15` `0x00938a15` |
+  | `hle-std-handles-done` | PASS | `0x00000000` | `0x00000004` |
+
+  What the cells establish:
+  - *`stdio-handles`.* `sceKernelStdin`, `sceKernelStdout` and `sceKernelStderr` returned `0x0093a513`,
+    `0x00938a15` and `0x00936f17` (the result word is Stdout's): three distinct UIDs, the same three as on boot 135
+    and boot 200.
+  - *`stdio-write-stdout`, `stdio-write-stderr`.* A one-byte `sceIoWrite` returned 1 on Stdout and on Stderr, and
+    each handle read the same UID again after its write.
+  - *`stdio-close-stdout`.* `sceIoClose` of the Stdout UID returned `0x800200d1` and closed nothing: the write
+    after it returned 1 and `sceKernelStdout` returned the UID that was closed.
+
+  The close's answer by launch context and custom firmware version, one launch each, all three launched through
+  PSPLink on this console:
+
+  | Launch context | ARK-5 5.1.0 | ARK-5 5.2.0 |
+  | --- | --- | --- |
+  | XMB | `0x800200d1` (boot 135, `d5fed0ba`) | `0x800200d1` (boot 222, `3872796c`) |
+  | game | not measured | `0x80020325` (boot 200, `3872796c`) |
+
+  Boot 222 and boot 200 ran the same commit under the same ARK-5 version and differ in the launch context, and
+  boot 222 answers as boot 135 did under the older version. So for these launches the launch context decides the
+  close's answer and the ARK-5 version does not. Not measured: the game context under ARK-5 5.1.0, a launch
+  without PSPLink (under PSPLink the three handles are its tty), a close of the Stdin or Stderr handle, and any
+  other console or system software.
+
 - **PSP-3000 single-case run of `hle-std-handles` in the game context (2026-11-12 UTC)**: one PSP-3000, game
   context (entered from the XMB by one `nkctl --owner-present game-context` soft reset, the owner at the console),
   one launch on its own boot (boot 200) after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited).
@@ -1687,7 +1740,8 @@ One console is one data point; see §11. Nothing here closes issue #70
   on Stdout and on Stderr. `sceIoClose` of the Stdout UID returned `0x80020325` here, where the XMB run returned
   `0x800200d1`; it again closed nothing: a write afterwards returned 1 and `sceKernelStdout` returned the same UID.
   The two runs also differ in custom firmware version (ARK-5 5.1.0 with `pspver` declared 6.6.0 on boot 135,
-  ARK-5 5.2.0 with 6.6.1 on boot 200); which factor decides the close's answer is not measured.
+  ARK-5 5.2.0 with 6.6.1 on boot 200), so these two runs alone do not separate the launch context from the
+  firmware version. The 2026-11-17 XMB run above does: the launch context decides the close's answer.
 
 - **PSP-3000 single-case runs of `hle-issues-batch`, `hle-kernel-pool-bounds` and `registry-font` (2026-11-10)**:
   one PSP-3000, all three PRXs built from `979c6a1dd`, XMB context, one launch per boot (boots 172, 173 and 174),
@@ -4090,7 +4144,7 @@ not expected PSP values.
 | `ge-clut-mip` | `PSP-GE-MIP-002` | `MEASURED` (2026-11-06, PSP-3000, boot 134, `2795f150`; 94 records) | Multi-CLUT mip sampling cells across palette formats, banks and level selection. |
 | `ge-weight` | `PSP-GE-WEIGHT-001` | `MEASURED` (2026-11-06, PSP-3000, boot 136, `d5fed0ba`; 288 records) | Weighted-vertex format and count combinations with raw GE output windows. |
 | `ge-rtt` | `PSP-GE-RTT-001` | `MEASURED` (2026-11-06, PSP-3000, boot 137, `cb3702cf`; 126 records) | Render-to-texture CPU reads, flush variants and output pixels. |
-| `hle-std-handles` | `PSP-HLE-STDIO-001` | `MEASURED` (2026-11-06, PSP-3000, boot 135, `d5fed0ba`, XMB context; again 2026-11-12, boot 200, `3872796c`, game context; 4 records each) | Standard-handle write and close results; the probe does not read stdin. The close of Stdout answered `0x800200d1` on boot 135 (XMB, ARK-5 5.1.0) and `0x80020325` on boot 200 (game context, ARK-5 5.2.0); which factor decides it is not measured. |
+| `hle-std-handles` | `PSP-HLE-STDIO-001` | `MEASURED` (2026-11-06, PSP-3000, boot 135, `d5fed0ba`, XMB context; again 2026-11-12, boot 200, `3872796c`, game context; again 2026-11-17 UTC, boot 222, `3872796c`, XMB context; 4 records each) | Standard-handle write and close results; the probe does not read stdin. The close of Stdout answered `0x800200d1` in the XMB context on boot 135 (ARK-5 5.1.0) and on boot 222 (ARK-5 5.2.0), and `0x80020325` in the game context on boot 200 (ARK-5 5.2.0): for these launches the launch context decides it, not the ARK-5 version. The game context under ARK-5 5.1.0 is not measured. |
 | `hle-audio-rest` | `PSP-HLE-AUDIO-REST-001` | `MEASURED` (2026-11-06, PSP-3000, boot 138, `8db3ec9d`; 102 records) | RestLen and RestLength after 32 blocking-output calls at 1024, 2048 and 4096 frames. |
 | `sas-adsr` | `PSP-SAS-002` | `MEASURED` (2026-11-13 UTC, PSP-3000, boot 208, game context, `06a6c942c`; 696 records and the done record, all PASS, acceptance-eligible; captured earlier on boot 185 with the same records) | The SAS envelope for #1296; every record repeats the 2026-11-05 values. See [PSP-SAS-002 capture 2026-11-10](#psp-sas-002-capture-2026-11-10). |
 | `sas-mix` | `PSP-SAS-003` | `MEASURED` (2026-11-12, PSP-3000, boot 197, game context, `3872796c`; 205 records, all PASS, acceptance-eligible; captured earlier on boots 146 and 191 with the same records) | Synthetic volume, WithMix and pitch cells for #2135 and #2054. See [PSP-SAS-003 capture 2026-11-07](#psp-sas-003-capture-2026-11-07). |

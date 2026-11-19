@@ -1047,7 +1047,6 @@ static uint32_t h_ReferVplStatus(CpuState *s) {
 #define TLSPL_BAD_PARTITION_B 0x800200d2u /* partitions <= 0, 7..10; alignments that are not powers of two */
 #define TLSPL_BAD_SIZE_VALUE 0x800201b7u  /* block size or count of 0 or 0xFFFFFFFF */
 #define TLSPL_NO_MEMORY 0x80020190u
-#define TLSPL_BUSY 0x800201a8u
 #define TLSPL_ILLEGAL_SIZE 0x800201bcu
 #define TLSPL_ILLEGAL_ATTR 0x80020191u
 #define TLSPL_USER_PARTITION 2u

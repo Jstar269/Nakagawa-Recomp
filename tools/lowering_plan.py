@@ -297,9 +297,9 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         # Its exits leave $sp to the guest and the stack census leaves it unwrapped
         # (codegen.GUEST_SP_ENTRIES); the C backend owns that contract.
         raise Unsupported("loads $sp, so its exits leave $sp to the guest (kept in C)")
-    if cg.ENHANCEMENT_SITES and insns & set(cg.ENHANCEMENT_SITES):
+    if cg.ENHANCEMENT_SITES and not insns.isdisjoint(cg.ENHANCEMENT_SITES):
         raise Unsupported("enhancement-package rewrite site")
-    if cg.ENHANCEMENT_ACE_SITES and insns & set(cg.ENHANCEMENT_ACE_SITES):
+    if cg.ENHANCEMENT_ACE_SITES and not insns.isdisjoint(cg.ENHANCEMENT_ACE_SITES):
         raise Unsupported("enhancement-package ace_parts site")
     if profile == "hst":
         hit = sorted(insns & hst_emission_sites(cg))
@@ -317,9 +317,12 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
     def symbol(target):
         return space.symbol(target, resume_owners)
 
-    # Scope first, so a function outside it fails with its first unsupported word.
+    # Scope first, so a function outside it fails with its first unsupported word. Each
+    # word is read and decoded once here; the emission pass below reuses both.
+    words = {}
+    decoded = {}
     for addr in sorted(insns):
-        w = word(addr)
+        w = words[addr] = word(addr)
         if w is None:
             continue
         if cg.is_control(w):
@@ -328,13 +331,13 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
             if (w >> 26) in (0x11, 0x12):
                 raise Unsupported(f"coprocessor branch at 0x{addr:08x}")
         else:
-            decode_op(addr, w, stale_detect=options.stale_detect)
+            decoded[addr] = decode_op(addr, w, stale_detect=options.stale_detect)
 
     # A delay slot that is itself a branch target runs inline at its transfer and again
     # under its own label; fall-through past the transfer skips the labelled copy.
     dup_slot_skips = {}
     for addr in insns:
-        w = cg.read32(elf, addr)
+        w = words[addr]
         if w is None or not cg.is_control(w):
             continue
         op, fn = w >> 26, w & 0x3F
@@ -355,11 +358,11 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
             continue
         if addr in labels:
             plan.steps.append(Label(addr))
-        w = word(addr)
+        w = words[addr]
         if w is None:
             continue
         if not cg.is_control(w):
-            plan.steps.append(decode_op(addr, w, stale_detect=options.stale_detect))
+            plan.steps.append(decoded[addr])
             if addr in continuations:
                 plan.steps.append(FallInto(continuations[addr]))
             continue

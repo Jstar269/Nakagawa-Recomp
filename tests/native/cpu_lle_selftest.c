@@ -164,6 +164,12 @@ static uint32_t enc_lw(unsigned base, unsigned rt, uint16_t offset) {
 static uint32_t enc_sw(unsigned base, unsigned rt, uint16_t offset) {
     return enc_mem(0x2Bu, base, rt, offset);
 }
+static uint32_t enc_lh(unsigned base, unsigned rt, uint16_t offset) {
+    return enc_mem(0x21u, base, rt, offset);
+}
+static uint32_t enc_sh(unsigned base, unsigned rt, uint16_t offset) {
+    return enc_mem(0x29u, base, rt, offset);
+}
 static uint32_t enc_vfpu(unsigned primary, unsigned base, unsigned vt, uint16_t offset) {
     return enc_mem(primary, base, vt, offset);
 }
@@ -367,8 +373,10 @@ static void test_hw_psp_a3_02_03_misaligned_codes_and_badvaddr(void) {
           "PSP-A3-02 BadVAddr=0x%08x, want the misaligned effective address 0x%08x",
           s.cop0[SR_CP0_BADVADDR], load_ea);
     CHECK((s.cop0[SR_CP0_BADVADDR] & 3u) != 0u,
-          "PSP-A3-02 BadVAddr must keep its low bits, not be aligned down");
-    CHECK(s.r[14] == 0x0BADC0DEu, "PSP-A3-02 t6 must be unchanged by a faulting load");
+          "PSP-A3-02 the raise must store BadVAddr as given, low bits included");
+    /* No load runs here; the lw itself is run end to end in
+     * test_hw_psp_a3_01_adel_through_load and test_lle_misaligned_data_access. */
+    CHECK(s.r[14] == 0x0BADC0DEu, "PSP-A3-02 the raise itself must not write a GPR");
     CHECK(s.flow_kind == SR_FLOW_EXCEPTION && s.pc == TEST_VECTOR,
           "PSP-A3-02 must transfer to the vector, not continue");
 
@@ -462,7 +470,8 @@ static void test_hw_psp_a3_05_halfword_odd(void) {
     CHECK(s.cop0[SR_CP0_BADVADDR] == base + 1u,
           "PSP-A3-05 lh BadVAddr=0x%08x, want the odd effective address",
           s.cop0[SR_CP0_BADVADDR]);
-    CHECK(s.r[14] == 0x0BADC0DEu, "PSP-A3-05 lh must leave t6 unchanged");
+    /* No lh runs here; test_hw_psp_a3_05_halfword_through_interpreter runs it. */
+    CHECK(s.r[14] == 0x0BADC0DEu, "PSP-A3-05 the lh raise itself must not write a GPR");
 
     /* Store half: sh $t6, 1($t5). */
     fresh_state(&s);
@@ -478,6 +487,102 @@ static void test_hw_psp_a3_05_halfword_odd(void) {
           s.cop0[SR_CP0_BADVADDR]);
     CHECK(s.cop0[SR_CP0_STATUS] == 0x00088613u,
           "PSP-A3-05 Status=0x%08x, want 0x00088613", s.cop0[SR_CP0_STATUS]);
+}
+
+/* PSP-A3-05 end to end: the odd-address lh and sh run through the interpreter,
+ * so the production width (2, not 4) and the guard are what is checked, not the
+ * decision function alone. base+2 is the width-relative half: a word access
+ * there faults, a halfword access must complete. */
+static void test_hw_psp_a3_05_halfword_through_interpreter(void) {
+    const uint32_t base = 0x088564F0u;
+    CpuState s;
+    SrGuestInterpFault fault;
+    SrGuestInterpResult r;
+
+    /* lh $t6, 1($t5): AdEL, BadVAddr the odd address, t6 unchanged. */
+    fresh_state(&s);
+    sr_cpu_lle_set_enabled(1);
+    MEM_W32_PC(base, 0x80015A3Cu, TEST_BASE);
+    MEM_W32_PC(TEST_BASE + 0u, enc_lh(13u, 14u, 1u), TEST_BASE);
+    s.pc = TEST_BASE;
+    s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
+    s.r[13] = base;
+    s.r[14] = 0x0BADC0DEu;
+    r = sr_guest_interp_run(&s, TEST_BASE, &fault);
+    CHECK(r == SR_GUEST_INTERP_EXCEPTION, "PSP-A3-05 odd lh must raise (got %s)",
+          sr_guest_interp_result_name(r));
+    CHECK(CAUSE_EXCCODE(s.cop0[SR_CP0_CAUSE]) == SR_EXC_ADEL,
+          "PSP-A3-05 odd lh ExcCode must be 4 (AdEL)");
+    CHECK((s.cop0[SR_CP0_CAUSE] & SR_CAUSE_BD) == 0u, "PSP-A3-05 odd lh BD must be 0");
+    CHECK(s.cop0[SR_CP0_EPC] == TEST_BASE, "PSP-A3-05 odd lh EPC=0x%08x, want the lh",
+          s.cop0[SR_CP0_EPC]);
+    CHECK(s.cop0[SR_CP0_BADVADDR] == base + 1u,
+          "PSP-A3-05 odd lh BadVAddr=0x%08x, want 0x%08x", s.cop0[SR_CP0_BADVADDR], base + 1u);
+    CHECK(s.r[14] == 0x0BADC0DEu, "PSP-A3-05 a faulting lh must leave t6 unchanged");
+    CHECK(s.pc == TEST_VECTOR, "PSP-A3-05 odd lh must transfer to the vector");
+
+    /* sh $t6, 1($t5): AdES, BadVAddr the odd address, memory unchanged. */
+    fresh_state(&s);
+    sr_cpu_lle_set_enabled(1);
+    MEM_W32_PC(base, 0x80015A3Cu, TEST_BASE);
+    MEM_W32_PC(TEST_BASE + 0u, enc_sh(13u, 14u, 1u), TEST_BASE);
+    s.pc = TEST_BASE;
+    s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
+    s.r[13] = base;
+    s.r[14] = 0x0000BEEFu;
+    r = sr_guest_interp_run(&s, TEST_BASE, &fault);
+    CHECK(r == SR_GUEST_INTERP_EXCEPTION, "PSP-A3-05 odd sh must raise (got %s)",
+          sr_guest_interp_result_name(r));
+    CHECK(CAUSE_EXCCODE(s.cop0[SR_CP0_CAUSE]) == SR_EXC_ADES,
+          "PSP-A3-05 odd sh ExcCode must be 5 (AdES)");
+    CHECK(s.cop0[SR_CP0_BADVADDR] == base + 1u,
+          "PSP-A3-05 odd sh BadVAddr=0x%08x, want 0x%08x", s.cop0[SR_CP0_BADVADDR], base + 1u);
+    CHECK(MEM_R32(base) == 0x80015A3Cu, "PSP-A3-05 a faulting sh must store nothing (0x%08x)",
+          MEM_R32(base));
+    CHECK(s.pc == TEST_VECTOR, "PSP-A3-05 odd sh must transfer to the vector");
+
+    /* lh $t6, 2($t5): no fault for a halfword; the upper half sign-extends. */
+    fresh_state(&s);
+    sr_cpu_lle_set_enabled(1);
+    MEM_W32_PC(base, 0x80015A3Cu, TEST_BASE);
+    MEM_W32_PC(TEST_BASE + 0u, enc_lh(13u, 14u, 2u), TEST_BASE);
+    MEM_W32_PC(TEST_BASE + 4u, 0x03E00008u, TEST_BASE + 4u);  /* jr $ra */
+    MEM_W32_PC(TEST_BASE + 8u, 0x00000000u, TEST_BASE + 8u);
+    s.pc = TEST_BASE;
+    s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
+    s.r[13] = base;
+    s.r[14] = 0x0BADC0DEu;
+    s.r[31] = TEST_SPAN_END;
+    memset(&fault, 0, sizeof fault);
+    r = sr_guest_interp_run(&s, TEST_BASE, &fault);
+    CHECK(r == SR_GUEST_INTERP_FETCH_BOUNDARY && fault.pc == TEST_SPAN_END,
+          "PSP-A3-05 lh at base+2 must run to the jr $ra (got %s at 0x%08x)",
+          sr_guest_interp_result_name(r), fault.pc);
+    CHECK(s.r[14] == 0xFFFF8001u, "PSP-A3-05 lh at base+2 loaded 0x%08x, want 0xffff8001",
+          s.r[14]);
+    CHECK(s.flow_kind == SR_FLOW_NONE, "PSP-A3-05 lh at base+2 must not set flow");
+
+    /* sh $t6, 2($t5): no fault; only the upper half of the word changes. */
+    fresh_state(&s);
+    sr_cpu_lle_set_enabled(1);
+    MEM_W32_PC(base, 0x80015A3Cu, TEST_BASE);
+    MEM_W32_PC(TEST_BASE + 0u, enc_sh(13u, 14u, 2u), TEST_BASE);
+    MEM_W32_PC(TEST_BASE + 4u, 0x03E00008u, TEST_BASE + 4u);  /* jr $ra */
+    MEM_W32_PC(TEST_BASE + 8u, 0x00000000u, TEST_BASE + 8u);
+    s.pc = TEST_BASE;
+    s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
+    s.r[13] = base;
+    s.r[14] = 0x1234BEEFu;
+    s.r[31] = TEST_SPAN_END;
+    memset(&fault, 0, sizeof fault);
+    r = sr_guest_interp_run(&s, TEST_BASE, &fault);
+    CHECK(r == SR_GUEST_INTERP_FETCH_BOUNDARY && fault.pc == TEST_SPAN_END,
+          "PSP-A3-05 sh at base+2 must run to the jr $ra (got %s at 0x%08x)",
+          sr_guest_interp_result_name(r), fault.pc);
+    CHECK(MEM_R32(base) == 0xBEEF5A3Cu, "PSP-A3-05 sh at base+2 left 0x%08x, want 0xbeef5a3c",
+          MEM_R32(base));
+    CHECK(s.flow_kind == SR_FLOW_NONE, "PSP-A3-05 sh at base+2 must not set flow");
+    sr_cpu_lle_set_enabled(0);
 }
 
 /* PSP-A3-06 (negative control): lwl/lwr/swl/swr across alignment boundaries
@@ -696,9 +801,9 @@ static void test_hw_psp_a3_08_11_vfpu_through_interpreter(void) {
     s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
     s.r[13] = base;
     r = sr_guest_interp_run(&s, TEST_BASE, &fault);
-    CHECK(r != SR_GUEST_INTERP_EXCEPTION,
-          "interp aligned lv.q must not raise (got %s)",
-          sr_guest_interp_result_name(r));
+    CHECK(r == SR_GUEST_INTERP_UNSUPPORTED && fault.pc == TEST_BASE,
+          "interp aligned lv.q must not raise: want the stub VFPU op's UNSUPPORTED at the op (got %s at 0x%08x)",
+          sr_guest_interp_result_name(r), fault.pc);
     CHECK(s.flow_kind == SR_FLOW_NONE, "interp aligned lv.q must not set flow");
 
     /* PSP-A3-11: lvl.q/lvr.q at +4 bypass like lwl/lwr and must not raise. */
@@ -709,9 +814,9 @@ static void test_hw_psp_a3_08_11_vfpu_through_interpreter(void) {
     s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
     s.r[13] = base + 4u;
     r = sr_guest_interp_run(&s, TEST_BASE, &fault);
-    CHECK(r != SR_GUEST_INTERP_EXCEPTION,
-          "interp lvl.q at +4 must not raise (got %s)",
-          sr_guest_interp_result_name(r));
+    CHECK(r == SR_GUEST_INTERP_UNSUPPORTED && fault.pc == TEST_BASE,
+          "interp lvl.q at +4 must not raise: want the stub VFPU op's UNSUPPORTED at the op (got %s at 0x%08x)",
+          sr_guest_interp_result_name(r), fault.pc);
     CHECK(s.flow_kind == SR_FLOW_NONE, "interp lvl.q at +4 must not set flow");
 
     fresh_state(&s);
@@ -721,9 +826,9 @@ static void test_hw_psp_a3_08_11_vfpu_through_interpreter(void) {
     s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
     s.r[13] = base + 4u;
     r = sr_guest_interp_run(&s, TEST_BASE, &fault);
-    CHECK(r != SR_GUEST_INTERP_EXCEPTION,
-          "interp lvr.q at +4 must not raise (got %s)",
-          sr_guest_interp_result_name(r));
+    CHECK(r == SR_GUEST_INTERP_UNSUPPORTED && fault.pc == TEST_BASE,
+          "interp lvr.q at +4 must not raise: want the stub VFPU op's UNSUPPORTED at the op (got %s at 0x%08x)",
+          sr_guest_interp_result_name(r), fault.pc);
     CHECK(s.flow_kind == SR_FLOW_NONE, "interp lvr.q at +4 must not set flow");
 }
 
@@ -992,9 +1097,9 @@ static void test_hw_psp_a3_12_15_vfpu_through_interpreter(void) {
     s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
     s.r[13] = base + 1u;
     r = sr_guest_interp_run(&s, TEST_BASE, &fault);
-    CHECK(r != SR_GUEST_INTERP_EXCEPTION,
-          "interp lvl.q at odd must not raise (got %s)",
-          sr_guest_interp_result_name(r));
+    CHECK(r == SR_GUEST_INTERP_UNSUPPORTED && fault.pc == TEST_BASE,
+          "interp lvl.q at odd must not raise: want the stub VFPU op's UNSUPPORTED at the op (got %s at 0x%08x)",
+          sr_guest_interp_result_name(r), fault.pc);
     CHECK(s.flow_kind == SR_FLOW_NONE, "interp lvl.q at odd must not set flow");
 }
 
@@ -1840,9 +1945,41 @@ static void aot_fatal_native_caller_body(CpuState *s) {
     g_aot_fatal_native_caller_after_call++;
 }
 
+/* The fatal-flow children exit(1) inside dispatch_call, but so does an ordinary
+ * dispatch miss: a refused registration, a caller PC that misses at the first
+ * dispatch, or an exception that never reached the unowned vector. The exit status
+ * alone cannot tell those apart, so each child records its final flow state from an
+ * atexit hook into a marker file the parent reads. The state is static so the hook
+ * can still read it while exit() runs from inside dispatch_call. */
+static const CpuState *g_fatal_child_state;
+static const char *g_fatal_child_marker;
+
+static void fatal_child_write_marker(void) {
+    if (g_fatal_child_state == NULL || g_fatal_child_marker == NULL) return;
+    FILE *out = fopen(g_fatal_child_marker, "wb");
+    if (out == NULL) return;
+    fprintf(out, "flow_kind=%u flow_target=0x%08x exccode=%u\n",
+            (unsigned)g_fatal_child_state->flow_kind,
+            (unsigned)g_fatal_child_state->flow_target,
+            (unsigned)CAUSE_EXCCODE(g_fatal_child_state->cop0[SR_CP0_CAUSE]));
+    fclose(out);
+}
+
+static void fatal_child_record(const CpuState *s, const char *marker) {
+    g_fatal_child_state = s;
+    g_fatal_child_marker = marker;
+    (void)atexit(fatal_child_write_marker);
+}
+
+#define FATAL_CHILD_MARKER_DIR SR_SELFTEST_BUILD_ROOT "/mygame"
+#define FATAL_CHILD_MARKER_AOT FATAL_CHILD_MARKER_DIR "/cpu_lle_fatal_child_aot.txt"
+#define FATAL_CHILD_MARKER_SYSCALL FATAL_CHILD_MARKER_DIR "/cpu_lle_fatal_child_syscall.txt"
+#define FATAL_CHILD_MARKER_BREAK FATAL_CHILD_MARKER_DIR "/cpu_lle_fatal_child_break.txt"
+
 static int run_fatal_dispatch_child(void) {
-    CpuState s;
+    static CpuState s;
     fresh_state(&s);
+    fatal_child_record(&s, FATAL_CHILD_MARKER_AOT);
     sr_cpu_lle_set_enabled(1);
     sr_cpu_lle_set_vectors(AOT_EXCEPTION_FATAL_VECTOR,
                            AOT_EXCEPTION_FATAL_VECTOR,
@@ -2193,7 +2330,8 @@ static void test_dispatch_aot_fatal_flow_propagates(void) {
 }
 
 static int run_generated_fatal_dispatch_child(const char *which) {
-    CpuState s;
+    static CpuState s;
+    const char *marker;
     uint32_t caller_pc;
     uint32_t body_pc;
     RecompFn caller;
@@ -2204,16 +2342,19 @@ static int run_generated_fatal_dispatch_child(const char *which) {
         body_pc = GENERATED_SYSCALL_ENTRY;
         caller = f_08810820;
         body = f_08810800;
+        marker = FATAL_CHILD_MARKER_SYSCALL;
     } else if (strcmp(which, "break") == 0) {
         caller_pc = GENERATED_BREAK_CALLER;
         body_pc = GENERATED_BREAK_ENTRY;
         caller = f_08810860;
         body = f_08810840;
+        marker = FATAL_CHILD_MARKER_BREAK;
     } else {
         return 97;
     }
 
     fresh_state(&s);
+    fatal_child_record(&s, marker);
     sr_cpu_lle_set_enabled(1);
     sr_cpu_lle_set_vectors(AOT_EXCEPTION_FATAL_VECTOR,
                            AOT_EXCEPTION_FATAL_VECTOR,
@@ -2231,17 +2372,57 @@ static int run_generated_fatal_dispatch_child(const char *which) {
     return s.r[8] == 1u ? 98 : 99;
 }
 
+/* Run a fatal-flow child and require both its exit status 1 and the marker its
+ * atexit hook wrote: the fatal flow to the unowned vector, with the cause the body
+ * raised. Returns the child status. */
+static int run_fatal_child_checked(const char *self_path, const char *mode,
+                                   const char *marker, unsigned want_exccode,
+                                   const char *what) {
+#ifdef _WIN32
+    (void)_mkdir(FATAL_CHILD_MARKER_DIR);
+#else
+    (void)mkdir(FATAL_CHILD_MARKER_DIR, 0755);
+#endif
+    (void)remove(marker);
+    int status = run_child_process(self_path, mode);
+    char want[96];
+    char got[96] = "";
+    snprintf(want, sizeof want, "flow_kind=%u flow_target=0x%08x exccode=%u\n",
+             (unsigned)SR_FLOW_FATAL, (unsigned)AOT_EXCEPTION_FATAL_VECTOR,
+             want_exccode);
+    FILE *in = fopen(marker, "rb");
+    if (in != NULL) {
+        size_t n = fread(got, 1, sizeof got - 1u, in);
+        got[n] = '\0';
+        fclose(in);
+    }
+    CHECK(strcmp(got, want) == 0,
+          "%s child did not exit through the fatal flow to the unowned vector "
+          "(marker \"%s\", want \"%s\")", what, got, want);
+    (void)remove(marker);
+    return status;
+}
+
 static void test_generated_lle_syscall_break_fatal_flow(const char *self_path) {
-    const char *cases[] = {
-        "--generated-fatal-dispatch-child:syscall",
-        "--generated-fatal-dispatch-child:break",
+    static const struct {
+        const char *mode;
+        const char *marker;
+        unsigned exccode;
+        const char *name;
+    } cases[] = {
+        {"--generated-fatal-dispatch-child:syscall", FATAL_CHILD_MARKER_SYSCALL,
+         SR_EXC_SYS, "syscall"},
+        {"--generated-fatal-dispatch-child:break", FATAL_CHILD_MARKER_BREAK,
+         SR_EXC_BP, "break"},
     };
     for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
-        int status = run_child_process(self_path, cases[i]);
+        int status = run_fatal_child_checked(self_path, cases[i].mode,
+                                             cases[i].marker, cases[i].exccode,
+                                             cases[i].name);
         CHECK(status == 1,
               "generated --lle-cpu %s caller did not fail closed before its "
               "post-call sentinel (child status=%d)",
-              i == 0 ? "syscall" : "break", status);
+              cases[i].name, status);
     }
 }
 
@@ -2256,7 +2437,9 @@ static int run_selftest_child(const char *mode) {
 }
 
 static void test_public_dispatch_call_terminates_fatal_flow(const char *self_path) {
-    int status = run_child_process(self_path, "--fatal-aot-dispatch-child");
+    int status = run_fatal_child_checked(self_path, "--fatal-aot-dispatch-child",
+                                         FATAL_CHILD_MARKER_AOT, SR_EXC_SYS,
+                                         "public dispatch_call");
     CHECK(status == 1,
           "dispatch_call returned through an AOT continuation after fatal flow "
           "instead of terminating (child status=%d)", status);
@@ -2292,8 +2475,11 @@ static void test_interp_flow_trace(void) {
     FILE *f = fopen(trace_path, "rb");
     CHECK(f != NULL, "trace file must exist");
     char buf[1024] = {0};
-    size_t bytes = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
+    size_t bytes = 0;
+    if (f) {
+        bytes = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+    }
     CHECK(bytes > 0, "trace file must not be empty");
     /* The trace must contain the step record for the mtc0 instruction */
     CHECK(strstr(buf, "\n0 pc=0x08810000") != NULL, "trace must record the faulting instruction");
@@ -2310,8 +2496,11 @@ static void test_interp_flow_trace(void) {
     f = fopen(trace_path, "rb");
     CHECK(f != NULL, "trace file must exist");
     memset(buf, 0, sizeof(buf));
-    bytes = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
+    bytes = 0;
+    if (f) {
+        bytes = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+    }
     CHECK(strstr(buf, "\n0 pc=0x08810000") == NULL, "rejected opcode must NOT record trace step");
 }
 
@@ -2355,10 +2544,16 @@ static void test_hw_psp_a3_01_adel_through_load(void) {
     s.pc = TEST_BASE;
     s.cop0[SR_CP0_STATUS] = 0u;                /* kernel mode */
     s.r[13] = 0x88000010u;
+    s.r[14] = 0x0BADBABEu;
     s.r[31] = TEST_SPAN_END;
+    MEM_W32_PC(0x08000014u, 0x5EED0014u, TEST_BASE);  /* the physical word kseg0 mirrors */
+    memset(&fault, 0, sizeof fault);
     r = sr_guest_interp_run(&s, TEST_BASE, &fault);
-    CHECK(r != SR_GUEST_INTERP_EXCEPTION,
-          "kernel-mode kseg0 load must not fault (got %s)", sr_guest_interp_result_name(r));
+    CHECK(r == SR_GUEST_INTERP_FETCH_BOUNDARY && fault.pc == TEST_SPAN_END,
+          "kernel-mode kseg0 load must run to the jr $ra (got %s at 0x%08x)",
+          sr_guest_interp_result_name(r), fault.pc);
+    CHECK(s.r[14] == 0x5EED0014u, "kernel-mode kseg0 load read 0x%08x, want physical 0x08000014's word",
+          s.r[14]);
     CHECK(s.flow_kind == SR_FLOW_NONE, "kernel-mode kseg0 load must not set flow");
 }
 
@@ -2431,11 +2626,16 @@ static void test_lle_gate_off_data_access(void) {
     s.pc = TEST_BASE;
     s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
     s.r[13] = 0x88000010u;
+    s.r[14] = 0x0BADBABEu;
     s.r[31] = TEST_SPAN_END;
+    MEM_W32_PC(0x08000014u, 0x5EED0B14u, TEST_BASE);  /* the word the mask reaches */
+    memset(&fault, 0, sizeof fault);
     r = sr_guest_interp_run(&s, TEST_BASE, &fault);
-    CHECK(r != SR_GUEST_INTERP_EXCEPTION,
-          "gate-off kernel-segment lw must keep the historical masked read (got %s)",
-          sr_guest_interp_result_name(r));
+    CHECK(r == SR_GUEST_INTERP_FETCH_BOUNDARY && fault.pc == TEST_SPAN_END,
+          "gate-off kernel-segment lw must keep the historical masked read and run to the "
+          "jr $ra (got %s at 0x%08x)", sr_guest_interp_result_name(r), fault.pc);
+    CHECK(s.r[14] == 0x5EED0B14u, "gate-off kernel-segment lw read 0x%08x, want the masked word",
+          s.r[14]);
     CHECK(s.flow_kind == SR_FLOW_NONE, "gate-off kernel-segment lw must not set flow");
 }
 
@@ -3152,6 +3352,7 @@ int main(int argc, char **argv) {
     test_hw_psp_a3_02_03_misaligned_codes_and_badvaddr();
     test_hw_psp_a3_04_delay_slot_misaligned();
     test_hw_psp_a3_05_halfword_odd();
+    test_hw_psp_a3_05_halfword_through_interpreter();
     test_hw_psp_a3_06_unaligned_no_fault();
     test_hw_psp_a3_08_11_vfpu_alignment();
     test_hw_psp_a3_08_11_vfpu_through_interpreter();

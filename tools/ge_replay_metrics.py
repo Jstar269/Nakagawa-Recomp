@@ -60,30 +60,42 @@ def _fields(line: str) -> dict[str, str]:
     return result
 
 
-def parse_cpu_profile(text: str) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
-    """Parse exactly one complete CPU profile, rejecting merged/duplicate phases."""
+def _parse_phase_profile(
+    text: str, phase_prefix: str, counts_prefix: str, label: str, expected: tuple[str, ...],
+) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
+    """Parse exactly one complete ``phase=`` profile and its count summary.
+
+    Rejects a duplicate or merged phase, a phase with other fields than calls/ns/ms, a
+    duplicate count summary, and a phase set other than ``expected``; ``label`` names the
+    profile in each error.
+    """
     phases: dict[str, dict[str, int]] = {}
     counts: dict[str, int] | None = None
     for line in text.splitlines():
-        if line.startswith("GE_REPLAY_CPU phase="):
+        if line.startswith(phase_prefix):
             fields = _fields(line)
             name = fields.pop("phase")
             if name in phases:
-                raise ValueError(f"duplicate CPU phase {name}")
+                raise ValueError(f"duplicate {label} phase {name}")
             if set(fields) != {"calls", "ns", "ms"}:
-                raise ValueError(f"unexpected CPU phase fields for {name}")
+                raise ValueError(f"unexpected {label} phase fields for {name}")
             phases[name] = {"calls": int(fields["calls"]), "ns": int(fields["ns"])}
-        elif line.startswith("GE_REPLAY_CPU_COUNTS "):
+        elif line.startswith(counts_prefix):
             if counts is not None:
-                raise ValueError("duplicate CPU count summary")
+                raise ValueError(f"duplicate {label} count summary")
             counts = {key: int(value) for key, value in _fields(line).items()}
-    missing = set(CPU_PHASES) - set(phases)
-    extra = set(phases) - set(CPU_PHASES)
+    missing = set(expected) - set(phases)
+    extra = set(phases) - set(expected)
     if missing or extra:
-        raise ValueError(f"CPU phase mismatch missing={sorted(missing)} extra={sorted(extra)}")
+        raise ValueError(f"{label} phase mismatch missing={sorted(missing)} extra={sorted(extra)}")
     if counts is None:
-        raise ValueError("missing CPU count summary")
+        raise ValueError(f"missing {label} count summary")
     return phases, counts
+
+
+def parse_cpu_profile(text: str) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
+    """Parse exactly one complete CPU profile, rejecting merged/duplicate phases."""
+    return _parse_phase_profile(text, "GE_REPLAY_CPU phase=", "GE_REPLAY_CPU_COUNTS ", "CPU", CPU_PHASES)
 
 
 def parse_wall_profile(text: str) -> dict[str, dict[str, int | str]]:
@@ -143,28 +155,8 @@ def _require_consistent_ge_cpu_profile(text: str) -> None:
 def parse_ge_cpu_profile(text: str) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
     """Parse one complete coarse ge.c CPU profile; list_total is inclusive."""
     _require_consistent_ge_cpu_profile(text)
-    phases: dict[str, dict[str, int]] = {}
-    counts: dict[str, int] | None = None
-    for line in text.splitlines():
-        if line.startswith("GE_REPLAY_GE_CPU phase="):
-            fields = _fields(line)
-            name = fields.pop("phase")
-            if name in phases:
-                raise ValueError(f"duplicate GE CPU phase {name}")
-            if set(fields) != {"calls", "ns", "ms"}:
-                raise ValueError(f"unexpected GE CPU phase fields for {name}")
-            phases[name] = {"calls": int(fields["calls"]), "ns": int(fields["ns"])}
-        elif line.startswith("GE_REPLAY_GE_CPU_COUNTS "):
-            if counts is not None:
-                raise ValueError("duplicate GE CPU count summary")
-            counts = {key: int(value) for key, value in _fields(line).items()}
-    missing = set(GE_CPU_PHASES) - set(phases)
-    extra = set(phases) - set(GE_CPU_PHASES)
-    if missing or extra:
-        raise ValueError(f"GE CPU phase mismatch missing={sorted(missing)} extra={sorted(extra)}")
-    if counts is None:
-        raise ValueError("missing GE CPU count summary")
-    return phases, counts
+    return _parse_phase_profile(text, "GE_REPLAY_GE_CPU phase=", "GE_REPLAY_GE_CPU_COUNTS ", "GE CPU",
+                                GE_CPU_PHASES)
 
 
 def parse_primitive_profile(text: str) -> dict[str, object]:
@@ -368,28 +360,8 @@ parse_ge_primitive_profile = parse_primitive_profile
 
 def parse_hook_cpu_profile(text: str) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
     """Parse renderer phases restricted to time spent under primitive GPU hooks."""
-    phases: dict[str, dict[str, int]] = {}
-    counts: dict[str, int] | None = None
-    for line in text.splitlines():
-        if line.startswith("GE_REPLAY_HOOK_CPU phase="):
-            fields = _fields(line)
-            name = fields.pop("phase")
-            if name in phases:
-                raise ValueError(f"duplicate hook CPU phase {name}")
-            if set(fields) != {"calls", "ns", "ms"}:
-                raise ValueError(f"unexpected hook CPU phase fields for {name}")
-            phases[name] = {"calls": int(fields["calls"]), "ns": int(fields["ns"])}
-        elif line.startswith("GE_REPLAY_HOOK_COUNTS "):
-            if counts is not None:
-                raise ValueError("duplicate hook CPU count summary")
-            counts = {key: int(value) for key, value in _fields(line).items()}
-    missing = set(CPU_PHASES) - set(phases)
-    extra = set(phases) - set(CPU_PHASES)
-    if missing or extra:
-        raise ValueError(f"hook CPU phase mismatch missing={sorted(missing)} extra={sorted(extra)}")
-    if counts is None:
-        raise ValueError("missing hook CPU count summary")
-    return phases, counts
+    return _parse_phase_profile(text, "GE_REPLAY_HOOK_CPU phase=", "GE_REPLAY_HOOK_COUNTS ", "hook CPU",
+                                CPU_PHASES)
 
 
 def parse_hierarchy(text: str) -> dict[str, int]:

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -56,6 +57,7 @@ CORPUS = ROOT / "tools" / "nid_corpus.json"
 HEADER = ROOT / "src" / "rt" / "nid_names.h"
 
 STORED_CLASSES = frozenset({"library-attributed", "editorial-alias", "unresolved"})
+C_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class CorpusError(RuntimeError):
@@ -68,6 +70,9 @@ def resolve(entry: dict) -> tuple[int, str]:
     name = entry.get("name")
     if not name:
         raise CorpusError(f"entry without a name: {entry!r}")
+    if not isinstance(name, str) or not C_IDENTIFIER.fullmatch(name):
+        # sr_nid_name() would print it as is, and codegen --name-imports would drop it unnamed.
+        raise CorpusError(f"{name!r}: a corpus name must be a C identifier")
 
     if cls in DERIVABLE_CLASSES:
         if "nid" in entry:

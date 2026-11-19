@@ -79,8 +79,12 @@ def read_seed_file(path) -> SeedFile:
     return parse_seed_text(text, str(path))
 
 
-def format_seed_file(seeds: dict[int, str]) -> str:
+def format_seed_file(seeds: dict[int, str], overflow: int = 0) -> str:
+    """The seed list text. A nonzero ``overflow`` keeps the runtime's ``entry_points_overflow``
+    note, so a list merged from an incomplete miss file still reads back as incomplete."""
     lines = [HEADER]
+    if overflow:
+        lines.append(f"# entry_points_overflow={overflow}")
     lines.extend(f"0x{address:08x} run={run}" for address, run in sorted(seeds.items()))
     return "\n".join(lines) + "\n"
 
@@ -117,19 +121,25 @@ def report_outcome(outcome, prefix="MISS_SEEDS_APPLIED"):
 
 
 def merge(existing: SeedFile, miss_files, run: str, known=frozenset()):
-    """Merge the miss files into ``existing``; returns (seeds, added, dropped, overflow)."""
-    seeds = dict(existing.seeds)
+    """Merge the miss files into ``existing``; returns (seeds, added, dropped, overflow).
+
+    A target in ``known`` is dropped wherever it comes from: a new miss file, or a seed the list
+    already holds that the analysis now finds as a function entry. ``dropped`` names each address
+    once, in ascending order.
+    """
+    seeds = {address: found_by for address, found_by in existing.seeds.items() if address not in known}
+    dropped = {address for address in existing.seeds if address in known}
     overflow = existing.overflow
-    added, dropped = [], []
+    added = []
     for miss in miss_files:
         overflow += miss.overflow
         for address in sorted(miss.seeds):
             if address in known:
-                dropped.append(address)
+                dropped.add(address)
             elif address not in seeds:
                 seeds[address] = run
                 added.append(address)
-    return seeds, added, dropped, overflow
+    return seeds, added, sorted(dropped), overflow
 
 
 def _build_parser():
@@ -169,7 +179,7 @@ def main(argv=None) -> int:
         known = frozenset(known_entries(elf, analyze.resolve_extra_spans(None)))
     seeds, added, dropped, overflow = merge(existing, miss_files, args.run, known)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(format_seed_file(seeds), encoding="ascii", newline="\n")
+    out_path.write_text(format_seed_file(seeds, overflow), encoding="ascii", newline="\n")
     print(f"MISS_SEEDS merged added={len(added)} dropped_known={len(dropped)} "
           f"total={len(seeds)} out={out_path.name}")
     if overflow:

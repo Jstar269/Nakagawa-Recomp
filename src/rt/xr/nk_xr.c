@@ -26,11 +26,18 @@ static void *nk_xr_lib_open(const char *name) {
 #endif
 }
 
-static void *nk_xr_lib_sym(void *lib, const char *name) {
+// The symbol as a generic function pointer. ISO C defines no conversion between object
+// and function pointers: GetProcAddress already returns a function pointer, and the
+// object pointer dlsym returns is copied bytewise, which POSIX guarantees for dlsym.
+static PFN_xrVoidFunction nk_xr_lib_sym(void *lib, const char *name) {
 #ifdef _WIN32
-    return (void *)GetProcAddress((HMODULE)lib, name);
+    return (PFN_xrVoidFunction)GetProcAddress((HMODULE)lib, name);
 #else
-    return dlsym(lib, name);
+    void *sym = dlsym(lib, name);
+    PFN_xrVoidFunction fn = NULL;
+    _Static_assert(sizeof(fn) == sizeof(sym), "dlsym result must fit a function pointer");
+    memcpy(&fn, &sym, sizeof(fn));
+    return fn;
 #endif
 }
 
@@ -56,6 +63,8 @@ const char *nk_xr_refusal_name(NkXrRefusal r) {
         return "no HMD";
     case NK_XR_REFUSE_OUT_OF_MEMORY:
         return "out of memory";
+    case NK_XR_REFUSE_GET_SYSTEM:
+        return "runtime failed in xrGetSystem";
     }
     return "unknown refusal";
 }
@@ -96,9 +105,8 @@ NkXrRefusal nk_xr_load(NkXrFns *f, const char *libname) {
     if (lib == NULL) {
         return NK_XR_REFUSE_NO_RUNTIME;
     }
-    // Function pointer from a data pointer: the dynamic-loader interface returns
-    // one, and the symbol has the PFN_xrGetInstanceProcAddr signature.
-    PFN_xrVoidFunction sym = (PFN_xrVoidFunction)nk_xr_lib_sym(lib, "xrGetInstanceProcAddr");
+    // The symbol has the PFN_xrGetInstanceProcAddr signature.
+    PFN_xrVoidFunction sym = nk_xr_lib_sym(lib, "xrGetInstanceProcAddr");
     NkXrRefusal r = nk_xr_load_from_proc(f, (PFN_xrGetInstanceProcAddr)sym);
     if (r != NK_XR_OK) {
         nk_xr_lib_close(lib);
@@ -137,68 +145,107 @@ void nk_xr_unload(NkXrFns *f) {
 }
 
 // Returns 1 when the runtime offers XR_KHR_vulkan_enable2, 0 when it does not,
-// -1 when the enumeration fails and -2 when allocation fails.
+// -1 when the enumeration fails and -2 when allocation fails. The list can grow between
+// the count call and the fill call (an API layer or a runtime switch); the fill call then
+// reports XR_ERROR_SIZE_INSUFFICIENT with the new count, and the fill is asked again at
+// that count, at most NK_XR_ENUM_ATTEMPTS times.
 static int nk_xr_has_vulkan_enable2(const NkXrFns *f) {
     uint32_t count = 0;
     if (XR_FAILED(f->EnumerateInstanceExtensionProperties(NULL, 0, &count, NULL))) {
         return -1;
     }
-    if (count == 0) {
-        return 0;
-    }
-    XrExtensionProperties *props = (XrExtensionProperties *)calloc(count, sizeof(*props));
-    if (props == NULL) {
-        return -2;
-    }
-    for (uint32_t i = 0; i < count; i++) {
-        props[i].type = XR_TYPE_EXTENSION_PROPERTIES;
-    }
-    int found = -1;
-    uint32_t got = 0;
-    if (XR_SUCCEEDED(f->EnumerateInstanceExtensionProperties(NULL, count, &got, props))) {
-        found = 0;
-        for (uint32_t i = 0; i < got && i < count; i++) {
-            if (strcmp(props[i].extensionName, NK_XR_EXT_VULKAN_ENABLE2) == 0) {
-                found = 1;
-                break;
-            }
+    for (int attempt = 0; attempt < NK_XR_ENUM_ATTEMPTS; attempt++) {
+        if (count == 0) {
+            return 0;
         }
+        XrExtensionProperties *props = (XrExtensionProperties *)calloc(count, sizeof(*props));
+        if (props == NULL) {
+            return -2;
+        }
+        for (uint32_t i = 0; i < count; i++) {
+            props[i].type = XR_TYPE_EXTENSION_PROPERTIES;
+        }
+        uint32_t got = 0;
+        XrResult r = f->EnumerateInstanceExtensionProperties(NULL, count, &got, props);
+        if (XR_SUCCEEDED(r)) {
+            int found = 0;
+            for (uint32_t i = 0; i < got && i < count; i++) {
+                if (strcmp(props[i].extensionName, NK_XR_EXT_VULKAN_ENABLE2) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            free(props);
+            return found;
+        }
+        free(props);
+        if (r != XR_ERROR_SIZE_INSUFFICIENT) {
+            return -1;
+        }
+        count = got;  // the count the runtime needs now
     }
-    free(props);
-    return found;
+    return -1;  // the list changed on every call
 }
 
 // Pick the blend mode: OPAQUE when the runtime offers it, else its first mode.
 // Returns 0 on success, -1 when the enumeration fails or reports no mode, -2 when
-// allocation fails.
+// allocation fails. A fill call that reports XR_ERROR_SIZE_INSUFFICIENT (a mode added
+// since the count call) is asked again at the new count, as for the extensions.
 static int nk_xr_pick_blend_mode(const NkXrFns *f, XrInstance inst, XrSystemId sys, XrEnvironmentBlendMode *out) {
     uint32_t count = 0;
     if (XR_FAILED(f->EnumerateEnvironmentBlendModes(inst, sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &count,
-                                                    NULL)) ||
-        count == 0) {
+                                                    NULL))) {
         return -1;
     }
-    XrEnvironmentBlendMode *modes = (XrEnvironmentBlendMode *)calloc(count, sizeof(*modes));
-    if (modes == NULL) {
-        return -2;
-    }
-    uint32_t got = 0;
-    int rc = -1;
-    if (XR_SUCCEEDED(f->EnumerateEnvironmentBlendModes(inst, sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, count,
-                                                       &got, modes)) &&
-        got > 0 && got <= count) {
-        XrEnvironmentBlendMode pick = modes[0];
-        for (uint32_t i = 0; i < got; i++) {
-            if (modes[i] == XR_ENVIRONMENT_BLEND_MODE_OPAQUE) {
-                pick = modes[i];
-                break;
-            }
+    for (int attempt = 0; attempt < NK_XR_ENUM_ATTEMPTS; attempt++) {
+        if (count == 0) {
+            return -1;
         }
-        *out = pick;
-        rc = 0;
+        XrEnvironmentBlendMode *modes = (XrEnvironmentBlendMode *)calloc(count, sizeof(*modes));
+        if (modes == NULL) {
+            return -2;
+        }
+        uint32_t got = 0;
+        XrResult r = f->EnumerateEnvironmentBlendModes(inst, sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, count,
+                                                       &got, modes);
+        if (r == XR_ERROR_SIZE_INSUFFICIENT) {
+            free(modes);
+            count = got;  // the count the runtime needs now
+            continue;
+        }
+        int rc = -1;
+        if (XR_SUCCEEDED(r) && got > 0 && got <= count) {
+            XrEnvironmentBlendMode pick = modes[0];
+            for (uint32_t i = 0; i < got; i++) {
+                if (modes[i] == XR_ENVIRONMENT_BLEND_MODE_OPAQUE) {
+                    pick = modes[i];
+                    break;
+                }
+            }
+            *out = pick;
+            rc = 0;
+        }
+        free(modes);
+        return rc;
     }
-    free(modes);
-    return rc;
+    return -1;  // the list changed on every call
+}
+
+// Copy the NUL-terminated `src` into the `cap`-byte field `dst`. The specification asks
+// for a NUL-terminated UTF-8 string there, so a name longer than the field is cut on a
+// code point boundary: when the first byte left out is a continuation byte (10xxxxxx),
+// the cut fell inside a sequence, and that sequence's lead byte and the continuation
+// bytes kept before the cut are dropped as well.
+static void nk_xr_copy_utf8(char *dst, size_t cap, const char *src) {
+    size_t n = strlen(src);
+    if (n > cap - 1) {
+        n = cap - 1;
+        while (n > 0 && ((unsigned char)src[n] & 0xC0u) == 0x80u) {
+            n--;
+        }
+    }
+    memcpy(dst, src, n);
+    dst[n] = '\0';
 }
 
 NkXrRefusal nk_xr_probe(NkXrFns *f, const char *app_name, XrInstance *instance, XrSystemId *system) {
@@ -221,8 +268,8 @@ NkXrRefusal nk_xr_probe(NkXrFns *f, const char *app_name, XrInstance *instance, 
     XrInstanceCreateInfo ci;
     memset(&ci, 0, sizeof(ci));
     ci.type = XR_TYPE_INSTANCE_CREATE_INFO;
-    strncpy(ci.applicationInfo.applicationName, app_name != NULL ? app_name : "Nakagawa Recomp",
-            XR_MAX_APPLICATION_NAME_SIZE - 1);
+    nk_xr_copy_utf8(ci.applicationInfo.applicationName, sizeof(ci.applicationInfo.applicationName),
+                    app_name != NULL ? app_name : "Nakagawa Recomp");
     ci.applicationInfo.applicationVersion = 1;
     strncpy(ci.applicationInfo.engineName, "Nakagawa Recomp", XR_MAX_ENGINE_NAME_SIZE - 1);
     ci.applicationInfo.engineVersion = 1;
@@ -253,9 +300,18 @@ NkXrRefusal nk_xr_probe(NkXrFns *f, const char *app_name, XrInstance *instance, 
     gi.type = XR_TYPE_SYSTEM_GET_INFO;
     gi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     XrSystemId sys = XR_NULL_SYSTEM_ID;
-    if (XR_FAILED(f->GetSystem(inst, &gi, &sys)) || sys == XR_NULL_SYSTEM_ID) {
+    XrResult sr = f->GetSystem(inst, &gi, &sys);
+    f->get_system_result = sr;
+    if (XR_FAILED(sr) || sys == XR_NULL_SYSTEM_ID) {
         f->DestroyInstance(inst);
-        return NK_XR_REFUSE_NO_HMD;
+        // Only these say no headset is there: the HMD form factor is not available now or
+        // not supported at all, or a success with no system. Any other failure (a lost
+        // instance, a runtime failure) is the runtime's, not a missing headset.
+        if (XR_SUCCEEDED(sr) || sr == XR_ERROR_FORM_FACTOR_UNAVAILABLE ||
+            sr == XR_ERROR_FORM_FACTOR_UNSUPPORTED) {
+            return NK_XR_REFUSE_NO_HMD;
+        }
+        return NK_XR_REFUSE_GET_SYSTEM;
     }
     XrEnvironmentBlendMode blend = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     int br = nk_xr_pick_blend_mode(f, inst, sys, &blend);
@@ -318,6 +374,11 @@ NkXrAction nk_xr_session_next(NkXrRun *run, XrSessionState new_state) {
         run->state = new_state;
         run->layers_shown = 0;
         run->running = 0;
+        if (run->session_destroyed) {
+            // A repeated or late LOSS_PENDING (after EXITING) for a session already
+            // destroyed: never a second xrDestroySession, and done stays as it was.
+            return NK_XR_ACT_NONE;
+        }
         run->may_retry = 1;
         run->session_destroyed = 1;
         return NK_XR_ACT_DESTROY_SESSION;
@@ -341,26 +402,21 @@ XrResult nk_xr_do_action(const NkXrFns *f, XrSession session, NkXrRun *run, NkXr
     if (f == NULL || run == NULL) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
-    const void *needed = (const void *)f;  // actions with no OpenXR call need nothing
-    switch (action) {
-    case NK_XR_ACT_BEGIN_SESSION:
-        needed = (const void *)f->BeginSession;
-        break;
-    case NK_XR_ACT_END_SESSION:
-        needed = (const void *)f->EndSession;
-        break;
-    case NK_XR_ACT_DESTROY_SESSION:
-    case NK_XR_ACT_DESTROY_AND_EXIT:
-        needed = (const void *)f->DestroySession;
-        break;
-    default:
-        break;
-    }
-    if (needed == NULL) {
-        return XR_ERROR_FUNCTION_UNSUPPORTED;
-    }
+    // Each calling action first checks that the table has its function. When it does
+    // not, no call is made, and what nk_xr_session_next() recorded for that action is
+    // undone so `*run` matches what happened: the session is not begun (a later READY
+    // asks for the begin again) or not destroyed (a later EXITING still asks for the
+    // destroy). nk_xr_session_next() has already stopped the frames for STOPPING,
+    // LOSS_PENDING and EXITING; the end and destroy actions clear running and
+    // layers_shown again so a caller that performs one directly, not from a state event,
+    // also stops running frames on an ended or destroyed session.
     switch (action) {
     case NK_XR_ACT_BEGIN_SESSION: {
+        if (f->BeginSession == NULL) {
+            run->running = 0;
+            run->layers_shown = 0;
+            return XR_ERROR_FUNCTION_UNSUPPORTED;
+        }
         XrSessionBeginInfo bi;
         memset(&bi, 0, sizeof(bi));
         bi.type = XR_TYPE_SESSION_BEGIN_INFO;
@@ -373,11 +429,18 @@ XrResult nk_xr_do_action(const NkXrFns *f, XrSession session, NkXrRun *run, NkXr
         return r;
     }
     case NK_XR_ACT_END_SESSION:
+        if (f->EndSession == NULL) {
+            return XR_ERROR_FUNCTION_UNSUPPORTED;
+        }
         run->running = 0;
         run->layers_shown = 0;
         return f->EndSession(session);
     case NK_XR_ACT_DESTROY_SESSION:
     case NK_XR_ACT_DESTROY_AND_EXIT:
+        if (f->DestroySession == NULL) {
+            run->session_destroyed = 0;
+            return XR_ERROR_FUNCTION_UNSUPPORTED;
+        }
         run->running = 0;
         run->layers_shown = 0;
         return f->DestroySession(session);

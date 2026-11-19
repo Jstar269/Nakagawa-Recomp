@@ -3070,10 +3070,12 @@ ALIAS_RULES = (
 # registration whose name disagrees with this map is a `mislabeled_nid`
 # finding, so the fixed label cannot silently regress.
 #
-# tools/hle_manifest.py now also cross-checks EVERY registration against
-# src/rt/nid_names.h automatically (the exhaustive NID->name integrity pass,
-# issues #75/#78/#83/#86), so this map is only needed for NIDs whose canonical
-# name cannot come from the generated table or to override it deliberately.
+# tools/hle_manifest.py also cross-checks EVERY registration against
+# src/rt/nid_names.h (the exhaustive NID->name integrity pass, issues
+# #75/#78/#83/#86). Every entry below repeats its nid_names.h name on purpose:
+# these are regression pins for the NIDs that were once mislabeled, kept
+# independent of the generated table. A rename in tools/nid_corpus.json must
+# change the matching pin here in the same commit, or the two checks disagree.
 KNOWN_NID_NAMES = {
     0x1B4217BC: "sceKernelSetCompiledSdkVersion603_605",
     # --- sceSasCore routing integrity ---
@@ -3133,29 +3135,6 @@ FLOAT_RETURN_HANDLERS = {
     "h_PowerGetPllClockFrequencyFloat",
     "h_PowerGetCpuClockFrequencyFloat",
     "h_PowerGetBusClockFrequencyFloat",
-}
-
-# Tracking issue for each canonical NID above, so a `mislabeled_nid` finding in
-# the gate output points at the routing-correctness owner. Every key here must
-# appear in KNOWN_NID_NAMES and must be registered in hle.c
-# (tools/hle_manifest.py enforces both).
-#
-# NOTE: a corrected label and a dedicated handler are separate checks. The SAS
-# NIDs above now route through handlers with their canonical signatures. The
-# remaining issue links cover the unrelated canonical-name audits below.
-KNOWN_NID_ISSUES = {
-    0x0CAE832B: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0x1D8A762E: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0x28A8E98A: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0x92E41280: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0xD4475AA8: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0xFA8A5739: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0x36CDFADE: "https://github.com/Jstar269/nakagawa-recomp/issues/83",
-    0x2085D15D: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-    0x0AFD0D8B: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-    0x87440F5E: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-    0xFDB5BFE9: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-    0x478FE6F5: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
 }
 
 # Acknowledged findings. The gate requires the live finding set to equal this
