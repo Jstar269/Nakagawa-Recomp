@@ -2019,7 +2019,7 @@ static bool nk_iso_stage_directory_records(FILE *iso, uint64_t file_size,
                                                                   name_length);
             /* An extensionless file keeps ECMA-119's separator ("DATA.;1"). One trailing
              * '.' is dropped, as nk_iso_reader_list and iso_inspect.py drop it, so the
-             * member stages as "DATA" on every host rather than as "DATA." on POSIX. */
+             * member stages as DATA on every host rather than as "DATA." on POSIX. */
             if (component_length > 0 && name_bytes[component_length - 1] == '.') {
                 component_length--;
             }
@@ -2091,7 +2091,7 @@ static bool nk_iso_stage_root_path_valid(const char *path) {
                 !nk_iso_stage_component_valid((const uint8_t *)part, length) ||
                 nk_iso_stage_device_name((const uint8_t *)part, length)) return false;
             /* Win32 drops a trailing '.' or ' ', so "DATA." and "DATA " would stage into the
-             * host folder of "DATA" while nk_iso_stage_root_paths_overlap, which compares
+             * host folder of DATA while nk_iso_stage_root_paths_overlap, which compares
              * spellings, judged them apart. A root is spelled without them. */
             if (part[length - 1] == '.' || part[length - 1] == ' ') return false;
             for (size_t i = 0; i < length; i++) {
