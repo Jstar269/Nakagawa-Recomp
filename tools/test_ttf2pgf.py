@@ -381,7 +381,7 @@ class FontListPinTests(unittest.TestCase):
     def _refusal(self, listing: Path, data: bytes, path: Path | None) -> str:
         with self.assertRaises(TtfConvertError) as caught:
             load_pin(listing, data, path)
-        return caught.exception.reason
+        return str(caught.exception.reason)
 
     def test_the_shipped_list_pins_geist(self) -> None:
         pin = load_pin(UI_FONT_LIST, self.data, self.font)
