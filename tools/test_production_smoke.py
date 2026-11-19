@@ -155,6 +155,11 @@ class TestProductionSmoke(unittest.TestCase):
         prx = self.prx_path.read_bytes()
         psp = self.psp_path.read_bytes()
         manifest_path = self.out_dir / "manifest.json"
+        # Keep the no-churn check independent of the filesystem's timestamp tick.
+        # A redundant rewrite must move these outputs off this old timestamp.
+        sentinel_mtime_ns = 946_684_800_000_000_000  # 2000-01-01 UTC
+        for path in (self.prx_path, self.psp_path, manifest_path):
+            os.utime(path, ns=(sentinel_mtime_ns, sentinel_mtime_ns))
         before = {
             path.name: (path.read_bytes(), path.stat().st_mtime_ns)
             for path in (self.prx_path, self.psp_path, manifest_path)
