@@ -55,7 +55,11 @@ it, into the player only, to decode the one track the player ships (`assets/musi
 `src/ui/nk_ui_image.c` includes the header with `STBI_ONLY_PNG`, `STBI_NO_STDIO`, `STBI_NO_LINEAR`, `STBI_NO_HDR`,
 `STBI_NO_FAILURE_STRINGS`, `STBI_NO_THREAD_LOCALS`, `STBI_MAX_DIMENSIONS 8192` and `STB_IMAGE_STATIC`. Before stb
 reads anything past the header, the caller's byte and dimension limits are applied, so an oversized image is refused
-without being decoded.
+without being decoded. It also defines `STBI_MALLOC`, `STBI_REALLOC` and `STBI_FREE` as wrappers that, while a decode
+runs, refuse any request larger than an image of the header's size and a file of that size can need: stb accepts image
+data longer than the image and grows its zlib buffer for as long as the data inflates, so a small file of highly
+compressible data would otherwise allocate gigabytes. A PNG whose first `IDAT` chunk is empty is refused before stb
+reads it, since stb copies that chunk into a buffer it has not yet allocated (a `memcpy` into `NULL`).
 
 A second translation unit builds the header for a test only: `tests/native/texrepl_selftest.c` (`texrepl-selftest`)
 uses it as an independent PNG decoder to check the texture-replacement pack reader's own decoder on a seeded
