@@ -12,6 +12,7 @@ asserted against every spec instead of being written out once per probe.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 import unittest
 
@@ -46,35 +47,98 @@ PROBES = (
 )
 
 
+PROBE_SOURCE = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "probe.c"
+
+# The probe.c function that emits each stream.
+PROBE_FUNCTIONS = {
+    IO_SPEC.test_id: "static void run_io_matrix(int emulated) {",
+    AUDIO_SPEC.test_id: "static void run_audio_query(int emulated) {",
+    CACHE_SPEC.test_id: "static void run_cache_alias(int emulated) {",
+    MBX_DELETE_WAIT_SPEC.test_id: "static uint32_t run_mbx_delete_wait(int emulated) {",
+}
+
+_DEFERRED_RECORD = re.compile(
+    r"\b(?:defer_record|audio_defer)\(\s*(?:emulated\s*,\s*)?(?:\"([^\"]+)\"|case_id)"
+    r"\s*,[^;]*?,\s*(\d+)\s*\);"
+)
+_EXTENDED_RECORD = re.compile(
+    r"\bemit_record_extended\(\s*emulated\s*,\s*\"([^\"]+)\"\s*,\s*\"([^\"]+)\"[^;]*?,"
+    r"\s*(\w+)\s*,\s*sizeof\(\3\)\s*/\s*sizeof\(\3\[0\]\)\s*\);"
+)
+
+
+def probe_function(test_id: str) -> str:
+    source = PROBE_SOURCE.read_text(encoding="utf-8")
+    start = source.index(PROBE_FUNCTIONS[test_id])
+    return source[start:source.index("\n}\n", start)]
+
+
+def probe_records(test_id: str) -> dict[str, int]:
+    """Case id -> output count, in the order probe.c first emits each case.
+
+    A case emitted on two paths (a failure path with fewer outputs) keeps its first,
+    successful-path emission, which is the one a passing run produces.
+    """
+
+    source = PROBE_SOURCE.read_text(encoding="utf-8")
+    body = probe_function(test_id)
+    records: dict[str, int] = {}
+    for match in _DEFERRED_RECORD.finditer(body):
+        if match.group(1) is not None:
+            records.setdefault(match.group(1), int(match.group(2)))
+            continue
+        # A formatted case id: snprintf(case_id, ..., "<prefix>%u", block) inside
+        # for (uint32_t block = 0; block < <BOUND>; ++block).
+        prefix = re.search(r'snprintf\(case_id, sizeof\(case_id\), "([^"]+)%u"', body)
+        bound = re.search(r"for \(uint32_t block = 0; block < (\w+); \+\+block\)", body)
+        assert prefix is not None and bound is not None, test_id
+        count = re.search(rf"^#define {bound.group(1)} (\d+)$", source, re.MULTILINE)
+        assert count is not None, bound.group(1)
+        for block in range(int(count.group(1))):
+            records.setdefault(f"{prefix.group(1)}{block}", int(match.group(2)))
+    for match in _EXTENDED_RECORD.finditer(body):
+        if match.group(1) != test_id:
+            continue
+        size = re.search(rf"\buint32_t {match.group(3)}\[(\d+)\]", body)
+        assert size is not None, match.group(3)
+        records.setdefault(match.group(2), int(size.group(1)))
+    return records
+
+
+# What probe.c emits for each stream, read from the source rather than restated.
+PROBE_OUT_COUNTS = {test_id: probe_records(test_id) for test_id in PROBE_FUNCTIONS}
+
+
+def value(spec: StreamSpec, case_id: str, index: int) -> int:
+    """The synthetic value of out<index> in ``case_id``'s record.
+
+    Each IO, audio and cache record carries values unique to its case, so an observable
+    read from the wrong case or field cannot match.  The mailbox field-set tests pin
+    the out<i> = i + 1 shape, so those records keep it.
+    """
+
+    if spec == MBX_DELETE_WAIT_SPEC:
+        return index + 1
+    position: int = spec.ordered_cases.index(case_id)
+    return (position + 1) * 0x100 + index
+
+
 def line(spec: StreamSpec, case_id: str, status: str = "PASS", *, out0: int | None = None) -> str:
-    """One protocol record for ``case_id``, in the exact shape the probe emits."""
+    """One protocol record for ``case_id``, with the output count the probe emits."""
 
     if case_id == spec.terminal_case:
-        value = spec.terminal_count if out0 is None else out0
+        terminal = spec.terminal_count if out0 is None else out0
         return (
             f"NAKAGAWA_PSP_TEST schema=1 test_id={spec.test_id} case_id={case_id} "
-            f"status={status} result=0x00000000 out0=0x{value:08x}\n"
+            f"status={status} result=0x00000000 out0=0x{terminal:08x}\n"
         )
-    if spec == AUDIO_SPEC:
-        outputs = " ".join(
-            f"out{i}=0x{i + 1:08x}" for i in range(AUDIO_OUT_COUNTS[case_id])
-        )
-        return (
-            f"NAKAGAWA_PSP_TEST schema=1 test_id={spec.test_id} case_id={case_id} "
-            f"status={status} result=0x00000000 {outputs}\n"
-        )
-    if spec == MBX_DELETE_WAIT_SPEC:
-        count = 26 if case_id == "mbx-delete-wait" else 8
-        outputs = " ".join(
-            f"out{i}=0x{i + 1:08x}" for i in range(count)
-        )
-        return (
-            f"NAKAGAWA_PSP_TEST schema=1 test_id={spec.test_id} case_id={case_id} "
-            f"status={status} result=0x00000000 {outputs}\n"
-        )
+    outputs = " ".join(
+        f"out{i}=0x{value(spec, case_id, i):08x}"
+        for i in range(PROBE_OUT_COUNTS[spec.test_id][case_id])
+    )
     return (
         f"NAKAGAWA_PSP_TEST schema=1 test_id={spec.test_id} case_id={case_id} "
-        f"status={status} result=0x00000000 out0=0x00000001 out1=0x00000002\n"
+        f"status={status} result=0x00000000 {outputs}\n"
     )
 
 
@@ -87,7 +151,8 @@ def golden(spec: StreamSpec) -> str:
 
 
 class TestSpecsMatchProbeSource(unittest.TestCase):
-    """The record contract, pinned to what the probe sources actually emit."""
+    """The record contract: the specs' literals, and their case order and output
+    counts checked against the records probe.c emits."""
 
     def test_io_contract(self) -> None:
         self.assertEqual(IO_SPEC.test_id, "PSP-IO-001")
@@ -170,6 +235,27 @@ class TestSpecsMatchProbeSource(unittest.TestCase):
                 self.assertNotIn(spec.terminal_case, spec.semantic_cases)
                 self.assertEqual(spec.record_count, spec.terminal_count + 1)
 
+    def test_spec_case_order_is_the_probes_emission_order(self) -> None:
+        for spec, _ in PROBES:
+            with self.subTest(spec.test_id):
+                self.assertEqual(tuple(PROBE_OUT_COUNTS[spec.test_id]), spec.ordered_cases)
+
+    def test_deferred_probes_flush_under_their_own_test_id(self) -> None:
+        for spec in (IO_SPEC, AUDIO_SPEC, CACHE_SPEC):
+            with self.subTest(spec.test_id):
+                self.assertIn(f'flush_deferred(emulated, "{spec.test_id}");', probe_function(spec.test_id))
+
+    def test_audio_output_counts_are_the_probes(self) -> None:
+        self.assertEqual(AUDIO_OUT_COUNTS, PROBE_OUT_COUNTS[AUDIO_SPEC.test_id])
+
+    def test_mbx_field_sets_are_the_probes_output_arrays(self) -> None:
+        for case, count in PROBE_OUT_COUNTS[MBX_DELETE_WAIT_SPEC.test_id].items():
+            with self.subTest(case):
+                self.assertEqual(
+                    MBX_DELETE_WAIT_EXPECTED_FIELDS[case],
+                    {"result", *(f"out{i}" for i in range(count))},
+                )
+
 
 class TestGoldenStreams(unittest.TestCase):
     def test_golden_passes_in_both_modes(self) -> None:
@@ -183,14 +269,17 @@ class TestGoldenStreams(unittest.TestCase):
                     self.assertEqual(report.record_count, spec.record_count)
 
     def test_observables_are_read_from_the_named_fields(self) -> None:
+        # Every value is unique to its case and field, so a parser reading another case
+        # or another out<i> gets a different number.
         io_report = parse_io_matrix_output(golden(IO_SPEC))
-        self.assertEqual(io_report.open_fd, 1)
+        self.assertEqual(io_report.open_fd, value(IO_SPEC, "io-open-create", 0))
+        self.assertEqual(io_report.removed_rc, value(IO_SPEC, "io-errors", 2))
         audio_report = parse_audio_query_output(golden(AUDIO_SPEC))
-        self.assertEqual(audio_report.channel_reserve_rc, 1)
-        self.assertEqual(audio_report.channel_rest_len, 1)  # out0 of audio-ch-query-before
+        self.assertEqual(audio_report.channel_reserve_rc, value(AUDIO_SPEC, "audio-ch-reserve", 0))
+        self.assertEqual(audio_report.channel_rest_len, value(AUDIO_SPEC, "audio-ch-query-before", 0))
         cache_report = parse_cache_alias_output(golden(CACHE_SPEC))
-        self.assertEqual(cache_report.stale_cached_read, 1)
-        self.assertEqual(cache_report.fresh_cached_read, 2)
+        self.assertEqual(cache_report.stale_cached_read, value(CACHE_SPEC, "cache-inval-contrast", 0))
+        self.assertEqual(cache_report.fresh_cached_read, value(CACHE_SPEC, "cache-inval-contrast", 1))
 
     def test_a_single_fail_cell_is_complete_but_not_passed(self) -> None:
         for spec, parse in PROBES:

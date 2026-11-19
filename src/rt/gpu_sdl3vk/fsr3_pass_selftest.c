@@ -14,6 +14,11 @@
  * bars below are measured against it, not against FSR 1).
  *
  *   P-0  the eight pipelines, at five size pairs, with no validation message; refusals
+ *   P-L  the device probe asks for linear filtering of every image a shader samples linearly, the
+ *        ones reached through an alias (LUMA_HISTORY_1/2, the only R16G16B16A16_SFLOAT images
+ *        sampled that way) included: a device whose format lacks it is refused
+ *   P-H  a failed image or shader-module create that leaves a non-null value in its output never
+ *        has that value destroyed, and the creation is refused
  *   F-S  a static thin-line quad, 32 frames, ratios 2 and 1: the raster moves by the jitter FSR is
  *        told, to 0.01 px, and FSR's error is well below the baseline's
  *   F-M  a quad moving 3.5 px a frame diagonally with exact vectors: no trail behind it
@@ -247,8 +252,9 @@ static int gpu_open(char *why, size_t cap) {
     mci.pNext = NULL; /* the chain above belongs to instance creation; the messenger takes none */
     if (g.validation && (!CreateDebugUtilsMessengerEXT ||
                          CreateDebugUtilsMessengerEXT(g.instance, &mci, NULL, &g.messenger) != VK_SUCCESS)) {
+        /* The layer and VK_EXT_debug_utils were found and enabled: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDebugUtilsMessengerEXT failed");
-        return 0;
+        return -1;
     }
     VkPhysicalDevice devs[8];
     uint32_t nd = 8;
@@ -292,8 +298,9 @@ static int gpu_open(char *why, size_t cap) {
     dci.pQueueCreateInfos = &qci;
     dci.pEnabledFeatures = &features;
     if (CreateDevice(g.physical, &dci, NULL, &g.device) != VK_SUCCESS) {
+        /* A device with what the pass needs is there, and could not be made: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDevice failed");
-        return 0;
+        return -1;
     }
 #define DEV(name) name = (PFN_vk##name)GetDeviceProcAddr(g.device, "vk" #name)
     DEV(DestroyDevice); DEV(GetDeviceQueue); DEV(CreateCommandPool); DEV(DestroyCommandPool);
@@ -360,8 +367,12 @@ static void cmd_end(void) {
     si.pCommandBuffers = &g.cb;
     EndCommandBuffer(g.cb);
     ResetFences(g.device, 1, &g.fence);
-    QueueSubmit(g.queue, 1, &si, g.fence);
-    WaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+    /* A frame that was not submitted, or whose fence never signalled, left nothing to measure. */
+    const VkResult submitted = QueueSubmit(g.queue, 1, &si, g.fence);
+    CHECK(submitted == VK_SUCCESS, "vkQueueSubmit failed (%d)", (int)submitted);
+    if (submitted != VK_SUCCESS) return;
+    const VkResult waited = WaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+    CHECK(waited == VK_SUCCESS, "vkWaitForFences failed (%d)", (int)waited);
 }
 
 /* Every earlier compute or transfer access before every later one. */
@@ -757,10 +768,85 @@ static Fsr3HostDesc desc_for(int dw, int dh) {
     return d;
 }
 
+/* A failed vkCreateImage or vkCreateShaderModule that leaves a non-null value in its output, as
+ * Vulkan allows (a failed command's output is undefined): the create whose turn it is fails and
+ * writes JUNK there; the destroy wrappers count JUNK instead of passing it on. Wrapped through the
+ * init's proc-addr hook, so the pass has no test seam. */
+#define JUNK_IMAGE ((VkImage)(uintptr_t)0x5EED0001u)
+#define JUNK_MODULE ((VkShaderModule)(uintptr_t)0x5EED0002u)
+static PFN_vkGetDeviceProcAddr s_real_dev_addr;
+static PFN_vkCreateImage s_real_create_image;
+static PFN_vkDestroyImage s_real_destroy_image;
+static PFN_vkCreateShaderModule s_real_create_module;
+static PFN_vkDestroyShaderModule s_real_destroy_module;
+static int s_image_fails_at = -1, s_module_fails_at = -1; /* the call that fails, counting from 0 */
+static unsigned s_junk_destroyed;
+
+static VKAPI_ATTR VkResult VKAPI_CALL junk_create_image(VkDevice device, const VkImageCreateInfo *info,
+                                                        const VkAllocationCallbacks *alloc, VkImage *image) {
+    if (s_image_fails_at >= 0 && s_image_fails_at-- == 0) {
+        *image = JUNK_IMAGE;
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return s_real_create_image(device, info, alloc, image);
+}
+
+static VKAPI_ATTR void VKAPI_CALL junk_destroy_image(VkDevice device, VkImage image, const VkAllocationCallbacks *alloc) {
+    if (image == JUNK_IMAGE) { s_junk_destroyed++; return; }
+    s_real_destroy_image(device, image, alloc);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL junk_create_module(VkDevice device, const VkShaderModuleCreateInfo *info,
+                                                         const VkAllocationCallbacks *alloc, VkShaderModule *module) {
+    if (s_module_fails_at >= 0 && s_module_fails_at-- == 0) {
+        *module = JUNK_MODULE;
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return s_real_create_module(device, info, alloc, module);
+}
+
+static VKAPI_ATTR void VKAPI_CALL junk_destroy_module(VkDevice device, VkShaderModule module,
+                                                      const VkAllocationCallbacks *alloc) {
+    if (module == JUNK_MODULE) { s_junk_destroyed++; return; }
+    s_real_destroy_module(device, module, alloc);
+}
+
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL junk_dev_addr(VkDevice device, const char *name) {
+    PFN_vkVoidFunction fn = s_real_dev_addr(device, name);
+    if (!strcmp(name, "vkCreateImage")) {
+        s_real_create_image = (PFN_vkCreateImage)fn;
+        return (PFN_vkVoidFunction)junk_create_image;
+    }
+    if (!strcmp(name, "vkDestroyImage")) {
+        s_real_destroy_image = (PFN_vkDestroyImage)fn;
+        return (PFN_vkVoidFunction)junk_destroy_image;
+    }
+    if (!strcmp(name, "vkCreateShaderModule")) {
+        s_real_create_module = (PFN_vkCreateShaderModule)fn;
+        return (PFN_vkVoidFunction)junk_create_module;
+    }
+    if (!strcmp(name, "vkDestroyShaderModule")) {
+        s_real_destroy_module = (PFN_vkDestroyShaderModule)fn;
+        return (PFN_vkVoidFunction)junk_destroy_module;
+    }
+    return fn;
+}
+
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL junk_gipa(VkInstance instance, const char *name) {
+    PFN_vkVoidFunction fn = g.gipa(instance, name);
+    if (!strcmp(name, "vkGetDeviceProcAddr")) {
+        s_real_dev_addr = (PFN_vkGetDeviceProcAddr)fn;
+        return (PFN_vkVoidFunction)junk_dev_addr;
+    }
+    return fn;
+}
+
+static PFN_vkGetInstanceProcAddr s_pass_gipa; /* pass_new's hook; NULL is the loader's own */
+
 static Fsr3Pass *pass_new(Fsr3HostDesc desc, uint32_t frames, char *err, size_t cap) {
     Fsr3PassInit init;
     memset(&init, 0, sizeof(init));
-    init.get_instance_proc_addr = g.gipa;
+    init.get_instance_proc_addr = s_pass_gipa ? s_pass_gipa : g.gipa;
     init.instance = g.instance;
     init.physical_device = g.physical;
     init.device = g.device;
@@ -781,14 +867,24 @@ static int run_open(Run *r, int dw, int dh) {
     r->out_px = malloc((size_t)dw * dh * 4);
     r->truth = malloc((size_t)dw * dh * 3 * sizeof(float));
     r->base = malloc((size_t)dw * dh * 3 * sizeof(float));
-    return r->out_px && r->truth && r->base &&
-           tex_make(&r->color, CANVAS_W, CANVAS_H, VK_FORMAT_R8G8B8A8_UNORM, in) &&
-           tex_make(&r->depth, CANVAS_W, CANVAS_H, VK_FORMAT_R32_SFLOAT, in) &&
-           tex_make(&r->mv, CANVAS_W, CANVAS_H, VK_FORMAT_R16G16_SFLOAT, in) &&
-           tex_make(&r->reactive, CANVAS_W, CANVAS_H, VK_FORMAT_R8_UNORM, in) &&
-           tex_make(&r->tc, CANVAS_W, CANVAS_H, VK_FORMAT_R8_UNORM, in) &&
-           tex_make(&r->out, (uint32_t)dw, (uint32_t)dh, VK_FORMAT_R8G8B8A8_UNORM,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    if (!r->out_px || !r->truth || !r->base) {
+        printf("FAIL run_open %dx%d: out of host memory for the output, truth and baseline\n", dw, dh);
+        s_fail = 1;
+        return 0;
+    }
+    /* A run whose images cannot be made measures nothing: a failure, never a quiet return. */
+    if (!tex_make(&r->color, CANVAS_W, CANVAS_H, VK_FORMAT_R8G8B8A8_UNORM, in) ||
+        !tex_make(&r->depth, CANVAS_W, CANVAS_H, VK_FORMAT_R32_SFLOAT, in) ||
+        !tex_make(&r->mv, CANVAS_W, CANVAS_H, VK_FORMAT_R16G16_SFLOAT, in) ||
+        !tex_make(&r->reactive, CANVAS_W, CANVAS_H, VK_FORMAT_R8_UNORM, in) ||
+        !tex_make(&r->tc, CANVAS_W, CANVAS_H, VK_FORMAT_R8_UNORM, in) ||
+        !tex_make(&r->out, (uint32_t)dw, (uint32_t)dh, VK_FORMAT_R8G8B8A8_UNORM,
+                  VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        printf("FAIL run_open %dx%d: an input or output image could not be made\n", dw, dh);
+        s_fail = 1;
+        return 0;
+    }
+    return 1;
 }
 
 static void run_close(Run *r) {
@@ -833,7 +929,10 @@ static void raster(Run *r, const Scene *s, int t) {
 
 /* One FSR 3 frame of scene s at time t; the output lands in r->out_px. */
 static int frame(Run *r, const Scene *s, int t, int reset) {
-    if (fsr3_jitter_next(&r->jitter, reset, RENDER_W, r->dw, &r->jx, &r->jy) != 0) return 0;
+    if (fsr3_jitter_next(&r->jitter, reset, RENDER_W, r->dw, &r->jx, &r->jy) != 0) {
+        CHECK(0, "fsr3_jitter_next refused frame %d (display width %d)", t, r->dw);
+        return 0;
+    }
     raster(r, s, t);
     Fsr3PassFrame f;
     memset(&f, 0, sizeof(f));
@@ -956,6 +1055,32 @@ static double mae(const Run *r, const float *alt, const Scene *s, int t, Region 
 /* ---- P-0 ------------------------------------------------------------------------------------- */
 
 static void cell_p0(void) {
+    /* Refusals that make no Vulkan object, so they run with or without the layer: no init at all,
+     * and each creation flag the one embedded permutation was not compiled for (LDR colour,
+     * render-resolution and unjittered vectors). Depth infinite and auto exposure are host-side. */
+    {
+        char err[160] = "";
+        Fsr3Pass *none = fsr3_pass_create(NULL, err, sizeof(err));
+        CHECK(none == NULL && strstr(err, "no init"), "P-0: a NULL init was not refused by name (%s)", err);
+        fsr3_pass_destroy(none);
+        static const struct {
+            uint32_t flag;
+            const char *name;
+        } unbuilt[] = {
+            { FSR3_HOST_ENABLE_HIGH_DYNAMIC_RANGE, "HIGH_DYNAMIC_RANGE" },
+            { FSR3_HOST_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS, "DISPLAY_RESOLUTION_MOTION_VECTORS" },
+            { FSR3_HOST_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION, "MOTION_VECTORS_JITTER_CANCELLATION" },
+        };
+        for (unsigned i = 0; i < sizeof(unbuilt) / sizeof(unbuilt[0]); i++) {
+            Fsr3HostDesc d = desc_for(960, 544);
+            d.flags |= unbuilt[i].flag;
+            err[0] = 0;
+            Fsr3Pass *p = pass_new(d, 1, err, sizeof(err));
+            CHECK(p == NULL && strstr(err, unbuilt[i].name), "P-0: flag %s accepted, though no shader is built for it (%s)",
+                  unbuilt[i].name, err);
+            fsr3_pass_destroy(p);
+        }
+    }
     if (!g.validation) {
         printf("SKIP P-0 (no validation layer: pipeline creation is not checked)\n");
         s_skip = 1;
@@ -990,6 +1115,65 @@ static void cell_p0(void) {
     p = pass_new(d, 1, err, sizeof(err));
     CHECK(p == NULL, "P-0: a 1-pixel-wide maximum render size accepted");
     fsr3_pass_destroy(p);
+}
+
+/* ---- P-L ------------------------------------------------------------------------------------- */
+
+/* The device's format properties, with linear filtering taken away from one format. */
+static VkFormat s_no_linear_format = VK_FORMAT_UNDEFINED;
+static PFN_vkGetPhysicalDeviceFormatProperties s_real_format_properties;
+
+static VKAPI_ATTR void VKAPI_CALL format_properties_without_linear(VkPhysicalDevice pd, VkFormat format,
+                                                                   VkFormatProperties *fp) {
+    s_real_format_properties(pd, format, fp);
+    if (format == s_no_linear_format)
+        fp->optimalTilingFeatures &= ~(VkFormatFeatureFlags)VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+}
+
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL gipa_without_linear(VkInstance instance, const char *name) {
+    PFN_vkVoidFunction fn = g.gipa(instance, name);
+    if (!strcmp(name, "vkGetPhysicalDeviceFormatProperties")) {
+        s_real_format_properties = (PFN_vkGetPhysicalDeviceFormatProperties)fn;
+        return (PFN_vkVoidFunction)format_properties_without_linear;
+    }
+    return fn;
+}
+
+static void cell_pl(void) {
+    CHECK(fsr3_pass_unavailable(gipa_without_linear, g.instance, g.physical, VK_FORMAT_R8_UNORM) == NULL,
+          "P-L: the wrapped probe refused the device with nothing taken away");
+    /* LUMA_HISTORY_1/2 are sampled linearly only through the LUMA_HISTORY alias, and no image the
+     * shaders name directly has their format: a probe that skips aliases accepts this device. */
+    s_no_linear_format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    const char *why = fsr3_pass_unavailable(gipa_without_linear, g.instance, g.physical, VK_FORMAT_R8_UNORM);
+    s_no_linear_format = VK_FORMAT_UNDEFINED;
+    char want[32];
+    snprintf(want, sizeof(want), "format %d ", (int)VK_FORMAT_R16G16B16A16_SFLOAT);
+    CHECK(why != NULL && strstr(why, want) != NULL,
+          "P-L: a device without linear filtering of R16G16B16A16_SFLOAT was accepted (%s)", why ? why : "no reason");
+}
+
+/* ---- P-H ------------------------------------------------------------------------------------- */
+
+static void cell_ph(void) {
+    static const struct {
+        const char *what;
+        int image, module;
+    } k_fail[] = { { "the third image", 2, -1 }, { "the fourth shader module", -1, 3 } };
+    for (unsigned i = 0; i < sizeof(k_fail) / sizeof(k_fail[0]); i++) {
+        char err[160] = "";
+        s_junk_destroyed = 0;
+        s_image_fails_at = k_fail[i].image;
+        s_module_fails_at = k_fail[i].module;
+        s_pass_gipa = junk_gipa;
+        Fsr3Pass *p = pass_new(desc_for(960, 544), 1, err, sizeof(err));
+        s_pass_gipa = NULL;
+        s_image_fails_at = s_module_fails_at = -1;
+        CHECK(p == NULL, "P-H: the pass was made although %s failed", k_fail[i].what);
+        fsr3_pass_destroy(p);
+        CHECK(s_junk_destroyed == 0, "P-H: the undefined output of a failed create (%s) was destroyed %u time(s)",
+              k_fail[i].what, s_junk_destroyed);
+    }
 }
 
 /* ---- F-S ------------------------------------------------------------------------------------- */
@@ -1327,7 +1511,7 @@ static const struct {
     const char *name;
     void (*run)(void);
 } k_cells[] = {
-    { "P-0", cell_p0 }, { "F-S", cell_fs }, { "F-M", cell_fm }, { "F-R", cell_fr },
+    { "P-0", cell_p0 }, { "P-L", cell_pl }, { "P-H", cell_ph }, { "F-S", cell_fs }, { "F-M", cell_fm }, { "F-R", cell_fr },
     { "F-T", cell_ft }, { "F-C", cell_fc }, { "F-D", cell_fd },
 };
 #define CELL_COUNT (sizeof(k_cells) / sizeof(k_cells[0]))
@@ -1350,15 +1534,18 @@ int main(int argc, char **argv) {
     char why[160] = "";
     const int up = gpu_open(why, sizeof(why));
     if (up != 1) {
-        printf("SKIP fsr3-pass-selftest: %s\n", up == 0 ? why : "a Vulkan object could not be made");
+        printf("%s fsr3-pass-selftest: %s\n", up == 0 ? "SKIP" : "FAIL",
+               why[0] ? why : "a Vulkan object could not be made");
         gpu_close();
         return up == 0 ? 77 : 1;
     }
     syncval_canary();
     shader_canary();
-    if (g.validation && !g_syncval_shader) {
-        /* The cells still run, but nothing checks the barriers between passes. */
-        printf("SKIP the barrier proof (synchronisation validation of shader accesses is not active)\n");
+    if (!g.validation || !g_syncval_shader) {
+        /* The cells still run, but nothing checks the barriers between passes: without the layer no
+         * messenger exists, so a cell's "no validation messages" check would hold trivially. */
+        printf("SKIP the barrier proof (%s)\n",
+               !g.validation ? "no validation layer" : "synchronisation validation of shader accesses is not active");
         s_skip = 1;
     }
     for (unsigned c = 0; c < CELL_COUNT; c++)

@@ -6044,7 +6044,92 @@ static void test_fd_namespace(void) {
            "sceIoRename source file removed after replace");
     expect(fd_host_bytes_equal(rename_dst_host, overwrite_payload, sizeof(overwrite_payload) - 1u),
            "sceIoRename replaced destination contains new payload");
+
+    /* 5. A rename that cannot complete leaves an existing destination alone. The Windows leg
+     * used to delete the destination before the move, so a missing source onto it, a rename
+     * onto itself and a case-only rename (the same file on NTFS) each lost the file. */
+    fd_guest_copy(rename_src_addr, rename_nonexist, sizeof(rename_nonexist));
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = rename_src_addr;
+    cpu.r[5] = rename_dst_addr;
+    expect(sr_hle_test_io_rename(&cpu) == 0x80010002u,
+           "sceIoRename of a missing source onto an existing file returns 0x80010002");
+    expect(fd_host_bytes_equal(rename_dst_host, overwrite_payload, sizeof(overwrite_payload) - 1u),
+           "sceIoRename of a missing source leaves the existing destination intact");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = rename_dst_addr;
+    cpu.r[5] = rename_dst_addr;
+    expect(sr_hle_test_io_rename(&cpu) == 0u &&
+               fd_host_bytes_equal(rename_dst_host, overwrite_payload, sizeof(overwrite_payload) - 1u),
+           "sceIoRename of a file onto itself succeeds and keeps the file");
+    static const char rename_case_guest[] = "ms0:/nakagawa_renamed_result.txt";
+    char rename_case_host[256];
+    fd_host_path(rename_case_host, sizeof(rename_case_host), rename_case_guest);
+    fd_guest_copy(rename_src_addr, rename_dst_guest, sizeof(rename_dst_guest));
+    fd_guest_copy(rename_dst_addr, rename_case_guest, sizeof(rename_case_guest));
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = rename_src_addr;
+    cpu.r[5] = rename_dst_addr;
+    expect(sr_hle_test_io_rename(&cpu) == 0u &&
+               fd_host_bytes_equal(rename_case_host, overwrite_payload, sizeof(overwrite_payload) - 1u),
+           "a case-only sceIoRename succeeds and keeps the file's bytes");
+    nk_remove_utf8(rename_case_host);
     nk_remove_utf8(rename_dst_host);
+
+    /* A synchronous write or read whose guest span leaves guest memory is 0x80010016, as
+     * sceIoWriteAsync and sceIoReadAsync refuse it at submission, and the file and position stay
+     * unchanged. The write used to store zeros for the bytes past the arena and the read to drop
+     * them, each reporting the full count. A read is judged on the bytes it delivers, after the
+     * clamp to the end of the file. */
+    {
+        static const char span_guest[] = "ms0:/NAKAGAWA_SPAN_EDGE.BIN";
+        static const uint8_t span_bytes[] = "ABCDEF";
+        char span_host[256];
+        fd_host_path(span_host, sizeof(span_host), span_guest);
+        nk_remove_utf8(span_host);
+        fd_set_path(&cpu, path_addr, span_guest);
+        uint32_t span_fd = sr_hle_test_io_open(&cpu);
+        expect(span_fd >= 3u && span_fd < 64u, "the span-edge fixture opens for writing");
+        fd_guest_copy(payload_addr, span_bytes, 4u);
+        fd_set_write(&cpu, span_fd, payload_addr, 4u);
+        expect(sr_hle_test_io_write(&cpu) == 4u, "the span-edge fixture's first write lands");
+        fd_set_write(&cpu, span_fd, 0x0bffff00u, 0x200u);
+        expect(sr_hle_test_io_write(&cpu) == 0x80010016u,
+               "sceIoWrite from a source that leaves guest memory is 0x80010016");
+        fd_guest_copy(payload_addr, span_bytes + 4, 2u);
+        fd_set_write(&cpu, span_fd, payload_addr, 2u);
+        expect(sr_hle_test_io_write(&cpu) == 2u, "the write after the refused one lands");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = span_fd;
+        expect(sr_hle_test_io_close(&cpu) == 0u, "the span-edge write descriptor closes");
+        expect(fd_host_bytes_equal(span_host, span_bytes, 6u),
+               "a refused sceIoWrite stores nothing and keeps the position");
+
+        fd_set_path(&cpu, path_addr, span_guest);
+        cpu.r[5] = 0x0001u; /* PSP_O_RDONLY */
+        span_fd = sr_hle_test_io_open(&cpu);
+        expect(span_fd >= 3u && span_fd < 64u, "the span-edge fixture opens for reading");
+        fd_set_write(&cpu, span_fd, 0x0bfffff0u, 0x1000u);
+        int top_ok = sr_hle_test_io_read(&cpu) == 6u;
+        for (uint32_t k = 0; k < 6u; k++) top_ok = top_ok && MEM_R8(0x0bfffff0u + k) == span_bytes[k];
+        expect(top_ok, "a long sceIoRead whose bytes after the clamp fit guest memory reads the file");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = span_fd;
+        cpu.r[5] = 0u;
+        cpu.r[6] = SEEK_SET;
+        expect(sr_hle_test_io_lseek32(&cpu) == 0u, "the span-edge read descriptor seeks to 0");
+        fd_set_write(&cpu, span_fd, 0x0bfffffcu, 0x40u);
+        expect(sr_hle_test_io_read(&cpu) == 0x80010016u,
+               "sceIoRead into a destination that leaves guest memory is 0x80010016");
+        fd_set_write(&cpu, span_fd, payload_addr, 0x40u);
+        int kept_ok = sr_hle_test_io_read(&cpu) == 6u;
+        for (uint32_t k = 0; k < 6u; k++) kept_ok = kept_ok && MEM_R8(payload_addr + k) == span_bytes[k];
+        expect(kept_ok, "a refused sceIoRead keeps the position");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = span_fd;
+        expect(sr_hle_test_io_close(&cpu) == 0u, "the span-edge read descriptor closes");
+        nk_remove_utf8(span_host);
+    }
 
     /* A write longer than the host copy buffer (4096 bytes) reaches the file whole. It used to
      * stop after the first buffer and report 4096, and a game takes that short count for a
@@ -6980,6 +7065,9 @@ static void test_ms0_unified_namespace(void) {
     cpu.r[4] = 0x09181000u;
     uint32_t ms_dir_fd = sr_hle_test_io_dopen(&cpu);
     int ms_dread_file = 0;
+    /* d_private (SceIoDirent + 0x158) is the caller's pointer, set once before the loop. */
+    MEM_W32(0x09180000u + 0x158u, 0x09182000u);
+    MEM_W32(0x09180000u + 0x15cu, 0x5a5a5a5au);
     for (int guard = 0; guard < 16; guard++) {
         memset(&cpu, 0, sizeof cpu);
         cpu.r[4] = ms_dir_fd;
@@ -6990,6 +7078,8 @@ static void test_ms0_unified_namespace(void) {
                             MEM_R32(0x09180000u + 8u) == (uint32_t)(sizeof(payload) - 1u);
     }
     expect(ms_dread_file, "sceIoDread lists an ms0 file with sceIoGetstat's mode 0x21ff and attr 0x0020");
+    expect(MEM_R32(0x09180000u + 0x158u) == 0x09182000u && MEM_R32(0x09180000u + 0x15cu) == 0x5a5a5a5au,
+           "sceIoDread leaves the caller's d_private pointer and the word after it untouched");
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = ms_dir_fd;
     (void)sr_hle_test_io_dclose(&cpu);
@@ -7353,6 +7443,20 @@ static void test_ms0_unified_namespace(void) {
 #else
             expect(read_refusal == 0x80010016u, "POSIX refuses a read through the link as EINVAL");
 #endif
+            /* sceIoGetstat through the same link is refused like the read, and tells nothing
+             * of the outside file: not that it exists, nor its type or size. */
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = PATH_ADDR;
+            cpu.r[5] = STAT_ADDR;
+            for (uint32_t i = 0; i < 0x58u; i++) MEM_W8(STAT_ADDR + i, 0xcc);
+            const uint32_t stat_refusal = sr_hle_test_io_getstat(&cpu);
+            if (stat_refusal != read_refusal)
+                fprintf(stderr, "  sceIoGetstat through the link answered 0x%08x, a read 0x%08x\n",
+                        (unsigned)stat_refusal, (unsigned)read_refusal);
+            expect(stat_refusal == read_refusal && MEM_R32(STAT_ADDR) == 0xccccccccu &&
+                       MEM_R32(STAT_ADDR + 8u) == 0xccccccccu,
+                   "sceIoGetstat through a folder link is refused like a read and reports no "
+                   "outside file");
             for (size_t i = 0; i < sizeof(opens) / sizeof(opens[0]); ++i) {
                 fd_guest_copy(PATH_ADDR, opens[i].guest, strlen(opens[i].guest) + 1u);
                 fd_set_path(&cpu, PATH_ADDR, opens[i].guest);
@@ -12716,6 +12820,23 @@ static int sdt_live_bookkeeping(const char *dir) {
     return n;
 }
 
+/* The kept copies of one member in a save directory: ".nakagawa-kept-<anything>-<member>". */
+static int sdt_kept_copies(const char *dir, const char *member) {
+    int n = 0;
+    size_t ml = strlen(member);
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        size_t len = strlen(de->d_name);
+        if (!strncmp(de->d_name, ".nakagawa-kept-", 15) && len > 15u + ml &&
+            de->d_name[len - ml - 1u] == '-' && !strcmp(de->d_name + len - ml, member))
+            n++;
+    }
+    closedir(d);
+    return n;
+}
+
 static void sdt_param(uint32_t mode, const char *game, const char *save, const char *file) {
     memset(g_mem_base + SDT_PARAM, 0, 0x600u);
     memset(g_mem_base + SDT_BUF, 0, 0x100u);
@@ -12850,11 +12971,27 @@ static void test_savedata_list_selection(void) {
     fd_guest_copy(SDT_BUF, "UNO", 3u);
     MEM_W32(SDT_PARAM + 0x7cu, 3u);
     snprintf(path, sizeof(path), "%s/PSP/SAVEDATA/NKLISTSLOT1/DATA.BIN", root);
-    char kept[600];
-    snprintf(kept, sizeof(kept), "%s/PSP/SAVEDATA/NKLISTSLOT1/.nakagawa-kept-0-DATA.BIN", root);
+    char kept[600], slot1[600];
+    snprintf(kept, sizeof(kept), "%s/PSP/SAVEDATA/NKLISTSLOT1/.nakagawa-kept-replaced-DATA.BIN", root);
+    snprintf(slot1, sizeof(slot1), "%s/PSP/SAVEDATA/NKLISTSLOT1", root);
     expect(sr_savedata_execute(SDT_PARAM) == 0u && sdt_read(path, text, sizeof(text)) &&
                !strcmp(text, "UNO") && sdt_read(kept, text, sizeof(text)) && !strcmp(text, "ONE"),
            "an automatic LISTSAVE over an existing save keeps the replaced version");
+    /* Each automatic overwrite supersedes the last: the slot keeps one copy per member, the
+     * version just before, so repeated saving never fills the kept names (which made every
+     * later SAVE to the slot fail). */
+    for (int i = 0; i < 3; i++) {
+        static const char *const again[] = { "DOS", "TRES", "CUATRO" };
+        sdt_list(5u, 0u /* NAME */, "SLOT1", save_list);
+        fd_guest_copy(SDT_BUF, again[i], (uint32_t)strlen(again[i]));
+        MEM_W32(SDT_PARAM + 0x7cu, (uint32_t)strlen(again[i]));
+        expect(sr_savedata_execute(SDT_PARAM) == 0u, "a repeated automatic LISTSAVE succeeds");
+    }
+    expect(sdt_read(path, text, sizeof(text)) && !strcmp(text, "CUATRO") &&
+               sdt_read(kept, text, sizeof(text)) && !strcmp(text, "TRES"),
+           "repeated automatic LISTSAVEs keep the version just before the last one");
+    expect(sdt_kept_copies(slot1, "DATA.BIN") == 1 && sdt_kept_copies(slot1, "PARAM.SFO") == 1,
+           "repeated automatic LISTSAVEs keep one copy of each member, not one per save");
 
     /* Outside the list modes "<>" is the empty save name, not some existing save. */
     sdt_list(0u /* AUTOLOAD */, 0u, "<>", listed);
@@ -18892,6 +19029,22 @@ static void test_direct_xb_read_precedence_and_listing(void) {
     expect(sr_hle_test_io_lseek32(&cpu) == 3u, "archive member seek uses logical file offsets");
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd; cpu.r[5] = data_addr; cpu.r[6] = 64u;
     expect(sr_hle_test_io_read(&cpu) == 9u, "a partial read clamps at archive member EOF");
+    /* The archive backend judges the destination on the bytes it delivers, after the clamp to the
+     * member's end, like the loose and disc backends: a long count into a buffer near the top of
+     * guest memory reads the member, and a destination those bytes leave is 0x80010016 with the
+     * position kept. It used to test the unclamped count and refuse the first read. */
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd; cpu.r[5] = 3u; cpu.r[6] = SEEK_SET;
+    expect(sr_hle_test_io_lseek32(&cpu) == 3u, "archive member seeks back to 3");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd; cpu.r[5] = 0x0bfffff0u; cpu.r[6] = 0x10000u;
+    expect(sr_hle_test_io_read(&cpu) == 9u,
+           "a long archive read whose clamped bytes fit guest memory returns them");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd; cpu.r[5] = 3u; cpu.r[6] = SEEK_SET;
+    expect(sr_hle_test_io_lseek32(&cpu) == 3u, "archive member seeks back to 3 again");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd; cpu.r[5] = 0x0bfffffcu; cpu.r[6] = 64u;
+    expect(sr_hle_test_io_read(&cpu) == 0x80010016u,
+           "an archive read whose clamped bytes leave guest memory is 0x80010016");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd; cpu.r[5] = data_addr; cpu.r[6] = 64u;
+    expect(sr_hle_test_io_read(&cpu) == 9u, "the refused archive read keeps the position");
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd;
     expect(sr_hle_test_io_close(&cpu) == 0u, "the archive descriptor closes cleanly");
     uint32_t ms0_fd = disc_route_open(&cpu, "ms0:/data/menu/archived.to");
@@ -19436,6 +19589,37 @@ static void test_hle_hot_log_switches_are_cached(void) {
     expect(sr_hle_test_io_statlog_env_reads() == 1u,
            "sceIoGetstat production path reads SR_STATLOG once across repeated syscalls");
     sr_hle_test_io_statlog_switch_reset();
+
+    /* SR_IOLOG is asked on every sceIoRead; it is read once, like SR_STATLOG (#1296). */
+    {
+        extern void sr_hle_test_io_iolog_switch_reset(void);
+        extern unsigned sr_hle_test_io_iolog_env_reads(void);
+        char *old_iolog = hle_archive_route_env_copy(getenv("SR_IOLOG"));
+        hle_archive_route_set_env("SR_IOLOG", NULL);
+        sr_hle_test_io_iolog_switch_reset();
+        CpuState cpu;
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = PATH_ADDR;
+        cpu.r[5] = 0x0001u; /* PSP_O_RDONLY */
+        uint32_t log_fd = sr_hle_test_io_open(&cpu);
+        expect(log_fd >= 3u && log_fd < 64u, "the SR_IOLOG fixture opens for reading");
+        for (unsigned i = 0; i < 4u; i++) {
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = log_fd;
+            cpu.r[5] = STAT_ADDR;
+            cpu.r[6] = 1u;
+            expect(sr_hle_test_io_read(&cpu) == 1u, "sceIoRead reads one byte of the SR_IOLOG fixture");
+            if (i == 0u) hle_archive_route_set_env("SR_IOLOG", "1");
+        }
+        expect(sr_hle_test_io_iolog_env_reads() == 1u,
+               "sceIoRead reads SR_IOLOG once across repeated reads");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = log_fd;
+        expect(sr_hle_test_io_close(&cpu) == 0u, "the SR_IOLOG fixture closes");
+        hle_archive_route_set_env("SR_IOLOG", old_iolog);
+        free(old_iolog);
+        sr_hle_test_io_iolog_switch_reset();
+    }
 
     hle_archive_route_set_env("SR_GELOG", old_ge);
     hle_archive_route_set_env("SR_GEDUMP", old_gedump);

@@ -25,10 +25,9 @@ import shutil
 import subprocess
 import sys
 import unittest
-try:
-    import hle_sources
-except ModuleNotFoundError:  # Running as ``python -m unittest tools.test_vfs_contained``.
-    from tools import hle_sources
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hle_sources  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 SELFTEST_C = ROOT / "tests" / "native" / "vfs_contained_selftest.c"
@@ -79,12 +78,14 @@ class TestContainedDeleteSelftest(unittest.TestCase):
         # A run that quietly skipped every hostile case would look like a pass.
         # Report what actually executed so a skipped matrix stays visible.
         if "backend=windows-verified-handle" in out:
-            expected_checks = 249  # +6: invalid UTF-8 leaf refusal (Windows only); +10: device-name grammar
+            expected_checks = 256  # +6: invalid UTF-8 leaf refusal (Windows only); +10: device-name grammar;
+            # +7: a writable mode clears a lone READONLY attribute (Windows only)
         elif "backend=posix-descriptor-relative" in out:
             # +10 device-name grammar; +4 root-level open; +21 open-existence modes (#1380);
             # includes the Linux guest path and file-operation matrix; +48: every write mode
-            # through a leaf symlink, a folder symlink and a hard link to an outside file
-            expected_checks = 402
+            # through a leaf symlink, a folder symlink and a hard link to an outside file;
+            # +14: sceIoChstat models the FAT read-only attribute (POSIX only)
+            expected_checks = 416
         else:
             self.fail("selftest did not identify a supported containment backend:\n" + out)
         self.assertIn(f": {expected_checks} checks, 0 skipped hostile case(s)", out)
