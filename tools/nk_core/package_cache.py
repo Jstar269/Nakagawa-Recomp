@@ -1320,9 +1320,9 @@ def _locate_enhancement_package(
         name, separator, value = token.partition("=")
         if separator and name == variable and value.strip():
             return f"MAKEFLAGS {variable}", value.strip()
-    value = _package_option_value(environment.get("CODEGEN_USER_ARGS", ""), option)
-    if value:
-        return f"CODEGEN_USER_ARGS {option}", value
+    option_value = _package_option_value(environment.get("CODEGEN_USER_ARGS", ""), option)
+    if option_value:
+        return f"CODEGEN_USER_ARGS {option}", option_value
     return None
 
 

@@ -731,7 +731,7 @@ def _check_slot_file(cache_dir: Path, slot: str, entry: Dict[str, Any]) -> Tuple
     try:
         info = _inspect_path(path)
     except (OSError, RuntimeError) as exc:
-        return False, f"its file cannot be read ({exc.strerror or exc})"
+        return False, f"its file cannot be read ({getattr(exc, 'strerror', None) or exc})"
     if not info["accepted"]:
         return False, f"the reader refused it: {info['refusal']}"
     if info["slot"] != slot:
@@ -749,7 +749,7 @@ def _check_latin_index_file(cache_dir: Path, index: int, entry: Dict[str, Any]) 
     try:
         info = _inspect_path(path)
     except (OSError, RuntimeError) as exc:
-        return False, f"its file cannot be read ({exc.strerror or exc})"
+        return False, f"its file cannot be read ({getattr(exc, 'strerror', None) or exc})"
     if not info["accepted"]:
         return False, f"the reader refused it: {info['refusal']}"
     if info["slot"] != "latin":
@@ -1033,9 +1033,10 @@ def _restore_font_file(target: Path, backup: Path | None) -> None:
     if backup is None:
         target.unlink(missing_ok=True)
         return
-    temporary = _stage_font_bytes(target.parent, target, backup.read_bytes())
+    staged = _stage_font_bytes(target.parent, target, backup.read_bytes())
+    temporary: Path | None = staged
     try:
-        os.replace(temporary, target)
+        os.replace(staged, target)
         temporary = None
     finally:
         if temporary is not None:

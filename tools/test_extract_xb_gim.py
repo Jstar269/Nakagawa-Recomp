@@ -66,6 +66,8 @@ def swizzle(data: bytes, pitch: int, height: int) -> bytes:
 
 
 class _CountingBytes(bytes):
+    accesses: dict[str, int]
+
     def __new__(cls, payload: bytes, accesses: dict[str, int]):
         value = super().__new__(cls, payload)
         value.accesses = accesses

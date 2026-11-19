@@ -1926,7 +1926,8 @@ def _branch_target(w: int, pc: int) -> int | None:
         from analyze import branch_target  # noqa: PLC0415 - lazy to keep package loading light
 
         _ANALYZE_BRANCH_TARGET = branch_target
-    return _ANALYZE_BRANCH_TARGET(pc, w)
+    target: int | None = _ANALYZE_BRANCH_TARGET(pc, w)
+    return target
 
 
 def _leaf_refusal(w: int) -> str | None:

@@ -154,9 +154,10 @@ class LadderTests(unittest.TestCase):
                 "runtime_imports": imports,
             }
             launch = library_build.summarize_report(report)["launch"]
-            return library_regress.classify({
+            verdict: str | None = library_regress.classify({
                 "outcome": "BUILT", "failure_class": "UNSUPPORTED_IMPORT", "launch": launch,
             })["stop"]
+            return verdict
 
         self.assertEqual(stop([first, second]), "UNSUPPORTED_IMPORT:sceZulu:sceStop")
         self.assertEqual(stop([first, second, unrelated]), "UNSUPPORTED_IMPORT:sceZulu:sceStop")

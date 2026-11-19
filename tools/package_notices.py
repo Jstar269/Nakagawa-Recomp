@@ -208,6 +208,7 @@ def system_dll_patterns(repo_root: Path = ROOT) -> tuple[re.Pattern[str], ...]:
 
 def __getattr__(name: str) -> Any:
     """Build legacy inventory constants only when an importer asks for them."""
+    value: Any
     if name == "KNOWN_RUNTIME_DLLS":
         value = known_runtime_dlls()
     elif name == "SYSTEM_DLL_PATTERNS":

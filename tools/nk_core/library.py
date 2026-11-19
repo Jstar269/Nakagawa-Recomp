@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import time
 from typing import Any, Dict, List, Optional
@@ -114,7 +115,7 @@ def _library_file_lock(user_data_root: Path):
     if lock_path.is_symlink() or getattr(lock_path, "is_junction", lambda: False)():
         raise ValueError("The library lock file is a link; refusing to write outside user data.")
     with lock_path.open("a+b") as handle:
-        if os.name == "nt":
+        if sys.platform == "win32":
             import msvcrt
 
             handle.seek(0, os.SEEK_END)

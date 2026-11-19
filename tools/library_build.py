@@ -590,7 +590,7 @@ class LibraryBuild:
         return_code: int | None = None
         try:
             with open(work_dir / "bringup-stdout.log", "wb") as output:
-                popen_options = {
+                popen_options: dict[str, Any] = {
                     "cwd": ROOT,
                     "stdout": output,
                     "stderr": subprocess.STDOUT,

@@ -1807,11 +1807,11 @@ def walk_disc_module_entries(
                 if root_entry is None:
                     continue
                 if not root_entry.is_directory:
-                    exc = IsoInspectionError("ISO path final directory component names a file")
+                    cause = IsoInspectionError("ISO path final directory component names a file")
                     raise IsoInspectionError(
                         "DISC_MODULE_TREE_INVALID: module directory "
-                        f"{'/'.join(root)} could not be listed safely: {exc}"
-                    ) from exc
+                        f"{'/'.join(root)} could not be listed safely: {cause}"
+                    ) from cause
                 entries = read_directory(stream, root, root_entry.lba, root_entry.size)
                 discovered += 1
                 directories.append((root, 0, entries))
@@ -1831,12 +1831,12 @@ def walk_disc_module_entries(
                         continue
                     if depth < MAX_MODULE_DIRECTORY_DEPTH:
                         if "/" in entry.name or "\\" in entry.name:
-                            exc = IsoInspectionError("ISO directory path is invalid")
+                            cause = IsoInspectionError("ISO directory path is invalid")
                             child = directory + (entry.name,)
                             raise IsoInspectionError(
                                 "DISC_MODULE_TREE_INVALID: module directory "
-                                f"{'/'.join(child)} could not be listed safely: {exc}"
-                            ) from exc
+                                f"{'/'.join(child)} could not be listed safely: {cause}"
+                            ) from cause
                         discovered += 1
                         if discovered > MAX_MODULE_DIRECTORIES:
                             raise IsoInspectionError(
@@ -2352,6 +2352,7 @@ def _boot_executable_facts(
 
     eboot_kind = executables["EBOOT.BIN"]["classification"]
     boot_kind = executables["BOOT.BIN"]["classification"]
+    selected: str | None
     if cfw_loader_detected:
         selected = "EBOOT.OLD"
     elif eboot_kind in _BOOT_FALLBACK_EBOOT_KINDS and boot_kind == "PLAIN_MIPS_ELF32":
@@ -2488,6 +2489,7 @@ def inspect_compatibility_preflight(
         if module_report["total"] or module_report.get("error")
         else None
     )
+    disc_check: dict[str, object]
     if directory_error:
         disc_check = {
             "code": "DISC_SFO", "status": "UNSUPPORTED",
