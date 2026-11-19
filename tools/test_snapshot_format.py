@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 from tools import nksnap
 
@@ -286,6 +287,78 @@ class MutantChunkLookupTests(unittest.TestCase):
                 self.assertIn("mutate --chunk probe/snapshot_recomp_0.c", proc.stdout)
                 calls = (work / "find-chunk.log").read_text(encoding="utf-8").splitlines()
                 self.assertEqual(len(calls), 1, f"{goal} ran find-chunk {len(calls)} times")
+
+
+class SharedHarnessStubTests(unittest.TestCase):
+    """The isolated-run harnesses share one stub unit, src/rt/harness_stubs.c (audit F-c543d233).
+
+    The snapshot runner and the verify harness each carried the runtime stand-ins, the image
+    reader and the hex parser, so a new extern in recomp.c had to be added twice.
+    """
+
+    STUBS = "src/rt/harness_stubs.c"
+    # One definition of each kind the two programs used to repeat.
+    SHARED = (
+        "volatile int g_sr_vram_read_pending;",
+        "uint32_t sched_current_uid(void) {",
+        "uint64_t snapshot_runner_ticks_ns(void) {",
+        "void sr_note_mem_write(uint32_t addr, uint32_t width, uint32_t val, uint32_t pc) {",
+        "uint8_t *sr_harness_read_image(const char *path, uint32_t *len_out) {",
+        "int sr_harness_parse_hex32(const char *text, uint32_t *out) {",
+    )
+    # Every program each recipe links, and the harness source that carries its main.
+    PROGRAMS: ClassVar[dict[str, dict[str, str]]] = {
+        "snapshot-selftest-run": {
+            "snapshot_runner.exe": "src/rt/snapshot_runner.c",
+            "snapshot_runner_mutant.exe": "src/rt/snapshot_runner.c",
+        },
+        "verify-selftest-run": {
+            "verify_harness.exe": "src/rt/verify_harness.c",
+            "verify_harness_mutant.exe": "src/rt/verify_harness.c",
+            "verify_replay_mutant.exe": "src/rt/snapshot_runner.c",
+        },
+        "form-sweep-link": {"form_sweep.exe": "src/rt/form_sweep.c"},
+    }
+
+    def test_the_stand_ins_are_defined_in_the_shared_unit_only(self) -> None:
+        stubs = (ROOT / self.STUBS).read_text(encoding="utf-8")
+        harness = (ROOT / "src" / "rt" / "verify_harness.c").read_text(encoding="utf-8")
+        for definition in self.SHARED:
+            with self.subTest(definition=definition):
+                self.assertEqual(stubs.count(definition), 1)
+        for text in (RUNNER_C, harness):
+            for name in ("g_sr_vram_read_pending", "sched_current_uid", "snapshot_runner_ticks_ns",
+                         "sr_note_mem_write", "*read_image(", "int parse_u32(", "int parse_hex("):
+                with self.subTest(name=name):
+                    self.assertNotIn(name, text)
+
+    @unittest.skipIf(shutil.which("mingw32-make") is None and shutil.which("make") is None,
+                     "needs GNU Make")
+    def test_every_harness_program_links_the_shared_unit_once(self) -> None:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        assert make is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            driver = work / "driver.py"
+            driver.write_text(_COUNTING_DRIVER, encoding="utf-8")
+            proc = subprocess.run(
+                [make, "-n", "--no-print-directory", *self.PROGRAMS, "GAME_NAME=snapshot",
+                 f"BUILD_ROOT={(work / 'build-root').as_posix()}",
+                 f"BUILD_DIR={(work / 'build').as_posix()}",
+                 f"SNAPSHOT_DRIVER={driver.as_posix()}", f"VERIFY_DRIVER={driver.as_posix()}"],
+                cwd=ROOT, capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stdout[-2000:] + proc.stderr[-2000:])
+        # A recipe line continues over several physical lines; join them first.
+        commands = [line.split() for line in proc.stdout.replace("\\\n", " ").splitlines()]
+        for programs in self.PROGRAMS.values():
+            for program, source in programs.items():
+                with self.subTest(program=program):
+                    links = [words for words in commands if "-o" in words[:-1]
+                             and words[words.index("-o") + 1].endswith("/" + program)]
+                    self.assertEqual(len(links), 1, f"{program} link lines: {links}")
+                    self.assertEqual(links[0].count(self.STUBS), 1, links[0])
+                    self.assertEqual(links[0].count(source), 1, links[0])
 
 
 if __name__ == "__main__":

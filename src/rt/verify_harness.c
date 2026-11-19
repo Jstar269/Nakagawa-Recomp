@@ -19,19 +19,19 @@
  * runtime's own _Exit paths make (SR_VERIFY_REPORT_NOW).
  *
  * The harness links the generated module, recomp.c and the dispatch and interpreter units
- * but no scheduler, HLE, GE or host platform. The definitions below stand in for those, as
- * in src/rt/snapshot_runner.c: none can change a compared result silently, and the two
- * calls that would leave guest code, sr_syscall and sr_raw_syscall, report the stop to the
- * verifier and return.
+ * but no scheduler, HLE, GE or host platform. src/rt/harness_stubs.c stands in for those,
+ * as it does for src/rt/snapshot_runner.c: none of its definitions can change a compared
+ * result silently. The two calls that would leave guest code, sr_syscall and
+ * sr_raw_syscall, are defined below: they report the stop to the verifier and return.
  */
 
 #include "recomp.h"
+#include "harness_stubs.h"
 #include "nested_frames.h"
 #include "verify.h"
 
 #ifdef SR_VERIFY   /* a verify build only; the strict compile of the default build sees nothing */
 
-#include <errno.h>
 #include <inttypes.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -39,51 +39,6 @@
 #include <string.h>
 
 void sr_register_all(void);   /* generated: executable spans and every native body */
-
-volatile int g_sr_vram_read_pending;
-void sr_ge_vram_read_prepare(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
-void sr_ge_vram_write_prepare(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
-void sr_ge_vram_write_commit(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
-
-uint32_t g_sr_debug = 0;
-SrMemWatch g_sr_mem_watches[SR_MAX_MEM_WATCHES];
-int g_sr_mem_watch_count = 0;
-int g_sr_metadata_watch = 0;
-uint32_t g_sr_mem_watch_context_pc = 0;
-unsigned g_sr_mem_watch_context_limit = 0;
-unsigned g_sr_mem_watch_context_count = 0;
-int g_sr_mem_watch_context_fpr = -1;
-uint32_t g_sr_mem_watch_context_fpr_value = 0;
-uint32_t g_sr_store_context_pc = 0;
-unsigned g_sr_store_context_count = 0;
-unsigned g_sr_store_context_limit = 0;
-int g_sr_store_context_mem_gpr = -1;
-uint32_t g_sr_store_context_mem_offset = 0;
-unsigned g_sr_store_context_mem_words = 0;
-int g_sr_last_writer_enabled = 0;
-CpuState *s_cpu = NULL;
-int sr_sched_on = 0;
-atomic_int_least32_t sr_timeslice;
-
-uint32_t sched_current_uid(void) { return 0u; }
-void sched_exit_current(int32_t status) { (void)status; }
-void sched_exit_current_delete(int32_t status) { (void)status; }
-uint32_t sched_start_thread(uint32_t uid, uint32_t arglen, uint32_t argp) { (void)uid; (void)arglen; (void)argp; return 0; }
-uint32_t sched_terminate_thread(uint32_t uid) { (void)uid; return 0; }
-uint32_t sched_delete_thread(uint32_t uid) { (void)uid; return 0; }
-uint32_t sched_thread_wakeup(uint32_t uid) { (void)uid; return 0; }
-void sched_set_current_join_target(uint32_t uid) { (void)uid; }
-void sched_clear_current_join_target(void) {}
-int sched_take_current_join_result(uint32_t uid, uint32_t *result_out) { (void)uid; (void)result_out; return 0; }
-uint32_t sr_get_ge_status(void) { return 0u; }
-uint32_t sr_hle_resolve_late_import(uint32_t nid) { (void)nid; return 0u; }
-void sr_main_module_register(const SrMainModuleRecord *record) { (void)record; }
-/* recomp.c reads the SDL clock for diagnostics only; the Makefile builds this harness's
- * copy of recomp.c with SDL_GetTicksNS renamed to this. */
-uint64_t snapshot_runner_ticks_ns(void) { return 0u; }
-void sr_note_mem_write(uint32_t addr, uint32_t width, uint32_t val, uint32_t pc) {
-    (void)addr; (void)width; (void)val; (void)pc;
-}
 
 static unsigned s_yields;
 static unsigned long s_slice;
@@ -122,15 +77,6 @@ typedef struct {
     uint32_t addr, count, arg[3];
 } CallSpec;
 
-static int parse_hex(const char *text, uint32_t *out) {
-    char *end = NULL;
-    errno = 0;
-    unsigned long long v = strtoull(text, &end, 16);
-    if (errno || !end || end == text || *end != '\0' || v > UINT32_MAX) return 0;
-    *out = (uint32_t)v;
-    return 1;
-}
-
 static int parse_call(const char *text, CallSpec *c) {
     char buf[128];
     snprintf(buf, sizeof buf, "%s", text);
@@ -142,13 +88,13 @@ static int parse_call(const char *text, CallSpec *c) {
     for (char *p = buf; *p && n < 5; p++) {
         if (*p == ':') { *p = '\0'; field[n++] = p + 1; }
     }
-    if (n < 2 || !parse_hex(field[0], &c->addr)) return 0;
+    if (n < 2 || !sr_harness_parse_hex32(field[0], &c->addr)) return 0;
     char *end = NULL;
     unsigned long long count = strtoull(field[1], &end, 10);
     if (!end || end == field[1] || *end != '\0' || count == 0u || count > UINT32_MAX) return 0;
     c->count = (uint32_t)count;
     for (int i = 2; i < n; i++)
-        if (!parse_hex(field[i], &c->arg[i - 2])) return 0;
+        if (!sr_harness_parse_hex32(field[i], &c->arg[i - 2])) return 0;
     return 1;
 }
 
@@ -157,26 +103,6 @@ static int usage(void) {
             "usage: verify_harness [--call ADDR:COUNT[:A0[:A1[:A2]]]]... [--sched-slice N]\n"
             "                      [--frozen-clock] [--hard-exit] <image.bin> <base-hex>\n");
     return 2;
-}
-
-static uint8_t *read_image(const char *path, uint32_t *len_out) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    uint8_t *data = NULL;
-    long n = -1;
-    if (fseek(f, 0, SEEK_END) == 0) n = ftell(f);
-    if (n < 0 || (unsigned long long)n > UINT32_MAX || fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return NULL;
-    }
-    data = (uint8_t *)malloc(n ? (size_t)n : 1u);
-    if (data && n && fread(data, 1, (size_t)n, f) != (size_t)n) {
-        free(data);
-        data = NULL;
-    }
-    fclose(f);
-    *len_out = (uint32_t)n;
-    return data;
 }
 
 int main(int argc, char **argv) {
@@ -204,7 +130,7 @@ int main(int argc, char **argv) {
         } else if (positional == 0) {
             image_path = a;
             positional++;
-        } else if (positional == 1 && parse_hex(a, &base)) {
+        } else if (positional == 1 && sr_harness_parse_hex32(a, &base)) {
             positional++;
         } else {
             return usage();
@@ -213,7 +139,7 @@ int main(int argc, char **argv) {
     if (positional != 2) return usage();
 
     uint32_t image_len = 0;
-    uint8_t *image = read_image(image_path, &image_len);
+    uint8_t *image = sr_harness_read_image(image_path, &image_len);
     if (!image) {
         fprintf(stderr, "verify_harness: cannot read %s\n", image_path);
         return 2;
