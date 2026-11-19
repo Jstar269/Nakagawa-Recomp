@@ -309,7 +309,12 @@ class LibrarySweepTests(unittest.TestCase):
                 )
         self.assertTrue(outcome.timed_out)
         self.assertEqual(observed_timeouts, [7])
-        terminate.assert_called_once_with(process)
+        # The route ends the whole tree on either host: Windows by the process's own tree, a
+        # POSIX host by the process group its new session leads.
+        if os.name == "nt":
+            terminate.assert_called_once_with(process)
+        else:
+            terminate.assert_called_once_with(process, process_group=True)
 
     def test_posix_route_uses_a_new_session_and_terminates_its_process_group(self) -> None:
         work_dir = self.private_dir / "posix-group-timeout-work"
