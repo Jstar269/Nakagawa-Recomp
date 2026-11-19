@@ -282,9 +282,11 @@ class LockHelperTests(MatrixTestCase):
 # writers start together, then makes its updates: "note" appends probes_run lines through note_launch,
 # "count" increments its own field through the shared writer, "read" reads the lock without the writer lock
 # until that field reaches ``count`` and fails on any read error, and "hold" takes the writer lock and keeps it
-# until stdin closes (or the process is killed).
+# until stdin closes (or the process is killed). A writer pauses up to 2 ms between its updates, as real
+# writers do (the writer lock is not fair: a process updating back to back can hold off the other until it
+# stops with HARDWARE_LOCK_WRITER_TIMEOUT); the updates of the two processes still overlap throughout.
 _LOCK_WRITER_PROCESS = """
-import sys, time
+import random, sys, time
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from tools.psp_oracle import oracle_matrix as om
@@ -319,6 +321,7 @@ for index in range(count):
         om.note_launch(path, sys.argv[6], f"{label} {index}")
     else:
         om._runner.update_hardware_lock(path, bump)
+    time.sleep(random.uniform(0, 0.002))
 """
 
 

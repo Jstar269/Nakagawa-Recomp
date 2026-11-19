@@ -3299,7 +3299,7 @@ def _write_campaign_json(path: Path, value: dict[str, object]) -> None:
 HARDWARE_LOCK_WRITER_SUFFIX = ".writer"
 HARDWARE_LOCK_WRITER_TIMEOUT_SECONDS = 10.0
 HARDWARE_LOCK_SHARING_RETRY_SECONDS = 1.0
-_HARDWARE_LOCK_WRITER_POLL_SECONDS = 0.01
+_HARDWARE_LOCK_WRITER_POLL_SECONDS = 0.002
 
 
 def _retry_windows_sharing_violation(action: Callable[[], Any]) -> Any:
@@ -3422,7 +3422,9 @@ def hardware_lock_writer(
 
     The wait is bounded: a writer that cannot take the lock within ``timeout_seconds`` (default
     ``HARDWARE_LOCK_WRITER_TIMEOUT_SECONDS``) stops with
-    ``HardwareLockError("HARDWARE_LOCK_WRITER_TIMEOUT")`` and writes nothing.
+    ``HardwareLockError("HARDWARE_LOCK_WRITER_TIMEOUT")`` and writes nothing. The lock is not fair: a
+    waiter polls, so a process that writes back to back can hold it off until that bound. Lock writers
+    update a few times per launch, far below that.
     """
 
     if timeout_seconds is None:
