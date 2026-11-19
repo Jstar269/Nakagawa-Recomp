@@ -28,6 +28,7 @@ read anywhere.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import hashlib
 import json
@@ -118,6 +119,12 @@ def _glyph_map(glyphs: tuple[Glyph, ...]) -> dict[int, Glyph]:
 def _untrimmed(left: int, top: int, width: int, height: int, samples: tuple[int, ...]):
     """Stands in for ``ttf2pgf._trim_to_ink`` to convert as before rule 15: the raster box unchanged."""
     return left, top, width, height, samples
+
+
+def _without_vertical(glyphs: list, **_: object) -> list:
+    """Stands in for ``ttf2pgf._vertical_metrics`` to convert as before rule 16: a vertical advance
+    of 0 and the writer's default vertical bearings."""
+    return [dataclasses.replace(glyph, advance_y=0) for glyph in glyphs]
 
 
 def _clusters(samples: list[int], row: int, width: int) -> list[int]:
@@ -846,7 +853,8 @@ class IntegerRasterEquivalenceTests(unittest.TestCase):
     def test_latin_project_font_output_is_pinned(self) -> None:
         # The digest the converter has produced for the Latin project font since #1309's build, with
         # the raster box as it was before rule 15's ink trim: the integer arithmetic must reproduce
-        # it byte for byte. The second digest is the same font cut to its ink (converter 0.7.0).
+        # it byte for byte. The second digest is the same font cut to its ink (converter 0.7.0), the
+        # third that font with the console's vertical metrics (rule 16, converter 0.8.0).
         fixture = ROOT / "tests" / "fixtures" / "fonts" / "mplus1p"
 
         def make() -> ttf2pgf.Conversion:
@@ -860,12 +868,16 @@ class IntegerRasterEquivalenceTests(unittest.TestCase):
                 font_name="Nakagawa Open Latin", font_type="Regular",
             )
 
-        with mock.patch.object(ttf2pgf, "_trim_to_ink", _untrimmed):
-            whole = make()
+        with mock.patch.object(ttf2pgf, "_vertical_metrics", _without_vertical):
+            with mock.patch.object(ttf2pgf, "_trim_to_ink", _untrimmed):
+                whole = make()
+            trimmed = make()
         self.assertEqual(hashlib.sha256(whole.image).hexdigest(),
                          "e10068b52f117295792fe29698a97ab52faedaac1aabfee59a8cf498437b1d15")
-        self.assertEqual(hashlib.sha256(make().image).hexdigest(),
+        self.assertEqual(hashlib.sha256(trimmed.image).hexdigest(),
                          "532bfec6aa133cb323a3cc11b136d31449270ec7058e96a843c4d6e74af04057")
+        self.assertEqual(hashlib.sha256(make().image).hexdigest(),
+                         "5c4e76bfbeec133dbae3eb2894cae1a6d34fa20c35537a536d2bb1177087c425")
 
 
 def _format4_subtable(segments: list[tuple[int, int, int]]) -> bytes:
@@ -1259,6 +1271,58 @@ class ReaderRoundTripTests(unittest.TestCase):
         )
         self.assertTrue(any(glyph.samples), "the composite glyph has ink")
 
+    def _vertical_fields(self, conversion: ttf2pgf.Conversion, probe: list[int]) -> dict[int, dict[str, int]]:
+        """The character information's 26.6 metrics (0x10-0x37) the reader returns for each drawn code."""
+        lines = self._read_back(conversion.image, probe)
+        self.assertEqual(lines[0], "open ok")
+        names = ("width", "height", "ascender", "descender", "bearing_hx", "bearing_hy", "bearing_vx",
+                 "bearing_vy", "advance_h", "advance_v")
+        fields = {}
+        for index, code in enumerate(probe):
+            char_line = lines[2 + index * 2].split(" ")
+            self.assertEqual(char_line[2], "1", f"U+{code:04X} presence")
+            fields[code] = dict(zip(names, struct.unpack_from("<10i", bytes.fromhex(char_line[3]), 0x10), strict=True))
+        return fields
+
+    def test_vertical_fields_follow_the_console_rule(self) -> None:
+        """#1300 (rule 16): the stand-ins wrote vertical bearing X as the box's left edge plus half
+        the advance, vertical bearing Y as the box's top and a vertical advance of 0. Every console
+        font centres the box on the vertical origin (bearing X minus half the width); its vertical
+        advance is a fraction of the em; its Latin and Korean fonts put each glyph's bearing Y at the
+        margin between that advance and the ascender-to-descender height, and its Japanese font at
+        the distance from 0.88 em above the baseline down to the glyph's top."""
+        data = FONT.read_bytes()
+        pin = load_pin(PIN, data)
+        probe = [0x48, 0x67, 0x2E, 0x69, 0x2D]
+        common = {"input_path": str(FONT), "output_path": "converted.pgf", "codes": DEFAULT_CODES, "ppem": 20,
+                  "pin": pin, "nominal_size_26_6": 648, "resolution_26_6": 8192}
+        # The em is 10.125 points at 128 dpi: 18 px, 1152 in 26.6. Without an option the vertical
+        # advance is one em and bearing Y the margin above the ascender.
+        plain = convert(data, **common, header_ascender_26_6=863, header_descender_26_6=-196)
+        for code, info in self._vertical_fields(plain, probe).items():
+            with self.subTest(rule="default", code=f"U+{code:04X}"):
+                self.assertEqual(info["bearing_vx"], -(info["width"] // 2))
+                self.assertEqual(info["advance_v"], 1152)
+                self.assertEqual(info["bearing_vy"], (1152 - (863 + 196)) // 2)
+        latin = convert(data, **common, header_ascender_26_6=863, header_descender_26_6=-196,
+                        vertical_advance=950)
+        for code, info in self._vertical_fields(latin, probe).items():
+            with self.subTest(rule="margin", code=f"U+{code:04X}"):
+                self.assertEqual(info["bearing_vx"], -(info["width"] // 2))
+                self.assertEqual(info["advance_v"], 1094, "950/1000 of 1152, rounded")
+                self.assertEqual(info["bearing_vy"], (1094 - (863 + 196)) // 2)
+        self.assertEqual(struct.unpack_from("<i", latin.image, 0xF0)[0], 1094, "header vertical advance")
+        self.assertEqual(latin.manifest["parameters"]["vertical_advance_thousandths"], 950)
+
+        ideographic = convert(data, **common, vertical_origin=880)
+        for code, info in self._vertical_fields(ideographic, probe).items():
+            with self.subTest(rule="origin", code=f"U+{code:04X}"):
+                self.assertEqual(info["bearing_vx"], -(info["width"] // 2))
+                self.assertEqual(info["advance_v"], 1152, "the default is one em")
+                self.assertEqual(info["bearing_vy"], 1014 - info["bearing_hy"], "880/1000 of 1152 is 1013.76")
+        self.assertEqual(ideographic.manifest["parameters"]["vertical_origin_thousandths"], 880)
+        self.assertNotIn("vertical_advance_thousandths", ideographic.manifest["parameters"])
+
     def _render(self, conversion: ttf2pgf.Conversion, text: str) -> dict[tuple[int, int], int]:
         """Draw ``text`` from what the reader returns: each bitmap at the pen plus its bitmap left
         and top (CharInfo 0x08 and 0x0C), the pen moved by the advance. Keys are pixels (x right,
@@ -1570,6 +1634,7 @@ _CONVERT_FLAGS = {
     "--resolution": "resolution_26_6", "--header-ascender": "header_ascender_26_6",
     "--header-descender": "header_descender_26_6", "--tracking": "tracking",
     "--digit-advance": "digit_advance_26_6", "--snap-overshoot": "snap_overshoot", "--scale-x": "scale_x",
+    "--vertical-advance": "vertical_advance", "--vertical-origin": "vertical_origin",
 }
 
 
@@ -1672,6 +1737,13 @@ class ProjectLatinStrikeTests(unittest.TestCase):
                 conversion = self._convert(index)
                 field = conversion.image[0x75:0x75 + 64].split(b"\0", 1)[0].decode("ascii")
                 self.assertEqual(field, LATIN_FACES[index % 8][1])
+                # #1300, rule 16: the console's vertical advance, 0.950 em of the larger size (18 px)
+                # and 0.917 em of the smaller (7 points at 128 dpi), and the margin above the
+                # ascender as every glyph's vertical bearing Y.
+                advance_y, margin = (1094, 17) if index < 8 else (730, 11)
+                self.assertEqual(struct.unpack_from("<i", conversion.image, 0xF0)[0], advance_y)
+                for glyph in conversion.glyphs:
+                    self.assertEqual((glyph.advance_y, glyph.y_top), (advance_y, margin))
 
     def test_each_index_meets_the_console_line_widths(self) -> None:
         for index, (sentence, menu) in enumerate(self.LINES):
@@ -1899,7 +1971,7 @@ class OvershootSnapTests(CliRefusalMixin):
 
     def test_the_option_is_recorded_and_absent_when_off(self) -> None:
         conversion = self._convert(13, snap_overshoot=3)
-        self.assertEqual(conversion.manifest["converter"]["version"], "0.7.0")
+        self.assertEqual(conversion.manifest["converter"]["version"], "0.8.0")
         self.assertEqual(conversion.manifest["parameters"]["snap_overshoot"], {
             "unit": "sub-sample (1/8 pixel)", "threshold": 3,
             "zones": {"baseline": 0, "x_height": 1082, "cap_height": 1409},
@@ -1966,9 +2038,12 @@ class ProjectCjkSizeTests(unittest.TestCase):
                                    font_name="Nakagawa Open Japanese")
         self.assertEqual(struct.unpack_from("<iiii", conversion.image, 0x24), (648, 648, 8192, 8192))
         self.assertEqual(struct.unpack_from("<ii", conversion.image, 0xD4), (1013, -139))
+        # #1300, rule 16: one em down, from an origin 0.88 em above the baseline.
+        self.assertEqual(struct.unpack_from("<i", conversion.image, 0xF0)[0], 18 * 64)
         for glyph in conversion.glyphs:
             with self.subTest(code=f"U+{glyph.code:04X}"):
                 self.assertEqual(glyph.advance_x, 18 * 64)
+                self.assertEqual((glyph.advance_y, glyph.y_top), (18 * 64, 1014 - cast(int, glyph.y_base)))
 
     def test_korean_font_is_set_at_ten_point_one_two_five(self) -> None:
         hangul = set(ttf2pgf.ks_x_1001_korean_code_points().codes) & set(range(0xAC00, 0xD7A4))
@@ -1977,6 +2052,8 @@ class ProjectCjkSizeTests(unittest.TestCase):
                                    font_name="Nakagawa Open Korean")
         self.assertEqual(struct.unpack_from("<iiii", conversion.image, 0x24), (648, 648, 8192, 8192))
         self.assertEqual(struct.unpack_from("<ii", conversion.image, 0xD4), (1000, -250))
+        # #1300, rule 16: 1.185 em down, bearing Y at the margin above the ascender.
+        self.assertEqual({(glyph.advance_y, glyph.y_top) for glyph in conversion.glyphs}, {(1365, 57)})
         average = sum(cast(int, glyph.advance_x) for glyph in conversion.glyphs) / 64 / len(conversion.glyphs)
         self.assertLessEqual(abs(average - 18.356), 0.25)
 
@@ -2072,6 +2149,27 @@ class SpacingAndFallbackOptionTests(CliRefusalMixin):
             self.assertEqual(caught.exception.reason, "scale-x-out-of-range")
         self.assert_cli_refused("scale-x-out-of-range", self.tmp / "out.pgf", FONT, "--codes", "0x48-0x48",
                                 "--scale-x", "1251")
+
+    def test_vertical_options_cli_match_the_api_and_misuse_is_refused(self) -> None:
+        output = self.tmp / "vertical.pgf"
+        result = _cli(output, FONT, "--codes", "0x30-0x48", "--ppem", "13", "--vertical-advance", "917",
+                      "--vertical-origin", "880")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            output.read_bytes(),
+            self._convert(vertical_advance=917, vertical_origin=880, pin=None, output_path=str(output)).image,
+        )
+        for kwargs in (
+            {"vertical_advance": ttf2pgf.MIN_VERTICAL - 1},
+            {"vertical_advance": ttf2pgf.MAX_VERTICAL + 1},
+            {"vertical_origin": ttf2pgf.MIN_VERTICAL - 1},
+            {"vertical_origin": True},
+        ):
+            with self.subTest(**kwargs), self.assertRaises(TtfConvertError) as caught:
+                self._convert(**kwargs)
+            self.assertEqual(caught.exception.reason, "vertical-metric-out-of-range")
+        self.assert_cli_refused("vertical-metric-out-of-range", self.tmp / "out.pgf", FONT, "--codes", "0x48-0x48",
+                                "--vertical-advance", "0")
 
     def test_spacing_options_out_of_range_are_refused(self) -> None:
         for kwargs, reason in (

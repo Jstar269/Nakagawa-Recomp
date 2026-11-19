@@ -39,7 +39,7 @@ import math
 import re
 import struct
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -55,7 +55,7 @@ except ImportError:  # direct script execution
     import pgf_writer  # type: ignore[no-redef]
 
 CONVERTER_NAME = "ttf2pgf"
-CONVERTER_VERSION = "0.7.0"
+CONVERTER_VERSION = "0.8.0"
 SPEC_PATH = "docs/cleanroom/PGF_CONVERTER_SPEC.md"
 PIN_SCHEMA = "font-pin/v1"
 
@@ -98,6 +98,11 @@ MAX_SNAP_OVERSHOOT = SUPERSAMPLE
 SCALE_X_NEUTRAL = 1000
 MIN_SCALE_X = 800
 MAX_SCALE_X = 1250
+#: Rule 16: the vertical advance and the vertical origin are given in thousandths of the em the
+#: header declares (its nominal size at its resolution); one em by default.
+VERTICAL_ADVANCE_DEFAULT = 1000
+MIN_VERTICAL = 1
+MAX_VERTICAL = 2000
 SNAP_CAP_REFERENCE = 0x48
 SNAP_X_REFERENCE = 0x78
 DEFAULT_FONT_NAME = "Nakagawa Open Latin"
@@ -1926,6 +1931,8 @@ def convert(
     fallback_pin: SourcePin | None = None,
     snap_overshoot: int = 0,
     scale_x: int = SCALE_X_NEUTRAL,
+    vertical_advance: int | None = None,
+    vertical_origin: int | None = None,
 ) -> Conversion:
     """Convert one pinned TrueType font into a PGF image plus its manifest.
 
@@ -1937,7 +1944,8 @@ def convert(
     code points the first lacks. ``snap_overshoot`` sets round letters' overshoots of less than that
     many sub-samples on the flat baseline, x-height and cap height (spec section 3, rule 13).
     ``scale_x`` widens (over 1000) or narrows outlines and advances by that many thousandths
-    (rule 14). Every stage
+    (rule 14). ``vertical_advance`` and ``vertical_origin`` set the vertical metrics (rule 16), in
+    thousandths of the em the header declares. Every stage
     validates before the next runs; the returned bytes are final. Raises
     :class:`TtfConvertError` naming the refusal on any malformed, unsupported, or
     policy-violating input.
@@ -1997,6 +2005,14 @@ def convert(
             "scale-x-out-of-range",
             f"--scale-x {scale_x!r} is outside {MIN_SCALE_X}..{MAX_SCALE_X} thousandths",
         )
+    for label, value in (("--vertical-advance", vertical_advance), ("--vertical-origin", vertical_origin)):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or not MIN_VERTICAL <= value <= MAX_VERTICAL
+        ):
+            raise _refuse(
+                "vertical-metric-out-of-range",
+                f"{label} {value!r} is outside {MIN_VERTICAL}..{MAX_VERTICAL} thousandths of the em",
+            )
     if (fallback_data is None) != (fallback_path is None):
         raise _refuse("conflicting-parameters", "a fallback font needs both its bytes and its path")
     if fallback_pin is not None and fallback_data is None:
@@ -2089,7 +2105,6 @@ def convert(
                 adjust_x=left,
                 adjust_y=top,
                 advance_x=advance_x,
-                advance_y=0,
                 dimension_width=width * pgf_writer.POINTS,
                 dimension_height=height * pgf_writer.POINTS,
                 x_left=left * pgf_writer.POINTS,
@@ -2097,12 +2112,22 @@ def convert(
             )
         )
 
+    nominal_em_26_6 = ppem * 64 if nominal_size_26_6 is None else nominal_size_26_6
+    glyphs = _vertical_metrics(
+        glyphs,
+        nominal_em_26_6=nominal_em_26_6,
+        resolution_26_6=resolution_26_6,
+        header_extents=(header_ascender_26_6, header_descender_26_6),
+        vertical_advance=VERTICAL_ADVANCE_DEFAULT if vertical_advance is None else vertical_advance,
+        vertical_origin=vertical_origin,
+    )
+
     try:
         image = pgf_writer.build_pgf(
             glyphs,
             font_name=font_name,
             font_type=font_type,
-            nominal_em_26_6=ppem * 64 if nominal_size_26_6 is None else nominal_size_26_6,
+            nominal_em_26_6=nominal_em_26_6,
             resolution_26_6=resolution_26_6,
             ascender_26_6=header_ascender_26_6,
             descender_26_6=header_descender_26_6,
@@ -2139,6 +2164,7 @@ def convert(
         digit_advance_26_6=digit_advance_26_6,
         snap_overshoot=snap_overshoot,
         scale_x=scale_x,
+        vertical=(vertical_advance, vertical_origin),
         fallback=None if fallback is None else {
             "data": fallback_data, "font": fallback, "path": fallback_path, "pin": fallback_pin,
             "codes": planner.fallback_codes,
@@ -2151,6 +2177,60 @@ def convert(
         ppem=ppem,
         codes=(first, last),
     )
+
+
+def _em_fraction_26_6(nominal_em_26_6: int, resolution_26_6: int, thousandths: int) -> int:
+    """``thousandths`` of the em the header declares, in 26.6 px, rounded half up.
+
+    The em is the nominal size (26.6 points) at the resolution (26.6 dpi): ``size * dpi / 72`` px,
+    so ``nominal * resolution / (72 * 64)`` in 26.6 px; 10.125 points at 128 dpi is 1152 (18 px).
+    """
+    numerator = nominal_em_26_6 * resolution_26_6 * thousandths
+    denominator = 72 * 64 * 1000
+    return (2 * numerator + denominator) // (2 * denominator)
+
+
+def _vertical_metrics(
+    glyphs: list[pgf_writer.Glyph],
+    *,
+    nominal_em_26_6: int,
+    resolution_26_6: int,
+    header_extents: tuple[int | None, int | None],
+    vertical_advance: int,
+    vertical_origin: int | None,
+) -> list[pgf_writer.Glyph]:
+    """Rule 16: set each glyph's vertical bearings and advance as the console fonts do.
+
+    Bearing X centres the box on the vertical origin: minus half its 26.6 width, rounded down.
+    The advance is ``vertical_advance`` thousandths of the em. Bearing Y is, with
+    ``vertical_origin``, the distance from that many thousandths of the em above the baseline down
+    to the glyph's top; without it, half the room the advance leaves beyond the header's
+    ascender-to-descender height, the same for every glyph.
+    """
+    advance_y = _em_fraction_26_6(nominal_em_26_6, resolution_26_6, vertical_advance)
+    origin = margin = 0
+    if vertical_origin is not None:
+        origin = _em_fraction_26_6(nominal_em_26_6, resolution_26_6, vertical_origin)
+    else:
+        # The header's extents: as given, else the glyphs' extremes as the writer derives them.
+        ascender, descender = header_extents
+        if ascender is None:
+            ascender = max(glyph.y_base or 0 for glyph in glyphs)
+        if descender is None:
+            descender = min((glyph.y_base or 0) - glyph.height * pgf_writer.POINTS for glyph in glyphs)
+        margin = (advance_y - (ascender - descender)) // 2
+    out = []
+    for glyph in glyphs:
+        y_base = glyph.y_base or 0
+        out.append(
+            replace(
+                glyph,
+                advance_y=advance_y,
+                x_center=-(glyph.width * pgf_writer.POINTS // 2),
+                y_top=origin - y_base if vertical_origin is not None else margin,
+            )
+        )
+    return out
 
 
 def _read_header_fields(image: bytes) -> dict:
@@ -2197,6 +2277,7 @@ def _build_manifest(
     digit_advance_26_6: int | None = None,
     snap_overshoot: int = 0,
     scale_x: int = SCALE_X_NEUTRAL,
+    vertical: tuple[int | None, int | None] = (None, None),
     fallback: dict | None = None,
 ) -> dict:
     first, last = codes
@@ -2240,6 +2321,11 @@ def _build_manifest(
     # Added in converter 0.6.0, likewise only when used.
     if scale_x != SCALE_X_NEUTRAL:
         parameters["scale_x_thousandths"] = scale_x
+    # Added in converter 0.8.0, likewise only when given.
+    if vertical[0] is not None:
+        parameters["vertical_advance_thousandths"] = vertical[0]
+    if vertical[1] is not None:
+        parameters["vertical_origin_thousandths"] = vertical[1]
     manifest = {
         "converter": {
             "name": CONVERTER_NAME,
@@ -2436,6 +2522,18 @@ def _main(argv: list[str]) -> int:
         help=f"scale outlines and advances horizontally by N/1000 ({MIN_SCALE_X}..{MAX_SCALE_X}, "
         f"default {SCALE_X_NEUTRAL}: off)",
     )
+    parser.add_argument(
+        "--vertical-advance",
+        type=int,
+        help=f"vertical advance in thousandths of the header's em ({MIN_VERTICAL}..{MAX_VERTICAL}, "
+        f"default {VERTICAL_ADVANCE_DEFAULT})",
+    )
+    parser.add_argument(
+        "--vertical-origin",
+        type=int,
+        help="put each glyph's vertical bearing Y below this many thousandths of the em above the "
+        f"baseline ({MIN_VERTICAL}..{MAX_VERTICAL}; default: the margin above the ascender)",
+    )
     parser.add_argument("--fallback", type=Path, help="second .ttf drawing only the code points the input lacks")
     parser.add_argument("--fallback-pin", type=Path, help="font-pin/v1 JSON for --fallback")
     parser.add_argument(
@@ -2513,6 +2611,8 @@ def _main(argv: list[str]) -> int:
             fallback_pin=fallback_pin,
             snap_overshoot=args.snap_overshoot,
             scale_x=args.scale_x,
+            vertical_advance=args.vertical_advance,
+            vertical_origin=args.vertical_origin,
         )
         manifest = manifest_bytes(conversion.manifest)
     except TtfConvertError as exc:
