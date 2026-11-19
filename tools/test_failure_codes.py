@@ -181,6 +181,9 @@ PLAYER_NOT_CODES = {
     "READY", "ERROR", "GET",
     # environment variables without a project prefix
     "APPDATA", "PATH", "PYTHON", "USER", "USERNAME", "USERPROFILE",
+    # the second half of an environment variable's name: nk_launch.c writes SR_CHEATS_FILE as
+    # two adjacent literals, the marker it looks for in a package's executable
+    "FILE",
     # disc folders, PARAM.SFO keys, module and folder names, file magic and disc-format names
     "EXTRACTED", "KMODULE", "PPSSPP", "SYSDIR", "TEST", "TITLE", "USRDIR", "CD001", "CISO", "CSO",
     "ELF", "IHDR", "ZISO", "ZSO",
