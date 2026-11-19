@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -54,6 +55,9 @@ static inline int sr_vfs_is_dos_device_name(const char *name, size_t len) {
     /* Fast-path direct length checks to avoid 22+ strlen() calls in a loop.
      * Length 3 devices: CON, PRN, AUX, NUL.
      * Length 4 devices: COM1-COM9, LPT1-LPT9.
+     * Length 5 devices: COM and LPT followed by a superscript one, two or three
+     *                   (U+00B9, U+00B2, U+00B3; two bytes each in UTF-8), which
+     *                   Microsoft's file-naming rules also list as device names.
      * Length 6 device:  CONIN$
      * Length 7 device:  CONOUT$ */
     if (base_len == 3) {
@@ -66,6 +70,12 @@ static inline int sr_vfs_is_dos_device_name(const char *name, size_t len) {
         return ((sr_vfs_strnicmp(name, "COM", 3) == 0 ||
                  sr_vfs_strnicmp(name, "LPT", 3) == 0) &&
                 (name[3] >= '1' && name[3] <= '9'));
+    }
+    if (base_len == 5) {
+        unsigned char lead = (unsigned char)name[3], trail = (unsigned char)name[4];
+        return ((sr_vfs_strnicmp(name, "COM", 3) == 0 ||
+                 sr_vfs_strnicmp(name, "LPT", 3) == 0) &&
+                lead == 0xC2u && (trail == 0xB9u || trail == 0xB2u || trail == 0xB3u));
     }
     if (base_len == 6) {
         return (sr_vfs_strnicmp(name, "CONIN$", 6) == 0);
@@ -97,10 +107,16 @@ static inline int sr_vfs_is_safe_component(const char *name, size_t len) {
     return 1;
 }
 
-/* Host-neutral VFS path join helper (Issue #19).
+/* Host-neutral VFS path join helpers (Issue #19): sr_vfs_host_dir_path for a
+ * guest path that may carry a device, sr_vfs_host_join_rel for a relative path
+ * whose device a caller has already removed.
  *
  * Concatenates `root` directory and relative `guest` path:
- * - Strips leading device specifier (e.g. "ms0:") and leading slashes/backslashes from `guest`.
+ * - Strips a leading device specifier (e.g. "ms0:": a ':' before the first '/' or '\\')
+ *   and leading slashes/backslashes from `guest`. Any later ':' is component text and
+ *   is refused below; a caller that has already removed the device (sr_ms0_resolve)
+ *   calls sr_vfs_host_join_rel, which strips nothing, so a component such as
+ *   "DATA.BIN:stream" can never be cut down to "stream".
  * - Rejects a ".." path *component* (directory traversal), returning 0. A literal ".."
  *   between separators (or at either end) escapes the root and is refused; ".." embedded
  *   inside a name ("file..bak", "...") is an ordinary filename and is allowed.
@@ -113,12 +129,10 @@ static inline int sr_vfs_is_safe_component(const char *name, size_t len) {
  * - Converts guest slashes to host separators (`sep`).
  * - Returns the resulting length on success (> 0), or 0 on error / overflow.
  */
-static inline int sr_vfs_host_dir_path(const char *root, const char *guest, char *out, size_t max, char sep) {
-    if (!root || !guest || !out || max == 0) return 0;
+static inline int sr_vfs_host_join_rel(const char *root, const char *rel, char *out, size_t max, char sep) {
+    if (!root || !rel || !out || max == 0) return 0;
 
-    const char *p = strchr(guest, ':');
-    if (p) p++;
-    else p = guest;
+    const char *p = rel;
     while (*p == '/' || *p == '\\') p++;
 
     /* Reject only a ".." *component* -- a maximal run of non-separator characters that
@@ -170,12 +184,21 @@ static inline int sr_vfs_host_dir_path(const char *root, const char *guest, char
     return (int)n;
 }
 
-/* Host-neutral flat-name mapping for the writable host-backed IoFileMgr route
- * (hle.c host_path_alloc; counterpart to sr_vfs_host_dir_path).
+static inline int sr_vfs_host_dir_path(const char *root, const char *guest, char *out, size_t max, char sep) {
+    if (!root || !guest || !out || max == 0) return 0;
+    size_t device_len = strcspn(guest, ":/\\");
+    const char *rel = guest[device_len] == ':' ? guest + device_len + 1u : guest;
+    return sr_vfs_host_join_rel(root, rel, out, max, sep);
+}
+
+/* Host-neutral flat-name mapping for the legacy SR_FSDIR store. Its only caller
+ * is the copy-only legacy import (hle_host.c ms0_try_legacy_flat_import), which
+ * finds a file the old flat store wrote; the writable route itself
+ * (host_path_alloc) resolves through sr_ms0_resolve.
  *
- * The writable storage route does not mirror the guest directory tree: every
- * guest path is flattened into ONE host filename directly beneath `root`, so
- * no guest byte can select a host directory, drive, or device. The mapping is
+ * The legacy store did not mirror the guest directory tree: every guest path
+ * was flattened into ONE host filename directly beneath `root`, so no guest
+ * byte can select a host directory, drive, or device. The mapping is
  * exactly '/' '\\' ':' and ' ' -> '_'; every other byte passes through.
  *
  * The only guest strings whose flattened form is still a directory reference
@@ -216,12 +239,42 @@ static inline int sr_vfs_host_flat_path(const char *root, const char *guest, cha
 
 /* Canonical host Memory Stick root for ordinary sceIo* I/O and savedata
  * (issue #334). Both routes share this root and sr_ms0_resolve so one guest
- * path always maps to one host path. getenv is used (not a Win32-only helper)
- * so the function stays host-neutral. */
+ * path always maps to one host path.
+ *
+ * The root is UTF-8 on every host: every consumer converts it as UTF-8
+ * (sr_vfs_canonical_root, the verified opens, sr_wide_path_alloc). On Windows
+ * the narrow CRT environment (getenv) holds the value in the ANSI code page,
+ * which differs from UTF-8 for any character outside ASCII, such as the user
+ * name in a per-user path the launcher sets. So Windows reads the wide process
+ * environment and converts it. A value that cannot be read or converted (longer
+ * than the verified-path buffers, or not valid UTF-16) is reported and replaced
+ * by a name Win32 refuses ('<' is not a legal file-name character), so every
+ * Memory Stick operation fails closed instead of using another folder. The
+ * returned string is per thread and stays valid until this thread calls again. */
+#ifdef _WIN32
+#define SR_MS0_ROOT_WIDE_MAX (MAX_PATH * 2)
+static inline const char *sr_ms0_root(void) {
+    static _Thread_local char utf8[SR_MS0_ROOT_WIDE_MAX * 3 + 1];
+    static volatile LONG reported;
+    wchar_t wide[SR_MS0_ROOT_WIDE_MAX];
+    DWORD n = GetEnvironmentVariableW(L"SR_MEMSTICK", wide, SR_MS0_ROOT_WIDE_MAX);
+    if (n == 0) return "memstick";   /* unset, or set to the empty string */
+    if (n < SR_MS0_ROOT_WIDE_MAX &&
+        WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1, utf8, (int)sizeof(utf8),
+                            NULL, NULL) > 0)
+        return utf8;
+    if (InterlockedExchange(&reported, 1) == 0)
+        fprintf(stderr, "SR_MEMSTICK: the Memory Stick folder cannot be used (longer than %d "
+                        "characters, or not a valid name); every Memory Stick operation fails\n",
+                SR_MS0_ROOT_WIDE_MAX - 1);
+    return "<SR_MEMSTICK unusable>";
+}
+#else
 static inline const char *sr_ms0_root(void) {
     const char *r = getenv("SR_MEMSTICK");
     return (r && *r) ? r : "memstick";
 }
+#endif
 
 enum sr_ms0_kind {
     SR_MS0_FOREIGN = 0,
@@ -229,9 +282,9 @@ enum sr_ms0_kind {
 };
 
 /* Classify a guest path for the unified Memory Stick namespace BEFORE any
- * host-join helper runs: sr_vfs_host_dir_path strips ANY ':', so a foreign
- * device (disc0:, kemu0:, ...) must be rejected first rather than flattened
- * into the ms root. Device-less paths are treated as owned relatives under
+ * host-join helper runs: sr_vfs_host_dir_path strips any device prefix, so a
+ * foreign device (disc0:, kemu0:, ...) must be rejected first rather than
+ * flattened into the ms root. Device-less paths are treated as owned relatives under
  * the root (legacy callers pass bare "PSP/..." strings).
  * Owned paths advance *rel to the first byte after the device colon. */
 static inline int sr_ms0_classify(const char *guest, const char **rel) {
@@ -270,7 +323,7 @@ static inline int sr_ms0_resolve(const char *root, const char *guest, char *out,
         out[root_len] = '\0';
         return (int)root_len;
     }
-    return sr_vfs_host_dir_path(root, rel, out, max, sep);
+    return sr_vfs_host_join_rel(root, rel, out, max, sep);
 }
 
 #ifdef _WIN32
@@ -281,6 +334,26 @@ static inline int sr_ms0_resolve(const char *root, const char *guest, char *out,
 #ifndef FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
 #define FILE_DISPOSITION_FLAG_POSIX_SEMANTICS 0x00000002
 #endif
+
+/* Strict UTF-8 -> UTF-16 with every '/' turned into '\\'. Returns the allocated
+ * string (the caller frees it) and its length in wchar_t including the
+ * terminator in *len_out, or NULL when the input is not valid UTF-8 or memory
+ * runs out. */
+static inline wchar_t *sr_vfs_utf8_to_wide_slashes(const char *utf8, int *len_out) {
+    if (len_out) *len_out = 0;
+    if (!utf8) return NULL;
+    int need = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, NULL, 0);
+    if (need <= 0) return NULL;
+    wchar_t *wide = (wchar_t *)malloc((size_t)need * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, wide, need) != need) {
+        free(wide);
+        return NULL;
+    }
+    for (wchar_t *p = wide; *p; p++) if (*p == L'/') *p = L'\\';
+    if (len_out) *len_out = need;
+    return wide;
+}
 
 /* Canonical root identity (Windows).
  *
@@ -308,12 +381,13 @@ static inline int sr_ms0_resolve(const char *root, const char *guest, char *out,
  */
 static inline int sr_vfs_canonical_root(const char *root_utf8, wchar_t *out, size_t cap) {
     if (!root_utf8 || !out || cap == 0) return 0;
-    int need = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, root_utf8, -1, NULL, 0);
-    if (need <= 0 || (size_t)need > cap) return 0;
-    wchar_t *wroot = (wchar_t *)malloc((size_t)need * sizeof(wchar_t));
+    int need = 0;
+    wchar_t *wroot = sr_vfs_utf8_to_wide_slashes(root_utf8, &need);
     if (!wroot) return 0;
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, root_utf8, -1, wroot, need);
-    for (wchar_t *p = wroot; *p; p++) if (*p == L'/') *p = L'\\';
+    if ((size_t)need > cap) {
+        free(wroot);
+        return 0;
+    }
 
     CreateDirectoryW(wroot, NULL);   /* documented F114-4 side effect: bare root only */
     HANDLE h = CreateFileW(wroot, FILE_READ_ATTRIBUTES,
@@ -372,12 +446,8 @@ static inline int sr_vfs_dir_is_contained_wide(const wchar_t *dir, const wchar_t
 /* UTF-8 convenience wrapper around sr_vfs_dir_is_contained_wide. */
 static inline int sr_vfs_dir_is_contained(const char *dir_utf8, const wchar_t *canonical_root) {
     if (!dir_utf8 || !canonical_root) return 0;
-    int need = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, dir_utf8, -1, NULL, 0);
-    if (need <= 0) return 0;
-    wchar_t *wdir = (wchar_t *)malloc((size_t)need * sizeof(wchar_t));
+    wchar_t *wdir = sr_vfs_utf8_to_wide_slashes(dir_utf8, NULL);
     if (!wdir) return 0;
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, dir_utf8, -1, wdir, need);
-    for (wchar_t *p = wdir; *p; p++) if (*p == L'/') *p = L'\\';
 
     int ok = sr_vfs_dir_is_contained_wide(wdir, canonical_root);
     free(wdir);
@@ -485,12 +555,8 @@ static inline int sr_vfs_open_contained_utf8(const char *path_utf8, DWORD desire
                                              const wchar_t *canonical_root, HANDLE *out) {
     if (!path_utf8 || !canonical_root || !out) return 0;
     *out = NULL;
-    int need = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path_utf8, -1, NULL, 0);
-    if (need <= 0) return 0;
-    wchar_t *wpath = (wchar_t *)malloc((size_t)need * sizeof(wchar_t));
+    wchar_t *wpath = sr_vfs_utf8_to_wide_slashes(path_utf8, NULL);
     if (!wpath) return 0;
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path_utf8, -1, wpath, need);
-    for (wchar_t *p = wpath; *p; p++) if (*p == L'/') *p = L'\\';
 
     DWORD err;
     HANDLE h = sr_vfs_open_verified_wide(wpath, desired_access,
@@ -508,10 +574,14 @@ static inline int sr_vfs_open_contained_utf8(const char *path_utf8, DWORD desire
  * Pre-1709 Windows falls back to FileDispositionInfo: deletion is still bound to
  * this exact verified handle (nothing re-resolves the path), but the name only
  * vanishes at CloseHandle -- that visibility window is the documented residual.
- * Returns 1 when the disposition was accepted. */
+ * Returns 1 when the disposition was accepted.
+ *
+ * FILE_DISPOSITION_INFO_EX is a typedef, not a macro, so it cannot gate this
+ * block; the flag macros it needs are defined above whenever the headers lack
+ * them, and the runtime fallback below covers hosts and volumes without it. */
 static inline int sr_vfs_dispose_by_handle(HANDLE h) {
     if (h == INVALID_HANDLE_VALUE) return 0;
-#if defined(FILE_DISPOSITION_INFO_EX)
+#if defined(FILE_DISPOSITION_FLAG_POSIX_SEMANTICS)
     {
         FILE_DISPOSITION_INFO_EX ex;
         ex.Flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
@@ -568,6 +638,7 @@ static inline int sr_vfs_delete_contained_leaf(const char *path_utf8, const wcha
  * then extends a buffer that STARTS as the verified canonical root, so nothing
  * can be created outside the root even while the walk is in progress:
  *   exists as a REPARSE POINT -> reject BEFORE creating anything deeper
+ *   exists, not a directory   -> reject (as the POSIX sr_cd_mkdirs does)
  *   exists                    -> verify by handle, keep walking
  *   missing                   -> create, verify by handle, continue
  * A pre-planted junction therefore causes rejection before any out-of-root
@@ -615,6 +686,8 @@ static inline int sr_vfs_mkdirs_contained(const char *owned_rel_utf8,
             if (!CreateDirectoryW(partial, NULL)) return 0;
         } else if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) {
             return 0;                     /* pre-planted link: reject before descending */
+        } else if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            return 0;                     /* a file holds the name: not a folder */
         }
         if (!sr_vfs_dir_is_contained_wide(partial, canonical_root)) return 0;
     }
