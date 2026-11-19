@@ -128,9 +128,6 @@ nidseq_mine.txt
 # `make run` (docs/WORKSPACE_DOCTOR.md, "Paths outside the output roots").
 /flight-recorder.json*
 /samples.csv
-# tools/test_public_title_isolation.py plants synthetic lookalike manifests in assets/titles
-# for the length of a test; they must never show as untracked candidates.
-/assets/titles/*.nk-test-planted.json
 
 # Local scratch
 /scratch/

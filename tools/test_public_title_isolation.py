@@ -29,6 +29,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
+from nk_core import title_registry
 from nk_core.git_isolation import run_git
 import publication_policy
 import title_catalog_codegen
@@ -59,41 +60,55 @@ def is_tracked(rel_posix: str) -> bool:
     return rel_posix in tracked_paths(rel_posix)
 
 
-#: Suffix of every manifest these tests plant in the checkout. ``.gitignore`` ignores
-#: ``/assets/titles/*.nk-test-planted.json``, so a planted file never shows in ``git status``
-#: as an untracked candidate, even while a test runs or after it is killed.
-PLANTED_SUFFIX = ".nk-test-planted.json"
+def scratch_checkout(case: unittest.TestCase, *pathspecs: str, with_index: bool = False) -> Path:
+    """A temporary copy of this checkout's tracked files, removed when the test ends.
 
+    The exclusion tests are vacuous unless the untracked manifest they must ignore exists where
+    the tools read manifests: ``assets/titles`` of the tree the tool runs in. Planting it in the
+    developer's checkout writes to, and then deletes from, a live tree, so those tests work on
+    this copy instead. Every tool finds its root from its own file, so a tool run from the copy,
+    or one whose ``ROOT`` names the copy, treats it as the whole repository.
 
-def is_ignored(rel_posix: str) -> bool:
-    """True when Git's ignore rules cover the path (``git check-ignore``)."""
-    probe = subprocess.run(["git", "check-ignore", "--quiet", "--no-index", "--", rel_posix],
-                           cwd=str(ROOT), capture_output=True, text=True)
-    if probe.returncode not in (0, 1):
-        raise AssertionError(f"git check-ignore failed for {rel_posix}: {probe.stderr}")
-    return probe.returncode == 0
-
-
-def plant_untracked_manifest(case: unittest.TestCase, name: str, manifest: dict) -> Path:
-    """Put an untracked, Git-ignored manifest in the checkout's assets/titles for one test.
-
-    The exclusion tests are vacuous unless the file they must ignore exists. ``name`` must end
-    in ``PLANTED_SUFFIX``, which ``.gitignore`` covers, so the planted file is ignored by Git
-    and never appears as an untracked candidate. A file of that name already on disk is used
-    as it is and never removed; otherwise the planted file is removed when the test ends.
+    ``pathspecs`` limit the copy; without them it holds every tracked file. The files carry the
+    worktree's bytes, so an uncommitted change to a tool is what the copy runs. ``with_index``
+    also makes the copy a Git repository whose index is this checkout's index, entry for entry:
+    the blobs are read from this repository's object store through an alternates file, and
+    nothing is written to that store.
     """
-    rel = f"assets/titles/{name}"
-    path = ROOT / rel
-    case.assertTrue(name.endswith(PLANTED_SUFFIX), f"{name} must end in {PLANTED_SUFFIX}")
-    case.assertFalse(is_tracked(rel), f"{name} must stay untracked")
-    case.assertTrue(is_ignored(rel), f"{name} must be ignored by .gitignore")
-    try:
-        with path.open("x", encoding="utf-8", newline="\n") as stream:
-            json.dump(manifest, stream, indent=2)
-            stream.write("\n")
-    except FileExistsError:
-        return path
-    case.addCleanup(path.unlink, missing_ok=True)
+    tmp = tempfile.TemporaryDirectory(prefix="title-isolation-")
+    case.addCleanup(tmp.cleanup)
+    scratch = Path(tmp.name).resolve()
+    rels = sorted(tracked_paths(*pathspecs))
+    case.assertTrue(rels, f"no tracked file matches {pathspecs}")
+    for rel in rels:
+        source = ROOT / rel
+        if not source.is_file():
+            continue  # tracked but deleted in the worktree: absent from the copy as well
+        target = scratch / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    if with_index:
+        run_git(["init", "--quiet"], cwd=scratch, capture_output=True, check=True)
+        objects = Path(run_git(["rev-parse", "--git-path", "objects"], cwd=ROOT,
+                               capture_output=True, text=True, check=True).stdout.strip())
+        if not objects.is_absolute():
+            objects = ROOT / objects
+        alternates = scratch / ".git" / "objects" / "info" / "alternates"
+        alternates.parent.mkdir(parents=True, exist_ok=True)
+        alternates.write_text(objects.resolve().as_posix() + "\n", encoding="utf-8", newline="\n")
+        entries = run_git(["ls-files", "--stage", "-z", "--", *pathspecs], cwd=ROOT,
+                          capture_output=True, check=True).stdout
+        run_git(["update-index", "-z", "--index-info"], cwd=scratch, input=entries,
+                capture_output=True, check=True)
+    return scratch
+
+
+def plant_untracked_manifest(scratch: Path, name: str, manifest: dict) -> Path:
+    """Write an untracked manifest into a scratch checkout's ``assets/titles``."""
+    path = scratch / "assets" / "titles" / name
+    with path.open("x", encoding="utf-8", newline="\n") as stream:
+        json.dump(manifest, stream, indent=2)
+        stream.write("\n")
     return path
 
 
@@ -411,13 +426,19 @@ class PublicTitleIsolationTests(unittest.TestCase):
 
     def test_private_overlay_has_zero_effect_on_verify(self) -> None:
         """An untracked private manifest in assets/titles must have zero effect on catalog verify."""
+        # A scratch copy of what --verify reads, with the tool itself: run from the copy, the
+        # tool's default --manifest-dir and --output-dir are the copy's, as in a real checkout.
+        scratch = scratch_checkout(
+            self, "tools/*.py", "assets/public_source_profile.json", "assets/titles/*.json",
+            "src/core/generated/nk_title_catalog.*")
+        cmd = [sys.executable, str(scratch / "tools" / "title_catalog_codegen.py"), "--verify"]
+
         # 1. Clean verify must succeed
-        cmd = [sys.executable, str(ROOT / "tools" / "title_catalog_codegen.py"), "--verify"]
-        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(scratch))
         self.assertEqual(proc.returncode, 0, f"--verify failed on baseline: {proc.stderr}")
 
-        # 2. A private overlay where --verify reads manifests: the checkout's assets/titles,
-        # untracked. Were it read, its id would change the digest and fail the verify.
+        # 2. A private overlay where --verify reads manifests: assets/titles, untracked. Were it
+        # read, its id would change the digest and fail the verify.
         fake_overlay = {
             "schema_version": 1,
             "id": "private-retail-lookalike-v1",
@@ -425,15 +446,14 @@ class PublicTitleIsolationTests(unittest.TestCase):
             "kind": "retail",
             "disc": {"id": UNCATALOGUED_RETAIL_DISC_ID, "region": "EU", "revision_policy": "exact-disc-id"}
         }
-        overlay_path = plant_untracked_manifest(
-            self, "private-overlay-lookalike" + PLANTED_SUFFIX, fake_overlay)
-        self.assertTrue(overlay_path.is_file())
+        overlay_path = plant_untracked_manifest(scratch, "private-overlay-lookalike.json", fake_overlay)
+        self.assertIn(overlay_path, list((scratch / "assets" / "titles").glob("*.json")))
 
-        proc2 = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
+        proc2 = subprocess.run(cmd, capture_output=True, text=True, cwd=str(scratch))
         self.assertEqual(proc2.returncode, 0, f"--verify failed with a private overlay present: {proc2.stderr}")
         self.assertIn("is up to date", proc2.stdout)
         self.assertEqual(proc2.stdout, proc.stdout, "the overlay changed the verified catalog")
-        catalog = (ROOT / "src" / "core" / "generated" / "nk_title_catalog.c").read_text(encoding="utf-8")
+        catalog = (scratch / "src" / "core" / "generated" / "nk_title_catalog.c").read_text(encoding="utf-8")
         self.assertNotIn("private-retail-lookalike-v1", catalog)
 
     def test_overlay_collision_policy(self) -> None:
@@ -485,7 +505,7 @@ class PublicTitleIsolationTests(unittest.TestCase):
 
 # A retail-looking manifest the policy never classified. It is the stand-in for
 # any developer's private title manifest now that the HST manifest is public.
-PRIVATE_LOOKALIKE_NAME = "private-retail-lookalike" + PLANTED_SUFFIX
+PRIVATE_LOOKALIKE_NAME = "private-retail-lookalike.json"
 PRIVATE_LOOKALIKE_REL = f"assets/titles/{PRIVATE_LOOKALIKE_NAME}"
 
 SYNTHETIC_LOOKALIKE = {
@@ -592,15 +612,19 @@ class CollectorHermeticityTests(unittest.TestCase):
         self.assertEqual(ids, sorted(set(ids)), "collector output must be deterministic")
 
     def test_registry_policy_filter_ignores_lookalike(self):
-        lookalike = plant_untracked_manifest(self, PRIVATE_LOOKALIKE_NAME, SYNTHETIC_LOOKALIKE)
-        self.assertTrue(lookalike.is_file())
+        scratch = scratch_checkout(self, "assets/public_source_profile.json", "assets/titles/*.json")
+        titles = scratch / "assets" / "titles"
+        lookalike = plant_untracked_manifest(scratch, PRIVATE_LOOKALIKE_NAME, SYNTHETIC_LOOKALIKE)
+        self.assertIn(lookalike, list(titles.glob("*.json")))
         registry = TitleRegistry(include_defaults=False)
-        registry.load_from_directory(ROOT / "assets" / "titles")
+        # The registry reads the policy from, and keys it on paths relative to, its ROOT: with
+        # ROOT naming the copy, the copy's assets/titles is the repository's.
+        with mock.patch.object(title_registry, "ROOT", scratch):
+            registry.load_from_directory(titles)
         ids = {p.id for p in registry.all_profiles()}
         self.assertNotIn("private-retail-lookalike", ids)
         self.assertIn(PUBLIC_RETAIL_ID, ids)
-        manifest_count = len(list((ROOT / "assets" / "titles").glob("*.json")))
-        self.assertLessEqual(len(ids), manifest_count)
+        self.assertEqual(len(ids), len(tracked_titles()), "every tracked manifest loads, and nothing else")
 
     def test_ambient_glob_sensitivity_mechanism(self):
         """Control: a bare glob does see a planted file, so the exclusions above are not vacuous.
@@ -713,15 +737,28 @@ class PublicationEnforcementTests(unittest.TestCase):
     """Untracked/ignored material stays invisible; staged material must fail."""
 
     def test_publication_audit_ignores_untracked_ignored_lookalike(self):
-        lookalike = plant_untracked_manifest(self, PRIVATE_LOOKALIKE_NAME, SYNTHETIC_LOOKALIKE)
-        self.assertTrue(lookalike.is_file())
+        # The audit runs from a scratch copy of the checkout that carries the same index, so the
+        # lookalikes are on disk in the tree being audited without touching the real checkout.
+        # One is plainly untracked, which only --tracked-only keeps out of the audit; the other
+        # Git also ignores.
+        scratch = scratch_checkout(self, with_index=True)
+        ignored_rel = "assets/titles/private-ignored-lookalike.json"
+        exclude = scratch / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text(f"/{ignored_rel}\n", encoding="utf-8", newline="\n")
+        plant_untracked_manifest(scratch, PRIVATE_LOOKALIKE_NAME, SYNTHETIC_LOOKALIKE)
+        plant_untracked_manifest(scratch, ignored_rel.split("/")[-1], SYNTHETIC_LOOKALIKE)
+        status = run_git(["status", "--porcelain", "--ignored", "--", PRIVATE_LOOKALIKE_REL, ignored_rel],
+                         cwd=scratch, capture_output=True, text=True, check=True)
+        self.assertEqual(status.stdout.splitlines(), [f"?? {PRIVATE_LOOKALIKE_REL}", f"!! {ignored_rel}"],
+                         "the audited tree must hold exactly one untracked and one ignored lookalike")
         proc = subprocess.run(
             [sys.executable, "tools/publish_audit.py", "--tracked-only",
              "--public-scope", "--provenance-self-consistency"],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=600,
+            cwd=str(scratch), capture_output=True, text=True, timeout=600,
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertNotIn(PRIVATE_LOOKALIKE_NAME, proc.stdout + proc.stderr)
+        self.assertNotIn("lookalike.json", proc.stdout + proc.stderr)
 
     def test_staged_private_manifest_is_rejected(self):
         proc = staged_index_audit(
