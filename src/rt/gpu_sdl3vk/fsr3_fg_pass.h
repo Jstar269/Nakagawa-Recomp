@@ -121,7 +121,10 @@ typedef struct {
 
 /* Record the provider's prepare and dispatch. 0, or -1 with nothing recorded and the context as it was
  * when the call is refused (a missing view, a bad slot or layout, a HUD-less colour that does not match
- * the configure, or what fsr3_fg_host refuses). */
+ * the configure, or what fsr3_fg_host refuses). A call that returns 0 has advanced the context (frame
+ * IDs and history) and, the first time, recorded the definition of every internal image and counter;
+ * neither is recorded again, so the command buffer of every call that returns 0 must be submitted.
+ * Dropping one leaves the pass in a state it cannot recover from: destroy it and create a new one. */
 int fsr3_fg_pass_prepare(Fsr3FgPass *p, VkCommandBuffer cmd, const Fsr3FgPassPrepare *f);
 int fsr3_fg_pass_dispatch(Fsr3FgPass *p, VkCommandBuffer cmd, const Fsr3FgPassDispatch *f);
 

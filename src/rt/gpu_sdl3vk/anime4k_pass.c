@@ -149,14 +149,20 @@ static int img_make(Anime4kPass *p, Img *im, int w, int h, VkImageUsageFlags usa
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
     ii.tiling = VK_IMAGE_TILING_OPTIMAL;
     ii.usage = usage;
-    if (p->CreateImage(p->dev, &ii, NULL, &im->image) != VK_SUCCESS) return 0;
+    /* Each handle is stored only once its create succeeded: Vulkan leaves a failed create's output
+       undefined, and img_free destroys whatever is stored. */
+    VkImage image = VK_NULL_HANDLE;
+    if (p->CreateImage(p->dev, &ii, NULL, &image) != VK_SUCCESS) return 0;
+    im->image = image;
     VkMemoryRequirements mr;
     p->GetImageMemoryRequirements(p->dev, im->image, &mr);
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size,
                                  memory_type(p, mr.memoryTypeBits) };
+    VkDeviceMemory memory = VK_NULL_HANDLE;
     if (mai.memoryTypeIndex == UINT32_MAX ||
-        p->AllocateMemory(p->dev, &mai, NULL, &im->memory) != VK_SUCCESS ||
-        p->BindImageMemory(p->dev, im->image, im->memory, 0) != VK_SUCCESS) return 0;
+        p->AllocateMemory(p->dev, &mai, NULL, &memory) != VK_SUCCESS) return 0;
+    im->memory = memory;
+    if (p->BindImageMemory(p->dev, im->image, im->memory, 0) != VK_SUCCESS) return 0;
     VkImageViewCreateInfo vi;
     memset(&vi, 0, sizeof(vi));
     vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -166,7 +172,10 @@ static int img_make(Anime4kPass *p, Img *im, int w, int h, VkImageUsageFlags usa
     vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     vi.subresourceRange.levelCount = 1;
     vi.subresourceRange.layerCount = 1;
-    return p->CreateImageView(p->dev, &vi, NULL, &im->view) == VK_SUCCESS;
+    VkImageView view = VK_NULL_HANDLE;
+    if (p->CreateImageView(p->dev, &vi, NULL, &view) != VK_SUCCESS) return 0;
+    im->view = view;
+    return 1;
 }
 
 static void img_free(Anime4kPass *p, Img *im) {
@@ -357,7 +366,11 @@ static int fixed_make(Anime4kPass *p) {
     si.magFilter = si.minFilter = VK_FILTER_LINEAR;
     si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    if (p->CreateSampler(p->dev, &si, NULL, &p->linear) != VK_SUCCESS) return 0;
+    /* As in img_make, each handle is stored only once its create succeeded: anime4k_destroy frees
+       whatever is stored, and a failed create's output is undefined. */
+    VkSampler linear = VK_NULL_HANDLE;
+    if (p->CreateSampler(p->dev, &si, NULL, &linear) != VK_SUCCESS) return 0;
+    p->linear = linear;
 
     VkDescriptorSetLayoutBinding b[BINDINGS];
     memset(b, 0, sizeof(b));
@@ -373,7 +386,9 @@ static int fixed_make(Anime4kPass *p) {
     dl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     dl.bindingCount = BINDINGS;
     dl.pBindings = b;
-    if (p->CreateDescriptorSetLayout(p->dev, &dl, NULL, &p->dsl) != VK_SUCCESS) return 0;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    if (p->CreateDescriptorSetLayout(p->dev, &dl, NULL, &dsl) != VK_SUCCESS) return 0;
+    p->dsl = dsl;
 
     const uint32_t sets = ANIME4K_MAX_STAGES * PASSES;
     VkDescriptorPoolSize sizes[2] = {
@@ -386,7 +401,9 @@ static int fixed_make(Anime4kPass *p) {
     dp.maxSets = sets;
     dp.poolSizeCount = 2;
     dp.pPoolSizes = sizes;
-    if (p->CreateDescriptorPool(p->dev, &dp, NULL, &p->pool) != VK_SUCCESS) return 0;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    if (p->CreateDescriptorPool(p->dev, &dp, NULL, &pool) != VK_SUCCESS) return 0;
+    p->pool = pool;
     VkDescriptorSetLayout layouts[ANIME4K_MAX_STAGES * PASSES];
     for (uint32_t i = 0; i < sets; i++) layouts[i] = p->dsl;
     VkDescriptorSet all[ANIME4K_MAX_STAGES * PASSES];
@@ -408,7 +425,9 @@ static int fixed_make(Anime4kPass *p) {
     pl.pSetLayouts = &p->dsl;
     pl.pushConstantRangeCount = 1;
     pl.pPushConstantRanges = &range;
-    if (p->CreatePipelineLayout(p->dev, &pl, NULL, &p->layout) != VK_SUCCESS) return 0;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (p->CreatePipelineLayout(p->dev, &pl, NULL, &layout) != VK_SUCCESS) return 0;
+    p->layout = layout;
     for (int k = 0; k < PASSES; k++) {
         int mutant = p->init.mutant_spirv && p->init.mutant_spirv_bytes && p->init.mutant_pass == k;
         p->mods[k] = mutant ? shader_make(p, p->init.mutant_spirv, p->init.mutant_spirv_bytes)
@@ -422,8 +441,10 @@ static int fixed_make(Anime4kPass *p) {
         pi.stage.module = p->mods[k];
         pi.stage.pName = "main";
         pi.layout = p->layout;
-        if (p->CreateComputePipelines(p->dev, VK_NULL_HANDLE, 1, &pi, NULL, &p->pipes[k]) != VK_SUCCESS)
+        VkPipeline pipe = VK_NULL_HANDLE;
+        if (p->CreateComputePipelines(p->dev, VK_NULL_HANDLE, 1, &pi, NULL, &pipe) != VK_SUCCESS)
             return 0;
+        p->pipes[k] = pipe;
     }
     return 1;
 }

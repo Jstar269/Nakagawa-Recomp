@@ -509,6 +509,8 @@ typedef struct {
     uint64_t frame_seq;    /* new frames flipped with smooth motion on */
     uint64_t taken_seq;    /* the newest of them whose verdict a present took */
     uint64_t owed_seq;     /* taken_seq before an OWED verdict was taken, for its present's failure */
+    uint64_t untake_seq;   /* taken_seq before the latest verdict a present took, for ace_pace_untake */
+    int untake_ok;         /* that take can still be undone */
     uint64_t unpaired;     /* in-betweens refused: the frame before never reached a present */
     uint64_t superseded;   /* held frames never shown: replaced by a flip before their VBLANK's
                             * present, at fast forward, or given up when a present failed and
@@ -545,6 +547,12 @@ AceShow ace_pace_take(AcePace *p);
  * stands, so the present that takes over (gui_present's CPU present of the same flip) shows it;
  * failing that, the next VBLANK or the next flip. Counted in `busy`. */
 void ace_pace_owed_failed(AcePace *p);
+/* The present that took the latest verdict failed before its submission, so the pass's record for
+ * it was undone (ace_smooth_discard) and the pass does not hold that frame: the frame is not
+ * taken, and the next new frame, which would be paired with it, becomes KEEP and is counted in
+ * `unpaired`, as for a frame that never reached a present. Nothing for a REAL verdict, or a
+ * second time. */
+void ace_pace_untake(AcePace *p);
 /* The in-between went to the screen at now_ns (the presenter's clock): the frame is held for the
  * VBLANK after `vcount`. Without smooth motion the frame would have been shown then, so the
  * held present's time less this one is the delay smooth motion adds. */
@@ -605,6 +613,8 @@ void ace_smooth_shown_between(uint64_t now_ns);
 void ace_smooth_shown_owed(uint64_t now_ns);
 /* ace_pace_owed_failed for the run. */
 void ace_smooth_owed_failed(void);
+/* ace_pace_untake for the run. */
+void ace_smooth_untake(void);
 /* One VBLANK: 1 when the held frame should be presented now. Off, it reads nothing. */
 int ace_smooth_vblank(uint32_t vcount);
 /* The held frame's present did not show it (ace_pace_held_missed). */

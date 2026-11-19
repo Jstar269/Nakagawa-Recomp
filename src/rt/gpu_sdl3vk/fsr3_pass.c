@@ -181,6 +181,39 @@ static int image_of(uint32_t id) {
     return -1;
 }
 
+/* Which internal images the shaders sample with s_LinearClamp. A binding names a resource that the
+ * host resolves through AMD's alias tables (ACCUMULATION to ACCUMULATION_1 or _2 by frame parity,
+ * LUMA_HISTORY and CURRENT_LUMA the same way, LUMA_INSTABILITY to INTERMEDIATE_FP16x1, an absent
+ * transparency and composition mask to INTERNAL_DEFAULT_REACTIVITY), so each linear binding is
+ * resolved on host plans of both parities, with and without the optional inputs. */
+static int linear_images(uint8_t linear[IMAGE_COUNT]) {
+    static Fsr3Host h; /* the probe's own plan; the probe is not reentrant (its reason is static) */
+    Fsr3HostDesc desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.max_render_width = desc.max_render_height = 2;
+    desc.max_upscale_width = desc.max_upscale_height = 2;
+    fsr3_host_init(&h, &desc);
+    memset(linear, 0, IMAGE_COUNT);
+    for (int frame = 0; frame < 4; frame++) {
+        Fsr3HostDispatch d;
+        memset(&d, 0, sizeof(d));
+        d.render_width = d.render_height = 2;
+        d.pre_exposure = 1.0f;
+        d.has_exposure = d.has_reactive = d.has_transparency_and_composition = frame >= 2;
+        if (fsr3_host_dispatch(&h, &d) != 0) return 0;
+        for (uint32_t p = 0; p < FSR3_PASS_COUNT; p++)
+            for (uint32_t b = 0; b < fsr3_pass_layout[p].count; b++) {
+                const Fsr3Binding *bd = &fsr3_pass_layout[p].bindings[b];
+                if (bd->kind != FSR3_BIND_SRV || !bd->linear) continue;
+                uint32_t resource = 0, mip = 0;
+                fsr3_host_resolve(&h, bd, &resource, &mip);
+                const int i = image_of(resource);
+                if (i >= 0) linear[i] = 1;
+            }
+    }
+    return 1;
+}
+
 const char *fsr3_pass_unavailable(PFN_vkGetInstanceProcAddr gipa, VkInstance instance, VkPhysicalDevice pd,
                                   VkFormat tc_format) {
     PFN_vkGetPhysicalDeviceFeatures features_fn =
@@ -196,18 +229,15 @@ const char *fsr3_pass_unavailable(PFN_vkGetInstanceProcAddr gipa, VkInstance ins
     /* Every internal image is written as a storage image and read as a sampled one; those the
      * shaders sample with s_LinearClamp need linear filtering; atomics reach the R32_UINT ones. */
     static char reason[96];
+    uint8_t linear[IMAGE_COUNT];
+    if (!linear_images(linear)) return "a host plan for the linear filtering check";
     for (uint32_t i = 0; i < IMAGE_COUNT; i++) {
         VkFormatProperties fp;
         format_fn(pd, k_images[i].format, &fp);
         VkFormatFeatureFlags need = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
                                     VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
         if (k_images[i].format == VK_FORMAT_R32_UINT) need |= VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT;
-        for (uint32_t p = 0; p < FSR3_PASS_COUNT; p++)
-            for (uint32_t b = 0; b < fsr3_pass_layout[p].count; b++) {
-                const Fsr3Binding *bd = &fsr3_pass_layout[p].bindings[b];
-                if (bd->kind == FSR3_BIND_SRV && bd->linear && image_of(bd->id) == (int)i)
-                    need |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-            }
+        if (linear[i]) need |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
         if ((fp.optimalTilingFeatures & need) != need) {
             snprintf(reason, sizeof(reason), "format %d features 0x%x", (int)k_images[i].format,
                      (unsigned)(need & ~fp.optimalTilingFeatures));
@@ -285,14 +315,20 @@ static int make_image(Fsr3Pass *p, uint32_t index) {
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
     ii.tiling = VK_IMAGE_TILING_OPTIMAL;
     ii.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    if (p->CreateImage(p->dev, &ii, NULL, &im->image) != VK_SUCCESS) return 0;
+    /* Each handle is stored only once its create succeeded: Vulkan leaves a failed create's output
+       undefined, and the destroy path frees whatever is stored. */
+    VkImage image = VK_NULL_HANDLE;
+    if (p->CreateImage(p->dev, &ii, NULL, &image) != VK_SUCCESS) return 0;
+    im->image = image;
     VkMemoryRequirements mr;
     p->GetImageMemoryRequirements(p->dev, im->image, &mr);
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size,
                                  memory_type(p, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
-    if (mai.memoryTypeIndex == UINT32_MAX || p->AllocateMemory(p->dev, &mai, NULL, &im->memory) != VK_SUCCESS ||
-        p->BindImageMemory(p->dev, im->image, im->memory, 0) != VK_SUCCESS)
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    if (mai.memoryTypeIndex == UINT32_MAX || p->AllocateMemory(p->dev, &mai, NULL, &memory) != VK_SUCCESS)
         return 0;
+    im->memory = memory;
+    if (p->BindImageMemory(p->dev, im->image, im->memory, 0) != VK_SUCCESS) return 0;
     p->memory_bytes += mr.size;
     im->view = make_view(p, im->image, im->format, 0, im->mips);
     if (!im->view) return 0;
@@ -329,19 +365,25 @@ static int make_pipe(Fsr3Pass *p, uint32_t pass) {
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo dci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, l->count, b };
-    if (p->CreateDescriptorSetLayout(p->dev, &dci, NULL, &pp->dsl) != VK_SUCCESS) return 0;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    if (p->CreateDescriptorSetLayout(p->dev, &dci, NULL, &dsl) != VK_SUCCESS) return 0;
+    pp->dsl = dsl;
     VkPipelineLayoutCreateInfo lci;
     memset(&lci, 0, sizeof(lci));
     lci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     lci.setLayoutCount = 1;
     lci.pSetLayouts = &pp->dsl;
-    if (p->CreatePipelineLayout(p->dev, &lci, NULL, &pp->layout) != VK_SUCCESS) return 0;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (p->CreatePipelineLayout(p->dev, &lci, NULL, &layout) != VK_SUCCESS) return 0;
+    pp->layout = layout;
     VkShaderModuleCreateInfo mi;
     memset(&mi, 0, sizeof(mi));
     mi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     mi.codeSize = k_spv[pass].bytes;
     mi.pCode = k_spv[pass].code;
-    if (p->CreateShaderModule(p->dev, &mi, NULL, &pp->module) != VK_SUCCESS) return 0;
+    VkShaderModule module = VK_NULL_HANDLE;
+    if (p->CreateShaderModule(p->dev, &mi, NULL, &module) != VK_SUCCESS) return 0;
+    pp->module = module;
     VkComputePipelineCreateInfo ci;
     memset(&ci, 0, sizeof(ci));
     ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -350,7 +392,10 @@ static int make_pipe(Fsr3Pass *p, uint32_t pass) {
     ci.stage.module = pp->module;
     ci.stage.pName = "CS";
     ci.layout = pp->layout;
-    return p->CreateComputePipelines(p->dev, VK_NULL_HANDLE, 1, &ci, NULL, &pp->pipeline) == VK_SUCCESS;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (p->CreateComputePipelines(p->dev, VK_NULL_HANDLE, 1, &ci, NULL, &pipeline) != VK_SUCCESS) return 0;
+    pp->pipeline = pipeline;
+    return 1;
 }
 
 static int make_constants(Fsr3Pass *p) {
@@ -363,15 +408,21 @@ static int make_constants(Fsr3Pass *p) {
     bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bi.size = p->constants_stride * 3 * p->init.frames_in_flight;
     bi.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-    if (p->CreateBuffer(p->dev, &bi, NULL, &p->constants) != VK_SUCCESS) return 0;
+    VkBuffer constants = VK_NULL_HANDLE;
+    if (p->CreateBuffer(p->dev, &bi, NULL, &constants) != VK_SUCCESS) return 0;
+    p->constants = constants;
     VkMemoryRequirements mr;
     p->GetBufferMemoryRequirements(p->dev, p->constants, &mr);
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size,
                                  memory_type(p, mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                                                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) };
     void *map = NULL;
-    if (mai.memoryTypeIndex == UINT32_MAX || p->AllocateMemory(p->dev, &mai, NULL, &p->constants_memory) != VK_SUCCESS ||
-        p->BindBufferMemory(p->dev, p->constants, p->constants_memory, 0) != VK_SUCCESS ||
+    VkDeviceMemory constants_memory = VK_NULL_HANDLE;
+    if (mai.memoryTypeIndex == UINT32_MAX ||
+        p->AllocateMemory(p->dev, &mai, NULL, &constants_memory) != VK_SUCCESS)
+        return 0;
+    p->constants_memory = constants_memory;
+    if (p->BindBufferMemory(p->dev, p->constants, p->constants_memory, 0) != VK_SUCCESS ||
         p->MapMemory(p->dev, p->constants_memory, 0, VK_WHOLE_SIZE, 0, &map) != VK_SUCCESS)
         return 0;
     p->constants_map = map;
@@ -394,7 +445,9 @@ static int make_sets(Fsr3Pass *p) {
     pci.maxSets = slots * FSR3_PASS_COUNT;
     pci.poolSizeCount = 4;
     pci.pPoolSizes = sizes;
-    if (p->CreateDescriptorPool(p->dev, &pci, NULL, &p->pool) != VK_SUCCESS) return 0;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    if (p->CreateDescriptorPool(p->dev, &pci, NULL, &pool) != VK_SUCCESS) return 0;
+    p->pool = pool;
     p->sets = calloc((size_t)slots * FSR3_PASS_COUNT, sizeof(*p->sets));
     if (!p->sets) return 0;
     for (uint32_t s = 0; s < slots; s++)
@@ -407,6 +460,10 @@ static int make_sets(Fsr3Pass *p) {
 }
 
 Fsr3Pass *fsr3_pass_create(const Fsr3PassInit *init, char *error, size_t error_size) {
+    if (!init) {
+        set_error(error, error_size, "FSR3: no init");
+        return NULL;
+    }
     const Fsr3HostDesc *d = &init->desc;
     if (!init->get_instance_proc_addr || !init->device || !init->frames_in_flight) {
         set_error(error, error_size, "FSR3: incomplete init");
@@ -414,6 +471,29 @@ Fsr3Pass *fsr3_pass_create(const Fsr3PassInit *init, char *error, size_t error_s
     }
     if (!(d->flags & FSR3_HOST_ENABLE_DEPTH_INVERTED)) {
         set_error(error, error_size, "FSR3: the shaders are built for inverted depth");
+        return NULL;
+    }
+    /* The embedded shaders are one permutation (fsr3_shader_manifest.json): LDR colour, render-
+     * resolution and unjittered motion vectors. A flag for another permutation would make the host
+     * build constants the shaders do not read, so it is refused by name. */
+    static const struct {
+        uint32_t flag;
+        const char *name;
+    } unbuilt[] = {
+        { FSR3_HOST_ENABLE_HIGH_DYNAMIC_RANGE, "HIGH_DYNAMIC_RANGE" },
+        { FSR3_HOST_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS, "DISPLAY_RESOLUTION_MOTION_VECTORS" },
+        { FSR3_HOST_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION, "MOTION_VECTORS_JITTER_CANCELLATION" },
+    };
+    for (size_t i = 0; i < sizeof(unbuilt) / sizeof(unbuilt[0]); i++)
+        if (d->flags & unbuilt[i].flag) {
+            if (error && error_size)
+                snprintf(error, error_size, "FSR3: no shader is built for FSR3_HOST_ENABLE_%s", unbuilt[i].name);
+            return NULL;
+        }
+    const uint32_t accepted =
+        FSR3_HOST_ENABLE_DEPTH_INVERTED | FSR3_HOST_ENABLE_DEPTH_INFINITE | FSR3_HOST_ENABLE_AUTO_EXPOSURE;
+    if (d->flags & ~accepted) {
+        if (error && error_size) snprintf(error, error_size, "FSR3: unknown flags 0x%x", (unsigned)(d->flags & ~accepted));
         return NULL;
     }
     if (d->max_render_width < 2 || d->max_render_height < 2 || d->max_upscale_width < 1 || d->max_upscale_height < 1) {
@@ -475,7 +555,10 @@ Fsr3Pass *fsr3_pass_create(const Fsr3PassInit *init, char *error, size_t error_s
     si.minLod = 0.0f;
     si.maxLod = VK_LOD_CLAMP_NONE;
     si.borderColor = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
-    if (p->CreateSampler(p->dev, &si, NULL, &p->linear_clamp) != VK_SUCCESS) {
+    VkSampler linear_clamp = VK_NULL_HANDLE;
+    const VkResult sampler_made = p->CreateSampler(p->dev, &si, NULL, &linear_clamp);
+    if (sampler_made == VK_SUCCESS) p->linear_clamp = linear_clamp;
+    if (sampler_made != VK_SUCCESS) {
         set_error(error, error_size, "FSR3: cannot create the sampler");
         fsr3_pass_destroy(p);
         return NULL;

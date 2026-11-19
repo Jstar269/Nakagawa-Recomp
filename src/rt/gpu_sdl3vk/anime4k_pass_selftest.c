@@ -15,10 +15,12 @@
  *                   touching the last good size's, and the pass still works at the good size
  *   alloc-failure   a size whose vkCreateImage fails (wrapped through the init's proc-addr hook) is
  *                   built once and not tried again, and the pass still works at a good size
+ *   failed-handle   a failed vkCreateImage or vkCreateSampler that leaves a non-null value in its
+ *                   output (Vulkan leaves it undefined) never has that value destroyed
  *   cost            a 480x272 frame through two stages and FSR 1 to 3811x2160, by timestamps
  *
  * --mutant PASS FILE runs line-art with another shader for one pass; it must then fail.
- * Exit 77 (SKIP) without a Vulkan loader or device.
+ * Exit 77 (SKIP) without a Vulkan loader or device; exit 1 when a device is there and cannot be made.
  */
 #include "anime4k_pass.h"
 #include "fsr1_pass.h"
@@ -141,8 +143,9 @@ static int gpu_open(char *why, size_t cap) {
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     if (CreateDevice(g.physical, &dci, NULL, &g.device) != VK_SUCCESS) {
+        /* A device with the queue is there, and could not be made: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDevice failed");
-        return 0;
+        return -1;
     }
 #define DEV(name) name = (PFN_vk##name)GetDeviceProcAddr(g.device, "vk" #name)
     DEV(DestroyDevice); DEV(GetDeviceQueue); DEV(CreateCommandPool); DEV(DestroyCommandPool);
@@ -454,7 +457,11 @@ static void cell_line_art(Anime4kPass *a, Fsr1Pass *f) {
     source_fill(&src, w, h, 1);
     bilinear(&src, w, h, ow, oh);
     double eb = art_error();
-    upscale(f, &src, w, h, ow, oh, FSR1_SHARPNESS_DEFAULT);
+    /* Without FSR 1's image the map still holds bilinear's, and the gate below would only compare
+       Anime4K with bilinear. */
+    VkImage fo = upscale(f, &src, w, h, ow, oh, FSR1_SHARPNESS_DEFAULT);
+    CHECK(fo != VK_NULL_HANDLE, "FSR 1 recorded at 2x");
+    if (!fo) { image_free(&src); return; }
     double ef = art_error();
     VkImage out = a4k_run(a, &src, w, h, 1);
     CHECK(out != VK_NULL_HANDLE, "Anime4K recorded");
@@ -543,12 +550,47 @@ static void cell_limits(Anime4kPass *a) {
 static PFN_vkGetDeviceProcAddr s_real_dev_addr;
 static PFN_vkCreateImage s_real_create_image;
 static uint32_t s_fail_width;  /* vkCreateImage fails for images this wide, when not 0 */
+/* failed-handle: a failed create writes this value into its output, as Vulkan allows (the output
+ * of a failed command is undefined), and the destroy wrappers count it instead of passing it on. */
+static int s_failed_writes_junk;
+static int s_fail_sampler;
+static unsigned s_junk_destroyed;
+#define JUNK_IMAGE ((VkImage)(uintptr_t)0x5EED0001u)
+#define JUNK_SAMPLER ((VkSampler)(uintptr_t)0x5EED0002u)
+static PFN_vkDestroyImage s_real_destroy_image;
+static PFN_vkCreateSampler s_real_create_sampler;
+static PFN_vkDestroySampler s_real_destroy_sampler;
 
 static VKAPI_ATTR VkResult VKAPI_CALL failing_create_image(VkDevice device, const VkImageCreateInfo *info,
                                                            const VkAllocationCallbacks *alloc,
                                                            VkImage *image) {
-    if (s_fail_width && info->extent.width == s_fail_width) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    if (s_fail_width && info->extent.width == s_fail_width) {
+        if (s_failed_writes_junk) *image = JUNK_IMAGE;
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
     return s_real_create_image(device, info, alloc, image);
+}
+
+static VKAPI_ATTR void VKAPI_CALL counting_destroy_image(VkDevice device, VkImage image,
+                                                         const VkAllocationCallbacks *alloc) {
+    if (image == JUNK_IMAGE) { s_junk_destroyed++; return; }
+    s_real_destroy_image(device, image, alloc);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL failing_create_sampler(VkDevice device, const VkSamplerCreateInfo *info,
+                                                             const VkAllocationCallbacks *alloc,
+                                                             VkSampler *sampler) {
+    if (s_fail_sampler) {
+        *sampler = JUNK_SAMPLER;
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return s_real_create_sampler(device, info, alloc, sampler);
+}
+
+static VKAPI_ATTR void VKAPI_CALL counting_destroy_sampler(VkDevice device, VkSampler sampler,
+                                                           const VkAllocationCallbacks *alloc) {
+    if (sampler == JUNK_SAMPLER) { s_junk_destroyed++; return; }
+    s_real_destroy_sampler(device, sampler, alloc);
 }
 
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL wrapped_device_addr(VkDevice device, const char *name) {
@@ -556,6 +598,18 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL wrapped_device_addr(VkDevice dev
     if (strcmp(name, "vkCreateImage") == 0) {
         s_real_create_image = (PFN_vkCreateImage)fn;
         return (PFN_vkVoidFunction)failing_create_image;
+    }
+    if (strcmp(name, "vkDestroyImage") == 0) {
+        s_real_destroy_image = (PFN_vkDestroyImage)fn;
+        return (PFN_vkVoidFunction)counting_destroy_image;
+    }
+    if (strcmp(name, "vkCreateSampler") == 0) {
+        s_real_create_sampler = (PFN_vkCreateSampler)fn;
+        return (PFN_vkVoidFunction)failing_create_sampler;
+    }
+    if (strcmp(name, "vkDestroySampler") == 0) {
+        s_real_destroy_sampler = (PFN_vkDestroySampler)fn;
+        return (PFN_vkVoidFunction)counting_destroy_sampler;
     }
     return fn;
 }
@@ -603,6 +657,52 @@ static void cell_alloc_failure(void) {
     CHECK(ok != VK_NULL_HANDLE, "the pass works at a good size after an allocation failure");
     image_free(&src);
     anime4k_destroy(a);
+}
+
+/* failed-handle: Vulkan leaves a failed create's output undefined. A driver that writes a non-null
+ * value there must not see it destroyed: the size change's free (anime4k_record after a failed
+ * build) and anime4k_destroy after a failed create both free only what was made. */
+static void cell_failed_handle(void) {
+    Anime4kInit ai;
+    memset(&ai, 0, sizeof(ai));
+    ai.get_instance_proc_addr = wrapped_instance_addr;
+    ai.instance = g.instance;
+    ai.physical_device = g.physical;
+    ai.device = g.device;
+    ai.queue_family = g.family;
+    char why[160] = "";
+    s_junk_destroyed = 0;
+    s_fail_sampler = 1;
+    Anime4kPass *none = anime4k_create(&ai, why, sizeof(why));
+    s_fail_sampler = 0;
+    CHECK(none == NULL, "anime4k_create succeeded with a failing vkCreateSampler");
+    anime4k_destroy(none);
+    CHECK(s_junk_destroyed == 0, "a failed vkCreateSampler's output was destroyed %u time(s)",
+          s_junk_destroyed);
+    Anime4kPass *a = anime4k_create(&ai, why, sizeof(why));
+    CHECK(a != NULL, "anime4k_create with wrapped creates: %s", why);
+    if (!a) return;
+    Source src;
+    memset(&src, 0, sizeof(src));
+    if (!image_make(&src, 64, 48, VK_FORMAT_R8G8B8A8_UNORM)) {
+        CHECK(0, "source image");
+        anime4k_destroy(a);
+        return;
+    }
+    source_fill(&src, 64, 48, 1);
+    s_junk_destroyed = 0;
+    s_failed_writes_junk = 1;
+    s_fail_width = 100;
+    cmd_begin();
+    VkImage out = anime4k_record(a, g.cb, src.image, 100, 50, 1);
+    cmd_end();
+    s_fail_width = 0;
+    s_failed_writes_junk = 0;
+    CHECK(out == VK_NULL_HANDLE, "a size whose vkCreateImage fails gave an image");
+    anime4k_destroy(a);
+    CHECK(s_junk_destroyed == 0, "a failed vkCreateImage's output was destroyed %u time(s)",
+          s_junk_destroyed);
+    image_free(&src);
 }
 
 static void cell_stages(void) {
@@ -710,7 +810,8 @@ int main(int argc, char **argv) {
     cell_stages();
     int up = gpu_open(why, sizeof(why));
     if (up <= 0) {
-        printf("SKIP anime4k-selftest: %s\n", why[0] ? why : "the device could not be set up");
+        printf("%s anime4k-selftest: %s\n", up == 0 ? "SKIP" : "FAIL",
+               why[0] ? why : "the device could not be set up");
         gpu_close();
         free(mutant);
         return up == 0 ? 77 : 1;
@@ -743,6 +844,7 @@ int main(int argc, char **argv) {
             cell_source_a4k(a);
             cell_limits(a);
             cell_alloc_failure();
+            cell_failed_handle();
             cell_cost_a4k(a, f);
         }
     }

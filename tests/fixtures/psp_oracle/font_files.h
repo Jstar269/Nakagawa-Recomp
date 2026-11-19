@@ -10,11 +10,13 @@
  * time. Shared by the probe (tests/fixtures/psp_oracle/probe.c, CASE=font-files) and a host harness
  * (tests/fixtures/psp_oracle/io_cases_host.c) that runs the same code against a fake file system.
  *
- * The user-facing font-copy app (src/psp_companion/fontcopy.c) runs the same copy with three
+ * The user-facing font-copy app (src/psp_companion/fontcopy.c) runs the same copy with four
  * settings the oracle case leaves unset, so the case's calls and records are unchanged:
  * dest_dir (its own memory-stick folder instead of host0:/fonts, with dest_parent created
- * first), pgf_only (only names ending in .pgf, in any case, are copied) and known_names (if the
- * listing cannot be opened, each of these names is opened read-only under flash0:/font instead).
+ * first), pgf_only (only names ending in .pgf, in any case, are copied), known_names (if the
+ * listing cannot be opened, or opens but yields no name to copy, each of these names is opened
+ * read-only under flash0:/font instead) and keep_verified (a destination copy that already
+ * matches a fresh flash0 read is kept, never truncated, so a retry cannot destroy it).
  *
  * Safety contract (checked by the host harness tests in tools/test_psp_oracle.py):
  *  - flash0: is only ever listed (sceIoDopen/sceIoDread/sceIoDclose), opened PSP_O_RDONLY and,
@@ -26,6 +28,8 @@
  *    only dest_parent and the destination.
  *  - If the listing cannot be opened and no known name is given, the case records the result
  *    and stops; nothing is copied.
+ *  - keep_verified only reads: the destination copy and flash0 are opened PSP_O_RDONLY and
+ *    hashed before the copy opens the destination for writing.
  *  - Each copy is verified: pass A reads flash0 and writes host0 while hashing (SHA-256), pass B
  *    reads the host0 copy back, pass C re-reads flash0. A copy passes only when the three digests
  *    and byte counts agree with each other and with the listed size.
@@ -85,8 +89,9 @@ typedef struct FontFiles {
     const char *dest_parent;          /* created before dest_dir; NULL for none */
     const char *dest_dir;             /* NULL: FONTFILES_HOST_DIR */
     uint32_t pgf_only;
-    const char *const *known_names;   /* tried only when the listing cannot be opened */
+    const char *const *known_names;   /* tried when the listing yields no name to copy */
     uint32_t known_count;
+    uint32_t keep_verified;           /* keep a destination copy that matches flash0 */
     uint32_t entries;
     uint32_t candidates;
     uint32_t copied;
@@ -317,7 +322,40 @@ static int64_t fontfiles_hash_file(const char *path, int *open_result, uint8_t d
     return total;
 }
 
+/* keep_verified: a destination copy that holds the listed size and the same SHA-256 as a fresh
+ * read-only flash0 read is kept as it is, so running the copy again (the app's "try again")
+ * never truncates a copy an earlier run verified. Both files are only opened PSP_O_RDONLY.
+ * font-kept-NNNN: result 0, out0 destination open, out1 its bytes, out2 flash0 open, out3
+ * flash0 bytes; detail = the name, sha256 = the digest. Returns 0, recording nothing, when the
+ * copy has to be made. The first step of every copy is "check:<destination>/<name>". */
+static int fontfiles_keep(FontFiles *f, uint32_t index) {
+    const char *name = s_fontfiles_names[index];
+    static uint8_t sha_dest[32], sha_flash[32];
+    static char digest[65];
+    snprintf(s_fontfiles_path, sizeof(s_fontfiles_path), "%s/%.63s", FONTFILES_DIR, name);
+    snprintf(s_fontfiles_host, sizeof(s_fontfiles_host), "%s/%.63s", fontfiles_dest(f), name);
+    int dest_open = (int)FONTFILES_ERROR;
+    int flash_open = (int)FONTFILES_ERROR;
+    fontfiles_step(f, "check:", s_fontfiles_host);
+    const int64_t dest_bytes = fontfiles_hash_file(s_fontfiles_host, &dest_open, sha_dest);
+    if (dest_bytes < 0 || (uint64_t)dest_bytes != (uint64_t)s_fontfiles_sizes[index]) return 0;
+    fontfiles_step(f, "reread:", s_fontfiles_path);
+    const int64_t flash_bytes = fontfiles_hash_file(s_fontfiles_path, &flash_open, sha_flash);
+    if (flash_bytes != dest_bytes || memcmp(sha_dest, sha_flash, sizeof(sha_dest)) != 0) return 0;
+    f->copied++;
+    (void)fontfiles_hex(digest, sizeof(digest), sha_dest, sizeof(sha_dest));
+    const int used = snprintf(s_fontfiles_line, FONTFILES_LINE_MAX,
+        "NAKAGAWA_PSP_TEST schema=1 test_id=" FONTFILES_TEST_ID " case_id=font-kept-%04u "
+        "status=PASS result=0x00000000 out0=0x%08x out1=0x%08x out2=0x%08x out3=0x%08x "
+        "detail=%s sha256=%s",
+        (unsigned int)index, (unsigned int)dest_open, (unsigned int)(uint32_t)dest_bytes,
+        (unsigned int)flash_open, (unsigned int)(uint32_t)flash_bytes, name, digest);
+    fontfiles_emit(f, used);
+    return 1;
+}
+
 static void fontfiles_copy(FontFiles *f, uint32_t index) {
+    if (f->keep_verified && fontfiles_keep(f, index)) return;
     const char *name = s_fontfiles_names[index];
     static char digest_a[65], digest_b[65], digest_c[65];
     static uint8_t sha_a[32], sha_b[32], sha_c[32];
@@ -417,7 +455,7 @@ static void fontfiles_mkdir(FontFiles *f) {
     fontfiles_emit(f, used);
 }
 
-/* The listing could not be opened: open each known name read-only instead and measure it with
+/* The listing yielded no name to copy: open each known name read-only instead and measure it with
  * sceIoLseek. font-known-NNNN: result = the sceIoOpen result (0xffffffff when the name was not
  * opened), out0/out1 = the measured size low/high (0xffffffff when not measured), out2 =
  * disposition; detail = the name, or - when it is not a safe name. */
@@ -468,8 +506,10 @@ static void fontfiles_known(FontFiles *f) {
 /* font-dir-open, font-mkdir, font-entry-NNNN..., font-dir-close, font-copy-NNNN...,
  * font-files-done. A listing that cannot be opened goes straight to font-files-done, unless
  * known names are given: then font-known-NNNN..., and font-mkdir and font-copy-NNNN... when
- * one of them opened. A destination that cannot hold a copy path is refused (font-dest) before
- * any call. */
+ * one of them opened. A listing that opened but gave no name to copy (sceIoDread refused at
+ * once, or no .pgf) is followed by font-known-NNNN... the same way, when known names are given.
+ * With keep_verified, a font-kept-NNNN record replaces font-copy-NNNN for a copy kept as it
+ * was. A destination that cannot hold a copy path is refused (font-dest) before any call. */
 static void fontfiles_list_and_copy(FontFiles *f) {
     int used;
     f->step(f->ctx, "dopen:" FONTFILES_DIR);
@@ -555,6 +595,11 @@ static void fontfiles_list_and_copy(FontFiles *f) {
             close_rc == 0 && end == 0 ? "PASS" : "FAIL", (unsigned int)close_rc,
             (unsigned int)f->entries, (unsigned int)end);
         fontfiles_emit(f, used);
+        /* A listing that opened but named nothing to copy is no better than a refused one: the
+         * known names are tried (the destination folder is already made). */
+        if (f->candidates == 0u && f->known_count > 0u && f->known_names != NULL) {
+            fontfiles_known(f);
+        }
         for (uint32_t i = 0; i < f->candidates; i++) fontfiles_copy(f, i);
     } else if (f->known_count > 0u && f->known_names != NULL) {
         fontfiles_known(f);

@@ -12,10 +12,6 @@
 #include <stdio.h>
 #include <string.h>
 
-void nk_ui_button_configuration(const NkUi *ui, uint32_t flags,
-                                NkUiLayout *layout, NkUiStyle *style);
-NkUiTypeRole nk_ui_button_role(uint32_t flags);
-
 static NkUiSizing nk_ui_fixed(float value) {
     NkUiSizing sizing = {NK_UI_SIZE_FIXED, value, 0.0f, 0.0f};
     return sizing;

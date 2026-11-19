@@ -23,7 +23,8 @@
  *     an arithmetic result then carries whichever payload the host compiler's operand order
  *     picks inside the shared helper, and the PSP's choice is unmeasured (counted on stderr);
  *   - for a memory form points the base register so base + offset falls inside the
- *     scratch window, and fills the window with random bytes on both sides;
+ *     scratch window, aligned as the form requires, and fills the window with random bytes
+ *     on both sides;
  *   - runs the translated body through production dispatch (as snapshot_runner.c does)
  *     and ref::Run, then compares r1..r31, hi, lo, f0..f31 (raw bits), fcr31, fpcond,
  *     llbit, the scratch window and the runtime's out-of-range access counters.
@@ -104,6 +105,16 @@ static uint32_t draw_fpr(uint64_t *rng) {
     return (uint32_t)(r >> 32);
 }
 
+/* The alignment a memory form's effective address needs: 2 for lh/lhu/sh, 4 for lw/sw/ll/sc/
+ * lwc1/swc1, 1 for the byte forms and lwl/lwr/swl/swr. */
+static uint32_t access_alignment(uint32_t word) {
+    switch (word >> 26) {
+    case 0x21: case 0x25: case 0x29: return 2u;
+    case 0x23: case 0x2B: case 0x30: case 0x38: case 0x31: case 0x39: return 4u;
+    default: return 1u;
+    }
+}
+
 static void make_state(CpuState *cpu, const SweepInst *in, uint32_t state_index, uint64_t seed,
                        uint32_t scratch, uint32_t scratch_size) {
     uint64_t rng = seed ^ ((uint64_t)in->index * 0xD6E8FEB86659FD93ull)
@@ -163,8 +174,12 @@ static void make_state(CpuState *cpu, const SweepInst *in, uint32_t state_index,
         }
     }
     if (in->base_reg > 0) {
-        /* The effective address lands in the middle half of the window, any alignment. */
+        /* The effective address lands in the middle half of the window, at any alignment the
+         * form accepts: a halfword or word access must be naturally aligned (the PSP raises an
+         * address error otherwise, and the reference stops there), while byte accesses and
+         * lwl/lwr/swl/swr take every byte offset. */
         uint32_t target = scratch + scratch_size / 4u + (uint32_t)(rng_next(&rng) % (scratch_size / 2u));
+        target &= ~(access_alignment(in->word) - 1u);
         cpu->r[in->base_reg] = target - in->offset;
     }
     cpu->r[0] = 0u;

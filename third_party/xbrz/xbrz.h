@@ -17,8 +17,10 @@
 // ****************************************************************************
 //
 // Modified by Nakagawa Recomp contributors, 2026-11-04: translated from C++ to C (xBRZ 1.9,
-// xbrz.h, xbrz_config.h and the parts of xbrz_tools.h the scaler uses). Only the
-// ColorFormat::argbUnbuffered scaler is kept; see PROVENANCE.md in this directory.
+// xbrz.h and xbrz_config.h). Only the ColorFormat::argbUnbuffered scaler is kept; see
+// PROVENANCE.md in this directory.
+// Modified by Nakagawa Recomp contributors, 2026-11-18: the note above no longer names
+// xbrz_tools.h, which this header takes nothing from; factor 1 places a slice at its own rows.
 
 #ifndef NK_XBRZ_H
 #define NK_XBRZ_H
@@ -57,6 +59,8 @@ void nk_xbrz_default_cfg(NkXbrzCfg *cfg);
 -> pixels are ARGB (alpha in the high byte, BGRA byte order on little-endian machines), as
    xbrz::ColorFormat::argbUnbuffered: the colour distance is computed per pair, with no table
 -> factor 1 copies the rows; factor 2 - NK_XBRZ_SCALE_FACTOR_MAX scales. Returns 0 for any other factor.
+-> at every factor, row y of a slice is written at target row factor * y, so slices of one image share one target
+-> cfg NULL means the defaults (nk_xbrz_default_cfg)
 
 THREAD-SAFETY: - parts of the same image may be scaled by multiple threads as long as the [yFirst, yLast)
                  ranges do not overlap!

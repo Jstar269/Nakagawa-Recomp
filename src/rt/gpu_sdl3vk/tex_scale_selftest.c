@@ -177,6 +177,15 @@ static void test_golden(void) {
     }
     free(whole);
     free(halves);
+    /* Factor 1 slices land at their own rows too, as xbrz.h promises for every factor (LOCAL DELTA:
+     * upstream copies a factor-1 slice to the start of trg whatever yFirst is). */
+    {
+        static uint32_t copy[40 * 28];
+        memset(copy, 0, sizeof copy);
+        CHECK(nk_xbrz_scale(1, full, copy, 40, 28, NULL, 0, 14) && nk_xbrz_scale(1, full, copy, 40, 28, NULL, 14, 28),
+              "xbrz-golden: factor 1 was refused");
+        CHECK(memcmp(copy, full, sizeof copy) == 0, "xbrz-golden: two factor-1 slices differ from the image");
+    }
     CHECK(!nk_xbrz_scale(7, corner, out, 6, 4, NULL, 0, 4) && !nk_xbrz_scale(0, corner, out, 6, 4, NULL, 0, 4),
           "xbrz-golden: factors 0 and 7 were accepted");
     if (!s_fail) printf("tex scale selftest: PASS xbrz-golden factors=2-6 patterns=2 corner=12x8\n");
