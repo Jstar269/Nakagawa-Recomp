@@ -4695,5 +4695,47 @@ class LinkerSpellingTests(unittest.TestCase):
         self.assertIn(f"HOST_KIND={expected}", completed.stdout.splitlines())
 
 
+class PspDisplaySizeHeaderTests(unittest.TestCase):
+    """The PSP screen size has one definition, ``src/core/nk_display_size.h``.
+
+    The window, the presenter, the VR quad and the player's hero art each carried a private
+    copy of 480 and 272 (audit 2026-11-17). They now take both from the shared header, by a
+    relative include, so no compile line needs an include directory for it.
+    """
+
+    HEADER = ROOT / "src" / "core" / "nk_display_size.h"
+    USERS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "src/rt/gui.c": ("#define PSP_W NK_PSP_DISPLAY_WIDTH", "#define PSP_H NK_PSP_DISPLAY_HEIGHT"),
+        "src/rt/gpu_sdl3vk/sdl3vk.c": ("#define PSP_W NK_PSP_DISPLAY_WIDTH",
+                                       "#define PSP_H NK_PSP_DISPLAY_HEIGHT"),
+        "src/rt/xr/nk_xr_layout.h": ("#define NK_XR_PSP_WIDTH NK_PSP_DISPLAY_WIDTH_F",
+                                     "#define NK_XR_PSP_HEIGHT NK_PSP_DISPLAY_HEIGHT_F"),
+        "src/ui/nk_ui_theme.h": (
+            "#define NK_UI_HERO_ASPECT (NK_PSP_DISPLAY_HEIGHT_F / NK_PSP_DISPLAY_WIDTH_F)",),
+    }
+
+    def test_the_header_defines_the_size_in_integer_and_float_form(self) -> None:
+        defines = dict(re.findall(r"^#define (NK_PSP_DISPLAY_\w+) (\S+)$",
+                                  self.HEADER.read_text(encoding="utf-8"), re.MULTILINE))
+        self.assertEqual(defines, {
+            "NK_PSP_DISPLAY_WIDTH": "480", "NK_PSP_DISPLAY_HEIGHT": "272",
+            "NK_PSP_DISPLAY_WIDTH_F": "480.0f", "NK_PSP_DISPLAY_HEIGHT_F": "272.0f",
+        })
+
+    def test_each_user_takes_its_size_from_the_header(self) -> None:
+        for path, lines in self.USERS.items():
+            with self.subTest(path=path):
+                text = (ROOT / path).read_text(encoding="utf-8")
+                include = re.search(r'^#include "((?:\.\./)+core/nk_display_size\.h)"', text,
+                                    re.MULTILINE)
+                self.assertIsNotNone(include, f"{path} does not include the shared header")
+                assert include is not None
+                # The include resolves from the including file's own directory.
+                self.assertEqual(((ROOT / path).parent / include.group(1)).resolve(),
+                                 self.HEADER.resolve())
+                for line in lines:
+                    self.assertIn(line, text)
+
+
 if __name__ == "__main__":
     unittest.main()
