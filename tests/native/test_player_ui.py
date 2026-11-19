@@ -9,6 +9,7 @@ import os
 import hashlib
 import itertools
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -888,6 +889,272 @@ class LegacyRendererSourceTests(unittest.TestCase):
             text = source.read_text(encoding="utf-8")
             self.assertNotIn('#include "ui_renderer.h"', text, source.name)
             self.assertNotIn("ui_render_frame(", text, source.name)
+
+
+def wcag_luminance(rgb: Sequence[float]) -> float:
+    """WCAG 2.x relative luminance of sRGB channel values in 0..255."""
+    linear = []
+    for value in rgb:
+        channel = value / 255.0
+        linear.append(channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def wcag_contrast(first: float, second: float) -> float:
+    """WCAG 2.x contrast ratio of two relative luminances."""
+    lighter, darker = max(first, second), min(first, second)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+class PlayerUiDesignTokenTests(unittest.TestCase):
+    """docs/PLAYER_UI_DESIGN.md's token record against the C source it describes, and the WCAG
+    contrast of every text-on-background pair it lists. The record cannot drift from the
+    theme, a colour literal cannot be added to the UI source without being recorded, and a
+    pair below its target fails unless it is a known shortfall with its exact ratio."""
+
+    DOC = ROOT / "docs" / "PLAYER_UI_DESIGN.md"
+    RECORD = re.compile(r"<!-- player-ui-tokens -->\s*```json\n(.*?)\n```", re.S)
+    # The UI's drawing source: every opaque 0xRRGGBBFFu literal in it must be recorded.
+    COLOUR_SOURCES = ("src/ui/*.c", "src/ui/*.h", "src/player/ui/*.c", "src/player/ui/*.h",
+                      "src/rt/overlay/*.c", "src/rt/overlay/*.h")
+    # Opaque-looking literals that are masks, not colours.
+    NOT_COLOURS = {
+        ("src/ui/nk_ui_widgets.c", "7FFFFF"),   # nk_ui_child_id's id mask
+        ("src/ui/nk_ui_ttf.c", "00FFFF"),       # the glyph index mask
+        ("src/rt/overlay/overlay_dev.c", "1FFFFF"),  # the PSP physical address mask
+    }
+    DEFINE_SOURCES = ("src/ui/nk_ui_theme.h", "src/ui/nk_ui_waves.h")
+    # WCAG large text is 24 px, or 18.66 px (14 pt) bold; these slots count as bold.
+    BOLD_FONTS = {"NK_UI_FONT_BODY_SEMIBOLD", "NK_UI_FONT_DISPLAY_BOLD"}
+    TARGETS = {"text": 4.5, "large_text": 3.0, "focus": 3.0, "edge": 3.0}
+    # Pairs drawn today below their target. The owner decides what changes; until then each
+    # is pinned at its measured ratio, so a better or a worse colour fails here.
+    KNOWN_SHORTFALLS = {
+        ("dim", "ground"): (4.16, "footnotes, disabled labels and a dimmed row's chips on the page"),
+        ("dim", "wave_limit"): (2.53, "About's footnotes over the brightest waves allowed"),
+        ("dim", "panel"): (3.86, "a game card's disc ID, footnotes and notes in cards"),
+        ("dim", "control"): (3.55, "a disabled primary button; a focused card's disc ID"),
+        ("dim", "pressed"): (3.06, "a pressed game card's disc ID"),
+        ("dim", "art_tint_0"): (3.71, "the art placeholder's caption"),
+        ("dim", "art_tint_1"): (2.86, "the art placeholder's caption"),
+        ("dim", "art_tint_2"): (3.56, "the art placeholder's caption"),
+        ("dim", "art_tint_3"): (3.59, "the art placeholder's caption"),
+        ("selected_neutral_edge_dimmed", "control"): (
+            2.64, "a dimmed row's value edge against its own box, accepted as the row is inert"),
+    }
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        text = cls.DOC.read_text(encoding="utf-8")
+        match = cls.RECORD.search(text)
+        if match is None:
+            raise AssertionError(f"{cls.DOC.name} has no <!-- player-ui-tokens --> json block")
+        cls.doc_text = text
+        cls.record = json.loads(match.group(1))
+
+    @staticmethod
+    def read(path: str) -> str:
+        return (ROOT / path).read_text(encoding="utf-8")
+
+    @staticmethod
+    def rgba(value: str) -> tuple[int, int, int, int]:
+        digits = value.lstrip("#")
+        if len(digits) == 6:
+            digits += "FF"
+        if not re.fullmatch(r"[0-9A-Fa-f]{8}", digits):
+            raise AssertionError(f"not a #RRGGBB or #RRGGBBAA colour: {value!r}")
+        return tuple(int(digits[i:i + 2], 16) for i in range(0, 8, 2))  # type: ignore[return-value]
+
+    @staticmethod
+    def c_value(text: str) -> float | str:
+        """A #define body as a number when it is one (or one number over another), else its
+        text with the spacing and outer parentheses normalised."""
+        body = text.strip()
+        while body.startswith("(") and body.endswith(")"):
+            body = body[1:-1].strip()
+        number = r"([0-9]+(?:\.[0-9]*)?)[fFuU]?"
+        match = re.fullmatch(number, body)
+        if match:
+            return float(match.group(1))
+        match = re.fullmatch(number + r"\s*/\s*" + number, body)
+        if match:
+            return float(match.group(1)) / float(match.group(2))
+        return re.sub(r"\s+", " ", body)
+
+    def section(self, heading: str) -> str:
+        start = self.doc_text.index(heading + "\n")
+        end = self.doc_text.find("\n#", start + len(heading))
+        return self.doc_text[start:end if end >= 0 else len(self.doc_text)]
+
+    def theme_values(self) -> dict[str, str]:
+        header = self.read("src/ui/nk_ui_theme.h")
+        source = self.read("src/ui/nk_ui_theme.c")
+        struct_body = header[header.index("struct NkUiTheme {"):]
+        fields = re.findall(r"uint32_t\s+(\w+);", struct_body[:struct_body.index("};")])
+        init = source[source.index("g_n1_theme = {"):]
+        values = re.findall(r"0x([0-9A-Fa-f]{8})u", init[:init.index("};")])
+        self.assertEqual(len(fields), len(values), "NkUiTheme fields and g_n1_theme values")
+        self.assertGreater(len(fields), 20)
+        return {name: value.upper() for name, value in zip(fields, values, strict=True)}
+
+    def colours(self) -> dict[str, tuple[int, int, int, int]]:
+        named = {entry["name"]: self.rgba(entry["value"]) for entry in self.record["colours"]}
+        for entry in self.record["outside_theme"]:
+            self.assertNotIn(entry["name"], named, "a colour name is used twice")
+            named[entry["name"]] = self.rgba(entry["value"])
+        return named
+
+    def test_colours_match_the_theme(self) -> None:
+        theme = self.theme_values()
+        recorded = {entry["name"]: "%02X%02X%02X%02X" % self.rgba(entry["value"])
+                    for entry in self.record["colours"]}
+        self.assertEqual(recorded, theme, "the record's colours against g_n1_theme")
+
+    def test_colour_table_matches_the_theme(self) -> None:
+        theme = self.theme_values()
+        rows = 0
+        for line in self.section("### Colour").splitlines():
+            if not line.startswith("| `"):
+                continue
+            cells = line.split("|")
+            names = re.findall(r"`(\w+)`", cells[1])
+            values = re.findall(r"`#([0-9A-Fa-f]{6})`", cells[2])
+            if not values:
+                continue  # a value given in words (the scrims)
+            self.assertEqual(len(names), len(values), line)
+            for name, value in zip(names, values, strict=True):
+                self.assertEqual(theme.get(name), value.upper() + "FF", f"Colour table: {name}")
+                rows += 1
+        self.assertGreater(rows, 20)
+
+    def test_every_colour_literal_is_recorded(self) -> None:
+        theme = set(self.theme_values().values())
+        recorded = {(entry["source"], "%02X%02X%02X" % self.rgba(entry["value"])[:3])
+                    for entry in self.record["outside_theme"]}
+        found: set[tuple[str, str]] = set()
+        for pattern in self.COLOUR_SOURCES:
+            for path in sorted(ROOT.glob(pattern)):
+                rel = path.relative_to(ROOT).as_posix()
+                for rgb in re.findall(r"\b0x([0-9A-Fa-f]{6})[Ff]{2}u\b", path.read_text(encoding="utf-8")):
+                    found.add((rel, rgb.upper()))
+        found -= self.NOT_COLOURS
+        missing = sorted(item for item in found - recorded
+                         if not (item[0] == "src/ui/nk_ui_theme.c" and item[1] + "FF" in theme))
+        self.assertEqual(missing, [], "colour literals in the UI source missing from the record")
+        gone = sorted(recorded - found)
+        self.assertEqual(gone, [], "outside_theme entries no longer in their source file")
+
+    def test_metrics_match_the_defines(self) -> None:
+        defines: dict[str, float | str] = {}
+        for path in self.DEFINE_SOURCES:
+            for name, body in re.findall(r"^#define\s+(NK_UI_\w+)[ \t]+([^\n]+)", self.read(path), re.M):
+                defines[name] = self.c_value(re.sub(r"/\*.*", "", body))
+        recorded = {entry["name"]: self.c_value(str(entry["value"])) for entry in self.record["metrics"]}
+        self.assertEqual(sorted(recorded), sorted(defines), "metrics against the #defines")
+        for name, value in defines.items():
+            if isinstance(value, float):
+                self.assertIsInstance(recorded[name], float, name)
+                self.assertTrue(math.isclose(value, recorded[name], rel_tol=1e-9),  # type: ignore[arg-type]
+                                f"{name}: {value} in the source, {recorded[name]} in the record")
+            else:
+                self.assertEqual(recorded[name], value, name)
+
+    def test_type_scale_and_fonts_match(self) -> None:
+        header = self.read("src/ui/nk_ui_theme.h")
+        source = self.read("src/ui/nk_ui_theme.c")
+        enum = header[header.index("typedef enum {\n    NK_UI_TYPE_"):header.index("} NkUiTypeRole;")]
+        roles = [r for r in re.findall(r"NK_UI_TYPE_(\w+)", enum) if r != "COUNT"]
+        scale = source[source.index("g_type_scale[NK_UI_TYPE_COUNT] = {"):]
+        rows = re.findall(r"\{(NK_UI_FONT_\w+),\s*(\d+),\s*([0-9.]+)f,\s*([0-9.]+)f\}",
+                          scale[:scale.index("};")])
+        wrap = re.search(r"style\.wrap = role >= NK_UI_TYPE_(\w+) && role <= NK_UI_TYPE_(\w+);", source)
+        self.assertIsNotNone(wrap, "nk_ui_type's wrap rule")
+        assert wrap is not None
+        first, last = roles.index(wrap.group(1)), roles.index(wrap.group(2))
+        self.assertEqual(len(rows), len(roles), "g_type_scale rows against NkUiTypeRole")
+        expected = [{"name": role, "font": font, "size_px": int(size), "line_px": float(line),
+                     "tracking_em": float(tracking), "wraps": first <= i <= last}
+                    for i, (role, (font, size, tracking, line)) in enumerate(zip(roles, rows, strict=True))]
+        recorded = [{key: (float(entry[key]) if key in ("line_px", "tracking_em") else entry[key])
+                     for key in ("name", "font", "size_px", "line_px", "tracking_em", "wraps")}
+                    for entry in self.record["type"]]
+        self.assertEqual(recorded, expected, "the record's type against g_type_scale")
+        table = {}
+        for line in self.section("### Type").splitlines():
+            match = re.match(r"\| `(\w+)` \|[^|]*\| (\d+) / (\d+) \|", line)
+            if match:
+                table[match.group(1)] = (int(match.group(2)), float(match.group(3)))
+        self.assertEqual(table, {e["name"]: (e["size_px"], e["line_px"]) for e in expected},
+                         "the Type table's size / line against g_type_scale")
+        slots = {name: int(slot) for name, slot in re.findall(r"(NK_UI_FONT_\w+) = (\d+),", header)}
+        paths = re.findall(r'"(assets/fonts/ui/[^"]+)"', source)
+        expected_fonts = sorted((slot, name, paths[slot]) for name, slot in slots.items())
+        recorded_fonts = sorted((e["slot"], e["name"], e["file"]) for e in self.record["fonts"])
+        self.assertEqual(recorded_fonts, expected_fonts, "fonts against NK_UI_FONT_* and g_font_paths")
+
+    def background_luminance(self, entry: dict, colours: dict, metrics: dict) -> float:
+        if "luminance" in entry:
+            return float(metrics[entry["luminance"]])
+        r, g, b, a = colours[entry["colour"]]
+        under = self.rgba(entry.get("over", "#000000"))
+        alpha = a / 255.0
+        # Composited channel by channel in sRGB bytes, as nk_ui_composite_luminance does.
+        rgb = [c * alpha + u * (1.0 - alpha) for c, u in zip((r, g, b), under[:3], strict=True)]
+        if a != 255 and "over" not in entry:
+            raise AssertionError(f"background {entry['name']} has alpha but nothing under it")
+        return wcag_luminance(rgb)
+
+    def measured_pairs(self) -> dict[tuple[str, str], tuple[float, float, dict]]:
+        colours = self.colours()
+        metrics = {e["name"]: self.c_value(str(e["value"])) for e in self.record["metrics"]}
+        type_roles = {e["name"]: e for e in self.record["type"]}
+        backgrounds = {e["name"]: self.background_luminance(e, colours, metrics)
+                       for e in self.record["backgrounds"]}
+        measured = {}
+        for pair in self.record["pairs"]:
+            key = (pair["text"], pair["on"])
+            self.assertNotIn(key, measured, f"pair listed twice: {key}")
+            self.assertIn(pair["kind"], ("text", "focus", "edge"), key)
+            kind = pair["kind"]
+            if kind == "text":
+                self.assertTrue(pair.get("roles"), f"a text pair names its roles: {key}")
+                if all(type_roles[r]["size_px"] >= 24 or (type_roles[r]["font"] in self.BOLD_FONTS and
+                                                          type_roles[r]["size_px"] >= 18.66)
+                       for r in pair["roles"]):
+                    kind = "large_text"
+            r, g, b, a = colours[pair["text"]]
+            self.assertEqual(a, 255, f"a pair's text or edge colour is opaque: {key}")
+            ratio = wcag_contrast(wcag_luminance((r, g, b)), backgrounds[pair["on"]])
+            measured[key] = (ratio, self.TARGETS[kind], pair)
+        return measured
+
+    def test_contrast_meets_targets_or_is_a_known_shortfall(self) -> None:
+        measured = self.measured_pairs()
+        self.assertGreater(len(measured), 40)
+        below = {key: round(ratio, 2) for key, (ratio, target, _) in measured.items() if ratio < target}
+        unexpected = sorted(f"{text} on {on}: {below[(text, on)]}:1"
+                            for text, on in below if (text, on) not in self.KNOWN_SHORTFALLS)
+        self.assertEqual(unexpected, [], "pairs below their contrast target")
+        for key, (ratio, reason) in self.KNOWN_SHORTFALLS.items():
+            self.assertIn(key, measured, f"known shortfall no longer listed in the record: {key}")
+            self.assertEqual(round(measured[key][0], 2), ratio,
+                             f"{key} ({reason}) measures {measured[key][0]:.2f}:1, recorded {ratio}:1")
+
+    def test_known_shortfalls_table_matches(self) -> None:
+        measured = self.measured_pairs()
+        rows = {}
+        for line in self.section("### Known shortfalls").splitlines():
+            match = re.match(r"\| `(\w+)` \| `(\w+)` \| ([0-9.]+) \| ([0-9.]+) \|", line)
+            if match:
+                rows[(match.group(1), match.group(2))] = (float(match.group(3)), float(match.group(4)))
+        expected = {key: (ratio, measured[key][1]) for key, (ratio, _) in self.KNOWN_SHORTFALLS.items()}
+        self.assertEqual(rows, expected, "the Known shortfalls table against KNOWN_SHORTFALLS")
+
+    def test_wcag_formula(self) -> None:
+        self.assertAlmostEqual(wcag_contrast(wcag_luminance((255, 255, 255)),
+                                             wcag_luminance((0, 0, 0))), 21.0)
+        self.assertAlmostEqual(wcag_contrast(wcag_luminance((119, 119, 119)),
+                                             wcag_luminance((255, 255, 255))), 4.48, places=2)
 
 
 class LaunchMusicTimingTests(unittest.TestCase):
