@@ -1191,6 +1191,34 @@ class TemporaryCompatibilityDebtGateTests(unittest.TestCase):
                     "test path or Makefile target",
                 )
 
+    def test_a_named_test_class_or_method_must_exist(self):
+        """MUTATION: a reference resolves only when the class and method it names
+        exist in the named module, not merely when the .py file does."""
+        path = "tools/test_codegen_profile_isolation.py"
+        resolved, unresolved = compat_overrides.test_references(
+            compat_overrides.CODEGEN_TEMPORARY_PATCH_TEST)
+        self.assertEqual(unresolved, [])
+        self.assertEqual(len(resolved), 2, resolved)
+        for test_field in (
+            f"{path}::NoSuchTests::test_every_coupled_address_differs_from_its_control_copy",
+            f"{path}::ProfileHstCouplingTests::test_missing",
+            f"{path}::ProfileHstCouplingTests + ProfileNoneDecouplingTests.test_missing",
+            f"{path}:test_missing",
+            "+ ProfileNoneDecouplingTests.test_every_coupled_address_matches_its_control_copy",
+        ):
+            with self.subTest(test=test_field):
+                _resolved, unresolved = compat_overrides.test_references(test_field)
+                self.assertTrue(unresolved, f"test={test_field!r} resolved a symbol that does not exist")
+                patch = dict(address=0x08ff0050, category="temporary_compatibility_patch",
+                             name="synthetic missing symbol", owner_issue="#363",
+                             retirement="remove the synthetic patch", test=test_field)
+                self.assertTrue(any(problem.startswith("test names a reference that does not exist")
+                                    for problem in compat_overrides.temporary_patch_defects(patch)))
+        for test_field in (f"{path}::ProfileNoneDecouplingTests",
+                           f"{path}:test_every_coupled_address_matches_its_control_copy"):
+            with self.subTest(test=test_field):
+                self.assertEqual(compat_overrides.test_references(test_field), ([test_field], []))
+
     def test_the_no_test_allowlist_is_attributed_and_current(self):
         """A waiver without an owner or a reason is an unexplained hole, and a
         waiver for an entry that no longer exists is a stale one."""

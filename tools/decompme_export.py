@@ -41,77 +41,7 @@ import sys
 from pathlib import Path
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-if TOOLS_DIR not in sys.path:
-    sys.path.insert(0, TOOLS_DIR)
-
-from nid_name_proof import DERIVABLE_CLASSES, nid_of  # noqa: E402
-
 REPO = Path(TOOLS_DIR).parent
-CORPUS_PATH = Path(TOOLS_DIR) / "nid_corpus.json"
-
-
-def load_nid_corpus(path: Path | str | None = None) -> dict[int, list[tuple[str | None, str]]]:
-    """Load the NID corpus mapping NID -> list of (library, name).
-
-    Falls back to an empty table if the file is missing, unreadable, or invalid.
-    """
-    corpus_file = Path(path) if path is not None else CORPUS_PATH
-    table: dict[int, list[tuple[str | None, str]]] = {}
-    try:
-        with open(corpus_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return table
-        derivable = set(data.get("derivable_classes", sorted(DERIVABLE_CLASSES)))
-        entries = data.get("entries", [])
-        if not isinstance(entries, list):
-            return table
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            name = entry.get("name")
-            if not name or not isinstance(name, str):
-                continue
-            cls = entry.get("class")
-            try:
-                if cls in derivable:
-                    nid = nid_of(name)
-                elif "nid" in entry:
-                    nid = int(str(entry["nid"]), 16)
-                else:
-                    continue
-            except Exception:
-                continue
-            lib = entry.get("library")
-            table.setdefault(nid, []).append((lib, name))
-    except Exception:
-        # Predictable failure: fall back to bare NIDs rather than to a
-        # half-parsed table whose gaps would look like unknown NIDs.
-        return {}
-    return table
-
-
-def lookup_nid_name(
-    lib: str,
-    nid: int,
-    table: dict[int, list[tuple[str | None, str]]],
-) -> str | None:
-    """Look up a function name for `(lib, nid)`.
-
-    Matches within the library if recorded in the corpus, or any library if the
-    corpus entry has no library attribution. Does not match a NID from one
-    library against a name attributed to another.
-    """
-    candidates = table.get(nid)
-    if not candidates:
-        return None
-    for entry_lib, name in candidates:
-        if entry_lib is not None and entry_lib == lib:
-            return name
-    for entry_lib, name in candidates:
-        if entry_lib is None:
-            return name
-    return None
 
 
 def sha256_hex(b: bytes) -> str:
@@ -142,7 +72,7 @@ def func_extent(addr: int, starts, ranges):
     return addr, end
 
 
-def gen_context_c(nids=None, corpus_path: Path | str | None = None) -> str:
+def gen_context_c() -> str:
     """decomp.me `context`: base PSP typedefs. Prototypes from the NID->signature
     API database and recovered game structs are progressively added later (#DB)."""
     lines = [
@@ -159,17 +89,6 @@ def gen_context_c(nids=None, corpus_path: Path | str | None = None) -> str:
         "typedef double         f64;",
         "",
     ]
-    if nids:
-        table = load_nid_corpus(corpus_path)
-        lines.append("/* Imported NIDs referenced nearby: */")
-        for lib, nid in nids:
-            nid_int = int(nid, 16) if isinstance(nid, str) else int(nid)
-            name = lookup_nid_name(lib, nid_int, table)
-            if name:
-                lines.append(f"/*   {lib}  {nid_int:#010x}  {name} */")
-            else:
-                lines.append(f"/*   {lib}  {nid_int:#010x} */")
-        lines.append("")
     return "\n".join(lines)
 
 

@@ -82,6 +82,16 @@ class GenUiAssetsTests(unittest.TestCase):
     def test_check_mode_reports_current(self) -> None:
         self.assertEqual(gen_ui_assets.main(["--check"]), 0)
 
+    def test_check_mode_compares_the_named_out_file(self) -> None:
+        # --check judges the file --out names, not the committed one behind it.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "x.c"
+            self.assertEqual(gen_ui_assets.main(["--out", str(out), "--check"]), 1)
+            out.write_bytes(b"stale\n")
+            self.assertEqual(gen_ui_assets.main(["--out", str(out), "--check"]), 1)
+            self.assertEqual(gen_ui_assets.main(["--out", str(out)]), 0)
+            self.assertEqual(gen_ui_assets.main(["--out", str(out), "--check"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

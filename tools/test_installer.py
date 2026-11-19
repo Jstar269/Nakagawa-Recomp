@@ -83,7 +83,8 @@ class InstallerScriptTests(unittest.TestCase):
     def test_it_uses_no_network(self):
         self.assertEqual(verify_installer.egress_findings(_code(self.text)), [])
         self.assertEqual(verify_installer.egress_findings("x := DownloadTemporaryFile('https://a', 'b', '', nil);"),
-                         ["INSTALLER_NETWORK_CALL: downloadtemporaryfile"])
+                         ["INSTALLER_NETWORK_CALL: downloadtemporaryfile",
+                          "INSTALLER_NETWORK_CALL: https:// in [Code]"])
         for snippet in (
             "Shell.Run('powershell -c iwr https://example.com');",
             "Shell.Exec('curl.exe https://example.com');",
@@ -92,6 +93,19 @@ class InstallerScriptTests(unittest.TestCase):
         ):
             with self.subTest(snippet=snippet):
                 self.assertTrue(verify_installer.egress_findings(snippet))
+
+    def test_the_egress_check_sees_download_pages_urls_and_download_tools(self):
+        """Inno 6.1+ downloads through a download page; Exec or ShellExec can start a downloader."""
+        page = ("[Code]\nvar P: TDownloadWizardPage;\nbegin\n  P := CreateDownloadPage('a', 'b', nil);\n"
+                "  P.Add(ExpandConstant('{#Mirror}'), 'f.zip', '');\n  P.Download;\nend;\n")
+        self.assertIn("INSTALLER_NETWORK_CALL: downloadpage", verify_installer.egress_findings(page))
+        exec_curl = "[Code]\nbegin\n  Exec('curl.exe', '-o f x', '', SW_HIDE, ewWaitUntilTerminated, R);\nend;\n"
+        self.assertIn("INSTALLER_NETWORK_CALL: exec(curl)", verify_installer.egress_findings(exec_curl))
+        shell_url = "[Code]\nbegin\n  ShellExec('', 'https://example.invalid/x', '', '', SW_SHOW, ewNoWait, R);\nend;\n"
+        self.assertIn("INSTALLER_NETWORK_CALL: https:// in [Code]", verify_installer.egress_findings(shell_url))
+        # A URL a [Setup] directive only shows is not network use.
+        shown = "[Setup]\nAppPublisherURL=https://example.invalid\n[Code]\nbegin\nend;\n"
+        self.assertEqual(verify_installer.egress_findings(shown), [])
 
     def test_the_app_id_is_the_one_the_verifier_and_upgrades_rely_on(self):
         self.assertEqual(_directive(self.text, "AppId"), "{{" + verify_installer.APP_ID + "}")
@@ -571,6 +585,16 @@ class BuildToolTests(unittest.TestCase):
             self.build()
         with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_PACKAGE_MISSING"):
             build_installer.check_package(self.root / "nothing")
+
+    def test_an_unreadable_checksum_list_is_a_named_refusal_not_a_traceback(self):
+        sums = self.package / build_installer.SUMS_NAME
+        sums.write_bytes(sums.read_bytes() + b"\xff\n")
+        with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_PACKAGE_INVALID: SHA256SUMS.txt is unreadable"):
+            self.build()
+        sums.unlink()
+        with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_PACKAGE_INVALID: SHA256SUMS.txt is unreadable"):
+            build_installer.read_sums(self.package)
+        self.assertEqual(self.calls, [])
 
     def test_a_runtime_manifest_that_does_not_verify_is_refused(self):
         def reject(_bin):

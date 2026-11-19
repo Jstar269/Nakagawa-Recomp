@@ -216,20 +216,30 @@ class EmittedFormatContractTest(unittest.TestCase):
             "RE_SKIPPED stopped matching the emitted SKIPPED line",
         )
 
-    def test_legacy_skipped_line_is_counted_as_a_skip(self):
+    def test_legacy_sync_failure_is_not_a_dropped_present(self):
         """src/rt/hle_display.c emits "FBSNAP f=%u -> SKIPPED (synchronisation failed)".
 
-        It is a dropped present, not a legacy capture of a file named "SKIPPED".
+        Only the legacy VRAM-side dump failed: the swapchain line for the same frame
+        follows it and says whether the present was captured or dropped. It is
+        neither a legacy capture of a file named "SKIPPED" nor a dropped present.
         """
         with tempfile.TemporaryDirectory() as d:
+            write_ppm(Path(d) / "frame_0300.ppm", 8, 8, 90)
             log = Path(d) / "stderr.log"
             log.write_text(
-                "FBSNAP f=300 -> SKIPPED (synchronisation failed)\n",
+                "FBSNAP f=300 -> SKIPPED (synchronisation failed)\n"
+                "FBSNAP f=300 swapchain capture -> build/snapshots/frame_0300.ppm (result=1)\n"
+                "FBSNAP f=301 -> SKIPPED (synchronisation failed)\n"
+                "FBSNAP f=301 swapchain capture -> SKIPPED (no present serviced this frame)\n",
                 encoding="utf-8",
             )
             r = fcc.classify_log(str(log))
-            self.assertEqual(r["skipped"], [300])
+            self.assertEqual(r["skipped"], [301])
+            self.assertEqual(r["legacy_sync_failures"], [300, 301])
             self.assertEqual(r["legacy"], [])
+            res = fcc.run_check(d, str(log), None)
+            self.assertEqual(res["skipped_presents"], 1)
+            self.assertEqual(res["legacy_sync_failures"], 2)
 
     def test_live_emitter_strings_in_hle_c(self):
         """The hand-copied samples must still agree with the actual emitter.
@@ -358,6 +368,43 @@ class RunCheckTest(unittest.TestCase):
             self.assertEqual(res["total_frames"], 3)
             # A step of 2 is a normal 30 Hz present pattern: reported, not a warning.
             self.assertEqual(len(res["frame_number_gaps"]), 2)
+
+    def test_empty_directory_without_a_log_is_not_clean(self):
+        """No frame and no capture line proves nothing was presented: not a pass."""
+        with tempfile.TemporaryDirectory() as d:
+            res = fcc.run_check(d, None, None)
+            self.assertEqual(res["total_frames"], 0)
+            self.assertEqual(res["verdict"], "no-capture")
+            self.assertEqual(fcc.main(["--dir", d]), fcc.EXIT_NO_CAPTURE)
+            self.assertNotIn(fcc.EXIT_NO_CAPTURE, (0, 1, 2))
+
+    def test_only_dropped_presents_is_not_clean(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "stderr.log"
+            log.write_text(
+                "FBSNAP f=7 swapchain capture -> SKIPPED (no present serviced this frame)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(fcc.run_check(d, str(log), None)["verdict"], "no-capture")
+
+    def test_fbdump_capture_is_accounted_by_its_own_name(self):
+        """SR_FBDUMP publishes present_source.ppm (src/rt/fbcap_policy.c), not frame_*.ppm."""
+        line = "FBSNAP f=40 swapchain capture -> present_source.ppm (result=1)\n"
+        with tempfile.TemporaryDirectory() as d:
+            write_ppm(Path(d) / "present_source.ppm", 8, 8, 90)
+            log = Path(d) / "stderr.log"
+            log.write_text(line, encoding="utf-8")
+            res = fcc.run_check(d, str(log), None)
+            self.assertEqual(res["missing_for_success"], [])
+            self.assertEqual(res["non_sequence_captures"], ["present_source.ppm"])
+            self.assertEqual(res["verdict"], "clean")
+            self.assertEqual(fcc.main(["--dir", d, "--log", str(log)]), 0)
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "stderr.log"
+            log.write_text(line, encoding="utf-8")
+            res = fcc.run_check(d, str(log), None)
+            self.assertEqual(len(res["missing_for_success"]), 1)
+            self.assertEqual(res["verdict"], "hard-error")
 
     def test_windows_named_frames(self):
         with tempfile.TemporaryDirectory() as d:

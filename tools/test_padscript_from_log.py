@@ -49,6 +49,30 @@ class TestPadscriptFromLog(unittest.TestCase):
             ],
         )
 
+    def test_widened_press_never_overlaps_the_next_press_into_a_chord(self):
+        # X tapped at 10, O at 12: widening X to 8 vblanks would replay X+O at 12..17.
+        transitions = [
+            padscript.Transition(10, 0, 0x4000),
+            padscript.Transition(11, 0x4000, 0),
+            padscript.Transition(12, 0, 0x2000),
+            padscript.Transition(13, 0x2000, 0),
+        ]
+        pulses = padscript.pulses_from_transitions(transitions, minimum_width=8)
+        self.assertEqual(pulses, [padscript.Pulse(10, 0x4000, 2), padscript.Pulse(12, 0x2000, 8)])
+        self.assertLessEqual(pulses[0].frame + pulses[0].width, pulses[1].frame)
+
+    def test_double_tap_keeps_a_released_vblank_between_the_presses(self):
+        transitions = [
+            padscript.Transition(10, 0, 0x4000),
+            padscript.Transition(11, 0x4000, 0),
+            padscript.Transition(12, 0, 0x4000),
+            padscript.Transition(13, 0x4000, 0),
+        ]
+        self.assertEqual(
+            padscript.pulses_from_transitions(transitions, minimum_width=8),
+            [padscript.Pulse(10, 0x4000, 1), padscript.Pulse(12, 0x4000, 8)],
+        )
+
     def test_backwards_vcount_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "moved backwards"):
             padscript.parse_transitions(
@@ -76,7 +100,9 @@ class TestPadscriptFromLog(unittest.TestCase):
         )
 
     def test_duplicate_vcount_transitions_do_not_emit_zero_width_spans(self):
-        # The zero-width 0x8 press is expanded to the minimum width, not dropped.
+        # The zero-width 0x8 press is kept for one vblank, not dropped. It is not expanded to the
+        # minimum width: the 0x10 row starts at the same vcount, and the runtime ORs overlapping
+        # rows, so a wider 0x8 row would replay the 0x18 chord for vblanks the recording never held.
         transitions = [
             padscript.Transition(10, 0, 0x8),
             padscript.Transition(10, 0x8, 0x10),
@@ -84,7 +110,7 @@ class TestPadscriptFromLog(unittest.TestCase):
         ]
         self.assertEqual(
             padscript.pulses_from_transitions(transitions),
-            [padscript.Pulse(10, 0x8, 8), padscript.Pulse(10, 0x10, 10)],
+            [padscript.Pulse(10, 0x8, 1), padscript.Pulse(10, 0x10, 10)],
         )
 
     def test_same_vcount_press_and_release_is_expanded_not_dropped(self):

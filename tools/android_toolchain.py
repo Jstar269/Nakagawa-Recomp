@@ -28,8 +28,13 @@ library folder):
 - `toolchain-manifest.json`, listing every file's SHA-256.
 
 Each stage writes into its own folder under --work and runs only when that folder has no
-`.done` stamp, so an interrupted build resumes. `--jobs` caps the compile jobs; links run one
-at a time, as one LLVM link can take several GB.
+`.done` stamp for the build's identity (Config.identity(): the pinned versions and SHA-256s,
+bionic's commit and the pinned sysroot inputs, the API level, the configure options, the host
+compilers and the Python launcher's source), so an interrupted build resumes. A stage folder
+that another identity wrote is cleared and built again, so a pin bump that reuses --work never
+ships the old binaries under the new pins. `stage` empties --out first and refuses a non-empty
+--out that this tool did not write. `--jobs` caps the compile jobs; links run one at a time, as
+one LLVM link can take several GB.
 """
 
 from __future__ import annotations
@@ -211,6 +216,23 @@ class Config:
     def tool(self, name: str) -> str:
         return str(self.host_bin / f"{name}{EXE}")
 
+    def identity(self) -> str:
+        """What every stage's output depends on, as the text each stage folder's stamps hold.
+
+        One identity covers every stage: the later stages are built by and against the earlier
+        ones, so a change to any input rebuilds them all.
+        """
+        document = {
+            "llvm": [LLVM_VERSION, LLVM_SHA256], "make": [MAKE_VERSION, MAKE_SHA256],
+            "python": [PYTHON_VERSION, PYTHON_SHA256], "bionic": android_sysroot.BIONIC_COMMIT,
+            "sysroot_inputs": android_sysroot.load_pins(), "api": API, "triple": TRIPLE,
+            "llvm_common": list(LLVM_COMMON), "host_tools": list(HOST_TOOLS),
+            "runtimes": list(RUNTIMES), "device_link": DEVICE_LINK,
+            "make_configure": list(MAKE_CONFIGURE), "host_cc": self.host_cc,
+            "host_cxx": self.host_cxx, "python_launcher": sha256_file(PYTHON_LAUNCHER),
+        }
+        return json.dumps(document, indent=2, sort_keys=True) + "\n"
+
     def prefix_map_args(self) -> list[str]:
         """Build paths out of the binaries: the source and work folders get fixed names."""
         return [f"-ffile-prefix-map={self.src}=/llvm-src", f"-ffile-prefix-map={self.build}=/llvm-build"]
@@ -236,12 +258,29 @@ def verify_tarball(path: Path, expected: str = LLVM_SHA256, url: str = LLVM_URL)
         raise ToolchainError(f"{path}: sha256 {actual}, pinned {expected}")
 
 
-def _done(folder: Path) -> bool:
-    return (folder / ".done").is_file()
+def _stamp(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8") if path.is_file() else None
 
 
-def _mark(folder: Path) -> None:
-    (folder / ".done").write_text("done\n", encoding="utf-8")
+def _done(folder: Path, identity: str) -> bool:
+    """True when *folder* holds a finished stage built from *identity*."""
+    return _stamp(folder / ".done") == identity
+
+
+def _start(folder: Path, identity: str) -> None:
+    """Make *folder* ready for a stage built from *identity*.
+
+    A folder that another identity started, or that records none, is cleared: its files were
+    built from other inputs. One this identity started is kept, so an interrupted stage resumes.
+    """
+    if folder.exists() and _stamp(folder / ".inputs") != identity:
+        shutil.rmtree(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / ".inputs").write_text(identity, encoding="utf-8", newline="\n")
+
+
+def _mark(folder: Path, identity: str) -> None:
+    (folder / ".done").write_text(identity, encoding="utf-8", newline="\n")
 
 
 def _run(command: list[str], log: Path, what: str, cwd: Path | None = None,
@@ -256,16 +295,18 @@ def _run(command: list[str], log: Path, what: str, cwd: Path | None = None,
 
 
 def extract_source(cfg: Config) -> None:
-    if _done(cfg.src):
+    identity = cfg.identity()
+    if _done(cfg.src, identity):
         return
     verify_tarball(cfg.llvm_tarball)
+    _start(cfg.src, identity)
     target = cfg.src.parent
     target.mkdir(parents=True, exist_ok=True)
     with tarfile.open(cfg.llvm_tarball) as tar:
         tar.extractall(target, filter="data")
     if not (cfg.src / "llvm" / "CMakeLists.txt").is_file():
         raise ToolchainError(f"{cfg.llvm_tarball}: no llvm/CMakeLists.txt under {cfg.src.name}")
-    _mark(cfg.src)
+    _mark(cfg.src, identity)
 
 
 def host_configure(cfg: Config) -> list[str]:
@@ -336,17 +377,21 @@ def check_no_ndk_runtime(data: bytes, binary: str) -> None:
 
 def stage_host(cfg: Config) -> None:
     folder = cfg.build / "host"
-    if _done(folder):
+    identity = cfg.identity()
+    if _done(folder, identity):
         return
+    _start(folder, identity)
     _run(host_configure(cfg), cfg.work / "logs" / "host-configure.log", "host configure")
     _run([cfg.ninja, "-C", str(folder), f"-j{cfg.jobs}", *HOST_TOOLS],
          cfg.work / "logs" / "host-build.log", "host build")
-    _mark(folder)
+    _mark(folder, identity)
 
 
 def stage_sysroot(cfg: Config) -> None:
-    if _done(cfg.sysroot):
+    identity = cfg.identity()
+    if _done(cfg.sysroot, identity):
         return
+    _start(cfg.sysroot, identity)
     tar_path = cfg.build / "sysroot.tar"
     files = android_sysroot.read_bionic(cfg.bionic)
     extra = android_sysroot.read_extra(cfg.extra, android_sysroot.load_pins())
@@ -369,13 +414,17 @@ def stage_sysroot(cfg: Config) -> None:
         target = cfg.sysroot / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(entry.data)
-    _mark(cfg.sysroot)
+    _mark(cfg.sysroot, identity)
 
 
 def stage_runtimes(cfg: Config) -> None:
     folder = cfg.build / "rt"
-    if _done(folder):
+    install = cfg.build / "rt-install"
+    identity = cfg.identity()
+    if _done(folder, identity):
         return
+    _start(folder, identity)
+    _start(install, identity)
     if cfg.resource.exists():
         shutil.rmtree(cfg.resource)
     shutil.copytree(cfg.build / "host" / "lib" / "clang" / CLANG_MAJOR / "include",
@@ -383,7 +432,6 @@ def stage_runtimes(cfg: Config) -> None:
     _run(runtimes_configure(cfg), cfg.work / "logs" / "rt-configure.log", "runtimes configure")
     _run([cfg.ninja, "-C", str(folder), f"-j{cfg.jobs}", "install"],
          cfg.work / "logs" / "rt-build.log", "runtimes build")
-    install = cfg.build / "rt-install"
     builtins = sorted(folder.rglob("libclang_rt.builtins*aarch64*.a"))
     if len(builtins) != 1:
         raise ToolchainError(f"expected one builtins library under {folder}, found {len(builtins)}")
@@ -392,23 +440,29 @@ def stage_runtimes(cfg: Config) -> None:
     shutil.copyfile(builtins[0], linux / "libclang_rt.builtins-aarch64-android.a")
     shutil.copyfile(install / "lib" / "libunwind.a", linux / "aarch64" / "libunwind.a")
     # libc++ goes where clang's Android driver looks for it: the sysroot. Only the device
-    # build reads it; the shipped sysroot tar is C only.
-    shutil.copytree(install / "include" / "c++" / "v1", cfg.sysroot / "usr" / "include" / "c++" / "v1")
+    # build reads it; the shipped sysroot tar is C only. A copy that an interrupted run left
+    # is replaced, so the stage resumes.
+    libcxx_headers = cfg.sysroot / "usr" / "include" / "c++" / "v1"
+    if libcxx_headers.exists():
+        shutil.rmtree(libcxx_headers)
+    shutil.copytree(install / "include" / "c++" / "v1", libcxx_headers)
     shutil.copyfile(install / "lib" / "libc++.a", cfg.sysroot / SYSROOT_LIB / "libc++.a")
-    _mark(folder)
+    _mark(folder, identity)
 
 
 def stage_device(cfg: Config) -> None:
     folder = cfg.build / "android"
-    if _done(folder):
+    identity = cfg.identity()
+    if _done(folder, identity):
         return
+    _start(folder, identity)
     _run(device_configure(cfg), cfg.work / "logs" / "device-configure.log", "device configure")
     _run([cfg.ninja, "-C", str(folder), f"-j{cfg.jobs}", "clang", "lld", "clang-resource-headers"],
          cfg.work / "logs" / "device-build.log", "device build")
     for name in ("clang", "lld"):
         binary = (folder / "bin" / name).resolve()
         check_no_ndk_runtime(binary.read_bytes(), str(binary))
-    _mark(folder)
+    _mark(folder, identity)
 
 
 def make_configure(cfg: Config) -> tuple[list[str], dict[str, str]]:
@@ -445,22 +499,23 @@ def check_device_executable(data: bytes, binary: str, work: Path) -> None:
 def stage_make(cfg: Config) -> None:
     """GNU make for the device: configure, then make's own build.sh, which needs no make."""
     folder = cfg.build / "make"
-    if _done(folder):
+    identity = cfg.identity()
+    if _done(folder, identity):
         return
-    if not _done(cfg.make_src):
+    if not _done(cfg.make_src, identity):
         verify_tarball(cfg.make_tarball, MAKE_SHA256, MAKE_URL)
-        cfg.make_src.parent.mkdir(parents=True, exist_ok=True)
+        _start(cfg.make_src, identity)
         with tarfile.open(cfg.make_tarball) as tar:
             tar.extractall(cfg.make_src.parent, filter="data")
         if not (cfg.make_src / "configure").is_file():
             raise ToolchainError(f"{cfg.make_tarball}: no configure under {cfg.make_src.name}")
-        _mark(cfg.make_src)
-    folder.mkdir(parents=True, exist_ok=True)
+        _mark(cfg.make_src, identity)
+    _start(folder, identity)
     command, env = make_configure(cfg)
     _run(command, cfg.work / "logs" / "make-configure.log", "make configure", folder, env)
     _run([cfg.sh, "./build.sh"], cfg.work / "logs" / "make-build.log", "make build", folder, env)
     check_device_executable((folder / "make").read_bytes(), str(folder / "make"), cfg.work)
-    _mark(folder)
+    _mark(folder, identity)
 
 
 def make_source_notice(reference: dict[str, object]) -> str:
@@ -588,9 +643,11 @@ def python_launcher_command(cfg: Config, libraries: list[str]) -> list[str]:
 def stage_python(cfg: Config) -> None:
     """The CPython release's libraries and standard library, and the launcher built against them."""
     folder = cfg.build / "python"
-    if _done(folder):
+    identity = cfg.identity()
+    if _done(folder, identity):
         return
     package = read_python_package(cfg.python_tarball)
+    _start(folder, identity)
     files = [*((f"lib/{name}", data) for name, data in package.libraries.items()),
              *package.headers.items(), ("LICENSE.txt", package.license)]
     for relative, data in files:
@@ -600,7 +657,7 @@ def stage_python(cfg: Config) -> None:
     _run(python_launcher_command(cfg, sorted(package.libraries)),
          cfg.work / "logs" / "python-launcher.log", "building the python launcher")
     check_device_executable((folder / "libnk_python.so").read_bytes(), "libnk_python.so", cfg.work)
-    _mark(folder)
+    _mark(folder, identity)
 
 
 def _tree_entries(root: Path, prefix: str) -> dict[str, android_sysroot.Entry]:
@@ -621,12 +678,32 @@ def third_party_notices(src: Path) -> str:
     return "".join(parts)
 
 
+MANIFEST = "toolchain-manifest.json"
+#: Present in --out while stage_output writes it; removed just before the manifest is written.
+PARTIAL = ".nk-toolchain-partial"
+
+
+def clear_out(out: Path) -> None:
+    """Empty *out* for stage_output, so nothing from an earlier run is listed or shipped.
+
+    Only a folder this tool wrote (it holds the manifest, or the stamp of an interrupted
+    stage_output) is cleared; any other non-empty folder is refused.
+    """
+    if out.exists():
+        if any(out.iterdir()) and not ((out / MANIFEST).is_file() or (out / PARTIAL).is_file()):
+            raise ToolchainError(f"{out}: not empty and holds no {MANIFEST}; refusing to clear it for --out")
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+    (out / PARTIAL).write_text("stage_output did not finish\n", encoding="utf-8", newline="\n")
+
+
 def stage_output(cfg: Config, out: Path) -> dict[str, str]:
-    """The APK's files under *out*; returns {path: sha256}."""
+    """The APK's files under *out*, which is emptied first (clear_out); returns {path: sha256}."""
+    clear_out(out)
     libs = out / "jniLibs" / "arm64-v8a"
     assets = out / "assets" / "toolchain"
-    libs.mkdir(parents=True, exist_ok=True)
-    assets.mkdir(parents=True, exist_ok=True)
+    libs.mkdir(parents=True)
+    assets.mkdir(parents=True)
     device = cfg.build / "android"
     for name, target in (("clang", "libnk_clang.so"), ("lld", "libnk_lld.so")):
         shutil.copyfile((device / "bin" / name).resolve(), libs / target)  # linked stripped
@@ -661,15 +738,14 @@ def stage_output(cfg: Config, out: Path) -> dict[str, str]:
     resource = _tree_entries(device / "lib" / "clang" / CLANG_MAJOR / "include", "include")
     resource.update(_tree_entries(cfg.resource / "lib", "lib"))
     android_sysroot.write_archive(resource, assets / "clang-resource.tar")
+    (out / PARTIAL).unlink()
     manifest = {path.relative_to(out).as_posix(): sha256_file(path)
-                for path in sorted(out.rglob("*")) if path.is_file()
-                and path.name != "toolchain-manifest.json"}
+                for path in sorted(out.rglob("*")) if path.is_file() and path.name != MANIFEST}
     document = {"llvm": LLVM_VERSION, "llvm_sha256": LLVM_SHA256,
                 "make": MAKE_VERSION, "make_sha256": MAKE_SHA256,
                 "python": PYTHON_VERSION, "python_sha256": PYTHON_SHA256,
                 "bionic": android_sysroot.BIONIC_COMMIT, "api": API, "files": manifest}
-    (out / "toolchain-manifest.json").write_text(json.dumps(document, indent=2) + "\n",
-                                                 encoding="utf-8", newline="\n")
+    (out / MANIFEST).write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8", newline="\n")
     return manifest
 
 
@@ -682,7 +758,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--extra", required=True, type=Path,
                         help="the files android/toolchain/sysroot-inputs.json pins")
     parser.add_argument("--work", required=True, type=Path, help="build folder (several GB)")
-    parser.add_argument("--out", required=True, type=Path, help="where the APK's files go")
+    parser.add_argument("--out", required=True, type=Path, help="where the APK's files go; emptied first, and a non-empty folder "
+                        "without a toolchain-manifest.json is refused")
     parser.add_argument("--cmake", default="cmake")
     parser.add_argument("--ninja", default="ninja")
     parser.add_argument("--host-cc", default="gcc")

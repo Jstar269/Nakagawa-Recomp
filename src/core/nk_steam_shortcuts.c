@@ -9,6 +9,7 @@
 #include "nk_zip.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -942,11 +943,16 @@ bool nk_steam_client_running(void) {
 #else
 
 NkSteamStatus nk_steam_find_root(char *root, size_t root_cap) {
-    if (root && root_cap) root[0] = '\0';
-    return NK_STEAM_ERR_UNSUPPORTED;
+    if (!root || root_cap == 0u) return NK_STEAM_ERR_ARGUMENT;
+    root[0] = '\0';
+    if (nk_platform_host_kind() != NK_HOST_LINUX) return NK_STEAM_ERR_UNSUPPORTED;
+    return nk_platform_linux_steam_find_root(root, root_cap) ? NK_STEAM_OK
+                                                             : NK_STEAM_ERR_NOT_FOUND;
 }
 
-bool nk_steam_client_running(void) { return false; }
+bool nk_steam_client_running(void) {
+    return nk_platform_host_kind() == NK_HOST_LINUX && nk_platform_linux_steam_client_running();
+}
 
 #endif
 
@@ -961,11 +967,10 @@ static NkSteamStatus add_for_account(const char *root, const char *account_id,
         strcmp(account_id, "0") == 0 || strlen(account_id) >= sizeof(((NkSteamAccount *)0)->id)) {
         return NK_STEAM_ERR_ARGUMENT;
     }
-#ifndef _WIN32
-    /* Without a probe of its own, a host that cannot see Steam's process cannot promise that
+    /* Without a host probe, a platform that cannot see Steam's process cannot promise that
      * Steam is closed, so it writes nothing. */
-    if (!running) return NK_STEAM_ERR_UNSUPPORTED;
-#endif
+    NkHostKind host = nk_platform_host_kind();
+    if (!running && host != NK_HOST_WINDOWS && host != NK_HOST_LINUX) return NK_STEAM_ERR_UNSUPPORTED;
     NkSteamAccount account;
     NkSteamStatus status = resolve_account(root, account_id, &account);
     if (status != NK_STEAM_OK) return status;
