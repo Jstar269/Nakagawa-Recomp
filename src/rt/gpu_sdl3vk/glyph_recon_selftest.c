@@ -373,7 +373,7 @@ static void profile_cell(const char *what, const int *prof, int n, int pad) {
 static void cell_gradient(void) {
     /* A gradient of one colour is not an edge: the rebuild keeps it smooth (or refuses it), and never turns it into
      * a sawtooth that restarts at every block. A stroke that is one texel wide and half covered is an edge. */
-    static uint32_t shadow[32 * 32], fade[64 * 8], steep[16 * 8], cross[16 * 16];
+    static uint32_t shadow[32 * 32], fade[64 * 8], cross[16 * 16];
     static uint32_t tile[64 * 6 * 8 * 6], big[32 * 6 * 32 * 6];
     for (int y = 0; y < 32; y++)
         for (int x = 0; x < 32; x++) {
@@ -482,7 +482,6 @@ static void cell_gradient(void) {
             check(v == NK_GLYPH_OK, "junction", "thick-stroke plus at ink 237, factor %d: %s", f, nk_glyph_verdict_name(v));
         }
     }
-    (void)steep;
 }
 
 /* ---- soft art in two dimensions ----------------------------------------------------------------- */

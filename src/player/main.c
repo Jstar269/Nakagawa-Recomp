@@ -2250,11 +2250,15 @@ static void player_ui_nk_apply_action(PlayerApp *app,
 /* nk_ui draws the frame at the window's real size, from the output's pixels. */
 static void player_render_active_ui(PlayerUiNk *next_ui, PlayerApp *app,
                                     SDL_Renderer *renderer, SDL_Window *window) {
-    PlayerUiAction action;
-    if (player_ui_nk_view_active(next_ui, app) &&
-        player_ui_nk_render(next_ui, app, renderer, window, &action)) {
+    PlayerUiAction action = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    bool drawn = player_ui_nk_view_active(next_ui, app) &&
+                 player_ui_nk_render(next_ui, app, renderer, window, &action);
+    /* An action the frame committed (its dialog already closed) runs even when
+       the frame could not be drawn. */
+    if (drawn || action.kind != PLAYER_UI_ACTION_NONE) {
         player_ui_nk_apply_action(app, &action);
-    } else {
+    }
+    if (!drawn) {
         /* The launcher draws every view (player_ui_nk_draws_view); a frame it
            could not draw is cleared. */
         (void)SDL_SetRenderDrawColor(renderer, 11u, 15u, 20u, 255u);
@@ -3822,9 +3826,10 @@ static void player_launch_job_spawn(PlayerLaunchJob *job, bool launcher_audio_cl
     }
 }
 
-/* `launcher_audio_closed`: the launcher holds no music stream. Otherwise the job
-   waits, launch_pending, while the music fades out, and player_launch_job_poll
-   starts the worker once the music has let go of the device. */
+/* `launcher_audio_closed`: the launcher holds no audio stream (music or UI sounds).
+   Otherwise the job waits, launch_pending, while the music fades out and the sounds
+   close, and player_launch_job_poll starts the worker once both have let go of the
+   device. */
 static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index,
                                                 bool launcher_audio_closed) {
     if (!app || app->launch_pending || app->is_game_running ||

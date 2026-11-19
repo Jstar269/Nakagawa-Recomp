@@ -456,8 +456,9 @@ anime4k-selftest: shader-verify
 # (invariant S1: a reference from the UI pass to the runtime fails this link). Then, for the
 # binary that runs, with src/rt/ace.c as well, whose key table gives the launch notice's longest
 # list: every part on, laid out at every window and display scale and drawn once. With SDL3_ttf
-# the pictures and that layout use the launcher's fonts. No Vulkan headers, loader or device: SKIP
-# (exit 77), visible in the log; NK_UI_VK_REQUIRE=1 makes a skip fail.
+# the pictures and that layout use the launcher's fonts: a font that does not load from the folder
+# fails, and an SDL3_ttf library that cannot be loaded at run time is a SKIP (exit 77). No Vulkan
+# headers, loader or device: SKIP (exit 77), visible in the log; NK_UI_VK_REQUIRE=1 makes a skip fail.
 ACE_UI_SELFTEST_BUILD = $(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/ui -Isrc/rt -Isrc/rt/gpu_sdl3vk -Ithird_party/clay \
 	$(VULKAN_INC_FLAGS) $(SDL3_INC_FLAGS) -DNK_UI_WITH_VULKAN $$ttf_defs \
 	$(NK_UI_CORE_SRCS) src/ui/backend/nk_ui_vk.c $$ttf_srcs src/rt/osk_overlay.c \
@@ -481,8 +482,8 @@ ace-ui-selftest:
 		$$ttf_libs -lm $(NK_UI_VK_SELFTEST_LIBS) -o $(BUILD_ROOT)/ace_ui_selftest$(EXE_EXT) || exit 1; \
 	rc=0; $(BUILD_ROOT_RUN)/ace_ui_selftest$(EXE_EXT) $(BUILD_ROOT) --fonts . || rc=$$?; \
 	if [ $$rc -eq 77 ] && [ "$(NK_UI_VK_REQUIRE)" = 1 ]; then \
-		echo "FAIL ace-ui-selftest (the GPU leg skipped, but NK_UI_VK_REQUIRE=1 requires a Vulkan device)"; exit 1; \
-	elif [ $$rc -eq 77 ]; then echo "SKIP ace-ui-selftest GPU leg (exit 77; the layout cells passed)"; \
+		echo "FAIL ace-ui-selftest (a leg skipped, but NK_UI_VK_REQUIRE=1 requires a Vulkan device and, with SDL3_ttf, its library)"; exit 1; \
+	elif [ $$rc -eq 77 ]; then echo "SKIP ace-ui-selftest GPU or font leg (exit 77; the reason is printed above; the layout cells passed)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL ace-ui-selftest (exit $$rc)"; exit $$rc; fi
 
 .PHONY: nk-ui-focus-selftest

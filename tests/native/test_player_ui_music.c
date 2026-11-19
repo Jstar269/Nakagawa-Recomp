@@ -175,6 +175,137 @@ static int test_track_decodes_and_loops(const char *track) {
     return 1;
 }
 
+/* ---- damaged headers ---------------------------------------------------------- */
+
+/* The Ogg page checksum: CRC-32, polynomial 0x04c11db7, not reflected, start 0. */
+static uint32_t ogg_crc(const unsigned char *data, size_t size) {
+    uint32_t crc = 0u;
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= (uint32_t)data[i] << 24;
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc & 0x80000000u) ? (crc << 1) ^ 0x04c11db7u : crc << 1;
+    }
+    return crc;
+}
+
+/* The size of the page at `page` (header, segment table and body). */
+static size_t ogg_page_size(const unsigned char *page) {
+    size_t size = 27u + page[26];
+    for (unsigned i = 0; i < page[26]; ++i) size += page[27 + i];
+    return size;
+}
+
+static void ogg_page_seal(unsigned char *page) {
+    uint32_t crc;
+    memset(page + 22, 0, 4u);
+    crc = ogg_crc(page, ogg_page_size(page));
+    for (int i = 0; i < 4; ++i) page[22 + i] = (unsigned char)(crc >> (8 * i));
+}
+
+/* Appends a page holding whole packets of the given sizes (each under 255 bytes). */
+static size_t ogg_page(unsigned char *out, unsigned char type, uint32_t sequence,
+                       const unsigned char *body, const unsigned char *sizes, unsigned count) {
+    size_t body_size = 0u;
+    memset(out, 0, 27u);
+    memcpy(out, "OggS", 4u);
+    out[5] = type;
+    out[14] = 0x4bu; /* serial number */
+    for (int i = 0; i < 4; ++i) out[18 + i] = (unsigned char)(sequence >> (8 * i));
+    out[26] = (unsigned char)count;
+    for (unsigned i = 0; i < count; ++i) {
+        out[27 + i] = sizes[i];
+        body_size += sizes[i];
+    }
+    memcpy(out + 27 + count, body, body_size);
+    ogg_page_seal(out);
+    return 27u + count + body_size;
+}
+
+/* Vorbis packs header fields least significant bit first. */
+static void put_bits(unsigned char *buf, size_t *bit, uint32_t value, int count) {
+    for (int i = 0; i < count; ++i, ++*bit)
+        if ((value >> i) & 1u) buf[*bit >> 3] |= (unsigned char)(1u << (*bit & 7u));
+}
+
+static int test_damaged_headers_are_refused(const char *track) {
+    char detail[256];
+    PlayerUiPcm none;
+    /* The last page's granule set to 2^63 + 10000: a negative 64-bit length
+       whose low 32 bits read as 10000 frames. Before the length was checked
+       whole, the 32-bit length passed every check and the decode returned
+       frames stb_vorbis never wrote. */
+    {
+        size_t size = 0u;
+        unsigned char *bytes = read_file(track, &size);
+        size_t last = 0u;
+        bool found = false;
+        CHECK(bytes != NULL && size > 27u, "the shipped track is readable");
+        for (size_t at = size - 27u; at > 0u; --at) {
+            if (memcmp(bytes + at, "OggS", 4u) == 0 && (bytes[at + 5] & 4u) != 0u) {
+                last = at;
+                found = true;
+                break;
+            }
+        }
+        CHECK(found && last + ogg_page_size(bytes + last) == size, "the track ends with its last page");
+        for (int i = 0; i < 8; ++i)
+            bytes[last + 6 + (size_t)i] =
+                (unsigned char)((0x8000000000002710ull >> (8 * i)) & 0xffu);
+        ogg_page_seal(bytes + last);
+        CHECK(player_ui_vorbis_decode(bytes, size, PLAYER_UI_MUSIC_MAX_PCM_BYTES, NULL, NULL,
+                                      &none, detail, sizeof(detail)) ==
+                      PLAYER_UI_VORBIS_UNSUPPORTED &&
+                  none.samples == NULL && strstr(detail, "declares -") != NULL,
+              "a last-page granule of 2^63 or more is refused as a length");
+        SDL_free(bytes);
+    }
+    /* A setup header of four codebooks of 2^18 entries each, about 3 MB of
+       decoder memory apiece from a few bytes of file: refused once it passes
+       the decoder's arena, before the file is found to be damaged further on.
+       Without the arena stb_vorbis allocated all of it (up to about 0.9 GB for
+       256 such codebooks). */
+    {
+        unsigned char file[512];
+        unsigned char body[256];
+        unsigned char sizes[2];
+        size_t at = 0u;
+        size_t bit;
+        memset(body, 0, sizeof(body));
+        /* Identification: 2 channels, 44.1 kHz, blocks of 256 and 2048. */
+        memcpy(body, "\x01vorbis", 7u);
+        body[11] = 2u;
+        body[12] = 0x44u; body[13] = 0xacu;
+        body[28] = 0xb8u;
+        body[29] = 1u;
+        sizes[0] = 30u;
+        at += ogg_page(file + at, 2u, 0u, body, sizes, 1u);
+        /* Comment (no vendor, no comments), then setup. */
+        memset(body, 0, sizeof(body));
+        memcpy(body, "\x03vorbis", 7u);
+        body[15] = 1u;
+        memcpy(body + 16, "\x05vorbis", 7u);
+        bit = (16u + 7u) * 8u;
+        put_bits(body, &bit, 3u, 8);                  /* four codebooks */
+        for (int c = 0; c < 4; ++c) {
+            put_bits(body, &bit, 0x564342u, 24);      /* sync */
+            put_bits(body, &bit, 1u, 16);             /* dimensions */
+            put_bits(body, &bit, 0x40000u, 24);       /* entries */
+            put_bits(body, &bit, 1u, 1);              /* ordered */
+            put_bits(body, &bit, 17u, 5);             /* every codeword 18 bits long */
+            put_bits(body, &bit, 0x40000u, 19);       /* ... for all 2^18 entries */
+            put_bits(body, &bit, 0u, 4);              /* no lookup */
+        }
+        sizes[0] = 16u;
+        sizes[1] = (unsigned char)((bit + 7u) / 8u - 16u + 8u);
+        at += ogg_page(file + at, 0u, 1u, body, sizes, 2u);
+        CHECK(player_ui_vorbis_decode(file, at, PLAYER_UI_MUSIC_MAX_PCM_BYTES, NULL, NULL, &none,
+                                      detail, sizeof(detail)) == PLAYER_UI_VORBIS_UNSUPPORTED &&
+                  none.samples == NULL && strstr(detail, "decoder setup") != NULL,
+              "a setup header that needs more than the decoder's arena is refused");
+    }
+    return 1;
+}
+
 /* Updates `music` until its state is `want` or WAIT_LIMIT_MS passes. */
 static bool wait_for(PlayerUiMusic *music, const PlayerUiMusicRequest *request,
                      PlayerUiMusicState want) {
@@ -470,8 +601,8 @@ int main(int argc, char **argv) {
         return 2;
     }
     (void)SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
-    if (!test_track_decodes_and_loops(argv[1]) || !test_player_states(argv[1]) ||
-        !test_decode_release_and_transitions(argv[1])) {
+    if (!test_track_decodes_and_loops(argv[1]) || !test_damaged_headers_are_refused(argv[1]) ||
+        !test_player_states(argv[1]) || !test_decode_release_and_transitions(argv[1])) {
         return 1;
     }
     puts("player UI launcher music passed");

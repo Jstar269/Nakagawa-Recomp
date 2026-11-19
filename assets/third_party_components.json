@@ -90,7 +90,11 @@
         "pacman_package": "freetype",
         "upstream_origin": "https://gitlab.freedesktop.org/freetype/freetype",
         "disposition": "copied_into_package",
-        "note": "FreeType is dual-licensed FTL or GPL-2.0-or-later; this distribution uses the FTL option, which the FSF lists as GPL-compatible.",
+        "note": "FreeType is dual-licensed FTL or GPL-2.0-or-later; this distribution uses the FTL option, which the FSF lists as GPL-compatible. The FTL requires a binary distribution's documentation to state that the software is based in part on the work of the FreeType Team; copyright_notices carries that statement into THIRD_PARTY_NOTICES.txt.",
+        "copyright_notices": [
+          "Portions of this software are copyright (C) 1996-2026 The FreeType Project (https://freetype.org). All rights reserved.",
+          "This software is based in part on the work of the FreeType Team."
+        ],
         "license_texts": [
           {
             "file": "third_party/licenses/FreeType-FTL.txt",
@@ -549,7 +553,7 @@
         "name": "dr_flac (carried by libchdr)",
         "spdx_id": "Unlicense",
         "upstream_origin": "https://github.com/mackron/dr_libs",
-        "upstream_revision": "dr_flac v0.13.4 (libchdr include/dr_libs/dr_flac.h at 47d794151b2b64f6aba60304e6480f4f5a2bc24b)",
+        "upstream_revision": "dr_flac v0.13.4 development snapshot (header 'v0.13.4 - TBD'; libchdr include/dr_libs/dr_flac.h at 47d794151b2b64f6aba60304e6480f4f5a2bc24b)",
         "disposition": "statically_linked_subset",
         "notice_file": "libchdr-dr-flac.txt",
         "copyright_notices": [
@@ -559,7 +563,7 @@
         "license_texts": [
           {
             "file": "third_party/dr_libs/LICENSE.txt",
-            "copied_from": "dr_libs LICENSE (third_party/dr_libs/PROVENANCE.md); the same two alternatives dr_flac.h carries at its end",
+            "copied_from": "dr_libs LICENSE (third_party/dr_libs/PROVENANCE.md); the same two alternatives dr_flac.h carries at its end, except that its MIT-0 copyright line reads 2020 where dr_flac.h reads 2023",
             "sha256": "dd1c647e6f767f8ff4b2dfae0fed314726600a01e0cf1ef556afddd5fa96ff15"
           }
         ]
@@ -597,7 +601,7 @@
           "Copyright (C) 2025-2026 the psp-recomp authors (sal063 / psp-recomp)",
           "Copyright (c) 2012- PPSSPP Project and contributors"
         ],
-        "note": "Source files under src/rt/ and src/ref/ that carry GPL-2.0-or-later and derive from the sal063 PSP Recompilation Project and, for the files listed in src/rt/PROVENANCE.md, from PPSSPP. They are compiled into the runtime itself, so no separate relink step applies. The runtime is conveyed under GPL-3.0-or-later, which GPL-2.0-or-later permits. No disposition in this inventory names statically compiled GPL source of this kind; statically_linked_subset is the closest documented value.",
+        "note": "Source files under src/rt/ and src/ref/ that carry GPL-2.0-or-later and derive from the sal063 PSP Recompilation Project and, for the files listed in src/rt/PROVENANCE.md, from PPSSPP. They are compiled into the runtime itself, so no separate relink step applies. GPL-2.0-or-later lets them be conveyed under GPL version 3, the licence of the player that links them: the project's own files are GPL-3.0-or-later, and the player also links GPL-3.0-only files (the pspdecrypt-derived src/core/nk_psp_* files and xBRZ), so it is conveyed under GPL version 3 (NOTICE.md). No disposition in this inventory names statically compiled GPL source of this kind; statically_linked_subset is the closest documented value.",
         "license_texts": [
           {
             "file": "third_party/licenses/GPL-2.0.txt",
@@ -607,7 +611,7 @@
           {
             "file": "third_party/licenses/SAL063_CREDITS.txt",
             "copied_from": "sal063 CREDITS.md at da17b0e1db209206a407d097d132201e516e3855 with Nakagawa corrections (third_party/licenses/SAL063_CREDITS.txt)",
-            "sha256": "e6fba06ec3eb22142c431ff4f2d4edb7212a8e0e72e68bf01b056cca5117b143"
+            "sha256": "619dd74e6f84e955b99c4adecc167c2e602626fc9555b98cbb07ce04c2b411ef"
           }
         ]
       },

@@ -7,9 +7,13 @@
 /* The player's on-screen keyboard (#2197): a grid of keys for a controller or the mouse,
    drawn from the nk_ui buttons, that edits one UTF-8 text in place. It knows nothing of
    what the text is for: the caller gives the buffer, the most bytes it may hold, and a
-   character filter. Today the nickname editor is its caller.
+   character filter. Two screens draw it: the nickname editor (scr_form.c), which lets
+   it take the pad's shortcuts itself, and the library's find box (scr_library.c), which
+   takes them before its top bar and hands them over (UiKeyboardPad).
 
-   The keys, row by row (the layout of src/rt/osk_overlay.h's guest keyboard):
+   The keys, row by row. Only the shape follows src/rt/osk_overlay.h's guest keyboard
+   (rows of ten keys, then the wide keys in the same order); the characters and their
+   order are this keyboard's own:
        1 2 3 4 5 6 7 8 9 0
        q w e r t y u i o p
        a s d f g h j k l '

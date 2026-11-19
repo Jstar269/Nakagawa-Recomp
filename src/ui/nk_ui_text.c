@@ -46,6 +46,7 @@ static int nk_ui_text_fixed_shape(void *user, int font, int px, const char *text
                                   size_t length, NkUiGlyph *out, int max) {
     int count = 0;
     size_t i = 0;
+    uint32_t chars = 0u;
     float advance;
     (void)user;
     (void)font;
@@ -83,7 +84,13 @@ static int nk_ui_text_fixed_shape(void *user, int font, int px, const char *text
         out[count].y = 0.0f;
         out[count].advance_x = advance;
         out[count].advance_y = 0.0f;
+        out[count].text_index = chars;
         ++count;
+        /* Characters as layout counts them: every byte that is not a UTF-8
+           continuation byte. */
+        for (size_t k = i; k < i + width; ++k) {
+            if (((unsigned char)text[k] & 0xC0u) != 0x80u) ++chars;
+        }
         i += width;
     }
     return count;
