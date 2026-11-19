@@ -71,9 +71,14 @@ PROJECT_LATIN_SMALL_STRIKE_ARGS := --ppem 13 --snap-overshoot 3 --embolden-x 2 -
 # Per index: source face, PGF style, then that face's spacing (--tracking, eighths of a pixel), where
 # measured its digit advance (26.6 px), and its horizontal-stroke weight (--embolden-y, eighths of a
 # pixel). The weight puts each sans-serif face's ink per letter within 2 % of the console face's (#1300);
-# the serif faces keep none, because they already carry more ink than the console's. The bold sans-serif
-# faces are already at the largest --embolden-y, so their vertical strokes take one sub-sample more
-# --embolden-x than the strike's (a later flag wins) to reach that.
+# the serif faces keep none, because they already carry more ink than the console's. The sans-serif
+# faces of the smaller size and the bold ones of the larger size also take a horizontal scale
+# (--scale-x, thousandths, spec section 3 rule 14) and, for the bold ones, more --embolden-x than the
+# strike's (a later flag wins) in place of --embolden-y: thickening upwards had set their x-height (and
+# the bold faces' cap height) a row above the console's, and their letters were narrower and spaced
+# looser than the console's. These values were tuned against a private comparison with the console's
+# own fonts (#1300); the regular faces of the smaller size keep a scale small enough for the 3 % line
+# widths of the larger capitals.
 PROJECT_LATIN_0_FACE := LiberationSans-Regular
 PROJECT_LATIN_1_FACE := LiberationSerif-Regular
 PROJECT_LATIN_2_FACE := LiberationSans-Italic
@@ -94,17 +99,17 @@ PROJECT_LATIN_0_SPACING := --tracking 7 --digit-advance 852 --embolden-y 3
 PROJECT_LATIN_1_SPACING := --tracking 2
 PROJECT_LATIN_2_SPACING := --tracking 7 --digit-advance 852 --embolden-y 3
 PROJECT_LATIN_3_SPACING := --tracking 3
-PROJECT_LATIN_4_SPACING := --tracking 6 --digit-advance 840 --embolden-y 8 --embolden-x 5
+PROJECT_LATIN_4_SPACING := --scale-x 1040 --embolden-x 8 --embolden-y 3 --tracking 2 --digit-advance 872
 PROJECT_LATIN_5_SPACING := --tracking 1
-PROJECT_LATIN_6_SPACING := --tracking 6 --digit-advance 840 --embolden-y 8 --embolden-x 5
+PROJECT_LATIN_6_SPACING := --scale-x 1080 --embolden-x 8 --embolden-y 2 --tracking -2 --digit-advance 904
 PROJECT_LATIN_7_SPACING := --tracking 2
-PROJECT_LATIN_8_SPACING := --tracking 7 --digit-advance 555 --embolden-y 5
+PROJECT_LATIN_8_SPACING := --scale-x 1030 --tracking 5 --digit-advance 571 --embolden-y 4
 PROJECT_LATIN_9_SPACING := --tracking 3
-PROJECT_LATIN_10_SPACING := --tracking 7 --digit-advance 555 --embolden-y 4
+PROJECT_LATIN_10_SPACING := --scale-x 1030 --tracking 5 --digit-advance 571 --embolden-y 4
 PROJECT_LATIN_11_SPACING := --tracking 4
-PROJECT_LATIN_12_SPACING := --tracking 6 --digit-advance 559 --embolden-y 8 --embolden-x 3
+PROJECT_LATIN_12_SPACING := --scale-x 1080 --embolden-x 4 --embolden-y 4 --tracking 1 --digit-advance 599
 PROJECT_LATIN_13_SPACING := --tracking 3
-PROJECT_LATIN_14_SPACING := --tracking 6 --digit-advance 559 --embolden-y 8 --embolden-x 3
+PROJECT_LATIN_14_SPACING := --scale-x 1080 --embolden-x 6 --embolden-y 2 --tracking 1 --digit-advance 599
 PROJECT_LATIN_15_SPACING := --tracking 3
 # $(1) index, $(2) target stem, $(3) output, $(4) the face index within its size (0-7), $(5) strike.
 define PROJECT_LATIN_FACE_RULE

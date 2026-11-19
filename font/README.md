@@ -35,6 +35,12 @@ dip below the baseline and rise above the x-height and cap height by up to a thi
 which would otherwise be drawn as a faint extra row; the converter sets those overshoots on the flat letters'
 heights (`--snap-overshoot`, [the converter specification](../docs/cleanroom/PGF_CONVERTER_SPEC.md)).
 
+The sans-serif faces of the smaller size (`ltn8`, `ltn10`, `ltn12`, `ltn14`) and the bold sans-serif faces of the
+larger size (`ltn4`, `ltn6`) set their x-height, and the bold ones their cap height, on the PSP font's rows, and
+are drawn slightly wider than Liberation Sans (`--scale-x`, 3 % for `ltn8` and `ltn10`, 4 % for `ltn4`, 8 % for
+the others) with tighter spacing, because the PSP's letters at those sizes fill more of their width. Those
+settings were tuned on 2026-11-19 against a private comparison with one PSP's own fonts (#1300).
+
 ## Without your PSP's fonts: what changes
 
 You don't need a PSP to play. Without its fonts, every game still starts and still draws its text, with the fonts
@@ -57,16 +63,15 @@ What changes:
 - **Letter shapes.** The text looks like Liberation Sans and Liberation Serif (Latin), Noto Sans JP (Japanese) or
   Gowun Dodum (Korean), not the PSP's fonts.
 - **Capitals against small letters.** In Liberation's faces capitals are wider, compared with small letters, than in
-  the PSP's. The spacing splits the difference, so in the regular sans-serif faces capitals average about 2 % wider
-  than the PSP's and small letters about 2 % narrower. A line in capitals, such as a menu, runs up to 3 % longer and
+  the PSP's. The spacing splits the difference, so in the regular sans-serif faces capitals average up to 2 % wider
+  than the PSP's and small letters up to 3 % narrower. A line in capitals, such as a menu, runs up to 3 % longer and
   a sentence up to 2 % shorter.
 - **Weight of the serif faces.** The serif stand-ins (`ltn1`, `ltn3`, `ltn5`, `ltn7` and the same four of the
   smaller size) carry 6 % to 30 % more ink per letter than the PSP's, because the PSP's serif faces are lighter than
   Liberation Serif. Measured on 2026-11-07 on the PSP-3000's files described under "Measured differences" below.
-- **Weight of the bold sans-serif faces.** The sans-serif stand-ins carry the PSP fonts' ink per letter within 2 %.
-  The bold ones (`ltn4`, `ltn6`, `ltn12`, `ltn14`) are at the converter's largest horizontal-stroke setting and
-  one-eighth of a pixel more vertical-stroke weight than the other faces of their size: `ltn4` and `ltn12` are
-  about 1 % lighter than the PSP's, `ltn6` and `ltn14` up to 2 % heavier.
+- **Weight of the sans-serif faces.** The sans-serif stand-ins carry the PSP fonts' ink per letter within 2 %. The
+  bold ones (`ltn4`, `ltn6`, `ltn12`, `ltn14`) get most of it from thicker vertical strokes, so that their x-height
+  and cap height stay on the PSP font's rows.
 - **Japanese weight and Latin letters in Japanese text.** The Japanese stand-in is Noto Sans JP's regular weight;
   its stroke weight has not been compared with the PSP font's. Latin letters drawn with the Japanese font come from
   Noto Sans JP and are about 18 % narrower than the PSP's (9.7 pixels on average against 11.8).
@@ -82,8 +87,10 @@ Measured on 2026-11-04 at `9ea3cc410` by reading each of the 18 fonts of one PSP
 stand-in that serves it through the player's own font reader (`src/rt/pgf_public.c`), with the stand-ins built by
 `tools/ttf2pgf.py` with the Makefile's settings. Widths are the sum of the characters' advances, without spaces.
 "Sentence" is `The quick brown fox jumps over the lazy dog.`; "menu line" is `NEW GAME  CONTINUE  OPTIONS  0123456789`.
-The "Now" columns compare the current stand-ins with those recorded PSP widths (#2005); the "Before" columns are the
-measurement of the earlier stand-ins.
+The "Now" columns compare the stand-ins of that date with those recorded PSP widths (#2005); the "Before" columns are
+the measurement of the earlier stand-ins. The faces retuned on 2026-11-19 (`ltn4`, `ltn6`, `ltn8`, `ltn10`, `ltn12`,
+`ltn14`) keep every sentence and menu line within 3 % of those recorded widths (`tools/test_ttf2pgf.py`); their
+per-class numbers in the table predate that change.
 
 | PSP fonts | Before: characters lacking | Before: width against the PSP font | Now: characters lacking | Now: width against the PSP font |
 | --- | --- | --- | --- | --- |
