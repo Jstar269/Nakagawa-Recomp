@@ -108,6 +108,7 @@ scaling.
 | `snap-overshoot-unavailable` | `--snap-overshoot` with a drawing font that lacks an outline for `H` or `x`, or whose flat edges do not ascend (section 3, rule 13). |
 | `snap-overshoot-zones-overlap` | At the chosen ppem the band above the x-height reaches the cap height (section 3, rule 13). |
 | `scale-x-out-of-range` | `--scale-x` outside 800..1250 thousandths (section 3, rule 14). |
+| `vertical-metric-out-of-range` | `--vertical-advance` or `--vertical-origin` outside 1..2000 thousandths of the em (section 3, rule 16). |
 | `glyph-too-large` | A raster exceeds the writer's 7-bit record fields (127 px). |
 | `composite-too-deep` / `composite-too-many-components` | Composite expansion bounds. |
 | `metric-targets-invalid` / `metric-target-unreachable` | Policy document is malformed / no size satisfies it. |
@@ -200,7 +201,7 @@ manifest in memory first and writes only after every stage succeeds.
    0..64, mapping to the writer's 4-bit samples.
 7. **Advances.** `hmtx` advance scaled by rule 1 (with the upem of the font
    that draws the code, rule 12), plus `(--embolden-advance + --tracking) * 8`
-   26.6 units; `advance_y` is 0. `--tracking K` (-8..16 sub-samples, default
+   26.6 units; `advance_y` is rule 16's. `--tracking K` (-8..16 sub-samples, default
    0) spaces every glyph alike. `--digit-advance D` (26.6) replaces the scaled
    advance of each digit 0-9 with `D` before that addition (tabular figures),
    and shifts that digit's outline right by `floor((D - natural) / 2)` 26.6
@@ -326,6 +327,45 @@ manifest in memory first and writes only after every stage succeeds.
     rather than by the advance: Hot Shots Tennis puts each glyph one pixel
     after the previous image's right edge, so every blank column widened its
     lines. Only that rule is taken from the measurement; no glyph data is.
+16. **Vertical metrics** (always on, from converter 0.8.0). After rule 15,
+    every record, a zero-area one included, gets the three vertical fields
+    the character information returns as vertical bearing X (`x_center`,
+    `0x28`), vertical bearing Y (`y_top`, `0x2C`) and vertical advance
+    (`advance_y`, `0x34`). Let `em` be the em the header declares: the
+    nominal size (26.6 points) at the resolution (26.6 dpi),
+    `nominal * resolution / 4608` in 26.6 px (1152, 18 px, for 10.125 points
+    at 128 dpi), and `frac(T)` be `T / 1000` of it, rounded half up to a
+    whole 26.6 unit.
+    - `x_center = -floor(dimension_width / 2)`: the box centred on the
+      vertical origin.
+    - `advance_y = frac(A)`, `A` from `--vertical-advance A` (1..2000,
+      default 1000: one em).
+    - With `--vertical-origin O` (1..2000): `y_top = frac(O) - y_base`, the
+      distance from `O / 1000` em above the baseline down to the glyph's top.
+      Without it: `y_top = floor((advance_y - (ascender - descender)) / 2)`,
+      the same for every glyph, with the header's ascender and descender
+      (`--header-ascender` and `--header-descender`, else the extremes the
+      writer derives).
+    The header's minimum centre X, maximum top Y and maximum vertical
+    advance follow from the records. No row, column or horizontal metric
+    changes, so text set horizontally draws the same pixels.
+    *Project decision* (#1300), from a measurement of one console's fonts
+    through the project's reader: in its Latin, Japanese and Korean fonts
+    every glyph's vertical bearing X is minus half its 26.6 width, and each
+    font has one vertical advance: 0.950 em in the larger Latin size, 0.917 em
+    in the smaller, one em in the Japanese font and 1.185 em in the Korean.
+    The Latin and Korean fonts give every glyph the same vertical bearing Y,
+    half the room that advance leaves beyond the font's ascender-to-descender
+    height (17 or 18, 11 or 12, and 57 or 58 26.6 units); the Japanese font
+    gives each glyph the distance from 0.88 em above the baseline down to its
+    top (503 of 529 glyphs sampled; the others are 25 full-width small Latin
+    letters and the full-width dollar sign). The stand-ins wrote the box's
+    left edge plus half the advance, its top and 0. Only these rules and
+    ratios are taken from the measurement; no glyph data is. The project's
+    reader passes the three fields to the game unchanged and draws nothing
+    by them, and the console library draws by the image alone
+    (`PGF_SPEC.md` section 3.5, #1055); a game that sets text vertically or
+    steps lines by the vertical advance would read them.
 
 Same pinned input plus same parameters plus same converter version therefore
 produce byte-identical `.pgf` and manifest output on every supported host,
@@ -342,8 +382,10 @@ baseline, y up):
 | `width`, `height` | box size in pixels (7-bit record fields). |
 | `dimension_width`, `dimension_height` | `width * 64`, `height * 64`. |
 | `x_left` | `left * 64` (bitmap left edge relative to the pen). |
-| `x_center` | writer default: `x_left + advance_x // 2`. |
+| `x_center` | `-floor(dimension_width / 2)` (rule 16). |
 | `y_base` | `top * 64` (pixels of bitmap above the baseline). |
+| `y_top` | rule 16: `frac(O) - y_base` with `--vertical-origin`, else the margin above the ascender. |
+| `advance_y` | rule 16: `frac(A)`, one em by default. |
 | descender (derived) | `y_base - dimension_height = bottom * 64`, matching `PGF_SPEC.md` section 3.9. |
 | `adjust_x`, `adjust_y` | `left`, `top`: the reader returns them as the character information's bitmap left and top (`0x08`, `0x0C`); its draw path uses only the caller's position (`PGF_SPEC.md` section 3.10). |
 | `row_order` | 1 (raster order). |
@@ -440,7 +482,7 @@ Generated PGFs are fixtures, never an authenticity claim.
 | `code_points` | For `--codepoints`: the file's leaf name, count, and SHA-256; `null` for a range. |
 | `glyphs` | Count, zero-area codes, maximum pixel dimensions. |
 | `metric_targets` | The policy, the chosen ppem, and achieved 26.6 values - or `null`. |
-| `parameters` | ppem, nominal em size (26.6), resolution (26.6), any header ascender and descender given, whether the ellipsis was set on the baseline, supersample, coverage bits, rounding formulas, hinting mode, and the `embolden` strengths (x, y, advance, in sub-samples); `tracking_sub_samples` and `digit_advance_26_6` only when given; `snap_overshoot` only when given: its unit, threshold `N`, and the flat edges `B`, `X` and `C` in font units of the first font (`zones`) and, with a fallback that draws codes, of the second (`fallback_zones`); `scale_x_thousandths` only when it is not 1000. |
+| `parameters` | ppem, nominal em size (26.6), resolution (26.6), any header ascender and descender given, whether the ellipsis was set on the baseline, supersample, coverage bits, rounding formulas, hinting mode, and the `embolden` strengths (x, y, advance, in sub-samples); `tracking_sub_samples` and `digit_advance_26_6` only when given; `snap_overshoot` only when given: its unit, threshold `N`, and the flat edges `B`, `X` and `C` in font units of the first font (`zones`) and, with a fallback that draws codes, of the second (`fallback_zones`); `scale_x_thousandths` only when it is not 1000; `vertical_advance_thousandths` and `vertical_origin_thousandths` only when given. |
 | `fallback` | Only with `--fallback`: the second font's `input` record (as above), its `license` block, and the ascending `codes` it draws. |
 | `license` | SPDX id, copyright line, reserved font names, the **full licence text**, its digest, and the source pin's provenance record - or `null` without a pin. |
 
@@ -493,5 +535,6 @@ Generated PGFs are fixtures, never an authenticity claim.
 | Project Latin faces: one per console index, line widths, class widths, ink, and the sans faces' x-height and cap-height rows | `ProjectLatinStrikeTests` |
 | Overshoot alignment: round and flat letters share their rows, flat letters and deep features unchanged, manifest record and refusals | `OvershootSnapTests`, `ProjectLatinStrikeTests` |
 | Ink trim: no image starts or ends in a blank column or row, a string drawn through the reader by advance keeps every pixel, advances unchanged | `InkTrimTests`, `ReaderRoundTripTests` |
+| Vertical metrics: the reader returns bearing X, bearing Y and advance by rule 16 with and without each option; the project fonts carry the console's values; out-of-range options refused | `ReaderRoundTripTests`, `ProjectLatinStrikeTests`, `ProjectCjkSizeTests`, `SpacingAndFallbackOptionTests` |
 | Project Japanese and Korean nominal size and advances | `ProjectCjkSizeTests` |
 | Independent structural validation | `nk_core.fonts.validate_pgf_data` on the output |

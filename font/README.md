@@ -28,7 +28,9 @@ These fonts are stand-ins. They let a game draw its text when you have not impor
 different from the PSP's. They are sized and spaced to come close: their nominal sizes are the PSP's (10.125 points
 for Japanese and Korean, and the PSP's two Latin sizes), and their x-height, cap height, stem width,
 horizontal-stroke weight and spacing are set from aggregate measurements of the PSP fonts they stand in for.
-No letter shape comes from those fonts.
+Their vertical metrics, which a game that sets text in columns would read, follow the PSP fonts' rule: each letter
+centred on the column, the PSP font's vertical advance, and the same top position (#1300). No letter shape comes
+from those fonts.
 
 Round letters such as `e`, `o` and `s` end on the same rows as flat ones such as `R`, `l` and `x`. Their outlines
 dip below the baseline and rise above the x-height and cap height by up to a third of a pixel at the PSP's sizes,
