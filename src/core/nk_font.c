@@ -790,7 +790,8 @@ NkFontStatus nk_font_check_cache(const char *user_data_root, char *out_message, 
 }
 
 NkFontSlotCheck nk_font_check_cache_slot_file(const char *user_data_root, NkFontSlot slot,
-                                              FILE *cache_file, char *reason, size_t reason_len) {
+                                              FILE *cache_file, char *reason, size_t reason_len,
+                                              bool *replacement) {
     char cache_dir[NK_MAX_PATH];
     FontManifest manifest;
     NkFontStatus status;
@@ -798,6 +799,7 @@ NkFontSlotCheck nk_font_check_cache_slot_file(const char *user_data_root, NkFont
     uint8_t *bytes = NULL;
     size_t length = 0;
     bool ok;
+    if (replacement) *replacement = false;
     if (reason_len > 0) reason[0] = '\0';
     if (!cache_file || (unsigned)slot >= NK_FONT_SLOT_COUNT) {
         font_copy_text(reason, reason_len, "no cache file or font slot was named");
@@ -822,7 +824,8 @@ NkFontSlotCheck nk_font_check_cache_slot_file(const char *user_data_root, NkFont
         return NK_FONT_SLOT_CHECK_NOT_LISTED;
     }
     if (!font_read_stream(cache_file, &bytes, &length, reason, reason_len)) return NK_FONT_SLOT_CHECK_FILE_INVALID;
-    ok = font_check_slot_bytes((int)slot, &manifest, bytes, length, reason, reason_len, NULL);
+    ok = font_check_slot_bytes((int)slot, &manifest, bytes, length, reason, reason_len,
+                               replacement);
     free(bytes);
     return ok ? NK_FONT_SLOT_CHECK_OK : NK_FONT_SLOT_CHECK_FILE_INVALID;
 }

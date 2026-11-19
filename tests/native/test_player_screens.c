@@ -5267,6 +5267,41 @@ static void test_enhanced_target_sizes(void) {
     g_flow_text_size_pct = saved_text;
 }
 
+/* Review of #2783: the font note's two buttons are full targets. At every text size each is at
+   least NK_UI_CONTROL_HEIGHT (44 px) high: its box, which is also where the pointer hits it (a
+   button's Clay element), measured from every command it draws. The window is the design
+   width, where a layout unit is a pixel. */
+static void test_font_note_target_sizes(void) {
+    static const NkUiId buttons[] = {PLAYER_UI_ID_TITLE_FONT_NOTE_GET,
+                                     PLAYER_UI_ID_TITLE_FONT_NOTE_HIDE};
+    static const int text_sizes[] = {100, 125, 150};
+    const int saved_text = g_flow_text_size_pct;
+    for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+        NkUi *ui = NULL;
+        const NkUiDrawList *draw;
+        g_flow_text_size_pct = text_sizes[t];
+        draw = flow_case_layout(FLOW_PAGE_TITLE_FONT_NOTE, 1280, 1600, &ui);
+        for (size_t b = 0u; b < sizeof(buttons) / sizeof(buttons[0]); ++b) {
+            int top = -1;
+            int bottom = -1;
+            char message[160];
+            for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+                const NkUiDrawCmd *cmd = &draw->cmd[i];
+                if (cmd->element_id != buttons[b]) continue;
+                if (top < 0 || cmd->bounds[1] < top) top = cmd->bounds[1];
+                if (bottom < 0 || cmd->bounds[3] > bottom) bottom = cmd->bounds[3];
+            }
+            (void)snprintf(message, sizeof(message),
+                           "%d%% text: the font note's %s button is %d px high (at least %d)",
+                           text_sizes[t], b == 0u ? "Get fonts from my PSP" : "Hide",
+                           top < 0 ? -1 : bottom - top, (int)NK_UI_CONTROL_HEIGHT);
+            CHECK(top >= 0 && bottom - top >= (int)NK_UI_CONTROL_HEIGHT, message);
+        }
+        if (ui != NULL) nk_ui_destroy(ui);
+    }
+    g_flow_text_size_pct = saved_text;
+}
+
 /* Draws `frames` more frames of a page in a window whose logical size `scale` gives, a
    quarter of a second apart on the caller's clock. */
 static const NkUiDrawList *enhanced_more_frames(NkUi *ui, FlowCase which, const NkUiScale *scale,
@@ -9852,6 +9887,7 @@ int main(int argc, char **argv) {
     test_tall_title_page_scrolls();
     test_enhanced_rows_stay_put();
     test_enhanced_target_sizes();
+    test_font_note_target_sizes();
     test_enhanced_selected_value_styles();
     test_enhanced_walk_at_every_text_size();
     test_enhanced_title_with_an_ellipsis();

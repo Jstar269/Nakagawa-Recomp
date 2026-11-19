@@ -361,8 +361,11 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
                 row.align_y = NK_UI_ALIGN_CENTER;
                 {
+                    /* Full-size secondary buttons (NK_UI_CONTROL_HEIGHT, 44 px), as the
+                       ENHANCEMENTS card's: the small control is kept for the library's heading row
+                       and the on-screen keyboard (docs/PLAYER_UI_DESIGN.md, Accessibility). */
                     NkUiFlowRow flow;
-                    const uint32_t flags = NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT;
+                    const uint32_t flags = NK_UI_BUTTON_NOT_DEFAULT;
                     if (nk_ui_flow_begin(ui, &flow, TITLE_ID_FONT_ACTIONS, &row,
                                          width - 2.0f * gutter - NK_UI_DETAIL_GAP - aside -
                                              2.0f * NK_UI_SPACE_5)) {

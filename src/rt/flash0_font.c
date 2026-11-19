@@ -218,12 +218,13 @@ static void flash0_refuse_import_cache(NkFontSlot slot) {
 
 /* One line per Japanese or Korean request for the life of the process, the first time the slot
  * is resolved, in the Latin lines' fields (#1300): the PSP file the slot stands for, the file that
- * backs it, and its source. The user's imported font is the PSP's own; the project font is a
+ * backs it, and its source. The user's imported font is the PSP's own, unless it is a replacement
+ * font (nk_font_is_replacement), whose line says selection=replacement; the project font is a
  * stand-in with a different face, so its line says substitute. The legacy Latin alias is not a
  * request a game makes by a PSP name, so it has no line; the Latin indices have their own. */
 static unsigned char s_flash0_slot_logged[NK_FONT_SLOT_COUNT];
 
-static void flash0_log_slot(NkFontSlot slot, Flash0Source source) {
+static void flash0_log_slot(NkFontSlot slot, Flash0Source source, bool replacement) {
     const char *requested = nk_font_slot_psp_filename(slot);
     const char *language = slot == NK_FONT_SLOT_JAPANESE ? "Japanese" : "Korean";
     unsigned index = slot == NK_FONT_SLOT_JAPANESE ? 0u : SR_FONT_REGISTRY_COUNT - 1u;
@@ -233,8 +234,9 @@ static void flash0_log_slot(NkFontSlot slot, Flash0Source source) {
         fprintf(stderr, "flash0: %s registry index=%u requested=%s backing=none source=none fallback=missing\n",
                 language, index, requested);
     } else if (source == FLASH0_SOURCE_USER) {
-        fprintf(stderr, "flash0: %s registry index=%u requested=%s backing=%s source=user-imported selection=exact\n",
-                language, index, requested, s_flash0_slots[slot].served_name);
+        fprintf(stderr, "flash0: %s registry index=%u requested=%s backing=%s source=user-imported selection=%s\n",
+                language, index, requested, s_flash0_slots[slot].served_name,
+                replacement ? "replacement" : "exact");
     } else {
         fprintf(stderr, "flash0: %s registry index=%u requested=%s backing=%s source=project "
                         "selection=substitute fallback=project\n",
@@ -284,10 +286,11 @@ static Flash0Source flash0_resolve_path(const Flash0Sources *sources, NkFontSlot
         /* The check reads this open handle, so the bytes it hashes are the bytes served. A later
          * in-place write to the file is not checked again, as with any open file. */
         char reason[NK_FONT_TEXT_MAX] = "";
+        bool replacement = false;
         NkFontSlotCheck check = nk_font_check_cache_slot_file(sources->user_data_dir, slot, *fp_out,
-                                                              reason, sizeof(reason));
+                                                              reason, sizeof(reason), &replacement);
         if (check == NK_FONT_SLOT_CHECK_OK) {
-            flash0_log_slot(slot, FLASH0_SOURCE_USER);
+            flash0_log_slot(slot, FLASH0_SOURCE_USER, replacement);
             return FLASH0_SOURCE_USER;
         }
         flash0_refuse_user_cache(slot, check, reason);
@@ -299,7 +302,7 @@ static Flash0Source flash0_resolve_path(const Flash0Sources *sources, NkFontSlot
         flash0_project_path(path, capacity, sources->project_dir, file) &&
         flash0_probe(path, slot, 0, fp_out, size_out)) {
         if (!flash0_project_is_import_cache(sources)) {
-            flash0_log_slot(slot, FLASH0_SOURCE_PROJECT);
+            flash0_log_slot(slot, FLASH0_SOURCE_PROJECT, false);
             return FLASH0_SOURCE_PROJECT;
         }
         flash0_refuse_import_cache(slot);
@@ -308,7 +311,7 @@ static Flash0Source flash0_resolve_path(const Flash0Sources *sources, NkFontSlot
         *size_out = 0;
     }
     path[0] = '\0';
-    flash0_log_slot(slot, FLASH0_SOURCE_NONE);
+    flash0_log_slot(slot, FLASH0_SOURCE_NONE, false);
     return FLASH0_SOURCE_NONE;
 }
 
@@ -329,7 +332,8 @@ static const char *flash0_latin_backing_name(const NkFontLatinResolution *resolu
 /* One line per Latin registry index for the life of the process, the first time the index is
  * resolved. A request served by any file other than its own imported ltnN.pgf is a substitute with
  * a different face (#1300): its line says so and names the fallback rule that chose the file, a
- * same-size-group import, the legacy single Latin import, or the project font. */
+ * same-size-group import, the legacy single Latin import, or the project font. Its own imported
+ * file is selection=exact, or selection=replacement when that file is a replacement font. */
 static void flash0_log_latin_index(int index, const NkFontLatinResolution *resolution) {
     if ((unsigned)index >= NK_FONT_LATIN_INDEX_COUNT || s_flash0_latin_logged[index]) return;
     s_flash0_latin_logged[index] = 1u;
@@ -341,8 +345,9 @@ static void flash0_log_latin_index(int index, const NkFontLatinResolution *resol
     const char *source = resolution->source == NK_FONT_SOURCE_USER ? "user-imported" : "project";
     const char *backing = flash0_latin_backing_name(resolution);
     if (resolution->source == NK_FONT_SOURCE_USER && resolution->served_index == index) {
-        fprintf(stderr, "flash0: Latin registry index=%d requested=%s backing=%s source=%s selection=exact\n",
-                index + 1, nk_font_latin_index_filename(index), backing, source);
+        fprintf(stderr, "flash0: Latin registry index=%d requested=%s backing=%s source=%s selection=%s\n",
+                index + 1, nk_font_latin_index_filename(index), backing, source,
+                resolution->replacement ? "replacement" : "exact");
         return;
     }
     const char *fallback = resolution->source == NK_FONT_SOURCE_PROJECT ? "project" :
@@ -397,7 +402,7 @@ static Flash0Source flash0_resolve_latin_index(const Flash0Sources *sources, int
             ? nk_font_check_cache_latin_index_file(sources->user_data_dir, resolution.served_index,
                                                    *fp_out, reason, sizeof(reason))
             : nk_font_check_cache_slot_file(sources->user_data_dir, NK_FONT_SLOT_LATIN,
-                                            *fp_out, reason, sizeof(reason));
+                                            *fp_out, reason, sizeof(reason), NULL);
         if (check != NK_FONT_SLOT_CHECK_OK) {
             flash0_refuse_user_cache(NK_FONT_SLOT_LATIN, check, reason);
             fclose(*fp_out);

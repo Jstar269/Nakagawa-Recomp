@@ -134,9 +134,11 @@ typedef enum {
  * the reader as that slot. cache_file must be an open handle on that slot's cache file. Its bytes
  * are read from the start, the handle is left at its start, and the file is hashed on every call.
  * reason must point to reason_len bytes the caller owns; it receives plain text for the caller to
- * name, on every verdict. */
+ * name, on every verdict. On NK_FONT_SLOT_CHECK_OK, *replacement (when not NULL) says whether
+ * those bytes are a replacement font (nk_font_is_replacement); it is false on any other verdict. */
 NkFontSlotCheck nk_font_check_cache_slot_file(const char *user_data_root, NkFontSlot slot,
-                                              FILE *cache_file, char *reason, size_t reason_len);
+                                              FILE *cache_file, char *reason, size_t reason_len,
+                                              bool *replacement);
 
 /* Firmware Latin files are named ltn0.pgf through ltn15.pgf. The filename helper accepts
  * ASCII case variants and returns the file ordinal 0..15, or -1 when the name is not one of

@@ -473,7 +473,7 @@ slower drawing path (#2151): a DRAWN IN SOFTWARE pill in the brand blue, as a fa
 game may run slower, a graphics driver update may help), and a small Hide button, never the default focus, that hides
 that fallback's notice for the rest of the session; then, when the game starts in Authentic and at least one of the
 18 PSP fonts is a stand-in or a replacement font, a FONTS card: one `BODY_S` `paper` sentence ("Text uses stand-in
-fonts. For the original look, get the fonts from your PSP.") and two small buttons, never the default focus: GET
+fonts. For the original look, get the fonts from your PSP.") and two 44 px secondary buttons, never the default focus: GET
 FONTS FROM MY PSP opens **Settings > PSP fonts** and looks for a connected PSP there (Back returns to the game's
 page), and Hide hides the card for that game for good (`settings.json` `"font_note_hidden"`). It never blocks PLAY,
 and Enhanced and Ace pages have no such card; then one action row on the column's left edge with every button 52 px (the primary action, PLAY when
