@@ -73,13 +73,13 @@ class ShaderEmbedTests(unittest.TestCase):
         glslc = shutil.which("glslc")
         if not glslc:
             self.skipTest("glslc is unavailable")
-        self.assertEqual(
-            shader_embed.verify(
-                shader_embed.UI_DIR, shader_embed.UI_MANIFEST, glslc,
-                shader_embed.UI_SHADERS,
-            ),
-            [],
+        errors, skipped = shader_embed.verify_glslc(
+            shader_embed.UI_DIR, shader_embed.UI_MANIFEST, glslc,
+            shader_embed.UI_SHADERS,
         )
+        self.assertEqual(errors, [])
+        if skipped:
+            self.skipTest(skipped)
 
     def test_ui_shader_set_rejects_stale_source_or_embedding(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nakagawa-ui-shader-test-") as temp_name:
@@ -108,39 +108,53 @@ class ShaderEmbedTests(unittest.TestCase):
             self.assertTrue(errors)
 
     def test_ui_recompile_mismatch_names_a_compiler_version_drift(self) -> None:
-        """A different glslc's byte mismatch says which compiler the manifest recorded."""
-        real_version = shader_embed.glslc_version
-        real_compile = shader_embed.compile_shader
+        """A different glslc skips byte reproduction by name; the pinned glslc fails on byte drift."""
+        recorded = json.loads(shader_embed.UI_MANIFEST.read_text(encoding="utf-8"))
+        pinned_summary = shader_embed.glslc_version_summary(recorded["compiler"]["version"])
+        compiled: list[Path] = []
 
         def other_compile(glslc: str, source: Path, output: Path, gpu_dir: Path,
                           defines: tuple[str, ...] = ()) -> bytes:
+            compiled.append(source)
             return bytes(20)  # not the embedded module
 
-        shader_embed.glslc_version = lambda glslc: "shaderc v1999.1\nTarget: SPIR-V 1.0"
-        shader_embed.compile_shader = other_compile
-        try:
-            errors = shader_embed.verify(
+        with mock.patch.object(
+            shader_embed, "glslc_version", return_value="shaderc v1999.1\nTarget: SPIR-V 1.0",
+        ), mock.patch.object(shader_embed, "compile_shader", side_effect=other_compile):
+            errors, skipped = shader_embed.verify_glslc(
                 shader_embed.UI_DIR, shader_embed.UI_MANIFEST, "glslc-under-test",
                 shader_embed.UI_SHADERS,
             )
-            self.assertTrue(errors)
+            self.assertEqual(errors, [])
+            self.assertIsNotNone(skipped)
+            assert skipped is not None
+            self.assertIn("manifest pins", skipped)
+            self.assertIn(pinned_summary, skipped)
+            self.assertIn("shaderc v1999.1", skipped)
+            self.assertEqual(compiled, [])
+            # verify() has no SKIP channel, so a non-pinned glslc still refuses rather than passing.
+            strict_errors = shader_embed.verify(
+                shader_embed.UI_DIR, shader_embed.UI_MANIFEST, "glslc-under-test",
+                shader_embed.UI_SHADERS,
+            )
+            self.assertEqual(strict_errors, [skipped])
+
+        # The recorded compiler itself: recompiles and reports byte drift with no compiler-drift note.
+        with mock.patch.object(
+            shader_embed, "glslc_version", return_value=recorded["compiler"]["version"].strip(),
+        ), mock.patch.object(shader_embed, "compile_shader", side_effect=other_compile):
+            errors, skipped = shader_embed.verify_glslc(
+                shader_embed.UI_DIR, shader_embed.UI_MANIFEST, "glslc-under-test",
+                shader_embed.UI_SHADERS,
+            )
+            self.assertIsNone(skipped)
+            self.assertEqual(len(compiled), len(shader_embed.UI_SHADERS))
+            self.assertEqual(len(errors), len(shader_embed.UI_SHADERS))
             self.assertTrue(
-                all("current glslc output differs" in error and "shaderc v1999.1" in error
-                    and "the manifest records glslc" in error for error in errors),
+                all("current glslc output differs from embedded SPIR-V" in error for error in errors),
                 errors,
             )
-            # The recorded compiler itself: a mismatch names no drift.
-            recorded = json.loads(shader_embed.UI_MANIFEST.read_text(encoding="utf-8"))
-            shader_embed.glslc_version = lambda glslc: recorded["compiler"]["version"].strip()
-            errors = shader_embed.verify(
-                shader_embed.UI_DIR, shader_embed.UI_MANIFEST, "glslc-under-test",
-                shader_embed.UI_SHADERS,
-            )
-            self.assertTrue(errors)
-            self.assertFalse(any("the manifest records glslc" in error for error in errors), errors)
-        finally:
-            shader_embed.glslc_version = real_version
-            shader_embed.compile_shader = real_compile
+            self.assertFalse(any("manifest pins" in error for error in errors), errors)
 
 
 # ---- schema 2: the FSR 3 sets, compiled by the pinned DXC (third_party/fidelityfx_sdk) -----------
