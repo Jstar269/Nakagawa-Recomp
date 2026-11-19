@@ -31,6 +31,10 @@
  * input bounds (every bit fetch is bounded by the caller's declared input
  * length, and the distance code class is bounds-checked against the
  * probability table).  Upstream read the input cursor without a limit.
+ * 2026-11-18: the context bits come from the output offset and the
+ * copyCountBitsProbs index instead of the low bits of host pointers, so the
+ * decoded bytes no longer depend on where the host placed either buffer; the
+ * never-true comparison of a probability pointer with curOut is removed.
  */
 
 #include <stdint.h>
@@ -160,9 +164,12 @@ static int read_bit_uniform_nonormal(u32 *inputVal, u32 *range)
 /*
  * Output a raw byte by reading 8 bits using arithmetic coding.
  */
-static void output_raw(u32 *inputVal, u32 *range, u8 *probs, KleIn *in, u32 *curByte, u8 *curOut, u8 shift)
+static void output_raw(u32 *inputVal, u32 *range, u8 *probs, KleIn *in, u32 *curByte, u8 *curOut,
+                       const u8 *outBuf, u8 shift)
 {
-    u32 mask = (((size_t)curOut & 7) << 8) | (*curByte & 0xFF);
+    /* The output position, not the host address: the firmware read the low bits
+     * of an aligned output pointer, which equal the offset from its start. */
+    u32 mask = (((size_t)(curOut - outBuf) & 7) << 8) | (*curByte & 0xFF);
     u8 *curProbs = &probs[((mask >> shift) & 7) * 255] - 1;
     *curByte = 1;
     while (*curByte < 0x100) {
@@ -234,7 +241,7 @@ int decompress_kle(u8 *outBuf, int outSize, u8 *inBuf, int inSize, void **end, i
     u8 shift = inBuf[0] & 0x7;
     in.cur = inBuf + 5;
     // Read a literal directly.
-    output_raw(&inputVal, &range, litProbs, &in, &curByte, curOut, shift);
+    output_raw(&inputVal, &range, litProbs, &in, &curByte, curOut, outBuf, shift);
     while (1) {
         // Fail closed: a bit fetch past the end of the declared input means
         // the stream is truncated, whatever the probabilities decoded so far.
@@ -248,7 +255,7 @@ int decompress_kle(u8 *outBuf, int outSize, u8 *inBuf, int inSize, void **end, i
             if (curOut == outEnd) {
                 return 0x80000104; // SCE_ERROR_INVALID_SIZE
             }
-            output_raw(&inputVal, &range, litProbs, &in, &curByte, curOut, shift);
+            output_raw(&inputVal, &range, litProbs, &in, &curByte, curOut, outBuf, shift);
             continue;
         }
         // Otherwise, first find the number of bits used in the 'length' code.
@@ -264,7 +271,10 @@ int decompress_kle(u8 *outBuf, int outSize, u8 *inBuf, int inSize, void **end, i
         // Determine the length itself, and use different distance code probabilities depending on it (and on whether it's KL3E or KL4E).
         s32 powLimit;
         if (copyCountBits >= 0) {
-            u8 *probs = &copyCountProbs[(copyCountBits << 5) | ((((size_t)curOut & 3) << (copyCountBits + 3)) & 0x18) | ((size_t)curCopyCountBitsProbs & 7)];
+            /* Offsets into the output and into copyCountBitsProbs, never host addresses:
+             * the firmware relied on both being 8-byte aligned, which C does not
+             * promise for a u8 array or a caller's buffer. */
+            u8 *probs = &copyCountProbs[(copyCountBits << 5) | ((((size_t)(curOut - outBuf) & 3) << (copyCountBits + 3)) & 0x18) | ((size_t)(curCopyCountBitsProbs - copyCountBitsProbs) & 7)];
             if (copyCountBits < 3) {
                 copyCount = 1;
             } else {
@@ -331,9 +341,10 @@ int decompress_kle(u8 *outBuf, int outSize, u8 *inBuf, int inSize, void **end, i
                         break;
                     }
                     copyDist = 0;
-                    if (curCopyDistBitsProbs == curOut) { // Is this a mistake by Sony?
-                        return 0x80000108; // SCE_ERROR_INVALID_FORMAT
-                    }
+                    /* A zero-distance copy always has a byte of history: the first
+                     * literal is written before the loop and curOut advances past
+                     * it before any match. (Upstream compared a probability-table
+                     * pointer with curOut here, which could never be equal.) */
                     skip = 1; // Just copy with a zero distance.
                     break;
                 }
@@ -412,6 +423,6 @@ int decompress_kle(u8 *outBuf, int outSize, u8 *inBuf, int inSize, void **end, i
         }
         curByte = curOut[copyCount];
         curOut += copyCount;
-        curCopyCountBitsProbs = &copyCountBitsProbs[6 + ((size_t)curOut & 1)];
+        curCopyCountBitsProbs = &copyCountBitsProbs[6 + ((size_t)(curOut - outBuf) & 1)];
     }
 }

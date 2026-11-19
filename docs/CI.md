@@ -782,6 +782,10 @@ ships it and `assets/prereq_manifest.json` pins it. This job adds GCC 16 against
   - The job sets `SR_SOURCE_COMMIT` to the checked-out revision, as `windows_runtime` does.
     It runs as root in the container and the checkout belongs to the runner's user, so git
     refuses the repository and the display smoke's flight step would have no build identity.
+  - Before the core suite, the job adds the checkout to git's system `safe.directory` list, so
+    `test_player_state`'s #511 git-clean check can run `git status` on it. That test points
+    `HOME` at its own temporary folder, so a user (`--global`) entry would not reach it. Without
+    the entry the check could not run, the test exits 77, and `native-core-tests` fails.
   - The job needs network access to the Docker registry and Fedora's mirrors. An
     unauthenticated Docker Hub pull limit or a mirror outage can fail it without any code
     change.

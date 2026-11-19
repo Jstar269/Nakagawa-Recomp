@@ -120,6 +120,9 @@ class FakePPSSPP:
             self.reply({"event": "error", "message": "Bad message: unknown event"}, t)
             return
         target = int(msg["us"])
+        if target <= self.us:
+            self.reply({"event": "error", "message": "Target time has already passed"}, t)
+            return
         before = self.us
         self.us = max(self.us, target - self.stop_short_by + self.overshoot_by)
         self.reply({"event": "cpu.runUntilTime", "targetUs": target, "us": before}, t)
@@ -157,11 +160,23 @@ class TestTiming(unittest.TestCase):
             self.assertEqual(vblank_of(us), frame)
 
     def test_input_lands_in_the_period_before_its_vblank(self):
-        self.assertEqual(pr.input_us(0), 0)
+        self.assertEqual(pr.input_us(0), 1)
+        self.assertGreater(pr.input_us(0), 0)
+        self.assertEqual(vblank_of(pr.input_us(0)), 0)
+        self.assertLess(pr.input_us(0), pr.capture_us(0))
+        self.assertLess(pr.input_us(0), pr.input_us(1))
         for frame in (1, 2, 600, 1499):
             us = pr.input_us(frame)
             self.assertEqual(vblank_of(us), frame - 1, frame)
             self.assertGreater(Fraction(frame) * PERIOD - us, PERIOD / 3)
+
+    def test_later_frame_input_times_match_main(self):
+        expected = {1: 8342, 2: 25025, 10: 158492, 13: 208542,
+                    600: 10001658, 1499: 24999975, 3000: 50041658}
+        for frame, want in expected.items():
+            self.assertEqual(pr.input_us(frame), want, frame)
+        with self.assertRaises(ValueError):
+            pr.input_us(-1)
 
 
 class TestPadScript(unittest.TestCase):
@@ -247,6 +262,18 @@ class TestPlan(unittest.TestCase):
         plan = pr.build_plan(pr.parse_padscript("8 CROSS 1\n"), [pr.Scene("s", 7, None, 0, 0.0)])
         same = [a for a in plan if a.us == pr.capture_us(7)]
         self.assertEqual([a.kind for a in same], ["capture", "input"])
+
+    def test_frame_zero_input_plan_has_only_positive_times(self):
+        rows = pr.parse_padscript("0 CROSS 3\n")
+        scenes = [pr.Scene("boot", 0, None, 0, 0.0), pr.Scene("after", 3, None, 0, 0.0)]
+        plan = pr.build_plan(rows, scenes)
+        self.assertTrue(all(a.us > 0 for a in plan), [a.us for a in plan])
+        self.assertEqual([(a.kind, a.frame, a.us, a.buttons, a.scene) for a in plan], [
+            ("input", 0, 1, (("cross", True),), ""),
+            ("capture", 0, 8342, (), "boot"),
+            ("input", 3, 41708, (("cross", False),), ""),
+            ("capture", 3, 58392, (), "after"),
+        ])
 
 
 class TestLaunch(unittest.TestCase):
@@ -345,6 +372,45 @@ class TestDrive(unittest.TestCase):
         self.assertEqual(result.max_late_us, pr.LATE_LIMIT_US)
         with self.assertRaisesRegex(pr.CaptureFailed, "past the next vblank"):
             self.drive(FakePPSSPP(overshoot_by=pr.LATE_LIMIT_US + 1))
+
+    def test_plan_in_the_past_is_refused_before_anything_is_sent(self):
+        bad_plans = (
+            ("at-reset", [pr.Action(0, "input", 0, buttons=(("cross", True),))],
+             r"input v0.*0 us"),
+            ("negative", [pr.Action(-5, "input", 0, buttons=(("cross", True),))],
+             r"input v0.*-5 us"),
+            ("out-of-order", [pr.Action(100, "input", 1, buttons=(("cross", True),)),
+                              pr.Action(50, "input", 2, buttons=(("cross", False),))],
+             r"input v2.*50 us.*100 us"),
+        )
+        for label, plan, pattern in bad_plans:
+            with self.subTest(case=label):
+                fake = FakePPSSPP()
+                with self.assertRaisesRegex(pr.RefError, pattern):
+                    self.drive(fake, plan)
+                self.assertEqual(fake.log, [])
+
+    def test_runtime_overshoot_past_next_input_refuses_before_sending(self):
+        fake = FakePPSSPP(overshoot_by=100)
+        plan = [
+            pr.Action(10, "input", 0, buttons=(("cross", True),)),
+            pr.Action(20, "input", 1, buttons=(("cross", False),)),
+        ]
+        with self.assertRaisesRegex(pr.CaptureFailed, r"input v1.*20 us.*110 us"):
+            self.drive(fake, plan)
+        run_calls = [p for e, _, p in fake.log if e == "cpu.runUntilTime"]
+        send_calls = [p["buttons"] for e, _, p in fake.log if e == "input.buttons.send"]
+        self.assertEqual(run_calls, [{"us": 10}])
+        self.assertEqual(send_calls, [{"cross": True}])
+
+    def test_same_timestamp_capture_and_input_share_one_run_until_time(self):
+        fake = FakePPSSPP()
+        plan = pr.build_plan(pr.parse_padscript("8 CROSS 1\n"), [pr.Scene("s", 7, None, 0, 0.0)])
+        result = self.drive(fake, plan)
+        self.assertEqual(len(result.shots), 1)
+        run_targets = [p["us"] for e, _, p in fake.log if e == "cpu.runUntilTime"]
+        self.assertEqual(run_targets, sorted(set(run_targets)))
+        self.assertEqual(run_targets[0], 1)
 
 
 class TestCaptureAndCompare(unittest.TestCase):
@@ -803,6 +869,105 @@ class TestDebuggerProtocol(unittest.TestCase):
         fake = FakePPSSPP()
         with self.assertRaisesRegex(pr.DebuggerError, "unknown event"):
             pr.Debugger(fake).request("no.such.event")
+
+
+class TestDecodeScreenshot(unittest.TestCase):
+    @staticmethod
+    def _msg(width, height, fmt, raw, flipped=False):
+        return {
+            "width": width,
+            "height": height,
+            "format": fmt,
+            "flipped": flipped,
+            "base64": base64.b64encode(raw).decode("ascii"),
+        }
+
+    def test_16bit_formats_decode_with_bit_replication(self):
+        # Each tuple: (format_name, [red, green, blue, black, white, mixed] uint16 words,
+        #              expected RGB for the mixed pixel).
+        # Bit replication:
+        #   4-bit: (v << 4) | v           -> 0xA->170, 0x5->85, 0xC->204
+        #   5-bit: (v << 3) | (v >> 2)    -> 21->173, 13->107, 9->74
+        #   6-bit: (v << 2) | (v >> 4)    -> 42->170
+        cases = (
+            # Native PSP display formats (GEBufferFormat 5650 / 5551 / 4444)
+            ("B5G6R5_UNORM_PACK16",
+             [0x001F, 0x07E0, 0xF800, 0x0000, 0xFFFF,
+              (21 << 0) | (42 << 5) | (9 << 11)],
+             (173, 170, 74)),
+            ("A1B5G5R5_UNORM_PACK16",
+             [0x801F, 0x03E0, 0xFC00, 0x8000, 0x7FFF,
+              (21 << 0) | (13 << 5) | (9 << 10) | (1 << 15)],
+             (173, 107, 74)),
+            ("A4B4G4R4_UNORM_PACK16",
+             [0xF00F, 0x00F0, 0xAF00, 0xF000, 0x0FFF,
+              (0xA << 0) | (0x5 << 4) | (0xC << 8) | (0x7 << 12)],
+             (170, 85, 204)),
+            # PPSSPP reversed / BGRA 16-bit color variants (GPUDebugBufferFormat)
+            ("R5G6B5_UNORM_PACK16",
+             [0xF800, 0x07E0, 0x001F, 0x0000, 0xFFFF,
+              (9 << 0) | (42 << 5) | (21 << 11)],
+             (173, 170, 74)),
+            ("R5G5B5A1_UNORM_PACK16",
+             [0xF801, 0x07C0, 0x003F, 0x0001, 0xFFFE,
+              (1 << 0) | (9 << 1) | (13 << 6) | (21 << 11)],
+             (173, 107, 74)),
+            ("R4G4B4A4_UNORM_PACK16",
+             [0xF00F, 0x0F00, 0x00FA, 0x000F, 0xFFF0,
+              (0x7 << 0) | (0xC << 4) | (0x5 << 8) | (0xA << 12)],
+             (170, 85, 204)),
+            ("A1R5G5B5_UNORM_PACK16",
+             [0xFC00, 0x03E0, 0x801F, 0x8000, 0x7FFF,
+              (9 << 0) | (13 << 5) | (21 << 10) | (1 << 15)],
+             (173, 107, 74)),
+            ("A4R4G4B4_UNORM_PACK16",
+             [0xAF00, 0x00F0, 0xF00F, 0xF000, 0x0FFF,
+              (0xC << 0) | (0x5 << 4) | (0xA << 8) | (0x7 << 12)],
+             (170, 85, 204)),
+        )
+        for fmt, words, mixed_rgb in cases:
+            with self.subTest(fmt=fmt):
+                raw = struct.pack("<6H", *words)
+                frame = pr.decode_screenshot(self._msg(3, 2, fmt, raw))
+                want = bytes(
+                    (255, 0, 0) + (0, 255, 0) + (0, 0, 255)
+                    + (0, 0, 0) + (255, 255, 255) + mixed_rgb
+                )
+                self.assertEqual((frame.width, frame.height, frame.pixels), (3, 2, want))
+
+    def test_16bit_flipped_rows_are_inverted(self):
+        # Row 0 in buffer (bottom on screen): pure blue; row 1 in buffer (top on screen): pure red.
+        raw = struct.pack("<2H", 0x7C00, 0x001F)
+        frame = pr.decode_screenshot(self._msg(1, 2, "A1B5G5R5_UNORM_PACK16", raw, flipped=True))
+        self.assertEqual(frame.pixels, bytes((255, 0, 0, 0, 0, 255)))
+
+    def test_16bit_wrong_byte_count_is_refused_with_numbers(self):
+        for nbytes in (10, 14):
+            with self.subTest(nbytes=nbytes):
+                msg = self._msg(3, 2, "A1B5G5R5_UNORM_PACK16", b"\x00" * nbytes)
+                with self.assertRaisesRegex(pr.CaptureFailed, rf"{nbytes} bytes.*3x2x2"):
+                    pr.decode_screenshot(msg)
+
+    def test_unknown_format_is_refused_by_name(self):
+        for fmt in ("D16", "UNDEFINED", "R5G5B5X1_UNORM_PACK16"):
+            with self.subTest(fmt=fmt):
+                msg = self._msg(1, 1, fmt, b"\x00\x00")
+                with self.assertRaisesRegex(pr.CaptureFailed, fmt):
+                    pr.decode_screenshot(msg)
+
+    def test_existing_24_and_32bit_paths_are_unchanged(self):
+        rgba = bytes((10, 20, 30, 255, 40, 50, 60, 128))
+        bgra = bytes((30, 20, 10, 255, 60, 50, 40, 128))
+        rgb = bytes((10, 20, 30, 40, 50, 60))
+        want = bytes((10, 20, 30, 40, 50, 60))
+        for fmt, raw in (("R8G8B8A8_UNORM", rgba), ("B8G8R8A8_UNORM", bgra), ("R8G8B8_UNORM", rgb)):
+            with self.subTest(fmt=fmt):
+                frame = pr.decode_screenshot(self._msg(2, 1, fmt, raw))
+                self.assertEqual((frame.width, frame.height, frame.pixels), (2, 1, want))
+        flipped = pr.decode_screenshot(self._msg(1, 2, "R8G8B8_UNORM", rgb, flipped=True))
+        self.assertEqual(flipped.pixels, bytes((40, 50, 60, 10, 20, 30)))
+        with self.assertRaisesRegex(pr.CaptureFailed, r"5 bytes.*2x1x3"):
+            pr.decode_screenshot(self._msg(2, 1, "R8G8B8_UNORM", b"\x00" * 5))
 
 
 if __name__ == "__main__":

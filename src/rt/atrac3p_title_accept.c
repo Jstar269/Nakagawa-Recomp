@@ -8,8 +8,9 @@
  * Bounded private-route acceptance: reads the lawful private title stream
  * (a RIFF/WAVE ATRAC3+ file, canonically
  * place_game_here/EXTRACTED/PSP_GAME/USRDIR/data/sound/bgm/bgm_title.sgb),
- * parses the container with the same field offsets and bounds discipline as
- * the HLE ring parser (src/rt/hle.c atrac_parse_track), and decodes EVERY
+ * parses the container with its own copy of the RIFF walk (the same field
+ * offsets as src/rt/hle_audio_codec.c atrac_parse_track, but not all of its
+ * refusals: it takes 1..8 channels, for one), and decodes EVERY
  * frame through the production PR-A decoder via the PR-B bridge
  * (atrac3p_bridge_decode). It asserts:
  *
@@ -28,10 +29,12 @@
  *
  * Exit codes: 0 = PASS (valid, nonzero, deterministic PCM); 77 = SKIP
  * (private input absent — never a pass); 1 = FAIL (silence, undecodable
- * frame, or inconsistent container). This tool is NOT part of CI and its
+ * frame, inconsistent container, or an input that exists but cannot be
+ * read). This tool is NOT part of CI and its
  * evidence is the user's lawful private title route only.
  */
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,7 +43,7 @@
 #include "atrac3p_bridge.h"
 #include "atrac3p/atrac3p_api.h"
 
-/* ---- bounded host-side container parse (same fields as hle.c) ---- */
+/* ---- bounded host-side container parse (same fields as hle_audio_codec.c) ---- */
 
 typedef struct {
     uint32_t riff_end;       /* total file size per the RIFF header */
@@ -97,7 +100,15 @@ static int accept_parse(const uint8_t *buf, size_t size, TitleStream *ts) {
     }
     if (!ts->have_fmt || !ts->have_data) return 0;
     if (ts->fact_samples == 0u) return 0;               /* PSP ATRAC tracks carry a fact chunk */
+    /* atrac_parse_track's limit: a larger count is no track the HLE plays. */
+    if (ts->fact_samples > 0x7fffffffu) return 0;
+    if (ts->sample_rate == 0u) return 0;                /* no rate, no duration */
     return 1;
+}
+
+/* Frames the fact chunk declares, rounded up in 64 bits so no count wraps. */
+static uint32_t accept_fact_frames(uint32_t fact_samples) {
+    return (uint32_t)(((uint64_t)fact_samples + ATRAC3P_FRAME_SAMPLES - 1u) / ATRAC3P_FRAME_SAMPLES);
 }
 
 static int is_atrac3plus(uint16_t tag) {
@@ -113,16 +124,21 @@ int main(int argc, char **argv) {
         return 1;
     }
     const char *path = argv[1];
+    errno = 0;
     FILE *f = fopen(path, "rb");
     if (!f) {
         /* Private input absent: SKIP, never a pass. Exit 77 is the
-         * repository's established "unavailable" SKIP code. */
-        fprintf(stderr, "ATRAC3P-TITLE: SKIP (private title input not present: %s)\n", path);
-        return 77;
+         * repository's established "unavailable" SKIP code.  An input that
+         * is there but cannot be opened is a broken route, not one not run. */
+        if (errno == ENOENT) {
+            fprintf(stderr, "ATRAC3P-TITLE: SKIP (private title input not present: %s)\n", path);
+            return 77;
+        }
+        fprintf(stderr, "ATRAC3P-TITLE: FAIL (cannot open %s: %s)\n", path, strerror(errno));
+        return 1;
     }
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    long sz = fseek(f, 0, SEEK_END) == 0 ? ftell(f) : -1;
+    if (sz >= 0 && fseek(f, 0, SEEK_SET) != 0) sz = -1;
     if (sz < 0 || (unsigned long)sz > 512u * 1024u * 1024u) {
         fclose(f);
         fprintf(stderr, "ATRAC3P-TITLE: FAIL (file size out of range)\n");
@@ -157,7 +173,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     uint32_t frames = ts.data_size / ts.block_align;
-    uint32_t fact_frames = (ts.fact_samples + ATRAC3P_FRAME_SAMPLES - 1u) / ATRAC3P_FRAME_SAMPLES;
+    uint32_t fact_frames = accept_fact_frames(ts.fact_samples);
     if (frames < fact_frames) {
         fprintf(stderr, "ATRAC3P-TITLE: FAIL (truncated: %u frames present, %u declared)\n",
                 frames, fact_frames);
@@ -219,8 +235,11 @@ int main(int argc, char **argv) {
         int16_t *pcm_ref = (int16_t *)malloc(frame_bytes);
         int16_t *pcm_tst = (int16_t *)malloc(frame_bytes);
         if (pcm_ref && pcm_tst &&
-            atrac3p_bridge_create((int)ts.channels, (int)ts.block_align, &ref) == 0 &&
-            atrac3p_bridge_create((int)ts.channels, (int)ts.block_align, &tst) == 0) {
+            atrac3p_bridge_create((int)ts.channels, (int)ts.block_align, &ref) != 0)
+            ref = NULL;
+        if (ref && atrac3p_bridge_create((int)ts.channels, (int)ts.block_align, &tst) != 0)
+            tst = NULL;
+        if (ref && tst) {
             int same = 1, ok = 1;
             for (uint32_t i = 0u; i < probe; i++) {
                 const uint8_t *frame = file + ts.data_off + (size_t)i * ts.block_align;
@@ -259,9 +278,9 @@ int main(int argc, char **argv) {
                 }
             }
             reset_ok = reset_same;
-            atrac3p_bridge_destroy(tst);
-            atrac3p_bridge_destroy(ref);
         }
+        atrac3p_bridge_destroy(tst);   /* NULL-safe: whichever was created */
+        atrac3p_bridge_destroy(ref);
         free(pcm_ref);
         free(pcm_tst);
         for (uint32_t i = 0u; i < probe; i++) free(ref_first[i]);

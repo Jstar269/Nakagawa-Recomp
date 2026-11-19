@@ -3050,10 +3050,10 @@
     "status": "partial"
   },
   "0xb3b5d042": {
-    "classification": "fake_success",
-    "handler": "h_ok",
+    "classification": "dedicated",
+    "handler": "h_AtracGetOutputChannel",
     "name": "sceAtracGetOutputChannel",
-    "status": "stub"
+    "status": "unreviewed"
   },
   "0xb3edd801": {
     "classification": "dedicated",
@@ -3850,7 +3850,7 @@
   },
   "0xe2d56b2d": {
     "classification": "dedicated",
-    "handler": "h_AudioOutputPannedBlocking",
+    "handler": "h_AudioOutputPanned",
     "name": "sceAudioOutputPanned",
     "status": "unreviewed"
   },

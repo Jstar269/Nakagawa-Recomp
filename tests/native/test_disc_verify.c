@@ -828,6 +828,14 @@ static void test_hash_file(void) {
     path_in(missing, sizeof(missing), "missing.iso");
     CHECK(!nk_disc_hash_file(missing, NULL, &digest, &status));
     CHECK(strcmp(status.code, NK_DISC_READ_FAILED) == 0);
+#ifdef _WIN32
+    /* The NUL device opens and reads as empty, but has no file size: the
+     * changed-size check cannot run, so no hash is reported. (POSIX gives
+     * /dev/null a size of 0, so it has no such case.) */
+    CHECK(!nk_disc_hash_file("NUL", NULL, &digest, &status));
+    CHECK(strcmp(status.code, NK_DISC_READ_FAILED) == 0);
+    CHECK(digest.sha1[0] == '\0' && digest.size_bytes == 0);
+#endif
     free(image);
     printf("PASS whole-image hash, progress and cancel\n");
 }

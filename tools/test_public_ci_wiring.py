@@ -1125,6 +1125,13 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         self.assertIn("MSYS2 still ships Python 3.14.8", "\n".join(self.block))
         self.assertIn('cygpath -u "$PYTHON"', "\n".join(self.block))
 
+    def test_native_core_tests_find_git_for_the_git_clean_check(self) -> None:
+        # The MSYS2 shell has no git of its own; test_player_state's #511 git-clean check needs
+        # the runner's Windows git from the inherited PATH, or it cannot run and exits 77.
+        step = "\n".join(cast(list[str], self.steps["Run native core test suite on Windows"]))
+        self.assertIn("shell: msys2 {0}", step)
+        self.assertIn("        env:\n          MSYS2_PATH_TYPE: inherit\n", step)
+
     def test_flash0_python_path_assignment_is_separate_from_invocation(self) -> None:
         step = "\n".join(cast(list[str], self.steps["Build and run flash0 font device selftest"]))
         self.assertRegex(step, r"(?m)^\s+run: \|$")
@@ -4039,6 +4046,19 @@ class Gcc16CanaryWiringTests(unittest.TestCase):
         self.assertLess(_ci_step_index(self.block, self.INSTALL_STEP),
                         _ci_step_index(self.block, "Check out repository"))
 
+    def test_git_can_read_the_checkout_before_the_core_suite(self) -> None:
+        # test_player_state's #511 git-clean check runs `git status` with HOME pointed at its own
+        # temporary folder. Root cannot read the runner-owned checkout, so without a system-wide
+        # safe.directory entry the check cannot run and the suite exits 77.
+        name = "Let git read the runner-owned checkout"
+        step = _ci_step(self.block, name)
+        self.assertIsNotNone(step, "linux_gcc16 lost the safe.directory step")
+        assert step is not None
+        self.assertIn('run: git config --system --add safe.directory "$GITHUB_WORKSPACE"', "\n".join(step))
+        self.assertLess(_ci_step_index(self.block, "Check out repository"), _ci_step_index(self.block, name))
+        self.assertLess(_ci_step_index(self.block, name),
+                        _ci_step_index(self.block, "Run native core test suite with GCC 16.2"))
+
     def test_runs_the_core_suite_and_the_headless_display_smoke(self) -> None:
         for name, command in (
             ("Run native core test suite with GCC 16.2", "run: make -j2 CC=gcc native-core-tests"),
@@ -4065,7 +4085,7 @@ class Gcc16CanaryWiringTests(unittest.TestCase):
         section = _markdown_section((ROOT / "docs" / "CI.md").read_text(encoding="utf-8"),
                                     "### GCC 16 canary")
         for fact in ("`linux_gcc16`", "--repo=fedora", "`gcc-16.2.1-2.fc45.1`", "`--init`", "`SR_SOURCE_COMMIT`",
-                     "Not required",
+                     "system `safe.directory`", "Not required",
                      "no `continue-on-error`", "steps locally against the new digest", "from any event",
                      "conclusion, with none failed by the container", "libavutil/mem.c:272"):
             with self.subTest(fact=fact):

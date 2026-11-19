@@ -175,6 +175,12 @@ int nk_font_find_psp_folder(char *out, size_t out_len);
 /* How many of the eighteen PSP system fonts (Japanese, Korean and the sixteen Latin registry
  * indices) are served by the user's own import of exactly that font, not a stand-in. */
 int nk_font_own_font_count(const char *user_data_root, const char *project_root);
+/* The same count from states nk_font_slot_states and nk_font_latin_index_states already
+ * returned, for a caller that holds them, so the manifests and font files are not read and
+ * hashed a second time. */
+int nk_font_own_font_count_from_states(
+    const NkFontSlotState states[NK_FONT_SLOT_COUNT],
+    const NkFontLatinIndexState latin_states[NK_FONT_LATIN_INDEX_COUNT]);
 #define NK_FONT_PSP_FONT_COUNT (NK_FONT_LATIN_INDEX_COUNT + 2)
 
 /* One file the import considered. imported is true when this file's bytes now serve the

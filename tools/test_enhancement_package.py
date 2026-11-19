@@ -4974,57 +4974,180 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             self.assertIn("the executable's own symbols", stderr.getvalue())
             self.assertFalse(output.exists())
 
-    def test_publish_refuses_an_unaligned_data_symbol(self) -> None:
-        """A data site's address is refused unless it is 4-byte aligned, as a function's is, in
-        --publish and in the published form's own check. Whether a byte table may sit at an
-        unaligned address is not decided here."""
-        refusal = (r"site_map\.synth_byte_table: address '0x00002001' must be a 4-byte-aligned "
-                   r"0x%08x hex string")
+    # A byte table at 0x2001, a halfword table at 0x2002 and a word at 0x2004, in initialised data.
+    _ALIGN_WORDS = {0x00002000: 0x001E1E00, 0x00002004: 21}
+    _ALIGN_SYMBOLS = {"synth_byte_table": 0x00002001, "synth_half_table": 0x00002002, "synth_word_table": 0x00002004}
+
+    def _aligned_data_package(self, elf_bytes: bytes) -> tuple[dict[str, Any], dict[str, str]]:
+        """The synthetic package plus a u8 site on an odd symbol and a u16 site on a 2-aligned one."""
+        private, symbols = self._make_package_and_symbols(elf_bytes)
+        private["data_sites"] = [
+            {"id": "BYTE_TABLE", "symbol": "synth_byte_table", "offset": 0, "type": "u8", "count": 1,
+             "stock_digest": hashlib.sha256(bytes((30,))).hexdigest(), "transform": "count_x2"},
+            {"id": "HALF_TABLE", "symbol": "synth_half_table", "offset": 0, "type": "u16", "count": 1,
+             "stock_digest": hashlib.sha256(struct.pack("<H", 30)).hexdigest(), "transform": "count_x2"},
+        ]
+        symbols.update({name: f"0x{addr:08x}" for name, addr in self._ALIGN_SYMBOLS.items()})
+        return private, symbols
+
+    def _aligned_data_elf(self, path: Path) -> bytes:
+        return _write_synthetic_mips_elf(
+            path, {**self.words, **self._ALIGN_WORDS}, self.entry,
+            sections=((".text", 0x00001000, 0x700, 6), (".data", 0x00002000, 8, 3)))
+
+    def test_data_symbols_publish_at_their_element_alignment(self) -> None:
+        """A data-only name needs the alignment of its element type, not a function's 4 bytes: a u8
+        site on an odd symbol and a u16 site on a 2-aligned one build, publish through --publish,
+        pass the published form's check, and the published build writes the same bytes at the same
+        addresses as the private build (F-9143fc69)."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
-            words = dict(self.words)
-            words[0x00002000] = 0x00001E1E  # the bytes at 0x2000 and 0x2001 are 30
-            elf_bytes = _write_synthetic_mips_elf(
-                tmp / "synth.elf",
-                words,
-                self.entry,
-                sections=((".text", 0x00001000, 0x700, 6), (".data", 0x00002000, 4, 3)),
-                symbols=(("synth_byte_table", 0x00002001, 1, 1, 3),),
-            )
-            private, symbols = self._make_package_and_symbols(elf_bytes)
-            private["data_sites"] = [{
-                "id": "BYTE_TABLE",
-                "symbol": "synth_byte_table",
-                "offset": 0,
-                "type": "u8",
-                "count": 1,
-                "stock_digest": hashlib.sha256(bytes((30,))).hexdigest(),
-                "transform": "count_x2",
-            }]
+            elf_path = tmp / "synth.elf"
+            self._aligned_data_elf(elf_path)
+            elf_bytes = elf_path.read_bytes()
+            private, symbols = self._aligned_data_package(elf_bytes)
+            priv_path = tmp / "private" / "synth-60hz.json"
+            priv_path.parent.mkdir()
+            priv_path.write_text(json.dumps(private), encoding="utf-8")
+            priv_path.with_suffix(".symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+            pub_path = tmp / "public" / "ulus99999-60hz.json"
+            pub_path.parent.mkdir()
+            stderr = StringIO()
+            with mock.patch("sys.stdout", new=StringIO()), mock.patch("sys.stderr", new=stderr):
+                rc = enhancement_package.main([
+                    "--publish", str(priv_path), "--elf", str(elf_path), "--base", "0",
+                    "--disc-id", self.DISC, "--disc-version", self.VERSION, "--out", str(pub_path)])
+            self.assertEqual(rc, 0, stderr.getvalue())
+            published = json.loads(pub_path.read_text(encoding="utf-8"))
+            self.assertEqual(enhancement_package.published_package_findings(published), [])
+            self.assertEqual(published["site_map"]["synth_byte_table"], "0x00002001")
+            self.assertEqual(published["site_map"]["synth_half_table"], "0x00002002")
+
+            runs = {}
+            for label, path in (("private", priv_path), ("published", pub_path)):
+                out_dir = tmp / f"out-{label}"
+                out_dir.mkdir()
+                rc_run, output, files = self._run_codegen(elf_path, out_dir / "out.c",
+                                                          [f"--enhancement-package={path}"])
+                self.assertEqual(rc_run, 0, output)
+                runs[label] = files
+            self.assertEqual(runs["published"], runs["private"])
+            combined = b"\n".join(runs["published"].values()).decode("utf-8")
+            # Each site is checked and written at its own address: 30 -> 60 in one byte at 0x2001
+            # and in one halfword at 0x2002.
+            self.assertIn("nk_enh_data_new_0[] = {0x3c}", combined)
+            self.assertIn("if (!sr_guest_span_writable(0x00002001u, 1u) ||", combined)
+            self.assertIn("memcpy(sr_host_address(0x00002001u), nk_enh_data_new_0, 1u);", combined)
+            self.assertIn("nk_enh_data_new_1[] = {0x3c, 0x00}", combined)
+            self.assertIn("if (!sr_guest_span_writable(0x00002002u, 2u) ||", combined)
+            self.assertIn("memcpy(sr_host_address(0x00002002u), nk_enh_data_new_1, 2u);", combined)
+
+            # A published map edited to put the u16 table at an odd address is refused by name when
+            # the package is resolved and when codegen builds it: nothing is written.
+            hostile = copy.deepcopy(published)
+            hostile["site_map"]["synth_half_table"] = "0x00002001"
+            refusal = (r"site_map\.synth_half_table: address '0x00002001' must be a 2-byte-aligned "
+                       r"0x%08x hex string")
+            findings = enhancement_package.published_package_findings(hostile)
+            self.assertEqual(len(findings), 1, findings)
+            self.assertRegex(findings[0], refusal)
+            read_words, read_data = self._readers(elf_bytes)
+            with self.assertRaisesRegex(EnhancementPackageError, refusal):
+                enhancement_package.resolve_published_package(
+                    hostile, executable=elf_bytes, read_words_fn=read_words, read_data_fn=read_data)
+            hostile_path = tmp / "public" / "hostile.json"
+            hostile_path.write_text(json.dumps(hostile), encoding="utf-8")
+            hostile_dir = tmp / "out-hostile"
+            hostile_dir.mkdir()
+            rc_bad, out_bad, files_bad = self._run_codegen(elf_path, hostile_dir / "out.c",
+                                                           [f"--enhancement-package={hostile_path}"])
+            self.assertNotEqual(rc_bad, 0)
+            self.assertRegex(out_bad, refusal)
+            self.assertEqual(files_bad, {})
+
+    def test_publish_refuses_a_data_symbol_below_its_element_alignment(self) -> None:
+        """--publish and the published form refuse, by name, a u16 symbol at an odd address and a
+        u32 symbol at a 2-aligned address; a function name keeps the 4-byte rule, also when a data
+        site uses it too."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_bytes = self._aligned_data_elf(tmp / "synth.elf")
+            private, symbols = self._aligned_data_package(elf_bytes)
             read_words, read_data = self._readers(elf_bytes)
 
-            def publish(address: str) -> dict[str, Any]:
+            def publish(pkg: dict[str, Any], **moved: int) -> dict[str, Any]:
                 published: dict[str, Any] = enhancement_package.publish_package(
-                    private,
-                    {name: int(value, 16) for name, value in {**symbols, "synth_byte_table": address}.items()},
-                    executable=elf_bytes,
-                    disc_id=self.DISC,
-                    disc_version=self.VERSION,
-                    read_words_fn=read_words,
-                    read_data_fn=read_data,
-                )
+                    pkg, {**{name: int(value, 16) for name, value in symbols.items()}, **moved},
+                    executable=elf_bytes, disc_id=self.DISC, disc_version=self.VERSION,
+                    read_words_fn=read_words, read_data_fn=read_data)
                 return published
 
-            with self.assertRaisesRegex(EnhancementPackageError, refusal):
-                publish("0x00002001")
-            # The same site at an aligned address publishes; moving its address afterwards is refused.
-            published = publish("0x00002000")
+            # u16 at an odd address: the stock bytes there are 0x1e, 0x1e (30, 30).
+            odd_half = copy.deepcopy(private)
+            odd_half["data_sites"][1]["stock_digest"] = hashlib.sha256(bytes((30, 30))).hexdigest()
+            with self.assertRaisesRegex(EnhancementPackageError,
+                                        r"site_map\.synth_half_table: address '0x00002001' must be a "
+                                        r"2-byte-aligned 0x%08x hex string"):
+                publish(odd_half, synth_half_table=0x00002001)
+            # u32 at a 2-aligned address: the stock bytes at 0x2002..0x2005 are 0x1e, 0, 21, 0.
+            word = copy.deepcopy(private)
+            word["data_sites"].append({
+                "id": "WORD_TABLE", "symbol": "synth_word_table", "offset": 0, "type": "u32", "count": 1,
+                "stock_digest": hashlib.sha256(bytes((0x1E, 0, 21, 0))).hexdigest(), "transform": "count_x2"})
+            with self.assertRaisesRegex(EnhancementPackageError,
+                                        r"site_map\.synth_word_table: address '0x00002002' must be a "
+                                        r"4-byte-aligned 0x%08x hex string"):
+                publish(word, synth_word_table=0x00002002)
 
-        self.assertEqual(enhancement_package.published_package_findings(published), [])
-        published["site_map"]["synth_byte_table"] = "0x00002001"
-        findings = enhancement_package.published_package_findings(published)
-        self.assertEqual(len(findings), 1, findings)
-        self.assertRegex(findings[0], refusal)
+            published = publish(private)
+            self.assertEqual(enhancement_package.published_package_findings(published), [])
+
+        def finding(pkg: dict[str, Any]) -> str:
+            findings: list[str] = enhancement_package.published_package_findings(pkg)
+            self.assertEqual(len(findings), 1, findings)
+            return findings[0]
+
+        # A function name at an address that is not 4-byte aligned.
+        code = copy.deepcopy(published)
+        code["site_map"]["synth_timer_duration"] = "0x00001202"
+        self.assertRegex(finding(code), r"site_map\.synth_timer_duration: address '0x00001202' must be a "
+                                        r"4-byte-aligned 0x%08x hex string")
+        # The u16 table's name also used as a function: the 4-byte rule holds at 0x2002.
+        both = copy.deepcopy(published)
+        both["sites"][1]["function"] = "synth_half_table"
+        del both["site_map"]["synth_timer_duration"]
+        self.assertRegex(finding(both), r"site_map\.synth_half_table: address '0x00002002' must be a "
+                                        r"4-byte-aligned 0x%08x hex string")
+        # The u16 site retyped u32 in the published form: its 2-aligned address is refused.
+        retyped = copy.deepcopy(published)
+        retyped["data_sites"][1]["type"] = "u32"
+        self.assertRegex(finding(retyped), r"site_map\.synth_half_table: address '0x00002002' must be a "
+                                           r"4-byte-aligned 0x%08x hex string")
+
+    def test_data_site_resolution_refuses_an_element_below_its_alignment(self) -> None:
+        """verify_and_resolve_data_sites, which every build applies, refuses a symbol whose address
+        puts an element below its type's alignment, from any symbol map."""
+        image = {0x00002001: bytes((30, 30)), 0x00002002: struct.pack("<H", 30)}
+        pkg: dict[str, Any] = {
+            "schema_version": 1, "id": "synth.align", "display_name": "Synthetic alignment", "version": "1.0.0",
+            "category": "timing_frame_presentation", "target_title_id": "synthetic-allegrex-v1",
+            "game_version": "1.00", "executable_sha256": "a" * 64, "capabilities": ["count_x2"],
+            "rng_policy": {"mode": "subtick_30hz", "reason": "Every roll stays on alternate updates."},
+            "sites": [{"id": "S1", "function": "f", "insn_offset": 0,
+                       "stock_digest": "b" * 64, "transform": "count_x2"}],
+            "data_sites": [{"id": "HALF", "symbol": "table", "offset": 0, "type": "u16",
+                            "stock_digest": hashlib.sha256(bytes((30, 30))).hexdigest(),
+                            "transform": "count_x2"}],
+        }
+        with self.assertRaisesRegex(EnhancementPackageError,
+                                    r"data_sites\[0\]\(HALF\): table\+0 is at 0x00002001, which is not "
+                                    r"aligned to its 2-byte u16 element \(fail-closed refusal\)"):
+            verify_and_resolve_data_sites(pkg, symbol_to_addr={"table": 0x00002001},
+                                          read_data_fn=lambda a, n: image.get(a))
+        pkg["data_sites"][0]["stock_digest"] = hashlib.sha256(struct.pack("<H", 30)).hexdigest()
+        resolved = verify_and_resolve_data_sites(pkg, symbol_to_addr={"table": 0x00002002},
+                                                 read_data_fn=lambda a, n: image.get(a))
+        self.assertEqual([(e["addr"], e["data"]) for e in resolved], [(0x00002002, struct.pack("<H", 60))])
 
     def test_publish_walks_the_extracted_data_tree_once_for_multiple_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

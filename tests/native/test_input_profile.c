@@ -458,6 +458,29 @@ static void test_future_version_refused(void) {
     assert(strstr(readback, future_field) != NULL);
 
     remove(file_path);
+
+    /* schema_version is a whole number compared before any int conversion:
+     * 6.9 is refused rather than read as 6, and 1e12 (past the int range) is a
+     * newer schema rather than an undefined cast to a negative version. */
+    {
+        const char *fraction_json = "{ \"schema_version\": 6.9 }";
+        res = nk_input_profile_parse_json(&profile, fraction_json, strlen(fraction_json),
+                                          diag, sizeof(diag));
+        assert(res == NK_ERROR_GENERIC);
+        assert(strstr(diag, "schema_version must be a whole number") != NULL);
+
+        const char *huge_json = "{ \"schema_version\": 1e12 }";
+        res = nk_input_profile_parse_json(&profile, huge_json, strlen(huge_json),
+                                          diag, sizeof(diag));
+        assert(res == NK_ERROR_NEWER_SCHEMA);
+        assert(strstr(diag, "unsupported future schema_version 1000000000000") != NULL);
+
+        const char *negative_json = "{ \"schema_version\": -1e12 }";
+        res = nk_input_profile_parse_json(&profile, negative_json, strlen(negative_json),
+                                          diag, sizeof(diag));
+        assert(res == NK_ERROR_GENERIC);
+        assert(strstr(diag, "unsupported schema_version -1000000000000") != NULL);
+    }
     printf("[INPUT_PROFILE_TEST] Subtest 4 PASSED!\n");
 }
 
@@ -1293,13 +1316,14 @@ static void test_hostile_documents_fail_closed(void) {
         expect_refused("duplicate primary in a binding", s_hostile_doc, len,
                        "duplicate JSON object key");
 
-        /* A key that equals a real one only up to an embedded NUL is an unknown
-         * key, not a duplicate -- and an unknown binding key binds nothing. */
+        /* A key that equals a real one only up to an embedded NUL binds
+         * nothing: the JSON reader refuses a key holding \u0000 by name
+         * (audit 2026-11-17, F-09aceff2), before it could read as "pri". */
         len = render_doc(s_hostile_doc, sizeof(s_hostile_doc), NULL, NULL,
                          "\"psp_bindings\": [ { \"control\": \"cross\","
                          " \"pri\\u0000mary\": \"south\" } ]", NULL);
         expect_refused("binding key with an embedded NUL", s_hostile_doc, len,
-                       "neither 'primary' nor 'secondary'");
+                       "\\u0000 is not supported in a JSON object key");
 
         {
             char entries[1024];
@@ -3621,6 +3645,102 @@ static void test_versioned_profile_files(void) {
     printf("[INPUT_PROFILE_TEST] Versioned files PASSED!\n");
 }
 
+/* -----------------------------------------------------------------------------
+ * Every document the loader accepts saves to a file the loader accepts again, with the
+ * same mapping: a "trigger:" binding on a stick axis, control characters in guid and
+ * name_hint, and a guid or name_hint longer than its field that ends in a multi-byte
+ * character. Before, each of these saved a file the next load refused whole, which
+ * reset the global and every per-title mapping to the defaults.
+ * -------------------------------------------------------------------------- */
+
+static void expect_save_reload(const char *label, const NkInputProfileFile *doc,
+                               NkInputProfileFile *back) {
+    const char *path = SR_SELFTEST_BUILD_ROOT "/test_saved_strings_read_back.json";
+    char why[NK_INPUT_DIAGNOSTIC_MAX_LEN];
+    why[0] = '\0';
+    assert(nk_input_profile_file_save(doc, path, why, sizeof(why)) == NK_OK);
+    why[0] = '\0';
+    NkResult res = nk_input_profile_file_load(back, path, why, sizeof(why));
+    if (res != NK_OK) {
+        printf("  %s: the saved file was refused on reload: %s\n", label, why);
+        assert(0 && "a saved profile must load again");
+    }
+    remove(path);
+}
+
+static void test_saved_strings_read_back(void) {
+    printf("[INPUT_PROFILE_TEST] Saved bindings and device strings read back...\n");
+    NkInputProfileFile doc;
+    NkInputProfileFile back;
+    size_t len;
+
+    /* A trigger binding on a stick axis keeps its "trigger:" prefix when saved. */
+    len = render_doc(s_hostile_doc, sizeof(s_hostile_doc), NULL, NULL,
+                     "\"psp_bindings\": [ { \"control\": \"cross\", \"primary\": \"trigger:rightx\" } ]",
+                     NULL);
+    expect_accepted("trigger on a stick axis", s_hostile_doc, len, &doc);
+    assert(doc.global.psp_buttons[NK_PSP_BTN_CROSS].primary.type == NK_BINDING_HOST_TRIGGER);
+    assert(doc.global.psp_buttons[NK_PSP_BTN_CROSS].primary.index == NK_HOST_AXIS_RIGHTX);
+    expect_save_reload("trigger on a stick axis", &doc, &back);
+    assert(back.global.psp_buttons[NK_PSP_BTN_CROSS].primary.type == NK_BINDING_HOST_TRIGGER);
+    assert(back.global.psp_buttons[NK_PSP_BTN_CROSS].primary.index == NK_HOST_AXIS_RIGHTX);
+    /* The trigger axes themselves still save as the bare name, which reads back. */
+    len = render_doc(s_hostile_doc, sizeof(s_hostile_doc), NULL, NULL,
+                     "\"psp_bindings\": [ { \"control\": \"ltrigger\", \"primary\": \"left_trigger\" } ]",
+                     NULL);
+    expect_accepted("bare trigger axis", s_hostile_doc, len, &doc);
+    expect_save_reload("bare trigger axis", &doc, &back);
+    assert(back.global.psp_buttons[NK_PSP_BTN_LTRIGGER].primary.type == NK_BINDING_HOST_TRIGGER);
+    assert(back.global.psp_buttons[NK_PSP_BTN_LTRIGGER].primary.index == NK_HOST_AXIS_LEFT_TRIGGER);
+
+    /* Control characters the loader decodes from escapes are escaped again. */
+    len = render_doc(s_hostile_doc, sizeof(s_hostile_doc),
+                     "\"device\": { \"guid\": \"g\\u001fh\", "
+                     "\"name_hint\": \"a\\u0001b\\bc\\fd\\u007fe\" }",
+                     NULL, NULL, NULL);
+    expect_accepted("control characters in device strings", s_hostile_doc, len, &doc);
+    assert(strcmp(doc.global.guid, "g\x1fh") == 0);
+    assert(strcmp(doc.global.name_hint, "a\x01" "b\bc\fd\x7f" "e") == 0);
+    expect_save_reload("control characters in device strings", &doc, &back);
+    assert(strcmp(back.global.guid, doc.global.guid) == 0);
+    assert(strcmp(back.global.name_hint, doc.global.name_hint) == 0);
+
+    /* A value longer than its field is cut before the character that does not fit. */
+    {
+        char guid[NK_INPUT_GUID_MAX_LEN + 8];
+        char name[NK_INPUT_NAME_HINT_MAX_LEN + 8];
+        char device[512];
+        fill_repeat(guid, sizeof(guid), 'g', NK_INPUT_GUID_MAX_LEN - 2);
+        strcat(guid, "\xe2\x82\xac"); /* ends at byte 65 of a 63-byte field */
+        fill_repeat(name, sizeof(name), 'n', NK_INPUT_NAME_HINT_MAX_LEN - 2);
+        strcat(name, "\xc3\xa4"); /* ends at byte 128 of a 127-byte field */
+        int n = snprintf(device, sizeof(device),
+                         "\"device\": { \"guid\": \"%s\", \"name_hint\": \"%s\" }", guid, name);
+        assert(n > 0 && (size_t)n < sizeof(device));
+        len = render_doc(s_hostile_doc, sizeof(s_hostile_doc), device, NULL, NULL, NULL);
+        expect_accepted("over-long multi-byte device strings", s_hostile_doc, len, &doc);
+        assert(strlen(doc.global.guid) == NK_INPUT_GUID_MAX_LEN - 2);
+        assert(strspn(doc.global.guid, "g") == NK_INPUT_GUID_MAX_LEN - 2);
+        assert(strlen(doc.global.name_hint) == NK_INPUT_NAME_HINT_MAX_LEN - 2);
+        assert(strspn(doc.global.name_hint, "n") == NK_INPUT_NAME_HINT_MAX_LEN - 2);
+        expect_save_reload("over-long multi-byte device strings", &doc, &back);
+        assert(strcmp(back.global.guid, doc.global.guid) == 0);
+        assert(strcmp(back.global.name_hint, doc.global.name_hint) == 0);
+
+        /* A whole character that fits is kept. */
+        fill_repeat(name, sizeof(name), 'n', NK_INPUT_NAME_HINT_MAX_LEN - 3);
+        strcat(name, "\xc3\xa4");
+        n = snprintf(device, sizeof(device),
+                     "\"device\": { \"guid\": \"g\", \"name_hint\": \"%s\" }", name);
+        assert(n > 0 && (size_t)n < sizeof(device));
+        len = render_doc(s_hostile_doc, sizeof(s_hostile_doc), device, NULL, NULL, NULL);
+        expect_accepted("multi-byte name_hint that fits", s_hostile_doc, len, &doc);
+        assert(strcmp(doc.global.name_hint, name) == 0);
+    }
+
+    printf("[INPUT_PROFILE_TEST] Saved bindings and device strings read back PASSED!\n");
+}
+
 int main(void) {
     /* Unbuffered: a failing case names itself on stdout, and the harness reads
      * that line even when the run aborts on the assert that follows. */
@@ -3650,6 +3770,7 @@ int main(void) {
     test_mouse_aim();
     test_mouse_buttons();
     test_versioned_profile_files();
+    test_saved_strings_read_back();
 
     printf("=================================================================\n");
     printf("ALL HOST INPUT PROFILE TESTS PASSED SUCCESSFULLY!\n");

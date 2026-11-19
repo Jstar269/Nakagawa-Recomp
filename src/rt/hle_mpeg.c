@@ -131,14 +131,26 @@ uint32_t psmf_av_texture_bytes(uint32_t bufw, uint32_t h, uint32_t fmt) {
 /* Issue #279: the media fixture asserts the exact published counter line -- the same bytes
  * a run writes on stderr -- without scraping a shared stream.  psmf_log_summary() records
  * the last line it printed here and counts them, so a test can tell a fresh line from a
- * stale one.  Test-only; the production build carries neither the buffer nor the count. */
+ * stale one.  It also keeps the most recent PSMF_SUMMARY_LINE_HISTORY lines by publish
+ * number, so a sampler that runs after several getter calls checks every line they
+ * published, not only the newest.  Test-only; the production build carries neither the
+ * buffers nor the count. */
 #define PSMF_SUMMARY_LINE_CAPACITY 4096u
+#define PSMF_SUMMARY_LINE_HISTORY 16u
 #define PSMF_REJECTION_LINE_CAPACITY 512u
 static char s_psmf_last_summary[PSMF_SUMMARY_LINE_CAPACITY];
+static char s_psmf_summary_history[PSMF_SUMMARY_LINE_HISTORY][PSMF_SUMMARY_LINE_CAPACITY];
 static uint32_t s_psmf_summary_count;
 static char s_psmf_last_rejection[PSMF_REJECTION_LINE_CAPACITY];
 const char *sr_hle_test_psmf_last_summary(void) { return s_psmf_last_summary; }
 uint32_t sr_hle_test_psmf_summary_count(void) { return s_psmf_summary_count; }
+/* The line published as number `seq` (0 is the first line of the process), or NULL when it
+ * was not published yet or has already left the history. */
+const char *sr_hle_test_psmf_summary_line(uint32_t seq) {
+    if (seq >= s_psmf_summary_count || s_psmf_summary_count - seq > PSMF_SUMMARY_LINE_HISTORY)
+        return NULL;
+    return s_psmf_summary_history[seq % PSMF_SUMMARY_LINE_HISTORY];
+}
 #else
 #define PSMF_SUMMARY_LINE_CAPACITY 4096u
 #endif
@@ -234,6 +246,8 @@ static void psmf_log_summary(SrPsmfPlayer *p) {
     fputs(line, stderr);
 #ifdef SR_MPEG_MEDIA_SELFTEST
     memcpy(s_psmf_last_summary, line, (size_t)formatted + 1u);
+    memcpy(s_psmf_summary_history[s_psmf_summary_count % PSMF_SUMMARY_LINE_HISTORY], line,
+           (size_t)formatted + 1u);
     s_psmf_summary_count++;
 #endif
 }
@@ -252,6 +266,11 @@ static void psmf_log_tick(SrPsmfPlayer *p) {
 }
 
 #ifdef SR_MPEG_MEDIA_SELFTEST
+/* One step of the LoadExec reset (sr_hle_loadexec_reset_guest_state releases all four slots). */
+void sr_hle_test_psmf_release_slot(unsigned i) {
+    if (i < sizeof(s_psmf_players) / sizeof(s_psmf_players[0])) psmf_player_release(&s_psmf_players[i]);
+}
+
 void sr_hle_test_psmf_log_tick(uint32_t guest) {
     SrPsmfPlayer *p = psmf_find(guest, 1);
     if (p) psmf_log_tick(p);
@@ -421,6 +440,10 @@ static void psmf_media_reset(SrPsmfPlayer *p) {
  * got none. */
 void psmf_player_release(SrPsmfPlayer *p) {
     if (!p) return;
+    /* A slot no player holds owns nothing.  One never used is still zero-filled, so its h264
+     * field reads 0, a live instance id another owner (an sceMpeg context, another player) may
+     * hold; the LoadExec reset releases all four slots. */
+    if (!p->used) { p->h264 = -1; return; }
     sr_movie_forget_owner(p->guest);   /* its pictures are no longer movie frames (#2111) */
     psmf_flush(p);
     if (p->producer) { sr_psmf_producer_close(p->producer); p->producer = NULL; }
@@ -756,16 +779,19 @@ static int psmf_parse_header(SrPsmfPlayer *p, const uint8_t *h, uint32_t n) {
 static uint32_t h_PsmfCreate(CpuState *s) {
     /* Parameters are checked before a slot is claimed, so a refused create keeps nothing;
      * creating over a live control block gives the old player's decoder and producer back
-     * and starts a fresh player (issue #279). */
+     * and starts a fresh player (issue #279).  A refusal over a live control block clears its
+     * handle word, so the old player goes too: nothing could reach it to delete it. */
     s_psmf_calls++;
     SrPsmfPlayer *p = psmf_slot(A0, 0);
     if (!A0 || !A1 || !sr_guest_span_readable(A1, 12u)) return PSMF_ERR_PARAM;
     uint32_t b = MEM_R32(A1), sz = MEM_R32(A1 + 4), pri = MEM_R32(A1 + 8);
     if (!b || sz < PSMF_PLAYER_BUFFER_MIN_BYTES) {
+        psmf_player_release(p);
         MEM_W32(A0, 0);
         return PSMF_ERR_BUFSIZE;
     }
     if (pri < PSMF_PLAYER_PRIORITY_MIN || pri >= PSMF_PLAYER_PRIORITY_LIMIT) {
+        psmf_player_release(p);
         MEM_W32(A0, 0);
         return PSMF_ERR_PARAM;
     }
@@ -1244,24 +1270,19 @@ static uint32_t h_MpegRingbufferDestruct(CpuState *s) {
 
 /* sceMpegFlushAllStream(mpeg): flush and reset stream packets for an MPEG stream.
  * Public behaviour reference: PSPSDK pspmpeg.h and PPSSPP Core/HLE/sceMpeg.cpp.
- * Resets the ring buffer counters (packetsRead, packetsWritePos, packetsAvail)
- * and marks streams for reset. Errors reuse neighbouring bad-ring/address codes. */
+ * mpeg.c resets the ring buffer counters (packetsRead, packetsWritePos, packetsAvail) of the
+ * context's own ring and starts its demuxes over; it alone knows the ring, and a handle no
+ * context has is refused with -1, as sceMpegAvcDecodeFlush refuses it.  A null or unreadable
+ * descriptor is refused with the neighbouring bad-address code.  In the executable HLE harness
+ * mpeg.c is not linked, so the handler only checks the descriptor there. */
 static uint32_t h_MpegFlushAllStream(CpuState *s) {
     uint32_t mpegAddr = A0;
     if (!mpegAddr || !sr_guest_span_readable(mpegAddr, 4u)) return 0x80020003u;
 #ifndef SR_HLE_THREAD_SELFTEST
-    mpeg_flush_all_stream(mpegAddr);
-#endif
-    uint32_t h = MEM_R32(mpegAddr);
-    if (h && sr_guest_span_readable(h, 24u)) {
-        uint32_t ring = MEM_R32(h + 16u);
-        if (ring && sr_guest_span_writable(ring, MPEG_RB_BYTES)) {
-            MEM_W32(ring + MPEG_RB_PACKETS_READ, 0u);
-            MEM_W32(ring + MPEG_RB_PACKETS_WRITE_POS, 0u);
-            MEM_W32(ring + MPEG_RB_PACKETS_AVAIL, 0u);
-        }
-    }
+    return mpeg_flush_all_stream(mpegAddr);   /* -1 for a handle no context has */
+#else
     return 0;
+#endif
 }
 
 /* sceMpegFlushStream(mpeg, stream): validates the context and the stream id (the value
@@ -1289,9 +1310,10 @@ static uint32_t h_MpegAvcDecodeFlush(CpuState *s) {
     uint32_t mpegAddr = A0;
     if (!mpegAddr || !sr_guest_span_readable(mpegAddr, 4u)) return 0x80020003u;
 #ifndef SR_HLE_THREAD_SELFTEST
-    mpeg_avc_decode_flush(mpegAddr);
-#endif
+    return mpeg_avc_decode_flush(mpegAddr);   /* -1 for a handle no context has */
+#else
     return 0;
+#endif
 }
 void hle_register_mpeg_shared_handlers(void) {
     /* MPEG flush/destruct family: shared between selftest harness and production. */
