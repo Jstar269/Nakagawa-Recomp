@@ -657,8 +657,9 @@ class TestWindowsContainmentArchitecture(unittest.TestCase):
                       "the save directory itself must be removed by handle")
         self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT", win,
                       "the directory disposition must stay pinned to the object, not a link target")
-        self.assertIn("sr_vfs_dir_is_contained(", win,
-                      "the save directory must be containment-checked before enumeration")
+        self.assertIn("sr_vfs_open_contained_utf8(", win,
+                      "the save directory must be opened through a final-path-verified handle "
+                      "before enumeration")
 
     def test_do_erase_deletes_through_verified_handle(self):
         win = _seam_backend("SR_CD_BACKEND_WINDOWS")
@@ -758,8 +759,9 @@ class TestPortableContainedDeleteArchitecture(unittest.TestCase):
         self.assertIn("save_rel(", code,
                       "DELETE must pass a ROOT-RELATIVE path, never an absolute pathname")
         self.assertIn("sr_cd_root_close(&root)", code, "the root binding must be released")
-        self.assertIn("st == SR_CD_OK ? 0 : ERR_DELETE_NO_DATA", code,
-                      "any non-OK seam status must fail the guest call")
+        self.assertIn("if (st == SR_CD_OK) {", code, "only an OK seam status succeeds")
+        self.assertIn("st == SR_CD_NOT_FOUND ? ERR_DELETE_NO_DATA : ERR_DELETE_ACCESS_ERROR_UNMEASURED",
+                      code, "any other seam status must fail the guest call as an access error")
 
     def test_do_erase_routes_through_the_contained_seam(self):
         code = _savedata_fn("static uint32_t do_erase", "/* LIST (11)")
@@ -769,8 +771,9 @@ class TestPortableContainedDeleteArchitecture(unittest.TestCase):
                       "ERASE must go through the contained leaf-delete entry point")
         self.assertIn("save_rel(", code,
                       "ERASE must pass a ROOT-RELATIVE path, never an absolute pathname")
-        self.assertIn("st == SR_CD_OK ? 0 : ERR_RW_NO_DATA", code,
-                      "any non-OK seam status must fail the guest call")
+        self.assertIn("if (st == SR_CD_OK) {", code, "only an OK seam status succeeds")
+        self.assertIn("st == SR_CD_NOT_FOUND ? ERR_RW_NO_DATA : ERR_RW_NO_MEMSTICK_UNMEASURED",
+                      code, "any other seam status must fail the guest call as an access error")
 
     def test_posix_backend_is_descriptor_relative_end_to_end(self):
         posix = _seam_backend("SR_CD_BACKEND_POSIX_AT")
