@@ -31,6 +31,8 @@
     NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000500u + (uint32_t)(tab) * 4u)
 #define ENHANCED_TEST_LIST_ID(tab) \
     NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000550u + (uint32_t)(tab))
+/* The box around the pinned rows, the tabs and the list, beside the detail panel. */
+#define ENHANCED_TEST_LEFT_ID NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000542u)
 
 static int failures;
 static const uint8_t k_test_glyph_pixel = 0xFFu;
@@ -117,6 +119,10 @@ static NkUiId g_enhanced_focus_id;
 static const char *g_enhanced_preset_note;
 /* A part's sentence instead of the fixture's (NULL keeps it): Supersampling's warning. */
 static const char *g_enhanced_sentence[PLAYER_PART_COUNT];
+/* A part's name instead of the fixture's, and what a game's Texture pack folder row shows
+   instead of "None" (NULL keeps them): the detail panel's stress cases. */
+static const char *g_enhanced_name[PLAYER_PART_COUNT];
+static const char *g_enhanced_texpack_value;
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -508,7 +514,8 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         settings.enhanced_tab_chosen = &g_enhanced_tab_chosen;
         settings.texpack_row = title;
         settings.texpack_chosen = false;
-        settings.texpack_value = "None";
+        settings.texpack_value =
+            g_enhanced_texpack_value != NULL ? g_enhanced_texpack_value : "None";
         settings.texpack_sentence = "Choose the folder of a texture pack you made or downloaded.";
         for (int i = 0; i < PLAYER_PART_COUNT; i++) {
             const int part = k_enhanced_layout_fixture[i].part;
@@ -519,7 +526,8 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
             settings.enhanced_rows[i].part = part;
             settings.enhanced_rows[i].group = k_enhanced_layout_fixture[i].group;
             settings.enhanced_rows[i].selected_index = 0;
-            settings.enhanced_rows[i].name = k_enhanced_parts[part].name;
+            settings.enhanced_rows[i].name =
+                g_enhanced_name[part] != NULL ? g_enhanced_name[part] : k_enhanced_parts[part].name;
             settings.enhanced_rows[i].value =
                 title && g_enhanced_value[part] == NULL ? followed[i] : value;
             settings.enhanced_rows[i].sentence = g_enhanced_sentence[part] != NULL
@@ -3524,7 +3532,8 @@ static void enhanced_lines_join(const EnhancedLines *lines, char *out, size_t ca
    whole sentence and the whole note (NULL: none drawn), word for word, with the "Focused
    option" line when `focused`, and no text run of the page cut to an ellipsis. Where the
    page is taller than the window (a larger text size) the card is read to its end, 120 px at
-   a time, as the player scrolls it. */
+   a time, as the player scrolls it, and so is the panel's own column where its text is
+   taller than the panel. */
 static bool enhanced_panel_reads(FlowCase which, int width, int height, const char *name,
                                  const char *value, const char *sentence, const char *note,
                                  bool focused) {
@@ -3550,21 +3559,45 @@ static bool enhanced_panel_reads(FlowCase which, int width, int height, const ch
     want[3] = sentence;
     want[4] = note != NULL ? note : "";
     while (reads && draw != NULL) {
-        for (size_t p = 0u; p < sizeof(parts) / sizeof(parts[0]); ++p) {
-            enhanced_lines_add(&lines[p], draw,
-                               NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, parts[p].offset),
-                               (int)(offset * scale.density + 0.5f));
-        }
-        for (uint32_t i = 0u; i < draw->ncmd; ++i) {
-            const NkUiTextRun *run = draw->cmd[i].kind == NK_UI_DRAW_TEXT
-                                         ? (const NkUiTextRun *)draw->cmd[i].custom : NULL;
-            if (run != NULL && run->text != NULL && run_ends_in_ellipsis(run)) {
-                fprintf(stderr, "  cut short at %d x %d, %d%% text: %08X \"%.*s\"\n", width,
-                        height, g_flow_text_size_pct, (unsigned)draw->cmd[i].element_id,
-                        (int)(run->length > 70u ? 70u : run->length), run->text);
-                reads = false;
+        /* At each place of the card, the panel's own column is read to its end the same way
+           (it scrolls inside the panel where its text is taller than the list box). */
+        float column = 0.0f;
+        for (;;) {
+            for (size_t p = 0u; p < sizeof(parts) / sizeof(parts[0]); ++p) {
+                enhanced_lines_add(&lines[p], draw,
+                                   NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, parts[p].offset),
+                                   (int)((offset + column) * scale.density + 0.5f));
             }
+            for (uint32_t i = 0u; i < draw->ncmd; ++i) {
+                const NkUiTextRun *run = draw->cmd[i].kind == NK_UI_DRAW_TEXT
+                                             ? (const NkUiTextRun *)draw->cmd[i].custom
+                                             : NULL;
+                if (run != NULL && run->text != NULL && run_ends_in_ellipsis(run)) {
+                    fprintf(stderr, "  cut short at %d x %d, %d%% text: %08X \"%.*s\"\n",
+                            width, height, g_flow_text_size_pct,
+                            (unsigned)draw->cmd[i].element_id,
+                            (int)(run->length > 70u ? 70u : run->length), run->text);
+                    reads = false;
+                }
+            }
+            if (!nk_ui_scroll_state(ui, PLAYER_UI_ID_ENHANCED_DETAIL_BODY, &state) ||
+                column >= state.max_offset) {
+                break;
+            }
+            column += 120.0f;
+            if (column > state.max_offset) column = state.max_offset;
+            nk_ui_scroll_to(ui, PLAYER_UI_ID_ENHANCED_DETAIL_BODY, column);
+            g_flow_width = scale.logical_w;
+            g_flow_height = scale.logical_h;
+            for (int frame = 0; frame < 2; ++frame) {
+                nk_ui_begin(ui, 0.0);
+                (void)draw_flow_case(ui, which);
+                draw = nk_ui_end(ui);
+            }
+            g_flow_width = 1280.0f;
+            g_flow_height = 800.0f;
         }
+        if (column > 0.0f) nk_ui_scroll_to(ui, PLAYER_UI_ID_ENHANCED_DETAIL_BODY, 0.0f);
         if (!nk_ui_scroll_state(ui, FLOW_ID_CARD, &state) || offset >= state.max_offset) break;
         offset += 120.0f;
         if (offset > state.max_offset) offset = state.max_offset;
@@ -5414,6 +5447,334 @@ static void test_enhanced_wheel_scrolls_past_the_focused_row(void) {
     g_enhanced_focus_id = saved_focus;
 }
 
+/* Settings > Enhanced's detail panel under stress (#2643, follow-up to #2644): a value that is
+   one long word (a texture pack folder's name), a long value of many words, a long option
+   name with a long compound word in it, and a description far taller than any panel. */
+#define ENHANCED_PANEL_ONE_WORD                                                                  \
+    "ULUS10000_Remastered_HD_Texture_Pack_v2.1_final_with_widescreen_HUD_and_supersampled_fonts"
+#define ENHANCED_PANEL_LAST_WORDS "and this is the last line of the panel."
+/* The thumb beside the panel's column while it scrolls (scr_settings.c). */
+#define ENHANCED_TEST_DETAIL_THUMB_ID \
+    nk_ui_child_id(NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000B02u), 2u)
+enum { ENHANCED_PANEL_CASES = 4 };
+typedef struct {
+    const char *name;
+    FlowCase page;
+    NkUiId focus;
+    const char *whole; /* text the panel shows whole, spaces aside; NULL for none */
+    bool scrolls;      /* taller than the panel in every window */
+} EnhancedPanelCase;
+static const EnhancedPanelCase k_enhanced_panel_cases[ENHANCED_PANEL_CASES] = {
+    {"oneword", FLOW_SETTINGS_ACE_TITLE, PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE,
+     ENHANCED_PANEL_ONE_WORD " \xC2\xB7 2 textures", false},
+    {"multiword", FLOW_SETTINGS_ACE, PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_FILTERING),
+     "16x anisotropic filtering with trilinear mipmaps on every surface the game draws, near "
+     "and far, at any angle", false},
+    {"title", FLOW_SETTINGS_ACE, PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_FILTERING),
+     "Texture filtering for surfaces seen at a steep angle "
+     "(Texturfilterungsqualit\xC3\xA4tsstufenauswahlmen\xC3\xBC)", false},
+    {"manylines", FLOW_SETTINGS_ACE, PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_FILTERING), NULL,
+     true},
+};
+static const char k_enhanced_panel_long_sentence[] =
+    "Sharper textures on surfaces seen at an angle, such as roads, floors and walls that run "
+    "away from the camera. The game asks for one filter and this part draws with a better one "
+    "in its place, so nothing the game decides changes, only how a texture looks at a "
+    "distance. It costs a little graphics work on every frame, more at a higher resolution, "
+    "and nothing at all while the game shows no 3D scene. Some games draw their menus with "
+    "the same textures as their worlds, and those menus look a little softer or sharper too. "
+    "A game that draws text into a texture keeps that text as it was. If a surface flickers "
+    "where it did not before, choose a lower level or turn the part off for that game alone "
+    "on its own page, and the library keeps its own choice for every other game. This sentence "
+    "is long on purpose, to be taller than the panel in every window, " ENHANCED_PANEL_LAST_WORDS;
+
+/* Sets the fixture for one stress case (or back to the plain fixture with which < 0). */
+static void enhanced_panel_case_set(int which) {
+    g_enhanced_texpack_value = which == 0 ? k_enhanced_panel_cases[0].whole : NULL;
+    g_enhanced_value[PLAYER_PART_FILTERING] = which == 1 ? k_enhanced_panel_cases[1].whole : NULL;
+    g_enhanced_name[PLAYER_PART_FILTERING] = which == 2 ? k_enhanced_panel_cases[2].whole : NULL;
+    g_enhanced_sentence[PLAYER_PART_FILTERING] =
+        which == 3 ? k_enhanced_panel_long_sentence : NULL;
+    g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
+    g_enhanced_focus_id = which >= 0 ? k_enhanced_panel_cases[which].focus : 0u;
+    g_enhanced_mode = NULL;
+}
+
+/* A page of the case laid out in a launcher window at a UI scale and text size, focus on the
+   case's row, a few frames on so that the row is in view. The caller destroys *out_ui. */
+static const NkUiDrawList *enhanced_panel_layout(int which, int width, int height,
+                                                 float display_scale, int text_size_pct,
+                                                 NkUi **out_ui, NkUiScale *out_scale,
+                                                 double *clock_s) {
+    NkUiConfig config;
+    NkUiTextBackend text = screen_test_text_backend();
+    NkUiViewport viewport = launcher_viewport(width, height, display_scale);
+    NkUi *ui;
+    viewport.text_size_pct = text_size_pct;
+    *out_scale = nk_ui_scale_for_viewport(&viewport);
+    text.measure = screen_test_wide_measure;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    *out_ui = ui;
+    if (ui == NULL) return NULL;
+    nk_ui_set_viewport(ui, &viewport);
+    g_flow_text_size_pct = text_size_pct;
+    (void)enhanced_more_frames(ui, k_enhanced_panel_cases[which].page, out_scale, 1, clock_s);
+    nk_ui_focus(ui, k_enhanced_panel_cases[which].focus);
+    return enhanced_more_frames(ui, k_enhanced_panel_cases[which].page, out_scale, 4, clock_s);
+}
+
+static const NkUiDrawCmd *enhanced_box_command(const NkUiDrawList *draw, NkUiId id) {
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        if (draw->cmd[i].kind == NK_UI_DRAW_RECTANGLE && draw->cmd[i].element_id == id) {
+            return &draw->cmd[i];
+        }
+    }
+    return NULL;
+}
+
+/* Whether every text run drawn on the panel lies in its content box, the panel inside its
+   padding (NK_UI_SPACE_4): whole across, as nothing is cut there, and, of what its scroll
+   container leaves showing, whole down. Appends the runs drawn whole to `seen` (spaces left
+   out) in reading order: with the panel scrolled `offset` px (device), a run is taken only
+   below what *read_to (device px down the panel's content) has taken. Says in `why` what
+   failed. */
+static bool enhanced_panel_runs_inside(const NkUiDrawList *draw, float density, float offset,
+                                       float *read_to, char *seen, size_t seen_cap, char *why,
+                                       size_t why_cap) {
+    const NkUiDrawCmd *panel = enhanced_box_command(draw, PLAYER_UI_ID_ENHANCED_DETAIL);
+    int inset;
+    int box[4];
+    size_t used = strlen(seen);
+    int runs = 0;
+    if (panel == NULL) {
+        (void)snprintf(why, why_cap, "no panel drawn");
+        return false;
+    }
+    inset = (int)floorf(NK_UI_SPACE_4 * density) - 1;
+    box[0] = panel->bounds[0] + inset;
+    box[1] = panel->bounds[1] + inset;
+    box[2] = panel->bounds[2] - inset;
+    box[3] = panel->bounds[3] - inset;
+    for (uint32_t i = 0u; i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        const NkUiTextRun *run = cmd->kind == NK_UI_DRAW_TEXT
+                                     ? (const NkUiTextRun *)cmd->custom : NULL;
+        int top = cmd->bounds[1] > cmd->clip[1] ? cmd->bounds[1] : cmd->clip[1];
+        int bottom = cmd->bounds[3] < cmd->clip[3] ? cmd->bounds[3] : cmd->clip[3];
+        if (run == NULL || run->text == NULL || run->length == 0u || bottom <= top) continue;
+        /* A run on the panel: one that starts inside it, across and down. */
+        if (cmd->bounds[0] < panel->bounds[0] || cmd->bounds[0] >= panel->bounds[2] ||
+            bottom <= panel->bounds[1] || top >= panel->bounds[3]) {
+            continue;
+        }
+        ++runs;
+        if (cmd->bounds[0] < box[0] || cmd->bounds[2] > box[2] || top < box[1] ||
+            bottom > box[3]) {
+            (void)snprintf(why, why_cap,
+                           "the run \"%.*s\" is drawn at %d,%d to %d,%d (shown %d to %d), the "
+                           "panel's content box is %d,%d to %d,%d",
+                           (int)(run->length > 60u ? 60u : run->length), run->text,
+                           cmd->bounds[0], cmd->bounds[1], cmd->bounds[2], cmd->bounds[3], top,
+                           bottom, box[0], box[1], box[2], box[3]);
+            return false;
+        }
+        if (top == cmd->bounds[1] && bottom == cmd->bounds[3] &&
+            (float)cmd->bounds[1] + offset >= *read_to - 1.0f) {
+            *read_to = (float)cmd->bounds[3] + offset;
+            for (size_t c = 0u; c < run->length && used + 1u < seen_cap; ++c) {
+                if (run->text[c] != ' ' && run->text[c] != '\n') seen[used++] = run->text[c];
+            }
+            seen[used] = '\0';
+        }
+    }
+    if (runs == 0) {
+        (void)snprintf(why, why_cap, "no text drawn on the panel");
+        return false;
+    }
+    return true;
+}
+
+/* `text` with its spaces left out, as enhanced_panel_runs_inside collects what it saw. */
+static void enhanced_squeeze(const char *text, char *out, size_t cap) {
+    size_t used = 0u;
+    for (; text != NULL && *text != '\0' && used + 1u < cap; ++text) {
+        if (*text != ' ') out[used++] = *text;
+    }
+    out[used] = '\0';
+}
+
+static void enhanced_push(NkUi *ui, NkUiEventType type, NkUiNavDir dir, float x, float y) {
+    NkUiEvent event;
+    memset(&event, 0, sizeof(event));
+    event.type = type;
+    event.dir = dir;
+    event.x = x;
+    event.y = y;
+    event.down = true;
+    nk_ui_push_event(ui, &event);
+}
+
+/* The panel's text stays inside it, whatever it says, and the panel stays beside the list:
+   its words wrap, a word wider than the panel breaks across lines, and what is taller than
+   the list box scrolls inside the panel, with a thumb, to its last line by Page Down (the
+   pad's triggers) and the wheel. In windows of 1280 x 720, 960 x 540, 1366 x 705 and
+   1920 x 1080 at 100% and 150% UI scale, at every text size. Failing before: the one-word
+   value ran out of the panel's right side, and long text made the panel taller than the list
+   box, pushing Back off the page. */
+static void test_enhanced_panel_fits_its_content(void) {
+    static const struct { int w; int h; float scale; } windows[] = {
+        {1280, 720, 1.0f}, {960, 540, 1.0f}, {1366, 705, 1.0f}, {1920, 1080, 1.0f},
+        {1920, 1080, 1.5f}
+    };
+    static const int text_sizes[] = {100, 125, 150};
+    const int saved_tab = g_enhanced_tab;
+    const NkUiId saved_focus = g_enhanced_focus_id;
+    const int saved_text = g_flow_text_size_pct;
+    for (int which = 0; which < ENHANCED_PANEL_CASES; ++which) {
+        const EnhancedPanelCase *test = &k_enhanced_panel_cases[which];
+        enhanced_panel_case_set(which);
+        for (size_t w = 0u; w < sizeof(windows) / sizeof(windows[0]); ++w) {
+            for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+                NkUi *ui = NULL;
+                NkUiScale scale;
+                NkUiScrollState state;
+                double clock_s = 0.0;
+                const NkUiDrawList *draw = enhanced_panel_layout(
+                    which, windows[w].w, windows[w].h, windows[w].scale, text_sizes[t], &ui,
+                    &scale, &clock_s);
+                const NkUiDrawCmd *panel = enhanced_box_command(draw, PLAYER_UI_ID_ENHANCED_DETAIL);
+                const NkUiDrawCmd *left = enhanced_box_command(draw, ENHANCED_TEST_LEFT_ID);
+                char where[96];
+                char message[600];
+                char why[300] = "";
+                char seen[2048] = "";
+                char want[512];
+                float read_to = 0.0f;
+                bool scrolls;
+                bool inside;
+                (void)snprintf(where, sizeof(where), "%s, %dx%d at %.0f%% scale, %d%% text",
+                               test->name, windows[w].w, windows[w].h,
+                               (double)(windows[w].scale * 100.0f), text_sizes[t]);
+                (void)snprintf(message, sizeof(message), "%s: the panel and the list box are drawn",
+                               where);
+                CHECK(ui != NULL && nk_ui_focused(ui) == test->focus && panel != NULL &&
+                          left != NULL,
+                      message);
+                if (ui == NULL || panel == NULL || left == NULL) {
+                    if (ui != NULL) nk_ui_destroy(ui);
+                    continue;
+                }
+                (void)snprintf(message, sizeof(message),
+                               "%s: the panel (%d to %d down) is no taller than the list box "
+                               "beside it (%d to %d)",
+                               where, panel->bounds[1], panel->bounds[3], left->bounds[1],
+                               left->bounds[3]);
+                CHECK(panel->bounds[1] >= left->bounds[1] - 1 &&
+                          panel->bounds[3] <= left->bounds[3] + 1,
+                      message);
+                inside = enhanced_panel_runs_inside(draw, scale.density, 0.0f, &read_to, seen,
+                                                    sizeof(seen), why, sizeof(why));
+                (void)snprintf(message, sizeof(message), "%s: %s", where, why);
+                CHECK(inside, message);
+                scrolls = nk_ui_scroll_state(ui, PLAYER_UI_ID_ENHANCED_DETAIL_BODY, &state) &&
+                          state.max_offset > 0.5f;
+                if (test->scrolls) {
+                    (void)snprintf(message, sizeof(message),
+                                   "%s: text taller than the panel scrolls in it", where);
+                    CHECK(scrolls, message);
+                }
+                if (scrolls) {
+                    (void)snprintf(message, sizeof(message),
+                                   "%s: the panel shows a thumb while it scrolls", where);
+                    CHECK(enhanced_box_command(draw, ENHANCED_TEST_DETAIL_THUMB_ID) != NULL,
+                          message);
+                    /* Page Down to the end: each step a panel less a line, so it gets there. */
+                    for (int step = 0; step < 40 && state.offset < state.max_offset - 0.5f;
+                         ++step) {
+                        enhanced_push(ui, NK_UI_EV_PAGE, NK_UI_DIR_RIGHT, 0.0f, 0.0f);
+                        draw = enhanced_more_frames(ui, test->page, &scale, 1, &clock_s);
+                        if (!nk_ui_scroll_state(ui, PLAYER_UI_ID_ENHANCED_DETAIL_BODY, &state)) {
+                            break;
+                        }
+                        inside = enhanced_panel_runs_inside(
+                            draw, scale.density, state.offset * scale.density, &read_to, seen,
+                            sizeof(seen), why, sizeof(why));
+                        (void)snprintf(message, sizeof(message), "%s, scrolled to %.0f: %s",
+                                       where, (double)state.offset, why);
+                        CHECK(inside, message);
+                    }
+                    (void)snprintf(message, sizeof(message),
+                                   "%s: Page Down scrolls the panel to its end (%.1f of %.1f), "
+                                   "the row keeping focus",
+                                   where, (double)state.offset, (double)state.max_offset);
+                    CHECK(state.max_offset > 0.5f &&
+                              fabsf(state.offset - state.max_offset) < 0.5f &&
+                              nk_ui_focused(ui) == test->focus,
+                          message);
+                }
+                if (test->whole != NULL) {
+                    enhanced_squeeze(test->whole, want, sizeof(want));
+                    (void)snprintf(message, sizeof(message),
+                                   "%s: the panel shows \"%s\" whole, on lines drawn whole", where,
+                                   test->whole);
+                    CHECK(strstr(seen, want) != NULL, message);
+                }
+                if (test->scrolls) {
+                    enhanced_squeeze(ENHANCED_PANEL_LAST_WORDS, want, sizeof(want));
+                    (void)snprintf(message, sizeof(message),
+                                   "%s: scrolled to its end, the panel shows its last line whole",
+                                   where);
+                    CHECK(strstr(seen, want) != NULL, message);
+                }
+                nk_ui_destroy(ui);
+            }
+        }
+    }
+    {
+        /* The wheel over the panel scrolls it, and a new option's text starts at its top. */
+        NkUi *ui = NULL;
+        NkUiScale scale;
+        NkUiScrollState state;
+        double clock_s = 0.0;
+        const NkUiDrawList *draw;
+        const NkUiDrawCmd *panel;
+        float wheeled = -1.0f;
+        float after_move = -1.0f;
+        enhanced_panel_case_set(3);
+        g_enhanced_sentence[PLAYER_PART_WIDE] = k_enhanced_panel_long_sentence;
+        draw = enhanced_panel_layout(3, 1280, 720, 1.0f, 100, &ui, &scale, &clock_s);
+        panel = enhanced_box_command(draw, PLAYER_UI_ID_ENHANCED_DETAIL);
+        if (ui != NULL && panel != NULL) {
+            float x = (float)(panel->bounds[0] + panel->bounds[2]) * 0.5f / scale.density;
+            float y = (float)(panel->bounds[1] + panel->bounds[3]) * 0.5f / scale.density;
+            enhanced_push(ui, NK_UI_EV_WHEEL, NK_UI_DIR_DOWN, x, y);
+            (void)enhanced_more_frames(ui, FLOW_SETTINGS_ACE, &scale, 2, &clock_s);
+            if (nk_ui_scroll_state(ui, PLAYER_UI_ID_ENHANCED_DETAIL_BODY, &state)) {
+                wheeled = state.offset;
+            }
+            enhanced_push(ui, NK_UI_EV_NAV, NK_UI_DIR_DOWN, 0.0f, 0.0f);
+            (void)enhanced_more_frames(ui, FLOW_SETTINGS_ACE, &scale, 2, &clock_s);
+            if (nk_ui_scroll_state(ui, PLAYER_UI_ID_ENHANCED_DETAIL_BODY, &state)) {
+                after_move = state.offset;
+            }
+        }
+        CHECK(wheeled > 0.5f,
+              "a wheel notch over the panel scrolls the long description in it");
+        CHECK(after_move >= 0.0f && after_move < 0.5f && ui != NULL &&
+                  nk_ui_focused(ui) != PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_FILTERING),
+              "Down to the next option shows its text from the top");
+        if (ui != NULL) nk_ui_destroy(ui);
+    }
+    g_enhanced_sentence[PLAYER_PART_WIDE] = NULL;
+    enhanced_panel_case_set(-1);
+    g_enhanced_tab = saved_tab;
+    g_enhanced_focus_id = saved_focus;
+    g_flow_text_size_pct = saved_text;
+}
+
 /* Review of #2644, N1: Up and Down alone walk Settings > Enhanced at every text size, in a
    1280 x 720 window and a 960 x 540 one. From the active tab, Down is the tab's first row,
    then each row under it, then Back; Up from Back is the last row and so on back to the tab,
@@ -6949,6 +7310,77 @@ static bool capture_text_size(const char *directory, const NkUiTextBackend *text
     return ok;
 }
 
+/* Settings > Enhanced's detail panel under each stress case of
+   test_enhanced_panel_fits_its_content, in a 1x window of pixel_w x pixel_h, saved as
+   enhanced-panel-<case>-<pixel_w>.bmp; the long description also scrolled to its end by
+   Page Down, as enhanced-panel-manylines-end-<pixel_w>.bmp. */
+static bool capture_enhanced_panel(const char *directory, const NkUiTextBackend *text,
+                                   int pixel_w, int pixel_h) {
+    SDL_Surface *surface = SDL_CreateSurface(pixel_w, pixel_h, SDL_PIXELFORMAT_RGBA32);
+    SDL_Renderer *renderer = surface != NULL ? SDL_CreateSoftwareRenderer(surface) : NULL;
+    NkUiConfig config;
+    NkUi *ui = NULL;
+    NkUiSdlr *backend = NULL;
+    CaptureRig rig;
+    bool ok = false;
+    char name[96];
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = text;
+    if (renderer != NULL) ui = screen_ui_create(&config);
+    if (ui != NULL) backend = nk_ui_sdlr_create(renderer, text);
+    if (backend != NULL) {
+        NkUiViewport viewport = launcher_viewport(pixel_w, pixel_h, 1.0f);
+        NkUiScale scale = nk_ui_scale_for_viewport(&viewport);
+        nk_ui_set_viewport(ui, &viewport);
+        nk_ui_sdlr_set_scale(backend, scale.density);
+        capture_prefs(ui, NK_UI_PROMPT_KEYCAPS, false);
+        rig.ui = ui;
+        rig.backend = backend;
+        rig.renderer = renderer;
+        rig.surface = surface;
+        rig.directory = directory;
+        g_flow_width = scale.logical_w;
+        g_flow_height = scale.logical_h;
+        g_flow_text_size_pct = 100;
+        ok = true;
+        for (int which = 0; ok && which <= ENHANCED_PANEL_CASES; ++which) {
+            const int c = which < ENHANCED_PANEL_CASES ? which : ENHANCED_PANEL_CASES - 1;
+            enhanced_panel_case_set(c);
+            g_flow_case = k_enhanced_panel_cases[c].page;
+            nk_ui_focus(ui, k_enhanced_panel_cases[c].focus);
+            /* Frames for the focus to settle and its row to scroll into view; for the last
+               picture, Page Down until the panel is at its end. */
+            for (int frame = 0; frame < (which < ENHANCED_PANEL_CASES ? 6 : 30); ++frame) {
+                if (which == ENHANCED_PANEL_CASES && frame >= 6) {
+                    NkUiEvent page;
+                    memset(&page, 0, sizeof(page));
+                    page.type = NK_UI_EV_PAGE;
+                    page.dir = NK_UI_DIR_RIGHT;
+                    page.down = true;
+                    nk_ui_push_event(ui, &page);
+                }
+                nk_ui_begin(ui, 37.0);
+                (void)draw_flow_case(ui, g_flow_case);
+                (void)nk_ui_end(ui);
+            }
+            (void)snprintf(name, sizeof(name), "enhanced-panel-%s%s-%d",
+                           k_enhanced_panel_cases[c].name,
+                           which < ENHANCED_PANEL_CASES ? "" : "-end", pixel_w);
+            ok = capture_one(&rig, name, NULL, NULL);
+        }
+        enhanced_panel_case_set(-1);
+        g_flow_case = FLOW_NONE;
+        g_flow_width = 1280.0f;
+        g_flow_height = 800.0f;
+    }
+    nk_ui_sdlr_destroy(backend);
+    nk_ui_destroy(ui);
+    if (renderer != NULL) SDL_DestroyRenderer(renderer);
+    if (surface != NULL) SDL_DestroySurface(surface);
+    return ok;
+}
+
 /* A project-made stand-in for disc art: a diagonal gradient, so a capture shows
    how a disc's ICON0.PNG / PIC1.PNG sits on the card and the hero without any
    game image. */
@@ -7291,7 +7723,9 @@ static int capture_screens(const char *directory) {
        (125%) in the default window. */
     if (!capture_text_size(directory, &text, 1280, 720, 150, &title_fixture) ||
         !capture_text_size(directory, &text, 960, 540, 150, &title_fixture) ||
-        !capture_text_size(directory, &text, 1280, 720, 125, &title_fixture)) {
+        !capture_text_size(directory, &text, 1280, 720, 125, &title_fixture) ||
+        !capture_enhanced_panel(directory, &text, 1280, 720) ||
+        !capture_enhanced_panel(directory, &text, 960, 540)) {
         goto done;
     }
     {
@@ -9741,6 +10175,7 @@ int main(int argc, char **argv) {
     test_enhanced_row_takes_the_press_made_on_it();
     test_enhanced_pacing_says_all_games();
     test_enhanced_wheel_scrolls_past_the_focused_row();
+    test_enhanced_panel_fits_its_content();
     test_prompt_bar_stays_whole();
     test_game_page_text_is_never_cut();
     test_psp_fonts_page();

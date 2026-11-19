@@ -228,6 +228,10 @@ One exception is by design: at the design text size a setting's sentence beside 
 so the rows keep their side-by-side layout (Settings > Enhanced uses compact value rows and one focused-option detail panel instead). Above it, a sentence that would be cut makes the rows stack, and under
 its button the sentence wraps whole.
 
+A word wider than its whole box (a folder's name, a long identifier) would still run past it, as the layout wraps
+only between words: text that can hold one goes through `nk_ui_text_break`, which breaks such a word across lines
+of the box's width and leaves every other word to the layout.
+
 Wrapped text stays inside its box. Clay adds a run up word by word, and a text backend measures in whole pixels, so
 words measured one at a time, each with a lone space, fell short of the line as drawn (8 px for a ten-word line of
 14 px Geist): a line was kept that ran into the padding beside it, and a one-line run's box was narrower than its
@@ -649,7 +653,14 @@ value box is a pointer target only (`NK_UI_BUTTON_POINTER_ONLY`), never a focus 
 and FRAME PACING show their value as `< value >` in one box, as does a row whose values no longer fit beside its
 name at a larger text size. Category tabs are focusable. The panel on the right shows the focused row's name, its
 value, its whole description and, for a dimmed row, the reason; with a tab or BACK focused it shows the tab's first
-option. On a game's page, a row's first value is the library's, LIBRARY (value), in a raised box with muted text,
+option. The panel is as tall as the list box beside it, whatever it says, so its text never pushes BACK down: text
+taller than that scrolls inside the panel, with a thin thumb at its right edge as the list has, by the wheel, a drag,
+Page Up and Page Down or the pad's triggers (a panel less one line a press, as on the developer log), while focus
+stays on the row; another option's text starts at the panel's top. Every line wraps at its words, and a word wider
+than the panel (a texture pack folder's name, a long compound) is broken across lines inside it, after a `/`, `\`,
+`_`, `-` or `.` where one keeps at least half the line, else at the last letter that fits (`nk_ui_text_break`):
+nothing is cut, ellipsized or drawn past the panel (`test_enhanced_panel_fits_its_content` in
+`tests/native/test_player_screens.c`, at four window sizes, two UI scales and every text size). On a game's page, a row's first value is the library's, LIBRARY (value), in a raised box with muted text,
 and a value of the game's own is marked as above. An option that cannot apply as the page stands stays in the walk, dimmed
 and inert, with the reason in the panel; WIDESCREEN under SMOOTH MOTION marks OFF, the value that runs, and keeps
 the choice it had for when SMOOTH MOTION is off. The list shows as many whole rows as the window leaves (four at
