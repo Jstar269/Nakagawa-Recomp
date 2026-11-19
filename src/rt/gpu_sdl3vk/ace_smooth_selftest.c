@@ -14,7 +14,10 @@
  *   no-predecessor  the first frame gives no in-between
  *   scales          the same scene at 2x render scale
  *   hud-list        the HUD box rules: small 2D boxes are HUD; a quarter screen, a box that samples
- *                   a render target, or too many boxes are not; a present hands its boxes on once
+ *                   a render target, or too many boxes are not; a present hands its boxes on once;
+ *                   the mask filled a word at a time is the same as one bit per pixel; a freed
+ *                   target's boxes never reach the next target in its slot nor the counts, a target
+ *                   never presented counts none, and a depth image no draw wrote is not handed on
  *   hud-edge        the scene right beside a HUD box is right with the mask (it is wrong without:
  *                   one end of every vector there is under the HUD), and the HUD keeps every byte
  *   depth-band      a band that matches the scene behind it in the old frame: only depth tells the
@@ -29,12 +32,20 @@
  *   motion-*        the motion measure (ace_smooth_motion): a pan is about halfway, the posed figure
  *                   is the old frame, still frames move nothing, the counters equal the CPU's at 1x
  *                   and 2x, the ring keeps the last 8, and an in-between that never ran is refused
+ *   discard         a pass recorded and never submitted is undone: the held and previous frames,
+ *                   the serial and pair counts are the last ones that ran, and the next pair uses them
+ *   failed-create   on a wrapped device, each create failing in turn with its output poisoned: the
+ *                   pass never destroys a failed create's (undefined) output
+ *   pool-sizes      the descriptor pool holds every type the set layout has, for every set
+ *   size-fail       a size whose images cannot be made is tried once, not on every present; a size
+ *                   past the device's limit makes no image; a size that fits still works after them
  *
- * Exit 77 (SKIP) without a Vulkan loader or device.
+ * Exit 77 (SKIP) without a Vulkan loader or device; exit 1 when a device is there and cannot be made.
  */
 #include "ace_smooth.h"
 #include "ace_hud.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -147,8 +158,9 @@ static int gpu_open(char *why, size_t cap) {
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     if (CreateDevice(g.physical, &dci, NULL, &g.device) != VK_SUCCESS) {
+        /* A device with the queue is there, and could not be made: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDevice failed");
-        return 0;
+        return -1;
     }
 #define DEV(name) name = (PFN_vk##name)GetDeviceProcAddr(g.device, "vk" #name)
     DEV(DestroyDevice); DEV(GetDeviceQueue); DEV(CreateCommandPool); DEV(DestroyCommandPool);
@@ -649,6 +661,35 @@ static void cell_hud_list(void) {
     CHECK(l.overflow == 1, "hud-list: %u boxes did not overflow", ACE_HUD_MAX_BOXES + 1u);
     CHECK(ace_hud_list_bits(&l, bits) == 0 && bits[0] == 0u, "hud-list: an overflowed list gave a mask");
 
+    /* The mask is filled a word at a time: the same bits as one per pixel, for boxes on and
+     * across word edges, a pixel wide, fractional, at the screen's edges. */
+    {
+        static uint32_t want_bits[ACE_SMOOTH_HUD_WORDS];
+        static const float boxes[][4] = {
+            { 0.0f, 0.0f, 1.0f, 1.0f },       { 31.0f, 2.0f, 33.0f, 3.0f },   { 32.0f, 4.0f, 64.0f, 5.0f },
+            { 5.5f, 7.2f, 200.3f, 9.9f },     { 479.0f, 271.0f, 480.0f, 272.0f },
+            { 0.0f, 100.0f, 119.0f, 140.0f }, { 300.0f, 10.0f, 300.5f, 60.0f }, { 63.0f, 11.0f, 97.0f, 13.0f },
+        };
+        uint32_t nb = (uint32_t)(sizeof(boxes) / sizeof(boxes[0]));
+        ace_hud_list_reset(&l);
+        memset(want_bits, 0, sizeof(want_bits));
+        for (uint32_t i = 0; i < nb; i++) {
+            CHECK(ace_hud_list_add(&l, boxes[i][0], boxes[i][1], boxes[i][2], boxes[i][3], 0) == 1,
+                  "hud-words: box %u not kept", i);
+            int x0 = (int)floorf(boxes[i][0]), x1 = (int)ceilf(boxes[i][2]);
+            int y0 = (int)floorf(boxes[i][1]), y1 = (int)ceilf(boxes[i][3]);
+            for (int y = y0; y < y1; y++)
+                for (int x = x0; x < x1; x++) {
+                    uint32_t k = (uint32_t)(y * ACE_SMOOTH_HUD_W + x);
+                    want_bits[k >> 5] |= 1u << (k & 31u);
+                }
+        }
+        CHECK(ace_hud_list_bits(&l, bits) == 1, "hud-words: no mask");
+        uint32_t bad = 0;
+        for (uint32_t i = 0; i < ACE_SMOOTH_HUD_WORDS; i++) bad += bits[i] != want_bits[i];
+        CHECK(bad == 0u, "hud-words: %u mask words differ from one bit per pixel", bad);
+    }
+
     /* Why each box was left out. */
     AceHudWhy why = ACE_HUD_KEPT;
     ace_hud_list_reset(&l);
@@ -717,7 +758,8 @@ static void cell_hud_list(void) {
     AceSmoothAuxStats st;
     memset(&st, 0, sizeof(st));
     ace_hud_stats(&st);
-    CHECK(st.boxes_kept == 3u + ACE_HUD_MAX_BOXES && st.boxes_large == 1u && st.boxes_target == 1u &&
+    /* Slot 2's box was never presented: it is not a shown frame's, so it is not counted. */
+    CHECK(st.boxes_kept == 2u + ACE_HUD_MAX_BOXES && st.boxes_large == 1u && st.boxes_target == 1u &&
           st.boxes_full == 1u && st.boxes_merged == 0u && st.boxes_outside == 0u,
           "hud-runtime: box counts kept=%llu large=%llu target=%llu full=%llu merged=%llu outside=%llu",
           (unsigned long long)st.boxes_kept, (unsigned long long)st.boxes_large,
@@ -729,6 +771,58 @@ static void cell_hud_list(void) {
           (unsigned long long)st.frames_mask, (unsigned long long)st.frames_overflow,
           (unsigned long long)st.frames_depth, (unsigned long long)st.frames_depth_unwritten,
           (unsigned long long)st.frames_depth_none, (unsigned long long)st.published_unshown);
+    /* A target freed (ace_hud_forget) and its slot made again: the new target starts with none
+     * of the old one's boxes, and they are never counted. */
+    AceSmoothAuxStats before = st;
+    ace_hud_note(5, 100.0f, 100.0f, 110.0f, 104.0f, 0);
+    for (uint32_t i = 0; i <= ACE_HUD_MAX_BOXES; i++)
+        ace_hud_note(6, (float)(i % 400), (float)(i / 400), (float)(i % 400) + 1.0f, (float)(i / 400) + 1.0f, 0);
+    ace_hud_forget(5);
+    ace_hud_forget(6);
+    ace_hud_present(5, img4, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, 0, 0, 0u);
+    aux = ace_hud_take(img4);
+    CHECK(aux && aux->hud_bits, "hud-forget: a reused slot gave no mask");
+    if (aux && aux->hud_bits) {
+        uint32_t k = 102u * ACE_SMOOTH_HUD_W + 105u;
+        CHECK(!((aux->hud_bits[k >> 5] >> (k & 31u)) & 1u), "hud-forget: a freed target's box is in the new mask");
+    }
+    ace_hud_present(6, img4, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, 0, 0, 0u);
+    aux = ace_hud_take(img4);
+    CHECK(aux && aux->hud_bits, "hud-forget: a reused slot kept the freed target's overflow");
+    memset(&st, 0, sizeof(st));
+    ace_hud_stats(&st);
+    CHECK(st.boxes_kept == before.boxes_kept && st.boxes_full == before.boxes_full &&
+          st.frames_overflow == before.frames_overflow && st.frames_mask == before.frames_mask + 2u,
+          "hud-forget: a freed target's boxes were counted (kept +%llu, full +%llu, overflow +%llu)",
+          (unsigned long long)(st.boxes_kept - before.boxes_kept),
+          (unsigned long long)(st.boxes_full - before.boxes_full),
+          (unsigned long long)(st.frames_overflow - before.frames_overflow));
+    /* A target drawn to but not presented (a texture): its boxes count only once it is. */
+    before = st;
+    ace_hud_note(7, 100.0f, 100.0f, 110.0f, 104.0f, 0);
+    memset(&st, 0, sizeof(st));
+    ace_hud_stats(&st);
+    CHECK(st.boxes_kept == before.boxes_kept, "hud-unshown: a box on a target not presented was counted");
+    ace_hud_present(7, img4, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, 0, 0, 0u);
+    (void)ace_hud_take(img4);
+    memset(&st, 0, sizeof(st));
+    ace_hud_stats(&st);
+    CHECK(st.boxes_kept == before.boxes_kept + 1u, "hud-unshown: a presented target's box was not counted");
+    /* A depth image no draw ever wrote (its count is 0), seen for the first time: not handed on. */
+    before = st;
+    VkImage unwritten = (VkImage)(uintptr_t)0x6000u;
+    ace_hud_present(5, img4, unwritten, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 512, 272, 0u);
+    aux = ace_hud_take(img4);
+    CHECK(aux && aux->depth == VK_NULL_HANDLE, "hud-depth: a depth image no draw wrote was handed on");
+    memset(&st, 0, sizeof(st));
+    ace_hud_stats(&st);
+    CHECK(st.frames_depth == before.frames_depth && st.frames_depth_unwritten == before.frames_depth_unwritten + 1u,
+          "hud-depth: an unwritten depth image counted depth +%llu unwritten +%llu",
+          (unsigned long long)(st.frames_depth - before.frames_depth),
+          (unsigned long long)(st.frames_depth_unwritten - before.frames_depth_unwritten));
+    ace_hud_present(5, img4, unwritten, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 512, 272, 1u);
+    aux = ace_hud_take(img4);
+    CHECK(aux && aux->depth == unwritten, "hud-depth: depth a draw then wrote was withheld");
     ace_hud_enable(0);
     ace_hud_note(3, 100.0f, 100.0f, 110.0f, 104.0f, 0);
     ace_hud_present(3, img3, fake, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 512, 272, 8u);
@@ -1331,13 +1425,329 @@ static void cell_motion_ring(void) {
     FreeMemory(g.device, src.memory, NULL);
 }
 
+/* A show pass recorded and thrown away unsubmitted (a present that fails before its submission):
+ * ace_smooth_discard puts the pass back as it was. The held and previous frames are the last two
+ * that ran, the serial and the pair counts are back, and the next frame is paired with the newest
+ * frame that ran, not with a private copy whose commands never did. */
+static void cell_discard(void) {
+    int w = 480, h = 272;
+    size_t bytes = (size_t)w * (size_t)h * 4u;
+    uint32_t *x = (uint32_t *)malloc(bytes), *a = (uint32_t *)malloc(bytes);
+    Source src;
+    memset(&src, 0, sizeof(src));
+    AceBetween *s = smooth_new();
+    if (!x || !a || !s || !source_make(&src, w, h)) {
+        CHECK(0, "discard: setup failed");
+        free(x); free(a); ace_smooth_destroy(s);
+        return;
+    }
+    paint(w, h, 1, 0, 200, 1);
+    memcpy(x, g.map, bytes);
+    source_fill(&src, w, h, 1);
+    (void)feed(s, &src, w, h, 1);
+    paint(w, h, 1, 0, 216, 1);
+    memcpy(a, g.map, bytes);
+    source_fill(&src, w, h, 0);
+    CHECK(feed(s, &src, w, h, 1) != VK_NULL_HANDLE, "discard: no in-between before the lost pass");
+    AceSmoothAuxStats before, after;
+    memset(&before, 0, sizeof(before));
+    memset(&after, 0, sizeof(after));
+    ace_smooth_aux_stats(s, &before);
+    uint64_t serial = ace_smooth_between_serial(s);
+
+    /* The lost pass: a new frame, its in-between and the held frame's transition, recorded and
+     * never submitted. */
+    paint_other(w, h, 1);
+    source_fill(&src, w, h, 0);
+    ace_smooth_begin(s);
+    cmd_begin();
+    VkImage lost = ace_smooth_record(s, g.cb, src.image, w, h, 1);
+    (void)ace_smooth_held(s, g.cb);
+    EndCommandBuffer(g.cb);
+    ResetCommandBuffer(g.cb, 0);
+    ace_smooth_discard(s);
+    CHECK(lost != VK_NULL_HANDLE, "discard: the lost pass made no in-between");
+    ace_smooth_aux_stats(s, &after);
+    CHECK(ace_smooth_between_serial(s) == serial && after.pairs == before.pairs,
+          "discard: serial %llu pairs %llu after the lost pass, want %llu and %llu",
+          (unsigned long long)ace_smooth_between_serial(s), (unsigned long long)after.pairs,
+          (unsigned long long)serial, (unsigned long long)before.pairs);
+    cmd_begin();
+    VkImage held = ace_smooth_held(s, g.cb);
+    VkImage previous = ace_smooth_previous(s, g.cb);
+    cmd_end();
+    CHECK(held != VK_NULL_HANDLE && previous != VK_NULL_HANDLE, "discard: no held or previous frame");
+    if (held) {
+        image_read(held, w, h);
+        CHECK(memcmp(g.map, a, bytes) == 0, "discard: the held frame is not the newest frame that ran");
+    }
+    if (previous) {
+        image_read(previous, w, h);
+        CHECK(memcmp(g.map, x, bytes) == 0, "discard: the previous frame is not the one before it");
+    }
+    /* A cut after the newest frame that ran: its in-between is that frame, byte for byte. */
+    paint_other(w, h, 1);
+    source_fill(&src, w, h, 0);
+    VkImage mid = feed(s, &src, w, h, 1);
+    CHECK(mid != VK_NULL_HANDLE, "discard: no in-between after the lost pass");
+    if (mid) {
+        image_read(mid, w, h);
+        size_t differ = 0;
+        for (size_t i = 0; i < (size_t)w * (size_t)h; i++) differ += g.map[i] != a[i];
+        CHECK(differ == 0, "discard: %zu px of the in-between differ from the newest frame that ran", differ);
+    }
+    /* Nothing to undo without a begin, and once only. */
+    ace_smooth_discard(s);
+    CHECK(ace_smooth_between_serial(s) == serial + 1u, "discard: a second discard undid a submitted pass");
+    DeviceWaitIdle(g.device);
+    ace_smooth_destroy(s);
+    DestroyImage(g.device, src.image, NULL);
+    FreeMemory(g.device, src.memory, NULL);
+    free(x);
+    free(a);
+}
+
+/* ---- the pass on a wrapped device: failed creates, pool sizes, a size that cannot be made ----
+ * The pass gets its device calls through the get_instance_proc_addr it is given, so these cells
+ * hand it one whose vkGetDeviceProcAddr wraps the creates and destroys. A failing create writes a
+ * poison value into its output, as Vulkan allows (a failed command's output is undefined); a
+ * destroy of that value is counted and never reaches the driver. */
+static struct {
+    PFN_vkGetDeviceProcAddr gdpa;
+    int fault_at;           /* the creates counted so far fail at this one (0: none) */
+    int creates;            /* creates counted so far */
+    int images_fail;        /* every vkCreateImage fails */
+    int image_tries;        /* vkCreateImage calls */
+    int poison_destroyed;   /* destroys given a failed create's output */
+    int waits;              /* vkDeviceWaitIdle calls */
+    uint32_t layout_count[3], pool_count[3], pool_sets;   /* sampler, storage image, storage buffer */
+} w_;
+
+static int w_type(VkDescriptorType t) {
+    return t == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ? 0 : t == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ? 1
+         : t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ? 2 : -1;
+}
+
+static int w_poison(const void *h, size_t n) {
+    const unsigned char *p = (const unsigned char *)h;
+    for (size_t i = 0; i < n; i++)
+        if (p[i] != 0xA5u) return 0;
+    return n != 0;
+}
+
+/* 1 when this create fails, its output then poisoned. */
+static int w_fail(void *out, size_t n) {
+    if (++w_.creates != w_.fault_at) return 0;
+    memset(out, 0xA5, n);
+    return 1;
+}
+
+#define W_CREATE(Name, Info, Handle)                                                              \
+    static VKAPI_ATTR VkResult VKAPI_CALL w_##Name(VkDevice d, const Info *ci,                   \
+                                                   const VkAllocationCallbacks *a, Handle *out) {  \
+        if (w_fail(out, sizeof(*out))) return VK_ERROR_OUT_OF_DEVICE_MEMORY;                    \
+        return ((PFN_vk##Name)w_.gdpa(d, "vk" #Name))(d, ci, a, out);                             \
+    }
+#define W_DESTROY(Name, Handle)                                                                  \
+    static VKAPI_ATTR void VKAPI_CALL w_##Name(VkDevice d, Handle h, const VkAllocationCallbacks *a) { \
+        if (w_poison(&h, sizeof(h))) { w_.poison_destroyed++; return; }                           \
+        ((PFN_vk##Name)w_.gdpa(d, "vk" #Name))(d, h, a);                                         \
+    }
+W_CREATE(AllocateMemory, VkMemoryAllocateInfo, VkDeviceMemory)
+W_CREATE(CreateImageView, VkImageViewCreateInfo, VkImageView)
+W_CREATE(CreateBuffer, VkBufferCreateInfo, VkBuffer)
+W_CREATE(CreateSampler, VkSamplerCreateInfo, VkSampler)
+W_CREATE(CreatePipelineLayout, VkPipelineLayoutCreateInfo, VkPipelineLayout)
+W_DESTROY(DestroyImage, VkImage)
+W_DESTROY(FreeMemory, VkDeviceMemory)
+W_DESTROY(DestroyImageView, VkImageView)
+W_DESTROY(DestroyBuffer, VkBuffer)
+W_DESTROY(DestroySampler, VkSampler)
+W_DESTROY(DestroyDescriptorSetLayout, VkDescriptorSetLayout)
+W_DESTROY(DestroyDescriptorPool, VkDescriptorPool)
+W_DESTROY(DestroyPipelineLayout, VkPipelineLayout)
+#undef W_CREATE
+#undef W_DESTROY
+
+static VKAPI_ATTR VkResult VKAPI_CALL w_CreateImage(VkDevice d, const VkImageCreateInfo *ci,
+                                                    const VkAllocationCallbacks *a, VkImage *out) {
+    w_.image_tries++;
+    if (w_.images_fail) {
+        memset(out, 0xA5, sizeof(*out));
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    if (w_fail(out, sizeof(*out))) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    return ((PFN_vkCreateImage)w_.gdpa(d, "vkCreateImage"))(d, ci, a, out);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL w_CreateDescriptorSetLayout(VkDevice d, const VkDescriptorSetLayoutCreateInfo *ci,
+                                                                  const VkAllocationCallbacks *a,
+                                                                  VkDescriptorSetLayout *out) {
+    memset(w_.layout_count, 0, sizeof(w_.layout_count));
+    for (uint32_t i = 0; i < ci->bindingCount; i++) {
+        int t = w_type(ci->pBindings[i].descriptorType);
+        if (t >= 0) w_.layout_count[t] += ci->pBindings[i].descriptorCount;
+    }
+    if (w_fail(out, sizeof(*out))) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    return ((PFN_vkCreateDescriptorSetLayout)w_.gdpa(d, "vkCreateDescriptorSetLayout"))(d, ci, a, out);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL w_CreateDescriptorPool(VkDevice d, const VkDescriptorPoolCreateInfo *ci,
+                                                             const VkAllocationCallbacks *a, VkDescriptorPool *out) {
+    memset(w_.pool_count, 0, sizeof(w_.pool_count));
+    w_.pool_sets = ci->maxSets;
+    for (uint32_t i = 0; i < ci->poolSizeCount; i++) {
+        int t = w_type(ci->pPoolSizes[i].type);
+        if (t >= 0) w_.pool_count[t] += ci->pPoolSizes[i].descriptorCount;
+    }
+    if (w_fail(out, sizeof(*out))) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    return ((PFN_vkCreateDescriptorPool)w_.gdpa(d, "vkCreateDescriptorPool"))(d, ci, a, out);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL w_DeviceWaitIdle(VkDevice d) {
+    w_.waits++;
+    return ((PFN_vkDeviceWaitIdle)w_.gdpa(d, "vkDeviceWaitIdle"))(d);
+}
+
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL w_GetDeviceProcAddr(VkDevice d, const char *name) {
+    static const struct { const char *name; PFN_vkVoidFunction fn; } k_wrapped[] = {
+#define W_ENTRY(Name) { "vk" #Name, (PFN_vkVoidFunction)w_##Name }
+        W_ENTRY(CreateImage), W_ENTRY(AllocateMemory), W_ENTRY(CreateImageView), W_ENTRY(CreateBuffer),
+        W_ENTRY(CreateSampler), W_ENTRY(CreateDescriptorSetLayout), W_ENTRY(CreateDescriptorPool),
+        W_ENTRY(CreatePipelineLayout), W_ENTRY(DestroyImage), W_ENTRY(FreeMemory),
+        W_ENTRY(DestroyImageView), W_ENTRY(DestroyBuffer), W_ENTRY(DestroySampler),
+        W_ENTRY(DestroyDescriptorSetLayout), W_ENTRY(DestroyDescriptorPool),
+        W_ENTRY(DestroyPipelineLayout), W_ENTRY(DeviceWaitIdle),
+#undef W_ENTRY
+    };
+    for (size_t i = 0; i < sizeof(k_wrapped) / sizeof(k_wrapped[0]); i++)
+        if (strcmp(name, k_wrapped[i].name) == 0) return k_wrapped[i].fn;
+    return w_.gdpa(d, name);
+}
+
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL w_GetInstanceProcAddr(VkInstance inst, const char *name) {
+    if (strcmp(name, "vkGetDeviceProcAddr") == 0) return (PFN_vkVoidFunction)w_GetDeviceProcAddr;
+    return g.gipa(inst, name);
+}
+
+static AceBetween *smooth_wrapped(char *error, size_t cap) {
+    AceSmoothInit init;
+    memset(&init, 0, sizeof(init));
+    init.get_instance_proc_addr = w_GetInstanceProcAddr;
+    init.instance = g.instance;
+    init.physical_device = g.physical;
+    init.device = g.device;
+    init.queue = g.queue;
+    init.queue_family = g.family;
+    return ace_smooth_create(&init, error, cap);
+}
+
+static void w_reset(void) {
+    PFN_vkGetDeviceProcAddr gdpa = w_.gdpa;
+    memset(&w_, 0, sizeof(w_));
+    w_.gdpa = gdpa;
+}
+
+/* failed-create: every create the pass makes, in turn, fails with its output poisoned; the pass
+ * then never destroys that output (a destroy of an undefined handle is undefined in the driver),
+ * whether the create was the fixed objects' (ace_smooth_create) or a size's (the first frame). */
+static void cell_failed_create(void) {
+    const int w = 480, h = 272;
+    Source src;
+    memset(&src, 0, sizeof(src));
+    if (!source_make(&src, w, h)) { CHECK(0, "failed-create setup failed"); return; }
+    paint(w, h, 1, 0, 200, 0);
+    source_fill(&src, w, h, 1);
+    int tried = 0;
+    for (int at = 1; at < 256; at++) {
+        w_reset();
+        w_.fault_at = at;
+        char error[160] = "";
+        AceBetween *s = smooth_wrapped(error, sizeof(error));
+        if (s) (void)feed(s, &src, w, h, 1);
+        ace_smooth_destroy(s);
+        CHECK(w_.poison_destroyed == 0, "failed-create: create %d failed and its undefined output was "
+              "destroyed %d time(s)", at, w_.poison_destroyed);
+        if (w_.creates < at) break;   /* every create has failed once */
+        tried++;
+    }
+    CHECK(tried >= 20, "failed-create: only %d creates were failed in turn", tried);
+    w_reset();
+    DestroyImage(g.device, src.image, NULL);
+    FreeMemory(g.device, src.memory, NULL);
+}
+
+/* pool-sizes: a set takes a descriptor for every binding of its layout, written or not, so the pool
+ * holds every type at least as many times as the layout has it, for each set it allows. A driver
+ * that does not hold the pool to its sizes would not show a shortfall, so the sizes are compared. */
+static void cell_pool_sizes(void) {
+    w_reset();
+    char error[160] = "";
+    AceBetween *s = smooth_wrapped(error, sizeof(error));
+    CHECK(s != NULL, "pool-sizes: create failed: %s", error);
+    static const char *k_name[3] = { "combined image sampler", "storage image", "storage buffer" };
+    for (int t = 0; t < 3; t++)
+        CHECK(w_.pool_count[t] >= w_.layout_count[t] * w_.pool_sets,
+              "pool-sizes: the pool has %u %s descriptors, %u sets of the layout need %u", w_.pool_count[t],
+              k_name[t], w_.pool_sets, w_.layout_count[t] * w_.pool_sets);
+    ace_smooth_destroy(s);
+    w_reset();
+}
+
+/* size-fail: a size whose images cannot be made gives no in-between, is said once, and is not tried
+ * again (no device wait on every later present); a size past the device's limit is refused before
+ * any image is made; a size that can be made still works after them. */
+static void cell_size_fail(void) {
+    const int w = 480, h = 272;
+    Source src;
+    memset(&src, 0, sizeof(src));
+    if (!source_make(&src, 2 * w, 2 * h)) { CHECK(0, "size-fail setup failed"); return; }
+    paint(2 * w, 2 * h, 2, 0, 200, 0);
+    source_fill(&src, 2 * w, 2 * h, 1);
+    w_reset();
+    char error[160] = "";
+    AceBetween *s = smooth_wrapped(error, sizeof(error));
+    CHECK(s != NULL, "size-fail: create failed: %s", error);
+    if (!s) { DestroyImage(g.device, src.image, NULL); FreeMemory(g.device, src.memory, NULL); return; }
+    VkPhysicalDeviceProperties props;
+    ((PFN_vkGetPhysicalDeviceProperties)g.gipa(g.instance, "vkGetPhysicalDeviceProperties"))(g.physical, &props);
+    const int big = (int)props.limits.maxImageDimension2D + 1;
+    w_.images_fail = 1;   /* nothing is ever made at the big size, whatever the pass does */
+    w_.image_tries = 0;
+    CHECK(feed(s, &src, big, h, 1) == VK_NULL_HANDLE, "size-fail: a size past the device limit gave an image");
+    CHECK(w_.image_tries == 0, "size-fail: %d image(s) were tried at a size past the device limit (%d)",
+          w_.image_tries, big);
+    w_.waits = 0;
+    CHECK(feed(s, &src, w, h, 1) == VK_NULL_HANDLE, "size-fail: a size whose images fail gave an image");
+    CHECK(feed(s, &src, w, h, 1) == VK_NULL_HANDLE, "size-fail: the failed size gave an image the second time");
+    CHECK(feed(s, &src, w, h, 1) == VK_NULL_HANDLE, "size-fail: the failed size gave an image the third time");
+    CHECK(w_.waits == 1, "size-fail: the failed size was tried %d times, not once (a device wait per present)",
+          w_.waits);
+    int sw = -1, sh = -1;
+    ace_smooth_size(s, &sw, &sh);
+    CHECK(sw == 0 && sh == 0, "size-fail: a failed size is held as %dx%d", sw, sh);
+    w_.images_fail = 0;
+    (void)feed(s, &src, 2 * w, 2 * h, 1);
+    ace_smooth_size(s, &sw, &sh);
+    CHECK(sw == 2 * w && sh == 2 * h, "size-fail: a size that fits was not made after one that failed (%dx%d)",
+          sw, sh);
+    paint(2 * w, 2 * h, 2, 0, 216, 0);
+    source_fill(&src, 2 * w, 2 * h, 0);
+    CHECK(feed(s, &src, 2 * w, 2 * h, 1) != VK_NULL_HANDLE, "size-fail: no in-between at the size that fits");
+    DeviceWaitIdle(g.device);
+    ace_smooth_destroy(s);
+    w_reset();
+    DestroyImage(g.device, src.image, NULL);
+    FreeMemory(g.device, src.memory, NULL);
+}
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     char why[128] = "";
     int up = gpu_open(why, sizeof(why));
     if (up <= 0) {
-        printf("SKIP ace-smooth-selftest: %s\n", why[0] ? why : "the device could not be set up");
+        printf("%s ace-smooth-selftest: %s\n", up == 0 ? "SKIP" : "FAIL",
+               why[0] ? why : "the device could not be set up");
         gpu_close();
         return up == 0 ? 77 : 1;
     }
@@ -1355,6 +1765,14 @@ int main(int argc, char **argv) {
     cell_figure_textured();
     cell_motion();
     cell_motion_ring();
+    cell_discard();
+    w_.gdpa = (PFN_vkGetDeviceProcAddr)g.gipa(g.instance, "vkGetDeviceProcAddr");
+    if (!w_.gdpa) CHECK(0, "no vkGetDeviceProcAddr for the wrapped device");
+    else {
+        cell_failed_create();
+        cell_pool_sizes();
+        cell_size_fail();
+    }
     gpu_close();
     printf(s_fail ? "ace-smooth-selftest: FAIL\n" : "ace-smooth-selftest: PASS\n");
     return s_fail ? 1 : 0;

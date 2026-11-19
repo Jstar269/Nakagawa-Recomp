@@ -65,12 +65,21 @@ int ace_hud_list_bits(const AceHudList *l, uint32_t *bits) {
         /* Every pixel the box touches: a HUD's edges are often filtered or blended. */
         int x0 = (int)floorf(b->x0), x1 = (int)ceilf(b->x1);
         int y0 = (int)floorf(b->y0), y1 = (int)ceilf(b->y1);
+        if (x1 <= x0) continue;
         for (int y = y0; y < y1; y++) {
-            uint32_t row = (uint32_t)y * ACE_SMOOTH_HUD_W;
-            for (int x = x0; x < x1; x++) {
-                uint32_t k = row + (uint32_t)x;
-                bits[k >> 5] |= 1u << (k & 31u);
+            /* Bits [k0, k1) of the row, a word at a time: rows do not start on a word. */
+            uint32_t k0 = (uint32_t)y * ACE_SMOOTH_HUD_W + (uint32_t)x0;
+            uint32_t k1 = (uint32_t)y * ACE_SMOOTH_HUD_W + (uint32_t)x1;
+            uint32_t w0 = k0 >> 5, w1 = (k1 - 1u) >> 5;
+            uint32_t first = ~0u << (k0 & 31u);
+            uint32_t last = ~0u >> (31u - ((k1 - 1u) & 31u));
+            if (w0 == w1) {
+                bits[w0] |= first & last;
+                continue;
             }
+            bits[w0] |= first;
+            for (uint32_t i = w0 + 1u; i < w1; i++) bits[i] = ~0u;
+            bits[w1] |= last;
         }
     }
     return 1;
@@ -91,6 +100,10 @@ static AceSmoothAux s_aux;
 static VkImage s_aux_src;                /* the image the published aux belongs to */
 static int s_aux_ready;
 static AceSmoothAuxStats s_stats;
+/* Per slot, what became of each box since that slot's last present (by AceHudWhy). They reach
+ * s_stats only when the slot is presented, so boxes drawn into a target that is never shown
+ * (a texture drawn to) are not counted as a shown frame's. */
+static uint64_t s_pending[ACE_HUD_SLOTS][ACE_HUD_FULL + 1];
 static int s_warned_full;
 
 static int env_off(const char *name) {
@@ -102,6 +115,7 @@ void ace_hud_enable(int on) {
     s_aux_ready = 0;
     s_aux_src = VK_NULL_HANDLE;
     memset(&s_stats, 0, sizeof(s_stats));
+    memset(s_pending, 0, sizeof(s_pending));
     s_warned_full = 0;
     if (!on) {
         g_ace_hud_on = 0;
@@ -122,14 +136,25 @@ void ace_hud_note(int slot, float xa, float ya, float xb, float yb, int samples_
     if (!g_ace_hud_on || !s_use_hud || slot < 0 || slot >= ACE_HUD_SLOTS) return;
     AceHudWhy why;
     (void)ace_hud_list_add_why(&s_lists[slot], xa, ya, xb, yb, samples_target, &why);
-    switch (why) {
-    case ACE_HUD_KEPT: s_stats.boxes_kept++; break;
-    case ACE_HUD_MERGED: s_stats.boxes_merged++; break;
-    case ACE_HUD_LARGE: s_stats.boxes_large++; break;
-    case ACE_HUD_TARGET: s_stats.boxes_target++; break;
-    case ACE_HUD_OUTSIDE: s_stats.boxes_outside++; break;
-    case ACE_HUD_FULL: s_stats.boxes_full++; break;
-    }
+    s_pending[slot][why]++;
+}
+
+void ace_hud_forget(int slot) {
+    if (!s_lists || slot < 0 || slot >= ACE_HUD_SLOTS) return;
+    ace_hud_list_reset(&s_lists[slot]);
+    memset(s_pending[slot], 0, sizeof(s_pending[slot]));
+}
+
+/* The slot is presented: its boxes are a shown frame's. */
+static void pending_count(int slot) {
+    const uint64_t *p = s_pending[slot];
+    s_stats.boxes_kept += p[ACE_HUD_KEPT];
+    s_stats.boxes_merged += p[ACE_HUD_MERGED];
+    s_stats.boxes_large += p[ACE_HUD_LARGE];
+    s_stats.boxes_target += p[ACE_HUD_TARGET];
+    s_stats.boxes_outside += p[ACE_HUD_OUTSIDE];
+    s_stats.boxes_full += p[ACE_HUD_FULL];
+    memset(s_pending[slot], 0, sizeof(s_pending[slot]));
 }
 
 /* 1 when a draw wrote `depth` since it was last handed on; records `gen` as handed on. */
@@ -143,7 +168,8 @@ static int depth_fresh(VkImage depth, uint32_t gen) {
     s_depth_seen[s_depth_next].image = depth;
     s_depth_seen[s_depth_next].gen = gen;
     s_depth_next = (s_depth_next + 1u) % ACE_HUD_SLOTS;
-    return 1;
+    /* Not handed on before: fresh only if a draw ever wrote it (gen counts from 0). */
+    return gen != 0u;
 }
 
 static int s_depth_float;
@@ -171,6 +197,7 @@ void ace_hud_present(int slot, VkImage src, VkImage depth, VkImageLayout depth_l
             }
         }
         ace_hud_list_reset(&s_lists[slot]);
+        pending_count(slot);
     }
     if (s_use_depth) {
         if (!depth) {

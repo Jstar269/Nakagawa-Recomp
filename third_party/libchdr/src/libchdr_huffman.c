@@ -711,6 +711,15 @@ enum huffman_error huffman_build_lookup_table(struct huffman_decoder* decoder)
 {
 	const lookup_value* lookupend = &decoder->lookup[(1u << decoder->maxbits)];
 	uint32_t curcode;
+	uint32_t i;
+	/* Nakagawa LOCAL DELTA (2026-11-17): a malformed tree (length 1 is exempt
+	 * from the Kraft check in huffman_assign_canonical_codes, and an all-zero
+	 * tree passes it) leaves slots no code writes. Prefill the whole table
+	 * with the same bounded placeholder as the LOWRAM_TARGET variant, so a
+	 * gap decodes the same way every time instead of from uninitialised heap
+	 * or the previous hunk's tree. */
+	for (i = 0; i < (1u << decoder->maxbits); i++)
+		decoder->lookup[i] = MAKE_LOOKUP(0, 1);
 	/* iterate over all codes */
 	for (curcode = 0; curcode < decoder->numcodes; curcode++)
 	{

@@ -10,7 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32)
-#include <windows.h>   /* MoveFileExA: the report's atomic replace */
+#include <wchar.h>
+#include <windows.h>   /* the report's UTF-16 path: _wfopen, MoveFileExW, DeleteFileW */
 #endif
 
 /* ---- the launch line ------------------------------------------------------------------------ */
@@ -452,11 +453,14 @@ static double s_peak_min_gain = 1.0;
 static AcePadPlan s_pad_plan;
 static AceLatency s_latency;
 
-static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
+/* One row per AceFeature, in its order (ace.h); the count is checked, the order by ace-selftest. */
+static const char *const k_feature_key[] = {
     "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull",
     "depth", "twin", "ssaa", "peak", "glyphs", "mips", "texpack",
     "pad", "shadow", "texscale", "smart2d"
 };
+typedef char ace_feature_keys_complete[sizeof(k_feature_key) / sizeof(k_feature_key[0]) == ACE_FEATURE_COUNT
+                                       ? 1 : -1];
 
 /* The run's observation state. */
 static AceDetector s_det;
@@ -470,6 +474,13 @@ static uint32_t s_win_frames, s_win_skipped, s_win_betweens, s_win_shown, s_win_
 static uint64_t s_shown_seq;   /* AcePace.frame_seq of the newest real frame that reached the screen */
 static uint64_t s_win_idle_ns;
 static uint64_t s_win_gpu_wait_ns;   /* ace_note_gpu_wait in the window */
+
+/* A readout window starts at now_ns with nothing counted: every per-window counter is here. */
+static void win_reset(uint64_t now_ns) {
+    s_win_start_ns = now_ns;
+    s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
+    s_win_motion_milli = 0; s_win_gpu_wait_ns = 0;
+}
 static uint32_t s_last_flip_vcount, s_last_flip_fb;
 static int s_have_flip;
 static uint64_t s_rate_vblanks[ACE_RATE_COUNT];
@@ -494,9 +505,8 @@ static void observation_reset(void) {
     memset(&s_view, 0, sizeof(s_view));
     s_have_view = 0;
     memset(&s_counters, 0, sizeof(s_counters));
-    s_win_start_ns = 0; s_win_started = 0;
-    s_win_frames = s_win_skipped = s_win_betweens = s_win_shown = 0; s_win_idle_ns = 0;
-    s_win_motion_milli = 0; s_win_gpu_wait_ns = 0;
+    s_win_started = 0;
+    win_reset(0);
     memset(&s_motion, 0, sizeof(s_motion));
     s_shown_seq = 0;
     s_last_flip_vcount = s_last_flip_fb = 0; s_have_flip = 0;
@@ -547,8 +557,15 @@ int ace_init_spec(const char *spec, const char *report_path) {
     if (!s_req.on) return 0;                   /* "off": authentic, silently */
     s_eff = s_req;
     (void)ace_format(&s_req, s_spec, sizeof(s_spec));
-    if (report_path && report_path[0])
-        snprintf(s_report_path, sizeof(s_report_path), "%s", report_path);
+    if (report_path && report_path[0]) {
+        int n = snprintf(s_report_path, sizeof(s_report_path), "%s", report_path);
+        if (n < 0 || (size_t)n >= sizeof(s_report_path)) {
+            /* Cut short it would name another file: none is written. */
+            s_report_path[0] = '\0';
+            fprintf(stderr, "ACE_MODE: report path too long (more than %u bytes): no report is written\n",
+                    (unsigned)(sizeof(s_report_path) - 1u));
+        }
+    }
     g_ace_on = 1;
     fprintf(stderr, "ACE_MODE: on (tier=%s, af=%d, text=%s, readout=%s, notice=%s, wide=%s, "
             "smooth=%s, sas=%s, tess=%s, twin=%s)\n", tier_word(s_req.tier), s_req.af, on_off(s_req.text),
@@ -646,7 +663,32 @@ int ace_init_from_env(void) {
             exit(1);
         }
     }
+#if defined(_WIN32)
+    /* The report's path is UTF-8 and may name a folder outside the ANSI code page (the player's
+       user-data root under the user's profile): the wide environment carries it whole, where the
+       narrow getenv gives code-page bytes with '?' for the rest. */
+    char *report = NULL;
+    DWORD wn = GetEnvironmentVariableW(L"SR_ACE_REPORT", NULL, 0);
+    if (wn > 0) {
+        wchar_t *w = (wchar_t *)malloc((size_t)wn * sizeof(wchar_t));
+        DWORD got = w ? GetEnvironmentVariableW(L"SR_ACE_REPORT", w, wn) : 0;
+        int un = got > 0 && got < wn
+                     ? WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, -1, NULL, 0, NULL, NULL) : 0;
+        report = un > 0 ? (char *)malloc((size_t)un) : NULL;
+        if (report && WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, -1, report, un, NULL, NULL) != un) {
+            free(report);
+            report = NULL;
+        }
+        free(w);
+        if (!report && got > 0)
+            fprintf(stderr, "ACE_MODE: SR_ACE_REPORT is not valid UTF-16: no report is written\n");
+    }
+    int on = ace_init_spec(getenv("SR_ACE"), report);
+    free(report);
+    return on;
+#else
     return ace_init_spec(getenv("SR_ACE"), getenv("SR_ACE_REPORT"));
+#endif
 }
 
 const AceConfig *ace_requested(void) { return &s_req; }
@@ -1199,9 +1241,7 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         /* Fast forward: no window is judged (ace_note_fast_forward). */
     } else if (!s_win_started) {
         s_win_started = 1;
-        s_win_start_ns = now_ns;
-        s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
-        s_win_motion_milli = 0; s_win_gpu_wait_ns = 0;
+        win_reset(now_ns);
     } else if (now_ns - s_win_start_ns >= 1000000000ull) {
         AceWindow w;
         w.wall_ns = now_ns - s_win_start_ns;
@@ -1221,9 +1261,7 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         s_counters.windows++;
         if (s_view.pc_limited) s_limited_windows++;
         if (s_view.gpu_limited) s_gpu_limited_windows++;
-        s_win_start_ns = now_ns;
-        s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
-        s_win_motion_milli = 0; s_win_gpu_wait_ns = 0;
+        win_reset(now_ns);
     }
     return new_frame;
 }
@@ -1290,6 +1328,7 @@ void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint64_t
 AceShow ace_pace_take(AcePace *p) {
     AceShow show = p->show;
     p->show = ACE_SHOW_REAL;
+    p->untake_ok = 0;
     if (show == ACE_SHOW_REAL) return show;
     int consecutive = p->taken_seq + 1u == p->frame_seq;
     if (show == ACE_SHOW_BETWEEN && !consecutive) {
@@ -1300,8 +1339,16 @@ AceShow ace_pace_take(AcePace *p) {
         show = ACE_SHOW_KEEP;
     }
     if (show == ACE_SHOW_OWED) p->owed_seq = p->taken_seq;
+    p->untake_seq = p->taken_seq;
+    p->untake_ok = 1;
     p->taken_seq = p->frame_seq;
     return show;
+}
+
+void ace_pace_untake(AcePace *p) {
+    if (!p->untake_ok) return;
+    p->untake_ok = 0;
+    p->taken_seq = p->untake_seq;
 }
 
 void ace_pace_owed_failed(AcePace *p) {
@@ -1377,6 +1424,10 @@ void ace_smooth_shown_owed(uint64_t now_ns) {
 
 void ace_smooth_owed_failed(void) {
     if (g_ace_on) ace_pace_owed_failed(&s_pace);
+}
+
+void ace_smooth_untake(void) {
+    if (g_ace_on) ace_pace_untake(&s_pace);
 }
 
 int ace_smooth_vblank(uint32_t vcount) {
@@ -1798,17 +1849,20 @@ void ace_finish(void) {
     for (int f = 0; f < ACE_FEATURE_COUNT; f++)
         if (s_exit_report[f]) s_exit_report[f]();
     /* A feature that is on but never ran: its renderer or presenter did not start. */
-    static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
-                                                ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
-                                                ACE_HAS_DEPTH, 1, ACE_HAS_SSAA, ACE_HAS_PEAK, ACE_HAS_GLYPHS,
-                                                ACE_HAS_MIPS, ACE_HAS_TEXPACK,
-                                                ACE_HAS_PAD, ACE_HAS_SHADOW,
-                                                ACE_HAS_TEXSCALE, ACE_HAS_SMART2D };
-    const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
-                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
-                                        s_eff.load, s_eff.cull, s_eff.depth, s_eff.twin, s_eff.ssaa,
-                                        s_eff.peak, s_eff.glyphs, s_eff.mips, s_eff.texpack,
-                                        s_eff.pad, s_eff.shadow, s_eff.texscale, s_eff.smart2d };
+    /* Both in AceFeature order, one row each (checked below): a missing row would read as 0. */
+    static const int has[] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
+                               ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
+                               ACE_HAS_DEPTH, 1, ACE_HAS_SSAA, ACE_HAS_PEAK, ACE_HAS_GLYPHS,
+                               ACE_HAS_MIPS, ACE_HAS_TEXPACK,
+                               ACE_HAS_PAD, ACE_HAS_SHADOW,
+                               ACE_HAS_TEXSCALE, ACE_HAS_SMART2D };
+    const int on[] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
+                       s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
+                       s_eff.load, s_eff.cull, s_eff.depth, s_eff.twin, s_eff.ssaa,
+                       s_eff.peak, s_eff.glyphs, s_eff.mips, s_eff.texpack,
+                       s_eff.pad, s_eff.shadow, s_eff.texscale, s_eff.smart2d };
+    (void)sizeof(char[sizeof(has) / sizeof(has[0]) == ACE_FEATURE_COUNT ? 1 : -1]);   /* a compile-time check */
+    (void)sizeof(char[sizeof(on) / sizeof(on[0]) == ACE_FEATURE_COUNT ? 1 : -1]);
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
@@ -1873,7 +1927,19 @@ void ace_finish(void) {
     }
     char tmp[sizeof(s_report_path) + 8];
     snprintf(tmp, sizeof(tmp), "%s.tmp", s_report_path);
+    /* The path is UTF-8. Windows opens, replaces and removes it as UTF-16, as nk_fopen_utf8 and
+     * nk_rename_utf8 do (nk_platform.h; ace.c links none of the platform layer): the narrow calls
+     * read the bytes in the ANSI code page and miss a folder named outside it. */
+#if defined(_WIN32)
+    wchar_t wtmp[sizeof(tmp)], wpath[sizeof(s_report_path)];
+    int wide = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, tmp, -1, wtmp,
+                                   (int)(sizeof(wtmp) / sizeof(wtmp[0]))) > 0 &&
+               MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s_report_path, -1, wpath,
+                                   (int)(sizeof(wpath) / sizeof(wpath[0]))) > 0;
+    FILE *f = wide ? _wfopen(wtmp, L"wb") : NULL;
+#else
     FILE *f = fopen(tmp, "wb");
+#endif
     if (!f) {
         fprintf(stderr, "ACE_MODE: report not written (%s)\n", "cannot create the file");
         return;
@@ -1885,13 +1951,17 @@ void ace_finish(void) {
      * target, and MoveFileEx replaces it. */
     if (ok) {
 #if defined(_WIN32)
-        ok = MoveFileExA(tmp, s_report_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+        ok = MoveFileExW(wtmp, wpath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 #else
         ok = rename(tmp, s_report_path) == 0;
 #endif
     }
     if (!ok) {
+#if defined(_WIN32)
+        (void)DeleteFileW(wtmp);
+#else
         (void)remove(tmp);
+#endif
         fprintf(stderr, "ACE_MODE: report not written (%s)\n", "write failed");
     }
 }
