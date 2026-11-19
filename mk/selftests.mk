@@ -1707,14 +1707,20 @@ native-core-tests: pipeline-cache-selftest
 # reads, the wildcard lookup order, the palette identity, ZIP packs read in place (nk_zip.c and its
 # inflater), malformed packs and archives refused whole, and the decoded-image budget. Synthetic
 # packs written by the test; no GPU, no SDL, no game data. Once built, the same program measures a
-# large synthetic pack: $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) --bench 10000.
+# large synthetic pack: $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) --bench 10000. Exit 77 is a Windows
+# host that could not make a link a hostile case needs (a file symbolic link without Developer
+# Mode): the SKIP is printed with the cases left out. On POSIX a link that cannot be made fails.
 texrepl-selftest:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/core -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS -DNK_TEXREPL_TEST_HOOKS tests/native/texrepl_selftest.c src/rt/texrepl.c src/core/nk_zip.c src/core/nk_psp_inflate.c \
 		src/core/nk_shared_helpers.c \
 		$(PLAYER_PLATFORM_SRC) $(PLAYER_PLATFORM_LIBS) \
-		-o $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) && $(BUILD_DIR)/texrepl_selftest$(EXE_EXT)
+		-o $(BUILD_DIR)/texrepl_selftest$(EXE_EXT)
+	@rc=0; $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) || rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP texrepl-selftest link containment (exit 77; the hostile cases this host could not set up are printed above)"; \
+	elif [ $$rc -ne 0 ]; then exit $$rc; fi
 
 native-core-tests: texrepl-selftest
 
