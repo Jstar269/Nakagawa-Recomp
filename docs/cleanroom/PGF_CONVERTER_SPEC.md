@@ -36,8 +36,8 @@ policy into a public-safe PGF fixture:
 - **Japanese project font.** The project pins Noto Sans JP Regular (the UI
   font's static instance) and M PLUS 1p Regular, both under SIL OFL 1.1, and
   converts the `--japanese-text` repertoire described below from Noto Sans JP,
-  with M PLUS 1p drawing through `--fallback` the one point Noto Sans JP lacks
-  (#2005). The converter is
+  with M PLUS 1p drawing through `--fallback` the 341 points of that set Noto
+  Sans JP lacks (#2005, #1300). The converter is
   codepoint-driven; any additional font pin still needs its own pin file and
   coverage set. The output is not claimed to be pixel-identical to a firmware
   font (`FONT_ORIGINS.md` records the source and conversion).
@@ -96,8 +96,8 @@ scaling.
 | `bad-codepoint-list` | A `--codepoints` file is unreadable, not ASCII, holds a line that is not a code point, or leaves 16 bits. |
 | `codepoints-unsorted` | A `--codepoints` file repeats a code or is not in ascending order. |
 | `empty-codepoint-set` | A `--codepoints` file lists no code point. |
-| `japanese-codec-unavailable` / `japanese-mapping-invalid` | A built-in ASCII/EUC-JP/CP932 codec or its pinned Japanese mapping is unavailable or has changed. |
-| `latin-mapping-invalid` | A built-in Latin mapping has changed from its pinned digest or count. |
+| `japanese-codec-unavailable` / `japanese-mapping-invalid` | A built-in ASCII/EUC-JP/CP932/Shift_JIS-2004 codec or its pinned Japanese mapping is unavailable or has changed. |
+| `latin-mapping-invalid` / `latin-codec-unavailable` | A built-in Latin mapping has changed from its pinned digest or count, a code page codec is unavailable, or the face does not draw all of printable ASCII for `--latin-cyrillic-text`. |
 | `ppem-out-of-range` | Size outside 1..128. |
 | `embolden-out-of-range` | `--embolden-x`, `--embolden-y`, or `--embolden-advance` outside 0..8 sub-samples. |
 | `baseline-ellipsis-unavailable` | `--baseline-ellipsis` without U+2026 in the code set, without an outline for U+2026 or U+002E, or with U+2026 drawn by the `--fallback` font. |
@@ -141,21 +141,96 @@ assigned punctuation and symbols U+2010-U+2027, U+2030, U+2039-U+203A, U+20AC,
 and U+2122 (29). The set contains 348 unique points with canonical SHA-256
 `7fbcaac92248acdb1c2704c3fef2181e7bc49f2b0e9d0f970cd029fb58057340`.
 
-`--latin-cyrillic-text` (#2005) is the `--latin-1-text` set without U+2011,
-U+2023, U+2024, U+2025 and U+2027, plus 111 more: the WGL4 Cyrillic letters
-U+0401-040C, U+040E-044F, U+0451-045C, U+045E-045F and U+0490-0491 and U+04C0
-(95); U+0192, U+02C6 and U+02DC; the combining accents U+0301, U+0306, U+0308
-and U+0338; and U+2116, U+2206, U+2219, U+221A, U+221E, U+2248, U+2260, U+2264
-and U+2265. The set contains 454 unique points with canonical SHA-256
-`6b8511988b7ce6199c99a45ab3a00ee498986067343117205c22031e2b8b330d`.
+`--latin-cyrillic-text` (#2005, #1300) is a rule over public standards, applied
+to the face being converted: every code point of the Unicode blocks and the
+single-byte code pages below that the face's own character map draws. Code
+pages are read through Python's standard codecs, bytes 0x20-0xFF, without the
+C1 controls and the Private Use Area. Invisible format controls (Unicode general
+category Cf, such as the bidirectional marks of General Punctuation) are left
+out, except the soft hyphen U+00AD that Latin-1 text writes. A face that does
+not draw all of printable ASCII is refused (`latin-mapping-invalid`). No list
+of characters is taken from a console font. The blocks, each with its reason:
 
-`--japanese-text` (#2005) is the `--jis-x-0208-japanese` set widened by the
-EUC-JP mapping of JIS X 0208 rows 48..84 (the 3,390 level-2 kanji), every
-assigned double-byte character of Python's standard `cp932` table outside the
+| Block | Why it is in |
+| --- | --- |
+| Basic Latin U+0020-007E | ASCII: every Latin-script text. |
+| Latin-1 Supplement U+00A0-00FF | The letters and signs of Western European text. |
+| Latin Extended-A U+0100-017F | The letters of Central and Eastern European, Baltic, Turkish and Esperanto text. |
+| Spacing Modifier Letters U+02B0-02FF | The accents text writes on their own (`ˆ ˇ ˘ ˙ ˚ ˛ ˜ ˝`). |
+| General Punctuation U+2000-206F | Dashes, quotation marks, the ellipsis, daggers, the bullet and the per mille sign. |
+| Letterlike Symbols U+2100-214F | The trade mark sign, the numero sign and the other symbols written in text. |
+
+The code pages, each with its reason:
+
+| Code page | Why it is in |
+| --- | --- |
+| Windows-1250, -1251, -1252, -1254 and -1257 (`cp1250`, `cp1251`, `cp1252`, `cp1254`, `cp1257`) | The character sets of Central European, Cyrillic, Western, Turkish and Baltic text on Windows: the Cyrillic alphabets, `ƒ`, `€` and their punctuation. |
+| ISO 8859-16 (`iso8859_16`) | The Romanian letters with a comma below (`Ș ș Ț ț`). |
+| Mac Cyrillic (`mac_cyrillic`) | The symbols of Macintosh text (`∆ √ ∞ ≈ ≠ ≤ ≥`). |
+
+Left out, with the reason:
+
+| Block or code page | Why it is out |
+| --- | --- |
+| Latin Extended-B, Cyrillic (as a whole block), Currency Symbols | Their digraphs, historic letters and some currency signs are wider or taller than any letter, so they would grow the font's glyph box and maximum advance; games size glyph buffers and place lines by those (Hot Shots Tennis' dialog moved). Their text letters come in through the code pages. |
+| Combining Diacritical Marks | PGF text is drawn glyph by glyph and cannot set a mark over a letter; the precomposed letters are in. |
+| Mathematical Operators, Arrows, Number Forms | Not text characters. Hot Shots Tennis writes the minus sign U+2212 in its dialog and draws its own character where the font has none. |
+| Mac Roman, KOI8-R, CP866 | Their integral, box-drawing and block characters are taller than any letter (the glyph box again). |
+
+With each Liberation face of the build the set has 556 points, the same for all
+eight faces (canonical SHA-256
+`7eb9461a9b5e1012ff653746e9b0e3ff7947b8d51b27cc9fa224003a1705647d`); the
+manifest records the set's digest and source `builtin:latin-text-blocks`.
+
+`--japanese-text` (#2005, #1300) has a pinned core and a rule over public
+standards. The core is the `--jis-x-0208-japanese` set widened by the EUC-JP
+mapping of JIS X 0208 rows 48..84 (the 3,390 level-2 kanji), every assigned
+double-byte character of Python's standard `cp932` table outside the
 user-defined area (lead bytes 0xF0-0xF9, Unicode Private Use; 7,326
-characters, with the NEC and IBM extensions), and the Latin-1 Supplement
-U+00A0-U+00FF. The set contains 7,575 unique points with canonical SHA-256
-`7c737cfedb45385d553dbfeecce9949135f185b5ca31ce486428cd4082904497`.
+characters, with the NEC and IBM extensions) and the Latin-1 Supplement
+U+00A0-U+00FF: 7,575 unique points with the pinned canonical SHA-256
+`7c737cfedb45385d553dbfeecce9949135f185b5ca31ce486428cd4082904497`. The
+command line adds every character of JIS X 0213:2004 and of the Unicode blocks
+below that the input face, or the `--fallback` face where the input has no
+glyph, draws. JIS X 0213 is read through Python's `shift_jis_2004` codec over
+lead bytes 0x81-0x9F and 0xE0-0xFC, keeping cells that map to one code point
+up to U+FFFF (10,905 points, pinned by count and digest; a cell that maps to a
+base letter and a combining mark has no single code). No list of characters is
+taken from a console font. The blocks, each with its reason:
+
+| Block | Why it is in |
+| --- | --- |
+| Latin Extended-A U+0100-017F | Romanized Japanese with macrons (`ā ō ū`). |
+| Superscripts and Subscripts U+2070-209F | Superscript and subscript digits in units and notes. |
+| Combining Diacritical Marks for Symbols U+20D0-20FF | The enclosing circle and other marks JIS X 0213 uses with symbols. |
+| Letterlike Symbols U+2100-214F | The trade mark sign (Ace Combat: Joint Assault writes "Memory Stick™"), `℃`, `№`, `℡`. |
+| Number Forms U+2150-218F | Roman numerals and fractions. |
+| Arrows U+2190-21FF | Arrows in menus and instructions. |
+| Miscellaneous Technical U+2300-23FF | The arc `⌒` and the technical symbols of JIS X 0213. |
+| Enclosed Alphanumerics U+2460-24FF | Circled and parenthesized numbers and letters. |
+| Box Drawing U+2500-257F | Table and frame lines, the rounded corners included. |
+| Block Elements U+2580-259F | Shades and half blocks. |
+| Geometric Shapes U+25A0-25FF | Circles, triangles, squares and diamonds used as markers. |
+| Dingbats U+2700-27BF | Check marks and negative circled numbers. |
+| CJK Radicals Supplement U+2E80-2EFF, Kangxi Radicals U+2F00-2FDF | The radical forms of dictionaries and kanji lessons. |
+| Hiragana U+3040-309F, Katakana U+30A0-30FF, Katakana Phonetic Extensions U+31F0-31FF | The kana beyond JIS X 0208 (`ゔ`, the small kana of Ainu). |
+| Enclosed CJK Letters and Months U+3200-32FF | Parenthesized and circled kanji (`㈱`, `㊤`). |
+| CJK Compatibility U+3300-33FF | Squared words and units (`㌔`, `㍻`). |
+| CJK Unified Ideographs Extension A U+3400-4DBF, CJK Unified Ideographs U+4E00-9FFF | Kanji outside JIS X 0208: names, places and older forms. |
+| Alphabetic Presentation Forms U+FB00-FB4F | The Latin ligatures (`ﬁ`, `ﬂ`). |
+| CJK Compatibility Forms U+FE30-FE4F | The vertical forms of punctuation for text set in columns. |
+
+Left out, with the reason. What CP932 and JIS X 0213 hold of these blocks is in
+through the core and JIS X 0213:
+
+| Block | Why it is out |
+| --- | --- |
+| Mathematical Operators, CJK Symbols and Punctuation | Their remaining characters (multiple integrals, the two-cell vertical repeat marks, the tone marks) are wider or taller than a full-width cell, so they would grow the font's glyph box that games size glyph buffers and place lines by. |
+| Latin Extended-B, IPA Extensions, Combining Diacritical Marks, Greek and Coptic, Cyrillic, Latin Extended Additional, General Punctuation, Currency Symbols, Miscellaneous Symbols, Halfwidth and Fullwidth Forms | Their glyphs' sizes would overflow the 255-entry dimension table (section 6, `metric-table-overflow`); Western scripts are the Latin fonts' text. |
+
+With Noto Sans JP and M PLUS 1p the set has 15,631 points (M PLUS 1p draws
+341 of them); the manifest records the set's digest and source
+`builtin:jis-x-0208-cp932-japanese+jis-x-0213+blocks`.
 
 `--ks-x-1001-korean` decodes assigned cells in KS X 1001 rows 1-4 and 6-9
 through Python's standard `euc_kr` codec, adds ASCII, and includes every modern
@@ -531,7 +606,7 @@ Generated PGFs are fixtures, never an authenticity claim.
 | Sparse code-point set reads back through the reader; absent codes are misses | `ReaderRoundTripTests` |
 | Every named refusal writes nothing | `RefusalTests`, `CompositeRefusalTests` |
 | Tracking, tabular digits, the horizontal scale and the second font: effect, manifest record and refusals | `SpacingAndFallbackOptionTests` |
-| Built-in Latin, Japanese and Korean sets and the pinned fonts' coverage of them | `ProjectCodePointCoverageTests`, `JapaneseCodePointCoverageTests` |
+| Built-in Latin, Japanese and Korean sets and the pinned fonts' coverage of them; the block and code-page rules equal their definition over the faces' character maps; the small sans face keeps its glyph box | `ProjectCodePointCoverageTests`, `JapaneseCodePointCoverageTests` |
 | Project Latin faces: one per console index, line widths, class widths, ink, and the sans faces' x-height and cap-height rows | `ProjectLatinStrikeTests` |
 | Overshoot alignment: round and flat letters share their rows, flat letters and deep features unchanged, manifest record and refusals | `OvershootSnapTests`, `ProjectLatinStrikeTests` |
 | Ink trim: no image starts or ends in a blank column or row, a string drawn through the reader by advance keeps every pixel, advances unchanged | `InkTrimTests`, `ReaderRoundTripTests` |

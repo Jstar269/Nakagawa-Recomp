@@ -10,7 +10,7 @@ fonts, with the project's converter `tools/ttf2pgf.py`:
 
 | File | Stands in for | Made from | Licence |
 | --- | --- | --- | --- |
-| `nkjpn.pgf` | `jpn0`, Japanese text | Noto Sans JP Regular, and M PLUS 1p Regular for its one missing character (`≒`) | SIL Open Font License 1.1 |
+| `nkjpn.pgf` | `jpn0`, Japanese text | Noto Sans JP Regular, and M PLUS 1p Regular for the 341 characters of its set Noto Sans JP lacks (`≒` among them) | SIL Open Font License 1.1 |
 | `nkltn.pgf`, `nkltn1.pgf` to `nkltn7.pgf` | `ltn0` to `ltn7`, Latin text at the PSP's larger size | Liberation Sans and Liberation Serif, Regular, Italic, Bold and Bold Italic | SIL Open Font License 1.1 |
 | `nkltns.pgf`, `nkltn9.pgf` to `nkltn15.pgf` | `ltn8` to `ltn15`, Latin text at the PSP's smaller size | The same eight faces | SIL Open Font License 1.1 |
 | `nkkr.pgf` | `kr0`, Korean text | Gowun Dodum Regular | SIL Open Font License 1.1 |
@@ -58,10 +58,17 @@ stand-ins, and the player's checks before a game starts say the same.
 
 What stays the same:
 
-- **Characters.** Every character of the PSP's Latin fonts is in the Latin stand-ins: ASCII, Latin-1, Latin
-  Extended-A, the Windows-1252 punctuation and symbols, and the Cyrillic alphabet. The Japanese stand-in has every
-  character of Shift JIS as PSP games write it (Microsoft's code page 932), including all 6,355 kanji of JIS X 0208
-  levels 1 and 2. The Korean stand-in has all 11,172 Hangul syllables.
+- **Characters.** Each stand-in's characters follow a rule over public standards, computed from its source fonts'
+  own character maps when the build makes it; no list of characters comes from the PSP's fonts
+  ([the converter specification](../docs/cleanroom/PGF_CONVERTER_SPEC.md) gives every block and code page and why
+  it is in or out). The Latin stand-ins have the 556 characters of the Unicode blocks Basic Latin, Latin-1
+  Supplement, Latin Extended-A, Spacing Modifier Letters, General Punctuation and Letterlike Symbols and of the
+  Windows code pages for Western, Central European, Turkish, Baltic and Cyrillic text, ISO 8859-16 and Mac Cyrillic
+  that Liberation draws: Latin text of most European languages, the Cyrillic alphabets, `™`, `№` and `€`. The
+  Japanese stand-in has every character of Shift JIS as PSP games write it (Microsoft's code page 932), including
+  all 6,355 kanji of JIS X 0208 levels 1 and 2, every character of JIS X 0213 and of 23 further Unicode blocks (kana,
+  radicals, kanji outside JIS, enclosed and squared characters, symbols, box drawing) that Noto Sans JP or M PLUS 1p
+  draws: 15,631 characters. The Korean stand-in has all 11,172 Hangul syllables.
 - **Sizes and line lengths.** Each Latin stand-in has its PSP font's family, style and nominal size, and a sentence
   or a menu line in any of the 16 Latin faces comes out within 3 % of its width on a PSP. Digits in the sans-serif
   faces all have the PSP's width. Japanese kana and kanji are 18 pixels wide, as on a PSP, and Hangul syllables
@@ -85,8 +92,10 @@ What changes:
   its stroke weight has not been compared with the PSP font's. Latin letters drawn with the Japanese font come from
   Noto Sans JP and are about 18 % narrower than the PSP's (9.7 pixels on average against 11.8).
 - **Missing characters.** A character the stand-in lacks is drawn as the font library's replacement character: an
-  underscore, unless the game chooses another. Where the stand-in lacks that one too, nothing is drawn. The Japanese
-  stand-in lacks about 2,200 of the PSP Japanese font's 9,773 characters, the ones outside code page 932. The Korean
+  underscore, unless the game chooses another. Where the stand-in lacks that one too, nothing is drawn. The Latin
+  stand-ins lack 6 of the PSP Latin fonts' 322 characters: four combining accents, `Ӏ` and `∙`. The Japanese
+  stand-in lacks 47 of the PSP Japanese font's 9,773: mathematical operators, punctuation, combining marks and
+  letters of blocks the rule leaves out, and three characters neither source font draws. The Korean
   stand-in lacks 512 of the PSP Korean font's 11,836, all in U+1200 to U+12FF and U+1400 to U+14FF; Gowun Dodum has
   none of them.
 
@@ -97,8 +106,10 @@ stand-in that serves it through the player's own font reader (`src/rt/pgf_public
 `tools/ttf2pgf.py` with the Makefile's settings. Widths are the sum of the characters' advances, without spaces.
 "Sentence" is `The quick brown fox jumps over the lazy dog.`; "menu line" is `NEW GAME  CONTINUE  OPTIONS  0123456789`.
 The "Now" columns compare the stand-ins of that date with those recorded PSP widths (#2005); the "Before" columns are
-the measurement of the earlier stand-ins. The faces retuned on 2026-11-19 (`ltn4`, `ltn6`, `ltn8`, `ltn10`, `ltn12`,
-`ltn14`) keep every sentence and menu line within 3 % of those recorded widths (`tools/test_ttf2pgf.py`); their
+the measurement of the earlier stand-ins. Since 2026-11-19 the stand-ins' characters follow the public rule above
+(#1300): the Japanese stand-in lacks 47 of the 9,773 instead of the "Now" column's 2,202, and among the characters
+it gained is the trade mark sign `™` that games write in "Memory Stick™"; the Latin stand-ins lack 6 of 322. The faces retuned on 2026-11-19 (`ltn4`, `ltn6`, `ltn8`, `ltn10`,
+`ltn12`, `ltn14`) keep every sentence and menu line within 3 % of those recorded widths (`tools/test_ttf2pgf.py`); their
 per-class numbers in the table predate that change.
 
 | PSP fonts | Before: characters lacking | Before: width against the PSP font | Now: characters lacking | Now: width against the PSP font |
