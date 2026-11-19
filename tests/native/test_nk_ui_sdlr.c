@@ -145,6 +145,9 @@ static int test_ttf_japanese_shaping(void) {
           (glyphs[2].glyph >> 24) == 1u && (glyphs[3].glyph >> 24) == 0u,
           "per-glyph fallback depths for mixed text");
     CHECK(glyphs[3].codepoint == 'V', "V keeps its codepoint after wide glyphs");
+    CHECK(glyphs[0].text_index == 0u && glyphs[1].text_index == 1u &&
+              glyphs[2].text_index == 2u && glyphs[3].text_index == 4u,
+          "text_index counts characters, the space that draws no glyph included");
     CHECK(!text.raster(text.user, 0, 24, (3u << 24) | 5u, &bitmap),
           "a fallback depth the font does not have is refused");
     return 1;
@@ -762,6 +765,378 @@ static int test_image_commands(void) {
     return 1;
 }
 
+/* SDL's allocator, wrapped so a test can make every allocation of a page's size
+   fail (a texture SDL cannot create) and then let them through again. Each call
+   goes to SDL's own functions, so memory allocated before the wrap frees alike. */
+#define LARGE_ALLOCATION ((size_t)1024u * 1024u)
+static bool g_fail_large_allocations;
+static SDL_malloc_func g_sdl_malloc;
+static SDL_calloc_func g_sdl_calloc;
+static SDL_realloc_func g_sdl_realloc;
+static SDL_free_func g_sdl_free;
+
+static void *SDLCALL test_malloc(size_t size) {
+    return g_fail_large_allocations && size >= LARGE_ALLOCATION ? NULL : g_sdl_malloc(size);
+}
+
+static void *SDLCALL test_calloc(size_t count, size_t size) {
+    return g_fail_large_allocations && size != 0u && count >= LARGE_ALLOCATION / size
+        ? NULL : g_sdl_calloc(count, size);
+}
+
+static void *SDLCALL test_realloc(void *memory, size_t size) {
+    return g_fail_large_allocations && size >= LARGE_ALLOCATION ? NULL : g_sdl_realloc(memory, size);
+}
+
+static void SDLCALL test_free(void *memory) {
+    g_sdl_free(memory);
+}
+
+static bool wrap_sdl_allocator(void) {
+    SDL_GetOriginalMemoryFunctions(&g_sdl_malloc, &g_sdl_calloc, &g_sdl_realloc, &g_sdl_free);
+    return g_sdl_malloc != NULL && g_sdl_calloc != NULL && g_sdl_realloc != NULL &&
+           g_sdl_free != NULL &&
+           SDL_SetMemoryFunctions(test_malloc, test_calloc, test_realloc, test_free);
+}
+
+static int test_atlas_page_failure_is_reported(void) {
+    /* An atlas page SDL cannot create fails the render, and the glyphs it was for
+       are not remembered as blank: the next render rasterises and draws them. */
+    NkUiTextBackend text = nk_ui_ttf_backend(g_ttf);
+    Target target;
+    NkUiSdlr *backend;
+    NkUiSdlrStats stats;
+    NkUiDrawBuffer buffer;
+    const int box[4] = {0, 0, 160, 60};
+    const uint32_t black = 0x000000FFu;
+    bool rendered;
+    Ink ink;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(target_open(&target, 160, 60), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, &text);
+    CHECK(backend != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_text(&buffer, (NkUiPixelRect){0, 0, 160, 60}, "Hi", 2, 0, 32,
+                              0xFFFFFFFFu, 1u), "queue a text run");
+    target_clear(&target, black);
+    g_fail_large_allocations = true;
+    rendered = nk_ui_sdlr_render(backend, &buffer.list);
+    g_fail_large_allocations = false;
+    CHECK(!rendered, "a page SDL cannot create fails the render");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    CHECK(stats.atlas_pages == 0u && stats.atlas_glyphs == 0u,
+          "the failed glyph is not cached as blank");
+    target_clear(&target, black);
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "the next render succeeds");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    ink = measure_ink(&target, box, black, 40);
+    CHECK(stats.atlas_pages == 1u && stats.glyphs_drawn == 2u && ink.pixels > 0,
+          "the glyphs are drawn once a page can be created");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+/* The rightmost ink column of `text` drawn with `spacing` px of letter spacing. */
+static int spaced_ink_right(Target *target, NkUiSdlr *backend, const char *text, float spacing) {
+    NkUiDrawBuffer buffer;
+    const int box[4] = {0, 0, 300, 60};
+    const uint32_t black = 0x000000FFu;
+    Ink ink;
+    memset(&buffer, 0, sizeof(buffer));
+    if (!nk_ui_draw_add_text_spaced(&buffer, (NkUiPixelRect){4, 0, 300, 60}, text, strlen(text),
+                                    0, 32, spacing, 0xFFFFFFFFu, 1u)) {
+        return -1;
+    }
+    target_clear(target, black);
+    if (!nk_ui_sdlr_render(backend, &buffer.list)) {
+        nk_ui_draw_buffer_destroy(&buffer);
+        return -1;
+    }
+    ink = measure_ink(target, box, black, 40);
+    nk_ui_draw_buffer_destroy(&buffer);
+    return ink.max_x;
+}
+
+static int test_letter_spacing_counts_characters(void) {
+    /* Layout reserves one gap after every character, spaces too (nk_ui_clay.c),
+       so a glyph after a space sits two gaps in, though the space draws no glyph. */
+    NkUiTextBackend text = nk_ui_ttf_backend(g_ttf);
+    Target target;
+    NkUiSdlr *backend;
+    int plain;
+    int spaced;
+    CHECK(target_open(&target, 300, 60), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, &text);
+    CHECK(backend != NULL, "create the backend");
+    plain = spaced_ink_right(&target, backend, "A B", 0.0f);
+    spaced = spaced_ink_right(&target, backend, "A B", 8.0f);
+    CHECK(plain > 0 && spaced > 0, "both runs draw");
+    CHECK(spaced - plain >= 15 && spaced - plain <= 17,
+          "B moves two gaps (A and the space), not one per drawn glyph");
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+static int test_command_clip_bounds_text(void) {
+    /* A label wider and taller than its box is cut at the box, as every backend
+       clips a command to its clip (nk_ui_draw.h), with no scissor open. */
+    NkUiTextBackend text = nk_ui_ttf_backend(g_ttf);
+    Target target;
+    NkUiSdlr *backend;
+    NkUiDrawBuffer buffer;
+    const int inside[4] = {10, 10, 40, 30};
+    const int right[4] = {40, 0, 200, 80};
+    const int below[4] = {0, 30, 40, 80};
+    const uint32_t black = 0x000000FFu;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(target_open(&target, 200, 80), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, &text);
+    CHECK(backend != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_text(&buffer, (NkUiPixelRect){10, 10, 40, 30}, "WWWWgy", 6, 0, 32,
+                              0xFFFFFFFFu, 1u), "queue an overhanging label");
+    target_clear(&target, black);
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "render the label");
+    CHECK(measure_ink(&target, inside, black, 40).pixels > 0, "the label draws inside its box");
+    CHECK(measure_ink(&target, right, black, 40).pixels == 0 &&
+              measure_ink(&target, below, black, 40).pixels == 0,
+          "no ink outside the command's clip");
+    CHECK(!SDL_RenderClipEnabled(target.renderer), "the renderer's clip state is restored");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+/* A text backend that writes at most `max` glyphs but, once g_shape_overstates
+   is set, returns three more than it wrote (a "size needed" convention). Its
+   glyphs are 2 x 2 squares 4 px apart. */
+static bool g_shape_overstates;
+
+static int overstating_shape(void *user, int font, int px, const char *s, size_t n,
+                             NkUiGlyph *out, int max) {
+    int i;
+    (void)user;
+    (void)font;
+    (void)px;
+    (void)s;
+    for (i = 0; i < max && (size_t)i < n; ++i) {
+        memset(&out[i], 0, sizeof(out[i]));
+        out[i].glyph = 1u;
+        out[i].codepoint = 'x';
+        out[i].x = (float)(i * 4);
+        out[i].advance_x = 4.0f;
+        out[i].text_index = (uint32_t)i;
+    }
+    return g_shape_overstates ? i + 3 : i;
+}
+
+static bool square_raster(void *user, int font, int px, uint32_t glyph, NkUiGlyphBitmap *out) {
+    static const uint8_t ink[4] = {0xFFu, 0xFFu, 0xFFu, 0xFFu};
+    (void)user;
+    (void)font;
+    (void)px;
+    (void)glyph;
+    memset(out, 0, sizeof(*out));
+    out->pixels = ink;
+    out->width = 2;
+    out->height = 2;
+    out->pitch = 2;
+    out->bearing_y = 2;
+    out->advance_x = 4.0f;
+    return true;
+}
+
+static int test_shape_count_is_clamped(void) {
+    /* A shaper that reports more glyphs than the room it was given draws only
+       the glyphs that fit: the renderer never reads past its glyph buffer. A
+       longer run first leaves the buffers bigger than the short run needs, so
+       an unclamped count reads stale glyphs instead of past the allocation. */
+    NkUiTextBackend text;
+    Target target;
+    NkUiSdlr *backend;
+    NkUiSdlrStats stats;
+    NkUiDrawBuffer buffer;
+    uint32_t drawn;
+    memset(&text, 0, sizeof(text));
+    text.shape = overstating_shape;
+    text.raster = square_raster;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(target_open(&target, 64, 16), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, &text);
+    CHECK(backend != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_text(&buffer, (NkUiPixelRect){0, 0, 64, 16}, "xxxxxxxxxx", 10, 0, 8,
+                              0xFFFFFFFFu, 1u), "queue a ten-glyph run");
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "render the long run");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    drawn = stats.glyphs_drawn;
+    CHECK(drawn == 10u, "an honest shaper draws every glyph");
+    nk_ui_draw_buffer_reset(&buffer);
+    CHECK(nk_ui_draw_add_text(&buffer, (NkUiPixelRect){0, 0, 64, 16}, "xx", 2, 0, 8,
+                              0xFFFFFFFFu, 2u), "queue a two-glyph run");
+    g_shape_overstates = true;
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "render the short run");
+    g_shape_overstates = false;
+    nk_ui_sdlr_get_stats(backend, &stats);
+    CHECK(stats.glyphs_drawn - drawn == 2u, "only the two glyphs the shaper wrote are drawn");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+static int test_image_shrinks_per_axis(void) {
+    /* An image drawn narrower than itself but far taller is shrunk across only:
+       the texture is never taller than the image, so a tall box needs no texture
+       past the renderer's limit. Box sides past INT_MAX / 5 compare without
+       overflowing and are drawn at the image's own size. */
+    static uint8_t big[64u * 64u * 4u];
+    NkUiImage image = {64u, 64u, big, 0x5EED0101ull};
+    Target target;
+    NkUiSdlr *backend;
+    NkUiSdlrStats stats;
+    NkUiDrawBuffer buffer;
+    const uint32_t black = 0x000000FFu;
+    bool rendered;
+    memset(big, 0xFF, sizeof(big));
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(target_open(&target, 64, 64), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, NULL);
+    CHECK(backend != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_image(&buffer, &image, (NkUiPixelRect){0, 0, 30, 40000}, 0xFFFFFFFFu, 1u),
+          "a narrow, very tall image box");
+    target_clear(&target, black);
+    /* The software renderer sets no texture limit, so large allocations stand
+       in for one: a 30 x 40000 texture needs megabytes, a 30 x 64 one does not. */
+    g_fail_large_allocations = true;
+    rendered = nk_ui_sdlr_render(backend, &buffer.list);
+    g_fail_large_allocations = false;
+    CHECK(rendered, "render the tall image");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    CHECK(stats.images_failed == 0u && stats.images_drawn == 1u, "the tall image is drawn");
+    CHECK(target_pixel(&target, 10, 32) == 0xFFFFFFFFu && target_pixel(&target, 40, 32) == black,
+          "it fills its box and nothing beside it");
+    nk_ui_draw_buffer_reset(&buffer);
+    CHECK(nk_ui_draw_add_image(&buffer, &image, (NkUiPixelRect){0, 0, 500000000, 64}, 0xFFFFFFFFu,
+                               2u), "an image box wider than INT_MAX / 5");
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "render the wide image");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    CHECK(stats.images_failed == 0u && stats.images_drawn == 2u, "the wide image is drawn");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+static int test_tall_waves_fit_the_renderer(void) {
+    /* Waves in a box far taller than wide get a texture of bounded height; the
+       linear scale-up covers the rest. The software renderer sets no texture
+       limit, so large allocations stand in for one (a 1 x 333333 texture needs
+       over a megabyte). */
+    NkUiWavesCommand waves;
+    NkUiWavePalette palette;
+    Target target;
+    NkUiSdlr *backend;
+    NkUiSdlrStats stats;
+    NkUiDrawBuffer buffer;
+    bool rendered;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(nk_ui_waves_palette(0u, &palette), "base wave palette");
+    nk_ui_waves_command(37.0, 3.0f, 1000000.0f, &palette, &waves);
+    CHECK(target_open(&target, 16, 16), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, NULL);
+    CHECK(backend != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_custom(&buffer, NK_UI_CUSTOM_WAVES, &waves,
+                                (NkUiPixelRect){0, 0, 3, 1000000}, 1u), "a 3 px wide waves box");
+    CHECK(nk_ui_draw_add_rect(&buffer, (NkUiRect){8.0f, 8.0f, 4.0f, 4.0f}, 1.0f, 0.0f,
+                              0xFF0000FFu, 2u), "a rectangle after the waves");
+    target_clear(&target, 0x000000FFu);
+    g_fail_large_allocations = true;
+    rendered = nk_ui_sdlr_render(backend, &buffer.list);
+    g_fail_large_allocations = false;
+    CHECK(rendered, "render the tall waves");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    CHECK(stats.waves_drawn == 1u, "the tall waves are drawn");
+    CHECK(target_pixel(&target, 9, 9) == 0xFF0000FFu, "and so is what follows them");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+static int test_unbalanced_scissor_end_is_malformed(void) {
+    /* A scissor end with none open is a malformed list, as in the Vulkan
+       backend: render refuses it before drawing anything. The draw buffer never
+       emits one, so the list is a balanced one with its start removed. */
+    Target target;
+    NkUiSdlr *backend;
+    NkUiDrawBuffer buffer;
+    NkUiDrawCmd commands[2];
+    NkUiDrawList list;
+    const uint32_t black = 0x000000FFu;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(target_open(&target, 16, 16), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, NULL);
+    CHECK(backend != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_rect(&buffer, (NkUiRect){0.0f, 0.0f, 16.0f, 16.0f}, 1.0f, 0.0f,
+                              0xFF0000FFu, 1u), "a rectangle");
+    CHECK(nk_ui_draw_add_scissor(&buffer, true, (NkUiPixelRect){0, 0, 16, 16}, 2u) &&
+              nk_ui_draw_add_scissor(&buffer, false, (NkUiPixelRect){0, 0, 16, 16}, 2u),
+          "a scissor start and end");
+    CHECK(buffer.list.ncmd == 3u && buffer.list.cmd[1].kind == NK_UI_DRAW_SCISSOR_START,
+          "the rectangle, then the scissor");
+    commands[0] = buffer.list.cmd[0];
+    commands[1] = buffer.list.cmd[2];
+    list = buffer.list;
+    list.cmd = commands;
+    list.ncmd = 2u;
+    target_clear(&target, black);
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "the balanced list renders");
+    target_clear(&target, black);
+    CHECK(!nk_ui_sdlr_render(backend, &list), "the unbalanced list is refused");
+    CHECK(target_pixel(&target, 8, 8) == black, "and nothing of it is drawn");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+static int test_geometry_failure_fails_the_render(void) {
+    /* Geometry SDL cannot queue (here for want of memory) fails the render
+       rather than reporting a frame that is missing it. */
+    Target target;
+    NkUiSdlr *backend;
+    NkUiDrawBuffer buffer;
+    bool rendered;
+    int i;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(target_open(&target, 16, 16), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, NULL);
+    CHECK(backend != NULL, "create the backend");
+    /* Enough neighbouring rectangles that their one batch needs over a
+       megabyte of SDL vertex data. */
+    for (i = 0; i < 30000; ++i) {
+        if (!nk_ui_draw_add_rect(&buffer, (NkUiRect){(float)(i % 16), 0.0f, 1.0f, 1.0f}, 1.0f,
+                                 0.0f, 0xFF0000FFu, 1u)) {
+            break;
+        }
+    }
+    CHECK(i == 30000, "queue the rectangles");
+    target_clear(&target, 0x000000FFu);
+    g_fail_large_allocations = true;
+    rendered = nk_ui_sdlr_render(backend, &buffer.list);
+    g_fail_large_allocations = false;
+    CHECK(!rendered, "geometry SDL refused fails the render");
+    target_clear(&target, 0x000000FFu);
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "the next render succeeds");
+    CHECK(target_pixel(&target, 4, 0) == 0xFF0000FFu, "and draws the rectangles");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
 #if defined(_WIN32)
 /* The SDL3_ttf.dll path in the folder of module (NULL: this executable), or "" when that
    folder cannot be named. */
@@ -865,6 +1240,10 @@ int main(void) {
     size_t i;
     int passed = 0;
     int total = 0;
+    if (!wrap_sdl_allocator()) {
+        printf("FAIL wrapping SDL's allocator: %s\n", SDL_GetError());
+        return 1;
+    }
     for (i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); ++i) {
         if (!file_exists(fixtures[i])) {
             printf("FAIL fixture font %s is missing (run from the repository root)\n", fixtures[i]);
@@ -913,6 +1292,14 @@ int main(void) {
     RUN(test_snapshots_and_atlas);
     RUN(test_atlas_rebuild_on_scale_change);
     RUN(test_atlas_page_overflow);
+    RUN(test_atlas_page_failure_is_reported);
+    RUN(test_letter_spacing_counts_characters);
+    RUN(test_command_clip_bounds_text);
+    RUN(test_shape_count_is_clamped);
+    RUN(test_image_shrinks_per_axis);
+    RUN(test_tall_waves_fit_the_renderer);
+    RUN(test_unbalanced_scissor_end_is_malformed);
+    RUN(test_geometry_failure_fails_the_render);
 #undef RUN
     nk_ui_ttf_destroy(g_ttf);
     printf("nk_ui_sdlr: %d of %d tests passed\n", passed, total);

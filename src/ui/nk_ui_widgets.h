@@ -33,6 +33,12 @@ bool nk_ui_begin_modal(NkUi *ui, NkUiId id, const NkUiLayout *layout, const NkUi
 bool nk_ui_take_activation(NkUi *ui, NkUiId id);
 /* Label colour of a button with these flags. */
 uint32_t nk_ui_button_text_rgba(const NkUi *ui, uint32_t flags);
+/* The type role of a button's label with these flags. */
+NkUiTypeRole nk_ui_button_role(uint32_t flags);
+/* The layout and resting style nk_ui_button gives a button with these flags, for a
+   control drawn as one that nk_ui_button cannot draw itself. */
+void nk_ui_button_configuration(const NkUi *ui, uint32_t flags,
+                                NkUiLayout *layout, NkUiStyle *style);
 
 /* How wide nk_ui_button lays out a button with this label and these flags when
    it fits its label (no NK_UI_BUTTON_GROW room), at the current text size. A

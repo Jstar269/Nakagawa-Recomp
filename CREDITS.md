@@ -65,7 +65,8 @@ Nakagawa has since substantially extended and modified that codebase. This repos
 - **PSPSDK sample programs — Jesper Svennevid, Donour Sizemore, James Forshaw, John Kelley, Marcus R. Brown, Frank Buss and weltall** — BSD-3-Clause. The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) names four PSPSDK samples, pinned to the PSPDEV release; nothing is built or copied into the repository ([`tests/fixtures/homebrew_corpus/PROVENANCE.md`](tests/fixtures/homebrew_corpus/PROVENANCE.md)).
 - **SDL, SDL_ttf and their dependencies** — staged beside the player with their licence texts (listed in [`NOTICE.md`](NOTICE.md)).
 - **stb_image 2.30 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The PNG
-  decoder in [`third_party/stb/`](third_party/stb/), for the player's prompt glyphs and the disc art read from your own disc.
+  decoder in [`third_party/stb/`](third_party/stb/), for the player's prompt glyphs, the disc art read from your own disc
+  and, when you turn on cover art, the cover downloaded from `thumbnails.libretro.com`.
 - **stb_vorbis 1.24 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The Ogg
   Vorbis decoder for the optional launcher music, in [`third_party/stb/`](third_party/stb/PROVENANCE.md).
 - **"Chill lofi inspired" — omfgdude ([OpenGameArt](https://opengameart.org/content/chill-lofi-inspired))** — CC0-1.0.

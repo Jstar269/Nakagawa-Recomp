@@ -36,6 +36,8 @@ void player_ui_sounds_destroy(PlayerUiSounds *sounds);
    turning them off closes it and stops SDL audio again. */
 void player_ui_sounds_set_enabled(PlayerUiSounds *sounds, bool enabled);
 bool player_ui_sounds_enabled(const PlayerUiSounds *sounds);
+/* Whether the sounds hold an audio stream on the playback device. */
+bool player_ui_sounds_hold_audio(const PlayerUiSounds *sounds);
 
 /* Plays one clip, cutting off the one before it. Does nothing while disabled. */
 void player_ui_sounds_play(PlayerUiSounds *sounds, PlayerUiSound sound);

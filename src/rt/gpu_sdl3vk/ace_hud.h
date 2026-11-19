@@ -70,8 +70,12 @@ int ace_hud_list_bits(const AceHudList *l, uint32_t *bits);
 extern int g_ace_hud_on;
 /* Called by gui.c when Ace smooth motion starts or stops. */
 void ace_hud_enable(int on);
-/* ge_gpu.c: a through-mode draw's box on render-target slot `slot`. */
+/* ge_gpu.c: a through-mode draw's box on render-target slot `slot`. What became of it is counted
+ * in ace_hud_stats once that slot is presented. */
 void ace_hud_note(int slot, float xa, float ya, float xb, float yb, int samples_target);
+/* ge_gpu.c, when the target in slot `slot` is freed: its boxes are dropped, uncounted, so a target
+ * made later in that slot starts with none. */
+void ace_hud_forget(int slot);
 /* ge_gpu.c, just before target image `src` is presented: its boxes since its last present, and
  * its depth image. `depth_gen` counts the draws that wrote that depth image; depth is handed on
  * only if one did since that depth image was last handed on (whichever target it was presented
@@ -86,7 +90,8 @@ int ace_hud_depth_float(void);
  * NULL (a CPU frame, the feature off, or nothing published for it). It always clears what was
  * published, so an aux never reaches another image. Valid until the next ace_hud_present. */
 const AceSmoothAux *ace_hud_take(VkImage src);
-/* The box and frame counts since ace_hud_enable (the pair counts are ace_smooth.c's). */
+/* The box and frame counts since ace_hud_enable, the boxes of presented slots only (the pair
+ * counts are ace_smooth.c's). */
 void ace_hud_stats(AceSmoothAuxStats *out);
 
 #endif /* SR_ACE_HUD_H */

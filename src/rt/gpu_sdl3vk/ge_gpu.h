@@ -292,6 +292,12 @@ int gegpu_coherence_selftest(void);
  * device's (0 keeps the device's), and the factor ssaa-limit expects init to choose (0: none).
  * Call before gegpu_init. */
 void gegpu_selftest_ssaa_limits(unsigned long long budget_bytes, unsigned max_dim, int expect);
+/* The coherence selftest's init-fail run (--init-fail): with `on`, gegpu_init fails at its last
+ * step that can fail, after every part has been set up. Call before gegpu_init. */
+void gegpu_selftest_init_fail(int on);
+/* After the init-fail run's gegpu_init: how many of the objects its steps made are still held
+ * (0: the failed init released them all). */
+int gegpu_selftest_init_left(void);
 /* Ace Mode's texture filtering (src/rt/ace.h): the anisotropy level the renderer uses (0 in an
  * authentic run), the anisotropic samplers it has made, and its texture descriptor pool's
  * size. Invariant A2: an authentic run makes none and keeps MAX_TEX sets. mips_entries: the
