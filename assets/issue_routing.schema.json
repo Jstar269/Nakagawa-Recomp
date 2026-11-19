@@ -49,7 +49,9 @@
         "hardware_test_id": {"type": "string", "minLength": 1},
         "local_test_command": {"type": "string", "minLength": 1},
         "note": {"type": "string", "maxLength": 1024}
-      }
+      },
+      "if": {"properties": {"primary_state": {"const": "hardware"}}},
+      "else": {"not": {"required": ["hardware_test_id"]}}
     }
   }
 }
