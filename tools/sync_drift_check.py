@@ -153,7 +153,8 @@ def load_excluded_paths(export_root: Path, source_root: Path = ROOT) -> tuple[fr
     def read_profile() -> dict:
         if not profile.is_file():
             raise FileNotFoundError(f"no {EXPORT_MANIFEST} in export and no {PROFILE_PATH} in source tree")
-        return json.loads(profile.read_text(encoding="utf-8"))
+        loaded: dict = json.loads(profile.read_text(encoding="utf-8"))
+        return loaded
 
     manifest = export_root / EXPORT_MANIFEST
     if manifest.is_file():

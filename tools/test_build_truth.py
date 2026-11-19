@@ -1026,13 +1026,13 @@ class NestedFramesLinkDependencyTests(unittest.TestCase):
     def test_every_link_of_a_caller_also_supplies_the_module(self) -> None:
         offenders, checked = _nested_frame_link_offenders(
             self.lines, _make_variables(self.makefile), _nested_frame_callers())
-        offenders = [f"Makefile:{number}: {text.strip()}" for number, text in offenders]
+        offender_lines = [f"Makefile:{number}: {text.strip()}" for number, text in offenders]
         self.assertEqual(
-            offenders,
+            offender_lines,
             [],
             "these Makefile link statements use a nested-frame caller without "
             f"{NESTED_FRAMES_C}; the link will fail with undefined references to "
-            "sr_nested_frame_*:\n" + "\n".join(offenders),
+            "sr_nested_frame_*:\n" + "\n".join(offender_lines),
         )
         # The HLE sources reach the link lines through $(HLE_SRCS) (#307); a scan that cannot
         # see through it would skip every HLE selftest link and still pass.
@@ -3735,7 +3735,8 @@ def _unguarded_sibling_imports(source: str, sibling_modules: set[str]) -> list[s
     def innermost_function(node: ast.AST) -> ast.AST | None:
         return next((parent for parent in enclosing(node) if isinstance(parent, functions)), None)
 
-    path_calls = [(innermost_function(node), node.lineno) for node in ast.walk(tree) if is_path_call(node)]
+    path_calls = [(innermost_function(node), cast(ast.Call, node).lineno)
+                  for node in ast.walk(tree) if is_path_call(node)]
     path_lines = [line for function, line in path_calls if function is None]
     unguarded: list[str] = []
     for node in ast.walk(tree):
@@ -3973,7 +3974,7 @@ def _make_directory_operands(elements: list[ast.expr]) -> list[ast.expr | None]:
             if not prefix.startswith(option):
                 continue
             if isinstance(element, ast.Constant):
-                operands.append(ast.Constant(element.value[len(option):]))
+                operands.append(ast.Constant(cast(str, element.value)[len(option):]))
             else:
                 rest = cast(ast.JoinedStr, element).values[1:]
                 head = prefix[len(option):]
