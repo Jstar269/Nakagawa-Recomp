@@ -75,18 +75,7 @@ osk-overlay-paint-selftest:
 		tests/native/osk_overlay_paint_selftest.c src/rt/osk_overlay.c src/rt/osk_overlay_paint.c $(LDFLAGS) $(LIBS)
 	$(BUILD_DIR)/osk_overlay_paint_selftest$(EXE_EXT) $(BUILD_DIR)/osk_overlay_paint_selftest.bmp
 
-# Resolve the already-supported SDL3_ttf dependency for the font selftest. Linux
-# CI installs sdl3-ttf in the SDL3_ttf job; Windows uses the discovered UCRT64 SDK.
-ifeq ($(OS),Windows_NT)
-SDL3_TTF_AVAILABLE := $(shell "$(PYTHON)" -c "from pathlib import Path; import sys; root=Path(r'$(SDL3_DIR)'); sys.exit(0 if (root/'include/SDL3_ttf/SDL_ttf.h').is_file() and (root/'lib/libSDL3_ttf.dll.a').is_file() and (root/'bin/SDL3_ttf.dll').is_file() else 1)" && echo yes)
-SDL3_TTF_CFLAGS := $(SDL3_INC_FLAGS)
-SDL3_TTF_LIBS := $(SDL3_LDFLAGS) -lSDL3_ttf -lSDL3
-else
-SDL3_TTF_AVAILABLE := $(shell command -v pkg-config >/dev/null 2>&1 && pkg-config --exists sdl3-ttf && echo yes)
-SDL3_TTF_CFLAGS := $(shell command -v pkg-config >/dev/null 2>&1 && pkg-config --cflags sdl3-ttf)
-SDL3_TTF_LIBS := $(shell command -v pkg-config >/dev/null 2>&1 && pkg-config --libs sdl3-ttf)
-endif
-
+# SDL3_TTF_AVAILABLE, SDL3_TTF_CFLAGS and SDL3_TTF_LIBS come from mk/build_common.mk.
 .PHONY: ui-font-selftest
 ifeq ($(SDL3_TTF_AVAILABLE),yes)
 ui-font-selftest:
@@ -487,7 +476,8 @@ ace-ui-selftest:
 .PHONY: nk-ui-focus-selftest
 # The focus, input and glyph checks are SDL-free. The SDL_Event translation leg is built from
 # the same sources: with SDL3 (as found by build discovery) it translates real SDL events;
-# without, it compiles without SDL and exits 77, which this recipe reports as SKIP.
+# without, it compiles without SDL and exits 77, which this recipe reports as SKIP, or as a failure
+# under NK_REQUIRE_SDL3=1 (mk/selftests.mk).
 NK_UI_FOCUS_SDL_READY := $(and $(filter-out none,$(SDL3_PROVIDER)),$(if $(strip $(SDL3_ERROR)),,yes))
 NK_UI_FOCUS_SDL_CFLAGS := $(if $(NK_UI_FOCUS_SDL_READY),-DNK_UI_WITH_SDL3 $(SDL3_INC_FLAGS),)
 NK_UI_FOCUS_SDL_LIBS := $(if $(NK_UI_FOCUS_SDL_READY),$(SDL3_LDFLAGS) -lSDL3,)
@@ -504,7 +494,9 @@ nk-ui-focus-selftest:
 		$(NK_UI_CORE_SRCS) src/ui/nk_ui_sdl_input.c tests/native/test_nk_ui_focus.c -lm \
 		$(NK_UI_FOCUS_SDL_LIBS) -o $(BUILD_ROOT)/test_nk_ui_focus_sdl$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_nk_ui_focus_sdl$(EXE_EXT) --sdl-input; rc=$$?; \
-		if [ "$$rc" = 77 ]; then echo "SKIP nk-ui-focus-selftest SDL translation leg (exit 77): SDL3 not found by build discovery"; \
+		if [ "$$rc" = 77 ] && [ "$(NK_REQUIRE_SDL3)" = 1 ]; then \
+			echo "FAIL nk-ui-focus-selftest SDL translation leg (SDL3 not found by build discovery, but NK_REQUIRE_SDL3=1 requires it)"; exit 1; \
+		elif [ "$$rc" = 77 ]; then echo "SKIP nk-ui-focus-selftest SDL translation leg (exit 77): SDL3 not found by build discovery"; \
 		elif [ "$$rc" != 0 ]; then exit "$$rc"; fi
 
 .PHONY: shared-helpers-selftest
@@ -547,8 +539,8 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(BUILD_ROOT_RUN)/test_cover_art$(EXE_EXT)
 	$(call DISCORD_PRESENCE_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_discord_presence$(EXE_EXT)
-	$(CC) -std=c99 -Wall -Wextra -Isrc/core -Isrc/core/generated -Isrc/rt -Isrc/player -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		$(PLAYER_CORE_SOURCES) $(PLAYER_PLAT_SOURCES) src/player/setup_staging.c src/rt/archive_vfs.c \
+	$(CC) $(NC_CFLAGS_PLAYER) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_PLAYER) \
+		src/player/setup_staging.c src/rt/archive_vfs.c \
 		tests/native/native_test_isolation.c tests/native/test_xb_parser.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_xb_parser$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_xb_parser$(EXE_EXT)
 	$(CC) $(NC_CFLAGS_CORE) -Werror $(LIBCHDR_INC) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) $(PLAYER_CHD_SRCS) \
@@ -568,8 +560,8 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Itests/native -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		tests/native/pcm_wav_dump.c tests/native/test_pcm_wav_dump.c -o $(BUILD_ROOT)/test_pcm_wav_dump$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_pcm_wav_dump$(EXE_EXT)
-	$(CC) -std=c99 -Wall -Wextra -Isrc/core -Isrc/core/generated -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		$(PLAYER_CORE_SOURCES) $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/archive_vfs.c \
+	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
+		src/rt/prx_loader.c src/rt/archive_vfs.c \
 		tests/native/test_fuzz_parsers.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_fuzz_parsers$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_fuzz_parsers$(EXE_EXT) --iters 100
 	$(call PSMF_PRODUCER_SELFTEST_CMD,100)

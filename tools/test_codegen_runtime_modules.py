@@ -1499,5 +1499,42 @@ class MainModuleRecordTest(unittest.TestCase):
         self.assertNotIn("sr_main_func_exports", outputs["without"])
 
 
+class RegistrationFileIsWrittenLastTest(unittest.TestCase):
+    """<game>_recomp.c is the Make target of a codegen run (mk/pipeline.mk). A run that fails
+    after building it must not leave it newer than its inputs, or the next make skips codegen
+    and compiles the chunks that run left behind."""
+
+    _write = MainModuleRecordTest._write
+
+    def _out_c(self):
+        out_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(out_dir, ignore_errors=True))
+        return os.path.join(out_dir, "probe_recomp.c")
+
+    def test_a_chunk_write_failure_leaves_no_registration_file(self):
+        out_c = self._out_c()
+        full = OSError(28, "No space left on device")
+        with unittest.mock.patch.object(codegen, "_write_chunks", side_effect=full):
+            with self.assertRaises(OSError):
+                codegen.main(["codegen.py", self._write(_elf(_text())), out_c])
+        self.assertFalse(os.path.exists(out_c), "a failed run left the target Make reads as fresh")
+        self.assertFalse(os.path.exists(out_c + ".partial"))
+
+    def test_a_late_failure_keeps_the_previous_registration_file_untouched(self):
+        out_c = self._out_c()
+        elf = self._write(_elf(_text()))
+        self.assertEqual(codegen.main(["codegen.py", elf, out_c]), 0)
+        os.utime(out_c, ns=(1_000_000_000, 1_000_000_000))
+        before = Path(out_c).read_bytes()
+        full = OSError(28, "No space left on device")
+        with unittest.mock.patch.object(codegen, "_remove_stale_chunks", side_effect=full):
+            with self.assertRaises(OSError):
+                codegen.main(["codegen.py", elf, out_c])
+        self.assertEqual(os.stat(out_c).st_mtime_ns, 1_000_000_000)
+        self.assertEqual(Path(out_c).read_bytes(), before)
+        self.assertEqual(codegen.main(["codegen.py", elf, out_c]), 0)
+        self.assertEqual(Path(out_c).read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

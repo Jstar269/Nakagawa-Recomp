@@ -2039,8 +2039,9 @@ class TestSanitizedBringup(unittest.TestCase):
         self, failure=None, *, launch_code=0, launch_output="", timeout=False,
         flight_events=None, flight_dropped=0, instruction_trace=False,
         unsupported_opcodes=None, analyzer_error=None, launch_bytes=None,
+        package_document=None, package_executable=True, case_name=None,
     ):
-        case_root = self.root / (failure or "success")
+        case_root = self.root / (case_name or failure or "success")
         report_path = case_root / "bringup.json"
         args = argparse.Namespace(
             iso=str(self.iso),
@@ -2085,10 +2086,11 @@ class TestSanitizedBringup(unittest.TestCase):
             stage_observer("compile", "PASS", 3)
             package_dir = build_args.user_data_root / "packages" / "ULUS99998"
             package_dir.mkdir(parents=True, exist_ok=True)
-            (package_dir / "runtime.exe").write_bytes(b"synthetic runtime marker")
+            if package_executable:
+                (package_dir / "runtime.exe").write_bytes(b"synthetic runtime marker")
             (package_dir / "runtime_image.bin").write_bytes(b"synthetic runtime image")
             (package_dir / "package.json").write_text(
-                json.dumps({
+                package_document if package_document is not None else json.dumps({
                     "executable": {"path": "runtime.exe"},
                     "runtime": {"run_entry": "0x08800100"},
                     "required_local_assets": [{"path": "data"}],
@@ -2666,6 +2668,13 @@ class TestSanitizedBringup(unittest.TestCase):
 
         def fake_package_build(build_args, stage_observer=None):
             self.last_build_module_dir = build_args.module_dir
+            # The bring-up removes its staged module copies when it ends: keep what
+            # the package build was given.
+            self.last_build_module_files = (
+                {path.name: path.read_bytes()
+                 for path in Path(build_args.module_dir).iterdir()}
+                if build_args.module_dir is not None else None
+            )
             stage_observer("codegen", "START", 0)
             stage_observer("codegen", "PASS", 1)
             build_args.aot_stage_result = {"status": "REUSED", "reason": "NONE"}
@@ -2770,12 +2779,10 @@ class TestSanitizedBringup(unittest.TestCase):
         profile_dir = (
             work_root / "work" / "user-data" / "experimental" / "ULUS99998"
         )
-        module_dirs = list(profile_dir.glob("module-stage-*"))
-        self.assertEqual(len(module_dirs), 1)
-        self.assertEqual(
-            sorted(path.name for path in module_dirs[0].iterdir()),
-            ["alpha.prx", "beta.elf"],
-        )
+        self.assertEqual(Path(self.last_build_module_dir).parent, profile_dir)
+        self.assertEqual(sorted(self.last_build_module_files), ["alpha.prx", "beta.elf"])
+        # The staged copies are removed when the bring-up ends.
+        self.assertEqual(list(profile_dir.glob("module-stage-*")), [])
         profile = json.loads((profile_dir / "profile.json").read_text(encoding="utf-8"))
         modules = profile["manifest"]["modules"]
         self.assertEqual([module["name"] for module in modules], ["alpha.prx", "beta.elf"])
@@ -2785,6 +2792,27 @@ class TestSanitizedBringup(unittest.TestCase):
         self.assertTrue(all("load_address" not in module for module in modules))
         self.assertTrue(all(module["required"] and module["role"] == "guest-prx" for module in modules))
         nk_cli.validate_bringup_report(report)
+
+    def test_a_module_layout_failure_leaves_no_staged_module_copies(self):
+        work_root = self.root / "module-layout-failure-case"
+        work_root.mkdir(parents=True)
+        iso_path = work_root / "multi-module.iso"
+        create_test_iso_with_modules(
+            iso_path,
+            bytes(build_synthetic_iso_elf()),
+            sysdir_modules={"alpha.prx": build_synthetic_decrypted_prx()},
+            usrdir_modules={},
+            disc_id="ULUS99998",
+            title="Synthetic Module Layout Failure",
+        )
+        with mock.patch.object(nk_cli, "plan_guest_module_layout",
+                               side_effect=OSError("synthetic layout failure")):
+            status, report = self._run_module_fixture(iso_path, work_root)
+        self.assertEqual(status, 1, report)
+        self.assertEqual(report["failure_class"],
+                         "GUEST_MODULE_LOAD_ADDRESS_LAYOUT_UNAVAILABLE")
+        profile_dir = work_root / "work" / "user-data" / "experimental" / "ULUS99998"
+        self.assertEqual(list(profile_dir.glob("module-stage-*")), [])
 
     def test_disc_whose_modules_the_runtime_serves_translates_no_guest_module(self):
         """A disc module the runtime replaces completely is left out of translation.
@@ -3168,11 +3196,7 @@ class TestSanitizedBringup(unittest.TestCase):
         self.assertEqual(report["failure_class"], "NONE")
         self.assertEqual(report["counts"]["modules"], 2)
         self.assertEqual(report["counts"]["encrypted_modules"], 1)
-        module_stage = next(
-            (work_root / "work" / "user-data" / "experimental" / "ULUS99998")
-            .glob("module-stage-*"),
-        )
-        self.assertEqual((module_stage / "encrypted.prx").read_bytes(), bytes(module_bytes))
+        self.assertEqual(self.last_build_module_files["encrypted.prx"], bytes(module_bytes))
         profile = json.loads(
             (work_root / "work" / "user-data" / "experimental" / "ULUS99998" / "profile.json")
             .read_text(encoding="utf-8")
@@ -3603,6 +3627,90 @@ class TestSanitizedBringup(unittest.TestCase):
         self.assertNotRegex(summary, r"#[0-9]+")
         nk_cli.validate_bringup_report(report)
 
+    def test_a_dispatch_miss_without_the_exit_summary_is_still_named(self):
+        """The summary block is printed only from atexit; a run that aborts after a miss
+        (or is killed) leaves only the per-miss line, which still names the miss."""
+        status, report = self._run_case(
+            "launch", launch_code=134,
+            launch_output=(
+                "DISPATCH_MISS_NEW[1]: target=0x08800000 caller_pc=0x08800004 "
+                "ra=0x08800008 uid=0x1\n"
+                "guest_interp: unsupported form; aborting\n"
+            ),
+        )
+        self.assertNotEqual(status, 0)
+        self.assertEqual(report["runtime_output_kind"], "DISPATCH_MISS")
+        self.assertEqual(report["failure_class"], "UNRESOLVED_DISPATCH_TARGET")
+        self.assertNotIn("08800000", json.dumps(report))
+        nk_cli.validate_bringup_report(report)
+        # A line that only begins like one is not a miss.
+        self.assertEqual(nk_cli.runtime_output_kind("DISPATCH_MISS_NEW[1]: nothing\n", []), "OTHER")
+
+    def test_a_timed_out_launch_keeps_what_its_runtime_printed(self):
+        """The runtime ran until the limit: the report classifies its output, it does not
+        claim the runtime never ran."""
+        cases = (
+            ("  SEMANTIC_BOUNDARY: target-not-executable; in the works: #308\n",
+             "SEMANTIC_BOUNDARY", "target-not-executable"),
+            ("DISPATCH_MISS_NEW[1]: target=0x08800000 caller_pc=0x08800004 "
+             "ra=0x08800008 uid=0x1\n", "DISPATCH_MISS", None),
+            ("BOOT_EVENT phase=window_ready backend=offscreen\n", "OTHER", None),
+        )
+        for index, (output, kind, boundary) in enumerate(cases):
+            with self.subTest(kind=kind):
+                status, report = self._run_case(
+                    case_name=f"timeout-kind-{index}", timeout=True, launch_output=output)
+                self.assertNotEqual(status, 0)
+                self.assertEqual(report["failure_class"], "LAUNCH_TIMEOUT")
+                self.assertEqual(report["exit_classification"], "TIMED_OUT")
+                self.assertEqual(report["runtime_output_kind"], kind)
+                self.assertEqual(report["runtime_boundary"], boundary)
+                self.assertEqual(report["runtime_imports"], [])
+                nk_cli.validate_bringup_report(report)
+
+    def test_a_package_the_launch_cannot_use_is_a_reported_launch_failure(self):
+        """A missing executable or a damaged package.json is recorded as LAUNCH_FAILED in a
+        written report, not a traceback that leaves none."""
+        cases = {
+            "missing-executable": {"package_executable": False},
+            "missing-runtime-key": {"package_document": json.dumps(
+                {"executable": {"path": "runtime.exe"}})},
+            "wrong-shape": {"package_document": json.dumps(
+                {"executable": {"path": "runtime.exe"}, "runtime": None})},
+            "replaced-after-build": {},
+        }
+        # An executable path that leaves the package folder is refused before it runs, even
+        # when the program it names exists (audit 2026-11-17).
+        outside = self.root / "outside-runtime.exe"
+        outside.write_bytes(b"synthetic program outside the package")
+        for label, path in (("absolute", str(outside)),
+                            ("parent", "../../../../../outside-runtime.exe")):
+            cases[f"escaping-executable-{label}"] = {"package_document": json.dumps({
+                "executable": {"path": path},
+                "runtime": {"run_entry": "0x08800100"},
+                "required_local_assets": [{"path": "data"}],
+            })}
+        real_stub_report = nk_cli._packaged_stub_report
+
+        def replace_after_build(package_dir):
+            # Another bring-up sharing the data folder replaced the package between the
+            # build and the launch.
+            stub_report = real_stub_report(package_dir)
+            (package_dir / "package.json").write_text("{not json", encoding="utf-8")
+            return stub_report
+
+        for name, options in cases.items():
+            with self.subTest(case=name), contextlib.ExitStack() as stack:
+                if name == "replaced-after-build":
+                    stack.enter_context(mock.patch.object(
+                        nk_cli, "_packaged_stub_report", side_effect=replace_after_build))
+                status, report = self._run_case(case_name=f"package-{name}", **options)
+                self.assertEqual(status, 1)
+                self.assertEqual(report["failure_class"], "LAUNCH_FAILED")
+                self.assertEqual(report["stages"]["launch"]["status"], "FAIL")
+                self.assertIsNone(self.last_launch_command)
+                nk_cli.validate_bringup_report(report)
+
     def test_launch_timeout_is_a_bounded_reported_exit(self):
         status, report = self._run_case(timeout=True)
         self.assertNotEqual(status, 0)
@@ -3918,11 +4026,52 @@ class TestBringupCaptureRounds(unittest.TestCase):
         self.assertEqual(report["code_capture"]["stop"], "BRINGUP_CAPTURE_MISSING")
         self.assertIn("BRINGUP_CAPTURE_MISSING: round 1 stopped at", self.printed)
 
+    def test_a_capture_folder_with_a_space_is_named_by_its_short_form(self):
+        """CODEGEN_USER_ARGS reaches the codegen recipe unquoted, so a capture under a data
+        folder with a space is named by its 8.3 short form, never word-split."""
+        case_root = self.root / "data root" / "case"
+        capture_dir = (case_root / "work" / "user-data" / "cache" / "bringup" / "ULUS99998"
+                       / "captures")
+        short_dir = self.root / "DATARO~1" / "captures"
+
+        def short_form(path):
+            self.assertEqual(Path(path).resolve(), capture_dir.resolve())
+            return short_dir
+
+        with mock.patch.object(title_codegen_plan, "_windows_short_path", side_effect=short_form):
+            status, report = self._run([("wrote", self.CAPTURE_A), None], case_root=case_root)
+        self.assertEqual(status, 0, report)
+        self.assertEqual(self.build_user_args[1], f"--code-capture={(short_dir / self.CAPTURE_A).as_posix()}")
+        self.assertEqual(self._translated(1), [(short_dir / self.CAPTURE_A).as_posix()])
+
+    def test_a_capture_folder_with_no_safe_name_is_a_named_codegen_failure(self):
+        case_root = self.root / "data root" / "case"
+        with mock.patch.object(title_codegen_plan, "_windows_short_path", return_value=None):
+            status, report = self._run([("wrote", self.CAPTURE_A)], case_root=case_root)
+        self.assertEqual(status, 1)
+        # Round 2 never built with a split argument: only round 1's build ran.
+        self.assertEqual(self.build_user_args, [None])
+        self.assertEqual(report["failure_class"], "CODEGEN_FAILED")
+        self.assertEqual(report["stages"]["codegen"]["status"], "FAIL")
+        self.assertIn("PACKAGE_UNSUPPORTED_PATH: code-capture folder", self.printed)
+
     def test_the_round_limit_option_is_checked(self):
         self.assertEqual(nk_cli._capture_rounds_argument("3"), 3)
         for value in ("0", str(nk_cli.BRINGUP_CAPTURE_ROUNDS_MAX + 1), "two"):
             with self.assertRaises(argparse.ArgumentTypeError):
                 nk_cli._capture_rounds_argument(value)
+
+    def test_a_launch_timeout_outside_its_range_is_refused_not_clamped(self):
+        # It used to run 600 as 120 and 0 as 1 without a word (audit 2026-11-17).
+        for value in ("0", "-5", str(nk_cli.BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS + 1), "600"):
+            argv = ["nk_cli.py", "bringup", "x.iso", "--launch-timeout", value]
+            with self.subTest(value=value), mock.patch.object(sys, "argv", argv):
+                with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    with self.assertRaises(SystemExit) as raised:
+                        nk_cli.main()
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn(f"must be 1..{nk_cli.BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS}", stderr.getvalue())
+        self.assertEqual(nk_cli._launch_timeout_argument("120"), 120)
 
 
 class TestBringupReportOpcodeNames(unittest.TestCase):

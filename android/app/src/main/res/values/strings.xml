@@ -11,4 +11,9 @@
     <string name="toolchain_unpack_retry">Try again</string>
     <string name="toolchain_unpack_skip">Continue without the build tools</string>
     <string name="toolchain_unpack_unavailable">Building on this device is unavailable until the build tools are unpacked. The next start tries again.</string>
+    <!-- LauncherActivity, when the APK's bundled files could not be unpacked. -->
+    <string name="bundled_files_failed_title">Some app files are missing</string>
+    <string name="bundled_files_failed">The bundled app files (UI fonts, bundled titles) could not be unpacked: %1$s. Some may be missing until they are. The next start tries again.</string>
+    <string name="bundled_files_continue">Continue</string>
+    <string name="bundled_files_close">Close</string>
 </resources>

@@ -97,10 +97,6 @@ vfpu-tables-selftest:
 		tests/native/vfpu_tables_selftest.c src/rt/vfpu_tables.c $(LIBS)
 	$(BUILD_DIR)/vfpu_tables_selftest.exe
 
-# watchpoints-file-selftest — bounded parser regression for the derived
-# watchpoints.json runtime artifact (issue #188): the canonical JSON
-# fixture round-trips into the expected native watchpoint set, plus fail-closed
-# cases (wrong version/format, malformed JSON, out-of-range/reversed/oversized
 # strbuf-selftest — unit and adversarial tests for sr_buf_append / strbuf.h.
 # Exercises bounded formatting, hostile cursors, negative returns, canary bounds,
 # and golden trace formatting invariants.
@@ -121,6 +117,12 @@ xr-selftest:
 
 native-core-tests: xr-selftest
 
+# watchpoints-file-selftest — bounded parser regression for the derived
+# watchpoints.json runtime artifact (issue #188): the canonical JSON
+# fixture round-trips into the expected native watchpoint set, plus fail-closed
+# cases (wrong version/format, malformed JSON, out-of-range/reversed/oversized
+# spans, bad labels, duplicates, over-capacity lists, escapes) and the legacy
+# bare-array form. No game inputs required.
 watchpoints-file-selftest:
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/watchpoints_file_selftest.exe \
 		tests/native/watchpoints_file_selftest.c src/rt/watchpoints_file.c $(LIBS)
@@ -1266,7 +1268,8 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 # gpu-coherence-pcache-mutant - pipeline-cache-cold must kill SR_PCACHE_SELFTEST_NULL_MUTANT, a
 # build whose pipe_create passes VK_NULL_HANDLE instead of the pipeline cache (#2149): no create
 # then takes the cache's handle, on any driver (lavapipe keeps no pipeline data, so the cache's
-# size cannot tell). Exit 77 (no Vulkan device) is a SKIP.
+# size cannot tell). Exit 77 (no Vulkan device) prints a SKIP line and fails the target with status
+# 77 (make reports Error 77), so a host without a device never counts the mutant killed.
 gpu-coherence-pcache-mutant: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_mutant', ignore_errors=True)"
@@ -1285,7 +1288,7 @@ gpu-coherence-pcache-mutant: shader-verify $(RT_GE_O)
 # SR_GPU_SNAPBAR_MUTANT in ge_gpu.c: 1 records one barrier command per image (the stream before
 # the pair), 2 leaves the target SHADER_READ_ONLY after a copy op, 3 drops the write from the
 # barriers' destination access. Each builds its own binary and must fail with its own message;
-# exit 77 (no Vulkan device) is a SKIP, as for the selftest itself.
+# exit 77 (no Vulkan device) prints a SKIP line and fails the target with status 77.
 gpu-coherence-selftest-snapbar-mutants: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in 1 2 3; do \
@@ -1319,7 +1322,7 @@ gpu-coherence-selftest-snapbar-mutants: shader-verify $(RT_GE_O)
 # samples as full colour: `--ssaa 2 --twin-key off`. The ge.c mutants build their own ge.o. Each builds
 # its own binary, so fourteen are built; the target is not part of
 # gpu-coherence-selftest or native-core-tests. Each mutant must fail with its own message; exit 77
-# (no Vulkan device) is a SKIP, as for the selftest itself.
+# (no Vulkan device) prints a SKIP line and fails the target with status 77.
 gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@rc=0; $(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_mutant_s2.txt || rc=$$?; \
@@ -1365,7 +1368,7 @@ gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 # fail with "movie frame not found". A second build, NK_MOVIE_MUTANT_COPY_HASH in ge.c, judges a copy of a
 # picture by the word-wise FNV fold instead of comparing bytes: movie-texture's alpha-bit cell (two pixels
 # that differ only in their top bit) must then fail with "a copy that differs from the picture was found
-# (two alpha bits)". Exit 77 (no Vulkan device) is a SKIP, as for the selftest itself.
+# (two alpha bits)". Exit 77 (no Vulkan device) prints a SKIP line and fails the target with status 77.
 gpu-coherence-selftest-movie-mutant: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@bin=$(BUILD_DIR)/gpu_coherence_movie_mutant.exe; kill="FAIL movie frame not found"; \
@@ -1467,8 +1470,9 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 # and the sprite behind it differ from the image (dst-read-depth with the native twin), and 17 lets a
 # shader-depth run write depth for a batch whose depth writes are off (dst-read-depth: Q's depth).
 # Mutants 1 to 3 and 5 to 17 run on the interlock path, 4 on the snapshot path. Each builds its own
-# binary and must fail with its own message. Exit 77 (no Vulkan device, or a device without the
-# interlock for 1 to 3 and 5 to 17) is a SKIP of that mutant.
+# binary and must fail with its own message. Exit 77 for 1 to 3 and 5 to 17 (no Vulkan device, or a
+# device without the interlock) is a SKIP of that mutant; for 4, which needs only a device, it prints
+# a SKIP line and fails the target with status 77.
 gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do \
@@ -1497,7 +1501,7 @@ gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
 		$$bin $$args > $$bin.log 2>&1; result=$$?; \
-		if test $$result -eq 77; then echo "dst-read mutant $$m: SKIP (no Vulkan device, or no interlock)"; continue; fi; \
+		if test $$result -eq 77 && test $$m -eq 4; then echo "dst-read mutant 4: SKIP (no Vulkan device)"; exit 77; fi; if test $$result -eq 77; then echo "dst-read mutant $$m: SKIP (no Vulkan device, or no interlock)"; continue; fi; \
 		if test $$result -eq 0; then cat $$bin.log; echo "dst-read mutant $$m unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "dst-read mutant $$m failed for another reason" >&2; exit 1; fi; \
 		echo "gpu-dst-read-mutants: mutant $$m killed ($$kill)"; \
@@ -1508,7 +1512,8 @@ gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 # where two overlap), 2 calls every stencil state with a KEEP stencil-fail op write-once (the
 # matrix), and 3 drops the depth condition (the GEQUAL depth leg with depth writes on). All run on
 # the snapshot path, where the batch is reordered. Each builds its own binary and must fail with
-# its own message. Exit 77 (no Vulkan device) is a SKIP of that mutant.
+# its own message. Exit 77 (no Vulkan device: the snapshot path needs nothing more) prints a SKIP
+# line and fails the target with status 77.
 gpu-stencil-once-mutants: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in 1 2 3; do \
@@ -1523,7 +1528,7 @@ gpu-stencil-once-mutants: shader-verify $(RT_GE_O)
 			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
 		$$bin --dst-read snapshot --case stencil-once > $$bin.log 2>&1; result=$$?; \
-		if test $$result -eq 77; then echo "stencil-once mutant $$m: SKIP (no Vulkan device)"; continue; fi; \
+		if test $$result -eq 77; then echo "stencil-once mutant $$m: SKIP (no Vulkan device)"; exit 77; fi; \
 		if test $$result -eq 0; then cat $$bin.log; echo "stencil-once mutant $$m unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "stencil-once mutant $$m failed for another reason" >&2; exit 1; fi; \
 		echo "gpu-stencil-once-mutants: mutant $$m killed ($$kill)"; \
@@ -1554,12 +1559,16 @@ gpu-ace-selftest: shader-verify $(RT_GE_O)
 # wrap and clamp borders, the job queue, the settings and the smart 2D classifier, and soft
 # shadows' copy (exact texels of a synthetic disc, the interior and mass rules, the bounds) and
 # their texture digest (RFC 4231 HMAC-SHA-256 vectors, then the match rule). No GPU; the
-# worker threads need SDL3, so without it the recipe reports SKIP.
+# worker threads need SDL3, so without it the recipe reports SKIP. NK_REQUIRE_SDL3=1 makes that
+# SKIP a failure, for a job that installs SDL3: a build discovery that misses it must not pass.
+NK_REQUIRE_SDL3 ?=
 TEX_SCALE_SDL_READY := $(and $(filter-out none,$(SDL3_PROVIDER)),$(if $(strip $(SDL3_ERROR)),,yes))
 tex-scale-selftest:
 	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
-	@if [ -z "$(TEX_SCALE_SDL_READY)" ]; then echo "SKIP tex-scale-selftest (SDL3 not found by build discovery)"; exit 0; fi; \
+	@if [ -z "$(TEX_SCALE_SDL_READY)" ] && [ "$(NK_REQUIRE_SDL3)" = 1 ]; then \
+		echo "FAIL tex-scale-selftest (SDL3 not found by build discovery, but NK_REQUIRE_SDL3=1 requires it)"; exit 1; fi; \
+	if [ -z "$(TEX_SCALE_SDL_READY)" ]; then echo "SKIP tex-scale-selftest (SDL3 not found by build discovery)"; exit 0; fi; \
 	$(CC) $(CFLAGS) -O2 -ffunction-sections -fdata-sections $(LDFLAGS) $(LD_GC_SECTIONS) \
 		-o $(BUILD_DIR)/tex_scale_selftest$(EXE_EXT) \
 		src/rt/gpu_sdl3vk/tex_scale_selftest.c src/rt/gpu_sdl3vk/tex_scale.c third_party/xbrz/xbrz.c src/rt/vfpu_tables.c \
@@ -1972,8 +1981,9 @@ ge-replay: shader-verify $(RT_GE_O)
 # draw is NO_DRAWS (exit 6); none is ever NO_DIFFERENCE.
 # Exit 77 (no Vulkan device) is a SKIP, as for gpu-coherence-selftest (GE_FBD_SKIP_STATUS).
 GE_FBD_DIR = $(BUILD_DIR)/ge_first_bad_draw
-# The exit status of a skip: 77 run alone; gpu-coherence-selftest passes 0, so a host with no
-# Vulkan device gets SKIP lines there, as for its other skipped cases, not a make error.
+# The exit status of a skip: 77 run alone, which fails the target. gpu-coherence-selftest passes
+# 0, so these legs print SKIP lines there instead; a host with no Vulkan device never reaches
+# them, because the selftest's first leg has already failed the target with status 77.
 GE_FBD_SKIP_STATUS ?= 77
 ge-first-bad-draw-selftest: ge-replay
 	$(NK_REQUIRE_POSIX_SHELL)
