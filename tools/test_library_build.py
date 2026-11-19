@@ -231,6 +231,26 @@ class LibraryBuildTests(unittest.TestCase):
             return self.command(iso, data, work, launch_timeout)
 
         build = self.build(jobs=2, command=synchronized_command)
+        # Every disc ID whose build_one is still running, and each source that began while
+        # another build of its disc ID was still running: an overlap at any point of the run,
+        # with no window that depends on how long a bring-up takes.
+        in_flight: set[str | None] = set()
+        overlapped: list[str] = []
+        in_flight_lock = threading.Lock()
+        product_build_one = build.build_one
+
+        def tracked_build_one(record: dict) -> None:
+            with in_flight_lock:
+                if record.get("disc_id") in in_flight:
+                    overlapped.append(record["source"])
+                in_flight.add(record.get("disc_id"))
+            try:
+                product_build_one(record)
+            finally:
+                with in_flight_lock:
+                    in_flight.discard(record.get("disc_id"))
+
+        build.build_one = tracked_build_one  # type: ignore[method-assign]
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(build.run)
             try:
@@ -245,6 +265,7 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertEqual([records[key]["outcome"] for key in sorted(records)], ["BUILT"] * 3)
         # No overlap was logged: the second image started only after the first one ended.
         self.assertEqual(sorted(self.calls()), ["busy-test70016", "busy-test70016", "ok-test70017"])
+        self.assertEqual(overlapped, [], "a same-ID build began while another was still running")
 
     def test_two_discs_that_could_not_be_hashed_both_build(self) -> None:
         self.disc("a/ok-test70015.iso", "TEST70015")
@@ -395,8 +416,14 @@ class LibraryBuildTests(unittest.TestCase):
         build._wait_while_paused = tracked_wait  # type: ignore[method-assign]
         paused_sleeping = threading.Event()
         release_pause_poll = threading.Event()
+        real_sleep = time.sleep
 
-        def controlled_pause_sleep(_seconds: float) -> None:
+        def controlled_pause_sleep(seconds: float) -> None:
+            # The patch reaches every time.sleep in the process (subprocess's POSIX wait loop
+            # included): once released, a sleep is a real sleep again instead of a busy loop.
+            if release_pause_poll.is_set():
+                real_sleep(seconds)
+                return
             paused_sleeping.set()
             if not release_pause_poll.wait(timeout=10):
                 raise TimeoutError("test did not release the paused build")
