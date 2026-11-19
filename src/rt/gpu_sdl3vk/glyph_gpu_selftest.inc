@@ -14,6 +14,7 @@
  *   rewrite    a page the guest rewrites draws a rebuilt tile for the new texels and never the old
  *              one; a cell whose texels did not change keeps its tile;
  *   rewrite-gap a rewrite the cache's content hash does not see (it samples part of a page) draws its new tile;
+ *   rewrite-back a cell rewritten, synced stale, then written back to its first glyph draws its tile again;
  *   gradient   fade bars of one colour (shallow, steep, four texels, two) and a box shadow draw without a reversal along their rows and columns;
  *   cap        more new rectangles in one present than NK_GLYPH_PER_PRESENT: exactly that many are
  *              rebuilt, the rest draw as before and are rebuilt by the next present;
@@ -338,6 +339,44 @@ static int gst_cell_rewrite(void) {
     return 1;
 }
 
+/* A cell the guest rewrites and then writes back (blinking text, a double-buffered font page): a sync while the
+ * cell held the other glyph marks its tile stale, and once the page holds the first glyph again the draw must bind
+ * a tile of those texels, never stay on the game's own picture for the rest of the entry's life. */
+static int gst_cell_rewrite_back(void) {
+    static uint32_t page[GST_W * GST_H], want0[GST_CW * 6 * GST_CH * 6];
+    gst_reset();
+    gst_page(page, 0, 1, 0x00FFFFFFu);
+    gst_put(GST_PAGE, page);
+    gst_state(GST_PAGE, GST_W, GST_H);
+    if (nk_glyph_rebuild(page, GST_W, GST_H, 0, 0, GST_CW, GST_CH, s_scale, want0) != NK_GLYPH_OK)
+        return gst_fail("rewrite-back", "the synthetic glyph does not rebuild");
+    int ok = gst_cell(0, 20.0f, 20.0f) && gst_cell(16, 60.0f, 20.0f);
+    const uint64_t stale0 = s_cnt_gl_stale;
+    gst_page(page, 2, 1, 0x00FFFFFFu);        /* cell A holds another glyph; only cell B is drawn */
+    gst_put(GST_PAGE, page);
+    gst_state(GST_PAGE, GST_W, GST_H);
+    ok = ok && gst_cell(16, 60.0f, 60.0f);
+    if (ok && s_cnt_gl_stale - stale0 != 1u)
+        return gst_fail("rewrite-back", "%llu tiles marked stale by the rewrite (want 1); the cell tests nothing",
+                        (unsigned long long)(s_cnt_gl_stale - stale0));
+    gst_page(page, 0, 1, 0x00FFFFFFu);        /* cell A holds its first glyph again */
+    gst_put(GST_PAGE, page);
+    gst_state(GST_PAGE, GST_W, GST_H);
+    const uint64_t bound0 = s_cnt_gl_bound;
+    ok = ok && gst_cell(0, 100.0f, 20.0f);
+    const uint64_t bound = s_cnt_gl_bound - bound0;
+    uint32_t *dev = ok ? gst_device() : NULL;
+    if (!dev) return gst_fail("rewrite-back", "draw or readback failed");
+    const int off = gst_off_tile(dev, 100, 20, GST_CW, GST_CH, want0);
+    free(dev);
+    if (bound != 1u || off)
+        return gst_fail("rewrite-back", "the written-back cell bound %llu tiles (want 1) and %d device pixels differ from its tile",
+                        (unsigned long long)bound, off);
+    printf("gpu glyph selftest: PASS %-12s scale %d: a cell written back to its first glyph after a stale sync draws its tile\n",
+           "rewrite-back", s_scale);
+    return 1;
+}
+
 /* A rewrite that misses the bytes tex_hash samples (it hashes 16 bytes in every 32 of this 2 KiB page, texels 4 to 7 of
  * each 8 are not read): the cache sees the same hash and finds the rewrite through its shadow copy, and the glyph
  * code must find it too and draw the new tile. */
@@ -598,7 +637,8 @@ int gegpu_glyph_selftest(void) {
         if (s_glyphs_asked) return gst_fail("setup", "glyphs=on but the feature is off at render scale %d", s_scale);
         return gst_cell_sharp();
     }
-    int ok = gst_cell_pool() && gst_cell_sharp() && gst_cell_refuse() && gst_cell_color_test() && gst_cell_rewrite() && gst_cell_rewrite_gap() && gst_cell_gradient() &&
+    int ok = gst_cell_pool() && gst_cell_sharp() && gst_cell_refuse() && gst_cell_color_test() && gst_cell_rewrite() && gst_cell_rewrite_gap() &&
+             gst_cell_rewrite_back() && gst_cell_gradient() &&
              gst_cell_cap();
     if (ok) {
         /* No guest byte moved: the page and the CLUT are what the CPU left. */
