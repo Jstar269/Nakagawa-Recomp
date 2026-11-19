@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -207,6 +208,37 @@ class Fsr3ShaderSetTests(unittest.TestCase):
         errors, skipped = shader_embed.verify_dxc(shader_embed.ROOT, shader_embed.FSR3_MANIFEST, dxc)
         self.assertEqual(errors, [])
         self.assertIsNone(skipped)
+
+    def test_an_include_outside_the_repository_is_a_named_error(self) -> None:
+        # Under --recompile with the pinned DXC, a #line marker that resolves
+        # outside the repository is a named verification error, not a traceback.
+        pinned = "libdxcompiler.so: 1.9(5512-01b62ad4)(1.9.2609.5)"
+        with tempfile.TemporaryDirectory(prefix="nakagawa-fsr3-test-") as temp:
+            root = Path(temp) / "repo"
+            root.mkdir()
+            manifest_path = _fsr3_copy(root)
+            embedded = {
+                entry["source"]: entry["embedded"]
+                for entry in json.loads(manifest_path.read_text(encoding="utf-8"))["shaders"]
+            }
+
+            def fake_compile(_dxc, root_, source_rel, _output, _defines):
+                text = (root_ / embedded[source_rel.as_posix()]).read_text(encoding="ascii")
+                return shader_embed.parse_embedding(text)
+
+            def fake_preprocess(args, **_kwargs):
+                out = Path(args[args.index("-Fi") + 1])
+                out.write_text('#line 1 "' + "../" * 16 + 'outside.hlsl"\n', encoding="utf-8")
+                return subprocess.CompletedProcess(args, 0)
+
+            with mock.patch.object(shader_embed, "dxc_version", return_value=pinned), \
+                    mock.patch.object(shader_embed, "compile_dxc", side_effect=fake_compile), \
+                    mock.patch.object(shader_embed.subprocess, "run", side_effect=fake_preprocess):
+                errors, skipped = shader_embed.verify_dxc(root, manifest_path, "dxc")
+            self.assertIsNone(skipped)
+            self.assertTrue(errors)
+            for error in errors:
+                self.assertIn("include outside the repository", error)
 
 
 class Fsr3FrameGenerationShaderSetTests(unittest.TestCase):

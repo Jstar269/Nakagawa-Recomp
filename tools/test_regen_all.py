@@ -151,6 +151,69 @@ class CheckModeTests(unittest.TestCase):
         self.assertIn("FAIL  broken: boom", out)
 
 
+class WriteModeTests(unittest.TestCase):
+    def test_a_later_generator_failure_writes_nothing(self) -> None:
+        # An earlier stale step must not be written when a later generator fails,
+        # including with an exception that is not a StepError.
+        def buggy(tmp):
+            raise KeyError("missing")
+
+        with tempfile.TemporaryDirectory() as root:
+            stale = regen_all.Step("fresh", "fresh", ("out.txt",), lambda tmp: {"out.txt": b"new\n"})
+            broken = regen_all.Step("buggy", "buggy", (), buggy)
+            out = io.StringIO()
+            provenance = mock.Mock(side_effect=AssertionError("provenance must not run"))
+            git = mock.Mock(side_effect=AssertionError("nothing may be staged"))
+            with mock.patch.object(regen_all, "ROOT", Path(root)), \
+                    mock.patch.object(regen_all, "STEPS", (stale, broken)), \
+                    mock.patch.object(regen_all, "_provenance", provenance), \
+                    mock.patch.object(regen_all, "_git", git), \
+                    contextlib.redirect_stdout(out):
+                rc = regen_all.run(check=False, base=None)
+            self.assertEqual(rc, 1)
+            self.assertIn("FAIL  buggy: KeyError", out.getvalue())
+            self.assertFalse((Path(root) / "out.txt").exists())
+
+    def test_stale_provenance_controls_are_written_from_one_generation(self) -> None:
+        # regen_all writes and stages the controls it generated in process; it
+        # does not run contrib_refresh.py to generate them a second time.
+        sys.path.insert(0, str(ROOT / "tools"))
+        import contrib_refresh
+
+        with tempfile.TemporaryDirectory() as root:
+            git = mock.Mock(return_value=mock.Mock(returncode=0, stderr=""))
+            with mock.patch.object(regen_all, "ROOT", Path(root)), \
+                    mock.patch.object(contrib_refresh, "_generate", return_value=(b"ledger\n", b"export\n", [])) as gen, \
+                    mock.patch.object(regen_all, "_git", git), \
+                    mock.patch.object(regen_all.subprocess, "run",
+                                      side_effect=AssertionError("no second generation")):
+                status, paths, detail = regen_all._provenance(False, None)
+            self.assertEqual(status, "WROTE", detail)
+            self.assertEqual(sorted(paths), sorted([contrib_refresh.LEDGER, contrib_refresh.EXPORT]))
+            self.assertEqual(gen.call_count, 1)
+            self.assertEqual((Path(root) / contrib_refresh.LEDGER).read_bytes(), b"ledger\n")
+            self.assertEqual((Path(root) / contrib_refresh.EXPORT).read_bytes(), b"export\n")
+            git.assert_called_once_with("add", "--", contrib_refresh.LEDGER, contrib_refresh.EXPORT)
+
+
+class ShaderStepTests(unittest.TestCase):
+    def test_ui_shader_set_embeddings_are_listed(self) -> None:
+        # regen_all --list defines generated content, so the UI shader set's
+        # embeddings and manifest belong to a step that names its command.
+        import shader_embed
+
+        expected = {
+            (shader_embed.UI_DIR / output).relative_to(ROOT).as_posix()
+            for _stage, _source, output in shader_embed.UI_SHADERS
+        }
+        expected.add(shader_embed.UI_MANIFEST.relative_to(ROOT).as_posix())
+        owners = [step for step in regen_all.STEPS if expected & set(step.outputs)]
+        self.assertEqual(len(owners), 1, [step.name for step in owners])
+        self.assertEqual(set(owners[0].outputs), expected)
+        self.assertIn("--shader-set ui", owners[0].command)
+        self.assertNotIn("make shader-verify", owners[0].skip or "")
+
+
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     proc = subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "core.autocrlf=false",

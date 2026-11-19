@@ -188,6 +188,47 @@ class GpuVerificationStatusTests(unittest.TestCase):
             # The already-skipping child must still read as SKIP next to a real failure.
             self.assertIn("GPU_SELFTEST_RESULT skip_child.sh SKIP 77", proc.stdout)
 
+    def test_status_seam_runs_every_capture_terminal_fault_leg(self) -> None:
+        """gpu-capture-selftest runs three terminal-fault legs after its default run;
+        the status seam must run and report each, or the manager's gate covers only
+        the default run."""
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if make is None:
+            self.skipTest("GNU Make is required for the behavioural check")
+        recipe = self.makefile[self.makefile.index("\ngpu-capture-selftest:"):]
+        recipe = recipe[: recipe.index("\n\n")]
+        cases = re.search(r"(?m)^GPU_CAPTURE_TERMINAL_CASES := (.+)$", self.makefile)
+        if cases is None:
+            self.fail("GPU_CAPTURE_TERMINAL_CASES must list the legs")
+        legs = cases.group(1).split()
+        self.assertEqual(sorted(legs), sorted(re.findall(r"SR_GPU_CAPTURE_TERMINAL_CASE=(\S+)", recipe)),
+                         "the status seam and gpu-capture-selftest must run the same legs")
+        helper_legs = re.search(r'"gpu-capture-selftest" = @\(([^)]*)\)', self.helper)
+        if helper_legs is None:
+            self.fail("the manager helper must list the gpu-capture-selftest legs")
+        self.assertEqual(sorted(legs), sorted(re.findall(r'"([^"]+)"', helper_legs.group(1))),
+                         "the manager must require every leg the Makefile runs")
+        with tempfile.TemporaryDirectory(prefix="gpu_status_legs_") as tmp:
+            work = Path(tmp)
+            child = work / "gpu_capture_selftest.exe"
+            child.write_text(
+                '#!/bin/sh\n[ "$SR_GPU_CAPTURE_TERMINAL_CASE" = device-lost ] && exit 3\nexit 0\n',
+                encoding="utf-8", newline="\n")
+            child.chmod(0o755)
+            proc = subprocess.run(
+                [make, "--no-print-directory", "gpu-selftest-status",
+                 f"GPU_SELFTEST_BINS={child.as_posix()}",
+                 "GPU_SELFTEST_PREREQS=",
+                 f"BUILD_ROOT={(work / 'build').as_posix()}",
+                 f"BUILD_DIR={(work / 'build').as_posix()}"],
+                cwd=ROOT, capture_output=True, text=True, timeout=300,
+            )
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("GPU_SELFTEST_RESULT gpu_capture_selftest.exe PASS 0", proc.stdout)
+        self.assertIn("GPU_SELFTEST_RESULT gpu_capture_selftest.exe:surface-lost PASS 0", proc.stdout)
+        self.assertIn("GPU_SELFTEST_RESULT gpu_capture_selftest.exe:unclassified PASS 0", proc.stdout)
+        self.assertIn("GPU_SELFTEST_RESULT gpu_capture_selftest.exe:device-lost FAIL 3", proc.stdout)
+
 
 class ManagerSafetyContractTests(unittest.TestCase):
     """Static fail-closed contracts on the manager wiring."""

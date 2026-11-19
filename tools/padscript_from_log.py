@@ -139,10 +139,12 @@ def pulses_from_transitions(
 ) -> list[Pulse]:
     """Convert pad-state spans into replay pulses.
 
-    A press shorter than ``minimum_width`` is expanded to it. A press the stick
-    moved during is split at each move, and the expansion applies to the press
-    as a whole, on its last split, so a split press is never held longer than
-    an unsplit one.
+    A press shorter than ``minimum_width`` is expanded to it, but never into the
+    next row: the expansion stops where the next press or stick row starts, and
+    a vblank before a press of the same button. A press the stick moved during
+    is split at each move, and the expansion applies to the press as a whole,
+    on its last split, so a split press is never held longer than an unsplit
+    one.
     """
 
     if minimum_width < 1:
@@ -165,7 +167,14 @@ def pulses_from_transitions(
             # A press that starts and ends at the same vcount is still a press: expand it.
             width = max(1, following.frame - span.frame)
             if span.mask and following.mask != span.mask:
-                width = max(width, minimum_width - (span.frame - press_start))
+                widened = minimum_width - (span.frame - press_start)
+                # The runtime ORs overlapping rows, so a widened press stops where the next row
+                # starts (a vblank earlier for the same button, which must be seen released):
+                # it never replays a chord, or merges two presses, the recording did not hold.
+                later = next((s for s in spans[index + 1:] if s.mask or (s.lx, s.ly) != (CENTRE, CENTRE)), None)
+                if later is not None:
+                    widened = min(widened, later.frame - span.frame - (1 if later.mask & span.mask else 0))
+                width = max(width, widened)
         pulses.append(Pulse(span.frame, span.mask, width, span.lx, span.ly))
     return pulses
 

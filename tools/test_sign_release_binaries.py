@@ -5,14 +5,18 @@
 
 A real signature needs a certificate, so the paths only a signed file reaches are read, not run. The paths
 that stop before a signature exists (a refused timestamp, a failing signtool sign or verify, and the restore
-of the stage after it) run the script against a throwaway stage with a stub signtool.
+of the stage after it) run the script against a throwaway stage with a stub signtool, as do the checks around
+signing: a stage that differs from its attested manifest, and a restore that fails.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -20,6 +24,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+
+import stage_runtime_dlls  # noqa: E402
 SCRIPT = ROOT / "tools" / "sign_release_binaries.ps1"
 SIGNING_DOC = ROOT / "docs" / "RELEASE_SIGNING.md"
 RELEASE_DOC = ROOT / "docs" / "PREVIEW_RELEASE.md"
@@ -115,7 +122,20 @@ class SignReleaseBinariesRunTests(unittest.TestCase):
         (self.stage / "bin").mkdir(parents=True)
         for name in ("nakagawa_player.exe", "production_smoke.exe"):
             shutil.copyfile(self.unsigned_exe, self.stage / "bin" / name)
-        (self.stage / "bin" / "runtime-manifest.json").write_bytes(b'{"attested": true}\n')
+        # The script checks bin/ against this manifest before it signs (SIGN_MANIFEST_ATTESTED), so it attests the
+        # two executables as staged; the restore must bring back these exact bytes.
+        files = []
+        for name in ("nakagawa_player.exe", "production_smoke.exe"):
+            data = (self.stage / "bin" / name).read_bytes()
+            files.append({"path": name, "kind": "executable", "size": len(data),
+                          "sha256": hashlib.sha256(data).hexdigest(), "imports": []})
+        manifest = {"format": stage_runtime_dlls.RUNTIME_MANIFEST_FORMAT,
+                    "schema_version": stage_runtime_dlls.RUNTIME_MANIFEST_SCHEMA_VERSION,
+                    "files": files, "host_libraries": []}
+        (self.stage / "bin" / "runtime-manifest.json").write_bytes(json.dumps(manifest).encode("ascii"))
+        # The check also reads the licence index; the stage ships no runtime library, so it lists none.
+        (self.stage / "bin" / "THIRD_PARTY_NOTICES").mkdir()
+        (self.stage / "bin" / "THIRD_PARTY_NOTICES" / "index.json").write_bytes(b'{"components": []}\n')
         self.log = self.work / "signtool.log"
         self.before = self.snapshot()
 
@@ -125,7 +145,7 @@ class SignReleaseBinariesRunTests(unittest.TestCase):
 
     def run_script(self, *arguments, sign_exit=0, verify_exit=0):
         env = {**os.environ, "NK_STUB_LOG": str(self.log), "NK_STUB_SIGN_EXIT": str(sign_exit),
-               "NK_STUB_VERIFY_EXIT": str(verify_exit)}
+               "NK_STUB_VERIFY_EXIT": str(verify_exit), "PYTHON": sys.executable}
         return subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(SCRIPT),
                                "-Stage", str(self.stage), "-SignTool", str(self.stub), *arguments],
                               env=env, capture_output=True, text=True, check=False, timeout=120)
@@ -163,6 +183,87 @@ class SignReleaseBinariesRunTests(unittest.TestCase):
         self.assertIn("SIGN_VERIFY: signtool verify /pa failed for bin/nakagawa_player.exe", output)
         player = str(self.stage / "bin" / "nakagawa_player.exe")
         self.assertEqual(self.calls()[1:], [f"verify /pa /all {player}"])
+
+
+def _minimal_pe() -> bytes:
+    """A tiny unsigned PE32+ image (headers and one section), so Authenticode reports NotSigned."""
+    dos = bytearray(64)
+    dos[0:2] = b"MZ"
+    struct.pack_into("<I", dos, 0x3C, 64)
+    coff = struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 240, 0x0022)
+    opt = bytearray(240)
+    for fmt, offset, value in (("<H", 0, 0x20B), ("<I", 16, 0x1000), ("<I", 20, 0x1000),
+                               ("<Q", 24, 0x140000000), ("<I", 32, 0x1000), ("<I", 36, 0x200),
+                               ("<H", 40, 6), ("<H", 48, 6), ("<I", 56, 0x2000), ("<I", 60, 0x200),
+                               ("<H", 68, 3), ("<Q", 72, 0x100000), ("<Q", 80, 0x1000),
+                               ("<Q", 88, 0x100000), ("<Q", 96, 0x1000), ("<I", 108, 16)):
+        struct.pack_into(fmt, opt, offset, value)
+    section = struct.pack("<8sIIIIIIHHI", b".text", 0x1000, 0x1000, 0x200, 0x200, 0, 0, 0, 0, 0x60000020)
+    headers = bytes(dos) + b"PE\0\0" + coff + bytes(opt) + section
+    return headers + bytes(0x200 - len(headers)) + b"\xc3" + bytes(0x1FF)
+
+
+@unittest.skipUnless(os.name == "nt" and shutil.which("pwsh"), "needs Windows Authenticode and PowerShell 7")
+class SignReleaseBinariesManifestRunTests(unittest.TestCase):
+    """Run the script on a synthetic stage with a stand-in signtool that never signs."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="nk_sign_")
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.stage = self.dir / "stage"
+        self.bin = self.stage / "bin"
+        self.bin.mkdir(parents=True)
+        for name in ("nakagawa_player.exe", "production_smoke.exe"):
+            (self.bin / name).write_bytes(_minimal_pe())
+        self.scratch = self.dir / "tmp"
+        self.scratch.mkdir()
+        self.marker = self.dir / "signtool-ran"
+
+    def run_script(self, signtool_body: str) -> subprocess.CompletedProcess:
+        signtool = self.dir / "signtool.ps1"
+        signtool.write_text(f"New-Item -ItemType File -Path '{self.marker}' -Force | Out-Null\n"
+                            + signtool_body + "\nexit 1\n", encoding="utf-8")
+        env = dict(os.environ, PYTHON=sys.executable, TMP=str(self.scratch), TEMP=str(self.scratch))
+        return subprocess.run(["pwsh", "-NoProfile", "-File", str(SCRIPT), "-Stage", str(self.stage),
+                               "-Thumbprint", "00", "-TestCertificate", "-SignTool", str(signtool)],
+                              capture_output=True, text=True, check=False, env=env, timeout=120)
+
+    def test_a_stage_that_differs_from_its_attested_manifest_is_refused_before_signing(self):
+        attested = b"attested runtime library"
+        files = [{"path": "SDL3.dll", "kind": "runtime-library", "size": len(attested),
+                  "sha256": hashlib.sha256(attested).hexdigest(), "imports": []}]
+        for name in ("nakagawa_player.exe", "production_smoke.exe"):
+            data = (self.bin / name).read_bytes()
+            files.append({"path": name, "kind": "executable", "size": len(data),
+                          "sha256": hashlib.sha256(data).hexdigest(), "imports": []})
+        manifest = {"format": stage_runtime_dlls.RUNTIME_MANIFEST_FORMAT,
+                    "schema_version": stage_runtime_dlls.RUNTIME_MANIFEST_SCHEMA_VERSION,
+                    "files": files, "host_libraries": []}
+        manifest_bytes = json.dumps(manifest).encode("ascii")
+        (self.bin / "runtime-manifest.json").write_bytes(manifest_bytes)
+        # A same-name library swapped after staging and attestation.
+        (self.bin / "SDL3.dll").write_bytes(b"replaced runtime library")
+        result = self.run_script("")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SIGN_MANIFEST_ATTESTED", result.stdout + result.stderr)
+        self.assertIn("RUNTIME_FILE_CHANGED", result.stdout + result.stderr)
+        self.assertFalse(self.marker.exists(), "signtool ran on a stage that does not match its attestation")
+        self.assertEqual((self.bin / "runtime-manifest.json").read_bytes(), manifest_bytes)
+
+    def test_a_failed_restore_keeps_the_backup(self):
+        # The stand-in signtool fails, and the backup copy of the first file is gone, so its restore fails too.
+        body = (f"Get-ChildItem -Directory -LiteralPath '{self.scratch}' -Filter 'nk-sign-backup-*' | "
+                "ForEach-Object { Remove-Item -LiteralPath (Join-Path $_.FullName 'nakagawa_player.exe') }")
+        result = self.run_script(body)
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.marker.exists())
+        self.assertIn("SIGN_FAILED", output)
+        backups = list(self.scratch.glob("nk-sign-backup-*"))
+        self.assertEqual(len(backups), 1, output)
+        self.assertTrue((backups[0] / "production_smoke.exe").is_file())
+        self.assertIn("could not be restored", output)
 
 
 if __name__ == "__main__":

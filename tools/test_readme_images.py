@@ -484,6 +484,15 @@ class ShowcaseAnimationToolTests(unittest.TestCase):
         self.assertEqual([path.name for _vcount, path in found],
                          ["frame_v2.ppm", "frame_v10.ppm", "frame_v100.ppm"])
 
+    def test_frames_refuse_two_files_for_one_vcount(self) -> None:
+        # Leading zeros give one VCOUNT two names; their order would follow the directory
+        # listing, so the same inputs could encode different GIF bytes.
+        directory = self.tempdir()
+        for name in ("frame_v1.ppm", "frame_v01.ppm", "frame_v2.ppm"):
+            self.write(directory, name, b"")
+        with self.assertRaisesRegex(ValueError, r"frame_v01\.ppm and frame_v1\.ppm name the same VCOUNT 1"):
+            animation._frames(directory)
+
     def test_frames_need_a_directory_with_two_snapshots(self) -> None:
         directory = self.tempdir()
         with self.assertRaises(ValueError):

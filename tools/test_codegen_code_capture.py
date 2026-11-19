@@ -108,6 +108,16 @@ class CaptureFile(unittest.TestCase):
             self.assertEqual(code_capture.fnv1a64(data), digest)
             self.assertEqual(codegen.fnv1a64(data), digest)
 
+    def test_naming_a_capture_does_not_load_the_code_generator(self):
+        # `code_capture.py info` only names captures; it must not import all of codegen to hash.
+        probe = ("import sys; sys.path.insert(0, sys.argv[1]); import code_capture; "
+                 "image = code_capture.CaptureImage(0x08900000, bytearray(b'foobar')); "
+                 "print(image.name, code_capture.FIXED_OVERLAY_ELF_TYPE, 'codegen' in sys.modules)")
+        result = subprocess.run([sys.executable, "-c", probe, str(ROOT / "tools")],
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.split(),
+                         ["code_capture_08900000_85944171f73967e8", str(analyzer.FIXED_OVERLAY_ELF_TYPE), "False"])
+
     def test_a_malformed_capture_is_refused_by_name(self):
         good = bytearray(code_capture.capture_bytes(capture()))
         cases = {
