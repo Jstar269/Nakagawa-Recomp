@@ -34,6 +34,11 @@ extern "C" {
 // graphics-API guards, so the module names it itself.
 #define NK_XR_EXT_VULKAN_ENABLE2 "XR_KHR_vulkan_enable2"
 
+// How many fill calls a two-call enumeration makes (the instance extensions, the
+// environment blend modes) while the list keeps growing between calls
+// (XR_ERROR_SIZE_INSUFFICIENT); a list that changes on every call is refused.
+#define NK_XR_ENUM_ATTEMPTS 4
+
 #ifdef _WIN32
 #define NK_XR_LOADER_NAME "openxr_loader.dll"
 #else
@@ -47,11 +52,13 @@ typedef enum NkXrRefusal {
     NK_XR_REFUSE_NO_VULKAN_ENABLE2,  // runtime lacks XR_KHR_vulkan_enable2
     NK_XR_REFUSE_INSTANCE,           // instance creation (or resolving its functions) failed
     NK_XR_REFUSE_NO_HMD,             // the runtime reports no head-mounted display
-    NK_XR_REFUSE_OUT_OF_MEMORY       // host allocation failed
+    NK_XR_REFUSE_OUT_OF_MEMORY,      // host allocation failed
+    NK_XR_REFUSE_GET_SYSTEM          // xrGetSystem failed for another reason (lost instance, runtime failure)
 } NkXrRefusal;
 
 // The text of a refusal: "ok", "no OpenXR runtime", "runtime lacks
-// XR_KHR_vulkan_enable2", "instance creation failed", "no HMD", "out of memory".
+// XR_KHR_vulkan_enable2", "instance creation failed", "no HMD", "out of memory",
+// "runtime failed in xrGetSystem".
 // Never NULL; a value outside the enum gives "unknown refusal".
 const char *nk_xr_refusal_name(NkXrRefusal r);
 
@@ -81,6 +88,9 @@ typedef struct NkXrFns {
     // before a probe; nk_xr_frame_once() then submits OPAQUE.
     XrVersion api_version;
     XrEnvironmentBlendMode blend_mode;
+    // Set by nk_xr_probe() once it calls xrGetSystem: that call's XrResult, so a caller
+    // can report a NK_XR_REFUSE_GET_SYSTEM (or NK_XR_REFUSE_NO_HMD) refusal's cause.
+    XrResult get_system_result;
 } NkXrFns;
 
 // Open the loader library (`libname`, or NK_XR_LOADER_NAME when NULL) and resolve
@@ -105,7 +115,14 @@ void nk_xr_unload(NkXrFns *f);
 // and get the head-mounted-display system. `f` came from nk_xr_load() or
 // nk_xr_load_from_proc(). On NK_XR_OK, `*instance` and `*system` are set and the
 // caller owns the instance (f->DestroyInstance); on any refusal nothing is left
-// open and the outputs are untouched. `app_name` may be NULL ("Nakagawa Recomp").
+// open and the outputs are untouched, with one exception: when the runtime cannot
+// resolve xrDestroyInstance itself (NK_XR_REFUSE_INSTANCE), the instance it created
+// cannot be destroyed, since that function only comes from the instance, and it stays
+// alive until the process ends. `app_name` may be NULL ("Nakagawa Recomp"); a name
+// longer than XR_MAX_APPLICATION_NAME_SIZE - 1 bytes is cut on a UTF-8 code point
+// boundary. A list that grows between an enumeration's count and fill calls is asked
+// again at the new count (NK_XR_ENUM_ATTEMPTS); one that changes on every call refuses
+// as NK_XR_REFUSE_NO_RUNTIME (extensions) or NK_XR_REFUSE_INSTANCE (blend modes).
 // The instance is first requested at XR_CURRENT_API_VERSION; on
 // XR_ERROR_API_VERSION_UNSUPPORTED it is requested once more at 1.0.0 (see
 // f->api_version). The environment blend modes are enumerated once here for the system;
@@ -160,7 +177,12 @@ NkXrAction nk_xr_session_next(NkXrRun *run, XrSessionState new_state);
 // xrBeginSession fails, `run->running` stays 0 and the result is returned for the
 // caller to report; after a destroy action the session handle is no longer valid.
 // Returns XR_ERROR_FUNCTION_UNSUPPORTED, making no call, when the table lacks the
-// function the action needs (a table whose instance functions were never resolved).
+// function the action needs (a table whose instance functions were never resolved);
+// then what nk_xr_session_next() recorded for the action is undone: after a refused
+// begin `run->running` is 0 (the next READY asks again), after a refused destroy
+// `run->session_destroyed` is 0 (a later EXITING still asks for the destroy). The end
+// and destroy actions clear `running` and `layers_shown`, as nk_xr_session_next()
+// already did for their states, so a direct call also stops the frames.
 XrResult nk_xr_do_action(const NkXrFns *f, XrSession session, NkXrRun *run, NkXrAction action);
 
 // What one pass of the frame loop saw.
