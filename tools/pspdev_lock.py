@@ -29,9 +29,17 @@ HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 RELEASE_RE = re.compile(r"^v20[0-9]{6}$")
 SEMVER_TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 CONTAINER_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
-UNC_PATH_RE = re.compile(r"^\\\\[^\\]+\\[^\\]+")
-POSIX_PRIVATE_PATH_RE = re.compile(r"^/(?:home|Users)/[^/]+(?:/|$)")
+# The private-path patterns search anywhere in a value, not only at its start,
+# so a free-text field (a configure line naming a --prefix under a home
+# directory) cannot carry a host path past this check. A drive letter or POSIX
+# root matches only where it begins a path, so a URL whose path names a home
+# directory stays valid.
+WINDOWS_PATH_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
+UNC_PATH_RE = re.compile(r"\\\\[^\\\s]+\\[^\\\s]+")
+POSIX_PRIVATE_PATH_RE = re.compile(
+    r"(?<![\w.:/~-])/(?:(?:home|Users)/[^/\s]+|root(?=/|\s|$)|mnt/[A-Za-z]/)"
+)
+HOME_RELATIVE_PATH_RE = re.compile(r"(?<![\w./~-])~[\w.-]*/")
 
 EXPECTED_COMPONENTS = {
     "pspsdk": "https://github.com/pspdev/pspsdk",
@@ -145,9 +153,10 @@ def _walk_strings(value: Any, where: str = "$") -> Iterable[tuple[str, str]]:
 def _reject_private_paths(data: dict[str, Any]) -> None:
     for where, value in _walk_strings(data):
         if (
-            WINDOWS_PATH_RE.match(value)
-            or UNC_PATH_RE.match(value)
-            or POSIX_PRIVATE_PATH_RE.match(value)
+            WINDOWS_PATH_RE.search(value)
+            or UNC_PATH_RE.search(value)
+            or POSIX_PRIVATE_PATH_RE.search(value)
+            or HOME_RELATIVE_PATH_RE.search(value)
         ):
             raise LockError(f"{where} embeds a host-specific/private absolute path")
 
@@ -380,7 +389,9 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def load_lock(path: Path) -> tuple[dict[str, Any], list[str]]:
+def load_lock(
+    path: Path, *, require_local: bool = False
+) -> tuple[dict[str, Any], list[str]]:
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -391,7 +402,7 @@ def load_lock(path: Path) -> tuple[dict[str, Any], list[str]]:
         raise LockError(f"{path} is invalid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise LockError(f"{path} root must be an object")
-    return data, validate_lock(data)
+    return data, validate_lock(data, require_local=require_local)
 
 
 def canonical_json(data: dict[str, Any]) -> str:
@@ -452,8 +463,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     try:
-        data, _ = load_lock(args.lock)
-        pending = validate_lock(data, require_local=args.require_local)
+        data, pending = load_lock(args.lock, require_local=args.require_local)
     except LockError as exc:
         print(f"pspdev_lock: {exc}", file=sys.stderr)
         return 1

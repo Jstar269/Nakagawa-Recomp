@@ -438,7 +438,7 @@ def _utc_now() -> str:
 
 def _read_lock(path: Path) -> dict[str, object]:
     try:
-        lock = json.loads(path.read_text(encoding="utf-8"))
+        lock = _runner.read_hardware_lock_file(path)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise MatrixError(f"HARDWARE_LOCK_UNAVAILABLE:{type(exc).__name__}") from exc
     if not isinstance(lock, dict):
@@ -467,22 +467,26 @@ def attested_boot(path: Path, session_id: str) -> tuple[int | None, str]:
 
 
 def note_launch(path: Path, session_id: str, text: str) -> None:
-    """Append one ``probes_run`` line to the lock this session holds (read, then atomic replace).
+    """Append one ``probes_run`` line to the lock this session holds.
 
-    The lock file has no writer-side locking: a field another writer changes between this read
-    and the replace is overwritten.
+    The append goes through the runner's shared lock writer, ``update_hardware_lock``: under the
+    cross-process writer lock it re-reads the lock, checks that this session still holds it, appends
+    and replaces the file atomically, so a field another writer changed in the meantime is kept.
     """
 
-    lock = _read_lock(path)
-    problem = lock_holder_problem(lock, session_id)
-    if problem:
-        raise MatrixError(problem)
-    runs = lock.get("probes_run")
-    lock["probes_run"] = [
-        *(runs if isinstance(runs, list) else []),
-        f"{session_id} {_utc_now()}: {text}",
-    ]
-    _runner._write_campaign_json(path, lock)
+    line = f"{session_id} {_utc_now()}: {text}"
+
+    def append(lock: dict[str, object]) -> None:
+        problem = lock_holder_problem(lock, session_id)
+        if problem:
+            raise MatrixError(problem)
+        runs = lock.get("probes_run")
+        lock["probes_run"] = [*(runs if isinstance(runs, list) else []), line]
+
+    try:
+        _runner.update_hardware_lock(path, append)
+    except _runner.HardwareLockError as exc:
+        raise MatrixError(exc.status) from exc
 
 
 # --------------------------------------------------------------------------------- launch classification

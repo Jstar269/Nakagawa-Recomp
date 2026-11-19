@@ -20,6 +20,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -177,6 +178,34 @@ class CarryTests(Revisions, unittest.TestCase):
         self.assertNotEqual(matcher.status(self.old["U2"])["new"], matcher.status(self.old["U3"])["new"])
 
 
+class MaskingTests(unittest.TestCase):
+    @staticmethod
+    def tokens(words: list) -> list:
+        module = object.__new__(binding_carry.Module)
+        module.imports = {}
+        module.function = {BASE: {"entry": BASE, "addresses": [BASE + 4 * i for i in range(len(words))],
+                                  "words": words, "calls": []}}
+        tokens: list = module._tokens(BASE)
+        return tokens
+
+    def test_vfpu_compute_words_keep_their_low_bits_when_bits_21_to_25_read_as_gp(self):
+        # vfim S000, <half float>: op 0x37 with bits 23-25 = 111 and vt's top bits 00, so bits 21-25
+        # read as 28 ($gp). The low 16 bits are the immediate, not an offset, so they must stay.
+        one, two = 0xDF803C00, 0xDF804000
+        self.assertEqual((one >> 21) & 31, binding_carry.GP)
+        self.assertNotEqual(self.tokens([one, JR_RA, NOP]), self.tokens([two, JR_RA, NOP]))
+        for op in (0x34, 0x37, 0x3C, 0x3F):
+            word = (op << 26) | (binding_carry.GP << 21) | 0x1234
+            with self.subTest(op=hex(op)):
+                self.assertEqual(self.tokens([word])[0], ("w", word))
+
+    def test_gp_relative_loads_and_stores_still_drop_their_offset(self):
+        for word in (LW_GP, 0xAF820010, 0xDB800010, 0xFB800010):  # lw, sw, lv.q, sv.q off $gp
+            with self.subTest(word=hex(word)):
+                self.assertEqual(self.tokens([word])[0], ("addr", word >> 16))
+        self.assertEqual(self.tokens([LUI_A0, ADDIU_A0])[1], ("addr", ADDIU_A0 >> 16))
+
+
 class ManifestTests(Revisions, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -296,6 +325,64 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(status["status"], "ambiguous")
         self.assertEqual(status["candidates"], sorted([new_a["D"], new_a["D2"]]))
         self.assertNotIn(old_a["D"], matcher.match)
+
+    def test_a_copy_left_alone_by_its_neighbours_lists_only_the_copy_still_free(self):
+        # H1 and H2 share code. H1's neighbours X and Z pick H1 -> H1n; H2's never agree, so the
+        # one-to-one pair left over stays refused, naming only H2n and never the taken H1n.
+        old = {"main": ["call:X", "call:H1", "call:Z", "call:H2", JR_RA, NOP],
+               "X": body(1), "H1": body(7, 6), "Z": body(3), "H2": body(7, 6)}
+        new = {"main": ["call:H2", "call:X", "call:H1", "call:Z", JR_RA, NOP],
+               "H2": body(7, 6), "X": body(1), "H1": body(7, 6), "Z": body(3)}
+        matcher, old_a, new_a = self.match(old, new)
+        self.assertEqual(matcher.status(old_a["H1"])["status"], "neighbour")
+        self.assertEqual(matcher.match[old_a["H1"]], new_a["H1"])
+        status = matcher.status(old_a["H2"])
+        self.assertEqual(status["status"], "ambiguous")
+        self.assertEqual(status["candidates"], [new_a["H2"]])
+        self.assertNotIn(old_a["H2"], matcher.match)
+
+    def test_a_copy_whose_every_new_copy_is_taken_names_no_taken_candidate(self):
+        old = {"main": ["call:X", "call:H1", "call:Z", "call:H2", "call:Y", "call:H3", JR_RA, NOP],
+               "X": body(1), "H1": body(7, 6), "Z": body(3), "H2": body(7, 6), "Y": body(4), "H3": body(7, 6)}
+        new = {"main": ["call:X", "call:H1", "call:Z", "call:H2", "call:Y", JR_RA, NOP],
+               "X": body(1), "H1": body(7, 6), "Z": body(3), "H2": body(7, 6), "Y": body(4)}
+        matcher, old_a, new_a = self.match(old, new)
+        self.assertEqual(matcher.match[old_a["H1"]], new_a["H1"])
+        self.assertEqual(matcher.match[old_a["H2"]], new_a["H2"])
+        status = matcher.status(old_a["H3"])
+        self.assertEqual(status["status"], "unmatched")
+        self.assertNotIn("candidates", status)
+        self.assertNotIn(old_a["H3"], matcher.match)
+
+    def test_neighbour_tie_break_scales_to_hundreds_of_identical_stubs(self):
+        # 200 identical two-word stubs among 10,000 distinct functions, every stub told apart by its
+        # neighbours. Scanning every entry per scored pair took about 13 s here; bisection takes well
+        # under one, so a 5 s budget fails only when the work is quadratic in the entry count again.
+        def ir(gap: int) -> dict:
+            instructions, functions, address = [], [], BASE
+            for index in range(10_000):
+                bodies = [[0x34030000 | (index >> 14), 0x34040000 | (index & 0x3FFF), JR_RA, NOP]]
+                if index % 50 == 0:
+                    bodies.append([JR_RA, 0x24020000])
+                for words in bodies:
+                    functions.append({"kind": "callable", "entry": address, "calls": [], "tail_calls": []})
+                    for word in words:
+                        instructions.append({"address": address, "word": word, "owners": [functions[-1]["entry"]]})
+                        address += 4
+                    address += gap
+            return {"schema": binding_carry.analysis_ir.IR_SCHEMA, "instructions": instructions,
+                    "functions": functions}
+        old_module, new_module = binding_carry.Module(ir(0)), binding_carry.Module(ir(4))
+        matcher = binding_carry.Matcher(old_module, new_module, 0.75, 0.05)
+        started = time.perf_counter()
+        matcher.run()
+        elapsed = time.perf_counter() - started
+        stubs = [entry for entry in old_module.entries if len(old_module.function[entry]["words"]) == 2]
+        self.assertEqual(len(stubs), 200)
+        self.assertEqual({matcher.method[entry] for entry in stubs}, {"neighbour"})
+        self.assertEqual([old_module.entries.index(entry) for entry in stubs],
+                         [new_module.entries.index(matcher.match[entry]) for entry in stubs])
+        self.assertLess(elapsed, 5.0)
 
     def test_a_vote_from_exact_callers_carries_a_function_too_changed_to_match_fuzzily(self):
         changed = body(6, 12)

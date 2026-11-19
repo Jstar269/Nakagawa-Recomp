@@ -124,6 +124,44 @@ class LockValidationTests(unittest.TestCase):
                 pspdev_lock.validate_lock(data)
             self.assertIn("absolute path", str(ctx.exception))
 
+    def test_private_paths_inside_free_text_are_rejected(self) -> None:
+        # A free-text field can mention a host path anywhere, not only at the
+        # start; WSL mounts, /root and home-relative forms are host paths too.
+        embedded = (
+            "configured with --prefix=" + "/" + "home/example/pspdev",
+            "installed from " + "C:" + r"\Users\Example\pspdev",
+            "copied to " + "D:/pspdev",
+            "built in " + "/" + "mnt/c/" + "Users/example/pspdev",
+            "unpacked under " + "/" + "root/pspdev",
+            "unpacked under " + "~" + "/pspdev",
+            "share " + r"\\" + "server" + r"\private\pspdev",
+        )
+        for value in embedded:
+            with self.subTest(value=value):
+                data = copy.deepcopy(self.lock)
+                data["local_verification"]["installation_method"] = value
+                with self.assertRaises(pspdev_lock.LockError) as ctx:
+                    pspdev_lock.validate_lock(data)
+                self.assertIn("absolute path", str(ctx.exception))
+
+    def test_urls_and_relative_paths_in_free_text_stay_valid(self) -> None:
+        for value in (
+            "downloaded from https://github.com/pspdev/pspdev/releases",
+            "see https://example.org/" + "home/notes and tools/PrxEncrypter",
+            "reviewed at 17:48:10Z on a rootless container",
+        ):
+            with self.subTest(value=value):
+                data = copy.deepcopy(self.lock)
+                data["local_verification"]["installation_method"] = value
+                pspdev_lock.validate_lock(data)
+
+    def test_load_lock_applies_require_local_in_one_validation(self) -> None:
+        _data, pending = pspdev_lock.load_lock(LOCK_PATH, require_local=True)
+        self.assertEqual(
+            pending,
+            pspdev_lock.validate_lock(copy.deepcopy(self.lock), require_local=True),
+        )
+
     def test_policy_cannot_enable_network_or_retail_material(self) -> None:
         for key in (
             "network_access_from_normal_build",

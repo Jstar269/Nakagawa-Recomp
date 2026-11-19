@@ -65,13 +65,6 @@ def sync_database_from_progress(db_path, progress_path):
     if not progress_data:
         return 0
 
-    total_units = int(progress_data.get("total_units", progress_data.get("total", 0)))
-    units_earned = int(progress_data.get("units_earned", progress_data.get("earned", 0)))
-    units_regressed = int(progress_data.get("units_regressed", progress_data.get("regressed", 0)))
-    completion_pct = float(progress_data.get("completion_pct", 0.0))
-    if not completion_pct and total_units:
-        completion_pct = round(((units_earned - units_regressed) / total_units) * 100.0, 2)
-
     opengrip_progress = progress_data.get("opengrip_progress", [])
     if not opengrip_progress:
         return 0
@@ -125,6 +118,15 @@ def sync_database_from_progress(db_path, progress_path):
             continue
 
         run_id = f"cli_{uuid.uuid4().hex[:12]}"
+        # Unit totals belong to the run each entry records. The document's
+        # top-level totals describe only the current tree, so an entry without
+        # its own totals stores 0 rather than borrowing today's values.
+        total_units = int(entry.get("total_units", 0))
+        units_earned = int(entry.get("units_earned", 0))
+        units_regressed = int(entry.get("units_regressed", 0))
+        completion_pct = float(entry.get("completion_pct", 0.0))
+        if not completion_pct and total_units:
+            completion_pct = round(((units_earned - units_regressed) / total_units) * 100.0, 2)
         total_funcs = int(entry.get("total_functions", 0))
         matched_funcs = int(entry.get("matched_functions", 0))
         total_bytes = int(entry.get("total_bytes", 0))
@@ -244,12 +246,21 @@ class PDFDocument:
         self.objects.append((obj_id, content_bytes))
         return obj_id
 
+    def reserve(self):
+        """Reserve an object number for an object that refers forward."""
+        return self.add_object(None)
+
+    def set_object(self, obj_id, content_bytes):
+        self.objects[obj_id - 1] = (obj_id, content_bytes)
+
     def build(self):
         header = b"%PDF-1.4\n"
         body = bytearray(header)
         offsets = {}
 
         for obj_id, content in self.objects:
+            if content is None:
+                raise ValueError(f"PDF object {obj_id} was reserved but never set")
             offsets[obj_id] = len(body)
             body.extend(f"{obj_id} 0 obj\n".encode("ascii"))
             body.extend(content)
@@ -273,10 +284,12 @@ class PDFDocument:
 def generate_pdf_report(runs, latencies, output_path):
     pdf = PDFDocument()
 
-    # 1. Catalog
-    pdf.add_object(b"<< /Type /Catalog /Pages 2 0 R >>")
-    # 2. Pages
-    pdf.add_object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    # The trailer names object 1 as /Root and the last object as /Info, so the
+    # catalog is reserved first and the info dictionary is added last. Every
+    # other reference comes from the id add_object/reserve returned.
+    catalog_id = pdf.reserve()
+    pages_id = pdf.reserve()
+    page_id = pdf.reserve()
 
     # Stream content drawing
     stream = []
@@ -427,24 +440,18 @@ def generate_pdf_report(runs, latencies, output_path):
     # Chart 2: Byte Match
     draw_trend_chart(320, "Byte Match (%)", [r["byteCompletionPct"] * 100.0 for r in runs[-15:]])
 
-    # 3. Page Catalog Link
     page_content = "\n".join(stream).encode("ascii")
 
-    # 5. Contents Stream Object
     contents_str = f"<< /Length {len(page_content)} >> stream\n".encode("ascii") + page_content + b"\nendstream"
     contents_id = pdf.add_object(contents_str)
+    font_regular_id = pdf.add_object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /MacRomanEncoding >>")
+    font_bold_id = pdf.add_object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /MacRomanEncoding >>")
+    resources_id = pdf.add_object(f"<< /Font << /F1 {font_regular_id} 0 R /F2 {font_bold_id} 0 R >> >>".encode("ascii"))
+    pdf.set_object(page_id, f"<< /Type /Page /Parent {pages_id} 0 R /Resources {resources_id} 0 R /MediaBox [0 0 595.28 841.89] /Contents {contents_id} 0 R >>".encode("ascii"))
+    pdf.set_object(pages_id, f"<< /Type /Pages /Kids [{page_id} 0 R] /Count 1 >>".encode("ascii"))
+    pdf.set_object(catalog_id, f"<< /Type /Catalog /Pages {pages_id} 0 R >>".encode("ascii"))
 
-    # 3. Page Object
-    pdf.add_object(f"<< /Type /Page /Parent 2 0 R /Resources 4 0 R /MediaBox [0 0 595.28 841.89] /Contents {contents_id} 0 R >>".encode("ascii"))
-
-    # 4. Resources
-    pdf.add_object(b"<< /Font << /F1 6 0 R /F2 7 0 R >> >>")
-
-    # 6. Fonts
-    pdf.add_object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /MacRomanEncoding >>")
-    pdf.add_object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /MacRomanEncoding >>")
-
-    # 8. Info
+    # Info (last: the trailer's /Info)
     pdf.add_object(f"<< /Title (Nakagawa Recomp Telemetry Benchmark Report) /Creator (Nakagawa Recomp) /CreationDate (D:{datetime.now().strftime('%Y%m%d%H%M%S')}) >>".encode("ascii"))
 
     pdf_bytes = pdf.build()
@@ -784,7 +791,10 @@ def validate_run_row(row):
             return None
         if not (val == val) or val in (float("inf"), float("-inf")):
             return None  # NaN / Infinity rejected
-        if not (0.0 <= val <= 100.0):
+        # byteCompletionPct is a fraction (every renderer multiplies it by 100);
+        # the other fields are percentages.
+        upper = 1.0 if field == "byteCompletionPct" else 100.0
+        if not (0.0 <= val <= upper):
             return None  # percentages must be in-range
     rid = row.get("id")
     if not isinstance(rid, str) or not rid or len(rid) > 128:

@@ -173,7 +173,11 @@ def _source_files(root: Path, suffix: str) -> list[Path]:
     if not src.is_dir() or src.is_symlink():
         raise SyncError(f"{root.name} does not contain an ordinary src directory")
     paths: list[Path] = []
-    for path in sorted(src.rglob(f"*{suffix}")):
+    # Match the suffix and order the files case-sensitively on every host: a
+    # Windows pathlib glob ignores case and WindowsPath sorts case-folded, which
+    # would scan lowercase ``.s`` files and keep a different first duplicate.
+    candidates = [path for path in src.rglob("*") if path.name.endswith(suffix)]
+    for path in sorted(candidates, key=lambda item: item.relative_to(root).as_posix()):
         if path.is_symlink():
             raise SyncError(f"{path.relative_to(root).as_posix()} is a symlink")
         if not path.is_file():

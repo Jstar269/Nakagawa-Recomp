@@ -355,6 +355,34 @@ class PgfWriterRefusalTests(unittest.TestCase):
             with self.subTest(glyph=glyph):
                 self.assert_refused(reason, glyphs=[glyph])
 
+    def test_json_glyph_fields_are_not_coerced(self):
+        # int() would turn true into 1, truncate 3.9 to 3 and parse "65", building a font with altered metrics.
+        base = {"code": 65, "width": 1, "height": 1, "samples": [0]}
+        cases = (
+            {"width": True},
+            {"code": "65"},
+            {"height": 1.0},
+            {"samples": [True]},
+            {"samples": [1.5]},
+            {"samples": "0"},
+            {"row_order": True},
+            {"adjust_x": 3.9},
+            {"adjust_y": False},
+            {"advance_x": True},
+            {"y_top": 2.5},
+            {"dimension_width": "3"},
+        )
+        for override in cases:
+            with self.subTest(override=override):
+                with self.assertRaises(PgfWriteError) as caught:
+                    pgf_writer._glyph_from_dict({**base, **override})
+                self.assertEqual(caught.exception.reason, "unsupported-input")
+        glyph = pgf_writer._glyph_from_dict({**base, "adjust_x": -3, "advance_x": 4})
+        self.assertEqual((glyph.code, glyph.adjust_x, glyph.advance_x), (65, -3, 4))
+        with self.assertRaises(PgfWriteError) as caught:
+            pgf_writer._glyph_from_dict({"code": 65, "width": 1})
+        self.assertEqual(caught.exception.reason, "unsupported-input")
+
     def test_cli_refusal_names_the_reason_and_writes_nothing(self):
         with tempfile.TemporaryDirectory(prefix="pgf_writer_") as tmp:
             glyph_set = Path(tmp) / "glyphs.json"
