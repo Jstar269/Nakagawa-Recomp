@@ -46,8 +46,8 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **711** (dedicated **627**, fake_success **4**, controlled_unsupported **80**).
-Semantic handler census: **601** handlers across **30** API families, covering **634** handler-associated NID registrations.
+Registered NIDs: **711** (dedicated **628**, fake_success **3**, controlled_unsupported **80**).
+Semantic handler census: **603** handlers across **30** API families, covering **635** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
@@ -55,14 +55,14 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 | `partial` | 348 | 360 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 235 | 243 |
+| `unreviewed` | 237 | 244 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `newlib` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `other` | 1 | 1 | 0 | 0 | 0 | 2 | 2 |
-| `sceAtrac` | 0 | 0 | 0 | 0 | 33 | 33 | 34 |
-| `sceAudio` | 0 | 11 | 0 | 0 | 5 | 16 | 18 |
+| `sceAtrac` | 0 | 0 | 0 | 0 | 34 | 34 | 35 |
+| `sceAudio` | 0 | 11 | 0 | 0 | 6 | 17 | 18 |
 | `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceCtrl` | 0 | 12 | 0 | 0 | 0 | 12 | 12 |
 | `sceDisplay` | 1 | 14 | 0 | 0 | 1 | 16 | 16 |
@@ -89,7 +89,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **348** | **1** | **3** | **235** | **601** | **634** |
+| **Total** | **14** | **348** | **1** | **3** | **237** | **603** | **635** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -163,7 +163,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_imports_20261102_measured_contracts
   - Evidence: PSPAutotests tests/threads/callbacks/exit.expected (1a9e6c31, recorded on a PSP, compiled SDK 3.95): checkpoints under LoadExecForUser_362A956B
 - **`h_AudioChRelease`** (`sceAudio`): `sceAudioChRelease` (0x6fc46853)
-  - Limitation: the cells release channel 0 after the two valid blocking-output calls and query it after release; unreserved, out-of-range, and other channel-state release results are unmeasured (#341)
+  - Limitation: the cells release channel 0 after the two valid blocking-output calls and query it after release; a release clears the channel's length, format and volumes; the out-of-range (0x80260003) and not-reserved (0x80260008) refusals follow PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp sceAudioChRelease and are unmeasured, as are other channel-state release results (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
   - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-release, audio-ch-query-released
@@ -173,7 +173,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cell: audio-ch-reserve
 - **`h_AudioOutput2Blocking`** (`sceAudio`): `sceAudioOutput2OutputBlocking` (0x2d53f36e)
-  - Limitation: audio-out2-output-blocking measures one valid silent 1024-sample block at volume 0x8000 and makes no acoustic claim; volumes above 0xFFFFF are refused with 0x8026000b following PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp, unmeasured; not-reserved, buffer-error and audio_output error-propagation behavior are not covered (the handler discards audio_output's return) (#341)
+  - Limitation: audio-out2-output-blocking measures one valid silent 1024-sample block at volume 0x8000 and makes no acoustic claim; volumes above 0xFFFFF are refused with 0x8026000b following PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp, unmeasured; an unreadable buffer returns audio_output's 0x80000103 to the guest, a host contract that is unmeasured; the not-reserved code is not covered (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
   - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cell: audio-out2-output-blocking
@@ -194,7 +194,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-out2-query-before, audio-out2-query-after
 - **`h_AudioOutputBlocking`** (`sceAudio`): `sceAudioOutputBlocking` (0x136caf51)
-  - Limitation: the cells exercise two maximum-volume outputs with a valid silent stereo buffer and record timing and rest-length values, not audible output; mono, other volumes, invalid buffers/channels, and error precedence are unmeasured (#341)
+  - Limitation: the cells exercise two maximum-volume outputs with a valid silent stereo buffer and record timing and rest-length values, not audible output; mono, other volumes, invalid buffers, and error precedence are unmeasured; a channel of 8 or more (0x80260003) and an unreserved channel (0x80260001) are refused following PPSSPP caa91b54b535, corroborated by PSPAutotests output.expected for channel -1 and unreserved channel 5 (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
   - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-output-blocking-0, audio-ch-output-blocking-1
@@ -1649,7 +1649,7 @@ The current registration classes and semantic statuses are in the generated cens
 | `sceUmdUser` | `sceUmdCancelWaitDriveStat` (`0x6af9b50a`) | Implemented: `h_UmdCancelWaitDriveStat` wakes every drive waiter with `SCE_KERNEL_ERROR_WAIT_CANCEL` and returns 0. |
 | `sceUmdUser` | `sceUmdGetErrorStat` (`0x20628e6f`) | Compatibility implementation: returns no error while the virtual ISO drive reports its modeled PRESENT/READY/READABLE state; other drive-error states are not modeled (#281). |
 | `IoFileMgrForUser` | `sceIoDevctl` (`0x54f5fb11`) | Partial Memory Stick support for `ms0:` and `fatms0:`: capacity/free-cluster geometry comes from the unified Memory Stick root shared with ordinary `sceIo*` and savedata (`SR_MEMSTICK`, default `memstick/`); inserted and ready queries write 1 and 4; registering a live callback for insert/eject events adds it to a 32-entry list and queues one notification with argument 1 (inserted), delivered on the owning thread at its next callback point; unregister removes one matching entry, an unknown UID returns `0x80010016`, and deleting a callback drops its registrations. No later insert or eject event exists ([#1378](https://github.com/Jstar269/nakagawa-recomp/issues/1378)). Other device/command pairs return `0x80010086`, log once per pair, and appear in the #281 exit summary. |
-| `sceAtrac3plus` | `sceAtracGetOutputChannel` (`0xb3b5d042`) | Compatibility exception: existing acceptance is retained while output-channel mapping is tracked by #286. |
+| `sceAtrac3plus` | `sceAtracGetOutputChannel` (`0xb3b5d042`) | Compatibility exception at the migration. It now refuses an unknown ID with `0x80630005` (`ATRAC_ERROR_BAD_ATRACID`) and an unwritable output word with `0x80000103`, and writes the channel count `sceAtracDecodeData` interleaves (the track's own channels). A PSP's stereo output of a mono track set without the MOut calls is not modeled (#286). |
 | `sceKernelVolatileMemUnlock` | `sceKernelVolatileMemUnlock` (`0xa569e425`) | Compatibility exception at the migration: the documented asset-loading route uses this call around the shared volatile-memory scratch buffer (#281). It now returns the PSP-measured states (#1135) and hands the lock to the oldest `sceKernelVolatileMemLock` caller blocked on it (#1383). |
 | `sceUtility` | `sceUtilityOskUpdate` (`0x4b85c861`) | Compatibility exception: `h_OskUpdate` follows the PSP-3000 measurements (#363): `SCE_ERROR_UTILITY_WRONG_TYPE` (`0x80110005`) before a keyboard starts, 0 in VISIBLE, and `0x80110001` in INIT, QUIT and NONE after use. FINISHED returns 0, which is not measured (#341); Update does not drive the keyboard, whose text is collected from `sceUtilityOskGetStatus` (#281); and the call is still named in the end-of-run compatibility-exception summary (`hle_success_exception_issue` in `src/rt/hle_internal.h`). |
 

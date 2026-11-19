@@ -138,9 +138,18 @@ static int es_append_au(Dec *d, const SrH264AccessUnit *au) {
     return 1;
 }
 
+/* Drop fed chunks from the front: all of them once every queued chunk has been fed (feed_one
+ * copied each into its own sample; sceVideocodecDecode leaves the queue in that state after every
+ * call), otherwise once they are the larger part of a big buffer. */
 static void es_compact(Dec *d) {
-    if (d->curCk == 0 || d->curCk >= d->nCk || d->curCk < d->nCk / 2 ||
-        d->esLen < (1u << 20)) return;
+    if (d->curCk != 0 && d->curCk >= d->nCk) {
+        d->esLen = 0;
+        d->nCk = 0;
+        d->curCk = 0;
+        d->takeCk = 0;
+        return;
+    }
+    if (d->curCk == 0 || d->curCk < d->nCk / 2 || d->esLen < (1u << 20)) return;
     uint32_t base = d->ck[d->curCk].off;
     if (base > d->esLen) return;
     memmove(d->es, d->es + base, d->esLen - base);
@@ -599,7 +608,10 @@ static int pull_frame(int id, int eos, uint32_t buffer, int frameWidth, int pixe
     if (id < 0 || id >= MAX_DEC || !s_dec[id].used) return -1;
     Dec *d = &s_dec[id];
     if (d->failed || !d->xf) return -1;
-    for (int guard = 0; guard < 4096; guard++) {
+    /* No round cap: every round returns, feeds one queued chunk or sends the drain once, so the
+     * loop ends within the queue's length. A cap returned 0 ("no picture yet", or "drained" at
+     * EOS) with chunks still queued (audit 2026-11-17). */
+    for (;;) {
         int r = pump_out(d, buffer, frameWidth, pixelMode, host, hostW, hostH, hostStride, yuv, info);
         /* A refused destination (r == 2) is reported as "no frame written" but does NOT poison
          * the decoder: the picture was already consumed from the MFT, the stream is still
@@ -620,7 +632,6 @@ static int pull_frame(int id, int eos, uint32_t buffer, int frameWidth, int pixe
             return 0;                       /* out of compressed data: wait for more feed */
         }
     }
-    return 0;
 }
 
 int sr_h264_mf_frame_ex(int id, int eos, const SrH264FrameTarget *target,

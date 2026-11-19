@@ -408,7 +408,7 @@ atrac3p-title-accept:
 	$(CC) $(CFLAGS) -Isrc/rt/atrac3p -Isrc/rt/atrac3p/libavcodec \
 		-Isrc/rt/atrac3p/libavutil $(LDFLAGS) \
 		-o $(BUILD_DIR)/atrac3p_title_accept.exe \
-		src/rt/atrac3p_title_accept.c src/rt/atrac3p_bridge.c \
+		src/rt/atrac3p_title_accept.c src/rt/atrac3p_bridge.c src/rt/perf.c \
 		$(ATRAC3P_SRCS) src/rt/vfpu_tables.c -lm
 	$(BUILD_DIR)/atrac3p_title_accept.exe "$(ATRAC3P_TITLE)"
 
