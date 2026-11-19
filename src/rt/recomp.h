@@ -2792,6 +2792,10 @@ void     sched_delay_current(uint64_t usec);        /* block current thread for 
  * causes: when another thread is ready then, of any priority, that thread is dispatched first.
  * For the Ace load skip (nk_ace_load_skip_wait); see the definition in sched.c. */
 void     sched_delay_current_dispatching(uint64_t usec);
+/* sceKernelDelayThread[CB]'s own delay: 1 + the result when sceKernelReleaseWaitThread ended it
+ * (sched_release_thread_delay), 0 when it ran its course. */
+int      sched_delay_thread_current(uint64_t usec, uint32_t *result_out);
+int      sched_release_thread_delay(uint32_t thread_uid, uint32_t result);
 void     sched_preempt(void);                       /* yield now if a higher-priority thread is ready */
 /* Set by the preemption timer when a stronger thread's deadline comes. A long HLE call polls it
  * between units of work and, where the thread that runs cannot reach the call's own state (for
@@ -2903,8 +2907,8 @@ static inline int sr_vcount_window_crossed(uint32_t vcount, uint32_t period,
 }
 void     sched_set_current_cb_wait(int cb_wait);    /* mark running thread as callback-waiting */
 void     sched_wake_callbacks(uint32_t thread_uid); /* wake thread waiting in CB-wait */
-void     sched_thread_sleep(void);                  /* sceKernelSleepThread (wakeup-count) */
-void     sched_thread_sleep_cb(void);               /* sceKernelSleepThreadCB (wakeup-count) */
+uint32_t sched_thread_sleep(void);                  /* sceKernelSleepThread (wakeup-count); 0 or a release result */
+uint32_t sched_thread_sleep_cb(void);               /* sceKernelSleepThreadCB (wakeup-count); 0 or a release result */
 uint32_t sched_thread_wakeup(uint32_t uid);         /* sceKernelWakeupThread (banks if not asleep) */
 uint32_t sched_set_priority(uint32_t uid, int priority);   /* sceKernelChangeThreadPriority */
 uint32_t sched_change_current_thread_attr(uint32_t clear_mask, uint32_t set_mask); /* sceKernelChangeCurrentThreadAttr */
@@ -3002,7 +3006,10 @@ uint32_t sched_thread_exit_status(uint32_t uid);
 uint32_t sched_thread_stack_free_size(uint32_t uid);  /* sceKernelGetThreadStackFreeSize */
 /* The calling thread's user-visible stack range (sceKernelCheckThreadStack); 0 with no thread. */
 int      sched_current_thread_stack_range(uint32_t *base_out, uint32_t *size_out);
-/* High user-partition blocks, carved from the top of the thread-stack arena (sched.c). */
+/* High user-partition blocks, carved from the top of the thread-stack arena (sched.c). At most
+ * SR_SCHED_ARENA_HIGH_BLOCK_MAX are live at once (hle_internal.h HLE_MAX_PARTITION_BLOCKS); the
+ * arena's free-range table is sized from it. */
+#define SR_SCHED_ARENA_HIGH_BLOCK_MAX 256
 int      sched_partition_alloc_high(uint32_t size, uint32_t ceiling, uint32_t *base_out);
 void     sched_partition_release_high(uint32_t base, uint32_t size);
 /* Whether an address inside the thread-stack arena is free there; *end_out bounds the answer. */
@@ -3038,7 +3045,10 @@ static inline SrResumeStatus sched_resume_describe(uint32_t uid, SrResumeFrame *
     }
     return sr_resume_describe(stack, s_cpu, frames, capacity, count, detail, detail_cap);
 }
-void     sched_run(uint32_t entry, uint32_t arglen, uint32_t argp);  /* run from the entry thread */
+/* Run from the entry thread. 0 when the scheduler loop ends; SCHED_RUN_NO_ENTRY_THREAD when the
+ * entry (module_start) thread could not be created and no guest thread ran. */
+#define SCHED_RUN_NO_ENTRY_THREAD 1
+int      sched_run(uint32_t entry, uint32_t arglen, uint32_t argp);
 
 /* PSP callback ABI: SceKernelCallbackFunction(int count, int arg, void *common).
  * PPSSPP (__KernelRunCallbackOnThread) passes { notifyCount, notifyArg, commonArgument },
