@@ -157,7 +157,7 @@ def _coff_timestamp(data: bytes) -> int:
     """Return COFF ImageFileHeader.TimeDateStamp (little-endian uint32 at offset 4)."""
     if len(data) < 8:
         raise AssertionError(f"object file too short for COFF header ({len(data)} bytes)")
-    return struct.unpack_from("<I", data, 4)[0]
+    return int(struct.unpack_from("<I", data, 4)[0])
 
 
 def _pe_timestamp(data: bytes) -> int:
@@ -167,7 +167,7 @@ def _pe_timestamp(data: bytes) -> int:
     pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
     if len(data) < pe_offset + 12 or data[pe_offset:pe_offset + 4] != b"PE\x00\x00":
         raise AssertionError("linked output is missing the PE signature")
-    return struct.unpack_from("<I", data, pe_offset + 8)[0]
+    return int(struct.unpack_from("<I", data, pe_offset + 8)[0])
 
 
 class RecorderObjectTests(unittest.TestCase):
