@@ -9400,6 +9400,9 @@ static void test_play_mode_settings(void) {
         assert(info && info->key && info->name && info->sentence && info->value_count >= 2);
         for (int i = 0; i < info->value_count; i++) has_off = has_off || info->values[i] == 0;
         assert(has_off);
+        /* Audit 2026-11-17, F-bf5c0482: the table's ace_only is what tags and dims a game's
+           row, and the part's sentence says it (the screen test's fixture reads the sentence). */
+        assert(info->ace_only == (strncmp(info->sentence, "Ace only", 8) == 0));
     }
     assert(player_enhanced_part(PLAYER_PART_COUNT) == NULL);
     /* The screen test's fixture is the page a new settings file shows: same names, fresh-value
@@ -12762,6 +12765,53 @@ static void test_play_mode_title_page(void) {
     assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
     player_app_enhanced_page_cycle_part(app, PLAYER_PART_TEXT);
     assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
+    player_app_enhanced_page_set_mode(app, 1);
+    assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, 1);
+    assert(app->settings.enhanced.part[PLAYER_PART_FILTERING] == 8);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, 0);
+    assert(app->settings.enhanced.part[PLAYER_PART_FILTERING] == 16);
+    /* Audit 2026-11-17, F-d4cb7cec: on the library's page, a value past the part's list, the
+     * library default (-1, a game's choice only) and the play mode choices a game's page alone
+     * has (Enhanced and Ace, 2 and 3) change nothing. */
+    {
+        PlayerSettings *before = (PlayerSettings *)malloc(sizeof(PlayerSettings));
+        const PlayerEnhancedPartInfo *filtering = player_enhanced_part(PLAYER_PART_FILTERING);
+        assert(before && filtering);
+        memcpy(before, &app->settings, sizeof(*before));
+        player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, filtering->value_count);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, -1);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, -2);
+        player_app_enhanced_page_set_mode(app, 2);
+        player_app_enhanced_page_set_mode(app, 3);
+        player_app_enhanced_page_set_mode(app, -1);
+        assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
+        assert(app->active_view == VIEW_ACE_SETTINGS);
+        free(before);
+    }
+    /* Review of #2644, D1: with a preset the library's page shows the preset's value for a
+     * part the preset sets (Medium: Sharper enlarging on, over the library's own off).
+     * Picking the value the row shows changes nothing; picking another saves it and makes the
+     * preset Custom. */
+    {
+        const PlayerEnhancedPartInfo *upscale = player_enhanced_part(PLAYER_PART_UPSCALE);
+        const PlayerSettings kept = app->settings; /* leaving a preset keeps its values */
+        int shown;
+        assert(upscale && upscale->value_count == 2);
+        player_app_apply_graphics_preset(app, PLAYER_PRESET_MEDIUM);
+        shown = player_settings_library_part(&app->settings, PLAYER_PART_UPSCALE);
+        assert(app->settings.graphics_preset == PLAYER_PRESET_MEDIUM);
+        assert(shown == upscale->values[0] &&
+               app->settings.enhanced.part[PLAYER_PART_UPSCALE] == upscale->values[1]);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_UPSCALE, 0);   /* as shown */
+        assert(app->settings.graphics_preset == PLAYER_PRESET_MEDIUM);
+        assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == upscale->values[1]);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_UPSCALE, 1);   /* Off */
+        assert(app->settings.graphics_preset == PLAYER_PRESET_CUSTOM);
+        assert(player_settings_library_part(&app->settings, PLAYER_PART_UPSCALE) ==
+               upscale->values[1]);
+        app->settings = kept;
+    }
     player_app_close_enhanced_page(app);
     assert(app->active_view == VIEW_SETTINGS);
 
@@ -12770,6 +12820,29 @@ static void test_play_mode_title_page(void) {
     player_app_enhanced_page_cycle_mode(app);                     /* the title's choice */
     assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_AUTHENTIC);
     assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+    player_app_enhanced_page_set_mode(app, 2);
+    assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_ENHANCED);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, 0);
+    assert(player_app_title_part(app, 1, PLAYER_PART_TEXT) == 1);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, -1);
+    assert(player_app_title_part(app, 1, PLAYER_PART_TEXT) == -1);
+    /* Audit 2026-11-17, F-d4cb7cec: Ace for a game without its package is refused, and a value
+     * or a mode choice past its list changes nothing. */
+    {
+        PlayerSettings *before = (PlayerSettings *)malloc(sizeof(PlayerSettings));
+        const PlayerEnhancedPartInfo *text = player_enhanced_part(PLAYER_PART_TEXT);
+        assert(before && text && !app->title_enhancements[1].available);
+        memcpy(before, &app->settings, sizeof(*before));
+        player_app_enhanced_page_set_mode(app, 3);
+        assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_ENHANCED);
+        player_app_enhanced_page_set_mode(app, 4);
+        player_app_enhanced_page_set_mode(app, -1);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, text->value_count);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, -2);
+        assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
+        assert(app->active_view == VIEW_ACE_SETTINGS && player_app_enhanced_page_title(app) == 1);
+        free(before);
+    }
     player_app_enhanced_page_cycle_part(app, PLAYER_PART_TEXT);   /* library -> on */
     assert(player_app_title_part(app, 1, PLAYER_PART_TEXT) == 1);
     assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
@@ -12808,6 +12881,17 @@ static void test_play_mode_title_page(void) {
         player_app_set_view(app, VIEW_ACE_SETTINGS);              /* the gone game's page again */
         memcpy(app->enhanced_page_disc, "TEST92002", sizeof("TEST92002"));
         player_app_enhanced_page_cycle_mode(app);
+        assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
+        assert(app->active_view == VIEW_LIBRARY);
+        /* Audit 2026-11-17, F-d4cb7cec: the setters the page's values call do the same. */
+        player_app_set_view(app, VIEW_ACE_SETTINGS);
+        memcpy(app->enhanced_page_disc, "TEST92002", sizeof("TEST92002"));
+        player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, 0);
+        assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
+        assert(app->active_view == VIEW_LIBRARY);
+        player_app_set_view(app, VIEW_ACE_SETTINGS);
+        memcpy(app->enhanced_page_disc, "TEST92002", sizeof("TEST92002"));
+        player_app_enhanced_page_set_mode(app, 1);
         assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
         assert(app->active_view == VIEW_LIBRARY);
 

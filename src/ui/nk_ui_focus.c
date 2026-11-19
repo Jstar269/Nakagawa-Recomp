@@ -12,11 +12,16 @@
    overlap and the center distance along y otherwise.
    Vertical moves: main is the center distance along y; cross is 0.3 * |dx| when the
    columns overlap and |dx| otherwise. Ties go to reading order (top, then left,
-   then declaration order). */
+   then declaration order). An entry that names its up or down neighbour moves there
+   instead, when that neighbour can take focus. An entry clipped away whole by its scroll
+   container is a candidate only for moves from inside that container. */
 #define NK_UI_FOCUS_EPS 0.01f
 #define NK_UI_FOCUS_TIE 0.0001f
 #define NK_UI_FOCUS_COLUMN_WEIGHT 0.3f
 #define NK_UI_FOCUS_CROSS_WEIGHT 2.0f
+/* Layouts after a focus change that bring the focused entry into view again: the one the
+   change itself shapes, and the one after the scroll that answers it. */
+#define NK_UI_FOCUS_REVEAL_FRAMES 2
 
 struct NkUiFocusGraph {
     NkUiFocusEntry *entries;
@@ -27,9 +32,16 @@ struct NkUiFocusGraph {
     size_t scroller_capacity;
     NkUiId focused;
     NkUiId memory[NK_UI_FOCUS_MAX_SCOPES];
-    bool has_scroll;
-    NkUiFocusScrollRequest scroll;
+    /* The scrolls that bring the focused entry into view, innermost container first. */
+    size_t scroll_count;
+    NkUiFocusScrollRequest scroll[NK_UI_FOCUS_SCROLL_DEPTH];
+    /* Layouts still to come after a focus change on which the entry is brought into view
+       again (nk_ui_focus_place). */
+    int reveal_frames;
 };
+
+static size_t nk_ui_focus_reveal(const NkUiFocusGraph *graph, NkUiId id,
+                                 NkUiFocusScrollRequest *out, size_t cap);
 
 static bool nk_ui_focus_rect_valid(NkUiRect r) {
     return isfinite(r.x) && isfinite(r.y) && isfinite(r.w) && isfinite(r.h) &&
@@ -73,8 +85,90 @@ static int nk_ui_focus_top_scope(const NkUiFocusEntry *entries, size_t count) {
     return top;
 }
 
+static const NkUiFocusScroller *nk_ui_focus_scroller(const NkUiFocusScroller *scrollers,
+                                                     size_t scroller_count, NkUiId id) {
+    size_t i;
+    for (i = 0; id != 0u && scrollers != NULL && i < scroller_count; ++i) {
+        if (scrollers[i].id == id) {
+            return &scrollers[i];
+        }
+    }
+    return NULL;
+}
+
+/* Whether scroll container `inner` is `outer` or sits inside it. */
+static bool nk_ui_focus_scroller_inside(const NkUiFocusScroller *scrollers,
+                                        size_t scroller_count, NkUiId inner, NkUiId outer) {
+    int depth;
+    for (depth = 0; inner != 0u && depth < NK_UI_FOCUS_SCROLL_DEPTH; ++depth) {
+        const NkUiFocusScroller *s;
+        if (inner == outer) {
+            return true;
+        }
+        s = nk_ui_focus_scroller(scrollers, scroller_count, inner);
+        inner = s != NULL ? s->parent : 0u;
+    }
+    return false;
+}
+
+static bool nk_ui_focus_in_viewport(NkUiRect rect, const NkUiFocusScroller *s) {
+    return nk_ui_focus_overlap(rect.y, rect.y + rect.h, s->viewport.y,
+                               s->viewport.y + s->viewport.h) &&
+           nk_ui_focus_overlap(rect.x, rect.x + rect.w, s->viewport.x,
+                               s->viewport.x + s->viewport.w);
+}
+
+/* Whether a move from `from` may land on `cand`: an entry that its scroll container clips
+   away whole is reached only from inside that container (its neighbours scroll it into
+   view), never from a control outside it, which would jump to something not on screen. A
+   control in a container nested in that one is inside it: the last row of a list in a page
+   that scrolls reaches the button under the list, though the page has it out of view. A
+   container that shows none of its controls (a page body scrolled to a stretch of text) has
+   nothing on screen to enter by, so there its clipped controls are targets as they were
+   before, and the one a move lands on is scrolled into view. Each container around the
+   entry is judged the same way, out to the first one that holds `from`: a row its list
+   shows is still not on screen when the page the list sits in has the whole list out of
+   view. */
+static bool nk_ui_focus_on_screen_for(const NkUiFocusEntry *entries, size_t count,
+                                      const NkUiFocusEntry *from, const NkUiFocusEntry *cand,
+                                      const NkUiFocusScroller *scrollers,
+                                      size_t scroller_count) {
+    NkUiId container = cand->scroller;
+    int depth;
+    if (scrollers == NULL) {
+        return true;
+    }
+    for (depth = 0; container != 0u && depth < NK_UI_FOCUS_SCROLL_DEPTH; ++depth) {
+        const NkUiFocusScroller *s;
+        size_t i;
+        if (nk_ui_focus_scroller_inside(scrollers, scroller_count, from->scroller,
+                                        container)) {
+            return true;
+        }
+        s = nk_ui_focus_scroller(scrollers, scroller_count, container);
+        if (s == NULL) {
+            return true;
+        }
+        if (!nk_ui_focus_in_viewport(cand->rect, s)) {
+            for (i = 0; i < count; ++i) {
+                const NkUiFocusEntry *e = &entries[i];
+                if (e != from && nk_ui_focus_enabled(e) && e->scope == cand->scope &&
+                    (e->flags & NK_UI_FOCUS_POINTER_ONLY) == 0u &&
+                    nk_ui_focus_scroller_inside(scrollers, scroller_count, e->scroller,
+                                                container) &&
+                    nk_ui_focus_in_viewport(e->rect, s)) {
+                    return false;
+                }
+            }
+        }
+        container = s->parent;
+    }
+    return true;
+}
+
 static long nk_ui_focus_pick(const NkUiFocusEntry *entries, size_t count,
-                             size_t current, NkUiNavDir dir) {
+                             size_t current, NkUiNavDir dir,
+                             const NkUiFocusScroller *scrollers, size_t scroller_count) {
     const NkUiFocusEntry *from = &entries[current];
     float from_cx = nk_ui_focus_cx(from->rect);
     float from_cy = nk_ui_focus_cy(from->rect);
@@ -89,6 +183,17 @@ static long nk_ui_focus_pick(const NkUiFocusEntry *entries, size_t count,
     if (horizontal && (from->flags & NK_UI_FOCUS_OWNS_HORIZONTAL) != 0u) {
         return -1;
     }
+    /* A named neighbour wins over position (the tab strip's active tab, however far to the
+       side it sits from a full-width row). */
+    if (!horizontal) {
+        NkUiId named = dir == NK_UI_DIR_UP ? from->up : from->down;
+        long to = nk_ui_focus_find(entries, count, named);
+        if (to >= 0 && (size_t)to != current && nk_ui_focus_enabled(&entries[to]) &&
+            entries[to].scope == from->scope &&
+            (entries[to].flags & NK_UI_FOCUS_POINTER_ONLY) == 0u) {
+            return to;
+        }
+    }
     for (i = 0; i < count; ++i) {
         const NkUiFocusEntry *cand = &entries[i];
         float dx;
@@ -97,7 +202,9 @@ static long nk_ui_focus_pick(const NkUiFocusEntry *entries, size_t count,
         float cross;
         float score;
         bool in_half_plane;
-        if (i == current || !nk_ui_focus_enabled(cand) || cand->scope != from->scope) {
+        if (i == current || !nk_ui_focus_enabled(cand) || cand->scope != from->scope ||
+            (cand->flags & NK_UI_FOCUS_POINTER_ONLY) != 0u ||
+            !nk_ui_focus_on_screen_for(entries, count, from, cand, scrollers, scroller_count)) {
             continue;
         }
         dx = nk_ui_focus_cx(cand->rect) - from_cx;
@@ -166,7 +273,7 @@ NkUiId nk_ui_focus_directional(const NkUiFocusEntry *entries, size_t count,
     if (cur < 0) {
         return current;
     }
-    next = nk_ui_focus_pick(entries, count, (size_t)cur, direction);
+    next = nk_ui_focus_pick(entries, count, (size_t)cur, direction, NULL, 0u);
     return next >= 0 ? entries[next].id : current;
 }
 
@@ -251,32 +358,35 @@ static NkUiId nk_ui_focus_enter_scope(const NkUiFocusGraph *graph, int scope) {
     }
     found = nk_ui_focus_find(graph->entries, graph->count, graph->memory[scope]);
     if (found >= 0 && nk_ui_focus_enabled(&graph->entries[found]) &&
-        (int)graph->entries[found].scope == scope) {
+        (int)graph->entries[found].scope == scope &&
+        (graph->entries[found].flags & NK_UI_FOCUS_POINTER_ONLY) == 0u) {
         return graph->entries[found].id;
     }
     for (i = 0; i < graph->count; ++i) {
         const NkUiFocusEntry *e = &graph->entries[i];
         if ((int)e->scope == scope && nk_ui_focus_enabled(e) &&
-            (e->flags & NK_UI_FOCUS_DEFAULT) != 0u) {
+            (e->flags & NK_UI_FOCUS_DEFAULT) != 0u &&
+            (e->flags & NK_UI_FOCUS_POINTER_ONLY) == 0u) {
             return e->id;
         }
     }
     for (i = 0; i < graph->count; ++i) {
         const NkUiFocusEntry *e = &graph->entries[i];
         if ((int)e->scope == scope && nk_ui_focus_enabled(e) &&
-            (e->flags & NK_UI_FOCUS_NO_DEFAULT) == 0u) {
+            (e->flags & (NK_UI_FOCUS_NO_DEFAULT | NK_UI_FOCUS_POINTER_ONLY)) == 0u) {
             return e->id;
         }
     }
     return 0u;
 }
 
-/* The scope's first enabled entry, a destructive one included. */
+/* The scope's first enabled entry that keys can reach, a destructive one included. */
 static NkUiId nk_ui_focus_first_enabled(const NkUiFocusGraph *graph, int scope) {
     size_t i;
     for (i = 0; i < graph->count; ++i) {
         const NkUiFocusEntry *e = &graph->entries[i];
-        if ((int)e->scope == scope && nk_ui_focus_enabled(e)) {
+        if ((int)e->scope == scope && nk_ui_focus_enabled(e) &&
+            (e->flags & NK_UI_FOCUS_POINTER_ONLY) == 0u) {
             return e->id;
         }
     }
@@ -311,6 +421,15 @@ void nk_ui_focus_place(NkUiFocusGraph *graph,
             s->scroll_y = scroll_y;
             s->content_h = content_h;
         }
+    }
+    /* A move is judged on the layout before it, and the layout it leads to can differ: a
+       panel that describes the focused control changes height with it and pushes the
+       control down the page, part of it out of view. So the layouts just after a focus
+       change bring the focused entry into view again, where they put it. */
+    if (graph->reveal_frames > 0) {
+        --graph->reveal_frames;
+        graph->scroll_count = nk_ui_focus_reveal(graph, graph->focused, graph->scroll,
+                                                 NK_UI_FOCUS_SCROLL_DEPTH);
     }
 }
 
@@ -365,62 +484,104 @@ NkUiId nk_ui_focus_remembered(const NkUiFocusGraph *graph, uint32_t scope) {
     return graph->memory[scope];
 }
 
-bool nk_ui_focus_scroll_into_view(const NkUiFocusGraph *graph, NkUiId id,
-                                  NkUiFocusScrollRequest *request) {
-    long idx;
-    size_t i;
-    const NkUiFocusEntry *e;
-    const NkUiFocusScroller *s = NULL;
-    float nx;
-    float ny;
-    float max_x;
-    float max_y;
-    if (graph == NULL || request == NULL) {
-        return false;
+/* The scroll that shows `rect` whole in container s, or as much of it from its top left as
+   fits (minimal movement). Returns false when s need not move. *rect becomes the part of
+   it s shows after that scroll. */
+static bool nk_ui_focus_scroll_for(const NkUiFocusScroller *s, NkUiRect *rect,
+                                   NkUiFocusScrollRequest *request) {
+    float nx = s->scroll_x;
+    float ny = s->scroll_y;
+    float max_x = s->content_w - s->viewport.w;
+    float max_y = s->content_h - s->viewport.h;
+    float x0;
+    float y0;
+    float x1;
+    float y1;
+    if (rect->y < s->viewport.y || rect->h > s->viewport.h) {
+        ny += rect->y - s->viewport.y;
+    } else if (rect->y + rect->h > s->viewport.y + s->viewport.h) {
+        ny += (rect->y + rect->h) - (s->viewport.y + s->viewport.h);
     }
-    idx = nk_ui_focus_find(graph->entries, graph->count, id);
-    if (idx < 0 || graph->entries[idx].scroller == 0u) {
-        return false;
-    }
-    e = &graph->entries[idx];
-    for (i = 0; i < graph->scroller_count; ++i) {
-        if (graph->scrollers[i].id == e->scroller) {
-            s = &graph->scrollers[i];
-            break;
-        }
-    }
-    if (s == NULL) {
-        return false;
-    }
-    nx = s->scroll_x;
-    ny = s->scroll_y;
-    if (e->rect.y < s->viewport.y || e->rect.h > s->viewport.h) {
-        ny += e->rect.y - s->viewport.y;
-    } else if (e->rect.y + e->rect.h > s->viewport.y + s->viewport.h) {
-        ny += (e->rect.y + e->rect.h) - (s->viewport.y + s->viewport.h);
-    }
-    if (e->rect.x < s->viewport.x || e->rect.w > s->viewport.w) {
-        nx += e->rect.x - s->viewport.x;
-    } else if (e->rect.x + e->rect.w > s->viewport.x + s->viewport.w) {
-        nx += (e->rect.x + e->rect.w) - (s->viewport.x + s->viewport.w);
+    if (rect->x < s->viewport.x || rect->w > s->viewport.w) {
+        nx += rect->x - s->viewport.x;
+    } else if (rect->x + rect->w > s->viewport.x + s->viewport.w) {
+        nx += (rect->x + rect->w) - (s->viewport.x + s->viewport.w);
     }
     /* nk_ui's scrollers are vertical (content_w is the viewport width), so nx clamps
        to 0 there; the horizontal half serves hosts that register wider content. */
-    max_x = s->content_w - s->viewport.w;
-    max_y = s->content_h - s->viewport.h;
     if (max_x < 0.0f) max_x = 0.0f;
     if (max_y < 0.0f) max_y = 0.0f;
     if (nx > max_x) nx = max_x;
     if (ny > max_y) ny = max_y;
     if (nx < 0.0f) nx = 0.0f;
     if (ny < 0.0f) ny = 0.0f;
-    if (nx == s->scroll_x && ny == s->scroll_y) {
-        return false;
-    }
     request->scroller = s->id;
     request->scroll_x = nx;
     request->scroll_y = ny;
+    x0 = rect->x - (nx - s->scroll_x);
+    y0 = rect->y - (ny - s->scroll_y);
+    x1 = x0 + rect->w;
+    y1 = y0 + rect->h;
+    if (x0 < s->viewport.x) x0 = s->viewport.x;
+    if (y0 < s->viewport.y) y0 = s->viewport.y;
+    if (x1 > s->viewport.x + s->viewport.w) x1 = s->viewport.x + s->viewport.w;
+    if (y1 > s->viewport.y + s->viewport.h) y1 = s->viewport.y + s->viewport.h;
+    rect->x = x0;
+    rect->y = y0;
+    rect->w = x1 > x0 ? x1 - x0 : 0.0f;
+    rect->h = y1 > y0 ? y1 - y0 : 0.0f;
+    return nx != s->scroll_x || ny != s->scroll_y;
+}
+
+bool nk_ui_focus_scroll_into_view(const NkUiFocusGraph *graph, NkUiId id,
+                                  NkUiFocusScrollRequest *request) {
+    long idx;
+    const NkUiFocusScroller *s;
+    NkUiFocusScrollRequest found;
+    NkUiRect rect;
+    if (graph == NULL || request == NULL) {
+        return false;
+    }
+    idx = nk_ui_focus_find(graph->entries, graph->count, id);
+    if (idx < 0) {
+        return false;
+    }
+    s = nk_ui_focus_scroller(graph->scrollers, graph->scroller_count,
+                             graph->entries[idx].scroller);
+    rect = graph->entries[idx].rect;
+    if (s == NULL || !nk_ui_focus_scroll_for(s, &rect, &found)) {
+        return false;
+    }
+    *request = found;
     return true;
+}
+
+/* The scrolls that bring entry id into view: its own container's, then the one of each
+   container around that, which has to show what the container inside it shows of the
+   entry. Returns how many were written to out. */
+static size_t nk_ui_focus_reveal(const NkUiFocusGraph *graph, NkUiId id,
+                                 NkUiFocusScrollRequest *out, size_t cap) {
+    long idx = nk_ui_focus_find(graph->entries, graph->count, id);
+    const NkUiFocusScroller *s;
+    NkUiRect rect;
+    size_t count = 0u;
+    int depth;
+    if (idx < 0) {
+        return 0u;
+    }
+    rect = graph->entries[idx].rect;
+    s = nk_ui_focus_scroller(graph->scrollers, graph->scroller_count,
+                             graph->entries[idx].scroller);
+    for (depth = 0; s != NULL && count < cap && depth < NK_UI_FOCUS_SCROLL_DEPTH; ++depth) {
+        if (nk_ui_focus_scroll_for(s, &rect, &out[count])) {
+            ++count;
+        }
+        if (rect.w <= 0.0f || rect.h <= 0.0f) {
+            break;
+        }
+        s = nk_ui_focus_scroller(graph->scrollers, graph->scroller_count, s->parent);
+    }
+    return count;
 }
 
 static void nk_ui_focus_commit(NkUiFocusGraph *graph, NkUiId id, int scope) {
@@ -428,7 +589,9 @@ static void nk_ui_focus_commit(NkUiFocusGraph *graph, NkUiId id, int scope) {
     if (scope >= 0 && scope < NK_UI_FOCUS_MAX_SCOPES) {
         graph->memory[scope] = id;
     }
-    graph->has_scroll = nk_ui_focus_scroll_into_view(graph, id, &graph->scroll);
+    graph->scroll_count = nk_ui_focus_reveal(graph, id, graph->scroll,
+                                             NK_UI_FOCUS_SCROLL_DEPTH);
+    graph->reveal_frames = NK_UI_FOCUS_REVEAL_FRAMES;
 }
 
 bool nk_ui_focus_set(NkUiFocusGraph *graph, NkUiId id) {
@@ -480,7 +643,8 @@ NkUiId nk_ui_focus_move(NkUiFocusGraph *graph, NkUiNavDir direction) {
         nk_ui_focus_commit(graph, first, top);
         return graph->focused;
     }
-    next = nk_ui_focus_pick(graph->entries, graph->count, (size_t)cur, direction);
+    next = nk_ui_focus_pick(graph->entries, graph->count, (size_t)cur, direction,
+                            graph->scrollers, graph->scroller_count);
     if (next < 0) {
         return 0u;
     }
@@ -513,7 +677,8 @@ NkUiId nk_ui_focus_cycle(NkUiFocusGraph *graph, bool reverse) {
     for (i = 1; i <= n; ++i) {
         size_t idx = reverse ? (start + n - (i % n)) % n : (start + i) % n;
         const NkUiFocusEntry *e = &graph->entries[idx];
-        if (nk_ui_focus_enabled(e) && (int)e->scope == top) {
+        if (nk_ui_focus_enabled(e) && (int)e->scope == top &&
+            ((e->flags & NK_UI_FOCUS_POINTER_ONLY) == 0u || (cur >= 0 && idx == (size_t)cur))) {
             if (cur >= 0 && idx == (size_t)cur) {
                 return 0u; /* the only focusable entry: nothing moves */
             }
@@ -525,11 +690,15 @@ NkUiId nk_ui_focus_cycle(NkUiFocusGraph *graph, bool reverse) {
 }
 
 bool nk_ui_focus_take_scroll(NkUiFocusGraph *graph, NkUiFocusScrollRequest *request) {
-    if (graph == NULL || request == NULL || !graph->has_scroll) {
+    size_t i;
+    if (graph == NULL || request == NULL || graph->scroll_count == 0u) {
         return false;
     }
-    *request = graph->scroll;
-    graph->has_scroll = false;
+    *request = graph->scroll[0];
+    --graph->scroll_count;
+    for (i = 0; i < graph->scroll_count; ++i) {
+        graph->scroll[i] = graph->scroll[i + 1u];
+    }
     return true;
 }
 

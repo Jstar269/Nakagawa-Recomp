@@ -87,6 +87,14 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   1 to 8 before starting the player: it replaces the speed's job count (a Background build stays
   at low priority), and the build log and screen say so. `nk_cli.py build-package` takes the
   same speeds as `--build-speed`.
+- **Enhanced options page.** The shared Graphics preset and Play mode stay above six tabs: Picture, Motion, Sound,
+  Controls, On-screen and Advanced. The same tabs appear on the library and each game's Enhanced options page. Each
+  option is one row with all of its values. Up and Down move from row to row, Left and Right change the focused
+  row's value, and a click picks a value; Q and E, or a controller's shoulder buttons, change tabs. A panel on the
+  right shows the focused option's value, description and caveats, and the graphics preset's note. On a game's page,
+  inherited values appear as `Library (value)` and a game's own value is highlighted. Ace-only options carry a tag,
+  and options that cannot apply as the page stands stay visible but dimmed, with the reason in the panel. Frame
+  pacing is on Motion. A game's Texture pack folder and Remove texture pack rows are the last rows of Picture.
 - **Texture scaling and the Smart 2D filter.** Two parts of Enhanced and Ace, off by default and in no graphics
   preset: Settings > Enhanced offers **Texture scaling** (2x to 6x, or Off) and **Smart 2D filter** (On or Off), for
   the library or for one game. Texture scaling draws each texture from a larger copy made with xBRZ. The Smart 2D
