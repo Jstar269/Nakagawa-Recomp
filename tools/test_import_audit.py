@@ -274,17 +274,6 @@ class ExportTableTests(unittest.TestCase):
             parse_export_table(build_module_elf(exports))
         self.assertEqual(psp_import_table.MAX_EXPORTS_PER_LIB, runtime_cap)
 
-    def test_export_count_cap_matches_the_runtime_loader(self) -> None:
-        runtime = (ROOT / "src" / "rt" / "hle_kernel_module.c").read_text(encoding="utf-8")
-        loader = runtime.split("unsigned register_prx_exports", 1)[1].split("\n}", 1)[0]
-        match = re.search(r"\bcount\s*>\s*(\d+)", loader)
-        self.assertIsNotNone(match, "runtime export count cap was not found")
-        runtime_cap = int(match.group(1))
-        oversized = [("SyntheticLarge", 0x4000, list(range(runtime_cap + 1)), [])]
-        with self.assertRaises(ImportTableError):
-            parse_export_table(build_module_elf(oversized))
-        self.assertEqual(psp_import_table.MAX_EXPORTS_PER_LIB, runtime_cap)
-
 
 class InterleavedImportTests(unittest.TestCase):
     """The interleaved stub-table shape (35 of 51 slots) this model was

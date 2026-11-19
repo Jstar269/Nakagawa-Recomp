@@ -59,7 +59,9 @@ TRACE_STATE_NAMES = tuple(
 RECORD_WORDS = 2 + len(TRACE_STATE_NAMES) + 2   # pc, op, selected state, store address/value
 STORE_BITS = {0x28: 8, 0x29: 16, 0x2B: 32}     # sb, sh, sw: the store width follows from the op
 END_REACHED = 0
-LOCAL_TRACE_TIMEOUT_SECONDS = 5.0
+# Host-side bound on one traced driver run (a few dozen steps). It is generous because a newly
+# built executable can take seconds to start on a loaded host.
+LOCAL_TRACE_TIMEOUT_SECONDS = 30.0
 
 
 class InsnTraceError(ValueError):
@@ -362,10 +364,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         data = parse_fixtures(FIXTURES_H)
     except (InsnTraceError, OSError, UnicodeError, ValueError, KeyError) as exc:
-        print(
-            f"REJECTED: fixture header could not be parsed ({type(exc).__name__})",
-            file=sys.stderr,
-        )
+        detail = str(exc) if isinstance(exc, InsnTraceError) else type(exc).__name__
+        print(f"REJECTED: fixture header could not be parsed ({detail})", file=sys.stderr)
         return 2
     if args.command == "local":
         fixture_ids = {fixture["id"] for fixture in data["fixtures"]}

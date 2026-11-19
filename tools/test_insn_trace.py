@@ -484,7 +484,9 @@ class ConversionTests(unittest.TestCase):
             ), patch.object(insn_trace.subprocess, "run", side_effect=timeout) as run:
                 with self.assertRaisesRegex(insn_trace.InsnTraceError, "timed out"):
                     insn_trace.local_records(fixture, data["consts"], Path(name))
-            self.assertLessEqual(run.call_args.kwargs["timeout"], 5.0)
+            self.assertEqual(
+                run.call_args.kwargs["timeout"], insn_trace.LOCAL_TRACE_TIMEOUT_SECONDS
+            )
 
     def test_trace_modes_do_not_leave_partial_or_stale_files_after_rejection(self) -> None:
         data = {

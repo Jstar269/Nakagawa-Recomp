@@ -3676,7 +3676,10 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
             binary = root / "transport-write.prx"
             binary.write_bytes(b"synthetic PRX")
             link = root / "nakagawa_transport_write.bin"
-            link.symlink_to(root / "missing-target.bin")
+            try:
+                link.symlink_to(root / "missing-target.bin")
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symbolic links are unavailable in this environment: {exc}")
             transport = SimulatedPsplinkTransport()
             transport.host0_root = root
             runner = PsplinkCampaignRunner(
@@ -3702,7 +3705,10 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
             target = root / "target.bin"
             target.write_bytes(expected)
             link = root / "nakagawa_transport_write.bin"
-            link.symlink_to(target)
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symbolic links are unavailable in this environment: {exc}")
             transport = SimulatedPsplinkTransport()
             transport.host0_root = root
             runner = PsplinkCampaignRunner(
@@ -4142,6 +4148,23 @@ class CampaignCheckpointTransitionTests(unittest.TestCase):
             _checkpoint_state(next_case_index=0), case_count=self.CASES
         )
         self.assertEqual(start, 0)
+
+    def test_stop_without_a_named_case_keeps_the_carried_lost_case(self):
+        resumed = _checkpoint_case_started(
+            _checkpoint_state(
+                next_case_index=3, failed_case_id="kernel-alarm", host0_qualified=True,
+                interrupted_cases=["kernel-alarm"],
+            ),
+            3, "wait-outcomes", "RESET_BEFORE_CASE", device_boot_number=42,
+        )
+        final = _checkpoint_after_run(
+            resumed, terminal_reason="PHYSICAL_INTERVENTION_REQUIRED",
+            intervention_case_id=None, resume_case_index=3, case_count=self.CASES,
+        )
+        self.assertEqual(final["state"], "WAITING_FOR_NEW_QUALIFIED_BOOT")
+        self.assertEqual(final["next_case_index"], 3)
+        self.assertEqual(final["interrupted_cases"], ["kernel-alarm"])
+        self.assertEqual(final["failed_case_id"], "kernel-alarm")
 
     def test_checkpoint_write_fsyncs_and_removes_temporary_file_on_replace_failure(self):
         fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"

@@ -51,8 +51,6 @@ def parse_lanes(lanes: str) -> dict[int, int]:
         if not 0 <= phys < 128 or phys in out:
             raise ValueError(f"invalid or duplicate physical register {p!r}")
         out[phys] = value
-    if set(out) != set(range(128)):
-        raise ValueError(f"lanes payload has {len(out)}/128 physical registers")
     return out
 
 

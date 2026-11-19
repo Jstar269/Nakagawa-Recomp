@@ -221,28 +221,6 @@ class LockHelperTests(MatrixTestCase):
         self.assertEqual(boot, 70)
         self.assertEqual(status, "HELD_AND_QUALIFIED")
 
-    def test_note_launch_merges_a_lock_update_between_its_reads(self) -> None:
-        self.device()
-        original_read = Path.read_text
-        original_write = Path.write_text
-        injected = False
-
-        def update_between_reads(path, *args, **kwargs):
-            nonlocal injected
-            text = original_read(path, *args, **kwargs)
-            if path == self.lock_path and not injected:
-                changed = json.loads(text)
-                changed["device_state_attestation"]["watchdog_state"]["remaining_s"] = 17
-                original_write(path, json.dumps(changed), encoding="utf-8")
-                injected = True
-            return text
-
-        with patch.object(Path, "read_text", autospec=True, side_effect=update_between_reads):
-            om.note_launch(self.lock_path, SESSION, "concurrent writer test")
-        final = json.loads(original_read(self.lock_path, encoding="utf-8"))
-        self.assertEqual(final["device_state_attestation"]["watchdog_state"]["remaining_s"], 17)
-        self.assertIn("concurrent writer test", final["probes_run"][-1])
-
     def test_note_launch_uses_the_runner_atomic_json_writer(self) -> None:
         self.device()
         writer = om._runner._write_campaign_json
@@ -255,25 +233,37 @@ class LockHelperTests(MatrixTestCase):
         fixture_build = om.ROOT / "tests" / "fixtures" / "psp_oracle" / "build"
         fixture_build.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="matrix-timeout-tree-", dir=fixture_build) as name:
-            marker = Path(name) / "descendant-finished.txt"
+            # The command starts a descendant that inherits its stdout and stderr. The descendant
+            # reports that it runs, and six seconds later would write a second file. The three-second
+            # bound gives both interpreters time to start, so the timeout is taken with the descendant
+            # alive and holding the capture pipes.
+            running = Path(name) / "descendant-running.txt"
+            finished = Path(name) / "descendant-finished.txt"
             child = (
-                "import pathlib,sys,time; time.sleep(1.25); "
-                "pathlib.Path(sys.argv[1]).write_text('finished')"
+                "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('running'); "
+                "time.sleep(6); pathlib.Path(sys.argv[2]).write_text('finished')"
             )
             parent = (
                 "import subprocess,sys,time; "
-                "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]], "
+                "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2],sys.argv[3]], "
                 "stdout=sys.stdout,stderr=sys.stderr); "
-                "time.sleep(10)"
+                "time.sleep(30)"
             )
             started = time.monotonic()
             code, _stdout, _stderr = om.run_command(
-                [sys.executable, "-c", parent, child, str(marker)], 0.05
+                [sys.executable, "-c", parent, child, str(running), str(finished)], 3.0
             )
             elapsed = time.monotonic() - started
+            was_running = running.exists()
+            # Outlive the descendant's own six seconds: a survivor writes its second file.
+            while time.monotonic() - started < 7.5 and not finished.exists():
+                time.sleep(0.1)
+            survived = finished.exists()
         self.assertIsNone(code)
-        self.assertLess(elapsed, 1.0)
-        self.assertFalse(marker.exists())
+        self.assertTrue(was_running, "the descendant had not started when the command timed out")
+        # Without the tree stop the capture pipes stay open until the descendant exits.
+        self.assertLess(elapsed, 5.5)
+        self.assertFalse(survived, "the descendant outlived the timed-out command")
 
     def test_probe_command_report_uses_the_last_trailing_json_object(self) -> None:
         report = om._probe_command_report(
@@ -513,6 +503,10 @@ class MatrixExecutionTests(MatrixTestCase):
         self.assertEqual(report["state"], "COMPLETE")
         notes = self.lock()["probes_run"]
         self.assertEqual(len(notes), 6)
+        self.assertIn("boot 71, launching transport-write + delay-zero", notes[0])
+        self.assertIn("delay-zero on boot 71: ACCEPTED", notes[1])
+        saved = json.loads(plan.report_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["accepted"], report["accepted"])
 
     def test_changed_staged_prx_is_refused_before_the_next_reset(self) -> None:
         plan = self.load(self.CASES[:2])
@@ -710,8 +704,6 @@ class MatrixExecutionTests(MatrixTestCase):
         code, report = self.runner(plan, device).execute()
         self.assertEqual(code, 2)
         self.assertEqual(report["outcomes"][0]["status"], om.NOT_ELIGIBLE)
-        saved = json.loads(plan.report_path.read_text(encoding="utf-8"))
-        self.assertEqual(saved["accepted"], report["accepted"])
 
     def test_crashing_case_is_contained_and_never_accepted(self) -> None:
         plan = self.load(self.CASES)

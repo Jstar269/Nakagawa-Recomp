@@ -14,7 +14,9 @@ A matrix plan names a source commit and an ordered list of probe cases. This too
    than every boot this matrix has already seen;
 3. launches ``transport-write`` plus the case through the configured probe command
    (normally the resident agent's guarded ``probe`` wrapper around
-   ``tools/psp_oracle/run_psplink.py``, or the runner itself);
+   ``tools/psp_oracle/run_psplink.py``). The last JSON object the command prints must
+   carry a ``boots`` list that names the launch boot; a command that prints none, such
+   as the bare runner, leaves the reboot state unknown and its launch is never accepted;
 4. accepts a case only from a runner report written by that launch whose envelopes
    carry the plan's source commit, the staged PRX digests, the expected firmware and
    a host0 run window that starts after the launch; and
@@ -465,22 +467,22 @@ def attested_boot(path: Path, session_id: str) -> tuple[int | None, str]:
 
 
 def note_launch(path: Path, session_id: str, text: str) -> None:
-    """Append one session-owned probe note while retaining the latest lock fields."""
+    """Append one ``probes_run`` line to the lock this session holds (read, then atomic replace).
+
+    The lock file has no writer-side locking: a field another writer changes between this read
+    and the replace is overwritten.
+    """
 
     lock = _read_lock(path)
     problem = lock_holder_problem(lock, session_id)
     if problem:
         raise MatrixError(problem)
-    latest = _read_lock(path)
-    problem = lock_holder_problem(latest, session_id)
-    if problem:
-        raise MatrixError(problem)
-    runs = latest.get("probes_run")
-    latest["probes_run"] = [
+    runs = lock.get("probes_run")
+    lock["probes_run"] = [
         *(runs if isinstance(runs, list) else []),
         f"{session_id} {_utc_now()}: {text}",
     ]
-    _runner._write_campaign_json(path, latest)
+    _runner._write_campaign_json(path, lock)
 
 
 # --------------------------------------------------------------------------------- launch classification

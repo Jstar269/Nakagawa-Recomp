@@ -2597,7 +2597,11 @@ class PsplinkCampaignRunner:
                 f"campaign soft reset before {case.case_id}"
             ):
                 if self.terminal_reason == "PHYSICAL_INTERVENTION_REQUIRED":
-                    self.intervention_case_id = cases[local_index - 1].case_id
+                    # The case before a resumed run's first case ran in an earlier
+                    # run and is not in this list; cases[-1] would name the last
+                    # queued case, which has not run.
+                    if local_index > 0:
+                        self.intervention_case_id = cases[local_index - 1].case_id
                     self.resume_case_index = case_index
                 return False
         case_host0_log = (
@@ -3346,7 +3350,9 @@ def _checkpoint_waiting(
     return {
         **state,
         "state": "WAITING_FOR_NEW_QUALIFIED_BOOT",
-        "failed_case_id": failed_case_id,
+        "failed_case_id": (
+            failed_case_id if failed_case_id is not None else state.get("failed_case_id")
+        ),
         "interrupted_cases": interrupted,
         "interrupted_boot_number": state.get("active_case_boot_number"),
         "next_case_index": resume_case_index,
@@ -4092,7 +4098,7 @@ def _binary_sha256_for_args(args: argparse.Namespace) -> str | None:
     if not isinstance(binary, Path):
         return None
     digest = _host_binary_sha256(binary)
-    setattr(args, "_binary_sha256", digest)
+    args._binary_sha256 = digest
     return digest
 
 

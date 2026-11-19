@@ -2168,6 +2168,39 @@ class PspOracleRunnerTests(unittest.TestCase):
         reset.assert_called_once_with("campaign soft reset before resumed-case")
         self.assertEqual(phases, ["RESET_BEFORE_CASE"])
 
+    def test_failed_reset_before_a_resumed_first_case_names_no_queued_case(self) -> None:
+        runner = PsplinkCampaignRunner(
+            SimpleNamespace(), console_model="synthetic", source_commit="0" * 40
+        )
+        first = SimpleNamespace(case_id="resumed-case", binary=Path("resumed.prx"), timeout=1.0)
+        last = SimpleNamespace(case_id="last-queued-case", binary=Path("last.prx"), timeout=1.0)
+
+        def failed_reset(_detail: str) -> bool:
+            runner._physical_intervention("synthetic reset failure")
+            return False
+
+        with patch.object(runner, "_hardware_lock_held", return_value=True), patch.object(
+            runner, "_reset_once", side_effect=failed_reset
+        ):
+            kept_going = runner._run_case(
+                first,
+                case_index=3,
+                local_index=0,
+                cases=[first, last],
+                host0_path=None,
+                progress=SimpleNamespace(),
+                reset_between_cases=True,
+                stop_on_incomplete=True,
+                on_case_start=None,
+                on_case_complete=None,
+            )
+        self.assertFalse(kept_going)
+        self.assertEqual(runner.terminal_reason, "PHYSICAL_INTERVENTION_REQUIRED")
+        # The case before a resumed first case ran in an earlier run; no case in
+        # this run's list was launched, so none is named.
+        self.assertIsNone(runner.intervention_case_id)
+        self.assertEqual(runner.resume_case_index, 3)
+
     def test_reset_campaign_case_verifies_and_removes_host0_roundtrip_file(self) -> None:
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(
