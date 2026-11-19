@@ -1533,6 +1533,249 @@ static void test_backend_malformed_input(void) {
     conformance_backend.destroy(id);
 }
 
+#if defined(SR_H264_FFMPEG)
+/* ---- vendored FFmpeg LOCAL DELTAs (src/rt/h264_ffmpeg_sub/PROVENANCE.md) ------------------ */
+
+static void bw_se(BitW *w, int32_t v) {
+    bw_ue(w, v > 0 ? 2u * (uint32_t)v - 1u : 2u * (uint32_t)(-v));
+}
+
+static void bw_reset(BitW *w, uint8_t *d, uint32_t cap) {
+    w->d = d; w->cap = cap; w->n = 0; w->acc = 0; w->bits = 0; w->overflow = 0;
+}
+
+/* A PPS with its own id whose bottom_field_pic_order_in_frame_present_flag is chosen. */
+static void write_pps_poc(BitW *w, uint32_t pps_id, int bottom_poc_present) {
+    bw_ue(w, pps_id);         /* pic_parameter_set_id */
+    bw_ue(w, 0u);             /* seq_parameter_set_id */
+    bw_bit(w, 0);             /* entropy_coding_mode_flag: CAVLC */
+    bw_bit(w, bottom_poc_present); /* bottom_field_pic_order_in_frame_present_flag */
+    bw_ue(w, 0u);             /* num_slice_groups_minus1 */
+    bw_ue(w, 0u);             /* num_ref_idx_l0_default_active_minus1 */
+    bw_ue(w, 0u);             /* num_ref_idx_l1_default_active_minus1 */
+    bw_bit(w, 0);             /* weighted_pred_flag */
+    bw_u(w, 0u, 2);           /* weighted_bipred_idc */
+    bw_se(w, 0);              /* pic_init_qp_minus26 */
+    bw_se(w, 0);              /* pic_init_qs_minus26 */
+    bw_se(w, 0);              /* chroma_qp_index_offset */
+    bw_bit(w, 0);             /* deblocking_filter_control_present_flag */
+    bw_bit(w, 0);             /* constrained_intra_pred_flag */
+    bw_bit(w, 0);             /* redundant_pic_cnt_present_flag */
+    bw_trailing(w);
+}
+
+/* Decode the submitted stream to its end into raw host planes, keeping each picture's first
+ * luma sample and time.  Returns the number of pictures, or -1 on a backend error. */
+static int ff_drain_planes(int dec, uint8_t *y, uint8_t *cb, uint8_t *cr, int width, int height,
+                           uint8_t *first_luma, int64_t *pts, int cap) {
+    SrH264FrameTarget target;
+    SrH264FrameInfo info;
+    memset(&target, 0, sizeof(target));
+    target.kind = SR_H264_TARGET_HOST_YUV;
+    target.host_buffer = y;
+    target.host_cb = cb;
+    target.host_cr = cr;
+    target.host_width = width;
+    target.host_height = height;
+    target.host_stride = width;
+    target.host_c_stride = width / 2;
+    int got = 0;
+    for (int guard = 0; guard < 16; guard++) {
+        int r = sr_h264_frame_ex(dec, 1, &target, &info);
+        if (r < 0) return -1;
+        if (r == 0) break;
+        if (got < cap) {
+            first_luma[got] = y[0];
+            pts[got] = info.has_pts ? info.pts : -1;
+        }
+        got++;
+    }
+    return got;
+}
+
+/* FFmpeg's slice_table is uint16_t with 0xFFFF as its "no slice" sentinel, so slice number 0xFFFF
+ * must never be handed out: a picture's slice 65535 is refused (release/4.4 6d57428858, carried
+ * as a LOCAL DELTA in h264_slice.c).  Without the cap that slice is decoded with the sentinel's
+ * number, which defeats the neighbour checks and lets intra prediction write below top_borders.
+ * The IDR picture here is 4096x16 macroblocks (16 rows, so every row reaches the host planes).
+ * Slices 1 to 65534 each code one macroblock, I_16x16 DC with no residual and no neighbour in
+ * its own slice, so mid-grey.  Slice 65535 codes the last two macroblocks I_PCM (60, 200, 40).
+ * The decoder must refuse it: the picture is delivered, every coded macroblock is grey and no
+ * sample of the refused slice appears. */
+static void test_ffmpeg_slice_number_cap(void) {
+    enum { SLICES = 65535, W_MBS = 4096, H_MBS = 16, WIDTH = 16 * W_MBS, HEIGHT = 16 * H_MBS };
+    int dec = sr_h264_create();
+    if (dec < 0) {
+        fprintf(stderr, "SKIP: the slice-number cap needs the FFmpeg H.264 backend\n");
+        return;
+    }
+    const uint32_t cap = 1024u + (uint32_t)SLICES * 16u + 2u * 512u;
+    uint8_t *es = malloc(cap);
+    uint8_t *y = malloc((size_t)WIDTH * HEIGHT);
+    uint8_t *cb = malloc((size_t)WIDTH * HEIGHT / 4u), *cr = malloc((size_t)WIDTH * HEIGHT / 4u);
+    if (!es || !y || !cb || !cr) {
+        CHECK(0, "slice-cap: the stream and plane buffers are allocated");
+        free(es); free(y); free(cb); free(cr);
+        sr_h264_destroy(dec);
+        return;
+    }
+    static const uint8_t aud[5] = { 0, 0, 1, 0x09, 0x10 };
+    ByteOut out = { es, cap, 0, 0 };
+    uint8_t scratch[1024];
+    BitW w;
+    bo_raw(&out, aud, sizeof(aud));
+    bw_reset(&w, scratch, sizeof(scratch));
+    write_sps_ex(&w, W_MBS, H_MBS);
+    emit_nal(&out, 0x67, &w);
+    bw_reset(&w, scratch, sizeof(scratch));
+    write_pps(&w);
+    emit_nal(&out, 0x68, &w);
+    int overflow = 0;
+    for (uint32_t s = 0; s < SLICES; s++) {
+        bw_reset(&w, scratch, sizeof(scratch));
+        bw_ue(&w, s);                    /* first_mb_in_slice */
+        bw_ue(&w, 2u);                   /* slice_type: I */
+        bw_ue(&w, 0u);                   /* pic_parameter_set_id */
+        bw_u(&w, 0u, 4);                 /* frame_num */
+        bw_ue(&w, 0u);                   /* idr_pic_id */
+        bw_u(&w, 0u, 4);                 /* pic_order_cnt_lsb */
+        bw_bit(&w, 0);                   /* no_output_of_prior_pics_flag */
+        bw_bit(&w, 0);                   /* long_term_reference_flag */
+        bw_se(&w, 0);                    /* slice_qp_delta */
+        if (s == SLICES - 1) {
+            write_pcm_macroblocks(&w, 2u, 1u, 60u, 200u, 40u);
+        } else {
+            bw_ue(&w, 3u);               /* mb_type: I_16x16_2_0_0 (DC, no coded blocks) */
+            bw_ue(&w, 0u);               /* intra_chroma_pred_mode: DC */
+            bw_se(&w, 0);                /* mb_qp_delta */
+            bw_bit(&w, 1);               /* Intra16x16DCLevel coeff_token (nC 0): no coefficient */
+            bw_trailing(&w);
+        }
+        overflow |= w.overflow;
+        emit_nal(&out, 0x65, &w);
+    }
+    CHECK(!overflow && !out.overflow, "slice-cap: the 65535-slice picture fits its buffers");
+    CHECK(sr_h264_submit_au(dec, es, out.n) == 0, "slice-cap: the 65535-slice access unit is accepted");
+    uint8_t first[4];
+    int64_t pts[4];
+    memset(y, 0, (size_t)WIDTH * HEIGHT);
+    int got = ff_drain_planes(dec, y, cb, cr, WIDTH, HEIGHT, first, pts, 4);
+    CHECK(got == 1, "slice-cap: the picture is still delivered once");
+    /* The refused slice covers the last two macroblocks of the last macroblock row. */
+    int coded_grey = 1, refused_seen = 0;
+    for (int row = 0; row < HEIGHT; row++)
+        for (int x = 0; x < WIDTH; x++) {
+            int refused = row >= HEIGHT - 16 && x >= WIDTH - 32;
+            uint8_t v = y[(size_t)row * WIDTH + (size_t)x];
+            if (refused) refused_seen |= v == 60u;
+            else if (v != 128u) coded_grey = 0;
+        }
+    for (int row = 0; row < HEIGHT / 2; row++)
+        for (int x = 0; x < WIDTH / 2; x++) {
+            int refused = row >= HEIGHT / 2 - 8 && x >= WIDTH / 2 - 16;
+            size_t i = (size_t)row * (WIDTH / 2) + (size_t)x;
+            if (refused) refused_seen |= cb[i] == 200u || cr[i] == 40u;
+            else if (cb[i] != 128u || cr[i] != 128u) coded_grey = 0;
+        }
+    if (!coded_grey || refused_seen)
+        fprintf(stderr, "slice-cap: first macroblock (%u, %u, %u), last macroblock (%u, %u, %u)\n",
+                y[0], cb[0], cr[0], y[(size_t)HEIGHT * WIDTH - 1u],
+                cb[(size_t)HEIGHT * WIDTH / 4u - 1u], cr[(size_t)HEIGHT * WIDTH / 4u - 1u]);
+    CHECK(coded_grey, "slice-cap: slices 1 to 65534 decode their own macroblocks");
+    CHECK(!refused_seen, "slice-cap: slice 65535 is refused, no sample of it reaches the picture");
+    free(es); free(y); free(cb); free(cr);
+    sr_h264_destroy(dec);
+}
+
+/* One slice header of the POC stream: reference I slice, 8-bit frame_num and pic_order_cnt_lsb. */
+static void write_poc_slice_header(BitW *w, int idr, uint32_t pps_id, uint32_t frame_num,
+                                   uint32_t poc_lsb, int bottom_poc_present, int32_t delta_bottom,
+                                   int32_t qp_delta) {
+    bw_ue(w, 0u);                       /* first_mb_in_slice */
+    bw_ue(w, 2u);                       /* slice_type: I */
+    bw_ue(w, pps_id);                   /* pic_parameter_set_id */
+    bw_u(w, frame_num, 8);              /* frame_num */
+    if (idr) bw_ue(w, 0u);              /* idr_pic_id */
+    bw_u(w, poc_lsb, 8);                /* pic_order_cnt_lsb */
+    if (bottom_poc_present) bw_se(w, delta_bottom); /* delta_pic_order_cnt_bottom */
+    if (idr) {
+        bw_bit(w, 0);                   /* no_output_of_prior_pics_flag */
+        bw_bit(w, 0);                   /* long_term_reference_flag */
+    } else {
+        bw_bit(w, 0);                   /* adaptive_ref_pic_marking_mode_flag: sliding window */
+    }
+    bw_se(w, qp_delta);                 /* slice_qp_delta */
+}
+
+/* A slice header that fails to parse must not hand its POC fields to the next slice (release/4.4
+ * bf87bdd3f6, carried as a LOCAL DELTA in h264_slice.c).  PPS 0 codes delta_pic_order_cnt_bottom,
+ * PPS 1 does not.  Picture A (IDR, POC 0) and picture B (POC 4) and C (POC 8) use PPS 1.  Just
+ * before B's slice comes a slice through PPS 0 with delta_pic_order_cnt_bottom -100 whose
+ * slice_qp_delta takes QP out of range, so its header is refused.  B's header codes no delta: it
+ * is 0, B's POC is 4 and the pictures leave in decode order A, B, C.  A stale -100 would give B
+ * POC -96 and change what the decoder outputs. */
+static void test_ffmpeg_failed_slice_poc_is_not_inherited(void) {
+    enum { W = FIX_W_MBS * 16, H = FIX_H_MBS * 16 };
+    int dec = sr_h264_create();
+    if (dec < 0) {
+        fprintf(stderr, "SKIP: the failed-slice POC contract needs the FFmpeg H.264 backend\n");
+        return;
+    }
+    static const uint8_t aud[5] = { 0, 0, 1, 0x09, 0x10 };
+    static const uint8_t luma[3] = { 40u, 80u, 120u };
+    static uint8_t es[3][16384];
+    ByteOut out[3];
+    uint8_t scratch[8192];
+    BitW w;
+    int overflow = 0;
+    for (int p = 0; p < 3; p++) {
+        out[p].d = es[p]; out[p].cap = sizeof(es[p]); out[p].n = 0; out[p].overflow = 0;
+        bo_raw(&out[p], aud, sizeof(aud));
+        if (p == 0) {
+            bw_reset(&w, scratch, sizeof(scratch));
+            write_sps_full(&w, FIX_W_MBS, FIX_H_MBS, 1);
+            emit_nal(&out[p], 0x67, &w);
+            bw_reset(&w, scratch, sizeof(scratch));
+            write_pps_poc(&w, 0u, 1);
+            emit_nal(&out[p], 0x68, &w);
+            bw_reset(&w, scratch, sizeof(scratch));
+            write_pps_poc(&w, 1u, 0);
+            emit_nal(&out[p], 0x68, &w);
+        }
+        if (p == 1) {
+            bw_reset(&w, scratch, sizeof(scratch));
+            write_poc_slice_header(&w, 0, 0u, 1u, 2u, 1, -100, 40);   /* QP 66: refused */
+            write_pcm_macroblocks(&w, FIX_W_MBS, FIX_H_MBS, 250u, 128u, 128u);
+            overflow |= w.overflow;
+            emit_nal(&out[p], 0x61, &w);
+        }
+        bw_reset(&w, scratch, sizeof(scratch));
+        write_poc_slice_header(&w, p == 0, 1u, (uint32_t)p, 4u * (uint32_t)p, 0, 0, 0);
+        write_pcm_macroblocks(&w, FIX_W_MBS, FIX_H_MBS, luma[p], 128u, 128u);
+        overflow |= w.overflow;
+        emit_nal(&out[p], p == 0 ? 0x65 : 0x61, &w);
+        overflow |= out[p].overflow;
+    }
+    CHECK(!overflow, "poc-reset: the stream fits its buffers");
+    for (int p = 0; p < 3; p++)
+        CHECK(sr_h264_submit_au_timed(dec, es[p], out[p].n, 3003 * p, 1) == 0,
+              "poc-reset: every access unit is accepted");
+    static uint8_t y[W * H], cb[W * H / 4], cr[W * H / 4];
+    uint8_t first[8];
+    int64_t pts[8];
+    int got = ff_drain_planes(dec, y, cb, cr, W, H, first, pts, 8);
+    CHECK(got == 3, "poc-reset: the decoder delivers the three valid pictures");
+    int in_order = got == 3;
+    for (int p = 0; p < 3 && p < got; p++)
+        if (first[p] != luma[p] || pts[p] != 3003 * p) in_order = 0;
+    if (!in_order)
+        for (int p = 0; p < got && p < 8; p++)
+            fprintf(stderr, "poc-reset: picture %d luma %u pts %lld\n", p, first[p], (long long)pts[p]);
+    CHECK(in_order, "poc-reset: the pictures leave in POC order A, B, C with their own times");
+    sr_h264_destroy(dec);
+}
+#endif
+
 /* The seam's timed submit carries the producer's normalized 90 kHz PTS.  Every backend converts or
  * forwards it (Media Foundation multiplies by 1000 / 9), so a value outside
  * +-SR_H264_PTS_ABS_MAX is refused like any malformed unit instead of overflowing int64. */
@@ -6372,6 +6615,10 @@ int main(int argc, char **argv) {
     test_backend_registry_fail_closed();
     test_backend_reset_and_restart();
     test_backend_malformed_input();
+#if defined(SR_H264_FFMPEG)
+    test_ffmpeg_slice_number_cap();
+    test_ffmpeg_failed_slice_poc_is_not_inherited();
+#endif
     test_backend_pts_range();
     test_video_eos_waits_for_all_access_units();
     test_mpeg_ps_demux_error_fails_closed();

@@ -163,6 +163,7 @@ void osk_overlay_paint(const OskOverlay *o, uint32_t *px, int w, int h) {
     fill(r, 12, 24, (float)(w - 24), 24, 30, 36, 50, 255);
     outline(r, 12, 24, (float)(w - 24), 24, 90, 120, 180);
     int field_max = (w - 24 - 16) / GLYPH - 1;   /* one column left for the caret */
+    if (field_max < 0) field_max = 0;            /* a frame too narrow for text keeps the caret */
     int first = o->len > field_max ? o->len - field_max : 0;
     SDL_SetRenderDrawColor(r, 240, 244, 250, 255);
     text_units(r, 20, 32, o->text, first, o->len - first);

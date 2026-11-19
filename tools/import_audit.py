@@ -36,12 +36,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 from pathlib import Path
 import re
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gen_nidnames  # noqa: E402
 import hle_registry_meta as meta  # noqa: E402
 import psp_import_table  # noqa: E402
 from psp_import_table import ImportTableError, parse_import_table  # noqa: E402
@@ -53,7 +55,33 @@ EXPECTED_MANIFEST_SCHEMA = 1
 CLASSES = ("missing", "fake_success", "dedicated", "controlled_unsupported")
 REGISTERED_CLASSES = frozenset(c for c in CLASSES if c != "missing")
 _NID_RE = re.compile(r"^0x[0-9a-f]{8}$")
+_FINDING_ADDR_RE = re.compile(r"0x[0-9a-fA-F]{8}")
 _MANIFEST_ROW_FIELDS = ("nid", "name", "handler", "origin", "classification", "status")
+
+
+class NidCorpusError(Exception):
+    """The tracked NID corpus cannot be read or parsed. Message is one line."""
+
+
+@functools.lru_cache(maxsize=1)
+def _corpus_nid_names() -> dict[int, str]:
+    """Names for unregistered NIDs, from the tracked tools/nid_corpus.json.
+
+    A missing or corrupt corpus is an error, never an empty map: an empty map would
+    silently report every missing import without its name.
+    """
+    try:
+        corpus = json.loads(gen_nidnames.CORPUS.read_text(encoding="utf-8"))
+        names: dict[int, str] = gen_nidnames.nid_names(corpus)
+    except OSError as e:
+        raise NidCorpusError(f"cannot read {gen_nidnames.CORPUS.name}: {e.strerror}") from e
+    except json.JSONDecodeError as e:
+        raise NidCorpusError(
+            f"{gen_nidnames.CORPUS.name} is not valid JSON: {e.msg} at line {e.lineno}"
+        ) from e
+    except gen_nidnames.CorpusError as e:
+        raise NidCorpusError(f"{gen_nidnames.CORPUS.name} is not a usable NID corpus: {e}") from e
+    return names
 
 
 class ManifestValidationError(Exception):
@@ -131,6 +159,7 @@ def classify_imports(
     in deterministic order and they pass through untouched.
     """
     regs = {int(r["nid"], 16): r for r in manifest["registrations"]}
+    corpus_names = _corpus_nid_names()
 
     rows = []
     by_nid_libs: dict[int, set[str]] = {}
@@ -140,7 +169,11 @@ def classify_imports(
         row = {
             "lib": f.library,
             "nid": f"0x{f.nid:08x}",
-            "name": reg["name"] if reg else meta.KNOWN_NID_NAMES.get(f.nid),
+            "name": (
+                reg["name"]
+                if reg
+                else (meta.KNOWN_NID_NAMES.get(f.nid) or corpus_names.get(f.nid))
+            ),
             "classification": reg["classification"] if reg else "missing",
             "handler": reg["handler"] if reg else None,
             "status": reg["status"] if reg else None,
@@ -163,6 +196,12 @@ def classify_imports(
         if len(libs) > 1
     ]
 
+    formatted_findings = (
+        list(findings)
+        if with_addresses
+        else [_FINDING_ADDR_RE.sub("<redacted>", f) for f in findings]
+    )
+
     return {
         "schema": REPORT_SCHEMA,
         "summary": {"total": len(rows), **totals, "libraries": len(lib_stats)},
@@ -171,7 +210,7 @@ def classify_imports(
         ],
         "imports": rows,
         "cross_library_duplicate_nids": duplicates,
-        "findings": list(findings),
+        "findings": formatted_findings,
     }
 
 
@@ -280,9 +319,13 @@ def main(argv: list[str]) -> int:
         print(f"import_audit: malformed input: {e}", file=sys.stderr)
         return 1
 
-    report = classify_imports(
-        table.funcs, manifest, with_addresses=args.with_addresses, findings=table.findings
-    )
+    try:
+        report = classify_imports(
+            table.funcs, manifest, with_addresses=args.with_addresses, findings=table.findings
+        )
+    except NidCorpusError as e:
+        print(f"import_audit: NID corpus unusable: {e}", file=sys.stderr)
+        return 1
     text = render_text(report)
     if args.out:
         _dump(report, args.out)
