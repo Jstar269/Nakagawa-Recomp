@@ -521,11 +521,11 @@ python tools/vblank_ledger.py --perf logs/perf.csv --stderr logs/stderr_run.log
 ```
 
 ```text
-VBLANK_CHECK: presenting PASS presenting_s=3454 wall_s=3457.723 source_periods=207256.1 delivered=207248
+VBLANK_CHECK: presenting INFO presenting_s=3454 wall_s=3457.723 source_periods=207256.1 delivered=207248
 VBLANK_CHECK: rate PASS ratio=0.99992 band=[0.99500,1.00500] excess_episodes=-16 ... per_second_delivered={59: 617, 60: 2209, 61: 623}
 VBLANK_CHECK: identity PASS owed=205096 coalesced=7 delivered=205102 dropped=0 in_flight=1 residual=1 late_owed=84207 late_delivered=84206
 VBLANK_CHECK: masked PASS coalesced=7 masked_periods=11 credit=-4 in_flight=1
-VBLANK_AUDIT: verdict=PASS checks=4 failures=0
+VBLANK_AUDIT: verdict=PASS checks=3 failures=0
 ```
 
 - `rate` divides delivered episodes by the source periods that elapsed
@@ -540,6 +540,9 @@ VBLANK_AUDIT: verdict=PASS checks=4 failures=0
   (`PERF_ATTRIB vblank_late ... masked_periods=`). A credit beyond the in-flight
   residual is a masked window counted twice; the hardware probe measured `+1` for a
   window however many periods it covered (`docs/ARCHITECTURE.md`).
+- `presenting` is `INFO`: it names the window the rate is judged over and is not a
+  check, so a run that presented frames but could judge neither the rate nor the
+  ledger is still `NOT_RUN`.
 - A missing ledger is `SKIP` with its reason, and a run where nothing could be
   judged is `NOT_RUN` with a non-zero exit: an absent artifact is not a pass.
 
@@ -609,19 +612,21 @@ observations.
 
 | Line (exact text) | Where | Meaning and next step |
 | --- | --- | --- |
-| `HLE: unverified: <name> (NID 0x<nid>) has no recorded evidence (docs/HLE_COVERAGE.md)` | `src/rt/hle.c:106` | Once per NID, just before its handler first runs. The handler exists, but no test records evidence for it. The line changes no result. Look the NID up in [`HLE_COVERAGE.md`](HLE_COVERAGE.md) before you trust what the handler returned. |
-| `HLE: controlled refusal: <name> (NID 0x<nid>) returned 0x<code>; in the works (#341)` | `src/rt/hle.c:87` | Once per NID. The handler is registered only to answer a fixed error code (`0x8...`), because the function is not modelled yet. The game gets that error, not an invented success. Find the handler with the "Find an HLE handler" recipe in [Quick recipes](#quick-recipes). |
-| `HLE: compatibility exception: <name> (NID 0x<nid>) keeps result 0; semantics in the works (<issue>)` | `src/rt/hle.c:115` | Once per NID, after the handler ran. The handler returns 0 so the game can go on, but the real semantics are not modelled; `<issue>` is the tracking issue. If the game misbehaves near this call, start from that issue. |
-| `HLE unimplemented summary: <name> (NID 0x<nid>) -> 0x<code>; in the works (#341)` or `HLE unimplemented summary: <name> (NID 0x<nid>) kept compatibility result 0; in the works (<issue>)` | `src/rt/hle.c:72`, `src/rt/hle.c:77` | Printed once at process exit (registered with `atexit`), one line for each NID that earlier printed a controlled refusal or a compatibility exception. It is the same information gathered at the end of the log. A run that ends with `_Exit`, such as the stop below, does not print it. |
-| `UNSUPPORTED_IMPORT: <name> <detail>; the run stops here (#308)` | `src/rt/hle.c:1932` (`hle_unmodelled_stop`) | A handler met an argument shape the runtime does not model. Under the scheduler the run exits with code 7 and the player shows an `unsupported-import-<name>` stop card. See `UNSUPPORTED_IMPORT` in [`FAILURE_CODES.md`](FAILURE_CODES.md). Fix or model the case; do not work around the stop. |
-| `HLE: unimplemented nid 0x<nid> (<name>) (thread uid 0x<uid>)`, then an indented line `-> add a handler in src/rt/hle.c: sr_hle_register(0x<nid>u, "<name>", h_...);` | `src/rt/hle.c:4103` (`sr_syscall`) | The game called an import with no handler at all (`<name>` is `unknown` if the NID is not in the name table). The run stops: exit code 7 under the scheduler, an HLE-miss stop otherwise. Add a handler, or an unsupported registration, for that NID. |
+| `HLE: unverified: <name> (NID 0x<nid>) has no recorded evidence (docs/HLE_COVERAGE.md)` | `hle_note_unverified()` (`src/rt/hle.c`) | Once per NID, just before its handler first runs. The handler exists, but no test records evidence for it. The line changes no result. Look the NID up in [`HLE_COVERAGE.md`](HLE_COVERAGE.md) before you trust what the handler returned. |
+| `HLE: controlled refusal: <name> (NID 0x<nid>) returned 0x<code>; in the works (#341)` | `hle_note_unsupported()` (`src/rt/hle.c`) | Once per NID. The handler is registered only to answer a fixed error code (`0x8...`), because the function is not modelled yet. The game gets that error, not an invented success. Find the handler with the "Find an HLE handler" recipe in [Quick recipes](#quick-recipes). |
+| `HLE: compatibility exception: <name> (NID 0x<nid>) keeps result 0; semantics in the works (<issue>)` | `hle_note_success_exception()` (`src/rt/hle.c`) | Once per NID, after the handler ran. The handler returns 0 so the game can go on, but the real semantics are not modelled; `<issue>` is the tracking issue. If the game misbehaves near this call, start from that issue. |
+| `HLE unimplemented summary: <name> (NID 0x<nid>) -> 0x<code>; in the works (#341)` or `HLE unimplemented summary: <name> (NID 0x<nid>) kept compatibility result 0; in the works (<issue>)` | `hle_unsupported_summary()` (`src/rt/hle.c`), registered by `hle_register_unsupported_summary()` | Printed once at process exit (registered with `atexit`), one line for each NID that earlier printed a controlled refusal or a compatibility exception. It is the same information gathered at the end of the log. A run that ends with `_Exit`, such as the stop below, does not print it. |
+| `UNSUPPORTED_IMPORT: <name> <detail>; the run stops here (#308)` | `hle_unmodelled_stop()` (`src/rt/hle.c`) | A handler met an argument shape the runtime does not model. Under the scheduler the run exits with code 7 and the player shows an `unsupported-import-<name>` stop card. See `UNSUPPORTED_IMPORT` in [`FAILURE_CODES.md`](FAILURE_CODES.md). Fix or model the case; do not work around the stop. |
+| `HLE: unimplemented nid 0x<nid> (<name>) (thread uid 0x<uid>)`, then an indented line `-> add a handler in src/rt/hle.c: sr_hle_register(0x<nid>u, "<name>", h_...);` | `sr_syscall()` (`src/rt/hle.c`) | The game called an import with no handler at all (`<name>` is `unknown` if the NID is not in the name table). The run stops: exit code 7 under the scheduler, an HLE-miss stop otherwise. Add a handler, or an unsupported registration, for that NID. |
 
 Two more lines come from registration and mean a build problem, not a game problem:
-`HLE: duplicate NID 0x<nid> (<name>) rejected; first was <name>` (`src/rt/hle.c:217`) and
-`HLE: invalid unsupported result 0x<code> for <name> (NID 0x<nid>)` (`src/rt/hle.c:244`; an unsupported
-result must have its top bit set). Both are printed while handlers register; the second registration is dropped.
+`HLE: duplicate NID 0x<nid> (<name>) rejected; first was <name>` (`sr_hle_register_entry()` in
+`src/rt/hle.c`) and `HLE: invalid unsupported result 0x<code> for <name> (NID 0x<nid>)`
+(`sr_hle_register_unsupported()` in `src/rt/hle.c`; an unsupported result must have its top bit
+set). Both are printed while handlers register; the second registration is dropped.
 
-`SR_HLELOG=1` adds the per-call `HLE: calling <name> (0x<nid>) from 0x<uid>` lines (`src/rt/hle.c:4096`). The
+`SR_HLELOG=1` adds the per-call `HLE: calling <name> (0x<nid>) from 0x<uid>` lines (`sr_syscall()` in
+`src/rt/hle.c`). The
 coverage classes, such as `unverified` and `synthetic`, are defined in [`HLE_COVERAGE.md`](HLE_COVERAGE.md).
 
 ### Thread Scheduling (→ SR_DBG_SCHED)
@@ -997,6 +1002,15 @@ keeps the original behaviour exactly, and a file mixing the two is refused.
 | `READS <step>` / `VBLANKS <step>` | The unit of that one `PRESS`, `DELAY`, `PRESS_UNTIL`, `PRESS_WHILE` or `PRESS_UNTIL_NID` line; overrides `WIDTHS` |
 | `STICK <lx> <ly> <step>` | Hold the left stick at `lx`, `ly` (decimal 0-255, 128 centred) while that `PRESS`, `PRESS_UNTIL`, `PRESS_WHILE` or `PRESS_UNTIL_NID` presses; comes before `READS` / `VBLANKS` ([below](#holding-the-left-stick)) |
 | `END` | Route complete |
+
+Every count (widths, periods, timeouts, `DELAY`, `SAMPLE_EVERY`, `TOLERANCE`, `tol=` and the
+legacy row's frame and width) is plain decimal digits and nothing else: `-1`, `12x` or `abc` refuses
+the file at load rather than becoming a near-endless hold, `12` or `0`. Every step that names a
+checkpoint (`WAIT`, `EXPECT`, `PRESS_UNTIL`, `PRESS_WHILE`) must name one a `CHECKPOINT` line
+defines. All recordings of one checkpoint share one tolerance, so an alternate whose tolerance
+(its `tol=`, or `TOLERANCE` without one) differs from an earlier recording's is refused. A route
+file `SR_PADSCRIPT` names that cannot be opened, or that holds no step, fails the run with
+`ROUTE_FAIL:` and status 86 instead of running unscripted on the automatic START pulse.
 
 A mask is either a button name (see [Naming the buttons a route presses](#naming-the-buttons-a-route-presses))
 or a hex literal of at most eight digits with an optional `0x` prefix. Anything else refuses
@@ -1683,7 +1697,6 @@ scan: they are excluded from `presenting` and never counted as a stall.
 | ---------- | ------------- |
 | `SR_IOLOG=1` | Log file open/read/write operations |
 | `SR_STATLOG=1` | Log stat operations |
-| `SR_UMDDUMP=1` | Dump UMD data |
 
 ### Display & Video (→ SR_DBG_VIDEO)
 
@@ -1750,7 +1763,6 @@ committed.
 | `SR_GE_TIMING=1` | Opt-in GE completion timing (issue #1296), off by default. A display list that reached its END completes -- finish callback, `sceGeDrawSync`, `sceGeListSync` -- only once guest time passes its cost on one serial GE timeline; the callback is delivered as an interrupt, and the peeks read 2 until it is handled. The cost model in `src/rt/ge.c` is in GE clocks (the bus clock, converted at the emulated bus clock) and every coefficient was measured on a PSP-3000 with `CASE=ge-timing` (PR #1321): per list, command word and PRIM, per vertex by format, per span by width and fill state, texel fetch, CLUT loads and block transfers. Classes the measurement did not cover are charged as the nearest measured class and tagged `UNMEASURED_NEAREST` in the source. Startup prints `GE_TIMING: on, GE time model measured on PSP-3000 ...` |
 | `SR_AUDIO_DISABLED=1` | Disable audio output (null backend). `SR_AUDIO_BACKEND=null` (or `none`, `0`, `off`) does the same; `SR_AUDIO_BACKEND=dummy` keeps the device open on SDL's dummy driver. `SR_HEADLESS=1` also selects the null backend unless `SR_AUDIO_BACKEND` is set |
 | `SR_AUDIODUMP=PATH` | Debug only, off by default. Write the device mix (every channel's stream after the master gain, as SDL is about to submit it) to a 16-bit PCM WAV at the device's own rate and channel count. The header is patched once per second of audio data and at close, and a stats line (`AUDIODUMP: ... frames= silent_frames= clipped_samples= peak= dropped_frames=`) is printed there. `dropped_frames` counts the frames the dump was offered but did not write, whether past its size limit, after a changed device format, or after a failed write; the first refusal prints one line. The file is closed at a normal exit and at `SR_EXIT_AT_VBLANK`, with or without `SR_AUDIOSTAT`; a runtime that is killed, crashes, or ends on another path that skips `atexit` (`sceKernelExitGame`, the watchdog, a route failure) keeps the last once-a-second patch, so up to a second at the end lies past the header's length. It runs on SDL's audio thread and does file I/O there, so it changes host pacing; never compare timing with it on. Audit the file for silence, clipping, gaps and sample rate |
-| `SR_POSTUMD=1` | Post-UMD processing |
 | `SR_HEAP_BASE=HEX` | Override heap base address |
 | `SR_PARTITION_TOP=HEX` | Override partition top |
 | `SR_CALLCOUNT=1` | Enable call counting |

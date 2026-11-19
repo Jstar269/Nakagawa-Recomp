@@ -2814,10 +2814,16 @@ class MachinePortabilityTests(unittest.TestCase):
             self.assertNotIn("-I/Include", proc.stdout)
 
     def test_mem_debug_nm_discovery_prefers_environment_and_path(self) -> None:
-        """get_symbol_rvas in mem_debug.py must probe NM environment variable and shutil.which before hardcoded paths."""
+        """find_nm in mem_debug.py must probe the NM environment variable and PATH before hardcoded paths.
+
+        PATH is walked for absolute entries only (``_nm_on_path``), never through a bare
+        ``shutil.which("nm")`` that Windows resolves in the working directory first;
+        tools/test_mem_debug.py covers the behaviour.
+        """
         mem_debug_text = (ROOT / "tools" / "mem_debug.py").read_text(encoding="utf-8")
         self.assertIn("os.environ.get(\"NM\")", mem_debug_text)
-        self.assertIn("shutil.which(\"nm\")", mem_debug_text)
+        self.assertIn("_nm_on_path()", mem_debug_text)
+        self.assertNotIn("shutil.which(\"nm\")", mem_debug_text)
 
     def test_copy_build_assets_script_has_toolchain_discovery_fallback(self) -> None:
         """copy_build_assets.ps1 must attempt compiler toolchain discovery if SDL3.dll is absent from local dirs."""

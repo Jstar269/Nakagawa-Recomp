@@ -206,6 +206,11 @@ static inline int32_t sr_u32_as_s32(uint32_t bits) {
  * seven bits were measured as not writable; no other FCR31 bit is masked. The
  * generated C spells the same word as a literal (tools/codegen.py, ctc1). */
 #define SR_FCR31_CTC1_UNWRITABLE 0xfe000000u
+/* The FCR0 (FIR, implementation and revision) word a guest cfc1 of register 0
+ * reads; every other FCR but 31 reads 0. The reference and runtime interpreters
+ * share this name; the generated C spells the same word as a literal
+ * (tools/codegen.py, cfc1). */
+#define SR_FCR0_FIR 0x00003351u
 
 #if defined(__SSE2__) || defined(_M_X64) || defined(__i386__)
 #include <xmmintrin.h>

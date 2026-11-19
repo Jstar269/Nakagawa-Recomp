@@ -305,6 +305,46 @@ try {
         Assert-True ((Get-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN")) -eq "live") "live save lost after rollback"
     }
 
+    Test-Case "a failed post-swap verification puts the changed live save back and leaves no swap dir" {
+        # The live save differs from the baseline here, so a rollback that leaves the restored
+        # baseline in place is caught (with identical contents it would pass vacuously).
+        $root = Join-Path $tmpRoot "sb12b/PSP/SAVEDATA"
+        New-Item -ItemType Directory -Path (Join-Path $root "UCUS98701") -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN") -Value "base"
+        $base = Join-Path $tmpRoot "sb12b/base"
+        [void](Sync-SaveBase -BasePath $base -SaveRoot $root -ApprovedRoot $tmpRoot)
+        Set-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN") -Value "changed"
+        $r = Sync-SaveBase -BasePath $base -SaveRoot $root -ApprovedRoot $tmpRoot -Failpoint "verify"
+        Assert-True ($null -eq $r) "verify failure not reported"
+        Assert-True ((Get-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN")) -eq "changed") `
+            "the live save was left in the rollback folder"
+        $swap = @(Get-ChildItem -LiteralPath (Join-Path $tmpRoot "sb12b/PSP") -Directory -Force |
+            Where-Object { $_.Name -like ".nk_savebase_*" })
+        Assert-True ($swap.Count -eq 0) "a caught failure left $($swap.Count) swap dir(s) that block every later restore"
+        $r = Sync-SaveBase -BasePath $base -SaveRoot $root -ApprovedRoot $tmpRoot
+        Assert-True ($null -ne $r) "a restore after a caught failure was refused"
+        Assert-True ((Get-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN")) -eq "base") "baseline not restored"
+    }
+
+    Test-Case "a loose file in the save root does not fail the restore" {
+        # Only top-level save folders are captured and swapped; Explorer's desktop.ini beside
+        # them is neither, so the post-swap check must not count it as a difference.
+        $root = Join-Path $tmpRoot "sb12c/PSP/SAVEDATA"
+        New-Item -ItemType Directory -Path (Join-Path $root "UCUS98701") -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN") -Value "base"
+        $base = Join-Path $tmpRoot "sb12c/base"
+        [void](Sync-SaveBase -BasePath $base -SaveRoot $root -ApprovedRoot $tmpRoot)
+        Set-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN") -Value "changed"
+        Set-Content -LiteralPath (Join-Path $root "desktop.ini") -Value "[.ShellClassInfo]"
+        $r = Sync-SaveBase -BasePath $base -SaveRoot $root -ApprovedRoot $tmpRoot
+        Assert-True ($null -ne $r) "a loose top-level file failed the restore"
+        Assert-True ((Get-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN")) -eq "base") "baseline not restored"
+        Assert-True (Test-Path -LiteralPath (Join-Path $root "desktop.ini")) "the loose file was removed"
+        $swap = @(Get-ChildItem -LiteralPath (Join-Path $tmpRoot "sb12c/PSP") -Directory -Force |
+            Where-Object { $_.Name -like ".nk_savebase_*" })
+        Assert-True ($swap.Count -eq 0) "a finished restore left $($swap.Count) swap dir(s)"
+    }
+
     Test-Case "orphaned swap dir from an interrupted restore fails closed" {
         # Simulate a hard kill inside the swap window: an orphaned rollback sibling that
         # a caught-exception path would have cleaned up. The next restore must refuse to
@@ -402,6 +442,36 @@ try {
     Test-Case "missing pid file is a no-op" {
         $result = Invoke-StaleBuildCleanup -PidFile (Join-Path $tmpRoot "no-such-pids") -DryRun
         Assert-True ($result.Killed.Count -eq 0 -and $result.Kept.Count -eq 0) "missing file was not a no-op"
+    }
+
+    Test-Case "a dry run keeps the record of a live verified build" {
+        # The build is still running and was not reaped, so a later real cleanup must still find it.
+        $pidFile = Join-Path $tmpRoot "pids5.jsonl"
+        Set-Content -LiteralPath $pidFile -Value (($recordFull | ConvertTo-Json -Compress) + "`n") -Encoding utf8
+        $result = Invoke-StaleBuildCleanup -PidFile $pidFile -Probe $probeFull -DryRun
+        Assert-True ($result.Killed.Count -eq 1) "the live build was not reported as one to reap"
+        Assert-True (Test-Path -LiteralPath $pidFile) "a dry run deleted the ledger of a live build"
+        $left = @((Get-BuildPidRecords -Path $pidFile).Records)
+        Assert-True ($left.Count -eq 1 -and [int]$left[0].pid -eq 4242) "a dry run dropped the live build's record"
+    }
+
+    Test-Case "process tree skips an orphan whose stale parent PID matches the root" {
+        # Windows keeps a ParentProcessId after the parent exits, so a process started before the
+        # root by an earlier holder of the root's PID still names it as parent. The process list
+        # is modelled by a Get-CimInstance function, which PowerShell resolves before the cmdlet.
+        $t = [DateTime]::new(2026, 11, 17, 12, 0, 0)
+        function Get-CimInstance {
+            [CmdletBinding()] param([Parameter(Position = 0)][string]$ClassName)
+            @(
+                [pscustomobject]@{ ProcessId = 7100; ParentProcessId = 1;    CreationDate = $t },
+                [pscustomobject]@{ ProcessId = 7101; ParentProcessId = 7100; CreationDate = $t.AddSeconds(1) },
+                [pscustomobject]@{ ProcessId = 7103; ParentProcessId = 7101; CreationDate = $t.AddSeconds(2) },
+                [pscustomobject]@{ ProcessId = 7102; ParentProcessId = 7100; CreationDate = $t.AddSeconds(-60) },
+                [pscustomobject]@{ ProcessId = 7104; ParentProcessId = 7102; CreationDate = $t.AddSeconds(-30) }
+            )
+        }
+        $ids = @(Get-ProcessTreeIds -RootPid 7100 | Sort-Object)
+        Assert-True (($ids -join ",") -eq "7100,7101,7103") "the build tree took in an older orphan: $($ids -join ',')"
     }
 
     # --- Build truth: unknown exit is not success -------------------------------------

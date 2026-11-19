@@ -150,7 +150,11 @@ class TestEncodings(unittest.TestCase):
                 encoding="utf-8",
             )
             values = vks.key_values(str(p))
+            parsed, unparsed = vks.parse_key_file(str(p))
         self.assertEqual(values, {"foo": SAMPLE})
+        # The malformed entry is reported by name, never silently dropped.
+        self.assertEqual(parsed, {"foo": SAMPLE})
+        self.assertEqual(unparsed, ["bad"])
 
 
 class TestSearchVerdicts(unittest.TestCase):
@@ -177,6 +181,30 @@ class TestSearchVerdicts(unittest.TestCase):
             verdict, error = vks.search_history(SAMPLE.hex(), [SAMPLE.hex()])
         self.assertIs(verdict, vks.Verdict.FOUND)
         self.assertIsNone(error)
+
+    def test_found_when_value_is_introduced_only_by_a_merge(self):
+        # An "evil merge": neither parent holds the value; only the merge
+        # commit's own resolution adds it. Pickaxe without -m builds no diff
+        # for a merge, so the value would be reported clean while it sits in
+        # the tip tree.
+        repo = self.repo
+        assert _run_git(repo, "checkout", "-b", "side").returncode == 0
+        (repo / "side.txt").write_text("side\n", encoding="utf-8")
+        assert _run_git(repo, "add", "-A").returncode == 0
+        assert _run_git(repo, "commit", "-m", "side").returncode == 0
+        assert _run_git(repo, "checkout", "main").returncode == 0
+        (repo / "main.txt").write_text("main\n", encoding="utf-8")
+        assert _run_git(repo, "add", "-A").returncode == 0
+        assert _run_git(repo, "commit", "-m", "main").returncode == 0
+        merge = _run_git(repo, "merge", "--no-ff", "--no-commit", "side")
+        assert merge.returncode == 0, merge.stderr
+        (repo / "resolved.txt").write_text(f"leaked = {SAMPLE.hex()}\n", encoding="utf-8")
+        assert _run_git(repo, "add", "-A").returncode == 0
+        assert _run_git(repo, "commit", "-m", "merge side").returncode == 0
+        with _chdir(repo):
+            verdict, error = vks.search_history(SAMPLE.hex(), [SAMPLE.hex()])
+        self.assertIsNone(error)
+        self.assertIs(verdict, vks.Verdict.FOUND)
 
     def test_error_when_git_log_fails(self):
         needle = SAMPLE.hex()
@@ -214,6 +242,22 @@ class TestSearchVerdicts(unittest.TestCase):
         self.assertEqual(error.exit_code, 128)
         self.assertNotIn(needle, error.detail)
         self.assertIn("[redacted]", error.detail)
+
+    def test_regex_search_passes_pickaxe_regex_and_redacts_the_pattern(self):
+        pattern = vks.history_pattern(SAMPLE)
+        seen: list[list[str]] = []
+
+        def failing_run(command, *_args, **kwargs):
+            seen.append(command)
+            self.assertEqual(kwargs["timeout"], vks.REGEX_GIT_TIMEOUT_SECONDS)
+            return subprocess.CompletedProcess(args=[], returncode=128, stdout="", stderr=f"fatal: bad regex {pattern}")
+
+        with mock.patch.object(vks.subprocess, "run", side_effect=failing_run):
+            verdict, error = vks.search_history(pattern, [pattern], regex=True)
+        self.assertIs(verdict, vks.Verdict.ERROR)
+        self.assertIn("--pickaxe-regex", seen[0])
+        self.assertNotIn(pattern, error.detail)
+        self.assertNotIn(pattern, error.operation)
 
 
 class TestRepositoryPreconditions(unittest.TestCase):
@@ -298,6 +342,66 @@ class TestCliVerdicts(unittest.TestCase):
             with self._capture() as (_out, _err):
                 rc = self._main_in(repo, keys)
         self.assertEqual(rc, 3)
+
+    def test_unparseable_key_entry_makes_the_run_unverifiable(self):
+        """A key-file entry that is not 16 bytes of hex is never searched, so no clean verdict covers it."""
+        repo = _init_repo()
+        other = bytes(range(16, 32))
+        with tempfile.TemporaryDirectory() as d:
+            keys = Path(d) / "keys.txt"
+            keys.write_text(f"k = {SAMPLE.hex()}\nprefixed = 0x{other.hex()}\n", encoding="utf-8")
+            with self._capture() as (out, err):
+                rc = self._main_in(repo, keys)
+        self.assertEqual(rc, 2)
+        self.assertIn("did not parse", err.getvalue())
+        self.assertIn("prefixed", err.getvalue())
+        combined = out.getvalue() + err.getvalue()
+        self.assertNotIn(other.hex(), combined)
+        self.assertNotIn("History is clean", combined)
+
+    def _assert_spelling_reachable(self, spelling: str) -> None:
+        repo = _init_repo()
+        _commit_secret(repo, spelling)
+        with tempfile.TemporaryDirectory() as d:
+            keys = _write_keys(Path(d), {"k": SAMPLE})
+            with self._capture() as (out, _err):
+                rc = self._main_in(repo, keys)
+        self.assertEqual(rc, 3, spelling)
+        self.assertIn("k: REACHABLE", out.getvalue())
+
+    def test_byte_array_wrapped_over_lines_with_tabs_is_reachable(self):
+        first, second = SAMPLE[:8], SAMPLE[8:]
+        self._assert_spelling_reachable(
+            "{\n\t" + ",\t".join(f"0x{b:02x}" for b in first) + ",\n\t"
+            + ",\t".join(f"0X{b:X}" for b in second) + "\n}"
+        )
+
+    def test_decimal_array_without_spaces_is_reachable(self):
+        self._assert_spelling_reachable("bytes([" + ",".join(str(b) for b in SAMPLE) + "])")
+
+    def test_escaped_string_split_over_lines_is_reachable(self):
+        first, second = SAMPLE[:8], SAMPLE[8:]
+        self._assert_spelling_reachable(
+            'b"' + "".join(f"\\x{b:02x}" for b in first) + '"\n    b"'
+            + "".join(f"\\x{b:02X}" for b in second) + '"'
+        )
+
+    def test_space_separated_hex_wrapped_over_lines_is_reachable(self):
+        spelled = " ".join(f"{b:02x}" for b in SAMPLE)
+        self._assert_spelling_reachable(spelled[:24] + "\n" + spelled[24:])
+
+    def test_tolerant_pattern_does_not_match_a_different_value(self):
+        """Negative control: a wrapped array of a value that differs in one byte stays clean."""
+        near = SAMPLE[:-1] + bytes([SAMPLE[-1] ^ 0x01])
+        repo = _init_repo()
+        _commit_secret(repo, ",\n".join(f"0x{b:02x}" for b in near))
+        with tempfile.TemporaryDirectory() as d:
+            keys = _write_keys(Path(d), {"k": SAMPLE})
+            with self._capture() as (out, _err):
+                rc = self._main_in(repo, keys)
+        self.assertEqual(rc, 0)
+        self.assertIn("k: clean", out.getvalue())
+        self.assertIn("spellings searched", out.getvalue())
 
     def test_exit_two_outside_git_repository(self):
         with tempfile.TemporaryDirectory() as d:

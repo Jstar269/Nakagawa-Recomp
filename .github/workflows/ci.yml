@@ -54,11 +54,16 @@ on:
     types: [checks_requested]
 
 concurrency:
-  # A new commit supersedes an in-flight run for the same PR/ref.  This is also
+  # A new commit supersedes an in-flight run for the same pull request.  This is also
   # intentionally shared by draft and ready events so stale work cannot consume
   # a runner after the PR advances: marking a Draft Ready cancels its light run,
   # and converting a pull request to a Draft cancels its full run.
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Every other run (a push to main, the nightly schedule, a manual run, a merge
+  # group) is a group of its own. Pushes, the schedule and manual runs all have the
+  # main branch's ref, so a group keyed on the ref let a landing cancel the nightly
+  # full-tier run, or a schedule cancel a push's main smoke, with nothing reporting
+  # the validation that never ran.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || format('run-{0}', github.run_id) }}
   cancel-in-progress: true
 
 permissions:
@@ -319,13 +324,17 @@ jobs:
         # fetches every other branch, and Betterleaks' default `git log --all` failed every
         # pull request on one unrelated branch's finding (79d9ef6e, on #1669's branch).
         # Without a pull-request base (pushes, merge groups, the schedule, manual runs) the
-        # scan covers all history reachable from HEAD.
+        # scan covers all history reachable from HEAD. `git log -p` prints no patch for a
+        # merge commit unless told to, so `--diff-merges=first-parent` makes every merge
+        # show what it brought to its first parent: a value typed while resolving a merge
+        # of main and removed in a later commit is still scanned (the merge-only canary in
+        # tools/betterleaks_canary.py).
         run: |
           set -euo pipefail
           if [ -n "$BASE_SHA" ]; then
-            "$BETTERLEAKS_BIN" git . --redact --verbose --log-opts="--full-history ${BASE_SHA}..HEAD"
+            "$BETTERLEAKS_BIN" git . --redact --verbose --log-opts="--full-history --diff-merges=first-parent ${BASE_SHA}..HEAD"
           else
-            "$BETTERLEAKS_BIN" git . --redact --verbose --log-opts="--full-history HEAD"
+            "$BETTERLEAKS_BIN" git . --redact --verbose --log-opts="--full-history --diff-merges=first-parent HEAD"
           fi
 
       - name: Run Betterleaks synthetic canaries
@@ -336,15 +345,17 @@ jobs:
       # (tools/ci_paths.py run_main_smoke), never pull requests. It waited for hygiene
       # to pass; as later steps of the same job it still runs only after every hygiene
       # step above succeeded.
+      # Both smoke steps are skipped when native_tools runs: its core part runs the same two
+      # commands on the same commit, so running them here too only repeated them.
       - name: Run compact import/publication smoke
         # Publication audit is part of the always-present hygiene checks above; this
         # smoke adds a fresh main-branch import gate without repeating it.
-        if: ${{ needs.classify.outputs.run_main_smoke == 'true' }}
+        if: ${{ needs.classify.outputs.run_main_smoke == 'true' && !(needs.classify.outputs.allow_substantive == 'true' && needs.classify.outputs.run_native == 'true') }}
         run: python tools/import_audit_gate.py
 
       - name: Run provenance record and disposition gap check
         # #355: ratchets disposition gaps for upstream-derived production paths.
-        if: ${{ needs.classify.outputs.run_main_smoke == 'true' }}
+        if: ${{ needs.classify.outputs.run_main_smoke == 'true' && !(needs.classify.outputs.allow_substantive == 'true' && needs.classify.outputs.run_native == 'true') }}
         run: python tools/provenance_record_gap.py --check
 
       # The former markdown job. It never depended on hygiene, so `!cancelled()` keeps
@@ -363,8 +374,11 @@ jobs:
   # Public-export candidate audit (#293/#294), in its own job so it overlaps the all-files
   # hygiene checks instead of running after them (#735 item 5). It is a separate required
   # result: ci_required fails unless it succeeds, and every gate that waited for hygiene
-  # also waits for it. The job runs on every event and gates no path, because publication
-  # integrity must never be path-dependent (tools/test_ci_paths.py).
+  # also waits for it. The job runs on every event, because publication integrity must
+  # never be path-dependent (tools/test_ci_paths.py). Its export step runs when the
+  # classifier routes security_publication: the publication files and the export tool
+  # and every gate it runs (tools/ci_paths.py PUBLIC_EXPORT_TOOLS), every full-matrix
+  # event, and every manual run.
   #
   # The job also builds the profile-zero fixture, the steps of the former
   # profile_zero_fixture job (docs/CI.md, "Jobs per run"). They run after the export
@@ -372,7 +386,8 @@ jobs:
   # that job's old condition, plus run_installer, which also starts the Windows job whose
   # smoke and routes parts download these fixtures (an installer-only change starts it with
   # run_python and run_windows both false). The steps never gate the
-  # export: the job-level condition and the export step name no path output.
+  # export: the job-level condition names no path output, and the export step names
+  # only security_publication.
   public_export:
     name: Public export audit and profile-zero fixture
     # The classifier picks the runner (docs/CI.md, "Self-hosted Linux runners"):
@@ -588,7 +603,9 @@ jobs:
     # long job, and each was a real failure that a light run would otherwise hide
     # until the landing batch (docs/CI.md, "Quick and full checks"): the tools mypy
     # baseline and the generated-file and documentation-lint tests run in the Python
-    # tooling job, and the format check in the native core part.
+    # tooling job, and the format check in the native core part. A change to a file
+    # tools/regen_all.py regenerates routes the Python job (tools/ci_paths.py), so a
+    # full run of a documentation-only change still checks it is current.
     name: Generated files and repository lints
     # Always hosted: a light run never needs the self-hosted pool. ubuntu-24.04, not
     # 26.04, because it is the hosted image of the Python tooling and native jobs whose
@@ -667,7 +684,7 @@ jobs:
     # ubuntu-24.04, or the nk-wsl pool for a trusted run while the pool is up.
     runs-on: ${{ fromJSON(needs.classify.outputs.linux_runner || '"ubuntu-24.04"') }}
     env:
-      NK_TEST_TIER: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'full' || 'pr' }}
+      NK_TEST_TIER: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group') && 'full' || 'pr' }}
     # id-token: write lets the coverage upload authenticate to Codecov with the
     # job's OIDC identity (use_oidc: true) instead of a stored repository token.
     # It is not a publication permission: contents stays read.
@@ -743,6 +760,9 @@ jobs:
           # building it would fetch an unhashed setuptools (Scorecard PinnedDependencies).
 
       - name: Enforce tools mypy baseline
+        # The baseline reads the whole tools/ tree, not a shard's modules, so one shard
+        # runs it. Shard 0 is in every shard list (tools/ci_paths.py python_shards).
+        if: matrix.shard == 0
         shell: bash
         run: |
           cat > "$RUNNER_TEMP/mypy-requirements.txt" <<'LOCK'
@@ -1088,6 +1108,19 @@ jobs:
           echo "/usr/local/pspdev/bin" >> "$GITHUB_PATH"
           echo "PSPDEV=/usr/local/pspdev" >> "$GITHUB_ENV"
 
+      # Every Vulkan step selects lavapipe from here: this one step finds the ICD the apt step
+      # installed and fails the job if it is missing. The Vulkan steps export VK_ICD_FILENAMES
+      # themselves, so no other step's Vulkan loader sees a changed environment.
+      - name: Select the lavapipe Vulkan ICD
+        run: |
+          set -euo pipefail
+          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
+          test -n "$lvp_icd" || {
+            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
+            exit 1
+          }
+          echo "NK_LAVAPIPE_ICD=$lvp_icd" >> "$GITHUB_ENV"
+
       - name: Run import-coverage and fake-success audit gate
         if: matrix.part == 'core'
         # Public gate for issue #71: manifest extraction from src/rt/hle.c,
@@ -1208,12 +1241,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 make CC=gcc -j4 gpu-snapsync-selftest
 
       - name: Run host present pacing selftest (links SDL3)
@@ -1234,12 +1262,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           vulkaninfo --summary | tee "$RUNNER_TEMP/vulkan-summary.txt"
           grep -qi llvmpipe "$RUNNER_TEMP/vulkan-summary.txt"
           # Report only: whether lavapipe offers the interlock destination-read path (#2109).
@@ -1252,17 +1275,15 @@ jobs:
       # The Vulkan backend's coherence selftest (src/rt/gpu_sdl3vk/ge_gpu.c): render-target
       # coherence, the texture cache, the per-draw state template, filtering and blend parity
       # against the software GE. It ran on no hosted job, so a regression from #1481 went
-      # unseen; an exit 77 skip fails the step like the capture selftest's.
+      # unseen. A plain run's exit 77 fails the step, as for the capture selftest, but the recipe
+      # (mk/selftests.mk) passes three kinds of SKIP: the gpu-timestamps legs (its own and the
+      # twin's), the interlock dst-read and stencil-once cells on a device that refuses the
+      # interlock, and ge-first-bad-draw-selftest (GE_FBD_SKIP_STATUS=0). Those stay green here.
       - name: Run GPU coherence selftest on lavapipe
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
             make CC=gcc gpu-coherence-selftest vram-view-identity-selftest
 
@@ -1273,12 +1294,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
             make CC=gcc gpu-texscale-selftest gpu-texscale-mutant 2>&1 | tee "$RUNNER_TEMP/texscale.log"
           if grep -q '^SKIP gpu-texscale' "$RUNNER_TEMP/texscale.log"; then
@@ -1293,12 +1309,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-pass-selftest
 
       # FSR 3 frame generation's device refusal (G-R in src/rt/gpu_sdl3vk/fsr3_fg_pass_selftest.c) on
@@ -1309,12 +1320,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-fg-pass-selftest FSR3FG_PASS_ARGS="--cell G-R"
 
       # The embedded FSR 3 SPIR-V must be what the pinned DirectXShaderCompiler release makes of AMD's
@@ -1438,7 +1444,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           g++ -std=c++17 -O1 -Isrc/ref -Isrc/rt -o build/selftest \
-            src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp \
+            src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp src/ref/snapshot_ref.cpp \
             -DSR_SELFTEST_ONLY -fno-exceptions \
             -fsanitize=undefined,float-cast-overflow -fno-sanitize-recover=all
           ./build/selftest
@@ -1628,6 +1634,16 @@ jobs:
         run: |
           python tools/ppmdiff.py --threshold 3 build/verify/snap build/verify/gold
           python -c "import json; r=json.load(open('visual_regression_report.json')); exit(1 if r['summary']['failed_frames'] > 0 else 0)"
+
+      # The Python shards have no PSPDEV, so they report the showcase half of the analysis IR
+      # module gate as NOT_RUN. This part installs PSPDEV, so the gate runs here on the
+      # showcase PRXs built from source; NK_ANALYSIS_IR_SHOWCASE_REQUIRED turns a missing
+      # PSPDEV into a failure instead of a skip.
+      - name: Run the analysis IR module gate on the showcase PRXs
+        if: matrix.part == 'translation'
+        env:
+          NK_ANALYSIS_IR_SHOWCASE_REQUIRED: "1"
+        run: python -m unittest -v tools.test_analysis_ir.AnalysisIrModuleGateTests
 
   linux_gcc16:
     name: Linux GCC 16 canary
@@ -1944,6 +1960,19 @@ jobs:
           echo "/usr/local/pspdev/bin" >> "$GITHUB_PATH"
           echo "PSPDEV=/usr/local/pspdev" >> "$GITHUB_ENV"
 
+      # Every Vulkan step selects lavapipe from here: this one step finds the ICD the apt step
+      # installed and fails the job if it is missing. The Vulkan steps export VK_ICD_FILENAMES
+      # themselves, so no other step's Vulkan loader sees a changed environment.
+      - name: Select the lavapipe Vulkan ICD
+        run: |
+          set -euo pipefail
+          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
+          test -n "$lvp_icd" || {
+            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
+            exit 1
+          }
+          echo "NK_LAVAPIPE_ICD=$lvp_icd" >> "$GITHUB_ENV"
+
       # Every `gcc` and `g++` the steps below run, from make, the Python tools and the
       # selftest commands alike, is this wrapper: the real compiler with `--coverage` added.
       # The measuring steps then run the gates' commands (only an isolated build root or
@@ -1997,7 +2026,7 @@ jobs:
       - name: Run selftest (C++ interpreter unit tests under UBSan)
         run: |
           g++ -std=c++17 -O1 -Isrc/ref -Isrc/rt -o build/selftest \
-            src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp \
+            src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp src/ref/snapshot_ref.cpp \
             -DSR_SELFTEST_ONLY -fno-exceptions \
             -fsanitize=undefined,float-cast-overflow -fno-sanitize-recover=all
           ./build/selftest
@@ -2126,12 +2155,7 @@ jobs:
       - name: Measure the GPU selftests on lavapipe
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           # A software device that is not lavapipe, or a skipped texture scaling selftest,
           # would shrink the number without failing: both fail the step, as in native_tools.
           vulkaninfo --summary | tee "$RUNNER_TEMP/vulkan-summary.txt"

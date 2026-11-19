@@ -582,6 +582,60 @@ class TestStrictTraceContract(unittest.TestCase):
         self.assertIn("never overwrites", stderr)
         self.assertEqual((out / "a.trace").read_bytes(), before)
 
+    def overlap_pair(self, prefix):
+        """Two v1 streams whose first records are ``prefix`` and which diverge right after."""
+        def stream(name, wrong):
+            lines = ["# psp-recomp trace v1 target=fixture oracle=interp start_pc=0x08900100"]
+            for step, writes in enumerate(prefix):
+                lines.append(f"{step} pc=0x{0x08900100 + 4 * step:08x} op=0x25080001 {writes}")
+            step = len(prefix)
+            lines.append(f"{step} pc=0x{0x08900100 + 4 * step:08x} op=0x25080001 "
+                         f"r9=0x{0xdeadbeef if wrong else 1:08x}")
+            return self.write_lines(name, lines)
+        return stream("overlap-a.trace", False), stream("overlap-b.trace", True)
+
+    def test_shrink_start_state_follows_overlapping_writes_in_time_order(self):
+        cases = (
+            # A later word write covers an earlier byte: the word is the final state.
+            (["m8[0x09ffff00]=0xaa", "m32[0x09ffff00]=0x11223344"],
+             "# start-state m32[0x09ffff00]=0x11223344"),
+            # A later byte write lands inside an earlier word: only that byte changes.
+            (["m32[0x09ffff00]=0x11223344", "m8[0x09ffff01]=0xbb"],
+             "# start-state m8[0x09ffff00]=0x44 m8[0x09ffff01]=0xbb "
+             "m8[0x09ffff02]=0x22 m8[0x09ffff03]=0x11"),
+        )
+        for index, (prefix, expected) in enumerate(cases):
+            with self.subTest(prefix=prefix):
+                path_a, path_b = self.overlap_pair(prefix)
+                _step, _pc, _detail, written = tracediff.shrink(
+                    str(path_a), str(path_b), str(self.dir / f"overlap-{index}"), context=0)
+                lines = pathlib.Path(written[0]).read_text(encoding="utf-8").splitlines()
+                self.assertEqual(lines[2], expected)
+
+    def test_unreadable_traces_are_malformed_input_not_a_divergence(self):
+        path_a, path_b = self.shrink_pair(diverge_at=3, length=5)
+        bad = self.dir / "not-utf8.trace"
+        bad.write_bytes(path_a.read_bytes() + b"5 pc=0x08900114 op=0x25080001 r8=0x\xff\n")
+        missing = self.dir / "missing.trace"
+        for mode, extra in (([], []), (["--shrink"], [str(self.dir / "unreadable-out")])):
+            for broken in (bad, missing):
+                with self.subTest(mode=mode, input=broken.name):
+                    result = subprocess.run(
+                        [sys.executable, "-I", self.TOOL, *mode, str(path_b), str(broken), *extra],
+                        cwd=os.path.dirname(self.TOOL), capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", timeout=60)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertNotIn("Traceback", result.stdout + result.stderr)
+                    self.assertIn(broken.name, result.stderr)
+
+    def test_shrink_names_its_input_without_the_local_path(self):
+        path_a, path_b = self.shrink_pair(diverge_at=30)
+        _step, _pc, _detail, written = tracediff.shrink(
+            str(path_a), str(path_b), str(self.dir / "named"), context=2)
+        line = pathlib.Path(written[0]).read_text(encoding="utf-8").splitlines()[1]
+        self.assertTrue(line.startswith(f"# shrunk from {path_a.name} records "), line)
+        self.assertNotIn(str(self.dir), line)
+
     def test_shrink_never_overwrites_its_inputs(self):
         path_a, path_b = self.shrink_pair(diverge_at=30)
         inputs = self.dir / "inputs"

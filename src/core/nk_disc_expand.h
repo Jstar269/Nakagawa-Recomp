@@ -133,6 +133,13 @@ typedef struct {
 bool nk_disc_import_probe(const char *source, const char *data_root, NkDiscImport *out,
                           NkDiscExpandStatus *status);
 
+/* The fingerprint of any other file a disc image is made from (a PSN package the
+   player converts): its size, write time and a hash of its first 64 KiB, keyed
+   apart from a compressed image's, so an image made from it is reused only for
+   the same unchanged file. */
+bool nk_disc_source_fingerprint(const char *source, char out[NK_DISC_FINGERPRINT_CHARS + 1],
+                                NkDiscExpandStatus *status);
+
 /* Probe, then expand when no matching expansion exists: the image is expanded
    into <data_root>/discs/expanded/, checked to be a PSP disc with a disc ID,
    and moved into its per-title folder. */

@@ -263,6 +263,7 @@ The **Where** column of each table names the places a code can appear:
 | `CLI_NOT_FOUND` | player | The bundled tools folder could not be found. |
 | `DATA_DIR_UNAVAILABLE` | player | Nakagawa's data folder is not available. |
 | `DESTINATION_WRITE_FAILED` | player | A verified download could not be moved into place, or its downloads folder could not be prepared. |
+| `DISC_PATH_TOO_LONG` | player | The disc image picked in the file picker is in a folder too deep to read, so it was not added. |
 | `DISK_FULL` | player | The disk is full. |
 | `DISK_WRITE_FAILED` | player | The Python runtime's staging folder could not be prepared, or its files could not be moved into app data. |
 | `ERROR_UNKNOWN` | player | The player raised an error without a code. This is a defect in the player. |

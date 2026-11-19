@@ -38,6 +38,13 @@ the real ``ge_set_gpu_hooks`` capture seam the Vulkan rasterizer uses (so the te
   has no CVtx::nf to consult) with a NaN bone matrix.
 * ``predicate``  - prints the verdict of ``ge_vtx_finite`` (ge_shared.h), the single
   predicate BOTH rasterizers apply, over a table of inputs.
+* ``hugetri`` / ``hugeline`` / ``hugespr`` / ``hugepoint`` - a finite THROUGH-mode
+  coordinate of 1e10 pixels, past what the rasterizers' integer coverage arithmetic holds
+  (2^24 pixels): each used to reach a float-to-int conversion or a 64-bit edge product
+  whose result C leaves undefined. ``bigtri`` is the control at 1e6 pixels, which must
+  still be drawn.
+* ``capturestop`` - a GE capture of a list whose run stops after every command and
+  resumes (as a preemption stops it): its primitive must count toward the capture.
 
 ``gpuprim`` in the GESTAT+ line counts primitives a GPU backend took: without it a
 GPU-rasterized scene reports zero 3D primitives, because a taken primitive returns before
@@ -282,8 +289,7 @@ static void emit_through_vtx(uint32_t addr, float x, float y, float z) {
     memcpy(SR_HOST(addr), f, sizeof(f));
 }
 
-static void emit_through_list(uint32_t list, uint32_t prim_type, uint32_t count, int nan_v1) {
-    float nan_x = from_bits(0x7fc00000u);
+static void emit_through_list(uint32_t list, uint32_t prim_type, uint32_t count, float x1) {
     s_pc = list;
     W(0x14, 0);                       /* ORIGIN */
     W(0x10, 0);                       /* BASE */
@@ -304,12 +310,17 @@ static void emit_through_list(uint32_t list, uint32_t prim_type, uint32_t count,
     W(0x01, VERTS - list);            /* VADDR (ORIGIN-relative) */
     W(0x04, (prim_type << 16) | count);
     W(0x0C, 0);                       /* END */
-    /* Through-mode x/y are raw screen pixels, not model units: a pixel-scale quad. */
-    float x1 = nan_v1 ? nan_x : 160.0f;
+    /* Through-mode x/y are raw screen pixels, not model units: a pixel-scale quad. x1 is
+     * the tested coordinate (160 for the control). */
     if (prim_type == 6) {             /* SPRITES: p0 lower-left, p1 upper-right */
         emit_through_vtx(VERTS + 0u * THROUGH_STRIDE, 80.0f, 60.0f, 0.0f);
         emit_through_vtx(VERTS + 1u * THROUGH_STRIDE, x1, 200.0f, 0.0f);
-    } else {                          /* TRIANGLES: NaN in the first vertex's x */
+    } else if (prim_type == 1) {      /* LINES: from an on-screen pixel to x1 */
+        emit_through_vtx(VERTS + 0u * THROUGH_STRIDE, 80.0f, 60.0f, 0.0f);
+        emit_through_vtx(VERTS + 1u * THROUGH_STRIDE, x1, 60.0f, 0.0f);
+    } else if (prim_type == 0) {      /* POINTS */
+        emit_through_vtx(VERTS + 0u * THROUGH_STRIDE, x1, 60.0f, 0.0f);
+    } else {                          /* TRIANGLES: the tested value in the first vertex's x */
         emit_through_vtx(VERTS + 0u * THROUGH_STRIDE, x1, 60.0f, 0.0f);
         emit_through_vtx(VERTS + 1u * THROUGH_STRIDE, 320.0f, 60.0f, 0.0f);
         emit_through_vtx(VERTS + 2u * THROUGH_STRIDE, 200.0f, 200.0f, 0.0f);
@@ -421,10 +432,22 @@ int main(int argc, char **argv) {
 
     if (strcmp(mode, "lightswap") == 0)
         emit_lightswap_list(LIST1);
-    else if (strcmp(mode, "throughtri") == 0 || strcmp(mode, "throughok") == 0)
-        emit_through_list(LIST1, 3, 3, strcmp(mode, "throughtri") == 0);
+    else if (strcmp(mode, "throughtri") == 0)
+        emit_through_list(LIST1, 3, 3, from_bits(0x7fc00000u));
+    else if (strcmp(mode, "throughok") == 0 || strcmp(mode, "capturestop") == 0)
+        emit_through_list(LIST1, 3, 3, 160.0f);
     else if (strcmp(mode, "throughspr") == 0)
-        emit_through_list(LIST1, 6, 2, 1);
+        emit_through_list(LIST1, 6, 2, from_bits(0x7fc00000u));
+    else if (strcmp(mode, "hugetri") == 0)
+        emit_through_list(LIST1, 3, 3, 1e10f);
+    else if (strcmp(mode, "bigtri") == 0)
+        emit_through_list(LIST1, 3, 3, 1e6f);
+    else if (strcmp(mode, "hugeline") == 0)
+        emit_through_list(LIST1, 1, 2, 1e10f);
+    else if (strcmp(mode, "hugespr") == 0)
+        emit_through_list(LIST1, 6, 2, 1e10f);
+    else if (strcmp(mode, "hugepoint") == 0)
+        emit_through_list(LIST1, 0, 1, 1e10f);
     else if (strcmp(mode, "patchnan") == 0)
         emit_patch_list(LIST1, bone);
     else
@@ -432,7 +455,21 @@ int main(int argc, char **argv) {
     if (with_gpu) hook_register();
     clear_fb();
     ge_set_frame(60);
-    if (ge_run_list(LIST1, 0) != 0) { printf("FAIL: list did not END\n"); return 1; }
+    if (strcmp(mode, "capturestop") == 0) {
+        /* A stop flag that stays set stops the run after every command, as a preemption
+         * does; each stopped run resumes where it stopped until the list reaches its END.
+         * The capture (armed for frame 60 by the test) closes at the next frame. */
+        atomic_int_least32_t stop;
+        atomic_init(&stop, 1);
+        int stopped = 0, runs = 1;
+        uint32_t next = ge_run_list_until(LIST1, 0, &stop, &stopped);
+        while (stopped && runs < 1000) {
+            next = ge_run_list_until(next, 1, &stop, &stopped);
+            runs++;
+        }
+        if (next != 0) { printf("FAIL: list did not END\n"); return 1; }
+        printf("RUNS=%d\n", runs);
+    } else if (ge_run_list(LIST1, 0) != 0) { printf("FAIL: list did not END\n"); return 1; }
     printf("LIT=%u\nHOOK=%u\n", lit_pixels(), s_hook_calls);
     if (strcmp(mode, "lightswap") == 0)
         for (uint32_t t = 0; t < 4; t++) printf("RED%u=%u\n", t, lightswap_red(t));
@@ -467,12 +504,15 @@ def _compile(tmp: Path) -> Path:
     return compile_ge_harness(tmp, HARNESS_C, "ge_nonfinite_harness")
 
 
-def _run(exe: Path, mode: str, gpu: bool = False) -> subprocess.CompletedProcess:
+def _run(exe: Path, mode: str, gpu: bool = False,
+         extra_env: dict | None = None) -> subprocess.CompletedProcess:
     # ge.c reads many SR_* settings that change what it draws or write files (SR_FBSNAP,
     # SR_NOCULL, SR_TEXDUMP, ...): none of the caller's reach the harness, and it runs in its
     # own scratch folder, so the shell cannot change a verdict or write into the checkout.
+    # A test that needs a setting passes it in extra_env.
     env = {key: value for key, value in os.environ.items() if not key.startswith("SR_")}
     env["SR_GESTAT"] = "1"
+    env.update(extra_env or {})
     argv = [os.fspath(exe), mode] + (["hook"] if gpu else [])
     return subprocess.run(argv, capture_output=True, text=True, env=env, cwd=exe.parent)
 
@@ -619,6 +659,53 @@ class TestNonFiniteVertex(unittest.TestCase):
         self.assertEqual(gpu.returncode, 0, gpu.stdout + gpu.stderr)
         self.assertEqual(_out(gpu, "HOOK"), 0,
                          "the Vulkan capture seam was handed a non-finite patch triangle")
+
+    def test_unrepresentable_through_coordinate_drops_the_primitive(self):
+        # A finite through-mode coordinate of 1e10 pixels passed the finiteness gate and
+        # reached (int) conversions and 64-bit edge products whose result C leaves undefined
+        # (on x86 the conversion gives INT_MIN): the line drew one pixel where its span
+        # should have been, and the triangle, sprite and point were handed to the GPU seam
+        # while the software path lost them uncounted. Both paths now drop it and count it.
+        for mode in ("hugetri", "hugeline", "hugespr", "hugepoint"):
+            with self.subTest(mode=mode):
+                sw = _run(self.exe, mode)
+                self.assertEqual(sw.returncode, 0, sw.stdout + sw.stderr)
+                self.assertEqual(_out(sw, "LIT"), 0,
+                                 "an unrepresentable through-mode coordinate must not rasterize")
+                stat = _stat(sw.stderr, 120)
+                self.assertEqual(stat.get("unrepresentable"), "1",
+                                 "the dropped primitive must be counted for GESTAT")
+                self.assertEqual(stat.get("nonfinite"), "0", "it is finite")
+                gpu = _run(self.exe, mode, gpu=True)
+                self.assertEqual(gpu.returncode, 0, gpu.stdout + gpu.stderr)
+                self.assertEqual(_out(gpu, "HOOK"), 0,
+                                 "the GPU seam was handed a primitive the software path drops")
+
+    def test_large_representable_through_coordinate_still_draws(self):
+        sw = _run(self.exe, "bigtri")
+        self.assertEqual(sw.returncode, 0, sw.stdout + sw.stderr)
+        self.assertGreater(_out(sw, "LIT"), 100,
+                           "control: a through-mode vertex at 1e6 pixels must still rasterize")
+        self.assertEqual(_stat(sw.stderr, 120).get("unrepresentable"), "0")
+        gpu = _run(self.exe, "bigtri", gpu=True)
+        self.assertEqual(_out(gpu, "HOOK"), 1,
+                         "control: a through-mode vertex at 1e6 pixels must reach the GPU seam")
+
+    def test_capture_counts_the_primitives_of_a_stopped_run(self):
+        # A run that stops early (a preemption) and resumes used to drop the stopped run's
+        # primitives from the capture total, so a frame whose draws all came before the stop
+        # was skipped as drawing fewer primitives than SR_GE_CAPTURE_MIN_PRIMS.
+        capture = self.tmp / "capturestop.ngef"
+        if capture.exists():
+            capture.unlink()
+        result = _run(self.exe, "capturestop", extra_env={
+            "SR_GE_CAPTURE_FRAME": "60", "SR_GE_CAPTURE_PATH": os.fspath(capture)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertGreater(_out(result, "RUNS"), 3, "control: the run stopped and resumed")
+        self.assertGreater(_out(result, "LIT"), 0, "control: the triangle was drawn")
+        self.assertNotIn("GE_CAPTURE: skipped", result.stderr)
+        self.assertTrue(capture.exists(), "the capture of the drawn frame must be written:\n"
+                        + result.stderr)
 
     def test_lighting_follows_light_changes_between_draws(self):
         # The GE keeps register-derived lighting values (colours, a directional light's
