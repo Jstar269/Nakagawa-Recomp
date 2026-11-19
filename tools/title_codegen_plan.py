@@ -56,7 +56,6 @@ _TOOLS_DIRECTORY = str(Path(__file__).resolve().parent)
 if _TOOLS_DIRECTORY not in sys.path:
     sys.path.insert(0, _TOOLS_DIRECTORY)
 
-import nk_powershell
 import title_manifest
 
 GAME_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -2515,6 +2514,7 @@ def build_package(
             if arg.startswith("--extra-elf=")
         ]
         link_map = build_workspace / f"{selected_name}.map"
+        import nk_powershell
         build_environment = nk_powershell.powershell_env(os.environ)
         # The optimization the cache key above names is what Make compiles with.
         build_environment.update(
