@@ -63545,6 +63545,14 @@ static int run_texdump_stop_child(const char *arg) {
         sr_hle_test_state_sample_reset();
         hle_test_setenv("SR_WATCHDOG_EXIT", "600");   /* no new frame for 600 vblanks: status 1 */
         for (unsigned i = 0; i < 1300u; i++) { sr_display_advance_vcount(1u); sr_vblank_tick(); }
+    } else if (strcmp(route, "fbdump1") == 0) {
+        /* A NEXTFRAME (sync=1) flip is presented at the VBLANK: the armed present reports its
+         * capture there and the SR_FBDUMP verdict exit follows it (audit 2026-11-17, F-8972ffa6). */
+        hle_test_setenv("SR_FBDUMP", "1");
+        s_test_gui_on = 1;
+        sr_display_advance_vcount(1u);
+        (void)display_set(0x04000000u, 512, 3, 1);
+        sr_vblank_tick();
     } else if (strcmp(route, "regfull") == 0) {
         /* Synthetic NIDs no table uses, past HLE_CAP: each one the registry cannot hold is
          * named as it is refused (audit 2026-11-17, F-dc2bea8c). Not a stop: returns 0. */
@@ -63634,6 +63642,28 @@ static void test_watchdog_stop_runs_the_run_end(const char *self) {
                memcmp(rows + row_end - 2u, ",7", 2u) == 0,
            "the SR_WATCHDOG_EXIT stop lands every SR_SAMPLE_OUT row sampled before it "
            "(hle_state_sample_close)");
+}
+
+/* SR_FBDUMP=<N> ends the run at the first armed present from vblank N on, whichever way the
+ * title flips: after a NEXTFRAME (sync=1) flip, sr_vblank_tick presents it, reports the capture
+ * and gives the verdict exit, through the run end (audit 2026-11-17, F-8972ffa6). This harness's
+ * presenter publishes no capture, so the policy status is 1. */
+static void test_fbdump_exits_after_a_nextframe_flip(const char *self) {
+    static char text[65536];
+    char root[MAX_PATH], probe[MAX_PATH], log[MAX_PATH];
+    if (!hle_scratch_root(root, sizeof(root)) ||
+        !texdump_stop_paths(probe, log, sizeof(probe), root, "fbdump1")) {
+        expect(0, "SR_FBDUMP sync=1: the selftest knows its scratch root");
+        return;
+    }
+    const int status = run_end_child(self, root, "fbdump1", text, sizeof(text));
+    FILE *pf = fopen(probe, "rb");
+    if (pf) fclose(pf);
+    expect(status == 1 && strstr(text, "present capture result=0") != NULL,
+           "SR_FBDUMP=1 after a NEXTFRAME (sync=1) flip reports the VBLANK's present capture and "
+           "exits with the policy status (1: nothing published)");
+    expect(pf != NULL, "the SR_FBDUMP exit after a NEXTFRAME flip goes through the run end "
+                       "(the texture dump's finish ran)");
 }
 
 static void test_texdump_finished_by_run_stops(const char *self) {
@@ -64239,6 +64269,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_texdump_finished_by_run_stops(argc > 0 ? argv[0] : NULL);
     test_registry_full_is_named(argc > 0 ? argv[0] : NULL);
     test_watchdog_stop_runs_the_run_end(argc > 0 ? argv[0] : NULL);
+    test_fbdump_exits_after_a_nextframe_flip(argc > 0 ? argv[0] : NULL);
     test_td24d_hle_batch();
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();
