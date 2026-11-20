@@ -2455,29 +2455,29 @@ def convert(
     inexact: list[int] = []
     padded: list[int] = []
     for code in planner.codes:
-        image = _glyph_image(planner, code, ppem, embolden_x, embolden_y)
+        glyph_image = _glyph_image(planner, code, ppem, embolden_x, embolden_y)
         target = measured.get(code)
         if target is not None:
             advance_x = target[0]
-            if image is not None and target[1] > 0:
-                image = _meet_width(planner, code, ppem, embolden_x, embolden_y, target[1], image)
-                if image[2] < target[1]:
-                    image = _pad_columns(image, target[1])
+            if glyph_image is not None and target[1] > 0:
+                glyph_image = _meet_width(planner, code, ppem, embolden_x, embolden_y, target[1], glyph_image)
+                if glyph_image[2] < target[1]:
+                    glyph_image = _pad_columns(glyph_image, target[1])
                     padded.append(code)
-                elif image[2] > target[1]:
+                elif glyph_image[2] > target[1]:
                     inexact.append(code)
-                image = (target[2], *image[1:])
+                glyph_image = (target[2], *glyph_image[1:])
         else:
             if digit_advance_26_6 is not None and code in DIGIT_CODES:
                 advance_x = digit_advance_26_6
             else:
                 advance_x = _to26_6(planner.advance_units(code), ppem, planner.font_for(code).units_per_em)
             advance_x += (embolden_advance + tracking) * SUB_PIXEL
-        if image is None:
+        if glyph_image is None:
             zero_area.append(code)
             glyphs.append(pgf_writer.Glyph(code=code, width=0, height=0, samples=(), advance_x=advance_x))
             continue
-        left, top, width, height, samples = image
+        left, top, width, height, samples = glyph_image
         max_width = max(max_width, width)
         max_height = max(max_height, height)
         glyphs.append(

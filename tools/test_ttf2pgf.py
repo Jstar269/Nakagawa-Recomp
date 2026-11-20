@@ -2733,7 +2733,9 @@ class HorizontalMetricsTests(CliRefusalMixin):
         glyphs = _glyph_map(self._convert(table).glyphs)
 
         def rows(glyph: Glyph) -> tuple[int, int] | None:
-            return ttf2pgf._half_coverage_rows((0, glyph.adjust_y, glyph.width, glyph.height, glyph.samples))
+            found: tuple[int, int] | None = ttf2pgf._half_coverage_rows(
+                (0, cast(int, glyph.adjust_y), glyph.width, glyph.height, glyph.samples))
+            return found
 
         for code in range(0x41, 0x5B):
             with self.subTest(code=f"U+{code:04X}"):
@@ -2745,7 +2747,7 @@ class HorizontalMetricsTests(CliRefusalMixin):
 
     def test_malformed_tables_are_named_refusals(self) -> None:
         good = {"U+0048": [700, 9, 1]}
-        cases = {
+        cases: dict[str, tuple[dict[str, list], dict[str, object]]] = {
             "schema": ({}, {"schema": "nk-psp-horizontal-metrics/v0"}),
             "evidence": ({}, {"evidence": "guessed"}),
             "fields": ({}, {"fields": [{"name": "advance_h_26_6"}]}),
