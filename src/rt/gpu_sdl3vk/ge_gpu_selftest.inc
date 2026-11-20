@@ -4082,21 +4082,23 @@ static int coherence_run_through_float_z(void) {
             ok = 0;
         }
     }
-    /* A NaN z is drawn. PSP-GE-THROUGHZ-001 (docs/HARDWARE_ORACLE.md, 2026-11-10, PSP-3000): a
-     * through-mode 16x16 sprite with both vertices at z = NaN, depth test ALWAYS, is drawn in full.
-     * The depth the GE stores for it was not read; depth 0 is UNMEASURED (the decoder's rule for a z
-     * below the range), held here only so both renderers take the same one: the depth test EQUAL
-     * passes against 0 and fails against 1. Two triangles at NaN take the same decoder path. */
+    /* A NaN z is drawn, at depth 0xffff. PSP-GE-THROUGHZ-001 (docs/HARDWARE_ORACLE.md, PSP-3000): its
+     * 2026-11-10 run drew a through-mode 16x16 sprite with both vertices at z = NaN, depth test
+     * ALWAYS, in full; its 2026-11-20 run read the depth word that sprite stores for the NaN
+     * 0x7fc00000 (C's NAN here): 0xffff. Both renderers take the decoder's depth, so the depth test
+     * EQUAL passes against 65535 and fails against 65534 and 0. Two triangles at NaN take the same
+     * decoder path. -inf, a negative NaN and other NaNs are not measured and not checked here. */
     for (int gpu = 1; gpu >= 0; gpu--) {
         const int sprite_drawn = through_float_z_passes(NAN, 100u, gpu, 1u, 0, 1);
         const int tris_drawn = through_float_z_passes(NAN, 100u, gpu, 1u, 0, 0);
+        const int at_max = through_float_z_passes(NAN, 65535u, gpu, 2u, 0, 1);
+        const int at_below = through_float_z_passes(NAN, 65534u, gpu, 2u, 0, 1);
         const int at_zero = through_float_z_passes(NAN, 0u, gpu, 2u, 0, 1);
-        const int at_one = through_float_z_passes(NAN, 1u, gpu, 2u, 0, 1);
-        if (sprite_drawn == 1 && tris_drawn == 1 && at_zero == 1 && at_one == 0) continue;
+        if (sprite_drawn == 1 && tris_drawn == 1 && at_max == 1 && at_below == 0 && at_zero == 0) continue;
         fprintf(stderr, "gpu coherence selftest [%s]: on %s at z=NaN: a sprite under the depth test ALWAYS was "
-                        "drawn: %d (want 1), two triangles: %d (want 1); EQUAL to depth 0: %d (want 1), to "
-                        "depth 1: %d (want 0)\n", name, gpu ? "the Vulkan path" : "ge.c", sprite_drawn,
-                tris_drawn, at_zero, at_one);
+                        "drawn: %d (want 1), two triangles: %d (want 1); EQUAL to depth 65535: %d (want 1), to "
+                        "depth 65534: %d (want 0), to depth 0: %d (want 0)\n", name,
+                gpu ? "the Vulkan path" : "ge.c", sprite_drawn, tris_drawn, at_max, at_below, at_zero);
         ok = 0;
     }
     /* Through mode only: a transform-mode z is a model coordinate, and the decoder must leave it
@@ -4118,7 +4120,7 @@ static int coherence_run_through_float_z(void) {
     coherence_reset_targets();
     if (ok)
         printf("gpu coherence selftest: PASS %-22s z=-1.0 and z=70000.0 drawn; a fraction and an infinity "
-               "are the same depth on both renderers; NaN drawn; transform-mode z untouched\n", name);
+               "are the same depth on both renderers; NaN drawn at depth 65535; transform-mode z untouched\n", name);
     return ok;
 }
 
