@@ -47,7 +47,7 @@ import unittest
 from typing import Any, TypedDict, cast
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-# The repository root, so ``tools.`` imports also resolve when this file runs as a script.
+# The repository root resolves `tools.`; the tools folder resolves bare sibling imports.
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
@@ -924,7 +924,7 @@ class PathTextRenderingTests(unittest.TestCase):
 
     def test_path_text_is_rendering_only(self):
         # It replaces backslashes with slashes but does not claim containment
-        from title_codegen_plan import _path_text
+        _path_text = title_codegen_plan._path_text
         self.assertEqual(_path_text(pathlib.Path(r"C:\foo\bar"), "label"), "C:/foo/bar")
         self.assertEqual(_path_text(pathlib.Path("a/b"), "label"), "a/b")
         # Ensure comments/tests say rendering only (checked by searching planner)
@@ -935,14 +935,16 @@ class PathTextRenderingTests(unittest.TestCase):
         self.assertNotIn("containment", text.lower())
         self.assertNotIn("security validation", text.lower())
 
-    def test_the_module_runs_as_a_script(self) -> None:
-        # ``python tools/test_generic_title_planning_proof.py`` puts only tools/ on the path;
-        # its imports still resolve.
-        with tempfile.TemporaryDirectory() as cwd:
-            script = str(pathlib.Path(__file__).resolve())
-            run = subprocess.run([sys.executable, "-E", script, "-h"], cwd=cwd,
-                                 capture_output=True, text=True, check=False, timeout=120)
+    def test_file_imports_when_run_as_a_script(self) -> None:
+        # Script mode puts only tools/ on sys.path, never the repository root or the cwd.
+        env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+        with tempfile.TemporaryDirectory() as tmp:
+            run = subprocess.run(
+                [sys.executable, "-s", str(pathlib.Path(__file__).resolve()), "--help"],
+                cwd=tmp, env=env, capture_output=True, text=True, check=False, timeout=120,
+            )
         self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertNotIn("ModuleNotFoundError", run.stderr)
 
 
 if __name__ == "__main__":

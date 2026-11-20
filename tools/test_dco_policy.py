@@ -298,16 +298,13 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             with self.subTest(hard_stop=rule):
                 self.assertRuleStated(hard_stop_bullets, terms, f"the hard stop: {rule}")
 
-        standing = [block for block in section_3_blocks if block.startswith("**Standing hardware authorization.**")]
-        self.assertEqual(len(standing), 1, "section 3 needs one standing hardware authorization paragraph")
-        for terms in (
-            ("non-destructive", "per-turn authorization", "hardware-lock protocol", "one holder at a time"),
-            ("revoke", "return to per-turn authorization"),
-            ("never covers", "destructive writes", "tags", "releases", "credentials", "disclosure of private inputs"),
-            ("requested from the maintainer", "never simulated"),
-        ):
-            with self.subTest(standing_authorization=terms):
-                self.assertRuleStated(standing, terms, "the bounds of the standing hardware authorization")
+        hardware = [block for block in section_3_blocks if block.startswith("**PSP hardware.**")]
+        self.assertEqual(len(hardware), 1, "section 3 needs one PSP hardware paragraph")
+        self.assertRuleStated(
+            hardware,
+            ("only as its user directs", "physical steps", "never simulated", "device writes", "forbidden"),
+            "the bounds of a contributor's PSP use",
+        )
 
         execution_contracts = (
             (118, ("fail-closed", "analyzer-owned", "fail closed", "not an all-Allegrex interpreter")),
@@ -333,10 +330,83 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             [
                 "LANE", "MISSION", "BASE_SHA", "HEAD_SHA", "PR", "STATUS", "RESULT", "ROOT_CAUSE",
                 "CHANGED_FILES", "NEW_PATH_PROVENANCE", "FAILING_BEFORE", "TESTS", "PRIVATE_ACCEPTANCE",
-                "HARDWARE", "UNRESOLVED", "DISCOVERED_FOLLOWUPS", "READY_QUALITY",
+                "HARDWARE", "UNRESOLVED", "DISCOVERED_FOLLOWUPS", "NOT_PERFORMED", "READY_QUALITY",
             ],
             "the section 11 report template must keep its fields",
         )
+
+    def test_agents_marks_upstream_behavior_as_a_bounded_evidence_tier(self):
+        content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        section_6 = " ".join(_blocks(_section(content, 6))).lower()
+        section_7 = " ".join(_blocks(_section(content, 7))).lower()
+        for required in (
+            "unknown nids and unowned dispatches stop visibly",
+            "a modeled psp error may return to the guest",
+            "do not deliberately crash the player",
+            "reported visibly",
+            "stays a named stop",
+        ):
+            with self.subTest(section=6, required=required):
+                self.assertIn(required, section_6)
+        for required in (
+            "ppsspp-derived, not psp-measured",
+            "jpcsp-derived, not psp-measured",
+            "exact upstream revision and symbol",
+            "log first use once per run",
+            "a psp measurement for the same scope supersedes it",
+            "no public reference",
+            "save-data and flash writes",
+            "never fills an unknown nid",
+            "production-path regression",
+        ):
+            with self.subTest(section=7, required=required):
+                self.assertIn(required, section_7)
+
+    def test_hard_limits_and_review_separate_guest_errors_from_hidden_failures(self):
+        content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        start = content.index("### Hard limits")
+        hard_limits = " ".join(_blocks(content[start:content.index("\n### ", start + 1)])).lower()
+        for required in ("no hidden failures", "fake success", "deliberate crashes", "a modeled psp error"):
+            with self.subTest(surface="AGENTS.md hard limits", required=required):
+                self.assertIn(required, hard_limits)
+        review = " ".join((ROOT / ".github/REVIEW.md").read_text(encoding="utf-8").lower().split())
+        for required in ("modeled psp error", "whole-run stop", "host crash"):
+            with self.subTest(surface=".github/REVIEW.md", required=required):
+                self.assertIn(required, review)
+
+    def test_agents_keeps_the_maintainer_workspace_process_out_of_the_public_contract(self):
+        # The maintainer's own workspace, hardware and landing procedure lives outside the
+        # repository; the public file says so, states that it can only add rules, and keeps
+        # the integration and merge boundaries every contributor relies on.
+        content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertNotRegex(content, r"(?m)^## Maintainer process")
+        self.assertNotIn("Standing hardware authorization", content)
+        intro = " ".join(_blocks(content[: content.index("## Where to start")]))
+        self.assertRuleStated([intro], ("outside this repository", "only add", "never relax"), "the split")
+        section_10 = _blocks(_section(content, 10))
+        self.assertRuleStated(section_10, ("**Integration**", "full required hosted CI is green", "goes back to its author"),
+                              "the public integration boundary")
+        self.assertRuleStated(section_10, ("maintainer authorizes", "merges a PR", "nobody bypasses", "required checks"),
+                              "the merge boundary")
+        self.assertRuleStated(_blocks(_section(content, 8)), ("before the pull request opens", "Nobody pushes to `main`"),
+                              "the early push of a planned topic branch")
+
+    def test_agents_scopes_opt_in_network_approval(self):
+        content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        section_5 = " ".join(_blocks(_section(content, 5))).lower()
+        for required in (
+            "offline by default",
+            "approves opt-in network features in principle",
+            "does not authorize an unlisted host",
+            "each feature's public issue must name its hosts, payload, consent and data boundaries",
+            "before it ships",
+            "off by default",
+            "listed in `docs/setup.md` network use",
+            "tools/test_prereq_fetcher.py",
+            "no setting makes a nid miss permissive",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, section_5)
 
     def test_release_safety_rule_is_present_and_not_contradicted(self):
         policy_text = "\n".join(

@@ -2081,6 +2081,55 @@ static void test_library_hash_members_are_checked(void) {
     printf("PASS library hash members: unknown tier reads unchecked, malformed hash refused\n");
 }
 
+static void test_redump_game_name_lookup(void) {
+    static const char *const doc =
+        "<?xml version=\"1.0\"?>\n"
+        "<datafile>\n"
+        "  <header><name>Synthetic</name><version>1</version></header>\n"
+        "  <game name=\"Alpha &amp; Omega &#39;Two&#x27;: Beta\">\n"
+        "    <serial>TEST-70010</serial>\n"
+        "    <rom name=\"a.iso\" size=\"2048\" crc=\"11223344\" "
+        "sha1=\"0123456789abcdef0123456789abcdef01234567\"/>\n"
+        "  </game>\n"
+        "  <game>\n"
+        "    <serial>TEST-70011</serial>\n"
+        "    <rom name=\"b.iso\" size=\"4096\" crc=\"55667788\" "
+        "sha1=\"fedcba9876543210fedcba9876543210fedcba98\"/>\n"
+        "  </game>\n"
+        "</datafile>\n";
+    NkDiscDat dat;
+    NkDiscExpandStatus status;
+    CHECK(nk_disc_dat_parse(doc, strlen(doc), &dat, &status));
+    const char *name = nk_disc_dat_find_game_name(
+        &dat, "0123456789abcdef0123456789abcdef01234567", "11223344", 2048u);
+    CHECK(name != NULL && strcmp(name, "Alpha & Omega 'Two': Beta") == 0);
+    /* Zero size skips the size check (library.json records store sha1+crc32 without byte count). */
+    CHECK(nk_disc_dat_find_game_name(
+              &dat, "0123456789abcdef0123456789abcdef01234567", "11223344", 0u) == name);
+    /* Wrong CRC-32, wrong size, wrong SHA-1, or unnamed <game> returns NULL. */
+    CHECK(nk_disc_dat_find_game_name(
+              &dat, "0123456789abcdef0123456789abcdef01234567", "deadbeef", 0u) == NULL);
+    CHECK(nk_disc_dat_find_game_name(
+              &dat, "0123456789abcdef0123456789abcdef01234567", "11223344", 4096u) == NULL);
+    CHECK(nk_disc_dat_find_game_name(
+              &dat, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "11223344", 0u) == NULL);
+    CHECK(nk_disc_dat_find_game_name(
+              &dat, "fedcba9876543210fedcba9876543210fedcba98", "55667788", 4096u) == NULL);
+    nk_disc_dat_free(&dat);
+
+    char bundled[NATIVE_TEST_PATH_MAX];
+    CHECK(nk_disc_bundled_dat_path(".", bundled, sizeof(bundled)));
+    CHECK(nk_disc_dat_load(bundled, &dat, &status));
+    for (size_t i = 0; i < dat.rom_count; i++) {
+        CHECK(dat.roms[i].name_offset > 0u && dat.roms[i].name_offset < dat.names_size);
+    }
+    const char *known_name = nk_disc_dat_find_game_name(
+        &dat, "3ba8af1354c8ae1e5119dbff19730793c21ad56e", "b71764f4", 1207468032u);
+    CHECK(known_name != NULL && known_name[0] != '\0');
+    nk_disc_dat_free(&dat);
+    printf("PASS Redump game name lookup (entities, negatives, bundled DAT)\n");
+}
+
 int main(void) {
     test_conformance_corpus();
     native_test_create_root("disc-verify");
@@ -2101,6 +2150,7 @@ int main(void) {
     test_library_remove_by_file();
     test_library_commit_keeps_both_images();
     test_library_hash_members_are_checked();
+    test_redump_game_name_lookup();
     printf("test_disc_verify: %d checks passed\n", g_checks);
     return 0;
 }

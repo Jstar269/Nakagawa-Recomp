@@ -12,6 +12,42 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Standalone runtime stubs for symbols referenced by uncalled paths in recomp.c and
+ * guest_interp.c. GNU ld --gc-sections drops those sections before diagnosing references,
+ * whereas lld resolves object-level symbols first. */
+volatile int g_sr_vram_read_pending = 0;
+void sr_ge_vram_read_prepare(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
+void sr_ge_vram_write_prepare(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
+void sr_ge_vram_write_commit(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
+uint32_t sr_get_ge_status(void) { return 0u; }
+uint32_t g_sr_debug = 0;
+SrMemWatch g_sr_mem_watches[SR_MAX_MEM_WATCHES];
+int g_sr_mem_watch_count = 0;
+int g_sr_metadata_watch = 0;
+uint32_t g_sr_mem_watch_context_pc = 0;
+unsigned g_sr_mem_watch_context_limit = 0;
+unsigned g_sr_mem_watch_context_count = 0;
+int g_sr_mem_watch_context_fpr = -1;
+uint32_t g_sr_mem_watch_context_fpr_value = 0;
+uint32_t g_sr_store_context_pc = 0;
+unsigned g_sr_store_context_count = 0;
+unsigned g_sr_store_context_limit = 0;
+int g_sr_store_context_mem_gpr = -1;
+uint32_t g_sr_store_context_mem_offset = 0;
+unsigned g_sr_store_context_mem_words = 0;
+int g_sr_last_writer_enabled = 0;
+void sr_note_mem_write(uint32_t addr, uint32_t width, uint32_t val, uint32_t pc) {
+    (void)addr; (void)width; (void)val; (void)pc;
+}
+CpuState *s_cpu = NULL;
+int sr_sched_on = 0;
+atomic_int_least32_t sr_timeslice;
+uint32_t sched_current_uid(void) { return 0u; }
+void sr_yield(CpuState *s) { (void)s; }
+uint32_t sr_hle_resolve_late_import(uint32_t nid) { (void)nid; return 0u; }
+uint32_t sr_syscall(CpuState *s, uint32_t nid) { (void)s; (void)nid; return 0u; }
+int sr_vfpu_interp(CpuState *s, uint32_t op) { (void)s; (void)op; return 0; }
+
 static int s_checks;
 static int s_failures;
 

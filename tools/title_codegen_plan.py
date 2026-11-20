@@ -65,7 +65,7 @@ GAME_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 MIN_FUNCS_PER_CHUNK = 1
 MAX_FUNCS_PER_CHUNK = 100_000
 MANAGER_PLAN_VERSION = 1
-PACKAGE_SCHEMA_VERSION = 2
+PACKAGE_SCHEMA_VERSION = 3
 BUILD_REPORT_SCHEMA_VERSION = 1
 PACKAGE_FORMAT = "nakagawa-aot-package"
 BUILD_REPORT_FORMAT = "nakagawa-build-report"
@@ -158,16 +158,15 @@ def available_physical_memory() -> int | None:
     Windows reports it through ``GlobalMemoryStatusEx``; Linux through ``MemAvailable``
     (which counts reclaimable cache); other POSIX systems through free pages.
     """
-    if os.name == "nt":
+    # sys.platform, not os.name: type checkers narrow on it, so ctypes.windll needs no cast.
+    if sys.platform == "win32":
         status = _MemoryStatusEx()
         status.dwLength = ctypes.sizeof(_MemoryStatusEx)
-        # ctypes.windll exists only on win32; the check also lets mypy type it there.
-        if sys.platform == "win32":
-            try:
-                if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-                    return int(status.ullAvailPhys)
-            except (AttributeError, OSError):
-                pass
+        try:
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullAvailPhys)
+        except (AttributeError, OSError):
+            pass
         return None
     try:
         with open("/proc/meminfo", encoding="ascii") as meminfo:
@@ -1220,9 +1219,7 @@ def _make_safe_directory(path: Path, label: str) -> Path:
 
 
 def _windows_short_path(path: Path) -> Path | None:
-    if os.name != "nt":
-        return None
-    # ctypes.windll exists only on win32; the check also lets mypy type it there.
+    # sys.platform, not os.name: type checkers narrow on it, so ctypes.windll needs no cast.
     if sys.platform != "win32":
         return None
     try:
@@ -2659,16 +2656,21 @@ def build_package(
         aot_callables = sum(1 for prefix in entry_symbols if prefix == "f")
         aot_resumes = sum(1 for prefix in entry_symbols if prefix == "r")
         unsupported_regions, unsupported_instructions = _read_codegen_fallbacks(stub_report, sources)
-        object_files = sorted(
-            (path for path in build_workspace.rglob("*.o") if path.is_file()),
-            key=lambda path: path.relative_to(build_workspace).as_posix(),
-        )
-        generated_objects = [
+        # Runtime package schema 3 carries no compiler objects. The package
+        # completion manifest still hashes every file that remains in the
+        # package; the player's separate object cache owns rebuild reuse. The
+        # build report still records every object this build compiled, as the
+        # evidence that AOT code was generated and linked.
+        generated_objects: list[dict[str, str]] = []
+        compiled_objects = [
             {
                 "path": path.relative_to(build_workspace).as_posix(),
                 "sha256": _sha256_file(path),
             }
-            for path in object_files
+            for path in sorted(
+                (path for path in build_workspace.rglob("*.o") if path.is_file()),
+                key=lambda path: path.relative_to(build_workspace).as_posix(),
+            )
         ]
         executable_sha256 = _sha256_file(compiled_executable)
         module_hashes = {row["name"]: row["sha256"] for row in input_hashes["modules"]}
@@ -2743,6 +2745,8 @@ def build_package(
             "artifacts": {
                 "executable": executable_name,
                 "link_map": link_map.name,
+                # Compiled and linked, not kept in the package (schema 3).
+                "compiled_objects": compiled_objects,
             },
         }
         package = {
