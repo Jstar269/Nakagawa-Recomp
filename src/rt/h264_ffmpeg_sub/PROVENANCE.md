@@ -401,8 +401,9 @@ is marked `LOCAL DELTA` in the file.
   by a signed `(ptrdiff_t)sizeof(pixel)` instead of the unsigned `sizeof(pixel)`, so the two
   pointer adjustments are signed offsets rather than wrapped unsigned ones.
 
-Taken on upstream's authority, not reproduced in this project. On targets where the wrapped
-unsigned offset happened to land on the same address, the pointers are unchanged.
+Taken on upstream's authority, not reproduced in this project. With the wrap-around pointer
+arithmetic of the targets the project builds for, the addresses are the same as before; the
+change removes the undefined behaviour UBSan reports.
 
 ## Authored stand-ins
 
@@ -481,3 +482,19 @@ code is not held to the project warning set), the `nk_h264_symbols.h` force-incl
   `7a31f986a2c0fcf1d19607126b96e3c83047912f` (SHA-256
   `5e00ee27cb743b4d26def23f15f45cc2cb75d6de5c6bdfbef0eb384caa661f94`). The other imported files
   are unchanged and still byte-identical to n4.4.
+- 2026-11-20: `h264_direct.c`, `h264_refs.c`, `utils.c` and `videodsp_template.c` became
+  `imported + LOCAL DELTA` and `h264_slice.c` took one more fix (the commits above). Each file
+  equals its n4.4 blob with the listed upstream commits applied by `patch`, once the dated header
+  note and the `LOCAL DELTA` marker lines are removed (for `h264_slice.c`, apart from the comment
+  that 2026-11-17 marker replaced). Working-tree `git hash-object` and SHA-256 of the modified
+  files:
+  - `libavcodec/h264_direct.c`: `e5b6830f72ca130dfac8d4750801559f9fcd6366`, SHA-256
+    `b689c45eed7c541be3ffe1e38f1ff588d98174f1b77ee1cae727206e4baf654d`
+  - `libavcodec/h264_refs.c`: `b422bf371461082aca8f46cb09c43cc7af1634f2`, SHA-256
+    `96f7e7dd213adb1a49711294049331969f44cd64c2d69201e0a84ea5198bc417`
+  - `libavcodec/h264_slice.c`: `8ef45121049c333f103e98b22d85faad20ac6665`, SHA-256
+    `06aa8aa51b51e061a5e4c70113dfaae85d5b961eb118904485f36befcedba667`
+  - `libavcodec/utils.c`: `0f8db83e71b222094e71a6f249a65ed2928a6b05`, SHA-256
+    `5544c0b2f93e1a3c1dd10b55af593af5ec38235bf67a1c66e0c72a1bd6606f6f`
+  - `libavcodec/videodsp_template.c`: `13972917e119182ab3a1d7c9fd6e6afb9c436a90`, SHA-256
+    `268ceeacf5dd96ba4068cd2fe3ac94c3e7a0c570d82b44e32c1856cda3a1cfc8`
