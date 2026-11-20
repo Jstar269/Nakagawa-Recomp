@@ -324,6 +324,7 @@ static int write_launch_environment_probe(void) {
     const char *adhoc_enabled = getenv("SR_ADHOC_ENABLED");
     const char *adhoc_server = getenv("SR_ADHOC_SERVER");
     const char *adhoc_offset = getenv("SR_ADHOC_PORT_OFFSET");
+    const char *adhoc_off_file = getenv("SR_ADHOC_OFF_FILE");
     char nickname_utf8[512];
     const char *nickname = probe_env_utf8("SR_NICKNAME", nickname_utf8, sizeof(nickname_utf8));
     const char *cheats = getenv("SR_CHEATS");
@@ -366,6 +367,7 @@ static int write_launch_environment_probe(void) {
                      "SR_ADHOC_ENABLED=%s\n"
                      "SR_ADHOC_SERVER=%s\n"
                      "SR_ADHOC_PORT_OFFSET=%s\n"
+                     "SR_ADHOC_OFF_FILE=%s\n"
                      "SR_CHEATS=%s\n"
                      "SR_CHEATS_FILE=%s\n",
                      iso ? iso : "<unset>",
@@ -405,6 +407,7 @@ static int write_launch_environment_probe(void) {
                      adhoc_enabled ? adhoc_enabled : "<unset>",
                      adhoc_server ? adhoc_server : "<unset>",
                      adhoc_offset ? adhoc_offset : "<unset>",
+                     adhoc_off_file ? adhoc_off_file : "<unset>",
                      cheats ? cheats : "<unset>",
                      cheats_file ? cheats_file : "<unset>") >= 0;
     if (fclose(f) != 0) ok = 0;
@@ -652,13 +655,15 @@ static void test_no_iso_child_environment(const char *test_executable,
     char *old_code_capture = capture_environment_value("SR_CODE_CAPTURE", &had_code_capture);
     restore_environment_value("SR_CODE_CAPTURE", NULL, false);
     /* Nor inherited opt-in ad hoc online play (#1139): offline stays forced to 0/empty. */
-    bool had_adhoc_en, had_adhoc_srv, had_adhoc_off;
+    bool had_adhoc_en, had_adhoc_srv, had_adhoc_off, had_adhoc_off_file;
     char *old_adhoc_en = capture_environment_value("SR_ADHOC_ENABLED", &had_adhoc_en);
     char *old_adhoc_srv = capture_environment_value("SR_ADHOC_SERVER", &had_adhoc_srv);
     char *old_adhoc_off = capture_environment_value("SR_ADHOC_PORT_OFFSET", &had_adhoc_off);
+    char *old_adhoc_off_file = capture_environment_value("SR_ADHOC_OFF_FILE", &had_adhoc_off_file);
     set_environment_value("SR_ADHOC_ENABLED", "1");
     set_environment_value("SR_ADHOC_SERVER", "poisoned.adhoc.example:27312");
     set_environment_value("SR_ADHOC_PORT_OFFSET", "9999");
+    set_environment_value("SR_ADHOC_OFF_FILE", "poisoned-online-off-file");
 
     /* The enhanced build launches or nothing does (docs/ENHANCEMENT_CONTRACT.md
        section 9): with no packages/<disc>-enhanced-<id>, neither the developer
@@ -870,6 +875,9 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "poisoned.adhoc.example") == NULL);
     assert(strstr(observed, "SR_ADHOC_PORT_OFFSET=\n") != NULL);
     assert(strstr(observed, "9999") == NULL);
+    assert(strstr(observed, "SR_ADHOC_OFF_FILE=\n") != NULL);
+    assert(strstr(observed, "poisoned-online-off-file") == NULL);
+    assert(session.config.online_play_port_offset == 10000u);   /* prepare_session's default */
     assert(!session.config.cheats && session.config.cheats_file[0] == '\0');   /* prepare_session's default */
     assert(strstr(observed, "SR_CHEATS=0\n") != NULL);
     assert(strstr(observed, "SR_CHEATS_FILE=\n") != NULL);
@@ -928,6 +936,14 @@ static void test_no_iso_child_environment(const char *test_executable,
     session.config.online_play = true;
     snprintf(session.config.online_play_server, sizeof(session.config.online_play_server),
              "%s", "socom.cc");
+    /* The port offset the player chose reaches the child, and so does the file it creates to
+       turn Online play off during the run: the boot event file's name plus ".online-off". */
+    session.config.online_play_port_offset = 12345u;
+    {
+        int n = snprintf(session.boot_event_file_path, sizeof(session.boot_event_file_path),
+                         "%s%cboot-events.log", root, sep);
+        assert(n > 0 && (size_t)n < sizeof(session.boot_event_file_path));
+    }
     /* Cheats turned on name the title's own file under the per-user data directory (#2639). */
     session.config.cheats = true;
     /* An Ace Mode session exports its line and, with it, the report path. */
@@ -962,7 +978,19 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_NICKNAME=Kaz \xE3\x83\x8A\n") != NULL);
     assert(strstr(observed, "SR_ADHOC_ENABLED=1\n") != NULL);
     assert(strstr(observed, "SR_ADHOC_SERVER=socom.cc\n") != NULL);
-    assert(strstr(observed, "SR_ADHOC_PORT_OFFSET=10000\n") != NULL);
+    assert(strstr(observed, "SR_ADHOC_PORT_OFFSET=12345\n") != NULL);
+    {
+        char expected_off[NK_MAX_PATH + 64];
+        snprintf(expected_off, sizeof(expected_off), "SR_ADHOC_OFF_FILE=%s.online-off\n",
+                 session.boot_event_file_path);
+        assert(strstr(observed, expected_off) != NULL);
+        char helper[NK_MAX_PATH];
+        assert(nk_launch_adhoc_off_path(session.boot_event_file_path, helper, sizeof(helper)) &&
+               strncmp(expected_off + strlen("SR_ADHOC_OFF_FILE="), helper, strlen(helper)) == 0);
+        assert(!nk_launch_adhoc_off_path("", helper, sizeof(helper)) && helper[0] == '\0');
+        assert(!nk_launch_adhoc_off_path(session.boot_event_file_path, helper, 8u) &&
+               helper[0] == '\0');
+    }
     {
         char expected[NK_MAX_PATH * 2 + 64];
         snprintf(expected, sizeof(expected), "SR_CHEATS_FILE=%s%ccheats%cTEST00006.ini\n",
@@ -989,6 +1017,15 @@ static void test_no_iso_child_environment(const char *test_executable,
     restore_environment_value("SR_CODE_CAPTURE", old_code_capture, had_code_capture);
     free(old_code_capture);
     session.enhancement_package_id[0] = '\0';
+    /* An offset past 65535 keeps Online play off for the launch, file and all. */
+    session.config.online_play_port_offset = 70000u;
+    run_probe(&session, report_path, observed, sizeof(observed));
+    assert(strstr(observed, "SR_ADHOC_ENABLED=0\n") != NULL);
+    assert(strstr(observed, "SR_ADHOC_SERVER=\n") != NULL);
+    assert(strstr(observed, "SR_ADHOC_PORT_OFFSET=\n") != NULL);
+    assert(strstr(observed, "SR_ADHOC_OFF_FILE=\n") != NULL);
+    session.config.online_play_port_offset = 10000u;
+    session.boot_event_file_path[0] = '\0';
     session.config.online_play = false;
     session.config.online_play_server[0] = '\0';
     session.config.developer_mode = false;
@@ -1568,6 +1605,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     free(old_adhoc_srv);
     restore_environment_value("SR_ADHOC_PORT_OFFSET", old_adhoc_off, had_adhoc_off);
     free(old_adhoc_off);
+    restore_environment_value("SR_ADHOC_OFF_FILE", old_adhoc_off_file, had_adhoc_off_file);
+    free(old_adhoc_off_file);
     restore_environment_value("SR_CHEATS", old_cheats, had_cheats);
     restore_environment_value("SR_CHEATS_FILE", old_cheats_file, had_cheats_file);
     free(old_cheats);

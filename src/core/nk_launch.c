@@ -66,6 +66,18 @@ static bool launch_join_path(const char *base, const char *relative,
                                    NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
 }
 
+bool nk_launch_adhoc_off_path(const char *boot_event_path, char *out, size_t out_size) {
+    if (!out || out_size == 0u) return false;
+    out[0] = '\0';
+    if (!boot_event_path || !boot_event_path[0]) return false;
+    int w = snprintf(out, out_size, "%s.online-off", boot_event_path);
+    if (w <= 0 || (size_t)w >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
 /* Whether the runtime in a package's executable knows the cheats switch (#2639). A package is
    linked with the runtime of the Nakagawa that built it, and one built before cheats existed
    ignores SR_CHEATS without a word: no marker in its window and no line in its log. The
@@ -1202,6 +1214,7 @@ NkResult nk_launch_prepare_session(
     snprintf(session->config.ace_spec, sizeof(session->config.ace_spec), "off");
     session->config.ace_report_path[0] = '\0';
     snprintf(session->config.nickname, sizeof(session->config.nickname), "%s", NK_NICKNAME_DEFAULT);
+    session->config.online_play_port_offset = NK_RELAY_PORT_OFFSET;
 
     NkRuntimePackageInfo package_info;
     char package_error[1024] = "";
@@ -1631,6 +1644,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_adhoc_enabled[32];
     char env_adhoc_server[sizeof(session->config.online_play_server) + 24];
     char env_adhoc_offset[32];
+    char env_adhoc_off_file[NK_MAX_PATH + 32];
     char env_cheats_file[NK_MAX_PATH + 24];
     char sep = nk_platform_path_separator();
 
@@ -1760,20 +1774,30 @@ NkResult nk_launch_start(NkLaunchSession *session) {
        always exported so an inherited value can never opt a launch in. */
     {
         bool adhoc_ok = session->config.online_play &&
+                        session->config.online_play_port_offset <= 65535u &&
                         nk_adhoc_relay_parse_server(session->config.online_play_server,
                                                     NULL, 0u, NULL, NULL);
+        char off_path[NK_MAX_PATH];
         snprintf(env_adhoc_enabled, sizeof(env_adhoc_enabled), "SR_ADHOC_ENABLED=%s",
                  adhoc_ok ? "1" : "0");
         snprintf(env_adhoc_server, sizeof(env_adhoc_server), "SR_ADHOC_SERVER=%s",
                  adhoc_ok ? session->config.online_play_server : "");
         if (adhoc_ok)
             snprintf(env_adhoc_offset, sizeof(env_adhoc_offset), "SR_ADHOC_PORT_OFFSET=%u",
-                     (unsigned)NK_RELAY_PORT_OFFSET);
+                     (unsigned)session->config.online_play_port_offset);
         else
             snprintf(env_adhoc_offset, sizeof(env_adhoc_offset), "SR_ADHOC_PORT_OFFSET=");
+        /* The file the launcher creates when the user turns Online play off during this run;
+           empty (masking an inherited one) when off or when the run has no boot event file. */
+        if (!adhoc_ok || !nk_launch_adhoc_off_path(session->boot_event_file_path, off_path,
+                                                   sizeof(off_path))) {
+            off_path[0] = '\0';
+        }
+        snprintf(env_adhoc_off_file, sizeof(env_adhoc_off_file), "SR_ADHOC_OFF_FILE=%s", off_path);
         envp[env_count++] = env_adhoc_enabled;
         envp[env_count++] = env_adhoc_server;
         envp[env_count++] = env_adhoc_offset;
+        envp[env_count++] = env_adhoc_off_file;
     }
     /* And Reduce motion: the pause overlay eases or cuts as the launcher does. */
     envp[env_count++] = session->config.reduce_motion == NK_REDUCE_MOTION_ON ? "SR_REDUCE_MOTION=on"

@@ -112,6 +112,10 @@ typedef struct {
        SR_ADHOC_SERVER (0 and empty when off) so inherited values never enable online play. */
     bool online_play;
     char online_play_server[128]; /* NK_ADHOC_SERVER_MAX_LEN + 1 */
+    /* The port offset the relay adds to the game's ports (SR_ADHOC_PORT_OFFSET): 0-65535,
+       NK_RELAY_PORT_OFFSET (10000, PPSSPP's) as prepare_session leaves it. A value past 65535
+       keeps online play off for the launch. */
+    uint32_t online_play_port_offset;
     /* Cheats (#2639, src/rt/cheats.h): off as prepare_session leaves it. SR_CHEATS and
        SR_CHEATS_FILE are always exported, 0 and empty while this is off, so an inherited value
        cannot opt a launch in. On, the file is cheats_file when that names one (the player's
@@ -368,6 +372,11 @@ bool nk_launch_describe_spawn_block(int os_error, const char *program,
                                     const char *program_title,
                                     const char *program_path,
                                     NkSpawnBlockReport *out);
+
+/* The file the launcher creates to turn Online play off while a game runs (#1139): the run's
+   boot event file with ".online-off" added, exported as SR_ADHOC_OFF_FILE. False, with out
+   empty, when there is no boot event file or the result does not fit. */
+bool nk_launch_adhoc_off_path(const char *boot_event_path, char *out, size_t out_size);
 
 #ifdef __cplusplus
 }
