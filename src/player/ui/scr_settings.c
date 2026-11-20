@@ -1997,9 +1997,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                 safe_text(model->achievements_status,
                                                           "Softcore only. Hardcore is unavailable.")};
             }
-            /* A long RetroAchievements account name widens the button column; at any text size
-               the sentences then go under their buttons rather than end in an ellipsis. */
-            WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, true);
+            /* The RetroAchievements row's button carries the account name, of any length, which
+               widens the button column; while it shows, a sentence the column would cut goes
+               under its button at every text size instead of ending in an ellipsis. */
+            WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f,
+                                                    model->achievements_enabled);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
                                   "Online mode", SCR_ONLINE_STORED_ON_SENTENCE, true,
