@@ -214,7 +214,7 @@ We aim to respond promptly and will remove material where appropriate.
   and the four Geist fonts' licence copies both Geist's and Liberation's. The generated
   fonts carry project-owned names (`Nakagawa Open Latin`, `Nakagawa Open Japanese`,
   `Nakagawa Open Korean`), so no Reserved Font Name is used.
-- **stb_image 2.30** — Sean Barrett; upstream offers `MIT OR Unlicense`, and the
+- **stb_image 2.34** — Sean Barrett; upstream offers `MIT OR Unlicense`, and the
   project uses it under the public-domain (Unlicense) alternative. The byte-identical
   header, upstream `LICENSE` and the pinned manifest are under `third_party/stb/`. It is
   built for PNG only into the `nk_ui` core and the player, where it decodes the

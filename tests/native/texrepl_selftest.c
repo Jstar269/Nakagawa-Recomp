@@ -58,6 +58,9 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsign-compare"
 #pragma GCC diagnostic ignored "-Wpedantic"
+/* v2.34's stbi__info2_main calls stbi__err as a statement, which
+   STBI_NO_FAILURE_STRINGS defines as 0: a statement with no effect. */
+#pragma GCC diagnostic ignored "-Wunused-value"
 #if !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
@@ -2042,9 +2045,11 @@ static void test_file_checks(void) {
  * decoder and stb_image (vendored, used here only as a second decoder) must give the same pixels.
  * Image data longer than the image is refused here (stb_image takes it). Then a seeded mutation
  * pass over all of them: wherever both decode, they must agree. */
-/* stb_image v2.30 reads a zero-length first IDAT with memcpy into a buffer it has not allocated
- * yet, a NULL pointer (stbi__getn), which UndefinedBehaviorSanitizer stops on. Such an input is not
- * given to it: `*not_run` is set and NULL returned. The pack reader decodes no PNG with stb_image. */
+/* stb_image v2.30 read a zero-length first IDAT with memcpy into a buffer it had not allocated
+ * yet, a NULL pointer (stbi__getn), which UndefinedBehaviorSanitizer stopped on. v2.34 skips the
+ * zero-byte copy but still adds the offset to that NULL pointer, which C leaves undefined. Such an
+ * input is not given to it: `*not_run` is set and NULL returned. The pack reader decodes no PNG
+ * with stb_image. */
 static unsigned char *stb_png(const uint8_t *d, size_t n, int *w, int *h, int *not_run) {
     int comp = 0;
     *not_run = 0;
