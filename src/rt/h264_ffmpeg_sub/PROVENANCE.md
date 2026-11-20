@@ -3,8 +3,9 @@
 Portable H.264 video decoder for the Nakagawa recomp runtime (PSMF movies on Linux and
 Android; Windows keeps Media Foundation). The decoder is FFmpeg's libavcodec H.264 decoder,
 imported byte-exact together with the libavcodec/libavutil framework files it needs, built
-from generic C only. One imported file, `libavcodec/h264_slice.c`, carries two FFmpeg
-release/4.4 security and robustness fixes as a LOCAL DELTA (see "LOCAL DELTAs" below). A thin C API written for this project (`nk_h264_api.h`) wraps it.
+from generic C only. A few imported files carry FFmpeg security and robustness fixes, each from
+a named upstream commit, as a LOCAL DELTA (see "LOCAL DELTAs" below). A thin C API written for
+this project (`nk_h264_api.h`) wraps it.
 
 Decision: maintainer, 2026-10-24, on issue #283 (pinned FFmpeg H.264 subset, following the
 `src/rt/atrac3p/` pattern, as PPSSPP does).
@@ -113,7 +114,7 @@ Legend:
 | `libavcodec/h2645_parse.h` | imported byte-identical | `3e47f86c53b2f993983d9418e94c99e51a2782d4` |
 | `libavcodec/h264_cabac.c` | imported byte-identical | `86f0a412faa738ae2997f518345578252eb9e25e` |
 | `libavcodec/h264_cavlc.c` | imported byte-identical | `9f5f692331ca4ac529431850d5de88e4314327fc` |
-| `libavcodec/h264_direct.c` | imported byte-identical | `8f079811303c67daac0d601774a623696964d052` |
+| `libavcodec/h264_direct.c` | imported + LOCAL DELTA | `8f079811303c67daac0d601774a623696964d052` |
 | `libavcodec/h264_loopfilter.c` | imported byte-identical | `558ec6c02dfb3b1d2e3dfaf59a4b02c5de88112f` |
 | `libavcodec/h264_mb.c` | imported byte-identical | `3cd17b7e4bafdd3f62670ca7686051471fa7d1b6` |
 | `libavcodec/h264_mb_template.c` | imported byte-identical | `d5ea26a6e3fc21a2a25e552cc00b7a20cabbde58` |
@@ -304,6 +305,25 @@ is marked `LOCAL DELTA` in the file.
 Regressions: `test_ffmpeg_slice_number_cap` and `test_ffmpeg_failed_slice_poc_is_not_inherited`
 in `tests/native/psmf_media_selftest.c` (`make H264_FFMPEG=1 psmf-media-selftest`) fail on the
 unmodified n4.4 blob and pass with the delta.
+
+### `libavcodec/h264_direct.c`
+
+Modified 2026-11-20 (audit 2026-11-17 finding F-06b369c6; new bytes await the maintainer's
+approval). One commit from FFmpeg `master` is applied verbatim to the n4.4 blob; nothing else
+changes, and each change is marked `LOCAL DELTA` in the file. The fix is not on `release/4.4`;
+FFmpeg cherry-picked it to `release/6.1` (`30e346c76f`), `release/7.1` (`f9db090b14`),
+`release/8.0` (`4ea01b43b6`), `release/8.1` (`a35157abb9`) and `release/9.0` (`b204e94e90`).
+
+- `2546b6f061fe6bc869ac9a1c0ed892555bd24402` "avcodec/h264_direct: keep the colocated type
+  interlaced in the field branch" (heap-buffer-overflow read, oss-fuzz 553213954). In
+  `pred_spatial_direct_motion` and `pred_temp_direct_motion`, the branch for an interlaced
+  colocated macroblock sets `col_field = MB_TYPE_INTERLACED` before `goto single_col`, and
+  `single_col` ORs it into `mb_type_col`. A macroblock never decoded in a broken field picture
+  keeps a stale type without that flag; without the fix the frame path then reads the colocated
+  motion vectors with the field remapping, past the end of the picture's arrays.
+
+Taken on upstream's authority: the read was not reproduced in this project, so no regression
+test shows the change is needed. The media selftests confirm that valid streams decode as before.
 
 ## Authored stand-ins
 
