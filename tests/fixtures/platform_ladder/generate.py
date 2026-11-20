@@ -2685,6 +2685,33 @@ def _verify_overlay_translation(fixture_dir: Path, main_c: str, chunks: str) -> 
         raise RuntimeError("a runtime-placed module function was registered at a fixed address")
 
 
+def _verify_stub_dispatch(plan: Plan, generated_text: str) -> None:
+    """Each import stub's own body dispatches exactly the NID its slot imports.
+
+    Checking only that every NID appears somewhere would accept a build whose
+    stubs dispatch a permutation of the plan's NIDs, so the mapping is pinned
+    per slot: the body of f_<stub address> holds one sr_syscall, for nids[i].
+    """
+    for flat_index, nid in enumerate(plan.flat_nids()):
+        stub_addr = plan.stub_address(flat_index)
+        body = re.search(
+            rf"^void f_{stub_addr:08x}\(CpuState \*s\) \{{(.*?)^\}}",
+            generated_text,
+            re.MULTILINE | re.DOTALL,
+        )
+        if body is None:
+            raise RuntimeError(
+                f"import stub {flat_index} at 0x{stub_addr:08x} was not generated"
+            )
+        dispatched = re.findall(r"sr_syscall\(s, 0x([0-9a-f]{8})u\);", body.group(1))
+        if dispatched != [f"{nid:08x}"]:
+            raise RuntimeError(
+                f"import stub {flat_index} at 0x{stub_addr:08x} dispatches "
+                f"{', '.join('0x' + value for value in dispatched) or 'no NID'}, "
+                f"not NID 0x{nid:08x}"
+            )
+
+
 def verify(build_dir: Path, workload: str) -> int:
     plan = effective_plan(workload)
     stem = game_name_of(workload)
@@ -2745,11 +2772,7 @@ def verify(build_dir: Path, workload: str) -> int:
     for library, nids in plan.imports:
         if library not in imports_toml.read_text(encoding="ascii"):
             raise RuntimeError(f"generated import manifest omits library {library}")
-    for flat_index, nid in enumerate(plan.flat_nids()):
-        stub_addr = plan.stub_address(flat_index)
-        marker = f"sr_syscall(s, 0x{nid:08x}u)"
-        if marker not in generated_text:
-            raise RuntimeError(f"import stub {flat_index} does not dispatch NID 0x{nid:08x}")
+    _verify_stub_dispatch(plan, generated_text)
 
     if plan.gap_omit_offset is not None:
         omitted_addr = plan.base + plan.gap_omit_offset

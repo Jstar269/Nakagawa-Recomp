@@ -301,6 +301,32 @@ def _without_admission(ledger: bytes | None) -> dict | None:
     return returned
 
 
+def _without_labels(document: dict | None) -> dict | None:
+    """``document`` with each record-backed entry's public label text blanked.
+
+    The label is derived from the entry's trusted record, which this public-only check cannot
+    read, and the label set changes over time (``provenance_ledger.PUBLIC_LABEL_SETS``). Two
+    ledgers equal here differ only in that text; the trusted attestation derives it from the
+    records and refuses any label they do not back.
+    """
+    if document is None:
+        return None
+    sys.path.insert(0, str(TOOLS))
+    import provenance_ledger
+
+    known = provenance_ledger._known_public_labels()
+    result = json.loads(json.dumps(document))
+    for entry in result.get("entries", []) if isinstance(result.get("entries"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        field = provenance_ledger.PUBLIC_LABEL_FIELDS.get(entry.get("classification"))
+        evidence = entry.get("evidence")
+        if field and isinstance(evidence, dict) and evidence.get(field) in known:
+            evidence[field] = None
+    returned: dict[str, Any] = result
+    return returned
+
+
 def _provenance(check: bool, base: str | None) -> tuple[str, list[str], str]:
     """Return (status, stale or changed paths, detail) for the provenance controls."""
     sys.path.insert(0, str(TOOLS))
@@ -329,12 +355,18 @@ def _provenance(check: bool, base: str | None) -> tuple[str, list[str], str]:
         if _current(path) != expected
     ]
     note = ""
-    if stale == [contrib_refresh.LEDGER] and _without_admission(_current(contrib_refresh.LEDGER)) == _without_admission(
-        ledger_bytes
-    ):
+    current = _without_admission(_current(contrib_refresh.LEDGER))
+    expected = _without_admission(ledger_bytes)
+    if stale == [contrib_refresh.LEDGER] and current == expected:
         # Right after an admission merge the base ledger carries an `admission` audit block. The
         # trusted refresh drops it and contrib_refresh keeps it; the per-path entries agree.
         stale, note = [], "differs only by the base ledger's admission block, which the trusted refresh drops"
+    elif stale == [contrib_refresh.LEDGER] and current is not None and _without_labels(current) == _without_labels(
+        expected
+    ):
+        # The trusted refresh writes the emitted public label set, and contrib_refresh keeps the
+        # base's; the claims agree, and the hosted attestation checks each label against its record.
+        stale, note = [], "differs only in public label text, which the trusted attestation derives from the records"
     if check or not stale:
         return ("STALE" if stale else "OK"), stale, note
     # Write the bytes generated above, as contrib_refresh.py writes and stages them,

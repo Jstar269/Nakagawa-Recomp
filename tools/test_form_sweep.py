@@ -4,7 +4,8 @@
 """Pin the form sweep's census, aliasing patterns, immediate buckets and mutant bookkeeping (#1844).
 
 The execution half (the translated body against the reference interpreter) is
-``mingw32-make form-sweep-selftest``; these tests cover the Python half without a compiler.
+``mingw32-make form-sweep-selftest``; these tests cover the Python half, plus the harness's
+per-instance verdict, which ``HarnessVerdict`` builds on its own with the host C compiler.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import shutil
 import struct
 import subprocess
 import sys
@@ -340,6 +342,96 @@ class Reporting(unittest.TestCase):
                                "INST 2 NOT_CHECKED ref-unimplemented pc=0x0 op=0x3 state=0\n")
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(fs.report(manifest, results), 0)
+
+    def test_a_pinned_form_that_stops_after_state_zero_fails(self):
+        # sync and cache are expected to stop on their first state: the reference cannot run
+        # them at all. A stop at a later state means earlier states ran, so the instance is
+        # not the expected shape and must not pass as an allowed NOT_CHECKED (F-1eb0c171).
+        man = {"seed": 1, "states": 8, "excluded": {},
+               "forms": [{"key": "c", "name": "cache"}, {"key": "s", "name": "sync"}],
+               "instances": [
+                   {"index": 0, "form": "c", "word": 1, "pattern": "p"},
+                   {"index": 1, "form": "s", "word": 2, "pattern": "p"}]}
+        text = ("INST 0 NOT_CHECKED ref-memory-fault pc=0x08c00000 op=0xbc000000 state=3\n"
+                "INST 1 NOT_CHECKED ref-unimplemented pc=0x08c00010 op=0x0000000f state=0\n")
+        verdicts = fs.parse_verdicts(text)
+        self.assertEqual(fs.unexpected_not_checked(man, verdicts), {"cache": 1})
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest, results = Path(tmp, "m.json"), Path(tmp, "r.txt")
+            manifest.write_text(json.dumps(man))
+            results.write_text(text)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(fs.report(manifest, results), 1)
+            self.assertIn("cache x1", out.getvalue())
+        # A NOT_CHECKED line that names no state is not the expected shape either.
+        bare = fs.parse_verdicts("INST 1 NOT_CHECKED ref-unimplemented pc=0x0 op=0xf\n")
+        self.assertEqual(fs.unexpected_not_checked(man, bare), {"sync": 1})
+
+
+CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
+
+
+@unittest.skipUnless(CC, "needs a host C compiler (gcc, cc or clang)")
+class HarnessVerdict(unittest.TestCase):
+    """The harness's per-instance verdict (``instance_verdict`` in src/rt/form_sweep.c), built on
+    its own with -DSR_FORM_SWEEP_VERDICT_SELFTEST. Each argument of the selftest is one state's
+    outcome: ``ok``, ``bad`` (a field differs), ``ref:<reason>`` (the reference stopped) or
+    ``aot`` (the translated side failed)."""
+
+    exe: Path
+    _tmp: tempfile.TemporaryDirectory[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory(prefix="nk_form_sweep_verdict_")
+        cls.exe = Path(cls._tmp.name) / ("verdict.exe" if sys.platform == "win32" else "verdict")
+        build = real_run([str(CC), "-std=c99", "-Wall", "-Wextra", "-Werror",
+                          "-DSR_FORM_SWEEP_VERDICT_SELFTEST", "src/rt/form_sweep.c",
+                          "-o", str(cls.exe)],
+                         cwd=fs.ROOT, capture_output=True, text=True, check=False)
+        if build.returncode != 0:
+            cls._tmp.cleanup()
+            raise AssertionError(f"building the verdict selftest failed:\n{build.stdout}{build.stderr}")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def run_states(self, *outcomes: str) -> tuple[int, list[str]]:
+        run = real_run([str(self.exe), *outcomes], capture_output=True, text=True, check=False,
+                       timeout=30)
+        return run.returncode, run.stdout.splitlines()
+
+    def test_a_mismatch_survives_a_later_reference_stop(self):
+        rc, lines = self.run_states("bad", "ok", "bad", "ref:ref-step-limit")
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith("INST 0 MISMATCH states=3 bad=2 first=0 r9 "), lines)
+        self.assertIn("later state not checked: NOT_CHECKED ref-step-limit", lines[0])
+        self.assertIn("state=3", lines[0])
+        self.assertEqual(rc, 1)
+        self.assertEqual(fs.parse_verdicts("\n".join(lines))[0][0], "MISMATCH")
+
+    def test_a_mismatch_survives_a_later_translated_side_failure(self):
+        rc, lines = self.run_states("ok", "bad", "aot")
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith("INST 0 MISMATCH states=2 bad=1 first=1 r9 "), lines)
+        self.assertIn("later state not checked: AOT_FAILED aot-dispatch-error", lines[0])
+        self.assertEqual(rc, 1)
+
+    def test_a_clean_stop_keeps_its_own_verdict(self):
+        rc, lines = self.run_states("ok", "ref:ref-unimplemented")
+        self.assertEqual(lines, ["INST 0 NOT_CHECKED ref-unimplemented pc=0x00000000 op=0x00000000 state=1"])
+        self.assertEqual(rc, 0)
+        rc, lines = self.run_states("ok", "aot")
+        self.assertEqual(lines, ["INST 0 AOT_FAILED aot-dispatch-error code=-1000 op=0x00000000 state=1"])
+        self.assertEqual(rc, 1)
+
+    def test_match_and_mismatch_without_a_stop(self):
+        self.assertEqual(self.run_states("ok", "ok"), (0, ["INST 0 MATCH states=2"]))
+        rc, lines = self.run_states("ok", "bad")
+        self.assertEqual(lines, ["INST 0 MISMATCH states=2 bad=1 first=1 r9 aot=0x00000001 ref=0x00000002"])
+        self.assertEqual(rc, 1)
 
 
 class BadPlans(unittest.TestCase):

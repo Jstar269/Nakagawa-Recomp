@@ -18,6 +18,14 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with FFmpeg; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ *
+ * Modified 2026-11-20 for the Nakagawa Recomp project (LOCAL DELTA against FFmpeg n4.4):
+ * one FFmpeg release/4.4 fix is applied, each change marked LOCAL DELTA below.
+ *  - e39140d9d3 "avcodec/h264_slice: guard color_frame() against chroma-width underflow"
+ *    (FFmpeg's own adaptation to 4.4's ff_color_frame): for a plane one sample wide,
+ *    bytes - 2 no longer underflows into a huge av_memcpy_backptr length (a heap
+ *    out-of-bounds write).
+ * See src/rt/h264_ffmpeg_sub/PROVENANCE.md.
  */
 
 /**
@@ -402,8 +410,11 @@ void ff_color_frame(AVFrame *frame, const int c[4])
         int bytes  = is_chroma ? AV_CEIL_RSHIFT(frame->width,  desc->log2_chroma_w) : frame->width;
         int height = is_chroma ? AV_CEIL_RSHIFT(frame->height, desc->log2_chroma_h) : frame->height;
         if (desc->comp[0].depth >= 9) {
-            ((uint16_t*)dst)[0] = c[p];
-            av_memcpy_backptr(dst + 2, 2, bytes - 2);
+            /* LOCAL DELTA: upstream e39140d9d3 (release/4.4), see the file header. */
+            if (bytes >= 1)
+                ((uint16_t*)dst)[0] = c[p];
+            if (bytes >= 2)
+                av_memcpy_backptr(dst + 2, 2, 2 * (bytes - 1));
             dst += frame->linesize[p];
             for (y = 1; y < height; y++) {
                 memcpy(dst, frame->data[p], 2*bytes);

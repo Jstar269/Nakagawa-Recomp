@@ -65,6 +65,9 @@ static void *nk_ui_image_stbi_realloc(void *pointer, size_t size) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsign-compare"
 #pragma GCC diagnostic ignored "-Wpedantic"
+/* v2.34's stbi__info2_main calls stbi__err as a statement, which
+   STBI_NO_FAILURE_STRINGS defines as 0: a statement with no effect. */
+#pragma GCC diagnostic ignored "-Wunused-value"
 #if !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
@@ -95,9 +98,11 @@ static uint32_t nk_ui_image_be32(const uint8_t *p) {
            (uint32_t)p[3];
 }
 
-/* Whether the first IDAT chunk is empty. stb_image v2.30 copies a zero-length
-   chunk into its image-data buffer before it has allocated one, a memcpy into
-   NULL (stbi__getn), so such a file is refused before it reaches stb_image.
+/* Whether the first IDAT chunk is empty. stb_image v2.30 copied a zero-length
+   chunk into its image-data buffer before it had allocated one, a memcpy into
+   NULL (stbi__getn); v2.34 skips the zero-byte copy but still adds the offset
+   to that NULL pointer, which C leaves undefined, so such a file is refused
+   before it reaches stb_image.
    The walk stops at the first IDAT or a chunk that runs past the end, which
    stb_image then fails on its own. */
 static bool nk_ui_image_first_idat_empty(const uint8_t *bytes, size_t size) {

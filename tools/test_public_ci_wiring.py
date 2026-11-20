@@ -386,8 +386,8 @@ class PublicCiWiringTests(unittest.TestCase):
 
     def test_linux_showcase_ci_uses_pinned_runtime_dependencies(self) -> None:
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        lock = json.loads((ROOT / "assets" / "upstream" / "pspdev.lock.json").read_text())
-        evidence = json.loads((ROOT / "assets" / "upstream" / "pspdev.evidence.json").read_text())
+        lock = json.loads((ROOT / "assets" / "upstream" / "pspdev.lock.json").read_text(encoding="utf-8"))
+        evidence = json.loads((ROOT / "assets" / "upstream" / "pspdev.evidence.json").read_text(encoding="utf-8"))
         self.assertIn("Build pinned SDL3 for headless Linux runtime", ci)
         self.assertIn("f00dc919ca35b9756316e86c4777392de442f9b2", ci)
         self.assertIn("libvulkan-dev", ci)
@@ -3110,6 +3110,9 @@ def _job_if(block: list[str]) -> str:
 _EXPRESSION_TOKEN = re.compile(r"\s*(\|\||&&|==|!=|!|\(|\)|,|'(?:[^']|'')*'|\d+(?:\.\d+)?|[A-Za-z_][A-Za-z0-9_.-]*)")
 
 
+_ACTIONS_LITERALS: dict[str, object] = {"true": True, "false": False, "null": None}
+
+
 def _actions_eval(expression: str, context: Mapping[str, object]) -> bool:
     """Whether a job guard holds: ``_actions_value``, read as Actions reads an ``if:``."""
     return _actions_value(expression, context) not in (None, False, 0, "")
@@ -3119,7 +3122,7 @@ def _actions_value(expression: str, context: Mapping[str, object]) -> object:
     """Evaluate the GitHub Actions expression subset the job guards and run names use.
 
     Supported: ``||``, ``&&``, ``!``, ``==``, ``!=``, parentheses, single-quoted strings, number literals,
-    context paths (a missing or null step reads as null), ``startsWith``, ``format`` and ``always``.
+    the ``true``, ``false`` and ``null`` literals, context paths (a missing or null step reads as null), ``startsWith``, ``format`` and ``always``.
     As in Actions, ``!`` binds tighter than ``==`` and ``!=``, two strings compare without
     case, operands of different types compare as numbers (null and '' are 0, a non-numeric
     string is NaN), and ``startsWith`` reads null as the empty string.
@@ -3205,6 +3208,9 @@ def _actions_value(expression: str, context: Mapping[str, object]) -> object:
                 values = ["" if value is None else str(value) for value in arguments[1:]]
                 return re.sub(r"\{(\d+)\}", lambda match: values[int(match.group(1))], str(arguments[0]))
             raise AssertionError(f"unsupported function {token}")
+        # Actions reads these three words as literals, never as context names.
+        if token in _ACTIONS_LITERALS:
+            return _ACTIONS_LITERALS[token]
         return lookup(token)
 
     def negation() -> object:
@@ -3288,6 +3294,17 @@ class ActionsExpressionEvaluatorTests(unittest.TestCase):
         self.assertFalse(_actions_eval("run.attempt == 1", {"run": {"attempt": 2}}))
         self.assertTrue(_actions_eval("run.attempt == 1", {"run": {"attempt": "1"}}))
         self.assertFalse(_actions_eval("missing == 1", {}))
+
+    def test_boolean_and_null_literals_are_literals_not_context_names(self) -> None:
+        # A context name read in their place is null, which would invert a draft guard.
+        draft = {"github": {"event": {"pull_request": {"draft": True}}}}
+        ready = {"github": {"event": {"pull_request": {"draft": False}}}}
+        self.assertTrue(_actions_eval("github.event.pull_request.draft == true", draft))
+        self.assertFalse(_actions_eval("github.event.pull_request.draft == true", ready))
+        self.assertTrue(_actions_eval("github.event.pull_request.draft == false", ready))
+        self.assertFalse(_actions_eval("github.event.pull_request.draft == false", draft))
+        self.assertTrue(_actions_eval("github.missing == null", {}))
+        self.assertIs(_actions_value("true", {"true": "a context named true"}), True)
 
     def test_strings_compare_without_case(self) -> None:
         self.assertTrue(_actions_eval("github.repository == 'jstar269/NAKAGAWA-recomp'",

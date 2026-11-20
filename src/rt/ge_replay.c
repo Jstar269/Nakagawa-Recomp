@@ -334,7 +334,9 @@ static int fbd_observer(void *ctx, unsigned long index, uint32_t op, uint32_t cm
     const int writes_depth = st->clear ? (st->clear_mode & 0x400u) != 0
                                        : st->ztest_enable && !st->zwrite_disable;
     if (writes_depth)
-        /* and only inside the depth buffer's columns (ge.c's zbuf_write_index) */
+        /* over the depth buffer's columns: ge.c writes a column past zbw into a later row's
+         * word (zbuf_write_px, PSP-GE-RASTER-004), so a draw on the last rows compared here can
+         * also write words below them, which this region does not compare */
         fbd_add_region(run, FBD_KIND_DEPTH, fbd_depth_base(st), depth_stride, 0u,
                        depth_stride < need_w ? depth_stride : need_w, need_h);
     if (st->blend_enable && !st->clear) run->blended = 1;

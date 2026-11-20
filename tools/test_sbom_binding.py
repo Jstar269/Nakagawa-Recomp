@@ -389,6 +389,8 @@ class TestRuntimeManifestBinding(unittest.TestCase):
                          [{"algorithm": "SHA256", "checksumValue": self.sha["nakagawa_player.exe"]}])
         self.assertEqual((player["name"], player["filesAnalyzed"], player["primaryPackagePurpose"]),
                          ("nakagawa_player.exe", False, "APPLICATION"))
+        # The player links GPL-3.0-only parts beside the project's GPL-3.0-or-later code.
+        self.assertEqual(player["licenseDeclared"], "GPL-3.0-or-later AND GPL-3.0-only")
         relations = {(r["spdxElementId"], r["relationshipType"], r["relatedSpdxElement"])
                      for r in spdx["relationships"]}
         self.assertIn(("SPDXRef-Package-nakagawa-recomp", "GENERATES", player["SPDXID"]), relations)

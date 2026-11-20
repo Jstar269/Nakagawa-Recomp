@@ -150,10 +150,10 @@
     },
     {
       "id": "stb-image",
-      "name": "stb_image 2.30 PNG decoder",
+      "name": "stb_image 2.34 PNG decoder",
       "license": "Unlicense",
       "origin": "https://github.com/nothings/stb",
-      "revision": "v2.30 / 003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5",
+      "revision": "v2.34 / 6b5799bae8a1fe3792691ef4b72ae26434c3e799",
       "notice_path": "third_party/stb/LICENSE",
       "evidence_path": "third_party/stb/PROVENANCE.md",
       "disposition": "vendored_source; MIT OR Unlicense upstream, used under Unlicense; linked into the player (PNG only)"
@@ -176,7 +176,7 @@
       "revision": "v12.5.0 / 1433173220a7eaede6a9ed7a18e94117be1821e0",
       "notice_path": "third_party/rcheevos/LICENSE",
       "evidence_path": "third_party/rcheevos/PROVENANCE.md",
-      "disposition": "vendored_source; MIT, with L. Peter Deutsch's MD5 under zlib; imported with LOCAL DELTA fixes in src/rc_client.c, src/rapi/ and src/rcheevos/ (alloc.c, richpresence.c, runtime_progress.c; see third_party/rcheevos/PROVENANCE.md); opt-in RetroAchievements support (#1316)"
+      "disposition": "vendored_source; MIT, with L. Peter Deutsch's MD5 under zlib; imported with LOCAL DELTA fixes in src/rc_client.c, src/rapi/ and src/rcheevos/ (alloc.c, richpresence.c, runtime.c, runtime_progress.c; see third_party/rcheevos/PROVENANCE.md); opt-in RetroAchievements support (#1316)"
     },
     {
       "id": "kenney-input-prompts",
@@ -1272,7 +1272,7 @@
       "disposition": "included",
       "public_scope_included": true,
       "optional": false,
-      "comment": "Upstream LICENSE from nothings/stb aae9fee018211439eec93986e4dd2d9201e9b82c (the last commit to change it, after the stb_image.h pin 003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5), byte-identical; the project uses stb_image under the Unlicense option (third_party/stb/PROVENANCE.md)."
+      "comment": "Upstream LICENSE from nothings/stb aae9fee018211439eec93986e4dd2d9201e9b82c (the last commit to change it; the same file as at the stb_image.h pin 6b5799bae8a1fe3792691ef4b72ae26434c3e799), byte-identical; the project uses stb_image under the Unlicense option (third_party/stb/PROVENANCE.md)."
     },
     {
       "id": "fidelityfx-sdk-ffx-frameinterpolation-compute-game-vector-field-inpainting-pyramid-pass",

@@ -173,13 +173,24 @@ int rc_runtime_activate_achievement(rc_runtime_t* self, uint32_t id, const char*
   trigger = RC_ALLOC(rc_trigger_t, &preparse.parse);
   rc_parse_trigger_internal(trigger, &preparse_memaddr, &preparse.parse);
 
+  /* Nakagawa LOCAL DELTA (2026-11-20): part of upstream commit
+   * e3e7e86bc8ab10295dace443addfb091d1095a0e ("runtime: survive a failed allocation while
+   * activating a set", #559). Every early return frees the preparse state (its scratch chunks
+   * leaked when a definition failed to parse), and a failed array growth keeps the old array and
+   * capacity (the capacity grew before the realloc, and a failure lost every registered item).
+   * The same changes are made below for leaderboards and rich presence. A later pin that
+   * includes the commit drops this delta. */
   size = preparse.parse.offset;
-  if (size < 0)
+  if (size < 0) {
+    rc_destroy_preparse_state(&preparse);
     return size;
+  }
 
   trigger_buffer = malloc(size);
-  if (!trigger_buffer)
+  if (!trigger_buffer) {
+    rc_destroy_preparse_state(&preparse);
     return RC_OUT_OF_MEMORY;
+  }
 
   /* populate the item, using the communal memrefs pool */
   rc_reset_parse_state(&preparse.parse, trigger_buffer);
@@ -195,16 +206,21 @@ int rc_runtime_activate_achievement(rc_runtime_t* self, uint32_t id, const char*
 
   /* grow the trigger buffer if necessary */
   if (self->trigger_count == self->trigger_capacity) {
-    self->trigger_capacity += 32;
+    /* keep the old array and capacity if the allocation fails */
+    const uint32_t new_capacity = self->trigger_capacity + 32;
+    rc_runtime_trigger_t* new_triggers;
     if (!self->triggers)
-      self->triggers = (rc_runtime_trigger_t*)malloc(self->trigger_capacity * sizeof(rc_runtime_trigger_t));
+      new_triggers = (rc_runtime_trigger_t*)malloc(new_capacity * sizeof(rc_runtime_trigger_t));
     else
-      self->triggers = (rc_runtime_trigger_t*)realloc(self->triggers, self->trigger_capacity * sizeof(rc_runtime_trigger_t));
+      new_triggers = (rc_runtime_trigger_t*)realloc(self->triggers, new_capacity * sizeof(rc_runtime_trigger_t));
 
-    if (!self->triggers) {
+    if (!new_triggers) {
       free(trigger_buffer);
       return RC_OUT_OF_MEMORY;
     }
+
+    self->triggers = new_triggers;
+    self->trigger_capacity = new_capacity;
   }
 
   /* assign the new trigger */
@@ -357,12 +373,16 @@ int rc_runtime_activate_lboard(rc_runtime_t* self, uint32_t id, const char* mema
   rc_parse_lboard_internal(lboard, memaddr, &preparse.parse);
 
   size = preparse.parse.offset;
-  if (size < 0)
+  if (size < 0) {
+    rc_destroy_preparse_state(&preparse);
     return size;
+  }
 
   lboard_buffer = malloc(size);
-  if (!lboard_buffer)
+  if (!lboard_buffer) {
+    rc_destroy_preparse_state(&preparse);
     return RC_OUT_OF_MEMORY;
+  }
 
   /* populate the item, using the communal memrefs pool */
   rc_reset_parse_state(&preparse.parse, lboard_buffer);
@@ -378,16 +398,21 @@ int rc_runtime_activate_lboard(rc_runtime_t* self, uint32_t id, const char* mema
 
   /* grow the lboard buffer if necessary */
   if (self->lboard_count == self->lboard_capacity) {
-    self->lboard_capacity += 16;
+    /* keep the old array and capacity if the allocation fails */
+    const uint32_t new_capacity = self->lboard_capacity + 16;
+    rc_runtime_lboard_t* new_lboards;
     if (!self->lboards)
-      self->lboards = (rc_runtime_lboard_t*)malloc(self->lboard_capacity * sizeof(rc_runtime_lboard_t));
+      new_lboards = (rc_runtime_lboard_t*)malloc(new_capacity * sizeof(rc_runtime_lboard_t));
     else
-      self->lboards = (rc_runtime_lboard_t*)realloc(self->lboards, self->lboard_capacity * sizeof(rc_runtime_lboard_t));
+      new_lboards = (rc_runtime_lboard_t*)realloc(self->lboards, new_capacity * sizeof(rc_runtime_lboard_t));
 
-    if (!self->lboards) {
+    if (!new_lboards) {
       free(lboard_buffer);
       return RC_OUT_OF_MEMORY;
     }
+
+    self->lboards = new_lboards;
+    self->lboard_capacity = new_capacity;
   }
 
   /* assign the new lboard */
@@ -453,8 +478,10 @@ int rc_runtime_activate_richpresence(rc_runtime_t* self, const char* script, voi
   rc_parse_richpresence_internal(richpresence, script, &preparse.parse);
 
   size = preparse.parse.offset;
-  if (size < 0)
+  if (size < 0) {
+    rc_destroy_preparse_state(&preparse);
     return size;
+  }
 
   /* if there's a previous script, free it */
   if (self->richpresence) {
@@ -464,14 +491,20 @@ int rc_runtime_activate_richpresence(rc_runtime_t* self, const char* script, voi
 
   /* allocate and process the new script */
   self->richpresence = (rc_runtime_richpresence_t*)malloc(sizeof(rc_runtime_richpresence_t));
-  if (!self->richpresence)
+  if (!self->richpresence) {
+    rc_destroy_preparse_state(&preparse);
     return RC_OUT_OF_MEMORY;
+  }
 
   memcpy(self->richpresence->md5, md5, sizeof(md5));
 
   self->richpresence->buffer = malloc(size);
-  if (!self->richpresence->buffer)
+  if (!self->richpresence->buffer) {
+    rc_destroy_preparse_state(&preparse);
+    free(self->richpresence);
+    self->richpresence = NULL;
     return RC_OUT_OF_MEMORY;
+  }
 
   rc_reset_parse_state(&preparse.parse, self->richpresence->buffer);
   rc_preparse_reserve_memrefs(&preparse, self->memrefs);

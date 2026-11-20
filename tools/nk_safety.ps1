@@ -237,8 +237,10 @@ function Test-SafeComponentName {
 function Remove-SafeDirectory {
     <#
         The ONLY recursive-delete primitive the manager uses. Refuses (throws) when the
-        target is not contained in $Root or when any reparse point in the tree resolves
-        to a final path outside $Root. Uses -LiteralPath and -ErrorAction Stop throughout.
+        target is not contained in $Root, when it is $Root itself, or when any reparse
+        point in the tree resolves to a final path outside $Root. When $Path itself is a
+        reparse point (a junction or symbolic link), only the link is removed: its target
+        and the target's contents stay. Uses -LiteralPath and -ErrorAction Stop throughout.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -249,16 +251,41 @@ function Remove-SafeDirectory {
     if (-not (Test-PathContained -Path $canonicalTarget -Root $Root)) {
         throw "refusing recursive delete of '$Path': canonical target '$canonicalTarget' is outside allowed root '$Root'"
     }
-    # The target itself may be a reparse point; resolve and re-check it.
-    $rootItem = Get-Item -LiteralPath $canonicalTarget -Force -ErrorAction Stop
-    if ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-        $final = Get-CanonicalPath -Path $canonicalTarget
-        if (-not (Test-PathContained -Path $final -Root $Root)) {
-            throw "refusing recursive delete of '$Path': reparse target '$final' escapes allowed root '$Root'"
+    $canonicalRoot = Get-CanonicalPath -Path $Root
+    $cmp = Get-PathComparison
+    if ($canonicalTarget.TrimEnd('\', '/').Equals($canonicalRoot.TrimEnd('\', '/'), $cmp)) {
+        throw "refusing recursive delete of '$Path': canonical target '$canonicalTarget' is the allowed root '$Root' itself"
+    }
+    # Whether $Path is a link is a property of the lexical path: Get-CanonicalPath has
+    # already resolved a link to its target, so its target never shows the reparse point.
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        # The link itself (its canonical parent plus its own name) must lie inside the root.
+        $full = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+        $parent = [IO.Path]::GetDirectoryName($full)
+        $leaf = [IO.Path]::GetFileName($full)
+        if ([string]::IsNullOrEmpty($parent) -or [string]::IsNullOrEmpty($leaf)) {
+            throw "refusing link removal of '$Path': it has no parent directory"
         }
+        $linkLocation = [IO.Path]::Combine((Get-CanonicalPath -Path $parent), $leaf)
+        $rootWithSep = $canonicalRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+        if (-not $linkLocation.StartsWith($rootWithSep, $cmp)) {
+            throw "refusing link removal of '$Path': the link '$linkLocation' is outside allowed root '$Root'"
+        }
+        # Remove the link only, never its target. On Windows a directory link (junction or
+        # directory symbolic link) is removed with a non-recursive directory delete; elsewhere
+        # a symbolic link is unlinked as a file.
+        $onWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+            [System.Runtime.InteropServices.OSPlatform]::Windows)
+        if ($item -is [IO.DirectoryInfo] -and $onWindows) {
+            [IO.Directory]::Delete($full, $false)
+        } else {
+            [IO.File]::Delete($full)
+        }
+        return $true
     }
     # Every reparse descendant must stay inside the root as well.
-    $reparse = @(Get-ChildItem -LiteralPath $canonicalTarget -Recurse -Force -ErrorAction Stop |
+    $reparse = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction Stop |
         Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
     foreach ($r in $reparse) {
         $final = Get-CanonicalPath -Path $r.FullName
@@ -266,7 +293,7 @@ function Remove-SafeDirectory {
             throw "refusing recursive delete of '$Path': reparse descendant '$($r.FullName)' escapes to '$final'"
         }
     }
-    Remove-Item -LiteralPath $canonicalTarget -Recurse -Force -ErrorAction Stop
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
     return $true
 }
 

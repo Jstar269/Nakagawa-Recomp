@@ -58,8 +58,12 @@ NOT_RUN and captures nothing.
 
 PPSSPP's debugger web server reports this machine's local IP address and port to
 report.ppsspp.org while it runs (its remote-disc discovery; PPSSPP behaviour, not
-Nakagawa's). ``capture`` refuses to start PPSSPP until ``--allow-ppsspp-registration`` says
-the person running it accepts that. The driver itself connects only to 127.0.0.1.
+Nakagawa's). While a capture runs, PPSSPP's debugger also listens on every network
+interface of this computer and allows reading and writing the game's memory, so other
+devices on the same network can reach it; run captures on a trusted network or with the
+host firewall blocking inbound connections to PPSSPP. ``capture`` refuses to start PPSSPP
+until ``--allow-ppsspp-registration`` says the person running it accepts that. The driver
+itself (not PPSSPP) connects only to 127.0.0.1.
 """
 
 from __future__ import annotations
@@ -1213,9 +1217,14 @@ def summary(grades: Sequence[Grade]) -> tuple[str, int]:
 
 # ---- command line ---------------------------------------------------------------------------
 
-REGISTRATION_NOTE = ("PPSSPP's debugger web server reports this machine's local IP address and "
-                     "port to report.ppsspp.org while it runs; pass --allow-ppsspp-registration "
-                     "to accept that")
+REGISTRATION_NOTE = (
+    "PPSSPP's debugger web server reports this machine's local IP address and port to "
+    "report.ppsspp.org while it runs; while a capture runs, PPSSPP's debugger also listens on "
+    "every network interface of this computer and allows reading and writing the game's memory, "
+    "so other devices on the same network can reach it (run captures on a trusted network or "
+    "with the host firewall blocking inbound connections to PPSSPP); pass "
+    "--allow-ppsspp-registration to accept that"
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1231,8 +1240,17 @@ def main(argv: list[str] | None = None) -> int:
                    help="capture N times; scenes whose runs differ are a FAIL and are not stored "
                         "(default 2)")
     p.add_argument("--replace", action="store_true", help="capture over existing references")
-    p.add_argument("--allow-ppsspp-registration", action="store_true",
-                   help="accept that PPSSPP's debugger server registers with report.ppsspp.org")
+    p.add_argument(
+        "--allow-ppsspp-registration",
+        action="store_true",
+        help=(
+            "accept that while a capture runs, PPSSPP's debugger server registers with "
+            "report.ppsspp.org, listens on every network interface of this computer, and allows "
+            "reading and writing the game's memory, so other devices on the same network can "
+            "reach it (run captures on a trusted network or with the host firewall blocking "
+            "inbound connections to PPSSPP)"
+        ),
+    )
     p.add_argument("--keep-work", action="store_true", help="keep each run's PPSSPP log and ini")
     p = sub.add_parser("compare", help="grade Nakagawa's captures against the PPSSPP references")
     p.add_argument("scenes", type=Path)

@@ -1252,11 +1252,18 @@ static int hle_run(void)
  * every other per-fragment unit is off, as in ge-rtt. The depth range words keep the
  * ge-rtt/ge-raster values (0xd6 = 0, 0xd7 = 0xffff).
  *
- * Layout, as ge-raster and ge-rtt: a 64x32 5650 colour buffer at VRAM offset GTZ_FB_OFFSET and a
- * 64x32 16-bit depth buffer at GTZ_ZB_OFFSET, both stride 64. Before every cell the CPU clears
- * the colour block to 0 and fills every depth word with GTZ_ZCLEAR (0x1234) through the uncached
- * VRAM mirror, then `sync` and a data-cache write-back. Like those cases it leaves the two blocks
- * as the last cell drew them.
+ * Layout: a 64x32 5650 colour buffer at VRAM offset GTZ_FB_OFFSET and a 64x32 16-bit depth buffer
+ * at GTZ_ZB_OFFSET, both stride 64. Before every cell the CPU clears the colour block to 0 and
+ * fills every depth word with GTZ_ZCLEAR (0x1234) through the uncached VRAM mirror, then `sync`
+ * and a data-cache write-back.
+ *
+ * What the case leaves behind: both buffers lie in VRAM 0x110000..0x120fff, in the block
+ * ge-raster-bounds and ge-depth-bounds use, above the frame buffer seen in the XMB context. The
+ * case copies those 0x11000 bytes to its own RAM before the first cell and writes them back
+ * after the last, then counts the words that differ (`vram-restore`). Every list is queued with a
+ * GE context (PspGeListArgs), so the GE driver restores the GE state after a list that ends, as
+ * in those cases. Until the 2026-11-20 change the colour buffer was at 0x100000 (inside an XMB
+ * frame buffer), the lists were queued without a context and nothing was restored.
  *
  * Where the depth words are: the GE keeps the depth of pixel index k at the 16-bit word index
  * k ^ 0x1020 of the buffer (byte offset XOR 0x2040: PSP-VRAM-MIRROR-001, and PSP-GE-RASTER-004's
@@ -1273,10 +1280,13 @@ static int hle_run(void)
  * changed depth words, the lowest and highest changed word (0xffffffff and 0 when none), the
  * index of the first changed word (0xffffffff when none), and the depth words at the sprite's
  * first pixel (16, 8) and its centre), then `<cell>-z` (the depth words of row y 16, x 16..31,
- * zero-extended). */
+ * zero-extended). Last, `vram-restore` (2 words: the 32-bit words written back and how many of
+ * them then read differently from the saved copy). */
 
-#define GTZ_FB_OFFSET 0x00100000u   /* VRAM-relative 5650 colour buffer, stride 64, 32 rows */
+#define GTZ_FB_OFFSET 0x00120000u   /* VRAM-relative 5650 colour buffer, stride 64, 32 rows */
 #define GTZ_ZB_OFFSET 0x00110000u   /* VRAM-relative 16-bit depth buffer, stride 64, 32 rows */
+#define GTZ_SAVE_OFFSET 0x00110000u /* the saved block: the depth words under either address rule */
+#define GTZ_SAVE_WORDS (0x00011000u / 4u)   /* 0x110000..0x120fff, both buffers, as 32-bit words */
 #define GTZ_STRIDE 64u
 #define GTZ_ROWS 32u
 #define GTZ_PIXELS (GTZ_STRIDE * GTZ_ROWS)
@@ -1315,6 +1325,8 @@ _Static_assert(sizeof(gtz_cells) / sizeof(gtz_cells[0]) == GTZ_CELL_COUNT, "GTZ_
 static uint32_t s_gtz_vtx[8] __attribute__((aligned(64)));
 static uint32_t s_gtz_list[GTZ_LIST_WORDS] __attribute__((aligned(64)));
 static uint32_t s_gtz_row[GTZ_SIDE];
+static uint32_t s_gtz_save[GTZ_SAVE_WORDS];
+static PspGeContext s_gtz_ctx;
 
 static uint32_t gtz_fbits(float f)
 {
@@ -1426,9 +1438,13 @@ static void gtz_draw(const struct gtz_cell *c)
     gtz_prepare();
     gtz_vertices(c->zbits);
     const uint32_t words = gtz_list(gtz_phys(s_gtz_vtx), s_gtz_list);
+    PspGeListArgs args;
+    memset(&args, 0, sizeof(args));
+    args.size = sizeof(args);
+    args.context = &s_gtz_ctx;
     sceKernelDcacheWritebackAll();
     const uint32_t t0 = sceKernelGetSystemTimeLow();
-    const int qid = sceGeListEnQueue(s_gtz_list, NULL, -1, NULL);
+    const int qid = sceGeListEnQueue(s_gtz_list, NULL, -1, &args);
     int list_state = qid;
     int draw_state = -1;
     int idle = 0;
@@ -1489,9 +1505,25 @@ static void gtz_draw(const struct gtz_cell *c)
 
 static int hle_run(void)
 {
+    volatile uint32_t *vram = (volatile uint32_t *)gtz_mirror(GTZ_SAVE_OFFSET);
+    hle_step("vram-save");
+    for (uint32_t i = 0; i < GTZ_SAVE_WORDS; i++) {
+        s_gtz_save[i] = vram[i];
+    }
     for (uint32_t i = 0; i < GTZ_CELL_COUNT; i++) {
         gtz_draw(&gtz_cells[i]);
     }
+    hle_step("vram-restore");
+    for (uint32_t i = 0; i < GTZ_SAVE_WORDS; i++) {
+        vram[i] = s_gtz_save[i];
+    }
+    __asm__ volatile("sync" ::: "memory");
+    uint32_t mismatches = 0u;
+    for (uint32_t i = 0; i < GTZ_SAVE_WORDS; i++) {
+        mismatches += vram[i] != s_gtz_save[i];
+    }
+    const uint32_t restore[2] = {GTZ_SAVE_WORDS, mismatches};
+    hle_record("vram-restore", mismatches == 0u ? "PASS" : "FAIL", 0, restore, 2);
     return 1;
 }
 

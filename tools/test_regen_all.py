@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,15 @@ class StepInventoryTests(unittest.TestCase):
                     self.assertTrue((ROOT / output).is_file(), f"{step.name} names a missing output")
                     self.assertNotIn(output, seen, f"{output} belongs to {seen.get(output)} and {step.name}")
                     seen[output] = step.name
+        # On disk is not tracked: an ignored or never-added output would pass the check above.
+        git = shutil.which("git")
+        if git is None or not (ROOT / ".git").exists():
+            self.skipTest("git or the checkout's .git is unavailable, so whether the outputs are tracked is unchecked")
+        listed = subprocess.run(
+            [git, "-C", str(ROOT), "ls-files", "-z", "--", *seen],
+            capture_output=True, check=True, timeout=60,
+        ).stdout.decode("utf-8").split(chr(0))
+        self.assertEqual(sorted(set(seen) - set(listed)), [], "regen_all names outputs Git does not track")
 
     def test_every_step_either_runs_or_says_why_not(self) -> None:
         for step in regen_all.STEPS:
@@ -100,6 +110,35 @@ class AdmissionBlockTests(unittest.TestCase):
             regen_all._without_admission(json.dumps(with_admission).encode()),
             regen_all._without_admission(json.dumps(rehashed).encode()),
         )
+
+
+class PublicLabelTests(unittest.TestCase):
+    """A ledger that differs from the base's only in public label text is not stale."""
+
+    def _ledger(self, authorship: str, *, classification: str = "project_authored_attested") -> dict:
+        return {"schema_version": 2, "entries": [
+            {"path": "src/a.c", "classification": classification,
+             "evidence": {"record_id": "rec-a", "authorship": authorship}},
+        ]}
+
+    def test_only_known_label_text_is_ignored(self) -> None:
+        sets = regen_all_labels()
+        v1 = self._ledger(sets["v1"]["behavior-informed"])
+        v2 = self._ledger(sets["v2"]["behavior-informed"])
+        self.assertNotEqual(v1, v2)
+        self.assertEqual(regen_all._without_labels(v1), regen_all._without_labels(v2))
+        # Free text is not a label, and a changed claim is not a label change.
+        self.assertNotEqual(regen_all._without_labels(v1), regen_all._without_labels(self._ledger("hand-written")))
+        moved = self._ledger(sets["v2"]["behavior-informed"], classification="upstream_derived")
+        self.assertNotEqual(regen_all._without_labels(v1), regen_all._without_labels(moved))
+
+
+def regen_all_labels() -> dict[str, dict[str, str]]:
+    sys.path.insert(0, str(Path(regen_all.__file__).resolve().parent))
+    import provenance_ledger
+
+    sets: dict[str, dict[str, str]] = provenance_ledger.PUBLIC_LABEL_SETS
+    return sets
 
 
 class CheckModeTests(unittest.TestCase):

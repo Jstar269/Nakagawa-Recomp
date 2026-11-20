@@ -52,6 +52,7 @@ import sys
 import tempfile
 import unittest
 from typing import Any, Protocol, cast
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -124,6 +125,25 @@ GUEST_DERIVED_SUFFIXES = (".c", ".h", ".bin", ".toml")
 # The package files that record the manifest's own identity. Two routes that bind
 # the same guest to two different manifests must differ in exactly these.
 MANIFEST_IDENTIFIED = ("build-report.json", "package.json", "completion-manifest.json")
+# What the runtime writes when a launch stops short of a clean exit. The player hands
+# the child its boot-event file as the destination of the child's stdout and stderr
+# (src/core/nk_launch.c), so the file carries both the named stop record
+# (src/rt/hle.c, src/rt/recomp.c) and the stderr diagnostics: an unhandled import
+# (src/rt/hle.c), an interpreter rejection (src/rt/recomp.c), a driver expectation
+# (src/rt/driver.c).
+CHILD_STOP_MARKERS = (
+    "BOOT_EVENT phase=stop",
+    "HLE: unimplemented nid",
+    "INTERP_REJECT",
+    "DRIVER_EXPECT_U32",
+)
+
+
+def child_stop_markers(events: str) -> list[str]:
+    """The stop markers a launched child's boot-event file carries, in table order."""
+    return [marker for marker in CHILD_STOP_MARKERS if marker in events]
+
+
 # Compiler path echoes and profile-entry files are build-only and are omitted from
 # the v3 runtime package.
 PATH_ECHOES: tuple[str, ...] = ()
@@ -405,11 +425,15 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
         if all(binary.is_file() for binary in required):
             return
         lines = (built.stdout + built.stderr).splitlines()
-        reason = next((line for line in lines
-                       if "sdl3 dependency is missing" in line.lower()),
-                      "building the route's binaries failed: "
-                      + " ".join(lines).strip()[-400:])
-        raise unittest.SkipTest(reason.strip())
+        build_reason = next((line for line in lines
+                             if "sdl3 dependency is missing" in line.lower()), None)
+        if build_reason is not None:
+            raise unittest.SkipTest(build_reason.strip())
+        # Every tool the route needs is present, so a failed build is the project's
+        # own failure (a compile or link error), never a reason to skip the class.
+        raise AssertionError(
+            f"building the route's binaries failed (exit {built.returncode}): "
+            + "\n".join(lines[-40:]))
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -613,7 +637,7 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
             [str(self.player), "--empty", "--launch-index=0", "--headless-launch",
              f"--runtime-root={self.roots[name]}"],
             cwd=ROOT, env=environment, capture_output=True, text=True,
-            timeout=LAUNCH_TIMEOUT_MS,
+            timeout=LAUNCH_TIMEOUT_MS / 1000,  # subprocess.run takes seconds
         )
         return launched, perf_csv
 
@@ -635,9 +659,7 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
                           "BOOT_EVENT phase=runtime_registered",
                           "BOOT_EVENT phase=guest_start mode=scheduler"):
             self.assertIn(milestone, events)
-        for forbidden in ("UNKNOWN NID", "NONPLT_MISS", "INTERP_REJECT",
-                          "DRIVER_EXPECT_U32"):
-            self.assertNotIn(forbidden, events)
+        self.assertEqual(child_stop_markers(events), [], events[-4000:])
         rows = perf_csv.read_text(encoding="utf-8", errors="replace").splitlines()
         self.assertGreaterEqual(len(rows), 2, "the perf CSV has header and summary only")
         self.assertEqual(rows[0].split(",")[0], "vblank_total")
@@ -1033,6 +1055,76 @@ def make_file_writes(makefile: str) -> dict[str, str]:
                                  "directly in $(BUILD_DIR)")
             writes[named.group(1)] = line
     return writes
+
+
+class TestLaunchHarnessContract(unittest.TestCase):
+    """The class's own harness: its backstop, its probe and its stop markers.
+
+    These run with a mocked subprocess, so they hold on a host with no toolchain."""
+
+    def test_launch_backstop_is_the_route_timeout_in_seconds(self):
+        with tempfile.TemporaryDirectory(prefix="nk-determinism-launch-") as temporary:
+            root = Path(temporary) / "root"
+            root.mkdir()
+            (root / "library.json").write_text("{}", encoding="utf-8")
+            case = TestPlayerPackageDeterminism("test_identical_inputs_produce_an_identical_package")
+            case.roots = {"a": root}
+            case.player = Path(temporary) / "nakagawa_player"
+            completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            with mock.patch.object(subprocess, "run", return_value=completed) as run:
+                case.launch("a")
+        self.assertEqual(run.call_args.kwargs["timeout"], LAUNCH_TIMEOUT_MS / 1000)
+        self.assertEqual(run.call_args.kwargs["timeout"], 180)
+
+    def _probe(self, build_output: str) -> None:
+        class Probe(TestPlayerPackageDeterminism):
+            pass
+
+        with tempfile.TemporaryDirectory(prefix="nk-determinism-probe-") as temporary:
+            Probe.binary_dir = Path(temporary)
+            results = iter((
+                subprocess.CompletedProcess([], 0, stdout="", stderr=""),  # sdl3-check
+                subprocess.CompletedProcess([], 2, stdout="", stderr=build_output),
+            ))
+            with mock.patch.object(shutil, "which", return_value="tool"), \
+                    mock.patch.object(subprocess, "run", side_effect=lambda *a, **k: next(results)):
+                Probe.probe_toolchain()
+
+    def test_a_project_build_failure_fails_the_class_instead_of_skipping_it(self):
+        failure = ("src/player/main.c:120:5: error: 'nk_missing' undeclared\n"
+                   "mingw32-make: *** [build/player/main.o] Error 1\n")
+        try:
+            with self.assertRaisesRegex(
+                    AssertionError,
+                    r"(?s)building the route's binaries failed \(exit 2\).*nk_missing"):
+                self._probe(failure)
+        except unittest.SkipTest as skipped:
+            self.fail(f"a project build failure was reported as a skip: {skipped}")
+
+    def test_a_missing_sdl3_dependency_still_skips(self):
+        with self.assertRaisesRegex(unittest.SkipTest, "SDL3 dependency is missing"):
+            self._probe("SDL3 dependency is missing: install SDL3\n")
+
+    def test_stop_markers_match_what_the_runtime_writes(self):
+        # The exact forms src/rt/hle.c, src/rt/recomp.c and src/rt/driver.c print.
+        for line, marker in (
+            ("BOOT_EVENT phase=stop reason=semantic-boundary "
+             "boundary=unsupported-import-0xdead2f02 issue=0", "BOOT_EVENT phase=stop"),
+            ("HLE: unimplemented nid 0xdead2f02 (unknown) (thread uid 0x133)",
+             "HLE: unimplemented nid"),
+            ("  INTERP_REJECT: target=0x08900040 result=unsupported fault_pc=0x08900044",
+             "INTERP_REJECT"),
+            ("DRIVER_EXPECT_U32 addr=0x08903000 got=0x00000000 expected=0x00000001 "
+             "status=FAIL", "DRIVER_EXPECT_U32"),
+        ):
+            with self.subTest(marker=marker):
+                events = ("BOOT_EVENT phase=init public_safe=1\n"
+                          "BOOT_EVENT phase=image_loaded entry=0x08900000\n" + line + "\n")
+                self.assertEqual(child_stop_markers(events), [marker])
+        self.assertEqual(child_stop_markers(
+            "BOOT_EVENT phase=image_loaded entry=0x08900000\n"
+            "BOOT_EVENT phase=runtime_registered\n"
+            "BOOT_EVENT phase=guest_start mode=scheduler\n"), [])
 
 
 class TestMakeWrittenFilesAreClassified(unittest.TestCase):

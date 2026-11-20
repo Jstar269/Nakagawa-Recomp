@@ -17,21 +17,32 @@ it, into the player only, to decode the one track the player ships (`assets/musi
 
 ## Upstream source
 
-- Project: stb (`stb_image`, v2.30)
+- Project: stb (`stb_image`, v2.34)
 - Repository: `https://github.com/nothings/stb`
-- Pin: commit `003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5` (`master` on 2026-10-24). `stb_image.h` last changed in
-  commit `013ac3beddff3dbffafd5177e7972067cd2b5083` (2024-05-31, v2.30), so the file is the same at both.
+- Pin: commit `6b5799bae8a1fe3792691ef4b72ae26434c3e799` (`master` on 2026-11-19, "update stb_image_write version",
+  committed 2026-11-19T18:39:41Z). `stb_image.h` last changed in commit `1da9ade1e66195252114f5da497f244704a6c58d`
+  (2026-11-19, "bump stb_image version number", v2.34), so the file is the same at both. Updated 2026-11-20 from
+  v2.30 (pin `003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5`, file last changed in `013ac3beddff3dbffafd5177e7972067cd2b5083`,
+  2024-05-31) under the maintainer's standing decision to keep vendored code at upstream's latest release; upstream
+  has no release tags, so the version is the one the header names. The 67 upstream commits to `stb_image.h` between the
+  two pins include PNG fixes (an uninitialised palette that could expose stack bytes, `298550a`; thread-safe handling of
+  invalid chunks, `796dd17`; `stbi__getn` no longer calls `memcpy` for zero bytes and compares lengths without pointer
+  overflow, `51c22cc`; a leak in the 8/16-bit conversions on allocation failure, `de23427`) and many fixes to formats
+  this build leaves out (BMP, GIF, TGA, PNM, JPEG, HDR; PIC support removed).
 - License: upstream offers a choice of MIT or public domain (Unlicense wording), in `LICENSE` and at the end of
-  `stb_image.h`. The project uses it under the public-domain alternative (`Unlicense`). Both texts are kept unchanged.
-- Import method: `stb_image.h` was downloaded from the pinned commit `003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5`. Its
-  Git blob ID matches that commit's file, and the SHA-256 value below was calculated from the local bytes (corrected
+  `stb_image.h`. The project uses it under the public-domain alternative (`Unlicense`). Both texts are kept unchanged;
+  the licence text at the end of `stb_image.h` is the same at both pins.
+- Import method: `stb_image.h` was downloaded from the pinned commit `6b5799bae8a1fe3792691ef4b72ae26434c3e799`. Its
+  Git blob ID matches that commit's file (checked against the GitHub contents API and a second download from
+  `raw.githubusercontent.com` on 2026-11-20), and the SHA-256 below was calculated from the local bytes (corrected
   2026-11-18: this bullet sat in the `stb_vorbis.c` section).
 - `LICENSE`: upstream reworded its opening lines in commit `aae9fee018211439eec93986e4dd2d9201e9b82c`
   (2026-10-31, "update license since libraries are inconsistent"): the libraries are in the public domain and most are
-  also available under MIT. The two alternatives below the opening are unchanged. On 2026-11-20 `LICENSE` was
-  downloaded again from that commit, which is still the last to change it on `master`; its Git blob ID matches that
-  commit's file, and the SHA-256 below was calculated from the local bytes. The `LICENSE` at the earlier pin had blob
-  `a77ae91f3ec0abb0028c9d9bd8d34d880b454d38`.
+  also available under MIT. The two alternatives below the opening are unchanged. On 2026-11-20, with the
+  maintainer's approval of the new wording, `LICENSE` was downloaded again from that commit, which is still the last
+  to change it on `master` (the same file as at the `stb_image.h` pin above); its Git blob ID matches that commit's
+  file, and the SHA-256 below was calculated from the local bytes. The `LICENSE` at the earlier pin
+  `003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5` had blob `a77ae91f3ec0abb0028c9d9bd8d34d880b454d38`.
 
 ### `stb_vorbis.c`
 
@@ -41,8 +52,8 @@ it, into the player only, to decode the one track the player ships (`assets/musi
 - License: the file's own header says "public domain" and its end offers a choice of two licences, "ALTERNATIVE A -
   MIT License" (Copyright (c) 2017 Sean Barrett) or "ALTERNATIVE B - Public Domain (www.unlicense.org)". The project
   uses it under the public-domain alternative (`Unlicense`), as it does `stb_image.h`. Both texts are kept unchanged
-  at the end of the file. The repository's `LICENSE` here stays at the `stb_image.h` pin above; the file carries its
-  own licence text.
+  at the end of the file. The repository's `LICENSE` here is the one recorded above (commit
+  `aae9fee018211439eec93986e4dd2d9201e9b82c`); the file carries its own licence text.
 - Import method: downloaded from `raw.githubusercontent.com` at the pinned commit. Its Git blob ID matches the pinned
   commit's file (checked against the GitHub contents API on 2026-11-12), and the SHA-256 below was calculated from
   the local bytes.
@@ -51,7 +62,7 @@ it, into the player only, to decode the one track the player ships (`assets/musi
 
 | File | Kind | Upstream blob SHA | SHA-256 |
 | --- | --- | --- | --- |
-| `stb_image.h` | imported byte-identical | `9eedabedc45b3e6fd88fae6f14a160b4d53272ec` | `594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3` |
+| `stb_image.h` | imported byte-identical | `9e65b834cfd7e34d9f8f8bd81d1c5e6eae128fc7` | `dfc2aadda6295f67f677587773f25e5bf8c8ad427ed0db7c518525c91e72e020` |
 | `stb_vorbis.c` | imported byte-identical (pin `9f755b604db3492df2cbeb39bf84b81e3e3932e3`) | `f5e80a0f27cbbe78405d01803bcc5e3edb98c2bd` | `b52cf518355f7b2d181f18b97b812f361ffeb26299d935c8cf29e842401d60a6` |
 | `LICENSE` | imported byte-identical (pin `aae9fee018211439eec93986e4dd2d9201e9b82c`) | `48b774af49c4a552d5593e005da685af27be2f20` | `eb36e45c704dd0b59730115523e089b051852625b4db0a6fe76c991900af20e7` |
 | `PROVENANCE.md` | project-authored manifest | n/a | n/a |
@@ -64,8 +75,10 @@ reads anything past the header, the caller's byte and dimension limits are appli
 without being decoded. It also defines `STBI_MALLOC`, `STBI_REALLOC` and `STBI_FREE` as wrappers that, while a decode
 runs, refuse any request larger than an image of the header's size and a file of that size can need: stb accepts image
 data longer than the image and grows its zlib buffer for as long as the data inflates, so a small file of highly
-compressible data would otherwise allocate gigabytes. A PNG whose first `IDAT` chunk is empty is refused before stb
-reads it, since stb copies that chunk into a buffer it has not yet allocated (a `memcpy` into `NULL`).
+compressible data would otherwise allocate gigabytes (v2.34 still grows that buffer the same way). A PNG whose first
+`IDAT` chunk is empty is refused before stb reads it: v2.30 copied that chunk into a buffer it had not yet allocated (a
+`memcpy` into `NULL`); v2.34 skips a zero-byte copy (`51c22cc`) but still adds the chunk's offset to that `NULL`
+buffer pointer, which C leaves undefined, so the refusal stays.
 
 A second translation unit builds the header for a test only: `tests/native/texrepl_selftest.c` (`texrepl-selftest`)
 uses it as an independent PNG decoder to check the texture-replacement pack reader's own decoder on a seeded
