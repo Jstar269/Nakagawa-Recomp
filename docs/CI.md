@@ -527,7 +527,16 @@ names, downloads the Gradle distribution named in
 `android/gradle/wrapper/gradle-wrapper.properties` and checks it against that file's
 `distributionSha256Sum`, then builds the launcher-only debug APK for arm64-v8a
 (`gradle -p android assembleDebug -Pnk.abis=arm64-v8a`) and checks that it carries
-`libmain.so`, `libSDL3.so` and `libSDL3_ttf.so` for that ABI and no other ABI. No title is
+`libmain.so`, `libSDL3.so` and `libSDL3_ttf.so` for that ABI and no other ABI. The build runs
+through the step's `NK_GRADLE_RETRY` helper: when a failed attempt's output names a dependency
+download or resolution error from a repository (`Could not find` or `Could not resolve` a
+`group:artifact:version`, `Could not GET`, `Could not parse POM`, a read or connect timeout, a
+plugin not found), it runs the build again, three attempts in all, 30 and then 60 seconds apart,
+each retry with an empty Gradle user home. Any other failure ends the step at once, and every
+retry leaves a warning in the run summary (`GradleRetryHelperTests` in
+`tools/test_public_ci_wiring.py`). The plugins and libraries are trusted as the repositories
+serve them over HTTPS: the repository commits no Gradle dependency verification metadata, so the
+job caches no Gradle dependencies. No title is
 bundled and nothing runs: running needs a device or an emulator
 ([`ANDROID_DEVELOPMENT.md`](ANDROID_DEVELOPMENT.md)). The APK is kept for 14 days as the
 artifact `nakagawa-android-arm64-debug`, for installing on a phone
