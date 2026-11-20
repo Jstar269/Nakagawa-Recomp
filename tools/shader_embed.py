@@ -141,6 +141,17 @@ def regenerate(
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
 
 
+# The pinned glslc is the LunarG Vulkan SDK 1.4.363.0's (shaderc v2026.4): both manifests record
+# its ``--version`` text. The hosted job downloads the SDK's Linux archive, checks it against this
+# SHA-256 (the value LunarG publishes beside it) and unpacks only the glslc member.
+GLSLC_RELEASE = {
+    "sdk": "1.4.363.0",
+    "linux_url": "https://sdk.lunarg.com/sdk/download/1.4.363.0/linux/vulkansdk-linux-x86_64-1.4.363.0.tar.xz",
+    "linux_sha256": "197962f5cbf80baf2775a03336a01cee7c8745686c65aaa70d3f751ade4d7e43",
+    "linux_member": "1.4.363.0/x86_64/bin/glslc",
+}
+
+
 def normalize_glslc_version(version: str) -> str:
     """Canonical LF-normalized, stripped ``glslc --version`` output."""
     return version.replace("\r\n", "\n").strip()

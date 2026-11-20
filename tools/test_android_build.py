@@ -18,6 +18,7 @@ it shares with the desktop build are checked here, without an SDK:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import os
 from pathlib import Path
 import re
@@ -62,6 +63,31 @@ def _expand(value: str, assignments: dict[str, list[str]], choose: dict[str, str
             candidates = [c for c in candidates if chosen in c] or candidates
         words += _expand(candidates[0], assignments, choose) if candidates else []
     return words
+
+
+def _make_exported_names(text: str) -> set[str]:
+    """Every variable the makefile text ``export``s, alone or after a target (``goal: export X``)."""
+    return set(re.findall(r"(?m)^(?:[^\s#][^:\n]*:\s*)?export\s+([A-Za-z_][A-Za-z0-9_]*)", text))
+
+
+def _isolated_make_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    """``environ`` without what an outer make hands a child make, for a plan of this repository.
+
+    Run under make (``make contrib-check``, ``make test``), this process inherits every variable
+    the makefiles export with the outer make's value, and MAKEFLAGS, which carries the outer
+    command line's variable overrides. A child ``make -n`` would take each of those over its own
+    ``?=`` default: a Windows outer make exports ``H264_FFMPEG=0``, and the Android plan then
+    drops the vendored FFmpeg sources. NK_TARGET, CC and CFLAGS are the overrides the plans set.
+    """
+    caller_only = {"NK_TARGET", "CC", "CFLAGS", "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES"}
+    caller_only |= _make_exported_names(read_makefile())
+    return {key: value for key, value in environ.items() if key.upper() not in caller_only}
+
+
+def _compiled_sources(dry_run: str) -> set[str]:
+    """The ``.c`` files a ``make -n`` plan compiles, recipes spanning lines joined."""
+    commands = dry_run.replace("\\\n", " ").splitlines()
+    return {m.group(1) for c in commands for m in [re.search(r" -c (\S+\.c) -o \S+\.o\b", c)] if m}
 
 
 def _cmake_list(text: str, name: str) -> list[str]:
@@ -465,7 +491,7 @@ class AndroidMakeTargetTests(unittest.TestCase):
 
     @classmethod
     def _dry_run(cls, goal: str, *overrides: str) -> subprocess.CompletedProcess[str]:
-        env = {k: v for k, v in os.environ.items() if k not in ("NK_TARGET", "CC", "CFLAGS")}
+        env = _isolated_make_environment(os.environ)
         return subprocess.run(
             [cast_str(cls.make), "-n", "--no-print-directory", goal,
              f"PYTHON={Path(sys.executable).as_posix()}", "GAME_NAME=demo",
@@ -506,6 +532,19 @@ class AndroidMakeTargetTests(unittest.TestCase):
         self.assertNotIn("src/core/nk_platform_win32.c", sources)
         self.assertIn("src/rt/h264_ffmpeg.c", sources)
         self.assertFalse([c for c in commands if "windres" in c or "copy_build_assets" in c])
+
+    def test_the_plan_ignores_what_an_outer_make_exports(self) -> None:
+        # Run from inside a Windows make, this process inherits H264_FFMPEG=0 (Makefile's
+        # `export H264_FFMPEG`) and MAKEFLAGS; the Android plan must not change with them.
+        self.assertIn("H264_FFMPEG", _make_exported_names(read_makefile()))
+        outer = {"H264_FFMPEG": "0", "MAKEFLAGS": "-- H264_FFMPEG=0", "MAKELEVEL": "1"}
+        with mock.patch.dict(os.environ, outer):
+            proc = self._dry_run("compile", *self._android_overrides())
+        self.assertEqual(proc.returncode, 0, proc.stdout[-2000:] + proc.stderr[-2000:])
+        # The first plan wrote its profile stamps, so the text differs; what it compiles may not.
+        compiled = _compiled_sources(proc.stdout)
+        self.assertIn("src/rt/h264_ffmpeg.c", compiled)
+        self.assertEqual(compiled, _compiled_sources(self.android_out))
 
     def test_the_host_build_is_unchanged(self) -> None:
         proc = self._dry_run("compile", "CC=gcc", "SDL3_DIR=", "VULKAN_SDK=")
