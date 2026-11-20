@@ -180,11 +180,15 @@ swaps, cables) are the person's, never simulated or assumed, and the device writ
   routes only when required. Remote host work stays reversible and non-overlapping.
 - **Offline by default.** The player and runtime connect only through a documented opt-in feature
   ([Network use](docs/SETUP.md#network-use)). The maintainer approves opt-in network features in principle
-  (#1139, #1316, #2632); that does not authorize an unlisted host, an upload, or an on-by-default or automatic
-  connection, each of which needs its own maintainer decision. Each feature's public issue must name its hosts,
-  payload, consent and data boundaries; before it ships it is off by default, listed in `docs/SETUP.md` Network
-  use and in the allowlist test `tools/test_prereq_fetcher.py`. The reserved `network_mode` setting accepts only
-  `"offline"`.
+  (#1139, #1316, #2632); that does not authorize an upload, or any connection before the player has opted in to
+  the feature, each of which needs its own maintainer decision. A host that an approved opt-in feature needs may be
+  added without a separate decision when all of this holds: it is contacted only after that feature's opt-in; it
+  receives nothing beyond what the feature's consent text names; and the pull request names the host and lists it
+  in the feature's public issue, its consent text, `docs/SETUP.md` Network use and the allowlist test
+  `tools/test_prereq_fetcher.py`. A first-run question may offer a documented opt-in feature: nothing connects
+  before the player answers, and no answer means off. Each feature's public issue must name its hosts, payload,
+  consent and data boundaries; before it ships it is off by default, listed in `docs/SETUP.md` Network use and in
+  the allowlist test. The reserved `network_mode` setting accepts only `"offline"`.
 - A user-started transfer may move their own packages and saves directly to their own devices, never through a
   server. Nothing uploads game code or data, decrypted modules, packages, saves or guest memory, or shares anything
   built from a user's game. No telemetry. Tests never touch the internet. Network HLE stays fail-closed; no setting
