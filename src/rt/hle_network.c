@@ -2,7 +2,8 @@
 // Copyright (C) 2025-2026 the psp-recomp authors
 // Copyright (C) 2026 the Nakagawa Recomp authors
 // Derived from sal063/PSP-recompilation-project (GPL-2.0-or-later)
-// Modified by Nakagawa Recomp contributors, 2026-08-11; 2026-11-16 (opt-in online ad hoc tier adapted from PPSSPP 3bc60270; #1139).
+// Modified by Nakagawa Recomp contributors, 2026-08-11.
+// Modified by Nakagawa Recomp contributors on 2026-11-16: the opt-in online ad hoc tier adapted from PPSSPP 3bc60270 (#1139).
 // See NOTICE.md for upstream lineage and modification provenance.
 // Derived from PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later
 // Copyright (c) 2012- PPSSPP Project and contributors
