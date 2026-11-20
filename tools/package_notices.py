@@ -528,8 +528,10 @@ def _git_text(repo_root: Path, *args: str) -> str | None:
 def source_reference(repo_root: Path = ROOT) -> dict[str, Any]:
     """The exact source a package was built from.
 
-    The whole program is GPL-3.0-or-later and the FFmpeg ATRAC3+ subset is
-    LGPL-2.1-or-later, statically linked. The maintainer's decision is
+    The project's own code is GPL-3.0-or-later, the statically linked xBRZ
+    scaler and the player's pspdecrypt-derived decryption files are
+    GPL-3.0-only, and the FFmpeg ATRAC3+ subset is LGPL-2.1-or-later,
+    statically linked. The maintainer's decision is
     that the complete corresponding source is the relink mechanism, so every
     package names the repository, commit and (when built from one) tag it came
     from, and says so plainly when the working tree carried local changes.
@@ -554,8 +556,13 @@ def render_source_notice(
     lines = [
         "COMPLETE CORRESPONDING SOURCE",
         "",
-        "This package is Nakagawa Recomp, distributed under the GNU General Public",
-        "License version 3 or later. It statically links a subset of the FFmpeg",
+        "This package is Nakagawa Recomp. The project's own code is licensed under",
+        "the GNU General Public License version 3 or later. The package also",
+        "includes the xBRZ texture scaler, which is licensed under the GNU General",
+        "Public License version 3 only, and the Nakagawa player links decryption",
+        "files ported from pspdecrypt, which are licensed under the GNU General",
+        "Public License version 3 only except the KIRK engine (NOTICE.md in the",
+        "source). It statically links a subset of the FFmpeg",
         "ATRAC3+ decoder, which is licensed under the GNU Lesser General Public",
         "License version 2.1 or later. The complete corresponding source of this",
         "build, including that subset, is available from:",
@@ -638,7 +645,7 @@ Nakagawa Recomp incorporates a subset of the FFmpeg ATRAC3+ audio decoder (`src/
 
 Under LGPL v2.1 Section 6 you may modify the ATRAC3+ decoder source code and relink the recompiled application executable with your modified library objects.
 
-The whole program is licensed under the GNU General Public License version 3 or later and its complete corresponding source is published, so you can rebuild and relink every part of it, not only the decoder. `SOURCE.txt` in this package names the exact repository commit this build came from.
+The project's own code is licensed under the GNU General Public License version 3 or later. The program also includes the xBRZ texture scaler, which is licensed under the GNU General Public License version 3 only, and the Nakagawa player links decryption files ported from pspdecrypt, which are licensed under the GNU General Public License version 3 only except the KIRK engine (`NOTICE.md` in the source). The complete corresponding source is published, so you can rebuild and relink every part of it, not only the decoder. `SOURCE.txt` in this package names the exact repository commit this build came from.
 
 ## 1. ATRAC3+ Source Files
 
