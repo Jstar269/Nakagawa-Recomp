@@ -4344,6 +4344,7 @@ static void test_settings_pages(void) {
             PLAYER_UI_ID_SETTINGS_NICKNAME,
             PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
             PLAYER_UI_ID_SETTINGS_COVER_ART,
+            PLAYER_UI_ID_SETTINGS_CHEATS,
             PLAYER_UI_ID_SETTINGS_DEVELOPER_LOG
         };
         NkUi *ui = NULL;
@@ -4357,7 +4358,7 @@ static void test_settings_pages(void) {
             (void)draw_flow_case(ui, FLOW_SETTINGS_ONLINE);
             (void)nk_ui_end(ui);
             CHECK(nk_ui_focused(ui) == expected_order[step],
-                  "Down steps sequentially through Developer, Discord, Nickname, Online play, Cover art, and Developer log");
+                  "Down steps sequentially through Developer, Discord, Nickname, Online play, Cover art, Cheats, and Developer log");
         }
         if (ui != NULL) {
             push_nav(ui, NK_UI_DIR_LEFT);
@@ -4384,6 +4385,7 @@ static void test_settings_pages(void) {
             PLAYER_UI_ID_SETTINGS_NICKNAME,
             PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
             PLAYER_UI_ID_SETTINGS_COVER_ART,
+            PLAYER_UI_ID_SETTINGS_CHEATS,
             PLAYER_UI_ID_SETTINGS_DEVELOPER_LOG
         };
         memset(&config, 0, sizeof(config));
