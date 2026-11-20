@@ -14,14 +14,22 @@ host's callback, so nothing here opens a connection.
 - Repository: `https://github.com/RetroAchievements/rcheevos`
 - Pin: release tag `v12.5.0`, commit `1433173220a7eaede6a9ed7a18e94117be1821e0` (published 2026-09-14, the newest
   release at the time of import).
+- Checked 2026-11-20 against `develop` at `a1ba160cd1b710aa54d3f8d4a1943c2adb0ff96e` (2026-11-16): `v12.5.0` is still
+  the newest release, `LICENSE` is unchanged, and the 31 commits since the pin hold the fixes taken below as LOCAL
+  DELTA (#553, #554, #569, #570, #572, #577, part of #559; #568 has its own fix here). Not taken: #555, #576 and
+  `0aea57b` change disc hashing, which is not vendored; #573 fixes Encore mode's unlock times, and the bridge turns
+  Encore mode off (`src/core/nk_achievements.c`); #578 (a new "challenge" set type, which the bridge does not read)
+  and #574 (zero progress for measured achievements) add behaviour; #579 changes only the
+  unused validator and a comment; #561 and #565 are build changes for compilers and a platform not used here; the
+  rest restructure the tree or add consoles and libretro support.
 - License: MIT (`third_party/rcheevos/LICENSE`, "Copyright (c) 2018 RetroAchievements.org"), kept beside the sources unchanged. MIT is
   compatible with GPL-3.0-or-later. `src/rhash/md5.c` and `md5.h` are L. Peter Deutsch's MD5 ("Copyright (C)
   1999, 2000, 2002 Aladdin Enterprises"), under the zlib licence in their own headers, which are kept unchanged;
   rcheevos uses it to sign unlock requests. The zlib licence is compatible with GPL-3.0-or-later.
 - Import method: each file was read from a clone of the repository with `git show <commit>:<path>`. Its Git blob ID
   matches the pinned commit's tree, and the SHA-256 values below were calculated from the local bytes. `src/rc_client.c`,
-  five `src/rapi/` files, `src/rcheevos/alloc.c`, `src/rcheevos/richpresence.c` and `src/rcheevos/runtime_progress.c`
-  have since been changed (Local deltas below); their rows keep the upstream blob ID.
+  five `src/rapi/` files, `src/rcheevos/alloc.c`, `src/rcheevos/richpresence.c`, `src/rcheevos/runtime.c` and
+  `src/rcheevos/runtime_progress.c` have since been changed (Local deltas below); their rows keep the upstream blob ID.
 - Only what rc_client needs to sign in, load a game's achievement set by its hash, evaluate it and submit unlocks is
   vendored, in the upstream layout so every `#include` resolves without an edit: the public headers, `rc_client`, the
   `rapi` request builders and parsers, the `rcheevos` runtime, and `rhash`'s MD5. Not vendored: the rest of `rhash`
@@ -59,7 +67,7 @@ host's callback, so nothing here opens a connection.
 | `src/rapi/rc_api_info.c` | `src/rapi/rc_api_info.c` | imported + LOCAL DELTA | `327a6dff3fc8f775f0bf369205c11482e43f9638` | `f036a31dc0d8c0db8cea3ee78a3746a218369e7f10c3c2183751a0c72cf78bfc` (this tree's bytes) |
 | `src/rapi/rc_api_runtime.c` | `src/rapi/rc_api_runtime.c` | imported + LOCAL DELTA | `261741d55aeebf4323b126f993dbf53483529c83` | `2580e58f67b20b020be0d2d29d5cf0e93383b930fe5d2b2613b103be14f569c7` (this tree's bytes) |
 | `src/rapi/rc_api_user.c` | `src/rapi/rc_api_user.c` | imported + LOCAL DELTA | `6943c98c443d647070e637758184fc4c09bec499` | `f8816573734c4b35f8ad9c15636ed6630dd4b6fc4d2199da57aa638947ae8260` (this tree's bytes) |
-| `src/rc_client.c` | `src/rc_client.c` | imported + LOCAL DELTA | `7a7399580ebe48fd92b84d3a198f51b6675a23fd` | `093f7159a99354bf57628798cc2801051e3a15c321fed55ddfa0a15683e717f9` (this tree's bytes) |
+| `src/rc_client.c` | `src/rc_client.c` | imported + LOCAL DELTA | `7a7399580ebe48fd92b84d3a198f51b6675a23fd` | `a2ca2e4609fe691f1afe2a94631ffba40fe7517d6d42c32e9070dd6151730484` (this tree's bytes) |
 | `src/rc_client_external.h` | `src/rc_client_external.h` | imported byte-identical | `b3c0e5eba9bfa12f32cc54bf6150bf67d67b6da9` | `dbca667b2ec79cc74347d234085b7c9fb3bd931e22bc2d598fb0af9931edc3ba` |
 | `src/rc_client_external_versions.h` | `src/rc_client_external_versions.h` | imported byte-identical | `90f6f689604498d8d9ec61f6126c6c13f7f7328d` | `47c3a1975907b4d77ae7f427257f15cead2a9eef95c32b6034ebd3c048a330f1` |
 | `src/rc_client_internal.h` | `src/rc_client_internal.h` | imported byte-identical | `fad288d62aee1717d4062bb2661ef5b5c9075a5a` | `a7fa88dbad2cb390cf84a5b2697284c928ef74fd4438afa81e6e633cbd8aacd2` |
@@ -68,7 +76,7 @@ host's callback, so nothing here opens a connection.
 | `src/rc_util.c` | `src/rc_util.c` | imported byte-identical | `3efdf04da480707da81c0a5c34f6045bbbd5a350` | `8e7a44443c9062054ee97bb9c60148ea7f14116a42d525d8abe3835a0a5c9666` |
 | `src/rc_version.c` | `src/rc_version.c` | imported byte-identical | `a29d0a5f522f6b474063056cfd926a04dd49aef8` | `210091300446cf20bcbfc8f80c747c543a5a99e143887cf6aff16ab5f5a245a3` |
 | `src/rc_version.h` | `src/rc_version.h` | imported byte-identical | `a2c0544d929e060daf2410a36efab82c653ffb0e` | `99db64703fd642b32812efe3b6fefb4843a2f1da6352aed3cb0d89cefcaafe0d` |
-| `src/rcheevos/alloc.c` | `src/rcheevos/alloc.c` | imported + LOCAL DELTA | `96fb8e382511670b8bcccb3197caf9260927ce49` | `476da4dcbcc209aca2fd1b43bc9824c2d74b9dab88830447dd1aa18cbd2cbed1` (this tree's bytes) |
+| `src/rcheevos/alloc.c` | `src/rcheevos/alloc.c` | imported + LOCAL DELTA | `96fb8e382511670b8bcccb3197caf9260927ce49` | `29d142e187f1e1c20c68cdfdab5d50d085482055d76a7500e3e99a783eff2321` (this tree's bytes) |
 | `src/rcheevos/condition.c` | `src/rcheevos/condition.c` | imported byte-identical | `eb57a1cba3ea6add393b6b557775f0786b6a235d` | `bf21adfc2be390f9ba5a85c4039b73645a866e4100139368541efdd654bafe90` |
 | `src/rcheevos/condset.c` | `src/rcheevos/condset.c` | imported byte-identical | `c9f984bfffd8d6bb4d248c819689165c25b020a5` | `e619f132a9a2bd62bc9d246a8e7598682806f8446eb4b197c09fb2929f65859b` |
 | `src/rcheevos/consoleinfo.c` | `src/rcheevos/consoleinfo.c` | imported byte-identical | `2acedfdec644c855c99f763f129e2649ac745ce3` | `8e2949ee957152c1989c97472634d4a12859feaaa8c89c205775434a734d006d` |
@@ -80,7 +88,7 @@ host's callback, so nothing here opens a connection.
 | `src/rcheevos/rc_validate.c` | `src/rcheevos/rc_validate.c` | imported byte-identical | `843c2ad30cf77f4aecbc7651eb74ddaf2a19e007` | `b669159309b67eecbfd9ddd2332cdc083e025f75bb743f6e5c972f7ee5cdee0d` |
 | `src/rcheevos/rc_validate.h` | `src/rcheevos/rc_validate.h` | imported byte-identical | `cfda94075d36295b3a6cb78e4ad9f239eb507774` | `d3da5219ebf38d2c34008417b3415658997cb3b63ee26b859d4036fd3fff3191` |
 | `src/rcheevos/richpresence.c` | `src/rcheevos/richpresence.c` | imported + LOCAL DELTA | `c6a3393e2a22f29c9119e27c5725e7eafdf4dc60` | `a753aef5eacd1ace621580bf6cb6d0477e033f8bbd3bcfed950714a7472375c1` (this tree's bytes) |
-| `src/rcheevos/runtime.c` | `src/rcheevos/runtime.c` | imported byte-identical | `c1100b9af9a9c33a50ba75420b51704d36d6336d` | `5dd68234cecb9111646431bc785a07eaca3234e8794a9c25d0622fe1607a360f` |
+| `src/rcheevos/runtime.c` | `src/rcheevos/runtime.c` | imported + LOCAL DELTA | `c1100b9af9a9c33a50ba75420b51704d36d6336d` | `487dbdf1be71208c9865d36466e885a3cbda1c98200e242eb3ed74c7f1917b80` (this tree's bytes) |
 | `src/rcheevos/runtime_progress.c` | `src/rcheevos/runtime_progress.c` | imported + LOCAL DELTA | `c87721eb4fc04df5a110400a923bf7dec567681c` | `fd333fc6b6192638476e13711909b02483433a4d4dbdbc455ecc9d976872556c` (this tree's bytes) |
 | `src/rcheevos/trigger.c` | `src/rcheevos/trigger.c` | imported byte-identical | `063a14f5c92c8e924c34a6325adf5d69a5340737` | `fe38429dd6c0e18d2c27c1eb797c963d61f63130c6546a20e1f8d27ed8271ece` |
 | `src/rcheevos/value.c` | `src/rcheevos/value.c` | imported byte-identical | `9a451c63c88d74cb6e540bc286712394f31fe41f` | `126a5e14182fa551c03c758a2066feeda17c6e255a0dcb21fc6895ed5371413b` |
@@ -90,14 +98,14 @@ host's callback, so nothing here opens a connection.
 
 ## Local deltas
 
-Nine files are modified (corrected 2026-11-18: this line said six). The `src/rapi/` changes are listed after the
-`src/rc_client.c` ones, then the `src/rcheevos/` ones.
+Ten files are modified (corrected 2026-11-18: this line said six; 2026-11-20: `src/rcheevos/runtime.c` added). The
+`src/rapi/` changes are listed after the `src/rc_client.c` ones, then the `src/rcheevos/` ones.
 
 ### `src/rc_client.c`
 
 `src/rc_client.c` was modified by Nakagawa Recomp contributors on 2026-11-17 (audit 2026-11-17). Its
 upstream v12.5.0 bytes have SHA-256 `f3fcc544f082acef62ca32fdd8d05f43fed5f77e14484c344e8dca9402e0024f`; the three
-changes below give the SHA-256 in the table. Each is marked `LOCAL DELTA` in the file, and
+changes below and the 2026-11-20 changes in the next section give the SHA-256 in the table. Each is marked `LOCAL DELTA` in the file, and
 `tests/native/test_nk_achievements.c` (`achievements-selftest`) fails on the upstream bytes for each of them, with a
 transport that answers later, as `NkAchTransport` allows. The first and third are the changes upstream made after
 the pin, in commit `db8ca2e622f05b5c870c43db9a1d796036aebbb8` ("add null checks to rc_client functions", #570, in
@@ -119,6 +127,36 @@ the pin, in commit `db8ca2e622f05b5c870c43db9a1d796036aebbb8` ("add null checks 
   loaded. Upstream at the pin walked `client->game->subsets` without either, so an award whose answer arrived
   after the game was unloaded (a new load unloads it at once) read through a NULL `client->game`. The selftest
   delivers the award's answer after the next load has started.
+
+### `src/rc_client.c`: the rest of #570, and #572
+
+Modified by Nakagawa Recomp contributors on 2026-11-20 (upstream freshness, the maintainer's standing decision of
+2026-11-19), on top of the changes above. Each site is marked `LOCAL DELTA` in the file, and a later pin that
+includes both commits drops them. The rest of upstream commit `db8ca2e622f05b5c870c43db9a1d796036aebbb8` (#570),
+whose other two changes are above, applied by hand to the unsplit file (upstream's hunks are in
+`src/client/rc_client_game.c`, `rc_client_info.c` and `rc_client_do_frame.c`):
+
+- `rc_client_fetch_leaderboard_entries_callback` passes the signed-in user's display name to `strlen` only when there
+  is one. Leaderboard entries can be fetched before anyone signs in; upstream at the pin then passed NULL to
+  `strlen` (a NULL dereference). `achievements-selftest` fetches entries without signing in; on the previous bytes
+  the Windows selftest stops with an access violation.
+- `rc_client_create_achievement_list` and `rc_client_create_leaderboard_list` return NULL, with the state mutex
+  released, when their `malloc` fails, instead of writing through the NULL list.
+- `rc_client_find_game_hash` does not write through a failed `rc_buffer_alloc`. Its callers, as upstream's, still
+  use the result unchecked.
+- `rc_client_submit_leaderboard_entry_server_call` frees its callback data when the request cannot be built (it
+  leaked).
+- `rc_client_fetch_game_list_callback` counts the hash pointers once: it multiplied the count by
+  `sizeof(const char*)` twice, so the list reserved eight times the pointers' space on a 64-bit host (an
+  over-allocation, not an overflow).
+
+And upstream commit `918ba6dc4e55dc01b396bdeb51643b35a0013d28` ("Fix possible buffer overflow error in
+rc_client_get_user_agent_clause", #572, in `src/client/rc_client.c`), applied unchanged in effect:
+
+- `rc_client_get_user_agent_clause` appends ` rc_client/<version>` only when the external client's clause left room.
+  Upstream at the pin formed `buffer + result` past the buffer and passed `buffer_size - result`, which wraps, to
+  `snprintf`. The code is built only with `RC_CLIENT_SUPPORTS_EXTERNAL`, which no build here defines; the file was
+  syntax-checked with it defined.
 
 ### `src/rapi/rc_api_common.c`, `rc_api_common.h`, `rc_api_runtime.c`, `rc_api_info.c`
 
@@ -186,9 +224,42 @@ tree's. The change is marked `LOCAL DELTA` in the file.
   `achievements-selftest` loads a set whose one achievement watches 40000 distinct bytes through the bridge and
   unlocks it; it fails on the upstream bytes. Upstream fixed the same truncation after the pin by refusing more
   than `0xFFFF` memrefs (commit `6d897b44fe8e141eac90f7c2a32f1a08a8110a48`, #568, in `src/runtime/rc_alloc.c`).
-- Not changed: the reservation still does not check its `calloc` and `malloc` results. Upstream's handling
-  (commit `e3e7e86bc8ab10295dace443addfb091d1095a0e`, #559) makes every later allocation in the parse stop after
-  an error, across nine files; a later pin that includes it supersedes this delta.
+- `rc_alloc_str` (2026-11-20) clears the tree slot it filled when it fails, so no string node is left without a
+  value for the next lookup to compare against. This is part of upstream commit
+  `e3e7e86bc8ab10295dace443addfb091d1095a0e` (#559); its other parts here are in `runtime.c` below.
+- Not changed: the reservation still does not check its `calloc` and `malloc` results, and `rc_alloc` and
+  `rc_alloc_scratch` still add sizes to an offset that already holds an error code. Upstream's handling (#559) makes
+  every later allocation in the parse return NULL after an error and adds NULL checks after the allocations in nine
+  files, but it is written for upstream's allocator after commit `aed817f` (#557, "make runtime types internal"),
+  which takes the parse state, bounds every write by the buffer's size and reports a failed scratch allocation in
+  the parse's offset. At this pin a failed scratch allocation inside `rc_alloc` is not reported (its offset is a
+  local), so the NULL checks alone would let the sizing pass skip a part's contents without an error and the
+  second pass write past the measured buffer, and reporting a failed reservation without upstream's early return
+  would make `rc_alloc` form a pointer before the buffer in `rc_client`'s activation, which does not check the
+  offset between reserving and allocating. Those parts wait for a pin that includes #557 and #559.
+
+### `src/rcheevos/runtime.c`: activation frees its parse state and keeps its arrays on failure
+
+`src/rcheevos/runtime.c` was modified by Nakagawa Recomp contributors on 2026-11-20 (upstream freshness, the
+maintainer's standing decision of 2026-11-19). Its upstream v12.5.0 bytes have SHA-256
+`5dd68234cecb9111646431bc785a07eaca3234e8794a9c25d0622fe1607a360f`; the table gives this tree's. The changes are the
+`rc_runtime.c` hunks of upstream commit `e3e7e86bc8ab10295dace443addfb091d1095a0e` ("runtime: survive a failed
+allocation while activating a set", #559, in `src/runtime/rc_runtime.c`, where upstream has since moved the file)
+that do not depend on upstream's newer allocator (see `alloc.c` above for the parts not taken); they are marked
+`LOCAL DELTA` in the file, and a later pin that includes the commit drops them.
+
+- `rc_runtime_activate_achievement`, `rc_runtime_activate_lboard` and `rc_runtime_activate_richpresence` free the
+  preparse state on every early return. Upstream at the pin returned a parse error or a failed `malloc` without it,
+  leaking the preparse's scratch chunks: a 2000-group trigger whose last group does not parse leaked 63744 bytes in
+  249 allocations under LeakSanitizer before this change and nothing after (a scratch program, not a selftest: the
+  bridge activates through `rc_client`, which frees its own preparse state).
+- When the trigger or leaderboard array cannot grow, the old array and its capacity are kept. Upstream at the pin
+  raised the capacity before the `realloc` and stored its NULL result, losing every registered item and leaving a
+  capacity larger than the (absent) array.
+- When the rich presence buffer cannot be allocated, the new `rc_runtime_richpresence_t` is freed and the pointer
+  cleared, instead of being left with a NULL buffer for later calls to use.
+- Not taken: the NULL checks after `RC_ALLOC` and the error check after `rc_preparse_reserve_memrefs`, for the
+  reason given under `alloc.c`.
 
 ### `src/rcheevos/richpresence.c`: lookups built in order, unknown-macro text cut to its buffer
 
