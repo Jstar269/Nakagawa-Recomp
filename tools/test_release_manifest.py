@@ -218,8 +218,12 @@ class TestReleaseManifest(unittest.TestCase):
         root_pkg = next(
             p for p in sbom["packages"] if p["SPDXID"] == "SPDXRef-Package-nakagawa-recomp"
         )
-        self.assertEqual(root_pkg["licenseDeclared"], "GPL-3.0-or-later")
-        self.assertEqual(root_pkg["licenseConcluded"], "GPL-3.0-or-later")
+        # The package links GPL-3.0-only parts (xBRZ, the pspdecrypt ports) beside the project's
+        # GPL-3.0-or-later code, so it declares both (maintainer decision 2026-11-19).
+        self.assertEqual(root_pkg["licenseDeclared"], "GPL-3.0-or-later AND GPL-3.0-only")
+        self.assertEqual(root_pkg["licenseConcluded"], "GPL-3.0-or-later AND GPL-3.0-only")
+        # The project-level declaration in the release manifest stays GPL-3.0-or-later.
+        self.assertEqual(data["license"], "GPL-3.0-or-later")
 
         spdx_ids = {p["SPDXID"] for p in sbom["packages"]}
         self.assertEqual(len(spdx_ids), len(sbom["packages"]), "SPDX 2.3 package IDs must be unique")
@@ -252,8 +256,8 @@ class TestReleaseManifest(unittest.TestCase):
         self.assertIn("spdx:Package", types)
 
         root_pkg = next(e for e in graph if e.get("spdx:name") == "nakagawa-recomp")
-        self.assertIn("spdx:concludedLicense", root_pkg)
-        self.assertIn("GPL-3.0-or-later", root_pkg["spdx:concludedLicense"])
+        self.assertEqual(root_pkg["spdx:concludedLicense"], "GPL-3.0-or-later AND GPL-3.0-only")
+        self.assertEqual(root_pkg["spdx:declaredLicense"], "GPL-3.0-or-later AND GPL-3.0-only")
 
         ids = [e.get("@id") for e in graph]
         self.assertEqual(len(ids), len(set(ids)), "SPDX 3 graph element ids must be unique")
@@ -269,7 +273,7 @@ class TestReleaseManifest(unittest.TestCase):
         app = cd["components"][0]
         self.assertEqual(app["type"], "application")
         self.assertEqual(app["name"], "nakagawa-recomp")
-        self.assertEqual(app["licenses"][0]["license"]["id"], "GPL-3.0-or-later")
+        self.assertEqual(app["licenses"], [{"expression": "GPL-3.0-or-later AND GPL-3.0-only"}])
 
         # CycloneDX uniqueness is carried by bom-ref/purl, not the display name
         # (a package can legitimately appear at multiple install paths).

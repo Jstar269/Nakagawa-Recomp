@@ -22,6 +22,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 SPDX_VERSION = "SPDX-2.3"
 DATA_LICENSE = "CC0-1.0"
+# The licence the package declares for itself (maintainer decision 2026-11-19). The project's own
+# code is GPL-3.0-or-later (LICENSE, and the release manifest's project-level "license"), but the
+# packaged player also links GPL-3.0-only parts: xBRZ (third_party/xbrz) and the files ported from
+# pspdecrypt (src/core/PROVENANCE.md), so the package as a whole is GPL version 3. Each component
+# and DLL keeps its own licence below.
+PACKAGE_LICENSE = "GPL-3.0-or-later AND GPL-3.0-only"
 DOCUMENT_NAME = "nakagawa-recomp-sbom"
 DOCUMENT_NAMESPACE_BASE = "https://spdx.org/spdxdocs/nakagawa-recomp"
 
@@ -886,8 +892,8 @@ def generate_spdx23(manifest_data: dict, py_packages: list[dict],
         "versionInfo": manifest_data.get("version", "0.1.0"),
         "downloadLocation": "https://github.com/Jstar269/nakagawa-recomp",
         "filesAnalyzed": False,
-        "licenseConcluded": manifest_data.get("license", "GPL-3.0-or-later"),
-        "licenseDeclared": manifest_data.get("license", "GPL-3.0-or-later"),
+        "licenseConcluded": PACKAGE_LICENSE,
+        "licenseDeclared": PACKAGE_LICENSE,
         "copyrightText": "Copyright (C) 2025-2026 the psp-recomp authors; Copyright (C) 2026 the Nakagawa Recomp authors",
         "summary": manifest_data.get("description", ""),
     }]
@@ -1022,7 +1028,7 @@ def generate_spdx23(manifest_data: dict, py_packages: list[dict],
             "primaryPackagePurpose": "APPLICATION",
             "checksums": [{"algorithm": "SHA256", "checksumValue": executable["sha256"]}],
             "licenseConcluded": "NOASSERTION",
-            "licenseDeclared": manifest_data.get("license", "GPL-3.0-or-later"),
+            "licenseDeclared": PACKAGE_LICENSE,
             "copyrightText": "NOASSERTION",
             "comment": "Packaged executable built from the root package; SHA-256 from bin/runtime-manifest.json.",
         })
@@ -1069,7 +1075,9 @@ def generate_spdx301(manifest_data: dict, py_packages: list[dict],
             "@type": "spdx:Package",
             "spdx:name": manifest_data.get("name", "nakagawa-recomp"),
             "spdx:packageVersion": version,
-            "spdx:concludedLicense": f"http://spdx.org/licenses/{manifest_data.get('license', 'GPL-3.0-or-later')}",
+            # A licence expression, not one licence-list entry, so no licence URL.
+            "spdx:concludedLicense": PACKAGE_LICENSE,
+            "spdx:declaredLicense": PACKAGE_LICENSE,
         },
     ]
     for dll in shipped_dlls:
@@ -1129,7 +1137,8 @@ def generate_cyclonedx(manifest_data: dict, py_packages: list[dict],
         "type": "application",
         "name": manifest_data.get("name", "nakagawa-recomp"),
         "version": manifest_data.get("version", "0.1.0"),
-        "licenses": [{"license": {"id": manifest_data.get("license", "GPL-3.0-or-later")}}],
+        # CycloneDX 1.5 carries a licence expression as the single entry {"expression": ...}.
+        "licenses": [{"expression": PACKAGE_LICENSE}],
         "description": manifest_data.get("description", ""),
     }]
     for family in manifest_data.get("provenance_families", []):
