@@ -185,9 +185,11 @@ typedef struct {
 #define SCR_ONLINE_PLAY_SERVERS_LEAD \
     "Each server is run by its own community, not by Nakagawa. Choosing one opens the Online " \
     "play card for it: nothing connects until you choose TURN ON there."
-#define SCR_ONLINE_PLAY_OWN_SENTENCE \
-    "A server you run or trust: host, host:lobby_port or host:lobby_port,data_port. It is kept " \
-    "only on this PC."
+#define SCR_ONLINE_PLAY_OWN_SENTENCE "A server you run or trust. It is kept only on this PC."
+/* What to type for one's own server, on its row until one is in use. */
+#define SCR_ONLINE_PLAY_OWN_FORMAT "host[:lobby_port[,data_port]]"
+#define SCR_ONLINE_PLAY_LIST_OFF_LINE \
+    "With Online play on, the servers on PPSSPP's list show here as well."
 #define SCR_ONLINE_PLAY_RELAY_ONLY_CAPTION \
     "Listed: the servers that relay game data the way this version does (PPSSPP's data_mode " \
     "AemuPostoffice; PPSSPP-derived, not PSP-measured)."

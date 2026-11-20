@@ -1412,20 +1412,21 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
             if (!p || !p->host) continue;
             if (strcmp(srv, p->host) == 0) label = p->label;
             player->settings_online_play_servers[rows++] =
-                (PlayerUiOnlineServer){p->label, p->host, "Ships with Nakagawa."};
+                (PlayerUiOnlineServer){p->label, p->host, "", false};
         }
         for (size_t i = 0u; i < app->online_play_list.count &&
                             rows < PLAYER_UI_ONLINE_PLAY_SERVERS_MAX; ++i) {
             const NkAdhocListEntry *e = &app->online_play_list.entries[i];
             if (!label && strcmp(srv, e->host) == 0) label = e->name;
-            player->settings_online_play_servers[rows++] = (PlayerUiOnlineServer){
-                e->name, e->host, e->location[0] ? e->location : "From PPSSPP's list."};
+            player->settings_online_play_servers[rows++] =
+                (PlayerUiOnlineServer){e->name, e->host, e->location, true};
         }
         model.online_play_servers = player->settings_online_play_servers;
         model.online_play_server_count = rows;
         model.online_play_server_label = label ? label : "Your own server";
         model.online_play_list_status = app->online_play_list_status;
         model.online_play_list_busy = app->online_play_list_busy;
+        model.online_play_list_live = app->online_play_list_live;
         model.online_play_card_server = app->online_play_card_server;
         snprintf(player->settings_online_play_row, sizeof(player->settings_online_play_row),
                  model.online_play ? "On: %s" : "Off", srv);

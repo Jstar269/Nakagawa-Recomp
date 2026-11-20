@@ -572,12 +572,14 @@ typedef struct {
     PlayerUiInputGuide input_guide;
 } PlayerUiDiscModel;
 
-/* One server the Online play picker offers (#1139): its name, its host[:ports] and a line
-   (where it is, or that it ships with Nakagawa). */
+/* One server the Online play picker offers (#1139): its name, its host[:ports], where it is
+   (a list entry's location, or empty), and whether it is on PPSSPP's list rather than one
+   the player ships. */
 typedef struct PlayerUiOnlineServer {
     const char *name;
     const char *host;
     const char *line;
+    bool listed;
 } PlayerUiOnlineServer;
 
 /* The Settings pages: the main page (VIEW_SETTINGS), online and developer
@@ -910,6 +912,7 @@ typedef struct {
     size_t online_play_server_count;
     const char *online_play_list_status;
     bool online_play_list_busy;           /* a download is running: Refresh waits */
+    bool online_play_list_live;           /* the list was downloaded, not the shipped copy */
     /* Third-party notices: "name version · licence" per downloaded tool */
     const char *tools[PLAYER_UI_SETTINGS_TOOLS];
     size_t tool_count;

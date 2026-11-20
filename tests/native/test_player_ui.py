@@ -3239,7 +3239,7 @@ class NativePlayerUiTests(unittest.TestCase):
                       "online_play_server": "socom.cc"})
         self.assertNotIn("adhoc_list_request", str(unconsented["stdout"]))
 
-        # With Online play off the picker shows the shipped list and asks for nothing.
+        # With Online play off the picker shows no list and asks for nothing.
         off = self.next_ui_run(
             "online-play-servers", ("WAIT_MS=300",),
             settings={"nickname": "Player", "nickname_asked": True})
@@ -3288,6 +3288,48 @@ class NativePlayerUiTests(unittest.TestCase):
             if not states or states[-1] != state:
                 states.append(state)
         return states
+
+    def test_next_ui_online_play_list_entry_needs_its_card(self) -> None:
+        """#1139, maintainer decision of 2026-11-20: PPSSPP's downloaded server list may name
+        any host, and no entry connects by itself. Here the list (the UI-test transport serving
+        a local file; nothing goes online) names a host no shipped list has. Picking it opens the
+        Online play card for it; NOT NOW leaves the server and its consent as they were, and
+        only TURN ON on that card makes it the server."""
+        on = {"nickname": "Player", "nickname_asked": True, "online_play": True,
+              "online_play_server": "socom.cc", "online_play_consent": "socom.cc"}
+        listed = {"servers": [{"name": "Any relay", "host": "relay-any.example.org",
+                               "location": "Testland", "data_mode": "AemuPostoffice"}]}
+        # Five shipped rows, the own server's, then the list's only row.
+        to_row = ("WAIT_MS=900",) + ("KEY_DOWN", "WAIT_MS=60") * 6 + ("KEY_RETURN", "WAIT_MS=200")
+        with tempfile.TemporaryDirectory(prefix=".adhoc-list-", dir=ROOT) as tmp:
+            fixture = Path(tmp) / "adhoc-servers.json"
+            fixture.write_text(json.dumps(listed), encoding="utf-8")
+            env = {"NK_UI_TEST_ADHOC_LIST": str(fixture)}
+            not_now = self.next_ui_run(
+                "online-play-servers", to_row + ("KEY_RETURN", "WAIT_MS=200"),
+                settings=on, env_extra=env)
+            turn_on = self.next_ui_run(
+                "online-play-servers", to_row + ("KEY_LEFT", "KEY_RETURN", "WAIT_MS=200"),
+                settings=on, env_extra=env)
+        for run in (not_now, turn_on):
+            self.assertIn("online_play_card", [view for view, _ in self.screens(run)],
+                          run["stdout"])
+        # NOT NOW saves nothing (None: the player wrote no settings file), or keeps both.
+        settings = not_now["settings"] or {}
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("online_play_server", "socom.cc"), "socom.cc",
+                         "NOT NOW on the list entry's card keeps the server")
+        self.assertEqual(settings.get("online_play_consent", "socom.cc"), "socom.cc",
+                         "NOT NOW on the list entry's card gives it no consent")
+        frames = not_now["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[-1]["online_play_server"], "socom.cc", not_now["stdout"])
+        settings = turn_on["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("online_play_server"), "relay-any.example.org",
+                         turn_on["stdout"])
+        self.assertEqual(settings.get("online_play_consent"), "relay-any.example.org")
+        self.assertEqual(settings.get("network_mode", "offline"), "offline")
 
     def test_next_ui_nickname_keyboard_types_with_a_controller(self) -> None:
         """#2197: the first-launch prompt's on-screen keyboard types a nickname with a

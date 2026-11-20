@@ -33,6 +33,9 @@
     NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000550u + (uint32_t)(tab))
 /* The box around the pinned rows, the tabs and the list, beside the detail panel. */
 #define ENHANCED_TEST_LEFT_ID NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000542u)
+/* The picker's scrolling list and its scroll bar (scr_settings.c SET_ID_ONLINE_PLAY_*). */
+#define ONLINE_PLAY_TEST_LIST NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E1u)
+#define ONLINE_PLAY_TEST_TRACK NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E2u)
 
 static int failures;
 static const uint8_t k_test_glyph_pixel = 0xFFu;
@@ -399,6 +402,8 @@ static int g_flow_text_size_pct = 100;
 static const char *g_online_play_host = NULL;
 /* The notice New console ID leaves on the Online play page (#1139), or NULL for none. */
 static const char *g_online_play_note = NULL;
+/* The server picker with Online play off (#1139): no list, and its line saying so. */
+static bool g_online_play_picker_off = false;
 
 /* The check rows player_state.c gives a disc, in its words (#1302). */
 static const PlayerUiCheckRow k_disc_rows_ready[] = {
@@ -649,7 +654,7 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.cheats = false;
     settings.cover_art_cache_size = "1.4 MB";
     settings.developer_mode = true;
-    settings.online_play = which == FLOW_SETTINGS_ONLINE_PLAY_SERVERS;
+    settings.online_play = which == FLOW_SETTINGS_ONLINE_PLAY_SERVERS && !g_online_play_picker_off;
     settings.online_play_row_value = "Off";
     settings.online_play_server = "socom.cc";
     settings.online_play_server_label = "Socom Adhoc Server (France)";
@@ -665,20 +670,23 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     }
     if (g_online_play_note != NULL) settings.online_play_console_note = g_online_play_note;
     {
-        /* The picker: shipped servers, the longest shipped name and host among them, one from
-           a (synthetic) list, and a list name too long for one button at a larger text size. */
+        /* The picker: the five shipped servers, the longest shipped name and host among them,
+           then two from a (synthetic) downloaded list, one with a name too long for one line
+           beside its host at a larger text size. */
         static const PlayerUiOnlineServer servers[] = {
-            {"Socom Adhoc Server (France)", "socom.cc", "Ships with Nakagawa."},
-            {"ArenaAnywhere (US)", "relay-usa.arenaanywhere.site", "Ships with Nakagawa."},
-            {"Example relay", "relay.example.invalid", "Testland"},
-            {"ArenaAnywhere (South Africa)", "relay-sa.arenaanywhere.site",
-             "Ships with Nakagawa."},
+            {"Socom Adhoc Server (France)", "socom.cc", "", false},
+            {"ArenaAnywhere (Europe)", "relay.arenaanywhere.site", "", false},
+            {"ArenaAnywhere (US)", "relay-usa.arenaanywhere.site", "", false},
+            {"ArenaAnywhere (South Africa)", "relay-sa.arenaanywhere.site", "", false},
+            {"ArenaAnywhere (Singapore)", "relay-asia.arenaanywhere.site", "", false},
+            {"Example relay", "relay.example.invalid", "Testland", true},
             {"An example relay whose name is far too long for one button",
-             "relay-long.example.invalid", "From PPSSPP's list."}
+             "relay-long.example.invalid", "", true}
         };
         settings.online_play_servers = servers;
         settings.online_play_server_count = sizeof(servers) / sizeof(servers[0]);
         settings.online_play_list_status = "Shown: PPSSPP's list, downloaded now.";
+        settings.online_play_list_live = true;
     }
     settings.share_system_libraries = true;
     settings.build_speed = "Background";
@@ -3927,6 +3935,8 @@ static void test_settings_pages(void) {
          PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER, "a picker row picks its server"},
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
          PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER, "Your own server opens the editor"},
+        {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT,
+         PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT, "the picker's Port offset opens its editor"},
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_ONLINE_PLAY_REFRESH,
          PLAYER_UI_SETTINGS_REFRESH_ONLINE_PLAY_SERVERS, "Refresh list downloads it again"},
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
@@ -4436,12 +4446,12 @@ static void test_settings_pages(void) {
     {
         /* The picker scrolls once it lists more than a few servers: each of these shows
            somewhere as it is scrolled through. */
-        static const char *const picker[] = {"EXAMPLE RELAY", "relay.example.invalid",
+        static const char *const picker[] = {"Example relay", "relay.example.invalid",
                                              "PPSSPP-derived, not PSP-measured",
                                              "REFRESH LIST"};
         CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540, NULL, 0u) &&
                   flow_case_text_whole(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540,
-                                       FLOW_ID_CARD, picker, 4u),
+                                       ONLINE_PLAY_TEST_LIST, picker, 4u),
               "the picker lists the servers, says the relay-only reading is PPSSPP-derived, "
               "and offers Refresh with Online play on");
     }
@@ -6963,7 +6973,9 @@ static bool flow_case_text_whole(FlowCase which, int width, int height, NkUiId s
         nk_ui_scroll_to(ui, scroller, offset);
         g_flow_width = scale.logical_w;
         g_flow_height = scale.logical_h;
-        for (int frame = 0; frame < 2; ++frame) {
+        /* Four frames: the scroll, and a list that settles on an item boundary after it (the
+           Online play picker's) with the frame that draws it there. */
+        for (int frame = 0; frame < 4; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)draw_flow_case(ui, which);
             draw = end_frame(ui);
@@ -7072,8 +7084,7 @@ static bool online_play_card_reads(int width, int height, int text_pct, bool mus
 }
 
 /* #1139: focus moving down the picker at 960 x 540 with Larger (150%) text to a row below the
-   card's edge brings the whole row into view, its host and where it comes from under its button
-   as well as the button itself. */
+   list's edge brings the whole row into view: its name, its host and where it is. */
 static bool online_play_picker_row_reveals(void) {
     NkUi *ui = NULL;
     const NkUiDrawList *draw;
@@ -7083,12 +7094,13 @@ static bool online_play_picker_row_reveals(void) {
     draw = flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540, &ui);
     ok = draw != NULL && ui != NULL && !draw_shows(draw, "relay-long.example.invalid");
     if (ok) {
-        nk_ui_focus(ui, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 4u);
-        for (int i = 0; i < 2; ++i) {
+        nk_ui_focus(ui, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 6u);
+        for (int i = 0; i < 3; ++i) {
             draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540);
         }
-        ok = draw_shows(draw, "CHOOSE") && draw_shows(draw, "relay-long.example.invalid") &&
-             draw_shows(draw, "From PPSSPP's list.");
+        ok = draw_shows(draw, "An example relay") &&
+             draw_shows(draw, "relay-long.example.invalid") &&
+             draw_shows(draw, "FROM THE DOWNLOADED LIST");
     }
     nk_ui_destroy(ui);
     g_flow_text_size_pct = saved;
@@ -7134,11 +7146,151 @@ static bool online_play_console_button_stays_in_view(void) {
     return ok;
 }
 
+/* Whether `rect` lies wholly inside `view`, to the half pixel. */
+static bool rect_inside(NkUiRect rect, NkUiRect view) {
+    return rect.y >= view.y - 0.5f && rect.y + rect.h <= view.y + view.h + 0.5f &&
+           rect.x >= view.x - 0.5f && rect.x + rect.w <= view.x + view.w + 0.5f;
+}
+
+/* Whether a run of text that shows is cut by a scroll container's edge: it shows, but only in
+   part, above or below. */
+static bool draw_cuts_a_line(const NkUiDrawList *draw) {
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        const NkUiTextRun *run = cmd->kind == NK_UI_DRAW_TEXT ? (const NkUiTextRun *)cmd->custom
+                                                              : NULL;
+        if (run == NULL || !command_shows(cmd)) continue;
+        if (cmd->clip[1] > cmd->bounds[1] + 1 || cmd->clip[3] < cmd->bounds[3] - 1) {
+            report_misfit("a line cut by the list's edge", cmd);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* #1139, the picker's look (owner review of 2026-11-20): one row per server across the list,
+   and the list scrolls inside the card. At 960 x 540 and 1280 x 720 with 100% text every
+   shipped server and the own server's row show whole without scrolling; at every text size,
+   Online play on and off, every row is reachable and focus brings its whole hit box inside
+   the list (or, where the list cannot hold two rows, the card); scrolled from top to foot no
+   line is ever cut at the list's edge; and at 150% the list scrolls with its bar showing. */
+static void test_online_play_picker_rows(void) {
+    static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
+    static const int text_sizes[] = {100, 125, 150};
+    const int saved = g_flow_text_size_pct;
+    for (int off = 0; off < 2; ++off) {
+        g_online_play_picker_off = off != 0;
+        for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+            g_flow_text_size_pct = text_sizes[t];
+            for (size_t z = 0u; z < sizeof(sizes) / sizeof(sizes[0]); ++z) {
+                const int w = sizes[z].w;
+                const int h = sizes[z].h;
+                NkUi *ui = NULL;
+                const NkUiDrawList *draw =
+                    flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h, &ui);
+                NkUiId controls[16];
+                size_t control_count = 0u;
+                NkUiScrollState state;
+                NkUiRect view;
+                NkUiRect rect;
+                bool whole = draw != NULL && ui != NULL;
+                bool reachable = whole;
+                bool uncut = whole;
+                char message[200];
+                for (NkUiId i = 0u; i < (off ? 5u : 7u); ++i) {
+                    controls[control_count++] = PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + i;
+                    if (i == 4u) {
+                        controls[control_count++] = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER;
+                        controls[control_count++] = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT;
+                    }
+                }
+                if (text_sizes[t] == 100 && whole) {
+                    /* Unscrolled: the shipped rows, the own row and its Port offset whole. */
+                    whole = nk_ui_element_rect(ui, ONLINE_PLAY_TEST_LIST, &view);
+                    for (size_t c = 0u; whole && c < 7u; ++c) {
+                        whole = nk_ui_element_rect(ui, controls[c], &rect) &&
+                                rect_inside(rect, view);
+                        if (!whole) {
+                            fprintf(stderr, "  %08X at y %.1f to %.1f, the list shows %.1f to "
+                                    "%.1f\n", (unsigned)controls[c], (double)rect.y,
+                                    (double)(rect.y + rect.h), (double)view.y,
+                                    (double)(view.y + view.h));
+                        }
+                    }
+                    whole = whole && draw_shows(draw, "relay-asia.arenaanywhere.site") &&
+                            draw_shows(draw, "Your own server") &&
+                            draw_shows(draw, "host[:lobby_port[,data_port]]");
+                    (void)snprintf(message, sizeof(message),
+                                   "at %d x %d with 100%% text and Online play %s the picker "
+                                   "shows every shipped server and the own server's row whole, "
+                                   "unscrolled", w, h, off ? "off" : "on");
+                    CHECK(whole, message);
+                }
+                if (text_sizes[t] == 150 && ui != NULL) {
+                    (void)snprintf(message, sizeof(message),
+                                   "at %d x %d with 150%% text and Online play %s the picker's "
+                                   "list scrolls, its bar showing", w, h, off ? "off" : "on");
+                    CHECK(nk_ui_scroll_state(ui, ONLINE_PLAY_TEST_LIST, &state) &&
+                              state.max_offset > 0.5f &&
+                              nk_ui_element_rect(ui, nk_ui_child_id(ONLINE_PLAY_TEST_TRACK, 2u),
+                                                 &rect) && rect.h > 0.0f,
+                          message);
+                }
+                for (size_t c = 0u; reachable && c < control_count; ++c) {
+                    NkUiId scroller = ONLINE_PLAY_TEST_LIST;
+                    nk_ui_focus(ui, controls[c]);
+                    for (int f = 0; f < 3; ++f) {
+                        draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                    }
+                    if (!nk_ui_scroll_state(ui, scroller, &state) || state.max_offset <= 0.5f) {
+                        scroller = FLOW_ID_CARD;
+                    }
+                    reachable = nk_ui_focused(ui) == controls[c] &&
+                                nk_ui_element_rect(ui, scroller, &view) &&
+                                nk_ui_element_rect(ui, controls[c], &rect) &&
+                                rect_inside(rect, view) && !draw_cuts_a_line(draw);
+                    if (!reachable) {
+                        fprintf(stderr, "  focus on %08X: at y %.1f to %.1f, %08X shows %.1f to "
+                                "%.1f\n", (unsigned)controls[c], (double)rect.y,
+                                (double)(rect.y + rect.h), (unsigned)scroller, (double)view.y,
+                                (double)(view.y + view.h));
+                    }
+                }
+                (void)snprintf(message, sizeof(message),
+                               "at %d x %d with %d%% text and Online play %s focus reaches every "
+                               "picker row, the own server's and Port offset, each wholly inside "
+                               "the list", w, h, text_sizes[t], off ? "off" : "on");
+                CHECK(reachable, message);
+                /* From the top to the foot, a third of a view at a time: no line cut. */
+                if (uncut && nk_ui_scroll_state(ui, ONLINE_PLAY_TEST_LIST, &state) &&
+                    state.max_offset > 0.5f) {
+                    for (float at = 0.0f; uncut && at <= state.max_offset + 0.5f;
+                         at += state.viewport / 3.0f) {
+                        nk_ui_focus(ui, PLAYER_UI_ID_SETTINGS_BACK);
+                        nk_ui_scroll_to(ui, ONLINE_PLAY_TEST_LIST, at);
+                        for (int f = 0; f < 3; ++f) {
+                            draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                        }
+                        uncut = !draw_cuts_a_line(draw);
+                    }
+                }
+                (void)snprintf(message, sizeof(message),
+                               "at %d x %d with %d%% text and Online play %s no line of the "
+                               "picker is cut at the list's edge, scrolled top to foot", w, h,
+                               text_sizes[t], off ? "off" : "on");
+                CHECK(uncut, message);
+                if (ui != NULL) nk_ui_destroy(ui);
+            }
+        }
+    }
+    g_online_play_picker_off = false;
+    g_flow_text_size_pct = saved;
+}
+
 /* #1139: in the Online play server picker and on the consent card nothing is cut, at the
    960 x 540 minimum and at 1280 x 720, at every text size: no run ends in an ellipsis, scrolled
    through to the end (flow_case_text_whole), and the picker shows every server's whole name and
-   whole host, the longest shipped ones among them, with a name too long for one button whole
-   under a CHOOSE button. */
+   whole host, the longest shipped ones among them. */
 static void test_online_play_text_is_never_cut(void) {
     static char dump[CASE_DUMP_CAP];
     static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
@@ -7155,7 +7307,8 @@ static void test_online_play_text_is_never_cut(void) {
                                "the Online play %s cuts no text at %d x %d, %d%% text",
                                p == 0u ? "server picker" : "card", sizes[s].w, sizes[s].h,
                                text_sizes[t]);
-                CHECK(flow_case_text_whole(pages[p], sizes[s].w, sizes[s].h, FLOW_ID_CARD, NULL,
+                CHECK(flow_case_text_whole(pages[p], sizes[s].w, sizes[s].h,
+                                           p == 0u ? ONLINE_PLAY_TEST_LIST : FLOW_ID_CARD, NULL,
                                            0u),
                       message);
             }
@@ -7164,19 +7317,20 @@ static void test_online_play_text_is_never_cut(void) {
     {
         /* Scrolled through, each whole name and whole host shows (no run ends in an ellipsis:
            flow_case_text_whole fails on one). */
-        static const char *const names[] = {"SOCOM ADHOC SERVER (FRANCE)", "socom.cc",
-                                            "ARENAANYWHERE (SOUTH AFRICA)",
+        static const char *const names[] = {"Socom Adhoc Server (France)", "socom.cc",
+                                            "Africa)",
                                             "relay-sa.arenaanywhere.site",
-                                            "relay-usa.arenaanywhere.site",
+                                            "relay-asia.arenaanywhere.site",
                                             "relay-long.example.invalid",
-                                            "CHOOSE", "YOUR OWN SERVER: TYPE IT"};
+                                            "Your own server", "PORT OFFSET: 10000"};
         g_flow_text_size_pct = 150;
         CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540, dump, sizeof(dump)) &&
                   strstr(dump, "\xE2\x80\xA6") == NULL &&
-                  flow_case_text_whole(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540, FLOW_ID_CARD,
-                                       names, sizeof(names) / sizeof(names[0])),
+                  flow_case_text_whole(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540,
+                                       ONLINE_PLAY_TEST_LIST, names,
+                                       sizeof(names) / sizeof(names[0])),
               "at 960 x 540 with 150% text no label in the picker is elided: every server's "
-              "whole name and whole host, a too-long name under CHOOSE, and the own-server row");
+              "whole name and whole host, and the own server's row with its Port offset");
         g_flow_text_size_pct = saved;
     }
     {
@@ -7237,7 +7391,7 @@ static void test_online_play_text_is_never_cut(void) {
           "the notice NEW CONSOLE ID leaves does not push the focused button past the card's "
           "edge at 960 x 540 with 150% text");
     CHECK(online_play_picker_row_reveals(),
-          "focus moving to a picker row below the card's edge shows the row whole: its button, "
+          "focus moving to a picker row below the list's edge shows the row whole: its name, "
           "its host and where it comes from");
     CHECK(online_play_card_reads(960, 540, 150, true),
           "Page Up (keyboard) and the left trigger (pad) scroll the Online play card at 960 x "
@@ -10822,6 +10976,7 @@ int main(int argc, char **argv) {
     test_prompt_bar_stays_whole();
     test_game_page_text_is_never_cut();
     test_online_play_text_is_never_cut();
+    test_online_play_picker_rows();
     test_psp_fonts_page();
     test_wizard_actions();
     test_flow_dumps_fail_closed();

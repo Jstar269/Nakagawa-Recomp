@@ -1919,47 +1919,217 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     nk_ui_end_container(ui);
 }
 
-/* One server in the Online play picker (#1139): a button with the server's name, its host on a
-   line of its own under it, and where the row comes from under that. The host is what a player
-   reads before agreeing to connect, so nothing in the row is cut: every line wraps whole at any
-   window and text size (a word wider than the row breaks inside it), and a name too wide for
-   one button becomes the first line under a CHOOSE button instead. `cell` is the button width
-   the picker's rows share. Returns true when the button is activated. */
-static bool settings_online_play_server_row(NkUi *ui, NkUiId id, NkUiId text_id,
-                                            const char *name, const char *host,
-                                            const char *line, bool current, float width,
-                                            float cell) {
-    const NkUiTheme *theme = nk_ui_theme(ui);
-    NkUiLayout row = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(), NK_UI_SPACE_1);
-    NkUiTextStyle host_style = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
-    NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->muted);
-    const bool named = name[0] != '\0' && nk_ui_button_width(ui, name, 0u) <= cell;
-    bool pressed = false;
-    row.padding_bottom = NK_UI_SPACE_3;
-    if (!nk_ui_begin_container(ui, text_id, &row, NULL)) return false;
-    {
-        NkUiLayout box = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(cell), sizing_fit(), 0.0f);
-        if (nk_ui_begin_container(ui, text_id + 1u, &box, NULL)) {
-            pressed = nk_ui_button(ui, id, named ? name : "Choose",
-                                   NK_UI_BUTTON_GROW | (current ? NK_UI_BUTTON_PRIMARY : 0u));
-            nk_ui_end_container(ui);
-        }
-    }
-    if (!named && name[0] != '\0') {
-        nk_ui_text(ui, text_id + 2u, nk_ui_text_break(ui, name, &host_style, width), &host_style);
-    }
-    nk_ui_text(ui, text_id + 3u, nk_ui_text_break(ui, host, &host_style, width), &host_style);
-    if (line[0] != '\0') {
-        nk_ui_text(ui, text_id + 4u, nk_ui_text_break(ui, line, &text, width), &text);
-    }
-    nk_ui_end_container(ui);
-    return pressed;
+/* The Online play server picker (#1139): one row per server, the whole row its control: the
+   server's name and host on the left, where it comes from and Current on the one in use as
+   chips at the right edge. The list scrolls inside the card, beside a thin bar that shows where
+   it is, so the heading, the intro and Back stay put. */
+#define ONLINE_PLAY_ROW_HEIGHT 40.0f /* a row's least height at the design text size */
+#define ONLINE_PLAY_CHIP_GAP 6.0f
+#define ONLINE_PLAY_CHECK "\xE2\x9C\x93"
+#define SET_ID_ONLINE_PLAY_LIST_ROW (SET_ID_TEXT + 0x7E0u)
+#define SET_ID_ONLINE_PLAY_LIST (SET_ID_TEXT + 0x7E1u)
+#define SET_ID_ONLINE_PLAY_TRACK (SET_ID_TEXT + 0x7E2u)
+#define SET_ID_ONLINE_PLAY_BOX (SET_ID_TEXT + 0x7E3u)
+#define SET_ID_ONLINE_PLAY_HEADING (SET_ID_TEXT + 0x7E4u) /* + 0 to 2: the section headings */
+#define SET_ID_ONLINE_PLAY_OWN_LINE (SET_ID_TEXT + 0x7E8u)
+#define SET_ID_ONLINE_PLAY_OFF_LINE (SET_ID_TEXT + 0x7E9u)
+#define SET_ID_ONLINE_PLAY_OWN_SENTENCE (SET_ID_TEXT + 0x7F0u)
+
+/* How a run of rows lays out: the host beside the name where every row of the run has room
+   for both and its chips, else under the name; and where the chips would leave the words less
+   than half the row, the chips under the words. */
+typedef struct {
+    bool beside;
+    bool chips_under;
+} OnlinePlayRowLayout;
+
+static float settings_online_play_row_height(const NkUi *ui) {
+    NkUiTextStyle name = nk_ui_type(NK_UI_TYPE_BODY, 0u);
+    return nk_ui_line_box(ui, ONLINE_PLAY_ROW_HEIGHT, &name);
 }
 
-/* The picker row focus last moved to. Focus brings only the row's button into view, which
-   leaves the host and the line under it past the card's edge as focus moves down; for the
-   frames just after a move the whole row is brought into view (its top first where it is
-   taller than the card), and never later, so the wheel and a drag still scroll freely. */
+/* How wide a row's chips are: its origin's (none for the own server) and Current's. */
+static float settings_online_play_chips_width(NkUi *ui, const char *chip, bool current) {
+    NkUiTextStyle label = nk_ui_type(NK_UI_TYPE_LABEL_S, 0u);
+    float width = 0.0f;
+    if (chip != NULL && chip[0] != '\0') {
+        width += ceilf(nk_ui_text_width(ui, nk_ui_caps(ui, chip), &label)) + 2.0f * 10.0f;
+    }
+    if (current) {
+        if (width > 0.0f) width += ONLINE_PLAY_CHIP_GAP;
+        width += ceilf(nk_ui_text_width(ui, ONLINE_PLAY_CHECK, &label)) + 6.0f +
+                 ceilf(nk_ui_text_width(ui, nk_ui_caps(ui, "Current"), &label)) + 2.0f * 10.0f;
+    }
+    return width;
+}
+
+/* A row's mono line: the host, and for a list entry where it is. */
+static const char *settings_online_play_host_line(NkUi *ui, const PlayerUiOnlineServer *row) {
+    char line[NK_ADHOC_SERVER_MAX_LEN + 160u];
+    const char *host = safe_text(row->host, "");
+    const char *where = safe_text(row->line, "");
+    if (!row->listed || where[0] == '\0') return host;
+    (void)snprintf(line, sizeof(line), "%s \xC2\xB7 %s", host, where);
+    return nk_ui_frame_text(ui, line);
+}
+
+/* Whether one row has room for its name, its host and its chips side by side. */
+static bool settings_online_play_fits_beside(NkUi *ui, const char *name, const char *host,
+                                             const char *chip, bool current, float width) {
+    NkUiTextStyle name_style = nk_ui_type(NK_UI_TYPE_BODY, 0u);
+    NkUiTextStyle host_style = nk_ui_type(NK_UI_TYPE_DATA, 0u);
+    float need = 2.0f * NK_UI_SPACE_3 + ceilf(nk_ui_text_width(ui, name, &name_style)) +
+                 NK_UI_SPACE_3 + ceilf(nk_ui_text_width(ui, host, &host_style)) +
+                 NK_UI_SPACE_3 + settings_online_play_chips_width(ui, chip, current);
+    return need <= width;
+}
+
+static OnlinePlayRowLayout settings_online_play_layout(NkUi *ui, bool beside, const char *chip,
+                                                       float width) {
+    OnlinePlayRowLayout layout = {beside, false};
+    float words = width - 2.0f * NK_UI_SPACE_3 - NK_UI_SPACE_3 -
+                  settings_online_play_chips_width(ui, chip, true);
+    layout.chips_under = !beside && words < 0.5f * (width - 2.0f * NK_UI_SPACE_3);
+    return layout;
+}
+
+/* Whether the list showed `id` only in part in the last layout: it is then drawn blank at its
+   height (*height), so no line is ever cut at the list's edge. A row with focus is drawn: it is
+   being brought into view. */
+static bool settings_online_play_cut(NkUi *ui, NkUiId id, float *height) {
+    NkUiScrollState state;
+    NkUiRect view;
+    NkUiRect rect;
+    if (!nk_ui_scroll_state(ui, SET_ID_ONLINE_PLAY_LIST, &state) || state.max_offset <= 0.5f ||
+        !nk_ui_element_rect(ui, SET_ID_ONLINE_PLAY_LIST, &view) ||
+        !nk_ui_element_rect(ui, id, &rect) || nk_ui_button_focused(ui, id)) {
+        return false;
+    }
+    *height = rect.h;
+    return rect.y < view.y - 0.5f || rect.y + rect.h > view.y + view.h + 0.5f;
+}
+
+/* One server: the row is the button. `host` is the mono line (the format to type, muted, on
+   the own server's row until one is in use); `chip` says where the server comes from. Returns
+   true when the row is activated. */
+static bool settings_online_play_row(NkUi *ui, NkUiId id, const char *name, const char *host,
+                                     const char *chip, bool current, float width,
+                                     OnlinePlayRowLayout layout, NkUiId up, NkUiId down) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    const bool focused = nk_ui_button_focused(ui, id);
+    const float chips = settings_online_play_chips_width(ui, chip, current);
+    const float inside = width - 2.0f * NK_UI_SPACE_3;
+    const float words = layout.chips_under || chips <= 0.0f ? inside
+                                                             : inside - NK_UI_SPACE_3 - chips;
+    NkUiTextStyle name_style = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
+    NkUiTextStyle host_style = nk_ui_type(NK_UI_TYPE_DATA, theme->muted);
+    float blank_height = 0.0f;
+    const bool blank = settings_online_play_cut(ui, id, &blank_height);
+    NkUiLayout row = layout_make(layout.chips_under ? NK_UI_LAYOUT_COLUMN : NK_UI_LAYOUT_ROW,
+                                 sizing_fixed(width),
+                                 blank ? sizing_fixed(blank_height) : sizing_fit(),
+                                 layout.chips_under ? NK_UI_SPACE_1 : NK_UI_SPACE_3);
+    NkUiStyle style;
+    memset(&style, 0, sizeof(style));
+    if (!blank) row.height.min = settings_online_play_row_height(ui);
+    row.align_y = NK_UI_ALIGN_CENTER;
+    row.padding_left = row.padding_right = NK_UI_SPACE_3;
+    row.padding_top = row.padding_bottom = NK_UI_SPACE_1;
+    style.corner_radius = NK_UI_RADIUS_CONTROL;
+    if (!blank) {
+        style.fill_rgba = nk_ui_pressed(ui, id) ? theme->pressed
+                          : focused || nk_ui_hovered(ui, id) ? theme->surface_high : 0u;
+    }
+    nk_ui_register_button_between(ui, id, 0u, up, down);
+    if (!nk_ui_begin_container(ui, id, &row, &style)) return false;
+    if (focused) nk_ui_focus_ring(ui, id, NK_UI_RADIUS_CONTROL);
+    if (!blank) {
+        NkUiLayout text = layout_make(layout.beside ? NK_UI_LAYOUT_ROW : NK_UI_LAYOUT_COLUMN,
+                                      layout.beside ? sizing_grow() : sizing_fixed(words),
+                                      sizing_fit(), layout.beside ? NK_UI_SPACE_3 : 0.0f);
+        text.align_y = NK_UI_ALIGN_CENTER;
+        if (nk_ui_begin_container(ui, nk_ui_child_id(id, 1u), &text, NULL)) {
+            nk_ui_text(ui, nk_ui_child_id(id, 2u),
+                       nk_ui_text_break(ui, name, &name_style, words), &name_style);
+            if (host[0] != '\0') {
+                nk_ui_text(ui, nk_ui_child_id(id, 3u),
+                           nk_ui_text_break(ui, host, &host_style, words), &host_style);
+            }
+            nk_ui_end_container(ui);
+        }
+        if (chips > 0.0f) {
+            NkUiLayout tags = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                          ONLINE_PLAY_CHIP_GAP);
+            tags.align_y = NK_UI_ALIGN_CENTER;
+            if (nk_ui_begin_container(ui, nk_ui_child_id(id, 4u), &tags, NULL)) {
+                if (chip != NULL && chip[0] != '\0') nk_ui_tag(ui, nk_ui_child_id(id, 5u), chip);
+                if (current) {
+                    nk_ui_status_pill(ui, nk_ui_child_id(id, 6u), ONLINE_PLAY_CHECK, "Current",
+                                      theme->ready);
+                }
+                nk_ui_end_container(ui);
+            }
+        }
+    }
+    nk_ui_end_container(ui);
+    return nk_ui_take_activation(ui, id);
+}
+
+/* The own server's Port offset button, beside its row; while the list cuts it, a blank of its
+   size that keeps its place in the focus walk. */
+static bool settings_online_play_port(NkUi *ui, const char *label, NkUiId up, NkUiId down) {
+    const NkUiId id = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT;
+    float height = 0.0f;
+    NkUiRect rect;
+    if (settings_online_play_cut(ui, id, &height) && nk_ui_element_rect(ui, id, &rect)) {
+        NkUiLayout blank = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(rect.w),
+                                       sizing_fixed(height), 0.0f);
+        nk_ui_register_button_between(ui, id, 0u, up, down);
+        if (nk_ui_begin_container(ui, id, &blank, NULL)) nk_ui_end_container(ui);
+        return nk_ui_take_activation(ui, id);
+    }
+    return nk_ui_button_between(ui, id, label, 0u, up, down);
+}
+
+/* Where Up and Down from `id` land in the picker's walk `order` (shipped servers, the own
+   server, the list's): its neighbours, named, because a move by position skips a row the list
+   has scrolled out of view. 0 past either end: by position (Back below). */
+static void settings_online_play_links(const NkUiId *order, size_t count, NkUiId id, NkUiId *up,
+                                       NkUiId *down) {
+    *up = 0u;
+    *down = 0u;
+    for (size_t k = 0u; k < count; ++k) {
+        if (order[k] != id) continue;
+        if (k > 0u) *up = order[k - 1u];
+        if (k + 1u < count) *down = order[k + 1u];
+        return;
+    }
+}
+
+/* A section heading in the list, or a line of text under one; blank while the list cuts it. */
+static void settings_online_play_text(NkUi *ui, NkUiId id, const char *text, NkUiTypeRole role,
+                                      uint32_t rgba, float top) {
+    float height = 0.0f;
+    NkUiLayout line = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), 0.0f);
+    if (settings_online_play_cut(ui, id, &height)) {
+        nk_ui_spacer(ui, id, sizing_grow(), sizing_fixed(height));
+        return;
+    }
+    line.padding_left = line.padding_right = NK_UI_SPACE_3;
+    line.padding_top = top;
+    /* A heading keeps clear of the focus ring of the row under it. */
+    if (role == NK_UI_TYPE_EYEBROW) line.padding_bottom = 6.0f;
+    if (nk_ui_begin_container(ui, id, &line, NULL)) {
+        nk_ui_text_role(ui, nk_ui_child_id(id, 1u),
+                        role == NK_UI_TYPE_EYEBROW ? nk_ui_caps(ui, text) : text, role, rgba);
+        nk_ui_end_container(ui);
+    }
+}
+
+/* The picker control focus last moved to. Focus brings it to the list's edge, where the list
+   would cut its focus ring; for the frames just after a move it is brought in by the list's
+   padding as well, and never later, so the wheel and a drag still scroll freely. Where the
+   list cannot hold two rows (a larger text size in a small window) the card scrolls instead. */
 static struct {
     const NkUi *ui;
     NkUiId focused;
@@ -1968,8 +2138,9 @@ static struct {
 
 static void settings_online_play_reveal_row(NkUi *ui, size_t count) {
     const NkUiId focused = nk_ui_focused(ui);
-    NkUiId row = 0u;
-    NkUiRect card;
+    NkUiId scroller = SET_ID_ONLINE_PLAY_LIST;
+    float pad = ENHANCED_LIST_PAD;
+    NkUiRect view;
     NkUiRect rect;
     NkUiScrollState state;
     float offset;
@@ -1981,24 +2152,65 @@ static void settings_online_play_reveal_row(NkUi *ui, size_t count) {
     }
     if (s_online_play_row.frames <= 0) return;
     --s_online_play_row.frames;
-    if (focused >= PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE &&
-        focused < PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + (NkUiId)count) {
-        row = (NkUiId)(SET_ID_TEXT + 0x800u + 8u * (focused - PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE));
-    } else if (focused == PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER) {
-        row = SET_ID_TEXT + 0x7F0u;
+    if (!(focused >= PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE &&
+          focused < PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + (NkUiId)count) &&
+        focused != PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER &&
+        focused != PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT) {
+        return;
     }
-    if (row == 0u || !nk_ui_element_rect(ui, row, &rect) ||
-        !nk_ui_element_rect(ui, FLOW_ID_CARD, &card) ||
-        !nk_ui_scroll_state(ui, FLOW_ID_CARD, &state)) {
+    if (!nk_ui_scroll_state(ui, scroller, &state) || state.max_offset <= 0.5f) {
+        scroller = FLOW_ID_CARD;
+        pad = 0.0f;
+    }
+    if (!nk_ui_element_rect(ui, focused, &rect) || !nk_ui_element_rect(ui, scroller, &view) ||
+        !nk_ui_scroll_state(ui, scroller, &state)) {
         return;
     }
     offset = state.offset;
-    if (rect.y + rect.h > card.y + card.h) offset += rect.y + rect.h - (card.y + card.h);
+    if (rect.y + rect.h > view.y + view.h - pad) offset += rect.y + rect.h - (view.y + view.h - pad);
     top = rect.y - (offset - state.offset);
-    if (top < card.y) offset -= card.y - top;
+    if (top < view.y + pad) offset -= view.y + pad - top;
     if (offset > state.max_offset) offset = state.max_offset;
     if (offset < 0.0f) offset = 0.0f;
-    if (fabsf(offset - state.offset) >= 0.5f) nk_ui_scroll_to(ui, FLOW_ID_CARD, offset);
+    if (fabsf(offset - state.offset) >= 0.5f) nk_ui_scroll_to(ui, scroller, offset);
+}
+
+/* At rest the list's top edge lies on an item's top: an item the edge would cut is drawn blank
+   (settings_online_play_cut), which would leave a gap there. Once the wheel, a drag or focus
+   has moved the list, it is moved on to the nearest item boundary: up to show the cut item
+   whole, unless that would push the focused control past the foot, else down past it. Scrolled
+   to its end it stays there, where the last item rests whole on the foot. `items` are the ids
+   of everything the list holds, in any order. */
+static void settings_online_play_snap(NkUi *ui, const NkUiId *items, size_t count) {
+    const NkUiId focused = nk_ui_focused(ui);
+    NkUiScrollState state;
+    NkUiRect view;
+    NkUiRect rect;
+    NkUiRect mark;
+    float top;
+    float offset;
+    if (s_online_play_row.frames > 0 || nk_ui_scroll_in_motion(ui) ||
+        !nk_ui_scroll_state(ui, SET_ID_ONLINE_PLAY_LIST, &state) || state.max_offset <= 0.5f ||
+        state.offset >= state.max_offset - 0.5f ||
+        !nk_ui_element_rect(ui, SET_ID_ONLINE_PLAY_LIST, &view)) {
+        return; /* at the foot the last item rests on the edge: nothing is cut there */
+    }
+    top = view.y + ENHANCED_LIST_PAD;
+    for (size_t i = 0u; i < count; ++i) {
+        if (!nk_ui_element_rect(ui, items[i], &rect) || !(rect.y < top - 0.5f) ||
+            !(rect.y + rect.h > top + 0.5f)) {
+            continue;
+        }
+        offset = state.offset - (top - rect.y);
+        if (nk_ui_element_rect(ui, focused, &mark) && mark.y >= view.y && mark.y < view.y + view.h &&
+            mark.y + mark.h + (top - rect.y) > view.y + view.h - ENHANCED_LIST_PAD) {
+            offset = state.offset + (rect.y + rect.h - top);
+        }
+        if (offset > state.max_offset) offset = state.max_offset;
+        if (offset < 0.0f) offset = 0.0f;
+        if (fabsf(offset - state.offset) >= 0.5f) nk_ui_scroll_to(ui, SET_ID_ONLINE_PLAY_LIST, offset);
+        return;
+    }
 }
 
 /* The Online play page's lines above its buttons change after a press (New console ID adds a
@@ -2401,57 +2613,217 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         break;
     }
     case PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS: {
-        /* The server picker: the shipped servers, then PPSSPP's list, then the player's own.
-           Choosing one opens the consent card for it; nothing here connects. */
-        static const char own_label[] = "Your own server: Type it";
+        /* The server picker: the shipped servers, the player's own, and with Online play on
+           PPSSPP's list. Choosing one opens the consent card for it; nothing here connects. */
         size_t count = model->online_play_servers ? model->online_play_server_count : 0u;
-        const float row_width = inner - 32.0f;
-        /* Every row's button is as wide as the widest name up to six tenths of the row, so they
-           line up (a longer name, from the list, is the line under a CHOOSE button); each row's
-           lines are stacked under its button at full width, so none is cut. */
-        WizardColumn column = {220.0f, true};
+        const char *server = safe_text(model->online_play_server, "");
+        const char *list_chip = model->online_play_list_live ? "From the downloaded list"
+                                                             : "From the shipped list";
+        /* The list's panel keeps little padding of its own: the list's, there for the focus
+           ring, is the rest. */
+        const float row_width = inner - 16.0f - ENHANCED_SCROLLBAR_ROOM -
+                                2.0f * ENHANCED_LIST_PAD;
+        NkUiLayout box_layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(),
+                                            0.0f);
+        NkUiStyle box_style = scr_flow_box_style(theme, theme->surface);
+        const NkUiTextStyle eyebrow = nk_ui_type(NK_UI_TYPE_EYEBROW, 0u);
+        const NkUiTextStyle heading = nk_ui_type(NK_UI_TYPE_TITLE, 0u);
+        const NkUiTextStyle label = nk_ui_type(NK_UI_TYPE_LABEL, 0u);
+        char port_label[48];
+        bool shipped_beside = true;
+        bool listed_beside = true;
+        bool own_current;
+        bool any_listed = false;
+        OnlinePlayRowLayout shipped;
+        OnlinePlayRowLayout from_list;
+        OnlinePlayRowLayout own;
+        NkUiId order[PLAYER_UI_ONLINE_PLAY_SERVERS_MAX + 1u];
+        size_t order_count = 0u;
+        NkUiId up = 0u;
+        NkUiId down = 0u;
+        float own_width;
+        float port_width;
+        /* The list holds what the card leaves between the bars once the heading, the intro,
+           the box's padding and Back are placed, so the card itself does not scroll; where
+           that is less than two rows (a larger text size in a small window), the list takes
+           its whole height and the card scrolls instead. */
+        float list_room = height - NK_UI_TOP_BAR_HEIGHT - NK_UI_PROMPT_BAR_HEIGHT -
+                          2.0f * NK_UI_SPACE_4 - NK_UI_DIALOG_PAD_TOP - NK_UI_DIALOG_PAD_BOTTOM -
+                          nk_ui_line_height(ui, &eyebrow) - nk_ui_line_height(ui, &heading) -
+                          settings_enhanced_text_height(ui, SCR_ONLINE_PLAY_SERVERS_LEAD,
+                                                        NK_UI_TYPE_BODY_S, inner) -
+                          4.0f * NK_UI_DIALOG_GAP - 12.0f - NK_UI_SPACE_1 -
+                          nk_ui_line_box(ui, NK_UI_CONTROL_HEIGHT, &label) - 1.0f;
+        if (list_room < 2.0f * ENHANCED_LIST_PAD + 2.0f * settings_online_play_row_height(ui) +
+                            nk_ui_line_height(ui, &eyebrow)) {
+            list_room = 0.0f;
+        }
         if (count > PLAYER_UI_ONLINE_PLAY_SERVERS_MAX) count = PLAYER_UI_ONLINE_PLAY_SERVERS_MAX;
-        for (size_t i = 0u; i <= count; ++i) {
-            const char *label = i < count ? safe_text(model->online_play_servers[i].name, "")
-                                          : own_label;
-            float need = nk_ui_button_width(ui, label, 0u);
-            float most = i < count ? 0.6f * row_width : row_width;
-            if (need > column.cell && need <= most) column.cell = need;
+        own_current = model->online_play && server[0] != '\0';
+        for (size_t i = 0u; i < count; ++i) {
+            const PlayerUiOnlineServer *row = &model->online_play_servers[i];
+            const char *host = safe_text(row->host, "");
+            if (row->listed && !model->online_play) continue;
+            if (strcmp(host, server) == 0) own_current = false;
+            if (row->listed) {
+                any_listed = true;
+                listed_beside = listed_beside &&
+                                settings_online_play_fits_beside(
+                                    ui, safe_text(row->name, ""),
+                                    settings_online_play_host_line(ui, row), list_chip,
+                                    model->online_play && strcmp(host, server) == 0, row_width);
+            } else {
+                shipped_beside = shipped_beside &&
+                                 settings_online_play_fits_beside(
+                                     ui, safe_text(row->name, ""), host, "Built in",
+                                     model->online_play && strcmp(host, server) == 0, row_width);
+            }
         }
-        if (nk_ui_button_width(ui, "Choose", 0u) > column.cell) {
-            column.cell = nk_ui_button_width(ui, "Choose", 0u);
+        for (int pass = 0; pass < 2; ++pass) {
+            for (size_t i = 0u; i < count; ++i) {
+                if (model->online_play_servers[i].listed != (pass == 1)) continue;
+                if (pass == 1 && !model->online_play) continue;
+                order[order_count++] = (NkUiId)(PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + i);
+            }
+            if (pass == 0) order[order_count++] = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER;
         }
-        if (column.cell > row_width) column.cell = row_width;
+        shipped = settings_online_play_layout(ui, shipped_beside, "Built in", row_width);
+        from_list = settings_online_play_layout(ui, listed_beside, list_chip, row_width);
+        (void)snprintf(port_label, sizeof(port_label), "Port offset: %s",
+                       safe_text(model->online_play_port_offset, "10000"));
+        port_width = nk_ui_button_width(ui, port_label, 0u);
+        own_width = row_width - NK_UI_SPACE_3 - port_width;
+        /* The port offset beside the own server's row while that leaves the row half the
+           width, else under it. */
+        if (own_width < 0.5f * row_width) own_width = row_width;
+        own = settings_online_play_layout(
+            ui, settings_online_play_fits_beside(ui, "Your own server",
+                                                 own_current ? server : SCR_ONLINE_PLAY_OWN_FORMAT,
+                                                 NULL, own_current, own_width),
+            NULL, own_width);
+        box_layout.padding_top = box_layout.padding_bottom = 6.0f;
+        box_layout.padding_left = box_layout.padding_right = 8.0f;
         settings_online_play_reveal_row(ui, count);
+        {
+            NkUiId items[PLAYER_UI_ONLINE_PLAY_SERVERS_MAX + 12u];
+            size_t item_count = 0u;
+            items[item_count++] = SET_ID_ONLINE_PLAY_HEADING;
+            items[item_count++] = SET_ID_ONLINE_PLAY_HEADING + 1u;
+            items[item_count++] = SET_ID_ONLINE_PLAY_OWN_LINE;
+            items[item_count++] = SET_ID_ONLINE_PLAY_OWN_SENTENCE;
+            if (model->online_play) {
+                items[item_count++] = SET_ID_ONLINE_PLAY_HEADING + 2u;
+                items[item_count++] = SET_ID_TEXT + 0x7F4u;
+                if (any_listed) items[item_count++] = SET_ID_TEXT + 0x7F5u;
+            } else {
+                items[item_count++] = SET_ID_ONLINE_PLAY_OFF_LINE;
+            }
+            for (size_t i = 0u; i < order_count; ++i) {
+                if (order[i] != PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER) {
+                    items[item_count++] = order[i];
+                }
+            }
+            settings_online_play_snap(ui, items, item_count);
+        }
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Online play", theme->accent_dark);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "Choose a server", NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_PLAY_SERVERS_LEAD, NK_UI_TYPE_BODY_S,
                         theme->muted);
-        if (scr_wizard_box_begin(ui, 0u)) {
-            for (size_t i = 0u; i < count; ++i) {
-                const char *host = safe_text(model->online_play_servers[i].host, "");
-                bool current = model->online_play && model->online_play_server &&
-                               strcmp(host, model->online_play_server) == 0;
-                if (settings_online_play_server_row(
-                        ui, (NkUiId)(PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + i),
-                        (NkUiId)(SET_ID_TEXT + 0x800u + 8u * (NkUiId)i),
-                        safe_text(model->online_play_servers[i].name, ""), host,
-                        safe_text(model->online_play_servers[i].line, ""), current, row_width,
-                        column.cell)) {
-                    *result = settings_op(PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER);
-                    result->choice_index = (int)i;
+        if (nk_ui_begin_container(ui, SET_ID_ONLINE_PLAY_BOX, &box_layout, &box_style)) {
+            NkUiLayout list_row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
+                                              0.0f);
+            NkUiLayout list = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(), 0.0f);
+            list.padding_left = list.padding_right = ENHANCED_LIST_PAD;
+            list.padding_top = list.padding_bottom = ENHANCED_LIST_PAD;
+            if (list_room > 0.0f) {
+                list.height.max = list_room;
+                list.scroll = true;
+            }
+            if (nk_ui_begin_container(ui, SET_ID_ONLINE_PLAY_LIST_ROW, &list_row, NULL)) {
+                if (nk_ui_begin_container(ui, SET_ID_ONLINE_PLAY_LIST, &list, NULL)) {
+                    bool first_in_section = true;
+                    settings_online_play_text(ui, SET_ID_ONLINE_PLAY_HEADING, "Built in",
+                                              NK_UI_TYPE_EYEBROW, theme->muted, 0.0f);
+                    for (int pass = 0; pass < 2; ++pass) {
+                        /* The shipped servers first; PPSSPP's list after the own server. */
+                        if (pass == 1) {
+                            if (!model->online_play) break;
+                            settings_online_play_text(ui, SET_ID_ONLINE_PLAY_HEADING + 2u,
+                                                      "PPSSPP's list", NK_UI_TYPE_EYEBROW,
+                                                      theme->muted, 6.0f);
+                            if (model->online_play_list_status &&
+                                model->online_play_list_status[0] != '\0') {
+                                settings_online_play_text(ui, SET_ID_TEXT + 0x7F4u,
+                                                          model->online_play_list_status,
+                                                          NK_UI_TYPE_BODY_S, theme->muted, 0.0f);
+                            }
+                            first_in_section = true;
+                        }
+                        for (size_t i = 0u; i < count; ++i) {
+                            const PlayerUiOnlineServer *row = &model->online_play_servers[i];
+                            const char *host = safe_text(row->host, "");
+                            const NkUiId id = (NkUiId)(PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + i);
+                            if (row->listed != (pass == 1)) continue;
+                            if (!first_in_section) {
+                                nk_ui_divider(ui, (NkUiId)(SET_ID_TEXT + 0x800u + 8u * (NkUiId)i),
+                                              true);
+                            }
+                            first_in_section = false;
+                            settings_online_play_links(order, order_count, id, &up, &down);
+                            if (settings_online_play_row(
+                                    ui, id, safe_text(row->name, ""),
+                                    settings_online_play_host_line(ui, row),
+                                    pass == 1 ? list_chip : "Built in",
+                                    model->online_play && strcmp(host, server) == 0, row_width,
+                                    pass == 1 ? from_list : shipped, up, down)) {
+                                *result = settings_op(PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER);
+                                result->choice_index = (int)i;
+                            }
+                        }
+                        if (pass == 0) {
+                            NkUiLayout own_line = layout_make(
+                                own_width < row_width ? NK_UI_LAYOUT_ROW : NK_UI_LAYOUT_COLUMN,
+                                sizing_grow(), sizing_fit(), NK_UI_SPACE_3);
+                            own_line.align_y = NK_UI_ALIGN_CENTER;
+                            settings_online_play_text(ui, SET_ID_ONLINE_PLAY_HEADING + 1u,
+                                                      "Your own server", NK_UI_TYPE_EYEBROW,
+                                                      theme->muted, 6.0f);
+                            settings_online_play_links(order, order_count,
+                                                       PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
+                                                       &up, &down);
+                            if (nk_ui_begin_container(ui, SET_ID_ONLINE_PLAY_OWN_LINE, &own_line,
+                                                      NULL)) {
+                                if (settings_online_play_row(
+                                        ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
+                                        "Your own server",
+                                        own_current ? server : SCR_ONLINE_PLAY_OWN_FORMAT, NULL,
+                                        own_current, own_width, own, up, down)) {
+                                    *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER);
+                                }
+                                if (settings_online_play_port(ui, port_label, up, down)) {
+                                    *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT);
+                                }
+                                nk_ui_end_container(ui);
+                            }
+                            settings_online_play_text(ui, SET_ID_ONLINE_PLAY_OWN_SENTENCE,
+                                                      SCR_ONLINE_PLAY_OWN_SENTENCE,
+                                                      NK_UI_TYPE_CAPTION, theme->muted, 0.0f);
+                        }
+                    }
+                    if (model->online_play && any_listed) {
+                        settings_online_play_text(ui, SET_ID_TEXT + 0x7F5u,
+                                                  SCR_ONLINE_PLAY_RELAY_ONLY_CAPTION,
+                                                  NK_UI_TYPE_CAPTION, theme->muted, 0.0f);
+                    } else if (!model->online_play) {
+                        settings_online_play_text(ui, SET_ID_ONLINE_PLAY_OFF_LINE,
+                                                  SCR_ONLINE_PLAY_LIST_OFF_LINE, NK_UI_TYPE_CAPTION,
+                                                  theme->muted, NK_UI_SPACE_2);
+                    }
+                    nk_ui_end_container(ui);
                 }
+                settings_enhanced_scrollbar(ui, SET_ID_ONLINE_PLAY_TRACK, SET_ID_ONLINE_PLAY_LIST);
+                nk_ui_end_container(ui);
             }
-            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
-                                 SET_ID_TEXT + 0x7F0u, "Your own server", "Type it",
-                                 SCR_ONLINE_PLAY_OWN_SENTENCE, false, row_width, &column)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER);
-            }
-            nk_ui_text_role(ui, SET_ID_TEXT + 0x7F4u,
-                            safe_text(model->online_play_list_status, ""), NK_UI_TYPE_BODY_S,
-                            theme->muted);
-            nk_ui_text_role(ui, SET_ID_TEXT + 0x7F5u, SCR_ONLINE_PLAY_RELAY_ONLY_CAPTION,
-                            NK_UI_TYPE_CAPTION, theme->muted);
             nk_ui_end_container(ui);
         }
         {
@@ -2459,7 +2831,10 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                          NK_UI_SPACE_3);
             row.padding_top = NK_UI_SPACE_1;
             if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back", NK_UI_BUTTON_PRIMARY)) {
+                /* Up from Back enters the list at its end, scrolled out of view or not. */
+                if (nk_ui_button_between(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back",
+                                         NK_UI_BUTTON_PRIMARY,
+                                         order_count > 0u ? order[order_count - 1u] : 0u, 0u)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_BACK);
                 }
                 /* The list downloads only with Online play on. */
