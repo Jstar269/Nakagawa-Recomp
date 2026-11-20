@@ -673,6 +673,58 @@ class CompilerCompareTests(unittest.TestCase):
         self.assertIn("<HOST_PATH>", output.getvalue())
         self.assertIn("/PSP_GAME/USRDIR/a.bin", serialized)
 
+    def run_main(self, compilers: str = "gcc") -> int:
+        with mock.patch("sys.stdout", io.StringIO()):
+            return compiler_compare.main([
+                "--compilers", compilers, "--linkers", "default",
+                "--make", "mingw32-make", "--python", sys.executable,
+                "--repeats", "3", "--output", str(self.output),
+            ])
+
+    def test_unstable_semantic_hash_across_repeats_fails_the_run(self) -> None:
+        """F-cb9cb21f: three repeats with three hashes are MEASURED_HASH_UNSTABLE and exit 1."""
+        self.fake.semantic_hash = lambda _compiler, index: f"{index:064x}"
+        result = self.run_main()
+        self.assertEqual(result, 1)
+        report = json.loads((self.output / "compiler_compare.json").read_text(encoding="utf-8"))
+        entry = report["toolchains"][0]
+        self.assertEqual(entry["status"], compiler_compare.STATUS_MEASURED_HASH_UNSTABLE)
+        self.assertFalse(entry["measurements"]["summary"]["semantic_hash_stable"])
+        self.assertEqual(report["summary"][compiler_compare.STATUS_MEASURED_HASH_UNSTABLE], ["gcc/default"])
+        self.assertEqual(report["summary"][compiler_compare.STATUS_MEASURED], [])
+        self.assertEqual(report["semantic_hash_comparison"]["status"], "UNSTABLE")
+        markdown = (self.output / "compiler_compare.md").read_text(encoding="utf-8")
+        row = next(line for line in markdown.splitlines() if line.startswith("| gcc | default |"))
+        # The measurements stay visible; the row names its status and the unstable hash.
+        self.assertIn("MEASURED_HASH_UNSTABLE", row)
+        self.assertIn("| UNSTABLE |", row)
+        self.assertIn(" s |", row)
+
+    def test_semantic_hashes_that_differ_across_toolchains_fail_the_run(self) -> None:
+        """F-cb9cb21f: stable rows whose hashes differ are each MEASURED, but the run exits 1."""
+        self.fake.semantic_hash = lambda compiler, _index: (
+            "c" * 64 if "clang" in compiler else "a" * 64)
+        result = self.run_main("gcc,clang")
+        self.assertEqual(result, 1)
+        report = json.loads((self.output / "compiler_compare.json").read_text(encoding="utf-8"))
+        self.assertEqual([entry["status"] for entry in report["toolchains"]],
+                         [compiler_compare.STATUS_MEASURED] * 2)
+        self.assertEqual(report["semantic_hash_comparison"]["status"], "DIFFERENT")
+
+    def test_matching_stable_hashes_across_toolchains_pass_the_run(self) -> None:
+        self.assertEqual(self.run_main("gcc,clang"), 0)
+
+    def test_report_validator_ties_the_measured_status_to_hash_stability(self) -> None:
+        report = self.compare()
+        report["toolchains"][0]["measurements"]["summary"]["semantic_hash_stable"] = False
+        with self.assertRaises(compiler_compare.CompareError):
+            compiler_compare.validate_report(report)
+        self.fake.semantic_hash = lambda _compiler, index: f"{index:064x}"
+        report = self.compare()
+        report["toolchains"][0]["measurements"]["summary"]["semantic_hash_stable"] = True
+        with self.assertRaises(compiler_compare.CompareError):
+            compiler_compare.validate_report(report)
+
     def test_main_writes_veto_report_and_returns_failure(self) -> None:
         self.fake.failing_gate = "cosim-selftest"
         with mock.patch("sys.stdout", io.StringIO()):
@@ -874,7 +926,8 @@ class CompilerCompareTests(unittest.TestCase):
                 "name": "gcc/default",
                 "compiler": "gcc",
                 "linker_selection": "default",
-                "status": compiler_compare.STATUS_MEASURED,
+                # These repeats disagree, so the row is MEASURED_HASH_UNSTABLE (F-cb9cb21f).
+                "status": compiler_compare.STATUS_MEASURED_HASH_UNSTABLE,
                 "veto": {
                     "status": compiler_compare.GATE_PASS,
                     "failed_gate": None,
@@ -911,7 +964,9 @@ class CompilerCompareTests(unittest.TestCase):
             "name": "gcc/default",
             "compiler": "gcc",
             "linker_selection": "default",
-            "status": compiler_compare.STATUS_MEASURED,
+            # The status a run gives this summary: an unstable hash is MEASURED_HASH_UNSTABLE (F-cb9cb21f).
+            "status": (compiler_compare.STATUS_MEASURED if summary["semantic_hash_stable"]
+                       else compiler_compare.STATUS_MEASURED_HASH_UNSTABLE),
             "veto": {
                 "status": compiler_compare.GATE_PASS,
                 "failed_gate": None,

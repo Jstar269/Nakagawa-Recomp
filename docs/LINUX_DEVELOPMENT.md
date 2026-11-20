@@ -58,6 +58,12 @@ Install PSPDEV v20261101 at `/usr/local/pspdev` (the official
 `assets/upstream/pspdev.evidence.json` and verifies the digest recorded in
 `assets/upstream/pspdev.lock.json`.
 
+Then check the build tools with `python tools/nk_doctor.py --scope build`. On Linux it reports
+the host as `INFO` and checks that `gcc`, `make` and the `python` the Makefile runs (`$PYTHON`
+when set) are on `PATH` and run, and that this `python` is 3.14.x or 3.15.x; Ubuntu's own
+`python` is older, so activate the project environment first or set `PYTHON=python3.15`. It
+does not check SDL3, Vulkan or PSPDEV. The `run` and `all` scopes still need Windows.
+
 ## What works today
 
 Last verified on Ubuntu 24.04 with gcc 13.3.0, SDL3 3.4.20, Vulkan 1.3.275, CMake
