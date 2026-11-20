@@ -242,6 +242,7 @@ struct NkAdhocRelayClient {
     uint32_t pdp_dropped;
     RelayPtpSocket ptp[NK_RELAY_PTP_SOCKETS];
     uint16_t next_ptp_port;
+    int shut_down; /* nk_relay_client_shutdown: every socket closed, none opened again */
     char last_error[160];
 };
 
@@ -891,6 +892,7 @@ static bool open_data_chan(NkAdhocRelayClient *c, TcpChan *ch, NkRelayInit type,
     uint8_t init[NK_RELAY_INIT_SIZE];
     const uint16_t wire_sport = nk_relay_port_out(sport, c->port_offset);
     const uint16_t wire_dport = nk_relay_port_out(dport, c->port_offset);
+    if (c->shut_down) return false;
     if (nk_relay_init(init, type, c->mac, wire_sport, dst_mac, wire_dport) != NK_RELAY_INIT_SIZE)
         return false;
     chan_close(ch);
@@ -1056,6 +1058,8 @@ static int rc_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], co
     if (!c || !mac || !nickname || !product) return NK_NET_BAD_ARG;
     uint8_t frame[NK_LOBBY_LOGIN_SIZE];
     if (nk_lobby_login(frame, mac, nickname, product) != NK_LOBBY_LOGIN_SIZE) return NK_NET_BAD_ARG;
+    /* A client that was shut down stays down: its reason stays the last error. */
+    if (c->shut_down) return NK_NET_DEAD;
 
     if (c->logged_in) {
         release_resolve_job(&c->resolve_job);
@@ -1112,6 +1116,7 @@ static int rc_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], co
 }
 
 static int queue_lobby_cmd(NkAdhocRelayClient *c, const uint8_t *bytes, size_t n) {
+    if (c->shut_down) return NK_NET_DEAD;
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
     if (c->lobby.dead || c->lobby.remote_eof) return NK_NET_DEAD;
     if (!buf_append(&c->lobby.tx, &c->lobby.tx_len, &c->lobby.tx_cap, bytes, n,
@@ -1193,6 +1198,7 @@ static uint32_t rc_events_dropped(const NkAdhocTransport *t) {
 
 static int rc_pdp_open(NkAdhocTransport *t, uint16_t port) {
     NkAdhocRelayClient *c = as_client(t);
+    if (c->shut_down) return NK_NET_DEAD;
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
     if (port == 0u || port == 0xffffu) return NK_NET_BAD_ARG;
     int slot = -1;
@@ -1284,6 +1290,7 @@ static uint32_t rc_pdp_dropped(const NkAdhocTransport *t) {
 
 static int rc_ptp_listen(NkAdhocTransport *t, uint16_t sport, int backlog) {
     NkAdhocRelayClient *c = as_client(t);
+    if (c->shut_down) return NK_NET_DEAD;
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
     if (sport == 0u) sport = pick_ptp_port(c);
     if (sport == 0u) return NK_NET_NO_SLOT;
@@ -1331,6 +1338,7 @@ static int rc_ptp_accept(NkAdhocTransport *t, int listen_handle, uint8_t peer_ma
 static int rc_ptp_open(NkAdhocTransport *t, uint16_t sport, const uint8_t dst[NK_RELAY_MAC_LEN],
                        uint16_t dport) {
     NkAdhocRelayClient *c = as_client(t);
+    if (c->shut_down) return NK_NET_DEAD;
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
     if (!dst || dport == 0u) return NK_NET_BAD_ARG;
     if (sport == 0u) sport = pick_ptp_port(c);
@@ -1509,6 +1517,19 @@ bool nk_relay_client_lobby_connected(const NkAdhocRelayClient *client) {
 
 bool nk_relay_client_lobby_dead(const NkAdhocRelayClient *client) {
     return !client || client->lobby.dead || client->lobby.remote_eof;
+}
+
+void nk_relay_client_shutdown(NkAdhocRelayClient *client, const char *reason) {
+    if (!client) return;
+    release_resolve_job(&client->resolve_job);
+    close_all_sockets(client);
+    chan_close(&client->lobby);
+    client->lobby.dead = 1;
+    client->logged_in = 0;
+    client->in_group = 0;
+    client->scanning = 0;
+    client->shut_down = 1;
+    set_error(client, (reason && reason[0]) ? reason : "shut down");
 }
 
 const char *nk_relay_client_last_error(const NkAdhocRelayClient *client) {

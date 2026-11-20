@@ -13373,6 +13373,103 @@ static void d3_main_fn(CpuState *cpu) {
     s_d3_done = 1;
 }
 
+/* ---- Online play turned off in the launcher while the game runs (#1139) ------------------- */
+static AdhP2MiniRelay *s_off_srv;
+static const char *s_off_path;
+static int s_off_done;
+
+static int off_active_peers(void) {
+    int n = 0;
+    for (int i = 0; i < 6; i++) n += s_off_srv->peers[i].active ? 1 : 0;
+    return n;
+}
+
+static void off_main_fn(CpuState *cpu) {
+    char msg[288];
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '1', '1'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    s_adh_events = 0u;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_CREATE, adh_name(0, "OFFGRP1"), 0u, 0u) == 0u, "off: Create");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh_state() == 1u && s_adh_events == 1u && off_active_peers() == 1,
+           "off: in group OFFGRP1 with the lobby connected");
+    /* The launcher turns Online play off: it creates the file SR_ADHOC_OFF_FILE names. */
+    FILE *marker = fopen(s_off_path, "wb");
+    expect(marker != NULL, "off: the marker file is written");
+    if (marker) fclose(marker);
+    /* The runtime looks at most every 250 ms of host time; give it up to 3 s. */
+    for (int w = 0; w < 600 && (s_adh_events < 2u || off_active_peers() != 0); w++) d3_step(cpu);
+    snprintf(msg, sizeof(msg),
+             "off: turning it off ends the lobby connection and tells the game DISCONNECT "
+             "(events=%u ev=%d err=0x%08x state=%u peers=%d)",
+             s_adh_events, s_adh_events > 1u ? ADH_AT(1).event : -1,
+             s_adh_events > 1u ? ADH_AT(1).error : 0u, adh_state(), off_active_peers());
+    expect(s_adh_events == 2u && ADH_AT(1).event == 2 && ADH_AT(1).error == 0x80410b09u &&
+           adh_state() == 0u && off_active_peers() == 0, msg);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "off: Term");
+    /* The game starts ad hoc again in the same run: no connection is made. */
+    const int logins_before = s_off_srv->last_login_ok;
+    s_off_srv->last_login_ok = 0;
+    s_adh_events = 0u;
+    const uint32_t init_rc = net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u);
+    const uint32_t adh_rc = adh_init(0x2000u, 0x30u, ADH_ID);
+    for (int w = 0; w < 100; w++) d3_step(cpu);
+    snprintf(msg, sizeof(msg),
+             "off: a later Init in the same run connects to nothing (net=0x%08x adhocctl=0x%08x "
+             "peers=%d login=%d)", init_rc, adh_rc, off_active_peers(), s_off_srv->last_login_ok);
+    expect(adh_rc != 0u && off_active_peers() == 0 && s_off_srv->last_login_ok == 0, msg);
+    (void)logins_before;
+    (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+    (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+    s_off_done = 1;
+}
+
+static void test_adhoc_turned_off_in_launcher(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "off: WSAStartup");
+#endif
+    static char path[512];
+    snprintf(path, sizeof(path), "%s/hle_adhoc_online_off.marker", HLE_BUILD_ROOT);
+    (void)remove(path);
+    AdhP2MiniRelay srv;
+    expect(mr_start(&srv), "off: mini relay started");
+    if (srv.running) {
+        s_off_srv = &srv;
+        s_off_path = path;
+        char srv_spec[64];
+        snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u",
+                 (unsigned)srv.lobby_port, (unsigned)srv.data_port);
+        s_off_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        hle_test_setenv("SR_ADHOC_ENABLED", "1");
+        hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+        hle_test_setenv("SR_ADHOC_OFF_FILE", path);
+        hle_net_reset();
+        adh_run(ADH_P2_MAIN, off_main_fn);
+        expect(s_off_done == 1, "off: turned-off regression finished");
+        hle_net_reset();
+        hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+        hle_test_setenv("SR_ADHOC_SERVER", NULL);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+        hle_test_setenv("SR_ADHOC_OFF_FILE", NULL);
+        adh_fixture_end(loaded_end);
+        mr_stop(&srv);
+        s_off_srv = NULL;
+        s_off_path = NULL;
+    }
+    (void)remove(path);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
 static void test_adhoc_d3_dead_and_silent_lobby(void) {
 #ifdef _WIN32
     WSADATA wsa;
@@ -66510,6 +66607,7 @@ static int hle_selftest_main(int argc, char **argv) {
         test_adhoc_d1_lifetime_across_term();
         test_adhoc_d4_ptp_open_connect_regression();
         test_adhoc_d3_dead_and_silent_lobby();
+        test_adhoc_turned_off_in_launcher();
         test_adhoc_d8_d9_regressions();
         test_adhoc_online_all_39_handlers_real_tcp();
         fprintf(stderr, "adhocctl: %d checks, %d failures\n", s_checks, s_failures);
@@ -66676,6 +66774,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_adhoc_d1_lifetime_across_term();
     test_adhoc_d4_ptp_open_connect_regression();
     test_adhoc_d3_dead_and_silent_lobby();
+    test_adhoc_turned_off_in_launcher();
     test_adhoc_d8_d9_regressions();
     test_adhoc_online_all_39_handlers_real_tcp();
     test_unregistered_batch_profiler_refer_null();

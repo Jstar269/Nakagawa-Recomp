@@ -31,6 +31,10 @@ NkAdhocTransport *nk_relay_client_transport(NkAdhocRelayClient *client);
 bool nk_relay_client_lobby_connected(const NkAdhocRelayClient *client);
 bool nk_relay_client_lobby_dead(const NkAdhocRelayClient *client);
 const char *nk_relay_client_last_error(const NkAdhocRelayClient *client);
+/* Ends every connection now (the lobby and each data stream) and opens none again: the lobby
+ * reads as dead, reason becomes the last error, and login and new sockets are refused. Used when
+ * the user turns Online play off while a game runs (#1139). */
+void nk_relay_client_shutdown(NkAdhocRelayClient *client, const char *reason);
 
 typedef bool (*NkRelayTestResolveFn)(const char *host, uint8_t out_ipv4[4], void *ctx);
 void nk_relay_client_set_resolve_hook_for_test(NkRelayTestResolveFn fn, void *ctx);

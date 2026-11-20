@@ -45,6 +45,7 @@
     X("SR_ACE_SMOOTH_DEPTH", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the GE's depth for its in-betweens.") \
     X("SR_ACE_SMOOTH_HUD", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the HUD mask of through-mode draws for its in-betweens.") \
     X("SR_ADHOC_ENABLED", "string", "0 (off)", "hle_network.c", "Enables opt-in online ad hoc play only when set to 1; any other value keeps all host network sockets closed and online APIs refused.") \
+    X("SR_ADHOC_OFF_FILE", "path", "unset (Online play stays on for the run)", "hle_network.c", "File the launcher creates when Online play is turned off during a run; once it exists, every relay connection ends and none is made again.") \
     X("SR_ADHOC_PORT_OFFSET", "number", "10000", "hle_network.c", "Optional port offset added to relay data ports for PPSSPP and community server compatibility (default 10000).") \
     X("SR_ADHOC_SERVER", "string", "unset (off)", "hle_network.c", "Community ad hoc server address (host, host:lobby, or host:lobby,data) used when SR_ADHOC_ENABLED is on.") \
     X("SR_ALLOC_GUARD", "flag-nonzero", "on (refusal lines printed when unset)", "hle.c", "A value starting with 0 silences the allocator's refusal lines; a request the user partition cannot hold is refused either way.") \

@@ -708,6 +708,72 @@ static void test_bad_server_frames_fail_closed(void) {
     nk_relay_client_destroy(c);
 }
 
+/* Turning Online play off while a game runs (#1139): shutdown ends the lobby and every data
+ * stream at once, the server sees each connection close, and nothing connects again. */
+static void test_shutdown_ends_every_connection(void) {
+    uint16_t lp = 0u, dp = 0u;
+    TSock ls = t_listen_loopback(&lp);
+    TSock ds = t_listen_loopback(&dp);
+    NkAdhocRelayConfig cfg = {"127.0.0.1", lp, dp, NK_RELAY_PORT_OFFSET};
+    NkAdhocRelayClient *c = nk_relay_client_create(&cfg);
+    CHECK(ls != T_INV && ds != T_INV && c != NULL, "shutdown: server and client ready");
+    if (!c) {
+        t_close(ls);
+        t_close(ds);
+        return;
+    }
+    NkAdhocTransport *t = nk_relay_client_transport(c);
+    static const uint8_t mac[6] = {0x02, 9, 8, 7, 6, 5};
+    CHECK(t->ops->login(t, mac, "Leaver", "ULUS10000") == NK_NET_OK, "shutdown: login queued");
+    const int pdp = t->ops->pdp_open(t, 0x1000u);
+    CHECK(pdp >= 0, "shutdown: PDP stream opened");
+    TSock lobby = T_INV, data = T_INV;
+    for (int i = 0; i < 200 && (lobby == T_INV || data == T_INV); i++) {
+        if (lobby == T_INV) lobby = accept(ls, NULL, NULL);
+        if (data == T_INV) data = accept(ds, NULL, NULL);
+        t->ops->pump(t);
+        if (lobby == T_INV || data == T_INV) test_sleep_ms(5u);
+    }
+    CHECK(lobby != T_INV && data != T_INV, "shutdown: server accepted the lobby and the stream");
+    if (lobby != T_INV) t_nonblock(lobby);
+    if (data != T_INV) t_nonblock(data);
+    for (int i = 0; i < 20; i++) t->ops->pump(t);
+    CHECK(nk_relay_client_lobby_connected(c) && !nk_relay_client_lobby_dead(c),
+          "shutdown: the lobby is connected before");
+
+    nk_relay_client_shutdown(c, "online play turned off in the launcher");
+    CHECK(nk_relay_client_lobby_dead(c) && !nk_relay_client_lobby_connected(c),
+          "shutdown: the lobby reads as dead at once");
+    CHECK(strcmp(nk_relay_client_last_error(c), "online play turned off in the launcher") == 0,
+          "shutdown: the reason is the last error");
+    int lobby_closed = 0, data_closed = 0;
+    uint8_t sink[512];
+    for (int i = 0; i < 200 && (!lobby_closed || !data_closed); i++) {
+        if (lobby != T_INV && !lobby_closed) (void)t_drain(lobby, sink, 0u, sizeof sink, &lobby_closed);
+        if (data != T_INV && !data_closed) (void)t_drain(data, sink, 0u, sizeof sink, &data_closed);
+        if (!lobby_closed || !data_closed) test_sleep_ms(5u);
+    }
+    CHECK(lobby_closed && data_closed, "shutdown: the server sees the lobby and the stream close");
+
+    static const uint8_t grp[8] = {'T', 'E', 'S', 'T', '0', '0', '1', 0};
+    CHECK(t->ops->login(t, mac, "Leaver", "ULUS10000") == NK_NET_DEAD &&
+              t->ops->connect(t, grp) == NK_NET_DEAD && t->ops->pdp_open(t, 0x1001u) == NK_NET_DEAD,
+          "shutdown: login, a group and a new stream are refused afterwards");
+    for (int i = 0; i < 20; i++) t->ops->pump(t);
+    TSock again = accept(ls, NULL, NULL);
+    TSock again_data = accept(ds, NULL, NULL);
+    CHECK(again == T_INV && again_data == T_INV, "shutdown: nothing connects again");
+    t_close(again);
+    t_close(again_data);
+    CHECK(strcmp(nk_relay_client_last_error(c), "online play turned off in the launcher") == 0,
+          "shutdown: the reason stays the last error");
+    t_close(lobby);
+    t_close(data);
+    t_close(ls);
+    t_close(ds);
+    nk_relay_client_destroy(c);
+}
+
 static void test_ptp_accept_waits_for_free_slot(void) {
     TestServer srv;
     srv_init(&srv);
@@ -1211,6 +1277,7 @@ int main(void) {
 #endif
     test_two_clients_loopback();
     test_bad_server_frames_fail_closed();
+    test_shutdown_ends_every_connection();
     test_ptp_accept_waits_for_free_slot();
     test_lobby_burst_waits_for_queue_room();
     test_ptp_port_reuse();

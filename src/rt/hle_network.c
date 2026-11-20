@@ -324,6 +324,41 @@ static int adhoc_parse_port_offset(uint16_t *out) {
     return 1;
 }
 
+/* Turning Online play off in the launcher while a game runs (#1139). The launcher names a file in
+ * SR_ADHOC_OFF_FILE when it starts a game with Online play on, and creates that file when the user
+ * turns Online play off. While the relay is in use the lobby pump looks for it, at most every
+ * 250 ms of host time; once it exists the relay client ends every connection, the lobby-lost path
+ * below tells the game, and no new connection is made in this run. One log line names it. */
+#define ADHOC_OFF_CHECK_MS 250u
+static int s_adhoc_off_state;       /* 0 not read yet, 1 no file named, 2 file named */
+static char *s_adhoc_off_path;
+static int s_adhoc_turned_off;
+static uint64_t s_adhoc_off_next_ms;
+
+static int adhoc_turned_off(void) {
+    if (s_adhoc_turned_off) return 1;
+    if (s_adhoc_off_state == 0) {
+        int present = 0;
+        char *path = NULL;
+        s_adhoc_off_state = 1;
+        if (sr_utf8_env_alloc(L"SR_ADHOC_OFF_FILE", &path, &present) && present && path &&
+            path[0]) {
+            s_adhoc_off_path = path;
+            s_adhoc_off_state = 2;
+        } else {
+            free(path);
+        }
+    }
+    if (s_adhoc_off_state != 2) return 0;
+    const uint64_t now = sr_host_monotonic_ms();
+    if (now < s_adhoc_off_next_ms) return 0;
+    s_adhoc_off_next_ms = now + ADHOC_OFF_CHECK_MS;
+    if (!nk_platform_file_exists(s_adhoc_off_path)) return 0;
+    s_adhoc_turned_off = 1;
+    fprintf(stderr, "HLE: online ad hoc play turned off in the launcher\n");
+    return 1;
+}
+
 static int adhoc_online_mode(void) {
     if (s_adhoc_test_transport) return 1;
     const char *en = getenv("SR_ADHOC_ENABLED");
@@ -623,6 +658,10 @@ static void adhocctl_call_handlers(CpuState *s, uint32_t gen, uint32_t sp, uint3
 static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp) {
     NkAdhocTransport *t = s_adhoc_active_transport;
     if (!t || !t->ops) return;
+    if (s_adhoc_relay_client && t == nk_relay_client_transport(s_adhoc_relay_client) &&
+        !nk_relay_client_lobby_dead(s_adhoc_relay_client) && adhoc_turned_off()) {
+        nk_relay_client_shutdown(s_adhoc_relay_client, "online play turned off in the launcher");
+    }
     if (t->ops->pump) t->ops->pump(t);
     NkLobbyEvent ev[16];
     size_t n = t->ops->take_events ? t->ops->take_events(t, ev, 16u) : 0u;
@@ -902,6 +941,11 @@ static int adhocctl_attach_online_transport(const uint8_t id13[13], uint32_t *ou
     NkAdhocTransport *t = s_adhoc_test_transport;
     if (!t) {
         char host[NK_ADHOC_SERVER_MAX_LEN + 1u];
+        if (adhoc_turned_off()) {
+            fprintf(stderr, "HLE: online ad hocctl refused: online play was turned off in the "
+                            "launcher; it is on again from the next launch\n");
+            return 0;
+        }
         uint16_t lp = 0u, dp = 0u, off = NK_RELAY_PORT_OFFSET;
         if (!nk_adhoc_relay_parse_server(getenv("SR_ADHOC_SERVER"), host, sizeof(host), &lp, &dp)) {
             fprintf(stderr, "HLE: online ad hocctl refused invalid SR_ADHOC_SERVER\n");
@@ -3756,6 +3800,12 @@ void hle_net_reset(void) {
     const uint32_t gen = s_adhocctl.gen + 1u;
     memset(&s_adhocctl, 0, sizeof(s_adhocctl));
     s_adhocctl.gen = gen;
+    /* A run reads SR_ADHOC_OFF_FILE again (the selftests change it between cases). */
+    free(s_adhoc_off_path);
+    s_adhoc_off_path = NULL;
+    s_adhoc_off_state = 0;
+    s_adhoc_turned_off = 0;
+    s_adhoc_off_next_ms = 0u;
 }
 int sr_hle_test_adhocctl_state(void) { return s_adhocctl.inited ? s_adhocctl.state : -1; }
 uint32_t sr_hle_test_adhocctl_thread(void) { return s_adhocctl.thread_uid; }
