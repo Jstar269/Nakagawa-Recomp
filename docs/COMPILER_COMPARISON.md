@@ -49,7 +49,7 @@ remains GCC.
 
 | Compiler/linker | Result | Gates passed before the failure | First failure |
 | --- | --- | --- | --- |
-| GCC/default | MEASURED | All ten veto gates | None; the semantic hash is `UNSTABLE` (see Measurements) |
+| GCC/default | MEASURED_HASH_UNSTABLE (printed as MEASURED at this commit) | All ten veto gates | None; the semantic hash is `UNSTABLE` (see Measurements) |
 | GCC/lld | FAILED_VETO | production-smoke, production-smoke-gap, display-smoke, cosim-selftest, cosim-mutants | `native-core-tests`: `ld.lld: error: undefined symbol: sr_ge_vram_read_prepare` |
 | Clang/default | FAILED_VETO | production-smoke, production-smoke-gap | `display-smoke`: `src/rt/videorec.c:83:17: error: variable 's_cur' set but not used [-Werror,-Wunused-but-set-global]` |
 | Clang/lld | FAILED_VETO | production-smoke, production-smoke-gap | `display-smoke`: `src/rt/videorec.c:83:17: error: variable 's_cur' set but not used [-Werror,-Wunused-but-set-global]` |
@@ -95,6 +95,13 @@ hashes: `48115df0…0f7c`, `401da44f…dea0` and `071b6204…8b7b`. The tool the
 `semantic_sha256` for the row and the comparison across all four rows is `INCOMPLETE`. The earlier
 snapshot (2026-11-07) matched across its three repeats. The tool does not
 keep the raw per-repeat output, so which normalised field differs is not yet known.
+
+At this snapshot's commit the tool still recorded such a row as `MEASURED` and exited 0. Since
+2026-11-20 (audit finding F-cb9cb21f) a row whose semantic hash changes between repeats is
+`MEASURED_HASH_UNSTABLE`, and the run exits 1 for it, and also when stable rows' hashes are
+`DIFFERENT` across toolchains: output that changes between runs or between compilers is a
+correctness signal, not a clean row. The veto table above gives the GCC/default row the status
+the current tool gives these measurements.
 
 All nine GCC/default runtime workloads passed. Elapsed times are above the earlier snapshot's; the
 machine load noted above may account for it, and they are not comparable with it (different

@@ -199,8 +199,26 @@ def check_data_directory(report: Report) -> None:
     _report_legacy_data_directory(report, data_root)
 
 
+def _is_windows_host() -> bool:
+    return platform.system() == "Windows" or os.name == "nt"
+
+
 def check_platform(report: Report) -> None:
-    is_windows = os.name == "nt"
+    is_windows = _is_windows_host()
+    if not is_windows and report.scope == "build":
+        # Linux (native or WSL 2) is a supported development route for the build scope
+        # (docs/LINUX_DEVELOPMENT.md); games still run on Windows only, so the run and all
+        # scopes keep the Windows host checks below.
+        report.info(
+            "HOST_PLATFORM",
+            f"{platform.system() or 'Non-Windows'} host: --scope build checks the Linux build tools "
+            "(gcc, make, python); building and running games is supported on Windows 11 x64 only",
+            detail=platform.platform(),
+            metadata={"system": platform.system(), "machine": platform.machine()},
+        )
+        _check_host_x64(report)
+        _check_python_version(report)
+        return
     if is_windows:
         report.pass_(
             "HOST_WINDOWS",
@@ -236,6 +254,12 @@ def check_platform(report: Report) -> None:
             if build is not None or product_type is not None
             else {},
         )
+    _check_host_x64(report)
+    _check_python_version(report)
+    check_powershell(report)
+
+
+def _check_host_x64(report: Report) -> None:
     machine = platform.machine().lower()
     if machine in {"amd64", "x86_64"}:
         report.pass_("HOST_X64", "x86-64 host architecture detected", detail=platform.machine())
@@ -244,9 +268,16 @@ def check_platform(report: Report) -> None:
             "HOST_X64",
             "Host architecture is not x86-64",
             detail=platform.machine(),
-            remediation="Use a supported Windows x64 environment.",
+            remediation="Use a supported x86-64 environment (Windows 11 x64, or Ubuntu 24.04 x86-64 for Linux development).",
         )
-    if (3, 14) <= sys.version_info[:2] < (3, 16):
+
+
+def _supported_python(version: tuple[int, int]) -> bool:
+    return (3, 14) <= version < (3, 16)
+
+
+def _check_python_version(report: Report) -> None:
+    if _supported_python((sys.version_info[0], sys.version_info[1])):
         report.pass_("PYTHON_VERSION", "Python version is supported", detail=sys.version.split()[0])
     else:
         report.fail(
@@ -255,7 +286,68 @@ def check_platform(report: Report) -> None:
             detail=sys.version.split()[0],
             remediation="Install CPython 3.15.x (or 3.14.x) and make `python` resolve to it.",
         )
-    check_powershell(report)
+
+
+#: The tools the Linux build route runs from PATH (docs/LINUX_DEVELOPMENT.md): `make CC=gcc ...`,
+#: whose recipes run `$(PYTHON)` (Makefile default `python`). Each is (code, name, Ubuntu fix).
+LINUX_BUILD_TOOLS: tuple[tuple[str, str, str], ...] = (
+    ("TOOL_GCC", "gcc", "Install the compiler: sudo apt install build-essential"),
+    ("TOOL_MAKE", "make", "Install GNU Make: sudo apt install build-essential"),
+)
+_PYTHON_VERSION_LINE = re.compile(r"^Python (\d+)\.(\d+)(?:\.\d+)?\S*$")
+
+
+def check_linux_build_tools(report: Report) -> None:
+    """On a non-Windows host: gcc, make and the Makefile's `python` are on PATH and run."""
+    python_name = os.environ.get("PYTHON") or "python"
+    tools = (
+        *LINUX_BUILD_TOOLS,
+        ("TOOL_PYTHON", python_name,
+         "Install CPython 3.15 (deadsnakes PPA: sudo apt install python3.15 python3.15-venv) and activate "
+         "the project environment so `python` resolves to it, or run make with PYTHON=python3.15"),
+    )
+    for code, name, remediation in tools:
+        found = shutil.which(name)
+        if not found:
+            report.fail(code, f"Required tool `{name}` was not found on PATH", remediation=remediation)
+            continue
+        executable = Path(found)
+        rc, version = _run_version([found, "--version"])
+        if rc != 0:
+            report.fail(
+                code,
+                f"`{name}` was found but did not run (`{name} --version` exited {rc})",
+                path=executable,
+                detail=version,
+                remediation=remediation,
+            )
+            continue
+        if code == "TOOL_PYTHON":
+            match = _PYTHON_VERSION_LINE.match(version.strip())
+            if match is None or not _supported_python((int(match.group(1)), int(match.group(2)))):
+                report.fail(
+                    code,
+                    f"`{name}` is {version.strip() or 'an unknown version'}; Python 3.14.x or 3.15.x is required",
+                    path=executable,
+                    detail=version,
+                    remediation=remediation,
+                )
+                continue
+        report.pass_(code, f"`{name}` is on PATH and runs", path=executable, detail=version)
+
+
+def check_build_toolchain(
+    report: Report,
+    msys_path: Path,
+    vulkan_sdk: Path | None,
+    root: Path | None = None,
+    sdl3_path: Path | None = None,
+) -> None:
+    """The build scope's toolchain checks: MSYS2 UCRT64 on Windows, the Linux build tools elsewhere."""
+    if _is_windows_host():
+        check_toolchain(report, msys_path, vulkan_sdk, root, sdl3_path=sdl3_path)
+    else:
+        check_linux_build_tools(report)
 
 
 DEEPEST_EXPECTED_BUILD_PATH = Path("build") / "synthetic" / "vfpu_oracle" / "nakagawa.stdout.txt"
