@@ -97,7 +97,7 @@ class TestReleaseManifest(unittest.TestCase):
         stb = families["stb-image"]
         self.assertEqual(stb["license"], "Unlicense")
         self.assertEqual(stb["origin"], "https://github.com/nothings/stb")
-        self.assertIn("003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5", stb["revision"])
+        self.assertIn("6b5799bae8a1fe3792691ef4b72ae26434c3e799", stb["revision"])
         self.assertEqual(stb["notice_path"], "third_party/stb/LICENSE")
         self.assertEqual(stb["evidence_path"], "third_party/stb/PROVENANCE.md")
         self.assertNotIn("kenney-ui-assets", families)
