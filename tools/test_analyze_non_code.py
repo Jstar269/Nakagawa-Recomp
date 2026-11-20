@@ -1219,10 +1219,13 @@ class PublicFixtureTest(unittest.TestCase):
     # sha256 over the name and bytes of every file codegen writes for each guest, as a PRX with
     # its relocation map (base 0x08804000) and as its code alone in a fixed-address executable.
     # The fixed-address cosim output changes because trace_function now stops after an
-    # out-of-range tail jump instead of absorbing the next function (PR24-U05).
+    # out-of-range tail jump instead of absorbing the next function (PR24-U05). Both cosim
+    # digests change because sqrt.s now runs in the guest's FCR31 environment: its three
+    # sqrt.s lines read `sr_fpu_sqrt_s(s->f[0],s->fcr31)` instead of `sqrtf(s->f[0])`, and
+    # nothing else in either output differs (F-17fdc127).
     MAIN_DIGESTS = {
-        ("cosim", "prx"): "bee3adc3e5eae434f8f847c5d01653496d026cbdfd471295640d72097415ac47",
-        ("cosim", "exec"): "c487f3214bc18e768cf1c33ab5eb8070337dd97adead840eed32981fa057b89b",
+        ("cosim", "prx"): "2acadc479f0e0e73862e92945a9fabff4778f4647025dad4ff4bf3d406be794e",
+        ("cosim", "exec"): "c4039d0677157b86785cbec9af1495bbef1a4f9029742d8cf0dc92d7f1db995e",
         ("display_smoke", "prx"): "1da0e0efdf775dff837b3198dea52a8aa7935f30b025a3e73b3c932710456b3d",
         ("display_smoke", "exec"): "5147b3e75ae67fd626117c140fab2b0be5b0e284e918fd814847eda530f90607",
         ("production_smoke", "prx"): "0b579f0cbb5a73ede2896d262891779005bbd3697700d1ae7af0f8007f9cea8d",

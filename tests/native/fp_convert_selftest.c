@@ -109,7 +109,7 @@ static const VfpuVector kVfpuVectors[] = {
  * so every row runs under all four host modes. */
 typedef struct ScalarOpVector {
     const char *name;
-    uint8_t op;               /* 0=add 1=sub 2=mul 3=div */
+    uint8_t op;               /* 0=add 1=sub 2=mul 3=div 4=sqrt (b unused) */
     uint32_t a_bits;
     uint32_t b_bits;
     uint32_t fcr31;
@@ -120,6 +120,7 @@ typedef struct ScalarOpVector {
 #define SR_FP_OP_SUB 1u
 #define SR_FP_OP_MUL 2u
 #define SR_FP_OP_DIV 3u
+#define SR_FP_OP_SQRT 4u
 
 static const ScalarOpVector kScalarOpVectors[] = {
     {"mul RM anchors RN",   SR_FP_OP_MUL, 0x3e97d668u, 0x42780000u, 0u,          0x419317b5u},
@@ -168,6 +169,21 @@ static const ScalarOpVector kScalarOpVectors[] = {
     {"mul inf * 0 NaN",     SR_FP_OP_MUL, 0xff800000u, 0x00000000u, 0u,          0x7fc00000u},
     {"add NaN operand kept",SR_FP_OP_ADD, 0x7fc00123u, 0x3f800000u, 0u,          0x7fc00123u},
     {"div qNaN by 0 kept",  SR_FP_OP_DIV, 0xffc00000u, 0x00000000u, 0u,          0xffc00000u},
+    /* sqrt.s runs in the same scoped window: the result follows the guest RM whatever the host
+     * mode is. sqrt(2) lies between 0x3FB504F3 and 0x3FB504F4, nearer the first. The directed
+     * rows are the helper's IEEE contract; PSP sqrt.s under RM other than RN is unmeasured. */
+    {"sqrt 2 RN",           SR_FP_OP_SQRT, 0x40000000u, 0u,         0u,          0x3fb504f3u},
+    {"sqrt 2 RZ",           SR_FP_OP_SQRT, 0x40000000u, 0u,         1u,          0x3fb504f3u},
+    {"sqrt 2 RP",           SR_FP_OP_SQRT, 0x40000000u, 0u,         2u,          0x3fb504f4u},
+    {"sqrt 2 RM",           SR_FP_OP_SQRT, 0x40000000u, 0u,         3u,          0x3fb504f3u},
+    {"sqrt 4 exact RP",     SR_FP_OP_SQRT, 0x40800000u, 0u,         2u,          0x40000000u},
+    /* A subnormal input keeps its weight (FS flushes results only, and no sqrt result is tiny). */
+    {"sqrt 2^-148 exact",   SR_FP_OP_SQRT, 0x00000002u, 0u,         0u,          0x1a800000u},
+    {"sqrt 2^-148 FS=1",    SR_FP_OP_SQRT, 0x00000002u, 0u,         0x01000000u, 0x1a800000u},
+    {"sqrt min subnormal RN",SR_FP_OP_SQRT, 0x00000001u, 0u,        0u,          0x1a3504f3u},
+    {"sqrt min subnormal RP",SR_FP_OP_SQRT, 0x00000001u, 0u,        0x01000002u, 0x1a3504f4u},
+    {"sqrt -0 keeps sign",  SR_FP_OP_SQRT, 0x80000000u, 0u,         0x01000003u, 0x80000000u},
+    {"sqrt +inf",           SR_FP_OP_SQRT, 0x7f800000u, 0u,         1u,          0x7f800000u},
 };
 
 /* CVT.S.W honors guest RM near the binary32 precision boundary. */
@@ -205,6 +221,7 @@ static uint32_t apply_scalar_op(unsigned op, float a, float b, uint32_t fcr31) {
         case SR_FP_OP_ADD: r = sr_fpu_add_s(a, b, fcr31); break;
         case SR_FP_OP_SUB: r = sr_fpu_sub_s(a, b, fcr31); break;
         case SR_FP_OP_MUL: r = sr_fpu_mul_s(a, b, fcr31); break;
+        case SR_FP_OP_SQRT: (void)b; r = sr_fpu_sqrt_s(a, fcr31); break;
         default:           r = sr_fpu_div_s(a, b, fcr31); break;
     }
     return sr_float_bits(r);
@@ -296,6 +313,17 @@ int main(void) {
                     csr_before, csr_after);
             g_failures++;
         }
+        /* sqrt(2) is inexact: a bare host sqrt leaves PE set in the caller's MXCSR. */
+        const uint32_t sqrt_before = sr_fpu_env_save();
+        (void)sr_fpu_sqrt_s(float_from_bits(0x40000000u), 2u);
+        const uint32_t sqrt_after = sr_fpu_env_save();
+        g_checks++;
+        if (sqrt_after != sqrt_before) {
+            fprintf(stderr, "FAIL: sqrt helper left host FP env modified "
+                            "(caller-before=0x%08x caller-after=0x%08x)\n",
+                    sqrt_before, sqrt_after);
+            g_failures++;
+        }
         float gradual = float_from_bits(0x00800000u) * float_from_bits(0x3f000000u);
         check_word("native gradual underflow survives helpers", "restoration",
                    sr_float_bits(gradual), 0x00400000u);
@@ -383,6 +411,8 @@ int main(void) {
             {"mul gradual out", SR_FP_OP_MUL, 0x00800000u, 0x3f000000u, 0x00000000u, 0x00400000u},
             {"mul subnormal in", SR_FP_OP_MUL, 0x00000001u, 0x40000000u, 0x00000000u, 0x00000002u},
             {"div 1/3 RZ guest", SR_FP_OP_DIV, 0x3f800000u, 0x40400000u, 0x00000001u, 0x3eaaaaaau},
+            {"sqrt 2 RN guest", SR_FP_OP_SQRT, 0x40000000u, 0u, 0x00000000u, 0x3fb504f3u},
+            {"sqrt subnormal in", SR_FP_OP_SQRT, 0x00000002u, 0u, 0x00000000u, 0x1a800000u},
         };
         const uint32_t csr_base = sr_fpu_env_save();
         char label[128];
@@ -504,6 +534,9 @@ int main(void) {
                sr_float_bits(sr_fpu_div_s(float_from_bits(0x3f800000u),
                                           float_from_bits(0x40400000u), 1u)),
                0x3eaaaaaau);
+    check_word("literal sqrt RP not folded to RN", "folding-guard",
+               sr_float_bits(sr_fpu_sqrt_s(float_from_bits(0x40000000u), 2u)),
+               0x3fb504f4u);
     check_word("literal cvt.s.w RP not folded to RN", "folding-guard",
                sr_float_bits(sr_fpu_cvt_s_w(16777217, 2u)),
                0x4b800001u);
