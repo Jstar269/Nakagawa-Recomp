@@ -53,7 +53,7 @@ static const char *player_runtime_root(const PlayerApp *app) {
     return (app && app->runtime_root[0]) ? app->runtime_root : NULL;
 }
 
-static bool player_app_data_root(const PlayerApp *app, char *out, size_t out_size) {
+bool player_app_data_root(const PlayerApp *app, char *out, size_t out_size) {
     if (!out || out_size == 0) return false;
     out[0] = '\0';
     if (app && app->runtime_root[0]) {
@@ -89,6 +89,21 @@ static const char *player_package_root(const PlayerApp *app, const GameRecord *g
         return app->showcase_root;
     }
     return player_runtime_root(app);
+}
+
+const char *player_app_package_root(const PlayerApp *app, const GameRecord *game) {
+    return player_package_root(app, game);
+}
+
+bool player_runtime_available(NkRuntimePackageStatus status, const GameRecord *game,
+                              const char *package_root) {
+    if (!game) return false;
+    if (status == NK_RUNTIME_PACKAGE_OK) return true;
+    /* A developer layout can stand in for a missing authentic package, never for an
+       experimental title or the enhanced build. */
+    return status == NK_RUNTIME_PACKAGE_MISSING && !game->is_experimental &&
+           !game->enhancement_package_id[0] &&
+           nk_launch_runtime_available(package_root, game->title_id);
 }
 
 bool player_app_title_profile_refusal_for_disc(
@@ -638,10 +653,7 @@ bool player_app_game_has_runtime(const PlayerApp *app, const GameRecord *game) {
         data_status != NK_LAUNCH_DATA_ROOT_NOT_REQUIRED) return false;
     NkRuntimePackageStatus status = player_app_validate_runtime_package(
         app, game, NULL, NULL, 0);
-    if (status == NK_RUNTIME_PACKAGE_OK) return true;
-    return status == NK_RUNTIME_PACKAGE_MISSING && !game->is_experimental &&
-           nk_launch_runtime_available(player_package_root(app, game),
-                                       game->title_id);
+    return player_runtime_available(status, game, player_package_root(app, game));
 }
 
 void player_app_sync_library(PlayerApp *app) {
@@ -5249,6 +5261,8 @@ static const struct { const char *code; const char *badge; } k_error_badges[] = 
     {"BUILD_TOOLCHAIN_MISSING", "Build tools needed"},
     {"PREREQUISITE_MANIFEST_INVALID", "Build tools damaged"},
     {"PREREQUISITE_BUNDLE_INVALID", "Build tools damaged"},
+    /* The tools are fine; the game they were downloaded for is gone. */
+    {"PREREQUISITE_TITLE_GONE", "Game not in library"},
     {"TOOLS_IN_USE", "Build tools busy"},
     {"TOOLS_REMOVE_FAILED", "Not removed"},
     /* Removing the downloaded tools names it when <data root>/prerequisites does not fit
@@ -6266,11 +6280,7 @@ void player_launch_work_run(PlayerLaunchWork *work) {
         : NK_RUNTIME_PACKAGE_MISSING;
     /* An enhanced build has no developer-layout stand-in: it is valid or the
        launch stops here. */
-    bool runtime_available = package_status == NK_RUNTIME_PACKAGE_OK ||
-        (package_status == NK_RUNTIME_PACKAGE_MISSING && !game->is_experimental &&
-         !game->enhancement_package_id[0] &&
-         nk_launch_runtime_available(root, game->title_id));
-    if (!runtime_available) {
+    if (!player_runtime_available(package_status, game, root)) {
         work->failed_step = PLAYER_LAUNCH_STEP_PACKAGE;
         return;
     }
@@ -6543,7 +6553,8 @@ static bool player_plan_take_entry(PlayerStagePlan *plan, const NkTitleEntry *en
     return true;
 }
 
-bool player_app_build_stage_plan(const GameRecord *game, PlayerStagePlan *plan) {
+bool player_app_build_stage_plan(const PlayerApp *app, const GameRecord *game,
+                                 PlayerStagePlan *plan) {
     if (!game || !plan) return false;
     memset(plan, 0, sizeof(*plan));
     if (!player_copy_bounded_text(plan->iso_path, sizeof(plan->iso_path), game->iso_path) ||
@@ -6563,9 +6574,13 @@ bool player_app_build_stage_plan(const GameRecord *game, PlayerStagePlan *plan) 
     if (game->is_experimental) {
         char profile_hash[65];
         char error[256];
+        /* The profile lives where the import wrote it and the build reads it: the
+           runtime root when one is set. The staged files stay in the per-user root. */
+        char profile_root[NK_MAX_PATH];
         NkTitleEntrySnapshot snapshot = {0};
-        valid = nk_title_manifest_read_experimental_profile(
-                    plan->user_data_root, game->disc_id, game->title_id,
+        valid = player_app_data_root(app, profile_root, sizeof(profile_root)) &&
+                nk_title_manifest_read_experimental_profile(
+                    profile_root, game->disc_id, game->title_id,
                     game->selected_executable, &snapshot, profile_hash, error,
                     sizeof(error)) &&
                 snapshot.entry.id && strcmp(snapshot.entry.id, game->title_id) == 0 &&
@@ -6604,7 +6619,7 @@ bool player_app_inspected_game_needs_staging(const PlayerApp *app) {
     const GameRecord *replaced = nk_library_find_replaced(&app->library, &merged);
     if (replaced) (void)player_merge_readded_game(replaced, &merged);
     PlayerStagePlan *plan = (PlayerStagePlan *)calloc(1, sizeof(*plan));
-    bool takes_data_from_disc = plan && player_app_build_stage_plan(&merged, plan) &&
+    bool takes_data_from_disc = plan && player_app_build_stage_plan(app, &merged, plan) &&
                                 player_stage_title_takes_data_from_disc(&plan->request);
     free(plan);
     if (!takes_data_from_disc) return false;
@@ -7475,7 +7490,10 @@ bool player_app_prereq_begin(PlayerApp *app, int game_index,
         (!python_missing && !toolchain_missing)) return false;
     memset(&app->prerequisites, 0, sizeof(app->prerequisites));
     app->prerequisites.phase = PLAYER_PREREQ_CONSENT;
-    app->prerequisites.game_index = game_index;
+    snprintf(app->prerequisites.disc_id, sizeof(app->prerequisites.disc_id), "%s",
+             app->games[game_index].disc_id);
+    snprintf(app->prerequisites.iso_path, sizeof(app->prerequisites.iso_path), "%s",
+             app->games[game_index].iso_path);
     app->prerequisites.bootstrap_python = python_missing;
     app->prerequisite_job_started = false;
     app->prerequisite_fetcher_started = false;
@@ -7576,6 +7594,35 @@ bool player_app_prereq_take_resume(PlayerApp *app) {
     if (!app || !app->prerequisites.resume_build_pending) return false;
     app->prerequisites.resume_build_pending = false;
     return true;
+}
+
+int player_app_prereq_resume_game(const PlayerApp *app) {
+    if (!app || !app->prerequisites.disc_id[0]) return -1;
+    return player_app_find_built_game(app, app->prerequisites.disc_id,
+                                      app->prerequisites.iso_path);
+}
+
+bool player_app_prereq_resume_build(PlayerApp *app) {
+    if (!app) return false;
+    int game_index = player_app_prereq_resume_game(app);
+    if (game_index < 0) {
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "The build tools are installed, but %s is no longer in your library, so "
+                 "nothing was built. Add the game again to build it.",
+                 app->prerequisites.disc_id[0] ? app->prerequisites.disc_id
+                                               : "the game they were for");
+        player_app_set_error(app, "PREREQUISITE_TITLE_GONE", "Game not in the library",
+                             message, "Back to library", VIEW_LIBRARY);
+        return false;
+    }
+    /* On a refusal the state helper has already opened the actionable card. */
+    return player_app_start_package_build(app, game_index);
+}
+
+bool player_app_build_session_is_prerequisite_fetch(const PlayerApp *app) {
+    return app && app->build_session.session_generation ==
+                      app->prerequisite_session_generation;
 }
 
 bool player_app_open_prerequisite_about(PlayerApp *app) {
@@ -8876,7 +8923,7 @@ bool player_app_apply_build_outcome(PlayerApp *app) {
     app->build_outcome_handled_generation = session->session_generation;
     /* The prerequisite fetcher reuses the session; its own card already
        reported the outcome. */
-    if (session->session_generation == app->prerequisite_session_generation) {
+    if (player_app_build_session_is_prerequisite_fetch(app)) {
         return false;
     }
     /* A Rebuild all build that failed or was cancelled: the old package is
@@ -10484,11 +10531,16 @@ bool player_psn_package_convert(const PlayerPsnPackage *package,
        share modes) nothing can write to, replace or delete the package meanwhile. Elsewhere,
        or when another program already has it open for writing, a writer is not stopped; the
        stamp and the second identity find any change. */
+    errno = 0;
     held = nk_platform_open_read_deny_writes(package->pbp_path, &shared);
     if (held == NULL) {
         player_psn_result(code, code_size, NK_DISC_READ_FAILED, message, message_size,
-                          "The package could not be opened for reading. Check that the drive "
-                          "it is on is connected, then add it again.");
+                          errno == EACCES
+                              ? "Access to the package was denied, so it could not be read. "
+                                "Check that your account may read the file (its permissions), "
+                                "then add it again."
+                              : "The package could not be opened for reading. Check that the "
+                                "drive it is on is connected, then add it again.");
         return false;
     }
     if (shared) {

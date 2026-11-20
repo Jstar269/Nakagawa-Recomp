@@ -167,7 +167,7 @@ class BuildWiringTests(unittest.TestCase):
         self.assertIn("TITLE_ICON_OBJ      = $(BUILD_DIR)/nakagawa_icon.o", windows[0])
         self.assertIn("PLAYER_ICON_OBJ     :=\nTITLE_ICON_OBJ      :=\n", windows[1])
         player_rule = makefile.split("\n$(PLAYER_EXE): $(PLAYER_SRCS)", 1)[1].split("\n\n", 1)[0]
-        self.assertIn("$(PLAYER_SRCS) $(PLAYER_ICON_OBJ) -lSDL3", player_rule)
+        self.assertIn("$(PLAYER_LINK_SRCS) $(PLAYER_ICON_OBJ) -lSDL3", player_rule)
         link_objects = makefile.split("\nLINK_OBJECTS = ", 1)[1].split("\n", 1)[0].split()
         self.assertIn("$(TITLE_ICON_OBJ)", link_objects)
         self.assertIn("%/nakagawa_icon.o: %/nakagawa_icon.rc assets/brand/nakagawa.rc assets/brand/nakagawa.ico", makefile)

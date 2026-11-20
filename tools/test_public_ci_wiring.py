@@ -664,6 +664,56 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
                          ["if: matrix.part == 'translation'"])
 
+    def test_glsl_shaders_are_reproduced_with_the_pinned_linux_glslc(self) -> None:
+        """The hosted job downloads the Vulkan SDK archive shader_embed.py pins, checks its SHA-256
+        before it unpacks only glslc, and runs the tool itself, so a SKIP (exit 77, any other
+        glslc) fails the step."""
+        sys.path.insert(0, str(ROOT / "tools"))
+        import shader_embed
+        release = shader_embed.GLSLC_RELEASE
+        self.assertTrue(release["linux_url"].startswith("https://sdk.lunarg.com/"))
+        self.assertIn(f"/{release['sdk']}/", release["linux_url"])
+        self.assertTrue(release["linux_member"].startswith(f"{release['sdk']}/"))
+        self.assertRegex(release["linux_sha256"], r"^[0-9a-f]{64}$")
+        step = _ci_step(_ci_job_blocks()["native_tools"], "Reproduce the GLSL shaders with the pinned glslc")
+        self.assertIsNotNone(step, "native_tools must reproduce the GLSL shaders")
+        assert step is not None
+        text = "\n".join(step)
+        self.assertIn("set -euo pipefail", text)
+        self.assertIn(release["linux_url"], text)
+        self.assertIn(f"printf '%s  %s\\n' {release['linux_sha256']} \"$archive\"", text)
+        self.assertIn("sha256sum --check --strict", text)
+        unpack = f'tar -xJf "$archive" -C "$sdk_dir" {release["linux_member"]}'
+        self.assertIn(unpack, text)
+        self.assertLess(text.index("sha256sum --check --strict"), text.index(unpack))
+        for shader_set in ("psp", "ui"):
+            self.assertIn(f"python tools/shader_embed.py verify --shader-set {shader_set} --recompile "
+                          f'--glslc "$sdk_dir/{release["linux_member"]}"', text)
+        self.assertNotIn("make ", text, "make maps exit 77 to a SKIP line; the step must see it")
+        self.assertNotIn("continue-on-error", text)
+        self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
+                         ["if: matrix.part == 'translation'"])
+
+    def test_parser_fuzzers_run_under_the_sanitizers_at_a_fixed_depth(self) -> None:
+        """F-6cc53528: native_tools runs make fuzz-parsers, whose build off Windows adds ASan and
+        UBSan with recovery off, at a fixed iteration count over the harness's fixed seed."""
+        step = _ci_step(_ci_job_blocks()["native_tools"], "Run the parser mutation fuzzers under ASan and UBSan")
+        self.assertIsNotNone(step, "native_tools must run the parser fuzzers under the sanitizers")
+        assert step is not None
+        text = "\n".join(step)
+        self.assertRegex(text, r'(?m)^ {8}run: make CC=gcc BUILD_ROOT="\$RUNNER_TEMP/fuzz-parsers-build" '
+                               r"FUZZ_ITERS=[1-9][0-9]* fuzz-parsers$")
+        self.assertNotIn("continue-on-error", text)
+        self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
+                         ["if: matrix.part == 'core'"])
+        recipe = (ROOT / "mk" / "native_ui_tests.mk").read_text(encoding="utf-8")
+        self.assertIn("else\nFUZZ_SAN_FLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all\nendif",
+                      recipe)
+        fuzz = recipe[recipe.index("\nfuzz-parsers:\n"):]
+        self.assertIn("$(FUZZ_SAN_FLAGS)", fuzz.split("\n\n", 1)[0])
+        harness = (ROOT / "tests" / "native" / "test_fuzz_parsers.c").read_text(encoding="utf-8")
+        self.assertIn("static uint64_t s_rng_state = 0x5EEDF007CAFE1234ULL;", harness)
+
     def test_ffmpeg_h264_media_selftest_is_wired_in_linux_ci(self) -> None:
         """The vendored H.264 subset must build and execute its real media fixture in CI.
 
@@ -1029,6 +1079,7 @@ _WINDOWS_SERIAL_GATES = {
     "Build and run HLE thread selftest": "CC=gcc VULKAN_SDK=/ucrt64 hle-thread-selftest",
     "Build and run flash0 font device selftest": 'PYTHONPATH=tools "$py" -m unittest -v test_flash0_font',
     "Build and run the Win32 Memory Stick containment selftest": 'PYTHONPATH=tools "$py" -m unittest -v test_vfs_c',
+    "Run the Windows-only Python tests": 'PYTHONPATH=tools "$py" -m unittest -v $tests 2>&1 | tee "$log"',
     "Build and run the Media Foundation H.264 media selftest": "CC=gcc VULKAN_SDK=/ucrt64 psmf-media-selftest",
     "Build and run the vendored FFmpeg H.264 media selftest on Windows":
         "CC=gcc VULKAN_SDK=/ucrt64 H264_FFMPEG=1 psmf-media-selftest",
@@ -1151,11 +1202,53 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
                 self.assertIsNotNone(part, f"{name}: a step with its own limit must be in a part")
                 required_part = _required(part, f"{name}: a step with its own limit must be in a part")
                 step_limits[required_part] = step_limits.get(required_part, 0) + int(limit.group(1))
-        self.assertEqual(step_limits, {"smoke": 15})
+        self.assertEqual(step_limits, {"smoke": 15, "selftests": 20})
         for group, (parts, timeout) in _windows_matrix_entries(self.block).items():
             with self.subTest(group=group):
                 self.assertEqual(timeout, sum(25 + step_limits.get(part, 0) for part in parts))
         self.assertIn("      fail-fast: false", text)
+
+    def test_windows_only_python_tests_run_from_the_planner_and_fail_closed(self) -> None:
+        """The Linux shards skip the Windows-only tests, so a Windows group runs exactly the
+        planner's list of them, stops on an empty or failing planner, and passes only on a
+        bare OK; a module the planner leaves out must still run whole in the step it names."""
+        import ci_test_shards
+        step = _required(self.steps.get("Run the Windows-only Python tests"),
+                         "windows_runtime must run the Windows-only Python tests")
+        text = "\n".join(line.strip() for line in step)
+        self.assertEqual(self.part_of("Run the Windows-only Python tests"), "selftests")
+        self.assertIn("shell: msys2 {0}", text)
+        self.assertIn("MSYS2_PATH_TYPE: inherit", text)
+        self.assertIn("set -euo pipefail", text)
+        planner = 'tests="$("$py" tools/ci_test_shards.py --windows-only | tr -d \'\\r\')"'
+        self.assertIn(planner, text)
+        self.assertLess(text.index(planner), text.index('test -n "$tests"'))
+        self.assertLess(text.index('test -n "$tests"'), text.index("-m unittest -v $tests"))
+        self.assertIn("tail -n 1 \"$log\" | tr -d '\\r' | grep -qx 'OK'", text)
+        self.assertNotIn("continue-on-error", text)
+        # The 8.3 short-name tests run, never skip: their volume creates short names, a probe
+        # proves it before any test, and their temporary folders are made on that volume.
+        order = [
+            'tmp="$(cygpath -m "$RUNNER_TEMP")/windows-only-tmp"',
+            'volume="${tmp%%/*}"',
+            'fsutil.exe 8dot3name set 2',
+            'fsutil.exe 8dot3name set "$volume" 0',
+            'mkdir -p "$tmp/Spaced short name probe"',
+            '"$py" - "$(cygpath -w "$tmp/Spaced short name probe")" <<\'PY\'',
+            'sys.exit(f"SHORT_NAMES_UNAVAILABLE: {sys.argv[1]} has no 8.3 alias")',
+            'export TMPDIR="$tmp"',
+            "-m unittest -v $tests",
+        ]
+        for earlier, later in zip(order, order[1:], strict=False):
+            with self.subTest(earlier=earlier):
+                self.assertIn(earlier, text)
+                self.assertLess(text.index(earlier), text.index(later))
+        installer = _ci_job_blocks()["windows_installer"]
+        for module, step_name in ci_test_shards.WINDOWS_ONLY_RUN_ELSEWHERE.items():
+            with self.subTest(module=module):
+                other = _required(_ci_step(installer, step_name) or _ci_step(self.block, step_name),
+                                  f"{step_name!r} no longer exists to run {module}")
+                self.assertRegex("\n".join(other), rf"(?m)-m unittest -v (tools\.)?{module}$")
 
     def test_grouped_fuzz_shards_rebuild_and_rerun_in_order(self) -> None:
         # Both shard steps regenerate the cases header and run `vfpu_fuzz_build`, a phony
@@ -1343,6 +1436,8 @@ _NATIVE_SERIAL_GATES = {
         "run: python tools/format_portability_check.py",
     "Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)":
         "run: NK_REQUIRE_SDL3=1 make CC=gcc native-core-tests",
+    "Run the parser mutation fuzzers under ASan and UBSan":
+        'run: make CC=gcc BUILD_ROOT="$RUNNER_TEMP/fuzz-parsers-build" FUZZ_ITERS=5000 fuzz-parsers',
     "Run title-configured HLE behaviour tests on Linux":
         'PYTHONPATH=tools python -m unittest -v test_hle_title_config_behavior 2>&1 | tee "$log"',
     "Compile GE frontend profiling mode":
@@ -1376,6 +1471,8 @@ _NATIVE_SERIAL_GATES = {
         'NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-fg-pass-selftest FSR3FG_PASS_ARGS="--cell G-R"',
     "Reproduce the FSR 3 shaders with the pinned DXC":
         'python tools/shader_embed.py verify --shader-set fsr3 --recompile --dxc "$dxc_dir/bin/dxc"',
+    "Reproduce the GLSL shaders with the pinned glslc":
+        'python tools/shader_embed.py verify --shader-set psp --recompile --glslc "$sdk_dir/1.4.363.0/x86_64/bin/glslc"',
     "Configure, build, and test CMake Linux player": 'ctest --test-dir "$player_build" --output-on-failure',
     "Build and run the Linux showcase headlessly": "make CC=gcc showcase-linux",
     "Build and run the profile-zero production route on Linux":
@@ -2732,6 +2829,9 @@ class CoverageWiringTests(unittest.TestCase):
         _GPU_TWIN_MUTANTS_STEP: "mutants",
         "Run Linux cosimulation mutation corpus": "mutants",
         "Reproduce the FSR 3 shaders with the pinned DXC": "shader bytes, no C",
+        "Reproduce the GLSL shaders with the pinned glslc": "shader bytes, no C",
+        "Run the parser mutation fuzzers under ASan and UBSan":
+            "sanitizer builds; native-core-tests measures the same harness",
         "Configure, build, and test CMake Linux player": "an end-to-end player route",
         "Build and run the Linux showcase headlessly": "an end-to-end player route",
         "Build and run the profile-zero production route on Linux": "an end-to-end route",

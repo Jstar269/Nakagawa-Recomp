@@ -186,6 +186,13 @@ by a computed name would escape this and must name the module literally. The exp
 flags (`build_system`, `python_tools`, ...) are unchanged; only `run_native` and
 `run_windows` skip.
 
+A test module that holds a Windows-only test (one `python tools/ci_test_shards.py
+--windows-only` selects; [What hosted CI does not run](#what-hosted-ci-does-not-run)) also routes `run_windows` on its
+own, so a change to it runs windows_runtime's `selftests` group on its own head; it routes
+neither `run_native` nor `run_installer`. `ci_paths.py` imports that selection
+(`_windows_only_test_modules`) instead of keeping a list; when it cannot be computed, every
+`tools/test_*.py` module routes `run_windows`.
+
 #### Trusted CodeQL on pull requests
 
 `Trusted CodeQL` is the producer of the required `CodeQL` status: GitHub's code scanning
@@ -445,10 +452,21 @@ gate runs in exactly one part with the command it had in the serial job:
 
 - `core`: the FFmpeg H.264 media selftest, the import-audit and provenance-gap gates, the
   portable objects and format check, and the native core suite and its coverage upload.
+  It also runs the parser mutation fuzzers under AddressSanitizer and UndefinedBehaviorSanitizer
+  with recovery off (`make CC=gcc FUZZ_ITERS=5000 fuzz-parsers`, audit finding F-6cc53528): the
+  `tests/native/test_fuzz_parsers.c` harness from its fixed seed with its per-stage caps, then
+  the PSMF producer and media selftests' mutation loops at the same depth. The run is bounded
+  and deterministic and reads no outside input; `native-core-tests` runs the same harness at 100
+  iterations without a sanitizer.
 - `translation`: the HLE, scheduler and dispatch selftests, cosimulation and its mutation
   corpus, the GPU selftests on lavapipe, the interpreter, VFPU, strbuf and ATRAC3+
   selftests, the microtest codegen gates, and the analysis IR module gate
-  (`tools/test_analysis_ir.py`'s `AnalysisIrModuleGateTests`). The Python shards have no
+  (`tools/test_analysis_ir.py`'s `AnalysisIrModuleGateTests`). It reproduces the embedded
+  SPIR-V byte for byte with the pinned compilers: the FSR 3 sets with the DXC release and the
+  GPU backend's and player UI's GLSL sets with the Vulkan SDK 1.4.363.0 glslc
+  (`tools/shader_embed.py`, `DXC_RELEASE` and `GLSLC_RELEASE`). Each archive is checked against
+  the SHA-256 written in the workflow before it is unpacked, and a SKIP (any other compiler)
+  fails the step. The Python shards have no
   PSPDEV and report that gate's showcase half as `NOT_RUN`; this part builds the showcase
   PRXs with PSPDEV and sets `NK_ANALYSIS_IR_SHOWCASE_REQUIRED=1`, so a missing PSPDEV fails
   the step instead of skipping it.
@@ -980,7 +998,8 @@ Some generators are listed but not run, and `--list` says why:
 
 - embedded shaders (`make shaders GLSLC=...`): regenerating needs `glslc`, whose
   version the manifest records; `make shader-verify` checks the committed files
-  of both glslc sets, the GPU backend's (`psp`) and the player UI's (`ui`);
+  of both glslc sets, the GPU backend's (`psp`) and the player UI's (`ui`), and
+  `native_tools`' `translation` part recompiles both with that glslc;
 - profile-zero prebuilt digests: rebuilding needs the pinned PSPDEV toolchain;
   CI checks `SHA256SUMS`;
 - the import-stub census and the benchmark report: both need private inputs
@@ -1146,14 +1165,23 @@ a recipe-only `Makefile` change is the only Python-routing change (`python_scope
 the change routes Python, needs no local full run; a change that routes no Python needs none
 either.
 
-No hosted job runs the Windows-only cases in `tools/test_asset_index_c.py`,
-`tools/test_scratch_dir.py`, `tools/test_player_package_route.py`,
-`tools/test_manager_safety.py`, `tools/test_visual_oracle.py`, `tools/test_library_sweep.py`
-and `tools/test_stage_install.py`. A change under `tools/`, `src/core/`, `src/player/`, the
-`Makefile` or any `.ps1` file (including the root `nk.ps1`) runs those modules locally
-on Windows. The full local suite builds the native fixtures and takes over an hour on
-Windows. Make-based tests need a POSIX `sh` on `PATH` (MSYS2 `usr/bin` or Git for Windows
-`bin`).
+The Python tests that skip on every host but Windows run in `windows_runtime`'s `selftests`
+group ("Run the Windows-only Python tests"). `python tools/ci_test_shards.py --windows-only`
+names them from their skip conditions: a `skipUnless` or `skipIf` decorator on the test or its
+class whose condition holds only on Windows (`os.name == "nt"`, `sys.platform == "win32"`,
+`platform.system() == "Windows"`, and their negations), or a top-level `if` in the test, its
+class's `setUp` or `setUpClass`, or the module that skips under such a condition. A new one
+joins the step without an edit; a skip that depends on a tool being present (`mingw32-make`,
+`pwsh`) is not a platform condition and is not selected. `tools/test_installer.py` is left out
+because `windows_installer` runs it whole with the pinned compiler. The step passes only on
+unittest's bare `OK`, so a test that skips there too fails it. Two of the tests need 8.3 short
+names, which the runner's temporary volume did not create: the step turns their creation on
+for the volume of a fresh folder under `RUNNER_TEMP` (`fsutil 8dot3name`; the hosted runner is
+elevated), makes the tests' temporary folders there (`TMPDIR`), and stops by name
+(`SHORT_NAMES_UNAVAILABLE`) when a new spaced folder there still has no 8.3 alias. The rest of
+those modules, and every other module, runs only in the Linux shards; the full local suite builds the native
+fixtures and takes over an hour on Windows. Make-based tests need a POSIX `sh` on `PATH`
+(MSYS2 `usr/bin` or Git for Windows `bin`).
 
 `make dmac-mutants` is also left to local runs: it builds `hle-thread-selftest` against each mutated copy
 of `src/rt/hle_cache_dma.c`, one selftest build per mutant (`NK_DMAC_MUTANTS_ONLY=<part of a name>` runs one).
@@ -1245,7 +1273,9 @@ whenever their jobs run; neither can change a gate's result.
     count in the unmutated objects they link.
   - Not C self-tests: the import and fake-success audit, the provenance gap check, the 32-bit
     format portability build (syntax only), the portable-object and GE profiling compiles, and
-    the FSR 3 shader reproduction.
+    the FSR 3 and GLSL shader reproductions.
+  - Sanitizer builds: the parser mutation fuzzers under ASan and UBSan (`fuzz-parsers`), whose
+    harness `native-core-tests` measures.
   - End-to-end routes: the CMake player build, test and smokes, the showcase, the installed
     player smoke, the profile-zero route, and the codegen gates (run_elf, the MIPS
     microtests, their golden traces and the framebuffer parity checks).

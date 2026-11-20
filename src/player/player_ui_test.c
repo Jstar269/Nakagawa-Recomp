@@ -733,6 +733,7 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            "bad_disc_notice=%d "
            "picker=%d package_building=%d package_cancelled=%d profile_fallback=%d "
            "controller_capturing=%d controller_conflicts=%d calibrating=%d "
+           "calib_stage=%d calib_samples=%d calib_elapsed=%d "
            "error_details_available=%d "
            "select_binding=%d start_binding=%d circle_binding=%d profile_save_notice=%d "
            "input_scope=%s input_titles=%d input_notice=%d "
@@ -776,6 +777,8 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            input_settings_is_capturing(&app->input_settings) ? 1 : 0,
            input_settings_has_conflicts(&app->input_settings) ? 1 : 0,
            input_settings_is_calibrating(&app->input_settings) ? 1 : 0,
+           (int)app->input_settings.calib.stage, app->input_settings.calib.sample_count,
+           app->input_settings.calib.elapsed_ms,
            app->last_error.details[0] ? 1 : 0,
            app->input_settings.profile.psp_buttons[INPUT_CONTROL_BTN_SELECT].primary.index,
            app->input_settings.profile.psp_buttons[INPUT_CONTROL_BTN_START].primary.index,
@@ -1111,6 +1114,13 @@ void player_ui_test_prepare_app(PlayerUiTest *t, PlayerApp *app) {
                                        "ENCRYPTED_EXECUTABLE: EBOOT.BIN is encrypted and "
                                        "built-in decryption stopped: KEY_REQUIRED.",
                                        NULL);
+        } else if (strcmp(t->error_code, "PREREQUISITE_TITLE_GONE") == 0) {
+            /* The build tools finished downloading for a title that has left the library
+               meanwhile: the resume's own card (player_app_prereq_resume_build). */
+            memset(&app->prerequisites, 0, sizeof(app->prerequisites));
+            snprintf(app->prerequisites.disc_id, sizeof(app->prerequisites.disc_id),
+                     "TEST80009");
+            (void)player_app_prereq_resume_build(app);
         } else {
             player_app_set_error(app, t->error_code, t->error_code,
                                  "Synthetic UI regression error state.",
@@ -1214,8 +1224,9 @@ void player_ui_test_report_update_phase(const PlayerUiTest *t, const PlayerApp *
     static PlayerReportPhase reported_report = PLAYER_REPORT_IDLE;
     if (t->mode && app->report.phase != reported_report) {
         reported_report = app->report.phase;
-        printf("[PLAYER_UI_TEST] problem_report=%d files=%d path=%s\n", (int)app->report.phase,
-               app->report.file_count, app->report.path[0] ? app->report.path : "none");
+        printf("[PLAYER_UI_TEST] problem_report=%d files=%d total=%d path=%s\n",
+               (int)app->report.phase, app->report.file_count, app->report.file_total,
+               app->report.path[0] ? app->report.path : "none");
         if (app->report.message[0]) {
             printf("[PLAYER_UI_TEST] problem_report_message=%s\n", app->report.message);
         }

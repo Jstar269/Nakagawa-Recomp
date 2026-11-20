@@ -1527,6 +1527,7 @@ class NativePlayerUiTests(unittest.TestCase):
         expect_failure: bool = False,
         runtime_root_arg: str | None = None,
         library_unwritable: bool = False,
+        config_files: dict[str, str] | None = None,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             scratch = Path(tmp)
@@ -1746,6 +1747,14 @@ class NativePlayerUiTests(unittest.TestCase):
                 config.mkdir(parents=True, exist_ok=True)
                 (config / "settings.json").write_text(
                     json.dumps({"schema_version": 2, **settings}), encoding="utf-8")
+            if config_files:
+                # Other files in the player's settings folder (the report tool lists every
+                # *.json there), written beside settings.json.
+                config = (localappdata / "Nakagawa" / "config" if os.name == "nt"
+                          else userprofile / "data" / "Nakagawa" / "config")
+                config.mkdir(parents=True, exist_ok=True)
+                for name, text in config_files.items():
+                    (config / name).write_text(text, encoding="utf-8")
             if stale_package:
                 synthetic_stale_package(runtime_root)
             if incompatible_package:
@@ -4821,6 +4830,36 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual([view for view, _ in self.screens(leave)], ["controller", "settings"],
                          "Back again leaves without saving")
 
+    def test_next_ui_calibration_rest_sampling_survives_a_visit_to_the_developer_log(
+            self) -> None:
+        """Audit 2026-11-17 F-4403fc76: the stick calibration runs on the frame's own clock.
+
+        The rest step samples the resting stick for about a second (duration_ms). Failing
+        before: calibration kept its own clock, which advanced only while its page was
+        shown, so F12 to the developer log and back gave one step as long as the whole time
+        away, and the rest step ended at once on its first frame back, after a few samples."""
+        focus = self.CONTROLLER_FOCUS
+        run = self.next_ui_run(
+            "controller",
+            ("WAIT_MS=100",) + self.TO_CALIBRATE +
+            ("KEY_RETURN", "KEY_F12", "WAIT_MS=2000", "KEY_F12", "WAIT_MS=100"),
+            settings={"developer_mode": True},
+        )
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertIn(focus["calibrate"], self.focus_trail(run))
+        views = [frame["view"] for frame in frames]
+        self.assertIn("developer_log", views, run["stdout"])
+        away = views.index("developer_log")
+        back = [frame for frame in frames[away:] if frame["view"] == "controller"]
+        self.assertTrue(back, run["stdout"])
+        self.assertEqual(back[0]["calibrating"], "1")
+        self.assertEqual(back[-1]["calib_stage"], "1",
+                         "the rest step is still sampling after the 2 s away")
+        self.assertLess(int(back[-1]["calib_elapsed"]), 1000, back[-1])
+        self.assertGreater(int(back[-1]["calib_samples"]), int(back[0]["calib_samples"]),
+                           "it keeps sampling on the frames after the return")
+
     def test_next_ui_keyboard_keys_rebind_refuse_reset_and_save(self) -> None:
         """#1299: KEYBOARD shows the keys; a chosen button takes the next key pressed,
         a key another control uses moves to it and that control takes its old key,
@@ -5311,6 +5350,37 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertNotIn(5, phases, stdout)
             self.assertEqual(phases[-1], 2, stdout)
             self.assertIn("about.txt", names)
+
+    def test_problem_report_counts_every_file_beyond_the_list(self) -> None:
+        """Audit 2026-11-17 F-8e71bba5: the page lists 16 of the report's files and says
+        "and N more" for the rest, counted from every file the ZIP holds.
+
+        The player keeps the names of the first 24 files only. Failing before: "and N more"
+        was counted from those 24, so a report with 30 settings files and its other files
+        said "and 8 more" while the ZIP held many more."""
+        config_files = {f"synthetic-{index:02d}.json": "{}" for index in range(30)}
+        with tempfile.TemporaryDirectory(prefix="nk-report-test-") as tmp:
+            env = {**self.CLI_INSTALL_ROOT, "NK_UI_TEST_REPORT_DATA_ROOT": tmp}
+            screenshots = os.environ.get("NAKAGAWA_PLAYER_UI_SP_SCREENSHOTS")
+            run = self.next_ui_run(
+                "problem-report", ("WAIT_REPORT=2|5|6,60000", "WAIT_MS=200"), env_extra=env,
+                config_files=config_files,
+                screenshot_path=(Path(screenshots) / "problem-report-more.bmp"
+                                 if screenshots else None))
+            stdout = run["stdout"]
+            assert isinstance(stdout, str)
+            steps, names = self.problem_report_steps(stdout)
+            phases = [int(step["problem_report"]) for step in steps]
+            if 6 in phases:
+                self.skipTest("no Python interpreter on this host, so the page shows the command")
+            self.assertEqual(phases[-1], 2, stdout)
+            total = int(steps[-1]["total"])
+            self.assertGreaterEqual(total, 30, "the 30 settings files and the report's own")
+            self.assertEqual(int(steps[-1]["files"]), 24, "the player keeps 24 names")
+            more = re.findall(r"next_ui_report_more lines=(\d+) total=(\d+) more=(\d+)", stdout)
+            self.assertTrue(more, stdout)
+            self.assertEqual(more[-1], ("24", str(total), str(total - 16)),
+                             "and N more counts every file beyond the 16 listed")
 
     def test_problem_report_that_cannot_start_its_worker_says_so_on_the_page(self) -> None:
         """#1849: if the report thread cannot start, the page shows a failed phase with the
@@ -7920,6 +7990,24 @@ class NativePlayerUiTests(unittest.TestCase):
         assert isinstance(other_frames, list)
         self.assertEqual(other_frames[0]["error_badge"], "Problem")
 
+    def test_tools_download_for_a_title_that_left_the_library_says_so(self) -> None:
+        """Audit 2026-11-17 F-7dc315bd: the build after a tools download resumes for the title
+        it was started for, by its disc ID and image. When that title has left the library,
+        the card says so by name instead of building another game or reporting a package
+        "completed without its library title"."""
+        screenshots = os.environ.get("NAKAGAWA_PLAYER_UI_SP_SCREENSHOTS")
+        run = self.run_player(
+            "library", ("WAIT_MS=50",), error_code="PREREQUISITE_TITLE_GONE",
+            screenshot_path=(Path(screenshots) / "prerequisite-title-gone.bmp"
+                             if screenshots else None))
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[0]["view"], "error")
+        self.assertEqual(frames[0]["error"], "PREREQUISITE_TITLE_GONE")
+        self.assertEqual(frames[0]["error_title"], "Game_not_in_the_library")
+        self.assertEqual(frames[0]["error_badge"], "Game_not_in_library")
+        self.assertEqual(frames[0]["package_building"], "0", "nothing was built")
+
     def test_failed_close_confirmation_needs_a_second_explicit_close(self) -> None:
         run = self.run_player(
             "library",
@@ -8330,6 +8418,106 @@ class FirstRunRouteTests(unittest.TestCase):
             self.assertTrue(library["games"][0]["assets_staged"])
             self.assertTrue((user_root / "games" / "ULUS99996" / "xbdata" / "menu" /
                              "assets.xb.d" / "data" / "raw.bin").is_file())
+
+    def test_dropped_uncatalogued_disc_keeps_its_profile_under_the_runtime_root(self) -> None:
+        """Audit 2026-11-17 F-1fc4e8af: the runtime root owns experimental profiles.
+
+        With --user-data-root and --runtime-root apart, the profile of an uncatalogued disc
+        is written where the build's preflight, the package build and the manifest load at
+        start read it: under the runtime root. Failing before: the writer used the per-user
+        data folder, so the profile landed under --user-data-root and the title page's
+        preflight refused the build with TITLE_PROFILE."""
+        with tempfile.TemporaryDirectory(prefix=".first-run-runtime-profile-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            iso = scratch / "experimental.iso"
+            executable = build_plain_mips_elf() + bytes(i % 251 for i in range(70000))
+            create_test_iso_with_executables(
+                iso, executable, disc_id="ULUS99995", title="Runtime Root Profile"
+            )
+            user_root = scratch / "user data"
+            user_root.mkdir()
+            runtime_root = scratch / "runtime"
+            completed = subprocess.run(
+                [str(PLAYER_EXE), f"--user-data-root={user_root}", f"--iso={iso}",
+                 "--ui-test-events=WAIT_VIEW=experimental,15000;WAIT_MS=100;KEY_RETURN;"
+                 "WAIT_VIEW=library,10000;WAIT_MS=300;KEY_RETURN;WAIT_MS=500;QUIT",
+                 f"--ui-test-screenshot={scratch / 'last-frame.bmp'}",
+                 f"--runtime-root={runtime_root}"],
+                cwd=ROOT, env=self.scratch_env(scratch), capture_output=True, text=True,
+                timeout=120, check=False,
+            )
+            output = completed.stdout + completed.stderr
+            self.assertEqual(completed.returncode, 0, output)
+            self.assertTrue(
+                (runtime_root / "experimental" / "ULUS99995" / "profile.json").is_file(), output)
+            self.assertFalse((user_root / "experimental").exists(),
+                             "nothing of the profile is written under the user-data root")
+            library = json.loads((user_root / "library.json").read_text(encoding="utf-8"))
+            self.assertEqual([game["disc_id"] for game in library["games"]], ["ULUS99995"])
+            self.assertTrue(library["games"][0]["is_experimental"])
+            title_frames = [frame for frame in parse_frames(completed.stdout)
+                            if frame.get("next_route") == "2"]
+            self.assertTrue(title_frames, output)
+            self.assertNotEqual(title_frames[-1]["next_preflight_code"], "TITLE_PROFILE",
+                                title_frames[-1]["next_preflight_detail"])
+
+    def launch_index_layout_run(self, scratch: Path,
+                                play: dict[str, str] | None) -> subprocess.CompletedProcess:
+        """--launch-index=0 on a library of the catalogued TEST00006 whose runtime root holds
+        only a developer layout (no v1 package) and the title's 60 FPS enhancement package;
+        `play` is the title's saved play choice (settings.json title_play), if any."""
+        user_root = scratch / "user data"
+        user_root.mkdir(exist_ok=True)
+        if play is not None:
+            # --user-data-root keeps the settings in its config folder.
+            (user_root / "config").mkdir(exist_ok=True)
+            (user_root / "config" / "settings.json").write_text(json.dumps(
+                {"schema_version": 2, "enhanced": {"default": "authentic"},
+                 "title_play": {"TEST00006": play}}), encoding="utf-8")
+        (user_root / "library.json").write_text(json.dumps({"schema_version": 1, "games": [
+            {"disc_id": "TEST00006", "title_name": "Synthetic Display Smoke",
+             "iso_path": str(scratch / "display.iso"), "title_id": "display-smoke-v1"},
+        ]}), encoding="utf-8")
+        runtime_root = scratch / "runtime"
+        layout = runtime_root / "build" / "display-smoke-v1"
+        layout.mkdir(parents=True, exist_ok=True)
+        # The launcher finds a developer layout by path existence; these empty files are
+        # synthetic sentinels.
+        (layout / "display-smoke-v1.exe").write_bytes(b"")
+        (layout / "display-smoke-v1").write_bytes(b"")
+        (layout / "display-smoke-v1_image.bin").write_bytes(b"")
+        (runtime_root / "tests" / "fixtures" / "display_smoke").mkdir(parents=True,
+                                                                      exist_ok=True)
+        enhancements = runtime_root / "enhancements"
+        enhancements.mkdir(exist_ok=True)
+        (enhancements / "test00006-60hz.json").write_text(
+            json.dumps({"id": "fixture-60hz", "target_title_id": "display-smoke-v1"}),
+            encoding="utf-8")
+        return self.run_route(scratch, [f"--user-data-root={user_root}",
+                                        "--launch-index=0", "--headless-launch"])
+
+    def test_launch_index_never_stands_a_developer_layout_in_for_an_enhanced_build(
+            self) -> None:
+        """Audit 2026-11-17 F-f8907a6e: one rule says whether a title's runtime is there.
+
+        A developer layout stands in for a missing authentic package, never for an enhanced
+        build. Failing before: --launch-index left the enhancement term out, so for a title
+        saved as Ace (60 FPS game logic) it printed "PLAY NOW available" although its enhanced
+        build is missing, and failed later in the launch worker instead of exiting 3."""
+        with tempfile.TemporaryDirectory(prefix=".first-run-enhanced-layout-", dir=ROOT) as tmp:
+            enhanced = self.launch_index_layout_run(Path(tmp), {"mode": "ace"})
+        output = enhanced.stdout + enhanced.stderr
+        self.assertEqual(enhanced.returncode, 3, output)
+        self.assertIn("Launch index 0 has no prepared runtime; PLAY NOW is unavailable.",
+                      enhanced.stderr)
+        self.assertNotIn("PLAY NOW available", enhanced.stdout)
+
+        # The same layout still stands in for the authentic package.
+        with tempfile.TemporaryDirectory(prefix=".first-run-authentic-layout-", dir=ROOT) as tmp:
+            authentic = self.launch_index_layout_run(Path(tmp), None)
+        self.assertIn("Launch index 0: PLAY NOW available for TEST00006", authentic.stdout,
+                      authentic.stdout + authentic.stderr)
+        self.assertNotEqual(authentic.returncode, 3, authentic.stdout + authentic.stderr)
 
     def test_launch_index_on_an_empty_library_fails_with_a_clear_message(self) -> None:
         with tempfile.TemporaryDirectory(prefix=".first-run-empty-", dir=ROOT) as tmp:

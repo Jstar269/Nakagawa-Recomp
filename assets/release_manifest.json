@@ -106,7 +106,7 @@
       "revision": "35b5c392cc15456736c440a68dbe073178bbffe0",
       "notice_path": "third_party/dr_libs/LICENSE.txt",
       "evidence_path": "third_party/dr_libs/PROVENANCE.md",
-      "disposition": "vendored_source_only; selftests only, not linked into the player or runtime"
+      "disposition": "vendored_source_only; selftests only, not linked into the player or runtime; dr_wav.h carries four later upstream fixes as LOCAL DELTA (third_party/dr_libs/PROVENANCE.md)"
     },
     {
       "id": "monocypher-ed25519",
@@ -116,7 +116,7 @@
       "revision": "4.0.3 / ab2b16dd619ad5f6979a4fbe69cfa324a6fcc35f",
       "notice_path": "third_party/monocypher/LICENCE.md",
       "evidence_path": "third_party/monocypher/PROVENANCE.md",
-      "disposition": "linked into the player for the signed update check (src/core/nk_sig.c, mk/pipeline.mk UPDATE_SIG_SRCS); upstream dual BSD-2-Clause OR CC0-1.0, CC0-1.0 elected"
+      "disposition": "linked into the player for the signed update check (src/core/nk_sig.c, mk/pipeline.mk UPDATE_SIG_SRCS); upstream dual BSD-2-Clause OR CC0-1.0, CC0-1.0 elected; monocypher.c carries upstream commit 55158d37 as a LOCAL DELTA (third_party/monocypher/PROVENANCE.md)"
     },
     {
       "id": "sdl3",
@@ -364,7 +364,7 @@
       "presence": "required",
       "source_path": "SDL3.dll",
       "upstream_origin": "https://github.com/libsdl-org/SDL",
-      "license": "Zlib",
+      "license": "Zlib AND BSD-3-Clause",
       "notice_path": "NOTICE.md",
       "disposition": "included",
       "public_scope_included": true,
@@ -1272,7 +1272,7 @@
       "disposition": "included",
       "public_scope_included": true,
       "optional": false,
-      "comment": "Upstream LICENSE from nothings/stb 003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5, byte-identical; the project uses stb_image under the Unlicense option (third_party/stb/PROVENANCE.md)."
+      "comment": "Upstream LICENSE from nothings/stb aae9fee018211439eec93986e4dd2d9201e9b82c (the last commit to change it; the same file as at the stb_image.h pin 6b5799bae8a1fe3792691ef4b72ae26434c3e799), byte-identical; the project uses stb_image under the Unlicense option (third_party/stb/PROVENANCE.md)."
     },
     {
       "id": "fidelityfx-sdk-ffx-frameinterpolation-compute-game-vector-field-inpainting-pyramid-pass",

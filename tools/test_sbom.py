@@ -169,6 +169,9 @@ class TestSBOMTooling(unittest.TestCase):
         )
         self.assertNotIn(">=", by_name["SDL3.dll"]["version"])
         self.assertEqual(by_name["SDL3.dll"]["version"], "NOASSERTION")
+        # The release manifest's sdl3-runtime row replaces the inventory record, so its licence
+        # must name everything the inventory records for SDL3.dll (zlib, yuv2rgb's and hidapi's BSD).
+        self.assertEqual(by_name["SDL3.dll"]["license"], inventory["native"]["dlls"]["sdl3.dll"]["spdx_id"])
 
     def test_python_license_classifier_does_not_guess_lgpl_or_agpl_as_gpl(self):
         classifiers = (

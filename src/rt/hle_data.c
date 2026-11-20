@@ -2006,13 +2006,10 @@ char *data_normalize_guest_key(const char *guest_path, int *wanted_variant) {
     size_t length = strlen(p);
     char *key = (char *)malloc(length + 1u);
     if (!key) { free(localized); return NULL; }
-    for (size_t n = 0; n < length; n++) {
-        char ch = p[n];
-        if (ch == '\\') ch = '/';
-        if (ch >= 'A' && ch <= 'Z') ch += 32;
-        key[n] = ch;
-    }
-    key[length] = 0;
+    memcpy(key, p, length + 1u);
+    /* A Shift-JIS pair keeps its trail byte, so 0x83 0x41 and 0x83 0x61 are two keys
+     * (audit 2026-11-17 F-27cbd9cd). */
+    sr_vfs_fold_guest_key(key);
     free(localized);
     return key;
 }
@@ -2548,10 +2545,8 @@ int sr_enhancement_file_register(const char *disc_path, const uint8_t stock_sha2
         s_enhancement_file_count >= capacity)
         return 0;
     HleEnhancementFile *entry = &s_enhancement_files[s_enhancement_file_count++];
-    for (size_t i = 0; i <= length; i++) {
-        char c = disc_path[i];
-        entry->key[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-    }
+    memcpy(entry->key, disc_path, length + 1u);
+    sr_vfs_fold_guest_key(entry->key);
     memcpy(entry->stock_sha256, stock_sha256, 32u);
     entry->data = data;
     entry->size = size;

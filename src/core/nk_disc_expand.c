@@ -1125,10 +1125,12 @@ bool nk_disc_source_stamp(const char *path, NkDiscSourceStamp *out) {
     return true;
 }
 
-/* Equal, or not reported by one of the two stamps (0): never a refusal for a
-   file system that does not keep the field. */
+/* Equal. 0 in both stamps is a field the file system does not keep, so it
+   never refuses such a file; 0 in one stamp only means the field could be
+   read once and not the other time (the file was replaced, moved to another
+   file system, or could not be reached), which is a change. */
 static bool stamp_field_same(uint64_t before, uint64_t now) {
-    return before == 0 || now == 0 || before == now;
+    return before == now;
 }
 
 bool nk_disc_source_unchanged(const char *path, const NkDiscSourceStamp *before,
@@ -1472,8 +1474,15 @@ bool nk_disc_import(const char *source, const char *data_root,
        meanwhile. Elsewhere, or when another program already has it open for
        writing, a writer is not stopped, and the stamp and the second identity
        find any change. */
+    errno = 0;
     held = nk_platform_open_read_deny_writes(source, &shared);
     if (!held) {
+        if (errno == EACCES) {
+            return disc_fail(status, NK_DISC_READ_FAILED,
+                             "Access to the disc image was denied, so it could not be read. "
+                             "Check that your account may read the file (its permissions), "
+                             "then add it again.");
+        }
         return disc_fail(status, NK_DISC_READ_FAILED,
                          "The disc image could not be opened for reading. Check that the drive "
                          "it is on is connected, then add it again.");

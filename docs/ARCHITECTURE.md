@@ -597,6 +597,11 @@ The live Makefile currently uses:
   `fno-strict-aliasing`, include paths, feature defines, and warnings.
 - **`ge.c`:** a dedicated `-O2 -fno-math-errno` compile rule for software-rasterizer speed.
 - **Portable-core objects:** a separate host-neutral `PORTABLE_CORE_CFLAGS` set, currently `-O0`.
+- **The player:** `RUNTIME_OPT` (direct-Make default `-O0`) for every source but
+  `src/core/nk_disc_expand.c`, which is compiled on its own at `PLAYER_DISC_EXPAND_OPT` (`-O2`):
+  adding a compressed disc image or a PSN package hashes every byte of it there, five to six
+  times faster than at `-O0` on a 1 to 4 GiB file. `CMakeLists.txt` gives that file the same level, and
+  `tools/test_build_system_parity.py` checks that the two agree.
 
 The opt-in guest-PC profiler uses an explicit occupied bit, so guest PC `0x00000000` is a valid
 profile key for zero-based images. Its bounded 64-probe lookup reports `lookup_drops` in every
