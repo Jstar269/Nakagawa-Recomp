@@ -116,7 +116,7 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   its way finishes.
 - **User agent.** Each request names the player in the form RetroAchievements documents for clients:
   `NakagawaRecomp/<numeric version> (<operating system and version>) rcheevos/<version>`, for example
-  `NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5.0`. A version that is not numeric, or a
+  `NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5`. A version that is not numeric, or a
   system part that would break the form, means no request is sent.
 - **Sign-in.** The player sends the RetroAchievements user name and password once to exchange them for a
   token, clears the password from its temporary buffers and from rcheevos' request buffer once the request

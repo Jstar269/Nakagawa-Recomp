@@ -1881,6 +1881,30 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         bridge = (REPO_ROOT / "src" / "core" / "nk_achievements.c").read_text(encoding="utf-8")
         self.assertIn("rc_client_get_user_agent_clause(", bridge)
 
+    def test_documented_user_agent_names_the_vendored_rcheevos(self) -> None:
+        # The rcheevos part of the user agent is whatever the vendored rc_version.h says
+        # (achievements-selftest checks the clause against RCHEEVOS_VERSION_STRING); the examples
+        # the documentation gives must name that same version, in its short form when the patch
+        # number is 0, so an rcheevos update that changes it fails here until they follow.
+        version_h = (REPO_ROOT / "third_party" / "rcheevos" / "src" / "rc_version.h").read_text(
+            encoding="utf-8")
+        parts = {}
+        for name in ("MAJOR", "MINOR", "PATCH"):
+            match = re.search(rf"^#define RCHEEVOS_VERSION_{name} (\d+)$", version_h, re.MULTILINE)
+            self.assertIsNotNone(match, f"rc_version.h defines RCHEEVOS_VERSION_{name}")
+            assert match is not None
+            parts[name] = int(match.group(1))
+        self.assertIn("#if RCHEEVOS_VERSION_PATCH > 0", version_h)
+        expected = f"rcheevos/{parts['MAJOR']}.{parts['MINOR']}"
+        if parts["PATCH"] > 0:
+            expected += f".{parts['PATCH']}"
+        for rel in ("docs/SETUP.md", "docs/ONLINE_FEATURES.md"):
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            examples = re.findall(r"NakagawaRecomp/\d[\d.]* \([^)]*\) (rcheevos/[\d.]+)", text)
+            self.assertTrue(examples, f"{rel} gives an example user agent")
+            self.assertEqual(sorted(set(examples)), [expected],
+                             f"{rel}'s example user agent names the vendored rcheevos")
+
     def test_achievements_are_softcore_only_and_off_by_default(self) -> None:
         # Owner decision 2026-11-20: softcore only. Nothing turns hardcore on: the bridge only ever
         # turns it off, and neither the player nor the runtime has a setting, flag or variable

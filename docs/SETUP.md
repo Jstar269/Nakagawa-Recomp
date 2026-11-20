@@ -1534,7 +1534,7 @@ are off for a game started with cheats on or with a package that changes its spe
 the game's page says why. Turning the switch off sends nothing more: a request waiting its turn is dropped, and only one already on its way finishes.
 Its requests identify themselves in the form RetroAchievements documents:
 `NakagawaRecomp/<version> (<operating system and version>) rcheevos/<version>`, such as
-`NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5.0`. No telemetry is sent.
+`NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5`. No telemetry is sent.
 To turn it on, open **Settings > Online and developer options**, switch on **Achievements**, read and accept the consent screen,
 then choose **Sign in**. The game's page lists the core achievements after the set loads.
 

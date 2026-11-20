@@ -16,6 +16,7 @@
 #include "rc_client.h"
 #include "rc_consoles.h"
 #include "rc_error.h"
+#include "rc_version.h"
 
 /* rhash's MD5, which signs a progress state's DONE chunk; vendored, not a public header. */
 #include "../../third_party/rcheevos/src/rhash/md5.h"
@@ -2139,6 +2140,9 @@ static void test_user_agent_names_this_player(void) {
     snprintf(expected, sizeof expected, "NakagawaRecomp/0.1.0 (Windows 10.0.26100) %s", clause);
     char ua[NK_ACH_USER_AGENT_MAX];
     CHECK(strncmp(clause, "rcheevos/", 9u) == 0, "rc_client's clause names rcheevos: %s", clause);
+    /* The version in the user agent is the vendored one, not a copy that could drift from it. */
+    CHECK(strcmp(clause, "rcheevos/" RCHEEVOS_VERSION_STRING) == 0,
+          "the clause \"%s\" names the vendored rcheevos " RCHEEVOS_VERSION_STRING, clause);
     CHECK(nk_ach_user_agent("0.1.0-dev", "Windows 10.0.26100", ua, sizeof ua) &&
               strcmp(ua, expected) == 0,
           "the user agent is \"%s\", not \"%s\"", ua, expected);
