@@ -232,8 +232,9 @@ static void test_deadzone_and_inversion_vectors(void) {
     printf("[INPUT_PROFILE_TEST] Subtest 2 PASSED!\n");
 }
 
-/* The stick byte map is symmetric around 128 (audit F-4b9e3c3e): with no dead zone, 0 and
- * +-1 give 128, +32767 gives 255, -32768 gives 0, and f(-x) = 256 - f(x) for x in 1..32767,
+/* The stick byte map is symmetric around 128 (audit F-4b9e3c3e): with no dead zone, every
+ * value from -129 to 129 gives 128, +32767 gives 255, -32768 gives 0, and f(-x) = 256 - f(x)
+ * for x in 1..32767,
  * through the profile's transform and through the shared map alike. Against the truncating map
  * it replaced, ((x + 32768) * 255 / 65535), no byte is lower, a positive value's byte is at most
  * one unit higher and a negative value's at most two. */

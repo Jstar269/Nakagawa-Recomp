@@ -3573,8 +3573,8 @@ zone smaller than the game's, the first live host count reaches the edge of the 
   `deadzone_inner` from the active input profile through the host's own byte map, `round(deadzone_inner * 127 /
   32767)`, 30 by default, and 0 without an SDL3 presenter. That byte map (`nk_input_profile_axis_byte` in
   `src/core/nk_input_profile.h`, the one every module uses) is symmetric about 128: a host value `x` from 1 to 32767
-  gives the byte `128 + round(x * 127 / 32767)` and `-x` gives 256 minus that, 0 and +-1 give 128, and -32768 alone
-  gives 0. So with the default 7849 the first live value is 30 counts from rest on both sides: a push of 30 is still
+  gives the byte `128 + round(x * 127 / 32767)` and `-x` gives 256 minus that, every value from -129 to 129 gives
+  128, and -32768 alone gives 0. So with the default 7849 the first live value is 30 counts from rest on both sides: a push of 30 is still
   at `m = D` and reaches the game at `G - 1`, and both sides first move the player at 32 counts. A `D` below 0 or of
   127 or more reads as 0, and any `D` from 0 to 126 is used as it is, at or above `G` too. With `h = b - 128` per
   axis, clamped to -127..127, and `m = max(|hx|, |hy|)`:

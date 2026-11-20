@@ -332,8 +332,8 @@ typedef struct {
 /**
  * @brief The PSP stick byte for a host axis value: the one byte map every module uses.
  *
- * Symmetric rounding around 128: 0 and +-1 give 128; x in 1..32767 gives
- * 128 + round(x * 127 / 32767) and -x gives 256 minus that, so +32767 gives 255 and
+ * Symmetric rounding around 128: x in 1..32767 gives 128 + round(x * 127 / 32767) and -x
+ * gives 256 minus that, so every value from -129 to 129 gives 128, +32767 gives 255 and
  * -32767 gives 1; -32768 alone gives 0. A value below -32768 reads as -32768 and one above
  * 32767 as 32767. x * 127 / 32767 is never n + 1/2 (254 * x is even, an odd multiple of
  * 32767 is odd), so the rounding needs no tie rule.
