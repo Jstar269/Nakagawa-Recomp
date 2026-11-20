@@ -40,6 +40,15 @@ void sr_oor(uint32_t address, uint32_t value, int store) {
 #include <unistd.h>
 #endif
 
+/* The stick byte for a host axis value outside every dead zone, computed independently of
+ * nk_input_profile_axis_byte, in floating point: 128 + round(x * 127 / 32767) for x >= 0,
+ * 256 minus the byte of -x for x in -32767..-1, and 0 for -32768. */
+static uint8_t stick_reference_byte(int x) {
+    if (x == -32768) return 0;
+    const int k = (int)((x < 0 ? -x : x) * 127.0 / 32767.0 + 0.5);
+    return (uint8_t)(x < 0 ? 128 - k : 128 + k);
+}
+
 /* -----------------------------------------------------------------------------
  * Subtest 1: Default Profile Equals Current Runtime Mapping
  * -------------------------------------------------------------------------- */
@@ -115,11 +124,12 @@ static void test_default_equals_current_mapping(void) {
         assert((nk_input_profile_eval_buttons(&profile, host_buttons, host_axes) & 0x0200) == 0x0200);
     }
 
-    /* Test analog axes transform across full 16-bit domain vs sdl3vk.c formula (lines 520-521) */
+    /* Test analog axes transform across the full 16-bit domain: 128 inside the dead zone,
+       symmetric rounding around 128 outside it (stick_reference_byte). */
     for (int ax = -32768; ax <= 32767; ax++) {
         uint8_t expected = 128;
         if (ax < -7849 || ax > 7849) {
-            expected = (uint8_t)(((int32_t)ax + 32768) * 255 / 65535);
+            expected = stick_reference_byte(ax);
         }
         uint8_t actual = nk_input_profile_transform_axis((int16_t)ax, 7849, 0, false);
         assert(actual == expected);
@@ -135,8 +145,9 @@ static void test_default_equals_current_mapping(void) {
         uint8_t lx = 0, ly = 0;
         nk_input_profile_eval_analog(&profile, host_axes, &lx, &ly);
 
-        uint8_t exp_lx = (uint8_t)(((int32_t)16000 + 32768) * 255 / 65535);
-        uint8_t exp_ly = (uint8_t)(((int32_t)-16000 + 32768) * 255 / 65535);
+        uint8_t exp_lx = stick_reference_byte(16000);
+        uint8_t exp_ly = stick_reference_byte(-16000);
+        assert(exp_lx == 190 && exp_ly == 66);
         assert(lx == exp_lx);
         assert(ly == exp_ly);
     }
@@ -187,8 +198,8 @@ static void test_deadzone_and_inversion_vectors(void) {
     assert(nk_input_profile_transform_axis(32767, 5000, 0, false) == 255);
     assert(nk_input_profile_transform_axis(-32768, 5000, 0, false) == 0);
 
-    /* Inversion vectors */
-    assert(nk_input_profile_transform_axis(32767, 5000, 0, true) == 0);
+    /* Inversion vectors. An inverted full push is -32767, which gives 1: only -32768 gives 0. */
+    assert(nk_input_profile_transform_axis(32767, 5000, 0, true) == 1);
     assert(nk_input_profile_transform_axis(-32768, 5000, 0, true) == 255);
     assert(nk_input_profile_transform_axis(5001, 5000, 0, true) < 128);
     assert(nk_input_profile_transform_axis(-5001, 5000, 0, true) > 128);
@@ -219,6 +230,56 @@ static void test_deadzone_and_inversion_vectors(void) {
     assert(!nk_input_profile_eval_trigger(-1000, 8192));
 
     printf("[INPUT_PROFILE_TEST] Subtest 2 PASSED!\n");
+}
+
+/* The stick byte map is symmetric around 128 (audit F-4b9e3c3e): with no dead zone, every
+ * value from -129 to 129 gives 128, +32767 gives 255, -32768 gives 0, and f(-x) = 256 - f(x)
+ * for x in 1..32767,
+ * through the profile's transform and through the shared map alike. Against the truncating map
+ * it replaced, ((x + 32768) * 255 / 65535), no byte is lower, a positive value's byte is at most
+ * one unit higher and a negative value's at most two. */
+static void test_stick_byte_rounding_is_symmetric(void) {
+    printf("[INPUT_PROFILE_TEST] Stick byte map: symmetric rounding around 128...\n");
+    static const struct { int raw; uint8_t byte; } pinned[] = {
+        {0, 128}, {1, 128}, {-1, 128}, {129, 128}, {-129, 128}, {130, 129}, {-130, 127},
+        {16000, 190}, {-16000, 66}, {32767, 255}, {-32767, 1}, {-32768, 0},
+    };
+    for (size_t i = 0; i < sizeof(pinned) / sizeof(pinned[0]); i++) {
+        const uint8_t got = nk_input_profile_transform_axis((int16_t)pinned[i].raw, 0, 0, false);
+        if (got != pinned[i].byte) {
+            printf("FAIL stick byte raw=%d got=%u want=%u\n", pinned[i].raw, got, pinned[i].byte);
+        }
+        assert(got == pinned[i].byte);
+    }
+    for (int x = -32768; x <= 32767; x++) {
+        const uint8_t got = nk_input_profile_transform_axis((int16_t)x, 0, 0, false);
+        const uint8_t want = stick_reference_byte(x);
+        if (got != want || nk_input_profile_axis_byte(x) != want) {
+            printf("FAIL stick byte raw=%d got=%u shared=%u want=%u\n", x, got,
+                   nk_input_profile_axis_byte(x), want);
+        }
+        assert(got == want && nk_input_profile_axis_byte(x) == want);
+        if (x >= 1) {
+            const uint8_t mirror = nk_input_profile_transform_axis((int16_t)-x, 0, 0, false);
+            if (mirror != 256 - got) {
+                printf("FAIL stick byte symmetry x=%d f(x)=%u f(-x)=%u\n", x, got, mirror);
+            }
+            assert(mirror == 256 - got);
+        }
+        /* The truncating map sat about half a step low, so no byte is lower than it was, and
+           none is more than two units higher (two only on the negative side). */
+        const int truncated = (x + 32768) * 255 / 65535;
+        const int moved = (int)got - truncated;
+        assert(moved >= 0 && moved <= (x < 0 ? 2 : 1));
+    }
+    /* Inversion mirrors the raw value first: an inverted +1 is still at rest, and an inverted
+       -32768 (32767 after the clamp) is 255. */
+    assert(nk_input_profile_transform_axis(1, 0, 0, true) == 128);
+    assert(nk_input_profile_transform_axis(-1, 0, 0, true) == 128);
+    assert(nk_input_profile_transform_axis(-32768, 0, 0, true) == 255);
+    /* Out-of-range values read as the nearest end. */
+    assert(nk_input_profile_axis_byte(40000) == 255 && nk_input_profile_axis_byte(-40000) == 0);
+    printf("[INPUT_PROFILE_TEST] Stick byte map PASSED!\n");
 }
 
 /* -----------------------------------------------------------------------------
@@ -3752,6 +3813,7 @@ int main(void) {
 
     test_default_equals_current_mapping();
     test_deadzone_and_inversion_vectors();
+    test_stick_byte_rounding_is_symmetric();
     test_strict_load_failures();
     test_future_version_refused();
     test_conflict_detection();
