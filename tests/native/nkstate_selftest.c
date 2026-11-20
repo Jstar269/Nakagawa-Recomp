@@ -518,6 +518,19 @@ static void test_refusals(void) {
         b.len = 0u;
     }
     {
+        /* A build with no runtime identity loads nothing, not even a file whose runtime
+         * field is empty too: the two empty fields would compare equal. */
+        NkStateIdentity anon = self;
+        memset(anon.runtime, 0, sizeof anon.runtime);
+        NkStateExpect anon_expect = expect;
+        anon_expect.self = &anon;
+        nkstate_buf_put(&b, good.data, good.len);
+        memset(b.data + OFF_RUNTIME, 0, NKSTATE_RUNTIME_ID_LEN);
+        rehash(&b);
+        expect_refusal("identity-less build", b.data, b.len, &anon_expect, NKSTATE_NO_RUNTIME_IDENTITY);
+        b.len = 0u;
+    }
+    {
         nkstate_buf_put(&b, good.data, good.len);
         nkstate_buf_put(&b, "x", 1u);
         expect_refusal("trailing bytes", b.data, b.len, &expect, NKSTATE_TRAILING_BYTES);
@@ -586,6 +599,37 @@ static void test_capture_refusals(void) {
     NkStateExporter dup[2] = {ex[0], ex[0]};
     st = nkstate_capture(&self, NULL, 0u, dup, 2u, &out, detail, sizeof detail);
     CHECK(st == NKSTATE_DUPLICATE_SEGMENT, "two exporters with one tag gave %s", nkstate_status_name(st));
+}
+
+/* The table order is the load order (nkstate_restore runs loaders in it), so a capture puts
+ * the required subsystems first, in required[] order, whatever order exporters[] lists them. */
+static void test_capture_writes_required_first(void) {
+    NkStateIdentity self = test_identity();
+    NkStateBuf out = {0};
+    char detail[256];
+    static uint8_t opt[] = "optional";
+    NkStateExporter ex[3] = {
+        {"OPT ", "optional", 1u, buf_save, never_load, opt},
+        {"MEM ", "guest memory", 1u, buf_save, never_load, g_seg_b},
+        {"CPU ", "cpu", 1u, buf_save, never_load, g_seg_a},
+    };
+    const NkStateRequirement req[] = {{"CPU ", "cpu"}, {"MEM ", "guest memory"}, {"CPU ", "cpu"}};
+    NkStateStatus st = nkstate_capture(&self, req, 3u, ex, 3u, &out, detail, sizeof detail);
+    CHECK(st == NKSTATE_OK, "capture with required tags last: %s %s", nkstate_status_name(st), detail);
+    if (st != NKSTATE_OK) return;
+    NkStateExpect expect = {&self, 1, ex, 3u};
+    NkStateFile f;
+    st = nkstate_parse(out.data, out.len, &expect, &f, detail, sizeof detail);
+    CHECK(st == NKSTATE_OK, "parse of the ordered capture: %s %s", nkstate_status_name(st), detail);
+    if (st == NKSTATE_OK) {
+        static const char *want[3] = {"CPU ", "MEM ", "OPT "};
+        CHECK(f.segment_count == 3u, "the capture wrote %u segments", f.segment_count);
+        for (uint32_t i = 0; i < f.segment_count && i < 3u; i++)
+            CHECK(memcmp(f.segments[i].tag, want[i], NKSTATE_TAG_LEN) == 0,
+                  "table entry %u is '%.4s', want '%s'", i, f.segments[i].tag, want[i]);
+        nkstate_file_free(&f);
+    }
+    nkstate_buf_free(&out);
 }
 
 static void test_segment_payload_refusals(void) {
@@ -1618,6 +1662,7 @@ int main(int argc, char **argv) {
     test_round_trip_continues_identically();
     test_refusals();
     test_capture_refusals();
+    test_capture_writes_required_first();
     test_segment_payload_refusals();
     test_frames_segment();
     test_golden();

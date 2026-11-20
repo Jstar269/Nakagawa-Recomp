@@ -710,6 +710,20 @@ static void cell_stages(void) {
     CHECK(anime4k_stages_for(480, 272, 960, 544) == 1, "480x272 to 960x544 takes one stage");
     CHECK(anime4k_stages_for(480, 272, 560, 317) == 0, "under 1.2x takes none");
     CHECK(anime4k_stages_for(480, 272, 1920, 1088) == 2, "4x takes two stages");
+    /* A doubling larger than its place would leave FSR 1 to shrink it, which EASU cannot. */
+    CHECK(anime4k_stages_for(480, 272, 1270, 720) == 1, "1270x720 stops at 960x544, which fits");
+    CHECK(anime4k_stages_for(480, 272, 720, 408) == 0, "720x408 is smaller than 960x544: none");
+    CHECK(anime4k_stages_for(480, 272, 1000, 340) == 0, "a doubled height past the place: none");
+    CHECK(anime4k_stages_for(480, 272, 1919, 1088) == 1, "one pixel short of 4x takes one stage");
+    for (int ow = 1; ow <= 2200; ow += 7)
+        for (int oh = 1; oh <= 1300; oh += 5) {
+            int s = anime4k_stages_for(480, 272, ow, oh);
+            if (s > 0 && ((480 << s) > ow || (272 << s) > oh)) {
+                CHECK(0, "the stages never leave a picture larger than its place");
+                ow = 2201;
+                break;
+            }
+        }
     CHECK(anime4k_parse_movie_mode(NULL) == MOVIE_UPSCALE_OFF && anime4k_parse_movie_mode("off") == 0 &&
           anime4k_parse_movie_mode("fsr1") == MOVIE_UPSCALE_FSR1 &&
           anime4k_parse_movie_mode("anime4k") == MOVIE_UPSCALE_ANIME4K &&

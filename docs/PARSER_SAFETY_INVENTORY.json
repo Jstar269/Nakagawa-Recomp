@@ -610,9 +610,9 @@
           "src/rt/archive_vfs.c:archive_normalize_key"
         ]
       },
-      "allocation_time": "Index, mount and cache arrays grow by checked doubling; the expanded-entry cache is capped by sr_archive_vfs_configure.",
+      "allocation_time": "Index, mount and cache arrays grow by checked doubling; the expanded-entry cache is capped by sr_archive_vfs_configure, and one decoded member larger than that cap (at most the XB provider's entry limit) is held outside it.",
       "failure_atomicity": "A mount that fails rolls back every index entry it added, so earlier mounts stay published unchanged.",
-      "harness": "tests/native/test_fuzz_parsers.c:test_fuzz_archive_vfs; tests/native/test_xb_parser.c:test_archive_vfs_keyless_member_is_invalid",
+      "harness": "tests/native/test_fuzz_parsers.c:test_fuzz_archive_vfs; tests/native/test_xb_parser.c:test_archive_vfs_sjis_trail_5c_member",
       "status": "PARTIAL",
       "id": "archive-vfs-c",
       "source_paths": [

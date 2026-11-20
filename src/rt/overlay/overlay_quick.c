@@ -69,24 +69,16 @@ static NkUiTextStyle row_description_style(const NkUiTheme *theme) {
 static bool row_begin(NkUi *ui, NkUiId id, unsigned row, const char *label,
                       const char *description, float text_width, bool compact) {
     const NkUiTheme *theme = nk_ui_theme(ui);
-    bool focused = nk_ui_button_focused(ui, id);
     NkUiLayout layout = nk_overlay_layout(NK_UI_LAYOUT_ROW, nk_overlay_grow(),
                                           nk_overlay_fixed(compact ? QUICK_ROW_HEIGHT_COMPACT
                                                                    : QUICK_ROW_HEIGHT),
                                           NK_UI_SPACE_4);
-    NkUiStyle style;
     NkUiLayout text = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(),
                                         nk_overlay_fit(), 2.0f);
-    memset(&style, 0, sizeof(style));
-    style.corner_radius = NK_UI_RADIUS_CONTROL;
-    style.fill_rgba = nk_ui_pressed(ui, id) ? theme->pressed :
-                      focused || nk_ui_hovered(ui, id) ? theme->surface_high : 0u;
     layout.align_y = NK_UI_ALIGN_CENTER;
     layout.padding_left = layout.padding_right = NK_UI_SPACE_4;
     layout.padding_top = layout.padding_bottom = compact ? NK_UI_SPACE_1 : NK_UI_SPACE_2;
-    nk_ui_register_button(ui, id, NK_UI_BUTTON_OWNS_HORIZONTAL);
-    if (!nk_ui_begin_container(ui, id, &layout, &style)) return false;
-    if (focused) nk_ui_focus_ring(ui, id, NK_UI_RADIUS_CONTROL);
+    if (!nk_overlay_row_open(ui, id, &layout)) return false;
     if (nk_ui_begin_container(ui, part_id(row, 0u), &text, NULL)) {
         NkUiTextStyle label_style = row_label_style(theme);
         NkUiTextStyle description_style = row_description_style(theme);
@@ -192,13 +184,18 @@ static void toggle_row(NkUi *ui, NkUiId id, unsigned row, const char *label,
         toggle(ui, row, on);
         nk_ui_end_container(ui);
     }
-    if (focused && nk_ui_take_event(ui, NK_UI_EV_NAV, &dir)) {
+    switch (nk_overlay_row_input(ui, id, focused, &dir)) {
+    case NK_OVERLAY_ROW_STEP:
         if ((dir == NK_UI_DIR_RIGHT) != on &&
             (dir == NK_UI_DIR_LEFT || dir == NK_UI_DIR_RIGHT)) {
             *result = nk_overlay_action(kind, dir == NK_UI_DIR_RIGHT);
         }
-    } else if (nk_ui_take_activation(ui, id)) {
+        break;
+    case NK_OVERLAY_ROW_ACTIVATE:
         *result = nk_overlay_action(kind, on ? 0 : 1);
+        break;
+    default:
+        break;
     }
 }
 
@@ -214,13 +211,19 @@ static void segmented_row(NkUi *ui, NkUiId id, unsigned row, const char *label,
         segmented(ui, row, (NkUiId)(id + 1u), options, count, chosen, focused);
         nk_ui_end_container(ui);
     }
-    if (focused && nk_ui_take_event(ui, NK_UI_EV_NAV, &dir)) {
+    switch (nk_overlay_row_input(ui, id, focused, &dir)) {
+    case NK_OVERLAY_ROW_STEP: {
         int next = chosen + (dir == NK_UI_DIR_RIGHT ? 1 : dir == NK_UI_DIR_LEFT ? -1 : 0);
         if (next >= 0 && next < count && next != chosen) {
             *result = nk_overlay_action(kind, next);
         }
-    } else if (nk_ui_take_activation(ui, id)) {
+        break;
+    }
+    case NK_OVERLAY_ROW_ACTIVATE:
         *result = nk_overlay_action(kind, (chosen + 1) % count);
+        break;
+    default:
+        break;
     }
 }
 
@@ -231,7 +234,7 @@ NkOverlayAction nk_overlay_page_settings(NkUi *ui, NkOverlayState *state,
         {NK_UI_PROMPT_ACT_CONFIRM, "Change"},
         {NK_UI_PROMPT_ACT_BACK, "Back"}
     };
-    static const char *const scalings[NK_OVERLAY_SCALING_COUNT] = {"Sharp", "Integer", "Smooth"};
+    const char *scalings[NK_OVERLAY_SCALING_COUNT];
     static const char *const pacings[NK_OVERLAY_PACING_COUNT] = {"PSP timing", "No extra cap"};
     const NkUiTheme *theme = nk_ui_theme(ui);
     NkOverlayAction result = nk_overlay_action(NK_OVERLAY_ACT_NONE, 0);
@@ -241,7 +244,8 @@ NkOverlayAction nk_overlay_page_settings(NkUi *ui, NkOverlayState *state,
     float inner = nk_overlay_page_begin(ui, model,
                                         compact ? QUICK_CARD_WIDTH_COMPACT : QUICK_CARD_WIDTH);
     if (inner <= 0.0f) return result;
-    nk_overlay_eyebrow(ui, QUICK_ID_EYEBROW, NULL, "Game paused \xC2\xB7 Settings", theme->muted);
+    for (int i = 0; i < NK_OVERLAY_SCALING_COUNT; ++i) scalings[i] = nk_overlay_scaling_label(i);
+    nk_ui_eyebrow(ui, QUICK_ID_EYEBROW, "Game paused \xC2\xB7 Settings");
     nk_ui_text_role(ui, QUICK_ID_TITLE, "Settings", NK_UI_TYPE_TITLE, theme->paper);
     {
         NkUiLayout rows = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(),

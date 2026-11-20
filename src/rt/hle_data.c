@@ -2290,11 +2290,11 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
     sr_cd_status open_status = SR_CD_NOT_FOUND;
 #endif
     uint32_t lba, size;
-    /* The ISO lookup drops the device prefix, so an ms0: or fatms0: name that is also on the
-     * disc would open the disc file. A Memory Stick open never consults the disc: the read-only
-     * PSP_O_TRUNC and PSP_O_EXCL creates answer from the Memory Stick file alone
-     * (PSP-HLE-IO-SEEK-002), and a plain read never gets a same-named disc file in place of
-     * the Memory Stick file, or of the not-found answer for a missing one. */
+    /* The ISO lookup answers only names on a disc device (disc0:, umd0:, umd1:, umd:) or on
+     * none, so an ms0: or fatms0: name is never a disc file. A Memory Stick open never consults
+     * the disc either: the read-only PSP_O_TRUNC and PSP_O_EXCL creates answer from the Memory
+     * Stick file alone (PSP-HLE-IO-SEEK-002), and a plain read never gets a same-named disc file
+     * in place of the Memory Stick file, or of the not-found answer for a missing one. */
     const int memstick_device = strchr(path, ':') && sr_ms0_classify(path, NULL) == SR_MS0_OWNED;
     /* Only the Memory Stick reaches a host file. PSP_O_TRUNC that would cut an existing file
      * outside the measured kept-bytes rule stops before any host open. */

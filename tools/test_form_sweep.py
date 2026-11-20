@@ -13,15 +13,19 @@ import contextlib
 import io
 import json
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import codegen  # noqa: E402
 import form_sweep as fs  # noqa: E402
+
+real_run = subprocess.run
 
 
 class ImmediateBuckets(unittest.TestCase):
@@ -336,6 +340,47 @@ class Reporting(unittest.TestCase):
                                "INST 2 NOT_CHECKED ref-unimplemented pc=0x0 op=0x3 state=0\n")
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(fs.report(manifest, results), 0)
+
+
+class BadPlans(unittest.TestCase):
+    PLAN = ("seed 1\nstates 4\nscratch 9800000 100\n"
+            "inst 0 8c00000 1 -1 0 1 0\n"
+            "inst 1 8c00010 81080000 8 0 100 0\n")
+
+    def test_each_variant_changes_one_line_out_of_range(self):
+        got = fs.bad_plans(self.PLAN)
+        self.assertEqual(set(got), {"base-register", "scratch-below-ram", "scratch-past-ram",
+                                    "scratch-wraps"})
+        self.assertIn("inst 1 8c00010 81080000 40 0 100 0\n", got["base-register"])
+        self.assertIn("scratch 9800000 100\n", got["base-register"])
+        end = fs.GUEST_RAM_BASE + fs.GUEST_RAM_SIZE
+        for name, text in got.items():
+            self.assertEqual(len(text.splitlines()), 5, name)
+            scratch = next(ln for ln in text.splitlines() if ln.startswith("scratch "))
+            start, size = (int(v, 16) for v in scratch.split()[1:])
+            if name != "base-register":
+                self.assertTrue(start < fs.GUEST_RAM_BASE or start + size > end, name)
+
+    def test_the_harness_must_exit_two_with_a_named_plan_error(self):
+        # A stand-in harness: a Python script that refuses nothing exits 0, so every
+        # variant is reported as a failure.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = Path(tmp, "plan.txt")
+            plan.write_text(self.PLAN)
+            accept = Path(tmp, "accept.py")
+            accept.write_text("import sys\nsys.exit(0)\n")
+            refuse = Path(tmp, "refuse.py")
+            refuse.write_text("import sys\nsys.stderr.write('form_sweep: plan refused\\n')\n"
+                              "sys.exit(2)\n")
+            for script, want in ((accept, 1), (refuse, 0)):
+                def run(cmd, s=script, **kw):
+                    return real_run([sys.executable, str(s)] + cmd[1:], **kw)
+
+                with mock.patch.object(fs.subprocess, "run", side_effect=run):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(
+                            fs.check_bad_plans(Path("harness"), Path("image.bin"), "0x08C00000",
+                                               plan, Path(tmp, "out")), want, script.name)
 
 
 class Mutant(unittest.TestCase):

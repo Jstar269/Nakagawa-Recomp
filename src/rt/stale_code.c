@@ -148,7 +148,7 @@ void sr_stale_forget_range(uint32_t addr, uint32_t size) {
     s_block_count = kept;
 }
 
-#define SR_STALE_FNV1A_SEED 0x811c9dc5u
+#define SR_STALE_FNV1A_SEED SR_STALE_FNV1A_BASIS   /* the FNV-1a basis, stale_code.h */
 
 /* One word of the FNV-1a hash, its four bytes little-endian first. sr_stale_fnv1a (the
  * function pinned against tools/codegen.py), mark_block and block_hash_with all hash through
@@ -220,6 +220,11 @@ int sr_stale_enabled(void) {
         s_enabled = (e != NULL && e[0] != '\0' && strcmp(e, "0") != 0) ? 1 : 0;
     }
     return s_enabled;
+}
+
+/* The public word step (stale_code.h), for a caller that hashes guest words in place. */
+uint32_t sr_stale_fnv1a_step(uint32_t h, uint32_t word) {
+    return fnv1a_step(h, word);
 }
 
 uint32_t sr_stale_fnv1a(const uint32_t *words, uint32_t nwords) {

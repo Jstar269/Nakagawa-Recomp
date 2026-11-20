@@ -975,9 +975,10 @@ bool nk_ui_dialog_begin(NkUi *ui, NkUiId id, float width) {
 
 bool nk_ui_dialog_begin_scroll(NkUi *ui, NkUiId id, float width, float max_height) {
     const NkUiTheme *theme = nk_ui_theme(ui);
-    NkUiLayout layout = nk_ui_column(nk_ui_fixed(width), nk_ui_fit(), 14.0f);
+    NkUiLayout layout = nk_ui_column(nk_ui_fixed(width), nk_ui_fit(), NK_UI_DIALOG_GAP);
     NkUiStyle style = nk_ui_fill(theme->surface_raised, theme->line_strong, NK_UI_RADIUS_DIALOG);
-    nk_ui_pad(&layout, 26.0f, 28.0f, 22.0f, 28.0f);
+    nk_ui_pad(&layout, NK_UI_DIALOG_PAD_TOP, NK_UI_DIALOG_PAD_RIGHT, NK_UI_DIALOG_PAD_BOTTOM,
+              NK_UI_DIALOG_PAD_LEFT);
     if (max_height > 0.0f) {
         layout.height.max = max_height;
         layout.scroll = true;

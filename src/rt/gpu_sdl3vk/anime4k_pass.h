@@ -43,8 +43,9 @@ typedef struct {
 enum { MOVIE_UPSCALE_OFF = 0, MOVIE_UPSCALE_FSR1 = 1, MOVIE_UPSCALE_ANIME4K = 2 };
 int anime4k_parse_movie_mode(const char *value);
 
-/* How many 2x stages take a w-wide picture toward out_w: each runs while the picture is still
- * more than 1.2 times narrower than out_w (Anime4K's own rule), up to ANIME4K_MAX_STAGES. */
+/* How many 2x stages take a w x h picture toward out_w x out_h: each runs while its doubled
+ * picture still fits inside out_w x out_h, so FSR 1 after it only enlarges (EASU is not a
+ * downscaler), up to ANIME4K_MAX_STAGES. */
 int anime4k_stages_for(int w, int h, int out_w, int out_h);
 
 /* NULL, with the reason, when the queue has no compute or a Vulkan object cannot be made. */

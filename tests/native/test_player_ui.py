@@ -896,6 +896,29 @@ class PlayerUiIdSourceTests(unittest.TestCase):
         problems += self.check_families("shared", shared, shared_spans)
         self.assertEqual(problems, [])
 
+    def test_segmented_rows_declare_the_span_their_options_use(self) -> None:
+        """overlay_quick.c's segmented_row makes one id per option by adding to the id
+        it is given (id + 1 + option), which the literal `NAME + n` scan above cannot
+        see; so each base it is given declares a _SPAN that holds 1 + its option count."""
+        header = (ROOT / "src" / "rt" / "overlay" / "nk_overlay.h").read_text(encoding="utf-8")
+        quick = (ROOT / "src" / "rt" / "overlay" / "overlay_quick.c").read_text(encoding="utf-8")
+        spans = {name: int(span, 0) for name, span in
+                 re.findall(r"^#define (NK_OVERLAY_ID_\w+)_SPAN (0x[0-9A-Fa-f]+|\d+)u", header, re.M)}
+        counts: dict[str, int] = {}
+        for body in re.findall(r"enum \{([^}]*)\}", header):
+            members = re.findall(r"^\s*(NK_OVERLAY_\w+)", body, re.M)
+            for index, member in enumerate(members):
+                if member.endswith("_COUNT"):
+                    counts[member] = index
+        calls = re.findall(r"segmented_row\(ui, (NK_OVERLAY_ID_\w+),.*?,\s*(NK_OVERLAY_\w+_COUNT),",
+                           quick, re.S)
+        self.assertGreaterEqual(len(calls), 2, "the scan found no segmented rows")
+        for base, count in calls:
+            self.assertIn(count, counts, f"{count} is not an enum count in nk_overlay.h")
+            self.assertIn(base, spans, f"segmented_row adds to {base}, which declares no {base}_SPAN")
+            self.assertGreaterEqual(spans[base], 1 + counts[count],
+                                    f"{base}_SPAN {spans[base]:#x} cannot hold 1 + {count}")
+
 
 class ErrorCodeSourceTests(unittest.TestCase):
     """#2007: every code the player raises as a card has a badge, so none falls through to a

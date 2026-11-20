@@ -355,7 +355,9 @@ static void gp_emit_hexfloat(gp_out *o, const gp_spec *sp, double v) {
             uint64_t kept = m >> dropped;
             uint64_t rest = m & (((uint64_t)1 << dropped) - 1u);
             uint64_t half = (uint64_t)1 << (dropped - 1);
-            if (rest > half || (rest == half && (kept & 1u) != 0u)) {
+            /* The last digit kept decides a tie: the leading digit when no fraction digit is. */
+            uint64_t odd = (keep == 0) ? (uint64_t)(lead & 1) : (kept & 1u);
+            if (rest > half || (rest == half && odd != 0u)) {
                 kept++;
                 if (keep == 0) {
                     if (kept != 0u) { lead++; kept = 0u; }

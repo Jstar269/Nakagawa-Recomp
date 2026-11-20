@@ -666,6 +666,53 @@ static void test_sha256(void) {
     sha256_hex((const uint8_t *)two_blocks, sizeof(two_blocks) - 1, 7, hex);
     CHECK(strcmp(hex, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1") == 0,
           "SHA-256 of the 448-bit message (padding spills into a second block)");
+    static const char long_two_blocks[] =
+        "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmn"
+        "hijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
+    sha256_hex((const uint8_t *)long_two_blocks, sizeof(long_two_blocks) - 1, 13, hex);
+    CHECK(strcmp(hex, "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1") == 0,
+          "SHA-256 of the 896-bit message");
+    /* Messages that end at and around the block boundary and the length field (55, 56, 63,
+       64, 65 bytes, and the same a block later), byte i = i * 7 + 1. The digests come from
+       Python's hashlib, not from this code. Each is fed whole and split in two at every
+       position, so every update size crosses the 64-byte block and the 56-byte padding
+       limit; tests/native/vfpu_tables_selftest.c runs the same table on the runtime side. */
+    static const struct { size_t length; const char *want; } edges[] = {
+        { 55u, "16fa57a0a3423a715d594516339f36189d6b5f93754a9714fef202616a9fabfe" },
+        { 56u, "c37b44e5f1b18554b36966f4f8e08bfbf3164c4b6c10374d12d89850892073c5" },
+        { 63u, "bbba992d2c85af960fb2987a1fd05e0aa82a3db3c740dd8982a9e273b75e36a3" },
+        { 64u, "66bd4633ed6f71c4ecfa4763bf7ba1c8ec7612de9aa6c0578a7b675207c71e0b" },
+        { 65u, "9f7dc47107b750a1f3d35db5d9547f24ef40da5b731b9540d4f43710a154f6c9" },
+        { 119u, "a3ed307b730fa77c07531300c6e4a282330011d4d4caf6bb7b63ae05950f4b66" },
+        { 120u, "8e3b15d9fea7472655aa069620b7f8c2e55ee1499f763200a7515fe826e99d20" },
+        { 127u, "44480fb9672845177f5368a08b69ea263275f2a5ec42e06a933370fe0d2968a4" },
+        { 128u, "e462c130fef8c97e34f7dc3ff3ad2f8b3533ab849af21c10531552a2852387a4" },
+        { 129u, "aa7ea4e8bf89146aeb67ff195fd8182a0e504c9d580aa7af8d2c862e14b98405" },
+    };
+    uint8_t message[129];
+    for (size_t i = 0; i < sizeof(message); i++) message[i] = (uint8_t)(i * 7u + 1u);
+    for (size_t e = 0; e < sizeof(edges) / sizeof(edges[0]); e++) {
+        size_t length = edges[e].length;
+        sha256_hex(message, length, length, hex);
+        if (strcmp(hex, edges[e].want) != 0) {
+            fprintf(stderr, "FAIL: SHA-256 of a %zu-byte message: got %s\n", length, hex);
+            failures++;
+        }
+        for (size_t split = 0; split <= length; split++) {
+            NkSha256 sha;
+            uint8_t digest[32];
+            nk_sha256_init(&sha);
+            nk_sha256_update(&sha, message, split);
+            nk_sha256_update(&sha, message + split, length - split);
+            nk_sha256_finish(&sha, digest);
+            for (size_t i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", digest[i]);
+            if (strcmp(hex, edges[e].want) != 0) {
+                fprintf(stderr, "FAIL: SHA-256 of a %zu-byte message split after %zu bytes: got %s\n",
+                        length, split, hex);
+                failures++;
+            }
+        }
+    }
     uint8_t *million = (uint8_t *)malloc(1000000u);
     CHECK(million != NULL, "SHA-256 million-byte buffer");
     if (million) {

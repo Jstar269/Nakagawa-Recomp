@@ -1349,7 +1349,8 @@ static uint32_t load_guest_placed_module(const char *file, int required, uint32_
     mod->runtime_placed = 1;
     mod->code = code;
     mod->gp = img.gp;
-    /* The start routine is the system library's module_start, else the ELF entry -- when
+    /* The start routine is the system library's module_start, else its module_bootstart
+     * (the loader reports either as mod_start), else the ELF entry -- when
      * that lies in the image. A library module that declares neither (an entry of
      * 0xFFFFFFFF, which the loader reports one byte below the image) has no start
      * routine at all: 0. */

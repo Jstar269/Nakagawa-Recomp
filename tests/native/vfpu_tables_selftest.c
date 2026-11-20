@@ -8,6 +8,10 @@
  *
  * Coverage:
  *   - SHA-256 known-answer vectors (empty, single block, NIST multi-block);
+ *   - the same SHA-256 the player uses (nk_sha256_* in src/core/nk_shared_helpers.h):
+ *     FIPS 180-4 vectors, block-boundary lengths split at every position, and
+ *     RFC 4231 HMAC cases, through it and through sr_vfpu_sha256 and
+ *     sr_vfpu_hmac_sha256;
  *   - asin index validator against synthetic out-of-range indices;
  *   - sin interval validator against out-of-range, boundary-exact and
  *     underflowed bounds (the genuine data maxes at hi == len, inclusive);
@@ -35,6 +39,7 @@
 #endif
 
 #include "vfpu_tables.h"
+#include "../../src/core/nk_shared_helpers.h" /* nk_sha256_*: the hash sr_vfpu_sha256 calls */
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -139,6 +144,119 @@ static void test_sha256_known_answers(void) {
               specs[i].name, specs[i].bytes, specs[i].elem);
         CHECK(strlen(specs[i].sha256) == 64u,
               "manifest %s: sha256 not 64 hex chars", specs[i].name);
+    }
+}
+
+/* ---- the SHA-256 the player and the runtime share ------------------------ */
+
+/* The runtime's sr_vfpu_sha256 and sr_vfpu_hmac_sha256 against the player's nk_sha256_*
+ * (src/core/nk_shared_helpers.h) on the same known answers: FIPS 180-4's examples, one
+ * million 'a', messages that end at and around the block boundary and the length field
+ * (byte i = i * 7 + 1; digests from Python's hashlib) fed whole and split in two at every
+ * position, and RFC 4231's HMAC cases. tests/native/test_shared_helpers.c runs the
+ * boundary table on the core side, so a second copy that drifts from the shared one fails
+ * one side or the other. */
+static void test_shared_sha256(void) {
+    static const char long_two_blocks[] =
+        "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmn"
+        "hijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
+    static const struct { const char *in; const char *want; } fips[] = {
+        { "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+        { "abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" },
+        { "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+          "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1" },
+        { long_two_blocks, "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1" },
+    };
+    uint8_t digest[32];
+    char got[65];
+    for (size_t c = 0; c < sizeof fips / sizeof fips[0]; c++) {
+        const uint8_t *in = (const uint8_t *)fips[c].in;
+        size_t len = strlen(fips[c].in);
+        sr_vfpu_sha256(in, len, digest);
+        hex_of(digest, got);
+        CHECK(strcmp(got, fips[c].want) == 0, "sr_vfpu_sha256 FIPS case %zu: got %s", c, got);
+        /* Pieces of 1, 2, 3 ... bytes through the shared streaming calls. */
+        NkSha256 sha;
+        nk_sha256_init(&sha);
+        for (size_t at = 0, piece = 1; at < len; at += piece, piece++) {
+            if (piece > len - at) piece = len - at;
+            nk_sha256_update(&sha, in + at, piece);
+        }
+        nk_sha256_finish(&sha, digest);
+        hex_of(digest, got);
+        CHECK(strcmp(got, fips[c].want) == 0, "nk_sha256 FIPS case %zu in pieces: got %s", c, got);
+    }
+
+    uint8_t *million = (uint8_t *)malloc(1000000u);
+    CHECK(million != NULL, "one million 'a': allocation");
+    if (million) {
+        memset(million, 'a', 1000000u);
+        sr_vfpu_sha256(million, 1000000u, digest);
+        hex_of(digest, got);
+        CHECK(strcmp(got, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0") == 0,
+              "sr_vfpu_sha256 of one million 'a': got %s", got);
+        free(million);
+    }
+
+    static const struct { size_t length; const char *want; } edges[] = {
+        { 55u, "16fa57a0a3423a715d594516339f36189d6b5f93754a9714fef202616a9fabfe" },
+        { 56u, "c37b44e5f1b18554b36966f4f8e08bfbf3164c4b6c10374d12d89850892073c5" },
+        { 63u, "bbba992d2c85af960fb2987a1fd05e0aa82a3db3c740dd8982a9e273b75e36a3" },
+        { 64u, "66bd4633ed6f71c4ecfa4763bf7ba1c8ec7612de9aa6c0578a7b675207c71e0b" },
+        { 65u, "9f7dc47107b750a1f3d35db5d9547f24ef40da5b731b9540d4f43710a154f6c9" },
+        { 119u, "a3ed307b730fa77c07531300c6e4a282330011d4d4caf6bb7b63ae05950f4b66" },
+        { 120u, "8e3b15d9fea7472655aa069620b7f8c2e55ee1499f763200a7515fe826e99d20" },
+        { 127u, "44480fb9672845177f5368a08b69ea263275f2a5ec42e06a933370fe0d2968a4" },
+        { 128u, "e462c130fef8c97e34f7dc3ff3ad2f8b3533ab849af21c10531552a2852387a4" },
+        { 129u, "aa7ea4e8bf89146aeb67ff195fd8182a0e504c9d580aa7af8d2c862e14b98405" },
+    };
+    uint8_t message[129];
+    for (size_t i = 0; i < sizeof message; i++) message[i] = (uint8_t)(i * 7u + 1u);
+    for (size_t e = 0; e < sizeof edges / sizeof edges[0]; e++) {
+        size_t length = edges[e].length;
+        sr_vfpu_sha256(message, length, digest);
+        hex_of(digest, got);
+        CHECK(strcmp(got, edges[e].want) == 0, "sr_vfpu_sha256 of %zu bytes: got %s", length, got);
+        for (size_t split = 0; split <= length; split++) {
+            NkSha256 sha;
+            nk_sha256_init(&sha);
+            nk_sha256_update(&sha, message, split);
+            nk_sha256_update(&sha, message + split, length - split);
+            nk_sha256_finish(&sha, digest);
+            hex_of(digest, got);
+            CHECK(strcmp(got, edges[e].want) == 0,
+                  "nk_sha256 of %zu bytes split after %zu: got %s", length, split, got);
+        }
+    }
+
+    /* RFC 4231 test cases 1, 2, 6 and 7 (a short key, a key shorter than its message, and a
+     * key longer than the block, which is hashed first), the message in two pieces. */
+    static uint8_t key_0b[20], key_aa[131];
+    memset(key_0b, 0x0b, sizeof key_0b);
+    memset(key_aa, 0xaa, sizeof key_aa);
+    static const char long_data[] =
+        "This is a test using a larger than block-size key and a larger than block-size data. "
+        "The key needs to be hashed before being used by the HMAC algorithm.";
+    const struct {
+        const uint8_t *key; size_t key_len; const uint8_t *msg; size_t msg_len; const char *want;
+    } macs[] = {
+        { key_0b, sizeof key_0b, (const uint8_t *)"Hi There", 8u,
+          "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7" },
+        { (const uint8_t *)"Jefe", 4u, (const uint8_t *)"what do ya want for nothing?", 28u,
+          "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843" },
+        { key_aa, sizeof key_aa,
+          (const uint8_t *)"Test Using Larger Than Block-Size Key - Hash Key First", 54u,
+          "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54" },
+        { key_aa, sizeof key_aa, (const uint8_t *)long_data, sizeof long_data - 1u,
+          "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2" },
+    };
+    for (size_t c = 0; c < sizeof macs / sizeof macs[0]; c++) {
+        size_t head = macs[c].msg_len / 3u;
+        const uint8_t *parts[2] = { macs[c].msg, macs[c].msg + head };
+        const size_t lens[2] = { head, macs[c].msg_len - head };
+        sr_vfpu_hmac_sha256(macs[c].key, macs[c].key_len, parts, lens, 2u, digest);
+        hex_of(digest, got);
+        CHECK(strcmp(got, macs[c].want) == 0, "sr_vfpu_hmac_sha256 RFC 4231 case %zu: got %s", c, got);
     }
 }
 
@@ -635,6 +753,7 @@ static void test_evidence_names_explicit_root(const char *captured) {
 
 int main(void) {
     test_sha256_known_answers();
+    test_shared_sha256();
     test_asin_index_validator();
     test_sin_interval_validator();
     test_loader_rejects_corrupt_roots();

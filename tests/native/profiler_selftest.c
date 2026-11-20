@@ -253,6 +253,34 @@ static void test_live_rows(void) {
 
 /* Each closed telemetry interval lands in the history the live view reads, carrying the
  * interval's counters, and the transition hot spots are the summary's top_pcs. */
+/* Audit 2026-11-17: the tier hooks run on every dispatch of a profiled run. A nested AOT or
+ * interpreter call crosses no tier boundary, so it reads no host clock; before, each begin and
+ * end read it and threw the value away, adding clock cost to the AOT time being measured. */
+static unsigned s_clock_reads;
+static uint64_t counting_wall(void) { return 50000000000ull + 1000u * (uint64_t)++s_clock_reads; }
+
+static void test_nested_tier_calls_read_no_clock(void) {
+    sr_perf_init();
+    sr_perf_test_set_clocks(counting_wall, NULL);
+    sr_perf_aot_begin(0x08804000u);              /* outermost: the AOT tier starts here */
+    unsigned before = s_clock_reads;
+    sr_perf_aot_begin(0x08804100u);
+    sr_perf_aot_end();
+    CHECK(s_clock_reads == before, "a nested AOT call read the clock %u times",
+          s_clock_reads - before);
+    sr_perf_interp_begin(0x08804200u);           /* AOT -> interpreter: a boundary */
+    before = s_clock_reads;
+    sr_perf_interp_begin(0x08804300u);
+    sr_perf_interp_end(0x08804310u, 0);
+    CHECK(s_clock_reads == before, "a nested interpreter call read the clock %u times",
+          s_clock_reads - before);
+    before = s_clock_reads;
+    sr_perf_interp_end(0x08804210u, 0);
+    sr_perf_aot_end();
+    CHECK(s_clock_reads > before, "the outermost ends still time their tiers");
+    sr_perf_test_set_clocks(NULL, NULL);
+}
+
 static void test_live_history_follows_the_report(void) {
     SrPerfTopPc top[4];
     sr_perf_init();
@@ -289,6 +317,80 @@ static void test_live_history_follows_the_report(void) {
           "top AOT->interpreter PCs, most frequent first (n=%u)", n);
     CHECK(sr_perf_top_transitions(0, top, 1) == 1, "the top list stops at the caller's max");
     CHECK(sr_perf_top_transitions(2, top, 4) == 0, "an unknown direction has no entries");
+}
+
+/* Audit 2026-11-17: the top-transitions table keeps 16 hot spots. A newcomer that takes the
+ * lowest slot inherits that slot's count (Space-Saving), so a hot PC first seen after the table
+ * filled still climbs to the top while one-off PCs pass through; before, every newcomer restarted
+ * at 1, and the hot PC and the one-offs evicted each other from the same slot for ever. The
+ * inherited part is reported as the entry's overcount, so the true count is known to lie in
+ * [count - overcount, count]. */
+static void set_env(const char *name, const char *value);
+
+static void aot_to_interp_at(uint32_t pc) {
+    sr_perf_aot_begin(0x08900000u);
+    sr_perf_interp_begin(pc);
+    sr_perf_interp_end(pc + 0x10u, 0);
+    sr_perf_aot_end();
+}
+
+static void test_top_transitions_keep_a_late_hot_pc(void) {
+    SrPerfTopPc top[16];
+    const uint32_t hot = 0x08a00000u;
+    sr_perf_test_reinit();
+    for (uint32_t i = 0; i < 16u; i++) {
+        aot_to_interp_at(0x08810000u + i * 0x100u);
+        aot_to_interp_at(0x08810000u + i * 0x100u);
+    }
+    for (uint32_t i = 0; i < 200u; i++) {
+        aot_to_interp_at(hot);
+        aot_to_interp_at(0x08b00000u + i * 0x100u);
+    }
+    unsigned n = sr_perf_top_transitions(0, top, 16);
+    CHECK(n == 16 && top[0].pc == hot && top[0].count >= 200u &&
+              top[0].count - top[0].overcount <= 200u && top[0].overcount < top[0].count,
+          "a hot PC seen after the table filled leads it (n=%u pc=0x%08x count=%llu overcount=%llu)",
+          n, n ? top[0].pc : 0u, n ? (unsigned long long)top[0].count : 0ull,
+          n ? (unsigned long long)top[0].overcount : 0ull);
+    sr_perf_test_reinit();
+}
+
+/* Audit 2026-11-17: the JSON summary sits beside SR_PERF_CSV with its extension replaced. Only a
+ * dot in the file name is an extension: a dot in a folder name ("v1.2") is not, and on Windows the
+ * backslash separates folders too, so C:\runs\v1.2\perf does not become C:\runs\v1.json. */
+static void expect_summary_path(const char *csv, const char *want) {
+    char out[256];
+    sr_perf_test_summary_path(csv, out, sizeof out);
+    CHECK(strcmp(out, want) == 0, "summary path for [%s]: [%s] (expected [%s])", csv, out, want);
+}
+
+static void test_summary_path_beside_the_csv(void) {
+    expect_summary_path("runs/perf.csv", "runs/perf.json");
+    expect_summary_path("runs/v1.2/perf", "runs/v1.2/perf.json");
+    expect_summary_path("perf", "perf.json");
+#ifdef _WIN32
+    expect_summary_path("C:\\runs\\v1.2\\perf", "C:\\runs\\v1.2\\perf.json");
+    expect_summary_path("C:\\runs\\v1.2\\perf.csv", "C:\\runs\\v1.2\\perf.json");
+    expect_summary_path("C:/runs\\v1.2\\perf", "C:/runs\\v1.2\\perf.json");
+    expect_summary_path("C:\\runs/v1.2/perf", "C:\\runs/v1.2/perf.json");
+#endif
+}
+
+/* Audit 2026-11-17: shutdown writes the run's final attribution totals. It marked the counters shut
+ * down before its forced report, which then returned at once, so the totals a run ended with were
+ * the last periodic report's (at most once a minute), or none. */
+static void test_shutdown_writes_final_attribution(void) {
+    int found = 0;
+    set_env("SR_PERF", "1");
+    sr_perf_test_reinit();
+    sr_perf_vblank_latch(50000u, 3u, 0);
+    sr_perf_test_set_report_sink(capture_report_line);
+    s_report_count = 0;
+    sr_perf_shutdown();
+    sr_perf_test_set_report_sink(NULL);
+    for (int i = 0; i < s_report_count && i < REPORT_LINES; i++)
+        if (whole_line(i, "PERF_ATTRIB vblank_late total=")) found = 1;
+    CHECK(found, "shutdown wrote no final PERF_ATTRIB vblank_late line (%d lines)", s_report_count);
 }
 
 /* Guest symbol labels (codegen --symbol-map). The registered table is what the crash report and
@@ -1056,6 +1158,7 @@ int main(void) {
     test_live_history_ring();
     test_live_rows();
     test_live_history_follows_the_report();
+    test_nested_tier_calls_read_no_clock();
     test_guest_symbol_labels();
     test_new_frames_are_distinct_buffers();
     test_frame_intervals_and_work();
@@ -1065,6 +1168,9 @@ int main(void) {
     test_per_frame_rows();
     test_per_frame_gpu_columns_no_queries();
     test_per_frame_gpu_columns();
+    test_top_transitions_keep_a_late_hot_pc();
+    test_summary_path_beside_the_csv();
+    test_shutdown_writes_final_attribution();
     sr_perf_shutdown();
     test_process_end_reports();
     {

@@ -154,6 +154,11 @@ int sr_stale_enabled(void);
  * sequence. */
 uint32_t sr_stale_fnv1a(const uint32_t *words, uint32_t nwords);
 
+/* The same digest one word at a time: start from SR_STALE_FNV1A_BASIS and fold each
+ * word in address order, so a caller can hash guest words in place. */
+#define SR_STALE_FNV1A_BASIS 0x811c9dc5u
+uint32_t sr_stale_fnv1a_step(uint32_t h, uint32_t word);
+
 /* Compare the registered records overlapping [addr, addr+size) against the
  * reader. Words are checked first (precise word-level report), then blocks
  * (hash-level report). Every examined record updates its stale flag (set on
