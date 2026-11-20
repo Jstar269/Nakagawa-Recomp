@@ -173,6 +173,7 @@ try:
         admission_claim, claims_ledger, claims_ledger_bytes, derive_policy_delta_v3, is_claims_ledger,
         is_derived_policy_delta, is_policy_delta_v4, policy_delta_v3_bytes, policy_delta_v3_name,
         policy_delta_v4_key, validate_ledger, verify_derived_policy_delta,
+        PUBLIC_LABEL_SET, public_label, public_label_set_of, relabel_public_ledger,
     )
     from .publish_audit import load_release_manifest_bytes, requires_byte_binding
     from .public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS
@@ -187,6 +188,7 @@ except ImportError:
         admission_claim, claims_ledger, claims_ledger_bytes, derive_policy_delta_v3, is_claims_ledger,
         is_derived_policy_delta, is_policy_delta_v4, policy_delta_v3_bytes, policy_delta_v3_name,
         policy_delta_v4_key, validate_ledger, verify_derived_policy_delta,
+        PUBLIC_LABEL_SET, public_label, public_label_set_of, relabel_public_ledger,
     )
     from publish_audit import load_release_manifest_bytes, requires_byte_binding  # type: ignore[no-redef]
     from public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS  # type: ignore[no-redef]
@@ -1033,7 +1035,9 @@ def _validate_public_baseline(
     return document, entries
 
 
-def _safe_public_claim(path: str, record: dict | None) -> tuple[str, dict]:
+def _safe_public_claim(
+    path: str, record: dict | None, *, label_set: str = PUBLIC_LABEL_SET,
+) -> tuple[str, dict]:
     """Derive a public claim without copying private record descriptions."""
 
     classification, evidence = _class_for(path, record)
@@ -1045,9 +1049,10 @@ def _safe_public_claim(path: str, record: dict | None) -> tuple[str, dict]:
         "record_id": record.get("id"),
         "evidence_tier": record.get("evidence_tier"),
     }
+    label = public_label(record.get("classification"), label_set)
     if classification == "project_authored_attested":
         safe.update({
-            "authorship": "independent implementation record",
+            "authorship": label,
             "upstream_attribution": None,
         })
     elif classification == "upstream_derived":
@@ -1056,7 +1061,7 @@ def _safe_public_claim(path: str, record: dict | None) -> tuple[str, dict]:
             # The SPDX identifier is public (it is in the file header) and the
             # publication audit checks the header against it.
             "license": record.get("upstream_license") or "see NOTICE.md",
-            "modification_status": "modified_or_translated; see trusted record",
+            "modification_status": label,
         })
     elif classification == "generated_from_public_source":
         safe.update({
@@ -1066,7 +1071,9 @@ def _safe_public_claim(path: str, record: dict | None) -> tuple[str, dict]:
     return classification, safe
 
 
-def generate_authority_baseline(*, repo: Path, base_rev: str, trusted_ledger: Path, workdir: Path) -> bytes:
+def generate_authority_baseline(
+    *, repo: Path, base_rev: str, trusted_ledger: Path, workdir: Path, label_set: str = PUBLIC_LABEL_SET,
+) -> bytes:
     """Build the public baseline envelope for ``base_rev`` from the trusted authority alone.
 
     The committed ledger on the base branch is not consulted: every path the
@@ -1096,7 +1103,7 @@ def generate_authority_baseline(*, repo: Path, base_rev: str, trusted_ledger: Pa
 
     entries: list[dict] = []
     for path in sorted(p for p in base_blobs if trusted_policy.resolve(p).disposition == "included"):
-        classification, evidence = _safe_public_claim(path, exact_records.get(path))
+        classification, evidence = _safe_public_claim(path, exact_records.get(path), label_set=label_set)
         entry = {"path": path, "classification": classification, "evidence": evidence}
         if path not in CONTROL_PATHS:
             entry["sha256"] = hashlib.sha256(base_blobs[path]).hexdigest()
@@ -1887,12 +1894,20 @@ def generate_ephemeral_controls(
     trusted_candidate_policy: Path | None = None,
     policy_delta_authority: Path | None = None,
     require_exact_blob_approvals: bool = False,
+    label_set: str | None = None,
 ) -> EphemeralControls:
     """Generate the hosted attestation controls from an exact candidate tree.
 
     Local refresh and hosted attestation both call this function. Candidate
     controls are replaced from the trusted base ledger and the external detailed
     authority; the candidate ledger and export are never trust inputs.
+
+    ``label_set`` names the public label set to generate (``PUBLIC_LABEL_SETS``
+    in ``provenance_ledger``); a producer passes the emitted set. Left ``None``,
+    as the verifier leaves it, the set is the one the candidate's committed
+    ledger uses. That choice only selects which trusted derivation of the label
+    text is generated: every label still comes from the entry's exact trusted
+    record, and the claim and record id are the same in every set.
     """
 
     repo = repo.resolve()
@@ -2082,6 +2097,9 @@ def generate_ephemeral_controls(
         candidate_policy=candidate_policy,
         exact_records=exact_records,
     )
+    if label_set is None:
+        label_set = _candidate_label_set(candidate_blobs.get(LEDGER_PATH))
+    relabel_public_ledger(generated_ledger, exact_records, label_set)
     generated_ledger = _reconcile_refresh_audit(
         generated=generated_ledger,
         candidate_blobs=candidate_blobs,
@@ -2135,6 +2153,17 @@ def generate_ephemeral_controls(
         generated_export=generated_export,
         generated_export_bytes=generated_export_bytes,
     )
+
+
+def _candidate_label_set(raw: bytes | None) -> str:
+    """The public label set of the candidate's committed ledger, or the emitted set."""
+    if raw is None:
+        return PUBLIC_LABEL_SET
+    try:
+        document = strict_json(raw, code="CANDIDATE_LEDGER_INVALID", label="legacy candidate ledger")
+    except VerifyError:
+        return PUBLIC_LABEL_SET
+    return public_label_set_of(document)
 
 
 def _declares_hashed_ledger(raw: bytes | None) -> bool:
