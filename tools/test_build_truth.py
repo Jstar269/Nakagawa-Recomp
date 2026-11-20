@@ -1719,10 +1719,18 @@ class GuestInputTransportTests(unittest.TestCase):
     # Assert the property -- "a fragment of the pathname was dispatched as a
     # command" -- rather than one host's spelling of it.
     INJECTION_SIGNATURES = (
-        VER_OUTPUT,                       # cmd.exe ran `ver`
+        VER_OUTPUT,                          # cmd.exe ran `ver`
         "is not recognized as an internal",  # cmd.exe tried to resolve a fragment
-        "ver: command not found",         # bash tried to run `ver`
-        ": ver: not found",               # dash (Ubuntu's /bin/sh): `sh: 1: ver: not found`
+    )
+    # POSIX shells (dash, bash, sh) report an attempted `ver` execution on a line
+    # ending in `ver: not found` or `ver: command not found`. Under `&`, two
+    # background shells share stderr, so `/bin/sh: 1: ` can interleave onto an
+    # earlier line and leave `ver: not found` at column 0. Requiring line start,
+    # `:`, or horizontal whitespace before `ver:` rejects lookalikes such as
+    # `server: not found` and echoed path fragments such as `split&ver: not found`.
+    POSIX_VER_NOT_FOUND_RE = re.compile(
+        r"(?:^|[: \t])(ver: (?:command )?not found)[ \t\r]*$",
+        re.MULTILINE,
     )
 
     def test_injection_signatures_cover_each_shell_make_dispatches_to(self) -> None:
@@ -1735,8 +1743,48 @@ class GuestInputTransportTests(unittest.TestCase):
                 self.assertTrue(self._injection_evidence(f"prxload: ok\n{message}\n"))
         self.assertEqual(self._injection_evidence("image written: test_gi_split_image.bin\n"), [])
 
+    def test_injection_evidence_handles_interleaved_shell_output(self) -> None:
+        """Interleaved shell stderr still proves `ver` ran; echoed paths and lookalikes do not."""
+        positives = (
+            ("interleaved_dash", "/bin/sh: 1: /bin/sh: 1: tail.elf: not found\nver: not found\n"),
+            ("interleaved_bash", "bash: line 1: bash: line 1: tail.elf: command not found\nver: command not found\n"),
+            ("normal_dash", "/bin/sh: 1: ver: not found\n"),
+            ("bash_command_not_found", "bash: line 1: ver: command not found\n"),
+            ("windows_ver_output", "Microsoft Windows [Version 10.0.26100.1]\n"),
+            ("windows_not_recognized", "'tail.elf' is not recognized as an internal or external command,\n"),
+        )
+        for label, sample in positives:
+            with self.subTest(kind="positive", case=label):
+                self.assertTrue(
+                    self._injection_evidence(sample),
+                    f"expected injection evidence for {label!r} in:\n{sample}",
+                )
+
+        negatives = (
+            ("no_ver_execution", "image written: test_gi_split_image.bin\n"),
+            ("empty_output", ""),
+            ("echoed_quoted_path", '"python" tools/prxload.py "build/test_gi_split/split&ver&tail.elf" 0x08804000\n'),
+            ("tail_elf_not_found_alone", "/bin/sh: 1: tail.elf: not found\n"),
+            ("tail_elf_bare_not_found", "tail.elf: not found\n"),
+            ("word_ending_in_ver_dash", "/bin/sh: 1: server: not found\n"),
+            ("word_ending_in_ver_bare", "server: not found\n"),
+            ("word_ending_in_ver_bash", "bash: line 1: server: command not found\n"),
+            ("amp_attached_ver_not_found", "split&ver: not found\n"),
+            ("path_attached_ver_not_found", "build/dir/ver: not found\n"),
+        )
+        for label, sample in negatives:
+            with self.subTest(kind="negative", case=label):
+                self.assertEqual(
+                    self._injection_evidence(sample), [],
+                    f"unexpected injection evidence for {label!r} in:\n{sample}",
+                )
+
     def _injection_evidence(self, blob: str) -> list[str]:
-        return [marker for marker in self.INJECTION_SIGNATURES if marker in blob]
+        hits = [marker for marker in self.INJECTION_SIGNATURES if marker in blob]
+        match = self.POSIX_VER_NOT_FOUND_RE.search(blob)
+        if match is not None:
+            hits.append(match.group(1))
+        return hits
 
     def setUp(self) -> None:
         self.make = shutil.which("mingw32-make") or shutil.which("make")
@@ -1836,7 +1884,8 @@ class GuestInputTransportTests(unittest.TestCase):
             self._injection_evidence(blob),
             "mutation did not reproduce the pre-fix command execution; this "
             "regression is no longer load-bearing. Expected one of "
-            f"{self.INJECTION_SIGNATURES} in:\n" + blob)
+            f"{self.INJECTION_SIGNATURES} or regex "
+            f"{self.POSIX_VER_NOT_FOUND_RE.pattern!r} in:\n" + blob)
 
     def test_M1b_sibling_inputs_are_transported_too(self) -> None:
         """GAME_PSP_HEADER shares the recipe, and so must share the transport."""

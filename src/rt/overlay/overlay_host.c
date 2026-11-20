@@ -271,7 +271,14 @@ bool nk_overlay_host_is_open(const NkOverlayHost *host) {
 bool nk_overlay_host_event(NkOverlayHost *host, const SDL_Event *event) {
     NkUiEvent translated[8];
     size_t count;
-    if (host == NULL || event == NULL || !host->state.open) return false;
+    if (host == NULL || event == NULL) return false;
+    if (event->type == SDL_EVENT_RENDER_DEVICE_RESET) {
+        /* Every texture the backend made is gone (SDL3: they must be recreated), open
+           or not: the next frame uploads what it draws again. */
+        nk_ui_sdlr_reset(host->backend);
+        return host->state.open;
+    }
+    if (!host->state.open) return false;
     count = nk_ui_sdl_input_translate(&host->input, event, (double)SDL_GetTicksNS() / 1e9,
                                       translated, sizeof(translated) / sizeof(translated[0]));
     for (size_t i = 0u; i < count; ++i) nk_ui_push_event(host->ui, &translated[i]);
@@ -365,6 +372,10 @@ void nk_overlay_host_unbind(NkOverlayHost *host) {
     nk_ui_sdlr_destroy(host->backend);
     host->backend = NULL;
     host->bound = NULL;
+}
+
+const struct NkUiSdlr *nk_overlay_host_backend(const NkOverlayHost *host) {
+    return host != NULL ? host->backend : NULL;
 }
 
 NkUiPadFamily nk_overlay_host_pad_family(const NkOverlayHost *host) {

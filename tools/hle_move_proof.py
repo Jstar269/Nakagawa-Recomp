@@ -52,6 +52,7 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import hle_focus_check  # noqa: E402
 import hle_sources  # noqa: E402
 from hle_sources import Item, blank_comments_and_literals, is_object_definition, split_items  # noqa: E402
 
@@ -681,17 +682,15 @@ LINK_LIBRARIES = {
 def _nm(path: Path, nm: str, dynamic: bool = False) -> set[str]:
     """External symbols ``path`` defines. An nm that cannot read the file raises: an empty
     set from an unreadable object would hide every L4 difference."""
-    command = [nm, "-g", "--defined-only", *(["-D"] if dynamic else []), str(path)]
-    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if result.returncode != 0:
-        raise RuntimeError(f"{' '.join(command)} failed (exit {result.returncode}):\n{result.stderr[-2000:]}")
-    names = set()
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        # MinGW emits a `.refptr.<name>` COMDAT stub in every object that reads an external
-        # variable; the linker merges them, so they are not definitions of the source.
-        if len(parts) >= 3 and len(parts[-2]) == 1 and not parts[-1].startswith(".refptr."):
-            names.add(parts[-1].split("@", 1)[0])
+    names: set[str] = hle_focus_check.nm_defined_symbols(
+        path,
+        nm,
+        dynamic=dynamic,
+        local_too=False,
+        text_only=False,
+        strip_version=True,
+        strict_columns=False,
+    )
     return names
 
 
