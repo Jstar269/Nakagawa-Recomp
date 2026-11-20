@@ -152,6 +152,64 @@ class BuildSystemParityTests(unittest.TestCase):
         outside = self.cmake_text.replace(guarded.group(0), "")
         self.assertNotIn("--wrap=malloc", outside)
 
+    @staticmethod
+    def _make_lines_inside_conditionals(text: str) -> set[int]:
+        """The 1-based line numbers a Make conditional (ifeq/ifneq/ifdef/ifndef ... endif)
+        encloses, so a link option there is host- or target-dependent. GNU Make's `else ifeq`
+        replaces the branch without changing the depth."""
+        depth = 0
+        inside: set[int] = set()
+        for number, line in enumerate(text.splitlines(), 1):
+            directive = re.match(r"\s*(ifn?def|ifn?eq|else|endif)\b", line)
+            if directive:
+                kind = directive.group(1)
+                if kind == "endif":
+                    depth -= 1
+                elif kind != "else":
+                    depth += 1
+                continue
+            if depth:
+                inside.add(number)
+        return inside
+
+    def test_ge_patch_tess_malloc_wrap_is_conditional_in_the_makefile(self) -> None:
+        """ge-patch-tess-selftest's failing-allocator case links with -Wl,--wrap=malloc, which
+        Apple's ld64 and MSVC's linker lack: the Makefile adds it only off a Mac
+        (GE_PATCH_TESS_WRAP_MALLOC, chosen beside LD_GC_SECTIONS and DISC_EXPAND_WRAP_MALLOC),
+        and CMake builds no such target, so neither build stops linking the selftest there."""
+        selftests = (ROOT / "mk/selftests.mk").read_text(encoding="utf-8")
+        start = selftests.find("\nge-patch-tess-selftest:")
+        self.assertNotEqual(start, -1, "mk/selftests.mk has no ge-patch-tess-selftest rule")
+        recipe = selftests[start:selftests.find("\n\n", start)]
+        self.assertIn("tests/native/ge_patch_tess_selftest.c", recipe)
+        self.assertIn("$(GE_PATCH_TESS_WRAP_MALLOC)", recipe)
+        self.assertNotIn("--wrap", recipe)
+        self.assertNotIn("NK_TEST_WRAP_MALLOC", recipe)
+        choice = re.search(r"^ifeq \(\$\(NK_TARGET_OS\)-\$\(HOST_KIND\),posix-Darwin\)\n(.*?)^else\n(.*?)^endif",
+                           self.makefile_text, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(choice, "the Makefile's Darwin link-option choice is missing")
+        assert choice is not None
+        self.assertRegex(choice.group(1), r"(?m)^GE_PATCH_TESS_WRAP_MALLOC :=\s*$")
+        self.assertIn("GE_PATCH_TESS_WRAP_MALLOC := -DNK_TEST_WRAP_MALLOC -Wl,--wrap=malloc",
+                      choice.group(2))
+        # Every --wrap option in the Makefile and the mk fragments sits inside a conditional, so
+        # no host whose linker lacks the option is asked to take one.
+        for path in (ROOT / "Makefile", *sorted((ROOT / "mk").glob("*.mk"))):
+            text = path.read_text(encoding="utf-8")
+            inside = self._make_lines_inside_conditionals(text)
+            for number, line in enumerate(text.splitlines(), 1):
+                if "--wrap" not in line.split("#", 1)[0]:
+                    continue
+                with self.subTest(file=path.relative_to(ROOT).as_posix(), line=number):
+                    self.assertIn(number, inside,
+                                  f"{path.relative_to(ROOT).as_posix()}:{number} passes --wrap "
+                                  f"outside a host conditional: {line.strip()}")
+        # CMake builds no GE patch-tessellation selftest. A future target there must guard its
+        # wrap like test_disc_expand's, and this test must learn to read that guard.
+        self.assertNotIn("ge_patch_tess_selftest.c", self.cmake_text,
+                         "CMakeLists.txt now builds the GE patch-tessellation selftest: extend this "
+                         "test to require its wrap inside if(NOT MSVC AND NOT APPLE)")
+
     def test_core_sources_parity(self) -> None:
         """Verify identical core sources in Makefile and CMakeLists.txt."""
         expected_core = [
