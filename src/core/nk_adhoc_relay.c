@@ -268,13 +268,19 @@ uint16_t nk_relay_port_in(uint16_t port, uint16_t offset) {
     return (uint16_t)(port - offset);
 }
 
-/* The shipped servers are the ones issue #1139 names (maintainer decision of 2026-11-06):
- * socom.cc, PPSSPP's default aemu_postoffice server, beside the field for the user's own server.
- * Another preset is another host the player may contact: it needs its own maintainer decision in
- * that issue, a row under "Network use" in docs/SETUP.md and a line in
+/* The shipped servers (maintainer decisions of 2026-11-06 and 2026-11-19 on #1139): socom.cc,
+ * PPSSPP's default aemu_postoffice server, is the default; the four ArenaAnywhere relays are
+ * presets. All five are listed with "data_mode": "AemuPostoffice" in PPSSPP's
+ * assets/adhoc-servers.json at 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, and the labels give the
+ * places that list names. Another preset is another host the player may contact: it needs its
+ * own maintainer decision in that issue, a row under "Network use" in docs/SETUP.md and a line in
  * tools/test_prereq_fetcher.py (AGENTS.md section 5). */
 static const NkAdhocServerPreset s_server_presets[] = {
-    {"socom.cc", "socom.cc (EU / PPSSPP default)"},
+    {"socom.cc", "Socom Adhoc Server (France)"},
+    {"relay.arenaanywhere.site", "ArenaAnywhere (Europe)"},
+    {"relay-usa.arenaanywhere.site", "ArenaAnywhere (US)"},
+    {"relay-sa.arenaanywhere.site", "ArenaAnywhere (South Africa)"},
+    {"relay-asia.arenaanywhere.site", "ArenaAnywhere (Singapore)"},
 };
 
 size_t nk_adhoc_server_preset_count(void) {
@@ -304,6 +310,54 @@ static bool host_char_ok(unsigned char c) {
            (c >= '0' && c <= '9') || c == '-' || c == '.';
 }
 
+/* The host check on host[0..len), which need not be terminated. */
+static bool host_span_ok(const char *host, size_t len) {
+    if (!host || len == 0u || len > NK_ADHOC_SERVER_MAX_LEN) return false;
+    size_t label_start = 0u;
+    size_t labels = 0u;
+    bool last_all_digits = false;
+    for (size_t i = 0u; i <= len; i++) {
+        if (i < len && host[i] != '.') {
+            if (!host_char_ok((unsigned char)host[i])) return false;
+            continue;
+        }
+        const size_t label_len = i - label_start;
+        if (label_len == 0u || label_len > 63u) return false;
+        if (host[label_start] == '-' || host[i - 1u] == '-') return false;
+        last_all_digits = true;
+        for (size_t j = label_start; j < i; j++) {
+            if (host[j] < '0' || host[j] > '9') last_all_digits = false;
+        }
+        labels++;
+        label_start = i + 1u;
+    }
+    if (!last_all_digits) return true;
+    /* A last label of digits only is an IPv4 literal: exactly four parts, each 0-255, no
+       leading zero, so "1.2.3" and "01.2.3.4" are never read as some other address. */
+    if (labels != 4u) return false;
+    size_t start = 0u;
+    for (size_t i = 0u; i <= len; i++) {
+        if (i < len && host[i] != '.') continue;
+        const size_t part = i - start;
+        unsigned value = 0u;
+        if (part > 3u || (part > 1u && host[start] == '0')) return false;
+        for (size_t j = start; j < i; j++) {
+            if (host[j] < '0' || host[j] > '9') return false;
+            value = value * 10u + (unsigned)(host[j] - '0');
+        }
+        if (value > 255u) return false;
+        start = i + 1u;
+    }
+    return true;
+}
+
+bool nk_adhoc_relay_host_ok(const char *host) {
+    if (!host) return false;
+    size_t len = 0u;
+    while (len <= NK_ADHOC_SERVER_MAX_LEN && host[len]) len++;
+    return host_span_ok(host, len);
+}
+
 bool nk_adhoc_relay_parse_server(const char *spec, char *host_out, size_t host_cap,
                                  uint16_t *lobby_port, uint16_t *data_port) {
     if (host_out && host_cap > 0u) host_out[0] = '\0';
@@ -314,15 +368,7 @@ bool nk_adhoc_relay_parse_server(const char *spec, char *host_out, size_t host_c
     const char *colon = strchr(spec, ':');
     const size_t host_len = colon ? (size_t)(colon - spec) : total;
     if (host_len == 0u || (host_out && host_len >= host_cap)) return false;
-    if (spec[0] == '.' || spec[0] == '-' || spec[host_len - 1u] == '.' || spec[host_len - 1u] == '-')
-        return false;
-    bool prev_dot = false;
-    for (size_t i = 0u; i < host_len; i++) {
-        const unsigned char c = (unsigned char)spec[i];
-        if (!host_char_ok(c)) return false;
-        if (c == '.' && prev_dot) return false;
-        prev_dot = (c == '.');
-    }
+    if (!host_span_ok(spec, host_len)) return false;
 
     uint16_t lport = NK_RELAY_LOBBY_PORT;
     uint16_t dport = NK_RELAY_DATA_PORT;

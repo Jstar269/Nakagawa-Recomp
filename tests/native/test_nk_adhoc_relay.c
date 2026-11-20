@@ -354,13 +354,47 @@ static void test_check_boundaries(void) {
 static void test_server_parsing_and_presets(void) {
     char host[NK_ADHOC_SERVER_MAX_LEN + 1u];
     uint16_t lp = 0u, dp = 0u;
-    /* The shipped servers are the hosts issue #1139 names: socom.cc and no other. */
-    CHECK(nk_adhoc_server_preset_count() == 1u, "one server is shipped (got %u)",
+    /* The shipped servers (owner decision of 2026-11-19 on #1139): socom.cc first, the default,
+       then the four ArenaAnywhere relays, and no other. */
+    static const char *const shipped[] = {
+        "socom.cc", "relay.arenaanywhere.site", "relay-usa.arenaanywhere.site",
+        "relay-sa.arenaanywhere.site", "relay-asia.arenaanywhere.site"};
+    CHECK(nk_adhoc_server_preset_count() == 5u, "five servers are shipped (got %u)",
           (unsigned)nk_adhoc_server_preset_count());
     const NkAdhocServerPreset *p0 = nk_adhoc_server_preset(0u);
     CHECK(p0 && strcmp(p0->host, NK_ADHOC_DEFAULT_SERVER) == 0 && strcmp(p0->host, "socom.cc") == 0,
-          "the shipped server is the default, socom.cc");
-    CHECK(nk_adhoc_server_preset(1u) == NULL, "no second preset exists");
+          "the first shipped server is the default, socom.cc");
+    for (size_t i = 0; i < sizeof(shipped) / sizeof(shipped[0]); i++) {
+        const NkAdhocServerPreset *p = nk_adhoc_server_preset(i);
+        CHECK(p && strcmp(p->host, shipped[i]) == 0 && p->label && p->label[0] &&
+                  nk_adhoc_relay_host_ok(p->host),
+              "shipped server %zu is %s, labelled, and a valid host", i, shipped[i]);
+    }
+    CHECK(nk_adhoc_server_preset(5u) == NULL, "no sixth preset exists");
+    /* The strict host check every server name passes before it is used or shown. */
+    static const char *const good_hosts[] = {"socom.cc", "a.b", "185.183.157.234", "x-1.example",
+                                             "localhost", "0.0.0.0"};
+    for (size_t i = 0; i < sizeof(good_hosts) / sizeof(good_hosts[0]); i++) {
+        CHECK(nk_adhoc_relay_host_ok(good_hosts[i]), "host %s accepted", good_hosts[i]);
+    }
+    char long_label[80];
+    memset(long_label, 'a', 64u);
+    memcpy(long_label + 64u, ".cc", 4u);
+    char long_host[NK_ADHOC_SERVER_MAX_LEN + 8u];
+    for (size_t i = 0; i + 1u < sizeof(long_host); i++) long_host[i] = (i % 4u == 3u) ? '.' : 'a';
+    long_host[sizeof(long_host) - 1u] = '\0';
+    static const char *const bad_hosts[] = {
+        NULL, "", ".", "a..b", ".a", "a.", "-a.cc", "a-.cc", "a.-cc", "a_b.cc", "a b.cc", "a\tb",
+        "a\x01.cc", "1.2.3", "1.2.3.4.5", "256.1.1.1", "01.2.3.4", "1.2.3.04", "[::1]", "::1",
+        "user@host", "host:1", "h\xc3\xa9.cc", "http://x.cc"};
+    for (size_t i = 0; i < sizeof(bad_hosts) / sizeof(bad_hosts[0]); i++) {
+        CHECK(!nk_adhoc_relay_host_ok(bad_hosts[i]), "bad host %zu refused", i);
+    }
+    CHECK(!nk_adhoc_relay_host_ok(long_label), "a 64-byte label is refused");
+    CHECK(!nk_adhoc_relay_host_ok(long_host), "a host longer than the field is refused");
+    CHECK(!nk_adhoc_relay_parse_server("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.cc",
+                                       host, sizeof host, &lp, &dp),
+          "a server spec whose host fails the host check is refused");
     CHECK(nk_adhoc_relay_parse_server("socom.cc", host, sizeof host, &lp, &dp) &&
               strcmp(host, "socom.cc") == 0 && lp == NK_RELAY_LOBBY_PORT &&
               dp == NK_RELAY_DATA_PORT,

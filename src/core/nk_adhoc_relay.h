@@ -189,8 +189,16 @@ typedef struct NkAdhocServerPreset {
     const char *label;
 } NkAdhocServerPreset;
 
+/* The shipped servers, socom.cc (the default) first. Each is a host the player may contact only after
+ * the user chose TURN ON on the Online play card for it. */
 size_t nk_adhoc_server_preset_count(void);
 const NkAdhocServerPreset *nk_adhoc_server_preset(size_t index);
+
+/* True for a host name or IPv4 literal this client may name: 1 to NK_ADHOC_SERVER_MAX_LEN bytes of
+ * dot-separated labels, each 1 to 63 of A-Z, a-z, 0-9 and '-', not starting or ending with '-'. A name
+ * whose last label is all digits must be a dotted IPv4 address (four decimal parts, 0-255, no leading
+ * zero). No port, user info, path, IPv6, space, control or non-ASCII byte. False for NULL. */
+bool nk_adhoc_relay_host_ok(const char *host);
 
 /* Parses a user server string in the form "host", "host:lobby_port", or
  * "host:lobby_port,data_port". Missing ports default to NK_RELAY_LOBBY_PORT (27312) and
