@@ -116,6 +116,16 @@ static bool refresh_is_multiple_of(double hz, double base) {
     return n >= 1.0 && fabs(hz - n * base) <= REFRESH_TOLERANCE_HZ;
 }
 
+size_t player_ui_report_more_count(const PlayerUiSettingsModel *model) {
+    if (!model || model->report_line_count == 0u) return 0u;
+    size_t shown = model->report_line_count < PLAYER_UI_REPORT_SHOWN
+        ? model->report_line_count : PLAYER_UI_REPORT_SHOWN;
+    /* A model that names no total (the screen snapshot fixtures) counts its lines. */
+    size_t total = model->report_file_total > model->report_line_count
+        ? model->report_file_total : model->report_line_count;
+    return total - shown;
+}
+
 PlayerUiRefreshAdvice player_ui_refresh_advice(double refresh_hz) {
     if (!(refresh_hz > 0.0) || !isfinite(refresh_hz)) return PLAYER_UI_REFRESH_SILENT;
     if (refresh_is_multiple_of(refresh_hz, REFRESH_TITLE_HZ) ||
@@ -392,7 +402,9 @@ static void settings_problem_report(NkUi *ui, const PlayerUiSettingsModel *model
                             NK_UI_TYPE_DATA, theme->paper);
         }
         if (model->report_line_count > 0u) {
-            size_t shown = model->report_line_count < 16u ? model->report_line_count : 16u;
+            size_t shown = model->report_line_count < PLAYER_UI_REPORT_SHOWN
+                ? model->report_line_count : PLAYER_UI_REPORT_SHOWN;
+            size_t more = player_ui_report_more_count(model);
             float column = (inner - 32.0f - NK_UI_SPACE_4) / 2.0f;
             NkUiLayout cols = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
                                           NK_UI_SPACE_4);
@@ -418,10 +430,11 @@ static void settings_problem_report(NkUi *ui, const PlayerUiSettingsModel *model
                 }
                 nk_ui_end_container(ui);
             }
-            if (model->report_line_count > shown) {
-                char more[48];
-                (void)snprintf(more, sizeof(more), "and %zu more", model->report_line_count - shown);
-                nk_ui_text_role(ui, SET_ID_TEXT + 0x302u, more, NK_UI_TYPE_CAPTION, theme->muted);
+            if (more > 0u) {
+                char more_text[48];
+                (void)snprintf(more_text, sizeof(more_text), "and %zu more", more);
+                nk_ui_text_role(ui, SET_ID_TEXT + 0x302u, more_text, NK_UI_TYPE_CAPTION,
+                                theme->muted);
             }
         }
         nk_ui_end_container(ui);
