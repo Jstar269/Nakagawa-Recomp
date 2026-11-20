@@ -827,7 +827,12 @@ static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model,
 /* A part's values as pointer targets: part p's choice c. Eight choices a part, forty parts. */
 #define SET_ID_ENHANCED_CHOICES(part, choice) \
     SET_ID(0x000600u + (uint32_t)(part) * 0x20u + (uint32_t)(choice) * 4u)
-#define SET_ID_ENHANCED_DETAIL SET_ID(0x000B00u)
+#define SET_ID_ENHANCED_DETAIL PLAYER_UI_ID_ENHANCED_DETAIL     /* SET_ID(0x000B00u) */
+#define SET_ID_ENHANCED_DETAIL_BODY PLAYER_UI_ID_ENHANCED_DETAIL_BODY
+#define SET_ID_ENHANCED_DETAIL_TRACK SET_ID(0x000B02u)
+typedef char settings_enhanced_detail_ids_are_the_screens[
+    PLAYER_UI_ID_ENHANCED_DETAIL == SET_ID(0x000B00u) &&
+    PLAYER_UI_ID_ENHANCED_DETAIL_BODY == SET_ID(0x000B01u) ? 1 : -1];
 #define SET_ID_ENHANCED_DIVIDER SET_ID(0x000D00u)    /* + the row's place in its list */
 #define SET_ID_ENHANCED_DIVIDER_SPAN 0x40u
 typedef char settings_enhanced_tabs_have_lists[
@@ -1218,42 +1223,163 @@ typedef struct {
     bool value_muted;      /* the library's value on a game's page, or a dimmed row's */
 } SettingsEnhancedDetail;
 
-/* The panel beside the list: the option's name, value and whole description. It is as tall as
-   the list box and wraps every sentence whole. Text that needs more room than that (a larger
-   text size) makes the panel, and the page with it, taller: the card then scrolls, as every
-   page of the player does, and nothing is cut or drawn over what is under it. */
+/* A thin thumb beside a list (or the panel's column) that scrolls: where the window on its
+   content is. `id` is the track's, the thumb's ids its children. */
+static void settings_enhanced_scrollbar(NkUi *ui, NkUiId id, NkUiId list) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    NkUiLayout track = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(ENHANCED_SCROLLBAR_ROOM),
+                                   sizing_grow(), 0.0f);
+    NkUiScrollState state;
+    track.align_x = NK_UI_ALIGN_END;
+    if (!nk_ui_begin_container(ui, id, &track, NULL)) return;
+    if (nk_ui_scroll_state(ui, list, &state) && state.max_offset > 0.5f &&
+        state.viewport > 1.0f) {
+        float content = state.max_offset + state.viewport;
+        float thumb = state.viewport * state.viewport / content;
+        float top;
+        NkUiStyle fill;
+        NkUiLayout bar;
+        if (thumb < 24.0f) thumb = 24.0f;
+        if (thumb > state.viewport) thumb = state.viewport;
+        top = (state.viewport - thumb) * (state.offset / state.max_offset);
+        if (top < 0.0f) top = 0.0f;
+        if (top > state.viewport - thumb) top = state.viewport - thumb;
+        memset(&fill, 0, sizeof(fill));
+        fill.fill_rgba = theme->line_strong;
+        fill.corner_radius = 2.0f;
+        bar = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(4.0f), sizing_fixed(thumb), 0.0f);
+        nk_ui_spacer(ui, nk_ui_child_id(id, 1u), sizing_fixed(4.0f), sizing_fixed(top));
+        if (nk_ui_begin_container(ui, nk_ui_child_id(id, 2u), &bar, &fill)) {
+            nk_ui_end_container(ui);
+        }
+    }
+    nk_ui_end_container(ui);
+}
+
+/* What the panel showed last, so that another option's text starts at the panel's top: the
+   control with focus and the option's name (a name longer than the copy is told apart by its
+   length and its first bytes). The page is drawn from one thread. */
+static struct {
+    const NkUi *ui;
+    NkUiId focused;
+    size_t name_length;
+    char name[128];
+} s_enhanced_detail;
+
+/* Records what the panel shows this frame; true when that is not what it showed last. */
+static bool settings_enhanced_detail_changed(NkUi *ui, const SettingsEnhancedDetail *detail) {
+    const char *name = safe_text(detail->name, "");
+    const size_t length = strlen(name);
+    const NkUiId focused = nk_ui_focused(ui);
+    const bool changed = s_enhanced_detail.ui != ui || s_enhanced_detail.focused != focused ||
+                         s_enhanced_detail.name_length != length ||
+                         strncmp(s_enhanced_detail.name, name, sizeof(s_enhanced_detail.name) - 1u) != 0;
+    if (changed) {
+        s_enhanced_detail.ui = ui;
+        s_enhanced_detail.focused = focused;
+        s_enhanced_detail.name_length = length;
+        snprintf(s_enhanced_detail.name, sizeof(s_enhanced_detail.name), "%s", name);
+    }
+    return changed;
+}
+
+/* Where the panel's column is scrolled this frame. A new option shows from the top. Page Up
+   and Page Down (the pad's triggers) move it a column less one line, as on the developer log,
+   so a line carries over; the wheel and a drag scroll it as any scroll container. Focus stays
+   on the row: the panel is read, never focused. */
+static void settings_enhanced_detail_scroll(NkUi *ui, const SettingsEnhancedDetail *detail,
+                                            float line) {
+    const bool fresh = settings_enhanced_detail_changed(ui, detail);
+    NkUiScrollState state;
+    NkUiNavDir page;
+    bool known;
+    float offset;
+    float start;
+    known = nk_ui_scroll_state(ui, SET_ID_ENHANCED_DETAIL_BODY, &state);
+    offset = fresh || !known ? 0.0f : state.offset;
+    start = offset;
+    while (nk_ui_take_event(ui, NK_UI_EV_PAGE, &page)) {
+        float step = known && state.viewport > 2.0f * line ? state.viewport - line : line;
+        offset += page == NK_UI_DIR_RIGHT ? step : -step;
+    }
+    if (known && offset > state.max_offset) offset = state.max_offset;
+    if (offset < 0.0f) offset = 0.0f;
+    if (fresh || fabsf(offset - start) >= 0.5f) {
+        nk_ui_scroll_to(ui, SET_ID_ENHANCED_DETAIL_BODY, offset);
+    }
+}
+
+/* The panel beside the list: the option's name, value and whole description. It is exactly as
+   tall as the list box beside it (a percentage of the row they share, so its text never makes
+   the row taller), and its text is a column inside it that scrolls where it is taller than
+   that, with a thumb at the panel's right edge, as the list has. Every sentence wraps whole at
+   its words, and a word wider than the column (a texture pack folder's name, a long compound)
+   is broken across lines inside it (nk_ui_text_break), so nothing is cut or drawn past the
+   panel. */
 static void settings_enhanced_details(NkUi *ui, const SettingsEnhancedDetail *detail,
                                       float width) {
     const NkUiTheme *theme = nk_ui_theme(ui);
-    NkUiLayout panel = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(width), sizing_grow(),
-                                   NK_UI_SPACE_3);
+    NkUiLayout panel = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(width), sizing_grow(),
+                                   NK_UI_SPACE_1);
     NkUiStyle style = scr_flow_box_style(theme, theme->surface);
     NkUiTextStyle name = nk_ui_type(NK_UI_TYPE_HEADING, theme->paper);
     NkUiTextStyle value = nk_ui_type(NK_UI_TYPE_BODY,
                                      detail->value_muted ? theme->muted : theme->paper);
     NkUiTextStyle sentence = nk_ui_type(NK_UI_TYPE_BODY_S, theme->muted);
-    panel.padding_left = panel.padding_right = NK_UI_SPACE_4;
+    /* The text's column: the panel less its padding, the gap and the thumb's track. The
+       thumb sits in the panel's right padding, where the list's sits in its box's. */
+    const float column = width - NK_UI_SPACE_4 - ENHANCED_BOX_PAD - NK_UI_SPACE_1 -
+                         ENHANCED_SCROLLBAR_ROOM;
+    NkUiLayout body = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(column), sizing_grow(),
+                                  NK_UI_SPACE_3);
+    /* As tall as the row it shares with the list box, which only that box sizes. */
+    panel.height.kind = NK_UI_SIZE_PERCENT;
+    panel.height.value = 1.0f;
+    panel.padding_left = NK_UI_SPACE_4;
+    panel.padding_right = ENHANCED_BOX_PAD;
     panel.padding_top = panel.padding_bottom = NK_UI_SPACE_4;
+    body.scroll = true;
+    settings_enhanced_detail_scroll(ui, detail, nk_ui_line_height(ui, &sentence));
     if (!nk_ui_begin_container(ui, SET_ID_ENHANCED_DETAIL, &panel, &style)) return;
-    if (detail->focused) nk_ui_eyebrow(ui, SET_ID_TEXT + 0x701u, "Focused option");
-    nk_ui_text(ui, SET_ID_TEXT + 0x702u, safe_text(detail->name, "Enhanced"), &name);
-    if (detail->value != NULL && detail->value[0] != '\0') {
-        nk_ui_text(ui, SET_ID_TEXT + 0x703u, detail->value, &value);
-    }
-    if (detail->tag != NULL || detail->scope != NULL) {
-        NkUiLayout tags = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_2);
-        if (nk_ui_begin_container(ui, SET_ID_TEXT + 0x708u, &tags, NULL)) {
-            if (detail->tag != NULL) nk_ui_tag(ui, SET_ID_TEXT + 0x704u, detail->tag);
-            if (detail->scope != NULL) nk_ui_tag(ui, SET_ID_TEXT + 0x705u, detail->scope);
-            nk_ui_end_container(ui);
+    if (nk_ui_begin_container(ui, SET_ID_ENHANCED_DETAIL_BODY, &body, NULL)) {
+        if (detail->focused) nk_ui_eyebrow(ui, SET_ID_TEXT + 0x701u, "Focused option");
+        nk_ui_text(ui, SET_ID_TEXT + 0x702u,
+                   nk_ui_text_break(ui, safe_text(detail->name, "Enhanced"), &name, column),
+                   &name);
+        if (detail->value != NULL && detail->value[0] != '\0') {
+            nk_ui_text(ui, SET_ID_TEXT + 0x703u,
+                       nk_ui_text_break(ui, detail->value, &value, column), &value);
         }
+        if (detail->tag != NULL || detail->scope != NULL) {
+            /* The tags wrap onto a second row where both do not fit (a larger text size). */
+            const char *tags[2] = {detail->tag, detail->scope};
+            NkUiTextStyle label = nk_ui_type(NK_UI_TYPE_LABEL_S, 0u);
+            NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                         NK_UI_SPACE_2);
+            NkUiFlowRow flow;
+            if (nk_ui_flow_begin(ui, &flow, SET_ID_TEXT + 0x708u, &row, column)) {
+                for (int i = 0; i < 2; ++i) {
+                    if (tags[i] == NULL) continue;
+                    /* nk_ui_tag: its caps and 10 px either side. */
+                    nk_ui_flow_item(ui, &flow,
+                                    ceilf(nk_ui_text_width(ui, nk_ui_caps(ui, tags[i]), &label)) +
+                                        20.0f);
+                    nk_ui_tag(ui, SET_ID_TEXT + 0x704u + (uint32_t)i, tags[i]);
+                }
+                nk_ui_flow_end(ui, &flow);
+            }
+        }
+        if (detail->sentence != NULL && detail->sentence[0] != '\0') {
+            nk_ui_text(ui, SET_ID_TEXT + 0x706u,
+                       nk_ui_text_break(ui, detail->sentence, &sentence, column), &sentence);
+        }
+        if (detail->note != NULL && detail->note[0] != '\0') {
+            nk_ui_text(ui, SET_ID_TEXT + 0x707u,
+                       nk_ui_text_break(ui, detail->note, &sentence, column), &sentence);
+        }
+        nk_ui_end_container(ui);
     }
-    if (detail->sentence != NULL && detail->sentence[0] != '\0') {
-        nk_ui_text(ui, SET_ID_TEXT + 0x706u, detail->sentence, &sentence);
-    }
-    if (detail->note != NULL && detail->note[0] != '\0') {
-        nk_ui_text(ui, SET_ID_TEXT + 0x707u, detail->note, &sentence);
-    }
+    settings_enhanced_scrollbar(ui, SET_ID_ENHANCED_DETAIL_TRACK, SET_ID_ENHANCED_DETAIL_BODY);
     nk_ui_end_container(ui);
 }
 
@@ -1332,40 +1458,6 @@ static bool settings_enhanced_row_blank(NkUi *ui, const SettingsEnhancedWindow *
                                         int place, NkUiId id) {
     return window->at_rest && !nk_ui_button_focused(ui, id) &&
            (place == window->first - 1 || place == window->first + window->count);
-}
-
-/* A thin thumb beside a list that scrolls: where the window on the rows is. */
-static void settings_enhanced_scrollbar(NkUi *ui, NkUiId list) {
-    const NkUiTheme *theme = nk_ui_theme(ui);
-    NkUiLayout track = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(ENHANCED_SCROLLBAR_ROOM),
-                                   sizing_grow(), 0.0f);
-    NkUiScrollState state;
-    track.align_x = NK_UI_ALIGN_END;
-    if (!nk_ui_begin_container(ui, SET_ID_ENHANCED_SCROLLBAR, &track, NULL)) return;
-    if (nk_ui_scroll_state(ui, list, &state) && state.max_offset > 0.5f &&
-        state.viewport > 1.0f) {
-        float content = state.max_offset + state.viewport;
-        float thumb = state.viewport * state.viewport / content;
-        float top;
-        NkUiStyle fill;
-        NkUiLayout bar;
-        if (thumb < 24.0f) thumb = 24.0f;
-        if (thumb > state.viewport) thumb = state.viewport;
-        top = (state.viewport - thumb) * (state.offset / state.max_offset);
-        if (top < 0.0f) top = 0.0f;
-        if (top > state.viewport - thumb) top = state.viewport - thumb;
-        memset(&fill, 0, sizeof(fill));
-        fill.fill_rgba = theme->line_strong;
-        fill.corner_radius = 2.0f;
-        bar = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(4.0f), sizing_fixed(thumb), 0.0f);
-        nk_ui_spacer(ui, nk_ui_child_id(SET_ID_ENHANCED_SCROLLBAR, 1u), sizing_fixed(4.0f),
-                     sizing_fixed(top));
-        if (nk_ui_begin_container(ui, nk_ui_child_id(SET_ID_ENHANCED_SCROLLBAR, 2u), &bar,
-                                  &fill)) {
-            nk_ui_end_container(ui);
-        }
-    }
-    nk_ui_end_container(ui);
 }
 
 const char *player_ui_enhanced_group_label(PlayerUiEnhancedGroup group) {
@@ -1751,7 +1843,7 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                         }
                         nk_ui_end_container(ui);
                     }
-                    settings_enhanced_scrollbar(ui, list_id);
+                    settings_enhanced_scrollbar(ui, SET_ID_ENHANCED_SCROLLBAR, list_id);
                     nk_ui_end_container(ui);
                 }
             }

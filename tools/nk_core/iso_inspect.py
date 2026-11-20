@@ -2668,7 +2668,7 @@ def inspect_compatibility_preflight(
                     "issues": [308],
                 }
 
-    from .fonts import inspect_font_cache, latin_index_states, slot_states
+    from .fonts import inspect_font_cache, latin_index_states, own_font_count, slot_states
 
     font_status, font_message = inspect_font_cache(user_data_root=root)
     if font_status == "INVALID":
@@ -2685,10 +2685,8 @@ def inspect_compatibility_preflight(
             + [state["detail"] for state in latin_states]
             + [states["korean"]["detail"]]
         )
-        exact = (states["japanese"]["source"] == "user" and
-                 states["korean"]["source"] == "user" and
-                 all(state["source"] == "user" and state["served_index"] == index
-                     for index, state in enumerate(latin_states)))
+        # Every one the user's own import of exactly that font, none a replacement font.
+        exact = own_font_count(states, latin_states) == len(latin_states) + 2
         if (states["japanese"]["source"] != "none" and
                 states["korean"]["source"] != "none" and
                 all(state["source"] != "none" for state in latin_states)):

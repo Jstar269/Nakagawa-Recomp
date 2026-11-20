@@ -16688,6 +16688,148 @@ int main(int argc, char **argv) {
         assert(psp_app->wizard.font_own_count == NK_FONT_PSP_FONT_COUNT);
         assert(strcmp(psp_app->wizard.font_summary, "All 18 PSP fonts are your PSP's originals.") == 0);
 
+        /* Replacement fonts and the game page's font note (owner request 2026-11-19). */
+        printf("[PLAYER_STATE_TEST] Subtest: replacement fonts are stand-ins; the font note\n");
+        fflush(stdout);
+        {
+            /* The first digest of nk_font.c's list (a replacement kr0.pgf). */
+            static const char kListedDigest[] =
+                "8e2cd9c996e7cd5d229612cadd7bb03a82ccc8728b198568df8b4f585786cb5a";
+            char settings_file[1100];
+            char *saved;
+            PlayerApp *back;
+            NkIsoExecutableReport exec_rep;
+            const PlayerPreflightCheck *fcheck;
+
+            /* The rule on the bytes, as tools/nk_core/fonts.py applies it to the same vectors. */
+            assert(nk_font_is_replacement(kGoldenStandInLatinPgf, sizeof(kGoldenStandInLatinPgf), NULL));
+            assert(nk_font_is_replacement(kGoldenStandInJapanesePgf, sizeof(kGoldenStandInJapanesePgf),
+                                          NULL));
+            assert(nk_font_is_replacement(kGoldenStandInKoreanPgf, sizeof(kGoldenStandInKoreanPgf), NULL));
+            assert(!nk_font_is_replacement(kGoldenLatinPgf, sizeof(kGoldenLatinPgf), NULL));
+            assert(!nk_font_is_replacement(kGoldenJapanesePgf, sizeof(kGoldenJapanesePgf), NULL));
+            assert(!nk_font_is_replacement(kGoldenStandInLatinPgf, 0x35u + 4u, NULL));
+            assert(nk_font_known_replacement_count() > 0u);
+            assert(nk_font_known_replacement_sha256(kListedDigest));
+            assert(!nk_font_known_replacement_sha256(
+                "0000000000000000000000000000000000000000000000000000000000000000"));
+            assert(!nk_font_known_replacement_sha256(NULL));
+            assert(nk_font_is_replacement(kGoldenLatinPgf, sizeof(kGoldenLatinPgf), kListedDigest));
+
+            /* A PSP-shaped folder of replacements: imported, and none of them counts as the
+               user's own. */
+            snprintf(path, sizeof(path), "%s%cjpn0.pgf", folder[3], sep);
+            write_binary_file(path, kGoldenStandInJapanesePgf, sizeof(kGoldenStandInJapanesePgf));
+            snprintf(path, sizeof(path), "%s%ckr0.pgf", folder[3], sep);
+            write_binary_file(path, kGoldenStandInKoreanPgf, sizeof(kGoldenStandInKoreanPgf));
+            for (int index = 0; index < NK_FONT_LATIN_INDEX_COUNT; index++) {
+                snprintf(path, sizeof(path), "%s%c%s", folder[3], sep,
+                         nk_font_latin_index_filename(index));
+                write_binary_file(path, kGoldenStandInLatinPgf, sizeof(kGoldenStandInLatinPgf));
+            }
+            assert(player_app_fonts_import_from_psp_roots(psp_app, roots + 3, 1));
+            assert(strstr(psp_app->wizard.font_message,
+                          "Imported 18 font file(s) into the player's font cache. 18 of them are "
+                          "replacement fonts, not your PSP's own, so text still looks different.") != NULL);
+            assert(strstr(psp_app->wizard.font_message, "PSP font file(s)") == NULL);
+            assert(psp_app->wizard.font_message_kind == PLAYER_NOTE_WARNING);
+            assert(psp_app->wizard.font_own_count == 0);
+            assert(nk_font_own_font_count(per_user, per_user) == 0);
+            assert(strcmp(psp_app->wizard.font_slot_detail[NK_FONT_SLOT_JAPANESE],
+                          "Japanese: a replacement font.") == 0);
+            assert(strcmp(psp_app->wizard.font_latin_index_detail[0], "L1 replacement ltn0.pgf") == 0);
+            assert(strstr(psp_app->wizard.font_summary, "None of the 18 PSP fonts") != NULL);
+
+            /* The launch check names them as replacements, and still does not block. */
+            snprintf(psp_app->inspecting_game.disc_id, sizeof(psp_app->inspecting_game.disc_id),
+                     "UCUS98701");
+            snprintf(psp_app->inspecting_game.title_id, sizeof(psp_app->inspecting_game.title_id),
+                     "synthetic-allegrex-v1");
+            memset(&exec_rep, 0, sizeof(exec_rep));
+            exec_rep.eboot.kind = NK_ISO_EXEC_PSP_ENCRYPTED;
+            exec_rep.boot.kind = NK_ISO_EXEC_MIPS_ELF32;
+            exec_rep.selected = NK_ISO_EXEC_SELECTION_BOOT;
+            exec_rep.boot_fallback = true;
+            snprintf(exec_rep.selected_path, sizeof(exec_rep.selected_path), "BOOT.BIN");
+            player_app_build_compatibility_preflight(psp_app, true, true, &exec_rep);
+            fcheck = find_preflight_check(&psp_app->wizard.preflight, "SYSTEM_FONTS");
+            assert(fcheck != NULL && fcheck->status == PREFLIGHT_SYNTHETIC);
+            assert(!player_preflight_check_blocks(fcheck));
+            assert(strstr(fcheck->plain, "These PSP system fonts are replacement fonts that look "
+                                         "different, not your PSP's own: ") != NULL);
+            assert(strstr(fcheck->plain, "were not found") == NULL);
+            assert(strstr(fcheck->plain, "Import them from your own PSP in Settings, PSP fonts.") != NULL);
+
+            /* The note: Authentic with a stand-in or replacement in use, per game. */
+            psp_app->game_count = 2;
+            snprintf(psp_app->games[0].disc_id, sizeof(psp_app->games[0].disc_id), "TEST96001");
+            snprintf(psp_app->games[1].disc_id, sizeof(psp_app->games[1].disc_id), "TEST96002");
+            psp_app->settings.enhanced.library = PLAYER_PLAY_AUTHENTIC;
+            assert(player_app_font_note(psp_app, 0) != NULL);
+            assert(strcmp(player_app_font_note(psp_app, 0),
+                          "Text uses stand-in fonts. For the original look, get the fonts from "
+                          "your PSP.") == 0);
+            assert(player_app_font_note(psp_app, 1) != NULL);
+            assert(player_app_font_note(psp_app, 2) == NULL);
+            assert(player_app_font_note(psp_app, -1) == NULL);
+            assert(player_app_font_note(NULL, 0) == NULL);
+            /* Enhanced and Ace draw with the user's chosen look: no note. */
+            psp_app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+            assert(player_app_font_note(psp_app, 0) == NULL);
+            psp_app->settings.enhanced.library = PLAYER_PLAY_AUTHENTIC;
+
+            /* Get fonts from my PSP opens the fonts step, and Back returns to the game's page;
+               opened from Settings, Back still returns to Settings. */
+            player_app_set_view(psp_app, VIEW_LIBRARY);
+            player_app_font_note_open_fonts(psp_app);
+            assert(psp_app->active_view == VIEW_PSP_FONTS && psp_app->fonts_page_from_title);
+            player_app_close_fonts_page(psp_app);
+            assert(psp_app->active_view == VIEW_LIBRARY && !psp_app->fonts_page_from_title);
+            player_app_set_view(psp_app, VIEW_PSP_FONTS);
+            assert(!psp_app->fonts_page_from_title);
+            player_app_close_fonts_page(psp_app);
+            assert(psp_app->active_view == VIEW_SETTINGS);
+
+            /* Hide: that game only, kept in settings.json across sessions. */
+            snprintf(settings_file, sizeof(settings_file), "%s%cfont_note_settings.json", psp_test, sep);
+            assert(strlen(settings_file) < sizeof(psp_app->settings_path));
+            memcpy(psp_app->settings_path, settings_file, strlen(settings_file) + 1u);
+            player_app_hide_font_note(psp_app, 0);
+            player_app_hide_font_note(psp_app, 0);
+            player_app_hide_font_note(psp_app, 5);
+            assert(psp_app->settings.font_note_hidden_count == 1);
+            assert(player_app_font_note(psp_app, 0) == NULL);
+            assert(player_app_font_note(psp_app, 1) != NULL);
+            saved = read_text_file(settings_file);
+            assert(saved && strstr(saved, "\"font_note_hidden\": [\"TEST96001\"]") != NULL);
+            free(saved);
+            back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+            assert(back != NULL);
+            nk_library_init(&back->library);
+            player_app_set_runtime_root(back, per_user);
+            assert(player_app_load_settings(back, settings_file) == NK_OK);
+            back->game_count = 2;
+            memcpy(back->games, psp_app->games, 2u * sizeof(back->games[0]));
+            assert(player_app_font_note(back, 0) == NULL);  /* status not read yet: no claim */
+            player_app_refresh_font_status(back);
+            assert(player_app_font_note(back, 0) == NULL);
+            assert(player_app_font_note(back, 1) != NULL);
+            /* A member that is not a disc ID is not kept. */
+            write_text_file(settings_file, "{\"schema_version\": 2, \"font_note_hidden\":"
+                                           " [\"TEST96002\", 7, \"nonsense\", \"test96002\"]}");
+            memset(&back->settings, 0, sizeof(back->settings));
+            assert(player_app_load_settings(back, settings_file) == NK_OK);
+            assert(back->settings.font_note_hidden_count == 1);
+            assert(player_app_font_note(back, 0) != NULL);
+            assert(player_app_font_note(back, 1) == NULL);
+            free(back);
+
+            /* All 18 the user's own: no note in any mode. */
+            assert(player_app_fonts_import_from_psp_roots(psp_app, roots + 2, 1));
+            assert(psp_app->wizard.font_own_count == NK_FONT_PSP_FONT_COUNT);
+            assert(player_app_font_note(psp_app, 1) == NULL);
+        }
+
         free(psp_app);
         assert(nk_platform_set_app_data_dir_override(NULL));
         assert(test_remove_tree(psp_test));

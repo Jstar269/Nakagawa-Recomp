@@ -520,7 +520,8 @@ GOLDEN_HEADER = ROOT / "tests" / "native" / "pgf_golden_vectors.h"
 
 
 def golden_vectors() -> dict:
-    """Synthetic two-glyph fonts for the native font tests, one per slot. Built by pgf_writer."""
+    """Synthetic two-glyph fonts for the native font tests, one per slot, and the same fonts
+    under the project stand-in name, which marks a replacement font. Built by pgf_writer."""
     def glyph(code: int) -> Glyph:
         return Glyph(code=code, width=2, height=2, samples=(1, 2, 3, 4), row_order=1)
 
@@ -528,6 +529,10 @@ def golden_vectors() -> dict:
         "Latin": build_pgf([glyph(0x41), glyph(0x61)], font_name="Nakagawa Test Latin"),
         "Japanese": build_pgf([glyph(0x41), glyph(0x3042)], font_name="Nakagawa Test Japanese"),
         "Korean": build_pgf([glyph(0x41), glyph(0xAC00)], font_name="Nakagawa Test Korean"),
+        "StandInLatin": build_pgf([glyph(0x41), glyph(0x61)], font_name="Nakagawa Open Latin"),
+        "StandInJapanese": build_pgf([glyph(0x41), glyph(0x3042)],
+                                     font_name="Nakagawa Open Japanese"),
+        "StandInKorean": build_pgf([glyph(0x41), glyph(0xAC00)], font_name="Nakagawa Open Korean"),
     }
 
 
@@ -661,9 +666,11 @@ class GoldenVectorTests(unittest.TestCase):
         slots = {"Latin": "latin", "Japanese": "japanese", "Korean": "korean"}
         for name, image in golden_vectors().items():
             info = fonts.validate_pgf_data(image, f"{name}.pgf")
-            self.assertEqual(info["slot"], slots[name], name)
+            self.assertEqual(info["slot"], slots[name.removeprefix("StandIn")], name)
             # Each golden font names U+0041 and one more code far from it: a sparse character map.
             self.assertTrue(info["sparse"], name)
+            # Only the fonts under the project stand-in name are replacement fonts.
+            self.assertEqual(info["replacement"], name.startswith("StandIn"), name)
 
 
 if __name__ == "__main__":

@@ -731,13 +731,14 @@ static void player_go_back(PlayerApp *app, SDL_Window *window, bool *running,
         player_app_set_view(app, VIEW_ONLINE_SETTINGS);
     } else if (app->active_view == VIEW_PREREQ_ABOUT ||
                app->active_view == VIEW_BUILD_CACHE ||
-               app->active_view == VIEW_PSP_FONTS ||
                app->active_view == VIEW_UPDATES ||
                app->active_view == VIEW_CONFIRM_FACTORY_RESET ||
                app->active_view == VIEW_ONLINE_SETTINGS ||
                app->active_view == VIEW_ACCESSIBILITY_SETTINGS ||
                app->active_view == VIEW_PROBLEM_REPORT) {
         player_app_set_view(app, VIEW_SETTINGS);
+    } else if (app->active_view == VIEW_PSP_FONTS) {
+        player_app_close_fonts_page(app);
     } else if (app->active_view == VIEW_ACE_SETTINGS) {
         player_app_close_enhanced_page(app);
     } else if (app->active_view == VIEW_DEVELOPER_LOG) {
@@ -1847,6 +1848,7 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             break;
         case PLAYER_UI_SETTINGS_BACK:
             if (app->active_view == VIEW_ACE_SETTINGS) player_app_close_enhanced_page(app);
+            else if (app->active_view == VIEW_PSP_FONTS) player_app_close_fonts_page(app);
             else if (app->active_view == VIEW_ONLINE_PLAY_SETTINGS) {
                 player_app_set_view(app, VIEW_ONLINE_SETTINGS);
             } else player_app_set_view(app, VIEW_SETTINGS);
@@ -2134,6 +2136,17 @@ static void player_ui_nk_apply_action(PlayerApp *app,
     }
     if (action->kind == PLAYER_UI_ACTION_HIDE_RENDER_NOTICE) {
         player_app_hide_render_notice(app);
+        return;
+    }
+    if (action->kind == PLAYER_UI_ACTION_HIDE_FONT_NOTE) {
+        player_app_hide_font_note(app, (int)action->title_index);
+        return;
+    }
+    if (action->kind == PLAYER_UI_ACTION_FONT_NOTE_GET_FONTS) {
+        /* The font note's Get fonts from my PSP: the PSP fonts step, then the same search
+           for a PSP as that page's own button; the page shows what it found. */
+        player_app_font_note_open_fonts(app);
+        (void)player_app_fonts_import_from_psp(app);
         return;
     }
     if (action->kind == PLAYER_UI_ACTION_CHECK_INPUT_AGAIN) {

@@ -292,6 +292,19 @@ def write_latin_index_fixture(root: Path) -> dict[str, bytes]:
     legacy_result = fonts.import_fonts(legacy_source, user_data_root=root / "legacy-data")
     if legacy_result["status"] != "OK":
         raise AssertionError(f"the legacy-only fixture import failed: {legacy_result['outcomes']}")
+
+    # Review of #2783: an import of replacement fonts (the project stand-in name marks them): a
+    # Japanese font and Latin index 11 (ltn10.pgf), which no other request of the selftest reaches.
+    replacement_source = root / "replacement-source"
+    replacement_source.mkdir(parents=True, exist_ok=True)
+    (replacement_source / "jpn0.pgf").write_bytes(
+        synthetic_pgf(JAPANESE_PROJECT_CODES, "Nakagawa Open Japanese", 648))
+    (replacement_source / "ltn10.pgf").write_bytes(
+        synthetic_pgf(LATIN_PROJECT_CODES, "Nakagawa Open Latin", 9 * 64))
+    replacement_result = fonts.import_fonts(replacement_source,
+                                            user_data_root=root / "replacement-data")
+    if replacement_result["replacement_count"] != 2:
+        raise AssertionError(f"the replacement fixture import failed: {replacement_result['outcomes']}")
     return payloads
 
 
@@ -362,10 +375,13 @@ def request_lines(stderr: str) -> list[str]:
     return [line for line in stderr.splitlines() if re.match(r"flash0: \w+ registry index=", line)]
 
 
-def latin_request_line(index: int, backing: str, source: str, fallback: str | None = None) -> str:
+def latin_request_line(index: int, backing: str, source: str, fallback: str | None = None,
+                       replacement: bool = False) -> str:
     """The line for Latin file ordinal ``index``. A request served by another file than its own
-    import is a substitute and names its fallback rule (#1300)."""
-    selection = "selection=exact" if fallback is None else f"selection=substitute fallback={fallback}"
+    import is a substitute and names its fallback rule (#1300); its own import is exact, or a
+    replacement when that file is a replacement font (#2783)."""
+    exact = "selection=replacement" if replacement else "selection=exact"
+    selection = exact if fallback is None else f"selection=substitute fallback={fallback}"
     return (f"flash0: Latin registry index={index + 1} requested=ltn{index}.pgf backing={backing} "
             f"source={source} {selection}")
 
@@ -615,12 +631,14 @@ bool nk_platform_absolute_path(const char *path, char *out_path, size_t max_len)
 }
 
 NkFontSlotCheck nk_font_check_cache_slot_file(const char *user_data_root, NkFontSlot slot,
-                                              FILE *cache_file, char *reason, size_t reason_len) {
+                                              FILE *cache_file, char *reason, size_t reason_len,
+                                              bool *replacement) {
     (void)user_data_root;
     (void)slot;
     (void)cache_file;
     (void)reason;
     (void)reason_len;
+    if (replacement) *replacement = false;
     return NK_FONT_SLOT_CHECK_FILE_INVALID;
 }
 
@@ -1027,6 +1045,11 @@ class Flash0FontDeviceTests(unittest.TestCase):
                 latin_request_line(13, "nkltn13.pgf", "project", "project"),
                 latin_request_line(12, project_small, "project", "project"),
                 latin_request_line(14, project_small, "project", "project"),
+                # #2783: an imported replacement font is named as one, never as exact.
+                "flash0: Japanese registry index=0 requested=jpn0.pgf "
+                f"backing={header_string('NK_FONT_SLOT_JAPANESE_FILE')} source=user-imported "
+                "selection=replacement",
+                latin_request_line(10, "ltn10.pgf", "user-imported", replacement=True),
             ])
             # The registry lines cover every font the game could ask for; this one, what it opened.
             self.assertEqual(run.stderr.count("flash0: game opened "), 1, run.stderr[-2000:])
