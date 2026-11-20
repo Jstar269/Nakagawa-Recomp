@@ -777,7 +777,8 @@ reuses that expansion. Otherwise the expansion is written beside its final name,
 read once more to check that it did not change meanwhile, and the expansion is renamed into place, so a cancelled
 or failed expansion leaves nothing behind. The file's size, write time, change time and file identity are noted
 before it is read and checked again before anything is recorded; with the second read, they stop a file that
-changed while it was added (even one changed and put back) as `DISC_IMAGE_READ_FAILED`. On Windows the file is
+changed while it was added (even one changed and put back, where the file system reports change times or file
+identities) as `DISC_IMAGE_READ_FAILED`. On Windows the file is
 also held while it is added so that no other program can write to it (on a local drive, or a server that enforces
 this); a file another program already has open for writing, such as a download or sync tool, is read shared and
 relies on those checks, and the log says so. A CHD whose header records the
