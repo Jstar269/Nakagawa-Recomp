@@ -229,6 +229,38 @@ void hle_exit_close_audio_dump(void) {
 #endif
 }
 
+/* The one end of a run the runtime stops itself (audit 2026-11-17, F-1ee85ec7). _Exit skips
+ * atexit, so every finalizer an atexit hook would run is run here, in the order the
+ * SR_EXIT_AT_VBLANK exit established, and every stop that ends the process calls this instead of
+ * repeating the list: the SR_TRACE tail lands first (the evidence closest to the stop), the audio
+ * statistics print and the SR_AUDIODUMP header is finalised, the texture dump's files land, the
+ * recording is finished with this exit status, the PSMF A/V and scene reports print, the
+ * presenter is released (it writes the SR_PERF summary first, so the shutdown after it is a
+ * no-op), the profile and verifier reports print, the SR_SAMPLE_OUT tail lands, and Ace Mode
+ * writes its report. Each step is idempotent and a no-op when its feature is off. A stop keeps
+ * its own leading lines (its message, the flight-recorder event) before the call. */
+_Noreturn void sr_run_end(int status, const char *reason) {
+    sr_trace_close();
+    hle_exit_audio_stats();
+    hle_exit_close_audio_dump();
+    sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
+    (void)sr_videorec_finish_status(reason, status);
+    sr_dump_calls();
+    fflush(stderr);
+    fflush(stdout);
+    psmf_av_final(reason);
+    ge_scene_dump_finish();
+    sr_compat_report();
+    gui_shutdown();
+    sr_perf_shutdown();
+    sr_profile_dump_final();
+    SR_VERIFY_REPORT_NOW();
+    hle_state_sample_close();   /* _Exit flushes no stdio stream: land the SR_SAMPLE_OUT tail */
+    ace_finish();               /* Ace Mode's exit stamp and report (an atexit hook otherwise) */
+    fflush(stderr); fflush(stdout);
+    _Exit(status);
+}
+
 /* A route that cannot be trusted must not be allowed to look like one that can. Every
  * failure path lands here: it names the step, the vblank and what was actually on screen,
  * then terminates with a distinct status so the manager's verdict cannot record the run
@@ -246,18 +278,7 @@ static void route_fail(const char *fmt, ...) {
     fflush(stderr);
     if (!getenv("SR_ROUTE_NO_EXIT")) {
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, 0u, ROUTE_FAIL_EXIT);
-        hle_exit_audio_stats();
-        hle_exit_close_audio_dump();
-        ge_scene_dump_finish();
-        sr_compat_report();
-        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-        (void)sr_videorec_finish_status("a route check failed", ROUTE_FAIL_EXIT);
-        sr_perf_shutdown();
-        sr_profile_dump_final();
-        SR_VERIFY_REPORT_NOW();
-        hle_state_sample_close();   /* _Exit flushes no stdio stream: land the SR_SAMPLE_OUT tail */
-        sr_trace_close();           /* and the SR_TRACE tail, the evidence closest to the failure */
-        _Exit(ROUTE_FAIL_EXIT);
+        sr_run_end(ROUTE_FAIL_EXIT, "a route check failed");
     }
 }
 
@@ -1809,14 +1830,7 @@ static FILE *s_sample_out;
 
 static void hle_state_sample_refuse(const char *path, int line, const char *why) {
     fprintf(stderr, "SR_SAMPLE_SPEC: %s line %d: %s; the run stops here\n", path, line, why);
-    sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-    (void)sr_videorec_finish_status("SR_SAMPLE_SPEC was refused", 2);
-    sr_perf_shutdown();
-    sr_profile_dump_final();
-    SR_VERIFY_REPORT_NOW();
-    sr_trace_close();   /* _Exit flushes no stdio stream: land the SR_TRACE tail */
-    fflush(stderr);
-    _Exit(2);
+    sr_run_end(2, "SR_SAMPLE_SPEC was refused");
 }
 
 static void hle_state_sample_init(void) {

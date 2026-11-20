@@ -2631,15 +2631,7 @@ uint32_t h_io_open_path(const char *path, uint32_t flags, int forced_slot) {
     if (rc < (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) && s_fds[rc].used &&
         hle_enhancement_attach((int)rc, path, flags) < 0) {
         fprintf(stderr, "ENHANCEMENT_DATA_MISMATCH: the run stops here\n");
-        sr_trace_close();
-        ge_scene_dump_finish();
-        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-        (void)sr_videorec_finish_status("ENHANCEMENT_DATA_MISMATCH", 1);
-        sr_perf_shutdown();
-        sr_profile_dump_final();
-        SR_VERIFY_REPORT_NOW();
-        fflush(stderr);
-        _Exit(1);
+        sr_run_end(1, "ENHANCEMENT_DATA_MISMATCH");
     }
     return rc;
 }

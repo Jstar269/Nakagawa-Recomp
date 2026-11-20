@@ -861,27 +861,12 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
             if (!snap_ok) {
                 fprintf(stderr, "SR_FBDUMP: no trustworthy framebuffer snapshot was written\n");
                 sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, 0u, 1u);
-                ge_scene_dump_finish();
-                sr_compat_report();
-                sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-                (void)sr_videorec_finish_status("SR_FBDUMP found no trustworthy framebuffer", 1);
-                sr_perf_shutdown();
-                sr_profile_dump_final();
-                SR_VERIFY_REPORT_NOW();
-                _Exit(1);
+                sr_run_end(1, "SR_FBDUMP found no trustworthy framebuffer");
             }
             {
                 int capture_exit_status = sr_fbcap_exit_status(SR_FBCAP_FBDUMP, cres);
                 sr_flight_exit((uint32_t)capture_exit_status);
-                psmf_av_final("capture_exit");
-                ge_scene_dump_finish();
-                sr_compat_report();
-                sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-                (void)sr_videorec_finish_status("SR_FBDUMP capture exit", capture_exit_status);
-                sr_perf_shutdown();
-                sr_profile_dump_final();
-                SR_VERIFY_REPORT_NOW();
-                _Exit(capture_exit_status);
+                sr_run_end(capture_exit_status, "SR_FBDUMP capture exit");
             }
         }
     }
@@ -1226,14 +1211,7 @@ void sr_vblank_tick(void) {
           if (wde > 0 && diff >= (uint32_t)wde) {
               fprintf(stderr, "WATCHDOG: aborting after %u vblanks with no new frame (SR_WATCHDOG_EXIT=%d)\n", diff, wde);
               sr_flight_hang(diff, (uint32_t)wde);
-              ge_scene_dump_finish();
-              sr_compat_report();
-              sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-              (void)sr_videorec_finish_status("SR_WATCHDOG_EXIT", 1);
-              sr_perf_shutdown();
-              sr_profile_dump_final();
-              SR_VERIFY_REPORT_NOW();
-              _Exit(1);
+              sr_run_end(1, "SR_WATCHDOG_EXIT");
           }
         }
     }
@@ -1294,35 +1272,12 @@ void sr_vblank_tick(void) {
         if (exit_at && s_vcount >= exit_at) {
             fprintf(stderr, "BOOT_EVENT phase=exit_at_vblank vblanks=%u (SR_EXIT_AT_VBLANK=%u)\n",
                     s_vcount, exit_at);
-            hle_exit_audio_stats();
-            /* _Exit skips atexit, so the SR_AUDIODUMP file is closed here whether or not
-             * SR_AUDIOSTAT is set; after the stats call above it is a no-op. */
-            hle_exit_close_audio_dump();
-            /* The same for a texture dump and a video recording: the dump's files land and its
-             * exit line prints, the recorder's encoder is finished and the files muxed. */
-            sr_texdump_exit_finish();
-            (void)sr_videorec_finish_status("SR_EXIT_AT_VBLANK", 0);
-            sr_dump_calls();
-            fflush(stderr);
-            fflush(stdout);
             sr_flight_budget(s_vcount);
-            /* _Exit skips the atexit hook that writes the SR_PERF_JSON summary and the
-             * final CSV row, so the perf shutdown runs here, like the audio dump close
-             * above; it is idempotent and a no-op without SR_PERF. The PSMF A/V summary is an
-             * atexit report too, so it is printed here as well (a no-op unless enabled). */
-            psmf_av_final("exit_at_vblank");
-            ge_scene_dump_finish();
-            sr_compat_report();
-            /* _Exit skips atexit, so release the renderer (and save its pipeline cache) here; it writes
-             * the SR_PERF summary first, so the call below is then a no-op. */
-            gui_shutdown();
-            sr_perf_shutdown();
-            sr_profile_dump_final();
-            SR_VERIFY_REPORT_NOW();
-            hle_state_sample_close();
-            /* Ace Mode's exit stamp and report are an atexit hook too (a no-op when off). */
-            ace_finish();
-            _Exit(0);
+            /* _Exit skips atexit, so the run end runs every finalizer itself: the audio
+             * statistics and the SR_AUDIODUMP close, the texture dump and the recording, the
+             * PSMF A/V and scene reports, the presenter release (the SR_PERF summary first), the
+             * profile, the SR_SAMPLE_OUT tail and Ace Mode's report. Status 0. */
+            sr_run_end(0, "SR_EXIT_AT_VBLANK");
         }
     }
 }

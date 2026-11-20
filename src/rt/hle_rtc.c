@@ -223,18 +223,7 @@ static void hle_guest_fault(CpuState *s, const char *name, uint32_t addr, int st
     s_hle_guest_fault_count++;
     s_hle_guest_fault_addr = addr;
 #else
-    if (sr_sched_on) {
-        sr_trace_close();
-        ge_scene_dump_finish();
-        sr_compat_report();
-        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-        (void)sr_videorec_finish_status("a guest fault stopped the run", HLE_GUEST_FAULT_EXIT);
-        sr_perf_shutdown();
-        sr_profile_dump_final();
-        SR_VERIFY_REPORT_NOW();
-        fflush(stderr);
-        _Exit(HLE_GUEST_FAULT_EXIT);
-    }
+    if (sr_sched_on) sr_run_end(HLE_GUEST_FAULT_EXIT, "a guest fault stopped the run");
     longjmp(g_hle_jmp, 1);
 #endif
 }

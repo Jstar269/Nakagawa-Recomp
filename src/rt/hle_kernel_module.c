@@ -1048,18 +1048,7 @@ static uint32_t hle_libfont_startup_stop(const char *reason) {
     return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
 #else
     sr_hit_hle = 1;
-    if (sr_sched_on) {
-        sr_trace_close();
-        ge_scene_dump_finish();
-        sr_compat_report();
-        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-        (void)sr_videorec_finish_status("the libfont start-up stop", HLE_LIBFONT_STARTUP_STOP_EXIT);
-        sr_perf_shutdown();
-        sr_profile_dump_final();
-        SR_VERIFY_REPORT_NOW();
-        fflush(stderr);
-        _Exit(HLE_LIBFONT_STARTUP_STOP_EXIT);
-    }
+    if (sr_sched_on) sr_run_end(HLE_LIBFONT_STARTUP_STOP_EXIT, "the libfont start-up stop");
     longjmp(g_hle_jmp, 1);
 #endif
 }

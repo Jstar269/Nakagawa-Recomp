@@ -2274,18 +2274,7 @@ uint32_t hle_unmodelled_stop(const char *import_name, const char *fmt, ...) {
     hle_record_unsupported_import_stop(sr_last_nid, import_name);
     sr_flight_unsupported_fatal(sr_last_nid, sched_current_uid(), 0u);
     sr_hit_hle = 1;
-    if (sr_sched_on) {
-        sr_trace_close();
-        ge_scene_dump_finish();
-        sr_compat_report();
-        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-        (void)sr_videorec_finish_status("an unsupported import stopped the run", 7);
-        sr_perf_shutdown();
-        sr_profile_dump_final();
-        SR_VERIFY_REPORT_NOW();
-        fflush(stderr);
-        _Exit(7);
-    }
+    if (sr_sched_on) sr_run_end(7, "an unsupported import stopped the run");
     longjmp(g_hle_jmp, 1);
 #endif
 }
@@ -4698,7 +4687,7 @@ uint32_t sr_syscall(CpuState *s, uint32_t nid) {
         sr_hit_hle = 1;
         /* Under the fiber scheduler, longjmp across fibers is invalid; stop the process cleanly
          * after flushing the trace. The plain driver (no scheduler) keeps the longjmp boundary. */
-        if (sr_sched_on) { sr_trace_close(); ge_scene_dump_finish(); sr_compat_report(); sr_texdump_exit_finish(); (void)sr_videorec_finish_status("an unregistered NID stopped the run", 7); sr_perf_shutdown(); sr_profile_dump_final(); SR_VERIFY_REPORT_NOW(); fflush(stderr); _Exit(7); }
+        if (sr_sched_on) sr_run_end(7, "an unregistered NID stopped the run");
         longjmp(g_hle_jmp, 1);
     }
     if (hle_syslog_on()) {

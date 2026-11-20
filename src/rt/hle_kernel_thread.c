@@ -128,18 +128,12 @@ static uint32_t h_ExitThread(CpuState *s) {
             s->r[2], s->r[4], s->r[8], s->r[9], s->r[10], s->r[11],
             s->r[16], s->r[17], s->r[18], s->r[19]);
     if (death_wish) {
-        /* _exit: skip host atexit handlers (libc has already burned -- the death wish
-         * is unconditional at this point). stderr flush so the trace survives. */
+        /* The run end skips the host atexit handlers (libc has already burned -- the death
+         * wish is unconditional at this point) and runs the end-of-process reports itself. */
         fprintf(stderr, "GAMELOG: Guest requested exit (libc guard chain)\n");
         fflush(stderr);
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, s->pc, uid, 1u);
-        SR_VERIFY_REPORT_NOW();  /* _exit skips atexit, which would have written the report */
-        ge_scene_dump_finish();
-        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-        (void)sr_videorec_finish_status("the guest's own exit path failed", 1);
-        sr_perf_shutdown();      /* the end-of-process reports, as on the _Exit paths */
-        sr_profile_dump_final();
-        _exit(1);
+        sr_run_end(1, "the guest's own exit path failed");
     }
     int delete_request = s_exit_delete_request;
     s_exit_delete_request = 0;

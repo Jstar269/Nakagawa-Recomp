@@ -711,8 +711,11 @@ void gui_pump(void) {
     if (s_test_gui_pump_polls) s_test_gui_poll_ns = sched_host_now_ns();
 }
 int gui_headless_acceptance_complete(void) { return 0; }
-/* sr_vblank_tick releases the presenter before its SR_EXIT_AT_VBLANK _Exit; this harness has none. */
-void gui_shutdown(void) {}
+/* The run end (sr_run_end) releases the presenter before its _Exit; this harness has none, so it
+ * says it was asked, and a stop's child log shows the release ran. */
+void gui_shutdown(void) {
+    fputs("gui_shutdown: the harness presenter is released\n", stderr);
+}
 uint32_t gui_buttons(void) { return s_test_gui_buttons | s_test_gui_pulse; }
 uint32_t gui_consume_button_pulses(void) {
     const uint32_t pulses = s_test_gui_pulse;
@@ -63523,6 +63526,25 @@ static int run_texdump_stop_child(const char *arg) {
             fclose(f);
             (void)sr_route_load(pad);
         }
+    } else if (strcmp(route, "watchsample") == 0) {
+        /* The watchdog stop runs the whole run end (audit 2026-11-17, F-1ee85ec7): the
+         * SR_SAMPLE_OUT rows sampled before it land, and the presenter is released. */
+        extern void sr_hle_test_state_sample_reset(void);
+        char spec[MAX_PATH], csv[MAX_PATH];
+        const char *root = colon + 1;
+        if (snprintf(spec, sizeof(spec), "%s/texdump_stop_%s.spec", root, route) >= (int)sizeof(spec) ||
+            snprintf(csv, sizeof(csv), "%s/texdump_stop_%s.csv", root, route) >= (int)sizeof(csv))
+            return 96;
+        FILE *f = fopen(spec, "w");
+        if (!f) return 96;
+        fputs("count u32 0x09018500\n", f);
+        fclose(f);
+        hle_test_setenv("SR_SAMPLE_SPEC", spec);
+        hle_test_setenv("SR_SAMPLE_OUT", csv);
+        MEM_W32(0x09018500u, 7u);
+        sr_hle_test_state_sample_reset();
+        hle_test_setenv("SR_WATCHDOG_EXIT", "600");   /* no new frame for 600 vblanks: status 1 */
+        for (unsigned i = 0; i < 1300u; i++) { sr_display_advance_vcount(1u); sr_vblank_tick(); }
     } else if (strcmp(route, "regfull") == 0) {
         /* Synthetic NIDs no table uses, past HLE_CAP: each one the registry cannot hold is
          * named as it is refused (audit 2026-11-17, F-dc2bea8c). Not a stop: returns 0. */
@@ -63578,6 +63600,40 @@ static void test_registry_full_is_named(const char *self) {
     expect(status == 0 &&
                strstr(text, "HLE: registry full (HLE_CAP=1024), sceTestRegistryFill (0x7e57") != NULL,
            "a registration past HLE_CAP is named, not dropped without a word");
+}
+
+/* The SR_WATCHDOG_EXIT stop goes through the one run end, so it runs the finalizers its own copy
+ * of the list skipped: the presenter is released and the SR_SAMPLE_OUT file is closed with
+ * every row sampled before the stop (audit 2026-11-17, F-1ee85ec7). The SR_AUDIODUMP close in
+ * the same list is compiled out of this harness (hle_exit_close_audio_dump). The file is
+ * written in text mode, so a row ends in "\r\n" on Windows and "\n" elsewhere. */
+static void test_watchdog_stop_runs_the_run_end(const char *self) {
+    static char text[65536];
+    static char rows[16384];
+    char root[MAX_PATH], csv[MAX_PATH];
+    if (!hle_scratch_root(root, sizeof(root)) ||
+        snprintf(csv, sizeof(csv), "%s/texdump_stop_watchsample.csv", root) >= (int)sizeof(csv)) {
+        expect(0, "watchdog run end: the selftest knows its scratch root");
+        return;
+    }
+    remove(csv);
+    const int status = run_end_child(self, root, "watchsample", text, sizeof(text));
+    const size_t got = run_end_read_file(csv, rows, sizeof(rows));
+    size_t lines = 0u;
+    for (size_t k = 0; k < got; k++) lines += rows[k] == '\n';
+    size_t row_end = got;   /* the last row without its line end */
+    if (row_end > 0u && rows[row_end - 1u] == '\n') row_end--;
+    if (row_end > 0u && rows[row_end - 1u] == '\r') row_end--;
+    const int header_ok = strncmp(rows, "vblank,count\n", 13) == 0 ||
+                          strncmp(rows, "vblank,count\r\n", 14) == 0;
+    expect(status == 1 && strstr(text, "WATCHDOG: aborting after 600 vblanks") != NULL,
+           "the SR_WATCHDOG_EXIT stop ends the run with status 1");
+    expect(strstr(text, "gui_shutdown: the harness presenter is released") != NULL,
+           "the SR_WATCHDOG_EXIT stop releases the presenter (gui_shutdown) before it exits");
+    expect(header_ok && lines >= 500u && row_end < got && row_end >= 2u &&
+               memcmp(rows + row_end - 2u, ",7", 2u) == 0,
+           "the SR_WATCHDOG_EXIT stop lands every SR_SAMPLE_OUT row sampled before it "
+           "(hle_state_sample_close)");
 }
 
 static void test_texdump_finished_by_run_stops(const char *self) {
@@ -64182,6 +64238,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_mp3_notify_past_area_end_reported();
     test_texdump_finished_by_run_stops(argc > 0 ? argv[0] : NULL);
     test_registry_full_is_named(argc > 0 ? argv[0] : NULL);
+    test_watchdog_stop_runs_the_run_end(argc > 0 ? argv[0] : NULL);
     test_td24d_hle_batch();
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();
