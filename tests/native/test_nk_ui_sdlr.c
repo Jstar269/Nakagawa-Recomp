@@ -495,6 +495,82 @@ static int test_atlas_rebuild_on_scale_change(void) {
     return 1;
 }
 
+/* SDL_EVENT_RENDER_DEVICE_RESET loses every texture the renderer made (a D3D device
+   removed by a driver reset or update): nk_ui_sdlr_reset drops the atlas pages and
+   glyph entries, the cached image textures and the waves texture, so the next render
+   uploads each of them again instead of drawing from a lost texture. */
+static int test_device_reset_recreates_textures(void) {
+    NkUiTextBackend text = nk_ui_ttf_backend(g_ttf);
+    NkUiConfig config;
+    NkUi *ui;
+    Target target;
+    NkUiSdlr *backend;
+    NkUiSdlrStats before;
+    NkUiSdlrStats stats;
+    NkUiDrawBuffer buffer;
+    NkUiWavesCommand waves;
+    NkUiWavePalette palette;
+    NkUiImage image;
+    uint8_t pixels[4u * 4u * 4u];
+    const NkUiDrawList *list;
+    memset(&config, 0, sizeof(config));
+    memset(&buffer, 0, sizeof(buffer));
+    memset(pixels, 0xFF, sizeof(pixels));
+    image.width = 4u;
+    image.height = 4u;
+    image.rgba_pm = pixels;
+    image.serial = 0x5EED0101ull;
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create the ui");
+    CHECK(target_open(&target, 360, 220), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, &text);
+    CHECK(backend != NULL, "create the backend");
+    nk_ui_sdlr_set_scale(backend, 1.0f);
+    CHECK(nk_ui_waves_palette(0u, &palette), "base wave palette");
+    nk_ui_waves_command(37.0, 64.0f, 64.0f, &palette, &waves);
+    CHECK(nk_ui_draw_add_custom(&buffer, NK_UI_CUSTOM_WAVES, &waves,
+                                (NkUiPixelRect){0, 100, 64, 164}, 1u), "waves command");
+    CHECK(nk_ui_draw_add_image(&buffer, &image, (NkUiPixelRect){300, 0, 316, 16}, 0xFFFFFFFFu, 2u),
+          "image command");
+    /* Two frames: the second draws everything from the textures the first made. */
+    for (int frame = 0; frame < 2; ++frame) {
+        list = build_screen(ui, 360, 220, 100);
+        CHECK(list != NULL && nk_ui_sdlr_render(backend, list), "render the text frame");
+        CHECK(nk_ui_sdlr_render(backend, &buffer.list), "render the waves and image frame");
+    }
+    nk_ui_sdlr_get_stats(backend, &before);
+    CHECK(before.atlas_pages == 1u && before.atlas_glyphs > 10u && before.atlas_uploads > 10u &&
+          before.image_uploads == 1u && before.waves_rendered == 1u && before.device_resets == 0u,
+          "a repeated frame reuses its glyph, image and waves textures");
+
+    nk_ui_sdlr_reset(backend);
+    nk_ui_sdlr_get_stats(backend, &stats);
+    CHECK(stats.atlas_pages == 0u && stats.atlas_glyphs == 0u && stats.device_resets == 1u &&
+          stats.atlas_rebuilds == before.atlas_rebuilds,
+          "a reset drops the atlas, and it is not counted as a scale rebuild");
+
+    list = build_screen(ui, 360, 220, 100);
+    target_clear(&target, 0x000000FFu);
+    CHECK(list != NULL && nk_ui_sdlr_render(backend, list), "render the text frame after the reset");
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "render the waves and image after the reset");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    CHECK(stats.atlas_pages == 1u && stats.atlas_glyphs == before.atlas_glyphs &&
+          stats.atlas_uploads > before.atlas_uploads,
+          "every glyph is uploaded into a new page");
+    CHECK(stats.image_uploads == before.image_uploads + 1u, "the image is uploaded again");
+    CHECK(stats.waves_rendered == before.waves_rendered + 1u,
+          "the unchanged waves frame is rendered into a new texture");
+    CHECK(target_pixel(&target, 308, 8) == 0xFFFFFFFFu, "the image draws from its new texture");
+    nk_ui_sdlr_reset(NULL);   /* a NULL backend is ignored */
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    nk_ui_destroy(ui);
+    return 1;
+}
+
 static int test_atlas_page_overflow(void) {
     /* A glyph the size of a quarter page, in many distinct pixel sizes, forces the
        atlas past its page limit; the backend must rebuild instead of failing. */
@@ -1291,6 +1367,7 @@ int main(void) {
     RUN(test_rounded_border_and_waves);
     RUN(test_snapshots_and_atlas);
     RUN(test_atlas_rebuild_on_scale_change);
+    RUN(test_device_reset_recreates_textures);
     RUN(test_atlas_page_overflow);
     RUN(test_atlas_page_failure_is_reported);
     RUN(test_letter_spacing_counts_characters);
