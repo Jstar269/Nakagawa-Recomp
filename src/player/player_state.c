@@ -1452,6 +1452,8 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->title_play_count = 0;
     memset(settings->title_packs, 0, sizeof(settings->title_packs));
     settings->title_pack_count = 0;
+    memset(settings->font_note_hidden, 0, sizeof(settings->font_note_hidden));
+    settings->font_note_hidden_count = 0;
 }
 
 static bool resolution_scale_valid(int scale) {
@@ -1823,6 +1825,38 @@ static int texture_packs_read(PlayerSettings *settings, const NkJsonNode *packs)
     return dropped;
 }
 
+static int font_note_hidden_index(const PlayerSettings *settings, const char *key) {
+    for (int i = 0; settings && key && i < settings->font_note_hidden_count; i++) {
+        if (strcmp(settings->font_note_hidden[i], key) == 0) return i;
+    }
+    return -1;
+}
+
+/* Adds the game `key` (already normalised) to the games whose page hides the font note. False
+   only when MAX_LIBRARY_GAMES games are listed already. */
+static bool font_note_hidden_store(PlayerSettings *settings, const char *key) {
+    if (font_note_hidden_index(settings, key) >= 0) return true;
+    if (settings->font_note_hidden_count >= MAX_LIBRARY_GAMES) return false;
+    memcpy(settings->font_note_hidden[settings->font_note_hidden_count++], key,
+           PLAYER_DISC_ID_KEY_LEN);
+    return true;
+}
+
+/* Reads "font_note_hidden": ["<disc ID>", ...]. A member that is not a disc ID is not kept; the
+   return says how many, so the player is told. */
+static int font_note_hidden_read(PlayerSettings *settings, const NkJsonNode *list) {
+    int dropped = 0;
+    if (!list || !nk_json_is_array(list)) return 0;
+    for (size_t i = 0; i < nk_json_array_count(list); i++) {
+        char key[PLAYER_DISC_ID_KEY_LEN];
+        const char *disc = nk_json_get_string(nk_json_array_get(list, i));
+        if (!disc || !player_disc_id_key(disc, key) || !font_note_hidden_store(settings, key)) {
+            dropped++;
+        }
+    }
+    return dropped;
+}
+
 static void play_settings_write(FILE *f, const PlayerSettings *settings) {
     fprintf(f, "  \"enhanced\": {\"default\": \"%s\"",
             settings->enhanced.library == PLAYER_PLAY_ENHANCED ? "enhanced" : "authentic");
@@ -1851,6 +1885,11 @@ static void play_settings_write(FILE *f, const PlayerSettings *settings) {
         settings_write_json_string(f, settings->title_packs[i].path);
     }
     fprintf(f, "},\n");
+    fprintf(f, "  \"font_note_hidden\": [");
+    for (int i = 0; i < settings->font_note_hidden_count; i++) {
+        fprintf(f, "%s\"%s\"", i ? ", " : "", settings->font_note_hidden[i]);
+    }
+    fprintf(f, "],\n");
 }
 
 static const char *player_system_choice_key(PlayerSystemChoice choice) {
@@ -1931,6 +1970,7 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
     app->settings_newer_schema = false;
     app->settings_unreadable = false;
     int packs_dropped = 0;   /* "texture_packs" members not kept (texture_packs_read) */
+    int font_notes_dropped = 0; /* "font_note_hidden" members not kept (font_note_hidden_read) */
 
     char resolved_path[MAX_PATH_LEN];
     const char *target = player_settings_target(app, file_path, resolved_path,
@@ -2151,6 +2191,8 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
             play_settings_read_legacy(&app->settings, root);
         }
         packs_dropped = texture_packs_read(&app->settings, nk_json_obj_get(root, "texture_packs"));
+        font_notes_dropped = font_note_hidden_read(&app->settings,
+                                                   nk_json_obj_get(root, "font_note_hidden"));
     }
 
     /* Reduce motion was a plain switch, saved as "reduce_motion", until it could
@@ -2303,6 +2345,11 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         player_dev_log_add(app, "settings", "texture_packs: %d entr%s not kept (not a disc ID, "
                            "or a folder that is not a full UTF-8 path under 512 bytes)",
                            packs_dropped, packs_dropped == 1 ? "y" : "ies");
+    }
+    if (font_notes_dropped > 0) {
+        /* Nothing is lost but a hidden note, which shows again on that game's page. */
+        player_dev_log_add(app, "settings", "font_note_hidden: %d entr%s not kept (not a disc ID)",
+                           font_notes_dropped, font_notes_dropped == 1 ? "y" : "ies");
     }
     return NK_OK;
 }
@@ -4862,6 +4909,7 @@ void player_app_set_view(PlayerApp *app, PlayerView view) {
         app->drop_notice_visible = true;
     }
     if (view != VIEW_ACE_SETTINGS) app->enhanced_page_disc[0] = '\0';
+    if (view != VIEW_PSP_FONTS) app->fonts_page_from_title = false;
     if (view == VIEW_BUILD_CACHE) player_app_refresh_cover_art_cache_size(app);
     app->active_view = view;
 }
@@ -6886,6 +6934,50 @@ bool player_app_render_notice(const PlayerApp *app, const char *disc_id, const c
     if (heading) *heading = "Partly drawn in software";
     if (text) *text = app->render_effects_text;
     return true;
+}
+
+const char *player_app_font_note(const PlayerApp *app, int game_index) {
+    char key[PLAYER_DISC_ID_KEY_LEN];
+    PlayerPlayResolved play;
+    if (!app || game_index < 0 || game_index >= app->game_count) return NULL;
+    /* The font status has not been read yet: nothing is claimed. */
+    if (app->wizard.font_slot_detail[NK_FONT_SLOT_JAPANESE][0] == '\0') return NULL;
+    if (app->wizard.font_own_count >= NK_FONT_PSP_FONT_COUNT) return NULL;
+    player_play_resolve(&app->settings, app->games[game_index].disc_id, &play);
+    if (play.mode != PLAYER_PLAY_AUTHENTIC) return NULL;
+    if (player_disc_id_key(app->games[game_index].disc_id, key) &&
+        font_note_hidden_index(&app->settings, key) >= 0) {
+        return NULL;
+    }
+    return PLAYER_FONT_NOTE_TEXT;
+}
+
+void player_app_hide_font_note(PlayerApp *app, int game_index) {
+    char key[PLAYER_DISC_ID_KEY_LEN];
+    if (!app || game_index < 0 || game_index >= app->game_count ||
+        !player_disc_id_key(app->games[game_index].disc_id, key)) {
+        return;
+    }
+    if (!font_note_hidden_store(&app->settings, key)) {
+        player_dev_log_add(app, "settings", "font note for %s not hidden: %d games already hide it",
+                           key, MAX_LIBRARY_GAMES);
+        return;
+    }
+    player_dev_log_add(app, "settings", "font note hidden for %s", key);
+    maybe_persist_settings(app);
+}
+
+void player_app_font_note_open_fonts(PlayerApp *app) {
+    if (!app) return;
+    player_app_refresh_font_status(app);
+    player_app_set_view(app, VIEW_PSP_FONTS);
+    app->fonts_page_from_title = true;
+}
+
+void player_app_close_fonts_page(PlayerApp *app) {
+    if (!app) return;
+    /* The title page is still the library's screen under Settings, as for the Enhanced page. */
+    player_app_set_view(app, app->fonts_page_from_title ? VIEW_LIBRARY : VIEW_SETTINGS);
 }
 
 void player_app_hide_render_notice(PlayerApp *app) {
@@ -11095,25 +11187,39 @@ static void player_font_append_names(char *out, size_t out_len,
 /* The Fonts check's player sentence when a PSP system font is not imported (#1300). A game that
    asks for one gets a stand-in from another file (a nearby imported size, the older single Latin
    import, or the project's font), whose face differs from the PSP's, or no font when nothing
-   stands in. Empty when every font is the user's own import. */
+   stands in. An imported replacement font (nk_font_is_replacement) is named apart, as a
+   replacement that looks different. Empty when every font is the user's own import. */
 static void player_font_missing_sentence(char *out, size_t out_len,
                                          const NkFontSlotState states[NK_FONT_SLOT_COUNT],
                                          const NkFontLatinIndexState latin[NK_FONT_LATIN_INDEX_COUNT]) {
     bool missing[PLAYER_PSP_FONT_COUNT] = { false };
     bool unserved[PLAYER_PSP_FONT_COUNT] = { false };
+    bool replaced[PLAYER_PSP_FONT_COUNT] = { false };
     size_t missing_count = 0;
     size_t unserved_count = 0;
+    size_t replaced_count = 0;
     if (!out || out_len == 0) return;
     out[0] = '\0';
     for (int font = 0; font < PLAYER_PSP_FONT_COUNT; font++) {
         NkFontSource source;
         bool exact;
+        bool replacement;
         if (font == 0 || font == PLAYER_PSP_FONT_COUNT - 1) {
-            source = states[font == 0 ? NK_FONT_SLOT_JAPANESE : NK_FONT_SLOT_KOREAN].source;
+            const NkFontSlotState *state =
+                &states[font == 0 ? NK_FONT_SLOT_JAPANESE : NK_FONT_SLOT_KOREAN];
+            source = state->source;
             exact = source == NK_FONT_SOURCE_USER;
+            replacement = state->replacement;
         } else {
             source = latin[font - 1].source;
             exact = source == NK_FONT_SOURCE_USER && latin[font - 1].served_index == font - 1;
+            replacement = latin[font - 1].replacement;
+        }
+        /* The exact file is imported, but it is a replacement font, not the PSP's own. */
+        if (exact && replacement) {
+            replaced[font] = true;
+            replaced_count++;
+            continue;
         }
         if (exact) continue;
         missing[font] = true;
@@ -11123,24 +11229,34 @@ static void player_font_missing_sentence(char *out, size_t out_len,
             unserved_count++;
         }
     }
-    if (missing_count == 0) return;
-    bool one = missing_count == 1;
-    player_font_append(out, out_len, one ? "This PSP system font was not found: "
-                                         : "These PSP system fonts were not found: ");
-    player_font_append_names(out, out_len, missing);
-    player_font_append(out, out_len, one ? ". Games that ask for it get " : ". Games that ask for them get ");
-    if (unserved_count == missing_count) {
-        player_font_append(out, out_len, "no font at all. ");
-    } else {
-        player_font_append(out, out_len, "a stand-in font that looks different");
-        if (unserved_count > 0) {
-            player_font_append(out, out_len, "; for ");
-            player_font_append_names(out, out_len, unserved);
-            player_font_append(out, out_len, " they get no font at all");
+    if (missing_count == 0 && replaced_count == 0) return;
+    if (missing_count > 0) {
+        bool one = missing_count == 1;
+        player_font_append(out, out_len, one ? "This PSP system font was not found: "
+                                             : "These PSP system fonts were not found: ");
+        player_font_append_names(out, out_len, missing);
+        player_font_append(out, out_len, one ? ". Games that ask for it get "
+                                             : ". Games that ask for them get ");
+        if (unserved_count == missing_count) {
+            player_font_append(out, out_len, "no font at all. ");
+        } else {
+            player_font_append(out, out_len, "a stand-in font that looks different");
+            if (unserved_count > 0) {
+                player_font_append(out, out_len, "; for ");
+                player_font_append_names(out, out_len, unserved);
+                player_font_append(out, out_len, " they get no font at all");
+            }
+            player_font_append(out, out_len, ". ");
         }
+    }
+    if (replaced_count > 0) {
+        player_font_append(out, out_len, replaced_count == 1
+            ? "This PSP system font is a replacement font that looks different, not your PSP's own: "
+            : "These PSP system fonts are replacement fonts that look different, not your PSP's own: ");
+        player_font_append_names(out, out_len, replaced);
         player_font_append(out, out_len, ". ");
     }
-    player_font_append(out, out_len, one ? "Import it" : "Import them");
+    player_font_append(out, out_len, missing_count + replaced_count == 1 ? "Import it" : "Import them");
     player_font_append(out, out_len, " from your own PSP in Settings, PSP fonts.");
 }
 
@@ -11219,6 +11335,15 @@ bool player_app_fonts_import_folder(PlayerApp *app, const char *folder) {
         }
         snprintf(app->wizard.font_message, sizeof(app->wizard.font_message),
                  "No font was imported: %.400s.", reason);
+        app->wizard.font_message_kind = PLAYER_NOTE_WARNING;
+    } else if (result.replacement_count > 0) {
+        /* A replacement font is imported, but it is not the PSP's own, so the message does
+           not call it one and says what it changes. */
+        snprintf(app->wizard.font_message, sizeof(app->wizard.font_message),
+                 "Imported %d font file(s) into the player's font cache. %d of them %s, not your "
+                 "PSP's own, so text still looks different.",
+                 result.imported_count, result.replacement_count,
+                 result.replacement_count == 1 ? "is a replacement font" : "are replacement fonts");
         app->wizard.font_message_kind = PLAYER_NOTE_WARNING;
     } else {
         snprintf(app->wizard.font_message, sizeof(app->wizard.font_message),

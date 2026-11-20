@@ -398,6 +398,11 @@ typedef struct {
     int title_play_count;
     PlayerTitlePack title_packs[PLAYER_MAX_TITLE_PACKS];
     int title_pack_count;
+    /* The games whose page no longer shows the font note (player_app_font_note), by disc ID:
+       "font_note_hidden" in settings.json, a list, an addition to schema version 2 as
+       text_size is. An older player ignores it. */
+    char font_note_hidden[MAX_LIBRARY_GAMES][PLAYER_DISC_ID_KEY_LEN];
+    int font_note_hidden_count;
     /* Builds keep the compiled system libraries a disc carries in the data folder and
        reuse them for other games with the same library (#1306). On by default; the
        copies never leave this PC. */
@@ -1066,6 +1071,9 @@ struct PlayerApp {
        another game; empty for the library's page. Any other view clears it, and a re-sync that
        no longer lists the game closes the page. */
     char enhanced_page_disc[PLAYER_DISC_ID_KEY_LEN];
+    /* Settings > PSP fonts was opened from a game's page (its font note's Get fonts from my
+       PSP), so Back goes to that page rather than to Settings. Any other view clears it. */
+    bool fonts_page_from_title;
     char settings_notice[128];
     /* Cover art cache state (#2632): generation bumps on cache refresh/clear so UI
        thumbnails invalidate and missing covers re-check once; size_label backs
@@ -2088,6 +2096,25 @@ bool player_app_render_notice(const PlayerApp *app, const char *disc_id, const c
                               const char **text);
 /* Hide: the notice shown stays hidden for the rest of this player session. */
 void player_app_hide_render_notice(PlayerApp *app);
+
+/* The game page's font note (owner request 2026-11-19). Authentic is the game as released, and
+   text drawn in a stand-in or replacement font is not, so in Authentic the page says so in one
+   line, with an action that gets the fonts from the user's PSP. NULL when the game does not
+   start in Authentic, all 18 PSP fonts are the user's own (wizard.font_own_count), the font
+   status has not been read (player_app_refresh_font_status), or the user hid the note for this
+   game. It never blocks a start; Settings > PSP fonts always shows the full state. */
+#define PLAYER_FONT_NOTE_TEXT \
+    "Text uses stand-in fonts. For the original look, get the fonts from your PSP."
+const char *player_app_font_note(const PlayerApp *app, int game_index);
+/* Hide: the note stays hidden for that game, across sessions (settings.json "font_note_hidden"). */
+void player_app_hide_font_note(PlayerApp *app, int game_index);
+/* Get fonts from my PSP: opens Settings > PSP fonts with the font status read again, the same
+   step as Settings, PSP fonts. The caller then looks for a PSP
+   (player_app_fonts_import_from_psp), whose outcome that page shows. */
+void player_app_font_note_open_fonts(PlayerApp *app);
+/* Leaves Settings > PSP fonts: back to the game's page when the font note opened it, else to
+   Settings. */
+void player_app_close_fonts_page(PlayerApp *app);
 /* Reads one line of the session's boot events for the render_path and render_fallback
    events. */
 void player_app_consume_render_path_line(PlayerApp *app, const char *line);

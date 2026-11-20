@@ -39,7 +39,10 @@ heights (`--snap-overshoot`, [the converter specification](../docs/cleanroom/PGF
 
 You don't need a PSP to play. Without its fonts, every game still starts and still draws its text, with the fonts
 above standing in. **Settings > PSP fonts** says how many of the PSP's 18 fonts are your own and which ones are
-stand-ins, and the player's checks before a game starts say the same.
+stand-ins, and the player's checks before a game starts say the same. These fonts, and the open replacement fonts
+other programs ship in place of a PSP's, are recognised even when imported, so they are never counted as your own
+([docs/SETUP.md](../docs/SETUP.md#what-the-user-supplies)). In Authentic, a game's page says in one line that its
+text uses stand-in fonts, with the way to get your PSP's.
 
 What stays the same:
 
