@@ -1344,8 +1344,9 @@ A package carries the runtime it was built with. One built before cheats existed
 switch without a word, so the launcher does not start it with cheats on: it says that the package
 was built before cheats existed, and to rebuild the package or turn cheats off.
 
-RetroAchievements has no hardcore mode here yet; when it does, cheats will be refused while it is
-on.
+RetroAchievements is softcore only here, and it is off for a game started with cheats on: no
+achievement set is loaded and nothing is earned. The game's page and Settings > Online and developer
+say so.
 
 The start of a run names at most 32 refused cheats one by one and counts the rest on one line.
 
@@ -1500,12 +1501,13 @@ make is listed below, and each is opt-in.
 | Build-tool download | `www.python.org`, `repo.msys2.org` (HTTPS) | Only after you select **DOWNLOAD** on the BUILD PACKAGE consent card | That consent card, per build |
 | Check for updates | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
 | Update download | `github.com`, which redirects to `release-assets.githubusercontent.com` (HTTPS) | Only after a check finds a newer version and you select **DOWNLOAD** | That button, per download |
-| RetroAchievements | `retroachievements.org` (HTTPS) | Only after you enable **Achievements** in Settings > Online and developer options and accept the consent screen; achievement-set, Rich Presence and leaderboard requests follow while it is enabled | The Achievements switch and its consent screen |
+| RetroAchievements | `retroachievements.org` (HTTPS) | Only after you enable **Achievements** in Settings > Online and developer options and accept the consent screen; sign-in, achievement-set, session, unlock and Rich Presence requests follow while it is enabled | The Achievements switch and its consent screen |
 | Download cover art | `thumbnails.libretro.com` (HTTPS) | When **Download cover art** is on (Settings > Online and developer, off by default), once per verified Redump disc not yet cached | That switch, and **Refresh cover art** (Settings > Build tools and cache) |
 
 **RetroAchievements** is off by default. Its consent screen names `retroachievements.org` and the data sent:
-your RetroAchievements user name and API token, the game hash, achievement unlocks, Rich Presence text and
-leaderboard entries. During sign-in, your user name and password are sent once to obtain the token; the
+your RetroAchievements user name and API token, the game hash, achievement unlocks and Rich Presence text,
+which a running game sends every two minutes. Leaderboard entries are not sent. Every request goes to
+`https://retroachievements.org/dorequest.php`; no image or other host is contacted. During sign-in, your user name and password are sent once to obtain the token; the
 password is not saved. The token is kept in Windows Credential Manager. Other platforms without that
 credential store refuse sign-in. Nakagawa identifies a game by hashing the raw `PSP_GAME/PARAM.SFO` and
 `PSP_GAME/SYSDIR/EBOOT.BIN` bytes from your readable disc image, in that order; it does not decrypt them for
@@ -1516,8 +1518,13 @@ the unlocks still waiting, and unlocks another account left are discarded and re
 the account now signed in. A queue file that cannot be read is kept beside itself as
 `unlock-queue.bin.unreadable`, never written over. An unlock the server refuses leaves the file and is
 reported on the **RA account** line. When the sign-in at start cannot reach the server, the stored token is
-tried again by itself (after 30 seconds, then at doubling waits up to ten minutes); no password is asked. The feature is softcore only; hardcore unlocks
-are not available. Its requests identify themselves with the stable user agent `NakagawaRecomp/<version>`.
+tried again by itself (after 30 seconds, then at doubling waits up to ten minutes); no password is asked. The feature is softcore only:
+hardcore is not available, and a request that would claim it is refused before it is sent. Achievements
+are off for a game started with cheats on or with a package that changes its speed (60 FPS game logic);
+the game's page says why. Turning the switch off sends nothing more: a request waiting its turn is dropped, and only one already on its way finishes.
+Its requests identify themselves in the form RetroAchievements documents:
+`NakagawaRecomp/<version> (<operating system and version>) rcheevos/<version>`, such as
+`NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5.0`. No telemetry is sent.
 To turn it on, open **Settings > Online and developer options**, switch on **Achievements**, read and accept the consent screen,
 then choose **Sign in**. The game's page lists the core achievements after the set loads.
 

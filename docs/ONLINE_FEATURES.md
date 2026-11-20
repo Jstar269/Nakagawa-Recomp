@@ -110,14 +110,31 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
 
 - **Settings > Online and developer options** has an **Achievements** switch, off by default. Turning it on shows a consent
   screen that names `retroachievements.org` and lists every data field. The player contacts only that
-  host over HTTPS for achievement sets, unlocks, Rich Presence and leaderboard requests. It uses the
-  existing player HTTPS transport and a stable `NakagawaRecomp/<numeric version>` user agent.
+  host, at `https://retroachievements.org/dorequest.php`, over the existing player HTTPS transport; it
+  fetches no badge image and uses no other host. Turning the switch off stops the requests: one waiting
+  its turn is answered as refused and never sent, nothing new is sent, and only the request already on
+  its way finishes.
+- **User agent.** Each request names the player in the form RetroAchievements documents for clients:
+  `NakagawaRecomp/<numeric version> (<operating system and version>) rcheevos/<version>`, for example
+  `NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5.0`. A version that is not numeric, or a
+  system part that would break the form, means no request is sent.
 - **Sign-in.** The player sends the RetroAchievements user name and password once to exchange them for a
-  token, clears the password from its temporary buffers, and stores only the token in Windows Credential
+  token, clears the password from its temporary buffers and from rcheevos' request buffer once the request
+  is handed over, and stores only the token in Windows Credential
   Manager. Sign-out removes that credential. Other platforms without the Windows credential store refuse
   sign-in rather than saving a token in a plain file.
-- **What is sent:** the user name and token, the RetroAchievements game hash, achievement unlocks, Rich
-  Presence text and leaderboard entries. The hash follows RetroAchievements' PSP method: raw bytes from
+- **What is sent**, as form fields of RetroAchievements' `dorequest.php` API:
+  - sign-in (`r=login2`): the user name with the password once, or with the stored token;
+  - the game's achievement set (`r=achievementsets`): user name, token and the game hash;
+  - session start (`r=startsession`): user name, token, the game's RetroAchievements ID, the game hash,
+    `h=0` (softcore) and the rcheevos version;
+  - an unlock (`r=awardachievement`): user name, token, the achievement ID, `h=0`, the game hash, the
+    seconds since a queued unlock happened and rcheevos' request signature;
+  - Rich Presence (`r=ping`), every two minutes while a game runs: user name, token, the game ID, the
+    game's Rich Presence text (what its achievement set says you are doing), `h=0` and the game hash.
+
+  Leaderboard entries are not sent: rcheevos would submit them in softcore too, and the bridge refuses
+  that request. The hash follows RetroAchievements' PSP method: raw bytes from
   `PSP_GAME/PARAM.SFO`, then `PSP_GAME/SYSDIR/EBOOT.BIN`, with no new decryption. No game file, save,
   package, guest memory, telemetry or capture is sent.
 - **Offline unlocks** are stored as owner-only, token-free records in the player's data folder. After the
@@ -163,8 +180,17 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   the runtime's next VBLANK stops waiting for it; the shared memory stays mapped until the game exits.
 - **UI regression runs** refuse the switch, **Sign in** and **Sign out**, and say so: they stay offline,
   open no consent or credential box and read no credential.
-- **Hardcore is unavailable.** The client starts softcore sessions only; the UI and requests do not claim
-  hardcore eligibility.
+- **Hardcore is unavailable.** The bridge turns rcheevos' hardcore mode off before every sign-in, game
+  load and frame, and refuses to send any request that claims it (`h=` other than `0`, or a leaderboard
+  entry); neither the player nor the runtime has a setting, option or variable that turns it on.
+- **Off with cheats or a changed speed.** A game started with cheats on (saved, or `--cheats` for the
+  session) or with a package that changes its game logic's speed (60 FPS game logic) loads no achievement
+  set and evaluates no frame. The game's page says why before it starts, and Settings says so while cheats
+  are on.
+- **Frames read the game's own memory.** The achievements are evaluated once per guest VBLANK, on the
+  game's clock, over rcheevos' PSP memory map: RetroAchievements addresses `0x00000000`-`0x03FFFFFF` are
+  guest `0x08000000`-`0x0BFFFFFF` (kernel, user and extended RAM).
+- **No telemetry.** Nothing else about the player, the PC or play is sent.
 - **Tests** use rcheevos' server callback with canned responses and never touch the internet. The
   egress allowlist permits the player's existing transport as the caller, while the bridge and vendored
   rcheevos library hold no network implementation of their own.
