@@ -1336,6 +1336,11 @@ enum {
                   ? PLAYER_UI_ID_SETTINGS_ENHANCED_PART + (uint32_t)(part)                     \
                   : PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE +                                 \
                         ((uint32_t)(part) - PLAYER_UI_ENHANCED_FIRST_IDS)))
+/* Settings > Enhanced's detail panel and the column inside it that scrolls (scr_settings.c).
+   Neither is a focus stop; they are named here so that a test finds them in a frame's draw
+   list and scroll state. */
+#define PLAYER_UI_ID_ENHANCED_DETAIL NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000B00u)
+#define PLAYER_UI_ID_ENHANCED_DETAIL_BODY NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000B01u)
 
 NkUiRouter *nk_ui_router_create(void);
 void nk_ui_router_destroy(NkUiRouter *router);
