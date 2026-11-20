@@ -17,6 +17,14 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with FFmpeg; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ *
+ * Modified 2026-11-20 for the Nakagawa Recomp project (LOCAL DELTA against FFmpeg n4.4):
+ * one FFmpeg release/4.4 fix is applied, each change marked LOCAL DELTA below.
+ *  - 545cfeeebd "avcodec/videodsp_template: Adjust pointers to avoid undefined pointer
+ *    things" (cherry-pick of f0150cd41c): ff_emulated_edge_mc forms its start_x pointer
+ *    offsets as signed ptrdiff_t, so a negative start_x no longer wraps as an unsigned
+ *    offset (undefined pointer arithmetic).
+ * See src/rt/h264_ffmpeg_sub/PROVENANCE.md.
  */
 
 #include "bit_depth_template.c"
@@ -60,7 +68,8 @@ void FUNC(ff_emulated_edge_mc)(uint8_t *buf, const uint8_t *src,
     av_assert2(start_x < end_x && block_w);
 
     w    = end_x - start_x;
-    src += start_y * src_linesize + start_x * sizeof(pixel);
+    /* LOCAL DELTA: upstream 545cfeeebd (release/4.4), see the file header. */
+    src += start_y * src_linesize + start_x * (ptrdiff_t)sizeof(pixel);
     buf += start_x * sizeof(pixel);
 
     // top
@@ -83,7 +92,8 @@ void FUNC(ff_emulated_edge_mc)(uint8_t *buf, const uint8_t *src,
         buf += buf_linesize;
     }
 
-    buf -= block_h * buf_linesize + start_x * sizeof(pixel);
+    /* LOCAL DELTA: upstream 545cfeeebd (release/4.4), see the file header. */
+    buf -= block_h * buf_linesize + start_x * (ptrdiff_t)sizeof(pixel);
     while (block_h--) {
         pixel *bufp = (pixel *) buf;
 

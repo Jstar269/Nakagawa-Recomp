@@ -197,7 +197,7 @@ Legend:
 | `libavcodec/version.h` | imported byte-identical | `cfdde469600bd30a6d60cfe8816747dba6edbd2b` |
 | `libavcodec/videodsp.c` | imported byte-identical | `ce9e9eb1439d8c134f12caef79daad82d94c37f6` |
 | `libavcodec/videodsp.h` | imported byte-identical | `c0545f22b02789425d956c7989540fa98433c9ca` |
-| `libavcodec/videodsp_template.c` | imported byte-identical | `55123a5844689607c95aed73d9c0b4ee5633d925` |
+| `libavcodec/videodsp_template.c` | imported + LOCAL DELTA | `55123a5844689607c95aed73d9c0b4ee5633d925` |
 | `libavcodec/vlc.h` | imported byte-identical | `6879c3ca6a7c29a3b1e8a87f13a849aac1aa8b0a` |
 | `libavutil/attributes.h` | imported byte-identical | `5cb9fe345288e1e5a892a454cc6fbc0ae7883cf5` |
 | `libavutil/avassert.h` | imported byte-identical | `9abeadea4a2319832491e57d6b4ab16da2e738f5` |
@@ -387,6 +387,22 @@ is marked `LOCAL DELTA` in the file.
 
 Taken on upstream's authority, not reproduced in this project. For planes at least two samples
 wide the bytes written are the same as before.
+
+### `libavcodec/videodsp_template.c`
+
+Modified 2026-11-20 (new bytes await the maintainer's approval). One commit from FFmpeg's
+`release/4.4` branch is applied verbatim to the n4.4 blob; nothing else changes, and each change
+is marked `LOCAL DELTA` in the file.
+
+- `545cfeeebd2868ae8e161f33f1e28f80dcbff2d4` "avcodec/videodsp_template: Adjust pointers to avoid
+  undefined pointer things" (cherry-pick of master `f0150cd41c2d3c01050a6c4f3df1de511a217913`;
+  oss-fuzz 48567, a pointer overflow reported by UBSan). `ff_emulated_edge_mc`, which the H.264
+  decoder uses for motion compensation that reaches past a picture edge, multiplies `start_x`
+  by a signed `(ptrdiff_t)sizeof(pixel)` instead of the unsigned `sizeof(pixel)`, so the two
+  pointer adjustments are signed offsets rather than wrapped unsigned ones.
+
+Taken on upstream's authority, not reproduced in this project. On targets where the wrapped
+unsigned offset happened to land on the same address, the pointers are unchanged.
 
 ## Authored stand-ins
 
