@@ -49,6 +49,8 @@
       schedule); CMD1 reuses the header keys its CMAC check unwrapped;
       CMD1, CMD4, CMD7 and CMD11 refuse an output size smaller than what
       they write; CMD4/CMD7 and kirk4/kirk7 share one CBC routine each.
+    - 2026-11-19: CMD10 refuses an input shorter than the 0x90-byte CMD1
+      header (KIRK_INVALID_SIZE) before it reads any header field.
 */
 
 #include <stdio.h>
@@ -135,6 +137,7 @@ static int cmd10_verify(AES_ctx *cmd1, u8 *inbuff, int insize,
     u32 chk_size;
     int rc;
 
+    if (insize < (int)sizeof(KIRK_CMD1_HEADER)) return KIRK_INVALID_SIZE;
     if (!(header->mode == KIRK_MODE_CMD1 || header->mode == KIRK_MODE_CMD2 ||
           header->mode == KIRK_MODE_CMD3)) return KIRK_INVALID_MODE;
     if (header->data_size == 0) return KIRK_DATA_SIZE_ZERO;
