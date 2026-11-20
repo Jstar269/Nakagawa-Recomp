@@ -1240,6 +1240,15 @@ static size_t g_probe_top;
 static int g_probe_ran;
 static uint32_t g_probe_host_entry;
 
+/* "neighbour": the second stack runs once, to its first switch, and records its top, so the
+ * probe can report whether that stack lies directly below its own (0: not measured). */
+static uintptr_t g_neighbour_top;
+static void neighbour_body(void *arg) {
+    (void)arg;
+    if (!sr_coro_stack_top(&g_neighbour_top)) g_neighbour_top = 0;
+    for (;;) sr_coro_switch(g_probe_main);
+}
+
 static void probe_body(void *arg) {
     (void)arg;
     RecompFn fn = sr_lookup(0x00001000u);
@@ -1250,6 +1259,13 @@ static void probe_body(void *arg) {
             g_probe_ran = 1;
         }
     } else if (sr_coro_stack_remaining(&g_probe_top) && fn) {
+        if (g_neighbour_top) {
+            /* Where this stack's usable range ends, before anything can overrun it. */
+            fprintf(stderr, "NEIGHBOUR_LAYOUT probe_low=0x%llx neighbour_top=0x%llx\n",
+                    (unsigned long long)((uintptr_t)&fn - g_probe_top),
+                    (unsigned long long)g_neighbour_top);
+            fflush(stderr);
+        }
 #ifdef SR_TAIL_DRAIN
         sr_call_body(fn, &g_probe_state);   /* complete the entry's TAIL chain (#855) */
 #else
@@ -1359,7 +1375,11 @@ int main(int argc, char **argv) {
     /* "neighbour": a second guest-size stack created after the probe's, as the scheduler
      * creates one per guest thread. POSIX mmap is top-down, so it usually lands directly
      * below the probe's stack, where an overrun of the probe's stack would write. */
-    if (neighbour && !sr_coro_create(probe_body, NULL, SR_GUEST_CORO_STACK_SIZE)) return 23;
+    if (neighbour) {
+        SrCoro *next = sr_coro_create(neighbour_body, NULL, SR_GUEST_CORO_STACK_SIZE);
+        if (!next) return 23;
+        sr_coro_switch(next);   /* parks at its first switch, as a waiting guest thread does */
+    }
     sr_coro_switch(fiber);
     sr_sched_on = 0;
     sr_dispatch_host_stack_remaining = NULL;
@@ -2208,13 +2228,29 @@ class GeneratedCallDepthTests(unittest.TestCase):
         self.assertEqual(fields.get("v1"), _PROBE_SP, output)
 
     def _assert_mutant_fails(self, name, words, iterations, mutate, check, codegen_args=(),
-                             vector=None, timeout=120):
+                             vector=None, timeout=120, may_end=frozenset()):
+        """Build and run a mutant; it is killed only when ``check`` holds on runs that ended
+        for a semantic reason: the probe finished (rc 0) or the runtime stopped by name
+        (rc 1). A hang (rc -1, PROBE_NO_STOP), a signal, an abort or a probe setup code is
+        WRONG_REASON, never a kill, unless the mutant's semantic is itself that ending:
+        ``may_end`` names it, "hang" (a run that never stops, the bug the fix ended) or
+        "crash" (an overrun past a removed stack check)."""
+        unknown = set(may_end) - {"hang", "crash"}
+        if unknown:
+            raise AssertionError(f"unsupported mutant ending(s): {sorted(unknown)}")
         with scratch_dir.TemporaryDirectory(prefix="depth_mutant_") as tmp:
             work = Path(tmp)
             exe, output = _build_depth_probe(words, work, mutate=mutate, codegen_args=codegen_args,
                                              vector=vector)
             self.assertIsNotNone(exe, f"{name}: MUTANT_BUILD_FAILED (not a semantic kill)\n{output}")
             results = [_run_depth_probe(exe, n, timeout=timeout) for n in iterations]
+        for rc, run_output, _fields in results:
+            hung = rc == -1 and run_output.startswith("PROBE_NO_STOP")
+            if rc in (0, 1) or (hung and "hang" in may_end) or (
+                    not hung and "crash" in may_end):
+                continue
+            self.fail(f"{name}: WRONG_REASON (the run neither finished nor stopped by name: "
+                      f"rc={rc})\n{run_output}")
         self.assertTrue(check(results), f"{name}: MUTANT_SURVIVED {results}")
         print(f"{name}: MUTANT_EXECUTED_AND_SEMANTIC_TEST_FAILED")
 
@@ -2334,23 +2370,24 @@ class GeneratedCallDepthTests(unittest.TestCase):
                 self.assertEqual(fields.get("v0"), 0x107, output)
                 self.assertEqual(fields.get("v1"), _PROBE_SP, output)
                 self.assertGreater(fields.get("unwinds", 0), 0, output)
-        # L1: the interpreter runs on past its call, as before.
+        # L1: the interpreter runs on past its call, as before: the run never stops.
         self._assert_mutant_fails(
             "L1-interpreted-return-past-its-call-runs-on", _longjmp_into_live_frame(), (0,),
             {"guest_interp.c": ("    return sr_aot_return_boundary_encloses_resume(s, target, sp);",
                                 "    return 0;")},
-            lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107,
-            codegen_args=interpreted_longjmp, timeout=30,
+            lambda r: r[0][0] == -1 and r[0][1].startswith("PROBE_NO_STOP"),
+            codegen_args=interpreted_longjmp, timeout=30, may_end={"hang"},
         )
         # L2: only the innermost live call counts. The entry's call to F lies below the site
-        # boundary G's call begins, so F's return is not seen.
+        # boundary G's call begins, so F's return is not seen and the interpreter runs on
+        # as in L1: the run never stops.
         self._assert_mutant_fails(
             "L2-only-the-innermost-call-is-searched", _longjmp_into_live_frame(), (0,),
             {"recomp.c": ("        if (enclosing->has_resume_pc && enclosing->resume_pc == target &&",
                           "        if (index == sr_aot_return_boundary_depth && enclosing->has_resume_pc &&"
                           " enclosing->resume_pc == target &&")},
-            lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107,
-            codegen_args=interpreted_longjmp, timeout=30,
+            lambda r: r[0][0] == -1 and r[0][1].startswith("PROBE_NO_STOP"),
+            codegen_args=interpreted_longjmp, timeout=30, may_end={"hang"},
         )
 
     def test_a_frameless_interpreted_body_returns_from_its_own_inline_call(self):
@@ -2886,8 +2923,11 @@ class GeneratedCallDepthTests(unittest.TestCase):
 
     _DEEP_LINKED = 3_000_000      # overruns the fiber at > 22 B per level (gcc -O0: 48-64 B)
     _SHALLOW_LINKED = 500_000     # 24-32 MB at gcc -O0: well inside the fiber
-    # An overrun that ends inside a 64 MiB neighbour for 40-64 B per level (1.68M-2.1M).
-    _NEIGHBOUR_OVERRUN = 1_900_000
+    # sr_coro.h: SR_GUEST_CORO_STACK_SIZE and SR_CORO_STACK_GUARD_BYTES.
+    _FIBER_BYTES = 64 << 20
+    _GUARD_BYTES = 64 << 10
+    _NEIGHBOUR_LAYOUT = re.compile(
+        r"NEIGHBOUR_LAYOUT probe_low=0x([0-9a-f]+) neighbour_top=0x([0-9a-f]+)")
     _NAMED_STOP_EVENT = ("BOOT_EVENT phase=stop reason=semantic-boundary "
                          "boundary=host-fiber-stack-exhausted issue=855")
     _NO_ENTRY_CHECK = ('return f"    SR_HOST_STACK_CHECK({entry_expr});"', 'return ""')
@@ -3003,7 +3043,7 @@ class GeneratedCallDepthTests(unittest.TestCase):
         for name, mutate in mutants:
             with self.subTest(mutant=name):
                 self._assert_mutant_fails(name, _linked_recursion(), (self._DEEP_LINKED,),
-                                          mutate, overran)
+                                          mutate, overran, may_end={"crash"})
 
     @staticmethod
     def _probe_fields(stdout):
@@ -3051,17 +3091,34 @@ class GeneratedCallDepthTests(unittest.TestCase):
     def _overrun_with_neighbour(self, mutate):
         """Overrun the fiber with the entry check removed and a guest stack created after it.
 
-        Returns (faulted, detail): faulted means the run died without a named stop and
-        without finishing, as a hit guard does.
+        The depth is measured, not assumed: a shallow run on the same build gives this host's
+        native bytes per level, and the overrun is sized to end halfway into a neighbour
+        that lies directly below the probe's stack. Returns a dict with ``rc``, ``stdout``,
+        ``n``, ``faulted`` (the run died without a named stop and without finishing, as a hit
+        guard does), ``adjacent`` (the probe measured the neighbour's top directly below its
+        own usable range: True, False, or None when the host gave no layout) and ``detail``.
         """
         with scratch_dir.TemporaryDirectory(prefix="guard_band_") as tmp:
             work = Path(tmp)
             exe, output = _build_depth_probe(_linked_recursion(), work, mutate=mutate)
             self.assertIsNotNone(exe, f"MUTANT_BUILD_FAILED (not a semantic result)\n{output}")
-            rc, stdout, stderr, _events = self._run_probe_mode(
-                exe, work, self._NEIGHBOUR_OVERRUN, "neighbour")
-        detail = f"rc={rc}\n{stdout}\n{stderr}"
-        return rc not in (0, 1) and "DEPTH_PROBE" not in stdout, detail
+            rc, stdout, stderr, _events = self._run_probe_mode(exe, work, self._SHALLOW_LINKED)
+            used = self._probe_fields(stdout).get("native_bytes", 0)
+            self.assertEqual(rc, 0, f"the measuring run did not finish\n{stdout}\n{stderr}")
+            self.assertGreater(used, 0, f"the measuring run sampled no stack\n{stdout}")
+            per_level = used / self._SHALLOW_LINKED
+            n = int((self._FIBER_BYTES + self._GUARD_BYTES + self._FIBER_BYTES // 2) / per_level)
+            rc, stdout, stderr, _events = self._run_probe_mode(exe, work, n, "neighbour")
+        layout = self._NEIGHBOUR_LAYOUT.search(stderr)
+        adjacent = None
+        if layout:
+            probe_low, neighbour_top = (int(value, 16) for value in layout.groups())
+            adjacent = 0 <= probe_low - neighbour_top <= 2 * self._GUARD_BYTES
+        return {
+            "rc": rc, "stdout": stdout, "n": n, "adjacent": adjacent,
+            "faulted": rc not in (0, 1) and "DEPTH_PROBE" not in stdout,
+            "detail": f"n={n} ({per_level:.1f} B per level) rc={rc}\n{stdout}\n{stderr}",
+        }
 
     _NO_GUARD_BAND = ("    if (mprotect(c->map, guard, PROT_NONE) != 0) {",
                       "    if (0 && mprotect(c->map, guard, PROT_NONE) != 0) {")
@@ -3071,18 +3128,27 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # probe's stack (POSIX: the PROT_NONE band; Windows: the fiber's own guard page)
         # instead of writing into the neighbouring guest stack. Before the band, POSIX
         # finished this run with rc 0 and the right v0.
-        faulted, detail = self._overrun_with_neighbour({"codegen.py": self._NO_ENTRY_CHECK})
-        self.assertTrue(faulted, detail)
+        run = self._overrun_with_neighbour({"codegen.py": self._NO_ENTRY_CHECK})
+        self.assertTrue(run["faulted"], run["detail"])
 
     @unittest.skipIf(sys.platform == "win32",
                      "the band is the POSIX backend's; Windows fibers end in a kernel guard page")
     def test_guard_band_mutant_overruns_silently_into_the_neighbouring_stack(self):
-        faulted, detail = self._overrun_with_neighbour(
+        run = self._overrun_with_neighbour(
             {"codegen.py": self._NO_ENTRY_CHECK, "sr_coro.c": self._NO_GUARD_BAND})
-        if faulted:
+        if not run["adjacent"]:
             # The mutant can only show the silent overrun when the neighbour's mapping lies
-            # directly below the probe's, as top-down mmap places it on Linux.
-            self.skipTest("the neighbouring stack is not adjacent on this host: " + detail)
+            # directly below the probe's, as top-down mmap usually places it on Linux. The
+            # skip rests on the probe's measured layout, never on how the mutant ended.
+            self.skipTest("the neighbouring stack is not directly below the probe's on this "
+                          "host: " + run["detail"])
+        # With the band gone the overrun writes into the neighbour and the run finishes as if
+        # nothing happened: rc 0 and the recursion's own result. Any other ending (a fault,
+        # a named stop, a wrong v0) is not the silent overrun the band exists to prevent.
+        detail = "G1-no-guard-band: MUTANT_SURVIVED or WRONG_REASON\n" + run["detail"]
+        self.assertEqual(run["rc"], 0, detail)
+        self.assertIn("DEPTH_PROBE", run["stdout"], detail)
+        self.assertEqual(self._probe_fields(run["stdout"]).get("v0"), run["n"], detail)
         print("G1-no-guard-band: MUTANT_EXECUTED_AND_SEMANTIC_TEST_FAILED")
 
     def _probe_with_module(self, words, module_words, *, codegen_args=()):

@@ -41,6 +41,10 @@ typedef struct
 	u32 type;
 	u32 seed;
 	u8 key[16];
+	/* Nakagawa: the counter base, which depends only on key; derived on the
+	 * first update and wiped by sceDrmBBCipherFinal. */
+	int have_ctr_base;
+	u8 ctr_base[16];
 } CIPHER_KEY;
 
 /* MAC type 3 (fixed key, MAC encrypted again) is the one enabled; type 2

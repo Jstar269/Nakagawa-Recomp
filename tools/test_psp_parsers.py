@@ -13,6 +13,7 @@ import prxload
 
 from psp_oracle.parse_golden import (
     EXPECTED_CELLS as FPU_EXPECTED_CELLS,
+    EXPECTED_SYSTEM_CASES,
     EXPECTED_ORDERED_CASES as PHASEB_EXPECTED_CASES,
     FPU_EXPECTED_TERMINAL_COUNT as EXPECTED_TERMINAL_COUNT,
     parse_ctrl_clock_output,
@@ -141,11 +142,23 @@ class TestPspParsers(unittest.TestCase):
         self.assertTrue(report.all_passed)
 
     def test_parse_ctrl_clock_timestamp_wrap(self) -> None:
-        # uint32 wrap test: pad timestamp wrapping around 0xFFFFFFFF
-        ts_before = 0xFFFFFFF0
-        ts_after = 0x00000010
-        delta = (ts_after - ts_before) & 0xFFFFFFFF
-        self.assertEqual(delta, 32)
+        # The delay record's clock wraps past 0xFFFFFFFF between its before (out0) and after
+        # (out1) samples. The parser reports the harness's uint32 delta (out2) as written; a
+        # signed recomputation from the raw samples would give a negative delay instead.
+        stream = (
+            SAMPLE_META
+            + "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id=ctrl-ts-pairs status=PASS result=0x00000008 out0=0x00000008 out1=0x00000002 out2=0x00000010 out3=0x00000002 out4=0x00000010 out5=0x00010000 out6=0x00010000\n"
+            + "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id=ctrl-ts-vcount status=PASS result=0x00000008 out0=0x00000008 out1=0x00000001 out2=0x00000002 out3=0x00000002 out4=0x00000010 out5=0x00000010 out6=0x00010000\n"
+            + "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id=clock-snapshot status=PASS result=0x00010000 out0=0x00010000 out1=0x00000020 out2=0x00000100 out3=0x12345678 out4=0x00000000 out5=0x000000de out6=0x00000000\n"
+            + "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id=delay-10ms status=PASS result=0x00000020 out0=0xfffffff0 out1=0x00000010 out2=0x00000020 out3=0x00002710\n"
+            + "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id=ctrl-zero-count status=PASS result=0x00000000 out0=0x00000010\n"
+            + "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id=ctrl-peek-read status=PASS result=0x00000000 out0=0x00000010 out1=0x00000010 out2=0x00000001 out3=0x00000001\n"
+        )
+        report = parse_ctrl_clock_output(stream)
+        self.assertEqual(report.delay_measured_us, (0x00000010 - 0xFFFFFFF0) & 0xFFFFFFFF)
+        self.assertEqual(report.delay_measured_us, 32)
+        self.assertTrue(report.complete)
+        self.assertTrue(report.all_passed)
 
     def test_parse_ctrl_clock_synthetic_ctrl_golden(self) -> None:
         stream = (
@@ -167,6 +180,34 @@ class TestPspParsers(unittest.TestCase):
         )
         with self.assertRaises(ProtocolError):
             parse_ctrl_clock_output(stream)
+
+    def test_ctrl_clock_rejects_foreign_records_in_both_modes(self) -> None:
+        rows = [
+            f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id={case} "
+            "status=PASS result=0x0 out0=0x1\n"
+            for case in EXPECTED_SYSTEM_CASES
+        ]
+        foreign = (
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SMOKE-001 "
+            "case_id=foreign status=FAIL result=0x0\n"
+        )
+        stream = SAMPLE_META + "".join(rows) + foreign
+        for strict in (True, False):
+            with self.subTest(strict=strict), self.assertRaisesRegex(ProtocolError, "foreign"):
+                parse_ctrl_clock_output(stream, require_complete=strict)
+
+    def test_ctrl_clock_rejects_unknown_same_test_case_in_non_strict_mode(self) -> None:
+        rows = [
+            f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id={case} "
+            "status=PASS result=0x0 out0=0x1\n"
+            for case in EXPECTED_SYSTEM_CASES
+        ]
+        unknown = (
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 "
+            "case_id=unregistered status=PASS result=0x0\n"
+        )
+        with self.assertRaisesRegex(ProtocolError, "unexpected ctrl/clock case"):
+            parse_ctrl_clock_output(SAMPLE_META + "".join(rows) + unknown, require_complete=False)
 
 
 class TestPartialStreamsNeverPass(unittest.TestCase):
@@ -374,18 +415,18 @@ class TestPartialStreamsNeverPass(unittest.TestCase):
 
 
 class TestDualChannelReconciliation(unittest.TestCase):
-    """Host tests proving the dual-channel evidence contract:
+    """Host tests of the parser behaviour the dual-channel evidence contract relies on:
 
     - partial stdout cannot become semantic PASS;
     - complete host0 stream can independently establish semantic completeness;
-    - channel mismatch is reported without downgrading an otherwise complete host0 semantic measurement;
+    - a partial stdout stream and a complete host0 stream each parse on their own (no
+      production reconciler exists, so channel verdicts are not claimed here);
     - stale append logs (duplicate cells) are rejected;
     - completion count mismatch fails;
     - duplicate records fail;
     - reordered records fail;
     - truncated host0 log fails;
-    - placeholder provenance remains explicitly HOST_ATTESTED rather than stream-attested;
-    - stdout loss can be represented as a transport observation separately from semantic result.
+    - placeholder provenance remains explicitly HOST_ATTESTED rather than stream-attested.
     """
 
     def setUp(self) -> None:
@@ -400,7 +441,7 @@ class TestDualChannelReconciliation(unittest.TestCase):
         """Partial stdout capture (1/16) must fail strict parse and report all_passed=False."""
         with self.assertRaises(ProtocolError) as ctx:
             parse_fpu_vector_output(self.partial_fpu_stdout, require_complete=True)
-        self.assertIn("missing cells", str(ctx.exception))
+        self.assertIn("incomplete", str(ctx.exception))
         report = parse_fpu_vector_output(self.partial_fpu_stdout, require_complete=False)
         self.assertEqual(report.cell_count, 1)
         self.assertFalse(report.complete)
@@ -416,24 +457,24 @@ class TestDualChannelReconciliation(unittest.TestCase):
         self.assertTrue(report.all_passed)
         self.assertEqual(report.boot_fcr31, 0x00000E00)
 
-    def test_channel_mismatch_reported_without_downgrading_host0_semantic(self) -> None:
-        """Channel mismatch is reported while preserving complete host0 measurement."""
+    def test_each_channel_is_parsed_on_its_own_stream(self) -> None:
+        """A partial stdout stream and a complete host0 stream of one run parse independently.
+
+        This proves only what parse_fpu_vector_output reports for each channel. There is no
+        production reconciler: no channel verdict (transport status, measurement label or
+        channel agreement) is computed here or asserted.
+        """
         stdout_report = parse_fpu_vector_output(self.partial_fpu_stdout, require_complete=False)
         host0_report = parse_fpu_vector_output(self.complete_fpu_stream, require_complete=True)
 
-        # Stdout channel verdict
-        stdout_transport_status = "PARTIAL_HARDWARE_PREFIX" if not stdout_report.complete else "COMPLETE"
-        self.assertEqual(stdout_transport_status, "PARTIAL_HARDWARE_PREFIX")
+        self.assertEqual(stdout_report.cell_count, 1)
+        self.assertFalse(stdout_report.complete)
         self.assertFalse(stdout_report.all_passed)
 
-        # Host0 semantic verdict
-        host0_semantic_status = "HARDWARE_MEASURED" if host0_report.all_passed else "FAIL"
-        self.assertEqual(host0_semantic_status, "HARDWARE_MEASURED")
+        # Parsing the partial channel first leaves the complete channel's result untouched.
+        self.assertEqual(host0_report.cell_count, 16)
+        self.assertTrue(host0_report.complete)
         self.assertTrue(host0_report.all_passed)
-
-        # Channels do not agree on completeness, but host0 measurement remains valid
-        channels_agree = (stdout_report.cell_count == host0_report.cell_count)
-        self.assertFalse(channels_agree)
 
     def test_stale_append_log_rejected(self) -> None:
         """Stale append (log containing records from two runs) produces duplicate cell error."""
@@ -545,7 +586,7 @@ class TestDualChannelReconciliation(unittest.TestCase):
         )
         with self.assertRaises(ProtocolError) as ctx:
             parse_fpu_vector_output(stream, require_complete=True)
-        self.assertIn("missing cells", str(ctx.exception))
+        self.assertIn("incomplete", str(ctx.exception))
 
         report = parse_fpu_vector_output(stream, require_complete=False)
         self.assertTrue(report.terminal_present)
@@ -596,7 +637,7 @@ class TestDualChannelReconciliation(unittest.TestCase):
             with self.subTest(require_complete=strict):
                 with self.assertRaises(ProtocolError) as ctx:
                     parse_fpu_vector_output(stream, require_complete=strict)
-                self.assertIn("unknown cell", str(ctx.exception))
+                self.assertIn("unknown", str(ctx.exception))
 
     def test_mutation_foreign_test_id_record_rejected(self) -> None:
         """A complete run plus one foreign-probe record must not pass.

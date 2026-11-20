@@ -27,13 +27,16 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import posixpath
 import re
 import subprocess
 import sys
 import tempfile
 import unicodedata
 import unittest
+from unittest import mock
 from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -131,6 +134,51 @@ POLICY = {
 
 def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+class TreeListingExitTests(unittest.TestCase):
+    """The ls-tree reader judges git by its exit status, not by when it exits (audit 2026-11-17).
+
+    git closes its stdout before its exit work, so the reader can reach EOF while git is
+    still running. Killing it then made a complete listing fail on Windows (TerminateProcess
+    leaves exit status 1) and hid a real failure on POSIX (a kill reads as -9, which was
+    accepted).
+    """
+
+    #: Stands in for ``git ls-tree``: one valid entry, stdout closed, then a pause before
+    #: the exit status given on the command line, as git's own exit work takes.
+    STUB = (
+        "import os, sys, time\n"
+        "sys.stdout.buffer.write(b'100644 blob ' + b'a' * 40 + b'\\tREADME.md\\0')\n"
+        "sys.stdout.buffer.flush()\n"
+        "os.close(1)\n"
+        "time.sleep(0.5)\n"
+        "sys.exit(int(sys.argv[1]))\n"
+    )
+
+    def _listing(self, status: int) -> list[tuple[str, str]]:
+        real_popen = subprocess.Popen
+
+        def stub_popen(args, *rest, **kwargs):
+            if list(args[:2]) == ["git", "ls-tree"]:
+                args = [sys.executable, "-I", "-c", self.STUB, str(status)]
+            return real_popen(args, *rest, **kwargs)
+
+        with tempfile.TemporaryDirectory() as root:
+            original = verifier.subprocess.Popen
+            verifier.subprocess.Popen = stub_popen  # type: ignore[misc]
+            try:
+                return list(verifier._stream_tree_entries(Path(root), "0" * 40))
+            finally:
+                verifier.subprocess.Popen = original  # type: ignore[misc]
+
+    def test_a_listing_whose_git_exits_after_eof_succeeds(self) -> None:
+        self.assertEqual(self._listing(0), [("README.md", "a" * 40)])
+
+    def test_a_git_failure_after_eof_is_reported(self) -> None:
+        with self.assertRaises(verifier.VerifyError) as caught:
+            self._listing(3)
+        self.assertEqual(caught.exception.code, "GIT_ERROR")
 
 
 class Repository:
@@ -1175,6 +1223,43 @@ class ExactBlobAuthorizationTests(GateCase):
         self.assertPasses(verdict)
         self.assertEqual(verdict["authority_revision"], "a" * 40)
 
+    # -- K3: the verify scratch ------------------------------------------------
+    def test_K3_default_scratch_leaves_nothing_beside_the_trusted_ledger(self) -> None:
+        """Without --workdir, no candidate policy bytes land in the authority's folder.
+
+        FAILING_BEFORE: the scratch defaulted to the trusted ledger's own folder, so
+        trusted_policy.json and candidate_policy.json were left beside it.
+        """
+        before = sorted(path.name for path in self.outside.iterdir())
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = verifier.main(["--repo", str(self.repo.root), "--base", self.base,
+                                "--candidate", self.base, "--trusted-ledger", str(self.trusted_ledger)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sorted(path.name for path in self.outside.iterdir()), before)
+
+    def test_K3_scratch_inside_the_candidate_repository_is_refused(self) -> None:
+        """FAILING_BEFORE: verify() accepted a --workdir inside --repo, against its help text."""
+        with self.assertRaises(verifier.VerifyError) as caught:
+            verifier.verify(
+                repo=self.repo.root, candidate_rev=self.base, base_rev=self.base,
+                trusted_ledger=self.trusted_ledger, workdir=self.repo.root / "scratch",
+            )
+        self.assertEqual(caught.exception.code, "OUTPUT_CANDIDATE_CONTROLLED")
+        self.assertFalse((self.repo.root / "scratch").exists())
+
+    def test_K3_scratch_never_overwrites_the_trusted_ledger(self) -> None:
+        """FAILING_BEFORE: a trusted ledger named like a scratch file was overwritten."""
+        named = self.outside / "candidate_policy.json"
+        raw = self.trusted_ledger.read_bytes()
+        named.write_bytes(raw)
+        with self.assertRaises(verifier.VerifyError) as caught:
+            verifier.verify(
+                repo=self.repo.root, candidate_rev=self.base, base_rev=self.base,
+                trusted_ledger=named, workdir=self.outside,
+            )
+        self.assertEqual(caught.exception.code, "OUTPUT_TRUSTED_INPUT_COLLISION")
+        self.assertEqual(named.read_bytes(), raw)
+
     # -- L ------------------------------------------------------------------
     def test_L_internally_perfect_candidate_still_fails_on_external_digest(self) -> None:
         """Every public artifact agrees with every other, and it is still refused."""
@@ -1383,6 +1468,55 @@ class TrustedScopeTests(GateCase):
         self.repo.write(verifier.POLICY_PATH, json.dumps(document, indent=2) + "\n")
         head = self.repo.commit("exclude my own new source")
         self.assertFatal(self.run_verify(head), "TRUSTED_SCOPE_VIOLATION")
+
+    def test_a_candidate_authored_exclusion_cannot_hide_other_source_languages(self) -> None:
+        """Java, Gradle/Kotlin scripts, assembly and shaders are implementation too (audit 2026-11-17)."""
+        sources = (
+            "android/app/src/main/java/example/Payload.java",
+            "android/app/build2.gradle.kts",
+            "android/app/extra.gradle",
+            "android/app/src/main/kotlin/Payload.kt",
+            "tests/fixtures/probe/payload.S",
+            "assets/payload.asm",
+            "assets/shaders/payload.comp",
+            "assets/shaders/payload.frag",
+            "assets/shaders/payload.vert",
+            "assets/shaders/payload.glsl",
+            "assets/shaders/payload.hlsl",
+        )
+        for path in sources:
+            with self.subTest(path=path):
+                self.repo.branch(f"attack-{abs(hash(path))}", self.base)
+                self.repo.write(path, b"payload\n")
+                document = dict(POLICY)
+                document["include_paths"] = sorted(
+                    set(self.FILES) | {TRUSTED_WORKFLOW, verifier.LEDGER_PATH, verifier.EXPORT_PATH}
+                )
+                document["exclude_paths"] = sorted(set(POLICY["exclude_paths"]) | {path})
+                self.repo.write(verifier.POLICY_PATH, json.dumps(document, indent=2) + "\n")
+                head = self.repo.commit(f"exclude my own new {path}")
+                verdict = self.run_verify(head)
+                self.assertIn(("TRUSTED_SCOPE_VIOLATION", path), {
+                    (item["code"], item["path"]) for item in verdict["findings"] if item["fatal"]
+                })
+
+    def test_narrowing_scope_is_reported_as_the_authors_to_fix(self) -> None:
+        """Only a new-path scope finding is a maintainer's admission (audit 2026-11-17).
+
+        Dropping a published path from include_paths is the author's change. The per-finding
+        flag says so, and the guidance must not override it from the code name alone.
+        """
+        verdict = self.run_verify(self._drop_from_scope(self.BACKED, change_bytes=False))
+        scope = [item for item in verdict["findings"] if item["code"] == "TRUSTED_SCOPE_VIOLATION"]
+        self.assertTrue(scope)
+        self.assertFalse(any(item["maintainer_action"] for item in scope))
+        for render in (verifier._print_guidance, verifier._print_contributor_summary):
+            with self.subTest(render=render.__name__):
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    render(verdict)
+                self.assertNotIn("nothing for you to do", buffer.getvalue())
+                self.assertNotIn("maintainer will admit", buffer.getvalue())
 
     def test_widening_scope_is_allowed(self) -> None:
         """Coverage may grow; the new path just has to satisfy provenance."""
@@ -2127,6 +2261,89 @@ class MergePathTamperTests(GateCase):
         head = self._commit_workflow(".github/workflows/spoof.yml", raw)
         self.assertFatal(self.run_verify(head), "CI_CONTEXT_COLLISION")
 
+    def test_a_reserved_context_spelled_another_static_yaml_way_is_refused(self) -> None:
+        """YAML resolves escapes and folding before GitHub reads the job name (audit 2026-11-17).
+
+        None of these files holds the reserved context as one byte run, yet each
+        names the job exactly that once parsed, so a byte search let them through.
+        """
+        spellings = {
+            "hex escape": b'    name: "Trusted provenance\\x20attestation"\n',
+            "unicode escape": b'    name: "Trusted\\u0020provenance attestation"\n',
+            "escaped line break": b'    name: "Trusted provenance at\\\n      testation"\n',
+            "folded block scalar": b"    name: >-\n      Trusted provenance\n      attestation\n",
+            "plain multi-line scalar": b"    name: Trusted provenance\n      attestation\n",
+            "other letter case": b"    name: trusted Provenance ATTESTATION\n",
+        }
+        for label, name_line in spellings.items():
+            with self.subTest(spelling=label):
+                raw = (
+                    b"on: [pull_request]\njobs:\n  spoof:\n" + name_line
+                    + b"    steps:\n      - run: exit 0\n"
+                )
+                self.assertNotIn(RESERVED_CONTEXT.encode("utf-8"), raw)
+                findings = verifier._ci_findings({".github/workflows/spoof.yml": raw}, {})
+                self.assertIn(
+                    ("CI_CONTEXT_COLLISION", ".github/workflows/spoof.yml"),
+                    {(item.code, item.path) for item in findings if item.fatal},
+                )
+        raw = (
+            b"on: [pull_request]\njobs:\n  spoof:\n" + spellings["folded block scalar"]
+            + b"    steps:\n      - run: exit 0\n"
+        )
+        head = self._commit_workflow(".github/workflows/spoof.yml", raw)
+        self.assertFatal(self.run_verify(head), "CI_CONTEXT_COLLISION")
+
+    def test_a_reserved_context_followed_by_a_combining_mark_is_still_refused(self) -> None:
+        """The normalized reading adds to the byte search; it never replaces it.
+
+        NFKC composes a combining mark with the letter before it, so a check that
+        compared only the composed text stopped seeing the reserved name once a mark
+        followed it, although the byte search it replaced refuses that file.  The
+        first two spellings hold the name as one byte run; all of them must collide.
+        """
+        mark = "\u0301".encode("utf-8")
+        reserved = RESERVED_CONTEXT.encode("utf-8")
+        spellings = {
+            "raw mark after the name": b"    name: " + reserved + mark + b"\n",
+            "escaped mark after the name": b'    name: "' + reserved + b'\\u0301"\n',
+            "raw mark, other letter case": b"    name: TRUSTED provenance attestation" + mark + b"\n",
+            "raw mark, folded block scalar":
+                b"    name: >-\n      Trusted provenance\n      attestation" + mark + b"\n",
+            "escaped mark, hex-escaped space":
+                b'    name: "Trusted provenance\\x20attestation\\u0301"\n',
+            "precomposed last letter": "    name: Trusted provenance attestatio\u0144\n".encode("utf-8"),
+            "other letter case": b"    name: trusted Provenance ATTESTATION\n",
+            "folded block scalar": b"    name: >-\n      Trusted provenance\n      attestation\n",
+        }
+        for label in ("raw mark after the name", "escaped mark after the name"):
+            self.assertIn(reserved, spellings[label], label)
+        for label, name_line in spellings.items():
+            with self.subTest(spelling=label):
+                raw = (
+                    b"on: [pull_request]\njobs:\n  spoof:\n" + name_line
+                    + b"    steps:\n      - run: exit 0\n"
+                )
+                findings = verifier._ci_findings({".github/workflows/spoof.yml": raw}, {})
+                self.assertIn(
+                    ("CI_CONTEXT_COLLISION", ".github/workflows/spoof.yml"),
+                    {(item.code, item.path) for item in findings if item.fatal},
+                )
+        raw = (
+            b"on: [pull_request]\njobs:\n  spoof:\n" + spellings["raw mark after the name"]
+            + b"    steps:\n      - run: exit 0\n"
+        )
+        head = self._commit_workflow(".github/workflows/spoof.yml", raw)
+        self.assertFatal(self.run_verify(head), "CI_CONTEXT_COLLISION")
+
+    def test_an_unrelated_job_name_is_not_a_context_collision(self) -> None:
+        raw = (
+            b"on: [pull_request]\njobs:\n  build:\n    name: >-\n      Trusted build\n"
+            b"      provenance notes\n    steps:\n      - run: echo attestation\n"
+        )
+        findings = verifier._ci_findings({".github/workflows/build.yml": raw}, {})
+        self.assertNotIn("CI_CONTEXT_COLLISION", {item.code for item in findings})
+
     def test_deleting_the_trusted_workflow_is_refused(self) -> None:
         self.repo.branch("attack", self.base)
         self.repo.remove(TRUSTED_WORKFLOW)
@@ -2336,11 +2553,31 @@ class MergePathTamperTests(GateCase):
         self.assertIn("TRUSTED_WORKFLOW_MODIFIED", self.codes(verdict, fatal_only=False))
 
 
+def _workflow_files(directory: Path) -> list[Path]:
+    """Every workflow GitHub would run from ``directory``: it reads both YAML suffixes."""
+    return sorted(path for path in directory.iterdir() if path.suffix in (".yml", ".yaml"))
+
+
+#: Event fields whose text the pull request author or a branch pusher chooses.  None
+#: may reach an expression in the job that holds the authority token.
+_UNTRUSTED_EVENT_TEXT = re.compile(
+    r"\.(title|body|message|head\.ref|head\.label|head\.repo|head_ref|head_branch"
+    r"|display_title|head_commit|pull_requests)\b"
+)
+
+
 class LiveRepositoryTests(unittest.TestCase):
     """Guard the real repository's own invariants that need no private input."""
 
+    def test_workflow_files_include_both_yaml_suffixes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for name in ("a.yml", "spoof.yaml", "notes.md"):
+                (directory / name).write_text("x\n", encoding="utf-8")
+            self.assertEqual([path.name for path in _workflow_files(directory)], ["a.yml", "spoof.yaml"])
+
     def test_the_reserved_context_appears_in_exactly_one_workflow(self) -> None:
-        workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+        workflows = _workflow_files(ROOT / ".github" / "workflows")
         self.assertTrue(workflows, "no workflows found")
         naming = [
             path for path in workflows
@@ -2362,7 +2599,7 @@ class LiveRepositoryTests(unittest.TestCase):
             self.assertIn("--policy-delta-key", block)
             self.assertIn("docs/provenance/policy-deltas-v3/${v3_name}.json", block)
             # The derived name is checked before it is used, and a V3 hit passes no blessed policy.
-            self.assertLess(block.index("[ \"${#v3_name}\" -eq 64 ]"), block.index("gh api"))
+            self.assertLess(block.index("[[ \"${v3_name}\" =~ ^[0-9a-f]{64}$ ]]"), block.index("gh api"))
             v3_hit = block[:block.index("else")]
             self.assertNotIn("trusted_candidate_policy=", v3_hit)
             # Only a confirmed absence falls back to the legacy layouts; any other error stops the step.
@@ -2384,7 +2621,7 @@ class LiveRepositoryTests(unittest.TestCase):
             block = raw[raw.index(begin):raw.index(end)]
             self.assertIn("--policy-delta-key-v4", block)
             self.assertIn("docs/provenance/policy-deltas-v4/${v4_name}.json", block)
-            self.assertLess(block.index("[ \"${#v4_name}\" -eq 64 ]"), block.index("gh api"))
+            self.assertLess(block.index("[[ \"${v4_name}\" =~ ^[0-9a-f]{64}$ ]]"), block.index("gh api"))
             v4_hit, fallback = block[:block.index("else")], block[block.index("else"):]
             self.assertNotIn("trusted_candidate_policy=", v4_hit)
             # The V3 lookup runs only inside the V4 miss, after a confirmed absence.
@@ -2470,9 +2707,28 @@ class LiveRepositoryTests(unittest.TestCase):
         raw = (ROOT / TRUSTED_WORKFLOW).read_text(encoding="utf-8")
         for expression in re.findall(r"\$\{\{(.+?)\}\}", raw):
             self.assertNotRegex(
-                expression, r"\.(title|body|head\.ref|head\.label|head\.repo)",
+                expression, _UNTRUSTED_EVENT_TEXT,
                 msg=f"attacker-authored text interpolated: {expression.strip()}",
             )
+
+    def test_the_untrusted_text_guard_names_every_author_chosen_field(self) -> None:
+        for expression in (
+            "github.event.pull_request.title", "github.event.pull_request.body",
+            "github.event.pull_request.head.ref", "github.event.pull_request.head.label",
+            "github.event.pull_request.head.repo.full_name", "github.head_ref",
+            "github.event.workflow_run.head_branch", "github.event.workflow_run.display_title",
+            "github.event.workflow_run.head_commit.message", "github.event.workflow_run.pull_requests[0].head.ref",
+            "github.event.head_commit.message",
+        ):
+            with self.subTest(expression=expression):
+                self.assertRegex(f" {expression} ", _UNTRUSTED_EVENT_TEXT)
+        for expression in (
+            "github.event.workflow_run.head_sha", "github.event.pull_request.head.sha",
+            "github.event.pull_request.base.sha", "github.event.pull_request.number",
+            "github.event.repository.default_branch", "inputs.head_sha", "github.event_name",
+        ):
+            with self.subTest(expression=expression):
+                self.assertNotRegex(f" {expression} ", _UNTRUSTED_EVENT_TEXT)
 
     def test_the_trusted_workflow_judges_immutable_revisions(self) -> None:
         """Branch names are moving targets; the verdict must name exact SHAs."""
@@ -2975,6 +3231,47 @@ class EphemeralGenerationBehaviorTests(EphemeralGenerationTests):
                     finding["code"] for finding in verdict["findings"] if finding["fatal"]
                 })
 
+    def test_content_under_an_unbacked_claim_fails_without_a_committed_ledger(self) -> None:
+        """The claim checks read the generated ledger when the candidate commits none (audit 2026-11-17).
+
+        README.md inherits a claim the trusted authority does not support. Changing it is
+        CONTENT_UNATTESTED with the committed ledger present; deleting that ledger must
+        not turn the same change into a pass.
+        """
+        self.repo.branch("without-ledger-changed-claim", self.base)
+        self.repo.remove(verifier.LEDGER_PATH)
+        self.repo.remove(verifier.EXPORT_PATH)
+        self.repo.write("README.md", b"# fixture, rewritten under an inherited claim\n")
+        head = self.repo.commit("change a path under an unbacked claim without the ledger")
+
+        verdict = self.run_ephemeral(head)
+
+        self.assertEqual(verdict["verdict"], "fail")
+        self.assertIn(("CONTENT_UNATTESTED", "README.md"), {
+            (finding["code"], finding["path"]) for finding in verdict["findings"] if finding["fatal"]
+        })
+
+    def test_frozen_debt_is_reported_without_a_committed_ledger(self) -> None:
+        self.repo.branch("without-ledger-frozen", self.base)
+        self.repo.remove(verifier.LEDGER_PATH)
+        self.repo.remove(verifier.EXPORT_PATH)
+        head = self.repo.commit("remove legacy controls only")
+
+        verdict = self.run_ephemeral(head)
+
+        self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
+        self.assertIn("README.md", {item["path"] for item in verdict["grandfathered_debt"]})
+
+    def test_the_ephemeral_verdict_never_discloses_a_private_record_id(self) -> None:
+        """verify() withholds a record id the public ledger does not name; so must ephemeral mode."""
+        verdict = self.run_ephemeral(self.base)
+
+        self.assertNotIn("private-only-record", json.dumps(verdict))
+        entry = next(item for item in verdict["grandfathered_debt"] if item["path"] == "README.md")
+        self.assertEqual(entry["trusted_record_id"], verifier.WITHHELD)
+        core = [item for item in verdict["grandfathered_debt"] if item["path"] == "src/rt/core.c"]
+        self.assertEqual(core, [], "core.c agrees with the trusted authority and is not debt")
+
     def test_controls_are_generated_outside_the_candidate_tree(self) -> None:
         self.repo.branch("without-legacy-controls", self.base)
         self.repo.remove(verifier.LEDGER_PATH)
@@ -3431,6 +3728,61 @@ class EphemeralGenerationBehaviorTests(EphemeralGenerationTests):
 
         self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
         self.assertEqual(verdict["policy_delta"]["rule_changes"], ["exclude_rationale"])
+
+    def test_a_v2_delta_cannot_authorize_removing_an_exclusion_glob_or_prefix(self) -> None:
+        """A removed exclusion rule is refused even when the authority binds both of its values.
+
+        docs/PUBLICATION_READINESS.md, Limits: "a removed exclude_globs or exclude_prefixes
+        entry is refused whatever the delta says".  The delta here is otherwise valid, so the
+        refusal is the verifier's own and not a rejected authority document.
+        """
+        removed = {"exclude_globs": "*.iso", "exclude_prefixes": "private/"}
+        for key in ("exclude_globs", "exclude_prefixes"):
+            with self.subTest(key=key):
+                self.repo.branch(f"drop-{key}", self.base)
+                policy_path = self.repo.root / verifier.POLICY_PATH
+                baseline_raw = policy_path.read_bytes()
+                baseline = json.loads(baseline_raw.decode("utf-8"))
+                candidate = dict(baseline, **{key: []})
+                self.assertTrue(baseline[key])
+                candidate_raw = _canonical(candidate)
+                self.repo.write(verifier.POLICY_PATH, candidate_raw)
+                head = self.repo.commit(f"drop the trusted {key}")
+                bound = {
+                    "key": key,
+                    "baseline_sha256": provenance_ledger.policy_rule_value_sha256(baseline, key),
+                    "candidate_sha256": provenance_ledger.policy_rule_value_sha256(candidate, key),
+                }
+                blessed_policy, authority = self._rule_authority(baseline_raw, candidate_raw, [bound])
+
+                verdict = self.run_ephemeral(
+                    head, trusted_candidate_policy=blessed_policy, policy_delta_authority=authority,
+                )
+
+                self.assertEqual(verdict["policy_delta"]["rule_changes"], [key])
+                self.assertEqual(verdict["verdict"], "fail", verdict["findings"])
+                self.assertEqual(
+                    [(item["path"], item["detail"], item["fatal"]) for item in verdict["findings"]
+                     if item["code"] == "POLICY_SUBSTITUTION"],
+                    [(verifier.POLICY_PATH,
+                      f"candidate policy removes the trusted {key} entry {removed[key]}", True)],
+                )
+
+    def test_an_exclusion_rule_change_without_its_authority_is_still_refused(self) -> None:
+        trusted = load_policy(self.repo.root / verifier.POLICY_PATH)
+        self.repo.write(verifier.POLICY_PATH, _canonical(dict(
+            json.loads((self.repo.root / verifier.POLICY_PATH).read_text(encoding="utf-8")),
+            exclude_globs=[], exclude_prefixes=[],
+        )))
+        candidate = load_policy(self.repo.root / verifier.POLICY_PATH)
+        for authorized in (None, {"exclude_removed": [], "rule_changes": ["exclude_rationale"]}):
+            with self.subTest(authorized=authorized):
+                findings = verifier._policy_findings(candidate, trusted, authorized_delta=authorized)
+                self.assertEqual(
+                    sorted(item.detail for item in findings if item.code == "POLICY_SUBSTITUTION"),
+                    ["candidate policy removes the trusted exclude_globs entry *.iso",
+                     "candidate policy removes the trusted exclude_prefixes entry private/"],
+                )
 
     def test_a_v2_delta_refuses_a_rule_change_bound_to_another_value(self) -> None:
         head, baseline_raw, candidate_raw, baseline, _candidate = self._rule_change_head()
@@ -4087,6 +4439,30 @@ class PolicyDeltaV4Tests(_PolicyDeltaV4Fixture):
         self.assertEqual(rc, 2)
         self.assertIn("POLICY_DELTA_EMPTY", err.getvalue())
 
+    def test_policy_delta_keys_read_the_profiles_without_the_whole_base_tree(self) -> None:
+        head = self._change("pr-a", self.base, {self.NEW_A: b"# a\n"}, include=[self.NEW_A])
+        expected_v4 = self._v4(self.base, head).stem.split("-", 1)[1]
+        expected_v3 = verifier.policy_delta_key(repo=self.repo.root, base_rev=self.base, candidate_rev=head)
+        whole_tree = verifier.read_tree
+        with mock.patch.object(verifier, "read_tree", side_effect=whole_tree) as reads:
+            self.assertEqual(
+                verifier.policy_delta_key_v4(repo=self.repo.root, base_rev=self.base, candidate_rev=head),
+                expected_v4)
+            self.assertEqual(reads.call_count, 0)
+            self.assertEqual(
+                verifier.policy_delta_key(repo=self.repo.root, base_rev=self.base, candidate_rev=head),
+                expected_v3)
+            # The candidate's hashes are part of a V3 document; the base gives its profile alone.
+            self.assertEqual(reads.call_count, 1)
+
+        tree = verifier._rev_tree(self.repo.root, head)
+        profile = whole_tree(self.repo.root, tree)[verifier.POLICY_PATH]
+        self.assertEqual(verifier.read_tree_file(self.repo.root, tree, verifier.POLICY_PATH), profile)
+        self.assertIsNone(verifier.read_tree_file(self.repo.root, tree, "no/such/file.json"))
+        with self.assertRaises(verifier.VerifyError) as raised:
+            verifier.read_tree_file(self.repo.root, tree, verifier.POLICY_PATH, limit=len(profile) - 1)
+        self.assertEqual(raised.exception.code, "TREE_TOO_LARGE")
+
     # -- byte-identical imports after landing -----------------------------------
 
     def test_a_landed_byte_identical_import_cannot_drift(self) -> None:
@@ -4658,6 +5034,50 @@ class VendoredManifestTests(unittest.TestCase):
         self.assertGreater(rows, 0, "the tree carries byte-identical imports")
         self.assertEqual([finding.as_dict() for finding in verifier._vendored_manifest_findings(blobs, blobs)], [])
 
+    @staticmethod
+    def _tracked_files() -> list[str]:
+        listed = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, check=True, capture_output=True).stdout
+        return [path for path in listed.decode("utf-8").split("\0") if path]
+
+    def test_every_vendored_licence_text_is_a_manifest_row(self) -> None:
+        """A manifest that declares import kinds names every licence text under it.
+
+        The byte gate checks only table rows, so a licence text named only in prose could be
+        edited or truncated with no finding (the atrac3p LGPL copy was such a file).
+        """
+        tracked = self._tracked_files()
+        manifests = {path for path in tracked if posixpath.basename(path) == verifier.VENDOR_MANIFEST_NAME}
+        licence = re.compile(r"(?i)(licen[cs]e|copying)([.-][^/]*)?")
+        missing: list[str] = []
+        for path in tracked:
+            if not licence.fullmatch(posixpath.basename(path)):
+                continue
+            directory = posixpath.dirname(path)
+            while directory and posixpath.join(directory, verifier.VENDOR_MANIFEST_NAME) not in manifests:
+                directory = posixpath.dirname(directory)
+            if not directory:
+                continue
+            manifest = posixpath.join(directory, verifier.VENDOR_MANIFEST_NAME)
+            rows = verifier._manifest_rows((ROOT / manifest).read_bytes()) or []
+            if not rows:
+                continue
+            if path not in {verifier._manifest_row_path(manifest, row.get("file", "")) for row in rows}:
+                missing.append(f"{path} (manifest {manifest})")
+        self.assertEqual(missing, [])
+
+    def test_atrac3p_local_delta_files_carry_a_dated_modification_notice(self) -> None:
+        """LGPL-2.1 section 2(a): each modified FFmpeg file of the ATRAC3 subset says so, with a date."""
+        manifest = "src/rt/atrac3p/" + verifier.VENDOR_MANIFEST_NAME
+        rows = verifier._manifest_rows((ROOT / manifest).read_bytes()) or []
+        deltas = [
+            verifier._manifest_row_path(manifest, row.get("file", ""))
+            for row in rows if "local delta" in row.get("kind", "").lower()
+        ]
+        self.assertEqual(len(deltas), 5, "atrac3.c, atrac3plus.c, atrac3plusdec.c, sinewin.c and libavutil/mem.h")
+        notice = re.compile(r"Modified by Nakagawa Recomp contributors, \d{4}-\d{2}-\d{2}")
+        unmarked = [path for path in deltas if path is None or not notice.search((ROOT / path).read_text("utf-8"))]
+        self.assertEqual(unmarked, [])
+
 
 class IndependentRefreshMergeTests(EphemeralGenerationTests):
     """Two reviewed refreshes of different paths must land without a resync.
@@ -4827,8 +5247,40 @@ class RealHistoryParityTests(unittest.TestCase):
                 cwd=ROOT,
                 capture_output=True,
             )
-            if present.returncode != 0:
-                self.skipTest(f"real-history commit unavailable in this checkout: {revision}")
+            if present.returncode == 0:
+                continue
+            # Hosted CI fetches both commits (ci.yml, python_tools), so a missing one there
+            # is a broken fetch and must not turn this parity check into a silent skip.
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                self.fail(f"real-history commit missing from the hosted checkout: {revision}")
+            self.skipTest(f"real-history commit unavailable in this checkout: {revision}")
+
+    def test_hosted_ci_fails_instead_of_skipping_without_the_history(self) -> None:
+        probe = RealHistoryParityTests("test_real_history_modes_agree_on_recordless_changed_test_fatal")
+        probe.BASE = "0" * 40
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            with self.assertRaises(self.failureException):
+                probe._require_history()
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}):
+            with self.assertRaises(unittest.SkipTest):
+                probe._require_history()
+
+    def test_the_hosted_python_job_fetches_both_commits(self) -> None:
+        """The python_tools checkout is shallow; without the fetch step the parity check never runs."""
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        start = workflow.index("\n  python_tools:\n")
+        following = re.search(r"\n  [a-z0-9_]+:\n", workflow[start + 1:])
+        job = workflow[start:start + 1 + following.start()] if following else workflow[start:]
+        fetches = [line for line in job.splitlines() if "git fetch" in line and not line.lstrip().startswith("#")]
+        self.assertTrue(fetches, "the python_tools job fetches no history")
+        fetched = " ".join(fetches)
+        self.assertIn(self.CANDIDATE, fetched)
+        # The base is the candidate's grandparent, so a depth-3 fetch of the candidate brings both
+        # and keeps the ancestry the verifier checks.
+        depth = re.search(r"--depth[= ](\d+)", fetched)
+        if depth is None:
+            self.fail("the fetch must name its depth")
+        self.assertGreaterEqual(int(depth.group(1)), 3)
 
     def _test_authority(self, candidate_ledger: dict, base_ledger: dict) -> dict:
         """Build a disclosure-safe test authority for already-public claims."""

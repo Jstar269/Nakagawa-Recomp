@@ -25,6 +25,7 @@ import hle_manifest  # noqa: E402
 import hle_sources  # noqa: E402
 from hle_sources import HleSourcesError  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
+from nk_core.git_isolation import run_git  # noqa: E402
 
 ROOT = hle_sources.ROOT
 
@@ -101,6 +102,19 @@ class SplitItemsTests(unittest.TestCase):
         source = "static int a;\nint b = 1;\nextern int c;\nint f(void);\ntypedef int T;\nstruct S { int x; };\n"
         kinds = {item.names[0]: hle_sources.is_object_definition(item) for item in hle_sources.split_items(source)}
         self.assertEqual(kinds, {"a": True, "b": True, "c": False, "f": False, "T": False, "S": False})
+
+    def test_repeated_lookups_reuse_every_parsed_source(self) -> None:
+        # Each lookup walks every source and header in order; a cache smaller than that
+        # cycle evicts each file before it returns, so a second walk would parse all again.
+        # definitions() keeps its own per-root cache, cleared so each call walks the sources.
+        units = len(hle_sources.sources(headers=True))
+        hle_sources._items_of.cache_clear()
+        hle_sources.definitions.cache_clear()
+        hle_sources.definitions()
+        hle_sources.definitions.cache_clear()
+        hle_sources.definitions()
+        info = hle_sources._items_of.cache_info()
+        self.assertEqual((info.misses, info.hits), (units, units))
 
     def test_every_live_source_round_trips(self) -> None:
         for relative, body in hle_sources.sources(headers=True):
@@ -381,7 +395,6 @@ class NoOtherReaderTests(unittest.TestCase):
         "tools/test_hle_manifest.py": "synthetic sources and the owner_file values the manifest reports",
         "tools/test_hle_move_proof.py": "a synthetic split",
         "tools/test_hle_sources.py": "synthetic trees and this guard's own cases",
-        "tools/test_import_stub_census.py": "a synthetic tree",
         "tools/test_package_cache.py": "a synthetic compile command",
         "tools/test_portability_inventory.py": "paths handed to the classifier",
         "tools/test_progress_evidence.py": "a synthetic tree",
@@ -389,9 +402,38 @@ class NoOtherReaderTests(unittest.TestCase):
         "tools/test_purity_gate.py": "a synthetic tree",
     }
 
+    @staticmethod
+    def _tracked_python_files(root: Path) -> list[Path]:
+        """The tracked tools/ and tests/fixtures/ Python files present in ``root``.
+
+        Untracked scratch files are a developer's own and absent from hosted CI, so
+        the guard reads what Git tracks, not what the working tree happens to hold.
+        """
+        listed = run_git(
+            ["ls-files", "-z", "--", "tools/*.py", "tests/fixtures/*.py"],
+            root,
+            check=True,
+            capture_output=True,
+        )
+        names = [name for name in listed.stdout.decode("utf-8").split("\0") if name]
+        return sorted(path for path in (root / name for name in names) if path.is_file())
+
+    def test_guard_reads_tracked_files_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tools" / "sub").mkdir(parents=True)
+            (root / "tests" / "fixtures").mkdir(parents=True)
+            for relative in ("tools/kept.py", "tools/sub/nested.py", "tests/fixtures/fx.py"):
+                (root / relative).write_text("x = 1\n", encoding="utf-8")
+            run_git(["init", "-q"], root, check=True, capture_output=True)
+            run_git(["add", "--", "tools", "tests"], root, check=True, capture_output=True)
+            (root / "tools" / "scratch.py").write_text('P = "src/rt/hle_x.c"\n', encoding="utf-8")
+            listed = [path.relative_to(root).as_posix() for path in self._tracked_python_files(root)]
+        self.assertEqual(listed, ["tests/fixtures/fx.py", "tools/kept.py", "tools/sub/nested.py"])
+
     def test_no_tool_names_an_hle_source(self) -> None:
         found: dict[str, list[tuple[int, str]]] = {}
-        for path in sorted([*(ROOT / "tools").rglob("*.py"), *(ROOT / "tests" / "fixtures").rglob("*.py")]):
+        for path in self._tracked_python_files(ROOT):
             relative = path.relative_to(ROOT).as_posix()
             hits = hle_sources.hle_source_path_constants(path.read_text(encoding="utf-8"), relative)
             if hits:

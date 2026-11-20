@@ -26,6 +26,13 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import progress_tracker as pt  # noqa: E402
 
+# Records the runtime writes, quoted from their emitters: a frame the presenter showed
+# (src/rt/hle_display.c, SR_PRESENT_TRACE) and a present that failed (src/rt/gpu_sdl3vk/sdl3vk.c).
+PRESENT_LINE = "HOST_PRESENT_SUBMITTED f=12 buf=0x04000000 fmt=3 stride=512"
+PRESENT_FAILED_LINE = "sdl3vk: pause overlay present failed: vkQueuePresentKHR failed with VK_ERROR_DEVICE_LOST"
+VFPU_PASS_LINE = ("vfpu_fuzz: 40/40 distinct words tested (0 not covered by interp oracle), "
+                  "0 words diverge, 0/40000 trials mismatched")
+
 
 class TrackerTestBase(unittest.TestCase):
     def setUp(self) -> None:
@@ -71,22 +78,22 @@ class TestLatestLog(TrackerTestBase):
 class TestSequencePredicate(TrackerTestBase):
     def test_verified_only_when_ordered_sequence_present(self):
         self.write_log("stderr_run1.log", [
-            "boot", "DISPLAY_SET_FB: 0x04000000", "vkCmdDraw: 12", "vkQueuePresent ok",
+            "boot", "DISPLAY_SET_FB: 0x04000000", PRESENT_LINE,
         ])
         self.assertEqual(
             pt._check_sequence(last_log="stderr_run1.log",
-                               ordered=[r"DISPLAY_SET_FB:", r"vkQueuePresent"]),
+                               ordered=[r"DISPLAY_SET_FB:", pt._PRESENT_OK_PATTERN]),
             "verified",
         )
 
     def test_pending_when_out_of_order(self):
         # Present happens BEFORE the framebuffer set -> the claimed causality is absent.
         self.write_log("stderr_run1.log", [
-            "vkQueuePresent ok", "DISPLAY_SET_FB: 0x04000000",
+            PRESENT_LINE, "DISPLAY_SET_FB: 0x04000000",
         ])
         self.assertEqual(
             pt._check_sequence(last_log="stderr_run1.log",
-                               ordered=[r"DISPLAY_SET_FB:", r"vkQueuePresent"]),
+                               ordered=[r"DISPLAY_SET_FB:", pt._PRESENT_OK_PATTERN]),
             "pending",
         )
 
@@ -94,7 +101,7 @@ class TestSequencePredicate(TrackerTestBase):
         self.write_log("stderr_run1.log", ["DISPLAY_SET_FB: only"])
         self.assertEqual(
             pt._check_sequence(last_log="stderr_run1.log",
-                               ordered=[r"DISPLAY_SET_FB:", r"vkQueuePresent"]),
+                               ordered=[r"DISPLAY_SET_FB:", pt._PRESENT_OK_PATTERN]),
             "pending",
         )
 
@@ -127,7 +134,43 @@ class TestWatchdog(TrackerTestBase):
 
 class TestVfpuEvidence(TrackerTestBase):
     def test_verified_from_fuzz_pass_marker(self):
-        self.write_log("vfpu.log", ["vfpu_fuzz: 4096 cases, 0 mismatch PASS"])
+        self.write_log("vfpu.log", [VFPU_PASS_LINE])
+        self.assertEqual(pt._check_vfpu(), "verified")
+
+    def test_verified_from_manager_pass_verdict(self):
+        self.write_log("vfpu.log", ["[PASS] vfpu_fuzz OK."])
+        self.assertEqual(pt._check_vfpu(), "verified")
+
+    def test_diverging_or_partial_fuzz_summary_is_not_a_pass(self):
+        """The fuzzer exits 1 on these summaries, so they are no VFPU proof (audit F-596dcc66)."""
+        for line in (
+            "vfpu_fuzz: 40/40 distinct words tested (0 not covered by interp oracle), "
+            "2 words diverge, 9/40000 trials mismatched",
+            "vfpu_fuzz: 38/40 distinct words tested (2 not covered by interp oracle), "
+            "0 words diverge, 0/38000 trials mismatched",
+        ):
+            with self.subTest(line=line):
+                self.write_log("vfpu.log", [line])
+                self.assertEqual(pt._check_vfpu(), "pending")
+
+    def test_ok_inside_an_ordinary_word_is_not_a_pass(self):
+        self.write_log("vfpu.log", ["vfpu_fuzz: lookup table broken, token mismatch"])
+        self.assertEqual(pt._check_vfpu(), "pending")
+
+    def test_fuzz_log_older_than_the_binaries_is_stale(self):
+        """A pass from before the current build is not current VFPU proof (audit F-596dcc66)."""
+        now = time.time()
+        self.write_log("vfpu.log", [VFPU_PASS_LINE], mtime=now - 4000)
+        exe = self.build / "hst.exe"
+        exe.write_bytes(b"B")
+        os.utime(exe, (now, now))
+        self.assertEqual(pt._check_vfpu(), "pending")
+        fuzz = self.build / "vfpu_fuzz.exe"
+        os.utime(exe, (now - 8000, now - 8000))
+        fuzz.write_bytes(b"F")
+        os.utime(fuzz, (now, now))
+        self.assertEqual(pt._check_vfpu(), "pending")
+        os.utime(fuzz, (now - 8000, now - 8000))
         self.assertEqual(pt._check_vfpu(), "verified")
 
     def test_pending_without_verification_evidence(self):
@@ -307,6 +350,45 @@ class TestFrameRenderingMeasurements(TrackerTestBase):
         status = self.statuses([stats])
         self.assertEqual(status["P5.2"], "verified")
         self.assertEqual(status["P6.3"], "verified")
+
+    def test_present_record_verifies_the_present_items(self):
+        status = self.statuses(["DISPLAY_SET_FB: 0x04000000", PRESENT_LINE])
+        self.assertEqual(status["P2.3"], "verified")
+        self.assertEqual(status["P2.4"], "verified")
+        self.assertEqual(status["P5.3"], "verified")
+        status = self.statuses(["BOOT_EVENT phase=first_frame source=gpu presented=1 t_ns=123"])
+        self.assertEqual(status["P2.4"], "verified")
+        self.assertEqual(status["P5.3"], "verified")
+
+    def test_present_failure_line_is_a_regression_not_a_present(self):
+        """The only lines naming vkQueuePresent are failures; they earn no credit (audit F-0d09ef3f)."""
+        status = self.statuses(["DISPLAY_SET_FB: 0x04000000", PRESENT_FAILED_LINE,
+                                "sdl3vk: vkQueuePresentKHR failed with VK_ERROR_DEVICE_LOST; the renderer is terminal"])
+        self.assertEqual(status["P2.3"], "pending")
+        self.assertEqual(status["P2.4"], "pending")
+        self.assertEqual(status["P5.3"], "regressed")
+
+    def test_leftover_snapshot_files_are_not_a_present(self):
+        """Snapshot files on disk are bound to no run, so they never verify P5.3 (audit F-de6be834)."""
+        snaps = self.build / "snapshots"
+        snaps.mkdir()
+        for i in range(3):
+            (snaps / f"frame_{i:04d}.ppm").write_bytes(b"P6")
+            (self.build / f"snap_{i}.ppm").write_bytes(b"P6")
+        # The legacy draw line the old snapshot branch keyed on is kept, so the files alone decide.
+        status = self.statuses(["vkCmdDraw: 12", "DISPLAY_SET_FB: 0x04000000", "GEGPU submit #1 batches=2 verts=12 "
+                                "tgt=0x04000000/512 fmt=3", "FBSNAP f=3 -> snap_3.ppm",
+                                "FBSNAP f=4 -> snap_4.ppm"])
+        self.assertEqual(status["P5.3"], "pending")
+
+    def test_seeding_items_without_a_runtime_record_stay_pending(self):
+        """P2.1 and P4.2 name no record the runtime writes; they are pending by name (audit F-71d33526)."""
+        self.write_log("stderr_run1.log", ["THREAD_SEED_OK", "hash seed", "create thread #1"])
+        by_id = {it.id: it for it in pt.verify_all()}
+        for item_id in ("P2.1", "P4.2"):
+            with self.subTest(item=item_id):
+                self.assertEqual(by_id[item_id].status, "pending")
+                self.assertIn("not measurable from a run log", by_id[item_id].verified_by)
 
     def test_dropped_batch_leaves_the_draw_count_unknown(self):
         status = self.statuses([
@@ -558,12 +640,10 @@ class TestItemEvidenceGrades(TrackerTestBase):
         self.write_log(
             "stderr_run1.log",
             [
-                "THREAD_SEED_OK",
                 "create thread #1",
                 "start thread",
                 "DISPLAY_SET_FB: 0x04000000",
-                "vkCmdDraw: 12",
-                "vkQueuePresent ok",
+                PRESENT_LINE,
                 "DISPLAY_SET_FB: 0x04000000",
             ],
             mtime=log_mtime,
@@ -583,7 +663,7 @@ class TestItemEvidenceGrades(TrackerTestBase):
         now = time.time()
         by_id = self._items_with_commit(log_mtime=now, exe_mtime=now)
         # Log-derived, bound to the current binary, log not older than binary.
-        self.assertEqual(by_id["P2.1"].evidence, "content-validated")
+        self.assertEqual(by_id["P2.2"].evidence, "content-validated")
         self.assertEqual(by_id["P6.1"].evidence, "content-validated")
         self.assertEqual(by_id["P5.3"].evidence, "content-validated")
         # Pending items stay unknown even on a bound run.
@@ -595,7 +675,7 @@ class TestItemEvidenceGrades(TrackerTestBase):
     def test_stale_run_marks_log_items_stale(self):
         now = time.time()
         by_id = self._items_with_commit(log_mtime=now - 10000, exe_mtime=now)
-        self.assertEqual(by_id["P2.1"].evidence, "stale")
+        self.assertEqual(by_id["P2.2"].evidence, "stale")
         self.assertEqual(by_id["P6.1"].evidence, "stale")
 
     def test_unbound_run_keeps_executed_grade(self):
@@ -603,12 +683,12 @@ class TestItemEvidenceGrades(TrackerTestBase):
         # No hst.exe in the temp build: identity cannot bind.
         self.write_log(
             "stderr_run1.log",
-            ["THREAD_SEED_OK", "DISPLAY_SET_FB: 0x04000000", "vkQueuePresent ok"],
+            ["create thread #1", "DISPLAY_SET_FB: 0x04000000", PRESENT_LINE],
             mtime=now,
         )
         items = pt.verify_all()
         by_id = {it.id: it for it in items}
-        self.assertEqual(by_id["P2.1"].evidence, "executed")
+        self.assertEqual(by_id["P2.2"].evidence, "executed")
         self.assertEqual(by_id["P7.1"].evidence, "unknown")
 
     def test_aggregate_emits_evidence_per_item(self):
@@ -616,7 +696,7 @@ class TestItemEvidenceGrades(TrackerTestBase):
         by_id = self._items_with_commit(log_mtime=now, exe_mtime=now)
         agg = pt.aggregate(list(by_id.values()))
         serialized = {item["id"]: item for item in agg["items"]}
-        self.assertEqual(serialized["P2.1"]["evidence"], "content-validated")
+        self.assertEqual(serialized["P2.2"]["evidence"], "content-validated")
         self.assertEqual(serialized["P7.1"]["evidence"], "unknown")
 
     def test_render_markdown_includes_identity(self):
@@ -657,8 +737,130 @@ class TestItemEvidenceGrades(TrackerTestBase):
         self.assertEqual(identity["generated_at"], emitted["run"]["generated_at"])
         # Per-item grades ride along in the emitted items array.
         by_id = {item["id"]: item for item in emitted["items"]}
-        self.assertEqual(by_id["P2.1"]["evidence"], "content-validated")
+        self.assertEqual(by_id["P2.2"]["evidence"], "content-validated")
         self.assertEqual(by_id["P7.1"]["evidence"], "unknown")
+
+    def test_verify_main_exits_1_when_an_item_regressed(self):
+        """The documented exit 1 for a regressed item (audit F-1b58fe45)."""
+        now = time.time()
+        self.write_log("stderr_run1.log", ["DISPLAY_SET_FB: 0x04000000", "WATCHDOG: no frame, aborting"],
+                       mtime=now)
+        saved_out = pt.OUT
+        pt.OUT = Path(self._tmp.name) / "progress.json"
+        try:
+            self.assertEqual(pt.main(["verify"]), 1)
+        finally:
+            pt.OUT = saved_out
+        emitted = json.loads((Path(self._tmp.name) / "progress.json").read_text(encoding="utf-8"))
+        self.assertGreater(emitted["units_regressed"], 0)
+
+
+
+class TestSplitFunctionBoundary(TrackerTestBase):
+    """P3.4 judges the body of f_0005a648 only (audit F-46faa873)."""
+
+    MIS_SPLIT = ("void f_0005a648(CpuState *s) {\n"
+                 "    sr_begin(s, 0x0005a64cu, 0x00801021u);\n"
+                 "    return;\n"
+                 "}\n")
+    WHOLE = ("void f_0005a648(CpuState *s) {\n"
+             "    s->r[2] = s->r[4] + s->r[5];\n"
+             "    return;\n"
+             "}\n")
+    LATER = ("void f_0005a700(CpuState *s) {\n"
+             "    sr_begin(s, 0x0005a704u, 0x00801021u);\n"
+             "    return;\n"
+             "}\n")
+
+    def _chunk(self, *functions: str) -> None:
+        (self.build / "hst_recomp_0.c").write_text(
+            "void f_0005a648(CpuState *s);\n\n" + "\n".join(functions), encoding="utf-8")
+
+    def test_a_later_function_with_the_word_is_not_the_mis_split(self):
+        """Failing-before: the lazy regex ran past f_0005a648's closing brace and matched the
+        word and the return of the next function, so P3.4 read 'regressed'."""
+        self._chunk(self.WHOLE, self.LATER)
+        self.assertEqual(pt._check_split_function(), "verified")
+
+    def test_the_mis_split_body_is_still_a_regression(self):
+        self._chunk(self.MIS_SPLIT, self.LATER)
+        self.assertEqual(pt._check_split_function(), "regressed")
+
+
+class TestVerifyReadsEachInputOnce(TrackerTestBase):
+    """One verify pass reads the selected run log once, hashes hst.exe by streaming, and
+    stores the run block it graded against (audit F-094a5e69)."""
+
+    def _count_reads(self, target: Path):
+        from unittest import mock  # noqa: PLC0415
+
+        real = Path.read_bytes
+        reads: list[Path] = []
+
+        def read_bytes(path: Path) -> bytes:
+            if Path(path) == target:
+                reads.append(path)
+            return real(path)
+
+        return reads, mock.patch.object(Path, "read_bytes", autospec=True, side_effect=read_bytes)
+
+    def test_verify_decodes_the_selected_log_once(self):
+        """Failing-before: every checker re-read and re-decoded the log, some twenty times."""
+        log = self.write_log("stderr_run1.log",
+                             ["create thread #1", "start thread", "DISPLAY_SET_FB: 0x04000000",
+                              PRESENT_LINE, "DISPLAY_SET_FB: 0x04000000"], mtime=time.time())
+        reads, patch = self._count_reads(log)
+        with patch:
+            by_id = {it.id: it for it in pt.verify_all()}
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(by_id["P2.2"].status, "verified")
+        # Outside a verify pass the file is read afresh.
+        with patch:
+            pt._log_lines("stderr_run1.log")
+        self.assertEqual(len(reads), 2)
+
+    def test_hst_exe_is_hashed_without_reading_it_whole(self):
+        """Failing-before: _check_hst_exe loaded the whole binary (over 100 MB) into memory."""
+        exe = self.build / "hst.exe"
+        size = 100_000_001
+        with exe.open("wb") as handle:
+            handle.truncate(size)
+        digest = hashlib.sha256()
+        with exe.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        then = time.time() - 100
+        os.utime(exe, (then, then))
+        (self.logs / "build_manifest.json").write_text(
+            json.dumps({"exe_sha256": digest.hexdigest().upper()}), encoding="utf-8")
+        reads, patch = self._count_reads(exe)
+        with patch:
+            self.assertEqual(pt._check_hst_exe(), "verified")
+        self.assertEqual(reads, [])
+
+    def test_verify_main_stores_the_run_block_it_graded_against(self):
+        """Failing-before: main computed a second _run_metadata, hashing hst.exe again and
+        stamping a generated_at other than the grading one."""
+        self.write_log("stderr_run1.log", ["create thread #1"], mtime=time.time())
+        (self.build / "hst.exe").write_bytes(b"B" * 1024)
+        calls: list[dict] = []
+        real = pt._run_metadata
+
+        def run_metadata(latest):
+            calls.append(real(latest))
+            return calls[-1]
+
+        saved = (pt._run_metadata, pt.OUT)
+        pt._run_metadata = run_metadata  # type: ignore[assignment]
+        pt.OUT = Path(self._tmp.name) / "progress.json"
+        try:
+            pt.main(["verify"])
+            emitted = json.loads(pt.OUT.read_text(encoding="utf-8"))
+        finally:
+            pt._run_metadata, pt.OUT = saved  # type: ignore[assignment]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(emitted["run"], calls[0])
+        self.assertEqual(emitted["latest_log"], "stderr_run1.log")
 
 
 if __name__ == "__main__":

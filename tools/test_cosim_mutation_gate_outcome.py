@@ -310,6 +310,57 @@ class GateOutcomeBindingTests(unittest.TestCase):
                             "the campaign baseline must not accept an inconsistent gate")
 
 
+def _scheduler_gate(failures: int, code: int) -> str:
+    """A synthetic AOT-boundary selftest run: the boundary stop, one isolation failure line
+    and the summary the real selftest prints (hle_thread_selftest.c)."""
+    return f"""
+        import sys
+        print("SEMANTIC_BOUNDARY: AOT_RETURN_TARGET_MISMATCH; synthetic", file=sys.stderr)
+        print("FAIL: AOT boundary isolation: synthetic", file=sys.stderr)
+        print("aot-return-boundary-selftest: 40 checks, {failures} failures", file=sys.stderr)
+        sys.exit({code})
+        """
+
+
+class SchedulerGateVerdictTests(unittest.TestCase):
+    """The scheduler gate's verdict reads the exact failure count, not a substring of it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="cosim_scheduler_gate_")
+        self.addCleanup(self.tmp.cleanup)
+        self.source = Path(self.tmp.name) / "scheduler_mutant.c"
+        self.source.write_text("/* synthetic mutant source */\n", encoding="utf-8")
+
+    def run_scheduler(self, code: str):
+        with mock.patch.object(mutate, "make_command", lambda source, target: _child(code)):
+            return mutate.run_gate(self.source, target="scheduler",
+                                   accepted_boundary="AOT_RETURN_TARGET_MISMATCH")
+
+    def test_exactly_one_boundary_failure_is_the_kill(self):
+        verdict, detail = self.run_scheduler(_scheduler_gate(1, 1))
+        self.assertEqual(verdict, "fail", detail)
+        self.assertIn("AOT_RETURN_TARGET_MISMATCH", detail)
+
+    def test_eleven_failures_are_not_the_single_intended_kill(self):
+        for failures in (11, 21):
+            with self.subTest(failures=failures):
+                verdict, detail = self.run_scheduler(_scheduler_gate(failures, 1))
+                self.assertNotEqual(verdict, "fail",
+                                    f"{failures} failures matched '1 failures': {detail}")
+
+    def test_a_clean_run_passes_only_on_zero_failures(self):
+        verdict, detail = self.run_scheduler("""
+            import sys
+            print("aot-return-boundary-selftest: 40 checks, 0 failures", file=sys.stderr)
+            """)
+        self.assertEqual(verdict, "ok", detail)
+        verdict, detail = self.run_scheduler("""
+            import sys
+            print("aot-return-boundary-selftest: 40 checks, 10 failures", file=sys.stderr)
+            """)
+        self.assertNotEqual(verdict, "ok", f"10 failures matched '0 failures': {detail}")
+
+
 class SurvivorWindowTests(unittest.TestCase):
     def test_a_surviving_grandchild_outlives_the_liveness_deadline(self):
         # If the grandchild could exit on its own before the probe gives up, a

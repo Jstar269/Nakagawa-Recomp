@@ -199,6 +199,16 @@ def verify(
         embedded_spirv[entry.get("embedded", "")] = spirv
 
     if glslc and not errors:
+        # Name a compiler drift, so a byte mismatch from another glslc is not left unexplained.
+        recorded_version = str(manifest["compiler"]["version"]).strip()
+        try:
+            running_version = glslc_version(glslc)
+        except (OSError, subprocess.SubprocessError) as exc:
+            running_version = f"unknown ({exc})"
+        drift = (
+            f" (the manifest records glslc {recorded_version!r}; this glslc is {running_version!r})"
+            if running_version != recorded_version else ""
+        )
         with tempfile.TemporaryDirectory(prefix="nakagawa-shader-verify-") as temp_name:
             temp = Path(temp_name)
             for stage, source_rel, embedded_rel in shaders:
@@ -212,7 +222,7 @@ def verify(
                     errors.append(f"{stage}: reproducibility compile failed: {exc}")
                     continue
                 if rebuilt != embedded_spirv.get(embedded_rel.as_posix()):
-                    errors.append(f"{stage}: current glslc output differs from embedded SPIR-V")
+                    errors.append(f"{stage}: current glslc output differs from embedded SPIR-V{drift}")
     return errors
 
 
@@ -357,7 +367,10 @@ def include_closure(
     found = set()
     for name in _LINE_MARKER.findall(out.read_text(encoding="utf-8", errors="replace")):
         path = (source.parent / name.replace("\\\\", "/").replace("\\", "/")).resolve()
-        rel = path.relative_to(root.resolve()).as_posix()
+        try:
+            rel = path.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            raise ValueError(f"{source_rel.as_posix()}: include outside the repository: {name}") from None
         if rel != source_rel.as_posix():
             found.add(rel)
     return sorted(found)
@@ -480,6 +493,9 @@ def verify_dxc(
             try:
                 rebuilt = compile_dxc(dxc, root, source_rel, temp / f"{source_rel.stem}.spv", defines)
                 closure = include_closure(dxc, root, source_rel, temp, defines)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
             except (OSError, subprocess.SubprocessError) as exc:
                 errors.append(f"{key}: reproducibility compile failed: {exc}")
                 continue

@@ -1,9 +1,14 @@
 # PROVENANCE.md — `src/rt/xr/openxr/`
 
 The Khronos OpenXR C headers, for the runtime's optional OpenXR (VR) module
-`src/rt/xr/nk_xr.c`. The module loads the OpenXR loader at run time
-(`LoadLibraryA` or `dlopen`) and never links it, so the headers supply only
-types, enumerations and function-pointer typedefs. No loader binary is carried.
+`src/rt/xr/nk_xr.c`. The module loads the OpenXR loader at run time and never
+links it, so the headers supply only types, enumerations and function-pointer
+typedefs. On Windows it calls `LoadLibraryExA` with
+`LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`, which
+searches only the application directory and System32, never the current
+directory or `PATH`, so `openxr_loader.dll` must sit next to the executable
+(`tools/stage_runtime_dlls.py` does not stage it). Elsewhere it calls `dlopen`.
+No loader binary is carried.
 The headers are imported unmodified.
 
 ## Upstream source

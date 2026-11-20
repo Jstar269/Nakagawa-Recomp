@@ -3,6 +3,7 @@
 
 """Fail-closed coverage for the retained Python release dependency lock."""
 
+import io
 import json
 from pathlib import Path
 import sys
@@ -216,6 +217,35 @@ class TestVerifySbomFailsClosed(ReleaseManifestFixture):
 
     def test_verify_main_succeeds_on_repository_lock(self):
         self.assertEqual(verify_sbom.main(["--manifest", str(RELEASE_MANIFEST)]), 0)
+
+    def test_missing_spdx_file_is_a_named_error(self):
+        """Failing-before: a missing --spdx file returned no error, so a caller reading only the error
+        list saw a verified SBOM, and main exited 1 without saying why."""
+        absent = self.root / "absent-sbom.json"
+        errors, digests = verify_sbom.verify_sbom_matches(absent, RELEASE_MANIFEST, PY_LOCK)
+        self.assertEqual(errors, [f"SPDX SBOM missing or not a file: {absent}"])
+        self.assertIsNone(digests["python"])
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr, mock.patch("sys.stdout"):
+            code = verify_sbom.main(["--manifest", str(RELEASE_MANIFEST), "--spdx", str(absent)])
+        self.assertEqual(code, 1)
+        self.assertIn("SPDX SBOM missing or not a file", stderr.getvalue())
+
+    def test_main_resolves_the_release_metadata_once(self):
+        """Failing-before: verify_release_locks and verify_sbom_matches each resolved the release index, so
+        with --fetch-live-metadata every pinned release was fetched from PyPI twice per run."""
+        parsed = generate_sbom.parse_lockfiles(PY_LOCK, repo_root=ROOT)
+        data = json.loads(RELEASE_MANIFEST.read_text(encoding="utf-8"))
+        spdx = generate_sbom.generate_spdx23(
+            data, parsed["py_packages"], lock_files=parsed["lock_files"],
+            lock_relationships=parsed["lock_relationships"],
+        )
+        spdx_path = write(self.root, "sbom.json", json.dumps(spdx))
+        resolve = generate_sbom.resolve_pypi_release_index
+        with mock.patch.object(generate_sbom, "resolve_pypi_release_index", side_effect=resolve) as resolved, \
+                mock.patch("sys.stdout"):
+            code = verify_sbom.main(["--manifest", str(RELEASE_MANIFEST), "--spdx", str(spdx_path)])
+        self.assertEqual(code, 0)
+        self.assertEqual(resolved.call_count, 1)
 
     def test_verify_main_rejects_cli_lock_outside_manifest_declaration(self):
         spdx = write(self.root, "sbom.json", json.dumps({"packages": []}))

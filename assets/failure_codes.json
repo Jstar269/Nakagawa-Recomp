@@ -135,6 +135,13 @@
         "player"
       ]
     },
+    "DISC_IMAGE_IMPORT_BUSY": {
+      "stage": "inspect",
+      "in": [
+        "disc",
+        "player"
+      ]
+    },
     "DISC_IMAGE_INDEX_INVALID": {
       "stage": "inspect",
       "in": [
@@ -1118,10 +1125,17 @@
     "DATA_DIR_UNAVAILABLE": {
       "stage": "host",
       "in": [
+        "route",
         "player"
       ]
     },
     "DESTINATION_WRITE_FAILED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "DISC_PATH_TOO_LONG": {
       "stage": "host",
       "in": [
         "player"

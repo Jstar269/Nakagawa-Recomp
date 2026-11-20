@@ -29,6 +29,7 @@
 #include "flight_recorder.h"
 #include "prx_loader.h"
 #include "ace.h"
+#include "cheats.h"
 #include "ge_shared.h"
 #include "videorec.h"
 
@@ -48,14 +49,16 @@ extern int sr_audio_pause_script_ready(void);
 extern int sr_audio_init(void);
 /* Ace Mode's peak=limit (#2137): the host audio backend's true-peak limiter (audio_sdl3.c). */
 extern int sr_audio_set_true_peak_limiter(int on);
-extern void sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
-                                     double *min_gain);
+extern int sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
+                                    double *min_gain);
 
-/* peak=limit's totals into the Ace report: registered after ace_finish, so it runs first. */
+/* peak=limit's totals into the Ace report: registered after ace_finish, so it runs first. A run
+ * whose host output never opened (no device) limited nothing, and the report says so. */
 static void driver_peak_stats_to_ace(void) {
     uint64_t pushes = 0, frames = 0, limited = 0;
     double min_gain = 1.0;
-    sr_audio_true_peak_stats(&pushes, &frames, &limited, &min_gain);
+    if (!sr_audio_true_peak_stats(&pushes, &frames, &limited, &min_gain))
+        ace_feature_unavailable(ACE_FEATURE_PEAK, "did not run: no host audio output opened");
     ace_set_peak_stats(pushes, frames, limited, min_gain);
 }
 
@@ -81,6 +84,7 @@ static int driver_stop_requested(void) {
 /* An end of main once the guest has run: a recording (#1273) names it and the exit status
  * main is about to return, so record.json tells a clean end from a failed one. */
 static int driver_run_end(int status, const char *how) {
+    sr_cheats_run_end();        /* the counts behind the cheats' hold lines (cheats.h) */
     sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
     (void)sr_videorec_finish_status(how, status);
     return status;
@@ -754,7 +758,10 @@ have_image:;
         (void)sr_audio_init();
         for (;;) {
             sr_driver_boot_event("BOOT_EVENT phase=guest_start mode=scheduler entry=0x%08x", entry);
-            sched_run(entry, s.r[4], s.r[5]);
+            /* No entry thread (the title's module_start parameters refused): nothing ran, so
+             * the run ends with a failure status, not as a run that returned normally. */
+            if (sched_run(entry, s.r[4], s.r[5]) != 0)
+                return driver_run_end(2, "the module_start thread could not be created");
 
             /* A run stopped from outside the guest ends here, even with a LoadExec queued, and
              * so does one the person asked to quit before the stop was due (a LoadExec from the

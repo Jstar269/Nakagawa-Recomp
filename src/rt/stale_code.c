@@ -148,6 +148,65 @@ void sr_stale_forget_range(uint32_t addr, uint32_t size) {
     s_block_count = kept;
 }
 
+#define SR_STALE_FNV1A_SEED 0x811c9dc5u
+
+/* One word of the FNV-1a hash, its four bytes little-endian first. sr_stale_fnv1a (the
+ * function pinned against tools/codegen.py), mark_block and block_hash_with all hash through
+ * it, so the runtime check cannot drift from the pinned vectors. */
+static uint32_t fnv1a_step(uint32_t h, uint32_t word) {
+    int shift;
+    for (shift = 0; shift < 32; shift += 8) {
+        h ^= (word >> shift) & 0xffu;
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+/* FNV-1a over a block's live words, with `addr` read as `word`. Returns 0
+ * when any other word is unreadable. */
+static int block_hash_with(const SrStaleBlockEntry *entry, uint32_t addr, uint32_t word,
+                           SrStaleReadFn read, void *ctx, uint32_t *hash_out) {
+    uint32_t h = SR_STALE_FNV1A_SEED;
+    uint32_t i;
+    for (i = 0; i < entry->nwords; i++) {
+        uint32_t waddr = entry->addr + i * 4u;
+        uint32_t w = word;
+        if (waddr != addr && !read(waddr, &w, ctx)) {
+            return 0;
+        }
+        h = fnv1a_step(h, w);
+    }
+    *hash_out = h;
+    return 1;
+}
+
+void sr_stale_patch_word(uint32_t addr, uint32_t new_word, SrStaleReadFn read, void *ctx) {
+    size_t i;
+    if ((addr & 3u) != 0u || !read) {
+        return;
+    }
+    for (i = 0; i < s_block_count; i++) {
+        uint64_t span = (uint64_t)s_blocks[i].nwords * 4u;
+        uint32_t old_word = 0u;
+        uint32_t before = 0u;
+        uint32_t after = 0u;
+        if (addr < s_blocks[i].addr || (uint64_t)(addr - s_blocks[i].addr) >= span) {
+            continue;
+        }
+        /* Only an intact block takes the patched word as expected: a block that
+         * already differs keeps its record, so the earlier overwrite still fires. */
+        if (!read(addr, &old_word, ctx) ||
+            !block_hash_with(&s_blocks[i], addr, old_word, read, ctx, &before) ||
+            before != s_blocks[i].expected_hash ||
+            !block_hash_with(&s_blocks[i], addr, new_word, read, ctx, &after)) {
+            continue;
+        }
+        /* Replaces the record in place (same address), clearing its flag. */
+        sr_stale_register_block(s_blocks[i].addr, s_blocks[i].nwords, after);
+    }
+    sr_stale_register_word(addr, new_word);
+}
+
 uint32_t sr_stale_entry_count(void) {
     return (uint32_t)(s_word_count + s_block_count);
 }
@@ -164,17 +223,13 @@ int sr_stale_enabled(void) {
 }
 
 uint32_t sr_stale_fnv1a(const uint32_t *words, uint32_t nwords) {
-    uint32_t h = 0x811c9dc5u;
+    uint32_t h = SR_STALE_FNV1A_SEED;
     uint32_t i;
-    int shift;
     if (!words) {
         return h;
     }
     for (i = 0; i < nwords; i++) {
-        for (shift = 0; shift < 32; shift += 8) {
-            h ^= (words[i] >> shift) & 0xffu;
-            h *= 0x01000193u;
-        }
+        h = fnv1a_step(h, words[i]);
     }
     return h;
 }
@@ -212,19 +267,15 @@ static int range_words(uint32_t addr, uint32_t size, uint32_t *first_out, uint32
  * caller's business. */
 static int mark_block(SrStaleBlockEntry *entry, SrStaleReadFn read, void *ctx,
                       uint32_t *hash_out) {
-    uint32_t h = 0x811c9dc5u;
+    uint32_t h = SR_STALE_FNV1A_SEED;
     uint32_t i;
-    int shift;
     for (i = 0; i < entry->nwords; i++) {
         uint32_t waddr = entry->addr + i * 4u;
         uint32_t w = 0u;
         if (!read(waddr, &w, ctx)) {
             return 0;
         }
-        for (shift = 0; shift < 32; shift += 8) {
-            h ^= (w >> shift) & 0xffu;
-            h *= 0x01000193u;
-        }
+        h = fnv1a_step(h, w);
     }
     if (h != entry->expected_hash) {
         entry->stale = 1;

@@ -3,8 +3,9 @@
 
 /* The player's on-screen keyboard (#2197); ui_keyboard.h describes it. The character
    keys are drawn here from the nk_ui pieces a button is made of (nk_ui_button capitalises
-   its label, and a keyboard has to show which case its letters type); the other keys are
-   nk_ui buttons. */
+   its label, and a keyboard has to show which case its letters type), and so is Space
+   while it cannot type (nk_ui_button has no dimmed key that keeps its focus stop); the
+   other keys are nk_ui buttons. */
 
 #include "ui_keyboard.h"
 #include "nk_ui_widgets.h"
@@ -55,39 +56,18 @@ size_t ui_keyboard_utf8(uint32_t codepoint, char *out) {
     return n;
 }
 
-/* Reads one well-formed UTF-8 character from `s`: its length, with *codepoint set, or
-   0 for a byte that does not start one (an overlong form, a lone continuation byte, a
-   cut-off sequence, a surrogate or a value past U+10FFFF). */
-static size_t utf8_read(const unsigned char *s, uint32_t *codepoint) {
-    size_t extra;
-    uint32_t cp;
-    uint32_t min;
-    if (s[0] < 0x80u) {
-        *codepoint = s[0];
-        return 1u;
-    }
-    if (s[0] >= 0xC2u && s[0] <= 0xDFu) {
-        extra = 1u;
-        cp = s[0] & 0x1Fu;
-        min = 0x80u;
-    } else if (s[0] >= 0xE0u && s[0] <= 0xEFu) {
-        extra = 2u;
-        cp = s[0] & 0x0Fu;
-        min = 0x800u;
-    } else if (s[0] >= 0xF0u && s[0] <= 0xF4u) {
-        extra = 3u;
-        cp = s[0] & 0x07u;
-        min = 0x10000u;
-    } else {
-        return 0u;
-    }
-    for (size_t k = 1u; k <= extra; ++k) {
-        if ((s[k] & 0xC0u) != 0x80u) return 0u; /* also stops at the NUL */
-        cp = (cp << 6) | (s[k] & 0x3Fu);
-    }
-    if (cp < min || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) return 0u;
+/* Reads one well-formed UTF-8 character from the `end - s` bytes at `s`: its length,
+   with *codepoint set, or 0 for a byte that does not start one (an overlong form, a lone
+   continuation byte, a cut-off sequence, a surrogate or a value past U+10FFFF).
+   nk_ui_utf8_next applies those rules; it marks a byte it refuses by stepping over that
+   byte alone with U+FFFD, which a well-formed U+FFFD (three bytes) never does. */
+static size_t utf8_read(const char *s, const char *end, uint32_t *codepoint) {
+    const char *cursor = s;
+    uint32_t cp = nk_ui_utf8_next(&cursor, end);
+    size_t n = (size_t)(cursor - s);
+    if (n == 0u || (cp == 0xFFFDu && n == 1u)) return 0u;
     *codepoint = cp;
-    return 1u + extra;
+    return n;
 }
 
 bool ui_keyboard_can_type(const UiKeyboard *keyboard, uint32_t codepoint) {
@@ -100,14 +80,15 @@ bool ui_keyboard_can_type(const UiKeyboard *keyboard, uint32_t codepoint) {
 }
 
 bool ui_keyboard_type(UiKeyboard *keyboard, const char *utf8) {
-    const unsigned char *s = (const unsigned char *)utf8;
     bool typed = false;
     size_t length;
+    const char *end;
     if (keyboard == NULL || keyboard->text == NULL || utf8 == NULL) return false;
     length = strlen(keyboard->text);
-    for (size_t i = 0u; s[i] != 0u;) {
+    end = utf8 + strlen(utf8);
+    for (size_t i = 0u; utf8[i] != '\0';) {
         uint32_t cp = 0u;
-        size_t n = utf8_read(s + i, &cp);
+        size_t n = utf8_read(utf8 + i, end, &cp);
         if (n == 0u) {
             ++i; /* not a character: left out */
             continue;
@@ -117,7 +98,7 @@ bool ui_keyboard_type(UiKeyboard *keyboard, const char *utf8) {
             continue;
         }
         if (length + n > keyboard->cap) break;
-        memcpy(keyboard->text + length, s + i, n);
+        memcpy(keyboard->text + length, utf8 + i, n);
         length += n;
         keyboard->text[length] = '\0';
         typed = true;
@@ -154,36 +135,24 @@ uint32_t ui_keyboard_key_char(unsigned place, bool shifted) {
     return (uint32_t)(unsigned char)c;
 }
 
-/* Types one character; true when it was taken. */
+/* Types one character through ui_keyboard_type, which applies the filter and the cap;
+   true when it was taken. */
 static bool type_codepoint(UiKeyboard *keyboard, uint32_t codepoint) {
     char bytes[5];
-    if (!ui_keyboard_can_type(keyboard, codepoint)) return false;
-    (void)ui_keyboard_utf8(codepoint, bytes);
+    if (codepoint == 0u || ui_keyboard_utf8(codepoint, bytes) == 0u) return false;
     return ui_keyboard_type(keyboard, bytes);
 }
 
-/* A character key: a small button, as nk_ui_button draws one, whose label keeps its
-   case. `usable` false draws the label dimmed (the key cannot type now); it stays
-   focusable. True on the frame it is activated. */
-static bool character_key(NkUi *ui, NkUiId id, const char *label, bool usable) {
-    const uint32_t flags = NK_UI_BUTTON_SMALL | NK_UI_BUTTON_GROW | NK_UI_BUTTON_ROW;
+/* One key in `layout`, drawn as nk_ui_button draws a button with `flags`, with `label`
+   as given in `text`. `usable` false draws the label dimmed and drops the outline (the
+   key cannot type now); it stays focusable. True on the frame it is activated. */
+static bool draw_key(NkUi *ui, NkUiId id, uint32_t flags, const NkUiLayout *layout,
+                     const char *label, NkUiTextStyle text, bool usable) {
     const NkUiTheme *theme = nk_ui_theme(ui);
-    NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY, 0u);
-    NkUiLayout layout;
     NkUiStyle style;
     bool focused;
     bool activated;
     nk_ui_register_button(ui, id, flags);
-    memset(&layout, 0, sizeof(layout));
-    layout.width = (NkUiSizing){NK_UI_SIZE_GROW, 0.0f, 0.0f, 0.0f};
-    layout.height = (NkUiSizing){NK_UI_SIZE_FIXED,
-                                 nk_ui_line_box(ui, NK_UI_CONTROL_HEIGHT_SMALL, &text), 0.0f,
-                                 0.0f};
-    layout.direction = NK_UI_LAYOUT_ROW;
-    layout.padding_left = NK_UI_SPACE_2;
-    layout.padding_right = NK_UI_SPACE_2;
-    layout.align_x = NK_UI_ALIGN_CENTER;
-    layout.align_y = NK_UI_ALIGN_CENTER;
     memset(&style, 0, sizeof(style));
     /* A key that cannot type now (the cap, or the filter) loses its outline as well as
        its label colour, so colour is not the only cue: its shape changes too. The
@@ -199,14 +168,44 @@ static bool character_key(NkUi *ui, NkUiId id, const char *label, bool usable) {
     }
     style.transition = NK_UI_TRANSITION_COLOR;
     style.transition_s = (float)NK_UI_MOTION_FAST;
-    if (!nk_ui_begin_container(ui, id, &layout, &style)) return false;
+    if (!nk_ui_begin_container(ui, id, layout, &style)) return false;
     if (focused) nk_ui_focus_ring(ui, id, NK_UI_RADIUS_CONTROL);
     activated = nk_ui_take_activation(ui, id);
-    text.rgba = usable ? nk_ui_button_text_rgba(ui, NK_UI_BUTTON_SMALL) : theme->muted;
+    text.rgba = usable ? nk_ui_button_text_rgba(ui, flags) : theme->muted;
     text.wrap = false;
     nk_ui_text(ui, id, label, &text);
     nk_ui_end_container(ui);
     return activated;
+}
+
+/* A character key: a small button whose label keeps its case. */
+static bool character_key(NkUi *ui, NkUiId id, const char *label, bool usable) {
+    const uint32_t flags = NK_UI_BUTTON_SMALL | NK_UI_BUTTON_GROW | NK_UI_BUTTON_ROW;
+    NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY, 0u);
+    NkUiLayout layout;
+    memset(&layout, 0, sizeof(layout));
+    layout.width = (NkUiSizing){NK_UI_SIZE_GROW, 0.0f, 0.0f, 0.0f};
+    layout.height = (NkUiSizing){NK_UI_SIZE_FIXED,
+                                 nk_ui_line_box(ui, NK_UI_CONTROL_HEIGHT_SMALL, &text), 0.0f,
+                                 0.0f};
+    layout.direction = NK_UI_LAYOUT_ROW;
+    layout.padding_left = NK_UI_SPACE_2;
+    layout.padding_right = NK_UI_SPACE_2;
+    layout.align_x = NK_UI_ALIGN_CENTER;
+    layout.align_y = NK_UI_ALIGN_CENTER;
+    return draw_key(ui, id, flags, &layout, label, text, usable);
+}
+
+/* Space: the nk_ui button its row's other keys are while it can type; while it cannot,
+   the same button's size and capitalised label, dimmed, without its outline, and still
+   a focus stop. */
+static bool space_key(NkUi *ui, NkUiId id, uint32_t flags, bool usable) {
+    NkUiLayout layout;
+    NkUiStyle resting;
+    if (usable) return nk_ui_button(ui, id, "Space", flags);
+    nk_ui_button_configuration(ui, flags, &layout, &resting);
+    return draw_key(ui, id, flags, &layout, nk_ui_caps(ui, "Space"),
+                    nk_ui_type(nk_ui_button_role(flags), 0u), false);
 }
 
 static NkUiLayout keyboard_row(float gap) {
@@ -232,13 +231,29 @@ void ui_keyboard_take_pad(NkUi *ui, UiKeyboardPad *pad) {
 UiKeyboardResult ui_keyboard_draw(NkUi *ui, UiKeyboard *keyboard, const UiKeyboardView *view) {
     UiKeyboardResult result = UI_KEYBOARD_NONE;
     NkUiLayout block;
+    UiKeyboardPad taken;
+    const UiKeyboardPad *pad;
     if (ui == NULL || keyboard == NULL || keyboard->text == NULL || view == NULL) {
         return UI_KEYBOARD_NONE;
+    }
+    /* The pad's shortcuts, taken every frame the keyboard is up so none reaches the
+       screen under it (or before it, by the screen: view->pad), even on a frame its
+       keys cannot be drawn. A key's own press below wins over them. */
+    pad = view->pad;
+    if (pad == NULL) {
+        ui_keyboard_take_pad(ui, &taken);
+        pad = &taken;
     }
     block = keyboard_row(0.0f);
     block.direction = NK_UI_LAYOUT_COLUMN;
     block.gap = NK_UI_SPACE_1;
-    if (!nk_ui_begin_container(ui, view->part_base, &block, NULL)) return UI_KEYBOARD_NONE;
+    if (!nk_ui_begin_container(ui, view->part_base, &block, NULL)) {
+        /* No keys drawn this frame: Back and Start still answer; the editing
+           shortcuts wait for keys the user can see. */
+        if (pad->back) return UI_KEYBOARD_CANCEL;
+        if (pad->done) return UI_KEYBOARD_DONE;
+        return UI_KEYBOARD_NONE;
+    }
     for (unsigned r = 0u; r < UI_KEYBOARD_CHAR_ROWS; ++r) {
         NkUiLayout row = keyboard_row(NK_UI_SPACE_1);
         if (!nk_ui_begin_container(ui, view->part_base + 1u + r, &row, NULL)) continue;
@@ -264,8 +279,8 @@ UiKeyboardResult ui_keyboard_draw(NkUi *ui, UiKeyboard *keyboard, const UiKeyboa
                 keyboard->shifted = !keyboard->shifted;
                 result = UI_KEYBOARD_EDITED;
             }
-            if (nk_ui_button(ui, view->key_base + UI_KEYBOARD_KEY_SPACE, "Space",
-                             flags | NK_UI_BUTTON_GROW) &&
+            if (space_key(ui, view->key_base + UI_KEYBOARD_KEY_SPACE, flags | NK_UI_BUTTON_GROW,
+                          ui_keyboard_can_type(keyboard, ' ')) &&
                 type_codepoint(keyboard, ' ')) {
                 result = UI_KEYBOARD_EDITED;
             }
@@ -287,25 +302,14 @@ UiKeyboardResult ui_keyboard_draw(NkUi *ui, UiKeyboard *keyboard, const UiKeyboa
         }
     }
     nk_ui_end_container(ui);
-    /* The pad's shortcuts, taken every frame the keyboard is up so none reaches the
-       screen under it (or before it, by the screen: view->pad). A key's own press
-       above wins over them. */
-    {
-        UiKeyboardPad taken;
-        const UiKeyboardPad *pad = view->pad;
-        if (pad == NULL) {
-            ui_keyboard_take_pad(ui, &taken);
-            pad = &taken;
-        }
-        if (result != UI_KEYBOARD_NONE) return result;
-        if (pad->back) return UI_KEYBOARD_CANCEL;
-        if (pad->done) return UI_KEYBOARD_DONE;
-        if (pad->remove && ui_keyboard_delete(keyboard)) return UI_KEYBOARD_EDITED;
-        if (pad->space && type_codepoint(keyboard, ' ')) return UI_KEYBOARD_EDITED;
-        if (pad->shift) {
-            keyboard->shifted = !keyboard->shifted;
-            return UI_KEYBOARD_EDITED;
-        }
+    if (result != UI_KEYBOARD_NONE) return result;
+    if (pad->back) return UI_KEYBOARD_CANCEL;
+    if (pad->done) return UI_KEYBOARD_DONE;
+    if (pad->remove && ui_keyboard_delete(keyboard)) return UI_KEYBOARD_EDITED;
+    if (pad->space && type_codepoint(keyboard, ' ')) return UI_KEYBOARD_EDITED;
+    if (pad->shift) {
+        keyboard->shifted = !keyboard->shifted;
+        return UI_KEYBOARD_EDITED;
     }
     return result;
 }

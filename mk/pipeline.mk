@@ -8,6 +8,8 @@
 # Split out of the root Makefile (#1531), text unchanged: guest-input tracking, the codegen pipeline, the player link and the player UI regressions.
 # The root Makefile includes it where the text used to be, so evaluation order is unchanged.
 
+.DELETE_ON_ERROR:
+
 # Re-checked on every invocation that needs a guest input (hence FORCE), but rewritten
 # only when an input's identity actually changed, so dependents do not rebuild spuriously.
 # GAME_PSP_HEADER and GAME_EXTRA_ELFS_ENV are optional; GAME_ELF is not.
@@ -25,12 +27,18 @@ $(BUILD_DIR)/$(GAME_NAME)_image.bin: $(GAME_INPUT_PREREQ) tools/prxload.py
 # regenerates them; a C build does not depend on these files. CODEGEN_BACKEND=llvm adds
 # --backend=llvm to CODEGEN_USER_ARGS (Makefile), so this sees either spelling.
 CODEGEN_LLVM_PREREQ := $(if $(filter --backend=llvm,$(CODEGEN_USER_ARGS)),tools/codegen_llvm.py tools/llvm_ir.py tools/lowering_plan.py)
+# The enhancement and code-hook packages codegen reads, and the package's <name>.symbols.json
+# sidecar when one exists, so editing a package in place regenerates: the codegen profile
+# records only their paths. Backslashes become slashes, the spelling a prerequisite needs.
+ENHANCEMENT_PACKAGE_PATH := $(subst \,/,$(strip $(ENHANCEMENT_PACKAGE)))
+ENHANCEMENT_PACKAGE_PREREQ := $(ENHANCEMENT_PACKAGE_PATH) $(subst \,/,$(strip $(ENHANCEMENT_CODE_HOOK_PACKAGE))) \
+	$(if $(ENHANCEMENT_PACKAGE_PATH),$(wildcard $(basename $(ENHANCEMENT_PACKAGE_PATH)).symbols.json))
 
 ifeq ($(NK_AOT_PREGENERATED),1)
 $(BUILD_DIR)/$(GAME_NAME)_recomp.c $(BUILD_DIR)/$(GAME_NAME)_recomp_funcs.h:
 	$(if $(wildcard $@),,$(error NK_AOT_PREGENERATED requires $@))
 else
-$(BUILD_DIR)/$(GAME_NAME)_recomp.c $(BUILD_DIR)/$(GAME_NAME)_recomp_funcs.h: $(GAME_INPUT_PREREQ) $(CODEGEN_TOOL) tools/codegen.py tools/analyze.py tools/analyze_cfg.py tools/entry_frame_balance.py tools/prxload.py tools/host_stubs.py tools/codegen_hst_stubs.py tools/imports.py $(CODEGEN_LLVM_PREREQ) $(CODEGEN_PROFILE_STAMP) $(SYMBOL_MAP) $(NAME_IMPORTS_PREREQ)
+$(BUILD_DIR)/$(GAME_NAME)_recomp.c $(BUILD_DIR)/$(GAME_NAME)_recomp_funcs.h: $(GAME_INPUT_PREREQ) $(CODEGEN_TOOL) tools/codegen.py tools/analyze.py tools/analyze_cfg.py tools/entry_frame_balance.py tools/prxload.py tools/host_stubs.py tools/codegen_hst_stubs.py tools/imports.py $(CODEGEN_LLVM_PREREQ) $(CODEGEN_PROFILE_STAMP) $(SYMBOL_MAP) $(NAME_IMPORTS_PREREQ) $(ENHANCEMENT_PACKAGE_PREREQ)
 	"$(PYTHON)" $(CODEGEN_TOOL) --env-elf $(BUILD_DIR)/$(GAME_NAME)_recomp.c --base=$(GAME_BASE) $(CODEGEN_PROFILE_ARG) $(EXTRA_SPAN_ARG) $(EXTRA_ELF_ENV_ARG) --funcs-per-chunk=$(FUNCS_PER_CHUNK) $(CHUNK_BYTES_ARG) $(SYMBOL_MAP_ARG) $(NAME_IMPORTS_ARG) $(ENHANCEMENT_PACKAGE_ARG) $(CODEGEN_USER_ARGS)
 endif
 
@@ -38,7 +46,7 @@ $(BUILD_DIR)/$(GAME_NAME)_imports.toml: $(GAME_INPUT_PREREQ) tools/imports.py to
 	"$(PYTHON)" tools/imports.py --env-elf $(GAME_BASE) --toml=$@
 
 ifndef NK_BUILD_DIR_READY
-RUNTIME_PROFILE_HASH := $(call profile_hash,NK_RUNTIME_PROFILE_ENTRIES,$(CC),$(BUILD_DIR)/.runtime-profile-entries)
+RUNTIME_PROFILE_HASH := $(call profile_hash,NK_RUNTIME_PROFILE_ENTRIES,$(CC))
 endif
 RUNTIME_PROFILE_STAMP := $(BUILD_DIR)/.runtime-profile-$(RUNTIME_PROFILE_HASH)
 # The objects the runtime profile invalidates go in a list file that make writes (see the record
@@ -119,8 +127,9 @@ $(BUILD_DIR)/xbrz.o: third_party/xbrz/xbrz.c third_party/xbrz/xbrz.h $(RUNTIME_P
 	$(CC) $(CFLAGS) -O2 $(DEPFLAGS) -c $< -o $@
 
 # The pause overlay draws its pages with nk_ui (src/ui, src/rt/overlay); only the window
-# presenter and those sources see the UI include path. SDL3_TTF_AVAILABLE is set further down;
-# these flags are read when a recipe runs.
+# presenter and those sources see the UI include path. SDL3_TTF_AVAILABLE comes from
+# mk/build_common.mk, and the runtime profile hashes it with SDL3_TTF_CFLAGS, so a change in
+# SDL3_ttf rebuilds these objects.
 RT_NK_UI_FLAGS = -Isrc/ui -Isrc/rt/overlay -Ithird_party/clay -DNK_UI_WITH_SDL -DNK_UI_WITH_SDL3 \
                  $(if $(filter yes,$(SDL3_TTF_AVAILABLE)),$(SDL3_TTF_CFLAGS) -DNK_UI_WITH_SDL_TTF,)
 
@@ -150,7 +159,16 @@ $(BUILD_DIR)/nk_ui_vk.o: src/ui/backend/nk_ui_vk.c $(RUNTIME_PROFILE_STAMP)
 $(BUILD_DIR)/title_config.o: src/rt/title_config.c src/rt/title_config.h $(TITLE_CONFIG_HEADER) $(RUNTIME_PROFILE_STAMP)
 	$(CC) $(CFLAGS) -I$(TITLE_CONFIG_DIR) $(DEPFLAGS) -c $< -o $@
 
-$(PORTABLE_CORE_DIR)/title_config.o: src/rt/title_config.c src/rt/title_config.h $(TITLE_CONFIG_HEADER)
+# The portable-core objects (portability gate) are built with their own compiler and flags, which
+# no other profile stamp covers. The stamp is checked on every build of them and rewritten only
+# when CC, its version or PORTABLE_CORE_CFLAGS changed (GE_FRONTEND_PROFILE=1 adds a define),
+# so `make portable-core-objects CC=clang` after a gcc run compiles again instead of passing on
+# the gcc objects.
+PORTABLE_CORE_PROFILE_STAMP := $(PORTABLE_CORE_DIR)/.portable-core-profile
+$(PORTABLE_CORE_PROFILE_STAMP): $(BUILD_PROFILE_TOOL) FORCE
+	"$(PYTHON)" $(BUILD_PROFILE_TOOL) record --output "$(PORTABLE_CORE_DIR)/portable_core_profile.json" --section portable-core --compiler "$(CC)" --entry "PORTABLE_CORE_CFLAGS=$(PORTABLE_CORE_CFLAGS)" --stamp "$@" --stale-glob ".portable-core-profile"
+
+$(PORTABLE_CORE_DIR)/title_config.o: src/rt/title_config.c src/rt/title_config.h $(TITLE_CONFIG_HEADER) $(PORTABLE_CORE_PROFILE_STAMP)
 	$(CC) $(PORTABLE_CORE_CFLAGS) -I$(TITLE_CONFIG_DIR) $(DEPFLAGS) -c $< -o $@
 
 $(HLE_OBJS): $(BUILD_DIR)/%.o: src/rt/%.c $(HLE_HDRS) src/rt/audio_resample.h src/rt/osk_overlay.h src/rt/osk_text_entry.h src/rt/flash0_font.h src/rt/asset_index.h src/rt/archive_vfs.h src/rt/pgf_api.h src/rt/atrac3p_bridge.h src/rt/mp3_bridge.h src/rt/gpu_sdl3vk/ge_gpu.h src/rt/scripted_input.h src/rt/recomp.h $(RUNTIME_PROFILE_STAMP)
@@ -159,7 +177,7 @@ $(BUILD_DIR)/pgf_public.o: src/rt/pgf_public.c src/rt/pgf_api.h src/rt/recomp.h 
 
 runtime-objects: shader-verify $(RT_GE_O) $(RT_OBJS) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o
 
-$(PORTABLE_CORE_DIR)/%.o: src/rt/%.c src/rt/recomp.h
+$(PORTABLE_CORE_DIR)/%.o: src/rt/%.c src/rt/recomp.h $(PORTABLE_CORE_PROFILE_STAMP)
 	$(CC) $(PORTABLE_CORE_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 portable-core-objects: $(PORTABLE_CORE_OBJS)
@@ -182,18 +200,20 @@ $(FLIGHT_IDENTITY_STAMP):
 $(BUILD_DIR)/flight_recorder.o: src/rt/flight_recorder.c src/rt/recomp.h $(RUNTIME_PROFILE_STAMP) $(FLIGHT_IDENTITY_STAMP)
 	$(CC) $(CFLAGS) $(FLIGHT_IDENTITY_DEFS) $(DEPFLAGS) -c $< -o $@
 
-$(PORTABLE_CORE_DIR)/flight_recorder.o: src/rt/flight_recorder.c src/rt/recomp.h $(FLIGHT_IDENTITY_STAMP)
+$(PORTABLE_CORE_DIR)/flight_recorder.o: src/rt/flight_recorder.c src/rt/recomp.h $(FLIGHT_IDENTITY_STAMP) $(PORTABLE_CORE_PROFILE_STAMP)
 	$(CC) $(PORTABLE_CORE_CFLAGS) $(FLIGHT_IDENTITY_DEFS) $(DEPFLAGS) -c $< -o $@
 
 atrac3p-objects: $(ATRAC3P_OBJS)
 
 # A clear player-target failure when no usable SDK resolved (see the Windows
-# branch above). On Linux the Vulkan loader is a system library, so the check is
+# branch above), or when an explicit VULKAN_SDK, which skips discovery, is
+# unusable. On Linux the Vulkan loader is a system library, so the check is
 # an empty recipe and the player links -lvulkan directly.
 .PHONY: player-vulkan-check
 ifeq ($(OS),Windows_NT)
 player-vulkan-check:
 	$(if $(strip $(VULKAN_SDK)),,$(error No usable Vulkan SDK found; set VULKAN_SDK to the SDK root (e.g. mingw32-make player VULKAN_SDK=C:/path/to/VulkanSDK/<version>) or install a current SDK))
+	@"$(PYTHON)" -c "import sys; sys.path.insert(0, 'tools'); from vulkan_sdk import vulkan_sdk_build_error; sys.exit(vulkan_sdk_build_error(sys.argv[1]) or None)" "$(VULKAN_SDK)"
 else
 player-vulkan-check: ;
 endif
@@ -223,28 +243,34 @@ LIBCHDR_INC := -I$(LIBCHDR_DIR)/include
 LIBCHDR_CFLAGS := -std=c99 -O2 $(LIBCHDR_INC) -I$(LIBCHDR_DIR)/deps/lzma-26.02/include \
 	-I$(LIBCHDR_DIR)/deps/miniz-3.1.2 -I$(LIBCHDR_DIR)/deps/zstd-1.5.7 \
 	-DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_STDIO -DMINIZ_NO_TIME
+ifneq ($(strip $(REPRODUCIBLE_COMPILE_FLAG)),)
+LIBCHDR_CFLAGS += $(REPRODUCIBLE_COMPILE_FLAG)
+endif
 # The CHD backend over libchdr, compiled into the programs that read CHD.
 PLAYER_CHD_SRCS := src/core/nk_disc_chd.c
+LIBCHDR_PUBLIC_HDRS := $(wildcard $(LIBCHDR_DIR)/include/libchdr/*.h)
 
 $(LIBCHDR_OBJ_DIR):
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(LIBCHDR_OBJ_DIR)').mkdir(parents=True, exist_ok=True)"
 
-# One object per source, from each folder libchdr keeps its sources in.
+# One object per source, from each folder libchdr keeps its sources in. Each records the headers
+# it read (DEPFLAGS, included through DEP_FILES), so a header-only re-pin or local delta rebuilds
+# the archive. The programs that compile nk_disc_chd.c against libchdr's public headers list them.
 $(LIBCHDR_OBJ_DIR)/%.o: $(LIBCHDR_DIR)/src/%.c | $(LIBCHDR_OBJ_DIR)
-	$(CC) $(LIBCHDR_CFLAGS) -c $< -o $@
+	$(CC) $(LIBCHDR_CFLAGS) $(DEPFLAGS) -c $< -o $@
 $(LIBCHDR_OBJ_DIR)/%.o: $(LIBCHDR_DIR)/deps/lzma-26.02/src/%.c | $(LIBCHDR_OBJ_DIR)
-	$(CC) $(LIBCHDR_CFLAGS) -c $< -o $@
+	$(CC) $(LIBCHDR_CFLAGS) $(DEPFLAGS) -c $< -o $@
 $(LIBCHDR_OBJ_DIR)/%.o: $(LIBCHDR_DIR)/deps/miniz-3.1.2/%.c | $(LIBCHDR_OBJ_DIR)
-	$(CC) $(LIBCHDR_CFLAGS) -c $< -o $@
+	$(CC) $(LIBCHDR_CFLAGS) $(DEPFLAGS) -c $< -o $@
 $(LIBCHDR_OBJ_DIR)/%.o: $(LIBCHDR_DIR)/deps/zstd-1.5.7/%.c | $(LIBCHDR_OBJ_DIR)
-	$(CC) $(LIBCHDR_CFLAGS) -c $< -o $@
+	$(CC) $(LIBCHDR_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(LIBCHDR_LIB): $(LIBCHDR_OBJS)
 	$(AR) rcs $@ $(LIBCHDR_OBJS)
 
 PLAYER_EXE ?= $(BUILD_ROOT)/nakagawa_player$(EXE_EXT)
 PLAYER_UI_TEST_EXE ?= $(BUILD_ROOT)/nakagawa_player_ui_test$(EXE_EXT)
-PLAYER_CORE_SOURCES := src/core/nk_shared_helpers.c src/core/nk_font.c src/rt/pgf_public.c src/rt/texrepl.c src/core/nk_pgf_host.c src/core/nk_iso.c src/core/nk_library.c src/core/nk_launch.c src/core/nk_title_manifest.c src/core/nk_xb.c src/core/nk_input_profile.c src/core/nk_json.c src/core/nk_psp_crypto.c src/core/nk_psp_keystore.c src/core/nk_psp_builtin_keys.c src/core/nk_psp_aes.c src/core/nk_psp_sha1.c src/core/nk_psp_ec.c src/core/nk_psp_kirk.c src/core/nk_psp_prx.c src/core/nk_psp_kle.c src/core/nk_psp_inflate.c src/core/nk_psp_container.c src/core/nk_psp_amctrl.c src/core/nk_psp_lzrc.c src/core/nk_psp_npumdimg.c src/core/nk_pbp_homebrew.c src/core/nk_disc_expand.c src/core/nk_disc_verify.c src/core/nk_zip.c src/core/nk_steam_shortcuts.c src/core/nk_data_migrate.c src/core/generated/nk_title_catalog.c
+PLAYER_CORE_SOURCES := src/core/nk_shared_helpers.c src/core/nk_font.c src/rt/pgf_public.c src/rt/texrepl.c src/core/nk_pgf_host.c src/core/nk_iso.c src/core/nk_library.c src/core/nk_launch.c src/core/nk_title_manifest.c src/core/nk_xb.c src/core/nk_input_profile.c src/core/nk_json.c src/core/nk_cheats.c src/core/nk_psp_crypto.c src/core/nk_psp_keystore.c src/core/nk_psp_builtin_keys.c src/core/nk_psp_aes.c src/core/nk_psp_sha1.c src/core/nk_psp_ec.c src/core/nk_psp_kirk.c src/core/nk_psp_prx.c src/core/nk_psp_kle.c src/core/nk_psp_inflate.c src/core/nk_psp_container.c src/core/nk_psp_amctrl.c src/core/nk_psp_lzrc.c src/core/nk_psp_npumdimg.c src/core/nk_pbp_homebrew.c src/core/nk_disc_expand.c src/core/nk_disc_verify.c src/core/nk_zip.c src/core/nk_steam_shortcuts.c src/core/nk_data_migrate.c src/core/generated/nk_title_catalog.c
 PLAYER_CORE_SRCS := $(PLAYER_CORE_SOURCES) $(PLAYER_PLATFORM_SRC)
 PLAYER_NK_UI_SRCS := $(NK_UI_CORE_SRCS) $(NK_UI_EDGE_SRCS) src/ui/backend/nk_ui_sdlr.c $(NK_UI_PLAYER_C5_SRCS) $(NK_UI_PLAYER_HOST_SRCS)
 # The player's About page shows "v<version> (MM-DD-YYYY)" (the version itself is
@@ -252,9 +278,17 @@ PLAYER_NK_UI_SRCS := $(NK_UI_CORE_SRCS) $(NK_UI_EDGE_SRCS) src/ui/backend/nk_ui_
 # SOURCE_DATE_EPOCH when the build sets it, else the source commit's time, so
 # two builds of one commit show the same date; a tree without git shows
 # "dev build". Only the player's compile sees these defines.
-NK_PLAYER_BUILD_EPOCH := $(or $(SR_SOURCE_DATE_EPOCH),$(strip $(shell "$(PYTHON)" -c "import shutil, subprocess, sys; exe = shutil.which(sys.argv[1]); out = subprocess.run([exe, 'log', '-1', '--format=%ct'], capture_output=True, text=True).stdout.strip() if exe else ''; print(out if out.isdigit() else '')" "$(GIT)")))
-NK_PLAYER_BUILD_COMMIT := $(shell "$(PYTHON)" -c "import sys; print(sys.argv[1][:7])" "$(SR_SOURCE_COMMIT)")
+# One interpreter start yields both: the date (a "-" placeholder when there is none) and then the
+# short commit.
+NK_PLAYER_IDENTITY := $(shell "$(PYTHON)" -c "import shutil, subprocess, sys; epoch, commit, git = sys.argv[1:4]; exe = None if epoch else shutil.which(git); out = subprocess.run([exe, 'log', '-1', '--format=%ct'], capture_output=True, text=True).stdout.strip() if exe else ''; print(epoch or (out if out.isdigit() else '-'), commit[:7])" "$(SR_SOURCE_DATE_EPOCH)" "$(SR_SOURCE_COMMIT)" "$(GIT)")
+NK_PLAYER_BUILD_EPOCH := $(filter-out -,$(firstword $(NK_PLAYER_IDENTITY)))
+NK_PLAYER_BUILD_COMMIT := $(wordlist 2,$(words $(NK_PLAYER_IDENTITY)),$(NK_PLAYER_IDENTITY))
 NK_PLAYER_IDENTITY_DEFS := $(if $(NK_PLAYER_BUILD_EPOCH),-DNK_PLAYER_BUILD_EPOCH=$(NK_PLAYER_BUILD_EPOCH)LL,) $(if $(strip $(NK_PLAYER_BUILD_COMMIT)),-DNK_PLAYER_BUILD_COMMIT=\"$(strip $(NK_PLAYER_BUILD_COMMIT))\",)
+# The player and its UI test compile those defines in, so a stamp named after them makes both
+# relink when the commit or the date changes, as FLIGHT_IDENTITY_STAMP does for the recorder.
+PLAYER_IDENTITY_STAMP := $(BUILD_ROOT)/.player-identity-$(or $(subst $() ,_,$(strip $(NK_PLAYER_BUILD_COMMIT))),none)-$(or $(NK_PLAYER_BUILD_EPOCH),none)
+$(PLAYER_IDENTITY_STAMP):
+	@"$(PYTHON)" -c "from pathlib import Path; p = Path(r'$@'); p.parent.mkdir(parents=True, exist_ok=True); [s.unlink() for s in p.parent.glob('.player-identity-*') if s != p]; p.touch()"
 PLAYER_NK_UI_DEFS = -DNK_UI_WITH_SDL -DNK_UI_WITH_SDL3 $(if $(filter yes,$(SDL3_TTF_AVAILABLE)),-DNK_UI_WITH_SDL_TTF,) $(NK_PLAYER_IDENTITY_DEFS)
 # Check for updates verifies a minisign signature over each release's checksum file
 # (src/player/update_check.h) with nk_minisign_verify (src/core/nk_sig.c) on the
@@ -297,7 +331,7 @@ endif
 
 $(PLAYER_EXE): | player-vulkan-check sdl3-check
 
-$(PLAYER_EXE): $(PLAYER_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE)) $(PLAYER_ICON_OBJ)
+$(PLAYER_EXE): $(PLAYER_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) $(LIBCHDR_PUBLIC_HDRS) $(PLAYER_IDENTITY_STAMP) src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE)) $(PLAYER_ICON_OBJ)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) $(RUNTIME_OPT) -Wall -Wextra $(PLAYER_NK_UI_DEFS) $(NK_UPDATE_KEY_DEFS) $(PLAYER_INCLUDES) $(LDFLAGS) $(PLAYER_VULKAN_LIB) $(PLAYER_GUI_LDFLAGS) $(PLAYER_CHD_SRCS) $(LIBCHDR_INC) $(PLAYER_SRCS) $(PLAYER_ICON_OBJ) -lSDL3 $(LIBCHDR_LIB) $(PLAYER_EXTRA_LIBS) $(REPRODUCIBLE_LINK_FLAG) -o $@
 
@@ -310,7 +344,7 @@ player: $(PLAYER_EXE)
 
 $(PLAYER_UI_TEST_EXE): | player-vulkan-check sdl3-check
 
-$(PLAYER_UI_TEST_EXE): $(PLAYER_SRCS) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) src/player/player_ui_test.h src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE))
+$(PLAYER_UI_TEST_EXE): $(PLAYER_SRCS) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) $(LIBCHDR_PUBLIC_HDRS) $(PLAYER_IDENTITY_STAMP) src/player/player_ui_test.h src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE))
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) $(RUNTIME_OPT) -Wall -Wextra -DNK_PLAYER_UI_REGRESSION_TEST $(PLAYER_NK_UI_DEFS) $(NK_UPDATE_KEY_DEFS) $(PLAYER_INCLUDES) $(LDFLAGS) $(PLAYER_VULKAN_LIB) $(PLAYER_SRCS) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_INC) $(LIBCHDR_LIB) -lSDL3 $(PLAYER_EXTRA_LIBS) $(REPRODUCIBLE_LINK_FLAG) -o $@
 
@@ -344,4 +378,4 @@ LIBRARY_OBJS = $(patsubst %.c,%.o,$(wildcard $(BUILD_DIR)/nk_lib_*.c))
 # refused when it contains whitespace, so each object stays one argument.
 LINK_OBJECTS = $(BUILD_DIR)/$(GAME_NAME)_recomp.o $(CHUNK_OBJS) $(LIBRARY_OBJS) $(RT_GE_O) $(RT_OBJS) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o $(TITLE_ICON_OBJ) $(TITLE_ANDROID_OBJ)
 LINK_OBJECTS_RSP = $(BUILD_DIR)/link-objects.rsp
-DEP_FILES = $(patsubst %.o,%.d,$(RT_GE_O) $(RT_OBJS) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o $(PORTABLE_CORE_OBJS) $(CHUNK_OBJS) $(LIBRARY_OBJS) $(BUILD_DIR)/$(GAME_NAME)_recomp.o $(BUILD_DIR)/vfpu_fuzz.o)
+DEP_FILES = $(patsubst %.o,%.d,$(RT_GE_O) $(RT_OBJS) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o $(PORTABLE_CORE_OBJS) $(LIBCHDR_OBJS) $(CHUNK_OBJS) $(LIBRARY_OBJS) $(BUILD_DIR)/$(GAME_NAME)_recomp.o $(BUILD_DIR)/vfpu_fuzz.o)

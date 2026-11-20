@@ -145,10 +145,20 @@ void rc_preparse_alloc_memrefs(rc_memrefs_t* memrefs, rc_preparse_state_t* prepa
   }
 }
 
+/* Nakagawa LOCAL DELTA (2026-11-17): a list's capacity is a uint16_t. Upstream let this return
+ * 65536 or more, which the caller truncated (65536 became 0), so the parse then placed the
+ * remaining memrefs in the trigger's buffer beyond the size the preparse measured (a heap
+ * overflow). Never return more than one list can hold; rc_preparse_reserve_memrefs chains as
+ * many lists as it needs. */
+#define RC_MEMREF_LIST_MAX_CAPACITY 0xFFFFu
+
 static uint32_t rc_preparse_array_size(uint32_t needed, uint32_t minimum)
 {
-  while (minimum < needed)
+  while (minimum < needed && minimum < RC_MEMREF_LIST_MAX_CAPACITY)
     minimum <<= 1;
+
+  if (minimum > RC_MEMREF_LIST_MAX_CAPACITY)
+    minimum = RC_MEMREF_LIST_MAX_CAPACITY;
 
   return minimum;
 }
@@ -172,15 +182,21 @@ void rc_preparse_reserve_memrefs(rc_preparse_state_t* preparse, rc_memrefs_t* me
     }
 
     available = memref_list->capacity - memref_list->count;
-    if (available < num_memrefs) {
+    /* Nakagawa LOCAL DELTA (2026-11-17): add lists until they hold every memref, each at the
+     * end of the chain, so more than one list's worth is never truncated. */
+    while (memref_list->next)
+      memref_list = memref_list->next;
+    while (available < num_memrefs) {
       rc_memref_list_t* new_memref_list = (rc_memref_list_t*)calloc(1, sizeof(rc_memref_list_t));
       if (!new_memref_list)
         return;
 
-      new_memref_list->capacity = rc_preparse_array_size(num_memrefs - available, 16);
+      new_memref_list->capacity = (uint16_t)rc_preparse_array_size(num_memrefs - available, 16);
       new_memref_list->items = (rc_memref_t*)malloc(new_memref_list->capacity * sizeof(rc_memref_t));
       new_memref_list->allocated = 1;
       memref_list->next = new_memref_list;
+      memref_list = new_memref_list;
+      available += new_memref_list->capacity;
     }
   }
 
@@ -194,15 +210,20 @@ void rc_preparse_reserve_memrefs(rc_preparse_state_t* preparse, rc_memrefs_t* me
     }
 
     available = modified_memref_list->capacity - modified_memref_list->count;
-    if (available < num_modified_memrefs) {
+    /* Nakagawa LOCAL DELTA (2026-11-17): as for the memref lists above. */
+    while (modified_memref_list->next)
+      modified_memref_list = modified_memref_list->next;
+    while (available < num_modified_memrefs) {
       rc_modified_memref_list_t* new_modified_memref_list = (rc_modified_memref_list_t*)calloc(1, sizeof(rc_modified_memref_list_t));
       if (!new_modified_memref_list)
         return;
 
-      new_modified_memref_list->capacity = rc_preparse_array_size(num_modified_memrefs - available, 8);
+      new_modified_memref_list->capacity = (uint16_t)rc_preparse_array_size(num_modified_memrefs - available, 8);
       new_modified_memref_list->items = (rc_modified_memref_t*)malloc(new_modified_memref_list->capacity * sizeof(rc_modified_memref_t));
       new_modified_memref_list->allocated = 1;
       modified_memref_list->next = new_modified_memref_list;
+      modified_memref_list = new_modified_memref_list;
+      available += new_modified_memref_list->capacity;
     }
   }
 

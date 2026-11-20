@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from typing import ClassVar, TypedDict, cast
 from unittest.mock import patch
 
@@ -352,7 +353,8 @@ def create_test_iso_with_module_tree(
         for name, _child_path, is_directory in sorted(
             children, key=lambda child: child[0].casefold()
         ):
-            encoded = name.encode("latin-1") if is_directory else name.encode("latin-1") + b";1"
+            encoded = name.encode("latin-1", "surrogateescape") if is_directory else \
+                name.encode("latin-1", "surrogateescape") + b";1"
             placeholder.append(_dir_record(encoded, 1, sector_size, is_directory))
         directory_sizes[directory] = len(pack_records(placeholder))
 
@@ -384,7 +386,8 @@ def create_test_iso_with_module_tree(
         for name, child_path, is_directory in sorted(
             children, key=lambda child: child[0].casefold()
         ):
-            encoded = name.encode("latin-1") if is_directory else name.encode("latin-1") + b";1"
+            encoded = name.encode("latin-1", "surrogateescape") if is_directory else \
+                name.encode("latin-1", "surrogateescape") + b";1"
             records.append(_dir_record(
                 encoded,
                 directory_lbas[child_path] if is_directory else file_lbas[child_path],
@@ -628,6 +631,9 @@ class IsoParityTests(unittest.TestCase):
         # launch behaviour, not compiler freshness; each test still receives
         # its own input/output directory below.
         cls._build_dir = Path(tempfile.mkdtemp(prefix="nk_parity_build_"))
+        # A class cleanup runs even when a compile failure below raises out of
+        # setUpClass, which tearDownClass does not.
+        cls.addClassCleanup(shutil.rmtree, cls._build_dir, True)
         cls.harness_c = cls._build_dir / "parity_harness.c"
         executable_name = "parity_harness.exe" if sys.platform == "win32" else "parity_harness"
         cls.harness_exe = cls._build_dir / executable_name
@@ -635,7 +641,6 @@ class IsoParityTests(unittest.TestCase):
             "parity_path_limit.exe" if sys.platform == "win32" else "parity_path_limit"
         )
 
-        has_launch = (ROOT / "src" / "core" / "nk_launch.c").is_file()
         core_srcs = [
             ROOT / "src" / "core" / "nk_shared_helpers.c",
             ROOT / "src" / "core" / "nk_iso.c",
@@ -643,21 +648,21 @@ class IsoParityTests(unittest.TestCase):
             ROOT / "src" / "core" / "nk_title_manifest.c",
             ROOT / "src" / "core" / "nk_json.c",
             ROOT / "src" / "core" / "generated" / "nk_title_catalog.c",
-        ]
-        if has_launch:
-            core_srcs.append(ROOT / "src" / "core" / "nk_launch.c")
+            # The launch modes are required: a missing nk_launch.c fails the build.
+            ROOT / "src" / "core" / "nk_launch.c",
             # nk_launch.c starts a homebrew program from its Memory Stick folder
             # (nk_pbp_homebrew.c), whose package reader reports through the PSP crypto
             # engine (nk_psp_fail), which reads the key store.
-            core_srcs.extend(ROOT / "src" / "core" / name
-                             for name in ("nk_pbp_homebrew.c", "nk_psp_crypto.c",
-                                          "nk_psp_keystore.c", "nk_psp_builtin_keys.c"))
+            *(ROOT / "src" / "core" / name
+              for name in ("nk_pbp_homebrew.c", "nk_psp_crypto.c",
+                           "nk_psp_keystore.c", "nk_psp_builtin_keys.c")),
+        ]
         if sys.platform == "win32":
             core_srcs.append(ROOT / "src" / "core" / "nk_platform_win32.c")
         else:
             core_srcs.append(ROOT / "src" / "core" / "nk_platform_posix.c")
 
-        harness_code = f"""#include <ctype.h>
+        harness_code = """#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -666,72 +671,70 @@ class IsoParityTests(unittest.TestCase):
 #include "../rt/prx_loader.h"
 #include "nk_library.h"
 #include "nk_title_manifest.h"
-#if {1 if has_launch else 0}
 #include "nk_launch.h"
-#endif
 
 static bool print_module_path(const char *path, const NkIsoDirEntry *entry,
-                              void *userdata) {{
+                              void *userdata) {
     (void)userdata;
     size_t length = strlen(entry->name);
     if (length >= 4 &&
         tolower((unsigned char)entry->name[length - 4]) == '.' &&
         tolower((unsigned char)entry->name[length - 3]) == 'p' &&
         tolower((unsigned char)entry->name[length - 2]) == 'r' &&
-        tolower((unsigned char)entry->name[length - 1]) == 'x') {{
+        tolower((unsigned char)entry->name[length - 1]) == 'x') {
         printf("MODULE_PATH:%s\\n", path);
-    }} else if (length >= 4 &&
+    } else if (length >= 4 &&
         tolower((unsigned char)entry->name[length - 4]) == '.' &&
         tolower((unsigned char)entry->name[length - 3]) == 'e' &&
         tolower((unsigned char)entry->name[length - 2]) == 'l' &&
-        tolower((unsigned char)entry->name[length - 1]) == 'f') {{
+        tolower((unsigned char)entry->name[length - 1]) == 'f') {
         printf("MODULE_PATH:%s\\n", path);
-    }}
+    }
     return true;
-}}
+}
 
-static bool harness_file_read(void *context, uint64_t offset, void *dst, uint32_t bytes) {{
+static bool harness_file_read(void *context, uint64_t offset, void *dst, uint32_t bytes) {
     FILE *image = (FILE *)context;
     if (offset > 0x7fffffffULL || fseek(image, (long)offset, SEEK_SET) != 0) return false;
     return fread(dst, 1, bytes, image) == bytes;
-}}
+}
 
-int main(int argc, char **argv) {{
+int main(int argc, char **argv) {
     if (argc < 2) return 1;
     const char *mode = argv[1];
 
-    if (strcmp(mode, "elf_layout") == 0) {{
+    if (strcmp(mode, "elf_layout") == 0) {
         /* elf_layout <file> <module 0|1>: the shared PSP ELF32/MIPS layout rule. */
         if (argc < 4) return 1;
         FILE *image = fopen(argv[2], "rb");
         if (!image) return 2;
-        if (fseek(image, 0, SEEK_END) != 0) {{ fclose(image); return 2; }}
+        if (fseek(image, 0, SEEK_END) != 0) { fclose(image); return 2; }
         long image_size = ftell(image);
-        if (image_size < 0) {{ fclose(image); return 2; }}
+        if (image_size < 0) { fclose(image); return 2; }
         const char *rule = nk_elf32_mips_layout_violation(
             harness_file_read, image, (uint64_t)image_size, strcmp(argv[3], "1") == 0);
         fclose(image);
         printf("ELF_LAYOUT:%s\\n", rule ? rule : "USABLE");
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "start_entry") == 0) {{
+    if (strcmp(mode, "start_entry") == 0) {
         /* start_entry <file>: where the PSP starts this executable (sr_prx_start_entry in src/rt/prx_loader.h). */
         if (argc < 3) return 1;
         FILE *image = fopen(argv[2], "rb");
         if (!image) return 2;
-        if (fseek(image, 0, SEEK_END) != 0) {{ fclose(image); return 2; }}
+        if (fseek(image, 0, SEEK_END) != 0) { fclose(image); return 2; }
         long image_size = ftell(image);
-        if (image_size < 0) {{ fclose(image); return 2; }}
+        if (image_size < 0) { fclose(image); return 2; }
         uint32_t entry = 0;
         const char *rule = sr_prx_start_entry(harness_file_read, image, (uint64_t)image_size,
                                               &entry);
         fclose(image);
         printf("START_ENTRY:%s:%08x\\n", rule ? rule : "OK", entry);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "module_walk") == 0) {{
+    if (strcmp(mode, "module_walk") == 0) {
         if (argc < 3) return 1;
         NkIsoReader *reader = nk_iso_reader_open(argv[2]);
         if (!reader) return 2;
@@ -740,19 +743,19 @@ int main(int argc, char **argv) {{
         printf("MODULE_WALK_STATUS:%d\\n", (int)status);
         nk_iso_reader_close(reader);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "inspect") == 0) {{
+    if (strcmp(mode, "inspect") == 0) {
         if (argc < 3) return 1;
         const char *iso_path = argv[2];
         NkIsoMetadata meta;
         NkResult res = nk_iso_inspect(iso_path, &meta);
-        if (res != NK_OK) {{
+        if (res != NK_OK) {
             printf("RESULT:ERROR:%d:%s\\n", (int)res, meta.error_message);
             printf("BOUNDARY:%s\\n", meta.boundary_code);
             printf("MESSAGE:%s\\n", meta.error_message);
             return 0;
-        }}
+        }
         printf("RESULT:OK\\n");
         printf("DISC_ID:%s\\n", meta.disc_id);
         printf("SFO_DISC_ID:%s\\n", meta.sfo_disc_id);
@@ -771,9 +774,9 @@ int main(int argc, char **argv) {{
         printf("MATCHED_ID:%s\\n", meta.matched_title_id[0] ? meta.matched_title_id : "NONE");
         printf("STATUS:%d\\n", (int)meta.status);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "library_test") == 0) {{
+    if (strcmp(mode, "library_test") == 0) {
         if (argc < 3) return 1;
         const char *lib_json = argv[2];
         static NkLibrary lib;  /* too large for the stack (NK_MAX_GAMES) */
@@ -823,28 +826,28 @@ int main(int argc, char **argv) {{
 
         printf("LIBRARY_TEST_PASSED\\n");
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "experimental_profile") == 0) {{
+    if (strcmp(mode, "experimental_profile") == 0) {
         if (argc < 4) return 1;
         const char *iso_path = argv[2];
         const char *user_data_root = argv[3];
         NkIsoMetadata meta;
         NkResult inspect_result = nk_iso_inspect(iso_path, &meta);
-        if (inspect_result != NK_OK) {{
+        if (inspect_result != NK_OK) {
             printf("PROFILE_RESULT:ERROR:DISC:%s\\n", meta.error_message);
             return 0;
-        }}
-        char profile_id[64] = {{0}};
-        char error[256] = {{0}};
+        }
+        char profile_id[64] = {0};
+        char error[256] = {0};
         bool ok = nk_title_manifest_write_experimental_profile(
             iso_path, meta.param_sfo_parsed, meta.disc_id, meta.title_name,
             meta.executables.selected_path, user_data_root, profile_id,
             sizeof(profile_id), error, sizeof(error));
-        if (!ok) {{
+        if (!ok) {
             printf("PROFILE_RESULT:ERROR:%s\\n", error);
             return 0;
-        }}
+        }
         printf("PROFILE_RESULT:OK\\n");
         printf("PROFILE_ID:%s\\n", profile_id);
         printf("PACKAGE_AVAILABLE:%d\\n",
@@ -861,10 +864,9 @@ int main(int argc, char **argv) {{
                launch_result == NK_OK ? "OK" : "REFUSED");
         printf("LAUNCH_REASON:%s\\n", session.last_error);
         return 0;
-    }}
+    }
 
-#if {1 if has_launch else 0}
-    if (strcmp(mode, "launch_test") == 0) {{
+    if (strcmp(mode, "launch_test") == 0) {
         if (argc < 4) return 1;
         const char *repo_root = argv[2];
         const char *iso_path = argv[3];
@@ -880,19 +882,19 @@ int main(int argc, char **argv) {{
 
         NkLaunchSession session;
         NkResult res = nk_launch_prepare_session(&session, &g, repo_root);
-        if (res != NK_OK) {{
+        if (res != NK_OK) {
             printf("LAUNCH_PREPARE_ERROR:%d:%s\\n", (int)res, session.last_error);
             return 0;
-        }}
+        }
         printf("LAUNCH_PREPARE_OK\\n");
         printf("EXE:%s\\n", session.executable_path);
         printf("ISO:%s\\n", session.iso_path);
         printf("BASE:0x%08x\\n", session.base_address);
         printf("ENTRY:0x%08x\\n", session.entry_point);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "boot_roundtrip") == 0) {{
+    if (strcmp(mode, "boot_roundtrip") == 0) {
         if (argc < 5) return 1;
         static NkLibrary lib;  /* too large for the stack (NK_MAX_GAMES) */
         NkResult load_result = nk_library_load(&lib, argv[2]);
@@ -917,9 +919,9 @@ int main(int argc, char **argv) {{
         printf("SESSION_BOOT_MATCH:%d\\n",
                strcmp(entry->boot_executable, session.boot_executable) == 0);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "boot_session_unterminated") == 0) {{
+    if (strcmp(mode, "boot_session_unterminated") == 0) {
         NkGameEntry game;
         NkLaunchSession session;
         memset(&game, 0, sizeof(game));
@@ -931,10 +933,9 @@ int main(int argc, char **argv) {{
         printf("SESSION_RESULT:%d\\n", (int)result);
         printf("ERROR:%s\\n", session.last_error);
         return 0;
-    }}
-#endif
+    }
 
-    if (strcmp(mode, "boot_save_unterminated") == 0) {{
+    if (strcmp(mode, "boot_save_unterminated") == 0) {
         if (argc < 3) return 1;
         static NkLibrary lib;  /* too large for the stack (NK_MAX_GAMES) */
         NkGameEntry game;
@@ -946,16 +947,16 @@ int main(int argc, char **argv) {{
         NkResult result = nk_library_save(&lib, argv[2]);
         printf("SAVE_RESULT:%d\\n", (int)result);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "reader_test") == 0) {{
+    if (strcmp(mode, "reader_test") == 0) {
         if (argc < 3) return 1;
         const char *iso_path = argv[2];
         NkIsoReader *reader = nk_iso_reader_open(iso_path);
-        if (!reader) {{
+        if (!reader) {
             printf("READER:OPEN_FAILED\\n");
             return 0;
-        }}
+        }
         printf("READER:OPEN_OK\\n");
         printf("VOLUME_ID:%s\\n", nk_iso_reader_volume_id(reader));
         printf("FILE_SIZE:%llu\\n", (unsigned long long)nk_iso_reader_file_size(reader));
@@ -987,46 +988,46 @@ int main(int argc, char **argv) {{
 
         nk_iso_reader_close(reader);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "lookup") == 0) {{
+    if (strcmp(mode, "lookup") == 0) {
         if (argc < 4) return 1;
         NkIsoReader *reader = nk_iso_reader_open(argv[2]);
-        if (!reader) {{
+        if (!reader) {
             printf("READER:OPEN_FAILED\\n");
             return 0;
-        }}
+        }
         uint32_t lba = 0, sz = 0;
         bool is_dir = false;
         int rc = nk_iso_reader_lookup(reader, argv[3], &lba, &sz, &is_dir);
         printf("LOOKUP:%d:%u:%u:%d\\n", rc, (unsigned)lba, (unsigned)sz, is_dir ? 1 : 0);
         nk_iso_reader_close(reader);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "entries") == 0) {{
+    if (strcmp(mode, "entries") == 0) {
         if (argc < 4) return 1;
         NkIsoReader *reader = nk_iso_reader_open(argv[2]);
-        if (!reader) {{
+        if (!reader) {
             printf("READER:OPEN_FAILED\\n");
             return 0;
-        }}
-        for (uint32_t index = 0;; index++) {{
+        }
+        for (uint32_t index = 0;; index++) {
             NkIsoDirEntry de;
             int rc = nk_iso_reader_list(reader, argv[3], index, &de);
-            if (rc != 1) {{
+            if (rc != 1) {
                 printf("END:%d\\n", rc);
                 break;
-            }}
+            }
             printf("ENTRY:%s:%u:%u:%d\\n", de.name, (unsigned)de.lba, (unsigned)de.size,
                    de.is_directory ? 1 : 0);
-        }}
+        }
         nk_iso_reader_close(reader);
         return 0;
-    }}
+    }
 
     return 2;
-}}
+}
 """
         cls.harness_c.write_text(harness_code, encoding="utf-8")
 
@@ -1057,13 +1058,6 @@ int main(int argc, char **argv) {{
 
     def tearDown(self) -> None:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        build_dir = getattr(cls, "_build_dir", None)
-        if build_dir is not None:
-            shutil.rmtree(build_dir, ignore_errors=True)
-        super().tearDownClass()
 
     def _run_native_inspect(self, iso_path: Path) -> dict[str, str]:
         cmd = [str(self.exe_path), "inspect", str(iso_path)]
@@ -1735,6 +1729,72 @@ int main(int argc, char **argv) {{
         )
         self.assertIsNotNone(output)
         self.assertEqual((output / "manifest-sdk.prx").read_bytes(), module_bytes)
+
+    def test_copy_optional_modules_keeps_only_the_modules_the_manifest_requires(self) -> None:
+        # The cache's modules/ persists between builds and the package ships every file in
+        # it, so a module an earlier manifest required and a leftover partial copy are
+        # removed before this build's copies (audit 2026-11-17).
+        iso_file = self.temp_dir / "current-modules.iso"
+        module_bytes = build_plain_mips_elf(0xFFA0)
+        create_test_iso_with_modules(
+            iso_file, build_plain_mips_elf(),
+            sysdir_modules={"libfont.prx": module_bytes},
+            usrdir_modules={},
+        )
+        cache = self.temp_dir / "persistent-module-package"
+        (cache / "modules").mkdir(parents=True)
+        (cache / "modules" / "earlier.prx").write_bytes(build_plain_mips_elf(0xFFB0))
+        (cache / "modules" / "libfont.prx.tmp").write_bytes(b"partial")
+        (cache / "modules" / "keep-dir").mkdir()
+        manifest = {"modules": [{"name": "libfont.prx", "role": "guest-prx", "required": True}]}
+        output = nk_cli._copy_optional_modules(iso_file, manifest, cache, None)
+        self.assertIsNotNone(output)
+        assert output is not None
+        self.assertEqual(
+            sorted(path.name for path in output.iterdir() if path.is_file()), ["libfont.prx"]
+        )
+        self.assertEqual((output / "libfont.prx").read_bytes(), module_bytes)
+
+    def test_a_disc_module_whose_copy_fails_leaves_no_partial_copy(self) -> None:
+        iso_file = self.temp_dir / "failed-module-copy.iso"
+        create_test_iso_with_modules(
+            iso_file, build_plain_mips_elf(),
+            sysdir_modules={"libfont.prx": build_plain_mips_elf(0xFFA0)},
+            usrdir_modules={},
+        )
+        cache = self.temp_dir / "failed-module-package"
+        manifest = {"modules": [{"name": "libfont.prx", "role": "guest-prx", "required": True}]}
+        # The copy was already opened for writing when the read fails (a disk error); the
+        # member is skipped, and the module is then refused as unavailable.
+        with patch.object(nk_cli, "_read_iso_extent",
+                          side_effect=OSError("synthetic read failure")):
+            with self.assertRaisesRegex(nk_cli.PackageBuildError, "is unavailable"):
+                nk_cli._copy_optional_modules(iso_file, manifest, cache, None)
+        self.assertEqual(sorted(path.name for path in (cache / "modules").iterdir()), [])
+        # A refusal of the copied bytes removes them too.
+        truncated_iso = self.temp_dir / "refused-module.iso"
+        create_test_iso_with_modules(
+            truncated_iso, build_plain_mips_elf(),
+            sysdir_modules={"libfont.prx": build_plain_mips_elf(0xFFA0)[:60]},
+            usrdir_modules={},
+        )
+        refused_cache = self.temp_dir / "refused-module-package"
+        with self.assertRaisesRegex(nk_cli.PackageBuildError, "not a usable plain MIPS ELF32"):
+            nk_cli._copy_optional_modules(truncated_iso, manifest, refused_cache, None)
+        self.assertEqual(sorted(path.name for path in (refused_cache / "modules").iterdir()), [])
+
+    def test_a_failed_executable_extraction_leaves_no_partial_copy(self) -> None:
+        iso_file = self.temp_dir / "short-read.iso"
+        create_test_iso_with_modules(
+            iso_file, build_plain_mips_elf(), sysdir_modules={}, usrdir_modules={},
+        )
+        destination = self.temp_dir / "short-read-package" / "selected.elf"
+        # The extent leaves the image part-way: the copy was already opened for writing.
+        with patch.object(nk_cli, "_read_iso_extent",
+                          side_effect=IsoInspectionError("synthetic out-of-bounds extent")):
+            with self.assertRaisesRegex(nk_cli.PackageBuildError, "synthetic out-of-bounds"):
+                nk_cli._extract_iso_executable(iso_file, "EBOOT.BIN", destination)
+        self.assertEqual(sorted(path.name for path in destination.parent.iterdir()), [])
 
     def test_one_module_name_in_two_disc_folders_gets_path_qualified_host_names(self) -> None:
         # A module is identified by its disc path. Two folders holding one file name
@@ -2435,32 +2495,22 @@ int main(int argc, char **argv) {{
             "OK", "MISSING", "UNSUPPORTED", "IN_PROGRESS",
         } for check in checks))
         by_code = {check["code"]: check for check in checks}
-        self.assertEqual(by_code["DATA_ROOT"]["status"], "MISSING")
-        self.assertIn("data folder", by_code["DATA_ROOT"]["message"].lower())
+        metadata = inspect_iso(iso_file)
+        assert metadata.matched_profile is not None
+        self.assertTrue(metadata.matched_profile.archive_relpath)
+        checkout_data = ROOT / metadata.matched_profile.archive_relpath
+        self.assertEqual(
+            by_code["DATA_ROOT"]["status"], "OK" if checkout_data.is_dir() else "MISSING"
+        )
         self.assertEqual(by_code["RUNTIME_PACKAGE"]["status"], "MISSING")
-        self.assertEqual(by_code["SYSTEM_FONTS"]["status"], "MISSING")
         self.assertEqual(by_code["AUDIO_OUTPUT"]["status"], "OK")
+        original_font_status = by_code["SYSTEM_FONTS"]["status"]
 
-        meta = inspect_iso(iso_file)
-        assert meta.matched_profile is not None
-        title_name = meta.matched_profile.game_name
-        package_dir = runtime_root / "build" / title_name
-        package_dir.mkdir(parents=True)
-        (package_dir / f"{title_name}.exe").write_bytes(b"synthetic executable")
-        (package_dir / f"{title_name}_image.bin").write_bytes(b"synthetic image")
-        data_root = runtime_root / "tests" / "fixtures" / "profile_zero"
-        data_root.mkdir(parents=True)
-        # The project fonts are one valid synthetic PGF per slot, built by the writer (no real font).
-        from pgf_writer import Glyph, build_pgf
-
-        def _glyph(code: int) -> Glyph:
-            return Glyph(code=code, width=2, height=2, samples=(1, 2, 3, 4), row_order=1)
-
-        font_dir = runtime_root / "font"
-        font_dir.mkdir()
-        (font_dir / "nkjpn.pgf").write_bytes(build_pgf([_glyph(0x41), _glyph(0x3042)], font_name="Nakagawa Test Japanese"))
-        (font_dir / "nkltn.pgf").write_bytes(build_pgf([_glyph(0x41), _glyph(0x61)], font_name="Nakagawa Test Latin"))
-        (font_dir / "nkkr.pgf").write_bytes(build_pgf([_glyph(0x41), _glyph(0xAC00)], font_name="Nakagawa Test Korean"))
+        staged_data = (
+            runtime_root / "games" / metadata.disc_id
+            / metadata.matched_profile.archive_relpath
+        )
+        staged_data.mkdir(parents=True)
         ready = subprocess.run(
             [sys.executable, str(ROOT / "tools" / "nk_cli.py"), "inspect",
              str(iso_file), "--json", "--root", str(runtime_root)],
@@ -2470,11 +2520,10 @@ int main(int argc, char **argv) {{
         ready_checks = {check["code"]: check for check in
                         json.loads(ready.stdout)["compatibility_preflight"]["checks"]}
         self.assertEqual(ready_checks["DATA_ROOT"]["status"], "OK")
-        self.assertEqual(ready_checks["RUNTIME_PACKAGE"]["status"], "OK")
-        # Project fonts only: every font is a stand-in, not the user's own (#1300).
-        self.assertEqual(ready_checks["SYSTEM_FONTS"]["status"], "SYNTHETIC")
+        self.assertEqual(ready_checks["RUNTIME_PACKAGE"]["status"], "MISSING")
+        self.assertEqual(ready_checks["SYSTEM_FONTS"]["status"], original_font_status)
 
-        data_root.rmdir()
+        shutil.rmtree(runtime_root / "games" / metadata.disc_id)
         extracted_data_root = (
             iso_file.parent / "EXTRACTED" / "PSP_GAME" / "USRDIR" / "tests" / "fixtures" / "profile_zero"
         )
@@ -2488,6 +2537,134 @@ int main(int argc, char **argv) {{
         extracted_checks = {check["code"]: check for check in
                             json.loads(extracted_ready.stdout)["compatibility_preflight"]["checks"]}
         self.assertEqual(extracted_checks["DATA_ROOT"]["status"], "OK")
+
+    def test_preflight_validates_runtime_package_in_the_per_title_packages_folder(self) -> None:
+        iso_file = self.temp_dir / "package-cache-preflight.iso"
+        create_test_iso(iso_file, disc_id="TEST00001", title="Synthetic Test Title")
+        metadata = inspect_iso(iso_file)
+        self.assertIsNotNone(metadata.matched_profile)
+        runtime_root = self.temp_dir / "package-cache-user-data"
+        package_dir = runtime_root / "packages" / metadata.disc_id
+        package_dir.mkdir(parents=True)
+
+        with patch.object(iso_inspect, "package_cache", create=True) as package_cache:
+            package_cache.validate_package_cache.return_value = (True, "")
+            report = inspect_compatibility_preflight(
+                iso_file, metadata=metadata, runtime_root=runtime_root
+            )
+
+        runtime_check = next(
+            check for check in report["checks"] if check["code"] == "RUNTIME_PACKAGE"
+        )
+        self.assertEqual(runtime_check["status"], "OK")
+        self.assertEqual(
+            Path(package_cache.validate_package_cache.call_args.args[0]), package_dir
+        )
+
+    def test_boot_selection_and_preflight_share_their_on_disc_facts(self) -> None:
+        iso_file = self.temp_dir / "shared-boot-facts.iso"
+        create_test_iso_with_executables(
+            iso_file, b"\0" * 64, build_plain_mips_elf(),
+            disc_id="TEST00001", title="Synthetic Test Title",
+        )
+        metadata = inspect_iso(iso_file)
+        self.assertEqual(iso_inspect.select_boot_executable_source(iso_file), "BOOT.BIN")
+        facts_helper = getattr(iso_inspect, "_boot_executable_facts", None)
+        self.assertIsNotNone(facts_helper, "boot facts must have one shared implementation")
+
+        with patch.object(iso_inspect, "_boot_executable_facts", wraps=facts_helper) as shared:
+            inspect_compatibility_preflight(
+                iso_file, metadata=metadata, runtime_root=self.temp_dir / "shared-facts-root"
+            )
+            iso_inspect.select_boot_executable_source(iso_file)
+
+        self.assertEqual(shared.call_count, 2)
+
+    def test_preflight_finds_data_root_in_the_staged_title_folder(self) -> None:
+        iso_file = self.temp_dir / "staged-data-root-preflight.iso"
+        create_test_iso(iso_file, disc_id="TEST00001", title="Synthetic Test Title")
+        metadata = inspect_iso(iso_file)
+        assert metadata.matched_profile is not None
+        self.assertTrue(metadata.matched_profile.archive_relpath)
+        runtime_root = self.temp_dir / "staged-data-root-user-data"
+        project_root = self.temp_dir / "staged-data-root-project"
+        project_root.mkdir()
+        staged_data = (
+            runtime_root / "games" / metadata.disc_id
+            / metadata.matched_profile.archive_relpath
+        )
+        staged_data.mkdir(parents=True)
+
+        report = inspect_compatibility_preflight(
+            iso_file, metadata=metadata, runtime_root=runtime_root, project_root=project_root
+        )
+
+        data_check = next(check for check in report["checks"] if check["code"] == "DATA_ROOT")
+        self.assertEqual(data_check["status"], "OK")
+
+    def test_preflight_uses_the_project_checkout_for_project_fonts(self) -> None:
+        iso_file = self.temp_dir / "project-font-preflight.iso"
+        create_test_iso(iso_file, disc_id="TEST00001", title="Synthetic Test Title")
+        metadata = inspect_iso(iso_file)
+        runtime_root = self.temp_dir / "project-font-user-data"
+        project_root = self.temp_dir / "synthetic-project-root"
+        font_dir = project_root / "font"
+        font_dir.mkdir(parents=True)
+
+        from pgf_writer import Glyph, build_pgf
+
+        def glyph(code: int) -> Glyph:
+            return Glyph(code=code, width=2, height=2, samples=(1, 2, 3, 4), row_order=1)
+
+        (font_dir / "nkjpn.pgf").write_bytes(
+            build_pgf([glyph(0x41), glyph(0x3042)], font_name="Synthetic Japanese")
+        )
+        (font_dir / "nkltn.pgf").write_bytes(
+            build_pgf([glyph(0x41), glyph(0x61)], font_name="Synthetic Latin")
+        )
+        (font_dir / "nkkr.pgf").write_bytes(
+            build_pgf([glyph(0x41), glyph(0xAC00)], font_name="Synthetic Korean")
+        )
+
+        with patch.object(iso_inspect, "PROJECT_ROOT", project_root, create=True):
+            report = inspect_compatibility_preflight(
+                iso_file, metadata=metadata, runtime_root=runtime_root
+            )
+
+        fonts_check = next(
+            check for check in report["checks"] if check["code"] == "SYSTEM_FONTS"
+        )
+        self.assertEqual(fonts_check["status"], "SYNTHETIC")
+
+    def test_concurrent_experimental_profile_writes_use_distinct_atomic_temporaries(self) -> None:
+        from nk_core import package_cache
+
+        iso_file = self.temp_dir / "concurrent-experimental-profile.iso"
+        create_test_iso_with_executables(
+            iso_file, build_plain_mips_elf(), disc_id="PROTO1234567",
+            title="Synthetic Concurrent Profile",
+        )
+        user_root = self.temp_dir / "concurrent-profile-user-data"
+        replacement_sources: list[str] = []
+        original_replace = package_cache.os.replace
+
+        def synchronized_profile_replace(source, destination):
+            if Path(destination).name == "profile.json":
+                replacement_sources.append(Path(source).name)
+            return original_replace(source, destination)
+
+        with patch.object(package_cache.os, "replace", side_effect=synchronized_profile_replace):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(write_experimental_profile, iso_file, user_root)
+                    for _ in range(2)
+                ]
+                paths = [future.result(timeout=10) for future in futures]
+
+        self.assertEqual(len(replacement_sources), 2)
+        self.assertEqual(len(set(replacement_sources)), 2)
+        self.assertEqual(paths[0], paths[1])
+        self.assertEqual(json.loads(paths[0].read_text(encoding="utf-8"))["schema_version"], 1)
 
     def test_cli_reports_refused_local_profile_with_shared_catalog_state(self) -> None:
         iso_file = self.temp_dir / "cli-refused-profile.iso"
@@ -3095,12 +3272,9 @@ int main(int argc, char **argv) {{
             self.assertEqual(nk_cli.cmd_build_package(args), 0)
             self.assertTrue(len(captured_commands) > 0)
             self.assertIn("--public-safe", captured_commands[0])
-            report = json.loads((user_root / "packages" / disc_id / "build-report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report.get("backends"), "public")
-            self.assertEqual(report.get("limits"), [
-                "Fonts: import your own PSP fonts; the public PGF reader is available for supported inputs.",
-                "PGD-protected data: unavailable; broader ISO-to-Play support is in the works.",
-            ])
+            # build-report.json here is the fake planner's own output, so reading it
+            # back proves nothing; test_production_smoke covers the real report. The
+            # completion manifest is written by cmd_build_package itself.
             completion = json.loads((user_root / "packages" / disc_id / "completion-manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(completion.get("backends"), "public")
             self.assertEqual(completion.get("limits"), [
@@ -3954,8 +4128,6 @@ int main(int argc, char **argv) {{
         with another title's session data. The stale artifact now must be
         irrelevant, and only the selected title's own build may resolve.
         """
-        if not (ROOT / "src" / "core" / "nk_launch.c").is_file():
-            self.skipTest("nk_launch.c not present in this slice")
         mock_root = self.temp_dir / "mock_repo"
         stale_dir = mock_root / "build" / "hst"
         stale_dir.mkdir(parents=True, exist_ok=True)
@@ -4390,6 +4562,78 @@ class GuestModuleElfRuleTests(unittest.TestCase):
             "libfont.prx", build_plain_mips_elf(0xFFA0, vaddr=0, entry=0xFFFFFFFF)
         )
         self.assertEqual(_classify_decrypted_elf_file(prx, module=True), "PLAIN_MIPS_ELF32")
+
+    def test_module_candidates_reject_prx_segments_above_the_player_limit(self) -> None:
+        oversized_header = bytearray(build_psp_container())
+        struct.pack_into("<I", oversized_header, 0x54, 100 * 1024 * 1024)
+        iso = self.temp_dir / "oversized-prx-segment.iso"
+        create_test_iso_with_module_tree(
+            iso, {"PSP_GAME/USRDIR/oversized.prx": bytes(oversized_header)}
+        )
+
+        self.assertEqual(list_disc_module_candidates(iso), [])
+
+    def test_module_walk_stops_by_name_when_import_analysis_is_unreadable(self) -> None:
+        iso = self.temp_dir / "unreadable-module-imports.iso"
+        plain_module = build_module_elf([], imports=[("sceAudio", [0x12345678])])
+        create_test_iso_with_module_tree(
+            iso, {"PSP_GAME/USRDIR/module/unknown-imports.prx": plain_module}
+        )
+
+        with patch("imports.parse_imports", side_effect=ValueError("synthetic malformed table")):
+            with self.assertRaises(IsoInspectionError) as caught:
+                list_disc_module_candidates(iso)
+
+        self.assertEqual(caught.exception.boundary_code, "ANALYZER_IMPORT_TABLE_INVALID")
+
+    def test_module_lookup_round_trips_surrogateescaped_directory_bytes(self) -> None:
+        directory = b"\x83\x58".decode("ascii", "surrogateescape")
+        iso = self.temp_dir / "shift-jis-module-directory.iso"
+        create_test_iso_with_module_tree(
+            iso,
+            {f"PSP_GAME/USRDIR/{directory}/MOD.PRX": build_psp_container()},
+            disc_id="TEST00043",
+        )
+
+        candidates = list_disc_module_candidates(iso)
+        self.assertEqual(len(candidates), 1)
+        checklist = check_needed_modules(
+            iso, user_data_root=self.temp_dir / "user-data", disc_id="TEST00043",
+            modules=candidates,
+        )
+
+        self.assertEqual(checklist["results"][0]["reason"], "encrypted")
+
+    def test_module_walk_reads_each_directory_from_one_open_iso_stream(self) -> None:
+        iso = self.temp_dir / "single-stream-module-walk.iso"
+        create_test_iso_with_module_tree(iso, {
+            "PSP_GAME/SYSDIR/sys.prx": build_psp_container(),
+            "PSP_GAME/USRDIR/A/B/sdk.prx": build_psp_container(),
+        })
+        original_open = Path.open
+        original_read_directory = iso_inspect._read_iso_directory_entries
+        opened_images = 0
+        read_directory_count = 0
+
+        def counted_open(path, *args, **kwargs):
+            nonlocal opened_images
+            if path == iso:
+                opened_images += 1
+            return original_open(path, *args, **kwargs)
+
+        def counted_read_directory(*args, **kwargs):
+            nonlocal read_directory_count
+            read_directory_count += 1
+            return original_read_directory(*args, **kwargs)
+
+        with patch.object(Path, "open", new=counted_open), patch.object(
+            iso_inspect, "_read_iso_directory_entries", side_effect=counted_read_directory
+        ):
+            walked = list(iso_inspect.walk_disc_module_entries(iso))
+
+        self.assertEqual(len(walked), 2)
+        self.assertEqual(opened_images, 1)
+        self.assertEqual(read_directory_count, 6)
 
     def test_executables_with_entry_in_code_segment_stay_usable(self) -> None:
         for e_type in (2, 3):

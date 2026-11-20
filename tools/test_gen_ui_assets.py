@@ -54,17 +54,24 @@ class GenUiAssetsTests(unittest.TestCase):
         self.assertTrue(all(name.endswith(".wav") for name in sounds))
 
     def test_oversized_or_missing_assets_are_refused(self) -> None:
+        # Each case leaves exactly one defect, and the refusal must name that defect.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompts = root / "third_party" / "kenney" / "input-prompts"
             sounds = root / "third_party" / "kenney" / "interface-sounds"
             prompts.mkdir(parents=True)
-            with self.assertRaises(SystemExit):
+            with self.assertRaisesRegex(SystemExit, r"no \*\.png under .*input-prompts"):
+                gen_ui_assets.collect(root)
+            (prompts / "a.png").write_bytes(b"\x89PNG")
+            # Only the sound pack's folder is missing now.
+            with self.assertRaisesRegex(SystemExit, r"no \*\.wav under .*interface-sounds"):
                 gen_ui_assets.collect(root)
             sounds.mkdir(parents=True)
-            (prompts / "a.png").write_bytes(b"\x89PNG")
+            (sounds / "a.wav").write_bytes(b"")
+            with self.assertRaisesRegex(SystemExit, r"a\.wav is 0 bytes"):
+                gen_ui_assets.collect(root)
             (sounds / "a.wav").write_bytes(b"x" * (gen_ui_assets.MAX_ASSET_BYTES + 1))
-            with self.assertRaises(SystemExit):
+            with self.assertRaisesRegex(SystemExit, rf"a\.wav is {gen_ui_assets.MAX_ASSET_BYTES + 1} bytes"):
                 gen_ui_assets.collect(root)
             (sounds / "a.wav").write_bytes(b"RIFF")
             self.assertEqual(
@@ -74,6 +81,16 @@ class GenUiAssetsTests(unittest.TestCase):
 
     def test_check_mode_reports_current(self) -> None:
         self.assertEqual(gen_ui_assets.main(["--check"]), 0)
+
+    def test_check_mode_compares_the_named_out_file(self) -> None:
+        # --check judges the file --out names, not the committed one behind it.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "x.c"
+            self.assertEqual(gen_ui_assets.main(["--out", str(out), "--check"]), 1)
+            out.write_bytes(b"stale\n")
+            self.assertEqual(gen_ui_assets.main(["--out", str(out), "--check"]), 1)
+            self.assertEqual(gen_ui_assets.main(["--out", str(out)]), 0)
+            self.assertEqual(gen_ui_assets.main(["--out", str(out), "--check"]), 0)
 
 
 if __name__ == "__main__":

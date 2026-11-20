@@ -1077,6 +1077,9 @@ class GenericRuntimeCarriesNoTitleAddress(unittest.TestCase):
             if line.startswith("export NK_RUNTIME_PROFILE_ENTRIES :=")
         )
         self.assertIn("TITLE_CONFIG_DIGEST=$(TITLE_CONFIG_DIGEST)", export_line)
+        # The UI and overlay objects compile with or without NK_UI_WITH_SDL_TTF.
+        self.assertIn("SDL3_TTF=$(SDL3_TTF_AVAILABLE)", export_line)
+        self.assertIn("SDL3_TTF_CFLAGS=$(SDL3_TTF_CFLAGS)", export_line)
         # The generic build must not default to a title manifest.
         self.assertRegex(makefile, r"(?m)^TITLE_MANIFEST \?=\s*$")
         # The scheduler matrix must cover a generic build and two distinct fixtures.
@@ -1084,6 +1087,33 @@ class GenericRuntimeCarriesNoTitleAddress(unittest.TestCase):
         self.assertRegex(makefile, r"(?m)^SCHED_SELFTEST_MANIFEST_generic :=\s*$")
         fixtures = set(re.findall(r"(?m)^SCHED_SELFTEST_MANIFEST_fixture-\w+ := (\S+)$", makefile))
         self.assertEqual(len(fixtures), 2, "the matrix must use two distinct fixtures")
+
+    def test_sdl3_ttf_availability_changes_the_runtime_profile(self) -> None:
+        """Installing or removing sdl3-ttf must rebuild the UI and overlay objects.
+
+        RT_NK_UI_FLAGS adds -DNK_UI_WITH_SDL_TTF and SDL3_TTF_CFLAGS only when SDL3_ttf is
+        found, and those objects' only profile prerequisite is the runtime profile stamp, so
+        the parse-time runtime profile hash must change with them.
+        """
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            self.skipTest("GNU Make is required for the parse-time profile check")
+        probe = "nk-print-runtime-profile: ; @echo NK_RUNTIME_PROFILE_HASH=$(RUNTIME_PROFILE_HASH)"
+        hashes: dict[tuple[str, str], str] = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            build_root = Path(tmp) / "build"
+            for available, cflags in (("yes", "-I/nk-ttf-a"), ("yes", "-I/nk-ttf-b"), ("", "")):
+                proc = subprocess.run(
+                    [make, "--no-print-directory", "-s", "--eval", probe, "nk-print-runtime-profile",
+                     f"BUILD_ROOT={build_root.as_posix()}", f"BUILD_DIR={(build_root / 'ttf').as_posix()}",
+                     f"SDL3_TTF_AVAILABLE={available}", f"SDL3_TTF_CFLAGS={cflags}"],
+                    cwd=ROOT, capture_output=True, text=True, timeout=300,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                found = re.findall(r"(?m)^NK_RUNTIME_PROFILE_HASH=(\S+)$", proc.stdout)
+                self.assertEqual(len(found), 1, proc.stdout)
+                hashes[(available, cflags)] = found[0]
+        self.assertEqual(len(set(hashes.values())), 3, hashes)
 
     def test_an_explicit_hst_build_without_a_manifest_fails_closed(self):
         """GAME_NAME=hst with no title configuration must refuse, not build generically."""

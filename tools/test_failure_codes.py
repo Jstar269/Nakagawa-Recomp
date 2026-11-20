@@ -29,7 +29,20 @@ import hle_sources  # noqa: E402
 REGISTRY = json.loads((ROOT / "assets" / "failure_codes.json").read_text(encoding="utf-8"))
 DOC = (ROOT / "docs" / "FAILURE_CODES.md").read_text(encoding="utf-8")
 CODE = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
-C_CODE = re.compile(r'"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)"')
+#: Any quoted all-caps literal of the registry's shape, with or without an underscore.
+C_CODE = re.compile(r'"([A-Z][A-Z0-9_]*[A-Z0-9])"')
+
+
+#: A C lookup-table row ``{"CODE", "text"}``, such as the player's badge table: it names a code
+#: without emitting it.
+C_TABLE_ROW = re.compile(r'\{\s*"[A-Z][A-Z0-9_]*"\s*,\s*"[^"\n]*"\s*\}')
+
+
+def _emitted_literals(path: Path, text: str) -> set[str]:
+    """The quoted all-caps literals in an emitter source, leaving out C lookup-table rows."""
+    if path.suffix in (".c", ".h"):
+        text = C_TABLE_ROW.sub("", text)
+    return set(re.findall(r"[\"']([A-Z][A-Z0-9_]*)[\"']", text))
 
 
 def codes_in(*vocabularies: str) -> set[str]:
@@ -126,7 +139,7 @@ def _c_function(relative: str, name: str) -> str:
 #: Python modules whose exceptions carry a route code (the ``route`` vocabulary).
 ROUTE_SOURCES = (
     "tools/nk_cli.py", "tools/title_codegen_plan.py", "tools/package_notices.py",
-    "tools/imports.py", "tools/psp_import_table.py", "tools/analyze.py",
+    "tools/imports.py", "tools/psp_import_table.py", "tools/analyze.py", "tools/codegen.py",
     "tools/nk_core/iso_inspect.py",
 )
 ROUTE_EXCEPTIONS = {
@@ -162,9 +175,33 @@ PLAYER_NOT_CODES = {
     # error code, which the Refresh notice replaces with its own text; neither reaches the problem report
     "COVER_ART_CLEAR_FAILED", "INVALID_PNG", "IO_ERROR", "NOT_FOUND", "NO_MATCH", "REDIRECT_REFUSED",
     "TOO_LARGE",
+    # single words. Keyboard keys, gamepad buttons and labels, and the UI test harness's tokens
+    "ALT", "BACK", "BACKSPACE", "BKSP", "CLOSE", "CREATE", "CTRL", "DEL", "DOWN", "EAST", "END",
+    "ESCAPE", "EXTRA", "F1", "F12", "GUIDE", "HOME", "INS", "L2", "L3", "LEFT", "LS", "LT", "NONE",
+    "NORTH", "P1", "P2", "P3", "P4", "PAGEDOWN", "PAGEUP", "QUIT", "R2", "R3", "RETURN", "RIGHT",
+    "RS", "RT", "SHIFT", "SLASH", "SOUTH", "SPACE", "START", "TAB", "TOUCH", "UP", "VIEW", "WEST",
+    "ZL", "ZR",
+    # preflight check names
+    "EXECUTABLE", "EXPERIMENTAL",
+    # runtime-package and cover-art status words, a disc check's result and the package
+    # builder's event statuses, none of them a problem-report code
+    "OK", "MISSING", "STALE", "INCOMPATIBLE", "UNKNOWN", "UNSUPPORTED", "HASHED", "RUNNING",
+    "PASS", "FAIL",
+    # Discord RPC event names and the HTTP method
+    "READY", "ERROR", "GET",
+    # environment variables without a project prefix
+    "APPDATA", "PATH", "PYTHON", "USER", "USERNAME", "USERPROFILE",
+    # the second half of an environment variable's name: nk_launch.c writes SR_CHEATS_FILE as
+    # two adjacent literals, the marker it looks for in a package's executable
+    "FILE",
+    # disc folders, PARAM.SFO keys, module and folder names, file magic and disc-format names
+    "EXTRACTED", "KMODULE", "PPSSPP", "SYSDIR", "TEST", "TITLE", "USRDIR", "CD001", "CISO", "CSO",
+    "ELF", "IHDR", "ZISO", "ZSO",
 }
 #: Environment variable names.
 PLAYER_NOT_CODE_PREFIXES = ("NK_", "SR_", "XDG_", "NAKAGAWA_", "PLAYER_UI_TEST_")
+#: Windows reserved device names (the player refuses them as file names) and disc IDs.
+PLAYER_NOT_CODE_PATTERN = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9]|[A-Z]{4}[0-9]{5})$")
 
 
 class RegistryShapeTests(unittest.TestCase):
@@ -274,6 +311,27 @@ class RouteTests(unittest.TestCase):
                         found |= value
         return found
 
+    def test_every_module_that_raises_a_route_exception_is_censused(self) -> None:
+        raisers: set[str] = set()
+        for path in sorted(TOOLS.rglob("*.py")):
+            if path.name.startswith("test_"):
+                continue
+            for node in ast.walk(_tree(path.relative_to(ROOT).as_posix())):
+                if isinstance(node, ast.Call):
+                    name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                elif isinstance(node, ast.ClassDef):
+                    name = next((getattr(base, "id", None) or getattr(base, "attr", None)
+                                 for base in node.bases
+                                 if (getattr(base, "id", None) or getattr(base, "attr", None))
+                                 in ROUTE_EXCEPTIONS), None)
+                else:
+                    continue
+                if name in ROUTE_EXCEPTIONS:
+                    raisers.add(path.relative_to(ROOT).as_posix())
+        self.assertIn("tools/imports.py", raisers)
+        self.assertEqual(sorted(raisers - set(ROUTE_SOURCES)), [],
+                         "a module that raises a route exception must be in ROUTE_SOURCES")
+
     def test_every_route_code_is_registered_and_every_registered_one_is_raised(self) -> None:
         census = self._census()
         self.assertEqual(sorted(census - codes_in("route")), [], "raised but not registered")
@@ -343,18 +401,26 @@ class DiscTests(unittest.TestCase):
 
 
 class PlayerTests(unittest.TestCase):
+    def test_a_single_word_literal_is_a_census_candidate(self) -> None:
+        # The registry allows a code with no underscore (CANCELLED is one), so the census must
+        # see one in both directions.
+        self.assertEqual(C_CODE.findall('player_app_set_error(app, "TIMEOUT", detail);'),
+                         ["TIMEOUT"])
+        self.assertIn("CANCELLED", codes_in("player"))
+
     def test_every_code_the_problem_report_can_show_is_registered(self) -> None:
         literals: set[str] = set()
         for relative in PLAYER_SOURCES:
             literals |= set(C_CODE.findall((ROOT / relative).read_text(encoding="utf-8")))
         candidates = {literal for literal in literals
                       if literal not in PLAYER_NOT_CODES
-                      and not literal.startswith(PLAYER_NOT_CODE_PREFIXES)}
+                      and not literal.startswith(PLAYER_NOT_CODE_PREFIXES)
+                      and not PLAYER_NOT_CODE_PATTERN.match(literal)}
         shown = codes_in("player", "disc", "decrypt")
         self.assertEqual(sorted(candidates - shown), [],
                          "a new uppercase literal is a registered code or a listed non-code")
-        self.assertEqual(sorted({code for code in codes_in("player") if CODE.match(code)}
-                                - literals), [], "registered but no longer in the player")
+        self.assertEqual(sorted(codes_in("player") - literals), [],
+                         "registered but no longer in the player")
 
 
 class LibraryTests(unittest.TestCase):
@@ -397,13 +463,19 @@ class StopBoundaryTests(unittest.TestCase):
 
 
 class LiveCodeTests(unittest.TestCase):
+    def test_a_lookup_table_row_does_not_count_as_an_emitter(self) -> None:
+        # The player's badge table names codes it can show, but a row there emits nothing.
+        table = 'static const T k_error_badges[] = {\n    {"OLD_GONE_CODE", "Game stopped"},\n};\n'
+        self.assertNotIn("OLD_GONE_CODE", _emitted_literals(Path("player_state.c"), table))
+        emit = 'player_app_set_error(app, "OLD_GONE_CODE", "x");\n'
+        self.assertIn("OLD_GONE_CODE", _emitted_literals(Path("player_state.c"), emit))
+
     def test_every_registered_code_still_appears_in_an_emitter(self) -> None:
-        text = ""
+        quoted: set[str] = set()
         for path in list((ROOT / "tools").rglob("*.py")) + list((ROOT / "src").rglob("*.[ch]")):
             if path.name.startswith("test_") or "selftest" in path.name:
                 continue
-            text += path.read_text(encoding="utf-8", errors="replace")
-        quoted = set(re.findall(r"[\"']([A-Z][A-Z0-9_]*)[\"']", text))
+            quoted |= _emitted_literals(path, path.read_text(encoding="utf-8", errors="replace"))
         self.assertEqual(sorted(set(REGISTRY["codes"]) - quoted), [],
                          "move a code no emitter uses to \"retired\"")
 

@@ -509,7 +509,12 @@ class Flash0ConfiguredRootSourceContractTests(unittest.TestCase):
         """The POSIX helper refuses a non-absolute value and never anchors it to the working directory."""
         posix = self.source[self.second:self.source.index("\n}\n", self.second)]
         self.assertNotIn("sr_wide_full_path_alloc(wide", posix)
-        self.assertRegex(posix, r"if \(!sr_wide_is_absolute\(wide\)\) \{\s*free\(wide\);\s*return 0;")
+        refusal = re.search(r"if \(!sr_wide_is_absolute\(wide\)\) \{\s*free\(wide\);\s*return 0;", posix)
+        if refusal is None:
+            self.fail("the POSIX helper no longer refuses a relative value")
+        # '.' and '..' are collapsed only after the refusal, and only lexically.
+        collapse = posix.find("sr_wide_lexical_canonical_alloc(wide, &canonical)")
+        self.assertGreater(collapse, refusal.end())
 
     def test_win32_configured_root_refuses_a_relative_value(self) -> None:
         """The Win32 definition, which the POSIX one now matches, refuses anything not absolute."""
@@ -809,8 +814,11 @@ class Flash0FontDirRefusalNativeTests(unittest.TestCase):
         project = self.tmp / "project"
         project.mkdir(parents=True, exist_ok=True)
         result = self.run_case(self.tmp, str(project))
-        self.assertIn("project", result["project"] or "")
-        self.assertIn("project", result["again"] or "")
+        # Exactly the configured directory, not any path that happens to contain the word.
+        self.assertTrue(result["project"], result["stderr"])
+        self.assertEqual(Path(result["project"]).resolve(), project.resolve())
+        self.assertTrue(result["again"], result["stderr"])
+        self.assertEqual(Path(result["again"]).resolve(), project.resolve())
         self.assertFalse([text for text in result["stderr"].splitlines() if text.startswith("flash0: SR_FONTDIR")])
 
 

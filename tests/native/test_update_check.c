@@ -37,6 +37,10 @@
 #include <unistd.h>
 #endif
 
+/* A case the host could not run: main then exits 77, which the Makefile reports as
+   SKIP, never as a pass. */
+static int g_skipped = 0;
+
 #define RECORDED_ZIP_SHA256 "032afce5b9b4713e6c4fa065c299f72ab732f59967624cffc25484f83516ab9f"
 /* The v0.0.1 ZIP's published .sha256 asset, byte for byte. */
 static const char k_recorded_checksum[] =
@@ -122,6 +126,8 @@ typedef struct {
     const unsigned char *body;
     size_t size;
     bool reachable;
+    bool misdeclared;        /* Content-Length says declared_length, not size */
+    size_t declared_length;
 } FakeAnswer;
 
 typedef struct {
@@ -165,7 +171,7 @@ static bool fake_open(void *context, const char *url, const char *allowed_hosts,
         memset(response, 0, sizeof(*response));
         response->final_url = answer->final_url ? answer->final_url : answer->url;
         response->has_content_length = true;
-        response->content_length = answer->size;
+        response->content_length = answer->misdeclared ? answer->declared_length : answer->size;
         response->context = net;
         response->read = fake_read;
         response->close = fake_close;
@@ -363,6 +369,15 @@ static void test_synthetic_release_lists(void) {
     assert(!nk_update_is_release_page("https://github.com/other/nakagawa-recomp/releases/tag/v1"));
     assert(!nk_update_is_release_page("https://github.com/Jstar269/Nakagawa-Recomp"));
     assert(!nk_update_is_release_page(NULL));
+    /* Audit 2026-11-17: what follows the prefix is a tag, as the release list's own
+       check reads one: no path, query, fragment, space or quote. */
+    assert(nk_update_is_release_page(PAGE "v1.0.0-rc.1+build.5"));
+    assert(!nk_update_is_release_page(PAGE "../../../../other/repo"));
+    assert(!nk_update_is_release_page(PAGE "v1.0.0/extra"));
+    assert(!nk_update_is_release_page(PAGE "v1.0.0?x=y"));
+    assert(!nk_update_is_release_page(PAGE "v1.0.0#top"));
+    assert(!nk_update_is_release_page(PAGE "v1 0"));
+    assert(!nk_update_is_release_page(PAGE "v1\"0"));
     /* Pages and files outside this repository fail closed. */
     assert(!parse("[{\"tag_name\":\"v1.0.0\",\"html_url\":\"https://github.com/other/"
                   "nakagawa-recomp/releases/tag/v1.0.0\"}]", &release, &error));
@@ -418,6 +433,40 @@ static void test_short_notes(void) {
     assert(strcmp(notes, "A long sentence that is cut…") == 0);
     nk_update_short_notes(NULL, notes, sizeof(notes));
     assert(notes[0] == '\0');
+    /* Audit 2026-11-17: a comment over several lines and a fenced code block are not
+       notes; the card shows the prose around them. */
+    nk_update_short_notes("<!--\nMaintainer note: keep this short\n-->\nWhat's new.", notes,
+                          sizeof(notes));
+    assert(strcmp(notes, "What's new.") == 0);
+    nk_update_short_notes("<!-- one line --> \nFirst.\n<!-- a\nb -->\nSecond.", notes,
+                          sizeof(notes));
+    assert(strcmp(notes, "First. Second.") == 0);
+    nk_update_short_notes("Run:\n```powershell\nInvoke-WebRequest x\n```\nThen play.\n~~~\n"
+                          "code\n~~~\nDone.", notes, sizeof(notes));
+    assert(strcmp(notes, "Run: Then play.") == 0);
+    /* Audit 2026-11-17: a room too small for the ellipsis cuts the text, whole
+       characters only, and never writes past it. */
+    {
+        char small[8];
+        memset(small, 'X', sizeof(small));
+        nk_update_short_notes("Hello world", small, 1);
+        assert(small[0] == '\0' && small[1] == 'X');
+        memset(small, 'X', sizeof(small));
+        nk_update_short_notes("Hello world", small, 2);
+        assert(strcmp(small, "H") == 0 && small[2] == 'X');
+        memset(small, 'X', sizeof(small));
+        nk_update_short_notes("Hello world", small, 3);
+        assert(strcmp(small, "He") == 0 && small[3] == 'X');
+        memset(small, 'X', sizeof(small));
+        nk_update_short_notes("\xC3\xA9t\xC3\xA9", small, 2);
+        assert(small[0] == '\0' && small[2] == 'X');
+        memset(small, 'X', sizeof(small));
+        nk_update_short_notes("Hello world", small, 4);
+        assert(strcmp(small, "\xE2\x80\xA6") == 0 && small[4] == 'X');
+        memset(small, 'X', sizeof(small));
+        nk_update_short_notes("Hi", small, 3);
+        assert(strcmp(small, "Hi") == 0);
+    }
     printf("[UPDATE_CHECK_TEST] short notes: PASS\n");
 }
 
@@ -656,6 +705,32 @@ static void test_check_failures(void) {
     net.answers[0].final_url = "https://example.com/releases";
     assert(!nk_update_check(fake_open, &net, "0.0.1", &result, &error));
     assert(strcmp(error.code, "UPDATE_REDIRECT_REJECTED") == 0 && net.closes == 1);
+    /* A redirect that names an allowed host as userinfo, or adds a port: still another
+       host, refused, and nothing more is asked. */
+    {
+        static const char *const disguised[] = {
+            "https://api.github.com@example.com/releases",
+            "https://api.github.com:8443/releases",
+        };
+        for (size_t i = 0; i < sizeof(disguised) / sizeof(disguised[0]); i++) {
+            memset(&net, 0, sizeof(net));
+            add_answer(&net, NK_UPDATE_RELEASES_URL, big, 2);
+            net.answers[0].final_url = disguised[i];
+            assert(!nk_update_check(fake_open, &net, "0.0.1", &result, &error));
+            assert(strcmp(error.code, "UPDATE_REDIRECT_REJECTED") == 0);
+            assert(net.request_count == 1 && net.closes == 1);
+        }
+    }
+    /* A Content-Length shorter than the body (none, or one byte): the whole answer is
+       still read, so the empty list is what is reported. */
+    for (size_t declared = 0; declared < 2; declared++) {
+        memset(&net, 0, sizeof(net));
+        add_answer(&net, NK_UPDATE_RELEASES_URL, big, 2);
+        net.answers[0].misdeclared = true;
+        net.answers[0].declared_length = declared;
+        assert(!nk_update_check(fake_open, &net, "0.0.1", &result, &error));
+        assert(strcmp(error.code, "UPDATE_NO_RELEASES") == 0 && net.closes == 1);
+    }
     /* An answer larger than any release list. */
     memset(&net, 0, sizeof(net));
     {
@@ -693,6 +768,22 @@ static NkUpdateRelease synthetic_release(void) {
     release.checksum_size = 105;
     release.signature_size = 300;
     return release;
+}
+
+static bool stop_download(void *context, uint64_t received, uint64_t expected) {
+    int *calls = (int *)context;
+    (void)received;
+    (void)expected;
+    ++*calls;
+    return false;
+}
+
+/* Neither the ZIP nor its ".part" file is left in the downloads folder. */
+static void assert_nothing_left(const char *zip_path) {
+    char partial[NATIVE_TEST_PATH_MAX + 200];
+    snprintf(partial, sizeof(partial), "%s.part", zip_path);
+    assert(!nk_platform_file_exists(zip_path));
+    assert(!nk_platform_file_exists(partial));
 }
 
 static void test_download(void) {
@@ -852,6 +943,78 @@ static void test_download(void) {
                                zip, sizeof(zip), &error));
     assert(strcmp(error.code, "UPDATE_REDIRECT_REJECTED") == 0 && net.request_count == 2);
 
+    /* A redirect that names a download host as userinfo, or adds a port: refused for the
+       checksum file before the signature, and for the ZIP before any byte is saved. */
+    {
+        static const char *const disguised[] = {
+            "https://github.com@example.com/x",
+            "https://github.com:8443/x",
+        };
+        for (size_t i = 0; i < sizeof(disguised) / sizeof(disguised[0]); i++) {
+            memset(&net, 0, sizeof(net));
+            add_answer(&net, release.checksum_url, k_good_checksum, strlen(k_good_checksum));
+            net.answers[0].final_url = disguised[i];
+            assert(!nk_update_download(fake_open, &net, &release, &signer.key, downloads, NULL,
+                                       NULL, zip, sizeof(zip), &error));
+            assert(strcmp(error.code, "UPDATE_REDIRECT_REJECTED") == 0 && net.request_count == 1);
+            memset(&net, 0, sizeof(net));
+            add_answer(&net, release.checksum_url, k_good_checksum, strlen(k_good_checksum));
+            add_answer(&net, release.signature_url, good_sig, strlen(good_sig));
+            add_answer(&net, release.zip_url, "hello", 5);
+            net.answers[2].final_url = disguised[i];
+            assert(!nk_update_download(fake_open, &net, &release, &signer.key, downloads, NULL,
+                                       NULL, zip, sizeof(zip), &error));
+            assert(strcmp(error.code, "UPDATE_REDIRECT_REJECTED") == 0 && net.request_count == 3);
+            assert(zip[0] == '\0');
+            assert_nothing_left(expected_zip);
+        }
+    }
+
+    /* The ZIP is not the size the release lists: shorter or longer than announced, or
+       its body ends before its own Content-Length. Nothing is left behind. */
+    {
+        static const struct {
+            const char *body;
+            size_t size;
+            bool misdeclared;
+            size_t declared_length;
+        } wrong_size[] = {
+            { "hell", 4, false, 0 },     /* announced short */
+            { "hello!", 6, false, 0 },   /* announced long */
+            { "hello!", 6, true, 5 },    /* longer than it announced */
+            { "hell", 4, true, 5 },      /* ends early */
+        };
+        for (size_t i = 0; i < sizeof(wrong_size) / sizeof(wrong_size[0]); i++) {
+            memset(&net, 0, sizeof(net));
+            add_answer(&net, release.checksum_url, k_good_checksum, strlen(k_good_checksum));
+            add_answer(&net, release.signature_url, good_sig, strlen(good_sig));
+            add_answer(&net, release.zip_url, wrong_size[i].body, wrong_size[i].size);
+            net.answers[2].misdeclared = wrong_size[i].misdeclared;
+            net.answers[2].declared_length = wrong_size[i].declared_length;
+            assert(!nk_update_download(fake_open, &net, &release, &signer.key, downloads, NULL,
+                                       NULL, zip, sizeof(zip), &error));
+            assert(strcmp(error.code, "UPDATE_INCOMPLETE_DOWNLOAD") == 0);
+            assert(strcmp(error.title, "Download incomplete") == 0);
+            assert(zip[0] == '\0');
+            assert_nothing_left(expected_zip);
+        }
+    }
+
+    /* Cancelled from the progress callback: stopped at the first answer, nothing left. */
+    {
+        int calls = 0;
+        memset(&net, 0, sizeof(net));
+        add_answer(&net, release.checksum_url, k_good_checksum, strlen(k_good_checksum));
+        add_answer(&net, release.signature_url, good_sig, strlen(good_sig));
+        add_answer(&net, release.zip_url, "hello", 5);
+        assert(!nk_update_download(fake_open, &net, &release, &signer.key, downloads,
+                                   stop_download, &calls, zip, sizeof(zip), &error));
+        assert(calls == 1);
+        assert(strcmp(error.code, "UPDATE_DOWNLOAD_CANCELLED") == 0);
+        assert(zip[0] == '\0');
+        assert_nothing_left(expected_zip);
+    }
+
     /* Offline at the checksum: the clear offline card. */
     memset(&net, 0, sizeof(net));
     assert(!nk_update_download(fake_open, &net, &release, &signer.key, downloads, NULL, NULL,
@@ -870,7 +1033,8 @@ static void write_file(const char *path) {
 }
 
 /* A directory link at link to target: a junction on Windows (no privilege needed), a
-   symlink elsewhere. False when the host will not make one; the caller says SKIP. */
+   symlink elsewhere. False when the host will not make one: on Windows the caller says
+   SKIP; elsewhere symlink() must work and a failure fails the test. */
 static bool make_dir_link(const char *link, const char *target) {
 #if defined(_WIN32) || defined(_WIN64)
     char cmd[2 * NATIVE_TEST_PATH_MAX + 64];
@@ -1058,8 +1222,13 @@ static void test_interrupted_install_staging(void) {
         assert(nk_platform_mkdir_p(outside));
         write_file(outside_file);
         /* The leftover is marked (the claim above made it). */
-        if (!make_dir_link(inner_link, outside)) {
+        bool linked = make_dir_link(inner_link, outside);
+#if !defined(_WIN32) && !defined(_WIN64)
+        assert(linked);
+#endif
+        if (!linked) {
             printf("[UPDATE_CHECK_TEST] SKIP links: this host would not make a directory link\n");
+            g_skipped++;
         } else {
             assert(nk_update_claim_staging(staging, &error));
             assert(nk_platform_path_missing(inner_link));
@@ -1123,6 +1292,99 @@ static void test_interrupted_install_staging(void) {
     printf("[UPDATE_CHECK_TEST] interrupted install staging: PASS\n");
 }
 
+#if defined(_WIN32) || defined(_WIN64)
+/* One file of a synthetic ustar archive (Windows' tar.exe reads it whatever the
+   file is called): a 512-byte header, then the bytes padded to 512. */
+static void tar_add(FILE *archive, const char *name, const char *bytes) {
+    unsigned char header[512];
+    size_t size = strlen(bytes);
+    unsigned sum = 0;
+    static const unsigned char zeros[512];
+    memset(header, 0, sizeof(header));
+    assert(strlen(name) < 100);
+    memcpy(header, name, strlen(name));
+    memcpy(header + 100, "0000644", 7);
+    memcpy(header + 108, "0000000", 7);
+    memcpy(header + 116, "0000000", 7);
+    snprintf((char *)header + 124, 12, "%011o", (unsigned)size);
+    memcpy(header + 136, "00000000000", 11);
+    memset(header + 148, ' ', 8);
+    header[156] = '0';
+    memcpy(header + 257, "ustar", 6);
+    memcpy(header + 263, "00", 2);
+    for (size_t i = 0; i < sizeof(header); i++) sum += header[i];
+    snprintf((char *)header + 148, 8, "%06o", sum);
+    header[155] = ' ';
+    assert(fwrite(header, 1, sizeof(header), archive) == sizeof(header));
+    assert(fwrite(bytes, 1, size, archive) == size);
+    if (size % 512u) {
+        assert(fwrite(zeros, 1, 512u - size % 512u, archive) == 512u - size % 512u);
+    }
+}
+
+/* A release archive at path holding the player, a file with two dots in its name,
+   and a SHA256SUMS.txt that lists both, then extra_line when it is not NULL. */
+static void write_release_archive(const char *path, const char *extra_line) {
+    static const char digest[] =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    char sums[2048];
+    static const unsigned char end[1024];
+    FILE *archive = nk_fopen_utf8(path, "wb");
+    assert(archive);
+    snprintf(sums, sizeof(sums), "%s  bin/nakagawa_player.exe\r\n%s *licenses/notes..txt\r\n%s",
+             digest, digest, extra_line ? extra_line : "");
+    tar_add(archive, "bin/nakagawa_player.exe", "synthetic player\n");
+    tar_add(archive, "licenses/notes..txt", "synthetic notes\n");
+    tar_add(archive, "SHA256SUMS.txt", sums);
+    assert(fwrite(end, 1, sizeof(end), archive) == sizeof(end));
+    fclose(archive);
+}
+
+/* SHA256SUMS.txt names are read as paths: dots inside a file name are a name, a
+   component of dots alone is refused, and a line too long for the buffer is a path
+   too long for the folder, never a file the unpack left out. */
+static void test_install_listed_names(void) {
+    char sep = nk_platform_path_separator();
+    char archive[NATIVE_TEST_PATH_MAX + 32];
+    char target[NATIVE_TEST_PATH_MAX + 48];
+    char notes[NATIVE_TEST_PATH_MAX + 80];
+    char log_path[NATIVE_TEST_PATH_MAX + 24];
+    char long_line[1200];
+    NkUpdateError error;
+    snprintf(archive, sizeof(archive), "%s%crelease.zip", native_test_get_root(), sep);
+    snprintf(target, sizeof(target), "%s%cnakagawa-recomp-0.2.0-windows-x64",
+             native_test_get_root(), sep);
+    snprintf(notes, sizeof(notes), "%s%clicenses%cnotes..txt", target, sep, sep);
+    snprintf(log_path, sizeof(log_path), "%s%cinstall-names.log", native_test_get_root(), sep);
+
+    write_release_archive(archive, NULL);
+    assert(nk_update_install(archive, target, log_path, &error));
+    assert(error.code[0] == '\0');
+    assert(nk_platform_file_exists(notes));
+    assert(nk_platform_remove_tree(target, NULL));
+
+    write_release_archive(archive,
+                          "0000000000000000000000000000000000000000000000000000000000000000"
+                          "  licenses/../SHA256SUMS.txt\r\n");
+    assert(!nk_update_install(archive, target, log_path, &error));
+    assert(strcmp(error.code, "UPDATE_INSTALL_INCOMPLETE") == 0);
+    assert(strstr(error.message, "licenses/../SHA256SUMS.txt") != NULL);
+    assert(nk_platform_path_missing(target));
+
+    memset(long_line, 'a', sizeof(long_line));
+    memcpy(long_line, "0000000000000000000000000000000000000000000000000000000000000000  ", 66);
+    memcpy(long_line + sizeof(long_line) - 3, "\r\n", 3);
+    write_release_archive(archive, long_line);
+    assert(!nk_update_install(archive, target, log_path, &error));
+    assert(strcmp(error.code, "UPDATE_INSTALL_PATH") == 0);
+    assert(strstr(error.message, "too long") != NULL);
+    assert(strstr(error.message, "SHA256SUMS.txt") == NULL);
+    assert(nk_platform_path_missing(target));
+    assert(nk_remove_utf8(archive) == 0);
+    printf("[UPDATE_CHECK_TEST] install listed names: PASS\n");
+}
+#endif
+
 int main(void) {
     native_test_create_root("update-check");
     native_test_isolate_user_data_roots();
@@ -1136,6 +1398,13 @@ int main(void) {
     test_download();
     test_install_folder();
     test_interrupted_install_staging();
+#if defined(_WIN32) || defined(_WIN64)
+    test_install_listed_names();
+#endif
+    if (g_skipped) {
+        printf("[UPDATE_CHECK_TEST] all others: PASS, %d case(s) SKIPPED\n", g_skipped);
+        return 77;
+    }
     printf("[UPDATE_CHECK_TEST] all: PASS\n");
     return 0;
 }

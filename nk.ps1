@@ -100,19 +100,30 @@ function Invoke-WorkspaceDoctor {
     return ($LASTEXITCODE -eq 0)
 }
 
+function Get-ManagerArguments {
+    # A hashtable binds the manager's parameters by name. An array splat binds
+    # positionally, so "-Action" itself would reach the manager's first parameter.
+    $arguments = @{ MsysPath = $MsysPath }
+    if ($VulkanSdk) { $arguments.VulkanSdk = $VulkanSdk }
+    if ($TitleManifest) { $arguments.TitleManifest = $TitleManifest }
+    if ($GameName) { $arguments.GameName = $GameName }
+    return $arguments
+}
+
 function Invoke-ManagerAction {
     param([Parameter(Mandatory = $true)][string]$ManagerAction)
 
     if (-not (Test-Path -LiteralPath $Manager)) {
         throw "Missing NK manager: $Manager"
     }
-    $arguments = @("-Action", $ManagerAction, "-MsysPath", $MsysPath)
-    if ($VulkanSdk) { $arguments += @("-VulkanSdk", $VulkanSdk) }
-    if ($TitleManifest) { $arguments += @("-TitleManifest", $TitleManifest) }
-    if ($GameName) { $arguments += @("-GameName", $GameName) }
-    $LASTEXITCODE = 0
+    $arguments = Get-ManagerArguments
+    $arguments.Action = $ManagerAction
+    # The manager reports a failed action only through `exit <code>`, which sets the
+    # global $LASTEXITCODE. Assigning a bare $LASTEXITCODE here would create a
+    # function-local copy that hides it, and every failure would read as success.
+    $global:LASTEXITCODE = 0
     & $Manager @arguments | Out-Host
-    $exitCode = [int]$LASTEXITCODE
+    $exitCode = [int]$global:LASTEXITCODE
     return ($exitCode -eq 0)
 }
 
@@ -163,10 +174,7 @@ try {
             if (-not (Test-Path -LiteralPath $Manager)) {
                 throw "Missing NK manager: $Manager"
             }
-            $arguments = @("-MsysPath", $MsysPath)
-            if ($VulkanSdk) { $arguments += @("-VulkanSdk", $VulkanSdk) }
-            if ($TitleManifest) { $arguments += @("-TitleManifest", $TitleManifest) }
-            if ($GameName) { $arguments += @("-GameName", $GameName) }
+            $arguments = Get-ManagerArguments
             & $Manager @arguments
         }
     }

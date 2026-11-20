@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -105,6 +106,41 @@ class ShaderEmbedTests(unittest.TestCase):
                 shaders=shader_embed.UI_SHADERS,
             )
             self.assertTrue(errors)
+
+    def test_ui_recompile_mismatch_names_a_compiler_version_drift(self) -> None:
+        """A different glslc's byte mismatch says which compiler the manifest recorded."""
+        real_version = shader_embed.glslc_version
+        real_compile = shader_embed.compile_shader
+
+        def other_compile(glslc: str, source: Path, output: Path, gpu_dir: Path,
+                          defines: tuple[str, ...] = ()) -> bytes:
+            return bytes(20)  # not the embedded module
+
+        shader_embed.glslc_version = lambda glslc: "shaderc v1999.1\nTarget: SPIR-V 1.0"
+        shader_embed.compile_shader = other_compile
+        try:
+            errors = shader_embed.verify(
+                shader_embed.UI_DIR, shader_embed.UI_MANIFEST, "glslc-under-test",
+                shader_embed.UI_SHADERS,
+            )
+            self.assertTrue(errors)
+            self.assertTrue(
+                all("current glslc output differs" in error and "shaderc v1999.1" in error
+                    and "the manifest records glslc" in error for error in errors),
+                errors,
+            )
+            # The recorded compiler itself: a mismatch names no drift.
+            recorded = json.loads(shader_embed.UI_MANIFEST.read_text(encoding="utf-8"))
+            shader_embed.glslc_version = lambda glslc: recorded["compiler"]["version"].strip()
+            errors = shader_embed.verify(
+                shader_embed.UI_DIR, shader_embed.UI_MANIFEST, "glslc-under-test",
+                shader_embed.UI_SHADERS,
+            )
+            self.assertTrue(errors)
+            self.assertFalse(any("the manifest records glslc" in error for error in errors), errors)
+        finally:
+            shader_embed.glslc_version = real_version
+            shader_embed.compile_shader = real_compile
 
 
 # ---- schema 2: the FSR 3 sets, compiled by the pinned DXC (third_party/fidelityfx_sdk) -----------
@@ -207,6 +243,37 @@ class Fsr3ShaderSetTests(unittest.TestCase):
         errors, skipped = shader_embed.verify_dxc(shader_embed.ROOT, shader_embed.FSR3_MANIFEST, dxc)
         self.assertEqual(errors, [])
         self.assertIsNone(skipped)
+
+    def test_an_include_outside_the_repository_is_a_named_error(self) -> None:
+        # Under --recompile with the pinned DXC, a #line marker that resolves
+        # outside the repository is a named verification error, not a traceback.
+        pinned = "libdxcompiler.so: 1.9(5512-01b62ad4)(1.9.2609.5)"
+        with tempfile.TemporaryDirectory(prefix="nakagawa-fsr3-test-") as temp:
+            root = Path(temp) / "repo"
+            root.mkdir()
+            manifest_path = _fsr3_copy(root)
+            embedded = {
+                entry["source"]: entry["embedded"]
+                for entry in json.loads(manifest_path.read_text(encoding="utf-8"))["shaders"]
+            }
+
+            def fake_compile(_dxc, root_, source_rel, _output, _defines):
+                text = (root_ / embedded[source_rel.as_posix()]).read_text(encoding="ascii")
+                return shader_embed.parse_embedding(text)
+
+            def fake_preprocess(args, **_kwargs):
+                out = Path(args[args.index("-Fi") + 1])
+                out.write_text('#line 1 "' + "../" * 16 + 'outside.hlsl"\n', encoding="utf-8")
+                return subprocess.CompletedProcess(args, 0)
+
+            with mock.patch.object(shader_embed, "dxc_version", return_value=pinned), \
+                    mock.patch.object(shader_embed, "compile_dxc", side_effect=fake_compile), \
+                    mock.patch.object(shader_embed.subprocess, "run", side_effect=fake_preprocess):
+                errors, skipped = shader_embed.verify_dxc(root, manifest_path, "dxc")
+            self.assertIsNone(skipped)
+            self.assertTrue(errors)
+            for error in errors:
+                self.assertIn("include outside the repository", error)
 
 
 class Fsr3FrameGenerationShaderSetTests(unittest.TestCase):

@@ -16,10 +16,15 @@ variants each corrupt one property the parser must reject cleanly.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import struct
 
 BASE_VADDR = 0x08804000
 DATA_FILE_OFF = 0x1000
+
+# Placeholder bytes the retail image holds in an import stub before the loader
+# patches it: `jr $ra; nop`.
+STUB_PLACEHOLDER = struct.pack("<II", 0x03E00008, 0)
 
 
 def _elf(
@@ -116,14 +121,37 @@ def _elf(
     return out
 
 
+def _segment(base: int) -> tuple[bytearray, Callable[..., int]]:
+    """One synthetic segment's bytes and its allocator.
+
+    ``alloc(b, align)`` pads the segment with zero bytes to ``align``, appends
+    ``b`` and returns the guest address of its first byte (``base`` plus the
+    offset). Every builder lays out its segment through this one allocator.
+    """
+    seg = bytearray()
+
+    def alloc(b: bytes, align: int = 4) -> int:
+        while len(seg) % align:
+            seg.append(0)
+        off = len(seg)
+        seg.extend(b)
+        return base + off
+
+    return seg, alloc
+
+
+def _check_module_name(name: bytes) -> None:
+    if not 0 < len(name) < 28:
+        raise ValueError("module name must fit the 28-byte field with its terminator")
+
+
 def _module_info_record(module_attributes: int, name: bytes) -> bytes:
     """A 52-byte SceModuleInfo with a NUL-terminated name and empty tables.
 
     The name is required: a sectionless input locates its record through
     phdr[0].p_paddr, and both parsers refuse a record without a printable name.
     """
-    if not 0 < len(name) < 28:
-        raise ValueError("module name must fit the 28-byte field with its terminator")
+    _check_module_name(name)
     return (
         struct.pack("<H", module_attributes) + b"\0\0"
         + name.ljust(28, b"\0") + b"\0" * 20
@@ -168,14 +196,7 @@ def build_import_elf(
     """
     if corrupt == "sectionless_bad_paddr":
         sectionless = True
-    seg = bytearray()
-
-    def alloc(b: bytes, align: int = 4) -> int:
-        while len(seg) % align:
-            seg.append(0)
-        off = len(seg)
-        seg.extend(b)
-        return BASE_VADDR + off
+    seg, alloc = _segment(BASE_VADDR)
 
     modinfo_vaddr = alloc(_module_info_record(module_attributes, b"SynthImports"))
 
@@ -310,14 +331,7 @@ def build_interleaved_import_elf(
     total = len(nids)
     if total <= 0:
         raise ValueError("interleaved fixture needs at least one NID")
-    seg = bytearray()
-
-    def alloc(b: bytes, align: int = 4) -> int:
-        while len(seg) % align:
-            seg.append(0)
-        off = len(seg)
-        seg.extend(b)
-        return BASE_VADDR + off
+    seg, alloc = _segment(BASE_VADDR)
 
     modinfo_vaddr = alloc(_module_info_record(0, b"SynthInterleaved"))
     name_vaddrs = [alloc(name.encode("ascii") + b"\0", 1) for name, _first, _count in windows]
@@ -408,14 +422,7 @@ def build_module_elf(
       "ent_range_reversed"      -- ent_top above ent_end
       "bad_name_ptr"            -- first named entry's name pointer is unmapped
     """
-    seg = bytearray()
-
-    def alloc(b: bytes, align: int = 4) -> int:
-        while len(seg) % align:
-            seg.append(0)
-        off = len(seg)
-        seg.extend(b)
-        return base_vaddr + off
+    seg, alloc = _segment(base_vaddr)
 
     modinfo_vaddr = alloc(b"\0" * 52)
     code_vaddr = alloc(struct.pack("<2I", 0x03E00008, 0))  # jr $ra; nop
@@ -501,8 +508,11 @@ def build_module_elf(
 # to exercise a manifest classification (those NIDs and API names are public
 # PSPSDK/PPSSPP knowledge and already appear in src/rt/hle.c).
 MIXED_FIXTURE_LIBS = [
-    # dedicated (real handler), fake_success (h_ok), controlled_unsupported
-    ("ThreadManForUser", [0x446D8DE6, 0x349D6D6C]),
+    # dedicated (real handlers): sceKernelCreateThread, sceKernelCheckCallback; and
+    # fake_success: sceKernelReferThreadProfiler, a handler whose body is a bare success
+    # return, kept on purpose (sceAtracGetOutputChannel was this example until it became
+    # a dedicated handler). One library holding two classes is part of the check.
+    ("ThreadManForUser", [0x446D8DE6, 0x349D6D6C, 0x64D4540E]),
     # dedicated: the PSMF video getter drives the media producer and host codecs
     ("scePsmfPlayer", [0x46F61F8B]),
     # controlled unsupported: ATRAC3 voice setter with no source codec
@@ -556,14 +566,7 @@ def build_import_layout_elf(
     Returns (ELF bytes, expected {stub address: (library, NID)}).
     """
     detached = detached or []
-    seg = bytearray()
-
-    def alloc(b: bytes, align: int = 4) -> int:
-        while len(seg) % align:
-            seg.append(0)
-        off = len(seg)
-        seg.extend(b)
-        return BASE_VADDR + off
+    seg, alloc = _segment(BASE_VADDR)
 
     gap = detached_gap_slots or 0
     # .text is filled with 8-byte (two-word) `jr $ra; nop` pairs: one pair of
@@ -674,17 +677,10 @@ def build_stripped_module_elf(
     Returns (ELF bytes, expected {stub address: (library, NID)}, module-info
     address).
     """
-    seg = bytearray()
-
-    def alloc(b: bytes, align: int = 4) -> int:
-        while len(seg) % align:
-            seg.append(0)
-        off = len(seg)
-        seg.extend(b)
-        return BASE_VADDR + off
+    seg, alloc = _segment(BASE_VADDR)
 
     alloc(struct.pack("<2I", 0x03E00008, 0) * 2)
-    stub_addrs = [alloc(struct.pack("<2I", 0x03E00008, 0) * len(nids)) for _name, nids in libs]
+    stub_addrs = [alloc(STUB_PLACEHOLDER * len(nids)) for _name, nids in libs]
     libstub = alloc(b"\0" * (20 * len(libs)))
     if early_decoy:
         early = alloc(b"\0" * 52)
@@ -693,8 +689,7 @@ def build_stripped_module_elf(
         struct.pack_into("<5I", seg, early - BASE_VADDR + 32,
                          0x00004000, 0, 0, libstub, libstub + 12)
     modinfo = alloc(b"\0" * 52)
-    if not 0 < len(name) < 28:
-        raise ValueError("module name must fit the 28-byte field with its terminator")
+    _check_module_name(name)
     seg[modinfo - BASE_VADDR + 4:modinfo - BASE_VADDR + 5 + len(name)] = name + b"\0"
     name_addrs = [alloc(lib_name.encode("ascii") + b"\0") for lib_name, _nids in libs]
     nid_addrs = [alloc(b"".join(struct.pack("<I", n) for n in nids)) for _name, nids in libs]
@@ -722,11 +717,6 @@ def build_stripped_module_elf(
     if paddr is not None:
         p_paddr = paddr
     return _elf(bytes(seg), modinfo, sectionless=True, paddr_override=p_paddr), expected, modinfo
-
-
-# Placeholder bytes the retail image holds in an import stub before the loader
-# patches it: `jr $ra; nop`.
-STUB_PLACEHOLDER = struct.pack("<II", 0x03E00008, 0)
 
 
 def build_text_stub_run_elf(
@@ -759,14 +749,7 @@ def build_text_stub_run_elf(
         stub_count = len(nids)
     if stub_count < 1:
         raise ValueError("stub_count must be at least 1")
-    seg = bytearray()
-
-    def alloc(b: bytes, align: int = 4) -> int:
-        while len(seg) % align:
-            seg.append(0)
-        off = len(seg)
-        seg.extend(b)
-        return BASE_VADDR + off
+    seg, alloc = _segment(BASE_VADDR)
 
     # .text: entry `jr $ra; nop`, then the orphan caller. Its `jal` words are
     # patched once the stub addresses exist.

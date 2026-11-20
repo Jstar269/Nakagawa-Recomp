@@ -128,9 +128,17 @@ static int msg_pipe_detach_invocation(SrWaitHandle invocation, uint32_t object) 
     return notified;
 }
 
-static int msg_pipe_trace_call(uint32_t calls) {
-    return getenv("SR_MSGLOG") && (calls <= 16u || (calls & (calls - 1u)) == 0u);
+/* SR_MSGLOG is read once: the Try* paths test it on every message (HST's worker
+ * queues run through message pipes). */
+static int msg_pipe_log_on(void) {
+    static int s_msglog = -1;
+    return hle_env_switch(&s_msglog, "SR_MSGLOG");
 }
+static int msg_pipe_trace_call(uint32_t calls) {
+    return msg_pipe_log_on() && (calls <= 16u || (calls & (calls - 1u)) == 0u);
+}
+static uint32_t msg_pipe_transfer(MsgPipe *p, uint32_t buffer, uint32_t amount,
+                                 uint32_t resultp, int is_send, int *direct_wake);
 
 static uint32_t h_CreateMsgPipe(CpuState *s) {
     /* a0=name, a1=partition, a2=attr, a3=bufferSize, t0=option. */
@@ -172,7 +180,7 @@ static uint32_t h_CreateMsgPipe(CpuState *s) {
         p->capacity = A3;
         p->data = data;
         memcpy(p->name, name, sizeof(p->name));
-        if (hle_log_on() || getenv("SR_MSGLOG"))
+        if (hle_log_on() || msg_pipe_log_on())
             fprintf(stderr, "HLE: CreateMsgPipe uid=0x%x name='%s' attr=0x%x size=%u\n",
                     p->uid, p->name, p->attr, p->capacity);
         return p->uid;
@@ -183,7 +191,7 @@ static uint32_t h_CreateMsgPipe(CpuState *s) {
 static uint32_t h_DeleteMsgPipe(CpuState *s) {
     MsgPipe *p = msg_pipe_find(A0);
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_MPPID;
-    if (getenv("SR_MSGLOG"))
+    if (msg_pipe_log_on())
         fprintf(stderr, "HLE: DeleteMsgPipe uid=0x%x name='%s' queued=%u send=%u receive=%u\n",
                 p->uid, p->name, p->count, p->send_calls, p->receive_calls);
     free(p->data);
@@ -389,13 +397,9 @@ static uint32_t h_TrySendMsgPipe(CpuState *s) {
                     p->uid, sched_current_uid(), p->send_calls, A2, A1, amount);
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     }
-    uint32_t direct = msg_pipe_reserve_receiver(p, A1, amount);
-    for (uint32_t i = direct; i < amount; i++) {
-        p->data[p->write_pos] = MEM_R8(A1 + i);
-        p->write_pos = (p->write_pos + 1u) % p->capacity;
-    }
-    p->count += amount - direct;
-    if (resultp) MEM_W32(resultp, amount);
+    int direct = 0;
+    uint32_t rc = msg_pipe_transfer(p, A1, amount, resultp, 1, &direct);
+    if (rc) return rc;
     if (msg_pipe_trace_call(p->send_calls))
         fprintf(stderr, "MSGPIPE: send uid=0x%x thread=0x%x call=%u requested=%u transferred=%u queued=%u\n",
                 p->uid, sched_current_uid(), p->send_calls, A2, amount, p->count);
@@ -442,12 +446,9 @@ static uint32_t h_TryReceiveMsgPipe(CpuState *s) {
                     p->uid, sched_current_uid(), p->receive_calls, A2, A1, amount);
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     }
-    for (uint32_t i = 0; i < amount; i++) {
-        MEM_W8(A1 + i, p->data[p->read_pos]);
-        p->read_pos = (p->read_pos + 1) % p->capacity;
-    }
-    p->count -= amount;
-    if (resultp) MEM_W32(resultp, amount);
+    int direct = 0;
+    uint32_t rc = msg_pipe_transfer(p, A1, amount, resultp, 0, &direct);
+    if (rc) return rc;
     if (msg_pipe_trace_call(p->receive_calls))
         fprintf(stderr, "MSGPIPE: receive uid=0x%x thread=0x%x call=%u requested=%u transferred=%u queued=%u\n",
                 p->uid, sched_current_uid(), p->receive_calls, A2, amount, p->count);
@@ -731,7 +732,7 @@ static uint32_t h_CancelMsgPipe(CpuState *s) {
     p->count = 0u;
     p->reserved = 0u;
     p->reservation = 0;
-    if (getenv("SR_MSGLOG"))
+    if (msg_pipe_log_on())
         fprintf(stderr, "HLE: CancelMsgPipe uid=0x%x name='%s' send=%u receive=%u\n",
                 p->uid, p->name, senders, receivers);
     /* No waiter: no wake result to latch. Completing an invocation records its
@@ -828,9 +829,33 @@ void mbx_remove_waiter(Mbx *m, uint32_t thid) {
     }
 }
 
+/* A receiver joins the wait queue at its tail, or at its head when it goes back to waiting
+ * after a wake that left it no message (it keeps its turn). A thread waits on one object at
+ * a time, so a full table means the waiter bookkeeping is broken: that stops the run by name. */
+static int mbx_has_waiter(const Mbx *m, uint32_t thid) {
+    for (int i = 0; i < m->nwaiters; i++)
+        if (m->waiters[i] == thid) return 1;
+    return 0;
+}
+static uint32_t mbx_add_waiter(Mbx *m, uint32_t thid, int at_head) {
+    if (mbx_has_waiter(m, thid)) return 0u;
+    if (m->nwaiters >= MBX_MAX_WAITERS)
+        return hle_unmodelled_stop("sceKernelReceiveMbx",
+                                   "on mailbox 0x%x with %d waiters recorded, more than the "
+                                   "scheduler has threads", m->uid, m->nwaiters);
+    if (at_head) {
+        for (int j = m->nwaiters; j > 0; j--) m->waiters[j] = m->waiters[j - 1];
+        m->waiters[0] = thid;
+    } else {
+        m->waiters[m->nwaiters] = thid;
+    }
+    m->nwaiters++;
+    return 0u;
+}
+
 /* Attr 0x400 delivers by ascending msgPriority, FIFO among equals; otherwise append. */
 static void mbx_enqueue(Mbx *m, uint32_t msg) {
-    if (m->nmsgs >= MBX_MAX_MSGS) return;
+    mbx_reserve_msg(m);
     int pos = m->nmsgs;
     if (m->attr & PSP_MBX_ATTR_PRIORITY) {
         int32_t pri = (int32_t)MEM_R32(msg + 4);
@@ -861,24 +886,20 @@ static uint32_t h_CreateMbx(CpuState *s) {
     if (A0) {
         if (!guest_cstr(A0, name, sizeof(name))) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     }
-    for (int i = 0; i < MBX_MAX; i++) {
-        Mbx *m = &s_mbx[i];
-        if (m->used) continue;
-        memset(m, 0, sizeof *m);
-        m->used = 1;
-        m->uid = sr_alloc_uid();
-        m->attr = A1;
-        memcpy(m->name, name, sizeof m->name);
-        return m->uid;
-    }
-    return 0x80020190u; /* SCE_KERNEL_ERROR_NO_MEMORY */
+    Mbx *m = mbx_new_slot();   /* the PSP has no mailbox limit; the table grows */
+    memset(m, 0, sizeof *m);
+    m->used = 1;
+    m->uid = sr_alloc_uid();
+    m->attr = A1;
+    memcpy(m->name, name, sizeof m->name);
+    return m->uid;
 }
 
 static uint32_t h_DeleteMbx(CpuState *s) {
     Mbx *m = mbx_find(A0);
     if (!m) return SCE_KERNEL_ERROR_UNKNOWN_MBXID;
     int waiters = m->nwaiters;
-    m->used = 0;
+    mbx_release(m);
     if (waiters) {
         sched_wake_with_result(A0, SCE_KERNEL_ERROR_WAIT_DELETE);
         sched_preempt();
@@ -893,14 +914,18 @@ static uint32_t h_SendMbx(CpuState *s) {
     /* Validate the whole accessed packet span: the circular relink writes
      * next@0 and priority mailboxes read msgPriority@4. */
     if (!msg || !sr_guest_span_writable(msg, 8u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-    if (m->nmsgs >= MBX_MAX_MSGS) return 0x80020190u;
     mbx_enqueue(m, msg);
-    if (m->nwaiters > 0) {
+    /* The first waiter still blocked on the mailbox is woken. One that is not (running its
+     * callbacks in ReceiveMbxCB, or timed out and not yet back) is passed over: it finds the
+     * message itself when it resumes, and the wake goes to the next one. */
+    while (m->nwaiters > 0) {
         uint32_t thid = m->waiters[0];
         for (int j = 0; j + 1 < m->nwaiters; j++) m->waiters[j] = m->waiters[j + 1];
         m->nwaiters--;
-        sched_wake_one_object_waiter(A0, thid);
-        sched_preempt();
+        if (sched_wake_one_object_waiter(A0, thid)) {
+            sched_preempt();
+            break;
+        }
     }
     return 0;
 }
@@ -944,8 +969,10 @@ static uint32_t receive_mbx_common(CpuState *s, int is_cb) {
 
     uint32_t cur_thid = sched_current_uid();
     if (cur_thid == 0) return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
-    if (m->nwaiters >= MBX_MAX_WAITERS) return 0x80020190u;
-    m->waiters[m->nwaiters++] = cur_thid;
+    {
+        uint32_t stop = mbx_add_waiter(m, cur_thid, 0);
+        if (stop) return stop;
+    }
 
     for (;;) {
         if (is_cb && sr_thread_has_pending_callbacks(cur_thid)) {
@@ -953,6 +980,22 @@ static uint32_t receive_mbx_common(CpuState *s, int is_cb) {
             m = mbx_find(uid);
             if (!m) return SCE_KERNEL_ERROR_WAIT_DELETE;
             sched_vtime_refresh();
+            /* A message sent while the callbacks ran (by a callback, or by a thread that ran
+             * while one blocked) is this receiver's: the sender found it not blocked and passed
+             * its wake on. Take it now rather than block with a message queued. */
+            if (m->nmsgs > 0) {
+                mbx_remove_waiter(m, cur_thid);
+                MEM_W32(pmsg, mbx_dequeue(m));
+                if (has_timeout) {
+                    uint64_t now_us = sched_vtime_us();
+                    MEM_W32(toptr, now_us < end_time ? (uint32_t)(end_time - now_us) : 0u);
+                }
+                return 0;
+            }
+            /* A sender may have taken this receiver off the queue meanwhile: it waits again
+             * at the head, keeping its turn. */
+            uint32_t stop = mbx_add_waiter(m, cur_thid, 1);
+            if (stop) return stop;
             continue;
         }
 
@@ -1007,10 +1050,9 @@ static uint32_t receive_mbx_common(CpuState *s, int is_cb) {
             }
             /* Spurious wake: requeue at head so FIFO order is preserved. */
             mbx_remove_waiter(m, cur_thid);
-            if (m->nwaiters < MBX_MAX_WAITERS) {
-                for (int j = m->nwaiters; j > 0; j--) m->waiters[j] = m->waiters[j - 1];
-                m->waiters[0] = cur_thid;
-                m->nwaiters++;
+            {
+                uint32_t stop = mbx_add_waiter(m, cur_thid, 1);
+                if (stop) return stop;
             }
         } else {
             if (is_cb) sched_set_current_cb_wait(1);
@@ -1034,10 +1076,9 @@ static uint32_t receive_mbx_common(CpuState *s, int is_cb) {
             }
 
             mbx_remove_waiter(m, cur_thid);
-            if (m->nwaiters < MBX_MAX_WAITERS) {
-                for (int j = m->nwaiters; j > 0; j--) m->waiters[j] = m->waiters[j - 1];
-                m->waiters[0] = cur_thid;
-                m->nwaiters++;
+            {
+                uint32_t stop = mbx_add_waiter(m, cur_thid, 1);
+                if (stop) return stop;
             }
         }
     }
@@ -1062,19 +1103,33 @@ static uint32_t h_CancelReceiveMbx(CpuState *s) {
 }
 
 /* sceKernelReferMbxStatus: SceKernelMbxInfo is 52 bytes — size(0), name[32](4),
- * attr(36), numWaitThreads(40), numMessages(44), firstMessage(48). */
+ * attr(36), numWaitThreads(40), numMessages(44), firstMessage(48).
+ * PSP-KERNEL-STATUS-001 (mbx-size-zero, mbx-size-8, mbx-size-40, mbx-size-full): the caller's
+ * size word chooses how much is written. Size 0 writes nothing; any other size writes
+ * min(size, 52) bytes of the record, whose size word reads back as 0x34, as the semaphore and
+ * event-flag status calls do. */
+#define MBX_INFO_SIZE 52u
+static void mbx_info_put32(uint8_t *rec, uint32_t off, uint32_t v) {
+    for (uint32_t i = 0; i < 4u; i++) rec[off + i] = (uint8_t)(v >> (8u * i));   /* little-endian */
+}
 static uint32_t h_ReferMbxStatus(CpuState *s) {
     Mbx *m = mbx_find(A0);
     if (!m) return SCE_KERNEL_ERROR_UNKNOWN_MBXID;
     uint32_t info = A1;
-    if (!info || !sr_guest_span_writable(info, 52u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-    MEM_W32(info + 0, 52u);
-    for (int i = 0; i < 32; i++) MEM_W8(info + 4 + (uint32_t)i, 0);
-    for (int i = 0; i < 31 && m->name[i]; i++) MEM_W8(info + 4 + (uint32_t)i, (uint8_t)m->name[i]);
-    MEM_W32(info + 36, m->attr);
-    MEM_W32(info + 40, (uint32_t)m->nwaiters);
-    MEM_W32(info + 44, (uint32_t)m->nmsgs);
-    MEM_W32(info + 48, m->nmsgs ? m->msgs[0] : 0u);
+    if (!info || !sr_guest_span_readable(info, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    uint32_t size = MEM_R32(info);
+    if (size == 0u) return 0;
+    uint32_t write_len = size < MBX_INFO_SIZE ? size : MBX_INFO_SIZE;
+    if (!sr_guest_span_writable(info, write_len)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    uint8_t rec[MBX_INFO_SIZE];
+    memset(rec, 0, sizeof rec);
+    mbx_info_put32(rec, 0u, MBX_INFO_SIZE);
+    for (int i = 0; i < 31 && m->name[i]; i++) rec[4 + i] = (uint8_t)m->name[i];
+    mbx_info_put32(rec, 36u, m->attr);
+    mbx_info_put32(rec, 40u, (uint32_t)m->nwaiters);
+    mbx_info_put32(rec, 44u, (uint32_t)m->nmsgs);
+    mbx_info_put32(rec, 48u, m->nmsgs ? m->msgs[0] : 0u);
+    for (uint32_t i = 0; i < write_len; i++) MEM_W8(info + i, rec[i]);
     return 0;
 }
 
@@ -1150,6 +1205,92 @@ static uint32_t h_DeleteSema(CpuState *s) {
     }
     return 0;
 }
+/* Semaphore waiter records. SignalSema hands the signalled count to the waiters it
+ * releases: each released waiter's need is subtracted inside SignalSema and the waiter
+ * is readied with result 0, so a PollSema, WaitSema or ReferSemaStatus made before the
+ * waiter runs sees the count already taken. Waiters are served in arrival order, or by
+ * current priority (arrival order among equals) when the semaphore has attr 0x100; a
+ * waiter whose need does not fit is passed over and the next one is tried.
+ * PPSSPP-derived, not PSP-measured: hrydgard/ppsspp 0697e8bd6f488b891a17e275b3eb5cd5815c96d7,
+ * Core/HLE/sceKernelSemaphore.cpp, sceKernelSignalSema and __KernelUnlockSemaForThread.
+ * A record is used only while its thread is still blocked on that semaphore
+ * (sema_waiter_live), so a thread terminated in the wait leaves a dead record that is
+ * never served and is reclaimed. A thread blocks on one object at a time, so live
+ * records never outnumber the scheduler's 128 threads. */
+#define SEMA_WAITER_MAX 128
+#define PSP_SEMA_ATTR_PRIORITY 0x100u
+typedef struct { uint32_t sema, thread; int need; uint64_t order; int active; } SemaWaiter;
+static SemaWaiter s_sema_waiters[SEMA_WAITER_MAX];
+static uint64_t s_sema_wait_order;
+static int s_sema_handoff_noted;
+
+static int sema_waiter_live(const SemaWaiter *w) {
+    SrThreadRunStatus rs;
+    /* Measured (PSP-B3-01): a semaphore wait is waitType 3 with waitId = the UID. */
+    return w->active && sched_thread_run_status(w->thread, &rs) == 0 &&
+           rs.waitType == 3u && rs.waitId == w->sema;
+}
+static void sema_waiter_end(void) {
+    uint32_t self = sched_current_uid();
+    for (int i = 0; i < SEMA_WAITER_MAX; i++)
+        if (s_sema_waiters[i].active && s_sema_waiters[i].thread == self) s_sema_waiters[i].active = 0;
+}
+static void sema_waiter_begin(uint32_t sema, int need) {
+    sema_waiter_end();
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < SEMA_WAITER_MAX; i++)
+            if (!s_sema_waiters[i].active) {
+                s_sema_waiters[i] = (SemaWaiter){sema, sched_current_uid(), need, ++s_sema_wait_order, 1};
+                return;
+            }
+        for (int i = 0; i < SEMA_WAITER_MAX; i++)
+            if (!sema_waiter_live(&s_sema_waiters[i])) s_sema_waiters[i].active = 0;
+    }
+    fprintf(stderr, "HLE: semaphore waiter table full; uid=0x%x thread=0x%x not recorded\n",
+            sema, sched_current_uid());
+}
+/* Hand m's count to its live waiters in service order. Returns 1 when one was readied. */
+static int sema_hand_over(Sync *m) {
+    int order[SEMA_WAITER_MAX];
+    uint32_t pri[SEMA_WAITER_MAX];
+    int n = 0;
+    const int by_priority = (m->attr & PSP_SEMA_ATTR_PRIORITY) != 0;
+    for (int i = 0; i < SEMA_WAITER_MAX; i++) {
+        const SemaWaiter *w = &s_sema_waiters[i];
+        SrThreadRunStatus rs;
+        if (w->sema != m->uid || !sema_waiter_live(w) ||
+            sched_thread_run_status(w->thread, &rs) != 0) continue;
+        /* Insertion by (current priority when attr 0x100, then arrival order). */
+        int j = n++;
+        while (j > 0) {
+            const SemaWaiter *p = &s_sema_waiters[order[j - 1]];
+            const int before = by_priority && rs.currentPriority != pri[j - 1]
+                                   ? rs.currentPriority < pri[j - 1]
+                                   : w->order < p->order;
+            if (!before) break;
+            order[j] = order[j - 1];
+            pri[j] = pri[j - 1];
+            j--;
+        }
+        order[j] = i;
+        pri[j] = rs.currentPriority;
+    }
+    int woke = 0;
+    for (int k = 0; k < n && m->count > 0; k++) {
+        SemaWaiter *w = &s_sema_waiters[order[k]];
+        if (w->need > m->count) continue;
+        m->count -= w->need;
+        w->active = 0;
+        if (!s_sema_handoff_noted) {
+            s_sema_handoff_noted = 1;
+            fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelSignalSema "
+                            "(NID 0x3f53e640) hands the signalled count to the waiter it releases\n");
+        }
+        woke |= sched_wake_one_object_waiter_with_result(w->thread, 0u);
+    }
+    return woke;
+}
+
 /* Entry contract shared by sceKernelWaitSema and sceKernelWaitSemaCB.
  *
  * The order below is not a style choice; each step is placed where a measured
@@ -1216,12 +1357,34 @@ static uint32_t sema_wait_entry(const char *who, uint32_t uid, int need, Sync **
     return 0;
 }
 
+/* A timed wait that blocked and then got its count writes the time it had left to the timeout
+ * word, as the other timed waits here do (ReceiveMbx, LockLwMutex, LockMutex). A wait satisfied
+ * at once leaves the word alone. PPSSPP-derived, not PSP-measured: hrydgard/ppsspp
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceKernelSemaphore.cpp,
+ * __KernelUnlockSemaForThread writes the unexpired time on the release; PSP-B2-01 measures only
+ * the expired wait's 0. */
+static int s_sema_timeout_left_noted;
+static void sema_write_timeout_left(uint32_t toptr, int blocked, uint64_t wait_end) {
+    if (!toptr || !blocked) return;
+    if (!s_sema_timeout_left_noted) {
+        s_sema_timeout_left_noted = 1;
+        fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelWaitSema[CB] writes the "
+                        "time left to its timeout word when a timed wait is satisfied\n");
+    }
+    sched_vtime_refresh();
+    uint64_t now = sched_vtime_us();
+    MEM_W32(toptr, now < wait_end ? (uint32_t)(wait_end - now) : 0u);
+}
+
 static uint32_t h_WaitSema(CpuState *s) {
     /* a0=semaid, a1=signal, a2=timeout ptr (0=infinite, else *a2 = microseconds). */
     uint32_t uid = A0; int need = (int)A1; uint32_t toptr = A2;
     Sync *m = NULL;
     uint32_t err = sema_wait_entry("WaitSema", uid, need, &m);
     if (err) return err;
+    /* As ReceiveMbx and LockLwMutex: an unwritable timeout word is refused before
+     * any wait (precedence after the entry checks is unmeasured). */
+    if (toptr && !sr_guest_span_writable(toptr, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     if (hle_log_on())
         fprintf(stderr, "HLE: WaitSema uid=0x%x count=%d need=%d (from 0x%x)\n", uid, m->count, need, sched_current_uid());
     /* The deadline is fixed by the first block; a wake that finds the count taken
@@ -1248,7 +1411,10 @@ static uint32_t h_WaitSema(CpuState *s) {
                     return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
                 }
             }
-            if (sched_block_on_timeout(uid, usec)) {
+            sema_waiter_begin(uid, need);
+            const int timed_out = sched_block_on_timeout(uid, usec);
+            sema_waiter_end();
+            if (timed_out) {
                 /* Measured (PSP-B2-01): an expired timed wait writes the
                  * remaining time (0 at the deadline) to *timeout and answers
                  * WAIT_TIMEOUT. */
@@ -1256,17 +1422,25 @@ static uint32_t h_WaitSema(CpuState *s) {
                 return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
             }
         } else {
+            sema_waiter_begin(uid, need);
             sched_block_on(uid);
+            sema_waiter_end();
         }
         /* Measured (PSP-B2-01): a cancelled/deleted/released wait answers
-         * its wake result instead of resuming into a satisfied count. */
+         * its wake result instead of resuming into a satisfied count. A
+         * SignalSema that released this waiter already took its count
+         * (sema_hand_over) and answers 0 the same way. */
         {
             uint32_t woken = 0;
-            if (sched_take_wake_result(&woken)) return woken;
+            if (sched_take_wake_result(&woken)) {
+                if (woken == 0u) sema_write_timeout_left(toptr, wait_end_set, wait_end);
+                return woken;
+            }
         }
         m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return 0x80020000;
     }
     m->count -= need;
+    sema_write_timeout_left(toptr, wait_end_set, wait_end);
     return 0;
 }
 static uint32_t h_WaitSemaCB(CpuState *s) {
@@ -1276,12 +1450,14 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
      * not sample the clock, run callbacks or write a remaining-timeout word. */
     uint32_t err = sema_wait_entry("WaitSemaCB", uid, need, &m);
     if (err) return err;
+    if (toptr && !sr_guest_span_writable(toptr, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     if (hle_log_on())
         fprintf(stderr, "HLE: WaitSemaCB uid=0x%x count=%d need=%d (from 0x%x)\n", uid, m->count, need, sched_current_uid());
 
     sched_vtime_refresh();
     uint64_t start = sched_vtime_us();
     uint64_t end = start + (toptr ? MEM_R32(toptr) : 0);
+    int blocked = 0;
 
     while (m->count < need) {
         if (sr_thread_has_pending_callbacks(sched_current_uid())) {
@@ -1303,7 +1479,10 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
             sched_set_current_cb_wait(1);
             /* Measured (PSP-B3-01): sema CB waits report waitType 3. */
             sched_set_current_wait_kind(3);
+            sema_waiter_begin(uid, need);
+            blocked = 1;
             int timed_out = sched_block_on_timeout(uid, remaining);
+            sema_waiter_end();
             sched_set_current_cb_wait(0);
             if (timed_out) {
                 /* Measured (PSP-B2-01): same remaining-0 contract after
@@ -1314,19 +1493,26 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
         } else {
             sched_set_current_cb_wait(1);
             sched_set_current_wait_kind(3);
+            sema_waiter_begin(uid, need);
             sched_block_on(uid);
+            sema_waiter_end();
             sched_set_current_cb_wait(0);
         }
         /* Measured (PSP-B2-01): a cancelled/deleted/released wait answers
-         * its wake result instead of resuming into a satisfied count. */
+         * its wake result instead of resuming into a satisfied count; a
+         * SignalSema hand-over (sema_hand_over) answers 0 the same way. */
         {
             uint32_t woken = 0;
-            if (sched_take_wake_result(&woken)) return woken;
+            if (sched_take_wake_result(&woken)) {
+                if (woken == 0u) sema_write_timeout_left(toptr, blocked, end);
+                return woken;
+            }
         }
         m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return 0x80020000;
         sched_vtime_refresh();
     }
     m->count -= need;
+    sema_write_timeout_left(toptr, blocked, end);
     return 0;
 }
 static uint32_t h_SignalSema(CpuState *s) {
@@ -1339,7 +1525,7 @@ static uint32_t h_SignalSema(CpuState *s) {
      * 800201AE and leaves the count unchanged; it does not cap. */
     if (new_count > m->maxc) return 0x800201aeu;
     m->count = (int32_t)(uint32_t)new_count;
-    sched_wake(A0);
+    (void)sema_hand_over(m);
     sched_preempt();    /* a woken higher-priority waiter runs immediately */
     return 0;
 }
@@ -1474,34 +1660,86 @@ int sr_hle_test_sema_state(uint32_t uid, int *count_out, int *max_out) {
 /* Measured (PSP-B2-01): an unlock to level 0 with a waiter hands
  * ownership directly to the waiter (lockThread = waiter, level = the waiter's
  * count) before the waiter runs. The waiter's requested count lives on its own
- * host stack while blocked, so a small FIFO queue carries it to the unlocker. */
-#define LWWAIT_MAX 64
-typedef struct { uint32_t muid, thread; int count; int active; } LwWait;
+ * host stack while blocked, so a small FIFO queue carries it to the unlocker.
+ *
+ * Each record is one thread's wait and is counted once in its workarea's
+ * numWaitThreads word: lww_enqueue adds it, lww_finish drops it. The waiter
+ * finishes its own record when it leaves the wait (granted, released, timed out
+ * or deleted); a thread that never leaves (terminated or deleted while waiting,
+ * or granted and then terminated before it ran) is finished by
+ * sr_hle_lwmutex_release_thread. A granted record stays until then, so the unlocker
+ * cannot hand the lock to it a second time. A thread waits on one object at a
+ * time and has one record, so the table holds the scheduler's 128 threads. */
+#define LWWAIT_MAX 128
+#define LWMUTEX_ATTR_PRIORITY 0x0100u
+typedef struct { uint32_t muid, thread, wa; int count; int active; int granted; uint64_t order; } LwWait;
 static LwWait s_lwwait[LWWAIT_MAX];
-static void lww_enqueue(uint32_t muid, uint32_t thread, int count) {
+static uint64_t s_lwwait_order;   /* arrival sequence: a reused low slot is not an older waiter */
+static int s_lwwait_priority_noted;
+static void lww_finish(uint32_t thread) {
+    for (int i = 0; i < LWWAIT_MAX; i++) {
+        LwWait *w = &s_lwwait[i];
+        if (!w->active || w->thread != thread) continue;
+        w->active = 0;
+        if (sr_guest_span_writable(w->wa + LWMUTEX_NUM_WAIT, 4u)) {
+            uint32_t waiters = MEM_R32(w->wa + LWMUTEX_NUM_WAIT);
+            if (waiters) MEM_W32(w->wa + LWMUTEX_NUM_WAIT, waiters - 1u);
+        }
+    }
+}
+static void lww_enqueue(uint32_t muid, uint32_t wa, uint32_t thread, int count) {
+    lww_finish(thread);
     for (int i = 0; i < LWWAIT_MAX; i++)
         if (!s_lwwait[i].active) {
-            s_lwwait[i] = (LwWait){muid, thread, count, 1};
+            s_lwwait[i] = (LwWait){muid, thread, wa, count, 1, 0, ++s_lwwait_order};
+            MEM_W32(wa + LWMUTEX_NUM_WAIT, MEM_R32(wa + LWMUTEX_NUM_WAIT) + 1u);
             return;
         }
+    fprintf(stderr, "HLE: LwMutex waiter table full; uid=0x%x thread=0x%x not recorded\n",
+            muid, thread);
 }
-static void lww_remove_thread(uint32_t thread) {
-    for (int i = 0; i < LWWAIT_MAX; i++)
-        if (s_lwwait[i].active && s_lwwait[i].thread == thread) s_lwwait[i].active = 0;
-}
-static void lww_remove_mutex(uint32_t muid) {
-    for (int i = 0; i < LWWAIT_MAX; i++)
-        if (s_lwwait[i].active && s_lwwait[i].muid == muid) s_lwwait[i].active = 0;
-}
-static int lww_pop_first(uint32_t muid, uint32_t *thread_out, int *count_out) {
-    for (int i = 0; i < LWWAIT_MAX; i++)
-        if (s_lwwait[i].active && s_lwwait[i].muid == muid) {
-            *thread_out = s_lwwait[i].thread;
-            *count_out = s_lwwait[i].count;
-            s_lwwait[i].active = 0;
-            return 1;
+/* The next ungranted record of a thread still blocked on muid (waitType 13,
+ * PSP-B3-01): the earliest to arrive, or, when the mutex's attr has 0x100, the
+ * best current priority with the earliest first among equals. A record whose
+ * thread already left the wait some other way is skipped; its owner finishes it.
+ * Arrival order is the PSPSDK FIFO default; the priority choice is PPSSPP-derived,
+ * not PSP-measured: hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6,
+ * Core/HLE/sceKernelMutex.cpp, __KernelUnlockLwMutex (PSP_MUTEX_ATTR_PRIORITY picks
+ * HLEKernel::FindBestPriorityWaiter); logged once per run. */
+static int lww_grant_first(uint32_t muid, uint32_t attr, uint32_t *thread_out, int *count_out) {
+    const int by_priority = (attr & LWMUTEX_ATTR_PRIORITY) != 0;
+    LwWait *best = NULL;
+    uint32_t best_pri = 0u;
+    for (int i = 0; i < LWWAIT_MAX; i++) {
+        LwWait *w = &s_lwwait[i];
+        SrThreadRunStatus rs;
+        if (!w->active || w->granted || w->muid != muid) continue;
+        if (sched_thread_run_status(w->thread, &rs) != 0 || rs.waitType != 13u || rs.waitId != muid)
+            continue;
+        const int before = !best ||
+            (by_priority && rs.currentPriority != best_pri ? rs.currentPriority < best_pri
+                                                           : w->order < best->order);
+        if (before) {
+            best = w;
+            best_pri = rs.currentPriority;
         }
-    return 0;
+    }
+    if (!best) return 0;
+    if (by_priority && !s_lwwait_priority_noted) {
+        s_lwwait_priority_noted = 1;
+        fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelUnlockLwMutex hands a "
+                        "priority (attr 0x100) LwMutex to its best-priority waiter\n");
+    }
+    best->granted = 1;
+    *thread_out = best->thread;
+    *count_out = best->count;
+    return 1;
+}
+void sr_hle_lwmutex_release_thread(uint32_t thread_uid) {
+    lww_finish(thread_uid);
+}
+void sr_hle_lwmutex_waits_reset(void) {
+    memset(s_lwwait, 0, sizeof(s_lwwait));
 }
 
 /* The guest hands us a pointer; validate the entire struct, not just its first
@@ -1542,8 +1780,8 @@ static uint32_t h_DeleteLwMutex(CpuState *s) {
     /* PSP-B1-01: deleting an already-deleted workarea is NOT_FOUND. */
     if (!m) return SCE_KERNEL_ERROR_LWMUTEX_NOT_FOUND;
     m->used = 0;
-    /* Anything still blocked here would wait forever otherwise. */
-    lww_remove_mutex(uid);
+    /* Anything still blocked here would wait forever otherwise. Each woken
+     * waiter finds the mutex gone and finishes its own record. */
     sched_wake(uid);
     /* PSP-B1-01: delete (even while held) leaves level 0 and poisons the
      * owner and uid words with 0xFFFFFFFF; attr is kept. */
@@ -1627,12 +1865,18 @@ enum {
     LWMUTEX_NOT_RECURSIVE,   /* self-held without the RECURSIVE attribute */
     LWMUTEX_GONE,            /* deleted before or while waiting */
     LWMUTEX_TIMEOUT,         /* contended timed wait expired */
+    LWMUTEX_WAKE_RESULT,     /* the wait was ended with a result (ReleaseWaitThread) */
 };
-static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_t toptr);
+static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_t toptr,
+                                   uint32_t *wake_out, int is_cb);
 static int lwmutex_acquire(uint32_t wa, int count, int blocking) {
-    return lwmutex_acquire_timeout(wa, count, blocking, 0u);
+    return lwmutex_acquire_timeout(wa, count, blocking, 0u, NULL, 0);
 }
-static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_t toptr) {
+/* is_cb: LockLwMutexCB. Its wait runs the thread's callbacks: those pending when it would
+ * block run first, and a callback notified while it waits ends the block, runs, and the lock
+ * is tried again. */
+static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_t toptr,
+                                   uint32_t *wake_out, int is_cb) {
     uint32_t cur = sched_current_uid();
     uint64_t end = 0;
     int has_timeout = 0;
@@ -1662,6 +1906,10 @@ static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_
             return LWMUTEX_TAKEN;
         }
         if (!blocking) return LWMUTEX_BUSY;
+        if (is_cb && sr_thread_has_pending_callbacks(cur)) {
+            sr_thread_dispatch_callbacks();
+            continue;   /* the mutex may have changed while the callbacks ran */
+        }
         /* Contention accounting. Under the previous no-op registration every one
          * of these was a silently unserialised critical section, so the count is
          * the direct measure of what the no-op was costing. Bounded logging: the
@@ -1674,12 +1922,12 @@ static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_
                         blocks, wa, owner, cur, level);
         }
         uint32_t uid = MEM_R32(wa + LWMUTEX_UID);
-        MEM_W32(wa + LWMUTEX_NUM_WAIT, MEM_R32(wa + LWMUTEX_NUM_WAIT) + 1u);
-        lww_enqueue(uid, cur, count);
+        lww_enqueue(uid, wa, cur, count);
         /* Measured (PSP-B3-01): LwMutex waits report waitType 13 with
          * waitId = the workarea's uid. */
         sched_set_current_wait_kind(13);
         int timed_out = 0;
+        if (is_cb) sched_set_current_cb_wait(1);
         if (has_timeout) {
             sched_vtime_refresh();
             uint64_t now = sched_vtime_us();
@@ -1693,9 +1941,9 @@ static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_
         } else {
             sched_block_on(uid);
         }
-        uint32_t waiters = MEM_R32(wa + LWMUTEX_NUM_WAIT);
-        if (waiters) MEM_W32(wa + LWMUTEX_NUM_WAIT, waiters - 1u);
-        if (!sync_find(uid, SYNC_KIND_LWMUTEX)) { lww_remove_thread(cur); return LWMUTEX_GONE; }
+        if (is_cb) sched_set_current_cb_wait(0);
+        lww_finish(cur);
+        if (!sync_find(uid, SYNC_KIND_LWMUTEX)) return LWMUTEX_GONE;
         /* Measured (PSP-B2-01): the unlocker hands ownership directly to
          * the waiter, so a woken waiter that now owns the mutex takes it. */
         if (MEM_R32(wa + LWMUTEX_LOCK_THREAD) == cur) {
@@ -1706,42 +1954,64 @@ static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_
             }
             return LWMUTEX_TAKEN;
         }
+        /* Measured (PSP-B3-01): ReleaseWaitThread ends the wait with WAIT_RELEASE,
+         * latched on this thread; it is answered, not waited out again. */
+        {
+            uint32_t woken = 0;
+            if (sched_take_wake_result(&woken)) {
+                if (wake_out) *wake_out = woken;
+                return LWMUTEX_WAKE_RESULT;
+            }
+        }
         if (timed_out || (has_timeout && ({ sched_vtime_refresh(); sched_vtime_us() >= end; }))) {
             /* Measured (PSP-B2-01): a contended timed lock answers
              * WAIT_TIMEOUT (0x800201A8) and reports the remaining timeout (0). */
-            lww_remove_thread(cur);
             if (toptr) MEM_W32(toptr, 0u);
             return LWMUTEX_TIMEOUT;
         }
     }
 }
 
-static uint32_t h_lwmutex_lock_common(CpuState *s) {
+static uint32_t h_lwmutex_lock_common(CpuState *s, int is_cb) {
     /* a0=workarea, a1=lockCount, a2=timeout ptr. */
     uint32_t wa = A0;
     if (!lwmutex_workarea_ok(wa)) return 0x80000103u;
     int count = (int)A1; if (count <= 0) return 0x800200d2u;  /* ILLEGAL_ARGUMENT */
+    /* pspautotests tests/threads/lwmutex/lock.expected "Lock 0 => 2": a count above 1
+     * on a non-recursive mutex is ILLEGAL_COUNT and takes nothing, as TryLock_600. */
+    if (!(MEM_R32(wa + LWMUTEX_ATTR) & LWMUTEX_ATTR_RECURSIVE) && count > 1)
+        return 0x800201bdu;   /* ILLEGAL_COUNT */
     uint32_t toptr = A2;
     if (toptr && !sr_guest_span_writable(toptr, 4)) return 0x80000103u;
-    int rc = (toptr ? lwmutex_acquire_timeout(wa, count, 1, toptr)
-                    : lwmutex_acquire(wa, count, 1));
+    uint32_t woken = 0;
+    int rc = lwmutex_acquire_timeout(wa, count, 1, toptr, &woken, is_cb);
     switch (rc) {
     case LWMUTEX_TAKEN: return 0u;
     case LWMUTEX_NOT_RECURSIVE: return SCE_KERNEL_ERROR_LWMUTEX_RECURSIVE_NOT_ALLOWED;
-    case LWMUTEX_TIMEOUT: return 0x800201a8u;
+    case LWMUTEX_TIMEOUT: return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+    case LWMUTEX_WAKE_RESULT: return woken;
     default: return 0x800201b5u;   /* WAIT_DELETE */
     }
 }
 
 static uint32_t h_LockLwMutex(CpuState *s) {
-    return h_lwmutex_lock_common(s);
+    return h_lwmutex_lock_common(s, 0);
 }
 
-/* Callback-variant waits remain unreviewed until the callback wait probe has
- * measured them. Keep a distinct registered owner so the measured blocking
- * lock cells cannot implicitly graduate the CB imports. */
+/* The callback-capable wait is unmeasured until the callback wait probe has
+ * measured it. Keep a distinct registered owner so the measured blocking
+ * lock cells cannot implicitly graduate the CB import. PPSSPP-derived, not
+ * PSP-measured: hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6,
+ * Core/HLE/sceKernelMutex.cpp, sceKernelLockLwMutexCB waits with callback
+ * processing on; logged once per run. */
+static int s_lock_lwmutex_cb_noted;
 static uint32_t h_LockLwMutexCB(CpuState *s) {
-    return h_lwmutex_lock_common(s);
+    if (!s_lock_lwmutex_cb_noted) {
+        s_lock_lwmutex_cb_noted = 1;
+        fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelLockLwMutexCB "
+                        "runs the thread's callbacks while it waits\n");
+    }
+    return h_lwmutex_lock_common(s, 1);
 }
 
 static uint32_t h_TryLockLwMutex(CpuState *s) {
@@ -1811,7 +2081,8 @@ static uint32_t h_UnlockLwMutex(CpuState *s) {
          * before it runs; only then does the waiter become runnable. */
         uint32_t next_thread = 0;
         int next_count = 0;
-        if (lww_pop_first(muid, &next_thread, &next_count)) {
+        const Sync *lm = sync_find(muid, SYNC_KIND_LWMUTEX);   /* the attr the mutex was made with */
+        if (lww_grant_first(muid, lm ? lm->attr : 0u, &next_thread, &next_count)) {
             MEM_W32(wa + LWMUTEX_LOCK_LEVEL, (uint32_t)next_count);
             MEM_W32(wa + LWMUTEX_LOCK_THREAD, next_thread);
             sched_wake_one_object_waiter(muid, next_thread);
@@ -1826,7 +2097,7 @@ static uint32_t h_UnlockLwMutex(CpuState *s) {
 }
 
 static uint32_t h_CancelSema(CpuState *s) {
-    /* a0=semaid, a1=newCount, a2=numWaitThreads out (stack_arg 0).
+    /* a0=semaid, a1=newCount, a2=numWaitThreads out.
      * Measured (PSP-B2-01): newCount -1 resets the count to the initial
      * count, n <= max sets it, n > max rejects with ILLEGAL_COUNT (and numWait
      * stays untouched). Wake waiters with WAIT_CANCEL and report their number;
@@ -1839,8 +2110,9 @@ static uint32_t h_CancelSema(CpuState *s) {
     int waiters = sched_count_waiters(A0);
     /* Measured (PSP-B2-01): -1 restores the create-time initial count. */
     m->count = (new_count == -1) ? m->initc : new_count;
-    uint32_t nump = stack_arg(s, 0);
-    if (nump) MEM_W32(nump, (uint32_t)waiters);
+    /* The third argument is a2 (AGENTS.md section 7: arguments 1-4 are a0-a3). */
+    uint32_t nump = A2;
+    if (nump && sr_guest_span_writable(nump, 4u)) MEM_W32(nump, (uint32_t)waiters);
     /* No waiter: no wake result to latch (a stale result would be
      * misattributed to the next waiter). */
     if (waiters) {
@@ -2069,7 +2341,7 @@ static uint32_t h_LockMutex_impl(CpuState *s, int is_cb) {
     uint32_t toptr = A2;
 
     if (sched_is_intr_context()) return 0x80020064u; /* SCE_KERNEL_ERROR_ILLEGAL_CONTEXT */
-    if (!sched_wait_permitted()) return 0x800201A7u; /* SCE_KERNEL_ERROR_CAN_NOT_WAIT */
+    if (!sched_wait_permitted()) return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
 
     Mutex *m = mutex_find(uid);
     if (!m) return SCE_KERNEL_ERROR_UNKNOWN_MUTEXID;
@@ -2459,6 +2731,8 @@ static uint32_t h_WaitEventFlag(CpuState *s) {
     if (!sr_evf_matches(m->pattern, bits, mode) && !(m->attr & 0x200u) &&
         sched_count_waiters(uid) > 0)
         return 0x800201b0u;
+    /* As h_WaitSema: an unwritable timeout word is refused before any wait. */
+    if (toptr && !sr_guest_span_writable(toptr, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     uint64_t wait_end = 0;      /* fixed by the first block; see h_WaitSema */
     int wait_end_set = 0;
     while (!sr_evf_matches(m->pattern, bits, mode)) {
@@ -2531,6 +2805,7 @@ static uint32_t h_WaitEventFlagCB(CpuState *s) {
     if (!sr_evf_matches(m->pattern, bits, mode) && !(m->attr & 0x200u) &&
         sched_count_waiters(uid) > 0)
         return 0x800201b0u;
+    if (toptr && !sr_guest_span_writable(toptr, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
     /* A CB wait services pending callbacks even when it initially matches.
      * A callback may change or delete the flag, so recheck before waiting. */
@@ -2618,20 +2893,29 @@ static uint32_t h_PollEventFlag(CpuState *s) {
     m->pattern = sr_evf_consume(m->pattern, bits, mode);
     return 0;
 }
-/* PSPAutotests refer.expected: size zero writes nothing; every nonzero
- * size, including 1, returns the complete 52-byte structure. */
+/* sceKernelReferEventFlagStatus: SceKernelEventFlagInfo is 52 bytes -- size(0),
+ * name[32](4), attr(36), initPattern(40), currPattern(44), numWaitThreads(48).
+ * Size zero writes nothing. Measured (PSP-KERNEL-STATUS-001, event-size-8 and
+ * event-size-40): any other size copies only min(size, 52) bytes of the record,
+ * whose size word is 52; pspautotests refer.expected agrees, since it reads back
+ * only the size word (0x34 for every nonzero size). */
 static uint32_t h_ReferEventFlagStatus(CpuState *s) {
     Sync *m = evf_find(A0); if (!m) return SCE_KERNEL_ERROR_UNKNOWN_EVFID;
     uint32_t info = A1;
     if (!info || !sr_guest_span_readable(info, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-    if (!MEM_R32(info)) return 0;
-    if (!sr_guest_span_writable(info, 52u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-    MEM_W32(info, 52u);
-    for (uint32_t i = 0; i < 32u; i++) MEM_W8(info + 4u + i, (uint8_t)m->name[i]);
-    MEM_W32(info + 36u, m->attr);
-    MEM_W32(info + 40u, m->init_pattern);
-    MEM_W32(info + 44u, m->pattern);
-    MEM_W32(info + 48u, (uint32_t)sched_count_waiters(A0));
+    uint32_t input_size = MEM_R32(info);
+    if (!input_size) return 0;
+    uint8_t rec[52];
+    const uint32_t write_len = input_size < (uint32_t)sizeof(rec) ? input_size : (uint32_t)sizeof(rec);
+    if (!sr_guest_span_writable(info, write_len)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    const uint32_t fields[5] = {
+        (uint32_t)sizeof(rec), m->attr, m->init_pattern, m->pattern,
+        (uint32_t)sched_count_waiters(A0),
+    };
+    memcpy(rec, &fields[0], 4u);
+    memcpy(rec + 4u, m->name, 32u);
+    memcpy(rec + 36u, &fields[1], 16u);
+    for (uint32_t i = 0; i < write_len; i++) MEM_W8(info + i, rec[i]);
     return 0;
 }
 

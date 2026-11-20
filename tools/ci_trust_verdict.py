@@ -41,7 +41,8 @@ Rules (finding codes)
 
 (a) Protected definitions. A protected path is anything under
 ``.github/workflows/`` or ``.github/actions/``, the CI tools named in
-``PROTECTED_EXTRA``, and every ``tools/`` file a default-branch workflow names
+``PROTECTED_EXTRA``, every gate configuration file named in ``GATE_CONFIG_NAMES``
+wherever it stands, and every ``tools/`` file a default-branch workflow names
 outside a comment. A head whose copy differs from the default branch's is
 
 ``CI_CHANGE_UNAPPROVED``
@@ -133,6 +134,11 @@ event) is ignored when the second route has a run.
     the intended run belongs to a different pull request, or another open pull
     request has the same head (its base, and so its merge-ref definitions,
     may differ).
+``RUN_BEFORE_RETARGET``
+    the pull request changed its base after the intended run was created (or
+    either time cannot be read): the run tested the head against the old base,
+    and retargeting starts no new run. A push, or closing and reopening the
+    pull request, runs it against the default branch.
 ``PR_NOT_OPEN`` / ``BASE_NOT_DEFAULT``
     nothing to judge for merge into the default branch.
 ``DRAFT_LIGHT_CI``
@@ -349,6 +355,13 @@ PROTECTED_EXTRA = frozenset({
     "tools/publish_audit.py",
 })
 
+# Configuration a required gate reads from the candidate's own checkout, wherever it stands. The OSV job runs
+# ``osv-scanner --recursive ./`` on the pull request's tree, and OSV-Scanner applies the ``[[IgnoredVulns]]`` of
+# an ``osv-scanner.toml`` beside a scanned lockfile or in a parent directory, so an added one could silence the
+# required ``OSV Vulnerability Scan``. (Dependency Review reads a configuration only through its ``config-file``
+# input, which the workflow does not set.)
+GATE_CONFIG_NAMES = frozenset({"osv-scanner.toml"})
+
 # A tools/ path standing on its own, not the tail of a longer path such as an
 # installed copy (``$dir/source/tools/nk_cli.py``) or a module name.
 _TOOL_REFERENCE = re.compile(r"(?<![\w./-])(?:\./)?(tools/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+)")
@@ -387,6 +400,18 @@ class Verdict:
 # --- Snapshot: the API answers and git facts, normalised ------------------
 
 
+def latest_label_event(events: list[dict]) -> dict | None:
+    """The newest ``labeled`` or ``unlabeled`` event of the approval label in ``events``, by time and then ID.
+
+    The verdict (``normalise``, ``collect``) and the approval writer (``label_state``) all choose the current label
+    event here, so they cannot disagree about which one it is. ``None`` when there is none.
+    """
+    label = [event for event in events
+             if event.get("event") in ("labeled", "unlabeled")
+             and (event.get("label") or {}).get("name") == APPROVAL_LABEL]
+    return max(label, key=lambda event: (event.get("created_at") or "", event.get("id") or 0), default=None)
+
+
 def _pr_numbers(raw: list[dict] | None) -> list[int]:
     return [int(item["number"]) for item in raw or [] if "number" in item]
 
@@ -418,13 +443,14 @@ def normalise(raw: dict) -> dict:
             "labels": sorted(label.get("name", "") for label in pr.get("labels") or []),
         }
     approval = None
-    events = [
-        event for event in raw.get("label_events") or []
-        if event.get("event") in ("labeled", "unlabeled")
-        and (event.get("label") or {}).get("name") == APPROVAL_LABEL
+    # ``label_events`` is every event of a labelled pull request; ``base_changes`` holds the retargets the
+    # collector reads whether or not the label is on.
+    retargets = [
+        event for event in [*(raw.get("label_events") or []), *(raw.get("base_changes") or [])]
+        if event.get("event") == "base_ref_changed"
     ]
-    if events:
-        last = max(events, key=lambda event: (event.get("created_at") or "", event.get("id") or 0))
+    last = latest_label_event(raw.get("label_events") or [])
+    if last is not None:
         approval = {
             "event": last["event"],
             "actor": (last.get("actor") or {}).get("login"),
@@ -459,7 +485,10 @@ def normalise(raw: dict) -> dict:
             key=lambda record: (record["recorded_at"], str(record["digest"]), str(record["route"])),
         ),
         "approval_list_truncated": raw.get("approval_list_truncated") is True,
-        "retargeted": any(event.get("event") == "base_ref_changed" for event in raw.get("label_events") or []),
+        "retargeted": bool(retargets),
+        # When each retarget happened; a head-attached run created before the newest proves nothing about the
+        # current base (``RUN_BEFORE_RETARGET``). A missing time stays an empty string, which proves nothing.
+        "retargeted_at": [event.get("created_at") or "" for event in retargets],
         "workflow_runs": [
             {
                 "id": int(run["id"]),
@@ -760,6 +789,21 @@ def _check_producer(snapshot: dict, producer: Producer, pending: list[str]) -> l
             "RUN_FOR_OTHER_PR", producer.context,
             f"run {latest['id']} belongs to pull request(s) {latest['pull_requests']}",
         ))
+    # A head-attached run tested the head against the base the pull request had when the run was created
+    # (``pull_request``: merged into it; ``pull_request_target``: its workflow). Retargeting starts no run and a
+    # re-run keeps the old base, so a run created before the newest retarget is not evidence for this base. A
+    # named run comes from the default branch whatever the base was.
+    created = _when(latest["created_at"])
+    if not named and any(
+        created is None or moved is None or moved >= created
+        for moved in (_when(stamp) for stamp in snapshot.get("retargeted_at") or [])
+    ):
+        findings.append(Finding(
+            "RUN_BEFORE_RETARGET", producer.context,
+            f"run {latest['id']} was created before the pull request changed its base, so it tested the head "
+            "against the old one; push a commit, or close and reopen the pull request, to run it against "
+            f"{snapshot['default_branch']!r}",
+        ))
     jobs = [job for job in snapshot["jobs"].get(str(latest["id"]), []) if job["name"] == producer.context]
     if len(jobs) > 1:
         findings.append(Finding(
@@ -899,6 +943,7 @@ def protected_paths(trusted: dict[str, str], candidate: dict[str, str], workflow
     paths = {path for path in set(trusted) | set(candidate) if path.startswith(PROTECTED_PREFIXES)}
     paths |= PROTECTED_EXTRA
     paths |= {path for path in set(trusted) | set(candidate) if _shadows_stdlib(path)}
+    paths |= {path for path in set(trusted) | set(candidate) if path.rsplit("/", 1)[-1] in GATE_CONFIG_NAMES}
     for text in workflow_texts:
         paths |= {path for path in referenced_tools(text) if path in trusted}
     return paths
@@ -956,20 +1001,31 @@ def trusted_workflow_texts(repo: Path, trusted: dict[str, str]) -> list[str]:
     ]
 
 
+# The key under which ``git_facts`` returns the trees and protected paths it read (``protected_view``).
+VIEW_KEY = "_protected_view"
+
+
+def protected_view(repo: Path, head_sha: str) -> tuple[dict[str, str], dict[str, str], set[str]]:
+    """The trusted tree, ``head_sha``'s tree and the protected paths of the verdict's own classification."""
+    trusted = tree_entries(repo, "HEAD")
+    candidate = tree_entries(repo, head_sha)
+    return trusted, candidate, protected_paths(trusted, candidate, trusted_workflow_texts(repo, trusted))
+
+
 def git_facts(repo: Path, repository: str, number: int, head_sha: str, remote: str | None = None) -> dict:
     """Fetch ``refs/pull/N/head`` as objects only and compare its CI definitions."""
     fetched = fetch_candidate(repo, repository, number, remote)
     facts: dict = {"fetched_head": fetched, "trusted_sha": _git(repo, "rev-parse", "HEAD").decode("ascii").strip()}
     if fetched != head_sha:
         return facts | {"protected_changes": [], "context_collisions": []}
-    trusted = tree_entries(repo, "HEAD")
-    candidate = tree_entries(repo, head_sha)
+    trusted, candidate, paths = protected_view(repo, head_sha)
     merge_base_sha = _git(repo, "merge-base", "HEAD", head_sha).decode("ascii").strip()
     merge_base = tree_entries(repo, merge_base_sha)
-    paths = protected_paths(trusted, candidate, trusted_workflow_texts(repo, trusted))
     return facts | {
         "protected_changes": protected_changes(trusted, candidate, merge_base, paths),
         "context_collisions": context_collisions(repo, head_sha, candidate),
+        # Not part of the snapshot: ``collect`` hands it to ``approval_digest``, so the trees are read once.
+        VIEW_KEY: (trusted, candidate, paths),
     }
 
 
@@ -1008,18 +1064,19 @@ def default_definition(repo: Path, sha: str, workflow: str) -> bool:
     return all(copy.returncode == 0 for copy in copies) and len(blobs) == 1 and blobs != {b""}
 
 
-def approval_digest(repo: Path, head_sha: str) -> str:
+def approval_digest(repo: Path, head_sha: str,
+                    view: tuple[dict[str, str], dict[str, str], set[str]] | None = None) -> str:
     """SHA-256 over the mode and bytes of every protected path in ``head_sha``'s tree.
 
     The path set is ``protected_paths`` with the trusted checkout's workflows, exactly as the verdict's own
     classification, plus every ``tools/`` path that a workflow or action of ``head_sha`` itself names. A protected path absent from the candidate contributes nothing, so a path added to
     or removed from the candidate changes the digest, and a rename is a removal plus an addition. The candidate's
     copy of this tool is itself a protected path. The path is NUL-terminated and the rest of a record has a fixed
-    shape, so no two different trees give the same preimage.
+    shape, so no two different trees give the same preimage. ``view`` is ``protected_view(repo, head_sha)`` when
+    the caller has already read it.
     """
-    trusted = tree_entries(repo, "HEAD")
-    candidate = tree_entries(repo, head_sha)
-    paths = protected_paths(trusted, candidate, trusted_workflow_texts(repo, trusted))
+    _trusted, candidate, protected = view if view is not None else protected_view(repo, head_sha)
+    paths = set(protected)
     # The verdict's own classification names a tool only when a default-branch workflow does. A tool the
     # candidate's workflows or actions newly run (or newly stop running) is exactly what a reviewed head can
     # change later without touching a workflow, so it is hashed too, and a reference that only the candidate
@@ -1210,14 +1267,23 @@ def _jobs_of(gh: "GitHub"):
     return lambda run_id: gh.paginate(f"actions/runs/{run_id}/jobs?filter=latest", "jobs")
 
 
+def permission_of(gh: "GitHub", login: str) -> str | None:
+    """``login``'s permission on the repository as GitHub names it, ``None`` for an answer without one.
+
+    An HTTP error propagates; each caller decides what an unanswered lookup means.
+    """
+    answer = gh.get(f"collaborators/{urllib.parse.quote(login)}/permission")
+    return answer.get("permission") if isinstance(answer, dict) else None
+
+
 def _has_write(gh: "GitHub", login: str, known: dict[str, bool]) -> bool:
     """Whether ``login`` has write, maintain or admin permission. A login GitHub cannot answer for has none."""
     if login not in known:
         try:
-            answer = gh.get(f"collaborators/{urllib.parse.quote(login)}/permission")
+            permission = permission_of(gh, login)
         except urllib.error.HTTPError:
-            answer = None
-        known[login] = isinstance(answer, dict) and answer.get("permission") in WRITE_PERMISSIONS
+            permission = None
+        known[login] = permission in WRITE_PERMISSIONS
     return known[login]
 
 
@@ -1352,6 +1418,19 @@ def unfinished_producers(workflow_runs: list[dict], head_sha: str, default_branc
     return waiting
 
 
+def absent_producers(workflow_runs: list[dict], head_sha: str, default_branch: str = "main",
+                     producers: tuple[Producer, ...] = PRODUCERS) -> set[str]:
+    """The head-attached producers (no named route) that have no run at this head at all.
+
+    GitHub starts a ``pull_request`` producer's run with the others for the same event, so once every other
+    producer has finished, none of these is still coming: the candidate deleted the workflow or edited its
+    triggers. Waiting for it would post pending for ever and never name that change, so ``collect`` reads the
+    rest and ``evaluate`` judges the head: ``CI_CHANGE_UNAPPROVED`` for an unapproved change, else pending.
+    """
+    return {producer.context for producer in producers
+            if not producer.named_events and not producer_runs(workflow_runs, producer, head_sha, default_branch)}
+
+
 def collect(
     gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: int | None,
     producers: tuple[Producer, ...] = PRODUCERS,
@@ -1359,7 +1438,8 @@ def collect(
     """Read everything the rules need. ``None`` when no pull request into the default branch has this head.
 
     While a producer is unfinished (``unfinished_producers``) only the workflow runs are read, and the result
-    holds ``waiting_producers`` in place of the rest.
+    holds ``waiting_producers`` in place of the rest. A head-attached producer with no run at all does not hold
+    the read back once every other producer has finished (``absent_producers``).
     """
     open_prs = gh.paginate("pulls?state=open")
     if number is None:
@@ -1370,10 +1450,11 @@ def collect(
         number = min(int(pr["number"]) for pr in matches)
     workflow_runs = gh.paginate(f"actions/runs?head_sha={head_sha}", "workflow_runs")
     waiting = unfinished_producers(workflow_runs, head_sha, default_branch, producers)
+    absent = absent_producers(workflow_runs, head_sha, default_branch, producers)
     # A named route is listed only when it can change the answer: while a producer without one is unfinished the
     # head is pending whatever the list says, and the list is one more API call (several for an old head).
     named_contexts = {producer.context for producer in producers if producer.named_events}
-    if not set(waiting) <= named_contexts:
+    if not set(waiting) - absent <= named_contexts:
         return {"head_sha": head_sha, "waiting_producers": waiting}
     since = min((run["created_at"] for run in workflow_runs if run.get("created_at")), default=None)
     horizons: dict[str, str] = {}
@@ -1391,34 +1472,31 @@ def collect(
         if lost:
             return {"head_sha": head_sha, "waiting_producers": lost}
         waiting = unfinished_producers(workflow_runs, head_sha, default_branch, producers)
-    if waiting:
+    if set(waiting) - absent:
         return {"head_sha": head_sha, "waiting_producers": waiting}
     pr = gh.get(f"pulls/{number}")
     assert isinstance(pr, dict)
     labelled = any(label.get("name") == APPROVAL_LABEL for label in pr.get("labels") or [])
+    # A retarget matters with or without the label (``RUN_BEFORE_RETARGET``), so the events are always read.
+    issue_events = gh.paginate(f"issues/{number}/events")
     raw: dict = {
         "head_sha": head_sha,
         "default_branch": default_branch,
         "pull_request": pr,
         "open_pull_requests": open_prs,
-        # The events only matter when the label is on the pull request: without it nothing is approved.
-        "label_events": gh.paginate(f"issues/{number}/events") if labelled else [],
+        # The label events only matter when the label is on the pull request: without it nothing is approved.
+        "label_events": issue_events if labelled else [],
+        "base_changes": [event for event in issue_events if event.get("event") in BASE_MOVED_EVENTS],
         "workflow_runs": workflow_runs,
         "check_runs": gh.paginate(f"commits/{head_sha}/check-runs?filter=all", "check_runs"),
         "statuses": gh.paginate(f"commits/{head_sha}/statuses"),
     }
-    events = [event for event in raw["label_events"]
-              if event.get("event") in ("labeled", "unlabeled")
-              and (event.get("label") or {}).get("name") == APPROVAL_LABEL]
-    last_label: dict = max(
-        events, key=lambda event: (event.get("created_at") or "", event.get("id") or 0), default={},
-    )
-    if events:
+    last_label: dict = latest_label_event(raw["label_events"]) or {}
+    if last_label:
         actor = (last_label.get("actor") or {}).get("login")
         if actor:
             try:
-                answer = gh.get(f"collaborators/{urllib.parse.quote(actor)}/permission")
-                raw["label_actor_permission"] = answer.get("permission") if isinstance(answer, dict) else None
+                raw["label_actor_permission"] = permission_of(gh, actor)
             except urllib.error.HTTPError:
                 raw["label_actor_permission"] = None
     # The rules read jobs only from each producer's newest live run at this head (``_check_producer``), so only
@@ -1440,11 +1518,12 @@ def collect(
         return {"head_sha": head_sha, "waiting_producers": lost}
     raw["jobs"] = jobs
     facts = git_facts(repo, gh.repository, number, head_sha)
-    raw |= facts
+    view = facts.get(VIEW_KEY)
+    raw |= {key: value for key, value in facts.items() if key != VIEW_KEY}
     # An approval is judged only when a label is on and some protected path changed.
     if labelled and any(change["kind"] != "behind" for change in facts["protected_changes"]):
         try:
-            raw["head_digest"] = approval_digest(repo, head_sha)
+            raw["head_digest"] = approval_digest(repo, head_sha, view)
             records = head_records(workflow_runs, _jobs_of(gh), head_sha, number, default_branch)
             # A dispatched record counts only when written after the label, so only runs since then are listed.
             if last_label.get("event") == "labeled" and last_label.get("created_at"):
@@ -1467,6 +1546,26 @@ def latest_live_run(workflow_runs: list[dict], producer: Producer, head_sha: str
     return max(live, key=run_order) if live else None
 
 
+def _table_text(text: str) -> str:
+    """``text`` made safe for one cell of the report's table.
+
+    Subjects carry candidate-controlled bytes: a path a pull request adds may hold a newline, a ``|`` or a
+    backtick. The report is printed to the trusted job's log, where a line starting with ``::`` is a workflow
+    command, and appended to its step summary, where ``|`` ends a cell and a backtick ends a code span. Each of
+    those characters, the backslash and every other non-printable character is written as a visible
+    ``\\xNN``/``\\uNNNN`` escape, so the cell stays on one line, in its column and inside its code span.
+    """
+    out = []
+    for char in text:
+        if char in "\\|`" or not char.isprintable():
+            code = ord(char)
+            out.append(f"\\x{code:02x}" if code <= 0xFF else f"\\u{code:04x}" if code <= 0xFFFF
+                       else f"\\U{code:08x}")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
 def summary_markdown(verdict: Verdict, snapshot: dict) -> str:
     pr = snapshot["pull_request"] or {}
     lines = [
@@ -1481,7 +1580,8 @@ def summary_markdown(verdict: Verdict, snapshot: dict) -> str:
     if verdict.findings:
         lines += ["| Code | Subject | Detail |", "| --- | --- | --- |"]
         lines += [
-            f"| {'' if item.fatal else '(info) '}`{item.code}` | `{item.subject}` | {item.message} |"
+            f"| {'' if item.fatal else '(info) '}`{item.code}` | `{_table_text(item.subject)}` | "
+            f"{_table_text(item.message)} |"
             for item in verdict.findings
         ]
     else:
@@ -1517,17 +1617,13 @@ def label_state(gh: GitHub, number: int, pr: dict) -> dict:
     if APPROVAL_LABEL not in {label.get("name") for label in pr.get("labels") or []}:
         raise ApprovalRefused(f"{APPROVAL_LABEL!r} is not on #{number}")
     all_events = gh.paginate(f"issues/{number}/events")
-    events = [event for event in all_events
-              if event.get("event") in ("labeled", "unlabeled")
-              and (event.get("label") or {}).get("name") == APPROVAL_LABEL]
-    if not events:
+    last = latest_label_event(all_events)
+    if last is None:
         raise ApprovalRefused("no label event")
-    last = max(events, key=lambda event: (event.get("created_at") or "", event.get("id") or 0))
     actor = (last.get("actor") or {}).get("login")
     if last["event"] != "labeled" or not actor:
         raise ApprovalRefused(f"the latest {APPROVAL_LABEL!r} event is not a labeling")
-    answer = gh.get(f"collaborators/{urllib.parse.quote(actor)}/permission")
-    permission = answer.get("permission") if isinstance(answer, dict) else None
+    permission = permission_of(gh, actor)
     if permission not in WRITE_PERMISSIONS:
         raise ApprovalRefused(f"{actor!r} has permission {permission!r}, not write")
     return {"actor": actor, "created_at": last.get("created_at") or "",
@@ -1808,9 +1904,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--approval and --attestation-target are separate commands")
 
     if args.snapshot:
-        snapshot = normalise(json.loads(args.snapshot.read_text(encoding="utf-8")))
-        verdict = evaluate(snapshot)
-        _report(verdict, snapshot, args.summary)
+        saved = json.loads(args.snapshot.read_text(encoding="utf-8"))
+        snapshot = normalise(saved)
+        judged = None
+        producers = PRODUCERS
+        if "repository" in saved:
+            # Judge the producer set the live verdict judged: a fork's snapshot judges its Fork provenance check.
+            # A snapshot saved before the repository was recorded keeps the upstream set.
+            producers = producers_for(saved["repository"], saved.get("repository_id"))
+            judged = _judged_line(saved["repository"], saved.get("repository_id"))
+            judged += fork_run_note(snapshot, producers, saved["repository"])
+        verdict = evaluate(snapshot, producers)
+        _report(verdict, snapshot, args.summary, judged)
         return 1 if verdict.state == "failure" else 0
 
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -1839,8 +1944,7 @@ def main(argv: list[str] | None = None) -> int:
             })
 
     identity = os.environ.get("GITHUB_REPOSITORY_ID")
-    judged = (f"Provenance producer set: {provenance_mode.mode(args.repository, identity)} "
-              f"(repository {args.repository}, ID {identity or 'unknown'})")
+    judged = _judged_line(args.repository, identity)
     print(judged)
     try:
         producers = producers_for(args.repository, identity)
@@ -1856,7 +1960,9 @@ def main(argv: list[str] | None = None) -> int:
             print(gh.budget_note())
             return 0
         if args.snapshot_out:
-            args.snapshot_out.write_text(json.dumps(raw, indent=1, sort_keys=True), encoding="utf-8")
+            # The repository and its ID choose the producers, so a replay with --snapshot judges the same set.
+            saved = {**raw, "repository": args.repository, "repository_id": identity}
+            args.snapshot_out.write_text(json.dumps(saved, indent=1, sort_keys=True), encoding="utf-8")
         snapshot = normalise(raw)
         verdict = evaluate(snapshot, producers)
     except Exception as error:
@@ -1869,6 +1975,12 @@ def main(argv: list[str] | None = None) -> int:
     post(verdict.state, status_description(verdict, producers))
     print(gh.budget_note())
     return 1 if verdict.state == "failure" else 0
+
+
+def _judged_line(repository: str | None, identity: str | None) -> str:
+    """The report line naming the producer set judged and what chose it."""
+    return (f"Provenance producer set: {provenance_mode.mode(repository, identity)} "
+            f"(repository {repository}, ID {identity or 'unknown'})")
 
 
 def _report(verdict: Verdict, snapshot: dict, summary: Path | None, judged: str | None = None) -> None:

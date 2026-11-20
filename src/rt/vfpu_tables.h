@@ -59,7 +59,8 @@ typedef struct {
 /* Manifest of every table the runtime requires. Returns the entry count. */
 const SrVfpuTableSpec *sr_vfpu_table_manifest(size_t *count_out);
 
-/* FIPS-180-4 SHA-256 over a buffer (exported for the selftest). */
+/* FIPS-180-4 SHA-256 over a buffer: the runtime's name for the one SHA-256 the player and the
+ * runtime share (nk_sha256_* in src/core/nk_shared_helpers.h). */
 void sr_vfpu_sha256(const uint8_t *data, size_t size, uint8_t digest[32]);
 /* RFC 2104 HMAC-SHA-256 over that SHA-256: `key` (any length; one longer than 64 bytes is hashed
  * first) and the message given as `part_count` pieces, hashed in order as if joined, so a caller

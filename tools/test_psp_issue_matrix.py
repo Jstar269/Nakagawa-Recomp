@@ -10,9 +10,11 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import subprocess
 import tempfile
 from typing import Any
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 # The repository root resolves `tools.`; the tools folder resolves bare sibling imports.
@@ -23,6 +25,22 @@ from tools import psp_issue_matrix  # noqa: E402
 
 
 class PspIssueMatrixTests(unittest.TestCase):
+    def test_live_query_only_fetches_open_issues_and_refuses_a_full_page(self) -> None:
+        single = subprocess.CompletedProcess([], 0, json.dumps([self.issue(501)]), "")
+        with patch.object(psp_issue_matrix.subprocess, "run", return_value=single) as run:
+            self.assertEqual(len(psp_issue_matrix._run_gh()), 1)
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--state") + 1], "open")
+        limit = int(command[command.index("--limit") + 1])
+        self.assertEqual(limit, 500)
+
+        full_page = subprocess.CompletedProcess(
+            [], 0, json.dumps([{"number": number} for number in range(limit)]), ""
+        )
+        with patch.object(psp_issue_matrix.subprocess, "run", return_value=full_page):
+            with self.assertRaisesRegex(SystemExit, "limit"):
+                psp_issue_matrix._run_gh()
+
     def routing_file(self, entries: list[dict[str, object]]) -> Path:
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         path = directory / "routing.json"
@@ -273,12 +291,36 @@ class PspIssueMatrixTests(unittest.TestCase):
         self.assertEqual(psp_issue_matrix._state(23, routes), "PSP_HARDWARE_READY")
         self.assertEqual(routes[23]["hardware_test_id"], "ORACLE-001")
         self.assertEqual(psp_issue_matrix._state(63, routes), "LOCAL_PRIVATE_ROUTE_READY")
-        self.assertNotIn("hardware_test_id", routes[63])
         self.assertEqual(psp_issue_matrix._state(69, routes), "LOCAL_PRIVATE_ROUTE_READY")
-        self.assertNotIn("hardware_test_id", routes[69])
         self.assertEqual(psp_issue_matrix._state(70, routes), "PSP_HARDWARE_READY")
         self.assertEqual(routes[70]["hardware_test_id"], "ORACLE-001")
         self.assertEqual(psp_issue_matrix._state(98, routes), "LOCAL_IMPLEMENTATION_READY")
+
+    def test_hardware_test_id_is_refused_outside_the_hardware_state(self) -> None:
+        # A row for any other state reports real_psp_evidence_needed=False, so a hardware
+        # test id there would contradict it.
+        for state in sorted(psp_issue_matrix.ROUTING_STATES - {"hardware"}):
+            with self.subTest(state=state):
+                path = self.routing_file(
+                    [{"issue": 63, "primary_state": state, "hardware_test_id": "ORACLE-001"}]
+                )
+                with self.assertRaisesRegex(psp_issue_matrix.RoutingManifestError, "hardware_test_id"):
+                    psp_issue_matrix.load_routing_manifest(path)
+
+    def test_checked_in_routing_agrees_with_the_oracle_manifest(self) -> None:
+        # The link and cycle checks need no gh snapshot: treat every routed issue and every
+        # dependency as open, so only the checked-in files decide the result.
+        routes = psp_issue_matrix.load_routing_manifest(psp_issue_matrix.DEFAULT_ROUTING)
+        groups, tests = psp_issue_matrix.derive_oracle_links(psp_issue_matrix.DEFAULT_ORACLE_MANIFEST)
+        snapshot: dict[int, dict[str, Any]] = {}
+        for number, entry in routes.items():
+            snapshot[number] = {"state": "OPEN"}
+            for dependency in entry["depends_on"]:
+                snapshot.setdefault(dependency, {"state": "OPEN"})
+        findings = psp_issue_matrix._validate_routing(snapshot, routes, groups, tests)
+        self.assertEqual(
+            [f for f in findings if f["code"] in {"oracle_link_disagreement", "dependency_cycle"}], []
+        )
 
 
     def test_file_imports_when_run_as_a_script(self) -> None:

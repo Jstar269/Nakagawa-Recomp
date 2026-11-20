@@ -10,7 +10,7 @@ same sense as
 > The [source-owned scalar-probe runbook](../tests/fixtures/psp_oracle/README.md), its
 > [strict result protocol](../tools/psp_oracle/protocol.py), and the shipped
 > [`tools/psp_readiness.py`](../tools/psp_readiness.py) cover the implemented subset. Read those
-> first. In particular, the `tools/hw_doctor.py` proposed in §7 is superseded by the readiness tool
+> first. In particular, the `tools/hw_doctor.py` proposed in §8 (and the struck item 4 in §9) is superseded by the readiness tool
 > — extend that tool rather than adding a second precondition checker.
 > The PSP-side v2 instruction-trace producer now exists for source-owned microprograms: the
 > `insn-trace` probe (`PSP-TRACE-001`, `tests/fixtures/psp_oracle/probe_insn_trace.c`) single-steps the
@@ -141,7 +141,9 @@ proposals. Each claim covers only the exact fixture named:
   for these 14 exact raw words on the authorized PSP-3000-series / 6.61 /
   ARK-5.1.0 route (2026-09-30). Fixture: `tests/fixtures/vfpu_oracle/vfpu_probe.c`
   (`FIXTURE_BUILD_ID nakagawa-vfpu-oracle-v1`), whose source-owned
-  `VASIN_DOMAIN_INPUTS` list fed the console; each word produced one record,
+  `VASIN_DOMAIN_INPUTS` list (now in the shared
+  `tests/fixtures/vfpu_oracle/vfpu_oracle_cases.h`, so `src/rt/vfpu_oracle_host.c`
+  prints the same records) fed the console; each word produced one record,
   `vfpu-vasin-domain-arg00` through `vfpu-vasin-domain-arg13`, in the table's
   order. These were two fresh USBHostFS/PSPLink sessions of that single probe
   (no multi-fixture campaign identifier applies); both returned
@@ -1466,6 +1468,130 @@ One console is one data point; see §11. Nothing here closes issue #70
     (every index the cells mask is below the offset). The software sampler (`clut_index` in `src/rt/ge.c`)
     reads t at every level of a T32 texture, as for T16, and adds the offset after the mask.
 
+- **PSP-3000 single-case run of `safe-scalar` (2026-11-17 UTC)**: one PSP-3000, XMB context, one launch on its
+  own boot (boot 221) after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Firmware
+  identity: console PSP-3000 (operator-recorded label); system software 6.61 (operator-declared, as in the
+  2026-11-11 entry below); PSPLink `pspver` printed `0x06060010` ("6.6.0") in the XMB context on this boot, before
+  and after the launch, which the runner records as 6.6.0; custom firmware ARK-5, version 5.2.0
+  (operator-declared, not read by a tool); PSPLink v3.2.1 as its `ver` command printed. `safe-scalar` (case 141,
+  `tests/fixtures/psp_oracle/probe_kernel_semantics.c`) at `86279e852`, 49 records and the done record. Both
+  envelopes of the runner's report (`transport-write` and `safe-scalar`) are acceptance-eligible with 0 blockers
+  (evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, teardown check PASS,
+  the runner's state `READY` with no terminal reason), every record is PASS with no SKIP, the stream ends
+  COMPLETE PASS, and the PSP answered as qualified on boot 221 before the launch and at two requalifications after
+  it. The stream's own meta line gives the model and firmware as unknown and a zero binary digest, as every probe
+  does; the envelope adds the operator-recorded model, the firmware the runner read and the staged PRX digest
+  (binary binding `PLACEHOLDER`, device identity `PARTIAL`, 0 identity blockers).
+
+  What this record rests on, and what it lacks: the private host wrapper that starts the runner and arms the
+  console's watchdog printed no verdict for this launch. After the runner had written its report, the wrapper's
+  own post-run device-state attestation was refused, because the USBHostFS link had lost sync and no fresh
+  heartbeat arrived; the wrapper exited without its report, so the runner's exit code was not printed. The record
+  rests on the runner's report, the complete host0 stream (its records equal the envelope's) and the two later
+  requalifications on the same boot. `tools/psp_oracle/oracle_matrix.py` would not have named a launch `ACCEPTED`
+  whose probe command exited non-zero; this was a single launch outside the matrix. The raw envelope and host0
+  log stay in the private campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-17) |
+  | --- | --- | --- | --- |
+  | `PSP-SAFE-SCALAR-001` | the 49 rows of the table below and `safe-scalar-done` (boot 221) | any other date, list class, pool shape, partition or context; any address (the stream records only differences) | MEASURED: 49 records and the done record, all PASS |
+
+  The records, as the runner's strict parser reads them from the envelope (`tools/psp_oracle/parse_golden.py`,
+  `SAFE_SCALAR_ROWS`, gives each row's word count; a word of `0xa5a5a5a5` is the probe's preset, left unwritten):
+
+  | Case id | Status | Result | Output words (out0 onward) |
+  | --- | --- | --- | --- |
+  | `rtc-valid-day-0` | PASS | `0xfffffffd` | `0x000007e8` `0x00000001` `0x00000000` `0x00000000` |
+  | `rtc-valid-feb-29-2023` | PASS | `0xfffffffd` | `0x000007e7` `0x00000002` `0x0000001d` `0x00000000` |
+  | `rtc-valid-feb-29-1900` | PASS | `0xfffffffd` | `0x0000076c` `0x00000002` `0x0000001d` `0x00000000` |
+  | `rtc-valid-feb-30-2024` | PASS | `0xfffffffd` | `0x000007e8` `0x00000002` `0x0000001e` `0x00000000` |
+  | `rtc-valid-feb-31-2024` | PASS | `0xfffffffd` | `0x000007e8` `0x00000002` `0x0000001f` `0x00000000` |
+  | `rtc-valid-apr-31-2024` | PASS | `0xfffffffd` | `0x000007e8` `0x00000004` `0x0000001f` `0x00000000` |
+  | `rtc-valid-day-0-hour-24` | PASS | `0xfffffffd` | `0x000007e8` `0x00000001` `0x00000000` `0x00000018` |
+  | `rtc-dow-month-0` | PASS | `0x00000006` | `0x000007ea` `0x00000000` `0x00000001` |
+  | `rtc-dow-month-13` | PASS | `0x00000005` | `0x000007ea` `0x0000000d` `0x00000001` |
+  | `rtc-dow-month-13-again` | PASS | `0x00000005` | `0x000007ea` `0x0000000d` `0x00000001` |
+  | `rtc-dow-month-14` | PASS | `0x00000001` | `0x000007ea` `0x0000000e` `0x0000000f` |
+  | `rtc-dow-month-24` | PASS | `0x00000006` | `0x000007ea` `0x00000018` `0x00000001` |
+  | `rtc-dow-year-0` | PASS | `0x00000000` | `0x00000000` `0x00000001` `0x00000001` |
+  | `rtc-dow-year-10000` | PASS | `0x00000006` | `0x00002710` `0x00000001` `0x00000001` |
+  | `rtc-dow-day-1000001` | PASS | `0x00000005` | `0x000007ea` `0x00000001` `0x000f4241` |
+  | `rtc-dow-day-max` | PASS | `0x00000000` | `0x000007ea` `0x00000001` `0x7fffffff` |
+  | `rtc-time-1969` | PASS | `0x800001fe` | `0x00000000` `0xa5a5a5a5` |
+  | `rtc-time-1601` | PASS | `0x800001fe` | `0x00000000` `0xa5a5a5a5` |
+  | `rtc-time-2106-past` | PASS | `0x800001fe` | `0x7fffffff` `0xa5a5a5a5` |
+  | `rtc-time-9999` | PASS | `0x800001fe` | `0x7fffffff` `0xa5a5a5a5` |
+  | `rtc-time-month-0` | PASS | `0x00000000` | `0x659dde00` `0xa5a5a5a5` |
+  | `rtc-time-month-13` | PASS | `0x00000000` | `0x674ba700` `0xa5a5a5a5` |
+  | `rtc-time-day-0` | PASS | `0x00000000` | `0x6590af00` `0xa5a5a5a5` |
+  | `rtc-time-day-32` | PASS | `0x00000000` | `0x65badf00` `0xa5a5a5a5` |
+  | `rtc-time-feb-30` | PASS | `0x00000000` | `0x65e11a80` `0xa5a5a5a5` |
+  | `rtc-time-hour-24` | PASS | `0x00000000` | `0x65935200` `0xa5a5a5a5` |
+  | `rtc-time-second-60` | PASS | `0x00000000` | `0x659200bc` `0xa5a5a5a5` |
+  | `rtc-addyears-y10000-plus-0` | PASS | `0x00000000` | `0xa5a5a5a5` `0xa5a5a5a5` `0x00000000` |
+  | `rtc-addyears-y10000-plus-1` | PASS | `0x00000000` | `0xa5a5a5a5` `0xa5a5a5a5` `0x00000001` |
+  | `rtc-addyears-y10000-minus-1` | PASS | `0x00000000` | `0x3f8b4000` `0x0460e75d` `0xffffffff` |
+  | `rtc-addyears-y10001-minus-2` | PASS | `0x00000000` | `0x3f8b4000` `0x0460e75d` `0xfffffffe` |
+  | `tmid-9-list` | PASS | `0x00000000` | `0x00000000` `0x00000000` |
+  | `tmid-10-list` | PASS | `0x00000000` | `0x00000000` `0x00000000` |
+  | `tls-fragmentation` | PASS | `0x00000000` | `0x0008b600` |
+  | `tls-brackets` | PASS | `0x00000000` | `0x00000001` `0x00000001` `0x016ff200` `0x00000000` `0x00000000` `0x00000200` `0x00000100` |
+  | `tls-create-normal` | PASS | `0x00000001` | `0x00000400` `0x00000400` |
+  | `tls-place-normal` | PASS | `0x00000000` | `0x00000001` `0x00000001` `0x00000500` `0x00000100` `0x00000000` `0x00000000` |
+  | `tls-addr-normal` | PASS | `0x00000000` | `0x00000001` `0x00000100` `0x016ff100` `0x00000000` `0x00000001` `0xa5a5a5a5` |
+  | `tls-status-normal` | PASS | `0x00000000` | `0x0000003c` `0x00000000` `0x00000000` `0x00000100` `0x00000004` `0x00000003` `0x00000000` `0xa5a5a5a5` |
+  | `tls-create-high` | PASS | `0x00000001` | `0x00000400` `0x00000000` |
+  | `tls-place-high` | PASS | `0x00000000` | `0x00000001` `0x00000001` `0x00000500` `0x00000500` `0x00000000` `0x00000000` |
+  | `tls-addr-high` | PASS | `0x00000000` | `0x00000001` `0x016fee00` `0x00000400` `0x00000000` `0x00000001` `0x016fed00` |
+  | `tls-status-high` | PASS | `0x00000000` | `0x0000003c` `0x00004000` `0x00000001` `0x00000100` `0x00000004` `0x00000003` `0x00000000` `0xa5a5a5a5` |
+  | `tls-create-high-2` | PASS | `0x00000001` | `0x00000400` `0x00000000` |
+  | `tls-addr-high-2` | PASS | `0x00000000` | `0x00000001` `0x016fea00` `0x00000800` `0x00000000` `0x00000001` `0xfffffc00` |
+  | `tls-thread` | PASS | `0x00000000` | `0x00000001` `0x00000000` `0x00000100` `0x00000100` `0x00000000` `0x00000000` |
+  | `tls-free` | PASS | `0x00000000` | `0x00000000` `0x00000000` `0x00000000` |
+  | `tls-delete` | PASS | `0x00000000` | `0x00000000` `0x00000000` `0x00000000` |
+  | `tls-cleanup` | PASS | `0x00000000` | `0x00000000` `0x00000000` `0x00000000` `0x00000000` |
+  | `safe-scalar-done` | PASS | `0x00000000` | `0x00000031` |
+
+  What the cells establish, for the exact arguments named (`0x800001fe` is the runtime's `RTC_INVALID_VALUE`):
+  - *`sceRtcCheckValid`.* All seven dates return `0xfffffffd` (-3, the day): 2024-01-00, 2023-02-29, 1900-02-29,
+    2024-02-30, 2024-02-31, 2024-04-31, and 2024-01-00 with an hour of 24, so the day is judged before the hour.
+  - *`sceRtcGetDayOfWeek`* (0 is Sunday; arguments year, month, day). (2026, 0, 1) is 6; (2026, 13, 1) is 5, on
+    both calls; (2026, 14, 15) is 1; (2026, 24, 1) is 6; (0, 1, 1) is 0; (10000, 1, 1) is 6; (2026, 1, 1000001)
+    is 5; (2026, 1, `0x7fffffff`) is 0. Months 13 and 14 answer as 2027-01-01 and 2027-02-15 do, but month 0 does
+    not answer as 2025-12-01 (a Monday) and month 24 does not answer as 2027-12-01 (a Wednesday). Year 10000 and
+    day 1000001 answer as a linear carry does; day `0x7fffffff` does not (a linear carry gives 4).
+  - *`sceRtcGetTime_t`.* The call writes one 32-bit word; the word after it is untouched in all eleven rows.
+    1969-12-31 23:59:59 and 1601-01-01 00:00:00 return `0x800001fe` and write 0. 2106-02-07 06:28:16 (the first
+    second past 32 bits) and 9999-12-31 23:59:59 return `0x800001fe` and write `0x7fffffff`. A date with one
+    field out of range returns 0: 2024-00-10 writes `0x659dde00` (the seconds of 2024-01-10 00:00:00), 2024-13-01
+    `0x674ba700` (2024-12-01), 2024-01-00 `0x6590af00` (2023-12-31), 2024-01-32 `0x65badf00` (2024-02-01),
+    2024-02-30 `0x65e11a80` (2024-03-01), 2024-01-01 24:00:00 `0x65935200` (2024-01-02 00:00:00) and 2024-01-01
+    00:00:60 `0x659200bc` (00:01:00). Where between 2038-01-19 03:14:08 and 2106-02-07 06:28:15 the refusal
+    begins is not measured.
+  - *`sceRtcTickAddYears`.* From the tick of 10000-01-01 00:00:00 (315537897600000000), adding 0 or 1 returns 0
+    and leaves the destination unwritten; adding -1 returns 0 and writes `0x0460e75d3f8b4000`, the tick of
+    9999-01-01 00:00:00. From the tick of 10001-01-01 00:00:00 (315569520000000000), adding -2 returns 0 and
+    writes the same tick.
+  - *`sceKernelGetThreadmanIdList`.* For type 9 (thread event handlers) and type 10 (alarms), with a 16-slot
+    buffer and none of either class created by the probe, the call returns 0, stores a count of 0 and writes no
+    slot.
+  - *TLS pools* (partition 2, four `0x100`-byte blocks, NULL options; read as in
+    [Reading the safe-scalar TLS rows](#reading-the-safe-scalar-tls-rows)). `tls-fragmentation` is `0x0008b600`,
+    not 0: the free memory was several runs, so the `tls-addr-*` rows decide the placement and the `tls-place-*`
+    rows are a cross-check, which agrees. Both `0x100` brackets were obtained, their heads `0x100`-aligned and
+    `0x016ff200` apart; the total free size fell by `0x200` and the largest free block by `0x100`. The pool
+    without the attribute was created (total free size down `0x400`): the main thread's block is `0x100` above
+    the low bracket's head, directly after that bracket, and a fresh Low block then lands `0x500` above it, after
+    the pool, while a fresh High block stays `0x100` below the high bracket. The pool with attribute `0x4000` was
+    created (total free size down `0x400`): the main thread's block is `0x400` below the high bracket's head, so
+    the `0x400`-byte pool lies directly below that bracket with the thread's block lowest in it, and a fresh High
+    block then lands `0x500` below the bracket, below the pool, while a fresh Low block does not move. The second
+    attribute `0x4000` pool lies `0x400` below the first (`0x800` below the bracket). A second call for the same
+    thread returns the same address in each pool. The second thread's block is `0x100` above the main thread's
+    in the pool without the attribute and in the first pool with it. `sceKernelReferTlsplStatus` reads a size
+    word of `0x3c`, the attribute (0, then `0x4000`), index 0 then 1, block size `0x100`, 4 blocks, 3 free and 0
+    waiting threads, and leaves the word after its 60 bytes untouched. Every free and delete returns 0, and the
+    total and the largest free size end where they began.
 - **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**: one PSP-3000, XMB context, one launch on
   its own boot (boot 192) after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Firmware
   identity: console PSP-3000; system software 6.61 (operator-declared; `flash0:/vsh/etc/version.txt` read
@@ -1543,6 +1669,57 @@ One console is one data point; see §11. Nothing here closes issue #70
   The values are listed in the `sas-adsr` row of `tests/fixtures/psp_oracle/README.md` and under
   [PSP-SAS-002 capture 2026-11-10](#psp-sas-002-capture-2026-11-10).
 
+- **PSP-3000 single-case run of `hle-std-handles` in the XMB context under ARK-5 5.2.0 (2026-11-17 UTC)**: one
+  PSP-3000, XMB context, one launch on its own boot (boot 222) after the `transport-write` preflight
+  (PSP-TRANSPORT-001 is not re-cited). Firmware identity as for the `safe-scalar` run of the same day (boot 221):
+  console PSP-3000 (operator-recorded label); system software 6.61 (operator-declared); PSPLink `pspver` printed
+  `0x06060010` ("6.6.0") in the XMB context on this boot, before and after the launch, which the runner records as
+  6.6.0; custom firmware ARK-5, version 5.2.0 (operator-declared, not read by a tool); PSPLink v3.2.1.
+  `hle-std-handles` (case 156, `tests/fixtures/psp_oracle/probe_hle_measure.c`) at `3872796c`, the commit of the
+  game-context run below; the source of the case is the same at `d5fed0ba`, at `3872796c` and in this tree.
+  4 records and the done record (out0 4), all PASS, COMPLETE PASS. The runner exited 0 and both envelopes of its
+  report (`transport-write` and `hle-std-handles`) are acceptance-eligible with 0 blockers (evidence class
+  `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, teardown check PASS, the runner's state
+  `READY` with no terminal reason). The raw envelope and host0 log stay in the private campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-17, `3872796c`) |
+  | --- | --- | --- | --- |
+  | `PSP-HLE-STDIO-001` | `stdio-handles`, `stdio-write-stdout`, `stdio-write-stderr`, `stdio-close-stdout`, `hle-std-handles-done` (boot 222, XMB context) | a read from Stdin, the game context under ARK-5 5.1.0, a launch without PSPLink, the UID values on other boots | MEASURED (`hle-std-handles`) |
+
+  The records, as the runner's strict parser reads them from the envelope (`tools/psp_oracle/parse_golden.py`,
+  `HLE_STD_HANDLES_ROWS`, gives each row's word count):
+
+  | Case id | Status | Result | Output words (out0 onward) |
+  | --- | --- | --- | --- |
+  | `stdio-handles` | PASS | `0x00938a15` | `0x0093a513` `0x00938a15` `0x00936f17` |
+  | `stdio-write-stdout` | PASS | `0x00000001` | `0x00938a15` `0x00938a15` |
+  | `stdio-write-stderr` | PASS | `0x00000001` | `0x00936f17` `0x00936f17` |
+  | `stdio-close-stdout` | PASS | `0x800200d1` | `0x00000001` `0x00938a15` `0x00938a15` |
+  | `hle-std-handles-done` | PASS | `0x00000000` | `0x00000004` |
+
+  What the cells establish:
+  - *`stdio-handles`.* `sceKernelStdin`, `sceKernelStdout` and `sceKernelStderr` returned `0x0093a513`,
+    `0x00938a15` and `0x00936f17` (the result word is Stdout's): three distinct UIDs, the same three as on boot 135
+    and boot 200.
+  - *`stdio-write-stdout`, `stdio-write-stderr`.* A one-byte `sceIoWrite` returned 1 on Stdout and on Stderr, and
+    each handle read the same UID again after its write.
+  - *`stdio-close-stdout`.* `sceIoClose` of the Stdout UID returned `0x800200d1` and closed nothing: the write
+    after it returned 1 and `sceKernelStdout` returned the UID that was closed.
+
+  The close's answer by launch context and custom firmware version, one launch each, all three launched through
+  PSPLink on this console:
+
+  | Launch context | ARK-5 5.1.0 | ARK-5 5.2.0 |
+  | --- | --- | --- |
+  | XMB | `0x800200d1` (boot 135, `d5fed0ba`) | `0x800200d1` (boot 222, `3872796c`) |
+  | game | not measured | `0x80020325` (boot 200, `3872796c`) |
+
+  Boot 222 and boot 200 ran the same commit under the same ARK-5 version and differ in the launch context, and
+  boot 222 answers as boot 135 did under the older version. So for these launches the launch context decides the
+  close's answer and the ARK-5 version does not. Not measured: the game context under ARK-5 5.1.0, a launch
+  without PSPLink (under PSPLink the three handles are its tty), a close of the Stdin or Stderr handle, and any
+  other console or system software.
+
 - **PSP-3000 single-case run of `hle-std-handles` in the game context (2026-11-12 UTC)**: one PSP-3000, game
   context (entered from the XMB by one `nkctl --owner-present game-context` soft reset, the owner at the console),
   one launch on its own boot (boot 200) after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited).
@@ -1563,7 +1740,8 @@ One console is one data point; see §11. Nothing here closes issue #70
   on Stdout and on Stderr. `sceIoClose` of the Stdout UID returned `0x80020325` here, where the XMB run returned
   `0x800200d1`; it again closed nothing: a write afterwards returned 1 and `sceKernelStdout` returned the same UID.
   The two runs also differ in custom firmware version (ARK-5 5.1.0 with `pspver` declared 6.6.0 on boot 135,
-  ARK-5 5.2.0 with 6.6.1 on boot 200); which factor decides the close's answer is not measured.
+  ARK-5 5.2.0 with 6.6.1 on boot 200), so these two runs alone do not separate the launch context from the
+  firmware version. The 2026-11-17 XMB run above does: the launch context decides the close's answer.
 
 - **PSP-3000 single-case runs of `hle-issues-batch`, `hle-kernel-pool-bounds` and `registry-font` (2026-11-10)**:
   one PSP-3000, all three PRXs built from `979c6a1dd`, XMB context, one launch per boot (boots 172, 173 and 174),
@@ -3950,6 +4128,7 @@ not expected PSP values.
 | `kernel-semantics` | `PSP-KERNEL-SEM-001` | `MEASURED` (2026-10-31, `0c3cf0da`, boot 84; single launch, not in the campaign queue) | #1287, #1390, #1383, #1380, #1382: VBLANK sub-interrupt delivery order, controller read consumption, peek counts, analog by sampling mode and cycle spacing, volatile-lock types and partition-5 allocations, Memory Stick exclusive create and seeks past 4 GiB in a probe-owned directory, WLAN switch and power state; never the MAC or OpenPSID |
 | `io-seek-eof` | `PSP-IO-EOF-001` | `MEASURED` (2026-11-02, `f484ef58`, boot 100; single launch, not in the campaign queue) | #1380: Memory Stick opens of a missing file without `PSP_O_CREAT`, seeks before the start from each whence and through `sceIoLseek32`, a write after a seek past the end (sizes, position, tail) and a read past the end, in a probe-owned directory; the gap bytes stay private |
 | `io-umd-eof` | `PSP-IO-EOF-002` | `MEASURED` (2026-11-04, `999f3ce3`, boot 116; single launch, not in the campaign queue) | #1380: read-only, a game disc in the drive: seeks past the end and before the start of two `disc0:` files and of the raw device `umd0:` through `sceIoLseek` and `sceIoLseek32`, each with the position after it, reads across and at the end (count, bytes changed, position), and the UMD state before and after; sizes, the last sector's number and the bytes read stay private |
+| `safe-scalar` | `PSP-SAFE-SCALAR-001` | `MEASURED` (2026-11-17 UTC, PSP-3000, boot 221, XMB context, `86279e852`; 49 records and the done record, all PASS, acceptance-eligible; built as case 141; single launch, not in the campaign queue) | #2640: cells the runtime stops at by name or answers from an emulator, with no device, dialog, GE or radio call and no handler installed: `sceRtcCheckValid` for a day of 0 or past the month's length; `sceRtcGetDayOfWeek` for a month of 0 or 13 to 24, a year of 0 or 10000 and a day past 1000000; `sceRtcGetTime_t` before 1970, past 32 bits and with one field out of range; `sceRtcTickAddYears` from a tick past year 9999; `sceKernelGetThreadmanIdList` for the thread event handler and alarm classes; and where `sceKernelCreateTlspl` places a pool without and with attribute `0x4000`, each address recorded only as a difference from a block the probe allocated; the first TLS row records whether the free memory was one run ([how to read the TLS rows](#reading-the-safe-scalar-tls-rows)). 49 records. See the [2026-11-17 `safe-scalar` bullet](#measured-to-date-index--exact-cells-only-do-not-generalize). |
 | `hle-utility-none` | `PSP-HLE-UTILITY-NONE-001` | `MEASURED` (2026-11-04, `999f3ce3`, boot 115, XMB context; single launch, not in the campaign queue) | #1386: `GetStatus`, `Update(1)` and `ShutdownStart` of savedata, the message dialog, netconf, gamedata install and game sharing with no `InitStart`; no dialog is started |
 | `ge-sample` | `PSP-GE-SAMPLE-001` | `MEASURED` (2026-10-28, `86e55611`; single launch, not in the campaign queue) | #282: the raw 8888 pixels of a 16x16 window after 48 through-mode draws (triangle pair and sprite, nearest and bilinear, two parity textures) over 1:1, +0.5-texel, 2x-magnified and 20-to-12 mappings with float and 16-bit vertex words. 816 result records. |
 | `dma-timing` | `PSP-DMAC-002` | `MEASURED` (2026-10-29, `0e40e7d3`, `281a21a4` and `1310e632`; single launches, not in the campaign queue) | #303: `sceDmacMemcpy` / `sceDmacTryMemcpy` per-call duration by size (0x10 to 0x100000) and main-RAM/VRAM pair, relative-alignment cost, BUSY against the NULL and zero-size checks, what a refused Try copies, the order of queued callers, the busy window, and the sizes a pending transfer lets through. 202 result records in the last build. |
@@ -3965,7 +4144,7 @@ not expected PSP values.
 | `ge-clut-mip` | `PSP-GE-MIP-002` | `MEASURED` (2026-11-06, PSP-3000, boot 134, `2795f150`; 94 records) | Multi-CLUT mip sampling cells across palette formats, banks and level selection. |
 | `ge-weight` | `PSP-GE-WEIGHT-001` | `MEASURED` (2026-11-06, PSP-3000, boot 136, `d5fed0ba`; 288 records) | Weighted-vertex format and count combinations with raw GE output windows. |
 | `ge-rtt` | `PSP-GE-RTT-001` | `MEASURED` (2026-11-06, PSP-3000, boot 137, `cb3702cf`; 126 records) | Render-to-texture CPU reads, flush variants and output pixels. |
-| `hle-std-handles` | `PSP-HLE-STDIO-001` | `MEASURED` (2026-11-06, PSP-3000, boot 135, `d5fed0ba`, XMB context; again 2026-11-12, boot 200, `3872796c`, game context; 4 records each) | Standard-handle write and close results; the probe does not read stdin. The close of Stdout answered `0x800200d1` on boot 135 (XMB, ARK-5 5.1.0) and `0x80020325` on boot 200 (game context, ARK-5 5.2.0); which factor decides it is not measured. |
+| `hle-std-handles` | `PSP-HLE-STDIO-001` | `MEASURED` (2026-11-06, PSP-3000, boot 135, `d5fed0ba`, XMB context; again 2026-11-12, boot 200, `3872796c`, game context; again 2026-11-17 UTC, boot 222, `3872796c`, XMB context; 4 records each) | Standard-handle write and close results; the probe does not read stdin. The close of Stdout answered `0x800200d1` in the XMB context on boot 135 (ARK-5 5.1.0) and on boot 222 (ARK-5 5.2.0), and `0x80020325` in the game context on boot 200 (ARK-5 5.2.0): for these launches the launch context decides it, not the ARK-5 version. The game context under ARK-5 5.1.0 is not measured. |
 | `hle-audio-rest` | `PSP-HLE-AUDIO-REST-001` | `MEASURED` (2026-11-06, PSP-3000, boot 138, `8db3ec9d`; 102 records) | RestLen and RestLength after 32 blocking-output calls at 1024, 2048 and 4096 frames. |
 | `sas-adsr` | `PSP-SAS-002` | `MEASURED` (2026-11-13 UTC, PSP-3000, boot 208, game context, `06a6c942c`; 696 records and the done record, all PASS, acceptance-eligible; captured earlier on boot 185 with the same records) | The SAS envelope for #1296; every record repeats the 2026-11-05 values. See [PSP-SAS-002 capture 2026-11-10](#psp-sas-002-capture-2026-11-10). |
 | `sas-mix` | `PSP-SAS-003` | `MEASURED` (2026-11-12, PSP-3000, boot 197, game context, `3872796c`; 205 records, all PASS, acceptance-eligible; captured earlier on boots 146 and 191 with the same records) | Synthetic volume, WithMix and pitch cells for #2135 and #2054. See [PSP-SAS-003 capture 2026-11-07](#psp-sas-003-capture-2026-11-07). |
@@ -3973,6 +4152,9 @@ not expected PSP values.
 | `hle-self-stop-unload` | `PSP-HLE-SELFSTOP-001` | `MEASURED` (2026-11-08, PSP-3000, boot 165, `935f225d`; 6 records) | #341: sceKernelSelfStopUnloadModule from a helper PRX's own thread: the call does not return, module_stop runs once and the module is unloaded. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` (captured twice, PSP-3000, game context, 2026-11-12 boots 204 and 206; not acceptance-eligible) | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. A netconf dialog (boot 204) and a gamedata install dialog (boot 206) stayed RUNNING to the poll cap and the console then needed a power cycle: [captures](#psp-hle-utility-dialog-001-captures-2026-11-12). |
 | `hle-utility-netconf-sharing` | `PSP-HLE-UTILITY-DIALOG-002` | `CAPTURED` (2026-11-13 UTC, PSP-3000, boot 211, game context, `e8b9b0cd5`; game sharing stayed RUNNING to the poll cap, the netconf cells did not run, and the console needed a power cycle; not acceptance-eligible) | See [PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13](#psp-hle-utility-dialog-002-capture-2026-11-13). Built #1386 game sharing and netconf dialog cells (case 166), game sharing first and netconf last, with no savedata and no gamedata install dialog; no hardware result is claimed. POWER RISK, owner present, one launch per boot: case 161's netconf dialog stuck RUNNING on boot 204 ([captures](#psp-hle-utility-dialog-001-captures-2026-11-12)), so netconf-timing is expected to stick here too and the console to need a power cycle either way (on boot 204 it followed a net teardown that completed; case 166 tears down as case 161 does). Game context, WLAN switch on; the game sharing dialog is expected to use the PSP's ad hoc radio, and nothing is sent to an access point or any server. |
+| `hle-utility-attended-netconf` | `PSP-HLE-UTILITY-DIALOG-003` | `NOT_RUN` | Built #1386 ATTENDED netconf run (case 189): the netconf dialog alone, dismissed by hand by a person at the console within a 90-second window, so the sequence can reach FINISHED and ShutdownStart is made there; no hardware result is claimed. Game context, WLAN switch on, one launch per boot; a dialog still up at the window's end needs a power cycle. |
+| `hle-utility-attended-sharing` | `PSP-HLE-UTILITY-DIALOG-004` | `NOT_RUN` | Built #1386 ATTENDED game sharing run (case 190), dismissed by hand as for case 189; no hardware result is claimed. Game context, WLAN switch on (the dialog starts the ad hoc radio on its own), one launch per boot. |
+| `hle-utility-attended-gamedata` | `PSP-HLE-UTILITY-DIALOG-005` | `NOT_RUN` | Built #1386 ATTENDED gamedata install run (case 191), after case 161's precheck and with its cleanup, dismissed by hand as for case 189; no hardware result is claimed. Game context, no UMD, one launch per boot. |
 | `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | `MEASURED` (2026-11-08, PSP-3000, boot 156, `59520eb0`; 30 records) | #1380: flash0 seeks (64- and 32-bit), sceIoIoctl file commands, and writes on read-only descriptors. |
 | `hle-io-seek-edges` | `PSP-HLE-IO-SEEK-002` | `MEASURED` (2026-11-11, PSP-3000, boot 192, `1a5157e37`; 24 records) | #1380: flash0 SEEK_CUR and past-0x100000000 seeks, and Memory Stick open-flag and async-write cells on a probe-owned file. |
 | `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | `MEASURED` (2026-11-08, PSP-3000, boot 155, `07e58170`; 16 records) | W-NET-1 (#2197): the owner_name key type and the nickname string call at eight buffer lengths; no value bytes. |
@@ -3990,6 +4172,41 @@ not expected PSP values.
 | `vfpu-wider-ops` | `PSP-VFPU-WIDEROPS-001` | `MEASURED` (2026-11-10, PSP-3000, boot 176, `9426722a`; 223 records) | #326: vdiv.p/.t/.q, vsin/vcos/vrcp .p/.t/.q, vrsq.q, vsqrt.q, vocp.s/.q, the .p/.t dot and matrix forms over finite order-sensitive, NaN, inf and denormal cells, and vidt.q/.p into every column and row register of one matrix. |
 | `vfpu-reserved-widths` | `PSP-VFPU-RESERVED-001` | `MEASURED` (2026-11-10, PSP-3000, boot 182, `c6abab53`; 9 records; POWER RISK: reserved encodings; owner present) | #326: hand-encoded vus2i.t/.q and vs2i.t/.q words (refused by psp-as) over a sentinel image, M200 and C000 recorded. No word raised an exception; at .t and .q each form wrote what its .p form writes, four lanes from two source words. |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (not registered; captured three times, PSP-3000, firmware 6.6.1: 2026-11-07 boot 145, 2026-11-08 boot 152 and 2026-11-12 boot 202 in the game context; rerun required; the probe prints `test_id=PSP-MPEG-001` and the cell is registered here as `PSP-MPEG-YCBCR-001`) | Each mode begins from a fresh stream, ringbuffer and MPEG context. The capture measured mode 2 (query 128, a 128-byte header after a decode, a CSC of zero pixels), the CSC y and h refusals and the 16-bit CSC output (#302). Mode 3's second decode never returned on boot 145 and again on boot 152 (the first returned 0 and left a 16-byte header over a black 4:2:0 frame); the probe now bounds each mode 2 and 3 decode with a 3 s helper thread and stops making MPEG calls after a block. On boot 202, at `3872796c` with that bound, mode 3's first decode returned 0 and the second again did not return: the bound recorded `0x800201a8`, and the CSC and decode-stop cells were not called. That envelope is not acceptance-eligible either: the probe still prints the earlier `RC` status, its completion contract is unregistered and its module was not proven unloaded. The console powered off during the Nakagawa Link reset that followed it. |
+
+### Reading the safe-scalar TLS rows
+
+`safe-scalar` (`PSP-SAFE-SCALAR-001`) ran on 2026-11-17 (the bullet in the measured index gives its records).
+This is how its sixteen TLS rows are read. Every word is a size, a return value or the difference of two addresses, never an address; a SKIP row has
+its words at `0xA5A5A5A5` and measures nothing.
+
+1. `tls-fragmentation`: out0 is the user partition's total free size minus its largest free block, before the
+   probe allocates anything. `0` means the free memory is one run, so the two brackets of the next row are its
+   two ends. Any other value means several free runs (or that the two calls round differently).
+2. `tls-brackets`: out0 and out1 are 1 when the low and the high bracket (`0x100` bytes each) were obtained;
+   out2 is the high bracket's head minus the low bracket's; out5 and out6 are how far the total and the largest
+   free size fell (`0x200` each when both brackets came out of one run).
+3. `tls-create-normal`, `tls-create-high`, `tls-create-high-2`: the result is 1 when the pool was created,
+   else the error; out0 is the pool's footprint in the total free size.
+4. `tls-place-normal`, `tls-place-high`: out2 is a fresh low block's head minus the low bracket's, out3 the high
+   bracket's head minus a fresh high block's. When row 1 is `0`, a distance of `0x100` means nothing new lies at
+   that end and a larger one means a pool does, the excess being its footprint (`tls-place-high` includes the
+   first pool). When row 1 is not `0` these two rows are a cross-check only: a block asked from an end takes
+   the first hole it fits, so a pool can lie at an end and still leave the distance at `0x100`.
+5. `tls-addr-normal`, `tls-addr-high`, `tls-addr-high-2` decide the placement in every case: out1 is the
+   thread's TLS block address minus the low bracket's head, out2 the high bracket's head minus that address.
+   The two differ by about the size of the free memory, so the smaller one names the end the pool lies at. out5
+   is the distance from the previous pool's block.
+6. `tls-thread`: out2 and out3 are the second thread's block minus the main thread's in each of the first two
+   pools.
+7. `tls-free`, `tls-delete`: return values. `tls-cleanup`: out2 and out3 are the total and the largest free
+   size at the start minus the same at the end, `0` and `0` when nothing leaked.
+
+The runtime places a pool with attribute `0x4000` at the top of the partition, a rule it took from PPSSPP. On
+2026-11-17 row 1 was not `0`, so rows 5 decided: the pool with the attribute lies directly below the high
+bracket and the second one directly below the first, and the pool without it directly above the low bracket.
+For the pool shape the probe used (partition 2, attribute exactly `0x4000`, four `0x100`-byte blocks, no options)
+the runtime's rule is therefore PSP-measured; for every other pool with the attribute, partition 6 among them,
+it stays PPSSPP-derived and is logged as such.
 
 ### PSP-HLE-UTILITY-DIALOG-001 captures 2026-11-12
 
@@ -5119,8 +5336,8 @@ loop; route those to the batch path.
 
 | Artifact | Status |
 | --- | --- |
-| Homebrew module authored here + its hardware trace | Ours. Committable. |
-| VFPU fuzz corpus + hardware results | Ours. Committable. |
+| Homebrew module authored here + curated, reviewed result records | Ours. The probe source and reviewed result records are committable. Raw traces, envelopes and host0 logs stay private (AGENTS.md Section 5). |
+| VFPU fuzz corpus + curated, reviewed result records | Ours. The corpus source and reviewed result records are committable. Raw traces, envelopes and host0 logs stay private. |
 | Any trace of the **retail game** on hardware | Game-derived. Private, permanently. |
 | Frame or memory dumps from the retail title | Game-derived. Private, permanently. |
 

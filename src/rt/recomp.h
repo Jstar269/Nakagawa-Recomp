@@ -892,7 +892,7 @@ static inline __attribute__((noinline)) uint32_t sr_r32_slow(uint32_t a) {
 static inline __attribute__((noinline)) void sr_w8_pc_slow(uint32_t a, uint8_t v, uint32_t pc) {
     if (__builtin_expect(g_sr_store_context_pc != 0u, 0)) sr_log_store_context(a, v, 1u, pc);
     if (__builtin_expect(g_sr_last_writer_enabled, 0)) sr_note_mem_write(a, 1u, v, pc);
-    if (sr_check_mem_watch(a, v, 1, pc)) sr_log_mem_watch_context(pc);
+    if (sr_check_mem_watch_width(a, 1u, v, 1, pc)) sr_log_mem_watch_context(pc);
     if (__builtin_expect(g_sr_heap_watch, 0)) sr_heap_note_write(a, 1u, v, pc);
     if (sr_inrange(a)) {
         if (sr_vram_cpu_aperture(a)) {
@@ -909,7 +909,7 @@ static inline __attribute__((noinline)) void sr_w8_pc_slow(uint32_t a, uint8_t v
 static inline __attribute__((noinline)) void sr_w16_pc_slow(uint32_t a, uint16_t v, uint32_t pc) {
     if (__builtin_expect(g_sr_store_context_pc != 0u, 0)) sr_log_store_context(a, v, 2u, pc);
     if (__builtin_expect(g_sr_last_writer_enabled, 0)) sr_note_mem_write(a, 2u, v, pc);
-    if (sr_check_mem_watch(a, v, 1, pc)) sr_log_mem_watch_context(pc);
+    if (sr_check_mem_watch_width(a, 2u, v, 1, pc)) sr_log_mem_watch_context(pc);
     if (__builtin_expect(g_sr_heap_watch, 0)) sr_heap_note_write(a, 2u, v, pc);
     if (sr_inrange_n(a, 2)) {
         if (sr_vram_cpu_span_touches(a, 2u)) {
@@ -927,7 +927,7 @@ static inline __attribute__((noinline)) void sr_w16_pc_slow(uint32_t a, uint16_t
 static inline __attribute__((noinline)) void sr_w32_pc_slow(uint32_t a, uint32_t v, uint32_t pc) {
     if (__builtin_expect(g_sr_store_context_pc != 0u, 0)) sr_log_store_context(a, v, 4u, pc);
     if (__builtin_expect(g_sr_last_writer_enabled, 0)) sr_note_mem_write(a, 4u, v, pc);
-    if (sr_check_mem_watch(a, v, 1, pc)) sr_log_mem_watch_context(pc);
+    if (sr_check_mem_watch_width(a, 4u, v, 1, pc)) sr_log_mem_watch_context(pc);
     if (__builtin_expect(g_sr_heap_watch, 0)) sr_heap_note_write(a, 4u, v, pc);
     if (sr_inrange_n(a, 4)) {
         if (sr_vram_cpu_span_touches(a, 4u)) {
@@ -1248,10 +1248,14 @@ float sr_vfpu_exp2(float x);
 
 /* Single-instruction VFPU interpreter (src/rt/vfpu_interp.c). Returns SR_VFPU_COMPUTE for a
  * value-producing op (compare v[]/f[] to the reference trace), SR_VFPU_STATE for a prefix,
- * control, or store op, or SR_VFPU_OTHER for an instruction it cannot execute. */
+ * control, or store op, SR_VFPU_OTHER for an instruction it cannot execute, or
+ * SR_VFPU_ACCESS_REFUSED for a known VFPU load or store whose guest span is not wholly
+ * readable (loads) or writable (stores): nothing was read or written and no prefix was
+ * consumed. A caller stops a refused access by that name, never as a missing encoding. */
 #define SR_VFPU_OTHER   0
 #define SR_VFPU_COMPUTE 1
 #define SR_VFPU_STATE   2
+#define SR_VFPU_ACCESS_REFUSED 3
 int sr_vfpu_interp(CpuState *s, uint32_t op);
 
 /* Unverified VFPU forms in the run log (#1877; patterns generated into hle_evidence.h from
@@ -1436,6 +1440,12 @@ static inline const char *sr_guest_symbol_format(const SrGuestSymbol *sym, uint3
 void     sr_exec_span_reset(void);
 int      sr_exec_span_register(uint32_t start, uint32_t end);
 int      sr_exec_span_owns_fetch(uint32_t pc);
+/* The static spans only, with no runtime-module authority query: for a caller that
+ * has already found pc outside every bound module image. */
+int      sr_exec_span_owns_static_fetch(uint32_t pc);
+/* Whether any byte of [addr, addr + size) is translated code, a bound module's included: what a
+ * writer of guest memory asks before it writes (src/rt/cheats.h). */
+int      sr_exec_span_overlaps(uint32_t addr, uint32_t size);
 
 /* ---- Runtime-placed guest modules (issue #704) -------------------------------
  * A guest module translated with `tools/codegen.py --extra-elf=<module>@runtime` is
@@ -2197,8 +2207,9 @@ uint32_t sr_alloc_uid(void);
 /* sceGe display-list GPU (src/rt/ge.c): execute a GE command list, rasterising into VRAM. */
 uint32_t ge_run_list(uint32_t addr, int resume);
 /* ge_run_list that also stops at a command boundary once *stop is set, after at least one
- * command, exactly as it stops at a stall address: it returns the next command's address, with
- * *stopped set, and resuming there continues the list. */
+ * command, or once the run has executed 2^20 commands, exactly as it stops at a stall address:
+ * it returns the next command's address, with *stopped set, and resuming there continues the
+ * list. (A plain ge_run_list stops by name at that limit, through ge_take_signal_fault.) */
 uint32_t ge_run_list_until(uint32_t addr, int resume, atomic_int_least32_t *stop, int *stopped);
 /* The 16-bit argument of the FINISH command the last ge_run_list call executed. */
 uint32_t ge_last_finish_id(void);
@@ -2213,9 +2224,13 @@ double   ge_timing_run_clk(void);
 void ge_transition_trace_check(const char *why, uint32_t vcount);
 extern uint32_t g_ge_stall_addr;
 /* SIGNAL list control (ge.c): how many SIGNAL CALLs the running list may nest (the numStacks
- * its sceGeListEnQueue took), and the fault a SIGNAL JUMP, CALL or RET met in the last run,
- * if any. A fault stops the list at that SIGNAL; ge_take_signal_fault names it once. */
+ * its sceGeListEnQueue took), the signal function of the running list's callback (0 when it
+ * has none: a callback id of -1, or one registered with a NULL signal function), and the
+ * fault the last run met, if any: a SIGNAL JUMP, CALL or RET, a CALL with the call stack full
+ * or a RET with it empty, or a SIGNAL behaviour that is not modelled. A fault stops the list
+ * at that command; ge_take_signal_fault names it once. */
 extern uint32_t g_ge_signal_stack_limit;
+extern uint32_t g_ge_signal_handler;
 int ge_take_signal_fault(char *detail, size_t size);
 /* Diagnostic counters the watchdog and statistics reports print (hle.c). The GE ones
  * are kept by ge.c, the MPEG ones by mpeg.c. */
@@ -2601,12 +2616,6 @@ int sched_fast_forward_on(void);
 uint32_t sched_fast_forward_speed(void);
 /* How many times fast forward has started in this run (0 before the first). */
 uint32_t sched_fast_forward_epoch(void);
-/* f_00065c60 field-writer intercept: the container walker reads count from
- * r18+0x04 but f_0005a500's control block init puts count at r18+0x00 and
- * cursor at r18+0x04.  Since both functions are called directly (not via
- * dispatch()), the only hook point is SR_YIELD at function entry.  Copy
- * count from +0x00 to +0x04 before the walker body executes.  Idempotent:
- * if +0x04 already holds count, writing it again is harmless. */
 extern int g_prof_enabled;
 void sr_profile_init(void);
 void sr_profile_dump(void);
@@ -2627,6 +2636,19 @@ uint64_t sr_profile_test_lookup_drops(void);
 #else
 #define SR_VERIFY_NOTE_YIELD() ((void)0)
 #endif
+
+/* The preemption point alone, with no SR_PROFILE block count: for a site whose pc is not a
+ * block entry, such as the dispatch core, where s->pc is the last return or yield point and
+ * the entered body's own entry SR_YIELD counts the block. */
+#define SR_YIELD_UNPROFILED(s, target_pc) do { \
+    if (__builtin_expect(sr_sched_on, 1)) { \
+        if (atomic_fetch_sub_explicit(&sr_timeslice, 1, memory_order_relaxed) <= 1) { \
+            (s)->pc = (target_pc); \
+            SR_VERIFY_NOTE_YIELD(); \
+            sr_yield(s); \
+        } \
+    } \
+} while (0)
 
 #define SR_YIELD(s, target_pc) do { \
     if (__builtin_expect(g_prof_enabled, 0)) { \
@@ -2757,6 +2779,11 @@ int      sr_thread_has_pending_callbacks(uint32_t thread_uid);
 int      sr_thread_dispatch_callbacks(void);
 int      sr_vblank_dispatch_registered(void);
 void     sr_vblank_tick(void);
+/* The buttons of the newest pad sample (hle_input.c): the state latched at the last VBLANK,
+ * which every sample the guest reads until the next one carries, unless late pad sampling
+ * (ace.h, pad=late) has refreshed that sample since (ctrl_refresh_newest). The cheats read it at
+ * the VBLANK itself, right after the latch (cheats.h). */
+uint32_t sr_ctrl_live_buttons(void);
 /* The guest VBLANK count (hle.c) and the host audio backend's statistics dump. */
 uint32_t sr_audio_vbl(void);
 void     sr_audio_dump_stats(void);
@@ -2787,6 +2814,10 @@ void     sched_delay_current(uint64_t usec);        /* block current thread for 
  * causes: when another thread is ready then, of any priority, that thread is dispatched first.
  * For the Ace load skip (nk_ace_load_skip_wait); see the definition in sched.c. */
 void     sched_delay_current_dispatching(uint64_t usec);
+/* sceKernelDelayThread[CB]'s own delay: 1 + the result when sceKernelReleaseWaitThread ended it
+ * (sched_release_thread_delay), 0 when it ran its course. */
+int      sched_delay_thread_current(uint64_t usec, uint32_t *result_out);
+int      sched_release_thread_delay(uint32_t thread_uid, uint32_t result);
 void     sched_preempt(void);                       /* yield now if a higher-priority thread is ready */
 /* Set by the preemption timer when a stronger thread's deadline comes. A long HLE call polls it
  * between units of work and, where the thread that runs cannot reach the call's own state (for
@@ -2898,8 +2929,8 @@ static inline int sr_vcount_window_crossed(uint32_t vcount, uint32_t period,
 }
 void     sched_set_current_cb_wait(int cb_wait);    /* mark running thread as callback-waiting */
 void     sched_wake_callbacks(uint32_t thread_uid); /* wake thread waiting in CB-wait */
-void     sched_thread_sleep(void);                  /* sceKernelSleepThread (wakeup-count) */
-void     sched_thread_sleep_cb(void);               /* sceKernelSleepThreadCB (wakeup-count) */
+uint32_t sched_thread_sleep(void);                  /* sceKernelSleepThread (wakeup-count); 0 or a release result */
+uint32_t sched_thread_sleep_cb(void);               /* sceKernelSleepThreadCB (wakeup-count); 0 or a release result */
 uint32_t sched_thread_wakeup(uint32_t uid);         /* sceKernelWakeupThread (banks if not asleep) */
 uint32_t sched_set_priority(uint32_t uid, int priority);   /* sceKernelChangeThreadPriority */
 uint32_t sched_change_current_thread_attr(uint32_t clear_mask, uint32_t set_mask); /* sceKernelChangeCurrentThreadAttr */
@@ -2997,7 +3028,10 @@ uint32_t sched_thread_exit_status(uint32_t uid);
 uint32_t sched_thread_stack_free_size(uint32_t uid);  /* sceKernelGetThreadStackFreeSize */
 /* The calling thread's user-visible stack range (sceKernelCheckThreadStack); 0 with no thread. */
 int      sched_current_thread_stack_range(uint32_t *base_out, uint32_t *size_out);
-/* High user-partition blocks, carved from the top of the thread-stack arena (sched.c). */
+/* High user-partition blocks, carved from the top of the thread-stack arena (sched.c). At most
+ * SR_SCHED_ARENA_HIGH_BLOCK_MAX are live at once (hle_internal.h HLE_MAX_PARTITION_BLOCKS); the
+ * arena's free-range table is sized from it. */
+#define SR_SCHED_ARENA_HIGH_BLOCK_MAX 256
 int      sched_partition_alloc_high(uint32_t size, uint32_t ceiling, uint32_t *base_out);
 void     sched_partition_release_high(uint32_t base, uint32_t size);
 /* Whether an address inside the thread-stack arena is free there; *end_out bounds the answer. */
@@ -3033,7 +3067,10 @@ static inline SrResumeStatus sched_resume_describe(uint32_t uid, SrResumeFrame *
     }
     return sr_resume_describe(stack, s_cpu, frames, capacity, count, detail, detail_cap);
 }
-void     sched_run(uint32_t entry, uint32_t arglen, uint32_t argp);  /* run from the entry thread */
+/* Run from the entry thread. 0 when the scheduler loop ends; SCHED_RUN_NO_ENTRY_THREAD when the
+ * entry (module_start) thread could not be created and no guest thread ran. */
+#define SCHED_RUN_NO_ENTRY_THREAD 1
+int      sched_run(uint32_t entry, uint32_t arglen, uint32_t argp);
 
 /* PSP callback ABI: SceKernelCallbackFunction(int count, int arg, void *common).
  * PPSSPP (__KernelRunCallbackOnThread) passes { notifyCount, notifyArg, commonArgument },

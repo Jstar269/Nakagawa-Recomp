@@ -112,6 +112,73 @@ class VulkanSdkDiscoveryTests(unittest.TestCase):
             self.assertIn("No usable Vulkan SDK", str(ctx.exception))
 
 
+class VulkanSdkPowerShellParityTests(unittest.TestCase):
+    """tools/vulkan_sdk.ps1 (the Windows manager) accepts what tools/vulkan_sdk.py accepts."""
+
+    PS1 = ROOT / "tools" / "vulkan_sdk.ps1"
+
+    def _ps1_list(self, name: str) -> list[str]:
+        text = self.PS1.read_text(encoding="utf-8")
+        block = re.search(r"\$" + name + r" = @\((.*?)\n    \)", text, re.DOTALL)
+        self.assertIsNotNone(block, name)
+        assert block is not None
+        return re.findall(r'Join-Path \$resolved "([^"]+)"', block.group(1))
+
+    def test_candidate_lists_match_the_python_discovery(self) -> None:
+        import vulkan_sdk
+
+        self.assertEqual(self._ps1_list("headers"), ["\\".join(p) for p in vulkan_sdk.HEADER_CANDIDATES])
+        self.assertEqual(self._ps1_list("libraries"), ["\\".join(p) for p in vulkan_sdk.LIBRARY_CANDIDATES])
+
+    def _resolve(self, environment: str, install_root: str) -> subprocess.CompletedProcess[str]:
+        shell = shutil.which("pwsh")
+        if shell is None:
+            self.skipTest("PowerShell 7.6+ (pwsh) is required")
+        script = (
+            f". '{self.PS1}'; "
+            f"Resolve-VulkanSdk -EnvironmentPath '{environment}' -InstallRoot '{install_root}'"
+        )
+        env = {k: v for k, v in os.environ.items() if k != "VULKAN_SDK"}
+        return subprocess.run(
+            [shell, "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+
+    def test_manager_accepts_the_msys2_ucrt64_loader_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "ucrt64"
+            (root / "include" / "vulkan").mkdir(parents=True)
+            (root / "include" / "vulkan" / "vulkan.h").write_text("// fixture\n", encoding="ascii")
+            (root / "lib").mkdir()
+            (root / "lib" / "libvulkan-1.dll.a").write_bytes(b"synthetic import archive")
+            self.assertTrue(is_usable_vulkan_sdk(root))
+            done = self._resolve(str(root), str(Path(tmp) / "none"))
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(Path(done.stdout.strip()).resolve(), root.resolve())
+
+    def test_manager_scan_orders_versions_like_the_python_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("1.4.363.1", "1.4.363.1.2", "1.10.0", "1.9.9"):
+                (root / name / "Include" / "vulkan").mkdir(parents=True)
+                (root / name / "Include" / "vulkan" / "vulkan.h").write_text("// fixture\n", encoding="ascii")
+                (root / name / "Lib").mkdir()
+                (root / name / "Lib" / "vulkan-1.lib").write_bytes(b"synthetic import library")
+            expected = discover_vulkan_sdk(environment="", install_root=root)
+            self.assertEqual(expected.name, "1.10.0")
+            done = self._resolve("", str(root))
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(Path(done.stdout.strip()).resolve(), expected.resolve())
+            # A name with more than four parts is a version on both sides.
+            (root / "1.10.0" / "Lib" / "vulkan-1.lib").unlink()
+            (root / "1.9.9" / "Lib" / "vulkan-1.lib").unlink()
+            expected = discover_vulkan_sdk(environment="", install_root=root)
+            self.assertEqual(expected.name, "1.4.363.1.2")
+            done = self._resolve("", str(root))
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(Path(done.stdout.strip()).resolve(), expected.resolve())
+
+
 class VulkanSdkMakefileWiringTests(unittest.TestCase):
     """The player target must consume the shared VULKAN_SDK resolution, not a
     machine-pinned install path (TD-33).
@@ -214,6 +281,33 @@ class VulkanSdkMakefileWiringTests(unittest.TestCase):
             self.assertIn(f'-L"{root}/', blob)
             if os.name == "nt":
                 self.assertIn(f'-I"{root}/', blob)
+
+    @unittest.skipUnless(os.name == "nt", "the Vulkan SDK check runs only in the Windows build")
+    def test_unusable_explicit_vulkan_sdk_stops_the_player_by_name(self) -> None:
+        # An explicit VULKAN_SDK skips discovery, so a stale one must still stop the
+        # player before its compile with the same named reason discovery gives,
+        # rather than a missing vulkan/vulkan.h from the compiler. The check runs
+        # as the player's order-only prerequisite, probed alone so nothing compiles.
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            self.skipTest("GNU Make is required")
+        build_root = _scratch_build_root(self, "vulkan-sdk-stale")
+        stale = (build_root.parent / "stale-sdk").as_posix()
+        good = self.make_sdk(build_root.parent, "9.9.9.9").as_posix()
+        env = dict(os.environ)
+        env.pop("VULKAN_SDK", None)
+        results = {}
+        for label, value in (("stale", stale), ("good", good)):
+            results[label] = subprocess.run(
+                [make, "--no-print-directory", "player-vulkan-check", f"VULKAN_SDK={value}",
+                 f"PYTHON={Path(sys.executable).as_posix()}", f"BUILD_ROOT={build_root.as_posix()}"],
+                capture_output=True, text=True, env=env, check=False, cwd=str(ROOT),
+            )
+        stale_blob = results["stale"].stdout + results["stale"].stderr
+        self.assertNotEqual(results["stale"].returncode, 0, stale_blob)
+        self.assertIn(f"VULKAN_SDK points to an unusable Vulkan SDK: {stale}", stale_blob)
+        self.assertEqual(results["good"].returncode, 0,
+                         results["good"].stdout + results["good"].stderr)
 
 
 if __name__ == "__main__":

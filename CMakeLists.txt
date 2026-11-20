@@ -31,6 +31,7 @@ set(CORE_SOURCES
     src/core/nk_xb.c
     src/core/nk_input_profile.c
     src/core/nk_json.c
+    src/core/nk_cheats.c
     src/core/nk_psp_crypto.c
     src/core/nk_psp_keystore.c
     src/core/nk_psp_builtin_keys.c
@@ -272,10 +273,23 @@ add_executable(test_player_state
     src/player/iso_reader.c
     src/player/package_builder.c
     src/player/setup_staging.c
+    # The white-box seams (subtest 19b, the member-path and whole-backup tests) are compiled into
+    # this test's own copies of the two core files that hold them, as the Makefile's
+    # PLAYER_STATE_TEST_BIN_CMD does. Their symbols resolve here first, so the static
+    # nakagawa_core never contributes its seam-free copies of these two objects.
+    src/core/nk_title_manifest.c
+    src/core/nk_zip.c
 )
 target_include_directories(test_player_state PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${CMAKE_CURRENT_SOURCE_DIR}/src/player
+)
+# The seams, for the test and the two core files above, and scratch paths built on
+# SR_SELFTEST_BUILD_ROOT in the binary tree, like the other tests'.
+target_compile_definitions(test_player_state PRIVATE
+    NK_TITLE_MANIFEST_TEST_SEAMS
+    NK_SAVES_TEST_SEAMS
+    SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
 )
 target_link_libraries(test_player_state PRIVATE nakagawa_core)
 if(WIN32)
@@ -289,12 +303,11 @@ add_test(NAME player_state_test COMMAND test_player_state)
 set_tests_properties(player_state_test PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     ENVIRONMENT "NK_TEST_SCRATCH_DIR=${CMAKE_CURRENT_BINARY_DIR}/build")
-if(ANDROID)
-    # On Android the package rebuild steps need a libnk_python.so in the app's native library
-    # folder, which the test folder does not have (#360); the test runs everything else and
-    # exits 77.
-    set_tests_properties(player_state_test PROPERTIES SKIP_RETURN_CODE 77)
-endif()
+# Exit 77 is a skip, never a pass: on Android the package rebuild steps need a libnk_python.so in
+# the app's native library folder, which the test folder does not have (#360), and on any host a
+# case it cannot run there (a junction, a git that does not answer) is named by a NOT_RUN line.
+# The test runs everything else and exits 77.
+set_tests_properties(player_state_test PROPERTIES SKIP_RETURN_CODE 77)
 
 # The console nickname rule (src/core/nk_nickname.h) is header-only; its test needs no library.
 add_executable(test_nk_nickname tests/native/test_nk_nickname.c)
@@ -302,6 +315,15 @@ target_include_directories(test_nk_nickname PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
 )
 add_test(NAME nk_nickname_test COMMAND test_nk_nickname)
+
+# Cheat files (src/core/nk_cheats.h, #2639): the reader, the checks and the applier.
+add_executable(test_nk_cheats tests/native/test_nk_cheats.c)
+target_link_libraries(test_nk_cheats PRIVATE nakagawa_core)
+# The file reader's test (nk_cheats_load_file) needs the scratch directory, as the Makefile gives it.
+target_compile_definitions(test_nk_cheats PRIVATE
+    SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
+)
+add_test(NAME nk_cheats_test COMMAND test_nk_cheats)
 
 # The nk_ui core and its C3a reserved stubs stay SDL and Vulkan free. Keep this
 # explicit source inventory in sync with mk/nk_ui.mk.
@@ -351,15 +373,6 @@ set(NK_UI_PLAYER_TITLE_SOURCES
     src/player/ui/scr_devlog.c
     src/player/ui/ui_keyboard.c
 )
-set(NK_UI_PLAYER_SCREEN_SOURCES
-    src/player/ui/player_ui_nk.c
-    src/player/ui/ui_router.c
-    src/player/ui/scr_library.c
-    src/player/ui/scr_title.c
-    src/player/ui/scr_settings.c
-    src/player/ui/scr_first_run.c
-    src/player/ui/scr_dialogs.c
-)
 set(NK_UI_PLAYER_C5_SOURCES
     src/player/ui/player_ui_nk.c
     src/player/ui/ui_router.c
@@ -374,17 +387,6 @@ set(NK_UI_PLAYER_HOST_SOURCES
     src/player/ui/player_ui_music.c
     src/player/ui/player_ui_vorbis.c
 )
-set(NK_UI_OVERLAY_SOURCES
-    src/rt/overlay/nk_overlay.c
-    src/rt/overlay/overlay_pause.c
-    src/rt/overlay/overlay_quick.c
-    src/rt/overlay/overlay_hud.c
-    src/rt/overlay/overlay_toast.c
-    src/rt/overlay/overlay_dialogs.c
-    src/rt/overlay/overlay_controls.c
-    src/rt/overlay/overlay_dev.c
-    src/rt/overlay/overlay_host.c
-)
 # The overlay pages built so far (C9c, and the developer pages of #314), SDL-free; overlay_host.c builds only into the runtime.
 set(NK_UI_OVERLAY_C9C_SOURCES
     src/rt/overlay/nk_overlay.c
@@ -393,14 +395,6 @@ set(NK_UI_OVERLAY_C9C_SOURCES
     src/rt/overlay/overlay_dialogs.c
     src/rt/overlay/overlay_controls.c
     src/rt/overlay/overlay_dev.c
-)
-set(NK_UI_TEST_SOURCES
-    tests/native/test_nk_ui_core.c
-    tests/native/test_nk_ui_focus.c
-    tests/native/test_nk_ui_sdlr.c
-    tests/native/test_nk_ui_vk.c
-    tests/native/test_player_screens.c
-    tests/native/test_overlay_screens.c
 )
 add_executable(test_nk_ui_core
     tests/native/test_nk_ui_core.c
@@ -522,7 +516,6 @@ add_test(NAME nk_ui_vk_test COMMAND test_nk_ui_vk)
 set_tests_properties(nk_ui_vk_test PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     SKIP_RETURN_CODE 77)
-file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/build")
 # Focus graph, input model and prompt glyphs: SDL-free. The SDL_Event translation leg is
 # registered after SDL3 is resolved below, and reports SKIP (exit 77) without it.
 add_executable(test_nk_ui_focus
@@ -988,6 +981,8 @@ set(NK_RUNTIME_SOURCES
     src/rt/fbcap.c
     src/rt/videorec.c
     src/rt/replay_checkpoint.c
+    src/rt/cheats.c
+    src/core/nk_cheats.c
     src/rt/ge_capture.c
     src/rt/vfpu_interp.c
     src/rt/hle.c
@@ -1210,7 +1205,7 @@ function(nk_add_title_runtime target package_dir title_id)
     add_library(${target}_ge OBJECT "${root}/${NK_RUNTIME_GE_SOURCE}")
     target_include_directories(${target}_ge PRIVATE "${root}/src/rt")
     target_compile_options(${target}_ge PRIVATE -O2 -fno-math-errno -Wno-error)
-    target_compile_definitions(${target}_ge PRIVATE SR_SDL3VK)
+    target_compile_definitions(${target}_ge PRIVATE SR_SDL3VK SR_FLIGHT_RECORDER_LINKED)
 
     # The ATRAC3+ import and its bridge: CFLAGS plus the import's include paths.
     add_library(${target}_atrac OBJECT ${atrac} "${root}/${NK_RUNTIME_ATRAC3P_BRIDGE_SOURCE}")
@@ -1221,14 +1216,27 @@ function(nk_add_title_runtime target package_dir title_id)
     target_compile_definitions(${target}_atrac PRIVATE ${rt_defs})
     target_link_libraries(${target}_atrac PRIVATE SDL3::SDL3)
 
-    # The FFmpeg H.264 subset: the Makefile's h264sub_% rule (upstream code, warnings off).
+    # The FFmpeg H.264 subset: the Makefile's h264sub_% rule (upstream code, warnings off), and
+    # the project's own wrapper over it (nk_h264_api.c, the Makefile's h264sub_nk_h264_api.o
+    # rule), which keeps the project warning set (-Wall -Wextra) without -Werror, as the runtime.
+    set(h264api "${h264sub}")
+    list(FILTER h264api INCLUDE REGEX "/nk_h264_api[.]c$")
+    list(FILTER h264sub EXCLUDE REGEX "/nk_h264_api[.]c$")
+    set(h264_defs ${rt_defs} HAVE_AV_CONFIG_H _ISOC99_SOURCE _FILE_OFFSET_BITS=64
+        _LARGEFILE_SOURCE _POSIX_C_SOURCE=200112 _XOPEN_SOURCE=600)
+    set(h264_symbols -include "${root}/src/rt/h264_ffmpeg_sub/nk_h264_symbols.h")
     add_library(${target}_h264 OBJECT ${h264sub})
     target_include_directories(${target}_h264 PRIVATE "${root}/src/rt/h264_ffmpeg_sub"
         "${root}/src/rt")
     target_compile_options(${target}_h264 PRIVATE -O2 -fno-strict-aliasing -w -std=c11
-        -include "${root}/src/rt/h264_ffmpeg_sub/nk_h264_symbols.h")
-    target_compile_definitions(${target}_h264 PRIVATE ${rt_defs} HAVE_AV_CONFIG_H _ISOC99_SOURCE
-        _FILE_OFFSET_BITS=64 _LARGEFILE_SOURCE _POSIX_C_SOURCE=200112 _XOPEN_SOURCE=600)
+        ${h264_symbols})
+    target_compile_definitions(${target}_h264 PRIVATE ${h264_defs})
+    add_library(${target}_h264_api OBJECT ${h264api})
+    target_include_directories(${target}_h264_api PRIVATE "${root}/src/rt/h264_ffmpeg_sub"
+        "${root}/src/rt")
+    target_compile_options(${target}_h264_api PRIVATE -O2 -fno-strict-aliasing -Wall -Wextra
+        -Wno-error -std=c11 ${h264_symbols})
+    target_compile_definitions(${target}_h264_api PRIVATE ${h264_defs})
 
     # Generated C: RECOMP_FLAGS (-O0 -w), with the package directory on the include path.
     add_library(${target}_gen OBJECT ${generated})
@@ -1239,7 +1247,7 @@ function(nk_add_title_runtime target package_dir title_id)
     add_library(${target} SHARED
         $<TARGET_OBJECTS:${target}_rt> $<TARGET_OBJECTS:${target}_ge>
         $<TARGET_OBJECTS:${target}_atrac> $<TARGET_OBJECTS:${target}_h264>
-        $<TARGET_OBJECTS:${target}_gen>)
+        $<TARGET_OBJECTS:${target}_h264_api> $<TARGET_OBJECTS:${target}_gen>)
     target_link_libraries(${target} PRIVATE SDL3::SDL3 vulkan m)
     if(ANDROID)
         target_link_libraries(${target} PRIVATE log android)

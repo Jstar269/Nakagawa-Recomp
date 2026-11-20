@@ -139,7 +139,10 @@ def verify_toolchain(iscc: Path, lock: dict[str, Any]) -> None:
 def read_sums(package_dir: Path) -> dict[str, str]:
     """``{relative path: sha256}`` from the package's ``SHA256SUMS.txt``."""
     sums: dict[str, str] = {}
-    text = (package_dir / SUMS_NAME).read_text(encoding="utf-8")
+    try:
+        text = (package_dir / SUMS_NAME).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise InstallerError(f"INSTALLER_PACKAGE_INVALID: {SUMS_NAME} is unreadable: {exc}") from exc
     for number, line in enumerate(text.splitlines(), 1):
         digest, separator, name = line.partition("  ")
         if not separator or not _SHA256.fullmatch(digest) or not name or name.startswith(("/", "../")) or "\\" in name:

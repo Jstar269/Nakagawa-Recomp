@@ -19,8 +19,10 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -548,6 +550,102 @@ def golden_header_text() -> str:
         lines.append("};")
         lines.append("")
     return "\n".join(lines).rstrip("\n") + "\n"
+
+
+class FontCacheImportTransactionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="font-import-transaction-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    @staticmethod
+    def glyph(code: int, width: int = 2) -> Glyph:
+        return Glyph(code=code, width=width, height=2, samples=tuple(range(1, width * 2 + 1)),
+                     row_order=1)
+
+    def test_failed_second_slot_replace_restores_the_previous_cache(self) -> None:
+        from nk_core import fonts
+        from nk_core.fonts import FontImportError
+
+        old_source = self.root / "old-fonts"
+        old_source.mkdir()
+        (old_source / "japanese.pgf").write_bytes(
+            build_pgf([self.glyph(0x3042)], font_name="Synthetic Japanese Old")
+        )
+        (old_source / "korean.pgf").write_bytes(
+            build_pgf([self.glyph(0xAC00)], font_name="Synthetic Korean Old")
+        )
+        user_root = self.root / "user-data"
+        fonts.import_fonts(old_source, user_data_root=user_root)
+        cache_dir = fonts.get_font_cache_dir(user_root)
+        old_japanese = (cache_dir / fonts.SLOT_FILES["japanese"]).read_bytes()
+        old_korean = (cache_dir / fonts.SLOT_FILES["korean"]).read_bytes()
+        old_manifest = (cache_dir / fonts.MANIFEST_NAME).read_bytes()
+
+        new_source = self.root / "new-fonts"
+        new_source.mkdir()
+        (new_source / "japanese.pgf").write_bytes(
+            build_pgf([self.glyph(0x3042, width=3)], font_name="Synthetic Japanese New")
+        )
+        (new_source / "korean.pgf").write_bytes(
+            build_pgf([self.glyph(0xAC00, width=3)], font_name="Synthetic Korean New")
+        )
+        original_replace = fonts.os.replace
+        failed = False
+
+        def fail_second_slot(source, destination):
+            nonlocal failed
+            if destination == cache_dir / fonts.SLOT_FILES["korean"] and not failed:
+                failed = True
+                raise PermissionError("synthetic target in use")
+            return original_replace(source, destination)
+
+        with mock.patch.object(fonts.os, "replace", side_effect=fail_second_slot):
+            with self.assertRaises(FontImportError):
+                fonts.import_fonts(new_source, user_data_root=user_root)
+
+        self.assertEqual((cache_dir / fonts.SLOT_FILES["japanese"]).read_bytes(), old_japanese)
+        self.assertEqual((cache_dir / fonts.SLOT_FILES["korean"]).read_bytes(), old_korean)
+        self.assertEqual((cache_dir / fonts.MANIFEST_NAME).read_bytes(), old_manifest)
+        self.assertEqual(sorted(path.name for path in cache_dir.glob("*.tmp")), [])
+
+    def test_preflight_reuses_manifest_and_pgf_checks_for_the_same_files(self) -> None:
+        from nk_core import fonts
+
+        source = self.root / "complete-font-set"
+        source.mkdir()
+        (source / "japanese.pgf").write_bytes(
+            build_pgf([self.glyph(0x3042)], font_name="Synthetic Japanese")
+        )
+        latin = build_pgf(
+            [self.glyph(0x41), self.glyph(0x61)], font_name="Synthetic Latin"
+        )
+        (source / "latin.pgf").write_bytes(latin)
+        (source / "korean.pgf").write_bytes(
+            build_pgf([self.glyph(0xAC00)], font_name="Synthetic Korean")
+        )
+        for index in range(len(fonts.LATIN_INDEX_FILES)):
+            (source / fonts.LATIN_INDEX_FILES[index]).write_bytes(latin)
+        user_root = self.root / "font-user-data"
+        fonts.import_fonts(source, user_data_root=user_root)
+        manifest_path = fonts.get_font_cache_dir(user_root) / fonts.MANIFEST_NAME
+        manifest_reads = 0
+        original_read_text = Path.read_text
+
+        def count_manifest_reads(path, *args, **kwargs):
+            nonlocal manifest_reads
+            if path == manifest_path:
+                manifest_reads += 1
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(fonts, "_inspect", wraps=fonts._inspect) as inspected, \
+                mock.patch.object(Path, "read_text", new=count_manifest_reads):
+            self.assertEqual(fonts.inspect_font_cache(user_data_root=user_root)[0], "OK")
+            fonts.slot_states(user_data_root=user_root)
+            fonts.latin_index_states(user_data_root=user_root)
+
+        self.assertEqual(inspected.call_count, 19)
+        self.assertEqual(manifest_reads, 1)
 
 
 class GoldenVectorTests(unittest.TestCase):

@@ -544,6 +544,21 @@ class SeedFileTests(unittest.TestCase):
         self.assertEqual(seeds, {0x10: "first", 0x20: "second"})
         self.assertEqual((added, dropped, overflow), ([0x20], [0x30], 2))
 
+    def test_merge_drops_a_listed_seed_that_is_now_a_known_entry_and_names_each_drop_once(self):
+        existing = miss_seeds.SeedFile({0x10: "first", 0x40: "old"})
+        a = miss_seeds.SeedFile({0x30: "unknown"})
+        b = miss_seeds.SeedFile({0x30: "unknown", 0x20: "unknown"})
+        seeds, added, dropped, _ = miss_seeds.merge(
+            existing, [a, b], "second", known=frozenset({0x30, 0x40}))
+        self.assertEqual(seeds, {0x10: "first", 0x20: "second"})
+        self.assertEqual((added, dropped), ([0x20], [0x30, 0x40]))
+
+    def test_an_overflow_survives_the_merged_list(self):
+        text = miss_seeds.format_seed_file({0x10: "a"}, overflow=3)
+        self.assertEqual(miss_seeds.parse_seed_text(text).overflow, 3)
+        self.assertEqual(miss_seeds.parse_seed_text(text).seeds, {0x10: "a"})
+        self.assertNotIn("overflow", miss_seeds.format_seed_file({0x10: "a"}))
+
 
 class AnalysisSeedTests(_Fixture):
     def test_without_seeds_the_target_is_not_a_function_entry(self):
@@ -875,6 +890,9 @@ class MergeCommandTests(_Fixture):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("3 interpreter entries that did not fit", result.stderr)
+        # The merged list keeps the note, so it is still read back as incomplete.
+        self.assertEqual(
+            miss_seeds.read_seed_file(self.work / "overflow_seeds.txt").overflow, 3)
 
     def test_a_malformed_seed_list_is_refused(self):
         miss = self.write_seeds("bad.txt", "not a seed\n")
@@ -894,6 +912,40 @@ class CodegenSeedTests(_Fixture):
         result = _codegen(self.elf_path, out / "m_recomp.c", *extra)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         return out, result
+
+    def test_seed_preflight_does_not_double_codegen_statistics(self):
+        words = {
+            ENTRY: (0x0F << 26) | (8 << 16) | 0x1234,                  # lui t0, 0x1234
+            ENTRY + 4: (0x0D << 26) | (8 << 21) | (8 << 16) | 0x5678,  # ori t0, t0, 0x5678
+            ENTRY + 8: (0x0D << 26) | (9 << 16) | 1,                  # ori t1, zero, 1
+            ENTRY + 12: 0x03E00008,                                   # jr ra
+            ENTRY + 16: 0,
+        }
+        stats_elf = self.work / "stats.elf"
+        stats_elf.write_bytes(_synthetic_elf(words, ENTRY))
+        seeds = self.write_seeds(
+            "stats_known.txt", f"# nakagawa-miss-seeds-v1\n0x{ENTRY:08x}\n")
+
+        def run(name, *options):
+            out = self.work / name
+            out.mkdir()
+            result = _codegen(stats_elf, out / "m_recomp.c", *options)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            return result
+
+        prefixes = ("static-verify:", "CODEGEN_PROMOTION", "state-resume:")
+        cases = (("verify_promotion", ("--static-verify", "--promote-registers")),
+                 ("resume", ("--state-resume",)))
+        for name, options in cases:
+            with self.subTest(name=name):
+                plain = run(f"stats_{name}_plain", *options)
+                seeded = run(
+                    f"stats_{name}_seeded", *options, f"--miss-seeds={seeds}")
+                plain_stats = [line for line in plain.stdout.splitlines()
+                               if line.startswith(prefixes)]
+                seeded_stats = [line for line in seeded.stdout.splitlines()
+                                if line.startswith(prefixes)]
+                self.assertEqual(seeded_stats, plain_stats)
 
     @staticmethod
     def functions_line(result):

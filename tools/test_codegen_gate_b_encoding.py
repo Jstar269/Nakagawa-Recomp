@@ -89,55 +89,80 @@ def disassemble_words(data):
         yield pc, word
 
 
-class TestAllegrexEncoderHelpers(unittest.TestCase):
-    """Unit tests for the raw PSP word encoding relationships. These verify externally
-    established field constraints rather than duplicating generator helper implementations."""
+def _special3(rs, rt, rd, sa, funct):
+    """An Allegrex SPECIAL3 (opcode 0x1F) R-type word built from its fields."""
+    return (0x1F << 26) | (rs << 21) | (rt << 16) | (rd << 11) | (sa << 6) | funct
 
-    def test_max_opcode0_funct2C(self):
-        w = 0x0109502C
-        self.assertEqual((w >> 26) & 0x3F, 0x00)
-        self.assertEqual(w & 0x3F, 0x2C)
+
+# The (pos, size) pairs gen_microtest emits for ext ($t1 <- $t0) and ins
+# ($t2 <- $t1).
+GATE_B_EXT_FIELDS = ((0, 8), (4, 8), (8, 16), (0, 32), (16, 16), (3, 5), (12, 8), (20, 4))
+GATE_B_INS_FIELDS = ((0, 8), (8, 8), (4, 12), (0, 1), (8, 4), (16, 8), (24, 4))
+
+# Generic MIPS32 SPECIAL2 (opcode 0x1C) functs that must never stand in for an
+# Allegrex SPECIAL instruction in the Gate B ELF.
+GENERIC_SPECIAL2_MULTIPLY_FUNCTS = frozenset({0x00, 0x01, 0x02, 0x04, 0x05})
+GENERIC_SPECIAL2_COUNT_FUNCTS = frozenset({0x20, 0x21})
+
+
+def _field_mask(pos, size):
+    return ((1 << size) - 1) << pos
+
+
+class TestAllegrexEncoderHelpers(unittest.TestCase):
+    """The raw words Gate B emits, built from their documented fields, decode
+    through codegen to the operation and registers the field layout names."""
+
+    def _stmt(self, word):
+        stmt, _, _ = codegen.effect(0x08900000, word)
+        return stmt
+
+    def test_max_min_opcode0_funct2C_2D(self):
+        self.assertEqual(
+            self._stmt(0x0109502C),
+            "s->r[10] = ({int32_t _x=(int32_t)s->r[8],_y=(int32_t)s->r[9]; "
+            "(uint32_t)(_x>_y?_x:_y);});",
+        )
+        self.assertEqual(
+            self._stmt(0x0109502D),
+            "s->r[10] = ({int32_t _x=(int32_t)s->r[8],_y=(int32_t)s->r[9]; "
+            "(uint32_t)(_x<_y?_x:_y);});",
+        )
 
     def test_ext_rd_field_is_size_minus_1(self):
-        for size in (1, 8, 16, 32):
-            w = (0x1F << 26) | (8 << 21) | (9 << 16) | ((size - 1) << 11) | (0 << 6) | 0x00
-            self.assertEqual((w >> 11) & 0x1F, size - 1)
+        for pos, size in GATE_B_EXT_FIELDS:
+            with self.subTest(pos=pos, size=size):
+                word = _special3(8, 9, size - 1, pos, 0x00)
+                self.assertEqual(
+                    self._stmt(word),
+                    f"s->r[9] = ((s->r[8] >> {pos}) & 0x{(1 << size) - 1:x}u);",
+                )
 
     def test_ins_msb_field_is_pos_plus_size_minus_1(self):
-        for pos, size in ((0, 8), (8, 8), (4, 12), (0, 1), (8, 4), (16, 8), (24, 4)):
-            w = (0x1F << 26) | (8 << 21) | (9 << 16) | ((pos + size - 1) << 11) | (pos << 6) | 0x04
-            self.assertEqual((w >> 11) & 0x1F, pos + size - 1)
-            self.assertEqual((w >> 6) & 0x1F, pos)
+        for pos, size in GATE_B_INS_FIELDS:
+            with self.subTest(pos=pos, size=size):
+                word = _special3(9, 10, pos + size - 1, pos, 0x04)
+                mask = _field_mask(pos, size)
+                self.assertEqual(
+                    self._stmt(word),
+                    f"s->r[10] = ((s->r[10] & ~0x{mask:x}u) | "
+                    f"((s->r[9] << {pos}) & 0x{mask:x}u));",
+                )
 
-    def test_wsbh_special3_sub02(self):
-        w = (0x1F << 26) | (0 << 21) | (8 << 16) | (8 << 11) | (0x02 << 6) | 0x20
-        self.assertEqual((w >> 26) & 0x3F, 0x1F)
-        self.assertEqual((w >> 6) & 0x1F, 0x02)
-        self.assertEqual(w & 0x3F, 0x20)
-
-    def test_wsbw_special3_sub03(self):
-        w = (0x1F << 26) | (0 << 21) | (8 << 16) | (8 << 11) | (0x03 << 6) | 0x20
-        self.assertEqual((w >> 26) & 0x3F, 0x1F)
-        self.assertEqual((w >> 6) & 0x1F, 0x03)
-        self.assertEqual(w & 0x3F, 0x20)
-
-    def test_seb_special3_sub10(self):
-        w = (0x1F << 26) | (0 << 21) | (8 << 16) | (8 << 11) | (0x10 << 6) | 0x20
-        self.assertEqual((w >> 26) & 0x3F, 0x1F)
-        self.assertEqual((w >> 6) & 0x1F, 0x10)
-        self.assertEqual(w & 0x3F, 0x20)
-
-    def test_seh_special3_sub18(self):
-        w = (0x1F << 26) | (0 << 21) | (8 << 16) | (8 << 11) | (0x18 << 6) | 0x20
-        self.assertEqual((w >> 26) & 0x3F, 0x1F)
-        self.assertEqual((w >> 6) & 0x1F, 0x18)
-        self.assertEqual(w & 0x3F, 0x20)
-
-    def test_bitrev_special3_sub14(self):
-        w = (0x1F << 26) | (0 << 21) | (8 << 16) | (8 << 11) | (0x14 << 6) | 0x20
-        self.assertEqual((w >> 26) & 0x3F, 0x1F)
-        self.assertEqual((w >> 6) & 0x1F, 0x14)
-        self.assertEqual(w & 0x3F, 0x20)
+    def test_bshfl_sub_ops_decode_to_their_operation(self):
+        cases = (
+            (0x02, 10, "s->r[10] = (((s->r[8] & 0x00FF00FFu) << 8) | "
+                       "((s->r[8] >> 8) & 0x00FF00FFu));"),  # wsbh
+            (0x03, 11, "s->r[11] = (((s->r[8] & 0x000000FFu) << 24) | "
+                       "((s->r[8] & 0x0000FF00u) << 8) | ((s->r[8] & 0x00FF0000u) >> 8) | "
+                       "((s->r[8] & 0xFF000000u) >> 24));"),  # wsbw
+            (0x10, 12, "s->r[12] = ((uint32_t)(int32_t)(int8_t)s->r[8]);"),  # seb
+            (0x18, 13, "s->r[13] = ((uint32_t)(int32_t)(int16_t)s->r[8]);"),  # seh
+            (0x14, 14, "s->r[14] = sr_bitrev(s->r[8]);"),  # bitrev
+        )
+        for sub, rd, expected in cases:
+            with self.subTest(sub=sub):
+                self.assertEqual(self._stmt(_special3(0, 8, rd, sub, 0x20)), expected)
 
 
 class TestGateBSourceUsesRawWords(unittest.TestCase):
@@ -174,6 +199,12 @@ class TestGateBSourceUsesRawWords(unittest.TestCase):
         self._assert_no_assembler_mnemonics(["clz", "clo"])
 
     def test_ext_ins_are_raw_words(self):
+        for pos, size in GATE_B_EXT_FIELDS:
+            word = _special3(8, 9, size - 1, pos, 0x00)
+            self.assertIn(f".word 0x{word:08X}", self.text, ("ext", pos, size))
+        for pos, size in GATE_B_INS_FIELDS:
+            word = _special3(9, 10, pos + size - 1, pos, 0x04)
+            self.assertIn(f".word 0x{word:08X}", self.text, ("ins", pos, size))
         self._assert_no_assembler_mnemonics(["ext ", "ins "])
 
     def test_bitbyte_ops_are_raw_words(self):
@@ -187,6 +218,7 @@ class TestGateBSourceUsesRawWords(unittest.TestCase):
     def test_max_min_are_raw_words(self):
         self.assertIn(".word 0x0109502C", self.text)
         self.assertIn(".word 0x0109502D", self.text)
+        self._assert_no_assembler_mnemonics(["max ", "min "])
 
 
 class TestGateBElfEncodingAudit(unittest.TestCase):
@@ -222,17 +254,19 @@ class TestGateBElfEncodingAudit(unittest.TestCase):
                 return  # found correct PSP madd
         self.fail("No Allegrex madd (opcode=0, funct=0x1C) found in Gate B ELF")
 
-    def test_no_generic_special2_madd(self):
+    def _assert_no_special2(self, functs):
         for pc, w in self._collect_words():
-            if w == 0x71090000:
-                self.fail(f"Found generic SPECIAL2 madd word 0x71090000 at pc=0x{pc:08x}")
+            if (w >> 26) & 0x3F == 0x1C and w & 0x3F in functs:
+                self.fail(f"Found generic SPECIAL2 word 0x{w:08x} (funct=0x{w & 0x3F:02x}) "
+                          f"at pc=0x{pc:08x}")
+
+    def test_no_generic_special2_madd(self):
+        # madd, maddu, mul, msub, msubu on any registers.
+        self._assert_no_special2(GENERIC_SPECIAL2_MULTIPLY_FUNCTS)
 
     def test_no_generic_special2_clz(self):
-        for pc, w in self._collect_words():
-            opcode = (w >> 26) & 0x3F
-            funct = w & 0x3F
-            if opcode == 0x1C and funct == 0x20:
-                self.fail(f"Found generic SPECIAL2 clz (opcode=0x1C, funct=0x20) at pc=0x{pc:08x}")
+        # clz and clo on any registers.
+        self._assert_no_special2(GENERIC_SPECIAL2_COUNT_FUNCTS)
 
     def test_termination_is_explicit_syscall(self):
         exit_stub_addr = find_symbol_address(self.elf, "exit_stub")
@@ -257,6 +291,10 @@ class TestGateBElfEncodingAudit(unittest.TestCase):
         self.assertTrue(found_syscall, f"No syscall instruction found in exit_stub at 0x{exit_stub_addr:08x}")
         code = (found_w >> 6) & 0xFFFFF
         self.assertEqual(code, 0x210c, f"exit syscall in exit_stub at 0x{found_pc:08x} has code 0x{code:x}, want 0x210c")
+
+
+class TestSyscallTranslation(unittest.TestCase):
+    """Codegen-only: needs no MIPS cross toolchain."""
 
     def test_syscall_translations_are_not_collapsed(self):
         # syscall 0x123 -> op = (0x123 << 6) | 0x0C = 0x48CC

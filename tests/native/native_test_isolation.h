@@ -32,8 +32,10 @@ void native_test_assert_cache_root_isolated(void);
 void native_test_assert_config_root_isolated(void);
 
 /* Captures the real config paths before isolation, for later verification that
- * the real config directories were not touched: on Linux and macOS the settings
- * folders of both data layouts (#324, nk_data_migrate.h), the one in use first. */
+ * the real config directories were not touched: the settings folder the
+ * production resolver names (on Windows LOCALAPPDATA read as UTF-8, then the
+ * Known Folder, then APPDATA), and on Linux and macOS the settings folders of
+ * both data layouts (#324, nk_data_migrate.h), the one in use first. */
 void native_test_capture_real_config_probe(void);
 
 /* Captures again from the current environment, replacing the earlier capture.
@@ -41,18 +43,15 @@ void native_test_capture_real_config_probe(void);
  * at a stand-in profile. */
 void native_test_recapture_real_config_probe(void);
 
-/* Whether every captured real config directory (and its input_profiles
- * subdirectory) is as it was at the capture; when not, problem names what changed. */
+/* Whether every captured real config directory is as it was at the capture;
+ * when not, problem names what changed. */
 bool native_test_real_config_unchanged(char *problem, size_t problem_size);
 
-/* Verifies the real config directories (and input_profiles subdirectories) were
- * not modified during the test run, and aborts naming the change when one was.
- *
- * Limitation note: when the real config directory or input_profiles directory
- * already existed before the test run, this probe checks that non-existent
- * test-created targets (such as the default disc profile UCUS98701.json) were
- * not created, and if pre-existing, compares their file size and modification
- * timestamp (mtime) against the pre-test snapshot. */
+/* Verifies the real config directories were not modified during the test run,
+ * and aborts naming the change when one was. A directory absent before must
+ * still be absent; one present before must hold the same files and folders, by
+ * relative name and content (a rewrite that keeps the size and timestamp is a
+ * change). Links are compared by name and never followed. */
 void native_test_assert_real_config_untouched(void);
 
 /* Returns the path to the temporary root created for this run. */

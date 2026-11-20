@@ -35,6 +35,7 @@ Each row is something you are about to do. Find yours and read what it points to
 | Compare GCC and Clang on the synthetic generated-C corpus | [`COMPILER_COMPARISON.md`](COMPILER_COMPARISON.md) |
 | Qualify a public title through the native player | [`TITLE_TESTING.md`](TITLE_TESTING.md) |
 | Find out what a failure code means, or add one | [`FAILURE_CODES.md`](FAILURE_CODES.md) — every code a report, tool or the player emits, by pipeline stage |
+| Change what the launcher or the in-game overlay draws (a colour, size, screen or message) | [`PLAYER_UI_DESIGN.md`](PLAYER_UI_DESIGN.md) — the tokens with their source symbols, the contrast pairs and the checklist; `tests/native/test_player_ui.py` keeps its token record and the source in step |
 | Find your way around the code for the first time | [`CODE_TOUR.md`](CODE_TOUR.md) — one game from disc image to a frame on screen, file by file |
 | Change runtime, codegen, or the two-phase build | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
 | Pick up work, or check whether something is already known | [`STATUS.md`](STATUS.md) (live GitHub Issues win) |
@@ -172,14 +173,14 @@ history lives in git, so nothing is deleted.
   it is implemented unless marked. Since the 2026-10-20 re-scope, working inherited
   code is no longer rewritten only to make it original.
 - [`cleanroom/SCHED_SPEC.md`](cleanroom/SCHED_SPEC.md) specifies scheduler
-  behaviour. It was written for a clean-room rewrite that is no longer planned
+  behaviour. It was written for a rewrite that is no longer planned
   ([#340](https://github.com/Jstar269/nakagawa-recomp/issues/340) was closed as not planned); it stays as a behaviour reference, and the
   derived scheduler is the shipped code.
 - [`cleanroom/PRX_LOADER_SPEC.md`](cleanroom/PRX_LOADER_SPEC.md) specifies the
-  runtime PSP module (PRX) loader. It was written for clean-room rewrite unit G3,
+  runtime PSP module (PRX) loader. It was written for rewrite unit G3,
   which the 2026-10-20 re-scope no longer plans; it stays as a behaviour reference.
 - [`cleanroom/PGF_SPEC.md`](cleanroom/PGF_SPEC.md) specifies the runtime PSP
-  PGF reader for clean-room rewrite unit G4. The public reader built from it
+  PGF reader for rewrite unit G4. The public reader built from it
   landed as `src/rt/pgf_public.c` (PR #474) and is available for supported inputs,
   including composite row-order-3 glyphs and the supported revision and
   shadow-map variants ([#521](https://github.com/Jstar269/nakagawa-recomp/issues/521));
@@ -264,7 +265,7 @@ Every substantial document carries one status.
 | `RELEASE_NOTES_v0.0.1.md` | HISTORICAL | Notes of the v0.0.1 release, kept as released |
 | `RELEASE_SIGNING.md` | CURRENT | Update-signing key procedure (minisign, offline) and what the player checks before an update download |
 | `NATIVE_PLAYER_ARCHITECTURE.md` | CURRENT | Maintained native-shell architecture; the wizard's bounded ISO/XB staging exists and the player decrypts the user's own disc locally and checks it against Redump's PSP list, while one-click play without compiling on the user's PC is not built and is marked inline |
-| `PLAYER_UI_DESIGN.md` | CURRENT | Player UI design system for the default launcher: tokens, components, and the screen specs C6-C8 build against |
+| `PLAYER_UI_DESIGN.md` | CURRENT | Player UI design system for the default launcher: tokens, components, states, messages, contrast with its known shortfalls, the screen specs C6-C8 build against, and a machine-readable token record the player UI tests check against the source |
 | `ONLINE_FEATURES.md` | DRAFT | Design for the launcher's opt-in online mode (update check, news, user-sent reports) and developer mode, asked in the setup wizard; the switches, the wizard step, the developer log panel, the update check and Discord status are built; news and in-player reports are not |
 | `AOT_PRODUCTIZATION_ARCHITECTURE.md` | CURRENT | Maintained evaluation of end-user recompilation routes A-G; the zero-toolchain recommended routes remain unimplemented |
 | `RUNTIME_PACKAGING_ARCHITECTURE.md` | CURRENT | Maintained process-isolation decision record; installers and one-click end-user preparation remain unbuilt |
@@ -272,11 +273,11 @@ Every substantial document carries one status.
 | `provenance/HST_PUBLIC_CENSUS.md` | CURRENT | Title-specific vs generic/synthetic classification |
 | `provenance/INDEPENDENCE_MODEL.md` | CURRENT | Independence model |
 | `INDEPENDENCE_CAMPAIGN.md` | DRAFT | Independence route plan; read for intent, never cite as built state |
-| `cleanroom/SCHED_SPEC.md` | DRAFT | Scheduler clean-room behaviour spec; read for intent, never cite as shipped behaviour |
-| `cleanroom/PRX_LOADER_SPEC.md` | DRAFT | Runtime PRX loader clean-room behaviour spec (G3); read for intent, never cite as shipped behaviour |
-| `cleanroom/PGF_SPEC.md` | DRAFT | Runtime PGF reader clean-room behaviour spec (G4); read for intent, never cite as shipped behaviour |
+| `cleanroom/SCHED_SPEC.md` | DRAFT | Scheduler behaviour spec; read for intent, never cite as shipped behaviour |
+| `cleanroom/PRX_LOADER_SPEC.md` | DRAFT | Runtime PRX loader behaviour spec (G3); read for intent, never cite as shipped behaviour |
+| `cleanroom/PGF_SPEC.md` | DRAFT | Runtime PGF reader behaviour spec (G4); read for intent, never cite as shipped behaviour |
 | `cleanroom/PGF_CONVERTER_SPEC.md` | CURRENT | Deterministic TTF to PGF converter behaviour spec, refusal catalogue, and independence/provenance record (#313) |
-| `provenance/GUEST_INTERP_ATTESTATION.md` | CURRENT | Live attestation finding |
+| `provenance/GUEST_INTERP_ATTESTATION.md` | CURRENT | Resolved attestation disposition (#332); history of the original RECORD_ABSENT finding |
 | `provenance/FONT_ORIGINS.md` | CURRENT | PGF replacement-font origin evidence and route decision |
 | `archive/IMPORT_AUDIT.md` | ARCHIVED | Pre-republication import-coverage audit; method current, snapshot superseded |
 | `archive/ISSUE196_DIRECT_XB.md` | ARCHIVED | Superseded hypothesis preserved with scope banner |
@@ -306,7 +307,8 @@ preferring removal when the duplicate adds no value:
 
 - issue open/closed state: link the live issue, never restate its state
   (`STATUS.md` carries no state labels; `audit_public_issue_links.py`
-  enforces the At-a-glance rule where that section exists);
+  fails a Live work areas clause that says work remains but cites a closed
+  item, and a `STATUS.md` without that section);
 - HLE address/site/bucket and compatibility-override counts: cite
   `tools/test_compat_manifest.py` over `tools/compat_overrides.py`;
 - HLE registration-class and semantic-status counts (dedicated, fake-success,

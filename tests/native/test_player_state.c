@@ -67,8 +67,10 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <direct.h>
+#include <io.h>
 #include <process.h>
 #include <windows.h>
+#include <winioctl.h>
 #include <wchar.h>
 #define test_rmdir _rmdir
 #define nk_ps_chdir _chdir
@@ -682,13 +684,27 @@ static bool get_working_directory(char *out, size_t size) {
 /* Repository cleanliness gate (#511): the launch runs must not change any
  * repository-tracked file. Uses the shell's redirection because the platform
  * spawn API offers no stdout capture; reports false when git is unavailable
- * so the caller can print an explicit SKIP rather than a silent pass. */
-static bool git_status_snapshot(const char *out_path) {
-    char command[1200];
-    int written = snprintf(command, sizeof(command),
-                           "git status --porcelain > \"%s\" 2>&1", out_path);
+ * so the caller can name the check NOT_RUN rather than pass silently. The
+ * snapshot holds the status and the working tree's diff against the index:
+ * the status alone reads " M file" before and after for a tracked file that
+ * was already modified, whatever a run then writes into it. repo NULL is the
+ * current folder. */
+static bool git_status_snapshot_in(const char *repo, const char *out_path) {
+    char where[NATIVE_TEST_PATH_MAX + 16];
+    char command[2 * NATIVE_TEST_PATH_MAX + 2 * sizeof(where) + 256];
+    int written = repo ? snprintf(where, sizeof(where), "-C \"%s\" ", repo)
+                       : snprintf(where, sizeof(where), "%s", "");
+    if (written < 0 || (size_t)written >= sizeof(where)) return false;
+    written = snprintf(command, sizeof(command),
+                       "git %sstatus --porcelain > \"%s\" 2>&1 && "
+                       "git %sdiff --binary >> \"%s\" 2>&1",
+                       where, out_path, where, out_path);
     if (written <= 0 || (size_t)written >= sizeof(command)) return false;
     return system(command) == 0;
+}
+
+static bool git_status_snapshot(const char *out_path) {
+    return git_status_snapshot_in(NULL, out_path);
 }
 
 /* Reads a small file whole into out. Returns its length, or -1 when it cannot be read or
@@ -774,121 +790,36 @@ static void assert_session_released(const NkLaunchSession *session) {
     assert(session->process.is_active == false);
 }
 
-typedef struct {
-    uint32_t state[8];
-    uint64_t bits;
-    uint8_t block[64];
-    size_t used;
-} FixtureSha256;
-
-static uint32_t fixture_rotr(uint32_t value, unsigned count) {
-    return (value >> count) | (value << (32u - count));
-}
-
-static void fixture_sha_transform(FixtureSha256 *ctx, const uint8_t block[64]) {
-    static const uint32_t round[64] = {
-        0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
-        0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,
-        0xe49b69c1u,0xefbe4786u,0x0fc19dc6u,0x240ca1ccu,0x2de92c6fu,0x4a7484aau,0x5cb0a9dcu,0x76f988dau,
-        0x983e5152u,0xa831c66du,0xb00327c8u,0xbf597fc7u,0xc6e00bf3u,0xd5a79147u,0x06ca6351u,0x14292967u,
-        0x27b70a85u,0x2e1b2138u,0x4d2c6dfcu,0x53380d13u,0x650a7354u,0x766a0abbu,0x81c2c92eu,0x92722c85u,
-        0xa2bfe8a1u,0xa81a664bu,0xc24b8b70u,0xc76c51a3u,0xd192e819u,0xd6990624u,0xf40e3585u,0x106aa070u,
-        0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,0x391c0cb3u,0x4ed8aa4au,0x5b9cca4fu,0x682e6ff3u,
-        0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u
-    };
-    uint32_t words[64];
-    for (size_t i = 0; i < 16; i++) {
-        words[i] = ((uint32_t)block[i * 4] << 24) |
-                   ((uint32_t)block[i * 4 + 1] << 16) |
-                   ((uint32_t)block[i * 4 + 2] << 8) |
-                   (uint32_t)block[i * 4 + 3];
-    }
-    for (size_t i = 16; i < 64; i++) {
-        uint32_t s0 = fixture_rotr(words[i - 15], 7) ^ fixture_rotr(words[i - 15], 18) ^ (words[i - 15] >> 3);
-        uint32_t s1 = fixture_rotr(words[i - 2], 17) ^ fixture_rotr(words[i - 2], 19) ^ (words[i - 2] >> 10);
-        words[i] = words[i - 16] + s0 + words[i - 7] + s1;
-    }
-    uint32_t a = ctx->state[0], b = ctx->state[1], c = ctx->state[2], d = ctx->state[3];
-    uint32_t e = ctx->state[4], f = ctx->state[5], g = ctx->state[6], h = ctx->state[7];
-    for (size_t i = 0; i < 64; i++) {
-        uint32_t s1 = fixture_rotr(e, 6) ^ fixture_rotr(e, 11) ^ fixture_rotr(e, 25);
-        uint32_t choose = (e & f) ^ ((~e) & g);
-        uint32_t t1 = h + s1 + choose + round[i] + words[i];
-        uint32_t s0 = fixture_rotr(a, 2) ^ fixture_rotr(a, 13) ^ fixture_rotr(a, 22);
-        uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
-        uint32_t t2 = s0 + majority;
-        h = g; g = f; f = e; e = d + t1;
-        d = c; c = b; b = a; a = t1 + t2;
-    }
-    ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
-    ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
-}
-
-static void fixture_sha_init(FixtureSha256 *ctx) {
-    static const uint32_t initial[8] = {
-        0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,
-        0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u
-    };
-    memcpy(ctx->state, initial, sizeof(initial));
-    ctx->bits = 0;
-    ctx->used = 0;
-}
-
-static void fixture_sha_update(FixtureSha256 *ctx, const uint8_t *data, size_t length) {
-    ctx->bits += (uint64_t)length * 8u;
-    while (length > 0) {
-        size_t room = sizeof(ctx->block) - ctx->used;
-        size_t take = length < room ? length : room;
-        memcpy(ctx->block + ctx->used, data, take);
-        ctx->used += take;
-        data += take;
-        length -= take;
-        if (ctx->used == sizeof(ctx->block)) {
-            fixture_sha_transform(ctx, ctx->block);
-            ctx->used = 0;
-        }
-    }
-}
-
-static void fixture_sha_finish(FixtureSha256 *ctx, char out[65]) {
-    ctx->block[ctx->used++] = 0x80;
-    if (ctx->used > 56) {
-        memset(ctx->block + ctx->used, 0, sizeof(ctx->block) - ctx->used);
-        fixture_sha_transform(ctx, ctx->block);
-        ctx->used = 0;
-    }
-    memset(ctx->block + ctx->used, 0, 56 - ctx->used);
-    for (size_t i = 0; i < 8; i++) {
-        ctx->block[63 - i] = (uint8_t)(ctx->bits >> (8u * i));
-    }
-    fixture_sha_transform(ctx, ctx->block);
+/* The fixtures' digests come from the one SHA-256 the player and the runtime share
+   (nk_sha256_* in src/core/nk_shared_helpers.h, checked against known answers in
+   tests/native/test_shared_helpers.c and tests/native/vfpu_tables_selftest.c). */
+static void fixture_sha_finish(NkSha256 *ctx, char out[65]) {
     static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < sizeof(ctx->state) / sizeof(ctx->state[0]); i++) {
-        for (size_t j = 0; j < 4; j++) {
-            uint8_t byte = (uint8_t)(ctx->state[i] >> (24u - 8u * j));
-            out[i * 8 + j * 2] = hex[byte >> 4];
-            out[i * 8 + j * 2 + 1] = hex[byte & 0x0f];
-        }
+    uint8_t digest[32];
+    nk_sha256_finish(ctx, digest);
+    for (size_t i = 0; i < sizeof(digest); i++) {
+        out[i * 2] = hex[digest[i] >> 4];
+        out[i * 2 + 1] = hex[digest[i] & 0x0f];
     }
     out[64] = '\0';
 }
 
 static void fixture_sha_bytes(const void *data, size_t length, char out[65]) {
-    FixtureSha256 ctx;
-    fixture_sha_init(&ctx);
-    fixture_sha_update(&ctx, (const uint8_t *)data, length);
+    NkSha256 ctx;
+    nk_sha256_init(&ctx);
+    nk_sha256_update(&ctx, (const uint8_t *)data, length);
     fixture_sha_finish(&ctx, out);
 }
 
 static void fixture_sha_file(const char *path, char out[65]) {
-    FixtureSha256 ctx;
-    fixture_sha_init(&ctx);
+    NkSha256 ctx;
+    nk_sha256_init(&ctx);
     FILE *file = fopen(path, "rb");
     assert(file != NULL);
     uint8_t buffer[4096];
     size_t count;
     while ((count = fread(buffer, 1, sizeof(buffer), file)) != 0) {
-        fixture_sha_update(&ctx, buffer, count);
+        nk_sha256_update(&ctx, buffer, count);
     }
     assert(!ferror(file));
     assert(fclose(file) == 0);
@@ -1331,6 +1262,12 @@ static const char *g_fixture_report_extra = "";
 /* The generated-code epoch a fixture records: the current one but for the case that
    writes a package from before it. */
 static int g_fixture_generated_code_abi_epoch = NK_AOT_GENERATED_CODE_ABI_EPOCH;
+/* codegen_options the next fixture package writes as this text (any key order),
+   with its digest taken over g_fixture_codegen_options_canonical, the form
+   canonical_json() in tools/nk_core/package_cache.py hashes. NULL: the usual
+   options. */
+static const char *g_fixture_codegen_options_written = NULL;
+static const char *g_fixture_codegen_options_canonical = NULL;
 
 /* `folder_enhancement_id` names the package folder (NULL: the authentic
    packages/<disc_id>, else packages/<disc_id>-enhanced-<id>), and
@@ -1398,6 +1335,18 @@ static void write_runtime_package_fixture_variant(
         assert(used > 0 && (size_t)used < sizeof(codegen_options_json));
         int options_hash_length = snprintf(options_hash_input, sizeof(options_hash_input),
                                            "%s\n", codegen_options_json);
+        assert(options_hash_length > 0 &&
+               (size_t)options_hash_length < sizeof(options_hash_input));
+        fixture_sha_bytes(options_hash_input, (size_t)options_hash_length,
+                          codegen_options_digest);
+    }
+    if (g_fixture_codegen_options_written) {
+        char options_hash_input[sizeof(codegen_options_json) + 2];
+        int written = snprintf(codegen_options_json, sizeof(codegen_options_json), "%s",
+                               g_fixture_codegen_options_written);
+        int options_hash_length = snprintf(options_hash_input, sizeof(options_hash_input),
+                                           "%s\n", g_fixture_codegen_options_canonical);
+        assert(written > 0 && (size_t)written < sizeof(codegen_options_json));
         assert(options_hash_length > 0 &&
                (size_t)options_hash_length < sizeof(options_hash_input));
         fixture_sha_bytes(options_hash_input, (size_t)options_hash_length,
@@ -1925,6 +1874,16 @@ static bool dev_log_contains(const PlayerApp *app, const char *needle) {
     return false;
 }
 
+/* How many developer log lines hold `needle`. */
+static size_t dev_log_count(const PlayerApp *app, const char *needle) {
+    size_t count = 0u;
+    for (size_t i = 0; i < player_dev_log_count(app); i++) {
+        const char *line = player_dev_log_line(app, i);
+        if (line && strstr(line, needle)) count++;
+    }
+    return count;
+}
+
 /* Launch through the player-owned session path, let the child reach a
  * bounded exit, then settle the session at `settle_tick`. Pins the repeat
  * contract: identical save root, no stuck running state, no retained child
@@ -1932,8 +1891,10 @@ static bool dev_log_contains(const PlayerApp *app, const char *needle) {
 static void repeat_launch_and_settle(PlayerApp *app, int game_index,
                                      uint64_t launch_tick, uint64_t settle_tick,
                                      const char *expected_memstick) {
-    char error_before[48];
-    snprintf(error_before, sizeof(error_before), "%s", app->last_error.error_code);
+    /* Start from no error, back on the library: a recovery launch follows a failure,
+       and a clean exit that raised that failure's code again must not read as none. */
+    memset(&app->last_error, 0, sizeof(app->last_error));
+    if (app->active_view == VIEW_ERROR) app->active_view = VIEW_LIBRARY;
     int64_t before_ms = (int64_t)time(NULL) * 1000;
     assert(player_app_launch_game(app, game_index));
     assert(app->is_game_running);
@@ -1950,7 +1911,8 @@ static void repeat_launch_and_settle(PlayerApp *app, int game_index,
     assert(player_app_monitor_game_session(app, settle_tick));
     assert(!app->is_game_running);
     assert_session_released(&app->launch_session);
-    assert(strcmp(app->last_error.error_code, error_before) == 0);
+    assert(app->last_error.error_code[0] == '\0');
+    assert(app->active_view != VIEW_ERROR);
 }
 
 /* Catalog-epoch coherence probe (#670). Built only with the test seam macro,
@@ -2275,6 +2237,41 @@ static void test_report_this_game(void) {
         assert(player_report_discussion_url(&named, RP_HOME, user, url, sizeof(url)));
         assert(strstr(url, "Synthetic") == NULL);
         assert(strstr(url, "%3Cuser%3E%20Tennis") != NULL);
+        /* The fields the link does read: a profile path in the problem or the title goes out
+           as "~", in the title and in the body, never as the folder or the user name. */
+        {
+#if defined(_WIN32) || defined(_WIN64)
+#define RP_SEP_ENCODED "%5C"
+#else
+#define RP_SEP_ENCODED "%2F"
+#endif
+            PlayerReportFacts pathy = from_card;
+            pathy.problem = "stopped at " RP_HOME RP_SEP "x";
+            pathy.title_name = RP_HOME RP_SEP "Game";
+            assert(player_report_discussion_url(&pathy, RP_HOME, user, url, sizeof(url)));
+            const char *first = strstr(url, "~" RP_SEP_ENCODED "x");
+            assert(first != NULL && strstr(first + 1, "~" RP_SEP_ENCODED "x") != NULL);
+            first = strstr(url, "~" RP_SEP_ENCODED "Game");
+            assert(first != NULL && strstr(first + 1, "~" RP_SEP_ENCODED "Game") != NULL);
+            assert(strstr(url, "Synthetic") == NULL && strstr(url, "synthetic") == NULL);
+            assert(strstr(url, "path") == NULL && strstr(url, "%2Fsrv") == NULL);
+            assert(strstr(url, "%3Cuser%3E") == NULL);
+#undef RP_SEP_ENCODED
+        }
+        /* A user name across the 96-byte limit of the title and the problem is redacted
+           before the cut, so no part of it reaches the link (audit 2026-11-17). */
+        {
+            char straddle[160];
+            memset(straddle, 'a', 90u);
+            snprintf(straddle + 90, sizeof(straddle) - 90u, " %s Tennis", user);
+            PlayerReportFacts cut = from_card;
+            cut.title_name = straddle;
+            cut.problem = straddle;
+            assert(player_report_discussion_url(&cut, RP_HOME, user, url, sizeof(url)));
+            assert(strstr(url, "Synth") == NULL);
+            assert(report_query_value(url, "title", value, sizeof(value)));
+            assert(report_utf8_valid(value));
+        }
 
         /* The known cause: the card links issue 308; the copied details name
            the boundary, the renderer and the known issue. Paths show as "~",
@@ -2556,6 +2553,278 @@ static void test_library_writes_keep_titles_another_writer_added(void) {
     remove(path);
     free(app);
     printf("[PLAYER_STATE_TEST] library writes keep titles another writer added PASS\n");
+}
+
+/* The second defect this file pins (header): an add whose library could not be written reported
+ * success, and the title was gone on the next start. Here the library file's folder is a regular
+ * file, so no lock or library can be written under it: the add reports failure and no library
+ * file holds the title. */
+static void test_add_game_reports_an_unwritable_library(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: an add whose library cannot be written reports failure\n");
+    char cache[512];
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache, sizeof(cache)));
+    const char sep = nk_platform_path_separator();
+    char blocker[1024];
+    char path[1100];
+    snprintf(blocker, sizeof(blocker), "%s%cunwritable_library_folder", cache, sep);
+    snprintf(path, sizeof(path), "%s%clibrary.json", blocker, sep);
+    write_text_file(blocker, "a regular file where the library's folder would be\n");
+
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    assert(strlen(path) < sizeof(app->library.library_path));
+    strcpy(app->library.library_path, path);
+    GameRecord game;
+    seed_entry(&game, "TEST00061", "Synthetic Unsaved Title");
+    assert(player_app_add_game(app, &game) == false);
+    assert(!nk_platform_file_exists(path));
+
+    static NkLibrary loaded;  /* too large for the stack (NK_MAX_GAMES) */
+    nk_library_init(&loaded);
+    (void)nk_library_load(&loaded, path);
+    assert(nk_library_find_by_disc_id(&loaded, "TEST00061") == NULL);
+
+    assert(remove(blocker) == 0);
+    free(app);
+    printf("[PLAYER_STATE_TEST] an add whose library cannot be written reports failure PASS\n");
+}
+
+/* Audit 2026-11-17: an add or removal changed the library in memory before
+ * library.json, and a commit that failed was not undone. The card showed a title
+ * the file never got (gone on the next start), or lost one the file kept, and the
+ * wizard's Ready step went on to the library with no word of it.
+ *
+ * Failing before: after the refused add the library held the title, after the
+ * refused removal it had lost it, and the Ready step showed the library. Here the
+ * library's folder is a file, so every commit fails. */
+static void test_library_change_the_file_refused_is_undone(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: a library change the file refused is undone\n");
+    char sep = nk_platform_path_separator();
+    char blocker[1024];
+    char path[1100];
+    snprintf(blocker, sizeof(blocker), "%s%clibrary-folder-is-a-file", native_test_get_root(),
+             sep);
+    write_text_file(blocker, "a file where the library's folder would be\n");
+    snprintf(path, sizeof(path), "%s%clibrary.json", blocker, sep);
+
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    assert(strlen(path) < sizeof(app->library.library_path));
+    strcpy(app->library.library_path, path);
+
+    GameRecord game;
+    seed_entry(&game, "TEST00061", "Synthetic Unsaved Title");
+    assert(!player_app_add_game(app, &game));
+    assert(app->library.count == 0);
+    assert(player_app_find_game_by_disc_id(app, "TEST00061") == -1);
+
+    /* A title the file holds, whose removal the file then refuses. */
+    assert(nk_library_add_or_update(&app->library, &game) == NK_OK);
+    player_app_sync_library(app);
+    int index = player_app_find_game_by_disc_id(app, "TEST00061");
+    assert(index >= 0);
+    assert(!player_app_remove_game(app, index));
+    assert(app->library.count == 1);
+    assert(player_app_find_game_by_disc_id(app, "TEST00061") >= 0);
+
+    /* The setup wizard's Ready step says the title was not saved. */
+    seed_entry(&app->inspecting_game, "TEST00062", "Synthetic Wizard Title");
+    app->wizard.step = WIZARD_STEP_READY_LAUNCH;
+    app->active_view = VIEW_SETUP_WIZARD;
+    player_app_wizard_next(app);
+    assert(player_app_find_game_by_disc_id(app, "TEST00062") == -1);
+    assert(app->active_view == VIEW_ERROR);
+    assert(strcmp(app->last_error.error_code, "LIBRARY_WRITE_FAILED") == 0);
+
+    assert(nk_remove_utf8(blocker) == 0);
+    free(app);
+    printf("[PLAYER_STATE_TEST] a library change the file refused is undone PASS\n");
+}
+
+/* Audit 2026-11-17: a settings.json that was there but could not be opened (another
+ * program holding it) read as defaults, and the next change saved those defaults
+ * over the user's file.
+ *
+ * Failing before: the file afterwards held the defaults plus the change, and the
+ * user's own resolution scale was gone. */
+static void test_settings_file_that_could_not_be_read_is_kept(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: a settings file that could not be read is kept\n");
+    char path[1024];
+    snprintf(path, sizeof(path), "%s%cheld-settings.json", native_test_get_root(),
+             nk_platform_path_separator());
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *held = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL && held != NULL);
+    player_app_settings_init_default(&app->settings);
+    app->settings.resolution_scale = 3;
+    assert(player_app_save_settings(app, path) == NK_OK);
+    static char before[1u << 16];
+    static char after[1u << 16];
+    FILE *f = nk_fopen_utf8(path, "rb");
+    assert(f != NULL);
+    size_t before_size = fread(before, 1, sizeof(before), f);
+    fclose(f);
+    assert(before_size > 0 && before_size < sizeof(before));
+
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[1024];
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, 1024) > 0);
+    /* No sharing: the player's open fails, as with a program that holds the file. */
+    HANDLE hold = CreateFileW(wide, GENERIC_READ, 0, NULL, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(hold != INVALID_HANDLE_VALUE);
+    NkResult loaded = player_app_load_settings(held, path);
+    CloseHandle(hold);
+#else
+    if (geteuid() == 0) {
+        /* root opens a file whatever its mode: nothing here can refuse the read. */
+        printf("[PLAYER_STATE_TEST] a settings file that could not be read is kept SKIP (root)\n");
+        remove(path);
+        free(held);
+        free(app);
+        return;
+    }
+    /* The mode is changed and restored on one descriptor, so both changes
+     * reach the same file the load opens by name. */
+    int mode_fd = open(path, O_RDONLY | O_NOFOLLOW);
+    assert(mode_fd >= 0);
+    assert(fchmod(mode_fd, 0) == 0);
+    NkResult loaded = player_app_load_settings(held, path);
+    assert(fchmod(mode_fd, 0600) == 0);
+    assert(close(mode_fd) == 0);
+#endif
+    assert(loaded == NK_ERROR_IO);
+    assert(held->settings.resolution_scale == 1);
+
+    /* The file reads again now; a change this session makes leaves it alone. */
+    player_app_set_resolution_scale(held, 2);
+    assert(held->settings.resolution_scale == 2);
+    f = nk_fopen_utf8(path, "rb");
+    assert(f != NULL);
+    size_t after_size = fread(after, 1, sizeof(after), f);
+    fclose(f);
+    assert(after_size == before_size && memcmp(before, after, before_size) == 0);
+    assert(strstr(held->settings_notice, "not saved") != NULL);
+
+    /* The next start reads the user's settings. */
+    assert(player_app_load_settings(held, path) == NK_OK);
+    assert(held->settings.resolution_scale == 3);
+    remove(path);
+    free(held);
+    free(app);
+    printf("[PLAYER_STATE_TEST] a settings file that could not be read is kept PASS\n");
+}
+
+/* Audit 2026-11-17: the settings save ignored a failed sync and close, and renamed the
+ * temporary file over the good settings.json all the same.
+ *
+ * Failing before (POSIX): the temporary file is a link to /dev/null, whose fsync fails
+ * (EINVAL) while every write succeeds; the save returned NK_OK and settings.json became
+ * that link, so the user's settings read as empty. Windows has no file whose writes
+ * succeed while FlushFileBuffers fails, so the check runs on POSIX hosts. */
+static void test_settings_save_that_did_not_reach_the_disk_keeps_the_file(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: a settings save that did not reach the disk keeps the file\n");
+#if defined(_WIN32) || defined(_WIN64)
+    printf("[PLAYER_STATE_TEST] a settings save that did not reach the disk keeps the file "
+           "SKIP (no Windows file fails only its sync)\n");
+#else
+    char path[1024];
+    char tmp_path[1100];
+    snprintf(path, sizeof(path), "%s%cunsynced-settings.json", native_test_get_root(),
+             nk_platform_path_separator());
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    player_app_settings_init_default(&app->settings);
+    app->settings.resolution_scale = 3;
+    assert(player_app_save_settings(app, path) == NK_OK);
+    static char before[1u << 16];
+    static char after[1u << 16];
+    FILE *f = nk_fopen_utf8(path, "rb");
+    assert(f != NULL);
+    size_t before_size = fread(before, 1, sizeof(before), f);
+    fclose(f);
+    assert(before_size > 0 && before_size < sizeof(before));
+
+    assert(symlink("/dev/null", tmp_path) == 0);
+    app->settings.resolution_scale = 2;
+    assert(player_app_save_settings(app, path) == NK_ERROR_IO);
+
+    struct stat st;
+    assert(lstat(tmp_path, &st) != 0);   /* the link is removed; /dev/null is not touched */
+    /* The settings file is still a regular file, not a link: checked on the
+     * descriptor that is then read, so the check and the read see one file. */
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    assert(fd >= 0);
+    assert(fstat(fd, &st) == 0 && S_ISREG(st.st_mode));
+    f = fdopen(fd, "rb");
+    assert(f != NULL);
+    size_t after_size = fread(after, 1, sizeof(after), f);
+    fclose(f);
+    assert(after_size == before_size && memcmp(before, after, before_size) == 0);
+    assert(remove(path) == 0);
+    free(app);
+    printf("[PLAYER_STATE_TEST] a settings save that did not reach the disk keeps the file PASS\n");
+#endif
+}
+
+/* Audit 2026-11-17: the window_ready check read only the session file's first 8191
+ * bytes, and the runtime's own output shares that file, so a run that printed more
+ * before its window came up never handed the window over.
+ *
+ * Failing before: the marker after 16 KB of output was never seen. */
+static void test_child_window_ready_after_long_output(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: window_ready is seen after long runtime output\n");
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    snprintf(app->boot_event_file_path, sizeof(app->boot_event_file_path),
+             "%s%cwindow-ready-events.txt", native_test_get_root(),
+             nk_platform_path_separator());
+    FILE *f = nk_fopen_utf8(app->boot_event_file_path, "wb");
+    assert(f != NULL);
+    for (int i = 0; i < 200; i++) {
+        fprintf(f, "[runtime] synthetic early output line %03d, before the window ...........\n",
+                i);
+    }
+    assert(fclose(f) == 0);
+    assert(!player_app_child_window_ready(app));
+
+    f = nk_fopen_utf8(app->boot_event_file_path, "ab");
+    assert(f != NULL);
+    fprintf(f, "BOOT_EVENT phase=window_ready\n");
+    assert(fclose(f) == 0);
+    assert(player_app_child_window_ready(app));
+    assert(nk_remove_utf8(app->boot_event_file_path) == 0);
+    free(app);
+    printf("[PLAYER_STATE_TEST] window_ready is seen after long runtime output PASS\n");
+}
+
+/* Audit 2026-11-17: the Ace report was opened with the narrow fopen, which reads a
+ * path in the ANSI code page on Windows, so under a non-ASCII data folder the "Last
+ * session" line never showed.
+ *
+ * Failing before (Windows): no line for a report under "ace-caf\xc3\xa9". */
+static void test_ace_last_session_under_non_ascii_root(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: the Ace report is read under a non-ASCII folder\n");
+    char sep = nk_platform_path_separator();
+    char root[800];
+    char dir[820];
+    char report[900];
+    char line[256];
+    snprintf(root, sizeof(root), "%s%cace-caf\xc3\xa9", native_test_get_root(), sep);
+    snprintf(dir, sizeof(dir), "%s%cace", root, sep);
+    assert(nk_platform_mkdir_p(dir));
+    assert(player_ace_report_path(root, "TEST90011", report, sizeof(report)));
+    FILE *f = nk_fopen_utf8(report, "wb");
+    assert(f != NULL);
+    fputs("{\"schema\": 1, \"effective\": {\"af\": 4, \"text\": false}}\n", f);
+    assert(fclose(f) == 0);
+    assert(player_ace_last_session_line(root, "TEST90011", line, sizeof(line)));
+    assert(strcmp(line, "Last session: 4x filtering.") == 0);
+    assert(nk_platform_remove_tree(root, NULL));
+    printf("[PLAYER_STATE_TEST] the Ace report is read under a non-ASCII folder PASS\n");
 }
 
 /* Disc verification after an add. main.c's worker runs nk_disc_verify_image on
@@ -3211,7 +3480,7 @@ static void test_every_error_code_has_a_friendly_card(void) {
         "DISC_IMAGE_TRUNCATED", "PBP_PACKAGE_UNSUPPORTED", "PREREQUISITE_FETCH_START_FAILED",
         "PYTHON_BOOTSTRAP_FAILED", "DISK_FULL", "OFFLINE_OR_NETWORK_ERROR", "HASH_MISMATCH",
         "ENHANCEMENT_UNAVAILABLE", "PACKAGE_REBUILD_NOT_INCOMPATIBLE", "LAUNCH_DETAILS_UNAVAILABLE",
-        "TEXTURE_PACK_REFUSED",
+        "TEXTURE_PACK_REFUSED", "PATH_TOO_LONG",
     };
     PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
     assert(app != NULL);
@@ -3221,6 +3490,23 @@ static void test_every_error_code_has_a_friendly_card(void) {
         assert(strcmp(player_error_badge(&app->last_error), "Problem") != 0);
         assert(player_error_leads_with_message(&app->last_error));
         assert(strstr(player_error_badge(&app->last_error), "_") == NULL);
+    }
+    /* Remove downloaded tools raises the code the package builder returns (player_state.c), so a
+       code the builder writes gets a badge too: a data root whose prerequisites folder does not
+       fit is named PATH_TOO_LONG before anything is touched. */
+    {
+        char long_root[NK_MAX_PATH];
+        char code[48];
+        char message[512];
+        memset(long_root, 'a', sizeof(long_root) - 8u);
+        long_root[sizeof(long_root) - 8u] = '\0';
+        assert(!package_builder_remove_downloaded_tools(long_root, code, sizeof(code), message,
+                                                        sizeof(message)));
+        assert(strcmp(code, "PATH_TOO_LONG") == 0);
+        player_app_set_error(app, code, "Downloaded build tools could not be removed", message,
+                             "Back to settings", VIEW_SETTINGS);
+        assert(strcmp(player_error_badge(&app->last_error), "Problem") != 0);
+        assert(player_error_leads_with_message(&app->last_error));
     }
     /* A failed build tools download names whatever code the downloader chose. */
     player_app_set_error(app, "SOMETHING_NEW_FROM_THE_FETCHER", "Title", "x", "Retry",
@@ -3441,6 +3727,44 @@ static void test_platform_cards_name_this_platform(void) {
     assert(!player_app_open_prerequisite_about(app));
     assert(strcmp(app->last_error.error_code, "DATA_DIR_UNAVAILABLE") == 0);
     assert(strcmp(app->last_error.title, "Data folder not found") == 0); /* #1974: sentence case */
+    /* Package discovery with no data folder gives this host's reason. Failing before
+       (audit 2026-11-17): every host was told the Windows Local AppData folder,
+       LOCALAPPDATA or APPDATA could not be resolved. */
+    {
+        GameRecord package_game;
+        char reason[512];
+        seed_entry(&package_game, "TEST80962", "Synthetic Package Title");
+        assert(player_app_validate_runtime_package(app, &package_game, NULL, reason,
+                                                   sizeof(reason)) ==
+               NK_RUNTIME_PACKAGE_MISSING);
+        assert(strncmp(reason, "DATA_DIR_UNAVAILABLE: ", 22) == 0);
+        assert(strstr(reason, "LOCALAPPDATA") == NULL);
+        assert(strstr(reason, player_data_dir_unavailable_text(nk_platform_host_kind())) != NULL);
+        assert(strstr(reason, "package discovery cannot run.") != NULL);
+    }
+    /* The wizard's checks with no data folder: the disc's encrypted program is not decrypted
+       into the working directory's titles/ folder; the step stops by name before any
+       program check (audit 2026-11-17). */
+    {
+        PlayerApp *wizard = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        NkIsoExecutableReport executables;
+        const PlayerPreflightCheck *blocking;
+        assert(wizard != NULL);
+        memset(&executables, 0, sizeof(executables));
+        executables.eboot.kind = NK_ISO_EXEC_PSP_ENCRYPTED;
+        snprintf(wizard->inspecting_game.disc_id, sizeof(wizard->inspecting_game.disc_id),
+                 "TEST80961");
+        snprintf(wizard->inspecting_game.iso_path, sizeof(wizard->inspecting_game.iso_path),
+                 "no-such-disc-TEST80961.iso");
+        player_app_build_compatibility_preflight(wizard, true, true, &executables);
+        blocking = player_preflight_blocking_check(&wizard->wizard.preflight);
+        assert(blocking != NULL && strcmp(blocking->code, "DATA_DIR_UNAVAILABLE") == 0);
+        assert(wizard->wizard.preflight.count == 1u);
+        assert(strstr(player_preflight_plain_message(blocking), "before adding this game.") != NULL);
+        assert(strcmp(player_preflight_status_word(blocking), "Can't use") == 0);
+        assert(nk_platform_path_missing("titles/TEST80961"));
+        free(wizard);
+    }
 #if defined(__ANDROID__)
     assert(strstr(app->last_error.message, "NK_ANDROID_DATA_DIR") != NULL);
     assert(strstr(app->last_error.message, "XDG_DATA_HOME") == NULL);
@@ -3557,7 +3881,20 @@ static void test_error_cards_are_plain(void) {
     assert(strstr(report, "Game: Plain Card Fixture\n") != NULL);
     assert(strstr(report, "Disc ID: TEST00042\n") != NULL);
     assert(strstr(report, "Reason: Stopped at unsupported-import-scenetadhocinit") != NULL);
-    assert(strstr(report, "Log file: " SR_SELFTEST_BUILD_ROOT "/player_state_report_TEST00042-last.txt\n") != NULL);
+    {
+        /* The log's path as Copy details shows it: an absolute build root (CMake's binary tree, or
+           a BUILD_ROOT under the profile) goes through the same "~" and "<user>" rewrite. */
+        char shown_home[NATIVE_TEST_PATH_MAX + 128];
+        char shown[NATIVE_TEST_PATH_MAX + 128];
+        char expected[NATIVE_TEST_PATH_MAX + 160];
+        (void)player_display_text_with_home(report_run_log, nk_platform_env_home_dir(), shown_home,
+                                            sizeof(shown_home));
+        assert(player_dev_log_redact(shown_home, NULL, nk_platform_env_user_name(), shown,
+                                     sizeof(shown)));
+        snprintf(expected, sizeof(expected), "Log file: %s\n", shown);
+        assert(strstr(report, expected) != NULL);
+        assert(strstr(report, "/player_state_report_TEST00042-last.txt\n") != NULL);
+    }
     assert(strstr(report, "Last boot events:\n"
                           "  BOOT_EVENT phase=boot reason=entry entry=0x08804000\n"
                           "  BOOT_EVENT phase=stop") != NULL);
@@ -3649,7 +3986,7 @@ static void test_error_cards_are_plain(void) {
     {
         static const char *const codes[] = {
             "EXPERIMENTAL", "DISC_SFO", "EXECUTABLE", "GUEST_MODULES", "RUNTIME_PACKAGE",
-            "DATA_ROOT", "SYSTEM_FONTS", "AUDIO_OUTPUT", "SOMETHING_NEW"
+            "DATA_ROOT", "SYSTEM_FONTS", "AUDIO_OUTPUT", "DATA_DIR_UNAVAILABLE", "SOMETHING_NEW"
         };
         static const PlayerPreflightStatus statuses[] = {
             PREFLIGHT_OK, PREFLIGHT_MISSING, PREFLIGHT_INCOMPATIBLE, PREFLIGHT_STALE,
@@ -4143,6 +4480,23 @@ static void test_outdated_packages_rebuild(PlayerApp *app, const char *user_root
     bool offers = false;
     PlayerRebuildCard card;
 
+    /* The source tree is the folder above tools/: a tree at a filesystem or drive root is
+       that root, never the working directory (audit 2026-11-17). */
+    {
+        char root[64];
+        assert(player_source_root_from_cli("/tools/nk_cli.py", root, sizeof(root)));
+        assert(strcmp(root, "/") == 0);
+        assert(player_source_root_from_cli("C:\\tools\\nk_cli.py", root, sizeof(root)));
+        assert(strcmp(root, "C:\\") == 0);
+        assert(player_source_root_from_cli("/srv/tree/tools/nk_cli.py", root, sizeof(root)));
+        assert(strcmp(root, "/srv/tree") == 0);
+        assert(player_source_root_from_cli("C:\\tree\\tools\\nk_cli.py", root, sizeof(root)));
+        assert(strcmp(root, "C:\\tree") == 0);
+        assert(player_source_root_from_cli("tools/nk_cli.py", root, sizeof(root)));
+        assert(strcmp(root, ".") == 0);
+        assert(!player_source_root_from_cli("C:\\tree\\tools\\nk_cli.py", root, 3u));
+    }
+
     write_tree_file(install_root, "tools/analyze.py", "analyzer, this version\n");
     write_tree_file(install_root, "tools/analyze_cfg.py", "analyzer cfg, this version\n");
     write_tree_file(install_root, "tools/codegen.py", "codegen, this version\n");
@@ -4439,6 +4793,51 @@ static void test_build_outcome_is_shown_once_per_session(void) {
 
 /* Set when test_package_build_lifecycle skips its package rebuild steps (Android only). */
 static bool s_package_rebuild_skipped = false;
+
+/* Cases this host could not run (a junction cmd could not make, a git that does not answer): each
+   prints a NOT_RUN line naming itself, and the run then ends in exit 77 rather than ALL PASSED,
+   so a case that did not run is never counted as a pass. */
+static int s_cases_not_run = 0;
+static void note_case_not_run(const char *what) {
+    printf("[PLAYER_STATE_TEST] NOT_RUN: %s\n", what);
+    fflush(stdout);
+    s_cases_not_run++;
+}
+
+/* The #511 git-clean gate (subtest 20) sees a write into a tracked file that was already modified
+   before the run: in a scratch repository, a file modified once and then again gives the same
+   status line both times, and the snapshots must still differ. */
+static void test_git_snapshot_sees_a_second_change(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: the git-clean snapshot sees a change to a dirty file\n");
+    const char sep = nk_platform_path_separator();
+    char repo[NATIVE_TEST_PATH_MAX];
+    char file[NATIVE_TEST_PATH_MAX + 32];
+    char before[NATIVE_TEST_PATH_MAX + 32];
+    char after[NATIVE_TEST_PATH_MAX + 32];
+    char command[NATIVE_TEST_PATH_MAX + 128];
+    snprintf(repo, sizeof(repo), "%s%cgit-snapshot-repo", native_test_get_root(), sep);
+    snprintf(file, sizeof(file), "%s%ctracked.txt", repo, sep);
+    snprintf(before, sizeof(before), "%s%cgit-snapshot-before.txt", native_test_get_root(), sep);
+    snprintf(after, sizeof(after), "%s%cgit-snapshot-after.txt", native_test_get_root(), sep);
+    assert(nk_platform_mkdir_p(repo));
+    snprintf(command, sizeof(command), "git -C \"%s\" init -q", repo);
+    if (system(command) != 0) {
+        note_case_not_run("the git-clean snapshot check: `git init` is unavailable here");
+        return;
+    }
+    write_text_file(file, "tracked\n");
+    snprintf(command, sizeof(command), "git -C \"%s\" add tracked.txt", repo);
+    assert(system(command) == 0);
+    write_text_file(file, "modified before the run\n");
+    assert(git_status_snapshot_in(repo, before));
+    write_text_file(file, "modified again during the run\n");
+    assert(git_status_snapshot_in(repo, after));
+    assert(!files_identical(before, after));
+    /* An unchanged tree gives the same snapshot twice. */
+    assert(git_status_snapshot_in(repo, before));
+    assert(files_identical(before, after));
+    printf("[PLAYER_STATE_TEST] the git-clean snapshot sees a change to a dirty file PASS\n");
+}
 
 static void test_package_build_lifecycle(const char *self_executable) {
     assert(self_executable && self_executable[0]);
@@ -5819,7 +6218,6 @@ static void test_saves_backup_refuses_what_it_cannot_hold(void) {
         assert(saves_test_has_text(data_bin, "linked bytes"));
         assert(fchmod(locked_fd, 0700) == 0);
         assert(close(locked_fd) == 0);
-        linked = true;
     }
 #endif
     remove(app->library.library_path);
@@ -6012,6 +6410,321 @@ static void test_saves_change_nothing_without_a_whole_backup(void) {
            "undone; a failed unpack changes nothing\n");
 }
 #endif /* NK_SAVES_TEST_SEAMS */
+
+/* Audit 2026-11-17: Remove game and data listed one enhanced build, the timing
+ * package's, and only while that package was available. The culling builds
+ * (<DISC>-enhanced-<timing>+<hook> and <DISC>-enhanced-<hook>), and a timing build
+ * whose package went away, stayed on the disk, and the size shown left them out.
+ *
+ * Failing before: the plan's package bytes were the plain package's alone (3000)
+ * and the three enhanced folders were still there after the removal. */
+static void test_removal_takes_every_enhanced_build(void) {
+    RemovalFixture f;
+    PlayerRemovalPlan plan;
+    char error[NK_MAX_PATH + 128];
+    char packages[NK_MAX_PATH * 2];
+    char path[NK_MAX_PATH * 3];
+    static const char *const builds[] = {
+        "RMVE01306-enhanced-timing", "RMVE01306-enhanced-timing+cullhook",
+        "RMVE01306-enhanced-cullhook"
+    };
+    /* Not this title's enhanced builds: another disc's, a name no variant has, and a
+       folder that is not an enhanced build. */
+    static const char *const others[] = {
+        "RMVE01307-enhanced-timing", "RMVE01306-enhanced-Not_A_Variant", "RMVE01306-other"
+    };
+    removal_fixture_make(&f, "RMVE01306");
+    PlayerApp *app = removal_test_app(&f, "RMVE01306");
+    assert(!app->title_enhancements[0].available);
+    removal_test_path(packages, sizeof(packages), f.build_root, "packages", NULL, NULL);
+    for (size_t i = 0; i < 3u; ++i) {
+        removal_test_path(path, sizeof(path), packages, builds[i], NULL, NULL);
+        removal_test_tree(path, "package.json", 100u * (i + 1u));
+        removal_test_path(path, sizeof(path), packages, others[i], NULL, NULL);
+        removal_test_tree(path, "package.json", 7);
+    }
+    assert(player_app_plan_game_removal(app, 0, &plan));
+    assert(plan.kind_bytes[PLAYER_REMOVAL_PACKAGE] == 3000u + 100u + 200u + 300u);
+    assert(player_app_remove_game_and_data(app, 0, 0u, error, sizeof(error)));
+    assert(!nk_platform_dir_exists(f.package));
+    for (size_t i = 0; i < 3u; ++i) {
+        removal_test_path(path, sizeof(path), packages, builds[i], NULL, NULL);
+        assert(!nk_platform_dir_exists(path));
+        removal_test_path(path, sizeof(path), packages, others[i], NULL, NULL);
+        assert(nk_platform_dir_exists(path));
+        assert(nk_platform_remove_tree(path, NULL));
+    }
+    remove(app->library.library_path);
+    free(app);
+    printf("PASS: remove game and data takes every enhanced build of the title\n");
+}
+
+/* Audit 2026-11-17: Remove game and data deleted the folders, then took the card
+ * out of the library; when library.json could not be written that failed with an
+ * empty reason, and the card read "The game was not removed" over deleted files.
+ * Here the library's temporary file is a folder, so the write fails.
+ *
+ * Failing before: the error was empty. */
+static void test_removal_says_when_the_card_stays(void) {
+    RemovalFixture f;
+    char error[NK_MAX_PATH + 256];
+    char blocker[NK_MAX_PATH + 16];
+    removal_fixture_make(&f, "RMVE01308");
+    PlayerApp *app = removal_test_app(&f, "RMVE01308");
+    assert(nk_library_save(&app->library, app->library.library_path) == NK_OK);
+    snprintf(blocker, sizeof(blocker), "%s.tmp", app->library.library_path);
+    assert(nk_platform_mkdir_p(blocker));
+    assert(!player_app_remove_game_and_data(app, 0, 0u, error, sizeof(error)));
+    assert(strstr(error, "files were deleted") != NULL);
+    assert(strstr(error, "could not be taken out of the library") != NULL);
+    assert(!nk_platform_dir_exists(f.package));
+    assert(nk_platform_remove_tree(blocker, NULL));
+    remove(app->library.library_path);
+    free(app);
+    printf("PASS: remove game and data says when the card could not be removed\n");
+}
+
+/* Audit 2026-11-17: with no library path of its own and a data folder that cannot be
+ * named, Remove took no lock and did not read the library file again, so a second image
+ * of the disc ID another player had added lost its folders. Nothing is deleted now.
+ *
+ * Failing before: the package folder was deleted, then the card stayed for a library
+ * file that could not be updated. */
+static void test_removal_without_a_library_file_deletes_nothing(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    static const char variable[] = "LOCALAPPDATA";
+    static const char start[] = "C:\\";
+#elif defined(__linux__) && !defined(__ANDROID__)
+    static const char variable[] = "XDG_DATA_HOME";
+    static const char start[] = "/";
+#else
+    printf("SKIP: removal without a library file path (no data-folder variable here)\n");
+    return;
+#endif
+#if defined(_WIN32) || defined(_WIN64) || (defined(__linux__) && !defined(__ANDROID__))
+    RemovalFixture f;
+    char error[NK_MAX_PATH + 256];
+    char probe[NK_MAX_PATH];
+    char long_base[NK_MAX_PATH + 16];
+    char kept_library[sizeof(((NkLibrary *)0)->library_path)];
+    bool was_set = false;
+    bool data_unresolved;
+    removal_fixture_make(&f, "RMVL01768");
+    PlayerApp *app = removal_test_app(&f, "RMVL01768");
+    memcpy(kept_library, app->library.library_path, sizeof(kept_library));
+    app->library.library_path[0] = '\0';
+    /* An absolute data base too long for the data folder under it. */
+    memset(long_base, 'a', sizeof(long_base) - 1u);
+    memcpy(long_base, start, strlen(start));
+    long_base[sizeof(long_base) - 1u] = '\0';
+    char *old_value = capture_environment_value(variable, &was_set);
+    set_environment_value(variable, long_base);
+    data_unresolved = !nk_platform_get_app_data_dir(probe, sizeof(probe));
+    if (data_unresolved) {
+        assert(!player_app_remove_game_and_data(app, 0, 0u, error, sizeof(error)));
+        assert(strstr(error, "library file could not be read") != NULL);
+        assert(nk_platform_dir_exists(f.package));
+        assert(app->game_count == 2);
+    }
+    restore_environment_value(variable, old_value, was_set);
+    free(old_value);
+    assert(data_unresolved);
+    /* With its library path back, the same removal goes ahead. */
+    memcpy(app->library.library_path, kept_library, sizeof(kept_library));
+    assert(player_app_remove_game_and_data(app, 0, 0u, error, sizeof(error)));
+    assert(!nk_platform_dir_exists(f.package));
+    remove(app->library.library_path);
+    free(app);
+    printf("PASS: remove game and data deletes nothing without a library file to read\n");
+#endif
+}
+
+/* A sparse file holding `event` at byte `at`, past what a 32-bit offset reaches, that
+ * takes no disk space. False when this folder cannot hold a sparse file. */
+static bool write_sparse_event_file(const char *path, uint64_t at, const char *event) {
+    bool sparse = true;
+    FILE *file = nk_fopen_utf8(path, "wb");
+    assert(file != NULL);
+#if defined(_WIN32) || defined(_WIN64)
+    {
+        DWORD returned = 0;
+        sparse = DeviceIoControl((HANDLE)_get_osfhandle(_fileno(file)), FSCTL_SET_SPARSE, NULL,
+                                 0, NULL, 0, &returned, NULL) != 0;
+    }
+#endif
+    if (!sparse) {
+        fclose(file);
+        (void)nk_remove_utf8(path);
+        return false;
+    }
+    assert(nk_fseek64(file, (int64_t)at, SEEK_SET) == 0);
+    assert(fputs(event, file) >= 0);
+    assert(fclose(file) == 0);
+    return true;
+}
+
+/* Audit 2026-11-17: Restart game, Try again and the report found the card by its
+ * disc ID alone, the first card with it, though two images can share one (a retail
+ * disc beside its fan translation).
+ *
+ * Failing before: Restart game selected the first card and the report named its
+ * title, for a stop of the second card's image. */
+static void test_error_card_names_its_own_image(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: an error card names its own image\n");
+    static char report[PLAYER_ERROR_DETAILS_MAX + 4096];
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    for (int i = 0; i < 2; ++i) {
+        snprintf(app->games[i].disc_id, sizeof(app->games[i].disc_id), "TEST00071");
+        snprintf(app->games[i].iso_path, sizeof(app->games[i].iso_path),
+                 "%s%cimage-%d.iso", native_test_get_root(), nk_platform_path_separator(), i);
+    }
+    snprintf(app->games[0].title_name, sizeof(app->games[0].title_name), "Synthetic Retail");
+    snprintf(app->games[1].title_name, sizeof(app->games[1].title_name), "Synthetic Translation");
+    app->game_count = 2;
+
+    /* The second image ran and stopped. */
+    snprintf(app->launch_session.disc_id, sizeof(app->launch_session.disc_id), "TEST00071");
+    snprintf(app->running_iso_path, sizeof(app->running_iso_path), "%s", app->games[1].iso_path);
+    player_app_set_game_stop_error(app, "RUNTIME_ERROR_EXIT", NULL, 0, 1, 9000u, "TEST00071",
+                                   NULL);
+    assert(player_app_error_subject_index(app, &app->last_error) == 1);
+    assert(player_app_format_error_report_for(app, "v0.0.0-test", NULL, NULL, report,
+                                              sizeof(report)) > 0);
+    assert(strstr(report, "Game: Synthetic Translation\n") != NULL);
+    assert(strstr(report, "Synthetic Retail") == NULL);
+    app->selected_game_index = 0;
+    (void)player_app_retry_from_error(app);
+    assert(app->selected_game_index == 1);
+
+    /* A build of the second image that failed. */
+    snprintf(app->build_session.disc_id, sizeof(app->build_session.disc_id), "TEST00071");
+    snprintf(app->build_session.iso_path, sizeof(app->build_session.iso_path), "%s",
+             app->games[1].iso_path);
+    player_app_set_build_error(app, "synthetic-stage", "synthetic reason", NULL);
+    assert(app->last_error.retry == PLAYER_ERROR_RETRY_BUILD);
+    assert(player_app_error_subject_index(app, &app->last_error) == 1);
+
+    /* A card that does not name its image, beside another image of the disc ID,
+       picks neither. */
+    app->last_error.subject_iso_path[0] = '\0';
+    assert(player_app_error_subject_index(app, &app->last_error) == -1);
+    free(app);
+    printf("[PLAYER_STATE_TEST] an error card names its own image PASS\n");
+}
+
+/* Audit 2026-11-17: the boot-event file was deleted with the narrow remove(), which
+ * reads a UTF-8 path in the ANSI code page on Windows, so under a cache folder whose
+ * name is outside ASCII the file was never deleted.
+ *
+ * Failing before (Windows): the file under "boot-caf\xc3\xa9" was still there after a
+ * launch that could not start. */
+static void test_boot_event_file_is_deleted_under_non_ascii_folder(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: the boot-event file is deleted under a non-ASCII folder\n");
+    char sep = nk_platform_path_separator();
+    char root[256];
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerLaunchWork *work = (PlayerLaunchWork *)calloc(1, sizeof(PlayerLaunchWork));
+    assert(app != NULL && work != NULL);
+    nk_library_init(&app->library);
+    int n = snprintf(root, sizeof(root), "%s%cboot-caf\xc3\xa9", native_test_get_root(), sep);
+    assert(n > 0 && (size_t)n < sizeof(root));
+    assert(nk_platform_mkdir_p(root));
+    assert(sizeof(root) + 16u < sizeof(app->boot_event_file_path));
+    snprintf(app->boot_event_file_path, sizeof(app->boot_event_file_path), "%s%cboot.txt",
+             root, sep);
+    FILE *f = nk_fopen_utf8(app->boot_event_file_path, "wb");
+    assert(f != NULL);
+    fputs("runtime output\n", f);
+    assert(fclose(f) == 0);
+    work->game_index = -1;
+    work->failed_step = PLAYER_LAUNCH_STEP_START;
+    work->result = NK_ERROR_PROCESS_SPAWN;
+    work->session.process.spawn_error = 2;
+    assert(!player_app_launch_finish(app, work));
+    assert(strcmp(app->last_error.error_code, "PROCESS_SPAWN_FAILED") == 0);
+    assert(nk_platform_path_missing(app->boot_event_file_path));
+    assert(nk_platform_remove_tree(root, NULL));
+    free(work);
+    free(app);
+    printf("[PLAYER_STATE_TEST] the boot-event file is deleted under a non-ASCII folder PASS\n");
+}
+
+/* Audit 2026-11-17: the developer log, Copy details and the "~" rewrite read the
+ * profile folder and the user name with the narrow getenv, which gives ANSI
+ * code-page bytes on Windows. A UTF-8 path under a profile named outside ASCII never
+ * matched, so the full path and the name reached the log and the report.
+ *
+ * Failing before (Windows): the log line and the report kept "Jos\xc3\xa9 Synth". */
+static void test_user_identity_is_redacted_in_utf8(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: the profile and user name are redacted in UTF-8\n");
+    char sep = nk_platform_path_separator();
+    static const char user[] = "Jos\xc3\xa9 Synth";
+    char home[256];
+    char text[512];
+    char shown[512];
+    static char report[PLAYER_ERROR_DETAILS_MAX + 4096];
+#if defined(_WIN32) || defined(_WIN64)
+    static const wchar_t *const names[] = {L"USERPROFILE", L"USERNAME"};
+    /* Split so the source holds no text the publication audit reads as a share path. */
+    static const wchar_t *const values[] = {L"C:\\path\\" L"Jos\u00e9 Synth", L"Jos\u00e9 Synth"};
+    static wchar_t kept[2][1024];
+    bool had[2];
+    for (int i = 0; i < 2; ++i) {
+        const wchar_t *was = _wgetenv(names[i]);
+        had[i] = was != NULL;
+        if (was) {
+            assert(wcslen(was) < 1024u);
+            wcscpy(kept[i], was);
+        }
+        assert(_wputenv_s(names[i], values[i]) == 0);
+    }
+    snprintf(home, sizeof(home), "C:\\path\\%s", user);
+#else
+    static const char *const names[] = {"HOME", "USER"};
+    static char kept[2][1024];
+    bool had[2];
+    snprintf(home, sizeof(home), "/srv/%s", user);
+    for (int i = 0; i < 2; ++i) {
+        const char *was = getenv(names[i]);
+        had[i] = was != NULL;
+        if (was) {
+            assert(strlen(was) < 1024u);
+            strcpy(kept[i], was);
+        }
+        assert(setenv(names[i], i == 0 ? home : user, 1) == 0);
+    }
+#endif
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    player_app_init(app);
+    player_dev_log_add(app, "test", "opened %s%cAppData%cx.log for %s", home, sep, sep, user);
+    const char *line = player_dev_log_line(app, player_dev_log_count(app) - 1u);
+    assert(strstr(line, "Jos") == NULL);
+    assert(strstr(line, "%USERPROFILE%") != NULL && strstr(line, "<user>") != NULL);
+
+    snprintf(text, sizeof(text), "%s%csaves", home, sep);
+    assert(player_display_text(text, shown, sizeof(shown)) > 0);
+    assert(shown[0] == '~' && strstr(shown, "Jos") == NULL);
+
+    player_app_set_error(app, "SYNTHETIC_ERROR", "Synthetic", "m", "Back", VIEW_LIBRARY);
+    snprintf(app->last_error.details, sizeof(app->last_error.details), "Seen in %s%cAppData by %s",
+             home, sep, user);
+    assert(player_app_format_error_report(app, "v0.0.0-test", report, sizeof(report)) > 0);
+    assert(strstr(report, "Jos") == NULL);
+    free(app);
+
+#if defined(_WIN32) || defined(_WIN64)
+    for (int i = 0; i < 2; ++i) assert(_wputenv_s(names[i], had[i] ? kept[i] : L"") == 0);
+#else
+    for (int i = 0; i < 2; ++i) {
+        if (had[i]) assert(setenv(names[i], kept[i], 1) == 0);
+        else assert(unsetenv(names[i]) == 0);
+    }
+#endif
+    printf("[PLAYER_STATE_TEST] the profile and user name are redacted in UTF-8 PASS\n");
+}
 
 static void test_remove_from_library_deletes_what_nakagawa_built(void) {
     RemovalFixture f;
@@ -6401,7 +7114,15 @@ static void psn_test_refused(const char *path, const char *want_code, const char
    <file>.v<n>.bak before the first save replaces it; a newer one is refused by name and
    never replaced (src/core/nk_user_data_schema.h). */
 
-#define VERSIONED_DATA_ROOT SR_SELFTEST_BUILD_ROOT "/versioned_user_data"
+/* This run's own folder (native_test_get_root, #735), set by test_versioned_user_data: a run that
+   stops part way leaves its backups where no later run looks, and two runs never share them. */
+static char s_versioned_root[NATIVE_TEST_PATH_MAX];
+
+static void versioned_path(char *out, size_t out_size, const char *name) {
+    int written = snprintf(out, out_size, "%s%c%s", s_versioned_root,
+                           nk_platform_path_separator(), name);
+    assert(s_versioned_root[0] && written > 0 && (size_t)written < out_size);
+}
 
 static void versioned_copy_fixture(const char *fixture, const char *destination) {
     char *bytes = read_text_file(fixture);
@@ -6424,9 +7145,14 @@ static void versioned_remove(const char *path) {
 }
 
 static void test_versioned_settings(PlayerApp *app) {
-    const char *path = VERSIONED_DATA_ROOT "/settings.json";
-    const char *v1_backup = VERSIONED_DATA_ROOT "/settings.json.v1.bak";
-    const char *v2_backup = VERSIONED_DATA_ROOT "/settings.json.v2.bak";
+    char path[NATIVE_TEST_PATH_MAX + 64];
+    char v1_backup[NATIVE_TEST_PATH_MAX + 64];
+    char v2_backup[NATIVE_TEST_PATH_MAX + 64];
+    char v3_backup[NATIVE_TEST_PATH_MAX + 64];
+    versioned_path(path, sizeof(path), "settings.json");
+    versioned_path(v1_backup, sizeof(v1_backup), "settings.json.v1.bak");
+    versioned_path(v2_backup, sizeof(v2_backup), "settings.json.v2.bak");
+    versioned_path(v3_backup, sizeof(v3_backup), "settings.json.v3.bak");
 
     /* v0.0.1 wrote schema 2: every value loads as it was saved, and a save
        writes the same version again with no backup. */
@@ -6497,7 +7223,7 @@ static void test_versioned_settings(PlayerApp *app) {
         assert(strcmp(kept, newer) == 0);
         free(kept);
     }
-    assert(!nk_platform_file_exists(VERSIONED_DATA_ROOT "/settings.json.v3.bak"));
+    assert(!nk_platform_file_exists(v3_backup));
     versioned_remove(v1_backup);
     versioned_remove(path);
     printf("[PLAYER_STATE_TEST] settings.json: v0.0.1 and schema 1 load and migrate, "
@@ -6507,8 +7233,12 @@ static void test_versioned_settings(PlayerApp *app) {
 static void test_versioned_library(PlayerApp *app) {
     static NkLibrary library;
     static NkLibrary reloaded;
-    const char *path = VERSIONED_DATA_ROOT "/library.json";
-    const char *bak = VERSIONED_DATA_ROOT "/library.json.bak";
+    char path[NATIVE_TEST_PATH_MAX + 64];
+    char bak[NATIVE_TEST_PATH_MAX + 64];
+    char v1_backup[NATIVE_TEST_PATH_MAX + 64];
+    versioned_path(path, sizeof(path), "library.json");
+    versioned_path(bak, sizeof(bak), "library.json.bak");
+    versioned_path(v1_backup, sizeof(v1_backup), "library.json.v1.bak");
 
     /* v0.0.1's library.json (schema 1) loads whole and round-trips. */
     versioned_copy_fixture("tests/fixtures/user_data/v0.0.1/library.json", path);
@@ -6531,7 +7261,7 @@ static void test_versioned_library(PlayerApp *app) {
     assert(strcmp(two->title_name, "Synthetic Two \xE6\x97\xA5\xE6\x9C\xAC") == 0);
     assert(two->is_experimental && two->status == NK_STATUS_IDENTIFIED);
     assert(nk_library_save(&library, path) == NK_OK);
-    assert(!nk_platform_file_exists(VERSIONED_DATA_ROOT "/library.json.v1.bak"));
+    assert(!nk_platform_file_exists(v1_backup));
     assert(nk_library_load(&reloaded, path) == NK_OK);
     assert(reloaded.count == 2);
     assert(memcmp(reloaded.entries, library.entries,
@@ -6581,7 +7311,10 @@ static void test_versioned_library(PlayerApp *app) {
 static void test_versioned_user_data(void) {
     assert(nk_platform_file_exists("tests/fixtures/user_data/v0.0.1/library.json") &&
            "run from the repository root");
-    assert(nk_platform_mkdir_p(VERSIONED_DATA_ROOT));
+    int written = snprintf(s_versioned_root, sizeof(s_versioned_root), "%s%cversioned_user_data",
+                           native_test_get_root(), nk_platform_path_separator());
+    assert(written > 0 && (size_t)written < sizeof(s_versioned_root));
+    assert(nk_platform_mkdir_p(s_versioned_root));
     PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
     assert(app != NULL);
     test_versioned_settings(app);
@@ -7381,10 +8114,9 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             assert(!nk_platform_path_missing(record_path));
         }
         /* The same folder by another name (N2): a link named ALIAS to MYHB has MYHB's real
-           path. On Windows the picked path keeps the link's name, so the program's folder on
-           the Memory Stick would be ALIAS: the import stops, naming MYHB. On POSIX the
-           picked path is resolved (realpath), so ALIAS is MYHB by name too and imports as
-           the same folder. */
+           path. The picked path keeps the link's name on every host (on POSIX only the
+           folder's parent is resolved), so the program's folder on the Memory Stick would
+           be ALIAS: the import stops, naming MYHB. */
         {
             char alias_dir[NATIVE_TEST_PATH_MAX + 128];
             char alias_path[NATIVE_TEST_PATH_MAX + 160];
@@ -7392,9 +8124,7 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             snprintf(alias_path, sizeof(alias_path), "%s%cEBOOT.PBP", alias_dir, sep);
 #ifndef _WIN32
             assert(symlink(folder_path, alias_dir) == 0);
-            assert(player_psn_package_inspect(alias_path, &second, code, sizeof(code), message,
-                                              sizeof(message)));
-            assert(second.homebrew && second.iso_ready);
+            psn_test_refused(alias_path, "HOMEBREW_ALREADY_ADDED", "MYHB");
             assert(unlink(alias_dir) == 0);
 #else
             {
@@ -7405,7 +8135,8 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
                     psn_test_refused(alias_path, "HOMEBREW_ALREADY_ADDED", "MYHB");
                     assert(RemoveDirectoryA(alias_dir));
                 } else {
-                    printf("[PLAYER_STATE_TEST] NOT_RUN: mklink /J is unavailable here\n");
+                    note_case_not_run("the HOMEBREW_ALREADY_ADDED junction alias case: mklink /J "
+                                      "is unavailable here");
                 }
             }
 #endif
@@ -7563,11 +8294,28 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
                 assert(strstr(report, "MYHB") == NULL && strstr(report, base) == NULL);
             }
 
-            /* Delete kept copy: the image, the folder copy and the records go; the stick stays. */
+            /* Delete kept copy: the image, the folder copy and the records go; the stick stays.
+               With no library file yet, the library lock is still taken while they go, since
+               another player can make the file with this title in it meanwhile (audit
+               2026-11-17): the lock file it leaves shows it was taken. */
+            char hb_lock_file[NATIVE_TEST_PATH_MAX + 128];
+            snprintf(hb_lock_file, sizeof(hb_lock_file), "%s%clocks%clibrary.lock", base, sep,
+                     sep);
+            assert(remove(lib->library.library_path) == 0);
+            (void)remove(hb_lock_file);
+            assert(nk_platform_path_missing(hb_lock_file));
             assert(player_app_retry_from_error(lib));
             assert(lib->active_view == VIEW_LIBRARY && strstr(lib->library_notice, "deleted"));
             assert(nk_platform_path_missing(again.iso_path) && nk_platform_path_missing(view_root));
             assert(nk_platform_path_missing(record_path));
+            assert(nk_platform_file_exists(hb_lock_file));
+            {
+                NkLibrary *empty = (NkLibrary *)calloc(1, sizeof(NkLibrary));
+                assert(empty != NULL);
+                nk_library_init(empty);
+                assert(nk_library_save(empty, lib->library.library_path) == NK_OK);
+                free(empty);
+            }
             after = psn_test_read_file(stick_file, &after_len);
             assert(after != NULL && after_len == 22u &&
                    memcmp(after, "written by the program", 22u) == 0);
@@ -7821,7 +8569,7 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED", "a junction");
             assert(RemoveDirectoryA(entry));
         } else {
-            printf("[PLAYER_STATE_TEST] NOT_RUN: mklink /J is unavailable here\n");
+            note_case_not_run("the 'a junction' refusal case: mklink /J is unavailable here");
         }
     }
 #endif
@@ -7866,6 +8614,41 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         }
         nk_ps_set_env(home_name, had_home ? saved : NULL);
     }
+#if defined(_WIN32) || defined(_WIN64)
+    /* The cloud-sync root (OneDriveConsumer) is read from the wide environment: a root whose
+       name is outside the ANSI code page (here under a profile folder named so) was '?'
+       bytes through getenv, the path resolver refused it, and a package picked in it took
+       the whole root along as the program's folder. */
+    {
+        char sync_profile[NATIVE_TEST_PATH_MAX + 64];
+        char sync_root[NATIVE_TEST_PATH_MAX + 96];
+        char loose_path[NATIVE_TEST_PATH_MAX + 160];
+        WCHAR wsync_root[NATIVE_TEST_PATH_MAX + 96];
+        static WCHAR saved_sync[32768];
+        DWORD saved_sync_len = GetEnvironmentVariableW(L"OneDriveConsumer", saved_sync, 32768);
+        int sync_written = snprintf(sync_profile, sizeof(sync_profile),
+                                    "%s%cJos\xC3\xA9_\xE6\x97\xA5", base, sep);
+        assert(sync_written > 0 && (size_t)sync_written < sizeof(sync_profile));
+        sync_written = snprintf(sync_root, sizeof(sync_root), "%s%cOneDrive", sync_profile, sep);
+        assert(sync_written > 0 && (size_t)sync_written < sizeof(sync_root));
+        assert(nk_platform_mkdir_p(sync_root));
+        snprintf(loose_path, sizeof(loose_path), "%s%cEBOOT.PBP", sync_root, sep);
+        pbp = homebrew_pbp("Synced", program, 88u, NULL, 0, &pbp_len);
+        FILE *synced = nk_fopen_utf8(loose_path, "wb");
+        assert(synced != NULL);
+        assert(fwrite(pbp, 1, pbp_len, synced) == pbp_len);
+        assert(fclose(synced) == 0);
+        free(pbp);
+        assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, sync_root, -1, wsync_root,
+                                   (int)(sizeof(wsync_root) / sizeof(wsync_root[0]))) > 0);
+        assert(_wputenv_s(L"OneDriveConsumer", wsync_root) == 0);
+        psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED", "which holds your own files");
+        assert(_wputenv_s(L"OneDriveConsumer",
+                          saved_sync_len > 0 && saved_sync_len < 32768 ? saved_sync : L"") == 0);
+        /* The narrow-API cleanup of base cannot open a non-code-page name. */
+        assert(nk_platform_remove_tree(sync_profile, NULL));
+    }
+#endif
 
     /* An encrypted program and a file that is not a program are refused by name, and nothing
        is written. */
@@ -8141,6 +8924,67 @@ static void test_psn_package_imports_as_its_iso(void) {
     assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code),
                                       message, sizeof(message)));
     assert(again.iso_ready);
+
+    /* Another package with the same disc ID (a re-release, a fixed download) is converted
+       itself, not given the first one's image; then the first is converted again, and an
+       image cut short is not reused (audit 2026-11-17). */
+    {
+        char second_iso[NATIVE_TEST_PATH_MAX + 96];
+        char second_pbp[NATIVE_TEST_PATH_MAX + 96];
+        uint8_t *second_image;
+        uint8_t *second_package;
+        size_t second_image_len = 0, second_package_len = 0;
+        PlayerPsnPackage second;
+        snprintf(second_iso, sizeof(second_iso), "%s%csecond.iso", base, sep);
+        snprintf(second_pbp, sizeof(second_pbp), "%s%cSECOND.PBP", base, sep);
+        write_player_package_preflight_iso(second_iso, "TEST80901", "Synthetic PSN Game Two",
+                                           false);
+        second_image = psn_test_read_file(second_iso, &second_image_len);
+        assert(second_image_len != iso_len || memcmp(second_image, iso, iso_len) != 0);
+        keys = nk_keystore_create();
+        assert(keys != NULL);
+        assert(nk_keystore_load_builtin(keys, key_error, sizeof(key_error)) == NK_PSP_OK);
+        nk_psp_ctx_init(&ctx, keys);
+        second_package = psp_seal_npumdimg_pbp(&ctx, "TEST80901", second_image,
+                                               second_image_len, 4u, &second_package_len);
+        nk_keystore_free(keys);
+        write_binary_file(second_pbp, second_package, second_package_len);
+        free(second_package);
+
+        assert(player_psn_package_inspect(second_pbp, &second, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(strcmp(second.iso_path, expected_iso) == 0);
+        assert(!second.iso_ready);
+        assert(player_psn_package_convert(&second, NULL, code, sizeof(code), message,
+                                          sizeof(message)));
+        converted = psn_test_read_file(expected_iso, &converted_len);
+        assert(converted_len == second_image_len &&
+               memcmp(converted, second_image, second_image_len) == 0);
+        free(converted);
+        assert(player_psn_package_inspect(second_pbp, &second, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(second.iso_ready);
+        /* The first package's image is gone, so picking it converts it again. */
+        assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(!again.iso_ready);
+        assert(player_psn_package_convert(&again, NULL, code, sizeof(code), message,
+                                          sizeof(message)));
+        converted = psn_test_read_file(expected_iso, &converted_len);
+        assert(converted_len == iso_len && memcmp(converted, iso, iso_len) == 0);
+        /* Its tail cut off, with the volume descriptor and PARAM.SFO still readable. */
+        write_binary_file(expected_iso, converted, converted_len - 2048u);
+        free(converted);
+        assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(!again.iso_ready);
+        assert(player_psn_package_convert(&again, NULL, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(again.iso_ready);
+        free(second_image);
+    }
 
     /* The wizard's panel shows the conversion and hands back the view the
        package was picked from. */
@@ -8689,6 +9533,9 @@ static void test_play_mode_settings(void) {
         assert(info && info->key && info->name && info->sentence && info->value_count >= 2);
         for (int i = 0; i < info->value_count; i++) has_off = has_off || info->values[i] == 0;
         assert(has_off);
+        /* Audit 2026-11-17, F-bf5c0482: the table's ace_only is what tags and dims a game's
+           row, and the part's sentence says it (the screen test's fixture reads the sentence). */
+        assert(info->ace_only == (strncmp(info->sentence, "Ace only", 8) == 0));
     }
     assert(player_enhanced_part(PLAYER_PART_COUNT) == NULL);
     /* The screen test's fixture is the page a new settings file shows: same names, fresh-value
@@ -9283,6 +10130,40 @@ static void test_play_mode_settings(void) {
  * section 10.9): "ace" becomes the library's default and parts, "ace_titles" the titles'
  * choices and parts, and a disc in "enhancement_60hz_discs" plain Ace: Enhanced plus its 60 FPS
  * game logic (owner, 2026-11-04). The keys are read only when "enhanced" is absent. */
+/* A full table of per-title play choices (audit 2026-11-17): saved choices outlive a disc's
+ * removal, so the table can be full while a library title has none. A new choice then makes
+ * room by dropping the choices of discs no longer in the library, keeping every library
+ * title's, instead of being dropped while the change is logged as saved. */
+static void test_title_play_full_table_makes_room(void) {
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    const PlayerTitlePlay *kept;
+    printf("[PLAYER_STATE_TEST] Subtest: a full title play table makes room\n");
+    assert(app != NULL);
+    app->game_count = 2;
+    snprintf(app->games[0].disc_id, sizeof(app->games[0].disc_id), "TEST90071");
+    snprintf(app->games[1].disc_id, sizeof(app->games[1].disc_id), "TEST90072");
+    for (int i = 0; i < MAX_LIBRARY_GAMES; i++) {
+        PlayerTitlePlay *entry = &app->settings.title_play[i];
+        memset(entry, 0, sizeof(*entry));
+        if (i == 7) snprintf(entry->key, sizeof(entry->key), "TEST90072");
+        else snprintf(entry->key, sizeof(entry->key), "TEST7%04d", i);
+        entry->mode = PLAYER_PLAY_AUTHENTIC;
+        entry->logic_60 = -1;
+        for (int p = 0; p < PLAYER_PART_COUNT; p++) entry->part[p] = -1;
+    }
+    app->settings.title_play_count = MAX_LIBRARY_GAMES;
+    assert(player_app_title_play_mode(app, 0) == PLAYER_PLAY_LIBRARY);
+    player_app_cycle_title_play_mode(app, 0);
+    assert(player_app_title_play_mode(app, 0) == PLAYER_PLAY_AUTHENTIC);
+    /* The other library title keeps its choice; the removed discs' choices made the room. */
+    kept = player_settings_title_play(&app->settings, "TEST90072");
+    assert(kept != NULL && kept->mode == PLAYER_PLAY_AUTHENTIC);
+    assert(app->settings.title_play_count == 2);
+    assert(player_settings_title_play(&app->settings, "TEST70000") == NULL);
+    assert(app->last_error.error_code[0] == '\0');
+    free(app);
+}
+
 static void test_play_mode_settings_mapping(void) {
     char sep = nk_platform_path_separator();
     char cache_root[512], root[700], path[800];
@@ -9344,6 +10225,17 @@ static void test_play_mode_settings_mapping(void) {
     player_play_resolve(&back->settings, "TEST91001", &r);
     assert(r.chosen == PLAYER_PLAY_ACE && r.logic_60 && r.part[PLAYER_PART_FILTERING] == 16 &&
            r.part[PLAYER_PART_TEXT] == 1);
+
+    /* A filtering value past int is refused before it is narrowed (audit 2026-11-17):
+       2^32 + 8 and 2^32 + 2 are not read as 8x and 2x. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"ace\": {\"enabled\": true, \"af\": 4294967304},"
+        " \"ace_titles\": {\"TEST91007\": {\"mode\": \"ace\", \"af\": 4294967298}}}");
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_FILTERING] == 16);
+    player_play_resolve(&back->settings, "TEST91007", &r);
+    assert(r.chosen == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_FILTERING] == 16);
 
     /* With "enhanced" present the development keys are not read at all. */
     write_text_file(path,
@@ -11419,6 +12311,23 @@ static void expect_line_parses_in_runtime(const PlayerPlayResolved *r) {
     assert(c.smart2d == r->part[PLAYER_PART_SMART2D]);
     /* Late pad sampling (11.3.9) reaches the runtime only from an Ace launch with the part on. */
     assert(c.pad == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_PAD] == 1 ? 1 : 0));
+    /* Finer patches reach the runtime at the part's own factor, in either tier. */
+    assert(c.tess == r->part[PLAYER_PART_TESS]);
+    /* Supersampling and unclipped sound are Enhanced parts: the resolved factor, and limit when on. */
+    assert(c.ssaa == r->part[PLAYER_PART_SSAA]);
+    assert(c.peak == (r->part[PLAYER_PART_PEAK] == 1 ? 1 : 0));
+    /* Host-built mip chains: mips=on only when the part is on. */
+    assert(c.mips == (r->part[PLAYER_PART_MIPS] == 1 ? 1 : 0));
+    /* Wider culling, short loads and soft shadows are Ace items: on only in an Ace launch. */
+    assert(c.cull == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_CULL] == 1 ? 1 : 0));
+    assert(c.load == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_LOAD] == 1 ? 1 : 0));
+    assert(c.shadow == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_SHADOW] == 1
+                            ? ACE_SHADOW_SOFT : ACE_SHADOW_OFF));
+    /* The stick remap is an Ace item that carries the title's declared dead zone, not the part's
+       word: off for a title that declares none. */
+    assert(c.stick == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_STICK] == 1 &&
+                       r->stick_counts >= 1 && r->stick_counts <= ACE_STICK_COUNTS_MAX
+                           ? r->stick_counts : 0));
     assert(ace_format(&c, canonical, sizeof(canonical)) && strcmp(canonical, line) == 0);
 }
 
@@ -12006,6 +12915,53 @@ static void test_play_mode_title_page(void) {
     assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
     player_app_enhanced_page_cycle_part(app, PLAYER_PART_TEXT);
     assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
+    player_app_enhanced_page_set_mode(app, 1);
+    assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, 1);
+    assert(app->settings.enhanced.part[PLAYER_PART_FILTERING] == 8);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, 0);
+    assert(app->settings.enhanced.part[PLAYER_PART_FILTERING] == 16);
+    /* Audit 2026-11-17, F-d4cb7cec: on the library's page, a value past the part's list, the
+     * library default (-1, a game's choice only) and the play mode choices a game's page alone
+     * has (Enhanced and Ace, 2 and 3) change nothing. */
+    {
+        PlayerSettings *before = (PlayerSettings *)malloc(sizeof(PlayerSettings));
+        const PlayerEnhancedPartInfo *filtering = player_enhanced_part(PLAYER_PART_FILTERING);
+        assert(before && filtering);
+        memcpy(before, &app->settings, sizeof(*before));
+        player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, filtering->value_count);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, -1);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, -2);
+        player_app_enhanced_page_set_mode(app, 2);
+        player_app_enhanced_page_set_mode(app, 3);
+        player_app_enhanced_page_set_mode(app, -1);
+        assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
+        assert(app->active_view == VIEW_ACE_SETTINGS);
+        free(before);
+    }
+    /* Review of #2644, D1: with a preset the library's page shows the preset's value for a
+     * part the preset sets (Medium: Sharper enlarging on, over the library's own off).
+     * Picking the value the row shows changes nothing; picking another saves it and makes the
+     * preset Custom. */
+    {
+        const PlayerEnhancedPartInfo *upscale = player_enhanced_part(PLAYER_PART_UPSCALE);
+        const PlayerSettings kept = app->settings; /* leaving a preset keeps its values */
+        int shown;
+        assert(upscale && upscale->value_count == 2);
+        player_app_apply_graphics_preset(app, PLAYER_PRESET_MEDIUM);
+        shown = player_settings_library_part(&app->settings, PLAYER_PART_UPSCALE);
+        assert(app->settings.graphics_preset == PLAYER_PRESET_MEDIUM);
+        assert(shown == upscale->values[0] &&
+               app->settings.enhanced.part[PLAYER_PART_UPSCALE] == upscale->values[1]);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_UPSCALE, 0);   /* as shown */
+        assert(app->settings.graphics_preset == PLAYER_PRESET_MEDIUM);
+        assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == upscale->values[1]);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_UPSCALE, 1);   /* Off */
+        assert(app->settings.graphics_preset == PLAYER_PRESET_CUSTOM);
+        assert(player_settings_library_part(&app->settings, PLAYER_PART_UPSCALE) ==
+               upscale->values[1]);
+        app->settings = kept;
+    }
     player_app_close_enhanced_page(app);
     assert(app->active_view == VIEW_SETTINGS);
 
@@ -12014,6 +12970,29 @@ static void test_play_mode_title_page(void) {
     player_app_enhanced_page_cycle_mode(app);                     /* the title's choice */
     assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_AUTHENTIC);
     assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+    player_app_enhanced_page_set_mode(app, 2);
+    assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_ENHANCED);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, 0);
+    assert(player_app_title_part(app, 1, PLAYER_PART_TEXT) == 1);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, -1);
+    assert(player_app_title_part(app, 1, PLAYER_PART_TEXT) == -1);
+    /* Audit 2026-11-17, F-d4cb7cec: Ace for a game without its package is refused, and a value
+     * or a mode choice past its list changes nothing. */
+    {
+        PlayerSettings *before = (PlayerSettings *)malloc(sizeof(PlayerSettings));
+        const PlayerEnhancedPartInfo *text = player_enhanced_part(PLAYER_PART_TEXT);
+        assert(before && text && !app->title_enhancements[1].available);
+        memcpy(before, &app->settings, sizeof(*before));
+        player_app_enhanced_page_set_mode(app, 3);
+        assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_ENHANCED);
+        player_app_enhanced_page_set_mode(app, 4);
+        player_app_enhanced_page_set_mode(app, -1);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, text->value_count);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, -2);
+        assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
+        assert(app->active_view == VIEW_ACE_SETTINGS && player_app_enhanced_page_title(app) == 1);
+        free(before);
+    }
     player_app_enhanced_page_cycle_part(app, PLAYER_PART_TEXT);   /* library -> on */
     assert(player_app_title_part(app, 1, PLAYER_PART_TEXT) == 1);
     assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
@@ -12052,6 +13031,17 @@ static void test_play_mode_title_page(void) {
         player_app_set_view(app, VIEW_ACE_SETTINGS);              /* the gone game's page again */
         memcpy(app->enhanced_page_disc, "TEST92002", sizeof("TEST92002"));
         player_app_enhanced_page_cycle_mode(app);
+        assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
+        assert(app->active_view == VIEW_LIBRARY);
+        /* Audit 2026-11-17, F-d4cb7cec: the setters the page's values call do the same. */
+        player_app_set_view(app, VIEW_ACE_SETTINGS);
+        memcpy(app->enhanced_page_disc, "TEST92002", sizeof("TEST92002"));
+        player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, 0);
+        assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
+        assert(app->active_view == VIEW_LIBRARY);
+        player_app_set_view(app, VIEW_ACE_SETTINGS);
+        memcpy(app->enhanced_page_disc, "TEST92002", sizeof("TEST92002"));
+        player_app_enhanced_page_set_mode(app, 1);
         assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
         assert(app->active_view == VIEW_LIBRARY);
 
@@ -12322,6 +13312,155 @@ static void test_enhanced_package_variants(void) {
     printf("[PLAYER_STATE_TEST] enhanced and authentic package variants validate apart PASS\n");
 }
 
+/* A package's cache digests are taken over canonical JSON (sorted keys at every
+ * level, objects inside arrays included), as canonical_json() in
+ * tools/nk_core/package_cache.py computes them, so the same content in another
+ * key order still validates. The native writer used to leave an object's first
+ * key in place and never sorted objects inside arrays, so such a package was
+ * refused as incompatible (audit 2026-11-17). */
+static void test_package_cache_digest_ignores_key_order(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700];
+    char disc_id[MAX_DISC_ID_LEN];
+    NkTitleEntrySnapshot snapshot = {0};
+    assert(nk_title_catalog_find_by_id("synthetic-allegrex-v1", &snapshot));
+    assert(snapshot.entry.primary_disc_id);
+    snprintf(disc_id, sizeof(disc_id), "%s", snapshot.entry.primary_disc_id);
+    nk_title_catalog_snapshot_release(&snapshot);
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%ccache_key_order_probe", cache_root, sep);
+
+    NkGameEntry stock;
+    memset(&stock, 0, sizeof(stock));
+    snprintf(stock.disc_id, sizeof(stock.disc_id), "%s", disc_id);
+    snprintf(stock.title_id, sizeof(stock.title_id), "synthetic-allegrex-v1");
+    snprintf(stock.selected_executable, sizeof(stock.selected_executable), "EBOOT.BIN");
+    NkRuntimePackageInfo info;
+    char reason[1024];
+
+    static const struct {
+        const char *written;
+        const char *canonical;
+        bool valid;
+    } cases[] = {
+        /* The first key sorts after the second. */
+        {"{\"zz_probe\":0,\"aa_probe\":1}", "{\"aa_probe\":1,\"zz_probe\":0}", true},
+        /* An object inside an array, keys unsorted. */
+        {"{\"aa_probe\":[{\"zz\":1,\"aa\":2}]}", "{\"aa_probe\":[{\"aa\":2,\"zz\":1}]}", true},
+        /* Other content is still refused. */
+        {"{\"aa_probe\":1}", "{\"aa_probe\":2}", false},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
+        g_fixture_codegen_options_written = cases[i].written;
+        g_fixture_codegen_options_canonical = cases[i].canonical;
+        write_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1",
+                                      SR_CPUSTATE_ABI_VERSION, "synthetic-allegrex-v1.exe",
+                                      FIXTURE_SHA256, NULL);
+        g_fixture_codegen_options_written = NULL;
+        g_fixture_codegen_options_canonical = NULL;
+        reason[0] = '\0';
+        NkRuntimePackageStatus status = nk_launch_validate_runtime_package(
+            root, &stock, &info, reason, sizeof(reason));
+        if ((status == NK_RUNTIME_PACKAGE_OK) != cases[i].valid) {
+            fprintf(stderr, "codegen_options %s: status=%d reason=%s\n", cases[i].written,
+                    (int)status, reason);
+        }
+        assert((status == NK_RUNTIME_PACKAGE_OK) == cases[i].valid);
+        if (!cases[i].valid) {
+            assert(strstr(reason, "package cache AOT key is invalid or incompatible") != NULL);
+        }
+    }
+    remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
+    printf("[PLAYER_STATE_TEST] package cache digests ignore key order PASS\n");
+}
+
+/* On a case-sensitive file system a folder whose name differs from the package
+ * folder only in letter case is another folder. A symlinked directory inside
+ * the package that leads there is outside the package, so its executable and
+ * image are refused. The containment check used to fold case on every host and
+ * took them as inside (audit 2026-11-17). Windows folds case in NTFS names, so
+ * the check runs only where names are case-sensitive. */
+static void test_package_case_sibling_is_outside(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    printf("[PLAYER_STATE_TEST] SKIP package case-sibling containment: NTFS names fold case\n");
+#else
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], package_dir[900], sibling[900], link[960];
+    char disc_id[MAX_DISC_ID_LEN], lower_disc_id[MAX_DISC_ID_LEN];
+    NkTitleEntrySnapshot snapshot = {0};
+    assert(nk_title_catalog_find_by_id("synthetic-allegrex-v1", &snapshot));
+    assert(snapshot.entry.primary_disc_id);
+    snprintf(disc_id, sizeof(disc_id), "%s", snapshot.entry.primary_disc_id);
+    nk_title_catalog_snapshot_release(&snapshot);
+    for (size_t i = 0; i < sizeof(lower_disc_id); i++) {
+        lower_disc_id[i] = (char)tolower((unsigned char)disc_id[i]);
+        if (!disc_id[i]) break;
+    }
+    assert(strcmp(lower_disc_id, disc_id) != 0);
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cpackage_case_sibling_probe", cache_root, sep);
+    snprintf(package_dir, sizeof(package_dir), "%s%cpackages%c%s", root, sep, sep, disc_id);
+    snprintf(sibling, sizeof(sibling), "%s%cpackages%c%s", root, sep, sep, lower_disc_id);
+    snprintf(link, sizeof(link), "%s%csub", package_dir, sep);
+
+    NkGameEntry stock;
+    memset(&stock, 0, sizeof(stock));
+    snprintf(stock.disc_id, sizeof(stock.disc_id), "%s", disc_id);
+    snprintf(stock.title_id, sizeof(stock.title_id), "synthetic-allegrex-v1");
+    snprintf(stock.selected_executable, sizeof(stock.selected_executable), "EBOOT.BIN");
+    NkRuntimePackageInfo info;
+    char reason[1024];
+    static const char *const moved[] = {
+        "synthetic-allegrex-v1.exe", "synthetic-allegrex-v1_image.bin"
+    };
+    char from[1100], to[1100];
+
+    /* The package records sub/<executable>; sub links to the case sibling. */
+    (void)unlink(link);
+    remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
+    write_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1",
+                                  SR_CPUSTATE_ABI_VERSION, "sub/synthetic-allegrex-v1.exe",
+                                  FIXTURE_SHA256, NULL);
+    assert(nk_platform_mkdir_p(sibling));
+    for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
+        snprintf(from, sizeof(from), "%s%c%s", package_dir, sep, moved[i]);
+        snprintf(to, sizeof(to), "%s%c%s", sibling, sep, moved[i]);
+        assert(rename(from, to) == 0);
+    }
+    char target[64];
+    snprintf(target, sizeof(target), "..%c%s", sep, lower_disc_id);
+    assert(symlink(target, link) == 0);
+    NkRuntimePackageStatus status = nk_launch_validate_runtime_package(
+        root, &stock, &info, reason, sizeof(reason));
+    if (status == NK_RUNTIME_PACKAGE_OK) {
+        fprintf(stderr, "case-sibling package accepted: %s\n", info.executable_path);
+    }
+    assert(status != NK_RUNTIME_PACKAGE_OK);
+
+    /* The same files in a real folder inside the package validate. */
+    assert(unlink(link) == 0);
+    assert(nk_platform_mkdir_p(link));
+    for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
+        snprintf(from, sizeof(from), "%s%c%s", sibling, sep, moved[i]);
+        snprintf(to, sizeof(to), "%s%c%s", link, sep, moved[i]);
+        assert(rename(from, to) == 0);
+    }
+    status = nk_launch_validate_runtime_package(root, &stock, &info, reason, sizeof(reason));
+    if (status != NK_RUNTIME_PACKAGE_OK) fprintf(stderr, "in-package folder: %s\n", reason);
+    assert(status == NK_RUNTIME_PACKAGE_OK);
+
+    for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
+        snprintf(to, sizeof(to), "%s%c%s", link, sep, moved[i]);
+        assert(remove(to) == 0);
+    }
+    assert(test_rmdir(link) == 0);
+    assert(test_rmdir(sibling) == 0);
+    remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
+    printf("[PLAYER_STATE_TEST] package case-sibling containment PASS\n");
+#endif
+}
+
 /* The console nickname (#2197): "Player" until the user chooses one, and never the PC's user
  * name; the first-launch prompt shows until it is answered, and Skip keeps "Player" and is not
  * asked again after a reload; Settings saves a new nickname that a reload reads back; and a
@@ -12586,7 +13725,7 @@ static void test_add_to_steam_outcomes(void) {
     assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_NOT_FOUND &&
            !plan.ready);
     (void)player_steam_outcome_text(&plan, text, sizeof(text));
-    assert(strstr(text, "Steam isn't installed") != NULL && strstr(text, "nothing was added"));
+    assert(strstr(text, "Steam wasn't found") != NULL && strstr(text, "nothing was added"));
     /* Steam with no account yet. */
     assert(nk_platform_mkdir_p(steam));
     assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_NO_ACCOUNT);
@@ -13213,6 +14352,41 @@ static void test_add_to_steam_artwork_per_title(void) {
     free(app);
 }
 
+/* Audit 2026-11-17 (F-e7f8730a): the setup wizard's Ready step threw away
+ * player_app_add_game's result and went on to the library, so a title library.json
+ * did not take was reported nowhere and was gone on the next start.
+ *
+ * Failing before: the Ready step showed the library with no error card. Here the
+ * library's folder is a file, so the library write fails. */
+static void test_wizard_ready_step_reports_a_title_not_saved(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: the wizard's Ready step reports a title not saved\n");
+    char sep = nk_platform_path_separator();
+    char blocker[1024];
+    char path[1100];
+    snprintf(blocker, sizeof(blocker), "%s%cwizard-library-folder-is-a-file",
+             native_test_get_root(), sep);
+    write_text_file(blocker, "a file where the library's folder would be\n");
+    snprintf(path, sizeof(path), "%s%clibrary.json", blocker, sep);
+
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    assert(strlen(path) < sizeof(app->library.library_path));
+    strcpy(app->library.library_path, path);
+
+    seed_entry(&app->inspecting_game, "TEST00063", "Synthetic Wizard Title");
+    app->wizard.step = WIZARD_STEP_READY_LAUNCH;
+    app->active_view = VIEW_SETUP_WIZARD;
+    player_app_wizard_next(app);
+    assert(app->active_view == VIEW_ERROR);
+    assert(strcmp(app->last_error.error_code, "LIBRARY_WRITE_FAILED") == 0);
+    assert(app->wizard.step == WIZARD_STEP_READY_LAUNCH);
+
+    assert(nk_remove_utf8(blocker) == 0);
+    free(app);
+    printf("[PLAYER_STATE_TEST] the wizard's Ready step reports a title not saved PASS\n");
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -13308,6 +14482,12 @@ int main(int argc, char **argv) {
     test_remove_tree_deeper_than_max_path();
 #endif
     test_remove_from_library_deletes_what_nakagawa_built();
+    test_removal_takes_every_enhanced_build();
+    test_removal_says_when_the_card_stays();
+    test_removal_without_a_library_file_deletes_nothing();
+    test_error_card_names_its_own_image();
+    test_boot_event_file_is_deleted_under_non_ascii_folder();
+    test_user_identity_is_redacted_in_utf8();
     test_saves_back_up_restore_and_add();
     test_launch_title_names_one_game();
     test_add_to_steam_outcomes();
@@ -13319,6 +14499,7 @@ int main(int argc, char **argv) {
 #endif
     test_single_instance_per_data_folder();
     test_build_identity_matches_the_python_digest();
+    test_git_snapshot_sees_a_second_change();
     test_package_build_lifecycle(self_executable);
     test_bundled_prerequisite_build(self_executable);
     test_error_cards_are_plain();
@@ -13336,8 +14517,11 @@ int main(int argc, char **argv) {
     test_license_folder_request();
     test_library_card_status_text();
     test_enhanced_package_variants();
+    test_package_cache_digest_ignores_key_order();
+    test_package_case_sibling_is_outside();
     test_play_mode_settings();
     test_play_mode_settings_mapping();
+    test_title_play_full_table_makes_room();
     test_play_mode_smooth_motion();
     test_play_mode_sas_settings();
     test_play_mode_cull_settings();
@@ -13363,6 +14547,12 @@ int main(int argc, char **argv) {
      * root is the temporary one. */
     test_sample_entries_never_reach_library_json();
     test_library_writes_keep_titles_another_writer_added();
+    test_add_game_reports_an_unwritable_library();
+    test_library_change_the_file_refused_is_undone();
+    test_settings_file_that_could_not_be_read_is_kept();
+    test_settings_save_that_did_not_reach_the_disk_keeps_the_file();
+    test_child_window_ready_after_long_output();
+    test_ace_last_session_under_non_ascii_root();
     test_disc_check_after_add();
 
     /* PlayerApp holds 64 game records twice over; keep it off the stack. */
@@ -14218,8 +15408,8 @@ int main(int argc, char **argv) {
             "\"disc\":{\"id\":\"TEST00001\",\"region\":\"NA\","
             "\"revision_policy\":\"explicit-compatible-revisions\","
             "\"compatible_revisions\":[\"TEST00002\"]},"
-            "\"executable\":{\"base\":\"0x08800000\","
-            "\"entry\":\"0x08804000\",\"bss_metadata_source\":\"elf\","
+            "\"executable\":{\"base\":142606336,"
+            "\"entry\":142622720,\"bss_metadata_source\":\"elf\","
             "\"extra_executable_spans\":[]},\"modules\":[],"
             "\"filesystem\":{\"data_root\":\"data\","
             "\"memory_stick_root\":\"savedata\","
@@ -14227,7 +15417,7 @@ int main(int argc, char **argv) {
             "\"hle_profile\":\"generic\",\"feature_requirements\":[],"
             "\"verification_profile\":\"unverified\","
             "\"runtime_bindings\":{\"schema_version\":1,"
-            "\"vblank_frame_counter_addr\":\"0x08804000\"}}";
+            "\"vblank_frame_counter_addr\":142622720}}";
         write_text_file(refusal_path, refused_manifest);
         char refusal_report[2048];
         assert(nk_title_manifest_load_overlay_dir(refusal_dir, refusal_report,
@@ -15207,6 +16397,33 @@ int main(int argc, char **argv) {
             assert(nk_font_check_cache(font_root, msg, sizeof(msg)) == NK_FONT_STATUS_MISSING);
         }
 
+        /* 14j: the Latin file's target is blocked, so the commit stops after the Japanese file is
+           renamed into place. The manifest still names the Japanese file it now holds (the cache
+           stays valid and serves it), and the Korean file staged for the same import is not left
+           behind. */
+        {
+            char blocker[NATIVE_TEST_PATH_MAX + 32];
+            snprintf(path, sizeof(path), "%s%cfonts%cv2%cnkltn.pgf", font_root, sep, sep, sep);
+            assert(nk_platform_mkdir_p(path));
+            snprintf(blocker, sizeof(blocker), "%s%cblock.txt", path, sep);
+            write_text_file(blocker, "a directory is not replaced by a rename");
+            memset(&result, 0, sizeof(result));
+            assert(!nk_font_import_folder(font_root, source_dir, no_choice, &result, err, sizeof(err)));
+            assert(strstr(err, "could not be committed") != NULL);
+            assert(result.slot_imported[NK_FONT_SLOT_JAPANESE]);
+            assert(!result.slot_imported[NK_FONT_SLOT_LATIN]);
+            assert(!result.slot_imported[NK_FONT_SLOT_KOREAN]);
+            assert(nk_font_check_cache(font_root, msg, sizeof(msg)) == NK_FONT_STATUS_OK);
+            nk_font_slot_states(font_root, font_root, states);
+            assert(states[NK_FONT_SLOT_JAPANESE].source == NK_FONT_SOURCE_USER);
+            snprintf(path, sizeof(path), "%s%cfonts%cv2%cnkkr.pgf.tmp", font_root, sep, sep, sep);
+            assert(!nk_platform_file_exists(path));
+            snprintf(path, sizeof(path), "%s%cfonts%cv2%cnkltn.pgf", font_root, sep, sep, sep);
+            assert(test_remove_tree(path));
+            assert(nk_font_remove_imports(font_root, remove_all, err, sizeof(err)) == 1);
+            assert(nk_font_check_cache(font_root, msg, sizeof(msg)) == NK_FONT_STATUS_MISSING);
+        }
+
         /* A corrupt manifest is INVALID, and the preflight names the issue (#313). */
         snprintf(path, sizeof(path), "%s%cfonts%cv2", font_root, sep, sep);
         assert(nk_platform_mkdir_p(path));
@@ -15401,6 +16618,17 @@ int main(int argc, char **argv) {
            Latin indices are served by a stand-in. */
         assert(psp_app->wizard.font_own_count == 3);
         assert(nk_font_own_font_count(per_user, per_user) == 3);
+        /* The status refresh counts from the states it already read, with the same result. */
+        {
+            NkFontSlotState own_states[NK_FONT_SLOT_COUNT];
+            NkFontLatinIndexState own_latin[NK_FONT_LATIN_INDEX_COUNT];
+            char own_font_dir[NK_MAX_PATH * 2];
+            nk_font_slot_states(per_user, per_user, own_states);
+            snprintf(own_font_dir, sizeof(own_font_dir), "%s%c%s", per_user,
+                     nk_platform_path_separator(), NK_FONT_PROJECT_SUBDIR);
+            nk_font_latin_index_states(per_user, own_font_dir, own_latin);
+            assert(nk_font_own_font_count_from_states(own_states, own_latin) == 3);
+        }
         assert(strstr(psp_app->wizard.font_summary,
                       "3 of the 18 PSP fonts are your PSP's originals") != NULL);
         assert(strcmp(psp_app->wizard.font_latin_index_detail[0], "L1 exact ltn0.pgf") == 0);
@@ -16507,6 +17735,70 @@ int main(int argc, char **argv) {
             assert(!player_app_discord_activity(s_app2, &activity));
         }
 
+        /* Cheats (#2639): off by default, an optional key that only a JSON true turns on,
+           toggled and saved by the Settings switch. --cheats and --cheats-file turn them on
+           for the session and are never saved. */
+        player_app_init(s_app2);
+        assert(!s_app2->settings.cheats && !s_app2->cheats_session &&
+               s_app2->cheats_session_file[0] == '\0');
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        {
+            char *saved = read_text_file(test_settings_path);
+            assert(saved && strstr(saved, "\"cheats\": false") != NULL);
+            free(saved);
+        }
+        write_text_file(test_settings_path, "{\"schema_version\": 2}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.cheats);   /* a file from before the key: off */
+        write_text_file(test_settings_path, "{\"schema_version\": 2, \"cheats\": 1}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.cheats);
+        write_text_file(test_settings_path, "{\"schema_version\": 2, \"cheats\": true}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(s_app2->settings.cheats);
+        {
+            NkRuntimeConfig cheats_cfg;
+            memset(&cheats_cfg, 0, sizeof(cheats_cfg));
+            player_app_apply_settings_to_session(&s_app2->settings, &cheats_cfg);
+            assert(cheats_cfg.cheats && cheats_cfg.cheats_file[0] == '\0');
+            s_app2->settings.cheats = false;
+            player_app_apply_settings_to_session(&s_app2->settings, &cheats_cfg);
+            assert(!cheats_cfg.cheats);
+        }
+        s_app2->settings_path[0] = '\0';
+        player_app_toggle_cheats(s_app2);
+        assert(s_app2->settings.cheats);
+        player_app_toggle_cheats(s_app2);
+        assert(!s_app2->settings.cheats);
+        assert(player_app_set_cheats_session(s_app2, NULL));
+        assert(s_app2->cheats_session && s_app2->cheats_session_file[0] == '\0');
+        {
+            /* A named file must be there (so it can be made absolute on every host); one that
+               is not changes nothing. */
+            char named[sizeof(test_settings_path) + 32];
+            char absolute[MAX_PATH_LEN];
+            snprintf(named, sizeof(named), "%s.session-cheats.ini", test_settings_path);
+            remove(named);
+            assert(!player_app_set_cheats_session(s_app2, named));
+            assert(s_app2->cheats_session && s_app2->cheats_session_file[0] == '\0');
+            write_text_file(named, "_C1 Write\n_L 0x00000100 0x00000001\n");
+            assert(player_app_set_cheats_session(s_app2, named));
+            assert(nk_platform_absolute_path(named, absolute, sizeof(absolute)));
+            assert(s_app2->cheats_session && strcmp(s_app2->cheats_session_file, absolute) == 0);
+            remove(named);
+        }
+        assert(!s_app2->settings.cheats);   /* the session's cheats are not the stored switch */
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        {
+            char *saved = read_text_file(test_settings_path);
+            assert(saved && strstr(saved, "\"cheats\": false") != NULL &&
+                   strstr(saved, "session-cheats") == NULL);
+            free(saved);
+        }
+
         /* Opt-in cover art (#2632): off by default, persisted cleanly, toggleable, and
            its cache size / clear helpers inspect only the cover-art cache under user data. */
         player_app_init(s_app2);
@@ -16599,9 +17891,28 @@ int main(int argc, char **argv) {
         /* The user name is replaced as a whole word only. */
         assert(player_dev_log_redact("by synth, not synthetic", NULL, "synth", out, sizeof(out)));
         assert(strcmp(out, "by <user>, not synthetic") == 0);
-        /* Short names are left alone rather than blanking common letters. */
-        assert(player_dev_log_redact("ab cd", NULL, "ab", out, sizeof(out)));
-        assert(strcmp(out, "ab cd") == 0);
+        /* A two-letter name is hidden too, as a whole word, so a report pasted in public does
+           not show it (audit 2026-11-17); a single letter is left, rather than blanking the
+           words "a" and "I". */
+        assert(player_dev_log_redact("ab cd abc", NULL, "ab", out, sizeof(out)));
+        assert(strcmp(out, "<user> cd abc") == 0);
+        assert(player_dev_log_redact("D:/ab/Games/x.iso", NULL, "ab", out, sizeof(out)));
+        assert(strcmp(out, "D:/<user>/Games/x.iso") == 0);
+        assert(player_dev_log_redact("a b", NULL, "a", out, sizeof(out)));
+        assert(strcmp(out, "a b") == 0);
+        /* A profile folder that is the start of another folder's name is not the profile:
+           the other folder's path is left whole, not cut to "%USERPROFILE%ice". */
+#if defined(_WIN32) || defined(_WIN64)
+        assert(player_dev_log_redact("copied D:\\Profiles\\Alice\\x.iso and D:\\Profiles\\Al\\y",
+                                     "D:\\Profiles\\Al", "Al", out, sizeof(out)));
+        assert(strcmp(out, "copied D:\\Profiles\\Alice\\x.iso and %USERPROFILE%\\y") == 0);
+#else
+        /* A synthetic root that is not a profile path (the publication audit's
+           local-path check finds nothing); the whole-component logic is the same. */
+        assert(player_dev_log_redact("copied /srv/al/x and /srv/alice/y.iso", "/srv/al",
+                                     "al", out, sizeof(out)));
+        assert(strcmp(out, "copied %USERPROFILE%/x and /srv/alice/y.iso") == 0);
+#endif
         assert(!player_dev_log_redact("abcdef", NULL, NULL, out, 4u));
         assert(strcmp(out, "abc") == 0);
 
@@ -17019,20 +18330,28 @@ int main(int argc, char **argv) {
            it. The cancelled result says so and is never cached: the next
            validation hashes the package again and passes. */
         nk_title_manifest_set_cancel_check(test_cancel_always, NULL);
+        /* A cancelled validation says nothing about the package: UNKNOWN, not
+           the STALE or MISSING its abandoned hash fell through to. */
         assert(nk_launch_validate_runtime_package(
-                   validation_root, &game, &first_info, reason, sizeof(reason)) !=
-               NK_RUNTIME_PACKAGE_OK);
+                   validation_root, &game, &first_info, reason, sizeof(reason)) ==
+               NK_RUNTIME_PACKAGE_UNKNOWN);
         assert(strcmp(reason, "Package validation was cancelled.") == 0);
         assert(!first_info.validation_cache_hit && first_info.package_root[0] == '\0');
         nk_title_manifest_set_cancel_check(NULL, NULL);
+        char full_reason[1024];
         assert(nk_launch_validate_runtime_package(
-                   validation_root, &game, &first_info, reason, sizeof(reason)) ==
-               NK_RUNTIME_PACKAGE_OK);
+                   validation_root, &game, &first_info, full_reason,
+                   sizeof(full_reason)) == NK_RUNTIME_PACKAGE_OK);
         assert(!first_info.validation_cache_hit);
         assert(nk_launch_validate_runtime_package(
                    validation_root, &game, &cached_info, reason, sizeof(reason)) ==
                NK_RUNTIME_PACKAGE_OK);
         assert(cached_info.validation_cache_hit);
+        /* The full check and the cache hit report the same thing, and neither
+           names a package schema the package may not have. */
+        assert(strncmp(full_reason, "Runtime package is valid for ",
+                       strlen("Runtime package is valid for ")) == 0);
+        assert(strcmp(full_reason, reason) == 0);
         assert(strcmp(first_info.package_root, cached_info.package_root) == 0);
         assert(strcmp(first_info.executable_path, cached_info.executable_path) == 0);
         assert(strcmp(first_info.image_path, cached_info.image_path) == 0);
@@ -17370,8 +18689,8 @@ int main(int argc, char **argv) {
             "  \"display_name\": \"Epoch Coherence Overlay\",\n"
             "  \"kind\": \"retail\",\n"
             "  \"disc\": {\"id\": \"UCUS99901\", \"region\": \"NA\", \"revision_policy\": \"exact-disc-id\"},\n"
-            "  \"executable\": {\"base\": \"0x08800000\", \"entry\": \"0x08804000\", \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
-            "  \"modules\": [{\"name\": \"epoch.prx\", \"load_address\": \"0x08900000\", \"required\": true, \"role\": \"guest-prx\"}],\n"
+            "  \"executable\": {\"base\": 142606336, \"entry\": 142622720, \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
+            "  \"modules\": [{\"name\": \"epoch.prx\", \"load_address\": 143654912, \"required\": true, \"role\": \"guest-prx\"}],\n"
             "  \"filesystem\": {\"data_root\": \"data/epoch\", \"memory_stick_root\": \"ms/epoch\", \"device_prefixes\": [\"host0:\"]},\n"
             "  \"hle_profile\": \"standard\",\n"
             "  \"feature_requirements\": [\"allegrex\"],\n"
@@ -17491,6 +18810,8 @@ int main(int argc, char **argv) {
     (void)run_log_contains;
     (void)append_runtime_event;
     (void)repeat_launch_and_settle;
+    (void)dev_log_count;
+    (void)write_sparse_event_file;
 #else
     printf("[PLAYER_STATE_TEST] Subtest 20: repeat launch through the player session path\n");
     fflush(stdout);
@@ -17592,8 +18913,7 @@ int main(int argc, char **argv) {
 
         bool git_available = git_status_snapshot(git_before);
         if (!git_available) {
-            printf("[PLAYER_STATE_TEST] SKIP git-clean check: `git status` is unavailable here.\n");
-            fflush(stdout);
+            note_case_not_run("the #511 git-clean check: `git status` is unavailable here");
         }
 
         char memstick1[NK_MAX_PATH];
@@ -17998,6 +19318,75 @@ int main(int argc, char **argv) {
         assert_session_released(&rep->launch_session);
         set_environment_value("NK_REPEAT_LAUNCH_STOP_REASON", "");
 
+        /* Audit 2026-11-17: Stop game deleted the cache file even when its copy to the
+           logs folder failed, losing the run's only output. A folder where the copy is
+           written makes the keep fail here; the cache file stays and the developer log
+           says so. */
+        {
+            static const char not_kept[] = "game output could not be kept in the logs folder";
+            char part_blocker[NK_MAX_PATH + 80];
+            size_t not_kept_before = dev_log_count(rep, not_kept);
+            snprintf(part_blocker, sizeof(part_blocker), "%s.part", run_log_last);
+            assert(nk_platform_mkdir_p(part_blocker));
+            assert(player_app_launch_game(rep, 0));
+            assert(rep->is_game_running);
+            snprintf(hold_event_path, sizeof(hold_event_path), "%s", rep->boot_event_file_path);
+            player_app_stop_game(rep);
+            assert(!rep->is_game_running);
+            assert_session_released(&rep->launch_session);
+            assert(nk_platform_file_exists(hold_event_path));
+            assert(dev_log_count(rep, not_kept) == not_kept_before + 1u);
+            assert(nk_platform_remove_tree(part_blocker, NULL));
+            (void)nk_remove_utf8(hold_event_path);
+        }
+
+        /* Audit 2026-11-17: a last-played time the library file does not take was
+           dropped without a word. The library file's folder is a file here, so its
+           commit fails; the developer log names it. */
+        {
+            static const char not_saved[] = "the last-played time could not be saved";
+            static const char leaf[] = "library.json";
+            size_t root_length = strlen(iso_path);
+            size_t not_saved_before = dev_log_count(rep, not_saved);
+            assert(rep->library.library_path[0] == '\0');
+            assert(root_length + 1u + sizeof(leaf) <= sizeof(rep->library.library_path));
+            memcpy(rep->library.library_path, iso_path, root_length);
+            rep->library.library_path[root_length] = sep;
+            memcpy(rep->library.library_path + root_length + 1u, leaf, sizeof(leaf));
+            assert(player_app_launch_game(rep, 0));
+            assert(rep->is_game_running);
+            assert(rep->games[0].last_played[0] != '\0');
+            assert(dev_log_count(rep, not_saved) == not_saved_before + 1u);
+            player_app_stop_game(rep);
+            assert(!rep->is_game_running);
+            assert_session_released(&rep->launch_session);
+            rep->library.library_path[0] = '\0';
+        }
+
+        /* Audit 2026-11-17: the stop reader took any 511-byte chunk of the session file
+           for a line, so a long output line whose later part reads like a stop event
+           was shown as a semantic stop. Only a line's start is an event. */
+        {
+            char long_line[511 + 128];
+            char error_before[48];
+            memset(long_line, 'x', 511u);
+            snprintf(long_line + 511, sizeof(long_line) - 511u, "%s",
+                     "BOOT_EVENT phase=stop reason=semantic-boundary boundary=fake-stop "
+                     "issue=12\n");
+            snprintf(error_before, sizeof(error_before), "%s", rep->last_error.error_code);
+            set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
+            assert(player_app_launch_game(rep, 0));
+            assert(rep->is_game_running);
+            snprintf(hold_event_path, sizeof(hold_event_path), "%s", rep->boot_event_file_path);
+            rep->launch_time_ms = 50000;
+            assert(nk_launch_wait(&rep->launch_session, 10000) == 0);
+            assert(append_runtime_event(hold_event_path, long_line));
+            assert(player_app_monitor_game_session(rep, 51000));
+            assert(!rep->is_game_running);
+            assert_session_released(&rep->launch_session);
+            assert(strcmp(rep->last_error.error_code, error_before) == 0);
+        }
+
         /* Two titles in a row. The owner's ModNation Racers report listed
            LocoRoco 2's boot events: the report read them from the developer
            log, which spans every launch and keeps only each run's first 48
@@ -18092,10 +19481,51 @@ int main(int argc, char **argv) {
         bool warning_card_has_details = false;
         bool scheduler_summary_kept = false;
         char stall_events_path[NK_MAX_PATH] = "";
+        bool past_2_gib_read = false;
+        bool past_2_gib_skipped = false;
         if (events_ok) {
             snprintf(stall_events_path, sizeof(stall_events_path), "%s",
                      rep->boot_event_file_path);
             (void)player_app_monitor_game_session(rep, 13000);
+            /* Audit 2026-11-17: the session file's reader kept its offsets in a long, 32
+               bits on Windows, so once a long run's output passed 2 GiB no stall, render or
+               window event was read again. While the game runs, its session file is swapped
+               for a sparse one whose event sits past 2 GiB: the reader takes that whole line
+               and moves past it. */
+            {
+                static const char ready_event[] =
+                    "BOOT_EVENT phase=display_flip source=synthetic\n";
+                const uint64_t at = (uint64_t)0x90000000u;
+                char big_path[sizeof(scratch) + 32];
+                snprintf(big_path, sizeof(big_path), "%s%csession-past-2gib.txt", scratch, sep);
+                if (write_sparse_event_file(big_path, at, ready_event)) {
+                    char kept_path[sizeof(rep->boot_event_file_path)];
+                    uint64_t kept_offset = rep->boot_event_read_offset;
+                    bool kept_ready = rep->child_window_ready;
+                    bool kept_seen = rep->child_boot_event_seen;
+                    size_t big_length = strlen(big_path);
+                    memcpy(kept_path, rep->boot_event_file_path, sizeof(kept_path));
+                    assert(big_length < sizeof(rep->boot_event_file_path));
+                    memcpy(rep->boot_event_file_path, big_path, big_length + 1u);
+                    rep->boot_event_read_offset = at;
+                    rep->child_window_ready = false;
+                    /* The start check reads from the top; it is past here. */
+                    rep->child_boot_event_seen = true;
+                    (void)player_app_monitor_game_session(rep, 13000);
+                    past_2_gib_read = rep->is_game_running &&
+                        rep->boot_event_read_offset ==
+                            at + (uint64_t)(sizeof(ready_event) - 1u);
+                    memcpy(rep->boot_event_file_path, kept_path, sizeof(kept_path));
+                    rep->boot_event_read_offset = kept_offset;
+                    rep->child_window_ready = kept_ready;
+                    rep->child_boot_event_seen = kept_seen;
+                    (void)nk_remove_utf8(big_path);
+                } else {
+                    past_2_gib_skipped = true;
+                    printf("[PLAYER_STATE_TEST] SKIP session events past 2 GiB: this folder "
+                           "holds no sparse file\n");
+                }
+            }
             no_early_notice = !rep->stalled_game_notice_visible;
             events_ok = append_runtime_event(
                 stall_events_path,
@@ -18173,6 +19603,7 @@ int main(int argc, char **argv) {
             run_log_contains(run_log_last, "BOOT_EVENT phase=stalled") &&
             run_log_contains(run_log_last, "ready=1 delay=2 wait=3 spin=4");
         assert(events_ok);
+        assert(past_2_gib_read || past_2_gib_skipped);
         assert(no_early_notice);
         assert(warning_appeared);
         assert(warning_raise_requested);
@@ -18648,8 +20079,8 @@ int main(int argc, char **argv) {
         /* The card repeats the install root three times in a 512-byte message.
            The per-run temporary root makes the absolute probe path longer than
            the cache path this subtest used to get, which pushed the checkout
-           hint past that limit. A relative root keeps the whole message while
-           discovery still searches the working directory and its parent. */
+           hint past that limit. A relative root keeps the whole message, and from
+           the probe folder it names no tools folder. */
         assert(nk_ps_chdir(probe) == 0);
         snprintf(capp->install_root, sizeof(capp->install_root), "%s", ".");
 
@@ -19052,10 +20483,25 @@ int main(int argc, char **argv) {
         PlayerApp *reset = (PlayerApp *)calloc(1, sizeof(PlayerApp));
         assert(reset != NULL);
         nk_library_init(&reset->library);
+        /* Audit 2026-11-17: a runtime root (--runtime-root, a checkout in the developer
+           route) is never moved: only the per-user folders are. Failing before: the
+           checkout was listed and renamed to "<checkout>-backup-<stamp>". */
+        char checkout[NK_MAX_PATH];
+        char checkout_mark[NK_MAX_PATH + 32];
+        snprintf(checkout, sizeof(checkout), "%s%creset-checkout", native_test_get_root(), sep);
+        snprintf(checkout_mark, sizeof(checkout_mark), "%s%cAGENTS.md", checkout, sep);
+        assert(nk_platform_mkdir_p(checkout));
+        write_text_file(checkout_mark, "checkout\n");
+        assert(strlen(checkout) < sizeof(reset->runtime_root));
+        snprintf(reset->runtime_root, sizeof(reset->runtime_root), "%s", checkout);
         char folders[PLAYER_FACTORY_RESET_FOLDERS][NK_MAX_PATH];
         size_t folder_count =
             player_app_factory_reset_folders(reset, folders, PLAYER_FACTORY_RESET_FOLDERS);
         assert(folder_count >= 1u && folder_count <= 4u);
+        for (size_t i = 0; i < folder_count; ++i) {
+            assert(!native_test_path_within(folders[i], checkout) &&
+                   !native_test_path_within(checkout, folders[i]));
+        }
         for (size_t i = 0; i < folder_count; ++i) {
             for (size_t j = 0; j < folder_count; ++j) {
                 if (i != j) assert(strncmp(folders[i], folders[j], strlen(folders[j])) != 0 ||
@@ -19070,6 +20516,33 @@ int main(int argc, char **argv) {
         assert(!reset->factory_reset_done && !reset->should_quit);
         for (size_t i = 0; i < 4u; ++i) assert(nk_platform_file_exists(marks[i]));
         reset->is_game_running = false;
+
+        /* Audit 2026-11-17: a problem report and a package age scan work in the user
+           data too. Failing before: the reset moved the folders out from under both. */
+        for (int phase = PLAYER_REPORT_PREVIEWING; phase <= PLAYER_REPORT_CREATING; ++phase) {
+            if (phase == PLAYER_REPORT_PREVIEWED) continue;
+            reset->report.phase = (PlayerReportPhase)phase;
+            memset(&reset->last_error, 0, sizeof(reset->last_error));
+            assert(!player_app_factory_reset(reset, "20261029-010203"));
+            assert(strcmp(reset->last_error.error_code, "FACTORY_RESET_BUSY") == 0);
+            assert(!reset->factory_reset_done);
+            for (size_t i = 0; i < 4u; ++i) assert(nk_platform_file_exists(marks[i]));
+        }
+        reset->report.phase = PLAYER_REPORT_IDLE;
+        {
+            PlayerOutdatedScan *age_scan = (PlayerOutdatedScan *)calloc(1, sizeof(*age_scan));
+            assert(age_scan != NULL);
+            reset->outdated.identity_known = true;
+            assert(player_app_outdated_scan_begin(reset, age_scan));
+            memset(&reset->last_error, 0, sizeof(reset->last_error));
+            assert(!player_app_factory_reset(reset, "20261029-010203"));
+            assert(strcmp(reset->last_error.error_code, "FACTORY_RESET_BUSY") == 0);
+            assert(!reset->factory_reset_done);
+            for (size_t i = 0; i < 4u; ++i) assert(nk_platform_file_exists(marks[i]));
+            player_app_outdated_scan_finish(reset, age_scan, "0.0.0-test");
+            assert(!reset->outdated.scan_running);
+            free(age_scan);
+        }
 
 #if defined(_WIN32) || defined(_WIN64)
         /* A file held open in the cache folder: that folder cannot move, and
@@ -19122,6 +20595,7 @@ int main(int argc, char **argv) {
             assert(found);
         }
         assert(nk_platform_dir_exists(logs_dir));
+        assert(nk_platform_file_exists(checkout_mark));
 
         /* A second reset in the same second keeps the first backup's name. */
         reset->factory_reset_done = false;
@@ -19150,6 +20624,8 @@ int main(int argc, char **argv) {
             assert(nk_rename_utf8(moved, folders[i]) == 0);
         }
         for (size_t i = 0; i < 4u; ++i) remove(marks[i]);
+        assert(nk_platform_file_exists(checkout_mark));
+        assert(nk_platform_remove_tree(checkout, NULL));
         free(reset);
         printf("[PLAYER_STATE_TEST] factory reset PASSED\n");
     }
@@ -19256,6 +20732,7 @@ int main(int argc, char **argv) {
     fflush(stdout);
     test_input_classification_and_check_again();
     test_game_build_check_names_the_executable_build();
+    test_wizard_ready_step_reports_a_title_not_saved();
 
     /* Last: it changes how this whole process loads libraries. */
     printf("[PLAYER_STATE_TEST] Subtest 27: library loads leave the current folder and PATH\n");
@@ -19267,6 +20744,11 @@ int main(int argc, char **argv) {
     if (s_package_rebuild_skipped) {
         printf("[PLAYER_STATE_TEST] SKIP: every subtest ran except the package rebuild steps "
                "(exit 77, #360)\n");
+        return 77;
+    }
+    if (s_cases_not_run > 0) {
+        printf("[PLAYER_STATE_TEST] SKIP: %d case(s) did not run on this host, each named by a "
+               "NOT_RUN line above (exit 77)\n", s_cases_not_run);
         return 77;
     }
     printf("[PLAYER_STATE_TEST] ALL PLAYER STATE TESTS PASSED!\n");

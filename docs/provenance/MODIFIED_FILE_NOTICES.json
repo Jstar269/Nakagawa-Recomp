@@ -1654,6 +1654,311 @@
       "disposition": "MODIFIED_NOTICE_ADDED"
     }
   ],
+  "lineage_header_files": {
+    "description": "Tracked files that carry the sal063 immediate-upstream header but have no exact counterpart at the pinned revision in the inventory above: the build files split out of the root Makefile, the runtime and tool files split out of inherited ones after the campaign, and the files that restate parts of inherited ones (src/rt/motion_tap.c and its selftest restate src/rt/ge.c and src/rt/gpu_sdl3vk/ge_gpu.c functions). tools/modified_file_notice_audit.py keeps each one's SPDX identifier, sal063 attribution, modified-file notice and pointer, and fails for any tracked file whose header names sal063 but is listed neither here nor in files.",
+    "files": [
+      {
+        "path": "Makefile",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors since 2026-07-19.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "mk/cosim_snapshot.mk",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors since 2026-07-19.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "mk/diagnostics.mk",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors since 2026-07-19.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "mk/fuzz_verify.mk",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors since 2026-07-19.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "mk/housekeeping.mk",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors since 2026-07-19.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "mk/native_ui_tests.mk",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors since 2026-07-19.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "mk/pipeline.mk",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors since 2026-07-19.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "mk/public_targets.mk",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors since 2026-07-19.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "mk/runtime_sources.mk",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors since 2026-07-19.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "mk/selftests.mk",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors since 2026-07-19.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "mk/smoke_gates.mk",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors since 2026-07-19.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "mk/title_config.mk",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors since 2026-07-19.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/fbcap.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-10-08.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/fbcap.h",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-10-08.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/ge_vram_cli.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-11-01.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/gpu_sdl3vk/ge_gpu_selftest.inc",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-11-01.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/gpu_sdl3vk/sdl3vk_selftest.inc",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-11-01.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_audio.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_audio_codec.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_cache_dma.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_data.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_display.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_font.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_ge.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_host.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_input.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_internal.h",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_io.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_kernel_interrupt.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_kernel_memory.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_kernel_module.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_kernel_sync.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_kernel_thread.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_kernel_time.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_kernel_utils.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_mpeg.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_network.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_npdrm.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_power.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_power.h",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_route.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_rtc.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_system.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_umd.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/hle_utility.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/motion_tap.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-11-09.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "src/rt/sce_kernel_errors.h",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-11.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "tests/native/motion_tap_selftest.c",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-11-09.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "tools/analyze_cfg.py",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-08-10.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      },
+      {
+        "path": "tools/codegen_hst_stubs.py",
+        "spdx": "GPL-2.0-or-later",
+        "modified_notice": "Modified by Nakagawa Recomp contributors, 2026-11-01.",
+        "pointer": "See NOTICE.md for upstream lineage and modification provenance."
+      }
+    ]
+  },
   "limitations": [
     "This manifest classifies source and notice evidence; it does not decide whether any file is legally independent or derivative.",
     "PGF/JPCSP, PGD/amctrl, replacement-font, full-history, DCO, and maintainer-review questions remain outside this campaign.",

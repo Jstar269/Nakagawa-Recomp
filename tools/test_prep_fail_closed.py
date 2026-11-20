@@ -10,11 +10,12 @@ The suite pins the claims the Python preparation route previously got wrong:
 
 * a ``claphanz_xb`` profile is never staged by Python: without the native
   player's staging transaction it is refused before any filesystem mutation,
-  and with it the disc is handed to that transaction, never promoted as READY
-  on the strength of a Python-side no-op;
-* hostile XB archive bytes -- truncated FST, unsafe member path, decode
-  failure -- and an XB-parser import failure cannot convert preparation into
-  success, and a previous install survives every failure untouched;
+  even when archive bytes (including truncated FST, unsafe member path, or
+  decode-failure payloads) are present on the disc, and with it the disc is
+  handed to that transaction, never promoted as READY on the strength of a
+  Python-side no-op;
+* the Python preparation route never imports ``xb_probe``, and a previous
+  install survives every refused or failed preparation untouched;
 * required-output completeness is checked before atomic promotion: a manifest
   that is not attributable to the selected disc, a staging write failure, or a
   promotion rename failure all fail the transaction with the previous install
@@ -27,6 +28,7 @@ The suite pins the claims the Python preparation route previously got wrong:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -46,6 +48,8 @@ from nk_core import (  # noqa: E402
     TitleProfile,
     TitleRegistry,
 )
+import nk_core.prep_engine as prep_engine  # noqa: E402
+from nk_core.types import IsoMetadata  # noqa: E402
 from nk_core.prep_engine import NativeTitleStager, PLAYER_EXECUTABLE  # noqa: E402
 from test_extract_xb_security import _make_raw_archive  # noqa: E402
 from test_nk_core import _create_mock_iso  # noqa: E402
@@ -207,7 +211,7 @@ class RouteBlockedTests(PreparationFailClosedCase):
     def test_hostile_xb_iso_fixtures_fail_closed_and_preserve_previous_install(
         self,
     ) -> None:
-        """Truncated FST, unsafe path, and decode-failure discs all refuse."""
+        """The Python route gate refuses before reading any appended XB payload."""
         for variant, payload in _hostile_xb_payloads().items():
             with self.subTest(variant=variant):
                 case_dir = self.temp_dir / variant
@@ -249,10 +253,22 @@ class RouteBlockedTests(PreparationFailClosedCase):
                 )
 
     def test_xb_probe_import_failure_cannot_become_success(self) -> None:
-        """No import problem may be converted to success, on either route."""
+        """Preparation does not import xb_probe, and an unimportable xb_probe cannot become success."""
+        saved_modules = {
+            name: mod
+            for name, mod in list(sys.modules.items())
+            if name == "xb_probe" or name.startswith("xb_probe.")
+        }
+        for name in saved_modules:
+            sys.modules.pop(name, None)
         blocker = _ImportBlocker("xb_probe")
         sys.meta_path.insert(0, blocker)
         try:
+            with self.assertRaises(ImportError):
+                __import__("xb_probe")
+            self.assertEqual(blocker.attempts, ["xb_probe"])
+            blocker.attempts.clear()
+
             claphanz_iso = self.temp_dir / "claphanz.iso"
             _create_mock_iso(claphanz_iso, disc_id=CLAPHANZ_ISO)
             blocked = self._engine(claphanz=True).prepare_game(
@@ -266,8 +282,10 @@ class RouteBlockedTests(PreparationFailClosedCase):
                 raw_iso,
                 destination_root=self.dest_root,
             )
+            self.assertEqual(blocker.attempts, [])
         finally:
             sys.meta_path.remove(blocker)
+            sys.modules.update(saved_modules)
 
         self.assertFalse(blocked.success)
         self.assertEqual(blocked.error_code, "PREPARATION_ROUTE_UNSUPPORTED")
@@ -320,6 +338,9 @@ class NativeStagingRouteTests(PreparationFailClosedCase):
         self.assertEqual(stages[-1], "READY")
         self.assertEqual(
             [event.completed for event in events if event.current_item], [25, 100]
+        )
+        self.assertFalse(
+            any(event.cancellable for event in events if event.stage.value == "EXTRACTING_ARCHIVES")
         )
         # Python wrote nothing of its own: no games folder, no staging tree.
         self.assertFalse((self.temp_dir / "games").exists())
@@ -452,6 +473,61 @@ class TransactionHardeningTests(PreparationFailClosedCase):
         self.assertEqual(result.error_code, "PREPARATION_OUTPUT_INVALID")
         self._assert_previous_install_intact(RAW_ISO, marker, manifest_bytes)
 
+    def test_early_refusals_end_progress_with_failed_event(self) -> None:
+        profile = TitleProfile(
+            id="synthetic-qualified-title",
+            name="Synthetic Qualified Title",
+            disc_ids=[RAW_ISO],
+            regions=["TEST"],
+            save_namespace=RAW_ISO,
+        )
+        cases = (
+            (
+                "boundary",
+                mock.DEFAULT,
+                prep_engine.IsoInspectionError(
+                    "synthetic PBP refusal", boundary_code="PBP_HEADER_TRUNCATED"
+                ),
+            ),
+            (
+                "unqualified",
+                IsoMetadata(
+                    disc_id=RAW_ISO,
+                    title="Synthetic Title",
+                    matched_profile=profile,
+                    qualification_error="synthetic revision refusal",
+                ),
+                None,
+            ),
+            (
+                "unsupported",
+                IsoMetadata(disc_id=UNSUPPORTED_ISO, title="Synthetic Unsupported Title"),
+                None,
+            ),
+        )
+        for label, metadata, error in cases:
+            with self.subTest(route=label):
+                iso_file = self.temp_dir / f"{label}.iso"
+                _create_mock_iso(iso_file, disc_id=RAW_ISO)
+                events: list[ProgressEvent] = []
+                registry = TitleRegistry(include_defaults=False)
+                registry.register(profile)
+                engine = PreparationEngine(base_dir=self.temp_dir, registry=registry)
+                if error is not None:
+                    inspector = mock.patch.object(
+                        prep_engine, "inspect_iso", side_effect=error
+                    )
+                else:
+                    inspector = mock.patch.object(
+                        prep_engine, "inspect_iso", return_value=metadata
+                    )
+                with inspector:
+                    result = engine.prepare_game(iso_file, on_progress=events.append)
+
+                self.assertFalse(result.success)
+                self.assertTrue(events)
+                self.assertEqual(events[-1].stage.value, "FAILED")
+
     def test_manifest_write_failure_fails_and_preserves_previous_install(
         self,
     ) -> None:
@@ -494,6 +570,51 @@ class TransactionHardeningTests(PreparationFailClosedCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "PREPARATION_FAILED")
         self._assert_previous_install_intact(RAW_ISO, marker, manifest_bytes)
+
+    def test_cso_preparation_uses_the_expanded_iso_for_identity_and_staging(self) -> None:
+        from test_disc_expand import build_cso
+        from test_iso_parity import create_test_iso_with_executables
+
+        executable = b"synthetic EBOOT executable for compressed preparation"
+        plain_iso = self.temp_dir / "synthetic-raw.iso"
+        create_test_iso_with_executables(
+            plain_iso, executable, disc_id=RAW_ISO, title="Synthetic Raw Preparation"
+        )
+        compressed_iso = self.temp_dir / "synthetic-raw.cso"
+        compressed_iso.write_bytes(build_cso(plain_iso.read_bytes()))
+        executable_sha256 = hashlib.sha256(executable).hexdigest()
+        profile = TitleProfile(
+            id="synthetic-compressed-raw-v1",
+            name="Synthetic Compressed Raw",
+            disc_ids=[RAW_ISO],
+            regions=["TEST"],
+            archive_format="raw",
+            save_namespace=RAW_ISO,
+            min_iso_bytes=1,
+            builds=[{
+                "executable_sha256": executable_sha256,
+                "status": "supported",
+                "label": "synthetic supported build",
+            }],
+        )
+        registry = TitleRegistry(include_defaults=False)
+        registry.register(profile)
+
+        result = PreparationEngine(base_dir=self.temp_dir, registry=registry).prepare_game(
+            compressed_iso, destination_root=self.dest_root
+        )
+
+        self.assertTrue(result.success, result.error_message)
+        self.assertIsNotNone(result.prepared_root)
+        self.assertEqual(result.build["status"], "supported")
+        assert result.prepared_root is not None
+        manifest = json.loads((result.prepared_root / "manifest.json").read_text(encoding="utf-8"))
+        prepared_iso = Path(manifest["iso_path"])
+        self.assertNotEqual(prepared_iso, compressed_iso)
+        self.assertEqual(prepared_iso.read_bytes(), plain_iso.read_bytes())
+        self.assertEqual(manifest["iso_size"], prepared_iso.stat().st_size)
+        self.assertEqual((result.prepared_root / "disc" / "game.iso").read_bytes(),
+                         plain_iso.read_bytes())
 
     def test_raw_preparation_completes_with_verified_required_outputs(
         self,

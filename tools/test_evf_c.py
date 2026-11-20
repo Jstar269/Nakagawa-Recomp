@@ -8,9 +8,10 @@ Two layers:
 1. Compile and run ``tests/native/evf_selftest.c`` against the pure helpers in
    ``src/rt/evf.h`` — keep-mask clear, AND/OR matching, WAITCLEAR/WAITCLEARALL
    consumption, and PSP-style wait/poll argument validation errors.
-2. Source-level wiring checks that ``src/rt/hle.c`` (Windows-only TU, not
-   compilable on the Linux CI host) actually routes its EventFlag handlers
-   through those helpers instead of re-deriving the semantics inline.
+2. Source-level wiring checks that the EventFlag handlers in
+   ``src/rt/hle_kernel_sync.c`` (found through ``hle_sources``) route through
+   those helpers instead of re-deriving the semantics inline. These are source
+   checks, not a production syscall proof.
 """
 
 import os
@@ -18,13 +19,14 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import tempfile
 import unittest
+from unittest import mock
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import hle_sources  # noqa: E402
+import scratch_dir  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 SELFTEST_C = ROOT / "tests" / "native" / "evf_selftest.c"
@@ -50,12 +52,33 @@ def function_body(name):
     raise AssertionError(f"{name} has no closing brace")
 
 
+def poll_outbits_order_problem(body):
+    """Why a PollEventFlag body would report a post-consume outBits, or "" when it cannot.
+
+    On success the PSP writes outBits with the pattern before WAITCLEAR/WAITCLEARALL consumes
+    it, so the success-path write must come before the consume and none may follow it.
+    """
+    consume = body.find("sr_evf_consume(")
+    if consume < 0:
+        return "the success path does not consume through sr_evf_consume"
+    writes = [match.start() for match in re.finditer(r"MEM_W32\(outp, m->pattern\)", body)]
+    if not any(start < consume for start in writes):
+        return "no outBits write precedes the consume"
+    if any(start > consume for start in writes):
+        return "an outBits write comes after the consume, so it reports the post-consume pattern"
+    return ""
+
+
 @unittest.skipUnless(CC, "no C compiler on PATH")
 class TestEvfSelftestC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         assert CC is not None
-        cls.tmp = tempfile.mkdtemp(prefix="evfc_")
+        # A class cleanup runs even when setUpClass raises, as a failed compile does below;
+        # tearDownClass would not, and the scratch directory would be left behind.
+        scratch = scratch_dir.TemporaryDirectory(prefix="evfc_")
+        cls.addClassCleanup(scratch.cleanup)
+        cls.tmp = scratch.name
         cls.exe = os.path.join(cls.tmp, "evf_selftest.exe")
         result = subprocess.run(
             [
@@ -72,18 +95,29 @@ class TestEvfSelftestC(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
+            timeout=120,
         )
         if result.returncode != 0:
             raise AssertionError("evf_selftest.c did not compile:\n" + result.stderr)
 
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
     def test_pure_helper_invariants_hold(self):
-        result = subprocess.run([self.exe], capture_output=True, text=True)
+        result = subprocess.run([self.exe], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("evf selftest: OK", result.stdout)
+
+
+@unittest.skipUnless(CC, "no C compiler on PATH")
+class TestEvfSelftestScratch(unittest.TestCase):
+    def test_a_failed_compile_leaves_no_scratch_directory_and_is_bounded(self):
+        failed = subprocess.CompletedProcess([], 1, "", "simulated compile failure")
+        result = unittest.TestResult()
+        with mock.patch.object(subprocess, "run", return_value=failed) as runner:
+            unittest.defaultTestLoader.loadTestsFromTestCase(TestEvfSelftestC).run(result)
+        self.assertTrue(result.errors, "the failed compile must fail the class setup")
+        self.assertFalse(os.path.exists(TestEvfSelftestC.tmp),
+                         "setUpClass left its scratch directory after the compile failed")
+        self.assertEqual(runner.call_count, 1)
+        self.assertIn("timeout", runner.call_args.kwargs, "a hung compiler must not stall the suite")
 
 
 class TestHleEventFlagWiring(unittest.TestCase):
@@ -115,6 +149,21 @@ class TestHleEventFlagWiring(unittest.TestCase):
             "poll must report the current pattern on failure and the "
             "pre-consume pattern on success",
         )
+        self.assertEqual(poll_outbits_order_problem(body), "")
+
+    def test_the_order_check_catches_outbits_written_after_the_consume(self):
+        swapped = (
+            "{\n"
+            "    if (!sr_evf_matches(m->pattern, bits, mode)) {\n"
+            "        if (outp) MEM_W32(outp, m->pattern);\n"
+            "        return SR_EVF_ERR_COND;\n"
+            "    }\n"
+            "    m->pattern = sr_evf_consume(m->pattern, bits, mode);\n"
+            "    if (outp) MEM_W32(outp, m->pattern);\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        self.assertIn("after", poll_outbits_order_problem(swapped))
 
 
 if __name__ == "__main__":

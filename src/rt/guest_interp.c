@@ -329,6 +329,16 @@ int sr_exec_span_owns_fetch(uint32_t pc) {
             return module_authority;
         }
     }
+    return sr_exec_span_owns_static_fetch(pc);
+}
+
+/* The static tier alone: for a caller that has already found `pc` outside every
+ * bound module image (sr_lookup), so the module-authority query above would scan
+ * the bindings again only to answer "none". */
+int sr_exec_span_owns_static_fetch(uint32_t pc) {
+    if ((pc & 3u) != 0u) {
+        return 0;
+    }
     /* Fast path: single registered span check (common case for recompiled titles). */
     if (s_exec_span_count == 1u) {
         const SrExecSpan *span = &s_exec_spans[0];
@@ -667,6 +677,40 @@ int sr_module_code_fetch_authority(uint32_t pc) {
     if (!binding) return -1;
     if ((pc & 3u) != 0u) return 0;
     return module_span_owns(binding->code, pc - binding->base);
+}
+
+/* 1 when any byte of [addr, addr + size) is code the recompiler translated: a registered span,
+ * or a span of a module bound over the range. It answers a writer, not a fetch (cheats.h): a
+ * span of a fixed-base module that is not loaded counts too, so the answer errs towards "code".
+ * Compared as registered; guest RAM's code is registered at its user-mode addresses. */
+int sr_exec_span_overlaps(uint32_t addr, uint32_t size) {
+    if (size == 0u) return 0;
+    const uint64_t lo = addr, hi = (uint64_t)addr + size;
+    if (atomic_load_explicit(&s_module_bound_count, memory_order_acquire) != 0u) {
+        for (unsigned i = 0; i < SR_MODULE_CODE_MAX_BOUND; i++) {
+            if (!atomic_load_explicit(&s_module_binding_live[i], memory_order_acquire)) continue;
+            const SrModuleBinding *binding = &s_module_bindings[i];
+            if (lo >= binding->end || hi <= binding->start) continue;
+            for (uint32_t n = 0; n < binding->code->nspans; n++) {
+                const uint64_t start = (uint64_t)binding->base + binding->code->spans[n].start;
+                const uint64_t end = (uint64_t)binding->base + binding->code->spans[n].end;
+                if (lo < end && start < hi) return 1;
+            }
+        }
+    }
+    /* The static spans are sorted by start: only those starting below hi can overlap, and
+     * s_exec_span_reach says when no earlier one reaches lo. */
+    size_t first = 0u, last = s_exec_span_count;
+    while (first < last) {
+        size_t mid = first + (last - first) / 2u;
+        if (s_exec_spans[mid].start < hi) first = mid + 1u;
+        else last = mid;
+    }
+    for (size_t i = first; i-- > 0u;) {
+        if (s_exec_span_reach[i] <= lo) break;
+        if (s_exec_spans[i].end > lo) return 1;
+    }
+    return 0;
 }
 
 static const SrModuleNonCode **s_module_non_code;
@@ -1182,7 +1226,7 @@ static SrGuestInterpResult execute_noncontrol(
         if (fmt == 0x00u && move_shape) {         /* mfc1 rt, fs */
             write_gpr(s, ft, s->fi[fs]);
         } else if (fmt == 0x02u && move_shape) {  /* cfc1 */
-            write_gpr(s, ft, fs == 31u ? s->fcr31 : (fs == 0u ? 0x00003351u : 0u));
+            write_gpr(s, ft, fs == 31u ? s->fcr31 : (fs == 0u ? SR_FCR0_FIR : 0u));
         } else if (fmt == 0x06u && move_shape) {  /* ctc1 */
             if (fs == 31u) {
                 s->fcr31 = read_gpr(s, ft) & ~0xfe000000u;
@@ -1492,6 +1536,12 @@ static SrGuestInterpResult execute_noncontrol(
                 if (vfpu_rc == SR_VFPU_OTHER) {
                     set_fault(fault, pc, opcode, pc, 1);
                     return SR_GUEST_INTERP_UNSUPPORTED;
+                }
+                if (vfpu_rc == SR_VFPU_ACCESS_REFUSED) {
+                    /* Out-of-range span, as for a scalar store: nothing was accessed. */
+                    set_fault(fault, pc, opcode,
+                              read_gpr(s, rs) + sign_extend_16(opcode & 0xFFFCu), 1);
+                    return SR_GUEST_INTERP_MEMORY_FAULT;
                 }
                 if (primary == 0x3au) {
                     *store_address = read_gpr(s, rs) + sign_extend_16(opcode & 0xFFFCu);

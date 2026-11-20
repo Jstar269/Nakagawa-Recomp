@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import json
 import os
+import posixpath
 import re
 import struct
 import sys
@@ -424,6 +425,15 @@ def _display_path(path: str, extracted_dir: str) -> str:
     return path if rel.startswith("..") else rel
 
 
+def _reference_prefix(rel_inv_dir: str) -> str:
+    """The prefix every reference key of the inventory in ``rel_inv_dir`` starts with.
+
+    Built the way the keys are (``os.path.join(rel_inv_dir, item path)``, forward
+    slashes), so it matches exactly the keys that inventory would list.
+    """
+    return os.path.join(rel_inv_dir, "").replace("\\", "/")
+
+
 def main():
     parser = argparse.ArgumentParser(description="HST Asset Regression and Verification Suite")
     parser.add_argument("--dir", default="place_game_here/EXTRACTED/PSP_GAME/USRDIR/xbdata_extracted", help="Directory of extracted assets containing inventory_map.json files")
@@ -440,28 +450,27 @@ def main():
         sys.exit(1)
 
     print(f"Scanning target: {extracted_dir}")
+    # One walk finds the inventories and builds the file index for stream link checks.
     inventories = []
+    local_files_lower = set()
+    local_full_lower = set()
     for root, _, files in os.walk(extracted_dir):
         if "inventory_map.json" in files:
             inventories.append(os.path.join(root, "inventory_map.json"))
+        rel = os.path.relpath(root, extracted_dir).replace(os.sep, "/")
+        for fn in files:
+            local_files_lower.add(fn.lower())
+            # A file at the root of the tree has rel "."; normpath drops it, so the
+            # key is "music.sgb", the form an SGD reference normalizes to.
+            full = _normalize_asset_path(posixpath.normpath(posixpath.join(rel, fn.lower())))
+            local_full_lower.add(full)
 
     if not inventories:
         print("No inventory_map.json indices found. Please extract assets first.")
         sys.exit(1)
 
     print(f"Found {len(inventories)} archive inventory index maps.")
-
-    # Build local files set once for stream link checks
-    print("Building cached index of extracted filenames for link resolution...")
-    local_files_lower = set()
-    local_full_lower = set()
-    for root, _, files in os.walk(extracted_dir):
-        rel = os.path.relpath(root, extracted_dir).replace(os.sep, "/")
-        for fn in files:
-            local_files_lower.add(fn.lower())
-            full = _normalize_asset_path(rel + "/" + fn.lower())
-            local_full_lower.add(full)
-    print(f"Index built: {len(local_files_lower)} files registered.")
+    print(f"Index of extracted filenames for link resolution: {len(local_files_lower)} files registered.")
 
     # Load reference hashes if not bootstrapping
     ref_algorithm = REFERENCE_ALGORITHM
@@ -495,6 +504,11 @@ def main():
     stream_failures = []
     missing_from_golden = []
     inventory_failures = []
+    # Every reference key a parsed inventory still lists, whether or not it is on disk.
+    listed_keys = set()
+    # Reference-key prefixes of inventories that failed to load or validate: their
+    # entries were not examined, so their absence from listed_keys proves nothing.
+    failed_prefixes = []
     inventories_discovered = len(inventories)
     inventories_parsed = 0
     total_checked = 0
@@ -507,6 +521,7 @@ def main():
         except InventoryError as e:
             print(f"Error reading index {_display_path(inv_path, extracted_dir)}: {e}")
             inventory_failures.append((inv_path, str(e)))
+            failed_prefixes.append(_reference_prefix(rel_inv_dir))
             continue
 
         shape_problems = validate_inventory_shape(inv)
@@ -516,6 +531,7 @@ def main():
                 summary += f" (and {len(shape_problems) - 5} more)"
             print(f"Error reading index {_display_path(inv_path, extracted_dir)}: schema violations: {summary}")
             inventory_failures.append((inv_path, f"schema violations: {summary}"))
+            failed_prefixes.append(_reference_prefix(rel_inv_dir))
             continue
 
         inventories_parsed += 1
@@ -525,6 +541,8 @@ def main():
             for item in inv[cat]:
                 rel_path = item["path"]
                 full_path = os.path.join(inv_dir, rel_path)
+                db_key = os.path.join(rel_inv_dir, rel_path).replace("\\", "/")
+                listed_keys.add(db_key)
                 if not os.path.isfile(full_path):
                     mismatches.append((rel_path, "File missing on disk"))
                     continue
@@ -536,7 +554,6 @@ def main():
                     continue
 
                 # Store in bootstrap database
-                db_key = os.path.join(rel_inv_dir, rel_path).replace("\\", "/")
                 new_ref_hashes[db_key] = h
                 total_checked += 1
 
@@ -564,6 +581,19 @@ def main():
                     if not ok:
                         stream_failures.append((db_key, msg))
 
+    # Golden-reference entries no inventory lists any more: the asset left the tree
+    # together with its inventory entry, or its whole inventory is gone.  An entry
+    # under an inventory that failed is not examined: the failure is reported as the
+    # cause, not every key it would have listed as missing.
+    missing_from_tree = []
+    not_examined = []
+    if not args.bootstrap:
+        for key in sorted(set(ref_hashes) - listed_keys):
+            if any(key.startswith(prefix) for prefix in failed_prefixes):
+                not_examined.append(key)
+            else:
+                missing_from_tree.append(key)
+
     # Summary and execution outcomes
     print("\n--- Asset Validation Summary ---")
     print(f"Inventories discovered: {inventories_discovered}")
@@ -574,12 +604,20 @@ def main():
     print(f"Palette failures:       {len(palette_failures)}")
     print(f"Sound link failures:    {len(stream_failures)}")
     print(f"Missing from golden:    {len(missing_from_golden)}")
+    print(f"Missing from tree:      {len(missing_from_tree)}")
+    print(f"Not examined:           {len(not_examined)} (golden entries under a failed inventory)")
 
     if args.bootstrap and inventory_failures:
         print(
             "\n[!] Refusing to bootstrap a golden reference manifest: "
             "the target tree was not completely examined "
             f"({len(inventory_failures)} of {inventories_discovered} inventories failed)."
+        )
+    elif args.bootstrap and mismatches:
+        print(
+            "\n[!] Refusing to bootstrap a golden reference manifest: "
+            f"{len(mismatches)} listed asset(s) are missing on disk or unreadable, "
+            "so the manifest would leave them without a baseline."
         )
     elif args.bootstrap:
         try:
@@ -612,6 +650,14 @@ def main():
             print(f"  - {path}: {err}")
         if len(mismatches) > 15:
             print(f"  ...and {len(mismatches) - 15} more.")
+
+    if missing_from_tree:
+        success = False
+        print("\n[!] Golden reference assets no inventory lists any more (missing from tree):")
+        for path in missing_from_tree[:15]:
+            print(f"  - {path}")
+        if len(missing_from_tree) > 15:
+            print(f"  ...and {len(missing_from_tree) - 15} more.")
 
     if palette_failures:
         success = False

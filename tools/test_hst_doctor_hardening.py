@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -24,6 +25,23 @@ import nk_doctor_checks  # noqa: E402
 import nk_doctor_core  # noqa: E402
 from hst_test_fixtures import write_elf, write_iso, write_psp_header  # noqa: E402
 from nk_core.git_isolation import isolated_git_env, run_git  # noqa: E402
+
+# The doctor reads these from the caller's environment, and a developer shell or the
+# documented Make route may export them. Every test here starts without them, so none
+# validates or probes the caller's real title manifest, data root or Memory Stick
+# folder; a test that needs one sets it inside its own mock.patch.dict.
+CALLER_INPUT_VARIABLES = ("TITLE_MANIFEST", "SR_DATAROOT", "SR_MEMSTICK")
+_caller_environment = mock.patch.dict(os.environ)
+
+
+def setUpModule() -> None:
+    _caller_environment.start()
+    for name in CALLER_INPUT_VARIABLES:
+        os.environ.pop(name, None)
+
+
+def tearDownModule() -> None:
+    _caller_environment.stop()
 
 
 def retail_manifest() -> dict[str, object]:
@@ -253,31 +271,64 @@ This remains subject to legal review.
 
 
 class ManagerExitPropagationHardeningTests(unittest.TestCase):
-    def test_parameterized_manager_actions_fail_closed(self) -> None:
+    def test_run_action_without_a_result_fails_closed(self) -> None:
+        # Source-shape tripwire for the Run action only, which needs a launched player.
+        # BuildFull, BuildFast, Test and Fuzz are run against a failing Make target in
+        # test_hst_manager_manifest.test_a_failing_make_target_makes_each_action_exit_nonzero.
         manager = (ROOT / "tools" / "nk_manager.ps1").read_text(encoding="utf-8-sig")
-        # Each failing action records a nonzero termination code and breaks out of the
-        # switch; the single `exit` after the finally block applies it, so the caller
-        # sees a nonzero status AND the caller's location is restored first.
-        self.assertIn(
-            '"BuildFull" { if (-not (Invoke-NkBuild -Mode "Full")) { $script:ManagerExitCode = 1; break } }',
-            manager,
-        )
-        self.assertIn(
-            '"BuildFast" { if (-not (Invoke-NkBuild -Mode "Fast")) { $script:ManagerExitCode = 1; break } }',
-            manager,
-        )
-        self.assertIn('if (-not (Invoke-Selftest)) { $script:ManagerExitCode = 1; break }', manager)
         self.assertIn('$script:LastRunResult = $null', manager)
         self.assertIn('if ($null -eq $script:LastRunResult) { $script:ManagerExitCode = 1; break }', manager)
-        self.assertIn('if ($Action -and $script:ManagerExitCode -ne 0) {\n    exit $script:ManagerExitCode', manager)
 
     def test_frontend_does_not_mask_manager_failure(self) -> None:
         frontend = (ROOT / "nk.ps1").read_text(encoding="utf-8-sig")
         self.assertNotIn("Invoke-ManagerBuild", frontend)
         self.assertNotIn("Get-HstProductBackupPath", frontend)
-        self.assertIn("$LASTEXITCODE = 0", frontend)
-        self.assertIn("$exitCode = [int]$LASTEXITCODE", frontend)
+        self.assertIn("$global:LASTEXITCODE = 0", frontend)
+        self.assertIn("$exitCode = [int]$global:LASTEXITCODE", frontend)
         self.assertIn('DoctorScope "products"', frontend)
+
+    def test_frontend_reports_a_failed_manager_action(self) -> None:
+        # The front end runs the manager in its own process (`& $Manager`), and the
+        # manager reports a failed action only through `exit <code>`, which sets the
+        # global $LASTEXITCODE. A function-local $LASTEXITCODE would hide it, so
+        # Verify would pass and Build or Play would go on after a failed build.
+        # A stub manager and doctor beside a copy of nk.ps1 run the real front end.
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell 7 (pwsh) is required")
+        with tempfile.TemporaryDirectory(prefix="nk-frontend-exit-") as tmp:
+            root = Path(tmp)
+            (root / "tools").mkdir()
+            shutil.copyfile(ROOT / "nk.ps1", root / "nk.ps1")
+            (root / "tools" / "nk_doctor.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+            manager = root / "tools" / "nk_manager.ps1"
+            env = dict(os.environ)
+            env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
+            # The stub declares its parameters as the manager does (Action first, with a
+            # ValidateSet), so the front end must bind them by name.
+            param_block = (
+                'Param(\n'
+                '    [ValidateSet("BuildFull", "BuildFast", "Run", "Verify")]\n'
+                '    [string]$Action,\n'
+                '    [string]$MsysPath = "",\n'
+                '    [string]$VulkanSdk = "",\n'
+                '    [string]$TitleManifest = "",\n'
+                '    [string]$GameName = ""\n'
+                ')\n'
+                'Write-Host "stub $Action msys=$MsysPath game=$GameName"\n'
+            )
+            cases = {"fails": (param_block + "exit 3\n", 1), "passes": (param_block, 0)}
+            for label, (body, expected) in cases.items():
+                with self.subTest(manager=label):
+                    manager.write_text(body, encoding="utf-8")
+                    proc = subprocess.run(
+                        [pwsh, "-NoProfile", "-NonInteractive", "-File", str(root / "nk.ps1"), "Verify",
+                         "-MsysPath", "msys-probe", "-GameName", "probe"],
+                        capture_output=True, text=True, env=env, check=False,
+                    )
+                    self.assertIn("stub Verify msys=msys-probe game=probe", proc.stdout,
+                                  proc.stdout + proc.stderr)
+                    self.assertEqual(proc.returncode, expected, proc.stdout + proc.stderr)
 
 
 class SetupMatrixScenariosTests(unittest.TestCase):
@@ -384,7 +435,7 @@ class SetupMatrixScenariosTests(unittest.TestCase):
             self.assertEqual(res.metadata.get("public_safe"), 1)
             self.assertIn("public-safe", res.summary)
 
-            # Full profile
+            # A profile without the token: PUBLIC_SAFE=0 is retired, so it is not "full".
             (build_dir / "runtime_profile.json").write_text(
                 json.dumps({
                     "schema_version": 1,
@@ -400,8 +451,9 @@ class SetupMatrixScenariosTests(unittest.TestCase):
             nk_doctor_checks.check_build_profile(report_full, root, "hst")
             res_full = next(r for r in report_full.results if r.code == "BUILD_PROFILE")
             self.assertEqual(res_full.status, "INFO")
-            self.assertEqual(res_full.metadata.get("public_safe"), 0)
-            self.assertIn("full", res_full.summary)
+            self.assertEqual(res_full.metadata.get("profile"), "unrecognized")
+            self.assertNotIn("PUBLIC_SAFE=0;", res_full.summary)
+            self.assertIn("rebuild", res_full.summary)
 
     def test_case_f_malformed_save_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -439,6 +491,8 @@ class SetupMatrixScenariosTests(unittest.TestCase):
             nk_doctor_checks.check_save_root(report, root)
             failures = [res for res in report.results if res.status == "FAIL"]
             self.assertEqual(failures, [])
+            save_root = next(res for res in report.results if res.code == "SAVE_ROOT")
+            self.assertEqual(Path(save_root.path), Path("memstick"), "the default branch ran")
 
     def test_case_h_missing_lawful_inputs_fail_closed(self) -> None:
         """The doctor must FAIL CLOSED when the lawful retail inputs are absent.
@@ -674,6 +728,262 @@ class AgentIdentityChecks(unittest.TestCase):
             result = self._run(root)
             self.assertEqual(result.status, "WARN")
             self.assertIn("cannot be ruled out", result.summary)
+
+
+def _write_pe_x64(path: Path) -> None:
+    """A minimal x86-64 PE header: enough for Doctor's machine check, nothing runnable."""
+    header = bytearray(0x40)
+    header[:2] = b"MZ"
+    struct.pack_into("<I", header, 0x3C, 0x40)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(bytes(header) + b"PE\0\0" + struct.pack("<H", 0x8664) + b"\0" * 18)
+
+
+_BUILD_ENV_NAMES = ("BUILD_DIR", "NK_BUILD_ROOT", "BUILD_ROOT")
+
+
+class BuildOutputDirectoryTests(unittest.TestCase):
+    """Doctor reads build products where Make writes them (audit F-4410c1b3)."""
+
+    def _env(self, **values: str) -> dict[str, str]:
+        env = {key: value for key, value in os.environ.items() if key not in _BUILD_ENV_NAMES}
+        env.update(values)
+        return env
+
+    def _products(self, root: Path, env: dict[str, str]) -> dict[str, nk_doctor_core.Result]:
+        with mock.patch.dict(os.environ, env, clear=True):
+            report = nk_doctor.Report(root, "products")
+            nk_doctor_checks.check_build_products(report, "demo")
+            nk_doctor_checks.check_build_profile(report, root, "demo")
+        return {result.code: result for result in report.results}
+
+    def _make_build(self, build_dir: Path) -> None:
+        _write_pe_x64(build_dir / "demo.exe")
+        (build_dir / "demo_image.bin").write_bytes(b"\1")
+        (build_dir / "runtime_profile.json").write_text(
+            json.dumps({"entries": ["CFLAGS=-O2 -DSR_PUBLIC_SAFE"]}), encoding="utf-8"
+        )
+
+    def test_build_root_and_build_dir_locate_the_products(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkout"
+            root.mkdir()
+            out_root = Path(tmp) / "out"
+            self._make_build(out_root / "demo")
+            explicit = Path(tmp) / "explicit"
+            self._make_build(explicit)
+            cases = {
+                "BUILD_ROOT": (self._env(BUILD_ROOT=str(out_root)), out_root / "demo"),
+                "NK_BUILD_ROOT": (self._env(NK_BUILD_ROOT=str(out_root)), out_root / "demo"),
+                "BUILD_DIR": (
+                    self._env(BUILD_DIR=str(explicit), NK_BUILD_ROOT=str(Path(tmp) / "elsewhere")),
+                    explicit,
+                ),
+            }
+            for label, (env, build_dir) in cases.items():
+                with self.subTest(variable=label):
+                    results = self._products(root, env)
+                    self.assertEqual(results["BUILD_EXE"].status, "PASS", results["BUILD_EXE"])
+                    self.assertEqual(results["BUILD_IMAGE"].status, "PASS", results["BUILD_IMAGE"])
+                    self.assertEqual(results["BUILD_EXE"].path, str(build_dir / "demo.exe"))
+                    self.assertIn(build_dir.as_posix(), results["BUILD_EXE"].summary)
+                    self.assertEqual(results["BUILD_PROFILE"].path, str(build_dir / "runtime_profile.json"))
+                    self.assertEqual(results["BUILD_PROFILE"].metadata.get("public_safe"), 1)
+
+    def test_a_stale_default_build_does_not_pass_for_a_moved_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkout"
+            self._make_build(root / "build" / "demo")
+            results = self._products(root, self._env(BUILD_ROOT=str(Path(tmp) / "empty")))
+            self.assertEqual(results["BUILD_EXE"].status, "FAIL", results["BUILD_EXE"])
+            self.assertEqual(results["BUILD_EXE"].path, str(Path(tmp) / "empty" / "demo" / "demo.exe"))
+            self.assertEqual(results["BUILD_IMAGE"].status, "FAIL", results["BUILD_IMAGE"])
+            self.assertIn("unbuilt", results["BUILD_PROFILE"].summary)
+
+    def test_a_relative_build_root_is_under_the_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._make_build(root / "alt" / "demo")
+            results = self._products(root, self._env(BUILD_ROOT="alt"))
+            self.assertEqual(results["BUILD_EXE"].status, "PASS", results["BUILD_EXE"])
+            self.assertEqual(results["BUILD_EXE"].path, "alt/demo/demo.exe")
+
+    def test_runtime_dependencies_look_in_the_resolved_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkout"
+            root.mkdir()
+            out_root = Path(tmp) / "out"
+            _write_pe_x64(out_root / "demo" / "SDL3.dll")
+            env = self._env(BUILD_ROOT=str(out_root))
+            env.pop("SystemRoot", None)
+            with (
+                mock.patch.dict(os.environ, env, clear=True),
+                mock.patch.object(
+                    nk_doctor_checks, "discover_sdl3_provider",
+                    side_effect=nk_doctor_checks.Sdl3ProviderError("none"),
+                ),
+            ):
+                report = nk_doctor.Report(root, "run")
+                nk_doctor_checks.check_runtime_dependencies(report, Path(tmp) / "no-msys", "demo")
+            sdl = next(result for result in report.results if result.code == "RUNTIME_SDL3")
+            self.assertEqual(sdl.status, "PASS", sdl)
+            self.assertEqual(sdl.path, str(out_root / "demo" / "SDL3.dll"))
+
+    def test_long_path_candidates_and_products_name_the_same_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = nk_doctor_checks.title_diagnostic_context(root, None, game_name="demo")
+            with mock.patch.dict(os.environ, self._env(NK_BUILD_ROOT="moved"), clear=True):
+                candidates = dict(nk_doctor._long_path_candidates(root, context, None))
+                resolved = nk_doctor_checks.resolve_build_dir(root, "demo")
+            self.assertEqual(resolved, root / "moved" / "demo")
+            self.assertEqual(candidates["build executable output"], resolved / "demo.exe")
+            self.assertEqual(candidates["build image output"], resolved / "demo_image.bin")
+
+
+class BuildProfileParsingTests(unittest.TestCase):
+    """A malformed or pre-retirement profile is named, never a traceback (audit F-df032d81)."""
+
+    def _profile(self, payload: bytes) -> nk_doctor_core.Result:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_dir = root / "build" / "demo"
+            build_dir.mkdir(parents=True)
+            (build_dir / "runtime_profile.json").write_bytes(payload)
+            env = {key: value for key, value in os.environ.items() if key not in _BUILD_ENV_NAMES}
+            with mock.patch.dict(os.environ, env, clear=True):
+                report = nk_doctor.Report(root, "products")
+                nk_doctor_checks.check_build_profile(report, root, "demo")
+        return next(result for result in report.results if result.code == "BUILD_PROFILE")
+
+    def test_a_non_object_profile_is_reported_unparsed(self) -> None:
+        for payload in (b"[]", b'"text"', b"3"):
+            with self.subTest(payload=payload):
+                result = self._profile(payload)
+                self.assertEqual(result.status, "INFO")
+                self.assertIn("unparsed", result.summary)
+
+    def test_a_non_utf8_profile_is_reported_unparsed(self) -> None:
+        result = self._profile(b'{"entries": ["\xff\xfe"]}')
+        self.assertEqual(result.status, "INFO")
+        self.assertIn("unparsed", result.summary)
+
+    def test_a_profile_without_the_public_safe_token_is_not_called_full(self) -> None:
+        result = self._profile(json.dumps({"entries": ["CFLAGS=-O2"]}).encode())
+        self.assertEqual(result.status, "INFO")
+        self.assertNotIn("PUBLIC_SAFE=0;", result.summary)
+        self.assertNotIn("full (", result.summary)
+        self.assertIn("rebuild", result.summary)
+        self.assertEqual(result.metadata.get("profile"), "unrecognized")
+
+
+class GameNameContractTests(unittest.TestCase):
+    """Doctor and the manager accept only names the codegen planner accepts (audit F-a8e00b6c)."""
+
+    def test_doctor_refuses_an_upper_case_game_name(self) -> None:
+        import title_codegen_plan
+
+        for name in ("MyGame", "DEMO", "demo"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                context = nk_doctor_checks.title_diagnostic_context(Path(tmp), None, game_name=name)
+                accepted = context.game_name == name
+                self.assertEqual(accepted, bool(title_codegen_plan.GAME_NAME_RE.fullmatch(name)), context.game_name)
+
+    def test_manager_refuses_names_the_planner_refuses(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell 7 (pwsh) is required")
+        manager = (ROOT / "tools" / "nk_manager.ps1").read_text(encoding="utf-8-sig")
+        match = re.search(r"^ *function Assert-NkPortableGameName \{.*?^    \}$", manager, re.M | re.S)
+        self.assertIsNotNone(match, "the manager defines Assert-NkPortableGameName")
+        assert match is not None
+        import title_codegen_plan
+
+        for name in ("MyGame", "a" * 65, "demo", "a" * 64, "my.game-1"):
+            with self.subTest(name=name[:12]):
+                script = match.group(0) + f"\ntry {{ Assert-NkPortableGameName -Name '{name}'; 'ACCEPTED' }} catch {{ 'REFUSED' }}\n"
+                proc = subprocess.run(
+                    [pwsh, "-NoProfile", "-NonInteractive", "-Command", script],
+                    capture_output=True, text=True, check=False,
+                )
+                expected = "ACCEPTED" if title_codegen_plan.GAME_NAME_RE.fullmatch(name) else "REFUSED"
+                self.assertEqual(proc.stdout.strip(), expected, proc.stdout + proc.stderr)
+
+
+class OptionalGuestModuleDirectoryTests(unittest.TestCase):
+    """A guest-prx manifest always gets a module-folder result (audit F-1dbeafef)."""
+
+    def _results(self, root: Path, filesystem: dict[str, object]) -> list[nk_doctor_core.Result]:
+        manifest = {
+            "schema_version": 1,
+            "id": "demo",
+            "kind": "homebrew",
+            "game_name": "demo",
+            "filesystem": filesystem,
+            "executable": {"path": "EBOOT.elf", "bss_metadata_source": "none"},
+            "modules": [{"name": "libopt.prx", "role": "guest-prx", "required": False}],
+        }
+        context = nk_doctor_checks.title_diagnostic_context(root, manifest)
+        report = nk_doctor.Report(root, "inputs")
+        nk_doctor_checks.check_private_inputs(
+            report, need_iso=False, need_assets=False, title_manifest=manifest, title_context=context,
+        )
+        return [result for result in report.results if result.code == "INPUT_MODULE_DIR"]
+
+    def test_an_undeclared_module_dir_fails_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            results = self._results(Path(tmp), {})
+        self.assertEqual([result.status for result in results], ["FAIL"], results)
+        self.assertIn("filesystem.module_dir", results[0].summary)
+
+    def test_a_declared_but_invalid_module_dir_is_named_as_invalid(self) -> None:
+        # Declared, so the failure must not say "no filesystem.module_dir": it names the
+        # value and why it was refused, as an invalid disc_image does.
+        for value in ("guest modules", "C:/modules", "/modules", 7):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                results = self._results(Path(tmp), {"module_dir": value})
+                self.assertEqual([result.status for result in results], ["FAIL"], results)
+                self.assertIn("is not a valid relative directory path", results[0].summary)
+                self.assertNotIn("no filesystem.module_dir", results[0].summary)
+                self.assertIn(repr(value), results[0].detail or "")
+
+    def test_a_missing_module_dir_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            results = self._results(Path(tmp), {"module_dir": "modules"})
+        self.assertEqual([result.status for result in results], ["WARN"], results)
+        self.assertEqual(results[0].path, "modules")
+
+    def test_a_present_module_dir_adds_no_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "modules").mkdir()
+            results = self._results(Path(tmp), {"module_dir": "modules"})
+        self.assertEqual(results, [])
+
+
+class Sdl3DiscoveryCostTests(unittest.TestCase):
+    """One Make parse discovers the Vulkan SDK once (audit F-5a947733)."""
+
+    def test_build_discovery_runs_vulkan_discovery_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk = Path(tmp) / "sdk"
+            sdk.mkdir()
+            env = {key: value for key, value in os.environ.items() if key not in ("SDL3_DIR", "SDL3_PATH")}
+            # An empty MSYS2 prefix: SDL3 is missing, so the failure path (which names
+            # an incidental SDL3 copy in the Vulkan SDK) runs as well.
+            env["MSYS_PATH"] = str(Path(tmp) / "msys" / "bin")
+            with (
+                mock.patch.object(nk_doctor_checks, "discover_vulkan_sdk", return_value=sdk) as vulkan,
+                mock.patch.object(nk_doctor_checks.platform, "system", return_value="Windows"),
+                mock.patch.object(nk_doctor_checks.shutil, "which", return_value=None),
+                mock.patch.dict(os.environ, env, clear=True),
+            ):
+                text = nk_doctor_checks.build_discovery_make_fragment(None, None, None)
+            self.assertIn("SDL3 dependency is missing", text)
+            self.assertEqual(vulkan.call_count, 1)
+
+    def test_the_unused_make_query_helpers_are_gone(self) -> None:
+        for name in ("query_sdl3_make", "query_sdl3_error", "query_sdl3_info"):
+            self.assertFalse(hasattr(nk_doctor_checks, name), name)
 
 
 if __name__ == "__main__":

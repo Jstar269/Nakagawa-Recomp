@@ -30,7 +30,9 @@
  * the output; a literal that does not fit fails before the last output byte
  * is read back; and a literal-context shift past the byte width selects
  * context 0 instead of shifting by 32 or more (undefined in C).  The
- * probability tables keep upstream's enlarged sizes.
+ * probability tables keep upstream's enlarged sizes.  2026-11-18: a stored
+ * (plain-text) stream whose declared size passes the output or its input
+ * fails instead of being truncated.
  */
 
 #include <string.h>
@@ -251,14 +253,11 @@ int nk_psp_lzrc_decompress(uint8_t *out, size_t out_len,
 		return -1;
 
 	if(rc.lc&0x80){
-		/* plain text */
+		/* plain text: a declared size the output or the input cannot hold is
+		 * refused, never cut short and reported as decoded */
 		u32 copySize = rc.code;
-		if (copySize > (u32)rc.out_len) {
-			copySize = (u32)rc.out_len;
-		}
-		if (copySize > (u32)(rc.in_len - 5)) {
-			copySize = (u32)(rc.in_len - 5);
-		}
+		if (copySize > (u32)rc.out_len || copySize > (u32)(rc.in_len - 5))
+			return -1;
 		memcpy(rc.output, rc.input+5, copySize);
 		return (int)copySize;
 	}

@@ -45,6 +45,7 @@ PUBLIC_TARGETS := \
 	showcase-linux \
 	display-smoke \
 	display-smoke-run \
+	display-smoke-cheats-base0 \
 	display-smoke-picture-gate \
 	display-smoke-gui \
 	display-smoke-fsr1 \
@@ -103,6 +104,7 @@ PUBLIC_TARGETS := \
 	adhoc-net-selftest \
 	achievements-selftest \
 	nk-nickname-selftest \
+	nk-cheats-selftest \
 	nk-ui-core-selftest \
 	nk-ui-player-screens-selftest \
 	nk-ui-player-screens-capture \
@@ -168,6 +170,7 @@ PUBLIC_TARGETS := \
 	anime4k-selftest \
 	ace-ui-selftest \
 	motion-match-selftest \
+	motion-tap-selftest \
 	osk-overlay-paint-selftest \
 	psmf-producer-selftest \
 	psmf-media-selftest \
@@ -263,6 +266,7 @@ HELP_DESCRIPTION_showcase-smoke := run bundled demos headlessly with telemetry c
 HELP_DESCRIPTION_showcase-linux := build and smoke the showcase demos on this POSIX host (Linux CI gate)
 HELP_DESCRIPTION_display-smoke := build the display smoke fixture
 HELP_DESCRIPTION_display-smoke-run := run display smoke and compare its GE/present flight bundle
+HELP_DESCRIPTION_display-smoke-cheats-base0 := run the display smoke built at base 0 with a CWCheat file (part of display-smoke-run)
 HELP_DESCRIPTION_display-smoke-picture-gate := compare display smoke frames with an accepted reference (SKIP, PASS, FAIL)
 HELP_DESCRIPTION_display-smoke-gui := run the display smoke with its GUI
 HELP_DESCRIPTION_display-smoke-anime4k := compare the display smoke with the Anime4K movie upscaler off and on (needs a Vulkan device)
@@ -325,6 +329,7 @@ HELP_DESCRIPTION_relay-codec-selftest := check the ad hoc relay's lobby and rela
 HELP_DESCRIPTION_achievements-selftest := run the RetroAchievements bridge (vendored rcheevos) against an in-process fake server, with no network
 HELP_DESCRIPTION_ed25519-verify-selftest := check nk_ed25519_verify (vendored Monocypher) against the RFC 8032 vectors and nk_minisign_verify against real minisign output
 HELP_DESCRIPTION_nk-nickname-selftest := check the console nickname rule (src/core/nk_nickname.h): the Player default, the 32-byte cap and the refused values
+HELP_DESCRIPTION_nk-cheats-selftest := check cheat files (src/core/nk_cheats.h): the CWCheat reader, each code form on a synthetic guest, and the refusals by name
 HELP_DESCRIPTION_nk-ui-player-screens-selftest := build and run nk_ui Library, Title detail and router snapshots
 HELP_DESCRIPTION_nk-ui-player-screens-capture := save offscreen synthetic Library and Title detail captures (set NK_UI_CAPTURE_DIR)
 HELP_DESCRIPTION_nk-ui-overlay-host-selftest := build and run the in-game overlay host on SDL3_ttf, real key events and the SDL_Renderer backend (#1159)
@@ -390,6 +395,7 @@ HELP_DESCRIPTION_fsr1-selftest := run the FSR 1 presentation upscaler selftest o
 HELP_DESCRIPTION_anime4k-selftest := run the Anime4K movie upscaler selftest on a headless Vulkan device (SKIPs without one)
 HELP_DESCRIPTION_ace-ui-selftest := run Ace Mode's in-game UI selftest (layout, then a headless Vulkan render; SKIPs the GPU leg without Vulkan)
 HELP_DESCRIPTION_motion-match-selftest := run the draw matcher's selftest for render-state motion (synthetic PRIM lists; pure C)
+HELP_DESCRIPTION_motion-tap-selftest := run the frame store and in-between builder selftest for render-state motion (synthetic tap records; pure C)
 HELP_DESCRIPTION_osk-overlay-paint-selftest := run the in-window keyboard painter's exact-pixel selftest
 HELP_DESCRIPTION_psmf-producer-selftest := run the source-owned bounded PSMF producer selftest
 HELP_DESCRIPTION_psmf-media-selftest := run the source-owned PSMF-to-decoder media selftest

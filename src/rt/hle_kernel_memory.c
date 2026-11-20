@@ -25,6 +25,30 @@ static uint32_t h_KernelDevkitVersion(CpuState *s) { (void)s; return SR_PSP_FIRM
 #define HLE_KERNEL_ERROR_ERROR 0x80020001u          /* SCE_KERNEL_ERROR_ERROR */
 #define HLE_KERNEL_ERROR_ILLEGAL_ARGUMENT 0x800200d2u /* SCE_KERNEL_ERROR_ILLEGAL_ARGUMENT */
 
+/* SR_ALLOC_TRACE, read once (the alloc_block trace switch): per-call partition and FPL lines. */
+static int pool_trace_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("SR_ALLOC_TRACE") != NULL;
+    return on;
+}
+
+/* A block name: every byte up to its NUL, at most max - 1 of them, must be readable; a longer
+ * readable name is kept truncated, as h_CreateEventFlag keeps one. 0 when a byte is unreadable. */
+static int memory_block_name(uint32_t addr, char *out, int max) {
+    out[0] = '\0';
+    for (int i = 0; i < max - 1; i++) {
+        uint32_t cur = 0;
+        if (!sr_size_add_ok(addr, (uint32_t)i, &cur) || !sr_guest_span_readable(cur, 1u)) {
+            out[0] = '\0';
+            return 0;
+        }
+        out[i] = (char)MEM_R8(cur);
+        if (!out[i]) return 1;
+    }
+    out[max - 1] = '\0';
+    return 1;
+}
+
 /* SysMemUserForUser */
 /* Partition 5 is the 4 MiB volatile region [0x08400000, 0x08800000), the memory
  * sceKernelVolatileMemLock hands out (#1383). It has its own allocator, measured on a PSP by
@@ -138,7 +162,7 @@ static uint32_t h_AllocPartitionMemory(CpuState *s) {
     if (A2 > 4u) return HLE_KERNEL_ERROR_ILLEGAL_MEMBLOCKTYPE;
     if (!A1 && partition == VOLATILE_PART_ID) return HLE_KERNEL_ERROR_ERROR;
     if (A1) {
-        if (!guest_cstr(A1, name, sizeof(name)))
+        if (!memory_block_name(A1, name, sizeof(name)))
             return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     } else {
         name[0] = '\0';
@@ -146,11 +170,16 @@ static uint32_t h_AllocPartitionMemory(CpuState *s) {
     uint32_t type = A2;
     uint32_t size = A3;
     if (partition == VOLATILE_PART_ID) return volatile_part_alloc(type, size, stack_arg(s, 0));
+    /* Size 0, and a size whose 256-byte slot would wrap, is MEMBLOCK_ALLOC_FAILED: memblock.expected
+     * records it for sceKernelAllocMemoryBlock, which uOFW forwards to this call on partition 2,
+     * and the volatile partition answers the same. */
+    if (size == 0u || size > UINT32_MAX - 0xffu) return HLE_KERNEL_ERROR_MEMBLOCK_ALLOC_FAILED;
     uint32_t uid = (type == 2u)
         ? sr_alloc_block_at(stack_arg(s, 0), size, name)
-        : alloc_block(size ? size : 16);
-    fprintf(stderr, "  -> uid=0x%x addr=0x%08x (heap_bump_now=0x%08x)\n",
-            uid, sr_last_alloc_addr, s_heap);
+        : alloc_block(size);
+    if (pool_trace_on())
+        fprintf(stderr, "sceKernelAllocPartitionMemory: uid=0x%x addr=0x%08x (heap_bump_now=0x%08x)\n",
+                uid, sr_last_alloc_addr, s_heap);
     /* A block that cannot be placed is MEMBLOCK_ALLOC_FAILED: an Addr block at 0x08400000,
      * outside the user partition, measured on a PSP-3000 6.61 by PSP-KERNEL-SEM-001
      * vmem-alloc-free and vmem-alloc-held (2026-10-31), as partition.expected records for
@@ -189,7 +218,7 @@ static uint32_t h_AllocMemoryBlock(CpuState *s) {
     uint32_t kind = A1;
     uint32_t size = A2;
     char name[64];
-    if (A0 && !guest_cstr(A0, name, sizeof(name)))
+    if (A0 && !memory_block_name(A0, name, sizeof(name)))
         return HLE_KERNEL_ERROR_ILLEGAL_ADDR;
     if (A3 && !sr_guest_span_readable(A3, 4u))
         return HLE_KERNEL_ERROR_ILLEGAL_ADDR;
@@ -274,10 +303,35 @@ static uint32_t h_MaxFreeMemSize(CpuState *s) {
  * cannot hold with SCE_KERNEL_ERROR_NO_MEMORY; neither makes a pool. */
 #define FPL_ILLEGAL_MEMSIZE 0x800201b7u
 #define FPL_NO_MEMORY 0x80020190u
-/* UNMEASURED: a create with no free FPL slot and a blocking allocate outside a thread keep the
- * code they returned before the 2026-10-15 measurement; neither path was probed. Block size 0
- * was measured with one block: with a block count of 0 as well, the code order decides. */
+/* UNMEASURED: a blocking allocate outside a thread keeps the code it returned before the
+ * 2026-10-15 measurement; that path was not probed. Block size 0 was measured with one block:
+ * with a block count of 0 as well, the code order decides. */
 #define FPL_UNMEASURED_NO_SPACE 0x800200d9u
+
+/* The attribute bit that queues a pool's waiters by priority (PSP_FPL_ATTR_PRIORITY and
+ * PSP_VPL_ATTR_PRIORITY in the public PSPSDK headers). */
+#define POOL_ATTR_PRIORITY 0x100u
+
+/* Which queued waiter a freed block goes to: the first (FIFO), or under the priority attribute
+ * the one with the best current priority, the first of equals. pspautotests
+ * tests/threads/fpl/priority.expected (70e72391e95b4b5bf6cd7ffd7e0259f52abf9a99, recorded on a
+ * PSP): waiters of priority 0x30, 0x34 and 0x31 queued in that order get the block in that order
+ * without the attribute, and as 0x30, 0x31, 0x34 with it. */
+static int pool_pick_waiter(const uint32_t *thread_uids, int n, uint32_t attr) {
+    if (n <= 0) return -1;
+    if (!(attr & POOL_ATTR_PRIORITY)) return 0;
+    int best = 0;
+    uint32_t best_priority = UINT32_MAX;
+    for (int i = 0; i < n; i++) {
+        SrThreadRunStatus status;
+        if (sched_thread_run_status(thread_uids[i], &status) != 0) continue;
+        if (status.currentPriority < best_priority) {
+            best = i;
+            best_priority = status.currentPriority;
+        }
+    }
+    return best;
+}
 
 /* A woken waiter that loses the freed block (or wakes for another reason, e.g. a
  * callback) must stay queued, at the head so FIFO order holds; FreeFpl dequeues
@@ -304,6 +358,24 @@ void fpl_remove_waiter(FplPool *p, uint32_t thread_uid) {
     }
 }
 
+/* Appends the thread at the tail; a thread already queued keeps its one entry. 0 when full. */
+static int fpl_enqueue_waiter(FplPool *p, uint32_t thread_uid) {
+    for (int i = 0; i < p->nwaiters; i++)
+        if (p->waiters[i].thread_uid == thread_uid) return 1;
+    if (p->nwaiters >= FPL_MAX_WAITERS) return 0;
+    p->waiters[p->nwaiters++].thread_uid = thread_uid;
+    return 1;
+}
+
+/* A wait that ends with a latched result (WAIT_RELEASE, CANCEL, DELETE) leaves the queue: the
+ * entry would otherwise keep nwaiters above zero, so every later allocate would queue behind a
+ * thread that no longer waits, and a FreeFpl would hand its wake to that thread. */
+static uint32_t fpl_wait_ended(uint32_t uid, uint32_t thread_uid, uint32_t result) {
+    FplPool *p = fpl_lookup(uid);
+    if (p) fpl_remove_waiter(p, thread_uid);
+    return result;
+}
+
 static uint32_t h_CreateFpl(CpuState *s) {
     /* a0=name, a1=partition, a2=attr, a3=blockSize. 5th arg (numBlocks) is in t0 (r8). */
     char name[32] = {0};
@@ -312,37 +384,44 @@ static uint32_t h_CreateFpl(CpuState *s) {
     uint32_t nblocks = stack_arg(s, 0);
     if (bsize == 0) return FPL_ILLEGAL_MEMSIZE;
     if (nblocks == 0) nblocks = 1;
-    uint32_t total = bsize * nblocks;
-    uint32_t block_uid = alloc_block(total ? total : 16);
+    /* The pool spans bsize * nblocks bytes, computed without wrapping. A product past 4 GB is
+     * a pool no partition holds; it is refused like the measured 0x7FFFFFFF-byte block
+     * (UNMEASURED for a product that wraps 32 bits). */
+    uint64_t total64 = (uint64_t)bsize * nblocks;
+    if (total64 > UINT32_MAX) return FPL_NO_MEMORY;
+    uint32_t total = (uint32_t)total64;
+    uint32_t block_uid = alloc_block(total);
     if (block_uid == 0xFFFFFFFFu) return FPL_NO_MEMORY;
     uint32_t pool = block_addr(block_uid);
-    uint32_t uid = 0;
-    for (int i = 0; i < FPL_MAX; i++) {
-        if (!s_fpls[i].used) {
-            uid = (uint32_t)(i + 0x500);
-            FplPool *p = &s_fpls[i];
-            if (p->free_blocks) free(p->free_blocks);
-            if (p->allocated) free(p->allocated);
-            memset(p, 0, sizeof *p);
-            p->base = pool;
-            p->cur = pool;
-            p->end = pool + total;
-            p->bsize = bsize;
-            p->used = 1;
-            p->block_uid = block_uid;
-            p->attr = A2;
-            memcpy(p->name, name, sizeof(p->name));
-            p->nblocks = (int)nblocks;
-            p->free_blocks = (uint32_t *)calloc(nblocks, sizeof(uint32_t));
-            p->allocated = (uint8_t *)calloc(nblocks, sizeof(uint8_t));
-            break;
-        }
-    }
-    if (uid == 0) {
+    uint32_t *free_blocks = (uint32_t *)calloc(nblocks, sizeof(uint32_t));
+    uint8_t *allocated = (uint8_t *)calloc(nblocks, sizeof(uint8_t));
+    if (!free_blocks || !allocated) {
+        free(free_blocks);
+        free(allocated);
         free_block(block_uid);
-        return FPL_UNMEASURED_NO_SPACE;
+        return FPL_NO_MEMORY;
     }
-    fprintf(stderr, "sceKernelCreateFpl: uid=0x%x pool_uid=0x%x base=0x%08x bsize=%u nblocks=%u total=%u\n", uid, block_uid, pool, bsize, nblocks, total);
+    FplPool *p = fpl_new_slot();
+    if (p->free_blocks) free(p->free_blocks);
+    if (p->allocated) free(p->allocated);
+    memset(p, 0, sizeof *p);
+    /* The UID comes from the shared pool, so it never aliases another kernel object. */
+    uint32_t uid = sr_alloc_uid();
+    p->uid = uid;
+    p->base = pool;
+    p->cur = pool;
+    p->end = pool + total;
+    p->bsize = bsize;
+    p->used = 1;
+    p->block_uid = block_uid;
+    p->attr = A2;
+    memcpy(p->name, name, sizeof(p->name));
+    p->nblocks = (int)nblocks;
+    p->free_blocks = free_blocks;
+    p->allocated = allocated;
+    if (pool_trace_on())
+        fprintf(stderr, "sceKernelCreateFpl: uid=0x%x pool_uid=0x%x base=0x%08x bsize=%u nblocks=%u total=%u\n",
+                uid, block_uid, pool, bsize, nblocks, total);
     return uid;
 }
 
@@ -350,15 +429,15 @@ static uint32_t fpl_try_allocate_internal(FplPool *p, uint32_t *addr_out) {
     if (p->nfree > 0) {
         uint32_t addr = p->free_blocks[--p->nfree];
         uint32_t bidx = (addr - p->base) / p->bsize;
-        if (p->allocated && (int)bidx < p->nblocks) p->allocated[bidx] = 1;
+        if (p->allocated && bidx < (uint32_t)p->nblocks) p->allocated[bidx] = 1;
         *addr_out = addr;
         return 0;
     }
-    if (p->cur + p->bsize <= p->end) {
+    if (p->end - p->cur >= p->bsize) {
         uint32_t addr = p->cur;
         p->cur += p->bsize;
         uint32_t bidx = (addr - p->base) / p->bsize;
-        if (p->allocated && (int)bidx < p->nblocks) p->allocated[bidx] = 1;
+        if (p->allocated && bidx < (uint32_t)p->nblocks) p->allocated[bidx] = 1;
         *addr_out = addr;
         return 0;
     }
@@ -369,13 +448,20 @@ static uint32_t h_TryAllocateFpl(CpuState *s) {
     /* a0=fplUid, a1=dataPtrOut. Returns 0 on success. */
     uint32_t uid = A0, out = A1;
     FplPool *p = fpl_lookup(uid);
-    if (!p) { fprintf(stderr, "sceKernelTryAllocateFpl: bad uid=0x%x\n", uid); return SCE_KERNEL_ERROR_UNKNOWN_FPLID; }
+    if (!p) {
+        if (pool_trace_on()) fprintf(stderr, "sceKernelTryAllocateFpl: bad uid=0x%x\n", uid);
+        return SCE_KERNEL_ERROR_UNKNOWN_FPLID;
+    }
     if (out && !sr_guest_span_writable(out, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     uint32_t addr = 0;
     uint32_t err = fpl_try_allocate_internal(p, &addr);
-    if (err) { fprintf(stderr, "sceKernelTryAllocateFpl: pool 0x%x exhausted\n", uid); return err; }
+    if (err) {
+        if (pool_trace_on()) fprintf(stderr, "sceKernelTryAllocateFpl: pool 0x%x exhausted\n", uid);
+        return err;
+    }
     if (out) MEM_W32(out, addr);
-    fprintf(stderr, "sceKernelTryAllocateFpl: uid=0x%x -> 0x%08x (cur=0x%08x)\n", uid, addr, p->cur);
+    if (pool_trace_on())
+        fprintf(stderr, "sceKernelTryAllocateFpl: uid=0x%x -> 0x%08x (cur=0x%08x)\n", uid, addr, p->cur);
     return 0;
 }
 
@@ -424,8 +510,7 @@ static uint32_t allocate_fpl_common(CpuState *s, int is_cb) {
         return FPL_UNMEASURED_NO_SPACE;
     }
 
-    if (p->nwaiters >= FPL_MAX_WAITERS) return 0x80020190u; /* SCE_KERNEL_ERROR_NO_MEMORY */
-    p->waiters[p->nwaiters++].thread_uid = cur_thid;
+    if (!fpl_enqueue_waiter(p, cur_thid)) return 0x80020190u; /* SCE_KERNEL_ERROR_NO_MEMORY */
 
     for (;;) {
         if (is_cb && sr_thread_has_pending_callbacks(cur_thid)) {
@@ -454,7 +539,7 @@ static uint32_t allocate_fpl_common(CpuState *s, int is_cb) {
             if (is_cb) sched_set_current_cb_wait(0);
 
             uint32_t woken = 0;
-            if (sched_take_wake_result(&woken)) return woken;
+            if (sched_take_wake_result(&woken)) return fpl_wait_ended(uid, cur_thid, woken);
 
             p = fpl_lookup(uid);
             if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
@@ -480,7 +565,7 @@ static uint32_t allocate_fpl_common(CpuState *s, int is_cb) {
             if (is_cb) sched_set_current_cb_wait(0);
 
             uint32_t woken = 0;
-            if (sched_take_wake_result(&woken)) return woken;
+            if (sched_take_wake_result(&woken)) return fpl_wait_ended(uid, cur_thid, woken);
 
             p = fpl_lookup(uid);
             if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
@@ -502,22 +587,24 @@ static uint32_t h_AllocateFplCB(CpuState *s) {
     return allocate_fpl_common(s, 1);
 }
 
+/* pspautotests tests/threads/fpl/delete.expected (70e72391, recorded on a PSP): a NULL, invalid
+ * or already deleted id is UNKNOWN_FPLID (0x8002019D), and every waiter returns WAIT_DELETE.
+ * The pool is gone before a waiter wakes: a stronger waiter runs at once, and one that calls the
+ * pool again must find it unknown rather than queue on a pool about to be freed. */
 static uint32_t h_DeleteFpl(CpuState *s) {
     uint32_t uid = A0;
-    uint32_t idx = uid - 0x500;
-    if (idx >= FPL_MAX || !s_fpls[idx].used) return 0;
-    FplPool *p = &s_fpls[idx];
+    FplPool *p = fpl_lookup(uid);
+    if (!p) return SCE_KERNEL_ERROR_UNKNOWN_FPLID;
     uint32_t block_uid = p->block_uid;
-    int waiters = sched_count_waiters(uid);
-    if (waiters) {
-        sched_wake_with_result(uid, SCE_KERNEL_ERROR_WAIT_DELETE);
-        sched_preempt();
-    }
     if (p->free_blocks) free(p->free_blocks);
     if (p->allocated) free(p->allocated);
     memset(p, 0, sizeof *p);
     if (block_uid) {
         free_block(block_uid);
+    }
+    if (sched_count_waiters(uid)) {
+        sched_wake_with_result(uid, SCE_KERNEL_ERROR_WAIT_DELETE);
+        sched_preempt();
     }
     return 0;
 }
@@ -526,25 +613,29 @@ static uint32_t h_FreeFpl(CpuState *s) {
     uint32_t uid = A0, addr = A1;
     FplPool *p = fpl_lookup(uid);
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_FPLID;
-    if (addr < p->base || addr + p->bsize > p->end || ((addr - p->base) % p->bsize) != 0) {
+    /* Offsets, so no sum wraps: the block [addr, addr + bsize) lies wholly inside the pool. */
+    uint32_t span = p->end - p->base;
+    uint32_t off = addr - p->base;
+    if (addr < p->base || off >= span || span - off < p->bsize || (off % p->bsize) != 0) {
         /* Exact bad-address error code for FreeFpl is UNMEASURED; using SCE_KERNEL_ERROR_ILLEGAL_ADDR (0x80000103u) as defined in hle.c. */
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     }
-    uint32_t bidx = (addr - p->base) / p->bsize;
-    if (p->allocated && (int)bidx < p->nblocks && !p->allocated[bidx]) {
+    uint32_t bidx = off / p->bsize;
+    if (p->allocated && bidx < (uint32_t)p->nblocks && !p->allocated[bidx]) {
         /* Double-free or block not currently in use; exact error code is UNMEASURED, returning SCE_KERNEL_ERROR_ILLEGAL_ADDR */
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     }
-    if (p->allocated && (int)bidx < p->nblocks) p->allocated[bidx] = 0;
+    if (p->allocated && bidx < (uint32_t)p->nblocks) p->allocated[bidx] = 0;
     if (p->free_blocks && p->nfree < p->nblocks) {
         p->free_blocks[p->nfree++] = addr;
     }
-    /* Waiter order: semaphores in hle.c do not handle attr for priority/FIFO queuing;
-     * per task instruction, default to FIFO order and document.
-     * Wake one waiter. */
+    /* Wake one waiter, chosen by the pool's queue order (pool_pick_waiter). */
     if (p->nwaiters > 0) {
-        uint32_t next_thread = p->waiters[0].thread_uid;
-        for (int j = 0; j + 1 < p->nwaiters; j++) {
+        uint32_t uids[FPL_MAX_WAITERS];
+        for (int j = 0; j < p->nwaiters; j++) uids[j] = p->waiters[j].thread_uid;
+        const int pick = pool_pick_waiter(uids, p->nwaiters, p->attr);
+        uint32_t next_thread = p->waiters[pick].thread_uid;
+        for (int j = pick; j + 1 < p->nwaiters; j++) {
             p->waiters[j] = p->waiters[j + 1];
         }
         p->nwaiters--;
@@ -612,8 +703,8 @@ static uint32_t h_ReferFplStatus(CpuState *s) {
 #define VPL_GRANULE 8u
 /* PSP-measured (docs/HARDWARE_ORACLE.md kernel-object error table, PSP-B1-01): an unknown VPL id
  * returns SCE_KERNEL_ERROR_UNKNOWN_VPLID. */
-/* UNMEASURED: no VPL exhausted code is recorded; this is the pre-measurement value, not the FPL
- * code. */
+/* UNMEASURED: a create of size 0 and a blocking allocate outside a thread keep this
+ * pre-measurement value, not the FPL code. */
 #define VPL_EXHAUSTED 0x800200d9u
 /* pspautotests tests/threads/vpl/try.expected ("More than remaining", "All remaining", "1 byte
  * (none left)"): a request that no free block can hold answers SCE_KERNEL_ERROR_NO_MEMORY, as the
@@ -623,9 +714,6 @@ static uint32_t h_ReferFplStatus(CpuState *s) {
  * -1 bytes, or larger than the pool answers 0x800201B7 from Allocate, AllocateCB (with and
  * without timeout) and TryAllocate. */
 #define VPL_ILLEGAL_SIZE 0x800201b7u
-/* Pool names, by pool slot: VplPool has no name field (pspautotests tests/threads/vpl/refer.expected
- * prints name=refer). */
-static char s_vpl_names[VPL_MAX][32];
 
 /* Grow a pool array to hold `need` entries. A host that cannot provide them stops the run
  * by name: refusing the guest would report a full pool that is not full. */
@@ -688,6 +776,21 @@ void vpl_remove_waiter(VplPool *p, uint32_t thread_uid) {
     }
 }
 
+/* Same contracts as fpl_enqueue_waiter() and fpl_wait_ended(). */
+static int vpl_enqueue_waiter(VplPool *p, uint32_t thread_uid, uint32_t size) {
+    for (int i = 0; i < p->nwaiters; i++)
+        if (p->waiters[i].thread_uid == thread_uid) return 1;
+    if (p->nwaiters >= VPL_MAX_WAITERS) return 0;
+    p->waiters[p->nwaiters++] = (VplWaiter){thread_uid, size};
+    return 1;
+}
+
+static uint32_t vpl_wait_ended(uint32_t uid, uint32_t thread_uid, uint32_t result) {
+    VplPool *p = vpl_lookup(uid);
+    if (p) vpl_remove_waiter(p, thread_uid);
+    return result;
+}
+
 /* The bytes a pool hands out, which ReferVplStatus reports as poolSize. */
 static uint32_t vpl_pool_size(const VplPool *p) {
     return p->size > VPL_POOL_HEADER ? (p->size - VPL_POOL_HEADER) & ~(VPL_GRANULE - 1u) : 0u;
@@ -703,26 +806,23 @@ static int vpl_request_illegal(const VplPool *p, uint32_t request) {
     return ((request + (VPL_GRANULE - 1u)) & ~(VPL_GRANULE - 1u)) + VPL_BLOCK_HEADER > vpl_pool_size(p);
 }
 
+/* pspautotests tests/threads/vpl/create.expected (70e72391, recorded on a PSP): a pool the
+ * partition cannot hold (0x10000000 bytes) is SCE_KERNEL_ERROR_NO_MEMORY (0x80020190). */
 static uint32_t h_CreateVpl(CpuState *s) {
     uint32_t size = A3;
     if (size == 0) return VPL_EXHAUSTED; /* exact zero-size result is UNMEASURED */
     uint32_t block_uid = alloc_block(size);
-    if (block_uid == 0xFFFFFFFFu) return VPL_EXHAUSTED;
+    if (block_uid == 0xFFFFFFFFu) return VPL_NO_SPACE;
     uint32_t base = block_addr(block_uid);
-    for (int i = 0; i < VPL_MAX; ++i) {
-        if (!s_vpls[i].used) {
-            VplPool *p = &s_vpls[i];
-            vpl_release(p);
-            p->base = base; p->size = size; p->block_uid = block_uid; p->used = 1;
-            p->attr = A2;
-            memset(s_vpl_names[i], 0, sizeof s_vpl_names[i]);
-            if (A0) (void)guest_cstr(A0, s_vpl_names[i], (int)sizeof s_vpl_names[i]);
-            if (vpl_pool_size(p)) vpl_insert_free(p, base + VPL_POOL_HEADER, vpl_pool_size(p));
-            return (uint32_t)(0x600 + i);
-        }
-    }
-    (void)free_block(block_uid);
-    return VPL_EXHAUSTED;
+    VplPool *p = vpl_new_slot();
+    vpl_release(p);
+    p->base = base; p->size = size; p->block_uid = block_uid; p->used = 1;
+    p->attr = A2;
+    /* The UID comes from the shared pool, so it never aliases another kernel object. */
+    p->uid = sr_alloc_uid();
+    if (A0) (void)guest_cstr(A0, p->name, (int)sizeof p->name);
+    if (vpl_pool_size(p)) vpl_insert_free(p, base + VPL_POOL_HEADER, vpl_pool_size(p));
+    return p->uid;
 }
 
 static uint32_t vpl_try_allocate_internal(VplPool *p, uint32_t request, uint32_t *addr_out) {
@@ -799,8 +899,7 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
         return VPL_EXHAUSTED;
     }
 
-    if (p->nwaiters >= VPL_MAX_WAITERS) return 0x80020190u; /* SCE_KERNEL_ERROR_NO_MEMORY */
-    p->waiters[p->nwaiters++] = (VplWaiter){cur_thid, request};
+    if (!vpl_enqueue_waiter(p, cur_thid, request)) return 0x80020190u; /* SCE_KERNEL_ERROR_NO_MEMORY */
 
     for (;;) {
         if (is_cb && sr_thread_has_pending_callbacks(cur_thid)) {
@@ -829,7 +928,7 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
             if (is_cb) sched_set_current_cb_wait(0);
 
             uint32_t woken = 0;
-            if (sched_take_wake_result(&woken)) return woken;
+            if (sched_take_wake_result(&woken)) return vpl_wait_ended(uid, cur_thid, woken);
 
             p = vpl_lookup(uid);
             if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
@@ -856,7 +955,7 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
             if (is_cb) sched_set_current_cb_wait(0);
 
             uint32_t woken = 0;
-            if (sched_take_wake_result(&woken)) return woken;
+            if (sched_take_wake_result(&woken)) return vpl_wait_ended(uid, cur_thid, woken);
 
             p = vpl_lookup(uid);
             if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
@@ -886,12 +985,13 @@ static uint32_t h_FreeVpl(CpuState *s) {
     for (int i = 0; i < p->nallocs; ++i) if (p->allocs[i].addr == addr) {
         vpl_insert_free(p, addr - VPL_BLOCK_HEADER, p->allocs[i].size);
         p->allocs[i] = p->allocs[--p->nallocs];
-        /* Waiter order: semaphores in hle.c do not handle attr for priority/FIFO queuing;
-         * per task instruction, default to FIFO order and document.
-         * Wake one waiter. */
+        /* Wake one waiter, chosen by the pool's queue order (pool_pick_waiter). */
         if (p->nwaiters > 0) {
-            uint32_t next_thread = p->waiters[0].thread_uid;
-            for (int j = 0; j + 1 < p->nwaiters; j++) {
+            uint32_t uids[VPL_MAX_WAITERS];
+            for (int j = 0; j < p->nwaiters; j++) uids[j] = p->waiters[j].thread_uid;
+            const int pick = pool_pick_waiter(uids, p->nwaiters, p->attr);
+            uint32_t next_thread = p->waiters[pick].thread_uid;
+            for (int j = pick; j + 1 < p->nwaiters; j++) {
                 p->waiters[j] = p->waiters[j + 1];
             }
             p->nwaiters--;
@@ -903,18 +1003,19 @@ static uint32_t h_FreeVpl(CpuState *s) {
     return SCE_KERNEL_ERROR_UNKNOWN_VPLID;
 }
 
+/* As h_DeleteFpl: the pool is gone before a waiter wakes with WAIT_DELETE. */
 static uint32_t h_DeleteVpl(CpuState *s) {
     VplPool *p = vpl_lookup(A0);
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_VPLID;
     uint32_t block_uid = p->block_uid;
     uint32_t uid = A0;
-    int waiters = sched_count_waiters(uid);
-    if (waiters) {
+    vpl_release(p);
+    const uint32_t rc = free_block(block_uid); /* exactly once; unknown/double delete frees nothing */
+    if (sched_count_waiters(uid)) {
         sched_wake_with_result(uid, SCE_KERNEL_ERROR_WAIT_DELETE);
         sched_preempt();
     }
-    vpl_release(p);
-    return free_block(block_uid); /* exactly once; unknown/double delete frees nothing */
+    return rc;
 }
 
 static uint32_t h_ReferVplStatus(CpuState *s) {
@@ -928,7 +1029,7 @@ static uint32_t h_ReferVplStatus(CpuState *s) {
      * freeSize follow the PSP-B1-01 accounting above (992 for a 1024-byte pool). */
     if (MEM_R32(info) == 0u) return 0;
     MEM_W32(info + 0, 52u);
-    for (uint32_t i = 0; i < 32u; ++i) MEM_W8(info + 4u + i, (uint8_t)s_vpl_names[p - s_vpls][i]);
+    for (uint32_t i = 0; i < 32u; ++i) MEM_W8(info + 4u + i, (uint8_t)p->name[i]);
     MEM_W32(info + 36, p->attr);
     MEM_W32(info + 40, vpl_pool_size(p));
     uint32_t free_size = 0;
@@ -946,7 +1047,6 @@ static uint32_t h_ReferVplStatus(CpuState *s) {
 #define TLSPL_BAD_PARTITION_B 0x800200d2u /* partitions <= 0, 7..10; alignments that are not powers of two */
 #define TLSPL_BAD_SIZE_VALUE 0x800201b7u  /* block size or count of 0 or 0xFFFFFFFF */
 #define TLSPL_NO_MEMORY 0x80020190u
-#define TLSPL_BUSY 0x800201a8u
 #define TLSPL_ILLEGAL_SIZE 0x800201bcu
 #define TLSPL_ILLEGAL_ATTR 0x80020191u
 #define TLSPL_USER_PARTITION 2u
@@ -955,7 +1055,7 @@ static uint32_t h_ReferVplStatus(CpuState *s) {
 #define TLSPL_MAX_ALIGNMENT 256u
 
 TlsplPool s_tlspls[TLSPL_MAX];
-static int s_tlspl_highmem_noted;   /* the attr 0x4000 placement note has been logged this run */
+static int s_tlspl_highmem_noted;   /* the derived attr 0x4000 placement note has been logged this run */
 #ifdef SR_HLE_THREAD_SELFTEST
 void sr_hle_test_tlspl_highmem_note_reset(void) { s_tlspl_highmem_noted = 0; }
 #endif
@@ -992,7 +1092,13 @@ static uint32_t h_CreateTlspl(CpuState *s) {
      * 0x10000, are not measured and keep the old refusal. The attr 0x4000 cell (line 29 at
      * 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP) fixes that
      * the pool is created, reports the attribute and takes its 1024 bytes from the partition; it
-     * does not show where the pool lies (see the allocation below). */
+     * does not show where the pool lies (see the allocation below).
+     * PSP-measured 2026-11-17 (PSP-3000, PSP-SAFE-SCALAR-001; docs/HARDWARE_ORACLE.md), partition 2,
+     * four 0x100-byte blocks, NULL options: a pool without attr 0x4000 lies at the low end of the
+     * free memory, directly above a Low block taken before it (tls-addr-normal, tls-place-normal);
+     * its status reads size 0x3c, the attribute, the slot index, the block size and counts
+     * (tls-status-normal, tls-status-high); a thread's block is the lowest free one, the second
+     * thread's 0x100 above the first's (tls-thread). */
     if (!A0) return TLSPL_NO_MEMORY;
     if (!guest_cstr(A0, name, sizeof(name))) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     int32_t partition = (int32_t)A1;
@@ -1038,14 +1144,24 @@ static uint32_t h_CreateTlspl(CpuState *s) {
     if (A2 & TLSPL_ATTR_MEM_BOTTOM) {
         /* attr 0x4000 (PSP_TLSPL_ATTR_HIGHMEM in pspautotests tests/threads/tls/shared.h): the
          * pool comes from the top of the partition (alloc_block_high), in either partition layout
-         * (#2640). PPSSPP-derived, not PSP-measured: hrydgard/ppsspp
-         * 65181eea1deb7361beb3be6062ea98e8427f2786, Core/HLE/sceKernelMemory.cpp,
-         * sceKernelCreateTlspl, asks its block allocator for the top when the attribute is set;
-         * jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414, SceKernelTls, agrees. */
-        if (!s_tlspl_highmem_noted) {
+         * (#2640). For one pool shape that is PSP-measured 2026-11-17 (PSP-3000,
+         * PSP-SAFE-SCALAR-001; docs/HARDWARE_ORACLE.md): in partition 2, with the attribute word
+         * exactly 0x4000 and NULL options, a pool of four 0x100-byte blocks lies directly below a
+         * High block taken before it (tls-addr-high), the next such pool 0x400 below the first
+         * (tls-addr-high-2), and a later High block below the pool (tls-place-high).
+         * No other pool is in that measurement: another block size or count, an options block,
+         * another attribute bit beside 0x4000, partition 6. For those the top is PPSSPP-derived, not
+         * PSP-measured: hrydgard/ppsspp 65181eea1deb7361beb3be6062ea98e8427f2786,
+         * Core/HLE/sceKernelMemory.cpp, sceKernelCreateTlspl, asks its block allocator for the top
+         * when the attribute is set; jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414,
+         * SceKernelTls, agrees. */
+        const int measured_shape = partition == (int32_t)TLSPL_USER_PARTITION && A2 == TLSPL_ATTR_MEM_BOTTOM &&
+                                   block_size == 0x100u && num_blocks == 4u && !options;
+        if (!measured_shape && !s_tlspl_highmem_noted) {
             s_tlspl_highmem_noted = 1;
             fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelCreateTlspl "
-                            "(NID 0x8daff657) places an attr 0x4000 pool at the top of the partition\n");
+                            "(NID 0x8daff657) places an attr 0x4000 pool at the top of the partition "
+                            "(PSP-measured only for partition 2, four 0x100-byte blocks, no options)\n");
         }
         block_uid = alloc_block_high((uint32_t)(total64 + slack));
     } else {
@@ -1099,7 +1215,9 @@ static uint32_t h_FreeTlspl(CpuState *s) {
     for (uint32_t i = 0; i < p->num_blocks; ++i) {
         if (p->thread_uids[i] == thread_uid) {
             uint32_t addr = p->base + i * p->stride;
-            for (uint32_t j = 0; j < p->block_size; ++j) MEM_W8(addr + j, 0u);
+            /* sceKernelGetTlsAddr checked this span writable before it handed the block out,
+             * and sr_guest_fill's range check is no stricter, so the fill cannot be refused. */
+            (void)sr_guest_fill(addr, 0u, p->block_size);
             tlspl_release_thread(p, thread_uid);
             return 0;
         }
@@ -1130,7 +1248,7 @@ static uint32_t h_GetTlsAddr(CpuState *s) {
             return 0u;
         }
         uint32_t addr = (uint32_t)addr64;
-        for (uint32_t j = 0; j < p->block_size; ++j) MEM_W8(addr + j, 0u);
+        (void)sr_guest_fill(addr, 0u, p->block_size);   /* the span is writable, checked above */
         p->thread_uids[i] = thread_uid;
         if (p->free_blocks) --p->free_blocks;
         return addr;
@@ -1379,9 +1497,7 @@ void hle_register_wait_conformance_kernel_memory_1(void) {
      * Allocate forms off this handler left it alone. Registered by this same
      * helper in both builds, so the production mapping is unchanged. */
     sr_hle_register(0x623ae665, "sceKernelTryAllocateFpl", h_TryAllocateFpl);
-    /* Same reason, plus the selftest must hand every pool slot back: s_fpls[] holds
-     * FPL_MAX=16 and the conformance matrix already uses all 16, so a test that
-     * leaked one would starve the matrix rather than fail on its own assertion. */
+    /* Same reason: the selftest deletes the pools it creates. */
     sr_hle_register(0xed1410e0, "sceKernelDeleteFpl", h_DeleteFpl);
     sr_hle_register(0xd8199e4c, "sceKernelReferFplStatus", h_ReferFplStatus);
     /* VPL set (PSP_INTR_WAITS_MATRIX.md PR-G coverage rows; blocking AllocateVpl

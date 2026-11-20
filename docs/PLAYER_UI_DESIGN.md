@@ -15,6 +15,12 @@ screen lane builds against: Library and Title detail (C5, built), Settings (C6),
 It follows the owner's interactive prototype (version 8) and the "Player" boards of the design canvas, both private.
 Where this page and the code disagree, the code is current and this page is updated in the same change.
 
+Read this page before you change anything the launcher or the in-game overlay draws. Every token is also listed in a
+machine-readable block at the end, the [Token record](#token-record), with the source symbol it comes from and the
+text-on-background pairs the UI draws. `PlayerUiDesignTokenTests` in `tests/native/test_player_ui.py` reads that
+block and the C source and fails when they differ, when a colour literal in the UI source is missing from the
+record, or when a pair falls below its [contrast](#contrast) target and is not a [known shortfall](#known-shortfalls).
+
 ## Principles
 
 - **One dark theme, one accent.** Ground `#0B0F14`; every surface steps up in colour, not with shadows. The
@@ -50,10 +56,13 @@ Where this page and the code disagree, the code is current and this page is upda
 | `surface_high` | `#18202B` | chips, focused secondary button, focused row |
 | `line` | `#1C232D` | hairlines, card edges |
 | `line_strong` | `#2E3846` | control and chip borders, focused card edge |
+| `selected_neutral_edge` | `#6B7684` | edge of a current value marked without the accent (4.2:1 on the ground, 3.5:1 on `surface_high`) |
+| `selected_neutral_edge_dimmed` | `#576270` | that edge on a dimmed row, a step weaker (3.1:1 on the ground; 2.6:1 on `surface_high`, its own box, under 3:1 and accepted because a dimmed row is inert) |
 | `paper` | `#F5F7FA` | primary text |
 | `muted` | `#9AA4B2` | secondary text (7.6:1 on the ground) |
 | `dim` | `#6B7684` | disabled text and footnotes only (4.2:1, not for body text) |
 | `accent_dark` | `#6B9FF0` | the brand blue, the website's dark accent: focus ring, primary button, active tab rule, toggles, sliders, progress; as a ring 7.2:1 on the ground, 6.7:1 on `surface_raised`, 6.1:1 on `surface_high`, 3.7:1 on the scrim over a white frame, 4.4:1 over the brightest wave |
+| `focus` | `#6B9FF0` | the focus ring (`nk_ui_focus_ring` draws this field); the same value as `accent_dark`, kept as its own field |
 | `ink` | `#10151C` | text on an accent fill (6.8:1 on `accent_dark`) |
 | `accent_hover` | `#8FB8F2` | primary button under the pointer, the website's mark blue (ink on it 9.0:1) |
 | `accent_pressed` | `#4F86DC` | pressed primary button (ink on it 5.0:1) |
@@ -62,11 +71,11 @@ Where this page and the code disagree, the code is current and this page is upda
 | `warning` | `#DBB024` | needs setup |
 | `info` | `#C29AF4` | experimental, untested, informational notes: violet, 50 degrees of hue from the blue accent (8.4:1 on the ground, 7.2:1 on `surface_high`) |
 | `error` | `#FF7B72` | unsupported, failed, remove |
-| `scrim` | ground at 78% | behind dialogs and the in-game overlay |
+| `scrim` | ground at 78% | over the frozen game frame behind the in-game overlay (`src/rt/gui.c`); the launcher's dialogs draw no scrim (see [Loose ends](#loose-ends-in-the-code)) |
 | `art_scrim` | ground at 72% | under a badge on title art |
 | `art_label` | `#C9D6E3` | captions over title art |
 | `placeholder` | `#3A4552` | art placeholder outline, inactive glyph dots |
-| `capture` | `#223046` | a row waiting for a button press (C6 controls): the accent at 18% over `surface_raised`, paper on it 12.4:1 |
+| `capture` | `#223046` | a row waiting for a button press (C6 controls): the accent at 18% over `surface_raised`, paper on it 12.4:1; no screen draws it on `main` (see [Loose ends](#loose-ends-in-the-code)) |
 | `accent_light` | `#2F6FD0` | accent on a light surface, the website's light accent (4.9:1 on white; reserved, the UI has none) |
 
 ### Spacing, radii, borders
@@ -107,6 +116,24 @@ character).
 
 Labels, chips and eyebrows are drawn in caps (`nk_ui_caps`); the words stay sentence case in data.
 
+### Text: wrapping and length
+
+- **Which roles wrap.** `nk_ui_type` turns wrapping on for `TITLE_XL` through `FOOTNOTE` (titles, headings and
+  running text) and off for the display roles, labels, `EYEBROW`, `MICRO` and `DATA`. A screen may turn it on for one
+  run, as the error card does for its `DATA` details box.
+- **Long text that can be read elsewhere** (a value with its own editor or detail page, a game card's name, a log
+  line) is shortened with `nk_ui_text_clamp`: it keeps as many whole lines as the call allows and ends the last in
+  an ellipsis. A game card's name keeps two lines.
+- **Text with nowhere else to be read** wraps whole, and the page or card it sits in scrolls when it is taller than
+  the room between the bars (see [Layout grid](#layout-grid) for the cases at larger text sizes).
+- Wrapped text stays inside its box and keeps its wrapped height when a column is overfull (see
+  [Layout grid](#layout-grid)).
+- **Pending.** A long value that wraps inside the Settings options detail panel, and a panel whose text scrolls when
+  it is taller than its room, are in [#2754](https://github.com/Jstar269/nakagawa-recomp/pull/2754), a Draft
+  that is not on `main`; this page describes `main`.
+- Launcher text is English only and lives in the screen sources; moving it to a string table is
+  [#2747](https://github.com/Jstar269/nakagawa-recomp/issues/2747).
+
 ### Focus
 
 - The ring is drawn by the core outside the focused element, so the layout never moves when focus moves: 3 px
@@ -121,7 +148,21 @@ Labels, chips and eyebrows are drawn in caps (`nk_ui_caps`); the words stay sent
   theme.
 - A focusable control calls `nk_ui_register_button` and, when focused, `nk_ui_focus_ring(ui, id, radius)`. A focused
   secondary button also fills with `surface_high`; a focused card's edge becomes `line_strong`.
-- Arrow keys move to the nearest control in that direction.
+- Arrow keys move to the nearest control in that direction. A control may name the control an Up and a Down move
+  from it land on instead (`nk_ui_register_button_between`, `nk_ui_button_between`; a tab of `nk_ui_section_tabs`
+  names its Down neighbour in `NkUiSection.down`), for a place where the nearest one by position is not the next
+  one to a person: a list of full-width rows under a strip of small tabs. Position measures to a control's middle,
+  so under a narrow tab a small button further down can be nearer than the full-width row just below the tab, and
+  a Down move would pass the whole list. A named neighbour wins over position and is taken even when its scroll
+  container has it out of view; the move then scrolls it in.
+- A control that a scroll container clips away whole is otherwise reached only from inside that container, whose
+  rows scroll it into view, never from a control outside it. A scroll container knows the one it sits in
+  (`NkUiFocusScroller.parent`), and a control in the inner one counts as inside the outer one: the last row of a
+  list in a page that scrolls reaches the button under the list while the page has that button out of view
+  (`test_nested_scrollers` in `tests/native/test_nk_ui_focus.c`).
+- A control made of several pointer targets (a row of values) registers the row as the focus stop and each target
+  with `NK_UI_BUTTON_POINTER_ONLY`: a press focuses a target and its release activates it, no move, Tab or first
+  focus lands on it, and the screen hands focus back to the row.
 - The pointer is the other way in: a press focuses the control under it, and the release on the same control
   activates it. Clay finds what is under the pointer from the last layout (`Clay_SetPointerState`, every frame),
   inside clip containers, so a control scrolled or clipped out of view takes no click, and only controls of the
@@ -139,8 +180,13 @@ A list longer than its room is a scroll container (`NkUiLayout.scroll`), scrolle
 (`Clay_UpdateScrollContainers`, every frame, with the time since the last one): a wheel notch over it moves it 48 px,
 three of its 16 px lines; a drag with the mouse held, or a finger, moves it with the pointer and a fling keeps going a
 moment; a drag that scrolls more than 8 px is no click on the control it started on. A control inside it that takes
-focus, by key, pad or pointer, is scrolled fully into view, by the least it takes. The launcher draws at 60 Hz while a
-list, or anything else, still moves (`player_ui_nk_wait_ms`) and waits for input again once it settles. A wheel over anything else is
+focus, by key, pad or pointer, is scrolled fully into view, by the least it takes. Where scroll containers nest (a
+list inside a page that scrolls, up to `NK_UI_FOCUS_SCROLL_DEPTH` deep) every container around the control scrolls,
+the innermost first, each to show what the one inside it shows of the control. A move is judged on the layout
+before it, and a page that describes its focused control changes height with the focus, so the two layouts after a
+focus change bring the focused control into view again where they put it (`NK_UI_FOCUS_REVEAL_FRAMES`). The
+launcher draws at 60 Hz while a list, or anything else, still moves (`player_ui_nk_wait_ms`) and waits for input
+again once it settles. A wheel over anything else is
 the screen's own: the library turns its page with it. Only the lines a long list shows are laid out, with spacers
 for the rest, so its length costs nothing (`test_scroll_container` in `tests/native/test_nk_ui_core.c`).
 
@@ -204,8 +250,16 @@ the window. A larger window keeps its density and gains room. Clay clips at most
 long text with `nk_ui_text_clamp` instead of clipping it, but only text the player can read whole another way (a
 value with its own editor or detail page); text with no other place to be read wraps whole on a page that scrolls.
 One exception is by design: at the design text size a setting's sentence beside its button is clamped to two lines,
-so the rows keep their side-by-side layout (Settings > Enhanced stacks its rows at every size instead). Above it, a sentence that would be cut makes the rows stack, and under
+so the rows keep their side-by-side layout (Settings > Enhanced uses compact value rows and one focused-option detail panel instead). Above it, a sentence that would be cut makes the rows stack, and under
 its button the sentence wraps whole.
+
+Wrapped text stays inside its box. Clay adds a run up word by word, and a text backend measures in whole pixels, so
+words measured one at a time, each with a lone space, fell short of the line as drawn (8 px for a ten-word line of
+14 px Geist): a line was kept that ran into the padding beside it, and a one-line run's box was narrower than its
+glyphs. `nk_ui_clay_measure` therefore counts a word as the growth of its line (the line up to the word's end, less
+the line up to the end of the word before it, less the lone space Clay adds), measured from the line's start or, in a
+long line, from a word at most 256 bytes back. The words of a line add up to what `nk_ui_text_clamp` and the
+renderer measure for it.
 
 Wrapped text keeps its wrapped height when its page is overfull. Clay took a paragraph's minimum height before
 wrapping, as one line, so compressing an overfull column squeezed the paragraph back and the next block painted over
@@ -574,10 +628,10 @@ it under the action row while BUILD PACKAGE waits for the files, with CHECK AGAI
 
 ### Settings (C6)
 
-Built now (#1302): one page under the top bar with SETTINGS active, two cards of named rows, each value on the 34 px
-button that changes it: GAME (resolution, frame pacing, VSync, fullscreen, scaling) and LAUNCHER AND SOUND (game
-volume with - and +, launcher fullscreen, accessibility, menu sounds, controller settings, CHECK FOR UPDATES,
-launcher music and music volume with - and +, then the controller and the saves folder as captions; CHECK FOR UPDATES opens the Updates card and asks GitHub, see
+Built now (#1302): one page under the top bar with SETTINGS active, two cards of named rows: GAME (resolution, VSync,
+fullscreen, scaling and Play mode) and LAUNCHER AND SOUND (game volume with - and +, launcher fullscreen,
+accessibility, menu sounds, controller settings, CHECK FOR UPDATES, launcher music and music volume with - and +,
+then the controller and the saves folder as captions; CHECK FOR UPDATES opens the Updates card and asks GitHub, see
 [`SETUP.md`](SETUP.md#network-use)). Under them DONE (primary: saves and returns to the Library), ONLINE AND DEVELOPER,
 THIRD-PARTY NOTICES and BUILD TOOLS AND CACHE (#1306: the share libraries switch, CLEAR SHARED LIBRARY CACHE and
 REMOVE BUILD TOOLS); the online options, the notices, build tools and cache and the removal check are dialog cards.
@@ -586,43 +640,68 @@ sentence saying what it does and what Windows asks for now: INTERFACE SIZE (Auto
 100, 125, 150 or 200%; a larger size needs a window large enough for the 1280 x 720 layout at that size), TEXT SIZE
 (Standard, Large or Larger: 100, 125 or 150% type, with controls and the layout's spacing kept, in any window), HIGH
 CONTRAST and REDUCE MOTION (Automatic, On or Off; Automatic follows Windows' contrast themes and Animation effects,
-read every frame, so a change there applies at once). The four buttons share one column; at a larger text size it
-is as wide as the widest label, and the sentences go under the buttons when beside them one would be cut.
-PLAY MODE closes the GAME card (the play modes, docs/ENHANCEMENT_CONTRACT.md section 10): its value is the library's
-default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), and it opens Settings > Enhanced, a
-dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
-FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
-PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR;
-SUPERSAMPLING 2x, 4x, 4x anyway, Off, whose sentence at a render scale of 3x or 4x warns where 4x is picked ("About
-16 times the graphics work at this resolution; may stutter. Runs at 2x; pick 4x anyway.") because the game then runs
-at 2x until 4x anyway is picked, docs/ENHANCEMENT_CONTRACT.md section 10.21; SMOOTH FAR TEXTURES; TEXTURE PACK; LATE PAD SAMPLING; SOFT SHADOWS, Ace only, which draws the shadows a game's package
-names with soft edges and changes the frame the game reads, docs/ENHANCEMENT_CONTRACT.md section 11.3.13; UNCLIPPED
-SOUND, which plays the peaks the PSP would clip through a limiter and changes only what is heard, section 10.22;
-TEXTURE SCALING 2x to 6x, Off, and SMART 2D FILTER, which both change the frame the game reads, section 11.3.3; a
-new library has 16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER
-ENLARGING, CRISP SYSTEM TEXT and, under ULTRA, FULL 32-BIT COLOUR in Enhanced and Ace, below), each beside a
-sentence that says what it does and what it costs. A new part is a new row with no change to the page. While the
-mode is Authentic the part rows are disabled (`dim`, not focusable) and keep their values. The title page's ENHANCEMENTS
-card shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable
-package; `PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the
-same page for that game alone (its play mode, and each part on LIBRARY (16X) or its own value, then TEXTURE PACK
-FOLDER, which picks the game's pack folder and shows its name and texture count or None, and, with a pack chosen,
-REMOVE TEXTURE PACK; Done returns to the title page), and, while Ace is in effect, Ace's 60 FPS switch in the same row. Under the buttons come what is
+read every frame, so a change there applies at once). The four buttons share one column; at a larger text size it is
+as wide as the widest label, and the sentences go under the buttons when beside it a sentence would be cut.
+PLAY MODE opens Settings > Enhanced (the play modes, docs/ENHANCEMENT_CONTRACT.md section 10). The library's global
+GRAPHICS PRESET and PLAY MODE remain pinned above six category tabs: PICTURE, MOTION, SOUND, CONTROLS, ON-SCREEN and
+ADVANCED. L and R on a controller, or Q and E on a keyboard, switch tabs; clicking a tab selects it. The explicit
+part-group table covers every PlayerEnhancedPart once, with the existing part IDs, values and settings keys intact.
+PICTURE contains TEXTURE FILTERING; WIDESCREEN; SHARPER ENLARGING; TEXTURE PACK; FULL 32-BIT COLOUR; SUPERSAMPLING;
+SMOOTH FAR TEXTURES; TEXTURE SCALING; SMART 2D FILTER; CRISP SYSTEM TEXT. MOTION contains SMOOTH MOTION and the
+existing global FRAME PACING control. SOUND contains CLEAN PITCHED SOUND and UNCLIPPED SOUND. CONTROLS contains
+STICK DEAD ZONE. ON-SCREEN contains SPEED READOUT and GAME BADGE. ADVANCED contains FINER PATCHES, WIDER CULLING,
+SHORT LOADS, LATE PAD SAMPLING and SOFT SHADOWS. On a game's page TEXTURE PACK FOLDER and, with a folder chosen,
+REMOVE TEXTURE PACK are the last rows of Picture.
+Each option is one sentence-case row, as high as a control (44 px), and one focus stop: its name on the left, with an
+ACE ONLY tag beside the name where it applies, and on the right every value it can take, each in its own small box
+(34 px). The current value is filled with the accent, with `ink` text, when it is on or chosen (16X, ON, FSR 1).
+A current OFF is never filled with the accent: it is marked by the raised box (`surface_high`) with a
+`selected_neutral_edge` edge and `paper` text, so a tab whose options are off is not a column of accent boxes. That
+edge stands 4.2:1 from the list's ground and 3.5:1 from the box, so the mark is told from an unselected value's
+hairline (`line`, 1.2:1) without the accent. A dimmed row's mark has the weaker `selected_neutral_edge_dimmed`
+(3.1:1 on the ground), so that an inert row among live ones still reads as dimmed. Against its own box fill
+(`surface_high`) that edge is 2.6:1, under 3:1: accepted because a dimmed row is inert, so its mark shows a value
+and offers nothing to act on. Up and Down move row by row: Down from PLAY MODE lands on the active tab, Down from
+a tab on its first row, Down from the last row on BACK, and Up goes back the same way. The rows name those
+neighbours (`nk_ui_register_button_between`), because a full-width row and a small tab are not each other's nearest
+by position, and every tab names the active tab's first row as its Down neighbour (`NkUiSection.down`): at Larger
+text (150%) in a 1280 x 720 or 960 x 540 window the list keeps two rows, BACK under the strip was nearer to a tab
+than the middle of the first row, and Down went from the tabs to BACK past every option. The d-pad walk is tested
+at 100, 125 and 150% text (`test_enhanced_walk_at_every_text_size` in `tests/native/test_player_screens.c`, and
+`test_next_ui_enhanced_dpad_walk_reaches_every_row_without_changing_values` in `tests/native/test_player_ui.py`).
+Left and Right step the focused row's value, Confirm takes the next one, and a click picks any value; a
+value box is a pointer target only (`NK_UI_BUTTON_POINTER_ONLY`), never a focus stop. GRAPHICS PRESET, PLAY MODE
+and FRAME PACING show their value as `< value >` in one box, as does a row whose values no longer fit beside its
+name at a larger text size. Category tabs are focusable. The panel on the right shows the focused row's name, its
+value, its whole description and, for a dimmed row, the reason; with a tab or BACK focused it shows the tab's first
+option. On a game's page, a row's first value is the library's, LIBRARY (value), in a raised box with muted text,
+and a value of the game's own is marked as above. An option that cannot apply as the page stands stays in the walk, dimmed
+and inert, with the reason in the panel; WIDESCREEN under SMOOTH MOTION marks OFF, the value that runs, and keeps
+the choice it had for when SMOOTH MOTION is off. The list shows as many whole rows as the window leaves (four at
+1280 x 720, a whole tab at 1920 x 1080), the same number on every tab so that changing tabs moves nothing. A longer
+tab scrolls inside the list, with a thin thumb at the list's right edge, and the panel and BACK stay on screen. At a
+larger text size the panel narrows so that the six tabs stay whole, and a page taller than the window scrolls as a
+whole, as every page does. The title page's ENHANCEMENTS card
+shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable package;
+`PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the same tabs
+for that game alone, and, while Ace is in effect, Ace's 60 FPS switch in the same row. Under the buttons come what is
 on and, as its own `BODY_S` `muted` paragraph, the last session. Both sentences wrap whole, however many parts are
-on: the page body scrolls, so the card grows instead of ending either one in an ellipsis. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
-art's top right. In game, the pause menu's caption names the mode and its parts and its Settings page has a live
-SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut with Reduce motion) and the readout
-(top left) are chips on the 16 px safe area. When 60 FPS logic falls behind with the HUD off, its red
-`60 FPS logic: <n>/s - SLOWED` warning is a chip under the readout, never in the readout's corner. A second the
-host could not keep up with ends the readout in GPU LIMITED or PC LIMITED, in `warning` (the rule is
-docs/ENHANCEMENT_CONTRACT.md section 10.3). The notice and the caption list the parts that are on, joined by
-middle dots. A list too long for one line wraps between its parts, never inside one, and never ends in an
-ellipsis: the notice takes up to eleven lines, each at most half the window wide (one line while the on-screen
-keyboard is open), and the caption takes the lines its card has room for above RESUME. Where a list is longer
-than that, its last line counts the parts it leaves out ("and 9 more"). With every part on, the notice shows
-them all in every window, and the caption shows them all in the default 960 x 544 game window and any taller
-one (`ace-ui-selftest`, `nk-ui-overlay-screens-selftest`).
-GRAPHICS PRESET is the GAME card's last row (#2150). It steps through LOW, MEDIUM, HIGH, ULTRA and HANDHELD.
+on: the page body scrolls, so the card grows instead of ending either one in an ellipsis. A library card where
+Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the art's top right. In game, the pause menu's
+caption names the mode and its parts and its Settings page has a live SPEED READOUT row; the launch notice (ENHANCED
+or ACE, top right, 3 s, a cut with Reduce motion) and the readout (top left) are chips on the 16 px safe area. When
+60 FPS logic falls behind with the HUD off, its red `60 FPS logic: <n>/s - SLOWED` warning is a chip under the readout,
+never in the readout's corner. A second the host could not keep up with ends the readout in GPU LIMITED or PC LIMITED,
+in `warning` (the rule is docs/ENHANCEMENT_CONTRACT.md section 10.3). The notice and the caption list the parts that
+are on, joined by middle dots. A list too long for one line wraps between its parts, never inside one, and never ends
+in an ellipsis: the notice takes up to eleven lines, each at most half the window wide (one line while the on-screen
+keyboard is open), and the caption takes the lines its card has room for above RESUME. Where a list is longer than
+that, its last line counts the parts it leaves out ("and 9 more"). With every part on, the notice shows them all in
+every window, and the caption shows them all in the default 960 x 544 game window and any taller one
+(`ace-ui-selftest`, `nk-ui-overlay-screens-selftest`).
+GRAPHICS PRESET is the first row on Settings > Enhanced and each game's ENHANCED OPTIONS page (#2150). It steps
+through LOW, MEDIUM, HIGH, ULTRA and HANDHELD. While the row has focus, the panel beside the list carries the
+preset's note, which says where the preset is used and which Enhanced parts it turns on.
 A preset is used only by Enhanced and Ace sessions, where its values take the place of the RESOLUTION, SCALING,
 VSYNC and GAME FULLSCREEN rows and of up to three Enhanced parts' library values: CRISP SYSTEM TEXT, SHARPER
 ENLARGING (the FSR 1 upscaler) and, under ULTRA, FULL 32-BIT COLOUR. Choosing one changes none of those rows or
@@ -678,9 +757,8 @@ CUSTOM. Going CUSTOM by any edit keeps what the pages showed: the parts the pres
 game keeps the preset, since the game's own value wins over it. A settings file from v0.0.2 with a preset chosen keeps
 its library parts as written, and an Enhanced session takes the preset's parts over them (HIGH with SHARPER ENLARGING
 on in the library launches with FSR 1 off; the page says `OFF (HIGH)`).
-Left and Right move between the two cards along a row (`NK_UI_BUTTON_ROW`), so CONTROLLER SETTINGS is reached from
-SCALING. Every change is saved as it is made. Below a 680 px tall window the `SETTINGS` heading is left out (the tab names the
-page) so every row fits 960 x 540. The tabbed layout below is a design that is not built:
+Left and Right change a focused value, while Q and E or the controller shoulders switch Enhanced tabs. Every change is saved as it is made. Below a 680 px tall window the `SETTINGS` heading is left out (the tab names the
+page) so every row fits 960 x 540. The proposed whole-Settings tabbed layout below remains a design that is not built:
 
 - Top bar with SETTINGS active; `SETTINGS` in `DISPLAY`; a tab row (`LABEL`, 10/12 px padding, 3 px accent rule
   under the active tab, `line` underneath): DISPLAY, AUDIO, CONTROLS, PATHS AND STORAGE, ACCESSIBILITY, ABOUT.
@@ -845,10 +923,62 @@ Drawn by the runtime over the frozen game frame under the `scrim` while the game
 - Without SDL3_ttf or the bundled fonts the runtime shows the frozen frame under the scrim alone (C9b's overlay),
   and says why once on stderr; Esc, F1, Guide and the pad's back button resume.
 
+## States
+
+- **Focused**: the ring (see [Focus](#focus)), plus the fill a component names: `surface_high` for a secondary
+  button, a row or a tab, `line_strong` for a card's edge.
+- **Hover and press**: pointer looks only (see [Hover and press](#hover-and-press)).
+- **Disabled** (`NK_UI_BUTTON_DISABLED`): `dim` label, `line` edge, no fill (a primary button keeps `surface_high`).
+  A disabled control takes no activation, and focus moves pass over it (`nk_ui_focus_enabled`). WCAG's contrast
+  rule exempts inactive controls; this page still lists their pairs under [Known shortfalls](#known-shortfalls).
+- **Dimmed row** (a Settings option that cannot apply as the page stands): the name in `muted`, a stepper's value
+  and the current chip in `muted`, the other chips and the arrows in `dim`, the arrows inert, and the current value's
+  edge in `selected_neutral_edge_dimmed`. The row stays in the focus walk, and the detail panel gives the reason.
+- **Selected**: a value that is on or chosen fills with the accent and takes `ink` text; a selected Off, or the
+  library's own value, is a `surface_high` box with a `selected_neutral_edge` edge and `paper` text, so a list of
+  options that are off is not a column of accent boxes (`settings_enhanced_chip` in `scr_settings.c`). The active
+  tab has `paper` text and the 3 px accent rule.
+- **Status**: a marker shape and a word, then the status colour (see [Principles](#principles)).
+- **Error**: a cross marker and a badge word in `error`, a plain title, and what to do (see [Messages](#messages)).
+  A row that has a problem names it on the row in words (the launcher music row's "On: file missing", the
+  controller page's status line in `error`).
+- **Busy**: a progress bar (`nk_ui_progress_bar`: an accent fill on a 6 px `line_strong` track for a known
+  fraction, a sweeping segment when the fraction is unknown) and a sentence that says what is happening.
+
+## Messages
+
+**Error cards** (`scr_error.c`, the [Error dialogs](#error-dialogs-c8) layout):
+
+1. Eyebrow: `✕` and a short badge in `error`. The badge comes from the failure code (`player_error_badge` in
+   `src/player/player_state.c`: `RUNTIME_PREMATURE_EXIT` reads "Game didn't start"); a code with no badge falls back
+   to "Problem", and `ErrorCodeSourceTests` fails when the player raises a code that has none. The codes are stable
+   and listed in [`FAILURE_CODES.md`](FAILURE_CODES.md).
+2. Title (`TITLE`, `paper`): what happened, in plain words; "Something went wrong" only when the caller gave none.
+3. The failed stage, when there is one, as a `warning` status pill ("Failed stage: …").
+4. Message (`BODY`, `muted`): what to do next.
+5. Details (`DATA`, `muted`, wrapped in a ground-filled box): paths, the boundary, the log file.
+6. Buttons: the recovery action first and primary (default "Back to library"), then a retry when the failure can
+   be retried, then COPY DETAILS.
+7. A game failure adds a report row: "This is a known issue (#N)." with VIEW ISSUE #N ON GITHUB when the cause is known, REPORT
+   THIS GAME and SEE EXISTING REPORTS; the prompt-bar hint says "Copy details uses the clipboard and Report opens
+   your browser. Nothing is sent anywhere."
+
+**The problem report** (Settings > Problem report, `settings_problem_report` in `scr_settings.c`) says before it
+starts what the ZIP holds and what it leaves out ("Your user name and folders are replaced, and game files, saves
+and keys are left out. Nothing is uploaded."), lists the files it would hold, and when it is written reminds the
+user that GitHub issues are public. Its result line is `ready` when the report is written and `warning` when it
+could not be written or Python is missing, and the warning names what to run instead.
+
+**Wording rules** written down today: say what happened in plain words, then what to do; name the recovery action
+on its button; say what is sent and what is not; describe what the build does, never what it may do later
+([Principles](#principles)); never ask for or name a key file. A rule against blaming the user, and a check on
+wording, do not exist yet.
+
 ## Accessibility
 
 - Text contrast is at least 4.5:1 for everything except `dim`, which is reserved for disabled controls and
-  footnotes; over the brightest wave point muted and error text stay at 4.6:1.
+  footnotes; over the brightest wave point muted and error text stay at 4.6:1. The measured pairs and the places
+  `dim` falls short are under [Contrast](#contrast).
 - Focus ring 7.2:1 on the ground, at least 6.1:1 on any surface, 4.4:1 over the brightest wave point and 3.7:1 on
   the scrim over a white game frame; high-contrast focus for any background, from Settings > Accessibility or a
   Windows contrast theme.
@@ -858,8 +988,84 @@ Drawn by the runtime over the frozen game frame under the `scrim` while the game
   scales type alone, with the layout reflowing around it.
 - Reduce motion holds the waves and makes transitions cuts; Automatic follows Windows' Animation effects.
 - Launcher sounds are off by default and never replace a visual cue.
+- Colour never carries meaning alone: a status is a marker shape and a word, a selected value has an edge or a fill
+  as well as its text colour, and a key the on-screen keyboard cannot type loses its outline as well as dimming.
+- Not there yet: no screen-reader support
+  ([#2748](https://github.com/Jstar269/nakagawa-recomp/issues/2748)); English only, with no string table
+  ([#2747](https://github.com/Jstar269/nakagawa-recomp/issues/2747)); no light theme and no colour-blind palette;
+  a Windows contrast theme changes the focus ring only. The full list, with workarounds, is in
+  [`ACCESSIBILITY.md`](../ACCESSIBILITY.md#known-limitations).
+
+## Contrast
+
+Each text colour is measured against each background the UI draws it on, with the WCAG 2.x formula: relative
+luminance from the sRGB channels, and (lighter + 0.05) / (darker + 0.05). The targets are WCAG's, used as a guide
+for the launcher (see [`ACCESSIBILITY.md`](../ACCESSIBILITY.md#what-we-aim-for)):
+
+| Kind | Target | What it covers |
+| --- | --- | --- |
+| Normal text | 4.5:1 | every role under 24 px, or under 18.66 px (14 pt) in a bold face |
+| Large text | 3:1 | 24 px and up, or 18.66 px and up in a bold face; the test counts Geist SemiBold and Chakra Petch Bold as bold |
+| Focus indicator | 3:1 | the ring against what is around it |
+| Selection edge | 3:1 | the edge that marks a current value without the accent, against what is around it |
+
+Sizes are logical px at the 100% text size; a larger text size only makes text larger. A pair's kind comes from the
+smallest role the record lists for it, so a pair used for both headings and captions is held to 4.5:1.
+
+How the backgrounds are measured:
+
+- A colour with alpha is composited over what it is drawn on before measuring, channel by channel in sRGB bytes
+  as `nk_ui_composite_luminance` does. The worst case is used: `art_scrim` under a badge over a white picture, and
+  `scrim` over a white game frame under the in-game overlay.
+- Text on the ground can sit over the waves or the library backdrop. Their brightness is capped at a luminance of
+  `NK_UI_WAVES_LUMINANCE_MAX` (`nk_ui_waves_compute_cap`, `nk_ui_backdrop_scrim`), so the record measures the
+  ground pairs a second time against a background of exactly that luminance (`wave_limit`).
+- Text inside a box that is filled with the ground (a details box, a Settings stepper) counts as text on the ground.
+
+Not measured, because the code has no rule for them yet: control and card edges (`line` is 1.2:1 and `line_strong`
+1.6:1 on the ground), decorative vector art, the waves themselves, and the inactive prompt glyph dots
+(`placeholder`).
+
+### Known shortfalls
+
+These pairs are drawn today and fall below their target. They are recorded, not fixed: how the UI looks is the
+owner's decision. `KNOWN_SHORTFALLS` in `tests/native/test_player_ui.py` holds the same list with the same ratios,
+so an improvement or a further drop fails the test until both are updated.
+
+| Text or edge | On | Ratio | Target | Where |
+| --- | --- | --- | --- | --- |
+| `dim` | `ground` | 4.16 | 4.5 | About's source commit and data folder lines on the page; in ground-filled boxes, the update link in Settings and the file being copied in first run; disabled button labels; a dimmed row's chips and arrows |
+| `dim` | `wave_limit` | 2.53 | 4.5 | About's two lines on the page where they sit over the brightest waves allowed |
+| `dim` | `panel` | 3.86 | 4.5 | the disc ID on a game card; the empty library's "Or drop an .iso onto this window."; the title page's developer line and About's credits note, in cards; footnotes on the in-game overlay's pages; the build-tool download's per-item line; disabled buttons on a card |
+| `dim` | `control` | 3.55 | 4.5 | the disc ID on a hovered or focused game card; a disabled primary button |
+| `dim` | `pressed` | 3.06 | 4.5 | the disc ID on a game card while it is pressed |
+| `dim` | `art_tint_0` | 3.71 | 4.5 | the art placeholder's caption ("ART FROM YOUR DISC SHOWS HERE"), `MICRO`, on a title's art tint |
+| `dim` | `art_tint_1` | 2.86 | 4.5 | the same caption on the blue art tint |
+| `dim` | `art_tint_2` | 3.56 | 4.5 | the same caption |
+| `dim` | `art_tint_3` | 3.59 | 4.5 | the same caption |
+| `selected_neutral_edge_dimmed` | `control` | 2.64 | 3 | a dimmed row's current value against its own `surface_high` box (accepted when it was added, as a dimmed row is inert) |
+
+WCAG's contrast rule exempts the disabled controls among these; footnotes, the disc ID and the placeholder caption
+are not exempt.
 
 ## Building and checking a screen
+
+Before review, check each point:
+
+- [ ] Every colour, size, radius and duration comes from the theme (`nk_ui_theme(ui)`, `NK_UI_*`, `nk_ui_type`); a
+  new one is added to `src/ui/nk_ui_theme.h` and `.c`, to the tables above and to the [Token record](#token-record)
+  in the same change.
+- [ ] Each new text colour on a new background is a pair in the record's `pairs`, with where it is drawn, and meets
+  its [contrast](#contrast) target.
+- [ ] Every action works with a D-pad and two buttons, and with the keyboard; the prompt bar names each one.
+- [ ] The default focus is a safe action, never a danger button.
+- [ ] Long text either wraps whole on a page that scrolls or has another place to be read in full
+  ([Text](#text-wrapping-and-length)).
+- [ ] A failure says what happened and what to do, and has a named way out ([Messages](#messages)).
+- [ ] `python -m unittest discover -s tests/native -p test_player_ui.py -k PlayerUiDesignTokenTests` passes, and
+  the gates below do.
+
+The gates:
 
 1. Compose the screen from the components above; give every element a stable id (sub-parts use
    `nk_ui_child_id`). Ids follow one scheme (`src/ui/nk_ui.h`): a screen makes its ids with its own macro over
@@ -882,3 +1088,293 @@ Drawn by the runtime over the frozen game frame under the `scrim` while the game
    - The Controls page lays its rows out in two tables side by side on a window under 720 px tall, so all ten
      show at once. One scrolling list would hide rows that a controller reaches only by focusing them, and the
      rows are read, not chosen.
+
+## Loose ends in the code
+
+Found while writing the [Token record](#token-record). None is changed here: each is a question for the owner, and
+until one is settled the record lists the code as it is.
+
+- `capture` is in the theme and in the Colour table, but no screen draws it.
+- `focus` and `accent_dark` are two fields with one value (`#6B9FF0`): the ring reads `focus`, while focused
+  steppers and overlay rows draw their edge in `accent_dark`.
+- Copies of theme colours outside the theme, which a theme change would not reach: `NK_UI_ACCENT_RGBA` and
+  `NK_UI_PAPER_RGBA` (the N1 mark and the showcase art, `nk_ui_widgets.c`), and the empty library's disc icon
+  (`library_empty` in `scr_library.c`: the accent and `surface_high` as literals). The waves read the
+  ground from the theme (`nk_ui_theme_n1()->surface`), not from a copy.
+- The build and developer log boxes fill with `#080B0F`, darker than the ground, written as a literal in
+  `scr_build.c` and again in `scr_devlog.c`; there is no token for it.
+- The art tints (`nk_ui_art_tint`), the showcase fills (`nk_ui_art_fill`) and the showcase pictures' colours
+  (`#3DD6C6`, `#8B7CFF`, `#FF5A5F`, near but not equal to `ready`, `info` and `error`) are literals in
+  `nk_ui_widgets.c`.
+- The high-contrast ring's white and black are literals in `nk_ui_focus_ring` (`nk_ui.c`), not theme fields.
+- Component metrics off the scales: the detail and log boxes' radius 10 (`scr_flow_box_style`), the art
+  placeholder's radius 6, a stepper arrow's radius 7 (`NK_UI_RADIUS_CONTROL - 1`), the progress track's radius 3;
+  the dialog's 26/28/22 px padding and 14 px gap, the button's 18/22/34 px side padding, and the overlay row edge of
+  2 px. Component-internal metrics have no rule yet.
+- The in-game overlay's quick settings (`overlay_quick.c`) build text styles by hand (Geist Medium at 15/22, 12 and
+  13/18 px) instead of taking a role from `nk_ui_type`; Geist Medium has no role in the type scale.
+- `NK_UI_FONT_DISPLAY` (Chakra Petch SemiBold) is registered, but no role or screen uses it: the display roles use
+  `NK_UI_FONT_DISPLAY_BOLD`.
+- `PLAYER_UI_READY`, `PLAYER_UI_WARNING` and `PLAYER_UI_INFO` (`player_ui_nk.c`) read `nk_ui_theme_n1()` directly
+  rather than the theme the frame draws with (`nk_ui_theme(ui)`). There is one theme, so the two agree today.
+- This page's [Error dialogs](#error-dialogs-c8) and elevation levels put a dialog "over the scrim", but the
+  launcher's dialogs and flow cards draw no scrim; only the in-game overlay does (`src/rt/gui.c`).
+- `NK_UI_MOTION_BASE`'s comment names a toast, and the UI has no toast.
+
+## Token record
+
+The block below is the machine-readable form of this page's tokens. `PlayerUiDesignTokenTests` in
+`tests/native/test_player_ui.py` reads it and checks that:
+
+- every `NkUiTheme` field is under `colours` with its value in `g_n1_theme` (`src/ui/nk_ui_theme.c`), and the
+  Colour table above agrees;
+- every opaque colour literal in `src/ui/*.[ch]`, `src/player/ui/*.[ch]` and `src/rt/overlay/*.[ch]` is a theme
+  value or is under `outside_theme` with its file, and every `outside_theme` entry is still in its file;
+- every `#define NK_UI_*` in `src/ui/nk_ui_theme.h` and `src/ui/nk_ui_waves.h` is under `metrics` with its value;
+- `type` matches `g_type_scale` and the wrap rule in `nk_ui_type`, and the Type table above agrees; `fonts` matches
+  the `NK_UI_FONT_*` slots and `g_font_paths`;
+- every pair in `pairs` meets its [contrast](#contrast) target, or is a [known shortfall](#known-shortfalls) with
+  the ratio recorded there and in the test.
+
+Colours are `#RRGGBB`, or `#RRGGBBAA` when not opaque. In `backgrounds`, `colour` names a colour above, `over`
+composites it over another colour, and `luminance` names the metric that gives a background by its luminance alone.
+In `pairs`, `kind` `text` lists the type `roles` drawn there; `focus` and `edge` are held to 3:1.
+
+<!-- player-ui-tokens -->
+```json
+{
+  "colours": [
+    {"name": "ink", "value": "#10151C", "role": "text and icons on an accent fill"},
+    {"name": "paper", "value": "#F5F7FA", "role": "primary text; prompt glyph tint"},
+    {"name": "surface", "value": "#0B0F14", "role": "window ground; boxes inside cards (details, steppers, wizard boxes)"},
+    {"name": "surface_raised", "value": "#121821", "role": "cards, panels, dialogs, flow cards, prompt bar"},
+    {"name": "surface_high", "value": "#18202B", "role": "chips, pills, tags; focused or hovered secondary button, row and tab; disabled primary button"},
+    {"name": "accent_dark", "value": "#6B9FF0", "role": "brand blue: primary button, lit option, active tab rule, progress, accent eyebrows and text"},
+    {"name": "accent_light", "value": "#2F6FD0", "role": "accent on a light surface; reserved, the UI has none"},
+    {"name": "accent_pressed", "value": "#4F86DC", "role": "pressed primary button or lit option"},
+    {"name": "ready", "value": "#2DD4BF", "role": "Ready, done steps, a written report"},
+    {"name": "warning", "value": "#DBB024", "role": "needs setup, failed stage, developer mode"},
+    {"name": "info", "value": "#C29AF4", "role": "experimental, untested, informational notes"},
+    {"name": "error", "value": "#FF7B72", "role": "unsupported, failed, remove; danger button text"},
+    {"name": "muted", "value": "#9AA4B2", "role": "secondary text"},
+    {"name": "focus", "value": "#6B9FF0", "role": "the focus ring"},
+    {"name": "line", "value": "#1C232D", "role": "hairlines, card edges, disabled button edge"},
+    {"name": "line_strong", "value": "#2E3846", "role": "control and chip edges, focused card edge, progress track"},
+    {"name": "dim", "value": "#6B7684", "role": "disabled text and footnotes"},
+    {"name": "pressed", "value": "#222C39", "role": "pressed secondary button, row, tab or card"},
+    {"name": "pressed_danger", "value": "#2A1A1C", "role": "pressed danger button"},
+    {"name": "scrim", "value": "#0B0F14C7", "role": "the ground at 78% over the frozen game frame under the in-game overlay"},
+    {"name": "art_scrim", "value": "#0B0F14B8", "role": "the ground at 72% under a badge on title art"},
+    {"name": "art_label", "value": "#C9D6E3", "role": "the size note on the hero art"},
+    {"name": "placeholder", "value": "#3A4552", "role": "art placeholder outline, inactive prompt glyph dots"},
+    {"name": "capture", "value": "#223046", "role": "a row waiting for a button press; drawn nowhere on main"},
+    {"name": "accent_hover", "value": "#8FB8F2", "role": "primary button or lit option under the pointer"},
+    {"name": "selected_neutral_edge", "value": "#6B7684", "role": "edge of a current value marked without the accent"},
+    {"name": "selected_neutral_edge_dimmed", "value": "#576270", "role": "that edge on a dimmed row"}
+  ],
+  "outside_theme": [
+    {"name": "hc_ring_white", "source": "src/ui/nk_ui.c", "symbol": "nk_ui_focus_ring", "value": "#FFFFFF", "role": "high-contrast focus ring"},
+    {"name": "hc_keyline_black", "source": "src/ui/nk_ui.c", "symbol": "nk_ui_focus_ring", "value": "#000000", "role": "the keylines either side of the high-contrast ring"},
+    {"name": "log_box_build", "source": "src/player/ui/scr_build.c", "symbol": "scr_flow_box_style fill", "value": "#080B0F", "role": "the build log box"},
+    {"name": "log_box_devlog", "source": "src/player/ui/scr_devlog.c", "symbol": "scr_flow_box_style fill", "value": "#080B0F", "role": "the developer log box"},
+    {"name": "art_tint_0", "source": "src/ui/nk_ui_widgets.c", "symbol": "nk_ui_art_tint", "value": "#161C24", "role": "a title's art panel fill, chosen by its key"},
+    {"name": "art_tint_1", "source": "src/ui/nk_ui_widgets.c", "symbol": "nk_ui_art_tint", "value": "#16324A", "role": "a title's art panel fill"},
+    {"name": "art_tint_2", "source": "src/ui/nk_ui_widgets.c", "symbol": "nk_ui_art_tint", "value": "#1A1F2E", "role": "a title's art panel fill"},
+    {"name": "art_tint_3", "source": "src/ui/nk_ui_widgets.c", "symbol": "nk_ui_art_tint", "value": "#12202A", "role": "a title's art panel fill"},
+    {"name": "art_showcase_scene", "source": "src/ui/nk_ui_widgets.c", "symbol": "nk_ui_art_fill", "value": "#0E1A2B", "role": "the scene demo's art panel fill"},
+    {"name": "art_showcase_breakout", "source": "src/ui/nk_ui_widgets.c", "symbol": "nk_ui_art_fill", "value": "#14101F", "role": "the breakout demo's art panel fill"},
+    {"name": "art_accent", "source": "src/ui/nk_ui_widgets.c", "symbol": "NK_UI_ACCENT_RGBA", "value": "#6B9FF0", "role": "the N1 mark and showcase pictures; a copy of accent_dark"},
+    {"name": "art_paper", "source": "src/ui/nk_ui_widgets.c", "symbol": "NK_UI_PAPER_RGBA", "value": "#F5F7FA", "role": "the N1 mark and showcase pictures; a copy of paper"},
+    {"name": "showcase_teal", "source": "src/ui/nk_ui_widgets.c", "symbol": "g_showcase_scene, g_showcase_breakout", "value": "#3DD6C6", "role": "showcase pictures"},
+    {"name": "showcase_violet", "source": "src/ui/nk_ui_widgets.c", "symbol": "g_showcase_scene", "value": "#8B7CFF", "role": "showcase picture"},
+    {"name": "showcase_red", "source": "src/ui/nk_ui_widgets.c", "symbol": "g_showcase_breakout", "value": "#FF5A5F", "role": "showcase picture"},
+    {"name": "empty_disc_accent", "source": "src/player/ui/scr_library.c", "symbol": "library_empty", "value": "#6B9FF0", "role": "the empty library's disc icon; a copy of accent_dark"},
+    {"name": "empty_disc_hole", "source": "src/player/ui/scr_library.c", "symbol": "library_empty", "value": "#18202B", "role": "the empty library's disc icon; a copy of surface_high"},
+    {"name": "wave_base_0", "source": "src/ui/nk_ui_waves.c", "symbol": "g_base_colors", "value": "#5E9CC2", "role": "ribbon colour"},
+    {"name": "wave_base_1", "source": "src/ui/nk_ui_waves.c", "symbol": "g_base_colors", "value": "#2F6FD0", "role": "ribbon colour"},
+    {"name": "wave_base_2", "source": "src/ui/nk_ui_waves.c", "symbol": "g_base_colors", "value": "#6B9FF0", "role": "ribbon colour"},
+    {"name": "wave_base_3", "source": "src/ui/nk_ui_waves.c", "symbol": "g_base_colors", "value": "#A9C8F7", "role": "ribbon colour"},
+    {"name": "wave_month_01", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#5E8CB8", "role": "January's tint, mixed half into each ribbon"},
+    {"name": "wave_month_02", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#5894C4", "role": "month tint"},
+    {"name": "wave_month_03", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#4F9CCB", "role": "month tint"},
+    {"name": "wave_month_04", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#4BA3C9", "role": "month tint"},
+    {"name": "wave_month_05", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#59A9DD", "role": "month tint"},
+    {"name": "wave_month_06", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#6AA9EC", "role": "month tint"},
+    {"name": "wave_month_07", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#6B9FF0", "role": "month tint"},
+    {"name": "wave_month_08", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#84AEF2", "role": "month tint"},
+    {"name": "wave_month_09", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#7C96DE", "role": "month tint"},
+    {"name": "wave_month_10", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#6F86C8", "role": "month tint"},
+    {"name": "wave_month_11", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#6479AE", "role": "month tint"},
+    {"name": "wave_month_12", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#5F7F9F", "role": "month tint"}
+  ],
+  "metrics": [
+    {"name": "NK_UI_SPACE_1", "source": "src/ui/nk_ui_theme.h", "value": 4, "role": "spacing step, px"},
+    {"name": "NK_UI_SPACE_2", "source": "src/ui/nk_ui_theme.h", "value": 8, "role": "spacing step, px"},
+    {"name": "NK_UI_SPACE_3", "source": "src/ui/nk_ui_theme.h", "value": 12, "role": "spacing step, px"},
+    {"name": "NK_UI_SPACE_4", "source": "src/ui/nk_ui_theme.h", "value": 16, "role": "spacing step, px"},
+    {"name": "NK_UI_SPACE_5", "source": "src/ui/nk_ui_theme.h", "value": 20, "role": "spacing step, px"},
+    {"name": "NK_UI_SPACE_6", "source": "src/ui/nk_ui_theme.h", "value": 24, "role": "spacing step, px"},
+    {"name": "NK_UI_SPACE_7", "source": "src/ui/nk_ui_theme.h", "value": 32, "role": "spacing step, px"},
+    {"name": "NK_UI_SPACE_8", "source": "src/ui/nk_ui_theme.h", "value": 48, "role": "spacing step, px"},
+    {"name": "NK_UI_SPACE_9", "source": "src/ui/nk_ui_theme.h", "value": 64, "role": "spacing step, px"},
+    {"name": "NK_UI_RADIUS_CHIP", "source": "src/ui/nk_ui_theme.h", "value": 4, "role": "radius: pills, badges, keycap glyphs"},
+    {"name": "NK_UI_RADIUS_CONTROL", "source": "src/ui/nk_ui_theme.h", "value": 8, "role": "radius: buttons, rows, segmented controls"},
+    {"name": "NK_UI_RADIUS_TILE", "source": "src/ui/nk_ui_theme.h", "value": 12, "role": "radius: game cards, panels, the hero"},
+    {"name": "NK_UI_RADIUS_DIALOG", "source": "src/ui/nk_ui_theme.h", "value": 16, "role": "radius: dialogs and sheets"},
+    {"name": "NK_UI_RADIUS_PILL", "source": "src/ui/nk_ui_theme.h", "value": 999, "role": "radius: fully round ends, clamped to half the height"},
+    {"name": "NK_UI_BORDER_HAIRLINE", "source": "src/ui/nk_ui_theme.h", "value": 1, "role": "edge width, px"},
+    {"name": "NK_UI_FOCUS_RING_WIDTH", "source": "src/ui/nk_ui_theme.h", "value": 3, "role": "focus ring width, px"},
+    {"name": "NK_UI_FOCUS_RING_GAP", "source": "src/ui/nk_ui_theme.h", "value": 3, "role": "gap between an element and its ring, px"},
+    {"name": "NK_UI_FOCUS_HC_RING_WIDTH", "source": "src/ui/nk_ui_theme.h", "value": 4, "role": "high-contrast white ring width, px"},
+    {"name": "NK_UI_FOCUS_HC_KEYLINE", "source": "src/ui/nk_ui_theme.h", "value": 2, "role": "high-contrast black keyline width, px"},
+    {"name": "NK_UI_CONTROL_HEIGHT", "source": "src/ui/nk_ui_theme.h", "value": 44, "role": "button and row height; the minimum target"},
+    {"name": "NK_UI_CONTROL_HEIGHT_LARGE", "source": "src/ui/nk_ui_theme.h", "value": 52, "role": "large button height"},
+    {"name": "NK_UI_CONTROL_HEIGHT_SMALL", "source": "src/ui/nk_ui_theme.h", "value": 34, "role": "small button height"},
+    {"name": "NK_UI_CHIP_HEIGHT", "source": "src/ui/nk_ui_theme.h", "value": 26, "role": "pill and tag height"},
+    {"name": "NK_UI_BADGE_HEIGHT", "source": "src/ui/nk_ui_theme.h", "value": 20, "role": "badge height"},
+    {"name": "NK_UI_GLYPH_SIZE", "source": "src/ui/nk_ui_theme.h", "value": 24, "role": "prompt glyph size"},
+    {"name": "NK_UI_TOP_BAR_HEIGHT", "source": "src/ui/nk_ui_theme.h", "value": 64, "role": "top bar height"},
+    {"name": "NK_UI_PROMPT_BAR_HEIGHT", "source": "src/ui/nk_ui_theme.h", "value": 56, "role": "prompt bar height"},
+    {"name": "NK_UI_GUTTER", "source": "src/ui/nk_ui_theme.h", "value": 32, "role": "page side margin"},
+    {"name": "NK_UI_GUTTER_NARROW", "source": "src/ui/nk_ui_theme.h", "value": 16, "role": "page side margin below NK_UI_NARROW_WIDTH"},
+    {"name": "NK_UI_NARROW_WIDTH", "source": "src/ui/nk_ui_theme.h", "value": 900, "role": "logical width below which the gutter narrows"},
+    {"name": "NK_UI_BODY_PAD_TOP", "source": "src/ui/nk_ui_theme.h", "value": 24, "role": "body padding above"},
+    {"name": "NK_UI_BODY_PAD_BOTTOM", "source": "src/ui/nk_ui_theme.h", "value": 16, "role": "body padding below"},
+    {"name": "NK_UI_TILE_MIN_WIDTH", "source": "src/ui/nk_ui_theme.h", "value": 236, "role": "narrowest game card; the library's columns are how many fit"},
+    {"name": "NK_UI_TILE_GAP", "source": "src/ui/nk_ui_theme.h", "value": 20, "role": "gap between game cards"},
+    {"name": "NK_UI_TILE_ROW_GAP", "source": "src/ui/nk_ui_theme.h", "value": 16, "role": "gap between rows of game cards"},
+    {"name": "NK_UI_TILE_MAX_COLUMNS", "source": "src/ui/nk_ui_theme.h", "value": 6, "role": "most library columns"},
+    {"name": "NK_UI_TILE_ART_RATIO", "source": "src/ui/nk_ui_theme.h", "value": 0.53, "role": "game card art height / card width"},
+    {"name": "NK_UI_TILE_BODY_HEIGHT", "source": "src/ui/nk_ui_theme.h", "value": 90, "role": "game card body at the 100% text size"},
+    {"name": "NK_UI_DETAIL_ASIDE_WIDTH", "source": "src/ui/nk_ui_theme.h", "value": 520, "role": "title page hero column"},
+    {"name": "NK_UI_DETAIL_GAP", "source": "src/ui/nk_ui_theme.h", "value": 32, "role": "title page column gap"},
+    {"name": "NK_UI_HERO_ASPECT", "source": "src/ui/nk_ui_theme.h", "value": "NK_PSP_DISPLAY_HEIGHT_F / NK_PSP_DISPLAY_WIDTH_F", "role": "hero art height / width, the PSP screen's 272:480"},
+    {"name": "NK_UI_SAFE_AREA_MIN", "source": "src/ui/nk_ui_theme.h", "value": 16, "role": "nothing closer to a window edge"},
+    {"name": "NK_UI_MOTION_INSTANT", "source": "src/ui/nk_ui_theme.h", "value": 0, "role": "a cut, s"},
+    {"name": "NK_UI_MOTION_FAST", "source": "src/ui/nk_ui_theme.h", "value": 0.12, "role": "focus ring move, hover and press fills, s"},
+    {"name": "NK_UI_MOTION_BASE", "source": "src/ui/nk_ui_theme.h", "value": 0.2, "role": "tab rule slide, s"},
+    {"name": "NK_UI_MOTION_SLOW", "source": "src/ui/nk_ui_theme.h", "value": 0.5, "role": "art fade, s"},
+    {"name": "NK_UI_MOTION_ART_REST", "source": "src/ui/nk_ui_theme.h", "value": 0.6, "role": "rest on a card before its backdrop art shows, s"},
+    {"name": "NK_UI_MOTION_MUSIC_REST", "source": "src/ui/nk_ui_theme.h", "value": 1.1, "role": "reserved: preview music, which the player does not have, s"},
+    {"name": "NK_UI_MOTION_MUSIC_FADE_IN", "source": "src/ui/nk_ui_theme.h", "value": 1.0, "role": "reserved: preview music fade in, s"},
+    {"name": "NK_UI_MOTION_MUSIC_FADE_OUT", "source": "src/ui/nk_ui_theme.h", "value": 0.45, "role": "reserved: preview music fade out, s"},
+    {"name": "NK_UI_MOTION_WAVE_FRAME", "source": "src/ui/nk_ui_theme.h", "value": "1.0 / 30.0", "role": "the waves step at most at 30 Hz, s"},
+    {"name": "NK_UI_MOTION_FRAME", "source": "src/ui/nk_ui_theme.h", "value": "1.0 / 60.0", "role": "one 60 Hz frame given to a transition that starts after an idle frame, s"},
+    {"name": "NK_UI_WAVES_RIBBON_COUNT", "source": "src/ui/nk_ui_waves.h", "value": 4, "role": "ribbons behind the launcher"},
+    {"name": "NK_UI_WAVES_TINT_COUNT", "source": "src/ui/nk_ui_waves.h", "value": 12, "role": "month tints"},
+    {"name": "NK_UI_WAVES_ALPHA_CAP_MAX", "source": "src/ui/nk_ui_waves.h", "value": 0.24, "role": "most alpha a ribbon may have"},
+    {"name": "NK_UI_WAVES_LUMINANCE_MAX", "source": "src/ui/nk_ui_waves.h", "value": 0.0399, "role": "brightest luminance the waves and the backdrop may reach behind text"}
+  ],
+  "fonts": [
+    {"name": "NK_UI_FONT_BODY", "slot": 0, "file": "assets/fonts/ui/geist/Geist-Regular.ttf"},
+    {"name": "NK_UI_FONT_DISPLAY", "slot": 1, "file": "assets/fonts/ui/chakra-petch/ChakraPetch-SemiBold.ttf"},
+    {"name": "NK_UI_FONT_MONO", "slot": 2, "file": "assets/fonts/ui/geist-mono/GeistMono-Regular.ttf"},
+    {"name": "NK_UI_FONT_CJK", "slot": 3, "file": "assets/fonts/ui/noto-sans-jp/NotoSansJP-Regular.ttf"},
+    {"name": "NK_UI_FONT_BODY_SEMIBOLD", "slot": 4, "file": "assets/fonts/ui/geist/Geist-SemiBold.ttf"},
+    {"name": "NK_UI_FONT_BODY_MEDIUM", "slot": 5, "file": "assets/fonts/ui/geist/Geist-Medium.ttf"},
+    {"name": "NK_UI_FONT_MONO_MEDIUM", "slot": 6, "file": "assets/fonts/ui/geist-mono/GeistMono-Medium.ttf"},
+    {"name": "NK_UI_FONT_DISPLAY_BOLD", "slot": 7, "file": "assets/fonts/ui/chakra-petch/ChakraPetch-Bold.ttf"}
+  ],
+  "type": [
+    {"name": "DISPLAY_XL", "font": "NK_UI_FONT_DISPLAY_BOLD", "size_px": 40, "line_px": 44, "tracking_em": 0.04, "wraps": false, "role": "first-run headline, About's name"},
+    {"name": "DISPLAY", "font": "NK_UI_FONT_DISPLAY_BOLD", "size_px": 30, "line_px": 32, "tracking_em": 0.04, "wraps": false, "role": "screen names"},
+    {"name": "WORDMARK", "font": "NK_UI_FONT_DISPLAY_BOLD", "size_px": 18, "line_px": 20, "tracking_em": 0.06, "wraps": false, "role": "the top bar's wordmark"},
+    {"name": "TITLE_XL", "font": "NK_UI_FONT_BODY_SEMIBOLD", "size_px": 30, "line_px": 34, "tracking_em": 0, "wraps": true, "role": "a game's name on its page, a wizard step's title"},
+    {"name": "TITLE", "font": "NK_UI_FONT_BODY_SEMIBOLD", "size_px": 22, "line_px": 28, "tracking_em": 0, "wraps": true, "role": "dialog and panel titles"},
+    {"name": "HEADING", "font": "NK_UI_FONT_BODY_SEMIBOLD", "size_px": 17, "line_px": 24, "tracking_em": 0, "wraps": true, "role": "card headings"},
+    {"name": "TILE_TITLE", "font": "NK_UI_FONT_BODY_SEMIBOLD", "size_px": 15, "line_px": 20, "tracking_em": 0, "wraps": true, "role": "game card names"},
+    {"name": "BODY_L", "font": "NK_UI_FONT_BODY", "size_px": 17, "line_px": 26, "tracking_em": 0, "wraps": true, "role": "lead paragraphs"},
+    {"name": "BODY", "font": "NK_UI_FONT_BODY", "size_px": 15, "line_px": 22, "tracking_em": 0, "wraps": true, "role": "running text"},
+    {"name": "BODY_S", "font": "NK_UI_FONT_BODY", "size_px": 14, "line_px": 21, "tracking_em": 0, "wraps": true, "role": "card paragraphs"},
+    {"name": "CAPTION", "font": "NK_UI_FONT_BODY", "size_px": 13, "line_px": 19, "tracking_em": 0, "wraps": true, "role": "hints, counts, notes"},
+    {"name": "FOOTNOTE", "font": "NK_UI_FONT_BODY", "size_px": 12, "line_px": 16, "tracking_em": 0, "wraps": true, "role": "sources and fine print"},
+    {"name": "LABEL", "font": "NK_UI_FONT_MONO_MEDIUM", "size_px": 12, "line_px": 16, "tracking_em": 0.08, "wraps": false, "role": "buttons, prompts, tabs"},
+    {"name": "LABEL_L", "font": "NK_UI_FONT_MONO_MEDIUM", "size_px": 14, "line_px": 18, "tracking_em": 0.12, "wraps": false, "role": "the large button"},
+    {"name": "LABEL_S", "font": "NK_UI_FONT_MONO_MEDIUM", "size_px": 11, "line_px": 14, "tracking_em": 0.06, "wraps": false, "role": "chips, card meta rows, small buttons"},
+    {"name": "EYEBROW", "font": "NK_UI_FONT_MONO_MEDIUM", "size_px": 11, "line_px": 14, "tracking_em": 0.12, "wraps": false, "role": "section headers"},
+    {"name": "MICRO", "font": "NK_UI_FONT_MONO_MEDIUM", "size_px": 10, "line_px": 12, "tracking_em": 0.08, "wraps": false, "role": "badges and notes over art"},
+    {"name": "DATA", "font": "NK_UI_FONT_MONO", "size_px": 12, "line_px": 16, "tracking_em": 0, "wraps": false, "role": "disc IDs, figures, paths, log lines"}
+  ],
+  "backgrounds": [
+    {"name": "ground", "colour": "surface", "role": "the page, and ground-filled boxes inside cards"},
+    {"name": "wave_limit", "luminance": "NK_UI_WAVES_LUMINANCE_MAX", "role": "the ground under the brightest waves or library backdrop allowed"},
+    {"name": "panel", "colour": "surface_raised", "role": "cards, dialogs, flow cards, bars, the in-game overlay's card"},
+    {"name": "control", "colour": "surface_high", "role": "pills, tags, focused or hovered controls and rows"},
+    {"name": "pressed", "colour": "pressed", "role": "a control or card while pressed"},
+    {"name": "pressed_danger", "colour": "pressed_danger", "role": "a danger button while pressed"},
+    {"name": "accent_fill", "colour": "accent_dark", "role": "primary button, lit option, current step"},
+    {"name": "accent_hover_fill", "colour": "accent_hover", "role": "primary button under the pointer"},
+    {"name": "accent_pressed_fill", "colour": "accent_pressed", "role": "pressed primary button"},
+    {"name": "log_box", "colour": "log_box_build", "role": "the build and developer log boxes"},
+    {"name": "badge_over_white_art", "colour": "art_scrim", "over": "#FFFFFF", "role": "a badge over the brightest possible title art"},
+    {"name": "scrim_over_white_frame", "colour": "scrim", "over": "#FFFFFF", "role": "the in-game overlay's scrim over a white game frame"},
+    {"name": "art_tint_0", "colour": "art_tint_0", "role": "a title's art panel"},
+    {"name": "art_tint_1", "colour": "art_tint_1", "role": "a title's art panel"},
+    {"name": "art_tint_2", "colour": "art_tint_2", "role": "a title's art panel"},
+    {"name": "art_tint_3", "colour": "art_tint_3", "role": "a title's art panel"},
+    {"name": "art_showcase_scene", "colour": "art_showcase_scene", "role": "the scene demo's art panel"},
+    {"name": "art_showcase_breakout", "colour": "art_showcase_breakout", "role": "the breakout demo's art panel"},
+    {"name": "hc_keyline", "colour": "hc_keyline_black", "role": "the high-contrast ring's keylines"}
+  ],
+  "pairs": [
+    {"text": "paper", "on": "ground", "kind": "text", "roles": ["DISPLAY", "TITLE_XL", "BODY", "DATA", "LABEL"], "where": "screen names and text on the page; secondary button labels (nk_ui_button_text_rgba); text in ground boxes (scr_error.c details, scr_form.c wizard boxes)"},
+    {"text": "paper", "on": "wave_limit", "kind": "text", "roles": ["DISPLAY", "TITLE_XL", "BODY", "DATA", "LABEL"], "where": "the same text on the page over the waves or backdrop"},
+    {"text": "muted", "on": "ground", "kind": "text", "roles": ["BODY_S", "CAPTION", "EYEBROW", "DATA", "LABEL"], "where": "captions and eyebrows on the page; tab labels (nk_ui_section_tabs); option chips and stepper values (scr_settings.c); details and file lists in ground boxes"},
+    {"text": "muted", "on": "wave_limit", "kind": "text", "roles": ["CAPTION", "EYEBROW", "LABEL"], "where": "captions, eyebrows and tab labels on the page over the waves or backdrop"},
+    {"text": "dim", "on": "ground", "kind": "text", "roles": ["FOOTNOTE", "CAPTION", "DATA", "LABEL"], "where": "About's source commit and data folder (scr_about.c); the update link and the copied file in ground boxes (scr_settings.c, scr_wizard.c); disabled button labels (nk_ui_button_text_rgba); a dimmed row's chips and arrows (scr_settings.c)"},
+    {"text": "dim", "on": "wave_limit", "kind": "text", "roles": ["FOOTNOTE"], "where": "About's source commit and data folder over the waves"},
+    {"text": "error", "on": "ground", "kind": "text", "roles": ["LABEL"], "where": "danger button labels on the page (nk_ui_button_text_rgba)"},
+    {"text": "error", "on": "wave_limit", "kind": "text", "roles": ["LABEL"], "where": "danger button labels over the waves"},
+    {"text": "info", "on": "ground", "kind": "text", "roles": ["CAPTION"], "where": "the title page's tier note in its ground box (scr_title.c)"},
+    {"text": "paper", "on": "panel", "kind": "text", "roles": ["TITLE", "HEADING", "TILE_TITLE", "BODY", "BODY_S", "DATA", "LABEL"], "where": "cards, dialogs, flow cards, the prompt bar's labels and glyphs, the in-game overlay's card"},
+    {"text": "muted", "on": "panel", "kind": "text", "roles": ["BODY", "BODY_S", "CAPTION", "EYEBROW", "DATA", "LABEL_S"], "where": "dialog messages (scr_error.c), card captions, the prompt bar's hint, the input chip, eyebrows in cards"},
+    {"text": "dim", "on": "panel", "kind": "text", "roles": ["FOOTNOTE", "CAPTION", "DATA", "LABEL_S"], "where": "a game card's disc ID (nk_ui_tile); the empty library's note (scr_library.c); the developer line and credits note in cards (scr_title.c, scr_about.c); overlay footnotes (overlay_pause.c, overlay_quick.c, overlay_dev.c); the download's per-item line (scr_prereq.c); disabled buttons on a card"},
+    {"text": "accent_dark", "on": "panel", "kind": "text", "roles": ["EYEBROW", "LABEL_L", "BODY_S"], "where": "flow-card eyebrows (scr_flow_eyebrow callers); About's version line (scr_about.c); the building row (scr_build.c); the noted control (scr_controller.c)"},
+    {"text": "ready", "on": "panel", "kind": "text", "roles": ["EYEBROW", "BODY_S", "LABEL_S"], "where": "a game card's Ready word (nk_ui_tile); a written problem report (scr_settings.c); the overlay's controller-connected eyebrow"},
+    {"text": "warning", "on": "panel", "kind": "text", "roles": ["EYEBROW", "BODY_S", "CAPTION", "LABEL_S"], "where": "developer mode (scr_devlog.c); a report that failed (scr_settings.c); the overlay's quit and controller eyebrows; a card's needs-setup word"},
+    {"text": "info", "on": "panel", "kind": "text", "roles": ["EYEBROW", "LABEL_S"], "where": "flow eyebrows (scr_prereq.c, scr_rebuild.c, scr_form.c); a card's experimental or untested word"},
+    {"text": "error", "on": "panel", "kind": "text", "roles": ["EYEBROW", "BODY_S", "LABEL"], "where": "the error card's eyebrow (scr_error.c); a conflicting control (scr_controller.c); danger buttons in cards"},
+    {"text": "paper", "on": "control", "kind": "text", "roles": ["BODY", "LABEL", "LABEL_S"], "where": "focused or hovered secondary buttons (nk_ui_button_between), rows, tabs and selected chips"},
+    {"text": "muted", "on": "control", "kind": "text", "roles": ["BODY", "LABEL", "LABEL_S"], "where": "tags (nk_ui_tag); a dimmed row's name and selected chip; steps not reached (scr_wizard.c, scr_build.c)"},
+    {"text": "dim", "on": "control", "kind": "text", "roles": ["LABEL", "LABEL_S"], "where": "a disabled primary button (nk_ui_button_configuration); a hovered or focused game card's disc ID"},
+    {"text": "ready", "on": "control", "kind": "text", "roles": ["LABEL_S"], "where": "Ready pills (nk_ui_status_pill); done steps (scr_wizard.c, scr_build.c)"},
+    {"text": "warning", "on": "control", "kind": "text", "roles": ["LABEL_S"], "where": "needs-setup pills; the error card's failed-stage pill (scr_error.c)"},
+    {"text": "info", "on": "control", "kind": "text", "roles": ["LABEL_S"], "where": "experimental and untested pills"},
+    {"text": "error", "on": "control", "kind": "text", "roles": ["LABEL", "LABEL_S"], "where": "unsupported pills; a hovered or focused danger button"},
+    {"text": "accent_dark", "on": "control", "kind": "text", "roles": ["LABEL"], "where": "a focused item on the overlay's developer pages (overlay_dev.c)"},
+    {"text": "paper", "on": "pressed", "kind": "text", "roles": ["LABEL", "TILE_TITLE"], "where": "a pressed secondary button, tab, row or game card"},
+    {"text": "muted", "on": "pressed", "kind": "text", "roles": ["TILE_TITLE", "LABEL_S"], "where": "a pressed game card's muted name or meta word"},
+    {"text": "dim", "on": "pressed", "kind": "text", "roles": ["LABEL_S"], "where": "a pressed game card's disc ID"},
+    {"text": "ready", "on": "pressed", "kind": "text", "roles": ["LABEL_S"], "where": "a pressed game card's status word"},
+    {"text": "warning", "on": "pressed", "kind": "text", "roles": ["LABEL_S"], "where": "a pressed game card's status word"},
+    {"text": "info", "on": "pressed", "kind": "text", "roles": ["LABEL_S"], "where": "a pressed game card's status word"},
+    {"text": "error", "on": "pressed", "kind": "text", "roles": ["LABEL_S"], "where": "a pressed game card's status word"},
+    {"text": "error", "on": "pressed_danger", "kind": "text", "roles": ["LABEL"], "where": "a pressed danger button"},
+    {"text": "ink", "on": "accent_fill", "kind": "text", "roles": ["LABEL", "LABEL_L", "LABEL_S"], "where": "primary buttons (nk_ui_button_text_rgba), lit options (scr_settings.c), the current step (scr_wizard.c, scr_build.c)"},
+    {"text": "ink", "on": "accent_hover_fill", "kind": "text", "roles": ["LABEL", "LABEL_L"], "where": "a primary button or lit option under the pointer"},
+    {"text": "ink", "on": "accent_pressed_fill", "kind": "text", "roles": ["LABEL", "LABEL_L"], "where": "a pressed primary button or lit option"},
+    {"text": "muted", "on": "log_box", "kind": "text", "roles": ["DATA"], "where": "build and developer log lines (scr_build.c, scr_devlog.c)"},
+    {"text": "paper", "on": "badge_over_white_art", "kind": "text", "roles": ["MICRO"], "where": "a badge over title art (nk_ui_badge)"},
+    {"text": "art_label", "on": "art_tint_0", "kind": "text", "roles": ["MICRO"], "where": "the hero's size note (nk_ui_hero)"},
+    {"text": "art_label", "on": "art_tint_1", "kind": "text", "roles": ["MICRO"], "where": "the hero's size note"},
+    {"text": "art_label", "on": "art_tint_2", "kind": "text", "roles": ["MICRO"], "where": "the hero's size note"},
+    {"text": "art_label", "on": "art_tint_3", "kind": "text", "roles": ["MICRO"], "where": "the hero's size note"},
+    {"text": "art_label", "on": "art_showcase_scene", "kind": "text", "roles": ["MICRO"], "where": "the hero's size note on a showcase demo"},
+    {"text": "art_label", "on": "art_showcase_breakout", "kind": "text", "roles": ["MICRO"], "where": "the hero's size note on a showcase demo"},
+    {"text": "dim", "on": "art_tint_0", "kind": "text", "roles": ["MICRO"], "where": "the art placeholder's caption (nk_ui_art_content)"},
+    {"text": "dim", "on": "art_tint_1", "kind": "text", "roles": ["MICRO"], "where": "the art placeholder's caption"},
+    {"text": "dim", "on": "art_tint_2", "kind": "text", "roles": ["MICRO"], "where": "the art placeholder's caption"},
+    {"text": "dim", "on": "art_tint_3", "kind": "text", "roles": ["MICRO"], "where": "the art placeholder's caption"},
+    {"text": "focus", "on": "ground", "kind": "focus", "where": "the ring around a control on the page (nk_ui_focus_ring)"},
+    {"text": "focus", "on": "wave_limit", "kind": "focus", "where": "the ring over the brightest waves or backdrop allowed"},
+    {"text": "focus", "on": "panel", "kind": "focus", "where": "the ring around a control in a card, dialog or bar"},
+    {"text": "focus", "on": "control", "kind": "focus", "where": "the ring beside a focused or hovered neighbour"},
+    {"text": "focus", "on": "scrim_over_white_frame", "kind": "focus", "where": "the overlay's ring where it meets the scrim over a white game frame"},
+    {"text": "hc_ring_white", "on": "hc_keyline", "kind": "focus", "where": "the high-contrast ring between its keylines (nk_ui_focus_ring)"},
+    {"text": "selected_neutral_edge", "on": "ground", "kind": "edge", "where": "a selected Off or the library's value, against the list (settings_enhanced_chip)"},
+    {"text": "selected_neutral_edge", "on": "control", "kind": "edge", "where": "that edge against its own box"},
+    {"text": "selected_neutral_edge_dimmed", "on": "ground", "kind": "edge", "where": "a dimmed row's current value, against the list"},
+    {"text": "selected_neutral_edge_dimmed", "on": "control", "kind": "edge", "where": "that edge against its own box"}
+  ]
+}
+```

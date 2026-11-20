@@ -35,6 +35,10 @@ char nk_platform_path_list_separator(void) {
     return ';';
 }
 
+bool nk_platform_paths_fold_case(void) {
+    return true;
+}
+
 /* Bounded UTF-8 -> UTF-16 conversion */
 static bool utf8_to_wide(const char *utf8, WCHAR *out_wide, size_t max_wide_chars) {
     if (!utf8 || !out_wide || max_wide_chars == 0) return false;
@@ -44,6 +48,19 @@ static bool utf8_to_wide(const char *utf8, WCHAR *out_wide, size_t max_wide_char
         return false;
     }
     return true;
+}
+
+int nk_platform_compare_file_names(const char *a, const char *b) {
+    WCHAR wide_a[NK_PLATFORM_FILE_NAME_UNITS];
+    WCHAR wide_b[NK_PLATFORM_FILE_NAME_UNITS];
+    bool a_wide = utf8_to_wide(a, wide_a, NK_PLATFORM_FILE_NAME_UNITS);
+    bool b_wide = utf8_to_wide(b, wide_b, NK_PLATFORM_FILE_NAME_UNITS);
+    if (a_wide != b_wide) return a_wide ? -1 : 1;
+    if (a_wide) {
+        int order = CompareStringOrdinal(wide_a, -1, wide_b, -1, TRUE);
+        if (order != 0) return order - CSTR_EQUAL;
+    }
+    return strcmp(a, b);
 }
 
 /* Bounded UTF-16 -> UTF-8 conversion; unpaired surrogates are refused. */
@@ -847,13 +864,15 @@ bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len) {
     return written > 0 && (size_t)written < max_len;
 }
 
-/* Helper to escape arguments for Windows command line according to Microsoft CRT rules */
-static void append_escaped_arg(char *buf, size_t buf_len, const char *arg) {
-    if (!buf || buf_len == 0 || !arg) return;
+/* Appends one argument to a Windows command line, escaped by the Microsoft CRT rules.
+ * False when it does not fit whole: a cut argument (or a lost closing quote, which
+ * shifts every later one) must fail the spawn, never start the child with another argv. */
+static bool append_escaped_arg(char *buf, size_t buf_len, const char *arg) {
+    if (!buf || buf_len == 0 || !arg) return false;
 
     size_t cur_len = strlen(buf);
     if (cur_len > 0) {
-        if (cur_len + 1 >= buf_len) return;
+        if (cur_len + 1 >= buf_len) return false;
         buf[cur_len++] = ' ';
         buf[cur_len] = '\0';
     }
@@ -869,11 +888,13 @@ static void append_escaped_arg(char *buf, size_t buf_len, const char *arg) {
     }
 
     if (!needs_quotes) {
-        snprintf(buf + cur_len, buf_len - cur_len, "%s", arg);
-        return;
+        size_t arg_len = strlen(arg);
+        if (arg_len >= buf_len - cur_len) return false;
+        memcpy(buf + cur_len, arg, arg_len + 1);
+        return true;
     }
 
-    if (cur_len + 1 >= buf_len) return;
+    if (cur_len + 1 >= buf_len) return false;
     buf[cur_len++] = '\"';
 
     const char *p = arg;
@@ -886,35 +907,34 @@ static void append_escaped_arg(char *buf, size_t buf_len, const char *arg) {
 
         if (*p == '\"') {
             /* 2N + 1 backslashes before quote */
-            for (size_t i = 0; i < 2 * num_backslashes + 1 && cur_len + 1 < buf_len; i++) {
+            if (2 * num_backslashes + 2 >= buf_len - cur_len) return false;
+            for (size_t i = 0; i < 2 * num_backslashes + 1; i++) {
                 buf[cur_len++] = '\\';
             }
-            if (cur_len + 1 < buf_len) {
-                buf[cur_len++] = '\"';
-            }
+            buf[cur_len++] = '\"';
             p++;
         } else if (*p == '\0') {
             /* 2N backslashes before closing quote */
-            for (size_t i = 0; i < 2 * num_backslashes && cur_len + 1 < buf_len; i++) {
+            if (2 * num_backslashes >= buf_len - cur_len) return false;
+            for (size_t i = 0; i < 2 * num_backslashes; i++) {
                 buf[cur_len++] = '\\';
             }
             break;
         } else {
             /* N backslashes before normal character */
-            for (size_t i = 0; i < num_backslashes && cur_len + 1 < buf_len; i++) {
+            if (num_backslashes + 1 >= buf_len - cur_len) return false;
+            for (size_t i = 0; i < num_backslashes; i++) {
                 buf[cur_len++] = '\\';
             }
-            if (cur_len + 1 < buf_len) {
-                buf[cur_len++] = *p;
-            }
+            buf[cur_len++] = *p;
             p++;
         }
     }
 
-    if (cur_len + 1 < buf_len) {
-        buf[cur_len++] = '\"';
-    }
+    if (cur_len + 1 >= buf_len) return false;
+    buf[cur_len++] = '\"';
     buf[cur_len] = '\0';
+    return true;
 }
 
 typedef struct {
@@ -1103,16 +1123,25 @@ bool nk_platform_spawn_process_at_priority(
     char cmd_line[32768];
     cmd_line[0] = '\0';
 
+    bool cmd_fits = true;
     if (argv && argv[0]) {
-        for (int i = 0; argv[i]; i++) {
-            append_escaped_arg(cmd_line, sizeof(cmd_line), argv[i]);
+        for (int i = 0; argv[i] && cmd_fits; i++) {
+            cmd_fits = append_escaped_arg(cmd_line, sizeof(cmd_line), argv[i]);
         }
     } else {
-        append_escaped_arg(cmd_line, sizeof(cmd_line), executable_path);
+        cmd_fits = append_escaped_arg(cmd_line, sizeof(cmd_line), executable_path);
     }
 
+    /* CreateProcessW takes at most 32767 UTF-16 units, the terminating NUL included;
+       a line that does not fit fails here with the code CreateProcessW gives for it. */
     WCHAR wcmd[32768];
-    if (!utf8_to_wide(cmd_line, wcmd, sizeof(wcmd) / sizeof(WCHAR))) {
+    if (!cmd_fits) {
+        out_process->spawn_error = ERROR_FILENAME_EXCED_RANGE;
+        return false;
+    }
+    if (!utf8_to_wide(cmd_line, wcmd, 32767u)) {
+        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+            out_process->spawn_error = ERROR_FILENAME_EXCED_RANGE;
         return false;
     }
 
@@ -1153,7 +1182,11 @@ bool nk_platform_spawn_process_at_priority(
             free(wenv_block);
             return false;
         }
-        h_output = CreateFileW(wlog, GENERIC_WRITE | FILE_APPEND_DATA,
+        /* Append-only, as O_APPEND on POSIX: with FILE_WRITE_DATA (part of
+           GENERIC_WRITE) granted, a write lands at the handle's own offset, which
+           starts at 0 and trails what other writers (the runtime's fopen("ab") on
+           the same boot-event file) append, so it would overwrite their lines. */
+        h_output = CreateFileW(wlog, FILE_APPEND_DATA | SYNCHRONIZE,
                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                &handle_security, OPEN_ALWAYS,
                                FILE_ATTRIBUTE_NORMAL, NULL);
@@ -1587,12 +1620,41 @@ bool nk_platform_path_chars_equal(char a, char b) {
     return tolower((unsigned char)a) == tolower((unsigned char)b);
 }
 
+/* The variable's current value in UTF-8 in `slot`, or NULL when unset, empty or not
+   valid UTF-16. Read through the wide environment like every other path here: the
+   narrow getenv gives code-page bytes, which a UTF-8 reader (the redaction of the
+   profile path and user name, the personal-folder checks) never matches. The slot is
+   rewritten only when the value changed, under `lock`, so a caller holding the
+   pointer keeps a stable string, as getenv's is until the variable changes. */
+static const char *env_value_utf8_slot(const WCHAR *name, char *slot, size_t slot_size,
+                                       SRWLOCK *lock) {
+    char *fresh = (char *)malloc(slot_size);
+    if (!fresh) return NULL;
+    bool have = env_get_utf8(name, fresh, slot_size);
+    const char *result = NULL;
+    AcquireSRWLockExclusive(lock);
+    if (have) {
+        if (strcmp(slot, fresh) != 0) memcpy(slot, fresh, strlen(fresh) + 1);
+        result = slot;
+    }
+    ReleaseSRWLockExclusive(lock);
+    free(fresh);
+    return result;
+}
+
+/* 32767 UTF-16 units, the variable limit, are at most three UTF-8 bytes each. */
+#define NK_ENV_UTF8_SLOT (32767u * 3u + 1u)
+
 const char *nk_platform_env_home_dir(void) {
-    return getenv("USERPROFILE");
+    static char slot[NK_ENV_UTF8_SLOT];
+    static SRWLOCK lock = SRWLOCK_INIT;
+    return env_value_utf8_slot(L"USERPROFILE", slot, sizeof(slot), &lock);
 }
 
 const char *nk_platform_env_user_name(void) {
-    return getenv("USERNAME");
+    static char slot[NK_ENV_UTF8_SLOT];
+    static SRWLOCK lock = SRWLOCK_INIT;
+    return env_value_utf8_slot(L"USERNAME", slot, sizeof(slot), &lock);
 }
 
 int nk_platform_env_utf8(const char *name, char *out, size_t cap) {

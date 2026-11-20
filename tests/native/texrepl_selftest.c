@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* stb_image (vendored under third_party/stb) as a second, independent PNG decoder: the pack reader
  * decodes PNG itself, and the seed corpus checks the two agree. */
@@ -87,6 +88,35 @@
 #define SR_SELFTEST_BUILD_ROOT "."
 #endif
 
+/* The folder every pack, ZIP and cache file of this run goes in: one per executable under the
+ * build root (texrepl_selftest_files, texrepl_mutant_files), so texrepl-selftest and
+ * texrepl-mutant run at once (make -j) never write or read each other's files. */
+static char s_root[256] = SR_SELFTEST_BUILD_ROOT;
+
+static void set_root(const char *argv0) {
+    const char *base = argv0 ? argv0 : "";
+    for (const char *c = base; *c; c++)
+        if (*c == '/' || *c == '\\') base = c + 1;
+    char stem[64];
+    size_t n = 0;
+    for (; base[n] && base[n] != '.' && n < sizeof(stem) - 1u; n++) {
+        const char ch = base[n];
+        stem[n] = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ? ch : '_';
+    }
+    stem[n] = '\0';
+    snprintf(s_root, sizeof(s_root), "%s/%s_files", SR_SELFTEST_BUILD_ROOT, n ? stem : "texrepl_selftest");
+    nk_platform_mkdir_p(s_root);
+}
+
+/* `rel` under the run's folder, in a buffer of its own for each of the last four calls. */
+static const char *rooted(const char *rel) {
+    static char buf[4][600];
+    static int next;
+    char *out = buf[next++ & 3];
+    snprintf(out, sizeof(buf[0]), "%s/%s", s_root, rel);
+    return out;
+}
+
 static int g_failures;
 #define CHECK(cond, ...) do { if (!(cond)) { \
     fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); \
@@ -111,11 +141,12 @@ static uint32_t *solid(int w, int h, uint32_t colour) {
 }
 
 static void pack_path(char *out, size_t n, const char *pack, const char *file) {
-    const int written = snprintf(out, n, "%s/%s/%s", SR_SELFTEST_BUILD_ROOT, pack, file);
+    const int written = snprintf(out, n, "%s/%s/%s", s_root, pack, file);
     if (written < 0 || (size_t)written >= n) { fprintf(stderr, "path too long: %s/%s\n", pack, file); exit(2); }
 }
 static void make_pack(char *dir, size_t n, const char *pack) {
-    snprintf(dir, n, "%s/%s", SR_SELFTEST_BUILD_ROOT, pack);
+    const int written = snprintf(dir, n, "%s/%s", s_root, pack);
+    if (written < 0 || (size_t)written >= n) { fprintf(stderr, "path too long: %s\n", pack); exit(2); }
     nk_platform_mkdir_p(dir);
 }
 
@@ -296,7 +327,7 @@ static void test_malformed_ini(void) {
         if (p) nk_texrepl_close(p);
     }
     char err[128] = "";
-    CHECK(nk_texrepl_open(SR_SELFTEST_BUILD_ROOT "/texrepl_no_such_pack", 0, err, sizeof(err)) == NULL && err[0],
+    CHECK(nk_texrepl_open(rooted("texrepl_no_such_pack"), 0, err, sizeof(err)) == NULL && err[0],
           "a missing folder");
 }
 
@@ -501,7 +532,21 @@ static void test_texture_hash(void) {
     if (!p) return;
     uint32_t q = nk_texrepl_hash_texture(p, mem, sizeof(mem), 0x08800000u, 16, 16, 16, 3, 0);
     CHECK(q == nk_texrepl_quick_hash(mem, 16 * 16 * 4, 0x08800000u), "quick hash of a texture");
-    /* reduceHash with the quick hash is refused and reported (it needs a safer hash). */
+    nk_texrepl_close(p);
+
+    /* reduceHash with the quick hash is refused and reported (it needs a safer hash): the note is
+     * there, and the texture is hashed whole, not over the reduced share its ranges name. */
+    make_pack(dir, sizeof(dir), "texrepl_pack_hash_quick_reduce");
+    pack_path(path, sizeof(path), "texrepl_pack_hash_quick_reduce", "textures.ini");
+    write_text(path, "[options]\nhash = quick\nreduceHash = true\n[reducehashranges]\n16,16 = 0.5\n");
+    p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    CHECK(p != NULL, "open: %s", err);
+    if (!p) return;
+    CHECK(has_diag(p, "reduceHash needs hash = xxh32 or xxh64; ignored with the quick hash"),
+          "reduceHash with the quick hash was not reported");
+    q = nk_texrepl_hash_texture(p, mem, sizeof(mem), 0x08800000u, 16, 16, 16, 3, 0);
+    CHECK(q == nk_texrepl_quick_hash(mem, 16 * 16 * 4, 0x08800000u),
+          "reduceHash with the quick hash was applied (%08x)", q);
     nk_texrepl_close(p);
 }
 
@@ -858,6 +903,25 @@ static const uint8_t kZlibIni[] = {
     0x91, 0x46, 0xfe, 0x53, 0x52, 0xd5, 0xb5, 0x52, 0x5a, 0x1b, 0xb3, 0x3d, 0x2e, 0x8b, 0x3d, 0xb4,
     0xec, 0xf6, 0x39, 0xde, 0xc5, 0x17};
 
+#ifdef NK_TEXREPL_TEST_HOOKS
+extern void (*nk_texrepl_test_zip_checked)(const char *zip_path);
+static char s_swap_name[600], s_swap_aside[600];
+static int s_swap_renamed;
+
+/* Between the ZIP's checks and the reader: the name moved aside and a file that is no ZIP put in
+ * its place, as a local process racing the open could. */
+static void swap_checked_zip(const char *zip_path) {
+    (void)zip_path;
+    s_swap_renamed = rename(s_swap_name, s_swap_aside) == 0;
+    if (!s_swap_renamed) return;
+    FILE *f = fopen(s_swap_name, "wb");
+    if (f) {
+        fputs("not a ZIP: put in place after the checks", f);
+        fclose(f);
+    }
+}
+#endif
+
 static void test_zip_packs(void) {
     char dir[512], png[600], zip[600], err[400];
     make_pack(dir, sizeof(dir), "texrepl_zip");
@@ -938,6 +1002,29 @@ static void test_zip_packs(void) {
         CHECK(nk_texrepl_lookup(p, &named, &hit) == 0, "a loose file beside textures.zip was read");
         nk_texrepl_close(p);
     }
+#ifdef NK_TEXREPL_TEST_HOOKS
+    /* textures.zip swapped for another file once its checks passed: the ZIP reader reads the file
+     * checked, never what the name leads to at a second open. (On Windows the checked handle also
+     * refuses the rename, so the name cannot be swapped while the pack holds it.) */
+    pack_path(s_swap_name, sizeof(s_swap_name), "texrepl_zip_folder", "textures.zip");
+    pack_path(s_swap_aside, sizeof(s_swap_aside), "texrepl_zip_folder", "textures.zip.aside");
+    remove(s_swap_aside);
+    s_swap_renamed = 0;
+    nk_texrepl_test_zip_checked = swap_checked_zip;
+    p = nk_texrepl_open(fdir, 0, err, sizeof(err));
+    nk_texrepl_test_zip_checked = NULL;
+    CHECK(p != NULL, "textures.zip swapped after its checks was read by name: %s", err);
+    if (p) {
+        CHECK(nk_texrepl_is_zip(p) && nk_texrepl_lookup(p, &id, &hit) == 1,
+              "textures.zip swapped after its checks: the checked ZIP's file was not read");
+        nk_texrepl_unpin(p, &hit);
+        nk_texrepl_close(p);
+    }
+    if (s_swap_renamed) {   /* the checked ZIP back under its name, for the cells below */
+        remove(s_swap_name);
+        CHECK(rename(s_swap_aside, s_swap_name) == 0, "textures.zip could not be put back");
+    }
+#endif
 
     /* A damaged image: the pack opens (its structure is whole), that image is not used, and says so. */
     memset(&z, 0, sizeof(z));
@@ -1030,6 +1117,64 @@ static void mem_now(double *ws_mib, double *peak_mib) {
     getrusage(RUSAGE_SELF, &ru);
     *ws_mib = -1.0;   /* not read on this host */
     *peak_mib = (double)ru.ru_maxrss / 1024.0;
+}
+#endif
+
+/* ------------------------------------------------------------------------------ open timing */
+
+#ifdef NK_TEXREPL_TEST_HOOKS
+/* Seconds on the host's monotonic clock. */
+static double mono_s(void) {
+#if defined(_WIN32)
+    return wall_s();   /* QueryPerformanceCounter */
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) { fprintf(stderr, "no monotonic clock\n"); exit(2); }
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+#endif
+}
+
+static double s_blocked_s;
+
+/* Inside nk_texrepl_open, between the ZIP's checks and its reader: the thread blocked for 50 ms or
+ * more, using no CPU, as it is while a slow disk answers. */
+static void block_in_open(const char *zip_path) {
+    (void)zip_path;
+    const double t0 = mono_s();
+    while (mono_s() - t0 < 0.05) {
+#if defined(_WIN32)
+        Sleep(10);
+#else
+        const struct timespec nap = { 0, 10000000L };
+        nanosleep(&nap, NULL);
+#endif
+    }
+    s_blocked_s = mono_s() - t0;
+}
+
+/* stats.open_ns is elapsed wall time: an open that spent 50 ms blocked reports at least that. A
+ * CPU-time clock (ISO C clock() on POSIX) leaves blocked time out and reports a few microseconds. */
+static void test_open_wall_time(void) {
+    char dir[512], zip[600], err[256] = "";
+    Zw z;
+    make_pack(dir, sizeof(dir), "texrepl_open_time");
+    memset(&z, 0, sizeof(z));
+    zw_add_text(&z, "textures.ini", "[options]\nhash = quick\n", 0);
+    pack_path(zip, sizeof(zip), "texrepl_open_time", "textures.zip");
+    zw_finish(&z, zip, 0);
+    s_blocked_s = 0.0;
+    nk_texrepl_test_zip_checked = block_in_open;
+    NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    nk_texrepl_test_zip_checked = NULL;
+    CHECK(p != NULL && nk_texrepl_is_zip(p), "the timed pack did not open as its textures.zip: %s", err);
+    if (!p) return;
+    NkTexReplStats st;
+    nk_texrepl_stats(p, &st);
+    CHECK(s_blocked_s >= 0.05, "the open was not blocked (%.3f s)", s_blocked_s);
+    CHECK((double)st.open_ns >= s_blocked_s * 1e9 && st.list_ns <= st.open_ns,
+          "open timing: open_ns %llu, list_ns %llu, for an open blocked %.0f ns: open_ns is not elapsed wall time",
+          (unsigned long long)st.open_ns, (unsigned long long)st.list_ns, s_blocked_s * 1e9);
+    nk_texrepl_close(p);
 }
 #endif
 
@@ -1666,16 +1811,18 @@ static void test_png_corpus(void) {
 }
 
 #if defined(_WIN32)
-static int make_dir_link(const char *link, const char *target) {
+static int make_dir_link(const char *link, const char *target, int *err_out) {
     char cmd[1600], full[700], name[700];
+    if (err_out) *err_out = 0;
     if (!GetFullPathNameA(target, sizeof(full), full, NULL)) return 0;
     snprintf(name, sizeof(name), "%s", link);
     for (char *c = name; *c; c++) if (*c == '/') *c = '\\';   /* the link's name only, so "/J" stays */
     snprintf(cmd, sizeof(cmd), "mklink /J \"%s\" \"%s\" >NUL 2>&1", name, full);
     return system(cmd) == 0;
 }
-static int make_file_link(const char *link, const char *target) {
+static int make_file_link(const char *link, const char *target, int *err_out) {
     WCHAR wl[700], wt[700];
+    if (err_out) *err_out = 0;
     if (!MultiByteToWideChar(CP_UTF8, 0, link, -1, wl, 700) || !MultiByteToWideChar(CP_UTF8, 0, target, -1, wt, 700))
         return 0;
     for (WCHAR *c = wl; *c; c++) if (*c == L'/') *c = L'\\';
@@ -1685,19 +1832,52 @@ static int make_file_link(const char *link, const char *target) {
     return CreateSymbolicLinkW(wl, full, 0x2 /* SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE */) != 0;
 }
 #else
-static int make_abs(const char *target, char *out, size_t cap) {
+static int make_abs(const char *target, char *out, size_t cap, int *err_out) {
     char *r = realpath(target, NULL);
-    if (!r) return 0;
+    if (!r) {
+        if (err_out) *err_out = errno;
+        return 0;
+    }
     snprintf(out, cap, "%s", r);
     free(r);
     return 1;
 }
-static int make_dir_link(const char *link, const char *target) {
+static int make_dir_link(const char *link, const char *target, int *err_out) {
     char abs[4096];
-    return make_abs(target, abs, sizeof(abs)) && symlink(abs, link) == 0;
+    if (err_out) *err_out = 0;
+    if (!make_abs(target, abs, sizeof(abs), err_out)) return 0;
+    if (symlink(abs, link) != 0) {
+        if (err_out) *err_out = errno;
+        return 0;
+    }
+    return 1;
 }
-static int make_file_link(const char *link, const char *target) { return make_dir_link(link, target); }
+static int make_file_link(const char *link, const char *target, int *err_out) {
+    return make_dir_link(link, target, err_out);
+}
 #endif
+
+/* Hostile cases this host could not set up, so their checks did not run. main exits 77 for them
+ * (mk/selftests.mk texrepl-selftest prints the SKIP), never 0: a run that left a containment check
+ * out is not a pass. */
+static int s_skipped_hostile;
+
+/* A link or FIFO a hostile case needs could not be made. On Windows that is a host limit (a file
+ * symbolic link needs Developer Mode or an elevated shell; a junction needs NTFS): `cases` checks
+ * are counted as skipped. On POSIX a build folder takes symbolic links and FIFOs, so there it is a
+ * failure. */
+static void hostile_not_set_up(const char *what, int cases, int errnum) {
+#if defined(_WIN32)
+    (void)errnum;
+    s_skipped_hostile += cases;
+    printf("SKIP %s: it could not be made on this host (a file symbolic link needs Developer Mode or an elevated "
+           "shell, a junction needs NTFS); %d hostile case(s) not run\n", what, cases);
+#else
+    (void)cases;
+    CHECK(0, "%s: it could not be made in the build folder (%s), so its hostile case cannot run; use a BUILD_ROOT "
+             "on a file system with symbolic links and FIFOs", what, strerror(errnum));
+#endif
+}
 
 /* A [hashes] value with a device name or a name Windows changes is not opened; a link or junction
  * that leaves the pack folder is not followed; a FIFO is refused without blocking (POSIX); a
@@ -1718,21 +1898,25 @@ static void test_file_checks(void) {
     nk_platform_mkdir_p(path);
 
     /* Links: a junction (Windows) or symlink to a folder outside, a file link outside and one inside. */
+    int dir_link_err = 0, file_link_err = 0, in_link_err = 0;
     pack_path(path, sizeof(path), "texrepl_pack_files", "jdir");
-    int have_dir_link = nk_platform_dir_exists(path) || make_dir_link(path, outside);
+    int have_dir_link = nk_platform_dir_exists(path) || make_dir_link(path, outside, &dir_link_err);
     pack_path(path, sizeof(path), "texrepl_pack_files", "flink.png");
     pack_path(target, sizeof(target), "texrepl_pack_outside", "out.png");
-    int have_file_link = nk_platform_file_exists(path) || make_file_link(path, target);
+    int have_file_link = nk_platform_file_exists(path) || make_file_link(path, target, &file_link_err);
     pack_path(path, sizeof(path), "texrepl_pack_files", "inlink.png");
     pack_path(target, sizeof(target), "texrepl_pack_files", "in.png");
-    int have_in_link = nk_platform_file_exists(path) || make_file_link(path, target);
-    if (!have_dir_link) printf("SKIP folder link out of the pack: the link could not be made on this host\n");
-    if (!have_file_link || !have_in_link)
-        printf("SKIP file links: a symbolic link could not be made here (Windows needs Developer Mode)\n");
+    int have_in_link = nk_platform_file_exists(path) || make_file_link(path, target, &in_link_err);
+    if (!have_dir_link) hostile_not_set_up("a folder link out of the pack", 1, dir_link_err);
+    if (!have_file_link || !have_in_link) {
+        hostile_not_set_up("a file link out of the pack and one inside it", 2,
+                           !have_file_link ? file_link_err : in_link_err);
+    }
 #if !defined(_WIN32)
     pack_path(path, sizeof(path), "texrepl_pack_files", "fifo.png");
-    int have_fifo = mkfifo(path, 0600) == 0 || errno == EEXIST;
-    if (!have_fifo) printf("SKIP FIFO: mkfifo failed\n");
+    int fifo_err = mkfifo(path, 0600) == 0 ? 0 : errno;
+    int have_fifo = fifo_err == 0 || fifo_err == EEXIST;
+    if (!have_fifo) hostile_not_set_up("a FIFO named as an image", 1, fifo_err);
 #endif
     pack_path(path, sizeof(path), "texrepl_pack_files", "textures.ini");
     write_text(path, "[options]\nhash = quick\n[hashes]\n"
@@ -1828,7 +2012,8 @@ static void test_file_checks(void) {
     pack_path(path, sizeof(path), "texrepl_pack_fifozip", "textures.ini");
     write_text(path, "[options]\nhash = quick\n");
     pack_path(path, sizeof(path), "texrepl_pack_fifozip", "textures.zip");
-    if (mkfifo(path, 0600) == 0 || errno == EEXIST) {
+    int fifozip_err = mkfifo(path, 0600) == 0 ? 0 : errno;
+    if (fifozip_err == 0 || fifozip_err == EEXIST) {
         err[0] = '\0';
         p = nk_texrepl_open(fifo_dir, 0, err, sizeof(err));
         CHECK(p != NULL && !nk_texrepl_is_zip(p), "FIFO textures.zip: '%s'", err);
@@ -1838,13 +2023,13 @@ static void test_file_checks(void) {
         CHECK(p == NULL && err[0], "FIFO ZIP pack opened");
         if (p) nk_texrepl_close(p);
     } else {
-        printf("SKIP FIFO ZIP: mkfifo failed\n");
+        hostile_not_set_up("a FIFO named textures.zip", 2, fifozip_err);
     }
 #endif
 
     /* Errors carry the pack's last path component only. */
     err[0] = '\0';
-    CHECK(nk_texrepl_open(SR_SELFTEST_BUILD_ROOT "/texrepl_no_such_pack/", 0, err, sizeof(err)) == NULL &&
+    CHECK(nk_texrepl_open(rooted("texrepl_no_such_pack/"), 0, err, sizeof(err)) == NULL &&
               strstr(err, "'texrepl_no_such_pack'") && !strchr(err, '/') && !strchr(err, '\\'),
           "a missing pack's message: '%s'", err);
     free(px);
@@ -2355,7 +2540,7 @@ static void test_png_bomb(void) {
             const ZwOpt stored = { 0, 0, NULL, 0, 0, 0 };
             zw_add(&z, "good.png", png, n, stored);
             zw_add_text(&z, "textures.ini", ini, 0);
-            snprintf(where, sizeof(where), "%s/texrepl_png_spellings.zip", SR_SELFTEST_BUILD_ROOT);
+            snprintf(where, sizeof(where), "%s/texrepl_png_spellings.zip", s_root);
             zw_finish(&z, where, 0);
         } else {
             make_pack(where, sizeof(where), "texrepl_png_names");
@@ -2410,7 +2595,7 @@ static void test_png_bomb(void) {
         zw_add(&z, "damaged.png", png, n, damaged);
         zw_add_text(&z, "textures.ini", ini, 0);
         char where[600];
-        snprintf(where, sizeof(where), "%s/texrepl_png_damaged_spellings.zip", SR_SELFTEST_BUILD_ROOT);
+        snprintf(where, sizeof(where), "%s/texrepl_png_damaged_spellings.zip", s_root);
         zw_finish(&z, where, 0);
         err[0] = '\0';
         p = nk_texrepl_open(where, 0, err, sizeof(err));
@@ -2859,7 +3044,7 @@ static void test_cache_churn(void) {
         at += (size_t)snprintf(ini + at, icap - at, "0891000000000101ffffffff = big.png\n");
         zw_add_text(&z, "textures.ini", ini, 0);
         char zip[600];
-        snprintf(zip, sizeof(zip), "%s/texrepl_churn_many.zip", SR_SELFTEST_BUILD_ROOT);
+        snprintf(zip, sizeof(zip), "%s/texrepl_churn_many.zip", s_root);
         zw_finish(&z, zip, 0);
         free(ini);
         free(tiny);
@@ -2902,7 +3087,7 @@ static void test_cache_churn(void) {
         zw_add(&z, "wide.png", png, n, deflated);
         zw_add_text(&z, "textures.ini", "[options]\nhash = quick\n[hashes]\n0892000000000101000000a1 = wide.png\n", 0);
         char zip[600];
-        snprintf(zip, sizeof(zip), "%s/texrepl_read_peak.zip", SR_SELFTEST_BUILD_ROOT);
+        snprintf(zip, sizeof(zip), "%s/texrepl_read_peak.zip", s_root);
         zw_finish(&z, zip, 0);
         free(png);
         err[0] = '\0';
@@ -2962,7 +3147,7 @@ static void test_ini_text(void) {
 
 /* McIlroy's adversary ("A Killer Adversary for Quicksort", 1999) run against this C library's own
  * qsort gives the order that costs it most; the pack's sorts must not care. The order is a function
- * of n and the C library, so it is kept under the build folder once made. */
+ * of n and the C library, so each run makes its own (libc_adversary). */
 static int *g_adv_val;
 static int g_adv_solid, g_adv_candidate, g_adv_gas;
 static unsigned long long g_cmps;
@@ -2996,28 +3181,16 @@ static int *adversary(int n, void (*sorter)(void *, size_t, size_t, int (*)(cons
     free(ptr);
     return g_adv_val;
 }
+/* Made on every run, never read from a file: an order kept on disk is the worst for the C library
+ * that made it, and a build folder shared with another (MinGW's and glibc's in one tree under WSL)
+ * would hand that library's order to this one's qsort. At 16,384 items it takes well under a
+ * second. */
 static int *libc_adversary(int n) {
-    char path[600];
-    snprintf(path, sizeof(path), "%s/texrepl_adversary_%d.txt", SR_SELFTEST_BUILD_ROOT, n);
-    int *v = (int *)malloc(sizeof(int) * (size_t)n);
-    FILE *f = nk_fopen_utf8(path, "rb");
-    int got = 0;
-    if (f) {
-        while (got < n && fscanf(f, "%d", &v[got]) == 1) got++;
-        fclose(f);
-    }
-    if (got == n) return v;
-    free(v);
     unsigned long long cmps = 0;
     const double t0 = wall_s();
-    v = adversary(n, qsort, &cmps);
+    int *v = adversary(n, qsort, &cmps);
     printf("adversary: n=%d costs this C library's qsort %llu comparisons (n*n/4 = %llu), made in %.1f s\n", n, cmps,
            (unsigned long long)n * (unsigned long long)n / 4u, wall_s() - t0);
-    f = nk_fopen_utf8(path, "wb");
-    if (f) {
-        for (int i = 0; i < n; i++) fprintf(f, "%d\n", v[i]);
-        fclose(f);
-    }
     return v;
 }
 
@@ -3200,7 +3373,7 @@ static void test_sort_adversary(void) {
     zbuf(&body.d, &body.n, &body.cap, cd.d, cd.n);
     zbuf(&body.d, &body.n, &body.cap, e, 22);
     char zip[600];
-    snprintf(zip, sizeof(zip), "%s/texrepl_adv.zip", SR_SELFTEST_BUILD_ROOT);
+    snprintf(zip, sizeof(zip), "%s/texrepl_adv.zip", s_root);
     file_save(zip, body.d, body.n);
     free(body.d);
     free(cd.d);
@@ -3337,7 +3510,7 @@ static int bench(int n) {
     write_text(path, ini);
     zw_add_text(&z, "BenchPack/textures.ini", ini, 8);
     char zip[600];
-    snprintf(zip, sizeof(zip), "%s/texrepl_bench/pack.zip", SR_SELFTEST_BUILD_ROOT);
+    snprintf(zip, sizeof(zip), "%s/texrepl_bench/pack.zip", s_root);
     zw_finish(&z, zip, 0);
     char named[512];
     make_pack(named, sizeof(named), "texrepl_bench/named");
@@ -3358,8 +3531,8 @@ static int bench(int n) {
 
 static int bench_measure(int n, const char *kind) {
     char path[600], err[400];
-    if (!strcmp(kind, "zip")) snprintf(path, sizeof(path), "%s/texrepl_bench/pack.zip", SR_SELFTEST_BUILD_ROOT);
-    else snprintf(path, sizeof(path), "%s/texrepl_bench/%s", SR_SELFTEST_BUILD_ROOT, kind);
+    if (!strcmp(kind, "zip")) snprintf(path, sizeof(path), "%s/texrepl_bench/pack.zip", s_root);
+    else snprintf(path, sizeof(path), "%s/texrepl_bench/%s", s_root, kind);
     {
         const char *const kinds[1] = { kind };
         const int k = 0;
@@ -3469,8 +3642,21 @@ static void test_games(void) {
     }
 }
 
+/* The synthetic PNG writer reports a file it could not write in full, so a pack never holds a
+ * truncated image the test believes whole. Linux only: /dev/full opens, and every flush to it fails
+ * with ENOSPC; Windows and macOS have no such device. */
+static void test_png_writer_reports_write_failure(void) {
+#if defined(__linux__)
+    uint32_t *px = solid(4, 4, 0xff0000ffu);
+    CHECK(synpng_write("/dev/full", 4, 4, px) == 0,
+          "synthetic PNG writer: a write to a full device is reported as a failure");
+    free(px);
+#endif
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    set_root(argc > 0 ? argv[0] : NULL);
     if (argc == 3 && !strcmp(argv[1], "--bench")) return bench(atoi(argv[2]));
     if (argc == 4 && !strcmp(argv[1], "--bench-only")) return bench_measure(atoi(argv[2]), argv[3]);
     test_hashes();
@@ -3483,6 +3669,9 @@ int main(int argc, char **argv) {
     test_budget();
     test_index_forms();
     test_zip_packs();
+#ifdef NK_TEXREPL_TEST_HOOKS
+    test_open_wall_time();
+#endif
     test_zip_refusals();
     test_png_corpus();
     test_png_seeds();
@@ -3499,9 +3688,15 @@ int main(int argc, char **argv) {
     test_sort_adversary();
     test_file_checks();
     test_games();
+    test_png_writer_reports_write_failure();
     if (g_failures) {
         fprintf(stderr, "texrepl selftest: %d check(s) failed\n", g_failures);
         return 1;
+    }
+    if (s_skipped_hostile) {
+        printf("texrepl selftest: SKIP %d hostile case(s) not run on this host (named above); every check that "
+               "ran passed\n", s_skipped_hostile);
+        return 77;
     }
     printf("texrepl selftest: OK\n");
     return 0;

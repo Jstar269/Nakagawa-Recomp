@@ -445,9 +445,11 @@ bool nk_ui_prompt_draw(NkUiDrawBuffer *buffer, const NkUiPromptSpec *spec,
     int shorter;
     if (buffer == NULL || spec == NULL || !isfinite(density) || density <= 0.0f ||
         !isfinite(rect.x) || !isfinite(rect.y) || !isfinite(rect.w) || !isfinite(rect.h) ||
-        rect.w <= 0.0f || rect.h <= 0.0f ||
         (unsigned)spec->action >= (unsigned)NK_UI_PROMPT_ACT_COUNT) {
         return false;
+    }
+    if (rect.w <= 0.0f || rect.h <= 0.0f) {
+        return true; /* an empty box: nothing to draw, as for every other painter */
     }
     box = nk_ui_round_rect(rect, density);
     if (box.x1 <= box.x0 || box.y1 <= box.y0) {
