@@ -263,7 +263,7 @@ Created in this repository. The code moved out of a sal063-lineage file, so the 
 - `rt/atrac3p_bridge.c` and `rt/atrac3p_bridge.h`: say they are not a PPSSPP
   translation. FFmpeg provenance is in `src/rt/atrac3p/PROVENANCE.md`.
 - `rt/mp3_bridge.c` and `rt/mp3_bridge.h`: GPL-3.0-or-later, project-authored frame
-  wrapper over minimp3 (CC0, byte-identical, `src/rt/minimp3/PROVENANCE.md`). They contain
+  wrapper over minimp3 (CC0, LOCAL DELTA, `src/rt/minimp3/PROVENANCE.md`). They contain
   no PPSSPP code.
 - `rt/cheats.c` and `rt/cheats.h` (#2639): GPL-3.0-or-later, project-authored. They bind
   the cheat reader and applier to a run (the switch, the file, guest memory, the translated

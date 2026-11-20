@@ -404,7 +404,7 @@
         "upstream_revision": "ea99364f61c14656440e8d77e9c233ccf3124633",
         "disposition": "statically_linked_subset",
         "notice_file": "minimp3.txt",
-        "note": "The byte-identical header src/rt/minimp3/minimp3.h (src/rt/minimp3/PROVENANCE.md), compiled into every title runtime through the project wrapper src/rt/mp3_bridge.c (a runtime source in mk/runtime_sources.mk), where it decodes for sceMp3. CC0 1.0 asks for no notice; the dedication text travels with the package for clarity.",
+        "note": "The header src/rt/minimp3/minimp3.h, pinned upstream plus two later upstream lines as LOCAL DELTA (src/rt/minimp3/PROVENANCE.md), compiled into every title runtime through the project wrapper src/rt/mp3_bridge.c (a runtime source in mk/runtime_sources.mk), where it decodes for sceMp3. CC0 1.0 asks for no notice; the dedication text travels with the package for clarity.",
         "license_texts": [
           {
             "file": "src/rt/minimp3/LICENSE",
