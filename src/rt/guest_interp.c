@@ -1253,7 +1253,7 @@ static SrGuestInterpResult execute_noncontrol(
             SR_NAN_TRAP_STORE_F2(pc, "div.s", fd, fs, ft,
                                  sr_fpu_div_s(s->f[fs], s->f[ft], s->fcr31));
         } else if (fmt == 0x10u && funct == 0x04u) {   /* sqrt.s */
-            SR_NAN_TRAP_STORE_F1(pc, "sqrt.s", fd, fs, sqrtf(s->f[fs]));
+            SR_NAN_TRAP_STORE_F1(pc, "sqrt.s", fd, fs, sr_fpu_sqrt_s(s->f[fs], s->fcr31));
         } else if (fmt == 0x10u && funct == 0x05u) {   /* abs.s */
             SR_NAN_TRAP_STORE_F1(pc, "abs.s", fd, fs, fabsf(s->f[fs]));
         } else if (fmt == 0x10u && funct == 0x07u) {   /* neg.s */

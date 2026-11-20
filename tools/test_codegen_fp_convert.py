@@ -786,6 +786,8 @@ int main(void) {
         s.fi[1] = 0x42780000u;
         s.fi[16] = 0x00800000u;   /* smallest normal */
         s.fi[17] = 0x3f000000u;   /* 0.5: FS=0 must stay gradual */
+        s.fi[2] = 0x40000000u;    /* 2.0: sqrt.s under guest RN */
+        s.fi[3] = 0x00000002u;    /* 2^-148: sqrt.s of a subnormal input */
         s.r[8] = 0u;              /* guest ctc1: RN, gradual */
         f_00001000(&s);
         if (s.r[9] != 0x419317b5u) {
@@ -796,6 +798,18 @@ int main(void) {
         if (s.r[10] != 0x00400000u) {
             fprintf(stderr, "FAIL hostile %s gradual got=%08x want=00400000\\n",
                     bases[i].name, s.r[10]);
+            failures++;
+        }
+        /* sqrt(2) rounds to 3fb504f3 under RN; host RC=+inf gives 3fb504f4. */
+        if (s.r[11] != 0x3fb504f3u) {
+            fprintf(stderr, "FAIL hostile %s sqrt.s got=%08x want=3fb504f3\\n",
+                    bases[i].name, s.r[11]);
+            failures++;
+        }
+        /* sqrt(2^-148) = 2^-74 exactly; host DAZ reads the input as zero. */
+        if (s.r[12] != 0x1a800000u) {
+            fprintf(stderr, "FAIL hostile %s sqrt.s subnormal got=%08x want=1a800000\\n",
+                    bases[i].name, s.r[12]);
             failures++;
         }
         if (_mm_getcsr() != hostile) {
@@ -980,16 +994,22 @@ class GeneratedScalarFcr31Tests(unittest.TestCase):
         removed (review Disposition A), even default-state guests execute
         through the scoped helpers, so ambient host RC/FTZ/DAZ cannot change
         guest result bits and the caller's MXCSR must survive bit-for-bit.
+        sqrt.s is in the set: a plain host sqrtf ran under the ambient RC and
+        DAZ and left the inexact sticky bit in the caller's MXCSR.
         """
         words: list[int] = [
             _ctc1(8),                                   # guest installs RM=0/FS=0
             _fps3(1, 0, 8, 0x02), _mfc1(9, 8),          # mul.s (RM-sensitive vector)
             _fps3(17, 16, 8, 0x02), _mfc1(10, 8),       # mul.s min-normal * 0.5 (FS=0 gradual)
+            _fps(2, 8, 0x04), _mfc1(11, 8),             # sqrt.s f8,f2 (RM-sensitive, inexact)
+            _fps(3, 8, 0x04), _mfc1(12, 8),             # sqrt.s f8,f3 (subnormal input)
             0x03E00008, 0x00000000,
         ]
         emitted = _run_generated_fixture(
             self, "fp_scalar_hostile", words, _CELL_HOSTILE_MAIN)
         self.assertNotIn("sr_fpu_scalar_fast", emitted)  # fast path stays gone
+        self.assertIn("sr_fpu_sqrt_s(", emitted)
+        self.assertNotIn("sqrtf(", emitted)
 
     def test_mul_inf_zero_classifier_raw_bit_under_hostile_daz(self):
         """The inf*0 pre-classifier must classify from RAW BITS, not FP compares.
