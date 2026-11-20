@@ -2119,6 +2119,10 @@ bool nk_ui_scroll_state(const NkUi *ui, NkUiId id, NkUiScrollState *out) {
     return ui != NULL && nk_ui_clay_scroll_state(ui->clay, id, out);
 }
 
+bool nk_ui_element_rect(const NkUi *ui, NkUiId id, NkUiRect *out) {
+    return ui != NULL && out != NULL && nk_ui_clay_element_rect(ui->clay, id, out);
+}
+
 bool nk_ui_scroll_in_motion(const NkUi *ui) {
     return ui != NULL && ui->scroll_moving;
 }

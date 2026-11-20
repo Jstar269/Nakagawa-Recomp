@@ -1906,6 +1906,111 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     nk_ui_end_container(ui);
 }
 
+/* One server in the Online play picker (#1139): a button with the server's name, its host on a
+   line of its own under it, and where the row comes from under that. The host is what a player
+   reads before agreeing to connect, so nothing in the row is cut: every line wraps whole at any
+   window and text size (a word wider than the row breaks inside it), and a name too wide for
+   one button becomes the first line under a CHOOSE button instead. `cell` is the button width
+   the picker's rows share. Returns true when the button is activated. */
+static bool settings_online_play_server_row(NkUi *ui, NkUiId id, NkUiId text_id,
+                                            const char *name, const char *host,
+                                            const char *line, bool current, float width,
+                                            float cell) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    NkUiLayout row = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(), NK_UI_SPACE_1);
+    NkUiTextStyle host_style = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
+    NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->muted);
+    const bool named = name[0] != '\0' && nk_ui_button_width(ui, name, 0u) <= cell;
+    bool pressed = false;
+    row.padding_bottom = NK_UI_SPACE_3;
+    if (!nk_ui_begin_container(ui, text_id, &row, NULL)) return false;
+    {
+        NkUiLayout box = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(cell), sizing_fit(), 0.0f);
+        if (nk_ui_begin_container(ui, text_id + 1u, &box, NULL)) {
+            pressed = nk_ui_button(ui, id, named ? name : "Choose",
+                                   NK_UI_BUTTON_GROW | (current ? NK_UI_BUTTON_PRIMARY : 0u));
+            nk_ui_end_container(ui);
+        }
+    }
+    if (!named && name[0] != '\0') {
+        nk_ui_text(ui, text_id + 2u, nk_ui_text_break(ui, name, &host_style, width), &host_style);
+    }
+    nk_ui_text(ui, text_id + 3u, nk_ui_text_break(ui, host, &host_style, width), &host_style);
+    if (line[0] != '\0') {
+        nk_ui_text(ui, text_id + 4u, nk_ui_text_break(ui, line, &text, width), &text);
+    }
+    nk_ui_end_container(ui);
+    return pressed;
+}
+
+/* The picker row focus last moved to. Focus brings only the row's button into view, which
+   leaves the host and the line under it past the card's edge as focus moves down; for the
+   frames just after a move the whole row is brought into view (its top first where it is
+   taller than the card), and never later, so the wheel and a drag still scroll freely. */
+static struct {
+    const NkUi *ui;
+    NkUiId focused;
+    int frames;
+} s_online_play_row;
+
+static void settings_online_play_reveal_row(NkUi *ui, size_t count) {
+    const NkUiId focused = nk_ui_focused(ui);
+    NkUiId row = 0u;
+    NkUiRect card;
+    NkUiRect rect;
+    NkUiScrollState state;
+    float offset;
+    float top;
+    if (s_online_play_row.ui != ui || s_online_play_row.focused != focused) {
+        s_online_play_row.ui = ui;
+        s_online_play_row.focused = focused;
+        s_online_play_row.frames = 3;
+    }
+    if (s_online_play_row.frames <= 0) return;
+    --s_online_play_row.frames;
+    if (focused >= PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE &&
+        focused < PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + (NkUiId)count) {
+        row = (NkUiId)(SET_ID_TEXT + 0x800u + 8u * (focused - PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE));
+    } else if (focused == PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER) {
+        row = SET_ID_TEXT + 0x7F0u;
+    }
+    if (row == 0u || !nk_ui_element_rect(ui, row, &rect) ||
+        !nk_ui_element_rect(ui, FLOW_ID_CARD, &card) ||
+        !nk_ui_scroll_state(ui, FLOW_ID_CARD, &state)) {
+        return;
+    }
+    offset = state.offset;
+    if (rect.y + rect.h > card.y + card.h) offset += rect.y + rect.h - (card.y + card.h);
+    top = rect.y - (offset - state.offset);
+    if (top < card.y) offset -= card.y - top;
+    if (offset > state.max_offset) offset = state.max_offset;
+    if (offset < 0.0f) offset = 0.0f;
+    if (fabsf(offset - state.offset) >= 0.5f) nk_ui_scroll_to(ui, FLOW_ID_CARD, offset);
+}
+
+/* The consent card is taller than the window at the smallest window or a larger text size, and
+   its focus starts on its buttons at the foot. Page Up and Page Down (the pad's triggers) scroll
+   it a view less one line, so its first lines and the server's name can be read by keyboard or
+   controller before choosing; the wheel, a drag and touch scroll it as any card does. Returns
+   whether the card scrolls, so it can say how. */
+static bool settings_online_play_card_scroll(NkUi *ui) {
+    NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+    float line = nk_ui_line_height(ui, &body);
+    NkUiScrollState state;
+    NkUiNavDir page;
+    const bool known = nk_ui_scroll_state(ui, FLOW_ID_CARD, &state);
+    float offset = known ? state.offset : 0.0f;
+    const float start = offset;
+    while (nk_ui_take_event(ui, NK_UI_EV_PAGE, &page)) {
+        float step = known && state.viewport > 2.0f * line ? state.viewport - line : line;
+        offset += page == NK_UI_DIR_RIGHT ? step : -step;
+    }
+    if (known && offset > state.max_offset) offset = state.max_offset;
+    if (offset < 0.0f) offset = 0.0f;
+    if (fabsf(offset - start) >= 0.5f) nk_ui_scroll_to(ui, FLOW_ID_CARD, offset);
+    return known && state.max_offset > 0.5f;
+}
+
 static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float width,
                             float height, PlayerUiAction *result) {
     static const NkUiPromptItem prompts[] = {
@@ -2043,7 +2148,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         char console_line[160];
         const char *switch_sentence = model->online_play ? SCR_ONLINE_PLAY_ON_SENTENCE
                                                          : SCR_ONLINE_PLAY_OFF_SENTENCE;
-        char server_sentence[192];
+        const char *server = safe_text(model->online_play_server, NK_ADHOC_DEFAULT_SERVER);
+        const char *server_name = safe_text(model->online_play_server_label, "Your own server");
+        char server_label[NK_ADHOC_SERVER_MAX_LEN + 16u];
+        char server_sentence[NK_ADHOC_SERVER_MAX_LEN + 192u];
+        bool server_fits;
         if (model->online_play_console_id_shown) {
             snprintf(console_line, sizeof(console_line),
                      "Console ID: %s. Nakagawa made it at random for this PC's games. It is not "
@@ -2054,34 +2163,48 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                      "Console ID: none yet. Nakagawa makes a random one the first time a game "
                      "asks for it. It is not your PC's hardware address.");
         }
-        snprintf(server_sentence, sizeof(server_sentence),
-                 "%s. A community server: Nakagawa does not run it. Choose to pick another.",
-                 safe_text(model->online_play_server_label, "Your own server"));
+        /* The host is never cut: on the button while "Server: host" fits the row, else the
+           button reads "Server: Choose" and the host leads its sentence, which wraps whole. */
+        snprintf(server_label, sizeof(server_label), "Server: %s", server);
+        server_fits = nk_ui_button_width(ui, server_label, 0u) <= inner - 32.0f;
+        if (server_fits) {
+            snprintf(server_sentence, sizeof(server_sentence),
+                     "%s. A community server: Nakagawa does not run it. Choose to pick another.",
+                     server_name);
+        } else {
+            snprintf(server_sentence, sizeof(server_sentence),
+                     "%s: %s. A community server: Nakagawa does not run it. Choose to pick "
+                     "another.",
+                     server, server_name);
+        }
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "Online play", NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_PLAY_LEAD, NK_UI_TYPE_BODY_S, theme->muted);
         if (scr_wizard_box_begin(ui, 0u)) {
             WizardRow rows[3] = {
                 {"Online play", model->online_play ? "On" : "Off", switch_sentence},
-                {"Server", safe_text(model->online_play_server, NK_ADHOC_DEFAULT_SERVER),
-                 server_sentence},
+                {"Server", server_fits ? server : "Choose", server_sentence},
                 {"Port offset", safe_text(model->online_play_port_offset, "10000"),
                  SCR_ONLINE_PLAY_PORT_SENTENCE}
             };
-            WizardColumn column = scr_wizard_column(ui, rows, 3u, inner - 32.0f, false);
-            NkUiTextStyle value_style = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
+            /* A sentence two lines cannot hold moves every sentence under its button, at any
+               text size; so does a host too long for the button, whose sentence then breaks
+               inside the host where it is wider than the row (nk_ui_text_break). */
+            WizardColumn column = scr_wizard_column(ui, rows, 3u, inner - 32.0f, true);
+            const NkUiTextStyle sentence_style = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+            if (!server_fits) {
+                column.stacked = true;
+                rows[1].sentence = nk_ui_text_break(ui, server_sentence, &sentence_style,
+                                                    inner - 32.0f);
+            }
             if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE,
                                   SET_ID_TEXT + 0x600u, "Online play", switch_sentence,
                                   model->online_play, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY);
             }
             if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET,
-                                 SET_ID_TEXT + 0x604u, "Server",
-                                 nk_ui_text_clamp(ui,
-                                                  safe_text(model->online_play_server,
-                                                            NK_ADHOC_DEFAULT_SERVER),
-                                                  &value_style, column.cell * 0.8f, 1),
-                                 server_sentence, false, inner - 32.0f, &column)) {
+                                 SET_ID_TEXT + 0x604u, "Server", rows[1].value,
+                                 rows[1].sentence, false, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY_SERVERS);
             }
             if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT,
@@ -2130,20 +2253,31 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         char server_line[NK_ADHOC_SERVER_MAX_LEN + 96u];
         char nickname_line[96];
         const char *server = safe_text(model->online_play_card_server, NK_ADHOC_DEFAULT_SERVER);
+        const bool scrolls = settings_online_play_card_scroll(ui);
+        const NkUiTextStyle eyebrow_style = nk_ui_type(NK_UI_TYPE_EYEBROW, 0u);
+        const NkUiTextStyle line_style = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
         snprintf(server_line, sizeof(server_line),
                  "To do this, Nakagawa connects to %s. This is a community server. Nakagawa does "
                  "not run it.", server);
         snprintf(nickname_line, sizeof(nickname_line), "- Your Nickname: %s",
                  safe_text(model->nickname, NK_NICKNAME_DEFAULT));
-        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, server, theme->info);
+        /* The eyebrow names the server where it fits on its one line; a host too long for it
+           (a player's own) is named whole in the card's first line, broken inside the host
+           where it is wider than the box. */
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND,
+                         nk_ui_text_width(ui, nk_ui_caps(ui, server), &eyebrow_style) +
+                                 2.0f * NK_UI_SPACE_5 <= inner
+                             ? server : "Online play",
+                         theme->info);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "Online play", NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD,
                         "Online play lets this game find other players over the internet, the "
                         "same way it finds players nearby over local wireless.",
                         NK_UI_TYPE_BODY_S, theme->paper);
         if (scr_wizard_box_begin(ui, 0u)) {
-            nk_ui_text_role(ui, SET_ID_TEXT + 0x780u, server_line, NK_UI_TYPE_BODY_S,
-                            theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x780u,
+                            nk_ui_text_break(ui, server_line, &line_style, inner - 32.0f),
+                            NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x781u, "What Nakagawa sends to that server",
                             NK_UI_TYPE_BODY, theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x782u, nickname_line, NK_UI_TYPE_BODY_S,
@@ -2185,6 +2319,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                             NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_end_container(ui);
         }
+        if (scrolls) {
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x78Du,
+                            "Page Up and Page Down, or the triggers, scroll this card.",
+                            NK_UI_TYPE_CAPTION, theme->muted);
+        }
         {
             NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                          NK_UI_SPACE_3);
@@ -2209,40 +2348,48 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
     case PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS: {
         /* The server picker: the shipped servers, then PPSSPP's list, then the player's own.
            Choosing one opens the consent card for it; nothing here connects. */
-        WizardRow rows[PLAYER_UI_ONLINE_PLAY_SERVERS_MAX + 1u];
+        static const char own_label[] = "Your own server: Type it";
         size_t count = model->online_play_servers ? model->online_play_server_count : 0u;
-        WizardColumn column;
-        NkUiTextStyle value_style = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
+        const float row_width = inner - 32.0f;
+        /* Every row's button is as wide as the widest name up to six tenths of the row, so they
+           line up (a longer name, from the list, is the line under a CHOOSE button); each row's
+           lines are stacked under its button at full width, so none is cut. */
+        WizardColumn column = {220.0f, true};
         if (count > PLAYER_UI_ONLINE_PLAY_SERVERS_MAX) count = PLAYER_UI_ONLINE_PLAY_SERVERS_MAX;
+        for (size_t i = 0u; i <= count; ++i) {
+            const char *label = i < count ? safe_text(model->online_play_servers[i].name, "")
+                                          : own_label;
+            float need = nk_ui_button_width(ui, label, 0u);
+            float most = i < count ? 0.6f * row_width : row_width;
+            if (need > column.cell && need <= most) column.cell = need;
+        }
+        if (nk_ui_button_width(ui, "Choose", 0u) > column.cell) {
+            column.cell = nk_ui_button_width(ui, "Choose", 0u);
+        }
+        if (column.cell > row_width) column.cell = row_width;
+        settings_online_play_reveal_row(ui, count);
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Online play", theme->accent_dark);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "Choose a server", NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_PLAY_SERVERS_LEAD, NK_UI_TYPE_BODY_S,
                         theme->muted);
         if (scr_wizard_box_begin(ui, 0u)) {
             for (size_t i = 0u; i < count; ++i) {
-                rows[i] = (WizardRow){safe_text(model->online_play_servers[i].name, ""),
-                                      safe_text(model->online_play_servers[i].host, ""),
-                                      safe_text(model->online_play_servers[i].line, "")};
-            }
-            rows[count] = (WizardRow){"Your own server", "Type it", SCR_ONLINE_PLAY_OWN_SENTENCE};
-            column = scr_wizard_column(ui, rows, count + 1u, inner - 32.0f, false);
-            for (size_t i = 0u; i < count; ++i) {
                 const char *host = safe_text(model->online_play_servers[i].host, "");
                 bool current = model->online_play && model->online_play_server &&
                                strcmp(host, model->online_play_server) == 0;
-                if (scr_wizard_value(ui, (NkUiId)(PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + i),
-                                     (NkUiId)(SET_ID_TEXT + 0x800u + 4u * (NkUiId)i),
-                                     rows[i].name,
-                                     nk_ui_text_clamp(ui, host, &value_style, column.cell * 0.8f,
-                                                      1),
-                                     rows[i].sentence, current, inner - 32.0f, &column)) {
+                if (settings_online_play_server_row(
+                        ui, (NkUiId)(PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + i),
+                        (NkUiId)(SET_ID_TEXT + 0x800u + 8u * (NkUiId)i),
+                        safe_text(model->online_play_servers[i].name, ""), host,
+                        safe_text(model->online_play_servers[i].line, ""), current, row_width,
+                        column.cell)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER);
                     result->choice_index = (int)i;
                 }
             }
             if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
                                  SET_ID_TEXT + 0x7F0u, "Your own server", "Type it",
-                                 SCR_ONLINE_PLAY_OWN_SENTENCE, false, inner - 32.0f, &column)) {
+                                 SCR_ONLINE_PLAY_OWN_SENTENCE, false, row_width, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER);
             }
             nk_ui_text_role(ui, SET_ID_TEXT + 0x7F4u,
