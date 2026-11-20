@@ -466,6 +466,25 @@ and so on) carries Geist's licence text and then Liberation's. Both faces are
 converted to PGF, scaled horizontally (`--scale-x`), emboldened and cut to
 their ink as the Liberation faces are; no glyph is edited by hand.
 
+**Measured horizontal metrics for the Geist faces (#1300).** The four Geist
+fonts then take each character's advance, image width and left from
+`assets/fonts/psp_measured_latin_metrics.json`
+(`docs/cleanroom/PGF_CONVERTER_SPEC.md` section 3, rule 18). Origin: a
+project-owned measurement, labelled `PSP-measured`. The maintainer read the
+Latin fonts `ltn0`, `ltn4`, `ltn8` and `ltn12` of their own PSP-3000
+(firmware 6.61) locally with the project's PGF reader (`src/rt/pgf_public.c`)
+and recorded, for the 318 characters of each font that the stand-ins also
+draw, the character information fields `sfp26AdvanceH` (26.6 pixels),
+`bitmapWidth` and `bitmapLeft` (pixels). The maintainer approved publishing
+exactly these numbers. The file holds no outline, bitmap, hinting or other
+byte of a console font, and none of its values comes from PPSSPP or another
+emulator. A value that did would be labelled `PPSSPP-derived, not
+PSP-measured`, and the converter refuses a table without one of the two
+labels. Each letter keeps Geist's outline, scaled horizontally to the measured
+width without moving its rows. A letter that cannot reach the width that way
+is padded with blank columns when it is narrower, or kept wider and listed in
+the conversion manifest.
+
 The ink targets (`LETTER_INK` in `tools/test_ttf2pgf.py`) are one number per sans-serif face, measured on
 a PSP-3000's own font files, read locally; no font bytes or glyph data are recorded. To
 reproduce a number, read the console's `ltn<N>.pgf` with the project's PGF reader (`tools/nk_core/fonts.py`),

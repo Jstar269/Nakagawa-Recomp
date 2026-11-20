@@ -780,6 +780,17 @@
       }
     },
     {
+      "path": "assets/fonts/psp_measured_latin_metrics.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-measured-latin-metrics-1300",
+        "evidence_tier": "H",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "assets/fonts/ui/chakra-petch/ChakraPetch-Bold.ttf",
       "classification": "upstream_derived",
       "evidence": {

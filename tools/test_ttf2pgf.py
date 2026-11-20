@@ -1929,6 +1929,13 @@ def _convert_arguments(tokens: list[str]) -> dict:
     if "--fit-em" in tokens:
         tokens.remove("--fit-em")
         arguments["fit_em"] = True
+    if "--horizontal-metrics" in tokens:
+        at = tokens.index("--horizontal-metrics")
+        path = tokens[at + 1].replace("$(PSP_MEASURED_LATIN_METRICS)", _makefile_flags("PSP_MEASURED_LATIN_METRICS")[0])
+        slot_at = tokens.index("--horizontal-metrics-slot")
+        arguments["horizontal_metrics"] = ttf2pgf.load_horizontal_metrics(ROOT / path, tokens[slot_at + 1])
+        for index in sorted((at, slot_at), reverse=True):
+            del tokens[index:index + 2]
     for flag, value in zip(tokens[0::2], tokens[1::2], strict=True):
         arguments[_CONVERT_FLAGS[flag]] = int(value)
     return arguments
@@ -2206,6 +2213,10 @@ class InkTrimTests(unittest.TestCase):
         for name, conversion in self._conversions().items():
             with self.subTest(conversion=name):
                 loose: list[str] = []
+                # Rule 18 pads an image its outline cannot fill to the console's measured width with
+                # blank columns, which HorizontalMetricsTests checks; its rows stay tight.
+                record = conversion.manifest["parameters"].get("horizontal_metrics", {})
+                padded = set(record.get("width_padded_codes", []))
                 for glyph in conversion.glyphs:
                     width, height, samples = glyph.width, glyph.height, glyph.samples
                     if width == 0 or height == 0:
@@ -2217,6 +2228,8 @@ class InkTrimTests(unittest.TestCase):
                         "first row": samples[:width],
                         "last row": samples[-width:],
                     }
+                    if glyph.code in padded:
+                        del edges["first column"], edges["last column"]
                     loose += [f"U+{glyph.code:04X} {edge}" for edge, line in edges.items() if not any(line)]
                 self.assertEqual(loose, [], f"{len(loose)} empty image edges")
 
@@ -2316,7 +2329,7 @@ class OvershootSnapTests(CliRefusalMixin):
 
     def test_the_option_is_recorded_and_absent_when_off(self) -> None:
         conversion = self._convert(13, snap_overshoot=3)
-        self.assertEqual(conversion.manifest["converter"]["version"], "0.9.0")
+        self.assertEqual(conversion.manifest["converter"]["version"], "0.10.0")
         self.assertEqual(conversion.manifest["parameters"]["snap_overshoot"], {
             "unit": "sub-sample (1/8 pixel)", "threshold": 3,
             "zones": {"baseline": 0, "x_height": 1082, "cap_height": 1409},
@@ -2603,6 +2616,163 @@ class SpacingAndFallbackOptionTests(CliRefusalMixin):
         font = ttf2pgf._Ttf(NOTO_JP_FONT.read_bytes())
         self.assertIsNotNone(font.glyph_id(0x4E00))
         self.assertNotIn("STAT", ttf2pgf.VARIABLE_FONT_TABLES)
+
+
+class HorizontalMetricsTests(CliRefusalMixin):
+    """Spec section 3 rule 18 (#1300): the Geist stand-ins take each character's advance, image width
+    and left from the console's own Latin fonts, while every letter keeps Geist's outline.
+
+    The table assets/fonts/psp_measured_latin_metrics.json holds those three numbers per character and
+    nothing else. They are PSP-measured: read from the Latin fonts ltn0, ltn4, ltn8 and ltn12 of
+    the maintainer's own PSP-3000 (firmware 6.61) through the project's PGF reader, as the
+    sceFontGetCharInfo fields sfp26AdvanceH, bitmapWidth and bitmapLeft. None of them is
+    PPSSPP-derived; a table that were would have to say "PPSSPP-derived, not PSP-measured".
+    """
+
+    TABLE = ROOT / "assets" / "fonts" / "psp_measured_latin_metrics.json"
+
+    def setUp(self) -> None:
+        self.data = FONT.read_bytes()
+        self.pin = load_pin(PIN, self.data)
+        self.tmp = Path(tempfile.mkdtemp(prefix="ttf2pgf-metrics-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _table(self, slot_values: dict[str, list], **overrides: object) -> Path:
+        document: dict = {
+            "schema": ttf2pgf.HORIZONTAL_METRICS_SCHEMA,
+            "evidence": "PSP-measured",
+            "fields": [{"name": name} for name in ttf2pgf.HORIZONTAL_METRICS_FIELDS],
+            "slots": {"ltn0": slot_values},
+        }
+        document.update(overrides)
+        path = self.tmp / "metrics.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        return path
+
+    def _convert(self, table: ttf2pgf.HorizontalMetrics | None = None) -> ttf2pgf.Conversion:
+        return convert(self.data, input_path=str(FONT), output_path="out.pgf", codes=(0x41, 0x5A), ppem=16,
+                       pin=self.pin, tracking=5, horizontal_metrics=table)
+
+    def test_the_published_table_is_labelled_psp_measured_and_holds_only_the_three_numbers(self) -> None:
+        document = json.loads(self.TABLE.read_text(encoding="utf-8"))
+        self.assertEqual(set(document), {"schema", "evidence", "description", "measurement", "fields", "slots"})
+        self.assertEqual(document["schema"], "nk-psp-horizontal-metrics/v1")
+        self.assertEqual(document["evidence"], "PSP-measured")
+        self.assertIn("None comes from PPSSPP", document["description"])
+        measurement = document["measurement"]
+        self.assertEqual((measurement["device"], measurement["firmware"]), ("PSP-3000", "6.61"))
+        self.assertEqual(measurement["fonts"], {f"ltn{i}": f"flash0:/font/ltn{i}.pgf" for i in (0, 4, 8, 12)})
+        self.assertEqual([(field["name"], field["char_info_field"]) for field in document["fields"]], [
+            ("advance_h_26_6", "sfp26AdvanceH"), ("bitmap_width", "bitmapWidth"), ("bitmap_left", "bitmapLeft"),
+        ])
+        self.assertEqual(set(document["slots"]), {"ltn0", "ltn4", "ltn8", "ltn12"})
+        codes = set(document["slots"]["ltn0"])
+        for slot in document["slots"]:
+            with self.subTest(slot=slot):
+                table = ttf2pgf.load_horizontal_metrics(self.TABLE, slot)
+                self.assertEqual(table.evidence, "PSP-measured")
+                self.assertEqual(set(document["slots"][slot]), codes)
+                self.assertIn(ord("A"), table.values)
+                for values in table.values.values():
+                    self.assertEqual(len(values), 3)
+
+    def test_each_geist_face_takes_the_measured_advance_width_and_left(self) -> None:
+        for index, slot in ((0, "ltn0"), (4, "ltn4"), (8, "ltn8"), (12, "ltn12")):
+            with self.subTest(index=index):
+                tokens = _makefile_flags(f"PROJECT_LATIN_{index}_SPACING")
+                self.assertEqual(tokens[tokens.index("--horizontal-metrics-slot") + 1], slot)
+                conversion = ProjectLatinStrikeTests._convert(index)
+                record = conversion.manifest["parameters"]["horizontal_metrics"]
+                self.assertEqual((record["path"], record["slot"], record["evidence"]),
+                                 (self.TABLE.name, slot, "PSP-measured"))
+                self.assertEqual(record["sha256"], hashlib.sha256(self.TABLE.read_bytes()).hexdigest())
+                measured = ttf2pgf.load_horizontal_metrics(self.TABLE, slot).values
+                wider = set(record["width_not_met_codes"])
+                glyphs = _glyph_map(conversion.glyphs)
+                checked = [code for code in glyphs if code in measured]
+                self.assertEqual(len(checked), record["codes_applied"])
+                for code in checked:
+                    advance, width, left = measured[code]
+                    glyph = glyphs[code]
+                    self.assertEqual(glyph.advance_x, advance, f"U+{code:04X} advance")
+                    if width and glyph.width:
+                        self.assertEqual(glyph.adjust_x, left, f"U+{code:04X} left")
+                        if code not in wider:
+                            self.assertEqual(glyph.width, width, f"U+{code:04X} width")
+                # The alphabet meets the width except where the outline cannot narrow without moving
+                # a row (l); every miss is listed in the manifest, never hidden.
+                letters = {ord(c) for c in string.ascii_letters}
+                self.assertLessEqual(wider & letters, {ord("l")})
+
+    def test_measured_codes_take_the_table_and_others_keep_the_options(self) -> None:
+        plain = _glyph_map(self._convert().glyphs)
+        table = ttf2pgf.load_horizontal_metrics(self._table({
+            "U+0048": [700, plain[0x48].width, 2],  # H: its own width, so its own image, moved to left 2
+            "U+004F": [900, plain[0x4F].width + 2, 1],  # O: two pixels wider than drawn
+            "U+0020": [256, 0, 0],  # outside the converted range: ignored
+        }), "ltn0")
+        conversion = self._convert(table)
+        glyphs = _glyph_map(conversion.glyphs)
+        self.assertEqual((glyphs[0x48].advance_x, glyphs[0x48].adjust_x), (700, 2))
+        self.assertEqual(glyphs[0x48].samples, plain[0x48].samples, "the font's own image")
+        self.assertEqual((glyphs[0x4F].advance_x, glyphs[0x4F].width, glyphs[0x4F].adjust_x),
+                         (900, plain[0x4F].width + 2, 1))
+        self.assertEqual(glyphs[0x4F].height, plain[0x4F].height, "only the horizontal scale moves")
+        self.assertEqual(glyphs[0x41], plain[0x41], "a code the table lacks keeps --tracking and its image")
+        record = conversion.manifest["parameters"]["horizontal_metrics"]
+        self.assertEqual((record["codes"], record["codes_applied"], record["evidence"]), (3, 2, "PSP-measured"))
+        self.assertEqual(record["fields"], ["advance_h_26_6", "bitmap_width", "bitmap_left"])
+        self.assertIn("U+004F", record["width_factors"])
+        self.assertNotIn("horizontal_metrics", self._convert().manifest["parameters"])
+        self.assertEqual(conversion.manifest["converter"]["version"], "0.10.0")
+
+    def test_a_narrowed_glyph_keeps_the_rows_its_ink_reaches(self) -> None:
+        plain = _glyph_map(self._convert().glyphs)
+        table = ttf2pgf.load_horizontal_metrics(self._table(
+            {f"U+{code:04X}": [600, max(1, plain[code].width - 2), 0] for code in range(0x41, 0x5B)}), "ltn0")
+        glyphs = _glyph_map(self._convert(table).glyphs)
+
+        def rows(glyph: Glyph) -> tuple[int, int] | None:
+            found: tuple[int, int] | None = ttf2pgf._half_coverage_rows(
+                (0, cast(int, glyph.adjust_y), glyph.width, glyph.height, glyph.samples))
+            return found
+
+        for code in range(0x41, 0x5B):
+            with self.subTest(code=f"U+{code:04X}"):
+                self.assertEqual(rows(glyphs[code]), rows(plain[code]))
+
+    def test_an_image_its_outline_cannot_fill_is_padded_with_blank_columns(self) -> None:
+        image = (0, 5, 2, 2, (1, 2, 3, 4))
+        self.assertEqual(ttf2pgf._pad_columns(image, 5), (-1, 5, 5, 2, (0, 1, 2, 0, 0, 0, 3, 4, 0, 0)))
+
+    def test_malformed_tables_are_named_refusals(self) -> None:
+        good = {"U+0048": [700, 9, 1]}
+        cases: dict[str, tuple[dict[str, list], dict[str, object]]] = {
+            "schema": ({}, {"schema": "nk-psp-horizontal-metrics/v0"}),
+            "evidence": ({}, {"evidence": "guessed"}),
+            "fields": ({}, {"fields": [{"name": "advance_h_26_6"}]}),
+            "key": ({"0048": [700, 9, 1]}, {}),
+            "count": ({"U+0048": [700, 9]}, {}),
+            "type": ({"U+0048": [700, 9.5, 1]}, {}),
+            "range": ({"U+0048": [700, 400, 1]}, {}),
+            "empty-left": ({"U+0048": [700, 0, 3]}, {}),
+        }
+        for name, (values, overrides) in cases.items():
+            with self.subTest(case=name):
+                path = self._table(values or good, **overrides)
+                with self.assertRaises(TtfConvertError) as caught:
+                    ttf2pgf.load_horizontal_metrics(path, "ltn0")
+                self.assertEqual(caught.exception.reason, "horizontal-metrics-invalid")
+        with self.assertRaises(TtfConvertError) as caught:
+            ttf2pgf.load_horizontal_metrics(self._table(good), "ltn4")
+        self.assertEqual(caught.exception.reason, "horizontal-metrics-invalid")
+
+    def test_the_cli_needs_the_table_and_its_slot_together(self) -> None:
+        table = self._table({"U+0048": [700, 9, 1]})
+        self.assert_cli_refused("conflicting-parameters", self.tmp / "out.pgf", FONT, "--codes", "0x48-0x48",
+                                "--horizontal-metrics", table)
+        self.assert_cli_refused("horizontal-metrics-invalid", self.tmp / "out.pgf", FONT, "--codes", "0x48-0x48",
+                                "--horizontal-metrics", table, "--horizontal-metrics-slot", "ltn8")
 
 
 class NameDenylistTests(unittest.TestCase):
