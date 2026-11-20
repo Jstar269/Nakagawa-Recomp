@@ -53,6 +53,11 @@ static uint32_t h_ControlledUnsupported(CpuState *s);
 #define HLE_CAP 1024
 static HleEntry s_hle[HLE_CAP];
 static int s_hle_n = 0;
+/* Set when a registration did not fit in s_hle: sr_hle_init then stops the run by name. */
+static int s_hle_registry_full = 0;
+#ifdef SR_HLE_THREAD_SELFTEST
+int sr_hle_test_registered_count(void) { return s_hle_n; }
+#endif
 /* s_hle's indices sorted by NID, so a lookup is a binary search instead of a walk of every
  * handler on each syscall. s_hle itself keeps registration order. Guarded by hle_lock. */
 static uint16_t s_hle_by_nid[HLE_CAP];
@@ -273,6 +278,12 @@ static void sr_hle_register_entry(uint32_t nid, const char *name, HleFn fn,
         atomic_store_explicit(&e->unsupported_state, 0u, memory_order_release);
         e->unverified = (unsigned char)hle_nid_unverified(nid);
         atomic_store_explicit(&e->unverified_noted, 0u, memory_order_release);
+    } else {
+        /* A handler the table cannot hold would later stop as "unimplemented" although it
+         * exists: name it now, and sr_hle_init stops the run by name. */
+        fprintf(stderr, "HLE: registry full (HLE_CAP=%d), %s (0x%08x) not registered\n",
+                HLE_CAP, name ? name : "?", nid);
+        s_hle_registry_full = 1;
     }
     hle_unlock();
 }
@@ -4529,6 +4540,14 @@ void sr_hle_init(void) {
     (void)ge_timing_on();
     sched_set_vtimer_hooks(vtimer_next_deadline_us, vtimer_service_one);
 #endif
+    if (s_hle_registry_full) {
+        /* Each dropped handler was named as it was refused. A run without them would stop
+         * later at an "unimplemented" NID whose handler exists, so it stops here instead. */
+        fprintf(stderr, "HLE_REGISTRY_FULL: more handlers than HLE_CAP=%d were registered; raise "
+                        "HLE_CAP in src/rt/hle.c; the run stops here\n", HLE_CAP);
+        fflush(stderr);
+        exit(1);
+    }
     atomic_store_explicit(&s_hle_init_state, 2, memory_order_release);
 }
 

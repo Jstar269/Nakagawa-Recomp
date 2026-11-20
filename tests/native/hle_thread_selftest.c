@@ -63369,6 +63369,12 @@ static int run_atrac_zero_frame_child(const char *route) {
  * sees that the stop reached the dump's finish before the process ended. */
 #define TEXDUMP_STOP_CHILD "--texdump-stop-child="
 
+/* The handler the regfull route registers past HLE_CAP; never dispatched. */
+static uint32_t hle_registry_fill_handler(CpuState *s) {
+    (void)s;
+    return 0u;
+}
+
 /* The child changes directory as it starts, so its files are named from the parent's scratch root,
  * passed down in its argument after the route: --texdump-stop-child=<route>:<root>. */
 static int texdump_stop_paths(char *probe, char *log, size_t capacity, const char *root, const char *route) {
@@ -63443,8 +63449,61 @@ static int run_texdump_stop_child(const char *arg) {
             fclose(f);
             (void)sr_route_load(pad);
         }
+    } else if (strcmp(route, "regfull") == 0) {
+        /* Synthetic NIDs no table uses, past HLE_CAP: each one the registry cannot hold is
+         * named as it is refused (audit 2026-11-17, F-dc2bea8c). Not a stop: returns 0. */
+        extern int sr_hle_test_registered_count(void);
+        for (uint32_t i = 0; i <= 1024u; i++)
+            sr_hle_register(0x7e570000u + i, "sceTestRegistryFill", hle_registry_fill_handler);
+        fflush(stderr);
+        return sr_hle_test_registered_count() == 1024 ? 0 : 97;
     }
     return 98;   /* the stop did not end the run */
+}
+
+/* Read a stop child's whole log (or CSV) into text; returns the byte count. */
+static size_t run_end_read_file(const char *path, char *text, size_t capacity) {
+    FILE *f = fopen(path, "rb");
+    size_t n = f ? fread(text, 1, capacity - 1u, f) : 0u;
+    if (f) fclose(f);
+    text[n] = '\0';
+    return n;
+}
+
+/* Run one stop child (run_texdump_stop_child's route) and read its log into text; returns the
+ * child's exit status, or -2 when its paths do not fit. */
+static int run_end_child(const char *self, const char *root, const char *route, char *text,
+                         size_t capacity) {
+    char probe[MAX_PATH], log[MAX_PATH], mode[MAX_PATH + 64];
+    text[0] = '\0';
+    const int m = snprintf(mode, sizeof(mode), "%s%s:%s", TEXDUMP_STOP_CHILD, route, root);
+    if (!self || m <= 0 || (size_t)m >= sizeof(mode) ||
+        !texdump_stop_paths(probe, log, sizeof(probe), root, route))
+        return -2;
+    remove(probe);
+    remove(log);
+    const int status = aot_spawn_self(self, mode);
+    (void)run_end_read_file(log, text, capacity);
+    return status;
+}
+
+/* A registration past HLE_CAP is named as it is refused, and sr_hle_init stops by name when
+ * one was (audit 2026-11-17, F-dc2bea8c); the registry this build fills stays below the cap. */
+static void test_registry_full_is_named(const char *self) {
+    extern int sr_hle_test_registered_count(void);
+    static char text[65536];
+    char root[MAX_PATH];
+    const int registered = sr_hle_test_registered_count();
+    expect(registered > 0 && registered < 1024,
+           "the HLE registry holds every handler this build registers, below HLE_CAP=1024");
+    if (!hle_scratch_root(root, sizeof(root))) {
+        expect(0, "registry full: the selftest knows its scratch root");
+        return;
+    }
+    const int status = run_end_child(self, root, "regfull", text, sizeof(text));
+    expect(status == 0 &&
+               strstr(text, "HLE: registry full (HLE_CAP=1024), sceTestRegistryFill (0x7e57") != NULL,
+           "a registration past HLE_CAP is named, not dropped without a word");
 }
 
 static void test_texdump_finished_by_run_stops(const char *self) {
@@ -64047,6 +64106,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_mp3_loadexec_reset();
     test_mp3_notify_past_area_end_reported();
     test_texdump_finished_by_run_stops(argc > 0 ? argv[0] : NULL);
+    test_registry_full_is_named(argc > 0 ? argv[0] : NULL);
     test_td24d_hle_batch();
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();
