@@ -1340,6 +1340,10 @@ static void title_hle_write_cstr(uint32_t addr, const char *text) {
 
 static void test_guest_module_load_binding(void);
 static int runtime_module_path(char *out, size_t size, const char *file);
+/* The runtime's UTF-8 host-path layer (hle.c): the guest-module fixtures name SR_MODULE_DIR and
+ * write their files through it, as the loader reads them. */
+int sr_utf8_env_alloc(const wchar_t *name, char **value_out, int *present_out);
+FILE *sr_fopen_utf8(const char *path, const wchar_t *mode);
 
 /* #363: no title configuration arms an HLE display assist. For every profile the
  * production sceDisplaySetMode keeps its PSP success result and dispatches no guest body,
@@ -1564,7 +1568,9 @@ static int write_synthetic_guest_prx(const char *path) {
     fixture_wr32(strtab + 20, (uint32_t)sizeof(section_names));
     fixture_wr32(strtab + 32, 1);
 
-    FILE *f = fopen(path, "wb");
+    /* path is UTF-8 under SR_MODULE_DIR (runtime_module_path), which may hold characters
+     * outside the ANSI code page. */
+    FILE *f = sr_fopen_utf8(path, L"wb");
     if (!f) return 0;
     size_t written = fwrite(image, 1, sizeof(image), f);
     int close_result = fclose(f);
@@ -2296,11 +2302,18 @@ static int runtime_module_identity(const char *path, SrModuleCode *code) {
  * the title-config driver names. Unset or empty, the path is empty (nothing opens), never
  * "/file" at the filesystem root. Returns 1 when the directory is named and the path fits. */
 static int runtime_module_path(char *out, size_t size, const char *file) {
-    const char *root = getenv("SR_MODULE_DIR");
+    /* Read as UTF-8 the way the loader reads it, so a directory outside the ANSI code page is
+     * the one the fixture is written in. */
+    char *root = NULL;
+    int present = 0;
     if (!size) return 0;
     out[0] = '\0';
-    if (!root || !root[0]) return 0;
+    if (!sr_utf8_env_alloc(L"SR_MODULE_DIR", &root, &present) || !present || !root || !root[0]) {
+        free(root);
+        return 0;
+    }
     int written = snprintf(out, size, "%s/%s", root, file);
+    free(root);
     if (written <= 0 || (size_t)written >= size) {
         out[0] = '\0';
         return 0;
