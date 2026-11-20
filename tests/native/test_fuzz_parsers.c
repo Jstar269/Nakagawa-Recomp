@@ -4323,10 +4323,10 @@ static FuzzByteBuffer make_xb_members(const FuzzVfsMember *members, size_t count
 
 /* The archive key rule as archive_vfs.c states it: separators '/' or '\\', runs of them
  * collapsed and leading ones dropped, ASCII letters folded to lower case; a Shift-JIS
- * pair (a lead byte 0x81-0x9f or 0xe0-0xfc, then a trail byte 0x40-0x7e or 0x80-0xfc, or
- * the '/' a guest key folds a trail 0x5c into) is one unit, its trail byte folded like a
- * letter and never a separator; an empty, "." or ".." component or a trailing separator
- * has no key. */
+ * pair (a lead byte 0x81-0x9f or 0xe0-0xfc, then a trail byte 0x40-0x7e or 0x80-0xfc) is
+ * one unit kept byte for byte, its trail byte neither folded nor a separator (audit
+ * 2026-11-17 F-27cbd9cd); an empty, "." or ".." component or a trailing separator has no
+ * key. */
 static bool fuzz_vfs_fold(const char *path, char *out, size_t cap) {
     const char *p = path;
     size_t n = 0, component = 0;
@@ -4335,9 +4335,7 @@ static bool fuzz_vfs_fold(const char *path, char *out, size_t cap) {
         unsigned char lead = (unsigned char)p[0];
         if (((lead >= 0x81u && lead <= 0x9fu) || (lead >= 0xe0u && lead <= 0xfcu)) && p[1]) {
             unsigned char trail = (unsigned char)p[1];
-            if (trail == '/') trail = 0x5cu;
             if ((trail >= 0x40u && trail <= 0x7eu) || (trail >= 0x80u && trail <= 0xfcu)) {
-                if (trail >= 'A' && trail <= 'Z') trail = (unsigned char)(trail + 32u);
                 if (n + 2u >= cap) return false;
                 out[n++] = (char)lead;
                 out[n++] = (char)trail;
@@ -4389,12 +4387,22 @@ static void fuzz_vfs_member_path(char *path, size_t cap) {
 }
 
 /* A query for a stored path: letters flipped in case, separators turned to '\\' or
- * doubled, and a leading separator. Its fold equals the stored path's. */
+ * doubled, and a leading separator; a Shift-JIS pair is copied as it is, since its trail
+ * byte is part of the character. Its fold equals the stored path's. */
 static void fuzz_vfs_query(const char *path, char *out, size_t cap) {
     size_t n = 0;
     if (fuzz_rand32() & 1u) out[n++] = fuzz_rand32() & 1u ? '/' : '\\';
     for (const char *p = path; *p && n + 3u < cap; p++) {
         char c = *p;
+        unsigned char lead = (unsigned char)c;
+        unsigned char trail = (unsigned char)p[1];
+        if (((lead >= 0x81u && lead <= 0x9fu) || (lead >= 0xe0u && lead <= 0xfcu)) &&
+            ((trail >= 0x40u && trail <= 0x7eu) || (trail >= 0x80u && trail <= 0xfcu))) {
+            out[n++] = c;
+            out[n++] = p[1];
+            p++;
+            continue;
+        }
         if (c == '/') {
             out[n++] = fuzz_rand32() & 1u ? '/' : '\\';
             if (fuzz_rand32() % 4u == 0u) out[n++] = '/';
