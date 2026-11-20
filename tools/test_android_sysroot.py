@@ -21,10 +21,12 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import android_sysroot as sysroot  # noqa: E402
+from nk_core.git_isolation import isolated_git_env  # noqa: E402
 
 CRT_C = b"void nk_crt_marker(void) {}\n"
 CRT_S = b'#include <private/bionic_asm.h>\n.section .note.android.ident,"a",%note\n.long PLATFORM_SDK_VERSION\n'
@@ -79,7 +81,7 @@ EXTRA_PINS = {path: hashlib.sha256(data).hexdigest() for path, data in EXTRA.ite
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-c", "core.autocrlf=false", "-C", str(repo), *args],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, env=isolated_git_env(),
     ).stdout.strip()
 
 
@@ -97,20 +99,27 @@ class _SyntheticBionic(unittest.TestCase):
         cls.repo.mkdir()
         _git(cls.repo, "init", "-q")
         _git(cls.repo, "config", "core.ignorecase", "false")
+        git_env = isolated_git_env()
         # Write blobs straight into the index, so a case-insensitive file system cannot
         # merge the two ipt_* names.
         for path, data in FILES.items():
             blob = subprocess.run(
                 ["git", "-C", str(cls.repo), "hash-object", "-w", "--stdin"],
-                input=data, capture_output=True, check=True,
+                input=data, capture_output=True, check=True, env=git_env,
             ).stdout.decode().strip()
             _git(cls.repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
         tree = _git(cls.repo, "write-tree")
-        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
-                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid",
-                   GIT_AUTHOR_DATE="2026-01-01T00:00:00Z", GIT_COMMITTER_DATE="2026-01-01T00:00:00Z")
+        env = {
+            **git_env,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.invalid",
+            "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+            "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+        }
         cls.commit = subprocess.run(
-            ["git", "-C", str(cls.repo), "commit-tree", tree, "-m", "synthetic bionic"],
+            ["git", "-C", str(cls.repo), "commit-tree", "--no-gpg-sign", tree, "-m", "synthetic bionic"],
             capture_output=True, text=True, check=True, env=env,
         ).stdout.strip()
 
@@ -191,6 +200,29 @@ class SysrootTests(_SyntheticBionic):
     def test_the_notices_ship_under_their_source_paths(self) -> None:
         notices = sysroot.notice_entries(sysroot.read_bionic(self.repo, self.commit))
         self.assertEqual(sorted(notices), sorted(f"NOTICES/bionic/{p}" for p in sysroot.NOTICES))
+
+    def test_synthetic_bionic_fixture_ignores_inherited_git_dir(self) -> None:
+        class _IsolatedFixture(_SyntheticBionic):
+            pass
+
+        with tempfile.TemporaryDirectory(prefix="nk-sysroot-bogus-git-") as tmp:
+            bogus_git_dir = Path(tmp) / "not-a-git-dir"
+            bogus_git_dir.write_text("not a git repository\n", encoding="utf-8")
+            bogus_index = Path(tmp) / "not-an-index"
+            try:
+                with patch.dict(
+                    os.environ,
+                    {"GIT_DIR": str(bogus_git_dir), "GIT_INDEX_FILE": str(bogus_index)},
+                ):
+                    _IsolatedFixture.setUpClass()
+                self.assertTrue((_IsolatedFixture.repo / ".git").is_dir())
+                self.assertFalse(bogus_index.exists())
+                self.assertEqual(_IsolatedFixture.commit, self.commit)
+                files = sysroot.read_bionic(_IsolatedFixture.repo, _IsolatedFixture.commit)
+                self.assertEqual(files["libc/include/stdio.h"], b"/* stdio */\r\n")
+            finally:
+                if "_tmp" in _IsolatedFixture.__dict__:
+                    _IsolatedFixture.tearDownClass()
 
 
 class ExtraInputTests(unittest.TestCase):
