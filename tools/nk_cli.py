@@ -4247,6 +4247,9 @@ def cmd_fonts_import(args: argparse.Namespace) -> int:
                 print(f"{outcome['name']}: {outcome['detail']}")
             if result["imported_count"]:
                 print(f"Imported {result['imported_count']} font slot(s) into {result['cache_dir']}.")
+            if result["replacement_count"]:
+                print(f"{result['replacement_count']} of them are replacement fonts, not your PSP's own: "
+                      "games still show text that looks different.")
         if not result["imported_count"]:
             sys.stderr.write("Font import error: no font slot was imported.\n")
             return 1
@@ -4309,7 +4312,7 @@ def cmd_redump_import(args: argparse.Namespace) -> int:
 
 
 def cmd_fonts_status(args: argparse.Namespace) -> int:
-    from nk_core.fonts import SLOTS, latin_index_states, slot_states
+    from nk_core.fonts import SLOTS, latin_index_states, own_font_count, slot_states
 
     try:
         user_root = _user_data_root(args.user_data_root, "Imported fonts")
@@ -4318,9 +4321,11 @@ def cmd_fonts_status(args: argparse.Namespace) -> int:
         return 1
     states = slot_states(user_data_root=user_root, project_root=args.project_root)
     latin = latin_index_states(user_data_root=user_root, project_root=args.project_root)
+    own = own_font_count(states, latin)
     if args.json:
-        result = {slot: states[slot] for slot in SLOTS if slot != "latin"}
+        result: dict[str, Any] = {slot: states[slot] for slot in SLOTS if slot != "latin"}
         result["latin_indices"] = {str(index + 1): latin[index] for index in range(len(latin))}
+        result["own_font_count"] = own
         print(json.dumps(result, indent=2))
     else:
         for slot in ("japanese",):
@@ -4328,6 +4333,9 @@ def cmd_fonts_status(args: argparse.Namespace) -> int:
         for state in latin:
             print(state["detail"])
         print(states["korean"]["detail"])
+        print(f"{own} of the {len(latin) + 2} PSP fonts are your PSP's own; the rest are stand-ins, "
+              "replacement fonts or missing." if own < len(latin) + 2
+              else f"All {own} PSP fonts are your PSP's own.")
     return 0
 
 

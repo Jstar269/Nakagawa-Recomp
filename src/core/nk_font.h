@@ -35,8 +35,11 @@ typedef enum {
 #define NK_FONT_TEXT_MAX 1024
 #define NK_FONT_IMPORT_MAX_FILES 64
 
+/* replacement: the slot's imported font is a replacement font (nk_font_is_replacement), served
+ * but not the user's own PSP font. */
 typedef struct {
     NkFontSource source;
+    bool replacement;
     char detail[NK_FONT_TEXT_MAX];
 } NkFontSlotState;
 
@@ -53,23 +56,41 @@ typedef struct {
     int served_index;
     const char *project_file;
     int project_style_index;
+    bool replacement; /* an imported file serves the index and it is a replacement font */
 } NkFontLatinResolution;
 
 typedef struct {
     NkFontSource source;
     int served_index; /* as in NkFontLatinResolution */
+    bool replacement; /* as in NkFontLatinResolution */
     char detail[160];
 } NkFontLatinIndexState;
 
-/* One PGF file read and checked: the reader's verdict, the file's size and SHA-256, and the
- * slot it names (or -1 with the reason in slot_reason). */
+/* One PGF file read and checked: the reader's verdict, the file's size and SHA-256, the slot it
+ * names (or -1 with the reason in slot_reason), and whether it is a replacement font. */
 typedef struct {
     uint64_t size;
     char sha256[65];
     PgfVerdict verdict;
     int slot;
+    bool replacement;
     char slot_reason[NK_FONT_DETAIL_MAX];
 } NkFontInspection;
+
+/* A replacement font is a valid PGF that is not a PSP's own font: one of the open replacement
+ * fonts other programs ship in place of a PSP's, recognised by its exact SHA-256 (their headers
+ * carry the console fonts' names), or a stand-in this project converted from an open font,
+ * recognised by its font name ("Nakagawa Open ..."). The import accepts it, and every status
+ * says what it is: it is never counted as the user's own. A pure function of the bytes;
+ * sha256_hex is their lowercase digest (NkFontInspection.sha256). tools/nk_core/fonts.py
+ * (is_replacement_font) applies the same rule. */
+bool nk_font_is_replacement(const uint8_t *bytes, size_t length, const char *sha256_hex);
+/* What a status or import line says of a replacement font (tools/nk_core/fonts.py REPLACEMENT_NOTE). */
+#define NK_FONT_REPLACEMENT_NOTE "a replacement font, not your PSP's own"
+/* True when sha256_hex names one of the known replacement files. */
+bool nk_font_known_replacement_sha256(const char *sha256_hex);
+/* The number of known replacement files, for tests. */
+size_t nk_font_known_replacement_count(void);
 
 /* Read one PGF file (at most NK_FONT_PGF_MAX_BYTES) and check it with the native reader and
  * the slot rule. Returns false with out_error naming the failure. */
@@ -113,9 +134,11 @@ typedef enum {
  * the reader as that slot. cache_file must be an open handle on that slot's cache file. Its bytes
  * are read from the start, the handle is left at its start, and the file is hashed on every call.
  * reason must point to reason_len bytes the caller owns; it receives plain text for the caller to
- * name, on every verdict. */
+ * name, on every verdict. On NK_FONT_SLOT_CHECK_OK, *replacement (when not NULL) says whether
+ * those bytes are a replacement font (nk_font_is_replacement); it is false on any other verdict. */
 NkFontSlotCheck nk_font_check_cache_slot_file(const char *user_data_root, NkFontSlot slot,
-                                              FILE *cache_file, char *reason, size_t reason_len);
+                                              FILE *cache_file, char *reason, size_t reason_len,
+                                              bool *replacement);
 
 /* Firmware Latin files are named ltn0.pgf through ltn15.pgf. The filename helper accepts
  * ASCII case variants and returns the file ordinal 0..15, or -1 when the name is not one of
@@ -173,7 +196,8 @@ int nk_font_find_psp_folder_in(const char *const *roots, int root_count, char *o
 int nk_font_find_psp_folder(char *out, size_t out_len);
 
 /* How many of the eighteen PSP system fonts (Japanese, Korean and the sixteen Latin registry
- * indices) are served by the user's own import of exactly that font, not a stand-in. */
+ * indices) are served by the user's own import of exactly that font, not a stand-in and not a
+ * replacement font. */
 int nk_font_own_font_count(const char *user_data_root, const char *project_root);
 /* The same count from states nk_font_slot_states and nk_font_latin_index_states already
  * returned, for a caller that holds them, so the manifests and font files are not read and
@@ -184,21 +208,24 @@ int nk_font_own_font_count_from_states(
 #define NK_FONT_PSP_FONT_COUNT (NK_FONT_LATIN_INDEX_COUNT + 2)
 
 /* One file the import considered. imported is true when this file's bytes now serve the
- * slot named by slot. */
+ * slot named by slot; replacement when the reader accepted it and it is a replacement font. */
 typedef struct {
     char name[256];
     int slot;
     int latin_index; /* 0..15 for a named ltnN.pgf, or -1 for a generic file */
     bool imported;
+    bool replacement;
     char detail[NK_FONT_TEXT_MAX];
 } NkFontFileOutcome;
 
+/* replacement_count: how many of the imported_count files are replacement fonts. */
 typedef struct {
     int file_count;
     NkFontFileOutcome files[NK_FONT_IMPORT_MAX_FILES];
     bool slot_imported[NK_FONT_SLOT_COUNT];
     bool latin_index_imported[NK_FONT_LATIN_INDEX_COUNT];
     int imported_count;
+    int replacement_count;
 } NkFontImportResult;
 
 /* Import the .pgf files directly inside folder (not subfolders). Each file is read and checked
