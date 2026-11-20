@@ -61,6 +61,18 @@ $(CC) $(NC_CFLAGS_PLAYER) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_P
 	tests/native/native_test_isolation.c tests/native/test_cover_art.c $(PLAYER_EXTRA_LIBS) -o $(BUILD_ROOT)/test_cover_art$(EXE_EXT)
 endef
 
+# The Online play server list (src/player/adhoc_servers.c, #1139): fetched only with Online play
+# on, and checked as untrusted input. The transport is an in-process fake; nothing goes online.
+define ADHOC_SERVERS_TEST_BIN_CMD
+$(CC) $(NC_CFLAGS_PLAYER) $(NC_OBJS_PLAYER) src/player/package_builder.c src/player/adhoc_servers.c 	tests/native/test_adhoc_servers.c $(PLAYER_EXTRA_LIBS) -o $(BUILD_ROOT)/test_adhoc_servers$(EXE_EXT)
+endef
+
+.PHONY: adhoc-servers-selftest
+adhoc-servers-selftest: native-core-objects-player
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call ADHOC_SERVERS_TEST_BIN_CMD)
+	$(BUILD_ROOT_RUN)/test_adhoc_servers$(EXE_EXT)
+
 player-state-test-bin:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(call PLAYER_STATE_TEST_BIN_CMD)
@@ -571,6 +583,8 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 		elif [ "$$rc" != 0 ]; then exit "$$rc"; fi
 	$(call COVER_ART_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_cover_art$(EXE_EXT)
+	$(call ADHOC_SERVERS_TEST_BIN_CMD)
+	$(BUILD_ROOT_RUN)/test_adhoc_servers$(EXE_EXT)
 	$(call DISCORD_PRESENCE_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_discord_presence$(EXE_EXT)
 	$(CC) $(NC_CFLAGS_PLAYER) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_PLAYER) \

@@ -166,10 +166,19 @@ privacy notice, and is off by default.
   through an ad hoc relay server, the way PPSSPP does. Nakagawa speaks the protocol of
   [aemu_postoffice](https://github.com/Kethen/aemu_postoffice) at commit `02abf18f`, the version PPSSPP pins, so
   Nakagawa players can play with PPSSPP players, and with PSPs running the aemu plugin, on the same servers.
-- **Servers.** The player ships one server, `socom.cc` (PPSSPP's default), the host issue #1139 names, and
-  lets the user type their own address (`host[:lobby_port[,data_port]]`) with the on-screen keyboard. A
-  user-entered server stays only in the local `settings.json`. Another shipped server needs its own
-  maintainer decision first (`AGENTS.md` section 5).
+- **Servers.** The player ships five servers: `socom.cc` (PPSSPP's default, selected at first) and the four
+  ArenaAnywhere relays `relay.arenaanywhere.site` (Europe), `relay-usa.arenaanywhere.site` (US),
+  `relay-sa.arenaanywhere.site` (South Africa) and `relay-asia.arenaanywhere.site` (Singapore), the hosts the
+  maintainer chose in issue #1139. The server picker also offers the relay servers on PPSSPP's public list, which it
+  downloads over HTTPS only while Online play is on (`docs/SETUP.md` "Network use" has the rules), and lets the user
+  type their own address (`host[:lobby_port[,data_port]]`) with the on-screen keyboard. A user-entered server stays
+  only in the local `settings.json`. Another shipped server needs its own maintainer decision first (`AGENTS.md`
+  section 5).
+- **Consent per server.** The Online play card is the only way to turn Online play on. It names the exact server
+  and what is sent, and offers **TURN ON**, **NOT NOW** and **CHANGE SERVER**. Picking a different server opens the
+  card again for that server; until the user selects **TURN ON** for it, nothing connects. Turning Online play off
+  ends a running game's connection within a moment (the launcher leaves a marker file the runtime checks while it
+  polls the lobby); turning it on takes effect at the next launch.
 - **Two connections, both unencrypted.** The protocol is plain TCP. It has no encryption and no sign-in.
   - **Lobby** (port 27312): log in, find groups, join one, and learn who is in it.
   - **Data relay** (port 27313): one connection per ad hoc socket, carrying the game's own packets.

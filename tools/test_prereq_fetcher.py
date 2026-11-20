@@ -1610,13 +1610,34 @@ NETWORK_EGRESS_ALLOWLIST = frozenset({
 
 # Opt-in ad hoc relay defaults (#1139): the shipped servers and plain-TCP ports documented in
 # docs/SETUP.md ("Network use") and docs/ONLINE_FEATURES.md. The shipped servers are the hosts
-# issue #1139 names (maintainer decision of 2026-11-06): socom.cc, beside the field for the
-# user's own server. Another shipped host needs its own maintainer decision in that issue first.
+# the maintainer chose in issue #1139 (decisions of 2026-11-06 and 2026-11-19): socom.cc and the
+# four ArenaAnywhere relays, beside the field for the user's own server. Another shipped host
+# needs its own maintainer decision in that issue first.
 ADHOC_RELAY_DEFAULT_SERVER = "socom.cc"
 ADHOC_RELAY_PRESETS = (
     "socom.cc",
+    "relay.arenaanywhere.site",
+    "relay-usa.arenaanywhere.site",
+    "relay-sa.arenaanywhere.site",
+    "relay-asia.arenaanywhere.site",
 )
 ADHOC_RELAY_PORTS = (27312, 27313)
+# The Online play server picker (#1139; decision of 2026-11-19) also offers PPSSPP's public list
+# of ad hoc servers. It is downloaded over HTTPS from this host only, and only while Online play
+# is on (src/player/adhoc_servers.h). When the download is unavailable, the copy shipped in
+# src/player/adhoc_servers.c is offered instead: the relay entries of PPSSPP's
+# assets/adhoc-servers.json at 3bc60270, these hosts. A server from either list is reached only
+# after the user picks it and selects TURN ON on the card that names it; docs/SETUP.md lists them.
+ADHOC_LIST_HOST = "metadata.ppsspp.org"
+ADHOC_LIST_URL = "https://metadata.ppsspp.org/adhoc-servers.json"
+ADHOC_SHIPPED_LIST_HOSTS = (
+    "socom.cc", "psp.mgn.pub", "eahub.eu", "psi-hate.com", "jpa36a7.glddns.com",
+    "relay-sa.arenaanywhere.site", "relay.arenaanywhere.site", "relay-usa.arenaanywhere.site",
+    "relay-asia.arenaanywhere.site", "sayaakanlawan.my.id", "adhoc.gamesnexus.ovh",
+    "cvn-play.top", "ntarena.duckdns.org", "38.54.80.95", "cat.wjg.jp",
+    "brazil-01.sprawl-relay.link", "pspbrasil.duckdns.org", "jeddah-relay.ddns.net",
+    "140.245.237.12", "185.183.157.234", "psp.andexplaystream.online", "132.226.189.224",
+)
 
 # The only hosts the player's consented download reaches: the "Network use" table in
 # docs/SETUP.md. Every artifact pin stays on them.
@@ -1654,13 +1675,14 @@ ACHIEVEMENTS_VENDORED_TREE = "third_party/rcheevos"
 DISCORD_PRESENCE_PATHS = ("src/player/discord_presence.c", "src/player/discord_presence.h")
 DISCORD_PIPE_PREFIX = "discord-ipc-"
 # The only shipped callers of the native transport: the prerequisite bootstrap (in
-# package_builder.c itself), the update check, and opt-in cover art (#2632). Another
-# caller is a new egress.
+# package_builder.c itself), the update check, opt-in cover art (#2632), and the Online play
+# server list (#1139). Another caller is a new egress.
 COVER_ART_HOSTS = frozenset({"thumbnails.libretro.com"})
 NATIVE_TRANSPORT_CALLERS = frozenset({
     "src/player/package_builder.c",
     "src/player/update_check.c",
     "src/player/cover_art.c",
+    "src/player/adhoc_servers.c",
 })
 
 # Shipped code: everything under src/ and the Python the player runs. Maintainer
@@ -1773,6 +1795,33 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertEqual(quoted_hosts(servers.group(1)), ADHOC_RELAY_PRESETS)
         pstate = (REPO_ROOT / "src" / "player" / "player_state.c").read_text(encoding="utf-8")
         self.assertIn("settings->online_play = false;", pstate)
+
+    def test_adhoc_server_list_reaches_only_ppsspp_metadata_host(self) -> None:
+        header = (REPO_ROOT / "src" / "player" / "adhoc_servers.h").read_text(encoding="utf-8")
+        host = re.search(r'#define NK_ADHOC_LIST_HOST\s+"([^"]*)"', header)
+        url = re.search(r'#define NK_ADHOC_LIST_URL\s+"https://"\s+NK_ADHOC_LIST_HOST\s+"([^"]*)"', header)
+        self.assertIsNotNone(host, "NK_ADHOC_LIST_HOST")
+        self.assertIsNotNone(url, "NK_ADHOC_LIST_URL must be https://NK_ADHOC_LIST_HOST/...")
+        assert host is not None and url is not None
+        self.assertEqual("https://" + host.group(1) + url.group(1), ADHOC_LIST_URL)
+        impl = (REPO_ROOT / "src" / "player" / "adhoc_servers.c").read_text(encoding="utf-8")
+        # No URL literal in the implementation: the header's one URL is all it fetches, and the
+        # list's icon, web, status and Discord links are never read.
+        self.assertEqual(re.findall(r"https?://", impl), [])
+        for field in ("icon", "web", "status_xml", "discord", "description"):
+            self.assertNotIn(f'"{field}"', impl)
+        shipped = re.search(r"static const char s_shipped_json\[\]\s*=\s*(.*?);", impl, re.DOTALL)
+        self.assertIsNotNone(shipped)
+        assert shipped is not None
+        hosts = tuple(re.findall(r'host\\":\\"([^\\"]+)', shipped.group(1)))
+        self.assertEqual(hosts, ADHOC_SHIPPED_LIST_HOSTS)
+        self.assertLessEqual(set(ADHOC_RELAY_PRESETS), set(hosts))
+        setup = (REPO_ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+        for documented in (ADHOC_LIST_HOST, *ADHOC_SHIPPED_LIST_HOSTS):
+            self.assertIn(f"`{documented}`", setup)
+        rows = [line for line in setup.splitlines() if line.startswith("| Online play server list |")]
+        self.assertEqual(len(rows), 1)
+        self.assertIn(f"`{ADHOC_LIST_HOST}` (HTTPS)", rows[0])
 
     def test_cover_art_reaches_only_its_documented_libretro_host(self) -> None:
         header = (REPO_ROOT / "src" / "player" / "cover_art.h").read_text(encoding="utf-8")

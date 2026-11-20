@@ -644,6 +644,22 @@ endif()
 add_test(NAME cover_art_test COMMAND test_cover_art)
 set_tests_properties(cover_art_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# The Online play server list (#1139) on a fake transport; it never touches the internet.
+add_executable(test_adhoc_servers
+    tests/native/test_adhoc_servers.c
+    src/player/package_builder.c
+    src/player/adhoc_servers.c
+)
+target_include_directories(test_adhoc_servers PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player
+)
+target_link_libraries(test_adhoc_servers PRIVATE nakagawa_core)
+if(WIN32)
+    target_link_libraries(test_adhoc_servers PRIVATE winhttp bcrypt)
+endif()
+add_test(NAME adhoc_servers_test COMMAND test_adhoc_servers)
+
 # Discord status (#2259) on a fake transport and, on Windows, a fake pipe server with a
 # test-only name; it never opens Discord's own pipes.
 add_executable(test_discord_presence
@@ -791,6 +807,7 @@ if(BUILD_PLAYER)
         src/player/update_check.c
         src/player/discord_presence.c
         src/player/cover_art.c
+        src/player/adhoc_servers.c
         ${NK_UI_CORE_SOURCES}
         ${NK_UI_EDGE_SOURCES}
         src/ui/backend/nk_ui_sdlr.c
