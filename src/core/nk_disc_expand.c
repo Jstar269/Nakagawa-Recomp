@@ -1115,18 +1115,61 @@ static bool write_identity_records(const char *ref, const NkDiscImport *out) {
     "The file changed while Nakagawa was adding it. Add it again once nothing is writing " \
     "to it. Nothing was kept."
 
+/* The change time and the file's identity, where the file system reports
+   them; a field it does not report stays 0. */
+static void file_change_fields(const char *path, NkDiscSourceStamp *out) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[32768];
+    HANDLE handle;
+    FILE_BASIC_INFO basic;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, 32768) <= 0) return;
+    /* Attributes only, every sharing allowed: never in the way of the import's own hold or
+       of another program's open. */
+    handle = CreateFileW(wide, FILE_READ_ATTRIBUTES,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    if (GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)) &&
+        basic.ChangeTime.QuadPart > 0) {
+        out->changed = (uint64_t)basic.ChangeTime.QuadPart;
+    }
+    if (GetFileInformationByHandle(handle, &info)) {
+        out->volume = info.dwVolumeSerialNumber;
+        out->file_id = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+    }
+    CloseHandle(handle);
+#else
+    struct stat data;
+    if (stat(path, &data) != 0) return;
+    out->changed = (uint64_t)data.st_ctim.tv_sec * 1000000000ull + (uint64_t)data.st_ctim.tv_nsec;
+    out->volume = (uint64_t)data.st_dev;
+    out->file_id = (uint64_t)data.st_ino;
+#endif
+}
+
 bool nk_disc_source_stamp(const char *path, NkDiscSourceStamp *out) {
     if (!out) return false;
-    out->modified = 0;
+    memset(out, 0, sizeof(*out));
     out->size = path && path[0] ? nk_platform_get_file_size(path) : -1;
-    return out->size >= 0 && file_modified_time(path, &out->modified);
+    if (out->size < 0 || !file_modified_time(path, &out->modified)) return false;
+    file_change_fields(path, out);
+    return true;
+}
+
+/* Equal, or not reported by one of the two stamps (0): never a refusal for a
+   file system that does not keep the field. */
+static bool stamp_field_same(uint64_t before, uint64_t now) {
+    return before == 0 || now == 0 || before == now;
 }
 
 bool nk_disc_source_unchanged(const char *path, const NkDiscSourceStamp *before,
                               NkDiscExpandStatus *status) {
     NkDiscSourceStamp now;
     if (before && nk_disc_source_stamp(path, &now) && now.size == before->size &&
-        now.modified == before->modified) {
+        now.modified == before->modified && stamp_field_same(before->changed, now.changed) &&
+        stamp_field_same(before->volume, now.volume) &&
+        stamp_field_same(before->file_id, now.file_id)) {
         return true;
     }
     return disc_fail(status, NK_DISC_READ_FAILED, NK_DISC_SOURCE_CHANGED);
@@ -1448,6 +1491,7 @@ bool nk_disc_import(const char *source, const char *data_root,
                     const NkDiscExpandCallbacks *callbacks, NkDiscImport *out,
                     NkDiscExpandStatus *status) {
     FILE *held;
+    bool shared = false;
     bool ok;
     disc_status_clear(status);
     if (!out) return disc_fail(status, NK_DISC_INTERNAL, "No result was given.");
@@ -1455,16 +1499,20 @@ bool nk_disc_import(const char *source, const char *data_root,
     if (!source || !source[0] || !data_root || !data_root[0]) {
         return disc_fail(status, NK_DISC_INTERNAL, "No disc image or data folder was named.");
     }
-    /* Held until the import ends: on Windows nothing can write to, replace or
-       delete the file meanwhile, so the bytes hashed are the bytes expanded.
-       Elsewhere a writer is not stopped, and the stamp and the second
-       identity find it. */
-    held = nk_platform_open_read_deny_writes(source);
+    /* Held until the import ends: on Windows (a local volume, or a server that
+       enforces share modes) nothing can write to, replace or delete the file
+       meanwhile. Elsewhere, or when another program already has it open for
+       writing, a writer is not stopped, and the stamp and the second identity
+       find any change. */
+    held = nk_platform_open_read_deny_writes(source, &shared);
     if (!held) {
         return disc_fail(status, NK_DISC_READ_FAILED,
-                         "The disc image could not be opened for reading. If another program "
-                         "is still writing it (a download or a copy), wait until it finishes, "
-                         "then add it again.");
+                         "The disc image could not be opened for reading. Check that the drive "
+                         "it is on is connected, then add it again.");
+    }
+    if (shared) {
+        fprintf(stderr, "[DISC_IMPORT] The disc image is open in another program, so it is read "
+                        "twice to check that it does not change while it is added.\n");
     }
     ok = disc_import_held(source, data_root, callbacks, out, status);
     fclose(held);

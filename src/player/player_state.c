@@ -10360,6 +10360,7 @@ bool player_psn_package_convert(const PlayerPsnPackage *package,
     const char *slash;
     FILE *held;
     size_t length;
+    bool shared = false;
     bool ok;
     if (code != NULL && code_size > 0) code[0] = '\0';
     if (message != NULL && message_size > 0) message[0] = '\0';
@@ -10387,16 +10388,20 @@ bool player_psn_package_convert(const PlayerPsnPackage *package,
         return player_homebrew_package_convert(package, callbacks, code, code_size, message,
                                                message_size);
     }
-    /* Held until the conversion ends: on Windows nothing can write to, replace or delete the
-       package meanwhile. Elsewhere a writer is not stopped; the stamp and the second identity
-       find it. */
-    held = nk_platform_open_read_deny_writes(package->pbp_path);
+    /* Held until the conversion ends: on Windows (a local volume, or a server that enforces
+       share modes) nothing can write to, replace or delete the package meanwhile. Elsewhere,
+       or when another program already has it open for writing, a writer is not stopped; the
+       stamp and the second identity find any change. */
+    held = nk_platform_open_read_deny_writes(package->pbp_path, &shared);
     if (held == NULL) {
         player_psn_result(code, code_size, NK_DISC_READ_FAILED, message, message_size,
-                          "The package could not be opened for reading. If another program is "
-                          "still writing it (a download or a copy), wait until it finishes, "
-                          "then add it again.");
+                          "The package could not be opened for reading. Check that the drive "
+                          "it is on is connected, then add it again.");
         return false;
+    }
+    if (shared) {
+        fprintf(stderr, "[PLAYER] The package is open in another program, so it is read twice "
+                        "to check that it does not change while it is converted.\n");
     }
     ok = player_psn_retail_convert(package, callbacks, code, code_size, message, message_size);
     fclose(held);

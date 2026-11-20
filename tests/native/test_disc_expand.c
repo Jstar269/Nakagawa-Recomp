@@ -1756,6 +1756,218 @@ static void test_import_source_changed(void) {
     printf("PASS a source changed during its import is never recorded\n");
 }
 
+/* Two changes made during an import, each undone before the second identity:
+   RESTORE rewrites the source to other bytes once the expansion began and
+   writes the first bytes back when it ends, the write time put back both
+   times; RENAME moves the source away and another file of the same size and
+   write time into its place once the first identity is read, and moves both
+   back when the expansion ends. The second identity then reads the first
+   file's bytes, so only the stamp's change time and file identity can see
+   that the expansion read something else (review round 2 of F-f6233fe0). */
+typedef enum { UNDONE_RESTORE, UNDONE_RENAME } UndoneKind;
+
+typedef struct {
+    UndoneKind kind;
+    const char *path;
+    const char *other;    /* RENAME: the file moved into place */
+    const char *away;     /* RENAME: where the source waits */
+    const uint8_t *first; /* RESTORE: the source's bytes */
+    const uint8_t *second;
+    size_t len;
+    uint64_t change_after;
+    uint64_t undo_after;
+    int stage;
+    bool refused;
+#if defined(_WIN32) || defined(_WIN64)
+    HANDLE writer; /* RESTORE: another program's handle with write access */
+#endif
+} Undone;
+
+static void undone_write(Undone *u, const uint8_t *bytes) {
+#if defined(_WIN32) || defined(_WIN64)
+    FILETIME stamp;
+    DWORD wrote = 0;
+    LARGE_INTEGER at;
+    stamp.dwLowDateTime = 0x69050000u;
+    stamp.dwHighDateTime = 0x01D5C036u;
+    at.QuadPart = 0;
+    assert(SetFilePointerEx(u->writer, at, NULL, FILE_BEGIN));
+    assert(WriteFile(u->writer, bytes, (DWORD)u->len, &wrote, NULL) && wrote == u->len);
+    assert(FlushFileBuffers(u->writer));
+    assert(SetFileTime(u->writer, NULL, NULL, &stamp));
+#else
+    write_bytes(u->path, bytes, u->len);
+    stamp_write_time(u->path);
+#endif
+}
+
+static void on_progress_undone(uint64_t done, uint64_t total, void *user) {
+    Undone *u = (Undone *)user;
+    (void)total;
+    if (u->stage == 0 && done > u->change_after) {
+        u->stage = 1;
+        if (u->kind == UNDONE_RESTORE) {
+            undone_write(u, u->second);
+        } else if (nk_rename_utf8(u->path, u->away) != 0) {
+            u->refused = true; /* Windows: the import holds the file */
+        } else {
+            CHECK(nk_rename_utf8(u->other, u->path) == 0);
+        }
+    } else if (u->stage == 1 && done > u->undo_after) {
+        u->stage = 2;
+        if (u->kind == UNDONE_RESTORE) {
+            undone_write(u, u->first);
+        } else if (!u->refused) {
+            CHECK(nk_rename_utf8(u->path, u->other) == 0);
+            CHECK(nk_rename_utf8(u->away, u->path) == 0);
+        }
+    }
+}
+
+static void test_import_change_undone(void) {
+    TwinImages t;
+    char root[NATIVE_TEST_PATH_MAX];
+    char other[NATIVE_TEST_PATH_MAX];
+    char away[NATIVE_TEST_PATH_MAX];
+    char identity[NK_DISC_IDENTITY_CHARS + 1];
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    Undone undone;
+    NkDiscExpandCallbacks hooks = { on_progress_undone, NULL, &undone };
+    bool ok;
+    make_twins(&t, "undone");
+    CHECK(nk_disc_file_identity(t.first, NULL, identity, NULL, &status));
+
+    /* Rewritten and written back, the write time put back each time. Windows
+       denies writers while the import holds the file, so the test plays a
+       program that already had it open for writing: the import reads it
+       shared, and that program's writes are what is checked. */
+    path_in(root, sizeof(root), "undone-restore-root");
+    CHECK(nk_platform_mkdir_p(root));
+    memset(&undone, 0, sizeof(undone));
+    undone.kind = UNDONE_RESTORE;
+    undone.path = t.first;
+    undone.first = t.first_bytes;
+    undone.second = t.second_bytes;
+    undone.len = t.len;
+    undone.change_after = t.len;
+    undone.undo_after = t.len + ISO_BYTES - 1u;
+#if defined(_WIN32) || defined(_WIN64)
+    {
+        WCHAR wide[NATIVE_TEST_PATH_MAX];
+        assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, t.first, -1, wide,
+                                   NATIVE_TEST_PATH_MAX) > 0);
+        undone.writer = CreateFileW(wide, GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        assert(undone.writer != INVALID_HANDLE_VALUE);
+    }
+#endif
+    ok = nk_disc_import(t.first, root, &hooks, &result, &status);
+#if defined(_WIN32) || defined(_WIN64)
+    CloseHandle(undone.writer);
+#endif
+    if (undone.stage != 2 || ok || strcmp(status.code, NK_DISC_READ_FAILED) != 0) {
+        fprintf(stderr, "rewritten and written back: stage=%d ok=%d %s: %s\n", undone.stage,
+                (int)ok, status.code, status.message);
+        CHECK(false);
+    }
+    CHECK(strstr(status.message, "changed while Nakagawa was adding it") != NULL);
+    CHECK(nothing_recorded(root, identity));
+    CHECK(file_equals(t.first, t.first_bytes, t.len));
+
+    /* Moved away and back by rename, another file in its place meanwhile. */
+    path_in(root, sizeof(root), "undone-rename-root");
+    CHECK(nk_platform_mkdir_p(root));
+    path_in(other, sizeof(other), "undone-other.cso");
+    path_in(away, sizeof(away), "undone-away.cso");
+    write_bytes(other, t.second_bytes, t.len);
+    stamp_write_time(other);
+    memset(&undone, 0, sizeof(undone));
+    undone.kind = UNDONE_RENAME;
+    undone.path = t.first;
+    undone.other = other;
+    undone.away = away;
+    undone.change_after = t.len - 1u;
+    undone.undo_after = t.len + ISO_BYTES - 1u;
+    ok = nk_disc_import(t.first, root, &hooks, &result, &status);
+    /* Refused at once (the stamp right after the first identity): put the
+       files back as the second step would have. */
+    if (undone.stage == 1 && !undone.refused) {
+        CHECK(nk_rename_utf8(t.first, other) == 0);
+        CHECK(nk_rename_utf8(away, t.first) == 0);
+    }
+    CHECK(undone.stage >= 1);
+    if (host_denies_writers()) {
+        /* Held: the source cannot be moved away while it is added. */
+        CHECK(undone.refused && ok && file_equals(result.iso_path, g_iso, ISO_BYTES));
+    } else if (ok || strcmp(status.code, NK_DISC_READ_FAILED) != 0) {
+        fprintf(stderr, "moved away and back: ok=%d %s: %s\n", (int)ok, status.code,
+                status.message);
+        CHECK(false);
+    } else {
+        CHECK(nothing_recorded(root, identity));
+        CHECK(file_equals(t.first, t.first_bytes, t.len));
+    }
+    free_twins(&t);
+    printf("PASS a change undone before the second identity is still seen\n");
+}
+
+#if defined(_WIN32) || defined(_WIN64)
+/* A file another program has open for writing (a seeding or syncing program)
+   is added, read shared and checked twice: unchanged, it is imported; written
+   during the import, it is refused and nothing is recorded. */
+static void test_import_open_for_writing_elsewhere(void) {
+    TwinImages t;
+    char root[NATIVE_TEST_PATH_MAX];
+    char identity[NK_DISC_IDENTITY_CHARS + 1];
+    WCHAR wide[NATIVE_TEST_PATH_MAX];
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    Undone undone;
+    NkDiscExpandCallbacks hooks = { on_progress_undone, NULL, &undone };
+    bool ok;
+    make_twins(&t, "in-use");
+    CHECK(nk_disc_file_identity(t.first, NULL, identity, NULL, &status));
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, t.first, -1, wide,
+                               NATIVE_TEST_PATH_MAX) > 0);
+    memset(&undone, 0, sizeof(undone));
+    undone.writer = CreateFileW(wide, GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(undone.writer != INVALID_HANDLE_VALUE);
+
+    /* Open for writing elsewhere, not written: imported. */
+    path_in(root, sizeof(root), "in-use-root");
+    CHECK(nk_platform_mkdir_p(root));
+    ok = nk_disc_import(t.first, root, NULL, &result, &status);
+    if (!ok) fprintf(stderr, "in use: %s: %s\n", status.code, status.message);
+    CHECK(ok && !result.reused && file_equals(result.iso_path, g_iso, ISO_BYTES));
+    CHECK(strcmp(result.identity, identity) == 0);
+
+    /* Written through that program's handle during the expansion: refused. */
+    path_in(root, sizeof(root), "in-use-written-root");
+    CHECK(nk_platform_mkdir_p(root));
+    undone.kind = UNDONE_RESTORE;
+    undone.path = t.first;
+    undone.first = t.second_bytes; /* left as written */
+    undone.second = t.second_bytes;
+    undone.len = t.len;
+    undone.change_after = t.len;
+    undone.undo_after = UINT64_MAX;
+    ok = nk_disc_import(t.first, root, &hooks, &result, &status);
+    CloseHandle(undone.writer);
+    CHECK(undone.stage == 1);
+    if (ok || strcmp(status.code, NK_DISC_READ_FAILED) != 0) {
+        fprintf(stderr, "in use, written: ok=%d %s: %s\n", (int)ok, status.code, status.message);
+        CHECK(false);
+    }
+    CHECK(nothing_recorded(root, identity));
+    free_twins(&t);
+    printf("PASS a file open for writing elsewhere is read shared and checked twice\n");
+}
+#endif
+
 /* Cancel while a sampled record is compared: nothing is written, the record
    stays as it was. */
 static void test_import_cancel_during_comparison(void) {
@@ -2135,6 +2347,10 @@ int main(void) {
     test_import_upgrades_sampled_record();
     test_import_identity_read_error_and_cancel();
     test_import_source_changed();
+    test_import_change_undone();
+#if defined(_WIN32) || defined(_WIN64)
+    test_import_open_for_writing_elsewhere();
+#endif
     test_import_cancel_during_comparison();
     test_import_stored_image_short_or_unreadable();
     test_import_damaged_records();

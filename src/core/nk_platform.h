@@ -280,13 +280,17 @@ bool nk_platform_real_path(const char *path, char *out_path, size_t max_len);
 FILE *nk_platform_open_regular_file(const char *path);
 
 /* Open the file at `path` for reading in binary mode and, while the stream stays
- * open, keep other programs from changing it. Windows: the handle shares reads
- * only, so no other open may write to, replace, rename or delete the file until
- * it is closed (and the open fails while another program has it open for
- * writing). POSIX has no such share mode: the stream is an ordinary read and a
- * writer is not stopped, so a caller that needs the bytes to stay put still
- * checks them. NULL when the file cannot be opened. */
-FILE *nk_platform_open_read_deny_writes(const char *path);
+ * open, keep other programs from changing it where the platform can. Windows:
+ * the handle shares reads only, so no other open may write to, replace, rename
+ * or delete the file until it is closed, on a local volume or a server that
+ * enforces share modes. When another program already has the file open for
+ * writing (a seeding or syncing program), that open is refused by the system;
+ * the file is then opened shared, as an ordinary read, and *opened_shared is set
+ * so the caller can say so. POSIX has no such share mode: the stream is an
+ * ordinary read and a writer is not stopped (*opened_shared stays false). Either
+ * way a caller that needs the bytes to stay put still checks them. NULL only
+ * when the file cannot be opened for reading at all. opened_shared may be NULL. */
+FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared);
 
 /* Whether `path` is longer than the file APIs this process uses accept, so a
  * create or open of it fails for its length alone. On Win32 that is MAX_PATH

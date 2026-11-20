@@ -30,10 +30,13 @@
  *
  * The bytes recorded are the bytes expanded. The source is held open for the
  * whole import with writes denied where the platform has share modes
- * (nk_platform_open_read_deny_writes: Windows), its size and write time are
- * taken before anything reads it and checked again before anything is
- * recorded, and before a record is written for a new expansion or an upgrade
- * the identity is computed a second time and must be the same.
+ * (nk_platform_open_read_deny_writes: Windows, on a local volume or a server
+ * that enforces them; a file another program already has open for writing is
+ * read shared instead). Its stamp (NkDiscSourceStamp: size, write time, change
+ * time and file identity) is taken before anything reads it and checked again
+ * before anything is recorded, and before a record is written for a new
+ * expansion or an upgrade the identity is computed a second time and must be
+ * the same.
  *
  * Imports made before the full identity (F-f6233fe0) were recorded under a
  * sampled fingerprint of the source's size, write time and first 64 KiB
@@ -177,18 +180,28 @@ bool nk_disc_file_identity(const char *path, const NkDiscExpandCallbacks *callba
                            char out[NK_DISC_IDENTITY_CHARS + 1], uint64_t *out_bytes,
                            NkDiscExpandStatus *status);
 
-/* A source file's size and write time, taken before it is read and compared
-   before anything is recorded for it. */
+/* A source file's stamp, taken before it is read and compared before anything
+   is recorded for it: its size and write time, which a writer can put back,
+   and what no writer can put back: the time of its last change of any kind
+   (POSIX st_ctim; the NTFS change time) and which file it is (POSIX st_dev and
+   st_ino; the volume serial number and file index). A file system that does not
+   report one of the last three gives 0 for it, and that field is then not
+   compared. */
 typedef struct {
     int64_t size;
     uint64_t modified;
+    uint64_t changed;
+    uint64_t volume;
+    uint64_t file_id;
 } NkDiscSourceStamp;
 
 /* False when the file's size or write time cannot be read. */
 bool nk_disc_source_stamp(const char *path, NkDiscSourceStamp *out);
 
-/* True when the file still has the stamp `before`; otherwise
-   NK_DISC_READ_FAILED, saying that the file changed while it was added. */
+/* True when the file still has the stamp `before` (the size and write time
+   always; the change time, volume and file identity where both stamps have
+   them); otherwise NK_DISC_READ_FAILED, saying that the file changed while it
+   was added. */
 bool nk_disc_source_unchanged(const char *path, const NkDiscSourceStamp *before,
                               NkDiscExpandStatus *status);
 

@@ -1533,7 +1533,8 @@ FILE *nk_platform_open_regular_file(const char *path) {
     return file;
 }
 
-FILE *nk_platform_open_read_deny_writes(const char *path) {
+FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared) {
+    if (opened_shared) *opened_shared = false;
     if (!path || !*path) return NULL;
     WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
     if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
@@ -1543,8 +1544,14 @@ FILE *nk_platform_open_read_deny_writes(const char *path) {
     /* FILE_SHARE_READ alone: other readers open it, writers and deleters are refused. */
     HANDLE handle = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                                 FILE_ATTRIBUTE_NORMAL, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        /* Another program has it open for writing: read it shared, as any reader does. */
+        FILE *shared = GetLastError() == ERROR_SHARING_VIOLATION ? _wfopen(wpath, L"rb") : NULL;
+        free(wpath);
+        if (shared && opened_shared) *opened_shared = true;
+        return shared;
+    }
     free(wpath);
-    if (handle == INVALID_HANDLE_VALUE) return NULL;
     int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
     if (fd < 0) {
         CloseHandle(handle);

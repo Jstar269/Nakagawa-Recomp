@@ -851,7 +851,8 @@ FILE *nk_platform_open_regular_file(const char *path) {
     return file;
 }
 
-FILE *nk_platform_open_read_deny_writes(const char *path) {
+FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared) {
+    if (opened_shared) *opened_shared = false;
     if (!path || !*path) return NULL;
     /* No share modes here: an ordinary read (see nk_platform.h). */
     int fd = open(path, O_RDONLY | O_CLOEXEC);
