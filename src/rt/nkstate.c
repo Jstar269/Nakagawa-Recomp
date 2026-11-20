@@ -3,6 +3,10 @@
 
 /* nkstate v1 container (#2146, #2147). The format and the rules are in nkstate.h. */
 
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L /* fileno and fsync under -std=c11 */
+#endif
+
 #include "nkstate.h"
 #include "vfpu_tables.h" /* sr_vfpu_sha256: the runtime's SHA-256 */
 
@@ -11,7 +15,10 @@
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32)
-#include <windows.h> /* MoveFileExA: nkstate_write_file replaces an existing state in one step */
+#include <io.h>      /* _get_osfhandle: nkstate_write_file flushes the temp file to the disk */
+#include <windows.h> /* MoveFileExA, FlushFileBuffers: nkstate_write_file replaces a state in one step */
+#else
+#include <unistd.h> /* fsync: nkstate_write_file flushes the temp file to the disk */
 #endif
 
 static const char *const s_status_names[] = {
@@ -464,10 +471,32 @@ static long s_test_write_fault = -1;
 
 void nkstate_test_set_write_fault(long after_bytes) { s_test_write_fault = after_bytes; }
 
-/* The image goes to "<path>.tmp" first; only a write, flush and close that all succeed replace
-   the target, in one step: rename() on POSIX, and on Windows MoveFileExA, since rename() there
-   refuses an existing target (the ace.c report pattern; the narrow call reads the path as fopen
-   does). Any failure removes the temp file, so an existing state at the path stays whole. */
+/* A test's flush-to-disk fault: nonzero makes that step fail as a failed fsync or
+   FlushFileBuffers would. Nothing in the runtime arms it. */
+static int s_test_sync_fault = 0;
+
+void nkstate_test_set_sync_fault(int fail) { s_test_sync_fault = fail; }
+
+/* The temp file's bytes reach the disk: fsync on POSIX, FlushFileBuffers on Windows (the
+   nk_input_profile.c pattern, with the result checked). */
+static int nkstate_sync_file(FILE *fp) {
+#if defined(_WIN32)
+    const int fd = _fileno(fp);
+    if (fd < 0) return 0;
+    const HANDLE h = (HANDLE)_get_osfhandle(fd);
+    return h != INVALID_HANDLE_VALUE && FlushFileBuffers(h) != 0;
+#else
+    const int fd = fileno(fp);
+    return fd >= 0 && fsync(fd) == 0;
+#endif
+}
+
+/* The image goes to "<path>.tmp" first; only a write, flush, flush to the disk and close that all
+   succeed replace the target, in one step: rename() on POSIX, and on Windows MoveFileExA, since
+   rename() there refuses an existing target (the ace.c report pattern; the narrow call reads the
+   path as fopen does). Any failure removes the temp file, so an existing state at the path stays
+   whole. The directory is not flushed, so after a power loss the path may still hold the
+   earlier state. */
 NkStateStatus nkstate_write_file(const char *path, const NkStateBuf *image, char *detail, size_t detail_cap) {
     const size_t n = strlen(path);
     char *tmp = malloc(n + sizeof ".tmp");
@@ -487,8 +516,9 @@ NkStateStatus nkstate_write_file(const char *path, const NkStateBuf *image, char
     }
     const size_t wrote = want ? fwrite(image->data, 1, want, fp) : 0u;
     const int flushed = fflush(fp);
+    const int synced = flushed == 0 && nkstate_sync_file(fp) && !s_test_sync_fault;
     const int closed = fclose(fp);
-    int ok = !faulted && wrote == image->len && flushed == 0 && closed == 0;
+    int ok = !faulted && wrote == image->len && flushed == 0 && synced && closed == 0;
     if (ok) {
 #if defined(_WIN32)
         ok = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;

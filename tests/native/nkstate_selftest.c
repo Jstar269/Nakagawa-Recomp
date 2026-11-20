@@ -1641,9 +1641,10 @@ static void test_record_replay(void) {
 }
 
 /* A failed write never truncates a good state (audit F-243a2741): the writer goes through
- * "<path>.tmp" and replaces the target only after the write, flush and close succeed. A write
- * that stops part way is NKSTATE_IO_ERROR, the earlier state stays byte for byte, and no temp
- * file is left; a later good write replaces the state whole. */
+ * "<path>.tmp" and replaces the target only after the write, flush, flush to the disk and close
+ * succeed. A write that stops part way, or a failed flush to the disk, is NKSTATE_IO_ERROR, the
+ * earlier state stays byte for byte, and no temp file is left; a later good write replaces the
+ * state whole. */
 static void test_write_file_keeps_a_good_state(void) {
     const char *path = SR_SELFTEST_BUILD_ROOT "/nkstate_selftest_replace.nkstate";
     const char *tmp = SR_SELFTEST_BUILD_ROOT "/nkstate_selftest_replace.nkstate.tmp";
@@ -1672,6 +1673,21 @@ static void test_write_file_keeps_a_good_state(void) {
     nkstate_buf_free(&read);
     FILE *left = fopen(tmp, "rb");
     CHECK(left == NULL, "replace: a failed write left %s", tmp);
+    if (left) fclose(left);
+
+    /* Every byte written, but the flush to the disk fails: still no replace. */
+    nkstate_test_set_sync_fault(1);
+    st = nkstate_write_file(path, &next, detail, sizeof detail);
+    nkstate_test_set_sync_fault(0);
+    CHECK(st == NKSTATE_IO_ERROR, "replace: a failed flush to the disk gave %s, want io-error",
+          nkstate_status_name(st));
+    st = nkstate_read_file(path, &read, detail, sizeof detail);
+    CHECK(st == NKSTATE_OK && read.len == good.len && memcmp(read.data, good.data, good.len) == 0,
+          "replace: the good state did not survive a failed flush to the disk (%s, %zu bytes, want %zu)",
+          nkstate_status_name(st), read.len, good.len);
+    nkstate_buf_free(&read);
+    left = fopen(tmp, "rb");
+    CHECK(left == NULL, "replace: a failed flush to the disk left %s", tmp);
     if (left) fclose(left);
 
     st = nkstate_write_file(path, &next, detail, sizeof detail);
