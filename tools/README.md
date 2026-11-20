@@ -70,7 +70,9 @@ run on the development host and are never executed by `hst.exe` at runtime. For 
 - **`tree_lint.py`** — dead-file detection for the public tree. It reports tracked files that no other
   tracked file names; `python tools/tree_lint.py --check` enforces the reviewed reference and allowlist ratchet
   in the always-on hygiene job; unreferenced files must be removed or have a reviewed allowlist reason in
-  `tools/tree_lint_allow.json`. `mingw32-make tree-lint` runs the reporting form, which exits 0 whatever the
+  `tools/tree_lint_allow.json`, and `--check` also fails on a stale allowlist entry (an exact path that
+  excuses no file, or a `*` pattern that matches no tracked file), so an old reason never pre-excuses a
+  dead file created later at that path. `mingw32-make tree-lint` runs the reporting form, which exits 0 whatever the
   tree contains.
 - **`xb_probe.py <archive.xb> [--lookup <inner-key>]`** — bounded, read-only direct-XB
   metadata/lookup prototype (see [`docs/archive/ISSUE196_DIRECT_XB.md`](../docs/archive/ISSUE196_DIRECT_XB.md)). It uses synthetic tests in `test_xb_probe.py`,

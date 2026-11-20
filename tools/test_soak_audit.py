@@ -429,13 +429,14 @@ class SoakAuditTests(unittest.TestCase):
         """FAILING-BEFORE PROOF: with nothing measured the audit used to print
         verdict=PASS and exit 0."""
         code, out = self._run()
+        # Nothing was judged: the verdict is SKIP with its own exit status, never a pass.
         self.assertEqual(code, 77, out)
         self.assertNotIn("verdict=FAIL", out)
+        self.assertNotIn("verdict=PASS", out)
         for name in ("presenting", "cadence", "memory_working_set", "handles", "fatal", "route",
                      "compat_patches"):
             self.assertIn(f"SOAK_CHECK: {name} SKIP", out)
         self.assertIn("SOAK_AUDIT: verdict=SKIP", out)
-        self.assertNotIn("verdict=PASS", out)
 
         # Too short a perf.csv for a cadence sample and no other input: nothing judged
         # except presenting, which passes, so the run is a PASS on that one assertion.
@@ -443,6 +444,11 @@ class SoakAuditTests(unittest.TestCase):
         code, out = self._run("--perf", perf)
         self.assertEqual(code, 0, out)
         self.assertIn("SOAK_AUDIT: verdict=PASS", out)
+
+    def test_all_skip_json_verdict_is_skip(self) -> None:
+        code, out = self._run("--json")
+        self.assertEqual(code, 77, out)
+        self.assertIn('"verdict": "SKIP"', out)
 
     def test_a_reported_only_check_is_not_a_judged_pass(self) -> None:
         """compat_patches reports and never judges, so on its own it is not a PASS."""

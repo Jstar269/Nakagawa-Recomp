@@ -134,6 +134,60 @@ class TitleManagerAdapterTests(unittest.TestCase):
         plan["surprise_setting"] = True
         self.assert_rejected(plan, "unknown field(s): surprise_setting")
 
+    def _plan_with_disc_builds(self) -> dict:
+        raw = json.loads((TITLES / "hst-ucus98701.json").read_text(encoding="utf-8"))
+        raw["disc"]["require_local_compatibility_record"] = True
+        raw["disc"]["builds"] = [
+            {"executable_sha256": "0" * 64, "status": "supported", "label": "Synthetic build A"},
+            {"executable_sha256": "1" * 64, "status": "known-bad", "label": "Synthetic build B",
+             "reason": "Synthetic reason"},
+        ]
+        manifest = title_manifest.validate_manifest(raw)
+        self.assertIn("builds", manifest["disc"])
+        self.assertTrue(manifest["disc"]["require_local_compatibility_record"])
+        plan: dict = title_codegen_plan.build_manager_plan(
+            manifest,
+            game_name="hst",
+            game_elf=Path("build/fixtures/hst.elf"),
+            build_dir=Path("build/hst"),
+            module_dir=Path("build/fixtures/hst-modules"),
+            psp_header=Path("build/fixtures/hst-psp-header.bin"),
+            funcs_per_chunk=64,
+        )
+        return plan
+
+    def test_a_validated_disc_with_builds_and_local_record_is_accepted(self) -> None:
+        # validate_disc admits builds (#2140) and require_local_compatibility_record and
+        # the planner passes the disc object through, so the adapter must accept both.
+        plan = self._plan_with_disc_builds()
+        self.assertEqual(len(plan["disc"]["builds"]), 2)
+        proc = self.run_pwsh(
+            "Assert-TitleManagerPlan $plan | Out-Null\n"
+            "Assert-TitlePlanDerivation $plan | Out-Null\n"
+            "Write-Output 'ACCEPTED'",
+            plan,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("ACCEPTED", proc.stdout)
+
+    def test_malformed_disc_builds_and_local_record_are_rejected(self) -> None:
+        cases = (
+            ("builds", "not-a-list", "$.disc.builds must be an array"),
+            ("builds", [{"executable_sha256": "A" * 64, "status": "supported", "label": "x"}],
+             "executable_sha256 must be 64 lowercase hexadecimal digits"),
+            ("builds", [{"executable_sha256": "0" * 64, "status": "maybe", "label": "x"}],
+             "is not a supported build status"),
+            ("builds", [{"executable_sha256": "0" * 64, "status": "supported", "label": "x", "extra": 1}],
+             "unknown field(s): extra"),
+            ("require_local_compatibility_record", "yes",
+             "$.disc.require_local_compatibility_record must be a boolean"),
+        )
+        for field, value, expected in cases:
+            with self.subTest(field=field, expected=expected):
+                plan = self._plan_with_disc_builds()
+                plan["disc"][field] = value
+                self.assert_rejected(plan, expected)
+
     def test_a_runtime_placed_guest_module_carries_no_address(self) -> None:
         # The guest allocator places a runtime module when the game loads it, so its
         # plan entry names the placement instead of an address -- and only that.
@@ -299,6 +353,12 @@ class RunEntryIsPlanOwned(unittest.TestCase):
         returned: dict[str, Any] = title_manifest.load_manifest(TITLES / "synthetic.json")
         return returned
 
+    def plan_file(self) -> Path:
+        """A plan.json path in a temporary folder removed when the test (or subtest's test) ends."""
+        folder = tempfile.TemporaryDirectory(prefix="nakagawa-run-entry-")
+        self.addCleanup(folder.cleanup)
+        return Path(folder.name) / "plan.json"
+
     def test_run_entry_is_the_configured_fallback_entry(self) -> None:
         manifest = self.manifest()
         # The runnable fixture boots its real entry (fallback == entry), so give this copy a
@@ -327,7 +387,7 @@ class RunEntryIsPlanOwned(unittest.TestCase):
 
     def test_the_adapter_accepts_and_surfaces_it(self) -> None:
         plan = self.build(self.manifest())
-        plan_path = Path(tempfile.mkdtemp(prefix="nakagawa-run-entry-")) / "plan.json"
+        plan_path = self.plan_file()
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
         script = "\n".join([
             "$ErrorActionPreference = 'Stop'",
@@ -348,7 +408,7 @@ class RunEntryIsPlanOwned(unittest.TestCase):
             with self.subTest(case=label):
                 plan = self.build(self.manifest())
                 plan["run_entry"] = value
-                plan_path = Path(tempfile.mkdtemp(prefix="nakagawa-run-entry-")) / "plan.json"
+                plan_path = self.plan_file()
                 plan_path.write_text(json.dumps(plan), encoding="utf-8")
                 script = "\n".join([
                     "$ErrorActionPreference = 'Stop'",
@@ -367,7 +427,7 @@ class RunEntryIsPlanOwned(unittest.TestCase):
         """The manager must not silently fall back when the planner stops projecting it."""
         plan = self.build(self.manifest())
         plan.pop("run_entry")
-        plan_path = Path(tempfile.mkdtemp(prefix="nakagawa-run-entry-")) / "plan.json"
+        plan_path = self.plan_file()
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
         script = "\n".join([
             "$ErrorActionPreference = 'Stop'",

@@ -80,7 +80,6 @@ class ProtectedDigestCanonicalizationTests(unittest.TestCase):
         mutations = (
             ("id", lambda value: value.update(id="synthetic-allegrex-v2")),
             ("display_name", lambda value: value.update(display_name="Renamed Fixture")),
-            ("kind", lambda value: value.update(kind="homebrew")),
             ("base", lambda value: value["executable"].update(base=0x08804000)),
             ("entry", lambda value: value["executable"].update(entry=0x08804000)),
             ("bss-source", lambda value: value["executable"].update(bss_metadata_source="none")),
@@ -98,19 +97,23 @@ class ProtectedDigestCanonicalizationTests(unittest.TestCase):
             ("feature", lambda value: value["feature_requirements"].append("psp-hle")),
             ("verification-profile", lambda value: value.update(verification_profile="strict-public")),
         )
-        seen = {self.baseline}
+        # Every mutation must validate and move the digest. One the validator rejected would prove
+        # nothing about the digest, so a rejection fails here instead of being skipped.
         for label, mutate in mutations:
             with self.subTest(mutation=label):
                 mutated = copy.deepcopy(self.manifest)
                 mutate(mutated)
-                try:
-                    moved = digest(mutated)
-                except title_manifest.TitleManifestError:
-                    # Rejected outright, which is at least as strict as a digest change.
-                    continue
-                self.assertNotEqual(moved, self.baseline)
-                seen.add(moved)
-        self.assertGreater(len(seen), 1)
+                self.assertNotEqual(digest(mutated), self.baseline)
+
+    def test_kind_is_covered_by_the_digest(self) -> None:
+        # profile_zero is permitted only for a synthetic manifest, so a changed kind needs it gone.
+        # Both sides drop it, so the only difference left is kind itself.
+        without_profile_zero = copy.deepcopy(self.manifest)
+        without_profile_zero.pop("profile_zero")
+        homebrew = copy.deepcopy(without_profile_zero)
+        homebrew["kind"] = "homebrew"
+        self.assertNotEqual(homebrew["kind"], without_profile_zero["kind"])
+        self.assertNotEqual(digest(homebrew), digest(without_profile_zero))
 
     def test_unknown_operative_fields_are_rejected_rather_than_ignored(self) -> None:
         # A field the validator does not know cannot be silently dropped from the
