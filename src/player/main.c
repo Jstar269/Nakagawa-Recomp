@@ -994,6 +994,10 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
     case SDL_EVENT_DROP_COMPLETE:
         player_finish_drop(app);
         return true;
+    case SDL_EVENT_RENDER_DEVICE_RESET:
+        /* Every texture is lost: the next UI's backend drops its own, whichever view
+           is up, so it never draws from one after the reset. */
+        return player_ui_nk_handle_event(next_ui, event);
     default:
         return false;
     }

@@ -193,6 +193,42 @@ static void test_f1_resumes_and_queue_is_dropped(void) {
     nk_overlay_host_close(g_host);
 }
 
+static bool render_reset(void) {
+    SDL_Event e;
+    memset(&e, 0, sizeof(e));
+    e.type = SDL_EVENT_RENDER_DEVICE_RESET;
+    return nk_overlay_host_event(g_host, (const union SDL_Event *)&e);
+}
+
+/* SDL_EVENT_RENDER_DEVICE_RESET (a D3D device lost to a driver reset) loses every
+   texture: the host resets its backend, so the next frame uploads its glyphs again,
+   and it does so while the pages are closed too, before they are next drawn. The event
+   is built here as SDL delivers it; a software renderer never sends one itself. */
+static void test_render_device_reset_drops_the_textures(void) {
+    NkUiSdlrStats before;
+    NkUiSdlrStats stats;
+    memset(&before, 0, sizeof(before));
+    memset(&stats, 0, sizeof(stats));
+    nk_overlay_host_open(g_host, NK_OVERLAY_OPEN_USER);
+    CHECK(settle(), "device reset: draws");
+    nk_ui_sdlr_get_stats(nk_overlay_host_backend(g_host), &before);
+    CHECK(before.atlas_pages > 0u && before.atlas_uploads > 0u && before.device_resets == 0u,
+          "device reset: the frame drew from an atlas");
+    CHECK(render_reset(), "device reset: the pages must be drawn again");
+    nk_ui_sdlr_get_stats(nk_overlay_host_backend(g_host), &stats);
+    CHECK(stats.device_resets == 1u && stats.atlas_pages == 0u && stats.atlas_glyphs == 0u,
+          "device reset: the backend dropped its textures");
+    CHECK(draw(), "device reset: draw after the reset");
+    nk_ui_sdlr_get_stats(nk_overlay_host_backend(g_host), &stats);
+    CHECK(stats.atlas_pages > 0u && stats.atlas_uploads > before.atlas_uploads,
+          "device reset: the glyphs are uploaded again");
+    nk_overlay_host_close(g_host);
+    (void)render_reset();
+    nk_ui_sdlr_get_stats(nk_overlay_host_backend(g_host), &stats);
+    CHECK(stats.device_resets == 2u && stats.atlas_pages == 0u,
+          "device reset: a closed host resets its backend too");
+}
+
 static void test_pad_lost_and_resize(void) {
     nk_overlay_host_open(g_host, NK_OVERLAY_OPEN_PAD_LOST);
     CHECK(settle(), "pad lost: draws");
@@ -442,6 +478,7 @@ int main(int argc, char **argv) {
     g_model.disc_id = "TEST00001";
     test_menu_to_settings_and_back();
     test_f1_resumes_and_queue_is_dropped();
+    test_render_device_reset_drops_the_textures();
     test_pad_lost_and_resize();
     test_reduce_motion_follows_the_player();
     canvas_free(&g_canvas);

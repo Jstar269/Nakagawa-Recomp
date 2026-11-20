@@ -37,7 +37,8 @@ bool nk_overlay_host_is_open(const NkOverlayHost *host);
 
 /* One input or window event (the presenter's input claim). Returns true when the
    image must be drawn again. The pad's Guide button is the presenter's, never the
-   pages': it is not passed here. */
+   pages': it is not passed here. SDL_EVENT_RENDER_DEVICE_RESET is taken while the
+   pages are closed too: it drops the backend's textures (nk_ui_sdlr_reset). */
 bool nk_overlay_host_event(NkOverlayHost *host, const union SDL_Event *event);
 /* True when time alone needs a new frame: a held direction repeating, the frame
    after a page change, which navigates by the page's own layout, or a transition
@@ -59,6 +60,10 @@ bool nk_overlay_host_draw(NkOverlayHost *host, struct SDL_Renderer *renderer,
                           NkOverlayAction *action);
 /* Lets go of the renderer the last frame drew into, before it is destroyed. */
 void nk_overlay_host_unbind(NkOverlayHost *host);
+/* The SDL_Renderer backend the last frame drew with, NULL before the first frame or
+   after an unbind; for nk_ui_sdlr_get_stats (tests/native/test_overlay_host.c). */
+struct NkUiSdlr;
+const struct NkUiSdlr *nk_overlay_host_backend(const NkOverlayHost *host);
 
 /* The overlay's text engine and UI fonts on their own, for the runtime's other nk_ui surface,
    Ace Mode's in-game UI (src/rt/gpu_sdl3vk/ace_ui.h): the same search as
