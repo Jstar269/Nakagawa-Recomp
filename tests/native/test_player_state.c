@@ -7074,6 +7074,86 @@ static bool psn_test_cancel_after_progress(void *userdata) {
     return ((const PsnTestProgress *)userdata)->calls > 0;
 }
 
+/* Cancels in a PSN release's conversion: after the one report of the package's identity. */
+static bool psn_test_cancel_in_conversion(void *userdata) {
+    return ((const PsnTestProgress *)userdata)->calls > 1;
+}
+
+/* Converts a PSN release; true when the conversion in place was reused: then the only
+   progress is the one report of the package's identity, over the package's size. */
+static bool psn_test_convert_reused(const PlayerPsnPackage *package, size_t package_bytes) {
+    PsnTestProgress progress;
+    PlayerPsnConvertCallbacks hooks = { psn_test_progress, psn_test_never, NULL };
+    char code[64];
+    char message[512];
+    memset(&progress, 0, sizeof(progress));
+    hooks.userdata = &progress;
+    if (!player_psn_package_convert(package, &hooks, code, sizeof(code), message,
+                                    sizeof(message))) {
+        fprintf(stderr, "[PLAYER_STATE_TEST] PSN conversion failed: %s: %s\n", code, message);
+        assert(false);
+    }
+    return progress.calls == 1 && progress.done == package_bytes &&
+           progress.total == package_bytes;
+}
+
+/* Rewrites the package once the conversion has reported that it is done (it has read the
+   package), before anything is recorded: the same size, the write time put back, the last
+   byte changed. On Windows the conversion holds the package with writes denied, so the
+   open for writing fails and that is recorded instead. */
+typedef struct {
+    PsnTestProgress progress;
+    const char *path;
+    uint64_t image_bytes;
+    bool acted;
+    bool refused;
+} PsnTestMeddle;
+
+static void psn_test_meddle_progress(uint64_t done, uint64_t total, void *userdata) {
+    PsnTestMeddle *m = (PsnTestMeddle *)userdata;
+    FILE *file;
+    psn_test_progress(done, total, &m->progress);
+    if (m->acted || total != m->image_bytes || done != total) return;
+    m->acted = true;
+#if defined(_WIN32) || defined(_WIN64)
+    file = nk_fopen_utf8(m->path, "r+b");
+    if (file == NULL) {
+        m->refused = true;
+        return;
+    }
+    fclose(file);
+    assert(false && "a writer was let in while the conversion held the package");
+#else
+    {
+        struct stat before;
+        struct stat after;
+        struct timespec times[2];
+        int last;
+        assert(stat(m->path, &before) == 0);
+        file = nk_fopen_utf8(m->path, "r+b");
+        assert(file != NULL);
+        assert(fseek(file, -1L, SEEK_END) == 0);
+        last = fgetc(file);
+        assert(last != EOF);
+        assert(fseek(file, -1L, SEEK_END) == 0);
+        assert(fputc(last ^ 0x5A, file) != EOF);
+        assert(fclose(file) == 0);
+        times[0] = before.st_atim;
+        times[1] = before.st_mtim;
+        assert(utimensat(AT_FDCWD, m->path, times, 0) == 0);
+        assert(stat(m->path, &after) == 0);
+        assert(after.st_size == before.st_size &&
+               after.st_mtim.tv_sec == before.st_mtim.tv_sec &&
+               after.st_mtim.tv_nsec == before.st_mtim.tv_nsec);
+    }
+#endif
+}
+
+static bool psn_test_meddle_never(void *userdata) {
+    (void)userdata;
+    return false;
+}
+
 static uint8_t *psn_test_read_file(const char *path, size_t *size) {
     FILE *file = fopen(path, "rb");
     long length;
@@ -8895,21 +8975,37 @@ static void test_psn_package_imports_as_its_iso(void) {
     assert(strcmp(package.title, "Synthetic PSN package") == 0);
     assert(!package.iso_ready);
 
-    /* A cancel removes the partial image and keeps nothing. */
+    /* A cancel while the package is read for its identity keeps nothing, and so does one in
+       the conversion, which removes the partial image. */
     assert(!player_psn_package_convert(&package, &cancel_hooks, code, sizeof(code),
                                        message, sizeof(message)));
     assert(strcmp(code, "CANCELLED") == 0);
-    assert(strstr(message, "partial disc image was removed") != NULL);
+    assert(strstr(message, "before anything was written") != NULL);
     assert(nk_platform_path_missing(expected_iso));
     assert(nk_platform_path_missing(partial));
+    {
+        PlayerPsnConvertCallbacks late_cancel = { psn_test_progress, psn_test_cancel_in_conversion,
+                                                  NULL };
+        memset(&progress, 0, sizeof(progress));
+        late_cancel.userdata = &progress;
+        assert(!player_psn_package_convert(&package, &late_cancel, code, sizeof(code),
+                                           message, sizeof(message)));
+        assert(strcmp(code, "CANCELLED") == 0 && progress.calls > 1);
+        assert(strstr(message, "partial disc image was removed") != NULL);
+        assert(nk_platform_path_missing(expected_iso));
+        assert(nk_platform_path_missing(partial));
+    }
 
-    /* The conversion restores the ISO byte for byte, reporting progress. */
+    /* The conversion restores the ISO byte for byte, reporting progress: one report for the
+       package's identity, then the conversion's, then one for the identity read again before
+       the record is written. */
     memset(&progress, 0, sizeof(progress));
     hooks.userdata = &progress;
     assert(player_psn_package_convert(&package, &hooks, code, sizeof(code),
                                       message, sizeof(message)));
-    assert(progress.calls == (int)((iso_len / 2048u + 3u) / 4u));
-    assert(progress.done == progress.total && progress.total == iso_len);
+    assert(pbp_len < 1024u * 1024u);
+    assert(progress.calls == 2 + (int)((iso_len / 2048u + 3u) / 4u));
+    assert(progress.done == progress.total && progress.total == pbp_len);
     assert(nk_platform_path_missing(partial));
     converted = psn_test_read_file(expected_iso, &converted_len);
     assert(converted_len == iso_len && memcmp(converted, iso, iso_len) == 0);
@@ -8920,10 +9016,27 @@ static void test_psn_package_imports_as_its_iso(void) {
     assert(strcmp(inspected.disc_id, "TEST80901") == 0);
     assert(strcmp(inspected.title_name, "Synthetic PSN Game") == 0);
 
-    /* Picking the package again reuses the checked conversion. */
+    /* Picking the package again reads it for its identity on the worker, never on the UI
+       thread, and reuses the checked conversion. */
+    assert(pbp_len != iso_len);
     assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code),
                                       message, sizeof(message)));
-    assert(again.iso_ready);
+    assert(!again.iso_ready);
+    assert(psn_test_convert_reused(&again, pbp_len));
+
+    /* The same package bytes under another name, written now, are the same package
+       (F-f6233fe0: the sampled rule keyed on the write time). */
+    {
+        uint8_t *package_bytes;
+        size_t package_bytes_len = 0;
+        snprintf(other_path, sizeof(other_path), "%s%cCOPY OF EBOOT.PBP", base, sep);
+        package_bytes = psn_test_read_file(pbp_path, &package_bytes_len);
+        write_binary_file(other_path, package_bytes, package_bytes_len);
+        free(package_bytes);
+        assert(player_psn_package_inspect(other_path, &again, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(psn_test_convert_reused(&again, pbp_len));
+    }
 
     /* Another package with the same disc ID (a re-release, a fixed download) is converted
        itself, not given the first one's image; then the first is converted again, and an
@@ -8955,35 +9068,95 @@ static void test_psn_package_imports_as_its_iso(void) {
                                           sizeof(message)));
         assert(strcmp(second.iso_path, expected_iso) == 0);
         assert(!second.iso_ready);
-        assert(player_psn_package_convert(&second, NULL, code, sizeof(code), message,
-                                          sizeof(message)));
+        assert(!psn_test_convert_reused(&second, second_package_len));
         converted = psn_test_read_file(expected_iso, &converted_len);
         assert(converted_len == second_image_len &&
                memcmp(converted, second_image, second_image_len) == 0);
         free(converted);
-        assert(player_psn_package_inspect(second_pbp, &second, code, sizeof(code), message,
-                                          sizeof(message)));
-        assert(second.iso_ready);
+        assert(psn_test_convert_reused(&second, second_package_len));
         /* The first package's image is gone, so picking it converts it again. */
         assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
                                           sizeof(message)));
-        assert(!again.iso_ready);
-        assert(player_psn_package_convert(&again, NULL, code, sizeof(code), message,
-                                          sizeof(message)));
+        assert(!psn_test_convert_reused(&again, pbp_len));
         converted = psn_test_read_file(expected_iso, &converted_len);
         assert(converted_len == iso_len && memcmp(converted, iso, iso_len) == 0);
         /* Its tail cut off, with the volume descriptor and PARAM.SFO still readable. */
         write_binary_file(expected_iso, converted, converted_len - 2048u);
         free(converted);
-        assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
-                                          sizeof(message)));
-        assert(!again.iso_ready);
-        assert(player_psn_package_convert(&again, NULL, code, sizeof(code), message,
-                                          sizeof(message)));
-        assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
-                                          sizeof(message)));
-        assert(again.iso_ready);
+        assert(!psn_test_convert_reused(&again, pbp_len));
+        assert(psn_test_convert_reused(&again, pbp_len));
+        /* A record the sampled rule wrote (size, write time and first 64 KiB of the
+           package) names this package beside another package's image, as it did when two
+           packages shared that sample: it is not taken for this package's conversion, which
+           is made again (F-f6233fe0). */
+        {
+            char sidecar[NATIVE_TEST_PATH_MAX + 200];
+            char sampled[NK_DISC_LEGACY_FINGERPRINT_CHARS + 1];
+            NkDiscExpandStatus sample_status;
+            FILE *record;
+            write_binary_file(expected_iso, second_image, second_image_len);
+            assert(nk_disc_legacy_fingerprint(pbp_path, NK_DISC_FORMAT_NONE, sampled,
+                                              &sample_status));
+            snprintf(sidecar, sizeof(sidecar), "%s.source", expected_iso);
+            record = fopen(sidecar, "wb");
+            assert(record != NULL);
+            fprintf(record, "%s %lld\n", sampled, (long long)second_image_len);
+            assert(fclose(record) == 0);
+            assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                              sizeof(message)));
+            assert(!again.iso_ready);
+            assert(!psn_test_convert_reused(&again, pbp_len));
+            converted = psn_test_read_file(expected_iso, &converted_len);
+            if (converted_len != iso_len || memcmp(converted, iso, iso_len) != 0) {
+                fprintf(stderr, "[PLAYER_STATE_TEST] a sampled record served another "
+                                "package's image\n");
+                assert(false);
+            }
+            free(converted);
+        }
         free(second_image);
+    }
+
+    /* A package rewritten while it is converted (the same size and write time, one byte
+       changed) is never recorded: the identity read again before the record differs, and
+       the image is removed (review of F-f6233fe0, finding 2). On Windows the conversion holds
+       the package with writes denied, so the rewrite is refused and the conversion records
+       the bytes it read. */
+    {
+        char sidecar[NATIVE_TEST_PATH_MAX + 200];
+        uint8_t *package_bytes;
+        size_t package_bytes_len = 0;
+        PsnTestMeddle meddle;
+        PlayerPsnConvertCallbacks meddling = { psn_test_meddle_progress, psn_test_meddle_never,
+                                               NULL };
+        bool converted_ok;
+        package_bytes = psn_test_read_file(pbp_path, &package_bytes_len);
+        snprintf(sidecar, sizeof(sidecar), "%s.source", expected_iso);
+        assert(nk_remove_utf8(sidecar) == 0);
+        memset(&meddle, 0, sizeof(meddle));
+        meddle.path = pbp_path;
+        meddle.image_bytes = iso_len;
+        meddling.userdata = &meddle;
+        assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                          sizeof(message)));
+        converted_ok = player_psn_package_convert(&again, &meddling, code, sizeof(code),
+                                                  message, sizeof(message));
+        assert(meddle.acted);
+#if defined(_WIN32) || defined(_WIN64)
+        assert(meddle.refused && converted_ok);
+        assert(!nk_platform_path_missing(sidecar));
+#else
+        if (converted_ok || strcmp(code, "DISC_IMAGE_READ_FAILED") != 0 ||
+            strstr(message, "changed while Nakagawa was adding it") == NULL) {
+            fprintf(stderr, "[PLAYER_STATE_TEST] a package changed during its conversion was "
+                            "recorded: ok=%d %s: %s\n", (int)converted_ok, code, message);
+            assert(false);
+        }
+        assert(nk_platform_path_missing(expected_iso));
+        assert(nk_platform_path_missing(sidecar));
+        write_binary_file(pbp_path, package_bytes, package_bytes_len);
+#endif
+        free(package_bytes);
     }
 
     /* The wizard's panel shows the conversion and hands back the view the

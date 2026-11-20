@@ -1533,6 +1533,66 @@ FILE *nk_platform_open_regular_file(const char *path) {
     return file;
 }
 
+FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared) {
+    if (opened_shared) *opened_shared = false;
+    if (!path || !*path) return NULL;
+    WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return NULL;
+    }
+    /* FILE_SHARE_READ alone: other readers open it, writers and deleters are refused. */
+    HANDLE handle = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        /* Another program has it open for writing: read it shared, as any reader does. */
+        FILE *shared = GetLastError() == ERROR_SHARING_VIOLATION ? _wfopen(wpath, L"rb") : NULL;
+        free(wpath);
+        if (shared && opened_shared) *opened_shared = true;
+        return shared;
+    }
+    free(wpath);
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(handle);
+        return NULL;
+    }
+    FILE *file = _fdopen(fd, "rb");
+    if (!file) _close(fd);
+    return file;
+}
+
+void nk_platform_file_change_identity(const char *path, uint64_t *changed, uint64_t *volume,
+                                      uint64_t *file_id) {
+    if (changed) *changed = 0;
+    if (volume) *volume = 0;
+    if (file_id) *file_id = 0;
+    if (!path || !*path) return;
+    WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return;
+    }
+    /* Attributes only, every sharing allowed: never in the way of a hold or of
+       another program's open. */
+    HANDLE handle = CreateFileW(wpath, FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wpath);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    FILE_BASIC_INFO basic;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (changed && GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)) &&
+        basic.ChangeTime.QuadPart > 0) {
+        *changed = (uint64_t)basic.ChangeTime.QuadPart;
+    }
+    if (GetFileInformationByHandle(handle, &info)) {
+        if (volume) *volume = info.dwVolumeSerialNumber;
+        if (file_id) *file_id = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+    }
+    CloseHandle(handle);
+}
+
 void nk_platform_terminate_process(NkProcessHandle *process) {
     if (!process) return;
     if (process->job_handle) {
