@@ -33,8 +33,10 @@ The one partial pin that exists is described under "Pins" below.
 - Repository: `https://github.com/hrydgard/ppsspp`
 - Copyright: Copyright (c) 2012- PPSSPP Project and contributors
 - Licence: GPL-2.0-or-later, plus PPSSPP's own third-party notices. The
-  project conveys its combined work under GPL-3.0-or-later, which
-  GPL-2.0-or-later permits through its "or any later version" clause. Per-file
+  project's own code is GPL-3.0-or-later, and the packaged build, which also
+  includes GPL-3.0-only parts (xBRZ and the files ported from pspdecrypt), is
+  conveyed under GPL version 3; GPL-2.0-or-later permits both through its "or
+  any later version" clause. Per-file
   GPL-2.0-or-later identifiers are kept unchanged (`third_party/licenses/GPL-2.0.txt`,
   `LICENSE`, `NOTICE.md`).
 - Intermediate upstream: sal063/PSP-recompilation-project, GPL-2.0-or-later,
