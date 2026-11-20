@@ -4177,7 +4177,10 @@ static int hle_run(void)
  *   red    0x001f  depth 0x7000 (dr-zbw256's background) or, in dc-scissor, 0x5a5a (the CPU fill)
  *   white  0xffff  the EQUAL test passed against 0x1234, a value nothing wrote: the test did
  *                  not compare
- *   green  0x07e0  the colour of dw-test-zbw256's and ctl-zbw512's tag draws, not painted over
+ *   green  0x07e0  the colour of dw-test-zbw256's and ctl-zbw512's tag draws, not painted over;
+ *                  in dr-zbw256, the colour of a first readout sprite drawn with the test on and
+ *                  ALWAYS, so green there is a pixel the GE draws whose depth equals none of the
+ *                  values
  *   fill   0x5a5a  nothing drew here
  *
  * Each cell is one display list of project-written command words (no game data): through mode,
@@ -4194,15 +4197,20 @@ static int hle_run(void)
  *   dw-test-zbw256   zbw 256. The same clear and the same tags, now at columns past zbw; readout
  *                    over x 0..255 only (columns the depth test reads without doubt). Blue at
  *                    row y + 1, group y: the write ran on linearly into the next row. Blue at
- *                    row y, group y: it wrapped within the row. No blue: it was dropped.
+ *                    row y, group y: it wrapped within the row. No blue in rows 0..15: no tag
+ *                    depth landed in those rows (dropped, or written somewhere else; the -zp
+ *                    count of 0x0100 words tells the two apart only if the plain mirror reads
+ *                    depth). The past half's green count shows the tags' colour was drawn.
  *   dw-clear-zbw256  the same with the tags written by clear-mode depth-only sprites.
  *   dr-zbw256        zbw 256. The clear; then, inside the buffer, a clear-mode background of
  *                    0x7000 over x 0..255, rows 0..16 and tags y 0..15 at x 16y (depth 0x0100);
- *                    readout over x 0..511, rows 0..15. The in half (x 0..255) shows the tags
+ *                    readout over x 0..511, rows 0..15, after a green sprite over the same
+ *                    pixels with the test on and ALWAYS. The in half (x 0..255) shows the tags
  *                    where they were written. In the past half, row y blue at group y + 1 (row 15
  *                    all red): the depth test read on linearly, the next row's depth. Blue at
- *                    group y: it read its own row. White: it did not compare. Fill: it failed
- *                    every value.
+ *                    group y: it read its own row. White: it did not compare. Green: it compared
+ *                    and the depth it read equals none of the three values. Fill: the GE drew
+ *                    nothing there even under ALWAYS.
  *   dc-scissor       zbw 512. Under scissor x 0..99, a depth-only clear of 512x272 to 0x4000;
  *                    then under scissor x 0..511 a readout over 512x272: yellow where depth is
  *                    0x4000, red where it still equals the CPU fill 0x5a5a. Red at x 100..511:
@@ -4347,12 +4355,17 @@ static void gdb_sprite(uint32_t col, uint32_t x0, uint32_t y0, uint32_t x1, uint
 }
 
 /* The readout: with the depth test on (EQUAL) and depth writes off, one sprite per value over
-   x 0..x1-1, rows 0..rows-1; white last. `red_z` is the depth red stands for. */
-static void gdb_readout(uint32_t x1, uint32_t rows, uint32_t red_z, int with_blue)
+   x 0..x1-1, rows 0..rows-1; white last. `red_z` is the depth red stands for. With `base`, a
+   green sprite is drawn first with the test on and ALWAYS. */
+static void gdb_readout(uint32_t x1, uint32_t rows, uint32_t red_z, int with_blue, int base)
 {
     gdb_w(0xe7, 1);             /* depth writes off */
-    gdb_w(0xde, 2);             /* depth test EQUAL */
     gdb_w(0x23, 1);             /* depth test on */
+    if (base) {
+        gdb_w(0xde, 1);         /* depth test ALWAYS */
+        gdb_sprite(GDB_GREEN, 0u, 0u, x1, rows, GDB_Z_NONE);
+    }
+    gdb_w(0xde, 2);             /* depth test EQUAL */
     if (with_blue) {
         gdb_sprite(GDB_BLUE, 0u, 0u, x1, rows, GDB_Z_TAG);
     }
@@ -4445,16 +4458,18 @@ static void gdb_build(const struct gdb_cell *c)
     }
     switch (c->kind) {
     case GDB_K_CTL:
+        gdb_readout(512u, GDB_READ_ROWS, GDB_Z_HIGH, 1, 0);
+        break;
     case GDB_K_READ:
-        gdb_readout(512u, GDB_READ_ROWS, GDB_Z_HIGH, 1);
+        gdb_readout(512u, GDB_READ_ROWS, GDB_Z_HIGH, 1, 1);
         break;
     case GDB_K_WTEST:
     case GDB_K_WCLEAR:
-        gdb_readout(GDB_HALF_COLS, GDB_READ_ROWS, GDB_Z_HIGH, 1);
+        gdb_readout(GDB_HALF_COLS, GDB_READ_ROWS, GDB_Z_HIGH, 1, 0);
         break;
     default:
         gdb_w(0xd5, 511u | ((GDB_ROWS - 1u) << 10));   /* scissor x 0..511 for the readout */
-        gdb_readout(512u, GDB_ROWS, GDB_FILL16, 0);
+        gdb_readout(512u, GDB_ROWS, GDB_FILL16, 0, 0);
         break;
     }
     gdb_w(0xe7, 1);
