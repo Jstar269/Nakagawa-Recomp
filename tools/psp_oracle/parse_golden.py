@@ -2845,13 +2845,17 @@ for _fetch_case in (
 # ge-through-z (185, probe_ge_sample.c): through-mode vertex z outside 0..65535, fractional,
 # infinite and NaN. Per cell, in order, one `-draw` record (16 words: the GE wait outcome, the
 # list length, the z bits, the colour pixels written, the colour at the sprite centre and the
-# changed depth words) and one `-z` record (the depth words of the sprite's centre row).
+# changed depth words) and one `-z` record (the depth words of the sprite's centre row). Last,
+# `vram-restore`: the 32-bit words of VRAM 0x110000..0x120fff the case wrote back and how many
+# then differed from its saved copy.
 GE_THROUGH_Z_CELLS = (
     "zm1", "zm0p5", "z0", "z0p5", "z1p5", "z65535", "z65535p5", "z65536", "z70000", "zinf",
     "znan",
 )
-GE_THROUGH_Z_ROWS = tuple(
-    row for cell in GE_THROUGH_Z_CELLS for row in ((f"{cell}-draw", 16), (f"{cell}-z", 16)))
+GE_THROUGH_Z_ROWS = (
+    *(row for cell in GE_THROUGH_Z_CELLS for row in ((f"{cell}-draw", 16), (f"{cell}-z", 16))),
+    ("vram-restore", 2),
+)
 GE_THROUGH_Z_CASES = tuple(case for case, _count in GE_THROUGH_Z_ROWS)
 _register_campaign_probe(
     "ge-through-z", "PSP-GE-THROUGHZ-001", GE_THROUGH_Z_ROWS,
