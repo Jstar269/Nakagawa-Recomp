@@ -287,8 +287,8 @@ Legend:
 
 ### `libavcodec/h264_slice.c`
 
-Modified 2026-11-17 (maintainer-approved new bytes, audit 2026-11-17). Two commits from FFmpeg's
-`release/4.4` branch are applied verbatim to the n4.4 blob; nothing else changes, and each change
+Modified 2026-11-17 (maintainer-approved new bytes, audit 2026-11-17) and 2026-11-20. Commits from
+FFmpeg's `release/4.4` branch are applied verbatim to the n4.4 blob; nothing else changes, and each change
 is marked `LOCAL DELTA` in the file.
 
 - `6d574288584a81779068b032e405f74da0dd9ba1` "avcodec/h264_slice: reject slice_num >= 0xFFFF"
@@ -301,6 +301,15 @@ is marked `LOCAL DELTA` in the file.
   parsing failure". `h264_slice_header_parse` zeroes `poc_lsb`, `delta_poc_bottom` and
   `delta_poc[0..1]` before the conditional reads, so a slice whose header fails to parse
   cannot hand its POC fields to a next slice whose parameter sets do not code them.
+- Added 2026-11-20 (new bytes await the maintainer's approval):
+  `c5baeda37e6f297a9a2ac134040f1db577e7c9bc` "avcodec/h264: recompute per-slice direct mode state
+  for every slice" (`release/4.4`, cherry-pick of master `17723863922bd80e29cc957507cef7ae79eddccb`;
+  testcase `poc10`, a NULL pointer dereference; it touches `h264_direct.c` and `h264_slice.c`).
+  `h264_slice_init` calls `ff_h264_direct_ref_list_init` for every slice, and only that
+  function's writes to the current picture stay behind `!h->setup_finished`. The regression it
+  fixes is a frame-threading one: `setup_finished` is set only under frame threading, which this
+  build does not use (`HAVE_THREADS 0`), so here the change leaves decoding as it was. It is
+  taken to keep the subset in line with `release/4.4`.
 
 Regressions: `test_ffmpeg_slice_number_cap` and `test_ffmpeg_failed_slice_poc_is_not_inherited`
 in `tests/native/psmf_media_selftest.c` (`make H264_FFMPEG=1 psmf-media-selftest`) fail on the
@@ -332,6 +341,15 @@ each change is marked `LOCAL DELTA` in the file.
   `single_col` ORs it into `mb_type_col`. A macroblock never decoded in a broken field picture
   keeps a stale type without that flag; without the fix the frame path then reads the colocated
   motion vectors with the field remapping, past the end of the picture's arrays.
+
+- `c5baeda37e6f297a9a2ac134040f1db577e7c9bc` "avcodec/h264: recompute per-slice direct mode state
+  for every slice" (`release/4.4`, cherry-pick of master `17723863922bd80e29cc957507cef7ae79eddccb`;
+  testcase `poc10`, a NULL pointer dereference; it touches `h264_direct.c` and `h264_slice.c`).
+  `h264_slice_init` calls `ff_h264_direct_ref_list_init` for every slice, and only that
+  function's writes to the current picture stay behind `!h->setup_finished`. The regression it
+  fixes is a frame-threading one: `setup_finished` is set only under frame threading, which this
+  build does not use (`HAVE_THREADS 0`), so here the change leaves decoding as it was. It is
+  taken to keep the subset in line with `release/4.4`.
 
 Taken on upstream's authority: the read was not reproduced in this project, so no regression
 test shows the change is needed. The media selftests confirm that valid streams decode as before.
