@@ -2329,10 +2329,54 @@ jobs:
           echo "$gradle_bin" >> "$GITHUB_PATH"
 
       - name: Build the Android launcher APK for arm64-v8a
+        env:
+          # On 2026-11-20 one blip of the public Maven repositories failed this build with
+          # "Could not find <group>:<artifact>:<version>" and "Could not parse POM" for ordinary
+          # libraries, in a batch that did not touch Android. The helper runs the build and, only
+          # when the failed attempt's output names a dependency download or resolution error,
+          # runs it again: three attempts in all, 30 s and then 60 s apart, each retry with an
+          # empty Gradle user home, since Gradle's cache records a module's absence from a
+          # repository and could replay the miss. Any other failure (Java, CMake, the APK checks
+          # below) ends the step at once. tools/test_public_ci_wiring.py runs it against a stub.
+          NK_GRADLE_RETRY: |
+            set -euo pipefail
+            if [ "$#" -eq 0 ]; then
+              echo "::error::nk-gradle-retry: no command named" >&2
+              exit 2
+            fi
+            coordinate='[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+:[A-Za-z0-9_.+-]+'
+            transient="Could not (find|resolve) $coordinate|Could not (GET|HEAD|get resource) '?https?://"
+            transient+="|Could not parse POM https?://|(Read|Connect|connect) timed out"
+            transient+="|Plugin \[id: '[^']+', version: '[^']+'\] was not found in any of the following sources"
+            output="$(mktemp)"
+            for attempt in 1 2 3; do
+              if [ "$attempt" -gt 1 ]; then
+                GRADLE_USER_HOME="$(mktemp -d)"
+                export GRADLE_USER_HOME
+              fi
+              set +e
+              "$@" 2>&1 | tee "$output"
+              status="${PIPESTATUS[0]}"
+              set -e
+              if [ "$status" -eq 0 ]; then
+                exit 0
+              fi
+              if ! grep -Eq "$transient" "$output"; then
+                exit "$status"
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "::warning::nk-gradle-retry: attempt $attempt of 3 could not fetch a dependency;" \
+                  "retrying in $((30 * attempt)) s with an empty Gradle user home" >&2
+                sleep "$((30 * attempt))"
+              fi
+            done
+            echo "::error::nk-gradle-retry: fetching the build's dependencies failed on every attempt" >&2
+            exit "$status"
         run: |
           set -euo pipefail
           export JAVA_HOME="$JAVA_HOME_21_X64"
-          gradle --no-daemon -p android assembleDebug -Pnk.abis=arm64-v8a \
+          bash -c "$NK_GRADLE_RETRY" nk-gradle-retry \
+            gradle --no-daemon -p android assembleDebug -Pnk.abis=arm64-v8a \
             "-Pnk.depsDir=$RUNNER_TEMP/android-deps"
           apk=android/app/build/outputs/apk/debug/app-debug.apk
           listing=$(unzip -l "$apk")

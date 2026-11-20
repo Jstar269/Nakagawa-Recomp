@@ -1640,6 +1640,176 @@ class AndroidBuildWiringTests(unittest.TestCase):
         self.assertIn('("android-build", "ANDROID_RESULT", "RUN_NATIVE")', required)
 
 
+def _step_env_value(step: list[str], key: str) -> str:
+    """One step-level `env:` value written as a `|` block, with its lines dedented."""
+    header = next(i for i, line in enumerate(step) if line.strip() == f"{key}: |")
+    indent = len(step[header]) - len(step[header].lstrip()) + 2
+    body: list[str] = []
+    for line in step[header + 1:]:
+        if line.strip() and not line.startswith(" " * indent):
+            break
+        body.append(line[indent:])
+    while body and not body[-1].strip():
+        body.pop()
+    return "".join(line + "\n" for line in body)
+
+
+# A stand-in for gradle: each call appends its user home to the log; the first
+# NK_TEST_FAILURES calls print NK_TEST_MESSAGE and exit 1, later calls succeed.
+_GRADLE_STUBS = {
+    "gradle": (
+        '#!/bin/bash\nn=$(( $(cat "$NK_TEST_COUNT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$NK_TEST_COUNT"\n'
+        'echo "gradle ${GRADLE_USER_HOME:-default} $*" >> "$NK_TEST_LOG"\n'
+        'if [ "$n" -le "$NK_TEST_FAILURES" ]; then\n'
+        '  printf \'FAILURE: Build failed with an exception.\\n\\n* What went wrong:\\n%s\\n\' "$NK_TEST_MESSAGE" >&2\n'
+        '  exit 1\nfi\necho "BUILD SUCCESSFUL"\n'
+    ),
+    "sleep": '#!/bin/sh\necho "sleep $*" >> "$NK_TEST_LOG"\n',
+}
+
+# Messages from a repository that did not answer or answered wrongly: retried.
+_GRADLE_TRANSIENT = (
+    "Could not resolve all artifacts for configuration 'classpath'.\n"
+    "   > Could not find org.jetbrains.kotlin:kotlin-stdlib:2.3.0.",
+    "Could not resolve all artifacts for configuration 'classpath'.\n"
+    "   > Could not resolve com.google.guava:guava:33.4.0-jre.\n"
+    "      > Could not get resource 'https://repo.maven.apache.org/maven2/com/google/guava/guava/33.4.0-jre/"
+    "guava-33.4.0-jre.pom'.",
+    "   > Could not GET 'https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/9.5.1/"
+    "gradle-9.5.1.pom'. Received status code 503 from server: Service Unavailable",
+    "   > Could not HEAD 'https://repo.maven.apache.org/maven2/org/ow2/asm/asm/9.8/asm-9.8.jar'.",
+    "   > Could not parse POM https://dl.google.com/dl/android/maven2/com/android/tools/sdk-common/32.5.1/"
+    "sdk-common-32.5.1.pom",
+    "   > Could not GET 'https://repo.maven.apache.org/maven2/commons-io/commons-io/2.18.0/"
+    "commons-io-2.18.0.pom'.\n      > Read timed out",
+    "Plugin [id: 'com.android.application', version: '9.5.1'] was not found in any of the following sources:",
+)
+
+# Failures of the build itself, including ones worded like a lookup: never retried.
+_GRADLE_PERMANENT = (
+    "Execution failed for task ':app:compileDebugJavaWithJavac'.\n"
+    "> Compilation failed; see the compiler error output for details.",
+    "Execution failed for task ':app:buildCMakeDebug[arm64-v8a]'.\n"
+    "  Could not find a package configuration file provided by \"SDL3\" with any of the following names:",
+    "  Could not find toolchain file: /opt/ndk/build/cmake/android.toolchain.cmake",
+    "Could not resolve all files for configuration ':app:debugRuntimeClasspath'.\n"
+    "   > Could not resolve project :player.",
+    "Could not determine the dependencies of task ':app:compileDebugKotlin'.",
+)
+
+
+class GradleRetryHelperTests(unittest.TestCase):
+    """The Android build's Gradle helper (NK_GRADLE_RETRY), run as the step runs it, against a stub.
+
+    On 2026-11-20 a short outage of the public Maven repositories failed the Android launcher
+    build of a landing batch that did not touch Android, which cost the batch's whole run.
+    """
+
+    STEP = "Build the Android launcher APK for arm64-v8a"
+    COMMAND = ("gradle", "--no-daemon", "-p", "android", "assembleDebug", "-Pnk.abis=arm64-v8a")
+
+    step: ClassVar[list[str]]
+    helper: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        step = _ci_step(_ci_job_blocks()["android_build"], cls.STEP)
+        assert step is not None, f"android_build has no step {cls.STEP!r}"
+        cls.step = step
+        cls.helper = _step_env_value(step, "NK_GRADLE_RETRY")
+
+    def run_helper(self, failures: int, message: str = "",
+                   command: Sequence[str] = COMMAND) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        bash, reason = _step_bash()
+        if bash is None:
+            self.skipTest(reason)
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        scratch = Path(holder.name)
+        stubs = scratch / "bin"
+        stubs.mkdir()
+        for name, body in _GRADLE_STUBS.items():
+            (stubs / name).write_bytes(body.encode("utf-8"))
+            (stubs / name).chmod(0o755)
+        log = scratch / "log"
+        log.write_text("", encoding="utf-8")
+        env = {key: value for key, value in os.environ.items() if key != "GRADLE_USER_HOME"}
+        env.update({
+            "NK_GRADLE_RETRY": self.helper,
+            "NK_TEST_STUBS": _bash_path(stubs),
+            "NK_TEST_LOG": _bash_path(log),
+            "NK_TEST_COUNT": _bash_path(scratch / "count"),
+            "NK_TEST_FAILURES": str(failures),
+            "NK_TEST_MESSAGE": message,
+        })
+        # The step's own invocation, with the stubs first on PATH.
+        wrapper = 'export PATH="$NK_TEST_STUBS:$PATH"; bash -c "$NK_GRADLE_RETRY" nk-gradle-retry "$@"'
+        done = subprocess.run([bash, "-c", wrapper, "wrapper", *command], capture_output=True, text=True,
+                              env=env, timeout=120, check=False)
+        return done, log.read_text(encoding="utf-8").splitlines()
+
+    def test_the_step_builds_through_the_helper(self) -> None:
+        text = "\n".join(self.step)
+        self.assertIn('bash -c "$NK_GRADLE_RETRY" nk-gradle-retry \\\n'
+                      '            gradle --no-daemon -p android assembleDebug -Pnk.abis=arm64-v8a \\\n', text)
+        self.assertEqual(text.count("gradle --no-daemon"), 1, "the build runs only through the helper")
+        # Three attempts, a pause before each retry, and nothing that skips or relaxes a check.
+        self.assertIn("for attempt in 1 2 3; do", self.helper)
+        self.assertIn('sleep "$((30 * attempt))"', self.helper)
+        for banned in ("continue-on-error", "--refresh-dependencies", "--offline", "|| true"):
+            with self.subTest(banned=banned):
+                self.assertNotIn(banned, text)
+
+    def test_a_short_outage_succeeds_on_a_retry_with_an_empty_user_home(self) -> None:
+        done, log = self.run_helper(2, _GRADLE_TRANSIENT[0])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        calls = [line for line in log if line.startswith("gradle ")]
+        self.assertEqual(len(calls), 3, log)
+        for call in calls:
+            self.assertTrue(call.endswith(" " + " ".join(self.COMMAND[1:])), call)
+        homes = [call.split()[1] for call in calls]
+        self.assertEqual(homes[0], "default")
+        self.assertNotIn("default", homes[1:])
+        self.assertEqual(len(set(homes)), 3, homes)
+        self.assertEqual([line for line in log if line.startswith("sleep ")], ["sleep 30", "sleep 60"])
+        self.assertEqual(done.stderr.count("::warning::nk-gradle-retry: attempt "), 2, done.stderr)
+        self.assertIn("BUILD SUCCESSFUL", done.stdout)
+
+    def test_an_outage_past_the_bound_fails_the_step(self) -> None:
+        done, log = self.run_helper(99, _GRADLE_TRANSIENT[0])
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(sum(line.startswith("gradle ") for line in log), 3)
+        self.assertEqual([line for line in log if line.startswith("sleep ")], ["sleep 30", "sleep 60"])
+        self.assertIn("::error::nk-gradle-retry: fetching the build's dependencies failed on every attempt",
+                      done.stderr)
+
+    def test_a_build_failure_is_not_retried(self) -> None:
+        done, log = self.run_helper(1, _GRADLE_PERMANENT[0])
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(log, [f"gradle default {' '.join(self.COMMAND[1:])}"])
+        self.assertNotIn("nk-gradle-retry", done.stderr)
+        self.assertIn("Compilation failed", done.stdout)
+
+    def test_each_repository_error_is_retried(self) -> None:
+        for message in _GRADLE_TRANSIENT:
+            with self.subTest(message=message.splitlines()[-1]):
+                done, log = self.run_helper(1, message)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(sum(line.startswith("gradle ") for line in log), 2)
+
+    def test_lookup_wording_from_the_build_itself_is_not_retried(self) -> None:
+        for message in _GRADLE_PERMANENT:
+            with self.subTest(message=message.splitlines()[-1]):
+                done, log = self.run_helper(1, message)
+                self.assertEqual(done.returncode, 1)
+                self.assertEqual(sum(line.startswith("gradle ") for line in log), 1)
+
+    def test_no_command_is_a_usage_error(self) -> None:
+        done, log = self.run_helper(0, command=())
+        self.assertEqual(done.returncode, 2)
+        self.assertEqual(log, [])
+
+
 class WindowsCompilerCacheTests(unittest.TestCase):
     """#735 item 2: Windows compiles go through a compiler cache that only main writes.
 
