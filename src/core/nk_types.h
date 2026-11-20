@@ -83,6 +83,10 @@ typedef struct {
        share a disc ID and stay two records (nk_library.h). */
     char content_sha1[41];
     char content_crc32[9];
+    /* Which key disc_id is (NkIsoMetadata.disc_key_version): 1 or 2 for a content
+       key, 0 for a disc's own ID or an entry written before versions were recorded.
+       An entry keeps the key it was made with (nk_iso_library_key_match). */
+    uint32_t disc_key_version;
     /* How the image compares with the Redump list it was checked against (the
        user's import, else the list bundled with Nakagawa): an NkDiscTier
        (nk_disc_verify.h), 0 when it was not checked. */

@@ -44,9 +44,39 @@ bool iso_inspect_file(const char *iso_path, IsoInspectResult *out_result) {
              sizeof(out_result->matched_title_id), "%s",
              meta.matched_title_id);
     out_result->status = (GameSupportStatus)meta.status;
+    out_result->disc_key_version = meta.disc_key_version;
+    snprintf(out_result->legacy_disc_id, sizeof(out_result->legacy_disc_id), "%s",
+             meta.legacy_disc_id);
     out_result->success = true;
 
     return true;
+}
+
+uint32_t iso_inspect_result_for_library(IsoInspectResult *result, const NkGameEntry *entries,
+                                        int entry_count) {
+    if (!result) return 0u;
+    char key[MAX_DISC_ID_LEN];
+    uint32_t version = nk_iso_library_key_for_image(
+        entries, entry_count, result->disc_id, result->disc_key_version,
+        result->legacy_disc_id, key, sizeof(key));
+    if (strcmp(key, result->disc_id) == 0) return version;
+    /* Re-keyed under the v1 key an entry made before v2 holds: the catalog is
+       searched again under that key, and a name made from the v2 key is made
+       again from the v1 key, as nk_iso_inspect makes both. */
+    char image_key[sizeof(result->disc_id)];
+    char display_name[sizeof(result->title_name)];
+    snprintf(image_key, sizeof(image_key), "%s", result->disc_id);
+    snprintf(result->disc_id, sizeof(result->disc_id), "%s", key);
+    result->disc_key_version = version;
+    result->legacy_disc_id[0] = '\0';
+    result->is_supported = nk_iso_catalog_match(key, result->matched_title_id,
+                                                sizeof(result->matched_title_id),
+                                                display_name, sizeof(display_name));
+    result->status = (GameSupportStatus)(result->is_supported ? NK_STATUS_VERIFIED
+                                                              : NK_STATUS_IDENTIFIED);
+    nk_iso_title_for_key(result->title_name, sizeof(result->title_name), image_key, key,
+                         result->is_supported ? display_name : NULL);
+    return version;
 }
 
 NkIconStatus nk_iso_validate_png_header(const uint8_t *data, size_t size, uint32_t *out_w, uint32_t *out_h) {

@@ -783,6 +783,10 @@ typedef struct {
     /* NK_DISC_FORMAT_NONE for a PSN package; otherwise the compressed image's
        format, and iso_path and disc_id are known once it is expanded. */
     NkDiscFormat disc_format;
+    /* The library file the disc is added to (PlayerApp.library.library_path; empty
+       for the default one): player_disc_image_expand reads it to expand the disc
+       into the folder of the key it is added under. */
+    char library_path[NK_MAX_PATH];
 } PlayerPsnPackage;
 
 typedef struct {

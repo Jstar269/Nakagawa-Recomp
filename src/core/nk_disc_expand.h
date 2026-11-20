@@ -101,6 +101,8 @@ extern "C" {
 #define NK_DISC_CHD_CD_UNSUPPORTED     "DISC_IMAGE_CHD_CD_UNSUPPORTED"
 #define NK_DISC_CHD_UNSUPPORTED        "DISC_IMAGE_CHD_UNSUPPORTED"
 #define NK_DISC_IMPORT_BUSY            "DISC_IMAGE_IMPORT_BUSY"
+/* The library an import is keyed by cannot be read (the player's code for it). */
+#define NK_DISC_LIBRARY_UNREADABLE     "IO_FAILURE"
 #define NK_DISC_CANCELLED              "CANCELLED"
 #define NK_DISC_INTERNAL               "INTERNAL_ERROR"
 
@@ -246,6 +248,22 @@ bool nk_disc_import_probe(const char *source, const char *data_root, NkDiscImpor
 bool nk_disc_import(const char *source, const char *data_root,
                     const NkDiscExpandCallbacks *callbacks, NkDiscImport *out,
                     NkDiscExpandStatus *status);
+
+/* nk_disc_import for a library holding entries[0..entry_count): a new
+   expansion goes into the folder of the key the disc is added under
+   (nk_iso_library_key_for_image), so a prototype disc whose library entry
+   holds its v1 key is expanded into discs/<v1 key>, the folder that entry's
+   checks and removal use, and any other disc into discs/<its own key>. An
+   expansion recorded earlier under the other key moves to that folder (an
+   emptied old folder is removed; one that holds anything else stays). A move
+   that fails is named and leaves that expansion where its record names it.
+   nk_disc_import is this with no library
+   (entries NULL): a new expansion goes under the disc's own key and a recorded
+   one stays where it is. */
+bool nk_disc_import_for_library(const char *source, const char *data_root,
+                                const NkGameEntry *entries, int entry_count,
+                                const NkDiscExpandCallbacks *callbacks, NkDiscImport *out,
+                                NkDiscExpandStatus *status);
 
 #ifdef __cplusplus
 }

@@ -63,6 +63,14 @@ static bool player_populate_inspected_game(PlayerApp *app, const char *iso_path,
     if (!app || !iso_path || !result) return false;
     GameRecord *game = &app->inspecting_game;
     memset(game, 0, sizeof(*game));
+    /* A prototype disc keyed v2 whose v1 key an entry made before v2 holds is that
+       entry's disc, added again under its old key, with the title catalog searched
+       again under that key; any other disc keeps its own key. */
+    IsoInspectResult keyed = *result;
+    game->disc_key_version = iso_inspect_result_for_library(&keyed, app->library.entries,
+                                                            app->library.count);
+    result = &keyed;
+    snprintf(game->disc_id, sizeof(game->disc_id), "%s", result->disc_id);
     const char *title_id_end = memchr(result->matched_title_id, '\0',
                                       sizeof(result->matched_title_id));
     if (!title_id_end ||
@@ -73,7 +81,6 @@ static bool player_populate_inspected_game(PlayerApp *app, const char *iso_path,
         }
         return false;
     }
-    snprintf(game->disc_id, sizeof(game->disc_id), "%s", result->disc_id);
     snprintf(game->title_name, sizeof(game->title_name), "%s", result->title_name);
     snprintf(game->disc_version, sizeof(game->disc_version), "%s", result->disc_version);
     snprintf(game->iso_path, sizeof(game->iso_path), "%s", iso_path);
@@ -94,7 +101,7 @@ static bool player_populate_inspected_game(PlayerApp *app, const char *iso_path,
 
     char refused_profile[512] = "";
     bool profile_refused = player_app_title_profile_refusal_for_disc(
-        app, result->disc_id, refused_profile, sizeof(refused_profile));
+        app, game->disc_id, refused_profile, sizeof(refused_profile));
     if (!result->is_supported && result->param_sfo_parsed && !profile_refused) {
         /* The runtime root owns experimental profiles: the build's preflight, the
            package build and the manifest load at start all read them there. */
@@ -102,7 +109,7 @@ static bool player_populate_inspected_game(PlayerApp *app, const char *iso_path,
         char profile_id[64];
         if (!player_app_data_root(app, profile_root, sizeof(profile_root)) ||
             !nk_title_manifest_write_experimental_profile(
-                iso_path, result->param_sfo_parsed, result->disc_id,
+                iso_path, result->param_sfo_parsed, game->disc_id,
                 result->title_name, result->executables.selected_path,
                 profile_root, profile_id, sizeof(profile_id), error, error_len)) {
             if (error && error_len && !error[0]) {
@@ -170,7 +177,7 @@ static void player_take_picked_disc_from(PlayerApp *app, const char *selected_pa
             } else {
                 snprintf(app->wizard.status_message, sizeof(app->wizard.status_message),
                          "Disc image inspected: %s (%s). Review the preflight checks below.",
-                         res.title_name, res.disc_id);
+                         res.title_name, app->inspecting_game.disc_id);
             }
         } else if (app->inspecting_game.is_experimental) {
             player_app_set_view(app, VIEW_EXPERIMENTAL_TITLE);
@@ -3087,6 +3094,8 @@ static void start_psn_job(PlayerApp *app, PlayerPsnJob **job_slot) {
     PlayerPsnJob *job = (PlayerPsnJob *)calloc(1, sizeof(*job));
     if (job) {
         job->package = app->psn_package;
+        snprintf(job->package.library_path, sizeof(job->package.library_path), "%s",
+                 app->library.library_path);
         job->mutex = SDL_CreateMutex();
     }
     if (job && job->mutex) {
@@ -4733,6 +4742,8 @@ static int player_load_library(PlayerRun *run) {
             PlayerPsnConvertCallbacks hooks = { disc_console_progress, NULL, &last_percent };
             printf("[PLAYER] Reading disc image %s, then expanding it unless it was added "
                    "before...\n", nk_disc_format_extension(package.disc_format));
+            snprintf(package.library_path, sizeof(package.library_path), "%s",
+                     run->app.library.library_path);
             ok = player_disc_image_expand(&package, &hooks, code, sizeof(code), message,
                                           sizeof(message));
             if (ok) {

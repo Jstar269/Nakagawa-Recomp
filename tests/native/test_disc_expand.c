@@ -2685,6 +2685,26 @@ static void test_import_busy(void) {
     printf("PASS a second import of the same file meanwhile is refused as busy\n");
 }
 
+/* Review S2 of PR #2855: the folder a moved expansion leaves is removed by one
+   call that refuses a folder holding anything, so a file another import places
+   there at that moment is never removed with it. */
+static void test_remove_empty_dir(void) {
+    char dir[NATIVE_TEST_PATH_MAX];
+    char file[NATIVE_TEST_PATH_MAX];
+    static const unsigned char other[] = "another import";
+    path_in(dir, sizeof(dir), "old-folder");
+    CHECK(nk_platform_mkdir_p(dir));
+    CHECK(snprintf(file, sizeof(file), "%s%cother.iso", dir, nk_platform_path_separator()) > 0);
+    write_bytes(file, other, sizeof(other));
+    CHECK(!nk_platform_remove_empty_dir(dir));
+    CHECK(file_equals(file, other, sizeof(other)));
+    CHECK(nk_remove_utf8(file) == 0);
+    CHECK(nk_platform_remove_empty_dir(dir));
+    CHECK(nk_platform_path_missing(dir));
+    CHECK(!nk_platform_remove_empty_dir(dir));
+    printf("PASS a folder is removed only while it is empty\n");
+}
+
 int main(void) {
     char name[64];
     native_test_create_root("disc-expand");
@@ -2728,6 +2748,7 @@ int main(void) {
     test_import_damaged_records();
     test_import_name_collision();
     test_import_busy();
+    test_remove_empty_dir();
     printf("test_disc_expand: %d checks passed\n", g_checks);
     return 0;
 }

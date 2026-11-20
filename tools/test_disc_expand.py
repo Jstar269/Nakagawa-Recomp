@@ -27,7 +27,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import Callable, ClassVar
 from unittest import mock
 import zlib
 
@@ -39,7 +39,7 @@ from nk_core import disc_expand_tool, package_cache  # noqa: E402
 from nk_core.iso_inspect import (
     IsoInspectionError, inspect_compatibility_preflight, inspect_iso,
 )  # noqa: E402
-from test_iso_parity import create_test_iso_with_executables  # noqa: E402
+from test_iso_parity import build_plain_mips_elf, create_test_iso_with_executables  # noqa: E402
 
 SECTOR = 2048
 PLAIN_FLAG = 0x80000000
@@ -404,6 +404,218 @@ class BringupAcceptsCompressedImagesTests(unittest.TestCase):
         self.assertEqual(report["reached_stage"], "inspect")
         self.assertEqual(report["failure_class"], "DISC_IMAGE_REFUSED")
         self.assertEqual(seen, [])
+
+
+class PrototypeExpansionFollowsItsEntryKeyTests(unittest.TestCase):
+    """Review R1 of PR #2855: the command-line route (``nk_disc_expand import``, reached
+    through ``ensure_plain_iso`` by ``nk_cli.py inspect`` and the bring-up) keys an
+    expansion by the library in its data folder, as the player's route does. A prototype
+    disc whose entry holds its v1 key is expanded into ``discs/<v1 key>``, and an
+    expansion recorded earlier under its v2 key moves there. Removing the title removes
+    ``discs/<the entry's key>`` (the player's removal plan, ``player_state.c``), so
+    nothing is left under ``discs/`` but the records in ``discs/expanded``."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory(prefix="nk-disc-proto-")
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        iso_path = self.root / "prototype.iso"
+        create_test_iso_with_executables(
+            iso_path, bytes(2048), build_plain_mips_elf(), disc_id="PROTO1234567",
+            title="Synthetic Beta",
+        )
+        meta = inspect_iso(iso_path)
+        self.v2_key, self.v1_key = meta.disc_id, meta.legacy_disc_id
+        self.assertEqual(meta.disc_key_version, 2)
+        self.image = self.root / "prototype.cso"
+        self.image.write_bytes(build_cso(iso_path.read_bytes()))
+
+    def _user_root(self, name: str, records: list[dict] | None) -> Path:
+        root = self.root / name
+        root.mkdir(parents=True)
+        if records is not None:
+            (root / "library.json").write_bytes(
+                json.dumps({"schema_version": 1, "games": records}).encode("utf-8"))
+        return root
+
+    def _old_entry(self) -> dict:
+        return {"disc_id": self.v1_key, "title_name": "Synthetic Beta",
+                "iso_path": str(self.root / "elsewhere.iso")}
+
+    @staticmethod
+    def _title_folders(root: Path) -> list[str]:
+        discs = root / "discs"
+        return sorted(p.name for p in discs.iterdir() if p.name != "expanded") \
+            if discs.is_dir() else []
+
+    def _remove_title(self, root: Path, key: str) -> list[str]:
+        """The player's removal of the title's disc copy: discs/<the entry's key>."""
+        shutil.rmtree(root / "discs" / key, ignore_errors=False)
+        return self._title_folders(root)
+
+    def test_cli_inspect_expands_under_the_entry_key(self) -> None:
+        root = self._user_root("inspect", [self._old_entry()])
+        meta = inspect_iso(self.image, user_data_root=root)
+        self.assertEqual(meta.legacy_disc_id, self.v1_key)
+        self.assertEqual(self._title_folders(root), [self.v1_key],
+                         "the expansion goes into the folder of the key the entry holds")
+        self.assertEqual(self._remove_title(root, self.v1_key), [])
+
+    def test_bringup_expands_under_the_entry_key(self) -> None:
+        import nk_cli
+
+        work = self.root / "bringup" / "work"
+        user_root = work / "user-data"
+        user_root.mkdir(parents=True)
+        (user_root / "library.json").write_bytes(json.dumps(
+            {"schema_version": 1, "games": [self._old_entry()]}).encode("utf-8"))
+        args = argparse.Namespace(
+            iso=str(self.image), work_dir=str(work), report=str(self.root / "bringup.json"),
+            launch_timeout=1, instruction_trace=False,
+        )
+        preflight = {
+            "checks": [{"code": "DISC_SFO", "status": "OK", "issues": []},
+                       {"code": "EXECUTABLE", "status": "UNSUPPORTED", "issues": [308]}],
+            "selected_executable": None, "modified_dump_cfw_loader": False,
+        }
+        with (
+            mock.patch.object(nk_cli, "inspect_compatibility_preflight", return_value=preflight),
+            mock.patch("builtins.print"),
+        ):
+            self.assertEqual(nk_cli.cmd_bringup(args), 1)
+        self.assertEqual(self._title_folders(user_root), [self.v1_key])
+        self.assertEqual(self._remove_title(user_root, self.v1_key), [])
+
+    def test_an_earlier_expansion_moves_to_the_entry_key(self) -> None:
+        root = self._user_root("moves", None)
+        first = disc_expand_tool.import_image(self.image, root)
+        self.assertEqual((first["disc_id"], first["reused"]), (self.v2_key, False))
+        self.assertEqual(self._title_folders(root), [self.v2_key])
+        (root / "library.json").write_bytes(json.dumps(
+            {"schema_version": 1, "games": [self._old_entry()]}).encode("utf-8"))
+        again = disc_expand_tool.import_image(self.image, root)
+        self.assertEqual((again["disc_id"], again["reused"]), (self.v1_key, True))
+        self.assertTrue(Path(again["iso_path"]).is_file())
+        self.assertEqual(Path(again["iso_path"]).parent.name, self.v1_key)
+        self.assertEqual(self._title_folders(root), [self.v1_key])
+        self.assertEqual(self._remove_title(root, self.v1_key), [])
+
+    def test_a_v2_entry_keeps_the_v2_folder(self) -> None:
+        root = self._user_root("v2", [self._old_entry(), {
+            "disc_id": self.v2_key, "iso_path": str(self.root / "newer.iso"),
+            "disc_key_version": 2}])
+        result = disc_expand_tool.import_image(self.image, root)
+        self.assertEqual(result["disc_id"], self.v2_key)
+        self.assertEqual(self._title_folders(root), [self.v2_key])
+
+    def _expanded_under_v2(self, name: str) -> tuple[Path, Path, dict]:
+        """An expansion recorded under the v2 key, then a library whose entry holds v1."""
+        root = self._user_root(name, None)
+        first = disc_expand_tool.import_image(self.image, root)
+        self.assertEqual(first["disc_id"], self.v2_key)
+        (root / "library.json").write_bytes(json.dumps(
+            {"schema_version": 1, "games": [self._old_entry()]}).encode("utf-8"))
+        return root, Path(str(first["iso_path"])), first
+
+    def _destination(self, root: Path, iso: Path, identity: str | None = None) -> Path:
+        """The name the move takes: the short one, or with identity the long one."""
+        key = str(self.v1_key)
+        parts = iso.name.split(".")
+        parts[0] = key
+        if identity is not None:
+            parts[1] = identity
+        return root / "discs" / key / ".".join(parts)
+
+    def _assert_move_failed_and_left_usable(self, root: Path, iso: Path, code: str,
+                                            run: Callable[[], object]) -> None:
+        """The failed move named its error and left the earlier expansion where its record
+        names it: an import without the library reuses it there."""
+        before = iso.read_bytes()
+        with self.assertRaises(disc_expand_tool.DiscImageRefused) as caught:
+            run()
+        self.assertEqual(caught.exception.code, code, str(caught.exception))
+        self.assertTrue(iso.is_file(), "the earlier expansion is still there")
+        self.assertEqual(iso.read_bytes(), before)
+        self.assertTrue(Path(f"{iso}.source").is_file(), "and so is its record")
+        (root / "library.json").unlink()
+        again = disc_expand_tool.import_image(self.image, root)
+        self.assertEqual((again["reused"], Path(str(again["iso_path"]))), (True, iso))
+
+    def test_a_move_whose_name_is_being_placed_elsewhere_keeps_the_expansion(self) -> None:
+        """Review S1 of PR #2855: the name lock of the destination is held by another
+        import, so nothing moves."""
+        root, iso, _first = self._expanded_under_v2("move-busy")
+        lock_path = root / "discs" / "expanded" / (self._destination(root, iso).name[:-4] + ".lock")
+        with lock_path.open("a+b") as held:
+            held.seek(0)
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(held.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._assert_move_failed_and_left_usable(
+                root, iso, "DISC_IMAGE_IMPORT_BUSY",
+                lambda: disc_expand_tool.import_image(self.image, root))
+            held.seek(0)
+            if sys.platform == "win32":
+                msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 1)
+
+    def test_a_move_whose_folder_cannot_be_made_keeps_the_expansion(self) -> None:
+        root, iso, _first = self._expanded_under_v2("move-no-folder")
+        (root / "discs" / self.v1_key).write_bytes(b"not a folder")
+        self._assert_move_failed_and_left_usable(
+            root, iso, "DISC_IMAGE_WRITE_FAILED",
+            lambda: disc_expand_tool.import_image(self.image, root))
+
+    def test_a_move_that_cannot_rename_keeps_the_expansion(self) -> None:
+        """Both names the image could take are folders in use, so the rename fails."""
+        root, iso, first = self._expanded_under_v2("move-rename")
+        for target in (self._destination(root, iso),
+                       self._destination(root, iso, str(first["identity"]))):
+            target.mkdir(parents=True)
+            (target / "in-use").write_bytes(b"x")
+        self._assert_move_failed_and_left_usable(
+            root, iso, "DISC_IMAGE_WRITE_FAILED",
+            lambda: disc_expand_tool.import_image(self.image, root))
+
+    def test_a_move_whose_record_cannot_be_written_is_put_back(self) -> None:
+        """The image moves, its record cannot be written at the new name, so it is moved
+        back and its own record written again."""
+        root, iso, first = self._expanded_under_v2("move-record")
+        short = self._destination(root, iso)
+        short.mkdir(parents=True)
+        (short / "in-use").write_bytes(b"x")
+        long_name = self._destination(root, iso, str(first["identity"]))
+        blocked = Path(f"{long_name}.source")
+        blocked.mkdir()
+        (blocked / "in-use").write_bytes(b"x")
+        self._assert_move_failed_and_left_usable(
+            root, iso, "DISC_IMAGE_WRITE_FAILED",
+            lambda: disc_expand_tool.import_image(self.image, root))
+        self.assertFalse(long_name.exists(), "nothing is left at the name it was moved to")
+
+    def test_an_old_folder_that_holds_another_file_is_left_alone(self) -> None:
+        """Review S2 of PR #2855: the folder the expansion leaves is removed only when it
+        is empty; a file another import placed there stays."""
+        root, iso, _first = self._expanded_under_v2("move-sibling")
+        sibling = iso.parent / f"{self.v2_key}.0000000000000000.cso.iso"
+        sibling.write_bytes(b"another import")
+        moved = disc_expand_tool.import_image(self.image, root)
+        self.assertEqual((moved["disc_id"], moved["reused"]), (self.v1_key, True))
+        self.assertFalse(iso.exists())
+        self.assertEqual(sibling.read_bytes(), b"another import")
+        self.assertEqual(self._title_folders(root), sorted([self.v1_key, self.v2_key]))
+
+    def test_a_library_a_newer_nakagawa_wrote_refuses_by_name(self) -> None:
+        root = self._user_root("newer", None)
+        (root / "library.json").write_bytes(
+            json.dumps({"schema_version": 99, "games": []}).encode("utf-8"))
+        with self.assertRaises(disc_expand_tool.DiscImageRefused) as caught:
+            disc_expand_tool.import_image(self.image, root)
+        self.assertEqual(caught.exception.code, "IO_FAILURE")
+        self.assertIn("library could not be read", str(caught.exception))
+        self.assertEqual(self._title_folders(root), [])
 
 
 if __name__ == "__main__":

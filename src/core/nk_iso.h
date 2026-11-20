@@ -161,10 +161,65 @@ typedef struct {
     char sfo_disc_id[NK_MAX_DISC_ID_LEN];
     /* A disc whose own ID is not a retail ID (a beta, a prototype, an SDK
        placeholder): disc_id is then the key nk_non_retail_disc_key derived from
-       identity_sha256, the digest of its PARAM.SFO and main executable. */
+       identity_sha256, the digest of its PARAM.SFO and main executable (and of
+       BOOT.BIN when it boots BOOT.BIN beside an empty or zero-filled EBOOT.BIN). */
     bool non_retail;
     char identity_sha256[65];
+    /* Which key disc_id is: 0 for the disc's own ID (a retail or test ID), 1 for the
+       v1 content key (PARAM.SFO and EBOOT.BIN), 2 for the v2 content key of a disc
+       that boots BOOT.BIN beside an empty or zero-filled EBOOT.BIN. */
+    uint32_t disc_key_version;
+    /* For a v2-keyed disc, its v1 key and digest: the key a library entry made
+       before v2 existed holds, which that entry keeps (nk_iso_library_key_match).
+       Empty for every other disc. */
+    char legacy_disc_id[NK_MAX_DISC_ID_LEN];
+    char legacy_identity_sha256[65];
 } NkIsoMetadata;
+
+/* How a disc image's key relates to a library entry's (docs/YOUR_OWN_GAMES.md,
+ * "Discs that aren't retail"; key_match_for_library_entry in
+ * tools/nk_core/iso_inspect.py). An entry records the version of its key
+ * (NkGameEntry.disc_key_version; 0 for an entry written before versions were
+ * recorded, read as 1): an entry of version 2 is this image's only under its v2
+ * key, and an entry of version 0 or 1 only under its v1 key, which for a v2-keyed
+ * image is legacy_key (NK_ISO_KEY_MATCH_LEGACY). The two kinds never stand for
+ * each other. */
+typedef enum {
+    NK_ISO_KEY_NO_MATCH = 0,
+    NK_ISO_KEY_MATCH = 1,
+    NK_ISO_KEY_MATCH_LEGACY = 2
+} NkIsoKeyMatch;
+
+NkIsoKeyMatch nk_iso_library_key_match(const char *image_key, uint32_t image_key_version,
+                                       const char *legacy_key, const char *entry_key,
+                                       uint32_t entry_key_version);
+
+/* The title catalog's entry for disc_id, the search nk_iso_inspect makes: true
+ * when one is found, with its ID and display name copied out (each emptied when
+ * none is). */
+bool nk_iso_catalog_match(const char *disc_id, char *out_title_id, size_t out_title_id_size,
+                          char *out_display_name, size_t out_display_name_size);
+
+/* The title of an image re-keyed from image_key to key: a name nk_iso_inspect
+ * made from image_key because PARAM.SFO has no TITLE ("PSP Title (<image_key>)")
+ * is made again, from the catalog's display name for key when catalog_name is
+ * not empty, else from key; any other title is kept (keyed_as_legacy in
+ * tools/nk_core/iso_inspect.py makes the same name from key). */
+void nk_iso_title_for_key(char *title, size_t title_size, const char *image_key,
+                          const char *key, const char *catalog_name);
+
+/* The key a disc image is added under, given the library's entries: an entry
+ * that holds the image's own key first; else a v2-keyed image whose v1 key
+ * (legacy_key) an entry made before v2 holds keeps that v1 key, so adding the
+ * same disc again finds its entry rather than adding a second one; else the
+ * image's own key. Writes the key to out_key and returns its version
+ * (NkGameEntry.disc_key_version). Nothing in the library changes. A caller that
+ * gets the v1 key searches the title catalog again under it
+ * (nk_iso_catalog_match), as nk_iso_inspect searched it under the v2 key. */
+uint32_t nk_iso_library_key_for_image(const NkGameEntry *entries, int count,
+                                      const char *image_key, uint32_t image_key_version,
+                                      const char *legacy_key, char *out_key,
+                                      size_t out_key_size);
 
 /* SHA-256 (NkSha256, nk_sha256_*), used by the disc identity below and the package and
  * profile identities in nk_title_manifest.c, is declared in nk_shared_helpers.h. */
