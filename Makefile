@@ -404,10 +404,15 @@ endif
 # only a build for the Mac itself: a Mac building for Android links with the NDK's lld, so the
 # choice reads the target (NK_TARGET_OS, #360) as well as the host. Every link line uses this
 # variable, never the raw option.
+# test_disc_expand's failing-allocator case wraps malloc: GNU ld, lld and the MinGW linker take
+# -Wl,--wrap, ld64 has no such option, so a Mac's own build leaves the define and the flag out
+# and the test prints a named SKIP for that case (CMakeLists.txt makes the same choice).
 ifeq ($(NK_TARGET_OS)-$(HOST_KIND),posix-Darwin)
 LD_GC_SECTIONS := -Wl,-dead_strip
+DISC_EXPAND_WRAP_MALLOC :=
 else
 LD_GC_SECTIONS := -Wl,--gc-sections
+DISC_EXPAND_WRAP_MALLOC := -DNK_TEST_WRAP_MALLOC -Wl,--wrap=malloc
 endif
 
 # Portable H.264 backend (src/rt/h264_ffmpeg.c): the pinned FFmpeg n4.4 H.264 decoder subset

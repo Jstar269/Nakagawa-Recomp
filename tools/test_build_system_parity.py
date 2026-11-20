@@ -127,6 +127,31 @@ class BuildSystemParityTests(unittest.TestCase):
         unlinked = self.makefile_text.replace("$(PLAYER_LINK_SRCS)", "$(PLAYER_SRCS)")
         self.assertIsNone(make_disc_expand_opt(unlinked))
 
+    def test_disc_expand_malloc_wrap_is_conditional_in_both(self) -> None:
+        """test_disc_expand's failing-allocator case links with -Wl,--wrap=malloc, which Apple's
+        ld64 and MSVC's linker lack: Make adds it only off a Mac (DISC_EXPAND_WRAP_MALLOC, chosen
+        beside LD_GC_SECTIONS) and CMake only outside MSVC and Apple, so neither build stops
+        linking the test there."""
+        recipe = [line for line in self.makefile_text.splitlines() if "tests/native/test_disc_expand.c" in line]
+        self.assertEqual(len(recipe), 1, "expected one Makefile line linking test_disc_expand.c")
+        self.assertIn("$(DISC_EXPAND_WRAP_MALLOC)", recipe[0])
+        self.assertNotIn("--wrap", recipe[0])
+        self.assertNotIn("NK_TEST_WRAP_MALLOC", recipe[0])
+        choice = re.search(r"^ifeq \(\$\(NK_TARGET_OS\)-\$\(HOST_KIND\),posix-Darwin\)\n(.*?)^else\n(.*?)^endif",
+                           self.makefile_text, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(choice, "the Makefile's Darwin link-option choice is missing")
+        assert choice is not None
+        self.assertRegex(choice.group(1), r"(?m)^DISC_EXPAND_WRAP_MALLOC :=\s*$")
+        self.assertIn("DISC_EXPAND_WRAP_MALLOC := -DNK_TEST_WRAP_MALLOC -Wl,--wrap=malloc", choice.group(2))
+        guarded = re.search(r"^if\(NOT MSVC AND NOT APPLE\)\n(.*?)^endif\(\)", self.cmake_text,
+                            re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(guarded, "CMakeLists.txt has no if(NOT MSVC AND NOT APPLE) block")
+        assert guarded is not None
+        self.assertIn('target_link_options(test_disc_expand PRIVATE "-Wl,--wrap=malloc")', guarded.group(1))
+        self.assertIn("target_compile_definitions(test_disc_expand PRIVATE NK_TEST_WRAP_MALLOC)", guarded.group(1))
+        outside = self.cmake_text.replace(guarded.group(0), "")
+        self.assertNotIn("--wrap=malloc", outside)
+
     def test_core_sources_parity(self) -> None:
         """Verify identical core sources in Makefile and CMakeLists.txt."""
         expected_core = [

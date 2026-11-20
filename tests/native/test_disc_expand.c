@@ -1020,8 +1020,10 @@ static void test_chd_flac_empty_hunk_refused(void) {
    production backend, failing the 1st, 2nd, ... malloc in turn until a run
    makes no further call. Upstream wrote through the unchecked results (the
    decoder's 128 KiB lookup table first) and crashed; each failure must now
-   end the open or the read with a named error and leave nothing allocated
-   (a sanitizer build checks the leaks). */
+   end the open or the read with the named out-of-memory status, and the run
+   with no failure must read the bytes exactly. This test checks the status and
+   the bytes, not leaks: no hosted job builds it with a sanitizer, and the
+   change that added it was checked for leaks by hand under ASan/LSan. */
 static void test_chd_huff_allocation_failures(void) {
 #if !defined(NK_TEST_WRAP_MALLOC)
     printf("SKIP CHD huff codec under a failing allocator: built without NK_TEST_WRAP_MALLOC "
