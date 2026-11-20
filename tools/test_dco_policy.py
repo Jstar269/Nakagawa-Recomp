@@ -524,6 +524,32 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
                 )
                 self.assertNotRegex(content, r"(?i)\b(?:issue|pr)\s*#\d+")
 
+    def test_every_issue_form_applies_a_label(self):
+        """F-41f91e2c: CONTRIBUTING.md says every issue carries at least one label, so each issue
+        form names one (config.yml is the chooser's settings, not a form)."""
+        forms = sorted((ROOT / ".github" / "ISSUE_TEMPLATE").glob("*.yml"))
+        self.assertIn("smoke_test_report.yml", [form.name for form in forms])
+        for form in forms:
+            if form.name == "config.yml":
+                continue
+            with self.subTest(form=form.name):
+                text = form.read_text(encoding="utf-8")
+                match = re.search(r"(?m)^labels:[ \t]*(.*)$", text)
+                self.assertIsNotNone(match, f"{form.name} has no top-level labels key")
+                assert match is not None
+                inline = match.group(1).strip()
+                if inline:
+                    labels = re.findall(r"""["']?([^"',\[\]\s][^"',\[\]]*?)["']?\s*(?:,|\])""", inline)
+                else:
+                    block = text[match.end():].split("\n")
+                    labels = []
+                    for line in block[1:]:
+                        item = re.match(r"^\s+-\s+(.+?)\s*$", line)
+                        if not item:
+                            break
+                        labels.append(item.group(1).strip("\"'"))
+                self.assertTrue([label for label in labels if label.strip()], f"{form.name} names no label")
+
     def test_claude_is_no_longer_ignored(self):
         ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
         self.assertNotIn("/CLAUDE.md", ignore.splitlines())
