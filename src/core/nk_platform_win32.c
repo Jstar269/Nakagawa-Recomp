@@ -11,6 +11,7 @@
 #include <shlobj.h>
 #include <objbase.h>
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <io.h>
 #include <process.h>
@@ -1535,20 +1536,33 @@ FILE *nk_platform_open_regular_file(const char *path) {
 
 FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared) {
     if (opened_shared) *opened_shared = false;
-    if (!path || !*path) return NULL;
+    if (!path || !*path) {
+        errno = EINVAL;
+        return NULL;
+    }
     WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
     if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
         free(wpath);
+        errno = EINVAL;
         return NULL;
     }
     /* FILE_SHARE_READ alone: other readers open it, writers and deleters are refused. */
     HANDLE handle = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                                 FILE_ATTRIBUTE_NORMAL, NULL);
     if (handle == INVALID_HANDLE_VALUE) {
+        DWORD why = GetLastError();
         /* Another program has it open for writing: read it shared, as any reader does. */
-        FILE *shared = GetLastError() == ERROR_SHARING_VIOLATION ? _wfopen(wpath, L"rb") : NULL;
+        FILE *shared = why == ERROR_SHARING_VIOLATION ? _wfopen(wpath, L"rb") : NULL;
         free(wpath);
         if (shared && opened_shared) *opened_shared = true;
+        if (!shared) {
+            /* The CRT would call a sharing violation EACCES too; only a refusal of this
+               account's access is. */
+            errno = why == ERROR_ACCESS_DENIED                                ? EACCES
+                    : why == ERROR_SHARING_VIOLATION                          ? EBUSY
+                    : why == ERROR_FILE_NOT_FOUND || why == ERROR_PATH_NOT_FOUND ? ENOENT
+                                                                              : EIO;
+        }
         return shared;
     }
     free(wpath);

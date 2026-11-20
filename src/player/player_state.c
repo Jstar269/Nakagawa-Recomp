@@ -10484,11 +10484,16 @@ bool player_psn_package_convert(const PlayerPsnPackage *package,
        share modes) nothing can write to, replace or delete the package meanwhile. Elsewhere,
        or when another program already has it open for writing, a writer is not stopped; the
        stamp and the second identity find any change. */
+    errno = 0;
     held = nk_platform_open_read_deny_writes(package->pbp_path, &shared);
     if (held == NULL) {
         player_psn_result(code, code_size, NK_DISC_READ_FAILED, message, message_size,
-                          "The package could not be opened for reading. Check that the drive "
-                          "it is on is connected, then add it again.");
+                          errno == EACCES
+                              ? "Access to the package was denied, so it could not be read. "
+                                "Check that your account may read the file (its permissions), "
+                                "then add it again."
+                              : "The package could not be opened for reading. Check that the "
+                                "drive it is on is connected, then add it again.");
         return false;
     }
     if (shared) {
