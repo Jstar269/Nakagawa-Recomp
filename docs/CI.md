@@ -186,6 +186,13 @@ by a computed name would escape this and must name the module literally. The exp
 flags (`build_system`, `python_tools`, ...) are unchanged; only `run_native` and
 `run_windows` skip.
 
+A test module that holds a Windows-only test (one `python tools/ci_test_shards.py
+--windows-only` selects; [What hosted CI does not run](#what-hosted-ci-does-not-run)) also routes `run_windows` on its
+own, so a change to it runs windows_runtime's `selftests` group on its own head; it routes
+neither `run_native` nor `run_installer`. `ci_paths.py` imports that selection
+(`_windows_only_test_modules`) instead of keeping a list; when it cannot be computed, every
+`tools/test_*.py` module routes `run_windows`.
+
 #### Trusted CodeQL on pull requests
 
 `Trusted CodeQL` is the producer of the required `CodeQL` status: GitHub's code scanning
