@@ -82,15 +82,9 @@ def _cfg_normalize_ranges(ranges):
             or lo < 0 or hi < 0 or hi > UINT32_END_MAX
         ):
             raise ValueError(f"invalid CFG range: {item!r}")
-        if hi > lo:
-            normalized.append((lo, hi))
-    merged = []
-    for lo, hi in sorted(normalized):
-        if merged and lo <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
-        else:
-            merged.append((lo, hi))
-    return merged
+        normalized.append((lo, hi))
+    from analyze import merge_spans
+    return merge_spans(normalized, drop_empty=True)
 
 
 def _cfg_ranges_for(image, ranges):

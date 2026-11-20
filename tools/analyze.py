@@ -783,14 +783,7 @@ def exec_ranges(elf, extra_spans=None):
         spans.extend((lo, hi) for lo, hi in extra_spans)
     if not spans:
         return [(0, 0)]
-    spans.sort()
-    merged = [spans[0]]
-    for lo, hi in spans[1:]:
-        if lo <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
-        else:
-            merged.append((lo, hi))
-    return merged
+    return merge_spans(spans, drop_empty=False)
 
 
 def in_ranges(addr, ranges):
@@ -802,6 +795,35 @@ def in_ranges(addr, ranges):
         if lo <= addr < hi:
             return True
     return False
+
+
+def merge_spans(spans, *, drop_empty):
+    """Merge half-open ``(lo, hi)`` spans into sorted, disjoint intervals.
+
+    Touching spans (``lo == prev_hi``) are joined. When ``drop_empty`` is true,
+    empty or inverted spans (``lo >= hi``) are dropped before merging; when
+    false, they are kept unless an earlier span covers or touches ``lo``.
+    """
+    ordered = (
+        [(lo, hi) for lo, hi in spans if lo < hi]
+        if drop_empty
+        else [(lo, hi) for lo, hi in spans]
+    )
+    if not ordered:
+        return []
+    ordered.sort()
+    merged = []
+    it = iter(ordered)
+    cur_lo, cur_hi = next(it)
+    for lo, hi in it:
+        if lo <= cur_hi:
+            if hi > cur_hi:
+                cur_hi = hi
+        else:
+            merged.append((cur_lo, cur_hi))
+            cur_lo, cur_hi = lo, hi
+    merged.append((cur_lo, cur_hi))
+    return merged
 
 
 class _SpanIndex:
@@ -816,16 +838,10 @@ class _SpanIndex:
     __slots__ = ("starts", "ends", "_key")
 
     def __init__(self, ranges):
-        self.starts = []
-        self.ends = []
+        merged = merge_spans(ranges, drop_empty=True)
+        self.starts = [lo for lo, _ in merged]
+        self.ends = [hi for _, hi in merged]
         self._key = None
-        for lo, hi in sorted((lo, hi) for lo, hi in ranges if lo < hi):
-            if self.ends and lo <= self.ends[-1]:
-                if hi > self.ends[-1]:
-                    self.ends[-1] = hi
-            else:
-                self.starts.append(lo)
-                self.ends.append(hi)
 
     def __contains__(self, addr):
         i = bisect.bisect_right(self.starts, addr) - 1
@@ -2026,14 +2042,7 @@ class _Discovery:
         )
         if containing is None:
             return ranges
-        spans = sorted([*ranges, containing])
-        merged = []
-        for lo, hi in spans:
-            if merged and lo <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
-            else:
-                merged.append((lo, hi))
-        return merged
+        return merge_spans((*ranges, containing), drop_empty=False)
 
     def in_text(self, a):
         return in_ranges(a, self.ranges) and (a & 3) == 0
