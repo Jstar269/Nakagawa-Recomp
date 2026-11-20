@@ -141,8 +141,9 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   telemetry or capture is sent.
 - **Offline unlocks** are stored as owner-only, token-free records in the player's data folder. After the
   next sign-in, the player submits each pending unlock through rcheevos' award request builder and the
-  same transport. That includes an unlock earned while the switch was off, or one the switch stopped
-  from being sent, which goes after the next sign-in in the same run (rcheevos itself gives such a
+  same transport. That includes an unlock the switch stopped from being sent (one being sent or
+  waiting for another try when it went off, or earned in the frame it went off, since frames stop
+  with it), which goes once after the next sign-in in the same run (rcheevos itself gives such a
   request up), and one left from an earlier run. The queue holds at most 4,096 records. With no
   definite answer (no connection, a busy server) a record waits 30 seconds; a record the server refuses
   by its own error leaves the queue and is reported; a refused account keeps every record until the next
