@@ -106,7 +106,7 @@
       "revision": "35b5c392cc15456736c440a68dbe073178bbffe0",
       "notice_path": "third_party/dr_libs/LICENSE.txt",
       "evidence_path": "third_party/dr_libs/PROVENANCE.md",
-      "disposition": "vendored_source_only; selftests only, not linked into the player or runtime"
+      "disposition": "vendored_source_only; selftests only, not linked into the player or runtime; dr_wav.h carries four later upstream fixes as LOCAL DELTA (third_party/dr_libs/PROVENANCE.md)"
     },
     {
       "id": "monocypher-ed25519",
