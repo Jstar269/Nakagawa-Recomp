@@ -4388,6 +4388,8 @@ typedef struct PlayerRun {
     bool achievements_queue_load_checked;
     /* What the saved queue's load had to say, shown again once the sign-in has settled. */
     char achievements_queue_notice[160];
+    /* nk_ach_events_dropped when last reported: a change is logged and shown once. */
+    uint32_t achievements_events_dropped_seen;
     /* The frame loop. */
     PlayerLaunchJob *launch_job;
     PlayerStagingJob *staging_job;
@@ -4460,8 +4462,15 @@ static bool player_ach_response_append(PlayerAchHttpJob *job, const unsigned cha
             }
             next *= 2u;
         }
-        char *grown = (char *)realloc(job->response_body, next);
+        /* Not realloc: the old block can hold the login reply's token, so it is wiped before
+           it goes back to the heap. */
+        char *grown = (char *)malloc(next);
         if (!grown) return false;
+        if (job->response_body) {
+            memcpy(grown, job->response_body, job->response_body_size);
+            nk_secure_zero(job->response_body, *capacity);
+            free(job->response_body);
+        }
         job->response_body = grown;
         *capacity = next;
     }
@@ -4475,6 +4484,7 @@ static int SDLCALL player_ach_http_thread_main(void *userdata) {
     PlayerAchHttpJob *job = (PlayerAchHttpJob *)userdata;
     PackageHttpOptions options = {job->user_agent};
     PackageHttpResponse response;
+    unsigned char chunk[16384];
     memset(&response, 0, sizeof response);
     const char *method = job->post_data ? "POST" : "GET";
     size_t capacity = 0u;
@@ -4488,7 +4498,14 @@ static int SDLCALL player_ach_http_thread_main(void *userdata) {
             &options, job->url, NK_ACH_HOST, method,
             job->content_type[0] ? job->content_type : NULL,
             job->post_data, job->post_data_size, &response)) {
+        /* A request the transport refused before sending is refused again the same way, so
+           rc_client is told to give up, with the reason as its error text. */
         job->response_status = NK_ACH_HTTP_RETRY;
+        if (response.refused) {
+            job->response_status = NK_ACH_HTTP_CLIENT_ERROR;
+            (void)player_ach_response_append(job, (const unsigned char *)response.refused,
+                                             strlen(response.refused), &capacity);
+        }
         goto finished;
     }
     if (!response.final_url || !nk_ach_url_allowed(response.final_url) || !response.read ||
@@ -4500,7 +4517,6 @@ static int SDLCALL player_ach_http_thread_main(void *userdata) {
     }
     job->response_status = response.http_status;
     for (;;) {
-        unsigned char chunk[16384];
         size_t received = 0u;
         if (!response.read(response.context, chunk, sizeof chunk, &received)) {
             body_ok = false;
@@ -4516,6 +4532,8 @@ static int SDLCALL player_ach_http_thread_main(void *userdata) {
     if (!body_ok) job->response_status = NK_ACH_HTTP_RETRY;
 
 finished:
+    /* The last chunk read can hold the login reply's token. */
+    nk_secure_zero(chunk, sizeof chunk);
     if (!job->response_body) {
         job->response_body = (char *)calloc(1u, 1u);
         if (!job->response_body) job->response_status = NK_ACH_HTTP_CLIENT_ERROR;
@@ -4777,6 +4795,28 @@ static void player_achievements_end_account(PlayerRun *run, bool credential_remo
     if (discarded) player_achievements_save_queue_or_report(run);
 }
 
+/* Events the bridge dropped because more arrived than its queue holds before this player read
+   them (the oldest go first, nk_ach_take_events): logged once per change, by the counter's name,
+   and said on the status line, so a missed unlock notice or error is never silent. */
+static void player_achievements_report_dropped_events(PlayerRun *run) {
+    const uint32_t dropped = nk_ach_events_dropped(run->achievements);
+    if (dropped == run->achievements_events_dropped_seen) return;
+    const uint32_t newly = dropped - run->achievements_events_dropped_seen;
+    run->achievements_events_dropped_seen = dropped;
+    fprintf(stderr, "[PLAYER] RetroAchievements: nk_ach_events_dropped=%u (%u more): notices "
+                    "arrived faster than they were read and the oldest were dropped\n",
+            (unsigned)dropped, (unsigned)newly);
+    PlayerApp *app = &run->app;
+    char status[sizeof app->achievements_status];
+    snprintf(status, sizeof status, "%s", app->achievements_status);
+    char note[96];
+    snprintf(note, sizeof note, "%u RetroAchievements notice%s could not be shown.",
+             (unsigned)newly, newly == 1u ? "" : "s");
+    const size_t room = sizeof app->achievements_status - strlen(note) - 2u;
+    snprintf(app->achievements_status, sizeof app->achievements_status, "%.*s%s%s",
+             player_utf8_fit(status, room), status, status[0] ? " " : "", note);
+}
+
 static void player_achievements_collect_events(PlayerRun *run) {
     if (!run || !run->achievements) return;
     PlayerApp *app = &run->app;
@@ -4939,6 +4979,7 @@ static void player_achievements_collect_events(PlayerRun *run) {
             }
         }
     }
+    player_achievements_report_dropped_events(run);
 }
 
 /* Signs in with the token the credential store holds. No password is asked or needed. */
@@ -5076,7 +5117,11 @@ static void player_achievements_stop_channel(PlayerRun *run) {
         nk_platform_guest_memory_channel_stop(&run->guest_memory_channel);
         nk_platform_guest_memory_channel_close(&run->guest_memory_channel);
     }
-    if (run->achievements) nk_ach_set_memory(run->achievements, NULL);
+    if (run->achievements) {
+        nk_ach_set_memory(run->achievements, NULL);
+        /* The game has ended: rc_client sends no more Rich Presence pings for it. */
+        nk_ach_unload_game(run->achievements);
+    }
     run->guest_memory_channel_active = false;
     run->achievements_game_hash[0] = '\0';
 }
@@ -5089,7 +5134,11 @@ static void player_achievements_stop_channel(PlayerRun *run) {
 static void player_achievements_end_frames(PlayerRun *run) {
     if (!run || !run->guest_memory_channel_active) return;
     nk_platform_guest_memory_channel_stop(&run->guest_memory_channel);
-    if (run->achievements) nk_ach_set_memory(run->achievements, NULL);
+    if (run->achievements) {
+        nk_ach_set_memory(run->achievements, NULL);
+        /* No frame is evaluated any more, so no ping says the game is being played. */
+        nk_ach_unload_game(run->achievements);
+    }
     run->guest_memory_channel_active = false;
     run->achievements_game_hash[0] = '\0';
 }
@@ -5123,8 +5172,9 @@ static void player_achievements_shutdown(PlayerRun *run) {
         player_ach_http_poll(run);
     }
     if (run->achievements) {
-        if (player_achievements_queue_saves_allowed(run))
-            (void)player_achievements_save_queue(run);
+        if (player_achievements_queue_saves_allowed(run) && !player_achievements_save_queue(run))
+            fprintf(stderr, "[PLAYER] RetroAchievements: unlock-queue.bin could not be saved at "
+                            "shutdown; unlocks not yet sent are lost\n");
         nk_ach_destroy(run->achievements);
         run->achievements = NULL;
     }

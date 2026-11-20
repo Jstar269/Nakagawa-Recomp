@@ -2088,7 +2088,8 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         ra = main[main.index("static int player_utf8_fit("):
                   main.index("static void player_achievements_sign_in_stored(")]
         self.assertIsNone(re.search(r"%\.[0-9]+s", ra), "a byte-count cut of RA text")
-        self.assertEqual(ra.count("player_utf8_fit("), 5, "the helper, the list, three events")
+        self.assertEqual(ra.count("player_utf8_fit("), 6,
+                         "the helper, the list, three events, the dropped-notices line")
         # The arena's size is one constant, the runtime's SR_GUEST_ARENA_SIZE, asserted equal.
         platform = (REPO_ROOT / "src" / "core" / "nk_platform.h").read_text(encoding="utf-8")
         recomp = (REPO_ROOT / "src" / "rt" / "recomp.h").read_text(encoding="utf-8")
@@ -2102,6 +2103,47 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertIn("_Static_assert(SR_GUEST_ARENA_SIZE == NK_GUEST_MEMORY_ARENA_SIZE,", gui)
         self.assertIn("NK_GUEST_MEMORY_ARENA_SIZE)) {", main)
         self.assertNotIn("0x0c000000u", main)
+
+    def test_achievement_game_end_drops_and_wipes_in_the_player(self) -> None:
+        # src/player/main.c has no native harness (F-1993e125, F-176e1086); these read its
+        # source for the rules the review of 2026-11-20 found missing (the bridge's side of each
+        # runs in achievements-selftest, the transport's in test_package_builder).
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+
+        def body(signature: str) -> str:
+            text = main[main.index(signature):]
+            return text[:text.index("\n}\n")]
+
+        # The game's end unloads it from rc_client, so no Rich Presence ping follows it.
+        for signature in ("static void player_achievements_stop_channel(PlayerRun *run) {",
+                          "static void player_achievements_end_frames(PlayerRun *run) {"):
+            self.assertIn("nk_ach_unload_game(run->achievements);", body(signature), signature)
+        # Notices the bridge dropped are counted, logged by name once per change and shown.
+        events = body("static void player_achievements_collect_events(PlayerRun *run) {")
+        self.assertIn("player_achievements_report_dropped_events(run);", events)
+        dropped = body("static void player_achievements_report_dropped_events(PlayerRun *run) {")
+        self.assertIn("nk_ach_events_dropped(run->achievements)", dropped)
+        self.assertIn("run->achievements_events_dropped_seen", dropped)
+        self.assertIn("nk_ach_events_dropped=%u", dropped)
+        self.assertIn("app->achievements_status", dropped)
+        # The worker's read buffer and every outgrown answer buffer are wiped before release.
+        worker = body("static int SDLCALL player_ach_http_thread_main(void *userdata) {")
+        self.assertIn("nk_secure_zero(chunk, sizeof chunk);",
+                      worker[worker.index("finished:"):])
+        self.assertLess(worker.index("unsigned char chunk["), worker.index("goto finished;"))
+        append = body("static bool player_ach_response_append(")
+        self.assertNotIn("realloc(", append)
+        self.assertIn("nk_secure_zero(job->response_body, *capacity);", append)
+        # A request the transport refused before sending is a named client error, not a retry.
+        refused = worker[worker.index("if (response.refused) {"):]
+        refused = refused[:refused.index("goto finished;")]
+        self.assertIn("job->response_status = NK_ACH_HTTP_CLIENT_ERROR;", refused)
+        self.assertIn("response.refused", refused[refused.index("player_ach_response_append("):])
+        # The shutdown save's failure is reported by name, never discarded.
+        self.assertNotIn("(void)player_achievements_save_queue(run)", main)
+        shutdown = body("static void player_achievements_shutdown(PlayerRun *run) {")
+        self.assertIn("!player_achievements_save_queue(run))", shutdown)
+        self.assertIn("unlock-queue.bin could not be saved at", shutdown)
 
     def test_achievements_selftest_declares_rcheevos_libc_on_linux(self) -> None:
         # The selftest builds the vendored rcheevos with the core's strict -std=c99. glibc then
