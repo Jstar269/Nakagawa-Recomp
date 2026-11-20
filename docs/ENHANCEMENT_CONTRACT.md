@@ -3570,11 +3570,14 @@ zone smaller than the game's, the first live host count reaches the edge of the 
   a public title's value; an overlay loaded with an override replaces the public entry whole. The runtime remaps the
   live host stick where the controller ring latches a sample in analog mode (`src/rt/hle_route.c`), before the sample
   is stored or recorded. `D` is the host's dead zone in centred counts: the larger of the X and Y axes'
-  `deadzone_inner * 255 / 65535` (rounded down) from the active input profile, 30 by default, and 0 without an SDL3
-  presenter. The host's own byte conversion is not symmetric about 128, so with the default 7849 its first live
-  value is +30 on the positive side and -32 on the negative side: a push of +30 is still at `m = D` and reaches the
-  game at `G - 1`, and both sides first move the player at 32 counts; a `D` below 0 or of 127 or more reads as 0, and any `D` from 0 to 126 is used as it is, at or above `G`
-  too. With `h = b - 128` per axis, clamped to -127..127, and `m = max(|hx|, |hy|)`:
+  `deadzone_inner` from the active input profile through the host's own byte map, `round(deadzone_inner * 127 /
+  32767)`, 30 by default, and 0 without an SDL3 presenter. That byte map (`nk_input_profile_axis_byte` in
+  `src/core/nk_input_profile.h`, the one every module uses) is symmetric about 128: a host value `x` from 1 to 32767
+  gives the byte `128 + round(x * 127 / 32767)` and `-x` gives 256 minus that, every value from -129 to 129 gives
+  128, and -32768 alone gives 0. So with the default 7849 the first live value is 30 counts from rest on both sides: a push of 30 is still
+  at `m = D` and reaches the game at `G - 1`, and both sides first move the player at 32 counts. A `D` below 0 or of
+  127 or more reads as 0, and any `D` from 0 to 126 is used as it is, at or above `G` too. With `h = b - 128` per
+  axis, clamped to -127..127, and `m = max(|hx|, |hy|)`:
   - `m = 0` (rest) leaves both bytes as they are, and an axis at rest keeps its byte;
   - past the host's dead zone, `m > D`: the target magnitude is `m' = G + (m - D) * (127 - G) / (127 - D)`, rounded down;
   - up to it, `0 < m <= D` (a source with less dead zone than the host's, such as the mouse): `m' = m * (G - 1) / D`,

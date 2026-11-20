@@ -267,8 +267,9 @@ void ace_set_peak_stats(uint64_t pushes_wide, uint64_t frames_wide, uint64_t fra
 /* ---- stick dead-zone remap (stick=<counts>, contract 11.3.11) ------------------------------- */
 
 /* The host's stick dead zone in centred counts (0..127): the larger of the two axes'
- * deadzone_inner (0..32767 of a host axis) as (deadzone_inner * 255) / 65535. A negative value
- * reads as 0. */
+ * deadzone_inner (0..32767 of a host axis) through the host's own symmetric byte map,
+ * nk_input_profile_axis_byte(deadzone_inner) - 128, which is round(deadzone_inner * 127 / 32767)
+ * (7849 gives 30, 32767 gives 127). A negative value reads as 0. */
 int ace_stick_host_counts(int deadzone_inner_x, int deadzone_inner_y);
 /* Remaps one left-stick sample (bytes 0..255, 128 at rest) so the host's live range starts past
  * a square dead zone of game_counts (1..126) that the title ignores. host_counts is the host's
