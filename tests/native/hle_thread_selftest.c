@@ -32251,6 +32251,472 @@ static void test_ge_alpha_only_clear_keeps_colour_under_dither(void) {
     }
 }
 
+/* ==== GE depth bounds cells (PSP-GE-RASTER-004, #2193) ====
+ * The lists of probe_ge_sample.c's CASE=ge-depth-bounds, through production dispatch and the
+ * software GE, checked against what docs/HARDWARE_ORACLE.md's 2026-11-20 entry states a
+ * PSP-3000 did with them. Depth is read as colour, as the probe reads it: after a cell's depth
+ * writes, sprites drawn with the depth test on (EQUAL) and depth writes off each paint one
+ * colour where the stored depth equals one value (blue the tag 0x0100, yellow the 512x272
+ * depth-only clear 0x4000, red dr-zbw256's background 0x7000 or, in dc-scissor, the CPU fill
+ * 0x5a5a), white last for 0x1234, which nothing writes. Layout: a 512x272 5650 colour block at
+ * VRAM 0x110000 (fbw 512) and a depth block at 0x154000, each 0x44000 bytes and filled with
+ * 0x5a5a by the CPU before every cell. A tag is a 16x1 sprite; tag y lies on row y at group y
+ * (columns 16y to 16y + 15), so the row and group where it reads back name the word the GE
+ * used. tail-zbw256 is not a probe cell: it carries the measured index to the buffer's last row,
+ * where the PSP measured only the clear's word count, so it pins the software GE's own
+ * write/test agreement there. */
+#define GDB_FB 0x04110000u
+#define GDB_ZB 0x04154000u
+#define GDB_BLOCK_BYTES 0x00044000u
+#define GDB_FILL16 0x5a5au
+#define GDB_BLUE 0xffff0000u        /* vertex colours (ABGR) and their 5650 pixels */
+#define GDB_BLUE16 0xf800u
+#define GDB_YELLOW 0xff00ffffu
+#define GDB_YELLOW16 0x07ffu
+#define GDB_RED 0xff0000ffu
+#define GDB_RED16 0x001fu
+#define GDB_WHITE 0xffffffffu
+#define GDB_GREEN 0xff00ff00u
+#define GDB_GREEN16 0x07e0u
+#define GDB_Z_TAG 0x0100u
+#define GDB_Z_CLEAR 0x4000u
+#define GDB_Z_HIGH 0x7000u
+#define GDB_Z_NONE 0x1234u
+#define GDB_LIST_WORDS 256u
+#define GDB_VTX_MAX 64u
+
+enum { GDB_K_CTL, GDB_K_WTEST, GDB_K_WCLEAR, GDB_K_READ, GDB_K_SCISSOR, GDB_K_TAIL };
+
+struct gdb_cell {
+    const char *name;
+    uint8_t kind;
+    uint16_t zbw;
+};
+#define GDB_CELL_COUNT 6u
+static const struct gdb_cell gdb_cells[GDB_CELL_COUNT] = {
+    {"ctl-zbw512", GDB_K_CTL, 512u},
+    {"dw-test-zbw256", GDB_K_WTEST, 256u},
+    {"dw-clear-zbw256", GDB_K_WCLEAR, 256u},
+    {"dr-zbw256", GDB_K_READ, 256u},
+    {"dc-scissor", GDB_K_SCISSOR, 512u},
+    {"tail-zbw256", GDB_K_TAIL, 256u},
+};
+
+struct gdb_list {
+    uint32_t *w, n;
+    uint32_t vtx, nv;
+    int overflow;
+};
+
+static void gdb_w(struct gdb_list *l, uint32_t cmd, uint32_t data)
+{
+    if (l->n >= GDB_LIST_WORDS) {
+        l->overflow = 1;
+        return;
+    }
+    l->w[l->n++] = (cmd << 24) | (data & 0x00ffffffu);
+}
+
+/* One through-mode sprite x0..x1-1, y0..y1-1 at depth z (vertex type 0x80019c). */
+static void gdb_sprite(struct gdb_list *l, uint32_t col, uint32_t x0, uint32_t y0, uint32_t x1,
+                       uint32_t y1, uint32_t z)
+{
+    if (l->nv + 2u > GDB_VTX_MAX) {
+        l->overflow = 1;
+        return;
+    }
+    const uint32_t at = l->vtx + l->nv * 16u;
+    const float pos[6] = {(float)x0, (float)y0, (float)z, (float)x1, (float)y1, (float)z};
+    MEM_W32(at, col);
+    for (uint32_t i = 0; i < 3u; i++) {
+        uint32_t u;
+        memcpy(&u, &pos[i], 4);
+        MEM_W32(at + 4u + i * 4u, u);
+        memcpy(&u, &pos[3u + i], 4);
+        MEM_W32(at + 20u + i * 4u, u);
+    }
+    MEM_W32(at + 16u, col);
+    gdb_w(l, 0x01, at);
+    gdb_w(l, 0x04, (6u << 16) | 2u);
+    l->nv += 2u;
+}
+
+/* The probe's readout over x0..x1-1, y0..y1-1: with the depth test on (EQUAL) and depth writes
+   off, one sprite per value, white last; with `base` a green sprite first under ALWAYS. */
+static void gdb_readout(struct gdb_list *l, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1,
+                        uint32_t red_z, int with_blue, int base)
+{
+    gdb_w(l, 0xe7, 1);
+    gdb_w(l, 0x23, 1);
+    if (base) {
+        gdb_w(l, 0xde, 1);
+        gdb_sprite(l, GDB_GREEN, x0, y0, x1, y1, GDB_Z_NONE);
+    }
+    gdb_w(l, 0xde, 2);
+    if (with_blue) gdb_sprite(l, GDB_BLUE, x0, y0, x1, y1, GDB_Z_TAG);
+    gdb_sprite(l, GDB_YELLOW, x0, y0, x1, y1, GDB_Z_CLEAR);
+    gdb_sprite(l, GDB_RED, x0, y0, x1, y1, red_z);
+    gdb_sprite(l, GDB_WHITE, x0, y0, x1, y1, GDB_Z_NONE);
+    gdb_w(l, 0x23, 0);
+    gdb_w(l, 0xde, 1);
+}
+
+/* The cell's list (probe_ge_sample.c gdb_build, plus tail-zbw256). */
+static void gdb_build(const struct gdb_cell *c, struct gdb_list *l)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x23u, 0x24u, 0x25u, 0x27u, 0x28u};
+    gdb_w(l, 0x10, (l->vtx >> 8) & 0x000f0000u);
+    gdb_w(l, 0x9c, GDB_FB & 0x00ffffffu);
+    gdb_w(l, 0x9d, 512u);
+    gdb_w(l, 0xd2, 0);
+    gdb_w(l, 0x9e, GDB_ZB & 0x00ffffffu);
+    gdb_w(l, 0x9f, c->zbw);
+    gdb_w(l, 0x15, 0);
+    gdb_w(l, 0x16, 511u | (271u << 10));
+    gdb_w(l, 0xd4, 0);
+    gdb_w(l, 0xd5, (c->kind == GDB_K_SCISSOR ? 99u : 511u) | (271u << 10));
+    gdb_w(l, 0x4c, 0);
+    gdb_w(l, 0x4d, 0);
+    gdb_w(l, 0xd6, 0);
+    gdb_w(l, 0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) gdb_w(l, off_units[i], 0);
+    gdb_w(l, 0x1e, 0);
+    gdb_w(l, 0x50, 0);
+    gdb_w(l, 0xd3, 0);
+    gdb_w(l, 0xe7, 1);
+    gdb_w(l, 0xe8, 0);
+    gdb_w(l, 0xe9, 0);
+    gdb_w(l, 0xdb, 0x00ff0001u);
+    gdb_w(l, 0xd8, 1);
+    gdb_w(l, 0xd9, 0);
+    gdb_w(l, 0xda, 0);
+    gdb_w(l, 0xdc, 0x00ff0001u);
+    gdb_w(l, 0xdd, 0);
+    gdb_w(l, 0xde, 1);
+    gdb_w(l, 0xdf, 0x32u);
+    gdb_w(l, 0xe0, 0);
+    gdb_w(l, 0xe1, 0);
+    gdb_w(l, 0xe6, 3);
+    gdb_w(l, 0xcf, 0);
+    gdb_w(l, 0xcd, 0);
+    gdb_w(l, 0xce, 0);
+    gdb_w(l, 0x53, 0);
+    gdb_w(l, 0x55, 0xffffffu);
+    gdb_w(l, 0x58, 0xffu);
+    gdb_w(l, 0x12, 0x0080019cu);   /* through, 8888 colour, float position */
+
+    gdb_w(l, 0xe7, 0);             /* depth writes on */
+    gdb_w(l, 0xd3, 0x401u);        /* clear mode, depth only: the 512x272 clear */
+    gdb_sprite(l, GDB_RED, 0u, 0u, 512u, 272u, GDB_Z_CLEAR);
+    if (c->kind == GDB_K_WCLEAR)
+        for (uint32_t y = 0; y < 15u; y++)
+            gdb_sprite(l, GDB_GREEN, 256u + 16u * y, y, 272u + 16u * y, y + 1u, GDB_Z_TAG);
+    if (c->kind == GDB_K_READ) {
+        gdb_sprite(l, GDB_RED, 0u, 0u, 256u, 17u, GDB_Z_HIGH);
+        for (uint32_t y = 0; y < 16u; y++)
+            gdb_sprite(l, GDB_GREEN, 16u * y, y, 16u * y + 16u, y + 1u, GDB_Z_TAG);
+    }
+    gdb_w(l, 0xd3, 0);
+    if (c->kind == GDB_K_CTL || c->kind == GDB_K_WTEST || c->kind == GDB_K_TAIL) {
+        gdb_w(l, 0x23, 1);         /* depth test on, ALWAYS, writes on: the tags */
+        if (c->kind == GDB_K_TAIL)
+            gdb_sprite(l, GDB_GREEN, 256u, 271u, 272u, 272u, GDB_Z_TAG);
+        else
+            for (uint32_t y = 0; y < 15u; y++)
+                gdb_sprite(l, GDB_GREEN, 256u + 16u * y, y, 272u + 16u * y, y + 1u, GDB_Z_TAG);
+        gdb_w(l, 0x23, 0);
+    }
+    switch (c->kind) {
+    case GDB_K_CTL:
+        gdb_readout(l, 0u, 0u, 512u, 16u, GDB_Z_HIGH, 1, 0);
+        break;
+    case GDB_K_READ:
+        gdb_readout(l, 0u, 0u, 512u, 16u, GDB_Z_HIGH, 1, 1);
+        break;
+    case GDB_K_WTEST:
+    case GDB_K_WCLEAR:
+        gdb_readout(l, 0u, 0u, 256u, 16u, GDB_Z_HIGH, 1, 0);
+        break;
+    case GDB_K_TAIL:
+        gdb_readout(l, 256u, 270u, 512u, 272u, GDB_Z_HIGH, 1, 0);
+        break;
+    default:
+        gdb_w(l, 0xd5, 511u | (271u << 10));   /* scissor x 0..511 for the readout */
+        gdb_readout(l, 0u, 0u, 512u, 272u, GDB_FILL16, 0, 0);
+        break;
+    }
+    gdb_w(l, 0xe7, 1);
+    gdb_w(l, 0x0f, 0);
+    gdb_w(l, 0x0c, 0);
+}
+
+static uint16_t gdb_px(uint32_t x, uint32_t y)
+{
+    return MEM_R16(GDB_FB + (y * 512u + x) * 2u);
+}
+
+/* The colour PSP-GE-RASTER-004 states for pixel (x, y) of the cell's readout, or 0 outside it. */
+static uint16_t gdb_want(const struct gdb_cell *c, uint32_t x, uint32_t y)
+{
+    const uint32_t g = x / 16u;
+    switch (c->kind) {
+    case GDB_K_CTL:          /* each tag reads back where it was written */
+        if (y >= 16u) return 0;
+        return x >= 256u && y < 15u && g - 16u == y ? GDB_BLUE16 : GDB_YELLOW16;
+    case GDB_K_WTEST:        /* tag y, written at x 256 + 16y, reads back at row y + 1, group y */
+    case GDB_K_WCLEAR:
+        if (y >= 16u) return 0;
+        if (x >= 256u)
+            return c->kind == GDB_K_WTEST && y < 15u && g - 16u == y ? GDB_GREEN16 : GDB_FILL16;
+        return y >= 1u && g == y - 1u ? GDB_BLUE16 : GDB_YELLOW16;
+    case GDB_K_READ:         /* past zbw, row y reads row y + 1: blue at group y + 1 */
+        if (y >= 16u) return 0;
+        if (x < 256u) return g == y ? GDB_BLUE16 : GDB_RED16;
+        return y < 15u && g - 16u == y + 1u ? GDB_BLUE16 : GDB_RED16;
+    case GDB_K_SCISSOR:      /* the clear honours the scissor x 0..99 */
+        return x < 100u ? GDB_YELLOW16 : GDB_RED16;
+    default:                 /* the tag past the last row reads back where it was written */
+        if (y < 270u) return 0;
+        if (x < 256u) return GDB_FILL16;
+        return y == 271u && x < 272u ? GDB_BLUE16 : GDB_YELLOW16;
+    }
+}
+
+/* Runs every cell under raster rule set `mutant`; failed[k] says whether cell k differs from
+   what the PSP did. The zbw-256 cells also check the measured depth word count: the 512x272
+   clear writes 0x11100 words (256 x 272 + 256), so every word the CPU read back that is not the
+   fill counts. Returns how many cells fail. */
+static unsigned gdb_run_cells(int mutant, unsigned char failed[GDB_CELL_COUNT], int verbose)
+{
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    ge_test_set_raster_mutant(mutant);
+    const uint32_t list = 0x08900000u;
+    unsigned count = 0;
+    for (uint32_t k = 0; k < GDB_CELL_COUNT; k++) {
+        const struct gdb_cell *c = &gdb_cells[k];
+        for (uint32_t i = 0; i < 2u * GDB_BLOCK_BYTES; i += 4u) MEM_W32(GDB_FB + i, 0x5a5a5a5au);
+        struct gdb_list l = {(uint32_t *)SR_HOST(list), 0u, 0x08904000u, 0u, 0};
+        gdb_build(c, &l);
+        int ok = !l.overflow;
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = list;
+        const uint32_t qid = sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = qid;
+        if ((qid & 0xFF000000u) != 0x35000000u || sr_syscall(&cpu, NID_SCE_GE_LIST_SYNC) != 0u)
+            ok = 0;
+        for (uint32_t y = 0; ok && y < 272u; y++) {
+            for (uint32_t x = 0; x < 512u; x++) {
+                const uint16_t want = gdb_want(c, x, y), got = gdb_px(x, y);
+                if (want == 0 || got == want) continue;
+                if (verbose)
+                    fprintf(stderr, "GE-DEPTH-BOUNDS %s: pixel (%u,%u) is 0x%04x, want 0x%04x\n",
+                            c->name, (unsigned)x, (unsigned)y, got, want);
+                ok = 0;
+                break;
+            }
+        }
+        if (ok && c->zbw == 256u && c->kind != GDB_K_TAIL) {
+            uint32_t written = 0;
+            for (uint32_t i = 0; i < GDB_BLOCK_BYTES; i += 2u) written += MEM_R16(GDB_ZB + i) != GDB_FILL16;
+            if (written != 0x11100u) {
+                if (verbose)
+                    fprintf(stderr, "GE-DEPTH-BOUNDS %s: %u depth words written, want 0x11100\n",
+                            c->name, (unsigned)written);
+                ok = 0;
+            }
+        }
+        if (ok && c->kind == GDB_K_TAIL) {
+            /* The tag's words are 272 * 256 + 0..15, past the 272-row buffer, in guest VRAM at
+               the address rule's word; the row's own first columns keep the clear. */
+            for (uint32_t i = 0; i < 16u; i++) {
+                const uint16_t past = MEM_R16((GDB_ZB + (272u * 256u + i) * 2u) ^ 0x2040u);
+                const uint16_t own = MEM_R16((GDB_ZB + (271u * 256u + i) * 2u) ^ 0x2040u);
+                if (past != GDB_Z_TAG || own != GDB_Z_CLEAR) {
+                    if (verbose)
+                        fprintf(stderr, "GE-DEPTH-BOUNDS %s: word %u past the buffer is 0x%04x "
+                                        "(want 0x0100), row 271 column %u 0x%04x (want 0x4000)\n",
+                                c->name, (unsigned)i, past, (unsigned)i, own);
+                    ok = 0;
+                    break;
+                }
+            }
+        }
+        failed[k] = !ok;
+        count += !ok;
+    }
+    ge_test_set_raster_mutant(0);
+    return count;
+}
+
+/* ==== GE through-mode depth cells (PSP-GE-THROUGHZ-001, #2397) ====
+ * The lists of probe_ge_sample.c's CASE=ge-through-z: a 16x16 through-mode sprite over x 16..31,
+ * y 8..23 of a 64x32 5650 colour buffer at VRAM 0x100000, both vertices at the cell's float z,
+ * depth test ALWAYS and depth writes on, over a 64x32 depth buffer at 0x110000 whose words the
+ * CPU fills with 0x1234 first. On a PSP-3000 (2026-11-20, docs/HARDWARE_ORACLE.md) exactly 256
+ * depth words changed in every cell, all to the value below, and the centre colour was 0x07e0. */
+#define GTZ_FB 0x04100000u
+#define GTZ_ZB 0x04110000u
+#define GTZ_CELL_COUNT 11u
+static const struct {
+    const char *name;
+    uint32_t zbits;
+    uint16_t stored;
+} gtz_cells[GTZ_CELL_COUNT] = {
+    {"zm1", 0xbf800000u, 0x0000u},       /* -1.0 */
+    {"zm0p5", 0xbf000000u, 0x0000u},     /* -0.5 */
+    {"z0", 0x00000000u, 0x0000u},        /* 0.0 */
+    {"z0p5", 0x3f000000u, 0x0000u},      /* 0.5 */
+    {"z1p5", 0x3fc00000u, 0x0001u},      /* 1.5 */
+    {"z65535", 0x477fff00u, 0xffffu},    /* 65535.0 */
+    {"z65535p5", 0x477fff80u, 0xffffu},  /* 65535.5 */
+    {"z65536", 0x47800000u, 0xffffu},    /* 65536.0 */
+    {"z70000", 0x4788b800u, 0xffffu},    /* 70000.0 */
+    {"zinf", 0x7f800000u, 0xffffu},      /* +infinity */
+    {"znan", 0x7fc00000u, 0xffffu},      /* quiet NaN */
+};
+
+static unsigned gtz_run_cells(int mutant, unsigned char failed[GTZ_CELL_COUNT], int verbose)
+{
+    static const uint8_t off_units[11] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x24u, 0x25u, 0x27u, 0x28u};
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    ge_test_set_raster_mutant(mutant);
+    const uint32_t list = 0x08900000u, vtx = 0x08904000u;
+    const uint32_t full = 63u | (31u << 10);
+    unsigned count = 0;
+    for (uint32_t k = 0; k < GTZ_CELL_COUNT; k++) {
+        /* Pixel index p's depth is the word at p ^ 0x1020 (PSP-VRAM-MIRROR-001). */
+        for (uint32_t p = 0; p < 64u * 32u; p++) {
+            MEM_W16(GTZ_FB + p * 2u, 0u);
+            MEM_W16(GTZ_ZB + (p ^ 0x1020u) * 2u, 0x1234u);
+        }
+        const float x0 = 16.0f, y0 = 8.0f, x1 = 32.0f, y1 = 24.0f;
+        uint32_t u;
+        MEM_W32(vtx, GDB_GREEN);
+        memcpy(&u, &x0, 4); MEM_W32(vtx + 4u, u);
+        memcpy(&u, &y0, 4); MEM_W32(vtx + 8u, u);
+        MEM_W32(vtx + 12u, gtz_cells[k].zbits);
+        MEM_W32(vtx + 16u, GDB_GREEN);
+        memcpy(&u, &x1, 4); MEM_W32(vtx + 20u, u);
+        memcpy(&u, &y1, 4); MEM_W32(vtx + 24u, u);
+        MEM_W32(vtx + 28u, gtz_cells[k].zbits);
+        uint32_t *w = (uint32_t *)SR_HOST(list);
+        uint32_t n = 0;
+#define GTZ_W(cmd, data) (w[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+        GTZ_W(0x10, (vtx >> 8) & 0x000f0000u);
+        GTZ_W(0x9c, GTZ_FB & 0x00ffffffu);
+        GTZ_W(0x9d, 64u);
+        GTZ_W(0xd2, 0u);
+        GTZ_W(0x9e, GTZ_ZB & 0x00ffffffu);
+        GTZ_W(0x9f, 64u);
+        GTZ_W(0x15, 0);
+        GTZ_W(0x16, full);
+        GTZ_W(0xd4, 0);
+        GTZ_W(0xd5, full);
+        GTZ_W(0xd6, 0);
+        GTZ_W(0xd7, 0xffffu);
+        for (uint32_t i = 0; i < 11u; i++) GTZ_W(off_units[i], 0);
+        GTZ_W(0x23, 1);             /* depth test on */
+        GTZ_W(0xde, 1);             /* ALWAYS */
+        GTZ_W(0xe7, 0);             /* depth writes on */
+        GTZ_W(0x1e, 0);
+        GTZ_W(0x50, 0);
+        GTZ_W(0xd3, 0);
+        GTZ_W(0xe8, 0);
+        GTZ_W(0xe9, 0);
+        GTZ_W(0xdb, 0x00ff0001u);
+        GTZ_W(0xd8, 1);
+        GTZ_W(0xd9, 0);
+        GTZ_W(0xda, 0);
+        GTZ_W(0xdc, 0x00ff0001u);
+        GTZ_W(0xdd, 0);
+        GTZ_W(0xdf, 0x32u);
+        GTZ_W(0xe0, 0);
+        GTZ_W(0xe1, 0);
+        GTZ_W(0xe6, 3);
+        GTZ_W(0xcf, 0);
+        GTZ_W(0xcd, 0);
+        GTZ_W(0xce, 0);
+        GTZ_W(0x53, 0);
+        GTZ_W(0x55, 0xffffffu);
+        GTZ_W(0x58, 0xffu);
+        GTZ_W(0x12, 0x0080019cu);   /* through, 8888 colour, float position */
+        GTZ_W(0x01, vtx);
+        GTZ_W(0x04, (6u << 16) | 2u);
+        GTZ_W(0x0f, 0);
+        GTZ_W(0x0c, 0);
+#undef GTZ_W
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = list;
+        const uint32_t qid = sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = qid;
+        int ok = (qid & 0xFF000000u) == 0x35000000u && sr_syscall(&cpu, NID_SCE_GE_LIST_SYNC) == 0u;
+        uint32_t changed = 0, wrong = 0;
+        for (uint32_t p = 0; p < 64u * 32u; p++) {
+            const uint32_t x = p % 64u, y = p / 64u;
+            const int inside = x >= 16u && x < 32u && y >= 8u && y < 24u;
+            const uint16_t z = MEM_R16(GTZ_ZB + (p ^ 0x1020u) * 2u);
+            changed += z != 0x1234u;
+            wrong += inside ? z != gtz_cells[k].stored : z != 0x1234u;
+        }
+        const uint16_t centre = MEM_R16(GTZ_FB + (16u * 64u + 24u) * 2u);
+        if (!ok || changed != 256u || wrong != 0u || centre != GDB_GREEN16) {
+            if (verbose)
+                fprintf(stderr, "GE-THROUGH-Z %s: %u depth words changed (want 256), %u differ from "
+                                "0x%04x, centre colour 0x%04x (want 0x07e0)\n", gtz_cells[k].name,
+                        (unsigned)changed, (unsigned)wrong, gtz_cells[k].stored, centre);
+            ok = 0;
+        }
+        failed[k] = !ok;
+        count += !ok;
+    }
+    ge_test_set_raster_mutant(0);
+    return count;
+}
+
+/* The PSP-GE-RASTER-004 and PSP-GE-THROUGHZ-001 cells match the PSP-3000 under the measured
+ * rules, and each wrong rule (ge.c's GE_RASTER_MUTANT_DEPTH_STOPS_AT_ZBW, the depth rule before
+ * these measurements, and GE_RASTER_MUTANT_THROUGH_NAN_ZERO, the NaN rule before them) fails
+ * exactly its named cells. dr-zbw256 fails under the first through its word count: the clear
+ * stops at zbw, 0x11000 words. */
+static void test_ge_depth_bounds_and_through_z_match_psp(void) {
+    unsigned char gdb_failed[GDB_CELL_COUNT], gtz_failed[GTZ_CELL_COUNT];
+    expect(gdb_run_cells(0, gdb_failed, 1) == 0,
+           "every PSP-GE-RASTER-004 cell reads back the depth the PSP stored");
+    expect(gtz_run_cells(0, gtz_failed, 1) == 0,
+           "every PSP-GE-THROUGHZ-001 cell stores the depth word the PSP stored");
+
+    static const char *const depth_named[] = {"dw-test-zbw256", "dw-clear-zbw256", "dr-zbw256",
+                                              "tail-zbw256"};
+    unsigned wrong = gdb_run_cells(4, gdb_failed, 0), caught = 0;
+    fprintf(stderr, "GE-DEPTH-BOUNDS mutant 4 (depth writes stop at zbw): %u of %u cells differ:",
+            wrong, (unsigned)GDB_CELL_COUNT);
+    for (uint32_t k = 0; k < GDB_CELL_COUNT; k++) {
+        if (gdb_failed[k]) fprintf(stderr, " %s", gdb_cells[k].name);
+        for (size_t n = 0; n < sizeof(depth_named) / sizeof(depth_named[0]); n++)
+            caught += gdb_failed[k] && strcmp(gdb_cells[k].name, depth_named[n]) == 0;
+    }
+    fprintf(stderr, "\n");
+    expect(wrong == 4u && caught == 4u,
+           "depth writes that stop at zbw fail exactly the cells that write past zbw");
+
+    wrong = gtz_run_cells(5, gtz_failed, 0);
+    fprintf(stderr, "GE-THROUGH-Z mutant 5 (NaN z stores 0): %u of %u cells differ:", wrong,
+            (unsigned)GTZ_CELL_COUNT);
+    for (uint32_t k = 0; k < GTZ_CELL_COUNT; k++)
+        if (gtz_failed[k]) fprintf(stderr, " %s", gtz_cells[k].name);
+    fprintf(stderr, "\n");
+    expect(wrong == 1u && gtz_failed[GTZ_CELL_COUNT - 1u],
+           "a NaN z that stores 0 fails exactly the znan cell");
+}
+
 static void test_ge_guest_sentinel(void) {
     CpuState cpu;
     reset_fixture();
@@ -63357,6 +63823,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_linear_filter_stays_inside_region();
     test_ge_raster_cells_match_psp();
     test_ge_alpha_only_clear_keeps_colour_under_dither();
+    test_ge_depth_bounds_and_through_z_match_psp();
     test_ge_mip_cells_software_contract();
     test_ge_mip_cells_match_psp();
     test_ge_clut_mip_cells_match_psp();

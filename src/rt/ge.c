@@ -1114,6 +1114,19 @@ uint32_t ge_get_cmd(uint32_t cmd) {
     return s_ge_command[cmd];
 }
 
+/* Test-only (hle_thread_selftest): deliberately wrong raster rules, so the PSP cells are shown
+ * to catch each of them (#343, #2193). 0 is the measured rule set. */
+enum {
+    GE_RASTER_MUTANT_NONE = 0,
+    GE_RASTER_MUTANT_FILL_BOTTOM_RIGHT = 1, /* keep E == 0 pixels on bottom and right edges */
+    GE_RASTER_MUTANT_SNAP_HALF = 2,         /* snap vertices to 28.4 with +0.5, not +0.375 */
+    GE_RASTER_MUTANT_DITHER_SHIFTED = 3,    /* read the dither matrix at (x + 1, y + 1) */
+    GE_RASTER_MUTANT_DEPTH_STOPS_AT_ZBW = 4, /* refuse depth writes at columns at or past zbw */
+    GE_RASTER_MUTANT_THROUGH_NAN_ZERO = 5,  /* a through-mode z of NaN 0x7fc00000 stores 0 */
+};
+static int s_raster_mutant;
+void ge_test_set_raster_mutant(int mutant) { s_raster_mutant = mutant; }
+
 /* ---- Depth buffer ----
  * Software 16-bit depth buffer, one entry per pixel, max stride 512.
  * Only active when ge.ztest_enable is set. */
@@ -1126,19 +1139,6 @@ static int s_zbuf_layout_accepted;   /* ge_zbuf_layout_valid() passed for the ca
 static int s_zbuf_boundary_reported;
 
 static uint32_t zbuf_stride(void) { return ge.zbw ? ge.zbw : (ge.fbw ? ge.fbw : 512); }
-
-/* Where a depth write of pixel (x, y) goes in s_zbuf, or 0 when the pixel lies outside the
- * depth buffer: zbw columns by 272 rows (#2193). s_zbuf holds guest depth row by row at the
- * buffer's stride, so a column at or past zbw would be the next row's pixel there, or on row
- * 271 a cell past the buffer that ge_zbuf_materialize_current never copies to guest memory.
- * The Vulkan backend writes back the same zbw columns (depth_readback_to_guest). Whether a
- * PSP stops at zbw is unmeasured. */
-static int zbuf_write_index(int x, int y, uint32_t *idx) {
-    const uint32_t stride = zbuf_stride();
-    if (x < 0 || y < 0 || y >= 272 || stride > 512u || (uint32_t)x >= stride) return 0;
-    *idx = (uint32_t)y * stride + (uint32_t)x;
-    return 1;
-}
 
 /* Extremes of (v ^ mask) over every integer v in [lo, hi]. The range is covered by aligned
  * power-of-two blocks: inside one block the XOR only permutes the low bits, so each block maps onto
@@ -1426,6 +1426,71 @@ void ge_replay_restore(const GeState *state, const uint16_t *zbuf) {
 
 static inline int raster_columns(void);
 
+/* Depth pixel (x, y) is word y * zbw + x of the depth buffer for every column, at or past zbw
+ * too: the write and the test both use that index, so a column past zbw is the next row's word
+ * and, on the last rows, a word past the buffer's 272 rows (PSP-GE-RASTER-004, PSP-3000,
+ * 2026-11-20, docs/HARDWARE_ORACLE.md: at zbw 256 a tested draw and a clear-mode depth-only
+ * sprite both wrote a column past zbw into the next row, and a 512x272 depth-only clear wrote
+ * 0x11100 words, 256 x 272 + 256). Only zbw 256 and 512 were measured; the index is the one
+ * ztest_compare_px always read.
+ *
+ * s_zbuf holds the 272 rows that ge_zbuf_prepare_current loads and ge_zbuf_materialize_current
+ * writes back, at the buffer's stride. A word at or past 272 * zbw is outside that copy: it is
+ * read and written in guest VRAM, at the address the same rule gives (ge_zbuf_guest_address),
+ * through the guest accessors so the coherence hooks and the GE capture see it as they see a
+ * colour pixel. Every index formed is in range of s_zbuf: zbuf_write_px and ztest_compare_px
+ * take x below 512 and y below 272 (raster_columns, the 272-row clamp) at a stride of at most 512
+ * (ge_zbuf_layout_valid refuses a wider one), so y * zbw + x is at most 271 * 512 + 511, and
+ * s_zbuf itself is indexed only below 272 * zbw. */
+static int zbuf_past_block_address(uint32_t idx, uint32_t *addr) {
+    static int reported;
+    if (idx < 272u * 512u) {
+        /* s_zbuf_guest_base lies in VRAM and 2 * idx is below 0x44000: no overflow. */
+        const uint32_t a = ge_zbuf_guest_address(idx, 0u, s_zbuf_guest_base, s_zbuf_guest_stride);
+        if (a >= SR_VRAM_CPU_BASE && a <= SR_VRAM_CPU_BASE + 0x00200000u - 2u) {
+            *addr = a;
+            return 1;
+        }
+    }
+    if (!reported) {
+        reported = 1;
+        fprintf(stderr, "SEMANTIC_BOUNDARY: VRAM_DEPTH_PAST_VRAM; a depth word past the depth "
+                        "buffer's last row would lie past the end of VRAM, where the PSP's address "
+                        "for it is unmeasured: it is neither written nor read.\n");
+    }
+    return 0;
+}
+
+static __attribute__((noinline)) void zbuf_past_block_store(uint32_t idx, uint16_t z) {
+    uint32_t addr;
+    if (zbuf_past_block_address(idx, &addr)) MEM_W16(addr, z);
+}
+
+static __attribute__((noinline)) int zbuf_past_block_load(uint32_t idx, uint16_t *z) {
+    uint32_t addr;
+    if (!zbuf_past_block_address(idx, &addr)) return 0;
+    *z = MEM_R16(addr);
+    return 1;
+}
+
+/* A depth write of pixel (x, y) to the current surface (prepared by the caller). */
+static inline void zbuf_write_px(int x, int y, uint16_t z) {
+    const uint32_t stride = zbuf_stride();
+    const uint32_t cols = s_raster_mutant == GE_RASTER_MUTANT_DEPTH_STOPS_AT_ZBW ? stride : 512u;
+    if ((uint32_t)x >= cols || (uint32_t)y >= 272u || stride > 512u) return;
+    const uint32_t idx = (uint32_t)y * stride + (uint32_t)x;
+    if (__builtin_expect(idx < 272u * stride, 1)) {
+        s_zbuf[idx] = z;
+        ge_zbuf_note_write();
+    } else {
+        zbuf_past_block_store(idx, z);
+        /* The guest store wrote a dirty surface back first and, when the word lies inside the
+         * surface's span, dropped the cached copy (sr_ge_vram_write_commit): reload it so the
+         * primitive's later writes land in a valid copy. */
+        (void)ge_zbuf_prepare_current();
+    }
+}
+
 static void zbuf_fill_rect(int x0, int y0, int x1, int y1, uint16_t z) {
     if (__builtin_expect(s_wing != NULL, 0)) {
         /* A wing canvas: its own depth, clipped to the pass's columns and the scissor rows,
@@ -1441,13 +1506,14 @@ static void zbuf_fill_rect(int x0, int y0, int x1, int y1, uint16_t z) {
         return;
     }
     if (!ge_zbuf_prepare_current()) return;
-    /* The pixels the clear's colour reaches (the scissor, inside the target's columns and 272
-     * rows, as fill_rect_clear_fast and a GPU backend's scissor clip it), and of those only
-     * the ones inside the depth buffer (zbuf_write_index). */
+    /* The pixels the clear's colour reaches: the scissor (PSP-GE-RASTER-004 dc-scissor), inside
+     * the target's columns and 272 rows, as fill_rect_clear_fast and a GPU backend's scissor clip
+     * it. Each is word y * zbw + x (zbuf_write_px), a column past zbw included. */
     const uint32_t stride = zbuf_stride();
     if (stride > 512u) return;
     int last_col = raster_columns() - 1;
-    if ((int)stride - 1 < last_col) last_col = (int)stride - 1;
+    if (s_raster_mutant == GE_RASTER_MUTANT_DEPTH_STOPS_AT_ZBW && (int)stride - 1 < last_col)
+        last_col = (int)stride - 1;
     if ((int)ge.scis_x2 < last_col) last_col = (int)ge.scis_x2;
     const int last_row = (int)ge.scis_y2 < 271 ? (int)ge.scis_y2 : 271;
     if (x0 < (int)ge.scis_x1) x0 = (int)ge.scis_x1;
@@ -1457,11 +1523,24 @@ static void zbuf_fill_rect(int x0, int y0, int x1, int y1, uint16_t z) {
     if (x1 > last_col) x1 = last_col;
     if (y1 > last_row) y1 = last_row;
     if (x0 > x1 || y0 > y1) return;
+    /* Row y covers words y * zbw + x0 to y * zbw + x1, at most 271 * 512 + 511; the part below
+     * 272 * zbw is in s_zbuf. Rows overlap when the rectangle is wider than zbw; every word
+     * gets the same z, so the order does not matter. */
+    const uint32_t block = 272u * stride;
     for (int y = y0; y <= y1; y++) {
-        uint16_t *row = s_zbuf + (uint32_t)y * stride;
-        for (int x = x0; x <= x1; x++) row[x] = z;
+        const uint32_t first = (uint32_t)y * stride + (uint32_t)x0;
+        const uint32_t end = (uint32_t)y * stride + (uint32_t)x1 + 1u;
+        for (uint32_t i = first; i < (end < block ? end : block); i++) s_zbuf[i] = z;
     }
     ge_zbuf_note_write();
+    /* The words past the buffer's last row, last: the first guest store writes the surface
+     * back and may drop the cached copy, which nothing here reads again. */
+    if ((uint32_t)y1 * stride + (uint32_t)x1 < block) return;
+    for (int y = y0; y <= y1; y++) {
+        const uint32_t first = (uint32_t)y * stride + (uint32_t)x0;
+        const uint32_t end = (uint32_t)y * stride + (uint32_t)x1 + 1u;
+        for (uint32_t i = first > block ? first : block; i < end; i++) zbuf_past_block_store(i, z);
+    }
 }
 
 static void stat_zfail(void);
@@ -1471,9 +1550,11 @@ static int ztest_compare_px(int x, int y, uint16_t z) {
         cur = s_wing->depth[WING_PX(x, y)];
     } else {
         if (!ge_zbuf_prepare_current()) return 0;
-        uint32_t idx = (uint32_t)(y * (int)zbuf_stride() + x);
-        if (idx >= 272u * 512u) return 0;
-        cur = s_zbuf[idx];
+        /* The word zbuf_write_px writes for (x, y), a column past zbw included. */
+        const uint32_t stride = zbuf_stride();
+        const uint32_t idx = (uint32_t)(y * (int)stride + x);
+        if (__builtin_expect(idx < 272u * stride, 1)) cur = s_zbuf[idx];
+        else if (!zbuf_past_block_load(idx, &cur)) return 0;
     }
     int pass;
     switch (ge.ztest & 7) {
@@ -1490,17 +1571,6 @@ static int ztest_compare_px(int x, int y, uint16_t z) {
     if (!pass) stat_zfail();
     return pass;
 }
-
-/* Test-only (hle_thread_selftest): deliberately wrong raster rules, so the PSP-GE-RASTER-001
- * cells are shown to catch each of them (#343). 0 is the measured rule set. */
-enum {
-    GE_RASTER_MUTANT_NONE = 0,
-    GE_RASTER_MUTANT_FILL_BOTTOM_RIGHT = 1, /* keep E == 0 pixels on bottom and right edges */
-    GE_RASTER_MUTANT_SNAP_HALF = 2,         /* snap vertices to 28.4 with +0.5, not +0.375 */
-    GE_RASTER_MUTANT_DITHER_SHIFTED = 3,    /* read the dither matrix at (x + 1, y + 1) */
-};
-static int s_raster_mutant;
-void ge_test_set_raster_mutant(int mutant) { s_raster_mutant = mutant; }
 
 /* Clamp interpolated depth to the 16-bit range. minz/maxz are NOT a clamp: the PSP
  * depth-range test DISCARDS transform-mode pixels outside [minz,maxz] (see zrange_ok). */
@@ -1642,18 +1712,20 @@ static void read_pos_one(uint32_t addr, const VFmt *v, float *x, float *y, float
          * both renderers take one integer depth: the Vulkan path clips depth outside the
          * 16-bit range and rounds a fraction to the nearest step, where the software path
          * truncates it. A title may write any float there (a 2D overlay at z = -1.0 with
-         * the depth test off). NOT MEASURED on a PSP: this is the rule PPSSPP's
-         * through-mode float decoder applies, and which depth the hardware stores for
-         * such a z is an open probe. An infinite z saturates as well (+inf to 65535, -inf
-         * to 0), so its primitive is drawn, where the non-finite vertex rule dropped it
-         * before. A NaN z is drawn too: PSP-GE-THROUGHZ-001 (docs/HARDWARE_ORACLE.md,
-         * 2026-11-10, PSP-3000) drew a through-mode sprite with both vertices at z = NaN.
-         * The depth it stores was not read; it takes depth 0 here, UNMEASURED (PPSSPP's
-         * rule too). Transform mode is untouched: its z is a model coordinate. */
+         * the depth test off). PSP-GE-THROUGHZ-001 (docs/HARDWARE_ORACLE.md, PSP-3000,
+         * 2026-11-20) read the depth word a through-mode sprite stores: 0x0000 for z = -1.0,
+         * -0.5, 0.0 and 0.5, 0x0001 for 1.5, and 0xffff for 65535.0, 65535.5, 65536.0,
+         * 70000.0, +inf and the NaN 0x7fc00000; its 2026-11-10 run drew the sprite for each.
+         * So an infinite or NaN z is drawn, where the non-finite vertex rule dropped it
+         * before. Not measured, and kept at PPSSPP's rule: -inf, a negative NaN, any other
+         * NaN (a signalling one included) take depth 0. Transform mode is untouched: its z
+         * is a model coordinate. */
         if (v->through) {
             if (*z >= 65535.0f) *z = 65535.0f;
             else if (*z > 0.0f) *z = (float)(int)*z;
-            else *z = 0.0f;   /* z <= 0, or NaN */
+            else if (zi == 0x7fc00000u && s_raster_mutant != GE_RASTER_MUTANT_THROUGH_NAN_ZERO)
+                *z = 65535.0f;
+            else *z = 0.0f;   /* z <= 0, or a NaN other than 0x7fc00000 */
         }
     } else if (v->pos_fmt == 2) {
         if (v->through) {
@@ -3620,10 +3692,7 @@ static void put_px_rgba_tested(int x, int y, uint16_t pz, int use_z,
     }
     if (use_z && !ge.zwrite_disable) {
         if (__builtin_expect(s_wing != NULL, 0)) s_wing->depth[WING_PX(x, y)] = pz;
-        else {
-            uint32_t zi;
-            if (zbuf_write_index(x, y, &zi)) { s_zbuf[zi]=pz; ge_zbuf_note_write(); }
-        }
+        else zbuf_write_px(x, y, pz);
     }
     if (ge.stencil_enable)
         stencil=apply_stencil_op((int)((ge.stencil_op>>16)&7),stencil);
@@ -4317,12 +4386,8 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
              * clearing depth with triangles would leave stale z behind (mass z-rejects). */
             if (ge.clear) {
                 if (ge.clear_mode & 0x400) {
-                    uint32_t zi;
                     if (wing) s_wing->depth[WING_PX(x, y)] = clamp_z(iz);
-                    else if (zbuf_write_index(x, y, &zi)) {
-                        s_zbuf[zi] = clamp_z(iz);
-                        ge_zbuf_note_write();
-                    }
+                    else zbuf_write_px(x, y, clamp_z(iz));
                 }
                 who_init();
                 if (x == s_who_x && y == s_who_y && s_pixwho_n < 400) {
@@ -4377,11 +4442,13 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
                 who_init();
                 if (x == s_who_x && y == s_who_y && s_pixwho_n < 400) {
                     s_pixwho_n++;
+                    /* 99999: a word past the buffer's last row, which s_zbuf does not hold. */
                     uint32_t zidx = (uint32_t)(y * (int)zbuf_stride() + x);
-                    unsigned curz = zidx < 272u*512u ? s_zbuf[zidx] : 99999u;
+                    const int zcached = zidx < 272u * zbuf_stride();
+                    unsigned curz = zcached ? s_zbuf[zidx] : 99999u;
                     /* zpass: the verdict the depth test will actually give this pixel. */
                     int zpass = 1;
-                    if (use_z && zidx < 272u*512u) {
+                    if (use_z && zcached) {
                         uint16_t zv = clamp_z(iz);
                         switch (ge.ztest & 7) {
                             case 0: zpass = 0; break;
