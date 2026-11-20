@@ -1111,6 +1111,13 @@ void player_ui_test_prepare_app(PlayerUiTest *t, PlayerApp *app) {
                                        "ENCRYPTED_EXECUTABLE: EBOOT.BIN is encrypted and "
                                        "built-in decryption stopped: KEY_REQUIRED.",
                                        NULL);
+        } else if (strcmp(t->error_code, "PREREQUISITE_TITLE_GONE") == 0) {
+            /* The build tools finished downloading for a title that has left the library
+               meanwhile: the resume's own card (player_app_prereq_resume_build). */
+            memset(&app->prerequisites, 0, sizeof(app->prerequisites));
+            snprintf(app->prerequisites.disc_id, sizeof(app->prerequisites.disc_id),
+                     "TEST80009");
+            (void)player_app_prereq_resume_build(app);
         } else {
             player_app_set_error(app, t->error_code, t->error_code,
                                  "Synthetic UI regression error state.",
