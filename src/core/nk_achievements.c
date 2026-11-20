@@ -35,6 +35,7 @@ typedef struct AchPendingReplay {
     char game_hash[33];
     rc_api_request_t request;
     NkAchRequest transport_request;
+    uint32_t client_generation; /* the account that sent it (ach_account_requests_end) */
 } AchPendingReplay;
 
 static bool ach_hash_ok(const char *hash);
@@ -81,7 +82,7 @@ struct NkAch {
     uint64_t token_retry_wait_ms;
     uint64_t token_retry_after_ms; /* 0: the next nk_ach_token_login_due starts the wait */
     /* rc_client lives as long as one account (ach_client_replace). */
-    uint32_t client_generation;      /* counts the rc_clients replaced */
+    uint32_t client_generation;      /* counts the accounts ended (ach_account_requests_end) */
     bool client_replace_due;         /* a replacement failed: no sign-in until one is made */
     char session_owner[NK_ACH_ACCOUNT_TAG_SIZE]; /* the account this rc_client signed in, or "" */
     const void *sending_call;        /* the AchCall ach_server_call is sending, or NULL */
@@ -704,6 +705,26 @@ static rc_client_t *ach_client_new(NkAch *ach) {
     return client;
 }
 
+/* When an account ends, every request it made ends with it. Those still waiting their turn
+ * (ach_send) carry its name and token and would reach the server after the account was signed
+ * out: each is answered here instead, never sent. The request the transport holds still gets
+ * its answer, but every answer made for the account that ended is dropped (ach_done,
+ * ach_pending_replay_done), so none reaches the next account's queue. */
+static void ach_account_requests_end(NkAch *ach) {
+    ach->client_generation++;
+    ach->pending_replay_inflight = false;
+    AchOutbound *waiting = ach->outbound_head;
+    ach->outbound_head = NULL;
+    ach->outbound_tail = NULL;
+    while (waiting) {
+        AchOutbound *outbound = waiting;
+        waiting = outbound->next;
+        const NkAchResponse refused = {NULL, 0u, NK_ACH_HTTP_CLIENT_ERROR};
+        outbound->done(&refused, outbound->done_ctx); /* an old generation: dropped */
+        ach_outbound_free(outbound);
+    }
+}
+
 /* rc_client keeps an award or leaderboard entry it could not send on its own scheduler, through
  * a logout, and builds each retry from whoever is signed in when it fires (rc_client.c,
  * rc_client_award_achievement_server_call). So an rc_client lives as long as one account: when
@@ -712,8 +733,10 @@ static rc_client_t *ach_client_new(NkAch *ach) {
  * account unloaded, is loaded again by the caller. What the old client still held for its retries
  * and its requests in flight stays allocated: rc_client_destroy does not free its scheduled
  * callbacks, and an answer cannot be handed to a client that is gone. False when no fresh client
- * can be made; until one is, no account signs in. */
+ * can be made; until one is, no account signs in. The account's requests end either way
+ * (ach_account_requests_end). */
 static bool ach_client_replace(NkAch *ach) {
+    ach_account_requests_end(ach);
     rc_client_t *fresh = ach_client_new(ach);
     if (!fresh) {
         ach->client_replace_due = true;
@@ -721,7 +744,6 @@ static bool ach_client_replace(NkAch *ach) {
     }
     rc_client_t *old = ach->client;
     ach->client = fresh;
-    ach->client_generation++;
     ach->client_replace_due = false;
     memset(ach->session_owner, 0, sizeof ach->session_owner);
     rc_client_destroy(old);
@@ -1092,6 +1114,14 @@ static void RC_CCONV ach_pending_replay_done(const NkAchResponse *response, void
     AchPendingReplay *replay = (AchPendingReplay *)done_ctx;
     NkAch *ach = replay->ach;
     ach_enter(ach);
+    if (replay->client_generation != ach->client_generation) {
+        /* Sent for an account that has ended (ach_account_requests_end): its answer is not the
+         * next account's, whose records may name the same game and achievement. */
+        rc_api_destroy_request(&replay->request);
+        free(replay);
+        ach_leave(ach);
+        return;
+    }
     char message[sizeof(((NkAchEvent *)0)->message)];
     const AchReplayOutcome outcome =
         ach_replay_outcome(response, replay->achievement_id, message, sizeof message);
@@ -1181,6 +1211,7 @@ static void ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {
     }
 
     replay->ach = ach;
+    replay->client_generation = ach->client_generation;
     replay->achievement_id = unlock.achievement_id;
     snprintf(replay->game_hash, sizeof replay->game_hash, "%s", unlock.game_hash);
     replay->transport_request.url = replay->request.url;

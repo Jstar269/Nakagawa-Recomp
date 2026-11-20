@@ -1465,6 +1465,125 @@ static void test_requests_wait_for_the_one_transport_slot(uint8_t *ram) {
     nk_ach_destroy(ach);
 }
 
+static int requests_naming_from(const Fake *f, int first, const char *field) {
+    int count = 0;
+    for (int i = first; i < f->requests && i < 16; i++)
+        if (strstr(f->log[i], field)) count++;
+    return count;
+}
+
+/* Requests still waiting for the one transport slot when the account signs out carry its name
+ * and token: none of them is sent once the request holding the slot is answered. Route 0: a set
+ * fetch holds the slot and a saved unlock waits; route 1: the other way round. */
+static void test_requests_waiting_at_sign_out_are_not_sent(uint8_t *ram) {
+    for (int route = 0; route < 2; route++) {
+        Fake fake;
+        memset(&fake, 0, sizeof fake);
+        fake.award_status = 200;
+        memset(ram, 0, USER_RAM_SIZE);
+        const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+        NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+        CHECK(ach != NULL, "create");
+        if (!ach) return;
+        NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+        const NkAchPendingUnlock saved = saved_unlock(5501u);
+        CHECK(nk_ach_restore_pending_unlock(ach, &saved, player_tag()), "restore");
+        CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "sign in");
+        (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+
+        fake.defer = true;
+        fake.one_slot = true;
+        if (route == 0) {
+            CHECK(nk_ach_begin_load_game(ach, HASH), "route 0: a game starts");
+            nk_ach_replay_pending_unlocks(ach, 1000u);
+            CHECK(count_requests(&fake, "r=awardachievement&") == 0,
+                  "route 0: the saved unlock waits for the slot");
+        } else {
+            nk_ach_replay_pending_unlocks(ach, 1000u);
+            CHECK(nk_ach_begin_load_game(ach, HASH), "route 1: a game starts");
+            CHECK(count_requests(&fake, "r=awardachievement&") == 1 &&
+                      count_requests(&fake, "r=achievementsets&") == 0,
+                  "route 1: the set fetch waits for the slot");
+        }
+        const int sent = fake.requests;
+        CHECK(fake.deferred_done != NULL && sent >= 1, "route %d: one request holds the slot",
+              route);
+        CHECK(nk_ach_sign_out(ach) == 1u, "route %d: Player signs out", route);
+        for (int answers = 0; answers < 8 && fake_answer_held(&fake); answers++) {}
+        CHECK(fake.requests == sent && requests_naming_from(&fake, sent, "u=Player&") == 0 &&
+                  requests_naming_from(&fake, sent, "t=TOKEN") == 0,
+              "route %d: nothing of Player's is sent after the sign-out (%d sent, %d of "
+              "Player's)", route, fake.requests - sent,
+              requests_naming_from(&fake, sent, "u=Player&"));
+        CHECK(fake.slot_refusals == 0, "route %d: the busy transport refused nothing", route);
+        fake.defer = false;
+        fake.one_slot = false;
+        nk_ach_destroy(ach);
+    }
+}
+
+/* A saved unlock on its way when its account signs out is answered after the next account has
+ * signed in and saved an unlock of its own for the same game and achievement. That answer is
+ * the old account's: it neither removes the next account's record (route 0, awarded) nor holds
+ * its queue back as a refused account (route 1). */
+static void test_late_replay_answer_leaves_the_next_account(uint8_t *ram) {
+    char other[NK_ACH_ACCOUNT_TAG_SIZE];
+    CHECK(nk_ach_account_tag("Other", other), "Other's tag");
+    for (int route = 0; route < 2; route++) {
+        Fake fake;
+        memset(&fake, 0, sizeof fake);
+        fake.award_status = 200;
+        fake.login_user = "Other";
+        memset(ram, 0, USER_RAM_SIZE);
+        const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+        NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+        CHECK(ach != NULL, "create");
+        if (!ach) return;
+        NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+        const NkAchPendingUnlock saved = saved_unlock(5501u);
+        CHECK(nk_ach_restore_pending_unlock(ach, &saved, player_tag()), "restore Player's");
+        fake.login_user = NULL;
+        CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "Player signs in");
+        fake.login_user = "Other";
+        fake.defer = true;
+        fake.one_slot = true;
+        nk_ach_replay_pending_unlocks(ach, 1000u);
+        NkAchDone done = fake.deferred_done;
+        void *done_ctx = fake.deferred_ctx;
+        fake.deferred_done = NULL;
+        CHECK(done != NULL && count_requests(&fake, "r=awardachievement&") == 1,
+              "route %d: Player's saved unlock is on its way", route);
+        CHECK(nk_ach_sign_out(ach) == 1u, "route %d: Player signs out", route);
+
+        fake.defer = false;
+        fake.one_slot = false;
+        CHECK(nk_ach_restore_pending_unlock(ach, &saved, other), "restore Other's");
+        CHECK(nk_ach_begin_login(ach, "Other", "TOKEN2"), "route %d: Other signs in", route);
+        (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+
+        const NkAchResponse awarded = {k_award, sizeof k_award - 1u, 200};
+        const NkAchResponse bad_account = {k_bad_account, sizeof k_bad_account - 1u, 401};
+        if (done) done(route == 0 ? &awarded : &bad_account, done_ctx);
+        size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+        CHECK(nk_ach_pending_unlock_count(ach) == 1u,
+              "route %d: Other's record is still queued (%u queued)", route,
+              (unsigned)nk_ach_pending_unlock_count(ach));
+        CHECK(has_event(ev, n, NK_ACH_EVENT_SERVER_ERROR) < 0 &&
+                  has_event(ev, n, NK_ACH_EVENT_UNLOCK_REFUSED) < 0 &&
+                  has_event(ev, n, NK_ACH_EVENT_QUEUE_CHANGED) < 0,
+              "route %d: the late answer tells Other nothing", route);
+
+        const int sent = fake.requests;
+        nk_ach_replay_pending_unlocks(ach, 2000u);
+        CHECK(requests_naming_from(&fake, sent, "r=awardachievement&") == 1 &&
+                  requests_naming_from(&fake, sent, "u=Other&") == 1,
+              "route %d: Other's saved unlock is sent with Other's account (%d sent)", route,
+              fake.requests - sent);
+        CHECK(nk_ach_pending_unlock_count(ach) == 0u, "route %d: and answered", route);
+        nk_ach_destroy(ach);
+    }
+}
+
 /* Turning the feature off while a token sign-in is on its way: rc_client answers it as
  * aborted once the server's reply arrives. A reply that found no server must not arm the token
  * sign-in's retry for a feature that is now off. */
@@ -1920,6 +2039,8 @@ int main(int argc, char **argv) {
     RUN_RAM(test_refused_live_award_leaves_the_queue);
     RUN_RAM(test_late_answer_after_sign_out_keeps_the_next_unlock);
     RUN_RAM(test_requests_wait_for_the_one_transport_slot);
+    RUN_RAM(test_requests_waiting_at_sign_out_are_not_sent);
+    RUN_RAM(test_late_replay_answer_leaves_the_next_account);
     RUN_RAM(test_sign_in_ended_by_logout_is_not_tried_again);
     RUN_RAM(test_long_titles_are_cut_at_a_character);
     RUN(test_frames_are_served_while_the_event_loop_is_stalled);
