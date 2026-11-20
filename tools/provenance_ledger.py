@@ -1806,6 +1806,13 @@ def _known_public_labels(label_set: str | None = None) -> set[str]:
     return {label for labels in sets for label in labels.values()}
 
 
+def _label_field(entry: object) -> str | None:
+    """The evidence field that holds ``entry``'s public label, if its class carries one."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("classification"), str):
+        return None
+    return PUBLIC_LABEL_FIELDS.get(entry["classification"])
+
+
 def public_label_set_of(document: object) -> str:
     """The label set a public ledger's labels belong to, the emitted set first.
 
@@ -1817,7 +1824,7 @@ def public_label_set_of(document: object) -> str:
     known = _known_public_labels()
     for entry in entries if isinstance(entries, list) else []:
         evidence = entry.get("evidence") if isinstance(entry, dict) else None
-        field = PUBLIC_LABEL_FIELDS.get(entry.get("classification")) if isinstance(entry, dict) else None
+        field = _label_field(entry)
         if isinstance(evidence, dict) and field and evidence.get(field) in known:
             used.add(evidence[field])
     for label_set in [PUBLIC_LABEL_SET] + sorted(set(PUBLIC_LABEL_SETS) - {PUBLIC_LABEL_SET}):
@@ -1837,9 +1844,10 @@ def relabel_public_ledger(document: dict, records: dict[str, dict], label_set: s
     for entry in document.get("entries", []):
         if not isinstance(entry, dict):
             continue
-        field = PUBLIC_LABEL_FIELDS.get(entry.get("classification"))
+        field = _label_field(entry)
         evidence = entry.get("evidence")
-        record = records.get(entry.get("path"))
+        path = entry.get("path")
+        record = records.get(path) if isinstance(path, str) else None
         if not field or not isinstance(evidence, dict) or not isinstance(record, dict):
             continue
         if evidence.get(field) not in known or evidence.get("record_id") != record.get("id"):

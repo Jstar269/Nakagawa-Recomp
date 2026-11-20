@@ -127,7 +127,8 @@ def regen_all_labels() -> dict[str, dict[str, str]]:
     sys.path.insert(0, str(Path(regen_all.__file__).resolve().parent))
     import provenance_ledger
 
-    return provenance_ledger.PUBLIC_LABEL_SETS
+    sets: dict[str, dict[str, str]] = provenance_ledger.PUBLIC_LABEL_SETS
+    return sets
 
 
 class CheckModeTests(unittest.TestCase):
