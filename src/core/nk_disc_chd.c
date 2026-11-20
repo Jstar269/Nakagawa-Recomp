@@ -208,6 +208,13 @@ static bool chd_backend_open(const char *path, void **handle, uint64_t *logical_
 static bool chd_backend_read_hunk(void *handle, uint32_t index, uint8_t *dst,
                                   NkDiscExpandStatus *status) {
     chd_error err = chd_read((chd_file *)handle, index, dst);
+    if (err == CHDERR_OUT_OF_MEMORY) {
+        /* A codec's working memory (the HUFF codec's bitstream and small tree)
+           is allocated per block; the block itself is not damaged. */
+        return chd_status(status, NK_DISC_INTERNAL,
+                          "There is not enough memory to read this CHD disc image.",
+                          chd_error_string(err));
+    }
     if (err != CHDERR_NONE) {
         char detail[96];
         snprintf(detail, sizeof(detail), "block %u: %s", (unsigned)index, chd_error_string(err));

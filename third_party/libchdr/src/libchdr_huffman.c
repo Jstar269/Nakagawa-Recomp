@@ -96,6 +96,9 @@
 
 ***************************************************************************/
 
+/* Modified by Nakagawa Recomp contributors, 2026-11-20. The local changes (2026-11-17 and
+ * 2026-11-20) are marked LOCAL DELTA and listed in third_party/libchdr/PROVENANCE.md. */
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -130,6 +133,11 @@ struct huffman_decoder* create_huffman_decoder(int numcodes, int maxbits)
 		return NULL;
 
 	decoder = (struct huffman_decoder*)malloc(sizeof(struct huffman_decoder));
+	/* Nakagawa LOCAL DELTA (2026-11-20): each allocation is checked; on a
+	 * failure what was allocated is freed and NULL returned, which the
+	 * callers report as CHDERR_OUT_OF_MEMORY (upstream wrote through NULL). */
+	if (decoder == NULL)
+		return NULL;
 	decoder->numcodes = numcodes;
 	decoder->maxbits = maxbits;
 #if LOWRAM_TARGET
@@ -141,6 +149,14 @@ struct huffman_decoder* create_huffman_decoder(int numcodes, int maxbits)
 	decoder->lookup = (lookup_value*)malloc(sizeof(lookup_value) * (1 << maxbits));
 #endif
 	decoder->huffnode = (struct node_t*)malloc(sizeof(struct node_t) * numcodes);
+	/* Nakagawa LOCAL DELTA (2026-11-20): the lookup table and the nodes. */
+	if (decoder->lookup == NULL || decoder->huffnode == NULL)
+	{
+		free(decoder->lookup);
+		free(decoder->huffnode);
+		free(decoder);
+		return NULL;
+	}
 	decoder->datahisto = NULL;
 	decoder->prevdata = 0;
 	decoder->rleremaining = 0;
@@ -282,6 +298,10 @@ enum huffman_error huffman_import_tree_huffman(struct huffman_decoder* decoder, 
 	enum huffman_error error;
 	/* start by parsing the lengths for the small tree */
 	struct huffman_decoder* smallhuff = create_huffman_decoder(24, 6);
+	/* Nakagawa LOCAL DELTA (2026-11-20): the small tree's decoder may not
+	 * have been allocated. */
+	if (smallhuff == NULL)
+		return HUFFERR_OUT_OF_MEMORY;
 	smallhuff->huffnode[0].numbits = bitstream_read(bitbuf, 3);
 	start = bitstream_read(bitbuf, 3) + 1;
 	for (index = 1; index < 24; index++)

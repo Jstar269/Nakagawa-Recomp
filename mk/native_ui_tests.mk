@@ -562,8 +562,8 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 		src/player/setup_staging.c src/rt/archive_vfs.c \
 		tests/native/native_test_isolation.c tests/native/test_xb_parser.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_xb_parser$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_xb_parser$(EXE_EXT)
-	$(CC) $(NC_CFLAGS_CORE) -Werror $(LIBCHDR_INC) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) $(PLAYER_CHD_SRCS) \
-		tests/native/native_test_isolation.c tests/native/test_disc_expand.c $(LIBCHDR_LIB) $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_disc_expand$(EXE_EXT)
+	$(CC) $(NC_CFLAGS_CORE) -Werror $(LIBCHDR_INC) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" -DNK_TEST_WRAP_MALLOC $(NC_OBJS_CORE) $(PLAYER_CHD_SRCS) \
+		tests/native/native_test_isolation.c tests/native/test_disc_expand.c $(LIBCHDR_LIB) $(PLAYER_PLATFORM_LIBS) -Wl,--wrap=malloc -o $(BUILD_ROOT)/test_disc_expand$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_disc_expand$(EXE_EXT)
 	$(CC) $(NC_CFLAGS_CORE) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) 		tests/native/native_test_isolation.c tests/native/test_disc_verify.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_disc_verify$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_disc_verify$(EXE_EXT)
