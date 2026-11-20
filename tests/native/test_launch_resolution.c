@@ -365,7 +365,7 @@ static int write_launch_environment_probe(void) {
                      "SR_NICKNAME=%s\n"
                      "SR_ADHOC_ENABLED=%s\n"
                      "SR_ADHOC_SERVER=%s\n"
-                     "SR_ADHOC_PORT_OFFSET=%s\n",
+                     "SR_ADHOC_PORT_OFFSET=%s\n"
                      "SR_CHEATS=%s\n"
                      "SR_CHEATS_FILE=%s\n",
                      iso ? iso : "<unset>",
@@ -404,7 +404,7 @@ static int write_launch_environment_probe(void) {
                      nickname ? nickname : "<unset>",
                      adhoc_enabled ? adhoc_enabled : "<unset>",
                      adhoc_server ? adhoc_server : "<unset>",
-                     adhoc_offset ? adhoc_offset : "<unset>") >= 0;
+                     adhoc_offset ? adhoc_offset : "<unset>",
                      cheats ? cheats : "<unset>",
                      cheats_file ? cheats_file : "<unset>") >= 0;
     if (fclose(f) != 0) ok = 0;
