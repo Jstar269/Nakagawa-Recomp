@@ -364,7 +364,7 @@
       "presence": "required",
       "source_path": "SDL3.dll",
       "upstream_origin": "https://github.com/libsdl-org/SDL",
-      "license": "Zlib",
+      "license": "Zlib AND BSD-3-Clause",
       "notice_path": "NOTICE.md",
       "disposition": "included",
       "public_scope_included": true,
