@@ -20,11 +20,13 @@ admits new paths with the same ``tools/admit_paths.py`` flow the upstream uses
 with ``docs/provenance/IMPLEMENTATION_PROVENANCE.json``. Every record in it is rebuilt from a public
 ledger entry that names a record id: its id, its exact paths, the classification and evidence tier
 the entry publishes, and the licence of an upstream-derived file. Each record says that it adopts the
-claim the upstream published at that commit; it is not a new attestation. It makes one choice of its
-own: every project-authored entry gets the detailed class ``behavior-informed``, the weaker of the two
-detailed classes behind the public project-authored class, because the public ledger does not say
-which of the two (``project-authored-independent`` or ``behavior-informed``) the upstream recorded,
-and an adopted claim must not assert an independence no record supports. Documentation,
+claim the upstream published at that commit; it is not a new attestation. The detailed class is the
+one the entry's public label names (``provenance_ledger.PUBLIC_LABEL_SETS``). Where the label names
+two classes, as the ``v1`` labels do, it makes one choice of its own: a project-authored entry gets
+``behavior-informed``, the weaker of the two detailed classes behind the public project-authored
+class, and an upstream-derived entry gets ``derived-translated``, because such a label does not say
+which of the two the upstream recorded, and an adopted claim must not assert an independence no
+record supports. Documentation,
 configuration, fixtures and other deterministic paths need no
 record. ``init`` then checks that the trusted verifier, given only the new authority, regenerates the
 committed public ledger byte for byte, and commits the seed with your Git identity.
@@ -151,7 +153,7 @@ def seed_records(public_ledger: dict, commit: str) -> list[dict]:
         if not isinstance(evidence, dict) or not evidence.get("record_id"):
             continue
         public_class = entry.get("classification")
-        detailed = SEED_CLASSIFICATION.get(public_class)
+        detailed = _labelled_classification(entry) or SEED_CLASSIFICATION.get(public_class)
         if detailed is None:
             raise ForkInitError("PUBLIC_LEDGER_INVALID",
                                 f"{entry.get('path')}: record-backed class {public_class!r} has no seed mapping")
@@ -186,12 +188,32 @@ def seed_records(public_ledger: dict, commit: str) -> list[dict]:
     return [records[key] for key in sorted(records)]
 
 
-def regenerated_public_ledger(repo: Path, rev: str, authority_ledger: Path) -> bytes:
+def _labelled_classification(entry: dict) -> str | None:
+    """The one detailed class an entry's public label names, or ``None`` when it names several."""
+    public_class = entry.get("classification")
+    field = provenance_ledger.PUBLIC_LABEL_FIELDS.get(public_class)
+    evidence = entry.get("evidence")
+    if field is None or not isinstance(evidence, dict):
+        return None
+    label = evidence.get(field)
+    named = {
+        detailed
+        for labels in provenance_ledger.PUBLIC_LABEL_SETS.values()
+        for detailed, text in labels.items()
+        if text == label and provenance_ledger.public_class_of_detailed(detailed) == public_class
+    }
+    return named.pop() if len(named) == 1 else None
+
+
+def regenerated_public_ledger(
+    repo: Path, rev: str, authority_ledger: Path, *, label_set: str = provenance_ledger.PUBLIC_LABEL_SET,
+) -> bytes:
     """The committed public ledger the trusted verifier derives for ``rev`` from ``authority_ledger`` alone."""
     with tempfile.TemporaryDirectory(prefix="nakagawa-fork-init-") as scratch:
         try:
             envelope = provenance_attest_verify.generate_authority_baseline(
                 repo=repo, base_rev=rev, trusted_ledger=authority_ledger, workdir=Path(scratch),
+                label_set=label_set,
             )
         except provenance_attest_verify.VerifyError as error:
             raise ForkInitError(error.code, str(error)) from error
@@ -208,7 +230,11 @@ def verify(repo: Path, authority: Path, rev: str = "HEAD") -> str:
         raise ForkInitError("AUTHORITY_MISSING", f"{ledger} does not exist; run `fork_init.py init` first")
     committed = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", f"{sha}:{PUBLIC_LEDGER}"],
                                capture_output=True, check=False).stdout
-    regenerated = regenerated_public_ledger(repo, sha, ledger)
+    try:
+        label_set = provenance_ledger.public_label_set_of(json.loads(committed))
+    except ValueError:
+        label_set = provenance_ledger.PUBLIC_LABEL_SET
+    regenerated = regenerated_public_ledger(repo, sha, ledger, label_set=label_set)
     if regenerated != committed:
         raise ForkInitError(
             "AUTHORITY_MISMATCH",
