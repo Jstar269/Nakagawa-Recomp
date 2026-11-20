@@ -2122,17 +2122,18 @@ behavior the runtime is missing:
   translated code whose guest bytes changed under it;
 - a malformed generated module record (`sr_module_code_register` and
   `sr_module_code_non_code_register` in `src/rt/guest_interp.c`);
-- an impossible user-partition layout or a pool table the host could not grow (`src/rt/hle.c`).
+- an impossible user-partition layout, a pool table the host could not grow, or a mailbox queue the host
+  could not grow (`src/rt/hle.c`).
 
-They keep `abort()` so the evidence survives. Each one prints its line first, and the stale-code check
-records a flight-recorder `fatal` event (`SR_FLIGHT_KIND_FATAL_HOST`), so a run with `SR_FLIGHT` keeps the
-events before the stop ([Flight Recorder](#flight-recorder-sr_flight)). The `SIGABRT` handler in
+They keep `abort()` so the evidence survives. Each one prints its line first. The stale-code check and the
+`src/rt/hle.c` stops also record a flight-recorder `fatal` event (`SR_FLIGHT_KIND_FATAL_HOST`), so a run
+with `SR_FLIGHT` keeps the events before the stop ([Flight Recorder](#flight-recorder-sr_flight)); the
+`src/rt/guest_interp.c` stops record none. The `SIGABRT` handler in
 `src/rt/debug.c` writes out any buffered diagnostic stream, and a crash dump, where the host takes one,
 records the process as it was. These stops do not run the
 run-end teardown, and they are not the deliberate crash that AGENTS.md section 6 forbids, which signals
 missing behavior. Missing behavior still stops by name with a status (an unregistered NID, an
-unsupported import, the watchdog). A new check of a host invariant may use the same convention. A gap in
-emulated behavior may not.
+unsupported import, the watchdog).
 
 ## Crash Reporter
 
