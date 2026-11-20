@@ -219,6 +219,7 @@ void player_ui_test_report_open_url(const char *url);
 void player_ui_test_report_copied_details(bool copied, const char *report);
 PackageHttpOpen player_ui_test_update_transport(void);
 PackageHttpOpen player_ui_test_cover_art_transport(void);
+PackageHttpOpen player_ui_test_adhoc_list_transport(void);
 bool player_ui_test_update_signing_key(NkMinisignKey *out, bool *handled);
 
 #else /* shipped player: the hooks do nothing */
@@ -343,6 +344,7 @@ static inline void player_ui_test_report_copied_details(bool copied, const char 
 }
 static inline PackageHttpOpen player_ui_test_update_transport(void) { return NULL; }
 static inline PackageHttpOpen player_ui_test_cover_art_transport(void) { return NULL; }
+static inline PackageHttpOpen player_ui_test_adhoc_list_transport(void) { return NULL; }
 static inline bool player_ui_test_update_signing_key(NkMinisignKey *out, bool *handled) {
     (void)out;
     *handled = false;

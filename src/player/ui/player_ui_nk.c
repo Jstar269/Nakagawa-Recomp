@@ -136,6 +136,7 @@ struct PlayerUiNk {
     bool nickname_open;
     bool nickname_first_launch;
     bool nickname_is_server;
+    bool nickname_is_port;      /* Online play's port offset (#1139) */
     bool nickname_refused;
     NkUiId nickname_focus;
     NkUiId nickname_return_focus;
@@ -163,8 +164,10 @@ struct PlayerUiNk {
     char title_input_summary[128];
     char settings_controller[160];
     char settings_online_play_row[160];
-    char settings_online_play_preset[160];
     char settings_online_play_status[320];
+    char settings_online_play_port[8];
+    /* The Online play picker's rows (#1139): the shipped servers, then the list's. */
+    PlayerUiOnlineServer settings_online_play_servers[PLAYER_UI_ONLINE_PLAY_SERVERS_MAX];
     /* The graphics preset's note on the main Settings page (#2150). */
     char settings_preset_note[192];
     char settings_interface_size[16];
@@ -649,7 +652,8 @@ static bool player_ui_settings_view(PlayerView view) {
            view == VIEW_CONFIRM_REMOVE_TOOLS || view == VIEW_BUILD_CACHE ||
            view == VIEW_PSP_FONTS || view == VIEW_UPDATES ||
            view == VIEW_CONFIRM_FACTORY_RESET || view == VIEW_ACCESSIBILITY_SETTINGS ||
-           view == VIEW_ACE_SETTINGS || view == VIEW_PROBLEM_REPORT;
+           view == VIEW_ACE_SETTINGS || view == VIEW_PROBLEM_REPORT ||
+           view == VIEW_ONLINE_PLAY_CARD || view == VIEW_ONLINE_PLAY_SERVERS;
 }
 
 /* The views the next UI draws: the library (router screens), the setup wizard,
@@ -1289,6 +1293,10 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     switch (app->active_view) {
         case VIEW_ONLINE_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE; break;
         case VIEW_ONLINE_PLAY_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY; break;
+        case VIEW_ONLINE_PLAY_CARD: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD; break;
+        case VIEW_ONLINE_PLAY_SERVERS:
+            model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS;
+            break;
         case VIEW_ACCESSIBILITY_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ACCESSIBILITY; break;
         case VIEW_ACE_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ACE; break;
         case VIEW_PREREQ_ABOUT: model.page = PLAYER_UI_SETTINGS_PAGE_NOTICES; break;
@@ -1391,54 +1399,60 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.online_reports = app->settings.online_reports;
     model.developer_mode = app->settings.developer_mode;
     {
-        char host[NK_ADHOC_SERVER_MAX_LEN + 1u];
-        uint16_t lp = 0u, dp = 0u;
+        /* Online play (#1139): on only with the consent card's answer for the server. */
         const char *srv = app->settings.online_play_server[0] ? app->settings.online_play_server
                                                               : NK_ADHOC_DEFAULT_SERVER;
-        bool valid_srv = nk_adhoc_relay_parse_server(srv, host, sizeof(host), &lp, &dp);
-        const char *preset_label = NULL;
-        for (size_t i = 0u; i < nk_adhoc_server_preset_count(); ++i) {
-            const NkAdhocServerPreset *p = nk_adhoc_server_preset(i);
-            if (p && p->host && strcmp(srv, p->host) == 0) {
-                preset_label = p->label;
-                break;
-            }
-        }
-        model.online_play = app->settings.online_play && valid_srv;
+        const char *label = NULL;
+        size_t rows = 0u;
+        model.online_play = player_app_online_play_consented(&app->settings);
         model.online_play_server = srv;
-        if (preset_label != NULL) {
-            snprintf(player->settings_online_play_preset,
-                     sizeof(player->settings_online_play_preset), "%s", preset_label);
-        } else {
-            snprintf(player->settings_online_play_preset,
-                     sizeof(player->settings_online_play_preset), "Custom (%s)", srv);
+        for (size_t i = 0u; i < nk_adhoc_server_preset_count() &&
+                            rows < PLAYER_UI_ONLINE_PLAY_SERVERS_MAX; ++i) {
+            const NkAdhocServerPreset *p = nk_adhoc_server_preset(i);
+            if (!p || !p->host) continue;
+            if (strcmp(srv, p->host) == 0) label = p->label;
+            player->settings_online_play_servers[rows++] =
+                (PlayerUiOnlineServer){p->label, p->host, "Ships with Nakagawa."};
         }
-        model.online_play_preset_label = player->settings_online_play_preset;
-        if (model.online_play) {
-            snprintf(player->settings_online_play_row, sizeof(player->settings_online_play_row),
-                     "On: %s", srv);
+        for (size_t i = 0u; i < app->online_play_list.count &&
+                            rows < PLAYER_UI_ONLINE_PLAY_SERVERS_MAX; ++i) {
+            const NkAdhocListEntry *e = &app->online_play_list.entries[i];
+            if (!label && strcmp(srv, e->host) == 0) label = e->name;
+            player->settings_online_play_servers[rows++] = (PlayerUiOnlineServer){
+                e->name, e->host, e->location[0] ? e->location : "From PPSSPP's list."};
+        }
+        model.online_play_servers = player->settings_online_play_servers;
+        model.online_play_server_count = rows;
+        model.online_play_server_label = label ? label : "Your own server";
+        model.online_play_list_status = app->online_play_list_status;
+        model.online_play_list_busy = app->online_play_list_busy;
+        model.online_play_card_server = app->online_play_card_server;
+        snprintf(player->settings_online_play_row, sizeof(player->settings_online_play_row),
+                 model.online_play ? "On: %s" : "Off", srv);
+        if (app->online_play_notice[0]) {
+            snprintf(player->settings_online_play_status,
+                     sizeof(player->settings_online_play_status), "%s", app->online_play_notice);
+        } else if (model.online_play) {
             snprintf(player->settings_online_play_status,
                      sizeof(player->settings_online_play_status),
-                     "Status: On (applies next game launch) - Relay target %s (lobby TCP %u, data "
-                     "TCP %u; unencrypted plain TCP).",
-                     host, (unsigned)lp, (unsigned)dp);
+                     "Online play is on with %s. A game connects when it plays over local "
+                     "wireless.", srv);
         } else {
-            snprintf(player->settings_online_play_row, sizeof(player->settings_online_play_row),
-                     "Off");
-            if (valid_srv) {
-                snprintf(player->settings_online_play_status,
-                         sizeof(player->settings_online_play_status),
-                         "Status: Off - PSP ad hoc services stay closed (0x80010086). Configured "
-                         "target: %s (lobby TCP %u, data TCP %u).",
-                         host, (unsigned)lp, (unsigned)dp);
-            } else {
-                snprintf(player->settings_online_play_status,
-                         sizeof(player->settings_online_play_status),
-                         "Status: Off - PSP ad hoc services stay closed (0x80010086).");
-            }
+            snprintf(player->settings_online_play_status,
+                     sizeof(player->settings_online_play_status), "%s",
+                     "Online play is off. Nothing connects.");
         }
         model.online_play_row_value = player->settings_online_play_row;
         model.online_play_status = player->settings_online_play_status;
+        model.online_play_console_id = app->online_play_console_id;
+        model.online_play_console_id_shown = app->online_play_console_id_ok;
+        model.online_play_console_id_locked = app->is_game_running;
+        model.online_play_console_note = app->online_play_console_note;
+        snprintf(player->settings_online_play_port, sizeof(player->settings_online_play_port),
+                 "%u", (unsigned)(app->settings.online_play_port_offset <= 65535u
+                                      ? app->settings.online_play_port_offset
+                                      : NK_RELAY_PORT_OFFSET));
+        model.online_play_port_offset = player->settings_online_play_port;
     }
     model.download_cover_art = app->settings.download_cover_art;
     model.cheats = app->settings.cheats;
@@ -2263,8 +2277,14 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                 }
                 break;
             case VIEW_ONLINE_PLAY_SETTINGS:
-                focus = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE;
+                /* Back from the picker, its Server row; else the switch. */
+                focus = player->last_view == VIEW_ONLINE_PLAY_SERVERS
+                    ? PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET
+                    : PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE;
                 break;
+            /* The card's safe answer, NOT NOW, has the focus. */
+            case VIEW_ONLINE_PLAY_CARD: focus = PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW; break;
+            case VIEW_ONLINE_PLAY_SERVERS: focus = PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE; break;
             case VIEW_ACCESSIBILITY_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE; break;
             /* Settings > Enhanced, the library's or a game's, opens on its first row. */
             case VIEW_ACE_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_PRESET; break;
@@ -2745,12 +2765,22 @@ static void player_ui_nickname_open(PlayerUiNk *player, bool first_launch, bool 
     player->nickname_open = true;
     player->nickname_first_launch = first_launch && !server_mode;
     player->nickname_is_server = server_mode;
+    player->nickname_is_port = false;
     player->nickname_refused = false;
     player->nickname_focus = PLAYER_UI_ID_NICKNAME_KEY_BASE + UI_KEYBOARD_KEY_DEFAULT;
     player->nickname_text[0] = '\0';
     ui_keyboard_init(&player->nickname_keyboard, player->nickname_text,
                      server_mode ? NK_ADHOC_SERVER_MAX_LEN : NK_NICKNAME_MAX_BYTES,
                      server_mode ? player_ui_server_accepts : player_ui_nickname_accepts, NULL);
+}
+
+/* The same editor for Online play's port offset (#1139): digits only, five at most. */
+static void player_ui_port_open(PlayerUiNk *player) {
+    player_ui_nickname_open(player, false, false);
+    player->nickname_is_port = true;
+    player->nickname_focus = PLAYER_UI_ID_NICKNAME_KEY_BASE; /* "1", the first digit key */
+    ui_keyboard_init(&player->nickname_keyboard, player->nickname_text, 5u,
+                     player_ui_port_accepts, NULL);
 }
 
 /* What Done saves: the typed text without the spaces (U+0020) before and after
@@ -2769,6 +2799,7 @@ static const char *player_ui_nickname_trimmed(const char *text, char *out, size_
 static void player_ui_nickname_close(PlayerUiNk *player) {
     player->nickname_open = false;
     player->nickname_is_server = false;
+    player->nickname_is_port = false;
     player->nickname_refused = false;
     player->nickname_text[0] = '\0';
 }
@@ -3932,9 +3963,11 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         }
         model.first_launch = player->nickname_first_launch;
         model.server_mode = player->nickname_is_server;
+        model.port_mode = player->nickname_is_port;
         model.keyboard = &player->nickname_keyboard;
-        model.current = player->nickname_is_server ? app->settings.online_play_server
-                                                   : app->settings.nickname;
+        model.current = player->nickname_is_port ? player->settings_online_play_port
+                        : player->nickname_is_server ? app->settings.online_play_server
+                                                     : app->settings.nickname;
         model.refused = player->nickname_refused;
         model.logical_width = scale.logical_w;
         model.logical_height = scale.logical_h;
@@ -3950,11 +3983,17 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             bool save = (unsigned)action.primary == PLAYER_UI_NICKNAME_SAVE;
             const char *chosen = player_ui_nickname_trimmed(player->nickname_text, trimmed,
                                                             sizeof(trimmed));
-            bool done = player->nickname_is_server
-                ? !save || player_app_set_online_play_server(app, chosen)
+            /* Your own server opens the consent card for it, as any server picked does. */
+            bool done = player->nickname_is_port
+                ? !save || player_app_set_online_play_port_offset(app, chosen)
+                : player->nickname_is_server
+                ? !save || player_app_open_online_play_card(app, chosen)
                 : player->nickname_first_launch
                     ? player_app_nickname_prompt_answer(app, save ? chosen : NULL)
                     : !save || player_app_set_nickname(app, chosen);
+            if (done && save && player->nickname_is_server) {
+                player->nickname_return_focus = PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW;
+            }
             if (done) {
                 player_ui_nickname_close(player);
             } else {
@@ -3973,6 +4012,11 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                    (unsigned)action.primary == PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER) {
             player->nickname_return_focus = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER;
             player_ui_nickname_open(player, false, true);
+            action.kind = PLAYER_UI_ACTION_NONE;
+        } else if (action.kind == PLAYER_UI_ACTION_SETTINGS &&
+                   (unsigned)action.primary == PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT) {
+            player->nickname_return_focus = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT;
+            player_ui_port_open(player);
             action.kind = PLAYER_UI_ACTION_NONE;
         }
         if ((player_ui_settings_view(app->active_view) ||

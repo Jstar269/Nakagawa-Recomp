@@ -352,7 +352,8 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_DISC_CHECKING, FLOW_DISC_SUPPORTED,
                FLOW_DISC_UNTESTED, FLOW_DISC_FONTS, FLOW_DISC_BLOCKED, FLOW_DISC_UNSUPPORTED,
                FLOW_DISC_GUIDED, FLOW_SETTINGS, FLOW_SETTINGS_ONLINE, FLOW_SETTINGS_ONLINE_ON,
-               FLOW_SETTINGS_ONLINE_PLAY,
+               FLOW_SETTINGS_ONLINE_PLAY, FLOW_SETTINGS_ONLINE_PLAY_CARD,
+               FLOW_SETTINGS_ONLINE_PLAY_SERVERS,
                FLOW_SETTINGS_ONLINE_DISCORD_ON, FLOW_SETTINGS_ONLINE_NO_DISCORD,
                FLOW_SETTINGS_NOTICES,
                FLOW_SETTINGS_REMOVE, FLOW_SETTINGS_BUILD_CACHE, FLOW_SETTINGS_FONTS,
@@ -513,6 +514,8 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                     which == FLOW_SETTINGS_ONLINE_NO_DISCORD
         ? PLAYER_UI_SETTINGS_PAGE_ONLINE
         : which == FLOW_SETTINGS_ONLINE_PLAY ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY
+        : which == FLOW_SETTINGS_ONLINE_PLAY_CARD ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD
+        : which == FLOW_SETTINGS_ONLINE_PLAY_SERVERS ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS
         : which == FLOW_SETTINGS_NOTICES ? PLAYER_UI_SETTINGS_PAGE_NOTICES
         : which == FLOW_SETTINGS_REMOVE ? PLAYER_UI_SETTINGS_PAGE_REMOVE_TOOLS
         : which == FLOW_SETTINGS_BUILD_CACHE ? PLAYER_UI_SETTINGS_PAGE_BUILD_CACHE
@@ -642,12 +645,26 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.cheats = false;
     settings.cover_art_cache_size = "1.4 MB";
     settings.developer_mode = true;
-    settings.online_play = false;
+    settings.online_play = which == FLOW_SETTINGS_ONLINE_PLAY_SERVERS;
     settings.online_play_row_value = "Off";
-    settings.online_play_preset_label = "socom.cc (PPSSPP default)";
     settings.online_play_server = "socom.cc";
-    settings.online_play_status =
-        "Status: Off - PSP ad hoc services stay closed (0x80010086). Target: socom.cc.";
+    settings.online_play_server_label = "Socom Adhoc Server (France)";
+    settings.online_play_status = "Online play is off. Nothing connects.";
+    settings.online_play_console_id = "a4:c1:b2:c3:d4:e5";
+    settings.online_play_console_id_shown = true;
+    settings.online_play_port_offset = "10000";
+    settings.online_play_card_server = "relay-usa.arenaanywhere.site";
+    {
+        /* The picker: two shipped servers and one from a (synthetic) list. */
+        static const PlayerUiOnlineServer servers[] = {
+            {"Socom Adhoc Server (France)", "socom.cc", "Ships with Nakagawa."},
+            {"ArenaAnywhere (US)", "relay-usa.arenaanywhere.site", "Ships with Nakagawa."},
+            {"Example relay", "relay.example.invalid", "Testland"}
+        };
+        settings.online_play_servers = servers;
+        settings.online_play_server_count = sizeof(servers) / sizeof(servers[0]);
+        settings.online_play_list_status = "Shown: PPSSPP's list, downloaded now.";
+    }
     settings.share_system_libraries = true;
     settings.build_speed = "Background";
     settings.build_speed_sentence = "Up to two parts at a time at low priority, so a game you play "
@@ -3873,13 +3890,29 @@ static void test_settings_pages(void) {
         {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
          PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY, "Online play opens its page"},
         {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE,
-         PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY, "Online play switch toggles it"},
+         PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY, "the Online play switch asks for its card"},
         {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET,
-         PLAYER_UI_SETTINGS_CYCLE_ONLINE_PLAY_PRESET, "Server preset returns to the shipped server"},
-        {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
-         PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER, "Server address opens the custom editor"},
+         PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY_SERVERS, "Server opens the picker"},
+        {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT,
+         PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT, "Port offset opens its editor"},
+        {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_CONSOLE_ID,
+         PLAYER_UI_SETTINGS_NEW_CONSOLE_ID, "New console ID asks for a new one"},
         {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
          "Back returns to Online and developer"},
+        {FLOW_SETTINGS_ONLINE_PLAY_CARD, PLAYER_UI_ID_ONLINE_PLAY_TURN_ON,
+         PLAYER_UI_SETTINGS_ONLINE_PLAY_TURN_ON, "the card's TURN ON turns it on"},
+        {FLOW_SETTINGS_ONLINE_PLAY_CARD, PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW,
+         PLAYER_UI_SETTINGS_ONLINE_PLAY_NOT_NOW, "the card's NOT NOW changes nothing"},
+        {FLOW_SETTINGS_ONLINE_PLAY_CARD, PLAYER_UI_ID_ONLINE_PLAY_CHANGE_SERVER,
+         PLAYER_UI_SETTINGS_ONLINE_PLAY_CHANGE_SERVER, "the card's CHANGE SERVER opens the picker"},
+        {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 2u,
+         PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER, "a picker row picks its server"},
+        {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
+         PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER, "Your own server opens the editor"},
+        {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_ONLINE_PLAY_REFRESH,
+         PLAYER_UI_SETTINGS_REFRESH_ONLINE_PLAY_SERVERS, "Refresh list downloads it again"},
+        {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
+         "Back leaves the picker"},
         {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_COVER_ART, PLAYER_UI_SETTINGS_TOGGLE_COVER_ART,
          "the Download cover art switch toggles it"},
         {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_CHEATS, PLAYER_UI_SETTINGS_TOGGLE_CHEATS,
@@ -4361,9 +4394,34 @@ static void test_settings_pages(void) {
                   PLAYER_UI_ACTION_NONE,
           "Online and developer shows one plain line instead of an inert online switch");
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY, 960, 540, dump, sizeof(dump)) &&
-              strstr(dump, "plain TCP") != NULL && strstr(dump, "socom.cc") != NULL &&
-              player_ui_server_accepts(':', NULL) && !player_ui_server_accepts(' ', NULL),
-          "Online play page discloses plain TCP, shows server preset/address, and filters server chars");
+              strstr(dump, "not encrypted") != NULL && strstr(dump, "SOCOM.CC") != NULL &&
+              strstr(dump, "a4:c1:b2:c3:d4:e5") != NULL &&
+              strstr(dump, "your PC's hardware address") != NULL &&
+              strstr(dump, "\"PORT OFFSET: 10000\"") != NULL &&
+              strstr(dump, "\"NEW CONSOLE ID\"") != NULL &&
+              player_ui_server_accepts(':', NULL) && !player_ui_server_accepts(' ', NULL) &&
+              player_ui_port_accepts('7', NULL) && !player_ui_port_accepts('-', NULL),
+          "the Online play page says it is not encrypted, shows the server, the random console "
+          "ID, the port offset's rule and New console ID");
+    /* #1139: the consent card names the exact server, every line of the owner's wording, and
+       TURN ON, NOT NOW and CHANGE SERVER. */
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_CARD, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "Nakagawa connects to relay-usa.arenaanywhere.site.") != NULL &&
+              strstr(dump, "the ID of the game you start, for example ULUS12345") != NULL &&
+              strstr(dump, "- Your Nickname: ") != NULL &&
+              strstr(dump, "The people who run the server can see your IP address.") != NULL &&
+              strstr(dump, "The connection is not encrypted.") != NULL,
+          "the Online play card names the server and says what is sent and who can see it");
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_CARD, 1280, 800, dump, sizeof(dump)) &&
+              strstr(dump, "\"TURN ON\"") != NULL && strstr(dump, "\"NOT NOW\"") != NULL &&
+              strstr(dump, "\"CHANGE SERVER\"") != NULL,
+          "the Online play card offers TURN ON, NOT NOW and CHANGE SERVER");
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "RELAY.EXAMPLE.INVALID") != NULL &&
+              strstr(dump, "PPSSPP-derived, not PSP-measured") != NULL &&
+              strstr(dump, "\"REFRESH LIST\"") != NULL,
+          "the picker lists the servers, says the relay-only reading is PPSSPP-derived, and "
+          "offers Refresh with Online play on");
     /* Discord status (#2259): off, with what it does, in a build that can show it; no row in
        a build that cannot; and a stored On there keeps its row so it can be turned off. */
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE, 960, 540, dump, sizeof(dump)) &&
@@ -6910,6 +6968,8 @@ static void test_game_page_text_is_never_cut(void) {
         {FLOW_SETTINGS_BUILD_CACHE, NULL, 0u, "Settings > Build tools", 125},
         {FLOW_SETTINGS_ONLINE, NULL, 0u, "Settings > Online", 125},
         {FLOW_SETTINGS_ONLINE_PLAY, NULL, 0u, "Settings > Online play", 125},
+        {FLOW_SETTINGS_ONLINE_PLAY_CARD, NULL, 0u, "the Online play card", 125},
+        {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, NULL, 0u, "the Online play server picker", 125},
         {FLOW_SETTINGS_ONLINE_ON, NULL, 0u, "Settings > Online with Online mode on", 125},
         {FLOW_SETTINGS_ONLINE_DISCORD_ON, NULL, 0u, "Settings > Online with Discord status on",
          125},
@@ -7909,6 +7969,10 @@ static int capture_screens(const char *directory) {
             {FLOW_SETTINGS_ONLINE, "settings-online", PLAYER_UI_ID_SETTINGS_DEVELOPER},
             {FLOW_SETTINGS_ONLINE_PLAY, "settings-online-play",
              PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE},
+            {FLOW_SETTINGS_ONLINE_PLAY_CARD, "settings-online-play-card",
+             PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW},
+            {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, "settings-online-play-servers",
+             PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE},
             {FLOW_SETTINGS_NOTICES, "settings-notices", PLAYER_UI_ID_SETTINGS_BACK},
             {FLOW_SETTINGS_REMOVE, "settings-remove-tools", PLAYER_UI_ID_SETTINGS_BACK},
             {FLOW_SETTINGS_BUILD_CACHE, "settings-build-cache",

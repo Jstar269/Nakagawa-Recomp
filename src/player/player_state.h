@@ -21,6 +21,7 @@
 #include "update_check.h"
 #include "discord_presence.h"
 #include "cover_art.h"
+#include "adhoc_servers.h"
 #include "setup_staging.h"
 #include "nk_title_manifest.h"
 #include "generated/nk_title_catalog.h"
@@ -67,7 +68,9 @@ typedef enum {
     VIEW_CONFIRM_FACTORY_RESET, /* Settings > Factory reset: what moves aside */
     VIEW_ACCESSIBILITY_SETTINGS, /* Settings > Accessibility: size, contrast, motion */
     VIEW_ACE_SETTINGS,          /* Settings > Enhanced, the library's or one title's (#2055) */
-    VIEW_PROBLEM_REPORT         /* Settings > Problem report (#1849); the last value */
+    VIEW_PROBLEM_REPORT,        /* Settings > Problem report (#1849) */
+    VIEW_ONLINE_PLAY_CARD,      /* Settings > Online play: the consent card (#1139) */
+    VIEW_ONLINE_PLAY_SERVERS    /* Settings > Online play: the server picker; the last value */
 } PlayerView;
 
 typedef enum {
@@ -394,6 +397,12 @@ typedef struct {
        server (preset or host[:port]). */
     bool online_play;
     char online_play_server[NK_ADHOC_SERVER_MAX_LEN + 1u];
+    /* The server the player chose TURN ON for on the consent card. Online play is on only
+       while it names online_play_server: a server the card did not name never connects. */
+    char online_play_consent[NK_ADHOC_SERVER_MAX_LEN + 1u];
+    /* Added to the game's ports on the wire (0-65535, default NK_RELAY_PORT_OFFSET).
+       Players who want to play together need the same value. */
+    uint32_t online_play_port_offset;
     /* The play modes (#2055): "enhanced" and the sparse "title_play" in settings.json,
        additions to schema version 2 as text_size is. A file without them is read from the
        development builds' "ace", "ace_titles" and "enhancement_60hz_discs"
@@ -978,6 +987,21 @@ struct PlayerApp {
     GameRecord showcase_games[MAX_SHOWCASE_GAMES];
     int showcase_count;
     bool is_game_running;
+    /* Online play (#1139): the server the consent card names while it is open, and the
+       page's last notice (what changed and when it applies), empty when none. */
+    char online_play_card_server[NK_ADHOC_SERVER_MAX_LEN + 1u];
+    char online_play_notice[256];
+    /* The picker's list (main.c): PPSSPP's, downloaded this session only with Online play on,
+       else the copy shipped with the player; and where it came from. Kept in memory only. */
+    NkAdhocServerList online_play_list;
+    char online_play_list_status[192];
+    bool online_play_list_live;     /* the downloaded list, not the shipped copy */
+    bool online_play_list_busy;     /* a download is running */
+    /* The console ID the page shows (main.c reads it on opening the page), and the last
+       New console ID's result. */
+    char online_play_console_id[24];
+    bool online_play_console_id_ok;
+    char online_play_console_note[160];
     uint64_t launch_time_ms;
     uint64_t boot_event_read_offset;
     bool stalled_game_notice_visible;
@@ -2599,10 +2623,23 @@ void player_app_discord_tick(PlayerApp *app, uint64_t now_ms);
 /* Clear Discord status and close the connection, as the player exits. */
 void player_app_discord_shutdown(PlayerApp *app);
 void player_app_set_developer_mode(PlayerApp *app, bool on);
-/* Ad hoc online play (#1139): opt-in per-launch relay switch and validated server. */
+/* Online play (#1139). The consent card is the only way to turn it on: the switch in
+   Settings, or picking a different server, opens the card for that exact server.
+   player_app_set_online_play(app, true) opens the card for the chosen server; false turns
+   Online play off at once and, while a game runs, ends its connection (SR_ADHOC_OFF_FILE). */
 void player_app_set_online_play(PlayerApp *app, bool on);
-void player_app_cycle_online_play_preset(PlayerApp *app);
-bool player_app_set_online_play_server(PlayerApp *app, const char *server);
+/* Opens the consent card for `server` (host[:lobby[,data]]). A server the relay codec
+   refuses is refused here, with a notice, and no card opens. */
+bool player_app_open_online_play_card(PlayerApp *app, const char *server);
+/* The card's TURN ON: the card's server becomes the server, the consent and the switch.
+   With a game running it applies from the next game. False when no card is open. */
+bool player_app_online_play_turn_on(PlayerApp *app);
+/* The card's NOT NOW (and Back): nothing changes. */
+void player_app_online_play_not_now(PlayerApp *app);
+/* Port offset (advanced): decimal digits only, 0 to 65535. Applies from the next game. */
+bool player_app_set_online_play_port_offset(PlayerApp *app, const char *text);
+/* Whether the settings let a game launched now connect: on, with consent for the server. */
+bool player_app_online_play_consented(const PlayerSettings *settings);
 /* The wizard's options step: skipping keeps both switches off. */
 void player_app_wizard_skip_options(PlayerApp *app);
 

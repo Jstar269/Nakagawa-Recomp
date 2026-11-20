@@ -729,6 +729,10 @@ static void player_go_back(PlayerApp *app, SDL_Window *window, bool *running,
         player_app_set_view(app, VIEW_BUILD_CACHE);
     } else if (app->active_view == VIEW_ONLINE_PLAY_SETTINGS) {
         player_app_set_view(app, VIEW_ONLINE_SETTINGS);
+    } else if (app->active_view == VIEW_ONLINE_PLAY_CARD) {
+        player_app_online_play_not_now(app);
+    } else if (app->active_view == VIEW_ONLINE_PLAY_SERVERS) {
+        player_app_set_view(app, VIEW_ONLINE_PLAY_SETTINGS);
     } else if (app->active_view == VIEW_PREREQ_ABOUT ||
                app->active_view == VIEW_BUILD_CACHE ||
                app->active_view == VIEW_UPDATES ||
@@ -1445,6 +1449,225 @@ static void player_update_shutdown(void) {
     s_update_job = NULL;
 }
 
+/* Online play (#1139): the server picker's list and the console ID.
+
+   The list is PPSSPP's public list of ad hoc servers. It is downloaded (nk_adhoc_list_fetch,
+   HTTPS through the player's own transport) only while Online play is on, only when the picker
+   opens or Refresh is chosen, on a worker thread; the result is kept for this session only.
+   Otherwise, and when the download fails, the copy shipped with the player is shown and the
+   picker says why. Picking any server only opens the consent card for it. */
+typedef struct {
+    SDL_Thread *thread;
+    SDL_AtomicInt done;
+    PackageHttpOpen transport;   /* NULL: the native one */
+    NkAdhocServerList list;
+    NkAdhocListStatus status;
+    char log[2048];              /* the worker's log lines, added to the developer log after */
+} PlayerAdhocListJob;
+
+static PlayerAdhocListJob *s_adhoc_list_job;
+
+static void player_adhoc_list_app_log(void *context, const char *line) {
+    player_dev_log_add((PlayerApp *)context, "online play", "%s", line);
+}
+
+/* The worker cannot touch the developer log: its lines wait in the job. */
+static void player_adhoc_list_job_log(void *context, const char *line) {
+    PlayerAdhocListJob *job = (PlayerAdhocListJob *)context;
+    size_t used = strlen(job->log);
+    if (used + 2u < sizeof(job->log)) {
+        snprintf(job->log + used, sizeof(job->log) - used, "%s\n", line);
+    }
+}
+
+/* The shipped servers are listed first: the list's copy of one of them is left out. */
+static void player_adhoc_list_drop_presets(NkAdhocServerList *list) {
+    size_t kept = 0u;
+    for (size_t i = 0u; i < list->count; ++i) {
+        bool preset = false;
+        for (size_t p = 0u; p < nk_adhoc_server_preset_count() && !preset; ++p) {
+            const NkAdhocServerPreset *shipped = nk_adhoc_server_preset(p);
+            preset = shipped && shipped->host && strcmp(shipped->host, list->entries[i].host) == 0;
+        }
+        if (!preset) list->entries[kept++] = list->entries[i];
+    }
+    list->count = kept;
+}
+
+static void player_online_play_load_shipped(PlayerApp *app, const char *why) {
+    NkAdhocListStatus status = nk_adhoc_list_load_shipped(&app->online_play_list,
+                                                          player_adhoc_list_app_log, app);
+    player_adhoc_list_drop_presets(&app->online_play_list);
+    app->online_play_list_live = false;
+    snprintf(app->online_play_list_status, sizeof(app->online_play_list_status),
+             status == NK_ADHOC_LIST_OK
+                 ? "%s Shown: PPSSPP's list as shipped with Nakagawa."
+                 : "%s The list shipped with Nakagawa could not be read.",
+             why);
+}
+
+static int SDLCALL player_adhoc_list_thread_main(void *userdata) {
+    PlayerAdhocListJob *job = (PlayerAdhocListJob *)userdata;
+    job->status = nk_adhoc_list_fetch(job->transport, NULL, true, &job->list,
+                                      player_adhoc_list_job_log, job);
+    SDL_SetAtomicInt(&job->done, 1);
+    return 0;
+}
+
+/* The picker opened, or Refresh: the list is downloaded only with Online play on. */
+static void player_online_play_list_start(PlayerApp *app, bool refresh) {
+    PlayerAdhocListJob *job;
+    if (!player_app_online_play_consented(&app->settings)) {
+        player_online_play_load_shipped(app, "Turn Online play on to download PPSSPP's "
+                                             "current list.");
+        return;
+    }
+    if (s_adhoc_list_job != NULL || (app->online_play_list_live && !refresh)) return;
+    if (app->online_play_list.count == 0u) {
+        player_online_play_load_shipped(app, "");
+    }
+    job = (PlayerAdhocListJob *)calloc(1, sizeof(*job));
+    if (job) {
+        job->transport = player_ui_test_adhoc_list_transport();
+        job->thread = SDL_CreateThread(player_adhoc_list_thread_main, "nakagawa-adhoc-list", job);
+    }
+    if (!job || !job->thread) {
+        free(job);
+        player_online_play_load_shipped(app, "The list could not be downloaded: Nakagawa "
+                                             "could not start the download.");
+        return;
+    }
+    s_adhoc_list_job = job;
+    app->online_play_list_busy = true;
+    snprintf(app->online_play_list_status, sizeof(app->online_play_list_status),
+             "Downloading PPSSPP's list from %s.", NK_ADHOC_LIST_HOST);
+    player_dev_log_add(app, "online play", "downloading the server list from %s",
+                       NK_ADHOC_LIST_URL);
+}
+
+static void player_online_play_list_poll(PlayerApp *app) {
+    PlayerAdhocListJob *job = s_adhoc_list_job;
+    char *line;
+    if (!job || !SDL_GetAtomicInt(&job->done)) return;
+    SDL_WaitThread(job->thread, NULL);
+    s_adhoc_list_job = NULL;
+    app->online_play_list_busy = false;
+    line = job->log;
+    while (line && *line) {
+        char *end = strchr(line, '\n');
+        if (end) *end = '\0';
+        if (*line) player_dev_log_add(app, "online play", "%s", line);
+        line = end ? end + 1 : NULL;
+    }
+    if (!player_app_online_play_consented(&app->settings)) {
+        /* Turned off while it downloaded: what came is not used. */
+        player_online_play_load_shipped(app, "Turn Online play on to download PPSSPP's "
+                                             "current list.");
+    } else if (job->status == NK_ADHOC_LIST_OK) {
+        app->online_play_list = job->list;
+        player_adhoc_list_drop_presets(&app->online_play_list);
+        app->online_play_list_live = true;
+        snprintf(app->online_play_list_status, sizeof(app->online_play_list_status),
+                 "Shown: PPSSPP's list, downloaded now from %s.", NK_ADHOC_LIST_HOST);
+    } else {
+        char why[160];
+        snprintf(why, sizeof(why), "%s", nk_adhoc_list_status_text(job->status));
+        player_online_play_load_shipped(app, why);
+    }
+    free(job);
+}
+
+/* Closing the player never waits on the download. */
+static void player_online_play_list_shutdown(void) {
+    if (!s_adhoc_list_job) return;
+    if (SDL_GetAtomicInt(&s_adhoc_list_job->done)) {
+        SDL_WaitThread(s_adhoc_list_job->thread, NULL);
+        free(s_adhoc_list_job);
+    } else {
+        SDL_DetachThread(s_adhoc_list_job->thread);
+    }
+    s_adhoc_list_job = NULL;
+}
+
+/* The picker's row: the shipped servers, then the list's. */
+static const char *player_online_play_row_host(const PlayerApp *app, int row) {
+    size_t presets = nk_adhoc_server_preset_count();
+    if (row < 0) return NULL;
+    if ((size_t)row < presets) {
+        const NkAdhocServerPreset *preset = nk_adhoc_server_preset((size_t)row);
+        return preset ? preset->host : NULL;
+    }
+    if ((size_t)row - presets < app->online_play_list.count) {
+        return app->online_play_list.entries[(size_t)row - presets].host;
+    }
+    return NULL;
+}
+
+/* The console ID, as the runtime keeps it in the data folder's registry/system.json. */
+static NkConsoleIdStatus player_console_id_path(char *out, size_t out_size) {
+    char root[NK_MAX_PATH];
+    if (!nk_platform_get_app_data_dir(root, sizeof(root)) ||
+        !nk_adhoc_console_registry_path(root, out, out_size)) {
+        return NK_CONSOLE_ID_UNREADABLE;
+    }
+    return NK_CONSOLE_ID_OK;
+}
+
+static void player_online_play_read_console_id(PlayerApp *app) {
+    char path[NK_MAX_PATH];
+    char hex[NK_CONSOLE_ID_HEX_LEN + 1u];
+    NkConsoleIdStatus status = player_console_id_path(path, sizeof(path));
+    if (status == NK_CONSOLE_ID_OK) status = nk_adhoc_console_id_read(path, hex);
+    app->online_play_console_id_ok =
+        status == NK_CONSOLE_ID_OK &&
+        nk_adhoc_console_id_display(hex, app->online_play_console_id,
+                                    sizeof(app->online_play_console_id));
+    if (!app->online_play_console_id_ok) {
+        app->online_play_console_id[0] = '\0';
+        if (status != NK_CONSOLE_ID_NONE) {
+            snprintf(app->online_play_console_note, sizeof(app->online_play_console_note), "%s",
+                     nk_adhoc_console_id_status_text(status));
+        }
+    }
+}
+
+static void player_online_play_new_console_id(PlayerApp *app) {
+    char path[NK_MAX_PATH];
+    char hex[NK_CONSOLE_ID_HEX_LEN + 1u];
+    NkConsoleIdStatus status;
+    if (app->is_game_running) {
+        snprintf(app->online_play_console_note, sizeof(app->online_play_console_note), "%s",
+                 "Close the game first: a running game keeps the console ID it started with.");
+        player_dev_log_add(app, "online play", "New console ID refused: a game is running");
+        return;
+    }
+    status = player_console_id_path(path, sizeof(path));
+    if (status == NK_CONSOLE_ID_OK) status = nk_adhoc_console_id_renew(path, hex);
+    if (status == NK_CONSOLE_ID_OK) {
+        snprintf(app->online_play_console_note, sizeof(app->online_play_console_note), "%s",
+                 "New console ID made. Games use it from the next one you start.");
+    } else {
+        snprintf(app->online_play_console_note, sizeof(app->online_play_console_note), "%s",
+                 nk_adhoc_console_id_status_text(status));
+    }
+    player_dev_log_add(app, "online play", "New console ID: %s",
+                       nk_adhoc_console_id_status_text(status));
+    player_online_play_read_console_id(app);
+}
+
+static void player_online_play_open_page(PlayerApp *app) {
+    app->online_play_notice[0] = '\0';
+    app->online_play_console_note[0] = '\0';
+    player_online_play_read_console_id(app);
+    player_app_set_view(app, VIEW_ONLINE_PLAY_SETTINGS);
+}
+
+static void player_online_play_open_servers(PlayerApp *app) {
+    app->online_play_card_server[0] = '\0';
+    player_app_set_view(app, VIEW_ONLINE_PLAY_SERVERS);
+    player_online_play_list_start(app, false);
+}
+
 static void player_update_open_release_page(PlayerApp *app) {
     const char *url = app->update.check.newest.page_url;
     /* Only this repository's release pages, as the check verified. */
@@ -1851,17 +2074,32 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             else if (app->active_view == VIEW_PSP_FONTS) player_app_close_fonts_page(app);
             else if (app->active_view == VIEW_ONLINE_PLAY_SETTINGS) {
                 player_app_set_view(app, VIEW_ONLINE_SETTINGS);
+            } else if (app->active_view == VIEW_ONLINE_PLAY_CARD) {
+                player_app_online_play_not_now(app);
+            } else if (app->active_view == VIEW_ONLINE_PLAY_SERVERS) {
+                player_app_set_view(app, VIEW_ONLINE_PLAY_SETTINGS);
             } else player_app_set_view(app, VIEW_SETTINGS);
             break;
-        case PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY:
-            player_app_set_view(app, VIEW_ONLINE_PLAY_SETTINGS);
-            break;
+        case PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY: player_online_play_open_page(app); break;
         case PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY:
+            /* Off: the card for the server in use. On: off at once. */
             player_app_set_online_play(app, !app->settings.online_play);
             break;
-        case PLAYER_UI_SETTINGS_CYCLE_ONLINE_PLAY_PRESET:
-            player_app_cycle_online_play_preset(app);
+        case PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY_SERVERS:
+        case PLAYER_UI_SETTINGS_ONLINE_PLAY_CHANGE_SERVER:
+            player_online_play_open_servers(app);
             break;
+        case PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER: {
+            const char *host = player_online_play_row_host(app, choice_index);
+            if (host) (void)player_app_open_online_play_card(app, host);
+            break;
+        }
+        case PLAYER_UI_SETTINGS_REFRESH_ONLINE_PLAY_SERVERS:
+            player_online_play_list_start(app, true);
+            break;
+        case PLAYER_UI_SETTINGS_ONLINE_PLAY_TURN_ON: (void)player_app_online_play_turn_on(app); break;
+        case PLAYER_UI_SETTINGS_ONLINE_PLAY_NOT_NOW: player_app_online_play_not_now(app); break;
+        case PLAYER_UI_SETTINGS_NEW_CONSOLE_ID: player_online_play_new_console_id(app); break;
         case PLAYER_UI_SETTINGS_TOGGLE_ONLINE:
             player_app_set_online_mode(app, !app->settings.online_mode);
             break;
@@ -5097,7 +5335,13 @@ static void player_apply_test_view(PlayerApp *app, const char *test_view) {
         } else if (strcmp(test_view, "online-settings") == 0) {
             player_app_set_view(app, VIEW_ONLINE_SETTINGS);
         } else if (strcmp(test_view, "online-play-settings") == 0) {
-            player_app_set_view(app, VIEW_ONLINE_PLAY_SETTINGS);
+            player_online_play_open_page(app);
+        } else if (strcmp(test_view, "online-play-card") == 0) {
+            player_online_play_open_page(app);
+            (void)player_app_open_online_play_card(app, app->settings.online_play_server);
+        } else if (strcmp(test_view, "online-play-servers") == 0) {
+            player_online_play_open_page(app);
+            player_online_play_open_servers(app);
         } else if (strcmp(test_view, "accessibility-settings") == 0) {
             player_app_set_view(app, VIEW_ACCESSIBILITY_SETTINGS);
         } else if (strcmp(test_view, "ace-settings") == 0) {
@@ -5572,6 +5816,7 @@ static void player_loop_start(PlayerRun *run) {
 static void player_frame_begin(PlayerRun *run) {
     PlayerApp *app = &run->app;
     player_update_poll(app);
+    player_online_play_list_poll(app);
     player_report_poll(app);
     player_ui_test_report_update_phase(&run->ui_test, app);
     /* A worker that could not queue its own completion has no other way
@@ -6160,6 +6405,7 @@ static int player_shutdown(PlayerRun *run) {
     }
 
     player_update_shutdown();
+    player_online_play_list_shutdown();
     player_report_shutdown();
     player_app_discord_shutdown(app);
     destroy_staging_job(&run->staging_job);

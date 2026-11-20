@@ -153,14 +153,18 @@ The plan below is the later in-player report, once online mode ships.
 ## Online play
 
 Status: opt-in v0.1.0 implementation ([#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)),
-off by default (`online_play: false` in `settings.json`, `SR_ADHOC_ENABLED=0` in runtime). When off,
+off by default (`online_play: false` in `settings.json`, `SR_ADHOC_ENABLED=0` in runtime). It is on only while
+`online_play_consent` names the server in `online_play_server`, which only the card's **TURN ON** writes; a file
+that says on without it is read as off. When off,
 zero host sockets open; lone-console `sceNetAdhocctl` follows PSP measurements and strictly online
 ad hoc imports stay named refusals (`0x80010086`).
 
 A separate switch, **Online play** (**Settings > Online and developer > Online play**), lets games use
-the PSP's ad hoc multiplayer over the internet. It is not part of legacy online mode: **Ad hoc
-online play** lets opted-in games reach peers through a community relay server, carries a plain-TCP
-privacy notice, and is off by default.
+the PSP's ad hoc multiplayer over the internet. It is not part of legacy online mode: it lets games reach other
+players through a community relay server, says on its consent card that the connection is plain TCP, and is off by
+default. The page also shows the random console ID with **New console ID** (refused while a game runs, since the
+game keeps the ID it started with), and the advanced **Port offset** (`online_play_port_offset`, 0 to 65535,
+default 10000).
 
 - **Ad hoc multiplayer through a relay.** Most PSP multiplayer is local wireless ad hoc play. Nakagawa carries it
   through an ad hoc relay server, the way PPSSPP does. Nakagawa speaks the protocol of

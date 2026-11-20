@@ -173,15 +173,24 @@ typedef struct {
 #define SCR_ONLINE_PLAY_ROW_SENTENCE \
     "Connect PSP ad hoc multiplayer games through a community relay server over plain TCP. Off by default."
 #define SCR_ONLINE_PLAY_LEAD \
-    "Lets PSP ad hoc multiplayer games join players on a community relay server over plain TCP " \
-    "(no encryption and no account sign-in; anyone on the network path can read it). Sends only " \
-    "the disc ID, your nickname, the console profile's random MAC address, group name, and game packets."
-#define SCR_ONLINE_PLAY_TOGGLE_SENTENCE \
-    "Off by default. PSP ad hoc services stay closed until you turn this on."
-#define SCR_ONLINE_PLAY_PRESET_SENTENCE \
-    "Returns to the shipped community server. To use another, enter its host below."
-#define SCR_ONLINE_PLAY_SERVER_SENTENCE \
-    "Server address to join (host, host:lobby_port, or host:lobby_port,data_port)."
+    "Lets games that play over local wireless find other players over the internet, through a " \
+    "community server. Nakagawa does not run these servers. The connection is not encrypted."
+#define SCR_ONLINE_PLAY_OFF_SENTENCE \
+    "Off: nothing connects. Choose it to see what is sent and to whom, then TURN ON."
+#define SCR_ONLINE_PLAY_ON_SENTENCE \
+    "On from the next game you start. Choose it to turn it off: that ends the connection."
+#define SCR_ONLINE_PLAY_PORT_SENTENCE \
+    "Advanced. Added to the game's ports on the server (default 10000). Players who play " \
+    "together need the same value."
+#define SCR_ONLINE_PLAY_SERVERS_LEAD \
+    "Each server is run by its own community, not by Nakagawa. Choosing one opens the Online " \
+    "play card for it: nothing connects until you choose TURN ON there."
+#define SCR_ONLINE_PLAY_OWN_SENTENCE \
+    "A server you run or trust: host, host:lobby_port or host:lobby_port,data_port. It is kept " \
+    "only on this PC."
+#define SCR_ONLINE_PLAY_RELAY_ONLY_CAPTION \
+    "Listed: the servers that relay game data the way this version does (PPSSPP's data_mode " \
+    "AemuPostoffice; PPSSPP-derived, not PSP-measured)."
 
 /* Frame and box helpers (scr_flow.c). */
 float scr_flow_begin(NkUi *ui, float width, float height, float card_width);

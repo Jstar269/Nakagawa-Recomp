@@ -3041,6 +3041,7 @@ class NativePlayerUiTests(unittest.TestCase):
         "online": str(0x450D), "notices": str(0x450E), "remove_tools": str(0x450F),
         "online_play": str(0x455C), "online_play_toggle": str(0x455D),
         "online_play_preset": str(0x455E), "online_play_server": str(0x455F),
+        "online_play_port": str(0x4567),
         "cover_art": str(0x4563), "refresh_cover_art": str(0x4564),
         "build_cache": str(0x451A), "share_libraries": str(0x451B),
         "build_speed": str(0x4555),
@@ -3139,9 +3140,12 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(saved.get("nickname"), "x" * 32, "the editor keeps the first 32 bytes")
 
     def test_next_ui_online_play_settings(self) -> None:
-        """#1139: Settings > Online and developer > Online play stays off by default, opens
-        its subpage, toggles online play, steps presets, edits custom host[:port] via
-        ui_keyboard, refuses invalid port specs, and keeps network_mode offline."""
+        """#1139: Settings > Online and developer > Online play stays off by default and opens
+        its page. The consent card is the only way to turn it on: the switch opens the card,
+        NOT NOW changes nothing, TURN ON turns it on for the server the card names, and a server
+        picked from the picker opens the card for that server. The port offset's editor saves a
+        value from 0 to 65535 and refuses one above. network_mode stays offline. Failing-before:
+        the switch turned Online play on by itself and a preset button changed the server."""
         focus = self.SETTINGS_FOCUS
         nav = self.next_ui_run(
             "online-settings",
@@ -3162,30 +3166,72 @@ class NativePlayerUiTests(unittest.TestCase):
         run = self.next_ui_run(
             "online-play-settings",
             ("WAIT_MS=100",
-             "KEY_RETURN", "WAIT_MS=50",
-             "KEY_DOWN", "KEY_RETURN", "WAIT_MS=50",
-             "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100",
-             "TEXT=127.0.0.1:27312,27313", "KEY_RETURN", "WAIT_MS=100",
+             "KEY_RETURN", "WAIT_MS=100",                 # the switch: the card for socom.cc
+             "KEY_RETURN", "WAIT_MS=100",                 # NOT NOW: nothing changes
+             "KEY_RETURN", "WAIT_MS=100",                 # the switch again
+             "KEY_LEFT", "KEY_RETURN", "WAIT_MS=100",     # TURN ON
+             "KEY_DOWN", "KEY_RETURN", "WAIT_MS=300",     # Server: the picker
+             "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100",     # its second row: that server's card
+             "KEY_LEFT", "KEY_RETURN", "WAIT_MS=100",     # TURN ON for it
+             "KEY_DOWN", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100",   # Port offset's editor
+             "TEXT=99999", "KEY_RETURN", "WAIT_MS=100",   # five digits, above 65535: refused
+             "KEY_ESCAPE", "WAIT_MS=100",
              "KEY_RETURN", "WAIT_MS=100",
-             "TEXT=bad.host:99999", "KEY_RETURN", "WAIT_MS=100",
-             "KEY_ESCAPE", "WAIT_MS=100"),
+             "TEXT=12345", "KEY_RETURN", "WAIT_MS=100"),
             settings={"nickname": "Player", "nickname_asked": True},
         )
         run_frames = run["frames"]
         assert isinstance(run_frames, list)
+        views = [view for view, _ in self.screens(run)]
+        self.assertEqual(
+            views,
+            ["online_play_settings", "online_play_card", "online_play_settings",
+             "online_play_card", "online_play_settings", "online_play_servers",
+             "online_play_card", "online_play_settings"],
+            run["stdout"])
+        # NOT NOW left it off; only TURN ON turned it on.
+        not_now = next(i for i, f in enumerate(run_frames)
+                       if f["view"] == "online_play_card")
+        after_not_now = next(f for f in run_frames[not_now:]
+                             if f["view"] == "online_play_settings")
+        self.assertEqual(after_not_now["online_play"], "0", "NOT NOW keeps Online play off")
         self.assertEqual(run_frames[-1]["view"], "online_play_settings")
         self.assertEqual(run_frames[-1]["online_play"], "1")
-        self.assertEqual(run_frames[-1]["online_play_server"], "127.0.0.1:27312,27313")
+        self.assertEqual(run_frames[-1]["online_play_server"], "relay.arenaanywhere.site")
         settings = run["settings"]
         assert isinstance(settings, dict)
         self.assertIs(settings.get("online_play"), True)
-        self.assertEqual(settings.get("online_play_server"), "127.0.0.1:27312,27313")
+        self.assertEqual(settings.get("online_play_server"), "relay.arenaanywhere.site")
+        self.assertEqual(settings.get("online_play_consent"), "relay.arenaanywhere.site")
+        self.assertEqual(settings.get("online_play_port_offset"), 12345)
         self.assertEqual(settings.get("network_mode"), "offline")
         trail = self.focus_trail(run)
-        self.assertEqual(trail[-1], focus["online_play_server"],
-                         "closing the custom server editor returns focus to Server address")
+        self.assertEqual(trail[-1], focus["online_play_port"],
+                         "closing the port offset editor returns focus to its row")
+        # With Online play on, opening the picker asks for PPSSPP's list: here the UI-test
+        # transport, which answers nothing without NK_UI_TEST_ADHOC_LIST. Nothing goes online.
+        self.assertIn("adhoc_list_request=https://metadata.ppsspp.org/adhoc-servers.json",
+                      str(run["stdout"]))
 
-        # Verify focus moves cleanly from Developer -> Nickname -> Online play -> Download cover art -> Back.
+        # With Online play off the picker shows the shipped list and asks for nothing.
+        off = self.next_ui_run(
+            "online-play-servers", ("WAIT_MS=300",),
+            settings={"nickname": "Player", "nickname_asked": True})
+        off_frames = off["frames"]
+        assert isinstance(off_frames, list)
+        self.assertEqual(off_frames[-1]["view"], "online_play_servers")
+        self.assertEqual(off_frames[-1]["online_play"], "0")
+        self.assertNotIn("adhoc_list_request", str(off["stdout"]))
+        # A settings file that says on without the card's answer starts off.
+        stale = self.next_ui_run(
+            "online-play-settings", ("WAIT_MS=100",),
+            settings={"nickname": "Player", "nickname_asked": True, "online_play": True,
+                      "online_play_server": "socom.cc"})
+        stale_frames = stale["frames"]
+        assert isinstance(stale_frames, list)
+        self.assertEqual(stale_frames[0]["online_play"], "0")
+
+        # Focus moves Developer -> Nickname -> Online play -> Download cover art -> Cheats.
         order = self.next_ui_run(
             "online-settings",
             ("WAIT_MS=100", "KEY_DOWN", "WAIT_MS=50", "KEY_DOWN", "WAIT_MS=50",
@@ -3195,7 +3241,7 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(
             self.focus_trail(order),
             [focus["developer"], self.SETTINGS_NICKNAME, focus["online_play"],
-             focus["cover_art"], focus["back"]],
+             focus["cover_art"], str(0x4565)],
         )
 
     # The nickname editor's on-screen keyboard (#2197): its first letter, q, is where it opens.

@@ -2037,50 +2037,68 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             }
         }
         break;
-    case PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY:
+    case PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY: {
+        /* Online play (#1139): the switch, the server, the console ID and the port offset. The
+           switch never turns it on by itself: Off opens the consent card for the server shown. */
+        char console_line[160];
+        const char *switch_sentence = model->online_play ? SCR_ONLINE_PLAY_ON_SENTENCE
+                                                         : SCR_ONLINE_PLAY_OFF_SENTENCE;
+        char server_sentence[192];
+        if (model->online_play_console_id_shown) {
+            snprintf(console_line, sizeof(console_line),
+                     "Console ID: %s. Nakagawa made it at random for this PC's games. It is not "
+                     "your PC's hardware address.",
+                     safe_text(model->online_play_console_id, ""));
+        } else {
+            snprintf(console_line, sizeof(console_line), "%s",
+                     "Console ID: none yet. Nakagawa makes a random one the first time a game "
+                     "asks for it. It is not your PC's hardware address.");
+        }
+        snprintf(server_sentence, sizeof(server_sentence),
+                 "%s. A community server: Nakagawa does not run it. Choose to pick another.",
+                 safe_text(model->online_play_server_label, "Your own server"));
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "Online play", NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_PLAY_LEAD, NK_UI_TYPE_BODY_S, theme->muted);
         if (scr_wizard_box_begin(ui, 0u)) {
             WizardRow rows[3] = {
-                {"Ad hoc online play", model->online_play ? "On" : "Off",
-                 SCR_ONLINE_PLAY_TOGGLE_SENTENCE},
-                {"Server preset", safe_text(model->online_play_preset_label, "Custom"),
-                 SCR_ONLINE_PLAY_PRESET_SENTENCE},
-                {"Server address", safe_text(model->online_play_server, "socom.cc"),
-                 SCR_ONLINE_PLAY_SERVER_SENTENCE}
+                {"Online play", model->online_play ? "On" : "Off", switch_sentence},
+                {"Server", safe_text(model->online_play_server, NK_ADHOC_DEFAULT_SERVER),
+                 server_sentence},
+                {"Port offset", safe_text(model->online_play_port_offset, "10000"),
+                 SCR_ONLINE_PLAY_PORT_SENTENCE}
             };
             WizardColumn column = scr_wizard_column(ui, rows, 3u, inner - 32.0f, false);
             NkUiTextStyle value_style = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
             if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE,
-                                  SET_ID_TEXT + 0x600u, "Ad hoc online play",
-                                  SCR_ONLINE_PLAY_TOGGLE_SENTENCE, model->online_play,
-                                  inner - 32.0f, &column)) {
+                                  SET_ID_TEXT + 0x600u, "Online play", switch_sentence,
+                                  model->online_play, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY);
             }
             if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET,
-                                 SET_ID_TEXT + 0x604u, "Server preset",
-                                 nk_ui_text_clamp(ui,
-                                                  safe_text(model->online_play_preset_label,
-                                                            "Custom"),
-                                                  &value_style, column.cell * 0.8f, 1),
-                                 SCR_ONLINE_PLAY_PRESET_SENTENCE, false,
-                                 inner - 32.0f, &column)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_ONLINE_PLAY_PRESET);
-            }
-            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
-                                 SET_ID_TEXT + 0x608u, "Server address",
+                                 SET_ID_TEXT + 0x604u, "Server",
                                  nk_ui_text_clamp(ui,
                                                   safe_text(model->online_play_server,
-                                                            "socom.cc"),
+                                                            NK_ADHOC_DEFAULT_SERVER),
                                                   &value_style, column.cell * 0.8f, 1),
-                                 SCR_ONLINE_PLAY_SERVER_SENTENCE, model->online_play,
-                                 inner - 32.0f, &column)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER);
+                                 server_sentence, false, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY_SERVERS);
+            }
+            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT,
+                                 SET_ID_TEXT + 0x610u, "Port offset",
+                                 safe_text(model->online_play_port_offset, "10000"),
+                                 SCR_ONLINE_PLAY_PORT_SENTENCE, false, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT);
+            }
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x614u, console_line, NK_UI_TYPE_BODY_S,
+                            theme->muted);
+            if (model->online_play_console_note && model->online_play_console_note[0]) {
+                nk_ui_text_role(ui, SET_ID_TEXT + 0x615u, model->online_play_console_note,
+                                NK_UI_TYPE_BODY_S, theme->paper);
             }
             nk_ui_text_role(ui, SET_ID_TEXT + 0x60Cu,
                             safe_text(model->online_play_status,
-                                      "Status: Off (PSP ad hoc services stay closed)."),
+                                      "Online play is off. Nothing connects."),
                             NK_UI_TYPE_BODY_S,
                             model->online_play ? theme->ready : theme->muted);
             nk_ui_end_container(ui);
@@ -2093,10 +2111,166 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back", NK_UI_BUTTON_PRIMARY)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_BACK);
                 }
+                /* A game keeps the console ID it started with, so the button waits for it to
+                   close; with none yet there is nothing to replace. */
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_CONSOLE_ID, "New console ID",
+                                 model->online_play_console_id_shown &&
+                                         !model->online_play_console_id_locked
+                                     ? 0u : NK_UI_BUTTON_DISABLED)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_NEW_CONSOLE_ID);
+                }
                 nk_ui_end_container(ui);
             }
         }
         break;
+    }
+    case PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD: {
+        /* The consent card (owner's wording of 2026-11-19 and 2026-11-20): it names the exact
+           server each time, and it is the only way Online play turns on. */
+        char server_line[NK_ADHOC_SERVER_MAX_LEN + 96u];
+        char nickname_line[96];
+        const char *server = safe_text(model->online_play_card_server, NK_ADHOC_DEFAULT_SERVER);
+        snprintf(server_line, sizeof(server_line),
+                 "To do this, Nakagawa connects to %s. This is a community server. Nakagawa does "
+                 "not run it.", server);
+        snprintf(nickname_line, sizeof(nickname_line), "- Your Nickname: %s",
+                 safe_text(model->nickname, NK_NICKNAME_DEFAULT));
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, server, theme->info);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, "Online play", NK_UI_TYPE_TITLE, theme->paper);
+        nk_ui_text_role(ui, FLOW_ID_LEAD,
+                        "Online play lets this game find other players over the internet, the "
+                        "same way it finds players nearby over local wireless.",
+                        NK_UI_TYPE_BODY_S, theme->paper);
+        if (scr_wizard_box_begin(ui, 0u)) {
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x780u, server_line, NK_UI_TYPE_BODY_S,
+                            theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x781u, "What Nakagawa sends to that server",
+                            NK_UI_TYPE_BODY, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x782u, nickname_line, NK_UI_TYPE_BODY_S,
+                            theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x783u,
+                            "- This game's ID: the ID of the game you start, for example ULUS12345",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x784u,
+                            "- A random console ID that Nakagawa made for you. It is not your "
+                            "PC's hardware address.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x785u, "- The game's own multiplayer messages.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x786u, "Who can see what", NK_UI_TYPE_BODY,
+                            theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x787u,
+                            "- The people who run the server can see your IP address.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x788u,
+                            "- Other players in your game may also see your IP address. This "
+                            "depends on the server.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x789u,
+                            "- Your Nickname, the game and your room name may appear on the "
+                            "server's public status page.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x78Au,
+                            "- The connection is not encrypted. Others on the network path could "
+                            "read it.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x78Bu,
+                            "Nakagawa never sends your saves, your game files, your PC's user "
+                            "name or anything else from your PC.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x78Cu,
+                            "Online play is off until you choose TURN ON. You can turn it off "
+                            "again at any time in Settings > Online and developer > Online play. "
+                            "Turning it off ends the connection.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_end_container(ui);
+        }
+        {
+            NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                         NK_UI_SPACE_3);
+            row.padding_top = NK_UI_SPACE_1;
+            if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_ONLINE_PLAY_TURN_ON, "Turn on",
+                                 NK_UI_BUTTON_PRIMARY)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_ONLINE_PLAY_TURN_ON);
+                }
+                if (nk_ui_button(ui, PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW, "Not now", 0u)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_ONLINE_PLAY_NOT_NOW);
+                }
+                if (nk_ui_button(ui, PLAYER_UI_ID_ONLINE_PLAY_CHANGE_SERVER, "Change server",
+                                 0u)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_ONLINE_PLAY_CHANGE_SERVER);
+                }
+                nk_ui_end_container(ui);
+            }
+        }
+        break;
+    }
+    case PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS: {
+        /* The server picker: the shipped servers, then PPSSPP's list, then the player's own.
+           Choosing one opens the consent card for it; nothing here connects. */
+        WizardRow rows[PLAYER_UI_ONLINE_PLAY_SERVERS_MAX + 1u];
+        size_t count = model->online_play_servers ? model->online_play_server_count : 0u;
+        WizardColumn column;
+        NkUiTextStyle value_style = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
+        if (count > PLAYER_UI_ONLINE_PLAY_SERVERS_MAX) count = PLAYER_UI_ONLINE_PLAY_SERVERS_MAX;
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Online play", theme->accent_dark);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, "Choose a server", NK_UI_TYPE_TITLE, theme->paper);
+        nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_PLAY_SERVERS_LEAD, NK_UI_TYPE_BODY_S,
+                        theme->muted);
+        if (scr_wizard_box_begin(ui, 0u)) {
+            for (size_t i = 0u; i < count; ++i) {
+                rows[i] = (WizardRow){safe_text(model->online_play_servers[i].name, ""),
+                                      safe_text(model->online_play_servers[i].host, ""),
+                                      safe_text(model->online_play_servers[i].line, "")};
+            }
+            rows[count] = (WizardRow){"Your own server", "Type it", SCR_ONLINE_PLAY_OWN_SENTENCE};
+            column = scr_wizard_column(ui, rows, count + 1u, inner - 32.0f, false);
+            for (size_t i = 0u; i < count; ++i) {
+                const char *host = safe_text(model->online_play_servers[i].host, "");
+                bool current = model->online_play && model->online_play_server &&
+                               strcmp(host, model->online_play_server) == 0;
+                if (scr_wizard_value(ui, (NkUiId)(PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + i),
+                                     (NkUiId)(SET_ID_TEXT + 0x800u + 4u * (NkUiId)i),
+                                     rows[i].name,
+                                     nk_ui_text_clamp(ui, host, &value_style, column.cell * 0.8f,
+                                                      1),
+                                     rows[i].sentence, current, inner - 32.0f, &column)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER);
+                    result->choice_index = (int)i;
+                }
+            }
+            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
+                                 SET_ID_TEXT + 0x7F0u, "Your own server", "Type it",
+                                 SCR_ONLINE_PLAY_OWN_SENTENCE, false, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER);
+            }
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7F4u,
+                            safe_text(model->online_play_list_status, ""), NK_UI_TYPE_BODY_S,
+                            theme->muted);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7F5u, SCR_ONLINE_PLAY_RELAY_ONLY_CAPTION,
+                            NK_UI_TYPE_CAPTION, theme->muted);
+            nk_ui_end_container(ui);
+        }
+        {
+            NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                         NK_UI_SPACE_3);
+            row.padding_top = NK_UI_SPACE_1;
+            if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back", NK_UI_BUTTON_PRIMARY)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_BACK);
+                }
+                /* The list downloads only with Online play on. */
+                if (model->online_play &&
+                    nk_ui_button(ui, PLAYER_UI_ID_ONLINE_PLAY_REFRESH, "Refresh list",
+                                 model->online_play_list_busy ? NK_UI_BUTTON_DISABLED : 0u)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_REFRESH_ONLINE_PLAY_SERVERS);
+                }
+                nk_ui_end_container(ui);
+            }
+        }
+        break;
+    }
     case PLAYER_UI_SETTINGS_PAGE_ACCESSIBILITY:
         settings_accessibility(ui, model, inner, result);
         break;

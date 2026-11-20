@@ -198,6 +198,7 @@ typedef enum {
 typedef struct {
     bool first_launch;
     bool server_mode;       /* false: console nickname; true: custom ad hoc relay host[:port] */
+    bool port_mode;         /* Online play's port offset (#1139): digits, 0 to 65535 */
     UiKeyboard *keyboard;   /* what is typed, its cap and filter, and the letter case */
     const char *current;    /* the nickname or server in use, shown while nothing is typed */
     bool refused;           /* the last Done was refused */
@@ -571,6 +572,14 @@ typedef struct {
     PlayerUiInputGuide input_guide;
 } PlayerUiDiscModel;
 
+/* One server the Online play picker offers (#1139): its name, its host[:ports] and a line
+   (where it is, or that it ships with Nakagawa). */
+typedef struct PlayerUiOnlineServer {
+    const char *name;
+    const char *host;
+    const char *line;
+} PlayerUiOnlineServer;
+
 /* The Settings pages: the main page (VIEW_SETTINGS), online and developer
    options (VIEW_ONLINE_SETTINGS), the third-party notices for downloaded build
    tools (VIEW_PREREQ_ABOUT), the build tool removal check
@@ -589,7 +598,9 @@ typedef enum {
     PLAYER_UI_SETTINGS_PAGE_FACTORY_RESET, /* VIEW_CONFIRM_FACTORY_RESET */
     PLAYER_UI_SETTINGS_PAGE_ACCESSIBILITY, /* VIEW_ACCESSIBILITY_SETTINGS */
     PLAYER_UI_SETTINGS_PAGE_ACE,           /* VIEW_ACE_SETTINGS */
-    PLAYER_UI_SETTINGS_PAGE_PROBLEM_REPORT /* VIEW_PROBLEM_REPORT */
+    PLAYER_UI_SETTINGS_PAGE_PROBLEM_REPORT, /* VIEW_PROBLEM_REPORT */
+    PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD,   /* VIEW_ONLINE_PLAY_CARD: the consent card */
+    PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS /* VIEW_ONLINE_PLAY_SERVERS: the server picker */
 } PlayerUiSettingsPage;
 
 /* What a Settings control asks for (PLAYER_UI_ACTION_SETTINGS). main.c runs the
@@ -671,9 +682,16 @@ typedef enum {
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP,
     PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY,         /* opens Settings > Online play (#1139) */
-    PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY,       /* opt-in ad hoc online play switch */
-    PLAYER_UI_SETTINGS_CYCLE_ONLINE_PLAY_PRESET, /* cycles curated ad hoc relay presets */
-    PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER   /* opens host[:port] server editor */
+    PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY,       /* Off: opens the card; On: turns it off */
+    PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY_SERVERS, /* the server picker */
+    PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER,  /* the picker's Your own server: the editor */
+    PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER,  /* choice_index: the picker's row; opens the card */
+    PLAYER_UI_SETTINGS_REFRESH_ONLINE_PLAY_SERVERS, /* downloads the list again (Online play on) */
+    PLAYER_UI_SETTINGS_ONLINE_PLAY_TURN_ON,      /* the card's TURN ON */
+    PLAYER_UI_SETTINGS_ONLINE_PLAY_NOT_NOW,      /* the card's NOT NOW */
+    PLAYER_UI_SETTINGS_ONLINE_PLAY_CHANGE_SERVER,/* the card's CHANGE SERVER: the picker */
+    PLAYER_UI_SETTINGS_NEW_CONSOLE_ID,           /* a new random console ID */
+    PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT     /* the port offset editor (advanced) */
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced: every PlayerEnhancedPart belongs to one visual group. The macro is the
@@ -872,12 +890,25 @@ typedef struct {
     bool online_news;
     bool online_reports;
     bool developer_mode;
-    /* Ad hoc online play (#1139): off by default; opens its own settings page. */
+    /* Online play (#1139): off by default; its own page, the consent card and the picker. */
     bool online_play;
     const char *online_play_row_value;    /* "Off" or "On: socom.cc" */
-    const char *online_play_preset_label; /* curated server label or "Custom" */
     const char *online_play_server;       /* current host[:port] */
-    const char *online_play_status;       /* current status and validated target ports */
+    const char *online_play_server_label; /* the picker's name for it, or "Your own server" */
+    const char *online_play_status;       /* what is in effect, or the last change's notice */
+    const char *online_play_console_id;   /* "a4:a1:b2:c3:d4:e5", or why there is none */
+    bool online_play_console_id_shown;    /* the line above is an ID */
+    bool online_play_console_id_locked;   /* a game runs: New console ID waits */
+    const char *online_play_console_note; /* the last New console ID's result, or NULL */
+    const char *online_play_port_offset;  /* "10000" */
+    /* The card: the exact server it names and the nickname it sends. */
+    const char *online_play_card_server;
+    /* The picker: the shipped servers, then the list's (PlayerUiOnlineServer), and where the
+       list came from. Online play on adds Refresh. */
+    const PlayerUiOnlineServer *online_play_servers;
+    size_t online_play_server_count;
+    const char *online_play_list_status;
+    bool online_play_list_busy;           /* a download is running: Refresh waits */
     /* Third-party notices: "name version · licence" per downloaded tool */
     const char *tools[PLAYER_UI_SETTINGS_TOOLS];
     size_t tool_count;
@@ -1284,14 +1315,20 @@ enum {
     PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE = 0x455Bu,   /* a title's Enhanced page: Remove texture pack */
     PLAYER_UI_ID_SETTINGS_ONLINE_PLAY = 0x455Cu,      /* Settings > Online: opens Online play */
     PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE = 0x455Du, /* Online play: On / Off switch */
-    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET = 0x455Eu, /* Online play: server preset selector */
-    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER = 0x455Fu, /* Online play: custom host[:port] */
+    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET = 0x455Eu, /* Online play: Server, opens the picker */
+    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER = 0x455Fu, /* the picker: Your own server (editor) */
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
     PLAYER_UI_ID_SETTINGS_COVER_ART = 0x4563u,        /* Settings > Online: Download cover art */
     PLAYER_UI_ID_SETTINGS_REFRESH_COVER_ART = 0x4564u,/* Settings > Build cache: Refresh cover art */
     PLAYER_UI_ID_SETTINGS_CHEATS = 0x4565u,           /* Settings > Online: Cheats */
+    PLAYER_UI_ID_SETTINGS_CONSOLE_ID = 0x4566u,       /* Online play: New console ID */
+    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT = 0x4567u, /* Online play: Port offset (advanced) */
+    PLAYER_UI_ID_ONLINE_PLAY_TURN_ON = 0x4568u,       /* the Online play card's TURN ON */
+    PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW = 0x4569u,       /* its NOT NOW */
+    PLAYER_UI_ID_ONLINE_PLAY_CHANGE_SERVER = 0x456Au, /* its CHANGE SERVER */
+    PLAYER_UI_ID_ONLINE_PLAY_REFRESH = 0x456Bu,       /* the picker's Refresh list */
     PLAYER_UI_ID_NICKNAME_KEY_BASE = 0x4570u,         /* + its keyboard key's place */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
@@ -1320,7 +1357,8 @@ enum {
     PLAYER_UI_ID_DEVELOPER_LOG_COPY = 0x4701u,
     PLAYER_UI_ID_DEVELOPER_LOG_SAVE = 0x4702u,
     PLAYER_UI_ID_DEVELOPER_LOG_CLOSE = 0x4703u,
-    PLAYER_UI_ID_DEVELOPER_LOG_INSPECT = 0x4704u
+    PLAYER_UI_ID_DEVELOPER_LOG_INSPECT = 0x4704u,
+    PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE = 0x4B00u    /* + the picker's row */
 };
 
 /* The shared id families (nk_ui.h's id scheme): each holds every id made from it. */
@@ -1329,6 +1367,9 @@ enum {
 #define PLAYER_UI_ID_LIBRARY_ITEM_BASE_SPAN 0x1000u    /* NK_MAX_GAMES */
 #define PLAYER_UI_ID_DISC_VERIFY_BASE_SPAN 0x100u      /* progress, cancel, results */
 #define PLAYER_UI_ID_NICKNAME_KEY_BASE_SPAN 0x40u     /* UI_KEYBOARD_KEY_COUNT */
+#define PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE_SPAN 0x60u /* PLAYER_UI_ONLINE_PLAY_SERVERS_MAX */
+/* The most rows the Online play picker shows: the shipped servers and the list's. */
+#define PLAYER_UI_ONLINE_PLAY_SERVERS_MAX 80u
 
 /* Disc verification's controls and lines, in PLAYER_UI_ID_DISC_VERIFY_BASE's family. */
 #define PLAYER_UI_ID_DISC_VERIFY_CANCEL ((NkUiId)(PLAYER_UI_ID_DISC_VERIFY_BASE + 0x01u))
@@ -1555,6 +1596,7 @@ bool player_ui_nickname_accepts(uint32_t codepoint, void *user);
 /* The server editor's character filter (UiKeyboardFilter): characters allowed
    in host[:lobby_port[,data_port]] strings. */
 bool player_ui_server_accepts(uint32_t codepoint, void *user);
+bool player_ui_port_accepts(uint32_t codepoint, void *user);
 /* The find box's character filter (UiKeyboardFilter): any character a title name or
    a disc ID can hold, so nothing but control characters is refused. */
 bool player_ui_find_accepts(uint32_t codepoint, void *user);
