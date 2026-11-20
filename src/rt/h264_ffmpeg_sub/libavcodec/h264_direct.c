@@ -19,7 +19,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  *
  * Modified 2026-11-20 for the Nakagawa Recomp project (LOCAL DELTA against FFmpeg n4.4):
- * one FFmpeg fix is applied, each change marked LOCAL DELTA below.
+ * FFmpeg fixes are applied, each change marked LOCAL DELTA below.
+ *  - 27b7fa0c10 "avcodec/h264_direct: do not read the other field's rows of colocated
+ *    mb_type" (master; also on release/5.1 to release/9.1): the colocated picture counts
+ *    as field coded when it is a field picture, before its mb_type is read.
  *  - 2546b6f061 "avcodec/h264_direct: keep the colocated type interlaced in the field
  *    branch" (master; also on release/6.1 to release/9.0, not on release/4.4): in
  *    pred_spatial_direct_motion and pred_temp_direct_motion, the field branch ORs
@@ -295,7 +298,9 @@ static void pred_spatial_direct_motion(const H264Context *const h, H264SliceCont
         return;
     }
 
-    if (IS_INTERLACED(sl->ref_list[1][0].parent->mb_type[mb_xy])) { // AFL/AFR/FR/FL -> AFL/FL
+    /* LOCAL DELTA: upstream 27b7fa0c10 (master), see the file header. */
+    if (sl->ref_list[1][0].parent->field_picture ||
+        IS_INTERLACED(sl->ref_list[1][0].parent->mb_type[mb_xy])) { // AFL/AFR/FR/FL -> AFL/FL
         if (!IS_INTERLACED(*mb_type)) {                    //     AFR/FR    -> AFL/FL
             mb_y  = (sl->mb_y & ~1) + sl->col_parity;
             mb_xy = sl->mb_x +
@@ -520,7 +525,9 @@ static void pred_temp_direct_motion(const H264Context *const h, H264SliceContext
     await_reference_mb_row(h, &sl->ref_list[1][0],
                            sl->mb_y + !!IS_INTERLACED(*mb_type));
 
-    if (IS_INTERLACED(sl->ref_list[1][0].parent->mb_type[mb_xy])) { // AFL/AFR/FR/FL -> AFL/FL
+    /* LOCAL DELTA: upstream 27b7fa0c10 (master), see the file header. */
+    if (sl->ref_list[1][0].parent->field_picture ||
+        IS_INTERLACED(sl->ref_list[1][0].parent->mb_type[mb_xy])) { // AFL/AFR/FR/FL -> AFL/FL
         if (!IS_INTERLACED(*mb_type)) {                    //     AFR/FR    -> AFL/FL
             mb_y  = (sl->mb_y & ~1) + sl->col_parity;
             mb_xy = sl->mb_x +

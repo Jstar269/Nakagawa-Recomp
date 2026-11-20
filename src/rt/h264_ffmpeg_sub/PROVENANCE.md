@@ -309,12 +309,23 @@ unmodified n4.4 blob and pass with the delta.
 ### `libavcodec/h264_direct.c`
 
 Modified 2026-11-20 (audit 2026-11-17 finding F-06b369c6; new bytes await the maintainer's
-approval). One commit from FFmpeg `master` is applied verbatim to the n4.4 blob; nothing else
-changes, and each change is marked `LOCAL DELTA` in the file. The fix is not on `release/4.4`;
-FFmpeg cherry-picked it to `release/6.1` (`30e346c76f`), `release/7.1` (`f9db090b14`),
-`release/8.0` (`4ea01b43b6`), `release/8.1` (`a35157abb9`) and `release/9.0` (`b204e94e90`).
+approval). The commits below are applied verbatim to the n4.4 blob; nothing else changes, and
+each change is marked `LOCAL DELTA` in the file.
 
-- `2546b6f061fe6bc869ac9a1c0ed892555bd24402` "avcodec/h264_direct: keep the colocated type
+- `27b7fa0c107cf6f8f8d3fac541a96ee14940b202` "avcodec/h264_direct: do not read the other field's
+  rows of colocated mb_type" (FFmpeg `master`, also on `release/9.1`; cherry-picked to
+  `release/5.1` `7499ccc61a`, `release/6.1` `a4f6f7588e`, `release/7.1` `3978a28d5b`,
+  `release/8.0` `281c902aa1`, `release/8.1` `139afe709a` and `release/9.0` `16dfae5c88`; not on
+  `release/4.4`; FFmpeg ticket 10891). Both direct-prediction functions treat the colocated
+  picture as field coded when its `field_picture` is set, before reading its `mb_type` at the
+  current, not yet remapped, macroblock address. Every macroblock of a field picture carries
+  `MB_TYPE_INTERLACED`, so a valid stream takes the same branch as before; upstream fixed an
+  unsynchronised read under frame threading, which this single-threaded build does not use.
+  It is taken because the next fix is written against it: its message relies on a colocated
+  field picture always taking the field branch.
+- `2546b6f061fe6bc869ac9a1c0ed892555bd24402` (FFmpeg `master`; cherry-picked to `release/6.1`
+  `30e346c76f`, `release/7.1` `f9db090b14`, `release/8.0` `4ea01b43b6`, `release/8.1`
+  `a35157abb9` and `release/9.0` `b204e94e90`; not on `release/4.4`) "avcodec/h264_direct: keep the colocated type
   interlaced in the field branch" (heap-buffer-overflow read, oss-fuzz 553213954). In
   `pred_spatial_direct_motion` and `pred_temp_direct_motion`, the branch for an interlaced
   colocated macroblock sets `col_field = MB_TYPE_INTERLACED` before `goto single_col`, and
