@@ -1384,7 +1384,7 @@ class ProvenanceRefreshTests(unittest.TestCase):
             "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
             "record_id": "PROV-EXISTING",
             "evidence_tier": "H",
-            "authorship": "independent implementation record",
+            "authorship": "project-authored-independent record",
             "upstream_attribution": None,
         })
 
@@ -3710,6 +3710,20 @@ class PublicLabelTests(unittest.TestCase):
         self.assertIn("modified_or_translated", v2["derived-translated"])
         # Each label names exactly one class, so a reader (and fork_init) can tell them apart.
         self.assertEqual(len(set(v2.values())), len(v2))
+
+    def test_the_emitted_labels_state_no_more_than_the_record_class(self) -> None:
+        """What every producer writes today: no independence for behavior-informed, no "modified" for a vendored import."""
+        behavior = provenance_ledger._refresh_class_for("src/x.c", self._record("behavior-informed"))[1]
+        vendored = provenance_ledger._refresh_class_for("src/x.c", self._record("upstream-third-party"))[1]
+        self.assertNotIn("independent", behavior["authorship"])
+        self.assertNotIn("modified", vendored["modification_status"])
+        # The full generator and the hosted claim say the same.
+        self.assertEqual(provenance_ledger._class_for("src/x.c", self._record("behavior-informed"))[1]["authorship"],
+                         behavior["authorship"])
+        self.assertEqual(
+            provenance_ledger._class_for("src/x.c", self._record("upstream-third-party"))[1]["modification_status"],
+            vendored["modification_status"],
+        )
 
     def test_refresh_and_safe_claim_derive_the_same_label(self) -> None:
         import provenance_attest_verify as verifier
