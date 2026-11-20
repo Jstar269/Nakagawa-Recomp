@@ -19,13 +19,17 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  *
  * Modified 2026-11-17 for the Nakagawa Recomp project (LOCAL DELTA against FFmpeg n4.4):
- * two FFmpeg release/4.4 fixes are applied, each marked LOCAL DELTA below.
+ * FFmpeg release/4.4 fixes are applied, each marked LOCAL DELTA below.
  *  - 6d57428858 "avcodec/h264_slice: reject slice_num >= 0xFFFF" (cherry-pick of
  *    39e1969303): h264_slice_init refuses a picture's slice 65535 so slice_num never
  *    equals the uint16_t slice_table sentinel 0xFFFF.
  *  - bf87bdd3f6 "avcodec/h264_slice: clear old slice POC values on parsing failure":
  *    h264_slice_header_parse zeroes poc_lsb, delta_poc_bottom and delta_poc[] before
  *    reading them, so a failed header cannot leave them to the next slice.
+ *  - Added 2026-11-20: c5baeda37e "avcodec/h264: recompute per-slice direct mode state
+ *    for every slice" (release/4.4, cherry-pick of 1772386392):
+ *    ff_h264_direct_ref_list_init runs for every slice and only its updates of the
+ *    current picture wait for !setup_finished.
  * See src/rt/h264_ffmpeg_sub/PROVENANCE.md.
  */
 
@@ -2001,8 +2005,8 @@ static int h264_slice_init(H264Context *h, H264SliceContext *sl,
 
     if (sl->slice_type_nos == AV_PICTURE_TYPE_B && !sl->direct_spatial_mv_pred)
         ff_h264_direct_dist_scale_factor(h, sl);
-    if (!h->setup_finished)
-        ff_h264_direct_ref_list_init(h, sl);
+    /* LOCAL DELTA: upstream c5baeda37e (release/4.4), see the file header. */
+    ff_h264_direct_ref_list_init(h, sl);
 
     if (h->avctx->skip_loop_filter >= AVDISCARD_ALL ||
         (h->avctx->skip_loop_filter >= AVDISCARD_NONKEY &&
