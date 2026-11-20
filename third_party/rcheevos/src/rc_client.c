@@ -2793,11 +2793,15 @@ rc_client_game_hash_t* rc_client_find_game_hash(rc_client_t* client, const char*
 
   if (!game_hash) {
     game_hash = (rc_client_game_hash_t*)rc_buffer_alloc(&client->state.buffer, sizeof(rc_client_game_hash_t));
-    memset(game_hash, 0, sizeof(*game_hash));
-    snprintf(game_hash->hash, sizeof(game_hash->hash), "%s", hash);
-    game_hash->game_id = RC_CLIENT_UNKNOWN_GAME_ID;
-    game_hash->next = client->hashes;
-    client->hashes = game_hash;
+    /* LOCAL DELTA (Nakagawa Recomp, 2026-11-20): upstream rcheevos commit db8ca2e6 (#570); a failed
+     * allocation is not written through. */
+    if (game_hash) {
+      memset(game_hash, 0, sizeof(*game_hash));
+      snprintf(game_hash->hash, sizeof(game_hash->hash), "%s", hash);
+      game_hash->game_id = RC_CLIENT_UNKNOWN_GAME_ID;
+      game_hash->next = client->hashes;
+      client->hashes = game_hash;
+    }
   }
   rc_mutex_unlock(&client->state.mutex);
 
@@ -3956,10 +3960,12 @@ static void rc_client_fetch_game_list_callback(const rc_api_server_response_t* s
         strings_size += strlen(src->image_name) + 1;
       if (src->image_url)
         strings_size += strlen(src->image_url) + 1;
-      hashes_size += src->num_supported_hashes * sizeof(const char*);
+      /* LOCAL DELTA (Nakagawa Recomp, 2026-11-20): upstream rcheevos commit db8ca2e6 (#570);
+       * hashes_size counts pointers, which list_size multiplies by sizeof(const char*) once. */
+      hashes_size += src->num_supported_hashes;
       for (i = 0; i < src->num_supported_hashes; i++)
         strings_size += strlen(src->supported_hashes[i]) + 1;
-      hashes_size += src->num_unsupported_hashes * sizeof(const char*);
+      hashes_size += src->num_unsupported_hashes;
       for (i = 0; i < src->num_unsupported_hashes; i++)
         strings_size += strlen(src->unsupported_hashes[i]) + 1;
     }
@@ -4357,6 +4363,12 @@ rc_client_achievement_list_t* rc_client_create_achievement_list(rc_client_t* cli
   buckets_size = RC_ALIGN(num_buckets * sizeof(rc_client_achievement_bucket_t));
 
   list = (rc_client_achievement_list_info_t*)malloc(list_size + buckets_size + num_achievements * sizeof(rc_client_achievement_t*));
+  /* LOCAL DELTA (Nakagawa Recomp, 2026-11-20): upstream rcheevos commit db8ca2e6 (#570); a failed
+   * allocation returns NULL with the state mutex released. */
+  if (!list) {
+    rc_mutex_unlock(&client->state.mutex);
+    return NULL;
+  }
   list->public_.buckets = bucket_ptr = (rc_client_achievement_bucket_t*)((uint8_t*)list + list_size);
   achievement_ptr = (const rc_client_achievement_t**)((uint8_t*)bucket_ptr + buckets_size);
 
@@ -5099,6 +5111,11 @@ rc_client_leaderboard_list_t* rc_client_create_leaderboard_list(rc_client_t* cli
   buckets_size = RC_ALIGN(num_buckets * sizeof(rc_client_leaderboard_bucket_t));
 
   list = (rc_client_leaderboard_list_info_t*)malloc(list_size + buckets_size + num_leaderboards * sizeof(rc_client_leaderboard_t*));
+  /* LOCAL DELTA (Nakagawa Recomp, 2026-11-20): upstream rcheevos commit db8ca2e6 (#570), as above. */
+  if (!list) {
+    rc_mutex_unlock(&client->state.mutex);
+    return NULL;
+  }
   list->public_.buckets = bucket_ptr = (rc_client_leaderboard_bucket_t*)((uint8_t*)list + list_size);
   leaderboard_ptr = (const rc_client_leaderboard_t**)((uint8_t*)bucket_ptr + buckets_size);
 
@@ -5474,6 +5491,9 @@ static void rc_client_submit_leaderboard_entry_server_call(rc_client_submit_lead
   result = rc_api_init_submit_lboard_entry_request_hosted(&request, &api_params, &lboard_data->client->state.host);
   if (result != RC_OK) {
     RC_CLIENT_LOG_ERR_FORMATTED(lboard_data->client, "Error constructing submit leaderboard entry for leaderboard %u: %s", lboard_data->id, rc_error_str(result));
+    /* LOCAL DELTA (Nakagawa Recomp, 2026-11-20): upstream rcheevos commit db8ca2e6 (#570); the
+     * submission ends here, so its data is freed (it leaked). */
+    free(lboard_data);
     return;
   }
 
@@ -5604,7 +5624,9 @@ static void rc_client_fetch_leaderboard_entries_callback(const rc_api_server_res
       char* user = (char*)((uint8_t*)list + list_size);
       const rc_api_lboard_info_entry_t* lbentry = lbinfo_response.entries;
       const rc_api_lboard_info_entry_t* stop = lbentry + lbinfo_response.num_entries;
-      const size_t logged_in_user_len = strlen(client->user.display_name) + 1;
+      /* LOCAL DELTA (Nakagawa Recomp, 2026-11-20): upstream rcheevos commit db8ca2e6 (#570); no
+       * signed-in user (display_name NULL) matches no entry instead of being passed to strlen. */
+      const size_t logged_in_user_len = client->user.display_name ? strlen(client->user.display_name) + 1 : 0;
       info->destroy_func = NULL;
       list->user_index = -1;
 
@@ -7159,7 +7181,14 @@ size_t rc_client_get_user_agent_clause(rc_client_t* client, char buffer[], size_
   if (client && client->state.external_client && client->state.external_client->get_user_agent_clause) {
     result = client->state.external_client->get_user_agent_clause(buffer, buffer_size);
     if (result > 0) {
-      result += snprintf(buffer + result, buffer_size - result, " rc_client/" RCHEEVOS_VERSION_STRING);
+      /* LOCAL DELTA (Nakagawa Recomp, 2026-11-20): upstream rcheevos commit 918ba6dc (#572). When the
+       * external clause filled the buffer, buffer + result is past its end and buffer_size - result
+       * wraps to a huge size_t, so snprintf wrote past the buffer. Only built with
+       * RC_CLIENT_SUPPORTS_EXTERNAL, which no build here defines. */
+      if (result < buffer_size)
+        result += snprintf(buffer + result, buffer_size - result, " rc_client/" RCHEEVOS_VERSION_STRING);
+      else
+        result += (sizeof(" rc_client/" RCHEEVOS_VERSION_STRING) - 1);
       buffer[buffer_size - 1] = '\0';
       return result;
     }

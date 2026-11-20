@@ -1216,6 +1216,56 @@ static void test_progress_chunk_cannot_wrap(uint8_t *ram) {
     nk_ach_destroy(ach);
 }
 
+typedef struct LbEntries {
+    int calls;
+    int result;
+    uint32_t num_entries;
+    int32_t user_index;
+} LbEntries;
+
+static void RC_CCONV lb_entries_done(int result, const char *error_message, rc_client_leaderboard_entry_list_t *list,
+                                     rc_client_t *client, void *userdata) {
+    LbEntries *out = (LbEntries *)userdata;
+    (void)error_message;
+    (void)client;
+    out->calls++;
+    out->result = result;
+    if (list) {
+        out->num_entries = list->num_entries;
+        out->user_index = list->user_index;
+        rc_client_destroy_leaderboard_entry_list(list);
+    }
+}
+
+/* rcheevos LOCAL DELTA (rc_client_fetch_leaderboard_entries_callback, upstream db8ca2e6 #570):
+ * leaderboard entries can be fetched before anyone signs in, and the reply then looks for the
+ * signed-in user's entry. Upstream at the pin passed the NULL display name to strlen. */
+static void test_leaderboard_entries_without_login(uint8_t *ram) {
+    Deferred d;
+    memset(&d, 0, sizeof d);
+    memset(ram, 0, USER_RAM_SIZE);
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, deferred_transport, &d);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    static const char lbinfo[] =
+        "{\"Success\":true,\"LeaderboardData\":{\"LBID\":7001,\"LBFormat\":\"VALUE\",\"LowerIsBetter\":0,"
+        "\"LBTitle\":\"Synthetic Board\",\"LBDesc\":\"A synthetic leaderboard\",\"LBMem\":\"\","
+        "\"GameID\":1234,\"LBAuthor\":\"Synthetic\",\"LBCreated\":\"2026-01-01 00:00:00\","
+        "\"LBUpdated\":\"2026-01-01 00:00:00\",\"Entries\":[{\"User\":\"Someone\",\"Rank\":1,"
+        "\"Index\":1,\"Score\":100,\"DateSubmitted\":1700000000}],\"TotalEntries\":1}}";
+    LbEntries out = {0, -1, 0u, 0};
+    (void)rc_client_begin_fetch_leaderboard_entries(nk_ach_rc_client(ach), 7001u, 1u, 10u, lb_entries_done, &out);
+    CHECK(deliver(&d, "r=lbinfo&", 200, lbinfo), "the leaderboard request waits for its answer");
+    CHECK(out.calls == 1 && out.result == RC_OK, "the entries arrive once, got %d call(s), result %d", out.calls,
+          out.result);
+    CHECK(out.num_entries == 1u && out.user_index == -1,
+          "one entry and no signed-in user's entry, got %u entries, user index %d", (unsigned)out.num_entries,
+          (int)out.user_index);
+    drain(&d);
+    nk_ach_destroy(ach);
+}
+
 int main(void) {
     uint8_t *ram = (uint8_t *)calloc(1u, USER_RAM_SIZE);
     if (!ram) {
@@ -1246,6 +1296,7 @@ int main(void) {
     test_long_unknown_macro_is_cut(ram);
     test_long_sorted_lookup_loads(ram);
     test_progress_chunk_cannot_wrap(ram);
+    test_leaderboard_entries_without_login(ram);
     free(ram);
     if (g_failures) {
         fprintf(stderr, "test_nk_achievements: %d failure(s)\n", g_failures);

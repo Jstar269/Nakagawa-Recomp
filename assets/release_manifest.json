@@ -176,7 +176,7 @@
       "revision": "v12.5.0 / 1433173220a7eaede6a9ed7a18e94117be1821e0",
       "notice_path": "third_party/rcheevos/LICENSE",
       "evidence_path": "third_party/rcheevos/PROVENANCE.md",
-      "disposition": "vendored_source; MIT, with L. Peter Deutsch's MD5 under zlib; imported with LOCAL DELTA fixes in src/rc_client.c, src/rapi/ and src/rcheevos/ (alloc.c, richpresence.c, runtime_progress.c; see third_party/rcheevos/PROVENANCE.md); opt-in RetroAchievements support (#1316)"
+      "disposition": "vendored_source; MIT, with L. Peter Deutsch's MD5 under zlib; imported with LOCAL DELTA fixes in src/rc_client.c, src/rapi/ and src/rcheevos/ (alloc.c, richpresence.c, runtime.c, runtime_progress.c; see third_party/rcheevos/PROVENANCE.md); opt-in RetroAchievements support (#1316)"
     },
     {
       "id": "kenney-input-prompts",
