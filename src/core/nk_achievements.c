@@ -620,39 +620,6 @@ typedef struct AchCall {
 static const char k_no_response[] = "no response from the RetroAchievements server";
 static const char k_closing[] = "refused: achievements are closing";
 
-/* rcheevos 12.5.0 marks the set complete when an award answer says no achievement remains, and
- * tells of it from the next rc_client_do_frame. Until then that state is not safe: unloading
- * the game (the feature turned off, a sign-out, another game, the player closing) raises it
- * with no game and reads through a null pointer (rc_client.c, rc_client_unload_game then
- * rc_client_raise_mastery_event), and an answer that arrives once the game is unloaded does the
- * same in rc_client_award_achievement_callback. Both happen when the last achievement of a set
- * is earned just before the game ends. This bridge shows no "set complete" notice, so rc_client
- * is given the same answer saying one remains and never enters that state. True when out holds
- * that answer. */
-static bool ach_award_answer_without_completion(const NkAchResponse *response, char *out,
-                                                size_t out_size) {
-    if (!response || !response->body || response->http_status < 200 ||
-        response->http_status >= 300) return false;
-    rc_api_server_response_t server;
-    memset(&server, 0, sizeof server);
-    server.body = response->body;
-    server.body_length = response->body_length;
-    server.http_status_code = response->http_status;
-    rc_api_award_achievement_response_t parsed;
-    const int result = rc_api_process_award_achievement_server_response(&parsed, &server);
-    const bool completes = result == RC_OK && parsed.response.succeeded &&
-                           parsed.achievements_remaining == 0u;
-    int length = 0;
-    if (completes)
-        length = snprintf(out, out_size,
-                          "{\"Success\":true,\"Score\":%u,\"SoftcoreScore\":%u,"
-                          "\"AchievementID\":%u,\"AchievementsRemaining\":1}",
-                          parsed.new_player_score, parsed.new_player_score_softcore,
-                          parsed.awarded_achievement_id);
-    rc_api_destroy_award_achievement_response(&parsed);
-    return completes && length > 0 && (size_t)length < out_size;
-}
-
 /* No answer from the server itself: no connection, a busy or failing server. */
 static bool ach_response_unreachable(const NkAchResponse *response) {
     if (!response) return false;
@@ -706,13 +673,6 @@ static void ach_done(const NkAchResponse *response, void *done_ctx) {
         free(call);
         ach_leave(ach);
         return;
-    }
-    char without_completion[192];
-    if (call->award_id &&
-        ach_award_answer_without_completion(response, without_completion,
-                                            sizeof without_completion)) {
-        server.body = without_completion;
-        server.body_length = strlen(without_completion);
     }
     const bool outer_unreachable = ach->response_unreachable;
     ach->response_unreachable = ach_response_unreachable(response);
@@ -867,6 +827,10 @@ static void RC_CCONV ach_event(const rc_client_event_t *event, rc_client_t *clie
         break;
     case RC_CLIENT_EVENT_RECONNECTED:
         ach_push(ach, NK_ACH_EVENT_RECONNECTED, 0u, 0u, 0u, NULL, NULL);
+        break;
+    case RC_CLIENT_EVENT_GAME_COMPLETED:
+        ach_push(ach, NK_ACH_EVENT_SET_COMPLETED, event->subset ? event->subset->id : 0u, 0u, 0u,
+                 NULL, NULL);
         break;
     default:
         break;
@@ -1257,10 +1221,10 @@ bool nk_ach_begin_load_game(NkAch *ach, const char *hash) {
 void nk_ach_unload_game(NkAch *ach) {
     if (!ach) return;
     ach_enter(ach);
-    /* rc_client never reaches its completed-set state here (ach_award_answer_without_completion),
-     * so unloading cannot raise a mastery event with no game. rc_client takes the game's ping off
-     * its schedule; its retries of an award stay. A load still on its way is abandoned, and so
-     * is a badge's answer. */
+    /* rc_client takes the game's ping off its schedule; its retries of an award stay. A set the
+     * last award completed is not announced once its game is gone (the vendored rc_client.c's
+     * dated LOCAL DELTA in rc_client_subset_raise_pending_events). A load still on its way is
+     * abandoned, and so is a badge's answer. */
     ach->load_generation++;
     ach_badges_end(ach);
     rc_client_unload_game(ach->client);

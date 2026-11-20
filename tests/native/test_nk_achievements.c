@@ -1399,16 +1399,23 @@ static void test_every_entry_takes_the_lock(uint8_t *ram) {
     remove_queue_files(path);
 }
 
-/* The last achievement of a set, answered just as the game ends. rcheevos 12.5.0 would read
- * through a null pointer when the game is then unloaded, or when the answer comes after it. */
+/* The last achievement of a set, answered as the server answers it ("AchievementsRemaining":0),
+ * which puts rc_client's completed-set notice on the next frame. rcheevos 12.5.0 read through a
+ * null pointer when the game was unloaded before that frame (rc_client_unload_game clears
+ * client->game, then raises the unloaded game's pending events, and
+ * rc_client_raise_mastery_event reads client->game->subsets); the vendored rc_client.c's dated
+ * LOCAL DELTA raises it only while a game is loaded. Routes: 0, the answer, then the game is
+ * unloaded (nk_ach_unload_game, as the player does when the game exits); 1, the answer, then a
+ * logout; 2, a logout, then the answer; 3, the answer, then the player closes; 4, the answer,
+ * then a frame, the normal route, which raises the completion once. No route but 4 raises it,
+ * neither at once nor on a later frame. */
 static void test_last_achievement_answered_as_the_game_ends(uint8_t *ram) {
     const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
     const NkAchResponse answer = {k_award, sizeof k_award - 1u, 200};
     NkAchEvent ev[NK_ACH_EVENT_QUEUE];
-    CHECK(strstr(k_award, "\"AchievementsRemaining\":0") != NULL, "the answer completes the set");
-    /* 0: the answer, then the game is unloaded. 1: unloaded, then the answer. 2: the answer,
-     * then the player closes. */
-    for (int order = 0; order < 3; order++) {
+    CHECK(strstr(k_award, "\"AchievementsRemaining\":0") != NULL,
+          "the server's answer completes the set");
+    for (int route = 0; route < 5; route++) {
         Fake fake;
         memset(&fake, 0, sizeof fake);
         fake.award_status = 200;
@@ -1419,17 +1426,43 @@ static void test_last_achievement_answered_as_the_game_ends(uint8_t *ram) {
         nk_ach_begin_login(ach, "Player", "TOKEN");
         nk_ach_begin_load_game(ach, HASH);
         for (int i = 0; i < 4; i++) nk_ach_frame(ach);
+        (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
         fake.defer = true;
         ram[ACH_ADDR] = 5;
         nk_ach_frame(ach);
         NkAchDone done = fake.deferred_done;
-        CHECK(done != NULL && nk_ach_pending_unlock_count(ach) == 1u, "the award is on its way");
-        if (order == 1) nk_ach_logout(ach);
+        CHECK(done != NULL && nk_ach_pending_unlock_count(ach) == 1u,
+              "route %d: the last award is on its way", route);
+        fake.deferred_done = NULL;
+        fake.defer = false;
+        if (route == 2) nk_ach_logout(ach);
         if (done) done(&answer, fake.deferred_ctx);
         CHECK(nk_ach_pending_unlock_count(ach) == 0u,
-              "order %d: the answered award left the queue", order);
-        if (order == 0) nk_ach_logout(ach);
-        (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+              "route %d: the answered award left the queue", route);
+        if (route == 0) nk_ach_unload_game(ach);
+        if (route == 1) nk_ach_logout(ach);
+        size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+        CHECK(has_event(ev, n, NK_ACH_EVENT_SET_COMPLETED) < 0,
+              "route %d: the set's completion waits for the next frame", route);
+        if (route == 3) {
+            nk_ach_destroy(ach);
+            continue;
+        }
+        /* The next frames: the completion is told once with the game still loaded, and never
+         * for a game that is gone. */
+        int told = 0;
+        for (int i = 0; i < 3; i++) {
+            nk_ach_frame(ach);
+            n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+            for (size_t k = 0; k < n; k++) {
+                if (ev[k].kind != NK_ACH_EVENT_SET_COMPLETED) continue;
+                told++;
+                CHECK(ev[k].id == 1111u, "route %d: the completed set is the game's core set "
+                      "(AchievementSetId 1111), not %u", route, (unsigned)ev[k].id);
+            }
+        }
+        CHECK(told == (route == 4 ? 1 : 0),
+              "route %d: the set's completion was told %d time(s)", route, told);
         nk_ach_destroy(ach);
     }
 }

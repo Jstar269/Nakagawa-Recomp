@@ -110,8 +110,11 @@ typedef enum NkAchEventKind {
     NK_ACH_EVENT_LOGIN_UNREACHABLE, /* a token sign-in got no answer from the server (no
                                     * connection, 5xx, 408, 429): nk_ach_token_login_due says
                                     * when to try it again */
-    NK_ACH_EVENT_UNLOCKS_DISCARDED /* count: saved unlocks that belong to another account than
+    NK_ACH_EVENT_UNLOCKS_DISCARDED, /* count: saved unlocks that belong to another account than
                                     * the one now signed in; they left the queue unsent */
+    NK_ACH_EVENT_SET_COMPLETED     /* id: the core set's ID. Every achievement in it is unlocked;
+                                    * raised by the frame after the award that completed it, and
+                                    * never once its game is unloaded */
 } NkAchEventKind;
 
 typedef struct NkAchEvent {
