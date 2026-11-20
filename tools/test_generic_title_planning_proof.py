@@ -44,12 +44,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from typing import Any
+from typing import Any, TypedDict, cast
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+# The repository root resolves `tools.`; the tools folder resolves bare sibling imports.
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
-import title_codegen_plan  # noqa: E402
+from tools import title_codegen_plan  # noqa: E402
 import title_manifest  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
 
@@ -59,6 +61,33 @@ SYNTHETIC2 = TITLES / "synthetic-title2.json"
 PSPDEV = TITLES / "pspdev-phase5.json"
 PLANNER = ROOT / "tools" / "title_codegen_plan.py"
 HELPER = ROOT / "tools" / "title_manager_plan.ps1"
+
+
+class _ManagerMakePlan(TypedDict):
+    game_name: str
+    codegen_profile_arg: str
+    build_dir: str
+
+
+class _ManagerPlanEnvironment(TypedDict):
+    GAME_BASE: str
+    GAME_ENTRY: str
+    TITLE_EXTRA_SPANS: str
+
+
+class _ManagerPlanView(TypedDict):
+    title_manifest_id: str
+    title_kind: str
+    game_name: str
+    game_base: int
+    game_entry: int
+    codegen_profile: str
+    bss_metadata_source: str
+    extra_executable_spans: list[object]
+    disc: object
+    make: _ManagerMakePlan
+    environment: _ManagerPlanEnvironment
+    private_binding_requirements: dict[str, bool]
 
 
 def _scratch_build_root(test: unittest.TestCase) -> pathlib.Path:
@@ -158,15 +187,18 @@ class GenericTitleProofFixtures(unittest.TestCase):
 
 
 class GenericPlannerAcceptsSyntheticTitle2(unittest.TestCase):
-    def _plan(self, manifest_path: pathlib.Path, game_name: str, build_dir: pathlib.Path) -> dict:
+    def _plan(self, manifest_path: pathlib.Path, game_name: str, build_dir: pathlib.Path) -> _ManagerPlanView:
         manifest = _load(manifest_path)
-        return title_codegen_plan.build_manager_plan(
-            manifest,
-            game_name=game_name,
-            game_elf=pathlib.Path("build/fixtures/synthetic2.elf"),
-            build_dir=build_dir,
-            funcs_per_chunk=64,
-        )
+        return cast(
+            _ManagerPlanView,
+            title_codegen_plan.build_manager_plan(
+                manifest,
+                game_name=game_name,
+                game_elf=pathlib.Path("build/fixtures/synthetic2.elf"),
+                build_dir=build_dir,
+                funcs_per_chunk=64,
+            ),
+        )  # The builder constructs these projected keys with the annotated value types.
 
     def test_synthetic_title2_plans_successfully_via_generic_planner(self) -> None:
         """Generic fields are projected without pretending to be HST."""
@@ -270,6 +302,7 @@ class HstProfileIsolation(unittest.TestCase):
         self.shell = shutil.which("pwsh")
         if self.shell is None:
             self.skipTest("pwsh required for adapter isolation checks")
+        assert self.shell is not None
 
     def _run_adapter_reject(self, plan: dict, expected_fragment: str) -> None:
         import json as _json
@@ -289,7 +322,9 @@ class HstProfileIsolation(unittest.TestCase):
                 "  exit 3",
                 "}",
             ])
-            proc = subprocess.run([self.shell, "-NoProfile", "-NonInteractive", "-Command", script],
+            shell = self.shell
+            assert shell is not None
+            proc = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", script],
                                   cwd=ROOT, capture_output=True, text=True)
             self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
             self.assertIn(expected_fragment, proc.stdout)
@@ -913,7 +948,7 @@ class PathTextRenderingTests(unittest.TestCase):
 
     def test_path_text_is_rendering_only(self):
         # It replaces backslashes with slashes but does not claim containment
-        from title_codegen_plan import _path_text
+        _path_text = title_codegen_plan._path_text
         self.assertEqual(_path_text(pathlib.Path(r"C:\foo\bar"), "label"), "C:/foo/bar")
         self.assertEqual(_path_text(pathlib.Path("a/b"), "label"), "a/b")
         # Ensure comments/tests say rendering only (checked by searching planner)
@@ -923,6 +958,17 @@ class PathTextRenderingTests(unittest.TestCase):
         # The planner's _path_text should not be described as containment
         self.assertNotIn("containment", text.lower())
         self.assertNotIn("security validation", text.lower())
+
+    def test_file_imports_when_run_as_a_script(self) -> None:
+        # Script mode puts only tools/ on sys.path, never the repository root or the cwd.
+        env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+        with tempfile.TemporaryDirectory() as tmp:
+            run = subprocess.run(
+                [sys.executable, "-s", str(pathlib.Path(__file__).resolve()), "--help"],
+                cwd=tmp, env=env, capture_output=True, text=True, check=False, timeout=120,
+            )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertNotIn("ModuleNotFoundError", run.stderr)
 
 
 if __name__ == "__main__":

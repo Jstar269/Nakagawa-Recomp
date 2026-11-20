@@ -223,6 +223,7 @@ class ScriptedInputDeliveryTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
+        assert CC is not None
         cls.tmp = Path(tempfile.mkdtemp(prefix="scripted_input_"))
         source = cls.tmp / "scripted_input_harness.c"
         source.write_text(HARNESS_C, encoding="utf-8")

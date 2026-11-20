@@ -198,7 +198,7 @@ class TestGuestSpanRouting(unittest.TestCase):
         self.assertTrue(0 <= readable < opened < host)
 
     def test_ge_direct_guest_host_pointers_have_named_complete_span_owners(self) -> None:
-        cases = {
+        cases: dict[Path, dict[str, tuple[str, ...]]] = {
             ROOT / "src" / "rt" / "ge.c": {
                 "ge_decode_tex_rgba": ("sr_guest_rect_readable",),
                 "ge_block_transfer": ("sr_guest_rect_readable", "sr_guest_rect_writable"),

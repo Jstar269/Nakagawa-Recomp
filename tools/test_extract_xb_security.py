@@ -612,7 +612,7 @@ class _FakeLibxbModule:
         LITTLE = "little"
 
     def __init__(self) -> None:
-        self.calls = []
+        self.calls: list[tuple[Path | str, str]] = []
         module = self
 
         class XBArchive:

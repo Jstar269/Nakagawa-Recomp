@@ -758,6 +758,54 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertEqual(len(source_parents), 1)
         self.assertTrue(source_parents[0].is_relative_to(output_dir))
 
+    def test_disappeared_disc_member_is_a_named_refusal(self) -> None:
+        encrypted = self.discs / "ok-test70063.iso"
+        create_test_iso_with_executables(
+            encrypted, b"~PSP" + b"\0" * 60, disc_id="TEST70063"
+        )
+        from nk_core import iso_inspect
+
+        # Discovery named a module the image no longer holds (it changed or was cut short),
+        # then one still there: the gone one is a coded row and the next one still runs.
+        candidates = [
+            {"kind": "encrypted", "name": "GONE.PRX",
+             "members": [["PSP_GAME", "USRDIR", "GONE.PRX"]]},
+            {"kind": "encrypted", "name": "AFTER.PRX",
+             "members": [["PSP_GAME", "SYSDIR", "EBOOT.BIN"]]},
+        ]
+
+        def runner(_source: Path, destination: Path) -> tuple[int, str]:
+            destination.write_bytes(b"decrypted")
+            return 0, "ok"
+
+        with mock.patch.object(iso_inspect, "list_disc_module_candidates",
+                               return_value=candidates):
+            rows = decrypt_tool.decrypt_disc(encrypted, self.data, "TEST70063", runner=runner)
+        self.assertEqual([(row["name"], row["status"], row["code"]) for row in rows],
+                         [("EBOOT.elf", 0, None),
+                          ("GONE.PRX", -1, "DISC_DECRYPT_MEMBER_MISSING"),
+                          ("AFTER.PRX", 0, None)])
+        self.assertEqual(rows[1]["member"], "PSP_GAME/USRDIR/GONE.PRX")
+
+        # The library record names that refusal, not INTERNAL_ERROR (a second disc, so
+        # nothing decrypted above is reused).
+        create_test_iso_with_executables(
+            self.discs / "ok-test70064.iso", b"~PSP" + b"\0" * 60, disc_id="TEST70064"
+        )
+        encrypted.unlink()
+
+        def decrypt(iso: Path, data: Path, disc_id: str) -> list[dict]:
+            decrypted: list[dict] = decrypt_tool.decrypt_disc(iso, data, disc_id, runner=runner)
+            return decrypted
+
+        with mock.patch.object(iso_inspect, "list_disc_module_candidates",
+                               return_value=candidates):
+            result = self.build(jobs=1, decrypt=decrypt).run()
+        self.assertEqual(self.by_source(result)["ok-test70064.iso"]["decrypt_step"],
+                         {"files": 3, "failed": ["GONE.PRX"],
+                          "first_failure": "encrypted disc member disappeared after discovery",
+                          "first_failure_code": "DISC_DECRYPT_MEMBER_MISSING"})
+
     def test_the_manifest_names_where_each_first_launch_stopped(self) -> None:
         stages = {stage: {"status": "PASS", "duration_ms": 1} for stage in library_build.STAGES}
         stages["launch"]["status"] = "FAIL"

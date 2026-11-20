@@ -306,10 +306,12 @@ class TestAgreementWithTheGate(unittest.TestCase):
 class TestOutput(unittest.TestCase):
     def _check(self, **patches: object) -> tuple[int, str]:
         import io
-        from contextlib import redirect_stderr, redirect_stdout
+        from contextlib import ExitStack, redirect_stderr, redirect_stdout
         from unittest import mock
 
-        with mock.patch.multiple(gap, **patches):
+        with ExitStack() as stack:
+            for attribute, value in patches.items():
+                stack.enter_context(mock.patch.object(gap, attribute, value))
             stderr = io.StringIO()
             with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
                 rc = gap.main(["--repo", str(ROOT), "--check"])

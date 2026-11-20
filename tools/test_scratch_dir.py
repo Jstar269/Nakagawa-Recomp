@@ -31,8 +31,13 @@ def windows_error(winerror: int | None) -> OSError:
     """An OSError carrying ``winerror``, as Windows reports it, on any host."""
     error = PermissionError(13, "synthetic removal failure", "locked.exe")
     if winerror is not None:
-        error.winerror = winerror
+        object.__setattr__(error, "winerror", winerror)
     return error
+
+
+def windows_error_code(error: OSError) -> int | None:
+    value = getattr(error, "winerror", None)
+    return value if isinstance(value, int) else None
 
 
 class RetryPolicyTests(unittest.TestCase):
@@ -250,7 +255,7 @@ class WindowsLockTests(unittest.TestCase):
         handle = self.hold_open(directory)
         with self.assertRaises(PermissionError) as raised:
             directory.cleanup()
-        self.assertEqual(raised.exception.winerror, ERROR_SHARING_VIOLATION)
+        self.assertEqual(windows_error_code(raised.exception), ERROR_SHARING_VIOLATION)
         handle.close()
 
     def test_a_lock_released_within_the_bound_is_waited_out(self) -> None:
@@ -270,7 +275,7 @@ class WindowsLockTests(unittest.TestCase):
         handle = self.hold_open(directory)
         with self.assertRaises(PermissionError) as raised:
             directory.cleanup()
-        self.assertEqual(raised.exception.winerror, ERROR_SHARING_VIOLATION)
+        self.assertEqual(windows_error_code(raised.exception), ERROR_SHARING_VIOLATION)
         self.assertIn("still locked after 0.3 s", raised.exception.__notes__[0])
         self.assertTrue(os.path.exists(directory.name))
         handle.close()

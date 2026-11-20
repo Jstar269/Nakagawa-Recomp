@@ -75,7 +75,7 @@ def _addr(text: str) -> int:
 def c_signature(text: str) -> dict:
     """The same facts, read from emit_function's C for one function."""
     # Each TAIL record, with a `_t` or `s->pc` target bound to the literal it was loaded from.
-    tails = []
+    tails: list[tuple[int | None, str | None]] = []
     for match in re.finditer(r"(?:uint32_t _t = (0x[0-9a-f]{8}u); )?(?:s->pc = (0x[0-9a-f]{8}u); )?"
                              r"sr_tail_record\(s, ([^,]+), ([^,]+),", text):
         loaded_t, loaded_pc, target, fn = match.groups()

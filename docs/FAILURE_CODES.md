@@ -99,6 +99,7 @@ The **Where** column of each table names the places a code can appear:
 | --- | --- | --- |
 | `CONTEXT_REQUIRED` | decrypt, player | The file is bound to the console that installed it (its fuse ID), which Nakagawa cannot take, so it is refused. |
 | `DECOMPRESS_FAILURE` | decrypt, player | The decrypted payload does not decompress; the file looks damaged or changed. |
+| `DISC_DECRYPT_MEMBER_MISSING` | decrypt | An encrypted file found on the disc image was gone when the tools came to decrypt it: the image changed or was cut short during the run. The disc's other files are still decrypted. |
 | `FIRMWARE_OUT_OF_SCOPE` | decrypt, player | The file is PSP system software. Nakagawa never decrypts firmware. |
 | `INTEGRITY_FAILURE` | decrypt, player | The file's signature or hash check failed; the file looks damaged or changed. |
 | `IO_FAILURE` | decrypt, player | The input could not be read or the output could not be written. |

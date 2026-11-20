@@ -335,6 +335,7 @@ class PgfValidatorParityTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
+        assert CC is not None
         cls.tmp = scratch_dir.TemporaryDirectory(prefix="pgf_parity_")
         exe_name = "pgf_verdict_harness.exe" if sys.platform == "win32" else "pgf_verdict_harness"
         cls.exe = Path(cls.tmp.name) / exe_name

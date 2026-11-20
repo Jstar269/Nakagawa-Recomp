@@ -2439,14 +2439,15 @@ def inspect_compatibility_preflight(
     decrypted_elf: Path | None = None
     decrypted_elf_kind = "MISSING"
     if module_dir is not None:
-        candidate_elf: Path | None = module_dir / "EBOOT.elf"
+        candidate_elf = module_dir / "EBOOT.elf"
         try:
             candidate_elf.resolve(strict=False).relative_to(root.expanduser().resolve(strict=False))
         except ValueError:
-            candidate_elf = None
-        if candidate_elf is not None and candidate_elf.is_file():
-            decrypted_elf = candidate_elf
-            decrypted_elf_kind = _classify_decrypted_elf_file(candidate_elf)
+            pass
+        else:
+            if candidate_elf.is_file():
+                decrypted_elf = candidate_elf
+                decrypted_elf_kind = _classify_decrypted_elf_file(candidate_elf)
     if cfw_loader_detected:
         selected = (
             "EBOOT.elf"

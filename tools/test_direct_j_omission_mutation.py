@@ -184,6 +184,8 @@ int main(void) {{
 
 def _generate_compile_run(codegen_path: Path, work: Path, target: int, owner: int,
                           cc: str | None = None) -> _Outcome:
+    compiler = cc or CC
+    assert compiler is not None, "gcc is required for the compiled mutation proof"
     elf = work / "direct_j.elf"
     generated = work / "direct_j.c"
     elf.write_bytes(_synthetic_elf({
@@ -211,7 +213,7 @@ def _generate_compile_run(codegen_path: Path, work: Path, target: int, owner: in
     exe = work / "direct_j.exe"
     compile_result = subprocess.run(
         [
-            cc or CC, "-std=c11", "-O0", "-Wall", "-Wextra", "-I", str(work),
+            compiler, "-std=c11", "-O0", "-Wall", "-Wextra", "-I", str(work),
             str(work / "harness.c"), str(generated),
             *(str(path) for path in chunks), "-lm", "-o", str(exe),
         ],

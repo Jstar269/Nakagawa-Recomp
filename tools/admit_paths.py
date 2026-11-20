@@ -119,6 +119,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from typing import TypedDict, cast
 
 TOOLS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
@@ -166,6 +167,32 @@ class AdmitError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class RemainingStepsInput(TypedDict):
+    paths: list[str]
+    pushed: bool
+    pr_worktree: Path
+    authority_root: Path
+
+
+class AdmissionResult(RemainingStepsInput):
+    statements: list[dict[str, object]]
+    base: str
+    candidate_commit: str
+    candidate_tree: str
+    admission_commit: str
+    admit_branch: str
+    candidate_policy_sha256: str
+    policy_delta_record: str
+    records: list[str]
+    record_bytes: dict[str, bytes]
+    replaceable: frozenset[str]
+    private_commit: str
+    ledger: bytes
+    slug: str
+    date: str
+    rekey: bool
 
 
 def _git(repo: Path, *args: str, stdin: bytes | None = None) -> bytes:
@@ -1050,7 +1077,7 @@ def admit(
     push: bool = False,
     rekey: bool = False,
     scratch_root: Path | None = None,
-) -> dict:
+) -> AdmissionResult:
     """Admit ``paths`` and write their V4 policy delta."""
     authority_root, authority_ledger, records = _authority_inputs(private_repo)
     resolved_date = date or datetime.date.today().isoformat()
@@ -1092,7 +1119,7 @@ def admit(
             ) from None
         pushed = True
     plan.update(records=record_paths, private_commit=private_commit, pushed=pushed)
-    return plan
+    return cast(AdmissionResult, plan)  # Preparation defines the other keys; the commit fills these three.
 
 
 def _batch_entries(document: object, *, resume: bool = False) -> list[dict]:
@@ -1751,7 +1778,7 @@ CONFLICT_PROCEDURE = (
 )
 
 
-def remaining_steps(result: dict) -> list[str]:
+def remaining_steps(result: RemainingStepsInput) -> list[str]:
     """The exact commands left after ``admit``, in order.
 
     One refresh on the pull request's own branch: it finds the V4 delta just written beside the
@@ -1932,7 +1959,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f'  {number}. git -C "{authority_root}" push origin main')
                 number += 1
             for entry in result["entries"]:
-                for step in remaining_steps({**entry, "pushed": True}):
+                steps_input = cast(
+                    RemainingStepsInput, {**entry, "pushed": True}
+                )  # admit_batch constructs every entry with these required fields.
+                for step in remaining_steps(steps_input):
                     print(f"  {number}. {step}")
                     number += 1
             print(CONFLICT_PROCEDURE)
@@ -1942,7 +1972,7 @@ def main(argv: list[str] | None = None) -> int:
             raise AdmitError("ADMIT_ARGUMENT_INVALID", "pass <pr-worktree> and at least one path, or use --batch/--merge-profile")
         if args.private_repo is None:
             raise AdmitError("AUTHORITY_REQUIRED", "pass --private-repo or set NK_PRIVATE_AUTHORITY")
-        result = admit(
+        admission_result = admit(
             pr_worktree=args.pr_worktree, paths=args.paths, approval_basis=args.approval_basis,
             private_repo=args.private_repo, base=args.base, slug=args.slug, date=args.date,
             origins=_origins(args), assisted_by=args.assisted_by, push=args.push, rekey=args.rekey,
@@ -1950,19 +1980,19 @@ def main(argv: list[str] | None = None) -> int:
     except (AdmitError, RefreshError) as error:
         print(f"admit paths: {error.code}: {error}", file=sys.stderr)
         return 1
-    print(f"admit paths: admitted {len(result['paths'])} path(s) on base {result['base']}")
-    for statement in result["statements"]:
+    print(f"admit paths: admitted {len(admission_result['paths'])} path(s) on base {admission_result['base']}")
+    for statement in admission_result["statements"]:
         print(f"  {statement['path']}: {statement['classification']} (bound to its "
               f"{'bytes' if statement_binding(statement) == 'bytes' else 'claim'})")
-    print(f"  candidate profile sha256 {result['candidate_policy_sha256']}")
-    print(f"  V4 policy delta {result['policy_delta_record']}")
-    print(f"  private records ({'pushed' if result['pushed'] else 'committed locally'} at "
-          f"{result['private_commit'][:12]}):")
-    for record in result["records"]:
+    print(f"  candidate profile sha256 {admission_result['candidate_policy_sha256']}")
+    print(f"  V4 policy delta {admission_result['policy_delta_record']}")
+    print(f"  private records ({'pushed' if admission_result['pushed'] else 'committed locally'} at "
+          f"{admission_result['private_commit'][:12]}):")
+    for record in admission_result["records"]:
         print(f"    {record}")
-    print(f"  admission commit {result['admission_commit']} on local branch {result['admit_branch']}")
+    print(f"  admission commit {admission_result['admission_commit']} on local branch {admission_result['admit_branch']}")
     print("\nLeft to do, in order:")
-    for number, step in enumerate(remaining_steps(result), 1):
+    for number, step in enumerate(remaining_steps(admission_result), 1):
         print(f"  {number}. {step}")
     print(CONFLICT_PROCEDURE)
     return 0

@@ -6,17 +6,21 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
-import sys
 import subprocess
+import sys
 import tempfile
 from typing import Any
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+ROOT = Path(__file__).resolve().parents[1]
+# The repository root resolves `tools.`; the tools folder resolves bare sibling imports.
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools"))
 
-import psp_issue_matrix
+from tools import psp_issue_matrix  # noqa: E402
 
 
 class PspIssueMatrixTests(unittest.TestCase):
@@ -316,6 +320,18 @@ class PspIssueMatrixTests(unittest.TestCase):
         self.assertEqual(
             [f for f in findings if f["code"] in {"oracle_link_disagreement", "dependency_cycle"}], []
         )
+
+
+    def test_file_imports_when_run_as_a_script(self) -> None:
+        # Script mode puts only tools/ on sys.path, never the repository root or the cwd.
+        env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+        with tempfile.TemporaryDirectory() as tmp:
+            run = subprocess.run(
+                [sys.executable, "-s", str(Path(__file__).resolve()), "--help"],
+                cwd=tmp, env=env, capture_output=True, text=True, check=False, timeout=120,
+            )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertNotIn("ModuleNotFoundError", run.stderr)
 
 
 if __name__ == "__main__":
