@@ -37,8 +37,24 @@
 #define MAX_PATH_LEN NK_MAX_PATH
 #define MAX_DISC_ID_LEN NK_MAX_DISC_ID_LEN
 #define MAX_SHOWCASE_GAMES 8
-#define PLAYER_ACHIEVEMENTS_LIST_MAX 64u
-#define PLAYER_ACHIEVEMENT_LINE_MAX 176u
+/* The rows a game's page lists: every achievement of a set this large, the rest counted. */
+#define PLAYER_ACHIEVEMENTS_LIST_MAX 256u
+#define PLAYER_ACHIEVEMENT_TITLE_MAX 128u
+#define PLAYER_ACHIEVEMENT_DESCRIPTION_MAX 192u
+#define PLAYER_ACHIEVEMENT_BADGE_NAME_MAX 8u
+
+struct NkUiImage;
+/* One achievement as the game's page lists it. The text is the bridge's, already cleaned. */
+typedef struct PlayerAchievementRow {
+    char title[PLAYER_ACHIEVEMENT_TITLE_MAX];
+    char description[PLAYER_ACHIEVEMENT_DESCRIPTION_MAX];
+    char badge_name[PLAYER_ACHIEVEMENT_BADGE_NAME_MAX]; /* "" when the set gave none usable */
+    uint32_t points;
+    bool unlocked;
+    /* The badge picture for this row's state, decoded, or NULL while there is none: the page
+       draws its own icon then. The player's badge store owns it (src/player/main.c). */
+    const struct NkUiImage *badge;
+} PlayerAchievementRow;
 
 typedef enum {
     VIEW_LIBRARY = 0,
@@ -964,12 +980,16 @@ struct PlayerApp {
     bool achievements_signed_in;
     char achievements_account[64];
     char achievements_status[192];
-    /* A bounded, memory-only preview for the currently identified game's page. */
+    /* A bounded, memory-only preview for the currently identified game's page: the unlocked
+       first, then the locked (nk_ach_copy_achievement_list), and the set's progress. */
     bool achievements_list_loaded;
     char achievements_list_disc_id[MAX_DISC_ID_LEN];
-    char achievements_list_lines[PLAYER_ACHIEVEMENTS_LIST_MAX][PLAYER_ACHIEVEMENT_LINE_MAX];
+    PlayerAchievementRow achievements_list[PLAYER_ACHIEVEMENTS_LIST_MAX];
     size_t achievements_list_count;
     size_t achievements_list_total;
+    uint32_t achievements_unlocked;
+    uint32_t achievements_points_unlocked;
+    uint32_t achievements_points_total;
 
     /* Native core state */
     NkLibrary library;

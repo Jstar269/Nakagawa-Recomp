@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -233,14 +234,69 @@ bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *ch
                                                         uint32_t *seen_sequence,
                                                         char *text, size_t text_size);
 /* A RetroAchievements unlock (#1316) is the message this begins, followed by the achievement's
- * title. The in-game toast captions it "RetroAchievements"; any other message keeps the caption
+ * title, then a line feed and its points in decimal, then a line feed and its badge name (empty
+ * when it has none): "Achievement unlocked: First Steps\n5\n00001". The title holds no line feed
+ * (the bridge turns control characters into spaces), so the fields cannot run together. The
+ * in-game toast captions it "RetroAchievements"; any other message keeps the caption
  * "Host notification". */
 #define NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "Achievement unlocked: "
+#define NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX 160u
+#define NK_GUEST_MEMORY_NOTIFICATION_BADGE_MAX 8u
 static inline const char *nk_guest_memory_notification_caption(const char *text) {
     static const char unlocked[] = NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED;
     size_t i = 0u;
     while (text && unlocked[i] && text[i] == unlocked[i]) i++;
     return text && !unlocked[i] && text[i] ? "RetroAchievements" : "Host notification";
+}
+
+/* An unlock message's fields. */
+typedef struct NkGuestUnlockNotice {
+    char title[NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX];
+    uint32_t points;
+    bool has_points;
+    char badge[NK_GUEST_MEMORY_NOTIFICATION_BADGE_MAX]; /* letters and digits only, or "" */
+} NkGuestUnlockNotice;
+
+/* True, with out filled, for an unlock message (the caption "RetroAchievements"). A message with
+ * no points line is an unlock with no points known; a badge name with anything but one to seven
+ * ASCII letters and digits is left empty. */
+static inline bool nk_guest_memory_notification_unlock(const char *text,
+                                                       NkGuestUnlockNotice *out) {
+    static const char unlocked[] = NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED;
+    if (!out) return false;
+    memset(out, 0, sizeof *out);
+    if (!text || strncmp(text, unlocked, sizeof unlocked - 1u) != 0 ||
+        !text[sizeof unlocked - 1u])
+        return false;
+    const char *p = text + sizeof unlocked - 1u;
+    size_t n = 0u;
+    while (p[n] && p[n] != '\n') n++;
+    if (n >= sizeof out->title) {
+        n = sizeof out->title - 1u;
+        while (n > 0u && ((unsigned char)p[n] & 0xC0u) == 0x80u) n--; /* a whole character */
+    }
+    memcpy(out->title, p, n);
+    out->title[n] = '\0';
+    p = strchr(p, '\n');
+    if (!p) return true;
+    p++;
+    uint32_t points = 0u;
+    size_t digits = 0u;
+    while (p[digits] >= '0' && p[digits] <= '9' && digits < 9u)
+        points = points * 10u + (uint32_t)(p[digits++] - '0');
+    if (digits && (p[digits] == '\n' || !p[digits])) {
+        out->points = points;
+        out->has_points = true;
+    }
+    p = strchr(p, '\n');
+    if (!p) return true;
+    p++;
+    size_t b = 0u;
+    while ((p[b] >= '0' && p[b] <= '9') || (p[b] >= 'a' && p[b] <= 'z') ||
+           (p[b] >= 'A' && p[b] <= 'Z'))
+        b++;
+    if (b > 0u && b < sizeof out->badge && !p[b]) memcpy(out->badge, p, b);
+    return true;
 }
 
 /* An exclusive lock on a file that other programs lock too: Win32 locks byte 0

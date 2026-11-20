@@ -51,8 +51,11 @@
 #include "overlay/overlay_host.h" /* the pause overlay's pages (C9c) */
 #include "gpu_sdl3vk/ace_ui.h"   /* Ace Mode's in-game UI: notice, readout, crisp keyboard */
 #include "nk_platform.h"         /* the system's Reduce motion, and SR_UI_ROOT in UTF-8 */
+#include "nk_ui_image.h"         /* an achievement toast's badge picture (#1316) */
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_render.h>
+/* The per-user data folder the launcher named (hle_host.c): the player's badge folder is in it. */
+void flash0_user_data_root(char *dst, size_t capacity);
 #endif
 #ifdef SR_GUI_PRESENT_SELFTEST
 #include "overlay/nk_overlay.h"  /* the pause display rows' actions and pacing choices */
@@ -877,6 +880,86 @@ static uint64_t s_ace_first_frame_ns;             /* the first accepted present:
 static char s_ace_words[ACE_WORDS_MAX];
 static char s_host_toast_text[NK_GUEST_MEMORY_NOTIFICATION_MAX];
 static uint64_t s_host_toast_until_ns;
+/* The toast's fields when it is an achievement unlock (#1316), and that achievement's badge
+ * picture when the player has it in its badge folder. The player downloads the badges once
+ * Achievements is on and the person is signed in, into <user data>/achievements-badges, the
+ * unlocked picture as <badge name>.png; this side only reads that folder, never the network.
+ * A picture that is missing, larger than a badge or not a PNG of at most 128 x 128 pixels leaves
+ * the toast's drawn trophy (the player's own limits, nk_achievements.h). */
+#define HOST_TOAST_BADGE_DIR "achievements-badges"
+#define HOST_TOAST_BADGE_MAX_BYTES (64u * 1024u)
+#define HOST_TOAST_BADGE_MAX_SIDE 128u
+static NkGuestUnlockNotice s_host_toast_unlock;
+static int s_host_toast_is_unlock;
+static char s_host_toast_detail[64];
+static NkUiImage s_host_toast_badge;
+static int s_host_toast_has_badge;
+static int s_host_toast_badge_refusal_named;
+
+static void gui_host_toast_badge_drop(void) {
+    if (s_host_toast_has_badge) nk_ui_image_free(&s_host_toast_badge);
+    memset(&s_host_toast_badge, 0, sizeof s_host_toast_badge);
+    s_host_toast_has_badge = 0;
+}
+
+/* The unlocked badge `name` (one to seven letters and digits, checked by the message parser)
+ * from the player's badge folder, decoded within the badge limits. A file that is not there is
+ * the usual case (not downloaded yet, or offline) and says nothing; one that is there but
+ * refused is named once per run. */
+static void gui_host_toast_badge_load(const char *name) {
+    gui_host_toast_badge_drop();
+    if (!name || !name[0]) return;
+    char root[1024];
+    char path[1200];
+    flash0_user_data_root(root, sizeof root);
+    if (!root[0]) return;
+    const char sep = nk_platform_path_separator();
+    const int n = snprintf(path, sizeof path, "%s%c%s%c%s.png", root, sep, HOST_TOAST_BADGE_DIR,
+                           sep, name);
+    if (n < 0 || (size_t)n >= sizeof path) return;
+    FILE *file = nk_fopen_utf8(path, "rb");
+    if (!file) return;
+    unsigned char *bytes = (unsigned char *)malloc(HOST_TOAST_BADGE_MAX_BYTES + 1u);
+    const size_t size = bytes ? fread(bytes, 1u, HOST_TOAST_BADGE_MAX_BYTES + 1u, file) : 0u;
+    fclose(file);
+    NkUiImageLimits limits;
+    memset(&limits, 0, sizeof limits);
+    limits.max_bytes = HOST_TOAST_BADGE_MAX_BYTES;
+    limits.max_width = HOST_TOAST_BADGE_MAX_SIDE;
+    limits.max_height = HOST_TOAST_BADGE_MAX_SIDE;
+    NkUiImageStatus status = bytes ? NK_UI_IMAGE_TOO_LARGE : NK_UI_IMAGE_DECODE_FAILED;
+    if (bytes && size <= HOST_TOAST_BADGE_MAX_BYTES)
+        status = nk_ui_image_decode_png(bytes, size, &limits, &s_host_toast_badge);
+    free(bytes);
+    if (status == NK_UI_IMAGE_OK) {
+        s_host_toast_has_badge = 1;
+        return;
+    }
+    memset(&s_host_toast_badge, 0, sizeof s_host_toast_badge);
+    if (!s_host_toast_badge_refusal_named) {
+        s_host_toast_badge_refusal_named = 1;
+        fprintf(stderr, "HOST_NOTIFICATION: an achievement badge in the badge folder was refused "
+                        "(%s); the toast shows its drawn trophy\n",
+                nk_ui_image_status_name(status));
+    }
+}
+
+/* A new message for the toast: an unlock's title, "N points · Softcore" and badge, or any other
+ * message as it came. */
+static void gui_host_toast_begin(void) {
+    s_host_toast_is_unlock =
+        nk_guest_memory_notification_unlock(s_host_toast_text, &s_host_toast_unlock) ? 1 : 0;
+    s_host_toast_detail[0] = '\0';
+    gui_host_toast_badge_drop();
+    if (!s_host_toast_is_unlock) return;
+    if (s_host_toast_unlock.has_points)
+        snprintf(s_host_toast_detail, sizeof s_host_toast_detail,
+                 "%u %s \xC2\xB7 Softcore", (unsigned)s_host_toast_unlock.points,
+                 s_host_toast_unlock.points == 1u ? "point" : "points");
+    else
+        snprintf(s_host_toast_detail, sizeof s_host_toast_detail, "Softcore");
+    gui_host_toast_badge_load(s_host_toast_unlock.badge);
+}
 
 /* ---- The player's local guest-memory channel -------------------------------------------------
  * A launch for which the player wants to read guest memory each frame names a local shared
@@ -978,17 +1061,29 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
         snprintf(s_host_toast_text, sizeof s_host_toast_text, "%s", notification);
         s_host_toast_until_ns = now <= UINT64_MAX - HOST_TOAST_NS
                                     ? now + HOST_TOAST_NS : UINT64_MAX;
+        gui_host_toast_begin();
     }
     if (s_host_toast_text[0] && now < s_host_toast_until_ns) {
-        /* "RetroAchievements" over an unlock, "Host notification" over anything else. */
-        f.host_toast_head = nk_guest_memory_notification_caption(s_host_toast_text);
-        f.host_toast = s_host_toast_text;
+        /* An unlock: "Achievement unlocked" over its title, then its points, with its badge or
+         * the drawn trophy. Anything else: "Host notification" over the message as it came. */
+        if (s_host_toast_is_unlock) {
+            f.host_toast_head = "Achievement unlocked";
+            f.host_toast = s_host_toast_unlock.title;
+            f.host_toast_detail = s_host_toast_detail;
+            f.host_toast_badge = s_host_toast_has_badge ? &s_host_toast_badge : NULL;
+            f.host_toast_unlock = 1;
+        } else {
+            f.host_toast_head = nk_guest_memory_notification_caption(s_host_toast_text);
+            f.host_toast = s_host_toast_text;
+        }
         f.host_toast_alpha = 1.0f;
         if (!f.reduce_motion && s_host_toast_until_ns - now < 300000000ull)
             f.host_toast_alpha = (float)(s_host_toast_until_ns - now) / 300000000.0f;
     } else {
         s_host_toast_text[0] = '\0';
         s_host_toast_until_ns = 0u;
+        s_host_toast_is_unlock = 0;
+        gui_host_toast_badge_drop();
     }
     if (!ace_ui_frame_wants(&f)) return 0;
     AceUiTarget t;

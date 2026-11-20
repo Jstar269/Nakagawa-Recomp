@@ -1102,13 +1102,30 @@ typedef struct {
     float logical_height;
 } PlayerUiErrorModel;
 
+/* One achievement on a game's page: title, description, points, whether it is unlocked, and
+   its badge picture when one was fetched (NULL: the page draws a trophy or a padlock). */
+typedef struct {
+    const char *title;
+    const char *description;
+    uint32_t points;
+    bool unlocked;
+    const struct NkUiImage *badge;
+} PlayerUiAchievementRow;
+
 typedef struct {
     const PlayerUiTitle *title;
     size_t title_index;
     const char *achievements_status; /* the signed-in game's softcore status, or NULL */
-    const char *achievement_lines[64];
+    /* Why nothing is earned now (cheats on, the 60 FPS game-logic package), or NULL: the card
+       shows it in the notice shape, with an icon and no points. */
+    const char *achievements_notice;
+    /* The set's rows, unlocked first, and its progress; count 0 with no set loaded. */
+    const PlayerUiAchievementRow *achievement_rows;
     size_t achievement_count;
     size_t achievement_total;
+    uint32_t achievements_unlocked;
+    uint32_t achievements_points_unlocked;
+    uint32_t achievements_points_total;
     /* With more in the set than the page lists: how many it shows and where to see the rest. */
     char achievements_more[160];
     bool stalled_game_notice_visible;
@@ -1411,6 +1428,12 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                                         const PlayerUiLibraryModel *model);
 PlayerUiAction player_ui_screen_title(NkUi *ui,
                                       const PlayerUiTitleModel *model);
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+/* After a frame of the title page, for a UI regression run: prints each drawn achievement row's
+   state, whether it has its icon slot, and whether a part was clipped (scr_title.c). */
+void player_ui_title_report_achievement_rows(const NkUiDrawList *list, size_t count,
+                                             const PlayerUiAchievementRow *rows);
+#endif
 PlayerUiAction player_ui_screen_build(NkUi *ui, const PlayerUiBuildModel *model);
 
 /* Remove from library (#1304): what goes, with sizes, and the saves box. */

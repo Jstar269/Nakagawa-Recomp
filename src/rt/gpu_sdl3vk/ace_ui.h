@@ -70,9 +70,18 @@ typedef struct {
     const char *host_notice_head;
     const char *host_notice;
     const char *host_notice_hint;
-    /* A short-lived message from the local player process, in a top-right chip. */
+    /* A short-lived message from the local player process, in a top-right toast of a fixed
+     * width with an accent edge: an icon slot at the left, then host_toast_head (the eyebrow, in
+     * the accent), host_toast (an unlock's title in the strong style, else the message; two lines
+     * at most, ending in an ellipsis), and host_toast_detail under it in the dim style ("25 points
+     * Â· Softcore"; NULL for none). The slot shows host_toast_badge (the achievement's
+     * badge picture, which must outlive the frame) or, without one, a trophy drawn from the UI's
+     * shapes for an unlock (host_toast_unlock) and an exclamation mark for any other message. */
     const char *host_toast_head;
     const char *host_toast;
+    const char *host_toast_detail;
+    const struct NkUiImage *host_toast_badge;
+    int host_toast_unlock;
     float host_toast_alpha;
 } AceUiFrame;
 
@@ -141,7 +150,15 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *frame);
 #define ACE_UI_ID_HOST_TOAST_ROW ACE_UI_ID(0x0F9u)
 #define ACE_UI_ID_HOST_TOAST ACE_UI_ID(0x0FAu)
 #define ACE_UI_ID_HOST_TOAST_HEAD ACE_UI_ID(0x0FBu)
-#define ACE_UI_ID_HOST_TOAST_TEXT ACE_UI_ID(0x0FCu)
+#define ACE_UI_ID_HOST_TOAST_TEXT ACE_UI_ID(0x0FCu)  /* + line, below ACE_UI_HOST_TOAST_LINES */
+#define ACE_UI_ID_HOST_TOAST_EDGE ACE_UI_ID(0x0D0u)  /* the accent edge */
+#define ACE_UI_ID_HOST_TOAST_SLOT ACE_UI_ID(0x0D1u)  /* the icon slot */
+#define ACE_UI_ID_HOST_TOAST_ICON ACE_UI_ID(0x0D2u)  /* its badge picture or drawn glyph */
+#define ACE_UI_ID_HOST_TOAST_WORDS ACE_UI_ID(0x0D3u) /* the column of eyebrow, title and detail */
+#define ACE_UI_ID_HOST_TOAST_DETAIL ACE_UI_ID(0x0D4u)
+/* The toast's width when the window has room, and its icon slot's side, in layout px. */
+#define ACE_UI_HOST_TOAST_WIDTH 400.0f
+#define ACE_UI_HOST_TOAST_ICON 48.0f
 /* The render notice's words wrap to at most this many lines; more ends in an ellipsis. */
 #define ACE_UI_HOST_NOTICE_LINES 3
 #define ACE_UI_HOST_TOAST_LINES 2

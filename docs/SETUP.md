@@ -1511,13 +1511,22 @@ make is listed below, and each is opt-in.
 | Build-tool download | `www.python.org`, `repo.msys2.org` (HTTPS) | Only after you select **DOWNLOAD** on the BUILD PACKAGE consent card | That consent card, per build |
 | Check for updates | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
 | Update download | `github.com`, which redirects to `release-assets.githubusercontent.com` (HTTPS) | Only after a check finds a newer version and you select **DOWNLOAD** | That button, per download |
-| RetroAchievements | `retroachievements.org` (HTTPS) | Only after you enable **Achievements** in Settings > Online and developer options and accept the consent screen; sign-in, achievement-set, session, unlock and Rich Presence requests follow while it is enabled | The Achievements switch and its consent screen |
+| RetroAchievements | `retroachievements.org`, and `media.retroachievements.org` for badge pictures (HTTPS) | Only after you enable **Achievements** in Settings > Online and developer options and accept the consent screen; sign-in, achievement-set, session, unlock and Rich Presence requests follow while it is enabled, and the badge pictures of a loaded set while you are signed in | The Achievements switch and its consent screen |
 | Download cover art | `thumbnails.libretro.com` (HTTPS) | When **Download cover art** is on (Settings > Online and developer, off by default), once per verified Redump disc not yet cached | That switch, and **Refresh cover art** (Settings > Build tools and cache) |
 
-**RetroAchievements** is off by default. Its consent screen names `retroachievements.org` and the data sent:
+**RetroAchievements** is off by default. Its consent screen names `retroachievements.org` and
+`media.retroachievements.org` and the data sent:
 your RetroAchievements user name and API token, the game hash, achievement unlocks and Rich Presence text,
 which a running game sends every two minutes. Leaderboard entries are not sent. Every request goes to
-`https://retroachievements.org/dorequest.php`; no image or other host is contacted. During sign-in, your user name and password are sent once to obtain the token; the
+`https://retroachievements.org/dorequest.php`, except the achievement badge pictures: while you are
+signed in, the player asks `https://media.retroachievements.org/Badge/<badge>.png` (`<badge>_lock.png`
+for a locked achievement) for each badge of the loaded set, one at a time and each at most once per
+session, with a plain GET that carries only the user agent below: no user name, token, cookie or
+console ID. A picture that does not come, is larger than 64 KB or 128 x 128 pixels, or is not a PNG is
+not shown; the game's page and the in-game notice draw their own icon instead. Fetched pictures are kept
+in the `achievements-badges` folder under the player data folder (at most 2,048 files). **Sign out**
+deletes that folder; turning **Achievements** off fetches nothing more and leaves it until the next
+**Sign out**, and you can delete it yourself at any time. No other host is contacted. During sign-in, your user name and password are sent once to obtain the token; the
 password is not saved. The token is kept in Windows Credential Manager. Other platforms without that
 credential store refuse sign-in. Nakagawa identifies a game by hashing the raw `PSP_GAME/PARAM.SFO` and
 `PSP_GAME/SYSDIR/EBOOT.BIN` bytes from your readable disc image, in that order; it does not decrypt them for

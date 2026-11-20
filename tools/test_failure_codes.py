@@ -197,6 +197,8 @@ PLAYER_NOT_CODES = {
     # disc folders, PARAM.SFO keys, module and folder names, file magic and disc-format names
     "EXTRACTED", "KMODULE", "PPSSPP", "SYSDIR", "TEST", "TITLE", "USRDIR", "CD001", "CISO", "CSO",
     "ELF", "IHDR", "ZISO", "ZSO",
+    # PNG chunk names of the UI test's synthetic sample badges (player_ui_test.c)
+    "IDAT", "IEND",
 }
 #: Environment variable names.
 PLAYER_NOT_CODE_PREFIXES = ("NK_", "SR_", "XDG_", "NAKAGAWA_", "PLAYER_UI_TEST_")

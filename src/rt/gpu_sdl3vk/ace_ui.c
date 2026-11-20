@@ -9,6 +9,7 @@
 #include "ace_ui.h"
 
 #include "nk_ui_theme.h"
+#include "nk_ui_widgets.h"
 #include "backend/nk_ui_vk.h"
 
 #include <stdio.h>
@@ -358,36 +359,140 @@ static void host_notice_layout(NkUi *ui, const NkUiTheme *theme, const AceUiFram
     nk_ui_end_container(ui);
 }
 
+/* The toast's glyphs when it has no badge picture, drawn from the UI's own shapes in a 48 x 48
+ * box as the launcher's achievement card draws them (src/player/ui/scr_title.c): a filled
+ * trophy for an unlock and an exclamation mark in a ring for any other message. A ring is a
+ * filled circle with the slot's fill inside it. Static: nk_ui_shapes keeps the pointer until the
+ * frame is drawn; the colours are set each frame. */
+static NkUiShape s_toast_trophy[] = {
+    {NK_UI_SHAPE_CIRCLE, 0u, 0.0f, 0u, {12.5f, 17.0f, 5.5f}},
+    {NK_UI_SHAPE_CIRCLE, 0u, 0.0f, 0u, {12.5f, 17.0f, 3.0f}},
+    {NK_UI_SHAPE_CIRCLE, 0u, 0.0f, 0u, {35.5f, 17.0f, 5.5f}},
+    {NK_UI_SHAPE_CIRCLE, 0u, 0.0f, 0u, {35.5f, 17.0f, 3.0f}},
+    {NK_UI_SHAPE_RECT, 0u, 1.5f, 0u, {13.0f, 8.0f, 22.0f, 4.0f}},
+    {NK_UI_SHAPE_POLY, 0u, 0.0f, 4u, {14.5f, 11.0f, 33.5f, 11.0f, 32.0f, 24.0f, 16.0f, 24.0f}},
+    {NK_UI_SHAPE_CIRCLE, 0u, 0.0f, 0u, {24.0f, 23.5f, 8.0f}},
+    {NK_UI_SHAPE_RECT, 0u, 0.0f, 0u, {22.0f, 30.0f, 4.0f, 6.0f}},
+    {NK_UI_SHAPE_RECT, 0u, 1.5f, 0u, {16.5f, 35.5f, 15.0f, 4.0f}},
+    {NK_UI_SHAPE_RECT, 0u, 1.5f, 0u, {14.0f, 39.0f, 20.0f, 3.5f}},
+};
+static const int s_toast_trophy_ground[] = {0, 1, 0, 1, 0, 0, 0, 0, 0, 0};
+static NkUiShape s_toast_mark[] = {
+    {NK_UI_SHAPE_CIRCLE, 0u, 0.0f, 0u, {24.0f, 24.0f, 15.0f}},
+    {NK_UI_SHAPE_CIRCLE, 0u, 0.0f, 0u, {24.0f, 24.0f, 12.5f}},
+    {NK_UI_SHAPE_RECT, 0u, 1.4f, 0u, {22.6f, 15.0f, 2.8f, 11.5f}},
+    {NK_UI_SHAPE_CIRCLE, 0u, 0.0f, 0u, {24.0f, 31.5f, 1.9f}},
+};
+static const int s_toast_mark_ground[] = {0, 1, 0, 0};
+
+/* The toast: a fixed width (ACE_UI_HOST_TOAST_WIDTH, less where the window is narrower), at the
+ * top right where it always stood, on the chip's opaque dark fill so it reads over a bright game
+ * frame, with an accent edge down its left side. The icon slot, then the eyebrow in the accent,
+ * the title in the strong style on at most two lines (an ellipsis ends a longer one), and the
+ * detail in the dim style. It fades out with host_toast_alpha. */
 static void host_toast_layout(NkUi *ui, const NkUiTheme *theme, const AceUiFrame *f,
                               float logical_w) {
+    const float a = f->host_toast_alpha;
+    const float edge = 4.0f;
     float chip_w = logical_w - 2.0f * NK_UI_SPACE_4;
-    if (chip_w > 440.0f) chip_w = 440.0f;
-    const float inner = chip_w - 2.0f * NK_UI_SPACE_3;
+    if (chip_w > ACE_UI_HOST_TOAST_WIDTH) chip_w = ACE_UI_HOST_TOAST_WIDTH;
+    const float side = ACE_UI_HOST_TOAST_ICON;
+    const float inner = chip_w - edge - side - 2.0f * NK_UI_SPACE_3 - NK_UI_SPACE_3;
     NkUiLayout row = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_GROW, 0.0f),
                             sizing(NK_UI_SIZE_FIT, 0.0f), 0.0f);
     row.align_x = NK_UI_ALIGN_END;
     if (!nk_ui_begin_container(ui, ACE_UI_ID_HOST_TOAST_ROW, &row, NULL)) return;
-    NkUiLayout chip = layout(NK_UI_LAYOUT_COLUMN, sizing(NK_UI_SIZE_FIXED, chip_w),
-                             sizing(NK_UI_SIZE_FIT, 0.0f), 2.0f);
-    chip.padding_left = chip.padding_right = NK_UI_SPACE_3;
-    chip.padding_top = chip.padding_bottom = NK_UI_SPACE_2;
-    NkUiStyle style = chip_style(theme, f->high_contrast, f->host_toast_alpha);
+    NkUiLayout chip = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_FIXED, chip_w),
+                             sizing(NK_UI_SIZE_FIT, 0.0f), NK_UI_SPACE_3);
+    chip.padding_right = NK_UI_SPACE_3;
+    chip.align_y = NK_UI_ALIGN_CENTER;
+    NkUiStyle style = chip_style(theme, f->high_contrast, a);
     if (nk_ui_begin_container(ui, ACE_UI_ID_HOST_TOAST, &chip, &style)) {
-        NkUiTextStyle head = nk_ui_type(NK_UI_TYPE_LABEL_S,
-                                        faded(theme->accent_dark, f->host_toast_alpha));
-        NkUiTextStyle words = nk_ui_type(NK_UI_TYPE_BODY_S,
-                                         faded(theme->paper, f->host_toast_alpha));
-        head.wrap = false;
-        words.wrap = false;
-        if (f->host_toast_head && f->host_toast_head[0])
-            nk_ui_text(ui, ACE_UI_ID_HOST_TOAST_HEAD,
-                       one_line(ui, nk_ui_text_clamp(ui, f->host_toast_head, &head, inner, 1)),
-                       &head);
-        const char *rest = f->host_toast;
-        for (int line = 0; line < ACE_UI_HOST_TOAST_LINES && rest && rest[0]; line++)
-            nk_ui_text(ui, ACE_UI_ID_HOST_TOAST_TEXT + (NkUiId)line,
-                       words_line(ui, &rest, &words, inner,
-                                  line + 1 == ACE_UI_HOST_TOAST_LINES), &words);
+        /* The accent edge, as tall as the toast. */
+        NkUiLayout bar = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_FIXED, edge),
+                                sizing(NK_UI_SIZE_GROW, 0.0f), 0.0f);
+        NkUiStyle accent;
+        memset(&accent, 0, sizeof(accent));
+        accent.fill_rgba = faded(theme->accent_dark, a);
+        accent.corner_radius = NK_UI_RADIUS_CHIP;
+        accent.square_corners = NK_UI_CORNER_SQUARE_TR | NK_UI_CORNER_SQUARE_BR;
+        if (nk_ui_begin_container(ui, ACE_UI_ID_HOST_TOAST_EDGE, &bar, &accent))
+            nk_ui_end_container(ui);
+        /* The icon slot: the badge, or the drawn glyph. */
+        NkUiLayout slot = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_FIXED, side),
+                                 sizing(NK_UI_SIZE_FIXED, side), 0.0f);
+        slot.align_x = NK_UI_ALIGN_CENTER;
+        slot.align_y = NK_UI_ALIGN_CENTER;
+        NkUiStyle frame;
+        memset(&frame, 0, sizeof(frame));
+        frame.fill_rgba = faded(theme->surface_raised, a);
+        frame.border_rgba = faded(f->host_toast_unlock ? theme->accent_dark : theme->line_strong, a);
+        frame.border_width = f->host_toast_unlock ? 2.0f : NK_UI_BORDER_HAIRLINE;
+        frame.corner_radius = NK_UI_RADIUS_CONTROL;
+        /* The slot sits inside the toast's vertical padding. */
+        NkUiLayout pad = layout(NK_UI_LAYOUT_COLUMN, sizing(NK_UI_SIZE_FIT, 0.0f),
+                                sizing(NK_UI_SIZE_FIT, 0.0f), 0.0f);
+        pad.padding_top = pad.padding_bottom = NK_UI_SPACE_3;
+        if (nk_ui_begin_container(ui, nk_ui_child_id(ACE_UI_ID_HOST_TOAST_SLOT, 1u), &pad, NULL)) {
+            if (nk_ui_begin_container(ui, ACE_UI_ID_HOST_TOAST_SLOT, &slot, &frame)) {
+                if (f->host_toast_badge) {
+                    NkUiImageArt art;
+                    memset(&art, 0, sizeof(art));
+                    art.contain = f->host_toast_badge;
+                    art.contain_scale = 1.0f;
+                    (void)nk_ui_image_art(ui, ACE_UI_ID_HOST_TOAST_ICON,
+                                          sizing(NK_UI_SIZE_FIXED, side - 8.0f),
+                                          sizing(NK_UI_SIZE_FIXED, side - 8.0f), &art);
+                } else {
+                    NkUiShape *shapes = f->host_toast_unlock ? s_toast_trophy : s_toast_mark;
+                    const int *ground = f->host_toast_unlock ? s_toast_trophy_ground
+                                                             : s_toast_mark_ground;
+                    const size_t count = f->host_toast_unlock
+                                             ? sizeof(s_toast_trophy) / sizeof(s_toast_trophy[0])
+                                             : sizeof(s_toast_mark) / sizeof(s_toast_mark[0]);
+                    const uint32_t ink = f->host_toast_unlock ? theme->accent_dark : theme->muted;
+                    for (size_t i = 0; i < count; i++)
+                        shapes[i].rgba = faded(ground[i] ? theme->surface_raised : ink, a);
+                    NkUiShapeArt art;
+                    memset(&art, 0, sizeof(art));
+                    art.view_w = 48.0f;
+                    art.view_h = 48.0f;
+                    art.shapes = shapes;
+                    art.count = count;
+                    (void)nk_ui_shapes(ui, ACE_UI_ID_HOST_TOAST_ICON,
+                                       sizing(NK_UI_SIZE_FIXED, side - 6.0f),
+                                       sizing(NK_UI_SIZE_FIXED, side - 6.0f), &art);
+                }
+                nk_ui_end_container(ui);
+            }
+            nk_ui_end_container(ui);
+        }
+        NkUiLayout column = layout(NK_UI_LAYOUT_COLUMN, sizing(NK_UI_SIZE_FIXED, inner),
+                                   sizing(NK_UI_SIZE_FIT, 0.0f), 2.0f);
+        column.padding_top = column.padding_bottom = NK_UI_SPACE_3;
+        if (nk_ui_begin_container(ui, ACE_UI_ID_HOST_TOAST_WORDS, &column, NULL)) {
+            NkUiTextStyle head = nk_ui_type(NK_UI_TYPE_LABEL_S, faded(theme->accent_dark, a));
+            NkUiTextStyle words = nk_ui_type(NK_UI_TYPE_TILE_TITLE, faded(theme->paper, a));
+            NkUiTextStyle detail = nk_ui_type(NK_UI_TYPE_CAPTION, faded(theme->muted, a));
+            head.wrap = false;
+            words.wrap = false;
+            detail.wrap = false;
+            if (f->host_toast_head && f->host_toast_head[0])
+                nk_ui_text(ui, ACE_UI_ID_HOST_TOAST_HEAD,
+                           one_line(ui, nk_ui_text_clamp(ui, f->host_toast_head, &head, inner, 1)),
+                           &head);
+            const char *rest = f->host_toast;
+            for (int line = 0; line < ACE_UI_HOST_TOAST_LINES && rest && rest[0]; line++)
+                nk_ui_text(ui, ACE_UI_ID_HOST_TOAST_TEXT + (NkUiId)line,
+                           words_line(ui, &rest, &words, inner,
+                                      line + 1 == ACE_UI_HOST_TOAST_LINES), &words);
+            if (f->host_toast_detail && f->host_toast_detail[0])
+                nk_ui_text(ui, ACE_UI_ID_HOST_TOAST_DETAIL,
+                           one_line(ui, nk_ui_text_clamp(ui, f->host_toast_detail, &detail,
+                                                         inner, 1)),
+                           &detail);
+            nk_ui_end_container(ui);
+        }
         nk_ui_end_container(ui);
     }
     nk_ui_end_container(ui);

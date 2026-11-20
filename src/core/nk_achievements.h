@@ -9,7 +9,9 @@
  *
  * This module is the bridge between rc_client and Nakagawa. It holds no network code and opens
  * no connection: every request rc_client makes reaches the caller's NkAchTransport, and only
- * after nk_ach_url_allowed() has passed its URL. The caller is the one place that may carry it
+ * after nk_ach_url_allowed() has passed its URL; the one other request, a badge picture's
+ * (nk_ach_request_badge), goes the same way after nk_ach_badge_url_allowed() has passed its
+ * URL on RetroAchievements' media host. The caller is the one place that may carry it
  * to the network, as an opt-in feature the user turned on (AGENTS.md section 5; the "Network
  * use" table in docs/SETUP.md lists it once that transport ships). With no transport, nothing
  * is sent and every request fails as a refused client call.
@@ -32,6 +34,11 @@ extern "C" {
  * "https://retroachievements.org" (src/rapi/rc_api_common.c), and this bridge never changes it. */
 #define NK_ACH_HOST "retroachievements.org"
 #define NK_ACH_URL_PREFIX "https://" NK_ACH_HOST "/"
+
+/* An achievement's badge name: what rc_client keeps of the server's "BadgeName" (rc_client.h,
+ * rc_client_achievement_t.badge_name, 8 bytes), here only when it is one to seven ASCII letters
+ * and digits (nk_ach_badge_name_ok); empty otherwise. */
+#define NK_ACH_BADGE_NAME_MAX 8u
 
 /* RetroAchievements' console ID for the PSP (rc_consoles.h RC_CONSOLE_PSP). Its memory map
  * (src/rcheevos/consoleinfo.c) puts RA address 0 at guest 0x08000000: kernel RAM, user RAM
@@ -114,6 +121,7 @@ typedef struct NkAchEvent {
     uint32_t count;    /* GAME_LOADED and UNLOCKS_DISCARDED only; 0 otherwise */
     char title[96];
     char message[160];
+    char badge_name[NK_ACH_BADGE_NAME_MAX]; /* UNLOCKED only, as NkAchAchievement's */
 } NkAchEvent;
 
 #define NK_ACH_EVENT_QUEUE 32u
@@ -132,9 +140,19 @@ typedef struct NkAchPendingUnlock {
 typedef struct NkAchAchievement {
     char title[NK_ACH_DISPLAY_TITLE_MAX];
     char description[NK_ACH_DISPLAY_DESCRIPTION_MAX];
+    char badge_name[NK_ACH_BADGE_NAME_MAX];
     uint32_t points;
     bool unlocked_softcore;
 } NkAchAchievement;
+
+/* The core set's progress for the signed-in account: rc_client's own count
+ * (rc_client_get_user_game_summary). */
+typedef struct NkAchProgress {
+    uint32_t unlocked;
+    uint32_t total;
+    uint32_t points_unlocked;
+    uint32_t points_total;
+} NkAchProgress;
 
 typedef struct NkAch NkAch;
 
@@ -294,10 +312,63 @@ typedef struct NkAchQueueLoad {
 } NkAchQueueLoad;
 bool nk_ach_load_queue_file(NkAch *ach, const char *path, NkAchQueueLoad *out);
 bool nk_ach_save_queue_file(NkAch *ach, const char *path);
-/* Copies only the official/core achievement set. `total` receives the full count even when
- * `out` is smaller; the caller owns all copied strings. */
+/* Copies only the official/core achievement set: the unlocked ones first, then the locked, each
+ * in the set's own order. `total` receives the full count even when `out` is smaller; the caller
+ * owns all copied strings. */
 size_t nk_ach_copy_achievement_list(const NkAch *ach, NkAchAchievement *out, size_t max,
                                     size_t *total);
+/* False, with out zeroed, when no game is loaded. */
+bool nk_ach_copy_progress(const NkAch *ach, NkAchProgress *out);
+
+/* Badge pictures. An achievement's badge is a PNG on RetroAchievements' media host, at the URL
+ * rcheevos builds for it (src/rapi/rc_api_common.c, rc_api_init_fetch_image_request_hosted with
+ * no custom host, as rc_client_get_image_url does):
+ *   https://media.retroachievements.org/Badge/<badge name>.png       (unlocked)
+ *   https://media.retroachievements.org/Badge/<badge name>_lock.png  (locked)
+ * The server may name another URL in a set's "BadgeURL" and "BadgeLockedURL"; the bridge never
+ * uses those: it builds the URL from the badge name alone, so the media host above is the only
+ * one a badge request can name. A badge request is a GET with no post data, no cookie, no token,
+ * no account name and no console ID: the URL above is all it says. */
+#define NK_ACH_BADGE_HOST "media.retroachievements.org"
+#define NK_ACH_BADGE_URL_PREFIX "https://" NK_ACH_BADGE_HOST "/Badge/"
+/* RetroAchievements' badges are 64 x 64 PNG pictures of a few kilobytes. A picture is refused by
+ * name beyond these, before any pixel is decoded. */
+#define NK_ACH_BADGE_MAX_BYTES (64u * 1024u)
+#define NK_ACH_BADGE_MAX_SIDE 128u
+/* True for one to seven ASCII letters and digits: no path separator, dot or other character a
+ * file name or URL could be steered by. */
+bool nk_ach_badge_name_ok(const char *name);
+/* The badge URL for name, built by rcheevos as above; false, with out empty, for a name
+ * nk_ach_badge_name_ok refuses, a URL nk_ach_badge_url_allowed refuses, or an out too small. */
+bool nk_ach_badge_url(const char *name, bool locked, char *out, size_t out_size);
+/* True only for NK_ACH_BADGE_URL_PREFIX followed by a valid badge name and ".png" or
+ * "_lock.png", and nothing more. */
+bool nk_ach_badge_url_allowed(const char *url);
+/* True when bytes start as a PNG whose header (IHDR) gives a width and height of 1 to
+ * NK_ACH_BADGE_MAX_SIDE, and size is at most NK_ACH_BADGE_MAX_BYTES. */
+bool nk_ach_badge_png_ok(const uint8_t *bytes, size_t size);
+
+/* One badge request's outcome. ok: png holds size bytes the caller frees with
+ * nk_ach_badge_free; otherwise why names the refusal. */
+typedef struct NkAchBadge {
+    char name[NK_ACH_BADGE_NAME_MAX];
+    bool locked;
+    bool ok;
+    uint8_t *png;
+    size_t size;
+    char why[96];
+} NkAchBadge;
+/* Asks for one badge through the transport, in turn with rc_client's own requests. Only while
+ * the switch is on, an account is signed in and a game is loaded, for a valid name, and while no
+ * other badge request is unanswered or untaken; false, with nothing sent, otherwise. The answer
+ * is dropped, never handed out, when the switch goes off, the account ends or the game ends
+ * before it arrives. */
+bool nk_ach_request_badge(NkAch *ach, const char *name, bool locked);
+/* True while a badge request waits for its answer. */
+bool nk_ach_badge_pending(const NkAch *ach);
+/* Moves the answered badge out; false when none waits. */
+bool nk_ach_take_badge(NkAch *ach, NkAchBadge *out);
+void nk_ach_badge_free(NkAchBadge *badge);
 
 /* The user's Achievements switch. Off: nothing more reaches the transport. Requests waiting their
  * turn are answered as refused and never sent, rc_client's own retries and saved unlocks stay

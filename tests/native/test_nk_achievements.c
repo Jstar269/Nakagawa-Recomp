@@ -165,6 +165,12 @@ typedef struct Fake {
     int login_status;        /* the HTTP status login2 answers when not 0, else 200 */
     const char *login_body;  /* its body when not NULL */
     const char *sets_body;   /* the achievement sets answered when not NULL, else k_sets */
+    const char *session_body; /* the start of session answered when not NULL, else k_session */
+    /* A badge GET (logged as "GET <url>") is answered badge_status (200 when 0) with these
+     * bytes, or with "Not Found" and 404 when badge is NULL. */
+    const uint8_t *badge;
+    size_t badge_size;
+    int badge_status;
     char login_answer[256];
     /* A transport that answers later, from wherever the test calls the kept done. */
     bool defer;
@@ -258,7 +264,19 @@ static NkAchResponse fake_response(Fake *f, const char *post) {
         if (f->login_status < 0) r.body = "";
     }
     else if (starts_with(post, "r=achievementsets&")) r.body = f->sets_body ? f->sets_body : k_sets;
-    else if (starts_with(post, "r=startsession&")) r.body = k_session;
+    else if (starts_with(post, "r=startsession&"))
+        r.body = f->session_body ? f->session_body : k_session;
+    else if (starts_with(post, "GET ")) {
+        r.body = "Not Found";
+        r.body_length = 9u;
+        r.http_status = 404;
+        if (f->badge) {
+            r.body = (const char *)f->badge;
+            r.body_length = f->badge_size;
+            r.http_status = f->badge_status ? f->badge_status : 200;
+        }
+        return r;
+    }
     else if (starts_with(post, "r=awardachievement&")) {
         r.body = f->award_body ? f->award_body : k_award;
         r.http_status = f->award_status;
@@ -274,7 +292,13 @@ static NkAchResponse fake_response(Fake *f, const char *post) {
 
 static void fake_transport(void *ctx, const NkAchRequest *req, NkAchDone done, void *done_ctx) {
     Fake *f = (Fake *)ctx;
+    char get[512];
     const char *post = req->post_data ? req->post_data : "";
+    if (!req->post_data) {
+        /* A GET has no post data: the log keeps its URL. */
+        snprintf(get, sizeof get, "GET %s", req->url);
+        post = get;
+    }
     if (f->defer && f->one_slot && f->deferred_done) {
         const NkAchResponse busy = {NULL, 0u, NK_ACH_HTTP_RETRY};
         f->slot_refusals++;
@@ -2560,6 +2584,40 @@ static void test_unlock_toast_is_captioned_retroachievements(void) {
     }
     CHECK(strcmp(nk_guest_memory_notification_caption(NULL), "Host notification") == 0,
           "no message keeps the caption Host notification");
+
+    /* The toast's fields: title, points and badge name, each on its own line. */
+    NkGuestUnlockNotice notice;
+    CHECK(nk_guest_memory_notification_unlock("Achievement unlocked: First Steps\n25\n00001",
+                                              &notice) &&
+              strcmp(notice.title, "First Steps") == 0 && notice.has_points &&
+              notice.points == 25u && strcmp(notice.badge, "00001") == 0,
+          "an unlock reads as title, points and badge (%s, %u, %s)", notice.title, notice.points,
+          notice.badge);
+    CHECK(nk_guest_memory_notification_unlock("Achievement unlocked: First Steps", &notice) &&
+              strcmp(notice.title, "First Steps") == 0 && !notice.has_points &&
+              !notice.badge[0],
+          "an unlock with no points line has no points and no badge");
+    static const char *const badges[] = {"../x", "a/b", "12345678", "a b", ""};
+    for (size_t i = 0; i < sizeof badges / sizeof badges[0]; i++) {
+        snprintf(toast, sizeof toast, NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "T\n5\n%s",
+                 badges[i]);
+        CHECK(nk_guest_memory_notification_unlock(toast, &notice) && !notice.badge[0] &&
+                  notice.points == 5u,
+              "badge \"%s\" is left out of the toast", badges[i]);
+    }
+    CHECK(!nk_guest_memory_notification_unlock("Saved progress could not be sent.", &notice) &&
+              !nk_guest_memory_notification_unlock("Achievement unlocked: ", &notice),
+          "other messages are no unlock");
+    /* A title as long as the message holds is cut at a whole character. */
+    char longest[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+    size_t at = (size_t)snprintf(longest, sizeof longest, NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED);
+    while (at + 2u < sizeof longest) {
+        longest[at++] = '\xc3';
+        longest[at++] = '\xa9';
+    }
+    longest[at] = '\0';
+    CHECK(nk_guest_memory_notification_unlock(longest, &notice) && utf8_ends_whole(notice.title),
+          "a long title ends on a whole character (%u bytes)", (unsigned)strlen(notice.title));
 }
 
 /* Two unlocks close together are two toasts: the runtime reads the player's messages one at a
@@ -3576,6 +3634,289 @@ static void test_leaderboard_entries_without_login(uint8_t *ram) {
     nk_ach_destroy(ach);
 }
 
+/* ---- badge pictures ------------------------------------------------------------------ */
+
+/* A set of three, the second unlocked at the start of the session: the page lists it first.
+ * 6001's badge name is fine and the server names a badge URL on another host for it; 6003's
+ * badge name carries path characters. */
+static const char k_sets_badges[] =
+    "{\"Success\":true,\"GameId\":1234,\"Title\":\"Synthetic Game\",\"ConsoleId\":41,"
+    "\"ImageIconUrl\":\"\",\"RichPresenceGameId\":1234,\"RichPresencePatch\":\"\","
+    "\"Sets\":[{\"AchievementSetId\":1111,\"GameId\":1234,\"Title\":null,\"Type\":\"core\","
+    "\"ImageIconUrl\":\"\",\"Achievements\":["
+    "{\"ID\":6001,\"Title\":\"First\",\"Description\":\"Locked one\","
+    "\"Flags\":3,\"Points\":5,\"MemAddr\":\"0xH800100=5\",\"Author\":\"Synthetic\","
+    "\"BadgeName\":\"00001\",\"BadgeURL\":\"https://example.invalid/b.png\","
+    "\"BadgeLockedURL\":\"https://example.invalid/b_lock.png\","
+    "\"Created\":1700000000,\"Modified\":1700000000},"
+    "{\"ID\":6002,\"Title\":\"Second\",\"Description\":\"Unlocked one\","
+    "\"Flags\":3,\"Points\":10,\"MemAddr\":\"0xH800101=5\",\"Author\":\"Synthetic\","
+    "\"BadgeName\":\"A2b\",\"Created\":1700000000,\"Modified\":1700000000},"
+    "{\"ID\":6003,\"Title\":\"Third\",\"Description\":\"Locked two\","
+    "\"Flags\":3,\"Points\":25,\"MemAddr\":\"0xH800102=5\",\"Author\":\"Synthetic\","
+    "\"BadgeName\":\"../x1\",\"Created\":1700000000,\"Modified\":1700000000}"
+    "],\"Leaderboards\":[]}]}";
+static const char k_session_one_unlock[] =
+    "{\"Success\":true,\"Unlocks\":[{\"ID\":6002,\"When\":1700000000}],\"HardcoreUnlocks\":[],"
+    "\"ServerNow\":1700000000}";
+
+static uint32_t png_crc(const uint8_t *p, size_t n) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) {
+        crc ^= p[i];
+        for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+
+static size_t png_put32(uint8_t *out, size_t at, uint32_t v) {
+    out[at] = (uint8_t)(v >> 24);
+    out[at + 1] = (uint8_t)(v >> 16);
+    out[at + 2] = (uint8_t)(v >> 8);
+    out[at + 3] = (uint8_t)v;
+    return at + 4u;
+}
+
+static size_t png_chunk(uint8_t *out, size_t at, const char *type, const uint8_t *data,
+                        size_t n) {
+    at = png_put32(out, at, (uint32_t)n);
+    const size_t start = at;
+    memcpy(out + at, type, 4u);
+    at += 4u;
+    if (n) memcpy(out + at, data, n);
+    at += n;
+    return png_put32(out, at, png_crc(out + start, n + 4u));
+}
+
+/* A project-made w x h RGBA PNG (one solid colour, stored without compression), for the fake
+ * media server: no RetroAchievements picture is used. Returns its size; out holds cap bytes. */
+static size_t synthetic_png(uint8_t *out, size_t cap, uint32_t w, uint32_t h) {
+    static const uint8_t signature[8] = {0x89u, 'P', 'N', 'G', '\r', '\n', 0x1Au, '\n'};
+    const size_t raw = (size_t)h * (1u + (size_t)w * 4u);
+    if (raw > 65535u || cap < raw + 128u) return 0u;
+    uint8_t *idat = (uint8_t *)malloc(raw + 11u);
+    if (!idat) return 0u;
+    size_t n = 0u;
+    idat[n++] = 0x78u;
+    idat[n++] = 0x01u;
+    idat[n++] = 0x01u; /* the last block, stored */
+    idat[n++] = (uint8_t)raw;
+    idat[n++] = (uint8_t)(raw >> 8);
+    idat[n++] = (uint8_t)~raw;
+    idat[n++] = (uint8_t)(~raw >> 8);
+    const size_t data = n;
+    for (uint32_t y = 0; y < h; y++) {
+        idat[n++] = 0u;
+        for (uint32_t x = 0; x < w; x++) {
+            idat[n++] = 0x2Au;
+            idat[n++] = 0x7Fu;
+            idat[n++] = 0xD4u;
+            idat[n++] = 0xFFu;
+        }
+    }
+    uint32_t a = 1u, b = 0u;
+    for (size_t i = data; i < n; i++) {
+        a = (a + idat[i]) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    n = png_put32(idat, n, (b << 16) | a);
+    uint8_t ihdr[13];
+    (void)png_put32(ihdr, 0u, w);
+    (void)png_put32(ihdr, 4u, h);
+    ihdr[8] = 8u;
+    ihdr[9] = 6u;
+    ihdr[10] = ihdr[11] = ihdr[12] = 0u;
+    memcpy(out, signature, sizeof signature);
+    size_t at = png_chunk(out, sizeof signature, "IHDR", ihdr, sizeof ihdr);
+    at = png_chunk(out, at, "IDAT", idat, n);
+    at = png_chunk(out, at, "IEND", NULL, 0u);
+    free(idat);
+    return at;
+}
+
+static int requests_naming(const Fake *f, const char *text) {
+    int count = 0;
+    for (int i = 0; i < f->requests && i < 16; i++)
+        if (strstr(f->log[i], text)) count++;
+    return count;
+}
+
+static void test_badge_url_is_rcheevos_media_host_only(void) {
+    char url[160];
+    CHECK(nk_ach_badge_url("00001", false, url, sizeof url) &&
+              strcmp(url, "https://media.retroachievements.org/Badge/00001.png") == 0,
+          "the unlocked badge is rcheevos' own media URL: %s", url);
+    CHECK(nk_ach_badge_url("A2b", true, url, sizeof url) &&
+              strcmp(url, "https://media.retroachievements.org/Badge/A2b_lock.png") == 0,
+          "the locked badge is rcheevos' _lock variant: %s", url);
+    static const char *const names[] = {"", "../x1", "a/b", "a\\b", "a.b", "12345678", "a b",
+                                        "%2e", "\xc3\xa9"};
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        CHECK(!nk_ach_badge_name_ok(names[i]) && !nk_ach_badge_url(names[i], false, url, sizeof url) &&
+                  url[0] == '\0',
+              "badge name \"%s\" is refused", names[i]);
+    CHECK(!nk_ach_badge_url("00001", false, url, 20u), "a URL that does not fit is refused");
+    static const char *const urls[] = {
+        "http://media.retroachievements.org/Badge/1.png",
+        "https://media.retroachievements.org.example/Badge/1.png",
+        "https://media.retroachievements.org:443/Badge/1.png",
+        "https://user@media.retroachievements.org/Badge/1.png",
+        "https://retroachievements.org/Badge/1.png",
+        "https://media.retroachievements.org/Badge/../1.png",
+        "https://media.retroachievements.org/Badge/1.png?x=1",
+        "https://media.retroachievements.org/Badge/1.png/",
+        "https://media.retroachievements.org/UserPic/Player.png",
+        "https://example.invalid/b.png"};
+    for (size_t i = 0; i < sizeof urls / sizeof urls[0]; i++)
+        CHECK(!nk_ach_badge_url_allowed(urls[i]), "%s is refused", urls[i]);
+    CHECK(!nk_ach_url_allowed("https://media.retroachievements.org/Badge/1.png"),
+          "the API gate does not take the media host");
+}
+
+/* The set is listed unlocked first, then locked, each in the set's order, with the core set's
+ * progress, and a badge is fetched from the media host only, by its name alone. */
+static void test_badges_and_list_order(uint8_t *ram) {
+    Fake fake;
+    uint8_t png[20000];
+    const size_t png_size = synthetic_png(png, sizeof png, 64u, 64u);
+    CHECK(png_size > 0u && nk_ach_badge_png_ok(png, png_size), "the sample badge is a PNG");
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = 200;
+    fake.sets_body = k_sets_badges;
+    fake.session_body = k_session_one_unlock;
+    memset(ram, 0, USER_RAM_SIZE);
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    CHECK(!nk_ach_request_badge(ach, "00001", false) && fake.requests == 0,
+          "signed out: no badge request is sent");
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN") && nk_ach_logged_in(ach), "signed in");
+    const int before_game = fake.requests;
+    CHECK(!nk_ach_request_badge(ach, "00001", false) && fake.requests == before_game,
+          "no game loaded: no badge request is sent");
+    CHECK(nk_ach_begin_load_game(ach, HASH) && nk_ach_game_loaded(ach), "set loaded");
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+
+    NkAchAchievement list[4];
+    size_t total = 0u;
+    const size_t n = nk_ach_copy_achievement_list(ach, list, 4u, &total);
+    CHECK(n == 3u && total == 3u, "three listed (%u of %u)", (unsigned)n, (unsigned)total);
+    if (n == 3u) {
+        CHECK(strcmp(list[0].title, "Second") == 0 && list[0].unlocked_softcore &&
+                  strcmp(list[1].title, "First") == 0 && !list[1].unlocked_softcore &&
+                  strcmp(list[2].title, "Third") == 0 && !list[2].unlocked_softcore,
+              "unlocked first, then locked in the set's order: %s %s %s", list[0].title,
+              list[1].title, list[2].title);
+        CHECK(strcmp(list[0].badge_name, "A2b") == 0 && strcmp(list[1].badge_name, "00001") == 0,
+              "badge names are copied (%s, %s)", list[0].badge_name, list[1].badge_name);
+        CHECK(list[2].badge_name[0] == '\0', "a badge name with path characters is dropped: %s",
+              list[2].badge_name);
+    }
+    NkAchProgress progress;
+    CHECK(nk_ach_copy_progress(ach, &progress) && progress.unlocked == 1u &&
+              progress.total == 3u && progress.points_unlocked == 10u &&
+              progress.points_total == 40u,
+          "progress: %u of %u, %u of %u points", progress.unlocked, progress.total,
+          progress.points_unlocked, progress.points_total);
+
+    /* Served: the bytes come out as sent, from the URL rcheevos builds, never the set's
+     * BadgeURL on another host. */
+    fake.badge = png;
+    fake.badge_size = png_size;
+    int sent = fake.requests;
+    CHECK(nk_ach_request_badge(ach, "00001", true), "a locked badge is asked for");
+    CHECK(fake.requests == sent + 1 &&
+              strcmp(fake.log[sent], "GET https://media.retroachievements.org/Badge/00001_lock.png") == 0,
+          "one GET of the _lock picture, with no post data: %s",
+          fake.requests > sent ? fake.log[sent] : "");
+    NkAchBadge badge;
+    CHECK(nk_ach_take_badge(ach, &badge) && badge.ok && badge.locked &&
+              strcmp(badge.name, "00001") == 0 && badge.size == png_size &&
+              memcmp(badge.png, png, png_size) == 0,
+          "the served picture is handed out whole (%s)", badge.why);
+    nk_ach_badge_free(&badge);
+    CHECK(!nk_ach_take_badge(ach, &badge), "taken once");
+    CHECK(requests_naming(&fake, "example.invalid") == 0, "the set's BadgeURL host is never asked");
+    sent = fake.requests;
+    CHECK(!nk_ach_request_badge(ach, "../x1", false) && fake.requests == sent,
+          "path characters in a badge name: nothing is sent");
+
+    /* Refused answers: each is a failure the page draws its own icon for. */
+    static const struct {
+        const char *what;
+        size_t size;
+        int status;
+        const char *why;
+    } refusals[] = {{"oversized", NK_ACH_BADGE_MAX_BYTES + 1u, 200, "larger"},
+                    {"corrupt", 9u, 200, "not a PNG"},
+                    {"missing", 0u, 404, "did not send"},
+                    {"unreachable", 0u, NK_ACH_HTTP_RETRY, "no answer"}};
+    uint8_t *big = (uint8_t *)calloc(1u, NK_ACH_BADGE_MAX_BYTES + 1u);
+    CHECK(big != NULL, "memory");
+    if (!big) {
+        nk_ach_destroy(ach);
+        return;
+    }
+    memcpy(big, png, png_size);
+    for (size_t i = 0; i < sizeof refusals / sizeof refusals[0]; i++) {
+        fake.badge = refusals[i].size == 9u ? (const uint8_t *)"not a png" : big;
+        fake.badge_size = refusals[i].size;
+        fake.badge_status = refusals[i].status;
+        CHECK(nk_ach_request_badge(ach, "A2b", false), "%s: asked", refusals[i].what);
+        CHECK(nk_ach_take_badge(ach, &badge) && !badge.ok && !badge.png &&
+                  strstr(badge.why, refusals[i].why) != NULL,
+              "%s: refused by name (%s)", refusals[i].what, badge.why);
+        nk_ach_badge_free(&badge);
+    }
+    /* A picture wider than a badge, whole and well formed, is refused from its header. */
+    uint8_t wide[40000];
+    const size_t wide_size = synthetic_png(wide, sizeof wide, 129u, 8u);
+    fake.badge = wide;
+    fake.badge_size = wide_size;
+    fake.badge_status = 0;
+    CHECK(wide_size > 0u && nk_ach_request_badge(ach, "A2b", false) &&
+              nk_ach_take_badge(ach, &badge) && !badge.ok,
+          "129 pixels wide is refused (%s)", badge.why);
+    nk_ach_badge_free(&badge);
+    free(big);
+
+    /* One at a time; an answer the switch, the game or the account ended is dropped. */
+    fake.badge = png;
+    fake.badge_size = png_size;
+    fake.defer = true;
+    CHECK(nk_ach_request_badge(ach, "A2b", false) && nk_ach_badge_pending(ach), "held");
+    sent = fake.requests;
+    CHECK(!nk_ach_request_badge(ach, "00001", false) && fake.requests == sent,
+          "a second badge waits for the first");
+    nk_ach_set_online(ach, false);
+    CHECK(!nk_ach_badge_pending(ach), "switched off: the badge is no longer waited for");
+    CHECK(fake_answer_held(&fake) && !nk_ach_take_badge(ach, &badge),
+          "switched off: the answer on its way is dropped");
+    sent = fake.requests;
+    CHECK(!nk_ach_request_badge(ach, "A2b", false) && fake.requests == sent,
+          "switched off: no badge request is sent");
+    nk_ach_set_online(ach, true);
+    CHECK(nk_ach_request_badge(ach, "A2b", false), "on again: asked");
+    nk_ach_unload_game(ach);
+    CHECK(fake_answer_held(&fake) && !nk_ach_take_badge(ach, &badge),
+          "the game ended: the answer is dropped");
+    CHECK(nk_ach_begin_load_game(ach, HASH), "loaded again");
+    while (fake_answer_held(&fake)) {
+        /* the set and the start of the session, one at a time */
+    }
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(nk_ach_game_loaded(ach) && nk_ach_request_badge(ach, "A2b", false), "asked again");
+    (void)nk_ach_sign_out(ach);
+    CHECK(fake_answer_held(&fake) && !nk_ach_take_badge(ach, &badge),
+          "signed out: the answer is dropped");
+    sent = fake.requests;
+    CHECK(!nk_ach_request_badge(ach, "A2b", false) && fake.requests == sent,
+          "signed out: no badge request is sent");
+    nk_ach_destroy(ach);
+}
+
 int main(int argc, char **argv) {
     if (argc == 4 && strcmp(argv[1], "--runtime-child") == 0)
         return runtime_child(argv[2], argv[3]);
@@ -3651,6 +3992,8 @@ int main(int argc, char **argv) {
     RUN_RAM(test_reset_forgets_the_old_guest);
     RUN_RAM(test_progress_comes_back_with_a_state);
     RUN_RAM(test_leaderboard_entries_without_login);
+    RUN(test_badge_url_is_rcheevos_media_host_only);
+    RUN_RAM(test_badges_and_list_order);
     free(ram);
     if (g_failures) {
         fprintf(stderr, "test_nk_achievements: %d failure(s)\n", g_failures);

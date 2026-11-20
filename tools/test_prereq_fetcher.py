@@ -1634,6 +1634,10 @@ UPDATE_CHECK_HOSTS = frozenset({
 # nk_achievements.h names it. Neither the bridge nor the vendored rcheevos may use a network API;
 # the transport that carries them is the existing package_builder WinHTTP implementation.
 ACHIEVEMENTS_HOST = "retroachievements.org"
+# Its achievement badge pictures (owner decision 2026-11-20): GET only, from the one image host
+# rcheevos' own badge URLs use (RETROACHIEVEMENTS_IMAGE_HOST in the vendored rc_api_common.c),
+# once Achievements is on and the person is signed in.
+ACHIEVEMENTS_BADGE_HOST = "media.retroachievements.org"
 ACHIEVEMENTS_NO_NETWORK_PATHS = ("src/core/nk_achievements.c", "src/core/nk_achievements.h")
 ACHIEVEMENTS_VENDORED_TREE = "third_party/rcheevos"
 # Discord status (#2259; owner decision 2026-11-08): opt-in and off by default, and not an
@@ -1833,10 +1837,27 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         assert host is not None
         self.assertEqual(host.group(1), ACHIEVEMENTS_HOST)
         self.assertIsNotNone(prefix, "NK_ACH_URL_PREFIX must be https://NK_ACH_HOST/")
-        # docs/SETUP.md "Network use" lists the host and says the feature is off by default.
+        # The badge pictures come from the image host rcheevos itself builds badge URLs for,
+        # over HTTPS, under /Badge/ only.
+        badge_host = re.search(r'#define NK_ACH_BADGE_HOST\s+"([^"]*)"', header)
+        self.assertIsNotNone(badge_host, "NK_ACH_BADGE_HOST")
+        assert badge_host is not None
+        self.assertEqual(badge_host.group(1), ACHIEVEMENTS_BADGE_HOST)
+        self.assertRegex(header, r'#define NK_ACH_BADGE_URL_PREFIX\s+"https://"\s+NK_ACH_BADGE_HOST'
+                                 r'\s+"/Badge/"')
+        rapi = (REPO_ROOT / ACHIEVEMENTS_VENDORED_TREE / "src" / "rapi" /
+                "rc_api_common.c").read_text(encoding="utf-8")
+        self.assertIn(f'#define RETROACHIEVEMENTS_IMAGE_HOST "https://{ACHIEVEMENTS_BADGE_HOST}"',
+                      rapi)
+        # docs/SETUP.md "Network use" and docs/ONLINE_FEATURES.md list both hosts and say the
+        # feature is off by default.
         setup = (REPO_ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
-        self.assertIn(f"`{ACHIEVEMENTS_HOST}`", setup)
+        online = (REPO_ROOT / "docs" / "ONLINE_FEATURES.md").read_text(encoding="utf-8")
+        for documented_host in (ACHIEVEMENTS_HOST, ACHIEVEMENTS_BADGE_HOST):
+            self.assertIn(f"`{documented_host}`", setup)
+            self.assertIn(f"`{documented_host}`", online)
         self.assertIn("**RetroAchievements** is off by default.", setup)
+        self.assertNotIn("fetches no badge image", setup + online)
         # No other host literal in the bridge: the gate is the one place a host is named.
         bridge = (REPO_ROOT / "src" / "core" / "nk_achievements.c").read_text(encoding="utf-8")
         self.assertEqual(re.findall(r"https?://[A-Za-z0-9.-]+", bridge), [])
@@ -1864,11 +1885,12 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertIn("package_builder_native_transport_request", source)
         self.assertIn("NK_ACH_HOST", source)
         # main.c is a native-transport caller for this one request only: every use of the
-        # transport there is the call whose allowed-host argument is NK_ACH_HOST.
+        # transport there is the call whose allowed-host argument is NK_ACH_HOST, or
+        # NK_ACH_BADGE_HOST for a badge picture.
         uses = re.findall(r"package_builder_native_transport\w*", source)
         calls = re.findall(
-            r"package_builder_native_transport_request\(\s*&options,\s*job->url,\s*NK_ACH_HOST,",
-            source)
+            r"package_builder_native_transport_request\(\s*&options,\s*job->url,\s*"
+            r"job->badge \? NK_ACH_BADGE_HOST : NK_ACH_HOST,", source)
         self.assertEqual(uses, ["package_builder_native_transport_request"])
         self.assertEqual(len(calls), 1)
         # Every request names this player in the form RetroAchievements documents, made once by
@@ -2088,8 +2110,13 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         ra = main[main.index("static int player_utf8_fit("):
                   main.index("static void player_achievements_sign_in_stored(")]
         self.assertIsNone(re.search(r"%\.[0-9]+s", ra), "a byte-count cut of RA text")
-        self.assertEqual(ra.count("player_utf8_fit("), 6,
-                         "the helper, the list, three events, the dropped-notices line")
+        self.assertEqual(ra.count("player_utf8_fit("), 5,
+                         "the helper, three events, the dropped-notices line")
+        # The list's rows hold the bridge's whole display text, already cut at a character
+        # (ach_copy_text), so the player copies it and never cuts it again.
+        self.assertIn("_Static_assert(PLAYER_ACHIEVEMENT_TITLE_MAX >= NK_ACH_DISPLAY_TITLE_MAX,", ra)
+        self.assertIn("_Static_assert(PLAYER_ACHIEVEMENT_DESCRIPTION_MAX >= "
+                      "NK_ACH_DISPLAY_DESCRIPTION_MAX,", ra)
         # The arena's size is one constant, the runtime's SR_GUEST_ARENA_SIZE, asserted equal.
         platform = (REPO_ROOT / "src" / "core" / "nk_platform.h").read_text(encoding="utf-8")
         recomp = (REPO_ROOT / "src" / "rt" / "recomp.h").read_text(encoding="utf-8")
@@ -2166,16 +2193,26 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
                    if path.is_file() and path.suffix in {".c", ".h"}]
         texts = {path.relative_to(REPO_ROOT).as_posix(): path.read_text(
             encoding="utf-8", errors="replace") for path in shipped}
-        self.assertIn("sr_host_notification", texts["src/rt/gui.c"])
-        # An unlock's toast is captioned "RetroAchievements", any other "Host notification"
-        # (achievements-selftest checks nk_guest_memory_notification_caption): the runtime takes
-        # the caption from the message, and the player writes an unlock with the shared prefix.
+        gui = texts["src/rt/gui.c"]
+        self.assertIn("sr_host_notification", gui)
+        # The player writes an unlock with the shared prefix, then its points and badge name
+        # (achievements-selftest checks nk_guest_memory_notification_unlock); the runtime reads
+        # those fields from the message and makes the toast of them, "Achievement unlocked" over
+        # the title, and captions any other message "Host notification".
+        self.assertIn("nk_guest_memory_notification_unlock(s_host_toast_text, &s_host_toast_unlock)",
+                      gui)
         self.assertIn("f.host_toast_head = nk_guest_memory_notification_caption(s_host_toast_text);",
-                      texts["src/rt/gui.c"])
-        self.assertNotIn('f.host_toast_head = "', texts["src/rt/gui.c"])
+                      gui)
+        self.assertEqual(re.findall(r'f\.host_toast_head = "([^"]*)"', gui),
+                         ["Achievement unlocked"])
         player = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
-        self.assertIn('NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "%.*s"', player)
+        self.assertIn('NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "%.*s\\n%u\\n%s"', player)
         self.assertNotIn('"Achievement unlocked: ', player)
+        # The badge picture comes from the player's badge folder on this PC: the runtime opens
+        # no connection for it (NETWORK_EGRESS_PATTERN, below) and names no host.
+        self.assertIn('#define HOST_TOAST_BADGE_DIR "achievements-badges"', gui)
+        self.assertIsNone(NETWORK_EGRESS_PATTERN.search(gui))
+        self.assertEqual(re.findall(r"https?://", gui), [])
         for rel, source in texts.items():
             with self.subTest(path=rel):
                 self.assertNotIn("retroachievements.org", source.lower())

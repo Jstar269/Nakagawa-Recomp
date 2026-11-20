@@ -3531,8 +3531,6 @@ class NativePlayerUiTests(unittest.TestCase):
                                   "in a changed game.")
     ACHIEVEMENTS_TIMING_REASON = ("Achievements are off with 60 FPS game logic, which changes "
                                   "the game's speed.")
-    # Down to the foot of a game's page, which brings its RetroAchievements card into view.
-    TO_PAGE_FOOT = ("KEY_DOWN", "WAIT_MS=80") * 6
     # Settings > Online and developer. Tab goes by the order the hub declares its controls in,
     # whatever the window and text size (the arrows go by position, which Larger text moves):
     # sixteen stops from Resolution to Online and developer.
@@ -3586,10 +3584,44 @@ class NativePlayerUiTests(unittest.TestCase):
         said = self.achievements_lines(online, "settings")
         self.assertTrue(said and said[-1] == self.ACHIEVEMENTS_CHEATS_REASON, said)
 
-    ACHIEVEMENTS_MORE = ("Showing 8 of 12 achievements. All of them are on this game's page at "
-                         "retroachievements.org.")
     # The smallest window at the largest text size, and the common window at design size.
     ACHIEVEMENTS_WHOLE_WINDOWS = ((960, 540, 150), (1280, 720, 100))
+    # The UI-test player's sample set (player_ui_test.c, NK_UI_TEST_ACHIEVEMENTS=list:<disc>):
+    # twelve, the three unlocked first, five with a decodable badge picture and one whose
+    # picture is damaged, so its row draws the page's own icon.
+    ACHIEVEMENTS_LONGEST_TITLE = "Champion of the Hot Shots Cup, Undefeated on Every Surface"
+    ACHIEVEMENTS_SAMPLE_ROWS = 12
+    ACHIEVEMENTS_SAMPLE_UNLOCKED = 3
+
+    @staticmethod
+    def achievement_row_reports(run: dict[str, object]) -> list[dict[str, str]]:
+        """Every row the title card drew whole in any frame (scr_title.c
+        player_ui_title_report_achievement_rows), as fields by name, the index included."""
+        reports: list[dict[str, str]] = []
+        for line in re.findall(r"next_ui_title_achievement_rows (\S*)", str(run["stdout"])):
+            for row in filter(None, line.split(";")):
+                index, state, *fields = row.split(":")
+                report = {"index": index, "state": state}
+                report.update(field.split("=", 1) for field in fields)  # type: ignore[misc]
+                reports.append(report)
+        return reports
+
+    @staticmethod
+    def achievement_model_rows(run: dict[str, object]) -> dict[int, tuple[str, str, str]]:
+        """The rows the player handed the title card, last report each: (state, icon, title)."""
+        rows: dict[int, tuple[str, str, str]] = {}
+        for index, state, icon, title in re.findall(
+                r"next_ui_title_achievement disc=\S+ index=(\d+) state=(\w+) icon=(\w+) "
+                r"points=\d+ title_hex=([0-9a-f]*)", str(run["stdout"])):
+            rows[int(index)] = (state, icon, bytes.fromhex(title).decode("utf-8"))
+        return rows
+
+    @staticmethod
+    def wheel_down_the_page(width: int, height: int, notches: int = 40) -> tuple[str, ...]:
+        """The pointer over the page, then the wheel down one notch at a time, so every part
+        of a long page passes through the window."""
+        return (f"MOUSE_MOVE={width // 3},{height // 2}",
+                *(("MOUSE_WHEEL=-1", "WAIT_MS=60") * notches), "WAIT_MS=200")
 
     @staticmethod
     def wizard_rows(run: dict[str, object]) -> dict[str, tuple[int, int]]:
@@ -3604,8 +3636,8 @@ class NativePlayerUiTests(unittest.TestCase):
     def test_next_ui_achievements_rows_and_list_show_whole(self) -> None:
         """#1316: at 960x540 with 150% text and at 1280x720 with 100%, the Achievements switch
         and the RetroAchievements row show their names and sentences whole, signed out
-        and signed in, and a game whose set is longer than the page lists says how many it shows
-        and where all of them are."""
+        and signed in, and a game's title card lists its whole set: every row whole with its icon
+        slot, none cut short, the 60-character title included."""
         if os.name != "nt":
             self.skipTest("the Achievements switch needs Windows Credential Manager")
         for width, height, text_size in self.ACHIEVEMENTS_WHOLE_WINDOWS:
@@ -3628,15 +3660,52 @@ class NativePlayerUiTests(unittest.TestCase):
                 settings = {"achievements_enabled": True}
                 if text_size != 100:
                     settings["text_size"] = text_size
-                run = self.next_ui_run("library", self.OPEN_TITLE + ("WAIT_MS=200",),
+                run = self.next_ui_run("library",
+                                       self.OPEN_TITLE + self.wheel_down_the_page(width, height),
                                        width=width, height=height, wait_background=True,
                                        settings=settings,
                                        env_extra={"NK_UI_TEST_ACHIEVEMENTS": "list:TEST00005"})
+                stdout = str(run["stdout"])
                 more = [bytes.fromhex(line).decode("utf-8") for line in re.findall(
                     r"next_ui_title_achievements disc=TEST00005 status_hex=[0-9a-f]* "
-                    r"more_hex=([0-9a-f]*)", str(run["stdout"]))]
-                self.assertTrue(more, run["stdout"])
-                self.assertEqual(more[-1], self.ACHIEVEMENTS_MORE)
+                    r"more_hex=([0-9a-f]*)", stdout)]
+                self.assertTrue(more, stdout)
+                self.assertEqual(more[-1], "", "the page scrolls, so it lists the whole set")
+                self.assert_achievement_rows_whole(run)
+
+    def assert_achievement_rows_whole(self, run: dict[str, object]) -> None:
+        """The sample set's rows as the title card drew them: each one whole in some frame, with
+        its icon slot, nothing clipped or shortened; the unlocked first; a locked row in the
+        locked state (its own dimmer title colour); the badge picture where the row has one and
+        the page's own icon where it has none or its picture was refused."""
+        stdout = str(run["stdout"])
+        self.assertRegex(stdout, r"achievements_badge_fixture decoded=5 refused=1")
+        model = self.achievement_model_rows(run)
+        self.assertEqual(sorted(model), list(range(self.ACHIEVEMENTS_SAMPLE_ROWS)), model)
+        states = [model[index][0] for index in sorted(model)]
+        unlocked = self.ACHIEVEMENTS_SAMPLE_UNLOCKED
+        self.assertEqual(states, ["unlocked"] * unlocked +
+                         ["locked"] * (self.ACHIEVEMENTS_SAMPLE_ROWS - unlocked),
+                         "the unlocked are listed first")
+        self.assertIn(self.ACHIEVEMENTS_LONGEST_TITLE, [row[2] for row in model.values()])
+        reports = self.achievement_row_reports(run)
+        self.assertEqual(sorted({int(report["index"]) for report in reports}),
+                         list(range(self.ACHIEVEMENTS_SAMPLE_ROWS)),
+                         "every row passed through the window whole")
+        inks: dict[str, set[str]] = {"unlocked": set(), "locked": set()}
+        for report in reports:
+            index = int(report["index"])
+            self.assertEqual((report["slot"], report["clipped"], report["cut"]), ("1", "0", "0"),
+                             report)
+            self.assertEqual(report["state"], model[index][0], report)
+            self.assertEqual(report["icon"], model[index][1], report)
+            inks[report["state"]].add(report["ink"])
+        self.assertEqual(len(inks["unlocked"]), 1, inks)
+        self.assertEqual(len(inks["locked"]), 1, inks)
+        self.assertNotEqual(inks["unlocked"], inks["locked"], "a locked row is dimmed")
+        icons = {(state, icon) for state, icon, _ in model.values()}
+        self.assertTrue({("unlocked", "badge"), ("unlocked", "drawn"), ("locked", "badge"),
+                         ("locked", "drawn")} <= icons, icons)
 
     # The pictures of RetroAchievements' screens a review looks at (#1316): (name, view, events,
     # run arguments, NK_UI_TEST_ACHIEVEMENTS). Each is taken at both window sizes and text sizes.
@@ -3650,18 +3719,26 @@ class NativePlayerUiTests(unittest.TestCase):
          {"settings": {"achievements_enabled": True}}, "signed-in"),
         ("ra-settings-cheats-off", "settings", TO_ONLINE_PAGE + ("KEY_DOWN",) * 6,
          {"settings": {"achievements_enabled": True, "cheats": True}}, "signed-in"),
-        ("ra-title-list", "library", OPEN_TITLE + TO_PAGE_FOOT,
+        # A game's page is scrolled by the wheel to its RetroAchievements card (RA_TITLE_WHEEL).
+        ("ra-title-list", "library", OPEN_TITLE,
          {"wait_background": True, "settings": {"achievements_enabled": True}},
          "list:TEST00005"),
-        ("ra-title-cheats-off", "library", OPEN_TITLE + TO_PAGE_FOOT,
+        ("ra-title-cheats-off", "library", OPEN_TITLE,
          {"wait_background": True, "settings": {"achievements_enabled": True, "cheats": True}},
          "signed-in"),
-        ("ra-title-60fps-off", "ready", OPEN_TITLE_ACE + TO_PAGE_FOOT,
+        ("ra-title-60fps-off", "ready", OPEN_TITLE_ACE,
          {"post_build_ready": True, "wait_background": True,
           "settings": {"achievements_enabled": True},
           "enhancement_packages": {"TEST00006": "display-smoke-v1"}}, "signed-in"),
     )
     RA_WINDOWS = ((1280, 720, 100), (1280, 720, 150), (960, 540, 100), (960, 540, 150))
+    # Wheel notches, by text size, that bring a game page's RetroAchievements card into the
+    # picture: the list's head with unlocked and locked rows under it, or a notice card whole.
+    RA_TITLE_WHEEL: dict[str, dict[int, int]] = {
+        "ra-title-list": {100: 12, 150: 15},
+        "ra-title-cheats-off": {100: 6, 150: 9},
+        "ra-title-60fps-off": {100: 6, 150: 6},
+    }
 
     def test_next_ui_achievements_screenshots_when_requested(self) -> None:
         """With NAKAGAWA_PLAYER_UI_RA_SCREENSHOTS naming a folder, writes the UI-test player's
@@ -3683,7 +3760,10 @@ class NativePlayerUiTests(unittest.TestCase):
                     if text_size != 100:
                         settings["text_size"] = text_size
                     env = {"NK_UI_TEST_ACHIEVEMENTS": fixture} if fixture else None
-                    run = self.next_ui_run(view, events + ("WAIT_MS=250",), width=width,
+                    wheel = self.RA_TITLE_WHEEL.get(name, {}).get(text_size, 0)
+                    scroll = (("MOUSE_MOVE=320,300",) +
+                              ("MOUSE_WHEEL=-1", "WAIT_MS=60") * wheel) if wheel else ()
+                    run = self.next_ui_run(view, events + scroll + ("WAIT_MS=250",), width=width,
                                            height=height, settings=settings, env_extra=env,
                                            screenshot_path=output / (picture + ".bmp"),
                                            **run_kwargs)

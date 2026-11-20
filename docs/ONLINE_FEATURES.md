@@ -109,11 +109,31 @@ opt-in and off by default.
 Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed rcheevos client.
 
 - **Settings > Online and developer options** has an **Achievements** switch, off by default. Turning it on shows a consent
-  screen that names `retroachievements.org` and lists every data field. The player contacts only that
-  host, at `https://retroachievements.org/dorequest.php`, over the existing player HTTPS transport; it
-  fetches no badge image and uses no other host. Turning the switch off stops the requests: one waiting
-  its turn is answered as refused and never sent, nothing new is sent, and only the request already on
-  its way finishes.
+  screen that names `retroachievements.org` and `media.retroachievements.org` and lists every data
+  field. The player's requests go to `https://retroachievements.org/dorequest.php` over the existing
+  player HTTPS transport; the achievement badge pictures come from `media.retroachievements.org`, and
+  no other host is used. Turning the switch off stops the requests: one waiting its turn is answered
+  as refused and never sent, nothing new is sent, and only the request already on its way finishes
+  (a badge picture's answer is then thrown away).
+- **Badge pictures.** Once the switch is on and you are signed in, the player asks for the badge of
+  each achievement in the loaded set, one at a time, from the address rcheevos itself builds for it:
+  `https://media.retroachievements.org/Badge/<badge>.png`, or `<badge>_lock.png` for the grey picture
+  of a locked one. The request is a plain HTTPS GET with certificate validation, through the same
+  transport, carrying only the user agent below: no user name, token, cookie or console ID. The
+  badge name comes from the set the server sent and is used only when it is one to seven letters and
+  digits; an address the server suggests for a picture is not used. Each badge is asked for at most
+  once per session. A picture larger than 64 KB, wider or taller than 128 pixels, or not a PNG is
+  refused by name, and an answer that does not come is not an error: the row (or the in-game notice)
+  shows the player's own drawn icon, a trophy for an unlocked achievement and a padlock for a locked
+  one, and the log says once per run that a badge could not be shown. Pictures are decoded with the
+  vendored stb_image, its size checked before any pixel memory is taken.
+- **Badge cache.** Fetched pictures are kept in `achievements-badges` under the player data folder,
+  named from the badge name only, at most 2,048 files; a kept picture is read from there instead of
+  asked for again. **Sign out** deletes that folder (the pictures say which games were played).
+  Turning the switch off fetches nothing more and leaves the folder as it is: the next **Sign out**
+  deletes it, a factory reset moves it aside with the rest of the data folder, and it can be deleted
+  by hand at any time. The in-game notice reads
+  the unlocked picture from that folder; the runtime itself opens no connection.
 - **User agent.** Each request names the player in the form RetroAchievements documents for clients:
   `NakagawaRecomp/<numeric version> (<operating system and version>) rcheevos/<version>`, for example
   `NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5`. A version that is not numeric, or a
@@ -147,10 +167,12 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   request up), and one left from an earlier run. The queue holds at most 4,096 records. With no
   definite answer (no connection, a busy server) a record waits 30 seconds; a record the server refuses
   by its own error leaves the queue and is reported; a refused account keeps every record until the next
-  sign-in. The game's title page shows its core achievements (up to 64; with more, the page says how
-  many it shows and that all of them are on the game's page at retroachievements.org) and unlock toasts
-  captioned **RetroAchievements** appear in-game, one after another: two unlocks close together are two
-  toasts.
+  sign-in. The game's title page shows its core achievements under **RetroAchievements · Softcore**:
+  how many are unlocked and the points earned of the total, with a bar, then one row each, the
+  unlocked first, each with its badge (or the drawn icon), title, description and points (up to 256;
+  with more, the page says how many it shows and that all of them are on the game's page at
+  retroachievements.org). Unlock notices appear in-game, one after another: **Achievement unlocked**
+  over the achievement's title, its points and its badge. Two unlocks close together are two notices.
 - **One request at a time.** The player carries one RetroAchievements request at a time. A request made
   while another is on its way (a game started while a saved unlock is being sent) waits its turn, in
   order, instead of failing.

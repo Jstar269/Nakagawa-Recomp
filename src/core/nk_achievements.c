@@ -100,6 +100,13 @@ struct NkAch {
     bool outbound_pumping; /* ach_outbound_pump is on the stack */
     bool closing; /* nk_ach_destroy ran: freed when the transport answers what it holds */
     bool offline; /* nk_ach_set_online(false): nothing reaches the transport */
+    /* One badge request at a time (nk_ach_request_badge): its answer is kept in badge_done until
+     * nk_ach_take_badge. badge_generation counts what ends a badge's use (the switch turned off,
+     * the account or the game ended): an answer for an older one is dropped. */
+    bool badge_inflight;
+    bool badge_ready;
+    uint32_t badge_generation;
+    NkAchBadge badge_done;
 };
 
 static void ach_enter(const NkAch *ach) {
@@ -330,6 +337,28 @@ static void ach_push(NkAch *ach, NkAchEventKind kind, uint32_t id, uint32_t poin
     if (title) ach_copy_text(e->title, sizeof e->title, title);
     if (message) ach_copy_text(e->message, sizeof e->message, message);
     ach->event_count++;
+}
+
+void nk_ach_badge_free(NkAchBadge *badge) {
+    if (!badge) return;
+    free(badge->png);
+    memset(badge, 0, sizeof *badge);
+}
+
+/* The switch went off, or the account or the game ended: a badge's answer still on its way is
+ * dropped when it arrives (ach_badge_done), and one not yet taken goes now. The next badge request
+ * may be made at once; it waits its turn behind the one the transport holds (ach_send). */
+static void ach_badges_end(NkAch *ach) {
+    ach->badge_generation++;
+    ach->badge_inflight = false;
+    ach->badge_ready = false;
+    nk_ach_badge_free(&ach->badge_done);
+}
+
+/* The badge name when nk_ach_badge_name_ok takes it, else empty. */
+static void ach_copy_badge_name(char out[NK_ACH_BADGE_NAME_MAX], const char *name) {
+    memset(out, 0, NK_ACH_BADGE_NAME_MAX);
+    if (nk_ach_badge_name_ok(name)) memcpy(out, name, strlen(name));
 }
 
 static size_t ach_pending_find(const NkAch *ach, const char *game_hash, uint32_t id) {
@@ -634,6 +663,7 @@ static bool ach_response_unreachable(const NkAchResponse *response) {
 
 static void ach_finish(NkAch *ach) {
     rc_client_destroy(ach->client);
+    nk_ach_badge_free(&ach->badge_done);
     free(ach);
 }
 
@@ -820,6 +850,10 @@ static void RC_CCONV ach_event(const rc_client_event_t *event, rc_client_t *clie
             }
             ach_push(ach, NK_ACH_EVENT_UNLOCKED, event->achievement->id,
                      event->achievement->points, 0u, event->achievement->title, NULL);
+            ach_copy_badge_name(
+                ach->events[(ach->event_head + ach->event_count - 1u) % NK_ACH_EVENT_QUEUE]
+                    .badge_name,
+                event->achievement->badge_name);
         }
         break;
     case RC_CLIENT_EVENT_SERVER_ERROR:
@@ -889,6 +923,7 @@ static rc_client_t *ach_client_new(NkAch *ach) {
 static void ach_account_requests_end(NkAch *ach) {
     ach->client_generation++;
     ach->load_generation++;
+    ach_badges_end(ach);
     ach->pending_replay_inflight = false;
     AchOutbound *waiting = ach->outbound_head;
     ach->outbound_head = NULL;
@@ -1135,6 +1170,7 @@ void nk_ach_logout(NkAch *ach) {
     ach_enter(ach);
     ach_token_retry_end(ach);
     ach->load_generation++; /* the logout unloads the game and abandons a load */
+    ach_badges_end(ach);
     rc_client_logout(ach->client);
     ach_queue_take_over(ach);
     /* rc_client keeps its scheduled award retries through a logout and sends them as whoever
@@ -1223,8 +1259,10 @@ void nk_ach_unload_game(NkAch *ach) {
     ach_enter(ach);
     /* rc_client never reaches its completed-set state here (ach_award_answer_without_completion),
      * so unloading cannot raise a mastery event with no game. rc_client takes the game's ping off
-     * its schedule; its retries of an award stay. A load still on its way is abandoned. */
+     * its schedule; its retries of an award stay. A load still on its way is abandoned, and so
+     * is a badge's answer. */
     ach->load_generation++;
+    ach_badges_end(ach);
     rc_client_unload_game(ach->client);
     ach_leave(ach);
 }
@@ -1468,6 +1506,10 @@ void nk_ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {
     ach_leave(ach);
 }
 
+/* rc_client's lock-state grouping puts one set's achievements in buckets by state (unlocked,
+ * locked, unsupported and others), each in the set's order. The page lists the unlocked first,
+ * then the rest, so the list is read twice: pass 0 copies the unlocked, pass 1 everything else,
+ * each in rc_client's order. */
 static size_t ach_copy_achievement_list(const NkAch *ach, NkAchAchievement *out, size_t max,
                                         size_t *total) {
     rc_client_achievement_list_t *list = rc_client_create_achievement_list(
@@ -1476,28 +1518,218 @@ static size_t ach_copy_achievement_list(const NkAch *ach, NkAchAchievement *out,
     if (!list) return 0u;
     size_t copied = 0u;
     size_t count = 0u;
-    for (uint32_t bucket = 0u; bucket < list->num_buckets; bucket++) {
-        const rc_client_achievement_bucket_t *group = &list->buckets[bucket];
-        for (uint32_t item = 0u; item < group->num_achievements; item++) {
-            const rc_client_achievement_t *achievement = group->achievements[item];
-            if (!achievement) continue;
-            if (out && copied < max) {
-                NkAchAchievement *entry = &out[copied++];
-                memset(entry, 0, sizeof(*entry));
-                ach_copy_text(entry->title, sizeof entry->title,
-                              achievement->title ? achievement->title : "Untitled achievement");
-                ach_copy_text(entry->description, sizeof entry->description,
-                              achievement->description);
-                entry->points = achievement->points;
-                entry->unlocked_softcore =
+    for (int pass = 0; pass < 2; pass++) {
+        for (uint32_t bucket = 0u; bucket < list->num_buckets; bucket++) {
+            const rc_client_achievement_bucket_t *group = &list->buckets[bucket];
+            for (uint32_t item = 0u; item < group->num_achievements; item++) {
+                const rc_client_achievement_t *achievement = group->achievements[item];
+                if (!achievement) continue;
+                const bool unlocked =
                     (achievement->unlocked & RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE) != 0u;
+                if (unlocked != (pass == 0)) continue;
+                if (out && copied < max) {
+                    NkAchAchievement *entry = &out[copied++];
+                    memset(entry, 0, sizeof(*entry));
+                    ach_copy_text(entry->title, sizeof entry->title,
+                                  achievement->title ? achievement->title
+                                                     : "Untitled achievement");
+                    ach_copy_text(entry->description, sizeof entry->description,
+                                  achievement->description);
+                    ach_copy_badge_name(entry->badge_name, achievement->badge_name);
+                    entry->points = achievement->points;
+                    entry->unlocked_softcore = unlocked;
+                }
+                count++;
             }
-            count++;
         }
     }
     if (total) *total = count;
     rc_client_destroy_achievement_list(list);
     return copied;
+}
+
+bool nk_ach_copy_progress(const NkAch *ach, NkAchProgress *out) {
+    if (out) memset(out, 0, sizeof *out);
+    if (!ach || !out) return false;
+    ach_enter(ach);
+    const bool loaded = rc_client_is_game_loaded(ach->client) != 0;
+    if (loaded) {
+        rc_client_user_game_summary_t summary;
+        memset(&summary, 0, sizeof summary);
+        rc_client_get_user_game_summary(ach->client, &summary);
+        out->unlocked = summary.num_unlocked_achievements;
+        out->total = summary.num_core_achievements;
+        out->points_unlocked = summary.points_unlocked;
+        out->points_total = summary.points_core;
+    }
+    ach_leave(ach);
+    return loaded;
+}
+
+/* ---- badge pictures ------------------------------------------------------------------- */
+
+bool nk_ach_badge_name_ok(const char *name) {
+    if (!name) return false;
+    size_t length = 0u;
+    for (; name[length]; length++) {
+        const char c = name[length];
+        if (length + 1u >= NK_ACH_BADGE_NAME_MAX ||
+            !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
+            return false;
+    }
+    return length > 0u;
+}
+
+bool nk_ach_badge_url_allowed(const char *url) {
+    static const char prefix[] = NK_ACH_BADGE_URL_PREFIX;
+    if (!url || strncmp(url, prefix, sizeof prefix - 1u) != 0) return false;
+    const char *name = url + sizeof prefix - 1u;
+    size_t length = 0u;
+    while ((name[length] >= '0' && name[length] <= '9') ||
+           (name[length] >= 'a' && name[length] <= 'z') ||
+           (name[length] >= 'A' && name[length] <= 'Z'))
+        length++;
+    if (length == 0u || length >= NK_ACH_BADGE_NAME_MAX) return false;
+    return strcmp(name + length, ".png") == 0 || strcmp(name + length, "_lock.png") == 0;
+}
+
+bool nk_ach_badge_url(const char *name, bool locked, char *out, size_t out_size) {
+    if (out && out_size) out[0] = '\0';
+    if (!out || out_size == 0u || !nk_ach_badge_name_ok(name)) return false;
+    rc_api_fetch_image_request_t params;
+    memset(&params, 0, sizeof params);
+    params.image_name = name;
+    params.image_type = locked ? RC_IMAGE_TYPE_ACHIEVEMENT_LOCKED : RC_IMAGE_TYPE_ACHIEVEMENT;
+    rc_api_request_t request;
+    memset(&request, 0, sizeof request);
+    /* No host, as rc_client_get_image_url passes: rcheevos' own media host, whatever host the
+     * API requests are set to. */
+    if (rc_api_init_fetch_image_request_hosted(&request, &params, NULL) != RC_OK) return false;
+    const bool fits = request.url && strlen(request.url) < out_size &&
+                      nk_ach_badge_url_allowed(request.url) && !request.post_data;
+    if (fits) snprintf(out, out_size, "%s", request.url);
+    rc_api_destroy_request(&request);
+    return fits;
+}
+
+static uint32_t ach_be32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+bool nk_ach_badge_png_ok(const uint8_t *bytes, size_t size) {
+    static const uint8_t signature[8] = {0x89u, 'P', 'N', 'G', '\r', '\n', 0x1Au, '\n'};
+    if (!bytes || size < 33u || size > NK_ACH_BADGE_MAX_BYTES ||
+        memcmp(bytes, signature, sizeof signature) != 0 || ach_be32(bytes + 8) != 13u ||
+        memcmp(bytes + 12, "IHDR", 4u) != 0)
+        return false;
+    const uint32_t width = ach_be32(bytes + 16);
+    const uint32_t height = ach_be32(bytes + 20);
+    return width >= 1u && width <= NK_ACH_BADGE_MAX_SIDE && height >= 1u &&
+           height <= NK_ACH_BADGE_MAX_SIDE;
+}
+
+typedef struct AchBadgeCall {
+    NkAch *ach;
+    uint32_t generation;
+    char name[NK_ACH_BADGE_NAME_MAX];
+    bool locked;
+} AchBadgeCall;
+
+/* Why a badge's answer is not a picture, or NULL when it is one. */
+static const char *ach_badge_refusal(const NkAchResponse *response) {
+    if (!response || response->http_status == NK_ACH_HTTP_RETRY || response->http_status == 0)
+        return "no answer from the media server";
+    if (response->http_status < 0) return "refused before it was sent";
+    if (response->http_status != 200) return "the media server did not send it";
+    if (!response->body || response->body_length > NK_ACH_BADGE_MAX_BYTES)
+        return "refused: larger than a badge (64 KB)";
+    if (!nk_ach_badge_png_ok((const uint8_t *)response->body, response->body_length))
+        return "refused: not a PNG of at most 128 x 128 pixels";
+    return NULL;
+}
+
+static void ach_badge_done(const NkAchResponse *response, void *done_ctx) {
+    AchBadgeCall *call = (AchBadgeCall *)done_ctx;
+    NkAch *ach = call->ach;
+    ach_enter(ach);
+    if (ach->closing || call->generation != ach->badge_generation) {
+        /* The switch went off, or the account or the game ended, while it was on its way
+         * (ach_badges_end). */
+        free(call);
+        ach_leave(ach);
+        return;
+    }
+    ach->badge_inflight = false;
+    nk_ach_badge_free(&ach->badge_done);
+    NkAchBadge *badge = &ach->badge_done;
+    memcpy(badge->name, call->name, sizeof badge->name);
+    badge->locked = call->locked;
+    const char *why = ach_badge_refusal(response);
+    if (!why) {
+        badge->png = (uint8_t *)malloc(response->body_length);
+        if (badge->png) {
+            memcpy(badge->png, response->body, response->body_length);
+            badge->size = response->body_length;
+            badge->ok = true;
+        } else {
+            why = "out of memory";
+        }
+    }
+    if (why) snprintf(badge->why, sizeof badge->why, "%s", why);
+    ach->badge_ready = true;
+    free(call);
+    ach_leave(ach);
+}
+
+bool nk_ach_request_badge(NkAch *ach, const char *name, bool locked) {
+    if (!ach) return false;
+    char url[160];
+    if (!nk_ach_badge_url(name, locked, url, sizeof url)) return false;
+    ach_enter(ach);
+    bool sent = false;
+    if (!ach->closing && ach->transport && !ach->offline && !ach->badge_inflight &&
+        !ach->badge_ready && rc_client_get_user_info(ach->client) &&
+        rc_client_is_game_loaded(ach->client)) {
+        AchBadgeCall *call = (AchBadgeCall *)calloc(1u, sizeof *call);
+        if (call) {
+            call->ach = ach;
+            call->generation = ach->badge_generation;
+            snprintf(call->name, sizeof call->name, "%s", name);
+            call->locked = locked;
+            ach->badge_inflight = true;
+            const NkAchRequest request = {url, NULL, NULL};
+            if (ach_send(ach, &request, ach_badge_done, call)) {
+                sent = true;
+            } else {
+                ach->badge_inflight = false;
+                free(call);
+            }
+        }
+    }
+    ach_leave(ach);
+    return sent;
+}
+
+bool nk_ach_badge_pending(const NkAch *ach) {
+    if (!ach) return false;
+    ach_enter(ach);
+    const bool pending = ach->badge_inflight;
+    ach_leave(ach);
+    return pending;
+}
+
+bool nk_ach_take_badge(NkAch *ach, NkAchBadge *out) {
+    if (out) memset(out, 0, sizeof *out);
+    if (!ach || !out) return false;
+    ach_enter(ach);
+    const bool ready = ach->badge_ready;
+    if (ready) {
+        *out = ach->badge_done;
+        memset(&ach->badge_done, 0, sizeof ach->badge_done);
+        ach->badge_ready = false;
+    }
+    ach_leave(ach);
+    return ready;
 }
 
 size_t nk_ach_copy_achievement_list(const NkAch *ach, NkAchAchievement *out, size_t max,
@@ -1737,6 +1969,7 @@ void nk_ach_set_online(NkAch *ach, bool online) {
     if (!online && !was_offline) {
         ach_token_retry_end(ach);
         ach_queue_take_over(ach);
+        ach_badges_end(ach);
         /* Requests still waiting their turn are answered here, never sent. The one the transport
          * holds still gets its answer (NkAchTransport). */
         AchOutbound *waiting = ach->outbound_head;
