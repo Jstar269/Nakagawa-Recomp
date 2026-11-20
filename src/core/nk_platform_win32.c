@@ -1562,6 +1562,37 @@ FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared) {
     return file;
 }
 
+void nk_platform_file_change_identity(const char *path, uint64_t *changed, uint64_t *volume,
+                                      uint64_t *file_id) {
+    if (changed) *changed = 0;
+    if (volume) *volume = 0;
+    if (file_id) *file_id = 0;
+    if (!path || !*path) return;
+    WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return;
+    }
+    /* Attributes only, every sharing allowed: never in the way of a hold or of
+       another program's open. */
+    HANDLE handle = CreateFileW(wpath, FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wpath);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    FILE_BASIC_INFO basic;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (changed && GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)) &&
+        basic.ChangeTime.QuadPart > 0) {
+        *changed = (uint64_t)basic.ChangeTime.QuadPart;
+    }
+    if (GetFileInformationByHandle(handle, &info)) {
+        if (volume) *volume = info.dwVolumeSerialNumber;
+        if (file_id) *file_id = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+    }
+    CloseHandle(handle);
+}
+
 void nk_platform_terminate_process(NkProcessHandle *process) {
     if (!process) return;
     if (process->job_handle) {

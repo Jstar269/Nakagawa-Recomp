@@ -862,6 +862,20 @@ FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared) {
     return file;
 }
 
+void nk_platform_file_change_identity(const char *path, uint64_t *changed, uint64_t *volume,
+                                      uint64_t *file_id) {
+    struct stat data;
+    if (changed) *changed = 0;
+    if (volume) *volume = 0;
+    if (file_id) *file_id = 0;
+    if (!path || !*path || stat(path, &data) != 0) return;
+    if (changed) {
+        *changed = (uint64_t)data.st_ctim.tv_sec * 1000000000ull + (uint64_t)data.st_ctim.tv_nsec;
+    }
+    if (volume) *volume = (uint64_t)data.st_dev;
+    if (file_id) *file_id = (uint64_t)data.st_ino;
+}
+
 bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len) {
     (void)out_path;
     (void)max_len;

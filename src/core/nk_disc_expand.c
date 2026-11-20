@@ -1115,45 +1115,13 @@ static bool write_identity_records(const char *ref, const NkDiscImport *out) {
     "The file changed while Nakagawa was adding it. Add it again once nothing is writing " \
     "to it. Nothing was kept."
 
-/* The change time and the file's identity, where the file system reports
-   them; a field it does not report stays 0. */
-static void file_change_fields(const char *path, NkDiscSourceStamp *out) {
-#if defined(_WIN32) || defined(_WIN64)
-    WCHAR wide[32768];
-    HANDLE handle;
-    FILE_BASIC_INFO basic;
-    BY_HANDLE_FILE_INFORMATION info;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, 32768) <= 0) return;
-    /* Attributes only, every sharing allowed: never in the way of the import's own hold or
-       of another program's open. */
-    handle = CreateFileW(wide, FILE_READ_ATTRIBUTES,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    if (handle == INVALID_HANDLE_VALUE) return;
-    if (GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)) &&
-        basic.ChangeTime.QuadPart > 0) {
-        out->changed = (uint64_t)basic.ChangeTime.QuadPart;
-    }
-    if (GetFileInformationByHandle(handle, &info)) {
-        out->volume = info.dwVolumeSerialNumber;
-        out->file_id = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
-    }
-    CloseHandle(handle);
-#else
-    struct stat data;
-    if (stat(path, &data) != 0) return;
-    out->changed = (uint64_t)data.st_ctim.tv_sec * 1000000000ull + (uint64_t)data.st_ctim.tv_nsec;
-    out->volume = (uint64_t)data.st_dev;
-    out->file_id = (uint64_t)data.st_ino;
-#endif
-}
-
 bool nk_disc_source_stamp(const char *path, NkDiscSourceStamp *out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     out->size = path && path[0] ? nk_platform_get_file_size(path) : -1;
     if (out->size < 0 || !file_modified_time(path, &out->modified)) return false;
-    file_change_fields(path, out);
+    /* A field the file system does not report stays 0 (see nk_platform.h). */
+    nk_platform_file_change_identity(path, &out->changed, &out->volume, &out->file_id);
     return true;
 }
 

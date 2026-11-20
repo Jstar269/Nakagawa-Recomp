@@ -292,6 +292,14 @@ FILE *nk_platform_open_regular_file(const char *path);
  * when the file cannot be opened for reading at all. opened_shared may be NULL. */
 FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared);
 
+/* What a writer cannot put back about the file at `path`: its change time (POSIX
+ * st_ctim in nanoseconds; Windows the NTFS ChangeTime) and its identity (POSIX
+ * st_dev and st_ino; Windows the volume serial number and file index). A field
+ * the file system does not report, or a call that fails, leaves 0; the caller
+ * treats 0 as "not known", never as a difference. Never blocks another open. */
+void nk_platform_file_change_identity(const char *path, uint64_t *changed, uint64_t *volume,
+                                      uint64_t *file_id);
+
 /* Whether `path` is longer than the file APIs this process uses accept, so a
  * create or open of it fails for its length alone. On Win32 that is MAX_PATH
  * (260 with the terminator; 248 for a new directory) unless the process has
