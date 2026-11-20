@@ -153,7 +153,7 @@ class TestThirdPartyComponentInventory(unittest.TestCase):
 
     def _upstream_text(self, record: dict, file: str, origin: str, holders: tuple[str, ...]) -> dict:
         """The record's license_texts entry for *file*, imported from upstream at the pinned tag."""
-        entries = {entry["file"]: entry for entry in record["license_texts"]}
+        entries: dict[str, dict] = {entry["file"]: entry for entry in record["license_texts"]}
         entry = entries.get(file)
         self.assertIsNotNone(entry, f"{record['name']} does not record {file}")
         assert entry is not None
