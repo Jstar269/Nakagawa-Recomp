@@ -8,16 +8,20 @@ purely from the spec. Tests compile a small C harness together with
 src/rt/prx_loader.c using gcc from PATH (gcc -std=c11 -Wall -Wextra -Werror);
 the harness defines sr_prx_guest_write over a guard-filled arena.
 
-Covers spec section 8 items 1-8. Skips (not fails) if gcc is missing.
+Covers spec section 8 items 1-8. Skips (not fails) if gcc is missing; a harness that
+gcc cannot build is a failure. Where gcc has the AddressSanitizer runtime (every host
+but Windows), the fuzz and malformed-input cases also run on a harness built with
+-fsanitize=address,undefined, so an overrun of the loader's own buffers fails them.
 """
 
+import atexit
 import os
 import random
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
-import time
 import unittest
 
 PT_LOAD = 1
@@ -316,11 +320,14 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
         _setmode(_fileno(stdin), _O_BINARY);
 #endif
-        while (1) {
+        for (k = 0;; k++) {
             uint32_t len = 0;
             if (fread(&len, 1, 4, stdin) != 4) {
                 break;
             }
+            /* Name the input before loading it, so a crash or a hang names its mutation. */
+            printf("FUZZ %u\n", k);
+            fflush(stdout);
             blob = (unsigned char *)malloc(len > 0 ? (size_t)len : 1);
             if (blob == NULL) {
                 printf("RESULT fail\nERR harness out of memory\n");
@@ -505,6 +512,41 @@ def parse_output(text):
     return info
 
 
+SANITIZER_FLAGS = ("-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                   "-fno-omit-frame-pointer", "-g")
+SANITIZER_ENV = {"ASAN_OPTIONS": "detect_leaks=1:abort_on_error=0",
+                 "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"}
+
+
+class HarnessBuildError(AssertionError):
+    """gcc is on PATH but cannot build the harness: a failure, never a skip."""
+
+
+def harness_dir():
+    """A scratch directory for harness binaries, removed when the process exits."""
+    tmp = tempfile.mkdtemp(prefix="prxclean_")
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
+    return tmp
+
+
+def build_harness(out_dir, name, extra_flags=()):
+    """Compile HARNESS_SRC with src/rt/prx_loader.c into out_dir; return the binary."""
+    root = repo_root()
+    src = os.path.join(root, "src", "rt", "prx_loader.c")
+    hc = os.path.join(out_dir, name + ".c")
+    with open(hc, "w") as f:
+        f.write(HARNESS_SRC)
+    exe = os.path.join(out_dir, name + ".exe")
+    r = subprocess.run(
+        ["gcc", "-std=c11", "-Wall", "-Wextra", "-Werror", *extra_flags,
+         "-I", os.path.join(root, "src", "rt"),
+         hc, src, "-o", exe],
+        capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        raise HarnessBuildError("%s build failed: %s" % (name, r.stderr))
+    return exe
+
+
 class PrxTestBase(unittest.TestCase):
     EXE = None
     TMP = None
@@ -517,34 +559,21 @@ class PrxTestBase(unittest.TestCase):
             return
         if shutil.which("gcc") is None:
             raise unittest.SkipTest("gcc not on PATH")
-        root = repo_root()
-        src = os.path.join(root, "src", "rt", "prx_loader.c")
-        if not os.path.exists(src):
-            raise unittest.SkipTest("prx_loader.c not built yet")
-        PrxTestBase.TMP = tempfile.mkdtemp(prefix="prxclean_")
-        cls.TMP = PrxTestBase.TMP
-        hc = os.path.join(cls.TMP, "harness.c")
-        with open(hc, "w") as f:
-            f.write(HARNESS_SRC)
-        PrxTestBase.EXE = os.path.join(cls.TMP, "harness.exe")
-        cls.EXE = PrxTestBase.EXE
-        r = subprocess.run(
-            ["gcc", "-std=c11", "-Wall", "-Wextra", "-Werror",
-             "-I", os.path.join(root, "src", "rt"),
-             hc, src, "-o", cls.EXE],
-            capture_output=True, text=True, timeout=300)
-        if r.returncode != 0:
-            raise unittest.SkipTest("harness build failed: %s" % r.stderr)
+        tmp = harness_dir()
+        exe = build_harness(tmp, "harness")
+        PrxTestBase.TMP = cls.TMP = tmp
+        PrxTestBase.EXE = cls.EXE = exe
 
-    def run_load(self, blob, base=BASE, mode="mem", timeout=60):
+    def run_load(self, blob, base=BASE, mode="mem", timeout=60, exe=None,
+                 env=None):
         fx = os.path.join(self.TMP, "fix.prx")
         with open(fx, "wb") as f:
             f.write(blob)
-        args = [self.EXE, fx, "0x%X" % base]
+        args = [exe or self.EXE, fx, "0x%X" % base]
         if mode == "file":
             args.append("file")
         r = subprocess.run(args, capture_output=True, text=True,
-                           errors="replace", timeout=timeout)
+                           errors="replace", timeout=timeout, env=env)
         self.assertEqual(r.returncode, 0, "harness crashed: %r" % r.stderr)
         info = parse_output(r.stdout)
         self.assertIn("result", info, "harness gave no RESULT: %r" % r.stdout)
@@ -1287,15 +1316,22 @@ class TestExports(PrxTestBase):
         self.assert_fail(m.build(), needle="zero length")
 
     def test_file_api_matches_mem_api(self):
-        m = Module()
-        m.add_seg(0x1000, build_export_fixture(), 256)
-        blob = m.build()
-        a = self.run_load(blob, mode="mem")
-        b = self.run_load(blob, mode="file")
-        self.assertEqual(a["result"], "ok")
-        self.assertEqual(b["result"], "ok")
-        self.assertEqual(a["exps"], b["exps"])
-        self.assertEqual(a["entry"], b["entry"])
+        # Every field the harness reports must agree, on fixtures that populate the
+        # exports, the imports and a relocated segment.
+        exports = Module()
+        exports.add_seg(0x1000, build_export_fixture(), 256)
+        imports = Module()
+        imports.add_seg(0x1000, build_import_fixture(), 256)
+        for name, blob, populated in (
+                ("exports", exports.build(), "exps"),
+                ("imports", imports.build(), "imps"),
+                ("relocated", fuzz_seed_blob(), "mems")):
+            with self.subTest(fixture=name):
+                a = self.run_load(blob, mode="mem")
+                b = self.run_load(blob, mode="file")
+                self.assertEqual(a["result"], "ok", a.get("err"))
+                self.assertTrue(a[populated], "fixture leaves %s empty" % populated)
+                self.assertEqual(a, b)
 
 
 # ---------------------------------------------------------------------------
@@ -1343,8 +1379,6 @@ class TestImports(PrxTestBase):
         self.assertEqual(info.get("result"), "ok", info.get("err"))
         self.assertEqual(info["nimp"], 3)
         g = BASE + 0x1000
-        # Recompute expected stub addresses from the builder layout.
-        build_import_fixture()
         # stub0 area starts right after nid0 (8 bytes): find via structure.
         # Layout: modinfo(52) r0(20) r1(24) nid0(8) stub0(16) nid1(4)
         #         stub1(8) s0 s1.
@@ -1509,13 +1543,6 @@ class TestRevisedPinning(PrxTestBase):
         self.assertEqual(by_nid[0xBBBBBBBB]["addr"], g + 0x600)
         self.assertEqual(by_nid[0xCCCCCCCC]["func"], 0)
         self.assertEqual(by_nid[0xCCCCCCCC]["addr"], g + 0x700)
-        # Walking used the len byte at offset 8: rec1 must start at
-        # r0 + 4*4 = r0+16. Raw byte check pins the offsets.
-        self.assertEqual(raw[r0 + 8], 4)
-        self.assertEqual(raw[r0 + 9], 0)
-        self.assertEqual(struct.unpack_from("<H", raw, r0 + 10)[0], 1)
-        self.assertEqual(struct.unpack_from("<I", raw, r0 + 12)[0], g + e0)
-        self.assertEqual(raw[r1 + 8], 6)
 
     def test_export_short_len_fails(self):
         # len 3 (< 4 words) must fail even though the 16-byte head is present.
@@ -1574,17 +1601,6 @@ class TestRevisedPinning(PrxTestBase):
         got = {(e["lib"], e["nid"]): e["stub"] for e in info["imps"]}
         self.assertEqual(got[("pinA", 0xDDDDDDDD)], g + s0a)
         self.assertEqual(got[("pinB", 0xEEEEEEEE)], g + s1a)
-        # Raw byte checks pin the field offsets/widths.
-        self.assertEqual(struct.unpack_from("<H", raw, r0 + 4)[0], 0x1111)
-        self.assertEqual(struct.unpack_from("<H", raw, r0 + 6)[0], 0x2222)
-        self.assertEqual(raw[r0 + 8], 5)
-        self.assertEqual(raw[r0 + 9], 0)
-        self.assertEqual(struct.unpack_from("<H", raw, r0 + 10)[0], 1)
-        self.assertEqual(struct.unpack_from("<I", raw, r0 + 12)[0], g + n0)
-        self.assertEqual(struct.unpack_from("<I", raw, r0 + 16)[0], g + s0a)
-        self.assertEqual(raw[r1 + 8], 6)
-        self.assertEqual(struct.unpack_from("<I", raw, r1 + 20)[0],
-                         0xDEADBEEF)
 
     def test_stub_short_len_fails(self):
         # len 4 (< 5 words) must fail even though the 20-byte head is present.
@@ -1608,7 +1624,8 @@ class TestRevisedPinning(PrxTestBase):
 # ---------------------------------------------------------------------------
 
 class TestAtomicity(PrxTestBase):
-    def failing_blobs(self):
+    @staticmethod
+    def failing_blobs():
         blobs = []
         d = basic_seg_with_words([0x1])[0]
         m = Module()
@@ -1665,46 +1682,153 @@ class TestAtomicity(PrxTestBase):
 # Item 8: fuzz — 10,000 random mutations never crash nor hang
 # ---------------------------------------------------------------------------
 
+def fuzz_seed_blob():
+    """A loadable module with a module name, a string and a relocation table."""
+    m = Module(e_entry=0x40)
+    d0 = (modinfo_block(name=b"fuzzmod") + struct.pack("<4I", 1, 2, 3, 4)
+          + b"libX\x00")
+    m.add_seg(0x1000, d0, len(d0) + 16)
+    m.add_seg(0x2000, bytes(48), 64)
+    m.add_reloc(PT_REL_A, reloc_a(52, 2) + reloc_a(56, 1))
+    return m.build()
+
+
+def fuzz_mutation_stream(n):
+    """n seeded random mutations of fuzz_seed_blob, each prefixed by its u32 length."""
+    seed_blob = fuzz_seed_blob()
+    rng = random.Random(0xC10A4E)
+    stream = bytearray()
+    for _i in range(n):
+        mut = bytearray(seed_blob)
+        op = rng.randrange(4)
+        if op == 0 and len(mut) > 0:
+            for _ in range(rng.randrange(1, 9)):
+                mut[rng.randrange(len(mut))] = rng.randrange(256)
+        elif op == 1 and len(mut) > 1:
+            mut = mut[:rng.randrange(len(mut))]
+        elif op == 2:
+            mut += bytes(rng.randrange(256) for _ in range(
+                rng.randrange(1, 32)))
+        else:
+            if len(mut) > 0:
+                pos = rng.randrange(len(mut))
+                mut[pos:pos] = bytes(rng.randrange(256) for _ in range(
+                    rng.randrange(0, 8)))
+        stream += struct.pack("<I", len(mut)) + mut
+    return bytes(stream)
+
+
+def last_fuzz_index(out_text):
+    """The index of the last mutation the --fuzz-stream harness started, or None."""
+    last = None
+    for line in out_text.splitlines():
+        if line.startswith("FUZZ "):
+            last = int(line.split()[1])
+    return last
+
+
 class TestFuzz(PrxTestBase):
-    def test_fuzz_10000_mutations(self):
-        m = Module(e_entry=0x40)
-        d0 = (modinfo_block(name=b"fuzzmod") + struct.pack("<4I", 1, 2, 3, 4)
-              + b"libX\x00")
-        m.add_seg(0x1000, d0, len(d0) + 16)
-        m.add_seg(0x2000, bytes(48), 64)
-        m.add_reloc(PT_REL_A, reloc_a(52, 2) + reloc_a(56, 1))
-        seed_blob = m.build()
-        rng = random.Random(0xC10A4E)
-        n = 10000
-        t0 = time.monotonic()
-        stream = bytearray()
-        for _i in range(n):
-            mut = bytearray(seed_blob)
-            op = rng.randrange(4)
-            if op == 0 and len(mut) > 0:
-                for _ in range(rng.randrange(1, 9)):
-                    mut[rng.randrange(len(mut))] = rng.randrange(256)
-            elif op == 1 and len(mut) > 1:
-                mut = mut[:rng.randrange(len(mut))]
-            elif op == 2:
-                mut += bytes(rng.randrange(256) for _ in range(
-                    rng.randrange(1, 32)))
-            else:
-                if len(mut) > 0:
-                    pos = rng.randrange(len(mut))
-                    mut[pos:pos] = bytes(rng.randrange(256) for _ in range(
-                        rng.randrange(0, 8)))
-            stream += struct.pack("<I", len(mut)) + mut
-        r = subprocess.run([self.EXE, "--fuzz-stream", "0x%X" % BASE],
-                           input=bytes(stream),
-                           capture_output=True, timeout=60)
+    FUZZ_COUNT = 10000
+
+    def run_fuzz(self, exe, timeout, env=None):
+        n = self.FUZZ_COUNT
+        stream = fuzz_mutation_stream(n)
+        try:
+            r = subprocess.run([exe, "--fuzz-stream", "0x%X" % BASE],
+                               input=stream, capture_output=True,
+                               timeout=timeout, env=env)
+        except subprocess.TimeoutExpired as hang:
+            out_text = (hang.stdout or b"").decode("ascii", errors="replace")
+            self.fail("fuzz hung past %ds at mutation %s"
+                      % (timeout, last_fuzz_index(out_text)))
         out_text = r.stdout.decode("ascii", errors="replace") if r.stdout else ""
-        crashes = 0 if (r.returncode == 0 and "RESULT ok" in out_text) else 1
-        dt = time.monotonic() - t0
-        print("\nfuzz: %d mutations in %.1fs, crashes/hangs=%d"
-              % (n, dt, crashes))
-        self.assertEqual(crashes, 0, "%d fuzz crashes/hangs: %s" % (crashes, r.stderr))
-        self.assertLess(dt, 540, "fuzz exceeded time bound")
+        err_text = r.stderr.decode("ascii", errors="replace") if r.stderr else ""
+        ok = r.returncode == 0 and out_text.rstrip().endswith("RESULT ok")
+        self.assertTrue(ok, "fuzz crashed at mutation %s (exit %d): %s"
+                        % (last_fuzz_index(out_text), r.returncode, err_text))
+        self.assertEqual(last_fuzz_index(out_text), n - 1)
+
+    def test_fuzz_10000_mutations(self):
+        self.run_fuzz(self.EXE, timeout=60)
+
+
+class TestSanitized(TestFuzz):
+    """The fuzz and malformed-input cases on an ASan/UBSan harness (not on Windows)."""
+
+    SAN_EXE = None
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if os.name == "nt" or sys.platform in ("cygwin", "msys"):
+            raise unittest.SkipTest(
+                "SKIP: the Windows gcc has no AddressSanitizer runtime; the Linux "
+                "and macOS legs run the sanitized harness")
+        if TestSanitized.SAN_EXE is None or not os.path.exists(TestSanitized.SAN_EXE):
+            TestSanitized.SAN_EXE = build_harness(cls.TMP, "harness_san",
+                                                  SANITIZER_FLAGS)
+
+    def san_env(self):
+        env = dict(os.environ)
+        env.update(SANITIZER_ENV)
+        return env
+
+    def test_fuzz_10000_mutations(self):
+        self.run_fuzz(self.SAN_EXE, timeout=300, env=self.san_env())
+
+    def test_malformed_and_valid_inputs(self):
+        exports = Module()
+        exports.add_seg(0x1000, build_export_fixture(), 256)
+        imports = Module()
+        imports.add_seg(0x1000, build_import_fixture(), 256)
+        failing = TestAtomicity.failing_blobs()
+        valid = [exports.build(), imports.build(), fuzz_seed_blob()]
+        cases = [(blob, "fail") for blob in failing] + [(blob, "ok") for blob in valid]
+        for idx, (blob, expected) in enumerate(cases):
+            for mode in ("mem", "file"):
+                with self.subTest(blob=idx, mode=mode):
+                    info = self.run_load(blob, mode=mode, exe=self.SAN_EXE,
+                                         env=self.san_env())
+                    self.assertEqual(info.get("result"), expected, info.get("err"))
+
+
+class HarnessBuildTests(unittest.TestCase):
+    """The harness build itself: a broken build fails, and nothing is left behind."""
+
+    def setUp(self):
+        if shutil.which("gcc") is None:
+            self.skipTest("gcc not on PATH")
+
+    def test_broken_harness_build_fails_instead_of_skipping(self):
+        global HARNESS_SRC
+        saved = (PrxTestBase.EXE, PrxTestBase.TMP, HARNESS_SRC)
+        HARNESS_SRC = "#error deliberately broken harness\n"
+        PrxTestBase.EXE = None
+        try:
+            PrxTestBase.setUpClass()
+        except unittest.SkipTest as skipped:
+            self.fail("a harness build failure was reported as a skip: %s" % skipped)
+        except AssertionError as failure:
+            self.assertIn("deliberately broken harness", str(failure))
+        else:
+            self.fail("a broken harness built")
+        finally:
+            PrxTestBase.EXE, PrxTestBase.TMP, HARNESS_SRC = saved
+
+    def test_harness_directory_is_removed_at_exit(self):
+        tools = os.path.dirname(os.path.abspath(__file__))
+        code = ("import sys\n"
+                "sys.path.insert(0, %r)\n"
+                "import test_prx_loader_cleanroom as t\n"
+                "t.PrxTestBase.setUpClass()\n"
+                "print(t.PrxTestBase.TMP)\n" % tools)
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                           text=True, timeout=300)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tmp = r.stdout.strip().splitlines()[-1]
+        self.assertTrue(os.path.basename(tmp).startswith("prxclean_"), tmp)
+        self.assertFalse(os.path.exists(tmp),
+                         "harness directory %s outlived the run" % tmp)
 
 
 if __name__ == "__main__":

@@ -198,6 +198,19 @@ class TitleManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(title_manifest.TitleManifestError, "duplicate JSON object key"):
             title_manifest.loads_manifest('{"schema_version":1,"schema_version":1}')
 
+    def test_nesting_that_exhausts_the_decoder_is_a_named_failure(self) -> None:
+        # Under the public byte cap, yet deep enough that json.loads itself
+        # overflows before depth() runs.
+        raw = "[" * 200_000
+        self.assertLess(len(raw.encode("utf-8")), title_manifest.PUBLIC_MANIFEST_MAX_BYTES)
+        with self.assertRaisesRegex(title_manifest.TitleManifestError, "JSON nesting exceeds"):
+            title_manifest.loads_manifest(raw)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "deep.json"
+            path.write_text(raw, encoding="utf-8")
+            with self.assertRaisesRegex(title_manifest.TitleManifestError, "JSON nesting exceeds"):
+                title_manifest.load_manifest(path)
+
     def test_unknown_root_and_nested_fields_are_rejected(self) -> None:
         root_bad = copy.deepcopy(self.fixture)
         root_bad["workspace_binding"] = "private/input.bin"
@@ -939,10 +952,6 @@ assert(!nk_title_identity_by_disc("TEST12345"));
         self.assertEqual(result.stdout, b"")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class GuestModuleBaseTests(unittest.TestCase):
     """A guest PRX's code and data live at load_address, so it must be real user RAM."""
 
@@ -1020,3 +1029,7 @@ class GuestModuleBaseTests(unittest.TestCase):
         manifest["modules"] = modules(title_manifest.MAX_TITLE_MODULES + 1)
         with self.assertRaises(title_manifest.TitleManifestError):
             title_manifest.validate_manifest(manifest)
+
+
+if __name__ == "__main__":
+    unittest.main()

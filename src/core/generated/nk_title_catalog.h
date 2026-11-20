@@ -12,7 +12,8 @@
 #define NK_TITLE_CATALOG_SCHEMA_VERSION 1
 /* Title limits shared by this catalog and the manifest parser
  * (src/core/nk_title_manifest.c): a manifest the parser accepts always
- * fits the catalog's registry and snapshot copies. */
+ * fits the catalog's registry and snapshot copies. The module and loose-root
+ * limits come from tools/title_manifest.py, so the two validators cannot drift. */
 #define NK_TITLE_MAX_OVERLAYS 8
 #define NK_TITLE_MAX_COMPATIBLE_DISC_IDS 16
 #define NK_TITLE_MAX_MODULES 256

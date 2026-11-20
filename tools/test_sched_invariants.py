@@ -451,6 +451,33 @@ def _find_sched_selftest_binary(
     return None
 
 
+#: `make sched-selftest` (every configuration, in the hosted native legs) exports the exact binary it
+#: just built and runs the two execution tests below against it. Run any other way, the tests use a
+#: real built program under build/ (`_find_sched_selftest_binary`), never a decoy, or skip and say why.
+SCHED_SELFTEST_EXE_ENV = "NK_SCHED_SELFTEST_EXE"
+SCHED_SELFTEST_EXECUTION_TESTS = (
+    "tools.test_sched_invariants.NovbpaceSemanticsTests.test_pace_setup_binary_execution",
+    "tools.test_sched_invariants.PauseRuntimeAssertionTests.test_time_refresh_aborts_inside_the_pause_loop",
+)
+
+
+def sched_selftest_exe(case: unittest.TestCase) -> str:
+    """The binary `make sched-selftest-one` built (a named variable that points nowhere fails), else a
+    real built program under build/ (`_find_sched_selftest_binary`), else the test skips."""
+    exe = os.environ.get(SCHED_SELFTEST_EXE_ENV, "")
+    if exe:
+        path = Path(exe)
+        if not path.is_absolute():
+            path = ROOT / path
+        case.assertTrue(path.is_file(), f"{SCHED_SELFTEST_EXE_ENV}={exe} names no built selftest")
+        return str(path)
+    binary = _find_sched_selftest_binary(ROOT / "build")
+    if binary is None:
+        case.skipTest("sched_selftest executable not found; run through `make sched-selftest`, "
+                      f"which sets {SCHED_SELFTEST_EXE_ENV}")
+    return str(binary)
+
+
 class NovbpaceSemanticsTests(unittest.TestCase):
     """SR_NOVBPACE must enforce value semantics: unset/empty/'0' = paced, '1' = turbo, any other refused."""
 
@@ -515,16 +542,15 @@ class NovbpaceSemanticsTests(unittest.TestCase):
             decoy = fake_root / "build" / "u08" / "headtree" / "tests" / "native" / "sched_selftest.c"
             decoy.parent.mkdir(parents=True)
             decoy.write_text("int main(void) { return 0; }\n", encoding="utf-8")
-            with mock.patch.object(sys.modules[__name__], "ROOT", fake_root):
+            # Not through `make sched-selftest`, whose exported binary would be used before any lookup.
+            env = {k: v for k, v in os.environ.items() if k != SCHED_SELFTEST_EXE_ENV}
+            with mock.patch.object(sys.modules[__name__], "ROOT", fake_root), \
+                    mock.patch.dict(os.environ, env, clear=True):
                 with self.assertRaises(unittest.SkipTest):
                     self.test_pace_setup_binary_execution()
 
     def test_pace_setup_binary_execution(self):
-        binary = _find_sched_selftest_binary(ROOT / "build")
-        if binary is None:
-            self.skipTest("sched_selftest executable not found; skipping binary execution test")
-
-        exe = str(binary)
+        exe = sched_selftest_exe(self)
 
         # Unset -> paced (s_pace_on=1)
         env = {k: v for k, v in os.environ.items() if k != "SR_NOVBPACE"}
@@ -807,19 +833,9 @@ def _posix_classes_to_python(pattern):
 
 class PauseRuntimeAssertionTests(unittest.TestCase):
     def test_time_refresh_aborts_inside_the_pause_loop(self):
-        candidates = (
-            (ROOT / "build" / "hst" / "sched_selftest_generic.exe",)
-            if os.name == "nt"
-            else (
-                ROOT / "build" / "hst" / "sched_selftest_generic.exe",
-                ROOT / "build" / "hst" / "sched_selftest_generic",
-            )
-        )
-        binary = next((path for path in candidates if _is_executable_program(path)), None)
-        if binary is None:
-            self.skipTest("sched-selftest binary has not been built")
+        binary = sched_selftest_exe(self)
         result = subprocess.run(
-            [str(binary), "--pause-forbidden-vtime"], cwd=ROOT, text=True,
+            [binary, "--pause-forbidden-vtime"], cwd=ROOT, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10, check=False,
         )
         self.assertNotEqual(result.returncode, 0, "vtime_refresh unexpectedly ran while paused")
@@ -827,6 +843,23 @@ class PauseRuntimeAssertionTests(unittest.TestCase):
             "sched pause invariant: vtime_refresh ran while the guest was paused",
             result.stdout,
         )
+
+
+
+class SchedSelftestExecutionGateTests(unittest.TestCase):
+    """`make sched-selftest-one` runs the argv-only modes against the binary it just built."""
+
+    def test_the_selftest_recipe_runs_the_execution_tests_on_its_own_binary(self):
+        makefile = read_makefile(ROOT)
+        exe = "$(BUILD_DIR)/sched_selftest_$(SCHED_SELFTEST_CONFIG).exe"
+        self.assertIn(f"sched-selftest-one: export {SCHED_SELFTEST_EXE_ENV} = {exe}\n", makefile)
+        start = makefile.index("\nsched-selftest-one: $(TITLE_CONFIG_TOOL)")
+        recipe = makefile[start:makefile.index("\n\n", start)]
+        self.assertIn(f"\t{exe}\n", recipe)
+        run = '\t"$(PYTHON)" -m unittest ' + " ".join(SCHED_SELFTEST_EXECUTION_TESTS)
+        self.assertIn(run, recipe)
+        # The binary runs first, so the execution tests see the build that just passed.
+        self.assertLess(recipe.index(f"\t{exe}\n"), recipe.index(run))
 
 
 if __name__ == "__main__":

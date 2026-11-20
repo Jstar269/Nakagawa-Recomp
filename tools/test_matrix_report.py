@@ -306,6 +306,14 @@ class MatrixReportGenerationTests(unittest.TestCase):
             assert isinstance(case, dict)
             self.assertIn(case["source_shape_classification"], _DISPOSITION_BY_SHAPE)
             self.assertNotEqual(case["disposition"], "")
+            # Categories C and E are the deletion boundary and stay empty: the
+            # generator never proposes a deletion; that takes a manual review.
+            self.assertNotIn(
+                case["source_shape_classification"],
+                {"C_REDUNDANT_BEHAVIORAL_PROXY", "E_OBSOLETE_INVARIANT"},
+                case["id"],
+            )
+            self.assertNotEqual(case["disposition"], "DELETE_CANDIDATE", case["id"])
             for issue in case["related_issues"]:
                 self.assertRegex(issue, r"^#\d{1,4}$")
 
