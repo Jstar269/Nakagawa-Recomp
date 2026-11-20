@@ -293,10 +293,14 @@ References and diff images are game pixels: the tool refuses an output folder in
   reports its process id in `version`. Both arrived after v1.20.4. With an older build the result
   is `NOT_RUN ppsspp-too-old` and nothing is stored. A missing PPSSPP or disc is
   `NOT_RUN no-ppsspp` or `NOT_RUN no-disc`.
-- **Network.** The tool connects only to `127.0.0.1`. PPSSPP's debugger web server, though,
-  reports the machine's local IP address and port to `report.ppsspp.org` while it runs, for its
-  remote-disc discovery. `capture` will not start PPSSPP until `--allow-ppsspp-registration` says you
-  accept that; without the flag it reports `NOT_RUN registration-not-accepted`.
+- **Network.** The driver itself (not PPSSPP) connects only to `127.0.0.1`. PPSSPP's debugger web
+  server reports this machine's local IP address and port to `report.ppsspp.org` while it runs, for
+  its remote-disc discovery. While a capture runs, PPSSPP's debugger also listens on every network
+  interface of this computer and allows reading and writing the game's memory, so other devices on
+  the same network can reach it; run captures on a trusted network or with the host firewall
+  blocking inbound connections to PPSSPP. `capture` will not start PPSSPP until
+  `--allow-ppsspp-registration` says you accept that; without the flag it reports
+  `NOT_RUN registration-not-accepted`.
 
 ## Local presented-frame acceptance
 
