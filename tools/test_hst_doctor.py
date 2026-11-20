@@ -991,6 +991,82 @@ class EnvironmentContractTests(unittest.TestCase):
                 result = next(item for item in report.results if item.code == "HOST_WINDOWS_11")
                 self.assertEqual(result.status, expected)
 
+    # F-b5187cd8: on Linux (native or WSL 2) the build scope checks the Linux build tools
+    # instead of failing on HOST_WINDOWS. The probes are injected, so this runs on Windows too.
+    LINUX_TOOLS = {"gcc": "/usr/bin/gcc", "make": "/usr/bin/make", "python": "/usr/local/bin/python"}
+    LINUX_VERSIONS = {
+        "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0",
+        "make": "GNU Make 4.3",
+        "python": "Python 3.15.2",
+    }
+
+    def linux_build_report(self, tools: dict[str, str], versions: dict[str, tuple[int, str]]) -> nk_doctor.Report:
+        """The build scope's host and toolchain checks on a Linux host with these tools on PATH."""
+        def which(name: str) -> str | None:
+            return tools.get(name)
+
+        def run(command: list[str], timeout: float = 8.0) -> tuple[int, str]:
+            name = next(key for key, path in tools.items() if path == command[0])
+            return versions[name]
+
+        report = nk_doctor.Report(Path.cwd(), "build")
+        with mock.patch.object(_CHECKS_MODULE, "_is_windows_host", return_value=False), \
+                mock.patch.object(_CHECKS_MODULE.platform, "system", return_value="Linux"), \
+                mock.patch.object(_CHECKS_MODULE.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(_CHECKS_MODULE.shutil, "which", side_effect=which), \
+                mock.patch.object(_CHECKS_MODULE, "_run_version", side_effect=run), \
+                mock.patch.object(_CHECKS_MODULE, "check_toolchain",
+                                  side_effect=AssertionError("the MSYS2 toolchain check ran on Linux")), \
+                mock.patch.object(_CHECKS_MODULE, "_probe_powershell",
+                                  side_effect=AssertionError("the PowerShell check ran on Linux")), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PYTHON", None)
+            _CHECKS_MODULE.check_platform(report)
+            _CHECKS_MODULE.check_build_toolchain(report, Path("/usr/bin"), None, Path.cwd())
+        return report
+
+    def test_linux_build_scope_reports_the_host_and_passes_with_the_linux_tools(self) -> None:
+        report = self.linux_build_report(
+            self.LINUX_TOOLS, {name: (0, text) for name, text in self.LINUX_VERSIONS.items()}
+        )
+        by_code = {item.code: item for item in report.results}
+        self.assertEqual(by_code["HOST_PLATFORM"].status, "INFO", by_code["HOST_PLATFORM"])
+        self.assertIn("Linux", by_code["HOST_PLATFORM"].summary)
+        for code in ("HOST_WINDOWS", "HOST_WINDOWS_11", "POWERSHELL_VERSION", "MSYS2_UCRT64"):
+            self.assertNotIn(code, by_code)
+        for code, name in (("TOOL_GCC", "gcc"), ("TOOL_MAKE", "make"), ("TOOL_PYTHON", "python")):
+            with self.subTest(code=code):
+                self.assertEqual(by_code[code].status, "PASS", by_code[code])
+                self.assertEqual(by_code[code].detail, self.LINUX_VERSIONS[name])
+        self.assertEqual([item for item in report.results if item.status == "FAIL"], [])
+
+    def test_linux_build_scope_fails_by_name_for_a_missing_or_broken_tool(self) -> None:
+        versions = {name: (0, text) for name, text in self.LINUX_VERSIONS.items()}
+        missing_gcc = {name: path for name, path in self.LINUX_TOOLS.items() if name != "gcc"}
+        cases = (
+            ("gcc missing", missing_gcc, versions, "TOOL_GCC", "gcc"),
+            ("make does not run", self.LINUX_TOOLS, {**versions, "make": (127, "exec format error")},
+             "TOOL_MAKE", "make"),
+            ("python too old", self.LINUX_TOOLS, {**versions, "python": (0, "Python 3.12.3")},
+             "TOOL_PYTHON", "3.12.3"),
+        )
+        for label, tools, run_versions, code, named in cases:
+            with self.subTest(label):
+                report = self.linux_build_report(tools, run_versions)
+                failures = [item for item in report.results if item.status == "FAIL"]
+                self.assertEqual([item.code for item in failures], [code])
+                self.assertIn(named, failures[0].summary + " " + (failures[0].detail or ""))
+                self.assertTrue(failures[0].remediation)
+
+    def test_linux_run_scope_still_fails_on_the_host(self) -> None:
+        """Games run on Windows only: the run scope keeps FAIL HOST_WINDOWS on Linux."""
+        report = nk_doctor.Report(Path.cwd(), "run")
+        with mock.patch.object(_CHECKS_MODULE, "_is_windows_host", return_value=False), \
+                mock.patch.object(_CHECKS_MODULE, "_probe_powershell", return_value=(None, None, None, "absent")):
+            _CHECKS_MODULE.check_platform(report)
+        result = next(item for item in report.results if item.code == "HOST_WINDOWS")
+        self.assertEqual(result.status, "FAIL")
+
     def test_shader_mtime_does_not_require_glslc_when_provenance_is_valid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
