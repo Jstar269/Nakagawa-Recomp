@@ -83,9 +83,14 @@ class CancellationToken:
             raise InterruptedError("Operation cancelled by user")
 
 
+def normalize_disc_id(disc_id: str) -> str:
+    """Return a disc id upper-cased with edge whitespace and '-', '_' and spaces removed."""
+    return "".join(char for char in disc_id.strip().upper() if char not in "-_ ")
+
+
 def _comparable_disc_id(disc_id: str) -> str:
-    """A disc id with case, edge whitespace and the - and _ separators removed."""
-    return disc_id.strip().upper().replace("-", "").replace("_", "")
+    """A disc id normalised for profile matching."""
+    return normalize_disc_id(disc_id)
 
 
 @dataclass(frozen=True)

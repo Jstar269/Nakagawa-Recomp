@@ -246,7 +246,13 @@ class LibraryGameRecord:
 
 
 def _library_key(disc_id: str) -> str:
-    """The key a disc id is stored and looked up under: case- and edge-whitespace-insensitive."""
+    """The key a disc id is stored and looked up under: case- and edge-whitespace-insensitive.
+
+    Intentionally does not use ``nk_core.types.normalize_disc_id``: this is an
+    on-disk ``library.json`` lookup and deduplication key shared with the native
+    player, so dropping interior '-', '_' or spaces here would change how
+    persisted records are keyed.
+    """
     return disc_id.upper().strip()
 
 
