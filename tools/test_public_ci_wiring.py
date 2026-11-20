@@ -1226,6 +1226,23 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         self.assertLess(text.index('test -n "$tests"'), text.index("-m unittest -v $tests"))
         self.assertIn("tail -n 1 \"$log\" | tr -d '\\r' | grep -qx 'OK'", text)
         self.assertNotIn("continue-on-error", text)
+        # The 8.3 short-name tests run, never skip: their volume creates short names, a probe
+        # proves it before any test, and their temporary folders are made on that volume.
+        order = [
+            'tmp="$(cygpath -m "$RUNNER_TEMP")/windows-only-tmp"',
+            'volume="${tmp%%/*}"',
+            'fsutil.exe 8dot3name set 2',
+            'fsutil.exe 8dot3name set "$volume" 0',
+            'mkdir -p "$tmp/Spaced short name probe"',
+            '"$py" - "$(cygpath -w "$tmp/Spaced short name probe")" <<\'PY\'',
+            'sys.exit(f"SHORT_NAMES_UNAVAILABLE: {sys.argv[1]} has no 8.3 alias")',
+            'export TMPDIR="$tmp"',
+            "-m unittest -v $tests",
+        ]
+        for earlier, later in zip(order, order[1:], strict=False):
+            with self.subTest(earlier=earlier):
+                self.assertIn(earlier, text)
+                self.assertLess(text.index(earlier), text.index(later))
         installer = _ci_job_blocks()["windows_installer"]
         for module, step_name in ci_test_shards.WINDOWS_ONLY_RUN_ELSEWHERE.items():
             with self.subTest(module=module):

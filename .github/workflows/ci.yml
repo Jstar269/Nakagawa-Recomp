@@ -2982,6 +2982,12 @@ jobs:
       # they skip. tools/ci_test_shards.py --windows-only names them from their skip conditions,
       # so a new one joins without an edit; tools/test_installer.py's run in windows_installer.
       # Only unittest's bare OK passes, so a test that skips here too fails the step.
+      # Two of them need 8.3 short names, which the volume of the tests' temporary folders
+      # did not create here (both skipped): fsutil turns their creation on for the volume
+      # of a fresh folder under RUNNER_TEMP (the Windows default per-volume mode, then that
+      # volume; the hosted runner is elevated and the volume is its own), the tests' temporary
+      # folders are made in that folder (TMPDIR), and a probe stops the step by name when a
+      # new spaced folder there still has no 8.3 alias.
       - name: Run the Windows-only Python tests
         if: contains(matrix.parts, 'selftests')
         shell: msys2 {0}
@@ -2996,6 +3002,23 @@ jobs:
           py="$(cygpath -u "$PYTHON")"
           tests="$("$py" tools/ci_test_shards.py --windows-only | tr -d '\r')"
           test -n "$tests"
+          tmp="$(cygpath -m "$RUNNER_TEMP")/windows-only-tmp"
+          volume="${tmp%%/*}"
+          fsutil.exe 8dot3name set 2
+          fsutil.exe 8dot3name set "$volume" 0
+          fsutil.exe 8dot3name query "$volume"
+          mkdir -p "$tmp/Spaced short name probe"
+          "$py" - "$(cygpath -w "$tmp/Spaced short name probe")" <<'PY'
+          import ctypes, sys
+          from pathlib import PureWindowsPath
+          buffer = ctypes.create_unicode_buffer(1024)
+          written = ctypes.windll.kernel32.GetShortPathNameW(sys.argv[1], buffer, len(buffer))
+          alias = PureWindowsPath(buffer.value).name if 0 < written < len(buffer) else ""
+          if not alias or alias.casefold() == PureWindowsPath(sys.argv[1]).name.casefold():
+              sys.exit(f"SHORT_NAMES_UNAVAILABLE: {sys.argv[1]} has no 8.3 alias")
+          print(f"8.3 alias: {alias}")
+          PY
+          export TMPDIR="$tmp"
           log="$(cygpath -u "$RUNNER_TEMP")/windows-only-python.log"
           # One unittest name per word.
           # shellcheck disable=SC2086

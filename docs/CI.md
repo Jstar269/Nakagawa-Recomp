@@ -1165,8 +1165,12 @@ class's `setUp` or `setUpClass`, or the module that skips under such a condition
 joins the step without an edit; a skip that depends on a tool being present (`mingw32-make`,
 `pwsh`) is not a platform condition and is not selected. `tools/test_installer.py` is left out
 because `windows_installer` runs it whole with the pinned compiler. The step passes only on
-unittest's bare `OK`, so a test that skips there too fails it. The rest of those modules, and
-every other module, runs only in the Linux shards; the full local suite builds the native
+unittest's bare `OK`, so a test that skips there too fails it. Two of the tests need 8.3 short
+names, which the runner's temporary volume did not create: the step turns their creation on
+for the volume of a fresh folder under `RUNNER_TEMP` (`fsutil 8dot3name`; the hosted runner is
+elevated), makes the tests' temporary folders there (`TMPDIR`), and stops by name
+(`SHORT_NAMES_UNAVAILABLE`) when a new spaced folder there still has no 8.3 alias. The rest of
+those modules, and every other module, runs only in the Linux shards; the full local suite builds the native
 fixtures and takes over an hour on Windows. Make-based tests need a POSIX `sh` on `PATH`
 (MSYS2 `usr/bin` or Git for Windows `bin`).
 
