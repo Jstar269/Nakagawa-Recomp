@@ -3459,6 +3459,46 @@
         "reset": "one PRX launch per boot, in XMB context, with no network or radio use; PSPLink soft reset before the next launch only after a read-only nkctl probe shows the launch finished with its done record; otherwise the owner power-cycles the console and nothing is retried on that boot"
       },
       {
+        "id": "PSP-GE-RASTER-004",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built case 192; no hardware result is recorded yet.",
+        "group": "ge",
+        "source": "tests/fixtures/psp_oracle/probe_ge_sample.c",
+        "prx": "ge_depth_bounds.prx",
+        "apis": [
+          "sceGeEdramGetAddr",
+          "sceGeEdramGetSize",
+          "sceGeListEnQueue",
+          "sceGeListSync",
+          "sceGeDrawSync",
+          "sceGeBreak",
+          "sceKernelDcacheWritebackAll",
+          "sceKernelDelayThread",
+          "sceKernelGetSystemTimeLow",
+          "sceDisplayGetFrameBuf"
+        ],
+        "diagnostic_case_ids": [
+          "ge-depth-bounds"
+        ],
+        "case_ids": [
+          "display-check",
+          "edram",
+          "ctl-*",
+          "dw-*",
+          "dr-*",
+          "dc-*",
+          "vram-restore",
+          "ge-depth-bounds-done"
+        ],
+        "invariant": "#2193: first the display buffer and whether it overlaps the probe's block or the GE never idled, and the eDRAM size and address (when either is SKIP every later record is SKIP with its word count kept); then per cell in fixed order: the bounded wait outcome of the probe's own list, then fixed-shape colour reads of a 5650 buffer at VRAM 0x110000 (plain uncached mirror) after depth-tested EQUAL sprites painted one colour per stored depth value: per half of rows 0..15 the 16-column groups that are blue, yellow or red throughout and the colour counts, or for dc-scissor the counts inside and outside the scissor and two raw rows; then position-free counts of the 0x44000-byte depth block at 0x154000 through the plain and the 0x04200000 mirror; the 0x88000 bytes are saved first and restored and checked at the end",
+        "issues": [
+          2193
+        ],
+        "risk": "low; ge-raster-bounds' block, display check, save, fill, restore, GE-context enqueue and bounded own-list wait, with more sprites in each list (at most 22) and depth-tested readout sprites: project-written through-mode lists into a probe-owned 0x88000-byte VRAM block at 0x110000 (clear of both XMB display buffers, 0x0 and 0x88000); the probe first reads the display buffer and the eDRAM address and skips every cell (SKIP records, nothing touched) if the display overlaps the block or cannot be read or the eDRAM is not at 0x04000000, waits (bounded) for the GE to idle before saving the block, fills it before each cell and restores it at the end; a list or vertex buffer that would overflow is not queued (FAIL); each wait is bounded and decided by the probe's own list, with a sceGeBreak(1) reset only when that list has not ended by the deadline. No POWER RISK is known: the lists use no SIGNAL, JUMP, CALL or RET command; the depth writes at columns at or past zbw and the 512x272 depth clear at zbw 256 are those ge-raster-bounds made on boots 198 and 214, and every depth index the lists can form stays inside the saved block; every record is written before the next cell, so a stall loses only the cell in flight and those after it; after a reset that leaves the GE busy every later cell is SKIP and the block is still restored. The probe changes no GE setting outside its lists. The block's ownership is an assumption: display-check sees only the buffer on screen, so the probe's fill may show on screen and a VSH write into the block would read as other",
+        "reset": "one PRX launch per boot, in XMB context, with no network or radio use; soft reset before the next launch only after a read-only nkctl probe shows the launch finished with its done record; otherwise the owner power-cycles the console and nothing is retried on that boot"
+      },
+      {
         "id": "PSP-GE-MIP-001",
         "status": "implemented",
         "hardware_evidence": "MEASURED",
