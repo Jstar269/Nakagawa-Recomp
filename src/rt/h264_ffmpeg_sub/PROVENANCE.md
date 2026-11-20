@@ -125,7 +125,7 @@ Legend:
 | `libavcodec/h264_picture.c` | imported byte-identical | `eec5e9fb9a0a85cdc361caf7355d79217baec842` |
 | `libavcodec/h264_ps.c` | imported byte-identical | `e21c2b56acf4bb199f4452da1e8428cfd0edadfe` |
 | `libavcodec/h264_ps.h` | imported byte-identical | `3f1ab72e385a8fd8f1528cb95701c04b7457e9be` |
-| `libavcodec/h264_refs.c` | imported byte-identical | `dae8bd278adbe7ab14cbcb64a308ba71f12bbcc3` |
+| `libavcodec/h264_refs.c` | imported + LOCAL DELTA | `dae8bd278adbe7ab14cbcb64a308ba71f12bbcc3` |
 | `libavcodec/h264_sei.c` | imported byte-identical | `ca2ca59e1f5482c59b7d302ffd6ad0b1f757d848` |
 | `libavcodec/h264_sei.h` | imported byte-identical | `14cc559361d614a4e943e9b47fa9685155c28874` |
 | `libavcodec/h264_slice.c` | imported + LOCAL DELTA | `62f7a61aed9af051c78ee6202f386c999c1dbd4b` |
@@ -324,6 +324,23 @@ FFmpeg cherry-picked it to `release/6.1` (`30e346c76f`), `release/7.1` (`f9db090
 
 Taken on upstream's authority: the read was not reproduced in this project, so no regression
 test shows the change is needed. The media selftests confirm that valid streams decode as before.
+
+### `libavcodec/h264_refs.c`
+
+Modified 2026-11-20 (audit 2026-11-17 finding F-8eabcf01; new bytes await the maintainer's
+approval). One commit from FFmpeg's `release/4.4` branch is applied verbatim to the n4.4 blob
+(its parent's `h264_refs.c` is the n4.4 blob itself); nothing else changes, and each change is
+marked `LOCAL DELTA` in the file.
+
+- `3dc35e8529c4f6000dcc803fbf082a39aa7e85e8` "avcodec/h264_refs: Clear stale pointers from
+  ref_list" (cherry-pick of master `1886c3269d8a5cc15391ace1db598230d4fba5a4`; testcase
+  `poc10.bin`, reported by Chromium). Both `memset` calls in `h264_initialise_ref_list` clear
+  `32 - len` entries instead of only those below `ref_count`, so no entry above `ref_count`
+  keeps a pointer to a picture of an earlier slice or picture.
+
+Taken on upstream's authority: no single-threaded path reading `ref_list` above `ref_count`
+was found or reproduced in this project, so no regression test shows the change is needed. The
+media selftests confirm that valid streams decode as before.
 
 ## Authored stand-ins
 
