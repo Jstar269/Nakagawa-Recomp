@@ -27,24 +27,25 @@
  * product-check body earlier, while checking src/core/PROVENANCE.md's wording, and wrote the new
  * one from login_user_data without opening the old one again.
  *
- * Known limits for the wiring step (nothing calls this codec yet; the slice that opens the relay
- * connection decides them):
+ * How the codec is used: src/core/nk_adhoc_relay_client.c reads and writes the relay's TCP streams
+ * with it, and src/rt/hle_network.c consumes what it decodes.
  *   - nk_lobby_parse checks only a packet's opcode and length. A CONNECT from a hostile server may
  *     carry the all-ones, all-zero or a group MAC, the console's own MAC, an empty nickname or a
  *     repeated peer id, a DISCONNECT an unknown id, and a SCAN a group name with any bytes and no
- *     terminator; each is decoded as it is. The consumer validates these fields before it puts a
- *     peer in a list or fans a broadcast out to it.
- *   - The product code and nickname differ from the HLE layer's: sceNetAdhocctlInit accepts any
- *     product (a lower-case one too, as a PSP does), while the server's rule here refuses lower
- *     case; sceNetAdhocctlGetParameter writes at most 127 bytes of the nickname and a NUL, while
- *     the server accepts 128. The player caps a nickname at 32 bytes (#2197), so the second never
- *     shows today; the wiring step maps the first (refuse at login, or report it).
+ *     terminator; each is decoded as it is. hle_network.c (adhoc_upsert_peer) drops a CONNECT with
+ *     a zero, group or own MAC, and a repeated peer id replaces its older holder.
+ *   - sceNetAdhocctlInit accepts a lower-case product code, as a PSP does; the HLE layer upper-cases
+ *     it before nk_relay_product_ok and refuses by name one that still fails. The HLE layer sends
+ *     at most 127 bytes of the nickname, which the server's 128-byte rule accepts.
  *   - An inbound relay port of 0 or of the offset itself (10000 by default) comes back as guest
  *     port 0. A peer that follows the protocol never sends the second, since only port 0 maps
- *     there and it goes out as 0; the consumer refuses a 0 from nk_relay_port_in.
- *   - The codec keeps no state, so the reader that the wiring step adds caps its buffer at the
- *     largest packet (193 bytes on the lobby, 14 + 10240 for a PDP datagram, 4 + 51200 for a PTP
- *     block) and times out a packet a peer leaves unfinished. */
+ *     there and it goes out as 0; the relay client passes a 0 on as it is.
+ *   - The codec keeps no state. The relay client buffers each TCP stream (the lobby and each data
+ *     stream) up to 512 KiB (NK_RELAY_CHAN_MAX_BUF) and decodes whole packets from that buffer.
+ *     There is no timeout: a packet a peer leaves unfinished keeps that stream waiting for the
+ *     rest, which the game sees as no data on that ad hoc socket, or as no lobby event. A lobby
+ *     packet with an unknown opcode, or a PDP or PTP length above the protocol's largest (10240
+ *     and 51200 bytes), ends that stream, and the relay client's last error names it. */
 
 #include "nk_adhoc_relay.h"
 
@@ -266,4 +267,168 @@ uint16_t nk_relay_port_out(uint16_t port, uint16_t offset) {
 uint16_t nk_relay_port_in(uint16_t port, uint16_t offset) {
     if (port == 0u) return 0u; /* port 0 went out as 0; this project's addition */
     return (uint16_t)(port - offset);
+}
+
+/* The shipped servers (maintainer decisions of 2026-11-06 and 2026-11-19 on #1139): socom.cc,
+ * PPSSPP's default aemu_postoffice server, is the default; the four ArenaAnywhere relays are
+ * presets. All five are listed with "data_mode": "AemuPostoffice" in PPSSPP's
+ * assets/adhoc-servers.json at 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, and the labels give the
+ * places that list names. Another preset is another host the player may contact: it needs its
+ * own maintainer decision in that issue, a row under "Network use" in docs/SETUP.md and a line in
+ * tools/test_prereq_fetcher.py (AGENTS.md section 5). */
+static const NkAdhocServerPreset s_server_presets[] = {
+    {"socom.cc", "Socom Adhoc Server (France)"},
+    {"relay.arenaanywhere.site", "ArenaAnywhere (Europe)"},
+    {"relay-usa.arenaanywhere.site", "ArenaAnywhere (US)"},
+    {"relay-sa.arenaanywhere.site", "ArenaAnywhere (South Africa)"},
+    {"relay-asia.arenaanywhere.site", "ArenaAnywhere (Singapore)"},
+};
+
+size_t nk_adhoc_server_preset_count(void) {
+    return sizeof(s_server_presets) / sizeof(s_server_presets[0]);
+}
+
+const NkAdhocServerPreset *nk_adhoc_server_preset(size_t index) {
+    if (index >= nk_adhoc_server_preset_count()) return NULL;
+    return &s_server_presets[index];
+}
+
+static bool parse_u16_port(const char *s, const char *end, uint16_t *out) {
+    if (!s || s >= end) return false;
+    uint32_t v = 0u;
+    for (const char *p = s; p < end; p++) {
+        if (*p < '0' || *p > '9') return false;
+        v = v * 10u + (uint32_t)(*p - '0');
+        if (v > 65535u) return false;
+    }
+    if (v == 0u) return false;
+    if (out) *out = (uint16_t)v;
+    return true;
+}
+
+static bool host_char_ok(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '-' || c == '.';
+}
+
+/* The host check on host[0..len), which need not be terminated. */
+static bool host_span_ok(const char *host, size_t len) {
+    if (!host || len == 0u || len > NK_ADHOC_SERVER_MAX_LEN) return false;
+    size_t label_start = 0u;
+    size_t labels = 0u;
+    bool last_all_digits = false;
+    for (size_t i = 0u; i <= len; i++) {
+        if (i < len && host[i] != '.') {
+            if (!host_char_ok((unsigned char)host[i])) return false;
+            continue;
+        }
+        const size_t label_len = i - label_start;
+        if (label_len == 0u || label_len > 63u) return false;
+        if (host[label_start] == '-' || host[i - 1u] == '-') return false;
+        last_all_digits = true;
+        for (size_t j = label_start; j < i; j++) {
+            if (host[j] < '0' || host[j] > '9') last_all_digits = false;
+        }
+        labels++;
+        label_start = i + 1u;
+    }
+    if (!last_all_digits) return true;
+    /* A last label of digits only is an IPv4 literal: exactly four parts, each 0-255, no
+       leading zero, so "1.2.3" and "01.2.3.4" are never read as some other address. */
+    if (labels != 4u) return false;
+    size_t start = 0u;
+    for (size_t i = 0u; i <= len; i++) {
+        if (i < len && host[i] != '.') continue;
+        const size_t part = i - start;
+        unsigned value = 0u;
+        if (part > 3u || (part > 1u && host[start] == '0')) return false;
+        for (size_t j = start; j < i; j++) {
+            if (host[j] < '0' || host[j] > '9') return false;
+            value = value * 10u + (unsigned)(host[j] - '0');
+        }
+        if (value > 255u) return false;
+        start = i + 1u;
+    }
+    return true;
+}
+
+bool nk_adhoc_relay_host_ok(const char *host) {
+    if (!host) return false;
+    size_t len = 0u;
+    while (len <= NK_ADHOC_SERVER_MAX_LEN && host[len]) len++;
+    return host_span_ok(host, len);
+}
+
+bool nk_adhoc_relay_parse_server(const char *spec, char *host_out, size_t host_cap,
+                                 uint16_t *lobby_port, uint16_t *data_port) {
+    if (host_out && host_cap > 0u) host_out[0] = '\0';
+    if (!spec) return false;
+    const size_t total = strlen(spec);
+    if (total == 0u || total > NK_ADHOC_SERVER_MAX_LEN) return false;
+
+    const char *colon = strchr(spec, ':');
+    const size_t host_len = colon ? (size_t)(colon - spec) : total;
+    if (host_len == 0u || (host_out && host_len >= host_cap)) return false;
+    if (!host_span_ok(spec, host_len)) return false;
+
+    uint16_t lport = NK_RELAY_LOBBY_PORT;
+    uint16_t dport = NK_RELAY_DATA_PORT;
+    if (colon) {
+        const char *pstr = colon + 1;
+        const char *comma = strchr(pstr, ',');
+        const char *end = spec + total;
+        if (comma) {
+            if (!parse_u16_port(pstr, comma, &lport) ||
+                !parse_u16_port(comma + 1, end, &dport))
+                return false;
+        } else {
+            if (!parse_u16_port(pstr, end, &lport)) return false;
+        }
+    }
+
+    if (host_out && host_cap > 0u) {
+        memcpy(host_out, spec, host_len);
+        host_out[host_len] = '\0';
+    }
+    if (lobby_port) *lobby_port = lport;
+    if (data_port) *data_port = dport;
+    return true;
+}
+
+/* Whether s[i..] starts a Unicode bidirectional control in UTF-8: U+061C, U+200E/F,
+   U+202A-202E, U+2066-2069. */
+static bool server_bidi_at(const unsigned char *s, size_t i, size_t len) {
+    if (i + 1u < len && s[i] == 0xD8u && s[i + 1u] == 0x9Cu) return true;
+    if (i + 2u >= len || s[i] != 0xE2u) return false;
+    if (s[i + 1u] == 0x80u) {
+        return s[i + 2u] == 0x8Eu || s[i + 2u] == 0x8Fu || (s[i + 2u] >= 0xAAu && s[i + 2u] <= 0xAEu);
+    }
+    return s[i + 1u] == 0x81u && s[i + 2u] >= 0xA6u && s[i + 2u] <= 0xA9u;
+}
+
+const char *nk_adhoc_relay_server_problem(const char *spec) {
+    if (nk_adhoc_relay_parse_server(spec, NULL, 0u, NULL, NULL)) return NULL;
+    if (!spec || !spec[0]) return "it is empty";
+    const unsigned char *s = (const unsigned char *)spec;
+    const size_t len = strlen(spec);
+    for (size_t i = 0u; i < len; i++) {
+        if (server_bidi_at(s, i, len)) return "it has a bidirectional control character";
+    }
+    for (size_t i = 0u; i < len; i++) {
+        if (s[i] < 0x20u || s[i] == 0x7Fu) return "it has a control character";
+    }
+    for (size_t i = 0u; i < len; i++) {
+        if (s[i] >= 0x80u) return "it has a letter outside A to Z (only A-Z, 0-9, '-' and '.')";
+    }
+    if (strchr(spec, ' ')) return "it has a space";
+    if (strstr(spec, "://")) return "it starts with a scheme such as http://: enter the host only";
+    if (strchr(spec, '/')) return "it has a path (a '/'): enter the host only";
+    if (len > NK_ADHOC_SERVER_MAX_LEN) return "it is longer than 127 characters";
+    const char *colon = strchr(spec, ':');
+    const size_t host_len = colon ? (size_t)(colon - spec) : len;
+    if (!host_span_ok(spec, host_len)) {
+        return "the host is not a host name or IPv4 address (letters, digits, '-' and '.')";
+    }
+    return "a port is not a whole number from 1 to 65535 (host:lobby_port or "
+           "host:lobby_port,data_port)";
 }

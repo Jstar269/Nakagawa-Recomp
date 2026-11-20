@@ -1681,8 +1681,8 @@ class GenericLauncherHostileTests(unittest.TestCase):
 #: crypto engine (nk_psp_fail), which reads the key store.
 LAUNCH_HOMEBREW_SOURCES = tuple(
     REPO_ROOT / "src" / "core" / name
-    for name in ("nk_pbp_homebrew.c", "nk_psp_crypto.c", "nk_psp_keystore.c",
-                 "nk_psp_builtin_keys.c")
+    for name in ("nk_adhoc_relay.c", "nk_pbp_homebrew.c", "nk_psp_crypto.c",
+                 "nk_psp_keystore.c", "nk_psp_builtin_keys.c")
 )
 #: The Windows libraries those harnesses link.
 LAUNCH_WINDOWS_LIBS = ("-lshell32", "-lole32", "-luuid")

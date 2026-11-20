@@ -102,12 +102,14 @@ static void hle_unsupported_summary(void) {
     }
 }
 
-static void hle_note_unsupported(HleEntry *e) {
+/* The first controlled refusal of a NID: one stderr line and the end-of-run summary. A static
+ * refusal entry passes its table error, hle_controlled_refusal the error it returns. */
+static void hle_note_unsupported(HleEntry *e, uint32_t error) {
     if (atomic_exchange_explicit(&e->unsupported_state, 1u, memory_order_acq_rel))
         return;
     hle_register_unsupported_summary();
     fprintf(stderr, "HLE: controlled refusal: %s (NID 0x%08x) returned 0x%08x; in the works (#341)\n",
-            e->name, e->nid, e->unsupported_error);
+            e->name, e->nid, error);
 }
 
 /* One stderr line the first time a NID with no recorded evidence runs its handler. Diagnostic
@@ -2647,6 +2649,19 @@ static uint32_t h_ControlledUnsupported(CpuState *s) {
     (void)s;
     return 0x80010086u; /* SCE_KERNEL_ERROR_ERRNO_FUNCTION_NOT_SUPPORTED */
 }
+
+/* Runtime controlled refusal for features disabled by policy/setting (such as online ad hoc
+ * play when SR_ADHOC_ENABLED is off): emits the same diagnostic and flight record as a static
+ * refusal entry without permanently pinning the HLE table row across self-test toggles. */
+uint32_t hle_controlled_refusal(CpuState *s, uint32_t error) {
+    HleEntry *e = hle_find(sr_last_nid);
+    if (e) {
+        atomic_store_explicit(&e->unimplemented_error, error, memory_order_release);
+        hle_note_unsupported(e, error);
+        sr_flight_unsupported(e->nid, error, sched_current_uid(), s ? s->pc : 0u);
+    }
+    return error;
+}
 FILE *sr_fopen_utf8(const char *path, const wchar_t *mode);
 extern CallbackEntry *s_callbacks;
 extern size_t s_callbacks_len;
@@ -4688,7 +4703,7 @@ uint32_t sr_syscall(CpuState *s, uint32_t nid) {
     }
     uint32_t ret;
     if (e->unsupported_error) {
-        hle_note_unsupported(e);
+        hle_note_unsupported(e, e->unsupported_error);
         ret = e->unsupported_error;
     } else {
         hle_note_unverified(e);

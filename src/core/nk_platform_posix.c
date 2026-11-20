@@ -314,6 +314,16 @@ bool nk_platform_sync_file(FILE *f) {
     return fsync(fd) == 0;
 }
 
+bool nk_platform_random_bytes(void *out, size_t n) {
+    if (!out && n) return false;
+    if (n == 0) return true;
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (!f) return false;
+    const size_t got = fread(out, 1u, n, f);
+    fclose(f);
+    return got == n;
+}
+
 bool nk_platform_sync_dir(const char *dir) {
     if (!dir || !*dir) return false;
     int fd = open(dir, O_RDONLY);

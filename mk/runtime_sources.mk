@@ -140,6 +140,9 @@ RT_SRCS    := src/rt/recomp.c \
               $(HLE_SRCS) src/rt/audio_resample.c src/rt/flash0_font.c \
               src/rt/mp3_bridge.c \
               src/core/nk_xb.c \
+              src/core/nk_adhoc_relay.c \
+              src/core/nk_adhoc_net.c \
+              src/core/nk_adhoc_relay_client.c \
               src/rt/prx_loader.c \
               src/rt/sched.c \
               src/rt/sr_coro.c \

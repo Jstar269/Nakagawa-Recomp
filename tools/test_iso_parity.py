@@ -650,6 +650,7 @@ class IsoParityTests(unittest.TestCase):
             ROOT / "src" / "core" / "generated" / "nk_title_catalog.c",
             # The launch modes are required: a missing nk_launch.c fails the build.
             ROOT / "src" / "core" / "nk_launch.c",
+            ROOT / "src" / "core" / "nk_adhoc_relay.c",
             # nk_launch.c starts a homebrew program from its Memory Stick folder
             # (nk_pbp_homebrew.c), whose package reader reports through the PSP crypto
             # engine (nk_psp_fail), which reads the key store.

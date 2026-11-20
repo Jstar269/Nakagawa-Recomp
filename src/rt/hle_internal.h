@@ -1117,6 +1117,7 @@ int ge_log_on(void);
 void hle_lock(void);
 void hle_unlock(void);
 void sr_hle_register_unsupported(uint32_t nid, const char *name, uint32_t error);
+uint32_t hle_controlled_refusal(CpuState *s, uint32_t error);
 HleEntry *hle_find(uint32_t nid);
 extern uint32_t s_uid;
 extern uint32_t s_heap;

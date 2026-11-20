@@ -105,6 +105,9 @@ bool nk_platform_list_dir_counted(const char *dir, NkDirEntryFn fn, void *ctx,
 /* Flush f's buffered bytes and have the operating system put them on the disk
  * (fflush, then FlushFileBuffers or fsync). False when either fails. */
 bool nk_platform_sync_file(FILE *f);
+/* Fill out with n bytes from the operating system's random source (rand_s, which uses
+ * RtlGenRandom, on Win32; /dev/urandom on POSIX). False when the source cannot be read. */
+bool nk_platform_random_bytes(void *out, size_t n);
 /* Put dir's own entries (names added, renamed or removed in it) on the disk:
  * fsync on the directory on POSIX, where a file system that cannot sync a
  * directory (EINVAL) counts as done. NTFS journals directory changes and

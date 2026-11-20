@@ -368,11 +368,10 @@
     "status": "partial"
   },
   "0x157e6225": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPtpClose",
     "name": "sceNetAdhocPtpClose",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x15b6446b": {
     "classification": "dedicated",
@@ -716,11 +715,10 @@
     "status": "partial"
   },
   "0x2a2a1e07": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingInit",
     "name": "sceNetAdhocMatchingInit",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x2a2b3de0": {
     "classification": "dedicated",
@@ -880,11 +878,10 @@
     "status": "partial"
   },
   "0x32b156b3": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingStop",
     "name": "sceNetAdhocMatchingStop",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x32bf938e": {
     "classification": "dedicated",
@@ -1224,11 +1221,10 @@
     "status": "partial"
   },
   "0x40f8f435": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingGetPoolMaxAlloc",
     "name": "sceNetAdhocMatchingGetPoolMaxAlloc",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x42560f23": {
     "classification": "dedicated",
@@ -1423,6 +1419,12 @@
     "name": "sceRtcGetCurrentClock",
     "status": "complete"
   },
+  "0x4d2ce199": {
+    "classification": "dedicated",
+    "handler": "h_NetAdhocGetSocketAlert",
+    "name": "sceNetAdhocGetSocketAlert",
+    "status": "partial"
+  },
   "0x4d4e10ec": {
     "classification": "dedicated",
     "handler": "h_DisplayIsVblank",
@@ -1430,11 +1432,10 @@
     "status": "partial"
   },
   "0x4da4c788": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPtpSend",
     "name": "sceNetAdhocPtpSend",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x4db1e739": {
     "classification": "dedicated",
@@ -1644,18 +1645,16 @@
     "status": "unreviewed"
   },
   "0x5e3d4b79": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingSelectTarget",
     "name": "sceNetAdhocMatchingSelectTarget",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x5e7f79c9": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocctlJoin",
     "name": "sceNetAdhocctlJoin",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x5ec81c55": {
     "classification": "dedicated",
@@ -1916,11 +1915,10 @@
     "status": "unreviewed"
   },
   "0x6f92741b": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPdpCreate",
     "name": "sceNetAdhocPdpCreate",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x6fc46853": {
     "classification": "dedicated",
@@ -2000,6 +1998,12 @@
     "classification": "dedicated",
     "handler": "h_PowerSetClockFrequency",
     "name": "scePowerSetClockFrequency",
+    "status": "partial"
+  },
+  "0x73bfd52d": {
+    "classification": "dedicated",
+    "handler": "h_NetAdhocSetSocketAlert",
+    "name": "sceNetAdhocSetSocketAlert",
     "status": "partial"
   },
   "0x740fccd1": {
@@ -2117,11 +2121,10 @@
     "status": "unreviewed"
   },
   "0x7945ecda": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingTerm",
     "name": "sceNetAdhocMatchingTerm",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x79d1c3fa": {
     "classification": "dedicated",
@@ -2134,6 +2137,12 @@
     "handler": "h_AtracSetDataAndGetID",
     "name": "sceAtracSetDataAndGetID",
     "status": "unreviewed"
+  },
+  "0x7a662d6b": {
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPollSocket",
+    "name": "sceNetAdhocPollSocket",
+    "status": "partial"
   },
   "0x7ac0321a": {
     "classification": "dedicated",
@@ -2197,11 +2206,10 @@
     "status": "controlled_unsupported"
   },
   "0x7f27bb5e": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPdpDelete",
     "name": "sceNetAdhocPdpDelete",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x7f696782": {
     "classification": "dedicated",
@@ -2337,11 +2345,10 @@
     "status": "partial"
   },
   "0x877f6d66": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPtpOpen",
     "name": "sceNetAdhocPtpOpen",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x87c263d1": {
     "classification": "dedicated",
@@ -2374,11 +2381,10 @@
     "status": "unreviewed"
   },
   "0x8916c003": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocctlGetNameByAddr",
     "name": "sceNetAdhocctlGetNameByAddr",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x89360950": {
     "classification": "dedicated",
@@ -2418,11 +2424,10 @@
     "status": "controlled_unsupported"
   },
   "0x8bea2b3e": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPtpRecv",
     "name": "sceNetAdhocPtpRecv",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x8c1e027d": {
     "classification": "controlled_unsupported",
@@ -2480,11 +2485,10 @@
     "status": "unreviewed"
   },
   "0x8f58bedf": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingCancelTargetWithOpt",
     "name": "sceNetAdhocMatchingCancelTargetWithOpt",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x8ffdf9a2": {
     "classification": "dedicated",
@@ -2541,11 +2545,10 @@
     "status": "unreviewed"
   },
   "0x93ef3843": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingStart",
     "name": "sceNetAdhocMatchingStart",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x94416130": {
     "classification": "dedicated",
@@ -2621,11 +2624,10 @@
     "status": "partial"
   },
   "0x99560abe": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocctlGetAddrByName",
     "name": "sceNetAdhocctlGetAddrByName",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x99944089": {
     "classification": "dedicated",
@@ -2640,11 +2642,10 @@
     "status": "unreviewed"
   },
   "0x9ac2eeac": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPtpFlush",
     "name": "sceNetAdhocPtpFlush",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x9ace131e": {
     "classification": "dedicated",
@@ -2677,11 +2678,10 @@
     "status": "partial"
   },
   "0x9c5cfb7d": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingGetPoolStat",
     "name": "sceNetAdhocMatchingGetPoolStat",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x9c6eaad7": {
     "classification": "dedicated",
@@ -2720,11 +2720,10 @@
     "status": "partial"
   },
   "0x9df81198": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPtpAccept",
     "name": "sceNetAdhocPtpAccept",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x9ec3676a": {
     "classification": "dedicated",
@@ -2867,11 +2866,10 @@
     "status": "partial"
   },
   "0xa62c6f57": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocTerm",
     "name": "sceNetAdhocTerm",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xa66b0120": {
     "classification": "dedicated",
@@ -2953,11 +2951,10 @@
     "status": "partial"
   },
   "0xabed3790": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPdpSend",
     "name": "sceNetAdhocPdpSend",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xace946e8": {
     "classification": "dedicated",
@@ -3098,18 +3095,16 @@
     "status": "unreviewed"
   },
   "0xb58e61b7": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingSetHelloOpt",
     "name": "sceNetAdhocMatchingSetHelloOpt",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xb5d96c2a": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingGetHelloOpt",
     "name": "sceNetAdhocMatchingGetHelloOpt",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xb5f6dc87": {
     "classification": "dedicated",
@@ -3172,11 +3167,10 @@
     "status": "partial"
   },
   "0xb9685118": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocGetPtpStat",
     "name": "sceNetAdhocGetPtpStat",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xb9848a74": {
     "classification": "dedicated",
@@ -3359,11 +3353,10 @@
     "status": "partial"
   },
   "0xc58bcd9e": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingGetMembers",
     "name": "sceNetAdhocMatchingGetMembers",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xc6183d47": {
     "classification": "dedicated",
@@ -3390,11 +3383,10 @@
     "status": "unreviewed"
   },
   "0xc7c1fc57": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocGetPdpStat",
     "name": "sceNetAdhocGetPdpStat",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xc8cd158c": {
     "classification": "dedicated",
@@ -3415,11 +3407,10 @@
     "status": "unreviewed"
   },
   "0xca5eda6f": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingCreate",
     "name": "sceNetAdhocMatchingCreate",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xcab439df": {
     "classification": "dedicated",
@@ -3762,11 +3753,10 @@
     "status": "partial"
   },
   "0xdfe53e03": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPdpRecv",
     "name": "sceNetAdhocPdpRecv",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xe0727056": {
     "classification": "dedicated",
@@ -3775,11 +3765,10 @@
     "status": "partial"
   },
   "0xe08bdac1": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPtpListen",
     "name": "sceNetAdhocPtpListen",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xe0d68148": {
     "classification": "dedicated",
@@ -3824,11 +3813,10 @@
     "status": "partial"
   },
   "0xe1d621d7": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocInit",
     "name": "sceNetAdhocInit",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xe23e3a35": {
     "classification": "dedicated",
@@ -3921,6 +3909,12 @@
     "name": "sceUmdDeactivate",
     "status": "partial"
   },
+  "0xe8454c65": {
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingStart2",
+    "name": "sceNetAdhocMatchingStart2",
+    "status": "partial"
+  },
   "0xe855bf76": {
     "classification": "dedicated",
     "handler": "h_SasSetOutputmode",
@@ -3958,11 +3952,10 @@
     "status": "partial"
   },
   "0xea3c6108": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingCancelTarget",
     "name": "sceNetAdhocMatchingCancelTarget",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xea748e31": {
     "classification": "dedicated",
@@ -4007,11 +4000,10 @@
     "status": "partial"
   },
   "0xec19337d": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingAbortSendData",
     "name": "sceNetAdhocMatchingAbortSendData",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xeca32a99": {
     "classification": "dedicated",
@@ -4074,11 +4066,10 @@
     "status": "partial"
   },
   "0xf16eaf4f": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingDelete",
     "name": "sceNetAdhocMatchingDelete",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xf27a9c51": {
     "classification": "dedicated",
@@ -4165,11 +4156,10 @@
     "status": "unreviewed"
   },
   "0xf79472d7": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocMatchingSendData",
     "name": "sceNetAdhocMatchingSendData",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xf7d13214": {
     "classification": "controlled_unsupported",
@@ -4290,11 +4280,10 @@
     "status": "unreviewed"
   },
   "0xfc6fc07b": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_NetAdhocPtpConnect",
     "name": "sceNetAdhocPtpConnect",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xfccfad26": {
     "classification": "dedicated",

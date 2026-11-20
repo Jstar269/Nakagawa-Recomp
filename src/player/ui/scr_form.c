@@ -9,6 +9,7 @@
    with the FLOW screen's ids, and the on-screen keyboard (ui_keyboard.h). */
 
 #include "player_ui_nk.h"
+#include "nk_adhoc_relay.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 #include "ui_keyboard.h"
@@ -181,11 +182,23 @@ bool player_ui_nickname_accepts(uint32_t codepoint, void *user) {
            nk_nickname_valid(bytes);
 }
 
-/* The nickname editor (#2197): the box with what is typed (the nickname in use,
-   dimmed, while nothing is), how many of the 32 bytes it uses, why the last Done
-   was refused, then the on-screen keyboard with Done and Skip (first launch) or
-   Cancel (Settings). A physical keyboard also types into the box
-   (player_ui_nk.c); Back is Skip or Cancel. */
+/* The port offset (#1139): decimal digits only; Done checks the range. */
+bool player_ui_port_accepts(uint32_t codepoint, void *user) {
+    (void)user;
+    return codepoint >= '0' && codepoint <= '9';
+}
+
+bool player_ui_server_accepts(uint32_t codepoint, void *user) {
+    (void)user;
+    return (codepoint >= 'a' && codepoint <= 'z') || (codepoint >= 'A' && codepoint <= 'Z') ||
+           (codepoint >= '0' && codepoint <= '9') || codepoint == '.' || codepoint == '-' ||
+           codepoint == ':' || codepoint == ',';
+}
+
+/* The nickname / server editor (#2197, #1139): the box with what is typed (the value in use,
+   dimmed, while nothing is), how many bytes it uses, why the last Done was refused, then the
+   on-screen keyboard with Done and Skip (first launch) or Cancel (Settings). A physical keyboard
+   also types into the box (player_ui_nk.c); Back is Skip or Cancel. */
 PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *model) {
     static const NkUiPromptItem prompts_first[] = {
         {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Type"},
@@ -199,7 +212,7 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
     };
     const NkUiTheme *theme;
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
-    char scratch[NK_NICKNAME_MAX_BYTES + 1u];
+    char scratch[NK_ADHOC_SERVER_MAX_LEN + 1u];
     UiKeyboard empty;
     UiKeyboard *keyboard;
     UiKeyboardView view;
@@ -210,7 +223,12 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
     if (keyboard == NULL || keyboard->text == NULL) {
         /* Nothing to type into: the keys show, and what they type is dropped. */
         scratch[0] = '\0';
-        ui_keyboard_init(&empty, scratch, NK_NICKNAME_MAX_BYTES, player_ui_nickname_accepts,
+        ui_keyboard_init(&empty, scratch,
+                         model->port_mode ? 5u
+                         : model->server_mode ? NK_ADHOC_SERVER_MAX_LEN : NK_NICKNAME_MAX_BYTES,
+                         model->port_mode ? player_ui_port_accepts
+                         : model->server_mode ? player_ui_server_accepts
+                                              : player_ui_nickname_accepts,
                          NULL);
         keyboard = &empty;
     }
@@ -220,12 +238,26 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
                            model->logical_height > 80.0f ? model->logical_height : 800.0f,
                            640.0f);
     if (inner <= 0.0f) return result;
-    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Nickname", theme->info);
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND,
+                     model->server_mode || model->port_mode ? "Online play" : "Nickname",
+                     theme->info);
     nk_ui_text_role(ui, FLOW_ID_TITLE,
-                    model->first_launch ? "Choose a nickname" : "Change your nickname",
+                    model->port_mode ? "Port offset"
+                    : model->server_mode
+                        ? "Other server"
+                        : model->first_launch ? "Choose a nickname" : "Change your nickname",
                     NK_UI_TYPE_TITLE, theme->paper);
     nk_ui_text_role(ui, FLOW_ID_LEAD,
-                    model->first_launch
+                    model->port_mode
+                        ? "A whole number from 0 to 65535, added to the game's ports on the "
+                          "server (10000 unless you change it). Players who want to play "
+                          "together need the same value. It applies from the next game you start."
+                        : model->server_mode
+                        ? "Enter a community ad hoc relay server: host, host:lobby_port, or "
+                          "host:lobby_port,data_port (default ports 27312 and 27313; press Shift "
+                          "for ':'). It is kept only on this PC. Done opens the Online play card "
+                          "for it; nothing connects until you choose TURN ON there."
+                        : model->first_launch
                         ? "Games show it as your PSP's nickname. Type up to 32 bytes of text "
                           "(32 letters, about 10 Japanese characters), or skip to keep \"" NK_NICKNAME_DEFAULT "\". "
                           "You can change it in Settings."
@@ -246,7 +278,7 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
         field.padding_left = NK_UI_SPACE_4;
         field.padding_right = NK_UI_SPACE_4;
         if (nk_ui_begin_container(ui, FLOW_ID_NICKNAME_FIELD, &field, &style)) {
-            char shown[NK_NICKNAME_MAX_BYTES + 2u];
+            char shown[NK_ADHOC_SERVER_MAX_LEN + 2u];
             NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY,
                                             typed[0] != '\0' ? theme->paper : theme->muted);
             text.wrap = false;
@@ -254,7 +286,10 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
                 (void)snprintf(shown, sizeof(shown), "%s|", typed);
             } else {
                 (void)snprintf(shown, sizeof(shown), "%s",
-                               safe_text(model->current, NK_NICKNAME_DEFAULT));
+                               safe_text(model->current,
+                                         model->port_mode ? "10000"
+                                         : model->server_mode ? NK_ADHOC_DEFAULT_SERVER
+                                                              : NK_NICKNAME_DEFAULT));
             }
             nk_ui_text(ui, FLOW_ID_NICKNAME_TEXT,
                        nk_ui_text_clamp(ui, shown, &text, inner - 2.0f * NK_UI_SPACE_4, 1),
@@ -271,9 +306,20 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
                         full ? theme->warning : theme->muted);
     }
     if (model->refused) {
+        char server_note[320];
+        /* A refused server says why first, by name; the server in use stays. */
+        (void)snprintf(server_note, sizeof(server_note),
+                       "Not used: %s. Enter a host name or IPv4 address, with optional "
+                       ":lobby_port or :lobby_port,data_port from 1 to 65535.",
+                       model->refused_reason ? model->refused_reason
+                                             : "it is not a server address");
         nk_ui_text_role(ui, FLOW_ID_NICKNAME_NOTE,
-                        "A nickname is 1 to 32 bytes of text (32 plain letters; accented or "
-                        "Japanese letters take 2 to 4 bytes each), with no control characters and not only spaces.",
+                        model->port_mode
+                            ? "Enter a whole number from 0 to 65535."
+                        : model->server_mode
+                            ? nk_ui_frame_text(ui, server_note)
+                            : "A nickname is 1 to 32 bytes of text (32 plain letters; accented or "
+                              "Japanese letters take 2 to 4 bytes each), with no control characters and not only spaces.",
                         NK_UI_TYPE_BODY_S, theme->warning);
     }
     memset(&view, 0, sizeof(view));

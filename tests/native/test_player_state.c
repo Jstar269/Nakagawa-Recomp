@@ -15233,6 +15233,33 @@ int main(int argc, char **argv) {
         assert(cfg.fullscreen == true);
         assert(cfg.master_volume == 55);
         assert(cfg.developer_mode == true);   /* the runtime's developer pages follow it (#314) */
+        assert(cfg.online_play == false);
+        assert(cfg.online_play_server[0] == '\0');
+        applied.online_play = true;
+        snprintf(applied.online_play_server, sizeof(applied.online_play_server), "%s", "socom.cc");
+        /* On without the consent card's answer for this server: nothing connects (#1139). */
+        applied.online_play_consent[0] = '\0';
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(cfg.online_play == false && cfg.online_play_server[0] == '\0');
+        snprintf(applied.online_play_consent, sizeof(applied.online_play_consent), "%s",
+                 "relay.arenaanywhere.site");
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(cfg.online_play == false && cfg.online_play_server[0] == '\0');
+        snprintf(applied.online_play_consent, sizeof(applied.online_play_consent), "%s", "socom.cc");
+        applied.online_play_port_offset = 12345u;
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(cfg.online_play == true);
+        assert(strcmp(cfg.online_play_server, "socom.cc") == 0);
+        assert(cfg.online_play_port_offset == 12345u);
+        applied.online_play_port_offset = 70000u;
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(cfg.online_play_port_offset == NK_RELAY_PORT_OFFSET);
+        snprintf(applied.online_play_server, sizeof(applied.online_play_server), "%s", "bad host!!");
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(cfg.online_play == false);
+        assert(cfg.online_play_server[0] == '\0');
+        applied.online_play = false;
+        snprintf(applied.online_play_server, sizeof(applied.online_play_server), "%s", "socom.cc");
         /* The pause overlay eases or cuts as the launcher does (SR_REDUCE_MOTION). */
         assert(cfg.reduce_motion == NK_REDUCE_MOTION_ON);
         applied.reduce_motion_choice = PLAYER_SYSTEM_CHOICE_OFF;
@@ -18076,6 +18103,152 @@ int main(int argc, char **argv) {
         assert(!s_app2->settings.online_mode && !s_app2->settings.developer_mode);
         assert(s_app2->settings.network_mode == NK_NETWORK_MODE_OFFLINE);
 
+        /* Online play (#1139): off by default on socom.cc. The consent card is the only way to
+           turn it on: the switch opens the card for the server in use, and only TURN ON on the
+           card for that exact server turns it on. It persists through settings.json with the
+           card's answer, and a file that is on without that answer reads as off. */
+        player_app_init(s_app2);
+        assert(!s_app2->settings.online_play);
+        assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
+        assert(s_app2->settings.online_play_consent[0] == '\0');
+        assert(s_app2->settings.online_play_port_offset == NK_RELAY_PORT_OFFSET);
+        s_app2->settings_path[0] = '\0';
+        player_app_set_online_play(s_app2, true);
+        assert(!s_app2->settings.online_play && s_app2->settings.online_play_consent[0] == '\0');
+        assert(s_app2->active_view == VIEW_ONLINE_PLAY_CARD);
+        assert(strcmp(s_app2->online_play_card_server, NK_ADHOC_DEFAULT_SERVER) == 0);
+        player_app_online_play_not_now(s_app2);
+        assert(!s_app2->settings.online_play && s_app2->settings.online_play_consent[0] == '\0');
+        assert(s_app2->active_view == VIEW_ONLINE_PLAY_SETTINGS);
+        assert(s_app2->online_play_card_server[0] == '\0');
+        assert(!player_app_online_play_turn_on(s_app2));   /* no card is open */
+        assert(!s_app2->settings.online_play);
+        /* A server the codec refuses opens no card and says so. */
+        s_app2->online_play_notice[0] = '\0';
+        assert(!player_app_open_online_play_card(s_app2, "bad server!!"));
+        assert(!player_app_open_online_play_card(s_app2, "relay.example.invalid:99999"));
+        assert(s_app2->active_view == VIEW_ONLINE_PLAY_SETTINGS && s_app2->online_play_notice[0]);
+        /* Each is refused by name, and the server in use and its consent stay as they were
+           (#1139, review of 2026-11-20). */
+        {
+            static const struct { const char *spec; const char *why; } refused[] = {
+                {"", "empty"}, {"relay example.org", "a space"},
+                {"relay.\x01" "example.org", "control character"},
+                {"relay.\xE2\x80\xAE" "example.org", "bidirectional"},
+                {"http://relay.example.org", "scheme"}, {"relay.example.org/x", "a path"},
+                {"relay.example.org:0", "a port"}, {"relay.example.org:65536", "a port"}};
+            for (size_t i = 0u; i < sizeof(refused) / sizeof(refused[0]); ++i) {
+                s_app2->online_play_notice[0] = '\0';
+                assert(!player_app_open_online_play_card(s_app2, refused[i].spec));
+                assert(strstr(s_app2->online_play_notice, refused[i].why) != NULL);
+                assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
+                assert(s_app2->online_play_card_server[0] == '\0');
+                assert(s_app2->active_view == VIEW_ONLINE_PLAY_SETTINGS);
+            }
+        }
+        /* Picking a different server opens the card for that exact server; TURN ON makes it
+           the server, the consent and the switch at once. */
+        assert(player_app_open_online_play_card(s_app2, "127.0.0.1:27312,27313"));
+        assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
+        assert(player_app_online_play_turn_on(s_app2));
+        assert(s_app2->settings.online_play && s_app2->active_view == VIEW_ONLINE_PLAY_SETTINGS);
+        assert(strcmp(s_app2->settings.online_play_server, "127.0.0.1:27312,27313") == 0);
+        assert(strcmp(s_app2->settings.online_play_consent, "127.0.0.1:27312,27313") == 0);
+        assert(player_app_online_play_consented(&s_app2->settings));
+        /* While on, NOT NOW on a card for another server changes nothing. */
+        assert(player_app_open_online_play_card(s_app2, "relay.arenaanywhere.site"));
+        player_app_online_play_not_now(s_app2);
+        assert(s_app2->settings.online_play);
+        assert(strcmp(s_app2->settings.online_play_server, "127.0.0.1:27312,27313") == 0);
+        /* Port offset (advanced): digits only, 0 to 65535. */
+        assert(player_app_set_online_play_port_offset(s_app2, "0"));
+        assert(s_app2->settings.online_play_port_offset == 0u);
+        assert(player_app_set_online_play_port_offset(s_app2, "65535"));
+        assert(s_app2->settings.online_play_port_offset == 65535u);
+        assert(!player_app_set_online_play_port_offset(s_app2, "65536"));
+        assert(!player_app_set_online_play_port_offset(s_app2, ""));
+        assert(!player_app_set_online_play_port_offset(s_app2, "-1"));
+        assert(!player_app_set_online_play_port_offset(s_app2, "+5"));
+        assert(!player_app_set_online_play_port_offset(s_app2, " 5"));
+        assert(!player_app_set_online_play_port_offset(s_app2, "000010000"));
+        assert(s_app2->settings.online_play_port_offset == 65535u);
+        assert(player_app_set_online_play_port_offset(s_app2, "12345"));
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(s_app2->settings.online_play);
+        assert(strcmp(s_app2->settings.online_play_server, "127.0.0.1:27312,27313") == 0);
+        assert(strcmp(s_app2->settings.online_play_consent, "127.0.0.1:27312,27313") == 0);
+        assert(s_app2->settings.online_play_port_offset == 12345u);
+        assert(s_app2->settings.network_mode == NK_NETWORK_MODE_OFFLINE);
+        /* Turning it off forgets the answer: on again needs the card again. */
+        s_app2->settings_path[0] = '\0';
+        player_app_set_online_play(s_app2, false);
+        assert(!s_app2->settings.online_play && s_app2->settings.online_play_consent[0] == '\0');
+        assert(s_app2->online_play_notice[0] != '\0');
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"network_mode\": \"online\", "
+                        "\"online_play\": true, \"online_play_server\": \"not a host\"}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.online_play);
+        assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
+        assert(s_app2->settings.network_mode == NK_NETWORK_MODE_OFFLINE);
+        /* On for a server the card never named (a file from before the card, or one edited by
+           hand) reads as off; a port offset out of range reads as the default. */
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"online_play\": true, "
+                        "\"online_play_server\": \"socom.cc\", "
+                        "\"online_play_port_offset\": 70000}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.online_play && s_app2->settings.online_play_consent[0] == '\0');
+        assert(s_app2->settings.online_play_port_offset == NK_RELAY_PORT_OFFSET);
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"online_play\": true, "
+                        "\"online_play_server\": \"socom.cc\", "
+                        "\"online_play_consent\": \"relay.arenaanywhere.site\", "
+                        "\"online_play_port_offset\": \"10000\"}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.online_play && s_app2->settings.online_play_consent[0] == '\0');
+        assert(s_app2->settings.online_play_port_offset == NK_RELAY_PORT_OFFSET);
+        /* Turning it off while a game runs makes the file the runtime watches
+           (SR_ADHOC_OFF_FILE), so the running game's connection ends. */
+        {
+            char boot_path[MAX_PATH_LEN];
+            char off_path[MAX_PATH_LEN + 32u];
+            const size_t settings_len = strlen(test_settings_path);
+            static const char boot_suffix[] = ".boot-events.log";
+            assert(settings_len + sizeof(boot_suffix) <= sizeof(boot_path));
+            memcpy(boot_path, test_settings_path, settings_len);
+            memcpy(boot_path + settings_len, boot_suffix, sizeof(boot_suffix));
+            assert(nk_launch_adhoc_off_path(boot_path, off_path, sizeof(off_path)));
+            (void)remove(off_path);
+            player_app_init(s_app2);
+            s_app2->settings_path[0] = '\0';
+            player_app_set_online_play(s_app2, true);
+            assert(player_app_online_play_turn_on(s_app2));
+            s_app2->is_game_running = true;
+            snprintf(s_app2->boot_event_file_path, sizeof(s_app2->boot_event_file_path), "%s",
+                     boot_path);
+            assert(!nk_platform_file_exists(off_path));
+            player_app_set_online_play(s_app2, false);
+            assert(!s_app2->settings.online_play);
+            assert(nk_platform_file_exists(off_path));
+            assert(strstr(s_app2->online_play_notice, "connection has ended") != NULL);
+            /* Turned on again during the same run: from the next game. */
+            player_app_set_online_play(s_app2, true);
+            assert(player_app_online_play_turn_on(s_app2));
+            assert(strstr(s_app2->online_play_notice, "next game") != NULL);
+            /* With no boot-event path the running game cannot be told, and the page says so. */
+            s_app2->boot_event_file_path[0] = '\0';
+            player_app_set_online_play(s_app2, false);
+            assert(strstr(s_app2->online_play_notice, "could not be told") != NULL);
+            s_app2->is_game_running = false;
+            (void)remove(off_path);
+        }
+
         /* Check for updates at start (AGENTS.md section 5): off by default and
            after a reset, saved and read back once the user turns it on, and a
            value that is not a boolean keeps it off. */
@@ -18297,6 +18470,23 @@ int main(int argc, char **argv) {
                           "Cover art cache cleared. Covers for every verified disc download "
                           "again now.") == 0);
         }
+
+        /* Both opt-in network settings (#1139 and #2632) persist and default to off
+           independently when combined in one settings.json. */
+        player_app_init(s_app2);
+        assert(!s_app2->settings.online_play && !s_app2->settings.download_cover_art);
+        assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
+        s_app2->settings_path[0] = '\0';
+        player_app_set_online_play(s_app2, true);
+        assert(player_app_online_play_turn_on(s_app2));
+        player_app_toggle_download_cover_art(s_app2);
+        assert(s_app2->settings.online_play && s_app2->settings.download_cover_art);
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(s_app2->settings.online_play && s_app2->settings.download_cover_art);
+        assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
+        assert(s_app2->settings.network_mode == NK_NETWORK_MODE_OFFLINE);
 
         remove(test_settings_path);
         free(s_app);

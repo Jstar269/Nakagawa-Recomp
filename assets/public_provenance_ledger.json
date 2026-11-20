@@ -2456,6 +2456,28 @@
       }
     },
     {
+      "path": "src/core/nk_adhoc_relay_client.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "adhoc_relay_client_1139_20261116",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/core/nk_adhoc_relay_client.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "adhoc_relay_client_1139_20261116",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "src/core/nk_cheats.c",
       "classification": "upstream_derived",
       "evidence": {
@@ -3309,6 +3331,30 @@
         "evidence_tier": "S",
         "authorship": "project-authored-independent record",
         "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/adhoc_servers.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "adhoc_servers_list_ppsspp_1139_20261120",
+        "evidence_tier": "R",
+        "upstream": "documented upstream family",
+        "license": "GPL-3.0-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/player/adhoc_servers.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "adhoc_servers_list_ppsspp_1139_20261120",
+        "evidence_tier": "R",
+        "upstream": "documented upstream family",
+        "license": "GPL-3.0-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
       }
     },
     {
@@ -13333,6 +13379,17 @@
       }
     },
     {
+      "path": "tests/native/test_adhoc_servers.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "adhoc_servers_list_test_1139_20261120",
+        "evidence_tier": "S",
+        "authorship": "project-authored, behavior-informed record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/test_clay_layout.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -13494,6 +13551,17 @@
         "record_id": "nk-adhoc-relay-wire-1139",
         "evidence_tier": "S",
         "authorship": "project-authored, behavior-informed record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/test_nk_adhoc_relay_client.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "adhoc_relay_client_1139_20261116",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
         "upstream_attribution": null
       }
     },

@@ -3,6 +3,8 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 
+#define _CRT_RAND_S /* rand_s, for nk_platform_random_bytes */
+
 #include "nk_platform.h"
 #include "nk_data_migrate.h"
 #include "nk_types.h"
@@ -439,6 +441,17 @@ bool nk_platform_sync_file(FILE *f) {
     intptr_t os = _get_osfhandle(_fileno(f));
     if (os == -1) return false;
     return FlushFileBuffers((HANDLE)os) != 0;
+}
+
+bool nk_platform_random_bytes(void *out, size_t n) {
+    unsigned char *bytes = (unsigned char *)out;
+    if (!out && n) return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned int r = 0;
+        if (rand_s(&r) != 0) return false;
+        bytes[i] = (unsigned char)r;
+    }
+    return true;
 }
 
 bool nk_platform_sync_dir(const char *dir) {
