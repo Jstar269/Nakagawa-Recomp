@@ -36,6 +36,10 @@
 /* The picker's scrolling list and its scroll bar (scr_settings.c SET_ID_ONLINE_PLAY_*). */
 #define ONLINE_PLAY_TEST_LIST NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E1u)
 #define ONLINE_PLAY_TEST_TRACK NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E2u)
+/* The own server's caption under its row (SET_ID_ONLINE_PLAY_OWN_SENTENCE). */
+#define ONLINE_PLAY_TEST_OWN_CAPTION NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7F0u)
+/* The panel round the list (SET_ID_ONLINE_PLAY_BOX). */
+#define ONLINE_PLAY_TEST_PANEL NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E3u)
 
 static int failures;
 static const uint8_t k_test_glyph_pixel = 0xFFu;
@@ -7198,6 +7202,7 @@ static void test_online_play_picker_rows(void) {
                 NkUiScrollState state;
                 NkUiRect view;
                 NkUiRect rect;
+                NkUiRect panel;
                 bool whole = draw != NULL && ui != NULL;
                 bool reachable = whole;
                 bool uncut = whole;
@@ -7213,8 +7218,9 @@ static void test_online_play_picker_rows(void) {
                     /* Unscrolled: the shipped rows, the own row and its Port offset whole. */
                     whole = nk_ui_element_rect(ui, ONLINE_PLAY_TEST_LIST, &view);
                     for (size_t c = 0u; whole && c < 7u; ++c) {
+                        /* Each row, and Port offset, at least 44 px high (ACCESSIBILITY.md). */
                         whole = nk_ui_element_rect(ui, controls[c], &rect) &&
-                                rect_inside(rect, view);
+                                rect_inside(rect, view) && rect.h >= 44.0f - 0.01f;
                         if (!whole) {
                             fprintf(stderr, "  %08X at y %.1f to %.1f, the list shows %.1f to "
                                     "%.1f\n", (unsigned)controls[c], (double)rect.y,
@@ -7222,7 +7228,25 @@ static void test_online_play_picker_rows(void) {
                                     (double)(view.y + view.h));
                         }
                     }
+                    /* The card itself does not scroll: the list takes what it leaves. */
+                    if (whole && nk_ui_scroll_state(ui, FLOW_ID_CARD, &state) &&
+                        state.max_offset > 0.5f) {
+                        fprintf(stderr, "  the card scrolls by %.1f\n", (double)state.max_offset);
+                        whole = false;
+                    }
                     /* The hint under the intro (owner, 2026-11-20) is there too. */
+                    /* The own server's caption whole too, in the list's view, with at least
+                       the list's padding (8 px) between it and the panel's bottom edge. */
+                    if (whole && !(nk_ui_element_rect(ui, ONLINE_PLAY_TEST_OWN_CAPTION, &rect) &&
+                                   nk_ui_element_rect(ui, ONLINE_PLAY_TEST_PANEL, &panel) &&
+                                   rect_inside(rect, view) &&
+                                   rect.y + rect.h <= panel.y + panel.h - 8.0f + 0.5f)) {
+                        fprintf(stderr, "  own caption at y %.1f to %.1f, the list shows %.1f to "
+                                "%.1f, the panel ends at %.1f\n", (double)rect.y,
+                                (double)(rect.y + rect.h), (double)view.y,
+                                (double)(view.y + view.h), (double)(panel.y + panel.h));
+                        whole = false;
+                    }
                     whole = whole && draw_shows(draw, "Everyone you play with") &&
                             draw_shows(draw, "faster.") &&
                             draw_shows(draw, "relay-asia.arenaanywhere.site") &&
@@ -7230,7 +7254,7 @@ static void test_online_play_picker_rows(void) {
                             draw_shows(draw, "host[:lobby_port[,data_port]]");
                     (void)snprintf(message, sizeof(message),
                                    "at %d x %d with 100%% text and Online play %s the picker "
-                                   "shows every shipped server and the own server's row whole, "
+                                   "shows every shipped server and the own server's row and caption whole, "
                                    "unscrolled", w, h, off ? "off" : "on");
                     CHECK(whole, message);
                 }
