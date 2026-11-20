@@ -247,6 +247,17 @@ bool nk_disc_import(const char *source, const char *data_root,
                     const NkDiscExpandCallbacks *callbacks, NkDiscImport *out,
                     NkDiscExpandStatus *status);
 
+/* nk_disc_import for a library holding entries[0..entry_count): a new
+   expansion goes into the folder of the key the disc is added under
+   (nk_iso_library_key_for_image), so a prototype disc whose library entry
+   holds its v1 key is expanded into discs/<v1 key>, the folder that entry's
+   checks and removal use, and any other disc into discs/<its own key>.
+   nk_disc_import is this with no entries. */
+bool nk_disc_import_for_library(const char *source, const char *data_root,
+                                const NkGameEntry *entries, int entry_count,
+                                const NkDiscExpandCallbacks *callbacks, NkDiscImport *out,
+                                NkDiscExpandStatus *status);
+
 #ifdef __cplusplus
 }
 #endif

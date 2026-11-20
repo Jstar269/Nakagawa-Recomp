@@ -63,6 +63,14 @@ static bool player_populate_inspected_game(PlayerApp *app, const char *iso_path,
     if (!app || !iso_path || !result) return false;
     GameRecord *game = &app->inspecting_game;
     memset(game, 0, sizeof(*game));
+    /* A prototype disc keyed v2 whose v1 key an entry made before v2 holds is that
+       entry's disc, added again under its old key, with the title catalog searched
+       again under that key; any other disc keeps its own key. */
+    IsoInspectResult keyed = *result;
+    game->disc_key_version = iso_inspect_result_for_library(&keyed, app->library.entries,
+                                                            app->library.count);
+    result = &keyed;
+    snprintf(game->disc_id, sizeof(game->disc_id), "%s", result->disc_id);
     const char *title_id_end = memchr(result->matched_title_id, '\0',
                                       sizeof(result->matched_title_id));
     if (!title_id_end ||
@@ -73,11 +81,6 @@ static bool player_populate_inspected_game(PlayerApp *app, const char *iso_path,
         }
         return false;
     }
-    /* A prototype disc keyed v2 whose v1 key an entry made before v2 holds is that
-       entry's disc, added again under its old key; any other disc gets its own key. */
-    game->disc_key_version = nk_iso_library_key_for_image(
-        app->library.entries, app->library.count, result->disc_id, result->disc_key_version,
-        result->legacy_disc_id, game->disc_id, sizeof(game->disc_id));
     snprintf(game->title_name, sizeof(game->title_name), "%s", result->title_name);
     snprintf(game->disc_version, sizeof(game->disc_version), "%s", result->disc_version);
     snprintf(game->iso_path, sizeof(game->iso_path), "%s", iso_path);
@@ -3091,6 +3094,8 @@ static void start_psn_job(PlayerApp *app, PlayerPsnJob **job_slot) {
     PlayerPsnJob *job = (PlayerPsnJob *)calloc(1, sizeof(*job));
     if (job) {
         job->package = app->psn_package;
+        snprintf(job->package.library_path, sizeof(job->package.library_path), "%s",
+                 app->library.library_path);
         job->mutex = SDL_CreateMutex();
     }
     if (job && job->mutex) {
@@ -4737,6 +4742,8 @@ static int player_load_library(PlayerRun *run) {
             PlayerPsnConvertCallbacks hooks = { disc_console_progress, NULL, &last_percent };
             printf("[PLAYER] Reading disc image %s, then expanding it unless it was added "
                    "before...\n", nk_disc_format_extension(package.disc_format));
+            snprintf(package.library_path, sizeof(package.library_path), "%s",
+                     run->app.library.library_path);
             ok = player_disc_image_expand(&package, &hooks, code, sizeof(code), message,
                                           sizeof(message));
             if (ok) {

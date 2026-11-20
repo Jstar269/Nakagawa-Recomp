@@ -109,10 +109,13 @@ card.
   `nakagawa-non-retail-disc-key-v1` (with its NUL), then the bytes of
   `PSP_GAME/PARAM.SFO` and of `PSP_GAME/SYSDIR/EBOOT.BIN`, each preceded by its
   length as a little-endian 64-bit number. A prototype disc whose `EBOOT.BIN` is
-  empty or all zeros boots its plain `BOOT.BIN` instead, so its key also covers
-  `PSP_GAME/SYSDIR/BOOT.BIN`, after `EBOOT.BIN` and in the same form, under the
-  tag `nakagawa-non-retail-disc-key-v2`; two such builds that differ only in
-  `BOOT.BIN` get two keys. The first eight bytes of the digest,
+  empty or all zeros and which has a `PSP_GAME/SYSDIR/BOOT.BIN` file (1 byte to
+  512 MiB, whatever it holds) gets a key that also covers `BOOT.BIN`, after
+  `EBOOT.BIN` and in the same form, under the tag
+  `nakagawa-non-retail-disc-key-v2`; two such builds that differ only in
+  `BOOT.BIN` get two keys. Only the disc's layout chooses the tag, never whether
+  `BOOT.BIN` is a program Nakagawa can run, so no change to that check moves a
+  disc to another key. The first eight bytes of the digest,
   modulo 26³ × 10⁵, become three letters and five digits after an `X`, for
   example `XRQY66517`. No retail or test ID starts with `X`, so the key never
   meets another disc's ID, and the same disc always gets the same key. Two
@@ -123,19 +126,29 @@ card.
   records which kind of key it holds (`disc_key_version`: `1` or `2`; an entry
   written before this field existed counts as `1`). An entry made under the v1
   key goes on being found, opened, built, updated and removed under that key,
-  with its packages, saves and folders where they are. Adding the same disc again
-  looks for its v1 key in the library first, so it finds that entry rather than
-  adding a second one; only a prototype disc with no such entry gets the v2 key.
-  An entry of one kind never stands for the other, and nothing is renamed, moved
-  or deleted. An entry with `disc_key_version` `2` that a Nakagawa from before
-  this rule saves again loses the field, and is then refused by name as a
-  different disc until the disc is added again.
+  with its packages, saves and folders where they are, and a title manifest you
+  keep under the v1 key goes on matching it. Adding the same disc again uses an
+  entry that holds its v2 key if there is one, else one that holds its v1 key, so
+  it finds that entry rather than adding a second one; only a prototype disc with
+  neither gets a new entry, under the v2 key. An entry of one kind never stands
+  for the other, and nothing is renamed, moved or deleted. A compressed disc
+  image is expanded into `discs/<key>` under the key its entry holds, so removing
+  the title removes the expansion too.
+- **What stays as it was.** An old entry under the v1 key and a sibling build
+  that differs from it only in `BOOT.BIN` have the same v1 key, so the library
+  still treats them as one entry; remove the entry and add each disc again to
+  separate them. A Nakagawa from before this rule drops `disc_key_version` when
+  it saves the library, and a v2 entry is then refused by name as a different
+  disc until the disc is added again.
 - **The disc's own ID** stays as it is. `python tools/nk_cli.py inspect <iso>`
   shows it beside the key (`sfo_disc_id` in `--json`). Nakagawa never changes the
   disc's `PARAM.SFO` or any other file on it.
 - **Fail closed.** A non-retail disc without a readable `EBOOT.BIN` (or with an
-  empty one and no plain `BOOT.BIN`) cannot be told apart from other discs and is
-  refused, as is a disc without a usable `PARAM.SFO`.
+  empty one and no `BOOT.BIN`) cannot be told apart from other discs and is
+  refused, as is a disc without a usable `PARAM.SFO`. When `EBOOT.BIN` is empty
+  or all zeros and `BOOT.BIN` is what cannot be read, the refusal names
+  `BOOT.BIN`. A library record whose `disc_key_version` is not 0, 1 or 2 stops
+  the bring-up as `LIBRARY_RECORD_INVALID`, naming the record and the field.
 
 A beta added before this rule existed, under an ID like `ABCD12345`, now reads
 with its `X` key, so its old library entry reports a different disc. Add the

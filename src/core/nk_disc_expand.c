@@ -1314,6 +1314,7 @@ static bool place_expansion(const char *data_root, const NkDiscImportPaths *path
 
 /* Reuse, upgrade or expand while the caller holds paths->lock. */
 static bool disc_import_locked(const char *source, const char *data_root,
+                               const NkGameEntry *entries, int entry_count,
                                const NkDiscImportPaths *paths, const NkDiscSourceStamp *stamp,
                                NkDiscPhase *phase, NkDiscImport *out,
                                NkDiscExpandStatus *status) {
@@ -1390,7 +1391,15 @@ static bool disc_import_locked(const char *source, const char *data_root,
                          "This PSP disc image does not name a valid disc ID, so Nakagawa can't "
                          "keep it apart from other games.");
     }
-    snprintf(out->disc_id, sizeof(out->disc_id), "%.9s", meta.disc_id);
+    /* The folder of the key the disc is added under: a prototype disc whose
+       library entry holds its v1 key goes where that entry's folders are. */
+    {
+        char key[NK_MAX_DISC_ID_LEN];
+        (void)nk_iso_library_key_for_image(entries, entry_count, meta.disc_id,
+                                           meta.disc_key_version, meta.legacy_disc_id, key,
+                                           sizeof(key));
+        snprintf(out->disc_id, sizeof(out->disc_id), "%.9s", key);
+    }
     if (!place_expansion(data_root, paths, out, status)) return false;
     out->expanded_bytes = written;
     return true;
@@ -1399,6 +1408,7 @@ static bool disc_import_locked(const char *source, const char *data_root,
 /* nk_disc_import with the source held open (writes denied where the platform
    can): stamp, header, identity, then the locked lookup and import. */
 static bool disc_import_held(const char *source, const char *data_root,
+                             const NkGameEntry *entries, int entry_count,
                              const NkDiscExpandCallbacks *callbacks, NkDiscImport *out,
                              NkDiscExpandStatus *status) {
     NkDiscImportPaths paths;
@@ -1449,7 +1459,8 @@ static bool disc_import_held(const char *source, const char *data_root,
                          "This disc image is already being added by another Nakagawa window or "
                          "tool. Wait for that to finish, then add it again.");
     }
-    ok = disc_import_locked(source, data_root, &paths, &stamp, &phase, out, status);
+    ok = disc_import_locked(source, data_root, entries, entry_count, &paths, &stamp, &phase,
+                            out, status);
     nk_platform_file_lock_release(&lock);
     if (ok && callbacks && callbacks->on_progress) {
         callbacks->on_progress(phase.total, phase.total, callbacks->user);
@@ -1460,6 +1471,13 @@ static bool disc_import_held(const char *source, const char *data_root,
 bool nk_disc_import(const char *source, const char *data_root,
                     const NkDiscExpandCallbacks *callbacks, NkDiscImport *out,
                     NkDiscExpandStatus *status) {
+    return nk_disc_import_for_library(source, data_root, NULL, 0, callbacks, out, status);
+}
+
+bool nk_disc_import_for_library(const char *source, const char *data_root,
+                                const NkGameEntry *entries, int entry_count,
+                                const NkDiscExpandCallbacks *callbacks, NkDiscImport *out,
+                                NkDiscExpandStatus *status) {
     FILE *held;
     bool shared = false;
     bool ok;
@@ -1491,7 +1509,7 @@ bool nk_disc_import(const char *source, const char *data_root,
         fprintf(stderr, "[DISC_IMPORT] The disc image is open in another program, so it is read "
                         "twice to check that it does not change while it is added.\n");
     }
-    ok = disc_import_held(source, data_root, callbacks, out, status);
+    ok = disc_import_held(source, data_root, entries, entry_count, callbacks, out, status);
     fclose(held);
     return ok;
 }

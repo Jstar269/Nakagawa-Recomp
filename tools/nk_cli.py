@@ -88,6 +88,7 @@ from nk_core.library import (  # noqa: E402
 )
 from nk_core.prereq_fetcher import PrerequisiteFetchError, default_data_root  # noqa: E402
 from nk_core.iso_inspect import (  # noqa: E402
+    LibraryRecordError,
     library_record_key_version,
     metadata_for_library_entry,
     metadata_for_new_library_record,
@@ -3104,19 +3105,21 @@ def _package_preflight(st):
     if not iso_path.is_file():
         raise PackageBuildError(f"The library source ISO is unavailable at {iso_path}.")
     metadata = inspect_iso(iso_path, user_data_root=user_root)
+    # An entry made before the v2 key keeps its v1 key (docs/YOUR_OWN_GAMES.md); the
+    # title list and the qualification are then those of that key.
+    try:
+        keyed = metadata_for_library_entry(metadata, disc_id, library_record_key_version(entry),
+                                           user_data_root=user_root)
+    except LibraryRecordError as exc:
+        raise PackageBuildError(f"Library entry {disc_id}: {exc}.") from exc
+    if keyed is None:
+        raise PackageBuildError(f"ISO identity {metadata.disc_id} no longer matches library entry {disc_id}.")
+    metadata = keyed
     if metadata.qualification_error and not register_local_identity:
         raise PackageBuildError(
             metadata.qualification_error +
             " Rebuild with --register-local-compatibility-record only after reviewing this exact local input."
         )
-    # An entry made before the v2 key keeps its v1 key (docs/YOUR_OWN_GAMES.md).
-    try:
-        keyed = metadata_for_library_entry(metadata, disc_id, library_record_key_version(entry))
-    except IsoInspectionError as exc:
-        raise PackageBuildError(f"Library entry {disc_id}: {exc}.") from exc
-    if keyed is None:
-        raise PackageBuildError(f"ISO identity {metadata.disc_id} no longer matches library entry {disc_id}.")
-    metadata = keyed
     preflight = inspect_compatibility_preflight(iso_path, metadata=metadata,
                                                 runtime_root=user_root)
     selected_value = preflight.get("selected_executable")
@@ -5252,6 +5255,8 @@ def _write_bringup_library_locked(user_root: Path, iso_path: Path, metadata, tit
     key_version = getattr(metadata, "disc_key_version", 0)
     if type(key_version) is int and key_version in (1, 2):
         record["disc_key_version"] = key_version
+    else:
+        record.pop("disc_key_version", None)
     record.update({
         "disc_id": metadata.disc_id.upper(),
         "title_id": title_id,
@@ -5855,11 +5860,22 @@ def _bringup_inspect(st):
         registry = TitleRegistry(include_defaults=True)
         registry.load_local_manifests(user_root / "manifests")
         metadata = inspect_iso(iso_path, registry=registry)
-        # The same disc added before the v2 key keeps its entry's v1 key.
-        metadata = metadata_for_new_library_record(metadata, _bringup_library_records(user_root))
+        # The same disc added before the v2 key keeps its entry's v1 key, and is
+        # looked up in the title list under it.
+        metadata = metadata_for_new_library_record(
+            metadata, _bringup_library_records(user_root), registry
+        )
         preflight = inspect_compatibility_preflight(
             iso_path, metadata=metadata, runtime_root=user_root
         )
+    except LibraryRecordError as exc:
+        # A record the library cannot be read by is named, not called a bad disc.
+        print(f"The bring-up library cannot be read: {exc}.", file=sys.stderr)
+        fail_stage(report, "inspect", "LIBRARY_RECORD_INVALID",
+                   duration_ms=int((time.perf_counter() - started) * 1000))
+        _write_bringup_report(report, report_path)
+        print(_bringup_human_summary(report))
+        return 1
     except Exception as exc:
         elapsed = int((time.perf_counter() - started) * 1000)
         fail_stage(report, "inspect",

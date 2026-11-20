@@ -85,6 +85,7 @@ The **Where** column of each table names the places a code can appear:
 | `HOMEBREW_KERNEL_MODE_UNSUPPORTED` | player | The package's homebrew is kernel-mode or a custom-firmware plugin, which needs the PSP's own kernel and firmware. |
 | `HOMEBREW_KEY_TAKEN` | player | Another program already has the library key this homebrew program would get. |
 | `ISO_CORRUPT` | player | The picked file is not a PSP disc image. |
+| `LIBRARY_RECORD_INVALID` | report | A record in the bring-up library holds a field Nakagawa cannot read, such as a `disc_key_version` other than 0, 1 or 2; the run's output names the record and the field. |
 | `MODIFIED_DUMP_CFW_LOADER` | report | The disc image was modified by a custom-firmware patch; its real executable needs a decrypted copy. |
 | `PBP_ENCRYPTED_EXECUTABLE_UNSUPPORTED` | player | The PBP holds an encrypted program; only unencrypted homebrew is imported from a package. |
 | `PBP_HEADER_TRUNCATED` | report, route, disc, player | The PlayStation Store package (PBP) ends inside its header. |

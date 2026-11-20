@@ -1444,28 +1444,20 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
     }
 
     /* Look up in native title catalog */
-    nk_title_catalog_lock();
-    const NkTitleEntry *entry = identity_structured
-        ? nk_title_catalog_find_by_disc_id_locked(out_meta->disc_id)
-        : NULL;
-    out_meta->matched_title_id[0] = '\0';
-    if (entry) {
-        out_meta->is_supported = true;
-        snprintf(out_meta->matched_title_id, sizeof(out_meta->matched_title_id),
-                 "%s", entry->id ? entry->id : "");
-        out_meta->status = NK_STATUS_VERIFIED;
-        if (out_meta->title_name[0] == '\0') {
-            snprintf(out_meta->title_name, sizeof(out_meta->title_name), "%s",
-                     entry->display_name ? entry->display_name : "");
-        }
-    } else {
-        out_meta->is_supported = false;
-        out_meta->status = NK_STATUS_IDENTIFIED;
-        if (out_meta->title_name[0] == '\0') {
+    char display_name[sizeof(out_meta->title_name)] = "";
+    out_meta->is_supported = identity_structured &&
+        nk_iso_catalog_match(out_meta->disc_id, out_meta->matched_title_id,
+                             sizeof(out_meta->matched_title_id), display_name,
+                             sizeof(display_name));
+    if (!identity_structured) out_meta->matched_title_id[0] = '\0';
+    out_meta->status = out_meta->is_supported ? NK_STATUS_VERIFIED : NK_STATUS_IDENTIFIED;
+    if (out_meta->title_name[0] == '\0') {
+        if (out_meta->is_supported) {
+            snprintf(out_meta->title_name, sizeof(out_meta->title_name), "%s", display_name);
+        } else {
             snprintf(out_meta->title_name, sizeof(out_meta->title_name), "PSP Title (%s)", out_meta->disc_id);
         }
     }
-    nk_title_catalog_unlock();
 
     /* Executable classification is advisory preflight data. A valid disc can
        still be inspected when its SYSDIR files are missing or unsupported. */
@@ -1527,12 +1519,12 @@ static bool nk_iso_sha256_update_extent(NkSha256 *ctx, NkIsoReader *reader, uint
 /* Keys a non-retail disc by its contents (_non_retail_identity in
  * tools/nk_core/iso_inspect.py): SHA-256 over a domain tag, then PARAM.SFO and
  * PSP_GAME/SYSDIR/EBOOT.BIN, each preceded by its length as a little-endian
- * 64-bit integer. A disc whose EBOOT.BIN is empty or zero-filled and whose
- * BOOT.BIN is a plain MIPS ELF boots BOOT.BIN (nk_iso_classify_executables), so
- * its key covers BOOT.BIN too, under the v2 tag; every other disc keeps its v1
- * key. Nothing on the disc is changed. Without a readable EBOOT.BIN (or that
- * boot-fallback layout) the disc cannot be told apart from other discs and is
- * refused. */
+ * 64-bit integer. A disc whose EBOOT.BIN is empty or zero-filled and which has
+ * a BOOT.BIN file of 1 byte to NK_ISO_MAX_EXECUTABLE_BYTES, whatever it holds,
+ * is keyed over BOOT.BIN too, under the v2 tag; every other disc keeps its v1
+ * key. Nothing on the disc is changed. Without a readable EBOOT.BIN (or such a
+ * BOOT.BIN) the disc cannot be told apart from other discs and is refused; a
+ * BOOT.BIN that cannot be read is refused naming BOOT.BIN. */
 static bool nk_iso_non_retail_identity(const char *iso_path, const uint8_t *sfo,
                                        uint32_t sfo_size, NkIsoMetadata *meta) {
     static const char domain_v1[] = "nakagawa-non-retail-disc-key-v1";
@@ -1543,20 +1535,37 @@ static bool nk_iso_non_retail_identity(const char *iso_path, const uint8_t *sfo,
     uint32_t lba = 0, size = 0, boot_lba = 0, boot_size = 0;
     bool is_directory = false;
     bool boot_keyed = false;
+    /* Set once BOOT.BIN is what failed, so the refusal names it. */
+    bool boot_unreadable = false;
     bool ok = reader && buffer &&
         nk_iso_reader_lookup(reader, "PSP_GAME/SYSDIR/EBOOT.BIN", &lba, &size,
                              &is_directory) == 0 &&
         !is_directory && size <= NK_ISO_MAX_EXECUTABLE_BYTES &&
         nk_iso_extent_span_valid(reader, lba, size, 0, size);
     if (ok) {
-        NkIsoExecutableCandidate eboot, boot;
+        /* The v2 key is chosen by the disc's structure alone: an empty or
+           zero-filled EBOOT.BIN and a BOOT.BIN file of 1 byte to
+           NK_ISO_MAX_EXECUTABLE_BYTES, whatever it holds, so no rule about what
+           an executable may contain moves a disc between keys. A malformed
+           BOOT.BIN record is refused by name; one outside the image is skipped
+           by nk_iso_find_in_dir, so there is no BOOT.BIN (_non_retail_identity
+           reads both the same way). */
+        NkIsoExecutableCandidate eboot;
         nk_iso_classify_executable(reader, "PSP_GAME/SYSDIR/EBOOT.BIN", &eboot);
-        nk_iso_classify_executable(reader, "PSP_GAME/SYSDIR/BOOT.BIN", &boot);
-        boot_keyed = eboot.kind == NK_ISO_EXEC_EMPTY_OR_ZERO && boot.kind == NK_ISO_EXEC_MIPS_ELF32 &&
-            nk_iso_reader_lookup(reader, "PSP_GAME/SYSDIR/BOOT.BIN", &boot_lba, &boot_size,
-                                 &is_directory) == 0 &&
-            !is_directory && boot_size > 0 && boot_size <= NK_ISO_MAX_EXECUTABLE_BYTES;
-        ok = size > 0 || boot_keyed;
+        if (eboot.kind == NK_ISO_EXEC_EMPTY_OR_ZERO) {
+            bool boot_is_directory = false;
+            NkResult found = nk_iso_reader_resolve(reader, "PSP_GAME/SYSDIR/BOOT.BIN", &boot_lba,
+                                                   &boot_size, &boot_is_directory);
+            if (found == NK_OK && !nk_iso_extent_span_valid(reader, boot_lba, boot_size, 0, boot_size)) {
+                boot_unreadable = true;
+            } else if (found == NK_OK) {
+                boot_keyed = !boot_is_directory && boot_size > 0 &&
+                             boot_size <= NK_ISO_MAX_EXECUTABLE_BYTES;
+            } else if (found != NK_ERROR_FILE_NOT_FOUND) {
+                boot_unreadable = true;
+            }
+        }
+        ok = !boot_unreadable && (size > 0 || boot_keyed);
     }
     NkSha256 ctx;
     nk_sha256_init(&ctx);
@@ -1572,6 +1581,9 @@ static bool nk_iso_non_retail_identity(const char *iso_path, const uint8_t *sfo,
         ok = nk_iso_sha256_update_extent(&ctx, reader, boot_lba, boot_size, buffer,
                                          (uint32_t)CHUNK);
     }
+    /* Any read failing while a BOOT.BIN-keyed disc is hashed is refused as
+       _non_retail_identity refuses it, naming BOOT.BIN. */
+    if (boot_keyed && !ok) boot_unreadable = true;
     /* A v2-keyed disc also carries its v1 key: a library entry made before v2
        holds that one and keeps it (nk_iso_library_key_match). */
     uint8_t legacy_digest[32] = {0};
@@ -1582,10 +1594,18 @@ static bool nk_iso_non_retail_identity(const char *iso_path, const uint8_t *sfo,
         nk_iso_sha256_update_u64(&legacy, sfo_size);
         nk_sha256_update(&legacy, sfo, sfo_size);
         ok = nk_iso_sha256_update_extent(&legacy, reader, lba, size, buffer, (uint32_t)CHUNK);
+        boot_unreadable = !ok;
         if (ok) nk_sha256_finish(&legacy, legacy_digest);
     }
     free(buffer);
     if (reader) nk_iso_reader_close(reader);
+    if (!ok && boot_unreadable) {
+        snprintf(meta->error_message, sizeof(meta->error_message),
+                 "PARAM.SFO names this disc '%s', which is not a retail disc ID, and its "
+                 "PSP_GAME/SYSDIR/EBOOT.BIN is empty or all zeros but PSP_GAME/SYSDIR/BOOT.BIN is "
+                 "unreadable, so the disc cannot be identified by its contents", meta->sfo_disc_id);
+        return false;
+    }
     if (!ok) {
         snprintf(meta->error_message, sizeof(meta->error_message),
                  "PARAM.SFO names this disc '%s', which is not a retail disc ID, and "
@@ -1632,13 +1652,42 @@ NkIsoKeyMatch nk_iso_library_key_match(const char *image_key, uint32_t image_key
     return strcmp(image_key, entry_key) == 0 ? NK_ISO_KEY_MATCH : NK_ISO_KEY_NO_MATCH;
 }
 
+bool nk_iso_catalog_match(const char *disc_id, char *out_title_id, size_t out_title_id_size,
+                          char *out_display_name, size_t out_display_name_size) {
+    if (out_title_id && out_title_id_size) out_title_id[0] = '\0';
+    if (out_display_name && out_display_name_size) out_display_name[0] = '\0';
+    if (!disc_id || !disc_id[0]) return false;
+    nk_title_catalog_lock();
+    const NkTitleEntry *entry = nk_title_catalog_find_by_disc_id_locked(disc_id);
+    if (entry) {
+        if (out_title_id && out_title_id_size) {
+            snprintf(out_title_id, out_title_id_size, "%s", entry->id ? entry->id : "");
+        }
+        if (out_display_name && out_display_name_size) {
+            snprintf(out_display_name, out_display_name_size, "%s",
+                     entry->display_name ? entry->display_name : "");
+        }
+    }
+    nk_title_catalog_unlock();
+    return entry != NULL;
+}
+
 uint32_t nk_iso_library_key_for_image(const NkGameEntry *entries, int count,
                                       const char *image_key, uint32_t image_key_version,
                                       const char *legacy_key, char *out_key,
                                       size_t out_key_size) {
     if (!image_key || !out_key || out_key_size == 0u) return 0u;
-    /* The old key first: an entry made before v2 keeps it. */
+    /* An entry holding this image's own key first; then an entry made before
+       v2, which keeps the old key (metadata_for_new_library_record). */
     if (entries && image_key_version == 2u && legacy_key && legacy_key[0]) {
+        for (int i = 0; i < count; i++) {
+            if (nk_iso_library_key_match(image_key, image_key_version, legacy_key,
+                                         entries[i].disc_id, entries[i].disc_key_version) ==
+                NK_ISO_KEY_MATCH) {
+                snprintf(out_key, out_key_size, "%s", image_key);
+                return image_key_version;
+            }
+        }
         for (int i = 0; i < count; i++) {
             if (nk_iso_library_key_match(image_key, image_key_version, legacy_key,
                                          entries[i].disc_id, entries[i].disc_key_version) ==

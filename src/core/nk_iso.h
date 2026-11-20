@@ -194,11 +194,20 @@ NkIsoKeyMatch nk_iso_library_key_match(const char *image_key, uint32_t image_key
                                        const char *legacy_key, const char *entry_key,
                                        uint32_t entry_key_version);
 
-/* The key a disc image is added under, given the library's entries: a v2-keyed
- * image whose v1 key (legacy_key) an entry made before v2 holds keeps that v1
- * key, so adding the same disc again finds its entry rather than adding a second
- * one; every other image gets its own key. Writes the key to out_key and returns
- * its version (NkGameEntry.disc_key_version). Nothing in the library changes. */
+/* The title catalog's entry for disc_id, the search nk_iso_inspect makes: true
+ * when one is found, with its ID and display name copied out (each emptied when
+ * none is). */
+bool nk_iso_catalog_match(const char *disc_id, char *out_title_id, size_t out_title_id_size,
+                          char *out_display_name, size_t out_display_name_size);
+
+/* The key a disc image is added under, given the library's entries: an entry
+ * that holds the image's own key first; else a v2-keyed image whose v1 key
+ * (legacy_key) an entry made before v2 holds keeps that v1 key, so adding the
+ * same disc again finds its entry rather than adding a second one; else the
+ * image's own key. Writes the key to out_key and returns its version
+ * (NkGameEntry.disc_key_version). Nothing in the library changes. A caller that
+ * gets the v1 key searches the title catalog again under it
+ * (nk_iso_catalog_match), as nk_iso_inspect searched it under the v2 key. */
 uint32_t nk_iso_library_key_for_image(const NkGameEntry *entries, int count,
                                       const char *image_key, uint32_t image_key_version,
                                       const char *legacy_key, char *out_key,

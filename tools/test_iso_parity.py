@@ -2552,16 +2552,81 @@ int main(int argc, char **argv) {
         key, digest = self._expected_boot_identity(sfo, b"", boot)
         self._assert_identity_in_both_tiers(iso_file, key, digest)
 
+    def test_non_retail_v2_key_is_chosen_by_structure_alone(self) -> None:
+        """Review F2 of PR #2855: the v2 key is chosen by the disc's structure, an empty or
+        zero-filled EBOOT.BIN beside a BOOT.BIN file of any content, never by whether
+        BOOT.BIN passes the executable layout rule, so tightening that rule moves no disc
+        between keys, and two builds differing only in an unusable BOOT.BIN get two keys."""
+        sfo = build_param_sfo(self.BETA_DISC_ID, "Synthetic Beta")
+        cases = {
+            "zero-eboot-unusable-boot": (bytes(2048), b"not an executable\n"),
+            "zero-eboot-other-unusable-boot": (bytes(2048), b"another non-executable\n"),
+            "zero-eboot-encrypted-boot": (bytes(2048), build_psp_container()),
+            "empty-eboot-unusable-boot": (b"", b"not an executable\n"),
+        }
+        keys = set()
+        for name, (eboot, boot) in cases.items():
+            with self.subTest(case=name):
+                iso_file = self.temp_dir / f"v2-{name}.iso"
+                create_test_iso_with_executables(
+                    iso_file, eboot, boot, disc_id=self.BETA_DISC_ID, title="Synthetic Beta",
+                )
+                key, digest = self._expected_boot_identity(sfo, eboot, boot)
+                self._assert_identity_in_both_tiers(iso_file, key, digest)
+                keys.add(key)
+        self.assertEqual(len(keys), len(cases))
+
+    def test_unreadable_boot_bin_is_refused_by_name_in_both_tiers(self) -> None:
+        """Review F6 of PR #2855: when BOOT.BIN is what cannot be read (here its directory
+        record's two copies of its location disagree), the refusal names BOOT.BIN, the same
+        text in both tiers, not EBOOT.BIN. A BOOT.BIN record outside the image is no
+        BOOT.BIN in both tiers (the C reader skips such a record), so the disc keeps v1."""
+        sfo = build_param_sfo(self.BETA_DISC_ID, "Synthetic Beta")
+
+        def with_boot_record(name: str, little: int, big: int) -> Path:
+            iso_file = self.temp_dir / f"proto-boot-{name}.iso"
+            create_test_iso_with_executables(
+                iso_file, bytes(2048), build_plain_mips_elf(), disc_id=self.BETA_DISC_ID,
+                title="Synthetic Beta",
+            )
+            data = bytearray(iso_file.read_bytes())
+            record_name = b"BOOT.BIN;1"
+            at = data.index(bytes([len(record_name)]) + record_name) - 32
+            struct.pack_into("<I", data, at + 2, little)
+            struct.pack_into(">I", data, at + 6, big)
+            iso_file.write_bytes(data)
+            return iso_file
+
+        outside = 0x00FF0000
+        key, digest = self._expected_identity(sfo, bytes(2048))
+        self._assert_identity_in_both_tiers(with_boot_record("outside", outside, outside),
+                                            key, digest)
+
+        iso_file = with_boot_record("conflicting", 37, 38)
+        with self.assertRaises(IsoInspectionError) as caught:
+            inspect_iso(iso_file)
+        message = str(caught.exception)
+        self.assertEqual(
+            message,
+            f"PARAM.SFO names this disc '{self.BETA_DISC_ID}', which is not a retail disc ID, "
+            "and its PSP_GAME/SYSDIR/EBOOT.BIN is empty or all zeros but "
+            "PSP_GAME/SYSDIR/BOOT.BIN is unreadable, so the disc cannot be identified by its "
+            "contents",
+        )
+        c_meta = self._run_native_inspect(iso_file)
+        self.assertTrue(c_meta.get("RESULT", "").startswith("ERROR:"), c_meta)
+        self.assertEqual(c_meta.get("MESSAGE"), message)
+
     def test_non_retail_key_stays_v1_unless_boot_bin_is_the_boot_file(self) -> None:
         """A disc that boots its EBOOT.BIN keeps its v1 key byte for byte, whatever BOOT.BIN
-        holds; so does a zero-filled EBOOT.BIN without a plain BOOT.BIN, and an encrypted
+        holds; so does a zero-filled EBOOT.BIN without a BOOT.BIN, and an encrypted
         EBOOT.BIN (it differs per build and is hashed as stored)."""
         sfo = build_param_sfo(self.BETA_DISC_ID, "Synthetic Beta")
         cases = {
             "real-eboot-alone": (self.BETA_EXECUTABLE, None),
             "real-eboot-with-boot": (self.BETA_EXECUTABLE, build_plain_mips_elf()),
+            "real-eboot-with-unusable-boot": (self.BETA_EXECUTABLE, b"not an executable\n"),
             "zero-eboot-alone": (bytes(2048), None),
-            "zero-eboot-unusable-boot": (bytes(2048), b"not an executable\n"),
             "encrypted-eboot-with-boot": (build_psp_container(), build_plain_mips_elf()),
         }
         for name, (eboot, boot) in cases.items():
@@ -2679,6 +2744,24 @@ int main(int argc, char **argv) {
                     else [f"{v2_key}:2"],
                 )
 
+        # Review F5: an entry holding the image's own v2 key wins over an unversioned
+        # entry under its v1 key (one an older player or CLI may add later).
+        both: list[dict] = [dict(old_record, iso_path=str(self.temp_dir / "older.iso")),
+                {"disc_id": v2_key, "title_name": "Synthetic Beta",
+                 "iso_path": str(self.temp_dir / "newer.iso"), "disc_key_version": 2}]
+        self.assertIs(iso_inspect.metadata_for_new_library_record(meta, both), meta)
+        both_library = self.temp_dir / "both-keys-library.json"
+        self._write_library(both_library, both)
+        lines = self._native_library_key(iso_file, both_library)
+        self.assertEqual(lines.get("ADD"), [f"{v2_key}:2"])
+
+        # A malformed version is refused by name, the record and the field named (F4).
+        with self.assertRaises(iso_inspect.LibraryRecordError) as caught:
+            iso_inspect.metadata_for_new_library_record(
+                meta, [dict(old_record, disc_key_version=3)])
+        self.assertIn("disc_key_version 3", str(caught.exception))
+        self.assertIn(v1_key, str(caught.exception))
+
         # A disc with a v1 key (a real EBOOT.BIN) matches its entry as before.
         real = self.temp_dir / "real-eboot.iso"
         create_test_iso_with_executables(
@@ -2696,6 +2779,117 @@ int main(int argc, char **argv) {
             iso_inspect.key_match_for_library_entry(real_meta, self.BETA_KEY, 2),
             iso_inspect.KEY_NO_MATCH,
         )
+
+    def test_old_key_entry_keeps_its_manifest_and_the_cli_records_key_versions(self) -> None:
+        """Review F1, F3 and F4 of PR #2855, through the CLI's own steps.
+
+        F1: a disc re-keyed under the v1 key its entry holds is looked up in the title list
+        under that key, so the profile the user keeps under it goes on matching. F3: the
+        bring-up write records the key version (2 in an empty library; 1 when it reuses an
+        unversioned old-key record), and the package preflight compares versioned keys
+        (a v1 entry passes, the v1 key marked version 2 is refused). F4: a malformed
+        disc_key_version stops the bring-up as LIBRARY_RECORD_INVALID, the field named."""
+        from types import SimpleNamespace
+        from nk_core.title_registry import TitleRegistry
+        from nk_core.types import TitleProfile
+
+        sfo = build_param_sfo(self.BETA_DISC_ID, "Synthetic Beta")
+        iso_file = self.temp_dir / "proto-cli.iso"
+        create_test_iso_with_executables(
+            iso_file, bytes(2048), build_plain_mips_elf(), disc_id=self.BETA_DISC_ID,
+            title="Synthetic Beta",
+        )
+        v1_key, _ = self._expected_identity(sfo, bytes(2048))
+        v2_key, _ = self._expected_boot_identity(sfo, bytes(2048), build_plain_mips_elf())
+        old_record = {"disc_id": v1_key, "title_name": "Synthetic Beta",
+                      "iso_path": str(iso_file)}
+
+        # F1: a title-list profile the user keeps for the entry, under the v1 key.
+        registry = TitleRegistry(include_defaults=False)
+        registry.register(TitleProfile(
+            id="prototype-beta", name="Synthetic Beta", disc_ids=[v1_key], regions=["OTHER"],
+        ))
+        profile = registry.lookup_by_disc_id(v1_key)
+        assert profile is not None
+        meta = inspect_iso(iso_file, registry=registry)
+        self.assertEqual((meta.disc_id, meta.matched_profile), (v2_key, None))
+        added = iso_inspect.metadata_for_new_library_record(meta, [old_record], registry)
+        self.assertEqual((added.disc_id, added.disc_key_version), (v1_key, 1))
+        self.assertIsNotNone(added.matched_profile)
+        assert added.matched_profile is not None
+        self.assertEqual(added.matched_profile.id, profile.id)
+        opened = iso_inspect.metadata_for_library_entry(meta, v1_key, 0, registry)
+        assert opened is not None and opened.matched_profile is not None
+        self.assertEqual(opened.matched_profile.id, profile.id)
+
+        # F3: the bring-up write, into an empty library and into one with the old record.
+        def bringup_add(root: Path) -> list:
+            keyed = iso_inspect.metadata_for_new_library_record(
+                inspect_iso(iso_file), nk_cli._bringup_library_records(root))
+            nk_cli._write_bringup_library(root, iso_file, keyed, "experimental-beta",
+                                          "BOOT.BIN", True)
+            payload = json.loads((root / "library.json").read_text(encoding="utf-8"))
+            return list(payload["games"])
+
+        empty_root = self.temp_dir / "f3-empty"
+        empty_root.mkdir()
+        games = bringup_add(empty_root)
+        self.assertEqual([(g["disc_id"], g.get("disc_key_version")) for g in games],
+                         [(v2_key, 2)])
+        old_root = self.temp_dir / "f3-old"
+        old_root.mkdir()
+        self._write_library(old_root / "library.json", [old_record])
+        games = bringup_add(old_root)
+        self.assertEqual([(g["disc_id"], g.get("disc_key_version")) for g in games],
+                         [(v1_key, 1)])
+
+        # F3: the package preflight. A v1 entry gets past the identity check to the next
+        # one (its recorded executable, set here to differ); the v1 key marked v2 is refused.
+        def preflight(root: Path, version: int) -> str:
+            self._write_library(root / "library.json", [dict(
+                old_record, title_id="experimental-beta", selected_executable="EBOOT.BIN",
+                is_experimental=True, disc_key_version=version)])
+            st = SimpleNamespace(
+                args=SimpleNamespace(user_data_root=root, iso_path=None), disc_id=v1_key,
+                manifest_selected=None, module_dir=None, register_local_identity=False,
+                reporter=SimpleNamespace(report=lambda *_args: None),
+            )
+            with self.assertRaises(nk_cli.PackageBuildError) as caught:
+                nk_cli._package_preflight(st)
+            return str(caught.exception)
+
+        self.assertEqual(
+            preflight(old_root, 1),
+            "Selected executable changed from library entry 'EBOOT.BIN' to 'BOOT.BIN'; "
+            "re-import the ISO.",
+        )
+        self.assertEqual(
+            preflight(old_root, 2),
+            f"ISO identity {v2_key} no longer matches library entry {v1_key}.",
+        )
+
+        # F4: a malformed version is named, not called a bad disc image.
+        bad_root = self.temp_dir / "f4-bad"
+        bad_root.mkdir()
+        self._write_library(bad_root / "library.json", [dict(old_record, disc_key_version=7)])
+        report = nk_cli._new_bringup_report()
+        failures: list[str] = []
+
+        def fail_stage(report_value, stage, failure_class, issues=(), duration_ms=0):
+            failures.append(failure_class)
+            nk_cli._fail_bringup(report_value, stage, failure_class, issues, duration_ms)
+
+        st = SimpleNamespace(
+            fail_stage=fail_stage, iso_path=iso_file, metadata=None, module_dir=None,
+            preflight=None, report=report, report_path=bad_root / "report.json",
+            set_stage=lambda *_args: None, user_root=bad_root,
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(nk_cli._bringup_inspect(st), 1)
+        self.assertEqual((failures, report["failure_class"]),
+                         (["LIBRARY_RECORD_INVALID"], "LIBRARY_RECORD_INVALID"))
+        self.assertIn(f"the library record '{v1_key}' has disc_key_version 7", stderr.getvalue())
 
     def test_cli_inspect_names_a_non_retail_disc(self) -> None:
         iso_file = self.temp_dir / "cli-beta.iso"

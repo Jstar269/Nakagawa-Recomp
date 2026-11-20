@@ -30,6 +30,14 @@ typedef struct {
 /* Inspects a raw PSP ISO9660 disc image directly */
 bool iso_inspect_file(const char *iso_path, IsoInspectResult *out_result);
 
+/* Keys an inspected image as the library holds it (nk_iso_library_key_for_image)
+ * and returns that key's version. When an entry made before v2 holds the disc's
+ * v1 key, result is re-keyed under it and the title catalog searched again under
+ * that key (nk_iso_catalog_match), so a manifest kept under the v1 key goes on
+ * matching the disc; otherwise result is left as it is. */
+uint32_t iso_inspect_result_for_library(IsoInspectResult *result, const NkGameEntry *entries,
+                                        int entry_count);
+
 /* Icon and image loading from ISO disc image */
 typedef enum {
     NK_ICON_OK = 0,

@@ -229,6 +229,12 @@
         "player"
       ]
     },
+    "LIBRARY_RECORD_INVALID": {
+      "stage": "inspect",
+      "in": [
+        "report"
+      ]
+    },
     "MODIFIED_DUMP_CFW_LOADER": {
       "stage": "inspect",
       "in": [

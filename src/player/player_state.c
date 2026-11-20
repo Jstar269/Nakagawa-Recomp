@@ -10604,11 +10604,31 @@ bool player_disc_image_expand(PlayerPsnPackage *package,
                           "Nakagawa's data folder could not be found.");
         return false;
     }
+    /* The library as saved now: a prototype disc whose entry holds its v1 key is
+       expanded into that key's folder, the one the entry's checks and removal use. */
+    NkLibrary *library = (NkLibrary *)malloc(sizeof(*library));
+    if (library == NULL) {
+        player_psn_result(code, code_size, "INTERNAL_ERROR", message, message_size,
+                          "Out of memory reading the library.");
+        return false;
+    }
+    nk_library_init(library);
+    if (nk_library_load(library, package->library_path[0] ? package->library_path : NULL) !=
+        NK_OK) {
+        free(library);
+        player_psn_result(code, code_size, "IO_FAILURE", message, message_size,
+                          "Nakagawa's library could not be read, so the folder this disc image "
+                          "belongs in can't be chosen. Nothing was changed.");
+        return false;
+    }
     bridge.callbacks = callbacks;
     hooks.on_progress = player_disc_bridge_progress;
     hooks.is_cancelled = player_disc_bridge_cancelled;
     hooks.user = &bridge;
-    if (!nk_disc_import(package->pbp_path, data_root, &hooks, &result, &status)) {
+    bool imported = nk_disc_import_for_library(package->pbp_path, data_root, library->entries,
+                                               library->count, &hooks, &result, &status);
+    free(library);
+    if (!imported) {
         if (strcmp(status.code, NK_DISC_CANCELLED) != 0) {
             fprintf(stderr, "[PLAYER] Disc image expansion stopped: %s: %s\n", status.code,
                     status.message);
