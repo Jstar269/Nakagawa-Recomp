@@ -13560,6 +13560,27 @@ class GeThroughZProbeTests(unittest.TestCase):
         self.assertIn("**MEASURED** on 2026-11-10 UTC (PSP-3000, boot 180, XMB context, "
                       "`e4e6a3a2`; 23 records", self.readme)
 
+    def test_the_boot_229_run_of_the_saving_revision_is_recorded(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("commit 1972d515c", "boot 229", "23 records and the done record (out0 0x17)",
+                     "acceptance-eligible with 0 blockers", "exactly 256 colour pixels",
+                     "0x4400 words and found 0 that differed", "5 minutes 48 seconds", "did not restart",
+                     "One run does not establish"):
+            with self.subTest(term=term):
+                self.assertIn(term, note)
+        self.assertIn("5 minutes 48 seconds", self.rows[0]["risk"])
+        start = self.doc.index("- **PSP-3000 single-case reruns of `ge-through-z` and `ge-depth-bounds` "
+                               "(2026-11-20 UTC, second sitting)**")
+        section = " ".join(self.doc[start:self.doc.index("\n- **", start + 1)].split())
+        for term in ("boot 229 at `1972d515c`", "boot 230 at `306579a11`",
+                     "`PSP-GE-THROUGHZ-001` | `z*-draw`, `z*-z`, `ge-through-z-done` (boot 229)",
+                     "`PSP-GE-RASTER-004` | `edram`, `ctl-*`, `dw-*`, `dr-*`, `dc-*`, `ge-depth-bounds-done` "
+                     "(boot 230)", "`0x4400` words", "*No restart this time.*", "`0x04088000`",
+                     "word for word"):
+            with self.subTest(doc=term):
+                self.assertIn(term, section)
+        self.assertIn("boot 229, XMB context, `1972d515c`; 23 records and the done record", self.readme)
+
 
 class GeRasterProbeTests(unittest.TestCase):
     """CASE=ge-raster (123, PSP-GE-RASTER-001) in probe_ge_sample.c: the #343 GE raster
