@@ -21,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -99,11 +100,31 @@ class TestReleaseManifest(unittest.TestCase):
         self.assertIn("003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5", stb["revision"])
         self.assertEqual(stb["notice_path"], "third_party/stb/LICENSE")
         self.assertEqual(stb["evidence_path"], "third_party/stb/PROVENANCE.md")
-        kenney = families["kenney-ui-assets"]
-        self.assertEqual(kenney["license"], "CC0-1.0")
-        self.assertIn("ac2fcf599080b0f3ba2d174c9474db6df1a0e96ff0662580e2da79a122ab78a1", kenney["revision"])
-        self.assertEqual(kenney["evidence_path"], "third_party/kenney/PROVENANCE.md")
-        for family in (stb, kenney):
+        self.assertNotIn("kenney-ui-assets", families)
+        prompts = families["kenney-input-prompts"]
+        sounds = families["kenney-interface-sounds"]
+        # One row per pack: each names its own page, archive and licence file, so the SPDX package built
+        # from a row gives the right download location and notice for that pack.
+        for family, page, archive, notice in (
+            (prompts, "https://kenney.nl/assets/input-prompts",
+             "ac2fcf599080b0f3ba2d174c9474db6df1a0e96ff0662580e2da79a122ab78a1",
+             "third_party/kenney/input-prompts/License.txt"),
+            (sounds, "https://kenney.nl/assets/interface-sounds",
+             "f2193d072726d6758a5f7871b2dcc54dcce0d5c35c6f0a62f92549b327c81232",
+             "third_party/kenney/interface-sounds/License.txt"),
+        ):
+            with self.subTest(family=family["id"]):
+                self.assertEqual(family["license"], "CC0-1.0")
+                self.assertEqual(family["origin"], page)
+                self.assertIn(archive, family["revision"])
+                self.assertEqual(family["notice_path"], notice)
+                self.assertEqual(family["evidence_path"], "third_party/kenney/PROVENANCE.md")
+                manifest = (ROOT / family["evidence_path"]).read_text(encoding="utf-8")
+                self.assertIn(f"| `{page}` |", manifest)
+                self.assertIn(f"| `{archive}` |", manifest)
+        self.assertNotIn(sounds["revision"].split()[-1], prompts["revision"])
+        self.assertNotIn(prompts["revision"].split()[-1], sounds["revision"])
+        for family in (stb, prompts, sounds):
             self.assertTrue((ROOT / family["notice_path"]).is_file(), family["notice_path"])
             self.assertTrue((ROOT / family["evidence_path"]).is_file(), family["evidence_path"])
 
@@ -123,7 +144,7 @@ class TestReleaseManifest(unittest.TestCase):
         evidence = (ROOT / vorbis["evidence_path"]).read_text(encoding="utf-8")
         self.assertIn("9f755b604db3492df2cbeb39bf84b81e3e3932e3", evidence)
 
-    def test_monocypher_family_is_pinned_cc0_and_not_claimed_as_runtime_linked(self):
+    def test_monocypher_family_is_pinned_cc0_and_its_player_link_matches_the_build(self):
         family = next(
             item for item in load_manifest()["provenance_families"]
             if item.get("id") == "monocypher-ed25519"
@@ -136,7 +157,39 @@ class TestReleaseManifest(unittest.TestCase):
         )
         self.assertEqual(family["notice_path"], "third_party/monocypher/LICENCE.md")
         self.assertEqual(family["evidence_path"], "third_party/monocypher/PROVENANCE.md")
-        self.assertIn("not linked into player runtime", family["disposition"])
+        # The player links Monocypher for the signed update check exactly when the
+        # build puts it in PLAYER_SRCS (through UPDATE_SIG_SRCS); the release
+        # disposition, which the SBOM publishes, must say the same.
+        pipeline = (ROOT / "mk" / "pipeline.mk").read_text(encoding="utf-8")
+        assignments = {}
+        for line in pipeline.splitlines():
+            name, sep, value = line.partition(":=")
+            if sep and name.strip().isidentifier():
+                assignments.setdefault(name.strip(), value.split())
+        player_sources = assignments["PLAYER_SRCS"]
+        if "$(UPDATE_SIG_SRCS)" in player_sources:
+            player_sources = player_sources + assignments["UPDATE_SIG_SRCS"]
+        linked = "third_party/monocypher/monocypher.c" in player_sources
+        self.assertTrue(linked, "mk/pipeline.mk no longer links Monocypher into the player")
+        self.assertIn("linked into the player", family["disposition"])
+        self.assertNotIn("not linked", family["disposition"])
+
+    def test_ppsspp_lineage_family_records_no_unsupported_revision(self):
+        families = {item.get("id"): item for item in load_manifest()["provenance_families"]}
+        lineage = families["ppsspp"]
+        vfpu = families["vfpu"]
+        # f0baf3ade7 is the pin of the VFPU tables alone (assets/vfpu/PROVENANCE.json);
+        # the inherited runtime's PPSSPP revision is unknown (src/rt/PROVENANCE.md).
+        vfpu_record = json.loads((ROOT / "assets" / "vfpu" / "PROVENANCE.json").read_text(encoding="utf-8"))
+        self.assertEqual(vfpu["revision"], vfpu_record["source_commit"])
+        self.assertNotIn(vfpu_record["source_commit"], lineage["revision"])
+        self.assertTrue(lineage["revision"].startswith("unknown"), lineage["revision"])
+        self.assertIn("src/rt/PROVENANCE.md", lineage["revision"])
+        gap = (ROOT / "src" / "rt" / "PROVENANCE.md").read_text(encoding="utf-8")
+        self.assertIn("The exact PPSSPP revision of every inherited file is **unknown**", gap)
+        for pin in ("da17b0e1db209206a407d097d132201e516e3855", "4e109dd6ae34cbcb39751bb7647d345569700161"):
+            self.assertIn(pin, lineage["revision"])
+            self.assertIn(pin, gap)
 
     def test_project_korean_font_source_is_an_approved_pinned_binary(self):
         data = load_manifest()
@@ -253,16 +306,23 @@ class TestReleaseManifest(unittest.TestCase):
 
     def test_manifest_integrity_all_entries_and_git_tracking(self):
         data = load_manifest()
+        git_tracked: set[str] | None
+        try:
+            git_ls = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.splitlines()
+            git_tracked = set(git_ls)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            # No Git evidence here (git missing, a refused or corrupt repository, an export tree
+            # without .git): the tracking assertions are a visible skipped subtest, never a pass.
+            git_tracked = None
+            with self.subTest(check="git tracking"):
+                self.skipTest(f"git ls-files unavailable ({exc}); tracking assertions not run")
+        self._check_manifest_integrity(data, git_tracked)
+
+    def _check_manifest_integrity(self, data: dict, git_tracked: set[str] | None) -> None:
         # A materialized public-safe export keeps the full manifest but not the
         # profile-excluded component files; skip exactly those entries and hold
         # every remaining component to the same presence/tracking/hash contract.
         excluded = public_safe_excluded_paths(ROOT)
-
-        try:
-            git_ls = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.splitlines()
-            git_tracked = set(git_ls)
-        except Exception:
-            git_tracked = None
 
         for comp in data.get("components", []):
             comp_id = comp["id"]
@@ -296,6 +356,35 @@ class TestReleaseManifest(unittest.TestCase):
                 self.assertEqual(declared_sha.lower(), actual_sha.lower(),
                                 f"Component {comp_id} declared sha256 does not match actual file bytes")
 
+            elif presence == "required":
+                src_p = comp.get("source_path")
+                self.assertIsNotNone(src_p, f"Component {comp_id} missing source_path")
+                if comp.get("type") == "library" and comp.get("relationship") == "DEPENDS_ON":
+                    # A runtime library the build depends on (SDL3.dll) is staged from outside the
+                    # tree, as publish_audit's orphan check also treats it; it pins no bytes here.
+                    self.assertNotIn("sha256", comp.get("hashes", {}),
+                                     f"External library {comp_id} must not pin bytes the tree does not hold")
+                    continue
+                if src_p in excluded or _policy_excluded(src_p):
+                    continue
+                full_src = ROOT / src_p
+                self.assertTrue(full_src.is_file(), f"Component {comp_id} source_path {src_p} does not exist on disk")
+                if git_tracked is not None:
+                    self.assertIn(src_p, git_tracked, f"Component {comp_id} source_path {src_p} must be tracked in Git")
+                declared_sha = comp.get("hashes", {}).get("sha256")
+                if declared_sha is not None:
+                    self.assertEqual(declared_sha.lower(), sha256_of(full_src),
+                                     f"Component {comp_id} declared sha256 does not match actual file bytes")
+
+            elif presence == "excluded_from_public_profile":
+                src_p = comp.get("source_path")
+                self.assertIsNotNone(src_p, f"Component {comp_id} missing source_path")
+                self.assertTrue(src_p in excluded or _policy_excluded(src_p),
+                                f"Component {comp_id} claims exclusion, but the policy does not exclude {src_p}")
+                self.assertIs(comp.get("public_scope_included"), False,
+                              f"Excluded component {comp_id} must declare public_scope_included false")
+                self.assertTrue(comp.get("optional", False), f"Excluded component {comp_id} must be marked optional")
+
             elif presence == "tracked_collection":
                 prov_p = comp.get("provenance_path")
                 self.assertIsNotNone(prov_p, f"Component {comp_id} missing provenance_path")
@@ -309,6 +398,50 @@ class TestReleaseManifest(unittest.TestCase):
 
             elif presence == "optional_local_or_external":
                 self.assertTrue(comp.get("optional", False), f"External runtime library {comp_id} must be marked optional")
+
+            else:
+                self.fail(f"Component {comp_id} has unknown presence {presence!r}")
+
+    def test_integrity_check_covers_every_presence_value(self):
+        """Failing-before: only four presence values had a branch, so a 'required' file that was
+        deleted, untracked or re-pinned, a wrong exclusion claim and a misspelled presence all passed."""
+        tracked = set(subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True,
+                                     check=True).stdout.splitlines())
+        base = {"notice_path": "NOTICE.md", "type": "source", "relationship": "CONTAINS"}
+        real = "tools/test_release_manifest.py"
+        cases: dict[str, tuple[dict, set[str]]] = {
+            "unknown presence": ({"presence": "requird", "source_path": real}, tracked),
+            "required file missing": ({"presence": "required", "source_path": "tools/no_such_component.py"}, tracked),
+            "required file untracked": ({"presence": "required", "source_path": real}, tracked - {real}),
+            "required stale pin": ({"presence": "required", "source_path": real,
+                                    "hashes": {"sha256": "0" * 64}}, tracked),
+            "exclusion not in policy": ({"presence": "excluded_from_public_profile", "source_path": real,
+                                         "public_scope_included": False, "optional": True}, tracked),
+        }
+        for name, (fields, git) in cases.items():
+            with self.subTest(case=name):
+                with self.assertRaises(AssertionError):
+                    self._check_manifest_integrity({"components": [{"id": name, **base, **fields}]}, git)
+        good = {"id": "good", **base, "presence": "required", "source_path": real,
+                "hashes": {"sha256": sha256_of(ROOT / real)}}
+        self._check_manifest_integrity({"components": [good]}, tracked)
+
+    def test_git_failure_is_a_visible_skip_not_a_pass(self):
+        """Failing-before: a bare `except Exception` turned every tracking assertion off silently."""
+        for error in (FileNotFoundError("git"), subprocess.CalledProcessError(128, ["git", "ls-files"])):
+            with self.subTest(error=type(error).__name__):
+                inner = TestReleaseManifest("test_manifest_integrity_all_entries_and_git_tracking")
+                result = unittest.TestResult()
+                with mock.patch.object(subprocess, "run", side_effect=error):
+                    inner.run(result)
+                self.assertEqual(result.failures + result.errors, [])
+                self.assertEqual(len(result.skipped), 1, result.skipped)
+                self.assertIn("tracking assertions not run", result.skipped[0][1])
+        inner = TestReleaseManifest("test_manifest_integrity_all_entries_and_git_tracking")
+        result = unittest.TestResult()
+        with mock.patch.object(subprocess, "run", side_effect=ValueError("not a git failure")):
+            inner.run(result)
+        self.assertEqual(len(result.errors), 1, "an unexpected error must not be swallowed")
 
     def test_vfpu_collection_has_no_fake_provenance_checksum(self):
         data = load_manifest()

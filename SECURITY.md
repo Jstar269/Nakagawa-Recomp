@@ -115,15 +115,14 @@ as a whole and has no rows below.
 
 Every other use is one row. `python -m unittest tools.test_lint_docs` scans the tracked production files
 under `tools/` and `src/` (test files are oracles and are skipped) for `hashlib` calls other than SHA-256,
-`zlib` CRC-32 and Adler-32, and hand-rolled FNV and CRC-32 helpers, found by their primes and polynomials.
-It fails when a file and algorithm pair is missing here or a row names a pair the scan no longer finds.
+`zlib` CRC-32 and Adler-32, hand-rolled FNV and CRC-32 helpers, found by their primes and polynomials,
+and hand-rolled SHA-1 and MD5, found by the constants only they use (SHA-1's fifth initial word or last
+round constant, MD5's first sine constant). A file that only calls another file's SHA-1 has no row. It fails when a file and algorithm pair is missing here or a row names a pair the scan no longer finds.
 
 | File | Algorithm | Purpose | Disposition |
 | --- | --- | --- | --- |
-| `tools/decompme_export.py` | SHA-1 | PSP NID derivation (`sha1(name)[0:4]`, little-endian) | Keep: the PSP defines it |
-| `tools/gen_nidnames.py` | SHA-1 | PSP NID derivation | Keep: the PSP defines it |
 | `tools/homebrew_corpus.py` | SHA-1 | Git blob ID of a sample file, compared with the blob ID `tests/fixtures/homebrew_corpus/corpus.json` pins for it | Keep: Git object identity |
-| `tools/nid_name_proof.py` | SHA-1 | PSP NID derivation | Keep: the PSP defines it |
+| `tools/nid_name_proof.py` | SHA-1 | PSP NID derivation (`sha1(name)[0:4]`, little-endian), the one `nid_of` that `tools/gen_nidnames.py` uses | Keep: the PSP defines it |
 | `tools/ppsspp_ref.py` | SHA-1 | WebSocket handshake check of `Sec-WebSocket-Accept` (RFC 6455 section 4.2.2) | Keep: the protocol defines it |
 | `tools/provenance_attest_verify.py` | SHA-1 | Git blob ID of a file a `PROVENANCE.md` row declares imported byte-identical, compared with the row's recorded blob ID (a SHA-256 column, where present, is checked too) | Keep: Git object identity |
 | `tools/verify_vfpu_provenance.py` | SHA-1 | Git blob ID of a VFPU table against the pinned upstream tree | Keep: Git object identity |
@@ -135,13 +134,15 @@ It fails when a file and algorithm pair is missing here or a row names a pair th
 | `tools/ppsspp_ref.py` | CRC-32 | PNG chunk checksum | Keep: the format requires it |
 | `src/rt/fbcap.c` | CRC-32 | PNG chunk checksum of F12 screenshots | Keep: the format requires it |
 | `src/core/nk_psp_inflate.c` | CRC-32 | gzip member trailer of a decrypted PSP payload (RFC 1952) | Keep: the format requires it |
-| `src/core/nk_zip.c` | CRC-32 | ZIP entry checksum of save backups (store-only archives, APPNOTE 4.4.7), checked for every entry before a restore writes anything | Keep: the format requires it |
-| `src/core/nk_steam_shortcuts.c` | CRC-32 | The app ID Steam derives for a non-Steam shortcut (the CRC-32 of the quoted executable path and name, top bit set); an identifier in the user's own Steam library, not a security check | Keep: Steam defines it |
-| `src/core/nk_disc_verify.c` | CRC-32 | Disc verification: a whole disc image's CRC-32 and SHA-1 (the file's own FIPS 180-4 SHA-1, which the scan above does not detect), compared with Redump's PSP list (the bundled one, or the user's import) | Keep: Redump lists both; they identify a dump and are not a security check |
+| `src/core/nk_zip.c` | CRC-32 | ZIP entry checksum of save backups (store-only archives, APPNOTE 4.4.7), checked for every entry before a restore writes anything; `src/core/nk_steam_shortcuts.c` also calls `nk_zip_crc32` for the app ID Steam derives for a non-Steam shortcut (the CRC-32 of the quoted executable path and name, top bit set), an identifier in the user's own Steam library, not a security check | Keep: the format requires it; Steam defines the app ID |
+| `src/core/nk_disc_verify.c` | CRC-32 | Disc verification: a whole disc image's CRC-32, compared with Redump's PSP list (the bundled one, or the user's import) together with the SHA-1 below | Keep: Redump lists both; they identify a dump and are not a security check |
+| `src/core/nk_disc_verify.c` | SHA-1 | Disc verification: the file's own FIPS 180-4 SHA-1 of a whole disc image, the key into Redump's PSP list | Keep: Redump lists it; it identifies a dump and is not a security check |
+| `src/core/nk_psp_sha1.c` | SHA-1 | The SHA-1 core of the KIRK model (`nk_psp_kirk.c` command 0x0B) and PRX decryption (`nk_psp_prx.c`) | Keep: the PSP defines it |
+| `src/rt/h264_ffmpeg_sub/libavutil/sha.c` | SHA-1 | Vendored FFmpeg `av_sha`, imported byte-identical; in the built subset, `libavutil/random_seed.c` folds entropy into a seed with it | Keep: vendored upstream code, not a project integrity check |
 | `src/core/nk_disc_verify.h` | CRC-32 | The disc-verification CRC-32 interface (`nk_crc32_update`) | Keep: Redump lists it; it identifies a dump and is not a security check |
 | `tools/nk_core/disc_verify.py` | SHA-1 | Disc verification: a whole disc image's SHA-1, the key into Redump's PSP list | Keep: Redump lists it; it identifies a dump and is not a security check |
 | `tools/nk_core/disc_verify.py` | CRC-32 | Disc verification: a whole disc image's CRC-32, checked with the SHA-1 match | Keep: Redump lists it; it identifies a dump and is not a security check |
-| `tools/codegen.py` | FNV-64 | Names shared units and symbols, and the digest of an overlay's leading bytes (`fnv1a64`), mirrored by `src/rt/guest_interp.c`; the staged module identity itself is SHA-256 (`file_sha256`) | Done in #1920: staged-module identity is SHA-256, `GENERATED_CODE_ABI_EPOCH` is 3, and `tools/test_package_cache.py` checks that older packages are refused. The FNV-64 that remains is not an identity check |
+| `tools/code_capture.py` | FNV-64 | The FNV-1a 64 implementation (`fnv1a64`, which `tools/codegen.py` uses as `codegen.fnv1a64`): names shared units and symbols, code-capture files, and the digest of an overlay's leading bytes, mirrored by `src/rt/guest_interp.c` `sr_module_code_fnv1a64`; the staged module identity itself is SHA-256 (`file_sha256` in `tools/codegen.py`) | Done in #1920: staged-module identity is SHA-256, `GENERATED_CODE_ABI_EPOCH` is 3, and `tools/test_package_cache.py` checks that older packages are refused. The FNV-64 that remains is not an identity check |
 | `src/rt/guest_interp.c` | FNV-64 | Digest of an overlay's leading bytes in guest memory (`sr_module_code_fnv1a64`), checked on instruction-cache invalidate; the staged file is identified by SHA-256 (`sr_module_code_sha256`) | Done in #1920: staged-module identity is SHA-256. The FNV-64 that remains says whether an overlay is present, not whose file it is |
 | `tools/codegen.py` | FNV-32 | Self-modifying-code block record (`stale_fnv1a`), mirrored by `src/rt/stale_code.c` | Keep: change detector |
 | `src/rt/stale_code.c` | FNV-32 | Self-modifying-code detection (`sr_stale_fnv1a`), checked per block | Keep: performance-critical change detector |
@@ -155,7 +156,10 @@ It fails when a file and algorithm pair is missing here or a row names a pair th
 | `src/rt/gpu_sdl3vk/ge_gpu.c` | FNV-64 | Texture cache key | Keep: cache key, not integrity |
 | `src/rt/gpu_sdl3vk/pipeline_cache.h` | FNV-64 | Damage check of the on-disk Vulkan pipeline cache's driver data (`nk_pcache_fnv1a64`), and the name of the embedded shader set it was made for; `ge_gpu.c` also uses it to tell whether the driver's data changed before saving | Keep: catches a truncated or damaged cache file in the user's own folder, not a security check; the driver validates the data it is given |
 | `src/rt/motion_match.c` | FNV-64 | Sort and lookup key of a PRIM's signature and key in the draw matcher (`sig_hash`, `key_hash`); every hash match is confirmed by comparing the fields themselves | Keep: hash-table key, not integrity |
+| `src/rt/motion_tap.c` | FNV-64 | Says whether a PRIM's index bytes are the same in two frames (`fnv1a64`), so the in-between builder pairs their vertices by position only then; the bytes themselves are not kept | Keep: change detector, not integrity; a collision could only misplace vertices in one in-between frame |
+| `src/rt/asset_index.h` | FNV-64 | Slot of a case-folded name in a directory listing's open-addressed name table (`sr_vfs_name_fold_hash`), so a merge finds an earlier spelling without scanning every entry; every slot match is confirmed with `sr_vfs_strcasecmp` | Keep: hash-table key, not integrity |
 | `src/core/nk_xb.c` | FNV-32 | In-memory path table that finds duplicate paths while writing an XB archive | Keep: hash-table key |
+| `src/core/nk_json.c` | FNV-64 | Per-object key table that finds a duplicate member key while parsing (`json_key_hash`); every hash match is confirmed by comparing the keys themselves | Keep: hash-table key, not integrity |
 | `src/core/nk_platform_win32.c` | FNV-64 | Non-cryptographic hash of the data-folder path (`single_instance_hash`), used only to name the launcher's single-instance mutex and its owner page | Keep: a name, not integrity; a collision only makes two data folders share one launcher |
 | `tools/nk_core/iso_inspect.py` | FNV-32 | Disc-path suffix that keeps two disc modules with the same file name apart in the per-title module folder (`disc_module_qualified_name`), mirrored by `src/player/player_state.c` | Keep: file-name key, not integrity |
 | `src/player/player_state.c` | FNV-32 | Same disc-path suffix for the player's disc check (`player_module_qualified_name`), matching `tools/nk_core/iso_inspect.py` | Keep: file-name key, not integrity |

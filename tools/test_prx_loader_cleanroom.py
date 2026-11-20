@@ -390,6 +390,8 @@ int main(int argc, char **argv) {
     if (rc != 0) {
         printf("RESULT fail\nERR %s\nARENA_CLEAN %d\n", err,
                arena_all_guard());
+        printf("OWNS %d\n", (img.exps != NULL || img.imps != NULL ||
+                             img.nexp != 0 || img.nimp != 0) ? 1 : 0);
         sr_prx_image_free(&img);
         return 0;
     }
@@ -498,6 +500,8 @@ def parse_output(text):
             info["mems"].append(bytes.fromhex(p[2]))
         elif p[0] == "ARENA_CLEAN":
             info["arena_clean"] = int(p[1])
+        elif p[0] == "OWNS":
+            info["owns"] = int(p[1])
     return info
 
 
@@ -1045,6 +1049,22 @@ class TestLayout(PrxTestBase):
         self.assertEqual(info["entry"], 0x1200)
         self.assert_fail(m.build(), base=BASE, needle="nonzero base")
 
+    def test_exec_with_relocation_records_refused(self):
+        # An ET_EXEC image is linked at its p_vaddr; adding the segment address to
+        # its words again would corrupt every relocated pointer. Relocation records
+        # in a program header or a section are refused by name.
+        d0, offs, memsz = basic_seg_with_words([0x00001234])
+        m = Module(e_type=2, e_entry=0x1000)
+        m.add_seg(0x1000, d0, memsz)
+        m.add_reloc(PT_REL_A, reloc_a(offs[0], 2))
+        self.assert_fail(m.build(), base=0,
+                         needle="ET_EXEC with relocation records refused")
+        m = Module(e_type=2, e_entry=0x1000)
+        m.add_seg(0x1000, d0, memsz)
+        m.add_section(".rel.text", PT_REL_A, 0, reloc_a(offs[0], 2))
+        self.assert_fail(m.build(), base=0,
+                         needle="ET_EXEC with relocation records refused")
+
     def test_psp_magic_fails(self):
         self.assert_fail(b"~PSP" + bytes(128), needle="decryption")
 
@@ -1128,12 +1148,30 @@ class TestModinfo(PrxTestBase):
         m.add_seg(0x1000, d0, len(d0), paddr=0)
         self.assert_fail(m.build(), needle="p_paddr")
 
+    def test_kernel_bit_paddr_is_masked(self):
+        # A kernel module's first p_paddr carries 0x80000000 over the file offset;
+        # the offset is p_paddr & 0x1FFFFFFF, as sr_prx_start_entry_from_table
+        # (prx_loader.h) and the inspector read it.
+        d0 = modinfo_block(name=b"kmod") + bytes(16)
+        m = Module()
+        seg_off = 52 + 32  # one program header
+        m.add_seg(0x1000, d0, len(d0), paddr=0x80000000 | seg_off)
+        info = self.run_load(m.build())
+        self.assertEqual(info.get("result"), "ok", info.get("err"))
+        self.assertEqual(info["modname"], "kmod")
+        self.assertEqual(info["modinfo"], BASE + 0x1000)
+
 
 # ---------------------------------------------------------------------------
 # Item 5: exports
 # ---------------------------------------------------------------------------
 
-def build_export_fixture(zero_len=False, start_twice=False):
+def build_export_fixture(zero_len=False, start_twice=False, func_nids=None,
+                         var_nid=0xF01D73A7, rec1_syslib_nid=None):
+    """Record 0 is a system-library record (two functions, one variable). With
+    `func_nids` its two function NIDs, with `var_nid` its variable NID; with
+    `rec1_syslib_nid` record 1 is a second system-library record whose function
+    carries that NID."""
     g = BASE + 0x1000
     data = bytearray()
     data += modinfo_block(name=b"expmod")  # placeholder, patched below
@@ -1157,12 +1195,17 @@ def build_export_fixture(zero_len=False, start_twice=False):
     vv = g + 0x700
     struct.pack_into("<IHHBBHI", raw, rec0_off, 0, 0, 0, 4, 1, 2,
                      g + etab0_off)
-    struct.pack_into("<3I", raw, etab0_off, 0xD632ACDB,
-                     0xD632ACDB if start_twice else 0xCEE05613, 0xF01D73A7)
+    if func_nids is None:
+        func_nids = (0xD632ACDB, 0xD632ACDB if start_twice else 0xCEE05613)
+    struct.pack_into("<3I", raw, etab0_off, func_nids[0], func_nids[1],
+                     var_nid)
     struct.pack_into("<3I", raw, etab0_off + 12, f0, f1, vv)
-    struct.pack_into("<IHHBBHI", raw, rec1_off, g + str_off, 0, 0, 4, 1, 1,
-                     g + etab1_off)
-    struct.pack_into("<2I", raw, etab1_off, 0x12345678, 0x9ABCDEF0)
+    struct.pack_into("<IHHBBHI", raw, rec1_off,
+                     0 if rec1_syslib_nid is not None else g + str_off,
+                     0, 0, 4, 1, 1, g + etab1_off)
+    struct.pack_into("<2I", raw, etab1_off,
+                     0x12345678 if rec1_syslib_nid is None else rec1_syslib_nid,
+                     0x9ABCDEF0)
     struct.pack_into("<2I", raw, etab1_off + 8, g + 0x800, g + 0x900)
     if zero_len:
         raw[rec1_off + 8] = 0
@@ -1199,6 +1242,44 @@ class TestExports(PrxTestBase):
         self.assertEqual(info.get("result"), "ok", info.get("err"))
         self.assertEqual(info["hasstart"], 1)
         self.assertEqual(info["modstart"], BASE + 0x1000 + 0x600)
+
+    def test_module_bootstart_is_the_start_without_module_start(self):
+        # prx_loader.h: module_start, otherwise module_bootstart (0xD3744BE0),
+        # otherwise the ELF entry; the runtime starts a loaded module at mod_start.
+        m = Module(e_entry=0x10)
+        m.add_seg(0x1000, build_export_fixture(
+            func_nids=(0xD3744BE0, 0xCEE05613)), 256)
+        info = self.run_load(m.build())
+        self.assertEqual(info.get("result"), "ok", info.get("err"))
+        self.assertEqual(info["hasstart"], 1)
+        self.assertEqual(info["modstart"], BASE + 0x1000 + 0x500)
+
+    def test_module_start_outside_the_first_syslib_functions_is_not_the_start(self):
+        # Only the function entries of the first system-library record name the
+        # start routine: a variable carrying the NID, or a second system-library
+        # record, does not (sr_prx_start_entry_from_table reads the same way).
+        m = Module(e_entry=0x10)
+        m.add_seg(0x1000, build_export_fixture(
+            func_nids=(0x11111111, 0xCEE05613), var_nid=0xD632ACDB), 256)
+        info = self.run_load(m.build())
+        self.assertEqual(info.get("result"), "ok", info.get("err"))
+        self.assertEqual(info["hasstart"], 0)
+        m = Module(e_entry=0x10)
+        m.add_seg(0x1000, build_export_fixture(
+            func_nids=(0x11111111, 0xCEE05613), rec1_syslib_nid=0xD632ACDB), 256)
+        info = self.run_load(m.build())
+        self.assertEqual(info.get("result"), "ok", info.get("err"))
+        self.assertEqual(info["hasstart"], 0)
+
+    def test_guest_write_failure_leaves_out_owning_nothing(self):
+        # The image's tables are parsed before the commit; a commit the guest
+        # refuses (here a second segment past the arena) must not leave them owned
+        # by the output record, which a caller reporting the error never frees.
+        m = Module(e_entry=0x10)
+        m.add_seg(0x1000, build_export_fixture(), 256)
+        m.add_seg(0x30000, bytes(16), 16)
+        info = self.assert_fail(m.build(), needle="guest write failed")
+        self.assertEqual(info.get("owns"), 0)
 
     def test_zero_length_record_fails(self):
         m = Module()

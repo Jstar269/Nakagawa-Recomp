@@ -35,6 +35,8 @@
  *   option short-writes <name>       destination writes of <name> accept at most 4096 bytes each
  *   option host-corrupt <name>       the stored destination copy of <name> has its first byte
  *                                    flipped
+ *   option host-existing <name> <bytes>     the destination already holds the first <bytes>
+ *                                    bytes of <name>, as an earlier run left them
  *   open <path-hex> <rc>             sceIoOpen of a device path returns <rc> (>= 0 opens)
  *   dopen <path-hex> <rc>            sceIoDopen of a device path returns <rc> (>= 0 opens)
  *   umd <medium> <drive-stat>        sceUmdCheckMedium / sceUmdGetDriveStat results
@@ -52,7 +54,10 @@
  * Unlisted device paths answer 0x80010002. Numbers accept 0x prefixes; names are literal.
  * A flash0 font file answers sceIoLseek(SEEK_END) with its generated size.
  * Output: CALL, EMIT, STEP and HOST0 (one per stored destination copy) lines, then a SUMMARY
- * line; mode fontcopy prints a TARGET line first. */
+ * line; mode fontcopy prints a TARGET line first, a PROGRESS line (the app's "Copying font N
+ * of M: <name>") at each copy's first step and, after the run, an OUTCOME line: the app's
+ * fontcopy_outcome verdict on the records, the error code it shows and the side
+ * (read or write) the first failed copy failed on. */
 
 #include <stdint.h>
 #include <stdio.h>
@@ -643,14 +648,26 @@ int sceUmdGetDriveStat(void) {
     return s_umd_drive;
 }
 
+/* Mode fontcopy: the app's own view of the records (fontcopy_config.h), reported as OUTCOME,
+ * and the progress line it draws at a copy's first step, reported as PROGRESS. */
+static FontCopyView s_fontcopy_view;
+static int s_fontcopy_mode;
+static const FontFiles *s_fontcopy_files;
+
 static void harness_emit(void *ctx, const char *line, size_t length) {
     (void)ctx;
     printf("EMIT %.*s", (int)length, line);
+    if (s_fontcopy_mode) (void)fontcopy_view_record(&s_fontcopy_view, line);
 }
 
 static void harness_step(void *ctx, const char *step) {
     (void)ctx;
     printf("STEP %s\n", step);
+    const char *font = s_fontcopy_mode ? fontcopy_step_font(step) : NULL;
+    if (font != NULL) {
+        printf("PROGRESS %u of %u %s\n", (unsigned int)(s_fontcopy_view.finished + 1u),
+               (unsigned int)s_fontcopy_files->candidates, font);
+    }
 }
 
 static int hex_text(const char *hex, char *out, size_t capacity) {
@@ -734,6 +751,15 @@ static int load_scenario(FILE *input) {
                 e->short_writes = 1;
             } else if (strcmp(w[1], "host-corrupt") == 0) {
                 e->host_corrupt = 1;
+            } else if (strcmp(w[1], "host-existing") == 0 && n == 4) {
+                /* A copy an earlier run left: the first <bytes> bytes of the font. */
+                const uint32_t bytes = (uint32_t)number(w[3]);
+                if (bytes > e->bytes || e->host != NULL) return 0;
+                e->host = (uint8_t *)malloc((size_t)bytes + 1u);
+                if (e->host == NULL) return 0;
+                for (uint32_t b = 0; b < bytes; b++) e->host[b] = fake_byte(e, b, 0);
+                e->host_bytes = bytes;
+                e->host_written = 1;
             } else {
                 return 0;
             }
@@ -790,13 +816,25 @@ int main(int argc, char **argv) {
         fonts.emit = harness_emit;
         fonts.step = harness_step;
         if (strcmp(argv[1], "fontcopy") == 0) {
-            fontcopy_configure(&fonts, &target, s_argv0_set ? s_argv0 : NULL);
+            fontcopy_target(&target, s_argv0_set ? s_argv0 : NULL);
+            fontcopy_use_target(&fonts, &target);
             s_dest_dir = fonts.dest_dir;
             s_dest_parent = fonts.dest_parent;
             printf("TARGET parent=%s folder=%s\n", s_dest_parent, s_dest_dir);
+            s_fontcopy_mode = 1;
+            s_fontcopy_files = &fonts;
         }
         (void)snprintf(s_dest_prefix, sizeof(s_dest_prefix), "%s/", s_dest_dir);
         fontfiles_run(&fonts);
+        if (s_fontcopy_mode) {
+            static const char *const kinds[] = {"all-copied", "none-found", "listing-cut",
+                                                "none-written", "some-copied"};
+            static const char *const faults[] = {"none", "read", "write"};
+            uint32_t code = 0u;
+            const FontCopyOutcome kind = fontcopy_outcome(&fonts, &s_fontcopy_view, &code);
+            printf("OUTCOME kind=%s code=0x%08x fault=%s\n", kinds[kind], (unsigned int)code,
+                   faults[s_fontcopy_view.first_fault]);
+        }
     } else if (strcmp(argv[1], "umd") == 0) {
         static UmdIo umd;
         memset(&umd, 0, sizeof(umd));

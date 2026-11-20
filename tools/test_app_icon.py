@@ -269,6 +269,15 @@ class VersionInfoCommandLineTests(unittest.TestCase):
                                            "--original-filename", "mygame.exe").returncode, 0)
             self.assertIn('"mygame (Nakagawa Recomp)"', out.read_text("utf-8"))
 
+    def test_a_blank_title_name_fails_the_build(self) -> None:
+        # The same refusal as a blank manifest display_name: no nameless " (Nakagawa Recomp)".
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "t.rc"
+            done = self.run_tool(out, "--title-name", "  ", "--original-filename", "x.exe")
+            self.assertEqual(done.returncode, 1)
+            self.assertIn("--title-name is blank", done.stderr)
+            self.assertFalse(out.exists())
+
     def test_a_manifest_without_a_name_fails_the_build(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = Path(tmp) / "title.json"
@@ -284,6 +293,10 @@ class VersionInfoCommandLineTests(unittest.TestCase):
             out = Path(tmp) / "t.rc"
             args = ("--player", "--original-filename", "nakagawa_player.exe")
             self.assertEqual(self.run_tool(out, *args).returncode, 0)
+            # Move the first write well away from the filesystem's current timestamp tick.
+            # A redundant second write must then change the observed mtime on coarse filesystems too.
+            sentinel_mtime_ns = 946_684_800_000_000_000  # 2000-01-01 UTC
+            os.utime(out, ns=(sentinel_mtime_ns, sentinel_mtime_ns))
             before = out.stat().st_mtime_ns
             self.assertEqual(self.run_tool(out, *args).returncode, 0)
             self.assertEqual(out.stat().st_mtime_ns, before)

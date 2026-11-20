@@ -79,6 +79,39 @@ def libfont_selftest_manifest(tmp_path: Path) -> Path:
     return path
 
 
+def selftest_make() -> str:
+    """The make that builds the production-HLE selftest on this host, or a named skip.
+
+    Windows builds it with MSYS2's mingw32-make. Linux and WSL build the same
+    ``hle-title-selftest-one`` target with make (CI's Linux native job does), when
+    pkg-config finds the SDL3 and Vulkan development files it links. Hosted CI runs
+    this module in the core part of the Linux ``native_tools`` job and accepts only a
+    bare ``OK``; the ``python_tools`` shards skip it.
+    """
+    make = shutil.which("mingw32-make")
+    if make:
+        return make
+    if os.name != "nt":
+        make = shutil.which("make")
+        pkg_config = shutil.which("pkg-config")
+        if make and pkg_config and subprocess.run(
+            [pkg_config, "--exists", "sdl3", "vulkan"], capture_output=True, timeout=60
+        ).returncode == 0:
+            return make
+    raise unittest.SkipTest(
+        "WINDOWS_ONLY: no mingw32-make, and no make with pkg-config sdl3 and vulkan"
+    )
+
+
+def with_toolchain_path(make: str, env: dict[str, str]) -> dict[str, str]:
+    """``env`` with MSYS2's toolchain directory (the one holding ``make``) first on PATH,
+    so the build's gcc and the selftest's DLLs come from the same installation, wherever
+    MSYS2 lives. Other makes leave PATH as it is."""
+    if Path(make).stem.lower() != "mingw32-make":
+        return env
+    return {**env, "PATH": str(Path(make).parent) + os.pathsep + env.get("PATH", "")}
+
+
 def hle_file_containing(needle: str) -> tuple[str, str]:
     """The one runtime HLE source that contains ``needle``, exactly once, as (path, text)."""
     hits = [(relative, text) for relative, text in hle_sources.sources() if needle in text]
@@ -130,9 +163,7 @@ def run_libfont_selftest(make: str, tmp_path: Path, manifest_path: Path,
         f"HLE_TITLE_SELFTEST_EXE={exe.as_posix()}",
     ]
     env = os.environ.copy()
-    ucrt_bin = Path("C:/msys64/ucrt64/bin")
-    if ucrt_bin.is_dir():
-        env["PATH"] = str(ucrt_bin) + os.pathsep + env.get("PATH", "")
+    env = with_toolchain_path(make, env)
     env["SR_MODULE_DIR"] = str(tmp_path / "modules")
     env["SR_TEST_GUEST_MODULE_LOAD"] = "libfont-startup"
     return subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
@@ -219,9 +250,7 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
         )
 
     def test_configured_bindings_reach_production_hle(self):
-        make = shutil.which("mingw32-make")
-        if not make:
-            raise unittest.SkipTest("WINDOWS_ONLY: mingw32-make is not available")
+        make = selftest_make()
         with scratch_dir.TemporaryDirectory(prefix="nakagawa_hle_") as tmp:
             tmp_path = Path(tmp)
             manifest = tmp_path / "synthetic-positive.json"
@@ -242,32 +271,52 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
                 f"HLE_TITLE_SELFTEST_HEADER={header.as_posix()}",
                 f"HLE_TITLE_SELFTEST_EXE={exe.as_posix()}",
             ]
+            env = {
+                **os.environ,
+                "SR_HLE_DIAGNOSTICS": "1",
+                "SR_EXPECT_HLE_DIAGNOSTICS": "1",
+                "SR_REAL_MODULE_START": "0",
+                # synthetic_manifest() configures expected_data_file_count=12345.
+                "SR_EXPECT_DATA_FILE_COUNT": "12345",
+            }
             result = subprocess.run(
                 command,
                 cwd=ROOT,
                 capture_output=True,
                 text=True,
-                env={
-                    **os.environ,
-                    "SR_HLE_DIAGNOSTICS": "1",
-                    "SR_EXPECT_HLE_DIAGNOSTICS": "1",
-                    "SR_REAL_MODULE_START": "0",
-                },
+                env=env,
                 timeout=180,
             )
+            # The same executable told to expect another count must fail by name: the
+            # check compares the runtime's value, not the expectation with itself.
+            wrong_count = subprocess.run(
+                [str(exe), "--title-config"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                env=with_toolchain_path(make, {**env, "SR_EXPECT_DATA_FILE_COUNT": "12346"}),
+                timeout=60,
+            ) if exe.exists() else None
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("hle_title_production_selftest:", output)
         self.assertIn("0 failures", output)
+        self.assertIn("title_config: expected data-file count 12345", output)
+        self.assertIsNotNone(wrong_count, "the selftest executable was not built")
+        assert wrong_count is not None
+        wrong_output = wrong_count.stdout + wrong_count.stderr
+        self.assertNotEqual(wrong_count.returncode, 0, wrong_output)
+        self.assertIn(
+            "FAIL: the configured expected data-file count reaches the runtime accessor",
+            wrong_output,
+        )
         self.assertIn("DISPLAY_SET_MODE: mode=0 480x272", output)
         for retired in ("replaying title display-driver init", "runtime sync callbacks",
                         "seeded frame latch", "GE_FINISH_LATCH_ASSIST"):
             self.assertNotIn(retired, output)
 
     def test_libfont_guest_startup_routes_exports_without_ready_binding(self):
-        make = shutil.which("mingw32-make")
-        if not make:
-            raise unittest.SkipTest("WINDOWS_ONLY: mingw32-make is not available")
+        make = selftest_make()
         with scratch_dir.TemporaryDirectory(prefix="nakagawa_libfont_startup_") as tmp:
             tmp_path = Path(tmp)
             manifest_path = libfont_selftest_manifest(tmp_path)
@@ -301,9 +350,7 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
         """SR_REAL_MODULE_START is a tri-state gate: "0" is the environmental kill
         switch and has to cover libfont, "1" and the unset default run the translated
         entry. The mutant restores the pre-#652 gate, where "0" did not cover libfont."""
-        make = shutil.which("mingw32-make")
-        if not make:
-            raise unittest.SkipTest("WINDOWS_ONLY: mingw32-make is not available")
+        make = selftest_make()
         with scratch_dir.TemporaryDirectory(prefix="nakagawa_libfont_gate_") as tmp:
             tmp_path = Path(tmp)
             manifest_path = libfont_selftest_manifest(tmp_path)
@@ -331,9 +378,7 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
         )
 
     def test_manifest_module_load_honours_address_and_refuses_collision(self):
-        make = shutil.which("mingw32-make")
-        if not make:
-            raise unittest.SkipTest("WINDOWS_ONLY: mingw32-make is not available")
+        make = selftest_make()
         with scratch_dir.TemporaryDirectory(prefix="nakagawa_hle_module_") as tmp:
             tmp_path = Path(tmp)
             module_root = tmp_path / "modules"
@@ -364,9 +409,7 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
                 f"HLE_TITLE_SELFTEST_EXE={exe.as_posix()}",
             ]
             env = os.environ.copy()
-            ucrt_bin = Path("C:/msys64/ucrt64/bin")
-            if ucrt_bin.is_dir():
-                env["PATH"] = str(ucrt_bin) + os.pathsep + env.get("PATH", "")
+            env = with_toolchain_path(make, env)
             env["SR_MODULE_DIR"] = str(module_root)
             env["SR_TEST_GUEST_MODULE_LOAD"] = "success"
             built = subprocess.run(
@@ -401,9 +444,7 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
         """Guest-placed modules (#704) through the production loader: placement by the
         user-partition allocator, relocation, translation binding, start/stop with the
         module's own $gp, unload and reuse, LoadModuleByID, and every named refusal."""
-        make = shutil.which("mingw32-make")
-        if not make:
-            raise unittest.SkipTest("WINDOWS_ONLY: mingw32-make is not available")
+        make = selftest_make()
         with scratch_dir.TemporaryDirectory(prefix="nakagawa_hle_runtime_module_") as tmp:
             tmp_path = Path(tmp)
             module_root = tmp_path / "modules"
@@ -442,9 +483,7 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
                 f"HLE_TITLE_SELFTEST_EXE={exe.as_posix()}",
             ]
             env = os.environ.copy()
-            ucrt_bin = Path("C:/msys64/ucrt64/bin")
-            if ucrt_bin.is_dir():
-                env["PATH"] = str(ucrt_bin) + os.pathsep + env.get("PATH", "")
+            env = with_toolchain_path(make, env)
             env["SR_MODULE_DIR"] = str(module_root)
             env["SR_TEST_GUEST_MODULE_LOAD"] = "runtime-placement"
             env.pop("SR_REAL_MODULE_START", None)
@@ -469,9 +508,7 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
                 self.assertIn(marker, output)
 
     def test_generic_profile_rejects_diagnostics_even_when_requested(self):
-        make = shutil.which("mingw32-make")
-        if not make:
-            raise unittest.SkipTest("WINDOWS_ONLY: mingw32-make is not available")
+        make = selftest_make()
         with scratch_dir.TemporaryDirectory(prefix="nakagawa_hle_generic_") as tmp:
             tmp_path = Path(tmp)
             header = tmp_path / "sr_title_config.h"
@@ -506,9 +543,7 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
         self.assertIn("0 failures", output)
 
     def test_hst_profile_requires_explicit_diagnostics_opt_in(self):
-        make = shutil.which("mingw32-make")
-        if not make:
-            raise unittest.SkipTest("WINDOWS_ONLY: mingw32-make is not available")
+        make = selftest_make()
         with scratch_dir.TemporaryDirectory(prefix="nakagawa_hle_hst_nooptin_") as tmp:
             tmp_path = Path(tmp)
             manifest = tmp_path / "synthetic-hst-nooptin.json"

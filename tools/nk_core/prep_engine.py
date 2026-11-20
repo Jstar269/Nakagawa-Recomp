@@ -16,6 +16,7 @@ import tempfile
 import time
 from typing import Callable, Optional
 
+from . import disc_expand_tool
 from .iso_inspect import (
     IsoInspectionError,
     inspect_iso,
@@ -402,12 +403,14 @@ class PreparationEngine:
 
         operation = "Setting up the game's files"
         emit(PrepStage.EXTRACTING_ARCHIVES, operation, completed=0, total=100,
-             unit="percent", message="A large disc can take a few minutes.")
+             unit="percent", message="A large disc can take a few minutes.",
+             cancellable=False)
 
         def on_progress(percent: int, files: str) -> None:
             emit(PrepStage.EXTRACTING_ARCHIVES, operation,
                  completed=max(0, min(percent, 100)), total=100, unit="percent",
-                 current_item=files, message=f"{files} files" if files else "")
+                 current_item=files, message=f"{files} files" if files else "",
+                 cancellable=False)
 
         result = self.native_stager(iso, disc_id, on_progress)
         result.elapsed_ms = int((time.monotonic() - start_time) * 1000)
@@ -440,6 +443,7 @@ class PreparationEngine:
             current_item: str = "",
             message: str = "",
             severity: EventSeverity = EventSeverity.INFO,
+            cancellable: bool = True,
         ) -> None:
             if on_progress:
                 elapsed_ms = int((time.monotonic() - start_time) * 1000)
@@ -453,7 +457,7 @@ class PreparationEngine:
                     elapsed_ms=elapsed_ms,
                     message=message,
                     severity=severity,
-                    cancellable=True,
+                    cancellable=cancellable,
                 )
                 on_progress(event)
 
@@ -464,11 +468,22 @@ class PreparationEngine:
             emit(PrepStage.INSPECTING_ISO, "Inspecting disc image", completed=0, total=100)
             cancel_token.check()
 
+            if disc_expand_tool.compressed_format(iso) is not None:
+                try:
+                    iso = disc_expand_tool.ensure_plain_iso(iso, self.base_dir)
+                except disc_expand_tool.DiscImageRefused as exc:
+                    raise IsoInspectionError(str(exc), boundary_code=exc.code) from exc
+                except (OSError, RuntimeError) as exc:
+                    raise IsoInspectionError(
+                        f"The compressed disc image could not be expanded: {exc}"
+                    ) from exc
+
             try:
                 iso_meta = inspect_iso(iso, self.registry, user_data_root=self.base_dir)
             except IsoInspectionError as exc:
                 if exc.boundary_code is None:
                     raise
+                emit(PrepStage.FAILED, str(exc), severity=EventSeverity.ERROR)
                 return PreparationResult(
                     success=False,
                     disc_id=disc_id,
@@ -476,6 +491,11 @@ class PreparationEngine:
                     error_message=str(exc),
                 )
             if iso_meta.qualification_error:
+                emit(
+                    PrepStage.FAILED,
+                    iso_meta.qualification_error,
+                    severity=EventSeverity.ERROR,
+                )
                 return PreparationResult(
                     success=False,
                     disc_id=iso_meta.disc_id,
@@ -483,11 +503,15 @@ class PreparationEngine:
                     error_message=iso_meta.qualification_error,
                 )
             if not iso_meta.is_supported or not iso_meta.matched_profile:
+                message = (
+                    f"Title with disc ID '{iso_meta.disc_id}' is not currently supported."
+                )
+                emit(PrepStage.FAILED, message, severity=EventSeverity.ERROR)
                 return PreparationResult(
                     success=False,
                     disc_id=iso_meta.disc_id,
                     error_code="ISO_UNSUPPORTED_TITLE",
-                    error_message=f"Title with disc ID '{iso_meta.disc_id}' is not currently supported.",
+                    error_message=message,
                 )
 
             profile = iso_meta.matched_profile

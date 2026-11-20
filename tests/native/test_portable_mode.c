@@ -30,6 +30,8 @@
 #endif
 
 static char g_sep;
+/* A case the host could not run: main then exits 77, which the Makefile reports as SKIP. */
+static int g_skipped;
 
 /* A fresh install folder under the run's temp root, with an executable path inside it. */
 static void make_install(const char *name, char *folder, size_t folder_size, char *exe,
@@ -71,6 +73,9 @@ static void test_default_unchanged(void) {
     /* This test program has no marker beside it, so the process-level entry point
        leaves the platform root alone, too. */
     assert(nk_portable_apply(&res) == NK_PORTABLE_ABSENT);
+    assert(!nk_portable_in_use());
+    /* A caller that wants only the state may pass no result. */
+    assert(nk_portable_apply(NULL) == NK_PORTABLE_ABSENT);
     assert(!nk_portable_in_use());
     assert(nk_platform_resolve_app_data_dir(after, sizeof(after)));
     assert(strcmp(before, after) == 0);
@@ -225,11 +230,18 @@ static void test_too_long_is_refused(void) {
            (int)sizeof(marker));
     assert(snprintf(exe, sizeof(exe), "%s%cx.exe", long_folder, g_sep) < (int)sizeof(exe));
     FILE *file = nk_platform_mkdir_p(long_folder) ? nk_fopen_utf8(marker, "wb") : NULL;
+#if defined(_WIN32) || defined(_WIN64)
     if (!file) {
-        /* Windows file APIs without long-path support cannot make this folder. */
-        printf("[PORTABLE_TEST] too-long case skipped: the host cannot make the folder\n");
+        /* Windows file APIs without long-path support cannot make this folder: a SKIP
+           (main exits 77), never a pass. */
+        printf("[PORTABLE_TEST] SKIP too-long case: the host cannot make the folder\n");
+        g_skipped++;
         return;
     }
+#else
+    /* A POSIX file system makes this tree: failing to is a failure, not a skip. */
+    assert(file != NULL);
+#endif
     fclose(file);
     assert(nk_portable_resolve(exe, &res) == NK_PORTABLE_REFUSED);
     assert(strstr(res.message, "PORTABLE_PATH_TOO_LONG") != NULL);
@@ -245,6 +257,10 @@ int main(void) {
     test_marker_routes_every_folder();
     test_unwritable_is_refused();
     test_too_long_is_refused();
+    if (g_skipped) {
+        printf("[PORTABLE_TEST] all others ok, %d case(s) SKIPPED\n", g_skipped);
+        return 77;
+    }
     printf("[PORTABLE_TEST] ok\n");
     return 0;
 }

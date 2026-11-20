@@ -582,6 +582,60 @@ class TestStrictTraceContract(unittest.TestCase):
         self.assertIn("never overwrites", stderr)
         self.assertEqual((out / "a.trace").read_bytes(), before)
 
+    def overlap_pair(self, prefix):
+        """Two v1 streams whose first records are ``prefix`` and which diverge right after."""
+        def stream(name, wrong):
+            lines = ["# psp-recomp trace v1 target=fixture oracle=interp start_pc=0x08900100"]
+            for step, writes in enumerate(prefix):
+                lines.append(f"{step} pc=0x{0x08900100 + 4 * step:08x} op=0x25080001 {writes}")
+            step = len(prefix)
+            lines.append(f"{step} pc=0x{0x08900100 + 4 * step:08x} op=0x25080001 "
+                         f"r9=0x{0xdeadbeef if wrong else 1:08x}")
+            return self.write_lines(name, lines)
+        return stream("overlap-a.trace", False), stream("overlap-b.trace", True)
+
+    def test_shrink_start_state_follows_overlapping_writes_in_time_order(self):
+        cases = (
+            # A later word write covers an earlier byte: the word is the final state.
+            (["m8[0x09ffff00]=0xaa", "m32[0x09ffff00]=0x11223344"],
+             "# start-state m32[0x09ffff00]=0x11223344"),
+            # A later byte write lands inside an earlier word: only that byte changes.
+            (["m32[0x09ffff00]=0x11223344", "m8[0x09ffff01]=0xbb"],
+             "# start-state m8[0x09ffff00]=0x44 m8[0x09ffff01]=0xbb "
+             "m8[0x09ffff02]=0x22 m8[0x09ffff03]=0x11"),
+        )
+        for index, (prefix, expected) in enumerate(cases):
+            with self.subTest(prefix=prefix):
+                path_a, path_b = self.overlap_pair(prefix)
+                _step, _pc, _detail, written = tracediff.shrink(
+                    str(path_a), str(path_b), str(self.dir / f"overlap-{index}"), context=0)
+                lines = pathlib.Path(written[0]).read_text(encoding="utf-8").splitlines()
+                self.assertEqual(lines[2], expected)
+
+    def test_unreadable_traces_are_malformed_input_not_a_divergence(self):
+        path_a, path_b = self.shrink_pair(diverge_at=3, length=5)
+        bad = self.dir / "not-utf8.trace"
+        bad.write_bytes(path_a.read_bytes() + b"5 pc=0x08900114 op=0x25080001 r8=0x\xff\n")
+        missing = self.dir / "missing.trace"
+        for mode, extra in (([], []), (["--shrink"], [str(self.dir / "unreadable-out")])):
+            for broken in (bad, missing):
+                with self.subTest(mode=mode, input=broken.name):
+                    result = subprocess.run(
+                        [sys.executable, "-I", self.TOOL, *mode, str(path_b), str(broken), *extra],
+                        cwd=os.path.dirname(self.TOOL), capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", timeout=60)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertNotIn("Traceback", result.stdout + result.stderr)
+                    self.assertIn(broken.name, result.stderr)
+
+    def test_shrink_names_its_input_without_the_local_path(self):
+        path_a, path_b = self.shrink_pair(diverge_at=30)
+        _step, _pc, _detail, written = tracediff.shrink(
+            str(path_a), str(path_b), str(self.dir / "named"), context=2)
+        line = pathlib.Path(written[0]).read_text(encoding="utf-8").splitlines()[1]
+        self.assertTrue(line.startswith(f"# shrunk from {path_a.name} records "), line)
+        self.assertNotIn(str(self.dir), line)
+
     def test_shrink_never_overwrites_its_inputs(self):
         path_a, path_b = self.shrink_pair(diverge_at=30)
         inputs = self.dir / "inputs"
@@ -629,7 +683,7 @@ class TestVerifyGateEvidence(unittest.TestCase):
             tier = verify_gates.report_trace_tier(label, path)
         return tier, output.getvalue()
 
-    def capture_main(self, oracle):
+    def capture_main(self, oracle, microtest_module=None, microtest_oracle=None):
         output = io.StringIO()
         argv = [
             "verify_gates.py",
@@ -639,6 +693,10 @@ class TestVerifyGateEvidence(unittest.TestCase):
             "--workdir", str(self.dir / "verify-work"),
             "--codegen-oracle", oracle,
         ]
+        if microtest_module is not None:
+            argv += ["--microtest-module", microtest_module]
+        if microtest_oracle is not None:
+            argv += ["--microtest-oracle", microtest_oracle]
         with redirect_stdout(output), patch.object(sys, "argv", argv):
             with patch("verify_gates.subprocess.run", return_value=MagicMock(returncode=0)) as runner:
                 result = verify_gates.main()
@@ -702,10 +760,21 @@ class TestVerifyGateEvidence(unittest.TestCase):
     def test_main_without_a_hardware_pair_can_still_pass(self):
         """The hardware pair is opt-in: the existing gates must be able to report success."""
         oracle = self.trace("oracle.trace", source_tier="PPSSPP_CORROBORATIVE")
-        result, output, call_args = self.capture_main(oracle)
+        microtest_oracle = self.trace("microtest.trace", source_tier="PPSSPP_CORROBORATIVE")
+        result, output, call_args = self.capture_main(
+            oracle, microtest_module="synthetic-microtest.elf", microtest_oracle=microtest_oracle)
+        # Both gates ran (subprocess.run is mocked to pass); the microtest gate was the last.
         self.assertIsNotNone(call_args)
+        self.assertTrue(str(call_args.args[0][1]).endswith("microtest_gate.py"), call_args)
         self.assertIn("hardware_trace_gate", output)
         self.assertIn("NOT_RUN: optional gate", output)
+        self.assertEqual(result, 0, output)
+
+    def test_main_without_microtest_inputs_stays_a_failure(self):
+        oracle = self.trace("oracle.trace", source_tier="PPSSPP_CORROBORATIVE")
+        result, output, call_args = self.capture_main(oracle)
+        self.assertIsNotNone(call_args)
+        self.assertIn("NOT_RUN: MICROTEST_MODULE and/or MICROTEST_ORACLE not set", output)
         # codegen passes (mocked) but microtest inputs are absent, which stays a failure
         self.assertEqual(result, 1, output)
 

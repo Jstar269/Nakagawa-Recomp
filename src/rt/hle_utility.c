@@ -321,7 +321,7 @@ static uint32_t utility_slot_claim_locked(int type) {
  * hrydgard/pspautotests master). A refused block never takes the slot: every type still reports
  * WRONG_TYPE after it. Measured for game sharing; the other dialogs share the one slot and are
  * checked in the same order (UNMEASURED for them). */
-static int utility_slot_busy(void) {
+int utility_slot_busy(void) {
     dialog_lock();
     const int busy = utility_slot_active_locked();
     dialog_unlock();
@@ -523,6 +523,7 @@ static uint32_t utility_dialog_init(UtilityDialog *d, uint32_t param) {
         return claim;
     }
     d->param = param;
+    d->param_size = MEM_R32(param);      /* the version the caller's size check just proved */
     d->result = 0;
     d->generation++;
     d->status = 1;
@@ -547,7 +548,7 @@ static uint32_t msg_dialog_default_answer(uint32_t param) {
     return no ? 2u : 1u;
 }
 static uint32_t utility_dialog_update(UtilityDialog *d) {
-    uint32_t param = 0, generation = 0, result = 0;
+    uint32_t param = 0, param_size = 0, generation = 0, result = 0;
     unsigned kind = 0;
     dialog_lock();
     if (s_utility_slot != (int)d->kind) {
@@ -572,6 +573,7 @@ static uint32_t utility_dialog_update(UtilityDialog *d) {
     } else if (d->status == 2 && !d->work_started) {
         d->work_started = 1;
         param = d->param;
+        param_size = d->param_size;
         generation = d->generation;
         kind = d->kind;
     } else if (d->status == 2 && d->work_done) {  /* the work completed: FINISHED */
@@ -585,13 +587,24 @@ static uint32_t utility_dialog_update(UtilityDialog *d) {
             result = sr_savedata_prepare_utility(SR_UTILITY_STORAGE_GAMEDATA);
         else if (kind == UTILITY_GAMESHARING)
             result = sr_savedata_prepare_utility(SR_UTILITY_STORAGE_GAMESHARING);
+        /* There is no network behind netconf (the runtime is offline and network HLE is
+         * fail-closed), so the dialog never connects: it finishes the way a person backing out
+         * of it does, CANCEL, never 0, which a caller reads as a connection that was made. A PSP
+         * with no access point kept the dialog RUNNING until the person acted (PSP-HLE-UTILITY-
+         * DIALOG-001 captures, not acceptance-eligible); the result it then writes is UNMEASURED. */
+        else if (kind == UTILITY_NETCONF) {
+            result = UTILITY_DIALOG_RESULT_CANCEL;
+            fprintf(stderr, "sceUtilityNetconf: no network; the dialog finishes CANCELLED "
+                    "(result %u, UNMEASURED)\n", (unsigned)result);
+        }
         /* The message dialog answers with its default button (msg_dialog_default_answer). The
          * answer goes to buttonPressed at +0x240, which exists from the 580-byte (V2) parameter
          * block on; +0x23c is the caller's options word (YES/NO, default NO, ...) and is
          * input, never written (PPSSPP Core/Dialog/PSPMsgDialog.h pspMessageDialog: V1 ends
          * at 572 bytes, V2 adds options and buttonPressed, V3 is 708 bytes). Writing the
-         * answer into options left buttonPressed 0, which a yes/no caller reads as "no". */
-        else if (kind == UTILITY_MSG && MEM_R32(param) >= 0x244u)
+         * answer into options left buttonPressed 0, which a yes/no caller reads as "no". The
+         * version is the size InitStart proved, never a re-read of the guest's size word. */
+        else if (kind == UTILITY_MSG && param_size >= 0x244u)
             MEM_W32(param + 0x240, msg_dialog_default_answer(param));
         dialog_lock();
         if (generation == d->generation) {
@@ -684,9 +697,7 @@ static uint32_t h_NetDialogInit(CpuState *s) {
     if (!utility_param_size_ok(A0, sizes, sizeof(sizes) / sizeof(sizes[0]))) return 0x80110004u;
     return utility_dialog_init(&s_net_dialog, A0);
 }
-static uint32_t h_NetDialogUpdate(CpuState *s) { (void)s; return utility_dialog_update(&s_net_dialog); }
-static uint32_t h_NetDialogStatus(CpuState *s) { (void)s; return utility_dialog_status(&s_net_dialog); }
-static uint32_t h_NetDialogShutdown(CpuState *s) { (void)s; return utility_dialog_shutdown(&s_net_dialog); }
+UTILITY_DIALOG_HANDLERS(h_NetDialog, s_net_dialog)
 /* PSPAutotests utility/dialog/sizes lists the storage dialog versions. */
 static uint32_t utility_storage_init(UtilityDialog *d, uint32_t param) {
     static const uint32_t gamedata[] = { 0x590u, 0x598u }, sharing[] = { 0x50u, 0x54u, 0x64u };
@@ -697,9 +708,7 @@ static uint32_t utility_storage_init(UtilityDialog *d, uint32_t param) {
     return utility_dialog_init(d, param);
 }
 static uint32_t h_GamedataDialogInit(CpuState *s) { return utility_storage_init(&s_gamedata_dialog, A0); }
-static uint32_t h_GamedataDialogUpdate(CpuState *s) { (void)s; return utility_dialog_update(&s_gamedata_dialog); }
-static uint32_t h_GamedataDialogStatus(CpuState *s) { (void)s; return utility_dialog_status(&s_gamedata_dialog); }
-static uint32_t h_GamedataDialogShutdown(CpuState *s) { (void)s; return utility_dialog_shutdown(&s_gamedata_dialog); }
+UTILITY_DIALOG_HANDLERS(h_GamedataDialog, s_gamedata_dialog)
 /* sceUtilityHtmlViewerGetStatus and sceUtilityScreenshotGetStatus: the runtime has no HTML viewer
  * or screenshot dialog (their InitStart imports are not registered and stop the run), so neither
  * type can hold the dialog slot, and a GetStatus for a type that does not hold it is WRONG_TYPE.
@@ -708,9 +717,7 @@ static uint32_t h_GamedataDialogShutdown(CpuState *s) { (void)s; return utility_
 static uint32_t h_HtmlViewerStatus(CpuState *s) { (void)s; return SCE_ERROR_UTILITY_WRONG_TYPE; }
 static uint32_t h_ScreenshotStatus(CpuState *s) { (void)s; return SCE_ERROR_UTILITY_WRONG_TYPE; }
 static uint32_t h_SharingDialogInit(CpuState *s) { return utility_storage_init(&s_sharing_dialog, A0); }
-static uint32_t h_SharingDialogUpdate(CpuState *s) { (void)s; return utility_dialog_update(&s_sharing_dialog); }
-static uint32_t h_SharingDialogStatus(CpuState *s) { (void)s; return utility_dialog_status(&s_sharing_dialog); }
-static uint32_t h_SharingDialogShutdown(CpuState *s) { (void)s; return utility_dialog_shutdown(&s_sharing_dialog); }
+UTILITY_DIALOG_HANDLERS(h_SharingDialog, s_sharing_dialog)
 uint32_t s_osk_param = 0;
 int s_osk_field = 0;           /* the next field to answer */
 static int s_osk_request_open = 0;    /* a person's answer to that field is pending */
@@ -748,6 +755,7 @@ static void utility_dialog_settle(UtilityDialog *d) {
     } else if (d->status == 4) {
         d->status = 0;
         d->param = 0;
+        d->param_size = 0;
         d->work_started = d->work_done = d->aborted = 0;
     }
 }
@@ -838,9 +846,25 @@ static void osk_script_load(void) {
         return;
     }
     char line[OSK_SCRIPT_BYTES + 2];
+    int line_no = 0;
     while (s_osk_answer_count < OSK_SCRIPT_FIELDS && fgets(line, (int)sizeof(line), f)) {
         size_t n = strlen(line);
+        int whole = n && line[n - 1] == '\n';
+        line_no++;
+        if (!whole) {                                      /* the buffer filled, or the file ended */
+            const int c = fgetc(f);
+            if (c == EOF || c == '\n') whole = 1;
+            else ungetc(c, f);
+        }
         while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+        if (!whole || n > OSK_SCRIPT_BYTES) {
+            /* An answer holds OSK_SCRIPT_BYTES bytes. A longer line is neither cut short nor
+             * split into the next field's answer: the script ends before it, so its field and
+             * the ones after it are answered as fields the script does not cover. */
+            fprintf(stderr, "osk: SR_OSK_SCRIPT line %d is longer than %d bytes; the script "
+                    "is read only up to it\n", line_no, OSK_SCRIPT_BYTES);
+            break;
+        }
         if (!n || line[0] == '#') continue;               /* blank and comment lines */
         memcpy(s_osk_answers[s_osk_answer_count++], line, n + 1);
     }
@@ -920,9 +944,12 @@ static int osk_collect(void) {
             MEM_W32(f + 0x2c, 1u);                         /* result: CANCELLED */
             continue;
         }
-        int cap = outLen ? (int)outLen : 256;              /* u16 units incl. terminator */
-        if (outLimit && (int)outLimit + 1 < cap) cap = (int)outLimit + 1;
-        if (cap > 256) cap = 256;
+        /* u16 units incl. terminator, clamped in unsigned arithmetic: both words are the
+         * guest's, and one past INT_MAX must not become a negative capacity. */
+        uint32_t ucap = outLen ? outLen : 256u;
+        if (outLimit && outLimit < ucap - 1u) ucap = outLimit + 1u;
+        if (ucap > 256u) ucap = 256u;
+        const int cap = (int)ucap;                         /* 1..256 */
         wcscpy(out, intext);
         int ok;
         if (!scripted) {
@@ -1119,16 +1146,21 @@ void sr_hle_loadexec_reset_guest_state(void) {
     s_psmfplayer_lib_version = 0u;
     atomic_store_explicit(&s_prx_started_count, 0, memory_order_release);
     ge_finish_masked_reset_for_loadexec();
+    /* A list the old program left stalled or paused would stay the GE queue's head, and every
+     * list the next program enqueued would wait behind it for good. */
+    const unsigned ge_lists_dropped = ge_lists_reset();
+    if (ge_lists_dropped)
+        fprintf(stderr, "GE_LIST: %u lists the old program left on the GE dropped at LoadExec\n",
+                ge_lists_dropped);
+    /* The old program's sceGeSetCallback slots name its own code addresses; the next program
+     * starts with every slot free, so its callback IDs start at 0 again. */
+    memset(s_ge_cb, 0, sizeof(s_ge_cb));
     loadexec_reset_user_partition();
 
-    for (unsigned i = 0; i < FPL_MAX; i++) {
-        free(s_fpls[i].free_blocks);
-        free(s_fpls[i].allocated);
-    }
-    memset(s_fpls, 0, sizeof(s_fpls));
-    for (unsigned i = 0; i < VPL_MAX; i++) vpl_release(&s_vpls[i]);
+    fpl_table_reset();
+    vpl_table_reset();
     hle_sync_reset();
-    memset(s_mbx, 0, sizeof(s_mbx));
+    mbx_table_reset();
     mutex_reset_all();
 
     if (s_callbacks) free(s_callbacks);
@@ -1143,11 +1175,14 @@ void sr_hle_loadexec_reset_guest_state(void) {
     memset(s_utility_module_loaded, 0, sizeof(s_utility_module_loaded));
     s_utility_usb_loaded = 0u;
     hle_net_reset();                     /* the new program starts with sceNet uninitialized */
+    hle_sysreg_loadexec_reset();         /* no sceReg handle of the old program */
     s_volatile_locked = 0;
     g_sdk_version = 0u;
     s_loadexec_boot_uid = 0u;
     s_main_module_uid = 0u;
     sr_hle_power_loadexec_reset();
+    sr_hle_umd_loadexec_reset();         /* no UMD callback; the drive at its entry state */
+    hle_font_loadexec_reset();           /* no sceFont library or font of the old program */
 
     hle_fd_init();
     memset(s_io_cwds, 0, sizeof(s_io_cwds));
@@ -1166,6 +1201,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     memset(s_atrac_slot_codec, 0, sizeof(s_atrac_slot_codec));
     hle_atrac_context_reset();        /* the ATRAC context table's block went with the partition */
     hle_audio_guest_reset();
+    hle_mp3_guest_reset();            /* sceMp3 handles, their decoders and the resource flag */
     hle_sas_guest_reset();
     hle_videocodec_guest_reset();     /* sceVideocodec, sceAudiocodec and the ME RAM model */
 

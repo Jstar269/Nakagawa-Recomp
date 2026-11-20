@@ -48,6 +48,22 @@ def build_spec(values: dict[str, bytes]) -> list[str]:
     return lines
 
 
+def _is_inside(path: str, root: str) -> bool:
+    """Whether ``path`` lies under ``root`` once links and case are resolved.
+
+    Both sides go through realpath (a symlink or junction into the checkout
+    counts as inside) and normcase (Windows compares paths case-insensitively,
+    while ntpath.commonpath returns the prefix in the first path's case). A
+    path on another drive cannot be inside the root.
+    """
+    path_key = os.path.normcase(os.path.realpath(path))
+    root_key = os.path.normcase(os.path.realpath(root))
+    try:
+        return os.path.commonpath([path_key, root_key]) == root_key
+    except ValueError:  # different drives
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--keys", default=os.environ.get("SR_PGD_KEYS") or os.path.join("keys", "pgd_keys.txt"))
@@ -61,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out_abs = os.path.abspath(args.out)
-    if not args.force and os.path.commonpath([out_abs, repo_root]) == repo_root:
+    if not args.force and _is_inside(out_abs, repo_root):
         print(
             f"refusing to write the spec inside the repo ({out_abs}); it contains key\n"
             "material. Choose a temp path, or pass --force if you have gitignored it.",
@@ -75,8 +91,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     lines = build_spec(values)
-    with open(out_abs, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write("\n".join(lines) + "\n")
+    try:
+        # Owner-only from creation: the spec holds every constant. An existing
+        # file keeps its old mode under O_CREAT, so it is tightened as well.
+        fd = os.open(out_abs, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), 0o600)
+            handle.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        print(f"cannot write the spec to {out_abs}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
     print(f"wrote {len(lines)} replacement rules for {len(values)} constants -> {out_abs}")
     print("This file contains key material. Delete it after the scrub; never commit it.")
     return 0

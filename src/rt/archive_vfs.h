@@ -63,6 +63,16 @@ typedef struct {
     /* 1 + index of the file-backed mount whose member-read handle may be open, 0 for
      * none: the VFS keeps at most one archive descriptor open. */
     size_t handle_mount_slot;
+    /* The last decoded compressed member too large for the cache's byte budget, held
+     * outside that budget (one member at most, up to NK_XB_MAX_ENTRY_BYTES) so the HLE
+     * read loops, which split one sceIoRead into 4 KiB pieces, decode it once and not
+     * once per piece. NULL for none. */
+    uint8_t *oversize_data;
+    size_t oversize_size;
+    size_t oversize_mount_index;
+    size_t oversize_entry_index;
+    /* Count of whole-member decodes of compressed members, for tests. */
+    size_t decode_count;
 } SrArchiveVfs;
 
 void sr_archive_vfs_init(SrArchiveVfs *vfs);
@@ -93,6 +103,7 @@ size_t sr_archive_vfs_entry_count(const SrArchiveVfs *vfs);
 size_t sr_archive_vfs_index_sort_count(const SrArchiveVfs *vfs);
 size_t sr_archive_vfs_cache_bytes(const SrArchiveVfs *vfs);
 size_t sr_archive_vfs_cache_entry_count(const SrArchiveVfs *vfs);
+size_t sr_archive_vfs_decode_count(const SrArchiveVfs *vfs);
 
 #ifdef __cplusplus
 }

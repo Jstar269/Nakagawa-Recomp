@@ -24,6 +24,12 @@ host the check therefore compiles with -m32, which needs only the 32-bit C libra
 headers (libc6-dev-i386 on Debian/Ubuntu; gcc-multilib also provides them) because
 nothing is linked, and fails closed with exit status 2 when that is unavailable,
 rather than passing vacuously.
+
+A 32-bit x86 check build also has to be a build the core supports. GCC's default
+there runs float arithmetic on the x87 unit, which src/rt/fp_convert.h refuses with
+#error (its MXCSR window controls only SSE arithmetic), so the check passes the flags
+a real 32-bit x86 build of the core needs, -msse2 -mfpmath=sse (x86_float_math_flags).
+The guard stays on: a host with no supported FP backend still fails the check there.
 """
 
 from __future__ import annotations
@@ -101,6 +107,37 @@ typedef __UINTPTR_TYPE__   uintptr_t;
 #else
 typedef unsigned long long uintptr_t;
 #endif
+#endif
+
+/* PRI*PTR and SCN*PTR need the length modifier of intptr_t, which follows the compiler's
+ * __INTPTR_TYPE__: int under -m32 on Linux and on 32-bit newlib, long on LP64, long long on
+ * Win64. The preprocessor cannot compare type names, so, as newlib's <_intsup.h> does, each
+ * keyword is briefly spelled as a weight and the type's spelling sums to a number it can
+ * compare: int is 2, long and long int 4 and 6, long long and long long int 8 and 10. */
+#ifdef __INTPTR_TYPE__
+#define signed +0
+#define unsigned +0
+#define char +0
+#define short +1
+#define int +2
+#define long +4
+#if (__INTPTR_TYPE__ == 8 || __INTPTR_TYPE__ == 10)
+#define _FORMAT_SHIM_PRIPTR "ll"
+#elif (__INTPTR_TYPE__ == 4 || __INTPTR_TYPE__ == 6)
+#define _FORMAT_SHIM_PRIPTR "l"
+#elif (__INTPTR_TYPE__ == 2)
+#define _FORMAT_SHIM_PRIPTR ""
+#else
+#error "format shim: __INTPTR_TYPE__ is not int, long or long long"
+#endif
+#undef signed
+#undef unsigned
+#undef char
+#undef short
+#undef int
+#undef long
+#else
+#define _FORMAT_SHIM_PRIPTR "ll"
 #endif
 
 #define INT8_MIN   (-128)
@@ -222,12 +259,12 @@ INTTYPES_SHIM = """/* SPDX-License-Identifier: GPL-3.0-or-later */
 #define PRIx64  "llx"
 #define PRIX64  "llX"
 
-#define PRIdPTR "ld"
-#define PRIiPTR "li"
-#define PRIoPTR "lo"
-#define PRIuPTR "lu"
-#define PRIxPTR "lx"
-#define PRIXPTR "lX"
+#define PRIdPTR _FORMAT_SHIM_PRIPTR "d"
+#define PRIiPTR _FORMAT_SHIM_PRIPTR "i"
+#define PRIoPTR _FORMAT_SHIM_PRIPTR "o"
+#define PRIuPTR _FORMAT_SHIM_PRIPTR "u"
+#define PRIxPTR _FORMAT_SHIM_PRIPTR "x"
+#define PRIXPTR _FORMAT_SHIM_PRIPTR "X"
 
 #define PRIdMAX "lld"
 #define PRIiMAX "lli"
@@ -259,11 +296,11 @@ INTTYPES_SHIM = """/* SPDX-License-Identifier: GPL-3.0-or-later */
 #define SCNu64  "llu"
 #define SCNx64  "llx"
 
-#define SCNdPTR "ld"
-#define SCNiPTR "li"
-#define SCNoPTR "lo"
-#define SCNuPTR "lu"
-#define SCNxPTR "lx"
+#define SCNdPTR _FORMAT_SHIM_PRIPTR "d"
+#define SCNiPTR _FORMAT_SHIM_PRIPTR "i"
+#define SCNoPTR _FORMAT_SHIM_PRIPTR "o"
+#define SCNuPTR _FORMAT_SHIM_PRIPTR "u"
+#define SCNxPTR _FORMAT_SHIM_PRIPTR "x"
 #define SCNdMAX "lld"
 #define SCNiMAX "lli"
 #define SCNoMAX "llo"
@@ -284,24 +321,36 @@ def generate_shim_headers(shim_dir: Path) -> Path:
 
 
 def ensure_title_config_header(repo_root: Path) -> Path:
-    """Ensure build/title-config/generic/sr_title_config.h exists."""
+    """Write build/title-config/generic/sr_title_config.h from its generator, current on every run.
+
+    The generator runs into a scratch file every time and the header is replaced only when its
+    bytes differ, so a change to tools/title_runtime_config.py's generic output reaches the next
+    check (no Make rule refreshes the header for a standalone run) while an unchanged header
+    keeps its timestamp for the Makefile's own rule.
+    """
     target = repo_root / "build" / "title-config" / "generic" / "sr_title_config.h"
-    if not target.exists():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        gen_script = repo_root / "tools" / "title_runtime_config.py"
-        if gen_script.exists():
+    target.parent.mkdir(parents=True, exist_ok=True)
+    gen_script = repo_root / "tools" / "title_runtime_config.py"
+    if gen_script.exists():
+        scratch = target.with_name(target.name + ".format-check.tmp")
+        try:
             subprocess.run(
-                [sys.executable, str(gen_script), "--output", str(target)],
+                [sys.executable, str(gen_script), "--output", str(scratch)],
                 check=True,
                 capture_output=True,
             )
-        else:
-            target.write_text(
-                "#ifndef SR_TITLE_CONFIG_GENERATED_H\n"
-                "#define SR_TITLE_CONFIG_GENERATED_H\n"
-                "#endif\n",
-                encoding="utf-8",
-            )
+            fresh = scratch.read_bytes()
+            if not target.is_file() or target.read_bytes() != fresh:
+                os.replace(scratch, target)
+        finally:
+            scratch.unlink(missing_ok=True)
+    elif not target.exists():
+        target.write_text(
+            "#ifndef SR_TITLE_CONFIG_GENERATED_H\n"
+            "#define SR_TITLE_CONFIG_GENERATED_H\n"
+            "#endif\n",
+            encoding="utf-8",
+        )
     return target.parent
 
 
@@ -342,6 +391,30 @@ def host_long_width(compiler: str) -> int:
 def narrow_long_flags(long_width: int) -> list[str]:
     """Flags that give the check build a 32-bit `long`: nothing on ILP32/LLP64, -m32 on LP64."""
     return ["-m32"] if long_width == 8 else []
+
+
+def target_macros(compiler: str, flags: list[str]) -> set[str]:
+    """Names of the macros the compiler predefines for the target the given flags select."""
+    proc = run_compiler([compiler, *flags, "-dM", "-E", "-x", "c", "-"], input="")
+    if proc.returncode != 0:
+        raise ToolchainUnavailable(
+            f"{compiler} did not report its predefined macros with {' '.join(flags) or 'no flags'}"
+        )
+    return set(re.findall(r"^#define (\w+)", proc.stdout, re.M))
+
+
+def x86_float_math_flags(macros: set[str]) -> list[str]:
+    """Flags that make a 32-bit x86 check build one the core supports: SSE2 float arithmetic.
+
+    src/rt/fp_convert.h refuses an x86 build whose float arithmetic runs on the x87 unit (no
+    __SSE_MATH__), and x87 is GCC's default for 32-bit x86. A real 32-bit x86 build of the core
+    passes these flags, so the check build does too. x86-64 has SSE float arithmetic by default
+    and needs nothing; another architecture gets nothing either, so the header's own refusal
+    of a host without a supported FP backend still shows.
+    """
+    if "__i386__" in macros and "__SSE_MATH__" not in macros:
+        return ["-msse2", "-mfpmath=sse"]
+    return []
 
 
 def kernel_header_fallback(compiler: str, flags: list[str]) -> list[str]:
@@ -424,6 +497,7 @@ def check_format_portability(
         width_flags = narrow_long_flags(host_long_width(resolved_cc))
         width_flags += kernel_header_fallback(resolved_cc, width_flags)
         verify_narrow_long(resolved_cc, width_flags, shim_dir)
+    target_flags = width_flags + x86_float_math_flags(target_macros(resolved_cc, width_flags))
     failed_count = 0
     errors: list[str] = []
 
@@ -439,7 +513,7 @@ def check_format_portability(
 
         cmd = [
             resolved_cc,
-            *width_flags,
+            *target_flags,
             "-fsyntax-only",
             "-Wformat",
             "-Werror=format",

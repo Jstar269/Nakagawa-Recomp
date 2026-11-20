@@ -18,6 +18,14 @@
 /* Focusable controls register their previous-frame Clay bounds so nk_ui can
    move focus before the next screen is built. */
 void nk_ui_register_button(NkUi *ui, NkUiId id, uint32_t flags);
+/* The same, naming where an up and a down move from `id` land (0: the nearest control that
+   way, as usual). A full-width row beside a strip of small controls names the one it means,
+   such as a tab strip's active tab, because the nearest by position may be another. A named
+   control is taken even when its container has it scrolled out of view (it is then scrolled
+   into view); it is ignored, and the move goes by position, only when it is missing,
+   disabled, pointer-only or in another focus scope. */
+void nk_ui_register_button_between(NkUi *ui, NkUiId id, uint32_t flags, NkUiId up,
+                                   NkUiId down);
 bool nk_ui_button_focused(const NkUi *ui, NkUiId id);
 /* The pointer is over control `id` and was the last input (a key or a pad button
    hides hover until the pointer moves). A control under a dialog, or a disabled
@@ -33,6 +41,12 @@ bool nk_ui_begin_modal(NkUi *ui, NkUiId id, const NkUiLayout *layout, const NkUi
 bool nk_ui_take_activation(NkUi *ui, NkUiId id);
 /* Label colour of a button with these flags. */
 uint32_t nk_ui_button_text_rgba(const NkUi *ui, uint32_t flags);
+/* The type role of a button's label with these flags. */
+NkUiTypeRole nk_ui_button_role(uint32_t flags);
+/* The layout and resting style nk_ui_button gives a button with these flags, for a
+   control drawn as one that nk_ui_button cannot draw itself. */
+void nk_ui_button_configuration(const NkUi *ui, uint32_t flags,
+                                NkUiLayout *layout, NkUiStyle *style);
 
 /* How wide nk_ui_button lays out a button with this label and these flags when
    it fits its label (no NK_UI_BUTTON_GROW room), at the current text size. A
@@ -178,6 +192,9 @@ typedef struct {
     const char *label;
     bool active;
     NkUiId id;      /* nonzero: the tab is focusable and can be activated */
+    NkUiId down;    /* nonzero: the control a Down move from the tab lands on, where the
+                       nearest one below it is not the next one to a person (the first row
+                       of the list under the strip; nk_ui_register_button_between) */
 } NkUiSection;
 
 /* Top bar: brand mark and wordmark, section tabs with an accent underline on the
@@ -186,6 +203,10 @@ typedef struct {
    one), or -1. */
 int nk_ui_top_bar(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t count,
                   const char *input_label, bool input_active);
+/* A horizontal set of focusable tabs with the top bar's active underline and
+   shoulder-button navigation. `height` is the tab strip's logical height. */
+int nk_ui_section_tabs(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t count,
+                       float height);
 
 typedef struct {
     NkUiPromptAction action;
@@ -200,8 +221,14 @@ void nk_ui_prompt_bar(NkUi *ui, NkUiId id, const char *hint,
 const char *nk_ui_input_label(NkUiPromptStyle style);
 
 /* ---- Dialogs and progress ---------------------------------------------------------- */
-/* A dialog card: raised surface, strong edge, dialog radius, 26/28/22 px
-   padding, 14 px between blocks. Close it with nk_ui_end_container. */
+/* A dialog card: raised surface, strong edge, dialog radius, the padding and gap
+   below. Close it with nk_ui_end_container. A page that sizes its content to the
+   card reads these instead of copying them. */
+#define NK_UI_DIALOG_PAD_TOP 26.0f
+#define NK_UI_DIALOG_PAD_RIGHT 28.0f
+#define NK_UI_DIALOG_PAD_BOTTOM 22.0f
+#define NK_UI_DIALOG_PAD_LEFT 28.0f
+#define NK_UI_DIALOG_GAP 14.0f /* between the card's blocks */
 bool nk_ui_dialog_begin(NkUi *ui, NkUiId id, float width);
 /* The same card at most max_height px tall (0: no limit); content past that
    scrolls inside it, and a control that takes focus there scrolls into view. */

@@ -714,7 +714,9 @@ static uint32_t h_Mpegbase_0530BE4E(CpuState *s) {
  * written through the ME memory view (JPCSP reads it with getPointer(getMEMemory(), 4)): ME RAM,
  * or guest memory past it.
  * The whole list is checked before the first byte moves, so a refused list copies nothing
- * (JPCSP copies the packets before a bad one). A list that loops back on itself is refused. */
+ * (JPCSP copies the packets before a bad one). A list that loops back on itself is refused.
+ * The copy pass walks the live links again, so each packet is re-checked as it is reached and a
+ * list its own copies rewrite into a longer one or a loop is refused after the checked count. */
 static uint32_t vc_packet_check(uint32_t packet) {
     static const char call[] = "sceMpegBasePESpacketCopy";
     if ((packet & 3u) || !sr_guest_span_readable(packet, 16u))
@@ -732,11 +734,12 @@ static uint32_t vc_packet_check(uint32_t packet) {
 
 static uint32_t h_MpegBasePESpacketCopy(CpuState *s) {
     const uint32_t head = A0;
-    uint32_t slow = head, fast = head;
+    uint32_t slow = head, fast = head, count = 0u;
     for (;;) {   /* Floyd's walk: every packet is checked, a cycle is caught when the two meet */
         for (int step = 0; step < 2 && fast; step++) {
             const uint32_t r = vc_packet_check(fast);
             if (r) return r;
+            count++;
             fast = MEM_R32(fast + 8u);
         }
         if (!fast) break;
@@ -744,8 +747,14 @@ static uint32_t h_MpegBasePESpacketCopy(CpuState *s) {
         if (slow == fast)
             return vc_refuse("sceMpegBasePESpacketCopy", "packet list loops back on itself", VC_ERR_GUEST_ADDRESS);
     }
-    for (uint32_t packet = head; packet; packet = MEM_R32(packet + 8u)) {
+    uint32_t copied = 0u;
+    for (uint32_t packet = head; packet; packet = MEM_R32(packet + 8u), copied++) {
         uint8_t bytes[0x1000];
+        if (copied == count)
+            return vc_refuse("sceMpegBasePESpacketCopy", "the copies rewrote the packet list past its checked packets",
+                             VC_ERR_GUEST_ADDRESS);
+        const uint32_t r = vc_packet_check(packet);
+        if (r) return r;
         const uint32_t len = MEM_R32(packet + 12u) & 0xFFFu;
         if (!sr_guest_copy_in(bytes, MEM_R32(packet), len) || !me_view_copy_out(MEM_R32(packet + 4u), bytes, len))
             return vc_refuse("sceMpegBasePESpacketCopy", "a packet span became unusable", VC_ERR_GUEST_ADDRESS);
@@ -972,6 +981,9 @@ typedef struct {
 
 static AcContext s_ac[AC_MAX_CONTEXTS];
 static int16_t s_ac_pcm[2u * AC_FRAME_SAMPLES];
+/* The largest frame body the 10-bit PSMF size code names (sr_psmf_audio_frame_bytes less its
+ * 8-byte header): one host copy serves every decode. */
+static uint8_t s_ac_frame[0x3FFu * 8u + 8u];
 
 static AcContext *ac_find(uint32_t work) {
     for (int i = 0; i < AC_MAX_CONTEXTS; i++)
@@ -1153,6 +1165,7 @@ static uint32_t h_AudiocodecInit(CpuState *s) {
  * words there that give neither 0x1000 nor 0x2000. Synchronous (synthetic timing: JPCSP delays
  * the caller 2.3 ms; W-LLE-1). */
 #define AC_OUT_BYTES            0x2000u
+_Static_assert(sizeof(s_ac_pcm) == AC_OUT_BYTES, "the output block is serialised in place in s_ac_pcm");
 static uint32_t h_AudiocodecDecode(CpuState *s) {
     static const char call[] = "sceAudiocodecDecode";
     const uint32_t work = A0;
@@ -1192,28 +1205,25 @@ static uint32_t h_AudiocodecDecode(CpuState *s) {
         c->align = data;
         c->channels = channels;
     }
-    uint8_t *frame = (uint8_t *)malloc((size_t)data);
-    if (!frame) return vc_refuse(call, "no host memory for the frame", AC_ERR_ME);
     int samples = 0;
-    const int ok = sr_guest_copy_in(frame, in + 8u, (uint32_t)data) &&
-                   atrac3p_bridge_decode(c->at3p, frame, data, s_ac_pcm, &samples) == 0 &&
+    const int ok = sr_guest_copy_in(s_ac_frame, in + 8u, (uint32_t)data) &&
+                   atrac3p_bridge_decode(c->at3p, s_ac_frame, data, s_ac_pcm, &samples) == 0 &&
                    samples == (int)AC_FRAME_SAMPLES;
-    free(frame);
     if (!ok) return vc_refuse(call, "the ATRAC3plus frame did not decode to one block", AC_ERR_ME);
     if (channels == 1)
         for (int i = (int)AC_FRAME_SAMPLES - 1; i >= 0; i--) {
             s_ac_pcm[i * 2] = s_ac_pcm[i];
             s_ac_pcm[i * 2 + 1] = s_ac_pcm[i];
         }
-    uint8_t *bytes = (uint8_t *)malloc(out_bytes);
-    if (!bytes) return vc_refuse(call, "no host memory for the block", AC_ERR_ME);
-    for (uint32_t i = 0; i < out_bytes / 2u; i++) {   /* PSP memory is little-endian */
-        bytes[i * 2u] = (uint8_t)((uint16_t)s_ac_pcm[i]);
-        bytes[i * 2u + 1u] = (uint8_t)((uint16_t)s_ac_pcm[i] >> 8);
+    /* PSP memory is little-endian: each sample is serialised in place, read before its own two
+     * bytes are written. */
+    uint8_t *bytes = (uint8_t *)s_ac_pcm;
+    for (uint32_t i = 0; i < out_bytes / 2u; i++) {
+        const uint16_t v = (uint16_t)s_ac_pcm[i];
+        bytes[i * 2u] = (uint8_t)v;
+        bytes[i * 2u + 1u] = (uint8_t)(v >> 8);
     }
-    const int copied = sr_guest_copy_out(out, bytes, out_bytes);
-    free(bytes);
-    if (!copied) return vc_refuse(call, "the output block could not be written", AC_ERR_PRIV_REQUIRED);
+    if (!sr_guest_copy_out(out, bytes, out_bytes)) return vc_refuse(call, "the output block could not be written", AC_ERR_PRIV_REQUIRED);
     /* synthetic (W-LLE-1): JPCSP writes the frame bytes its decoder read at +28 and uofw's size
      * rule at +36; here +28 is the frame without its 8-byte header. */
     MEM_W32(work + 28u, (uint32_t)data);

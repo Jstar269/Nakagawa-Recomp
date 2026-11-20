@@ -325,9 +325,20 @@ LINK_MAP_ARG = $(if $(strip $(LINK_MAP)),$(LINK_MAP_VALUE),)
 # The Vulkan import library name differs by platform: vulkan-1.lib (Windows SDK) vs libvulkan.so
 # (Linux loader). The two are NOT interchangeable, so the name is chosen per platform rather
 # than unified to one.
+# Detect Clang once so Windows COFF reproducibility and the generated-code
+# GCC-only flag share one compiler check (#317).
+RECOMP_CC_IS_CLANG := $(findstring clang version,$(shell "$(CC)" --version 2>&1))
+
 ifeq ($(NK_TARGET_OS),windows)
 VULKAN_LIB_NAME := -lvulkan-1
 WIN_ONLY_LIBS   := -lmfplat -lgdi32 -lole32 -lshell32 -luuid -lwinmm -lws2_32
+# Clang's COFF object emitter stamps wall-clock time into ImageFileHeader.TimeDateStamp
+# by default and ignores SOURCE_DATE_EPOCH there; -mno-incremental-linker-compatible
+# zeroes TimeDateStamp so two compiles of identical inputs produce byte-identical
+# objects. GCC zeroes COFF TimeDateStamp by default and rejects this option, and
+# non-Windows targets emit no COFF header, so the flag is set only for Clang targeting
+# Windows.
+REPRODUCIBLE_COMPILE_FLAG := $(if $(RECOMP_CC_IS_CLANG),-mno-incremental-linker-compatible,)
 # -Wl,--no-insert-timestamp keeps the PE image byte-reproducible on the
 # MinGW/COFF linker. GNU ld publishes no such option -- an ELF link is already
 # timestamp-free -- so the flag is Windows-only and the Linux link line carries
@@ -336,6 +347,7 @@ REPRODUCIBLE_LINK_FLAG := -Wl,--no-insert-timestamp
 else
 VULKAN_LIB_NAME := -lvulkan
 WIN_ONLY_LIBS   :=
+REPRODUCIBLE_COMPILE_FLAG :=
 REPRODUCIBLE_LINK_FLAG :=
 # MinGW resolves the maths routines from the C runtime it always links, so the
 # Windows link line never names libm. A GNU/ELF link must name it: the runtime's
@@ -345,6 +357,16 @@ REPRODUCIBLE_LINK_FLAG :=
 # other GNU link line. An Android title also links the NDK's logging and native-activity
 # libraries, which the runtime's Android platform code calls.
 POSIX_RUNTIME_LIBS := -lm $(if $(filter android,$(NK_TARGET_OS)),-llog -landroid,)
+endif
+ifneq ($(strip $(REPRODUCIBLE_COMPILE_FLAG)),)
+ifeq ($(filter $(REPRODUCIBLE_COMPILE_FLAG),$(CFLAGS)),)
+override CFLAGS += $(REPRODUCIBLE_COMPILE_FLAG)
+endif
+endif
+ifneq ($(strip $(REPRODUCIBLE_LINK_FLAG)),)
+ifeq ($(filter $(REPRODUCIBLE_LINK_FLAG),$(LDFLAGS)),)
+override LDFLAGS += $(REPRODUCIBLE_LINK_FLAG)
+endif
 endif
 LIBS       ?= -lSDL3 $(VULKAN_LIB_NAME) $(WIN_ONLY_LIBS) $(POSIX_RUNTIME_LIBS)
 
@@ -399,6 +421,7 @@ H264_FFMPEG ?= 0
 else
 H264_FFMPEG ?= 1
 endif
+export H264_FFMPEG
 H264_SUB_DIR := src/rt/h264_ffmpeg_sub
 ifeq ($(H264_FFMPEG),1)
 override CFLAGS += -DSR_H264_FFMPEG
@@ -479,6 +502,15 @@ else
 H264_SUB_SRCS :=
 endif
 
+# GAME_NAME names one title's directory beneath BUILD_ROOT and the stem of its output
+# files, so it must be a single path component. The default BUILD_DIR below is
+# BUILD_ROOT/GAME_NAME and gets no scope check of its own, and `make clean` deletes it
+# wholesale: `GAME_NAME=..` would name the checkout itself and `GAME_NAME=../src` its
+# sources. A separator, a drive colon, or a name made only of dots is refused while Make
+# parses, before any directory is created or any recipe runs.
+ifneq ($(or $(findstring /,$(GAME_NAME)),$(findstring \,$(GAME_NAME)),$(findstring :,$(GAME_NAME)),$(if $(GAME_NAME),$(if $(subst .,,$(GAME_NAME)),,dots))),)
+$(error GAME_NAME '$(GAME_NAME)' is not a title name: it must be one directory name with no '/', '\', or ':' and not only dots, because the build directory is BUILD_ROOT/GAME_NAME and clean deletes it)
+endif
 BUILD_DIR  ?= $(BUILD_ROOT)/$(GAME_NAME)
 # An overridden BUILD_DIR gets the BUILD_ROOT scope refusal. `make clean` deletes it and
 # every build writes its outputs into it, so `BUILD_DIR=.` or `BUILD_DIR=src` must stop
@@ -661,6 +693,12 @@ DISPLAY_SMOKE_BASE      := 0x08810000
 # watch. Both are the same guest recipe with a different frame count.
 DISPLAY_SMOKE_FRAMES      := 60
 DISPLAY_SMOKE_DEMO_FRAMES := 1800
+# The same guest built with its image at 0, as a title manifest with "base": 0 has its image
+# loaded, for display-smoke-cheats-base0 (#2639). It has no title manifest and is not launchable
+# from the player. Keep the name equal to BASE0_ARTIFACT_STEM in the generator.
+DISPLAY_SMOKE_BASE0_NAME    := display-smoke-base0
+DISPLAY_SMOKE_BASE0_DIR     := $(BUILD_ROOT)/$(DISPLAY_SMOKE_BASE0_NAME)
+DISPLAY_SMOKE_BASE0_FIXTURE := $(DISPLAY_SMOKE_BASE0_DIR)/fixture
 
 # The AOT-gap mode of the same fixture: identical guest addresses, but the
 # helper is omitted from native emission (--omit-aot) so region A reaches it
@@ -716,11 +754,13 @@ RECOMP_LLVM_ENTRY_ARG := $(if $(RECOMP_LLVM_PROFILE_ENTRY),--entry "$(RECOMP_LLV
 # nothing. Both halves are carried into the codegen and recompiler profile
 # hashes, so flipping the option regenerates rather than reusing stale objects.
 # At run time SR_NAN_TRAP_LIMIT (default 20) bounds how many reports print.
+# Both appends use `override`: a plain += is ignored when the gates' sub-makes pass
+# CODEGEN_USER_ARGS on their command line, which would drop the codegen half alone.
 NAN_TRAP ?= 0
 NAN_TRAP_CFLAG :=
 ifeq ($(NAN_TRAP),1)
 NAN_TRAP_CFLAG := -DSR_NAN_TRAP
-CODEGEN_USER_ARGS += --nan-trap
+override CODEGEN_USER_ARGS += --nan-trap
 override CFLAGS += -DSR_NAN_TRAP
 endif
 

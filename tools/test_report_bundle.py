@@ -95,14 +95,62 @@ class RedactionTests(unittest.TestCase):
                          f"C:\\{USERS}\\Public\\Documents")
         self.assertEqual(rb.redact_text(f"C:\\{USERS}\\Exampleuser2\\x", IDENTITY), "~\\x")
 
+    def test_shape_only_redacts_a_spaced_unlisted_profile_component(self) -> None:
+        path = f"C:\\{USERS}\\Unlisted Profile\\AppData\\Local\\data"
+        self.assertEqual(rb.redact_text(path, rb.Identity()), "~\\AppData\\Local\\data")
+
+    def test_shape_redaction_stops_at_the_end_of_the_line(self) -> None:
+        # A home folder at the end of a line must not swallow the diagnostic lines after it.
+        cases = {
+            f"log: opened /{HOMEDIR}/other\nframe 12 ok\nframe 13 ok\nend.":
+                "log: opened ~\nframe 12 ok\nframe 13 ok\nend.",
+            f"C:\\{USERS}\\Unlisted Profile\r\nnext line here\nmore\n":
+                "~\r\nnext line here\nmore\n",
+            f"C:\\{USERS}\\Unlisted Profile\tcolumn two":
+                "~\tcolumn two",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(rb.redact_text(text, rb.Identity()), expected)
+
     def test_names(self) -> None:
         self.assertEqual(self.assertClean("user=Exampleuser, USER: EXAMPLEUSER."), "user=<user>, USER: <user>.")
         self.assertEqual(self.assertClean("host EXAMPLE-HOST up"), "host <host> up")
         # Whole words only: a longer word that merely contains the name stays.
         self.assertEqual(rb.redact_text("Exampleusers_game", IDENTITY), "Exampleusers_game")
-        # A name under three characters is not a safe thing to search for.
-        short = rb.Identity(user_names=("ab",))
-        self.assertEqual(rb.redact_text("a cab ab", short), "a cab ab")
+        # Short names are redacted only when they occupy a whole non-alphanumeric token.
+        short = rb.Identity(user_names=("ab",), host_names=("xy",))
+        self.assertEqual(rb.redact_text("a cab ab; host xy", short), "a cab <user>; host <host>")
+
+    def test_sensitive_json_values_are_removed_regardless_of_container_shape(self) -> None:
+        marker = "SYNTHETIC-" + "REDACTION-MARKER"
+        scrubbed = rb._scrub_json({
+            "api_tokens": [marker],
+            "credential_store": {"account": "synthetic", "password": marker},
+            "volume": 7,
+        })
+        self.assertEqual(scrubbed, {
+            "api_tokens": "<removed>",
+            "credential_store": "<removed>",
+            "volume": 7,
+        })
+        self.assertNotIn(marker, json.dumps(scrubbed))
+
+    def test_newest_skips_paths_removed_before_stat(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="report-bundle-rotation-") as temporary:
+            root = Path(temporary)
+            vanished = root / "vanished.log"
+            present = root / "present.log"
+            present.write_text("synthetic log\n", encoding="utf-8")
+            original_stat = Path.stat
+
+            def racing_stat(path, *args, **kwargs):
+                if path == vanished:
+                    raise FileNotFoundError("synthetic rotation")
+                return original_stat(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "stat", new=racing_stat):
+                self.assertEqual(rb._newest([vanished, present]), [present])
 
     def test_unrelated_text_is_unchanged(self) -> None:
         text = "[PLAYER] boot ok\nD:/Games/psp/game.iso\n/opt/nakagawa/bin\n"
@@ -322,6 +370,21 @@ class BundleTests(unittest.TestCase):
         self.assertTrue(text.endswith("line 0299999\n"))
         self.assertIn("left out", entry.note)
 
+    def test_binary_bytes_before_the_kept_log_tail_do_not_discard_the_tail(self) -> None:
+        log = self.fx.logs / "large-prefix-log.txt"
+        prefix = b"\0" + b"synthetic earlier line\n" * (rb.MAX_LOG_BYTES // 20)
+        tail = b"synthetic retained tail line\n"
+        log.write_bytes(prefix + tail)
+        plan = rb.BundlePlan("synthetic-report.zip")
+
+        entry = rb._read_allowed(
+            log, rb.MAX_LOG_BYTES, plan, "logs/player-output.txt", IDENTITY
+        )
+
+        self.assertIsNotNone(entry)
+        assert entry is not None
+        self.assertIn(tail.rstrip(), entry.data)
+
     def test_bad_title_id_is_refused(self) -> None:
         with self.assertRaises(rb.ReportError):
             build(self.fx.inputs(title_id="../../etc"))
@@ -380,8 +443,10 @@ class NoNetworkTests(unittest.TestCase):
 
 class CliTests(unittest.TestCase):
     def run_cli(self, tmp: Path, *extra: str, fx: Fixture) -> subprocess.CompletedProcess[str]:
+        local_appdata = tmp / "localappdata"
+        local_appdata.mkdir(exist_ok=True)
         env = dict(os.environ, USERPROFILE=WIN_HOME, HOME=POSIX_HOME, USERNAME=USER, USER=USER,
-                   COMPUTERNAME=HOST)
+                   COMPUTERNAME=HOST, LOCALAPPDATA=str(local_appdata))
         return subprocess.run(
             [sys.executable, str(ROOT / "tools" / "nk_cli.py"), "report", "--no-doctor", "--json",
              "--user-data-root", str(fx.data), "--logs-dir", str(fx.logs), "--config-dir", str(fx.config),

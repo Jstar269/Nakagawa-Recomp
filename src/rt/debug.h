@@ -184,16 +184,20 @@ int sr_find_last_writer(uint32_t addr, uint32_t width,
                         uint32_t *write_addr, uint32_t *write_width,
                         uint32_t *value, uint32_t *pc);
 
-static inline int sr_check_mem_watch(uint32_t addr, uint32_t val, int write, uint32_t pc) {
+/* An access of `width` bytes at addr matches a range watch when any of its bytes lies in
+ * [start, end): a word store two bytes below the range still changes two watched bytes. */
+static inline int sr_check_mem_watch_width(uint32_t addr, uint32_t width, uint32_t val,
+                                           int write, uint32_t pc) {
     /* An explicitly configured watch is already an opt-in diagnostic.  Keep the
        common no-watch path cheap, but do not require the broader SR_DEBUG=MEM
        category as a second switch (profiles may intentionally clear it). */
     if (g_sr_mem_watch_count == 0) return 0;
+    if (width == 0u) width = 1u;
     for (int i = 0; i < g_sr_mem_watch_count; i++) {
         const SrMemWatch *watch = &g_sr_mem_watches[i];
         int matched = watch->match_value
             ? val == watch->value
-            : addr >= watch->start && addr < watch->end;
+            : addr < watch->end && (uint64_t)addr + width > watch->start;
         if (matched) {
             fprintf(stderr, "%s[%s]: %s addr=0x%08" PRIx32 " val=0x%08" PRIx32 " pc=0x%08" PRIx32 "\n",
                     watch->match_value ? "MEM_VALUE_WATCH" : "MEM_WATCH",
@@ -204,6 +208,11 @@ static inline int sr_check_mem_watch(uint32_t addr, uint32_t val, int write, uin
         }
     }
     return 0;
+}
+
+/* A one-byte access. */
+static inline int sr_check_mem_watch(uint32_t addr, uint32_t val, int write, uint32_t pc) {
+    return sr_check_mem_watch_width(addr, 1u, val, write, pc);
 }
 
 #endif // PSP_RECOMP_RT_DEBUG_H

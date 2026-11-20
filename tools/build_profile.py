@@ -58,9 +58,25 @@ import sys
 import tempfile
 
 
+def _command_words(command: str) -> list[str]:
+    """Split a compiler command into words without eating a Windows path's backslashes.
+
+    POSIX splitting reads ``\\`` as an escape, so a Windows path such as
+    ``Python313\\python.exe`` under a drive root would lose every separator. A command that
+    names an existing file is one word; on Windows the rest splits the way cmd.exe quotes (a
+    quoted compiler path with a space in it, then ``-m64``, is two words).
+    """
+    if Path(command).is_file():
+        return [command]
+    if os.name != "nt":
+        return shlex.split(command, posix=True)
+    words = shlex.split(command, posix=False)
+    return [word[1:-1] if len(word) >= 2 and word[0] == word[-1] == '"' else word for word in words]
+
+
 def compiler_identity(command: str) -> dict[str, str]:
     """Return stable identity data for a compiler command."""
-    words = shlex.split(command, posix=True)
+    words = _command_words(command)
     if not words:
         raise ValueError("compiler command is empty")
     executable = shutil.which(words[0]) or words[0]

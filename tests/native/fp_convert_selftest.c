@@ -156,6 +156,18 @@ static const ScalarOpVector kScalarOpVectors[] = {
     {"add FS=1 tiny sum",   SR_FP_OP_ADD, 0x00800000u, 0x80000001u, 0x01000000u, 0x00000000u},
     {"add FS=0 tiny sum",   SR_FP_OP_ADD, 0x00800000u, 0x80000001u, 0u,          0x007fffffu},
     {"sub FS=1 tiny diff",  SR_FP_OP_SUB, 0x00000003u, 0x00000001u, 0x01000002u, 0x00000000u},
+    /* Invalid operations with no NaN operand give 0x7FC00000 on every host (x86 SSE itself
+     * writes 0xFFC00000, AArch64 0x7FC00000), the word mul.s gives for Inf * 0. Project
+     * semantics, not PSP-measured. A NaN operand still propagates as the host returns it. */
+    {"add inf + -inf NaN",  SR_FP_OP_ADD, 0x7f800000u, 0xff800000u, 0u,          0x7fc00000u},
+    {"add -inf + inf NaN",  SR_FP_OP_ADD, 0xff800000u, 0x7f800000u, 0x01000003u, 0x7fc00000u},
+    {"sub inf - inf NaN",   SR_FP_OP_SUB, 0x7f800000u, 0x7f800000u, 0u,          0x7fc00000u},
+    {"sub -inf - -inf NaN", SR_FP_OP_SUB, 0xff800000u, 0xff800000u, 2u,          0x7fc00000u},
+    {"div 0 / 0 NaN",       SR_FP_OP_DIV, 0x00000000u, 0x80000000u, 0u,          0x7fc00000u},
+    {"div inf / -inf NaN",  SR_FP_OP_DIV, 0x7f800000u, 0xff800000u, 1u,          0x7fc00000u},
+    {"mul inf * 0 NaN",     SR_FP_OP_MUL, 0xff800000u, 0x00000000u, 0u,          0x7fc00000u},
+    {"add NaN operand kept",SR_FP_OP_ADD, 0x7fc00123u, 0x3f800000u, 0u,          0x7fc00123u},
+    {"div qNaN by 0 kept",  SR_FP_OP_DIV, 0xffc00000u, 0x00000000u, 0u,          0xffc00000u},
 };
 
 /* CVT.S.W honors guest RM near the binary32 precision boundary. */
@@ -176,7 +188,7 @@ static const CvtSwVector kCvtSwVectors[] = {
     {"cvt.s.w exact -1",    0xffffffffu, 1u,          0xbf800000u},
 };
 
-#if defined(__SSE2__) || defined(_M_X64) || defined(__i386__)
+#if (defined(__SSE2__) && defined(__SSE_MATH__)) || (defined(_M_X64) && !defined(__GNUC__))
 #define HOST_X86 1
 static void host_env_set(uint32_t word) { _mm_setcsr(word); }
 #elif defined(__aarch64__)
@@ -440,7 +452,7 @@ int main(void) {
             const uint32_t hw = apply_scalar_op(op, a, b, rm | SR_FCR31_FS);
             volatile float va = a, vb = b, vr;
             const uint32_t saved = sr_fpu_env_save();
-            sr_fpu_env_apply_guest(rm);
+            sr_fpu_env_apply_guest(saved, rm);
             sr_fpu_scalar_barrier();
             switch (op) {
                 case SR_FP_OP_ADD: vr = va + vb; vr = sr_fpu_soft_ftz_sum(vr); break;

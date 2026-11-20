@@ -212,6 +212,13 @@ int sr_psmf_producer_select_streams(SrPsmfProducer *producer,
                                     uint32_t video_stream_num,
                                     uint32_t audio_stream_num);
 
+/* A producer with no stream table (sr_psmf_producer_open_stream, or a PSMF whose table is
+ * empty) keeps every private-stream-1 packet for its one audio stream.  This narrows it to the
+ * packets of one sub-stream id (an ATRAC3+ stream's is 0x00 + its number), so a second audio
+ * stream's bytes never enter the selected stream's frames.  The filter survives a reset and a
+ * later select_streams.  Returns 1, or 0 for a producer that has a stream table. */
+int sr_psmf_producer_select_audio_substream(SrPsmfProducer *producer, uint8_t sub_stream_id);
+
 uint32_t sr_psmf_producer_video_streams(const SrPsmfProducer *producer);
 uint32_t sr_psmf_producer_audio_streams(const SrPsmfProducer *producer);
 uint32_t sr_psmf_producer_selected_video_stream(const SrPsmfProducer *producer);

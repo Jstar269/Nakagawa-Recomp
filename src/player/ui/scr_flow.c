@@ -44,11 +44,7 @@ void scr_input_guide_box(NkUi *ui, NkUiId base, const PlayerUiInputGuide *guide,
     bool compact = max_rows > 0u && max_rows <= 2u;
     if (!scr_input_guide_present(guide)) return;
     if (inner < 120.0f) inner = 120.0f;
-    memset(&style, 0, sizeof(style));
-    style.fill_rgba = theme->surface;
-    style.border_rgba = theme->line;
-    style.border_width = NK_UI_BORDER_HAIRLINE;
-    style.corner_radius = 10.0f;
+    style = scr_flow_box_style(theme, theme->surface);
     box.padding_top = box.padding_bottom = compact ? 8.0f : 12.0f;
     box.padding_left = box.padding_right = 14.0f;
     if (compact) box.gap = 4.0f;
@@ -181,13 +177,19 @@ NkUiStyle scr_flow_box_style(const NkUiTheme *theme, uint32_t fill) {
 }
 
 void scr_flow_bytes(char *out, size_t cap, unsigned long long bytes) {
-    if (bytes >= 1024ull * 1024ull * 1024ull) {
-        (void)snprintf(out, cap, "%.1f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
-    } else if (bytes >= 1024ull * 1024ull) {
-        (void)snprintf(out, cap, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
-    } else if (bytes >= 1024ull) {
-        (void)snprintf(out, cap, "%.1f KB", (double)bytes / 1024.0);
-    } else {
+    static const char *const units[] = {"KB", "MB", "GB"};
+    const size_t last = sizeof(units) / sizeof(units[0]) - 1u;
+    double value = (double)bytes / 1024.0;
+    size_t unit = 0u;
+    if (bytes < 1024ull) {
         (void)snprintf(out, cap, "%llu bytes", bytes);
+        return;
     }
+    /* The unit follows the figure as shown: from 1023.95, which %.1f rounds to
+       1024.0, a size reads 1.0 of the next unit. */
+    while (unit < last && value >= 1023.95) {
+        value /= 1024.0;
+        ++unit;
+    }
+    (void)snprintf(out, cap, "%.1f %s", value, units[unit]);
 }

@@ -1013,7 +1013,7 @@ static int coherence_run_sprite_semantics(void) {
     }
 
     GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride, .width = 480, .height = 272 };
-    if (!gegpu_sync_guest_fb(&desc)) {
+    if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) {
         fprintf(stderr, "gpu coherence selftest [sprite-semantics]: gegpu_sync_guest_fb failed\n");
         return 0;
     }
@@ -1517,12 +1517,19 @@ static int coherence_run_linear_sprite(void) {
     sr_gpu_vram_dirty(base, stride * FB_H * 4u);
 
     uint32_t list_addr = coherence_prepare_linear_sprite_fixture(tex_base);
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(list_addr, 0);
 
     GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride, .width = 480, .height = 272 };
-    if (!gegpu_sync_guest_fb(&desc)) {
+    if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) {
         fprintf(stderr, "gpu coherence selftest [linear-gpu]: gegpu_sync_guest_fb failed\n");
+        return 0;
+    }
+    /* The GPU leg is the GPU's: a primitive ge.c drew would make it ge.c compared with ge.c. */
+    if (s_replay_stats.fallback_prims != fallback0) {
+        fprintf(stderr, "gpu coherence selftest [linear-gpu]: %llu primitives fell back to ge.c\n",
+                s_replay_stats.fallback_prims - fallback0);
         return 0;
     }
     uint32_t *fb = (uint32_t *)guest;
@@ -1661,12 +1668,19 @@ static int coherence_run_tflt_case(const char *name, int primitive_type, uint32_
     uint32_t list_addr = coherence_prepare_tflt_fixture(tex_base, tflt, primitive_type,
                                                         rect_w, rect_h,
                                                         u0, v0, u_span, v_span);
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(list_addr, 0);
     GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
                                .width = 480, .height = 272 };
-    if (!gegpu_sync_guest_fb(&desc)) {
+    if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) {
         fprintf(stderr, "gpu coherence selftest [TFLT-%s]: GPU readback failed\n", name);
+        coherence_reset_targets();
+        return 0;
+    }
+    if (s_replay_stats.fallback_prims != fallback0) {
+        fprintf(stderr, "gpu coherence selftest [TFLT-%s]: %llu primitives fell back to ge.c\n", name,
+                s_replay_stats.fallback_prims - fallback0);
         coherence_reset_targets();
         return 0;
     }
@@ -2029,12 +2043,19 @@ static int coherence_run_psp_sample_points(void) {
     coherence_reset_targets();
     memset(fb, 0, bytes);
     sr_gpu_vram_dirty(base, (uint32_t)bytes);
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(COH_SAMPLE_LIST, 0);
     GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
                                .width = 480, .height = 272 };
-    int ok = gegpu_sync_guest_fb(&desc);
+    int ok = gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
     if (!ok) fprintf(stderr, "gpu coherence selftest [psp-sample-points]: GPU readback failed\n");
+    if (ok && s_replay_stats.fallback_prims != fallback0) {
+        /* ge.c drew the GPU leg: the comparison below would be ge.c against ge.c. */
+        fprintf(stderr, "gpu coherence selftest [psp-sample-points]: %llu primitives fell back to ge.c\n",
+                s_replay_stats.fallback_prims - fallback0);
+        ok = 0;
+    }
     if (ok) {
         memcpy(gpu, fb, bytes);
         memset(fb, 0, bytes);
@@ -3907,13 +3928,15 @@ static int through_float_z_passes(float z, uint32_t depth, int gpu, uint32_t zfu
     DL_EMIT(0x0F, 0);
     DL_EMIT(0x0C, 0);
     #undef DL_EMIT
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(gpu ? &k_hooks : NULL);
     ge_run_list(list_addr, 0);
     ge_set_gpu_hooks(&k_hooks);
     if (gpu) {
         GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
                                    .width = 480, .height = 272 };
-        if (!gegpu_sync_guest_fb(&desc)) return -1;
+        if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) return -1;
+        if (s_replay_stats.fallback_prims != fallback0) return -1;   /* ge.c drew the GPU leg */
     }
     const uint32_t px = guest[32u * stride + 32u] & 0x00FFFFFFu;
     return px == (over & 0x00FFFFFFu) ? 1 : px == (under & 0x00FFFFFFu) ? 0 : -1;
@@ -3961,12 +3984,19 @@ static int coherence_run_through_float_z(void) {
         DL_EMIT(0x0F, 0);
         DL_EMIT(0x0C, 0);
         #undef DL_EMIT
+        const unsigned long long fallback0 = s_replay_stats.fallback_prims;
         ge_set_gpu_hooks(&k_hooks);
         ge_run_list(list_addr, 0);
         GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
                                    .width = 480, .height = 272 };
-        if (!gegpu_sync_guest_fb(&desc)) {
+        if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) {
             fprintf(stderr, "gpu coherence selftest [%s]: GPU readback failed\n", name);
+            coherence_reset_targets();
+            return 0;
+        }
+        if (s_replay_stats.fallback_prims != fallback0) {
+            fprintf(stderr, "gpu coherence selftest [%s]: z=%.1f: %llu primitives fell back to ge.c, not the "
+                    "Vulkan path\n", name, (double)z, s_replay_stats.fallback_prims - fallback0);
             coherence_reset_targets();
             return 0;
         }
@@ -4098,12 +4128,19 @@ static int coherence_run_clut_format_list(void) {
     DL_EMIT(0x0F, 0);
     DL_EMIT(0x0C, 0);
     #undef DL_EMIT
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(list_addr, 0);
     GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
                                .width = 480, .height = 272 };
-    if (!gegpu_sync_guest_fb(&desc)) {
+    if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) {
         fprintf(stderr, "gpu coherence selftest [clut-format-list]: GPU readback failed\n");
+        coherence_reset_targets();
+        return 0;
+    }
+    if (s_replay_stats.fallback_prims != fallback0) {
+        fprintf(stderr, "gpu coherence selftest [clut-format-list]: %llu primitives fell back to ge.c\n",
+                s_replay_stats.fallback_prims - fallback0);
         coherence_reset_targets();
         return 0;
     }
@@ -8136,15 +8173,7 @@ static int coherence_run_wide_fill(void) {
 static void coherence_reset_depths(void) {
     coherence_reset_targets();
     (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
-    for (int i = 0; i < MAX_DEP; i++) {
-        DepthEnt *d = &s_deps[i];
-        if (!d->used) continue;
-        if (d->view) vkDestroyImageView(s_dev, d->view, NULL);
-        if (d->img) vkDestroyImage(s_dev, d->img, NULL);
-        if (d->mem) vkFreeMemory(s_dev, d->mem, NULL);
-        twin_depth_free(d);
-        memset(d, 0, sizeof(*d));
-    }
+    depth_slots_release();   /* as gegpu_release frees them: slots not used included */
 }
 
 /* Depth newer than guest VRAM survives eviction. A draw that writes depth marks its surface
@@ -9147,6 +9176,85 @@ static int pcache_reopen_cell(const char *cell, VkPhysicalDevice pdev, const cha
     return 1;
 }
 
+/* pcache-shader-set: the cache file's shader-set key covers every SPIR-V module a cached pipeline
+ * is made from, the RMW fragment module (pipe_create's interlock pipelines, through the same
+ * s_pcache) included, so a build that changes that module alone refuses the old file. */
+static uint64_t coherence_shader_set_with(const uint32_t *rmw) {
+    uint64_t h = 0;
+    uint64_t n[4] = { sizeof(k_vert_spv), sizeof(k_frag_spv), sizeof(k_tnl_vert_spv), sizeof(k_frag_rmw_spv) };
+    h = nk_pcache_fnv1a64(h, n, sizeof n);
+    h = nk_pcache_fnv1a64(h, k_vert_spv, sizeof(k_vert_spv));
+    h = nk_pcache_fnv1a64(h, k_frag_spv, sizeof(k_frag_spv));
+    h = nk_pcache_fnv1a64(h, k_tnl_vert_spv, sizeof(k_tnl_vert_spv));
+    return nk_pcache_fnv1a64(h, rmw, sizeof(k_frag_rmw_spv));
+}
+
+static int coherence_run_pcache_shader_set(void) {
+    const char *name = "pcache-shader-set";
+    uint32_t *rmw = (uint32_t *)malloc(sizeof(k_frag_rmw_spv));
+    if (!rmw) return 0;
+    memcpy(rmw, k_frag_rmw_spv, sizeof(k_frag_rmw_spv));
+    rmw[sizeof(k_frag_rmw_spv) / sizeof(rmw[0]) - 1u] ^= 1u;   /* an RMW module of another build */
+    const uint64_t set = pcache_shader_set(), want = coherence_shader_set_with(k_frag_rmw_spv),
+                   other = coherence_shader_set_with(rmw);
+    free(rmw);
+    if (set != want || set == other) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the shader set %016llx, over all four modules "
+                "%016llx, with another RMW module %016llx -- a build that changes the RMW fragment module "
+                "alone keeps the old cache key\n", name, (unsigned long long)set, (unsigned long long)want,
+                (unsigned long long)other);
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s the cache key covers the RMW fragment module\n", name);
+    return 1;
+}
+
+/* pipe-index: the pipeline cache's index finds every pipeline the run made, past its growths:
+ * 256 distinct keys each make one pipeline, a second lookup of each returns the same pipeline and
+ * makes none, and every entry is found where a scan of the cache finds it. */
+static int coherence_run_pipe_index(void) {
+    const char *name = "pipe-index";
+    enum { KEYS = 256 };
+    static VkPipeline made[KEYS];
+    int ok = 1, n1 = 0;
+    for (int pass = 0; pass < 2 && ok; pass++) {
+        int k = 0;
+        for (int cull = 0; cull < 4 && ok; cull++)
+            for (int cm = 0; cm < 16 && ok; cm++)
+                for (int zf = 0; zf < 4 && ok; zf++, k++) {
+                    PipeKey key;
+                    memset(&key, 0, sizeof key);
+                    key.cull = (uint8_t)cull; key.cmask = (uint8_t)cm; key.zfunc = (uint8_t)zf;
+                    const VkPipeline p = pipe_get(&key);
+                    if (!p || (pass && p != made[k])) {
+                        fprintf(stderr, "gpu coherence selftest [%s]: FAIL key %d, lookup %d: pipeline %p (first "
+                                "made %p)\n", name, k, pass + 1, (void *)p, pass ? (void *)made[k] : NULL);
+                        ok = 0;
+                    }
+                    if (!pass) made[k] = p;
+                }
+        if (!pass) n1 = s_pipe_n;
+        else if (ok && s_pipe_n != n1) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the second lookups made %d pipelines again\n",
+                    name, s_pipe_n - n1);
+            ok = 0;
+        }
+    }
+    for (int i = 0; ok && i < s_pipe_n; i++) {
+        int scan = -1;
+        for (int j = 0; j < s_pipe_n && scan < 0; j++)
+            if (!memcmp(&s_pipes[j].key, &s_pipes[i].key, sizeof(PipeKey))) scan = j;
+        const int found = pipe_index_find(&s_pipe_idx, s_pipes, s_pipe_n, &s_pipes[i].key);
+        if (found != scan) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL entry %d found at %d by the index, %d by a scan\n",
+                    name, i, found, scan);
+            ok = 0;
+        }
+    }
+    if (ok) printf("gpu coherence selftest: PASS %s %d pipelines, each found again by the index\n", name, s_pipe_n);
+    return ok;
+}
+
 static int coherence_run_pipeline_cache_reject(void) {
     const char *name = "pipeline-cache-reject";
     Sdl3VkInfo vi;
@@ -9215,6 +9323,16 @@ static int coherence_run_twin_scene(void) {
     if (s_twin_unavailable) {
         printf("gpu coherence selftest: SKIP %s: the host twin was requested (SR_GPU_TWIN_COLOR=%s) but this "
                "device refused it\n", name, getenv("SR_GPU_TWIN_COLOR"));
+        return 1;
+    }
+    /* The twin-off leg writes the reference, so only a run that asked for no twin may take it: a
+     * twin or supersampling the line or SR_GPU_TWIN_COLOR asked for that is not running (gegpu_init
+     * lowered supersampling to 1x: memory budget, image side, no linear blit) tests nothing here. */
+    const char *tc = getenv("SR_GPU_TWIN_COLOR");   /* it wins over the line's twin key, as in gegpu_init */
+    const int twin_asked = tc && tc[0] ? twin_mode_parse(tc) > 0 : ace_requested()->twin != 0;
+    if (!s_twin && g_ace_on && (ace_requested()->ssaa > 1 || twin_asked)) {
+        printf("gpu coherence selftest: SKIP %s: the host twin or supersampling (ssaa=%d) was requested but is not "
+               "running; no reference is written or checked\n", name, ace_requested()->ssaa);
         return 1;
     }
     const unsigned long ops0 = s_cnt_twin_ops, reseed0 = s_cnt_twin_reseed;
@@ -9362,6 +9480,35 @@ void gegpu_selftest_ssaa_limits(unsigned long long budget_bytes, unsigned max_di
     s_ssaa_expect = expect > 0 ? (unsigned long long)expect : 0u;
 }
 
+void gegpu_selftest_init_fail(int on) {
+    s_selftest_init_fail = on ? 1 : 0;
+}
+
+int gegpu_selftest_init_left(void) {
+    int n = 0;
+    n += s_pool != VK_NULL_HANDLE; n += s_rp != VK_NULL_HANDLE; n += s_rp_rmw != VK_NULL_HANDLE;
+    n += s_dlayout != VK_NULL_HANDLE; n += s_dst_dlayout != VK_NULL_HANDLE; n += s_tnl_dlayout != VK_NULL_HANDLE;
+    n += s_rmw_dlayout != VK_NULL_HANDLE; n += s_playout != VK_NULL_HANDLE; n += s_playout_rmw != VK_NULL_HANDLE;
+    n += s_dpool_tex != VK_NULL_HANDLE; n += s_dpool_fix != VK_NULL_HANDLE; n += s_tnl_dpool != VK_NULL_HANDLE;
+    n += s_dpool_rmw != VK_NULL_HANDLE; n += s_rmw_zbuf != VK_NULL_HANDLE; n += s_rmw_zbuf_mem != VK_NULL_HANDLE;
+    n += s_vs != VK_NULL_HANDLE; n += s_fs != VK_NULL_HANDLE; n += s_fs_rmw != VK_NULL_HANDLE;
+    n += s_vs_tnl != VK_NULL_HANDLE; n += s_snapimg != VK_NULL_HANDLE; n += s_snapimg_mem != VK_NULL_HANDLE;
+    n += s_snap_view != VK_NULL_HANDLE; n += s_dst_set != VK_NULL_HANDLE; n += s_white != VK_NULL_HANDLE;
+    n += s_white_mem != VK_NULL_HANDLE; n += s_white_view != VK_NULL_HANDLE; n += s_white_smp != VK_NULL_HANDLE;
+    n += s_white_set != VK_NULL_HANDLE; n += s_xfer != VK_NULL_HANDLE; n += s_xfer_m != VK_NULL_HANDLE;
+    for (unsigned i = 0; i < TEX_FILTER_VARIANTS; i++) {
+        n += s_smp[i] != VK_NULL_HANDLE;
+        n += s_snap_set[i] != VK_NULL_HANDLE;
+    }
+    for (int i = 0; i < SUBMIT_FRAMES; i++)
+        n += s_submit[i].fence != VK_NULL_HANDLE || s_submit[i].vbuf != VK_NULL_HANDLE ||
+             s_submit[i].vbuf_mem != VK_NULL_HANDLE || s_submit[i].xfer != VK_NULL_HANDLE;
+    for (int i = 0; i < READBACK_FRAMES; i++)
+        n += s_readback[i].fence != VK_NULL_HANDLE || s_readback[i].buf != VK_NULL_HANDLE ||
+             s_readback[i].mem != VK_NULL_HANDLE;
+    return n;
+}
+
 /* Signed distance, in guest pixels, from (x, y) to the triangle's diagonal edge x / 480 + y / 272 = 1,
  * and to the sliver's long edges (two lines from (40, 200) to (440, 204) and (440, 212)). */
 static double ss_edge_dist(double x, double y) {
@@ -9384,9 +9531,12 @@ static double ss_edge_dist(double x, double y) {
 static int coherence_run_ssaa_edge(void) {
     const char *name = "ssaa-edge";
     const char *ref_path = getenv("SR_GPU_SSAA_REF");
-    if (s_twin_unavailable && g_ace_on && ace_effective()->ssaa > 1) {
-        printf("gpu coherence selftest: SKIP %s: supersampling was asked for but this device refused the "
-               "host twin\n", name);
+    /* gegpu_init turns a refused factor off in the effective line (ace_set_ssaa_effective), so the
+     * request is read: supersampling asked for and not running (the twin refused, the memory budget,
+     * the image side, no linear blit) is a SKIP, never a 1x run that writes the reference. */
+    if (g_ace_on && ace_requested()->ssaa > 1 && s_ssaa == 1) {
+        printf("gpu coherence selftest: SKIP %s: supersampling (ssaa=%d) was asked for but is not running on "
+               "this device (gegpu_init says why)\n", name, ace_requested()->ssaa);
         return 1;
     }
     coherence_reset_targets();
@@ -9505,12 +9655,15 @@ static int coherence_run_ssaa_edge(void) {
     if (ok && ref_path) {
         if (s_ssaa == 1) {
             FILE *f = fopen(ref_path, "w");
-            if (!f || fprintf(f, "scale=%d vram=%016llx\n", s_scale, (unsigned long long)vram) < 0) {
+            /* The line is buffered: fclose writes it, so a failed close is a reference never written. */
+            const int wrote = f && fprintf(f, "scale=%d vram=%016llx\n", s_scale, (unsigned long long)vram) >= 0;
+            if (f && fclose(f) != 0) f = NULL;
+            if (!wrote || !f) {
                 fprintf(stderr, "gpu coherence selftest [%s]: FAIL cannot write %s\n", name, ref_path);
                 ok = 0;
+            } else {
+                checked = "reference written";
             }
-            if (f) fclose(f);
-            checked = "reference written";
         } else {
             FILE *f = fopen(ref_path, "r");
             int rs = 0;
@@ -9548,9 +9701,10 @@ static int coherence_run_ssaa_edge(void) {
  * authentic ones, made for 1x, splits a quarter-off sprite's texels inside each guest pixel. */
 static int coherence_run_ssaa_sprite(void) {
     const char *name = "ssaa-sprite";
-    if (s_twin_unavailable && g_ace_on && ace_effective()->ssaa > 1) {
-        printf("gpu coherence selftest: SKIP %s: supersampling was asked for but this device refused the "
-               "host twin\n", name);
+    /* As in ssaa-edge: at 1x the shown image is the authentic one, so a refused factor would pass. */
+    if (g_ace_on && ace_requested()->ssaa > 1 && s_ssaa == 1) {
+        printf("gpu coherence selftest: SKIP %s: supersampling (ssaa=%d) was asked for but is not running on "
+               "this device (gegpu_init says why)\n", name, ace_requested()->ssaa);
         return 1;
     }
     const uint32_t fba = 0x00160000u, base = 0x04000000u | fba, stride = 512u;
@@ -14293,10 +14447,17 @@ static int hd_draw(const HdQuad *q, int n) {
     DL_EMIT(0x0F, 0);
     DL_EMIT(0x0C, 0);
     #undef DL_EMIT
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(HD_LIST, 0);
     GeGpuFbDescriptor desc = { .addr = HD_BASE, .format = 3, .stride = 512u, .width = 480, .height = 272 };
-    return gegpu_sync_guest_fb(&desc);
+    if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) return 0;
+    if (s_replay_stats.fallback_prims != fallback0) {
+        fprintf(stderr, "gpu coherence selftest [host-depth]: %llu primitives fell back to ge.c\n",
+                s_replay_stats.fallback_prims - fallback0);
+        return 0;
+    }
+    return 1;
 }
 
 /* A fresh target and depth surface, the depth surface seeded from the CPU with `z` everywhere. */
@@ -14332,7 +14493,9 @@ static int coherence_run_host_depth(void) {
     const char *name = "host-depth";
     const char *mode = s_depth32 ? "depth=32" : "16-bit";
     int ok = 1;
-    if (g_ace_on && ace_effective()->depth == 32 && !s_depth32) {
+    /* A refused depth=32 is turned off in the effective line (ace_feature_unavailable), so the request
+     * is read: such a run is a SKIP, never a 16-bit run that writes the key-off reference. */
+    if (g_ace_on && ace_requested()->depth == 32 && !s_depth32) {
         printf("gpu coherence selftest: SKIP %s: depth=32 was requested but this device refused it\n", name);
         return 1;
     }
@@ -15471,12 +15634,1073 @@ static int coherence_run_movie_target(void) {
     return ok;
 }
 
+static uint32_t coherence_batch_state_list(uint32_t fba, int blend_pair) {
+    SubmitBatchList l = { (uint32_t *)SR_HOST(SB_LIST), 0u, 0u };
+    sb_emit(&l, 0x10, (SB_VTX >> 8) & 0x000F0000u);
+    sb_emit(&l, 0x13, 0);
+    sb_emit(&l, 0x4C, 0);
+    sb_emit(&l, 0x4D, 0);
+    sb_target(&l, fba);
+    sb_emit(&l, 0x9E, SB_ZBA);
+    sb_emit(&l, 0x9F, 512u | (0x04000000u >> 8));
+    sb_emit(&l, 0xD2, 3u);
+    sb_emit(&l, 0xD3, 0u);
+    static const uint8_t disabled[] = { 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22,
+                                        0x23, 0x24, 0x27, 0x28 };
+    for (size_t i = 0; i < sizeof(disabled); i++) sb_emit(&l, disabled[i], 0u);
+    sb_emit(&l, 0xE7, 1u);  /* depth writes disabled */
+    sb_emit(&l, 0xDE, 1u);  /* ALWAYS when the test is enabled */
+    sb_emit(&l, 0x15, 0u);
+    sb_emit(&l, 0x16, ((FB_H - 1u) << 10) | (FB_W - 1u));
+    sb_emit(&l, 0xD4, 0u);
+    sb_emit(&l, 0xD5, ((FB_H - 1u) << 10) | (FB_W - 1u));
+    sb_emit(&l, 0x12, (7u << 2) | (3u << 7) | (1u << 23)); /* 8888 colour, float position */
+    if (blend_pair) {
+        sb_emit(&l, 0x21, 1u);
+        sb_emit(&l, 0xDF, 10u); /* FIXA * src + SRC * dst over a zero target: the constant is the pixel */
+        sb_emit(&l, 0xE0, 0x204060u);
+        sb_sprite(&l, 0, 24.0f, 36.0f, 0.0f, 0.0f, 24.0f, 0xFFFFFFFFu);
+        sb_emit(&l, 0xE0, 0xD0A050u);
+        sb_sprite(&l, 0, 88.0f, 36.0f, 0.0f, 0.0f, 24.0f, 0xFFFFFFFFu);
+        sb_emit(&l, 0x21, 0u);
+    } else {
+        /* The Z-test toggle changes only the pipeline key. All five batches keep the same
+         * set-0 descriptor, scissor and blend constants, and all fragments pass. */
+        for (uint32_t i = 0; i < 5u; i++) {
+            sb_emit(&l, 0x23, i & 1u);
+            sb_sprite(&l, 0, (float)(16u + i * 64u), 40.0f, 0.0f, 0.0f, 20.0f,
+                      0xFFFFFFFFu);
+        }
+    }
+    sb_emit(&l, 0x0F, 0u);
+    sb_emit(&l, 0x0C, 0u);
+    return SB_LIST;
+}
+
+/* Rows the two production-path cases clear and compare; every sprite of both lists ends above
+ * row 64. The CPU store stays this short on purpose: these cases run first in the default
+ * suite, before any texture is cached, and a store over the whole frame would mark the pages
+ * of the texture addresses later fixtures use (0x04040000 and up) as holding no texture, which
+ * texture-clean-page-index expects its own first store to find out. */
+enum { BATCH_STATE_ROWS = 96u };
+
+static void coherence_batch_state_fill(uint32_t fba) {
+    const uint32_t base = 0x04000000u | fba;
+    uint32_t *fb = (uint32_t *)SR_HOST(base);
+    for (uint32_t i = 0; i < 512u * BATCH_STATE_ROWS; i++) fb[i] = 0u;
+    sr_gpu_vram_dirty(base, 512u * BATCH_STATE_ROWS * 4u);
+}
+
+static int coherence_run_record_range_state_counts(void) {
+    enum { FBA = 0x00000000u, BATCHES = 5u };
+    const int saved_twin = s_twin;
+    s_twin = 0;
+    coherence_reset_targets();
+    coherence_batch_state_fill(FBA);
+    GeGpuReplayStats before, after;
+    gegpu_replay_stats_get(&before);
+    s_selftest_record_commands = (GegpuSelftestRecordCommands){0};
+    ge_set_gpu_hooks(&k_hooks);
+    int ok = ge_run_list(coherence_batch_state_list(FBA, 0), 0) == 0;
+    ge_set_gpu_hooks(&k_hooks);
+    if (s_nbatch) ok = submit_pending() && ok;
+    gegpu_replay_stats_get(&after);
+    if (after.batches - before.batches != BATCHES ||
+        s_selftest_record_commands.render_pass_begins != 1u ||
+        s_selftest_record_commands.descriptor_binds != 1u ||
+        s_selftest_record_commands.scissors != 1u ||
+        s_selftest_record_commands.blend_constants != 1u) {
+        fprintf(stderr, "gpu coherence selftest [record-range-state]: real display-list op recorded %llu batches; "
+                        "record_range began %u pass(es) and emitted descriptor=%u scissor=%u blend=%u "
+                        "(want 5 batches in 1 pass, 1 each)\n",
+                (unsigned long long)(after.batches - before.batches),
+                s_selftest_record_commands.render_pass_begins,
+                s_selftest_record_commands.descriptor_binds, s_selftest_record_commands.scissors,
+                s_selftest_record_commands.blend_constants);
+        ok = 0;
+    }
+    coherence_reset_targets();
+    s_twin = saved_twin;
+    if (ok) puts("gpu coherence selftest: PASS record_range counted one descriptor/scissor/blend for five real batches");
+    return ok;
+}
+
+static int coherence_run_batch_blend_change(void) {
+    enum { FBA = 0x00000000u };
+    const uint32_t base = 0x04000000u | FBA;
+    const int saved_twin = s_twin;
+    const size_t pixels = (size_t)FB_W * BATCH_STATE_ROWS;
+    uint32_t *gpu = (uint32_t *)malloc(pixels * sizeof(*gpu));
+    if (!gpu) return 0;
+    s_twin = 0;
+    coherence_reset_targets();
+    coherence_batch_state_fill(FBA);
+    GeGpuReplayStats before, after;
+    gegpu_replay_stats_get(&before);
+    s_selftest_record_commands = (GegpuSelftestRecordCommands){0};
+    ge_set_gpu_hooks(&k_hooks);
+    int ok = ge_run_list(coherence_batch_state_list(FBA, 1), 0) == 0;
+    ge_set_gpu_hooks(&k_hooks);
+    if (s_nbatch) ok = submit_pending() && ok;
+    GeGpuFbDescriptor desc = { base, 3u, 512u, FB_W, FB_H };
+    ok = gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK && ok;
+    gegpu_replay_stats_get(&after);
+    const unsigned long long recorded_batches = after.batches - before.batches;
+    const unsigned blend_commands = s_selftest_record_commands.blend_constants;
+    const int command_counts_ok = recorded_batches == 2u &&
+                                  s_selftest_record_commands.render_pass_begins == 1u &&
+                                  blend_commands == 2u;
+    if (!command_counts_ok) {
+        fprintf(stderr, "gpu coherence selftest [batch-blend-change]: production range recorded %llu batches in %u "
+                        "pass(es) with %u blend-constant commands (want 2 in 1 pass, 2 commands)\n",
+                recorded_batches, s_selftest_record_commands.render_pass_begins, blend_commands);
+    }
+    for (uint32_t y = 0; ok && y < BATCH_STATE_ROWS; y++)
+        memcpy(gpu + (size_t)y * FB_W, (uint32_t *)SR_HOST(base) + (size_t)y * 512u,
+               (size_t)FB_W * sizeof(*gpu));
+
+    coherence_reset_targets();
+    coherence_batch_state_fill(FBA);
+    ge_set_gpu_hooks(NULL);
+    ok = (ge_run_list(coherence_batch_state_list(FBA, 1), 0) == 0) && ok;
+    ge_set_gpu_hooks(&k_hooks);
+    for (uint32_t y = 0; ok && y < BATCH_STATE_ROWS; y++) {
+        const uint32_t *ref = (const uint32_t *)SR_HOST(base) + (size_t)y * 512u;
+        for (uint32_t x = 0; x < FB_W; x++) {
+            if (gpu[(size_t)y * FB_W + x] != ref[x]) {
+                fprintf(stderr, "gpu coherence selftest [batch-blend-change]: GPU pixel (%u,%u)=%08x; "
+                                "ge.c=%08x after the second FIXA batch\n",
+                        x, y, gpu[(size_t)y * FB_W + x], ref[x]);
+                ok = 0;
+                break;
+            }
+        }
+    }
+    coherence_reset_targets();
+    s_twin = saved_twin;
+    free(gpu);
+    if (ok) puts("gpu coherence selftest: PASS two same-pass FIXA batches match ge.c");
+    return ok && command_counts_ok;
+}
+
+static int coherence_run_batch_state_elision(void) {
+    BatchCommandState state = {0};
+    VkDescriptorSet descriptor = VK_NULL_HANDLE;
+    VkRect2D scissor = { { 3, 7 }, { 11u, 13u } };
+    float blend[4] = { 0.125f, 0.25f, 0.5f, 1.0f };
+    int descriptor_emits = 0, scissor_emits = 0, blend_emits = 0;
+    for (int i = 0; i < 5; i++) {
+        BatchCommandEmit emit = batch_command_state_update(&state, descriptor, &scissor, blend);
+        descriptor_emits += emit.descriptor;
+        scissor_emits += emit.scissor;
+        blend_emits += emit.blend;
+    }
+    if (descriptor_emits != 1 || scissor_emits != 1 || blend_emits != 1) {
+        fprintf(stderr, "gpu coherence selftest [batch-state]: five identical batches emitted descriptor=%d scissor=%d blend=%d (want 1 each)\n",
+                descriptor_emits, scissor_emits, blend_emits);
+        return 0;
+    }
+    BatchCommandEmit emit = batch_command_state_update(&state, descriptor, &scissor, blend);
+    if (emit.descriptor || emit.scissor || emit.blend) {
+        fprintf(stderr, "gpu coherence selftest [batch-state]: an identical batch emitted state again\n");
+        return 0;
+    }
+    VkRect2D other_scissor = scissor;
+    other_scissor.offset.x++;
+    emit = batch_command_state_update(&state, descriptor, &other_scissor, blend);
+    if (emit.descriptor || !emit.scissor || emit.blend) {
+        fprintf(stderr, "gpu coherence selftest [batch-state]: scissor change emitted the wrong state\n");
+        return 0;
+    }
+    float other_blend[4];
+    memcpy(other_blend, blend, sizeof(other_blend));
+    other_blend[0] = 0.75f;
+    emit = batch_command_state_update(&state, descriptor, &other_scissor, other_blend);
+    if (emit.descriptor || emit.scissor || !emit.blend) {
+        fprintf(stderr, "gpu coherence selftest [batch-state]: blend change emitted the wrong state\n");
+        return 0;
+    }
+    VkDescriptorSet other_descriptor = (VkDescriptorSet)(uintptr_t)1u;
+    emit = batch_command_state_update(&state, other_descriptor, &other_scissor, other_blend);
+    if (!emit.descriptor || emit.scissor || emit.blend) {
+        fprintf(stderr, "gpu coherence selftest [batch-state]: descriptor change emitted the wrong state\n");
+        return 0;
+    }
+    BatchCommandState next_pass = {0};
+    emit = batch_command_state_update(&next_pass, other_descriptor, &other_scissor, other_blend);
+    if (!emit.descriptor || !emit.scissor || !emit.blend) {
+        fprintf(stderr, "gpu coherence selftest [batch-state]: a new render pass did not start unknown\n");
+        return 0;
+    }
+    if (!coherence_run_record_range_state_counts()) return 0;
+    if (!coherence_run_batch_blend_change()) return 0;
+    puts("gpu coherence selftest: PASS batch-state helper invariants and production-path cases");
+    return 1;
+}
+
+/* ---- full caches, freed targets and failed boundaries (audit 2026-11-17) -----------------
+ *
+ * tex-evict-fail (alone: it fills the texture cache): a full cache whose eviction cannot retire
+ * the GPU's work (the drain fails, injected) takes no entry past the cache. The lookup draws the
+ * texture white, the cache keeps MAX_TEX entries, and the next lookup evicts and caches again.
+ * Failing before: tex_get filled s_tex[MAX_TEX], past the array, and counted MAX_TEX + 1.
+ *
+ * target-evict-pending: queued batches that sample a render target directly (its image and
+ * descriptor set) are recorded before that target is freed: when it is the LRU target taken for a
+ * new framebuffer (target_slot_acquire, as a present of a buffer the renderer does not hold), and
+ * when it is re-made at another stride (target_color_acquire). Failing before: the batches stayed
+ * queued naming the freed set, to be recorded with it later.
+ *
+ * xfer-cpu-writes: a GE block transfer is the GE's next use of both targets, so the CPU writes
+ * held for them (target_note_cpu_write) apply first. Source: the copy must carry the CPU's bytes.
+ * Destination: the transfer, which is later, must not be overwritten by the CPU's held bytes.
+ * Failing before: hook_xfer copied the source's image from before the write, and the destination's
+ * held span was patched from guest VRAM over the copy at the next readback.
+ *
+ * readback-zbuf: an asynchronous present readback that commits colour rows over ge.c's cached
+ * software depth surface invalidates it, as the synchronous target_readback does. Failing before:
+ * ge_zbuf_ptr() went on returning the depth values from before the commit.
+ *
+ * submit-fail (alone: the backend records nothing more after it): a queue submit that fails
+ * (injected VK_ERROR_OUT_OF_HOST_MEMORY) closes the open recording and starts no new one. Failing
+ * before: s_cmd_slot and s_cmd stayed live, so the next flush ended the same buffer again and
+ * every later submit failed on it. */
+#define AUD_TEX  0x08700000u   /* tex-evict-fail: 8 x 8 8888 textures, 256 bytes each */
+#define AUD_LIST 0x00104000u
+#define AUD_VTX  0x00104800u
+#define AUD_X    0x00020000u   /* VRAM offsets: 8888 targets of stride 512 (0x88000 bytes) */
+#define AUD_M    0x000B0000u
+#define AUD_FILL 0x00140000u   /* six 8888 targets of stride 128, 0x11000 bytes apart */
+#define AUD_NEW  0x001B0000u   /* 8888, stride 128 */
+#define AUD_Z    0x001E0000u   /* the list's depth buffer: stride 128, below the end of VRAM */
+
+static int coherence_run_tex_evict_fail(void) {
+    const char *name = "tex-evict-fail";
+    coherence_reset_targets();
+    if (s_nbatch) (void)submit_pending();
+    GeState saved = *s_ge;
+    s_ge->tex_fmt = 3u; s_ge->tex_w = 8; s_ge->tex_h = 8; s_ge->tex_bufw = 8u;
+    s_ge->tex_swizzle = 0; s_ge->tex_filter = 0u; s_ge->tex_wrap = 0u; s_ge->tex_max_level = 0u;
+    s_ge->tex_mip_bufw[0] = 8u; s_ge->tex_mip_wlog2[0] = 3u; s_ge->tex_mip_hlog2[0] = 3u;
+    int ok = 1;
+    uint32_t i = 0;
+    for (; ok && s_tex_n < MAX_TEX; i++) {
+        const uint32_t addr = AUD_TEX + i * 256u;
+        coherence_fill_raw((uint8_t *)SR_HOST(addr), 64u, 4u, 0xFF000000u | ((i * 2654435761u) >> 8));
+        sr_gpu_vram_dirty(addr, 256u);
+        s_ge->tex_addr = s_ge->tex_mip_addr[0] = addr;
+        const int n0 = s_tex_n;
+        if (tex_get() == s_white_set || s_tex_n != n0 + 1) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL texture %u did not enter the cache "
+                    "(entries %d)\n", name, i, s_tex_n);
+            ok = 0;
+        }
+        if (s_nbatch) (void)submit_pending();
+    }
+    const unsigned long failed0 = s_cnt_tex_evict_failed;
+    if (ok) {
+        const uint32_t addr = AUD_TEX + i++ * 256u;
+        coherence_fill_raw((uint8_t *)SR_HOST(addr), 64u, 4u, 0xFF102030u);
+        sr_gpu_vram_dirty(addr, 256u);
+        s_ge->tex_addr = s_ge->tex_mip_addr[0] = addr;
+        const unsigned long long uploads0 = s_replay_stats.upload_ring_reservations;
+        s_selftest_tex_evict_drain_fail = 1;
+        VkDescriptorSet set = tex_get();
+        const int injected = s_selftest_tex_evict_drain_fail == 0;
+        s_selftest_tex_evict_drain_fail = 0;
+        /* No texture may be made or uploaded for the lookup: its entry would be s_tex[MAX_TEX]. */
+        const unsigned long long uploads = s_replay_stats.upload_ring_reservations - uploads0;
+        if (!injected || set != s_white_set || s_tex_n != MAX_TEX || uploads != 0u ||
+            s_cnt_tex_evict_failed != failed0 + 1u) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL a full cache whose eviction failed: "
+                    "injected=%d white=%d entries=%d (want %d) uploads=%llu (want 0) refusals=%lu (want 1)%s\n",
+                    name, injected, set == s_white_set, s_tex_n, MAX_TEX, uploads,
+                    s_cnt_tex_evict_failed - failed0,
+                    uploads || s_tex_n > MAX_TEX ? " -- a texture was made in the entry past the cache" : "");
+            ok = 0;
+        }
+    }
+    /* Entries used again out of slot order, so the least recently used are not the first slots. */
+    for (uint32_t j = 0; ok && j < MAX_TEX / 2; j++) {
+        const uint32_t addr = AUD_TEX + ((j * 37u) % MAX_TEX) * 256u;
+        s_ge->tex_addr = s_ge->tex_mip_addr[0] = addr;
+        const int n0 = s_tex_n;
+        if (tex_get() == s_white_set || s_tex_n != n0) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL texture %08x was not found again\n", name, addr);
+            ok = 0;
+        }
+        if (s_nbatch) (void)submit_pending();
+    }
+    /* The eviction's result, from a minimum scan per victim with the last slot moved into it. */
+    static uint32_t want_addr[MAX_TEX];
+    static uint64_t want_lru[MAX_TEX];
+    int want_n = s_tex_n;
+    for (int t = 0; t < want_n; t++) { want_addr[t] = s_tex[t].addr; want_lru[t] = s_tex[t].lru; }
+    for (int r = 0; r < MAX_TEX / 4 && want_n > 0; r++) {
+        int v = 0;
+        for (int t = 1; t < want_n; t++)
+            if (want_lru[t] < want_lru[v]) v = t;
+        want_n--;
+        want_addr[v] = want_addr[want_n]; want_lru[v] = want_lru[want_n];
+    }
+    if (ok) {   /* the drain works again: the next miss evicts a quarter and caches */
+        const uint32_t addr = AUD_TEX + i++ * 256u;
+        coherence_fill_raw((uint8_t *)SR_HOST(addr), 64u, 4u, 0xFF405060u);
+        sr_gpu_vram_dirty(addr, 256u);
+        s_ge->tex_addr = s_ge->tex_mip_addr[0] = addr;
+        VkDescriptorSet set = tex_get();
+        if (set == s_white_set || s_tex_n != MAX_TEX - MAX_TEX / 4 + 1) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the lookup after the failure: white=%d "
+                    "entries=%d (want %d)\n", name, set == s_white_set, s_tex_n, MAX_TEX - MAX_TEX / 4 + 1);
+            ok = 0;
+        }
+        int moved = -1;
+        for (int t = 0; ok && t < want_n; t++)
+            if (s_tex[t].addr != want_addr[t]) { moved = t; break; }
+        if (ok && (moved >= 0 || s_tex[want_n].addr != addr)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the eviction left slot %d holding %08x (want "
+                    "%08x): not the least recently used quarter, swap-removed oldest first\n", name,
+                    moved >= 0 ? moved : want_n, moved >= 0 ? s_tex[moved].addr : s_tex[want_n].addr,
+                    moved >= 0 ? want_addr[moved] : addr);
+            ok = 0;
+        }
+        /* Every entry the eviction kept or moved is found again, none made twice. */
+        for (int t = 0; ok && t < s_tex_n; t++) {
+            s_ge->tex_addr = s_ge->tex_mip_addr[0] = s_tex[t].addr;
+            const int n0 = s_tex_n;
+            if (tex_get() == s_white_set || s_tex_n != n0) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL slot %d (%08x) after the eviction: entries "
+                        "%d (want %d) -- the lookup did not find it\n", name, t, s_tex[t].addr, s_tex_n, n0);
+                ok = 0;
+            }
+            if (s_nbatch) (void)submit_pending();
+        }
+    }
+    if (s_nbatch) (void)submit_pending();
+    *s_ge = saved;
+    if (ok) printf("gpu coherence selftest: PASS %s a full cache whose eviction failed drew white and "
+                   "kept %d entries; the next lookup evicted and cached\n", name, MAX_TEX);
+    return ok;
+}
+
+/* The list of target-evict-pending: into M (8888, stride 512), one 64 x 64 sprite textured from X
+ * (8888, stride 512) at 1:1, replace, no blend: a direct bind of X's image. The batch stays queued. */
+static void aud_rtt_list(void) {
+    RawSpriteVtx *sv = (RawSpriteVtx *)SR_HOST(AUD_VTX);
+    sv[0] = (RawSpriteVtx){ 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+    sv[1] = (RawSpriteVtx){ 64.0f, 64.0f, 64.0f, 64.0f, 0.0f };
+    uint32_t *dl = (uint32_t *)SR_HOST(AUD_LIST);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    DL_EMIT(0x10, 0);
+    DL_EMIT(0x9C, AUD_M); DL_EMIT(0x9D, 512u | (0x04u << 16)); DL_EMIT(0xD2, 3);
+    DL_EMIT(0x9E, AUD_Z); DL_EMIT(0x9F, 128u | (0x04u << 16));
+    DL_EMIT(0xD3, 0);
+    DL_EMIT(0x1D, 0); DL_EMIT(0x1F, 0);
+    DL_EMIT(0x22, 0); DL_EMIT(0x23, 0); DL_EMIT(0x24, 0);  /* no alpha, depth, stencil test */
+    DL_EMIT(0x25, 0); DL_EMIT(0x27, 0); DL_EMIT(0x28, 0);  /* no AA, colour test, logic op */
+    DL_EMIT(0xE7, 1); DL_EMIT(0xE8, 0); DL_EMIT(0xE9, 0);  /* no depth write, no masks */
+    DL_EMIT(0x4C, 0); DL_EMIT(0x4D, 0); DL_EMIT(0xD6, 0); DL_EMIT(0xD7, 0xFFFFu);
+    DL_EMIT(0x15, 0); DL_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xD4, 0); DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0x50, 1); DL_EMIT(0x20, 0); DL_EMIT(0x21, 0);  /* gouraud, no dither, no blend */
+    DL_EMIT(0x1E, 1);                                      /* texture on: X, its psm and stride */
+    DL_EMIT(0xA0, AUD_X); DL_EMIT(0xA8, 512u | (0x04u << 16));
+    DL_EMIT(0xB8, 6u | (6u << 8));                         /* 64 x 64 */
+    DL_EMIT(0xC0, 0); DL_EMIT(0xC8, 0);                    /* UV mapping, level 0 */
+    DL_EMIT(0xC2, 0); DL_EMIT(0xC3, 3);                    /* 8888 */
+    DL_EMIT(0xC6, 0); DL_EMIT(0xC7, 0x101u);               /* nearest, clamp */
+    DL_EMIT(0xC9, 3u | 0x100u);                            /* replace, RGBA */
+    DL_EMIT(0xCB, 0);
+    DL_EMIT(0x12, 3u | (3u << 7) | (1u << 23));            /* float UV and position, through */
+    DL_EMIT(0x01, AUD_VTX);
+    DL_EMIT(0x04, (6u << 16) | 2u);                        /* one sprite */
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+}
+
+/* One sub-cell of target-evict-pending: `restride` re-makes X at stride 256, else six more
+ * targets fill the slots and a new framebuffer takes X's (the LRU one). */
+static int aud_target_evict_one(int restride) {
+    const char *name = "target-evict-pending";
+    const char *what = restride ? "X re-made at another stride" : "X taken as the LRU slot";
+    const uint32_t xcol = 0xFF3060C0u, mbase = 0x04000000u | AUD_M;
+    coherence_reset_targets();
+    coherence_reset_depths();
+    coherence_fill_raw((uint8_t *)SR_HOST(0x04000000u | AUD_X), 512u * FB_H, 4u, xcol);
+    memset(SR_HOST(mbase), 0, 512u * FB_H * 4u);
+    memset(SR_HOST(0x04000000u | AUD_FILL), 0, 6u * 0x11000u);
+    memset(SR_HOST(0x04000000u | AUD_NEW), 0, 128u * FB_H * 4u);
+    Target *x = target_color_acquire(AUD_X, 512u, 3u, 1);
+    int ok = x && x->gpu_valid;
+    for (uint32_t k = 0; ok && !restride && k < 6u; k++) {
+        Target *f = target_color_acquire(AUD_FILL + k * 0x11000u, 128u, 3u, 1);
+        ok = f && f->gpu_valid;
+    }
+    if (!ok) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the targets could not be made\n", name, what);
+        coherence_reset_targets();
+        return 0;
+    }
+    aud_rtt_list();
+    ge_set_gpu_hooks(&k_hooks);
+    int sampled = 0;
+    ok = ge_run_list(AUD_LIST, 0) == 0;
+    for (uint32_t i = 0; ok && i < s_nbatch; i++) if (s_batch[i].tsrc == x) sampled = 1;
+    if (!ok || !sampled || !s_cur || s_cur->fba != AUD_M) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: no queued batch into M samples X "
+                "(list=%d batches=%u)\n", name, what, ok, (unsigned)s_nbatch);
+        coherence_reset_targets();
+        return 0;
+    }
+    VkDescriptorSet xset[TEX_FILTER_VARIANTS];
+    memcpy(xset, x->set, sizeof xset);
+    const Target *xslot = x;
+    Target *n = restride ? target_color_acquire(AUD_X, 256u, 3u, 0) : target_color_acquire(AUD_NEW, 128u, 3u, 0);
+    int stale = 0;
+    for (uint32_t i = 0; i < s_nbatch; i++) {
+        if (s_batch[i].tsrc == xslot) stale = 1;
+        for (unsigned v = 0; v < TEX_FILTER_VARIANTS; v++) if (xset[v] && s_batch[i].dset == xset[v]) stale = 1;
+    }
+    if (!n || stale) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: %s\n", name, what, !n ? "the new target was "
+                "not made" : "a queued batch still names X's freed descriptor set (it would be recorded "
+                "with it)");
+        batches_reset();   /* never record a batch that names a freed set */
+        coherence_reset_targets();
+        return 0;
+    }
+    /* RGB only: the alpha byte of an 8888 target is its stencil, which this draw does not set */
+    Target *m = target_find_by_fba(AUD_M);
+    const uint32_t *mg = (const uint32_t *)SR_HOST(mbase), rgb = 0x00FFFFFFu;
+    if (!m || !target_readback(m) || (mg[10u * 512u + 10u] & rgb) != (xcol & rgb) ||
+        (mg[63u * 512u + 63u] & rgb) != (xcol & rgb) || (mg[10u * 512u + 100u] & rgb) != 0u) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: M shows %06x %06x %06x (want %06x %06x 0)\n",
+                name, what, mg[10u * 512u + 10u] & rgb, mg[63u * 512u + 63u] & rgb,
+                mg[10u * 512u + 100u] & rgb, xcol & rgb, xcol & rgb);
+        coherence_reset_targets();
+        return 0;
+    }
+    coherence_reset_targets();
+    coherence_reset_depths();
+    return 1;
+}
+
+static int coherence_run_target_evict_pending(void) {
+    if (!aud_target_evict_one(0) || !aud_target_evict_one(1)) return 0;
+    printf("gpu coherence selftest: PASS target-evict-pending batches sampling a target were recorded "
+           "before it was freed (LRU slot, new stride)\n");
+    return 1;
+}
+
+/* One sub-cell of xfer-cpu-writes: the CPU writes P into rows 20-29 of A (src_side) or rows 40-49
+ * of B, columns 0-63, then the GE copies A's rows 20-29 to B's rows 40-49. */
+static int aud_xfer_one(int src_side) {
+    const char *name = "xfer-cpu-writes";
+    const char *what = src_side ? "a CPU write into the source" : "a CPU write into the destination";
+    const uint32_t stride = 512u, bytes = stride * FB_H * 4u;
+    const uint32_t abase = 0x04000000u | AUD_X, bbase = 0x04000000u | AUD_M;
+    const uint32_t g1 = coherence_g1(3u), g0 = coherence_g0(3u);
+    uint8_t *ag = (uint8_t *)SR_HOST(abase), *bg = (uint8_t *)SR_HOST(bbase);
+    uint8_t *expected = (uint8_t *)malloc(bytes);
+    if (!expected) return 0;
+    coherence_reset_targets();
+    coherence_reset_depths();
+    coherence_fill_raw(ag, stride * FB_H, 4u, g1);
+    coherence_fill_raw(bg, stride * FB_H, 4u, g0);
+    Target *a = target_color_acquire(AUD_X, stride, 3u, 1), *b = target_color_acquire(AUD_M, stride, 3u, 1);
+    if (!a || !b || !a->gpu_valid || !b->gpu_valid) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the targets could not be made\n", name, what);
+        free(expected); coherence_reset_targets(); return 0;
+    }
+    memcpy(expected, bg, bytes);
+    const uint32_t wbase = src_side ? abase : bbase, wy = src_side ? 20u : 40u;
+    uint8_t *wg = src_side ? ag : bg;
+    for (uint32_t y = 0; y < 10u; y++) {
+        for (uint32_t x = 0; x < 64u; x++) {
+            const uint32_t pix = 0xFF000000u | ((y * 64u + x) * 0x010307u);
+            memcpy(wg + ((wy + y) * stride + x) * 4u, &pix, 4u);
+            /* the transfer's rows of B: the source's pixels, P when the CPU wrote them there */
+            memcpy(expected + ((40u + y) * stride + x) * 4u, src_side ? &pix : &g1, 4u);
+        }
+        sr_gpu_vram_dirty(wbase + (wy + y) * stride * 4u, 64u * 4u);
+    }
+    Target *held = src_side ? a : b;
+    if (!held->cpu_n) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the dirty hook did not hold it\n", name, what);
+        free(expected); coherence_reset_targets(); return 0;
+    }
+    GeState saved = *s_ge;
+    s_ge->xf_src = AUD_X; s_ge->xf_srcw = stride | (0x04u << 16);
+    s_ge->xf_dst = AUD_M; s_ge->xf_dstw = stride | (0x04u << 16);
+    s_ge->xf_spos = 20u << 10; s_ge->xf_dpos = 40u << 10;
+    s_ge->xf_size = 63u | (9u << 10);                      /* 64 x 10 */
+    const unsigned long blits0 = s_cnt_xferblit;
+    const int took = hook_xfer(1u);                        /* 32-bit */
+    *s_ge = saved;
+    int ok = took && s_cnt_xferblit == blits0 + 1u && target_readback(b);
+    size_t mismatch = 0;
+    while (ok && mismatch < bytes && bg[mismatch] == expected[mismatch]) mismatch++;
+    if (!ok || mismatch != bytes) {
+        if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the GPU transfer was not taken "
+                         "(took=%d)\n", name, what, took);
+        else fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: B pixel (%zu, %zu) is %08x, want %08x\n",
+                     name, what, (mismatch / 4u) % stride, (mismatch / 4u) / stride,
+                     ((uint32_t *)bg)[mismatch / 4u], ((uint32_t *)expected)[mismatch / 4u]);
+        free(expected); coherence_reset_targets(); return 0;
+    }
+    free(expected);
+    coherence_reset_targets();
+    return 1;
+}
+
+static int coherence_run_xfer_cpu_writes(void) {
+    if (!aud_xfer_one(1) || !aud_xfer_one(0)) return 0;
+    printf("gpu coherence selftest: PASS xfer-cpu-writes a block transfer applied the CPU writes held "
+           "for its source and destination first\n");
+    return 1;
+}
+
+static int coherence_run_readback_zbuf(void) {
+    const char *name = "readback-zbuf";
+    const uint32_t stride = 512u, base = 0x04000000u | AUD_X;
+    const uint32_t image = 0x5A5A5A5Au, before = 0x12121212u;
+    uint32_t *g = (uint32_t *)SR_HOST(base);
+    coherence_reset_targets();
+    coherence_reset_depths();
+    coherence_fill_raw((uint8_t *)g, stride * FB_H, 4u, image);
+    Target *t = target_color_acquire(AUD_X, stride, 3u, 1);
+    if (!t || !t->gpu_valid) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the target could not be made\n", name);
+        coherence_reset_targets(); return 0;
+    }
+    coherence_fill_raw((uint8_t *)g, stride * FB_H, 4u, before);
+    coherence_image_newer(t);
+    GeState saved = *s_ge;
+    s_ge->zbp = base; s_ge->zbw = stride;                  /* ge.c's depth surface over the colour */
+    const uint16_t *z = ge_zbuf_ptr();
+    int ok = z && z[10u * 512u + 10u] == 0x1212u;
+    ReadbackSlot *r = NULL;
+    if (ok && target_prepare_present(t))
+        for (int i = 0; i < READBACK_FRAMES; i++)
+            if (s_readback[i].pending && s_readback[i].image == t->img && s_readback[i].commit) r = &s_readback[i];
+    if (!ok || !r) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL setup: depth loaded=%d, a committing present "
+                "readback=%d\n", name, ok, r != NULL);
+        *s_ge = saved; coherence_reset_targets(); return 0;
+    }
+    ok = readback_finish(r, 1, 1) > 0 && g[10u * 512u + 10u] == image;
+    z = ok ? ge_zbuf_ptr() : NULL;
+    const unsigned zv = z ? z[10u * 512u + 10u] : 0u;
+    *s_ge = saved;
+    coherence_reset_targets();
+    if (!ok || zv != 0x5A5Au) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL committed=%d depth at (10, 10) is %04x, want "
+                "5a5a%s\n", name, ok, zv, zv == 0x1212u ? " -- ge.c kept its depth from before the commit" : "");
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s a present readback's commit invalidated ge.c's depth surface "
+           "under it\n", name);
+    return 1;
+}
+
+static int coherence_run_submit_fail(void) {
+    const char *name = "submit-fail";
+    const uint32_t base = 0x04000000u | AUD_X;
+    coherence_reset_targets();
+    coherence_fill_raw((uint8_t *)SR_HOST(base), 512u * FB_H, 4u, coherence_g1(3u));
+    Target *t = target_color_acquire(AUD_X, 512u, 3u, 1);
+    if (!t || !t->gpu_valid || !coherence_queue_g1_batch(base, 512u, 3u) || !submit_pending() || !s_cmd_slot) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL setup: no open recording\n", name);
+        return 0;
+    }
+    SubmitSlot *slot = s_cmd_slot;
+    s_selftest_submit_result = VK_ERROR_OUT_OF_HOST_MEMORY;
+    const int drained = cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+    const int injected = s_selftest_submit_result == VK_SUCCESS;
+    s_selftest_submit_result = VK_SUCCESS;
+    int ok = injected && !drained && !s_cmd_slot && s_cmd == VK_NULL_HANDLE && !slot->in_flight;
+    if (!ok) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a failed submit: injected=%d drained=%d "
+                "recording open=%d in flight=%d%s\n", name, injected, drained, s_cmd_slot != NULL,
+                slot->in_flight, s_cmd_slot ? " -- the next flush would end the same buffer again" : "");
+        return 0;
+    }
+    /* nothing records after it: a boundary fails, and opens no recording */
+    if (cmd_begin() || s_cmd_slot || target_readback(t)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a recording started after a failed submit\n", name);
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s a failed submit closed its recording and no new one "
+           "started\n", name);
+    return 1;
+}
+
+/* ---- GPU pixels kept through failed boundaries, depth slots, texture keys (audit 2026-11-17) --
+ *
+ * Each failed boundary is injected by refusing every new recording (s_cmd_failed) for one call,
+ * then letting recordings start again: nothing was abandoned, so the backend goes on as before.
+ *
+ * target-keep-unsynced: a target whose GPU pixels are newer than guest VRAM and cannot be written
+ * back (the readback cannot record) is kept, not freed, when its slot is wanted for a new target
+ * and when it is re-made at another stride; no new target is made. Once readbacks work, the same
+ * acquire frees it and makes the new one. Failing before: the readback's failure was ignored, the
+ * target freed with the only copy of its pixels, and the new target made.
+ *
+ * fallback-refused: a primitive the software rasterizer must draw (a point), over a target whose
+ * GPU pixels cannot be written back, is dropped (the hook returns 1) and the target stays GPU-valid.
+ * Failing before: the hook handed it to ge.c (returned 0) to draw over stale guest VRAM and marked
+ * the target not GPU-valid, losing its pixels.
+ *
+ * depth-init-fail: a depth surface whose first upload fails is not left keyed: the next acquire
+ * makes and seeds it. Failing before: the slot was marked used before the upload, so the next
+ * acquire returned the never-seeded image (layout UNDEFINED) as the surface.
+ *
+ * tex-key-bufw: two textures whose cache keys collide (the key XORs the buffer width into the
+ * address bits: 0x08640000 at width 64 and 0x08440000 at width 96) get an entry each. Failing
+ * before: the second updated the first's entry in place, which kept the first's address and
+ * source ranges, so CPU writes to the second were watched at the first's bytes. */
+#define AUD2_T0  0x00040000u   /* target-keep-unsynced: nine 8888 targets of stride 128 */
+#define AUD2_TSZ 0x00022000u
+
+static int aud2_keep_one(int restride) {
+    const char *name = "target-keep-unsynced";
+    const char *what = restride ? "a target re-made at another stride" : "the LRU target's slot taken";
+    const uint32_t xfba = AUD2_T0, nfba = AUD2_T0 + (uint32_t)MAX_TGT * AUD2_TSZ;
+    coherence_reset_targets();
+    memset(SR_HOST(0x04000000u | AUD2_T0), 0, ((uint32_t)MAX_TGT + 1u) * AUD2_TSZ);
+    Target *x = target_color_acquire(xfba, 128u, 3u, 1);
+    int ok = x && x->gpu_valid;
+    for (uint32_t k = 1; ok && !restride && k < (uint32_t)MAX_TGT; k++) {
+        Target *f = target_color_acquire(AUD2_T0 + k * AUD2_TSZ, 128u, 3u, 1);
+        ok = f && f->gpu_valid;
+    }
+    if (!ok) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the targets could not be made\n", name, what);
+        coherence_reset_targets();
+        return 0;
+    }
+    coherence_image_newer(x);
+    const VkImage ximg = x->img;
+    (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+    s_cmd_failed = 1;   /* the readback cannot record */
+    Target *n = restride ? target_color_acquire(xfba, 256u, 3u, 0) : target_color_acquire(nfba, 128u, 3u, 0);
+    s_cmd_failed = 0;
+    const Target *kept = target_find_by_fba(xfba);
+    if (n || !kept || kept->img != ximg || kept->stride != 128u || !kept->gpu_valid ||
+        kept->clean_gen == kept->render_gen) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s, its readback failing: new target made=%d, "
+                "kept=%d%s\n", name, what, n != NULL, kept && kept->img == ximg && kept->gpu_valid,
+                kept && kept->img == ximg ? "" : " -- the only copy of its GPU pixels was freed");
+        coherence_reset_targets();
+        return 0;
+    }
+    n = restride ? target_color_acquire(xfba, 256u, 3u, 0) : target_color_acquire(nfba, 128u, 3u, 0);
+    if (!n || (restride ? n->stride != 256u : target_find_by_fba(xfba) != NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s, its readback working again: the new target "
+                "was not made in its place\n", name, what);
+        coherence_reset_targets();
+        return 0;
+    }
+    coherence_reset_targets();
+    return 1;
+}
+
+static int coherence_run_target_keep_unsynced(void) {
+    if (!aud2_keep_one(0) || !aud2_keep_one(1)) return 0;
+    printf("gpu coherence selftest: PASS target-keep-unsynced a target whose readback failed was kept, not "
+           "freed (LRU slot, new stride)\n");
+    return 1;
+}
+
+static int coherence_run_fallback_refused(void) {
+    const char *name = "fallback-refused";
+    const uint32_t base = 0x04000000u | AUD_X;
+    coherence_reset_targets();
+    coherence_reset_depths();
+    coherence_fill_raw((uint8_t *)SR_HOST(base), 512u * FB_H, 4u, coherence_g1(3u));
+    Target *t = target_color_acquire(AUD_X, 512u, 3u, 1);
+    if (!t || !t->gpu_valid) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL setup: no GPU target\n", name);
+        coherence_reset_targets();
+        return 0;
+    }
+    coherence_image_newer(t);
+    GeState saved = *s_ge;
+    s_ge->fbp = base; s_ge->fbw = 512u; s_ge->fbfmt = 3u;
+    s_ge->zbp = 0x04000000u | AUD_Z; s_ge->zbw = 128u;
+    const GeVtx p = { 10.0f, 10.0f, 1.0f, 1.0f, 0, 0, 1.0f, 255, 255, 255, 255 };
+    (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+    const unsigned long refused0 = s_cnt_fallback_refused;
+    s_cmd_failed = 1;   /* the readback cannot record */
+    const int refused = hook_point(&p, 0);
+    s_cmd_failed = 0;
+    const int kept = t->used && t->gpu_valid && t->clean_gen != t->render_gen;
+    const int handed = refused == 1 && kept ? hook_point(&p, 0) : -1;   /* readbacks work again */
+    *s_ge = saved;
+    if (refused != 1 || !kept || handed != 0 || t->gpu_valid) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a fallback whose readback failed: hook=%d (want 1, "
+                "dropped) target kept=%d, then hook=%d (want 0, ge.c draws)%s\n", name, refused, kept, handed,
+                refused == 0 ? " -- ge.c would draw over stale guest VRAM" : "");
+        coherence_reset_targets();
+        return 0;
+    }
+    /* The refusal is counted, and the count reaches the exit line gegpu_shutdown prints. Failing
+     * before: only the first was said, and no line named the count. */
+    char line[256], want[64];
+    snprintf(want, sizeof want, " fallback-refused=%lu ", refused0 + 1u);
+    if (!failures_line(line, sizeof line) || !strstr(line, want)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the refusal's count did not reach the exit line "
+                "(want \"%s\"): %s\n", name, want, line[0] ? line : "no line\n");
+        coherence_reset_targets();
+        return 0;
+    }
+    coherence_reset_targets();
+    printf("gpu coherence selftest: PASS %s a fallback whose readback failed dropped the primitive and kept "
+           "the GPU's pixels\n", name);
+    return 1;
+}
+
+/* The depth surface at VRAM offset `zba`, stride 512, as target_acquire takes it. */
+static DepthEnt *aud2_depth(uint32_t zba) {
+    s_ge->zbp = 0x04000000u | zba;
+    s_ge->zbw = 512u;
+    if (!ge_zbuf_prepare_current()) return NULL;
+    s_zbuf = ge_zbuf_ptr();
+    return s_zbuf ? depth_acquire(zba, 512u) : NULL;
+}
+
+static int coherence_run_depth_init_fail(void) {
+    const char *name = "depth-init-fail";
+    const uint32_t zba = 0x044000u;
+    coherence_reset_depths();
+    GeState saved = *s_ge;
+    (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+    s_cmd_failed = 1;   /* the first upload cannot record */
+    DepthEnt *d = aud2_depth(zba);
+    s_cmd_failed = 0;
+    int keyed = 0;
+    for (int i = 0; i < MAX_DEP; i++) if (s_deps[i].used && s_deps[i].zba == zba) keyed = 1;
+    DepthEnt *again = d || keyed ? NULL : aud2_depth(zba);
+    int ok = !d && !keyed && again && again->layout != VK_IMAGE_LAYOUT_UNDEFINED && !again->cpu_dirty;
+    if (!ok)
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a depth surface whose upload failed: made=%d left "
+                "keyed=%d, then made=%d seeded=%d%s\n", name, d != NULL, keyed, again != NULL,
+                again && again->layout != VK_IMAGE_LAYOUT_UNDEFINED,
+                keyed ? " -- the next acquire would return its never-seeded image" : "");
+    /* The failed upload's free cannot retire the GPU's work either (its drain fails, injected): the
+     * slot, not used, keeps its images, and the release gegpu_release runs (depth_slots_release,
+     * through coherence_reset_depths) frees them. Failing before: it skipped every slot not used. */
+    if (ok) {
+        coherence_reset_depths();
+        (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+        s_cmd_failed = 1;
+        s_selftest_slot_drain_fail = 1;
+        DepthEnt *f = aud2_depth(zba);
+        const int injected = s_selftest_slot_drain_fail == 0;
+        s_cmd_failed = 0;
+        s_selftest_slot_drain_fail = 0;
+        int held = 0, rekeyed = 0, left = 0;
+        for (int i = 0; i < MAX_DEP; i++) {
+            const DepthEnt *e = &s_deps[i];
+            if (e->used && e->zba == zba) rekeyed = 1;
+            if (!e->used && (e->img || e->view || e->mem)) held = 1;
+        }
+        coherence_reset_depths();
+        for (int i = 0; i < MAX_DEP; i++) {
+            const DepthEnt *e = &s_deps[i];
+            if (e->img || e->view || e->mem || e->timg || e->tview || e->tmem) left = 1;
+        }
+        ok = !f && injected && held && !rekeyed && !left;
+        if (!ok)
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL a depth surface whose upload and free both failed: "
+                    "made=%d injected=%d images held by an unused slot=%d keyed=%d, after the release left=%d%s\n",
+                    name, f != NULL, injected, held, rekeyed, left,
+                    left ? " -- the release skipped the unused slot and leaked its images" : "");
+    }
+    *s_ge = saved;
+    coherence_reset_depths();
+    if (ok) printf("gpu coherence selftest: PASS %s a failed first upload left no slot keyed; the next acquire "
+                   "made and seeded it; a failed free's images were released\n", name);
+    return ok;
+}
+
+static int coherence_run_tex_key_bufw(void) {
+    const char *name = "tex-key-bufw";
+    static const uint32_t addr[2] = { 0x08640000u, 0x08440000u }, bufw[2] = { 64u, 96u };
+    if (s_nbatch) (void)submit_pending();
+    GeState saved = *s_ge;
+    s_ge->tex_fmt = 3u; s_ge->tex_w = 64; s_ge->tex_h = 64;
+    s_ge->tex_swizzle = 0; s_ge->tex_filter = 0u; s_ge->tex_wrap = 0u; s_ge->tex_max_level = 0u;
+    s_ge->tex_mip_wlog2[0] = 6u; s_ge->tex_mip_hlog2[0] = 6u;
+    int ok = 1;
+    for (int k = 0; k < 2; k++) {
+        const uint32_t bytes = bufw[k] * 64u * 4u;
+        coherence_fill_raw((uint8_t *)SR_HOST(addr[k]), bytes / 4u, 4u, k ? 0xFF20C040u : 0xFF4080C0u);
+        sr_gpu_vram_dirty(addr[k], bytes);
+        s_ge->tex_addr = s_ge->tex_mip_addr[0] = addr[k];
+        s_ge->tex_bufw = s_ge->tex_mip_bufw[0] = bufw[k];
+        if (tex_get() == s_white_set) ok = 0;
+        if (s_nbatch) (void)submit_pending();
+    }
+    int found[2] = {0, 0};
+    for (int i = 0; i < s_tex_n; i++)
+        for (int k = 0; k < 2; k++)
+            if (s_tex[i].addr == addr[k] && s_tex[i].w == 64 && s_tex[i].h == 64) found[k] = 1;
+    *s_ge = saved;
+    if (!ok || !found[0] || !found[1]) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL two textures sharing a key: drawn=%d entry at "
+                "0x%08x=%d at 0x%08x=%d%s\n", name, ok, addr[0], found[0], addr[1], found[1],
+                ok && !found[1] ? " -- the second updated the first's entry, which watches the first's bytes" : "");
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s two textures whose keys collide got an entry each\n", name);
+    return 1;
+}
+
+/* ---- Fallback depth key, failed targets, depth views, transfer strides, texture failures --------
+ * (audit 2026-11-17, PR01-U03)
+ *
+ * fallback-zbp-moved: zbp moves and the colour target stays; the next primitive is a point, which
+ * ge.c draws. Its depth is the new surface's from guest VRAM, and the old surface keeps its GPU
+ * depth, newer than guest VRAM. Failing before: the target's old depth was read into ge.c's
+ * buffer and labelled the new zbp, and the old surface was marked written back without being so.
+ *
+ * target-fail-handover: a sprite and a triangle the GPU cannot draw because no target can be made
+ * (a depth stride above 512) are handed to ge.c (the hook returns 0), with the target's newer GPU
+ * pixels written back first. Failing before: the hooks returned 1, so the primitive was drawn by
+ * neither.
+ *
+ * depth-view-dirty: a CPU store into a depth surface through the 0x04400000 and 0x04200000 views
+ * marks the surface CPU-written. Failing before: the commit compared the raw view address with the
+ * surface's plain-view span and never matched.
+ *
+ * xfer-stride: a block transfer whose rows pass the 480-pixel stride (which wrap into the next
+ * guest row) is left to ge.c's copy. Failing before: it was blitted image to image, the columns
+ * past the stride copied as if they were on the same row.
+ *
+ * tex-make-fail: a texture whose image memory cannot be allocated, or whose first upload fails,
+ * leaves no Vulkan object in the cache slot it was made in. Failing before: the image (and its
+ * memory, view and sampler) stayed in the slot, and the next texture's memset lost them. */
+#define AUD3_ZA 0x000B0000u   /* fallback-zbp-moved: two depth surfaces of stride 512 */
+#define AUD3_ZB 0x00100000u
+
+static void aud3_fill16(uint32_t off, uint32_t halfwords, uint16_t v) {
+    uint16_t *p = (uint16_t *)SR_HOST(0x04000000u | off);
+    for (uint32_t i = 0; i < halfwords; i++) p[i] = v;
+}
+
+static int coherence_run_fallback_zbp_moved(void) {
+    const char *name = "fallback-zbp-moved";
+    const uint32_t base = 0x04000000u | AUD_X;
+    coherence_reset_targets();
+    coherence_reset_depths();
+    GeState saved = *s_ge;
+    memset(s_ge, 0, sizeof(*s_ge));
+    coherence_fill_raw((uint8_t *)SR_HOST(base), 512u * FB_H, 4u, coherence_g1(3u));
+    aud3_fill16(AUD3_ZA, 512u * FB_H, 0x1111u);
+    aud3_fill16(AUD3_ZB, 512u * FB_H, 0x3333u);
+    s_ge->fbp = base; s_ge->fbw = 512u; s_ge->fbfmt = 3u;
+    s_ge->zbp = 0x04000000u | AUD3_ZA; s_ge->zbw = 512u;
+    int ok = begin_target() && s_cur && s_cur->dep && s_cur->dep->zba == AUD3_ZA;
+    DepthEnt *a = ok ? s_cur->dep : NULL;
+    /* the GPU drew depth 0x7777 over A: newer than guest VRAM */
+    uint16_t *dev16 = ok ? (uint16_t *)malloc((size_t)SCL_W * SCL_H * 2u) : NULL;
+    float *devf = ok && s_depth32 ? (float *)malloc((size_t)SCL_W * SCL_H * 4u) : NULL;
+    if (ok && (!dev16 || (s_depth32 && !devf))) ok = 0;
+    for (uint32_t i = 0; ok && i < SCL_W * SCL_H; i++) dev16[i] = 0x7777u;
+    for (uint32_t i = 0; ok && devf && i < SCL_W * SCL_H; i++) devf[i] = depth_unorm(0x7777u);
+    ok = ok && coherence_write_device(a->img, VK_IMAGE_ASPECT_DEPTH_BIT, &a->layout,
+                                      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, DEPTH_BPP,
+                                      devf ? (const void *)devf : (const void *)dev16) &&
+         coherence_wrote_device(NULL, a);
+    free(dev16);
+    free(devf);
+    if (!ok) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL setup: no target over depth A\n", name);
+        *s_ge = saved; coherence_reset_depths(); return 0;
+    }
+    a->cpu_dirty = 0;
+    a->guest_dirty = 1;
+    s_ge->zbp = 0x04000000u | AUD3_ZB;   /* the depth surface moves; the colour target stays */
+    const GeVtx p = { 10.0f, 10.0f, 1.0f, 1.0f, 0, 0, 1.0f, 255, 255, 255, 255 };
+    const int hook = hook_point(&p, 0);
+    const uint16_t *z = ge_zbuf_ptr();
+    const unsigned zv = z ? z[10u * 512u + 10u] : 0u;
+    const int a_kept = a->used && a->zba == AUD3_ZA && a->guest_dirty && !a->cpu_dirty;
+    *s_ge = saved;
+    coherence_reset_depths();
+    if (hook != 0 || zv != 0x3333u || !a_kept) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a point after zbp moved: hook=%d (want 0), ge.c's "
+                "depth at (10, 10) %04x (want 3333, B's), A still newer than VRAM=%d%s\n", name, hook, zv, a_kept,
+                zv == 0x7777u ? " -- ge.c took A's GPU depth as B's" : "");
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s a point after zbp moved tested B's depth and left A's on the GPU\n",
+           name);
+    return 1;
+}
+
+static int coherence_run_target_fail_handover(void) {
+    const char *name = "target-fail-handover";
+    const uint32_t base = 0x04000000u | AUD_X;
+    uint32_t *g = (uint32_t *)SR_HOST(base);
+    coherence_reset_targets();
+    coherence_reset_depths();
+    coherence_fill_raw((uint8_t *)g, 512u * FB_H, 4u, coherence_g1(3u));
+    Target *t = target_color_acquire(AUD_X, 512u, 3u, 1);
+    if (!t || !t->gpu_valid) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL setup: no GPU target\n", name);
+        coherence_reset_targets(); return 0;
+    }
+    coherence_fill_raw((uint8_t *)g, 512u * FB_H, 4u, coherence_g0(3u));
+    coherence_image_newer(t);   /* the image (g1) is newer than guest VRAM (g0) */
+    GeState saved = *s_ge;
+    memset(s_ge, 0, sizeof(*s_ge));
+    s_ge->fbp = base; s_ge->fbw = 512u; s_ge->fbfmt = 3u;
+    s_ge->zbp = 0x04000000u | AUD_Z; s_ge->zbw = 1024u;   /* no depth surface can be made */
+    const GeVtx p0 = { 10.0f, 10.0f, 1.0f, 1.0f, 0, 0, 1.0f, 255, 255, 255, 255 };
+    const GeVtx p1 = { 20.0f, 20.0f, 1.0f, 1.0f, 0, 0, 1.0f, 255, 255, 255, 255 };
+    const GeVtx p2 = { 10.0f, 30.0f, 1.0f, 1.0f, 0, 0, 1.0f, 255, 255, 255, 255 };
+    const int spr = hook_sprite(&p0, &p1, 0);
+    const int written = !t->gpu_valid && g[12u * 512u + 12u] == coherence_g1(3u);
+    s_tri_state.valid = 0;
+    const int tri = hook_tri(&p0, &p1, &p2, 0);
+    *s_ge = saved;
+    coherence_reset_targets();
+    if (spr != 0 || !written || tri != 0) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL primitives with no target: sprite hook=%d, triangle "
+                "hook=%d (want 0, ge.c draws), GPU pixels written back=%d%s\n", name, spr, tri, written,
+                spr == 1 || tri == 1 ? " -- the primitive was drawn by neither" : "");
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s primitives with no target went to ge.c over the written-back "
+           "pixels\n", name);
+    return 1;
+}
+
+static int coherence_run_depth_view_dirty(void) {
+    const char *name = "depth-view-dirty";
+    const uint32_t zba = 0x00100000u;
+    coherence_reset_depths();
+    GeState saved = *s_ge;
+    DepthEnt *d = aud2_depth(zba);
+    int ok = d && !d->cpu_dirty;
+    /* depth pixel (8, 4): plain offset (zba + linear) ^ 0x2040 */
+    const uint32_t plain = (zba + (4u * 512u + 8u) * 2u) ^ 0x2040u;
+    static const uint32_t view[2] = { 0x04400000u, 0x04200000u };
+    int marked[2] = { 0, 0 };
+    for (int k = 0; ok && k < 2; k++) {
+        d->cpu_dirty = 0;
+        /* through 0x04200000 a store reaches offset o ^ 0x2040 (sr_vram_cpu_address) */
+        const uint32_t addr = view[k] | (k ? plain ^ 0x2040u : plain);
+        if (sr_vram_cpu_address(addr) != (0x04000000u | plain)) { ok = 0; break; }
+        sr_ge_vram_write_commit(addr, 2u);
+        marked[k] = d->cpu_dirty;
+    }
+    *s_ge = saved;
+    coherence_reset_depths();
+    if (!ok || !marked[0] || !marked[1]) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL setup=%d, a CPU store into depth through 0x04400000 "
+                "marked it=%d, through 0x04200000=%d%s\n", name, ok, marked[0], marked[1],
+                ok ? " -- the GPU keeps testing against the depth from before the store" : "");
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s CPU stores into depth through the 0x044 and 0x042 views marked "
+           "the surface\n", name);
+    return 1;
+}
+
+static int coherence_run_xfer_stride(void) {
+    const char *name = "xfer-stride";
+    const uint32_t stride = 480u;
+    coherence_reset_targets();
+    coherence_reset_depths();
+    coherence_fill_raw((uint8_t *)SR_HOST(0x04000000u | AUD_X), stride * FB_H, 4u, coherence_g1(3u));
+    coherence_fill_raw((uint8_t *)SR_HOST(0x04000000u | AUD_M), stride * FB_H, 4u, coherence_g0(3u));
+    Target *a = target_color_acquire(AUD_X, stride, 3u, 1), *b = target_color_acquire(AUD_M, stride, 3u, 1);
+    if (!a || !b || !a->gpu_valid || !b->gpu_valid) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL setup: the targets could not be made\n", name);
+        coherence_reset_targets(); return 0;
+    }
+    GeState saved = *s_ge;
+    s_ge->xf_src = AUD_X; s_ge->xf_srcw = stride | (0x04u << 16);
+    s_ge->xf_dst = AUD_M; s_ge->xf_dstw = stride | (0x04u << 16);
+    s_ge->xf_size = 19u | (9u << 10);                      /* 20 x 10 */
+    int took[3];
+    static const uint32_t spos[3] = { 400u, 470u, 400u }, dpos[3] = { 400u, 400u, 470u };
+    for (int k = 0; k < 3; k++) {
+        s_ge->xf_spos = spos[k] | (20u << 10);
+        s_ge->xf_dpos = dpos[k] | (40u << 10);
+        took[k] = hook_xfer(1u);
+    }
+    *s_ge = saved;
+    coherence_reset_targets();
+    if (!took[0] || took[1] || took[2]) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL stride-480 transfers: inside the rows taken=%d (want "
+                "1), source past the stride=%d, destination past it=%d (want 0)%s\n", name, took[0], took[1],
+                took[2], took[1] || took[2] ? " -- columns past the stride were copied on the same row" : "");
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s transfers whose rows pass the stride were left to ge.c's copy\n", name);
+    return 1;
+}
+
+static int coherence_run_tex_make_fail(void) {
+    const char *name = "tex-make-fail";
+    const uint32_t addr = 0x08780000u, bytes = 64u * 64u * 4u;
+    if (s_nbatch) (void)submit_pending();
+    GeState saved = *s_ge;
+    s_ge->tex_fmt = 3u; s_ge->tex_w = 64; s_ge->tex_h = 64;
+    s_ge->tex_swizzle = 0; s_ge->tex_filter = 0u; s_ge->tex_wrap = 0u; s_ge->tex_max_level = 0u;
+    s_ge->tex_mip_wlog2[0] = 6u; s_ge->tex_mip_hlog2[0] = 6u;
+    s_ge->tex_addr = s_ge->tex_mip_addr[0] = addr;
+    s_ge->tex_bufw = s_ge->tex_mip_bufw[0] = 64u;
+    coherence_fill_raw((uint8_t *)SR_HOST(addr), bytes / 4u, 4u, 0xFF305070u);
+    sr_gpu_vram_dirty(addr, bytes);
+    const int n0 = s_tex_n;
+    /* k = 2: the upload fails and so does the drain before its objects are freed (injected); they
+     * are held outside the slot, and the next miss frees them before it makes its texture. Failing
+     * before: they stayed in the slot, and that miss's slot reset lost them. */
+    int white[3], left[3], held = 0, injected = 0;
+    for (int k = 0; k < 3; k++) {
+        if (k) { (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME); s_cmd_failed = 1; }   /* the upload cannot record */
+        else s_selftest_alloc_fail = 1;                                          /* the image has no memory */
+        if (k == 2) s_selftest_slot_drain_fail = 1;                              /* nor can the free retire */
+        white[k] = tex_get() == s_white_set;
+        if (k == 2) { injected = s_selftest_slot_drain_fail == 0; held = tex_left_held(); }
+        s_cmd_failed = 0;
+        s_selftest_alloc_fail = 0;
+        s_selftest_slot_drain_fail = 0;
+        const TexEnt *e = &s_tex[s_tex_n];
+        left[k] = s_tex_n != n0 || e->img || e->mem || e->view || e->smp;
+    }
+    const int made = tex_get() != s_white_set && s_tex_n == n0 + 1;
+    const int still_held = tex_left_held();
+    if (s_nbatch) (void)submit_pending();
+    *s_ge = saved;
+    if (!white[0] || !white[1] || !white[2] || left[0] || left[1] || left[2] || !injected || !held || !made ||
+        still_held) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL failed textures: alloc white=%d left objects=%d, upload "
+                "white=%d left objects=%d, upload and free white=%d injected=%d left objects=%d held=%d, then made=%d "
+                "still held=%d%s\n", name, white[0], left[0], white[1], left[1], white[2], injected, left[2], held,
+                made, still_held,
+                left[0] || left[1] || left[2] ? " -- the next texture's slot reset loses them" : "");
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s failed textures left no Vulkan object in their slot; a failed free's "
+           "objects were freed at the next miss\n", name);
+    return 1;
+}
+
 static int coherence_selftest_cases(void) {
     /* SR_GPU_COHERENCE_CASE=scaled-upload (the harness's --case) runs that case alone, as the
      * recipe does at render scales 2 and 4: the other fixtures expect 1x pixels (a filtered sample
      * lands on other device pixels at a higher scale). Any other value fails. */
     const char *only = getenv("SR_GPU_COHERENCE_CASE");
     if (only && *only) {
+        if (strcmp(only, "batch-state-elision") == 0) return coherence_run_batch_state_elision();
         if (strcmp(only, "scaled-upload") == 0) return coherence_run_scaled_upload();
         if (strcmp(only, "mip-lod") == 0) return coherence_run_mip_lod();
         if (strcmp(only, "mip-clut") == 0) return coherence_run_mip_clut();
@@ -15532,6 +16756,22 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();
         if (strcmp(only, "clear-masks") == 0) return coherence_run_clear_masks();
         if (strcmp(only, "soft-shadow") == 0) return coherence_run_soft_shadow();
+        if (strcmp(only, "tex-evict-fail") == 0) return coherence_run_tex_evict_fail();
+        if (strcmp(only, "target-evict-pending") == 0) return coherence_run_target_evict_pending();
+        if (strcmp(only, "xfer-cpu-writes") == 0) return coherence_run_xfer_cpu_writes();
+        if (strcmp(only, "readback-zbuf") == 0) return coherence_run_readback_zbuf();
+        if (strcmp(only, "submit-fail") == 0) return coherence_run_submit_fail();
+        if (strcmp(only, "target-keep-unsynced") == 0) return coherence_run_target_keep_unsynced();
+        if (strcmp(only, "fallback-refused") == 0) return coherence_run_fallback_refused();
+        if (strcmp(only, "depth-init-fail") == 0) return coherence_run_depth_init_fail();
+        if (strcmp(only, "tex-key-bufw") == 0) return coherence_run_tex_key_bufw();
+        if (strcmp(only, "fallback-zbp-moved") == 0) return coherence_run_fallback_zbp_moved();
+        if (strcmp(only, "target-fail-handover") == 0) return coherence_run_target_fail_handover();
+        if (strcmp(only, "depth-view-dirty") == 0) return coherence_run_depth_view_dirty();
+        if (strcmp(only, "xfer-stride") == 0) return coherence_run_xfer_stride();
+        if (strcmp(only, "tex-make-fail") == 0) return coherence_run_tex_make_fail();
+        if (strcmp(only, "pcache-shader-set") == 0) return coherence_run_pcache_shader_set();
+        if (strcmp(only, "pipe-index") == 0) return coherence_run_pipe_index();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
         return 0;
     }
@@ -15551,6 +16791,7 @@ static int coherence_selftest_cases(void) {
         { "alias-vram", 3, 512, (72u * 512u + 92u) * 4u, 8, 0, 0, 1 },
     };
     int ok = 1;
+    if (!coherence_run_batch_state_elision()) ok = 0;
     for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
         if (!coherence_run_case(&cases[i])) ok = 0;
     if (!coherence_run_clean_case("clean-aligned", 3, 512, (50u * 512u + 20u) * 4u, 16)) ok = 0;
@@ -15585,6 +16826,20 @@ static int coherence_selftest_cases(void) {
      * colour surface at 0x100000 here. */
     if (!coherence_run_scalar_vram_read(0x040A2000u)) ok = 0;
     if (!coherence_run_native_bulk_copy()) ok = 0;
+    if (!coherence_run_target_evict_pending()) ok = 0;
+    if (!coherence_run_xfer_cpu_writes()) ok = 0;
+    if (!coherence_run_readback_zbuf()) ok = 0;
+    if (!coherence_run_target_keep_unsynced()) ok = 0;
+    if (!coherence_run_fallback_refused()) ok = 0;
+    if (!coherence_run_depth_init_fail()) ok = 0;
+    if (!coherence_run_tex_key_bufw()) ok = 0;
+    if (!coherence_run_fallback_zbp_moved()) ok = 0;
+    if (!coherence_run_target_fail_handover()) ok = 0;
+    if (!coherence_run_depth_view_dirty()) ok = 0;
+    if (!coherence_run_xfer_stride()) ok = 0;
+    if (!coherence_run_tex_make_fail()) ok = 0;
+    if (!coherence_run_pcache_shader_set()) ok = 0;
+    if (!coherence_run_pipe_index()) ok = 0;
     if (!coherence_run_fallback_reasons()) ok = 0;
     /* Last: its chain-fallback case draws through the software fallback, which hands the
      * current depth surface to ge.c, and the fixtures above start from the depth state the

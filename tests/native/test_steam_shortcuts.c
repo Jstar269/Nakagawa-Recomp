@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
+#define _POSIX_C_SOURCE 200809L
+
 /* Add to Steam (#2152, src/core/nk_steam_shortcuts.c): the binary shortcuts.vdf edit and the
  * file-level rules around it. The files are built here byte by byte in a temporary folder; no
  * Steam client, registry entry or network is involved. */
@@ -13,6 +15,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 /* The fixture paths are short temporary-folder names; the compiler can only assume the longest
  * a buffer allows, and every path is checked by the calls that use it. */
@@ -486,6 +494,8 @@ static void test_a_failed_backup_writes_nothing(void) {
     CHECK(file_is(vdf, in.data, in.size), "the original is untouched");
     snprintf(name, sizeof(name), "%s.nakagawa-backup-20261106-120000", vdf);
     CHECK(file_is(name, in.data, 1u), "an earlier backup is not overwritten");
+    snprintf(name, sizeof(name), "%s.nakagawa-backup-20261106-120000-100", vdf);
+    CHECK(file_is(name, in.data, 1u), "the last backup name tried is not deleted");
 }
 
 static void test_bad_stamp(void) {
@@ -523,7 +533,20 @@ static void test_accounts_and_add_for_account(void) {
     }
     size_t one = 0;
     CHECK_STATUS(nk_steam_list_accounts(steam, accounts, 2u, &one), NK_STEAM_OK, "a small cap");
-    CHECK(one <= 2u, "never more than the cap");
+    CHECK(one == 2u, "a cap below the account count fills the cap");
+    if (one == 2u) {
+        /* Which two folders fill the cap follows the directory listing; each is one of
+           the three accounts, they differ, and they come back in ascending order. */
+        static const char *const known[] = {"4", "20002", "30001"};
+        int rank[2] = {-1, -1};
+        for (size_t a = 0; a < 2u; a++) {
+            for (int k = 0; k < 3; k++) {
+                if (strcmp(accounts[a].id, known[k]) == 0) rank[a] = k;
+            }
+        }
+        CHECK(rank[0] >= 0 && rank[1] >= 0, "each capped entry is a real account");
+        CHECK(rank[0] < rank[1], "the capped entries differ and are ascending by number");
+    }
 
     char missing[NATIVE_TEST_PATH_MAX];
     path_in(missing, sizeof(missing), "no-steam-here");
@@ -557,7 +580,7 @@ static void test_accounts_and_add_for_account(void) {
     free(data);
     snprintf(vdf, sizeof(vdf), "%s/userdata/30001/config/shortcuts.vdf", steam);
     CHECK(nk_platform_path_missing(vdf), "no other account was touched");
-#ifndef _WIN32
+#if !defined(_WIN32) && !(defined(__linux__) && !defined(__ANDROID__))
     CHECK_STATUS(nk_steam_add_for_account(steam, "30001", &kPlayer, NULL, "20261106-120000",
                                           backup, sizeof(backup), NULL), NK_STEAM_ERR_UNSUPPORTED,
                  "off Windows, without a probe of its own, nothing is written");
@@ -565,6 +588,158 @@ static void test_accounts_and_add_for_account(void) {
     CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_ERR_UNSUPPORTED,
                  "off Windows, Steam is not found by itself");
 #endif
+}
+
+#if defined(__linux__) && !defined(__ANDROID__)
+static void test_linux_steam_paths_and_pid(void) {
+    char home[NATIVE_TEST_PATH_MAX], path[NATIVE_TEST_PATH_MAX], root[NK_MAX_PATH];
+    char original_home[NK_MAX_PATH];
+    int have_original_home = nk_platform_env_utf8("HOME", original_home,
+                                                   sizeof(original_home)) > 0;
+    path_in(home, sizeof(home), "steam-home");
+    native_test_set_env("HOME", home);
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_ERR_NOT_FOUND,
+                 "no Steam root in temporary HOME");
+    snprintf(path, sizeof(path), "%s/.local/share/Steam", home);
+    CHECK(nk_platform_mkdir_p(path), "create standard Linux Steam root");
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "find the standard Linux Steam root");
+    CHECK(strcmp(root, path) == 0, "use the standard Steam root");
+
+    snprintf(path, sizeof(path), "%s/.steam", home);
+    CHECK(nk_platform_mkdir_p(path), "create legacy .steam folder");
+    snprintf(path, sizeof(path), "%s/.steam/steam", home);
+    CHECK(nk_platform_mkdir_p(path), "create legacy Steam root");
+    /* The standard location takes precedence when both exist. */
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "find Steam when both roots exist");
+    CHECK(strstr(root, "/.local/share/Steam") != NULL, "prefer the standard root");
+    snprintf(path, sizeof(path), "%s/.steam/steam/userdata", home);
+    CHECK(nk_platform_mkdir_p(path), "create userdata in the alternate root");
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "prefer the root that contains userdata");
+    CHECK(strstr(root, "/.steam/steam") != NULL, "use the root with Steam accounts");
+    CHECK(rmdir(path) == 0, "remove alternate userdata fixture");
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "fall back to standard root without userdata");
+    CHECK(strstr(root, "/.local/share/Steam") != NULL, "prefer standard root when neither has userdata");
+    snprintf(path, sizeof(path), "%s/.local/share/Steam", home);
+    CHECK(rmdir(path) == 0, "remove standard root to check the alternate layout");
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "find the alternate Linux Steam root");
+    CHECK(strstr(root, "/.steam/steam") != NULL, "use the alternate Steam root");
+    snprintf(path, sizeof(path), "%s/.local/share/Steam", home);
+    CHECK(nk_platform_mkdir_p(path), "restore standard Steam root for account fixture");
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "prefer standard root after restoring it");
+
+    snprintf(path, sizeof(path), "%s/.steam/steam.pid", home);
+    CHECK(!nk_steam_client_running(), "missing PID file means Steam is closed");
+    CHECK(write_bytes(path, (const uint8_t *)"not-a-pid\n", 10u), "write malformed PID");
+    CHECK(nk_steam_client_running(), "malformed PID fails closed");
+    CHECK(nk_remove_utf8(path) == 0, "remove malformed PID");
+    CHECK(write_bytes(path, (const uint8_t *)"123\n", 4u), "write PID for unreadable file test");
+    int unreadable_fd = open(path, O_RDONLY);
+    CHECK(unreadable_fd >= 0, "open PID fixture for descriptor-based permission change");
+    if (unreadable_fd >= 0) {
+        if (geteuid() == 0) {
+            puts("SKIP (root reads any mode): unreadable PID file permission test");
+        } else {
+            int mode_changed = fchmod(unreadable_fd, 0000) == 0;
+            CHECK(mode_changed, "make PID fixture unreadable through its open descriptor");
+            if (mode_changed) CHECK(nk_steam_client_running(), "unreadable PID file fails closed");
+            CHECK(fchmod(unreadable_fd, 0600) == 0, "restore PID fixture permissions through its descriptor");
+        }
+        CHECK(close(unreadable_fd) == 0, "close PID fixture descriptor");
+    }
+    CHECK(nk_remove_utf8(path) == 0, "remove unreadable PID fixture");
+    pid_t child = fork();
+    CHECK(child >= 0, "fork a process for stale PID test");
+    if (child == 0) _exit(0);
+    if (child > 0) {
+        int child_status = 0;
+        CHECK(waitpid(child, &child_status, 0) == child, "reap stale PID fixture process");
+        char stale_pid[32];
+        snprintf(stale_pid, sizeof(stale_pid), "%ld\n", (long)child);
+        CHECK(write_bytes(path, (const uint8_t *)stale_pid, strlen(stale_pid)),
+              "write exited process PID");
+    }
+    CHECK(!nk_steam_client_running(), "a PID for a nonexistent process means closed");
+    CHECK(nk_remove_utf8(path) == 0, "remove stale PID");
+    char pid[32];
+    snprintf(pid, sizeof(pid), "%ld\n", (long)getpid());
+    CHECK(write_bytes(path, (const uint8_t *)pid, strlen(pid)), "write current process PID");
+    CHECK(nk_steam_client_running(), "a live PID means Steam may be running");
+    CHECK(nk_remove_utf8(path) == 0, "remove live PID");
+    CHECK(nk_platform_mkdir_p(path), "a non-file PID path is treated as unreadable");
+    CHECK(nk_steam_client_running(), "a non-regular PID path fails closed");
+    CHECK(rmdir(path) == 0, "remove PID directory");
+
+    snprintf(path, sizeof(path), "%s/.local/share/Steam/userdata/345", home);
+    CHECK(nk_platform_mkdir_p(path), "create Steam account fixture");
+    char backup[NK_MAX_PATH];
+    CHECK_STATUS(nk_steam_add_for_account(root, "345", &kPlayer, NULL, "20261106-120000",
+                                          backup, sizeof(backup), NULL), NK_STEAM_OK,
+                 "without PID file, default probe permits writing");
+    snprintf(path, sizeof(path), "%s/userdata/345/config/shortcuts.vdf", root);
+    size_t prior_size = 0u;
+    uint8_t *prior = read_bytes(path, &prior_size);
+    CHECK(prior != NULL, "read shortcut before running-PID refusal");
+    snprintf(path, sizeof(path), "%s/.steam/steam.pid", home);
+    char pidtext[32];
+    snprintf(pidtext, sizeof(pidtext), "%ld\n", (long)getpid());
+    CHECK(write_bytes(path, (const uint8_t *)pidtext, strlen(pidtext)), "seed running PID");
+    CHECK_STATUS(nk_steam_add_for_account(root, "345", &kPlayer, NULL, "20261106-120001",
+                                          backup, sizeof(backup), NULL), NK_STEAM_ERR_STEAM_RUNNING,
+                 "default probe blocks writes while a PID is live");
+    snprintf(path, sizeof(path), "%s/userdata/345/config/shortcuts.vdf", root);
+    size_t after_size = 0u;
+    uint8_t *after = read_bytes(path, &after_size);
+    CHECK(prior && after && prior_size == after_size && memcmp(prior, after, prior_size) == 0,
+          "running Steam leaves shortcuts.vdf byte for byte unchanged");
+    free(prior);
+    free(after);
+    native_test_set_env("HOME", have_original_home ? original_home : NULL);
+}
+#endif
+
+/* More numbered account folders than the account list holds: adding for any one of them still
+ * finds it, because the requested account is looked up by its own folder, not in the capped
+ * list (audit 2026-11-17). */
+static void test_add_for_account_beyond_the_list_cap(void) {
+    enum { kAccounts = (int)NK_STEAM_ACCOUNT_CAP + 4 };
+    char steam[NATIVE_TEST_PATH_MAX], steam_art[NATIVE_TEST_PATH_MAX], sub[NATIVE_TEST_PATH_MAX];
+    char id[16], backup[NK_MAX_PATH];
+    int found_plain = 0, found_art = 0;
+    path_in(steam, sizeof(steam), "steam_many_accounts");
+    path_in(steam_art, sizeof(steam_art), "steam_many_accounts_art");
+    for (int i = 0; i < kAccounts; i++) {
+        snprintf(sub, sizeof(sub), "%s/userdata/%d", steam, 100 + i);
+        CHECK(nk_platform_mkdir_p(sub), "make an account folder");
+        snprintf(sub, sizeof(sub), "%s/userdata/%d", steam_art, 100 + i);
+        CHECK(nk_platform_mkdir_p(sub), "make an account folder");
+    }
+    for (int i = 0; i < kAccounts; i++) {
+        NkSteamGridResult res;
+        NkSteamChange ch = NK_STEAM_CHANGE_NONE;
+        snprintf(id, sizeof(id), "%d", 100 + i);
+        if (nk_steam_add_for_account(steam, id, &kPlayer, is_running_no, "20261117-120000",
+                                     backup, sizeof(backup), NULL) == NK_STEAM_OK) {
+            found_plain++;
+        }
+        if (nk_steam_add_for_account_with_art(steam_art, id, &kPlayer, is_running_no,
+                                              "20261117-120000", backup, sizeof(backup), &ch,
+                                              NULL, NK_STEAM_GRID_KEEP_EXISTING,
+                                              &res) == NK_STEAM_OK &&
+            ch == NK_STEAM_CHANGE_ADDED) {
+            found_art++;
+        }
+    }
+    CHECK(found_plain == kAccounts, "every account beyond the list cap is found and written");
+    CHECK(found_art == kAccounts, "with art, every account beyond the list cap is found");
+    CHECK_STATUS(nk_steam_add_for_account(steam, "99999", &kPlayer, is_running_no,
+                                          "20261117-120000", backup, sizeof(backup), NULL),
+                 NK_STEAM_ERR_NOT_FOUND, "an account folder that is not there");
 }
 
 /* ---- One shortcut per game (#2152) ---- */
@@ -905,7 +1080,13 @@ static void test_grid_slot_paths_and_suffixes(void) {
           "wide slot path trims trailing slash");
     snprintf(expect_tail, sizeof(expect_tail), "%c%lu.png", nk_platform_path_separator(),
              (unsigned long)app_id);
-    CHECK(strstr(out, expect_tail) != NULL, "wide slot path ends with <appid>.png");
+    {
+        char expect_full[NK_MAX_PATH];
+        snprintf(expect_full, sizeof(expect_full), "/steam/userdata/100/config/grid%s",
+                 expect_tail);
+        CHECK(strcmp(out, expect_full) == 0,
+              "wide slot path is the trimmed folder, one separator, then <appid>.png");
+    }
 
     CHECK(nk_steam_grid_slot_path("/grid", app_id, NK_STEAM_GRID_SLOT_ICON, out, sizeof(out)),
           "icon slot path formats");
@@ -1060,6 +1241,17 @@ static void test_grid_steam_running_and_overwrite_guards(void) {
               res.kept_mask == 0u && file_is(p_hero, pic1, pic1_len) &&
               nk_platform_path_missing(p_orig),
           "OVERWRITE replaced hero and cleaned rollback copy");
+
+    /* A rollback copy an earlier run could not put back (or a crash left) may be the user's
+       only copy of their own picture: OVERWRITE refuses instead of truncating it. */
+    CHECK(write_bytes(p_orig, custom_png, custom_len), "seed a leftover rollback copy");
+    CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                         NK_STEAM_GRID_OVERWRITE, &res),
+                 NK_STEAM_ERR_BACKUP, "OVERWRITE refuses over a leftover rollback copy");
+    CHECK(path_matches(res.failed_path, p_orig) && res.written_mask == 0u &&
+              file_is(p_orig, custom_png, custom_len) && file_is(p_hero, pic1, pic1_len) &&
+              file_is(p_icon, icon0, icon0_len) && file_is(p_wide, icon0, icon0_len),
+          "leftover rollback copy is kept byte for byte and named, and no slot changed");
 }
 
 static void test_grid_invalid_pngs_and_rollback(void) {
@@ -1118,6 +1310,7 @@ static void test_grid_invalid_pngs_and_rollback(void) {
     /* Oversized PNG (> NK_STEAM_GRID_MAX_BYTES) refused */
     oversized = (uint8_t *)calloc(1u, NK_STEAM_GRID_MAX_BYTES + 1u);
     CHECK(oversized != NULL, "allocate oversized buffer");
+    if (oversized == NULL) return;
     memcpy(oversized, good, good_len);
     art.icon0_png = oversized;
     art.icon0_size = NK_STEAM_GRID_MAX_BYTES + 1u;
@@ -1151,6 +1344,35 @@ static void test_grid_invalid_pngs_and_rollback(void) {
               nk_platform_path_missing(p_wide) && nk_platform_path_missing(p_orig) &&
               file_is(p_hero, old_hero, old_len),
           "mid-batch failure names blocker, cleans temps, and keeps prior hero");
+
+    /* The rollback removes only the temporary files this call staged: a kept slot's
+       '<dst>.nakagawa-tmp' and a later slot's, never written here, are left alone. */
+    {
+        static const uint8_t foreign[] = {'f', 'o', 'r', 'e', 'i', 'g', 'n'};
+        char p_hero_tmp[NK_MAX_PATH * 2];
+        path_in(grid_dir, sizeof(grid_dir), "grid_rollback_staged_only");
+        nk_platform_mkdir_p(grid_dir);
+        grid_file_in(p_icon, sizeof(p_icon), grid_dir, app_id, "_icon.png");
+        grid_file_in(p_icon_tmp, sizeof(p_icon_tmp), grid_dir, app_id, "_icon.png.nakagawa-tmp");
+        grid_file_in(p_tmp_block, sizeof(p_tmp_block), grid_dir, app_id, ".png.nakagawa-tmp");
+        grid_file_in(p_hero_tmp, sizeof(p_hero_tmp), grid_dir, app_id, "_hero.png.nakagawa-tmp");
+        CHECK(write_bytes(p_icon, old_hero, old_len), "seed an existing icon that is kept");
+        CHECK(write_bytes(p_icon_tmp, foreign, sizeof(foreign)), "seed a kept slot's temp file");
+        CHECK(write_bytes(p_hero_tmp, foreign, sizeof(foreign)), "seed a later slot's temp file");
+        CHECK(nk_platform_mkdir_p(p_tmp_block), "plant blocking wide temp dir");
+        art.icon0_png = good;
+        art.icon0_size = good_len;
+        art.pic1_png = good;
+        art.pic1_size = good_len;
+        CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                             NK_STEAM_GRID_KEEP_EXISTING, &res),
+                     NK_STEAM_ERR_WRITE, "wide staging blocker fails closed");
+        CHECK(file_is(p_icon, old_hero, old_len), "the kept icon is untouched");
+        CHECK(file_is(p_icon_tmp, foreign, sizeof(foreign)),
+              "rollback leaves a kept slot's temp file it never staged");
+        CHECK(file_is(p_hero_tmp, foreign, sizeof(foreign)),
+              "rollback leaves a later slot's temp file it never staged");
+    }
 }
 
 static void test_add_for_account_with_art_and_rollback(void) {
@@ -1522,6 +1744,10 @@ int main(void) {
     test_a_failed_backup_writes_nothing();
     test_bad_stamp();
     test_accounts_and_add_for_account();
+#if defined(__linux__) && !defined(__ANDROID__)
+    test_linux_steam_paths_and_pid();
+#endif
+    test_add_for_account_beyond_the_list_cap();
     test_each_game_is_its_own_shortcut();
     test_a_moved_folder_updates_its_own_entry();
     test_file_update_is_backed_up();

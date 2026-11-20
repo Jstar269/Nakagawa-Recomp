@@ -135,6 +135,30 @@ int main(void) {
     CHECK(sr_dtab_lookup(t, 4u) == (uintptr_t)(VoidFn)fn_a, "first bulk key");
     CHECK(sr_dtab_lookup(t, 4u * 3999u) == (uintptr_t)(VoidFn)fn_a, "last bulk key");
 
+    /* Capacity: the table takes SR_DTAB_CAPACITY distinct keys, refuses one more without
+     * changing anything, still re-registers a held key, and a miss still ends. Before the
+     * bound, filling every slot made the next register or any miss probe forever. */
+    {
+        SrDispatchTable *t4 = (SrDispatchTable *)calloc(1, sizeof *t4);
+        if (!t4) { fprintf(stderr, "OOM\n"); return 2; }
+        int all_taken = 1;
+        for (uint32_t i = 0; i < SR_DTAB_CAPACITY; i++)
+            all_taken &= sr_dtab_register(t4, i * 4u, (uintptr_t)(VoidFn)fn_a);
+        CHECK(all_taken, "a key below capacity was refused");
+        CHECK(t4->occupied == SR_DTAB_CAPACITY, "occupied count %u", (unsigned)t4->occupied);
+        CHECK(sr_dtab_register(t4, SR_DTAB_CAPACITY * 4u, (uintptr_t)(VoidFn)fn_b) == 0,
+              "a key past capacity was taken");
+        CHECK(t4->occupied == SR_DTAB_CAPACITY, "a refused key changed the count");
+        CHECK(sr_dtab_lookup(t4, SR_DTAB_CAPACITY * 4u) == 0u, "the refused key resolves");
+        CHECK(sr_dtab_lookup(t4, 0x7ffffff0u) == 0u, "a miss on a full table resolves");
+        CHECK(sr_dtab_register(t4, 4u, (uintptr_t)(VoidFn)fn_b) == 1,
+              "re-registering a held key at capacity was refused");
+        CHECK(sr_dtab_lookup(t4, 4u) == (uintptr_t)(VoidFn)fn_b, "re-registered key lookup");
+        CHECK(sr_dtab_lookup(t4, (SR_DTAB_CAPACITY - 1u) * 4u) == (uintptr_t)(VoidFn)fn_a,
+              "last key below capacity lookup");
+        free(t4);
+    }
+
     free(t);
     if (g_failed) { fprintf(stderr, "dispatch selftest: FAILED\n"); return 1; }
     printf("dispatch selftest: OK\n");

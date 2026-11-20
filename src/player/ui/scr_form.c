@@ -64,6 +64,21 @@ static bool text_was_cut(const char *shown, const char *text) {
            !(text_length >= n && memcmp(text + text_length - n, ellipsis, n) == 0);
 }
 
+/* A setting button's label, "name: value", whole. A label wider than the row's `width`
+   ends in an ellipsis, cut whole characters at a time by nk_ui_text_clamp (in the
+   button's capitals, which it draws), so the button never outgrows its row. The column
+   and the button take the same label. Returns `out` or frame storage. */
+static const char *scr_wizard_label(NkUi *ui, char *out, size_t cap, const char *name,
+                                    const char *value, float width) {
+    NkUiTextStyle style;
+    float pad;
+    (void)snprintf(out, cap, "%s: %s", name, value);
+    if (!(width > 0.0f) || nk_ui_button_width(ui, out, 0u) <= width) return out;
+    pad = nk_ui_button_width(ui, "", 0u);
+    style = nk_ui_type(NK_UI_TYPE_LABEL, 0u);
+    return nk_ui_text_clamp(ui, nk_ui_caps(ui, out), &style, width - pad, 1);
+}
+
 /* The column a group of rows `width` px across shares: the design's 220 px, or
    as wide as the widest label when that is wider. The buttons line up. At text
    sizes above design, or at design size when Enhanced opts in, a sentence with
@@ -73,12 +88,12 @@ WizardColumn scr_wizard_column(NkUi *ui, const WizardRow *rows, size_t count, fl
                               bool stack_at_design_size) {
     NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
     WizardColumn column = {WIZARD_VALUE_CELL, false};
-    char label[48];
+    char label[SCR_WIZARD_LABEL_MAX];
     float room;
     for (size_t i = 0u; i < count; ++i) {
-        float need;
-        (void)snprintf(label, sizeof(label), "%s: %s", rows[i].name, rows[i].value);
-        need = nk_ui_button_width(ui, label, 0u);
+        float need = nk_ui_button_width(
+            ui, scr_wizard_label(ui, label, sizeof(label), rows[i].name, rows[i].value, width),
+            0u);
         if (need > column.cell) column.cell = need;
     }
     if (!stack_at_design_size && !(nk_ui_text_scale(ui) > 1.0f)) return column;
@@ -110,7 +125,8 @@ bool scr_wizard_value_state(NkUi *ui, NkUiId id, NkUiId text_id, const char *nam
     NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_4);
     NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, disabled ? theme->dim : theme->muted);
     WizardColumn own;
-    char label[48];
+    char buffer[SCR_WIZARD_LABEL_MAX];
+    const char *label;
     float room;
     bool pressed = false;
     if (column == NULL) {
@@ -118,7 +134,7 @@ bool scr_wizard_value_state(NkUi *ui, NkUiId id, NkUiId text_id, const char *nam
         own = scr_wizard_column(ui, &self, 1u, width, false);
         column = &own;
     }
-    (void)snprintf(label, sizeof(label), "%s: %s", name, value);
+    label = scr_wizard_label(ui, buffer, sizeof(buffer), name, value, width);
     room = width - column->cell - NK_UI_SPACE_4;
     if (column->stacked) {
         /* The sentence sits close under its own button, and the next row's

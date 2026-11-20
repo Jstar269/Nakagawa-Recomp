@@ -14,8 +14,9 @@
  *     until it exits. --sched alone does the same without a window;
  *   - without --sched, as a trace-comparison harness: it seeds the CpuState from the entry
  *     register state the reference trace recorded ("# init" line), runs the entry function
- *     with tracing on, and stops at the first HLE call (sr_hle_call longjmps), exactly where
- *     the reference trace is truncated for comparison.
+ *     with tracing on, and stops at the first unsupported import or other HLE stop (each
+ *     longjmps to g_hle_jmp, armed here), exactly where the reference trace is truncated for
+ *     comparison; that stop closes the trace, reports, and exits with status 7.
  *
  * Usage: driver <elf> <ref-trace> <out-trace> [--sched] [--gui] [--expect-u32=ADDR:VALUE]
  *        driver --image <image.bin> <base-hex> <entry-hex> <ref-trace> <out-trace> [...]
@@ -29,8 +30,10 @@
 #include "flight_recorder.h"
 #include "prx_loader.h"
 #include "ace.h"
+#include "cheats.h"
 #include "ge_shared.h"
 #include "videorec.h"
+#include "nested_frames.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -48,14 +51,16 @@ extern int sr_audio_pause_script_ready(void);
 extern int sr_audio_init(void);
 /* Ace Mode's peak=limit (#2137): the host audio backend's true-peak limiter (audio_sdl3.c). */
 extern int sr_audio_set_true_peak_limiter(int on);
-extern void sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
-                                     double *min_gain);
+extern int sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
+                                    double *min_gain);
 
-/* peak=limit's totals into the Ace report: registered after ace_finish, so it runs first. */
+/* peak=limit's totals into the Ace report: registered after ace_finish, so it runs first. A run
+ * whose host output never opened (no device) limited nothing, and the report says so. */
 static void driver_peak_stats_to_ace(void) {
     uint64_t pushes = 0, frames = 0, limited = 0;
     double min_gain = 1.0;
-    sr_audio_true_peak_stats(&pushes, &frames, &limited, &min_gain);
+    if (!sr_audio_true_peak_stats(&pushes, &frames, &limited, &min_gain))
+        ace_feature_unavailable(ACE_FEATURE_PEAK, "did not run: no host audio output opened");
     ace_set_peak_stats(pushes, frames, limited, min_gain);
 }
 
@@ -78,9 +83,20 @@ static int driver_stop_requested(void) {
     return !sr_savedata_stop_deferred(sched_vtime_us());
 }
 
+/* The SR_PERF summary first, while the GPU GE it samples still exists; then the presenter,
+ * so no Vulkan device outlives main into the driver's process teardown; then the trace.
+ * Every return from main after the window or the trace opened comes through here.
+ * Returning from main flushes stdio and runs every atexit handler (#1377). */
+static void driver_run_teardown(void) {
+    sr_perf_shutdown();
+    gui_shutdown();
+    sr_trace_close();
+}
+
 /* An end of main once the guest has run: a recording (#1273) names it and the exit status
  * main is about to return, so record.json tells a clean end from a failed one. */
 static int driver_run_end(int status, const char *how) {
+    sr_cheats_run_end();        /* the counts behind the cheats' hold lines (cheats.h) */
     sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
     (void)sr_videorec_finish_status(how, status);
     return status;
@@ -703,6 +719,11 @@ have_image:;
 
     int use_sched = 0;
     int gui_requested = 0;
+    /* Set when the run without the scheduler stopped at an HLE stop (an unsupported import,
+     * a guest fault, the libfont start-up stop): each longjmps to g_hle_jmp. */
+    volatile int direct_import_stop = 0;
+    /* Set when a LoadExec restart could not be carried out; the run ends with status 2. */
+    const char *run_refusal = NULL;
     for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--sched") == 0) use_sched = 1;
     for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--gui") == 0) {
         char caption[SR_WINDOW_TITLE_CAP];
@@ -715,6 +736,7 @@ have_image:;
     if (gui_headless_acceptance_requested() &&
         (!gui_requested || !gui_headless_acceptance_ready())) {
         sr_driver_boot_event("BOOT_EVENT phase=headless_acceptance status=FAIL reason=window_presenter_unavailable");
+        driver_run_teardown();
         return SR_HEADLESS_ACCEPTANCE_EXIT_PRESENTER_UNAVAILABLE;
     }
     /* An acceptance launch ends the scheduler once its requested frames were presented; a
@@ -754,7 +776,13 @@ have_image:;
         (void)sr_audio_init();
         for (;;) {
             sr_driver_boot_event("BOOT_EVENT phase=guest_start mode=scheduler entry=0x%08x", entry);
-            sched_run(entry, s.r[4], s.r[5]);
+            /* No entry thread (the title's module_start parameters refused): nothing ran, so
+             * the run ends with a failure status, not as a run that returned normally, after
+             * the run's ordered teardown like every other refusal here. */
+            if (sched_run(entry, s.r[4], s.r[5]) != 0) {
+                run_refusal = "the module_start thread could not be created";
+                break;
+            }
 
             /* A run stopped from outside the guest ends here, even with a LoadExec queued, and
              * so does one the person asked to quit before the stop was due (a LoadExec from the
@@ -773,7 +801,8 @@ have_image:;
             if (!sched_reset_for_loadexec()) {
                 fprintf(stderr, "LOAD_EXEC_SCHEDULER_RESET_REFUSED: unable to retire old guest threads\n");
                 sr_hle_loadexec_release(&request);
-                return driver_run_end(2, "LoadExec could not retire the old guest threads");
+                run_refusal = "LoadExec could not retire the old guest threads";
+                break;
             }
             sr_hle_loadexec_reset_guest_state();
             sr_mem_reset();
@@ -784,13 +813,15 @@ have_image:;
             uint32_t next_entry = 0u, next_gp = 0u;
             if (!sr_hle_loadexec_boot_module(request.guest_path, &next_entry, &next_gp)) {
                 sr_hle_loadexec_release(&request);
-                return driver_run_end(2, "LoadExec could not boot the replacement module");
+                run_refusal = "LoadExec could not boot the replacement module";
+                break;
             }
             memset(&s, 0, sizeof(s));
             sr_vfpu_thread_ctrl_init(&s);
             if (!sr_driver_seed_loadexec_arguments(&s, &request, next_entry, next_gp)) {
                 sr_hle_loadexec_release(&request);
-                return driver_run_end(2, "LoadExec could not pass the replacement its arguments");
+                run_refusal = "LoadExec could not pass the replacement its arguments";
+                break;
             }
             sched_set_guest_process_gp(next_gp);
             sr_driver_boot_event("BOOT_EVENT phase=loadexec_restart entry=0x%08x args=%u",
@@ -809,15 +840,27 @@ have_image:;
          * SR_HOST_RETURN_PC (its $ra, seeded above), so a TAIL step into interpreted code still
          * returns to the host. The dispatch owns the AOT tier and its SR_PERF span. */
         if (sr_perf_enabled) sr_perf_guest_begin();
-        dispatch_from_host(&s, entry);
+        /* Without the scheduler an HLE stop (an unsupported import in hle.c, among others)
+         * longjmps to g_hle_jmp; arm it here, so the stop returns to main and the trace
+         * closes and the results report. */
+        if (setjmp(g_hle_jmp) == 0) {
+            dispatch_from_host(&s, entry);
+        } else {
+            /* The jump discarded every nested native body's C frames: drop the parallel AOT
+             * return-boundary stack with them, and reclaim the guest frames of any nested
+             * host->guest call in flight (no scheduler, so all of them). */
+            sr_aot_return_boundaries_reset();
+            sr_tail_assert_empty("tail-transfer-live-at-unwind");
+            unsigned reclaimed = sr_nested_frame_release_all();
+            if (reclaimed)
+                fprintf(stderr, "driver: reclaimed %u nested guest-call frame(s) after the "
+                                "HLE-boundary longjmp\n", reclaimed);
+            direct_import_stop = 1;
+        }
         if (sr_perf_enabled) sr_perf_guest_end();
     }
-    /* The SR_PERF summary first, while the GPU GE it samples still exists; then the presenter,
-     * so no Vulkan device outlives main into the driver's process teardown. Returning from
-     * main flushes stdio and runs every atexit handler (#1377). */
-    sr_perf_shutdown();
-    gui_shutdown();
-    sr_trace_close();
+    driver_run_teardown();
+    if (run_refusal) return driver_run_end(2, run_refusal);
 
     const char *ppm_path = getenv("SR_PPM_DUMP");
     if (ppm_path) {
@@ -855,6 +898,11 @@ have_image:;
             matches ? "PASS" : "FAIL"
         );
         if (!matches) any_failure = 1;
+    }
+    if (direct_import_stop) {
+        fprintf(stderr, "HLE_BOUNDARY_STOP: the run without the scheduler stopped at the HLE "
+                        "stop named above\n");
+        return driver_run_end(7, "an HLE stop ended the run without the scheduler");
     }
     if (any_failure) return driver_run_end(3, "a DRIVER_EXPECT_U32 check failed");
 

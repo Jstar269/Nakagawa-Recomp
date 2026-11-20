@@ -47,6 +47,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <fcntl.h>   /* _O_RDONLY, _O_BINARY: the checked textures.zip handle as a FILE */
+#include <io.h>
 #else
 #include <errno.h>
 #include <fcntl.h>
@@ -255,8 +257,21 @@ uint32_t nk_texrepl_bits_per_texel(uint32_t format) {
     return kBits[format & 15u];
 }
 
+/* Elapsed wall time on the host's monotonic clock, for the open, list and decode figures: the same
+ * meaning on every host, time blocked on a slow disk included and no other thread's CPU time added
+ * (ISO C clock() is this process's CPU time on POSIX and elapsed time on Windows). 0 when the host
+ * has no such clock; the figures are diagnostics only. */
 static uint64_t now_ns(void) {
-    return (uint64_t)((double)clock() * (1e9 / (double)CLOCKS_PER_SEC));
+#if defined(_WIN32)
+    LARGE_INTEGER freq, count;
+    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0 || !QueryPerformanceCounter(&count)) return 0;
+    const uint64_t f = (uint64_t)freq.QuadPart, c = (uint64_t)count.QuadPart;
+    return (c / f) * 1000000000ull + (c % f) * 1000000000ull / f;
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
 }
 
 /* ======================================================================================= pack */
@@ -1226,6 +1241,12 @@ static void id_add(NkTexRepl *p, const uint64_t id[ID_WORDS], uint32_t row) {
     p->id_n++;
 }
 
+#ifdef NK_TEXREPL_TEST_HOOKS
+/* The selftest's seam: called once a pack's ZIP has passed its checks and before the ZIP reader
+ * reads it, so the test can swap the name for another file in that window. */
+void (*nk_texrepl_test_zip_checked)(const char *zip_path) = NULL;
+#endif
+
 /* A folder pack's file is read only when the handle it opens is a regular file on a disk, no larger
  * than the cap, whose final path (links and junctions resolved) is inside the pack's resolved root.
  * The checks are on the opened handle, not the name, so a device (CON, COM1, a FIFO), a link out of
@@ -1283,8 +1304,9 @@ static int file_id_of(HANDLE h, uint64_t out[3]) {
 }
 
 static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t cap, size_t *size, PackRead *why,
-                                   int probe, uint64_t id[ID_WORDS], uint32_t *same) {
+                                   int probe, uint64_t id[ID_WORDS], uint32_t *same, FILE **keep) {
     *why = PACK_READ_MISSING;
+    if (keep) *keep = NULL;
     uint64_t fid[3] = { 0, 0, 0 };
     WCHAR *w = wide_of(path);
     if (!w) return NULL;
@@ -1309,6 +1331,12 @@ static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t 
         *why = PACK_READ_SAME;
     } else if (probe) {
         *why = PACK_READ_OK;
+        if (keep) {   /* the handle checked is the one handed on: no second open by name */
+            const int fd = _open_osfhandle((intptr_t)h, _O_RDONLY | _O_BINARY);
+            if (fd >= 0) h = INVALID_HANDLE_VALUE;   /* the descriptor owns it now */
+            if (fd >= 0 && (*keep = _fdopen(fd, "rb")) == NULL) _close(fd);
+            if (!*keep) *why = PACK_READ_MISSING;
+        }
     } else if ((buf = (unsigned char *)malloc(len.QuadPart ? (size_t)len.QuadPart : 1u)) != NULL) {
         size_t at = 0, want = (size_t)len.QuadPart;
         while (at < want) {
@@ -1320,7 +1348,7 @@ static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t 
         else { free(buf); buf = NULL; *why = PACK_READ_DAMAGED; }
     }
     free(final);
-    CloseHandle(h);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     return buf;
 }
 #else
@@ -1336,8 +1364,9 @@ static int inside_root(const NkTexRepl *p, const char *final) {
 }
 
 static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t cap, size_t *size, PackRead *why,
-                                   int probe, uint64_t id[ID_WORDS], uint32_t *same) {
+                                   int probe, uint64_t id[ID_WORDS], uint32_t *same, FILE **keep) {
     *why = PACK_READ_MISSING;
+    if (keep) *keep = NULL;
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
     if (fd < 0) return NULL;
     unsigned char *buf = NULL;
@@ -1366,6 +1395,10 @@ static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t 
         *why = PACK_READ_SAME;
     } else if (probe) {
         *why = PACK_READ_OK;
+        if (keep) {   /* the descriptor checked is the one handed on: no second open by name */
+            if ((*keep = fdopen(fd, "rb")) != NULL) fd = -1;   /* the stream owns it now */
+            else *why = PACK_READ_MISSING;
+        }
     } else if ((buf = (unsigned char *)malloc(st.st_size ? (size_t)st.st_size : 1u)) != NULL) {
         size_t at = 0, want = (size_t)st.st_size;
         while (at < want) {
@@ -1378,7 +1411,7 @@ static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t 
         else { free(buf); buf = NULL; *why = PACK_READ_DAMAGED; }
     }
     free(final);
-    close(fd);
+    if (fd >= 0) close(fd);
     return buf;
 }
 #endif
@@ -1435,7 +1468,7 @@ static unsigned char *pack_read(NkTexRepl *p, const char *rel, size_t cap, size_
     }
     char path[1400];
     if (snprintf(path, sizeof(path), "%s/%s", p->dir, rel) >= (int)sizeof(path)) return NULL;
-    unsigned char *buf = read_regular(p, path, cap, size, why, 0, id, same);
+    unsigned char *buf = read_regular(p, path, cap, size, why, 0, id, same, NULL);
     if (held && buf) *held = *size;
     return buf;
 }
@@ -1484,7 +1517,8 @@ static int name_is_dot_or_mac(const char *seg, size_t n) {
  * in that folder (a pack zipped with its folder). Entries starting with '.' or in __MACOSX at the top
  * are not counted when looking for that folder. A ZIP with no textures.ini in either place is
  * refused, as PPSSPP refuses a ZIP pack without one. */
-static int open_zip(NkTexRepl *p, const char *path, char *err, size_t err_cap) {
+/* The ZIP pack on `file`, the handle its checks ran on; the reader owns it from here on. */
+static int open_zip(NkTexRepl *p, FILE *file, char *err, size_t err_cap) {
     NkZipReadOptions opt;
     NkZipError ze;
     memset(&opt, 0, sizeof(opt));
@@ -1492,7 +1526,7 @@ static int open_zip(NkTexRepl *p, const char *path, char *err, size_t err_cap) {
     opt.max_total_bytes = NK_TEXREPL_MAX_PACK_BYTES;   /* what all its entries declare, unpacked */
     opt.deflate = true;
     opt.data_descriptor = true;
-    NkZipStatus st = nk_zip_reader_open_file_with(&p->zip, path, &opt, &ze);
+    NkZipStatus st = nk_zip_reader_open_stream_with(&p->zip, file, &opt, &ze);
     if (st != NK_ZIP_OK) {
         snprintf(err, err_cap, "texture pack ZIP refused (%s): %s%s%s", nk_zip_status_code(st),
                  nk_zip_status_message(st), ze.entry[0] ? " Entry: " : "", ze.entry);
@@ -1626,17 +1660,22 @@ static NkTexRepl *texrepl_open(const char *path, uint64_t budget_bytes, char *er
 
     if (zip_path[0]) {
         /* The ZIP's handle is checked as a folder file's is (a regular file, inside the folder when it
-         * is the folder's textures.zip) before the ZIP reader opens it. */
+         * is the folder's textures.zip), and the ZIP reader reads that same handle: a name swapped
+         * for a link, a pipe or another file after the checks is never opened. */
         size_t zsize = 0;
         PackRead zwhy;
-        read_regular(p, zip_path, (size_t)-1, &zsize, &zwhy, 1, NULL, NULL);
+        FILE *zfile = NULL;
+        read_regular(p, zip_path, (size_t)-1, &zsize, &zwhy, 1, NULL, NULL, &zfile);
         if (zwhy != PACK_READ_OK) {
             snprintf(err, err_cap, "texture pack ZIP '%s' refused: %s",
                      is_dir ? "textures.zip" : last_component(path, name, sizeof(name)), read_reason(zwhy));
             return open_fail(p);
         }
+#ifdef NK_TEXREPL_TEST_HOOKS
+        if (nk_texrepl_test_zip_checked) nk_texrepl_test_zip_checked(zip_path);
+#endif
         const uint64_t tl = now_ns();
-        if (!open_zip(p, zip_path, err, err_cap)) return open_fail(p);
+        if (!open_zip(p, zfile, err, err_cap)) return open_fail(p);
         p->stats.list_ns = now_ns() - tl;
         if (is_dir) diag_add(p, "textures.zip read in place of the folder's own files, as PPSSPP reads it");
     } else {

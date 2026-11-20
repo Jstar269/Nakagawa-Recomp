@@ -143,6 +143,12 @@ void input_settings_format_binding(const InputSettingsState *state, int control_
                  inv_y ? ", Invert Y" : "");
         return;
     }
+    /* The stick's four directions have keyboard keys only (input_settings_format_key_binding):
+       no controller input of their own, and no psp_buttons entry to read. */
+    if (control_idx >= INPUT_CONTROL_DIGITAL_COUNT) {
+        snprintf(buf, buf_sz, "None");
+        return;
+    }
 
     const NkDigitalBinding *bind = &state->profile.psp_buttons[control_idx];
     char primary_str[96] = {0};
@@ -671,48 +677,39 @@ static bool sources_equal(const NkBindingSource *a, const NkBindingSource *b) {
     return (a->type == b->type && a->index == b->index);
 }
 
+/* One conflict entry: `source` drives both control a and control b. */
+static void add_conflict(InputSettingsState *state, int a, int b, const NkBindingSource *source) {
+    if (state->conflict_count >= INPUT_SETTINGS_MAX_CONFLICTS) return;
+    InputBindingConflict *c = &state->conflicts[state->conflict_count++];
+    c->control_a = a;
+    c->control_b = b;
+    c->source = *source;
+    char src_name[96] = {0};
+    format_single_source(source, src_name, sizeof(src_name));
+    snprintf(c->description, sizeof(c->description),
+             "Conflict: %s bound to both %s and %s",
+             src_name,
+             input_settings_control_name(a),
+             input_settings_control_name(b));
+}
+
 void input_settings_refresh_conflicts(InputSettingsState *state) {
     if (!state) return;
     state->conflict_count = 0;
 
+    /* Each pair once: either input of one control against either input of the other. */
     for (int i = 0; i < INPUT_CONTROL_DIGITAL_COUNT; i++) {
         for (int j = i + 1; j < INPUT_CONTROL_DIGITAL_COUNT; j++) {
             const NkDigitalBinding *b_i = &state->profile.psp_buttons[i];
             const NkDigitalBinding *b_j = &state->profile.psp_buttons[j];
 
-            /* Check primary vs primary */
-            if (sources_equal(&b_i->primary, &b_j->primary)) {
-                if (state->conflict_count < INPUT_SETTINGS_MAX_CONFLICTS) {
-                    InputBindingConflict *c = &state->conflicts[state->conflict_count++];
-                    c->control_a = i;
-                    c->control_b = j;
-                    c->source = b_i->primary;
-                    char src_name[96] = {0};
-                    format_single_source(&b_i->primary, src_name, sizeof(src_name));
-                    snprintf(c->description, sizeof(c->description),
-                             "Conflict: %s bound to both %s and %s",
-                             src_name,
-                             input_settings_control_name(i),
-                             input_settings_control_name(j));
-                }
+            if (sources_equal(&b_i->primary, &b_j->primary) ||
+                sources_equal(&b_i->primary, &b_j->secondary)) {
+                add_conflict(state, i, j, &b_i->primary);
             }
-
-            /* Check secondary conflicts if present */
             if (sources_equal(&b_i->secondary, &b_j->primary) ||
                 sources_equal(&b_i->secondary, &b_j->secondary)) {
-                if (state->conflict_count < INPUT_SETTINGS_MAX_CONFLICTS) {
-                    InputBindingConflict *c = &state->conflicts[state->conflict_count++];
-                    c->control_a = i;
-                    c->control_b = j;
-                    c->source = b_i->secondary;
-                    char src_name[96] = {0};
-                    format_single_source(&b_i->secondary, src_name, sizeof(src_name));
-                    snprintf(c->description, sizeof(c->description),
-                             "Conflict: %s bound to both %s and %s",
-                             src_name,
-                             input_settings_control_name(i),
-                             input_settings_control_name(j));
-                }
+                add_conflict(state, i, j, &b_i->secondary);
             }
         }
     }
@@ -776,6 +773,9 @@ NkResult input_settings_load(InputSettingsState *state, const char *custom_path)
     if (res != NK_OK) {
         nk_input_profile_file_init_default(&state->file);
         state->has_load_diagnostic = true;
+        /* A newer player's file is never replaced (the writer refuses it); any other
+           file that did not load is kept before the defaults are first saved over it. */
+        state->keep_unreadable = res != NK_ERROR_NEWER_SCHEMA;
     } else {
         state->has_load_diagnostic = false;
     }
@@ -786,6 +786,38 @@ NkResult input_settings_load(InputSettingsState *state, const char *custom_path)
     state->profile = state->file.global;
     input_settings_refresh_conflicts(state);
     return res;
+}
+
+/* Moves the profile file the load could not read to "<file>.unreadable.bak" (replacing an
+ * older one), so the save that follows does not destroy the mappings it holds: one typo
+ * or one refused per-title entry is all it takes to refuse a whole document. The
+ * Controls page says where the file went. False when the file is there and could not
+ * be moved. */
+static bool keep_unreadable_profile(InputSettingsState *state, const char *path) {
+    if (!nk_platform_file_exists(path)) {
+        state->keep_unreadable = false;
+        return true;
+    }
+    char aside[NK_MAX_PATH + 32];
+    int written = snprintf(aside, sizeof(aside), "%s.unreadable.bak", path);
+    if (written <= 0 || (size_t)written >= sizeof(aside) || nk_rename_utf8(path, aside) != 0) {
+        snprintf(state->save_diagnostic, sizeof(state->save_diagnostic),
+                 "not saved: the controls file that could not be read could not be kept "
+                 "as its .unreadable.bak copy first, so it is left as it is");
+        return false;
+    }
+    state->keep_unreadable = false;
+    const char *name = aside;
+    for (const char *p = aside; *p; ++p) {
+        if (*p == '/' || *p == '\\') name = p + 1;
+    }
+    /* After the reason the load gave, cut short if the two do not fit. */
+    state->load_diagnostic[sizeof(state->load_diagnostic) - 1u] = '\0';
+    size_t used = strlen(state->load_diagnostic);
+    snprintf(state->load_diagnostic + used, sizeof(state->load_diagnostic) - used,
+             "%sThe file that could not be read was kept as %s.", used ? ". " : "", name);
+    state->has_load_diagnostic = true;
+    return true;
 }
 
 NkResult input_settings_save(InputSettingsState *state, const char *custom_path) {
@@ -811,6 +843,14 @@ NkResult input_settings_save(InputSettingsState *state, const char *custom_path)
         state->dirty = false;
         state->leave_unsaved = false;
         return NK_ERROR_GENERIC;
+    }
+    if (state->keep_unreadable && strcmp(save_path, state->profile_path) == 0 &&
+        !keep_unreadable_profile(state, save_path)) {
+        state->has_save_diagnostic = true;
+        state->dirty = false;
+        state->unsaved = true;
+        state->leave_unsaved = false;
+        return NK_ERROR_IO;
     }
     NkResult res = nk_input_profile_file_save(&state->file, save_path,
                                               state->save_diagnostic,
@@ -903,6 +943,19 @@ bool input_settings_assign_binding(InputSettingsState *state, int control_idx, N
     if (!state || control_idx < 0 || control_idx >= INPUT_CONTROL_DIGITAL_COUNT) return false;
     NkDigitalBinding *bind = &state->profile.psp_buttons[control_idx];
     clear_note(state);
+    if (source.type != NK_BINDING_NONE) {
+        /* SDL numbers buttons past the profile's (MISC2 to MISC6 on some pads), and the
+           profile refuses to save an index outside its own range (nk_input_profile_validate):
+           such an input is refused here, before anything is moved. */
+        const int limit = source.type == NK_BINDING_HOST_BUTTON ? NK_HOST_BUTTON_COUNT
+                                                                : NK_HOST_AXIS_COUNT;
+        if (source.index < 0 || source.index >= limit) {
+            snprintf(state->note, sizeof(state->note),
+                     "That input can't be used for a PSP button. Choose another one.");
+            state->note_error = true;
+            return false;
+        }
+    }
     if (source.type != NK_BINDING_NONE && sources_equal(&bind->primary, &source)) return true;
     NkBindingSource previous = bind->primary;
     if (source.type != NK_BINDING_NONE) {
@@ -948,14 +1001,17 @@ bool input_settings_assign_binding(InputSettingsState *state, int control_idx, N
     return true;
 }
 
-bool input_settings_adjust_deadzone(InputSettingsState *state, int axis_idx, int32_t delta) {
+/* The one writer of an axis's inner deadzone, with its bounds: 0 up to what the outer
+   deadzone leaves. `amount` is added to each axis's own value when relative, else it is the
+   value; axis_idx < 0 means every axis. */
+static bool apply_deadzone(InputSettingsState *state, int axis_idx, bool relative, int32_t amount) {
     if (!state) return false;
     int start = (axis_idx < 0) ? 0 : axis_idx;
     int end = (axis_idx < 0) ? NK_PSP_AXIS_COUNT - 1 : axis_idx;
     if (start < 0 || end >= NK_PSP_AXIS_COUNT) return false;
 
     for (int i = start; i <= end; i++) {
-        int32_t val = (int32_t)state->profile.axes[i].deadzone_inner + delta;
+        int32_t val = relative ? (int32_t)state->profile.axes[i].deadzone_inner + amount : amount;
         int32_t max_allowed = 32766 - state->profile.axes[i].deadzone_outer;
         if (max_allowed < 0) max_allowed = 0;
         if (val < 0) val = 0;
@@ -964,34 +1020,14 @@ bool input_settings_adjust_deadzone(InputSettingsState *state, int axis_idx, int
     }
     state->dirty = true;
     return true;
+}
+
+bool input_settings_adjust_deadzone(InputSettingsState *state, int axis_idx, int32_t delta) {
+    return apply_deadzone(state, axis_idx, true, delta);
 }
 
 bool input_settings_set_deadzone(InputSettingsState *state, int axis_idx, int32_t value) {
-    if (!state) return false;
-    int start = (axis_idx < 0) ? 0 : axis_idx;
-    int end = (axis_idx < 0) ? NK_PSP_AXIS_COUNT - 1 : axis_idx;
-    if (start < 0 || end >= NK_PSP_AXIS_COUNT) return false;
-
-    for (int i = start; i <= end; i++) {
-        int32_t val = value;
-        int32_t max_allowed = 32766 - state->profile.axes[i].deadzone_outer;
-        if (max_allowed < 0) max_allowed = 0;
-        if (val < 0) val = 0;
-        if (val > max_allowed) val = max_allowed;
-        state->profile.axes[i].deadzone_inner = (int16_t)val;
-    }
-    state->dirty = true;
-    return true;
-}
-
-bool input_settings_adjust_trigger_threshold(InputSettingsState *state, int32_t delta) {
-    if (!state) return false;
-    int32_t val = (int32_t)state->profile.trigger_threshold + delta;
-    if (val < 0) val = 0;
-    if (val > 32767) val = 32767;
-    state->profile.trigger_threshold = (int16_t)val;
-    state->dirty = true;
-    return true;
+    return apply_deadzone(state, axis_idx, false, value);
 }
 
 bool input_settings_set_trigger_threshold(InputSettingsState *state, int32_t value) {
@@ -1002,6 +1038,12 @@ bool input_settings_set_trigger_threshold(InputSettingsState *state, int32_t val
     state->profile.trigger_threshold = (int16_t)val;
     state->dirty = true;
     return true;
+}
+
+bool input_settings_adjust_trigger_threshold(InputSettingsState *state, int32_t delta) {
+    if (!state) return false;
+    return input_settings_set_trigger_threshold(
+        state, (int32_t)state->profile.trigger_threshold + delta);
 }
 
 bool input_settings_toggle_axis_inversion(InputSettingsState *state, int axis_idx) {

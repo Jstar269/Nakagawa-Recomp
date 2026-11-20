@@ -155,6 +155,44 @@ class DispositionTests(unittest.TestCase):
         self.assertEqual(row["disposition"], "implemented")
         self.assertEqual(row["owner"], "-")
 
+    def test_name_with_several_nids_reports_its_fake_success_registration(self) -> None:
+        # The dedicated registration has the lower NID; the fake-success one must still
+        # decide the row, or the #363 owner count misses it.
+        manifest = {
+            "registrations": [
+                {
+                    "nid": "0x00000010",
+                    "name": "sceKernelCreateMbx",
+                    "handler": "h_CreateMbx",
+                    "classification": "dedicated",
+                    "status": "partial",
+                },
+                {
+                    "nid": "0x00000020",
+                    "name": "sceKernelCreateMbx",
+                    "handler": "h_ok",
+                    "classification": "fake_success",
+                    "status": "stub",
+                },
+            ]
+        }
+        census = waits_census.build_census(SAMPLE_MATRIX, manifest=manifest)
+        row = next(r for r in census["rows"] if r["api"] == "sceKernelCreateMbx")
+        self.assertEqual(row["disposition"], "registered")
+        self.assertEqual(row["owner"], "#363")
+        self.assertEqual(row["nid"], "0x00000020")
+        self.assertEqual(census["summary"]["by_owner"].get("#363"), 1)
+
+    def test_name_with_several_equal_nids_keeps_the_lowest_nid(self) -> None:
+        regs = [
+            {"nid": f"0x0000003{i}", "name": "sceKernelCreateMbx", "handler": f"h_{i}",
+             "classification": "dedicated", "status": "partial"}
+            for i in (2, 1)
+        ]
+        census = waits_census.build_census(SAMPLE_MATRIX, manifest={"registrations": regs})
+        row = next(r for r in census["rows"] if r["api"] == "sceKernelCreateMbx")
+        self.assertEqual(row["nid"], "0x00000031")
+
     def test_summary_counts_match_rows(self) -> None:
         census = waits_census.build_census(SAMPLE_MATRIX, manifest={"registrations": []})
         s = census["summary"]

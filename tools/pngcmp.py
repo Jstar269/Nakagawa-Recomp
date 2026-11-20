@@ -44,8 +44,14 @@ def decode(path):
     w, h, depth, color, comp, filt, interlace = hdr
     if (depth, color, interlace) != (8, 2, 0):
         raise SystemExit(f"{path}: unsupported PNG (depth={depth} color={color} interlace={interlace})")
+    if w == 0 or h == 0:
+        raise SystemExit(f"{path}: empty image ({w}x{h})")
     raw = zlib.decompress(b"".join(idat))
     stride = w * 3
+    if len(raw) != h * (stride + 1):
+        # A short stream would give short rows that index past their end later; a long one
+        # carries data the header does not describe.
+        raise SystemExit(f"{path}: image data is {len(raw)} bytes; {w}x{h} RGB needs {h * (stride + 1)}")
     rows = []
     for y in range(h):
         off = y * (stride + 1)

@@ -11,10 +11,13 @@ process exit means that a probe passed.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import errno
 import hashlib
+from functools import lru_cache
 import math
 import os
 from pathlib import Path
@@ -28,136 +31,61 @@ import sys
 import threading
 import time
 import traceback
-from typing import TYPE_CHECKING, Any, Callable, TypeGuard, cast
+from typing import Any, Callable, TypeGuard, cast
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 _PACKAGE_PARENT = str(Path(__file__).resolve().parents[1])
 if _PACKAGE_PARENT not in sys.path:
     sys.path.insert(0, _PACKAGE_PARENT)
 
-if TYPE_CHECKING:
-    from .protocol import (
-        ParsedOutput,
-        ProtocolError,
-        compare_texts,
-        decode_psp_model_code,
-        dump_json,
-        ge_corpus_report,
-        model_identity_fields,
-        parse_output,
-        parse_progress,
-        provenance_issues,
-        validate_dmac_size_matrix,
-        validate_dmac_size_matrix_size,
-    )
-    from .parse_golden import (
-        CAMPAIGN_PROBE_CASES,
-        GE_CORPUS_PROBES,
-        DMAC_INVALID_CASES,
-        ge_corpus_cells,
-        parse_cache_alias_output,
-        parse_campaign_probe_output,
-        parse_audio_query_output,
-        parse_delay_zero_output,
-        parse_dmac_cells_output,
-        parse_dmac_invalid_tail_output,
-        parse_fpu_vector_output,
-        parse_ge_nan_output,
-        parse_hle_intr_cells_output,
-        parse_io_matrix_output,
-        parse_mbx_delete_wait_output,
-        parse_font_files_output,
-        parse_registry_font_output,
-        parse_registry_readonly_output,
-        parse_umd_io_output,
-        parse_umd_raw_read_output,
-        parse_vram_mirror_output,
-        validate_hle_edram_restore,
-        validate_hle_savedata_getsize_absent,
-    )
-else:
-    try:
-        from .protocol import (
-            ParsedOutput,
-            ProtocolError,
-            compare_texts,
-            decode_psp_model_code,
-            dump_json,
-            ge_corpus_report,
-            model_identity_fields,
-            parse_output,
-            parse_progress,
-            provenance_issues,
-            validate_dmac_size_matrix,
-            validate_dmac_size_matrix_size,
-        )
-    except ImportError:  # direct ``python tools/psp_oracle/run_psplink.py`` invocation
-        from psp_oracle.protocol import (
-            ParsedOutput,
-            ProtocolError,
-            compare_texts,
-            decode_psp_model_code,
-            dump_json,
-            ge_corpus_report,
-            model_identity_fields,
-            parse_output,
-            parse_progress,
-            provenance_issues,
-            validate_dmac_size_matrix,
-            validate_dmac_size_matrix_size,
-        )
+try:
+    from . import parse_golden as _parse_golden
+    from . import protocol as _protocol
+except ImportError:  # direct ``python tools/psp_oracle/run_psplink.py`` invocation
+    from psp_oracle import parse_golden as _parse_golden  # type: ignore[no-redef]
+    from psp_oracle import protocol as _protocol  # type: ignore[no-redef]
 
-    try:
-        from .parse_golden import (
-            CAMPAIGN_PROBE_CASES,
-            GE_CORPUS_PROBES,
-            DMAC_INVALID_CASES,
-            ge_corpus_cells,
-            parse_cache_alias_output,
-            parse_campaign_probe_output,
-            parse_audio_query_output,
-            parse_delay_zero_output,
-            parse_dmac_cells_output,
-            parse_dmac_invalid_tail_output,
-            parse_fpu_vector_output,
-            parse_ge_nan_output,
-            parse_hle_intr_cells_output,
-            parse_io_matrix_output,
-            parse_mbx_delete_wait_output,
-            parse_font_files_output,
-            parse_registry_font_output,
-            parse_registry_readonly_output,
-            parse_umd_io_output,
-            parse_umd_raw_read_output,
-            parse_vram_mirror_output,
-            validate_hle_edram_restore,
-            validate_hle_savedata_getsize_absent,
-        )
-    except ImportError:  # direct ``python tools/psp_oracle/run_psplink.py`` invocation
-        from psp_oracle.parse_golden import (
-            CAMPAIGN_PROBE_CASES,
-            GE_CORPUS_PROBES,
-            DMAC_INVALID_CASES,
-            ge_corpus_cells,
-            parse_cache_alias_output,
-            parse_campaign_probe_output,
-            parse_audio_query_output,
-            parse_delay_zero_output,
-            parse_dmac_cells_output,
-            parse_dmac_invalid_tail_output,
-            parse_fpu_vector_output,
-            parse_ge_nan_output,
-            parse_hle_intr_cells_output,
-            parse_io_matrix_output,
-            parse_mbx_delete_wait_output,
-            parse_font_files_output,
-            parse_registry_font_output,
-            parse_registry_readonly_output,
-            parse_umd_io_output,
-            parse_umd_raw_read_output,
-            parse_vram_mirror_output,
-            validate_hle_edram_restore,
-            validate_hle_savedata_getsize_absent,
-        )
+ParsedOutput = _protocol.ParsedOutput
+ProtocolError = _protocol.ProtocolError
+compare_texts = _protocol.compare_texts
+decode_psp_model_code = _protocol.decode_psp_model_code
+dump_json = _protocol.dump_json
+ge_corpus_report = _protocol.ge_corpus_report
+model_identity_fields = _protocol.model_identity_fields
+parse_output = _protocol.parse_output
+parse_progress = _protocol.parse_progress
+provenance_issues = _protocol.provenance_issues
+validate_dmac_size_matrix = _protocol.validate_dmac_size_matrix
+validate_dmac_size_matrix_size = _protocol.validate_dmac_size_matrix_size
+DMAC_SIZE_MATRIX_SIZES = _protocol.DMAC_SIZE_MATRIX_SIZES
+
+CAMPAIGN_PROBE_CASES = _parse_golden.CAMPAIGN_PROBE_CASES
+GE_CORPUS_PROBES = _parse_golden.GE_CORPUS_PROBES
+DMAC_INVALID_CASES = _parse_golden.DMAC_INVALID_CASES
+ge_corpus_cells = _parse_golden.ge_corpus_cells
+parse_cache_alias_output = _parse_golden.parse_cache_alias_output
+parse_campaign_probe_output = _parse_golden.parse_campaign_probe_output
+parse_audio_query_output = _parse_golden.parse_audio_query_output
+parse_delay_zero_output = _parse_golden.parse_delay_zero_output
+parse_dmac_cells_output = _parse_golden.parse_dmac_cells_output
+parse_dmac_invalid_tail_output = _parse_golden.parse_dmac_invalid_tail_output
+parse_fpu_vector_output = _parse_golden.parse_fpu_vector_output
+parse_ge_nan_output = _parse_golden.parse_ge_nan_output
+parse_hle_intr_cells_output = _parse_golden.parse_hle_intr_cells_output
+parse_io_matrix_output = _parse_golden.parse_io_matrix_output
+parse_mbx_delete_wait_output = _parse_golden.parse_mbx_delete_wait_output
+parse_font_files_output = _parse_golden.parse_font_files_output
+parse_registry_font_output = _parse_golden.parse_registry_font_output
+parse_registry_readonly_output = _parse_golden.parse_registry_readonly_output
+parse_umd_io_output = _parse_golden.parse_umd_io_output
+parse_umd_raw_read_output = _parse_golden.parse_umd_raw_read_output
+parse_vram_mirror_output = _parse_golden.parse_vram_mirror_output
+validate_hle_edram_restore = _parse_golden.validate_hle_edram_restore
+validate_hle_savedata_getsize_absent = _parse_golden.validate_hle_savedata_getsize_absent
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -180,6 +108,24 @@ _FULL_COMMIT_RE = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 _PSPVER_FIRMWARE_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 
 
+def _is_git_ignored(path: Path) -> bool:
+    try:
+        relative = path.resolve().relative_to(ROOT.resolve()).as_posix()
+    except (OSError, ValueError):
+        return False
+    try:
+        checked = subprocess.run(
+            ["git", "check-ignore", "-q", "--", relative],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return checked.returncode == 0
+
+
 def _expected_firmware_problem(value: object) -> str | None:
     """Explain why an expected firmware cannot match `pspver`, or return None."""
 
@@ -193,82 +139,74 @@ _FULL_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 _ALL_ZERO_RE = re.compile(r"0+")
 
 
-def _fixed_campaign_rows(test_id: str, cases: list[tuple[str, int, frozenset[str]]]):
-    return test_id, tuple(cases)
-
-
 _PASS = frozenset({"PASS"})
 _PASS_OR_SKIP = frozenset({"PASS", "SKIP"})
 _FIXED_CAMPAIGN_CASES = {
-    "smoke": _fixed_campaign_rows(
-        "PSP-SMOKE-001", [("sum-1-to-100", 1, _PASS)]
-    ),
-    "thread-k0-block": _fixed_campaign_rows(
+    "smoke": ("PSP-SMOKE-001", (("sum-1-to-100", 1, _PASS),)),
+    "thread-k0-block": (
         "PSP-THREAD-K0-001",
-        [("K0-MAIN", 6, _PASS), ("K0-FRESH", 11, _PASS)]
+        tuple(
+            [("K0-MAIN", 6, _PASS), ("K0-FRESH", 11, _PASS)]
         + [(f"K0-FRESH-W{row}0", 16, _PASS) for row in range(4)]
-        + [(f"K0-REUSE-{attr}", 9, _PASS) for attr in ("DEF", "NOFILL", "CLEAR")],
+            + [(f"K0-REUSE-{attr}", 9, _PASS) for attr in ("DEF", "NOFILL", "CLEAR")]
+        ),
     ),
-    "thread-exit-delete": _fixed_campaign_rows(
+    "thread-exit-delete": (
         "PSP-THREAD-EXIT-001",
-        [(case_id, 6, _PASS) for case_id in (
-            "ED-R77", "ED-R00", "ED-RNEG", "ED-RERR",
-            "ED-X77", "ED-X00", "ED-XNEG", "ED-XERR",
-            "ED-D77", "ED-D00", "ED-DNEG", "ED-DERR",
-        )],
+        tuple(
+            (case_id, 6, _PASS)
+            for case_id in (
+                "ED-R77", "ED-R00", "ED-RNEG", "ED-RERR",
+                "ED-X77", "ED-X00", "ED-XNEG", "ED-XERR",
+                "ED-D77", "ED-D00", "ED-DNEG", "ED-DERR",
+            )
+        ),
     ),
-    "teardown-test": _fixed_campaign_rows(
-        "PSP-TEARDOWN-001", [("exitdelete-main", 1, frozenset({"SKIP"}))]
-    ),
-    "display-mask-duty": _fixed_campaign_rows(
+    "teardown-test": ("PSP-TEARDOWN-001", (("exitdelete-main", 1, frozenset({"SKIP"})),)),
+    "display-mask-duty": (
         "PSP-DISPLAY-001",
-        [(f"display-mask-duty-{duration}us", 13, _PASS)
-         for duration in (33000, 66000)],
+        tuple((f"display-mask-duty-{duration}us", 13, _PASS) for duration in (33000, 66000)),
     ),
     # run_display_wait_late emits, per API, its five late cells and then that
     # API's in-vblank cell (PASS, or SKIP when the in-vblank phase was not
     # reached), after one calibration record.
-    "display-wait-late": _fixed_campaign_rows(
+    "display-wait-late": (
         "PSP-DISPLAY-002",
-        [("calibration", 5, _PASS)]
-        + [
-            row
-            for api in ("waitvblankstart", "waitvblank")
-            for row in (
-                [(f"late-{api}-{offset}eighths", 22, _PASS) for offset in (2, 6, 10, 14, 20)]
-                + [(f"invblank-{api}", 22, _PASS_OR_SKIP)]
-            )
-        ],
+        tuple(
+            [("calibration", 5, _PASS)]
+            + [
+                row
+                for api in ("waitvblankstart", "waitvblank")
+                for row in (
+                    [(f"late-{api}-{offset}eighths", 22, _PASS) for offset in (2, 6, 10, 14, 20)]
+                    + [(f"invblank-{api}", 22, _PASS_OR_SKIP)]
+                )
+            ]
+        ),
     ),
-    "display-wait-priority": _fixed_campaign_rows(
+    "display-wait-priority": (
         "PSP-DISPLAY-003",
-        [("calibration", 5, _PASS),
+        (("calibration", 5, _PASS),
          ("priority-control", 16, _PASS),
-         ("priority-experiment", 16, _PASS)],
+         ("priority-experiment", 16, _PASS)),
     ),
-    "display-vblank-window": _fixed_campaign_rows(
-        "PSP-DISPLAY-004", [("vblank-window", 14, _PASS)]
-    ),
-    "mutex-refer-unlocked": _fixed_campaign_rows(
-        "PSP-MUTEX-001", [("mutex-refer-unlocked", 5, _PASS)]
-    ),
-    "mutex-timeout-quanta": _fixed_campaign_rows(
-        "PSP-MUTEX-001", [("mutex-timeout-quanta", 17, _PASS)]
-    ),
-    "mutex-priority-inheritance": _fixed_campaign_rows(
-        "PSP-MUTEX-001", [("mutex-priority-inheritance", 7, _PASS)]
-    ),
+    "display-vblank-window": ("PSP-DISPLAY-004", (("vblank-window", 14, _PASS),)),
+    "mutex-refer-unlocked": ("PSP-MUTEX-001", (("mutex-refer-unlocked", 5, _PASS),)),
+    "mutex-timeout-quanta": ("PSP-MUTEX-001", (("mutex-timeout-quanta", 17, _PASS),)),
+    "mutex-priority-inheritance": ("PSP-MUTEX-001", (("mutex-priority-inheritance", 7, _PASS),)),
     # Each trial records sceKernelIsCpuIntrEnable() from the VBLANK handler in
     # out0 (context only) and the six mutex returns in out1..out6. The verdict is
     # machinery-only: a trial is PASS with result 1 when the handler completed it.
     # FAIL is admitted here only so that _check_mutex_interrupt_trial can name it;
     # that check refuses any trial that is not a completed PASS. The returned
     # values are observations and are not compared with expected values.
-    "mutex-interrupt-context": _fixed_campaign_rows(
+    "mutex-interrupt-context": (
         "PSP-MUTEX-001",
-        [("mutex-interrupt-context", 3, _PASS)]
-        + [(f"mutex-interrupt-context-t{index:02d}", 7, frozenset({"PASS", "FAIL"}))
-           for index in range(20)],
+        tuple(
+            [("mutex-interrupt-context", 3, _PASS)]
+            + [(f"mutex-interrupt-context-t{index:02d}", 7, frozenset({"PASS", "FAIL"}))
+               for index in range(20)]
+        ),
     ),
 }
 
@@ -680,7 +618,7 @@ def evaluate_teardown_snapshots(
         "module_uid": uid,
         "memory_free_deltas_bytes": memory_deltas,
         "memory_free_deltas_diagnostic_only": True,
-        "exprint_status": "NOT_RUN",
+        "exprint_status": exprint_command_status or "NOT_RUN",
         "exprint_command_status": exprint_command_status,
         "exprint_reply": exprint_reply,
     }
@@ -734,14 +672,19 @@ def _run_command(command: list[str], timeout: float) -> tuple[int | None, str, s
     except subprocess.TimeoutExpired as exc:
         return (
             None,
-            output_text(exc.stdout)[-65536:],
-            output_text(exc.stderr)[-65536:],
+            output_text(exc.stdout),
+            output_text(exc.stderr),
             "TIMEOUT",
         )
     except OSError as exc:
         return None, "", type(exc).__name__, "ERROR"
     status = "PROCESS_EXITED"
-    return completed.returncode, completed.stdout[-65536:], completed.stderr[-65536:], status
+    return (
+        completed.returncode,
+        output_text(completed.stdout),
+        output_text(completed.stderr),
+        status,
+    )
 
 
 def _verify_psplink_shell(
@@ -1007,16 +950,8 @@ def _validate_campaign_contract(text: str, case_id: str) -> None:
         validate_hle_savedata_getsize_absent(text)
     elif case_id in CAMPAIGN_PROBE_CASES:
         parse_campaign_probe_output(text, case_id, require_complete=True)
-    elif case_id == "registry-readonly":
-        parse_registry_readonly_output(text, require_complete=True)
-    elif case_id == "registry-font":
-        parse_registry_font_output(text, require_complete=True)
-    elif case_id == "umd-io":
-        parse_umd_io_output(text, require_complete=True)
-    elif case_id == "umd-raw-read":
-        parse_umd_raw_read_output(text, require_complete=True)
-    elif case_id == "font-files":
-        parse_font_files_output(text, require_complete=True)
+    elif case_id in _GOLDEN_CAMPAIGN_PARSERS:
+        _GOLDEN_CAMPAIGN_PARSERS[case_id](text, require_complete=True)
     elif case_id in _FIXED_CAMPAIGN_CASES:
         _parse_fixed_campaign_records(text, case_id)
     elif case_id in _COMPLETE_CAMPAIGN_PARSERS:
@@ -1028,8 +963,17 @@ def _validate_campaign_contract(text: str, case_id: str) -> None:
             raise ProtocolError(f"{case_id} stream must contain exactly one result record")
         if (parsed.results[0].test_id, parsed.results[0].case_id) != expected:
             raise ProtocolError(f"{case_id} stream must contain {expected[0]}/{expected[1]}")
+    else:
+        raise ProtocolError(f"{case_id}: no registered completion contract")
 
 
+_GOLDEN_CAMPAIGN_PARSERS = {
+    "registry-readonly": parse_registry_readonly_output,
+    "registry-font": parse_registry_font_output,
+    "umd-io": parse_umd_io_output,
+    "umd-raw-read": parse_umd_raw_read_output,
+    "font-files": parse_font_files_output,
+}
 _COMPLETE_CAMPAIGN_PARSERS = {
     "audio-query": parse_audio_query_output,
     "fpu-vector": parse_fpu_vector_output,
@@ -1048,6 +992,7 @@ _SINGLE_RECORD_CAMPAIGN_CASES = {
 }
 
 
+@lru_cache(maxsize=8)
 def _parse_campaign_records(text: str, case_id: str) -> ParsedOutput:
     """Validate a campaign's known completion contract, then return its typed rows.
 
@@ -1131,9 +1076,11 @@ def _normalise_unbound_identity_fields(text: str) -> str:
 
 
 def _campaign_completeness_contract(case_id: str) -> str:
-    if case_id in CAMPAIGN_PROBE_CASES or case_id in {
-        "registry-readonly", "registry-font", "umd-io", "umd-raw-read", "font-files",
-    }:
+    if (
+        case_id in CAMPAIGN_PROBE_CASES
+        or case_id in _GOLDEN_CAMPAIGN_PARSERS
+        or case_id in _COMPLETE_CAMPAIGN_PARSERS
+    ):
         return "strict-golden-sequence"
     if case_id in _FIXED_CAMPAIGN_CASES:
         return "strict-fixed-record-sequence"
@@ -1141,13 +1088,9 @@ def _campaign_completeness_contract(case_id: str) -> str:
         r"dmac-size-matrix-size-0x[0-9a-f]{8}", case_id
     ):
         return "strict-dmac-sequence"
-    if case_id in {"audio-query", "fpu-vector", "cache-alias", "io-matrix",
-                   "mbx-delete-wait", "ge-nan", "vram-mirror", "dma-cells",
-                   "delay-zero", "hle-intr-cells"}:
-        return "strict-golden-sequence"
     if case_id in DMAC_INVALID_CASES:
         return "strict-dmac-invalid-cell-records"
-    if case_id in {"transport-write", "model-profile"}:
+    if case_id in _SINGLE_RECORD_CAMPAIGN_CASES:
         return "exactly-one-known-record"
     return "unregistered-no-completion-contract"
 
@@ -1187,6 +1130,12 @@ def _render_argv(template: list[str], **values: str) -> list[str]:
         marker = "{" + key + "}"
         rendered = [part.replace(marker, value) for part in rendered]
     return rendered
+
+
+RUNNER_ARGV_PLACEHOLDERS = {
+    "pspsh_argv": frozenset({"remote_command"}),
+    "usbhostfs_argv": frozenset({"host0_root", "host0_root_wsl"}),
+}
 
 
 def _parse_usbipd_psplink_devices(output: str) -> list[tuple[str, str]]:
@@ -1591,7 +1540,13 @@ class PsplinkProcessTransport:
                     server.wait(timeout=2.0)
                 except subprocess.TimeoutExpired:
                     server.kill()
-                    server.wait(timeout=2.0)
+                    try:
+                        server.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        detail = self.stop_detail or "usbhostfs_pc did not stop cleanly"
+                        self.stop_detail = (
+                            f"{detail}; usbhostfs_pc did not exit within 2s after kill"
+                        )
         stdin = getattr(server, "stdin", None)
         if stdin is not None and not stdin.closed:
             try:
@@ -1936,6 +1891,7 @@ class PsplinkCampaignRunner:
         module_uid: str | None = None,
         *,
         probe_succeeded: bool = False,
+        unload_status: str | None = None,
     ) -> bool:
         if report.get("status") == "PASS":
             report["recovery_status"] = "NOT_REQUIRED"
@@ -1955,7 +1911,13 @@ class PsplinkCampaignRunner:
             return False
         issues = cast(Iterable[object], report.get("issues", []))
         detail = "; ".join(str(issue) for issue in issues)
-        recovered = self._recover(module_uid, f"probe teardown check failed: {detail}")
+        recovery_detail = f"probe teardown check failed: {detail}"
+        if unload_status is None:
+            recovered = self._recover(module_uid, recovery_detail)
+        else:
+            recovered = self._recover(
+                module_uid, recovery_detail, unload_status=unload_status
+            )
         report["recovery_status"] = "RECOVERED" if recovered else "FAILED"
         return recovered
 
@@ -1981,10 +1943,6 @@ class PsplinkCampaignRunner:
         if info[0] != 0 and "Unknown module" in text:
             return "PASS"
         return "BLOCKED"
-
-    def _unload(self, module_uid: str) -> bool:
-        """Compatibility predicate for callers that only need confirmed unload."""
-        return self._unload_status(module_uid) == "PASS"
 
     def _settle_after_unload(self) -> tuple[str, int]:
         """Settle the link after `modstun` before any post-unload check uses it.
@@ -2021,8 +1979,8 @@ class PsplinkCampaignRunner:
             return False
         path = root / "nakagawa_transport_write.bin"
         try:
-            captured = path.read_bytes()
-        except OSError:
+            captured, _info = _read_host0_file(path)
+        except (OSError, UnsafeHost0OutputError):
             return False
         expected = bytes(
             (0x5A ^ (index * 0x25 + (index >> 3))) & 0xFF
@@ -2039,6 +1997,15 @@ class PsplinkCampaignRunner:
         self.state = "SESSION_WEDGED"
         self.terminal_reason = "PHYSICAL_INTERVENTION_REQUIRED"
 
+    def _checkpoint_write_failed(self) -> None:
+        self.recovery_events.append(
+            "CHECKPOINT_WRITE_FAILED: campaign checkpoint could not be persisted"
+        )
+        if self.terminal_reason == "PHYSICAL_INTERVENTION_REQUIRED":
+            return
+        self.state = "STOPPED"
+        self.terminal_reason = "CHECKPOINT_WRITE_FAILED"
+
     def _hardware_lock_held(self, stage: str) -> bool:
         """Re-read the hardware lock; stop before touching the PSP when it is not held."""
 
@@ -2053,6 +2020,14 @@ class PsplinkCampaignRunner:
             self.terminal_reason = "HARDWARE_LOCK_REFUSED"
             return False
         return True
+
+    def _case_start_lock_refused(self, case_id: str, exc: HardwareLockError) -> None:
+        self.hardware_lock_status = exc.status
+        self.state = "STOPPED"
+        self.terminal_reason = "HARDWARE_LOCK_REFUSED"
+        self.recovery_events.append(
+            f"HARDWARE_LOCK: before launching {case_id}: {exc.status}; probe not launched"
+        )
 
     def _transport_start_failed(self, detail: str) -> None:
         """Stop before any launch: the PSP ran nothing, so no power cycle is needed."""
@@ -2138,8 +2113,26 @@ class PsplinkCampaignRunner:
             return False
         return True
 
-    def _recover(self, module_uid: str | None, detail: str) -> bool:
+    def _recover(
+        self,
+        module_uid: str | None,
+        detail: str,
+        *,
+        unload_status: str | None = None,
+    ) -> bool:
         self.state = "RECOVERABLE_FAULT"
+        if unload_status == "PASS":
+            self._l0_cleanup_attempted = True
+            self._l1_attempted = True
+            self.recovery_events.append(
+                "L0: skip repeated modstun; case teardown already confirmed unload"
+            )
+            if self.terminal_reason is not None:
+                return False
+            recovered = self._reset_once("reset after confirmed unload")
+            if recovered:
+                self.state = "READY"
+            return recovered
         if not self._l0_cleanup_attempted:
             self._l0_cleanup_attempted = True
             self.recovery_events.append(f"L0: one shell qualification/cleanup retry ({detail})")
@@ -2211,14 +2204,6 @@ class PsplinkCampaignRunner:
             finally:
                 self._l1_active = False
         return self._reset_once("reset after L1 requalification")
-
-    @staticmethod
-    def _sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
 
     def _envelope(
         self,
@@ -2319,7 +2304,7 @@ class PsplinkCampaignRunner:
 
         binary_sha = ""
         try:
-            binary_sha = self._sha256(case.binary)
+            binary_sha = _host_binary_sha256(case.binary)
         except OSError as exc:
             disqualify(f"campaign PRX could not be hashed ({type(exc).__name__})")
 
@@ -2336,6 +2321,14 @@ class PsplinkCampaignRunner:
         }
         canonical = host0_record_text
         parsed_ok = False
+        def parse_case_records(text: str) -> ParsedOutput:
+            if (
+                _campaign_completeness_contract(case.case_id)
+                == "unregistered-no-completion-contract"
+            ):
+                return parse_output(text)
+            return _parse_campaign_records(text, case.case_id)
+
         if host0_text:
             metadata_args = argparse.Namespace(
                 binary=case.binary,
@@ -2344,16 +2337,17 @@ class PsplinkCampaignRunner:
                 firmware=self.firmware,
                 source_commit=self.source_commit,
             )
+            metadata_args._binary_sha256 = binary_sha
             identity = _device_identity(host0_text, metadata_args)
             blockers.extend(cast(list[str], identity["DEVICE_IDENTITY_BLOCKERS"]))
             try:
-                host0_parsed = _parse_campaign_records(
-                    _normalise_unbound_identity_fields(host0_record_text), case.case_id
+                host0_parsed = parse_case_records(
+                    _normalise_unbound_identity_fields(host0_record_text)
                 )
                 device_model_raw_value = _model_profile_raw_value(host0_parsed)
                 _validate_model_code_expectation(device_model_raw_value, self.model_code)
                 canonical = _canonicalize_psp(host0_record_text, metadata_args)
-                canonical_parsed = _parse_campaign_records(canonical, case.case_id)
+                canonical_parsed = parse_case_records(canonical)
                 parsed_ok = bool(canonical_parsed.results) and all(
                     item.status == "PASS" for item in canonical_parsed.results
                 )
@@ -2379,8 +2373,8 @@ class PsplinkCampaignRunner:
 
         if stdout_record_text:
             try:
-                stdout_parsed = _parse_campaign_records(
-                    _normalise_unbound_identity_fields(stdout_record_text), case.case_id
+                stdout_parsed = parse_case_records(
+                    _normalise_unbound_identity_fields(stdout_record_text)
                 )
             except ProtocolError:
                 disqualify("stdout schema records failed strict protocol validation")
@@ -2492,12 +2486,12 @@ class PsplinkCampaignRunner:
             return self._report()
         self.source_tree_problem = _check_source_tree(self.source_commit)
         host0_path = getattr(self.transport, "host0_root", None)
-        if isinstance(host0_path, Path) and (
-            host0_path / "nakagawa_transport_write.bin"
-        ).exists():
-            self.state = "STOPPED"
-            self.terminal_reason = "HOST0_ROUNDTRIP_PATH_EXISTS"
-            return self._report()
+        if isinstance(host0_path, Path):
+            roundtrip_path = host0_path / "nakagawa_transport_write.bin"
+            if roundtrip_path.exists() or roundtrip_path.is_symlink():
+                self.state = "STOPPED"
+                self.terminal_reason = "HOST0_ROUNDTRIP_PATH_EXISTS"
+                return self._report()
         try:
             self.transport.start()
         except HardwareLockError as exc:
@@ -2517,6 +2511,15 @@ class PsplinkCampaignRunner:
                 else f"host transport process could not start ({type(exc).__name__})"
             )
             return self._report()
+        except BaseException:
+            try:
+                self.transport.stop()
+            except BaseException as cleanup_exc:
+                self.recovery_events.append(
+                    "HOST_ERROR: transport cleanup after start interruption raised "
+                    f"{type(cleanup_exc).__name__}"
+                )
+            raise
         start_detail = getattr(self.transport, "start_detail", None)
         if isinstance(start_detail, str) and start_detail:
             self.recovery_events.append(f"transport start: {start_detail}")
@@ -2584,10 +2587,13 @@ class PsplinkCampaignRunner:
 
         if not self._hardware_lock_held(f"before case {case.case_id}"):
             return False
-        if reset_between_cases and local_index > 0:
+        if reset_between_cases and case_index > 0:
             if on_case_start is not None:
                 try:
                     on_case_start(case_index, case, "RESET_BEFORE_CASE")
+                except HardwareLockError as exc:
+                    self._case_start_lock_refused(case.case_id, exc)
+                    return False
                 except (OSError, ValueError, TypeError):
                     self.state = "STOPPED"
                     self.terminal_reason = "CHECKPOINT_WRITE_FAILED"
@@ -2598,7 +2604,11 @@ class PsplinkCampaignRunner:
                 f"campaign soft reset before {case.case_id}"
             ):
                 if self.terminal_reason == "PHYSICAL_INTERVENTION_REQUIRED":
-                    self.intervention_case_id = cases[local_index - 1].case_id
+                    # The case before a resumed run's first case ran in an earlier
+                    # run and is not in this list; cases[-1] would name the last
+                    # queued case, which has not run.
+                    if local_index > 0:
+                        self.intervention_case_id = cases[local_index - 1].case_id
                     self.resume_case_index = case_index
                 return False
         case_host0_log = (
@@ -2696,6 +2706,9 @@ class PsplinkCampaignRunner:
         if on_case_start is not None:
             try:
                 on_case_start(case_index, case, "CASE_ACTIVE")
+            except HardwareLockError as exc:
+                self._case_start_lock_refused(case.case_id, exc)
+                return False
             except (OSError, ValueError, TypeError):
                 self.state = "STOPPED"
                 self.terminal_reason = "CHECKPOINT_WRITE_FAILED"
@@ -2805,7 +2818,7 @@ class PsplinkCampaignRunner:
                 try:
                     on_case_complete(case_index, envelope)
                 except (OSError, ValueError, TypeError):
-                    self.terminal_reason = "CHECKPOINT_WRITE_FAILED"
+                    self._checkpoint_write_failed()
             return False
 
         after_probe, s1_problem = self._take_snapshot()
@@ -2830,11 +2843,7 @@ class PsplinkCampaignRunner:
         after_unload, s2_problem = self._take_snapshot()
         shell_qualified = self._shell_qualified()
         exprint = self._request("exprint", self.cleanup_timeout)
-        host0_roundtrip_ok = (
-            self._verify_host0_roundtrip()
-            if case.case_id == "transport-write" or not reset_between_cases
-            else self.host0_qualified
-        )
+        host0_roundtrip_ok = self._verify_host0_roundtrip()
         probe_succeeded = self._probe_case_succeeded(
             case,
             result,
@@ -2888,7 +2897,20 @@ class PsplinkCampaignRunner:
                 f"module thread snapshot unavailable: {module_thread_problem}"
             )
         cleanup_ok = unload_status == "PASS" and teardown_report["status"] == "PASS"
-        if teardown_report["status"] != "PASS":
+        if (
+            not stop_on_incomplete
+            and progress.launched
+            and (not module_uid or unload_status != "PASS")
+            and not probe_succeeded
+        ):
+            self._physical_intervention(
+                f"direct case {case.case_id} launched without a confirmed module unload; "
+                "a newer qualified device boot is required before continuing"
+            )
+            self.intervention_case_id = case.case_id
+            self.resume_case_index = case_index + 1
+            teardown_report["recovery_status"] = "NOT_RUN"
+        elif teardown_report["status"] != "PASS":
             if stop_on_incomplete:
                 self._physical_intervention(
                     f"campaign stopped after teardown check failed for {case.case_id}; "
@@ -2902,6 +2924,7 @@ class PsplinkCampaignRunner:
                     teardown_report,
                     module_uid,
                     probe_succeeded=probe_succeeded,
+                    unload_status=unload_status,
                 )
         run_finished_ns = time.time_ns()
         if case.case_id == "transport-write":
@@ -2937,8 +2960,7 @@ class PsplinkCampaignRunner:
             try:
                 on_case_complete(case_index, envelope)
             except (OSError, ValueError, TypeError):
-                self.state = "STOPPED"
-                self.terminal_reason = "CHECKPOINT_WRITE_FAILED"
+                self._checkpoint_write_failed()
         if self.terminal_reason:
             return False
         self.state = "READY"
@@ -3239,7 +3261,7 @@ def _campaign_queue_summary() -> dict[str, object]:
          "estimated_seconds": CAMPAIGN_CASE_ESTIMATE_SECONDS[case_id]}
         for index, case_id in enumerate(CAMPAIGN_QUEUE_CASES)
     ]
-    case_seconds = sum(CAMPAIGN_CASE_ESTIMATE_SECONDS.values())
+    case_seconds = sum(CAMPAIGN_CASE_ESTIMATE_SECONDS[case_id] for case_id in CAMPAIGN_QUEUE_CASES)
     reset_count = len(CAMPAIGN_QUEUE_CASES) - 1
     reset_seconds = reset_count * CAMPAIGN_RESET_ESTIMATE_SECONDS
     return {
@@ -3254,21 +3276,74 @@ def _campaign_queue_summary() -> dict[str, object]:
 def _write_campaign_json(path: Path, value: dict[str, object]) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     rendered = dump_json(value)
-    temporary.write_text(rendered, encoding="utf-8")
-    os.replace(temporary, path)
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            stream.write(rendered)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+# Every writer of the hardware lock file takes an exclusive OS lock on a sidecar file next to it, re-reads the
+# lock under that OS lock, applies its change and replaces the file atomically (update_hardware_lock). The
+# sidecar is never the lock file itself, which each write replaces, and it is never deleted: deleting it would
+# let two writers lock two different files. A leftover sidecar is harmless, because only the OS lock on it
+# matters and the OS drops that lock when its holder exits, so a writer that dies holding it does not block the
+# next one. Readers take no lock: each replace is atomic, so a reader sees the whole old file or the whole new
+# one. On Windows a reader that has the file open makes the writer's replace fail, and a reader that opens it
+# during the replace fails, both with a sharing violation (PermissionError) that lasts only as long as one read
+# or one rename. Both sides retry that error alone, for at most HARDWARE_LOCK_SHARING_RETRY_SECONDS, then
+# report it.
+HARDWARE_LOCK_WRITER_SUFFIX = ".writer"
+HARDWARE_LOCK_WRITER_TIMEOUT_SECONDS = 10.0
+HARDWARE_LOCK_SHARING_RETRY_SECONDS = 1.0
+_HARDWARE_LOCK_WRITER_POLL_SECONDS = 0.002
+
+
+def _retry_windows_sharing_violation(action: Callable[[], Any]) -> Any:
+    """Run ``action``, retrying a Windows sharing violation for a bounded time; other errors propagate."""
+
+    deadline = time.monotonic() + HARDWARE_LOCK_SHARING_RETRY_SECONDS
+    while True:
+        try:
+            return action()
+        except PermissionError:
+            if sys.platform != "win32" or time.monotonic() >= deadline:
+                raise
+            time.sleep(_HARDWARE_LOCK_WRITER_POLL_SECONDS)
+
+
+def read_hardware_lock_file(lock_path: Path) -> object:
+    """Parse the hardware lock file without taking the writer lock; read errors propagate."""
+
+    path = Path(lock_path)
+    return json.loads(_retry_windows_sharing_violation(lambda: path.read_text(encoding="utf-8")))
+
+
+def _hardware_lock_holder_problem(lock: object, session_id: str) -> str | None:
+    if not isinstance(lock, dict) or lock.get("state") != "HELD":
+        return "HARDWARE_LOCK_NOT_HELD"
+    if lock.get("holder_session") != session_id:
+        return "HARDWARE_LOCK_SESSION_MISMATCH"
+    return None
 
 
 def _read_hardware_lock(
     session_id: str,
+    *,
+    lock_path: Path | None = None,
 ) -> tuple[bool, str, dict[str, object] | None]:
+    path = HARDWARE_LOCK_PATH if lock_path is None else Path(lock_path)
     try:
-        lock = json.loads(HARDWARE_LOCK_PATH.read_text(encoding="utf-8"))
+        lock = read_hardware_lock_file(path)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return False, f"HARDWARE_LOCK_UNAVAILABLE:{type(exc).__name__}", None
-    if not isinstance(lock, dict) or lock.get("state") != "HELD":
-        return False, "HARDWARE_LOCK_NOT_HELD", None
-    if lock.get("holder_session") != session_id:
-        return False, "HARDWARE_LOCK_SESSION_MISMATCH", None
+    problem = _hardware_lock_holder_problem(lock, session_id)
+    if problem:
+        return False, problem, None
+    assert isinstance(lock, dict)
     device_state, status = _validate_device_state_attestation(lock, session_id)
     if device_state is None:
         return False, status, None
@@ -3305,6 +3380,113 @@ def require_hardware_lock(session_id: object) -> dict[str, object]:
     return device_state
 
 
+def hardware_lock_writer_path(lock_path: Path) -> Path:
+    """The sidecar file whose OS lock serialises every writer of ``lock_path``."""
+
+    path = Path(lock_path)
+    return path.with_name(path.name + HARDWARE_LOCK_WRITER_SUFFIX)
+
+
+def _try_lock_writer_file(fd: int) -> bool:
+    """Take the exclusive lock on the sidecar without waiting; False when another writer holds it."""
+
+    if sys.platform == "win32":
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EDEADLOCK):
+                return False
+            raise
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _unlock_writer_file(fd: int) -> None:
+    if sys.platform == "win32":
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def hardware_lock_writer(
+    lock_path: Path, *, timeout_seconds: float | None = None
+) -> Iterator[None]:
+    """Hold the exclusive cross-process writer lock for ``lock_path`` for the ``with`` body.
+
+    The wait is bounded: a writer that cannot take the lock within ``timeout_seconds`` (default
+    ``HARDWARE_LOCK_WRITER_TIMEOUT_SECONDS``) stops with
+    ``HardwareLockError("HARDWARE_LOCK_WRITER_TIMEOUT")`` and writes nothing. The lock is not fair: a
+    waiter polls, so a process that writes back to back can hold it off until that bound. Lock writers
+    update a few times per launch, far below that.
+    """
+
+    if timeout_seconds is None:
+        timeout_seconds = HARDWARE_LOCK_WRITER_TIMEOUT_SECONDS
+    if (
+        not isinstance(timeout_seconds, (int, float))
+        or isinstance(timeout_seconds, bool)
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds < 0
+    ):
+        raise ValueError("timeout_seconds must be a finite non-negative number")
+    fd = os.open(hardware_lock_writer_path(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + timeout_seconds
+        while not _try_lock_writer_file(fd):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HardwareLockError("HARDWARE_LOCK_WRITER_TIMEOUT")
+            time.sleep(min(_HARDWARE_LOCK_WRITER_POLL_SECONDS, remaining))
+        try:
+            yield
+        finally:
+            _unlock_writer_file(fd)
+    finally:
+        os.close(fd)
+
+
+def update_hardware_lock(
+    lock_path: Path,
+    mutate: Callable[[dict[str, object]], None],
+    *,
+    timeout_seconds: float | None = None,
+    allow_missing: bool = False,
+) -> dict[str, object]:
+    """Apply ``mutate`` to a fresh read of the hardware lock and replace the file, as one atomic update.
+
+    The one way to write the hardware lock. Under :func:`hardware_lock_writer` it reads the lock file,
+    passes the object to ``mutate`` to change in place, and writes it back with the atomic replace of
+    :func:`_write_campaign_json`. An exception from ``mutate`` writes nothing and propagates. An unreadable
+    lock stops with ``HardwareLockError("HARDWARE_LOCK_UNAVAILABLE:<reason>")``; with ``allow_missing``
+    a missing file starts from an empty object. Returns the object written.
+    """
+
+    path = Path(lock_path)
+    with hardware_lock_writer(path, timeout_seconds=timeout_seconds):
+        loaded: object
+        try:
+            loaded = read_hardware_lock_file(path)
+        except FileNotFoundError as exc:
+            if not allow_missing:
+                raise HardwareLockError(f"HARDWARE_LOCK_UNAVAILABLE:{type(exc).__name__}") from exc
+            loaded = {}
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise HardwareLockError(f"HARDWARE_LOCK_UNAVAILABLE:{type(exc).__name__}") from exc
+        if not isinstance(loaded, dict):
+            raise HardwareLockError("HARDWARE_LOCK_UNAVAILABLE:not-an-object")
+        lock: dict[str, object] = loaded
+        mutate(lock)
+        _retry_windows_sharing_violation(lambda: _write_campaign_json(path, lock))
+    return lock
+
+
 def _checkpoint_waiting(
     state: dict[str, object], failed_case_id: str | None, resume_case_index: int
 ) -> dict[str, object]:
@@ -3318,7 +3500,9 @@ def _checkpoint_waiting(
     return {
         **state,
         "state": "WAITING_FOR_NEW_QUALIFIED_BOOT",
-        "failed_case_id": failed_case_id,
+        "failed_case_id": (
+            failed_case_id if failed_case_id is not None else state.get("failed_case_id")
+        ),
         "interrupted_cases": interrupted,
         "interrupted_boot_number": state.get("active_case_boot_number"),
         "next_case_index": resume_case_index,
@@ -3443,6 +3627,14 @@ def _checkpoint_after_run(
 
     if terminal_reason is None and not running:
         if position == case_count:
+            if state.get("failed_case_id") is not None:
+                return {
+                    **state,
+                    "state": "IN_PROGRESS",
+                    "active_case_index": None,
+                    "active_case_id": None,
+                    "phase": None,
+                }
             return {
                 **state,
                 "state": "COMPLETE",
@@ -3495,6 +3687,9 @@ def _checkpoint_resume(
         ),
         "host0_qualified": checkpoint.get("host0_qualified") is True,
     }
+    failed_case_id = checkpoint.get("failed_case_id")
+    if isinstance(failed_case_id, str) and failed_case_id:
+        carried["failed_case_id"] = failed_case_id
     state = checkpoint.get("state")
     start_index: object
     if state == "COMPLETE":
@@ -3517,6 +3712,14 @@ def _checkpoint_resume(
                 "interrupted_boot_number": interrupted_boot,
                 "qualified_boot_number": _attested_boot_number(device_state),
             }
+        if phase == "CASE_ACTIVE":
+            active_case_id = checkpoint.get("active_case_id")
+            if not isinstance(active_case_id, str) or not active_case_id:
+                return {"status": "REFUSED", "reason": "invalid active case id"}
+            interrupted_cases = cast(list[object], carried["interrupted_cases"])
+            if active_case_id not in interrupted_cases:
+                interrupted_cases.append(active_case_id)
+            carried["failed_case_id"] = active_case_id
         start_index = active_index + 1 if phase == "CASE_ACTIVE" else active_index
     elif state == "WAITING_FOR_NEW_QUALIFIED_BOOT":
         interrupted_boot = checkpoint.get("interrupted_boot_number")
@@ -3638,6 +3841,35 @@ def run_campaign_plan(
         return (0 if resume.get("status") == "COMPLETE" else 2), {**resume, **summary}
     start_index, carried = resume
     if start_index >= len(cases):
+        failed_case_id = carried.get("failed_case_id")
+        if failed_case_id is not None:
+            incomplete_state: dict[str, object] = {
+                "schema": 2,
+                "campaign_id": plan["campaign_id"],
+                "source_commit": plan["source_commit"],
+                "session_id": plan["session_id"],
+                "queue": list(CAMPAIGN_QUEUE_CASES),
+                "state": "IN_PROGRESS",
+                **carried,
+                "next_case_index": start_index,
+                "active_case_index": None,
+                "active_case_id": None,
+                "active_case_boot_number": None,
+                "phase": None,
+                "failed_case_id": failed_case_id,
+            }
+            _write_campaign_json(checkpoint_path, incomplete_state)
+            report = {
+                "status": "INCOMPLETE",
+                "campaign_id": plan["campaign_id"],
+                "case_count": len(cases),
+                "completed_cases": carried["completed_cases"],
+                "interrupted_cases": carried["interrupted_cases"],
+                "failed_case_id": failed_case_id,
+                **summary,
+            }
+            _write_campaign_json(paths["report_path"], report)
+            return 2, report
         return 0, {"status": "COMPLETE", "case_count": len(cases), **summary}
 
     state: dict[str, object] = {
@@ -3654,7 +3886,9 @@ def run_campaign_plan(
         "phase": None,
         "failed_case_id": None,
     }
+    state["failed_case_id"] = carried.get("failed_case_id")
     _write_campaign_json(checkpoint_path, state)
+    pending_checkpoint_state: dict[str, object] | None = None
     transport = cast(PsplinkProcessTransport, (transport_factory or PsplinkProcessTransport)(
         pspsh_argv=pspsh_argv,
         usbhostfs_argv=usbhostfs_argv,
@@ -3673,17 +3907,20 @@ def run_campaign_plan(
 
     def record_start(index: int, case: CampaignCase, phase: str) -> None:
         current_device_state = require_hardware_lock(plan["session_id"])
-        state.update(_checkpoint_case_started(
+        next_state = _checkpoint_case_started(
             state,
             index,
             case.case_id,
             phase,
             device_boot_number=int(cast(str | int, current_device_state["boot_number"])),
-        ))
-        _write_campaign_json(checkpoint_path, state)
+        )
+        _write_campaign_json(checkpoint_path, next_state)
+        state.clear()
+        state.update(next_state)
 
     def record_complete(index: int, envelope: dict[str, object]) -> None:
-        state.update(_checkpoint_case_finished(
+        nonlocal pending_checkpoint_state
+        next_state = _checkpoint_case_finished(
             state,
             index,
             str(envelope["CASE_ID"]),
@@ -3691,8 +3928,14 @@ def run_campaign_plan(
             resume_case_index=runner.resume_case_index,
             host0_qualified=runner.host0_qualified,
             power_cycle_required=runner.intervention_requires_power_cycle,
-        ))
-        _write_campaign_json(checkpoint_path, state)
+        )
+        try:
+            _write_campaign_json(checkpoint_path, next_state)
+        except (OSError, ValueError, TypeError):
+            pending_checkpoint_state = next_state
+            raise
+        state.clear()
+        state.update(next_state)
 
     try:
         report = runner.run(
@@ -3715,16 +3958,17 @@ def run_campaign_plan(
         if runner.terminal_reason != "PHYSICAL_INTERVENTION_REQUIRED":
             runner.terminal_reason = "HOST_ERROR"
         report = runner._report()
+    state_before_finalization = pending_checkpoint_state or state
     final_state = _checkpoint_after_run(
-        state,
+        state_before_finalization,
         terminal_reason=cast(str | None, report.get("terminal_reason")),
         intervention_case_id=runner.intervention_case_id,
         resume_case_index=runner.resume_case_index,
         case_count=len(cases),
     )
-    if final_state != state:
-        state = final_state
-        _write_campaign_json(checkpoint_path, state)
+    _write_campaign_json(checkpoint_path, final_state)
+    state.clear()
+    state.update(final_state)
 
     report.update({
         "campaign_id": plan["campaign_id"],
@@ -3732,6 +3976,9 @@ def run_campaign_plan(
         "start_case_index": start_index,
         "checkpoint_state": state.get("state"),
         "checkpoint_next_case_index": state.get("next_case_index"),
+        "completed_cases": list(cast(Iterable[object], state.get("completed_cases", []))),
+        "interrupted_cases": list(cast(Iterable[object], state.get("interrupted_cases", []))),
+        "failed_case_id": state.get("failed_case_id"),
         **summary,
     })
     _write_campaign_json(paths["report_path"], report)
@@ -3851,11 +4098,6 @@ def _wait_for_host0_output(
     raise TimeoutError(f"host0 output did not become complete: {path.name}")
 
 
-_STEP_LINE_RE = re.compile(
-    r"^NAKAGAWA_PSP_STEP schema=1 case_id=\S+ step=(\S+)\s*$", re.MULTILINE
-)
-
-
 def _host0_progress_detail(
     text: str | None, mtime_ns: int | None, run_started_ns: int
 ) -> str:
@@ -3864,12 +4106,15 @@ def _host0_progress_detail(
     if text is None or mtime_ns is None:
         return "no host0 output was observed"
     records = sum(line.startswith("NAKAGAWA_PSP_TEST ") for line in text.splitlines())
-    steps = _STEP_LINE_RE.findall(text)
+    try:
+        last_step = parse_progress(text).last_step
+    except ProtocolError:
+        last_step = None
     detail = (
         f"{records} result record(s); last host0 write "
         f"{max(mtime_ns - run_started_ns, 0) / 1e9:.1f}s after launch"
     )
-    return detail + (f"; last step marker: {steps[-1]}" if steps else "")
+    return detail + (f"; last step marker: {last_step.step}" if last_step else "")
 
 
 def _snapshot_host0_output(path: Path) -> tuple[str | None, int | None, str | None]:
@@ -3894,7 +4139,9 @@ def _snapshot_host0_output(path: Path) -> tuple[str | None, int | None, str | No
 
 def _host0_capture_complete(text: str, args: argparse.Namespace) -> bool:
     try:
-        return len(parse_output(_canonicalize_psp(text, args)).results) == 16
+        return len(parse_output(_canonicalize_psp(text, args)).results) == (
+            2 * len(DMAC_SIZE_MATRIX_SIZES)
+        )
     except (ProtocolError, OSError, ValueError):
         return False
 
@@ -3905,8 +4152,17 @@ def _validate_host0_capture(text: str, args: argparse.Namespace) -> dict[str, ob
     parsed = validate_dmac_size_matrix(_canonicalize_psp(text, args))
     metadata = parsed.metadata_dict()
     identity = _device_identity(text, args)
+    identity_blockers = cast(list[str], identity["DEVICE_IDENTITY_BLOCKERS"])
+    if (
+        identity["SOURCE_COMMIT_BINDING"] != _IDENTITY_MATCH
+        or identity["BINARY_SHA256_BINDING"] != _IDENTITY_MATCH
+    ) and not identity_blockers:
+        identity_blockers = [
+            "IDENTITY_NOT_BOUND: host binary and source commit are required to bind a capture"
+        ]
+        identity["DEVICE_IDENTITY_BLOCKERS"] = identity_blockers
     blockers = list(provenance_issues(metadata)) + list(
-        cast(list[str], identity["DEVICE_IDENTITY_BLOCKERS"])
+        identity_blockers
     )
     return {
         "classification": "PASS" if all(result.status == "PASS" for result in parsed.results) else "FAIL",
@@ -3982,6 +4238,18 @@ def _host_binary_sha256(binary: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _binary_sha256_for_args(args: argparse.Namespace) -> str | None:
+    cached = getattr(args, "_binary_sha256", None)
+    if isinstance(cached, str) and _FULL_SHA256_RE.fullmatch(cached):
+        return cached
+    binary = getattr(args, "binary", None)
+    if not isinstance(binary, Path):
+        return None
+    digest = _host_binary_sha256(binary)
+    args._binary_sha256 = digest
+    return digest
 
 
 def _device_metadata(text: str) -> dict[str, str]:
@@ -4066,9 +4334,8 @@ def _device_identity(text: str, args: argparse.Namespace) -> dict[str, object]:
     """Compare raw device identity before host canonicalization."""
 
     device = _device_metadata(text)
-    binary = getattr(args, "binary", None)
     try:
-        expected_digest = _host_binary_sha256(binary) if isinstance(binary, Path) else None
+        expected_digest = _binary_sha256_for_args(args)
     except OSError:
         expected_digest = None
     expected_commit = getattr(args, "source_commit", None)
@@ -4153,15 +4420,11 @@ def _canonicalize_psp(text: str, args: argparse.Namespace) -> str:
     if _is_measured_identity(reported_digest, _FULL_SHA256_RE):
         binary_sha256 = reported_digest.lower()
     else:
-        binary = getattr(args, "binary", None)
-        binary_sha256 = (
-            _host_binary_sha256(binary)
-            if isinstance(binary, Path)
-            else reported_digest or ""
-        )
+        binary_sha256 = _binary_sha256_for_args(args) or reported_digest or ""
 
+    source = device.get("source") or "unknown"
     metadata = (
-        "NAKAGAWA_PSP_META schema=1 source=psp "
+        f"NAKAGAWA_PSP_META schema=1 source={source} "
         f"{model_fields} firmware={firmware} "
         f"binary_sha256={binary_sha256} source_commit={source_commit}"
     )
@@ -4462,6 +4725,8 @@ def main(argv: list[str] | None = None) -> int:
             results_root.relative_to(ROOT.resolve())
         except ValueError:
             parser.error("--results-directory must be inside the repository root")
+        if not _is_git_ignored(results_root):
+            parser.error("--results-directory must be Git-ignored to keep captures private")
         if args.ge_corpus_write:
             try:
                 report = write_ge_corpus_probe_runs(
@@ -4484,13 +4749,10 @@ def main(argv: list[str] | None = None) -> int:
             args.annotate_report, args.observed_terminal_outcome, args.session_id,
         )):
             parser.error("campaign-plan mode cannot be combined with single-run or manual campaign options")
-        try:
-            pspsh_argv = _argv_json(parser, args.pspsh_argv_json, "--pspsh-argv-json")
-            usbhostfs_argv = _argv_json(
-                parser, args.usbhostfs_argv_json, "--usbhostfs-argv-json"
-            )
-        except SystemExit:
-            raise
+        pspsh_argv = _argv_json(parser, args.pspsh_argv_json, "--pspsh-argv-json")
+        usbhostfs_argv = _argv_json(
+            parser, args.usbhostfs_argv_json, "--usbhostfs-argv-json"
+        )
         code, report = run_campaign_plan(
             args.campaign_plan.resolve(),
             dry_run=args.dry_run,
@@ -4504,6 +4766,8 @@ def main(argv: list[str] | None = None) -> int:
         args.results_directory.relative_to(ROOT.resolve())
     except ValueError:
         parser.error("--results-directory must be inside the repository root")
+    if not _is_git_ignored(args.results_directory):
+        parser.error("--results-directory must be Git-ignored to keep captures private")
 
     if args.campaign_case:
         if (
@@ -4528,10 +4792,15 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--shell-verification-timeout must be finite and positive")
         host0_root = args.host0_root.resolve()
         fixture_root = (ROOT / "tests" / "fixtures" / "psp_oracle").resolve()
+        ignored_root = (fixture_root / "build").resolve()
         try:
-            host0_root.relative_to(fixture_root)
+            host0_root.relative_to(ignored_root)
         except ValueError:
-            parser.error("--host0-root must be a scratch directory under tests/fixtures/psp_oracle")
+            parser.error(
+                "--host0-root must be inside the ignored tests/fixtures/psp_oracle/build directory"
+            )
+        if not _is_git_ignored(host0_root):
+            parser.error("--host0-root must be ignored by Git to keep captures private")
         if not host0_root.is_dir():
             parser.error("--host0-root must be an existing scratch directory")
         cases: list[CampaignCase] = []
@@ -4573,13 +4842,10 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("campaign --out cannot replace the transport-write evidence file")
             if campaign_output in {case.binary for case in cases}:
                 parser.error("campaign --out cannot replace a probe PRX")
-        try:
-            pspsh_argv = _argv_json(parser, args.pspsh_argv_json, "--pspsh-argv-json")
-            usbhostfs_argv = _argv_json(
-                parser, args.usbhostfs_argv_json, "--usbhostfs-argv-json"
-            )
-        except SystemExit:
-            raise
+        pspsh_argv = _argv_json(parser, args.pspsh_argv_json, "--pspsh-argv-json")
+        usbhostfs_argv = _argv_json(
+            parser, args.usbhostfs_argv_json, "--usbhostfs-argv-json"
+        )
         transport = PsplinkProcessTransport(
             pspsh_argv=pspsh_argv,
             usbhostfs_argv=usbhostfs_argv,
@@ -4687,7 +4953,9 @@ def main(argv: list[str] | None = None) -> int:
     capture_started_ns = time.time_ns()
     returncode, stdout, stderr, process_status = _run_command(command, args.timeout)
     args.results_directory.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    timestamp = (
+        f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{capture_started_ns}"
+    )
     capture = args.results_directory / f"psplink-{timestamp}.stdout.txt"
     capture.write_text(stdout, encoding="utf-8")
     report = {
@@ -4703,10 +4971,37 @@ def main(argv: list[str] | None = None) -> int:
     report["test_record_count"] = record_count
     capture_ok = True
     if args.psp_output and args.nakagawa_output:
-        report["comparison"] = compare_texts(
-            _canonicalize_psp(args.psp_output.read_text(encoding="utf-8"), args),
-            args.nakagawa_output.read_text(encoding="utf-8"),
-        )
+        try:
+            raw_psp_text = args.psp_output.read_text(encoding="utf-8")
+            raw_nakagawa_text = args.nakagawa_output.read_text(encoding="utf-8")
+            comparison = compare_texts(
+                _canonicalize_psp(raw_psp_text, args),
+                raw_nakagawa_text,
+            )
+            if any(getattr(args, flag, None) for flag in PROVENANCE_FLAGS):
+                identity = _device_identity(raw_psp_text, args)
+                identity_blockers = cast(
+                    list[str], identity["DEVICE_IDENTITY_BLOCKERS"]
+                )
+                comparison.update(identity)
+                if identity_blockers:
+                    comparison["acceptance_blockers"] = [
+                        *cast(list[str], comparison["acceptance_blockers"]),
+                        *identity_blockers,
+                    ]
+                    comparison["acceptance_eligible"] = False
+        except (OSError, UnicodeError, ProtocolError, ValueError) as exc:
+            comparison = {
+                "classification": "INCONCLUSIVE",
+                "acceptance_eligible": False,
+                "acceptance_blockers": [
+                    f"comparison input could not be parsed ({type(exc).__name__})"
+                ],
+            }
+            capture_ok = False
+        if comparison["classification"] == "INCONCLUSIVE":
+            capture_ok = False
+        report["comparison"] = comparison
     elif args.psp_output or args.nakagawa_output:
         report["comparison"] = {
             "classification": "INCONCLUSIVE",

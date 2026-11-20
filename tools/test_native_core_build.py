@@ -12,6 +12,7 @@ the contract holds without building anything.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -53,6 +54,7 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/mygame/osk_text_entry_selftest",
     "build/mygame/ace_selftest build/mygame",
     "build/mygame/motion_match_selftest",
+    "build/mygame/motion_tap_selftest",
     "build/mygame/fsr3_host_selftest tests/native/fsr3_host_oracle.txt",
     "build/mygame/fsr3_fg_host_selftest tests/native/fsr3_fg_host_oracle.txt",
     "build/mygame/fsr3_fg_state_selftest",
@@ -60,6 +62,7 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/mygame/ge_float24_selftest",
     "build/mygame/ge_cpu_profile_validate_selftest",
     "build/mygame/ge_cpu_profile_validate_selftest --strip-cache-disabled",
+    "build/mygame/ge_cpu_profile_validate_selftest --vertex-cache-disabled",
     "build/mygame/ge_tnl_census_selftest",
     "build/mygame/ge_patch_tess_selftest",
     'build/mygame/ge_scene_selftest "build/mygame/ge-scene-selftest"',
@@ -96,6 +99,7 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/test_manifest_parser --check",
     "build/test_launch_resolution",
     "build/test_nk_nickname",
+    "build/test_nk_cheats",
     "build/test_player_state",
     "build/test_input_settings",
     "build/test_package_builder",
@@ -236,7 +240,7 @@ class NativeCoreTestsContractTests(unittest.TestCase):
                  for c in linked}
         for binary in ("test_core_catalog", "test_parsers_hostile", "test_manifest_parser",
                        "test_launch_resolution", "test_input_profile", "test_input_settings",
-                       "test_package_builder"):
+                       "test_package_builder", "test_xb_parser", "test_fuzz_parsers"):
             with self.subTest(binary=binary):
                 self.assertIn(binary, names)
 
@@ -284,6 +288,32 @@ class StandaloneTestBinTargetTests(unittest.TestCase):
         # The saves fault seams (#1883) compile into nk_zip.c and player_state.c here only.
         self.assertTrue(any("-DNK_SAVES_TEST_SEAMS" in c and "src/core/nk_zip.c" in c
                             and "src/player/player_state.c" in c for c in commands))
+
+
+class NkUiInventoryTests(unittest.TestCase):
+    """mk/nk_ui.mk and CMakeLists.txt keep one nk_ui source inventory, and every path in it is
+    a file the build can compile: a list naming a missing file breaks the first rule wired to it."""
+
+    @staticmethod
+    def _make_paths() -> dict[str, list[str]]:
+        text = (ROOT / "mk" / "nk_ui.mk").read_text(encoding="utf-8").replace("\\\n", " ")
+        return {match.group(1): [w for w in match.group(2).split() if w.endswith(".c")]
+                for match in re.finditer(r"^(NK_UI_\w+)\s*:?=(.*)$", text, re.M)}
+
+    @staticmethod
+    def _cmake_paths() -> dict[str, list[str]]:
+        text = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+        return {match.group(1): [w for w in match.group(2).split() if w.endswith(".c")]
+                for match in re.finditer(r"^set\((NK_UI_\w+)\s([^)]*)\)", text, re.M)}
+
+    def test_every_listed_nk_ui_source_exists(self) -> None:
+        for origin, lists in (("mk/nk_ui.mk", self._make_paths()),
+                              ("CMakeLists.txt", self._cmake_paths())):
+            self.assertTrue(lists, origin)
+            for name, paths in lists.items():
+                for path in paths:
+                    with self.subTest(origin=origin, list=name, path=path):
+                        self.assertTrue((ROOT / path).is_file(), f"{origin} {name} names {path}")
 
 
 if __name__ == "__main__":

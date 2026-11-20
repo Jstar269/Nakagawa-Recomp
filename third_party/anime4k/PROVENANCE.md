@@ -33,7 +33,8 @@ upscaler (`SR_MOVIE_UPSCALE=anime4k`) on CPU-presented movie frames.
 The nine compute shaders are not in this folder. Each is an adapted file: the upstream pass body is
 kept as it is, under the MIT notice and a modification note, inside the project's bindings. They are
 listed here as LOCAL DELTA rows, like `third_party/xbrz/PROVENANCE.md`. `python tools/anime4k_port.py
-check` fails when one differs from what the generator writes from the imported file.
+check` fails when one differs from what the generator writes from the imported file, and
+`tools/test_anime4k_port.py` fails when a SHA-256 below differs from the generated or the tracked shader.
 
 | File | Kind | Upstream source | SHA-256 |
 | --- | --- | --- | --- |

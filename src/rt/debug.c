@@ -31,7 +31,8 @@ int g_sr_last_writer_enabled = 0;
 
 /* Four-way buckets make address collisions very unlikely without turning an
  * opt-in diagnostic into an unbounded route trace.  Entries are replaced by
- * age within their bucket, while exact-address rewrites update in place. */
+ * age within their bucket, while a rewrite at the same start address that
+ * covers the old entry's bytes updates it in place. */
 #define SR_LAST_WRITER_BUCKETS 4096u
 #define SR_LAST_WRITER_WAYS 4u
 typedef struct {
@@ -68,7 +69,10 @@ void sr_note_mem_write(uint32_t addr, uint32_t width, uint32_t value, uint32_t p
     SrLastWriter *bucket = s_last_writers[sr_last_writer_bucket(addr)];
     SrLastWriter *slot = NULL;
     for (unsigned i = 0; i < SR_LAST_WRITER_WAYS; i++) {
-        if (bucket[i].valid && bucket[i].addr == addr) {
+        /* Reuse an entry only when the new write covers all of its bytes; a
+         * narrower write at the same start takes another way, so the wider
+         * write still owns the bytes past the narrow one. */
+        if (bucket[i].valid && bucket[i].addr == addr && bucket[i].width <= width) {
             slot = &bucket[i];
             break;
         }

@@ -176,6 +176,7 @@ static uint32_t s_latch_seen_count = 0u;
 /* The input the next sample carries: buttons, stick and scripted-input id, latched once per
  * VBLANK by sr_ctrl_sample() (the host's input is polled once per frame). */
 CtrlSample s_ctrl_live = { 0, 0, 128, 128, 0 };
+uint32_t sr_ctrl_live_buttons(void) { return s_ctrl_live.btn; }
 /* Sampling cycle (#1390): with cycle 0 the controller is sampled once per VBLANK. With a cycle
  * of 5555 to 20000 us it is sampled every `cycle` microseconds of guest time instead, and a
  * VBLANK adds no sample: pspautotests tests/ctrl/sampling2 at f573fe8c (recorded on a PSP)
@@ -339,6 +340,8 @@ int sr_pause_script_input_pending(uint32_t target_vcount) {
 /* Fill SceCtrlData[n] from the ring. Returns the number of new samples since the last read (the
  * PSP semantics), giving the game genuine per-frame history for edge/latch detection. Negative
  * reports inverted buttons. peek does not consume or block. */
+static int s_ctrl_bad_span_noted;   /* the derived unwritable-destination note has been logged this run */
+void sr_hle_test_ctrl_bad_span_note_reset(void) { s_ctrl_bad_span_noted = 0; }
 static uint32_t ctrl_fill_n(uint32_t buf, uint32_t nbufs, int negate, int peek) {
     /* Contract order: an out-of-contract request is refused before the ring is
      * consulted, so a rejected call can neither consume history nor write a byte.
@@ -394,8 +397,21 @@ static uint32_t ctrl_fill_n(uint32_t buf, uint32_t nbufs, int negate, int peek) 
      * resize, not a repaired defect. The span check itself does have one. */
     uint32_t span = 0;
     if (!sr_size_mul_ok((uint32_t)avail, CTRL_SAMPLE_BYTES, &span) ||
-        !sr_guest_span_writable(buf, span))
+        !sr_guest_span_writable(buf, span)) {
+        /* PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+         * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceCtrl.cpp, __CtrlReadSingleBuffer
+         * and sceCtrlReadBufferPositive): a destination it cannot write counts 0 samples, a read
+         * that found none waits first, and nothing is consumed. Noted once per run. */
+        if (!s_ctrl_bad_span_noted) {
+            s_ctrl_bad_span_noted = 1;
+            fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: %s into 0x%08x, which is not %u "
+                            "writable bytes of guest memory, answers 0 samples\n",
+                    peek ? (negate ? "sceCtrlPeekBufferNegative" : "sceCtrlPeekBufferPositive")
+                         : (negate ? "sceCtrlReadBufferNegative" : "sceCtrlReadBufferPositive"),
+                    buf, span);
+        }
         return 0;
+    }
     /* Oldest of the delivered samples first; peek differs only in blocking and in
      * whether the read cursor is advanced below, not in where the window starts. */
     int start = (s_ctrl_w - avail + CTRL_RING) % CTRL_RING;

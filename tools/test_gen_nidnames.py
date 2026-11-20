@@ -63,6 +63,13 @@ class ResolveTest(unittest.TestCase):
         with self.assertRaises(gen.CorpusError):
             gen.resolve({"class": "vibes", "name": "sceIoOpen"})
 
+    def test_a_name_that_is_not_a_c_identifier_is_rejected(self) -> None:
+        """sr_nid_name() would print the stray character and --name-imports would drop the name unnamed."""
+        for name in ("sceNpLookupAbortTransaction ", " sceIoOpen", "sce-IoOpen", "1sceIoOpen"):
+            with self.subTest(name=name), self.assertRaises(gen.CorpusError) as ctx:
+                gen.resolve({"class": "unresolved", "name": name, "nid": "0x4b4e4e71"})
+            self.assertIn("must be a C identifier", str(ctx.exception))
+
 
 class SentinelTest(unittest.TestCase):
     def test_non_derivable_sentinel_is_rejected(self) -> None:

@@ -21,7 +21,10 @@ requested) that audit passes. An interrupted or rejected generation therefore
 never leaves a candidate -- cleared or uncleared -- at the requested path; a
 failed audit may preserve a ``*.not-cleared`` diagnostic sibling. The export
 commit's author/committer timestamps and commit id are intentionally variable
-metadata; tracked candidate identity is the candidate tree id plus the
+metadata. The commit carries the operator's own Git identity (``git var
+GIT_AUTHOR_IDENT`` / ``GIT_COMMITTER_IDENT`` with their configuration); with no
+identity configured the export is refused (``EXPORT_IDENTITY_MISSING``), never
+committed under a placeholder; tracked candidate identity is the candidate tree id plus the
 recorded ``included_content_sha256``, both deterministic for a given source
 index.
 
@@ -32,6 +35,7 @@ Usage:
 """
 
 import argparse
+import fnmatch
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
@@ -47,10 +51,11 @@ ROOT = Path(__file__).resolve().parent.parent
 
 try:
     from . import public_export
-    from .nk_core.git_isolation import isolated_git_env, run_git
+    from .nk_core.git_isolation import _REPOSITORY_SELECTING_VARIABLES, isolated_git_env, run_git
 except ImportError:  # direct script execution
     import public_export  # type: ignore[no-redef]
-    from nk_core.git_isolation import isolated_git_env, run_git  # type: ignore[no-redef]
+    from nk_core.git_isolation import (  # type: ignore[no-redef]
+        _REPOSITORY_SELECTING_VARIABLES, isolated_git_env, run_git)
 
 PUBLIC_EXPORT_MANIFEST = "PUBLIC_EXPORT.json"
 PUBLIC_SAFE_PROFILE_ID = "public-safe-v1"
@@ -110,6 +115,15 @@ class GateResult:
     blocking: bool = True
 
 
+#: The unreviewed PGF/font components the public-safe profile must keep out of the
+#: export: the replacement font binaries and the lineage-sensitive PGF implementation.
+LEGAL_BLOCKER_PATTERNS = ("font/*.pgf", "src/rt/pgf.c", "src/rt/pgf.h")
+#: Concrete paths checked against the profile even when it does not name them.
+LEGAL_BLOCKER_PATHS = (
+    "font/jpn0.pgf", "font/kr0.pgf", "font/ltn0.pgf", "font/ltn8.pgf", "src/rt/pgf.c", "src/rt/pgf.h",
+)
+
+
 def check_unresolved_legal_blockers(public_safe_profile: bool = False) -> GateResult:
     """Check for unresolved PGF/font and PGD/amctrl review boundaries."""
     manifest_path = ROOT / "assets" / "release_manifest.json"
@@ -129,6 +143,28 @@ def check_unresolved_legal_blockers(public_safe_profile: bool = False) -> GateRe
     ]
 
     if public_safe_profile:
+        # The PASS below claims the profile keeps these components out of the export,
+        # so check that claim against the profile instead of asserting it.
+        try:
+            from . import publication_policy
+        except ImportError:  # direct script execution
+            import publication_policy  # type: ignore[no-redef]
+        profile_path = ROOT / "assets" / "public_source_profile.json"
+        try:
+            policy = publication_policy.load_policy(profile_path)
+        except publication_policy.PolicyError as error:
+            return GateResult("Legal Blockers", False, f"cannot read the public-safe profile: {error}")
+        candidates = set(LEGAL_BLOCKER_PATHS) | {
+            path for path in policy.include_paths
+            if any(fnmatch.fnmatchcase(path, pattern) for pattern in LEGAL_BLOCKER_PATTERNS)
+        }
+        included = sorted(path for path in candidates if policy.resolve(path).disposition == "included")
+        if included:
+            return GateResult(
+                "Legal Blockers",
+                False,
+                "PUBLIC-SAFE PROFILE INCLUDES UNREVIEWED COMPONENTS: " + ", ".join(included),
+            )
         return GateResult(
             "Legal Blockers",
             True,
@@ -182,11 +218,16 @@ def history_audit_gate_result(data: dict) -> GateResult:
     multi-commit public history legitimately passes; a fresh single-commit
     candidate with a finding must still fail.
     """
-    summary = data.get("summary", {})
-    categories = summary.get("category_counts", {})
+    # A report without the counts (schema drift, an error object) is not a clean history.
+    summary = data.get("summary") if isinstance(data, dict) else None
+    categories = summary.get("category_counts") if isinstance(summary, dict) else None
+    total = summary.get("total_findings") if isinstance(summary, dict) else None
+    if (not isinstance(categories, dict) or type(total) is not int
+            or any(type(count) is not int for count in categories.values())):
+        return GateResult("Full-History Audit", False,
+                          "history_audit report has no summary.total_findings and category_counts")
     definite = categories.get("DEFINITE_SECRET", 0)
     credentials = categories.get("POSSIBLE_CREDENTIAL", 0)
-    total = summary.get("total_findings", 0)
     if total == 0 and definite == 0 and credentials == 0:
         return GateResult(
             "Full-History Audit",
@@ -196,7 +237,7 @@ def history_audit_gate_result(data: dict) -> GateResult:
     return GateResult(
         "Full-History Audit",
         False,
-        f"SENSITIVE FINDINGS DETECTED: {summary.get('total_findings', 0)} findings; {definite} secrets, {credentials} credentials",
+        f"SENSITIVE FINDINGS DETECTED: {total} findings; {definite} secrets, {credentials} credentials",
     )
 
 
@@ -218,9 +259,14 @@ def run_history_audit(repo_root: Path = ROOT) -> GateResult:
         data = json.loads(res.stdout) if res.stdout.strip() else None
         if data is None:
             return GateResult("Full-History Audit", False, res.stderr.strip() or "history_audit failed")
-        return history_audit_gate_result(data)
+        result = history_audit_gate_result(data)
     except Exception as exc:
         return GateResult("Full-History Audit", False, f"failed to parse history_audit output: {exc}")
+    if result.passed and res.returncode != 0:
+        # A clean-looking report from a run that failed is not a pass.
+        return GateResult("Full-History Audit", False,
+                          f"history_audit exited {res.returncode}: {res.stderr.strip() or 'no detail'}")
+    return result
 
 
 def run_sbom_verification(repo_root: Path = ROOT) -> GateResult:
@@ -399,6 +445,34 @@ def _index_snapshot(repo_root: Path) -> tuple[str, list[tuple[str, str, bytes]]]
     return tree_sha, snapshot
 
 
+class ExportIdentityError(RuntimeError):
+    """No operator identity to commit the export under."""
+
+
+def host_commit_identity(repo_root: Path = ROOT) -> dict[str, str]:
+    """The author and committer Git records for the operator in *repo_root*.
+
+    The isolated environment every tool-run Git command uses pins a test identity;
+    the export commit is the root of a public history, so it carries the operator's
+    own identity instead, read with their configuration and environment
+    (``git var``). No usable identity is a named refusal, never a placeholder.
+    """
+    env = {key: value for key, value in os.environ.items() if key not in _REPOSITORY_SELECTING_VARIABLES}
+    identity: dict[str, str] = {}
+    for role in ("AUTHOR", "COMMITTER"):
+        res = subprocess.run(["git", "var", f"GIT_{role}_IDENT"], cwd=repo_root, env=env,
+                             capture_output=True, text=True, check=False)
+        name, separator, rest = res.stdout.strip().partition(" <")
+        email = rest.partition(">")[0]
+        if res.returncode or not separator or not name.strip() or not email.strip():
+            raise ExportIdentityError(
+                f"EXPORT_IDENTITY_MISSING: git has no {role.lower()} identity for the export commit; "
+                f"set user.name and user.email ({res.stderr.strip() or 'git var printed none'})")
+        identity[f"GIT_{role}_NAME"] = name.strip()
+        identity[f"GIT_{role}_EMAIL"] = email.strip()
+    return identity
+
+
 def _remove_tree_force(path: Path) -> None:
     """Best-effort ``rmtree`` that clears read-only bits before retrying.
 
@@ -513,6 +587,12 @@ def export_sanitized_public_tree(
             print(f"ERROR: Export directory '{export_dir}' exists and is not empty.", file=sys.stderr)
             return False
 
+    try:
+        identity = host_commit_identity(ROOT)
+    except ExportIdentityError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return False
+
     parent = export_dir.parent if str(export_dir.parent) else Path(".")
     try:
         parent.mkdir(parents=True, exist_ok=True)
@@ -533,6 +613,7 @@ def export_sanitized_public_tree(
 
         excluded_paths: list[str] = []
         exported_paths: list[str] = []
+        executable_paths: list[str] = []
         for rel, mode, blob in snapshot:
             if profile is not None and _is_excluded(rel, profile):
                 excluded_paths.append(rel)
@@ -542,6 +623,7 @@ def export_sanitized_public_tree(
             target.write_bytes(blob)
             if mode == "100755":
                 os.chmod(target, 0o755)
+                executable_paths.append(rel)
             exported_paths.append(rel)
 
         # PUBLIC_EXPORT.json is generated by the same authoritative implementation
@@ -577,13 +659,33 @@ def export_sanitized_public_tree(
         # Initialize clean single-commit Git repository
         run_git(["init"], cwd=staging, check=True, capture_output=True)
         run_git(["add", "."], cwd=staging, check=True, capture_output=True)
-        run_git(
+        # On a filesystem without an executable bit (NTFS) `git init` sets
+        # core.filemode=false and `git add` records every file as 100644, so the
+        # snapshot's 100755 entries are set in the index explicitly and checked.
+        if executable_paths:
+            run_git(["update-index", "--chmod=+x", "--", *executable_paths], cwd=staging,
+                    check=True, capture_output=True)
+        staged_modes = {
+            record.split("\t", 1)[1]: record.split(" ", 1)[0]
+            for record in run_git(["ls-files", "-s", "-z"], cwd=staging, check=True,
+                                  capture_output=True, text=True).stdout.split("\0") if record
+        }
+        wrong_modes = sorted(rel for rel, mode, _blob in snapshot
+                             if rel in staged_modes and staged_modes[rel] != mode)
+        if wrong_modes:
+            raise RuntimeError(f"export index modes differ from the source index: {', '.join(wrong_modes[:5])}")
+        # The commit carries the operator's identity, not the isolated test identity.
+        commit_env = isolated_git_env(root=staging)
+        commit_env.update(identity)
+        subprocess.run(
             [
+                "git",
                 "commit",
                 "-m",
                 "Initial sanitized public release export of Nakagawa Recomp",
             ],
             cwd=staging,
+            env=commit_env,
             check=True,
             capture_output=True,
         )

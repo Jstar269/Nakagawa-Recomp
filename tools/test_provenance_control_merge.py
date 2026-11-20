@@ -66,11 +66,12 @@ def _canonical(document: dict) -> bytes:
     return (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-def _ledger_document(policy, files: dict[str, bytes]) -> dict:
-    """The per-path ledger this repository commits, for *files*.
+def _hashed_ledger_document(policy, files: dict[str, bytes]) -> dict:
+    """The hashed ledger the hosted attestation regenerates for *files*.
 
-    Only the per-path entries are mutable, and each one names exactly one path,
-    which is the property that keeps two independent changes from colliding.
+    This is the trusted form (schema 1, a ``sha256`` per entry) that a release passes as
+    ``--provenance-ledger``; it is never committed. The committed ledger is its
+    claims-only form, :func:`provenance_ledger.claims_ledger_bytes` of this document.
     """
     entries = []
     for path in sorted(files):
@@ -95,10 +96,15 @@ def _ledger_document(policy, files: dict[str, bytes]) -> dict:
 
 
 def _generate_controls(root: Path, files: dict[str, bytes]) -> tuple[bytes, bytes]:
-    """Return (ledger bytes, committed control bytes) for the given tree."""
+    """Return (committed ledger bytes, committed control bytes) for the given tree.
+
+    The committed ledger is the claims-only form the repository commits (schema 2, no
+    hashes), produced by the real generator from the hashed ledger. Its entries each
+    name exactly one path, which is the property that keeps two independent changes
+    from colliding.
+    """
     policy = load_policy(root / POLICY)
-    ledger_document = _ledger_document(policy, files)
-    ledger_bytes = _canonical(ledger_document)
+    ledger_bytes = provenance_ledger.claims_ledger_bytes(_hashed_ledger_document(policy, files))
     full = public_export.build_document(
         policy,
         [(path, files[path]) for path in sorted(files) if path != EXPORT],
@@ -190,6 +196,21 @@ class ControlConflictTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.repo = SyntheticControlRepository(Path(self._tmp.name))
+
+    def test_the_fixture_commits_the_ledger_form_this_repository_commits(self) -> None:
+        """The merge properties are proved on the committed claims-only shape.
+
+        The repository's own ledger carries claims only (schema 2, no ``sha256``); a
+        fixture that committed the hashed form would prove the merge for a file the
+        repository never commits.
+        """
+        committed = json.loads((ROOT / LEDGER).read_text(encoding="utf-8"))
+        fixture = json.loads((self.repo.root / LEDGER).read_bytes())
+        self.assertEqual(fixture["schema_version"], committed["schema_version"])
+        self.assertEqual(fixture["schema_version"], provenance_ledger.CLAIMS_LEDGER_SCHEMA_VERSION)
+        self.assertTrue(fixture["entries"])
+        for entry in fixture["entries"]:
+            self.assertEqual(sorted(entry), ["classification", "evidence", "path"], entry)
 
     def test_two_independent_path_changes_merge_without_conflict(self) -> None:
         """Two pull requests touching different paths must merge cleanly.
@@ -456,22 +477,28 @@ class TamperStillFailsTests(unittest.TestCase):
         """A control that predates this change keeps working unchanged."""
         self.assertEqual(self._codes(self.generated), [])
 
-    def test_a_tampered_ledger_entry_is_still_a_content_mismatch(self) -> None:
-        """Editing a file without regenerating the ledger still fails closed.
+    def test_a_tampered_file_is_still_a_content_mismatch_against_the_hashed_ledger(self) -> None:
+        """Editing a file after its trusted hashes were generated still fails closed.
 
-        Checked through the publication audit's own ledger gate rather than
-        through a whole-repository audit, so the assertion is about this
-        property and not about which other controls a synthetic tree is
-        missing.
+        The committed claims-only ledger binds no bytes, so content is bound by the
+        hashed ledger the hosted attestation regenerates and a release passes as
+        ``--provenance-ledger``. That trusted form is what is checked here, through the
+        publication audit's own ledger gate rather than a whole-repository audit, so
+        the assertion is about this property and not about which other controls a
+        synthetic tree is missing.
         """
         import publish_audit
 
+        policy = load_policy(self.repo.root / POLICY)
+        trusted = Path(self._tmp.name + "-trusted-ledger.hashed.json")
+        self.addCleanup(trusted.unlink, missing_ok=True)
+        trusted.write_bytes(_canonical(_hashed_ledger_document(policy, self.repo.files)))
+
         self.repo.files[PATH_A] = b"# alpha\n\nedited without regenerating the controls\n"
         self.repo._write(self.repo.files)  # deliberately NOT followed by refresh()
-        policy = load_policy(self.repo.root / POLICY)
         entries = [
             publish_audit.GitEntry("100644", "", "0", path, "file")
-            for path in sorted(self.repo.files)
+            for path in sorted([*self.repo.files, LEDGER])
         ]
         findings = publish_audit._provenance_ledger_findings(
             policy=policy,
@@ -479,10 +506,11 @@ class TamperStillFailsTests(unittest.TestCase):
             content_map={},
             content_source=publish_audit.CONTENT_CANDIDATE,
             repo_root=self.repo.root,
-            trusted_ledger_path=None,
-            self_consistency=True,
+            trusted_ledger_path=trusted,
         )
         codes = [(f.code, f.path) for f in findings]
+        # The committed claims are exactly the trusted ledger's claims form.
+        self.assertNotIn(("PROVENANCE_LEDGER_MISMATCH", LEDGER), codes)
         self.assertIn(("PROVENANCE_CONTENT_MISMATCH", PATH_A), codes)
         self.assertNotIn(("PROVENANCE_CONTENT_MISMATCH", PATH_B), codes)
 

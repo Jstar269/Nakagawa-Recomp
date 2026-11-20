@@ -251,18 +251,15 @@ static void player_take_picked_package(PlayerApp *app, const char *path) {
     player_app_psn_conversion_begin(app, &package);
 }
 
-static void SDLCALL on_file_dialog_callback(void *userdata, const char * const *filelist, int filter) {
-    (void)filter;
-    PlayerApp *app = (PlayerApp *)userdata;
-    if (!app || !filelist || !filelist[0]) {
-        return;
-    }
+/* A disc image the picker chose or the user dropped, on the main thread: remembered as
+   the picker's next folder, then inspected, converted or expanded by its kind. */
+static void player_take_picked_file(PlayerApp *app, const char *selected_path) {
     if (app->wizard.is_extracting || app->psn_conversion_active) {
         /* A second file cannot replace the source while a worker owns the
            current staging transaction or conversion. */
         return;
     }
-    const char *selected_path = filelist[0];
+    player_ui_test_report_pick_taken("disc");
     printf("[PLAYER] ISO Selected: %s\n", selected_path);
     player_app_remember_picker_folder(app, selected_path, false);
     if (player_path_is_pbp_package(selected_path)) {
@@ -276,15 +273,50 @@ static void SDLCALL on_file_dialog_callback(void *userdata, const char * const *
     player_take_picked_disc(app, selected_path);
 }
 
+/* The disc picker. SDL may call its callback on another thread (player_host.h; on
+   Windows it always does), so the choice waits here and player_frame_requests takes it
+   on the main thread, as the save and texture pack pickers do: 1 a file was picked, 2
+   its path is too long to hold. A cancelled or failed dialog leaves nothing to take. */
+static char s_disc_pick[NK_MAX_PATH];
+static SDL_AtomicInt s_disc_pick_state;
+
+static void SDLCALL on_file_dialog_callback(void *userdata, const char * const *filelist, int filter) {
+    (void)userdata;
+    (void)filter;
+    if (!filelist) {
+        fprintf(stderr, "[PLAYER] The file picker could not open: %s\n", SDL_GetError());
+    } else if (!filelist[0]) {
+        return;
+    } else if (strlen(filelist[0]) >= sizeof(s_disc_pick)) {
+        SDL_SetAtomicInt(&s_disc_pick_state, 2);
+    } else {
+        (void)snprintf(s_disc_pick, sizeof(s_disc_pick), "%s", filelist[0]);
+        SDL_SetAtomicInt(&s_disc_pick_state, 1);
+    }
+}
+
+static void player_take_disc_pick(PlayerApp *app) {
+    int state = SDL_GetAtomicInt(&s_disc_pick_state);
+    if (state == 0) return;
+    SDL_SetAtomicInt(&s_disc_pick_state, 0);
+    if (state == 1) {
+        player_take_picked_file(app, s_disc_pick);
+    } else if (!app->wizard.is_extracting && !app->psn_conversion_active) {
+        player_show_picked_refusal(
+            app, "DISC_PATH_TOO_LONG", "Disc not added",
+            "The file you picked is too deep in other folders for Nakagawa to read, so it "
+            "wasn't added. Move it somewhere shorter and choose it from there.");
+    }
+}
+
 /* Opens the next dropped disc image the way the picker's choice opens, when the player
    can take one: not while a worker owns the staging or conversion. Later images of a
    drop wait for the library (player_frame_requests), so each is added in turn. */
 static void player_open_next_dropped_disc(PlayerApp *app) {
     char path[NK_MAX_PATH];
-    const char *files[2] = { path, NULL };
     if (app->wizard.is_extracting || app->psn_conversion_active) return;
     if (!player_app_drop_take(app, path, sizeof(path))) return;
-    on_file_dialog_callback(app, files, 0);
+    player_take_picked_file(app, path);
 }
 
 /* The end of a drop, whether SDL bracketed it with begin and complete or sent a lone file: a
@@ -310,6 +342,7 @@ static const char *player_picker_start(const PlayerApp *app) {
 }
 
 static void trigger_file_picker(SDL_Window *window, PlayerApp *app) {
+    SDL_SetAtomicInt(&s_disc_pick_state, 0);
     player_host_show_picker(PLAYER_HOST_PICK_DISC, window, player_picker_start(app),
                             on_file_dialog_callback, app);
 }
@@ -317,98 +350,109 @@ static void trigger_file_picker(SDL_Window *window, PlayerApp *app) {
 /* The PSP fonts import. The picker shows the .pgf files themselves, which a
    folder picker hides, so the user can see they are in the right folder; any
    one of them names the folder the import reads. A cancelled dialog arrives
-   with no entry and changes nothing. */
+   with no entry and changes nothing. As with a disc, SDL may call back on
+   another thread, so the file waits here for the main thread: 1 picked, 2 its
+   path is too long to hold. */
+static char s_font_pick[NK_MAX_PATH];
+static SDL_AtomicInt s_font_pick_state;
+
 static void on_font_files_dialog_callback(void *userdata, const char *const *filelist, int filter) {
-    PlayerApp *app = (PlayerApp *)userdata;
-    char folder[NK_MAX_PATH];
+    (void)userdata;
     (void)filter;
-    if (!app) return;
-    if (!filelist || !filelist[0]) return;
-    if (!player_path_parent_folder(filelist[0], folder, sizeof(folder))) return;
+    if (!filelist) {
+        fprintf(stderr, "[PLAYER] The font picker could not open: %s\n", SDL_GetError());
+    } else if (!filelist[0]) {
+        return;
+    } else if (strlen(filelist[0]) >= sizeof(s_font_pick)) {
+        SDL_SetAtomicInt(&s_font_pick_state, 2);
+    } else {
+        (void)snprintf(s_font_pick, sizeof(s_font_pick), "%s", filelist[0]);
+        SDL_SetAtomicInt(&s_font_pick_state, 1);
+    }
+}
+
+static void player_take_font_pick(PlayerApp *app) {
+    char folder[NK_MAX_PATH];
+    int state = SDL_GetAtomicInt(&s_font_pick_state);
+    if (state == 0) return;
+    SDL_SetAtomicInt(&s_font_pick_state, 0);
+    if (state != 1 || !player_path_parent_folder(s_font_pick, folder, sizeof(folder))) {
+        fprintf(stderr, "[PLAYER] The picked font file's folder could not be read from its "
+                        "path (too long, or no folder); no fonts were imported.\n");
+        return;
+    }
+    player_ui_test_report_pick_taken("fonts");
     player_app_remember_picker_folder(app, folder, true);
     (void)player_app_fonts_import_folder(app, folder);
 }
 
 static void trigger_font_folder_picker(SDL_Window *window, PlayerApp *app) {
+    SDL_SetAtomicInt(&s_font_pick_state, 0);
     player_host_show_picker(PLAYER_HOST_PICK_FONTS, window, player_picker_start(app),
                             on_font_files_dialog_callback, app);
 }
 
-/* Saves > Add a save (#1883). SDL may call the folder picker's callback on another
-   thread, so the folder waits here and player_frame_requests hands it to the
-   Saves dialog on the main thread: 1 a folder was picked, 2 cancelled, 3 the
-   picker failed, 4 the picked folder's path is too long to hold. */
-static char s_save_pick[NK_MAX_PATH];
-static char s_save_pick_error[256];
-static SDL_AtomicInt s_save_pick_state;
+/* A folder picker's answer: SDL may call the picker's callback on another thread, so
+   the folder waits here and player_frame_requests takes it on the main thread.
+   state: 1 a folder was picked, 2 cancelled, 3 the picker failed, 4 the picked
+   folder's path is too long to hold. */
+typedef struct {
+    char path[NK_MAX_PATH];
+    char error[256];
+    SDL_AtomicInt state;
+} PlayerFolderPick;
 
-static void on_save_folder_dialog_callback(void *userdata, const char *const *filelist,
+/* Saves > Add a save (#1883), handed to the Saves dialog. */
+static PlayerFolderPick s_save_pick;
+/* A title's Enhanced page > Texture pack folder. */
+static PlayerFolderPick s_texpack_pick;
+
+static void on_folder_pick_dialog_callback(void *userdata, const char *const *filelist,
                                            int filter) {
-    (void)userdata;
+    PlayerFolderPick *pick = (PlayerFolderPick *)userdata;
     (void)filter;
     if (!filelist) {
-        (void)snprintf(s_save_pick_error, sizeof(s_save_pick_error), "%s", SDL_GetError());
-        SDL_SetAtomicInt(&s_save_pick_state, 3);
+        (void)snprintf(pick->error, sizeof(pick->error), "%s", SDL_GetError());
+        SDL_SetAtomicInt(&pick->state, 3);
     } else if (!filelist[0]) {
-        SDL_SetAtomicInt(&s_save_pick_state, 2);
-    } else if (strlen(filelist[0]) >= sizeof(s_save_pick)) {
-        SDL_SetAtomicInt(&s_save_pick_state, 4);
+        SDL_SetAtomicInt(&pick->state, 2);
+    } else if (strlen(filelist[0]) >= sizeof(pick->path)) {
+        SDL_SetAtomicInt(&pick->state, 4);
     } else {
-        (void)snprintf(s_save_pick, sizeof(s_save_pick), "%s", filelist[0]);
-        SDL_SetAtomicInt(&s_save_pick_state, 1);
+        (void)snprintf(pick->path, sizeof(pick->path), "%s", filelist[0]);
+        SDL_SetAtomicInt(&pick->state, 1);
     }
+}
+
+static void trigger_folder_picker(PlayerHostPick what, PlayerFolderPick *pick,
+                                  SDL_Window *window, PlayerApp *app) {
+    SDL_SetAtomicInt(&pick->state, 0);
+    player_host_show_picker(what, window, player_picker_start(app),
+                            on_folder_pick_dialog_callback, pick);
 }
 
 static void trigger_save_folder_picker(SDL_Window *window, PlayerApp *app) {
-    SDL_SetAtomicInt(&s_save_pick_state, 0);
-    player_host_show_picker(PLAYER_HOST_PICK_SAVE, window, player_picker_start(app),
-                            on_save_folder_dialog_callback, app);
-}
-
-/* A title's Enhanced page > Texture pack folder. As with a save, SDL may call back on another
-   thread, so the folder waits here for the main thread: 1 picked, 2 cancelled, 3 the picker
-   failed, 4 the path is too long to hold. */
-static char s_texpack_pick[NK_MAX_PATH];
-static char s_texpack_pick_error[256];
-static SDL_AtomicInt s_texpack_pick_state;
-
-static void on_texpack_folder_dialog_callback(void *userdata, const char *const *filelist,
-                                              int filter) {
-    (void)userdata;
-    (void)filter;
-    if (!filelist) {
-        (void)snprintf(s_texpack_pick_error, sizeof(s_texpack_pick_error), "%s", SDL_GetError());
-        SDL_SetAtomicInt(&s_texpack_pick_state, 3);
-    } else if (!filelist[0]) {
-        SDL_SetAtomicInt(&s_texpack_pick_state, 2);
-    } else if (strlen(filelist[0]) >= sizeof(s_texpack_pick)) {
-        SDL_SetAtomicInt(&s_texpack_pick_state, 4);
-    } else {
-        (void)snprintf(s_texpack_pick, sizeof(s_texpack_pick), "%s", filelist[0]);
-        SDL_SetAtomicInt(&s_texpack_pick_state, 1);
-    }
+    trigger_folder_picker(PLAYER_HOST_PICK_SAVE, &s_save_pick, window, app);
 }
 
 static void trigger_texpack_folder_picker(SDL_Window *window, PlayerApp *app) {
-    SDL_SetAtomicInt(&s_texpack_pick_state, 0);
-    player_host_show_picker(PLAYER_HOST_PICK_TEXPACK, window, player_picker_start(app),
-                            on_texpack_folder_dialog_callback, app);
+    trigger_folder_picker(PLAYER_HOST_PICK_TEXPACK, &s_texpack_pick, window, app);
 }
 
 static void player_take_texpack_folder_pick(PlayerApp *app) {
-    int state = SDL_GetAtomicInt(&s_texpack_pick_state);
+    int state = SDL_GetAtomicInt(&s_texpack_pick.state);
     if (state == 0) return;
-    SDL_SetAtomicInt(&s_texpack_pick_state, 0);
+    SDL_SetAtomicInt(&s_texpack_pick.state, 0);
     if (state != 1) player_app_cancel_texpack_pick(app);
     if (state == 1) {
         /* Read and refused with its reason, or stored for the game the dialog was opened for. */
-        (void)player_app_take_texpack_pick(app, s_texpack_pick);
+        (void)player_app_take_texpack_pick(app, s_texpack_pick.path);
     } else if (state == 3) {
-        fprintf(stderr, "[PLAYER] The folder picker could not open: %s\n", s_texpack_pick_error);
+        fprintf(stderr, "[PLAYER] The folder picker could not open: %s\n", s_texpack_pick.error);
         player_app_set_error_with_details(
             app, "TEXTURE_PACK_PICKER_FAILED", "The folder picker didn't open",
             "Nakagawa couldn't show a folder picker, so no texture pack was chosen.",
-            s_texpack_pick_error, "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY
+            s_texpack_pick.error, "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY
                                                                         : app->active_view);
     } else if (state == 4) {
         player_app_set_error(
@@ -420,19 +464,19 @@ static void player_take_texpack_folder_pick(PlayerApp *app) {
 }
 
 static void player_take_save_folder_pick(PlayerApp *app) {
-    int state = SDL_GetAtomicInt(&s_save_pick_state);
+    int state = SDL_GetAtomicInt(&s_save_pick.state);
     if (state == 0) return;
-    SDL_SetAtomicInt(&s_save_pick_state, 0);
+    SDL_SetAtomicInt(&s_save_pick.state, 0);
     if (state == 1) {
-        (void)snprintf(app->saves_picked, sizeof(app->saves_picked), "%s", s_save_pick);
+        (void)snprintf(app->saves_picked, sizeof(app->saves_picked), "%s", s_save_pick.path);
         app->saves_pick_ready = true;
     } else if (state == 3) {
-        fprintf(stderr, "[PLAYER] The folder picker could not open: %s\n", s_save_pick_error);
+        fprintf(stderr, "[PLAYER] The folder picker could not open: %s\n", s_save_pick.error);
         player_app_set_error_with_details(
             app, "SAVES_PICKER_FAILED", "The folder picker didn't open",
             "Nakagawa couldn't show a folder picker, so no save was added. Copy the save's "
             "folder into PSP/SAVEDATA in the save folder yourself: Open save folder shows it.",
-            s_save_pick_error, "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY
+            s_save_pick.error, "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY
                                                                      : app->active_view);
     } else if (state == 4) {
         player_app_set_error(
@@ -659,6 +703,55 @@ static bool player_confirm_quit(SDL_Window *window, PlayerApp *app) {
 /* Select is held: with R it toggles the developer log panel. */
 static bool s_pad_select_held;
 
+/* Back, from Escape or the controller's East button: one ladder of views, so a
+   view added later goes back the same way from both. Only Escape cancels a
+   control's capture (a controller press during it is the binding) and asks to
+   quit at the library; East does nothing at the library. */
+static void player_go_back(PlayerApp *app, SDL_Window *window, bool *running,
+                           bool from_keyboard) {
+    if (app->active_view == VIEW_SETUP_WIZARD) {
+        player_app_wizard_back(app);
+    } else if (app->active_view == VIEW_CONTROLLER_SETTINGS) {
+        if (from_keyboard && input_settings_is_capturing(&app->input_settings)) {
+            input_settings_cancel_capture(&app->input_settings);
+        } else if (input_settings_is_calibrating(&app->input_settings)) {
+            input_settings_cancel_calibration(&app->input_settings);
+        } else if (input_settings_aim_is_open(&app->input_settings)) {
+            /* The mouse aiming settings (#1791) go back to the keys they opened from. */
+            input_settings_close_aim(&app->input_settings);
+        } else {
+            player_app_set_view(app, VIEW_SETTINGS);
+        }
+    } else if (app->active_view == VIEW_PREREQ_CONSENT ||
+               app->active_view == VIEW_PREREQ_PROGRESS) {
+        player_app_prereq_cancel(app);
+    } else if (app->active_view == VIEW_CONFIRM_REMOVE_TOOLS) {
+        player_app_set_view(app, VIEW_BUILD_CACHE);
+    } else if (app->active_view == VIEW_ONLINE_PLAY_SETTINGS) {
+        player_app_set_view(app, VIEW_ONLINE_SETTINGS);
+    } else if (app->active_view == VIEW_PREREQ_ABOUT ||
+               app->active_view == VIEW_BUILD_CACHE ||
+               app->active_view == VIEW_PSP_FONTS ||
+               app->active_view == VIEW_UPDATES ||
+               app->active_view == VIEW_CONFIRM_FACTORY_RESET ||
+               app->active_view == VIEW_ONLINE_SETTINGS ||
+               app->active_view == VIEW_ACCESSIBILITY_SETTINGS ||
+               app->active_view == VIEW_PROBLEM_REPORT) {
+        player_app_set_view(app, VIEW_SETTINGS);
+    } else if (app->active_view == VIEW_ACE_SETTINGS) {
+        player_app_close_enhanced_page(app);
+    } else if (app->active_view == VIEW_DEVELOPER_LOG) {
+        player_app_close_developer_log(app);
+    } else if (app->active_view == VIEW_BUILDING_PACKAGE) {
+        player_app_cancel_package_build(app);
+        player_app_set_view(app, VIEW_LIBRARY);
+    } else if (!player_view_is_library(app->active_view)) {
+        player_app_set_view(app, VIEW_LIBRARY);
+    } else if (from_keyboard) {
+        if (player_confirm_quit(window, app)) *running = false;
+    }
+}
+
 /* Backspace and the mouse's back button (X1) are Back: each is taken as Esc,
    so every view goes back the same way. A key the Controls page is waiting
    for keeps its own name, so Backspace can still be mapped, and so does
@@ -792,47 +885,7 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
                                     !player_view_is_library(app->active_view))) {
             return player_ui_nk_handle_event(next_ui, event);
         } else if (event->key.key == SDLK_ESCAPE) {
-            if (app->active_view == VIEW_SETUP_WIZARD) {
-                player_app_wizard_back(app);
-            } else if (app->active_view == VIEW_CONTROLLER_SETTINGS) {
-                if (input_settings_is_capturing(&app->input_settings)) {
-                    input_settings_cancel_capture(&app->input_settings);
-                } else if (input_settings_is_calibrating(&app->input_settings)) {
-                    input_settings_cancel_calibration(&app->input_settings);
-                } else if (input_settings_aim_is_open(&app->input_settings)) {
-                    /* The mouse aiming settings (#1791) go back to the keys they opened from. */
-                    input_settings_close_aim(&app->input_settings);
-                } else {
-                    player_app_set_view(app, VIEW_SETTINGS);
-                }
-            } else if (app->active_view == VIEW_PREREQ_CONSENT ||
-                       app->active_view == VIEW_PREREQ_PROGRESS) {
-                player_app_prereq_cancel(app);
-            } else if (app->active_view == VIEW_CONFIRM_REMOVE_TOOLS) {
-                player_app_set_view(app, VIEW_BUILD_CACHE);
-            } else if (app->active_view == VIEW_ONLINE_PLAY_SETTINGS) {
-                player_app_set_view(app, VIEW_ONLINE_SETTINGS);
-            } else if (app->active_view == VIEW_PREREQ_ABOUT ||
-                       app->active_view == VIEW_BUILD_CACHE ||
-                       app->active_view == VIEW_PSP_FONTS ||
-                       app->active_view == VIEW_UPDATES ||
-                       app->active_view == VIEW_CONFIRM_FACTORY_RESET ||
-                       app->active_view == VIEW_ONLINE_SETTINGS ||
-                       app->active_view == VIEW_ACCESSIBILITY_SETTINGS ||
-                       app->active_view == VIEW_PROBLEM_REPORT) {
-                player_app_set_view(app, VIEW_SETTINGS);
-            } else if (app->active_view == VIEW_ACE_SETTINGS) {
-                player_app_close_enhanced_page(app);
-            } else if (app->active_view == VIEW_DEVELOPER_LOG) {
-                player_app_close_developer_log(app);
-            } else if (app->active_view == VIEW_BUILDING_PACKAGE) {
-                player_app_cancel_package_build(app);
-                player_app_set_view(app, VIEW_LIBRARY);
-            } else if (!player_view_is_library(app->active_view)) {
-                player_app_set_view(app, VIEW_LIBRARY);
-            } else {
-                if (player_confirm_quit(window, app)) *running = false;
-            }
+            player_go_back(app, window, running, true);
         }
         return true;
     case SDL_EVENT_KEY_UP:
@@ -907,42 +960,7 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
         }
         if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST &&
             !player_view_is_library(app->active_view)) {
-            if (app->active_view == VIEW_SETUP_WIZARD) {
-                player_app_wizard_back(app);
-            } else if (app->active_view == VIEW_CONTROLLER_SETTINGS) {
-                if (input_settings_is_calibrating(&app->input_settings)) {
-                    input_settings_cancel_calibration(&app->input_settings);
-                } else if (input_settings_aim_is_open(&app->input_settings)) {
-                    input_settings_close_aim(&app->input_settings);
-                } else {
-                    player_app_set_view(app, VIEW_SETTINGS);
-                }
-            } else if (app->active_view == VIEW_PREREQ_CONSENT ||
-                       app->active_view == VIEW_PREREQ_PROGRESS) {
-                player_app_prereq_cancel(app);
-            } else if (app->active_view == VIEW_CONFIRM_REMOVE_TOOLS) {
-                player_app_set_view(app, VIEW_BUILD_CACHE);
-            } else if (app->active_view == VIEW_ONLINE_PLAY_SETTINGS) {
-                player_app_set_view(app, VIEW_ONLINE_SETTINGS);
-            } else if (app->active_view == VIEW_PREREQ_ABOUT ||
-                       app->active_view == VIEW_BUILD_CACHE ||
-                       app->active_view == VIEW_PSP_FONTS ||
-                       app->active_view == VIEW_UPDATES ||
-                       app->active_view == VIEW_CONFIRM_FACTORY_RESET ||
-                       app->active_view == VIEW_ONLINE_SETTINGS ||
-                       app->active_view == VIEW_ACCESSIBILITY_SETTINGS ||
-                       app->active_view == VIEW_PROBLEM_REPORT) {
-                player_app_set_view(app, VIEW_SETTINGS);
-            } else if (app->active_view == VIEW_ACE_SETTINGS) {
-                player_app_close_enhanced_page(app);
-            } else if (app->active_view == VIEW_DEVELOPER_LOG) {
-                player_app_close_developer_log(app);
-            } else if (app->active_view == VIEW_BUILDING_PACKAGE) {
-                player_app_cancel_package_build(app);
-                player_app_set_view(app, VIEW_LIBRARY);
-            } else {
-                player_app_set_view(app, VIEW_LIBRARY);
-            }
+            player_go_back(app, window, running, false);
         }
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_UP:
@@ -1005,7 +1023,12 @@ static void player_ui_open_save_folder(PlayerApp *app, size_t title_index) {
 static int player_ui_wizard_save_title(PlayerApp *app) {
     int idx;
     if (app->inspecting_game.disc_id[0] == '\0') return -1;
-    player_app_add_game(app, &app->inspecting_game);
+    /* A title library.json did not take is not added: say so, as the other
+       add buttons do (audit 2026-11-17). */
+    if (!player_app_add_game(app, &app->inspecting_game)) {
+        player_app_set_library_write_error(app);
+        return -1;
+    }
     idx = player_app_find_added_game(app, &app->inspecting_game);
     if (idx >= 0) app->selected_game_index = idx;
     return idx;
@@ -1072,12 +1095,12 @@ static void player_ui_wizard_apply(PlayerApp *app, PlayerUiWizardOp op) {
             bool runtime_ready = app->inspecting_game.is_prepared;
             int idx = player_ui_wizard_save_title(app);
             if (idx >= 0 && runtime_ready) player_app_request_launch(app, idx);
-            player_app_set_view(app, VIEW_LIBRARY);
+            if (app->active_view != VIEW_ERROR) player_app_set_view(app, VIEW_LIBRARY);
             break;
         }
         case PLAYER_UI_WIZARD_GO_TO_LIBRARY:
             (void)player_ui_wizard_save_title(app);
-            player_app_wizard_cancel(app);
+            if (app->active_view != VIEW_ERROR) player_app_wizard_cancel(app);
             break;
         case PLAYER_UI_WIZARD_TOGGLE_ONLINE:
             player_app_set_online_mode(app, !app->settings.online_mode);
@@ -1447,6 +1470,9 @@ typedef struct {
     char output_path[NK_MAX_PATH];
     char title_id[64];
     char title_name[128];
+    /* The name travels as one "--title-name=<name>" argument: argparse would read a
+       separate value that starts with '-' (a homebrew title) as an option. */
+    char title_name_arg[sizeof("--title-name=") + 128];
     PlayerReportState result;
 } PlayerReportJob;
 
@@ -1463,7 +1489,7 @@ static void player_report_command(const char *title_id, char *out, size_t size) 
 /* Reads the --json answer. The child's stderr shares the file, so parsing starts
    at the first '{'. */
 static bool player_report_read_answer(const char *path, PlayerReportState *out) {
-    FILE *file = fopen(path, "rb");
+    FILE *file = nk_fopen_utf8(path, "rb");
     char *text;
     char *start;
     long size;
@@ -1521,7 +1547,7 @@ static void player_report_error_line(const char *path, char *out, size_t size) {
     static const char prefix[] = "Report error: ";
     char text[1024];
     char *line;
-    FILE *file = fopen(path, "rb");
+    FILE *file = nk_fopen_utf8(path, "rb");
     size_t used;
     if (size > 0u) out[0] = '\0';
     if (!file) return;
@@ -1566,8 +1592,9 @@ static int SDLCALL player_report_thread_main(void *userdata) {
         argv[argc++] = "--title";
         argv[argc++] = job->title_id;
         if (job->title_name[0] != '\0') {
-            argv[argc++] = "--title-name";
-            argv[argc++] = job->title_name;
+            (void)snprintf(job->title_name_arg, sizeof(job->title_name_arg), "--title-name=%s",
+                           job->title_name);
+            argv[argc++] = job->title_name_arg;
         }
     }
     argv[argc++] = "--user-data-root";
@@ -1577,7 +1604,7 @@ static int SDLCALL player_report_thread_main(void *userdata) {
     argv[argc++] = "--config-dir";
     argv[argc++] = job->config_dir;
     argv[argc] = NULL;
-    (void)remove(job->output_path);   /* the spawn appends */
+    (void)nk_remove_utf8(job->output_path);   /* the spawn appends */
     if (!nk_platform_spawn_tool(python_path, argv, NULL, NULL, job->output_path, &process)) {
         out->phase = PLAYER_REPORT_FAILED;
         snprintf(out->message, sizeof(out->message), "Python could not be started.");
@@ -1601,7 +1628,7 @@ static int SDLCALL player_report_thread_main(void *userdata) {
     }
     out->phase = job->create ? PLAYER_REPORT_DONE : PLAYER_REPORT_PREVIEWED;
 finished:
-    (void)remove(job->output_path);
+    (void)nk_remove_utf8(job->output_path);
     SDL_SetAtomicInt(&job->done, 1);
     return 0;
 }
@@ -1687,7 +1714,8 @@ static void player_report_shutdown(void) {
 }
 
 /* The Settings controls. Each change is saved as it is made. */
-static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size_t arg) {
+static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size_t arg,
+                                     int choice_index) {
     switch (op) {
         case PLAYER_UI_SETTINGS_CHECK_UPDATES:
             player_app_set_view(app, VIEW_UPDATES);
@@ -1706,11 +1734,7 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             break;
         case PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER: {
             char folder[NK_MAX_PATH];
-            size_t cut = strlen(app->report.path);
-            snprintf(folder, sizeof(folder), "%s", app->report.path);
-            while (cut > 0u && folder[cut - 1u] != '/' && folder[cut - 1u] != '\\') --cut;
-            if (cut > 1u) {
-                folder[cut - 1u] = '\0';
+            if (player_path_parent_folder(app->report.path, folder, sizeof(folder))) {
                 (void)player_app_request_open_folder(app, folder);
             }
             break;
@@ -1727,6 +1751,9 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             break;
         case PLAYER_UI_SETTINGS_TOGGLE_COVER_ART:
             player_app_toggle_download_cover_art(app);
+            break;
+        case PLAYER_UI_SETTINGS_TOGGLE_CHEATS:
+            player_app_toggle_cheats(app);
             break;
         case PLAYER_UI_SETTINGS_REFRESH_COVER_ART:
             app->request_cover_art_refresh = true;
@@ -1748,17 +1775,13 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             break;
         case PLAYER_UI_SETTINGS_OPEN_UPDATE_FOLDER: {
             char folder[NK_MAX_PATH];
-            size_t cut;
             if (app->update.phase == PLAYER_UPDATE_INSTALLED) {
                 (void)player_app_request_open_folder(app, app->update.install_dir);
                 break;
             }
-            snprintf(folder, sizeof(folder), "%s", app->update.zip_path);
-            cut = strlen(folder);
-            while (cut > 0u && folder[cut - 1u] != '/' && folder[cut - 1u] != '\\') --cut;
-            if (cut == 0u) break;
-            folder[cut - 1u] = '\0';
-            (void)player_app_request_open_folder(app, folder);
+            if (player_path_parent_folder(app->update.zip_path, folder, sizeof(folder))) {
+                (void)player_app_request_open_folder(app, folder);
+            }
             break;
         }
         case PLAYER_UI_SETTINGS_OPEN_RELEASE_PAGE: player_update_open_release_page(app); break;
@@ -1775,7 +1798,9 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_TOGGLE_VSYNC: player_app_toggle_vsync(app); break;
         case PLAYER_UI_SETTINGS_TOGGLE_FULLSCREEN: player_app_toggle_fullscreen(app); break;
         case PLAYER_UI_SETTINGS_CYCLE_SCALING: player_app_cycle_present_scaling(app, 1); break;
-        case PLAYER_UI_SETTINGS_CYCLE_PRESET: player_app_cycle_graphics_preset(app, 1); break;
+        case PLAYER_UI_SETTINGS_CYCLE_PRESET:
+            player_app_cycle_graphics_preset(app, choice_index < 0 ? -1 : 1);
+            break;
         case PLAYER_UI_SETTINGS_VOLUME_DOWN: player_app_adjust_volume(app, -5); break;
         case PLAYER_UI_SETTINGS_VOLUME_UP: player_app_adjust_volume(app, 5); break;
         case PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS: player_app_toggle_ui_sounds(app); break;
@@ -1795,6 +1820,13 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE: player_app_enhanced_page_cycle_mode(app); break;
         case PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART:
             if (arg < (size_t)PLAYER_PART_COUNT) player_app_enhanced_page_cycle_part(app, (int)arg);
+            break;
+        case PLAYER_UI_SETTINGS_SET_PLAY_MODE:
+            player_app_enhanced_page_set_mode(app, choice_index);
+            break;
+        case PLAYER_UI_SETTINGS_SET_ENHANCED_PART:
+            if (arg < (size_t)PLAYER_PART_COUNT)
+                player_app_enhanced_page_set_part(app, (int)arg, choice_index);
             break;
         case PLAYER_UI_SETTINGS_CYCLE_HIGH_CONTRAST: player_app_cycle_high_contrast_focus(app); break;
         case PLAYER_UI_SETTINGS_CYCLE_REDUCE_MOTION: player_app_cycle_reduce_motion(app); break;
@@ -2015,7 +2047,8 @@ static void player_ui_nk_apply_action(PlayerApp *app,
         return;
     }
     if (action->kind == PLAYER_UI_ACTION_SETTINGS) {
-        player_ui_settings_apply(app, (PlayerUiSettingsOp)action->primary, action->title_index);
+        player_ui_settings_apply(app, (PlayerUiSettingsOp)action->primary, action->title_index,
+                                 action->choice_index);
         return;
     }
     if (action->kind == PLAYER_UI_ACTION_CONTROLLER) {
@@ -2183,7 +2216,7 @@ static void player_ui_nk_apply_action(PlayerApp *app,
         if (player_error_offers_report(&app->last_error)) {
             player_ui_open_report_link(
                 app, action->kind,
-                player_app_find_game_by_disc_id(app, app->last_error.subject_disc_id),
+                player_app_error_subject_index(app, &app->last_error),
                 &app->last_error);
         }
         return;
@@ -2244,11 +2277,15 @@ static void player_ui_nk_apply_action(PlayerApp *app,
 /* nk_ui draws the frame at the window's real size, from the output's pixels. */
 static void player_render_active_ui(PlayerUiNk *next_ui, PlayerApp *app,
                                     SDL_Renderer *renderer, SDL_Window *window) {
-    PlayerUiAction action;
-    if (player_ui_nk_view_active(next_ui, app) &&
-        player_ui_nk_render(next_ui, app, renderer, window, &action)) {
+    PlayerUiAction action = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
+    bool drawn = player_ui_nk_view_active(next_ui, app) &&
+                 player_ui_nk_render(next_ui, app, renderer, window, &action);
+    /* An action the frame committed (its dialog already closed) runs even when
+       the frame could not be drawn. */
+    if (drawn || action.kind != PLAYER_UI_ACTION_NONE) {
         player_ui_nk_apply_action(app, &action);
-    } else {
+    }
+    if (!drawn) {
         /* The launcher draws every view (player_ui_nk_draws_view); a frame it
            could not draw is cleared. */
         (void)SDL_SetRenderDrawColor(renderer, 11u, 15u, 20u, 255u);
@@ -2779,7 +2816,11 @@ static void staging_push_event(PlayerStagingJob *job, int code) {
     event.type = SDL_EVENT_USER;
     event.user.code = code;
     event.user.data1 = job;
-    SDL_PushEvent(&event);
+    /* A refused push is not retried: player_frame_requests finishes a job whose
+       worker is done, so a lost completion still ends the extraction. The UI-test
+       build models SDL refusing the completion push. */
+    if (code == PLAYER_STAGING_EVENT_COMPLETE && player_ui_test_drop_worker_event()) return;
+    (void)SDL_PushEvent(&event);
 }
 
 static bool staging_cancelled(void *userdata) {
@@ -2895,6 +2936,16 @@ static void sync_staging_progress(PlayerApp *app, PlayerStagingJob *job) {
     SDL_UnlockMutex(job->mutex);
     player_app_wizard_set_extraction_progress(app, percent, (int)files,
                                               (int)total, current);
+}
+
+/* The worker is done and its result not yet taken: player_frame_requests finishes it
+   here when SDL refused the completion event, as it does for a PSN job. */
+static bool staging_job_finished(PlayerStagingJob *job) {
+    if (!job || !job->mutex || job->completion_handled) return false;
+    SDL_LockMutex(job->mutex);
+    bool finished = job->finished;
+    SDL_UnlockMutex(job->mutex);
+    return finished;
 }
 
 static void finish_staging_job(PlayerApp *app, PlayerStagingJob *job) {
@@ -3745,6 +3796,23 @@ static bool player_parse_positive_u32(const char *text, uint32_t maximum,
     return true;
 }
 
+/* A whole number from 0 to INT_MAX, all of the text: --launch-index=abc or an empty
+   value is refused, never read as entry 0. */
+static bool player_parse_index(const char *text, int *out_value) {
+    if (!text || !text[0] || !out_value || text[0] < '0' || text[0] > '9') return false;
+    char *end = NULL;
+    /* An overflow reads as ULONG_MAX, which is above INT_MAX too. */
+    unsigned long value = strtoul(text, &end, 10);
+    if (end == text || !end || *end || value > (unsigned long)INT_MAX) {
+        return false;
+    }
+    *out_value = (int)value;
+    return true;
+}
+
+/* The largest --width or --height a capture or a test window takes. */
+#define PLAYER_MAX_OVERRIDE_DIMENSION 16384u
+
 /* PLAY's package check and process start, on a worker so the launcher keeps
  * drawing (#1298). Checking a retail package hashes every artifact it lists,
  * several hundred MB, and the launch used to do that up to three times on the
@@ -3785,9 +3853,10 @@ static void player_launch_job_spawn(PlayerLaunchJob *job, bool launcher_audio_cl
     }
 }
 
-/* `launcher_audio_closed`: the launcher holds no music stream. Otherwise the job
-   waits, launch_pending, while the music fades out, and player_launch_job_poll
-   starts the worker once the music has let go of the device. */
+/* `launcher_audio_closed`: the launcher holds no audio stream (music or UI sounds).
+   Otherwise the job waits, launch_pending, while the music fades out and the sounds
+   close, and player_launch_job_poll starts the worker once both have let go of the
+   device. */
 static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index,
                                                 bool launcher_audio_closed) {
     if (!app || app->launch_pending || app->is_game_running ||
@@ -3874,15 +3943,23 @@ static int player_run_command_line_launch(PlayerApp *app, int game_index,
     if (app->headless_accept_presented_frames > 0u) {
         uint32_t timeout_ms = app->headless_launch_timeout_ms > 0u
             ? app->headless_launch_timeout_ms : NK_HEADLESS_ACCEPTANCE_TIMEOUT_MS;
-        int child_code = nk_launch_wait(&app->launch_session, (int)timeout_ms);
-        app->is_game_running = false;
-        if (child_code < 0) {
+        /* A timeout is told apart from the exit code: a child that crashed
+           (a signal on POSIX, a negative NTSTATUS exit code on Windows) also
+           reads negative, and is a failed checkpoint, not a hang. */
+        bool child_timed_out = false;
+        int child_code = nk_launch_wait_status(&app->launch_session, (int)timeout_ms,
+                                               &child_timed_out);
+        if (child_timed_out) {
+            /* The timed-out child is still running. player_app_stop_game ends it
+               only while the game still counts as running, so the flag stays set
+               until it has. */
             fprintf(stderr,
                     "[PLAYER] HEADLESS_ACCEPTANCE status=FAIL reason=timeout timeout_ms=%u\n",
                     timeout_ms);
             player_app_stop_game(app);
             return 7;
         }
+        app->is_game_running = false;
         if (child_code == NK_LAUNCH_EXIT_ACCEPTANCE_REACHED) {
             printf("[PLAYER] HEADLESS_ACCEPTANCE status=PASS presented_frames=%u child_exit=%d\n",
                    app->headless_accept_presented_frames, child_code);
@@ -3904,16 +3981,18 @@ static int player_run_command_line_launch(PlayerApp *app, int game_index,
            window so a host with no display can still run it. The bound is
            the whole check -- a run that has not ended inside it is reported
            as a timeout with a distinct status, never as a launch. */
-        int headless_code = nk_launch_wait(&app->launch_session,
-                                           NK_HEADLESS_LAUNCH_TIMEOUT_MS);
-        app->is_game_running = false;
-        if (headless_code < 0) {
+        bool headless_timed_out = false;
+        int headless_code = nk_launch_wait_status(&app->launch_session,
+                                                  NK_HEADLESS_LAUNCH_TIMEOUT_MS,
+                                                  &headless_timed_out);
+        if (headless_timed_out) {
             fprintf(stderr,
                     "[PLAYER] Headless launch did not finish within %d ms; stopping the child.\n",
                     NK_HEADLESS_LAUNCH_TIMEOUT_MS);
             player_app_stop_game(app);
             return 7;
         }
+        app->is_game_running = false;
         printf("[PLAYER] Headless launch child exited with code %d.\n", headless_code);
         return headless_code;
     }
@@ -4154,8 +4233,7 @@ static void player_update_prerequisite_operation(PlayerApp *app) {
                     app->build_session.failure_code[0] ? app->build_session.failure_code : "PREREQUISITE_INSTALL_FAILED",
                     app->build_session.failure_boundary[0] ? app->build_session.failure_boundary :
                         "The verified build prerequisites could not be installed. Check the error and retry.");
-            } else if (app->build_session.is_complete &&
-                       app->build_session.prerequisite_install_complete) {
+            } else if (app->build_session.prerequisite_install_complete) {
                 player_app_prereq_complete(app);
             } else {
                 player_app_prereq_fail(app, "PREREQUISITE_INSTALL_FAILED",
@@ -4321,10 +4399,20 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
                    "[--launch-index=N | --launch-title=<disc ID>] [--headless-launch] "
                    "[--headless-accept-presented-frames=N] "
                    "[--headless-timeout-ms=N] "
-                   "[--experimental-60hz]\n");
+                   "[--experimental-60hz] "
+                   "[--cheats | --cheats-file=<path>]\n");
             return 0;
         } else if (strcmp(argv[i], "--experimental-60hz") == 0) {
             player_app_set_experimental_60hz_session(app, true);
+        } else if (strcmp(argv[i], "--cheats") == 0) {
+            /* Cheats on for this session (#2639), from each game's own file. A file named by
+               --cheats-file, before or after, stays the one read. */
+            if (!app->cheats_session) (void)player_app_set_cheats_session(app, NULL);
+        } else if (strncmp(argv[i], "--cheats-file=", 14) == 0) {
+            if (!argv[i][14] || !player_app_set_cheats_session(app, argv[i] + 14)) {
+                fprintf(stderr, "[PLAYER] --cheats-file must name a cheat file that exists.\n");
+                return 2;
+            }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
         } else if (player_ui_test_parse_arg(&run->ui_test, argv[i])) {
             /* A --ui-test-* option, taken by the harness. */
@@ -4359,14 +4447,26 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
             run->stage_only = true;
         } else if (strncmp(argv[i], "--launch-index=", 15) == 0) {
             run->launch_index_requested = true;
-            run->launch_index = atoi(argv[i] + 15);
+            if (!player_parse_index(argv[i] + 15, &run->launch_index)) {
+                fprintf(stderr, "[PLAYER] --launch-index must be a whole number from 0 up, "
+                                "the game's place in the library.\n");
+                return 2;
+            }
         } else if (strncmp(argv[i], PLAYER_LAUNCH_TITLE_ARG,
                            sizeof(PLAYER_LAUNCH_TITLE_ARG) - 1u) == 0) {
             run->launch_title = argv[i] + sizeof(PLAYER_LAUNCH_TITLE_ARG) - 1u;
-        } else if (strncmp(argv[i], "--width=", 8) == 0) {
-            run->override_w = atoi(argv[i] + 8);
-        } else if (strncmp(argv[i], "--height=", 9) == 0) {
-            run->override_h = atoi(argv[i] + 9);
+        } else if (strncmp(argv[i], "--width=", 8) == 0 ||
+                   strncmp(argv[i], "--height=", 9) == 0) {
+            bool width = argv[i][2] == 'w';
+            uint32_t value = 0u;
+            if (!player_parse_positive_u32(argv[i] + (width ? 8 : 9),
+                                           PLAYER_MAX_OVERRIDE_DIMENSION, &value)) {
+                fprintf(stderr, "[PLAYER] --width and --height must be whole numbers from 1 "
+                                "to %u.\n", PLAYER_MAX_OVERRIDE_DIMENSION);
+                return 2;
+            }
+            if (width) run->override_w = (int)value;
+            else run->override_h = (int)value;
         } else if (strncmp(argv[i], "--render-scale=", 15) == 0) {
             char *end = NULL;
             float value = strtof(argv[i] + 15, &end);
@@ -5339,19 +5439,25 @@ static int player_capture_screenshot(PlayerRun *run) {
     PlayerApp *app = &run->app;
     /* Headless Screenshot Mode */
     if (run->screenshot_path != NULL) {
+        /* A capture that was not drawn at its size or not saved fails the run: a caller
+           that trusts the exit code never takes a missing picture for a pass. */
+        bool saved = false;
         SDL_Texture *target = SDL_CreateTexture(run->renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
                                                 run->capture_pixel_width, run->capture_pixel_height);
-        if (target) {
-            SDL_SetRenderTarget(run->renderer, target);
-        }
-        player_ui_test_delay_screenshot();
-        player_render_active_ui(run->next_ui, app, run->renderer, run->window);
-        if (player_host_save_screenshot(run->renderer, run->screenshot_path)) {
-            printf("[PLAYER] Screenshot saved to %s (%dx%d pixels, %dx%d layout)\n", run->screenshot_path,
-                   run->capture_pixel_width, run->capture_pixel_height,
-                   app->window_width, app->window_height);
+        if (!target || !SDL_SetRenderTarget(run->renderer, target)) {
+            fprintf(stderr, "[PLAYER] Failed creating the %dx%d screenshot target: %s\n",
+                    run->capture_pixel_width, run->capture_pixel_height, SDL_GetError());
         } else {
-            fprintf(stderr, "[PLAYER] Failed saving screenshot to %s: %s\n", run->screenshot_path, SDL_GetError());
+            player_ui_test_delay_screenshot();
+            player_render_active_ui(run->next_ui, app, run->renderer, run->window);
+            saved = player_host_save_screenshot(run->renderer, run->screenshot_path);
+            if (saved) {
+                printf("[PLAYER] Screenshot saved to %s (%dx%d pixels, %dx%d layout)\n", run->screenshot_path,
+                       run->capture_pixel_width, run->capture_pixel_height,
+                       app->window_width, app->window_height);
+            } else {
+                fprintf(stderr, "[PLAYER] Failed saving screenshot to %s: %s\n", run->screenshot_path, SDL_GetError());
+            }
         }
         if (target) {
             SDL_SetRenderTarget(run->renderer, NULL);
@@ -5375,7 +5481,7 @@ static int player_capture_screenshot(PlayerRun *run) {
         SDL_DestroyRenderer(run->renderer);
         SDL_DestroyWindow(run->window);
         SDL_Quit();
-        return 0;
+        return saved ? 0 : 1;
     }
     return PLAYER_RUN_CONTINUE;
 }
@@ -5549,7 +5655,9 @@ static void player_frame_events(PlayerRun *run) {
                             finish_disc_check_job(app, &run->disc_check_job);
                         }
                     } else if (event.user.data1 == run->staging_job) {
-                        if (event.user.code == PLAYER_STAGING_EVENT_PROGRESS) {
+                        if (run->staging_job && run->staging_job->completion_handled) {
+                            /* Finished by the frame poll already; a late event changes nothing. */
+                        } else if (event.user.code == PLAYER_STAGING_EVENT_PROGRESS) {
                             sync_staging_progress(app, run->staging_job);
                         } else if (event.user.code == PLAYER_STAGING_EVENT_COMPLETE) {
                             sync_staging_progress(app, run->staging_job);
@@ -5581,8 +5689,11 @@ static void player_frame_requests(PlayerRun *run) {
         if (!player_ui_test_active(&run->ui_test)) {
             app->request_file_picker = false;
             trigger_file_picker(run->window, app);
+        } else if (player_ui_test_answer_picker(on_file_dialog_callback, app)) {
+            app->request_file_picker = false;
         }
     }
+    player_take_disc_pick(app);
     /* The rest of a drop, one disc image whenever the library is showing again. */
     if (app->active_view == VIEW_LIBRARY && app->drop_next < app->drop_count) {
         player_open_next_dropped_disc(app);
@@ -5591,8 +5702,11 @@ static void player_frame_requests(PlayerRun *run) {
         if (!player_ui_test_active(&run->ui_test)) {
             app->request_font_folder_picker = false;
             trigger_font_folder_picker(run->window, app);
+        } else if (player_ui_test_answer_picker(on_font_files_dialog_callback, app)) {
+            app->request_font_folder_picker = false;
         }
     }
+    player_take_font_pick(app);
     if (app->request_save_folder_picker) {
         if (!player_ui_test_active(&run->ui_test)) {
             app->request_save_folder_picker = false;
@@ -5646,6 +5760,16 @@ static void player_frame_requests(PlayerRun *run) {
     }
     if (psn_job_finished(run->psn_job)) {
         finish_psn_job(app, run->psn_job);
+    }
+    /* A staging completion whose event SDL refused (a full queue) is finished here,
+       as its COMPLETE event finishes it; otherwise the wizard stayed extracting. */
+    if (staging_job_finished(run->staging_job)) {
+        sync_staging_progress(app, run->staging_job);
+        finish_staging_job(app, run->staging_job);
+        player_package_status_queue_game(
+            app, app->selected_game_index, true,
+            run->package_status_requested,
+            run->package_status_force_requested);
     }
     /* Each added image is hashed once, on its own worker: the library's
        Cancel reaches it here, a completion whose event was lost is
@@ -5743,7 +5867,10 @@ static void player_frame_requests(PlayerRun *run) {
        visible. Completion is keyed to the build session's disc, not the
        current library selection. */
     player_app_poll_package_build(app, SDL_GetTicks());
-    if (app->build_session.is_complete && !run->build_check_pending &&
+    /* nk_cli.py reports the package PASS before it has finished writing, so the
+       build counts as done only once its child has exited cleanly. */
+    if (app->build_session.is_complete && !app->build_session.is_building &&
+        !app->build_session.is_failed && !run->build_check_pending &&
         !build_check_session_already_handled) {
         /* The card of the image built, not another image with its disc ID. */
         int build_game_index = player_app_find_built_game(
@@ -5929,13 +6056,15 @@ static void player_frame_render(PlayerRun *run) {
         /* A finished staging or PSN job stays allocated until the next one. */
         if (cover_art_writing ||
             run->launch_job || run->package_status_job || s_update_job || run->disc_check_job ||
+            run->outdated_scan_job || s_report_job ||
             (run->staging_job && !run->staging_job->completion_handled) ||
             (run->psn_job && !run->psn_job->completion_handled)) {
             /* A worker may still have a file in the user data open. */
             player_app_set_error(app, "FACTORY_RESET_BUSY", "Factory reset has to wait",
                                  "Nakagawa Recomp is still checking or setting up a "
-                                 "game. Wait a moment, then reset again. Nothing was "
-                                 "moved.", "Back to settings", VIEW_SETTINGS);
+                                 "game, or writing a problem report. Wait a moment, "
+                                 "then reset again. Nothing was moved.",
+                                 "Back to settings", VIEW_SETTINGS);
         } else {
             char stamp[32];
             time_t now = time(NULL);
@@ -5989,7 +6118,9 @@ static int player_shutdown(PlayerRun *run) {
         player_capture_window_settings(app, run->window);
         player_app_save_settings(app, NULL);
     }
-    if (app->prerequisite_job_started) {
+    /* By its handle, not only the flag: a new consent card clears the flag while a
+       worker it no longer polls may still be running. */
+    if (app->prerequisite_job_started || app->bootstrap_session.thread_handle) {
         package_builder_bootstrap_python_cancel(&app->bootstrap_session);
         package_builder_bootstrap_python_close(&app->bootstrap_session);
         app->prerequisite_job_started = false;

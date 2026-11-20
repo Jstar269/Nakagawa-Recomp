@@ -210,6 +210,7 @@ def build_traced_driver(elf, workdir, env, mutate=None):
             os.path.join(ROOT, "src", "core", "nk_shared_helpers.c"),
             os.path.join(rt, "ace.c"),
             os.path.join(rt, "videorec.c"),
+            os.path.join(rt, "nested_frames.c"),
             os.path.join(rt, "title_config.c"),
             os.path.join(ROOT, "tools", "gate_stub.c"), *extra, "-lm"], env=env):
         return None

@@ -120,6 +120,9 @@ class FakePPSSPP:
             self.reply({"event": "error", "message": "Bad message: unknown event"}, t)
             return
         target = int(msg["us"])
+        if target <= self.us:
+            self.reply({"event": "error", "message": "Target time has already passed"}, t)
+            return
         before = self.us
         self.us = max(self.us, target - self.stop_short_by + self.overshoot_by)
         self.reply({"event": "cpu.runUntilTime", "targetUs": target, "us": before}, t)
@@ -157,11 +160,23 @@ class TestTiming(unittest.TestCase):
             self.assertEqual(vblank_of(us), frame)
 
     def test_input_lands_in_the_period_before_its_vblank(self):
-        self.assertEqual(pr.input_us(0), 0)
+        self.assertEqual(pr.input_us(0), 1)
+        self.assertGreater(pr.input_us(0), 0)
+        self.assertEqual(vblank_of(pr.input_us(0)), 0)
+        self.assertLess(pr.input_us(0), pr.capture_us(0))
+        self.assertLess(pr.input_us(0), pr.input_us(1))
         for frame in (1, 2, 600, 1499):
             us = pr.input_us(frame)
             self.assertEqual(vblank_of(us), frame - 1, frame)
             self.assertGreater(Fraction(frame) * PERIOD - us, PERIOD / 3)
+
+    def test_later_frame_input_times_match_main(self):
+        expected = {1: 8342, 2: 25025, 10: 158492, 13: 208542,
+                    600: 10001658, 1499: 24999975, 3000: 50041658}
+        for frame, want in expected.items():
+            self.assertEqual(pr.input_us(frame), want, frame)
+        with self.assertRaises(ValueError):
+            pr.input_us(-1)
 
 
 class TestPadScript(unittest.TestCase):
@@ -199,6 +214,18 @@ class TestPadScript(unittest.TestCase):
             pr.PadState(17, 0, c),
         ])
 
+    def test_same_frame_stick_rows_follow_the_runtime_tie_break(self):
+        # sr_input_from_rows keeps the stick of the later row in file order when two
+        # held rows start on the same vblank (f[i] >= f[stick_row]).
+        rows = pr.parse_padscript("100 0 10 200 128\n100 0x4000 10 50 128\n")
+        self.assertEqual(pr.pad_states(rows)[1], pr.PadState(100, 0x4000, (50, 128)))
+
+    def test_non_ascii_digits_are_refused_not_a_traceback(self):
+        for text in ("\u00b2 CROSS 4\n", "10 CROSS \u00b2\n", "10 CROSS 4 \u0661 128\n",
+                     "\u0661\u0660 CROSS 4\n"):
+            with self.assertRaises(pr.RefError, msg=text):
+                pr.parse_padscript(text)
+
     def test_analog_round_trips_through_ppsspps_conversion(self):
         def f32(v):
             return struct.unpack("<f", struct.pack("<f", v))[0]
@@ -235,6 +262,18 @@ class TestPlan(unittest.TestCase):
         plan = pr.build_plan(pr.parse_padscript("8 CROSS 1\n"), [pr.Scene("s", 7, None, 0, 0.0)])
         same = [a for a in plan if a.us == pr.capture_us(7)]
         self.assertEqual([a.kind for a in same], ["capture", "input"])
+
+    def test_frame_zero_input_plan_has_only_positive_times(self):
+        rows = pr.parse_padscript("0 CROSS 3\n")
+        scenes = [pr.Scene("boot", 0, None, 0, 0.0), pr.Scene("after", 3, None, 0, 0.0)]
+        plan = pr.build_plan(rows, scenes)
+        self.assertTrue(all(a.us > 0 for a in plan), [a.us for a in plan])
+        self.assertEqual([(a.kind, a.frame, a.us, a.buttons, a.scene) for a in plan], [
+            ("input", 0, 1, (("cross", True),), ""),
+            ("capture", 0, 8342, (), "boot"),
+            ("input", 3, 41708, (("cross", False),), ""),
+            ("capture", 3, 58392, (), "after"),
+        ])
 
 
 class TestLaunch(unittest.TestCase):
@@ -300,6 +339,10 @@ class TestDrive(unittest.TestCase):
         self.assertEqual(shot.picture.pixels[0:3], bytes((300 & 0xFF, 300 >> 8, 0)))
         self.assertEqual(shot.picture.pixels[3:6], bytes((0, 7, 9)))
 
+    def test_a_non_numeric_debugger_pid_is_a_capture_failure(self):
+        with self.assertRaisesRegex(pr.CaptureFailed, "process"):
+            self.drive(FakePPSSPP(pid="\u00b2"))
+
     def test_an_old_ppsspp_is_not_run(self):
         for fake in (FakePPSSPP(version_has_pid=False), FakePPSSPP(has_run_until=False),
                      FakePPSSPP(has_us=False)):
@@ -329,6 +372,45 @@ class TestDrive(unittest.TestCase):
         self.assertEqual(result.max_late_us, pr.LATE_LIMIT_US)
         with self.assertRaisesRegex(pr.CaptureFailed, "past the next vblank"):
             self.drive(FakePPSSPP(overshoot_by=pr.LATE_LIMIT_US + 1))
+
+    def test_plan_in_the_past_is_refused_before_anything_is_sent(self):
+        bad_plans = (
+            ("at-reset", [pr.Action(0, "input", 0, buttons=(("cross", True),))],
+             r"input v0.*0 us"),
+            ("negative", [pr.Action(-5, "input", 0, buttons=(("cross", True),))],
+             r"input v0.*-5 us"),
+            ("out-of-order", [pr.Action(100, "input", 1, buttons=(("cross", True),)),
+                              pr.Action(50, "input", 2, buttons=(("cross", False),))],
+             r"input v2.*50 us.*100 us"),
+        )
+        for label, plan, pattern in bad_plans:
+            with self.subTest(case=label):
+                fake = FakePPSSPP()
+                with self.assertRaisesRegex(pr.RefError, pattern):
+                    self.drive(fake, plan)
+                self.assertEqual(fake.log, [])
+
+    def test_runtime_overshoot_past_next_input_refuses_before_sending(self):
+        fake = FakePPSSPP(overshoot_by=100)
+        plan = [
+            pr.Action(10, "input", 0, buttons=(("cross", True),)),
+            pr.Action(20, "input", 1, buttons=(("cross", False),)),
+        ]
+        with self.assertRaisesRegex(pr.CaptureFailed, r"input v1.*20 us.*110 us"):
+            self.drive(fake, plan)
+        run_calls = [p for e, _, p in fake.log if e == "cpu.runUntilTime"]
+        send_calls = [p["buttons"] for e, _, p in fake.log if e == "input.buttons.send"]
+        self.assertEqual(run_calls, [{"us": 10}])
+        self.assertEqual(send_calls, [{"cross": True}])
+
+    def test_same_timestamp_capture_and_input_share_one_run_until_time(self):
+        fake = FakePPSSPP()
+        plan = pr.build_plan(pr.parse_padscript("8 CROSS 1\n"), [pr.Scene("s", 7, None, 0, 0.0)])
+        result = self.drive(fake, plan)
+        self.assertEqual(len(result.shots), 1)
+        run_targets = [p["us"] for e, _, p in fake.log if e == "cpu.runUntilTime"]
+        self.assertEqual(run_targets, sorted(set(run_targets)))
+        self.assertEqual(run_targets[0], 1)
 
 
 class TestCaptureAndCompare(unittest.TestCase):
@@ -375,6 +457,27 @@ class TestCaptureAndCompare(unittest.TestCase):
         with self.assertRaisesRegex(pr.RefError, "--replace"):
             pr.capture(sf, Path("ppsspp.exe"), 1, False, runner=self.fake_runner([pic]))
 
+    def test_a_failed_replace_keeps_the_whole_previous_reference_set(self):
+        scenes = [{"name": "menu", "frame": 12}, {"name": "title", "frame": 13}]
+        sf = pr.load_scene_file(self.scene_file(scenes=scenes))
+        old, new = solid((1, 1, 1)), solid((9, 9, 9))
+        pr.capture(sf, Path("ppsspp.exe"), 1, False, runner=self.fake_runner([old]))
+        before = {path.name: path.read_bytes() for path in (self.dir / "ref").iterdir()}
+        real_write_png = pr.write_png
+        calls = []
+
+        def failing_write_png(path, picture):
+            calls.append(path)
+            if len(calls) == 2:
+                raise OSError(28, "No space left on device")
+            real_write_png(path, picture)
+
+        with patch.object(pr, "write_png", side_effect=failing_write_png), \
+                self.assertRaises(OSError):
+            pr.capture(sf, Path("ppsspp.exe"), 1, True, runner=self.fake_runner([new]))
+        after = {path.name: path.read_bytes() for path in (self.dir / "ref").iterdir()}
+        self.assertEqual(after, before)
+
     def test_disagreeing_runs_store_nothing(self):
         sf = pr.load_scene_file(self.scene_file())
         old = solid((1, 1, 1))
@@ -395,16 +498,57 @@ class TestCaptureAndCompare(unittest.TestCase):
             pr.capture(sf, Path("ppsspp.exe"), 1, False, runner=self.fake_runner([]))
         self.assertEqual(cm.exception.reason, "no-pad")
 
+    def write_reference(self, sf, picture, **meta):
+        """A reference as capture stores it: the PNG and its sidecar."""
+        ref = self.dir / "ref" / "menu.png"
+        ref.parent.mkdir(exist_ok=True)
+        pr.write_png(ref, picture)
+        settings = {section: {k: v for k, v in kv.items() if k != "RemoteISOPort"}
+                    for section, kv in pr.effective_ini(1234, sf.ini).items()}
+        sidecar = {"tool": pr.TOOL_NAME, "tool_version": pr.TOOL_VERSION,
+                   "ppsspp_version": "v-fake", "title": sf.title, "frame": 12,
+                   "emulated_us": 0, "rtc": sf.rtc, "runs": 1, "width": picture.width,
+                   "height": picture.height,
+                   "sha256": hashlib.sha256(picture.pixels).hexdigest(), "ini": settings}
+        sidecar.update(meta)
+        Path(str(ref) + ".json").write_text(json.dumps(sidecar), encoding="utf-8")
+        return ref
+
     def compare_with(self, reference, capture, **scene):
         doc_scene = {"name": "menu", "frame": 12, "nakagawa": "nk_v12.ppm"}
         doc_scene.update(scene)
         sf = pr.load_scene_file(self.scene_file(scenes=[doc_scene]))
         (self.dir / "ref").mkdir(exist_ok=True)
         if reference is not None:
-            pr.write_png(self.dir / "ref" / "menu.png", reference)
+            self.write_reference(sf, reference)
         if capture is not None:
             write_ppm(self.dir / "nk_v12.ppm", capture)
         return pr.compare(sf, self.dir / "ref" / "diff")[0]
+
+    def test_a_reference_whose_sidecar_does_not_match_the_scene_is_stale(self):
+        base = solid((100, 100, 100))
+        write_ppm(self.dir / "nk_v12.ppm", base)
+        sf = pr.load_scene_file(self.scene_file(
+            scenes=[{"name": "menu", "frame": 12, "nakagawa": "nk_v12.ppm"}]))
+        for meta in ({"frame": 11}, {"rtc": sf.rtc + 1}, {"sha256": "0" * 64},
+                     {"ini": {"General": {}}}):
+            with self.subTest(meta=meta):
+                self.write_reference(sf, base, **meta)
+                grade = pr.compare(sf, None)[0]
+                self.assertEqual(grade.status, pr.FAIL)
+                self.assertIn("stale-reference", grade.detail)
+        ref = self.write_reference(sf, base)
+        Path(str(ref) + ".json").unlink()
+        grade = pr.compare(sf, None)[0]
+        self.assertEqual(grade.status, pr.FAIL)
+        self.assertIn("stale-reference", grade.detail)
+        self.write_reference(sf, base)
+        self.assertEqual(pr.compare(sf, None)[0].status, pr.PASS)
+
+    def test_scene_names_that_differ_only_in_case_are_refused(self):
+        with self.assertRaisesRegex(pr.RefError, "repeat"):
+            pr.load_scene_file(self.scene_file(scenes=[{"name": "Title", "frame": 1},
+                                                       {"name": "title", "frame": 2}]))
 
     def test_pass_fail_no_reference_and_not_run(self):
         base = solid((100, 100, 100))
@@ -538,10 +682,18 @@ class TestWebSocket(unittest.TestCase):
         return client, thread, box
 
     @staticmethod
+    def receive(server, size):
+        """recv() that ends at end of stream instead of returning b"" forever."""
+        chunk = server.recv(size)
+        if not chunk:
+            raise ConnectionError("the client closed the connection early")
+        return chunk
+
+    @staticmethod
     def read_request(server):
         data = b""
         while b"\r\n\r\n" not in data:
-            data += server.recv(4096)
+            data += TestWebSocket.receive(server, 4096)
         head = data.split(b"\r\n\r\n")[0].decode()
         headers = {k.lower(): v.strip() for k, _, v in (l.partition(":") for l in head.split("\r\n")[1:])}
         return head.split("\r\n")[0], headers
@@ -572,7 +724,7 @@ class TestWebSocket(unittest.TestCase):
         def need(n):
             buf = b""
             while len(buf) < n:
-                buf += server.recv(n - len(buf))
+                buf += TestWebSocket.receive(server, n - len(buf))
             return buf
         b0, b1 = need(2)
         assert b1 & 0x80, "client frames must be masked"
@@ -583,6 +735,27 @@ class TestWebSocket(unittest.TestCase):
             (n,) = struct.unpack("!Q", need(8))
         key = need(4)
         return b0 & 0x0F, pr.mask_payload(need(n), key)
+
+    def test_the_peer_helpers_stop_at_end_of_stream(self):
+        # A client that closes early must end the peer script, not spin it on recv() == b"".
+        for helper in (self.read_request, self.read_client_frame):
+            with self.subTest(helper=helper.__name__):
+                client, server = socket.socketpair()
+                server.settimeout(10)
+                client.close()
+                box = {}
+
+                def run(helper=helper, server=server, box=box):
+                    try:
+                        helper(server)
+                    except ConnectionError as exc:
+                        box["error"] = exc
+                thread = threading.Thread(target=run, daemon=True)
+                thread.start()
+                thread.join(10)
+                server.close()
+                self.assertFalse(thread.is_alive(), "the helper spun on end of stream")
+                self.assertIsInstance(box.get("error"), ConnectionError)
 
     def test_handshake_fragments_ping_and_large_messages(self):
         big = json.dumps({"event": "gpu.buffer.screenshot", "base64": "A" * 70000})
@@ -605,6 +778,7 @@ class TestWebSocket(unittest.TestCase):
         ws.send_text('{"event":"cpu.status","ticket":"nk1"}')
         thread.join(10)
         client.close()
+        self.assertFalse(thread.is_alive(), "the peer script did not finish")
         self.assertNotIn("error", box)
         pong, sent = box["result"]
         self.assertEqual(pong, (0xA, b"hi"))
@@ -695,6 +869,105 @@ class TestDebuggerProtocol(unittest.TestCase):
         fake = FakePPSSPP()
         with self.assertRaisesRegex(pr.DebuggerError, "unknown event"):
             pr.Debugger(fake).request("no.such.event")
+
+
+class TestDecodeScreenshot(unittest.TestCase):
+    @staticmethod
+    def _msg(width, height, fmt, raw, flipped=False):
+        return {
+            "width": width,
+            "height": height,
+            "format": fmt,
+            "flipped": flipped,
+            "base64": base64.b64encode(raw).decode("ascii"),
+        }
+
+    def test_16bit_formats_decode_with_bit_replication(self):
+        # Each tuple: (format_name, [red, green, blue, black, white, mixed] uint16 words,
+        #              expected RGB for the mixed pixel).
+        # Bit replication:
+        #   4-bit: (v << 4) | v           -> 0xA->170, 0x5->85, 0xC->204
+        #   5-bit: (v << 3) | (v >> 2)    -> 21->173, 13->107, 9->74
+        #   6-bit: (v << 2) | (v >> 4)    -> 42->170
+        cases = (
+            # Native PSP display formats (GEBufferFormat 5650 / 5551 / 4444)
+            ("B5G6R5_UNORM_PACK16",
+             [0x001F, 0x07E0, 0xF800, 0x0000, 0xFFFF,
+              (21 << 0) | (42 << 5) | (9 << 11)],
+             (173, 170, 74)),
+            ("A1B5G5R5_UNORM_PACK16",
+             [0x801F, 0x03E0, 0xFC00, 0x8000, 0x7FFF,
+              (21 << 0) | (13 << 5) | (9 << 10) | (1 << 15)],
+             (173, 107, 74)),
+            ("A4B4G4R4_UNORM_PACK16",
+             [0xF00F, 0x00F0, 0xAF00, 0xF000, 0x0FFF,
+              (0xA << 0) | (0x5 << 4) | (0xC << 8) | (0x7 << 12)],
+             (170, 85, 204)),
+            # PPSSPP reversed / BGRA 16-bit color variants (GPUDebugBufferFormat)
+            ("R5G6B5_UNORM_PACK16",
+             [0xF800, 0x07E0, 0x001F, 0x0000, 0xFFFF,
+              (9 << 0) | (42 << 5) | (21 << 11)],
+             (173, 170, 74)),
+            ("R5G5B5A1_UNORM_PACK16",
+             [0xF801, 0x07C0, 0x003F, 0x0001, 0xFFFE,
+              (1 << 0) | (9 << 1) | (13 << 6) | (21 << 11)],
+             (173, 107, 74)),
+            ("R4G4B4A4_UNORM_PACK16",
+             [0xF00F, 0x0F00, 0x00FA, 0x000F, 0xFFF0,
+              (0x7 << 0) | (0xC << 4) | (0x5 << 8) | (0xA << 12)],
+             (170, 85, 204)),
+            ("A1R5G5B5_UNORM_PACK16",
+             [0xFC00, 0x03E0, 0x801F, 0x8000, 0x7FFF,
+              (9 << 0) | (13 << 5) | (21 << 10) | (1 << 15)],
+             (173, 107, 74)),
+            ("A4R4G4B4_UNORM_PACK16",
+             [0xAF00, 0x00F0, 0xF00F, 0xF000, 0x0FFF,
+              (0xC << 0) | (0x5 << 4) | (0xA << 8) | (0x7 << 12)],
+             (170, 85, 204)),
+        )
+        for fmt, words, mixed_rgb in cases:
+            with self.subTest(fmt=fmt):
+                raw = struct.pack("<6H", *words)
+                frame = pr.decode_screenshot(self._msg(3, 2, fmt, raw))
+                want = bytes(
+                    (255, 0, 0) + (0, 255, 0) + (0, 0, 255)
+                    + (0, 0, 0) + (255, 255, 255) + mixed_rgb
+                )
+                self.assertEqual((frame.width, frame.height, frame.pixels), (3, 2, want))
+
+    def test_16bit_flipped_rows_are_inverted(self):
+        # Row 0 in buffer (bottom on screen): pure blue; row 1 in buffer (top on screen): pure red.
+        raw = struct.pack("<2H", 0x7C00, 0x001F)
+        frame = pr.decode_screenshot(self._msg(1, 2, "A1B5G5R5_UNORM_PACK16", raw, flipped=True))
+        self.assertEqual(frame.pixels, bytes((255, 0, 0, 0, 0, 255)))
+
+    def test_16bit_wrong_byte_count_is_refused_with_numbers(self):
+        for nbytes in (10, 14):
+            with self.subTest(nbytes=nbytes):
+                msg = self._msg(3, 2, "A1B5G5R5_UNORM_PACK16", b"\x00" * nbytes)
+                with self.assertRaisesRegex(pr.CaptureFailed, rf"{nbytes} bytes.*3x2x2"):
+                    pr.decode_screenshot(msg)
+
+    def test_unknown_format_is_refused_by_name(self):
+        for fmt in ("D16", "UNDEFINED", "R5G5B5X1_UNORM_PACK16"):
+            with self.subTest(fmt=fmt):
+                msg = self._msg(1, 1, fmt, b"\x00\x00")
+                with self.assertRaisesRegex(pr.CaptureFailed, fmt):
+                    pr.decode_screenshot(msg)
+
+    def test_existing_24_and_32bit_paths_are_unchanged(self):
+        rgba = bytes((10, 20, 30, 255, 40, 50, 60, 128))
+        bgra = bytes((30, 20, 10, 255, 60, 50, 40, 128))
+        rgb = bytes((10, 20, 30, 40, 50, 60))
+        want = bytes((10, 20, 30, 40, 50, 60))
+        for fmt, raw in (("R8G8B8A8_UNORM", rgba), ("B8G8R8A8_UNORM", bgra), ("R8G8B8_UNORM", rgb)):
+            with self.subTest(fmt=fmt):
+                frame = pr.decode_screenshot(self._msg(2, 1, fmt, raw))
+                self.assertEqual((frame.width, frame.height, frame.pixels), (2, 1, want))
+        flipped = pr.decode_screenshot(self._msg(1, 2, "R8G8B8_UNORM", rgb, flipped=True))
+        self.assertEqual(flipped.pixels, bytes((40, 50, 60, 10, 20, 30)))
+        with self.assertRaisesRegex(pr.CaptureFailed, r"5 bytes.*2x1x3"):
+            pr.decode_screenshot(self._msg(2, 1, "R8G8B8_UNORM", b"\x00" * 5))
 
 
 if __name__ == "__main__":

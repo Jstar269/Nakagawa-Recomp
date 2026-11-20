@@ -124,6 +124,140 @@ class TestPublicCandidate(unittest.TestCase):
             self.assertEqual(payload["profile"], self.profile["name"])
             self.assertEqual(metadata, payload)
 
+    def test_unsafe_archive_names_are_refused_before_any_write(self):
+        """A tree from another system can name a drive, a backslash path or a dot part.
+
+        On Windows ``destination.joinpath("D:", ...)`` is a drive-relative path outside
+        the destination, and a PurePosixPath check sees no ``..`` in it. The drive used
+        here does not exist, so the unfixed code fails to write instead of escaping.
+        """
+        unused = next(
+            (f"{letter}:" for letter in "QRSTUVWXYZ" if not Path(f"{letter}:/").exists()), "Q:"
+        )
+        for name in (f"{unused}/escaped/out.txt", "a\\..\\..\\evil.txt", "a/./b.txt", "a//b.txt"):
+            with self.subTest(name=name):
+                def fake_git(*args, name=name):
+                    if args[0] == "rev-parse":
+                        return "0" * 40
+                    output = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--output="))
+                    with zipfile.ZipFile(output, "w") as archive:
+                        archive.writestr(zipfile.ZipInfo(name), "candidate bytes\n")
+                    return ""
+
+                with tempfile.TemporaryDirectory() as temp_raw:
+                    destination = Path(temp_raw) / "candidate"
+                    with mock.patch.object(public_candidate, "_git", fake_git):
+                        with self.assertRaisesRegex(ValueError, "unsafe archive path"):
+                            public_candidate.materialize("HEAD", destination, public_candidate.DEFAULT_PROFILE)
+                    self.assertFalse(destination.exists())
+                    self.assertEqual(list(Path(temp_raw).iterdir()), [])
+
+    def test_failure_partway_leaves_no_destination_and_a_rerun_succeeds(self):
+        """A refusal after some files were written must not leave a half-written tree.
+
+        Before the fix the destination was created first and filled in place, so a
+        symlink entry after a good file left ``docs/example.md`` behind and the next
+        run failed with FileExistsError until the user deleted the tree by hand.
+        """
+        def archive_with(entries):
+            def fake_git(*args):
+                if args[0] == "rev-parse":
+                    return "0" * 40
+                output = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--output="))
+                with zipfile.ZipFile(output, "w") as archive:
+                    for info, payload in entries:
+                        archive.writestr(info, payload)
+                return ""
+            return fake_git
+
+        link = zipfile.ZipInfo("docs/link.md")
+        link.external_attr = (0o120777 << 16)
+        with tempfile.TemporaryDirectory() as temp_raw:
+            destination = Path(temp_raw) / "candidate"
+            with mock.patch.object(public_candidate, "_git", archive_with(
+                    [("docs/example.md", "# example\n"), (link, "elsewhere")])):
+                with self.assertRaisesRegex(ValueError, "symlink"):
+                    public_candidate.materialize("HEAD", destination, public_candidate.DEFAULT_PROFILE)
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(Path(temp_raw).iterdir()), [])
+
+            with mock.patch.object(public_candidate, "_git", archive_with(
+                    [("docs/example.md", "# example\n")])):
+                metadata = public_candidate.materialize(
+                    "HEAD", destination, public_candidate.DEFAULT_PROFILE)
+            self.assertEqual(metadata["file_count"], 1)
+            self.assertTrue((destination / "docs" / "example.md").is_file())
+
+    def test_manifest_records_the_exported_refs_own_profile(self):
+        """The filter profile and the profile the exported ref carries are both named."""
+        import hashlib
+
+        ref_profile = b'{"name": "an-older-profile"}\n'
+
+        def fake_git(*args):
+            if args[0] == "rev-parse":
+                return "0" * 40
+            output = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--output="))
+            with zipfile.ZipFile(output, "w") as archive:
+                archive.writestr("docs/example.md", "# example\n")
+                archive.writestr("assets/public_source_profile.json", ref_profile)
+            return ""
+
+        with tempfile.TemporaryDirectory() as temp_raw:
+            destination = Path(temp_raw) / "candidate"
+            with mock.patch.object(public_candidate, "_git", fake_git):
+                metadata = public_candidate.materialize(
+                    "HEAD", destination, public_candidate.DEFAULT_PROFILE)
+        self.assertEqual(metadata["ref_profile_sha256"], hashlib.sha256(ref_profile).hexdigest())
+        self.assertEqual(
+            metadata["profile_sha256"],
+            hashlib.sha256(public_candidate.DEFAULT_PROFILE.read_bytes()).hexdigest(),
+        )
+
+    def test_candidate_audit_uses_the_profile_that_selected_the_tree(self):
+        """audit_candidate judges the tree by the --profile materialize used, in candidate-root mode."""
+        import publication_policy
+
+        with tempfile.TemporaryDirectory() as temp_raw:
+            root = Path(temp_raw) / "candidate"
+            root.mkdir()
+            for required in publish_audit.REQUIRED_PATHS:
+                (root / required).write_text(required + "\n", encoding="utf-8", newline="\n")
+            manifest = root / "assets" / "release_manifest.json"
+            manifest.parent.mkdir()
+            manifest.write_text('{"components": []}\n', encoding="utf-8", newline="\n")
+            document = {
+                "name": "hermetic-candidate-profile",
+                "profile_version": "2.0.0",
+                "min_tool_version": "0.4.0",
+                "build_mode": "PUBLIC_SAFE=1",
+                "default_disposition": "REJECT",
+                "exclude_prefixes": [],
+                "exclude_globs": [],
+                "exclude_paths": [],
+                "include_paths": sorted(
+                    [*publish_audit.REQUIRED_PATHS, "assets/release_manifest.json", "PUBLIC_EXPORT.json"]
+                ),
+            }
+            profile = Path(temp_raw) / "profile.json"
+            profile.write_text(json.dumps(document) + "\n", encoding="utf-8", newline="\n")
+            (root / "PUBLIC_EXPORT.json").write_text(
+                json.dumps({"profile": document["name"],
+                            "policy_sha256": publication_policy.canonical_digest(document)}) + "\n",
+                encoding="utf-8", newline="\n",
+            )
+            with mock.patch.object(
+                publish_audit, "audit_entries", wraps=publish_audit.audit_entries,
+            ) as audit:
+                findings = public_candidate.audit_candidate(root, None, profile)
+        # Judged by the checkout's default profile instead, this tree fails on that
+        # profile's controls and export digest; judged by its own profile it is clean.
+        self.assertEqual(findings, [])
+        kwargs = audit.call_args.kwargs
+        self.assertEqual(kwargs["policy_path"], profile)
+        self.assertTrue(kwargs["is_candidate_root"])
+        self.assertTrue(kwargs["exhaustive"])
+
 
 if __name__ == "__main__":
     unittest.main()

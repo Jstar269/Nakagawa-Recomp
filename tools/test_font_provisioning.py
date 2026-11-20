@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -142,6 +143,13 @@ class FontProvisioningTests(unittest.TestCase):
         self.assertIsNone(validate_pgf_data(digits)["slot"])
         mixed = build_pgf([_glyph(0x3042), _glyph(0xAC00)], font_name="Nakagawa Test Mixed")
         self.assertIsNone(validate_pgf_data(mixed)["slot"])
+        # Fonts whose embedded name names another slot: only coverage decides.
+        named_latin = build_pgf([_glyph(0x41), _glyph(0x3042)], font_name="Nakagawa Test Latin")
+        self.assertEqual(validate_pgf_data(named_latin)["slot"], "japanese")
+        named_japanese = build_pgf([_glyph(0x41), _glyph(0xAC00)], font_name="Nakagawa Test Japanese")
+        self.assertEqual(validate_pgf_data(named_japanese)["slot"], "korean")
+        named_korean = build_pgf([_glyph(0x41), _glyph(0x61)], font_name="Nakagawa Test Korean")
+        self.assertEqual(validate_pgf_data(named_korean)["slot"], "latin")
 
     # Import, classify, manifest, status, and removal in a scratch folder --------------------
 
@@ -259,7 +267,7 @@ class FontProvisioningTests(unittest.TestCase):
 
         self.assertEqual(resolve_latin_index(user_data, project / "font", 1),
                          {"source": "user", "served_index": 0})
-        # Index 9 belongs to the second eight-entry group and cannot borrow ltn0.
+        # Index 8, the first entry of the second eight-entry group, cannot borrow ltn0.
         self.assertEqual(resolve_latin_index(user_data, project / "font", 8),
                          {"source": "project", "served_index": -1, "project_file": "nkltn.pgf",
                           "project_style_index": 0})
@@ -539,6 +547,20 @@ class FontProvisioningTests(unittest.TestCase):
         removed = self._cli("remove", "--all", "--user-data-root", str(user_data))
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertIn("Removed 2 imported font file(s).", removed.stdout)
+
+    def test_cli_refuses_a_user_data_root_inside_the_checkout(self) -> None:
+        """The user's console fonts are never written where they could be committed."""
+        source = self._folder("cli_inside", {"one.pgf": latin_pgf()})
+        # A path that does not exist yet: the refusal comes before anything is created, so
+        # the test creates nothing in the checkout and has nothing there to clean up.
+        inside = ROOT / "build" / f"font-guard-{os.getpid()}-{self.temp_path.name}"
+        self.assertFalse(inside.exists())
+        for args in (("import", str(source)), ("status",), ("remove", "--all")):
+            with self.subTest(command=args[0]):
+                res = self._cli(*args, "--user-data-root", str(inside))
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+                self.assertIn("outside the repository", res.stderr)
+                self.assertFalse(inside.exists(), "a font command wrote inside the checkout")
 
     def test_cli_import_choose_and_refusal(self) -> None:
         dupes = self._folder("cli_dupes", {"x.pgf": latin_pgf(), "y.pgf": latin_pgf()})

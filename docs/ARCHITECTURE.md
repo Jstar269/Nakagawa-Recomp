@@ -464,13 +464,13 @@ those events at a fixed set of points, and `sr_cpu_link_clear()` runs at exactly
 | --- | --- |
 | exception return | `sr_cpu_eret()` (`src/rt/cpu_lle.c`), on a successful return only |
 | thread switch-in | `sched_load_thread_context()` (`src/rt/sched.c`), the only place `sched_run()` resumes a thread, so every parking path (`sr_yield`, blocking HLE waits, preemption) is covered |
-| interrupt return | `deliver_vblank()` and `scheduler_alarm_deliver()` after restoring the interrupted frame |
-| callback / nested guest call return | `sr_callback_dispatch_one()` (`recomp.h`), `ge_call_guest*()` (`hle.c`), `call_guest3()` (`mpeg.c`) |
+| interrupt return | `deliver_vblank()` and `scheduler_alarm_deliver()` after restoring the interrupted frame; `scheduler_ge_service()`, `scheduler_vtimer_service()` and the waiting-GE delivery in `scheduler_service_pending()` (`src/rt/sched.c`); `vtimer_call_handler()` (`src/rt/hle.c`) |
+| callback / nested guest call return | `sr_callback_dispatch_one()` (`recomp.h`), `ge_call_guest()` (`src/rt/hle_route.c`), `ge_call_guest_gp_rv()` (`src/rt/hle.c`), `call_guest3()` (`mpeg.c`) |
 | HLE syscall return | `sr_syscall()` after the handler runs; a call linked to a started module's guest export is a plain jump on hardware and does not clear |
 
-Nothing else writes `llbit`. In particular a `SR_YIELD` point whose `sr_yield()` neither switches
-threads nor delivers an interrupt leaves the link set, and exception entry does not clear it (the
-handler's `eret` does).
+Outside the sweep harness (`src/rt/form_sweep.c`), nothing else writes `llbit`. In particular a
+`SR_YIELD` point whose `sr_yield()` neither switches threads nor delivers an interrupt leaves the
+link set, and exception entry does not clear it (the handler's `eret` does).
 
 Forward progress. Interrupts are delivered and threads switched only from `sr_yield()` or from
 inside an HLE call, and `sr_yield()` is reached only from `SR_YIELD`, which the generated code

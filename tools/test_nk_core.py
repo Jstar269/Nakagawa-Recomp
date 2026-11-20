@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -335,6 +336,20 @@ class NkCoreTests(unittest.TestCase):
         # Check unsupported disc ID
         none_profile = reg.lookup_by_disc_id("ULUS99999")
         self.assertIsNone(none_profile)
+
+    def test_title_registry_override_removes_replaced_disc_ids(self) -> None:
+        registry = TitleRegistry(include_defaults=False)
+        original = TitleProfile(
+            id="synthetic-overlay", name="Synthetic Overlay",
+            disc_ids=("TEST00001", "TEST00002"), regions=("TEST",),
+        )
+        registry.register(original)
+        narrowed = dataclasses.replace(original, disc_ids=("TEST00001",))
+
+        registry.register(narrowed, allow_override=True)
+
+        self.assertEqual(registry.lookup_by_disc_id("TEST00001"), narrowed)
+        self.assertIsNone(registry.lookup_by_disc_id("TEST00002"))
 
     def test_iso_inspection_success(self) -> None:
         iso_file = self.temp_dir / "test_game.iso"
@@ -1099,6 +1114,15 @@ class NkCoreTests(unittest.TestCase):
         with self.assertRaises(RuntimeLaunchError):
             launcher.build_launch_plan(game_dir)
 
+    def test_runtime_launcher_reports_a_malformed_session_manifest_by_name(self) -> None:
+        game_dir = self.temp_dir / "TEST00001"
+        game_dir.mkdir(parents=True)
+        (game_dir / "manifest.json").write_text("{", encoding="utf-8")
+
+        launcher = RuntimeLauncher(repo_root=self.temp_dir)
+        with self.assertRaisesRegex(RuntimeLaunchError, "Game manifest is unreadable"):
+            launcher.build_launch_plan(game_dir)
+
     def test_runtime_launcher_moved_iso_error(self) -> None:
         game_dir = self.temp_dir / "TEST00001"
         game_dir.mkdir(parents=True, exist_ok=True)
@@ -1709,12 +1733,8 @@ int main(int argc, char **argv) {
         if not cls.gcc:
             return
         cls._class_temp = Path(tempfile.mkdtemp(prefix="nk_launch_parity_class_"))
+        cls.addClassCleanup(shutil.rmtree, cls._class_temp, ignore_errors=True)
         cls._harness = cls._compile_harness_class(cls._class_temp, cls.gcc)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        if hasattr(cls, "_class_temp"):
-            shutil.rmtree(cls._class_temp, ignore_errors=True)
 
     def setUp(self) -> None:
         if not self.gcc:
@@ -2438,7 +2458,7 @@ class BoundedLibraryJsonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "byte.*limit"):
             lib.save()
         self.assertEqual(path.read_bytes(), before)
-        self.assertEqual([item.name for item in self.temp_dir.iterdir()], [path.name])
+        self.assertEqual(sorted(item.name for item in self.temp_dir.iterdir()), sorted(["locks", path.name]))
         self.assertEqual(GameLibrary.load(path).count(), 1)
 
     def test_save_never_replaces_a_library_a_newer_player_wrote(self) -> None:
@@ -2453,7 +2473,7 @@ class BoundedLibraryJsonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "schema_version 2 was written by a newer"):
             lib.save()
         self.assertEqual(path.read_bytes(), before)
-        self.assertEqual([item.name for item in self.temp_dir.iterdir()], [path.name])
+        self.assertEqual(sorted(item.name for item in self.temp_dir.iterdir()), sorted(["locks", path.name]))
 
     def test_v001_player_library_reads_through_the_cli_route(self) -> None:
         # tests/fixtures/user_data/v0.0.1/library.json is what the v0.0.1 player wrote.
@@ -2544,7 +2564,7 @@ class BoundedLibraryJsonTests(unittest.TestCase):
             "play_count negative": self._record(**{"play_count": "-1"}),
             "play_count boolean": self._record(**{"play_count": "true"}),
             "play_count float": self._record(**{"play_count": "1.5"}),
-            "last_played string": self._record(**{"last_played": '"soon"'}),
+            "last_played list": self._record(**{"last_played": "[]"}),
             "settings_override list": self._record(**{"settings_override": "[]"}),
         }
         for label, record in cases.items():
@@ -2555,13 +2575,27 @@ class BoundedLibraryJsonTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     GameLibrary.load(path)
 
-    def test_library_unknown_record_and_root_fields_are_rejected(self) -> None:
-        path = self._write(
-            "unknown_record.json",
-            '{"schema_version": 1, "games": [{"disc_id": "TEST80002", "wat": 1}]}',
-        )
-        with self.assertRaisesRegex(ValueError, "unsupported fields: wat"):
-            GameLibrary.load(path)
+    def test_player_record_fields_and_string_last_played_are_preserved(self) -> None:
+        player_record = {
+            "disc_id": "TEST80002", "title_name": "Synthetic Player Title",
+            "iso_path": "synthetic.iso", "title_id": "synthetic_player_title",
+            "selected_executable": "BOOT.BIN", "is_experimental": True,
+            "last_played": "2026-11-17T12:00:00Z", "content_crc32": "12345678",
+        }
+        path = self._write("player_record.json", json.dumps({
+            "schema_version": 1, "games": [player_record],
+        }))
+        library = GameLibrary.load(path)
+        game = library.get_game("TEST80002")
+        self.assertIsNotNone(game)
+        for field_name, value in player_record.items():
+            self.assertEqual(game.to_dict()[field_name], value)
+        library.save()
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        for field_name, value in player_record.items():
+            self.assertEqual(saved["games"][0][field_name], value)
+
+    def test_library_unknown_root_fields_are_rejected(self) -> None:
         path = self._write(
             "unknown_root.json", '{"schema_version": 1, "games": [], "extra": true}'
         )
@@ -2591,19 +2625,16 @@ class BoundedLibraryJsonTests(unittest.TestCase):
         """Every attacker-reachable rejection stays named AND bounded.
 
         library.json is attacker-supplied, so each untrusted value that a
-        diagnosis would otherwise quote -- an unknown root field, an unknown
-        record field, a non-integer schema_version, a repeated disc_id -- is
+        diagnosis would otherwise quote -- an unknown root field, a non-integer
+        schema_version, a repeated disc_id -- is
         echoed only as a short prefix. Each case still fails closed with a
         ValueError naming the condition; only the echoed detail is bounded.
+        Unknown record fields are preserved for forward compatibility.
         """
         bulk = "A" * 400_000
         cases = {
             "unknown_root": (
                 '{"schema_version": 1, "updated_at": null, "games": [], "%s": 1}' % bulk,
-                "unsupported fields",
-            ),
-            "unknown_record": (
-                '{"schema_version": 1, "games": [{"disc_id": "TEST80002", "%s": 1}]}' % bulk,
                 "unsupported fields",
             ),
             "schema_echo": (
@@ -2852,29 +2883,24 @@ int main(int argc, char **argv) {
                 with self.assertRaisesRegex(ValueError, "library JSON.*finite"):
                     GameLibrary.load(path)
 
-    def test_overlapping_library_saves_use_independent_temporary_files(self) -> None:
+    def test_stale_library_views_merge_records_added_since_their_load(self) -> None:
         path = self.temp_dir / "library.json"
-        first = GameLibrary(storage_file=path)
-        second = GameLibrary(storage_file=path)
-        first.add_or_update_game(LibraryGameRecord("TEST00001", "First", "first.iso"))
-        second.add_or_update_game(LibraryGameRecord("TEST00002", "Second", "second.iso"))
-        real_load = GameLibrary.load
-        interleaved = False
+        seed = GameLibrary(storage_file=path)
+        seed.add_or_update_game(LibraryGameRecord("TEST00001", "Seed", "seed.iso"))
+        seed.save()
+        first = GameLibrary.load(path)
+        second = GameLibrary.load(path)
+        first.add_or_update_game(LibraryGameRecord("TEST00002", "First", "first.iso"))
+        second.add_or_update_game(LibraryGameRecord("TEST00003", "Second", "second.iso"))
 
-        def validate_with_another_writer(temporary):
-            nonlocal interleaved
-            if not interleaved:
-                interleaved = True
-                # The second production save completes between the first one's
-                # temporary write and validation; no threads or timing guesses.
-                second.save()
-            return real_load(temporary)
+        first.save()
+        second.save()
 
-        with patch.object(GameLibrary, "load", side_effect=validate_with_another_writer):
-            first.save()
         loaded = GameLibrary.load(path)
-        self.assertEqual([game.disc_id for game in loaded.list_games()], ["TEST00001"])
-        self.assertEqual(sorted(item.name for item in self.temp_dir.iterdir()), ["library.json"])
+        self.assertEqual(
+            {game.disc_id for game in loaded.list_games()},
+            {"TEST00001", "TEST00002", "TEST00003"},
+        )
 
     def test_library_save_preserves_another_writers_temporary_file(self) -> None:
         path = self.temp_dir / "library.json"

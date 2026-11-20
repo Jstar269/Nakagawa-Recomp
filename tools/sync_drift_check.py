@@ -45,6 +45,8 @@ Limitations, stated plainly:
 """
 
 import argparse
+import fnmatch
+import glob
 import hashlib
 import json
 from pathlib import Path
@@ -92,13 +94,24 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def index_tree(root: Path) -> dict[str, str]:
+# Never release content, and present or absent depending on how a tree was
+# materialized, so both sides skip them.
+CACHE_DIRS = frozenset({".git", "__pycache__", ".ruff_cache"})
+# Build output: a local build in a public checkout is ignored by Git and skipped, but
+# in an export it is the most sensitive leak there is (C generated from a retail game,
+# AGENTS.md section 5), so the export side indexes it and classify() reports it.
+BUILD_DIR = "build"
+
+
+def index_tree(root: Path, *, keep_build: bool = False) -> dict[str, str]:
     """Map repo-relative POSIX path -> sha256 for every file under *root*.
 
-    ``.git`` and build/dependency output are skipped: they are never release
-    content and their presence differs by how the tree was materialized.
+    ``.git`` and caches are always skipped: they are never release content and
+    their presence differs by how the tree was materialized. Build output
+    (any ``build`` component) is skipped too unless *keep_build* is set, which
+    the export side uses so a leaked ``build/`` is reported instead of dropped.
     """
-    skip_dirs = {".git", "build", "__pycache__", ".ruff_cache"}
+    skip_dirs = CACHE_DIRS if keep_build else CACHE_DIRS | {BUILD_DIR}
     out: dict[str, str] = {}
     for path in root.rglob("*"):
         if not path.is_file():
@@ -110,12 +123,39 @@ def index_tree(root: Path) -> dict[str, str]:
     return out
 
 
+def _strings(value: object) -> list[str]:
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+
+def _profile_globs(data: dict) -> list[str]:
+    """The profile's glob and prefix exclusions as fnmatch patterns.
+
+    A prefix becomes its glob-escaped text plus ``*``, so it matches exactly the paths
+    ``publication_policy.Policy.resolve`` excludes with ``startswith``.
+    """
+    globs = _strings(data.get("exclude_globs"))
+    globs.extend(glob.escape(prefix) + "*" for prefix in _strings(data.get("exclude_prefixes")))
+    return globs
+
+
 def load_excluded_paths(export_root: Path, source_root: Path = ROOT) -> tuple[frozenset[str], list[str]]:
-    """Return (excluded exact paths, excluded globs) for the public-safe profile.
+    """Return (excluded exact paths, excluded fnmatch patterns) for the public-safe profile.
 
     Prefers the export's own ``PUBLIC_EXPORT.json`` because that records what the
-    export actually removed; falls back to the profile in the source tree.
+    export actually removed: its ``excluded_paths`` and ``excluded_globs``. The manifest
+    never records prefixes, so the source profile's ``exclude_prefixes`` apply on both
+    routes when that profile exists (an older manifest without ``excluded_globs`` takes
+    the profile's globs as well).
+    Falls back to the profile in the source tree.
     """
+    profile = source_root / PROFILE_PATH
+
+    def read_profile() -> dict:
+        if not profile.is_file():
+            raise FileNotFoundError(f"no {EXPORT_MANIFEST} in export and no {PROFILE_PATH} in source tree")
+        loaded: dict = json.loads(profile.read_text(encoding="utf-8"))
+        return loaded
+
     manifest = export_root / EXPORT_MANIFEST
     if manifest.is_file():
         try:
@@ -124,21 +164,27 @@ def load_excluded_paths(export_root: Path, source_root: Path = ROOT) -> tuple[fr
             raise ValueError(f"{EXPORT_MANIFEST} is not valid JSON: {exc}") from exc
         paths = data.get("excluded_paths")
         if isinstance(paths, list) and paths:
-            return frozenset(p for p in paths if isinstance(p, str)), []
+            if "excluded_globs" in data:
+                # public_export.py records the policy's globs but not its prefixes, so the
+                # source profile's prefixes still apply when that profile is present.
+                globs = _strings(data.get("excluded_globs"))
+                if profile.is_file():
+                    globs.extend(glob.escape(prefix) + "*" for prefix in
+                                 _strings(read_profile().get("exclude_prefixes")))
+            else:
+                globs = _profile_globs(read_profile())
+            return frozenset(_strings(paths)), globs
 
-    profile = source_root / PROFILE_PATH
-    if not profile.is_file():
-        raise FileNotFoundError(f"no {EXPORT_MANIFEST} in export and no {PROFILE_PATH} in source tree")
-    data = json.loads(profile.read_text(encoding="utf-8"))
-    exact = frozenset(p for p in data.get("exclude_paths", []) if isinstance(p, str))
-    globs = [g for g in data.get("exclude_globs", []) if isinstance(g, str)]
-    return exact, globs
+    data = read_profile()
+    return frozenset(_strings(data.get("exclude_paths"))), _profile_globs(data)
 
 
 def is_excluded(path: str, exact: frozenset[str], globs: list[str]) -> bool:
+    """Exclusion as ``publication_policy.Policy.resolve`` decides it: an exact path, or a
+    whole-path ``fnmatchcase`` match (not the right-anchored ``PurePath.match``)."""
     if path in exact:
         return True
-    return any(Path(path).match(pattern) for pattern in globs)
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in globs)
 
 
 def classify(
@@ -213,13 +259,11 @@ def classify(
             continue
 
         # Present in the export but not on public main.
-        findings.append(
-            {
-                "path": path,
-                "category": "UNKNOWN",
-                "detail": "export introduces a path that public main does not have and that no rule classifies",
-            }
-        )
+        if BUILD_DIR in path.split("/"):
+            detail = "export contains build output, which is never public (AGENTS.md section 5)"
+        else:
+            detail = "export introduces a path that public main does not have and that no rule classifies"
+        findings.append({"path": path, "category": "UNKNOWN", "detail": detail})
     return findings
 
 
@@ -267,7 +311,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    findings = classify(index_tree(export_root), index_tree(public_root), excluded_exact, excluded_globs)
+    findings = classify(
+        index_tree(export_root, keep_build=True), index_tree(public_root), excluded_exact, excluded_globs
+    )
     text, failed = render(findings)
 
     if args.json:

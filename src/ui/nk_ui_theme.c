@@ -28,7 +28,9 @@ static const NkUiTheme g_n1_theme = {
     0xC9D6E3FFu, /* art_label */
     0x3A4552FFu, /* placeholder */
     0x223046FFu, /* capture */
-    0x8FB8F2FFu  /* accent_hover */
+    0x8FB8F2FFu, /* accent_hover */
+    0x6B7684FFu, /* selected_neutral_edge */
+    0x576270FFu  /* selected_neutral_edge_dimmed */
 };
 
 const NkUiTheme *nk_ui_theme_n1(void) {
@@ -53,6 +55,9 @@ const char *nk_ui_font_path(int font) {
     return g_font_paths[font];
 }
 
+/* tracking_em is never negative: the measure and the draw apply only extra
+   space after each character (nk_ui_clay_pack_font, nk_ui_draw_add_text_spaced),
+   so a negative value would be listed here and never drawn. */
 typedef struct {
     int font;
     int size_px;
@@ -64,7 +69,7 @@ static const NkUiTypeSpec g_type_scale[NK_UI_TYPE_COUNT] = {
     {NK_UI_FONT_DISPLAY_BOLD, 40, 0.04f, 44.0f},   /* display-xl */
     {NK_UI_FONT_DISPLAY_BOLD, 30, 0.04f, 32.0f},   /* display */
     {NK_UI_FONT_DISPLAY_BOLD, 18, 0.06f, 20.0f},   /* wordmark */
-    {NK_UI_FONT_BODY_SEMIBOLD, 30, -0.01f, 34.0f}, /* title-xl */
+    {NK_UI_FONT_BODY_SEMIBOLD, 30, 0.0f, 34.0f},   /* title-xl */
     {NK_UI_FONT_BODY_SEMIBOLD, 22, 0.0f, 28.0f},   /* title */
     {NK_UI_FONT_BODY_SEMIBOLD, 17, 0.0f, 24.0f},   /* heading */
     {NK_UI_FONT_BODY_SEMIBOLD, 15, 0.0f, 20.0f},   /* tile title */

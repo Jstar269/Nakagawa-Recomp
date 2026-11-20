@@ -10,6 +10,7 @@ pass) when the pinned compiler is not installed.
 from __future__ import annotations
 
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from typing import Any
 
 TOOLS = Path(__file__).resolve().parent
@@ -81,7 +83,29 @@ class InstallerScriptTests(unittest.TestCase):
     def test_it_uses_no_network(self):
         self.assertEqual(verify_installer.egress_findings(_code(self.text)), [])
         self.assertEqual(verify_installer.egress_findings("x := DownloadTemporaryFile('https://a', 'b', '', nil);"),
-                         ["INSTALLER_NETWORK_CALL: downloadtemporaryfile"])
+                         ["INSTALLER_NETWORK_CALL: downloadtemporaryfile",
+                          "INSTALLER_NETWORK_CALL: https:// in [Code]"])
+        for snippet in (
+            "Shell.Run('powershell -c iwr https://example.com');",
+            "Shell.Exec('curl.exe https://example.com');",
+            "Exec('curl.exe', '', '', SW_HIDE, ewWaitUntilTerminated, Code);",
+            "ShellExec('', 'https://example.com', '', '', SW_SHOWNORMAL, ewNoWait, Code);",
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertTrue(verify_installer.egress_findings(snippet))
+
+    def test_the_egress_check_sees_download_pages_urls_and_download_tools(self):
+        """Inno 6.1+ downloads through a download page; Exec or ShellExec can start a downloader."""
+        page = ("[Code]\nvar P: TDownloadWizardPage;\nbegin\n  P := CreateDownloadPage('a', 'b', nil);\n"
+                "  P.Add(ExpandConstant('{#Mirror}'), 'f.zip', '');\n  P.Download;\nend;\n")
+        self.assertIn("INSTALLER_NETWORK_CALL: downloadpage", verify_installer.egress_findings(page))
+        exec_curl = "[Code]\nbegin\n  Exec('curl.exe', '-o f x', '', SW_HIDE, ewWaitUntilTerminated, R);\nend;\n"
+        self.assertIn("INSTALLER_NETWORK_CALL: exec(curl)", verify_installer.egress_findings(exec_curl))
+        shell_url = "[Code]\nbegin\n  ShellExec('', 'https://example.invalid/x', '', '', SW_SHOW, ewNoWait, R);\nend;\n"
+        self.assertIn("INSTALLER_NETWORK_CALL: https:// in [Code]", verify_installer.egress_findings(shell_url))
+        # A URL a [Setup] directive only shows is not network use.
+        shown = "[Setup]\nAppPublisherURL=https://example.invalid\n[Code]\nbegin\nend;\n"
+        self.assertEqual(verify_installer.egress_findings(shown), [])
 
     def test_the_app_id_is_the_one_the_verifier_and_upgrades_rely_on(self):
         self.assertEqual(_directive(self.text, "AppId"), "{{" + verify_installer.APP_ID + "}")
@@ -179,11 +203,11 @@ class UninstallRuleTests(unittest.TestCase):
         resolved = re.findall(r'case NK_PATH_\w+:\s+subdir = "(\w+)";', resolve)
         self.assertEqual(sorted(names.values()), sorted(set(resolved)))
         self.assertIn('"%s\\\\Nakagawa\\\\%s"', resolve)
-        # The docs table, once #2164 lands it, lists the same five.
+        # The docs data-folder table lists the same five; a format change that the
+        # pattern no longer matches fails here as an empty list.
         setup_doc = (ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
         rows = re.findall(r"^\| `(\w+)/` \|", setup_doc, re.MULTILINE)
-        if rows:
-            self.assertEqual(sorted(names.values()), sorted(rows))
+        self.assertEqual(sorted(names.values()), sorted(rows))
 
     def test_the_delete_is_reached_only_from_the_unchecked_box_and_never_when_silent(self):
         release = _release(self.text)
@@ -562,6 +586,16 @@ class BuildToolTests(unittest.TestCase):
         with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_PACKAGE_MISSING"):
             build_installer.check_package(self.root / "nothing")
 
+    def test_an_unreadable_checksum_list_is_a_named_refusal_not_a_traceback(self):
+        sums = self.package / build_installer.SUMS_NAME
+        sums.write_bytes(sums.read_bytes() + b"\xff\n")
+        with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_PACKAGE_INVALID: SHA256SUMS.txt is unreadable"):
+            self.build()
+        sums.unlink()
+        with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_PACKAGE_INVALID: SHA256SUMS.txt is unreadable"):
+            build_installer.read_sums(self.package)
+        self.assertEqual(self.calls, [])
+
     def test_a_runtime_manifest_that_does_not_verify_is_refused(self):
         def reject(_bin):
             raise RuntimeError("RUNTIME_FILE_CHANGED: bin/SDL3.dll")
@@ -641,6 +675,58 @@ class VerifierPureTests(unittest.TestCase):
         with self.assertRaises(build_installer.InstallerError):
             verify_installer.Sentinels(link).plant()
         self.assertEqual(list(target.iterdir()), [])
+
+    def test_partial_sentinel_plant_or_finally_install_error_cleans_up_and_reports_coded_failure(self):
+        base = self.root / "local" / "Nakagawa"
+        (base / "config").mkdir(parents=True)
+        (base / "saves").parent.mkdir(parents=True, exist_ok=True)
+        (base / "saves").write_text("file instead of folder", encoding="utf-8")
+        sentinels = verify_installer.Sentinels(base)
+        with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_VERIFY_REFUSED"):
+            try:
+                sentinels.plant()
+            finally:
+                sentinels.remove()
+        self.assertFalse((base / "config" / verify_installer.SENTINEL_NAME).exists())
+        self.assertFalse((base / "data").exists())
+
+        # main() catches stage_install.InstallError and returns 1 without traceback
+        with unittest.mock.patch.object(
+            verify_installer, "verify_installer",
+            side_effect=stage_install.InstallError("SHORTCUT_FAILED: synthetic"),
+        ), unittest.mock.patch("sys.stderr", new=io.StringIO()) as err:
+            self.assertEqual(
+                verify_installer.main(["--installer", "setup.exe", "--package-dir", str(self.package)]),
+                1,
+            )
+        self.assertIn("SHORTCUT_FAILED", err.getvalue())
+
+    def test_a_failed_cleanup_is_reported_by_name_and_fails_a_passing_check(self):
+        folder = self.root / "cleanup-install"
+        folder.mkdir()
+        (folder / "unins000.exe").write_bytes(b"u")
+        shortcut = self.root / "Nakagawa Recomp.lnk"
+        shortcut.write_bytes(b"lnk")
+        with unittest.mock.patch.object(verify_installer, "_hkcu_key_exists", return_value=True), \
+                unittest.mock.patch.object(verify_installer, "_wait_for", return_value=False), \
+                unittest.mock.patch.object(verify_installer.subprocess, "run", side_effect=OSError("synthetic")), \
+                unittest.mock.patch.object(verify_installer.stage_install, "read_shortcut_app_id",
+                                           side_effect=stage_install.InstallError("SHORTCUT_UNREADABLE: synthetic")):
+            failures = verify_installer._cleanup_installs((folder,), shortcut, ["/VERYSILENT"])
+        self.assertEqual(len(failures), 3, failures)
+        self.assertIn("cannot run", failures[0])
+        self.assertIn(verify_installer.UNINSTALL_KEY, failures[1])
+        self.assertIn("SHORTCUT_UNREADABLE", failures[2])
+
+        # After a PASS the cleanup failure is the result; after an earlier failure it is only printed.
+        with unittest.mock.patch("sys.stderr", new=io.StringIO()) as err:
+            with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_VERIFY_CLEANUP_FAILED"):
+                verify_installer._report_cleanup(failures, raise_error=True)
+        self.assertEqual(err.getvalue().count("INSTALLER_VERIFY_CLEANUP_FAILED: "), 3)
+        with unittest.mock.patch("sys.stderr", new=io.StringIO()) as err:
+            verify_installer._report_cleanup(failures, raise_error=False)
+            verify_installer._report_cleanup([], raise_error=True)
+        self.assertEqual(err.getvalue().count("INSTALLER_VERIFY_CLEANUP_FAILED: "), 3)
 
     def test_an_install_equal_to_its_package_matches_even_with_the_uninstaller_beside_it(self):
         (self.installed / "unins000.exe").write_bytes(b"u")

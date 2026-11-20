@@ -181,6 +181,9 @@ def parse(data: bytes, *, self_identity: Identity | None = None,
     if fmt != FORMAT_VERSION:
         raise StateError("format-version", f"file {fmt}, this reader {FORMAT_VERSION}")
     if self_identity is not None:
+        if not self_identity.runtime:
+            raise StateError("no-runtime-identity",
+                             "this build carries no SR_BUILD_ID, so it cannot tell this file from another build's")
         if kind != self_identity.kind:
             raise StateError("kind", f"file kind {kind}, expected {self_identity.kind}")
         if abi != ABI_VERSION:

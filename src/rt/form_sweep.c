@@ -23,7 +23,8 @@
  *     an arithmetic result then carries whichever payload the host compiler's operand order
  *     picks inside the shared helper, and the PSP's choice is unmeasured (counted on stderr);
  *   - for a memory form points the base register so base + offset falls inside the
- *     scratch window, and fills the window with random bytes on both sides;
+ *     scratch window, aligned as the form requires, and fills the window with random bytes
+ *     on both sides;
  *   - runs the translated body through production dispatch (as snapshot_runner.c does)
  *     and ref::Run, then compares r1..r31, hi, lo, f0..f31 (raw bits), fcr31, fpcond,
  *     llbit, the scratch window and the runtime's out-of-range access counters.
@@ -41,8 +42,9 @@
  * an instruction the reference ran. Exit status: 0 when no instance mismatched or failed,
  * 1 otherwise, 2 for a usage or input error.
  *
- * The harness links snapshot_runner.c for its stand-ins of the scheduler, GE and host
- * symbols (see that file) and reuses its stop handling; only main is renamed.
+ * The harness includes snapshot_runner.c for its stop handling and its AOT and reference
+ * state, with only main renamed, and links src/rt/harness_stubs.c for the stand-ins of the
+ * scheduler, GE and host symbols, as the runner does.
  */
 
 #define main snapshot_runner_main
@@ -104,6 +106,16 @@ static uint32_t draw_fpr(uint64_t *rng) {
     return (uint32_t)(r >> 32);
 }
 
+/* The alignment a memory form's effective address needs: 2 for lh/lhu/sh, 4 for lw/sw/ll/sc/
+ * lwc1/swc1, 1 for the byte forms and lwl/lwr/swl/swr. */
+static uint32_t access_alignment(uint32_t word) {
+    switch (word >> 26) {
+    case 0x21: case 0x25: case 0x29: return 2u;
+    case 0x23: case 0x2B: case 0x30: case 0x38: case 0x31: case 0x39: return 4u;
+    default: return 1u;
+    }
+}
+
 static void make_state(CpuState *cpu, const SweepInst *in, uint32_t state_index, uint64_t seed,
                        uint32_t scratch, uint32_t scratch_size) {
     uint64_t rng = seed ^ ((uint64_t)in->index * 0xD6E8FEB86659FD93ull)
@@ -163,8 +175,12 @@ static void make_state(CpuState *cpu, const SweepInst *in, uint32_t state_index,
         }
     }
     if (in->base_reg > 0) {
-        /* The effective address lands in the middle half of the window, any alignment. */
+        /* The effective address lands in the middle half of the window, at any alignment the
+         * form accepts: a halfword or word access must be naturally aligned (the PSP raises an
+         * address error otherwise, and the reference stops there), while byte accesses and
+         * lwl/lwr/swl/swr take every byte offset. */
         uint32_t target = scratch + scratch_size / 4u + (uint32_t)(rng_next(&rng) % (scratch_size / 2u));
+        target &= ~(access_alignment(in->word) - 1u);
         cpu->r[in->base_reg] = target - in->offset;
     }
     cpu->r[0] = 0u;
@@ -210,6 +226,7 @@ static int parse_plan(const char *path, uint64_t *seed, uint32_t *states, uint32
     uint32_t cap = 256u, n = 0u;
     SweepInst *v = (SweepInst *)malloc(cap * sizeof *v);
     char line[256];
+    int bad = 0;
     *seed = 0u;
     *states = 0u;
     *scratch = 0u;
@@ -226,6 +243,13 @@ static int parse_plan(const char *path, uint64_t *seed, uint32_t *states, uint32
             *scratch = b;
             *scratch_size = c;
         } else if (sscanf(line, "inst %u %x %x %d %x %x %x", &b, &c, &d2, &base, &e, &g, &h) == 7) {
+            /* make_state indexes cpu->r with the base register: -1 and 0 name no base. */
+            if (base < -1 || base > 31) {
+                fprintf(stderr, "form_sweep: plan instance %u names base register %d, outside -1..31\n",
+                        b, base);
+                bad = 1;
+                break;
+            }
             if (n == cap) {
                 cap *= 2u;
                 v = (SweepInst *)realloc(v, cap * sizeof *v);
@@ -245,6 +269,16 @@ static int parse_plan(const char *path, uint64_t *seed, uint32_t *states, uint32
     if (!v) return 0;
     *out = v;
     *count = n;
+    if (bad) return 0;
+    /* Both sides form host pointers over the whole window (arena_base() + scratch and
+     * nk_ref_ram() + (scratch - NK_REF_RAM_BASE)) and write every byte of it, so the
+     * window must lie inside the reference RAM, which the runtime arena also covers. */
+    if (*scratch < NK_REF_RAM_BASE ||
+        (uint64_t)(*scratch - NK_REF_RAM_BASE) + (uint64_t)*scratch_size > (uint64_t)NK_REF_RAM_SIZE) {
+        fprintf(stderr, "form_sweep: plan scratch window 0x%08x+0x%x is outside guest RAM "
+                "0x%08x+0x%x\n", *scratch, *scratch_size, NK_REF_RAM_BASE, NK_REF_RAM_SIZE);
+        return 0;
+    }
     return *states != 0u && *scratch_size >= 0x40u && n != 0u;
 }
 
@@ -262,7 +296,7 @@ int main(int argc, char **argv) {
         } else if (positional == 0) {
             image_path = argv[i]; positional++;
         } else if (positional == 1) {
-            if (!parse_u32(argv[i], &base)) return 2;
+            if (!sr_harness_parse_hex32(argv[i], &base)) return 2;
             positional++;
         } else if (positional == 2) {
             plan_path = argv[i]; positional++;
@@ -282,7 +316,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     uint32_t image_len = 0u;
-    uint8_t *image = read_image(image_path, &image_len);
+    uint8_t *image = sr_harness_read_image(image_path, &image_len);
     if (!image) {
         fprintf(stderr, "form_sweep: cannot read %s\n", image_path);
         return 2;

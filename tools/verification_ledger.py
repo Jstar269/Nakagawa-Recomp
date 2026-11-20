@@ -44,6 +44,7 @@ if str(TOOLS) not in sys.path:
 
 import hle_manifest  # noqa: E402
 import hle_registry_meta as meta  # noqa: E402
+import vfpu_coverage_report  # noqa: E402
 
 ROOT = TOOLS.parent
 DOC = ROOT / "docs" / "HLE_COVERAGE.md"
@@ -196,7 +197,8 @@ VFPU_PPSSPP_KERNEL_SECTION = "VFPU transcendental kernels"
 RECOMP_C = ROOT / "src" / "rt" / "recomp.c"
 
 #: Dispositions whose words the runtime refuses at the issue #326 boundary: no path executes.
-VFPU_REFUSED_DISPOSITIONS = frozenset({"supported-opcode-form-unmodeled", "unsupported-encoding"})
+#: The census owns the set, so a new boundary disposition reaches both tools at once.
+VFPU_REFUSED_DISPOSITIONS = vfpu_coverage_report.REFUSED_DISPOSITIONS
 
 #: Evidence citations in hle_registry_meta that name an executable project-built test.
 SYNTHETIC_EVIDENCE_RE = re.compile(
@@ -206,9 +208,6 @@ SYNTHETIC_EVIDENCE_RE = re.compile(
 #: Evidence citations that describe a hardware run in prose or point at the oracle docs.
 HARDWARE_NOTE_RE = re.compile(r"hardware|HARDWARE_ORACLE|psp_oracle", re.IGNORECASE)
 
-_HANDLER_DEF_RE = re.compile(
-    r"^(?:static[ \t]+)?uint32_t[ \t]+(h_\w+)[ \t]*\([ \t]*CpuState[ \t]*\*[ \t]*\w*[ \t]*\)[ \t]*\{", re.MULTILINE
-)
 _BANNER_RE = re.compile(r"^/\* ---- ", re.MULTILINE)
 _KERNEL_DEF_RE = re.compile(r"^float[ \t]+(sr_vfpu_\w+)[ \t]*\(", re.MULTILINE)
 
@@ -254,24 +253,18 @@ def _comment_above(lines: list[str], def_line: int) -> str:
     return "\n".join(lines[j + 1 : k + 1])
 
 
-def _body_end(clean: str, open_brace: int) -> int:
-    depth = 0
-    for i in range(open_brace, len(clean)):
-        c = clean[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    raise LedgerError(f"unbalanced handler body at offset {open_brace}")
-
-
 def _handler_spans(raw: str) -> list[tuple[str, int, int]]:
-    """(handler, definition offset, body end) for each active handler definition in `raw`."""
-    active = hle_manifest.active_source(raw)
-    clean = hle_manifest._strip_string_literals(active)
-    return [(m.group(1), m.start(), _body_end(clean, m.end() - 1)) for m in _HANDLER_DEF_RE.finditer(active)]
+    """(handler, definition offset, body end) for each active handler definition in `raw`.
+
+    The definition grammar and brace matching are hle_manifest.handler_spans, so a handler
+    the manifest registers and classifies is the same handler this ledger credits.
+    """
+    spans = []
+    for name, start, opening, closing in hle_manifest.handler_spans(hle_manifest.active_source(raw)):
+        if closing >= len(raw):
+            raise LedgerError(f"unbalanced handler body at offset {opening}")
+        spans.append((name, start, closing + 1))
+    return spans
 
 
 def ppsspp_handler_comments(sources: list[tuple[str, str]]) -> dict[str, set[str]]:
@@ -528,16 +521,23 @@ def vfpu_unverified_masks(vfpu_rows: list[dict]) -> list[dict]:
     visited = {word: key for key, words in groups.items() for word in words}
 
     def keys_of(words: list[int]) -> dict[int, tuple]:
+        if not words:
+            return {}
         return {int(r["word"]): census_mod.row_key(r) for r in census_mod.classify_words(words)}
 
+    # Each classify_words call compiles the decoder probe once, so every form's bit flips go
+    # through one call and every form's samples through a second.
+    ordered_keys = sorted(unverified_keys, key=lambda k: form_of_key[k])
+    flips = keys_of(sorted({
+        w ^ (1 << b) for key in ordered_keys for w in groups[key] for b in range(VFPU_WORD_BITS)
+    }))
     rng = random.Random(0x1877)
-    patterns: dict[tuple[int, int], set[str]] = {}
-    for key in sorted(unverified_keys, key=lambda k: form_of_key[k]):
+    drawn: list[tuple[tuple, int, int, list[int]]] = []
+    for key in ordered_keys:
         words = sorted(groups[key])
         shared = 0xFFFFFFFF
         for word in words:
             shared &= ~(word ^ words[0])
-        flips = keys_of(sorted({w ^ (1 << b) for w in words for b in range(VFPU_WORD_BITS)}))
         mask = 0xFC000000
         for bit in range(VFPU_WORD_BITS):
             if not (shared >> bit) & 1:
@@ -547,7 +547,11 @@ def vfpu_unverified_masks(vfpu_rows: list[dict]) -> list[dict]:
         match = words[0] & mask
         free = ~mask & 0x03FFFFFF
         samples = sorted({match | (rng.getrandbits(32) & free) for _ in range(VFPU_CUBE_SAMPLES)})
-        stray = sorted(w for w, k in keys_of(samples).items() if k not in unverified_keys)
+        drawn.append((key, mask, match, samples))
+    sampled = keys_of(sorted({w for *_, samples in drawn for w in samples}))
+    patterns: dict[tuple[int, int], set[str]] = {}
+    for key, mask, match, samples in drawn:
+        stray = sorted(w for w in samples if sampled[w] not in unverified_keys)
         if stray:
             raise LedgerError(
                 f"VFPU form {form_of_key[key]}: pattern {mask:08x}/{match:08x} holds words outside the "

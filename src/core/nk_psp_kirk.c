@@ -41,7 +41,14 @@
       (upstream assumed well-formed sizes);
     - key generation (0x0C), PRNG (0x0E), signing (0x10) and content
       encryption (0x00) refuse fail-closed because they would require
-      private material this boundary never holds.
+      private material this boundary never holds;
+    - 2026-11-18: kirk4 and kirk7 refuse an empty pass as well as an
+      unaligned one.
+    - 2026-11-18: the CMD1 wrapping key is expanded from the caller's
+      context for each command and wiped after it (no process-wide AES
+      schedule); CMD1 reuses the header keys its CMAC check unwrapped;
+      CMD1, CMD4, CMD7 and CMD11 refuse an output size smaller than what
+      they write; CMD4/CMD7 and kirk4/kirk7 share one CBC routine each.
 */
 
 #include <stdio.h>
@@ -53,11 +60,6 @@
 #include "nk_psp_kirk.h"
 #include "nk_psp_keystore.h"
 #include "nk_psp_sha1.h"
-
-/* ------------------------- STATE ------------------------------- */
-
-static AES_ctx s_aes_kirk1; /* KIRK CMD1 wrapping key (KeyStore-backed) */
-static int s_kirk_ready;
 
 static int kirk_keyvault_key(NkPspCtx *ctx, int keyslot, u8 key_out[16])
 {
@@ -76,7 +78,10 @@ static int kirk_keyvault_key(NkPspCtx *ctx, int keyslot, u8 key_out[16])
     return KIRK_OPERATION_SUCCESS;
 }
 
-int kirk_init(NkPspCtx *ctx)
+/* Expand the KIRK CMD1 wrapping key held by ctx's KeyStore. The schedule
+ * lives in the caller's frame for one command, so two contexts never share
+ * it and the caller wipes it after use. */
+static int kirk_cmd1_key(NkPspCtx *ctx, AES_ctx *aes)
 {
     const uint8_t *value = NULL;
     size_t len = 0;
@@ -86,9 +91,16 @@ int kirk_init(NkPspCtx *ctx)
         return (int)nk_psp_fail(ctx, NK_PSP_ERR_KEYFILE, "kirk.cmd1.key",
                                 "key entry kirk.cmd1.key must be 16 bytes");
     }
-    AES_set_key(&s_aes_kirk1, value, 128);
-    s_kirk_ready = 1;
+    AES_set_key(aes, value, 128);
     return KIRK_OPERATION_SUCCESS;
+}
+
+int kirk_init(NkPspCtx *ctx)
+{
+    AES_ctx aes;
+    int rc = kirk_cmd1_key(ctx, &aes);
+    nk_secure_zero(&aes, sizeof(aes));
+    return rc;
 }
 
 /* ------------------------- HELPERS ------------------------------- */
@@ -110,37 +122,53 @@ static int cmd1_bounds(int size, const KIRK_CMD1_HEADER *header, u32 *chk_size)
     return total <= (u64)size ? 0 : -1;
 }
 
-/* KIRK command 0x0A: CMAC integrity check of a CMD1 header + payload. */
-int kirk_CMD10(NkPspCtx *ctx, u8 *inbuff, int insize)
+/* CMAC check of a CMD1 header + payload under the wrapping key cmd1. On
+ * success header_keys holds the unwrapped AES and CMAC keys, so CMD1 does
+ * not unwrap them a second time. */
+static int cmd10_verify(AES_ctx *cmd1, u8 *inbuff, int insize,
+                        u8 header_keys[32])
 {
     KIRK_CMD1_HEADER *header = (KIRK_CMD1_HEADER *)inbuff;
-    (void)ctx;
-    u8 header_keys_buf[32];
     u8 cmac_header_hash[16];
     u8 cmac_data_hash[16];
     AES_ctx cmac_key;
     u32 chk_size;
+    int rc;
 
-    if (!s_kirk_ready) return KIRK_NOT_INITIALIZED;
     if (!(header->mode == KIRK_MODE_CMD1 || header->mode == KIRK_MODE_CMD2 ||
           header->mode == KIRK_MODE_CMD3)) return KIRK_INVALID_MODE;
     if (header->data_size == 0) return KIRK_DATA_SIZE_ZERO;
     if (cmd1_bounds(insize, header, &chk_size) != 0) return KIRK_INVALID_SIZE;
+    if (header->mode != KIRK_MODE_CMD1)
+        return KIRK_SIG_CHECK_INVALID; /* checks for commands 2 & 3 not enabled */
 
-    if (header->mode == KIRK_MODE_CMD1) {
-        AES_cbc_decrypt(&s_aes_kirk1, inbuff, header_keys_buf, 32);
-        AES_set_key(&cmac_key, header_keys_buf + 16, 128);
-        AES_CMAC(&cmac_key, inbuff + 0x60, 0x30, cmac_header_hash);
-        AES_CMAC(&cmac_key, inbuff + 0x60,
-                 0x30 + (int)chk_size + header->data_offset, cmac_data_hash);
+    AES_cbc_decrypt(cmd1, inbuff, header_keys, 32);
+    AES_set_key(&cmac_key, header_keys + 16, 128);
+    AES_CMAC(&cmac_key, inbuff + 0x60, 0x30, cmac_header_hash);
+    AES_CMAC(&cmac_key, inbuff + 0x60,
+             0x30 + (int)chk_size + header->data_offset, cmac_data_hash);
+    nk_secure_zero(&cmac_key, sizeof(cmac_key));
 
-        if (memcmp(cmac_header_hash, header->CMAC_header_hash, 16) != 0)
-            return KIRK_HEADER_HASH_INVALID;
-        if (memcmp(cmac_data_hash, header->CMAC_data_hash, 16) != 0)
-            return KIRK_DATA_HASH_INVALID;
-        return KIRK_OPERATION_SUCCESS;
-    }
-    return KIRK_SIG_CHECK_INVALID; /* checks for commands 2 & 3 not enabled */
+    if (memcmp(cmac_header_hash, header->CMAC_header_hash, 16) != 0)
+        rc = KIRK_HEADER_HASH_INVALID;
+    else if (memcmp(cmac_data_hash, header->CMAC_data_hash, 16) != 0)
+        rc = KIRK_DATA_HASH_INVALID;
+    else
+        rc = KIRK_OPERATION_SUCCESS;
+    return rc;
+}
+
+/* KIRK command 0x0A: CMAC integrity check of a CMD1 header + payload. */
+int kirk_CMD10(NkPspCtx *ctx, u8 *inbuff, int insize)
+{
+    u8 header_keys[32];
+    AES_ctx cmd1;
+    int rc = kirk_cmd1_key(ctx, &cmd1);
+    if (rc == KIRK_OPERATION_SUCCESS)
+        rc = cmd10_verify(&cmd1, inbuff, insize, header_keys);
+    nk_secure_zero(&cmd1, sizeof(cmd1));
+    nk_secure_zero(header_keys, sizeof(header_keys));
+    return rc;
 }
 
 /* Load curve parameters (and optionally a public point) from the KeyStore.
@@ -180,155 +208,182 @@ static int load_curve(NkPspCtx *ctx, const char *suffix, NkEcParams *params)
     return NK_PSP_OK;
 }
 
-/* KIRK command 0x01: private decryption of a wrapped CMD1 container. */
-int kirk_CMD1(NkPspCtx *ctx, u8 *outbuff, u8 *inbuff, int size)
+/* ECDSA check of a CMD1 header + payload signed with the curve-1 key. */
+static int cmd1_ecdsa_verify(NkPspCtx *ctx, u8 *inbuff, int size)
+{
+    KIRK_CMD1_ECDSA_HEADER *eheader = (KIRK_CMD1_ECDSA_HEADER *)inbuff;
+    NkEcParams params;
+    u8 pub[40];
+    u8 header_hash[20];
+    u8 data_hash[20];
+    SHA_CTX sha;
+    const uint8_t *px = NULL;
+    const uint8_t *py = NULL;
+    size_t plen = 0;
+    int rc = load_curve(ctx, "1", &params);
+    if (rc != NK_PSP_OK) return KIRK_INVALID_OPERATION;
+    if (nk_psp_need(ctx, "kirk.ecdsa.px1", &px, &plen) != NK_PSP_OK ||
+        nk_psp_need(ctx, "kirk.ecdsa.py1", &py, &plen) != NK_PSP_OK ||
+        plen != NK_EC_BYTES) {
+        return KIRK_INVALID_OPERATION;
+    }
+    memcpy(pub, px, NK_EC_BYTES);
+    memcpy(pub + NK_EC_BYTES, py, NK_EC_BYTES);
+
+    SHAInit(&sha);
+    SHAUpdate(&sha, (u8 *)eheader + 0x60, 0x30);
+    SHAFinal(header_hash, &sha);
+    if (nk_ec_verify(&params, pub, pub + NK_EC_BYTES, header_hash,
+                     eheader->header_sig_r, eheader->header_sig_s) != 0) {
+        return nk_psp_fail(ctx, NK_PSP_ERR_INTEGRITY, NULL,
+                           "KIRK header signature did not verify "
+                           "(integrity check failed; refusing to decrypt)");
+    }
+    SHAInit(&sha);
+    SHAUpdate(&sha, (u8 *)eheader + 0x60, size - 0x60);
+    SHAFinal(data_hash, &sha);
+    if (nk_ec_verify(&params, pub, pub + NK_EC_BYTES, data_hash,
+                     eheader->data_sig_r, eheader->data_sig_s) != 0) {
+        return nk_psp_fail(ctx, NK_PSP_ERR_INTEGRITY, NULL,
+                           "KIRK data signature did not verify "
+                           "(integrity check failed; refusing to decrypt)");
+    }
+    return KIRK_OPERATION_SUCCESS;
+}
+
+/* KIRK command 0x01: private decryption of a wrapped CMD1 container. The
+ * payload decrypts to round16(data_size) bytes, which outsize must hold. */
+int kirk_CMD1(NkPspCtx *ctx, u8 *outbuff, int outsize, u8 *inbuff, int size)
 {
     KIRK_CMD1_HEADER *header = (KIRK_CMD1_HEADER *)inbuff;
-    u8 header_keys_buf[32];
+    u8 header_keys[32];
+    AES_ctx cmd1;
     AES_ctx k1;
     u32 chk_size;
+    int rc;
 
     if (size < (int)sizeof(KIRK_CMD1_HEADER)) return KIRK_INVALID_SIZE;
-    if (!s_kirk_ready) return KIRK_NOT_INITIALIZED;
-    if (header->mode != KIRK_MODE_CMD1) return KIRK_INVALID_MODE;
-    if (cmd1_bounds(size, header, &chk_size) != 0) return KIRK_INVALID_SIZE;
-    if (header->data_size == 0) return KIRK_DATA_SIZE_ZERO;
+    rc = kirk_cmd1_key(ctx, &cmd1);
+    if (rc != KIRK_OPERATION_SUCCESS) return rc;
 
-    if (header->ecdsa_hash == 1) {
-        KIRK_CMD1_ECDSA_HEADER *eheader = (KIRK_CMD1_ECDSA_HEADER *)inbuff;
-        NkEcParams params;
-        u8 pub[40];
-        u8 header_hash[20];
-        u8 data_hash[20];
-        SHA_CTX sha;
-        int rc = load_curve(ctx, "1", &params);
-        if (rc != NK_PSP_OK) return KIRK_INVALID_OPERATION;
-        const uint8_t *px = NULL;
-        const uint8_t *py = NULL;
-        size_t plen = 0;
-        if (nk_psp_need(ctx, "kirk.ecdsa.px1", &px, &plen) != NK_PSP_OK ||
-            nk_psp_need(ctx, "kirk.ecdsa.py1", &py, &plen) != NK_PSP_OK ||
-            plen != NK_EC_BYTES) {
-            return KIRK_INVALID_OPERATION;
-        }
-        memcpy(pub, px, NK_EC_BYTES);
-        memcpy(pub + NK_EC_BYTES, py, NK_EC_BYTES);
-
-        SHAInit(&sha);
-        SHAUpdate(&sha, (u8 *)eheader + 0x60, 0x30);
-        SHAFinal(header_hash, &sha);
-        if (nk_ec_verify(&params, pub, pub + NK_EC_BYTES, header_hash,
-                         eheader->header_sig_r, eheader->header_sig_s) != 0) {
-            return nk_psp_fail(ctx, NK_PSP_ERR_INTEGRITY, NULL,
-                               "KIRK header signature did not verify "
-                               "(integrity check failed; refusing to decrypt)");
-        }
-        SHAInit(&sha);
-        SHAUpdate(&sha, (u8 *)eheader + 0x60, size - 0x60);
-        SHAFinal(data_hash, &sha);
-        if (nk_ec_verify(&params, pub, pub + NK_EC_BYTES, data_hash,
-                         eheader->data_sig_r, eheader->data_sig_s) != 0) {
-            return nk_psp_fail(ctx, NK_PSP_ERR_INTEGRITY, NULL,
-                               "KIRK data signature did not verify "
-                               "(integrity check failed; refusing to decrypt)");
-        }
+    if (header->mode != KIRK_MODE_CMD1) {
+        rc = KIRK_INVALID_MODE;
+    } else if (cmd1_bounds(size, header, &chk_size) != 0) {
+        rc = KIRK_INVALID_SIZE;
+    } else if (header->data_size == 0) {
+        rc = KIRK_DATA_SIZE_ZERO;
+    } else if (outsize < 0 || (u64)chk_size > (u64)outsize) {
+        rc = KIRK_INVALID_SIZE;
+    } else if (header->ecdsa_hash == 1) {
+        rc = cmd1_ecdsa_verify(ctx, inbuff, size);
+        if (rc == KIRK_OPERATION_SUCCESS)
+            AES_cbc_decrypt(&cmd1, inbuff, header_keys, 32);
     } else {
-        int ret = kirk_CMD10(ctx, inbuff, size);
-        if (ret == KIRK_HEADER_HASH_INVALID || ret == KIRK_DATA_HASH_INVALID) {
-            return (int)nk_psp_fail(ctx, NK_PSP_ERR_INTEGRITY, NULL,
-                                    "KIRK header CMAC did not verify "
-                                    "(integrity check failed; refusing to decrypt)");
+        rc = cmd10_verify(&cmd1, inbuff, size, header_keys);
+        if (rc == KIRK_HEADER_HASH_INVALID || rc == KIRK_DATA_HASH_INVALID) {
+            rc = (int)nk_psp_fail(ctx, NK_PSP_ERR_INTEGRITY, NULL,
+                                  "KIRK header CMAC did not verify "
+                                  "(integrity check failed; refusing to decrypt)");
         }
-        if (ret != KIRK_OPERATION_SUCCESS) return ret;
     }
 
-    AES_cbc_decrypt(&s_aes_kirk1, inbuff, header_keys_buf, 32);
-    AES_set_key(&k1, header_keys_buf, 128);
-    AES_cbc_decrypt(&k1, inbuff + sizeof(KIRK_CMD1_HEADER) + header->data_offset,
-                    outbuff, (int)header->data_size);
-    return KIRK_OPERATION_SUCCESS;
+    if (rc == KIRK_OPERATION_SUCCESS) {
+        AES_set_key(&k1, header_keys, 128);
+        AES_cbc_decrypt(&k1, inbuff + sizeof(KIRK_CMD1_HEADER) + header->data_offset,
+                        outbuff, (int)header->data_size);
+        nk_secure_zero(&k1, sizeof(k1));
+    }
+    nk_secure_zero(&cmd1, sizeof(cmd1));
+    nk_secure_zero(header_keys, sizeof(header_keys));
+    return rc;
 }
 
-/* KIRK command 0x04: AES-128-CBC encrypt under a keyvault slot (mode 4). */
-int kirk_CMD4(NkPspCtx *ctx, u8 *outbuff, u8 *inbuff, int size)
+/* KIRK commands 0x04 and 0x07: AES-128-CBC under a keyvault slot. CMD4
+ * (mode 4) encrypts and writes after a header-sized gap; CMD7 (mode 5)
+ * decrypts to the start of outbuff. Either way outsize must hold it. */
+static int kirk_cbc_command(NkPspCtx *ctx, u8 *outbuff, int outsize,
+                            u8 *inbuff, int size, int encrypt)
 {
     KIRK_AES128CBC_HEADER *header = (KIRK_AES128CBC_HEADER *)inbuff;
+    const size_t out_at = encrypt ? sizeof(KIRK_AES128CBC_HEADER) : 0u;
     u8 key[16];
     AES_ctx aesKey;
 
-    if (!s_kirk_ready) return KIRK_NOT_INITIALIZED;
     if (size < (int)sizeof(KIRK_AES128CBC_HEADER)) return KIRK_INVALID_SIZE;
-    if (header->mode != KIRK_MODE_ENCRYPT_CBC) return KIRK_INVALID_MODE;
+    if (header->mode != (encrypt ? KIRK_MODE_ENCRYPT_CBC : KIRK_MODE_DECRYPT_CBC))
+        return KIRK_INVALID_MODE;
     if (header->data_size == 0) return KIRK_DATA_SIZE_ZERO;
     if (header->data_size < 0 ||
         (u64)sizeof(KIRK_AES128CBC_HEADER) + (u64)header->data_size > (u64)size)
         return KIRK_INVALID_SIZE;
     if ((header->data_size & 15) != 0) return KIRK_INVALID_SIZE;
+    if (outsize < 0 || (u64)out_at + (u64)header->data_size > (u64)outsize)
+        return KIRK_INVALID_SIZE;
     if (kirk_keyvault_key(ctx, header->keyseed, key) != KIRK_OPERATION_SUCCESS)
         return KIRK_INVALID_SEED_CODE;
     AES_set_key(&aesKey, key, 128);
-    AES_cbc_encrypt(&aesKey, inbuff + sizeof(KIRK_AES128CBC_HEADER),
-                    outbuff + sizeof(KIRK_AES128CBC_HEADER), header->data_size);
+    if (encrypt) {
+        AES_cbc_encrypt(&aesKey, inbuff + sizeof(KIRK_AES128CBC_HEADER),
+                        outbuff + out_at, header->data_size);
+    } else {
+        AES_cbc_decrypt(&aesKey, inbuff + sizeof(KIRK_AES128CBC_HEADER),
+                        outbuff, header->data_size);
+    }
+    nk_secure_zero(key, sizeof(key));
+    nk_secure_zero(&aesKey, sizeof(aesKey));
     return KIRK_OPERATION_SUCCESS;
 }
 
-/* KIRK command 0x07: AES-128-CBC decrypt under a keyvault slot (mode 5). */
-int kirk_CMD7(NkPspCtx *ctx, u8 *outbuff, u8 *inbuff, int size)
+int kirk_CMD4(NkPspCtx *ctx, u8 *outbuff, int outsize, u8 *inbuff, int size)
 {
-    KIRK_AES128CBC_HEADER *header = (KIRK_AES128CBC_HEADER *)inbuff;
+    return kirk_cbc_command(ctx, outbuff, outsize, inbuff, size, 1);
+}
+
+int kirk_CMD7(NkPspCtx *ctx, u8 *outbuff, int outsize, u8 *inbuff, int size)
+{
+    return kirk_cbc_command(ctx, outbuff, outsize, inbuff, size, 0);
+}
+
+/* A raw AES-CBC pass under a keyvault slot (kirk4 encrypts, kirk7 decrypts). */
+static int kirk_cbc_pass(NkPspCtx *ctx, u8 *outbuff, const u8 *inbuff,
+                         size_t size, int keyId, int encrypt)
+{
     u8 key[16];
     AES_ctx aesKey;
-
-    if (!s_kirk_ready) return KIRK_NOT_INITIALIZED;
-    if (size < (int)sizeof(KIRK_AES128CBC_HEADER)) return KIRK_INVALID_SIZE;
-    if (header->mode != KIRK_MODE_DECRYPT_CBC) return KIRK_INVALID_MODE;
-    if (header->data_size == 0) return KIRK_DATA_SIZE_ZERO;
-    if (header->data_size < 0 ||
-        (u64)sizeof(KIRK_AES128CBC_HEADER) + (u64)header->data_size > (u64)size)
-        return KIRK_INVALID_SIZE;
-    if ((header->data_size & 15) != 0) return KIRK_INVALID_SIZE;
-    if (kirk_keyvault_key(ctx, header->keyseed, key) != KIRK_OPERATION_SUCCESS)
+    if (kirk_keyvault_key(ctx, keyId, key) != KIRK_OPERATION_SUCCESS)
         return KIRK_INVALID_SEED_CODE;
+    /* An empty pass is refused with the unaligned ones: the CBC routines
+     * handle one block before they look at the length. */
+    if (size == 0 || (size & 15u) != 0) {
+        nk_secure_zero(key, sizeof(key));
+        return (int)nk_psp_fail(ctx, NK_PSP_ERR_INTERNAL, NULL,
+                                "empty or unaligned KIRK pass (%u bytes)",
+                                (unsigned)size);
+    }
     AES_set_key(&aesKey, key, 128);
-    AES_cbc_decrypt(&aesKey, inbuff + sizeof(KIRK_AES128CBC_HEADER),
-                    outbuff, header->data_size);
+    if (encrypt) {
+        AES_cbc_encrypt(&aesKey, inbuff, outbuff, (int)size);
+    } else {
+        AES_cbc_decrypt(&aesKey, inbuff, outbuff, (int)size);
+    }
+    nk_secure_zero(key, sizeof(key));
+    nk_secure_zero(&aesKey, sizeof(aesKey));
     return KIRK_OPERATION_SUCCESS;
 }
 
 int kirk4(NkPspCtx *ctx, u8 *outbuff, const u8 *inbuff, size_t size, int keyId)
 {
-    u8 key[16];
-    AES_ctx aesKey;
-    if (kirk_keyvault_key(ctx, keyId, key) != KIRK_OPERATION_SUCCESS)
-        return KIRK_INVALID_SEED_CODE;
-    if ((size & 15u) != 0) {
-        return (int)nk_psp_fail(ctx, NK_PSP_ERR_INTERNAL, NULL,
-                                "unaligned KIRK pass (%u bytes)",
-                                (unsigned)size);
-    }
-    AES_set_key(&aesKey, key, 128);
-    AES_cbc_encrypt(&aesKey, inbuff, outbuff, (int)size);
-    return KIRK_OPERATION_SUCCESS;
+    return kirk_cbc_pass(ctx, outbuff, inbuff, size, keyId, 1);
 }
 
 int kirk7(NkPspCtx *ctx, u8 *outbuff, const u8 *inbuff, size_t size, int keyId)
 {
-    u8 key[16];
-    AES_ctx aesKey;
-    if (kirk_keyvault_key(ctx, keyId, key) != KIRK_OPERATION_SUCCESS)
-        return KIRK_INVALID_SEED_CODE;
-    if ((size & 15u) != 0) {
-        return (int)nk_psp_fail(ctx, NK_PSP_ERR_INTERNAL, NULL,
-                                "unaligned KIRK pass (%u bytes)",
-                                (unsigned)size);
-    }
-    AES_set_key(&aesKey, key, 128);
-    AES_cbc_decrypt(&aesKey, inbuff, outbuff, (int)size);
-    return KIRK_OPERATION_SUCCESS;
+    return kirk_cbc_pass(ctx, outbuff, inbuff, size, keyId, 0);
 }
 
-/* KIRK command 0x0B: SHA-1 over the payload following the 4-byte header. */
-int kirk_CMD11(NkPspCtx *ctx, u8 *outbuff, u8 *inbuff, int size)
+/* KIRK command 0x0B: SHA-1 over the payload following the 4-byte header;
+ * the 20-byte digest must fit in outsize. */
+int kirk_CMD11(NkPspCtx *ctx, u8 *outbuff, int outsize, u8 *inbuff, int size)
 {
     KIRK_SHA1_HEADER *header = (KIRK_SHA1_HEADER *)inbuff;
     SHA_CTX sha;
@@ -337,6 +392,7 @@ int kirk_CMD11(NkPspCtx *ctx, u8 *outbuff, u8 *inbuff, int size)
     if (header->data_size == 0 || size == 0) return KIRK_DATA_SIZE_ZERO;
     if ((u64)sizeof(KIRK_SHA1_HEADER) + (u64)header->data_size > (u64)size)
         return KIRK_INVALID_SIZE;
+    if (outsize < 20) return KIRK_INVALID_SIZE;
     SHAInit(&sha);
     SHAUpdate(&sha, inbuff + sizeof(KIRK_SHA1_HEADER), (int)header->data_size);
     SHAFinal(outbuff, &sha);
@@ -413,11 +469,15 @@ int sceUtilsBufferCopyWithRange(NkPspCtx *ctx, u8 *outbuff, int outsize,
                                 u8 *inbuff, int insize, int cmd)
 {
     switch (cmd) {
-    case KIRK_CMD_DECRYPT_PRIVATE: return kirk_CMD1(ctx, outbuff, inbuff, insize);
-    case KIRK_CMD_ENCRYPT_IV_0: return kirk_CMD4(ctx, outbuff, inbuff, insize);
-    case KIRK_CMD_DECRYPT_IV_0: return kirk_CMD7(ctx, outbuff, inbuff, insize);
+    case KIRK_CMD_DECRYPT_PRIVATE:
+        return kirk_CMD1(ctx, outbuff, outsize, inbuff, insize);
+    case KIRK_CMD_ENCRYPT_IV_0:
+        return kirk_CMD4(ctx, outbuff, outsize, inbuff, insize);
+    case KIRK_CMD_DECRYPT_IV_0:
+        return kirk_CMD7(ctx, outbuff, outsize, inbuff, insize);
     case KIRK_CMD_PRIV_SIGN_CHECK: return kirk_CMD10(ctx, inbuff, insize);
-    case KIRK_CMD_SHA1_HASH: return kirk_CMD11(ctx, outbuff, inbuff, insize);
+    case KIRK_CMD_SHA1_HASH:
+        return kirk_CMD11(ctx, outbuff, outsize, inbuff, insize);
     case KIRK_CMD_ECDSA_GEN_KEYS: return kirk_CMD12(ctx, outbuff, outsize);
     case KIRK_CMD_ECDSA_MULTIPLY_POINT:
         return kirk_CMD13(ctx, outbuff, outsize, inbuff, insize);

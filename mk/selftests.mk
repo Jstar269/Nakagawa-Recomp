@@ -97,30 +97,33 @@ vfpu-tables-selftest:
 		tests/native/vfpu_tables_selftest.c src/rt/vfpu_tables.c $(LIBS)
 	$(BUILD_DIR)/vfpu_tables_selftest.exe
 
-# watchpoints-file-selftest — bounded parser regression for the derived
-# watchpoints.json runtime artifact (issue #188): the canonical JSON
-# fixture round-trips into the expected native watchpoint set, plus fail-closed
-# cases (wrong version/format, malformed JSON, out-of-range/reversed/oversized
 # strbuf-selftest — unit and adversarial tests for sr_buf_append / strbuf.h.
 # Exercises bounded formatting, hostile cursors, negative returns, canary bounds,
 # and golden trace formatting invariants.
 strbuf-selftest:
-	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Isrc/rt \
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Isrc/rt $(REPRODUCIBLE_COMPILE_FLAG) $(REPRODUCIBLE_LINK_FLAG) \
 		-o $(BUILD_DIR)/strbuf_selftest.exe tests/native/strbuf_selftest.c
 	$(BUILD_DIR)/strbuf_selftest.exe
 
 # xr-selftest — the OpenXR (VR) module in src/rt/xr/ against a fake OpenXR runtime (issue
 # #791): named refusals, the session state machine, the latest-frame mailbox, frame-loop
 # decoupling from the producer, and the layout maths. No headset, loader or game needed;
-# not reachable from the player.
+# not reachable from the player. Built with -Wpedantic: the module converts no function
+# pointer to or from an object pointer.
 xr-selftest:
-	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Isrc/rt \
+	$(CC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt $(REPRODUCIBLE_COMPILE_FLAG) $(REPRODUCIBLE_LINK_FLAG) \
 		-o $(BUILD_DIR)/xr_selftest.exe tests/native/xr_selftest.c \
 		src/rt/xr/nk_xr.c src/rt/xr/nk_xr_mailbox.c src/rt/xr/nk_xr_layout.c -lm
 	$(BUILD_DIR)/xr_selftest.exe
 
 native-core-tests: xr-selftest
 
+# watchpoints-file-selftest — bounded parser regression for the derived
+# watchpoints.json runtime artifact (issue #188): the canonical JSON
+# fixture round-trips into the expected native watchpoint set, plus fail-closed
+# cases (wrong version/format, malformed JSON, out-of-range/reversed/oversized
+# spans, bad labels, duplicates, over-capacity lists, escapes) and the legacy
+# bare-array form. No game inputs required.
 watchpoints-file-selftest:
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/watchpoints_file_selftest.exe \
 		tests/native/watchpoints_file_selftest.c src/rt/watchpoints_file.c $(LIBS)
@@ -208,6 +211,20 @@ motion-match-selftest:
 		-o $(BUILD_DIR)/motion_match_selftest$(EXE_EXT) tests/native/motion_match_selftest.c \
 		src/rt/motion_match.c -lm
 	$(BUILD_DIR)/motion_match_selftest$(EXE_EXT)
+
+# motion-tap-selftest - the frame store, the bridge to the matcher and the in-between builder of
+# render-state motion (src/rt/motion_tap.c, #2081) on synthetic tap records, with the real matcher
+# between the two frames: built positions against a double-precision reference (a translating
+# quad, a strip skinned by two bones, a morph), the 28.4 tie, the sprite floor rule, fog, t = 1
+# giving B bit for bit, the index-hash gate, an unpaired draw drawn as in B, a held frame, each
+# reason that stops a frame, and overflow. Built from motion_tap.c, motion_match.c and its test
+# alone (pure C); ge-cpu-profile-validate-selftest runs the tap and the builder on the real ge.o.
+native-core-tests: motion-tap-selftest
+motion-tap-selftest:
+	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt \
+		-o $(BUILD_DIR)/motion_tap_selftest$(EXE_EXT) tests/native/motion_tap_selftest.c \
+		src/rt/motion_tap.c src/rt/motion_match.c -lm
+	$(BUILD_DIR)/motion_tap_selftest$(EXE_EXT)
 
 # fsr3-host-selftest - FSR 3's CPU side (src/rt/fsr3_host.c, src/rt/fsr3_jitter.c) against the record
 # of AMD's own host code (tests/native/fsr3_host_oracle.md): every clear, discard and dispatch, the
@@ -391,7 +408,7 @@ atrac3p-title-accept:
 	$(CC) $(CFLAGS) -Isrc/rt/atrac3p -Isrc/rt/atrac3p/libavcodec \
 		-Isrc/rt/atrac3p/libavutil $(LDFLAGS) \
 		-o $(BUILD_DIR)/atrac3p_title_accept.exe \
-		src/rt/atrac3p_title_accept.c src/rt/atrac3p_bridge.c \
+		src/rt/atrac3p_title_accept.c src/rt/atrac3p_bridge.c src/rt/perf.c \
 		$(ATRAC3P_SRCS) src/rt/vfpu_tables.c -lm
 	$(BUILD_DIR)/atrac3p_title_accept.exe "$(ATRAC3P_TITLE)"
 
@@ -438,17 +455,21 @@ native-core-tests: ge-float24-selftest
 # SR_VRAMDUMP captures (#314): two captures are written next to the binary and removed.  Run
 # twice because ge.c latches the strip-cache switch per process, and a third time with the
 # per-draw vertex cache off for the scenes (its own case compares the cache on and off in
-# every run).  No game input.
+# every run).  The binary sets both switches from its arguments, so an SR_GE_*_DISABLE the
+# caller exported cannot turn a run into another leg.  No game input.
+# It is also where the render-state motion tap (#2081) meets that object: one list drawn with
+# no listener, with one and with none again must leave the same guest VRAM, depth, GE state,
+# counters and GE clock, and the listener's store (src/rt/motion_tap.c) must hold what ge.c
+# drew and give frame B's own vertices back at t = 1, bit for bit.
 GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftest$(EXE_EXT)
 
 ge-cpu-profile-validate-selftest: $(RT_GE_O)
-	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_CPU_PROFILE_VALIDATE_SELFTEST) \
 		tests/native/ge_cpu_profile_validate_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/motion_tap.c src/rt/motion_match.c src/rt/ace.c -lm
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
-	SR_GE_VERTEX_CACHE_DISABLE=1 $(GE_CPU_PROFILE_VALIDATE_SELFTEST)
+	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --vertex-cache-disabled
 
 native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants
 
@@ -482,7 +503,7 @@ ge-vertex-cache-mutants: $(RT_GE_O)
 		bin=$(BUILD_DIR)/ge-vertex-cache-mutants/ge_vertex_cache_mutant$$m$(EXE_EXT); \
 		$(CC) $(GE_CFLAGS) -DSR_GE_VERTEX_CACHE_MUTANT=$$m -c src/rt/ge.c -o $$obj || exit 1; \
 		$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $$bin tests/native/ge_cpu_profile_validate_selftest.c \
-			$$obj src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm || exit 1; \
+			$$obj src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/motion_tap.c src/rt/motion_match.c src/rt/ace.c -lm || exit 1; \
 		$$bin > $$bin.log 2>&1; result=$$?; \
 		if test $$result -eq 0; then cat $$bin.log; echo "vertex cache mutant $$m unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "vertex cache mutant $$m failed for another reason" >&2; exit 1; fi; \
@@ -515,14 +536,15 @@ native-core-tests: ge-tnl-census-selftest
 # patches at every factor, and a crack the check finds when the two are drawn at different
 # factors; line and point patches keep the PSP's division; the vertex cap lowers the factor
 # along its divisor chain, after the PSP's own cap; with the GE timing model on, factor F costs
-# the clocks of division d*F, not the PSP's d; the PATCH_TESS: exit line. It writes one scratch file under
+# the clocks of division d*F, not the PSP's d; a draw whose buffers cannot be allocated (malloc is
+# wrapped so one chosen call fails) is counted and draws nothing; the PATCH_TESS: exit line. It writes one scratch file under
 # BUILD_ROOT. No game input.
 GE_PATCH_TESS_SELFTEST := $(BUILD_DIR)/ge_patch_tess_selftest$(EXE_EXT)
 
 ge-patch-tess-selftest: $(RT_GE_O)
 	$(CC) $(CFLAGS) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -o $(GE_PATCH_TESS_SELFTEST) \
 		tests/native/ge_patch_tess_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm -Wl,--wrap=malloc
 	$(GE_PATCH_TESS_SELFTEST)
 
 native-core-tests: ge-patch-tess-selftest
@@ -553,7 +575,7 @@ native-core-tests: ge-scene-selftest
 GE_FLIGHT_DIR := $(BUILD_DIR)/ge-flight-overhead
 GE_FLIGHT_ROUNDS ?= 30
 GE_FLIGHT_PAIRS ?= 5
-GE_FLIGHT_SRCS := tests/native/ge_cpu_profile_validate_selftest.c src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c
+GE_FLIGHT_SRCS := tests/native/ge_cpu_profile_validate_selftest.c src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/motion_tap.c src/rt/motion_match.c src/rt/ace.c
 
 ge-flight-overhead:
 	"$(PYTHON)" -c "import os, sys; [os.makedirs(d, exist_ok=True) for d in sys.argv[1:]]" $(GE_FLIGHT_DIR)/linked $(GE_FLIGHT_DIR)/absent
@@ -670,7 +692,7 @@ PSMF_MEDIA_RUNTIME_OBJS := $(filter-out $(BUILD_DIR)/iso_public.o $(BUILD_DIR)/i
 # -Wno-unused-function: unused static helpers, mostly src/rt/hle.c; 103 warnings without it (#735 item 9).
 psmf-media-selftest: $(PSMF_MEDIA_RUNTIME_OBJS) $(RT_GE_O) $(GENERIC_TITLE_CONFIG_HEADER) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o
 	$(CC) $(CFLAGS) $(FUZZ_SAN_FLAGS) -Isrc/rt -std=c11 -Werror -c src/rt/psmf_producer.c -o $(BUILD_DIR)/psmf_producer_media_selftest.o
-	$(CC) $(CFLAGS) $(FLIGHT_IDENTITY_DEFS) $(FUZZ_SAN_FLAGS) -Isrc/rt -std=c11 -Werror -ffunction-sections -fdata-sections -c tests/native/psmf_media_selftest.c -o $(BUILD_DIR)/psmf_media_selftest.o
+	$(CC) $(CFLAGS) $(FLIGHT_IDENTITY_DEFS) $(FUZZ_SAN_FLAGS) -DSR_MPEG_MEDIA_SELFTEST -Isrc/rt -std=c11 -Werror -ffunction-sections -fdata-sections -c tests/native/psmf_media_selftest.c -o $(BUILD_DIR)/psmf_media_selftest.o
 	$(file >$(BUILD_DIR)/psmf_media_selftest.rsp,$(BUILD_DIR)/psmf_producer_media_selftest.o $(BUILD_DIR)/psmf_media_selftest.o $(PSMF_MEDIA_RUNTIME_OBJS) $(RT_GE_O) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o)
 	$(CC) $(CFLAGS) -I$(GENERIC_TITLE_CONFIG_DIR) $(FLIGHT_IDENTITY_DEFS) $(FUZZ_SAN_FLAGS) $(HLE_INCLUDES) -DSR_MPEG_MEDIA_SELFTEST -Isrc/rt -std=c11 -Wno-unused-function -ffunction-sections -fdata-sections \
 		-o $(BUILD_DIR)/psmf_media_selftest.exe \
@@ -684,7 +706,7 @@ psmf-media-selftest: $(PSMF_MEDIA_RUNTIME_OBJS) $(RT_GE_O) $(GENERIC_TITLE_CONFI
 psmf-media-selftest-csc-mutant: $(PSMF_MEDIA_RUNTIME_OBJS) $(RT_GE_O) $(GENERIC_TITLE_CONFIG_HEADER) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o
 	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) $(CFLAGS) $(FUZZ_SAN_FLAGS) -Isrc/rt -std=c11 -Werror -c src/rt/psmf_producer.c -o $(BUILD_DIR)/psmf_producer_media_selftest_csc_mutant.o
-	$(CC) $(CFLAGS) $(FLIGHT_IDENTITY_DEFS) $(FUZZ_SAN_FLAGS) -Isrc/rt -std=c11 -Werror -ffunction-sections -fdata-sections -DSR_MPEG_CSC_NO_WRITE_MUTANT -c tests/native/psmf_media_selftest.c -o $(BUILD_DIR)/psmf_media_selftest_csc_mutant.o
+	$(CC) $(CFLAGS) $(FLIGHT_IDENTITY_DEFS) $(FUZZ_SAN_FLAGS) -DSR_MPEG_MEDIA_SELFTEST -Isrc/rt -std=c11 -Werror -ffunction-sections -fdata-sections -DSR_MPEG_CSC_NO_WRITE_MUTANT -c tests/native/psmf_media_selftest.c -o $(BUILD_DIR)/psmf_media_selftest_csc_mutant.o
 	$(CC) $(CFLAGS) -I$(GENERIC_TITLE_CONFIG_DIR) $(FLIGHT_IDENTITY_DEFS) $(FUZZ_SAN_FLAGS) $(HLE_INCLUDES) -DSR_MPEG_MEDIA_SELFTEST -Isrc/rt -std=c11 -Wno-unused-function -ffunction-sections -fdata-sections \
 		-o $(BUILD_DIR)/psmf_media_selftest_csc_mutant.exe \
 		$(BUILD_DIR)/psmf_producer_media_selftest_csc_mutant.o $(BUILD_DIR)/psmf_media_selftest_csc_mutant.o \
@@ -721,7 +743,7 @@ PSMF_MEDIA_FOCUSED_OBJS := $(PSMF_MEDIA_FOCUSED_RT_OBJS) \
                            $(patsubst $(BUILD_DIR)/%,$(NC_OBJ_DIR)/core/%,$(PSMF_MEDIA_FOCUSED_CORE_RT))
 psmf-media-focused-selftest: native-core-objects-core $(PSMF_MEDIA_FOCUSED_RT_OBJS) $(HLE_OBJS) $(RT_GE_O) $(GENERIC_TITLE_CONFIG_HEADER) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o tests/native/hle_focus_media_stubs.c tools/hle_focus_check.py
 	$(CC) $(CFLAGS) $(FUZZ_SAN_FLAGS) -Isrc/rt -std=c11 -Werror -c src/rt/psmf_producer.c -o $(BUILD_DIR)/psmf_producer_media_selftest.o
-	$(CC) $(CFLAGS) $(FLIGHT_IDENTITY_DEFS) $(FUZZ_SAN_FLAGS) -Isrc/rt -std=c11 -Werror -ffunction-sections -fdata-sections -c tests/native/psmf_media_selftest.c -o $(BUILD_DIR)/psmf_media_selftest.o
+	$(CC) $(CFLAGS) $(FLIGHT_IDENTITY_DEFS) $(FUZZ_SAN_FLAGS) -DSR_MPEG_MEDIA_SELFTEST -Isrc/rt -std=c11 -Werror -ffunction-sections -fdata-sections -c tests/native/psmf_media_selftest.c -o $(BUILD_DIR)/psmf_media_selftest.o
 	$(CC) $(CFLAGS) -I$(GENERIC_TITLE_CONFIG_DIR) $(HLE_INCLUDES) -DSR_MPEG_MEDIA_SELFTEST -Isrc/rt -std=c11 -Werror -c tests/native/hle_focus_media_stubs.c -o $(BUILD_DIR)/hle_focus_media_stubs.o
 	$(file >$(BUILD_DIR)/psmf_media_focused_selftest.rsp,$(BUILD_DIR)/psmf_producer_media_selftest.o $(BUILD_DIR)/psmf_media_selftest.o $(PSMF_MEDIA_FOCUSED_OBJS) $(RT_GE_O) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o)
 	$(CC) $(CFLAGS) -I$(GENERIC_TITLE_CONFIG_DIR) $(FLIGHT_IDENTITY_DEFS) $(FUZZ_SAN_FLAGS) $(HLE_INCLUDES) -DSR_MPEG_MEDIA_SELFTEST -Isrc/rt -std=c11 -Wno-unused-function -ffunction-sections -fdata-sections \
@@ -753,13 +775,13 @@ audio-resampler-bench:
 	$(BUILD_DIR)/audio_resampler_bench$(EXE_EXT)
 
 # -Wno-unused-function: unused static helpers, mostly src/rt/hle.c; 75 warnings without it (#735 item 9).
-hle-thread-selftest-build: $(RT_GE_O) $(H264_SUB_OBJS) $(GENERIC_TITLE_CONFIG_HEADER) $(HLE_SRCS) $(HLE_HDRS) src/core/nk_shared_helpers.c src/core/nk_adhoc_relay.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay_client.c src/rt/nested_frames.c src/rt/nested_frames.h src/rt/stale_code.c src/rt/stale_code.h src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/audio_resample.c src/rt/audio_resample.h
+hle-thread-selftest-build: $(RT_GE_O) $(H264_SUB_OBJS) $(GENERIC_TITLE_CONFIG_HEADER) $(HLE_SRCS) $(HLE_HDRS) src/core/nk_shared_helpers.c src/core/nk_adhoc_relay.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay_client.c src/rt/nested_frames.c src/rt/nested_frames.h src/rt/stale_code.c src/rt/stale_code.h src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/domain_mode.c src/rt/audio_resample.c src/rt/audio_resample.h
 	$(CC) $(CFLAGS) -I$(GENERIC_TITLE_CONFIG_DIR) -DSR_HLE_THREAD_SELFTEST -DSR_CORO_LIFECYCLE_TEST -DSR_SCHED_LIVENESS_TEST -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(HLE_AOT_BOUNDARY_DEFINE) \
 		$(HLE_INCLUDES) \
 		-ffunction-sections -fdata-sections \
 		-fno-asynchronous-unwind-tables -fno-unwind-tables -Wno-unused-function \
 		$(LDFLAGS) $(LD_GC_SECTIONS) $(REPRODUCIBLE_LINK_FLAG) -o $(BUILD_DIR)/hle_thread_selftest.exe \
-		$(HLE_THREAD_SELFTEST_SOURCE) $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_adhoc_relay.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay_client.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
+		$(HLE_THREAD_SELFTEST_SOURCE) $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/cheats.c src/core/nk_cheats.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_adhoc_relay.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay_client.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/domain_mode.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
 		src/rt/atrac3p_bridge.c $(ATRAC3P_SRCS) src/rt/mp3_bridge.c src/rt/vfpu_tables.c \
 		src/rt/h264_mf.c src/rt/h264_null.c src/rt/h264_ffmpeg.c $(H264_SUB_OBJS) \
 		src/rt/fbcap_policy.c $(RT_GE_O) src/rt/ge_capture.c $(LIBS)
@@ -793,13 +815,13 @@ hle-title-selftest:
 	$(MAKE) --no-print-directory hle-title-selftest-one HLE_TITLE_CONFIG=fixture-b HLE_TITLE_MANIFEST=assets/titles/synthetic.json
 
 # -Wno-unused-function: unused static helpers, mostly src/rt/hle.c; 225 warnings without it across the three hle-title-selftest configs (#735 item 9).
-hle-title-selftest-one: $(RT_GE_O) $(H264_SUB_OBJS) $(TITLE_CONFIG_TOOL) tools/title_manifest.py tests/native/hle_thread_selftest.c $(HLE_SRCS) $(HLE_HDRS) src/core/nk_shared_helpers.c src/core/nk_adhoc_relay.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay_client.c src/rt/audio_resample.c src/rt/audio_resample.h src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/rt/prx_loader.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC)
+hle-title-selftest-one: $(RT_GE_O) $(H264_SUB_OBJS) $(TITLE_CONFIG_TOOL) tools/title_manifest.py tests/native/hle_thread_selftest.c $(HLE_SRCS) $(HLE_HDRS) src/core/nk_shared_helpers.c src/core/nk_adhoc_relay.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay_client.c src/rt/audio_resample.c src/rt/audio_resample.h src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/rt/prx_loader.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/domain_mode.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC)
 	"$(PYTHON)" $(TITLE_CONFIG_TOOL) $(HLE_TITLE_SELFTEST_CONFIG_ARG) --output $(HLE_TITLE_SELFTEST_HEADER)
 	$(CC) $(CFLAGS) -I$(HLE_TITLE_SELFTEST_DIR) $(HLE_SELFTEST_DEFINES) $(HLE_INCLUDES) \
 		-ffunction-sections -fdata-sections \
 		-fno-asynchronous-unwind-tables -fno-unwind-tables -Wno-unused-function \
 		$(LDFLAGS) $(LD_GC_SECTIONS) $(REPRODUCIBLE_LINK_FLAG) -o $(HLE_TITLE_SELFTEST_EXE) \
-		tests/native/hle_thread_selftest.c $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_adhoc_relay.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay_client.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
+		tests/native/hle_thread_selftest.c $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/cheats.c src/core/nk_cheats.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_adhoc_relay.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay_client.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/domain_mode.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
 		src/rt/atrac3p_bridge.c $(ATRAC3P_SRCS) src/rt/mp3_bridge.c src/rt/vfpu_tables.c \
 		src/rt/h264_mf.c src/rt/h264_null.c src/rt/h264_ffmpeg.c $(H264_SUB_OBJS) \
 		src/rt/fbcap_policy.c $(RT_GE_O) src/rt/ge_capture.c $(LIBS)
@@ -832,14 +854,14 @@ $(PSP_ORACLE_SMOKE_HEADER) $(PSP_ORACLE_SMOKE_CHUNK) $(PSP_ORACLE_SMOKE_ADAPTER)
 #   -Wno-missing-field-initializers: intr_conformance.h IcProbe rows omit the trailing skip field on purpose.
 #   -Wno-infinite-recursion: a generated guest loop in smoke_recomp_0.c ends in a dead tail call after an unconditional branch.
 #   -Wno-sign-compare -Wno-unused-parameter -Wno-parentheses -Wno-pointer-sign: FFmpeg n4.4 ATRAC3/ATRAC3+ subset sources in src/rt/atrac3p; import deltas are documented there.
-$(PSP_ORACLE_SMOKE_EXE): $(PSP_ORACLE_SMOKE_STAMP) $(H264_SUB_OBJS) $(PSP_ORACLE_SMOKE_HEADER) $(PSP_ORACLE_SMOKE_CHUNK) $(PSP_ORACLE_SMOKE_ADAPTER) tests/native/hle_thread_selftest.c $(HLE_SRCS) $(HLE_HDRS) src/core/nk_shared_helpers.c src/core/nk_adhoc_relay.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay_client.c src/rt/audio_resample.c src/rt/audio_resample.h src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/rt/prx_loader.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c $(PGD_BACKEND_SRC) $(RT_GE_O) $(GENERIC_TITLE_CONFIG_HEADER)
+$(PSP_ORACLE_SMOKE_EXE): $(PSP_ORACLE_SMOKE_STAMP) $(H264_SUB_OBJS) $(PSP_ORACLE_SMOKE_HEADER) $(PSP_ORACLE_SMOKE_CHUNK) $(PSP_ORACLE_SMOKE_ADAPTER) tests/native/hle_thread_selftest.c $(HLE_SRCS) $(HLE_HDRS) src/core/nk_shared_helpers.c src/core/nk_adhoc_relay.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay_client.c src/rt/audio_resample.c src/rt/audio_resample.h src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/rt/prx_loader.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/domain_mode.c src/rt/sr_coro.c $(PGD_BACKEND_SRC) $(RT_GE_O) $(GENERIC_TITLE_CONFIG_HEADER)
 	$(CC) $(CFLAGS) -I$(GENERIC_TITLE_CONFIG_DIR) $(HLE_SELFTEST_DEFINES) $(HLE_INCLUDES) -DSR_PSP_ORACLE_SMOKE \
 		-ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables \
 		-Wno-unused-function -Wno-format-truncation -Wno-missing-field-initializers \
 		-Wno-infinite-recursion -Wno-sign-compare -Wno-unused-parameter -Wno-parentheses -Wno-pointer-sign \
 		-I"$(PSP_ORACLE_SMOKE_DIR)" $(LDFLAGS) \
 		$(LD_GC_SECTIONS) $(REPRODUCIBLE_LINK_FLAG) -o "$(PSP_ORACLE_SMOKE_EXE)" \
-		tests/native/hle_thread_selftest.c $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_adhoc_relay.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay_client.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
+		tests/native/hle_thread_selftest.c $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/cheats.c src/core/nk_cheats.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_adhoc_relay.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay_client.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/domain_mode.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
 		src/rt/atrac3p_bridge.c $(ATRAC3P_SRCS) src/rt/mp3_bridge.c src/rt/vfpu_tables.c \
 		src/rt/h264_mf.c src/rt/h264_null.c src/rt/h264_ffmpeg.c $(H264_SUB_OBJS) \
 		src/rt/fbcap_policy.c $(RT_GE_O) src/rt/ge_capture.c \
@@ -926,7 +948,7 @@ nkstate-selftest: $(GENERIC_TITLE_CONFIG_HEADER)
 	$(CC) $(CFLAGS) -I$(GENERIC_TITLE_CONFIG_DIR) $(LDFLAGS) -o $(BUILD_DIR)/nkstate_selftest.exe \
 		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		tests/native/nkstate_selftest.c src/rt/nkstate.c src/rt/replay_checkpoint.c \
-		src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/guest_interp.c src/rt/stale_code.c \
+		src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/guest_interp.c src/rt/domain_mode.c src/rt/stale_code.c \
 		src/rt/vfpu_tables.c src/rt/title_config.c src/rt/perf.c -lm
 	$(BUILD_DIR)/nkstate_selftest.exe
 
@@ -1066,8 +1088,22 @@ asset-index-selftest:
 # gpu-coherence-twin-mutants (below) proves the twin cells kill the twin's mutants. The pipeline
 # cache (#2149) runs last, as three processes over one empty data root: a cold run saves the
 # cache, a warm run must start from it and draw the same frames, and a reject run re-opens it
-# over damaged, foreign and other-driver files and with the switch off or refused.
+# over damaged, foreign and other-driver files and with the switch off or refused. Two cells then
+# run alone, each in its own process: tex-evict-fail fills the texture cache and injects a failed
+# eviction drain, and submit-fail injects a failed queue submit, after which the backend records
+# nothing more. Last, init-fail runs gegpu_init with depth=32 and a failure injected after every
+# part is set up: the Ace report must find no part confirmed by the failed init.
 GPU_COHERENCE_BIN := $(BUILD_DIR)/gpu_coherence_selftest.exe
+# One leg of gpu-coherence-selftest: the binary's output as it printed it, and every SKIP line it printed (a device
+# that refuses the interlock, supersampling or the twin returns exit 0 with that line) added to GPU_COHERENCE_SKIPS
+# under the leg's arguments, which the recipe's last line names: the exit status alone cannot tell a SKIP from a PASS.
+GPU_COHERENCE_SKIPS := $(BUILD_DIR)/gpu_coherence_skips.txt
+# GPU_COHERENCE_RUN prints the leg's command itself, as make would.
+GPU_COHERENCE_LEG = nk_leg() { echo "$(GPU_COHERENCE_BIN) $$*"; leg_rc=0; \
+	"$(GPU_COHERENCE_BIN)" "$$@" > "$(GPU_COHERENCE_SKIPS).leg" 2>&1 || leg_rc=$$?; \
+	cat "$(GPU_COHERENCE_SKIPS).leg"; grep -a "gpu coherence selftest: SKIP" "$(GPU_COHERENCE_SKIPS).leg" | \
+	sed "s|^|  [$$*] |" >> "$(GPU_COHERENCE_SKIPS)"; return $$leg_rc; }; nk_leg
+GPU_COHERENCE_RUN = @$(GPU_COHERENCE_LEG)
 
 $(GPU_COHERENCE_BIN): shader-verify $(RT_GE_O)
 	$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -ffunction-sections -fdata-sections -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
@@ -1077,151 +1113,165 @@ $(GPU_COHERENCE_BIN): shader-verify $(RT_GE_O)
 
 gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(NK_REQUIRE_POSIX_SHELL)
-	$(GPU_COHERENCE_BIN)
-	$(GPU_COHERENCE_BIN) --scale 2 --case scaled-upload
-	$(GPU_COHERENCE_BIN) --scale 4 --case scaled-upload
-	$(GPU_COHERENCE_BIN) --scale 2 --case mip-lod
-	$(GPU_COHERENCE_BIN) --scale 4 --case mip-lod
-	$(GPU_COHERENCE_BIN) --scale 4 --case mip-clut
-	$(GPU_COHERENCE_BIN) --scale 2 --case readback-rows
-	$(GPU_COHERENCE_BIN) --scale 4 --case readback-rows
-	$(GPU_COHERENCE_BIN) --scale 4 --case readback-rows --readback-full 1
-	$(GPU_COHERENCE_BIN) --scale 2 --case undrawn-rows
-	$(GPU_COHERENCE_BIN) --scale 4 --case undrawn-rows
-	$(GPU_COHERENCE_BIN) --scale 4 --case undrawn-rows --readback-full 1
-	$(GPU_COHERENCE_BIN) --scale 2 --case wide-fill
-	$(GPU_COHERENCE_BIN) --scale 4 --case wide-fill
-	$(GPU_COHERENCE_BIN) --gpu-timestamps unset --case gpu-timestamps-off
-	$(GPU_COHERENCE_BIN) --gpu-timestamps 0 --case gpu-timestamps-off
-	@rc=0; $(GPU_COHERENCE_BIN) --gpu-timestamps 1 --case gpu-timestamps || rc=$$?; \
+	@: > "$(GPU_COHERENCE_SKIPS)"
+	$(GPU_COHERENCE_RUN)
+	$(GPU_COHERENCE_RUN) --scale 2 --case scaled-upload
+	$(GPU_COHERENCE_RUN) --scale 4 --case scaled-upload
+	$(GPU_COHERENCE_RUN) --scale 2 --case mip-lod
+	$(GPU_COHERENCE_RUN) --scale 4 --case mip-lod
+	$(GPU_COHERENCE_RUN) --scale 4 --case mip-clut
+	$(GPU_COHERENCE_RUN) --scale 2 --case readback-rows
+	$(GPU_COHERENCE_RUN) --scale 4 --case readback-rows
+	$(GPU_COHERENCE_RUN) --scale 4 --case readback-rows --readback-full 1
+	$(GPU_COHERENCE_RUN) --scale 2 --case undrawn-rows
+	$(GPU_COHERENCE_RUN) --scale 4 --case undrawn-rows
+	$(GPU_COHERENCE_RUN) --scale 4 --case undrawn-rows --readback-full 1
+	$(GPU_COHERENCE_RUN) --scale 2 --case wide-fill
+	$(GPU_COHERENCE_RUN) --scale 4 --case wide-fill
+	$(GPU_COHERENCE_RUN) --gpu-timestamps unset --case gpu-timestamps-off
+	$(GPU_COHERENCE_RUN) --gpu-timestamps 0 --case gpu-timestamps-off
+	@rc=0; $(GPU_COHERENCE_LEG) --gpu-timestamps 1 --case gpu-timestamps || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-coherence-selftest gpu-timestamps (exit 77; the reason is printed above)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-coherence-selftest gpu-timestamps (exit $$rc)"; exit $$rc; fi
-	$(GPU_COHERENCE_BIN) --scale 2 --case sprite-scaled
-	$(GPU_COHERENCE_BIN) --scale 3 --case sprite-scaled
-	$(GPU_COHERENCE_BIN) --scale 4 --case sprite-scaled
-	$(GPU_COHERENCE_BIN) --scale 2 --case uv-edge-clamp
-	$(GPU_COHERENCE_BIN) --scale 3 --case uv-edge-clamp
-	$(GPU_COHERENCE_BIN) --scale 4 --case uv-edge-clamp
-	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-scale
-	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-scale
-	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-scale-offset
-	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-scale-offset
-	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-edge
-	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-edge
-	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-depth-alias
-	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-1x-reads
-	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-1x-reads
-	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-vram-view
-	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-vram-view
-	$(GPU_COHERENCE_BIN) --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
-	$(GPU_COHERENCE_BIN) --depth 32 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
-	$(GPU_COHERENCE_BIN) --scale 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s4.txt
-	$(GPU_COHERENCE_BIN) --depth 32 --scale 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s4.txt
-	$(GPU_COHERENCE_BIN) --depth 32
-	$(GPU_COHERENCE_BIN) --twin native --depth 32 --case host-depth
-	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 2 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x2.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 2 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x2.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 2 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x2.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 3 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x3.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 3 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x3.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x4.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x4.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 5 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x5.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 5 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x5.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 6 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x6.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 6 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x6.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 4 --tex-scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_x4.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 4 --tex-scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_x4.txt --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow on --shadow-candidates 1 --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow on --shadow-candidates yes --case soft-shadow
-	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow off --shadow-candidates 1 --case soft-shadow
-	$(GPU_COHERENCE_BIN) --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
-	$(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
-	$(GPU_COHERENCE_BIN) --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
-	$(GPU_COHERENCE_BIN) --twin native
-	$(GPU_COHERENCE_BIN) --twin native --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
-	$(GPU_COHERENCE_BIN) --twin native --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
-	$(GPU_COHERENCE_BIN) --twin 1 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
-	$(GPU_COHERENCE_BIN) --twin 1 --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
-	$(GPU_COHERENCE_BIN) --twin 1 --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
-	$(GPU_COHERENCE_BIN) --twin 1 --case twin-gate
-	$(GPU_COHERENCE_BIN) --twin native --case twin-gate
-	$(GPU_COHERENCE_BIN) --twin 1 --authentic --case twin-gate
-	$(GPU_COHERENCE_BIN) --twin off --case twin-gate
-	$(GPU_COHERENCE_BIN) --twin yes --case twin-gate
-	$(GPU_COHERENCE_BIN) --twin 1 --scale 4 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
-	$(GPU_COHERENCE_BIN) --twin native --scale 2 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
-	$(GPU_COHERENCE_BIN) --twin 1 --scale 4 --case twin-drain-fail --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
-	$(GPU_COHERENCE_BIN) --twin native --scale 2 --case twin-drain-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
-	$(GPU_COHERENCE_BIN) --twin 1 --case twin-soft
-	$(GPU_COHERENCE_BIN) --twin native --case twin-soft
-	$(GPU_COHERENCE_BIN) --twin-key on --case twin-key
-	$(GPU_COHERENCE_BIN) --twin-key on --twin native --case twin-key
-	$(GPU_COHERENCE_BIN) --twin-key on --twin 0 --case twin-key
-	$(GPU_COHERENCE_BIN) --twin-key on --twin off --case twin-key
-	$(GPU_COHERENCE_BIN) --twin-key off --twin 1 --case twin-key
-	$(GPU_COHERENCE_BIN) --twin-key off --twin native --case twin-key
-	$(GPU_COHERENCE_BIN) --twin-key off --case twin-key
-	$(GPU_COHERENCE_BIN) --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
-	$(GPU_COHERENCE_BIN) --ssaa 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
-	$(GPU_COHERENCE_BIN) --ssaa 4 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
-	$(GPU_COHERENCE_BIN) --scale 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s2.txt
-	$(GPU_COHERENCE_BIN) --ssaa 2 --scale 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s2.txt
-	$(GPU_COHERENCE_BIN) --ssaa 4 --scale 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s2.txt
-	$(GPU_COHERENCE_BIN) --ssaa 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
-	$(GPU_COHERENCE_BIN) --ssaa 4 --twin 1 --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
-	$(GPU_COHERENCE_BIN) --ssaa 2
-	$(GPU_COHERENCE_BIN) --ssaa 4
-	$(GPU_COHERENCE_BIN) --ssaa 2 --case ssaa-sprite
-	$(GPU_COHERENCE_BIN) --ssaa 4 --case ssaa-sprite
-	$(GPU_COHERENCE_BIN) --ssaa 4 --scale 2 --case ssaa-sprite
-	$(GPU_COHERENCE_BIN) --ssaa 2 --twin native --scale 2 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
-	$(GPU_COHERENCE_BIN) --ssaa 4 --ssaa-budget-mb 48 --ssaa-expect 2 --case ssaa-limit
-	$(GPU_COHERENCE_BIN) --ssaa 2 --ssaa-budget-mb 8 --ssaa-expect 1 --case ssaa-limit
-	$(GPU_COHERENCE_BIN) --ssaa 4 --scale 4 --ssaa-max-dim 4096 --ssaa-expect 2 --case ssaa-limit
-	$(GPU_COHERENCE_BIN) --depth 32 --ssaa 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
-	$(GPU_COHERENCE_BIN) --ssaa 2 --twin-key off --case twin-key
-	$(GPU_COHERENCE_BIN) --ssaa 2 --twin-key on --case twin-key
-	@rc=0; $(GPU_COHERENCE_BIN) --twin 1 --gpu-timestamps 1 --case gpu-timestamps || rc=$$?; \
+	$(GPU_COHERENCE_RUN) --scale 2 --case sprite-scaled
+	$(GPU_COHERENCE_RUN) --scale 3 --case sprite-scaled
+	$(GPU_COHERENCE_RUN) --scale 4 --case sprite-scaled
+	$(GPU_COHERENCE_RUN) --scale 2 --case uv-edge-clamp
+	$(GPU_COHERENCE_RUN) --scale 3 --case uv-edge-clamp
+	$(GPU_COHERENCE_RUN) --scale 4 --case uv-edge-clamp
+	$(GPU_COHERENCE_RUN) --scale 2 --case rtt-scale
+	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-scale
+	$(GPU_COHERENCE_RUN) --scale 2 --case rtt-scale-offset
+	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-scale-offset
+	$(GPU_COHERENCE_RUN) --scale 2 --case rtt-edge
+	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-edge
+	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-depth-alias
+	$(GPU_COHERENCE_RUN) --scale 2 --case rtt-1x-reads
+	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-1x-reads
+	$(GPU_COHERENCE_RUN) --scale 2 --case rtt-vram-view
+	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-vram-view
+	$(GPU_COHERENCE_RUN) --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
+	$(GPU_COHERENCE_RUN) --depth 32 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
+	$(GPU_COHERENCE_RUN) --scale 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s4.txt
+	$(GPU_COHERENCE_RUN) --depth 32 --scale 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s4.txt
+	$(GPU_COHERENCE_RUN) --depth 32
+	$(GPU_COHERENCE_RUN) --twin native --depth 32 --case host-depth
+	$(GPU_COHERENCE_RUN) --scale 1 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 4 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --tex-scale 2 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x2.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --tex-scale 2 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x2.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --tex-scale 2 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x2.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --tex-scale 3 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x3.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --tex-scale 3 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x3.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --tex-scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x4.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --tex-scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x4.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --tex-scale 5 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x5.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --tex-scale 5 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x5.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --tex-scale 6 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x6.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --tex-scale 6 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x6.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 4 --tex-scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_x4.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 4 --tex-scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_x4.txt --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --soft-shadow on --shadow-candidates 1 --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --soft-shadow on --shadow-candidates yes --case soft-shadow
+	$(GPU_COHERENCE_RUN) --scale 1 --soft-shadow off --shadow-candidates 1 --case soft-shadow
+	$(GPU_COHERENCE_RUN) --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
+	$(GPU_COHERENCE_RUN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_RUN) --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
+	$(GPU_COHERENCE_RUN) --twin native
+	$(GPU_COHERENCE_RUN) --twin native --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_RUN) --twin native --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
+	$(GPU_COHERENCE_RUN) --twin 1 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
+	$(GPU_COHERENCE_RUN) --twin 1 --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_RUN) --twin 1 --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
+	$(GPU_COHERENCE_RUN) --twin 1 --case twin-gate
+	$(GPU_COHERENCE_RUN) --twin native --case twin-gate
+	$(GPU_COHERENCE_RUN) --twin 1 --authentic --case twin-gate
+	$(GPU_COHERENCE_RUN) --twin off --case twin-gate
+	$(GPU_COHERENCE_RUN) --twin yes --case twin-gate
+	$(GPU_COHERENCE_RUN) --twin 1 --scale 4 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
+	$(GPU_COHERENCE_RUN) --twin native --scale 2 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_RUN) --twin 1 --scale 4 --case twin-drain-fail --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
+	$(GPU_COHERENCE_RUN) --twin native --scale 2 --case twin-drain-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_RUN) --twin 1 --case twin-soft
+	$(GPU_COHERENCE_RUN) --twin native --case twin-soft
+	$(GPU_COHERENCE_RUN) --twin-key on --case twin-key
+	$(GPU_COHERENCE_RUN) --twin-key on --twin native --case twin-key
+	$(GPU_COHERENCE_RUN) --twin-key on --twin 0 --case twin-key
+	$(GPU_COHERENCE_RUN) --twin-key on --twin off --case twin-key
+	$(GPU_COHERENCE_RUN) --twin-key off --twin 1 --case twin-key
+	$(GPU_COHERENCE_RUN) --twin-key off --twin native --case twin-key
+	$(GPU_COHERENCE_RUN) --twin-key off --case twin-key
+	$(GPU_COHERENCE_RUN) --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
+	$(GPU_COHERENCE_RUN) --ssaa 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
+	$(GPU_COHERENCE_RUN) --ssaa 4 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
+	$(GPU_COHERENCE_RUN) --scale 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s2.txt
+	$(GPU_COHERENCE_RUN) --ssaa 2 --scale 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s2.txt
+	$(GPU_COHERENCE_RUN) --ssaa 4 --scale 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s2.txt
+	@if [ "$$OS" = "Windows_NT" ] || [ ! -c /dev/full ]; then echo "SKIP gpu-coherence-selftest ssaa-edge /dev/full: no /dev/full for this binary"; \
+	else rc=0; $(GPU_COHERENCE_BIN) --case ssaa-edge --ssaa-ref /dev/full > $(BUILD_DIR)/ssaa_ref_full.log 2>&1 || rc=$$?; \
+	if [ $$rc -eq 0 ] || ! grep -aq "ssaa-edge\]: FAIL cannot write /dev/full" $(BUILD_DIR)/ssaa_ref_full.log; then \
+		cat $(BUILD_DIR)/ssaa_ref_full.log; echo "FAIL gpu-coherence-selftest ssaa-edge: a reference whose write fails at close was reported written (exit $$rc)"; exit 1; fi; \
+	echo "PASS gpu-coherence-selftest ssaa-edge: a reference the device cannot hold (/dev/full) fails by name"; fi
+	$(GPU_COHERENCE_RUN) --ssaa 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
+	$(GPU_COHERENCE_RUN) --ssaa 4 --twin 1 --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_RUN) --ssaa 2
+	$(GPU_COHERENCE_RUN) --ssaa 4
+	$(GPU_COHERENCE_RUN) --ssaa 2 --case ssaa-sprite
+	$(GPU_COHERENCE_RUN) --ssaa 4 --case ssaa-sprite
+	$(GPU_COHERENCE_RUN) --ssaa 4 --scale 2 --case ssaa-sprite
+	$(GPU_COHERENCE_RUN) --ssaa 2 --twin native --scale 2 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_RUN) --ssaa 4 --ssaa-budget-mb 48 --ssaa-expect 2 --case ssaa-limit
+	$(GPU_COHERENCE_RUN) --ssaa 2 --ssaa-budget-mb 8 --ssaa-expect 1 --case ssaa-limit
+	$(GPU_COHERENCE_RUN) --ssaa 4 --scale 4 --ssaa-max-dim 4096 --ssaa-expect 2 --case ssaa-limit
+	$(GPU_COHERENCE_RUN) --depth 32 --ssaa 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
+	$(GPU_COHERENCE_RUN) --ssaa 2 --twin-key off --case twin-key
+	$(GPU_COHERENCE_RUN) --ssaa 2 --twin-key on --case twin-key
+	@rc=0; $(GPU_COHERENCE_LEG) --twin 1 --gpu-timestamps 1 --case gpu-timestamps || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-coherence-selftest twin gpu-timestamps (exit 77; the reason is printed above)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-coherence-selftest twin gpu-timestamps (exit $$rc)"; exit $$rc; fi
-	$(GPU_COHERENCE_BIN) --dst-read snapshot --case dst-read
-	$(GPU_COHERENCE_BIN) --dst-read snapshot --scale 4 --case dst-read
-	$(GPU_COHERENCE_BIN) --dst-read interlock --case dst-read
-	$(GPU_COHERENCE_BIN) --dst-read interlock --scale 4 --case dst-read
-	$(GPU_COHERENCE_BIN) --depth 32 --dst-read interlock --case dst-read
-	$(GPU_COHERENCE_BIN) --dst-read snapshot --case stencil-once
-	$(GPU_COHERENCE_BIN) --dst-read snapshot --scale 4 --case stencil-once
-	$(GPU_COHERENCE_BIN) --dst-read interlock --case stencil-once
-	$(GPU_COHERENCE_BIN) --twin native --dst-read snapshot --case dst-read
-	$(GPU_COHERENCE_BIN) --twin native --dst-read snapshot --scale 4 --case dst-read
-	$(GPU_COHERENCE_BIN) --twin native --dst-read interlock --case dst-read
-	$(GPU_COHERENCE_BIN) --twin native --dst-read interlock --scale 4 --case dst-read
-	$(GPU_COHERENCE_BIN) --twin 1 --dst-read snapshot --case dst-read
-	$(GPU_COHERENCE_BIN) --twin 1 --dst-read snapshot --scale 4 --case dst-read
-	$(GPU_COHERENCE_BIN) --twin 1 --dst-read interlock --case dst-read
-	$(GPU_COHERENCE_BIN) --twin 1 --dst-read interlock --scale 4 --case dst-read
-	$(GPU_COHERENCE_BIN) --twin native --dst-read interlock --case stencil-once
+	$(GPU_COHERENCE_RUN) --dst-read snapshot --case dst-read
+	$(GPU_COHERENCE_RUN) --dst-read snapshot --scale 4 --case dst-read
+	$(GPU_COHERENCE_RUN) --dst-read interlock --case dst-read
+	$(GPU_COHERENCE_RUN) --dst-read interlock --scale 4 --case dst-read
+	$(GPU_COHERENCE_RUN) --depth 32 --dst-read interlock --case dst-read
+	$(GPU_COHERENCE_RUN) --dst-read snapshot --case stencil-once
+	$(GPU_COHERENCE_RUN) --dst-read snapshot --scale 4 --case stencil-once
+	$(GPU_COHERENCE_RUN) --dst-read interlock --case stencil-once
+	$(GPU_COHERENCE_RUN) --twin native --dst-read snapshot --case dst-read
+	$(GPU_COHERENCE_RUN) --twin native --dst-read snapshot --scale 4 --case dst-read
+	$(GPU_COHERENCE_RUN) --twin native --dst-read interlock --case dst-read
+	$(GPU_COHERENCE_RUN) --twin native --dst-read interlock --scale 4 --case dst-read
+	$(GPU_COHERENCE_RUN) --twin 1 --dst-read snapshot --case dst-read
+	$(GPU_COHERENCE_RUN) --twin 1 --dst-read snapshot --scale 4 --case dst-read
+	$(GPU_COHERENCE_RUN) --twin 1 --dst-read interlock --case dst-read
+	$(GPU_COHERENCE_RUN) --twin 1 --dst-read interlock --scale 4 --case dst-read
+	$(GPU_COHERENCE_RUN) --twin native --dst-read interlock --case stencil-once
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_test', ignore_errors=True)"
-	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
-	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-warm
-	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-reject
+	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
+	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-warm
+	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-reject
+	$(GPU_COHERENCE_RUN) --case tex-evict-fail
+	$(GPU_COHERENCE_RUN) --case submit-fail
+	$(GPU_COHERENCE_RUN) --depth 32 --init-fail
 	@$(MAKE) --no-print-directory gpu-coherence-selftest-snapbar-mutants
 	@$(MAKE) --no-print-directory gpu-coherence-pcache-mutant
 	@$(MAKE) --no-print-directory gpu-dst-read-mutants
 	@$(MAKE) --no-print-directory gpu-stencil-once-mutants
 	@$(MAKE) --no-print-directory ge-first-bad-draw-selftest GE_FBD_SKIP_STATUS=0
+	@if [ -s "$(GPU_COHERENCE_SKIPS)" ]; then \
+		echo "SKIP gpu-coherence-selftest: $$(wc -l < "$(GPU_COHERENCE_SKIPS)" | tr -d ' ') SKIP lines from legs that exited 0 without running their path (not a PASS):"; \
+		cat "$(GPU_COHERENCE_SKIPS)"; \
+	else echo "PASS gpu-coherence-selftest: every leg ran its path (no SKIP line)"; fi
 
 # gpu-coherence-pcache-mutant - pipeline-cache-cold must kill SR_PCACHE_SELFTEST_NULL_MUTANT, a
 # build whose pipe_create passes VK_NULL_HANDLE instead of the pipeline cache (#2149): no create
 # then takes the cache's handle, on any driver (lavapipe keeps no pipeline data, so the cache's
-# size cannot tell). Exit 77 (no Vulkan device) is a SKIP.
+# size cannot tell). Exit 77 (no Vulkan device) prints a SKIP line and fails the target with status
+# 77 (make reports Error 77), so a host without a device never counts the mutant killed.
 gpu-coherence-pcache-mutant: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_mutant', ignore_errors=True)"
@@ -1240,7 +1290,7 @@ gpu-coherence-pcache-mutant: shader-verify $(RT_GE_O)
 # SR_GPU_SNAPBAR_MUTANT in ge_gpu.c: 1 records one barrier command per image (the stream before
 # the pair), 2 leaves the target SHADER_READ_ONLY after a copy op, 3 drops the write from the
 # barriers' destination access. Each builds its own binary and must fail with its own message;
-# exit 77 (no Vulkan device) is a SKIP, as for the selftest itself.
+# exit 77 (no Vulkan device) prints a SKIP line and fails the target with status 77.
 gpu-coherence-selftest-snapbar-mutants: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in 1 2 3; do \
@@ -1274,7 +1324,7 @@ gpu-coherence-selftest-snapbar-mutants: shader-verify $(RT_GE_O)
 # samples as full colour: `--ssaa 2 --twin-key off`. The ge.c mutants build their own ge.o. Each builds
 # its own binary, so fourteen are built; the target is not part of
 # gpu-coherence-selftest or native-core-tests. Each mutant must fail with its own message; exit 77
-# (no Vulkan device) is a SKIP, as for the selftest itself.
+# (no Vulkan device) prints a SKIP line and fails the target with status 77.
 gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@rc=0; $(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_mutant_s2.txt || rc=$$?; \
@@ -1320,7 +1370,7 @@ gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 # fail with "movie frame not found". A second build, NK_MOVIE_MUTANT_COPY_HASH in ge.c, judges a copy of a
 # picture by the word-wise FNV fold instead of comparing bytes: movie-texture's alpha-bit cell (two pixels
 # that differ only in their top bit) must then fail with "a copy that differs from the picture was found
-# (two alpha bits)". Exit 77 (no Vulkan device) is a SKIP, as for the selftest itself.
+# (two alpha bits)". Exit 77 (no Vulkan device) prints a SKIP line and fails the target with status 77.
 gpu-coherence-selftest-movie-mutant: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@bin=$(BUILD_DIR)/gpu_coherence_movie_mutant.exe; kill="FAIL movie frame not found"; \
@@ -1354,10 +1404,12 @@ gpu-coherence-selftest-movie-mutant: shader-verify $(RT_GE_O)
 # ge.c's lists run on ge_gpu.c's real targets: each frame draws a target, stores into it
 # from the CPU, draws it as a texture into the shown target and presents that with a capture
 # armed. A run without the viewer writes the digest (every presented frame, the lists' return
-# codes, then guest VRAM and RAM as a guest read sees them and the GE state); runs with the
+# codes, then all of guest VRAM and RAM as a guest read sees them and the GE state); runs with the
 # viewer's decodes at one frame's VBLANK must match it, and the decodes must show the scene and
 # move bytes into guest VRAM, so the match is not trivial. Again at render scale 2. Last, a
-# mutant whose viewer stores one byte into guest VRAM must fail on the next presented frame.
+# mutant whose viewer stores one byte into guest VRAM must fail on the next presented frame, and
+# the same mutant storing past the depth buffer or into RAM no list uses must fail on the
+# end-of-run vram or ram line.
 # Exit 77 (no Vulkan device) fails the recipe, as gpu-coherence-selftest's does on hosted CI.
 VRAM_VIEW_BIN := $(BUILD_DIR)/vram_view_identity_selftest.exe
 
@@ -1384,6 +1436,16 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 	if ! grep -Fq 'FAIL want "present 2 ' $$log; then \
 		cat $$log; echo "vram-view-identity-selftest: the mutant failed for another reason" >&2; exit 1; fi; \
 	echo "vram-view-identity-selftest: the writing-viewer mutant is caught at the next presented frame"
+	@for spec in "0x041F0000 vram" "0x09000000 ram"; do \
+		set -- $$spec; log=$(BUILD_DIR)/vram_view_identity_mutant_$$2.log; \
+		if $(BUILD_DIR)/vram_view_identity_mutant.exe --check $(BUILD_DIR)/vram_view_ref_s1.txt --view-at 1 \
+			--mutant-store $$1 > $$log 2>&1; then \
+			cat $$log; echo "vram-view-identity-selftest: the mutant storing at $$1 passed" >&2; exit 1; fi; \
+		if ! grep -Fq "FAIL want \"$$2 " $$log; then \
+			cat $$log; echo "vram-view-identity-selftest: the mutant storing at $$1 failed for another reason" >&2; \
+			exit 1; fi; \
+		echo "vram-view-identity-selftest: a viewer store at $$1 no frame presents is caught on the $$2 line"; \
+	done
 
 # gpu-dst-read-mutants — the dst-read cells must kill each SR_GPU_DSTREAD_MUTANT in ge_gpu.c (#2109):
 # 1 merges every channel from the loaded destination, so the RMW store has no effect
@@ -1410,8 +1472,9 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 # and the sprite behind it differ from the image (dst-read-depth with the native twin), and 17 lets a
 # shader-depth run write depth for a batch whose depth writes are off (dst-read-depth: Q's depth).
 # Mutants 1 to 3 and 5 to 17 run on the interlock path, 4 on the snapshot path. Each builds its own
-# binary and must fail with its own message. Exit 77 (no Vulkan device, or a device without the
-# interlock for 1 to 3 and 5 to 17) is a SKIP of that mutant.
+# binary and must fail with its own message. Exit 77 for 1 to 3 and 5 to 17 (no Vulkan device, or a
+# device without the interlock) is a SKIP of that mutant; for 4, which needs only a device, it prints
+# a SKIP line and fails the target with status 77.
 gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do \
@@ -1440,7 +1503,7 @@ gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
 		$$bin $$args > $$bin.log 2>&1; result=$$?; \
-		if test $$result -eq 77; then echo "dst-read mutant $$m: SKIP (no Vulkan device, or no interlock)"; continue; fi; \
+		if test $$result -eq 77 && test $$m -eq 4; then echo "dst-read mutant 4: SKIP (no Vulkan device)"; exit 77; fi; if test $$result -eq 77; then echo "dst-read mutant $$m: SKIP (no Vulkan device, or no interlock)"; continue; fi; \
 		if test $$result -eq 0; then cat $$bin.log; echo "dst-read mutant $$m unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "dst-read mutant $$m failed for another reason" >&2; exit 1; fi; \
 		echo "gpu-dst-read-mutants: mutant $$m killed ($$kill)"; \
@@ -1451,7 +1514,8 @@ gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 # where two overlap), 2 calls every stencil state with a KEEP stencil-fail op write-once (the
 # matrix), and 3 drops the depth condition (the GEQUAL depth leg with depth writes on). All run on
 # the snapshot path, where the batch is reordered. Each builds its own binary and must fail with
-# its own message. Exit 77 (no Vulkan device) is a SKIP of that mutant.
+# its own message. Exit 77 (no Vulkan device: the snapshot path needs nothing more) prints a SKIP
+# line and fails the target with status 77.
 gpu-stencil-once-mutants: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in 1 2 3; do \
@@ -1466,7 +1530,7 @@ gpu-stencil-once-mutants: shader-verify $(RT_GE_O)
 			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
 		$$bin --dst-read snapshot --case stencil-once > $$bin.log 2>&1; result=$$?; \
-		if test $$result -eq 77; then echo "stencil-once mutant $$m: SKIP (no Vulkan device)"; continue; fi; \
+		if test $$result -eq 77; then echo "stencil-once mutant $$m: SKIP (no Vulkan device)"; exit 77; fi; \
 		if test $$result -eq 0; then cat $$bin.log; echo "stencil-once mutant $$m unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "stencil-once mutant $$m failed for another reason" >&2; exit 1; fi; \
 		echo "gpu-stencil-once-mutants: mutant $$m killed ($$kill)"; \
@@ -1497,12 +1561,16 @@ gpu-ace-selftest: shader-verify $(RT_GE_O)
 # wrap and clamp borders, the job queue, the settings and the smart 2D classifier, and soft
 # shadows' copy (exact texels of a synthetic disc, the interior and mass rules, the bounds) and
 # their texture digest (RFC 4231 HMAC-SHA-256 vectors, then the match rule). No GPU; the
-# worker threads need SDL3, so without it the recipe reports SKIP.
+# worker threads need SDL3, so without it the recipe reports SKIP. NK_REQUIRE_SDL3=1 makes that
+# SKIP a failure, for a job that installs SDL3: a build discovery that misses it must not pass.
+NK_REQUIRE_SDL3 ?=
 TEX_SCALE_SDL_READY := $(and $(filter-out none,$(SDL3_PROVIDER)),$(if $(strip $(SDL3_ERROR)),,yes))
 tex-scale-selftest:
 	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
-	@if [ -z "$(TEX_SCALE_SDL_READY)" ]; then echo "SKIP tex-scale-selftest (SDL3 not found by build discovery)"; exit 0; fi; \
+	@if [ -z "$(TEX_SCALE_SDL_READY)" ] && [ "$(NK_REQUIRE_SDL3)" = 1 ]; then \
+		echo "FAIL tex-scale-selftest (SDL3 not found by build discovery, but NK_REQUIRE_SDL3=1 requires it)"; exit 1; fi; \
+	if [ -z "$(TEX_SCALE_SDL_READY)" ]; then echo "SKIP tex-scale-selftest (SDL3 not found by build discovery)"; exit 0; fi; \
 	$(CC) $(CFLAGS) -O2 -ffunction-sections -fdata-sections $(LDFLAGS) $(LD_GC_SECTIONS) \
 		-o $(BUILD_DIR)/tex_scale_selftest$(EXE_EXT) \
 		src/rt/gpu_sdl3vk/tex_scale_selftest.c src/rt/gpu_sdl3vk/tex_scale.c third_party/xbrz/xbrz.c src/rt/vfpu_tables.c \
@@ -1650,14 +1718,20 @@ native-core-tests: pipeline-cache-selftest
 # reads, the wildcard lookup order, the palette identity, ZIP packs read in place (nk_zip.c and its
 # inflater), malformed packs and archives refused whole, and the decoded-image budget. Synthetic
 # packs written by the test; no GPU, no SDL, no game data. Once built, the same program measures a
-# large synthetic pack: $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) --bench 10000.
+# large synthetic pack: $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) --bench 10000. Exit 77 is a Windows
+# host that could not make a link a hostile case needs (a file symbolic link without Developer
+# Mode): the SKIP is printed with the cases left out. On POSIX a link that cannot be made fails.
 texrepl-selftest:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/core -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS tests/native/texrepl_selftest.c src/rt/texrepl.c src/core/nk_zip.c src/core/nk_psp_inflate.c \
+		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS -DNK_TEXREPL_TEST_HOOKS tests/native/texrepl_selftest.c src/rt/texrepl.c src/core/nk_zip.c src/core/nk_psp_inflate.c \
 		src/core/nk_shared_helpers.c \
 		$(PLAYER_PLATFORM_SRC) $(PLAYER_PLATFORM_LIBS) \
-		-o $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) && $(BUILD_DIR)/texrepl_selftest$(EXE_EXT)
+		-o $(BUILD_DIR)/texrepl_selftest$(EXE_EXT)
+	@rc=0; $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) || rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP texrepl-selftest link containment (exit 77; the hostile cases this host could not set up are printed above)"; \
+	elif [ $$rc -ne 0 ]; then exit $$rc; fi
 
 native-core-tests: texrepl-selftest
 
@@ -1668,7 +1742,7 @@ texrepl-mutant:
 	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	@$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/core -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS -DNK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR tests/native/texrepl_selftest.c src/rt/texrepl.c \
+		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS -DNK_TEXREPL_TEST_HOOKS -DNK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR tests/native/texrepl_selftest.c src/rt/texrepl.c \
 		src/core/nk_zip.c src/core/nk_psp_inflate.c src/core/nk_shared_helpers.c $(PLAYER_PLATFORM_SRC) \
 		$(PLAYER_PLATFORM_LIBS) -o $(BUILD_DIR)/texrepl_mutant$(EXE_EXT)
 	@rc=0; $(BUILD_DIR)/texrepl_mutant$(EXE_EXT) > $(BUILD_DIR)/texrepl_mutant.log 2>&1 || rc=$$?; \
@@ -1845,6 +1919,10 @@ $(GPU_CAPTURE_BIN): shader-verify
 		tests/native/gpu_capture_selftest.c src/rt/perf.c \
 		$(SDL3VK_SRCS) $(LIBS)
 
+# The terminal-fault legs gpu-capture-selftest runs after its default run;
+# gpu-selftest-status runs the same legs, so the manager's gate covers them too.
+GPU_CAPTURE_TERMINAL_CASES := surface-lost unclassified device-lost
+
 gpu-capture-selftest: $(GPU_CAPTURE_BIN)
 	$(NK_REQUIRE_POSIX_SHELL)
 	$(GPU_CAPTURE_BIN)
@@ -1856,10 +1934,13 @@ gpu-capture-selftest: $(GPU_CAPTURE_BIN)
 # A failing recipe always leaves Make with its own generic status, so a child SKIP
 # (exit 77, "Vulkan or the validation layer unavailable") cannot travel out through a
 # Make exit code and would be misread as a failure. This target therefore prints one
-# machine-readable line per binary:
+# machine-readable line per binary and leg:
 #
-#     GPU_SELFTEST_RESULT <name> PASS|SKIP|FAIL <exit-code>
+#     GPU_SELFTEST_RESULT <name>[:<leg>] PASS|SKIP|FAIL <exit-code>
 #
+# A binary named gpu_capture_selftest.exe also runs each GPU_CAPTURE_TERMINAL_CASES leg
+# (as gpu-capture-selftest does), reported as gpu_capture_selftest.exe:<case>, so the
+# manager's gpu-capture-selftest gate covers its terminal-fault handling as well.
 # and exits nonzero only when a binary ran and failed for a real reason, so a build
 # failure and an executed semantic failure stay failures while a runtime SKIP stays a
 # SKIP. GPU_SELFTEST_BINS/GPU_SELFTEST_PREREQS are overridable so the status logic can
@@ -1871,15 +1952,27 @@ gpu-selftest-status: $(GPU_SELFTEST_PREREQS)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@status=0; \
 	for sr_bin in $(GPU_SELFTEST_BINS); do \
-	  sr_name=`basename $$sr_bin`; \
-	  sr_rc=0; \
-	  "$$sr_bin" || sr_rc=$$?; \
-	  case $$sr_rc in \
-	    0) sr_verdict=PASS ;; \
-	    77) sr_verdict=SKIP ;; \
-	    *) sr_verdict=FAIL; status=1 ;; \
-	  esac; \
-	  echo "GPU_SELFTEST_RESULT $$sr_name $$sr_verdict $$sr_rc"; \
+	  sr_base=`basename $$sr_bin`; \
+	  sr_legs=default; \
+	  if [ "$$sr_base" = "$(notdir $(GPU_CAPTURE_BIN))" ]; then \
+	    sr_legs="default $(GPU_CAPTURE_TERMINAL_CASES)"; \
+	  fi; \
+	  for sr_leg in $$sr_legs; do \
+	    sr_rc=0; \
+	    if [ "$$sr_leg" = default ]; then \
+	      sr_name=$$sr_base; \
+	      "$$sr_bin" || sr_rc=$$?; \
+	    else \
+	      sr_name=$$sr_base:$$sr_leg; \
+	      SR_GPU_CAPTURE_TERMINAL_CASE=$$sr_leg "$$sr_bin" || sr_rc=$$?; \
+	    fi; \
+	    case $$sr_rc in \
+	      0) sr_verdict=PASS ;; \
+	      77) sr_verdict=SKIP ;; \
+	      *) sr_verdict=FAIL; status=1 ;; \
+	    esac; \
+	    echo "GPU_SELFTEST_RESULT $$sr_name $$sr_verdict $$sr_rc"; \
+	  done; \
 	done; \
 	exit $$status
 
@@ -1909,8 +2002,9 @@ ge-replay: shader-verify $(RT_GE_O)
 # draw is NO_DRAWS (exit 6); none is ever NO_DIFFERENCE.
 # Exit 77 (no Vulkan device) is a SKIP, as for gpu-coherence-selftest (GE_FBD_SKIP_STATUS).
 GE_FBD_DIR = $(BUILD_DIR)/ge_first_bad_draw
-# The exit status of a skip: 77 run alone; gpu-coherence-selftest passes 0, so a host with no
-# Vulkan device gets SKIP lines there, as for its other skipped cases, not a make error.
+# The exit status of a skip: 77 run alone, which fails the target. gpu-coherence-selftest passes
+# 0, so these legs print SKIP lines there instead; a host with no Vulkan device never reaches
+# them, because the selftest's first leg has already failed the target with status 77.
 GE_FBD_SKIP_STATUS ?= 77
 ge-first-bad-draw-selftest: ge-replay
 	$(NK_REQUIRE_POSIX_SHELL)
@@ -2002,7 +2096,7 @@ ge-first-bad-draw-selftest: ge-replay
 # Requires g++ with C++17. Exit code 0 = all tests passed.
 selftest:
 	g++ -std=c++17 -O1 -Isrc/ref -Isrc/rt -o $(BUILD_DIR)/selftest.exe \
-		src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp \
+		src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp src/ref/snapshot_ref.cpp \
 		-DSR_SELFTEST_ONLY -fno-exceptions
 	$(BUILD_DIR)/selftest.exe
 	@echo "selftest passed"

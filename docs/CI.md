@@ -21,7 +21,7 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 | Event/change | Jobs that run | Jobs intentionally skipped |
 | --- | --- | --- |
 | Pull request, quick run: a Draft, and, while `NK_CI_TIERS` is `on`, every pull request from a branch of this repository that is not a `batch/`, `carry/` or `desk/` branch and has no `ci-full-matrix` label | the quick checks: classification, hygiene/security with its Markdown step, the public export audit, `Generated files and repository lints` and `CI quick checks` (see [Quick and full checks](#quick-and-full-checks)) | Python tooling, native/translation, the GCC 16 canary, the Android launcher build, Windows, the profile-zero fixture build and `CI required`, whatever the changed paths |
-| Pull request, full run, docs-only | classification, hygiene/security with its Markdown step, CI required | Python/native, Windows |
+| Pull request, full run, docs-only | classification, hygiene/security with its Markdown step, CI required; Python tooling (the whole suite) when a module under `tools/` names a changed document's file name, since a Python test can pin its text (`docs/SETUP.md`'s Network use list, for one) | native/translation, Windows; Python tooling when no `tools/` module names any changed document |
 | Pull request, full run, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
 | Pull request, full run, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over four shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
 | Pull request, full run, ordinary tools Python file | classification, hygiene/security, Python tooling, CI required | native/translation, Windows |
@@ -92,7 +92,8 @@ The jobs:
 - **Hygiene.** The check keeps its name, which the ruleset and the
   [Trusted CI verdict](#trusted-ci-verdict) require. The main smoke steps carry
   `run_main_smoke` and follow hygiene's own steps, so, as before, they run only after every
-  hygiene check passed. The Markdown steps carry `run_markdown` with `!cancelled()`: the
+  hygiene check passed. They are skipped when `native_tools` runs, whose core part runs the
+  same two commands on the same commit. The Markdown steps carry `run_markdown` with `!cancelled()`: the
   Markdown job never waited for hygiene, so its lint still runs and reports when an earlier
   step failed. Node.js is set up after pre-commit, so no hook's environment changes.
 - **Public export.** The export step runs first, on the clean checkout, under its own
@@ -325,7 +326,9 @@ routes exactly the gates the quick run of the same change skipped. What a push t
 unchanged: `allow_substantive` still narrows it there, and `CI required` still runs.
 
 `Generated files and repository lints` runs only on a quick run. It holds checks that a quick run
-would otherwise leave to the landing batch, each of which the full tier runs inside a longer job:
+would otherwise leave to the landing batch, each of which the full tier runs inside a longer job
+(a change to a file `tools/regen_all.py` regenerates routes the Python tooling job, so a full run
+of a documentation-only change still checks it):
 `python -m unittest tools.test_lint_docs`, `python tools/format_portability_check.py`,
 `python tools/regen_all.py --check`, and the tools mypy baseline (`tools/mypy_baseline.py --scope
 issue-1391`, then without `--scope`, with the Python tooling job's pinned install). Five lane runs of
@@ -444,12 +447,18 @@ gate runs in exactly one part with the command it had in the serial job:
   portable objects and format check, and the native core suite and its coverage upload.
 - `translation`: the HLE, scheduler and dispatch selftests, cosimulation and its mutation
   corpus, the GPU selftests on lavapipe, the interpreter, VFPU, strbuf and ATRAC3+
-  selftests, and the microtest codegen gates.
+  selftests, the microtest codegen gates, and the analysis IR module gate
+  (`tools/test_analysis_ir.py`'s `AnalysisIrModuleGateTests`). The Python shards have no
+  PSPDEV and report that gate's showcase half as `NOT_RUN`; this part builds the showcase
+  PRXs with PSPDEV and sets `NK_ANALYSIS_IR_SHOWCASE_REQUIRED=1`, so a missing PSPDEV fails
+  the step instead of skipping it.
   On the nightly schedule only, `translation` also runs `make CC=gcc selftest-repeat` after
   the single scheduler and HLE thread runs: it reruns the three `sched_selftest_*` binaries
   and `hle_thread_selftest` they built `SELFTEST_REPEAT` times (default 20), stops at the
   first failure and prints the iteration and binary that failed (#1846). Pull requests, pushes,
-  merge groups and manual runs skip it, so their time is unchanged.
+  merge groups and manual runs skip it, so their time is unchanged. The nightly schedule also
+  runs `gpu-coherence-twin-mutants` on lavapipe: its fourteen mutants each build their own
+  coherence selftest, which is too long for every run.
 - `player`: present pacing, the player UI tests and regressions, the CMake player, the
   showcase and the two player smokes that stage its ISO.
 
@@ -532,9 +541,12 @@ current-tree scan; the hook runs Betterleaks in directory mode over the files it
 is given (every tracked file under `--all-files`, the staged files at the commit
 stage). The hook is commit-stage only: at pre-push pre-commit supplies no file
 names, which would turn directory mode into a whole-working-tree scan. Hygiene then runs an explicit Betterleaks reachable-history
-scan in git mode and the synthetic canary gate. It also runs the core purity gate,
+scan in git mode and the synthetic canary gate. The history scan passes `--diff-merges=first-parent`
+to `git log`, which otherwise prints no patch for a merge commit, so a value added while resolving
+a merge and removed later is still found; a canary pins that case. It also runs the core purity gate,
 [`tools/purity_gate.py`](../tools/purity_gate.py): a hexadecimal literal in PSP user RAM
-(`0x08800000`-`0x09ffffff`) in `src/rt/` code fails it, outside title-config files, native
+(`0x08800000`-`0x09ffffff`, or in C code its uncached and kernel segment mirrors) in
+`src/rt/` code fails it, outside title-config files, native
 self-tests, registered NIDs and the reviewed allowlist in that file (one entry per literal,
 with its reason). A fix for one game goes in its title config, not the core. Markdown linting is separate from the native and Windows jobs. Those jobs remain
 synthetic/public-input gates; no private game input is put in Actions.
@@ -542,7 +554,7 @@ synthetic/public-input gates; no private game input is put in Actions.
 The shared pre-commit hooks include `mypy-tools`, which requires mypy 2.4.1 and checks the clean
 issue #1391 scope. Hygiene skips that local-system hook because the `python_tools` job installs
 the same version from a hash-locked requirements file, runs the clean-scope check, then runs the
-full `tools/` per-module ratchet. This keeps the developer hook and hosted checks on one pin
+full `tools/` per-module ratchet, in its first shard only (the baseline reads the whole tree). This keeps the developer hook and hosted checks on one pin
 without repeating the full scan in two jobs.
 
 The Windows job also runs `mingw32-make production-smoke` in the existing MSYS2 UCRT64/GCC,
@@ -634,8 +646,10 @@ SDL3 build. `vulkaninfo --summary` selects the lavapipe ICD and must list llvmpi
 terminal present-fault cases each get a fresh process, because the renderer must not reuse a
 device after a terminal failure; an exit 77 skip fails the gate. A separate step runs
 `gpu-coherence-selftest` the same way on lavapipe: the Vulkan backend's render-target coherence,
-texture cache, per-draw state template, filtering and blend cases against the software GE, where
-an exit 77 skip also fails. Its scaled-upload case then runs alone at render scales 2 and 4, where
+texture cache, per-draw state template, filtering and blend cases against the software GE. A plain
+run's exit 77 also fails it, but the recipe passes three kinds of SKIP with the step still green: the
+gpu-timestamps legs (its own and the twin's), the interlock dst-read and stencil-once cells on a
+device that refuses the interlock, and `ge-first-bad-draw-selftest` (`GE_FBD_SKIP_STATUS=0`). Its scaled-upload case then runs alone at render scales 2 and 4, where
 every device pixel of an uploaded target must hold its guest pixel, and so does its mip-lod case,
 where the shader's per-fragment mip level must not change with the render scale, and so does its
 readback-rows case, where guest memory must get the top-left device pixel of each cell while the
@@ -669,7 +683,9 @@ with the host twin (#2050) on, native and full colour, on both paths at scales 1
 the native twin on the interlock path: the image and the path taken must be those of the twin-off run, a native
 twin must equal its image, and a full-colour twin of the overlapping pair must hold the blends at 8 bits per
 channel, in drawing order on the interlock path. A device that refuses the
-interlock prints one SKIP line for each interlock leg. The lavapipe step prints
+interlock prints one SKIP line for each interlock leg, and the recipe's last line names every leg that printed a
+SKIP line (a leg that refuses the interlock, supersampling or the twin exits 0 without running its path), or says
+that every leg ran. The lavapipe step prints
 the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
 pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Four
 mutant targets follow, and each broken variant must fail its case with its own message:
@@ -684,6 +700,15 @@ snapshot path as before the shader owned depth, 16 copies the twin's shader dept
 writes depth for a batch whose depth writes are off),
 and `gpu-stencil-once-mutants` breaks the write-once stencil batch three ways (`SR_GPU_STENCIL_ONCE_MUTANT`: no
 reordering, every state called write-once, no depth condition).
+A mutant target that gets exit 77 (no Vulkan device) prints a SKIP line and fails with status 77, so a
+host without a device never counts a mutant killed; only an interlock leg on a device without the
+interlock is a SKIP that passes.
+A further step runs `gpu-ace-selftest` (Ace Mode's texture filtering: through-mode draws keep the PSP's
+sample points, a transformed linear draw gets the anisotropic sampler) and `gpu-mips-selftest` (host-built
+mip chains at render scales 4, 2 and 1, with 16x filtering and with mips off), then the mutants that must
+fail for their own reason: `gpu-mips-mutant`'s four, `tex-scale-gate-mutant` (texture scaling without its
+Ace gate) and `gpu-coherence-selftest-movie-mutant`'s three movie cells. A `SKIP` line in its log fails the
+step.
 `fsr3-pass-selftest` runs FSR 3's eight compute passes on
 lavapipe, headless, under the validation layer with synchronisation validation of shader accesses,
 and an exit 77 skip fails it, including one for synchronisation validation that is not active.
@@ -757,6 +782,10 @@ ships it and `assets/prereq_manifest.json` pins it. This job adds GCC 16 against
   - The job sets `SR_SOURCE_COMMIT` to the checked-out revision, as `windows_runtime` does.
     It runs as root in the container and the checkout belongs to the runner's user, so git
     refuses the repository and the display smoke's flight step would have no build identity.
+  - Before the core suite, the job adds the checkout to git's system `safe.directory` list, so
+    `test_player_state`'s #511 git-clean check can run `git status` on it. That test points
+    `HOME` at its own temporary folder, so a user (`--global`) entry would not reach it. Without
+    the entry the check could not run, the test exits 77, and `native-core-tests` fails.
   - The job needs network access to the Docker registry and Fedora's mirrors. An
     unauthenticated Docker Hub pull limit or a mirror outage can fail it without any code
     change.
@@ -804,10 +833,18 @@ mingw32-make --no-print-directory check
 ```
 
 `check` covers documentation and policy checks, the provenance record and
-disposition gap check, both publication-audit legs, the native host-core tests,
-and a fast Python subset. It does not replace `make readiness`: readiness
-additionally verifies the exact candidate against the external detailed ledger
-and therefore remains `BLOCKED` when `NK_TRUSTED_LEDGER` is unavailable.
+disposition gap check, both publication-audit legs, the modified-file notice
+audit, the native host-core tests, and a fast Python subset. A native leg this
+host cannot run (no Vulkan device, no SDL3_ttf) prints `SKIP` and the run goes
+on, so `check`'s last line says every step exited 0, not that every check
+passed: a `SKIP` above it is not a pass. Contributors run
+`mingw32-make contrib-check` (AGENTS.md Section 9), which adds the gates the
+change needs, before opening a pull request. `make readiness` is the
+maintainer's authority-bound aggregate: it runs the same publication checks and
+additionally verifies the exact candidate against the external detailed ledger,
+from the merge base with `origin/main` (resolved through `GIT`; an empty base is
+a named failure), and therefore remains `BLOCKED` when `NK_TRUSTED_LEDGER` is
+unavailable, which is expected for a fork or an outside contributor.
 `make provenance-refresh` is the single local command for regenerating the
 tracked public controls. It calls the same `generate_ephemeral_controls()`
 implementation as the hosted provenance attestation, reads the trusted public
@@ -840,8 +877,9 @@ V4 authority named after the change beside the trusted ledger; set
 record together with `PROVENANCE_TRUSTED_CANDIDATE_POLICY`, each naming an
 external reviewed input.
 
-Run the strict aggregate, then the Python modules for the files you changed. Treat any
-failure as blocking. Hosted CI runs the full Python suite; run it locally only when
+Maintainers run the strict aggregate, then the Python modules for the files they changed. Treat any
+failure as blocking. Contributors run `mingw32-make contrib-check`; a `BLOCKED` readiness result is
+expected for them because they have no external detailed ledger. Hosted CI runs the full Python suite; run it locally only when
 hosted CI cannot run for the change ([what hosted CI does not run](#what-hosted-ci-does-not-run)):
 
 ```bash
@@ -932,7 +970,8 @@ and run `python tools/hle_manifest.py --write-baseline` yourself.
 Some generators are listed but not run, and `--list` says why:
 
 - embedded shaders (`make shaders GLSLC=...`): regenerating needs `glslc`, whose
-  version the manifest records; `make shader-verify` checks the committed files;
+  version the manifest records; `make shader-verify` checks the committed files
+  of both glslc sets, the GPU backend's (`psp`) and the player UI's (`ui`);
 - profile-zero prebuilt digests: rebuilding needs the pinned PSPDEV toolchain;
   CI checks `SHA256SUMS`;
 - the import-stub census and the benchmark report: both need private inputs
@@ -1073,7 +1112,7 @@ fail-closed NID/dispatch, cosimulation, provenance, import-audit, and security
 gates remain in their normal PR jobs and tests. `python_tools` includes a
 one-line summary of skips by `NIGHTLY_TIER`, `WINDOWS_ONLY`, and `PRIVATE_INPUT`.
 
-The nightly `schedule` and manual `workflow_dispatch` both force the full CI
+The nightly `schedule`, manual `workflow_dispatch` and a merge-queue group all force the full CI
 matrix and set `NK_TEST_TIER=full`, so every nightly case runs. The normal local
 command uses the PR tier; set the environment variable to run the full tier:
 
@@ -1181,17 +1220,18 @@ whenever their jobs run; neither can change a gate's result.
   - `gui-present-selftest`, the player UI regressions and the player UI tests (overlays,
     fonts, art).
   - On lavapipe under Xvfb, as in `native_tools`: the GPU snapshot sync, capture, coherence,
-    VRAM view identity and texture scaling self-tests, the FSR 3 pass self-test and the FSR 3
-    frame generation refusal (cell `G-R`). As in `native_tools`, the step fails when the
-  device is not llvmpipe or the texture scaling self-test prints a `SKIP`, so a skip cannot
-  shrink the number unseen.
+    VRAM view identity, texture scaling, Ace and mip chain self-tests, the FSR 3 pass self-test
+    and the FSR 3 frame generation refusal (cell `G-R`). As in `native_tools`, the step fails
+  when the device is not llvmpipe or the texture scaling, Ace or mip chain self-test prints a
+  `SKIP`, so a skip cannot shrink the number unseen.
 
   Not measured, each `native_tools` step named in `tools/test_public_ci_wiring.py`
   (`CoverageWiringTests.C_NOT_MEASURED`), so a gate added later fails that test until it is
   measured or named:
 
-  - Mutants: the separate mutant steps (`gpu-texscale-mutant`, the cosimulation mutation
-    corpus) are left out, and the objects the mutants inside measured targets compile for
+  - Mutants: the separate mutant steps (`gpu-texscale-mutant`, the mip chain, texture scaling
+    gate and movie mutants, the nightly host twin mutants, the cosimulation mutation corpus)
+    are left out, and the objects the mutants inside measured targets compile for
     themselves are skipped at collection. They run deliberately broken code. Their runs still
     count in the unmutated objects they link.
   - Not C self-tests: the import and fake-success audit, the provenance gap check, the 32-bit
@@ -1345,7 +1385,9 @@ belongs to a new subsystem.
 
 GitHub-hosted Windows time is billed at a higher multiplier than Linux time. The
 workflow therefore starts the Windows runner only after the cheaper Linux classify
-and public-export jobs (the second also builds the fixture), cancels superseded PR runs, and avoids repeating the full matrix on
+and public-export jobs (the second also builds the fixture), cancels superseded PR runs (runs on
+`main` never cancel each other: each push, schedule, manual run and merge group is its own
+concurrency group), and avoids repeating the full matrix on
 ordinary main pushes. Besides dependency and tool caches (pip, the SDL3 installs),
 the only cache is the Windows compiler cache below. Build trees and generated
 shader/code output are not cached across jobs or runs, so the repository's
@@ -1416,6 +1458,8 @@ analyse another commit or repository, run its own code in that context, or suppl
 the required check's evidence. Its trusted-run concurrency group is the head
 repository and branch, so a newer head of a branch cancels the analysis of the
 older one; repositories never share a group, so forks cannot cancel one another.
+A push to `main` and the weekly schedule each run in a group of their own, so a landing
+never cancels the analysis of the previous `main` commit.
 The wake workflow's name is part of the trust path: `codeql.yml` names it in
 `workflows:`, and `tools/test_public_ci_wiring.py` pins that the two agree.
 
@@ -1489,7 +1533,10 @@ the trusted run. Serialising CodeQL after `CI`, by a `workflow_run` of the merge
 alternative is not used.
 
 **Provenance on a group.** `.github/workflows/provenance-attestation-merge-group.yml`
-observes each group commit with the default-branch provenance verifier. It runs as a
+observes each group commit with the default-branch provenance verifier, then audits the
+group tree with the default-branch publication audit (`tools/publish_audit.py
+--committed-tree`, the same step as the pull-request attestation), so the tree that
+combines the queued pull requests is checked as a whole. It runs as a
 `workflow_run` of the group's `CI` run, filtered to `merge_group` runs of this
 repository's `gh-readonly-queue/` branches, and reads the group commit as data only,
 without checking it out. Its verdict base is the merge base of the group with the
@@ -1571,7 +1618,59 @@ purpose, and `tools/test_merge_append.py` keeps the list honest:
 - The root `Makefile` only includes the `mk/` files, so it is no longer an append point.
 
 Add a file to the list only when every conflict it can have is two independent items, and add it to
-`ALLOWED_PATHS`, `.gitattributes` and the test together.
+`ALLOWED_PATHS`, `.gitattributes` and the test together. Generated files never use this driver; they
+have their own route below.
+
+## Merging regenerated files
+
+The files that `python tools/regen_all.py --list` names (`docs/HLE_COVERAGE.md`, `src/rt/hle_evidence.h`,
+`src/rt/nid_names.h`, `docs/RECOMP_HELPER_INVENTORY.md`, the HLE baseline and the census block in
+`docs/HLE_AND_WORKAROUND_INVENTORY.md`, the waits census, the title catalog, the provenance controls and
+the rest) are rewritten whole from the tree. Two pull requests that each touch an HLE or runtime source
+therefore conflict in those files even when their own changes are far apart, and every landing makes the
+rest of the queue conflict again. Under section 10 of `AGENTS.md` such a conflict is generated content,
+not a substantive correction. Neither side's copy is right after the merge: the right bytes are a fresh
+generation from the merged tree. `tools/regen_all.py --resolve-merge` produces them:
+
+```bash
+git merge origin/main             # or: git merge --squash --no-commit <branch>, git cherry-pick <commit>
+python tools/regen_all.py --resolve-merge
+git commit                        # concludes the merge
+python tools/regen_all.py         # after a merge commit only: the provenance refresh, its own commit
+```
+
+It works from the conflicted index (stage 1 the ancestor, 2 ours, 3 theirs), so it needs no Git
+setting, and it does this:
+
+1. It reads every conflicted path. If any is not an output of a step it runs (source, prose, a
+   skipped step's output such as the embedded shaders), or a generated file was deleted on one side,
+   it lists each one as `CONFLICT` and exits 1 without writing anything. No generator runs on a tree
+   that still holds a person's conflict. Resolve those by hand, `git add` them and run it again.
+2. A whole-file output takes our side. `docs/HLE_AND_WORKAROUND_INVENTORY.md` is hand-written around its
+   generated census block, so it merges three ways with the block emptied on every side. A conflict in
+   that hand-written text is a `CONFLICT` as in step 1.
+3. It regenerates every output from the merged tree, stages the results and runs the same comparison
+   as `--check` again. A step that fails, or an output that is still stale, makes it exit 1 with
+   `refusing to finish the merge`.
+4. The provenance controls hash the staged tree against a base, `merge-base(HEAD, origin/main)`, that
+   must be an ancestor of `HEAD`. During a squash merge or a cherry-pick `HEAD` is the branch being
+   built, so it refreshes and checks them too. If they conflicted and `contrib_refresh.py` refuses to
+   refresh them (a new or removed public path, a changed profile), it exits 1: that needs the
+   maintainer's admission route. During `git merge` the base that the finished merge will have does not
+   exist yet, so the controls stay as our side (`NOT_RUN provenance controls`). After `git commit`, run
+   `python tools/regen_all.py` and commit the refresh on its own, as section 4 of `AGENTS.md` asks.
+
+It never commits. Hosted CI stays the gate: `python tools/regen_all.py --check` in `Generated files and
+repository lints` on a quick run, and on a full run `tools/test_regen_all.py` in `Python tooling gates`,
+which compares each generator's output with the committed file. If a merge took the wrong side somewhere
+this route does not cover, the head still fails there and cannot land.
+
+Why not a merge driver like `nk-append`? A driver for these files would have to write one side and exit
+0 (then `git merge` commits a stale file on its own) or exit 1 (then the merge stops exactly as it does
+without one). The index already holds all three sides, so the command needs no driver, no per-clone
+setting and no `.gitattributes` entry that a pull request could point at another file. GitHub's own
+mergeability check and its **Update branch** button cannot run either, so a pull request can still show
+a conflict on GitHub that this command resolves locally.
 
 ## Trusted CI verdict
 
@@ -1615,13 +1714,14 @@ and each token's remaining budget.
 
 | Code | Fails when |
 | --- | --- |
-| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`, `tools/provenance_mode.py`), the publication gate's code (`.gitattributes`, `tools/publish_audit.py`, `tools/policy_sync.py`, `tools/modified_file_notice_audit.py`, `tools/provenance_record_gap.py`, `tools/history_audit.py` and every module they load or run; `PROTECTED_EXTRA` in the verifier is the list), a `tools/` module named like a standard-library one (it would be imported in place of it) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
+| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`, `tools/provenance_mode.py`), the publication gate's code (`.gitattributes`, `tools/publish_audit.py`, `tools/policy_sync.py`, `tools/modified_file_notice_audit.py`, `tools/provenance_record_gap.py`, `tools/history_audit.py` and every module they load or run; `PROTECTED_EXTRA` in the verifier is the list), a `tools/` module named like a standard-library one (it would be imported in place of it), a gate configuration file wherever it stands (`osv-scanner.toml`, whose ignore list would silence the OSV scan; `GATE_CONFIG_NAMES` in the verifier) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
 | `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; the integrator merges `main` when it lands the pull request; the author merges it only for a real conflict in content that is not generated, or when asked (`AGENTS.md` section 10). No label waives it |
 | `CI_CONTEXT_COLLISION` | another workflow names `Trusted CI verdict`, or a check run uses that name |
 | `FOREIGN_PRODUCER` | a check run or status under an intended context is not from the intended workflow path and event at this head |
 | `JOB_MISSING`, `JOB_FAILED`, `JOB_CANCELLED`, `DUPLICATE_CONTEXT` | the latest non-cancelled intended run lacks the job, the job did not succeed, every run was cancelled, or two jobs share the name |
 | `STALE_HEAD`, `RUN_HEAD_MISMATCH` | the head is no longer the pull request's head, or a result names another SHA |
 | `RUN_FOR_OTHER_PR`, `AMBIGUOUS_HEAD` | the intended run belongs to another pull request, or another open pull request has the same head |
+| `RUN_BEFORE_RETARGET` | the pull request changed its base after the intended run was created, so that run tested the head against the old base; retargeting starts no run, so push a commit or close and reopen the pull request |
 | `PR_NOT_OPEN`, `BASE_NOT_DEFAULT` | nothing to judge for a merge into `main` |
 | `DRAFT_LIGHT_CI` | the pull request is a Draft, or its draft state cannot be read: CI ran only the quick checks ([Draft pull requests](#draft-pull-requests)); mark it Ready for review |
 
@@ -1669,7 +1769,11 @@ A run still in progress gives `pending`. While any producer has
 no run at the head yet, or its newest run is unfinished, the verifier reads only the head's
 workflow runs and posts `pending`. The full read, about a dozen API calls, waits for the
 last producer to finish. Running it on every completion exhausted the repository's
-`GITHUB_TOKEN` rate limit, and Trusted CodeQL's upload then failed. Label events are read
+`GITHUB_TOKEN` rate limit, and Trusted CodeQL's upload then failed. A `pull_request` producer
+with no run at all at the head, once every other producer has finished, does not hold the full
+read back: GitHub starts its run with the others', so the candidate deleted the workflow or edited
+its triggers, and the head is judged (`CI_CHANGE_UNAPPROVED` for an unapproved change, otherwise
+`pending` for that producer). Label events are read
 only when the `ci-change-approved` label is on the pull request. The protected `tools/`
 list is derived on each run from the default branch's workflows (a path named outside a
 comment line), so it follows the workflows as they change.
@@ -2241,8 +2345,9 @@ developer runs locally, without private inputs:
   directory outside the build tree (`production-smoke-staged`).
 - The `public_export` job ("Public export audit and profile-zero fixture") is ungated
   and runs in parallel with `hygiene` (#735 item 5). Its step "Exercise public-export
-  generation and candidate audit" runs on `security_publication` changes and every
-  manual `workflow_dispatch`, and the job reports success when the step is skipped.
+  generation and candidate audit" runs on `security_publication` changes (which include the
+  export tool and every gate it runs, `PUBLIC_EXPORT_TOOLS` in `tools/ci_paths.py`), every
+  full-matrix event and every manual `workflow_dispatch`, and the job reports success when the step is skipped.
   `ci_required` requires the job to succeed. One
   `build_public_export.py --export-dir ... --public-safe-profile` invocation
   runs the publication gates, generates the public-safe candidate, and audits

@@ -22,10 +22,15 @@
 // The decode cases run wherever the build links a real H.264 backend (Media Foundation on
 // Windows, the FFmpeg subset where H264_FFMPEG=1). Without one, each decode case prints
 // "SKIP: videocodec decode: <case>" and is not counted as passed; the fail-closed refusal of a
-// decode without a backend runs on every build.
+// decode without a backend runs on every build. In a build that compiles a backend, a decode case
+// that does not run (SR_NOH264 set, or too few pictures for the case) is a FAIL, never a SKIP, so
+// the exit status cannot count an unrun decode as passed.
 //
 // Failing-before evidence: on the base tree src/rt/hle_videocodec.c and the videocodec-selftest
-// target do not exist, so this file does not build.
+// target do not exist, so this file does not build. Before the audit of 2026-11-17, SR_NOH264=1 on
+// a Windows build exited 0 with 11 decode cases SKIP, and a scratch hle_videocodec.c whose
+// CscAvcRange zeroed frame_count and closed the decoder after the decode cases still passed,
+// because Stop's expected result was read from the context it then checked.
 //
 // The ATRAC3plus cases build PSMF audio frames around synthetic bodies (the terminator frame of
 // tests/native/atrac3p_bridge_selftest.c, and the first xorshift-generated mono body that decodes
@@ -94,7 +99,19 @@ uint64_t SDL_GetTicksNS(void) { return 0u; }
 
 static int checks, failures, skips;
 #define CHECK(x, text) do { checks++; if (!(x)) { failures++; fprintf(stderr, "FAIL: %s\n", text); } } while (0)
+#if defined(_WIN32) || defined(SR_H264_FFMPEG)
+#define VC_BUILD_HAS_BACKEND 1   /* h264_null.c's platform_backend() is not NULL in this build */
+#else
+#define VC_BUILD_HAS_BACKEND 0
+#endif
 static void skip(const char *name) {
+    if (VC_BUILD_HAS_BACKEND) {
+        checks++;
+        failures++;
+        fprintf(stderr, "FAIL: videocodec decode: %s did not run in a build that carries an H.264 backend "
+                        "(SR_NOH264 set, or too few pictures decoded)\n", name);
+        return;
+    }
     skips++;
     fprintf(stderr, "SKIP: videocodec decode: %s\n", name);
 }
@@ -534,6 +551,12 @@ static void test_packet_copy(void) {
     put_packet(G_PKT + 16u, G_SRC, s_edram + 0xB00u, G_PKT, 8u);
     CHECK(call(NID_PESCOPY, G_PKT, 0, 0, 0) == VC_ERR_GUEST_ADDRESS && s_me_ram[off + 0xB00u] == 0u,
           "pescopy: a list that loops back is refused and copies nothing");
+    /* A packet whose copy writes its own next link: the checked list had one packet, so the copy
+     * that turns it into a loop is refused instead of walking the new link forever. */
+    MEM_W32(G_SRC + 0x1F0u, G_PKT);
+    put_packet(G_PKT, G_SRC + 0x1F0u, G_PKT + 8u, 0u, 4u);
+    CHECK(call(NID_PESCOPY, G_PKT, 0, 0, 0) == VC_ERR_GUEST_ADDRESS && MEM_R32(G_PKT + 8u) == G_PKT,
+          "pescopy: a list its own copies loop back on is refused after the checked packets");
     memset(s_me_ram + off, 0, 0x1000u);
 }
 
@@ -918,9 +941,9 @@ static void test_copy_range(void) {
 }
 
 static void test_teardown(void) {
-    /* Without an H.264 backend no access unit decoded, and Stop answers as before any decode. */
-    const uint32_t stop_want = vc_find(G_CTX) && vc_find(G_CTX)->frame_count == 0u && vc_find(G_CTX)->h264 < 0
-                                   ? VC_ERR_STATE : 0u;
+    /* Without an H.264 backend no access unit decoded, and Stop answers as before any decode. The
+     * expectation comes from what this test decoded, not from the context's own fields. */
+    const uint32_t stop_want = s_have_picture ? 0u : VC_ERR_STATE;
     CHECK(call(NID_STOP, G_CTX, 0u, 0, 0) == stop_want && vc_find(G_CTX) && vc_find(G_CTX)->h264 < 0,
           "stop: the host decoder is released");
     const int allocs = s_me_alloc_count;
@@ -1301,6 +1324,89 @@ static void test_band_room(void) {
     s_fix_h_mbs = FIX_H_MBS;
 }
 
+/* A long stream (audit 2026-11-17). sceVideocodecDecode submits one access unit and then pulls
+ * every picture, so when the call returns the backend has given every queued unit to its decoder.
+ * Each unit here is a fixture picture followed by a 1 MiB filler-data NAL (type 12, which a
+ * decoder skips), read from guest memory, so a few dozen calls carry more than the backends'
+ * 64 MiB access-unit buffer. Every call is accepted and pictures keep arriving past that mark.
+ *
+ * MUTANT: ff_es_compact / es_compact return again when every queued unit has been sent -- the
+ *   buffer only grows, the 64th call's unit no longer fits, and the decode is refused with
+ *   "the H.264 backend rejected the access unit". */
+static void test_long_stream(void) {
+    static const char k_case[] = "Decode keeps decoding past 64 MiB of access units, one per call";
+    if (!sr_h264_backend_available()) { skip(k_case); return; }
+    const uint32_t G_BIG = 0x09000000u;   /* one picture plus 1 MiB of filler, inside the arena */
+    const uint32_t FILL = 1u << 20;
+    const uint64_t LIMIT = 64ull << 20, TOTAL = 72ull << 20;
+    memset(host(G_CTX), 0, 96u);
+    CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == 0u && call(NID_GETEDRAM, G_CTX, 0u, 0, 0) == 0u &&
+              call(NID_INIT, G_CTX, 0u, 0, 0) == 0u,
+          "long stream: a context opens");
+    MEM_W32(G_CTX + 16u, G_BUF2);
+    MEM_W32(G_CTX + 44u, G_YUV);
+    MEM_W32(G_CTX + 48u, G_BUF3);
+    MEM_W32(G_CTX + 80u, G_SEI);
+    uint64_t total = 0;
+    int calls = 0, refused_at = -1, past_limit = 0;
+    for (int i = 0; total < TOTAL && refused_at < 0; i++) {
+        uint32_t len = build_au(i, host(G_BIG), 16384u);
+        uint8_t *fill = host(G_BIG + len);
+        fill[0] = 0u; fill[1] = 0u; fill[2] = 1u; fill[3] = 0x0Cu;   /* filler data NAL */
+        memset(fill + 4, 0xFF, FILL);
+        fill[4u + FILL] = 0x80u;                                       /* rbsp trailing bits */
+        len += 5u + FILL;
+        MEM_W32(G_CTX + 36u, G_BIG);
+        MEM_W32(G_CTX + 40u, len);
+        if (call(NID_DECODE, G_CTX, 0u, 0, 0) != 0u) refused_at = i;
+        else if (total > LIMIT && MEM_R32(G_BUF2 + 32u) == 1u) past_limit++;
+        total += len;
+        calls++;
+    }
+    fprintf(stderr, "videocodec: long stream: %d calls, %llu bytes, refused at call %d\n", calls,
+            (unsigned long long)total, refused_at);
+    CHECK(refused_at < 0, "long stream: every one-unit decode past 64 MiB of access units is accepted");
+    CHECK(past_limit >= 1, "long stream: pictures keep arriving after 64 MiB of access units");
+    CHECK(call(NID_DELETE, G_CTX, 0u, 0, 0) == 0u && !vc_find(G_CTX), "long stream: the context closes");
+}
+
+/* A drain behind a long picture-less run (audit 2026-11-17). 4100 queued units that produce no
+ * picture (an access-unit delimiter each) come before the one picture. The draining pull walks the
+ * whole queue and returns that picture; a pull that stops after a fixed number of rounds reports
+ * "fully drained" (0) with units still queued, and the picture is lost to the caller.
+ *
+ * MUTANT: restore the 4096-round guard in ff_pull / pull_frame -- the draining pull returns 0. */
+static void test_drain_behind_pictureless_units(void) {
+    static const char k_case[] = "A draining pull reaches a picture behind 4100 picture-less units";
+    if (!sr_h264_backend_available()) { skip(k_case); return; }
+    static const uint8_t aud[5] = { 0, 0, 1, 0x09, 0x10 };
+    static uint8_t au[16384];
+    const int dec = sr_h264_create();
+    CHECK(dec >= 0, "pictureless: a decoder opens");
+    if (dec < 0) return;
+    int accepted = 1;
+    for (int i = 0; i < 4100; i++)
+        if (sr_h264_submit_au(dec, aud, sizeof(aud)) != 0) accepted = 0;
+    const uint32_t len = build_au(0, au, sizeof(au));
+    if (sr_h264_submit_au(dec, au, len) != 0) accepted = 0;
+    CHECK(accepted, "pictureless: every unit is queued");
+    SrH264FrameTarget target;
+    SrH264FrameInfo info;
+    memset(&target, 0, sizeof(target));
+    target.kind = SR_H264_TARGET_HOST_YUV;
+    target.host_buffer = s_vc_scratch_y;
+    target.host_width = VC_MAX_WIDTH;
+    target.host_height = VC_MAX_HEIGHT;
+    target.host_stride = VC_MAX_WIDTH;
+    target.host_cb = s_vc_scratch_cb;
+    target.host_cr = s_vc_scratch_cr;
+    target.host_c_stride = VC_MAX_WIDTH / 2;
+    const int r = sr_h264_drain(dec, &target, &info);
+    CHECK(r == 1 && info.width == (int)FIX_W && info.height == (int)FIX_H,
+          "pictureless: the first draining pull returns the picture behind the run");
+    sr_h264_destroy(dec);
+}
+
 int main(void) {
     sr_mem_init();
     test_registration();
@@ -1315,6 +1421,8 @@ int main(void) {
     test_audiocodec();
     test_guest_reset();
     test_band_room();
+    test_long_stream();
+    test_drain_behind_pictureless_units();
     if (failures) {
         fprintf(stderr, "videocodec selftest: FAILED (%d of %d checks)\n", failures, checks);
         return 1;

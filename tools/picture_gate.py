@@ -229,12 +229,29 @@ def compare_files(reference: Path, frame: Path, threshold: int = 0,
 # ---- accept ---------------------------------------------------------------------------------
 
 def _inside_checkout(path: Path) -> bool:
-    path = Path(os.path.abspath(path))
+    resolved = Path(path).resolve()
     try:
-        rel = path.relative_to(ROOT)
+        rel = resolved.relative_to(ROOT)
     except ValueError:
+        pass
+    else:
+        return not (rel.parts and rel.parts[0] == "build")
+    parent = resolved.parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    try:
+        top = subprocess.run(["git", "-C", str(parent), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
         return False
-    return not (rel.parts and rel.parts[0] == "build")
+    if top.returncode != 0 or not top.stdout.strip():
+        return False
+    try:
+        ig = subprocess.run(["git", "-C", str(parent), "check-ignore", "-q", "--", str(resolved)],
+                            capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return ig.returncode != 0
 
 
 def _head_commit() -> str:
@@ -278,14 +295,17 @@ def accept(frame: Path, reference: Path, commit: str | None = None,
     data = Path(frame).read_bytes()
     if data[:8] == b"\x89PNG\r\n\x1a\n":
         data = b"P6\n%d %d\n255\n" % (got.width, got.height) + got.pixels
-    tmp = reference.with_name(reference.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, reference)
     meta = {"commit": commit or _head_commit(), "width": got.width, "height": got.height,
             "sha256": hashlib.sha256(data).hexdigest(), "slice_us": slice_us}
     if present_upscale is not None:  # known only for a frame this gate captured
         meta["present_upscale"] = present_upscale
-    sidecar_path(reference).write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    side = sidecar_path(reference)
+    side_tmp = side.with_name(side.name + ".tmp")
+    side_tmp.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    tmp = reference.with_name(reference.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(side_tmp, side)
+    os.replace(tmp, reference)
     return meta
 
 
@@ -386,6 +406,8 @@ def run_capture(command: list[str], env: dict, run_dir: Path,
         return None, "runtime-not-found"
     except subprocess.TimeoutExpired:
         return None, f"timeout-{timeout}s"
+    except OSError as exc:
+        return None, f"runtime-not-startable ({exc.strerror or exc})"
     (run_dir / "stdout.log").write_bytes(done.stdout)
     (run_dir / "stderr.log").write_bytes(done.stderr)
     if done.returncode != 0:
@@ -469,6 +491,10 @@ def run_route(route_path: Path, runs: int = 1, work_root: Path | None = None,
             if frame is None:
                 return title, capture_failure(how)
             frames.append(frame)
+        try:
+            load_picture(frames[0])
+        except PictureError as exc:
+            return title, Verdict(FAIL, f"unreadable-frame ({exc})")
         if len(frames) > 1:
             first = frames[0].read_bytes()
             for other in frames[1:]:

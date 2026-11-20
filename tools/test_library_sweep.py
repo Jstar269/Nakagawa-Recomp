@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -84,6 +85,90 @@ class LibrarySweepTests(unittest.TestCase):
         self.private_dir = self.root / "private"
         self.public_output = self.root / "public" / "aggregate.json"
 
+    def test_source_fingerprint_includes_dirty_changes_outside_its_file_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sweep_source = root / "tools" / "library_sweep.py"
+            cli_source = root / "tools" / "nk_cli.py"
+            schema_source = root / "assets" / "bringup_report.schema.json"
+            family_source = root / "tools" / "nid_corpus.json"
+            for path in (sweep_source, cli_source, schema_source, family_source):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"stable tracked source")
+
+            clean_diff = subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+            dirty_diff = subprocess.CompletedProcess(
+                [], 0, stdout=b"diff -- src/rt/hle.c\n+ changed runtime bytes\n", stderr=b""
+            )
+            with (
+                mock.patch.object(library_sweep, "ROOT", root),
+                mock.patch.object(library_sweep, "__file__", str(sweep_source)),
+                mock.patch.object(library_sweep, "NK_CLI", cli_source),
+                mock.patch.object(library_sweep, "_PUBLIC_LIBRARY_FAMILY_SOURCE", family_source),
+                mock.patch.object(library_sweep.subprocess, "run", side_effect=[clean_diff, dirty_diff]),
+            ):
+                clean_fingerprint = library_sweep._source_fingerprint()
+                dirty_fingerprint = library_sweep._source_fingerprint()
+
+        self.assertNotEqual(clean_fingerprint, dirty_fingerprint)
+
+    def test_source_keys_preserve_case_on_posix(self) -> None:
+        iso_root = self.root / "case-sensitive-isos"
+        upper = iso_root / "Game.iso"
+        lower = iso_root / "game.iso"
+
+        with mock.patch.object(library_sweep.os, "name", "posix"):
+            upper_key = library_sweep._source_key(upper, iso_root)
+            lower_key = library_sweep._source_key(lower, iso_root)
+
+        self.assertEqual(upper_key, "Game.iso")
+        self.assertEqual(lower_key, "game.iso")
+        self.assertNotEqual(upper_key, lower_key)
+
+    def test_completed_route_avoids_repeat_validation_and_final_checkpoint_write(self) -> None:
+        _write_iso(self.iso_dir, "one-route.iso", "UCUS99989", "One Route Sentinel")
+        original_write = library_sweep._write_outputs
+        original_validate = library_sweep._validate_sweep_rows
+        original_bounded_loads = library_sweep.package_cache.bounded_json_loads
+        write_count = 0
+        validated_nonempty_sizes: list[int] = []
+        bounded_load_count = 0
+
+        def counted_write(*args, **kwargs):
+            nonlocal write_count
+            write_count += 1
+            return original_write(*args, **kwargs)
+
+        def counted_validate(rows):
+            if rows:
+                validated_nonempty_sizes.append(len(rows))
+            return original_validate(rows)
+
+        def counted_bounded_loads(*args, **kwargs):
+            nonlocal bounded_load_count
+            bounded_load_count += 1
+            return original_bounded_loads(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                library_sweep, "_run_bringup", return_value=library_sweep.RouteOutcome(_bringup_report())
+            ),
+            mock.patch.object(library_sweep, "_write_outputs", side_effect=counted_write),
+            mock.patch.object(library_sweep, "_validate_sweep_rows", side_effect=counted_validate),
+            mock.patch.object(
+                library_sweep.package_cache,
+                "bounded_json_loads",
+                side_effect=counted_bounded_loads,
+            ),
+        ):
+            library_sweep.run_sweep(
+                self.iso_dir, self.private_dir, self.public_output, **self._run_kwargs()
+            )
+
+        self.assertEqual(write_count, 2)  # initial checkpoint and after the route
+        self.assertEqual(validated_nonempty_sizes, [1])
+        self.assertEqual(bounded_load_count, 0)
+
     def _run_kwargs(self) -> dict:
         return {
             "source_commit": SOURCE_COMMIT,
@@ -92,6 +177,34 @@ class LibrarySweepTests(unittest.TestCase):
             "poll_seconds": 1,
             "max_wait_seconds": 0,
         }
+
+    def test_source_identity_sha_validators_cover_the_full_formats(self) -> None:
+        self.assertTrue(library_sweep._is_commit_sha("a" * 40))
+        self.assertFalse(library_sweep._is_commit_sha("g" * 40))
+        self.assertFalse(library_sweep._is_commit_sha("a" * 39))
+        self.assertTrue(library_sweep._is_sha256("b" * 64))
+        self.assertFalse(library_sweep._is_sha256("b" * 63))
+        self.assertFalse(library_sweep._is_sha256("z" * 64))
+
+    def test_route_diagnostic_fields_keep_their_existing_values(self) -> None:
+        build_log = self.root / "build.log"
+        layout_log = self.root / "layout.log"
+        build_log.write_text("synthetic error: build failure\nsecond line\n", encoding="utf-8")
+        layout_log.write_text("synthetic module layout diagnostic\n", encoding="utf-8")
+
+        fields = library_sweep._route_diagnostic_fields(build_log, layout_log)
+
+        self.assertEqual(fields["build_log_path"], str(build_log))
+        self.assertEqual(fields["build_diagnostic"], "synthetic error: build failure")
+        self.assertEqual(fields["module_layout_diagnostic"], "synthetic module layout diagnostic")
+
+    def test_atomic_json_writer_reuses_package_cache_atomic_write(self) -> None:
+        target = self.root / "atomic-report.json"
+        payload = b"synthetic checkpoint bytes"
+        with mock.patch.object(library_sweep.package_cache, "_atomic_write") as atomic_write:
+            library_sweep._atomic_json_bytes(target, payload)
+
+        atomic_write.assert_called_once_with(target, payload)
 
     def test_identify_refusals_are_source_backed_sweep_blocker_codes(self) -> None:
         # A PlayStation Store package is refused at identify by name. The sweep
@@ -196,7 +309,117 @@ class LibrarySweepTests(unittest.TestCase):
                 )
         self.assertTrue(outcome.timed_out)
         self.assertEqual(observed_timeouts, [7])
-        terminate.assert_called_once_with(process)
+        # The route ends the whole tree on either host: Windows by the process's own tree, a
+        # POSIX host by the process group its new session leads.
+        if os.name == "nt":
+            terminate.assert_called_once_with(process)
+        else:
+            terminate.assert_called_once_with(process, process_group=True)
+
+    def test_posix_route_uses_a_new_session_and_terminates_its_process_group(self) -> None:
+        work_dir = self.private_dir / "posix-group-timeout-work"
+        work_dir.mkdir(parents=True)
+        iso = _write_iso(self.iso_dir, "posix-group-timeout.iso", "UCUS99992", "Timeout Sentinel")
+
+        class TimedOutProcess:
+            pid = 9004
+            returncode = None
+
+            def communicate(self, timeout=None):
+                raise subprocess.TimeoutExpired("nk_cli bringup", timeout)
+
+        process = TimedOutProcess()
+        with (
+            mock.patch.object(library_sweep.os, "name", "posix"),
+            mock.patch.object(library_sweep.subprocess, "Popen", return_value=process) as popen,
+            mock.patch.object(library_sweep, "_terminate_process_tree") as terminate,
+        ):
+            outcome = library_sweep._run_bringup(
+                iso,
+                work_dir,
+                work_dir / "bringup.json",
+                work_dir / "sweep-imports.json",
+                7,
+                7,
+            )
+
+        self.assertTrue(outcome.timed_out)
+        self.assertIs(popen.call_args.kwargs.get("start_new_session"), True)
+        terminate.assert_called_once_with(process, process_group=True)
+
+    def test_posix_timeout_terminates_the_entire_process_group(self) -> None:
+        process = mock.Mock()
+        process.pid = 9003
+        process.wait.side_effect = [subprocess.TimeoutExpired("nk_cli", 5), None]
+
+        with (
+            mock.patch.object(library_sweep.os, "killpg", create=True) as killpg,
+            mock.patch.object(library_sweep.os, "name", "posix"),
+            mock.patch.object(library_sweep.signal, "SIGTERM", 15, create=True),
+            mock.patch.object(library_sweep.signal, "SIGKILL", 9, create=True),
+        ):
+            expected_signals = [library_sweep.signal.SIGTERM, library_sweep.signal.SIGKILL]
+            library_sweep._terminate_process_tree(process, process_group=True)
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(9003, expected_signals[0]), mock.call(9003, expected_signals[1])],
+        )
+        process.kill.assert_not_called()
+
+    def test_furthest_stage_uses_finished_progress_when_report_is_missing(self) -> None:
+        progress = {"stages": {
+            "inspect": {"status": "PASS"},
+            "analyze": {"status": "PASS"},
+            "codegen": {"status": "FAIL"},
+        }}
+
+        self.assertEqual(library_sweep._furthest_stage(None, progress), "codegen")
+
+    def test_unparseable_report_keeps_progress_for_the_stage_summary(self) -> None:
+        work_dir = self.private_dir / "unparseable-report-work"
+        work_dir.mkdir(parents=True)
+        iso = _write_iso(self.iso_dir, "unparseable-report.iso", "UCUS99990", "Report Sentinel")
+
+        class UnparseableReportProcess:
+            returncode = 0
+
+            def __init__(self, command, **_kwargs):
+                self.command = command
+
+            def communicate(self, timeout=None):
+                report_path = Path(self.command[self.command.index("--report") + 1])
+                report_path.write_text("[]", encoding="utf-8")
+                progress_path = Path(
+                    self.command[self.command.index("--sweep-progress-report") + 1]
+                )
+                now_ms = int(library_sweep.time.time() * 1000)
+                progress_path.write_text(json.dumps({
+                    "schema_version": 1,
+                    "stages": {
+                        name: {
+                            "status": "PASS",
+                            "started_at_unix_ms": now_ms - 2,
+                            "finished_at_unix_ms": now_ms - 1,
+                            "duration_ms": 1,
+                        }
+                        for name in ("inspect", "prepare_import", "analyze", "codegen")
+                    },
+                }), encoding="utf-8")
+                return "", ""
+
+        with mock.patch.object(library_sweep.subprocess, "Popen", UnparseableReportProcess):
+            outcome = library_sweep._run_bringup(
+                iso,
+                work_dir,
+                work_dir / "bringup.json",
+                work_dir / "sweep-imports.json",
+                7,
+                7,
+            )
+
+        self.assertIsNone(outcome.report)
+        self.assertEqual(library_sweep._furthest_stage(outcome.report, outcome.progress), "codegen")
 
     def _bringup_launch_argument(self, time_budget: int, launch_timeout: int) -> str:
         """The --launch-timeout value one title's bring-up command line carries."""
@@ -396,7 +619,8 @@ class LibrarySweepTests(unittest.TestCase):
         self.assertEqual(row["build_diagnostic"], outcome.build_diagnostic)
         self.assertEqual(row["build_log_path"], outcome.build_log_path)
         self.assertNotIn("DIAGNOSTIC_PRIVATE_SENTINEL", public_text)
-        self.assertNotIn(str(work_dir), public_text)
+        for form in (str(work_dir), json.dumps(str(work_dir))[1:-1], work_dir.as_posix()):
+            self.assertNotIn(form, public_text)
 
     def test_prepare_import_module_layout_failure_keeps_diagnostic_only_in_private_report(self) -> None:
         work_dir = self.private_dir / "layout-failure-work"
@@ -459,7 +683,8 @@ class LibrarySweepTests(unittest.TestCase):
         row = private["rows"][0]
         self.assertEqual(row["module_layout_diagnostic"], outcome.module_layout_diagnostic)
         self.assertNotIn("DIAGNOSTIC_LAYOUT_SENTINEL", public_text)
-        self.assertNotIn(str(work_dir), public_text)
+        for form in (str(work_dir), json.dumps(str(work_dir))[1:-1], work_dir.as_posix()):
+            self.assertNotIn(form, public_text)
 
     def test_analysis_failure_keeps_first_diagnostic_only_in_private_report(self) -> None:
         iso = _write_iso(
@@ -1546,28 +1771,37 @@ class LibrarySweepTests(unittest.TestCase):
             ],
         })
 
+    def _write_build_report(self, path: Path, name: str, mtime_ns: int) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "unsupported": {"imports": [{
+                "library": "sceAudio",
+                "nid": "0x12345678",
+                "name": name,
+            }]},
+        }), encoding="utf-8")
+        os.utime(path, ns=(mtime_ns, mtime_ns))
+
     def test_empty_sidecar_recovers_nids_from_private_build_report(self) -> None:
         work_dir = self.private_dir / "work" / "synthetic"
-        output_dir = work_dir / "package"
-        output_dir.mkdir(parents=True)
+        work_dir.mkdir(parents=True)
         sidecar = work_dir / "sweep-imports.json"
         sidecar.write_text(json.dumps({
             "schema_version": 1,
             "unsupported_imports": [],
         }), encoding="utf-8")
-        (output_dir / "build-report.json").write_text(json.dumps({
-            "unsupported": {
-                "imports": [{
-                    "library": "sceAudio",
-                    "nid": "0x12345678",
-                    "name": "sceAudioInit",
-                }],
-            },
-        }), encoding="utf-8")
+        route_started_ns = 2_000_000_000_000_000_000
+        # Written in the same file-system tick as the route start, and before
+        # the sidecar: both are still this route's report.
+        self._write_build_report(
+            work_dir / "package" / "build-report.json", "sceAudioInit", route_started_ns
+        )
+        os.utime(sidecar, ns=(route_started_ns + 1, route_started_ns + 1))
 
         rows, status = library_sweep._read_private_nid_rows(
             sidecar,
             _bringup_report(),
+            route_started_ns,
         )
 
         self.assertEqual(status, "BUILD_REPORT")
@@ -1576,6 +1810,122 @@ class LibrarySweepTests(unittest.TestCase):
             "nid": "0x12345678",
             "nid_name": "sceAudioInit",
         }])
+
+    def test_nid_fallback_ignores_build_reports_older_than_the_route_start(self) -> None:
+        work_dir = self.private_dir / "work" / "stale-report"
+        route_started_ns = 2_000_000_000_000_000_000
+        self._write_build_report(
+            work_dir / "user-data" / "packages" / "UCUS99991" / "build-report.json",
+            "staleBuildReportImport",
+            route_started_ns - 1,
+        )
+        sidecar = work_dir / "sweep-imports.json"
+        sidecar.write_text(json.dumps({"schema_version": 1, "unsupported_imports": []}),
+                           encoding="utf-8")
+
+        rows, status = library_sweep._read_private_nid_rows(
+            sidecar, _bringup_report(), route_started_ns
+        )
+        self.assertEqual(rows, [])
+        self.assertEqual(status, "UNAVAILABLE")
+
+        rows, status = library_sweep._read_private_nid_rows(sidecar, _bringup_report(), None)
+        self.assertEqual(rows, [])
+        self.assertEqual(status, "UNAVAILABLE")
+
+    def test_missing_sidecar_still_recovers_this_routes_build_report(self) -> None:
+        work_dir = self.private_dir / "work" / "missing-sidecar"
+        route_started_ns = 2_000_000_000_000_000_000
+        self._write_build_report(
+            work_dir / "user-data" / "packages" / "UCUS99991" / "build-report.json",
+            "currentBuildReportImport",
+            route_started_ns,
+        )
+
+        rows, status = library_sweep._read_private_nid_rows(
+            work_dir / "sweep-imports.json", _bringup_report(), route_started_ns
+        )
+
+        self.assertEqual(status, "BUILD_REPORT")
+        self.assertEqual([row["nid_name"] for row in rows], ["currentBuildReportImport"])
+
+    def test_route_reads_only_the_build_report_it_wrote(self) -> None:
+        work_dir = self.private_dir / "work" / "route-marker"
+        packages = work_dir / "user-data" / "packages"
+        self._write_build_report(
+            packages / "UCUS99991" / "build-report.json", "staleBuildReportImport", 1_000_000_000
+        )
+        iso = _write_iso(self.iso_dir, "route-marker.iso", "UCUS99991", "Marker Sentinel")
+        report_path = work_dir / "bringup.json"
+        sidecar_path = work_dir / "sweep-imports.json"
+        report_payload = json.dumps(_bringup_report())
+        test = self
+
+        class CompletedProcess:
+            returncode = 0
+
+            @staticmethod
+            def communicate(timeout=None):
+                marker = work_dir / "bringup-route-start"
+                test.assertTrue(marker.is_file())
+                fresh = packages / "UCUS99992" / "build-report.json"
+                fresh.parent.mkdir(parents=True)
+                fresh.write_text(json.dumps({
+                    "unsupported": {"imports": [{
+                        "library": "sceAudio",
+                        "nid": "0x87654321",
+                        "name": "freshBuildReportImport",
+                    }]},
+                }), encoding="utf-8")
+                # Same file-system tick as the marker: still this route's report.
+                marker_ns = marker.stat().st_mtime_ns
+                os.utime(fresh, ns=(marker_ns, marker_ns))
+                report_path.write_text(report_payload, encoding="utf-8")
+                return "", ""
+
+        with (
+            mock.patch.object(library_sweep, "_route_environment", return_value={}),
+            mock.patch.object(
+                library_sweep.subprocess, "Popen", return_value=CompletedProcess()
+            ),
+        ):
+            outcome = library_sweep._run_bringup(
+                iso, work_dir, report_path, sidecar_path, 1, 1
+            )
+
+        self.assertIsNotNone(outcome.route_started_ns)
+        rows, status = library_sweep._read_private_nid_rows(
+            sidecar_path, outcome.report, outcome.route_started_ns
+        )
+        self.assertEqual(status, "BUILD_REPORT")
+        self.assertEqual([row["nid_name"] for row in rows], ["freshBuildReportImport"])
+
+    def test_unconfigured_optional_input_staging_clears_old_files(self) -> None:
+        work_dir = self.private_dir / "work" / "stale-optional-inputs"
+        old_decrypted = (
+            work_dir / "user-data" / "titles" / "UCUS99991" / "decrypted" / "old.elf"
+        )
+        old_decrypted.parent.mkdir(parents=True)
+        old_decrypted.write_bytes(b"synthetic old decrypted input")
+        old_manifest = work_dir / "user-data" / "manifests" / "old.json"
+        old_manifest.parent.mkdir(parents=True)
+        old_manifest.write_text("{}", encoding="utf-8")
+
+        decrypted = library_sweep._stage_decrypted_inputs(None, "UCUS99991", work_dir)
+        manifests = library_sweep._stage_title_manifests(None, "UCUS99991", work_dir)
+
+        self.assertEqual(decrypted, (0, "NOT_CONFIGURED"))
+        self.assertEqual(manifests, (0, "NOT_CONFIGURED"))
+        self.assertFalse(old_decrypted.exists())
+        self.assertFalse(old_manifest.exists())
+
+        unknown_disc_input = (
+            work_dir / "user-data" / "titles" / "PREVIOUS_ID" / "decrypted" / "old.prx"
+        )
+        unknown_disc_input.parent.mkdir(parents=True)
+        unknown_disc_input.write_bytes(b"synthetic stale input for previous ID")
+        library_sweep._stage_decrypted_inputs(None, None, work_dir)
+        self.assertFalse(unknown_disc_input.exists())
 
     def test_decrypted_inputs_are_staged_from_the_disc_id_folder(self) -> None:
         decrypted_root = self.root / "decrypted-titles"
@@ -1763,6 +2113,7 @@ class LibrarySweepExternalJsonTests(unittest.TestCase):
                 "nid": "0x87654321",
                 "nid_name": "runtimeFallback",
             }]},
+            None,
         )
         self.assertEqual(status, "RUNTIME_ONLY")
         self.assertEqual(runtime_rows[0]["nid"], "0x87654321")
@@ -1805,7 +2156,7 @@ class LibrarySweepExternalJsonTests(unittest.TestCase):
         sidecar_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         self.assertGreater(sidecar_path.stat().st_size, 1024 * 1024)
 
-        rows, status = library_sweep._read_private_nid_rows(sidecar_path, None)
+        rows, status = library_sweep._read_private_nid_rows(sidecar_path, None, None)
 
         self.assertEqual(status, "CAPTURED")
         self.assertEqual(len(rows), 20000)
@@ -1954,7 +2305,9 @@ class LibrarySweepExternalJsonTests(unittest.TestCase):
             with self.subTest(reader="sidecar", limit=name), mock.patch.object(
                 library_sweep, name, limit
             ):
-                rows, status = library_sweep._read_private_nid_rows(sidecar_path, runtime_report)
+                rows, status = library_sweep._read_private_nid_rows(
+                    sidecar_path, runtime_report, None
+                )
                 self.assertEqual(status, "RUNTIME_ONLY")
                 self.assertEqual(rows[0]["nid"], "0x87654321")
 
@@ -1985,7 +2338,7 @@ class LibrarySweepExternalJsonTests(unittest.TestCase):
                 "nid": "0x87654321",
                 "nid_name": "runtimeFallback",
             }]
-        })
+        }, None)
         self.assertEqual(status, "RUNTIME_ONLY")
         self.assertEqual(rows[0]["nid"], "0x87654321")
 

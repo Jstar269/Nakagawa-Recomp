@@ -14,11 +14,27 @@
 #include <cstring>
 #include <vector>
 #include <cstdlib>
+#include <new>
 
 #include "interp.h"
 #include "recomp.h"
+#include "snapshot_ref.h"
+
+#if defined(__SSE__) || defined(__x86_64__) || defined(_M_X64)
+#include <xmmintrin.h>
+#endif
 
 using namespace ref;
+
+// While set, a non-throwing array allocation of the reference RAM's size (64 MiB) fails, as
+// it does on a host that cannot supply it. Every other allocation goes to the library.
+static volatile bool g_fail_ram_alloc = false;
+
+void *operator new[](std::size_t size, const std::nothrow_t &) noexcept {
+	if (g_fail_ram_alloc && size >= Memory::kRamSize)
+		return nullptr;
+	return ::operator new[](size);
+}
 
 namespace {
 
@@ -45,7 +61,10 @@ uint32_t I(uint32_t opcode, uint32_t rs, uint32_t rt, uint16_t imm) {
 const uint32_t BREAK = 0x0000000D;
 const uint32_t SYSCALL = 0x0000000C;
 
-// Load a program at base and run to completion (a syscall instruction), returning final state.
+// Load a program at base and run it to its syscall instruction, returning the final state. Every
+// program here ends in a syscall, so any other stop fails the case: a run that skips the syscall
+// (a wrong branch or jump target) runs the zero words after it as nops into the step limit.
+// Cases that expect another stop call Run directly.
 ref::CpuState RunProgram(const std::vector<uint32_t> &prog, uint32_t base) {
 	Memory mem;
 	for (size_t i = 0; i < prog.size(); i++)
@@ -54,8 +73,8 @@ ref::CpuState RunProgram(const std::vector<uint32_t> &prog, uint32_t base) {
 	s.pc = base;
 	s.r[SP] = 0x08A00000;  // a valid RAM stack pointer
 	StepResult res = Run(&s, &mem, 1000, nullptr);
-	if (res.reason != StopReason::kSyscall && res.reason != StopReason::kStepLimit) {
-		std::printf("FAIL program stopped: reason=%d pc=0x%08x op=0x%08x\n",
+	if (res.reason != StopReason::kSyscall) {
+		std::printf("FAIL program did not end at its syscall: reason=%d pc=0x%08x op=0x%08x\n",
 			(int)res.reason, res.pc, res.op);
 		g_failures++;
 	}
@@ -157,6 +176,112 @@ void TestUnalignedWordAccess() {
 			std::snprintf(what, sizeof what, "%s offset %u", c.name, k);
 			Check(what, c.store ? mem.Read32(aligned) : s.r[T0], c.want[k]);
 		}
+	}
+}
+
+// A halfword or word access at an address that is not a multiple of its width, and a fetch at
+// a pc that is not a multiple of 4, raise an address error on the PSP (PSP-A3-01; the runtime
+// interpreter stops with MISALIGNED_DATA / MISALIGNED_PC). The reference stops with a memory
+// fault at that address and leaves memory untouched; it used to read or write the straddling
+// bytes as if the access were aligned.
+void TestMisalignedAccessFaults() {
+	const uint32_t code = 0x08900000;
+	const uint32_t data = 0x08A00100;
+	const struct { uint32_t op; uint16_t offset; const char *name; bool link; } cases[] = {
+		{0x21, 1, "lh odd", false},  {0x25, 3, "lhu odd", false}, {0x29, 1, "sh odd", false},
+		{0x23, 2, "lw +2", false},   {0x2B, 1, "sw +1", false},   {0x30, 2, "ll +2", false},
+		{0x38, 2, "sc +2 linked", true}, {0x38, 3, "sc +3 unlinked", false},
+		{0x31, 2, "lwc1 +2", false}, {0x39, 1, "swc1 +1", false},
+	};
+	for (const auto &c : cases) {
+		Memory mem;
+		mem.Write32(data, 0x44332211);
+		mem.Write32(data + 4, 0x88776655);
+		mem.Write32(code, I(c.op, A0, T0, c.offset));
+		ref::CpuState s;
+		s.pc = code;
+		s.r[A0] = data;
+		s.r[T0] = 0xAABBCCDD;
+		s.llbit = c.link ? 1u : 0u;
+		StepResult res = Run(&s, &mem, 1, nullptr);
+		char what[48];
+		std::snprintf(what, sizeof what, "%s stops", c.name);
+		Check(what, (uint32_t)res.reason, (uint32_t)StopReason::kMemoryFault);
+		std::snprintf(what, sizeof what, "%s fault addr", c.name);
+		Check(what, mem.fault_addr(), data + c.offset);
+		std::snprintf(what, sizeof what, "%s word 0 kept", c.name);
+		Check(what, mem.Read32(data), 0x44332211);
+		std::snprintf(what, sizeof what, "%s word 1 kept", c.name);
+		Check(what, mem.Read32(data + 4), 0x88776655);
+	}
+	// A jump to a pc that is not word aligned stops at the fetch, before anything executes.
+	Memory mem;
+	mem.Write32(code, I(0x09, ZERO, T0, 1));
+	mem.Write32(code + 4, I(0x09, ZERO, T0, 2));
+	ref::CpuState s;
+	s.pc = code + 2;
+	StepResult res = Run(&s, &mem, 4, nullptr);
+	Check("misaligned pc stops", (uint32_t)res.reason, (uint32_t)StopReason::kMemoryFault);
+	Check("misaligned pc fault addr", mem.fault_addr(), code + 2);
+	Check("misaligned pc executed", (uint32_t)res.executed, 0u);
+	Check("misaligned pc no effect", s.r[T0], 0u);
+}
+
+// A scratch file for a trace: tmpfile() where the host allows it, else a named file in the
+// temporary folder, removed by the caller through *path.
+std::FILE *OpenScratch(char *path, size_t size) {
+	path[0] = '\0';
+	if (std::FILE *f = std::tmpfile()) return f;
+	const char *dir = std::getenv("TMPDIR");
+	if (dir == nullptr) dir = std::getenv("TEMP");
+	if (dir == nullptr) dir = std::getenv("TMP");
+	std::snprintf(path, size, "%s/nk_ref_selftest_trace.txt", dir != nullptr ? dir : ".");
+	return std::fopen(path, "w+b");
+}
+
+// swl and swr write the aligned word that holds their byte; the trace records that word, as
+// the generated code records it (tools/codegen.py: "(address) & ~3u", 4). The trace used to read
+// back four bytes at the unaligned address: a different token from the generated code's, and a
+// memory fault for a completed store at the last word of RAM.
+void TestUnalignedStoreTraceRecordsTheAlignedWord() {
+	const uint32_t code = 0x08900000;
+	const struct {
+		uint32_t op; uint32_t base; const char *name; const char *token;
+	} cases[] = {
+		{0x2A, 0x08A00101, "swl +1 traced", " m32[0x08a00100]=0x4433aabb\n"},
+		{0x2E, 0x0BFFFFFD, "swr end of RAM traced", " m32[0x0bfffffc]=0xbbccdd00\n"},
+	};
+	for (const auto &c : cases) {
+		Memory mem;
+		mem.Write32(0x08A00100, 0x44332211);
+		mem.Write32(code, I(c.op, A0, T0, 0));
+		mem.Write32(code + 4, SYSCALL);
+		ref::CpuState s;
+		s.pc = code;
+		s.r[A0] = c.base;
+		s.r[T0] = 0xAABBCCDD;
+		char path[512];
+		std::FILE *out = OpenScratch(path, sizeof path);
+		if (out == nullptr) {
+			std::printf("FAIL %-28s cannot open a scratch trace file\n", c.name);
+			g_failures++;
+			continue;
+		}
+		TraceSink sink(out);
+		StepResult res = Run(&s, &mem, 4, &sink);
+		std::fflush(out);
+		std::rewind(out);
+		char text[1024] = {0};
+		const size_t got = std::fread(text, 1, sizeof text - 1, out);
+		text[got] = '\0';
+		std::fclose(out);
+		if (path[0] != '\0') std::remove(path);
+		char what[48];
+		std::snprintf(what, sizeof what, "%s stop", c.name);
+		Check(what, (uint32_t)res.reason, (uint32_t)StopReason::kSyscall);
+		const bool found = std::strstr(text, c.token) != nullptr;
+		if (!found) std::printf("     trace: %s", text);
+		Check(c.name, found ? 1u : 0u, 1u);
 	}
 }
 
@@ -554,11 +679,12 @@ void TestR0IsZero() {
 void TestBreakContinues() {
 	const uint32_t base = 0x08900000;
 	// break must advance PC and continue (PPSSPP Int_Break model).
-	// A divide-by-zero guard uses break; the test verifies execution continues past it.
+	// Compilers guard a division with a separate `bnez divisor; break 7`; the div itself never
+	// traps. The explicit break below is what this case tests: execution continues past it.
 	std::vector<uint32_t> p = {
-		I(0x09, ZERO, T0, 0),         // addiu t0, zero, 0    -> divisor = 0
-		I(0x09, ZERO, T1, 42),        // addiu t1, zero, 42   -> dividend = 42
-		R(T0, T1, 0, 0, 0x1A),        // div   t0, t1         -> triggers break guard
+		I(0x09, ZERO, T0, 0),         // addiu t0, zero, 0    -> t0 = 0
+		I(0x09, ZERO, T1, 42),        // addiu t1, zero, 42   -> t1 = 42
+		R(T0, T1, 0, 0, 0x1A),        // div   t0, t1         -> 0 / 42, no trap
 		0x0000000D,                    // break (funct 0x0D)   -> must continue, not stop
 		I(0x09, ZERO, T2, 99),        // addiu t2, zero, 99   -> should execute
 		SYSCALL,
@@ -643,6 +769,8 @@ void TestBreakFatalMode() {
 	// 3. SR_BREAK_FATAL = "" / empty (should continue)
 	{
 #ifdef _WIN32
+		// The Microsoft C runtime removes a variable set to an empty value, so on Windows
+		// this case repeats case 4 (unset). The empty value itself is tested on POSIX.
 		_putenv_s("SR_BREAK_FATAL", "");
 #else
 		setenv("SR_BREAK_FATAL", "", 1);
@@ -716,6 +844,9 @@ void TestAllegrexByteBitOps() {
 		(0x1Fu << 26) | (0u << 21) | (T0 << 16) | (T3 << 11) | (0x10u << 6) | 0x20u,  // seb  t3, t0
 		(0x1Fu << 26) | (0u << 21) | (T0 << 16) | (T4 << 11) | (0x18u << 6) | 0x20u,  // seh  t4, t0
 		(0x1Fu << 26) | (0u << 21) | (T0 << 16) | (T5 << 11) | (0x14u << 6) | 0x20u,  // bitrev t5, t0
+		I(0x0D, ZERO, T0, 0x80F0),                                                     // t0 = 0x000080F0
+		(0x1Fu << 26) | (0u << 21) | (T0 << 16) | (T6 << 11) | (0x10u << 6) | 0x20u,  // seb  t6, t0
+		(0x1Fu << 26) | (0u << 21) | (T0 << 16) | (T7 << 11) | (0x18u << 6) | 0x20u,  // seh  t7, t0
 		SYSCALL,
 	};
 	ref::CpuState s = RunProgram(p, base);
@@ -724,6 +855,65 @@ void TestAllegrexByteBitOps() {
 	Check("seb  0x12345678", s.r[T3], 0x00000078u);
 	Check("seh  0x12345678", s.r[T4], 0x00005678u);
 	Check("bitrev 0x12345678", s.r[T5], 0x1E6A2C48u);
+	// Sign bits set: a zero-extending seb or seh would give 0x000000F0 and 0x000080F0.
+	Check("seb  0x000080F0", s.r[T6], 0xFFFFFFF0u);
+	Check("seh  0x000080F0", s.r[T7], 0xFFFF80F0u);
+}
+
+// nk_ref_create returns null when the 64 MiB reference RAM cannot be allocated, so the snapshot
+// runner, form sweep and verifier take their named out-of-memory stop. The RAM used to come
+// from a throwing std::vector allocation inside a nothrow new of the small wrapper, so a
+// failed allocation ended the process instead. A Memory without RAM faults on every access.
+void TestSnapshotRefCreateReportsNoMemory() {
+	g_fail_ram_alloc = true;
+	NkRef *none = nk_ref_create();
+	g_fail_ram_alloc = false;
+	Check("nk_ref_create without RAM is null", none == nullptr ? 1u : 0u, 1u);
+	if (none) nk_ref_destroy(none);
+	NkRef *some = nk_ref_create();
+	Check("nk_ref_create with RAM", some != nullptr ? 1u : 0u, 1u);
+	if (some) nk_ref_destroy(some);
+
+	g_fail_ram_alloc = true;
+	Memory mem;
+	g_fail_ram_alloc = false;
+	mem.Write32(Memory::kRamBase, 1u);
+	Check("Memory without RAM: store faults", mem.last_fault() ? 1u : 0u, 1u);
+	mem.ClearFault();
+	(void)mem.Read32(Memory::kRamBase);
+	Check("Memory without RAM: load faults", mem.last_fault() ? 1u : 0u, 1u);
+}
+
+// nk_ref_run starts a call at entry_pc outside a delay slot. A caller's state taken inside a
+// delay-slot window (the runtime keeps the branch PC in next_pc there, src/rt/cpu_lle.c) used
+// to carry over, so the reference jumped to the stale next_pc after the first instruction.
+void TestSnapshotRefRunStartsOutsideDelaySlot() {
+	const uint32_t entry = 0x08900000;
+	const uint32_t prog[] = {I(0x09, ZERO, T2, 0x111), I(0x09, ZERO, T3, 0x222), SYSCALL};
+	NkRef *r = nk_ref_create();
+	if (!r) {
+		Check("nk_ref_create for nk_ref_run", 0u, 1u);
+		return;
+	}
+	std::memcpy(nk_ref_ram(r) + (entry - NK_REF_RAM_BASE), prog, sizeof prog);
+
+	ref::CpuState s;
+	s.in_delay_slot = 1;
+	s.next_pc = entry + 0x100;  // zero words there: nops into the step limit
+	NkRefResult out;
+	nk_ref_run(r, &s, entry, 0x0BAD0000u, nullptr, 0, 64, &out);
+	Check("nk_ref_run slot state: stop", (uint32_t)out.stop, (uint32_t)NK_REF_SYSCALL);
+	Check("nk_ref_run slot state: pc", out.pc, entry + 8);
+	Check("nk_ref_run slot state: second insn", s.r[T3], 0x222u);
+
+	// The first named import stub that the next fetch reaches ends the run there.
+	ref::CpuState s2;
+	const uint32_t stubs[] = {0x08A00000u, entry + 4, entry + 4};
+	nk_ref_run(r, &s2, entry, 0x0BAD0000u, stubs, 3, 64, &out);
+	Check("nk_ref_run import: stop", (uint32_t)out.stop, (uint32_t)NK_REF_IMPORT);
+	Check("nk_ref_run import: pc", out.pc, entry + 4);
+	Check("nk_ref_run import: executed", (uint32_t)out.executed, 1u);
+	nk_ref_destroy(r);
 }
 
 void TestAllegrexExtIns() {
@@ -772,13 +962,307 @@ void TestAllegrexMaxMin() {
 	Check("min INT32_MIN,INT32_MAX", s.r[T1], 0x80000000u);
 }
 
+// Load prog at base into a fresh Memory, seed s.pc and run up to budget instructions.
+StepResult RunWords(Memory *mem, ref::CpuState *s, const std::vector<uint32_t> &prog, uint32_t base,
+                    unsigned long long budget) {
+	for (size_t i = 0; i < prog.size(); i++)
+		mem->Write32(base + (uint32_t)i * 4, prog[i]);
+	s->pc = base;
+	return Run(s, mem, budget, nullptr);
+}
+
+// A jr/jalr target is latched at the transfer, before the link write (AGENTS.md section 7,
+// PR #126): jalr t9, t9 jumps to t9's old value, as the generated code (_t = R(a) first) and
+// the runtime interpreter do. It used to write the link first and jump to pc + 8.
+void TestJalrLatchesTargetBeforeLink() {
+	const uint32_t base = 0x08900000;
+	const uint32_t target = 0x08900100;
+	Memory mem;
+	mem.Write32(target, I(0x09, ZERO, T2, 0x111));  // addiu t2, zero, 0x111
+	mem.Write32(target + 4, SYSCALL);
+	ref::CpuState s;
+	s.r[T9] = target;
+	StepResult res = RunWords(&mem, &s, {
+		R(T9, 0, T9, 0, 0x09),        // jalr t9, t9
+		0,                            // delay slot
+		I(0x09, ZERO, T3, 0xBAD),     // pc + 8: must not run
+		SYSCALL,
+	}, base, 16);
+	Check("jalr rd==rs stop", (uint32_t)res.reason, (uint32_t)StopReason::kSyscall);
+	Check("jalr rd==rs took old target", s.r[T2], 0x111u);
+	Check("jalr rd==rs skipped pc+8", s.r[T3], 0u);
+	Check("jalr rd==rs link", s.r[T9], base + 8);
+}
+
+// c.cond.s orders denormals from their raw bits, as sr_fpu_condition_s does for the generated
+// code, whatever the host's ambient FP mode. With DAZ set in the process (a library may set
+// it), a host float compare treats 1 ulp of denormal as 0: c.eq.s said equal and c.lt.s said
+// not less, while the generated code says the opposite.
+void TestCompareIgnoresAmbientDenormalMode() {
+	struct Cell { const char *name; uint32_t a, b, funct, want; };
+	const Cell cells[] = {
+		{"c.eq.s denormal,+0", 0x00000001u, 0x00000000u, 0x32, 0},
+		{"c.lt.s +0,denormal", 0x00000000u, 0x00000001u, 0x3C, 1},
+		{"c.lt.s -denormal,+0", 0x80000001u, 0x00000000u, 0x3C, 1},
+		{"c.eq.s -0,+0", 0x80000000u, 0x00000000u, 0x32, 1},
+		{"c.lt.s -0,+0", 0x80000000u, 0x00000000u, 0x3C, 0},
+		{"c.lt.s -2,-1", 0xC0000000u, 0xBF800000u, 0x3C, 1},
+		{"c.le.s +inf,+inf", 0x7F800000u, 0x7F800000u, 0x3E, 1},
+		{"c.un.s qnan,1", 0x7FC00000u, 0x3F800000u, 0x31, 1},
+		{"c.ueq.s snan,1", 0x7F800001u, 0x3F800000u, 0x33, 1},
+		{"c.olt.s 1,qnan", 0x3F800000u, 0x7FC00000u, 0x34, 0},
+	};
+#if defined(__SSE__) || defined(__x86_64__) || defined(_M_X64)
+	const unsigned saved = _mm_getcsr();
+	_mm_setcsr(saved | 0x0040u);  // DAZ: denormal operands read as zero
+	const bool daz = true;
+#else
+	const bool daz = false;
+#endif
+	for (const Cell &c : cells) {
+		Memory mem;
+		ref::CpuState s;
+		s.fi[0] = c.a;
+		s.fi[1] = c.b;
+		StepResult res = RunWords(&mem, &s, {FPS(1, 0, 0, c.funct), SYSCALL}, 0x08900000, 4);
+		char what[64];
+		std::snprintf(what, sizeof what, "%s%s", c.name, daz ? " (DAZ)" : "");
+		Check(what, s.fpcond, c.want);
+		std::snprintf(what, sizeof what, "%s FCC0", c.name);
+		Check(what, (s.fcr31 >> 23) & 1u, c.want);
+		if (res.reason != StopReason::kSyscall) {
+			std::printf("FAIL %-28s stopped with reason %d\n", c.name, (int)res.reason);
+			g_failures++;
+		}
+	}
+#if defined(__SSE__) || defined(__x86_64__) || defined(_M_X64)
+	_mm_setcsr(saved);
+#endif
+}
+
+// An instruction that stops on an error does not complete: a faulting load leaves rt alone,
+// ll leaves the link clear, pc names the instruction, a delay slot keeps its branch pending,
+// and nothing is traced or counted. The reference used to write 0 to rt, set the link,
+// advance pc, apply the branch and emit a trace line for an instruction that never ran
+// (for a faulting store, a memory-write token for a write that never happened).
+void TestErrorStopsDoNotCommit() {
+	const uint32_t base = 0x08900000;
+	const struct { uint32_t op; const char *name; StopReason why; } cases[] = {
+		{I(0x23, A0, S0, 0), "lw fault", StopReason::kMemoryFault},
+		{I(0x20, A0, S0, 0), "lb fault", StopReason::kMemoryFault},
+		{I(0x30, A0, S0, 0), "ll fault", StopReason::kMemoryFault},
+		{I(0x22, A0, S0, 1), "lwl fault", StopReason::kMemoryFault},
+		{I(0x31, A0, 3, 0), "lwc1 fault", StopReason::kMemoryFault},
+		{0xF0000000u, "unimplemented", StopReason::kUnimplemented},
+		// A store to address 0 faults and writes nothing, so its trace has no m8/m16/m32
+		// token: the reference used to trace a faulting sw as m32[0x00000000]=0x00000000.
+		{I(0x2B, A0, S0, 0), "sw fault", StopReason::kMemoryFault},
+		{I(0x29, A0, S0, 0), "sh fault", StopReason::kMemoryFault},
+		{I(0x28, A0, S0, 0), "sb fault", StopReason::kMemoryFault},
+		{I(0x2A, A0, S0, 1), "swl fault", StopReason::kMemoryFault},
+	};
+	for (const auto &c : cases) {
+		Memory mem;
+		ref::CpuState s;
+		s.r[A0] = 0;  // outside modeled RAM
+		s.r[S0] = 0x1234;
+		s.fi[3] = 0x5678;
+		char path[512];
+		std::FILE *out = OpenScratch(path, sizeof path);
+		if (out == nullptr) {
+			std::printf("FAIL %-28s cannot open a scratch trace file\n", c.name);
+			g_failures++;
+			continue;
+		}
+		TraceSink sink(out);
+		mem.Write32(base, c.op);
+		s.pc = base;
+		StepResult res = Run(&s, &mem, 4, &sink);
+		std::fflush(out);
+		const long traced = std::ftell(out);
+		std::fclose(out);
+		if (path[0] != '\0') std::remove(path);
+		char what[64];
+		std::snprintf(what, sizeof what, "%s stop", c.name);
+		Check(what, (uint32_t)res.reason, (uint32_t)c.why);
+		std::snprintf(what, sizeof what, "%s rt kept", c.name);
+		Check(what, s.r[S0], 0x1234u);
+		std::snprintf(what, sizeof what, "%s ft kept", c.name);
+		Check(what, s.fi[3], 0x5678u);
+		std::snprintf(what, sizeof what, "%s link clear", c.name);
+		Check(what, s.llbit, 0u);
+		std::snprintf(what, sizeof what, "%s pc", c.name);
+		Check(what, s.pc, base);
+		std::snprintf(what, sizeof what, "%s executed", c.name);
+		Check(what, (uint32_t)res.executed, 0u);
+		std::snprintf(what, sizeof what, "%s not traced", c.name);
+		Check(what, (uint32_t)traced, 0u);
+	}
+	// A load fault in a delay slot: the branch completed, the slot did not.
+	Memory mem;
+	ref::CpuState s;
+	s.r[S0] = 0x1234;
+	StepResult res = RunWords(&mem, &s, {
+		I(0x04, ZERO, ZERO, 3),       // beq zero, zero, +3
+		I(0x23, A0, S0, 0),           // delay slot: lw s0, 0(a0) with a0 = 0 faults
+	}, base, 8);
+	Check("slot fault stop", (uint32_t)res.reason, (uint32_t)StopReason::kMemoryFault);
+	Check("slot fault pc", s.pc, base + 4);
+	Check("slot fault branch pending", s.in_delay_slot, 1u);
+	Check("slot fault next_pc", s.next_pc, base + 16);
+	Check("slot fault rt kept", s.r[S0], 0x1234u);
+	Check("slot fault executed", (uint32_t)res.executed, 1u);
+}
+
+// A computed jr/jalr target of 0 is a null code pointer (#1375): the production lanes refuse
+// it at the transfer, before the link write and the delay slot. The reference stops there with
+// a memory fault at address 0; it used to link, run the slot and fault at the fetch of pc 0.
+void TestNullCodePointerStopsAtTransfer() {
+	const uint32_t base = 0x08900000;
+	const struct { uint32_t op; const char *name; } cases[] = {
+		{R(T0, 0, 0, 0, 0x08), "jr null"},
+		{R(T0, 0, RA, 0, 0x09), "jalr null"},
+	};
+	for (const auto &c : cases) {
+		Memory mem;
+		ref::CpuState s;
+		s.r[RA] = 0x0890AAAC;
+		StepResult res = RunWords(&mem, &s, {c.op, I(0x09, ZERO, T2, 1), SYSCALL}, base, 8);
+		char what[64];
+		std::snprintf(what, sizeof what, "%s stop", c.name);
+		Check(what, (uint32_t)res.reason, (uint32_t)StopReason::kMemoryFault);
+		std::snprintf(what, sizeof what, "%s stop pc", c.name);
+		Check(what, res.pc, base);
+		std::snprintf(what, sizeof what, "%s fault addr", c.name);
+		Check(what, mem.fault_addr(), 0u);
+		std::snprintf(what, sizeof what, "%s no link", c.name);
+		Check(what, s.r[RA], 0x0890AAACu);
+		std::snprintf(what, sizeof what, "%s no slot", c.name);
+		Check(what, s.r[T2], 0u);
+		std::snprintf(what, sizeof what, "%s executed", c.name);
+		Check(what, (uint32_t)res.executed, 0u);
+	}
+}
+
+// Encodings with a reserved field set stop as unimplemented, as the runtime interpreter's
+// decode and the generator refuse them; the reference used to run them as the plain form.
+void TestReservedFieldsStop() {
+	const uint32_t base = 0x08900000;
+	const uint32_t target = 0x08900100;
+	const struct { uint32_t op; const char *name; } cases[] = {
+		{R(T0, 1, 0, 0, 0x08), "jr rt!=0"},
+		{R(T0, 0, 0, 1, 0x08), "jr sa!=0"},
+		{R(T0, 0, 1, 0, 0x08), "jr rd!=0"},
+		{R(T0, 1, RA, 0, 0x09), "jalr rt!=0"},
+		{R(T0, 0, RA, 1, 0x09), "jalr sa!=0"},
+		{I(0x06, T1, 1, 2), "blez rt!=0"},
+		{I(0x07, T1, 1, 2), "bgtz rt!=0"},
+		{I(0x16, T1, 1, 2), "blezl rt!=0"},
+		{I(0x17, T1, 1, 2), "bgtzl rt!=0"},
+		{R(2, T1, T2, 4, 0x02), "srl rs=2"},
+		{R(T1, T1, T2, 2, 0x06), "srlv sa=2"},
+	};
+	for (const auto &c : cases) {
+		Memory mem;
+		ref::CpuState s;
+		s.r[T0] = target;
+		s.r[T1] = 0x80;
+		StepResult res = RunWords(&mem, &s, {c.op, 0, SYSCALL}, base, 8);
+		char what[64];
+		std::snprintf(what, sizeof what, "%s stop", c.name);
+		Check(what, (uint32_t)res.reason, (uint32_t)StopReason::kUnimplemented);
+		std::snprintf(what, sizeof what, "%s stop pc", c.name);
+		Check(what, res.pc, base);
+		std::snprintf(what, sizeof what, "%s executed", c.name);
+		Check(what, (uint32_t)res.executed, 0u);
+	}
+	// The defined forms still run.
+	Memory mem;
+	ref::CpuState s;
+	s.r[T1] = 0x80;
+	RunWords(&mem, &s, {R(1, T1, T2, 4, 0x02), R(T1, T1, T3, 1, 0x06), SYSCALL}, base, 8);
+	Check("rotr still runs", s.r[T2], 0x08u);
+	Check("rotrv still runs", s.r[T3], 0x80u);
+}
+
+// A jump or branch in a delay slot is UNPREDICTABLE; the production lanes refuse it before
+// any effect. The reference stops on it by name; it used to jump to the inner target, drop the
+// outer one and skip the inner slot.
+void TestControlTransferInDelaySlotStops() {
+	const uint32_t base = 0x08900000;
+	const struct { uint32_t op; const char *name; } cases[] = {
+		{I(0x04, ZERO, ZERO, 8), "beq in slot"},
+		{I(0x05, ZERO, ZERO, 8), "bne (not taken) in slot"},
+		{(0x02u << 26) | ((0x08900200u >> 2) & 0x3FFFFFFu), "j in slot"},
+		{R(T0, 0, 0, 0, 0x08), "jr in slot"},
+		{BC1(1, 0, 8), "bc1t in slot"},
+	};
+	for (const auto &c : cases) {
+		Memory mem;
+		ref::CpuState s;
+		s.r[T0] = 0x08900300;
+		StepResult res = RunWords(&mem, &s, {
+			I(0x04, ZERO, ZERO, 3),   // beq zero, zero, +3
+			c.op,                     // its delay slot
+			SYSCALL,
+		}, base, 8);
+		char what[64];
+		std::snprintf(what, sizeof what, "%s stop", c.name);
+		Check(what, (uint32_t)res.reason, (uint32_t)StopReason::kUnimplemented);
+		std::snprintf(what, sizeof what, "%s stop pc", c.name);
+		Check(what, res.pc, base + 4);
+		std::snprintf(what, sizeof what, "%s executed", c.name);
+		Check(what, (uint32_t)res.executed, 1u);
+	}
+}
+
+// Behaviour pins for two cleanups: mul.s of inf and 0 (either order, either sign) is the
+// canonical NaN 0x7fc00000 now that sr_fpu_mul_s alone classifies it, and cfc1 of FCR0 reads
+// the FIR word through the shared SR_FCR0_FIR name. Both held before the cleanups too.
+void TestMulInfZeroAndFirUnchanged() {
+	const struct { const char *name; uint32_t a, b; } cells[] = {
+		{"mul.s +inf*+0", 0x7F800000u, 0x00000000u},
+		{"mul.s +0*+inf", 0x00000000u, 0x7F800000u},
+		{"mul.s -inf*+0", 0xFF800000u, 0x00000000u},
+		{"mul.s +inf*-0", 0x7F800000u, 0x80000000u},
+	};
+	for (const auto &c : cells) {
+		Memory mem;
+		ref::CpuState s;
+		s.fi[1] = c.a;
+		s.fi[2] = c.b;
+		RunWords(&mem, &s, {FPS(2, 1, 3, 0x02), SYSCALL}, 0x08900000, 4);  // mul.s f3, f1, f2
+		Check(c.name, s.fi[3], 0x7FC00000u);
+	}
+	Memory mem;
+	ref::CpuState s;
+	s.r[T0] = 0xDEADBEEFu;
+	s.r[T1] = 0xDEADBEEFu;
+	RunWords(&mem, &s, {
+		(0x11u << 26) | (0x02u << 21) | (T0 << 16) | (0u << 11),  // cfc1 t0, $0
+		(0x11u << 26) | (0x02u << 21) | (T1 << 16) | (1u << 11),  // cfc1 t1, $1
+		SYSCALL,
+	}, 0x08900000, 4);
+	Check("cfc1 $0 is the FIR word", s.r[T0], 0x00003351u);
+	Check("cfc1 $1 reads 0", s.r[T1], 0u);
+}
+
 }  // namespace
 
 int main() {
+	// BREAK's policy reads SR_BREAK_FATAL (interp.cpp). An inherited value must not change the
+	// break cases; TestBreakFatalMode sets it itself.
+#ifdef _WIN32
+	_putenv_s("SR_BREAK_FATAL", "");
+#else
+	unsetenv("SR_BREAK_FATAL");
+#endif
 	TestArithmetic();
 	TestMulDiv();
 	TestMemory();
 	TestUnalignedWordAccess();
+	TestMisalignedAccessFaults();
+	TestUnalignedStoreTraceRecordsTheAlignedWord();
 	TestAllegrexRotate();
 	TestBranchDelaySlot();
 	TestDaybreak4GuestInterpreterOracle();
@@ -795,8 +1279,17 @@ int main() {
 	TestBreakFatalMode();
 	TestSyscallCodePreservation();
 	TestAllegrexByteBitOps();
+	TestSnapshotRefCreateReportsNoMemory();
+	TestSnapshotRefRunStartsOutsideDelaySlot();
 	TestAllegrexExtIns();
 	TestAllegrexMaxMin();
+	TestJalrLatchesTargetBeforeLink();
+	TestCompareIgnoresAmbientDenormalMode();
+	TestErrorStopsDoNotCommit();
+	TestNullCodePointerStopsAtTransfer();
+	TestReservedFieldsStop();
+	TestControlTransferInDelaySlotStops();
+	TestMulInfZeroAndFirUnchanged();
 	std::printf("\n%s (%d failure(s))\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures);
 	return g_failures == 0 ? 0 : 1;
 }

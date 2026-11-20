@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 the Nakagawa Recomp authors
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -89,6 +91,21 @@ def _init_synthetic_repo(root: Path, sensitive: bool) -> None:
 
 _READ_ONLY_EXPORT: tuple[bool, Path] | None = None
 
+# The export commits under the operator's own Git identity and refuses without one. A
+# hosted runner has none configured, so these tests name a test operator explicitly.
+_TEST_OPERATOR = {
+    "GIT_AUTHOR_NAME": "Export Test Operator",
+    "GIT_AUTHOR_EMAIL": "export-operator@nakagawa-recomp.invalid",
+    "GIT_COMMITTER_NAME": "Export Test Operator",
+    "GIT_COMMITTER_EMAIL": "export-operator@nakagawa-recomp.invalid",
+}
+
+
+def setUpModule() -> None:
+    patcher = mock.patch.dict(os.environ, _TEST_OPERATOR)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
 
 def _hashed_trusted_ledger(tree: Path, out: Path) -> Path:
     """Write the hashed trusted ledger a release passes as ``--provenance-ledger``.
@@ -118,7 +135,15 @@ def _read_only_public_export() -> tuple[bool, Path]:
     global _READ_ONLY_EXPORT
     if _READ_ONLY_EXPORT is None:
         temp = tempfile.TemporaryDirectory(prefix="public_export_shared_")
-        unittest.addModuleCleanup(temp.cleanup)
+
+        def remove_shared_export() -> None:
+            # Forget the export with its directory, so a later run in the same
+            # process builds a new one instead of reading a removed path.
+            global _READ_ONLY_EXPORT
+            _READ_ONLY_EXPORT = None
+            temp.cleanup()
+
+        unittest.addModuleCleanup(remove_shared_export)
         target = Path(temp.name) / "public_export"
         _READ_ONLY_EXPORT = (export_sanitized_public_tree(target, public_safe_profile=True), target)
     return _READ_ONLY_EXPORT
@@ -154,6 +179,28 @@ class TestPublicExport(unittest.TestCase):
         self.assertTrue(res.passed)
         self.assertIn("PUBLIC-SAFE PROFILE ACTIVE", res.detail)
 
+    def test_legal_blockers_fail_when_the_profile_includes_a_blocked_component(self):
+        # The gate's PASS claims the profile excludes the unreviewed components, so a
+        # profile that includes one of them must fail it.
+        profile = json.loads((ROOT / "assets" / "public_source_profile.json").read_text(encoding="utf-8"))
+        for blocked, change in (
+            ("src/rt/pgf.c", lambda d: d["exclude_paths"].remove("src/rt/pgf.c")),
+            ("font/jpn0.pgf", lambda d: d["exclude_globs"].remove("font/*.pgf")),
+        ):
+            with self.subTest(blocked=blocked), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "assets").mkdir()
+                shutil.copy2(ROOT / "assets" / "release_manifest.json", root / "assets" / "release_manifest.json")
+                document = json.loads(json.dumps(profile))
+                change(document)
+                document["include_paths"] = sorted([*document["include_paths"], blocked])
+                (root / "assets" / "public_source_profile.json").write_text(
+                    json.dumps(document, indent=2) + "\n", encoding="utf-8")
+                with mock.patch.object(build_public_export, "ROOT", root):
+                    res = check_unresolved_legal_blockers(public_safe_profile=True)
+                self.assertFalse(res.passed, res.detail)
+                self.assertIn(blocked, res.detail)
+
     def test_publish_audit_gate(self):
         res = run_publish_audit()
         self.assertTrue(res.passed, f"publish_audit gate failed: {res.detail}")
@@ -187,6 +234,24 @@ class TestPublicExport(unittest.TestCase):
             res = history_audit_gate_result(report)
             self.assertTrue(res.passed, "sanitized multi-commit history must pass")
             self.assertIn("0 sensitive findings", res.detail)
+
+    def test_history_audit_gate_fails_closed_without_its_counts_or_on_a_failed_run(self):
+        # A report that lost its summary (schema drift, an error object) is not a clean history.
+        for report in ({}, {"error": "audit crashed"}, {"summary": {}},
+                       {"summary": {"total_findings": "0", "category_counts": {}}},
+                       {"summary": {"total_findings": 0}},
+                       {"summary": {"total_findings": 0, "category_counts": {"DEFINITE_SECRET": None}}}):
+            with self.subTest(report=report):
+                res = history_audit_gate_result(report)
+                self.assertFalse(res.passed, res.detail)
+        clean = {"summary": {"total_findings": 0, "category_counts": {}},
+                 "baseline": {"total_commits": 2, "total_objects": 9}}
+        self.assertTrue(history_audit_gate_result(clean).passed)
+        crashed = subprocess.CompletedProcess([], 2, json.dumps(clean), "history_audit: internal error")
+        with mock.patch.object(build_public_export.subprocess, "run", return_value=crashed):
+            res = build_public_export.run_history_audit(ROOT)
+        self.assertFalse(res.passed)
+        self.assertIn("history_audit exited 2", res.detail)
 
     def test_sbom_verification_gate(self):
         res = run_sbom_verification()
@@ -805,6 +870,163 @@ class TestCandidateImmutability293(unittest.TestCase):
             materialized = target / "docs" / "dir with space" / "file name.md"
             self.assertEqual(materialized.read_text(encoding="utf-8"), "# spaced\n")
 
+    def test_export_commit_carries_the_operator_identity_and_the_index_modes(self):
+        # The export commit is the root of a public history: it is the operator's, never the
+        # isolated test identity, and a 100755 index entry stays 100755 even where the
+        # filesystem has no executable bit (NTFS sets core.filemode=false on `git init`).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            synth = Path(tmpdir) / "source"
+            synth.mkdir()
+            _git(["init", "-q"], synth)
+            (synth / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8", newline="\n")
+            (synth / "README.md").write_text("readme\n", encoding="utf-8", newline="\n")
+            _git(["add", "-A"], synth)
+            _git(["update-index", "--chmod=+x", "--", "run.sh"], synth)
+
+            target = Path(tmpdir) / "export"
+            with mock.patch.object(build_public_export, "ROOT", synth):
+                ok = export_sanitized_public_tree(target, public_safe_profile=False)
+            self.assertTrue(ok)
+            people = run_git(["log", "-1", "--format=%an <%ae>|%cn <%ce>"], cwd=target,
+                             capture_output=True, text=True, check=True).stdout.strip()
+            operator = "Export Test Operator <export-operator@nakagawa-recomp.invalid>"
+            self.assertEqual(people, f"{operator}|{operator}")
+            modes = run_git(["ls-tree", "HEAD", "--", "run.sh", "README.md"], cwd=target,
+                            capture_output=True, text=True, check=True).stdout
+            self.assertIn("100755 blob", next(line for line in modes.splitlines() if line.endswith("\trun.sh")))
+            self.assertIn("100644 blob", next(line for line in modes.splitlines() if line.endswith("\tREADME.md")))
+
+    def test_export_without_an_operator_identity_is_refused_before_staging(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            synth = Path(tmpdir) / "source"
+            synth.mkdir()
+            _git(["init", "-q"], synth)
+            (synth / "README.md").write_text("readme\n", encoding="utf-8", newline="\n")
+            _git(["add", "-A"], synth)
+            target = Path(tmpdir) / "export"
+            no_identity = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+                           "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly",
+                           "GIT_CONFIG_VALUE_0": "true"}
+            stderr = io.StringIO()
+            with mock.patch.dict(os.environ, no_identity), \
+                    mock.patch.object(build_public_export, "ROOT", synth), \
+                    contextlib.redirect_stderr(stderr):
+                for key in _TEST_OPERATOR:
+                    os.environ.pop(key, None)
+                ok = export_sanitized_public_tree(target, public_safe_profile=False)
+            self.assertFalse(ok)
+            self.assertIn("EXPORT_IDENTITY_MISSING", stderr.getvalue())
+            self.assertFalse(target.exists())
+            self.assertEqual(sorted(path.name for path in Path(tmpdir).iterdir()), ["source"])
+
+
+class TestSharedExportCache(unittest.TestCase):
+    def test_a_second_run_in_the_same_process_rebuilds_the_removed_export(self):
+        # The shared export's directory is removed by the module cleanup; a runner that
+        # runs this module again in the same process must get a new export, not the
+        # removed path.
+        module = sys.modules[__name__]
+
+        def fake_export(target: Path, public_safe_profile: bool) -> bool:
+            target.mkdir(parents=True)
+            return public_safe_profile
+
+        with mock.patch.object(unittest.case, "_module_cleanups", []), \
+                mock.patch.object(module, "_READ_ONLY_EXPORT", None), \
+                mock.patch.object(module, "export_sanitized_public_tree", fake_export):
+            first = _read_only_public_export()
+            self.assertTrue(first[1].is_dir())
+            unittest.case.doModuleCleanups()
+            self.assertFalse(first[1].exists())
+            second = _read_only_public_export()
+            self.assertTrue(second[0])
+            self.assertTrue(second[1].is_dir(), "the cached export points at a removed directory")
+            unittest.case.doModuleCleanups()
+
+
+class TestIndexFilesReadsTheWholeIndex(unittest.TestCase):
+    """``index_files`` is the tree policy_sync and admit_paths compute the export over.
+
+    Every staged blob comes back under its exact name with its own bytes, and a tree it
+    cannot read completely is an error, never a shorter list.
+    """
+
+    def _repo(self, root: Path) -> None:
+        _git(["init", "-q"], root)
+
+    def _stage_blob(self, root: Path, path: str, data: bytes) -> str:
+        sha: str = run_git(["hash-object", "-w", "--stdin"], cwd=root, check=True,
+                           capture_output=True, input=data).stdout.decode("ascii").strip()
+        _git(["update-index", "--add", "--cacheinfo", f"100644,{sha},{path}"], root)
+        return sha
+
+    def test_a_path_with_leading_whitespace_keeps_its_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo(root)
+            self._stage_blob(root, " lead.md", b"lead\n")
+            self._stage_blob(root, "plain.md", b"plain\n")
+            self.assertEqual(
+                public_export.index_files(repo_root=root),
+                [(" lead.md", b"lead\n"), ("plain.md", b"plain\n")],
+            )
+
+    def test_a_gitlink_does_not_shift_the_bytes_of_later_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo(root)
+            self._stage_blob(root, "seed.md", b"seed\n")
+            _git(["-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                  "commit", "-qm", "seed"], root)
+            commit = run_git(["rev-parse", "HEAD"], cwd=root, check=True,
+                             capture_output=True).stdout.decode("ascii").strip()
+            # The gitlink's commit object is in this object store, so cat-file would
+            # print its payload; it sorts before the blob that follows it.
+            _git(["update-index", "--add", "--cacheinfo", f"160000,{commit},a_sub"], root)
+            self._stage_blob(root, "b.md", b"after the gitlink\n")
+            self.assertEqual(
+                public_export.index_files(repo_root=root),
+                [("b.md", b"after the gitlink\n"), ("seed.md", b"seed\n")],
+            )
+
+    def test_an_unreadable_staged_object_is_an_error_not_a_shorter_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo(root)
+            self._stage_blob(root, "kept.md", b"kept\n")
+            absent = "1" * 40
+            _git(["update-index", "--add", "--info-only", "--cacheinfo",
+                  f"100644,{absent},lost.md"], root)
+            with self.assertRaises(public_export.IndexReadError) as caught:
+                public_export.index_files(repo_root=root)
+            self.assertIn("lost.md", str(caught.exception))
+
+    def test_a_failing_cat_file_is_an_error_not_a_shorter_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo(root)
+            self._stage_blob(root, "one.md", b"one\n")
+            self._stage_blob(root, "two.md", b"two\n")
+            real_popen = subprocess.Popen
+
+            def truncated_cat_file(argv, *args, **kwargs):
+                if list(argv[:2]) == ["git", "cat-file"]:
+                    # A cat-file that answers the first request, then dies.
+                    script = (
+                        "import subprocess, sys\n"
+                        "first = sys.stdin.readline()\n"
+                        "out = subprocess.run(['git', 'cat-file', '--batch'], input=first.encode(),"
+                        " capture_output=True).stdout\n"
+                        "sys.stdout.buffer.write(out)\n"
+                        "sys.exit(128)\n"
+                    )
+                    argv = [sys.executable, "-c", script]
+                return real_popen(argv, *args, **kwargs)
+
+            with mock.patch.object(public_export.subprocess, "Popen", truncated_cat_file):
+                with self.assertRaises(public_export.IndexReadError):
+                    public_export.index_files(repo_root=root)
+
 
 class TestToolGitNeverDetachesMaintenance(unittest.TestCase):
     """The exporter commits the staging tree; `git commit` would otherwise hand the
@@ -872,6 +1094,24 @@ class TestToolGitNeverDetachesMaintenance(unittest.TestCase):
             )
             self.assertEqual(stored.returncode, 1)
             self.assertEqual(stored.stdout.strip(), "")
+
+    def test_nested_git_init_drops_an_inherited_index_after_repository_discovery_changes(self):
+        with tempfile.TemporaryDirectory(prefix="git-index-cache-", dir=ROOT) as tmpdir:
+            nested = Path(tmpdir) / "staging"
+            nested.mkdir()
+            caller_index = str(Path(tmpdir) / "caller-index")
+            caller = dict(os.environ, GIT_INDEX_FILE=caller_index)
+
+            before_init = isolated_git_env(caller, root=nested)
+            self.assertEqual(before_init.get("GIT_INDEX_FILE"), caller_index)
+
+            _git(["init", "-q"], nested)
+
+            after_init = isolated_git_env(caller, root=nested)
+            self.assertFalse(
+                "GIT_INDEX_FILE" in after_init,
+                "a nested repository must not keep the enclosing repository's index",
+            )
 
 
 if __name__ == "__main__":

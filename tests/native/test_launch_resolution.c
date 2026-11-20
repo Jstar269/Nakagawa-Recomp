@@ -92,6 +92,10 @@ static void write_file(const char *path, const char *data) {
 
 /* A disc image as the homebrew import writes it, as far as a launch looks: the primary
    volume descriptor with the import's volume identifier (nk_pbp_homebrew.c). */
+/* Link-escape legs (review of #2426, N2/m1) this host could not run because it cannot make
+   a folder link. Any such leg makes the run end in SKIP (exit 77), never a pass. */
+static int s_link_legs_not_run;
+
 /* A folder link at link_path leading to target: a symlink on POSIX, a junction (which needs
    no rights) on Windows. False where the host cannot make one. */
 static bool make_folder_link(const char *link_path, const char *target) {
@@ -189,6 +193,41 @@ static void restore_environment_value(const char *name, const char *value,
 #endif
 }
 
+/* Set `name` to a UTF-8 `value` the way a wrapper's environment carries it: on Windows through
+ * the wide environment (the narrow CRT copy then holds only the code-page approximation). */
+static void set_environment_utf8(const char *name, const char *value) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide_name[64];
+    WCHAR wide_value[1024];
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, wide_name, 64) > 0);
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, wide_value, 1024) > 0);
+    assert(_wputenv_s(wide_name, wide_value) == 0);
+#else
+    assert(setenv(name, value, 1) == 0);
+#endif
+}
+
+/* The process's current directory, in UTF-8, and a change to another one. */
+static void test_get_cwd(char *out, size_t cap) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[1024];
+    assert(_wgetcwd(wide, 1024) != NULL);
+    assert(WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, (int)cap, NULL, NULL) > 0);
+#else
+    assert(getcwd(out, cap) != NULL);
+#endif
+}
+
+static void test_set_cwd(const char *path) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[1024];
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, 1024) > 0);
+    assert(_wchdir(wide) == 0);
+#else
+    assert(chdir(path) == 0);
+#endif
+}
+
 static char *capture_environment_value(const char *name, bool *was_set) {
     const char *current = getenv(name);
     *was_set = current != NULL;
@@ -263,6 +302,8 @@ static int write_launch_environment_probe(void) {
     const char *input_profile = getenv("NK_INPUT_PROFILE");
     const char *novbpace = getenv("SR_NOVBPACE");
     const char *font_dir = getenv("SR_FONTDIR");
+    const char *data_root = getenv("SR_DATAROOT");
+    const char *module_dir = getenv("SR_MODULE_DIR");
     const char *user_data_root = getenv("SR_USER_DATA_ROOT");
     const char *game_title = getenv("SR_GAME_TITLE");
     const char *disc_id = getenv("SR_DISC_ID");
@@ -285,6 +326,8 @@ static int write_launch_environment_probe(void) {
     const char *adhoc_offset = getenv("SR_ADHOC_PORT_OFFSET");
     char nickname_utf8[512];
     const char *nickname = probe_env_utf8("SR_NICKNAME", nickname_utf8, sizeof(nickname_utf8));
+    const char *cheats = getenv("SR_CHEATS");
+    const char *cheats_file = getenv("SR_CHEATS_FILE");
     int ok = fprintf(f,
                      "PSP_ISO=%s\n"
                      "NK_LAUNCH_TEST_UNRELATED=%s\n"
@@ -300,6 +343,8 @@ static int write_launch_environment_probe(void) {
                      "NK_INPUT_PROFILE=%s\n"
                      "SR_NOVBPACE=%s\n"
                      "SR_FONTDIR=%s\n"
+                     "SR_DATAROOT=%s\n"
+                     "SR_MODULE_DIR=%s\n"
                      "SR_USER_DATA_ROOT=%s\n"
                      "SR_GAME_TITLE=%s\n"
                      "SR_DISC_ID=%s\n"
@@ -321,6 +366,8 @@ static int write_launch_environment_probe(void) {
                      "SR_ADHOC_ENABLED=%s\n"
                      "SR_ADHOC_SERVER=%s\n"
                      "SR_ADHOC_PORT_OFFSET=%s\n",
+                     "SR_CHEATS=%s\n"
+                     "SR_CHEATS_FILE=%s\n",
                      iso ? iso : "<unset>",
                      unrelated ? unrelated : "<unset>",
                      fps ? fps : "<unset>",
@@ -335,6 +382,8 @@ static int write_launch_environment_probe(void) {
                      input_profile ? input_profile : "<unset>",
                      novbpace ? novbpace : "<unset>",
                      font_dir ? font_dir : "<unset>",
+                     data_root ? data_root : "<unset>",
+                     module_dir ? module_dir : "<unset>",
                      user_data_root ? user_data_root : "<unset>",
                      game_title ? game_title : "<unset>",
                      disc_id ? disc_id : "<unset>",
@@ -356,7 +405,18 @@ static int write_launch_environment_probe(void) {
                      adhoc_enabled ? adhoc_enabled : "<unset>",
                      adhoc_server ? adhoc_server : "<unset>",
                      adhoc_offset ? adhoc_offset : "<unset>") >= 0;
+                     cheats ? cheats : "<unset>",
+                     cheats_file ? cheats_file : "<unset>") >= 0;
     if (fclose(f) != 0) ok = 0;
+    /* Subtest 21 sets NK_LAUNCH_TEST_DIE so the probe ends without an exit status the wait can
+     * tell from a timeout's: killed by a signal on POSIX, exit code 0xFFFFFFFF on Windows. */
+    if (getenv("NK_LAUNCH_TEST_DIE") != NULL) {
+#if defined(_WIN32) || defined(_WIN64)
+        ExitProcess(0xFFFFFFFFu);
+#else
+        raise(SIGKILL);
+#endif
+    }
     /* Subtest 21 sets NK_LAUNCH_TEST_HOLD so the probe stays alive long
      * enough for nk_launch_stop to have a running child to stop. */
     if (getenv("NK_LAUNCH_TEST_HOLD") != NULL) {
@@ -387,6 +447,7 @@ static bool test_child_exited(int pid, unsigned timeout_ms) {
 }
 
 static void write_valid_elf(const char *path, uint32_t base, uint32_t entry);
+static void write_bytes(const char *path, const void *data, size_t size);
 static bool ends_with(const char *s, const char *suffix);
 static void make_game(NkGameEntry *game, const char *iso_path);
 
@@ -537,6 +598,13 @@ static void test_no_iso_child_environment(const char *test_executable,
     bool had_nickname;
     char *old_nickname = capture_environment_value("SR_NICKNAME", &had_nickname);
     set_environment_value("SR_NICKNAME", "poisoned-parent-nickname");
+    /* Nor inherited cheats (#2639): a session that did not turn them on runs without them,
+       whatever switch and file the parent had. */
+    bool had_cheats, had_cheats_file;
+    char *old_cheats = capture_environment_value("SR_CHEATS", &had_cheats);
+    char *old_cheats_file = capture_environment_value("SR_CHEATS_FILE", &had_cheats_file);
+    set_environment_value("SR_CHEATS", "1");
+    set_environment_value("SR_CHEATS_FILE", "poisoned-parent-cheats");
     /* Nor an inherited Ace Mode line (src/rt/ace.h): a session the player did not resolve on
        is authentic, "off", and exports no report path (A1). */
     /* Nor an inherited presentation upscaler (#1273): an authentic session runs it off. */
@@ -700,6 +768,29 @@ static void test_no_iso_child_environment(const char *test_executable,
     int child_exit = nk_launch_wait(&session, -1);
     nk_launch_stop(&session);
     assert(child_exit == 0);
+
+    /* A session whose child has ended may be started again without a stop in
+       between; the ended child's process and job handles are closed by the new
+       start, not left open and overwritten. */
+    {
+#ifdef _WIN32
+        DWORD handles_before = 0;
+        assert(GetProcessHandleCount(GetCurrentProcess(), &handles_before));
+#endif
+        assert(nk_launch_start(&session) == NK_OK);
+        assert(nk_launch_wait(&session, -1) == 0);
+        assert(!session.is_running);
+        assert(nk_launch_start(&session) == NK_OK);
+        assert(nk_launch_wait(&session, -1) == 0);
+        nk_launch_stop(&session);
+#ifdef _WIN32
+        DWORD handles_after = 0;
+        assert(GetProcessHandleCount(GetCurrentProcess(), &handles_after));
+        printf("[LAUNCH_TEST] handles before restart %lu, after %lu\n",
+               (unsigned long)handles_before, (unsigned long)handles_after);
+        assert(handles_after <= handles_before);
+#endif
+    }
     assert(getenv("PSP_ISO") != NULL);
     assert(strcmp(getenv("PSP_ISO"), "poisoned-parent.iso") == 0);
     assert(getenv("NK_LAUNCH_TEST_UNRELATED") != NULL);
@@ -779,6 +870,10 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "poisoned.adhoc.example") == NULL);
     assert(strstr(observed, "SR_ADHOC_PORT_OFFSET=\n") != NULL);
     assert(strstr(observed, "9999") == NULL);
+    assert(!session.config.cheats && session.config.cheats_file[0] == '\0');   /* prepare_session's default */
+    assert(strstr(observed, "SR_CHEATS=0\n") != NULL);
+    assert(strstr(observed, "SR_CHEATS_FILE=\n") != NULL);
+    assert(strstr(observed, "poisoned-parent-cheats") == NULL);
     assert(strcmp(session.config.ace_spec, "off") == 0);   /* prepare_session's default */
     assert(strstr(observed, "SR_ACE=off\n") != NULL);
     assert(strstr(observed, "SR_ACE_REPORT=\n") != NULL);   /* the parent's path is masked */
@@ -833,6 +928,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     session.config.online_play = true;
     snprintf(session.config.online_play_server, sizeof(session.config.online_play_server),
              "%s", "socom.cc");
+    /* Cheats turned on name the title's own file under the per-user data directory (#2639). */
+    session.config.cheats = true;
     /* An Ace Mode session exports its line and, with it, the report path. */
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
              "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off");
@@ -866,6 +963,14 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_ADHOC_ENABLED=1\n") != NULL);
     assert(strstr(observed, "SR_ADHOC_SERVER=socom.cc\n") != NULL);
     assert(strstr(observed, "SR_ADHOC_PORT_OFFSET=10000\n") != NULL);
+    {
+        char expected[NK_MAX_PATH * 2 + 64];
+        snprintf(expected, sizeof(expected), "SR_CHEATS_FILE=%s%ccheats%cTEST00006.ini\n",
+                 per_user_root, sep, sep);
+        assert(strstr(observed, "SR_CHEATS=1\n") != NULL);
+        assert(strstr(observed, expected) != NULL);
+        assert(strstr(observed, "poisoned-parent-cheats") == NULL);
+    }
     assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\n") != NULL);
     assert(strstr(observed, "SR_TEX_REPLACE=\n") != NULL);
     assert(strstr(observed, "fixture-pack-folder") == NULL);
@@ -895,6 +1000,43 @@ static void test_no_iso_child_environment(const char *test_executable,
     session.config.headless_accept_presented_frames = 0u;
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
     session.config.ace_report_path[0] = '\0';
+    /* Nor does it launch with cheats on (#2639): the checkpoint is the game as it is. */
+    session.config.headless_accept_presented_frames = 3u;
+    assert(nk_launch_start(&session) != NK_OK);
+    assert(strstr(session.last_error, "Cheats are on") != NULL);
+    session.config.headless_accept_presented_frames = 0u;
+    /* Nor does a package whose runtime was built before cheats existed (review of #2652): it
+       would start, apply nothing and show no marker. The launcher asks the executable whether
+       it reads the switch; this one, put in the package's place, does not. */
+    {
+        char kept[NK_MAX_PATH + 8];
+        char block[70000];
+        assert(nk_launch_runtime_reads_cheats(session.executable_path));
+        assert(snprintf(kept, sizeof(kept), "%s.kept", session.executable_path) < (int)sizeof(kept));
+        assert(rename(session.executable_path, kept) == 0);
+        write_file(session.executable_path, "an older runtime: it names SR_CHEATS_FIL and SR_CHEATS, never the file's variable");
+        assert(!nk_launch_runtime_reads_cheats(session.executable_path));
+        assert(nk_launch_start(&session) != NK_OK);
+        assert(strstr(session.last_error, "built before cheats existed") != NULL &&
+               strstr(session.last_error, "Rebuild the package to use cheats, or turn cheats off") != NULL);
+        /* The name is found wherever it lies, across the reader's block boundary too. */
+        memset(block, 'x', sizeof(block));
+        memcpy(block + 65536 - 5, "SR_CHEATS_" "FILE", 14u);
+        write_bytes(session.executable_path, block, sizeof(block));
+        assert(nk_launch_runtime_reads_cheats(session.executable_path));
+        memcpy(block + 65536 - 5, "SR_CHEATS_" "FILX", 14u);
+        write_bytes(session.executable_path, block, sizeof(block));
+        assert(!nk_launch_runtime_reads_cheats(session.executable_path));
+        assert(nk_launch_runtime_reads_cheats("no-such-package-executable"));
+        /* A read that fails (audit 2026-11-17): a folder opens on POSIX and its first read
+           fails, which is an executable that cannot be read, not an older runtime. Windows
+           refuses to open it, the same answer. */
+        assert(nk_launch_runtime_reads_cheats("."));
+        assert(remove(session.executable_path) == 0 && rename(kept, session.executable_path) == 0);
+    }
+    /* A file the session names (the player's --cheats-file) is the one exported, while cheats
+       are on; with them off it names nothing. */
+    snprintf(session.config.cheats_file, sizeof(session.config.cheats_file), "named-cheats.ini");
 
     /* Either an enhanced build or Ace Mode alone is enough to follow the upscale setting
        (an enhancement package or Ace, not both): one launch with each. */
@@ -919,9 +1061,14 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert(strstr(observed, only == 0 ? "SR_ACE=off\n"
                                           : "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\n") != NULL);
         assert(strstr(observed, "SR_PRESENT_UPSCALE=fsr1\n") != NULL);
+        assert(strstr(observed, only == 0 ? "SR_CHEATS=1\n" : "SR_CHEATS=0\n") != NULL);
+        assert(strstr(observed, only == 0 ? "SR_CHEATS_FILE=named-cheats.ini\n" : "SR_CHEATS_FILE=\n") != NULL);
+        assert(strstr(observed, "poisoned-parent-cheats") == NULL);
+        session.config.cheats = false;   /* the second launch: the named file with cheats off */
         session.enhancement_package_id[0] = '\0';
         snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
     }
+    session.config.cheats_file[0] = '\0';
 
     /* A culling build (contract 9.9, 11.3.6) exports 60 Hz on only when it carries the timing
        package: beside it, on; the culling package alone, whose site runs on its own SR_ACE
@@ -992,6 +1139,57 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_TEX_SCALE=4") == NULL && strstr(observed, "SR_SMART_2D=on") == NULL &&
            strstr(observed, "SR_GLYPHS=on") == NULL);
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
+
+    /* Audit 2026-11-17 (F-aeae5960): a session that resolves no data root, project fonts,
+       module folder or per-title input profile hands the child none, whatever the launcher's
+       own environment holds. They were exported only when the session had a value, so a
+       player started from a shell that set them passed another tree's to every such title. */
+    {
+        static const char *const names[] = {
+            "SR_DATAROOT", "SR_FONTDIR", "SR_MODULE_DIR", "NK_INPUT_PROFILE"
+        };
+        bool had[4];
+        char *old_values[4];
+        for (size_t i = 0; i < 4u; i++) {
+            old_values[i] = capture_environment_value(names[i], &had[i]);
+            set_environment_value(names[i], "poisoned-parent-path");
+        }
+        char saved_dataroot[sizeof(session.dataroot_path)];
+        char saved_font[sizeof(session.font_dir)];
+        char saved_prepared[sizeof(session.prepared_root)];
+        char saved_profile[sizeof(session.config.input_profile_path)];
+        memcpy(saved_dataroot, session.dataroot_path, sizeof(saved_dataroot));
+        memcpy(saved_font, session.font_dir, sizeof(saved_font));
+        memcpy(saved_prepared, session.prepared_root, sizeof(saved_prepared));
+        memcpy(saved_profile, session.config.input_profile_path, sizeof(saved_profile));
+        session.dataroot_path[0] = '\0';
+        session.font_dir[0] = '\0';
+        session.prepared_root[0] = '\0';
+        session.config.input_profile_path[0] = '\0';
+        assert(nk_launch_start(&session) == NK_OK);
+        child_exit = nk_launch_wait(&session, -1);
+        nk_launch_stop(&session);
+        assert(child_exit == 0);
+        report = fopen(report_path, "rb");
+        assert(report != NULL);
+        observed_size = fread(observed, 1, sizeof(observed) - 1, report);
+        observed[observed_size] = '\0';
+        assert(!ferror(report));
+        assert(fclose(report) == 0);
+        assert(strstr(observed, "SR_DATAROOT=<unset>\n") != NULL);
+        assert(strstr(observed, "SR_FONTDIR=<unset>\n") != NULL);
+        assert(strstr(observed, "SR_MODULE_DIR=<unset>\n") != NULL);
+        assert(strstr(observed, "NK_INPUT_PROFILE=<unset>\n") != NULL);
+        assert(strstr(observed, "poisoned-parent-path") == NULL);
+        memcpy(session.dataroot_path, saved_dataroot, sizeof(saved_dataroot));
+        memcpy(session.font_dir, saved_font, sizeof(saved_font));
+        memcpy(session.prepared_root, saved_prepared, sizeof(saved_prepared));
+        memcpy(session.config.input_profile_path, saved_profile, sizeof(saved_profile));
+        for (size_t i = 0; i < 4u; i++) {
+            restore_environment_value(names[i], old_values[i], had[i]);
+            free(old_values[i]);
+        }
+    }
 
     /* #2143: an imported homebrew program runs from its Memory Stick folder. The import's
        copy of the folder it was picked from sits beside its disc image ("<image>.ms0",
@@ -1200,7 +1398,9 @@ static void test_no_iso_child_environment(const char *test_executable,
                 snprintf(link_path, sizeof(link_path), "%s%c%s", link_folder, sep,
                          level == 0 ? "MYHB" : level == 1 ? "levels" : "PSP");
                 if (!make_folder_link(link_path, outside)) {
-                    printf("[LAUNCH_TEST] NOT_RUN: this host cannot make a folder link\n");
+                    printf("[LAUNCH_TEST] NOT_RUN: link-escape leg %d: this host cannot make a "
+                           "folder link\n", level);
+                    s_link_legs_not_run++;
                     continue;
                 }
                 copy_field(session.memstick_root, sizeof(session.memstick_root), link_stick);
@@ -1368,6 +1568,10 @@ static void test_no_iso_child_environment(const char *test_executable,
     free(old_adhoc_srv);
     restore_environment_value("SR_ADHOC_PORT_OFFSET", old_adhoc_off, had_adhoc_off);
     free(old_adhoc_off);
+    restore_environment_value("SR_CHEATS", old_cheats, had_cheats);
+    restore_environment_value("SR_CHEATS_FILE", old_cheats_file, had_cheats_file);
+    free(old_cheats);
+    free(old_cheats_file);
     free(old_developer);
     restore_environment_value("SR_LAUNCHER_DISPLAY_BOUNDS", old_launcher_display,
                               had_launcher_display);
@@ -1627,6 +1831,59 @@ static void test_sha256_hex(const uint8_t *bytes, size_t size, char out[65]) {
     out[64] = '\0';
 }
 
+/* Audit 2026-11-17 (F-4d727f52): with no root the readiness probe looks where
+ * nk_launch_prepare_session looks, the per-user data directory. It used to
+ * probe the current directory, so the player's readiness gate and the launch
+ * could disagree about the same runtime. */
+static void test_null_root_probes_user_data_dir(const char *base, char sep,
+                                                const char *iso_path) {
+    printf("[LAUNCH_TEST] NULL root: readiness and prepare share one root\n");
+    fflush(stdout);
+    const char *title_id = "pspdev-phase5-v1";
+    NkTitleEntrySnapshot snapshot = {0};
+    const NkTitleEntry *title = lookup_title_snapshot(title_id, &snapshot);
+    assert(title != NULL && title->game_name != NULL);
+
+    /* The current directory holds no runtime for this title, so a probe of "."
+     * cannot satisfy the checks below. */
+    assert(!nk_launch_runtime_available(".", title_id));
+
+    char user_root[NK_MAX_PATH];
+    char runtime_dir[NK_MAX_PATH * 2];
+    char exe[NK_MAX_PATH * 3];
+    char img[NK_MAX_PATH * 3];
+    snprintf(user_root, sizeof(user_root), "%s%cnull_root_user_data", base, sep);
+    snprintf(runtime_dir, sizeof(runtime_dir), "%s%cbuild%c%s", user_root, sep, sep,
+             title->game_name);
+    assert(nk_platform_mkdir_p(runtime_dir));
+    snprintf(exe, sizeof(exe), "%s%c%s", runtime_dir, sep, title->game_name);
+    snprintf(img, sizeof(img), "%s%c%s_image.bin", runtime_dir, sep, title->game_name);
+    write_file(exe, "binary");
+    write_file(img, "image");
+    make_catalog_data_root(user_root, title_id);
+
+    assert(nk_platform_set_app_data_dir_override(user_root));
+    assert(nk_launch_runtime_available(user_root, title_id));
+    assert(nk_launch_runtime_available(NULL, title_id));
+    assert(nk_launch_runtime_available("", title_id));
+
+    NkGameEntry game;
+    NkLaunchSession session;
+    make_game(&game, iso_path);
+    snprintf(game.disc_id, sizeof(game.disc_id), "TEST00005");
+    snprintf(game.title_id, sizeof(game.title_id), "%s", title_id);
+    assert(nk_launch_prepare_session(&session, &game, NULL) == NK_OK);
+    assert(strstr(session.executable_path, "null_root_user_data") != NULL);
+
+    /* Without the runtime both say no. */
+    remove(exe);
+    assert(!nk_launch_runtime_available(NULL, title_id));
+    assert(nk_launch_prepare_session(&session, &game, NULL) != NK_OK);
+    assert(nk_platform_set_app_data_dir_override(NULL));
+    remove(img);
+    nk_title_catalog_snapshot_release(&snapshot);
+}
+
 static void test_build_identity_run_entry(const char *base, char sep) {
     static const char title_id[] = "build-identity-entry-v1";
     static const char game_name[] = "build-identity-entry";
@@ -1635,9 +1892,15 @@ static void test_build_identity_run_entry(const char *base, char sep) {
     static const uint32_t fallback_entry = 0x08803000u;
     static const uint8_t listed_executable[] = "synthetic-listed-executable";
     static const uint8_t unlisted_executable[] = "synthetic-unlisted-executable";
+    static const uint8_t experimental_executable[] = "synthetic-experimental-executable";
+    static const uint8_t known_bad_executable[] = "synthetic-known-bad-executable";
     char manifest_path[1000];
     char listed_iso[1000];
     char unlisted_iso[1000];
+    char experimental_iso[1000];
+    char known_bad_iso[1000];
+    char experimental_digest[65];
+    char known_bad_digest[65];
     char runtime_dir[1100];
     char runtime_path[1200];
     char image_path[1200];
@@ -1657,6 +1920,9 @@ static void test_build_identity_run_entry(const char *base, char sep) {
     snprintf(manifest_path, sizeof(manifest_path), "%s%cbuild-identity-entry.json", base, sep);
     snprintf(listed_iso, sizeof(listed_iso), "%s%cbuild-identity-listed.iso", base, sep);
     snprintf(unlisted_iso, sizeof(unlisted_iso), "%s%cbuild-identity-unlisted.iso", base, sep);
+    snprintf(experimental_iso, sizeof(experimental_iso), "%s%cbuild-identity-experimental.iso",
+             base, sep);
+    snprintf(known_bad_iso, sizeof(known_bad_iso), "%s%cbuild-identity-known-bad.iso", base, sep);
     snprintf(build_root, sizeof(build_root), "%s%cbuild", base, sep);
     snprintf(runtime_dir, sizeof(runtime_dir), "%s%c%s", build_root, sep, game_name);
     snprintf(runtime_path, sizeof(runtime_path), "%s%c%s", runtime_dir, sep, game_name);
@@ -1667,22 +1933,35 @@ static void test_build_identity_run_entry(const char *base, char sep) {
 
     test_write_build_identity_iso(listed_iso, listed_executable, sizeof(listed_executable));
     test_write_build_identity_iso(unlisted_iso, unlisted_executable, sizeof(unlisted_executable));
+    test_write_build_identity_iso(experimental_iso, experimental_executable,
+                                  sizeof(experimental_executable));
+    test_write_build_identity_iso(known_bad_iso, known_bad_executable,
+                                  sizeof(known_bad_executable));
     test_sha256_hex(listed_executable, sizeof(listed_executable), digest);
+    test_sha256_hex(experimental_executable, sizeof(experimental_executable),
+                    experimental_digest);
+    test_sha256_hex(known_bad_executable, sizeof(known_bad_executable), known_bad_digest);
     written = snprintf(manifest_json, sizeof(manifest_json),
         "{\"schema_version\":1,\"id\":\"%s\",\"game_name\":\"%s\","
         "\"display_name\":\"Build Identity Entry Fixture\",\"kind\":\"retail\","
         "\"disc\":{\"id\":\"%s\",\"region\":\"NA\","
         "\"revision_policy\":\"exact-disc-id\",\"builds\":["
         "{\"executable_sha256\":\"%s\",\"status\":\"supported\","
-        "\"label\":\"Recorded fixture build\"}]},"
-        "\"executable\":{\"base\":\"0x08800000\",\"entry\":\"0x%08x\","
+        "\"label\":\"Recorded fixture build\"},"
+        "{\"executable_sha256\":\"%s\",\"status\":\"experimental\","
+        "\"label\":\"Experimental fixture build\"},"
+        "{\"executable_sha256\":\"%s\",\"status\":\"known-bad\","
+        "\"label\":\"Patched fixture build\","
+        "\"reason\":\"This fixture copy was patched after release.\"}]},"
+        "\"executable\":{\"base\":142606336,\"entry\":%u,"
         "\"bss_metadata_source\":\"none\",\"extra_executable_spans\":[]},"
         "\"modules\":[],\"filesystem\":{\"data_root\":\"build-identity-data\","
         "\"memory_stick_root\":\"build-identity-ms\","
         "\"device_prefixes\":[\"host0:\"]},\"hle_profile\":\"standard\","
         "\"feature_requirements\":[\"allegrex\"],\"verification_profile\":\"smoke\","
-        "\"runtime_bindings\":{\"schema_version\":1,\"fallback_entry\":\"0x%08x\"}}",
-        title_id, game_name, disc_id, digest, executable_entry, fallback_entry);
+        "\"runtime_bindings\":{\"schema_version\":1,\"fallback_entry\":%u}}",
+        title_id, game_name, disc_id, digest, experimental_digest, known_bad_digest,
+        executable_entry, fallback_entry);
     assert(written > 0 && (size_t)written < sizeof(manifest_json));
     write_file(manifest_path, manifest_json);
     if (!nk_title_manifest_load_overlay_ext(manifest_path, false, error, sizeof(error))) {
@@ -1717,10 +1996,50 @@ static void test_build_identity_run_entry(const char *base, char sep) {
     assert(nk_launch_prepare_session(&session, &game, base) == NK_OK);
     assert(session.entry_point == executable_entry);
 
+    /* An experimental build is a recorded build: it launches with the recorded run entry. */
+    assert(nk_title_manifest_identify_build(disc_id, experimental_iso, "EBOOT.BIN", &identity));
+    assert(identity.status == NK_BUILD_EXPERIMENTAL);
+    make_game(&game, experimental_iso);
+    snprintf(game.disc_id, sizeof(game.disc_id), "%s", disc_id);
+    snprintf(game.title_id, sizeof(game.title_id), "%s", title_id);
+    snprintf(game.selected_executable, sizeof(game.selected_executable), "EBOOT.BIN");
+    assert(nk_launch_prepare_session(&session, &game, base) == NK_OK);
+    assert(session.entry_point == fallback_entry);
+
+    /* Audit 2026-11-17 (F-a35da00a): a known-bad build is refused by the launch core itself,
+     * with its recorded reason, as the card preflight and the Python staging refuse it. A
+     * direct launch, or one prepared after the disc changed since its card was checked, used
+     * to start it with the runtime bindings recorded for the supported executable. */
+    assert(nk_title_manifest_identify_build(disc_id, known_bad_iso, "EBOOT.BIN", &identity));
+    assert(identity.status == NK_BUILD_KNOWN_BAD);
+    make_game(&game, known_bad_iso);
+    snprintf(game.disc_id, sizeof(game.disc_id), "%s", disc_id);
+    snprintf(game.title_id, sizeof(game.title_id), "%s", title_id);
+    snprintf(game.selected_executable, sizeof(game.selected_executable), "EBOOT.BIN");
+    assert(nk_launch_prepare_session(&session, &game, base) == NK_ERROR_UNSUPPORTED_TITLE);
+    assert(strstr(session.last_error, "BUILD_KNOWN_BAD") != NULL);
+    assert(strstr(session.last_error, "Patched fixture build") != NULL);
+    assert(strstr(session.last_error, "patched after release") != NULL);
+    assert(session.entry_point == 0u);
+
+    /* An executable the image does not hold is not reported as another build:
+       the card names the read failure, and the recorded bindings stay off. */
+    {
+        char described[512];
+        assert(nk_title_manifest_identify_build(disc_id, listed_iso, "BOOT.BIN", &identity));
+        assert(identity.status == NK_BUILD_UNLISTED && identity.sha256[0] == '\0');
+        nk_title_manifest_describe_build(&identity, described, sizeof(described));
+        assert(strstr(described, "PSP_GAME/SYSDIR/BOOT.BIN could not be found or read") != NULL);
+        assert(strstr(described, "not a build Nakagawa has recorded") == NULL);
+        assert(strstr(described, "Supported build: Recorded fixture build") != NULL);
+    }
+
     nk_title_catalog_clear_overlay();
     remove(manifest_path);
     remove(listed_iso);
     remove(unlisted_iso);
+    remove(experimental_iso);
+    remove(known_bad_iso);
     remove(runtime_path);
     remove(image_path);
     test_rmdir(data_path);
@@ -1963,6 +2282,35 @@ static void test_launch_stop_functionality(const char *test_executable, const ch
     /* 5. Repeated call to nk_launch_stop on stopped session (idempotency) */
     nk_launch_stop(&session);
     assert(session.is_running == false);
+
+    /* 6. Audit 2026-11-17 (F-a2e4f9bb): a bounded wait says whether it timed out apart from
+     * the exit code. A child with no exit status (a signal on POSIX, 0xFFFFFFFF on Windows)
+     * also reads as -1, and the headless routes reported such a crash as a timeout. */
+    {
+        bool timed_out = false;
+        assert(nk_launch_prepare_session(&session, &game, root) == NK_OK);
+        assert(nk_launch_start(&session) == NK_OK);
+        /* Still holding: the wait expires, says so, and the session stays the caller's. */
+        assert(nk_launch_wait_status(&session, 200, &timed_out) == -1);
+        assert(timed_out);
+        assert(session.is_running);
+        nk_launch_stop(&session);
+        assert(!session.is_running);
+
+        restore_environment_value("NK_LAUNCH_TEST_HOLD", NULL, false);
+        bool had_die;
+        char *old_die = capture_environment_value("NK_LAUNCH_TEST_DIE", &had_die);
+        set_environment_value("NK_LAUNCH_TEST_DIE", "1");
+        assert(nk_launch_prepare_session(&session, &game, root) == NK_OK);
+        assert(nk_launch_start(&session) == NK_OK);
+        timed_out = true;
+        assert(nk_launch_wait_status(&session, 30000, &timed_out) == -1);
+        assert(!timed_out);
+        assert(!session.is_running);
+        nk_launch_stop(&session);
+        restore_environment_value("NK_LAUNCH_TEST_DIE", old_die, had_die);
+        free(old_die);
+    }
 
     restore_environment_value("NK_LAUNCH_TEST_REPORT_FILE", old_report, had_report);
     free(old_report);
@@ -2324,6 +2672,33 @@ static void test_non_ascii_user_data_root(const char *base, char sep) {
     assert(strstr(unicode_session.memstick_root, NK_NONASCII_ROOT) != NULL);
     assert(nk_platform_dir_exists(unicode_session.memstick_root));
 
+    /* Audit 2026-11-17 (F-8fbc6b7c): a wrapper's SR_MEMSTICK naming a folder outside the ANSI
+     * code page is read whole. The narrow getenv gave the code-page bytes, which no UTF-8 path
+     * reader accepts, so the launch stopped with "SR_MEMSTICK is set but is not a writable
+     * directory". */
+    {
+        char forced_stick[1000];
+        char expected_stick[NK_MAX_PATH];
+        bool had_stick;
+        char *old_stick = capture_environment_value("SR_MEMSTICK", &had_stick);
+        snprintf(forced_stick, sizeof(forced_stick), "%s%cforced_" NK_NONASCII_ROOT, base, sep);
+        assert(nk_platform_mkdir_p(forced_stick));
+        assert(nk_platform_absolute_path(forced_stick, expected_stick, sizeof(expected_stick)));
+        set_environment_utf8("SR_MEMSTICK", forced_stick);
+        static NkLaunchSession forced_session;
+        NkResult forced_result =
+            nk_launch_prepare_session(&forced_session, &unicode_game, root);
+        restore_environment_value("SR_MEMSTICK", old_stick, had_stick);
+        free(old_stick);
+        if (forced_result != NK_OK) {
+            printf("[LAUNCH_TEST] non-ASCII SR_MEMSTICK refused: [%s]\n",
+                   forced_session.last_error);
+        }
+        assert(forced_result == NK_OK);
+        assert(strcmp(forced_session.memstick_root, expected_stick) == 0);
+        remove_dir_utf8(forced_stick);
+    }
+
     /* The font cache open: the cache lives at <user_data>/fonts/v2, so its
      * manifest read is another user-data narrow open (#324). */
     snprintf(font_parent, sizeof(font_parent), "%s%cfonts", root, sep);
@@ -2464,6 +2839,18 @@ static void test_keep_run_log(const char *base, char sep) {
     assert(strlen(body) <= 100u);
     assert(strstr(body, "second run line 39\n") != NULL);
     assert(strcmp(body + strlen(body) - 19u, "second run line 39\n") == 0);
+    {
+        /* The note names what the file holds: the cut moved on to a whole line,
+           so fewer than the cap's bytes are kept, and the two counts add up to
+           the run. */
+        unsigned long long cut_bytes = 0;
+        unsigned long long kept_bytes = 0;
+        assert(sscanf(text, "[nakagawa] the first %llu bytes of this run were cut; "
+                            "the last %llu bytes are kept", &cut_bytes, &kept_bytes) == 2);
+        assert(kept_bytes == (unsigned long long)strlen(body));
+        assert(kept_bytes < 100u);
+        assert(cut_bytes + kept_bytes == (unsigned long long)strlen(second_run));
+    }
     assert(!nk_platform_file_exists(part));
 
     /* A third run drops the oldest copy. */
@@ -2558,6 +2945,56 @@ static void test_launcher_display_choice(void) {
     }
 }
 
+/* F-5eb8ea69: the program's Memory Stick folder is named as picked, not after a
+   link's target. Failing before (POSIX): the picked path went through realpath, so
+   a folder Cool linked to cool-v2 was named cool-v2, and a linked EBOOT.PBP named
+   the folder its target sits in. Windows (a junction) named it Cool already. */
+static void test_homebrew_folder_named_as_picked(const char *base) {
+    printf("[LAUNCH_TEST] Homebrew folder named as picked through a link\n");
+    fflush(stdout);
+    const char sep = nk_platform_path_separator();
+    char game[700], target[700], link_path[800], pbp[900], name[128], problem[512];
+    snprintf(game, sizeof(game), "%s%chb-picked%cGAME", base, sep, sep);
+    snprintf(target, sizeof(target), "%s%chb-picked%ccool-v2", base, sep, sep);
+    snprintf(link_path, sizeof(link_path), "%s%cCool", game, sep);
+    assert(nk_platform_mkdir_p(game));
+    assert(nk_platform_mkdir_p(target));
+    snprintf(pbp, sizeof(pbp), "%s%cEBOOT.PBP", target, sep);
+    write_file(pbp, "PBP program");
+    if (!nk_platform_dir_exists(link_path) && !make_folder_link(link_path, target)) {
+        printf("SKIP: this host cannot make a folder link\n");
+        return;
+    }
+    snprintf(pbp, sizeof(pbp), "%s%cEBOOT.PBP", link_path, sep);
+    assert(nk_pbp_homebrew_folder_name(pbp, name, sizeof(name), problem, sizeof(problem)));
+    assert(strcmp(name, "Cool") == 0);
+    {
+        /* A pick relative to the working folder keeps the name too. */
+        char saved_cwd[1024];
+        char relative[64];
+        test_get_cwd(saved_cwd, sizeof(saved_cwd));
+        test_set_cwd(game);
+        snprintf(relative, sizeof(relative), "Cool%cEBOOT.PBP", sep);
+        const bool named = nk_pbp_homebrew_folder_name(relative, name, sizeof(name), problem,
+                                                       sizeof(problem));
+        test_set_cwd(saved_cwd);
+        assert(named);
+        assert(strcmp(name, "Cool") == 0);
+    }
+#if !defined(_WIN32) && !defined(_WIN64)
+    /* An EBOOT.PBP that is itself a link names the folder it was picked in. */
+    char linked_folder[800], linked_pbp[900];
+    snprintf(linked_folder, sizeof(linked_folder), "%s%cLinked", game, sep);
+    assert(nk_platform_mkdir_p(linked_folder));
+    snprintf(linked_pbp, sizeof(linked_pbp), "%s%cEBOOT.PBP", linked_folder, sep);
+    snprintf(pbp, sizeof(pbp), "%s%cEBOOT.PBP", target, sep);
+    if (!nk_platform_file_exists(linked_pbp)) assert(symlink(pbp, linked_pbp) == 0);
+    assert(nk_pbp_homebrew_folder_name(linked_pbp, name, sizeof(name), problem,
+                                       sizeof(problem)));
+    assert(strcmp(name, "Linked") == 0);
+#endif
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return write_launch_environment_probe();
@@ -2581,6 +3018,7 @@ int main(int argc, char **argv) {
     char base[600];
     snprintf(base, sizeof(base), "%s%claunch_resolution_tests", cache_dir, sep);
     assert(nk_platform_mkdir_p(base));
+    test_homebrew_folder_named_as_picked(base);
 
     char iso_path[700];
     snprintf(iso_path, sizeof(iso_path), "%s%cgame.iso", base, sep);
@@ -2655,6 +3093,69 @@ int main(int argc, char **argv) {
         assert(strstr(forced_session.last_error, "SR_MEMSTICK") != NULL);
         assert(forced_session.memstick_root[0] == 0);
         restore_environment_value("SR_MEMSTICK", prev_copy, had);
+    }
+
+    /* 2c. Audit 2026-11-17 (F-acb0b625, F-53be42f7): the prepared_root/disc/game.iso fallback
+     * is formed by the checked join. A prepared root whose fallback does not fit the session's
+     * ISO path is refused by name: it used to pass the existence check at full length and then
+     * be stored cut, so PSP_ISO named another file. An empty prepared root has no fallback: it
+     * used to probe <filesystem root>/disc/game.iso. */
+    {
+        static NkLaunchSession fallback_session;
+        NkGameEntry fallback_game;
+        char missing_iso[800];
+        char long_container[800];
+        char long_root[NK_MAX_PATH];
+        char long_disc[NK_MAX_PATH + 16];
+        char long_iso[NK_MAX_PATH + 32];
+        char absolute_root1[NK_MAX_PATH];
+        snprintf(missing_iso, sizeof(missing_iso), "%s%cmissing-source.iso", root1, sep);
+        assert(!nk_platform_file_exists(missing_iso));
+
+        make_game(&fallback_game, missing_iso);
+        assert(nk_launch_prepare_session(&fallback_session, &fallback_game, root1) ==
+               NK_ERROR_FILE_NOT_FOUND);
+        assert(strstr(fallback_session.last_error, "Game source ISO not found") != NULL);
+
+        /* A prepared root 505 bytes long: "<root>/disc/game.iso" is 519, past the 511 the
+         * session holds. The Windows extended-length form lets the fixture exist on a host
+         * without long-path support. */
+        assert(nk_platform_absolute_path(root1, absolute_root1, sizeof(absolute_root1)));
+#if defined(_WIN32) || defined(_WIN64)
+        snprintf(long_container, sizeof(long_container), "\\\\?\\%s%clong-prepared",
+                 absolute_root1, sep);
+#else
+        snprintf(long_container, sizeof(long_container), "%s%clong-prepared", absolute_root1,
+                 sep);
+#endif
+        size_t long_length = strlen(long_container);
+        assert(long_length + 2u < 505u);
+        memcpy(long_root, long_container, long_length + 1u);
+        while (long_length < 505u) {
+            size_t component = 505u - long_length - 1u;
+            if (component > 200u) component = 200u;
+            if (component == 0u) {
+                long_root[long_length++] = 'x';
+                long_root[long_length] = '\0';
+                break;
+            }
+            long_root[long_length++] = sep;
+            memset(long_root + long_length, 'p', component);
+            long_length += component;
+            long_root[long_length] = '\0';
+        }
+        assert(strlen(long_root) == 505u);
+        snprintf(long_disc, sizeof(long_disc), "%s%cdisc", long_root, sep);
+        snprintf(long_iso, sizeof(long_iso), "%s%cgame.iso", long_disc, sep);
+        assert(nk_platform_mkdir_p(long_disc));
+        write_file_utf8(long_iso, "NOT-A-REAL-ISO");
+        assert(nk_platform_file_exists(long_iso));
+        memcpy(fallback_game.prepared_root, long_root, strlen(long_root) + 1u);
+        NkResult long_result =
+            nk_launch_prepare_session(&fallback_session, &fallback_game, root1);
+        assert(long_result == NK_ERROR_PATH_TOO_LONG);
+        assert(strstr(fallback_session.last_error, "too long") != NULL);
+        assert(nk_platform_remove_tree(long_container, NULL));
     }
 
     /* 3. A .exe name still has its extension replaced, not appended to. */
@@ -2788,7 +3289,7 @@ int main(int argc, char **argv) {
         "{\"schema_version\":1,\"id\":\"launch-name-test-v1\","
         "\"game_name\":\"custom-launch\",\"display_name\":\"Launch Name Test\","
         "\"kind\":\"synthetic\","
-        "\"executable\":{\"base\":\"0x08820000\",\"entry\":\"0x08820000\","
+        "\"executable\":{\"base\":142737408,\"entry\":142737408,"
         "\"bss_metadata_source\":\"elf\",\"extra_executable_spans\":[]},"
         "\"modules\":[],\"filesystem\":{\"data_root\":\"custom-data\","
         "\"memory_stick_root\":\"custom-ms\",\"device_prefixes\":[\"host0:\"],"
@@ -2825,6 +3326,22 @@ int main(int argc, char **argv) {
     assert(strstr(session.memstick_root, "custom-ms") != NULL);
     assert(strstr(session.loose_content_roots, "custom-root-a\tdata\t10\t0\t0\n") != NULL);
     assert(strstr(session.loose_content_roots, "custom-root-b\tdata\t20\t0\t0\n") != NULL);
+    /* Audit 2026-11-17 (F-1c5f0ea0): from a relative root the catalog's memory_stick_root is
+     * stored absolute. The child starts in the session's working directory, so a relative
+     * SR_MEMSTICK named <root>/<root>/custom-ms there, not the folder checked writable here. */
+    {
+        char saved_cwd[1024];
+        char expected_ms[NK_MAX_PATH];
+        static NkLaunchSession relative_session;
+        assert(nk_platform_absolute_path(custom_ms, expected_ms, sizeof(expected_ms)));
+        test_get_cwd(saved_cwd, sizeof(saved_cwd));
+        test_set_cwd(base);
+        NkResult relative_result = nk_launch_prepare_session(&relative_session, &game, ".");
+        test_set_cwd(saved_cwd);
+        assert(relative_result == NK_OK);
+        assert(nk_platform_path_is_absolute(relative_session.memstick_root));
+        assert(strcmp(relative_session.memstick_root, expected_ms) == 0);
+    }
     nk_title_catalog_clear_overlay();
     nk_title_catalog_snapshot_release(&custom_snapshot);
     remove(custom_exe);
@@ -2994,7 +3511,11 @@ int main(int argc, char **argv) {
     make_game(&game, iso_path);
     snprintf(game.disc_id, sizeof(game.disc_id), "ZZZZ99999");
     snprintf(game.title_id, sizeof(game.title_id), "not-a-catalog-title");
-    assert(nk_launch_prepare_session(&session, &game, base) != NK_OK);
+    /* The catalog refuses it by name, before any runtime is looked for: a runtime
+     * missing under `base` must not be what makes this subtest pass. */
+    assert(nk_launch_prepare_session(&session, &game, base) == NK_ERROR_UNSUPPORTED_TITLE);
+    assert(strstr(session.last_error, "No catalog entry describes this title") != NULL);
+    assert(strstr(session.last_error, "not-a-catalog-title") != NULL);
 
     /* 9. A stale retail-shaped build must not satisfy a second title (#366).
      *
@@ -3375,7 +3896,7 @@ int main(int argc, char **argv) {
         "\"display_name\":\"Legacy Retail Fixture\",\"kind\":\"retail\","
         "\"disc\":{\"id\":\"UCES01402\",\"region\":\"EU\","
         "\"revision_policy\":\"exact-disc-id\"},"
-        "\"executable\":{\"base\":\"0x00000000\",\"entry\":\"0x00000000\","
+        "\"executable\":{\"base\":0,\"entry\":0,"
         "\"bss_metadata_source\":\"elf\",\"extra_executable_spans\":[]},"
         "\"modules\":[],\"filesystem\":{\"data_root\":\"legacy-data\","
         "\"memory_stick_root\":\"legacy-ms\",\"device_prefixes\":[\"host0:\"]},"
@@ -3429,7 +3950,7 @@ int main(int argc, char **argv) {
      * when the runtime is actually spawned. The sentinel verifies that the
      * child still receives unrelated parent environment values. */
 #if defined(__ANDROID__)
-    /* Subtests 18 and 20 start the runtime as a child process. On Android a title starts in
+    /* Subtests 18 and 21 start the runtime as a child process. On Android a title starts in
      * its own process through TitleActivity, over JNI, which a program run from adb shell has
      * no Java VM for; nk_launch_start fails closed there (tests/native/test_posix_process.c).
      * They run inside the app instead, and are reported as skipped below. */
@@ -3442,9 +3963,9 @@ int main(int argc, char **argv) {
     test_non_ascii_user_data_root(base, sep);
     test_game_data_root_status(base, sep);
 
-    /* 20. nk_launch_stop state changes and process termination. */
+    /* 21. nk_launch_stop state changes and process termination. */
 #if defined(__ANDROID__)
-    printf("[LAUNCH_TEST] Subtest 20: skipped on Android (needs the app's TitleActivity)\n");
+    printf("[LAUNCH_TEST] Subtest 21: skipped on Android (needs the app's TitleActivity)\n");
 #else
     test_launch_stop_functionality(argv[0], base, sep);
 #endif
@@ -3453,15 +3974,24 @@ int main(int argc, char **argv) {
 
     test_launcher_display_choice();
     test_build_identity_run_entry(base, sep);
+    test_null_root_probes_user_data_dir(base, sep, iso_path);
 
 #if defined(__ANDROID__)
     (void)test_no_iso_child_environment;
     (void)test_launch_stop_functionality;
+    (void)s_link_legs_not_run;
     native_test_assert_real_config_untouched();
-    printf("SKIP launch_resolution_test subtests 18 and 20 (exit 77): they spawn the runtime, "
+    printf("SKIP launch_resolution_test subtests 18 and 21 (exit 77): they spawn the runtime, "
            "which Android does through TitleActivity; every other subtest passed\n");
     return 77;
 #else
+    if (s_link_legs_not_run > 0) {
+        native_test_assert_real_config_untouched();
+        printf("SKIP launch_resolution_test (exit 77): %d link-escape leg(s) of the review of "
+               "#2426 (N2/m1) were NOT_RUN because this host cannot make a folder link; every "
+               "other subtest passed\n", s_link_legs_not_run);
+        return 77;
+    }
     printf("[LAUNCH_TEST] ALL LAUNCH RESOLUTION TESTS PASSED!\n");
     native_test_assert_real_config_untouched();
     return 0;

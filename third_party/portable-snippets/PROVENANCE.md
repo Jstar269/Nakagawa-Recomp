@@ -40,3 +40,46 @@ None. The header declares `__int128` helper types, which GCC reports under
 `tests/native/test_safe_math.c` (run by `native-core-tests`) includes it the
 same way under `-Wpedantic -Werror` and checks the size and 64-bit edges those
 call sites rely on.
+
+## Supported surface and known upstream defects
+
+The project uses two typed helpers, `psnip_safe_size_mul` and
+`psnip_safe_uint64_add`, and only on its GCC, Clang and MinGW-w64 builds, where
+the header defines `PSNIP_SAFE_HAVE_BUILTIN_OVERFLOW` and each helper is a
+`__builtin_*_overflow` call. Everything else in the header is unsupported here.
+The pinned revision is still upstream's `master`, so none of the defects below
+has an upstream fix; they are kept byte-identical rather than edited, because no
+project path reaches them. Checked 2026-11-17 against the file in this tree:
+
+- **Do not define `PSNIP_SAFE_STATIC_INLINE`.** `PSNIP_SAFE__FUNCTION`, which every
+  helper definition uses, is defined only inside
+  `#if !defined(PSNIP_SAFE_STATIC_INLINE)` and nothing maps the override onto it,
+  so the header stops compiling.
+- **Do not define `PSNIP_SAFE_FORCE_PORTABLE`, or build with a compiler that has
+  neither the overflow builtins nor `intsafe.h`.** The portable fallbacks are
+  then compiled, and two of them are wrong:
+  - The promoted ("larger type") fallbacks are dead. The header defines
+    `PSNIP_SAFE_HAVE_INT8_LARGER` ... `PSNIP_SAFE_HAVE_INT64_LARGER` and
+    `PSNIP_SAFE_HAVE_LARGER_SHRT`/`USHRT`, but the users test
+    `PSNIP_SAFE_HAVE_LARGER_INT8` ... `UINT64` and `PSNIP_SAFE_HAVE_LARGER_SHORT`/`USHORT`,
+    names nothing defines, so the division-based fallbacks run instead.
+  - The unsigned multiply fallback (`PSNIP_SAFE_DEFINE_UNSIGNED_MUL`) computes
+    `(T) (a * b)` before its overflow check. For `unsigned short` and
+    `psnip_uint16_t` both operands promote to signed `int`, so
+    `psnip_safe_uint16_mul(&r, 0xffff, 0xffff)` overflows `int`, which is undefined
+    behaviour. Reproduced 2026-11-17 with Linux GCC,
+    `-DPSNIP_SAFE_FORCE_PORTABLE -fsanitize=signed-integer-overflow`: "signed
+    integer overflow: 65535 * 65535 cannot be represented in type 'int'" at the
+    `psnip_uint16_t` instantiation.
+- **Do not use the type-generic `psnip_safe_div` or `psnip_safe_mod`.** With the
+  builtins they expand to `__builtin_div_overflow` and `__builtin_mod_overflow`,
+  which neither GCC nor Clang provides, so a use fails to compile or link. Use a
+  typed helper instead.
+- **Do not define `PSNIP_SAFE_EMULATE_NATIVE` or `PSNIP_BUILTIN_EMULATE_NATIVE`.**
+  The guard that should skip the emulation tests `PSNIP_SAFE_HAVE_BUILTINS`, a
+  name the header never defines (it defines `PSNIP_SAFE_HAVE_BUILTIN_OVERFLOW`),
+  so on GCC or Clang the header would `#define __builtin_sadd_overflow` and the
+  other reserved builtin names over the real intrinsics.
+
+A project use outside this surface first needs a recorded LOCAL DELTA that fixes
+the defect it would reach.

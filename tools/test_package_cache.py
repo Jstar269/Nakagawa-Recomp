@@ -955,7 +955,7 @@ class PackageCacheTests(unittest.TestCase):
                     manifest, manifest_path, executable_hash, None, None, public_safe=mode
                     , title_input_identity=identity
                 )
-            planner_key = title_codegen_plan._cache_key_for_build(
+            planner_key, _planner_options, _tool_digests = title_codegen_plan._cache_key_for_build(
                 input_hashes=input_hashes,
                 title_input_identity=identity,
                 plan=plan,
@@ -1002,6 +1002,88 @@ class PackageCacheTests(unittest.TestCase):
         self.assertEqual(
             package_cache.compiler_target({**environment, "NK_TARGET_TRIPLE": "fixture-target"}),
             "fixture-target",
+        )
+
+    def test_compiler_target_reuses_the_shared_compiler_query(self) -> None:
+        environment = {"CC": "synthetic-compiler", "PATH": ""}
+        with (
+            mock.patch.object(
+                package_cache, "_compiler_executable", return_value="resolved-compiler"
+            ),
+            mock.patch.object(
+                package_cache, "_compiler_query", return_value="synthetic-target"
+            ) as query,
+        ):
+            target = package_cache.compiler_target(environment)
+
+        self.assertEqual(target, "synthetic-target")
+        query.assert_called_once_with("resolved-compiler", "-dumpmachine", environment)
+
+    def test_llvm_tool_probe_failures_are_named_package_cache_errors(self) -> None:
+        environment = {"PATH": "synthetic-path"}
+        failures = (
+            OSError("synthetic executable failure"),
+            subprocess.TimeoutExpired("synthetic clang", 60),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                with (
+                    mock.patch.object(
+                        package_cache.shutil, "which", return_value="synthetic-clang"
+                    ),
+                    mock.patch.object(package_cache.subprocess, "run", side_effect=failure),
+                ):
+                    with self.assertRaisesRegex(
+                        package_cache.PackageCacheError, "clang -v could not run"
+                    ):
+                        package_cache._llvm_tool_identity("clang", environment, "-v")
+
+    def test_enhancement_package_location_is_shared_by_guard_and_cache_key(self) -> None:
+        import enhancement_package
+
+        package_path = self.root / "synthetic-enhancement.json"
+        environments = (
+            ({"MAKEFLAGS": f"-j3 ENHANCEMENT_PACKAGE={package_path}"},
+             "MAKEFLAGS ENHANCEMENT_PACKAGE"),
+            ({"CODEGEN_USER_ARGS": f"--enhancement-package {package_path}"},
+             "CODEGEN_USER_ARGS --enhancement-package"),
+            ({"CODEGEN_USER_ARGS": f"--enhancement-package={package_path}"},
+             "CODEGEN_USER_ARGS --enhancement-package"),
+        )
+        with (
+            mock.patch.object(
+                enhancement_package,
+                "load_and_validate_package",
+                return_value={"id": "synthetic.enhancement"},
+            ),
+            mock.patch.object(
+                enhancement_package, "compute_package_digest", return_value="a" * 64
+            ),
+        ):
+            for environment, expected_source in environments:
+                with self.subTest(environment=environment):
+                    self.assertEqual(
+                        package_cache.ambient_enhancement_package(environment),
+                        expected_source,
+                    )
+                    options = package_cache.enhancement_package_options(environment)
+                    self.assertEqual(
+                        options["enhancement_package_id"], "synthetic.enhancement"
+                    )
+
+    def test_completion_manifest_checks_aot_key_components_once(self) -> None:
+        package_dir, key, _ = self._new_package_dir("single-aot-key-check")
+        package_cache.write_completion_manifest(package_dir, key)
+        original = package_cache._key_components
+
+        with mock.patch.object(package_cache, "_key_components", wraps=original) as check:
+            status, reason, _document = package_cache._check_completion_manifest(
+                package_dir, expected_key=key
+            )
+
+        self.assertEqual(status, package_cache._COMPLETION_OK, reason)
+        self.assertEqual(
+            sum(call.args[1] == "aot" for call in check.call_args_list), 1
         )
 
     def test_relative_cc_resolves_identity_and_target_to_the_same_compiler(self) -> None:
@@ -1141,6 +1223,36 @@ class PackageCacheTests(unittest.TestCase):
                 path = root / relative
                 path.write_bytes(path.read_bytes() + b"/* changed */\n")
                 self.assertEqual(package_cache.source_tree_digest(root), base, relative)
+
+    def test_runtime_digest_changes_when_an_embedded_shader_blob_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            shader_root = root / "src" / "rt" / "gpu_sdl3vk"
+            shader_root.mkdir(parents=True)
+            shader_blobs = [shader_root / f"synthetic_shader{suffix}"
+                            for suffix in (".inc", ".comp", ".vert", ".frag")]
+            for shader_blob in shader_blobs:
+                shader_blob.write_bytes(b"first embedded shader bytes")
+            first = package_cache.source_tree_digest(root, directories=("src/rt",))
+
+            for shader_blob in shader_blobs:
+                with self.subTest(suffix=shader_blob.suffix):
+                    shader_blob.write_bytes(b"updated embedded shader bytes")
+                    self.assertNotEqual(
+                        package_cache.source_tree_digest(root, directories=("src/rt",)),
+                        first,
+                    )
+                    shader_blob.write_bytes(b"first embedded shader bytes")
+
+
+    def test_player_runtime_digest_counts_the_same_source_suffixes(self) -> None:
+        text = (ROOT / "src" / "core" / "nk_title_manifest.c").read_text(encoding="utf-8")
+        start = text.index("static bool package_source_suffix_counts(")
+        block = re.search(r"suffixes\[\]\s*=\s*\{(.*?)\};", text[start:], re.S)
+        self.assertIsNotNone(block)
+        assert block is not None
+        native_suffixes = set(re.findall(r'"([^"]+)"', block.group(1)))
+        self.assertEqual(native_suffixes, package_cache.RUNTIME_SOURCE_SUFFIXES)
 
     def test_runtime_digest_lists_every_third_party_directory_the_runtime_uses(self) -> None:
         # A runtime source that includes a third-party header, or a runtime flag that
@@ -1498,29 +1610,65 @@ class PackageCacheTests(unittest.TestCase):
             target = root / "packages" / "ABCD12345"
             target.parent.mkdir(parents=True)
             for stamp, marker in ((100, "older"), (200, "newest")):
-                backup = cache_dir / f"previous-{stamp}"
+                backup = cache_dir / f"previous-ABCD12345-{stamp}"
                 backup.mkdir()
                 (backup / "package.json").write_text(marker, encoding="utf-8")
-            (cache_dir / "previous-notes").mkdir()
+            (cache_dir / "previous-ABCD12345-notes").mkdir()
             restored = nk_cli._restore_interrupted_swap(target, cache_dir)
-            self.assertEqual(restored, cache_dir / "previous-200")
+            self.assertEqual(restored, cache_dir / "previous-ABCD12345-200")
             self.assertEqual((target / "package.json").read_text(encoding="utf-8"), "newest")
-            self.assertFalse((cache_dir / "previous-200").exists())
+            self.assertFalse((cache_dir / "previous-ABCD12345-200").exists())
             # A package in place is never replaced by a backup.
             self.assertIsNone(nk_cli._restore_interrupted_swap(target, cache_dir))
             self.assertEqual((target / "package.json").read_text(encoding="utf-8"), "newest")
-            self.assertTrue((cache_dir / "previous-100").is_dir())
+            self.assertTrue((cache_dir / "previous-ABCD12345-100").is_dir())
+
+    def test_an_interrupted_swap_is_restored_only_into_its_own_variant(self) -> None:
+        """Every package variant of a disc shares one cache folder: a backup an
+        interrupted enhanced build left aside is never moved into the authentic
+        package's folder, and goes back into the enhanced one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_dir = root / "cache" / "packages" / "ABCD12345"
+            cache_dir.mkdir(parents=True)
+            authentic = root / "packages" / "ABCD12345"
+            enhanced = root / "packages" / "ABCD12345-enhanced-hd"
+            enhanced.mkdir(parents=True)
+            (enhanced / "package.json").write_text("enhanced", encoding="utf-8")
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "package.json").write_text("enhanced, rebuilt", encoding="utf-8")
+            real_helper = nk_cli._replace_package_folder
+
+            def stopped_after_the_first_rename(source, destination):
+                if Path(source) == staging:
+                    raise KeyboardInterrupt  # the build stops between the two renames
+                return real_helper(source, destination)
+
+            with mock.patch.object(nk_cli, "_replace_package_folder",
+                                   side_effect=stopped_after_the_first_rename):
+                with self.assertRaises(KeyboardInterrupt):
+                    nk_cli._swap_in_package_folder(staging, enhanced, cache_dir)
+            self.assertFalse(enhanced.exists())
+
+            self.assertIsNone(nk_cli._restore_interrupted_swap(authentic, cache_dir))
+            self.assertFalse(authentic.exists(), "another variant's package was moved in")
+            restored = nk_cli._restore_interrupted_swap(enhanced, cache_dir)
+            self.assertIsNotNone(restored)
+            self.assertEqual((enhanced / "package.json").read_text(encoding="utf-8"),
+                             "enhanced")
 
     def test_restore_recreates_a_removed_packages_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cache_dir = root / "cache"
-            (cache_dir / "previous-300").mkdir(parents=True)
-            (cache_dir / "previous-300" / "package.json").write_text("kept", encoding="utf-8")
+            (cache_dir / "previous-ABCD12345-300").mkdir(parents=True)
+            (cache_dir / "previous-ABCD12345-300" / "package.json").write_text(
+                "kept", encoding="utf-8")
             target = root / "packages" / "ABCD12345"
             self.assertFalse(target.parent.exists())
             self.assertEqual(nk_cli._restore_interrupted_swap(target, cache_dir),
-                             cache_dir / "previous-300")
+                             cache_dir / "previous-ABCD12345-300")
             self.assertEqual((target / "package.json").read_text(encoding="utf-8"), "kept")
 
     def test_an_unreadable_cache_folder_stops_the_restore_by_name(self) -> None:
@@ -1992,6 +2140,11 @@ class BoundedJsonArtifactTests(unittest.TestCase):
 
     def _deep_text(self, depth: int, payload: str = '1') -> str:
         return '{"format": "nakagawa-aot-package", "n": ' + '{"n":' * depth + payload + '}' * depth + '}'
+
+    def test_bounded_json_text_validator_checks_structure_without_parsing(self) -> None:
+        self.assertIsNone(package_cache.validate_bounded_json_text('{"item": [1, 2]}'))
+        with self.assertRaisesRegex(package_cache.BoundedJsonError, "nesting exceeds"):
+            package_cache.validate_bounded_json_text('{"item": [1]}', max_depth=1)
 
     def test_object_separators_are_diagnosed_as_separators(self) -> None:
         with self.assertRaisesRegex(package_cache.BoundedJsonError, "comma separators"):
@@ -2669,6 +2822,18 @@ class DecryptedElfRefusalTests(unittest.TestCase):
         self.assertIn("valid decrypted EBOOT.elf from your own copy", message)
         self.assertIn("the player decrypts the disc's own", message)
         self.assertNotIn("key", message.lower())
+
+    def test_a_failed_copy_leaves_no_partial_eboot_elf(self) -> None:
+        """A write or fsync error mid-copy removes EBOOT.elf.tmp from the package cache
+        (audit 2026-11-17): only the refused-ELF branch used to."""
+        with tempfile.TemporaryDirectory() as scratch:
+            source = Path(scratch) / "EBOOT.elf"
+            source.write_bytes(b"\x7fELF" + b"\0" * 4096)
+            cache = Path(scratch) / "cache"
+            with mock.patch.object(nk_cli.os, "fsync", side_effect=OSError("synthetic fsync failure")):
+                with self.assertRaisesRegex(nk_cli.PackageBuildError, "synthetic fsync failure"):
+                    nk_cli._copy_decrypted_elf(source, cache / "EBOOT.elf")
+            self.assertEqual(sorted(path.name for path in cache.iterdir()), [])
 
 
 class AnalyzerSourcesKeyTests(unittest.TestCase):

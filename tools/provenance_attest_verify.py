@@ -151,6 +151,7 @@ printed and never written to the JSON verdict.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from dataclasses import dataclass
 import hashlib
 import json
@@ -227,10 +228,24 @@ BASELINE_KIND = "public-provenance-baseline"
 BASELINE_SCHEMA_VERSION = 1
 
 #: The workflow that runs this verifier, and the required status check it
-#: reports under.  Both are matched literally against candidate bytes.
+#: reports under.  The context is matched in a candidate workflow as one byte
+#: run and against every static YAML spelling of it (``_names_reserved_context``).
 TRUSTED_WORKFLOW = ".github/workflows/provenance-attestation.yml"
 TRUSTED_CONTEXT = "Trusted provenance attestation"
 WORKFLOW_PREFIX = ".github/workflows/"
+
+#: The one-character escapes of a YAML double-quoted scalar (YAML 1.2, section 5.7).
+_YAML_ESCAPES = {
+    "0": "\0", "a": "\a", "b": "\b", "t": "\t", "\t": "\t", "n": "\n", "v": "\v",
+    "f": "\f", "r": "\r", "e": "\x1b", " ": " ", '"': '"', "/": "/", "\\": "\\",
+    "N": "\x85", "_": "\xa0", "L": "\u2028", "P": "\u2029",
+}
+# ``\xHH``, ``\uHHHH`` and ``\UHHHHHHHH``; an escaped line break, which joins the next line
+# with its leading white space dropped; or a one-character escape.
+_YAML_ESCAPE = re.compile(
+    r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|(\r\n?[ \t]*|\n[ \t]*)|(.))",
+    re.DOTALL,
+)
 
 #: The only events the trusted workflow may list.  ``pull_request_target`` and
 #: ``workflow_run`` always run the default branch's copy of the workflow.
@@ -388,6 +403,10 @@ MAX_PATH_DEPTH = 32
 MAX_TREE_PATH_BYTES = 8 * 1024 * 1024
 MAX_JSON_BYTES = 32 * 1024 * 1024
 MAX_REVIEWED_BLOBS = 100_000
+#: How long a git that has ended its output may take to exit, and how much of its
+#: error text a failure report quotes.
+GIT_EXIT_TIMEOUT_SECONDS = 60
+MAX_GIT_STDERR_BYTES = 64 * 1024
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
@@ -472,15 +491,20 @@ def _stream_tree_entries(repo: Path, tree_sha: str):
     rejected second. Reading incrementally lets every ceiling bite on the way
     in, and lets the reader be killed the moment one does.
     """
+    # stderr goes to a file, so a git that writes a lot of it can never block on a full pipe
+    # while this reader waits for its listing or its exit.
+    stderr_sink = tempfile.TemporaryFile()
     proc = subprocess.Popen(
         ["git", "ls-tree", "-r", "-z", "--full-tree", tree_sha], cwd=repo,
         env=isolated_git_env(root=repo),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=stderr_sink,
     )
     assert proc.stdout
     pending = b""
     count = 0
     path_bytes = 0
+    complete = False
+    status: int | None = None
     try:
         while True:
             chunk = proc.stdout.read(65536)
@@ -512,18 +536,30 @@ def _stream_tree_entries(repo: Path, tree_sha: str):
                 raise VerifyError("TREE_INVALID", "Git tree listing is malformed")
         if pending.strip(b"\0"):
             raise VerifyError("TREE_INVALID", "Git tree listing ended mid-entry")
+        complete = True
     finally:
-        failed = proc.poll() not in (0, None) or proc.poll() is None
-        if proc.poll() is None:
+        # Only an abandoned listing (a ceiling, a malformed entry, or a consumer that stops
+        # early) stops git.  At EOF git may still be running its exit work after closing
+        # stdout, so it is waited for and judged by its own exit status: killing it there
+        # made a complete listing fail on Windows and hid a real failure on POSIX.
+        if not complete and proc.poll() is None:
             proc.kill()
-        stderr = proc.stderr.read() if proc.stderr else b""
-        for stream in (proc.stdout, proc.stderr):
-            if stream is not None:
-                stream.close()
-        proc.wait()
-        if failed and proc.returncode not in (0, -9, -15) and sys.exc_info()[1] is None:
-            raise VerifyError(
-                "GIT_ERROR", stderr.decode("utf-8", errors="replace").strip() or "ls-tree failed")
+        proc.stdout.close()
+        try:
+            status = proc.wait(timeout=GIT_EXIT_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        stderr_sink.seek(0)
+        stderr = stderr_sink.read(MAX_GIT_STDERR_BYTES)
+        stderr_sink.close()
+    if status is None:
+        raise VerifyError(
+            "GIT_ERROR", f"ls-tree did not exit within {GIT_EXIT_TIMEOUT_SECONDS} s of ending its listing")
+    if status != 0:
+        raise VerifyError(
+            "GIT_ERROR",
+            stderr.decode("utf-8", errors="replace").strip() or f"ls-tree failed (exit status {status})")
 
 
 def _parse_tree_entry(item: bytes) -> tuple[str, str]:
@@ -639,6 +675,33 @@ def read_tree(repo: Path, tree_sha: str) -> dict[str, bytes]:
                 stream.close()
         proc.wait()
     return blobs
+
+
+def read_tree_file(repo: Path, tree_sha: str, path: str, *, limit: int = MAX_JSON_BYTES) -> bytes | None:
+    """Read one regular-file blob of an immutable tree, or ``None`` when the tree has no such path.
+
+    The same object-database read as ``read_tree`` (no filter or hook runs, a symlink,
+    gitlink or subtree is refused by ``_parse_tree_entry``), for a caller that needs one
+    file: the size is checked against ``limit`` before a byte of content is read.
+    """
+    listing = _git(repo, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", tree_sha, "--", path)
+    entries = [item for item in listing.split(b"\0") if item]
+    if not entries:
+        return None
+    if len(entries) != 1:
+        raise VerifyError("TREE_INVALID", f"Git tree lists {path} more than once")
+    entry_path, object_id = _parse_tree_entry(entries[0])
+    if entry_path != path:
+        raise VerifyError("TREE_INVALID", f"Git tree listed {entry_path} for {path}")
+    size_text = _git(repo, "cat-file", "-s", object_id).decode("ascii", errors="replace").strip()
+    if not size_text.isdigit():
+        raise VerifyError("TREE_INVALID", "Git returned a malformed blob size")
+    if int(size_text) > limit:
+        raise VerifyError("TREE_TOO_LARGE", f"{path} is {size_text} bytes, above the {limit} byte ceiling")
+    content = _git(repo, "cat-file", "blob", object_id)
+    if len(content) != int(size_text):
+        raise VerifyError("TREE_INVALID", "Git returned a truncated blob")
+    return content
 
 
 def load_trusted_records(raw: bytes) -> tuple[dict[str, dict], dict[str, list[str]], set[str]]:
@@ -1631,6 +1694,21 @@ def _ephemeral_verdict_findings(
 
     findings.extend(_legacy_export_findings(candidate_blobs, generated_export))
 
+    # The claim each protected path is judged under.  A committed ledger must equal the
+    # generated one (LEGACY_CONTROL_MISMATCH above), so its claims are the generated claims
+    # whenever it is accepted.  Without one, the generated ledger is the only statement of
+    # them: the claim, content and debt checks below run on it all the same, so deleting
+    # the committed ledger cannot pass a change a present ledger would fail.
+    generated_entries = _entry_map(
+        json.loads(generated_ledger_bytes), code="GENERATED_LEDGER_INVALID", label="generated ledger",
+    )
+    claim_entries = legacy_entries if legacy_entries is not None else generated_entries
+    # As in verify(): a trusted record id is reported only when the public ledger names it.
+    public_record_ids = {
+        record_id for record_id in (_claim(entry)[1] for entry in claim_entries.values())
+        if record_id is not None
+    }
+
     if legacy_entries is not None:
         for path in sorted(protected - set(legacy_entries)):
             findings.append(Finding("LEDGER_COVERAGE", path, "protected path has no legacy ledger entry"))
@@ -1710,11 +1788,11 @@ def _ephemeral_verdict_findings(
                 else:
                     blob_approved.append({"path": path, "sha256": digest})
 
-        if legacy_entries is None or path not in legacy_entries:
+        if path not in claim_entries:
             continue
-        entry = legacy_entries[path]
+        entry = claim_entries[path]
         classification, record_id = _claim(entry)
-        if path not in CONTROL_PATHS and not claims_form:
+        if legacy_entries is not None and path not in CONTROL_PATHS and not claims_form:
             actual = hashlib.sha256(candidate_blobs[path]).hexdigest()
             if entry.get("sha256") != actual:
                 findings.append(Finding(
@@ -1762,7 +1840,7 @@ def _ephemeral_verdict_findings(
                 "claimed": classification,
                 "claimed_record_id": record_id,
                 "trusted": expected_class,
-                "trusted_record_id": expected_record,
+                "trusted_record_id": _disclosable(expected_record, public_record_ids),
                 "backing": _backing(path, exact_records, record_patterns),
             })
     return findings, debt, blob_approved, blob_unapproved
@@ -2106,8 +2184,9 @@ def policy_delta_key_v4(*, repo: Path, base_rev: str, candidate_rev: str) -> str
     whole document, claims and byte bindings included, and requires the fetched bytes to equal it.
     """
     repo = repo.resolve()
-    baseline_raw = read_tree(repo, _rev_tree(repo, _rev_commit(repo, base_rev))).get(POLICY_PATH)
-    candidate_raw = read_tree(repo, _rev_tree(repo, _rev_commit(repo, candidate_rev))).get(POLICY_PATH)
+    # The key needs the two profiles alone, so only they are read, not either whole tree.
+    baseline_raw = read_tree_file(repo, _rev_tree(repo, _rev_commit(repo, base_rev)), POLICY_PATH)
+    candidate_raw = read_tree_file(repo, _rev_tree(repo, _rev_commit(repo, candidate_rev)), POLICY_PATH)
     if baseline_raw is None or candidate_raw is None:
         raise VerifyError("POLICY_MISSING", f"the base or the candidate has no {POLICY_PATH}")
     baseline = strict_json(baseline_raw, code="TRUSTED_POLICY_INVALID", label="trusted policy")
@@ -2126,9 +2205,10 @@ def policy_delta_key(*, repo: Path, base_rev: str, candidate_rev: str) -> str:
     again and requires the fetched bytes to equal it exactly.
     """
     repo = repo.resolve()
-    base_blobs = read_tree(repo, _rev_tree(repo, _rev_commit(repo, base_rev)))
+    # The candidate's file hashes are part of a V3 document, so its whole tree is read; the
+    # base contributes its profile alone.
+    baseline_raw = read_tree_file(repo, _rev_tree(repo, _rev_commit(repo, base_rev)), POLICY_PATH)
     candidate_blobs = read_tree(repo, _rev_tree(repo, _rev_commit(repo, candidate_rev)))
-    baseline_raw = base_blobs.get(POLICY_PATH)
     candidate_raw = candidate_blobs.get(POLICY_PATH)
     if baseline_raw is None or candidate_raw is None:
         raise VerifyError("POLICY_MISSING", f"the base or the candidate has no {POLICY_PATH}")
@@ -2484,6 +2564,65 @@ def _workflow_events(raw: bytes) -> list[str] | None:
     return events
 
 
+def _reserved_context_text(text: str, *, strip_marks: bool = False) -> str:
+    """``text`` as a static YAML job name compares: escapes resolved, white space folded.
+
+    A job name reaches GitHub after YAML has resolved double-quoted escapes and folded a
+    multi-line or block scalar into one line, so ``"Trusted provenance\\x20attestation"``
+    and a ``>-`` scalar split over two lines both name the reserved context without holding
+    it as one byte run.  Escapes are resolved wherever they appear, every run of white
+    space (line breaks included) becomes one space, and case and compatibility forms are
+    folded.
+
+    This reading can lose a match the byte run has: NFKC composes a combining mark with
+    the letter before it, so the reserved name followed by U+0301 no longer ends in its
+    own last letter.  ``strip_marks`` gives the reading that survives that: the text is
+    decomposed (NFKD) and every combining mark is dropped, before and after case folding.
+    Neither reading replaces the byte search; ``_names_reserved_context`` asks all three.
+    A name computed by an expression (``${{ }}``) is outside any static reading; the
+    trusted CI verdict judges each context by its producer instead.
+    """
+
+    def resolve(match: re.Match[str]) -> str:
+        whole: str = match.group(0)
+        digits: str | None = match.group(1) or match.group(2) or match.group(3)
+        if digits is not None:
+            point = int(digits, 16)
+            return chr(point) if point <= 0x10FFFF else whole
+        if match.group(4) is not None:
+            return ""
+        return _YAML_ESCAPES.get(match.group(5), whole)
+
+    resolved = _YAML_ESCAPE.sub(resolve, text)
+    if strip_marks:
+        decomposed = unicodedata.normalize("NFKD", resolved).casefold()
+        folded = "".join(
+            character for character in unicodedata.normalize("NFKD", decomposed)
+            if not unicodedata.category(character).startswith("M")
+        )
+    else:
+        folded = unicodedata.normalize("NFKC", resolved).casefold()
+    return " ".join(folded.split())
+
+
+def _names_reserved_context(raw: bytes) -> bool:
+    """Whether a workflow's bytes name the reserved required-check context.
+
+    Three readings, and any one of them is a match: the context as one byte run, which
+    is the original check and stays the floor; its composed, case-folded static YAML
+    spelling; and that spelling with combining marks dropped.  The later readings only
+    add matches to the first, so the tripwire never flags less than the byte search.
+    """
+    if TRUSTED_CONTEXT.encode("utf-8") in raw:
+        return True
+    text = raw.decode("utf-8", errors="replace")
+    return any(
+        _reserved_context_text(TRUSTED_CONTEXT, strip_marks=strip_marks)
+        in _reserved_context_text(text, strip_marks=strip_marks)
+        for strip_marks in (False, True)
+    )
+
+
 def _ci_findings(candidate: dict[str, bytes], trusted: dict[str, bytes]) -> list[Finding]:
     """Refuse a candidate that disarms this gate or answers to its check name.
 
@@ -2498,11 +2637,10 @@ def _ci_findings(candidate: dict[str, bytes], trusted: dict[str, bytes]) -> list
     ``workflow_run`` without this check changing again.
     """
     findings: list[Finding] = []
-    needle = TRUSTED_CONTEXT.encode("utf-8")
     for path, raw in sorted(candidate.items()):
         if not path.startswith(WORKFLOW_PREFIX) or path == TRUSTED_WORKFLOW:
             continue
-        if needle in raw:
+        if _names_reserved_context(raw):
             findings.append(Finding(
                 "CI_CONTEXT_COLLISION", path,
                 f"workflow names the reserved required-check context {TRUSTED_CONTEXT!r}; "
@@ -2541,7 +2679,8 @@ def _ci_findings(candidate: dict[str, bytes], trusted: dict[str, bytes]) -> list
                     "candidate workflow no longer runs for pull requests: it has neither "
                     f"{' nor '.join(sorted(TRUSTED_WORKFLOW_PULL_REQUEST_EVENTS))}",
                 ))
-        if needle not in candidate_workflow:
+        # The gate's own job keeps the context in its plain, literal spelling.
+        if TRUSTED_CONTEXT.encode("utf-8") not in candidate_workflow:
             findings.append(Finding(
                 "TRUSTED_WORKFLOW_WEAKENED", TRUSTED_WORKFLOW,
                 f"candidate workflow does not carry {TRUSTED_CONTEXT!r}",
@@ -2591,6 +2730,21 @@ def verify(
         )
     if not trusted_ledger.is_file():
         raise VerifyError("TRUSTED_INPUT_MISSING", "the trusted detailed ledger is unavailable")
+    # The scratch holds candidate-controlled policy bytes, so it gets the same two guards as
+    # the ephemeral scratch: never inside the tree under verification, and never over the
+    # trusted input it is verified against.
+    workdir = workdir.resolve()
+    if _path_is_within(workdir, repo):
+        raise VerifyError(
+            "OUTPUT_CANDIDATE_CONTROLLED",
+            "provenance scratch must live outside the repository under verification",
+        )
+    for name in ("trusted_policy.json", "candidate_policy.json"):
+        if (workdir / name).resolve() == trusted_ledger:
+            raise VerifyError(
+                "OUTPUT_TRUSTED_INPUT_COLLISION",
+                f"provenance scratch would overwrite trusted input: {trusted_ledger}",
+            )
 
     candidate_commit = _rev_commit(repo, candidate_rev)
     base_commit = _rev_commit(repo, base_rev)
@@ -2998,6 +3152,18 @@ def _print_report(verdict: dict, *, show_debt: bool) -> None:
     print(f"  verdict: {verdict['verdict'].upper()} ({verdict['fatal_count']} fatal finding(s))")
 
 
+def _needs_maintainer(item: dict) -> bool:
+    """Whether only a maintainer can clear this finding.
+
+    The per-finding flag is authoritative, an explicit ``False`` included: a scope
+    narrowing is ``TRUSTED_SCOPE_VIOLATION`` too, but it is the author's own change.  The
+    code set is the fallback only for a verdict written before the flag existed.
+    """
+    if "maintainer_action" in item:
+        return bool(item["maintainer_action"])
+    return item.get("code") in MAINTAINER_ACTION_CODES
+
+
 def _print_guidance(verdict: dict) -> None:
     """Say, in plain words, who has to act on the remaining findings.
 
@@ -3009,13 +3175,7 @@ def _print_guidance(verdict: dict) -> None:
     explanation names the actor.
     """
     fatal = [item for item in verdict["findings"] if item["fatal"]]
-    # The per-finding flag is authoritative; the code set is the fallback for a
-    # verdict written before the flag existed, so an older verdict still gets
-    # the plain-language explanation instead of a bare FAIL.
-    maintainer = [
-        item for item in fatal
-        if item.get("maintainer_action") or item["code"] in MAINTAINER_ACTION_CODES
-    ]
+    maintainer = [item for item in fatal if _needs_maintainer(item)]
     if not maintainer:
         if fatal:
             print("  what you need to do: fix the finding(s) above in this pull request. "
@@ -3042,10 +3202,7 @@ def _print_contributor_summary(verdict: dict) -> None:
     know in one sentence whether anything is wrong with *their change*.
     """
     fatal = [item for item in verdict.get("findings", []) if item.get("fatal")]
-    maintainer = [
-        item for item in fatal
-        if item.get("maintainer_action") or item.get("code") in MAINTAINER_ACTION_CODES
-    ]
+    maintainer = [item for item in fatal if _needs_maintainer(item)]
     # The verdict's own list is authoritative, but a finding carries its path
     # too, and a verdict written before that field existed still names them.
     paths = sorted(
@@ -3290,18 +3447,22 @@ def main(argv: list[str] | None = None) -> int:
                 require_exact_blob_approvals=args.require_reviewed_blobs,
             )
         else:
-            workdir = args.workdir or args.trusted_ledger.resolve().parent
-            workdir.mkdir(parents=True, exist_ok=True)
-            verdict = verify(
-                repo=args.repo,
-                candidate_rev=args.candidate,
-                base_rev=args.base,
-                trusted_ledger=args.trusted_ledger,
-                workdir=workdir,
-                require_immutable_revisions=args.require_immutable_revisions,
-                authority_revision=args.authority_revision,
-                require_exact_blob_approvals=args.require_reviewed_blobs,
-            )
+            # Without --workdir the scratch is a temporary directory, never the trusted
+            # ledger's own folder: it holds candidate policy bytes that must not be left
+            # beside the private authority.
+            with contextlib.ExitStack() as scratch:
+                workdir = args.workdir or Path(
+                    scratch.enter_context(tempfile.TemporaryDirectory(prefix="nakagawa-provenance-")))
+                verdict = verify(
+                    repo=args.repo,
+                    candidate_rev=args.candidate,
+                    base_rev=args.base,
+                    trusted_ledger=args.trusted_ledger,
+                    workdir=workdir,
+                    require_immutable_revisions=args.require_immutable_revisions,
+                    authority_revision=args.authority_revision,
+                    require_exact_blob_approvals=args.require_reviewed_blobs,
+                )
     except VerifyError as error:
         print(f"trusted provenance attestation: {error.code}: {error}", file=sys.stderr)
         return 2

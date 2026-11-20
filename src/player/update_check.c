@@ -201,12 +201,23 @@ static void append_plain(char *out, size_t out_size, size_t *used, const char *l
     append_inline(out, out_size, used, line, length);
 }
 
+/* Whether the `length` bytes at `text` hold `needle`. */
+static bool contains(const char *text, size_t length, const char *needle) {
+    size_t n = strlen(needle);
+    for (size_t i = 0; i + n <= length; i++) {
+        if (memcmp(text + i, needle, n) == 0) return true;
+    }
+    return false;
+}
+
 void nk_update_short_notes(const char *markdown, char *out, size_t out_size) {
     /* Room for a short card: the first two paragraphs, cut at a word. */
     size_t used = 0;
     int paragraphs = 0;
     bool in_paragraph = false;
     bool cut = false;
+    bool in_comment = false;
+    char fence = '\0';  /* the open code fence's mark, ` or ~ */
     char text[2048];
     const char *p = markdown;
     if (!out || out_size == 0) return;
@@ -224,13 +235,29 @@ void nk_update_short_notes(const char *markdown, char *out, size_t out_size) {
             length--;
         }
         while (length > 0 && (line[length - 1] == ' ' || line[length - 1] == '\t')) length--;
+        /* An HTML comment and a fenced code block are not notes, over however many
+           lines they run: each ends the paragraph before it, as a heading does. */
+        if (in_comment || (length >= 4 && strncmp(line, "<!--", 4) == 0)) {
+            size_t from = in_comment ? 0 : 4;
+            in_comment = !contains(line + from, length - from, "-->");
+            if (in_paragraph) paragraphs++;
+            in_paragraph = false;
+            continue;
+        }
+        if (length >= 3 && (line[0] == '`' || line[0] == '~') && line[1] == line[0] &&
+            line[2] == line[0] && (fence == '\0' || fence == line[0])) {
+            fence = fence == '\0' ? line[0] : '\0';  /* a fence closes on its own mark */
+            if (in_paragraph) paragraphs++;
+            in_paragraph = false;
+            continue;
+        }
+        if (fence != '\0') continue;
         if (length == 0) {
             if (in_paragraph) paragraphs++;
             in_paragraph = false;
             continue;
         }
-        if (line[0] == '#' || (length >= 2 && line[0] == '[' && line[1] == '!') ||
-            (length >= 4 && strncmp(line, "<!--", 4) == 0)) {
+        if (line[0] == '#' || (length >= 2 && line[0] == '[' && line[1] == '!')) {
             if (in_paragraph) paragraphs++;
             in_paragraph = false;
             continue;
@@ -242,7 +269,13 @@ void nk_update_short_notes(const char *markdown, char *out, size_t out_size) {
         append_plain(text, sizeof(text), &used, line, length);
         in_paragraph = true;
     }
-    if (strlen(text) >= out_size) {
+    if (strlen(text) >= out_size && out_size < 4) {
+        /* No room for the ellipsis (3 bytes and the NUL): the text alone, cut at a
+           whole character. */
+        size_t limit = out_size - 1;
+        while (limit > 0 && ((unsigned char)text[limit] & 0xC0) == 0x80) limit--;
+        text[limit] = '\0';
+    } else if (strlen(text) >= out_size) {
         size_t limit = out_size - 4;
         while (limit > 0 && text[limit] != ' ') limit--;
         if (limit == 0) limit = out_size - 4;
@@ -301,18 +334,28 @@ static bool exact_url(const char *url, const char *prefix, const char *tag, cons
 bool nk_update_is_release_page(const char *url) {
     static const char page_prefix[] = NK_UPDATE_RELEASE_PAGE_PREFIX;
     const size_t prefix = sizeof(page_prefix) - 1;
+    /* What follows the prefix is a tag as the release list reads one (safe_tag): no
+       path, query, fragment, space or quote reaches the link opener. */
     return names_this_repository(url) && strlen(url) > prefix &&
            strncmp(url + REPOSITORY_URL_LENGTH, page_prefix + REPOSITORY_URL_LENGTH,
-                   prefix - REPOSITORY_URL_LENGTH) == 0;
+                   prefix - REPOSITORY_URL_LENGTH) == 0 &&
+           safe_tag(url + prefix);
+}
+
+static bool is_hex(char c) {
+    return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+/* text[0..length) is all hex digits, either case; text need not end there. */
+static bool hex_span(const char *text, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        if (!is_hex(text[i])) return false;
+    }
+    return true;
 }
 
 static bool hex64(const char *text) {
-    if (!text || strlen(text) != 64) return false;
-    for (size_t i = 0; i < 64; i++) {
-        char c = text[i];
-        if (!is_digit(c) && !(c >= 'a' && c <= 'f') && !(c >= 'A' && c <= 'F')) return false;
-    }
-    return true;
+    return text && strlen(text) == 64 && hex_span(text, 64);
 }
 
 static void lower_hex(char *text) {
@@ -458,10 +501,8 @@ bool nk_update_parse_checksum(const char *text, size_t length, const char *file_
         (unsigned char)text[1] == 0xBB && (unsigned char)text[2] == 0xBF) {
         i = 3;   /* a byte-order mark */
     }
-    if (!text || !file_name || !out_sha256 || length < i + 64) goto invalid;
-    for (size_t k = 0; k < 64; k++) {
-        char c = text[i + k];
-        if (!is_digit(c) && !(c >= 'a' && c <= 'f') && !(c >= 'A' && c <= 'F')) goto invalid;
+    if (!text || !file_name || !out_sha256 || length < i + 64 || !hex_span(text + i, 64)) {
+        goto invalid;
     }
     memcpy(out_sha256, text + i, 64);
     out_sha256[64] = '\0';
@@ -665,6 +706,7 @@ static bool fetch_text(PackageHttpOpen transport, void *context, const char *url
                        NkUpdateError *error) {
     PackageHttpResponse response;
     char *buffer = NULL;
+    size_t capacity;
     size_t used = 0;
     bool ok = false;
     *out = NULL;
@@ -683,13 +725,34 @@ static bool fetch_text(PackageHttpOpen transport, void *context, const char *url
         goto done;
     }
     if (response.has_content_length && response.content_length > cap) goto too_large;
-    buffer = (char *)malloc(cap + 1);
+    /* The buffer starts at the announced size; a body that runs past it grows it to
+       cap, so the answer is read the same way whatever its Content-Length says. */
+    capacity = response.has_content_length ? (size_t)response.content_length : cap;
+    buffer = (char *)malloc(capacity + 1);
     if (!buffer) {
         offline_error(error);
         goto done;
     }
     for (;;) {
         size_t count = 0;
+        if (used == capacity && capacity < cap) {
+            unsigned char extra;
+            char *grown;
+            if (!response.read(response.context, &extra, 1, &count)) {
+                offline_error(error);
+                goto done;
+            }
+            if (count == 0) break;
+            grown = (char *)realloc(buffer, cap + 1);
+            if (!grown) {
+                offline_error(error);
+                goto done;
+            }
+            buffer = grown;
+            capacity = cap;
+            buffer[used++] = (char)extra;
+            continue;
+        }
         if (used == cap) {
             unsigned char extra;
             if (!response.read(response.context, &extra, 1, &count)) {
@@ -699,7 +762,7 @@ static bool fetch_text(PackageHttpOpen transport, void *context, const char *url
             if (count != 0) goto too_large;
             break;
         }
-        if (!response.read(response.context, (unsigned char *)buffer + used, cap - used,
+        if (!response.read(response.context, (unsigned char *)buffer + used, capacity - used,
                            &count)) {
             offline_error(error);
             goto done;
@@ -928,16 +991,30 @@ bool nk_update_install_folder(const char *exe_dir, const char *downloads_dir,
 }
 
 #if defined(_WIN32) || defined(_WIN64)
+/* name has a path component of dots alone ("..", "..."), with either separator; dots
+   inside a file name ("notes..txt") are not one. */
+static bool has_dots_component(const char *name) {
+    while (*name) {
+        size_t n = strcspn(name, "/\\");
+        if (n >= 2 && strspn(name, ".") == n) return true;
+        name += n;
+        if (*name) name++;
+    }
+    return false;
+}
+
 /* Every file the release's SHA256SUMS.txt lists is present under root. The
    ZIP itself was verified, so a missing file means unpacking lost it (an
-   antivirus removal, a full disk). Writes the first missing file to missing. */
+   antivirus removal, a full disk). Writes the first missing file to missing;
+   *too_long says instead that a listed file's path does not fit under root. */
 static bool listed_files_present(const char *root, char *missing, size_t missing_size,
-                                 bool *sums_found) {
+                                 bool *sums_found, bool *too_long) {
     char sums_path[NK_MAX_PATH];
     char line[1024];
     size_t count = 0;
     FILE *sums;
     *sums_found = false;
+    *too_long = false;
     missing[0] = '\0';
     if (snprintf(sums_path, sizeof(sums_path), "%s\\SHA256SUMS.txt", root) >=
         (int)sizeof(sums_path)) {
@@ -950,6 +1027,9 @@ static bool listed_files_present(const char *root, char *missing, size_t missing
         char path[NK_MAX_PATH];
         char *name = line;
         size_t length = strcspn(line, "\r\n");
+        /* A line that filled the buffer before its end names a path longer than any
+           that fits under root: it is reported as that, never read as two lines. */
+        bool whole = line[length] != '\0' || length + 1 < sizeof(line) || feof(sums);
         line[length] = '\0';
         if (length == 0) continue;
         if (length < 67 || line[64] != ' ') {
@@ -959,11 +1039,16 @@ static bool listed_files_present(const char *root, char *missing, size_t missing
         }
         name = line + 64;
         while (*name == ' ' || *name == '*') name++;
-        if (!*name || name[0] == '/' || name[0] == '\\' || strstr(name, "..") ||
-            strchr(name, ':') ||
-            snprintf(path, sizeof(path), "%s\\%s", root, name) >= (int)sizeof(path)) {
+        if (!*name || name[0] == '/' || name[0] == '\\' || has_dots_component(name) ||
+            strchr(name, ':')) {
             fclose(sums);
             snprintf(missing, missing_size, "%.200s", name);
+            return false;
+        }
+        if (!whole || snprintf(path, sizeof(path), "%s\\%s", root, name) >= (int)sizeof(path)) {
+            fclose(sums);
+            snprintf(missing, missing_size, "%.200s", name);
+            *too_long = true;
             return false;
         }
         for (char *c = path; *c; c++) if (*c == '/') *c = '\\';
@@ -1106,6 +1191,8 @@ bool nk_update_install(const char *zip_path, const char *target_dir, const char 
     char system_directory[NK_MAX_PATH];
     NkProcessHandle process;
     bool sums_found = false;
+    bool too_long = false;
+    bool listed;
     int exit_code;
     DWORD length;
     if (!zip_path || !target_dir || !target_dir[0] ||
@@ -1164,7 +1251,17 @@ bool nk_update_install(const char *zip_path, const char *target_dir, const char 
         set_error(error, "UPDATE_UNPACK_FAILED", "Couldn't install", text);
         return false;
     }
-    if (!listed_files_present(staging, missing, sizeof(missing), &sums_found) ||
+    listed = listed_files_present(staging, missing, sizeof(missing), &sums_found, &too_long);
+    if (too_long) {
+        (void)remove_staging(staging);
+        snprintf(text, sizeof(text),
+                 "The release lists %.200s, whose path is too long for the folder of the new "
+                 "version. Move Nakagawa to a shorter folder, or unpack the ZIP yourself.",
+                 missing);
+        set_error(error, "UPDATE_INSTALL_PATH", "Couldn't install", text);
+        return false;
+    }
+    if (!listed ||
         snprintf(player, sizeof(player), "%s\\bin\\nakagawa_player.exe", staging) >=
             (int)sizeof(player) ||
         !nk_platform_file_exists(player)) {

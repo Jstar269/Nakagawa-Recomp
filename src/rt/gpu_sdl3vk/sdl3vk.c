@@ -24,6 +24,7 @@
 #include "../ace.h"   /* Ace Mode: texture filtering asks for samplerAnisotropy */
 #include "sdl3vk.h"
 #include "nk_platform.h"
+#include "../../core/nk_display_size.h"
 #include "../perf.h"
 #include "../fbcap_policy.h"
 #include "../fbcap.h"
@@ -36,6 +37,7 @@
 #include <vulkan/vulkan.h>
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,8 +52,8 @@
 #include <unistd.h>
 #endif
 
-#define PSP_W 480
-#define PSP_H 272
+#define PSP_W NK_PSP_DISPLAY_WIDTH
+#define PSP_H NK_PSP_DISPLAY_HEIGHT
 #define PRESENT_FRAMES SDL3VK_PRESENT_FRAMES
 #define HUD_W 240
 #define HUD_H 108
@@ -81,6 +83,9 @@ typedef struct PresentFrame {
 
 static SDL_Window      *s_win;
 static int              s_window_hidden;      /* SR_WINDOW_HIDDEN: created hidden, never raised */
+#ifdef SR_VIDEOREC_SELFTEST
+static unsigned         s_selftest_present_clear_commands;
+#endif
 static SDL_Gamepad     *s_pad;
 static VkInstance       s_inst;
 static VkSurfaceKHR     s_surf;
@@ -116,12 +121,16 @@ static VkFence        s_swap_img_fence[8];
 static VkSemaphore    s_swap_sem_done[8];
 
 static int      s_renderer_terminal = 0;
+/* Set once a line has named why the renderer turned terminal on stderr (terminal_line), and the
+ * count of those lines, which the lifecycle selftest checks is one per terminal transition. */
+static int      s_terminal_reported = 0;
+static unsigned s_terminal_lines = 0;
 static int      s_denorm_preserve_f32 = 0;   /* see sdl3vk_init: VK_KHR_shader_float_controls */
 static int      s_dst_read = SDL3VK_DST_READ_SNAPSHOT;   /* see sdl3vk_init: SR_GPU_DST_READ */
 static uint32_t s_dev_extensions = 0;        /* what vkCreateDevice was given (sdl3vk_get_vk) */
 static int      s_dev_features = 0, s_dev_features2 = 0;
-/* A quit request (window close, SDL_EVENT_QUIT, ESC) is sticky. Two call sites drain
- * the SDL event queue -- gui_pump's sdl3vk_poll() and every present -- and only the
+/* A quit request (window close, SDL_EVENT_QUIT; ESC and F1 only ask for the pause) is
+ * sticky. Two call sites drain the SDL event queue -- gui_pump's sdl3vk_poll() and every present -- and only the
  * former exits the process. When a present consumed the quit (the common case: it
  * polls every frame), the request was lost and the runtime kept running with no
  * window, so the launcher could never see the game end. */
@@ -137,7 +146,8 @@ static VkResult s_present_fault_result = VK_SUCCESS;
  * the call, which is not made; a success code (VK_SUBOPTIMAL_KHR) replaces the call's own
  * VK_SUCCESS. One-shot; PSTEP_NONE is disarmed. */
 enum { PSTEP_NONE, PSTEP_FRAME_WAIT, PSTEP_ACQUIRE, PSTEP_IMAGE_WAIT, PSTEP_RESET_CMD,
-       PSTEP_BEGIN_CMD, PSTEP_END_CMD, PSTEP_RESET_FENCE, PSTEP_SUBMIT };
+       PSTEP_BEGIN_CMD, PSTEP_END_CMD, PSTEP_RESET_FENCE, PSTEP_SUBMIT, PSTEP_CAP_ALLOC,
+       PSTEP_PRESENT };
 static int      s_pstep_fault = PSTEP_NONE;
 static VkResult s_pstep_fault_result = VK_SUCCESS;
 
@@ -182,6 +192,19 @@ uint64_t sdl3vk_present_busy_count(void) { return s_present_busy_image + s_prese
 
 int sdl3vk_renderer_terminal(void) {
     return s_renderer_terminal;
+}
+
+/* Prints a line ending "; the renderer is terminal" and records that the transition is named.
+ * The step that failed (a fence wait, a swapchain rebuild) prints its own line with its
+ * VkResult; present_common's exit prints one only when no step below it named the transition,
+ * so a terminal transition prints one line. */
+static void terminal_line(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    s_terminal_reported = 1;
+    s_terminal_lines++;
 }
 
 void sdl3vk_present_fault_inject(int vk_result) {
@@ -376,8 +399,8 @@ static int wait_present_frame(PresentFrame *f) {
         sr_perf_present_wait(wait_started);
     }
     if (r != VK_SUCCESS) {
-        fprintf(stderr, "sdl3vk: present frame fence wait failed: %d; the renderer is terminal\n",
-                (int)r);
+        terminal_line("sdl3vk: present frame fence wait failed: %d; the renderer is terminal\n",
+                      (int)r);
         s_renderer_terminal = 1;
         return 0;
     }
@@ -411,8 +434,8 @@ static int poll_present_frame(PresentFrame *f) {
                                    : vkGetFenceStatus(s_dev, f->fence);
     if (r == VK_NOT_READY) return 0;
     if (r != VK_SUCCESS) {
-        fprintf(stderr, "sdl3vk: present frame fence status failed: %d; the renderer is terminal\n",
-                (int)r);
+        terminal_line("sdl3vk: present frame fence status failed: %d; the renderer is terminal\n",
+                      (int)r);
         s_renderer_terminal = 1;
         return -1;
     }
@@ -460,6 +483,10 @@ static int wait_swapchain_unused(void) {
     return 0;
 }
 
+/* Surface seam for the lifecycle selftest: the next swapchain creation sees the 0x0 extent of a
+ * minimized window. One-shot; 0 in production. */
+static int s_swap_extent_zero_fault = 0;
+
 static int init_step_fails(void);
 /* Set while sdl3vk_init creates its swapchain: each present semaphore is then one of its fallible
  * steps, as it was when the semaphores were per frame, so the init unwind reaches every one. */
@@ -468,13 +495,28 @@ static int s_swapchain_in_init = 0;
 /* Creates the swapchain, or replaces the current one: the old swapchain is retired into the new
  * one and destroyed once its images are no longer in use, and its present semaphores with it. */
 static int create_swapchain(void) {
-    if (s_swap && !wait_swapchain_unused()) return 0;
     VkSurfaceCapabilitiesKHR caps;
     VK_TRY(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_pdev, s_surf, &caps));
 
-    /* Prefer BGRA8 UNORM (matches the framebuffer byte order); fall back to whatever the
-     * surface offers first. VK_INCOMPLETE is a success code here (the surface has more
-     * formats than fmts[] holds, and the entries written are valid), so it is not routed
+    VkExtent2D ext = caps.currentExtent;
+    if (ext.width == UINT32_MAX) {   /* surface lets us choose: use the window pixel size */
+        int w = 0, h = 0;
+        SDL_GetWindowSizeInPixels(s_win, &w, &h);
+        ext.width  = (uint32_t)w;  ext.height = (uint32_t)h;
+    }
+    if (ext.width  < caps.minImageExtent.width)  ext.width  = caps.minImageExtent.width;
+    if (ext.width  > caps.maxImageExtent.width)  ext.width  = caps.maxImageExtent.width;
+    if (ext.height < caps.minImageExtent.height) ext.height = caps.minImageExtent.height;
+    if (ext.height > caps.maxImageExtent.height) ext.height = caps.maxImageExtent.height;
+    if (s_swap_extent_zero_fault) { s_swap_extent_zero_fault = 0; ext.width = ext.height = 0; }
+    /* Minimized: the old swapchain is kept, so nothing waits for its frames or the queue. A
+     * present to a minimized window comes back here every frame. */
+    if (ext.width == 0 || ext.height == 0) return 0;
+    if (s_swap && !wait_swapchain_unused()) return 0;
+
+    /* Prefer BGRA8 UNORM (matches the framebuffer byte order), then RGBA8 UNORM; fall back to
+     * whatever the surface offers first. VK_INCOMPLETE is a success code here (the surface has
+     * more formats than fmts[] holds, and the entries written are valid), so it is not routed
      * through VK_TRY (issue #884). The pick itself is sdl3vk_pick_surface_format. */
     VkSurfaceFormatKHR fmts[SDL3VK_SURFACE_FORMAT_CAP]; uint32_t nf = SDL3VK_SURFACE_FORMAT_CAP;
     VkResult fr = vkGetPhysicalDeviceSurfaceFormatsKHR(s_pdev, s_surf, &nf, fmts);
@@ -492,18 +534,6 @@ static int create_swapchain(void) {
     }
     VkSurfaceFormatKHR pick = fmts[pi];
     s_swap_fmt = pick.format;
-
-    VkExtent2D ext = caps.currentExtent;
-    if (ext.width == UINT32_MAX) {   /* surface lets us choose: use the window pixel size */
-        int w = 0, h = 0;
-        SDL_GetWindowSizeInPixels(s_win, &w, &h);
-        ext.width  = (uint32_t)w;  ext.height = (uint32_t)h;
-    }
-    if (ext.width  < caps.minImageExtent.width)  ext.width  = caps.minImageExtent.width;
-    if (ext.width  > caps.maxImageExtent.width)  ext.width  = caps.maxImageExtent.width;
-    if (ext.height < caps.minImageExtent.height) ext.height = caps.minImageExtent.height;
-    if (ext.height > caps.maxImageExtent.height) ext.height = caps.maxImageExtent.height;
-    if (ext.width == 0 || ext.height == 0) return 0;   /* minimized: keep old swapchain */
     s_swap_ext = ext;
 
     uint32_t n = caps.minImageCount + 1;
@@ -550,8 +580,8 @@ static int create_swapchain(void) {
         /* The old swapchain is retired even when the new one is not created (vkCreateSwapchainKHR,
          * oldSwapchain), so it can present nothing more; its images are unused (waited above).
          * It is destroyed and the renderer is terminal (#1377). */
-        fprintf(stderr, "sdl3vk: vkCreateSwapchainKHR failed: %d; the renderer is terminal\n",
-                (int)cr);
+        terminal_line("sdl3vk: vkCreateSwapchainKHR failed: %d; the renderer is terminal\n",
+                      (int)cr);
         if (old) vkDestroySwapchainKHR(s_dev, old, NULL);
         destroy_present_semaphores();
         s_swap = VK_NULL_HANDLE;
@@ -573,8 +603,8 @@ static int create_swapchain(void) {
     VkResult ir = vkGetSwapchainImagesKHR(s_dev, s_swap, &n_img, s_swap_img);
     if (ir != VK_SUCCESS) {
         /* The new swapchain exists and the old one is gone, but its images are unknown. */
-        fprintf(stderr, "sdl3vk: vkGetSwapchainImagesKHR failed: %d; the renderer is terminal\n",
-                (int)ir);
+        terminal_line("sdl3vk: vkGetSwapchainImagesKHR failed: %d; the renderer is terminal\n",
+                      (int)ir);
         s_swap_n = 0;
         memset(s_swap_img_fence, 0, sizeof(s_swap_img_fence));
         s_renderer_terminal = 1;
@@ -588,8 +618,8 @@ static int create_swapchain(void) {
         if (sr != VK_SUCCESS) {
             /* Those already made are destroyed with the swapchain, by the next creation or
              * by shutdown. */
-            fprintf(stderr, "sdl3vk: vkCreateSemaphore for swapchain image %u failed: %d; "
-                            "the renderer is terminal\n", (unsigned)i, (int)sr);
+            terminal_line("sdl3vk: vkCreateSemaphore for swapchain image %u failed: %d; "
+                          "the renderer is terminal\n", (unsigned)i, (int)sr);
             s_swap_sem_done[i] = VK_NULL_HANDLE;
             s_swap_n = 0;
             memset(s_swap_img_fence, 0, sizeof(s_swap_img_fence));
@@ -683,20 +713,25 @@ int sdl3vk_pick_present_mode(int vsync, const int *available, int count) {
 }
 
 /* Guard the Vulkan values sdl3vk_pick_surface_format compares against (passed as plain
- * ints, see sdl3vk.h): VK_SUCCESS, VK_INCOMPLETE and VK_FORMAT_B8G8R8A8_UNORM. */
+ * ints, see sdl3vk.h): VK_SUCCESS, VK_INCOMPLETE, VK_FORMAT_B8G8R8A8_UNORM and
+ * VK_FORMAT_R8G8B8A8_UNORM. */
 typedef char sdl3vk_surface_success_is_0[(int)VK_SUCCESS == 0 ? 1 : -1];
 typedef char sdl3vk_surface_incomplete_is_5[(int)VK_INCOMPLETE == 5 ? 1 : -1];
 typedef char sdl3vk_surface_bgra8_unorm_is_44[(int)VK_FORMAT_B8G8R8A8_UNORM == 44 ? 1 : -1];
+typedef char sdl3vk_surface_rgba8_unorm_is_37[(int)VK_FORMAT_R8G8B8A8_UNORM == 37 ? 1 : -1];
 
 int sdl3vk_pick_surface_format(int query, int count, const int *formats) {
     const int success = 0;
     const int incomplete = 5;
-    const int bgra8_unorm = 44;
+    /* The 8-bit UNORM formats, in order: the frame blit writes them without an sRGB encode, and
+     * the HUD and the pause overlay (8-bit RGBA or BGRA texels) can be copied into them. */
+    static const int unorm8[] = { 44 /* B8G8R8A8 */, 37 /* R8G8B8A8 */ };
     if (query != success && query != incomplete) return -1;
     if (count > SDL3VK_SURFACE_FORMAT_CAP) count = SDL3VK_SURFACE_FORMAT_CAP;
     if (count <= 0 || formats == NULL) return -1;
-    for (int i = 0; i < count; i++)
-        if (formats[i] == bgra8_unorm) return i;
+    for (size_t k = 0; k < sizeof unorm8 / sizeof unorm8[0]; k++)
+        for (int i = 0; i < count; i++)
+            if (formats[i] == unorm8[k]) return i;
     return 0;
 }
 
@@ -708,11 +743,32 @@ int sdl3vk_pick_surface_format(int query, int count, const int *formats) {
 static int s_init_fault_step = 0;
 static int s_init_steps = 0;        /* fallible steps the last sdl3vk_init reached */
 static int s_sdl_subsystems = 0;    /* sdl3vk_init's SDL_Init succeeded and is not undone */
+/* The last sdl3vk_init found a Vulkan device that presents to its window: a step that fails
+ * after it is a renderer failure, not a host without Vulkan presentation (the selftests' SKIP). */
+static int s_init_found_device = 0;
 
 static int init_step_fails(void) {
     if (++s_init_steps != s_init_fault_step) return 0;
     s_init_fault_step = 0;
     return 1;
+}
+
+/* Enumeration seam for the lifecycle selftest: a list query that succeeded reports VK_INCOMPLETE
+ * instead, as it does when the list holds more entries than the caller's array. One-shot per
+ * bit; 0 in production. */
+enum { ENUM_FAULT_DEVICES = 1, ENUM_FAULT_LAYERS = 2 };
+static int s_enum_incomplete_fault = 0;
+
+static VkResult enum_fault(int bit, VkResult r) {
+    if (r != VK_SUCCESS || !(s_enum_incomplete_fault & bit)) return r;
+    s_enum_incomplete_fault &= ~bit;
+    return VK_INCOMPLETE;
+}
+
+/* A list query's result as init takes it: VK_INCOMPLETE means the list holds more entries than
+ * the caller's array, and the entries written are valid. */
+static VkResult list_result(VkResult r) {
+    return r == VK_INCOMPLETE ? VK_SUCCESS : r;
 }
 
 /* A failed step leaves sdl3vk_init through its one unwind (fail:). */
@@ -807,6 +863,7 @@ static void sdl3vk_set_app_identity(void) {
 
 int sdl3vk_init(const char *title) {
     s_init_steps = 0;
+    s_init_found_device = 0;
     sdl3vk_set_app_identity();
     INIT_OK(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD), "sdl3vk: SDL_Init failed: %s\n", SDL_GetError());
     s_sdl_subsystems = 1;
@@ -842,15 +899,20 @@ int sdl3vk_init(const char *title) {
     uint32_t n_layers = 0;
     if (s_validation_on) {
         /* Fail closed when the layer was requested but is not installed: a silently
-         * missing layer would make a "validation-clean" evidence claim meaningless. */
+         * missing layer would make a "validation-clean" evidence claim meaningless.
+         * Every installed layer is read; a layer installed between the count and the list
+         * makes the list VK_INCOMPLETE, and the entries written are still searched. */
         uint32_t n = 0;
-        vkEnumerateInstanceLayerProperties(&n, NULL);
-        VkLayerProperties lp[64];
+        VkLayerProperties *lp = NULL;
         int have = 0;
-        if (n > 64) n = 64;
-        if (vkEnumerateInstanceLayerProperties(&n, lp) == VK_SUCCESS)
-            for (uint32_t i = 0; i < n; i++)
-                if (strcmp(lp[i].layerName, "VK_LAYER_KHRONOS_validation") == 0) { have = 1; break; }
+        if (vkEnumerateInstanceLayerProperties(&n, NULL) == VK_SUCCESS && n > 0 &&
+            (lp = (VkLayerProperties *)calloc(n, sizeof *lp)) != NULL) {
+            if (list_result(enum_fault(ENUM_FAULT_LAYERS,
+                                       vkEnumerateInstanceLayerProperties(&n, lp))) == VK_SUCCESS)
+                for (uint32_t i = 0; i < n; i++)
+                    if (strcmp(lp[i].layerName, "VK_LAYER_KHRONOS_validation") == 0) { have = 1; break; }
+            free(lp);
+        }
         INIT_OK(have, "sdl3vk: SR_VULKAN_VALIDATION set but VK_LAYER_KHRONOS_validation "
                       "is not installed; refusing to initialize\n");
         INIT_OK(next < 16, "sdl3vk: too many instance extensions to enable VK_EXT_debug_utils\n");
@@ -893,9 +955,10 @@ int sdl3vk_init(const char *title) {
     INIT_OK(SDL_Vulkan_CreateSurface(s_win, s_inst, NULL, &s_surf),
             "sdl3vk: SDL_Vulkan_CreateSurface failed: %s\n", SDL_GetError());
 
-    /* Physical device: first one with a graphics queue that can present to our surface. */
+    /* Physical device: first one with a graphics queue that can present to our surface, among
+     * the first 16 the instance lists. */
     VkPhysicalDevice devs[16]; uint32_t nd = 16;
-    INIT_VK(vkEnumeratePhysicalDevices(s_inst, &nd, devs));
+    INIT_VK(list_result(enum_fault(ENUM_FAULT_DEVICES, vkEnumeratePhysicalDevices(s_inst, &nd, devs))));
     s_pdev = VK_NULL_HANDLE;
     for (uint32_t d = 0; d < nd && !s_pdev; d++) {
         VkQueueFamilyProperties qf[16]; uint32_t nq = 16;
@@ -909,6 +972,7 @@ int sdl3vk_init(const char *title) {
         }
     }
     INIT_OK(s_pdev != VK_NULL_HANDLE, "sdl3vk: no usable Vulkan device\n");
+    s_init_found_device = 1;
     {
         VkPhysicalDeviceProperties pp;
         vkGetPhysicalDeviceProperties(s_pdev, &pp);
@@ -1103,10 +1167,9 @@ int sdl3vk_init(const char *title) {
         vkGetBufferMemoryRequirements(s_dev, f->hud_staging, &hmr);
         VkMemoryAllocateInfo hmai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
         hmai.allocationSize = hmr.size;
+        /* Coherent, as f->staging: nothing flushes the HUD bytes copied into it. Vulkan
+         * guarantees a buffer such a type. */
         hmai.memoryTypeIndex = find_mem_type(hmr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (hmai.memoryTypeIndex == UINT32_MAX) {
-            hmai.memoryTypeIndex = find_mem_type(hmr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-        }
         INIT_VK(vkAllocateMemory(s_dev, &hmai, NULL, &f->hud_staging_mem));
         INIT_VK(vkBindBufferMemory(s_dev, f->hud_staging, f->hud_staging_mem, 0));
         INIT_VK(vkMapMemory(s_dev, f->hud_staging_mem, 0, VK_WHOLE_SIZE, 0, &f->hud_staging_map));
@@ -1309,6 +1372,14 @@ static uint32_t s_button_pulse;
  * from s_button_pulse, which the guest's sample consumes, so both see every press. */
 static uint32_t s_pad_pulse;
 static int      s_text_claim;
+/* Keyboard keys the on-screen keyboard has (sdl3vk.h, text entry): every key held while it
+ * is open, and once it closes each key still held, until that key is let go or pressed anew.
+ * The game sees none of them, so a key typed into the field, or the Enter that confirmed it,
+ * never reaches the title as a held button or a pushed stick. */
+static bool     s_text_keys[NK_HOST_KEY_MOUSE_FIRST];
+/* Keyboard-state seam for the input selftests: it stands in SDL's own key array, which pushed
+ * events do not change. NULL in production. */
+static const bool *(*s_key_state_fn)(int *count) = NULL;
 
 /* In-game pause (sdl3vk.h). The gate hides input from the game while the overlay has it and
  * after it lets go; the raw host state is kept for the moment the claim ends. */
@@ -1359,8 +1430,11 @@ static int text_entry_key(SDL_Keycode k, int *repeats) {
     }
 }
 
-/* Queue each Unicode character of a UTF-8 text event. Malformed bytes are skipped. */
+/* Queue each Unicode character of a UTF-8 text event. Malformed bytes are skipped: a stray
+ * continuation byte, a sequence cut short (the byte that cut it is read on its own), an
+ * overlong form, a surrogate and a value past U+10FFFF queue nothing. */
 static void queue_text_utf8(const char *s) {
+    static const uint32_t min_cp[4] = { 0x0u, 0x80u, 0x800u, 0x10000u };
     const unsigned char *p = (const unsigned char *)s;
     while (*p) {
         uint32_t cp;
@@ -1370,7 +1444,10 @@ static void queue_text_utf8(const char *s) {
         else if ((*p & 0xF0) == 0xE0)  { cp = *p++ & 0x0Fu; extra = 2; }
         else if ((*p & 0xF8) == 0xF0)  { cp = *p++ & 0x07u; extra = 3; }
         else                           { p++; continue; }
-        while (extra-- > 0 && (*p & 0xC0) == 0x80) cp = (cp << 6) | (*p++ & 0x3Fu);
+        int got = 0;
+        while (got < extra && (*p & 0xC0) == 0x80) { cp = (cp << 6) | (*p++ & 0x3Fu); got++; }
+        if (got < extra || cp < min_cp[extra] || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu))
+            continue;
         key_queue_push(SDL3VK_KEY_TEXT, cp);
     }
 }
@@ -1521,6 +1598,14 @@ static void poll_input_on_this_stack(void *arg) {
         case SDL_EVENT_GAMEPAD_REMOVED:
             if (s_pad && SDL_GetGamepadID(s_pad) == ev.gdevice.which) {
                 SDL_CloseGamepad(s_pad); s_pad = NULL;
+                /* A gamepad still connected takes over, so the player can answer the pause
+                 * with it: its own ADDED event came while this one was open, and was passed by. */
+                int npads = 0;
+                SDL_JoystickID *ids = SDL_GetGamepads(&npads);
+                for (int i = 0; ids && i < npads && !s_pad; i++)
+                    if (ids[i] != ev.gdevice.which) s_pad = SDL_OpenGamepad(ids[i]);
+                SDL_free(ids);
+                /* The controller in use went away mid-game either way: the game pauses. */
                 pause_request_latch(SDL3VK_PAUSE_REQUEST_PAD_LOST);
             }
             break;
@@ -1562,7 +1647,12 @@ static void poll_input_on_this_stack(void *arg) {
             if (ev.key.key == SDLK_F12 && !ev.key.repeat) sr_screenshot_request();
             /* While the keyboard is claimed its keys go to the keyboard only: a keyboard Enter that
              * confirms the field must not leave a START pulse behind for the title to see. */
-            if (!ev.key.repeat && !s_text_claim) s_button_pulse |= keyboard_button(ev.key.scancode);
+            if (!ev.key.repeat && !s_text_claim) {
+                s_button_pulse |= keyboard_button(ev.key.scancode);
+                /* Pressed anew after the keyboard closed: the game's own key again. */
+                if ((int)ev.key.scancode >= 0 && (int)ev.key.scancode < NK_HOST_KEY_MOUSE_FIRST)
+                    s_text_keys[ev.key.scancode] = false;
+            }
             if (s_text_claim) {
                 int repeats;
                 int key = text_entry_key(ev.key.key, &repeats);
@@ -1605,16 +1695,23 @@ static void poll_input_on_this_stack(void *arg) {
     }
 
     int key_count = 0;
-    const bool *k = SDL_GetKeyboardState(&key_count);
+    const bool *k = s_key_state_fn ? s_key_state_fn(&key_count) : SDL_GetKeyboardState(&key_count);
     /* The profile's keyboard keys (#1299). Its defaults are the GDI front-end's map
      * (gui.c read_keys); SR_PADSCRIPT keeps the defaults, as it does for the gamepad. */
     const NkInputProfile *key_prof = padscript_active() ? NULL : sdl3vk_get_input_profile();
     bool keys[NK_HOST_KEY_LIMIT];
     host_key_state(k, key_count, s_mouse_held, keys);
+    /* The on-screen keyboard's keys are its own (s_text_keys): neither its buttons nor its
+     * stick keys reach the game while it is open, nor a key still held as it closes. */
+    for (int i = 0; i < NK_HOST_KEY_MOUSE_FIRST; i++) {
+        if (s_text_claim) s_text_keys[i] = keys[i];
+        else if (!keys[i]) s_text_keys[i] = false;
+        if (s_text_keys[i]) keys[i] = false;
+    }
     uint32_t b = sdl3vk_map_keyboard(key_prof, keys, NK_HOST_KEY_LIMIT);
     /* Tab held is fast forward (ace.h), unless the profile binds Tab to a PSP button or the
      * on-screen keyboard has the keys. */
-    ace_ff_hold(!s_text_claim && SDL_SCANCODE_TAB < key_count && k[SDL_SCANCODE_TAB] &&
+    ace_ff_hold(!s_text_claim && SDL_SCANCODE_TAB < key_count && keys[SDL_SCANCODE_TAB] &&
                             sdl3vk_map_key(key_prof, (int)SDL_SCANCODE_TAB) == 0u);
 
     uint8_t lx = 128, ly = 128;
@@ -1842,12 +1939,14 @@ static void cap_free_buffer(CapBuffer *c) {
 }
 
 /* The memory type for a buffer the CPU reads back, from the device's per-type property flags
- * and the buffer's allowed type bits. A HOST_CACHED type comes first, as
- * gegpu_pick_host_mem_type (ge_gpu.c) chooses for the GE readbacks: the first
+ * and the buffer's allowed type bits. A HOST_CACHED type comes first: the first
  * HOST_VISIBLE|HOST_COHERENT type is usually uncached write-combined memory, where every CPU
  * read goes to memory, and reading a 4x frame back from it took about a second (#1296). In
  * order: cached and coherent; cached (*noncoherent set: invalidate after the copy fence);
- * coherent; any host-visible type. UINT32_MAX when no type is host-visible. */
+ * coherent; any host-visible type. UINT32_MAX when no type is host-visible. This is not
+ * gegpu_pick_host_mem_type (ge_gpu.c), which the GE readbacks use: that one takes only
+ * coherent types (cached and coherent, else the first coherent one), because nothing there
+ * invalidates a mapped range, so the two can choose different types on the same device. */
 static uint32_t cap_pick_mem_type(const uint32_t *type_flags, uint32_t type_count,
                                   uint32_t allowed_bits, int *noncoherent) {
     static const uint32_t want[4] = {
@@ -2050,13 +2149,7 @@ static PresentDisposition classify_present(VkResult pr, int *out_presented, cons
  * pending: once the frame's submit (the signal) is done, the semaphore is replaced. */
 static int recover_unenqueued_present(PresentFrame *f, uint32_t idx) {
     if (!s_dev) return 0;
-    if (f->submitted) {
-        if (vkWaitForFences(s_dev, 1, &f->fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
-            s_renderer_terminal = 1;
-            return 0;
-        }
-        present_frame_finished(f);
-    }
+    if (!wait_present_frame(f)) return 0;   /* a failed wait leaves the renderer terminal */
     if (s_swap_sem_done[idx]) {
         vkDestroySemaphore(s_dev, s_swap_sem_done[idx], NULL);
         s_swap_sem_done[idx] = VK_NULL_HANDLE;
@@ -2122,84 +2215,18 @@ Sdl3VkPresentPlan sdl3vk_present_plan(int mode, int srcw, int srch, int dw, int 
     return p;
 }
 
-/* The sharp-scaling intermediate image, shared by the frame ring: each use transitions it from
- * UNDEFINED behind a transfer-stage barrier, which also orders the write after the previous
- * frame's read on this queue. */
-static VkImage        s_prescale_img;
-static VkDeviceMemory s_prescale_mem;
-static int            s_prescale_w, s_prescale_h;
-
-static void prescale_free(void) {
-    if (s_prescale_img) vkDestroyImage(s_dev, s_prescale_img, NULL);
-    if (s_prescale_mem) vkFreeMemory(s_dev, s_prescale_mem, NULL);
-    s_prescale_img = VK_NULL_HANDLE;
-    s_prescale_mem = VK_NULL_HANDLE;
-    s_prescale_w = s_prescale_h = 0;
+int sdl3vk_present_needs_clear(const Sdl3VkPresentPlan *plan, int dw, int dh) {
+    if (!plan || dw <= 0 || dh <= 0) return 1;
+    return plan->x != 0 || plan->y != 0 || plan->w != dw || plan->h != dh;
 }
 
-/* A w x h prescale image, recreated only when the size changes (a window resize). Returns 0
- * when it cannot be made; the caller then presents with one linear blit. */
-static int prescale_ensure(int w, int h) {
-    static int failed_w, failed_h;
-    if (s_prescale_img && s_prescale_w == w && s_prescale_h == h) return 1;
-    if (failed_w == w && failed_h == h) return 0;
-    failed_w = w; failed_h = h;  /* cleared below on success */
-    if (s_prescale_img) {
-        if (!wait_all_present_frames()) return 0;  /* an in-flight frame may still read it */
-        prescale_free();
-    }
-    VkImageCreateInfo imi = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-    imi.imageType = VK_IMAGE_TYPE_2D;
-    imi.format = VK_FORMAT_R8G8B8A8_UNORM;
-    imi.extent.width = (uint32_t)w; imi.extent.height = (uint32_t)h; imi.extent.depth = 1;
-    imi.mipLevels = 1; imi.arrayLayers = 1; imi.samples = VK_SAMPLE_COUNT_1_BIT;
-    imi.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imi.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    imi.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (vkCreateImage(s_dev, &imi, NULL, &s_prescale_img) != VK_SUCCESS) {
-        s_prescale_img = VK_NULL_HANDLE;
-        fprintf(stderr, "sdl3vk: no %dx%d sharp-scaling image; presenting with linear filtering\n", w, h);
-        return 0;
-    }
-    VkMemoryRequirements mr;
-    vkGetImageMemoryRequirements(s_dev, s_prescale_img, &mr);
-    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    mai.allocationSize = mr.size;
-    mai.memoryTypeIndex = find_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (mai.memoryTypeIndex == UINT32_MAX ||
-        vkAllocateMemory(s_dev, &mai, NULL, &s_prescale_mem) != VK_SUCCESS ||
-        vkBindImageMemory(s_dev, s_prescale_img, s_prescale_mem, 0) != VK_SUCCESS) {
-        prescale_free();
-        fprintf(stderr, "sdl3vk: no memory for the %dx%d sharp-scaling image; presenting with linear "
-                        "filtering\n", w, h);
-        return 0;
-    }
-    s_prescale_w = w;
-    s_prescale_h = h;
-    failed_w = failed_h = 0;
-    return 1;
-}
-
-/* ---- video recording (videorec.h, #1273) ---------------------------------------------------
- * With SR_VIDEOREC_DIR set, every present also scales the picture it shows, with the window's
- * own plan and filters, into a record target of one fixed size (SR_VIDEOREC_SIZE, or the
- * window's size at the first recorded present), without the HUD or the pause overlay. The
- * target is copied to the frame slot's own readback buffer in the same command buffer; the
- * recorder reads that buffer when the next VBLANK writes its frame (rec_resolve), and a present
- * reads it before it reuses the slot. Each use of the target and of its sharp-scaling image
- * starts from UNDEFINED behind a transfer-stage barrier, like the window's prescale image. */
+/* A transfer image (TRANSFER_DST | TRANSFER_SRC, device-local), made again only when its size
+ * changes: the window's sharp-scaling image, and the recording's target and its own. */
 typedef struct RecImage {
     VkImage img;
     VkDeviceMemory mem;
     int w, h;
 } RecImage;
-
-static int s_rec_state = -1;      /* -1 undecided, 0 off, 1 recording */
-static uint32_t s_rec_w, s_rec_h; /* the record target's size, fixed at the first use */
-static RecImage s_rec_target, s_rec_pre;
-static CapBuffer s_rec_buf[PRESENT_FRAMES];
-static int s_rec_filter[PRESENT_FRAMES]; /* the SrVideoRecFilter each slot's picture was made with */
-static PresentFrame *s_rec_pending; /* the slot whose readback holds the newest recorded picture */
 
 static void rec_image_free(RecImage *r) {
     if (r->img) vkDestroyImage(s_dev, r->img, NULL);
@@ -2240,6 +2267,67 @@ static int rec_image_ensure(RecImage *r, int w, int h, VkFormat fmt) {
     r->h = h;
     return 1;
 }
+
+/* The sharp-scaling intermediate image, shared by the frame ring: each use transitions it from
+ * UNDEFINED behind a transfer-stage barrier, which also orders the write after the previous
+ * frame's read on this queue. */
+static RecImage s_prescale;
+/* The size whose image could not be made, and the swapchain it was tried for. That size is not
+ * tried again on every present of the same swapchain; a new swapchain (a resize, a re-init)
+ * tries it again, and shutdown forgets it. */
+static int      s_prescale_failed_w, s_prescale_failed_h;
+static uint64_t s_prescale_failed_gen;
+
+/* Sharp-scaling fault seam for the capture selftest: the next prescale image is not made, as
+ * a failed allocation would leave it. One-shot; 0 in production. */
+static int s_prescale_fault = 0;
+
+static void prescale_free(void) {
+    rec_image_free(&s_prescale);
+    s_prescale_failed_w = s_prescale_failed_h = 0;
+    s_prescale_failed_gen = 0;
+}
+
+/* A w x h prescale image, recreated only when the size changes (a window resize). Returns 0
+ * when it cannot be made; the caller then presents with one linear blit. */
+static int prescale_ensure(int w, int h) {
+    if (s_prescale.img && s_prescale.w == w && s_prescale.h == h) return 1;
+    if (s_prescale_failed_w == w && s_prescale_failed_h == h &&
+        s_prescale_failed_gen == s_swapchain_gen)
+        return 0;
+    int made;
+    if (s_prescale_fault) {
+        s_prescale_fault = 0;
+        made = 0;
+    } else {
+        made = rec_image_ensure(&s_prescale, w, h, VK_FORMAT_R8G8B8A8_UNORM);
+    }
+    if (!made) {
+        s_prescale_failed_w = w;
+        s_prescale_failed_h = h;
+        s_prescale_failed_gen = s_swapchain_gen;
+        fprintf(stderr, "sdl3vk: no %dx%d sharp-scaling image; presenting with linear "
+                        "filtering\n", w, h);
+        return 0;
+    }
+    s_prescale_failed_w = s_prescale_failed_h = 0;
+    return 1;
+}
+
+/* ---- video recording (videorec.h, #1273) ---------------------------------------------------
+ * With SR_VIDEOREC_DIR set, every present also scales the picture it shows, with the window's
+ * own plan and filters, into a record target of one fixed size (SR_VIDEOREC_SIZE, or the
+ * window's size at the first recorded present), without the HUD or the pause overlay. The
+ * target is copied to the frame slot's own readback buffer in the same command buffer; the
+ * recorder reads that buffer when the next VBLANK writes its frame (rec_resolve), and a present
+ * reads it before it reuses the slot. Each use of the target and of its sharp-scaling image
+ * starts from UNDEFINED behind a transfer-stage barrier, like the window's prescale image. */
+static int s_rec_state = -1;      /* -1 undecided, 0 off, 1 recording */
+static uint32_t s_rec_w, s_rec_h; /* the record target's size, fixed at the first use */
+static RecImage s_rec_target, s_rec_pre;
+static CapBuffer s_rec_buf[PRESENT_FRAMES];
+static int s_rec_filter[PRESENT_FRAMES]; /* the SrVideoRecFilter each slot's picture was made with */
+static PresentFrame *s_rec_pending; /* the slot whose readback holds the newest recorded picture */
 
 static int rec_on(void) {
     if (s_rec_state < 0) s_rec_state = sr_videorec_active() ? 1 : 0;
@@ -2435,32 +2523,44 @@ static void draw_profile_hud(SDL_Renderer *ren, int w, int h, double game_fps, d
     }
 }
 
-/* The HUD, or with the HUD off the slowed-logic notice alone in a box of its own (`slowed`,
- * at `slow_rate` updates/s), copied at the top left. */
-static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_img, int swap_w, int swap_h,
-                             int slowed, unsigned slow_rate) {
+static int overlay_format_order(VkFormat fmt, int *rgba);
+
+/* With `with_hud` the HUD, else the slowed-logic notice alone in a box of its own (`slowed`,
+ * at `slow_rate` updates/s), copied at the top left. Its surface is 8-bit RGBA or BGRA, so a
+ * swapchain in any other format (10-bit, half float) gets no HUD, as it gets no pause overlay.
+ * Returns 1 when it copied, 0 when it drew nothing: the window is smaller than the HUD (240x108,
+ * 240x130 with the notice) or the box (240x22), or the format does not fit. */
+static int draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_img, int swap_w,
+                            int swap_h, int with_hud, int slowed, unsigned slow_rate) {
     /* The profile HUD needs a window it fits in; a smaller one shows the performance HUD. */
-    int notice_only = !s_hud_enabled;
-    int profile = s_hud_enabled == SDL3VK_HUD_PROFILE && swap_w >= PROFILE_HUD_W &&
+    int notice_only = !with_hud;
+    int profile = with_hud && s_hud_enabled == SDL3VK_HUD_PROFILE && swap_w >= PROFILE_HUD_W &&
                   swap_h >= PROFILE_HUD_H + LOGIC_NOTICE_H;
     int hud_w = profile ? PROFILE_HUD_W : HUD_W;
     int hud_h = notice_only ? 0 : profile ? PROFILE_HUD_H : HUD_H;
-    if (!slowed && notice_only) return;
+    if (!slowed && notice_only) return 0;
     if (slowed) hud_h += LOGIC_NOTICE_H;
-    if (!f || !f->hud_staging_map || swap_w < hud_w || swap_h < hud_h) return;
+    if (!f || !f->hud_staging_map || swap_w < hud_w || swap_h < hud_h) return 0;
+    int hud_rgba = 0;
+    if (!overlay_format_order(s_swap_fmt, &hud_rgba)) {
+        static int hud_format_warned;
+        if (!hud_format_warned++)
+            fprintf(stderr, "sdl3vk: the HUD is not shown: swapchain format %d is not 8-bit "
+                            "RGBA or BGRA\n", (int)s_swap_fmt);
+        return 0;
+    }
 
     if (!s_hud_surf || s_hud_fmt != s_swap_fmt || s_hud_surf->w != hud_w || s_hud_surf->h != hud_h) {
         if (s_hud_ren) { SDL_DestroyRenderer(s_hud_ren); s_hud_ren = NULL; }
         if (s_hud_surf) { SDL_DestroySurface(s_hud_surf); s_hud_surf = NULL; }
         s_hud_fmt = s_swap_fmt;
-        SDL_PixelFormat sdl_fmt = (s_swap_fmt == VK_FORMAT_R8G8B8A8_UNORM || s_swap_fmt == VK_FORMAT_R8G8B8A8_SRGB)
-                                  ? SDL_PIXELFORMAT_RGBA32 : SDL_PIXELFORMAT_BGRA32;
+        SDL_PixelFormat sdl_fmt = hud_rgba ? SDL_PIXELFORMAT_RGBA32 : SDL_PIXELFORMAT_BGRA32;
         s_hud_surf = SDL_CreateSurface(hud_w, hud_h, sdl_fmt);
         if (s_hud_surf) {
             s_hud_ren = SDL_CreateSoftwareRenderer(s_hud_surf);
         }
     }
-    if (!s_hud_surf || !s_hud_ren) return;
+    if (!s_hud_surf || !s_hud_ren) return 0;
 
     /* Game FPS counts new frames (a present of a buffer other than the previous one's), the
      * figure a player feels; Presents counts every frame handed to the window, re-presents of
@@ -2551,6 +2651,7 @@ static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_i
     s_hud_last.h = hud_h;
     s_hud_last.swap_w = swap_w;
     s_hud_last.swap_h = swap_h;
+    return 1;
 }
 
 static int present_common(VkImage src, int srcw, int srch, const uint32_t *upload) {
@@ -2581,6 +2682,17 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
     if (upload) { memcpy(f->staging_map, upload, (size_t)srcw * (size_t)srch * 4u); src = f->fbimg; }
     if (src) s_upscale_cpu_frame = upload ? SDL3VK_FRAME_CPU : movie ? SDL3VK_FRAME_MOVIE : SDL3VK_FRAME_GE;
     VkCommandBuffer cmd = f->cmd;
+    /* An armed capture's readback buffer is made before any image is acquired, so a failure to
+     * make it, or a present with no source to read back, has acquired nothing and the renderer
+     * goes on (#1377). */
+    CapBuffer *cap_cb = NULL;
+    if (sr_capture_is_armed()) {
+        if (!src) { why = "capture has no source image"; goto fail; }
+        cap_cb = sr_capture_pending_is_probe() ? &s_probe : &s_cap;
+        if (pstep_skips(PSTEP_CAP_ALLOC) || !cap_ensure(cap_cb, (uint32_t)srcw, (uint32_t)srch)) {
+            why = "capture buffer allocation failed"; goto fail;
+        }
+    }
 
     for (int attempt = 0; attempt < 2; attempt++) {
         uint32_t idx = 0;
@@ -2662,22 +2774,26 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         if (!show) { why = "nothing to show"; goto fail_acquired; }
 
         /* fb image -> swapchain, aspect-correct letterbox blit. */
+        int dw = (int)s_swap_ext.width, dh = (int)s_swap_ext.height;
+        Sdl3VkPresentPlan plan = sdl3vk_present_plan(s_scaling, showw, showh, dw, dh,
+                                                     (int)s_max_image_dim);
         barrier(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 0, VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        {
+        if (sdl3vk_present_needs_clear(&plan, dw, dh)) {
             VkClearColorValue black = {{0, 0, 0, 1}};
             VkImageSubresourceRange rng = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
             vkCmdClearColorImage(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                  &black, 1, &rng);
+#ifdef SR_VIDEOREC_SELFTEST
+            s_selftest_present_clear_commands++;
+#endif
+            /* The clear overlaps the blit at the image level; keep the dependency only when it ran. */
+            barrier(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         }
-        barrier(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        int dw = (int)s_swap_ext.width, dh = (int)s_swap_ext.height;
-        Sdl3VkPresentPlan plan = sdl3vk_present_plan(s_scaling, showw, showh, dw, dh,
-                                                     (int)s_max_image_dim);
         VkImage blit_src = show;
         int bw = showw, bh = showh;
         VkImageBlit blt = {0};
@@ -2702,21 +2818,21 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         } else if (plan.prescale > 1 &&
                    prescale_ensure(plan.prescale * showw, plan.prescale * showh)) {
             /* Sharp scaling, pass 1: nearest enlargement to the integer multiple. */
-            barrier(cmd, s_prescale_img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            barrier(cmd, s_prescale.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     0, VK_ACCESS_TRANSFER_WRITE_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
             blt.srcOffsets[1].x = showw;         blt.srcOffsets[1].y = showh;
-            blt.dstOffsets[1].x = s_prescale_w;  blt.dstOffsets[1].y = s_prescale_h;
+            blt.dstOffsets[1].x = s_prescale.w;  blt.dstOffsets[1].y = s_prescale.h;
             vkCmdBlitImage(cmd, show, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           s_prescale_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           s_prescale.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            1, &blt, VK_FILTER_NEAREST);
-            barrier(cmd, s_prescale_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            barrier(cmd, s_prescale.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                     VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-            blit_src = s_prescale_img;
-            bw = s_prescale_w;
-            bh = s_prescale_h;
+            blit_src = s_prescale.img;
+            bw = s_prescale.w;
+            bh = s_prescale.h;
         }
         if (plan.w > 0 && plan.h > 0) {
             blt.srcOffsets[1].x = bw;              blt.srcOffsets[1].y = bh;
@@ -2738,13 +2854,15 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         /* 60 FPS logic that has fallen behind plays slower than the original game; say so even
          * with the HUD off (section 9.5 of docs/ENHANCEMENT_CONTRACT.md): in the HUD while it
          * shows, else in the UI pass's layout, under its readout, else in the presenter's own
-         * box. That box sits where the readout does, so it is copied only when no pass drew. */
+         * box. That box sits where the readout does, so it is copied only when no pass drew. A
+         * HUD that is on but drew nothing (a window too small for it) does not count as shown. */
         const int hud_on = s_hud_enabled != SDL3VK_HUD_OFF;
         unsigned slow_rate = 0;
         const int slowed = s_logic_slowed_cb && s_logic_slowed_cb(&slow_rate);
         int slowed_shown = 0;
+        int hud_drawn = 0;
         if (hud_on && f->hud_staging_map) {
-            draw_hud_overlay(cmd, f, s_swap_img[idx], dw, dh, slowed, slow_rate);
+            hud_drawn = draw_hud_overlay(cmd, f, s_swap_img[idx], dw, dh, 1, slowed, slow_rate);
         }
         if (s_ui_pass) {
             Sdl3VkUiPass ui;
@@ -2758,12 +2876,12 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
             ui.image_count = s_swap_n;
             ui.image_index = idx;
             ui.swapchain_gen = s_swapchain_gen;
-            ui.logic_slowed = slowed && !hud_on;
+            ui.logic_slowed = slowed && !hud_drawn;
             ui.logic_rate = slow_rate;
             slowed_shown = s_ui_pass(&ui) && ui.logic_slowed;
         }
-        if (slowed && !hud_on && !slowed_shown && f->hud_staging_map) {
-            draw_hud_overlay(cmd, f, s_swap_img[idx], dw, dh, slowed, slow_rate);
+        if (slowed && !hud_drawn && !slowed_shown && f->hud_staging_map) {
+            draw_hud_overlay(cmd, f, s_swap_img[idx], dw, dh, 0, slowed, slow_rate);
         }
 
         barrier(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -2784,21 +2902,19 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         }
 
         int cap_in_submit = 0;
-        if (sr_capture_is_armed()) {
-            CapBuffer *cb = sr_capture_pending_is_probe() ? &s_probe : &s_cap;
-            if (!cap_ensure(cb, (uint32_t)srcw, (uint32_t)srch)) {
-                why = "capture buffer allocation failed"; goto fail;
-            }
+        if (cap_cb) {
             /* fbimg is B8G8R8A8_UNORM; a GE render target is R8G8B8A8_UNORM. */
             sr_cap_order order = upload ? SR_CAP_ORDER_BGRX : SR_CAP_ORDER_RGBX;
-            if (cb == &s_probe) {
+            if (cap_cb == &s_probe) {
                 s_probe_w = (uint32_t)srcw;
                 s_probe_order = order;
             } else {
                 s_cap_w = (uint32_t)srcw;
                 s_cap_order = order;
             }
-            if (!cap_record(cmd, cb, src, srcw, srch)) { why = "capture record failed"; goto fail; }
+            if (!cap_record(cmd, cap_cb, src, srcw, srch)) {
+                why = "capture record failed"; goto fail_acquired;
+            }
             cap_in_submit = 1;
         }
         if (s_pts_pool)
@@ -2859,7 +2975,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
                 }
             }
         } else {
-            pr = vkQueuePresentKHR(s_queue, &pi);
+            pr = PSTEP_VK(PSTEP_PRESENT, vkQueuePresentKHR(s_queue, &pi));
         }
 
         int did_present = 0;
@@ -2873,8 +2989,11 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
 
         case PRESENT_ENQUEUED_REBUILD:
             presented = 1;
-            if (!create_swapchain()) {
-                s_renderer_terminal = 1;
+            /* create_swapchain makes the renderer terminal itself whenever a failure loses the
+             * swapchain. A window minimized to a 0x0 extent, or a surface query that failed,
+             * keeps the old one, which the next acquire reports again and rebuilds then: this
+             * frame was presented and the renderer goes on. */
+            if (!create_swapchain() && s_renderer_terminal) {
                 why = "swapchain rebuild after presentation failed";
                 goto fail;
             }
@@ -2946,20 +3065,17 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         sr_capture_set_probe_resolver(cap_probe_resolve);
         sr_capture_probe_defer();
     } else if (sr_capture_is_recorded()) {
-        if (f->submitted) {
-            uint64_t perf_wait_started = sr_perf_now_ns();
-            if (vkWaitForFences(s_dev, 1, &f->fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
-                why = "capture fence wait failed"; goto fail;
-            }
-            if (perf_wait_started) sr_perf_vulkan_wait(perf_wait_started, 0);
-            present_frame_finished(f);
-        }
         /* The frame reached the presentation engine (vkQueuePresentKHR succeeded above):
          * a readback/publication failure must not make the frame itself look unpresented,
          * because gui.c would otherwise re-present it through the CPU fallback. The
          * capture resolves as attempted-and-failed (-1) inside fbcap.c, never as a
-         * fabricated success. */
-        if (!cap_invalidate_readback(&s_cap))
+         * fabricated success. The wait is the present's own (wait_present_frame), so the
+         * frame's GPU time is read and a failed wait leaves the renderer terminal: the copy
+         * into s_cap may still be running, and no later capture may free or regrow it. The
+         * failed wait printed the line naming that (terminal_line). */
+        if (!wait_present_frame(f))
+            sr_capture_fail("capture fence wait failed");
+        else if (!cap_invalidate_readback(&s_cap))
             sr_capture_fail("capture readback invalidate failed");
         else
             sr_capture_publish_recorded(s_cap.map, s_cap_w * 4u, s_cap_order);
@@ -2976,11 +3092,16 @@ fail_acquired:
     /* Between a successful acquire and the submit: the image stays acquired and f->sem_acq
      * stays to be signalled, and neither is handed back without a present, so the renderer is
      * terminal (#1377). */
-    fprintf(stderr, "sdl3vk: %s; the renderer is terminal\n", why);
     s_renderer_terminal = 1;
 fail:
     /* One exit for every failure above: the armed capture resolves as failed, never as
-     * an invented success, and a show pass learns its picture was not shown. */
+     * an invented success, and a show pass learns its picture was not shown. A failure that
+     * turned the renderer terminal (a lost device or surface, an unclassified present result,
+     * a step after the acquire) is named here unless the step that failed below (a fence wait,
+     * a swapchain rebuild) printed its own line, so it has one line; every later present is
+     * refused. */
+    if (s_renderer_terminal && !s_terminal_reported)
+        terminal_line("sdl3vk: %s; the renderer is terminal\n", why ? why : "present failed");
     sr_capture_fail(why);
     if (pass_ran && s_show_done) s_show_done(-1, pass_submission);
     return -1;
@@ -3029,7 +3150,14 @@ int sdl3vk_present_image(void *vk_image) {
 }
 
 int sdl3vk_present_image_ex(void *vk_image, int srcw, int srch) {
-    /* render-scaled GE target: the visible region scales with the internal resolution */
+    /* render-scaled GE target: the visible region scales with the internal resolution. The
+     * region is the blit and readback extent and sizes an armed capture's buffer, so a size no
+     * image can have is refused, as sdl3vk_present_rgba_ex refuses its own. */
+    if (srcw <= 0 || srch <= 0 || (uint32_t)srcw > s_max_image_dim ||
+        (uint32_t)srch > s_max_image_dim) {
+        sr_capture_fail("present_image_ex: unsupported picture size");
+        return -1;
+    }
     uint64_t started = sr_perf_now_ns();
     int result = present_common((VkImage)vk_image, srcw, srch, NULL);
     if (started) sr_perf_present_done(started, result);
@@ -3467,11 +3595,15 @@ void sdl3vk_shutdown(void) {
     if (s_win)         { SDL_DestroyWindow(s_win); s_win = NULL; }
     s_mouse_captured = false;                      /* the window took its grab with it */
     s_mouse_held = 0;                              /* and no click outlives it */
+    memset(s_text_keys, 0, sizeof s_text_keys);
     if (s_sdl_subsystems) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
         s_sdl_subsystems = 0;
     }
     s_renderer_terminal = 0;
+    s_terminal_reported = 0;
+    s_terminal_lines = 0;
+    s_swap_extent_zero_fault = 0;
     s_denorm_preserve_f32 = 0;
     s_quit_requested = 0;
     s_pstep_fault = PSTEP_NONE;

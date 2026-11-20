@@ -22,10 +22,12 @@ import tempfile
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import hle_sources  # noqa: E402
+import scratch_dir  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 RT = ROOT / "src" / "rt"
@@ -112,7 +114,11 @@ class TestDispatchSelftestC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         assert CC is not None
-        cls.tmp = tempfile.mkdtemp(prefix="dispatchc_")
+        # A class cleanup runs even when setUpClass raises, as a failed compile does below;
+        # tearDownClass would not, and the scratch directory would be left behind.
+        scratch = scratch_dir.TemporaryDirectory(prefix="dispatchc_")
+        cls.addClassCleanup(scratch.cleanup)
+        cls.tmp = scratch.name
         cls.exe = os.path.join(cls.tmp, "dispatch_selftest.exe")
         result = subprocess.run(
             [CC, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
@@ -122,14 +128,22 @@ class TestDispatchSelftestC(unittest.TestCase):
         if result.returncode != 0:
             raise AssertionError("dispatch_selftest.c did not compile:\n" + result.stderr)
 
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
     def test_behavioral_assertions_pass(self):
         result = subprocess.run([self.exe], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("dispatch selftest: OK", result.stdout)
+
+
+@unittest.skipUnless(CC, "no C compiler on PATH")
+class TestDispatchSelftestScratch(unittest.TestCase):
+    def test_a_failed_compile_leaves_no_scratch_directory(self):
+        failed = subprocess.CompletedProcess([], 1, "", "simulated compile failure")
+        result = unittest.TestResult()
+        with mock.patch.object(subprocess, "run", return_value=failed):
+            unittest.defaultTestLoader.loadTestsFromTestCase(TestDispatchSelftestC).run(result)
+        self.assertTrue(result.errors, "the failed compile must fail the class setup")
+        self.assertFalse(os.path.exists(TestDispatchSelftestC.tmp),
+                         "setUpClass left its scratch directory after the compile failed")
 
 
 class TestDispatchWiring(unittest.TestCase):

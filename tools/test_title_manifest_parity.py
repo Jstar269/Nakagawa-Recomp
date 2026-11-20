@@ -619,6 +619,26 @@ class TitleManifestParityTests(unittest.TestCase):
             c_base_ok, c_msg = self._run_native(base_mf)
             self.assertTrue(py_base_ok, f"Python rejected base valid_json: {py_msg}")
             self.assertTrue(c_base_ok, f"Native rejected base valid_json: {c_msg}")
+            # A display_name of 128 characters is accepted by both, though it is 384 UTF-8
+            # bytes: the limit counts characters (audit 2026-11-17).
+            wide = json.loads(json.dumps(valid_json))
+            wide["display_name"] = "\u65e5" * 128
+            wide_mf = Path(tmpdir) / "wide.json"
+            wide_mf.write_text(json.dumps(wide, ensure_ascii=False), encoding="utf-8")
+            py_wide_ok, py_msg = self._run_python(wide_mf)
+            c_wide_ok, c_msg = self._run_native(wide_mf)
+            self.assertTrue(py_wide_ok, f"Python rejected a 128-character display_name: {py_msg}")
+            self.assertTrue(c_wide_ok, f"Native rejected a 128-character display_name: {c_msg}")
+            # A title id of 63 characters, the player's title_id limit, is accepted by both
+            # (a 64-character one is a hostile mutation below; audit 2026-11-17).
+            longest = json.loads(json.dumps(valid_json))
+            longest["id"] = "t" * 63
+            longest_mf = Path(tmpdir) / "longest_id.json"
+            longest_mf.write_text(json.dumps(longest), encoding="utf-8")
+            py_long_ok, py_msg = self._run_python(longest_mf)
+            c_long_ok, c_msg = self._run_native(longest_mf)
+            self.assertTrue(py_long_ok, f"Python rejected a 63-character id: {py_msg}")
+            self.assertTrue(c_long_ok, f"Native rejected a 63-character id: {c_msg}")
 
         mutations = [
             # 1. Unknown field
@@ -673,6 +693,20 @@ class TitleManifestParityTests(unittest.TestCase):
             (lambda d: d["filesystem"].update({"disc_image": " lead/trail."}), "disc-image leading space"),
             # 26. Disc image rejects reserved Windows device names
             (lambda d: d["filesystem"].update({"disc_image": "CON .iso"}), "disc-image reserved name"),
+            # 26b. Superscript COM/LPT device names are reserved too (audit 2026-11-17)
+            (lambda d: d["filesystem"].update({"disc_image": "COM¹.iso"}), "disc-image superscript COM device"),
+            (lambda d: d["filesystem"].update({"disc_image": "dumps/lpt² .iso"}), "disc-image superscript LPT device"),
+            (lambda d: d["filesystem"].update({"disc_image": "CONIN$.iso"}), "disc-image console device"),
+            # 27. A well-formed hex string is still not an integer address (audit 2026-11-17)
+            (lambda d: d["executable"].update({"entry": "0x08804000"}), "well-formed hex string entry"),
+            # 28. display_name with a leading space
+            (lambda d: d.update({"display_name": " Leading space"}), "display_name leading space"),
+            # 29. display_name with a control character
+            (lambda d: d.update({"display_name": "Line\nbreak"}), "display_name control character"),
+            # 30. display_name over 128 characters
+            (lambda d: d.update({"display_name": "\u65e5" * 129}), "display_name 129 characters"),
+            # 31. A title id longer than the player's 63-character title_id buffers
+            (lambda d: d.update({"id": "t" * 64}), "id of 64 characters"),
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -751,6 +785,34 @@ class TitleManifestParityTests(unittest.TestCase):
             self.assertFalse(py_ok, f"Python should reject duplicate key: {py_err}")
             self.assertFalse(c_ok, f"Native should reject duplicate key: {c_err}")
 
+    def test_leading_zero_numbers_parity(self):
+        """Both parsers refuse a number with a leading zero (audit 2026-11-17, F-e31fe5c0).
+
+        The native reader used to accept ``01`` as 1, and cut a zero-padded
+        70-digit value to its first 63 bytes, where Python's json refuses both.
+        """
+        text = (ROOT / "assets" / "titles" / "synthetic.json").read_text(encoding="utf-8")
+        compact = json.dumps(json.loads(text))
+        self.assertIn('"schema_version": 1,', compact)
+        cases = {
+            "control": compact,
+            "leading-zero": compact.replace('"schema_version": 1,', '"schema_version": 01,', 1),
+            "negative-leading-zero": compact.replace(
+                '"schema_version": 1,', '"schema_version": -01,', 1),
+            "zero-padded-70-digits": compact.replace(
+                '"schema_version": 1,', '"schema_version": ' + "0" * 69 + "1,", 1),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name, body in cases.items():
+                with self.subTest(case=name):
+                    mf = Path(tmpdir) / f"numbers-{name}.json"
+                    mf.write_text(body, encoding="utf-8")
+                    py_ok, py_msg = self._run_python(mf)
+                    c_ok, c_msg = self._run_native(mf, allow_override=True)
+                    expected = name == "control"
+                    self.assertEqual(py_ok, expected, py_msg)
+                    self.assertEqual(c_ok, expected, c_msg)
+
     def test_declared_input_locations_parity(self):
         """Both parsers accept a declared executable and an ordinary dump-named disc image."""
         base = {
@@ -799,7 +861,7 @@ class TitleManifestParityTests(unittest.TestCase):
         raw_utf8_manifest = {
             "schema_version": 1,
             "id": "unicode-parity",
-            "display_name": "日本語 タイトル Café",
+            "display_name": "\u65e5本語 タイトル Café",
             "kind": "synthetic",
             "executable": {"base": 0, "entry": 142606336, "bss_metadata_source": "elf", "extra_executable_spans": []},
             "modules": [{"name": "main.prx", "load_address": 146800640, "required": True, "role": "guest-prx"}],

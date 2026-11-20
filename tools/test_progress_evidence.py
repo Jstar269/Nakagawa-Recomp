@@ -171,6 +171,28 @@ class FreshnessBoundEvidenceTests(EvidenceBase):
             self.touch(self.build / f"hst_recomp_{i}.c")
         self.assertEqual(pt._check_recomp_chunks(), "verified")
 
+    def test_one_fresh_chunk_among_stale_ones_is_pending(self) -> None:
+        """Every chunk must be fresh, not only the newest (audit F-fd13e346)."""
+        self.make_sources("codegen.py", "analyze.py", "imports.py")
+        for i in range(9):
+            self.touch(self.build / f"hst_recomp_{i}.c", old=(i != 4))
+        self.assertEqual(pt._check_recomp_chunks(), "pending")
+
+    def test_fresh_monolithic_file_over_stale_chunks_is_pending(self) -> None:
+        """codegen writes hst_recomp.c before the chunks; it is not a chunk (audit F-fd13e346)."""
+        self.make_sources("codegen.py", "analyze.py", "imports.py")
+        self.touch(self.build / "hst_recomp.c")
+        for i in range(8):
+            self.touch(self.build / f"hst_recomp_{i}.c", old=True)
+        self.assertEqual(pt._check_recomp_chunks(), "pending")
+        # The monolithic file does not stand in for a missing chunk either.
+        for i in range(7):
+            self.touch(self.build / f"hst_recomp_{i}.c")
+        (self.build / "hst_recomp_7.c").unlink()
+        self.assertEqual(pt._check_recomp_chunks(), "pending")
+        self.touch(self.build / "hst_recomp_7.c")
+        self.assertEqual(pt._check_recomp_chunks(), "verified")
+
 
 class Ps1ParseEvidenceTests(EvidenceBase):
     def test_source_heuristic_without_pwsh_is_pending(self) -> None:

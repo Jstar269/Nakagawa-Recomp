@@ -7,7 +7,11 @@
 // state machine, the latest-frame mailbox, that the frame loop cannot change what the
 // producer sees, and the layout maths.
 
+#include <float.h>
 #include <math.h>
+#include <stdalign.h>
+#include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -43,6 +47,68 @@ static int g_failures;
 #define FAKE_INSTANCE ((XrInstance)(uintptr_t)0x1001)
 #define FAKE_SESSION ((XrSession)(uintptr_t)0x2002)
 #define FAKE_SYSTEM ((XrSystemId)7)
+#define FAKE_PERIOD ((XrTime)11111111)  // 90 Hz, in nanoseconds
+
+// A one-shot gate: one thread opens it, another blocks until it is open. The waiting
+// thread sleeps in the OS; nothing polls.
+typedef struct Gate {
+#ifdef _WIN32
+    HANDLE ev;
+#else
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int open;
+#endif
+} Gate;
+
+static int gate_init(Gate *g) {
+#ifdef _WIN32
+    g->ev = CreateEventA(NULL, TRUE, FALSE, NULL);
+    return g->ev != NULL;
+#else
+    g->open = 0;
+    if (pthread_mutex_init(&g->mu, NULL) != 0) {
+        return 0;
+    }
+    if (pthread_cond_init(&g->cv, NULL) != 0) {
+        pthread_mutex_destroy(&g->mu);
+        return 0;
+    }
+    return 1;
+#endif
+}
+
+static void gate_open(Gate *g) {
+#ifdef _WIN32
+    SetEvent(g->ev);
+#else
+    pthread_mutex_lock(&g->mu);
+    g->open = 1;
+    pthread_cond_broadcast(&g->cv);
+    pthread_mutex_unlock(&g->mu);
+#endif
+}
+
+static void gate_wait(Gate *g) {
+#ifdef _WIN32
+    WaitForSingleObject(g->ev, INFINITE);
+#else
+    pthread_mutex_lock(&g->mu);
+    while (!g->open) {
+        pthread_cond_wait(&g->cv, &g->mu);
+    }
+    pthread_mutex_unlock(&g->mu);
+#endif
+}
+
+static void gate_destroy(Gate *g) {
+#ifdef _WIN32
+    CloseHandle(g->ev);
+#else
+    pthread_cond_destroy(&g->cv);
+    pthread_mutex_destroy(&g->mu);
+#endif
+}
 
 typedef struct Fake {
     // Scripted results.
@@ -67,11 +133,22 @@ typedef struct Fake {
     int n_enum, n_create, n_destroy_instance, n_get_system;
     int n_begin_session, n_end_session, n_destroy_session;
     int n_wait, n_begin_frame, n_end_frame;
-    uint64_t stall;  // grows by a large step in every xrWaitFrame (a long wait)
+    // When set, xrWaitFrame opens wait_entered and then really blocks until wait_release
+    // opens: a runtime that holds the frame loop for as long as the test chooses.
+    Gate *wait_entered;
+    Gate *wait_release;
+    XrTime last_end_display_time;
     uint32_t last_end_layer_count;
     const void *last_end_layers;
     char order[64];  // W, B, E in call order
     int bad_args;    // a fake saw an argument the OpenXR specification forbids
+    // Lists that change between the two-call idiom's count call and its fill call (a layer
+    // or runtime added extensions, or the system gained a blend mode): each call after the
+    // first reports one more entry, up to ext_grow (blend_grow) extra entries.
+    uint32_t ext_grow;
+    uint32_t blend_grow;
+    int app_name_bad_utf8;  // xrCreateInstance saw an applicationName that is not valid UTF-8
+    char app_name_seen[XR_MAX_APPLICATION_NAME_SIZE];
 } Fake;
 
 static Fake fk;
@@ -111,8 +188,27 @@ static XrResult XRAPI_CALL fake_EnumerateInstanceExtensionProperties(const char 
     if (XR_FAILED(fk.enum_result)) {
         return fk.enum_result;
     }
-    const char *names[2] = {"XR_KHR_opengl_enable", "XR_KHR_vulkan_enable2"};
-    uint32_t count = fk.has_vulkan_enable2 ? 2u : 1u;
+    static const char *const grown[] = {"XR_EXT_fake_grow_1", "XR_EXT_fake_grow_2", "XR_EXT_fake_grow_3",
+                                        "XR_EXT_fake_grow_4", "XR_EXT_fake_grow_5", "XR_EXT_fake_grow_6",
+                                        "XR_EXT_fake_grow_7", "XR_EXT_fake_grow_8"};
+    const char *names[2 + sizeof(grown) / sizeof(grown[0])];
+    uint32_t count = 0;
+    names[count++] = "XR_KHR_opengl_enable";
+    // Extensions added after the count call land before XR_KHR_vulkan_enable2, so a fill
+    // call with the stale capacity cannot see it.
+    uint32_t extra = (uint32_t)(fk.n_enum - 1);
+    if (extra > fk.ext_grow) {
+        extra = fk.ext_grow;
+    }
+    if (extra > sizeof(grown) / sizeof(grown[0])) {
+        extra = (uint32_t)(sizeof(grown) / sizeof(grown[0]));
+    }
+    for (uint32_t i = 0; i < extra; i++) {
+        names[count++] = grown[i];
+    }
+    if (fk.has_vulkan_enable2) {
+        names[count++] = "XR_KHR_vulkan_enable2";
+    }
     *countOutput = count;
     if (capacityInput == 0) {
         return XR_SUCCESS;
@@ -129,9 +225,44 @@ static XrResult XRAPI_CALL fake_EnumerateInstanceExtensionProperties(const char 
     return XR_SUCCESS;
 }
 
+// The specification's valid usage for XrApplicationInfo: applicationName is a
+// NUL-terminated UTF-8 string within XR_MAX_APPLICATION_NAME_SIZE. Returns 1 when the
+// field holds one (each lead byte followed by its continuation bytes).
+static int fake_name_is_utf8(const char *name, size_t cap) {
+    const unsigned char *p = (const unsigned char *)name;
+    size_t n = 0;
+    while (n < cap && p[n] != 0) {
+        n++;
+    }
+    if (n == cap) {
+        return 0;  // no NUL inside the field
+    }
+    for (size_t i = 0; i < n;) {
+        unsigned char c = p[i];
+        size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 0;
+        if (len == 0 || i + len > n) {
+            return 0;
+        }
+        for (size_t k = 1; k < len; k++) {
+            if ((p[i + k] & 0xC0) != 0x80) {
+                return 0;
+            }
+        }
+        i += len;
+    }
+    return 1;
+}
+
 static XrResult XRAPI_CALL fake_CreateInstance(const XrInstanceCreateInfo *createInfo, XrInstance *instance) {
     if (fk.n_create < 4 && createInfo != NULL) {
         fk.api_seen[fk.n_create] = createInfo->applicationInfo.apiVersion;
+    }
+    if (createInfo != NULL) {
+        memcpy(fk.app_name_seen, createInfo->applicationInfo.applicationName, sizeof(fk.app_name_seen));
+        if (!fake_name_is_utf8(createInfo->applicationInfo.applicationName, XR_MAX_APPLICATION_NAME_SIZE)) {
+            fk.app_name_bad_utf8++;
+            fk.bad_args++;
+        }
     }
     fk.n_create++;
     if (createInfo == NULL || createInfo->type != XR_TYPE_INSTANCE_CREATE_INFO || createInfo->enabledExtensionCount != 1 ||
@@ -183,14 +314,21 @@ static XrResult XRAPI_CALL fake_EnumerateEnvironmentBlendModes(XrInstance instan
     if (XR_FAILED(fk.blend_result)) {
         return fk.blend_result;
     }
-    *countOutput = fk.n_blend_modes;
+    // A mode added after the count call comes from blend_modes[n_blend_modes..].
+    uint32_t n = fk.n_blend_modes + ((uint32_t)(fk.n_blend_enum - 1) < fk.blend_grow
+                                         ? (uint32_t)(fk.n_blend_enum - 1)
+                                         : fk.blend_grow);
+    if (n > sizeof(fk.blend_modes) / sizeof(fk.blend_modes[0])) {
+        n = (uint32_t)(sizeof(fk.blend_modes) / sizeof(fk.blend_modes[0]));
+    }
+    *countOutput = n;
     if (capacityInput == 0) {
         return XR_SUCCESS;
     }
-    if (capacityInput < fk.n_blend_modes) {
+    if (capacityInput < n) {
         return XR_ERROR_SIZE_INSUFFICIENT;
     }
-    for (uint32_t i = 0; i < fk.n_blend_modes; i++) {
+    for (uint32_t i = 0; i < n; i++) {
         modes[i] = fk.blend_modes[i];
     }
     return XR_SUCCESS;
@@ -244,9 +382,12 @@ static XrResult XRAPI_CALL fake_WaitFrame(XrSession session, const XrFrameWaitIn
                                           XrFrameState *frameState) {
     fk.n_wait++;
     fake_log('W');
-    // A long wait for the next headset frame: the fake does not sleep, it records
-    // that the call "took" a large amount of time.
-    fk.stall += 1000000u;
+    // A long wait for the next headset frame, when the test asks for one: the call
+    // blocks until the test releases it.
+    if (fk.wait_entered != NULL && fk.wait_release != NULL) {
+        gate_open(fk.wait_entered);
+        gate_wait(fk.wait_release);
+    }
     if (session != FAKE_SESSION || frameWaitInfo == NULL || frameWaitInfo->type != XR_TYPE_FRAME_WAIT_INFO ||
         frameState == NULL || frameState->type != XR_TYPE_FRAME_STATE) {
         fk.bad_args++;
@@ -255,8 +396,8 @@ static XrResult XRAPI_CALL fake_WaitFrame(XrSession session, const XrFrameWaitIn
     if (XR_FAILED(fk.wait_result)) {
         return fk.wait_result;
     }
-    frameState->predictedDisplayTime = (XrTime)(fk.n_wait * 11111111);
-    frameState->predictedDisplayPeriod = 11111111;
+    frameState->predictedDisplayTime = (XrTime)fk.n_wait * FAKE_PERIOD;  // 64-bit: no int overflow
+    frameState->predictedDisplayPeriod = FAKE_PERIOD;
     frameState->shouldRender = fk.should_render;
     return XR_SUCCESS;
 }
@@ -277,6 +418,7 @@ static XrResult XRAPI_CALL fake_EndFrame(XrSession session, const XrFrameEndInfo
         fk.bad_args++;
         return XR_ERROR_VALIDATION_FAILURE;
     }
+    fk.last_end_display_time = frameEndInfo->displayTime;
     fk.last_end_layer_count = frameEndInfo->layerCount;
     fk.last_end_layers = frameEndInfo->layers;
     fk.last_end_blend = frameEndInfo->environmentBlendMode;
@@ -349,6 +491,7 @@ static void test_refusals(void) {
     CHECK(strcmp(nk_xr_refusal_name(NK_XR_REFUSE_INSTANCE), "instance creation failed") == 0);
     CHECK(strcmp(nk_xr_refusal_name(NK_XR_REFUSE_NO_HMD), "no HMD") == 0);
     CHECK(strcmp(nk_xr_refusal_name(NK_XR_REFUSE_OUT_OF_MEMORY), "out of memory") == 0);
+    CHECK(strcmp(nk_xr_refusal_name(NK_XR_REFUSE_GET_SYSTEM), "runtime failed in xrGetSystem") == 0);
     CHECK(strcmp(nk_xr_refusal_name((NkXrRefusal)1234), "unknown refusal") == 0);
 
     // No loader: a library name that does not exist.
@@ -403,6 +546,69 @@ static void test_refusals(void) {
     CHECK(r == NK_XR_REFUSE_INSTANCE);
     CHECK(fk.n_create == 1 && fk.n_destroy_instance == 1 && fk.n_get_system == 0);
 
+    // xrDestroyInstance itself cannot be resolved: the only destroy function comes from the
+    // instance, so the instance cannot be destroyed (the documented exception to "nothing
+    // is left open"); the probe still refuses and leaves the outputs untouched.
+    fake_reset();
+    fk.omit = "xrDestroyInstance";
+    CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+    r = nk_xr_probe(&f, "test", &inst, &sys);
+    CHECK(r == NK_XR_REFUSE_INSTANCE);
+    CHECK(fk.n_create == 1 && fk.n_destroy_instance == 0 && fk.n_get_system == 0);
+    CHECK(inst == (XrInstance)(uintptr_t)0xdead && sys == 99);
+
+    // An extension added between the count call and the fill call: the fill call reports
+    // XR_ERROR_SIZE_INSUFFICIENT, and the probe asks again with the new count instead of
+    // reporting a missing runtime.
+    fake_reset();
+    fk.ext_grow = 1;
+    CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+    r = nk_xr_probe(&f, "test", &inst, &sys);
+    CHECK(r == NK_XR_OK);
+    CHECK(fk.n_enum == 3);  // count, a fill that is too small, a fill at the new count
+    CHECK(fk.n_create == 1);
+    inst = (XrInstance)(uintptr_t)0xdead;
+    sys = 99;
+    // A list that changes on every call is asked a bounded number of times, then refused
+    // by name before any instance is created.
+    fake_reset();
+    fk.ext_grow = 8;
+    CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+    r = nk_xr_probe(&f, "test", &inst, &sys);
+    CHECK(r == NK_XR_REFUSE_NO_RUNTIME);
+    CHECK(fk.n_enum == 1 + NK_XR_ENUM_ATTEMPTS && fk.n_create == 0);
+    CHECK(inst == (XrInstance)(uintptr_t)0xdead && sys == 99);
+
+    // An application name longer than the field is cut on a UTF-8 code point boundary:
+    // 50 three-byte characters (150 bytes) keep 42 whole characters (126 bytes), never a
+    // lead byte without its continuation bytes.
+    {
+        char longname[50 * 3 + 1];
+        for (int i = 0; i < 50; i++) {
+            memcpy(longname + 3 * i, "\xE3\x81\x82", 3);  // U+3042
+        }
+        longname[150] = '\0';
+        fake_reset();
+        CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+        r = nk_xr_probe(&f, longname, &inst, &sys);
+        CHECK(r == NK_XR_OK);
+        CHECK(fk.app_name_bad_utf8 == 0);
+        CHECK(strlen(fk.app_name_seen) == 126 && memcmp(fk.app_name_seen, longname, 126) == 0);
+        // A long ASCII name keeps the whole field less its NUL.
+        memset(longname, 'a', 150);
+        fake_reset();
+        CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+        CHECK(nk_xr_probe(&f, longname, &inst, &sys) == NK_XR_OK);
+        CHECK(strlen(fk.app_name_seen) == XR_MAX_APPLICATION_NAME_SIZE - 1);
+        // A name that fits is passed unchanged.
+        fake_reset();
+        CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+        CHECK(nk_xr_probe(&f, "\xE3\x81\x82 test", &inst, &sys) == NK_XR_OK);
+        CHECK(strcmp(fk.app_name_seen, "\xE3\x81\x82 test") == 0 && fk.app_name_bad_utf8 == 0);
+        inst = (XrInstance)(uintptr_t)0xdead;
+        sys = 99;
+    }
+
     // No head-mounted display: the instance is destroyed again.
     fake_reset();
     fk.get_system_result = XR_ERROR_FORM_FACTOR_UNAVAILABLE;
@@ -412,6 +618,29 @@ static void test_refusals(void) {
     CHECK(strcmp(nk_xr_refusal_name(r), "no HMD") == 0);
     CHECK(fk.n_get_system == 1 && fk.n_destroy_instance == 1);
     CHECK(inst == (XrInstance)(uintptr_t)0xdead && sys == 99);  // outputs untouched on every refusal
+    CHECK(f.get_system_result == XR_ERROR_FORM_FACTOR_UNAVAILABLE);
+
+    // A runtime that does not support the HMD form factor has no headset either.
+    fake_reset();
+    fk.get_system_result = XR_ERROR_FORM_FACTOR_UNSUPPORTED;
+    CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+    CHECK(nk_xr_probe(&f, "test", &inst, &sys) == NK_XR_REFUSE_NO_HMD);
+
+    // Any other xrGetSystem failure is the runtime's, never "no HMD", and its XrResult is
+    // kept for the caller to report; the instance is destroyed again.
+    static const XrResult runtime_failures[] = { XR_ERROR_RUNTIME_FAILURE, XR_ERROR_INSTANCE_LOST,
+                                                 XR_ERROR_VALIDATION_FAILURE };
+    for (size_t i = 0; i < sizeof(runtime_failures) / sizeof(runtime_failures[0]); i++) {
+        fake_reset();
+        fk.get_system_result = runtime_failures[i];
+        CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+        r = nk_xr_probe(&f, "test", &inst, &sys);
+        CHECK(r == NK_XR_REFUSE_GET_SYSTEM);
+        CHECK(strcmp(nk_xr_refusal_name(r), "runtime failed in xrGetSystem") == 0);
+        CHECK(f.get_system_result == runtime_failures[i]);
+        CHECK(fk.n_get_system == 1 && fk.n_destroy_instance == 1);
+        CHECK(inst == (XrInstance)(uintptr_t)0xdead && sys == 99);
+    }
 
     // Success.
     fake_reset();
@@ -495,6 +724,19 @@ static void test_blend_mode_choice(void) {
     CHECK(fk.last_end_blend == XR_ENVIRONMENT_BLEND_MODE_ADDITIVE);
     CHECK(fk.bad_args == 0);
 
+    // A mode added between the count call and the fill call: asked again with the new
+    // count, so OPAQUE (the added mode) is found instead of refusing the instance.
+    fake_reset();
+    fk.blend_modes[0] = XR_ENVIRONMENT_BLEND_MODE_ADDITIVE;
+    fk.blend_modes[1] = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    fk.n_blend_modes = 1;
+    fk.blend_grow = 1;
+    CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+    CHECK(nk_xr_probe(&f, "test", &inst, &sys) == NK_XR_OK);
+    CHECK(f.blend_mode == XR_ENVIRONMENT_BLEND_MODE_OPAQUE);
+    CHECK(fk.n_blend_enum == 3 && fk.n_destroy_instance == 0);
+    CHECK(fk.bad_args == 0);
+
     // A runtime that offers no mode, or fails the query: refused, instance destroyed again.
     fake_reset();
     fk.n_blend_modes = 0;
@@ -516,14 +758,27 @@ static void test_null_table_refusals(void) {
     memset(&z, 0, sizeof(z));
     nk_xr_mailbox_init(&m);
     nk_xr_run_init(&run);
-    nk_xr_session_next(&run, XR_SESSION_STATE_READY);  // running = 1
+    CHECK(nk_xr_session_next(&run, XR_SESSION_STATE_READY) == NK_XR_ACT_BEGIN_SESSION);  // running = 1
 
     // A table whose instance functions were never resolved: a named result, no crash.
+    // No xrBeginSession was made, so the session is not begun: running is undone and the
+    // next READY asks for the begin again.
     CHECK(nk_xr_do_action(&z, FAKE_SESSION, &run, NK_XR_ACT_BEGIN_SESSION) == XR_ERROR_FUNCTION_UNSUPPORTED);
+    CHECK(run.running == 0 && run.layers_shown == 0);
+    CHECK(nk_xr_session_next(&run, XR_SESSION_STATE_READY) == NK_XR_ACT_BEGIN_SESSION);
+    // A refused end changes nothing (STOPPING already stopped the frames).
     CHECK(nk_xr_do_action(&z, FAKE_SESSION, &run, NK_XR_ACT_END_SESSION) == XR_ERROR_FUNCTION_UNSUPPORTED);
+    CHECK(run.running == 1);
+    // No xrDestroySession was made, so the session is not destroyed: a later EXITING
+    // still asks for the destroy instead of the plain exit.
+    CHECK(nk_xr_session_next(&run, XR_SESSION_STATE_LOSS_PENDING) == NK_XR_ACT_DESTROY_SESSION);
     CHECK(nk_xr_do_action(&z, FAKE_SESSION, &run, NK_XR_ACT_DESTROY_SESSION) == XR_ERROR_FUNCTION_UNSUPPORTED);
+    CHECK(run.session_destroyed == 0);
+    CHECK(nk_xr_session_next(&run, XR_SESSION_STATE_EXITING) == NK_XR_ACT_DESTROY_AND_EXIT);
     CHECK(nk_xr_do_action(&z, FAKE_SESSION, &run, NK_XR_ACT_DESTROY_AND_EXIT) == XR_ERROR_FUNCTION_UNSUPPORTED);
-    CHECK(run.running == 1);  // a refused action changes no bookkeeping
+    CHECK(run.session_destroyed == 0 && run.done == 1);
+    nk_xr_run_init(&run);
+    nk_xr_session_next(&run, XR_SESSION_STATE_READY);  // running = 1 for the frame checks below
     CHECK(nk_xr_do_action(&z, FAKE_SESSION, &run, NK_XR_ACT_FRAMES_SHOWN) == XR_SUCCESS);  // no call needed
     CHECK(nk_xr_frame_once(&z, FAKE_SESSION, &run, &m, &fr) == XR_ERROR_FUNCTION_UNSUPPORTED);
     CHECK(fr.slot == -1 && fr.layers_submitted == 0);
@@ -562,6 +817,33 @@ static void test_loss_then_exit(void) {
     CHECK(a == NK_XR_ACT_DESTROY_AND_EXIT);
     CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
     CHECK(fk.n_destroy_session == 1);
+
+    // A repeated LOSS_PENDING for the same session never destroys it a second time.
+    fake_reset();
+    nk_xr_run_init(&run);
+    a = nk_xr_session_next(&run, XR_SESSION_STATE_READY);
+    CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
+    a = nk_xr_session_next(&run, XR_SESSION_STATE_LOSS_PENDING);
+    CHECK(a == NK_XR_ACT_DESTROY_SESSION);
+    CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
+    a = nk_xr_session_next(&run, XR_SESSION_STATE_LOSS_PENDING);
+    CHECK(a == NK_XR_ACT_NONE);
+    CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
+    CHECK(fk.n_destroy_session == 1 && run.may_retry == 1 && run.done == 0);
+
+    // A late LOSS_PENDING after EXITING destroyed the session: no second destroy, and
+    // the run stays done without also becoming retryable.
+    fake_reset();
+    nk_xr_run_init(&run);
+    a = nk_xr_session_next(&run, XR_SESSION_STATE_READY);
+    CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
+    a = nk_xr_session_next(&run, XR_SESSION_STATE_EXITING);
+    CHECK(a == NK_XR_ACT_DESTROY_AND_EXIT);
+    CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
+    a = nk_xr_session_next(&run, XR_SESSION_STATE_LOSS_PENDING);
+    CHECK(a == NK_XR_ACT_NONE);
+    CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
+    CHECK(fk.n_destroy_session == 1 && run.done == 1 && run.may_retry == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -688,6 +970,23 @@ static void test_state_machine(void) {
 
 // ---------------------------------------------------------------------------
 // Mailbox.
+
+// The producer-private, consumer-private and shared words each own a 64-byte line,
+// and frame_id[], which the producer writes on every publish, shares none of them.
+static void test_mailbox_layout(void) {
+    enum { LINE = 64 };
+    size_t middle = offsetof(NkXrMailbox, middle) / LINE;
+    size_t back = offsetof(NkXrMailbox, back) / LINE;
+    size_t front_first = offsetof(NkXrMailbox, front) / LINE;
+    size_t front_last = (offsetof(NkXrMailbox, have_front) + sizeof(int) - 1u) / LINE;
+    size_t ids_first = offsetof(NkXrMailbox, frame_id) / LINE;
+    size_t ids_last = (offsetof(NkXrMailbox, frame_id) + sizeof(uint64_t) * NK_XR_MAILBOX_SLOTS - 1u) / LINE;
+    CHECK(alignof(NkXrMailbox) >= LINE);
+    CHECK(middle != back && middle != front_first && back != front_first);
+    CHECK(front_first == front_last);
+    CHECK(ids_first > front_last && ids_first == ids_last);
+    CHECK(ids_first != middle && ids_first != back);
+}
 
 static void test_mailbox_basic(void) {
     NkXrMailbox m;
@@ -821,17 +1120,23 @@ static void test_mailbox_producer_never_waits(void) {
 // Two real threads. The producer fills the whole slot with a per-frame pattern and
 // publishes; the consumer acquires and checks that every word of the slot it holds
 // matches the frame id acquire returned, and that frame ids never go backwards. The
-// producer never waits and the consumer stops once it has seen the last frame.
+// producer never waits; after its last publish it sets `done`. The consumer stops at the
+// last frame, or at the first acquire it starts after seeing `done`: that acquire comes
+// after the last publish, so a mailbox that lost the last frame fails the final CHECK
+// instead of spinning forever.
 //
 // NOTE: x86 is strongly ordered, so this test cannot catch a mutant that weakens the
-// acq_rel exchanges in nk_xr_mailbox.c to relaxed here. It is a smoke test on x86 and
-// a strong guard on weakly ordered CPUs (ARM64 builds, Android #360).
+// acq_rel exchanges in nk_xr_mailbox.c to relaxed here. It could catch one on a weakly
+// ordered CPU (ARM64), but no hosted CI job runs xr-selftest on one today: the only
+// ARM64 job builds the Android launcher and runs no native selftest. Until one does, the
+// memory orders rest on review, and this test is a smoke test wherever it runs.
 enum { STRESS_FRAMES = 200000, STRESS_WORDS = 64 };
 
 typedef struct Stress {
     NkXrMailbox mb;
     uint64_t slots[NK_XR_MAILBOX_SLOTS][STRESS_WORDS];
     uint64_t torn, backwards, acquires, distinct, last_seen;
+    atomic_int done;  // set (release) by the producer after its last publish
 } Stress;
 
 static uint64_t stress_word(uint64_t id, int i) {
@@ -846,6 +1151,7 @@ static void stress_produce(Stress *s) {
         }
         nk_xr_mailbox_publish(&s->mb, id);
     }
+    atomic_store_explicit(&s->done, 1, memory_order_release);
 }
 
 #ifdef _WIN32
@@ -863,6 +1169,7 @@ static void *stress_thread(void *arg) {
 static void test_mailbox_two_threads(void) {
     static Stress s;
     memset(&s, 0, sizeof(s));
+    atomic_init(&s.done, 0);
     nk_xr_mailbox_init(&s.mb);
 #ifdef _WIN32
     HANDLE th = CreateThread(NULL, 0, stress_thread, &s, 0, NULL);
@@ -878,7 +1185,9 @@ static void test_mailbox_two_threads(void) {
         return;
     }
 #endif
-    while (s.last_seen != STRESS_FRAMES) {
+    for (int producer_done = 0; !producer_done && s.last_seen != STRESS_FRAMES;) {
+        // Read before the acquire: when it is set, this acquire starts after the last publish.
+        producer_done = atomic_load_explicit(&s.done, memory_order_acquire);
         uint64_t id = 0;
         int slot = nk_xr_mailbox_acquire(&s.mb, &id);
         s.acquires++;
@@ -927,6 +1236,82 @@ static void produce(NkXrMailbox *m, ProducerLog *log, uint64_t *data, uint64_t i
         data[s] = id;
     }
     nk_xr_mailbox_publish(m, id);
+}
+
+// One nk_xr_frame_once pass on its own thread, as the VR frame loop runs it.
+typedef struct FrameLoopPass {
+    const NkXrFns *f;
+    const NkXrRun *run;
+    NkXrMailbox *m;
+    NkXrFrame fr;
+    XrResult r;
+} FrameLoopPass;
+
+static void frame_loop_pass(FrameLoopPass *p) {
+    p->r = nk_xr_frame_once(p->f, FAKE_SESSION, p->run, p->m, &p->fr);
+}
+
+#ifdef _WIN32
+static DWORD WINAPI frame_loop_thread(LPVOID arg) {
+    frame_loop_pass((FrameLoopPass *)arg);
+    return 0;
+}
+#else
+static void *frame_loop_thread(void *arg) {
+    frame_loop_pass((FrameLoopPass *)arg);
+    return NULL;
+}
+#endif
+
+// The frame loop blocks in xrWaitFrame on its own thread while this thread produces
+// `frames` frames after frame 1, which the loop holds. Returns 0 when a thread or gate
+// could not be made (a CHECK has already failed).
+static int decoupled_run(const NkXrFns *f, const NkXrRun *run, NkXrMailbox *m, uint64_t *data, int frames,
+                         int held, ProducerLog *log, int *held_intact, FrameLoopPass *pass) {
+    Gate entered, release;
+    if (!gate_init(&entered)) {
+        CHECK(!"gate");
+        return 0;
+    }
+    if (!gate_init(&release)) {
+        gate_destroy(&entered);
+        CHECK(!"gate");
+        return 0;
+    }
+    memset(pass, 0, sizeof(*pass));
+    pass->f = f;
+    pass->run = run;
+    pass->m = m;
+    fk.wait_entered = &entered;
+    fk.wait_release = &release;
+    int started = 0;
+#ifdef _WIN32
+    HANDLE th = CreateThread(NULL, 0, frame_loop_thread, pass, 0, NULL);
+    started = th != NULL;
+#else
+    pthread_t th;
+    started = pthread_create(&th, NULL, frame_loop_thread, pass) == 0;
+#endif
+    CHECK(started);
+    if (started) {
+        gate_wait(&entered);  // the frame loop is now inside xrWaitFrame, and stays there
+        for (int i = 0; i < frames; i++) {
+            produce(m, log, data, (uint64_t)i + 2u, held);
+        }
+        *held_intact = data[held] == 1;
+        gate_open(&release);
+#ifdef _WIN32
+        WaitForSingleObject(th, INFINITE);
+        CloseHandle(th);
+#else
+        pthread_join(th, NULL);
+#endif
+    }
+    fk.wait_entered = NULL;
+    fk.wait_release = NULL;
+    gate_destroy(&release);
+    gate_destroy(&entered);
+    return started;
 }
 
 static void test_frame_loop(void) {
@@ -985,19 +1370,10 @@ static void test_frame_loop(void) {
     CHECK(nk_xr_frame_once(&f, FAKE_SESSION, &run, &m, &fr) == XR_ERROR_LAYER_INVALID);
     CHECK(strcmp(fk.order, "WBE") == 0);
 
-    // Decoupling. The producer publishes 1000 frames. In run A nobody runs the frame
-    // loop. In run B the frame loop runs every 10 frames and every xrWaitFrame stalls
-    // (the fake records a long wait). The producer makes the same number of calls and
-    // is never refused a slot, never gets the consumer's slot, and the stalls only show
-    // up in the fake's own counter.
+    // Interleaved: the producer publishes 1000 frames and the frame loop runs every 10.
+    // The producer is never refused a slot and never gets the slot the loop holds, and
+    // each pass shows the frame published just before it.
     enum { FRAMES = 1000, EVERY = 10 };
-    ProducerLog a = {0, 0};
-    nk_xr_mailbox_init(&m);
-    for (uint64_t i = 1; i <= FRAMES; i++) {
-        produce(&m, &a, data, i, -1);
-    }
-    CHECK(a.calls == FRAMES && a.bad == 0);
-
     fake_reset();
     ProducerLog b = {0, 0};
     int consumer_slot = -1;
@@ -1013,11 +1389,45 @@ static void test_frame_loop(void) {
             consumer_slot = fr.slot;
         }
     }
-    CHECK(b.calls == a.calls && b.bad == 0);
+    CHECK(b.bad == 0);
     CHECK(loop_passes == FRAMES / EVERY && loop_ok);
-    CHECK(fk.n_wait == FRAMES / EVERY && fk.stall == (uint64_t)(FRAMES / EVERY) * 1000000u);
-    CHECK(fk.n_begin_frame == fk.n_wait && fk.n_end_frame == fk.n_wait);
+    CHECK(fk.n_wait == FRAMES / EVERY && fk.n_begin_frame == fk.n_wait && fk.n_end_frame == fk.n_wait);
     CHECK(fk.bad_args == 0);
+
+    // Decoupled: the loop holds frame 1, then runs on its own thread and its xrWaitFrame
+    // really blocks. While it is blocked the producer, on this thread, publishes 1000
+    // more frames: every publish completes, none is refused a slot or handed the slot
+    // the loop holds, and that slot keeps frame 1. Released, the loop shows the newest
+    // frame published during its wait, not a frame it took before waiting.
+    fake_reset();
+    nk_xr_mailbox_init(&m);
+    ProducerLog c = {0, 0};
+    produce(&m, &c, data, 1, -1);
+    CHECK(nk_xr_frame_once(&f, FAKE_SESSION, &run, &m, &fr) == XR_SUCCESS && fr.slot >= 0 && fr.frame_id == 1);
+    if (fr.slot >= 0) {
+        const int held = fr.slot;
+        int held_intact = 0;
+        FrameLoopPass pass;
+        if (decoupled_run(&f, &run, &m, data, FRAMES, held, &c, &held_intact, &pass)) {
+            CHECK(c.calls == FRAMES + 1 && c.bad == 0 && held_intact);
+            CHECK(pass.r == XR_SUCCESS && pass.fr.slot >= 0 && pass.fr.frame_id == (uint64_t)FRAMES + 1u &&
+                  data[pass.fr.slot] == (uint64_t)FRAMES + 1u);
+            CHECK(strcmp(fk.order, "WBEWBE") == 0 && fk.bad_args == 0);
+        }
+    }
+
+    // Display times pass through as the runtime predicts them: the frame state's time
+    // reaches the frame and xrEndFrame, past the waits where frame count times period
+    // leaves 32 bits (more than 193).
+    enum { LONG_RUN = 300 };
+    fake_reset();
+    XrResult lr = XR_SUCCESS;
+    for (int i = 0; i < LONG_RUN && lr == XR_SUCCESS; i++) {
+        lr = nk_xr_frame_once(&f, FAKE_SESSION, &run, &m, &fr);
+    }
+    CHECK(lr == XR_SUCCESS && fk.n_wait == LONG_RUN);
+    CHECK(fr.display_time == (XrTime)LONG_RUN * FAKE_PERIOD && fr.display_period == FAKE_PERIOD);
+    CHECK(fk.last_end_display_time == fr.display_time);
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,6 +1448,9 @@ static void test_layout(void) {
     CHECK(nk_xr_quad_extent(INFINITY, &w, &h) == -1);
     CHECK(nk_xr_quad_extent(NAN, &w, &h) == -1);
     CHECK(nk_xr_quad_extent(2.0f, NULL, &h) == -1);
+    // Every positive finite width has a finite extent: width * 272 would overflow first.
+    CHECK(nk_xr_quad_extent(FLT_MAX, &w, &h) == 0 && w == FLT_MAX && isfinite(h) && h > 0.0f);
+    CHECK(nk_xr_quad_extent(2e36f, &w, &h) == 0 && isfinite(h) && fabsf(h / 2e36f - 272.0f / 480.0f) < 1e-6f);
 
     float pos[3] = {9, 9, 9}, quat[4] = {9, 9, 9, 9};
     CHECK(nk_xr_quad_pose(2.5f, 1.25f, pos, quat) == 0);
@@ -1064,6 +1477,10 @@ static void test_layout(void) {
     CHECK(isnan(nk_xr_eye_clip_x(1.0f, 4.0f, INFINITY, c, -1)));
     CHECK(isnan(nk_xr_eye_clip_x(1.0f, 4.0f, s, INFINITY, +1)));
     CHECK(isnan(nk_xr_eye_clip_x(NAN, 4.0f, s, c, 0)));
+    // Finite inputs whose s * (w - c) overflows: mono keeps x, a stereo eye is refused with NaN.
+    CHECK(nk_xr_eye_clip_x(1.0f, FLT_MAX, 1.0f, -FLT_MAX, 0) == 1.0f);
+    CHECK(isnan(nk_xr_eye_clip_x(1.0f, FLT_MAX, 1.0f, -FLT_MAX, +1)));
+    CHECK(isnan(nk_xr_eye_clip_x(1.0f, FLT_MAX, 1.0f, -FLT_MAX, -1)));
     for (int i = 0; i < 16; i++) {
         float x = 0.25f * (float)(i - 8), wc = 0.5f * (float)i;
         float r = nk_xr_eye_clip_x(x, wc, s, c, +1), l = nk_xr_eye_clip_x(x, wc, s, c, -1);
@@ -1078,6 +1495,7 @@ int main(void) {
     test_null_table_refusals();
     test_loss_then_exit();
     test_state_machine();
+    test_mailbox_layout();
     test_mailbox_basic();
     test_mailbox_interleavings();
     test_mailbox_producer_never_waits();

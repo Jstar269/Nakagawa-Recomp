@@ -66,6 +66,78 @@ static bool launch_join_path(const char *base, const char *relative,
                                    NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
 }
 
+/* Whether the runtime in a package's executable knows the cheats switch (#2639). A package is
+   linked with the runtime of the Nakagawa that built it, and one built before cheats existed
+   ignores SR_CHEATS without a word: no marker in its window and no line in its log. The
+   package's build identity (NkPackageBuildIdentity) says only that another Nakagawa built it,
+   not which one came first, and nothing else a package records names its runtime's features.
+   So the launcher asks the executable: a runtime that reads the switch holds the name of the
+   variable its file comes from in its data. An executable that cannot be read (or no memory
+   to read it with) answers true, so the launch itself reports what is wrong with it. */
+bool nk_launch_runtime_reads_cheats(const char *executable_path) {
+    static const char marker[] = "SR_CHEATS_" "FILE";
+    const size_t marker_len = sizeof(marker) - 1u;
+    const size_t block_size = 65536u;
+    unsigned char *block;
+    size_t kept = 0u;
+    bool found = false;
+    FILE *f;
+    if (!executable_path || !executable_path[0]) return true;
+    f = nk_fopen_utf8(executable_path, "rb");
+    if (!f) return true;
+    block = (unsigned char *)malloc(block_size);
+    if (!block) {
+        fclose(f);
+        return true;
+    }
+    for (;;) {
+        size_t got = fread(block + kept, 1u, block_size - kept, f);
+        size_t have = kept + got;
+        if (got == 0u) break;
+        for (size_t i = 0u; i + marker_len <= have && !found; i++) {
+            if (block[i] == (unsigned char)marker[0] && memcmp(block + i, marker, marker_len) == 0) found = true;
+        }
+        if (found) break;
+        /* Keep the tail a marker could start in. */
+        kept = have < marker_len - 1u ? have : marker_len - 1u;
+        memmove(block, block + have - kept, kept);
+    }
+    /* A read that failed part way (a lock, a drive that went away) is an executable that
+       cannot be read, not one whose runtime predates cheats. */
+    if (!found && ferror(f)) found = true;
+    free(block);
+    fclose(f);
+    return found;
+}
+
+/* The cheat file a launch with cheats on names (#2639): the one the session names, else
+   <user_data_root>/cheats/<DISC>.ini with the disc ID as the package folders spell it
+   (ULUS12345). False, with `out_path` empty, when the session names none and has no per-user
+   data directory or no PSP disc ID, or the path does not fit; the runtime then says that no
+   file is named and applies nothing. */
+static bool launch_cheats_file(const NkLaunchSession *session, char *out_path, size_t out_size) {
+    int written;
+    if (!out_path || out_size == 0u) return false;
+    out_path[0] = '\0';
+    if (session->config.cheats_file[0]) {
+        written = snprintf(out_path, out_size, "%s", session->config.cheats_file);
+    } else {
+        char disc[NK_MAX_DISC_ID_LEN + 8];
+        char sep = nk_platform_path_separator();
+        if (!session->user_data_root[0] ||
+            !nk_title_manifest_package_dir_name(session->disc_id, NULL, disc, sizeof(disc))) {
+            return false;
+        }
+        written = snprintf(out_path, out_size, "%s%ccheats%c%s.ini", session->user_data_root, sep,
+                           sep, disc);
+    }
+    if (written < 0 || (size_t)written >= out_size) {
+        out_path[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
 /* The title's code-capture folder (#1933), <user_data_root>/cache/bringup/<DISC>/captures, the
    folder `nk_cli.py bringup` reads (bringup_capture_dir). False, with `out_path` empty, when the
    session has no per-user data directory or no PSP disc ID, or the path does not fit. */
@@ -241,6 +313,24 @@ static bool ensure_writable_dir(const char *path) {
     if (!f) return false;
     fclose(f);
     nk_remove_utf8(probe);
+    return true;
+}
+
+/* One rule for every Memory Stick candidate: the directory is created or found
+ * writable, then stored absolute. The child starts in the session's working
+ * directory, not the launcher's, so a relative root would name another folder
+ * there; a candidate whose absolute form cannot be formed or does not fit is
+ * not usable, and out_path is left as it was. */
+static bool launch_store_writable_dir(const char *candidate, char *out_path,
+                                      size_t out_size) {
+    if (!candidate || !candidate[0] || !out_path || out_size == 0u) return false;
+    if (!ensure_writable_dir(candidate)) return false;
+    char absolute[NK_MAX_PATH * 2];
+    if (!nk_platform_absolute_path(candidate, absolute, sizeof(absolute)) ||
+        strlen(absolute) >= out_size) {
+        return false;
+    }
+    safe_copy_path(out_path, out_size, absolute);
     return true;
 }
 
@@ -463,6 +553,17 @@ static bool find_candidate_executable(
     return false;
 }
 
+/* The root a NULL or empty caller root stands for: the per-user data
+ * directory, or "." when the platform cannot name one. The readiness probes
+ * (nk_launch_runtime_available, nk_launch_runtime_package_available) and
+ * nk_launch_prepare_session all resolve it here, so readiness looks where the
+ * launch looks. */
+static const char *launch_effective_root(const char *root, char *buffer, size_t buffer_size) {
+    if (root && *root) return root;
+    if (nk_platform_get_app_data_dir(buffer, buffer_size)) return buffer;
+    return ".";
+}
+
 static NkLaunchDataRootStatus launch_resolve_data_root(
     const NkGameEntry *game,
     const NkTitleEntry *entry,
@@ -537,11 +638,7 @@ NkLaunchDataRootStatus nk_launch_game_data_root_status(
     }
 
     char default_root[NK_MAX_PATH];
-    const char *root = (runtime_root && runtime_root[0]) ? runtime_root : NULL;
-    if (!root) {
-        if (nk_platform_get_app_data_dir(default_root, sizeof(default_root))) root = default_root;
-        else root = ".";
-    }
+    const char *root = launch_effective_root(runtime_root, default_root, sizeof(default_root));
 
     NkTitleEntrySnapshot snapshot = {0};
     char identity_error[512] = "";
@@ -573,7 +670,8 @@ NkLaunchDataRootStatus nk_launch_game_data_root_status(
 
 bool nk_launch_runtime_available(const char *root, const char *title_id) {
     char resolved[NK_MAX_PATH];
-    const char *effective_root = (root && *root) ? root : ".";
+    char default_root[NK_MAX_PATH];
+    const char *effective_root = launch_effective_root(root, default_root, sizeof(default_root));
     NkTitleEntrySnapshot snapshot = {0};
     bool found = title_id && *title_id &&
         nk_title_catalog_find_by_id(title_id, &snapshot);
@@ -937,7 +1035,8 @@ static bool find_candidate_image(
 }
 
 bool nk_launch_runtime_package_available(const char *root, const char *title_id) {
-    const char *effective_root = (root && *root) ? root : ".";
+    char default_root[NK_MAX_PATH];
+    const char *effective_root = launch_effective_root(root, default_root, sizeof(default_root));
     NkTitleEntrySnapshot snapshot = {0};
     bool found = title_id && *title_id &&
         nk_title_catalog_find_by_id(title_id, &snapshot);
@@ -1053,11 +1152,8 @@ NkResult nk_launch_prepare_session(
     }
 
     char default_root[NK_MAX_PATH];
-    const char *root = (repo_or_install_root && *repo_or_install_root) ? repo_or_install_root : NULL;
-    if (!root) {
-        if (nk_platform_get_app_data_dir(default_root, sizeof(default_root))) root = default_root;
-        else root = ".";
-    }
+    const char *root = launch_effective_root(repo_or_install_root, default_root,
+                                             sizeof(default_root));
     /* #366: `root` is a directory by contract. A direct file path is not an
        escape hatch in the generic API: handing the launcher an exact legacy
        binary path does not make it a validated runtime for this title, and
@@ -1214,8 +1310,24 @@ NkResult nk_launch_prepare_session(
         if (nk_title_manifest_identify_build(
                 build_disc_id, game->iso_path,
                 game->selected_executable[0] ? game->selected_executable : NULL,
-                &build_identity))
+                &build_identity)) {
+            /* A build the manifest records as known-bad is refused here, with
+               its recorded reason, as the card preflight and the Python
+               staging (BUILD_KNOWN_BAD) refuse it: a direct launch, or one
+               prepared after the disc changed since its card was checked,
+               must not start it with bindings recorded for another build. */
+            if (build_identity.status == NK_BUILD_KNOWN_BAD) {
+                char build_text[512];
+                nk_title_manifest_describe_build(&build_identity, build_text,
+                                                 sizeof(build_text));
+                snprintf(session->last_error, sizeof(session->last_error),
+                         "BUILD_KNOWN_BAD: %s", build_text);
+                session->base_address = 0u;
+                nk_title_catalog_snapshot_release(&title_snapshot);
+                return NK_ERROR_UNSUPPORTED_TITLE;
+            }
             unlisted_build = build_identity.status == NK_BUILD_UNLISTED;
+        }
     }
     session->entry_point = unlisted_build
         ? entry->executable_entry : entry->run_entry;
@@ -1312,18 +1424,18 @@ NkResult nk_launch_prepare_session(
     session->memstick_root[0] = 0;
     /* An explicit SR_MEMSTICK in the launcher's own environment wins, so a
      * wrapper such as tools/isolated_run.py can point a launched title at a
-     * disposable copy; the value is exported to the child below unchanged. */
+     * disposable copy; the value is exported to the child below unchanged. It
+     * is read through the UTF-8 environment reader: on Windows the narrow
+     * getenv gives code-page bytes, so a folder named outside the ANSI code
+     * page was refused as unwritable. Every candidate below is stored absolute
+     * by launch_store_writable_dir. */
     {
-        const char *forced = getenv("SR_MEMSTICK");
-        if (forced && *forced) {
-            if (ensure_writable_dir(forced)) {
-                char absolute[NK_MAX_PATH * 2];
-                if (nk_platform_absolute_path(forced, absolute, sizeof(absolute))) {
-                    safe_copy_path(session->memstick_root, sizeof(session->memstick_root), absolute);
-                } else {
-                    safe_copy_path(session->memstick_root, sizeof(session->memstick_root), forced);
-                }
-            } else {
+        char forced[NK_MAX_PATH * 2];
+        int forced_state = nk_platform_env_utf8("SR_MEMSTICK", forced, sizeof(forced));
+        if (forced_state < 0 || (forced_state > 0 && forced[0])) {
+            if (forced_state < 0 ||
+                !launch_store_writable_dir(forced, session->memstick_root,
+                                           sizeof(session->memstick_root))) {
                 /* A redirect request must never fall back to the real Memory Stick. */
                 snprintf(session->last_error, sizeof(session->last_error),
                          "SR_MEMSTICK is set but is not a writable directory; refusing to "
@@ -1336,23 +1448,18 @@ NkResult nk_launch_prepare_session(
     if (session->memstick_root[0] == 0 && !session->package_launch && game->assets_staged && game->prepared_root[0]) {
         char cand_ms[NK_MAX_PATH * 2];
         if (launch_join_path(game->prepared_root, "memstick",
-                             cand_ms, sizeof(cand_ms)) &&
-            ensure_writable_dir(cand_ms)) {
-            char absolute[NK_MAX_PATH * 2];
-            if (nk_platform_absolute_path(cand_ms, absolute, sizeof(absolute))) {
-                safe_copy_path(session->memstick_root, sizeof(session->memstick_root), absolute);
-            } else {
-                safe_copy_path(session->memstick_root, sizeof(session->memstick_root), cand_ms);
-            }
+                             cand_ms, sizeof(cand_ms))) {
+            (void)launch_store_writable_dir(cand_ms, session->memstick_root,
+                                            sizeof(session->memstick_root));
         }
     }
     if (!session->package_launch && session->memstick_root[0] == 0 &&
         entry && entry->memory_stick_root && *entry->memory_stick_root) {
         char cand_ms[NK_MAX_PATH * 2];
-        int w = snprintf(cand_ms, sizeof(cand_ms), "%s%c%s",
-                         session->working_directory, sep, entry->memory_stick_root);
-        if (w > 0 && (size_t)w < sizeof(session->memstick_root) && ensure_writable_dir(cand_ms)) {
-            safe_copy_path(session->memstick_root, sizeof(session->memstick_root), cand_ms);
+        if (launch_join_path(session->working_directory, entry->memory_stick_root,
+                             cand_ms, sizeof(cand_ms))) {
+            (void)launch_store_writable_dir(cand_ms, session->memstick_root,
+                                            sizeof(session->memstick_root));
         }
     }
     if (session->memstick_root[0] == 0) {
@@ -1361,9 +1468,9 @@ NkResult nk_launch_prepare_session(
             const char *slot = session->disc_id[0] ? session->disc_id
                              : (session->title_id[0] ? session->title_id : "unidentified");
             char cand_ms[NK_MAX_PATH * 2];
-            int w = snprintf(cand_ms, sizeof(cand_ms), "%s%c%s", saves_root, sep, slot);
-            if (w > 0 && (size_t)w < sizeof(session->memstick_root) && ensure_writable_dir(cand_ms)) {
-                safe_copy_path(session->memstick_root, sizeof(session->memstick_root), cand_ms);
+            if (launch_join_path(saves_root, slot, cand_ms, sizeof(cand_ms))) {
+                (void)launch_store_writable_dir(cand_ms, session->memstick_root,
+                                                sizeof(session->memstick_root));
             }
         }
     }
@@ -1379,11 +1486,26 @@ NkResult nk_launch_prepare_session(
     if (nk_platform_file_exists(game->iso_path)) {
         snprintf(session->iso_path, sizeof(session->iso_path), "%s", game->iso_path);
     } else {
-        /* Check fallback under prepared_root/disc/game.iso */
+        /* Check fallback under prepared_root/disc/game.iso. The checked join
+           refuses an empty prepared root (which would name the filesystem
+           root's disc/game.iso), and a fallback that does not fit the session's
+           ISO path is refused by name rather than checked whole and stored cut. */
         char fallback_iso[NK_MAX_PATH + 32];
-        snprintf(fallback_iso, sizeof(fallback_iso), "%s%cdisc%cgame.iso", game->prepared_root, sep, sep);
-        if (nk_platform_file_exists(fallback_iso)) {
-            snprintf(session->iso_path, sizeof(session->iso_path), "%.*s", (int)(sizeof(session->iso_path) - 1), fallback_iso);
+        char fallback_relative[16];
+        snprintf(fallback_relative, sizeof(fallback_relative), "disc%cgame.iso", sep);
+        bool have_fallback = launch_join_path(game->prepared_root, fallback_relative,
+                                              fallback_iso, sizeof(fallback_iso)) &&
+                             nk_platform_file_exists(fallback_iso);
+        if (have_fallback && strlen(fallback_iso) >= sizeof(session->iso_path)) {
+            snprintf(session->last_error, sizeof(session->last_error),
+                     "The prepared copy's disc image path is too long for a launch "
+                     "(%u bytes; the limit is %u).",
+                     (unsigned)strlen(fallback_iso), (unsigned)(sizeof(session->iso_path) - 1u));
+            nk_title_catalog_snapshot_release(&title_snapshot);
+            return NK_ERROR_PATH_TOO_LONG;
+        }
+        if (have_fallback) {
+            safe_copy_path(session->iso_path, sizeof(session->iso_path), fallback_iso);
         } else if (game->assets_staged && session->staged_executable_path[0]) {
             /* The promoted EBOOT and data root are enough for a staged launch
              * preparation. Leave PSP_ISO unset rather than relabelling the
@@ -1509,6 +1631,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_adhoc_enabled[32];
     char env_adhoc_server[sizeof(session->config.online_play_server) + 24];
     char env_adhoc_offset[32];
+    char env_cheats_file[NK_MAX_PATH + 24];
     char sep = nk_platform_path_separator();
 
     if (session->config.fps_cap == -1) {
@@ -1711,9 +1834,16 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     }
     envp[env_count++] = env_tables;
 
+    /* SR_DATAROOT, SR_FONTDIR, SR_MODULE_DIR and NK_INPUT_PROFILE are always
+       named: the session's value, or the bare name, which removes the variable
+       from the child's environment. Both backends start the child from the
+       launcher's environment, so a value a developer shell exported would
+       otherwise reach every title that resolves none of its own. */
     if (session->dataroot_path[0]) {
         snprintf(env_dataroot, sizeof(env_dataroot), "SR_DATAROOT=%s", session->dataroot_path);
         envp[env_count++] = env_dataroot;
+    } else {
+        envp[env_count++] = "SR_DATAROOT";
     }
     /* Empty explicitly masks any inherited title's bindings in a generic or
        legacy launch. Each row is host-path<TAB>mount<TAB>precedence<NEWLINE>. */
@@ -1723,6 +1853,8 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     if (session->font_dir[0]) {
         snprintf(env_font, sizeof(env_font), "SR_FONTDIR=%s", session->font_dir);
         envp[env_count++] = env_font;
+    } else {
+        envp[env_count++] = "SR_FONTDIR";
     }
     /* The per-user data directory the user-imported fonts live under. Always exported, cache or not, so
      * the runtime reads the root the launcher resolved and never its own platform default (which differs
@@ -1734,6 +1866,32 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     /* The console nickname (#2197), always exported so an inherited value cannot name it. */
     snprintf(env_nickname, sizeof(env_nickname), "SR_NICKNAME=%s", session->config.nickname);
     envp[env_count++] = env_nickname;
+    /* Cheats (#2639, src/rt/cheats.h): the switch and the file, both always exported so an
+       inherited value cannot turn them on or name a file. The acceptance checkpoint is evidence
+       of the game as it is, so a session with one refuses to launch with cheats on. */
+    {
+        char cheats_file[NK_MAX_PATH];
+        cheats_file[0] = '\0';
+        if (session->config.cheats) {
+            if (session->config.headless_accept_presented_frames > 0u) {
+                snprintf(session->last_error, sizeof(session->last_error),
+                         "Cheats are on; the acceptance checkpoint needs a run without them.");
+                return NK_ERROR_GENERIC;
+            }
+            /* A package built before cheats existed would start, apply nothing and say
+               nothing. It is not started that way. */
+            if (!nk_launch_runtime_reads_cheats(session->executable_path)) {
+                snprintf(session->last_error, sizeof(session->last_error),
+                         "Cheats are on, but this game's package was built before cheats existed "
+                         "and would ignore them. Rebuild the package to use cheats, or turn cheats off.");
+                return NK_ERROR_GENERIC;
+            }
+            (void)launch_cheats_file(session, cheats_file, sizeof(cheats_file));
+        }
+        envp[env_count++] = session->config.cheats ? "SR_CHEATS=1" : "SR_CHEATS=0";
+        snprintf(env_cheats_file, sizeof(env_cheats_file), "SR_CHEATS_FILE=%s", cheats_file);
+        envp[env_count++] = env_cheats_file;
+    }
     /* What the pause overlay shows and draws with, beside the game's name (SR_GAME_TITLE
      * below): the disc ID and the player's folder for the UI fonts. Always exported, so an
      * empty value masks an inherited one instead of naming another game. */
@@ -1769,6 +1927,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
      * where that exact tree lives; otherwise it falls back to the repository
      * development path and silently ignores the modules just staged. */
     char package_modules[NK_MAX_PATH * 2];
+    bool module_dir_named = false;
     bool have_package_modules = session->package_launch && session->working_directory[0] &&
         launch_join_path(session->working_directory, "modules", package_modules,
                          sizeof(package_modules)) &&
@@ -1781,6 +1940,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
                                       "SR_MODULE_DIR=%s", package_modules);
         if (module_written > 0 && (size_t)module_written < sizeof(env_modules)) {
             envp[env_count++] = env_modules;
+            module_dir_named = true;
         }
     } else if (session->prepared_root[0]) {
         char module_dir[NK_MAX_PATH * 2];
@@ -1790,8 +1950,12 @@ NkResult nk_launch_start(NkLaunchSession *session) {
                                           "SR_MODULE_DIR=%s", module_dir);
             if (module_written > 0 && (size_t)module_written < sizeof(env_modules)) {
                 envp[env_count++] = env_modules;
+                module_dir_named = true;
             }
         }
+    }
+    if (!module_dir_named) {
+        envp[env_count++] = "SR_MODULE_DIR";
     }
 
     /* The player resolves the effective host input mapping for the disc being
@@ -1800,6 +1964,8 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     if (nk_launch_format_input_profile_env(session, env_input_profile,
                                           sizeof(env_input_profile))) {
         envp[env_count++] = env_input_profile;
+    } else {
+        envp[env_count++] = "NK_INPUT_PROFILE";
     }
 
     if (session->config.benchmark_mode) {
@@ -1813,8 +1979,16 @@ NkResult nk_launch_start(NkLaunchSession *session) {
 
     /* Player launches use this event file so startup milestones and named
        stops survive child exit without relying on platform-specific stderr. */
+    /* An inherited SR_BOOT_EVENT_FILE is read through the UTF-8 environment
+       reader, as SR_MEMSTICK is: it becomes the child's output log, which the
+       spawn converts as UTF-8. */
+    char inherited_boot_event[NK_MAX_PATH];
+    if (nk_platform_env_utf8("SR_BOOT_EVENT_FILE", inherited_boot_event,
+                             sizeof(inherited_boot_event)) <= 0) {
+        inherited_boot_event[0] = '\0';
+    }
     const char *boot_event_path = session->boot_event_file_path[0]
-        ? session->boot_event_file_path : getenv("SR_BOOT_EVENT_FILE");
+        ? session->boot_event_file_path : inherited_boot_event;
     if (boot_event_path && *boot_event_path) {
         int w = snprintf(env_boot_event, sizeof(env_boot_event),
                          "SR_BOOT_EVENT_FILE=%s", boot_event_path);
@@ -1831,7 +2005,8 @@ NkResult nk_launch_start(NkLaunchSession *session) {
        (an empty one turns the capture off). */
     {
         char capture_dir[NK_MAX_PATH];
-        if (!getenv("SR_CODE_CAPTURE") &&
+        char user_capture[8];
+        if (nk_platform_env_utf8("SR_CODE_CAPTURE", user_capture, sizeof(user_capture)) == 0 &&
             launch_code_capture_dir(session, capture_dir, sizeof(capture_dir))) {
             int w = snprintf(env_code_capture, sizeof(env_code_capture), "SR_CODE_CAPTURE=%s",
                              capture_dir);
@@ -1881,6 +2056,12 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         }
     }
     argv[argc] = NULL;
+
+    /* A session started again after its child ended still holds that child's
+       process and job handles (nk_launch_is_running and nk_launch_wait read the
+       status but keep them); the spawn below overwrites them, so they are closed
+       here first. The live-child case returned above. */
+    nk_platform_close_process(&session->process);
 
     bool ok = nk_platform_spawn_process(
         session->executable_path,
@@ -1939,6 +2120,11 @@ bool nk_launch_is_running(NkLaunchSession *session) {
 }
 
 int nk_launch_wait(NkLaunchSession *session, int timeout_ms) {
+    return nk_launch_wait_status(session, timeout_ms, NULL);
+}
+
+int nk_launch_wait_status(NkLaunchSession *session, int timeout_ms, bool *timed_out) {
+    if (timed_out) *timed_out = false;
     if (!session) return -1;
     if (!session->is_running) return session->exit_code;
 
@@ -1949,8 +2135,11 @@ int nk_launch_wait(NkLaunchSession *session, int timeout_ms) {
            the handle still valid on both backends. Recording that as the exit
            code and marking the session stopped made a timeout unrecoverable:
            the caller could not wait again, and nk_launch_stop then skipped
-           termination and discarded a still-live handle. */
+           termination and discarded a still-live handle. A child that ended
+           with no exit status also reads -1, so only this branch is the
+           timeout the caller is told about. */
         if (nk_platform_is_process_running(&session->process)) {
+            if (timed_out) *timed_out = true;
             return code;
         }
         /* It exited between the wait expiring and this check, so -1 was the
@@ -2028,7 +2217,7 @@ bool nk_launch_keep_run_log_in(const char *events_path, const char *log_dir,
     if (ok && cut > 0) {
         ok = fprintf(out, "[nakagawa] the first %llu bytes of this run were cut; "
                           "the last %llu bytes are kept\n",
-                     (unsigned long long)cut, (unsigned long long)max_bytes) > 0;
+                     (unsigned long long)cut, (unsigned long long)((uint64_t)size - cut)) > 0;
     }
     char buffer[16384];
     size_t got;

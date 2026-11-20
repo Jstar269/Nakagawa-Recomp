@@ -10,9 +10,12 @@ target exists because a contributor who must run the whole native and tooling
 matrix to find out whether a one-line documentation fix is well formed gives up
 instead of opening the pull request.
 
-It does not decide what to run with a second, private copy of the rules.  Path
-routing comes from ``tools/ci_paths.py``, the same classifier the hosted
-workflow uses, so the local run and the hosted run cannot drift apart.  Each
+It does not classify the change with a second, private copy of the rules: the
+surfaces come from ``tools/ci_paths.py``, the same classifier the hosted
+workflow uses, and are printed.  Each local gate then checks only the files it
+can check here (ruff the changed Python, the strict compile the changed C
+sources), so a surface hosted CI builds that no local gate covers, such as a
+header-only native change, is reported ``NOT_RUN`` with that reason.  Each
 gate reports one of ``PASS``, ``FAIL``, ``SKIP`` (the tool is not installed) or
 ``NOT_RUN`` (the change does not touch that surface).  A gate that cannot run is
 never reported as a pass.
@@ -34,7 +37,9 @@ split.
 from __future__ import annotations
 
 import argparse
+import ast
 from dataclasses import dataclass
+from functools import lru_cache
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -61,19 +66,25 @@ MAINTAINER_SIDE_CODES = (
     "POLICY_EXPORT_STALE",
 )
 
+#: The shape of one publish_audit finding line: ``CODE: path: detail``.
+AUDIT_FINDING = re.compile(r"^[A-Z][A-Z0-9_]+: ")
+
 STRICT_C_FLAGS = (
     "-fsyntax-only", "-std=c11", "-Wall", "-Wextra", "-Werror",
     # Every include directory below is one the Makefile puts on the compile line
     # of the sources that need it: CFLAGS (`src/rt`, `src/core`), PLAYER_INCLUDES
     # (`src/player`, `src/player/ui`, `src/ui`, `third_party/clay`,
     # `src/core/generated`), RT_NK_UI_FLAGS (`src/rt/overlay`), the Ed25519
-    # selftest (`third_party/monocypher`) and HLE_INCLUDES (the ATRAC3+ subset).
+    # selftest (`third_party/monocypher`), HLE_INCLUDES (the ATRAC3+ subset) and
+    # the achievements build (`third_party/rcheevos/include`, which rcheevos's own
+    # sources and every caller include by bare name).
     # A `tests/native/*.c` unit lives outside `src/`, so a bare include of a
     # player or UI header resolves only with that directory on the path.
     "-Isrc/rt", "-Isrc/core",
     "-Isrc/player", "-Isrc/player/ui", "-Isrc/ui", "-Isrc/rt/overlay",
     "-Isrc/core/generated", "-Ithird_party/clay", "-Ithird_party/monocypher",
     "-Isrc/rt/atrac3p", "-Isrc/rt/atrac3p/libavcodec", "-Isrc/rt/atrac3p/libavutil",
+    "-Ithird_party/rcheevos/include",
 )
 
 
@@ -96,18 +107,20 @@ class GeneratedHeader:
 
 @dataclass(frozen=True)
 class StrictUnit:
-    """The extra flags the Makefile compiles one source with.
+    """The extra flags the build compiles one source with.
 
     *recipes* name the Makefile rules (their target text) whose compile line
-    these flags come from; ``tools/test_contrib_check.py`` reads those recipes
-    and fails if a define, include or warning listed here is not on them, so
-    this table cannot drift from the build.
+    these flags come from; *builder* names a ``(path, function)`` Python
+    helper when a tool builds the source directly instead of a Makefile rule.
+    ``tools/test_contrib_check.py`` reads those recipes or that builder and
+    fails if a define, include or warning listed here drifts from the build.
     """
 
-    recipes: tuple[str, ...]
+    recipes: tuple[str, ...] = ()
+    builder: tuple[str, str] | None = None
     defines: tuple[str, ...] = ()
     includes: tuple[str, ...] = ()
-    #: ``-Wno-*`` suppressions the Makefile owns, with their reason, for this
+    #: ``-Wno-*`` suppressions the build owns, with their reason, for this
     #: source's warning-audited build.  Only the ones this source needs.
     warnings: tuple[str, ...] = ()
     generated: tuple[GeneratedHeader, ...] = ()
@@ -207,11 +220,29 @@ STRICT_C_UNITS: dict[str, StrictUnit] = {
             ),
         ),
     ),
+    # The CHD reader and its test include libchdr's headers, which only the
+    # recipes that link libchdr put on the path ($(LIBCHDR_INC)).
+    "src/core/nk_disc_chd.c": StrictUnit(
+        recipes=("native-core-tests",),
+        includes=("third_party/libchdr/include",),
+    ),
+    "tests/native/test_disc_expand.c": StrictUnit(
+        recipes=("native-core-tests",),
+        includes=("third_party/libchdr/include",),
+    ),
     # The texture-pack selftest counts sort comparisons and inflater builds;
-    # nk_zip.h declares those counters only under these defines.
+    # nk_zip.h declares those counters only under these defines. It also
+    # swaps a pack's ZIP through texrepl.c's NK_TEXREPL_TEST_HOOKS seam.
     "tests/native/texrepl_selftest.c": StrictUnit(
         recipes=("texrepl-selftest",),
-        defines=("NK_SORT_COUNT_COMPARES", "NK_INFLATE_COUNT_BUILDS"),
+        defines=("NK_SORT_COUNT_COMPARES", "NK_INFLATE_COUNT_BUILDS", "NK_TEXREPL_TEST_HOOKS"),
+    ),
+    # The standalone GE VRAM decoder is compiled by tools/nk_cli.py
+    # (_build_vram_decoder) with -DSR_GE_VRAM_DECODER_CLI and the common
+    # include paths (-Isrc/rt, -Isrc/core, -Isrc/core/generated, -Isrc/player).
+    "src/rt/ge_vram_cli.c": StrictUnit(
+        builder=("tools/nk_cli.py", "_build_vram_decoder"),
+        defines=("SR_GE_VRAM_DECODER_CLI",),
     ),
 }
 
@@ -247,6 +278,74 @@ SHARED_TOOL_TESTS = {
     "tools/ci_paths.py": ("tools.test_ci_paths", "tools.test_ci_required"),
     "tools/contrib_check.py": ("tools.test_contrib_check",),
     "tools/provenance_record_gap.py": ("tools.test_provenance_record_gap",),
+    # Covered by a test module that is not named after them.
+    "tools/nk_core/disc_expand_tool.py": ("tools.test_disc_expand",),
+    "tests/fixtures/cosim/mutate.py": ("tools.test_cosim_mutation_gate_outcome",),
+}
+
+#: Source trees whose files may be read, compiled, or mutated directly by a
+#: ``tools/test_*.py`` module.
+SOURCE_TEST_ROOTS = ("src/", "tests/native/")
+
+#: Inline ``#include "<file>"`` inside generated C test harnesses.  When the
+#: included file is a ``.c`` or ``.inc`` unit that resolves uniquely under
+#: ``SOURCE_TEST_ROOTS``, the module compiles that unit and must run when it
+#: changes.
+_INLINE_C_INCLUDE = re.compile(r'#\s*include\s*"([^"]+)"')
+
+#: ``tools/test_*.py`` modules that mention literal paths under ``src/`` or
+#: ``tests/native/`` but are intentionally NOT selected by ``contrib-check``
+#: when those source files change.  Every exclusion carries its explicit reason
+#: and is verified by ``tools/test_contrib_check.py`` so no miss hides here.
+SOURCE_TEST_EXCLUSIONS: dict[str, str] = {
+    "tools.test_production_smoke": (
+        "too slow for the local fast path (~971 s in hosted CI); runs full "
+        "multi-fixture codegen and native smoke builds"
+    ),
+    "tools.test_ci_paths": (
+        "passes source paths only as synthetic inputs to ci_paths.classify(); "
+        "never reads, compiles, or mutates those files"
+    ),
+    "tools.test_dco_policy": (
+        "passes source paths only as synthetic commit paths in DCO policy "
+        "fixtures; never reads, compiles, or mutates those files"
+    ),
+    "tools.test_admit_paths": (
+        "uses source paths only as synthetic pre-commit regex and fixture "
+        "inputs; never reads, compiles, or mutates those files"
+    ),
+    "tools.test_lint_docs": (
+        "writes synthetic src/player/main.c links in temporary Markdown "
+        "fixtures; contrib-check runs tools/lint_docs.py directly on docs"
+    ),
+    "tools.test_public_export": (
+        "uses src/rt/recomp.c only in synthetic export fixtures (~78 s); "
+        "contrib-check runs policy_sync.py and publish_audit.py directly"
+    ),
+    "tools.test_publication_policy_gate": (
+        "uses src/rt/ge.c only as a policy classification string (~42 s); "
+        "contrib-check runs policy_sync.py directly"
+    ),
+    "tools.test_publish_audit": (
+        "tests publish_audit.py with synthetic fixtures and policy checks; "
+        "contrib-check runs publish_audit.py directly in publication_gate()"
+    ),
+    "tools.test_provenance_ledger": (
+        "tests provenance_ledger.py metadata and synthetic entries; "
+        "contrib-check runs publication_gate() directly"
+    ),
+    "tools.test_provenance_record_gap": (
+        "queries independence metadata by sample path string; never reads, "
+        "compiles, or mutates those C sources"
+    ),
+    "tools.test_contrib_check": (
+        "passes sample C paths to mocked contrib-check gates and unchanged-main "
+        "compiles; contrib-check already runs c_gate and purity_gate directly"
+    ),
+    "tools.test_hst_manager_manifest": (
+        "writes synthetic text to a temporary src/rt/recomp.c (~40 s); never "
+        "reads, compiles, or mutates the repository's src/rt/recomp.c"
+    ),
 }
 
 PASS, FAIL, SKIP, NOT_RUN, MAINTAINER_SIDE = "PASS", "FAIL", "SKIP", "NOT_RUN", "MAINTAINER-SIDE"
@@ -286,12 +385,20 @@ def find_tool(name: str) -> str | None:
 
 
 class Gate:
-    __slots__ = ("name", "status", "detail")
+    """One gate's result. ``detail`` is what is shown; ``output`` is a failed command's whole output, which
+    a caller that classifies the failure reads (``detail`` keeps only its last lines)."""
 
-    def __init__(self, name: str, status: str, detail: str = "") -> None:
+    __slots__ = ("name", "status", "detail", "output", "unchecked")
+
+    def __init__(self, name: str, status: str, detail: str = "", output: str = "",
+                 *, unchecked: bool = False) -> None:
         self.name = name
         self.status = status
         self.detail = detail
+        self.output = output
+        #: A NOT_RUN that leaves a changed surface unchecked locally, rather than one the
+        #: change does not touch; the summary names it next to the skipped gates.
+        self.unchecked = unchecked
 
 
 def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -302,9 +409,15 @@ def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
 
 def changed_paths(base: str) -> list[str]:
     """Committed changes against *base* plus anything still uncommitted."""
-    merge_base = _git("merge-base", base, "HEAD").stdout.strip()
-    if not merge_base:
-        raise SystemExit(f"contrib-check: cannot resolve a merge base with {base}")
+    # An unknown base (origin/main never fetched) or one with no common ancestor makes
+    # `git merge-base` exit non-zero; that is the named stop below, not a traceback.
+    found = _git("merge-base", base, "HEAD", check=False)
+    merge_base = found.stdout.strip()
+    if found.returncode != 0 or not merge_base:
+        why = found.stderr.strip() or (
+            "it has no common ancestor with HEAD" if found.returncode == 1
+            else f"git merge-base exited {found.returncode}")
+        raise SystemExit(f"contrib-check: cannot resolve a merge base with {base}: {why}")
     # NUL-separated output: paths are never quoted or split on spaces. In
     # `status --porcelain=v1 -z` each entry is one field "XY path"; a rename or
     # copy is followed by one more field holding its source path.
@@ -327,19 +440,219 @@ def changed_paths(base: str) -> list[str]:
     return sorted({path for path in committed + working if path})
 
 
-def python_test_modules(paths: list[str]) -> list[str]:
-    """Map the changed tools/ modules onto the test modules that cover them."""
+def _normalise_repo_path(raw: str) -> str:
+    normalised = raw.replace("\\", "/").strip("/")
+    while normalised.startswith("./"):
+        normalised = normalised[2:]
+    return normalised
+
+
+def _extract_source_prefix(joined: str) -> str | None:
+    for root_dir in ("src", "tests/native"):
+        if joined == root_dir:
+            return root_dir
+        marker = root_dir + "/"
+        if joined.startswith(marker):
+            return joined
+        idx = joined.find("/" + marker)
+        if idx != -1:
+            return joined[idx + 1:]
+    return None
+
+
+@lru_cache(maxsize=4)
+def _existing_source_files(root: Path) -> tuple[frozenset[str], dict[str, tuple[str, ...]]]:
+    """Return every file under ``src/`` and ``tests/native/`` plus a basename map."""
+    existing: set[str] = set()
+    by_basename: dict[str, list[str]] = {}
+    for base in ("src", "tests/native"):
+        base_dir = root / base
+        if not base_dir.is_dir():
+            continue
+        for dirpath, _dirnames, filenames in os.walk(base_dir):
+            rel_dir = Path(dirpath).relative_to(root).as_posix()
+            for filename in filenames:
+                rel_path = f"{rel_dir}/{filename}"
+                existing.add(rel_path)
+                by_basename.setdefault(filename, []).append(rel_path)
+    return (
+        frozenset(existing),
+        {name: tuple(sorted(paths)) for name, paths in by_basename.items()},
+    )
+
+
+@lru_cache(maxsize=4)
+def _test_module_texts(root: Path) -> tuple[tuple[str, Path, str], ...]:
+    """Read ``tools/test_*.py`` sources once per root for literal path matching."""
+    tools_dir = root / "tools"
+    if not tools_dir.is_dir():
+        return ()
+    entries: list[tuple[str, Path, str]] = []
+    for path in sorted(tools_dir.glob("test_*.py")):
+        if not path.is_file():
+            continue
+        entries.append((f"tools.{path.stem}", path, path.read_text(encoding="utf-8")))
+    return tuple(entries)
+
+
+def _docstring_node_ids(tree: ast.AST) -> set[int]:
+    docs: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.body and isinstance(node.body[0], ast.Expr):
+                value = node.body[0].value
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    docs.add(id(value))
+    return docs
+
+
+def _resolve_path_div(node: ast.BinOp, env: dict[str, str]) -> str | None:
+    parts: list[str] = []
+    cur: ast.AST = node
+    while isinstance(cur, ast.BinOp) and isinstance(cur.op, ast.Div):
+        if isinstance(cur.right, ast.Constant) and isinstance(cur.right.value, str):
+            parts.append(cur.right.value)
+        else:
+            return None
+        cur = cur.left
+    if isinstance(cur, ast.Constant) and isinstance(cur.value, str):
+        parts.append(cur.value)
+    elif isinstance(cur, ast.Name) and cur.id in env:
+        parts.append(env[cur.id])
+    elif isinstance(cur, ast.Attribute) and cur.attr in env:
+        parts.append(env[cur.attr])
+    parts.reverse()
+    joined = "/".join(_normalise_repo_path(p) for p in parts if p)
+    return _extract_source_prefix(joined)
+
+
+def _resolve_path_call(node: ast.Call, env: dict[str, str]) -> str | None:
+    fn = node.func
+    base: str | None = None
+    if isinstance(fn, ast.Attribute) and fn.attr == "joinpath":
+        if isinstance(fn.value, ast.Name) and fn.value.id in env:
+            base = env[fn.value.id]
+        elif isinstance(fn.value, ast.BinOp) and isinstance(fn.value.op, ast.Div):
+            base = _resolve_path_div(fn.value, env)
+    elif isinstance(fn, ast.Attribute) and fn.attr == "join":
+        pass
+    elif isinstance(fn, ast.Name) and fn.id in {"Path", "PurePosixPath", "PurePath"}:
+        pass
+    else:
+        return None
+    parts: list[str] = [base] if base else []
+    for index, arg in enumerate(node.args):
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            parts.append(arg.value)
+        elif isinstance(arg, ast.Name) and arg.id in env:
+            parts.append(env[arg.id])
+        elif index == 0 and base is None:
+            # Leading anchor such as ROOT or str(ROOT) in os.path.join(ROOT, "src", ...)
+            continue
+        else:
+            return None
+    if not parts:
+        return None
+    joined = "/".join(_normalise_repo_path(p) for p in parts if p)
+    return _extract_source_prefix(joined)
+
+
+@lru_cache(maxsize=512)
+def _module_source_paths(root: Path, module_path: Path, text: str) -> frozenset[str]:
+    """Extract existing ``src/`` and ``tests/native/`` paths referenced by *module_path*."""
+    existing, by_basename = _existing_source_files(root)
+    tree = ast.parse(text, filename=str(module_path))
+    docs = _docstring_node_ids(tree)
+    env: dict[str, str] = {}
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign) and len(n.targets) == 1]
+    for _ in range(2):
+        for assign in assigns:
+            target = assign.targets[0]
+            name = (
+                target.id if isinstance(target, ast.Name)
+                else target.attr if isinstance(target, ast.Attribute)
+                else None
+            )
+            if not name:
+                continue
+            resolved: str | None = None
+            if isinstance(assign.value, ast.BinOp) and isinstance(assign.value.op, ast.Div):
+                resolved = _resolve_path_div(assign.value, env)
+            elif isinstance(assign.value, ast.Call):
+                resolved = _resolve_path_call(assign.value, env)
+            elif isinstance(assign.value, ast.Constant) and isinstance(assign.value.value, str):
+                candidate = _normalise_repo_path(assign.value.value)
+                if candidate in {"src", "tests/native"} or candidate.startswith(SOURCE_TEST_ROOTS):
+                    resolved = candidate
+            if resolved:
+                env[name] = resolved
+
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) in docs:
+                continue
+            literal = _normalise_repo_path(node.value)
+            if literal in existing:
+                found.add(literal)
+            if "#include" in node.value:
+                for match in _INLINE_C_INCLUDE.finditer(node.value):
+                    inc = match.group(1).replace("\\", "/")
+                    if inc.endswith((".c", ".inc")):
+                        matches = by_basename.get(inc, ())
+                        if len(matches) == 1:
+                            found.add(matches[0])
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            div_resolved = _resolve_path_div(node, env)
+            if div_resolved and div_resolved in existing:
+                found.add(div_resolved)
+        elif isinstance(node, ast.Call):
+            call_resolved = _resolve_path_call(node, env)
+            if call_resolved and call_resolved in existing:
+                found.add(call_resolved)
+    return frozenset(found)
+
+
+def _source_tests_for_paths(paths: list[str], root: Path | None = None) -> set[str]:
+    """Select ``tools/test_*.py`` modules that reference changed ``src/`` or ``tests/native/`` files."""
+    active_root = ROOT if root is None else root
+    targets = {
+        _normalise_repo_path(path)
+        for path in paths
+        if _normalise_repo_path(path).startswith(SOURCE_TEST_ROOTS)
+    }
+    if not targets:
+        return set()
+    basenames = {PurePosixPath(path).name for path in targets}
     modules: set[str] = set()
-    for path in paths:
+    for module_name, module_path, text in _test_module_texts(active_root):
+        if module_name in SOURCE_TEST_EXCLUSIONS:
+            continue
+        if not any(name in text for name in basenames):
+            continue
+        if _module_source_paths(active_root, module_path, text) & targets:
+            modules.add(module_name)
+    return modules
+
+
+def python_test_modules(paths: list[str]) -> list[str]:
+    """Map changed ``tools/``, ``src/``, and ``tests/native/`` paths onto covering test modules."""
+    modules: set[str] = set()
+    for raw_path in paths:
+        path = _normalise_repo_path(raw_path)
         name = PurePosixPath(path).name
+        # A shared or differently named module outside tools/ still selects its tests.
+        modules.update(SHARED_TOOL_TESTS.get(path, ()))
         if not path.startswith("tools/") or not name.endswith(".py"):
             continue
         if name.startswith("test_"):
-            modules.add("tools." + name[:-3])
+            # A deleted test module has nothing to import.
+            if (ROOT / path).is_file():
+                modules.add("tools." + name[:-3])
             continue
-        modules.update(SHARED_TOOL_TESTS.get(path, ()))
         if (ROOT / f"tools/test_{name}").is_file():
             modules.add(f"tools.test_{name[:-3]}")
+    modules.update(_source_tests_for_paths(paths, ROOT))
     return sorted(modules)
 
 
@@ -354,8 +667,9 @@ def _run(label: str, command: list[str], *, timeout: int) -> Gate:
         return Gate(label, FAIL, f"timed out after {timeout}s: {' '.join(command)}")
     if result.returncode == 0:
         return Gate(label, PASS)
-    output = (result.stdout + result.stderr).strip().splitlines()
-    return Gate(label, FAIL, " | ".join(output[-6:]) or f"exit {result.returncode}")
+    text = (result.stdout + result.stderr).strip()
+    output = text.splitlines()
+    return Gate(label, FAIL, " | ".join(output[-6:]) or f"exit {result.returncode}", text)
 
 
 def _python_tool(tool: str, arguments: list[str], *, timeout: int) -> Gate:
@@ -381,7 +695,7 @@ def ruff_gate(paths: list[str]) -> Gate:
 
 def unit_gate(modules: list[str]) -> Gate:
     if not modules:
-        return Gate("python-unittest", NOT_RUN, "no changed tools/ module")
+        return Gate("python-unittest", NOT_RUN, "no matching test module for changed paths")
     return _run("python-unittest", [GATE_PYTHON, "-m", "unittest", *modules], timeout=1800)
 
 
@@ -480,6 +794,18 @@ def c_gate(paths: list[str]) -> Gate:
         if PurePosixPath(p).suffix.lower() == ".c" and (ROOT / p).is_file()
     ]
     if not sources:
+        headers = [p for p in paths if PurePosixPath(p).suffix.lower() in (".h", ".hpp") and (ROOT / p).is_file()]
+        if headers:
+            # A header-only change: this gate compiles changed sources only, so the headers
+            # are unchecked here and the summary says so (an OK must not read as covering them).
+            return Gate("strict-c-compile", NOT_RUN,
+                        f"changed header(s) not compiled: {', '.join(headers)}; hosted CI "
+                        "(or a local make check) builds them", unchecked=True)
+        if ci_paths.classify(paths)["native_runtime"] == "true":
+            # A native change with no C file: hosted CI builds it, this local gate compiles sources only.
+            return Gate("strict-c-compile", NOT_RUN,
+                        "no changed C source; the native_runtime surface changed, which only hosted CI "
+                        "(or a local make check) builds", unchecked=True)
         return Gate("strict-c-compile", NOT_RUN, "no changed C source")
     compiler = os.environ.get("CC") or find_tool("gcc") or find_tool("cc")
     if compiler is None:
@@ -493,7 +819,8 @@ def c_gate(paths: list[str]) -> Gate:
             continue
         gate = _run(f"cc {source}", command, timeout=600)
         if gate.status == FAIL:
-            sdk = _missing_sdk(gate.detail)
+            # The whole output: a real error printed before the missing header's last lines still fails.
+            sdk = _missing_sdk(gate.output)
             if sdk is not None:
                 # A missing SDK header is the environment, not the change: the
                 # file was not compiled, so it is a skip and never a pass.
@@ -554,15 +881,23 @@ def publication_gate() -> tuple[Gate, Gate]:
         )
     except subprocess.TimeoutExpired:
         return policy, Gate("publication-safety", FAIL, "publish_audit timed out")
-    findings = [
-        line.strip()
-        for line in (audit.stdout + audit.stderr).splitlines()
-        if line.strip() and ": " in line and not line.strip().startswith("publication audit:")
-    ]
-    maintainer = [line for line in findings if any(f"{code}:" in line for code in MAINTAINER_SIDE_CODES)]
+    lines = [line.strip() for line in (audit.stdout + audit.stderr).splitlines() if line.strip()]
+    # Only the audit's own ``CODE: path: detail`` lines are findings; its hints (such as the
+    # stale-control fix) and summary line are not.
+    findings = [line for line in lines if AUDIT_FINDING.match(line)]
+    maintainer = [line for line in findings if line.split(":", 1)[0] in MAINTAINER_SIDE_CODES]
     contributor = [line for line in findings if line not in maintainer]
+    completed = any(line.startswith("publication audit: ") for line in lines)
+    clean = audit.returncode == 0 and any(line.startswith("publication audit: OK") for line in lines)
     if contributor:
         return policy, Gate("publication-safety", FAIL, " || ".join(contributor[:6]))
+    if not completed or (not maintainer and not clean):
+        # Killed, crashed or silent: an audit that did not report its verdict is never a pass.
+        return policy, Gate(
+            "publication-safety", FAIL,
+            f"publish_audit exited {audit.returncode} without a complete verdict: "
+            + (" | ".join(lines[-6:]) or "no output"),
+        )
     if maintainer:
         codes = sorted({line.split(":", 1)[0] for line in maintainer})
         return policy, Gate(
@@ -576,8 +911,11 @@ def publication_gate() -> tuple[Gate, Gate]:
 def run(base: str) -> list[Gate]:
     paths = changed_paths(base)
     routing = ci_paths.classify(paths)
+    # A file the branch deleted still routes (its removal can break what remains), but the gates that open
+    # each named file (ruff, markdownlint) get only the files that exist; the strict compile filters likewise.
+    present = [path for path in paths if (ROOT / path).is_file()]
     python_paths = [
-        path for path in paths
+        path for path in present
         if path.endswith(".py") and path.startswith(("tools/", "tests/fixtures/"))
     ]
     print(f"contrib-check: base {base}, {len(paths)} changed path(s)")
@@ -596,7 +934,7 @@ def run(base: str) -> list[Gate]:
         ruff_gate(python_paths),
         unit_gate(modules),
         c_gate(paths),
-        markdown_gate(paths),
+        markdown_gate(present),
         docs_gate(paths),
         purity_gate(paths),
     ]
@@ -631,6 +969,7 @@ def main(argv: list[str] | None = None) -> int:
     failed = [gate.name for gate in gates if gate.status == FAIL]
     maintainer = [gate.name for gate in gates if gate.status == MAINTAINER_SIDE]
     skipped = [gate.name for gate in gates if gate.status == SKIP]
+    unchecked = [gate.name for gate in gates if gate.status == NOT_RUN and gate.unchecked]
     if maintainer:
         print("\n  a maintainer regenerates PUBLIC_EXPORT.json and the public ledger from the "
               "private trusted ledger (make provenance-refresh); a contributor cannot do that, and these findings are "
@@ -638,6 +977,9 @@ def main(argv: list[str] | None = None) -> int:
     if skipped:
         print(f"  SKIPPED because the tool is not installed: {', '.join(skipped)} -- "
               "a skipped gate is not a pass.")
+    if unchecked:
+        print(f"  NOT CHECKED here, although the change touches it: {', '.join(unchecked)} -- "
+              "hosted CI checks it; OK does not cover it.")
     print(f"\ncontrib-check: {'FAIL (' + ', '.join(failed) + ')' if failed else 'OK'}")
     return 1 if failed else 0
 
