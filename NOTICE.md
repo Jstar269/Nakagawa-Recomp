@@ -188,22 +188,31 @@ We aim to respond promptly and will remove material where appropriate.
   deterministic converter `tools/ttf2pgf.py` for test fixtures only. The font
   is not packaged, generated PGFs stay in temporary or `build/` paths, and the
   output name is project-owned so the Reserved Font Name is never claimed.
-- **Stand-in PSP font sources (issues #313 and #2005)** — SIL Open Font License 1.1:
+- **Stand-in PSP font sources (issues #313, #2005 and #1300)** — SIL Open Font License 1.1:
   Liberation Sans and Liberation Serif 2.1.5 (Digitized data copyright (c) 2010
   Google Corporation, with Reserved Font Names Arimo, Tinos and Cousine; Copyright
   (c) 2012 Red Hat, Inc., with Reserved Font Name Liberation) in
-  `tests/fixtures/fonts/liberation/`; Gowun Dodum (Copyright 2021 The Gowun Dodum Project
-  Authors) in `tests/fixtures/fonts/gowundodum/`; and M+ 1p (Copyright 2016 The M+ Project
-  Authors) in `tests/fixtures/fonts/mplus1p/`. Each is pinned with its licence text and a
-  `font-pin/v1` record. Unlike Gudea, these are build inputs: `tools/ttf2pgf.py`
-  converts them into the stand-in PSP fonts that a build puts in its `font/` folder
-  and the release ships (`font/README.md`). Liberation makes the Latin `nkltn*.pgf`
-  fonts and Gowun Dodum makes `nkkr.pgf`. `nkjpn.pgf` is made from Noto Sans JP (see
-  Project UI fonts below), with M+ 1p drawing the one character Noto Sans JP lacks
-  (U+2252). Each generated font is shipped with its conversion manifest and the licence
-  text of every font it draws from; `nkjpn-OFL.txt` carries both Noto Sans JP's and
-  M+ 1p's. The generated fonts carry project-owned names (`Nakagawa Open Latin`,
-  `Nakagawa Open Japanese`, `Nakagawa Open Korean`), so no Reserved Font Name is used.
+  `tests/fixtures/fonts/liberation/`; Geist Regular and Geist SemiBold (Copyright 2024
+  The Geist Project Authors; no Reserved Font Name), the project UI font in
+  `assets/fonts/ui/geist/` (static instances of `google/fonts` at
+  `45e3d5269e4a17d823f6d84470bc084dc5ae46f6`, see Project UI fonts below); Gowun Dodum
+  (Copyright 2021 The Gowun Dodum Project Authors) in `tests/fixtures/fonts/gowundodum/`;
+  and M+ 1p (Copyright 2016 The M+ Project Authors) in `tests/fixtures/fonts/mplus1p/`.
+  Each is pinned with its licence text and a `font-pin/v1` record, and Geist by its
+  record in `assets/fonts/ui/manifest.json`. Unlike Gudea, these
+  are build inputs: `tools/ttf2pgf.py` converts them (to PGF, scaled, emboldened and
+  cut to each glyph's ink) into the stand-in PSP fonts that a build puts in its `font/`
+  folder and the release ships (`font/README.md`). Geist makes the regular and bold
+  sans-serif Latin fonts (`nkltn.pgf` and `nkltns.pgf` from Regular, `nkltn4.pgf` and
+  `nkltn12.pgf` from SemiBold), with Liberation Sans Regular and Bold drawing the 110
+  characters of their set Geist lacks; Liberation makes the other twelve `nkltn*.pgf` fonts, and Gowun Dodum makes
+  `nkkr.pgf`. `nkjpn.pgf` is made from Noto Sans JP (see Project UI fonts below), with
+  M+ 1p drawing the 341 characters of its set Noto Sans JP lacks (U+2252 among them).
+  Each generated font is shipped with its conversion manifest and the licence text of
+  every font it draws from; `nkjpn-OFL.txt` carries both Noto Sans JP's and M+ 1p's,
+  and the four Geist fonts' licence copies both Geist's and Liberation's. The generated
+  fonts carry project-owned names (`Nakagawa Open Latin`, `Nakagawa Open Japanese`,
+  `Nakagawa Open Korean`), so no Reserved Font Name is used.
 - **stb_image 2.30** — Sean Barrett; upstream offers `MIT OR Unlicense`, and the
   project uses it under the public-domain (Unlicense) alternative. The byte-identical
   header, upstream `LICENSE` and the pinned manifest are under `third_party/stb/`. It is
@@ -399,4 +408,6 @@ upstream revisions, file hashes, static weights, and license hashes are recorded
 docs/provenance/FONT_ORIGINS.md and assets/fonts/ui/manifest.json. These are project UI
 assets, not game data. The build also converts the Noto Sans JP file into the Japanese
 stand-in PSP font `nkjpn.pgf` (#2005); `tests/fixtures/fonts/notosansjp/PIN.json` pins it for
-the converter, and its Reserved Font Name `Source` is not used.
+the converter, and its Reserved Font Name `Source` is not used. It converts Geist Regular and
+SemiBold into the regular and bold sans-serif Latin stand-in fonts (#1300); the converter checks
+them against their records in assets/fonts/ui/manifest.json, and Geist reserves no font name.

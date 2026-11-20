@@ -1087,7 +1087,7 @@
       "hashes": {
         "sha256": "2f294ad496432b1608f070d310e3aa2adcf1de4af429f4901df97ec4bd361ed1"
       },
-      "comment": "Retrieved from google/fonts ofl/mplus1p/MPLUS1p-Regular.ttf at d714b17ce2379f06daf6295617f961df605dccb5; byte-identical pinned source that draws U+2252, the one character Noto Sans JP lacks, in the build-time project Japanese PGF (#2005). Shipped beside its OFL license text."
+      "comment": "Retrieved from google/fonts ofl/mplus1p/MPLUS1p-Regular.ttf at d714b17ce2379f06daf6295617f961df605dccb5; byte-identical pinned source that draws the 341 characters of the Japanese text set Noto Sans JP lacks (U+2252 among them) in the build-time project Japanese PGF (#2005, #1300). Shipped beside its OFL license text."
     },
     {
       "id": "readme-hst-title-screen",
@@ -1172,7 +1172,7 @@
       "hashes": {
         "sha256": "58a4bac9a7b901313822aada65bb1469b3c873874e11b3fc88ba75ed9576d98a"
       },
-      "comment": "Player UI font from google/fonts 45e3d5269e4a17d823f6d84470bc084dc5ae46f6 under the SIL Open Font License 1.1; origin and instancing recorded in docs/provenance/FONT_ORIGINS.md section 8."
+      "comment": "Player UI font from google/fonts 45e3d5269e4a17d823f6d84470bc084dc5ae46f6 under the SIL Open Font License 1.1; origin and instancing recorded in docs/provenance/FONT_ORIGINS.md section 8. Also the source of the build-time project Latin PGFs of the regular sans-serif slots ltn0 and ltn8 (#1300)."
     },
     {
       "id": "ui-font-geist-medium",
@@ -1206,7 +1206,7 @@
       "hashes": {
         "sha256": "c157d36cc1778633d43f5a0ff92b078bb6de26f5011a6a092b7b6f49fe022fc5"
       },
-      "comment": "Player UI font from google/fonts 45e3d5269e4a17d823f6d84470bc084dc5ae46f6 under the SIL Open Font License 1.1; origin and instancing recorded in docs/provenance/FONT_ORIGINS.md section 8."
+      "comment": "Player UI font from google/fonts 45e3d5269e4a17d823f6d84470bc084dc5ae46f6 under the SIL Open Font License 1.1; origin and instancing recorded in docs/provenance/FONT_ORIGINS.md section 8. Also the source of the build-time project Latin PGFs of the bold sans-serif slots ltn4 and ltn12 (#1300)."
     },
     {
       "id": "ui-font-geistmono-regular",
