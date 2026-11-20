@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = ROOT / "tests" / "fixtures" / "mp3_tone" / "generate.py"
@@ -161,6 +162,11 @@ class Mp3PrivateBitsDecodeTests(unittest.TestCase):
     state the stream's next frame starts from (upstream 19ff674 zeroes the workspace).
     """
 
+    tmp: ClassVar[Path]
+    frame_path: ClassVar[Path]
+    plain_path: ClassVar[Path]
+    exe: ClassVar[Path]
+
     @classmethod
     def setUpClass(cls) -> None:
         assert CC is not None
@@ -189,14 +195,16 @@ class Mp3PrivateBitsDecodeTests(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _run(self, frame: Path) -> str:
-        result = subprocess.run([str(self.exe), str(frame)], capture_output=True, text=True)
+        result: subprocess.CompletedProcess[str] = subprocess.run(
+            [str(self.exe), str(frame)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
     def test_private_bits_frame_decodes_the_same_whatever_the_stack_held(self) -> None:
         out = self._run(self.frame_path)
         match = re.search(r"pcm identical, peak (\d+)", out)
-        self.assertIsNotNone(match, out)
+        if match is None:
+            self.fail(f"no 'pcm identical' line in the harness output:\n{out}")
         # The frame carries the fixture's tones, so the comparison is over real audio.
         self.assertGreater(int(match.group(1)), 1000, out)
 

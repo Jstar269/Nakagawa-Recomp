@@ -27,25 +27,30 @@ directory.
 
 ## File manifest
 
-| File | Kind | Upstream blob SHA at the pin | SHA-256 |
-| --- | --- | --- | --- |
-| `LICENSE` | imported byte-identical | `2c4afabdb632b5d68e60c9fe9fe0b0819676a729` | n/a |
-| `minimp3.h` | imported + LOCAL DELTA | `9fbd4d2cc50c06cc3e63dcafdd506dc6512b2103` | `0b0fb48653de2ce953bec82142f3d3737d995a56515e17979b45c8111924ba1d` |
+| File | Kind | Upstream blob SHA |
+| --- | --- | --- |
+| `LICENSE` | imported byte-identical | `2c4afabdb632b5d68e60c9fe9fe0b0819676a729` |
+| `minimp3.h` | imported + LOCAL DELTA | `9fbd4d2cc50c06cc3e63dcafdd506dc6512b2103` |
 
-The upstream `minimp3.h` bytes at the pin have SHA-256
-`57e437c5c1f0e8b243885d3929c8973b5e6c778451e0100ab4251d19915cb3ad`. The local
+The `minimp3.h` blob SHA is the upstream file at the pin (SHA-256
+`57e437c5c1f0e8b243885d3929c8973b5e6c778451e0100ab4251d19915cb3ad`). The local
 file adds a four-line modification note after the upstream dedication comment
 and the two lines below, each after a one-line `LOCAL DELTA (Nakagawa Recomp)`
-marker comment, which gives the SHA-256 in the table. Upstream's `minimp3_ex.h`
-(file and seek helpers), tests, fuzzers, player and vectors are not imported:
-the runtime feeds frames from guest memory and needs only the frame decoder.
+marker comment; the local file's SHA-256 is
+`0b0fb48653de2ce953bec82142f3d3737d995a56515e17979b45c8111924ba1d`.
+Upstream's `minimp3_ex.h` (file and seek helpers), tests, fuzzers, player and
+vectors are not imported: the runtime feeds frames from guest memory and needs
+only the frame decoder.
 
 ## Local deltas
 
 Modified 2026-11-19 (audit 2026-11-17, finding F-8af6c0b6): two upstream
 security fixes from `https://github.com/lieff/minimp3`, file `minimp3.h`,
 committed after the pin, are applied as upstream wrote them, one line each,
-without taking the rest of upstream's later history.
+without taking the rest of upstream's later history. The pinned upstream file
+has SHA-256 `57e437c5c1f0e8b243885d3929c8973b5e6c778451e0100ab4251d19915cb3ad`;
+the local file has SHA-256
+`0b0fb48653de2ce953bec82142f3d3737d995a56515e17979b45c8111924ba1d`.
 
 - `mp3dec_decode_frame`: `memset(scratch.ist_pos, 0, sizeof(scratch.ist_pos));`
   from upstream commit `a01e51e230b58a27f234b60ceece2e76f501f517` ("security:
