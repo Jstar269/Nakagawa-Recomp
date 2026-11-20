@@ -234,9 +234,6 @@ class TitleRegistry:
         """Alias for lookup_by_id matching C API naming."""
         return self.lookup_by_id(profile_id)
 
-    def list_all(self) -> List[TitleProfile]:
-        return list(self._profiles.values())
-
     def all_profiles(self) -> List[TitleProfile]:
         return list(self._profiles.values())
 

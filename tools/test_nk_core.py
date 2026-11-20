@@ -749,7 +749,6 @@ class NkCoreTests(unittest.TestCase):
                 save_namespace=base.save_namespace,
                 runtime_profile=base.runtime_profile,
                 codegen_profile=base.codegen_profile,
-                min_iso_bytes=base.min_iso_bytes,
             ),
             allow_override=True,
         )
@@ -2989,6 +2988,16 @@ class TestDiscIdNormalization(unittest.TestCase):
         self.assertEqual(_library_key("  ucus-98701  "), "UCUS-98701")
         self.assertEqual(_library_key("ucus_98701"), "UCUS_98701")
         self.assertEqual(_library_key("ucus 98701"), "UCUS 98701")
+
+    def test_dead_nk_core_surface_removed(self) -> None:
+        from nk_core import prep_engine
+
+        self.assertFalse(hasattr(prep_engine, "_sha256_file"))
+        self.assertFalse(hasattr(TitleRegistry, "list_all"))
+        self.assertNotIn(
+            "min_iso_bytes",
+            {field.name for field in dataclasses.fields(TitleProfile)},
+        )
 
 
 if __name__ == "__main__":

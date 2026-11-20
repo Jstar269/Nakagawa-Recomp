@@ -109,7 +109,6 @@ class TitleProfile:
     save_namespace: str = ""
     runtime_profile: str = "standard"
     codegen_profile: str = "default"
-    min_iso_bytes: int = 10 * 1024 * 1024  # 10 MB minimum
     game_name: str = ""
     require_local_compatibility_record: bool = False
     loose_content_roots: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
