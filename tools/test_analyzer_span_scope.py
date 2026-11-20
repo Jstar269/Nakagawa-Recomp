@@ -1013,19 +1013,22 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         mutant_tools = self.root / "fallthrough_mutant_tools"
         mutant_tools.mkdir()
         analyzer_source = (TOOLS / "analyze_cfg.py").read_text(encoding="utf-8")
+        # The ownership walk skips edges whose kind is in this module-level set.
         mutation_anchor = (
-            '                if kind_id in {\n'
-            '                    _CFG_KIND_IDS["call"], _CFG_KIND_IDS["tail-call"],\n'
-            '                    _CFG_KIND_IDS["unresolved-indirect"],\n'
-            '                }:\n'
+            '_CFG_NON_OWNING_KINDS = frozenset({\n'
+            '    _CFG_KIND_IDS["call"],\n'
+            '    _CFG_KIND_IDS["tail-call"],\n'
+            '    _CFG_KIND_IDS["unresolved-indirect"],\n'
+            '})\n'
         )
         self.assertEqual(analyzer_source.count(mutation_anchor), 1)
+        self.assertEqual(analyzer_source.count("in _CFG_NON_OWNING_KINDS"), 1)
         mutant_analyzer = analyzer_source.replace(
             mutation_anchor,
             mutation_anchor.replace(
-                '_CFG_KIND_IDS["unresolved-indirect"],',
-                '_CFG_KIND_IDS["unresolved-indirect"],\n'
-                '                    _CFG_KIND_IDS["fallthrough"],',
+                '    _CFG_KIND_IDS["unresolved-indirect"],\n',
+                '    _CFG_KIND_IDS["unresolved-indirect"],\n'
+                '    _CFG_KIND_IDS["fallthrough"],\n',
             ),
             1,
         )

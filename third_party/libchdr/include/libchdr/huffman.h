@@ -8,6 +8,9 @@
 
 ***************************************************************************/
 
+/* Modified by Nakagawa Recomp contributors, 2026-11-20. The local change is marked
+ * LOCAL DELTA and listed in third_party/libchdr/PROVENANCE.md. */
+
 #pragma once
 
 #ifndef __HUFFMAN_H__
@@ -30,7 +33,9 @@ enum huffman_error
 	HUFFERR_INPUT_BUFFER_TOO_SMALL,
 	HUFFERR_OUTPUT_BUFFER_TOO_SMALL,
 	HUFFERR_INTERNAL_INCONSISTENCY,
-	HUFFERR_TOO_MANY_CONTEXTS
+	HUFFERR_TOO_MANY_CONTEXTS,
+	/* Nakagawa LOCAL DELTA (2026-11-20): an allocation failed. */
+	HUFFERR_OUT_OF_MEMORY
 };
 
 /***************************************************************************

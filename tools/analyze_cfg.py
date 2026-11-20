@@ -18,6 +18,7 @@ The package cache key ``analyzer_sha256`` hashes this file and ``analyze.py`` to
 
 import hashlib
 import struct
+import sys
 from array import array
 from collections.abc import Iterable
 
@@ -82,15 +83,9 @@ def _cfg_normalize_ranges(ranges):
             or lo < 0 or hi < 0 or hi > UINT32_END_MAX
         ):
             raise ValueError(f"invalid CFG range: {item!r}")
-        if hi > lo:
-            normalized.append((lo, hi))
-    merged = []
-    for lo, hi in sorted(normalized):
-        if merged and lo <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
-        else:
-            merged.append((lo, hi))
-    return merged
+        normalized.append((lo, hi))
+    from analyze import merge_spans
+    return merge_spans(normalized, drop_empty=True)
 
 
 def _cfg_ranges_for(image, ranges):
@@ -187,6 +182,19 @@ _CFG_KIND_NAMES = (
 
 
 _CFG_KIND_IDS = {name: index for index, name in enumerate(_CFG_KIND_NAMES)}
+
+
+_CFG_TAIL_PROMOTABLE_KINDS = frozenset({
+    _CFG_KIND_IDS["direct-jump"],
+    _CFG_KIND_IDS["direct-branch"],
+})
+
+
+_CFG_NON_OWNING_KINDS = frozenset({
+    _CFG_KIND_IDS["call"],
+    _CFG_KIND_IDS["tail-call"],
+    _CFG_KIND_IDS["unresolved-indirect"],
+})
 
 
 _CFG_DETAIL_NAMES = (
@@ -602,6 +610,43 @@ class CanonicalCfgState:
         return report
 
 
+def _cfg_image_segment_spans(image):
+    """Return ordered ``(start, end)`` readable segment spans when ``image`` exposes them.
+
+    Returns ``None`` when the image does not expose a recognized segment layout,
+    keeping ``canonical_cfg_state`` on its per-word read fallback.
+    """
+    reloc = getattr(image, "reloc", None)
+    if reloc is not None:
+        lo = getattr(reloc, "lo", None)
+        mem = getattr(reloc, "mem", None)
+        if type(lo) is int and isinstance(mem, (bytes, bytearray, memoryview)):
+            return ((lo, lo + len(mem)),) if mem else ()
+        return None
+    segments = getattr(image, "segments", None)
+    if not isinstance(segments, (tuple, list)):
+        return None
+    spans = []
+    for segment in segments:
+        if isinstance(segment, dict):
+            if segment.get("type") != 1:
+                continue
+            lo = segment.get("vaddr")
+            filesz = segment.get("filesz")
+            if type(lo) is not int or type(filesz) is not int or filesz < 0:
+                return None
+            if filesz > 0:
+                spans.append((lo, lo + filesz))
+        else:
+            lo = getattr(segment, "guest_start", None)
+            hi = getattr(segment, "guest_end", None)
+            if type(lo) is not int or type(hi) is not int:
+                return None
+            if hi > lo:
+                spans.append((lo, hi))
+    return tuple(spans)
+
+
 def canonical_cfg_state(image, ranges=None, entries=None):
     """Build compact canonical CFG semantic state without report projections."""
     # The branch decode stays in analyze.py, where tests patch its constants; analyze.py imports
@@ -628,22 +673,72 @@ def canonical_cfg_state(image, ranges=None, entries=None):
         raise ValueError("CFG entries must be 32-bit guest addresses")
 
     node_index = {}
+
+    def append_word_from_reader(address, hi):
+        raw = reader(address, min(4, hi - address))
+        if raw is not None and len(raw) == 4:
+            node_index[address] = len(state.addresses)
+            state.addresses.append(address)
+            state.words.append(int.from_bytes(raw, "little"))
+            state.terminators.append(0)
+            state.delay_of.append(_CFG_NONE)
+            state.delay_annulled.append(0)
+        else:
+            state.unreadable_spans.append((
+                address,
+                min(address + 4, hi),
+                "partial-executable" if raw else "unreadable-executable",
+            ))
+
+    segment_spans = _cfg_image_segment_spans(image)
     for lo, hi in effective_ranges:
-        for address in range(lo, hi, 4):
-            raw = reader(address, min(4, hi - address))
-            if raw is not None and len(raw) == 4:
-                node_index[address] = len(state.addresses)
-                state.addresses.append(address)
-                state.words.append(int.from_bytes(raw, "little"))
-                state.terminators.append(0)
-                state.delay_of.append(_CFG_NONE)
-                state.delay_annulled.append(0)
+        if not segment_spans:
+            for address in range(lo, hi, 4):
+                append_word_from_reader(address, hi)
+            continue
+        address = lo
+        while address < hi:
+            limit = None
+            for seg_index, (seg_lo, seg_hi) in enumerate(segment_spans):
+                if seg_lo <= address < seg_hi:
+                    limit = hi if hi < seg_hi else seg_hi
+                    for prev_lo, _ in segment_spans[:seg_index]:
+                        if address < prev_lo < limit:
+                            limit = prev_lo
+                    break
+            if limit is None:
+                append_word_from_reader(address, hi)
+                address += 4
+                continue
+            word_count = (limit - address) // 4
+            if word_count <= 0:
+                append_word_from_reader(address, hi)
+                address += 4
+                continue
+            byte_count = word_count * 4
+            chunk_end = address + byte_count
+            raw = reader(address, byte_count)
+            if raw is not None and len(raw) == byte_count:
+                base_index = len(state.addresses)
+                if state.words.itemsize == 4:
+                    chunk_words = array("I")
+                    chunk_words.frombytes(raw)
+                    if sys.byteorder != "little":
+                        chunk_words.byteswap()
+                    state.words.extend(chunk_words)
+                else:
+                    state.words.extend(struct.unpack(f"<{word_count}I", raw))
+                chunk_addresses = range(address, chunk_end, 4)
+                state.addresses.extend(chunk_addresses)
+                state.terminators.extend(bytes(word_count))
+                state.delay_of.extend(array("Q", [_CFG_NONE]) * word_count)
+                state.delay_annulled.extend(bytes(word_count))
+                for offset_index, word_address in enumerate(chunk_addresses, base_index):
+                    node_index[word_address] = offset_index
             else:
-                state.unreadable_spans.append((
-                    address,
-                    min(address + 4, hi),
-                    "partial-executable" if raw else "unreadable-executable",
-                ))
+                for word_address in range(address, chunk_end, 4):
+                    append_word_from_reader(word_address, hi)
+            address = chunk_end
 
     entry_set = {value for value in entry_candidates if value in node_index}
     state.entries = tuple(sorted(entry_set))
@@ -733,15 +828,15 @@ def canonical_cfg_state(image, ranges=None, entries=None):
 
     # A direct jump/branch to a known entry is a tail transfer.  Keep this as a
     # post-pass so all edge kinds use the same entry qualification.
+    tail_call_kind = _CFG_KIND_IDS["tail-call"]
+    tail_transfer_detail = _CFG_DETAIL_IDS["known-entry-tail-transfer"]
     for edge_index, target in enumerate(state.edge_targets):
         if (
             target in entry_set
-            and state.edge_kinds[edge_index] in {
-                _CFG_KIND_IDS["direct-jump"], _CFG_KIND_IDS["direct-branch"],
-            }
+            and state.edge_kinds[edge_index] in _CFG_TAIL_PROMOTABLE_KINDS
         ):
-            state.edge_kinds[edge_index] = _CFG_KIND_IDS["tail-call"]
-            state.edge_details[edge_index] = _CFG_DETAIL_IDS["known-entry-tail-transfer"]
+            state.edge_kinds[edge_index] = tail_call_kind
+            state.edge_details[edge_index] = tail_transfer_detail
 
     state.edge_offsets = array("I", [0])
     running = 0
@@ -777,10 +872,7 @@ def canonical_cfg_state(image, ranges=None, entries=None):
                 if target == _CFG_NONE:
                     continue
                 kind_id = state.edge_kinds[edge_index]
-                if kind_id in {
-                    _CFG_KIND_IDS["call"], _CFG_KIND_IDS["tail-call"],
-                    _CFG_KIND_IDS["unresolved-indirect"],
-                }:
+                if kind_id in _CFG_NON_OWNING_KINDS:
                     continue
                 target_index = node_index.get(target)
                 if target_index is None:

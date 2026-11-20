@@ -1425,6 +1425,140 @@ class CanonicalCfgTests(unittest.TestCase):
             {finding["code"] for finding in analyze.verify_canonical_cfg_report(clean)},
         )
 
+    def test_cfg_uses_module_level_kind_frozensets_and_bulk_segment_reads(self):
+        import analyze_cfg
+
+        self.assertEqual(
+            analyze_cfg._CFG_TAIL_PROMOTABLE_KINDS,
+            frozenset({
+                analyze_cfg._CFG_KIND_IDS["direct-jump"],
+                analyze_cfg._CFG_KIND_IDS["direct-branch"],
+            }),
+        )
+        self.assertEqual(
+            analyze_cfg._CFG_NON_OWNING_KINDS,
+            frozenset({
+                analyze_cfg._CFG_KIND_IDS["call"],
+                analyze_cfg._CFG_KIND_IDS["tail-call"],
+                analyze_cfg._CFG_KIND_IDS["unresolved-indirect"],
+            }),
+        )
+
+        # Single-segment Elf and ProgramImage read the whole segment span in bulk.
+        base = 0x00100000
+        word_count = 256
+        words = [0] * word_count
+        entries = []
+        for index in range(0, word_count, 4):
+            addr = base + index * 4
+            entries.append(addr)
+            nxt = base + ((index + 4) % word_count) * 4
+            words[index] = jal(nxt) if index % 8 == 0 else j(nxt)
+            words[index + 2] = jr(31)
+        blob = make_elf([(base, words, word_count * 4, 5, 4)], entry=base)
+        ranges = [(base, base + word_count * 4)]
+
+        elf = analyze.Elf(bytes(blob))
+        elf_reads = []
+        orig_elf_read = elf.read_at_vaddr
+
+        def spy_elf_read(addr, size):
+            elf_reads.append((addr, size))
+            return orig_elf_read(addr, size)
+
+        elf.read_at_vaddr = spy_elf_read
+        elf_report = analyze.canonical_cfg_report(elf, ranges=ranges, entries=entries)
+        self.assertEqual(elf_reads, [(base, word_count * 4)])
+        self.assertEqual(
+            elf_report,
+            _canonical_cfg_report_reference(
+                analyze.Elf(bytes(blob)), ranges=ranges, entries=entries
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "bulk.elf"
+            path.write_bytes(blob)
+            image = prxload.load_program_image(path, base=base)
+        img_reads = []
+
+        class SpyProgramImage:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+                self.segments = wrapped.segments
+                self.sections = wrapped.sections
+                self.executable_intervals = wrapped.executable_intervals
+                self.entry_point = wrapped.entry_point
+
+            def read_at_vaddr(self, addr, size):
+                img_reads.append((addr, size))
+                return self._wrapped.read_at_vaddr(addr, size)
+
+        spy_img = SpyProgramImage(image)
+        img_report = analyze.canonical_cfg_report(spy_img, ranges=ranges, entries=entries)
+        self.assertEqual(img_reads, [(base, word_count * 4)])
+        self.assertEqual(img_report, elf_report)
+
+    def test_cfg_bulk_reads_match_per_word_reader_on_overlapping_pt_load_segments(self):
+        # Overlapping PT_LOAD segments must keep first-segment precedence across
+        # aligned overlaps, unaligned overlaps, gaps, and trailing partial bytes.
+        base = 0x2000
+        # 1. Earlier segment covers a middle slice of a wider later segment.
+        mid_overlap = make_elf([
+            (base + 4, [jr(31)], 4, 5, 1),
+            (base, [jal(base + 0x10), 0x24020001, 0, 0x24020002, jr(31), 0], 24, 5, 1),
+        ], entry=base)
+        # 2. Earlier segment starts before and ends inside the second segment.
+        prefix_overlap = make_elf([
+            (base, [0x24020001, 0x24020002], 8, 5, 1),
+            (base + 4, [0x24020099, jr(31), 0], 12, 5, 1),
+        ], entry=base)
+        # 3. Unaligned overlap: earlier segment [base+6, base+10) splits words
+        #    at base+4 (matched by second segment) and base+8 (partial from first).
+        unaligned = bytearray(make_elf([
+            (base + 6, [0x24020077], 4, 5, 1),
+            (base, [0x24020001, 0x24020002, 0x24020003, jr(31)], 16, 5, 1),
+        ], entry=base))
+        # 4. Two disjoint segments with an unmapped gap and a 2-byte trailing tail.
+        gapped = make_elf([
+            (base, [jal(base + 0x20), 0], 8, 5, 4),
+            (base + 0x20, [jr(31), 0], 8, 5, 4),
+        ], entry=base)
+
+        cases = [
+            ("mid-overlap", mid_overlap, [(base, base + 24)], [base, base + 0x10]),
+            ("prefix-overlap", prefix_overlap, [(base, base + 16)], [base]),
+            ("unaligned-overlap", bytes(unaligned), [(base, base + 16)], [base]),
+            ("gapped-with-tail", gapped, [(base, base + 0x2A)], [base, base + 0x20]),
+        ]
+        for label, blob, ranges, entries in cases:
+            with self.subTest(label=label):
+                elf = analyze.Elf(bytes(blob))
+                actual = analyze.canonical_cfg_report(elf, ranges=ranges, entries=entries)
+                expected = _canonical_cfg_report_reference(elf, ranges=ranges, entries=entries)
+                self.assertEqual(actual, expected)
+                self.assertEqual(analyze.verify_canonical_cfg_report(actual), [])
+
+        # Confirm the mid-overlap case really served base+4 from the first PT_LOAD (jr $ra).
+        mid_elf = analyze.Elf(bytes(mid_overlap))
+        mid_state = analyze.canonical_cfg_state(
+            mid_elf, ranges=[(base, base + 24)], entries=[base, base + 0x10]
+        )
+        self.assertEqual(mid_state.words[1], jr(31))
+
+        # Relocated PRX path (elf.reloc is not None) also matches per-word reference.
+        prx_blob = make_elf([(0, [jal(0x10), 0, jr(31), 0, jr(31), 0], 24, 5, 4)], entry=0, e_type=0xFFA0)
+        with tempfile.TemporaryDirectory() as td:
+            prx_path = Path(td) / "reloc.prx"
+            prx_path.write_bytes(prx_blob)
+            reloc_elf = analyze.Elf(str(prx_path), base=0x08804000)
+            self.assertIsNotNone(reloc_elf.reloc)
+            reloc_ranges = [(0x08804000, 0x08804018)]
+            self.assertEqual(
+                analyze.canonical_cfg_report(reloc_elf, ranges=reloc_ranges, entries=[0x08804000]),
+                _canonical_cfg_report_reference(reloc_elf, ranges=reloc_ranges, entries=[0x08804000]),
+            )
+
 
 class CanonicalCfgVerifierTests(unittest.TestCase):
     """Pin verifier findings so its indexing changes cannot alter a decision.

@@ -16,16 +16,19 @@
  *   - ZSO: LZ4 blocks with literals and overlapping matches, plus stored blocks;
  *   - CHD v5 DVD images: an uncompressed map (with an all-zero hunk) and a
  *     compressed map (a Huffman-coded type table) whose hunks use the CHD
- *     "zlib" codec (fixed-Huffman DEFLATE) or are stored uncompressed.
+ *     "zlib" codec (fixed-Huffman DEFLATE) or the "huff" codec, or are stored
+ *     uncompressed.
  *
  * CHD coverage: libchdr's v5 header and metadata reader, the uncompressed and
- * compressed v5 map decoders, the hunk CRC check, and the "zlib" codec path
- * (miniz's inflater over fixed-Huffman DEFLATE with back-references). The
- * lzma, huff, flac and zstd codecs, the CD codecs and self/parent hunk
- * references are covered only by libchdr upstream: there is no chdman here to
- * make them. The DVD/CD/hard-disk decision is tested through the metadata tag
- * each image carries. Two of libchdr's local deltas are checked directly: a
- * reused Huffman decoder's lookup gaps, and the FLAC codec's empty hunk.
+ * compressed v5 map decoders, the hunk CRC check, the "zlib" codec path
+ * (miniz's inflater over fixed-Huffman DEFLATE with back-references) and the
+ * "huff" codec (a Huffman-coded tree, then one code per byte). The lzma, flac
+ * and zstd codecs, the CD codecs and self/parent hunk references are covered
+ * only by libchdr upstream: there is no chdman here to make them. The
+ * DVD/CD/hard-disk decision is tested through the metadata tag each image
+ * carries. Three of libchdr's local deltas are checked directly: a reused
+ * Huffman decoder's lookup gaps, the FLAC codec's empty hunk, and the HUFF
+ * codec's allocation checks under a failing malloc (the link wraps malloc).
  */
 
 #if !defined(_WIN32) && !defined(_WIN64)
@@ -75,6 +78,24 @@ static uint8_t g_iso[ISO_BYTES];
 static uint8_t g_other_iso[ISO_BYTES]; /* an ISO9660 image with no PSP_GAME folder */
 static char g_dir[NATIVE_TEST_PATH_MAX];
 static int g_checks = 0;
+
+/* With NK_TEST_WRAP_MALLOC the link wraps malloc (-Wl,--wrap=malloc: the
+   native-core-tests recipe, and CMake where the linker has --wrap) so one
+   chosen call can fail: s_malloc_fail_at counts down the calls still to pass,
+   and the size of the call that failed is kept. */
+#if defined(NK_TEST_WRAP_MALLOC)
+void *__real_malloc(size_t size);
+void *__wrap_malloc(size_t size);
+static long s_malloc_fail_at = -1;
+static size_t s_malloc_failed_size = 0;
+void *__wrap_malloc(size_t size) {
+    if (s_malloc_fail_at >= 0 && s_malloc_fail_at-- == 0) {
+        s_malloc_failed_size = size;
+        return NULL;
+    }
+    return __real_malloc(size);
+}
+#endif
 
 #define CHECK(cond)                                                                    \
     do {                                                                               \
@@ -550,7 +571,66 @@ static void msb_flush(MsbWriter *w) {
 #define CHD_HUNK 4096u
 #define CHD_TAG(a, b, c, d) (((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | ((uint32_t)(c) << 8) | (uint32_t)(d))
 
-typedef enum { CHD_MAP_UNCOMPRESSED, CHD_MAP_COMPRESSED } ChdMap;
+static int g_huff_hunks = 0; /* hunks huff_encode wrote, across all images */
+
+/* CHD_MAP_COMPRESSED_HUFF: a compressed map whose codec 0 is libchdr's "huff". */
+typedef enum { CHD_MAP_UNCOMPRESSED, CHD_MAP_COMPRESSED, CHD_MAP_COMPRESSED_HUFF } ChdMap;
+
+/* One hunk in the CHD "huff" codec (libchdr_codec_huff.c): a code-length tree
+   for the 256 byte values, itself Huffman-coded through a 24-symbol small tree,
+   then one code per byte. Byte 0 gets the one-bit code 1; up to 128 other byte
+   values get eight-bit codes 0 followed by a 7-bit rank, and the rest of the 128
+   are padded with unused values so the code is complete, as libchdr's canonical
+   code check requires. The small tree gives two-bit codes to its symbols 0 (the
+   repeat escape, unused here), 1, 2 and 9 (code lengths 0, 1 and 8). Returns
+   false, writing nothing, when the hunk has more than 128 distinct nonzero
+   bytes or does not shrink. */
+static bool huff_encode(Buf *out, const uint8_t *src, size_t n) {
+    bool used[256] = { false };
+    uint32_t rank[256] = { 0 };
+    uint32_t count = 0;
+    uint32_t next = 0;
+    Buf bits = { NULL, 0, 0 };
+    MsbWriter w = { &bits, 0, 0 };
+    bool ok;
+    for (size_t i = 0; i < n; i++) {
+        if (src[i] != 0u && !used[src[i]]) {
+            used[src[i]] = true;
+            count++;
+        }
+    }
+    if (count > 128u) return false;
+    for (uint32_t s = 1; s < 256u && count < 128u; s++) {
+        if (!used[s]) {
+            used[s] = true;
+            count++;
+        }
+    }
+    for (uint32_t s = 1; s < 256u; s++) {
+        if (used[s]) rank[s] = next++;
+    }
+    msb_put(&w, 2, 3); /* small-tree symbol 0: length 2 */
+    msb_put(&w, 0, 3); /* lengths start at small-tree symbol 1 */
+    for (uint32_t s = 1; s <= 10u; s++) {
+        msb_put(&w, (s == 1u || s == 2u || s == 9u) ? 2u : (s == 10u ? 7u : 0u), 3);
+    }
+    for (uint32_t s = 0; s < 256u; s++) {
+        /* small-tree symbol 1 + length: 1 -> 01, 2 -> 10, 9 -> 11 */
+        msb_put(&w, s == 0u ? 2u : (used[s] ? 3u : 1u), 2);
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (src[i] == 0u) msb_put(&w, 1, 1);
+        else msb_put(&w, rank[src[i]], 8);
+    }
+    msb_flush(&w);
+    ok = bits.len < n;
+    if (ok) {
+        buf_put(out, bits.data, bits.len);
+        g_huff_hunks++;
+    }
+    free(bits.data);
+    return ok;
+}
 
 /* A CHD v5 image of `iso` with one metadata entry (`meta_tag`). */
 static void build_chd(Buf *out, const uint8_t *iso, size_t iso_len, ChdMap map, uint32_t meta_tag) {
@@ -563,6 +643,7 @@ static void build_chd(Buf *out, const uint8_t *iso, size_t iso_len, ChdMap map, 
     put_be32(header + 8, 124u);
     put_be32(header + 12, 5u);
     if (map == CHD_MAP_COMPRESSED) put_be32(header + 16, CHD_TAG('z', 'l', 'i', 'b'));
+    if (map == CHD_MAP_COMPRESSED_HUFF) put_be32(header + 16, CHD_TAG('h', 'u', 'f', 'f'));
     put_be64(header + 32, iso_len);
     put_be64(header + 48, meta_off);
     put_be32(header + 56, CHD_HUNK);
@@ -615,7 +696,9 @@ static void build_chd(Buf *out, const uint8_t *iso, size_t iso_len, ChdMap map, 
             const uint8_t *src = iso + (size_t)h * CHD_HUNK;
             size_t before = payload.len;
             types[h] = 4; /* COMPRESSION_NONE */
-            if (h % 2u == 0u) {
+            if (map == CHD_MAP_COMPRESSED_HUFF) {
+                if (huff_encode(&payload, src, CHD_HUNK)) types[h] = 0; /* codec 0, huff */
+            } else if (h % 2u == 0u) {
                 deflate_fixed(&payload, src, CHD_HUNK);
                 /* A compressed hunk must be smaller than a hunk; one that
                    did not shrink is stored, as chdman does. */
@@ -784,6 +867,12 @@ static void test_chd_round_trips(void) {
     expect_expands("chd-uncompressed-map", &image, g_iso, ISO_BYTES);
     build_chd(&image, g_iso, ISO_BYTES, CHD_MAP_COMPRESSED, CHD_TAG('D', 'V', 'D', ' '));
     expect_expands("chd-zlib", &image, g_iso, ISO_BYTES);
+    {
+        int huff_before = g_huff_hunks;
+        build_chd(&image, g_iso, ISO_BYTES, CHD_MAP_COMPRESSED_HUFF, CHD_TAG('D', 'V', 'D', ' '));
+        CHECK(g_huff_hunks > huff_before); /* the image has HUFF-coded hunks */
+        expect_expands("chd-huff", &image, g_iso, ISO_BYTES);
+    }
     free(image.data);
 }
 
@@ -924,6 +1013,70 @@ static void test_chd_flac_empty_hunk_refused(void) {
     CHECK(flac_codec_decompress(&flac, NULL, 0, dest, CHD_HUNK) == CHDERR_DECOMPRESSION_ERROR);
     flac_codec_free(&flac);
     printf("PASS CHD FLAC zero-length hunk refused\n");
+}
+
+/* libchdr's HUFF codec under a failing allocator (libchdr LOCAL DELTA
+   2026-11-20): a HUFF-coded CHD is opened and every hunk read through the
+   production backend, failing the 1st, 2nd, ... malloc in turn until a run
+   makes no further call. Upstream wrote through the unchecked results (the
+   decoder's 128 KiB lookup table first) and crashed; each failure must now
+   end the open or the read with the named out-of-memory status, and the run
+   with no failure must read the bytes exactly. This test checks the status and
+   the bytes, not leaks: no hosted job builds it with a sanitizer, and the
+   change that added it was checked for leaks by hand under ASan/LSan. */
+static void test_chd_huff_allocation_failures(void) {
+#if !defined(NK_TEST_WRAP_MALLOC)
+    printf("SKIP CHD huff codec under a failing allocator: built without NK_TEST_WRAP_MALLOC "
+           "(a linker with -Wl,--wrap=malloc)\n");
+#else
+    Buf image = { NULL, 0, 0 };
+    char path[NATIVE_TEST_PATH_MAX];
+    const NkDiscChdBackend *backend = nk_disc_chd_libchdr_backend();
+    uint8_t *hunk = (uint8_t *)malloc(CHD_HUNK);
+    const uint32_t hunks = ISO_BYTES / CHD_HUNK;
+    bool lookup_failed = false;
+    long n;
+    CHECK(hunk != NULL);
+    build_chd(&image, g_iso, ISO_BYTES, CHD_MAP_COMPRESSED_HUFF, CHD_TAG('D', 'V', 'D', ' '));
+    path_in(path, sizeof(path), "chd-huff-alloc.img");
+    write_bytes(path, image.data, image.len);
+    for (n = 0;; n++) {
+        NkDiscExpandStatus status;
+        void *handle = NULL;
+        uint64_t logical = 0;
+        uint32_t hunk_bytes = 0;
+        uint8_t sha1[NK_DISC_SHA1_BYTES];
+        bool ok;
+        bool injected;
+        memset(&status, 0, sizeof(status));
+        s_malloc_failed_size = 0;
+        s_malloc_fail_at = n;
+        ok = backend->open(path, &handle, &logical, &hunk_bytes, sha1, &status);
+        for (uint32_t h = 0; ok && h < hunks; h++) {
+            ok = backend->read_hunk(handle, h, hunk, &status);
+            if (ok) CHECK(memcmp(hunk, g_iso + (size_t)h * CHD_HUNK, CHD_HUNK) == 0);
+        }
+        if (handle) backend->close(handle);
+        injected = s_malloc_fail_at < 0;
+        s_malloc_fail_at = -1;
+        if (!injected) {
+            CHECK(ok); /* no call was failed: the image reads whole */
+            break;
+        }
+        if (s_malloc_failed_size == (sizeof(lookup_value) << 16)) lookup_failed = true;
+        if (ok) continue; /* an allocation the reader can do without */
+        if (strcmp(status.code, NK_DISC_INTERNAL) != 0) {
+            fprintf(stderr, "malloc #%ld (%zu bytes) failed: %s: %s\n", n + 1,
+                    s_malloc_failed_size, status.code, status.message);
+            CHECK(false);
+        }
+        CHECK(strstr(status.message, "not enough memory") != NULL);
+    }
+    CHECK(lookup_failed); /* the HUFF decoder's lookup table was among them */
+    printf("PASS CHD huff codec under a failing allocator (%ld allocations, each failed once)\n", n);
+    free(hunk);
+    free(image.data);
+#endif
 }
 
 static void test_cancel_removes_partial(void) {
@@ -2572,6 +2725,7 @@ int main(void) {
     test_malformed_refused();
     test_chd_huffman_gap_is_deterministic();
     test_chd_flac_empty_hunk_refused();
+    test_chd_huff_allocation_failures();
     test_cancel_removes_partial();
     test_import_and_reuse();
     test_chd_damaged_metadata();

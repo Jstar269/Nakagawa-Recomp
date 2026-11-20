@@ -37,6 +37,9 @@
 
 ***************************************************************************/
 
+/* Modified by Nakagawa Recomp contributors, 2026-11-20. The local change is marked
+ * LOCAL DELTA and listed in third_party/libchdr/PROVENANCE.md. */
+
 /* Feature test macros: must come before any system header.
  * Ensures fseeko/ftello are declared under strict C99/C11 and
  * that 64-bit file offsets are used on 32-bit platforms (armhf,
@@ -1193,6 +1196,13 @@ static chd_error decompress_v5_map(chd_file* chd, chd_header* header)
 		return CHDERR_READ_ERROR;
 	}
 	bitbuf = create_bitstream(compressed_ptr, sizeof(uint8_t) * mapbytes);
+	/* Nakagawa LOCAL DELTA (2026-11-20): the bitstream may not have been
+	 * allocated (create_bitstream returns NULL here). */
+	if (bitbuf == NULL)
+	{
+		free(compressed_ptr);
+		return CHDERR_OUT_OF_MEMORY;
+	}
 
 	/* first decode the compression types */
 	decoder = create_huffman_decoder(16, 8);
