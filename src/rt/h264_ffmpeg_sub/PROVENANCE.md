@@ -193,7 +193,7 @@ Legend:
 | `libavcodec/startcode.c` | imported byte-identical | `9efdffe8c6628e2d0e491f8cb641d56ad266c5db` |
 | `libavcodec/startcode.h` | imported byte-identical | `cfa02b08602eb45e6edbb1d226f14e23cd343059` |
 | `libavcodec/thread.h` | imported byte-identical | `413196269f59dc007b3db4a0f36e8c267ecce3b0` |
-| `libavcodec/utils.c` | imported byte-identical | `896b99dc3f2eb31b4e848e942822411849d2e466` |
+| `libavcodec/utils.c` | imported + LOCAL DELTA | `896b99dc3f2eb31b4e848e942822411849d2e466` |
 | `libavcodec/version.h` | imported byte-identical | `cfdde469600bd30a6d60cfe8816747dba6edbd2b` |
 | `libavcodec/videodsp.c` | imported byte-identical | `ce9e9eb1439d8c134f12caef79daad82d94c37f6` |
 | `libavcodec/videodsp.h` | imported byte-identical | `c0545f22b02789425d956c7989540fa98433c9ca` |
@@ -370,6 +370,23 @@ marked `LOCAL DELTA` in the file.
 Taken on upstream's authority: no single-threaded path reading `ref_list` above `ref_count`
 was found or reproduced in this project, so no regression test shows the change is needed. The
 media selftests confirm that valid streams decode as before.
+
+### `libavcodec/utils.c`
+
+Modified 2026-11-20 (new bytes await the maintainer's approval). One commit from FFmpeg's
+`release/4.4` branch is applied verbatim to the n4.4 blob; nothing else changes, and the change
+is marked `LOCAL DELTA` in the file.
+
+- `e39140d9d30b5589fbbb61b6655a9767143fe397` "avcodec/h264_slice: guard color_frame() against
+  chroma-width underflow". On master (`c79dfd29e6afca56294395be843d98d10858a7fa`) and
+  `release/6.1` (`b47f49586c`) the change is in `h264_slice.c`; FFmpeg adapted it to 4.4, where
+  the same code is `ff_color_frame` in `utils.c`. The H.264 decoder calls `ff_color_frame` to
+  grey out a missing reference frame; for a high-bit-depth plane one sample wide, `bytes - 2`
+  underflowed to a huge `av_memcpy_backptr` length, a heap out-of-bounds write. The first sample
+  and the copy are now guarded and the copy length is `2 * (bytes - 1)` bytes.
+
+Taken on upstream's authority, not reproduced in this project. For planes at least two samples
+wide the bytes written are the same as before.
 
 ## Authored stand-ins
 
