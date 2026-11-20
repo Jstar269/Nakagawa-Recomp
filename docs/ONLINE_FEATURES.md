@@ -131,20 +131,25 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   - an unlock (`r=awardachievement`): user name, token, the achievement ID, `h=0`, the game hash, the
     seconds since a queued unlock happened and rcheevos' request signature;
   - Rich Presence (`r=ping`), every two minutes while a game runs: user name, token, the game ID, the
-    game's Rich Presence text (what its achievement set says you are doing), `h=0` and the game hash.
+    game's Rich Presence text (what its achievement set says you are doing), `h=0` and the game hash;
+    none is sent once the game has exited or its frames have stopped.
 
-  Leaderboard entries are not sent: rcheevos would submit them in softcore too, and the bridge refuses
-  that request. The hash follows RetroAchievements' PSP method: raw bytes from
-  `PSP_GAME/PARAM.SFO`, then `PSP_GAME/SYSDIR/EBOOT.BIN`, with no new decryption. No game file, save,
-  package, guest memory, telemetry or capture is sent.
+  Leaderboard entries are not sent: rcheevos submits them only in hardcore, or in softcore when an
+  emulator allows it, which the bridge never does, and the bridge also refuses that request. The hash
+  follows RetroAchievements' PSP method: raw bytes from `PSP_GAME/PARAM.SFO`, then
+  `PSP_GAME/SYSDIR/EBOOT.BIN`, with no new decryption. No game file, save, package, guest memory,
+  telemetry or capture is sent.
 - **Offline unlocks** are stored as owner-only, token-free records in the player's data folder. After the
   next sign-in, the player submits each pending unlock through rcheevos' award request builder and the
-  same transport. The queue holds at most 4,096 records. With no definite answer (no connection, a
-  busy server) a record waits 30 seconds; a record the server refuses by its own error leaves the queue
-  and is reported; a refused account keeps every record until the next sign-in. The game's title page
-  shows its core achievements (up to 64; with more, the page says how many it shows and that all of
-  them are on the game's page at retroachievements.org) and unlock toasts captioned
-  **RetroAchievements** appear in-game, one after another: two unlocks close together are two toasts.
+  same transport. That includes an unlock earned while the switch was off, or one the switch stopped
+  from being sent, which goes after the next sign-in in the same run (rcheevos itself gives such a
+  request up), and one left from an earlier run. The queue holds at most 4,096 records. With no
+  definite answer (no connection, a busy server) a record waits 30 seconds; a record the server refuses
+  by its own error leaves the queue and is reported; a refused account keeps every record until the next
+  sign-in. The game's title page shows its core achievements (up to 64; with more, the page says how
+  many it shows and that all of them are on the game's page at retroachievements.org) and unlock toasts
+  captioned **RetroAchievements** appear in-game, one after another: two unlocks close together are two
+  toasts.
 - **One request at a time.** The player carries one RetroAchievements request at a time. A request made
   while another is on its way (a game started while a saved unlock is being sent) waits its turn, in
   order, instead of failing.
