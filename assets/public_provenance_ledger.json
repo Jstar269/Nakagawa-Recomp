@@ -2462,7 +2462,7 @@
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "adhoc_relay_client_1139_20261116",
         "evidence_tier": "S",
-        "authorship": "independent implementation record",
+        "authorship": "project-authored-independent record",
         "upstream_attribution": null
       }
     },
@@ -2473,7 +2473,7 @@
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "adhoc_relay_client_1139_20261116",
         "evidence_tier": "S",
-        "authorship": "independent implementation record",
+        "authorship": "project-authored-independent record",
         "upstream_attribution": null
       }
     },
@@ -13385,7 +13385,7 @@
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "adhoc_servers_list_test_1139_20261120",
         "evidence_tier": "S",
-        "authorship": "independent implementation record",
+        "authorship": "project-authored, behavior-informed record",
         "upstream_attribution": null
       }
     },
@@ -13561,7 +13561,7 @@
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "adhoc_relay_client_1139_20261116",
         "evidence_tier": "S",
-        "authorship": "independent implementation record",
+        "authorship": "project-authored-independent record",
         "upstream_attribution": null
       }
     },
