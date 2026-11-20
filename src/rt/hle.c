@@ -2018,7 +2018,11 @@ void sreg_ensure_loaded(void) {
     s_sreg_dirty = 0;
     free(text);
     free(path);
-    if (got == 0) sreg_seed_host_time_zone();
+    /* A missing overlay is a first run, and so is one that was ignored as corrupt: its saved
+     * settings are gone either way, so the time zone starts from the host's, never from the
+     * oracle console's seed (audit 2026-11-17, F-e01db03a; owner decision 2026-11-20). The
+     * persist that seeding does moves the ignored file to <file>.corrupt first. */
+    if (got <= 0) sreg_seed_host_time_zone();
 }
 
 typedef struct {

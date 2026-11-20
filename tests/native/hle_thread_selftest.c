@@ -18370,6 +18370,26 @@ static void test_first_run_time_zone_comes_from_the_host(void) {
     sysreg_restart();
     rtc_expect_profile(60, 1u, 120, "the saved zone with no host time zone");
 
+    /* A corrupt overlay is ignored as a whole, so its saved zone is gone: that is a first run
+     * too, and the host's zone is seeded and saved, the ignored file kept as <file>.corrupt,
+     * rather than the oracle console's -300 (audit 2026-11-17, F-e01db03a). */
+    {
+        static const char corrupt[] = "not json {";
+        sysreg_scratch_clean();
+        sysreg_write_file(SYSREG_SCRATCH_FILE, corrupt, strlen(corrupt));
+        hle_test_setenv("SR_HOST_TIME_ZONE", "60,1");
+        sysreg_restart();
+        rtc_expect_profile(60, 1u, 120, "the host's zone over a corrupt overlay");
+        char *kept = sysreg_read_file(SYSREG_SCRATCH_FILE ".corrupt");
+        expect(kept && strcmp(kept, corrupt) == 0,
+               "seeding the host's zone over a corrupt overlay keeps it as <file>.corrupt");
+        free(kept);
+        hle_test_setenv("SR_HOST_TIME_ZONE", "-480,0");
+        sysreg_restart();
+        rtc_expect_profile(60, 1u, 120, "the zone seeded over a corrupt overlay is retained");
+        hle_test_setenv("SR_HOST_TIME_ZONE", NULL);
+    }
+
     sysreg_scratch_clean();
     sysreg_restart();
 }
