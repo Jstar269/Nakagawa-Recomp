@@ -229,20 +229,79 @@ uint32_t nk_ach_read_memory(const NkAchMemory *mem, uint32_t ra_address, uint8_t
     return 0u;
 }
 
-/* Copies text into out[0..size): whole when it fits, else cut at a character. RetroAchievements'
- * titles, descriptions and messages are UTF-8, and a cut inside a multi-byte sequence would hand
- * the toast and the launcher invalid text. NULL text copies as empty. */
+/* The length of the well-formed UTF-8 character at p (1 to 4 bytes), and its code point; 0 for a
+ * byte that does not begin one: a stray continuation byte, a lead byte whose sequence is cut
+ * short, an overlong form, a surrogate or a code point past U+10FFFF. */
+static size_t ach_utf8_char(const unsigned char *p, uint32_t *code_point) {
+    const unsigned char c = p[0];
+    size_t length;
+    uint32_t value;
+    uint32_t least;
+    if (c < 0x80u) {
+        *code_point = c;
+        return 1u;
+    }
+    if (c >= 0xC2u && c <= 0xDFu) {
+        length = 2u;
+        value = c & 0x1Fu;
+        least = 0x80u;
+    } else if (c >= 0xE0u && c <= 0xEFu) {
+        length = 3u;
+        value = c & 0x0Fu;
+        least = 0x800u;
+    } else if (c >= 0xF0u && c <= 0xF4u) {
+        length = 4u;
+        value = c & 0x07u;
+        least = 0x10000u;
+    } else {
+        return 0u;
+    }
+    for (size_t i = 1u; i < length; i++) {
+        if ((p[i] & 0xC0u) != 0x80u) return 0u; /* also stops at the terminating NUL */
+        value = (value << 6) | (p[i] & 0x3Fu);
+    }
+    if (value < least || value > 0x10FFFFu || (value >= 0xD800u && value <= 0xDFFFu)) return 0u;
+    *code_point = value;
+    return length;
+}
+
+/* Characters that change how the text around them is shown and are never part of a title or a
+ * message: C0 controls and DEL, C1 controls, and the bidirectional controls (LRM, RLM, ALM, the
+ * embeddings, overrides and isolates). */
+static bool ach_control_character(uint32_t code_point) {
+    return code_point < 0x20u || (code_point >= 0x7Fu && code_point <= 0x9Fu) ||
+           code_point == 0x061Cu || code_point == 0x200Eu || code_point == 0x200Fu ||
+           (code_point >= 0x202Au && code_point <= 0x202Eu) ||
+           (code_point >= 0x2066u && code_point <= 0x2069u);
+}
+
+/* Copies server text (RetroAchievements' titles, descriptions and messages, which reach the toast,
+ * the status line and the game's page) into out[0..size) as clean UTF-8: a byte that does not
+ * begin a well-formed character is dropped; a tab, line feed or carriage return becomes a space;
+ * every other control character above is removed. The copy is whole when it fits, else it ends
+ * at the last whole character that fits. NULL text copies as empty. */
 static void ach_copy_text(char *out, size_t size, const char *text) {
     if (!out || size == 0u) return;
-    size_t length = 0u;
-    if (text) {
-        while (length < size - 1u && text[length]) length++;
-        /* Cut: back up past the continuation bytes of a character that does not fit. */
-        if (text[length])
-            while (length > 0u && ((unsigned char)text[length] & 0xC0u) == 0x80u) length--;
-        memcpy(out, text, length);
+    size_t used = 0u;
+    const unsigned char *p = (const unsigned char *)text;
+    while (p && *p) {
+        uint32_t code_point = 0u;
+        const size_t length = ach_utf8_char(p, &code_point);
+        if (length == 0u) {
+            p++;
+            continue;
+        }
+        if (code_point == '\t' || code_point == '\n' || code_point == '\r') {
+            if (used + 1u >= size) break;
+            out[used++] = ' ';
+        } else if (!ach_control_character(code_point)) {
+            if (used + length >= size) break;
+            memcpy(out + used, p, length);
+            used += length;
+        }
+        p += length;
     }
-    out[length] = '\0';
+    out[used] = '\0';
 }
 
 static void ach_push(NkAch *ach, NkAchEventKind kind, uint32_t id, uint32_t points,
@@ -321,6 +380,16 @@ static bool ach_pending_remove(NkAch *ach, const char *game_hash, uint32_t id,
     memset(&ach->pending_unlocks[ach->pending_unlock_count], 0,
            sizeof ach->pending_unlocks[0]);
     return true;
+}
+
+/* rcheevos gives an award up when its retry finds nobody signed in (rc_client.c,
+ * rc_client_award_achievement_server_call) or the bridge refuses it (a client error, which it
+ * never retries). So once the session ends or the switch goes off, every unlock in the queue is
+ * the bridge's to send: ach_replay_pending_unlocks sends it after the next sign-in. Should
+ * rcheevos' own retry still reach the server too, the server keeps one unlock and both answers
+ * take the same record out of the queue. */
+static void ach_queue_take_over(NkAch *ach) {
+    for (size_t i = 0u; i < ach->pending_unlock_count; i++) ach->pending_unlocks[i].restored = true;
 }
 
 static uint32_t ach_request_award_id(const char *post_data) {
@@ -678,27 +747,23 @@ static void RC_CCONV ach_server_call(const rc_api_request_t *request,
                                      rc_client_server_callback_t callback, void *callback_data,
                                      rc_client_t *client) {
     NkAch *ach = (NkAch *)rc_client_get_userdata(client);
-    if (!ach || !request || !nk_ach_url_allowed(request->url)) {
-        ach_refuse(callback, callback_data, "refused: not a RetroAchievements server");
-        return;
-    }
-    if (ach->closing) {
-        ach_refuse(callback, callback_data, k_closing);
-        return;
-    }
-    if (!ach->transport || ach->offline) {
-        ach_refuse(callback, callback_data, "refused: online achievements are off");
-        return;
-    }
-    if (ach_request_claims_hardcore(request->post_data)) {
+    const char *refusal = NULL;
+    if (!ach || !request || !nk_ach_url_allowed(request->url))
+        refusal = "refused: not a RetroAchievements server";
+    else if (ach->closing)
+        refusal = k_closing;
+    else if (!ach->transport || ach->offline)
+        refusal = "refused: online achievements are off";
+    else if (ach_request_claims_hardcore(request->post_data))
         /* Softcore only (nk_achievements.h): a request that would record a hardcore unlock or
          * session never leaves, whatever turned hardcore on. */
-        ach_refuse(callback, callback_data, "refused: hardcore is not available");
-        return;
-    }
-    AchCall *call = (AchCall *)calloc(1u, sizeof *call);
-    if (!call) {
-        ach_refuse(callback, callback_data, "refused: out of memory");
+        refusal = "refused: hardcore is not available";
+    AchCall *call = refusal ? NULL : (AchCall *)calloc(1u, sizeof *call);
+    if (!refusal && !call) refusal = "refused: out of memory";
+    if (refusal) {
+        /* A refused request is wiped too: it holds the password or the token as a sent one does. */
+        if (request) ach_scrub_request(request);
+        ach_refuse(callback, callback_data, refusal);
         return;
     }
     call->callback = callback;
@@ -739,6 +804,9 @@ static void RC_CCONV ach_event(const rc_client_event_t *event, rc_client_t *clie
                 ach->confirmed_unlock_unseen = false;
             } else {
                 (void)ach_pending_add(ach, ach->game_hash, event->achievement->id);
+                /* Earned in the frame that was evaluated as the switch went off: its award was
+                 * refused, so the bridge sends it after the next sign-in. */
+                if (ach->offline) ach_queue_take_over(ach);
             }
             ach_push(ach, NK_ACH_EVENT_UNLOCKED, event->achievement->id,
                      event->achievement->points, 0u, event->achievement->title, NULL);
@@ -1058,6 +1126,7 @@ void nk_ach_logout(NkAch *ach) {
     ach_enter(ach);
     ach_token_retry_end(ach);
     rc_client_logout(ach->client);
+    ach_queue_take_over(ach);
     ach_leave(ach);
 }
 
@@ -1126,6 +1195,16 @@ bool nk_ach_begin_load_game(NkAch *ach, const char *hash) {
     (void)rc_client_begin_load_game(ach->client, hash, ach_load_done, NULL);
     ach_leave(ach);
     return true;
+}
+
+void nk_ach_unload_game(NkAch *ach) {
+    if (!ach) return;
+    ach_enter(ach);
+    /* rc_client never reaches its completed-set state here (ach_award_answer_without_completion),
+     * so unloading cannot raise a mastery event with no game. rc_client takes the game's ping off
+     * its schedule; its retries of an award stay. */
+    rc_client_unload_game(ach->client);
+    ach_leave(ach);
 }
 
 void nk_ach_frame(NkAch *ach) {
@@ -1635,6 +1714,7 @@ void nk_ach_set_online(NkAch *ach, bool online) {
     ach->offline = !online;
     if (!online && !was_offline) {
         ach_token_retry_end(ach);
+        ach_queue_take_over(ach);
         /* Requests still waiting their turn are answered here, never sent. The one the transport
          * holds still gets its answer (NkAchTransport). */
         AchOutbound *waiting = ach->outbound_head;

@@ -209,7 +209,9 @@ bool nk_ach_begin_login_with_password(NkAch *ach, const char *username, const ch
 bool nk_ach_copy_user_token(const NkAch *ach, char *out, size_t out_size);
 bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size);
 /* Ends the session and keeps the pending unlocks: the stored credential, and so the account,
- * stays (the Achievements switch turned off). */
+ * stays (the Achievements switch turned off). The bridge sends those unlocks itself after the
+ * account's next sign-in (nk_ach_replay_pending_unlocks), as it does once the switch is off
+ * (nk_ach_set_online): rcheevos gives up a retry that finds nobody signed in or is refused. */
 void nk_ach_logout(NkAch *ach);
 /* The user's Sign out: ends the session and discards every pending unlock, returning how many.
  * The queue is the signed-out account's, and nothing of that account stays on this PC: rcheevos'
@@ -220,6 +222,10 @@ size_t nk_ach_sign_out(NkAch *ach);
  * otherwise the outcome is a GAME_LOADED or GAME_FAILED event. A set the server gives for another
  * console is unloaded and reported as GAME_FAILED naming that console. */
 bool nk_ach_begin_load_game(NkAch *ach, const char *hash);
+/* The game has ended (it exited, or its frames stopped): rc_client forgets it, so its Rich
+ * Presence ping, which rc_client sends every two minutes while a game is loaded, goes out no
+ * more. Pending unlocks and rc_client's retries of their awards stay. Nothing is sent. */
+void nk_ach_unload_game(NkAch *ach);
 
 /* Once per guest frame, at the vblank boundary: evaluates the achievements on guest memory. */
 void nk_ach_frame(NkAch *ach);
