@@ -205,6 +205,7 @@
     "assets/enhancements/ucus98744-60hz.json",
     "assets/failure_codes.json",
     "assets/flight_recorder_schema.json",
+    "assets/fonts/psp_measured_latin_metrics.json",
     "assets/fonts/ui/chakra-petch/ChakraPetch-Bold.ttf",
     "assets/fonts/ui/chakra-petch/ChakraPetch-SemiBold.ttf",
     "assets/fonts/ui/chakra-petch/OFL.txt",
