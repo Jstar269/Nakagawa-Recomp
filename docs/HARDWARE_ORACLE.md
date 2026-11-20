@@ -1903,8 +1903,10 @@ One console is one data point; see §11. Nothing here closes issue #70
   `system:58401@release_661,0x06060110:`); PSPLink `pspver` printed `0x06060010` ("6.6.0") in the XMB context on
   this boot, which the runner records as 6.6.0; custom firmware ARK-5 with cIPL, version 5.1.0 (operator-declared,
   not read by a tool). `ge-through-z` (case 185, `tests/fixtures/psp_oracle/probe_ge_sample.c`) on boot 180 at
-  `e4e6a3a2`, 23 records. The launch commit is an ancestor of this tree, and its case section, case number and
-  test id in `probe_ge_sample.c` and its Makefile CASE lines are identical to this tree's. The envelope is
+  `e4e6a3a2`, 23 records. The launch commit is an ancestor of this tree, and its cells, case number and test id
+  in `probe_ge_sample.c` and its Makefile CASE lines are identical to this tree's (the case has since changed
+  where it reads the depth words, where it draws its colour and what it restores: the 2026-11-20 entry below). The
+  envelope is
   acceptance-eligible with 0 blockers (evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean
   committed tree), every record is PASS, the stream ends COMPLETE PASS, and every list reached GE idle. The raw
   envelope, host0 log and decoded table stay in the private campaign directory.
@@ -1965,8 +1967,10 @@ One console is one data point; see §11. Nothing here closes issue #70
   records as 6.6.0; custom firmware ARK-5 with cIPL, version 5.2.0 (operator-declared, not read by a tool).
   `ge-depth-bounds` (case 192, `tests/fixtures/psp_oracle/probe_ge_sample.c`) ran on boot 225 at `306579a11`, 63
   records; `ge-through-z` (case 185, the same file) ran on boot 226 at `6380c2c5a`, 22 records. Both commits are
-  ancestors of this tree, and each case's section in `probe_ge_sample.c` and its Makefile CASE lines are identical
-  to this tree's. Each envelope is acceptance-eligible with 0 blockers (evidence class `PSP_HARDWARE`, source commit
+  ancestors of this tree. The `ge-depth-bounds` section of `probe_ge_sample.c` and both cases' Makefile CASE lines
+  are identical to this tree's; `ge-through-z` has since gained a save and restore (last sub-bullet below), with
+  its cells and per-cell records unchanged. Each envelope is acceptance-eligible with 0 blockers (evidence class
+  `PSP_HARDWARE`, source commit
   binding `MATCH` on a clean committed tree), every record is PASS, each stream ends COMPLETE PASS, every wait ended
   with the list done or the GE idle and no `sceGeBreak` reset ran. The raw envelopes and host0 logs stay in the
   private campaign directory.
@@ -2006,8 +2010,10 @@ One console is one data point; see §11. Nothing here closes issue #70
     65535.5, 65536.0, 70000.0, +inf and the quiet NaN `0x7fc00000`. So the z is clamped to 0..65535 and its fraction
     is dropped, and +inf and that NaN store `0xffff`. The centre colour is `0x07e0` in every cell.
   - *After the `ge-through-z` run.* About 30 seconds after the probe unloaded, the console restarted by itself;
-    the cause is not established. The case restores neither the depth words it fills nor its colour block, so it
-    is not to be run again in the XMB context until it does.
+    the cause is not established. That revision restored neither the depth words it filled nor its colour block
+    at `0x100000` (inside an XMB frame buffer), and it queued its lists without a GE context, so the GE state they
+    set stayed behind. The case now draws its colour at `0x120000`, queues each list with its own GE context, and
+    saves VRAM `0x110000..0x120fff` before the first cell and restores it after the last (`vram-restore`).
 
 - **PSP-3000 single-case run of `vfpu-reserved-widths` (2026-11-10 UTC)**: one PSP-3000, XMB context, one launch on
   its own boot after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited), with the owner present
