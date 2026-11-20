@@ -57,7 +57,7 @@ except ImportError:  # direct script execution
     import pgf_writer  # type: ignore[no-redef]
 
 CONVERTER_NAME = "ttf2pgf"
-CONVERTER_VERSION = "0.9.0"
+CONVERTER_VERSION = "0.10.0"
 SPEC_PATH = "docs/cleanroom/PGF_CONVERTER_SPEC.md"
 PIN_SCHEMA = "font-pin/v1"
 #: The ``schema_version`` of a static font list that may serve as a pin (spec section 7).
@@ -1741,6 +1741,67 @@ class _MetricTargets:
     ppem_max: int
 
 
+#: Schema of a measured horizontal metric table (``--horizontal-metrics``, spec section 3 rule 18).
+HORIZONTAL_METRICS_SCHEMA = "nk-psp-horizontal-metrics/v1"
+#: The table's fields, in the order each character's list gives them.
+HORIZONTAL_METRICS_FIELDS = ("advance_h_26_6", "bitmap_width", "bitmap_left")
+#: Range of the per-character horizontal factor that meets a measured image width, in thousandths.
+WIDTH_FACTOR_MIN = 750
+WIDTH_FACTOR_MAX = 1250
+
+
+@dataclass(frozen=True)
+class HorizontalMetrics:
+    """One slot of a measured horizontal metric table: per code, advance (26.6), image width and left (px)."""
+
+    file_name: str
+    sha256: str
+    slot: str
+    evidence: str
+    values: dict[int, tuple[int, int, int]]
+
+
+def load_horizontal_metrics(path: Path, slot: str) -> HorizontalMetrics:
+    """Load one slot of a measured horizontal metric table; any malformed entry is a named refusal."""
+    try:
+        raw = path.read_bytes()
+        document = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _refuse("horizontal-metrics-invalid", f"cannot read {path}: {exc}") from exc
+    if not isinstance(document, dict) or document.get("schema") != HORIZONTAL_METRICS_SCHEMA:
+        raise _refuse("horizontal-metrics-invalid", f"schema must be {HORIZONTAL_METRICS_SCHEMA!r}")
+    evidence = document.get("evidence")
+    if evidence not in ("PSP-measured", "PPSSPP-derived, not PSP-measured"):
+        raise _refuse("horizontal-metrics-invalid", "evidence must say PSP-measured or PPSSPP-derived, not PSP-measured")
+    fields = document.get("fields")
+    if not isinstance(fields, list) or tuple(
+        field.get("name") if isinstance(field, dict) else None for field in fields
+    ) != HORIZONTAL_METRICS_FIELDS:
+        raise _refuse("horizontal-metrics-invalid", f"fields must be {', '.join(HORIZONTAL_METRICS_FIELDS)}")
+    slots = document.get("slots")
+    if not isinstance(slots, dict) or not isinstance(slots.get(slot), dict) or not slots[slot]:
+        raise _refuse("horizontal-metrics-invalid", f"the table has no slot {slot!r}")
+    values: dict[int, tuple[int, int, int]] = {}
+    for key, entry in slots[slot].items():
+        match = re.fullmatch(r"U\+([0-9A-F]{4,6})", key)
+        if match is None:
+            raise _refuse("horizontal-metrics-invalid", f"{slot}: {key!r} is not a U+XXXX code point")
+        if (
+            not isinstance(entry, list) or len(entry) != 3
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in entry)
+        ):
+            raise _refuse("horizontal-metrics-invalid", f"{slot} {key}: give three integers")
+        advance, width, left = entry
+        if not 0 <= advance <= pgf_writer.MAX_EDGE * 64 or not 0 <= width <= pgf_writer.MAX_EDGE or not -64 <= left <= 64:
+            raise _refuse("horizontal-metrics-invalid", f"{slot} {key}: {entry} is out of range")
+        if width == 0 and left != 0:
+            raise _refuse("horizontal-metrics-invalid", f"{slot} {key}: an empty image has left 0")
+        values[int(match.group(1), 16)] = (advance, width, left)
+    return HorizontalMetrics(
+        file_name=path.name, sha256=hashlib.sha256(raw).hexdigest(), slot=slot, evidence=str(evidence), values=values,
+    )
+
+
 def load_metric_targets(path: Path) -> _MetricTargets:
     """Load the metric-target policy document (schema documented in the spec)."""
     try:
@@ -1891,6 +1952,8 @@ class _Planner:
         #: ``--fit-em`` (spec section 3, rule 17): the horizontal factor of each code whose glyph is
         #: wider than the em, so that it fits the em; codes absent here keep their width.
         self.fit: dict[int, Fraction] = {}
+        #: Per-code horizontal factors chosen to meet a measured image width (rule 18).
+        self.width_factor: dict[int, Fraction] = {}
         #: ``--snap-overshoot`` threshold in sub-samples (0: off) and each drawing font's flat
         #: edges, keyed by the font object's identity (spec section 3, rule 13).
         self.snap_overshoot = snap_overshoot
@@ -1958,8 +2021,21 @@ class _Planner:
 
     def _scale(self, code: int) -> Fraction:
         """The code's horizontal factor: ``--scale-x`` and any ``--fit-em`` narrowing."""
+        scale = self.scale_x
         fit = self.fit.get(code)
-        return self.scale_x if fit is None else self.scale_x * fit
+        if fit is not None:
+            scale *= fit
+        factor = self.width_factor.get(code)
+        return scale if factor is None else scale * factor
+
+    def set_width_factor(self, code: int, factor: Fraction) -> None:
+        """Draw ``code`` at ``factor`` times its other horizontal scale and drop its cached rasters."""
+        if factor == 1:
+            self.width_factor.pop(code, None)
+        else:
+            self.width_factor[code] = factor
+        for per_size in self._rasters.values():
+            per_size.pop(code, None)
 
     def advance_units(self, code: int) -> int | Fraction:
         units = self.font_for(code).advance_units(self.gids[code])
@@ -2096,6 +2172,117 @@ class _Planner:
         )
 
 
+_GlyphImage = tuple[int, int, int, int, tuple[int, ...]]
+
+
+def _glyph_image(planner: _Planner, code: int, ppem: int, embolden_x: int, embolden_y: int) -> _GlyphImage | None:
+    """The code's trimmed image ``(left, top, width, height, samples)``, or None when it has no ink."""
+    raster = planner.raster_at(code, ppem)
+    grow_right = -(-embolden_x // SUPERSAMPLE)
+    grow_top = -(-embolden_y // SUPERSAMPLE)
+    if raster.width > 0 and raster.height > 0 and (grow_right or grow_top):
+        raster = _Raster(
+            edges=raster.edges,
+            left=raster.left,
+            bottom=raster.bottom,
+            right=raster.right + grow_right,
+            top=raster.top + grow_top,
+        )
+    if raster.width > pgf_writer.MAX_EDGE or raster.height > pgf_writer.MAX_EDGE:
+        raise _refuse(
+            "glyph-too-large",
+            f"U+{code:04X} rasterizes to {raster.width}x{raster.height} at ppem {ppem}; "
+            f"the record field holds at most {pgf_writer.MAX_EDGE}",
+        )
+    if raster.width <= 0 or raster.height <= 0:
+        return None
+    width, height, samples = _rasterize(raster, embolden_x, embolden_y)
+    trimmed = _trim_to_ink(raster.left, raster.top, width, height, samples)
+    return None if trimmed[2] <= 0 or trimmed[3] <= 0 else trimmed
+
+
+def _half_coverage_rows(image: _GlyphImage | None) -> tuple[int, int] | None:
+    """Top and bottom edges, in pixels above the baseline, of the rows whose peak reaches half coverage."""
+    if image is None:
+        return None
+    _left, top, width, height, samples = image
+    rows = [row for row in range(height) if max(samples[row * width:(row + 1) * width]) >= 8]
+    return None if not rows else (top - rows[0], top - rows[-1] - 1)
+
+
+#: How many pixels below, then above, a measured width rule 18 tries, nearest first, when no factor
+#: that keeps the glyph's rows draws the measured width itself.
+WIDTH_FALLBACK_STEPS = 3
+
+
+def _pad_columns(image: _GlyphImage, width: int) -> _GlyphImage:
+    """Rule 18: widen an image to ``width`` with blank columns, half on each side (the extra one on the right)."""
+    left, top, old_width, height, samples = image
+    before = (width - old_width) // 2
+    after = width - old_width - before
+    rows = [
+        (0,) * before + samples[row * old_width:(row + 1) * old_width] + (0,) * after for row in range(height)
+    ]
+    return left - before, top, width, height, tuple(sample for row in rows for sample in row)
+
+
+def _meet_width(
+    planner: _Planner, code: int, ppem: int, embolden_x: int, embolden_y: int, target: int, image: _GlyphImage,
+) -> _GlyphImage:
+    """Rule 18: redraw ``code`` narrower or wider so its trimmed image is ``target`` pixels wide.
+
+    The factor is k/1000 of the code's other horizontal scale, k in WIDTH_FACTOR_MIN..WIDTH_FACTOR_MAX,
+    and it must keep the rows the glyph's ink reaches at half coverage (a horizontal scale must not
+    move an x-height or cap-height row). The image width grows with k, so a binary search finds the
+    factors that draw a given width. Of those that draw ``target`` and keep the rows, the one nearest
+    1000 wins. When none does, the nearest narrower width some row-keeping factor draws, at most
+    WIDTH_FALLBACK_STEPS pixels less, is taken and the caller pads it with blank columns
+    (:func:`_pad_columns`); failing that the nearest wider one, at most as many pixels more;
+    otherwise 1000. The outline is the font's own in every case; only its horizontal scale moves.
+    """
+    images: dict[int, _GlyphImage | None] = {1000: image}
+    rows = _half_coverage_rows(image)
+
+    def image_at(k: int) -> _GlyphImage | None:
+        if k not in images:
+            planner.set_width_factor(code, Fraction(k, 1000))
+            images[k] = _glyph_image(planner, code, ppem, embolden_x, embolden_y)
+        return images[k]
+
+    def width_at(k: int) -> int:
+        found = image_at(k)
+        return 0 if found is None else found[2]
+
+    def first_at_least(width: int) -> int:
+        """The smallest k whose width is at least ``width``, or WIDTH_FACTOR_MAX + 1."""
+        low, high = WIDTH_FACTOR_MIN, WIDTH_FACTOR_MAX + 1
+        while low < high:
+            middle = (low + high) // 2
+            if width_at(middle) >= width:
+                high = middle
+            else:
+                low = middle + 1
+        return low
+
+    def best_for(width: int) -> int | None:
+        """The row-keeping factor nearest 1000 that draws ``width``, or None."""
+        if width <= 0:
+            return None
+        first, last = first_at_least(width), first_at_least(width + 1) - 1
+        for k in sorted(range(first, last + 1), key=lambda k: (abs(k - 1000), k)):
+            if width_at(k) == width and _half_coverage_rows(image_at(k)) == rows:
+                return k
+        return None
+
+    # The measured width; else the nearest narrower one (padded to the width after), else wider.
+    widths = [target, *(target - step for step in range(1, WIDTH_FALLBACK_STEPS + 1)),
+              *(target + step for step in range(1, WIDTH_FALLBACK_STEPS + 1))]
+    chosen = next((k for k in map(best_for, widths) if k is not None), 1000)
+    planner.set_width_factor(code, Fraction(chosen, 1000))
+    found_image = image_at(chosen)
+    return image if found_image is None else found_image
+
+
 def convert(
     data: bytes,
     *,
@@ -2126,6 +2313,7 @@ def convert(
     vertical_advance: int | None = None,
     vertical_origin: int | None = None,
     fit_em: bool = False,
+    horizontal_metrics: HorizontalMetrics | None = None,
 ) -> Conversion:
     """Convert one pinned TrueType font into a PGF image plus its manifest.
 
@@ -2139,7 +2327,8 @@ def convert(
     ``scale_x`` widens (over 1000) or narrows outlines and advances by that many thousandths
     (rule 14). ``vertical_advance`` and ``vertical_origin`` set the vertical metrics (rule 16), in
     thousandths of the em the header declares. ``fit_em`` narrows each glyph wider than the em to
-    the em (rule 17). Every stage
+    the em (rule 17). ``horizontal_metrics`` gives the codes it lists their measured advance, image
+    width and left, drawing each with its own outline (rule 18). Every stage
     validates before the next runs; the returned bytes are final. Raises
     :class:`TtfConvertError` naming the refusal on any malformed, unsupported, or
     policy-violating input.
@@ -2250,6 +2439,8 @@ def convert(
         if any(code not in planner.gids for code in DIGIT_CODES):
             raise _refuse("digit-advance-unavailable", "--digit-advance needs the digits 0-9 in the code set")
         for code in DIGIT_CODES:
+            if horizontal_metrics is not None and code in horizontal_metrics.values:
+                continue  # rule 18 sets this digit's advance and place
             natural = _to26_6(planner.advance_units(code), ppem, planner.font_for(code).units_per_em)
             # Half the change on each side, rounded down to whole 26.6 units: deterministic and exact.
             planner.set_shift_x(code, (digit_advance_26_6 - natural) // 2)
@@ -2257,39 +2448,36 @@ def convert(
     glyphs: list[pgf_writer.Glyph] = []
     zero_area: list[int] = []
     max_width = max_height = 0
-    grow_right = -(-embolden_x // SUPERSAMPLE)
-    grow_top = -(-embolden_y // SUPERSAMPLE)
+    # A table may list characters this code set leaves out; only the codes converted take its values.
+    measured = {} if horizontal_metrics is None else {
+        code: values for code, values in horizontal_metrics.values.items() if code in planner.gids
+    }
+    inexact: list[int] = []
+    padded: list[int] = []
     for code in planner.codes:
-        raster = planner.raster_at(code, ppem)
-        if raster.width > 0 and raster.height > 0 and (grow_right or grow_top):
-            raster = _Raster(
-                edges=raster.edges,
-                left=raster.left,
-                bottom=raster.bottom,
-                right=raster.right + grow_right,
-                top=raster.top + grow_top,
-            )
-        if raster.width > pgf_writer.MAX_EDGE or raster.height > pgf_writer.MAX_EDGE:
-            raise _refuse(
-                "glyph-too-large",
-                f"U+{code:04X} rasterizes to {raster.width}x{raster.height} at ppem {ppem}; "
-                f"the record field holds at most {pgf_writer.MAX_EDGE}",
-            )
-        if digit_advance_26_6 is not None and code in DIGIT_CODES:
-            advance_x = digit_advance_26_6
+        image = _glyph_image(planner, code, ppem, embolden_x, embolden_y)
+        target = measured.get(code)
+        if target is not None:
+            advance_x = target[0]
+            if image is not None and target[1] > 0:
+                image = _meet_width(planner, code, ppem, embolden_x, embolden_y, target[1], image)
+                if image[2] < target[1]:
+                    image = _pad_columns(image, target[1])
+                    padded.append(code)
+                elif image[2] > target[1]:
+                    inexact.append(code)
+                image = (target[2], *image[1:])
         else:
-            advance_x = _to26_6(planner.advance_units(code), ppem, planner.font_for(code).units_per_em)
-        advance_x += (embolden_advance + tracking) * SUB_PIXEL
-        if raster.width <= 0 or raster.height <= 0:
+            if digit_advance_26_6 is not None and code in DIGIT_CODES:
+                advance_x = digit_advance_26_6
+            else:
+                advance_x = _to26_6(planner.advance_units(code), ppem, planner.font_for(code).units_per_em)
+            advance_x += (embolden_advance + tracking) * SUB_PIXEL
+        if image is None:
             zero_area.append(code)
             glyphs.append(pgf_writer.Glyph(code=code, width=0, height=0, samples=(), advance_x=advance_x))
             continue
-        width, height, samples = _rasterize(raster, embolden_x, embolden_y)
-        left, top, width, height, samples = _trim_to_ink(raster.left, raster.top, width, height, samples)
-        if width <= 0 or height <= 0:
-            zero_area.append(code)
-            glyphs.append(pgf_writer.Glyph(code=code, width=0, height=0, samples=(), advance_x=advance_x))
-            continue
+        left, top, width, height, samples = image
         max_width = max(max_width, width)
         max_height = max(max_height, height)
         glyphs.append(
@@ -2362,6 +2550,9 @@ def convert(
         scale_x=scale_x,
         vertical=(vertical_advance, vertical_origin),
         fit_em=fit_em,
+        horizontal_metrics=None if horizontal_metrics is None else {
+            "table": horizontal_metrics, "applied": len(measured), "inexact": inexact, "padded": padded,
+        },
         fallback=None if fallback is None else {
             "data": fallback_data, "font": fallback, "path": fallback_path, "pin": fallback_pin,
             "codes": planner.fallback_codes,
@@ -2476,6 +2667,7 @@ def _build_manifest(
     scale_x: int = SCALE_X_NEUTRAL,
     vertical: tuple[int | None, int | None] = (None, None),
     fit_em: bool = False,
+    horizontal_metrics: dict | None = None,
     fallback: dict | None = None,
 ) -> dict:
     first, last = codes
@@ -2527,6 +2719,23 @@ def _build_manifest(
     # Added in converter 0.9.0, likewise only when given: the codes narrowed to the em.
     if fit_em:
         parameters["fit_em"] = {"codes": sorted(planner.fit)}
+    # Added in converter 0.10.0, likewise only when given: the measured table rule 18 applied.
+    if horizontal_metrics is not None:
+        table: HorizontalMetrics = horizontal_metrics["table"]
+        parameters["horizontal_metrics"] = {
+            "path": table.file_name,
+            "sha256": table.sha256,
+            "slot": table.slot,
+            "evidence": table.evidence,
+            "fields": list(HORIZONTAL_METRICS_FIELDS),
+            "codes": len(table.values),
+            "codes_applied": horizontal_metrics["applied"],
+            "width_padded_codes": horizontal_metrics["padded"],
+            "width_not_met_codes": horizontal_metrics["inexact"],
+            "width_factors": {
+                f"U+{code:04X}": int(factor * 1000) for code, factor in sorted(planner.width_factor.items())
+            },
+        }
     manifest = {
         "converter": {
             "name": CONVERTER_NAME,
@@ -2741,6 +2950,13 @@ def _main(argv: list[str]) -> int:
         help="put each glyph's vertical bearing Y below this many thousandths of the em above the "
         f"baseline ({MIN_VERTICAL}..{MAX_VERTICAL}; default: the margin above the ascender)",
     )
+    parser.add_argument(
+        "--horizontal-metrics",
+        type=Path,
+        help=f"{HORIZONTAL_METRICS_SCHEMA} table: give each code it lists that advance, image width and "
+        "left, keeping the font's own outline (spec section 3, rule 18); needs --horizontal-metrics-slot",
+    )
+    parser.add_argument("--horizontal-metrics-slot", help="the table's slot to apply (for example ltn0)")
     parser.add_argument("--fallback", type=Path, help="second .ttf drawing only the code points the input lacks")
     parser.add_argument("--fallback-pin", type=Path, help="font-pin/v1 JSON for --fallback")
     parser.add_argument(
@@ -2799,6 +3015,12 @@ def _main(argv: list[str]) -> int:
         if args.fallback_pin is not None and fallback_data is None:
             raise _refuse("conflicting-parameters", "--fallback-pin needs --fallback")
         targets = load_metric_targets(args.metric_targets) if args.metric_targets is not None else None
+        if (args.horizontal_metrics is None) != (args.horizontal_metrics_slot is None):
+            raise _refuse("conflicting-parameters", "--horizontal-metrics and --horizontal-metrics-slot go together")
+        horizontal = (
+            load_horizontal_metrics(args.horizontal_metrics, args.horizontal_metrics_slot)
+            if args.horizontal_metrics is not None else None
+        )
         conversion = convert(
             data,
             input_path=str(args.input),
@@ -2828,6 +3050,7 @@ def _main(argv: list[str]) -> int:
             vertical_advance=args.vertical_advance,
             vertical_origin=args.vertical_origin,
             fit_em=args.fit_em,
+            horizontal_metrics=horizontal,
         )
         manifest = manifest_bytes(conversion.manifest)
     except TtfConvertError as exc:
