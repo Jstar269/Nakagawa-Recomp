@@ -187,8 +187,8 @@ PLAYER_NOT_CODES = {
     # builder's event statuses, none of them a problem-report code
     "OK", "MISSING", "STALE", "INCOMPATIBLE", "UNKNOWN", "UNSUPPORTED", "HASHED", "RUNNING",
     "PASS", "FAIL",
-    # Discord RPC event names and the HTTP method
-    "READY", "ERROR", "GET",
+    # Discord RPC event names and the HTTP methods (RetroAchievements' requests are POSTs)
+    "READY", "ERROR", "GET", "POST",
     # environment variables without a project prefix
     "APPDATA", "PATH", "PYTHON", "USER", "USERNAME", "USERPROFILE",
     # the second half of an environment variable's name: nk_launch.c writes SR_CHEATS_FILE as
