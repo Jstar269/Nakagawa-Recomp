@@ -330,6 +330,23 @@ typedef struct {
 } NkInputProfileFile;
 
 /**
+ * @brief The PSP stick byte for a host axis value: the one byte map every module uses.
+ *
+ * Symmetric rounding around 128: 0 and +-1 give 128; x in 1..32767 gives
+ * 128 + round(x * 127 / 32767) and -x gives 256 minus that, so +32767 gives 255 and
+ * -32767 gives 1; -32768 alone gives 0. A value below -32768 reads as -32768 and one above
+ * 32767 as 32767. x * 127 / 32767 is never n + 1/2 (254 * x is even, an odd multiple of
+ * 32767 is odd), so the rounding needs no tie rule.
+ */
+static inline uint8_t nk_input_profile_axis_byte(int32_t val) {
+    if (val <= -32768) return 0;
+    if (val > 32767) val = 32767;
+    const int32_t mag = val < 0 ? -val : val;
+    const int32_t counts = (2 * mag * 127 + 32767) / (2 * 32767);
+    return (uint8_t)(val < 0 ? 128 - counts : 128 + counts);
+}
+
+/**
  * @brief Transform raw host SDL axis value to PSP analog byte (0..255, centre 128).
  *
  * Mapping Formula:
@@ -352,11 +369,11 @@ typedef struct {
  *              val = -32768
  *
  * 4. PSP Byte Mapping:
- *      byte = (uint8_t)(((int32_t)val + 32768) * 255 / 65535)
+ *      byte = nk_input_profile_axis_byte(val), symmetric rounding around 128 (below)
  *
  * In the default profile (deadzone_inner = 7849, deadzone_outer = 0, inverted = false),
- * this yields 128 for |raw| <= 7849 and ((raw + 32768) * 255 / 65535) for |raw| > 7849,
- * reproducing the runtime's src/rt/gpu_sdl3vk/sdl3vk.c exactly.
+ * this yields 128 for |raw| <= 7849 and nk_input_profile_axis_byte(raw) for |raw| > 7849.
+ * The runtime's src/rt/gpu_sdl3vk/sdl3vk.c maps a gamepad through this function.
  */
 uint8_t nk_input_profile_transform_axis(
     int16_t raw_axis,

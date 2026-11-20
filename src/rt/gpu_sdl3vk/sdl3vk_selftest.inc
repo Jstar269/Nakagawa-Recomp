@@ -381,9 +381,18 @@ int sdl3vk_input_profile_selftest(void) {
             for (size_t j = 0; j < sizeof(axis_samples) / sizeof(axis_samples[0]); j++) {
                 int ax = axis_samples[i];
                 int ay = axis_samples[j];
+                /* Outside the dead zone, symmetric rounding around 128 (nk_input_profile.h),
+                   computed here in floating point: 128 +- round(|v| * 127 / 32767), and 0 for
+                   -32768. */
                 uint8_t old_lx = 128, old_ly = 128;
-                if (ax < -7849 || ax > 7849) old_lx = (uint8_t)((ax + 32768) * 255 / 65535);
-                if (ay < -7849 || ay > 7849) old_ly = (uint8_t)((ay + 32768) * 255 / 65535);
+                if (ax < -7849 || ax > 7849) {
+                    const int k = (int)((ax < 0 ? -ax : ax) * 127.0 / 32767.0 + 0.5);
+                    old_lx = (uint8_t)(ax == -32768 ? 0 : ax < 0 ? 128 - k : 128 + k);
+                }
+                if (ay < -7849 || ay > 7849) {
+                    const int k = (int)((ay < 0 ? -ay : ay) * 127.0 / 32767.0 + 0.5);
+                    old_ly = (uint8_t)(ay == -32768 ? 0 : ay < 0 ? 128 - k : 128 + k);
+                }
 
                 bool btns[NK_HOST_BUTTON_COUNT] = {false};
                 int16_t axes[NK_HOST_AXIS_COUNT] = {0};

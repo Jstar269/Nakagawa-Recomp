@@ -1533,6 +1533,18 @@ static void cell_stick_curve(void) {
     CHECK(ace_stick_host_counts(0, 7849) == 30 && ace_stick_host_counts(7849, 0) == 30, "the larger axis");
     CHECK(ace_stick_host_counts(0, 0) == 0 && ace_stick_host_counts(-1, -9) == 0, "none is 0");
     CHECK(ace_stick_host_counts(32767, 0) == 127, "a full dead zone is 127 (which the remap reads as 0)");
+    /* Through the host's symmetric byte map (audit F-4b9e3c3e): round(d * 127 / 32767), the
+       counts from rest the host gives the dead zone's edge on either side. The truncating map
+       gave 0 for 130 and 63 for 16384. */
+    CHECK(ace_stick_host_counts(129, 0) == 0 && ace_stick_host_counts(130, 0) == 1, "130 is 1 count");
+    CHECK(ace_stick_host_counts(16384, 0) == 64, "16384 is 64 counts");
+    {
+        int bad = -1;
+        for (int d = 1; d <= 32767 && bad < 0; d++)
+            if (ace_stick_host_counts(d, 0) != (int)(d * 127.0 / 32767.0 + 0.5)) bad = d;
+        if (bad >= 0) fprintf(stderr, "ace_stick_host_counts(%d) = %d\n", bad, ace_stick_host_counts(bad, 0));
+        CHECK(bad < 0, "every dead zone is round(d * 127 / 32767) counts");
+    }
 }
 
 /* A host dead zone at or above the game's (a large user dead zone, or a title with a small one)
