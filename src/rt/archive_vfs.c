@@ -29,26 +29,6 @@ int sr_archive_variant_from_name(const char *name, int *variant_out) {
     return 1;
 }
 
-/* A Shift-JIS lead byte, as the XB reader (nk_xb.c) recognizes one. */
-static int archive_sjis_lead(unsigned char value) {
-    return (value >= 0x81u && value <= 0x9fu) || (value >= 0xe0u && value <= 0xfcu);
-}
-
-/* The key byte for the second byte of a Shift-JIS pair, or -1 when `value` cannot follow
- * a lead byte. The XB reader keeps a pair byte for byte, so a trail 0x5c is part of the
- * name, never a separator. The guest key (data_normalize_guest_key) folds every byte,
- * a trail too: 0x5c becomes '/' and 'A'-'Z' become lower case. A '/' never follows a
- * lead byte in a member name (it is not a trail byte), so after a lead byte it can only
- * be such a folded 0x5c, and the key takes it back. A trail letter is folded the way
- * the guest key folds it. */
-static int archive_sjis_trail_key(unsigned char value) {
-    if (value == '/') return 0x5c;
-    if ((value >= 0x40u && value <= 0x7eu) || (value >= 0x80u && value <= 0xfcu)) {
-        return sr_vfs_ascii_tolower(value);
-    }
-    return -1;
-}
-
 static int archive_component_valid(const char *out, size_t start, size_t end) {
     if (end == start) return 0;
     if (end - start == 1u && out[start] == '.') return 0;
@@ -57,10 +37,12 @@ static int archive_component_valid(const char *out, size_t start, size_t end) {
 }
 
 /* The archive key of a member path or of a guest key: separators become one '/', ASCII
- * letters fold to lower case, and a Shift-JIS pair stays one unit (see
- * archive_sjis_trail_key), so its trail byte is neither a separator nor checked against
- * the forbidden ASCII characters. A directory key may be empty and may end in a
- * separator, which is dropped. */
+ * letters fold to lower case, and a Shift-JIS pair (sr_vfs_sjis_pair) stays byte for
+ * byte, as the XB reader keeps it and as the guest key (data_normalize_guest_key) keeps
+ * it: its trail byte is not folded, not a separator and not checked against the
+ * forbidden ASCII characters, so 0x83 0x41 and 0x83 0x61 are two keys and a trail 0x5c
+ * is part of the name. A directory key may be empty and may end in a separator, which
+ * is dropped. */
 static int archive_normalize_key(const char *input, char *out, size_t capacity,
                                  int directory) {
     if (!input || !out || capacity == 0u) return 0;
@@ -70,15 +52,12 @@ static int archive_normalize_key(const char *input, char *out, size_t capacity,
     size_t component_start = 0;
     while (*p) {
         unsigned char value = *p;
-        if (archive_sjis_lead(value) && p[1] != '\0') {
-            int trail = archive_sjis_trail_key(p[1]);
-            if (trail >= 0) {
-                if (out_pos + 2u >= capacity) return 0;
-                out[out_pos++] = (char)value;
-                out[out_pos++] = (char)trail;
-                p += 2;
-                continue;
-            }
+        if (sr_vfs_sjis_pair((const char *)p)) {
+            if (out_pos + 2u >= capacity) return 0;
+            out[out_pos++] = (char)p[0];
+            out[out_pos++] = (char)p[1];
+            p += 2;
+            continue;
         }
         if (value == '/' || value == '\\') {
             if (!archive_component_valid(out, component_start, out_pos)) return 0;
