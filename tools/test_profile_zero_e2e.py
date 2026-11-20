@@ -502,6 +502,30 @@ def _read_ppm_metrics(path: Path) -> tuple[int, int]:
     return len(colors), foreground
 
 
+def _finish_package_run(
+    title_id: str, output: str, run_command: list[str],
+    environment: dict[str, str], package_dir: Path,
+) -> None:
+    """Check the #306 digests, then require the dummy audio device the route records through.
+
+    Under SR_DETERMINISTIC_CLOCK=1 the guest-time audio queue answers the same whether the
+    host has an output device or none (src/rt/hle_audio.c), and RESULT.TXT's AUDIO_RESULT is
+    that queue's count. The digest check therefore runs before the audio SKIP: a host without
+    SDL's dummy driver still proves the cross-host contract, and only the host-audio evidence
+    is skipped.
+    """
+    _check_cross_host_digests(
+        title_id,
+        _deterministic_run_digests(run_command, environment, package_dir, title_id),
+    )
+    if "audio: initialized SDL3 audio output (driver: dummy," not in output:
+        if "audio: host audio output unavailable" in output:
+            raise unittest.SkipTest(
+                f"SKIP: SDL3 dummy audio is unavailable for {title_id}"
+            )
+        raise AssertionError(f"SDL3 dummy audio initialization is unproven for {title_id}")
+
+
 def _run_package(manifest_path: Path, guest: Path, package_dir: Path,
                  build_environment: dict[str, str], make: str) -> dict[str, str]:
     manifest = _manifest(manifest_path)
@@ -693,16 +717,7 @@ def _run_package(manifest_path: Path, guest: Path, package_dir: Path,
             f"(colors={colors}, foreground={foreground})"
         )
 
-    if "audio: initialized SDL3 audio output (driver: dummy," not in output:
-        if "audio: host audio output unavailable" in output:
-            raise unittest.SkipTest(
-                f"SKIP: SDL3 dummy audio is unavailable for {manifest['id']}"
-            )
-        raise AssertionError(f"SDL3 dummy audio initialization is unproven for {manifest['id']}")
-    _check_cross_host_digests(
-        manifest["id"],
-        _deterministic_run_digests(run_command, environment, package_dir, manifest["id"]),
-    )
+    _finish_package_run(manifest["id"], output, run_command, environment, package_dir)
     return fields
 
 
@@ -852,6 +867,37 @@ class ProfileZeroManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, r"result_txt: pinned"):
             _check_cross_host_digests(title_id, dict(pinned, result_txt="0" * 64))
         _check_cross_host_digests(title_id, pinned)
+
+    def test_a_host_without_dummy_audio_still_runs_the_digest_check(self) -> None:
+        """#306: the cross-host digest check must not sit behind the host-audio SKIP.
+
+        The deterministic digest is a pure function of the guest and the runtime source;
+        under SR_DETERMINISTIC_CLOCK=1 the guest-time audio queue answers the same with no
+        host output device (src/rt/hle_audio.c), so a host without SDL's dummy driver can
+        still prove the contract. Before: the SKIP fired first and the check never ran.
+        """
+        module = sys.modules[__name__]
+        calls: list[str] = []
+
+        def digests(run_command: list[str], environment: dict[str, str],
+                    package_dir: Path, title_id: str) -> dict[str, str]:
+            calls.append("digests")
+            return {"result_txt": "0" * 64}
+
+        def check(title_id: str, values: dict[str, str]) -> None:
+            calls.append("check")
+
+        with (
+            mock.patch.object(module, "_deterministic_run_digests", digests),
+            mock.patch.object(module, "_check_cross_host_digests", check),
+        ):
+            with self.assertRaises(unittest.SkipTest):
+                _finish_package_run(
+                    "synthetic-allegrex-v1",
+                    "audio: host audio output unavailable: no audio device\n",
+                    ["nakagawa"], {}, Path("."),
+                )
+        self.assertEqual(calls, ["digests", "check"])
 
     def test_required_route_fails_a_skip_raised_inside_a_manifest_subtest(self) -> None:
         """NK_PROFILE_ZERO_REQUIRED=1 turns a per-manifest SKIP into a failure.
