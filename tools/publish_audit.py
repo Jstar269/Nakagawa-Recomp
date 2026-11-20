@@ -1531,20 +1531,22 @@ def private_key_literal_lines(rel: str, text: str) -> list[int]:
     return private_key_assignment_lines(text, filename=rel)
 
 
-# Byte-exact third-party imports are copied verbatim from an upstream pin and
-# must stay byte-identical to preserve the recorded blob SHAs (see each
-# directory's PROVENANCE.md); they may carry upstream license headers that
-# predate SPDX identifiers. The audit classifies them via their ledger record
-# instead of requiring a header edit that would break the byte-identity claim.
-# The project-authored wrappers and selftests remain subject to SPDX checks.
-SPDX_BYTE_EXACT_IMPORT_TREES = (
+# Vendored third-party imports are copied from an upstream pin and kept either
+# byte-identical or with minimal documented LOCAL DELTA fixes (see each
+# directory's PROVENANCE.md); they carry upstream license/dedication notices
+# that omit an SPDX identifier in the first eight lines. The audit classifies
+# them via their ledger record and PROVENANCE.md instead of requiring a header
+# edit that breaks byte-identity or injects a synthetic SPDX line into upstream
+# headers. Project-authored wrappers, stand-ins and selftests remain subject to
+# SPDX checks.
+SPDX_VENDORED_IMPORT_TREES = (
     "src/rt/atrac3p/libavcodec/",
     "src/rt/atrac3p/libavutil/",
     "src/rt/h264_ffmpeg_sub/libavcodec/",
     "src/rt/h264_ffmpeg_sub/libavutil/",
     "src/rt/h264_ffmpeg_sub/compat/",
-    # libchdr and the codecs it carries, kept as upstream wrote them (CRLF normalised to LF only;
-    # third_party/libchdr/PROVENANCE.md records every upstream blob).
+    # libchdr and the codecs it carries, kept as upstream wrote them (CRLF normalised to LF and
+    # documented LOCAL DELTA fixes; third_party/libchdr/PROVENANCE.md records every upstream blob).
     "third_party/libchdr/",
     # AMD FidelityFX SDK headers (MIT): the notice is in each header comment, without an SPDX
     # line upstream. Imported byte-identical except three LOCAL DELTA headers (the FSR3 upscaler,
@@ -1554,11 +1556,15 @@ SPDX_BYTE_EXACT_IMPORT_TREES = (
     # keep the upstream notice and add its modification note by hand.
     "third_party/fidelityfx_sdk/",
     # rcheevos 12.5.0 (MIT; its MD5 is zlib): the notices are in LICENSE and each header comment,
-    # without SPDX lines upstream; imported byte-identical (third_party/rcheevos/PROVENANCE.md).
+    # without SPDX lines upstream; imported byte-identical with documented LOCAL DELTA fixes
+    # (third_party/rcheevos/PROVENANCE.md).
     "third_party/rcheevos/",
 )
 
-SPDX_BYTE_EXACT_IMPORT_PATHS = frozenset({
+SPDX_VENDORED_IMPORT_PATHS = frozenset({
+    # Single-file vendored upstream imports without an SPDX line in the first eight lines;
+    # clay.h and minimp3.h carry documented LOCAL DELTA fixes with dated modification notes
+    # while keeping their upstream licence/dedication notices (see each directory's PROVENANCE.md).
     "third_party/clay/clay.h",
     "src/rt/minimp3/minimp3.h",
     "third_party/dr_libs/dr_wav.h",
@@ -1575,10 +1581,10 @@ SPDX_BYTE_EXACT_IMPORT_PATHS = frozenset({
     "third_party/monocypher/monocypher.h",
 })
 
-# A small set of byte-exact FFmpeg headers already carry an SPDX identifier.
-# Keep those existing lineage declarations without requiring new SPDX headers
-# across the imported trees.
-SPDX_BYTE_EXACT_IMPORT_HEADER_PATHS = frozenset({
+# Authored stand-in headers and lists inside the vendored FFmpeg trees already
+# carry an SPDX identifier. Keep enforcing those lineage declarations without
+# requiring new SPDX headers on the imported upstream files beside them.
+SPDX_VENDORED_IMPORT_HEADER_PATHS = frozenset({
     "src/rt/atrac3p/libavcodec/avcodec.h",
     "src/rt/atrac3p/libavcodec/config.h",
     "src/rt/atrac3p/libavcodec/internal.h",
@@ -1602,7 +1608,7 @@ def _spdx_required(path: str) -> bool:
     pure = PurePosixPath(path)
     if pure.suffix.lower() not in SOURCE_EXTENSIONS:
         return False
-    if path.startswith(SPDX_BYTE_EXACT_IMPORT_TREES) or path in SPDX_BYTE_EXACT_IMPORT_PATHS:
+    if path.startswith(SPDX_VENDORED_IMPORT_TREES) or path in SPDX_VENDORED_IMPORT_PATHS:
         return False
     if path.startswith(("src/", "tools/", "tests/native/")):
         return True
@@ -1685,8 +1691,9 @@ def _spdx_provenance_findings(path: str, record: dict, raw_bytes: bytes) -> list
 
     The public profile supplies the audited path set and the public provenance
     ledger supplies each path's class and, for inherited sources, its license.
-    Byte-exact FFmpeg paths that already have an SPDX line are checked too,
-    while neighboring imported files remain exempt from acquiring one.
+    Authored stand-in files under vendored FFmpeg trees that carry an SPDX line
+    are checked too, while imported upstream files (byte-identical or minimal
+    documented LOCAL DELTA) remain exempt from acquiring one.
     """
     classification = record.get("classification")
     pure = PurePosixPath(path)
@@ -1708,11 +1715,11 @@ def _spdx_provenance_findings(path: str, record: dict, raw_bytes: bytes) -> list
                 f"project-authored source must declare {PROJECT_SPDX_IDENTIFIER}; found {actual}",
             )]
     elif classification == "upstream_derived":
-        byte_exact_import = (
-            path.startswith(SPDX_BYTE_EXACT_IMPORT_TREES)
-            or path in SPDX_BYTE_EXACT_IMPORT_PATHS
+        vendored_import = (
+            path.startswith(SPDX_VENDORED_IMPORT_TREES)
+            or path in SPDX_VENDORED_IMPORT_PATHS
         )
-        if not identifiers and byte_exact_import and path not in SPDX_BYTE_EXACT_IMPORT_HEADER_PATHS:
+        if not identifiers and vendored_import and path not in SPDX_VENDORED_IMPORT_HEADER_PATHS:
             return []
         evidence = record.get("evidence")
         expected = evidence.get("license") if isinstance(evidence, dict) else None
@@ -2013,6 +2020,8 @@ def _debt_budget_findings(
                 )
 
     # 2. First-party debt markers
+    # Vendored upstream code (byte-identical or LOCAL DELTA) and local build/staging
+    # directories are excluded because upstream comments are not first-party debt.
     marker_pat = re.compile(r"\b(?:" + r"TO" + r"DO|FIX" + r"ME|HA" + r"CK)\b")
     excluded_prefixes = (
         "third_party/",
