@@ -102,8 +102,9 @@ We aim to respond promptly and will remove material where appropriate.
   the native player through `src/core/nk_iso.c` and `src/core/nk_xb.c`, and into
   every title runtime through `src/core/nk_xb.c` (`mk/runtime_sources.mk`).
 - **dr_libs `dr_wav`** — the Unlicense (public domain), elected from upstream's
-  Unlicense or `MIT-0` choice; both texts are kept. The byte-identical header,
-  upstream `LICENSE`, pinned source manifest, and SHA-256 values are under
+  Unlicense or `MIT-0` choice; both texts are kept. The header (pinned, with four
+  later upstream fixes as LOCAL DELTA), upstream `LICENSE`, pinned source manifest,
+  and SHA-256 values are under
   `third_party/dr_libs/`. Only selftests compile it; it is not in the player or
   the runtime.
 - **libchdr** — `BSD-3-Clause`, Copyright Romain Tisserand; the MAME-derived CHD, CD-ROM,

@@ -41,12 +41,41 @@ not compiled into the native player, the runtime, or any shipped artifact.
 
 | File | Kind | Upstream blob SHA | SHA-256 |
 | --- | --- | --- | --- |
-| `dr_wav.h` | imported byte-identical | `f7920db42ff78e66cb74489435f8772ccc4d4977` | `fad60f1e360d6de726efc1b9a7985610c89c551719e3f110e8b992f0e1f308cd` |
+| `dr_wav.h` | imported + LOCAL DELTA | `f7920db42ff78e66cb74489435f8772ccc4d4977` | `b6ee38c4ec9392a9bdc8be273f22c607786ed7fba4c5fc4b8e27f236fb269375` (this tree's bytes) |
 | `LICENSE.txt` | imported byte-identical (upstream `LICENSE`) | `16dfbdfda2b761d1ec2ed57266dbdc777349ad25` | `dd1c647e6f767f8ff4b2dfae0fed314726600a01e0cf1ef556afddd5fa96ff15` |
 | `PROVENANCE.md` | project-authored manifest | n/a | n/a |
 
 ## Local deltas
 
-None. Three whitespace-only lines in upstream `dr_wav.h` (2673, 2690 and 6565) end in spaces; the
-repository's `.gitattributes` exempts that one file from the trailing-space
-check so the bytes stay identical to upstream.
+`dr_wav.h` was modified by Nakagawa Recomp contributors on 2026-11-20 (upstream freshness, the maintainer's
+standing decision of 2026-11-19 to take upstream fixes). Its `wav-0.14.6` bytes have SHA-256
+`fad60f1e360d6de726efc1b9a7985610c89c551719e3f110e8b992f0e1f308cd`; the table gives this tree's. `wav-0.14.6` is still
+the newest dr_wav tag on 2026-11-20, and `LICENSE` is unchanged at `master`. The changes are the four upstream
+commits to `dr_wav.h` after the tag, every change on `master` up to `e381981afa52800b9a3864df548353ff67252fbc`
+except the version bump: the file's first comment still names `v0.14.6 - 2026-10-31` and
+`DRWAV_VERSION_REVISION` stays 6, since these are fixes taken onto the release, not upstream's unreleased 0.14.7.
+Apart from those two lines and four one-line `LOCAL DELTA (Nakagawa Recomp, 2026-11-20)` comments, one at each
+commit's main change, the file is upstream's `master` file at `e381981a`. A pin that includes the commits drops
+this delta.
+
+- `ebfea72a291322bf26ce4eb393c98a0262b9b561` (2026-11-09, "Fix some metadata parsing errors", upstream issue
+  #353): `drwav__metadata_process_chunk` reads a `LIST` sub-chunk's ID and size only while the chunk has room for
+  them, and stops when the sub-chunk and its padding do not fit in the chunk.
+- `3a3e120a7d9d802b8e7d91f3a9ab83a628cb70d4` (2026-11-18, "Fix an endian error with s24 conversion", issue #362):
+  `drwav_s24_to_s16/f32/s32` read packed 24-bit samples in the host's byte order through one helper; on a
+  big-endian host they read them as little-endian.
+- `0901cdc54e719e2175827cb60b78fe725e581fe2` (2026-11-18, "Fix an endian error with Wave64 containers"): a Wave64
+  `fact` chunk's sample count is decoded from little-endian bytes instead of copied into a host integer.
+- `e381981afa52800b9a3864df548353ff67252fbc` (2026-11-20, "Minor rework to initialization for badly formed
+  files"): `drwav_init__internal` learns the file size before reading chunks (and fails if it cannot seek back to
+  the start), bounds the data chunk by it, treats a RIFF or RIFX data size of `0xFFFFFFFF` as "to the end of the
+  file", and `drwav__on_tell_stdio` reports a failed `ftell`.
+
+Only selftests compile the file, and they use the writer and read their own RIFF PCM files back
+(`tests/native/pcm_wav_dump.c`, `tests/native/test_pcm_wav_dump.c`); the WAV files the ATRAC3+ bridge selftest
+writes with `NK_PCM_WAV_DIR` set are byte-identical before and after this change. The endian fixes matter only on a
+big-endian host, and the metadata parser is not used here.
+
+Five whitespace-only lines in `dr_wav.h` (2673, 2690, 3843, 3861 and 6566; the third and fourth come from
+`e381981a`) end in spaces; the repository's `.gitattributes` exempts that one file from the trailing-space check so
+the bytes stay identical to upstream.
