@@ -284,6 +284,7 @@ const char *nk_overlay_scaling_label(int scaling);
 #define NK_OVERLAY_ID_FULLSCREEN NK_OVERLAY_ID(0x000212u)
 #define NK_OVERLAY_ID_TEXDUMP NK_OVERLAY_ID(0x000213u)   /* the texture dump */
 #define NK_OVERLAY_ID_PACING NK_OVERLAY_ID(0x000218u)   /* + 1 + NK_OVERLAY_PACING_* per option */
+#define NK_OVERLAY_ID_PACING_SPAN 0x8u
 #define NK_OVERLAY_ID_SETTINGS_BACK NK_OVERLAY_ID(0x000220u)
 #define NK_OVERLAY_ID_CONTROLS_BACK NK_OVERLAY_ID(0x000301u)
 #define NK_OVERLAY_ID_QUIT_STAY NK_OVERLAY_ID(0x000401u)
@@ -320,9 +321,22 @@ float nk_overlay_card_room(const NkOverlayModel *model);
 /* Closes the card and the page, then draws the prompt bar. */
 void nk_overlay_page_end(NkUi *ui, const char *hint, const NkUiPromptItem *prompts,
                          size_t count);
-/* The status line over a card's title: marker, a space, then the text, in caps. */
+/* The status line over a card's title: marker, a space, then the text, in caps; cut to 159
+   bytes on a whole UTF-8 sequence. A muted eyebrow without a marker is nk_ui_eyebrow. */
 void nk_overlay_eyebrow(NkUi *ui, NkUiId id, const char *marker, const char *text,
                         uint32_t rgba);
+/* A focusable row whose left and right belong to it (a value stepper, a toggle, a
+   segmented control). nk_overlay_row_open opens it with `layout`, filled while pressed,
+   focused or hovered and ringed while focused; true when opened, and the caller closes it
+   with nk_ui_end_container. nk_overlay_row_input then takes this frame's change: a left or
+   right while `focused` (the row's focus before it was opened), else its activation. */
+typedef enum {
+    NK_OVERLAY_ROW_NONE = 0,
+    NK_OVERLAY_ROW_STEP,        /* a direction, in *dir */
+    NK_OVERLAY_ROW_ACTIVATE
+} NkOverlayRowInput;
+bool nk_overlay_row_open(NkUi *ui, NkUiId id, const NkUiLayout *layout);
+NkOverlayRowInput nk_overlay_row_input(NkUi *ui, NkUiId id, bool focused, NkUiNavDir *dir);
 
 NkOverlayAction nk_overlay_page_menu(NkUi *ui, NkOverlayState *state, const NkOverlayModel *model);
 NkOverlayAction nk_overlay_page_controls(NkUi *ui, NkOverlayState *state,

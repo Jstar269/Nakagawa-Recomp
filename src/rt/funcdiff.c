@@ -18,6 +18,11 @@
  * (untraced) would diverge; pure-compute functions reproduce bit-for-bit.
  *
  * Usage: funcdiff <image.bin> <base-hex> <ref-trace> <target-pc-hex> <entry-step> <out-trace>
+ *
+ * Exit status: 0 when the function returned, 3 when it stopped at an import (the trace then
+ * covers only the steps before the import, so a comparison of it is partial), 2 for a usage,
+ * input or setup error. A reference line longer than the line buffer, or a step line without
+ * its pc= and op= fields, is refused rather than replayed.
  */
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -85,7 +90,12 @@ static void apply_tok(CpuState *s, char *tok) {
     else if (parse_indexed_register(name, 'v', 127, &index)) s->vi[index] = val;
     else if (!strcmp(name, "hi")) s->hi = val;
     else if (!strcmp(name, "lo")) s->lo = val;
-    else if (!strcmp(name, "fcr31")) s->fcr31 = val;
+    else if (!strcmp(name, "fcr31")) {
+        s->fcr31 = val;
+        /* bc1t/bc1f test the cached FCC0, so it follows the replayed FCR31 bit 23 as a guest
+         * ctc1 makes it do; the reference trace carries no separate fpcond token. */
+        s->fpcond = (val >> 23) & 1u;
+    }
 }
 
 int main(int argc, char **argv) {
@@ -111,10 +121,20 @@ int main(int argc, char **argv) {
 
     FILE *f = fopen(ref_trace, "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", ref_trace); return 2; }
-    char *line = (char *)malloc(1 << 16);
+    enum { LINE_CAP = 1 << 16 };
+    char *line = (char *)malloc(LINE_CAP);
+    if (!line) { fprintf(stderr, "out of memory for the trace line buffer\n"); fclose(f); return 2; }
     int reached = 0;
+    unsigned long long line_no = 0;
 
-    while (fgets(line, 1 << 16, f)) {
+    while (fgets(line, LINE_CAP, f)) {
+        line_no++;
+        const size_t line_len = strlen(line);
+        if (line_len > 0 && line[line_len - 1] != '\n' && !feof(f)) {
+            /* fgets split the line: replaying its tail as a new step would drop writes. */
+            fprintf(stderr, "%s:%llu: line does not fit the %d-byte line buffer\n", ref_trace, line_no, (int)LINE_CAP);
+            free(line); fclose(f); return 2;
+        }
         if (line[0] == '#') {
             if (!strncmp(line, "# init", 6)) {
                 char *tok = strtok(line + 6, " \t\n");
@@ -125,23 +145,31 @@ int main(int argc, char **argv) {
         char *step_s = strtok(line, " \t\n");
         char *pc_s = strtok(NULL, " \t\n");
         char *op_s = strtok(NULL, " \t\n");
-        if (!step_s || !pc_s || !op_s) continue;
+        if (!step_s) continue;   /* a blank line */
+        char *pc_end = NULL;
         unsigned long long st = strtoull(step_s, NULL, 10);
-        uint32_t pc = (uint32_t)strtoul(pc_s + 3, NULL, 16);
+        uint32_t pc = pc_s && !strncmp(pc_s, "pc=", 3) ? (uint32_t)strtoul(pc_s + 3, &pc_end, 16) : 0u;
+        if (!pc_end || pc_end == pc_s + 3 || *pc_end != '\0' || !op_s || strncmp(op_s, "op=", 3) != 0) {
+            fprintf(stderr, "%s:%llu: step line has no pc= and op= fields\n", ref_trace, line_no);
+            free(line); fclose(f); return 2;
+        }
         if (st == entry_step && pc == target) { reached = 1; s.pc = pc; break; }
         /* Not yet at entry: apply this step's writes so guest state tracks the reference. */
         char *tok;
         while ((tok = strtok(NULL, " \t\n")) != NULL) apply_tok(&s, tok);
     }
+    free(line);
     fclose(f);
     if (!reached) { fprintf(stderr, "did not reach target 0x%08x at step %llu\n", target, entry_step); return 2; }
 
     RecompFn fn = sr_lookup(target);
     if (!fn) { fprintf(stderr, "no recompiled function at 0x%08x\n", target); return 2; }
     if (sr_trace_open(out, "funcdiff", target) != 0) { fprintf(stderr, "cannot open %s\n", out); return 2; }
+    volatile int stopped_at_import = 0;
     if (setjmp(g_hle_jmp) == 0) {
         sr_call_body(fn, &s);
     } else {
+        stopped_at_import = 1;
         /* An unimplemented import longjmps out of every nested native body, so
          * discard the parallel AOT return-boundary stack with the C frames. */
         sr_aot_return_boundaries_reset();
@@ -160,5 +188,10 @@ int main(int argc, char **argv) {
     }
     sr_trace_close();
     fprintf(stderr, "ran 0x%08x from step %llu (hit_hle=%d)\n", target, entry_step, sr_hit_hle);
+    if (stopped_at_import) {
+        fprintf(stderr, "funcdiff: PARTIAL: the function stopped at an import, so %s covers only "
+                        "the steps before it\n", out);
+        return 3;
+    }
     return 0;
 }

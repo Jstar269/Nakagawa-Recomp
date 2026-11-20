@@ -212,7 +212,12 @@ static inline int32_t sr_u32_as_s32(uint32_t bits) {
  * (tools/codegen.py, cfc1). */
 #define SR_FCR0_FIR 0x00003351u
 
-#if defined(__SSE2__) || defined(_M_X64) || defined(__i386__)
+/* The MXCSR backend needs the float arithmetic itself to run on SSE: GCC and Clang define
+ * __SSE_MATH__ only then. An x86 build whose float math runs on the x87 unit (the 32-bit GCC
+ * default, -mfpmath=387, or no SSE2) would set MXCSR while add/sub/mul/div run on the x87 unit under its own control word and
+ * extended precision, ignoring the guest RM and FS, so it fails closed below. _M_X64 admits
+ * only a compiler that is not GCC-compatible (MinGW-w64's headers define it for GCC too). */
+#if (defined(__SSE2__) && defined(__SSE_MATH__)) || (defined(_M_X64) && !defined(__GNUC__))
 #include <xmmintrin.h>
 
 static inline uint32_t sr_fpu_env_save(void) {
@@ -236,10 +241,11 @@ static inline uint32_t sr_fpu_env_save(void) {
  * (reproduced: EXCEPTION_FLT_UNDERFLOW crash before this hardening). Sticky
  * flag bits raised inside the window never reach caller state because the
  * full-word restore below rewrites them; masks, like every other field, are
- * restored exactly as found. */
-static inline void sr_fpu_env_apply_guest(uint32_t fcr31) {
+ * restored exactly as found. The guest word is built from `saved`, the caller's MXCSR as
+ * sr_fpu_env_save just read it, so the window reads the control register once. */
+static inline void sr_fpu_env_apply_guest(uint32_t saved, uint32_t fcr31) {
     static const uint32_t rm_to_mxcsr[4] = {0u, 3u, 2u, 1u};
-    uint32_t csr = _mm_getcsr();
+    uint32_t csr = saved;
     csr &= ~(0x3u << 13);
     csr &= ~(1u << 6);                              /* DAZ off: inputs stay gradual */
     csr |= 0x1f80u;                                 /* mask IM..PM: no host FP faults */
@@ -276,9 +282,9 @@ static inline uint32_t sr_fpu_env_save(void) {
     return (uint32_t)fpcr;
 }
 
-static inline void sr_fpu_env_apply_guest(uint32_t fcr31) {
+static inline void sr_fpu_env_apply_guest(uint32_t saved, uint32_t fcr31) {
     static const uint32_t rm_to_rmode[4] = {0u, 3u, 1u, 2u};
-    uint64_t fpcr = sr_fpu_env_save();
+    uint64_t fpcr = saved;
     fpcr &= ~(uint64_t)((3u << 22) | (1u << 24) | (1u << 25) | (1u << 19) |
                         (1u << 15) | (0x1fu << 8) | 0x7u);
     fpcr |= (uint64_t)rm_to_rmode[fcr31 & SR_FCR31_RM_MASK] << 22;
@@ -298,8 +304,9 @@ static inline void sr_fpu_env_restore(uint32_t saved) {
  * compiler-info make-override probe and has NOT yet been exercised against
  * these helpers; MSVC is not used for them. Those compilers fail closed here
  * rather than risk a silently miscompiled window. AArch64 has the FPCR backend
- * above; any other host architecture fails closed here. */
-#error "sr_fpu scalar helpers need SSE2 or AArch64 FPCR, with GCC-compatible barriers, for scoped host FP-environment control"
+ * above; any other host architecture, and an x86 build whose float arithmetic runs on the x87
+ * unit (no __SSE_MATH__), fails closed here. */
+#error "sr_fpu scalar helpers need SSE2 float arithmetic (__SSE_MATH__) or AArch64 FPCR, with GCC-compatible barriers, for scoped host FP-environment control"
 #endif
 
 /* Ordering + opacity fence for the bounded operation inside each helper.
@@ -376,6 +383,30 @@ static inline float sr_fpu_soft_ftz_div(float a, float b, float r) {
     return (sr_float_bits(vs) & 0x7fffffffu) < 0x20800000u ? sr_fpu_soft_signed_zero(r) : r;
 }
 
+/* Invalid-operation NaN of add.s, sub.s and div.s (Inf - Inf, 0 / 0, Inf / Inf): when neither
+ * operand is a NaN and the result is one, the result word is 0x7FC00000 on every host. The host
+ * default NaN differs (x86 SSE writes 0xFFC00000, AArch64 0x7FC00000), so without this the same
+ * guest instruction left different register bits on the x86-64 and arm64 builds. The word is the
+ * one mul.s returns for Inf * 0. For these three forms it is project semantics, not PSP-measured:
+ * the PSP's word for them is unmeasured. A NaN operand propagates as the host returns it. The
+ * classification reads raw bits, so the host FP environment cannot affect it. */
+#define SR_FPU_INVALID_OP_NAN_BITS 0x7fc00000u
+
+static inline int sr_fpu_bits_are_nan(uint32_t bits) {
+    return (bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0u;
+}
+
+static inline float sr_fpu_invalid_op_nan(uint32_t a_bits, uint32_t b_bits, float r) {
+    if (!sr_fpu_bits_are_nan(sr_float_bits(r)) ||
+        sr_fpu_bits_are_nan(a_bits) || sr_fpu_bits_are_nan(b_bits)) {
+        return r;
+    }
+    const uint32_t bits = SR_FPU_INVALID_OP_NAN_BITS;
+    float out;
+    memcpy(&out, &bits, sizeof out);
+    return out;
+}
+
 /* Each wrapper bounds exactly one operation inside the guest environment.
  *
  * Why three separate mechanisms: the SSE transitions are volatile asm, the
@@ -401,8 +432,10 @@ static inline float sr_fpu_soft_ftz_div(float a, float b, float r) {
 static inline float sr_fpu_add_s(float a, float b, uint32_t fcr31) {
     volatile float va = a;
     volatile float vb = b;
+    const uint32_t a_bits = sr_float_bits(va);
+    const uint32_t b_bits = sr_float_bits(vb);
     const uint32_t saved = sr_fpu_env_save();
-    sr_fpu_env_apply_guest(fcr31);
+    sr_fpu_env_apply_guest(saved, fcr31);
     sr_fpu_scalar_barrier();
     volatile float vr = va + vb;
 #if defined(SR_FPU_SOFT_FS)
@@ -410,14 +443,16 @@ static inline float sr_fpu_add_s(float a, float b, uint32_t fcr31) {
 #endif
     sr_fpu_scalar_barrier();
     sr_fpu_env_restore(saved);
-    return vr;
+    return sr_fpu_invalid_op_nan(a_bits, b_bits, vr);
 }
 
 static inline float sr_fpu_sub_s(float a, float b, uint32_t fcr31) {
     volatile float va = a;
     volatile float vb = b;
+    const uint32_t a_bits = sr_float_bits(va);
+    const uint32_t b_bits = sr_float_bits(vb);
     const uint32_t saved = sr_fpu_env_save();
-    sr_fpu_env_apply_guest(fcr31);
+    sr_fpu_env_apply_guest(saved, fcr31);
     sr_fpu_scalar_barrier();
     volatile float vr = va - vb;
 #if defined(SR_FPU_SOFT_FS)
@@ -425,7 +460,7 @@ static inline float sr_fpu_sub_s(float a, float b, uint32_t fcr31) {
 #endif
     sr_fpu_scalar_barrier();
     sr_fpu_env_restore(saved);
-    return vr;
+    return sr_fpu_invalid_op_nan(a_bits, b_bits, vr);
 }
 
 static inline float sr_fpu_mul_s(float a, float b, uint32_t fcr31) {
@@ -441,7 +476,7 @@ static inline float sr_fpu_mul_s(float a, float b, uint32_t fcr31) {
         return result;
     }
     const uint32_t saved = sr_fpu_env_save();
-    sr_fpu_env_apply_guest(fcr31);
+    sr_fpu_env_apply_guest(saved, fcr31);
     sr_fpu_scalar_barrier();
     volatile float vr = va * vb;
 #if defined(SR_FPU_SOFT_FS)
@@ -455,8 +490,10 @@ static inline float sr_fpu_mul_s(float a, float b, uint32_t fcr31) {
 static inline float sr_fpu_div_s(float a, float b, uint32_t fcr31) {
     volatile float va = a;
     volatile float vb = b;
+    const uint32_t a_bits = sr_float_bits(va);
+    const uint32_t b_bits = sr_float_bits(vb);
     const uint32_t saved = sr_fpu_env_save();
-    sr_fpu_env_apply_guest(fcr31);
+    sr_fpu_env_apply_guest(saved, fcr31);
     sr_fpu_scalar_barrier();
     volatile float vr = va / vb;
 #if defined(SR_FPU_SOFT_FS)
@@ -464,7 +501,7 @@ static inline float sr_fpu_div_s(float a, float b, uint32_t fcr31) {
 #endif
     sr_fpu_scalar_barrier();
     sr_fpu_env_restore(saved);
-    return vr;
+    return sr_fpu_invalid_op_nan(a_bits, b_bits, vr);
 }
 
 /* CVT.S.W rounds per guest RM near the binary32 precision boundary. Unlike the
@@ -477,7 +514,7 @@ static inline float sr_fpu_div_s(float a, float b, uint32_t fcr31) {
 static inline float sr_fpu_cvt_s_w(int32_t value, uint32_t fcr31) {
     volatile int32_t vv = value;
     const uint32_t saved = sr_fpu_env_save();
-    sr_fpu_env_apply_guest(fcr31 & SR_FCR31_RM_MASK);
+    sr_fpu_env_apply_guest(saved, fcr31 & SR_FCR31_RM_MASK);
     sr_fpu_scalar_barrier();
     volatile float vr = (float)vv;
     sr_fpu_scalar_barrier();

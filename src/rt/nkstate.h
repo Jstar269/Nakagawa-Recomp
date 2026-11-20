@@ -60,8 +60,13 @@
 #define NKSTATE_FLAG_DETERMINISTIC_CLOCK 0x1u
 #define NKSTATE_FLAGS_KNOWN NKSTATE_FLAG_DETERMINISTIC_CLOCK
 
-/* Refusal reasons. The loader checks them in this order; nkstate_status_name gives the
- * stable name tools/nkstate.py also uses. */
+/* Refusal reasons; nkstate_status_name gives the stable name tools/nkstate.py also uses.
+ * The enum order is not the check order. nkstate_parse checks, first refusal wins: magic,
+ * header truncation, format version, this build's own runtime identity (no-runtime-identity),
+ * kind, ABI, CpuState size, executable, runtime, disc ID, flags, clock, segment count, table
+ * truncation, then per table entry its tag, a duplicate, an unknown tag and its version, then
+ * a missing required segment, payload truncation, trailing bytes, the segment hashes and the
+ * file hash. nkstate_restore then adds missing-exporter, segment-payload and restore-verify. */
 typedef enum {
     NKSTATE_OK = 0,
     NKSTATE_BAD_MAGIC,               /* "bad-magic" */

@@ -116,6 +116,8 @@ class TestGateStubLink(unittest.TestCase):
                 str(RT / "ace.c"),
                 # driver.c reports how the run ended to the real run recorder.
                 str(RT / "videorec.c"),
+                # driver.c reclaims nested guest-call frames after an HLE-boundary stop.
+                str(RT / "nested_frames.c"),
                 str(RT / "title_config.c"),
                 str(GATE_STUB),
                 "-lm",

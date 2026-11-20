@@ -572,6 +572,12 @@ static void ic_fmt_outcome(uint64_t v, char *out, size_t n) {
  * is production dispatch too, not a hand-built table entry. Returns 0 when the
  * arrangement could not be built (recorded as SETUP_FAILED, never as a pass).
  * ------------------------------------------------------------------------- */
+/* A kernel create returns a positive uid, or an error with bit 31 set (0x800201xx and the
+ * like): any such return is a setup failure, never a uid to hand the probe. */
+static int ic_create_failed(uint32_t uid) {
+    return uid == 0u || (uid & 0x80000000u) != 0u;
+}
+
 static int ic_arrange(const IcProbe *p, CpuState *cpu) {
     CpuState setup;
     memset(&setup, 0, sizeof setup);
@@ -587,7 +593,7 @@ static int ic_arrange(const IcProbe *p, CpuState *cpu) {
     case ICG_SEMA: {
         setup.r[4] = IC_NAMEBUF; setup.r[5] = 0; setup.r[6] = 0; setup.r[7] = 1;
         s_ic_sema_uid = sr_syscall(&setup, NID_IC_CREATE_SEMA);   /* init 0, max 1 */
-        if (s_ic_sema_uid == 0x80020000u) return 0;
+        if (ic_create_failed(s_ic_sema_uid)) return 0;
         cpu->r[4] = (p->variant == 0) ? 0u : s_ic_sema_uid;
         cpu->r[5] = (p->variant == 1) ? 9u : 1u;   /* invalid count = 9 vs max 1 */
         cpu->r[6] = 0u;                            /* NULL timeout = wait forever */
@@ -597,7 +603,7 @@ static int ic_arrange(const IcProbe *p, CpuState *cpu) {
     case ICG_EVF: {
         setup.r[4] = IC_NAMEBUF; setup.r[5] = 0; setup.r[6] = 0; setup.r[7] = 0;
         s_ic_evf_uid = sr_syscall(&setup, NID_IC_CREATE_EVF);     /* initial pattern 0 */
-        if (s_ic_evf_uid == 0x80020000u) return 0;
+        if (ic_create_failed(s_ic_evf_uid)) return 0;
         if (p->variant == 3) {                                    /* "Already set" */
             memset(&setup, 0, sizeof setup);
             setup.r[4] = s_ic_evf_uid; setup.r[5] = 1u;
@@ -615,7 +621,7 @@ static int ic_arrange(const IcProbe *p, CpuState *cpu) {
         setup.r[4] = IC_NAMEBUF; setup.r[5] = 0; setup.r[6] = 0; setup.r[7] = 0x100u;
         setup.r[8] = 0x10u;                              /* numBlocks via stack_arg(0) */
         s_ic_fpl_uid = sr_syscall(&setup, NID_IC_CREATE_FPL);
-        if (s_ic_fpl_uid == 0) return 0;
+        if (ic_create_failed(s_ic_fpl_uid)) return 0;
         cpu->r[4] = (p->variant == 0) ? 0u : s_ic_fpl_uid;
         cpu->r[5] = IC_SCRATCH;                          /* data pointer out */
         cpu->r[6] = 0u;                                  /* NULL timeout */
@@ -625,7 +631,7 @@ static int ic_arrange(const IcProbe *p, CpuState *cpu) {
     case ICG_MUTEX: {
         setup.r[4] = IC_NAMEBUF; setup.r[5] = 0; setup.r[6] = 0; setup.r[7] = 0;
         s_ic_mutex_uid = sr_syscall(&setup, NID_IC_CREATE_MUTEX);
-        if (s_ic_mutex_uid == 0x80020000u) return 0;
+        if (ic_create_failed(s_ic_mutex_uid)) return 0;
         cpu->r[4] = (p->variant == 0) ? 0u : s_ic_mutex_uid;
         cpu->r[5] = (p->variant == 1) ? 9u : 1u;
         cpu->r[6] = 0u;
@@ -950,6 +956,11 @@ static void test_intr_context_conformance(void) {
 
     sr_hle_init();   /* the registry must exist before reachability can be asked */
     const int intr_ctx_ok = ic_interrupt_context_reachable();
+    /* Without the substrate every interrupt-context cell is NOT_RUN as registry scope, which
+     * the declaration check exempts, so its loss must fail here rather than pass quietly. */
+    expect(intr_ctx_ok,
+           "the interrupt-context substrate (sub-interrupt registration and CPU suspend/resume "
+           "NIDs) is registered, so the interrupt-context cells are measured");
     int out_of_scope = 0;
     int disp_off_executed = 0;
     int disp_off_skipped = 0;
@@ -961,6 +972,17 @@ static void test_intr_context_conformance(void) {
         /* Registry scope. A NID that sr_hle_init() did not register cannot be
          * called at all here, so the cell is reported, never invoked. */
         if (!sr_hle_test_is_registered(p->nid) || !ic_group_reachable(p->group)) {
+            /* Its cells are exempt from the declaration check below, so the scope itself
+             * is checked here: every probe in the matrix is in scope in this build, and a
+             * lost registration (or a changed NID) would otherwise drop its cells from
+             * measurement with only a count printed. The check comes before the table's
+             * skip reasons, so a skip reason does not exempt an unregistered probe. */
+            char msg[256];
+            snprintf(msg, sizeof msg,
+                     "[REGISTRY SCOPE LOST] %s: its NID or its group's setup NIDs are not "
+                     "registered, so none of its cells is measured",
+                     p->api);
+            expect(0, msg);
             out_of_scope++;
             disp_off_out_of_scope++;
             for (int c = 0; c < IC_NCTX; c++)

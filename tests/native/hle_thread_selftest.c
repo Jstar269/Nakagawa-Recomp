@@ -25272,6 +25272,46 @@ static TCB *fixture_thread(uint32_t uid, int state, int priority) {
  * handler behavior. */
 #include "intr_conformance.h"
 
+/* A conformance fixture whose object create fails is SETUP_FAILED, not a probe run with the
+ * error code as its uid. sceKernelCreateFpl never returns 0 (it fails with an error code, bit
+ * 31 set, such as NO_MEMORY), so a check against 0 alone took the error for a pool. */
+static void test_intr_conformance_create_failure_is_setup_failure(void) {
+    extern void sr_hle_test_partition_reset(void);
+    const IcProbe *probe = NULL;
+    for (int i = 0; i < IC_MATRIX_N && !probe; i++) {
+        if (kIcMatrix[i].group == ICG_FPL && kIcMatrix[i].variant == 1) probe = &kIcMatrix[i];
+    }
+    expect(probe != NULL, "the conformance matrix has a valid-pool FPL probe");
+    if (!probe) return;
+
+    reset_fixture(); sr_hle_test_partition_reset(); sr_hle_init();
+    /* The pool table grows, so only memory limits a create. Fill the user partition with pools
+     * of halving sizes, each size until a create of it is refused, down to the probe's own
+     * 0x100 x 0x10 bytes: then no gap is left that holds the probe's pool. Each pool is
+     * remembered to give it back. */
+    uint32_t made[64];
+    int nmade = 0;
+    uint32_t refused = 0u;
+    for (uint32_t bsize = 0x100000u; bsize >= 0x100u; bsize >>= 1) {
+        refused = 0u;
+        while (nmade < (int)(sizeof made / sizeof made[0])) {
+            CpuState setup;
+            memset(&setup, 0, sizeof setup);
+            setup.r[4] = IC_NAMEBUF; setup.r[7] = bsize; setup.r[8] = 0x10u;
+            uint32_t uid = sr_syscall(&setup, NID_IC_CREATE_FPL);
+            if (uid & 0x80000000u) { refused = uid; break; }
+            made[nmade++] = uid;
+        }
+    }
+    expect(refused == FPL_NO_MEMORY_ERR,
+           "with no room left for a 0x100 x 0x10 pool sceKernelCreateFpl refuses it with NO_MEMORY");
+    CpuState cpu;
+    expect(ic_arrange(probe, &cpu) == 0,
+           "a conformance fixture whose FPL create fails reports SETUP_FAILED, not an error uid");
+    for (int i = 0; i < nmade; i++) fpl_free_pool(made[i]);
+    reset_fixture(); sr_hle_test_partition_reset(); sr_hle_init();
+}
+
 /* sceMpegCreate inside an interrupt handler. pspautotests tests/intr/delays
  * measured it on a PSP: from a VBLANK sub-interrupt handler it returns
  * 0x80618008 (delays.expected:24), while the same call on a thread returns 0
@@ -57813,6 +57853,22 @@ static void test_flash0_latin_index_resolution(void) {
                legacy_source && strcmp(legacy_source, "user-imported") == 0 &&
                legacy_served_index == -2 && strstr(legacy_path, "nkltn.pgf") != NULL,
            "SR_FONTDIR at a legacy-only import cache still resolves all Latin indices");
+    /* A mixed cache (ltn0 imported, plus the legacy single import) named by SR_FONTDIR: Latin
+     * index 9 has no import of its own or in its size group, and the cache's nkltn.pgf is not a
+     * project font, so the vouched legacy import serves it rather than nothing. */
+    Flash0Sources mixed_sources;
+    memset(&mixed_sources, 0, sizeof(mixed_sources));
+    snprintf(mixed_sources.user_data_dir, sizeof(mixed_sources.user_data_dir), "%s/mixed/data", root);
+    snprintf(mixed_sources.project_dir, sizeof(mixed_sources.project_dir), "%s/mixed/data/fonts/v2",
+             root);
+    legacy_source = NULL;
+    legacy_served_index = -3;
+    expect(sr_flash0_font_resolve_latin_index_path(&mixed_sources, 8, legacy_path,
+                                                   sizeof(legacy_path), &legacy_source,
+                                                   &legacy_served_index) &&
+               legacy_source && strcmp(legacy_source, "user-imported") == 0 &&
+               legacy_served_index == -2 && strstr(legacy_path, "nkltn.pgf") != NULL,
+           "SR_FONTDIR at a mixed import cache serves the legacy import where no index import fits");
 
     /* #1300: two indices not resolved above, so each logs its own line (the driver reads them):
      * index 7 has only the legacy import, and index 16 no import at all, only the project font. */
@@ -63430,6 +63486,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_mbx_receive_cb_takes_callback_message();
     test_mbx_refer_honours_size_word();
     test_intr_context_conformance();
+    test_intr_conformance_create_failure_is_setup_failure();
     test_mpeg_create_refused_in_interrupt();
     test_psp_mutex();
     test_kernel_nested_join();

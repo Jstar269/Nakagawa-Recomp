@@ -323,7 +323,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_exp2_approx` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_exp2_fixed` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_fixed_var_imports_register` | `rt/hle_kernel_module.c` | yes | emitter-reached (direct) | `rt/hle_kernel_module.c`: upstream_derived |
-| `sr_ge_vram_read_prepare` | `rt/ge.c`, `rt/harness_stubs.c` | yes | production-runtime-only | `rt/ge.c`: upstream_derived; `rt/harness_stubs.c`: project_authored_attested |
+| `sr_ge_vram_read_prepare` | `rt/ge.c`, `rt/gui.c`, `rt/harness_stubs.c` | yes | production-runtime-only | `rt/ge.c`: upstream_derived; `rt/gui.c`: upstream_derived; `rt/harness_stubs.c`: project_authored_attested |
 | `sr_ge_vram_write_commit` | `rt/ge.c`, `rt/harness_stubs.c` | yes | production-runtime-only | `rt/ge.c`: upstream_derived; `rt/harness_stubs.c`: project_authored_attested |
 | `sr_ge_vram_write_prepare` | `rt/ge.c`, `rt/harness_stubs.c` | yes | production-runtime-only | `rt/ge.c`: upstream_derived; `rt/harness_stubs.c`: project_authored_attested |
 | `sr_guest_copy_in` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |

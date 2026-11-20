@@ -4285,14 +4285,30 @@ static FuzzByteBuffer make_xb_members(const FuzzVfsMember *members, size_t count
     return out;
 }
 
-/* The archive key rule as archive_vfs.h states it: separators '/' or '\\', runs of them
- * collapsed and leading ones dropped, ASCII letters folded to lower case byte by byte;
- * an empty, "." or ".." component or a trailing separator has no key. */
+/* The archive key rule as archive_vfs.c states it: separators '/' or '\\', runs of them
+ * collapsed and leading ones dropped, ASCII letters folded to lower case; a Shift-JIS
+ * pair (a lead byte 0x81-0x9f or 0xe0-0xfc, then a trail byte 0x40-0x7e or 0x80-0xfc, or
+ * the '/' a guest key folds a trail 0x5c into) is one unit, its trail byte folded like a
+ * letter and never a separator; an empty, "." or ".." component or a trailing separator
+ * has no key. */
 static bool fuzz_vfs_fold(const char *path, char *out, size_t cap) {
     const char *p = path;
     size_t n = 0, component = 0;
     while (*p == '/' || *p == '\\') p++;
     while (*p) {
+        unsigned char lead = (unsigned char)p[0];
+        if (((lead >= 0x81u && lead <= 0x9fu) || (lead >= 0xe0u && lead <= 0xfcu)) && p[1]) {
+            unsigned char trail = (unsigned char)p[1];
+            if (trail == '/') trail = 0x5cu;
+            if ((trail >= 0x40u && trail <= 0x7eu) || (trail >= 0x80u && trail <= 0xfcu)) {
+                if (trail >= 'A' && trail <= 'Z') trail = (unsigned char)(trail + 32u);
+                if (n + 2u >= cap) return false;
+                out[n++] = (char)lead;
+                out[n++] = (char)trail;
+                p += 2;
+                continue;
+            }
+        }
         if (*p == '/' || *p == '\\') {
             size_t len = n - component;
             if (len == 0u || (len == 1u && out[component] == '.') ||
