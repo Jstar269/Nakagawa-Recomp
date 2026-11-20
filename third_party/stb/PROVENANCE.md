@@ -23,9 +23,15 @@ it, into the player only, to decode the one track the player ships (`assets/musi
   commit `013ac3beddff3dbffafd5177e7972067cd2b5083` (2024-05-31, v2.30), so the file is the same at both.
 - License: upstream offers a choice of MIT or public domain (Unlicense wording), in `LICENSE` and at the end of
   `stb_image.h`. The project uses it under the public-domain alternative (`Unlicense`). Both texts are kept unchanged.
-- Import method: `stb_image.h` and `LICENSE` were downloaded from the pinned commit
-  `003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5`. Their Git blob IDs match that commit's files, and the SHA-256 values
-  below were calculated from the local bytes (corrected 2026-11-18: this bullet sat in the `stb_vorbis.c` section).
+- Import method: `stb_image.h` was downloaded from the pinned commit `003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5`. Its
+  Git blob ID matches that commit's file, and the SHA-256 value below was calculated from the local bytes (corrected
+  2026-11-18: this bullet sat in the `stb_vorbis.c` section).
+- `LICENSE`: upstream reworded its opening lines in commit `aae9fee018211439eec93986e4dd2d9201e9b82c`
+  (2026-10-31, "update license since libraries are inconsistent"): the libraries are in the public domain and most are
+  also available under MIT. The two alternatives below the opening are unchanged. On 2026-11-20 `LICENSE` was
+  downloaded again from that commit, which is still the last to change it on `master`; its Git blob ID matches that
+  commit's file, and the SHA-256 below was calculated from the local bytes. The `LICENSE` at the earlier pin had blob
+  `a77ae91f3ec0abb0028c9d9bd8d34d880b454d38`.
 
 ### `stb_vorbis.c`
 
@@ -47,7 +53,7 @@ it, into the player only, to decode the one track the player ships (`assets/musi
 | --- | --- | --- | --- |
 | `stb_image.h` | imported byte-identical | `9eedabedc45b3e6fd88fae6f14a160b4d53272ec` | `594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3` |
 | `stb_vorbis.c` | imported byte-identical (pin `9f755b604db3492df2cbeb39bf84b81e3e3932e3`) | `f5e80a0f27cbbe78405d01803bcc5e3edb98c2bd` | `b52cf518355f7b2d181f18b97b812f361ffeb26299d935c8cf29e842401d60a6` |
-| `LICENSE` | imported byte-identical | `a77ae91f3ec0abb0028c9d9bd8d34d880b454d38` | `bebfe904b14301657e4e5d655c811d51fd31b97c455b9cc2d8600d6bac6cff63` |
+| `LICENSE` | imported byte-identical (pin `aae9fee018211439eec93986e4dd2d9201e9b82c`) | `48b774af49c4a552d5593e005da685af27be2f20` | `eb36e45c704dd0b59730115523e089b051852625b4db0a6fe76c991900af20e7` |
 | `PROVENANCE.md` | project-authored manifest | n/a | n/a |
 
 ## Build configuration
