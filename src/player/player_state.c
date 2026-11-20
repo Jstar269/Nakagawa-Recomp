@@ -5261,6 +5261,8 @@ static const struct { const char *code; const char *badge; } k_error_badges[] = 
     {"BUILD_TOOLCHAIN_MISSING", "Build tools needed"},
     {"PREREQUISITE_MANIFEST_INVALID", "Build tools damaged"},
     {"PREREQUISITE_BUNDLE_INVALID", "Build tools damaged"},
+    /* The tools are fine; the game they were downloaded for is gone. */
+    {"PREREQUISITE_TITLE_GONE", "Game not in library"},
     {"TOOLS_IN_USE", "Build tools busy"},
     {"TOOLS_REMOVE_FAILED", "Not removed"},
     /* Removing the downloaded tools names it when <data root>/prerequisites does not fit

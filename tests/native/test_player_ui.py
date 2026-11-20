@@ -7920,6 +7920,24 @@ class NativePlayerUiTests(unittest.TestCase):
         assert isinstance(other_frames, list)
         self.assertEqual(other_frames[0]["error_badge"], "Problem")
 
+    def test_tools_download_for_a_title_that_left_the_library_says_so(self) -> None:
+        """Audit 2026-11-17 F-7dc315bd: the build after a tools download resumes for the title
+        it was started for, by its disc ID and image. When that title has left the library,
+        the card says so by name instead of building another game or reporting a package
+        "completed without its library title"."""
+        screenshots = os.environ.get("NAKAGAWA_PLAYER_UI_SP_SCREENSHOTS")
+        run = self.run_player(
+            "library", ("WAIT_MS=50",), error_code="PREREQUISITE_TITLE_GONE",
+            screenshot_path=(Path(screenshots) / "prerequisite-title-gone.bmp"
+                             if screenshots else None))
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[0]["view"], "error")
+        self.assertEqual(frames[0]["error"], "PREREQUISITE_TITLE_GONE")
+        self.assertEqual(frames[0]["error_title"], "Game_not_in_the_library")
+        self.assertEqual(frames[0]["error_badge"], "Game_not_in_library")
+        self.assertEqual(frames[0]["package_building"], "0", "nothing was built")
+
     def test_failed_close_confirmation_needs_a_second_explicit_close(self) -> None:
         run = self.run_player(
             "library",
