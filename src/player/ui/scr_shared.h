@@ -185,6 +185,9 @@ typedef struct {
 #define SCR_ONLINE_PLAY_SERVERS_LEAD \
     "Each server is run by its own community, not by Nakagawa. Choosing one opens the Online " \
     "play card for it: nothing connects until you choose TURN ON there."
+/* The picker's hint under its intro (owner, 2026-11-20). */
+#define SCR_ONLINE_PLAY_SERVERS_HINT \
+    "Everyone you play with must choose the same server. A closer server responds faster."
 #define SCR_ONLINE_PLAY_OWN_SENTENCE "A server you run or trust. It is kept only on this PC."
 /* What to type for one's own server, on its row until one is in use. */
 #define SCR_ONLINE_PLAY_OWN_FORMAT "host[:lobby_port[,data_port]]"

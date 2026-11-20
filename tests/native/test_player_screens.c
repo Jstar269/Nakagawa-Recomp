@@ -6969,7 +6969,12 @@ static bool flow_case_text_whole(FlowCase which, int width, int height, NkUiId s
             }
         }
         if (!nk_ui_scroll_state(ui, scroller, &state) || offset >= state.max_offset) break;
-        offset += 120.0f;
+        /* 120 px at a time, or a quarter of the view where that is less, as a wheel's notches
+           go: in a short list a longer step can pass every stop at which an item taller than
+           half the view shows whole (the picker's list settles on item boundaries). */
+        offset += state.viewport > 0.0f && 0.25f * state.viewport < 120.0f
+                      ? 0.25f * state.viewport
+                      : 120.0f;
         nk_ui_scroll_to(ui, scroller, offset);
         g_flow_width = scale.logical_w;
         g_flow_height = scale.logical_h;
@@ -7217,7 +7222,10 @@ static void test_online_play_picker_rows(void) {
                                     (double)(view.y + view.h));
                         }
                     }
-                    whole = whole && draw_shows(draw, "relay-asia.arenaanywhere.site") &&
+                    /* The hint under the intro (owner, 2026-11-20) is there too. */
+                    whole = whole && draw_shows(draw, "Everyone you play with") &&
+                            draw_shows(draw, "faster.") &&
+                            draw_shows(draw, "relay-asia.arenaanywhere.site") &&
                             draw_shows(draw, "Your own server") &&
                             draw_shows(draw, "host[:lobby_port[,data_port]]");
                     (void)snprintf(message, sizeof(message),

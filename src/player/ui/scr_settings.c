@@ -1930,7 +1930,7 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
 #define SET_ID_ONLINE_PLAY_LIST (SET_ID_TEXT + 0x7E1u)
 #define SET_ID_ONLINE_PLAY_TRACK (SET_ID_TEXT + 0x7E2u)
 #define SET_ID_ONLINE_PLAY_BOX (SET_ID_TEXT + 0x7E3u)
-#define SET_ID_ONLINE_PLAY_HEADING (SET_ID_TEXT + 0x7E4u) /* + 0 to 2: the section headings */
+#define SET_ID_ONLINE_PLAY_HEADING (SET_ID_TEXT + 0x7E4u) /* + 1 and 2: the section headings */
 #define SET_ID_ONLINE_PLAY_OWN_LINE (SET_ID_TEXT + 0x7E8u)
 #define SET_ID_ONLINE_PLAY_OFF_LINE (SET_ID_TEXT + 0x7E9u)
 #define SET_ID_ONLINE_PLAY_OWN_SENTENCE (SET_ID_TEXT + 0x7F0u)
@@ -2666,16 +2666,18 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         NkUiId down = 0u;
         float own_width;
         float port_width;
-        /* The list holds what the card leaves between the bars once the heading, the intro,
-           the box's padding and Back are placed, so the card itself does not scroll; where
-           that is less than two rows (a larger text size in a small window), the list takes
-           its whole height and the card scrolls instead. */
+        /* The list holds what the card leaves between the bars once the heading, the intro and
+           its hint, the box's padding and Back are placed, so the card itself does not scroll;
+           where that is less than two rows (a larger text size in a small window), the list
+           takes its whole height and the card scrolls instead. */
         float list_room = height - NK_UI_TOP_BAR_HEIGHT - NK_UI_PROMPT_BAR_HEIGHT -
                           2.0f * NK_UI_SPACE_4 - NK_UI_DIALOG_PAD_TOP - NK_UI_DIALOG_PAD_BOTTOM -
                           nk_ui_line_height(ui, &eyebrow) - nk_ui_line_height(ui, &heading) -
                           settings_enhanced_text_height(ui, SCR_ONLINE_PLAY_SERVERS_LEAD,
                                                         NK_UI_TYPE_BODY_S, inner) -
-                          4.0f * NK_UI_DIALOG_GAP - 12.0f - NK_UI_SPACE_1 -
+                          settings_enhanced_text_height(ui, SCR_ONLINE_PLAY_SERVERS_HINT,
+                                                        NK_UI_TYPE_BODY_S, inner) -
+                          4.0f * NK_UI_DIALOG_GAP - 8.0f - NK_UI_SPACE_1 -
                           nk_ui_line_box(ui, NK_UI_CONTROL_HEIGHT, &label) - 1.0f;
         if (list_room < 2.0f * ENHANCED_LIST_PAD + 2.0f * settings_online_play_row_height(ui) +
                             nk_ui_line_height(ui, &eyebrow)) {
@@ -2728,13 +2730,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                  own_current ? server : SCR_ONLINE_PLAY_OWN_FORMAT,
                                                  NULL, own_current, own_width),
             NULL, own_width);
-        box_layout.padding_top = box_layout.padding_bottom = 6.0f;
+        box_layout.padding_top = box_layout.padding_bottom = 4.0f;
         box_layout.padding_left = box_layout.padding_right = 8.0f;
         settings_online_play_reveal_row(ui, count);
         {
             NkUiId items[PLAYER_UI_ONLINE_PLAY_SERVERS_MAX + 12u];
             size_t item_count = 0u;
-            items[item_count++] = SET_ID_ONLINE_PLAY_HEADING;
             items[item_count++] = SET_ID_ONLINE_PLAY_HEADING + 1u;
             items[item_count++] = SET_ID_ONLINE_PLAY_OWN_LINE;
             items[item_count++] = SET_ID_ONLINE_PLAY_OWN_SENTENCE;
@@ -2754,8 +2755,10 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         }
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Online play", theme->accent_dark);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "Choose a server", NK_UI_TYPE_TITLE, theme->paper);
-        nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_PLAY_SERVERS_LEAD, NK_UI_TYPE_BODY_S,
-                        theme->muted);
+        /* The intro, and its hint on a line of its own under it, in one block. */
+        nk_ui_text_role(ui, FLOW_ID_LEAD,
+                        SCR_ONLINE_PLAY_SERVERS_LEAD "\n" SCR_ONLINE_PLAY_SERVERS_HINT,
+                        NK_UI_TYPE_BODY_S, theme->muted);
         if (nk_ui_begin_container(ui, SET_ID_ONLINE_PLAY_BOX, &box_layout, &box_style)) {
             NkUiLayout list_row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
                                               0.0f);
@@ -2769,15 +2772,15 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             if (nk_ui_begin_container(ui, SET_ID_ONLINE_PLAY_LIST_ROW, &list_row, NULL)) {
                 if (nk_ui_begin_container(ui, SET_ID_ONLINE_PLAY_LIST, &list, NULL)) {
                     bool first_in_section = true;
-                    settings_online_play_text(ui, SET_ID_ONLINE_PLAY_HEADING, "Built in",
-                                              NK_UI_TYPE_EYEBROW, theme->muted, 0.0f);
+                    /* The shipped servers need no heading: each row's chip says Built in, and
+                       the room keeps the own server's row in view under the intro's hint. */
                     for (int pass = 0; pass < 2; ++pass) {
                         /* The shipped servers first; PPSSPP's list after the own server. */
                         if (pass == 1) {
                             if (!model->online_play) break;
                             settings_online_play_text(ui, SET_ID_ONLINE_PLAY_HEADING + 2u,
                                                       "PPSSPP's list", NK_UI_TYPE_EYEBROW,
-                                                      theme->muted, 6.0f);
+                                                      theme->muted, 4.0f);
                             if (model->online_play_list_status &&
                                 model->online_play_list_status[0] != '\0') {
                                 settings_online_play_text(ui, SET_ID_TEXT + 0x7F4u,
@@ -2814,7 +2817,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                             own_line.align_y = NK_UI_ALIGN_CENTER;
                             settings_online_play_text(ui, SET_ID_ONLINE_PLAY_HEADING + 1u,
                                                       "Your own server", NK_UI_TYPE_EYEBROW,
-                                                      theme->muted, 6.0f);
+                                                      theme->muted, 4.0f);
                             settings_online_play_links(order, order_count,
                                                        PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
                                                        &up, &down);
