@@ -200,6 +200,14 @@ NkIsoKeyMatch nk_iso_library_key_match(const char *image_key, uint32_t image_key
 bool nk_iso_catalog_match(const char *disc_id, char *out_title_id, size_t out_title_id_size,
                           char *out_display_name, size_t out_display_name_size);
 
+/* The title of an image re-keyed from image_key to key: a name nk_iso_inspect
+ * made from image_key because PARAM.SFO has no TITLE ("PSP Title (<image_key>)")
+ * is made again, from the catalog's display name for key when catalog_name is
+ * not empty, else from key; any other title is kept (keyed_as_legacy in
+ * tools/nk_core/iso_inspect.py makes the same name from key). */
+void nk_iso_title_for_key(char *title, size_t title_size, const char *image_key,
+                          const char *key, const char *catalog_name);
+
 /* The key a disc image is added under, given the library's entries: an entry
  * that holds the image's own key first; else a v2-keyed image whose v1 key
  * (legacy_key) an entry made before v2 holds keeps that v1 key, so adding the

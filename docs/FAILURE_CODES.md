@@ -103,7 +103,7 @@ The **Where** column of each table names the places a code can appear:
 | `DISC_DECRYPT_MEMBER_MISSING` | decrypt | An encrypted file found on the disc image was gone when the tools came to decrypt it: the image changed or was cut short during the run. The disc's other files are still decrypted. |
 | `FIRMWARE_OUT_OF_SCOPE` | decrypt, player | The file is PSP system software. Nakagawa never decrypts firmware. |
 | `INTEGRITY_FAILURE` | decrypt, player | The file's signature or hash check failed; the file looks damaged or changed. |
-| `IO_FAILURE` | decrypt, player | The input could not be read or the output could not be written. |
+| `IO_FAILURE` | decrypt, disc, player | The input could not be read or the output could not be written; for a disc image added from the command line, the library that chooses its folder could not be read. |
 | `KEY_FILE_INVALID` | decrypt, player | The supplied key file is missing or invalid. |
 | `KEY_REQUIRED` | decrypt, player | The file needs a key the built-in table does not carry; `nk_decrypt` names the entry. |
 | `MALFORMED_INPUT` | decrypt, player | The encrypted container is malformed. |

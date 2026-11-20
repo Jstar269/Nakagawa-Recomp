@@ -1312,6 +1312,64 @@ static bool place_expansion(const char *data_root, const NkDiscImportPaths *path
     return ok;
 }
 
+static bool count_dir_entry(const char *name, bool is_dir, void *ctx) {
+    (void)name;
+    (void)is_dir;
+    (*(size_t *)ctx)++;
+    return true;
+}
+
+/* A recorded expansion (out->iso_path under discs/<out->disc_id>) that the
+   caller's library keys under another key moves to that key's folder, so the
+   entry's checks and removal find it: a prototype disc expanded under its v2
+   key whose entry holds its v1 key, or the reverse. Its folder is removed when
+   the move leaves it empty. Without a library (entries NULL) the expansion
+   stays where it is. Only a non-retail key (it starts with X; no retail or test
+   ID does) can differ from the key the library holds. */
+static bool expansion_follows_entry_key(const char *data_root, const NkDiscImportPaths *paths,
+                                        const NkGameEntry *entries, int entry_count,
+                                        NkDiscImport *out, NkDiscExpandStatus *status) {
+    NkIsoMetadata meta;
+    char key[NK_MAX_DISC_ID_LEN];
+    char old_dir[NK_MAX_PATH];
+    char sidecar[NK_MAX_PATH + 8];
+    const char *slash;
+    size_t left = 0;
+    size_t skipped = 0;
+    if (!entries || out->disc_id[0] != 'X') return true;
+    memset(&meta, 0, sizeof(meta));
+    if (nk_iso_inspect(out->iso_path, &meta) != NK_OK) {
+        return disc_fail(status, NK_DISC_EXPANDED_INVALID,
+                         "The disc image expanded earlier is no longer a readable disc image: "
+                         "%.200s", meta.error_message);
+    }
+    (void)nk_iso_library_key_for_image(entries, entry_count, meta.disc_id, meta.disc_key_version,
+                                       meta.legacy_disc_id, key, sizeof(key));
+    if (strcmp(key, out->disc_id) == 0) return true;
+    slash = strrchr(out->iso_path, nk_platform_path_separator());
+    if (!slash || (size_t)(slash - out->iso_path) >= sizeof(old_dir) ||
+        !path_suffix(sidecar, sizeof(sidecar), out->iso_path, ".source")) {
+        return disc_fail(status, NK_DISC_WRITE_FAILED,
+                         "The path to Nakagawa's data folder is too long.");
+    }
+    snprintf(old_dir, sizeof(old_dir), "%.*s", (int)(slash - out->iso_path), out->iso_path);
+    /* Back to the staging name, then placed and recorded under the key, as a new
+       expansion is. */
+    if (nk_rename_utf8(out->iso_path, paths->staging) != 0) {
+        return disc_fail(status, NK_DISC_WRITE_FAILED,
+                         "The disc image expanded earlier could not be moved to the folder of "
+                         "its library entry's key.");
+    }
+    (void)nk_remove_utf8(sidecar);
+    snprintf(out->disc_id, sizeof(out->disc_id), "%.9s", key);
+    if (!place_expansion(data_root, paths, out, status)) return false;
+    if (nk_platform_list_dir_counted(old_dir, count_dir_entry, &left, &skipped) && left == 0 &&
+        skipped == 0) {
+        (void)nk_platform_remove_tree(old_dir, NULL);
+    }
+    return true;
+}
+
 /* Reuse, upgrade or expand while the caller holds paths->lock. */
 static bool disc_import_locked(const char *source, const char *data_root,
                                const NkGameEntry *entries, int entry_count,
@@ -1335,7 +1393,7 @@ static bool disc_import_locked(const char *source, const char *data_root,
         identity_recorded(out->iso_path, out)) {
         snprintf(out->disc_id, sizeof(out->disc_id), "%s", found_id);
         out->reused = true;
-        return true;
+        return expansion_follows_entry_key(data_root, paths, entries, entry_count, out, status);
     }
     out->iso_path[0] = '\0';
 
@@ -1359,7 +1417,8 @@ static bool disc_import_locked(const char *source, const char *data_root,
                                  "Nakagawa's data folder.");
             }
             out->reused = true;
-            return true;
+            return expansion_follows_entry_key(data_root, paths, entries, entry_count, out,
+                                               status);
         }
         phase->offset = out->source_bytes;
     }

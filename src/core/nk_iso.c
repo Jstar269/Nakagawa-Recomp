@@ -268,14 +268,20 @@ static bool nk_iso_name_matches(const char *token, const uint8_t *name_bytes, ui
     return false;
 }
 
-/* One directory search. A directory whose bytes cannot be read, or that holds a
- * malformed record or a record whose both-endian copies disagree (ECMA-119
- * 7.3.3), is NK_ERROR_INVALID_ISO, as nk_iso_reader_list and the stager treat
- * it: a damaged directory is not reported as one without the wanted name. A
- * record whose extent leaves the image is passed over. */
+/* One directory search, by the rule _lookup_iso_file in
+ * tools/nk_core/iso_inspect.py shares (tests/parity keep the two in step):
+ * - A directory whose bytes cannot be read, or that holds a record whose length
+ *   or name runs past it, is NK_ERROR_INVALID_ISO: a damaged directory is not
+ *   reported as one without the wanted name.
+ * - Records are read in their order. Only a record with the wanted name has its
+ *   location read: when its both-endian copies (ECMA-119 7.3.3) disagree the
+ *   search is NK_ERROR_INVALID_ISO; when its extent leaves the image it is
+ *   passed over (*out_outside is set) and the search goes on to a later record
+ *   of the name.
+ * - The first record of the name inside the image is the result. */
 static NkResult nk_iso_find_in_dir(NkIsoReader *reader, uint32_t dir_lba, uint32_t dir_size,
                                    const char *token, uint32_t *out_lba, uint32_t *out_size,
-                                   bool *out_is_dir) {
+                                   bool *out_is_dir, bool *out_outside) {
     if (!reader || !reader->f || dir_size == 0 || dir_size > NK_ISO_MAX_DIR_BYTES) {
         return NK_ERROR_INVALID_ISO;
     }
@@ -319,6 +325,11 @@ static NkResult nk_iso_find_in_dir(NkIsoReader *reader, uint32_t dir_lba, uint32
             continue;
         }
 
+        if (!nk_iso_name_matches(token, name_bytes, name_len)) {
+            pos += rec_len;
+            continue;
+        }
+
         uint32_t ext_lba_le = read_le32(&buf[pos + 2]);
         uint32_t ext_lba_be = read_be32(&buf[pos + 6]);
         uint32_t ext_sz_le = read_le32(&buf[pos + 10]);
@@ -331,19 +342,16 @@ static NkResult nk_iso_find_in_dir(NkIsoReader *reader, uint32_t dir_lba, uint32
 
         uint64_t ext_off = (uint64_t)ext_lba_le * SECTOR_SIZE;
         if (ext_off > reader->file_size || (uint64_t)ext_sz_le > reader->file_size - ext_off) {
+            if (out_outside) *out_outside = true;
             pos += rec_len;
             continue;
         }
 
-        if (nk_iso_name_matches(token, name_bytes, name_len)) {
-            if (out_lba) *out_lba = ext_lba_le;
-            if (out_size) *out_size = ext_sz_le;
-            if (out_is_dir) *out_is_dir = (buf[pos + 25] & 0x02u) != 0;
-            result = NK_OK;
-            break;
-        }
-
-        pos += rec_len;
+        if (out_lba) *out_lba = ext_lba_le;
+        if (out_size) *out_size = ext_sz_le;
+        if (out_is_dir) *out_is_dir = (buf[pos + 25] & 0x02u) != 0;
+        result = NK_OK;
+        break;
     }
 
     free(buf);
@@ -354,9 +362,13 @@ static NkResult nk_iso_find_in_dir(NkIsoReader *reader, uint32_t dir_lba, uint32
  * path refused before the disc is read (too long, or a ".." component),
  * NK_ERROR_FILE_NOT_FOUND when a component is not on the disc or an
  * intermediate component is a file, NK_ERROR_INVALID_ISO for a damaged
- * directory or a path deeper than NK_ISO_MAX_DEPTH. */
-static NkResult nk_iso_reader_resolve(NkIsoReader *reader, const char *path, uint32_t *out_lba,
-                                      uint32_t *out_size, bool *out_is_dir) {
+ * directory or a path deeper than NK_ISO_MAX_DEPTH. *out_outside (optional) is
+ * set when a record of the last component's name was passed over because its
+ * extent leaves the image (nk_iso_find_in_dir). */
+static NkResult nk_iso_reader_resolve_detail(NkIsoReader *reader, const char *path,
+                                             uint32_t *out_lba, uint32_t *out_size,
+                                             bool *out_is_dir, bool *out_outside) {
+    if (out_outside) *out_outside = false;
     if (!reader || !path) return NK_ERROR_GENERIC;
 
     while (*path == '/' || *path == '\\') path++;
@@ -408,7 +420,8 @@ static NkResult nk_iso_reader_resolve(NkIsoReader *reader, const char *path, uin
         bool entry_is_dir = false;
 
         NkResult found = nk_iso_find_in_dir(reader, cur_lba, cur_size, token, &entry_lba,
-                                            &entry_size, &entry_is_dir);
+                                            &entry_size, &entry_is_dir,
+                                            is_last ? out_outside : NULL);
         if (found != NK_OK) return found;
 
         if (is_last) {
@@ -429,6 +442,11 @@ static NkResult nk_iso_reader_resolve(NkIsoReader *reader, const char *path, uin
 
     /* A path that ends in "." components resolves to nothing, as before. */
     return NK_ERROR_FILE_NOT_FOUND;
+}
+
+static NkResult nk_iso_reader_resolve(NkIsoReader *reader, const char *path, uint32_t *out_lba,
+                                      uint32_t *out_size, bool *out_is_dir) {
+    return nk_iso_reader_resolve_detail(reader, path, out_lba, out_size, out_is_dir, NULL);
 }
 
 int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lba, uint32_t *out_size, bool *out_is_dir) {
@@ -1546,22 +1564,22 @@ static bool nk_iso_non_retail_identity(const char *iso_path, const uint8_t *sfo,
         /* The v2 key is chosen by the disc's structure alone: an empty or
            zero-filled EBOOT.BIN and a BOOT.BIN file of 1 byte to
            NK_ISO_MAX_EXECUTABLE_BYTES, whatever it holds, so no rule about what
-           an executable may contain moves a disc between keys. A malformed
-           BOOT.BIN record is refused by name; one outside the image is skipped
-           by nk_iso_find_in_dir, so there is no BOOT.BIN (_non_retail_identity
-           reads both the same way). */
+           an executable may contain moves a disc between keys. A BOOT.BIN that
+           cannot be resolved is refused by name, and so is one whose only
+           records lie outside the image (a truncated dump), which must not
+           quietly get the v1 key (_non_retail_identity reads both the same way). */
         NkIsoExecutableCandidate eboot;
         nk_iso_classify_executable(reader, "PSP_GAME/SYSDIR/EBOOT.BIN", &eboot);
         if (eboot.kind == NK_ISO_EXEC_EMPTY_OR_ZERO) {
             bool boot_is_directory = false;
-            NkResult found = nk_iso_reader_resolve(reader, "PSP_GAME/SYSDIR/BOOT.BIN", &boot_lba,
-                                                   &boot_size, &boot_is_directory);
-            if (found == NK_OK && !nk_iso_extent_span_valid(reader, boot_lba, boot_size, 0, boot_size)) {
-                boot_unreadable = true;
-            } else if (found == NK_OK) {
+            bool boot_outside = false;
+            NkResult found = nk_iso_reader_resolve_detail(
+                reader, "PSP_GAME/SYSDIR/BOOT.BIN", &boot_lba, &boot_size, &boot_is_directory,
+                &boot_outside);
+            if (found == NK_OK) {
                 boot_keyed = !boot_is_directory && boot_size > 0 &&
                              boot_size <= NK_ISO_MAX_EXECUTABLE_BYTES;
-            } else if (found != NK_ERROR_FILE_NOT_FOUND) {
+            } else if (found != NK_ERROR_FILE_NOT_FOUND || boot_outside) {
                 boot_unreadable = true;
             }
         }
@@ -1670,6 +1688,19 @@ bool nk_iso_catalog_match(const char *disc_id, char *out_title_id, size_t out_ti
     }
     nk_title_catalog_unlock();
     return entry != NULL;
+}
+
+void nk_iso_title_for_key(char *title, size_t title_size, const char *image_key,
+                          const char *key, const char *catalog_name) {
+    char made[sizeof(((NkIsoMetadata *)0)->title_name)];
+    if (!title || title_size == 0u || !image_key || !key) return;
+    snprintf(made, sizeof(made), "PSP Title (%s)", image_key);
+    if (strcmp(title, made) != 0) return;
+    if (catalog_name && catalog_name[0]) {
+        snprintf(title, title_size, "%s", catalog_name);
+    } else {
+        snprintf(title, title_size, "PSP Title (%s)", key);
+    }
 }
 
 uint32_t nk_iso_library_key_for_image(const NkGameEntry *entries, int count,

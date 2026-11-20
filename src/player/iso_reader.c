@@ -63,10 +63,9 @@ uint32_t iso_inspect_result_for_library(IsoInspectResult *result, const NkGameEn
     /* Re-keyed under the v1 key an entry made before v2 holds: the catalog is
        searched again under that key, and a name made from the v2 key is made
        again from the v1 key, as nk_iso_inspect makes both. */
-    char v2_fallback_name[sizeof(result->title_name)];
-    snprintf(v2_fallback_name, sizeof(v2_fallback_name), "PSP Title (%s)", result->disc_id);
-    bool fallback_name = strcmp(result->title_name, v2_fallback_name) == 0;
+    char image_key[sizeof(result->disc_id)];
     char display_name[sizeof(result->title_name)];
+    snprintf(image_key, sizeof(image_key), "%s", result->disc_id);
     snprintf(result->disc_id, sizeof(result->disc_id), "%s", key);
     result->disc_key_version = version;
     result->legacy_disc_id[0] = '\0';
@@ -75,13 +74,8 @@ uint32_t iso_inspect_result_for_library(IsoInspectResult *result, const NkGameEn
                                                 display_name, sizeof(display_name));
     result->status = (GameSupportStatus)(result->is_supported ? NK_STATUS_VERIFIED
                                                               : NK_STATUS_IDENTIFIED);
-    if (fallback_name) {
-        if (result->is_supported) {
-            snprintf(result->title_name, sizeof(result->title_name), "%s", display_name);
-        } else {
-            snprintf(result->title_name, sizeof(result->title_name), "PSP Title (%s)", key);
-        }
-    }
+    nk_iso_title_for_key(result->title_name, sizeof(result->title_name), image_key, key,
+                         result->is_supported ? display_name : NULL);
     return version;
 }
 

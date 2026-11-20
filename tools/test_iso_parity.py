@@ -804,6 +804,9 @@ int main(int argc, char **argv) {
             added.disc_id, sizeof(added.disc_id));
         printf("ADD:%s:%u\\n", added.disc_id, (unsigned)added.disc_key_version);
         snprintf(added.title_name, sizeof(added.title_name), "%s", meta.title_name);
+        nk_iso_title_for_key(added.title_name, sizeof(added.title_name), meta.disc_id,
+                             added.disc_id, NULL);
+        printf("TITLE:%s\\n", added.title_name);
         snprintf(added.iso_path, sizeof(added.iso_path), "%s", argv[2]);
         if (nk_library_add_or_update(&lib, &added) != NK_OK) return 5;
         if (nk_library_save(&lib, argv[3]) != NK_OK) return 6;
@@ -2576,46 +2579,136 @@ int main(int argc, char **argv) {
                 keys.add(key)
         self.assertEqual(len(keys), len(cases))
 
-    def test_unreadable_boot_bin_is_refused_by_name_in_both_tiers(self) -> None:
-        """Review F6 of PR #2855: when BOOT.BIN is what cannot be read (here its directory
-        record's two copies of its location disagree), the refusal names BOOT.BIN, the same
-        text in both tiers, not EBOOT.BIN. A BOOT.BIN record outside the image is no
-        BOOT.BIN in both tiers (the C reader skips such a record), so the disc keeps v1."""
-        sfo = build_param_sfo(self.BETA_DISC_ID, "Synthetic Beta")
+    BOOT_REFUSAL = (
+        "PARAM.SFO names this disc '{disc}', which is not a retail disc ID, and its "
+        "PSP_GAME/SYSDIR/EBOOT.BIN is empty or all zeros but PSP_GAME/SYSDIR/BOOT.BIN is "
+        "unreadable, so the disc cannot be identified by its contents"
+    )
 
-        def with_boot_record(name: str, little: int, big: int) -> Path:
-            iso_file = self.temp_dir / f"proto-boot-{name}.iso"
-            create_test_iso_with_executables(
-                iso_file, bytes(2048), build_plain_mips_elf(), disc_id=self.BETA_DISC_ID,
-                title="Synthetic Beta",
-            )
-            data = bytearray(iso_file.read_bytes())
-            record_name = b"BOOT.BIN;1"
-            at = data.index(bytes([len(record_name)]) + record_name) - 32
-            struct.pack_into("<I", data, at + 2, little)
-            struct.pack_into(">I", data, at + 6, big)
-            iso_file.write_bytes(data)
-            return iso_file
-
-        outside = 0x00FF0000
-        key, digest = self._expected_identity(sfo, bytes(2048))
-        self._assert_identity_in_both_tiers(with_boot_record("outside", outside, outside),
-                                            key, digest)
-
-        iso_file = with_boot_record("conflicting", 37, 38)
+    def _assert_refused_in_both_tiers(self, iso_file: Path, message: str) -> None:
         with self.assertRaises(IsoInspectionError) as caught:
             inspect_iso(iso_file)
-        message = str(caught.exception)
-        self.assertEqual(
-            message,
-            f"PARAM.SFO names this disc '{self.BETA_DISC_ID}', which is not a retail disc ID, "
-            "and its PSP_GAME/SYSDIR/EBOOT.BIN is empty or all zeros but "
-            "PSP_GAME/SYSDIR/BOOT.BIN is unreadable, so the disc cannot be identified by its "
-            "contents",
-        )
+        self.assertEqual(str(caught.exception), message)
         c_meta = self._run_native_inspect(iso_file)
         self.assertTrue(c_meta.get("RESULT", "").startswith("ERROR:"), c_meta)
         self.assertEqual(c_meta.get("MESSAGE"), message)
+
+    def _with_sysdir(self, name: str, eboot: bytes, boot: bytes | None,
+                     records: list[bytes]) -> Path:
+        """A prototype image whose SYSDIR holds exactly these records, after its own two;
+        EBOOT.BIN's bytes are at LBA 36 and BOOT.BIN's at LBA 37."""
+        iso_file = self.temp_dir / f"sysdir-{name}.iso"
+        create_test_iso_with_executables(
+            iso_file, eboot, boot, disc_id=self.BETA_DISC_ID, title="Synthetic Beta",
+        )
+        data = bytearray(iso_file.read_bytes())
+        entries = (_dir_record(bytes([0]), 35, 2048, True) + _dir_record(bytes([1]), 34, 2048, True)
+                   + b"".join(records))
+        data[35 * 2048:36 * 2048] = entries + bytes(2048 - len(entries))
+        iso_file.write_bytes(data)
+        return iso_file
+
+    @staticmethod
+    def _conflicting(record: bytes) -> bytes:
+        """The record with the big-endian copy of its location one sector on."""
+        changed = bytearray(record)
+        struct.pack_into(">I", changed, 6, struct.unpack_from("<I", changed, 2)[0] + 1)
+        return bytes(changed)
+
+    OUTSIDE_LBA = 0x00FF0000
+
+    def test_unreadable_boot_bin_is_refused_by_name_in_both_tiers(self) -> None:
+        """Review F6 and R2 of PR #2855: when BOOT.BIN is what cannot be read, the refusal
+        names BOOT.BIN, the same text in both tiers, not EBOOT.BIN: a BOOT.BIN record whose
+        two copies of its location disagree, and a BOOT.BIN whose only record lies outside
+        the image (a truncated dump), which no longer gets the v1 key quietly."""
+        boot = build_plain_mips_elf()
+        message = self.BOOT_REFUSAL.format(disc=self.BETA_DISC_ID)
+        eboot_record = _dir_record(b"EBOOT.BIN;1", 36, 2048, False)
+        boot_record = _dir_record(b"BOOT.BIN;1", 37, len(boot), False)
+        outside = self._with_sysdir(
+            "boot-outside", bytes(2048), boot,
+            [eboot_record, _dir_record(b"BOOT.BIN;1", self.OUTSIDE_LBA, len(boot), False)])
+        self._assert_refused_in_both_tiers(outside, message)
+        conflicting = self._with_sysdir(
+            "boot-conflicting", bytes(2048), boot, [eboot_record, self._conflicting(boot_record)])
+        self._assert_refused_in_both_tiers(conflicting, message)
+
+    def test_directory_walkers_share_one_rule(self) -> None:
+        """Review R3 of PR #2855: nk_iso_find_in_dir and _lookup_iso_file read a directory
+        by one rule. Only a record with the wanted name has its location read; one outside
+        the image is passed over for a later record of the name; a record of another name
+        with disagreeing copies of its location is not read. The same for EBOOT.BIN and
+        BOOT.BIN, and a disc keyed by main is keyed the same way (BETA_KEY)."""
+        sfo = build_param_sfo(self.BETA_DISC_ID, "Synthetic Beta")
+        boot = build_plain_mips_elf()
+        zero = bytes(2048)
+        v2_key, v2_digest = self._expected_boot_identity(sfo, zero, boot)
+        junk = self._conflicting(_dir_record(b"JUNK.BIN;1", 38, 16, False))
+        cases = {
+            "boot-outside-then-inside": (zero, boot, [
+                _dir_record(b"EBOOT.BIN;1", 36, len(zero), False),
+                _dir_record(b"BOOT.BIN;1", self.OUTSIDE_LBA, len(boot), False),
+                _dir_record(b"BOOT.BIN;1", 37, len(boot), False),
+            ], (v2_key, v2_digest)),
+            "bad-record-between-eboot-and-boot": (zero, boot, [
+                _dir_record(b"EBOOT.BIN;1", 36, len(zero), False),
+                junk,
+                _dir_record(b"BOOT.BIN;1", 37, len(boot), False),
+            ], (v2_key, v2_digest)),
+            "eboot-outside-then-inside": (self.BETA_EXECUTABLE, None, [
+                _dir_record(b"EBOOT.BIN;1", self.OUTSIDE_LBA, len(self.BETA_EXECUTABLE), False),
+                _dir_record(b"EBOOT.BIN;1", 36, len(self.BETA_EXECUTABLE), False),
+            ], self._expected_identity(sfo, self.BETA_EXECUTABLE)),
+            "bad-record-before-eboot": (self.BETA_EXECUTABLE, None, [
+                junk,
+                _dir_record(b"EBOOT.BIN;1", 36, len(self.BETA_EXECUTABLE), False),
+            ], self._expected_identity(sfo, self.BETA_EXECUTABLE)),
+        }
+        for name, (eboot, boot_bytes, records, (key, digest)) in cases.items():
+            with self.subTest(case=name):
+                iso_file = self._with_sysdir(name, eboot, boot_bytes, records)
+                self._assert_identity_in_both_tiers(iso_file, key, digest)
+        self.assertEqual(self._expected_identity(sfo, self.BETA_EXECUTABLE)[0], self.BETA_KEY)
+
+        # A record of the wanted name whose copies of its location disagree still stops
+        # the search, in both tiers: EBOOT.BIN here, so the disc has no key.
+        bad_eboot = self._with_sysdir("eboot-conflicting", self.BETA_EXECUTABLE, None, [
+            self._conflicting(_dir_record(b"EBOOT.BIN;1", 36, len(self.BETA_EXECUTABLE), False)),
+        ])
+        self._assert_refused_in_both_tiers(
+            bad_eboot,
+            f"PARAM.SFO names this disc '{self.BETA_DISC_ID}', which is not a retail disc ID, "
+            "and PSP_GAME/SYSDIR/EBOOT.BIN is missing or unreadable, so the disc cannot be "
+            "identified by its contents",
+        )
+
+    def test_a_disc_without_a_title_is_named_after_the_key_its_entry_holds(self) -> None:
+        """Review R4 of PR #2855: a prototype disc whose PARAM.SFO has no TITLE is named
+        "PSP Title (<key>)"; added again under the v1 key its entry holds, it is named after
+        that key in both tiers, not after its v2 key."""
+        sfo = build_param_sfo(self.BETA_DISC_ID, "")
+        iso_file = self.temp_dir / "proto-untitled.iso"
+        create_test_iso_with_executables(
+            iso_file, bytes(2048), build_plain_mips_elf(), disc_id=self.BETA_DISC_ID, title="",
+        )
+        v1_key, _ = self._expected_identity(sfo, bytes(2048))
+        v2_key, _ = self._expected_boot_identity(sfo, bytes(2048), build_plain_mips_elf())
+        meta = inspect_iso(iso_file)
+        self.assertEqual((meta.disc_id, meta.title), (v2_key, f"PSP Title ({v2_key})"))
+        self.assertEqual(self._run_native_inspect(iso_file).get("TITLE"), f"PSP Title ({v2_key})")
+        old_record = {"disc_id": v1_key, "iso_path": str(self.temp_dir / "elsewhere.iso")}
+        keyed = iso_inspect.metadata_for_new_library_record(meta, [old_record])
+        self.assertEqual((keyed.disc_id, keyed.title), (v1_key, f"PSP Title ({v1_key})"))
+        library = self.temp_dir / "untitled-library.json"
+        self._write_library(library, [old_record])
+        lines = self._native_library_key(iso_file, library)
+        self.assertEqual((lines.get("ADD"), lines.get("TITLE")),
+                         ([f"{v1_key}:1"], [f"PSP Title ({v1_key})"]))
+        fresh = self.temp_dir / "untitled-fresh-library.json"
+        self._write_library(fresh, [])
+        self.assertEqual(self._native_library_key(iso_file, fresh).get("TITLE"),
+                         [f"PSP Title ({v2_key})"])
 
     def test_non_retail_key_stays_v1_unless_boot_bin_is_the_boot_file(self) -> None:
         """A disc that boots its EBOOT.BIN keeps its v1 key byte for byte, whatever BOOT.BIN

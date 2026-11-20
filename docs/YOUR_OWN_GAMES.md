@@ -131,9 +131,11 @@ card.
   entry that holds its v2 key if there is one, else one that holds its v1 key, so
   it finds that entry rather than adding a second one; only a prototype disc with
   neither gets a new entry, under the v2 key. An entry of one kind never stands
-  for the other, and nothing is renamed, moved or deleted. A compressed disc
-  image is expanded into `discs/<key>` under the key its entry holds, so removing
-  the title removes the expansion too.
+  for the other, and no entry, package, title folder or save is renamed, moved or
+  deleted. A compressed disc image is expanded into `discs/<key>` under the key
+  its entry holds, by the player and by `nk_cli.py` alike (it reads the
+  `library.json` in its data folder), and an expansion made earlier under the
+  disc's other key moves there, so removing the title removes the expansion too.
 - **What stays as it was.** An old entry under the v1 key and a sibling build
   that differs from it only in `BOOT.BIN` have the same v1 key, so the library
   still treats them as one entry; remove the entry and add each disc again to
@@ -147,7 +149,9 @@ card.
   empty one and no `BOOT.BIN`) cannot be told apart from other discs and is
   refused, as is a disc without a usable `PARAM.SFO`. When `EBOOT.BIN` is empty
   or all zeros and `BOOT.BIN` is what cannot be read, the refusal names
-  `BOOT.BIN`. A library record whose `disc_key_version` is not 0, 1 or 2 stops
+  `BOOT.BIN`; that includes a truncated copy whose `BOOT.BIN` lies past the end
+  of the image. Such a copy could not start a game before either (no executable
+  could be chosen); an entry it has in the library can still be removed. A library record whose `disc_key_version` is not 0, 1 or 2 stops
   the bring-up as `LIBRARY_RECORD_INVALID`, naming the record and the field.
 
 A beta added before this rule existed, under an ID like `ABCD12345`, now reads

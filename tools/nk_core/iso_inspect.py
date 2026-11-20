@@ -842,16 +842,19 @@ def _non_retail_identity(
     # The v2 key is chosen by the disc's structure alone (nk_iso_non_retail_identity): an
     # empty or zero-filled EBOOT.BIN and a BOOT.BIN file of 1 byte to MAX_EXECUTABLE_BYTES,
     # whatever it holds, so no rule about what an executable may contain moves a disc
-    # between keys. A malformed BOOT.BIN record is refused by name; one outside the image
-    # is no BOOT.BIN, as the C reader skips it (nk_iso_find_in_dir).
+    # between keys. A BOOT.BIN that cannot be resolved is refused by name, and so is one
+    # whose only records lie outside the image (a truncated dump), which must not quietly
+    # get the v1 key (nk_iso_non_retail_identity reads both the same way).
     boot_keyed = False
     if eboot_kind == "EMPTY_OR_ZERO_FILLED":
         try:
-            boot_entry = _lookup_iso_file(stream, file_size, NON_RETAIL_BOOT_EXECUTABLE)
-        except _ExtentOutsideImage:
-            boot_entry = None
+            boot_entry, boot_outside = _lookup_iso_file_detail(
+                stream, file_size, NON_RETAIL_BOOT_EXECUTABLE
+            )
         except IsoInspectionError as exc:
             raise boot_refusal from exc
+        if boot_entry is None and boot_outside:
+            raise boot_refusal
         if boot_entry is not None and 0 < boot_entry[1] <= MAX_EXECUTABLE_BYTES:
             boot_keyed = True
             parts.append(boot_entry)
@@ -977,10 +980,15 @@ def keyed_as_legacy(
         registry or get_default_registry(), meta.legacy_disc_id, True, meta.version,
         meta.region, dict(meta.param_sfo_facts), user_data_root,
     )
+    # A name inspect_iso made from the v2 key (PARAM.SFO has no TITLE) is made again from
+    # the v1 key, as nk_iso_title_for_key does in the player.
+    title = meta.title
+    if title == f"PSP Title ({meta.disc_id})":
+        title = f"PSP Title ({meta.legacy_disc_id})"
     return dataclasses.replace(
         meta, disc_id=meta.legacy_disc_id, identity_sha256=meta.legacy_identity_sha256,
         disc_key_version=1, legacy_disc_id="", legacy_identity_sha256="",
-        matched_profile=matched, qualification_error=qualification_error,
+        matched_profile=matched, qualification_error=qualification_error, title=title,
     )
 
 
@@ -1662,6 +1670,22 @@ def _native_component_bytes(name: bytes) -> bytes:
 
 
 def _lookup_iso_file(stream, file_size: int, path: tuple[str, ...]) -> tuple[int, int] | None:
+    return _lookup_iso_file_detail(stream, file_size, path)[0]
+
+
+def _lookup_iso_file_detail(
+    stream, file_size: int, path: tuple[str, ...]
+) -> tuple[tuple[int, int] | None, bool]:
+    """The file at path and whether a record of its last component's name was passed over
+    because its extent leaves the image.
+
+    The rule nk_iso_find_in_dir in src/core/nk_iso.c shares (tests/parity keep the two
+    in step): a directory whose bytes cannot be read, or that holds a record whose length
+    or name runs past it, is refused. Records are read in their order; only a record with
+    the wanted name has its location read: when its both-endian copies disagree the
+    lookup is refused, and when its extent leaves the image it is passed over and the
+    search goes on to a later record of the name. The first record of the name inside
+    the image is the result."""
     stream.seek(PVD_SECTOR * SECTOR_SIZE)
     pvd = stream.read(SECTOR_SIZE)
     if len(pvd) != SECTOR_SIZE or pvd[:7] != ISO_MAGIC:
@@ -1681,6 +1705,7 @@ def _lookup_iso_file(stream, file_size: int, path: tuple[str, ...]) -> tuple[int
                 "ISO path component is not representable as directory bytes"
             ) from exc
         found: tuple[int, int, bool] | None = None
+        outside = False
         offset = 0
         while offset < len(directory):
             record_size = directory[offset]
@@ -1699,15 +1724,21 @@ def _lookup_iso_file(stream, file_size: int, path: tuple[str, ...]) -> tuple[int
             # ';' version, and one trailing separator '.' ("DATA.;1") dropped.
             if name not in (b"\0", b"\1") and \
                     _native_component_bytes(_iso_name_without_version(name)).upper() == wanted:
-                found = _extent_from_record(record, file_size)
+                try:
+                    found = _extent_from_record(record, file_size)
+                except _ExtentOutsideImage:
+                    outside = True
+                    offset += record_size
+                    continue
                 break
             offset += record_size
+        last = index == len(path) - 1
         if found is None:
-            return None
+            return None, outside and last
         lba, size, is_dir = found
-        if index < len(path) - 1 and not is_dir:
-            return None
-    return (lba, size) if not is_dir else None
+        if not last and not is_dir:
+            return None, False
+    return ((lba, size) if not is_dir else None), False
 
 
 def _image_read(read, offset: int, count: int) -> bytes | None:
