@@ -1396,6 +1396,20 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         const char *blocked = player_app_achievements_block(app, -1);
         if (blocked) model.achievements_status = blocked;
     }
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    {
+        /* The RA account row's line each time it changes, in hex so every byte reads back. */
+        static char reported[sizeof(app->achievements_status) + 8];
+        const char *line = model.achievements_status ? model.achievements_status : "";
+        if (strcmp(reported, line) != 0) {
+            snprintf(reported, sizeof(reported), "%s", line);
+            printf("[PLAYER_UI_TEST] next_ui_settings_achievements enabled=%d status_hex=",
+                   model.achievements_enabled ? 1 : 0);
+            for (const char *c = line; *c; c++) printf("%02x", (unsigned)(unsigned char)*c);
+            printf("\n");
+        }
+    }
+#endif
     model.cheats = app->settings.cheats;
     model.cover_art_cache_size = app->cover_art_cache_size_label;
     model.share_system_libraries = app->settings.share_system_libraries;
@@ -4179,6 +4193,23 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 const char *blocked = player_app_achievements_block(app, index);
                 if (blocked) model.achievements_status = blocked;
             }
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+            {
+                /* The card's status line each time it changes, in hex so every byte reads back. */
+                static char reported[PLAYER_ACHIEVEMENT_LINE_MAX + MAX_DISC_ID_LEN + 8];
+                char now[sizeof(reported)];
+                snprintf(now, sizeof(now), "%s|%s", game->disc_id,
+                         model.achievements_status ? model.achievements_status : "");
+                if (strcmp(reported, now) != 0) {
+                    snprintf(reported, sizeof(reported), "%s", now);
+                    printf("[PLAYER_UI_TEST] next_ui_title_achievements disc=%s status_hex=",
+                           game->disc_id);
+                    for (const char *c = model.achievements_status; c && *c; c++)
+                        printf("%02x", (unsigned)(unsigned char)*c);
+                    printf("\n");
+                }
+            }
+#endif
             /* The build check's refusal is on the page only while the build
                waits for it; so are the files it waits for (#308). */
             player_ui_input_guide(&model.input_guide,

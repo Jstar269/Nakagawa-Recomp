@@ -1084,6 +1084,46 @@ void player_ui_test_prepare_app(PlayerUiTest *t, PlayerApp *app) {
             app->child_window_ready = !starting;
         }
     }
+    /* RetroAchievements' signed-in states for the pictures of its rows and its title card
+       (#1316). A UI regression run never signs in or reaches a server, so the state is set
+       here: "signed-in" is an account with no set loaded; "list:<disc ID>" adds a softcore set
+       of eight synthetic achievements for that title, as the player lists one. */
+    const char *achievements = t->mode ? getenv("NK_UI_TEST_ACHIEVEMENTS") : NULL;
+    if (achievements && achievements[0]) {
+        app->achievements_store_available = true;
+        app->achievements_signed_in = true;
+        snprintf(app->achievements_account, sizeof(app->achievements_account), "%s",
+                 "SampleAccount");
+        snprintf(app->achievements_status, sizeof(app->achievements_status), "%s",
+                 "Signed in. Softcore only.");
+        if (strncmp(achievements, "list:", 5) == 0) {
+            static const struct { bool unlocked; unsigned points; const char *title; } k_set[] = {
+                {true, 5u, "First Steps"},
+                {true, 10u, "Warm-Up Rally"},
+                {false, 10u, "Straight Sets"},
+                {false, 25u, "Comeback from Love-Forty"},
+                {false, 25u, "Every Court in One Season"},
+                {false, 50u, "Champion of the Hot Shots Cup, Undefeated on Every Surface"},
+                {true, 5u, "Practice Makes Perfect"},
+                {false, 100u, "Grand Slam"},
+            };
+            const size_t count = sizeof(k_set) / sizeof(k_set[0]);
+            app->achievements_list_loaded = true;
+            snprintf(app->achievements_list_disc_id, sizeof(app->achievements_list_disc_id),
+                     "%s", achievements + 5);
+            for (size_t i = 0; i < count && i < PLAYER_ACHIEVEMENTS_LIST_MAX; i++) {
+                snprintf(app->achievements_list_lines[i], sizeof(app->achievements_list_lines[i]),
+                         "%s \xC2\xB7 %u points \xC2\xB7 %s",
+                         k_set[i].unlocked ? "Unlocked (softcore)" : "Locked", k_set[i].points,
+                         k_set[i].title);
+            }
+            app->achievements_list_count = count;
+            /* More than the page lists, so its "Showing n of m" line is in the picture. */
+            app->achievements_list_total = count + 4u;
+            snprintf(app->achievements_status, sizeof(app->achievements_status), "%s",
+                     "Softcore achievement set loaded: 3 of 12 unlocked.");
+        }
+    }
     if (t->error_code) {
         if (strcmp(t->error_code, "CLI_NOT_FOUND") == 0) {
             player_app_set_cli_not_found_error(app, "Back to library",

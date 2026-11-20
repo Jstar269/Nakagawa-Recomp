@@ -3517,6 +3517,128 @@ class NativePlayerUiTests(unittest.TestCase):
                        "unsupported."],
                 "no credential store here: the row is its reason, and nothing is asked")
 
+    # #1316: why a title earns nothing (player_state.c achievements_block_reason).
+    ACHIEVEMENTS_CHEATS_REASON = ("Achievements are off while cheats are on: nothing is earned "
+                                  "in a changed game.")
+    ACHIEVEMENTS_TIMING_REASON = ("Achievements are off with 60 FPS game logic, which changes "
+                                  "the game's speed.")
+    # Down to the foot of a game's page, which brings its RetroAchievements card into view.
+    TO_PAGE_FOOT = ("KEY_DOWN", "WAIT_MS=80") * 6
+    # Settings > Online and developer. Tab goes by the order the hub declares its controls in,
+    # whatever the window and text size (the arrows go by position, which Larger text moves):
+    # sixteen stops from Resolution to Online and developer.
+    TO_ONLINE_PAGE = ("WAIT_MS=100", *(("KEY_TAB", "WAIT_MS=40") * 16), "KEY_RETURN",
+                      "WAIT_MS=100", "WAIT_LAID_OUT=5000")
+    OPEN_TITLE = ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300")
+    # The packaged TEST00006's page with Ace chosen on it, so its 60 FPS game-logic package is
+    # what it would launch. Tab goes by the page's declared order at every text size: three
+    # stops to Play mode, which steps Authentic, Enhanced, Ace (as the Enhanced walks do).
+    OPEN_TITLE_ACE = (*OPEN_TITLE, *(("KEY_TAB", "WAIT_MS=80") * 3),
+                      *(("KEY_RETURN", "WAIT_MS=120") * 3), "WAIT_MS=200")
+
+    @staticmethod
+    def achievements_lines(run: dict[str, object], kind: str) -> list[str]:
+        """Each status line the title card (kind "title", "<disc> <status>") or the Settings
+        RA account row (kind "settings") showed, decoded, in order."""
+        stdout = str(run["stdout"])
+        if kind == "title":
+            return [f"{disc} {bytes.fromhex(status).decode('utf-8')}" for disc, status in
+                    re.findall(r"next_ui_title_achievements disc=(\S+) status_hex=([0-9a-f]*)",
+                               stdout)]
+        return [bytes.fromhex(status).decode("utf-8") for status in
+                re.findall(r"next_ui_settings_achievements enabled=1 status_hex=([0-9a-f]*)",
+                           stdout)]
+
+    def test_next_ui_achievements_say_why_cheats_or_60_fps_turn_them_off(self) -> None:
+        """#1316: with RetroAchievements on, a game's page says that nothing is earned while
+        cheats are on, or with its 60 FPS game logic, before it starts; Settings says so while
+        cheats are on. Without either the page says how its set is loaded."""
+        if os.name != "nt":
+            self.skipTest("the Achievements switch needs Windows Credential Manager")
+        plain = self.next_ui_run("library", self.OPEN_TITLE, wait_background=True,
+                                 settings={"achievements_enabled": True})
+        title = self.achievements_lines(plain, "title")
+        self.assertTrue(title, plain["stdout"])
+        self.assertTrue(title[-1].endswith(
+            "Sign in in Settings > Online to load this game's softcore set."), title)
+        cheats = self.next_ui_run("library", self.OPEN_TITLE, wait_background=True,
+                                  settings={"achievements_enabled": True, "cheats": True})
+        title = self.achievements_lines(cheats, "title")
+        self.assertTrue(title and title[-1].endswith(self.ACHIEVEMENTS_CHEATS_REASON), title)
+        timing = self.next_ui_run(
+            "ready", self.OPEN_TITLE_ACE, post_build_ready=True, wait_background=True,
+            settings={"achievements_enabled": True},
+            enhancement_packages={"TEST00006": "display-smoke-v1"})
+        title = self.achievements_lines(timing, "title")
+        self.assertTrue(title, timing["stdout"])
+        self.assertEqual(title[-1], f"TEST00006 {self.ACHIEVEMENTS_TIMING_REASON}")
+        online = self.next_ui_run("settings", self.TO_ONLINE_PAGE + ("WAIT_MS=200",),
+                                  settings={"achievements_enabled": True, "cheats": True})
+        said = self.achievements_lines(online, "settings")
+        self.assertTrue(said and said[-1] == self.ACHIEVEMENTS_CHEATS_REASON, said)
+
+    # The pictures of RetroAchievements' screens a review looks at (#1316): (name, view, events,
+    # run arguments, NK_UI_TEST_ACHIEVEMENTS). Each is taken at both window sizes and text sizes.
+    # On Settings the focus ends on Back, past the Achievements rows: at Larger text the page
+    # scrolls to show the focused control, and Back brings the last row's sentence into view.
+    RA_SCREENSHOTS: tuple[tuple[str, str, tuple[str, ...], dict[str, object], str], ...] = (
+        ("ra-settings-off", "settings", TO_ONLINE_PAGE + ("KEY_DOWN",) * 5, {}, ""),
+        ("ra-settings-on-sign-in", "settings", TO_ONLINE_PAGE + ("KEY_DOWN",) * 6,
+         {"settings": {"achievements_enabled": True}}, ""),
+        ("ra-settings-signed-in", "settings", TO_ONLINE_PAGE + ("KEY_DOWN",) * 6,
+         {"settings": {"achievements_enabled": True}}, "signed-in"),
+        ("ra-settings-cheats-off", "settings", TO_ONLINE_PAGE + ("KEY_DOWN",) * 6,
+         {"settings": {"achievements_enabled": True, "cheats": True}}, "signed-in"),
+        ("ra-title-list", "library", OPEN_TITLE + TO_PAGE_FOOT,
+         {"wait_background": True, "settings": {"achievements_enabled": True}},
+         "list:TEST00005"),
+        ("ra-title-cheats-off", "library", OPEN_TITLE + TO_PAGE_FOOT,
+         {"wait_background": True, "settings": {"achievements_enabled": True, "cheats": True}},
+         "signed-in"),
+        ("ra-title-60fps-off", "ready", OPEN_TITLE_ACE + TO_PAGE_FOOT,
+         {"post_build_ready": True, "wait_background": True,
+          "settings": {"achievements_enabled": True},
+          "enhancement_packages": {"TEST00006": "display-smoke-v1"}}, "signed-in"),
+    )
+    RA_WINDOWS = ((1280, 720, 100), (1280, 720, 150), (960, 540, 100), (960, 540, 150))
+
+    def test_next_ui_achievements_screenshots_when_requested(self) -> None:
+        """With NAKAGAWA_PLAYER_UI_RA_SCREENSHOTS naming a folder, writes the UI-test player's
+        own last frame of each RA_SCREENSHOTS entry there (<name>-<w>x<h>-<text size>.bmp) at
+        each RA_WINDOWS size. Skipped, and reported as skipped, without the variable or off
+        Windows, where the switch is unavailable."""
+        screenshot_dir = os.environ.get("NAKAGAWA_PLAYER_UI_RA_SCREENSHOTS")
+        if not screenshot_dir:
+            self.skipTest("NAKAGAWA_PLAYER_UI_RA_SCREENSHOTS names no folder")
+        if os.name != "nt":
+            self.skipTest("the Achievements switch needs Windows Credential Manager")
+        output = Path(screenshot_dir)
+        for name, view, events, kwargs, fixture in self.RA_SCREENSHOTS:
+            for width, height, text_size in self.RA_WINDOWS:
+                picture = f"{name}-{width}x{height}-{text_size}"
+                with self.subTest(picture=picture):
+                    run_kwargs = dict(kwargs)
+                    settings = dict(run_kwargs.pop("settings", {}))  # type: ignore[call-overload]
+                    if text_size != 100:
+                        settings["text_size"] = text_size
+                    env = {"NK_UI_TEST_ACHIEVEMENTS": fixture} if fixture else None
+                    run = self.next_ui_run(view, events + ("WAIT_MS=250",), width=width,
+                                           height=height, settings=settings, env_extra=env,
+                                           screenshot_path=output / (picture + ".bmp"),
+                                           **run_kwargs)
+                    self.assertTrue((output / (picture + ".bmp")).is_file(), picture)
+                    # The picture is of the page it names: the Achievements rows passed on the
+                    # way to Back, or the title card of the game it opened.
+                    if view == "settings":
+                        trail = self.focus_trail(run)
+                        self.assertEqual(trail[-1], self.SETTINGS_FOCUS["back"], (picture, trail))
+                        self.assertIn(self.SETTINGS_ACHIEVEMENTS, trail, (picture, trail))
+                    else:
+                        disc = "TEST00006" if view == "ready" else "TEST00005"
+                        shown = self.achievements_lines(run, "title")
+                        self.assertTrue(shown and shown[-1].startswith(disc), (picture, shown))
+                        self.assertFalse(self.enhanced_pages(run), (picture, "left the page"))
+
     def test_next_ui_motion_tab_changes_frame_pacing(self) -> None:
         """Frame pacing keeps its fps_cap values under Enhanced > Motion: E moves from Picture
         to the Motion tab, Down from the tab is Smooth motion and then Frame pacing, and the
