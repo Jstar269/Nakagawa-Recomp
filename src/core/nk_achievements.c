@@ -7,10 +7,12 @@
 
 #include "nk_iso.h"
 #include "nk_platform.h"
+#include "nk_psp_keystore.h"
 #include "rc_client.h"
 #include "rc_consoles.h"
 #include "rc_api_request.h"
 #include "rc_api_runtime.h"
+#include "rc_util.h"
 #include "rhash/md5.h"
 
 #include <stdio.h>
@@ -92,6 +94,7 @@ struct NkAch {
     bool outbound_busy;    /* the transport holds a request it has not answered */
     bool outbound_pumping; /* ach_outbound_pump is on the stack */
     bool closing; /* nk_ach_destroy ran: freed when the transport answers what it holds */
+    bool offline; /* nk_ach_set_online(false): nothing reaches the transport */
 };
 
 static void ach_enter(const NkAch *ach) {
@@ -418,8 +421,7 @@ static char *ach_copy_string(const char *text) {
 
 static void ach_clear_free(char *text) {
     if (!text) return;
-    volatile char *bytes = text;
-    while (*bytes) *bytes++ = '\0';
+    nk_secure_zero(text, strlen(text));
     free(text);
 }
 
@@ -455,7 +457,7 @@ static void ach_outbound_done(const NkAchResponse *response, void *done_ctx) {
 static void ach_outbound_pump(NkAch *ach) {
     if (ach->outbound_pumping) return;
     ach->outbound_pumping = true;
-    while (ach->transport && !ach->outbound_busy && ach->outbound_head) {
+    while (ach->transport && !ach->offline && !ach->outbound_busy && ach->outbound_head) {
         AchOutbound *outbound = ach->outbound_head;
         ach->outbound_head = outbound->next;
         if (!ach->outbound_head) ach->outbound_tail = NULL;
@@ -645,6 +647,33 @@ static void ach_refuse(rc_client_server_callback_t callback, void *callback_data
     callback(&server, callback_data);
 }
 
+/* True for a request that records play as hardcore: a leaderboard entry (rc_client submits them
+ * in hardcore only) or any request whose "h" field (award, start of session, ping: rcheevos'
+ * src/rapi/rc_api_runtime.c and rc_api_user.c) is not 0. A field value is URL-encoded, so "&h="
+ * inside one, such as the Rich Presence text, is "%26h%3D" and never matches. */
+static bool ach_request_claims_hardcore(const char *post_data) {
+    if (!post_data) return false;
+    if (strncmp(post_data, "r=submitlbentry&", 16u) == 0) return true;
+    for (const char *field = strstr(post_data, "&h="); field; field = strstr(field + 1, "&h=")) {
+        const char *value = field + 3;
+        if (value[0] != '0' || (value[1] != '\0' && value[1] != '&')) return true;
+    }
+    return false;
+}
+
+/* Clears every byte of rc_client's request buffer (rc_util.h). rc_client builds each request in
+ * a buffer it frees, unwiped, as soon as server_call returns; a sign-in's holds the password, the
+ * rest the token. The request is rc_client's own local (rc_client.c builds it on its stack and
+ * passes its address), so writing to it is defined; nothing reads it again before
+ * rc_api_destroy_request. */
+static void ach_scrub_request(const rc_api_request_t *request) {
+    rc_api_request_t *own = (rc_api_request_t *)request;
+    for (rc_buffer_chunk_t *chunk = &own->buffer.chunk; chunk; chunk = chunk->next) {
+        if (chunk->start && chunk->end > chunk->start)
+            nk_secure_zero(chunk->start, (size_t)(chunk->end - chunk->start));
+    }
+}
+
 static void RC_CCONV ach_server_call(const rc_api_request_t *request,
                                      rc_client_server_callback_t callback, void *callback_data,
                                      rc_client_t *client) {
@@ -657,8 +686,14 @@ static void RC_CCONV ach_server_call(const rc_api_request_t *request,
         ach_refuse(callback, callback_data, k_closing);
         return;
     }
-    if (!ach->transport) {
+    if (!ach->transport || ach->offline) {
         ach_refuse(callback, callback_data, "refused: online achievements are off");
+        return;
+    }
+    if (ach_request_claims_hardcore(request->post_data)) {
+        /* Softcore only (nk_achievements.h): a request that would record a hardcore unlock or
+         * session never leaves, whatever turned hardcore on. */
+        ach_refuse(callback, callback_data, "refused: hardcore is not available");
         return;
     }
     AchCall *call = (AchCall *)calloc(1u, sizeof *call);
@@ -678,6 +713,9 @@ static void RC_CCONV ach_server_call(const rc_api_request_t *request,
     ach->sending_call = call;
     const bool kept = ach_send(ach, &out, ach_done, call);
     ach->sending_call = outer_call; /* call may be freed by now: only its address is compared */
+    /* ach_send kept its own copies: rc_client's request, which can hold a password or a token,
+     * is wiped before rc_client frees it. */
+    ach_scrub_request(request);
     if (!kept) {
         free(call);
         ach_refuse(callback, callback_data, "refused: out of memory");
@@ -821,6 +859,17 @@ static bool ach_client_ready_for(NkAch *ach, const char *username) {
     return true;
 }
 
+/* Softcore only (nk_achievements.h): whatever turned hardcore on in rc_client, it is off again
+ * before rc_client evaluates, signs in or loads a game. Turning hardcore on with a game loaded
+ * stops rc_client's evaluation until rc_client_reset (rc_client.h, rc_client_set_hardcore_enabled),
+ * so the reset follows: every achievement starts over in softcore, which can only delay an
+ * unlock, never make one. */
+static void ach_softcore(NkAch *ach) {
+    if (!rc_client_get_hardcore_enabled(ach->client)) return;
+    rc_client_set_hardcore_enabled(ach->client, 0);
+    if (rc_client_is_game_loaded(ach->client)) rc_client_reset(ach->client);
+}
+
 NkAch *nk_ach_create(const NkAchMemory *mem, NkAchTransport transport, void *transport_ctx) {
     NkAch *ach = (NkAch *)calloc(1u, sizeof *ach);
     if (!ach) return NULL;
@@ -926,6 +975,7 @@ bool nk_ach_begin_login(NkAch *ach, const char *username, const char *token) {
     if (!ach || !username || !*username || !token || !*token) return false;
     ach_enter(ach);
     const bool ready = ach_client_ready_for(ach, username);
+    ach_softcore(ach);
     /* rc_client returns no handle for a call it finished at once; either way the outcome
      * arrives as an event. */
     if (ready)
@@ -959,6 +1009,7 @@ bool nk_ach_begin_login_with_password(NkAch *ach, const char *username, const ch
     ach_enter(ach);
     ach_token_retry_end(ach);
     const bool ready = ach_client_ready_for(ach, username);
+    ach_softcore(ach);
     if (ready)
         (void)rc_client_begin_login_with_password(ach->client, username, password,
                                                   ach_login_done, NULL);
@@ -1071,6 +1122,7 @@ bool nk_ach_begin_load_game(NkAch *ach, const char *hash) {
     if (!ach || !ach_hash_ok(hash)) return false;
     ach_enter(ach);
     snprintf(ach->game_hash, sizeof ach->game_hash, "%s", hash);
+    ach_softcore(ach);
     (void)rc_client_begin_load_game(ach->client, hash, ach_load_done, NULL);
     ach_leave(ach);
     return true;
@@ -1079,6 +1131,7 @@ bool nk_ach_begin_load_game(NkAch *ach, const char *hash) {
 void nk_ach_frame(NkAch *ach) {
     if (!ach) return;
     ach_enter(ach);
+    ach_softcore(ach);
     rc_client_do_frame(ach->client);
     ach_leave(ach);
 }
@@ -1086,6 +1139,7 @@ void nk_ach_frame(NkAch *ach) {
 void nk_ach_idle(NkAch *ach) {
     if (!ach) return;
     ach_enter(ach);
+    ach_softcore(ach);
     rc_client_idle(ach->client);
     ach_leave(ach);
 }
@@ -1192,6 +1246,7 @@ static void RC_CCONV ach_pending_replay_done(const NkAchResponse *response, void
         /* Sent for an account that has ended (ach_account_requests_end), or answered after
          * nk_ach_destroy: its answer is not the next account's, whose records may name the same
          * game and achievement, and a closing bridge keeps no records. */
+        ach_scrub_request(&replay->request);
         rc_api_destroy_request(&replay->request);
         free(replay);
         ach_leave(ach);
@@ -1229,13 +1284,14 @@ static void RC_CCONV ach_pending_replay_done(const NkAchResponse *response, void
         break;
     }
     ach->pending_replay_inflight = false;
+    ach_scrub_request(&replay->request);
     rc_api_destroy_request(&replay->request);
     free(replay);
     ach_leave(ach);
 }
 
 static void ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {
-    if (!ach->transport || ach->pending_replay_inflight ||
+    if (!ach->transport || ach->offline || ach->pending_replay_inflight ||
         ach->pending_replay_blocked || now_ms < ach->pending_replay_after_ms) return;
     const rc_client_user_t *user = rc_client_get_user_info(ach->client);
     if (!user || !user->username || !user->token) return;
@@ -1277,6 +1333,7 @@ static void ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {
     if (rc_api_init_award_achievement_request(&replay->request, &params) != RC_OK ||
         !replay->request.url || !replay->request.post_data ||
         !nk_ach_url_allowed(replay->request.url)) {
+        ach_scrub_request(&replay->request);
         rc_api_destroy_request(&replay->request);
         free(replay);
         ach_push(ach, NK_ACH_EVENT_SERVER_ERROR, unlock.achievement_id, 0u, 0u, NULL,
@@ -1297,6 +1354,7 @@ static void ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {
     if (!ach_send(ach, &replay->transport_request, ach_pending_replay_done, replay)) {
         ach->pending_replay_inflight = false;
         ach->pending_replay_after_ms = ach_replay_retry_after(now_ms);
+        ach_scrub_request(&replay->request);
         rc_api_destroy_request(&replay->request);
         free(replay);
     }
@@ -1568,6 +1626,123 @@ bool nk_ach_save_queue_file(NkAch *ach, const char *path) {
     if (ok && nk_rename_utf8(tmp_path, path) != 0) ok = false;
     if (!ok && file) (void)nk_remove_utf8(tmp_path);
     return ok;
+}
+
+void nk_ach_set_online(NkAch *ach, bool online) {
+    if (!ach) return;
+    ach_enter(ach);
+    const bool was_offline = ach->offline;
+    ach->offline = !online;
+    if (!online && !was_offline) {
+        ach_token_retry_end(ach);
+        /* Requests still waiting their turn are answered here, never sent. The one the transport
+         * holds still gets its answer (NkAchTransport). */
+        AchOutbound *waiting = ach->outbound_head;
+        ach->outbound_head = NULL;
+        ach->outbound_tail = NULL;
+        while (waiting) {
+            AchOutbound *outbound = waiting;
+            waiting = outbound->next;
+            const NkAchResponse refused = {NULL, 0u, NK_ACH_HTTP_CLIENT_ERROR};
+            outbound->done(&refused, outbound->done_ctx);
+            ach_outbound_free(outbound);
+        }
+    } else if (online && was_offline) {
+        ach_outbound_pump(ach);
+    }
+    ach_leave(ach);
+}
+
+bool nk_ach_online(const NkAch *ach) {
+    if (!ach) return false;
+    ach_enter(ach);
+    const bool online = !ach->offline && ach->transport != NULL;
+    ach_leave(ach);
+    return online;
+}
+
+/* The numeric part of version: one to four dot-separated runs of digits, followed by nothing or
+ * by a pre-release or build suffix ("-dev", "+abc"), which RetroAchievements' user agent rule has
+ * no place for. 0 when version does not start that way. */
+static size_t ach_numeric_version(const char *version) {
+    size_t length = 0u;
+    unsigned components = 0u;
+    if (!version) return 0u;
+    for (;;) {
+        const size_t start = length;
+        while (version[length] >= '0' && version[length] <= '9') length++;
+        if (length == start || length - start > 9u) return 0u;
+        components++;
+        if (version[length] != '.') break;
+        if (components == 4u) return 0u;
+        length++;
+    }
+    const char next = version[length];
+    return (next == '\0' || next == '-' || next == '+') ? length : 0u;
+}
+
+bool nk_ach_user_agent(const char *version, const char *system, char *out, size_t out_size) {
+    if (!out || out_size == 0u) return false;
+    out[0] = '\0';
+    const size_t version_length = ach_numeric_version(version);
+    if (version_length == 0u) return false;
+    char clause[64];
+    if (rc_client_get_user_agent_clause(NULL, clause, sizeof clause) == 0u || !clause[0])
+        return false;
+    /* The system part is printable ASCII without parentheses, which would end it early. */
+    char system_part[NK_ACH_USER_AGENT_SYSTEM_MAX];
+    size_t system_length = 0u;
+    for (const char *p = system ? system : ""; *p; p++) {
+        const unsigned char c = (unsigned char)*p;
+        if (c < 0x20u || c > 0x7eu || c == '(' || c == ')') return false;
+        if (system_length + 1u >= sizeof system_part) return false;
+        system_part[system_length++] = (char)c;
+    }
+    while (system_length > 0u && system_part[system_length - 1u] == ' ') system_length--;
+    system_part[system_length] = '\0';
+    const int written =
+        system_length
+            ? snprintf(out, out_size, "%s/%.*s (%s) %s", NK_ACH_USER_AGENT_PRODUCT,
+                       (int)version_length, version, system_part, clause)
+            : snprintf(out, out_size, "%s/%.*s %s", NK_ACH_USER_AGENT_PRODUCT,
+                       (int)version_length, version, clause);
+    if (written <= 0 || (size_t)written >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+void nk_ach_reset(NkAch *ach) {
+    if (!ach) return;
+    ach_enter(ach);
+    rc_client_reset(ach->client);
+    ach_leave(ach);
+}
+
+size_t nk_ach_progress_size(NkAch *ach) {
+    if (!ach) return 0u;
+    ach_enter(ach);
+    const size_t size = rc_client_progress_size(ach->client);
+    ach_leave(ach);
+    return size;
+}
+
+bool nk_ach_serialize_progress(NkAch *ach, uint8_t *out, size_t out_size) {
+    if (!ach || !out || out_size == 0u) return false;
+    ach_enter(ach);
+    const int result = rc_client_serialize_progress_sized(ach->client, out, out_size);
+    ach_leave(ach);
+    return result == RC_OK;
+}
+
+bool nk_ach_deserialize_progress(NkAch *ach, const uint8_t *data, size_t size) {
+    /* rcheevos takes the size as 32 bits (rc_runtime_deserialize_progress_sized). */
+    if (!ach || !data || size == 0u || size > UINT32_MAX) return false;
+    ach_enter(ach);
+    const int result = rc_client_deserialize_progress_sized(ach->client, data, size);
+    ach_leave(ach);
+    return result == RC_OK;
 }
 
 struct rc_client_t *nk_ach_rc_client(NkAch *ach) {

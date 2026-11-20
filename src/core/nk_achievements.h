@@ -15,7 +15,10 @@
  * is sent and every request fails as a refused client call.
  *
  * Softcore only: hardcore mode needs RetroAchievements' compliance review first, so
- * nk_ach_create turns hardcore off and nothing here turns it on. */
+ * nk_ach_create turns hardcore off and nothing here turns it on. No setting, environment
+ * variable or file reaches it either: the bridge turns hardcore off again before rc_client
+ * evaluates a frame, signs in or loads a game, and refuses any request that would record
+ * hardcore play (an "h" field other than 0, or a leaderboard entry). */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -36,6 +39,10 @@ extern "C" {
 #define NK_ACH_CONSOLE_PSP 41u
 #define NK_ACH_PSP_USER_RAM_START 0x08800000u
 #define NK_ACH_PSP_USER_RAM_SIZE 0x01800000u
+/* The guest span that whole map covers, [0x08000000, 0x0C000000): what a caller that holds all
+ * of guest RAM hands the bridge (NkAchMemory), so every region rcheevos defines reads. */
+#define NK_ACH_PSP_MAP_GUEST_START 0x08000000u
+#define NK_ACH_PSP_MAP_GUEST_SIZE 0x04000000u
 
 /* Guest memory as the bridge may read it: the guest bytes [guest_start, guest_start + size)
  * live at host address base. A read outside that span reads nothing. */
@@ -193,9 +200,11 @@ bool nk_ach_begin_login(NkAch *ach, const char *username, const char *token);
  * calls nk_ach_begin_login. A sign-in the server answered, a password sign-in, nk_ach_logout and
  * nk_ach_sign_out end the retries. */
 bool nk_ach_token_login_due(NkAch *ach, uint64_t now_ms);
-/* Exchanges the password once for the RA token. The bridge retains no password after rcheevos
- * has constructed its request; the player must clear its input buffers and store only the token.
- * False as nk_ach_begin_login is. */
+/* Exchanges the password once for the RA token. The bridge keeps no password: it clears its own
+ * copy of the request when the transport has answered, and clears rcheevos' request buffer before
+ * rcheevos frees it (every request's, so the token's too). It cannot clear what it never sees: the
+ * caller's own buffers (the player clears its prompt's), the transport's (the player's clears its
+ * copy) and the operating system's. False as nk_ach_begin_login is. */
 bool nk_ach_begin_login_with_password(NkAch *ach, const char *username, const char *password);
 bool nk_ach_copy_user_token(const NkAch *ach, char *out, size_t out_size);
 bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size);
@@ -279,6 +288,42 @@ bool nk_ach_save_queue_file(NkAch *ach, const char *path);
  * `out` is smaller; the caller owns all copied strings. */
 size_t nk_ach_copy_achievement_list(const NkAch *ach, NkAchAchievement *out, size_t max,
                                     size_t *total);
+
+/* The user's Achievements switch. Off: nothing more reaches the transport. Requests waiting their
+ * turn are answered as refused and never sent, rc_client's own retries and saved unlocks stay
+ * unsent, and a token sign-in is not tried again; the request the transport already holds still
+ * gets its answer. On (the default) sends again. nk_ach_online is false while it is off or there
+ * is no transport. */
+void nk_ach_set_online(NkAch *ach, bool online);
+bool nk_ach_online(const NkAch *ach);
+
+/* The User-Agent every request carries, in the form RetroAchievements documents for a client
+ * (the rcheevos wiki, "rc_client integration"):
+ *   NakagawaRecomp/<version> (<system>) rcheevos/<rcheevos version>
+ * version is the player's version: only its numeric part ("0.1.0" of "0.1.0-dev") is sent, since
+ * RetroAchievements reads a version made of numbers. system names the operating system
+ * ("Windows 10.0.26100") and may be NULL or empty, which leaves out "(...)". The last part is
+ * rc_client_get_user_agent_clause's. False, with out empty, for a version with no numeric part,
+ * a system with a character other than printable ASCII or with a parenthesis, or an out too
+ * small. */
+#define NK_ACH_USER_AGENT_PRODUCT "NakagawaRecomp"
+#define NK_ACH_USER_AGENT_MAX 192u
+#define NK_ACH_USER_AGENT_SYSTEM_MAX 96u
+bool nk_ach_user_agent(const char *version, const char *system, char *out, size_t out_size);
+
+/* What rc_client asks of an emulator (rc_client.h, rc_client_reset and the progress functions):
+ * a caller that resets the guest (a title restarted from its start) calls nk_ach_reset before the
+ * next nk_ach_frame, and a caller that saves and loads guest state saves nk_ach_progress_size
+ * bytes from nk_ach_serialize_progress with it and hands them to nk_ach_deserialize_progress when
+ * it loads that state. Otherwise rc_client keeps the hit counts and earlier memory values of the
+ * guest that was replaced, and an achievement can unlock on a change that never happened in the
+ * game. The player has neither a guest reset nor a state load today (its runtime runs in its own
+ * process); the first one that ships must call these. nk_ach_deserialize_progress is false for no
+ * data, no game loaded, or data rcheevos refuses (it then resets every achievement). */
+void nk_ach_reset(NkAch *ach);
+size_t nk_ach_progress_size(NkAch *ach);
+bool nk_ach_serialize_progress(NkAch *ach, uint8_t *out, size_t out_size);
+bool nk_ach_deserialize_progress(NkAch *ach, const uint8_t *data, size_t size);
 
 /* The rc_client behind ach, for the bridge's own tests: they point it at another host to prove
  * that the request gate refuses it. Nothing else needs it. */
