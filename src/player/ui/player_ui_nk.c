@@ -1423,7 +1423,9 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         }
         model.online_play_servers = player->settings_online_play_servers;
         model.online_play_server_count = rows;
-        model.online_play_server_label = label ? label : "Your own server";
+        /* NULL where no list names it: a host typed in, or a downloaded list's entry while that
+           list (kept one session) is not loaded; the page then says "Server in use". */
+        model.online_play_server_label = label;
         model.online_play_list_status = app->online_play_list_status;
         model.online_play_list_busy = app->online_play_list_busy;
         model.online_play_list_live = app->online_play_list_live;

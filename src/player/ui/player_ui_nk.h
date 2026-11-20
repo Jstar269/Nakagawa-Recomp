@@ -897,7 +897,7 @@ typedef struct {
     bool online_play;
     const char *online_play_row_value;    /* "Off" or "On: socom.cc" */
     const char *online_play_server;       /* current host[:port] */
-    const char *online_play_server_label; /* the picker's name for it, or "Your own server" */
+    const char *online_play_server_label; /* the picker's name for it, or NULL: no list names it */
     const char *online_play_status;       /* what is in effect, or the last change's notice */
     const char *online_play_console_id;   /* "a4:a1:b2:c3:d4:e5", or why there is none */
     bool online_play_console_id_shown;    /* the line above is an ID */

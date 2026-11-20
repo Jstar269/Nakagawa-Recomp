@@ -1993,20 +1993,36 @@ static OnlinePlayRowLayout settings_online_play_layout(NkUi *ui, bool beside, co
     return layout;
 }
 
-/* Whether the list showed `id` only in part in the last layout: it is then drawn blank at its
-   height (*height), so no line is ever cut at the list's edge. A row with focus is drawn: it is
-   being brought into view. */
-static bool settings_online_play_cut(NkUi *ui, NkUiId id, float *height) {
+/* Whether the list showed `id` only in part in the last layout, whether or not it has focus;
+   *height is its height then. */
+static bool settings_online_play_part_shown(NkUi *ui, NkUiId id, float *height) {
     NkUiScrollState state;
     NkUiRect view;
     NkUiRect rect;
     if (!nk_ui_scroll_state(ui, SET_ID_ONLINE_PLAY_LIST, &state) || state.max_offset <= 0.5f ||
         !nk_ui_element_rect(ui, SET_ID_ONLINE_PLAY_LIST, &view) ||
-        !nk_ui_element_rect(ui, id, &rect) || nk_ui_button_focused(ui, id)) {
+        !nk_ui_element_rect(ui, id, &rect)) {
         return false;
     }
     *height = rect.h;
     return rect.y < view.y - 0.5f || rect.y + rect.h > view.y + view.h + 0.5f;
+}
+
+/* Whether `id` is drawn blank at its height (*height), so no line is ever cut at the list's
+   edge: the list showed it only in part. A row with focus is drawn: it is being brought into
+   view. */
+static bool settings_online_play_cut(NkUi *ui, NkUiId id, float *height) {
+    return !nk_ui_button_focused(ui, id) && settings_online_play_part_shown(ui, id, height);
+}
+
+/* A click on what shows of a row the list cuts (the strip at its edge, drawn blank) focuses the
+   row, which then comes into view, and opens nothing: the player has not seen what it names.
+   The press already focuses it, so the test is the row's place in the last layout, not whether
+   it was drawn blank; a key or a button press (no pointer over the row) is not refused. */
+static bool settings_online_play_take(NkUi *ui, NkUiId id) {
+    float height = 0.0f;
+    const bool hidden = nk_ui_hovered(ui, id) && settings_online_play_part_shown(ui, id, &height);
+    return nk_ui_take_activation(ui, id) && !hidden;
 }
 
 /* One server: the row is the button. `host` is the mono line (the format to type, muted, on
@@ -2072,7 +2088,7 @@ static bool settings_online_play_row(NkUi *ui, NkUiId id, const char *name, cons
         }
     }
     nk_ui_end_container(ui);
-    return nk_ui_take_activation(ui, id);
+    return settings_online_play_take(ui, id);
 }
 
 /* The own server's Port offset button, beside its row; while the list cuts it, a blank of its
@@ -2086,7 +2102,12 @@ static bool settings_online_play_port(NkUi *ui, const char *label, NkUiId up, Nk
                                        sizing_fixed(height), 0.0f);
         nk_ui_register_button_between(ui, id, 0u, up, down);
         if (nk_ui_begin_container(ui, id, &blank, NULL)) nk_ui_end_container(ui);
-        return nk_ui_take_activation(ui, id);
+        return settings_online_play_take(ui, id);
+    }
+    if (nk_ui_hovered(ui, id) && settings_online_play_part_shown(ui, id, &height)) {
+        /* Focused by the press on its cut strip: drawn, coming into view, not yet opened. */
+        (void)nk_ui_button_between(ui, id, label, 0u, up, down);
+        return false;
     }
     return nk_ui_button_between(ui, id, label, 0u, up, down);
 }
@@ -2401,7 +2422,8 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         const char *switch_sentence = model->online_play ? SCR_ONLINE_PLAY_ON_SENTENCE
                                                          : SCR_ONLINE_PLAY_OFF_SENTENCE;
         const char *server = safe_text(model->online_play_server, NK_ADHOC_DEFAULT_SERVER);
-        const char *server_name = safe_text(model->online_play_server_label, "Your own server");
+        /* No list names the server (typed in, or from PPSSPP's list while it is not loaded). */
+        const char *server_name = safe_text(model->online_play_server_label, "Server in use");
         char server_label[NK_ADHOC_SERVER_MAX_LEN + 16u];
         char server_sentence[NK_ADHOC_SERVER_MAX_LEN + 192u];
         bool server_fits;
@@ -2633,6 +2655,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         bool shipped_beside = true;
         bool listed_beside = true;
         bool own_current;
+        const char *own_name;
         bool any_listed = false;
         OnlinePlayRowLayout shipped;
         OnlinePlayRowLayout from_list;
@@ -2696,8 +2719,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         /* The port offset beside the own server's row while that leaves the row half the
            width, else under it. */
         if (own_width < 0.5f * row_width) own_width = row_width;
+        /* A server in use that no row lists (one typed in, or a list entry while the list is
+           not loaded: it lasts one session) is named for what it is, not for where it came
+           from, which the settings do not keep. */
+        own_name = own_current ? "Server in use" : "Your own server";
         own = settings_online_play_layout(
-            ui, settings_online_play_fits_beside(ui, "Your own server",
+            ui, settings_online_play_fits_beside(ui, own_name,
                                                  own_current ? server : SCR_ONLINE_PLAY_OWN_FORMAT,
                                                  NULL, own_current, own_width),
             NULL, own_width);
@@ -2794,8 +2821,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                             if (nk_ui_begin_container(ui, SET_ID_ONLINE_PLAY_OWN_LINE, &own_line,
                                                       NULL)) {
                                 if (settings_online_play_row(
-                                        ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
-                                        "Your own server",
+                                        ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER, own_name,
                                         own_current ? server : SCR_ONLINE_PLAY_OWN_FORMAT, NULL,
                                         own_current, own_width, own, up, down)) {
                                     *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER);

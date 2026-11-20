@@ -665,7 +665,7 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.online_play_card_server = "relay-usa.arenaanywhere.site";
     if (g_online_play_host != NULL) {
         settings.online_play_server = g_online_play_host;
-        settings.online_play_server_label = "Your own server";
+        settings.online_play_server_label = NULL; /* no list names it, as the player's model */
         settings.online_play_card_server = g_online_play_host;
     }
     if (g_online_play_note != NULL) settings.online_play_console_note = g_online_play_note;
@@ -7261,6 +7261,37 @@ static void test_online_play_picker_rows(void) {
                                "picker row, the own server's and Port offset, each wholly inside "
                                "the list", w, h, text_sizes[t], off ? "off" : "on");
                 CHECK(reachable, message);
+                if (off && ui != NULL) {
+                    /* PPSSPP's list is not shown with Online play off, though the model holds
+                       it: its rows have no place, and Down from the own server's row and from
+                       Port offset reaches neither. */
+                    bool absent = !nk_ui_element_rect(ui, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 5u,
+                                                      &rect) &&
+                                  !nk_ui_element_rect(ui, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 6u,
+                                                      &rect);
+                    static const NkUiId from[] = {PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
+                                                  PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT};
+                    for (size_t k = 0u; absent && k < 2u; ++k) {
+                        NkUiEvent down_key;
+                        memset(&down_key, 0, sizeof(down_key));
+                        down_key.type = NK_UI_EV_NAV;
+                        down_key.dir = NK_UI_DIR_DOWN;
+                        down_key.down = true;
+                        nk_ui_focus(ui, from[k]);
+                        (void)flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                        nk_ui_push_event(ui, &down_key);
+                        (void)flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                        absent = nk_ui_focused(ui) != PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 5u &&
+                                 nk_ui_focused(ui) != PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 6u &&
+                                 !nk_ui_element_rect(ui, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 5u,
+                                                     &rect);
+                    }
+                    (void)snprintf(message, sizeof(message),
+                                   "at %d x %d with %d%% text and Online play off PPSSPP's list's "
+                                   "rows are neither laid out nor reached by Down", w, h,
+                                   text_sizes[t]);
+                    CHECK(absent, message);
+                }
                 /* From the top to the foot, a third of a view at a time: no line cut. */
                 if (uncut && nk_ui_scroll_state(ui, ONLINE_PLAY_TEST_LIST, &state) &&
                     state.max_offset > 0.5f) {
@@ -7284,6 +7315,133 @@ static void test_online_play_picker_rows(void) {
         }
     }
     g_online_play_picker_off = false;
+    g_flow_text_size_pct = saved;
+}
+
+/* One click (press and release in one frame) at x, y on the picker at width x height. */
+static PlayerUiAction online_play_picker_click(NkUi *ui, float x, float y, int width,
+                                               int height) {
+    NkUiViewport viewport = launcher_viewport(width, height, 1.0f);
+    NkUiScale scale;
+    NkUiEvent pointer;
+    PlayerUiAction action;
+    viewport.text_size_pct = g_flow_text_size_pct;
+    scale = nk_ui_scale_for_viewport(&viewport);
+    memset(&pointer, 0, sizeof(pointer));
+    pointer.type = NK_UI_EV_POINTER;
+    pointer.x = x;
+    pointer.y = y;
+    pointer.down = true;
+    nk_ui_push_event(ui, &pointer);
+    pointer.down = false;
+    nk_ui_push_event(ui, &pointer);
+    g_flow_width = scale.logical_w;
+    g_flow_height = scale.logical_h;
+    nk_ui_begin(ui, 0.0);
+    action = draw_flow_case(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS);
+    (void)end_frame(ui);
+    g_flow_width = 1280.0f;
+    g_flow_height = 800.0f;
+    return action;
+}
+
+/* Review of #2832 at 5c7468852: a row the list cuts is drawn blank, and a click on the strip
+   of it that shows at the list's edge opens nothing (the player has not seen the server it
+   names); the press focuses the row, which comes into view whole, and a click on it then opens
+   it. Failing-before: the click on the blank strip opened that server's card. Also: with no
+   list naming the server in use (typed in, or from PPSSPP's list while it is not loaded), the
+   own row and the Online play page call it "Server in use", not "Your own server". */
+static void test_online_play_picker_cut_row_click(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
+    const int saved = g_flow_text_size_pct;
+    g_flow_text_size_pct = 150;
+    for (size_t z = 0u; z < sizeof(sizes) / sizeof(sizes[0]); ++z) {
+        const int w = sizes[z].w;
+        const int h = sizes[z].h;
+        NkUi *ui = NULL;
+        NkUiId controls[9];
+        size_t control_count = 0u;
+        NkUiId hit = 0u;
+        NkUiRect view;
+        NkUiRect rect;
+        NkUiScrollState state;
+        PlayerUiAction first;
+        PlayerUiAction second;
+        char message[200];
+        bool shown = false;
+        (void)flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h, &ui);
+        for (NkUiId i = 0u; i < 7u; ++i) {
+            controls[control_count++] = PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + i;
+            if (i == 4u) {
+                controls[control_count++] = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER;
+                controls[control_count++] = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT;
+            }
+        }
+        if (ui == NULL) {
+            CHECK(false, "lay out the picker for the cut-row click");
+            continue;
+        }
+        /* Scrolled a little at a time, focus on Back, until the list's foot cuts a control
+           with at least 3 px of it showing. */
+        nk_ui_focus(ui, PLAYER_UI_ID_SETTINGS_BACK);
+        for (float at = 0.0f; hit == 0u && nk_ui_scroll_state(ui, ONLINE_PLAY_TEST_LIST, &state) &&
+                              at <= state.max_offset + 0.5f;
+             at += 3.0f) {
+            nk_ui_scroll_to(ui, ONLINE_PLAY_TEST_LIST, at);
+            for (int f = 0; f < 2; ++f) {
+                (void)flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+            }
+            if (!nk_ui_element_rect(ui, ONLINE_PLAY_TEST_LIST, &view)) break;
+            for (size_t c = 0u; hit == 0u && c < control_count; ++c) {
+                if (nk_ui_element_rect(ui, controls[c], &rect) &&
+                    rect.y < view.y + view.h - 3.0f && rect.y + rect.h > view.y + view.h + 0.5f) {
+                    hit = controls[c];
+                }
+            }
+        }
+        (void)snprintf(message, sizeof(message),
+                       "at %d x %d with 150%% text the list's foot cuts a row (the case the "
+                       "click needs)", w, h);
+        CHECK(hit != 0u, message);
+        if (hit != 0u) {
+            first = online_play_picker_click(ui, rect.x + 0.5f * rect.w,
+                                             0.5f * (rect.y + view.y + view.h), w, h);
+            (void)snprintf(message, sizeof(message),
+                           "at %d x %d a click on the cut strip of %08X at the list's foot opens "
+                           "nothing", w, h, (unsigned)hit);
+            CHECK(first.kind == PLAYER_UI_ACTION_NONE, message);
+            for (int f = 0; f < 3; ++f) {
+                (void)flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+            }
+            shown = nk_ui_focused(ui) == hit && nk_ui_element_rect(ui, hit, &rect) &&
+                    nk_ui_element_rect(ui, ONLINE_PLAY_TEST_LIST, &view) &&
+                    rect_inside(rect, view);
+            (void)snprintf(message, sizeof(message),
+                           "at %d x %d that click focuses the row and brings it into view whole",
+                           w, h);
+            CHECK(shown, message);
+            if (shown) {
+                second = online_play_picker_click(ui, rect.x + 0.5f * rect.w,
+                                                  rect.y + 0.5f * rect.h, w, h);
+                (void)snprintf(message, sizeof(message),
+                               "at %d x %d a click on the row, now in view, opens it", w, h);
+                CHECK(second.kind != PLAYER_UI_ACTION_NONE, message);
+            }
+        }
+        nk_ui_destroy(ui);
+    }
+    g_flow_text_size_pct = 100;
+    g_online_play_host = "relay-gone.example.invalid";
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 1280, 720, dump, sizeof(dump)) &&
+              strstr(dump, "Server in use") != NULL &&
+              strstr(dump, "relay-gone.example.invalid") != NULL,
+          "a server in use that no list names is the own row's \"Server in use\"");
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY, 1280, 720, dump, sizeof(dump)) &&
+              strstr(dump, "Server in use. A community server") != NULL &&
+              strstr(dump, "Your own server") == NULL,
+          "the Online play page names a server no list names \"Server in use\"");
+    g_online_play_host = NULL;
     g_flow_text_size_pct = saved;
 }
 
@@ -10977,6 +11135,7 @@ int main(int argc, char **argv) {
     test_game_page_text_is_never_cut();
     test_online_play_text_is_never_cut();
     test_online_play_picker_rows();
+    test_online_play_picker_cut_row_click();
     test_psp_fonts_page();
     test_wizard_actions();
     test_flow_dumps_fail_closed();

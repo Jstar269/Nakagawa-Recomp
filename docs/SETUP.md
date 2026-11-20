@@ -1545,15 +1545,15 @@ it on. A developer who runs a game executable directly with `SR_ADHOC_ENABLED=1`
 `SR_ADHOC_SERVER` set connects to that server without the card, and without a turn-off file
 (`SR_ADHOC_OFF_FILE`) nothing but closing the game ends the connection.
 
-The server picker shows the shipped servers and your own server's row, and with Online play on also
-PPSSPP's public list of ad hoc servers, downloaded over HTTPS from `metadata.ppsspp.org` only while
-Online play is on, when you open the picker or select **Refresh** (`src/player/adhoc_servers.c`, user agent `NakagawaRecomp/OnlinePlay`).
-The download is capped at 64 KiB and 64 servers, read as untrusted input, and kept for that session
+The server picker shows the shipped servers and your own server's row. While Online play is on it
+also shows PPSSPP's public list of ad hoc servers, downloaded over HTTPS from `metadata.ppsspp.org`
+when you open the picker or select **Refresh** (`src/player/adhoc_servers.c`, user agent
+`NakagawaRecomp/OnlinePlay`), and never while Online play is off. The download is capped at 64 KiB and 64 servers, read as untrusted input, and kept for that session
 only; an answer from another host is refused, and the list's icon, web, status and Discord links
 are never fetched. The download runs on its own thread and cannot be cancelled: if you turn Online
 play off while it runs, it finishes and its list is thrown away. Only relay servers this player can
 talk to (`data_mode` `AemuPostoffice`, a reading of PPSSPP's code that is PPSSPP-derived, not
-PSP-measured) are offered. Where the download is unavailable with Online play on, the picker says
+PSP-measured) are offered. Where the download is unavailable, the picker says
 why and offers the copy shipped with the player instead, marked as that copy, the relay
 entries of PPSSPP's list at revision `3bc60270`: `socom.cc`, `psp.mgn.pub`, `eahub.eu`,
 `psi-hate.com`, `jpa36a7.glddns.com`, `relay-sa.arenaanywhere.site`, `relay.arenaanywhere.site`,
