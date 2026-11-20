@@ -3,10 +3,6 @@
 /* The Online play server list and console ID (#1139): adhoc_servers.h says what each reads,
    from where and when. */
 
-#if defined(_WIN32) || defined(_WIN64)
-#define _CRT_RAND_S /* rand_s, the system's random source (RtlGenRandom), as the runtime uses */
-#endif
-
 #include "adhoc_servers.h"
 
 #include <stdarg.h>
@@ -14,12 +10,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#if defined(_WIN32) || defined(_WIN64)
-#include <io.h>
-#else
-#include <unistd.h>
-#endif
 
 #include "nk_json.h"
 #include "nk_platform.h"
@@ -433,22 +423,9 @@ NkConsoleIdStatus nk_adhoc_console_id_read(const char *registry_path,
     return status;
 }
 
+/* The system's random source, as the runtime uses (nk_platform_random_bytes). */
 static bool console_random_bytes(uint8_t *out, size_t n) {
-#if defined(_WIN32) || defined(_WIN64)
-    for (size_t i = 0; i < n; i++) {
-        unsigned int r = 0;
-        if (rand_s(&r) != 0) return false;
-        out[i] = (uint8_t)r;
-    }
-    return true;
-#else
-    FILE *f = fopen("/dev/urandom", "rb");
-    size_t got;
-    if (!f) return false;
-    got = fread(out, 1u, n, f);
-    fclose(f);
-    return got == n;
-#endif
+    return nk_platform_random_bytes(out, n);
 }
 
 /* Writes data beside path and renames it over path, as the runtime writes the file. */
@@ -460,13 +437,9 @@ static bool console_file_replace(const char *path, const char *data, size_t len)
     if (!tmp) return false;
     snprintf(tmp, plen + sizeof(".new"), "%s.new", path);
     f = nk_platform_fopen_private(tmp, "wb");
-    ok = f != NULL && fwrite(data, 1u, len, f) == len && fflush(f) == 0;
+    ok = f != NULL && fwrite(data, 1u, len, f) == len;
     if (f) {
-#if defined(_WIN32) || defined(_WIN64)
-        ok = _commit(_fileno(f)) == 0 && ok;
-#else
-        ok = fsync(fileno(f)) == 0 && ok;
-#endif
+        ok = nk_platform_sync_file(f) && ok;
         if (fclose(f) != 0) ok = false;
     }
     if (ok && nk_rename_utf8(tmp, path) != 0) ok = false;

@@ -103,6 +103,7 @@ PUBLIC_TARGETS := \
 	relay-codec-selftest \
 	adhoc-net-selftest \
 	relay-client-selftest \
+	adhoc-servers-selftest \
 	achievements-selftest \
 	nk-nickname-selftest \
 	nk-cheats-selftest \
@@ -328,6 +329,7 @@ HELP_DESCRIPTION_clay-layout-selftest := build and run the vendored Clay layout 
 HELP_DESCRIPTION_adhoc-net-selftest := check the ad hoc transport seam on simulated consoles in one process, with no network
 HELP_DESCRIPTION_relay-codec-selftest := check the ad hoc relay's lobby and relay packets byte by byte, with no network
 HELP_DESCRIPTION_relay-client-selftest := check the ad hoc TCP relay client against an in-process 127.0.0.1 loopback server, with no internet
+HELP_DESCRIPTION_adhoc-servers-selftest := check the Online play server list (downloaded only with Online play on, read as untrusted input) and New console ID against an in-process fake transport, with no network
 HELP_DESCRIPTION_achievements-selftest := run the RetroAchievements bridge (vendored rcheevos) against an in-process fake server, with no network
 HELP_DESCRIPTION_ed25519-verify-selftest := check nk_ed25519_verify (vendored Monocypher) against the RFC 8032 vectors and nk_minisign_verify against real minisign output
 HELP_DESCRIPTION_nk-nickname-selftest := check the console nickname rule (src/core/nk_nickname.h): the Player default, the 32-byte cap and the refused values

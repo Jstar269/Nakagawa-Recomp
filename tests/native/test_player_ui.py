@@ -4826,10 +4826,11 @@ class NativePlayerUiTests(unittest.TestCase):
         )
         if isinstance(untouched["settings"], dict):
             self.assertIsNot(untouched["settings"].get("cheats"), True)
+        # Developer -> Nickname -> Online play -> Download cover art -> Cheats.
         turned_on = self.next_ui_run(
             "online-settings",
-            ("WAIT_MS=100", "KEY_DOWN", "KEY_DOWN", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=200",
-             "KEY_ESCAPE", "WAIT_MS=100"),
+            ("WAIT_MS=100", "KEY_DOWN", "KEY_DOWN", "KEY_DOWN", "KEY_DOWN", "KEY_RETURN",
+             "WAIT_MS=200", "KEY_ESCAPE", "WAIT_MS=100"),
         )
         saved = turned_on["settings"]
         assert isinstance(saved, dict)
