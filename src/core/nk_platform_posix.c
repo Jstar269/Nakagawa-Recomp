@@ -244,6 +244,11 @@ bool nk_platform_remove_tree(const char *path, const char *skip_child) {
     return remove_tree_posix(path);
 }
 
+bool nk_platform_remove_empty_dir(const char *path) {
+    /* rmdir refuses a directory that holds anything, and a symlink (ENOTDIR). */
+    return path && *path && rmdir(path) == 0;
+}
+
 bool nk_platform_list_files(const char *dir, NkDirFileFn fn, void *ctx) {
     if (!dir || !*dir || !fn) return false;
     DIR *handle = opendir(dir);

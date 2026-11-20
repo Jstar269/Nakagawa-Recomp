@@ -1233,25 +1233,25 @@ static void unplace(const char *ref, const char *iso) {
     (void)nk_remove_utf8(iso);
 }
 
-/* Move the checked staging image into its per-title folder and record it.
-   <ID>.<first 16 of the identity>.<ext>.iso unless that name holds another
-   import's image; then <ID>.<identity>.<ext>.iso, which only this identity
-   takes (and the caller holds its lock). The lock of the short name is held
-   from the check to the record, so two imports that would take one name never
-   interleave. A failure removes the staging image and anything placed. */
-static bool place_expansion(const char *data_root, const NkDiscImportPaths *paths,
-                            NkDiscImport *out, NkDiscExpandStatus *status) {
+/* Choose the per-title name an image of out->disc_id takes and make its folder,
+   before anything is moved there. <ID>.<first 16 of the identity>.<ext>.iso
+   unless that name holds another import's image; then <ID>.<identity>.<ext>.iso,
+   which only this identity takes (and the caller holds its lock). On success the
+   lock of the short name is held (the caller releases it after the record), so
+   two imports that would take one name never interleave, and out->iso_path and
+   sidecar name the image and its .source. A failure holds no lock and leaves
+   out->iso_path empty. */
+static bool placement_begin(const char *data_root, const NkDiscImportPaths *paths,
+                            NkDiscImport *out, char *sidecar, size_t sidecar_size,
+                            NkFileLock *name_lock, NkDiscExpandStatus *status) {
     char dir[NK_MAX_PATH];
-    char sidecar[NK_MAX_PATH + 8];
     char lock_path[NK_MAX_PATH];
     char lock_name[NK_DISC_TITLE_NAME_MAX + 8];
     const char *name;
     size_t name_len;
-    NkFileLock name_lock;
-    bool ok;
+    bool ok = true;
     if (!title_iso_path(data_root, out->disc_id, out->identity, NK_DISC_TITLE_FINGERPRINT_CHARS,
                         out->format, dir, sizeof(dir), out->iso_path, sizeof(out->iso_path))) {
-        (void)nk_remove_utf8(paths->staging);
         out->iso_path[0] = '\0';
         return disc_fail(status, NK_DISC_WRITE_FAILED,
                          "The path to Nakagawa's data folder is too long.");
@@ -1263,46 +1263,59 @@ static bool place_expansion(const char *data_root, const NkDiscImportPaths *path
     if (name_len < 5u ||
         snprintf(lock_name, sizeof(lock_name), "%.*s.lock", (int)(name_len - 4u), name) <= 0 ||
         !path_join(lock_path, sizeof(lock_path), paths->expanded_dir, lock_name)) {
-        (void)nk_remove_utf8(paths->staging);
         out->iso_path[0] = '\0';
         return disc_fail(status, NK_DISC_WRITE_FAILED,
                          "The path to Nakagawa's data folder is too long.");
     }
-    if (!nk_platform_file_lock_acquire(&name_lock, lock_path, 0u)) {
-        (void)nk_remove_utf8(paths->staging);
+    if (!nk_platform_file_lock_acquire(name_lock, lock_path, 0u)) {
         out->iso_path[0] = '\0';
         return disc_fail(status, NK_DISC_IMPORT_BUSY,
                          "Another disc image that would take this one's place is being added "
                          "by another Nakagawa window or tool. Wait for that to finish, then add "
                          "this one again.");
     }
-    ok = true;
     if (title_name_taken(out->iso_path, out) &&
         !title_iso_path(data_root, out->disc_id, out->identity, NK_DISC_IDENTITY_CHARS,
                         out->format, dir, sizeof(dir), out->iso_path, sizeof(out->iso_path))) {
         ok = disc_fail(status, NK_DISC_WRITE_FAILED,
                        "The path to Nakagawa's data folder is too long.");
     }
-    if (ok && (!path_suffix(sidecar, sizeof(sidecar), out->iso_path, ".source") ||
+    if (ok && (!path_suffix(sidecar, sidecar_size, out->iso_path, ".source") ||
                !nk_platform_mkdir_p_private(dir))) {
         ok = disc_fail(status, NK_DISC_WRITE_FAILED,
                        "The disc image's folder could not be made in Nakagawa's data folder.");
     }
-    if (ok) {
-        /* The name is free or holds this identity's own image. Its old record
-           goes first, so an interrupted replace never leaves it beside this
-           image. */
-        (void)nk_remove_utf8(sidecar);
-        if (nk_rename_utf8(paths->staging, out->iso_path) != 0) {
-            ok = disc_fail(status, NK_DISC_WRITE_FAILED,
-                           "The expanded disc image could not be moved into its folder.");
-        } else if (!write_identity_records(paths->ref, out)) {
-            unplace(paths->ref, out->iso_path);
-            ok = disc_fail(status, NK_DISC_WRITE_FAILED,
-                           "The disc image was expanded, but its record could not be written in "
-                           "Nakagawa's data folder, so it was removed again. Check that the "
-                           "folder is writable, then add the disc image again.");
-        }
+    if (!ok) {
+        nk_platform_file_lock_release(name_lock);
+        out->iso_path[0] = '\0';
+    }
+    return ok;
+}
+
+/* Move the checked staging image into its per-title folder (placement_begin)
+   and record it. A failure removes the staging image and anything placed. */
+static bool place_expansion(const char *data_root, const NkDiscImportPaths *paths,
+                            NkDiscImport *out, NkDiscExpandStatus *status) {
+    char sidecar[NK_MAX_PATH + 8];
+    NkFileLock name_lock;
+    bool ok;
+    if (!placement_begin(data_root, paths, out, sidecar, sizeof(sidecar), &name_lock, status)) {
+        (void)nk_remove_utf8(paths->staging);
+        return false;
+    }
+    ok = true;
+    /* The name is free or holds this identity's own image. Its old record goes
+       first, so an interrupted replace never leaves it beside this image. */
+    (void)nk_remove_utf8(sidecar);
+    if (nk_rename_utf8(paths->staging, out->iso_path) != 0) {
+        ok = disc_fail(status, NK_DISC_WRITE_FAILED,
+                       "The expanded disc image could not be moved into its folder.");
+    } else if (!write_identity_records(paths->ref, out)) {
+        unplace(paths->ref, out->iso_path);
+        ok = disc_fail(status, NK_DISC_WRITE_FAILED,
+                       "The disc image was expanded, but its record could not be written in "
+                       "Nakagawa's data folder, so it was removed again. Check that the "
+                       "folder is writable, then add the disc image again.");
     }
     nk_platform_file_lock_release(&name_lock);
     if (!ok) {
@@ -1312,10 +1325,53 @@ static bool place_expansion(const char *data_root, const NkDiscImportPaths *path
     return ok;
 }
 
-static bool count_dir_entry(const char *name, bool is_dir, void *ctx) {
-    (void)name;
-    (void)is_dir;
-    (*(size_t *)ctx)++;
+/* Move the recorded expansion at out->iso_path to the folder of key and record
+   it there. The destination's name is chosen, its folder made and its name lock
+   taken before anything moves (placement_begin), and the image keeps its .source
+   until the move is recorded. A move whose record cannot be written is put back
+   and its own record written again, so every failure leaves the earlier
+   expansion where its ref names it, with a named error. */
+static bool move_expansion(const char *data_root, const NkDiscImportPaths *paths,
+                           const char *key, NkDiscImport *out, NkDiscExpandStatus *status) {
+    NkDiscImport moved = *out;
+    char sidecar[NK_MAX_PATH + 8];
+    char old_sidecar[NK_MAX_PATH + 8];
+    NkFileLock name_lock;
+    bool restored;
+    if (!path_suffix(old_sidecar, sizeof(old_sidecar), out->iso_path, ".source")) {
+        return disc_fail(status, NK_DISC_WRITE_FAILED,
+                         "The path to Nakagawa's data folder is too long.");
+    }
+    snprintf(moved.disc_id, sizeof(moved.disc_id), "%.9s", key);
+    if (!placement_begin(data_root, paths, &moved, sidecar, sizeof(sidecar), &name_lock, status)) {
+        return false;
+    }
+    if (nk_rename_utf8(out->iso_path, moved.iso_path) != 0) {
+        nk_platform_file_lock_release(&name_lock);
+        return disc_fail(status, NK_DISC_WRITE_FAILED,
+                         "The disc image expanded earlier could not be moved to the folder of "
+                         "its library entry's key, so it was left where it was.");
+    }
+    if (!write_identity_records(paths->ref, &moved)) {
+        (void)nk_remove_utf8(sidecar);
+        restored = nk_rename_utf8(moved.iso_path, out->iso_path) == 0 &&
+                   write_identity_records(paths->ref, out);
+        nk_platform_file_lock_release(&name_lock);
+        if (restored) {
+            return disc_fail(status, NK_DISC_WRITE_FAILED,
+                             "The record of the disc image expanded earlier could not be "
+                             "written in Nakagawa's data folder, so the image was put back "
+                             "where it was. Check that the folder is writable, then add the "
+                             "disc image again.");
+        }
+        return disc_fail(status, NK_DISC_WRITE_FAILED,
+                         "The record of the disc image expanded earlier could not be written in "
+                         "Nakagawa's data folder, and the image could not be put back where it "
+                         "was. Check that the folder is writable, then add the disc image again.");
+    }
+    nk_platform_file_lock_release(&name_lock);
+    (void)nk_remove_utf8(old_sidecar);
+    *out = moved;
     return true;
 }
 
@@ -1323,19 +1379,18 @@ static bool count_dir_entry(const char *name, bool is_dir, void *ctx) {
    caller's library keys under another key moves to that key's folder, so the
    entry's checks and removal find it: a prototype disc expanded under its v2
    key whose entry holds its v1 key, or the reverse. Its folder is removed when
-   the move leaves it empty. Without a library (entries NULL) the expansion
-   stays where it is. Only a non-retail key (it starts with X; no retail or test
-   ID does) can differ from the key the library holds. */
+   the move leaves it empty; a folder that holds anything else, even a file
+   another import placed a moment ago, is left alone (removing it fails).
+   Without a library (entries NULL) the expansion stays where it is. Only a
+   non-retail key (it starts with X; no retail or test ID does) can differ from
+   the key the library holds. */
 static bool expansion_follows_entry_key(const char *data_root, const NkDiscImportPaths *paths,
                                         const NkGameEntry *entries, int entry_count,
                                         NkDiscImport *out, NkDiscExpandStatus *status) {
     NkIsoMetadata meta;
     char key[NK_MAX_DISC_ID_LEN];
     char old_dir[NK_MAX_PATH];
-    char sidecar[NK_MAX_PATH + 8];
     const char *slash;
-    size_t left = 0;
-    size_t skipped = 0;
     if (!entries || out->disc_id[0] != 'X') return true;
     memset(&meta, 0, sizeof(meta));
     if (nk_iso_inspect(out->iso_path, &meta) != NK_OK) {
@@ -1347,26 +1402,14 @@ static bool expansion_follows_entry_key(const char *data_root, const NkDiscImpor
                                        meta.legacy_disc_id, key, sizeof(key));
     if (strcmp(key, out->disc_id) == 0) return true;
     slash = strrchr(out->iso_path, nk_platform_path_separator());
-    if (!slash || (size_t)(slash - out->iso_path) >= sizeof(old_dir) ||
-        !path_suffix(sidecar, sizeof(sidecar), out->iso_path, ".source")) {
+    if (!slash || (size_t)(slash - out->iso_path) >= sizeof(old_dir)) {
         return disc_fail(status, NK_DISC_WRITE_FAILED,
                          "The path to Nakagawa's data folder is too long.");
     }
     snprintf(old_dir, sizeof(old_dir), "%.*s", (int)(slash - out->iso_path), out->iso_path);
-    /* Back to the staging name, then placed and recorded under the key, as a new
-       expansion is. */
-    if (nk_rename_utf8(out->iso_path, paths->staging) != 0) {
-        return disc_fail(status, NK_DISC_WRITE_FAILED,
-                         "The disc image expanded earlier could not be moved to the folder of "
-                         "its library entry's key.");
-    }
-    (void)nk_remove_utf8(sidecar);
-    snprintf(out->disc_id, sizeof(out->disc_id), "%.9s", key);
-    if (!place_expansion(data_root, paths, out, status)) return false;
-    if (nk_platform_list_dir_counted(old_dir, count_dir_entry, &left, &skipped) && left == 0 &&
-        skipped == 0) {
-        (void)nk_platform_remove_tree(old_dir, NULL);
-    }
+    if (!move_expansion(data_root, paths, key, out, status)) return false;
+    /* Not empty is fine: whatever else is there stays. */
+    (void)nk_platform_remove_empty_dir(old_dir);
     return true;
 }
 

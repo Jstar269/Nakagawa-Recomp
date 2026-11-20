@@ -136,6 +136,8 @@ card.
   its entry holds, by the player and by `nk_cli.py` alike (it reads the
   `library.json` in its data folder), and an expansion made earlier under the
   disc's other key moves there, so removing the title removes the expansion too.
+  A move that cannot finish is named and leaves the expansion where it was, and
+  the folder it leaves is removed only while nothing else is in it.
 - **What stays as it was.** An old entry under the v1 key and a sibling build
   that differs from it only in `BOOT.BIN` have the same v1 key, so the library
   still treats them as one entry; remove the entry and add each disc again to

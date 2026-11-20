@@ -2635,8 +2635,9 @@ int main(int argc, char **argv) {
         self._assert_refused_in_both_tiers(conflicting, message)
 
     def test_directory_walkers_share_one_rule(self) -> None:
-        """Review R3 of PR #2855: nk_iso_find_in_dir and _lookup_iso_file read a directory
-        by one rule. Only a record with the wanted name has its location read; one outside
+        """Review R3 of PR #2855: nk_iso_find_in_dir and _lookup_iso_file_detail with
+        skip_outside (the non-retail identity's reads) read a directory by one rule. Only a
+        record with the wanted name has its location read; one outside
         the image is passed over for a later record of the name; a record of another name
         with disagreeing copies of its location is not read. The same for EBOOT.BIN and
         BOOT.BIN, and a disc keyed by main is keyed the same way (BETA_KEY)."""
@@ -2678,6 +2679,100 @@ int main(int argc, char **argv) {
         ])
         self._assert_refused_in_both_tiers(
             bad_eboot,
+            f"PARAM.SFO names this disc '{self.BETA_DISC_ID}', which is not a retail disc ID, "
+            "and PSP_GAME/SYSDIR/EBOOT.BIN is missing or unreadable, so the disc cannot be "
+            "identified by its contents",
+        )
+
+    def _outside_copy(self, source: Path, name: bytes, label: str) -> Path:
+        """A copy of source whose one directory record of name points outside the image."""
+        data = bytearray(source.read_bytes())
+        at = data.index(bytes([len(name)]) + name) - 32
+        struct.pack_into("<I", data, at + 2, self.OUTSIDE_LBA)
+        struct.pack_into(">I", data, at + 6, self.OUTSIDE_LBA)
+        copy = self.temp_dir / f"{label}.iso"
+        copy.write_bytes(data)
+        return copy
+
+    def _native_lookup(self, iso_file: Path, path: str) -> str:
+        res = subprocess.run([str(self.exe_path), "lookup", str(iso_file), path],
+                             capture_output=True, text=True, check=True)
+        return res.stdout.strip()
+
+    def test_a_record_outside_the_image_is_passed_over_only_by_the_identity(self) -> None:
+        """Review M1 of PR #2855: a record of the wanted name whose extent leaves the image
+        is passed over only where the non-retail identity reads EBOOT.BIN and BOOT.BIN
+        (R3). Every other lookup gives the result it gave before this PR: a file whose only
+        record lies outside the image is never read as a file the disc does not have, and a
+        later record of the name does not turn such a refusal into a read."""
+        runtime_root = self.temp_dir / "runtime"
+        runtime_root.mkdir()
+        unreadable = ("Disc directories could not be read safely; PARAM.SFO and executables "
+                      "were not trusted.")
+        good = self.temp_dir / "good.iso"
+        create_test_iso_with_executables(good, build_plain_mips_elf())
+        metadata = inspect_iso(good)
+
+        def disc_check(iso_file: Path) -> tuple[object, object]:
+            report = inspect_compatibility_preflight(
+                iso_file, metadata=metadata, runtime_root=runtime_root)
+            check = next(c for c in report["checks"] if c["code"] == "DISC_SFO")
+            return check["status"], check["message"]
+
+        # inspect_iso and nk_iso_inspect: PARAM.SFO, refused with one text in both tiers.
+        sfo_outside = self._outside_copy(good, b"PARAM.SFO;1", "sfo-outside")
+        self._assert_refused_in_both_tiers(sfo_outside, "PSP_GAME/PARAM.SFO extent is invalid")
+        # inspect_compatibility_preflight: PARAM.SFO.
+        self.assertEqual(disc_check(sfo_outside), ("UNSUPPORTED", unreadable))
+        # A PARAM.SFO record outside the image before one inside it is still refused by the
+        # tool. nk_iso_inspect's own PARAM.SFO scan passes it over, as before this PR.
+        sfo = build_param_sfo("TEST00001", "Test Game")
+        two_sfo = bytearray(good.read_bytes())
+        game_dir = (_dir_record(bytes([0]), 34, 2048, True) + _dir_record(bytes([1]), 33, 2048, True)
+                    + _dir_record(b"PARAM.SFO;1", self.OUTSIDE_LBA, len(sfo), False)
+                    + _dir_record(b"PARAM.SFO;1", 32, len(sfo), False)
+                    + _dir_record(b"SYSDIR", 35, 2048, True))
+        two_sfo[34 * 2048:35 * 2048] = game_dir + bytes(2048 - len(game_dir))
+        sfo_twice = self.temp_dir / "sfo-outside-then-inside.iso"
+        sfo_twice.write_bytes(two_sfo)
+        with self.assertRaises(IsoInspectionError) as caught:
+            inspect_iso(sfo_twice)
+        self.assertEqual(str(caught.exception), "PSP_GAME/PARAM.SFO extent is invalid")
+        self.assertEqual(disc_check(sfo_twice), ("UNSUPPORTED", unreadable))
+        self.assertEqual(self._run_native_inspect(sfo_twice).get("RESULT"), "OK")
+
+        # _boot_executable_facts and _classify_iso_executable (preflight and the boot
+        # selection), iso_executable_sha256: EBOOT.BIN of a disc with a retail-form ID.
+        eboot_outside = self._outside_copy(good, b"EBOOT.BIN;1", "eboot-outside")
+        self.assertEqual(disc_check(eboot_outside), ("UNSUPPORTED", unreadable))
+        self.assertIsNone(iso_inspect.select_boot_executable_source(eboot_outside))
+        self.assertIsNone(iso_inspect.iso_executable_sha256(eboot_outside, "EBOOT.BIN"))
+        native = self._run_native_inspect(eboot_outside)
+        self.assertEqual((native.get("RESULT"), native.get("EBOOT_KIND"),
+                          native.get("SELECTED_EXECUTABLE")), ("OK", "0", "0"))
+
+        # _lookup_iso_file itself, as nk_cli.py, decrypt_tool.py, check_needed_modules and
+        # write_experimental_profile call it, beside nk_iso_reader_lookup (every C caller
+        # of nk_iso_find_in_dir resolves through it): a file whose only record is outside
+        # the image is refused by the tool and missing to the reader, as before this PR.
+        for iso_file, member in ((eboot_outside, ("PSP_GAME", "SYSDIR", "EBOOT.BIN")),
+                                 (sfo_outside, ("PSP_GAME", "PARAM.SFO"))):
+            with self.subTest(member="/".join(member)):
+                with iso_file.open("rb") as stream:
+                    size = iso_file.stat().st_size
+                    with self.assertRaises(IsoInspectionError):
+                        iso_inspect._lookup_iso_file(stream, size, member)
+                    self.assertEqual(iso_inspect._lookup_iso_file_detail(
+                        stream, size, member, skip_outside=True), (None, True))
+                self.assertTrue(self._native_lookup(iso_file, "/".join(member))
+                                .startswith("LOOKUP:-1:"))
+
+        # The identity (R3): a non-retail disc whose only EBOOT.BIN record is outside the
+        # image is refused naming EBOOT.BIN in both tiers, as before this PR.
+        only_outside = self._with_sysdir("eboot-only-outside", self.BETA_EXECUTABLE, None, [
+            _dir_record(b"EBOOT.BIN;1", self.OUTSIDE_LBA, len(self.BETA_EXECUTABLE), False)])
+        self._assert_refused_in_both_tiers(
+            only_outside,
             f"PARAM.SFO names this disc '{self.BETA_DISC_ID}', which is not a retail disc ID, "
             "and PSP_GAME/SYSDIR/EBOOT.BIN is missing or unreadable, so the disc cannot be "
             "identified by its contents",

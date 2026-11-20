@@ -255,7 +255,9 @@ bool nk_disc_import(const char *source, const char *data_root,
    holds its v1 key is expanded into discs/<v1 key>, the folder that entry's
    checks and removal use, and any other disc into discs/<its own key>. An
    expansion recorded earlier under the other key moves to that folder (an
-   emptied old folder is removed). nk_disc_import is this with no library
+   emptied old folder is removed; one that holds anything else stays). A move
+   that fails is named and leaves that expansion where its record names it.
+   nk_disc_import is this with no library
    (entries NULL): a new expansion goes under the disc's own key and a recorded
    one stays where it is. */
 bool nk_disc_import_for_library(const char *source, const char *data_root,

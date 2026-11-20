@@ -27,7 +27,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import Callable, ClassVar
 from unittest import mock
 import zlib
 
@@ -507,6 +507,105 @@ class PrototypeExpansionFollowsItsEntryKeyTests(unittest.TestCase):
         result = disc_expand_tool.import_image(self.image, root)
         self.assertEqual(result["disc_id"], self.v2_key)
         self.assertEqual(self._title_folders(root), [self.v2_key])
+
+    def _expanded_under_v2(self, name: str) -> tuple[Path, Path, dict]:
+        """An expansion recorded under the v2 key, then a library whose entry holds v1."""
+        root = self._user_root(name, None)
+        first = disc_expand_tool.import_image(self.image, root)
+        self.assertEqual(first["disc_id"], self.v2_key)
+        (root / "library.json").write_bytes(json.dumps(
+            {"schema_version": 1, "games": [self._old_entry()]}).encode("utf-8"))
+        return root, Path(str(first["iso_path"])), first
+
+    def _destination(self, root: Path, iso: Path, identity: str | None = None) -> Path:
+        """The name the move takes: the short one, or with identity the long one."""
+        key = str(self.v1_key)
+        parts = iso.name.split(".")
+        parts[0] = key
+        if identity is not None:
+            parts[1] = identity
+        return root / "discs" / key / ".".join(parts)
+
+    def _assert_move_failed_and_left_usable(self, root: Path, iso: Path, code: str,
+                                            run: Callable[[], object]) -> None:
+        """The failed move named its error and left the earlier expansion where its record
+        names it: an import without the library reuses it there."""
+        before = iso.read_bytes()
+        with self.assertRaises(disc_expand_tool.DiscImageRefused) as caught:
+            run()
+        self.assertEqual(caught.exception.code, code, str(caught.exception))
+        self.assertTrue(iso.is_file(), "the earlier expansion is still there")
+        self.assertEqual(iso.read_bytes(), before)
+        self.assertTrue(Path(f"{iso}.source").is_file(), "and so is its record")
+        (root / "library.json").unlink()
+        again = disc_expand_tool.import_image(self.image, root)
+        self.assertEqual((again["reused"], Path(str(again["iso_path"]))), (True, iso))
+
+    def test_a_move_whose_name_is_being_placed_elsewhere_keeps_the_expansion(self) -> None:
+        """Review S1 of PR #2855: the name lock of the destination is held by another
+        import, so nothing moves."""
+        root, iso, _first = self._expanded_under_v2("move-busy")
+        lock_path = root / "discs" / "expanded" / (self._destination(root, iso).name[:-4] + ".lock")
+        with lock_path.open("a+b") as held:
+            held.seek(0)
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(held.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._assert_move_failed_and_left_usable(
+                root, iso, "DISC_IMAGE_IMPORT_BUSY",
+                lambda: disc_expand_tool.import_image(self.image, root))
+            held.seek(0)
+            if sys.platform == "win32":
+                msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 1)
+
+    def test_a_move_whose_folder_cannot_be_made_keeps_the_expansion(self) -> None:
+        root, iso, _first = self._expanded_under_v2("move-no-folder")
+        (root / "discs" / self.v1_key).write_bytes(b"not a folder")
+        self._assert_move_failed_and_left_usable(
+            root, iso, "DISC_IMAGE_WRITE_FAILED",
+            lambda: disc_expand_tool.import_image(self.image, root))
+
+    def test_a_move_that_cannot_rename_keeps_the_expansion(self) -> None:
+        """Both names the image could take are folders in use, so the rename fails."""
+        root, iso, first = self._expanded_under_v2("move-rename")
+        for target in (self._destination(root, iso),
+                       self._destination(root, iso, str(first["identity"]))):
+            target.mkdir(parents=True)
+            (target / "in-use").write_bytes(b"x")
+        self._assert_move_failed_and_left_usable(
+            root, iso, "DISC_IMAGE_WRITE_FAILED",
+            lambda: disc_expand_tool.import_image(self.image, root))
+
+    def test_a_move_whose_record_cannot_be_written_is_put_back(self) -> None:
+        """The image moves, its record cannot be written at the new name, so it is moved
+        back and its own record written again."""
+        root, iso, first = self._expanded_under_v2("move-record")
+        short = self._destination(root, iso)
+        short.mkdir(parents=True)
+        (short / "in-use").write_bytes(b"x")
+        long_name = self._destination(root, iso, str(first["identity"]))
+        blocked = Path(f"{long_name}.source")
+        blocked.mkdir()
+        (blocked / "in-use").write_bytes(b"x")
+        self._assert_move_failed_and_left_usable(
+            root, iso, "DISC_IMAGE_WRITE_FAILED",
+            lambda: disc_expand_tool.import_image(self.image, root))
+        self.assertFalse(long_name.exists(), "nothing is left at the name it was moved to")
+
+    def test_an_old_folder_that_holds_another_file_is_left_alone(self) -> None:
+        """Review S2 of PR #2855: the folder the expansion leaves is removed only when it
+        is empty; a file another import placed there stays."""
+        root, iso, _first = self._expanded_under_v2("move-sibling")
+        sibling = iso.parent / f"{self.v2_key}.0000000000000000.cso.iso"
+        sibling.write_bytes(b"another import")
+        moved = disc_expand_tool.import_image(self.image, root)
+        self.assertEqual((moved["disc_id"], moved["reused"]), (self.v1_key, True))
+        self.assertFalse(iso.exists())
+        self.assertEqual(sibling.read_bytes(), b"another import")
+        self.assertEqual(self._title_folders(root), sorted([self.v1_key, self.v2_key]))
 
     def test_a_library_a_newer_nakagawa_wrote_refuses_by_name(self) -> None:
         root = self._user_root("newer", None)

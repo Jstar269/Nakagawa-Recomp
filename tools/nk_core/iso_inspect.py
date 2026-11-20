@@ -824,7 +824,9 @@ def _non_retail_identity(
         "identified by its contents"
     )
     try:
-        entry = _lookup_iso_file(stream, file_size, NON_RETAIL_MAIN_EXECUTABLE)
+        entry = _lookup_iso_file(
+            stream, file_size, NON_RETAIL_MAIN_EXECUTABLE, skip_outside=True
+        )
     except IsoInspectionError as exc:
         raise refusal from exc
     if entry is None or entry[1] > MAX_EXECUTABLE_BYTES:
@@ -836,7 +838,9 @@ def _non_retail_identity(
     )
     parts = [entry]
     try:
-        eboot_kind = _classify_iso_executable(stream, file_size, "EBOOT.BIN")["classification"]
+        eboot_kind = _classify_iso_executable(
+            stream, file_size, "EBOOT.BIN", skip_outside=True
+        )["classification"]
     except (IsoInspectionError, struct.error):
         eboot_kind = None
     # The v2 key is chosen by the disc's structure alone (nk_iso_non_retail_identity): an
@@ -849,7 +853,7 @@ def _non_retail_identity(
     if eboot_kind == "EMPTY_OR_ZERO_FILLED":
         try:
             boot_entry, boot_outside = _lookup_iso_file_detail(
-                stream, file_size, NON_RETAIL_BOOT_EXECUTABLE
+                stream, file_size, NON_RETAIL_BOOT_EXECUTABLE, skip_outside=True
             )
         except IsoInspectionError as exc:
             raise boot_refusal from exc
@@ -1195,7 +1199,7 @@ def inspect_iso(
         root_note = _pvd_root_record_note(pvd_data)
         if root_note is not None:
             format_warnings.append(root_note)
-        sfo_entry = _lookup_iso_file(f, size_bytes, ("PSP_GAME", "PARAM.SFO"))
+        sfo_entry = _lookup_param_sfo(f, size_bytes)
 
         sfo_disc_id = ""
         identity_sha256 = ""
@@ -1549,7 +1553,11 @@ def _extent_fields(record: bytes, file_size: int) -> tuple[int, int, bool]:
 
 
 class _ExtentOutsideImage(IsoInspectionError):
-    """A directory record whose extent lies outside the image (_extent_fields)."""
+    """A directory record whose extent lies outside the image (_extent_fields).
+    last_component: it is the record of the file a lookup was for, not of a folder on
+    its way (set by _lookup_iso_file_detail)."""
+
+    last_component: bool = False
 
 
 def _read_iso_extent(
@@ -1669,23 +1677,29 @@ def _native_component_bytes(name: bytes) -> bytes:
     return name[:-1] if len(name) > 1 and name.endswith(b".") else name
 
 
-def _lookup_iso_file(stream, file_size: int, path: tuple[str, ...]) -> tuple[int, int] | None:
-    return _lookup_iso_file_detail(stream, file_size, path)[0]
+def _lookup_iso_file(
+    stream, file_size: int, path: tuple[str, ...], *, skip_outside: bool = False
+) -> tuple[int, int] | None:
+    return _lookup_iso_file_detail(stream, file_size, path, skip_outside=skip_outside)[0]
 
 
 def _lookup_iso_file_detail(
-    stream, file_size: int, path: tuple[str, ...]
+    stream, file_size: int, path: tuple[str, ...], *, skip_outside: bool = False
 ) -> tuple[tuple[int, int] | None, bool]:
     """The file at path and whether a record of its last component's name was passed over
     because its extent leaves the image.
 
-    The rule nk_iso_find_in_dir in src/core/nk_iso.c shares (tests/parity keep the two
-    in step): a directory whose bytes cannot be read, or that holds a record whose length
-    or name runs past it, is refused. Records are read in their order; only a record with
-    the wanted name has its location read: when its both-endian copies disagree the
-    lookup is refused, and when its extent leaves the image it is passed over and the
-    search goes on to a later record of the name. The first record of the name inside
-    the image is the result."""
+    A directory whose bytes cannot be read, or that holds a record whose length or name
+    runs past it, is refused. Records are read in their order; only a record with the
+    wanted name has its location read, and when its both-endian copies disagree the
+    lookup is refused. A record of the name whose extent leaves the image refuses the
+    lookup (_ExtentOutsideImage, with last_component set when it is the file's own
+    record), as every lookup did before content keys: such an image is never read as one
+    without that file. With skip_outside, the rule nk_iso_find_in_dir in src/core/nk_iso.c
+    follows (tests/test_iso_parity.py keeps the two in step), such a record is passed over
+    for a later record of the name, and the first record of the name inside the image is
+    the result. Only the non-retail identity reads EBOOT.BIN and BOOT.BIN that way, as
+    nk_iso_non_retail_identity does."""
     stream.seek(PVD_SECTOR * SECTOR_SIZE)
     pvd = stream.read(SECTOR_SIZE)
     if len(pvd) != SECTOR_SIZE or pvd[:7] != ISO_MAGIC:
@@ -1726,7 +1740,10 @@ def _lookup_iso_file_detail(
                     _native_component_bytes(_iso_name_without_version(name)).upper() == wanted:
                 try:
                     found = _extent_from_record(record, file_size)
-                except _ExtentOutsideImage:
+                except _ExtentOutsideImage as exc:
+                    if not skip_outside:
+                        exc.last_component = index == len(path) - 1
+                        raise
                     outside = True
                     offset += record_size
                     continue
@@ -1739,6 +1756,17 @@ def _lookup_iso_file_detail(
         if not last and not is_dir:
             return None, False
     return ((lba, size) if not is_dir else None), False
+
+
+def _lookup_param_sfo(stream, file_size: int) -> tuple[int, int] | None:
+    """PSP_GAME/PARAM.SFO. A PARAM.SFO record outside the image is refused with the text
+    nk_iso_inspect gives, never read as a disc without PARAM.SFO."""
+    try:
+        return _lookup_iso_file(stream, file_size, ("PSP_GAME", "PARAM.SFO"))
+    except _ExtentOutsideImage as exc:
+        if exc.last_component:
+            raise IsoInspectionError("PSP_GAME/PARAM.SFO extent is invalid") from exc
+        raise
 
 
 def _image_read(read, offset: int, count: int) -> bytes | None:
@@ -2473,8 +2501,12 @@ def _classify_decrypted_elf_file(path: Path | str, *, module: bool = False) -> s
     return "UNKNOWN"
 
 
-def _classify_iso_executable(stream, file_size: int, path: str) -> dict[str, object]:
-    entry = _lookup_iso_file(stream, file_size, ("PSP_GAME", "SYSDIR", path))
+def _classify_iso_executable(
+    stream, file_size: int, path: str, *, skip_outside: bool = False
+) -> dict[str, object]:
+    entry = _lookup_iso_file(
+        stream, file_size, ("PSP_GAME", "SYSDIR", path), skip_outside=skip_outside
+    )
     if entry is None:
         return {"classification": "UNKNOWN", "present": False, "size_bytes": 0}
     lba, size = entry
@@ -2629,7 +2661,7 @@ def inspect_compatibility_preflight(
     directory_error_code: str | None = None
     try:
         with path.open("rb") as stream:
-            sfo_entry = _lookup_iso_file(stream, size_bytes, ("PSP_GAME", "PARAM.SFO"))
+            sfo_entry = _lookup_param_sfo(stream, size_bytes)
             sfo_parsed = False
             if sfo_entry is not None and 20 <= sfo_entry[1] <= MAX_SFO_BYTES:
                 raw_sfo = _read_iso_extent(stream, size_bytes, *sfo_entry, 0, sfo_entry[1])

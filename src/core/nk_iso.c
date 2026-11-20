@@ -268,8 +268,11 @@ static bool nk_iso_name_matches(const char *token, const uint8_t *name_bytes, ui
     return false;
 }
 
-/* One directory search, by the rule _lookup_iso_file in
- * tools/nk_core/iso_inspect.py shares (tests/parity keep the two in step):
+/* One directory search, by the rule _lookup_iso_file_detail in
+ * tools/nk_core/iso_inspect.py follows with skip_outside, as the non-retail
+ * identity reads EBOOT.BIN and BOOT.BIN in both tiers (tests/test_iso_parity.py
+ * keeps the two in step; the tool's other lookups refuse a record of the name
+ * outside the image, as they always did):
  * - A directory whose bytes cannot be read, or that holds a record whose length
  *   or name runs past it, is NK_ERROR_INVALID_ISO: a damaged directory is not
  *   reported as one without the wanted name.
