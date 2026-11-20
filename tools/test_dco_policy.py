@@ -397,7 +397,11 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
         for required in (
             "offline by default",
             "approves opt-in network features in principle",
-            "does not authorize an unlisted host",
+            "does not authorize an upload, or any connection before the player has opted in to the feature",
+            "it is contacted only after that feature's opt-in",
+            "receives nothing beyond what the feature's consent text names",
+            "the pull request names the host and lists it in the feature's public issue, its consent text",
+            "nothing connects before the player answers, and no answer means off",
             "each feature's public issue must name its hosts, payload, consent and data boundaries",
             "before it ships",
             "off by default",
