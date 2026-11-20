@@ -1390,6 +1390,12 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.achievements_signed_in = app->achievements_signed_in;
     model.achievements_account = app->achievements_account[0] ? app->achievements_account : NULL;
     model.achievements_status = app->achievements_status[0] ? app->achievements_status : NULL;
+    /* Cheats turn achievements off for every game, so this page says so too
+       (player_app_achievements_block; the title page adds the 60 FPS package). */
+    if (model.achievements_enabled) {
+        const char *blocked = player_app_achievements_block(app, -1);
+        if (blocked) model.achievements_status = blocked;
+    }
     model.cheats = app->settings.cheats;
     model.cover_art_cache_size = app->cover_art_cache_size_label;
     model.share_system_libraries = app->settings.share_system_libraries;
@@ -4168,6 +4174,10 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 } else {
                     model.achievements_status = "Play this game to load its softcore achievement set.";
                 }
+                /* With cheats or the 60 FPS game-logic package nothing is earned, and the page
+                   says why before the game starts (player_app_achievements_block). */
+                const char *blocked = player_app_achievements_block(app, index);
+                if (blocked) model.achievements_status = blocked;
             }
             /* The build check's refusal is on the page only while the build
                waits for it; so are the files it waits for (#308). */

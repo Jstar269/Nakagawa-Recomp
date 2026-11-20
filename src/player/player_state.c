@@ -4225,6 +4225,27 @@ void player_app_set_achievements_enabled(PlayerApp *app, bool enabled) {
     maybe_persist_settings(app);
 }
 
+static const char *achievements_block_reason(bool cheats, bool timing_package) {
+    if (cheats)
+        return "Achievements are off while cheats are on: nothing is earned in a changed game.";
+    if (timing_package)
+        return "Achievements are off with 60 FPS game logic, which changes the game's speed.";
+    return NULL;
+}
+
+const char *player_app_achievements_block(const PlayerApp *app, int game_index) {
+    if (!app) return NULL;
+    const bool timing = game_index >= 0 && game_index < app->game_count &&
+                        player_game_has_timing_package(&app->games[game_index]);
+    return achievements_block_reason(app->settings.cheats || app->cheats_session, timing);
+}
+
+const char *player_launch_achievements_block(const PlayerLaunchWork *work) {
+    if (!work) return NULL;
+    return achievements_block_reason(work->settings.cheats || work->cheats_session,
+                                     player_game_has_timing_package(&work->game));
+}
+
 bool player_app_discord_activity(const PlayerApp *app, NkDiscordActivity *out) {
     if (out) memset(out, 0, sizeof(*out));
     if (!app || !out || !app->is_game_running) return false;

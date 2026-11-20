@@ -18079,6 +18079,57 @@ int main(int argc, char **argv) {
             assert(strstr(s_app2->achievements_status, "Credential Manager") != NULL);
         }
 
+        /* RetroAchievements is off for a launch with cheats on or with the 60 FPS game-logic
+           package (#1316, maintainer decision 2026-11-20); the presentation parts do not stop
+           it, nor does a title's culling package alone. */
+        {
+            static PlayerLaunchWork block_work;
+            memset(&block_work, 0, sizeof(block_work));
+            player_app_settings_init_default(&block_work.settings);
+            assert(player_launch_achievements_block(&block_work) == NULL);
+            block_work.settings.fps_cap = 0;
+            block_work.settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+            block_work.settings.enhanced.part[PLAYER_PART_UPSCALE] = 1;
+            block_work.settings.enhanced.part[PLAYER_PART_WIDE] = 1;
+            assert(player_launch_achievements_block(&block_work) == NULL);
+            block_work.settings.cheats = true;
+            assert(player_launch_achievements_block(&block_work) != NULL &&
+                   strstr(player_launch_achievements_block(&block_work), "cheats") != NULL);
+            block_work.settings.cheats = false;
+            block_work.cheats_session = true;
+            assert(player_launch_achievements_block(&block_work) != NULL &&
+                   strstr(player_launch_achievements_block(&block_work), "cheats") != NULL);
+            block_work.cheats_session = false;
+            snprintf(block_work.game.enhancement_package_id,
+                     sizeof(block_work.game.enhancement_package_id), "%s", "synthetic-cull");
+            block_work.game.enhancement_hook_only = true;
+            assert(player_launch_achievements_block(&block_work) == NULL);
+            block_work.game.enhancement_hook_only = false;
+            assert(player_launch_achievements_block(&block_work) != NULL &&
+                   strstr(player_launch_achievements_block(&block_work), "60 FPS") != NULL);
+            assert(player_launch_achievements_block(NULL) == NULL);
+
+            player_app_init(s_app2);
+            assert(player_app_achievements_block(s_app2, -1) == NULL);
+            s_app2->cheats_session = true;
+            assert(player_app_achievements_block(s_app2, -1) != NULL);
+            s_app2->cheats_session = false;
+            s_app2->settings.cheats = true;
+            assert(player_app_achievements_block(s_app2, -1) != NULL);
+            s_app2->settings.cheats = false;
+
+            /* The User-Agent's system part: this host's name and version, printable ASCII
+               with no parentheses, and refused, empty, when it does not fit. */
+            char os_text[96];
+            assert(nk_platform_os_description(os_text, sizeof os_text));
+            assert(os_text[0] != '\0' && strchr(os_text, ' ') != NULL);
+            for (const char *c = os_text; *c; ++c)
+                assert(*c >= 0x20 && *c <= 0x7e && *c != '(' && *c != ')');
+            char os_short[4] = "xyz";
+            assert(!nk_platform_os_description(os_short, sizeof os_short) && os_short[0] == '\0');
+            assert(!nk_platform_os_description(NULL, sizeof os_text));
+        }
+
         /* Cheats (#2639): off by default, an optional key that only a JSON true turns on,
            toggled and saved by the Settings switch. --cheats and --cheats-file turn them on
            for the session and are never saved. */

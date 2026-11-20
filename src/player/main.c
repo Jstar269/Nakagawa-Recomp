@@ -58,6 +58,7 @@ static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettings
 static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork *work);
 static void player_achievements_stop_channel(PlayerRun *run);
 static void player_achievements_end_frames(PlayerRun *run);
+static void player_achievements_release_channel(PlayerRun *run);
 
 static const char k_invalid_disc_message[] = "This file isn't a PSP disc image.";
 static const char k_ach_credential_target[] = "NakagawaRecomp/RetroAchievements";
@@ -4371,6 +4372,8 @@ typedef struct PlayerRun {
        ach_http_job. It is never held across anything that waits for the person. */
     SDL_Mutex *achievements_lock;
     SDL_AtomicInt achievements_transport_open;
+    /* nk_ach_user_agent's, made once with the bridge: every request carries it. */
+    char achievements_user_agent[NK_ACH_USER_AGENT_MAX];
     NkGuestMemoryChannel guest_memory_channel;
     PlayerAchHttpJob *ach_http_job;
     char achievements_game_hash[33];
@@ -4415,6 +4418,7 @@ struct PlayerAchHttpJob {
     void *done_context;
     char url[2048];
     char content_type[128];
+    char user_agent[NK_ACH_USER_AGENT_MAX];
     char *post_data;
     size_t post_data_size;
     char *response_body;
@@ -4463,42 +4467,16 @@ static bool player_ach_response_append(PlayerAchHttpJob *job, const unsigned cha
     return true;
 }
 
-static bool player_ach_build_user_agent(char *out, size_t out_size) {
-    const char *version = NK_PLAYER_VERSION;
-    size_t numeric_size = 0u;
-    unsigned components = 1u;
-    bool need_digit = true;
-    if (!out || out_size == 0u) return false;
-    out[0] = '\0';
-    while (version[numeric_size]) {
-        const unsigned char c = (unsigned char)version[numeric_size];
-        if (c >= '0' && c <= '9') {
-            numeric_size++;
-            need_digit = false;
-        } else if (c == '.' && !need_digit && components < 3u) {
-            numeric_size++;
-            components++;
-            need_digit = true;
-        } else {
-            break;
-        }
-    }
-    if (components != 3u || need_digit || numeric_size == 0u) return false;
-    const int written = snprintf(out, out_size, "NakagawaRecomp/%.*s",
-                                 (int)numeric_size, version);
-    return written > 0 && (size_t)written < out_size;
-}
-
 static int SDLCALL player_ach_http_thread_main(void *userdata) {
     PlayerAchHttpJob *job = (PlayerAchHttpJob *)userdata;
-    char user_agent[64];
-    PackageHttpOptions options = {user_agent};
+    PackageHttpOptions options = {job->user_agent};
     PackageHttpResponse response;
     memset(&response, 0, sizeof response);
     const char *method = job->post_data ? "POST" : "GET";
     size_t capacity = 0u;
     bool body_ok = true;
-    if (!player_ach_build_user_agent(user_agent, sizeof user_agent)) {
+    if (!job->user_agent[0]) {
+        /* No user agent in RetroAchievements' form: nothing is sent (nk_ach_user_agent). */
         job->response_status = NK_ACH_HTTP_CLIENT_ERROR;
         goto finished;
     }
@@ -4591,6 +4569,7 @@ static void player_ach_transport(void *context, const NkAchRequest *request,
         return;
     }
     job->run = run;
+    snprintf(job->user_agent, sizeof job->user_agent, "%s", run->achievements_user_agent);
     job->done_callback = done;
     job->done_context = done_context;
     snprintf(job->url, sizeof job->url, "%s", request->url);
@@ -4646,6 +4625,16 @@ static bool player_achievements_create(PlayerRun *run) {
     if (run->achievements) return true;
     if (!run->achievements_lock) run->achievements_lock = SDL_CreateMutex();
     if (!run->achievements_lock) return false;
+    /* The user agent RetroAchievements documents for a client: this player, its version, the
+       operating system and rcheevos (nk_ach_user_agent). Without one nothing starts. */
+    char system[NK_ACH_USER_AGENT_SYSTEM_MAX];
+    if (!nk_platform_os_description(system, sizeof system)) system[0] = '\0';
+    if (!nk_ach_user_agent(NK_PLAYER_VERSION, system, run->achievements_user_agent,
+                           sizeof run->achievements_user_agent)) {
+        fprintf(stderr, "[PLAYER] RetroAchievements: no user agent in RetroAchievements' form "
+                        "for version %s\n", NK_PLAYER_VERSION);
+        return false;
+    }
     run->achievements = nk_ach_create(NULL, player_ach_transport, run);
     if (!run->achievements) return false;
     const NkAchLock lock = {run->achievements_lock, player_ach_lock_enter,
@@ -4985,6 +4974,7 @@ static void player_achievements_start(PlayerRun *run) {
                  "RetroAchievements could not initialize.");
         return;
     }
+    nk_ach_set_online(run->achievements, true);
     if (!run->achievements_queue_load_checked) {
         run->achievements_queue_load_checked = true;
         player_achievements_load_queue(run);
@@ -4999,11 +4989,15 @@ static bool player_achievements_consent(PlayerRun *run) {
     };
     static const char message[] =
         "RetroAchievements is hosted at https://retroachievements.org.\n\n"
-        "If you agree, Nakagawa Recomp sends your RetroAchievements username and API token, "
-        "the game hash, achievement unlocks, Rich Presence text, and leaderboard entries. "
-        "During sign-in your password is sent once to obtain a token and is never saved. "
-        "Game files, saves, and guest memory stay on this PC.\n\n"
-        "This feature is softcore only. Hardcore is not available.";
+        "If you agree, Nakagawa Recomp sends only to retroachievements.org: your "
+        "RetroAchievements username and API token, the game's RetroAchievements hash, the "
+        "achievements you unlock, and every two minutes while a game runs its Rich Presence "
+        "text (what the game's achievement set says you are doing). Each request names this "
+        "player, its version, your operating system and the rcheevos version. During sign-in "
+        "your password is sent once to obtain a token and is never saved; the token is kept in "
+        "Windows Credential Manager. Game files, saves and guest memory stay on this PC.\n\n"
+        "Softcore only: hardcore is not available. Achievements are off while cheats are on "
+        "or with 60 FPS game logic.";
     SDL_MessageBoxData data;
     int selected = 0;
     if (!run || !run->window) return false;
@@ -5095,6 +5089,19 @@ static void player_achievements_end_frames(PlayerRun *run) {
     run->achievements_game_hash[0] = '\0';
 }
 
+/* Audit F-1eacbfb4: while a game runs or is starting, its runtime may not have opened the channel
+   yet, and closing the section now would end the game's start (GUEST_MEMORY_CHANNEL_UNAVAILABLE).
+   Then only the frames end, and player_frame_game_session closes the mapping once the game has
+   exited. With no game, the channel closes now. */
+static void player_achievements_release_channel(PlayerRun *run) {
+    if (!run) return;
+    if (run->app.is_game_running || run->app.launch_pending) {
+        player_achievements_end_frames(run);
+    } else {
+        player_achievements_stop_channel(run);
+    }
+}
+
 static void player_achievements_shutdown(PlayerRun *run) {
     if (!run) return;
     run->achievements_shutting_down = true;
@@ -5134,6 +5141,15 @@ static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork 
     if (!run->app.settings.achievements_enabled || !run->app.achievements_signed_in ||
         !run->app.achievements_store_available || !run->achievements ||
         player_ui_test_active(&run->ui_test)) return;
+    /* An unlock is earned only in the game as released: with cheats or the 60 FPS game-logic
+       package no set is loaded and no frame is evaluated, and the status line says why. */
+    const char *blocked = player_launch_achievements_block(work);
+    if (blocked) {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status, "%s",
+                 blocked);
+        fprintf(stderr, "[PLAYER] RetroAchievements: %s\n", blocked);
+        return;
+    }
 
     char hash[33] = "";
     if (!work->game.iso_path[0] || !nk_ach_psp_hash_iso(work->game.iso_path, hash)) {
@@ -5155,10 +5171,12 @@ static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork 
                  "The local guest-memory channel is unavailable; achievements are off for this run.");
         return;
     }
+    /* Every region of rcheevos' PSP map (kernel, user and extended RAM), which the arena holds
+       at its guest addresses. */
     NkAchMemory memory = {
-        run->guest_memory_channel.arena + NK_ACH_PSP_USER_RAM_START,
-        NK_ACH_PSP_USER_RAM_START,
-        NK_ACH_PSP_USER_RAM_SIZE,
+        run->guest_memory_channel.arena + NK_ACH_PSP_MAP_GUEST_START,
+        NK_ACH_PSP_MAP_GUEST_START,
+        NK_ACH_PSP_MAP_GUEST_SIZE,
     };
     nk_ach_set_memory(run->achievements, &memory);
     if (!nk_ach_begin_load_game(run->achievements, hash)) {
@@ -5186,7 +5204,7 @@ static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork 
 static void player_achievements_sign_out(PlayerRun *run) {
     if (!run) return;
     bool removed = nk_platform_credential_delete(k_ach_credential_target);
-    player_achievements_stop_channel(run);
+    player_achievements_release_channel(run);
     player_achievements_clear_list(run);
     run->app.achievements_signed_in = false;
     run->app.achievements_account[0] = '\0';
@@ -5221,6 +5239,8 @@ static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettings
         if (app->settings.achievements_enabled) {
             player_app_set_achievements_enabled(app, false);
             player_achievements_sync_transport(run);
+            /* Nothing more is sent: the bridge answers what waits itself (nk_ach_set_online). */
+            if (run->achievements) nk_ach_set_online(run->achievements, false);
             if (run->achievements_signout_pending) {
                 /* The Sign out that waited for the sign-in's answer ends the account now. When
                    the token is gone, nk_ach_sign_out replaced rc_client and the answer is
@@ -5233,7 +5253,7 @@ static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettings
             } else if (run->achievements) {
                 nk_ach_logout(run->achievements);
             }
-            player_achievements_stop_channel(run);
+            player_achievements_release_channel(run);
             player_achievements_clear_list(run);
             app->achievements_signed_in = false;
             app->achievements_account[0] = '\0';
@@ -6501,7 +6521,7 @@ static void player_frame_begin(PlayerRun *run) {
         nk_platform_guest_memory_channel_serving(&run->guest_memory_channel) < 0) {
         snprintf(app->achievements_status, sizeof app->achievements_status,
                  "The local guest-memory channel stopped; achievements are off for this run.");
-        player_achievements_stop_channel(run);
+        player_achievements_release_channel(run);
     }
     /* The runtime opens the channel at its start, before its window exists. A game whose window
        is up without having opened it ignores the channel (a package built before it, or

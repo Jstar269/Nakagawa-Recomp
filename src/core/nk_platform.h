@@ -136,6 +136,11 @@ bool nk_platform_mkdir_p(const char *dir_path);
 bool nk_platform_mkdir_p_private(const char *dir_path);
 FILE *nk_platform_fopen_private(const char *path, const char *mode);
 
+/* The operating system's name and version for a User-Agent's system part, such as
+ * "Windows 10.0.26100" or "Linux 6.8.0-45-generic": printable ASCII without parentheses. False,
+ * with out empty, when neither can be read or out is too small. */
+bool nk_platform_os_description(char *out, size_t out_size);
+
 /* Per-user OS credential storage. Secrets are never written to a settings or other plain file.
  * Unsupported platforms return false and do not provide a file fallback. */
 bool nk_platform_credential_store_available(void);

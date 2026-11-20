@@ -2611,6 +2611,16 @@ void player_app_toggle_update_check_at_start(PlayerApp *app);
 void player_app_toggle_discord_presence(PlayerApp *app);
 /* RetroAchievements is a separate opt-in, not the reserved network_mode setting. */
 void player_app_set_achievements_enabled(PlayerApp *app, bool enabled);
+/* Why RetroAchievements is off for a game, or NULL when nothing stops it (#1316, maintainer
+ * decision 2026-11-20): an unlock is earned only in the game as released. Cheats on (the stored
+ * switch or this session's --cheats) or a launch with the title's 60 FPS game-logic package,
+ * which changes the game's speed, turn it off for that launch: no achievement set is loaded and
+ * no frame is evaluated. The text says so in the UI. Presentation-only parts (filtering,
+ * upscaling, widescreen, smooth motion, frame pacing) change nothing the game computes and do
+ * not. player_app_achievements_block answers for the title the library shows,
+ * player_launch_achievements_block for the launch about to start. */
+const char *player_app_achievements_block(const PlayerApp *app, int game_index);
+const char *player_launch_achievements_block(const PlayerLaunchWork *work);
 /* What Discord shows now: the running game's title, play mode and start time. False when no
    game runs or nothing can be shown. It ignores the setting; player_app_discord_tick checks
    that. */

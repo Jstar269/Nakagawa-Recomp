@@ -33,6 +33,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -440,6 +441,23 @@ FILE *nk_platform_fopen_private(const char *path, const char *mode) {
     FILE *file = fdopen(fd, mode);
     if (!file) close(fd);
     return file;
+}
+
+bool nk_platform_os_description(char *out, size_t out_size) {
+    if (!out || out_size == 0u) return false;
+    out[0] = '\0';
+    struct utsname name;
+    if (uname(&name) != 0 || !name.sysname[0]) return false;
+    const int written = snprintf(out, out_size, "%s %s", name.sysname, name.release);
+    if (written <= 0 || (size_t)written >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    /* A User-Agent comment holds no parentheses or control bytes; anything else becomes '_'. */
+    for (char *c = out; *c; ++c) {
+        if (*c < 0x20 || *c > 0x7e || *c == '(' || *c == ')') *c = '_';
+    }
+    return true;
 }
 
 bool nk_platform_credential_store_available(void) {

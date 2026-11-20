@@ -544,6 +544,31 @@ FILE *nk_platform_fopen_private(const char *path, const char *mode) {
     return _wfopen(wpath, wmode);
 }
 
+/* RtlGetVersion reports the real version; GetVersionEx reports what the program's manifest
+   allows. It is read from ntdll, which every process has loaded. */
+typedef LONG(WINAPI *NkRtlGetVersion)(OSVERSIONINFOW *);
+
+bool nk_platform_os_description(char *out, size_t out_size) {
+    if (!out || out_size == 0u) return false;
+    out[0] = '\0';
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    NkRtlGetVersion get_version =
+        ntdll ? (NkRtlGetVersion)(void (*)(void))GetProcAddress(ntdll, "RtlGetVersion") : NULL;
+    OSVERSIONINFOW info;
+    memset(&info, 0, sizeof(info));
+    info.dwOSVersionInfoSize = sizeof(info);
+    if (!get_version || get_version(&info) != 0) return false;
+    const int written = snprintf(out, out_size, "Windows %lu.%lu.%lu",
+                                 (unsigned long)info.dwMajorVersion,
+                                 (unsigned long)info.dwMinorVersion,
+                                 (unsigned long)info.dwBuildNumber);
+    if (written <= 0 || (size_t)written >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
 bool nk_platform_credential_store_available(void) {
     return true;
 }
