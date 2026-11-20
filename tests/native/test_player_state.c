@@ -9159,6 +9159,56 @@ static void test_psn_package_imports_as_its_iso(void) {
         free(package_bytes);
     }
 
+    /* A package this account may not read is refused as access denied, not as a drive that
+       may be gone (review of #2779). Windows: a security descriptor that grants no one
+       anything; elsewhere no read permission, skipped for a user no permission stops. */
+    {
+        bool denied;
+        bool converted_ok;
+#if defined(_WIN32) || defined(_WIN64)
+        WCHAR wide[NATIVE_TEST_PATH_MAX];
+        SECURITY_DESCRIPTOR descriptor;
+        ACL nobody;
+        HANDLE probe;
+        assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pbp_path, -1, wide,
+                                   NATIVE_TEST_PATH_MAX) > 0);
+        assert(InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION));
+        assert(InitializeAcl(&nobody, sizeof(nobody), ACL_REVISION));
+        assert(SetSecurityDescriptorDacl(&descriptor, TRUE, &nobody, FALSE));
+        assert(SetFileSecurityW(wide, DACL_SECURITY_INFORMATION, &descriptor));
+        probe = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+        denied = probe == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED;
+        if (probe != INVALID_HANDLE_VALUE) CloseHandle(probe);
+#else
+        FILE *probe;
+        assert(chmod(pbp_path, 0) == 0);
+        probe = nk_fopen_utf8(pbp_path, "rb");
+        denied = probe == NULL;
+        if (probe != NULL) fclose(probe);
+#endif
+        if (denied) {
+            converted_ok = player_psn_package_convert(&again, NULL, code, sizeof(code), message,
+                                                      sizeof(message));
+            if (converted_ok || strcmp(code, "DISC_IMAGE_READ_FAILED") != 0 ||
+                strstr(message, "Access to the package was denied") == NULL) {
+                fprintf(stderr, "[PLAYER_STATE_TEST] an unreadable package was not refused as "
+                                "access denied: ok=%d %s: %s\n", (int)converted_ok, code, message);
+                assert(false);
+            }
+        } else {
+            printf("[PLAYER_STATE_TEST] SKIP access denied: this user reads a file it has no "
+                   "permission for\n");
+        }
+#if defined(_WIN32) || defined(_WIN64)
+        /* No descriptor list at all: everyone may again. */
+        assert(SetSecurityDescriptorDacl(&descriptor, TRUE, NULL, FALSE));
+        assert(SetFileSecurityW(wide, DACL_SECURITY_INFORMATION, &descriptor));
+#else
+        assert(chmod(pbp_path, 0600) == 0);
+#endif
+    }
+
     /* The wizard's panel shows the conversion and hands back the view the
        package was picked from. */
     app = (PlayerApp *)calloc(1, sizeof(PlayerApp));

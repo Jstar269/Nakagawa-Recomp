@@ -853,10 +853,16 @@ FILE *nk_platform_open_regular_file(const char *path) {
 
 FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared) {
     if (opened_shared) *opened_shared = false;
-    if (!path || !*path) return NULL;
+    if (!path || !*path) {
+        errno = EINVAL;
+        return NULL;
+    }
     /* No share modes here: an ordinary read (see nk_platform.h). */
     int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return NULL;
+    if (fd < 0) {
+        if (errno == EPERM) errno = EACCES;
+        return NULL;
+    }
     FILE *file = fdopen(fd, "rb");
     if (!file) close(fd);
     return file;
