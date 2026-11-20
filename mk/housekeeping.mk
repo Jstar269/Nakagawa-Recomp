@@ -60,11 +60,12 @@ endef
 # The same for a font drawn from two pinned sources: the first draws every character it has and the
 # second (--fallback) the rest. Arguments 1-9 as above, then 10 fallback TTF, 11 its pin, 12 its licence
 # text, 13 the first source's name and 14 the fallback's, which head their licences in the one licence
-# file that ships beside the font (each source's copyright notice and licence, OFL section 2).
+# file that ships beside the font (each source's copyright notice and licence, OFL section 2). The Geist
+# faces that use this rule also read the console's measured horizontal metrics (below).
 define PROJECT_FALLBACK_FONT_RULE
 project-$(1)-font: $(PROJECT_FONT_GENERATED_DIR)/$(2)
 
-$(PROJECT_FONT_GENERATED_DIR)/$(2): $(3) $(4) $(5) $(10) $(11) $(12) tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md mk/housekeeping.mk
+$(PROJECT_FONT_GENERATED_DIR)/$(2): $(3) $(4) $(5) $(10) $(11) $(12) $(PSP_MEASURED_LATIN_METRICS) tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md mk/housekeeping.mk
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(PROJECT_FONT_GENERATED_DIR_PY)').mkdir(parents=True, exist_ok=True)"
 	"$(PYTHON)" tools/ttf2pgf.py "$$@" "$(3)" --pin "$(4)" --fallback "$(10)" --fallback-pin "$(11)" $(6) $(8) --font-name "$(7)" --font-type "$(9)" --manifest "$(PROJECT_FONT_GENERATED_DIR_PY)/$(basename $(2)).json"
 	"$(PYTHON)" -c "from pathlib import Path; parts = [Path(p).read_text(encoding='utf-8') for p in ('$(5)', '$(12)')]; Path('$(PROJECT_FONT_GENERATED_DIR_PY)/$(basename $(2))-OFL.txt').write_text('$(13):\n\n' + parts[0] + '\n\n$(14) (the characters $(13) lacks):\n\n' + parts[1], encoding='utf-8', newline='\n')"
@@ -134,19 +135,26 @@ PROJECT_LATIN_7_STYLE := Bold Italic
 # their x-height and cap height sit on the console's rows, and their advances meet the line widths;
 # SemiBold's strokes are thickened both ways to the console bold faces' ink.
 # These values were tuned against a private comparison with the console's own fonts (#1300).
-PROJECT_LATIN_0_SPACING := --scale-x 1150 --embolden-x 3 --embolden-y 0 --tracking -8 --digit-advance 972
+# The Geist faces then take, for each character the console's font of the same index has, that font's
+# advance, image width and left, measured on the maintainer's PSP-3000 (firmware 6.61) and published as
+# numbers only (assets/fonts/psp_measured_latin_metrics.json, PSP-measured, spec section 3 rule 18): each such
+# letter keeps Geist's own outline, drawn as wide as the console's letter and placed where it is, so a
+# game's layout lands where the console's does. The spacing flags above then shape only the characters
+# the table does not list.
+PSP_MEASURED_LATIN_METRICS := assets/fonts/psp_measured_latin_metrics.json
+PROJECT_LATIN_0_SPACING := --scale-x 1150 --embolden-x 3 --embolden-y 0 --tracking -8 --digit-advance 972 --horizontal-metrics $(PSP_MEASURED_LATIN_METRICS) --horizontal-metrics-slot ltn0
 PROJECT_LATIN_1_SPACING := --tracking 2
 PROJECT_LATIN_2_SPACING := --tracking 7 --digit-advance 852 --embolden-y 3
 PROJECT_LATIN_3_SPACING := --tracking 3
-PROJECT_LATIN_4_SPACING := --ppem 19 --scale-x 1125 --embolden-x 7 --embolden-y 6 --tracking -3 --digit-advance 945
+PROJECT_LATIN_4_SPACING := --ppem 19 --scale-x 1125 --embolden-x 7 --embolden-y 6 --tracking -3 --digit-advance 945 --horizontal-metrics $(PSP_MEASURED_LATIN_METRICS) --horizontal-metrics-slot ltn4
 PROJECT_LATIN_5_SPACING := --tracking 1
 PROJECT_LATIN_6_SPACING := --scale-x 1080 --embolden-x 8 --embolden-y 2 --tracking -2 --digit-advance 904
 PROJECT_LATIN_7_SPACING := --tracking 2
-PROJECT_LATIN_8_SPACING := --scale-x 1200 --embolden-x 1 --embolden-y 2 --tracking -6 --digit-advance 659
+PROJECT_LATIN_8_SPACING := --scale-x 1200 --embolden-x 1 --embolden-y 2 --tracking -6 --digit-advance 659 --horizontal-metrics $(PSP_MEASURED_LATIN_METRICS) --horizontal-metrics-slot ltn8
 PROJECT_LATIN_9_SPACING := --tracking 3
 PROJECT_LATIN_10_SPACING := --scale-x 1030 --tracking 5 --digit-advance 571 --embolden-y 4
 PROJECT_LATIN_11_SPACING := --tracking 4
-PROJECT_LATIN_12_SPACING := --ppem 12 --scale-x 1250 --embolden-x 3 --embolden-y 6 --tracking -5 --digit-advance 659
+PROJECT_LATIN_12_SPACING := --ppem 12 --scale-x 1250 --embolden-x 3 --embolden-y 6 --tracking -5 --digit-advance 659 --horizontal-metrics $(PSP_MEASURED_LATIN_METRICS) --horizontal-metrics-slot ltn12
 PROJECT_LATIN_13_SPACING := --tracking 3
 PROJECT_LATIN_14_SPACING := --scale-x 1105 --embolden-x 6 --embolden-y 2 --tracking 0 --digit-advance 607
 PROJECT_LATIN_15_SPACING := --tracking 3
