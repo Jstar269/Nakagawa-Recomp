@@ -34,22 +34,131 @@
  *
  *   INST <index> MATCH states=<n>
  *   INST <index> MISMATCH states=<n> bad=<k> first=<state> <field> aot=<v> ref=<v>
+ *   INST <index> MISMATCH ... (later state not checked: <NOT_CHECKED or AOT_FAILED line>)
  *   INST <index> NOT_CHECKED <reason> [key=value...]
  *   INST <index> AOT_FAILED <reason> [key=value...]
  *
  * NOT_CHECKED is never a pass: the reference stopped on the instruction (unimplemented,
  * fault, break). AOT_FAILED is a failure: the translated side stopped or has no body for
- * an instruction the reference ran. Exit status: 0 when no instance mismatched or failed,
- * 1 otherwise, 2 for a usage or input error.
+ * an instruction the reference ran. A stop ends the instance, but states compared before it
+ * still count: when one of them mismatched, the verdict is MISMATCH (states= is the number
+ * compared) and names the stop, so a later stop never hides an earlier mismatch. Exit
+ * status: 0 when no instance mismatched or failed, 1 otherwise, 2 for a usage or input error.
  *
  * The harness includes snapshot_runner.c for its stop handling and its AOT and reference
  * state, with only main renamed, and links src/rt/harness_stubs.c for the stand-ins of the
- * scheduler, GE and host symbols, as the runner does.
+ * scheduler, GE and host symbols, as the runner does. With -DSR_FORM_SWEEP_VERDICT_SELFTEST
+ * the file builds on its own as a selftest of the per-instance verdict (instance_verdict),
+ * which tools/test_form_sweep.py drives.
  */
 
+#ifdef SR_FORM_SWEEP_VERDICT_SELFTEST
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#else
 #define main snapshot_runner_main
 #include "snapshot_runner.c"
 #undef main
+#endif
+
+typedef struct {
+    int bad;
+    char field[24];
+    uint32_t aot;
+    uint32_t ref;
+} Diff;
+
+static void diff_field(Diff *d, const char *name, uint32_t aot, uint32_t ref) {
+    if (d->bad || aot == ref) return;
+    d->bad = 1;
+    snprintf(d->field, sizeof d->field, "%s", name);
+    d->aot = aot;
+    d->ref = ref;
+}
+
+/* How an instance's run over its states ended. */
+typedef enum {
+    INST_END_ALL_STATES,   /* every state was compared */
+    INST_END_REF_STOP,     /* the reference stopped: NOT_CHECKED */
+    INST_END_AOT_FAILED,   /* the translated side failed or has no body: AOT_FAILED */
+} InstEnd;
+
+typedef struct {
+    uint32_t compared;      /* states compared on both sides */
+    uint32_t bad_states;    /* of those, states with a difference */
+    uint32_t first_state;
+    Diff first;             /* the first difference */
+} InstTally;
+
+static void tally_state(InstTally *t, const Diff *d, uint32_t state) {
+    t->compared++;
+    if (!d->bad) return;
+    if (t->bad_states == 0u) {
+        t->first = *d;
+        t->first_state = state;
+    }
+    t->bad_states++;
+}
+
+/* Print the one verdict line of an instance and count it. `stop` is the verdict a stop alone
+ * prints after "INST <index> " (NOT_CHECKED or AOT_FAILED with its details); it is unused
+ * when every state was compared. A mismatch in a state compared before a stop is still a
+ * MISMATCH and is counted; the line names the stop. An AOT failure counts as one either way. */
+static void instance_verdict(uint32_t index, const InstTally *t, InstEnd end, const char *stop,
+                             uint32_t *mismatched, uint32_t *aot_failed) {
+    if (end == INST_END_AOT_FAILED) (*aot_failed)++;
+    if (t->bad_states) {
+        printf("INST %u MISMATCH states=%u bad=%u first=%u %s aot=0x%08x ref=0x%08x", index,
+               t->compared, t->bad_states, t->first_state, t->first.field, t->first.aot,
+               t->first.ref);
+        if (end != INST_END_ALL_STATES) printf(" (later state not checked: %s)", stop);
+        printf("\n");
+        (*mismatched)++;
+    } else if (end == INST_END_ALL_STATES) {
+        printf("INST %u MATCH states=%u\n", index, t->compared);
+    } else {
+        printf("INST %u %s\n", index, stop);
+    }
+}
+
+#ifdef SR_FORM_SWEEP_VERDICT_SELFTEST
+/* One instance, one argument per state: `ok`, `bad` (r9 differs), `ref:<reason>` (the
+ * reference stops) or `aot` (a translated-side dispatch error). The stop lines have the
+ * harness's own shape. Exit status as the harness's. */
+int main(int argc, char **argv) {
+    InstTally tally;
+    memset(&tally, 0, sizeof tally);
+    InstEnd end = INST_END_ALL_STATES;
+    char stop[160] = "";
+    uint32_t mismatched = 0u, aot_failed = 0u;
+    for (int i = 1; i < argc && end == INST_END_ALL_STATES; i++) {
+        uint32_t st = (uint32_t)(i - 1);
+        Diff d;
+        memset(&d, 0, sizeof d);
+        if (!strncmp(argv[i], "ref:", 4)) {
+            snprintf(stop, sizeof stop, "NOT_CHECKED %s pc=0x%08x op=0x%08x state=%u", argv[i] + 4,
+                     0u, 0u, st);
+            end = INST_END_REF_STOP;
+        } else if (!strcmp(argv[i], "aot")) {
+            snprintf(stop, sizeof stop, "AOT_FAILED aot-dispatch-error code=%d op=0x%08x state=%u",
+                     -1000, 0u, st);
+            end = INST_END_AOT_FAILED;
+        } else if (!strcmp(argv[i], "bad")) {
+            diff_field(&d, "r9", st, st + 1u);
+            tally_state(&tally, &d, st);
+        } else if (!strcmp(argv[i], "ok")) {
+            tally_state(&tally, &d, st);
+        } else {
+            fprintf(stderr, "form_sweep verdict selftest: unknown state outcome %s\n", argv[i]);
+            return 2;
+        }
+    }
+    instance_verdict(0u, &tally, end, stop, &mismatched, &aot_failed);
+    return (mismatched || aot_failed) ? 1 : 0;
+}
+#else
 
 typedef struct {
     uint32_t index;
@@ -185,21 +294,6 @@ static void make_state(CpuState *cpu, const SweepInst *in, uint32_t state_index,
     }
     cpu->r[0] = 0u;
     cpu->r[31] = SR_HOST_RETURN_PC;
-}
-
-typedef struct {
-    int bad;
-    char field[24];
-    uint32_t aot;
-    uint32_t ref;
-} Diff;
-
-static void diff_field(Diff *d, const char *name, uint32_t aot, uint32_t ref) {
-    if (d->bad || aot == ref) return;
-    d->bad = 1;
-    snprintf(d->field, sizeof d->field, "%s", name);
-    d->aot = aot;
-    d->ref = ref;
 }
 
 static void compare_states(Diff *d, const CpuState *a, const CpuState *r) {
@@ -340,17 +434,18 @@ int main(int argc, char **argv) {
     for (uint32_t k = 0; k < count; k++) {
         const SweepInst *in = &insts[k];
         if (only >= 0 && (uint32_t)only != in->index) continue;
+        InstTally tally;
+        memset(&tally, 0, sizeof tally);
+        InstEnd end = INST_END_ALL_STATES;
+        char stop[160];
+        stop[0] = '\0';
         RecompFn fn = sr_lookup(in->entry);
         if (!fn) {
-            printf("INST %u AOT_FAILED aot-no-body pc=0x%08x op=0x%08x\n", in->index, in->entry, in->word);
-            aot_failed++;
+            snprintf(stop, sizeof stop, "AOT_FAILED aot-no-body pc=0x%08x op=0x%08x", in->entry, in->word);
+            instance_verdict(in->index, &tally, INST_END_AOT_FAILED, stop, &mismatched, &aot_failed);
             continue;
         }
-        uint32_t bad_states = 0u, first_state = 0u;
-        Diff first;
-        memset(&first, 0, sizeof first);
-        int not_checked = 0;
-        for (uint32_t st = 0; st < states && !not_checked; st++) {
+        for (uint32_t st = 0; st < states && end == INST_END_ALL_STATES; st++) {
             CpuState start;
             make_state(&start, in, st, seed, scratch, scratch_size);
             start.pc = in->entry;
@@ -377,9 +472,9 @@ int main(int argc, char **argv) {
                     "return", "import", "syscall", "ref-unimplemented", "ref-memory-fault",
                     "ref-break", "ref-step-limit",
                 };
-                printf("INST %u NOT_CHECKED %s pc=0x%08x op=0x%08x state=%u\n", in->index,
-                       names[rr.stop], rr.pc, rr.op, st);
-                not_checked = 1;
+                snprintf(stop, sizeof stop, "NOT_CHECKED %s pc=0x%08x op=0x%08x state=%u",
+                         names[rr.stop], rr.pc, rr.op, st);
+                end = INST_END_REF_STOP;
                 break;
             }
 
@@ -400,10 +495,9 @@ int main(int argc, char **argv) {
             oor_reads = g_oor_reads - oor_reads;
             oor_writes = g_oor_writes - oor_writes;
             if (dispatch_rc < 0) {
-                printf("INST %u AOT_FAILED aot-dispatch-error code=%d op=0x%08x state=%u\n", in->index,
-                       dispatch_rc, in->word, st);
-                aot_failed++;
-                not_checked = 1;
+                snprintf(stop, sizeof stop, "AOT_FAILED aot-dispatch-error code=%d op=0x%08x state=%u",
+                         dispatch_rc, in->word, st);
+                end = INST_END_AOT_FAILED;
                 break;
             }
             Diff d;
@@ -421,22 +515,9 @@ int main(int argc, char **argv) {
             }
             if (!d.bad && oor_reads) diff_field(&d, "oor_loads", (uint32_t)oor_reads, 0u);
             if (!d.bad && oor_writes) diff_field(&d, "oor_stores", (uint32_t)oor_writes, 0u);
-            if (d.bad) {
-                if (bad_states == 0u) {
-                    first = d;
-                    first_state = st;
-                }
-                bad_states++;
-            }
+            tally_state(&tally, &d, st);
         }
-        if (not_checked) continue;
-        if (bad_states) {
-            printf("INST %u MISMATCH states=%u bad=%u first=%u %s aot=0x%08x ref=0x%08x\n", in->index,
-                   states, bad_states, first_state, first.field, first.aot, first.ref);
-            mismatched++;
-        } else {
-            printf("INST %u MATCH states=%u\n", in->index, states);
-        }
+        instance_verdict(in->index, &tally, end, stop, &mismatched, &aot_failed);
     }
     fprintf(stderr, "form_sweep: %u float register pairs held NaNs with different payloads and were "
             "made equal (operand-order-dependent result, PSP choice unmeasured)\n", g_nan_ties);
@@ -444,3 +525,4 @@ int main(int argc, char **argv) {
     free(insts);
     return (mismatched || aot_failed) ? 1 : 0;
 }
+#endif /* SR_FORM_SWEEP_VERDICT_SELFTEST */
