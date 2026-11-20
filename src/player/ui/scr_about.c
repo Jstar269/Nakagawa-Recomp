@@ -108,10 +108,12 @@ PlayerUiAction player_ui_screen_about(NkUi *ui, const PlayerUiAboutModel *model)
                 if (nk_ui_card_begin(ui, ABOUT_ID_LICENSE, sizing_fixed(licence), sizing_grow(),
                                      NK_UI_SPACE_3)) {
                     nk_ui_eyebrow(ui, 0x50000200u, "Licence");
-                    nk_ui_text_role(ui, 0x50000201u, "GPL-3.0-or-later",
+                    nk_ui_text_role(ui, 0x50000201u, "GNU GPL version 3",
                                     NK_UI_TYPE_HEADING, theme->paper);
                     nk_ui_text_role(ui, 0x50000202u,
-                                    "Free software. Third-party parts keep their own licences.",
+                                    "Free software. Nakagawa's own code also allows later GPL "
+                                    "versions; two included parts are version 3 only. "
+                                    "Third-party parts keep their own licences.",
                                     NK_UI_TYPE_CAPTION, theme->muted);
                     if (nk_ui_button(ui, PLAYER_UI_ID_ABOUT_NOTICES, "Third-party notices", 0u)) {
                         result = action(PLAYER_UI_ACTION_OPEN_NOTICES, 0u, PLAYER_UI_PRIMARY_NONE);
