@@ -4402,9 +4402,13 @@ bool player_app_open_online_play_card(PlayerApp *app, const char *server) {
     if (!app) return false;
     if (!server || !server[0] || strlen(server) >= sizeof(app->online_play_card_server) ||
         !nk_adhoc_relay_parse_server(server, NULL, 0u, NULL, NULL)) {
-        snprintf(app->online_play_notice, sizeof(app->online_play_notice), "%s",
-                 "That server address is not valid, so Online play was not turned on.");
-        player_dev_log_add(app, "settings", "online play card refused an invalid server address");
+        /* Refused by name; the server in use and its consent stay as they were. */
+        const char *why = nk_adhoc_relay_server_problem(server);
+        snprintf(app->online_play_notice, sizeof(app->online_play_notice),
+                 "That server address was not used: %s. Online play was not changed.",
+                 why ? why : "it is not host, host:lobby_port or host:lobby_port,data_port");
+        player_dev_log_add(app, "settings", "online play card refused a server address: %s",
+                           why ? why : "invalid");
         return false;
     }
     snprintf(app->online_play_card_server, sizeof(app->online_play_card_server), "%s", server);

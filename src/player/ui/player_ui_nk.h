@@ -202,6 +202,7 @@ typedef struct {
     UiKeyboard *keyboard;   /* what is typed, its cap and filter, and the letter case */
     const char *current;    /* the nickname or server in use, shown while nothing is typed */
     bool refused;           /* the last Done was refused */
+    const char *refused_reason; /* server_mode: why, in words (nk_adhoc_relay_server_problem) */
     float logical_width;
     float logical_height;
 } PlayerUiNicknameModel;
@@ -906,6 +907,11 @@ typedef struct {
     const char *online_play_port_offset;  /* "10000" */
     /* The card: the exact server it names and the nickname it sends. */
     const char *online_play_card_server;
+    /* What the card's server reads as (nk_adhoc_relay_parse_server): the host and the two
+       ports a game connects to; "" and 0 where it does not parse. */
+    const char *online_play_card_host;
+    unsigned online_play_card_lobby_port;
+    unsigned online_play_card_data_port;
     /* The picker: the shipped servers, then the list's (PlayerUiOnlineServer), and where the
        list came from. Online play on adds Refresh. */
     const PlayerUiOnlineServer *online_play_servers;

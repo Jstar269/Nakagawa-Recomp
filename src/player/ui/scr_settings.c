@@ -1949,7 +1949,7 @@ static float settings_online_play_row_height(const NkUi *ui) {
     return nk_ui_line_box(ui, ONLINE_PLAY_ROW_HEIGHT, &name);
 }
 
-/* How wide a row's chips are: its origin's (none for the own server) and Current's. */
+/* How wide a row's chips are: `chip`'s (none on the picker today) and Current's. */
 static float settings_online_play_chips_width(NkUi *ui, const char *chip, bool current) {
     NkUiTextStyle label = nk_ui_type(NK_UI_TYPE_LABEL_S, 0u);
     float width = 0.0f;
@@ -2128,9 +2128,11 @@ static void settings_online_play_links(const NkUiId *order, size_t count, NkUiId
     }
 }
 
-/* A section heading in the list, or a line of text under one; blank while the list cuts it. */
+/* A section heading in the list, or a line of text under one; blank while the list cuts it.
+   `top` and `bottom` are its padding; a line a row follows keeps 6 px under it, clear of the
+   row's focus ring. */
 static void settings_online_play_text(NkUi *ui, NkUiId id, const char *text, NkUiTypeRole role,
-                                      uint32_t rgba, float top) {
+                                      uint32_t rgba, float top, float bottom) {
     float height = 0.0f;
     NkUiLayout line = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), 0.0f);
     if (settings_online_play_cut(ui, id, &height)) {
@@ -2139,8 +2141,7 @@ static void settings_online_play_text(NkUi *ui, NkUiId id, const char *text, NkU
     }
     line.padding_left = line.padding_right = NK_UI_SPACE_3;
     line.padding_top = top;
-    /* A heading keeps clear of the focus ring of the row under it. */
-    if (role == NK_UI_TYPE_EYEBROW) line.padding_bottom = 6.0f;
+    line.padding_bottom = bottom;
     if (nk_ui_begin_container(ui, id, &line, NULL)) {
         nk_ui_text_role(ui, nk_ui_child_id(id, 1u),
                         role == NK_UI_TYPE_EYEBROW ? nk_ui_caps(ui, text) : text, role, rgba);
@@ -2448,12 +2449,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         server_fits = nk_ui_button_width(ui, server_label, 0u) <= inner - 32.0f;
         if (server_fits) {
             snprintf(server_sentence, sizeof(server_sentence),
-                     "%s. A community server: Nakagawa does not run it. Choose to pick another.",
+                     "%s. Choose to pick another.",
                      server_name);
         } else {
             snprintf(server_sentence, sizeof(server_sentence),
-                     "%s: %s. A community server: Nakagawa does not run it. Choose to pick "
-                     "another.",
+                     "%s: %s. Choose to pick another.",
                      server, server_name);
         }
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
@@ -2540,9 +2540,23 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         const bool scrolls = settings_online_play_card_scroll(ui);
         const NkUiTextStyle eyebrow_style = nk_ui_type(NK_UI_TYPE_EYEBROW, 0u);
         const NkUiTextStyle line_style = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
-        snprintf(server_line, sizeof(server_line),
-                 "To do this, Nakagawa connects to %s. This is a community server. Nakagawa does "
-                 "not run it.", server);
+        {
+            /* Exactly what the runtime contacts: the host and both ports, as the model read
+               them with the runtime's own parser (player_ui_nk.c), the defaults written out. */
+            const char *host = safe_text(model->online_play_card_host, "");
+            if (host[0] != '\0' && model->online_play_card_lobby_port != 0u &&
+                model->online_play_card_data_port != 0u) {
+                snprintf(server_line, sizeof(server_line),
+                         "To do this, Nakagawa connects to %s on ports %u and %u. This is a "
+                         "community server. Nakagawa does not run it.",
+                         host, model->online_play_card_lobby_port,
+                         model->online_play_card_data_port);
+            } else {
+                snprintf(server_line, sizeof(server_line),
+                         "To do this, Nakagawa connects to %s. This is a community server. "
+                         "Nakagawa does not run it.", server);
+            }
+        }
         /* The login sends the console nickname, the registry's owner_name: this setting unless
            a game saved its own there (hle_network.c adhoc_fill_nickname). */
         snprintf(nickname_line, sizeof(nickname_line),
@@ -2644,8 +2658,9 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
            PPSSPP's list. Choosing one opens the consent card for it; nothing here connects. */
         size_t count = model->online_play_servers ? model->online_play_server_count : 0u;
         const char *server = safe_text(model->online_play_server, "");
-        const char *list_chip = model->online_play_list_live ? "From the downloaded list"
-                                                             : "From the shipped list";
+        /* Where PPSSPP's list came from is said once, in its heading, not on each row. */
+        const char *list_heading = model->online_play_list_live ? "PPSSPP's list"
+                                                                : "PPSSPP's list (shipped copy)";
         /* The list's panel keeps little padding of its own: the list's, there for the focus
            ring, is the rest. */
         const float row_width = inner - 16.0f - ENHANCED_SCROLLBAR_ROOM -
@@ -2656,6 +2671,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         const NkUiTextStyle eyebrow = nk_ui_type(NK_UI_TYPE_EYEBROW, 0u);
         const NkUiTextStyle heading = nk_ui_type(NK_UI_TYPE_TITLE, 0u);
         const NkUiTextStyle label = nk_ui_type(NK_UI_TYPE_LABEL, 0u);
+        const NkUiTextStyle host_line_style = nk_ui_type(NK_UI_TYPE_DATA, 0u);
         char port_label[48];
         bool shipped_beside = true;
         bool listed_beside = true;
@@ -2700,12 +2716,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 listed_beside = listed_beside &&
                                 settings_online_play_fits_beside(
                                     ui, safe_text(row->name, ""),
-                                    settings_online_play_host_line(ui, row), list_chip,
+                                    settings_online_play_host_line(ui, row), NULL,
                                     model->online_play && strcmp(host, server) == 0, row_width);
             } else {
                 shipped_beside = shipped_beside &&
                                  settings_online_play_fits_beside(
-                                     ui, safe_text(row->name, ""), host, "Built in",
+                                     ui, safe_text(row->name, ""), host, NULL,
                                      model->online_play && strcmp(host, server) == 0, row_width);
             }
         }
@@ -2717,19 +2733,27 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             }
             if (pass == 0) order[order_count++] = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER;
         }
-        shipped = settings_online_play_layout(ui, shipped_beside, "Built in", row_width);
-        from_list = settings_online_play_layout(ui, listed_beside, list_chip, row_width);
+        shipped = settings_online_play_layout(ui, shipped_beside, NULL, row_width);
+        from_list = settings_online_play_layout(ui, listed_beside, NULL, row_width);
         (void)snprintf(port_label, sizeof(port_label), "Port offset: %s",
                        safe_text(model->online_play_port_offset, "10000"));
         port_width = nk_ui_button_width(ui, port_label, 0u);
         own_width = row_width - NK_UI_SPACE_3 - port_width;
-        /* The port offset beside the own server's row while that leaves the row half the
-           width, else under it. */
-        if (own_width < 0.5f * row_width) own_width = row_width;
         /* A server in use that no row lists (one typed in, or a list entry while the list is
            not loaded: it lasts one session) is named for what it is, not for where it came
            from, which the settings do not keep. */
         own_name = own_current ? "Server in use" : "Your own server";
+        /* The port offset beside the own server's row while that leaves the row half the
+           width and its host whole on one line, else under it: a long typed host (up to 127
+           characters) takes the whole width, so the row stays short enough for the list. */
+        if (own_width < 0.5f * row_width ||
+            2.0f * NK_UI_SPACE_3 + NK_UI_SPACE_3 +
+                    ceilf(nk_ui_text_width(ui, own_current ? server : SCR_ONLINE_PLAY_OWN_FORMAT,
+                                           &host_line_style)) +
+                    settings_online_play_chips_width(ui, NULL, own_current) >
+                own_width) {
+            own_width = row_width;
+        }
         own = settings_online_play_layout(
             ui, settings_online_play_fits_beside(ui, own_name,
                                                  own_current ? server : SCR_ONLINE_PLAY_OWN_FORMAT,
@@ -2776,20 +2800,26 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             if (nk_ui_begin_container(ui, SET_ID_ONLINE_PLAY_LIST_ROW, &list_row, NULL)) {
                 if (nk_ui_begin_container(ui, SET_ID_ONLINE_PLAY_LIST, &list, NULL)) {
                     bool first_in_section = true;
-                    /* The shipped servers need no heading: each row's chip says Built in, and
-                       the room keeps the own server's row in view under the intro's hint. */
+                    /* No row carries a tag that every row near it would carry too: the
+                       shipped servers come first, with no heading or chip, and PPSSPP's list
+                       says once, in its heading, where it came from. Only Current marks a row. */
                     for (int pass = 0; pass < 2; ++pass) {
                         /* The shipped servers first; PPSSPP's list after the own server. */
                         if (pass == 1) {
                             if (!model->online_play) break;
+                            const bool has_status = model->online_play_list_status &&
+                                                    model->online_play_list_status[0] != '\0';
+                            /* Whichever line the first row follows keeps clear of its focus
+                               ring. */
                             settings_online_play_text(ui, SET_ID_ONLINE_PLAY_HEADING + 2u,
-                                                      "PPSSPP's list", NK_UI_TYPE_EYEBROW,
-                                                      theme->muted, 6.0f);
-                            if (model->online_play_list_status &&
-                                model->online_play_list_status[0] != '\0') {
+                                                      list_heading, NK_UI_TYPE_EYEBROW,
+                                                      theme->muted, 6.0f,
+                                                      has_status ? 0.0f : 6.0f);
+                            if (has_status) {
                                 settings_online_play_text(ui, SET_ID_TEXT + 0x7F4u,
                                                           model->online_play_list_status,
-                                                          NK_UI_TYPE_BODY_S, theme->muted, 0.0f);
+                                                          NK_UI_TYPE_BODY_S, theme->muted, 0.0f,
+                                                          6.0f);
                             }
                             first_in_section = true;
                         }
@@ -2807,7 +2837,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                             if (settings_online_play_row(
                                     ui, id, safe_text(row->name, ""),
                                     settings_online_play_host_line(ui, row),
-                                    pass == 1 ? list_chip : "Built in",
+                                    NULL,
                                     model->online_play && strcmp(host, server) == 0, row_width,
                                     pass == 1 ? from_list : shipped, up, down)) {
                                 *result = settings_op(PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER);
@@ -2839,17 +2869,17 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                             }
                             settings_online_play_text(ui, SET_ID_ONLINE_PLAY_OWN_SENTENCE,
                                                       SCR_ONLINE_PLAY_OWN_SENTENCE,
-                                                      NK_UI_TYPE_CAPTION, theme->muted, 0.0f);
+                                                      NK_UI_TYPE_CAPTION, theme->muted, 0.0f, 0.0f);
                         }
                     }
                     if (model->online_play && any_listed) {
                         settings_online_play_text(ui, SET_ID_TEXT + 0x7F5u,
                                                   SCR_ONLINE_PLAY_RELAY_ONLY_CAPTION,
-                                                  NK_UI_TYPE_CAPTION, theme->muted, 0.0f);
+                                                  NK_UI_TYPE_CAPTION, theme->muted, 0.0f, 0.0f);
                     } else if (!model->online_play) {
                         settings_online_play_text(ui, SET_ID_ONLINE_PLAY_OFF_LINE,
                                                   SCR_ONLINE_PLAY_LIST_OFF_LINE, NK_UI_TYPE_CAPTION,
-                                                  theme->muted, NK_UI_SPACE_2);
+                                                  theme->muted, NK_UI_SPACE_2, 0.0f);
                     }
                     nk_ui_end_container(ui);
                 }

@@ -166,6 +166,7 @@ struct PlayerUiNk {
     char settings_online_play_row[160];
     char settings_online_play_status[320];
     char settings_online_play_port[8];
+    char settings_online_play_card_host[NK_ADHOC_SERVER_MAX_LEN + 1u];
     /* The Online play picker's rows (#1139): the shipped servers, then the list's. */
     PlayerUiOnlineServer settings_online_play_servers[PLAYER_UI_ONLINE_PLAY_SERVERS_MAX];
     /* The graphics preset's note on the main Settings page (#2150). */
@@ -1430,6 +1431,20 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         model.online_play_list_busy = app->online_play_list_busy;
         model.online_play_list_live = app->online_play_list_live;
         model.online_play_card_server = app->online_play_card_server;
+        {
+            /* The card names exactly what a game will contact: the runtime's own parser
+               (nk_launch.c passes the same string to it). */
+            uint16_t lobby_port = 0u;
+            uint16_t data_port = 0u;
+            if (nk_adhoc_relay_parse_server(app->online_play_card_server,
+                                            player->settings_online_play_card_host,
+                                            sizeof(player->settings_online_play_card_host),
+                                            &lobby_port, &data_port)) {
+                model.online_play_card_lobby_port = lobby_port;
+                model.online_play_card_data_port = data_port;
+            }
+            model.online_play_card_host = player->settings_online_play_card_host;
+        }
         snprintf(player->settings_online_play_row, sizeof(player->settings_online_play_row),
                  model.online_play ? "On: %s" : "Off", srv);
         if (app->online_play_notice[0]) {
@@ -4000,6 +4015,12 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                         : player->nickname_is_server ? app->settings.online_play_server
                                                      : app->settings.nickname;
         model.refused = player->nickname_refused;
+        if (model.refused && model.server_mode) {
+            /* The Done refused said why: the text is as it was then (an edit clears refused). */
+            char typed[NK_ADHOC_SERVER_MAX_LEN + 1u];
+            model.refused_reason = nk_adhoc_relay_server_problem(
+                player_ui_nickname_trimmed(player->nickname_text, typed, sizeof(typed)));
+        }
         model.logical_width = scale.logical_w;
         model.logical_height = scale.logical_h;
         action = player_ui_screen_nickname(player->ui, &model);

@@ -18128,6 +18128,24 @@ int main(int argc, char **argv) {
         assert(!player_app_open_online_play_card(s_app2, "bad server!!"));
         assert(!player_app_open_online_play_card(s_app2, "relay.example.invalid:99999"));
         assert(s_app2->active_view == VIEW_ONLINE_PLAY_SETTINGS && s_app2->online_play_notice[0]);
+        /* Each is refused by name, and the server in use and its consent stay as they were
+           (#1139, review of 2026-11-20). */
+        {
+            static const struct { const char *spec; const char *why; } refused[] = {
+                {"", "empty"}, {"relay example.org", "a space"},
+                {"relay.\x01" "example.org", "control character"},
+                {"relay.\xE2\x80\xAE" "example.org", "bidirectional"},
+                {"http://relay.example.org", "scheme"}, {"relay.example.org/x", "a path"},
+                {"relay.example.org:0", "a port"}, {"relay.example.org:65536", "a port"}};
+            for (size_t i = 0u; i < sizeof(refused) / sizeof(refused[0]); ++i) {
+                s_app2->online_play_notice[0] = '\0';
+                assert(!player_app_open_online_play_card(s_app2, refused[i].spec));
+                assert(strstr(s_app2->online_play_notice, refused[i].why) != NULL);
+                assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
+                assert(s_app2->online_play_card_server[0] == '\0');
+                assert(s_app2->active_view == VIEW_ONLINE_PLAY_SETTINGS);
+            }
+        }
         /* Picking a different server opens the card for that exact server; TURN ON makes it
            the server, the consent and the switch at once. */
         assert(player_app_open_online_play_card(s_app2, "127.0.0.1:27312,27313"));

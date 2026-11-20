@@ -414,6 +414,77 @@ static void test_server_parsing_and_presets(void) {
     }
 }
 
+/* #1139, review of 2026-11-20 ("is it tested how custom servers are shown?"): every form a
+   player may type for their own server is accepted with the host and ports it names, the
+   longest host included, and every refused one is refused with its reason in words. */
+static void test_own_server_forms_and_reasons(void) {
+    char host[NK_ADHOC_SERVER_MAX_LEN + 1u];
+    char longest[NK_ADHOC_SERVER_MAX_LEN + 1u];
+    char too_long[NK_ADHOC_SERVER_MAX_LEN + 2u];
+    uint16_t lp = 0u, dp = 0u;
+    /* 127 bytes: two 63-byte labels around a dot. */
+    memset(longest, 'a', 63u);
+    longest[63] = '.';
+    memset(longest + 64, 'b', 63u);
+    longest[127] = '\0';
+    memcpy(too_long, longest, 127u);
+    too_long[127] = 'b';
+    too_long[128] = '\0';
+    static const struct {
+        const char *spec;
+        const char *host;
+        uint16_t lobby;
+        uint16_t data;
+    } good[] = {
+        {"relay.example.org", "relay.example.org", 27312u, 27313u},
+        {"relay.example.org:40000", "relay.example.org", 40000u, 27313u},
+        {"relay.example.org:40000,40001", "relay.example.org", 40000u, 40001u},
+        {"192.0.2.10", "192.0.2.10", 27312u, 27313u},
+        {"192.0.2.10:1,65535", "192.0.2.10", 1u, 65535u},
+    };
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        CHECK(nk_adhoc_relay_parse_server(good[i].spec, host, sizeof host, &lp, &dp) &&
+                  strcmp(host, good[i].host) == 0 && lp == good[i].lobby && dp == good[i].data &&
+                  nk_adhoc_relay_server_problem(good[i].spec) == NULL,
+              "own server %s is accepted as %s, ports %u and %u", good[i].spec, good[i].host,
+              (unsigned)good[i].lobby, (unsigned)good[i].data);
+    }
+    CHECK(nk_adhoc_relay_parse_server(longest, host, sizeof host, &lp, &dp) &&
+              strcmp(host, longest) == 0 && nk_adhoc_relay_server_problem(longest) == NULL,
+          "the longest host (127 bytes) is accepted whole");
+    static const struct {
+        const char *spec;
+        const char *reason; /* a part of the reason */
+    } refused[] = {
+        {"", "empty"},
+        {"relay.example.org extra", "a space"},
+        {"relay.\x01example.org", "a control character"},
+        {"relay.example.org\x7f", "a control character"},
+        {"relay.\xE2\x80\xAE" "gro.elpmaxe", "bidirectional"},
+        {"\xE2\x81\xA6relay.example.org", "bidirectional"},
+        {"rel\xC3\xA9.example.org", "outside A to Z"},
+        {"http://relay.example.org", "scheme"},
+        {"relay.example.org/adhoc", "a path"},
+        {"relay.example.org:0", "a port"},
+        {"relay.example.org:65536", "a port"},
+        {"relay.example.org:40000,0", "a port"},
+        {"relay.example.org:", "a port"},
+        {"relay..example.org", "the host"},
+        {"user@relay.example.org", "the host"},
+        {":40000", "the host"},
+    };
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        const char *why = nk_adhoc_relay_server_problem(refused[i].spec);
+        CHECK(!nk_adhoc_relay_parse_server(refused[i].spec, host, sizeof host, &lp, &dp) &&
+                  why != NULL && strstr(why, refused[i].reason) != NULL,
+              "own server %zu is refused because %s (got: %s)", i, refused[i].reason,
+              why ? why : "accepted");
+    }
+    CHECK(nk_adhoc_relay_server_problem(NULL) != NULL &&
+              strstr(nk_adhoc_relay_server_problem(too_long), "longer than 127") != NULL,
+          "NULL and a 128-byte host are refused, the long one as too long");
+}
+
 int main(void) {
     test_sizes();
     test_login();
@@ -426,6 +497,7 @@ int main(void) {
     test_size_fields_are_32_bits();
     test_hostile_connect();
     test_check_boundaries();
+    test_own_server_forms_and_reasons();
     test_server_parsing_and_presets();
     if (g_failures) {
         fprintf(stderr, "test_nk_adhoc_relay: %d failure(s)\n", g_failures);

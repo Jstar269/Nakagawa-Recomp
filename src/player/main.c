@@ -1507,10 +1507,10 @@ static void player_online_play_load_shipped(PlayerApp *app, const char *why) {
                                                           player_adhoc_list_app_log, app);
     player_adhoc_list_drop_presets(&app->online_play_list);
     app->online_play_list_live = false;
+    /* The list's heading says it is the shipped copy; the status says only why. */
     snprintf(app->online_play_list_status, sizeof(app->online_play_list_status),
-             status == NK_ADHOC_LIST_OK
-                 ? "%s Shown: PPSSPP's list as shipped with Nakagawa."
-                 : "%s The list shipped with Nakagawa could not be read.",
+             status == NK_ADHOC_LIST_OK ? "%s"
+                                        : "%s The list shipped with Nakagawa could not be read.",
              why);
 }
 
@@ -1576,7 +1576,7 @@ static void player_online_play_list_poll(PlayerApp *app) {
         player_adhoc_list_drop_presets(&app->online_play_list);
         app->online_play_list_live = true;
         snprintf(app->online_play_list_status, sizeof(app->online_play_list_status),
-                 "Shown: PPSSPP's list, downloaded now from %s.", NK_ADHOC_LIST_HOST);
+                 "Downloaded now from %s.", NK_ADHOC_LIST_HOST);
     } else {
         char why[160];
         snprintf(why, sizeof(why), "%s", nk_adhoc_list_status_text(job->status));

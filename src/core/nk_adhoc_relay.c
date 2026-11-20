@@ -394,3 +394,41 @@ bool nk_adhoc_relay_parse_server(const char *spec, char *host_out, size_t host_c
     if (data_port) *data_port = dport;
     return true;
 }
+
+/* Whether s[i..] starts a Unicode bidirectional control in UTF-8: U+061C, U+200E/F,
+   U+202A-202E, U+2066-2069. */
+static bool server_bidi_at(const unsigned char *s, size_t i, size_t len) {
+    if (i + 1u < len && s[i] == 0xD8u && s[i + 1u] == 0x9Cu) return true;
+    if (i + 2u >= len || s[i] != 0xE2u) return false;
+    if (s[i + 1u] == 0x80u) {
+        return s[i + 2u] == 0x8Eu || s[i + 2u] == 0x8Fu || (s[i + 2u] >= 0xAAu && s[i + 2u] <= 0xAEu);
+    }
+    return s[i + 1u] == 0x81u && s[i + 2u] >= 0xA6u && s[i + 2u] <= 0xA9u;
+}
+
+const char *nk_adhoc_relay_server_problem(const char *spec) {
+    if (nk_adhoc_relay_parse_server(spec, NULL, 0u, NULL, NULL)) return NULL;
+    if (!spec || !spec[0]) return "it is empty";
+    const unsigned char *s = (const unsigned char *)spec;
+    const size_t len = strlen(spec);
+    for (size_t i = 0u; i < len; i++) {
+        if (server_bidi_at(s, i, len)) return "it has a bidirectional control character";
+    }
+    for (size_t i = 0u; i < len; i++) {
+        if (s[i] < 0x20u || s[i] == 0x7Fu) return "it has a control character";
+    }
+    for (size_t i = 0u; i < len; i++) {
+        if (s[i] >= 0x80u) return "it has a letter outside A to Z (only A-Z, 0-9, '-' and '.')";
+    }
+    if (strchr(spec, ' ')) return "it has a space";
+    if (strstr(spec, "://")) return "it starts with a scheme such as http://: enter the host only";
+    if (strchr(spec, '/')) return "it has a path (a '/'): enter the host only";
+    if (len > NK_ADHOC_SERVER_MAX_LEN) return "it is longer than 127 characters";
+    const char *colon = strchr(spec, ':');
+    const size_t host_len = colon ? (size_t)(colon - spec) : len;
+    if (!host_span_ok(spec, host_len)) {
+        return "the host is not a host name or IPv4 address (letters, digits, '-' and '.')";
+    }
+    return "a port is not a whole number from 1 to 65535 (host:lobby_port or "
+           "host:lobby_port,data_port)";
+}

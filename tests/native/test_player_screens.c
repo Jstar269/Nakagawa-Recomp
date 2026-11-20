@@ -404,6 +404,14 @@ static float g_flow_height = 800.0f;
 static int g_flow_text_size_pct = 100;
 /* A player's own server for the Online play page and card (#1139), or NULL for socom.cc. */
 static const char *g_online_play_host = NULL;
+/* The picker's PPSSPP list is its shipped copy (the download unavailable). */
+static bool g_online_play_list_shipped = false;
+/* What the card's server reads as, where a case names its own (the player's model reads it
+   with nk_adhoc_relay_parse_server, unit-tested in test_nk_adhoc_relay.c). */
+static const char *g_online_play_card_host = NULL;
+static unsigned g_online_play_card_ports[2] = {0u, 0u};
+/* The server editor with a refused Done, and why (FLOW_NICKNAME_REFUSED). */
+static const char *g_server_refused_reason = NULL;
 /* The notice New console ID leaves on the Online play page (#1139), or NULL for none. */
 static const char *g_online_play_note = NULL;
 /* The server picker with Online play off (#1139): no list, and its line saying so. */
@@ -667,10 +675,16 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.online_play_console_id_shown = true;
     settings.online_play_port_offset = "10000";
     settings.online_play_card_server = "relay-usa.arenaanywhere.site";
+    settings.online_play_card_host = "relay-usa.arenaanywhere.site";
+    settings.online_play_card_lobby_port = 27312u;
+    settings.online_play_card_data_port = 27313u;
     if (g_online_play_host != NULL) {
         settings.online_play_server = g_online_play_host;
         settings.online_play_server_label = NULL; /* no list names it, as the player's model */
         settings.online_play_card_server = g_online_play_host;
+        settings.online_play_card_host = g_online_play_card_host;
+        settings.online_play_card_lobby_port = g_online_play_card_ports[0];
+        settings.online_play_card_data_port = g_online_play_card_ports[1];
     }
     if (g_online_play_note != NULL) settings.online_play_console_note = g_online_play_note;
     {
@@ -689,8 +703,10 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         };
         settings.online_play_servers = servers;
         settings.online_play_server_count = sizeof(servers) / sizeof(servers[0]);
-        settings.online_play_list_status = "Shown: PPSSPP's list, downloaded now.";
-        settings.online_play_list_live = true;
+        settings.online_play_list_status =
+            g_online_play_list_shipped ? "Live list unavailable: the list server did not answer."
+                                       : "Downloaded now from the list's host.";
+        settings.online_play_list_live = !g_online_play_list_shipped;
     }
     settings.share_system_libraries = true;
     settings.build_speed = "Background";
@@ -1474,6 +1490,10 @@ static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
         nickname.keyboard = &keyboard;
         nickname.current = "Player";
         nickname.refused = which == FLOW_NICKNAME_REFUSED;
+        if (nickname.refused && g_server_refused_reason != NULL) {
+            nickname.server_mode = true;
+            nickname.refused_reason = g_server_refused_reason;
+        }
         nickname.logical_width = g_flow_width;
         nickname.logical_height = g_flow_height;
         return player_ui_screen_nickname(ui, &nickname);
@@ -3079,6 +3099,31 @@ static void test_flow_dumps_fail_closed(void) {
           "a fit whose dump was cut does not pass");
 }
 
+/* Whether `sentence` is in a dump, read across the lines a wrapped text is dumped as: a space
+   in `sentence` may stand for the end of one dumped line's text and the start of the next's. */
+static bool dump_says(const char *dump, const char *sentence) {
+    for (const char *start = dump; dump != NULL && *start != '\0'; ++start) {
+        const char *at = start;
+        const char *want = sentence;
+        while (*want != '\0' && *at != '\0') {
+            if (*want == ' ' && at[0] == '"' && at[1] == '\n') {
+                const char *next = strchr(at + 2, '"');
+                const char *eol = strchr(at + 2, '\n');
+                if (next == NULL || (eol != NULL && eol < next)) break;
+                at = next + 1;
+                ++want;
+            } else if (*want == *at) {
+                ++want;
+                ++at;
+            } else {
+                break;
+            }
+        }
+        if (*want == '\0') return true;
+    }
+    return false;
+}
+
 /* Whether a text run containing `needle` shows in this draw list: drawn, and
    not clipped away by a scroll container. */
 static bool draw_shows(const NkUiDrawList *draw, const char *needle) {
@@ -4438,7 +4483,8 @@ static void test_settings_pages(void) {
     /* #1139: the consent card names the exact server, every line of the owner's wording, and
        TURN ON, NOT NOW and CHANGE SERVER. */
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_CARD, 960, 540, dump, sizeof(dump)) &&
-              strstr(dump, "Nakagawa connects to relay-usa.arenaanywhere.site.") != NULL &&
+              dump_says(dump, "Nakagawa connects to relay-usa.arenaanywhere.site on ports 27312 "
+                                    "and 27313.") &&
               strstr(dump, "the ID of the game you start, for example ULUS12345") != NULL &&
               strstr(dump, "- Your Nickname: ") != NULL &&
               strstr(dump, "The people who run the server can see your IP address.") != NULL &&
@@ -7109,7 +7155,7 @@ static bool online_play_picker_row_reveals(void) {
         }
         ok = draw_shows(draw, "An example relay") &&
              draw_shows(draw, "relay-long.example.invalid") &&
-             draw_shows(draw, "FROM THE DOWNLOADED LIST");
+             !draw_shows(draw, "FROM THE DOWNLOADED LIST");
     }
     nk_ui_destroy(ui);
     g_flow_text_size_pct = saved;
@@ -7470,10 +7516,171 @@ static void test_online_play_picker_cut_row_click(void) {
               strstr(dump, "relay-gone.example.invalid") != NULL,
           "a server in use that no list names is the own row's \"Server in use\"");
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY, 1280, 720, dump, sizeof(dump)) &&
-              strstr(dump, "Server in use. A community server") != NULL &&
+              strstr(dump, "Server in use") != NULL &&
+              strstr(dump, "Choose to pick another.") != NULL &&
+              strstr(dump, "A community server: Nakagawa does not run it") == NULL &&
               strstr(dump, "Your own server") == NULL,
           "the Online play page names a server no list names \"Server in use\"");
     g_online_play_host = NULL;
+    g_flow_text_size_pct = saved;
+}
+
+/* The text drawn for element `id` with its line breaks taken out, in `out`; false where none is
+   drawn. */
+static bool draw_text_of(const NkUiDrawList *draw, NkUiId id, char *out, size_t cap) {
+    size_t n = 0u;
+    bool found = false;
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiTextRun *run = draw->cmd[i].kind == NK_UI_DRAW_TEXT
+                                     ? (const NkUiTextRun *)draw->cmd[i].custom : NULL;
+        if (run == NULL || run->text == NULL || draw->cmd[i].element_id != id) continue;
+        /* A wrapped text is drawn one run per line. */
+        for (size_t at = 0u; at < run->length && n + 1u < cap; ++at) {
+            if (run->text[at] != '\n') out[n++] = run->text[at];
+        }
+        found = true;
+    }
+    if (cap > 0u) out[n] = '\0';
+    return found;
+}
+
+/* #1139, review of 2026-11-20 ("is it tested how custom servers are shown?"). A server the
+   player typed, in each form the player accepts (host; host:lobby_port;
+   host:lobby_port,data_port; an IPv4 literal; the longest host, 127 bytes), shows on the own
+   row with the host exactly as typed (a host too wide for the row wraps whole, never an
+   ellipsis), the row and Port offset whole in the list and inside the window, and Current on
+   it, at 960 x 540 and 1280 x 720 with 100% and 150% text. A typed server equal to a shipped
+   or listed host marks that row and is not shown a second time on the own row. The card for
+   a typed server names the host and both ports a game connects to, and a refused Done in the
+   server editor says why. */
+static void test_online_play_own_server_shown(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const char *const forms[] = {
+        "relay.example.org", "relay.example.org:40000", "relay.example.org:40000,40001",
+        "192.0.2.10",
+        "weekend-league-relay-for-players-who-meet-every-friday-and-sund."
+        "the-longest-host-name-this-player-accepts-for-own-serve.example"};
+    static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
+    static const int text_sizes[] = {100, 150};
+    const NkUiId own = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER;
+    const int saved = g_flow_text_size_pct;
+    CHECK(strlen(forms[4]) == 127u, "the longest example host is 127 bytes, the field's most");
+    for (size_t f = 0u; f < sizeof(forms) / sizeof(forms[0]); ++f) {
+        g_online_play_host = forms[f];
+        for (size_t t = 0u; t < 2u; ++t) {
+            g_flow_text_size_pct = text_sizes[t];
+            for (size_t z = 0u; z < 2u; ++z) {
+                const int w = sizes[z].w;
+                const int h = sizes[z].h;
+                NkUi *ui = NULL;
+                const NkUiDrawList *draw =
+                    flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h, &ui);
+                NkUiScrollState state;
+                NkUiRect view;
+                NkUiRect row;
+                NkUiRect port;
+                NkUiRect pill;
+                char shown[160];
+                char message[240];
+                bool ok = draw != NULL && ui != NULL;
+                NkUiId scroller = ONLINE_PLAY_TEST_LIST;
+                if (ok) {
+                    nk_ui_focus(ui, own);
+                    for (int i = 0; i < 3; ++i) {
+                        draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                    }
+                    if (!nk_ui_scroll_state(ui, scroller, &state) || state.max_offset <= 0.5f) {
+                        scroller = FLOW_ID_CARD;
+                    }
+                    ok = nk_ui_element_rect(ui, scroller, &view) &&
+                         nk_ui_element_rect(ui, own, &row) && rect_inside(row, view) &&
+                         nk_ui_element_rect(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT, &port) &&
+                         port.x >= view.x - 0.5f && port.x + port.w <= view.x + view.w + 0.5f &&
+                         draw_text_of(draw, nk_ui_child_id(own, 3u), shown, sizeof(shown)) &&
+                         strcmp(shown, forms[f]) == 0 &&
+                         nk_ui_element_rect(ui, nk_ui_child_id(own, 6u), &pill) &&
+                         rect_inside(pill, row) && !draw_cuts_a_line(draw);
+                    for (uint32_t i = 0u; ok && i < draw->ncmd; ++i) {
+                        const NkUiTextRun *run =
+                            draw->cmd[i].kind == NK_UI_DRAW_TEXT
+                                ? (const NkUiTextRun *)draw->cmd[i].custom : NULL;
+                        ok = run == NULL || !run_ends_in_ellipsis(run);
+                    }
+                }
+                (void)snprintf(message, sizeof(message),
+                               "own server form %zu at %d x %d, %d%% text: the own row shows the "
+                               "host as typed, whole, with Current, and it and Port offset sit "
+                               "whole in the list", f, w, h, text_sizes[t]);
+                CHECK(ok, message);
+                if (ui != NULL) nk_ui_destroy(ui);
+            }
+        }
+    }
+    g_flow_text_size_pct = 100;
+    {
+        /* A typed server equal to a shipped host, then to a listed one: that row is Current,
+           and the own row shows what to type, not the host a second time. */
+        static const struct { const char *host; NkUiId row; } same[] = {
+            {"relay-usa.arenaanywhere.site", PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 2u},
+            {"relay.example.invalid", PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 5u}};
+        for (size_t s = 0u; s < 2u; ++s) {
+            NkUi *ui = NULL;
+            const NkUiDrawList *draw;
+            NkUiRect pill;
+            char shown[160];
+            bool ok;
+            g_online_play_host = same[s].host;
+            draw = flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 1280, 720, &ui);
+            ok = draw != NULL && ui != NULL &&
+                 draw_text_of(draw, nk_ui_child_id(own, 3u), shown, sizeof(shown)) &&
+                 strcmp(shown, "host[:lobby_port[,data_port]]") == 0 &&
+                 !nk_ui_element_rect(ui, nk_ui_child_id(own, 6u), &pill);
+            if (ok) {
+                nk_ui_focus(ui, same[s].row);
+                for (int i = 0; i < 3; ++i) {
+                    draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 1280, 720);
+                }
+                ok = nk_ui_element_rect(ui, nk_ui_child_id(same[s].row, 6u), &pill) &&
+                     draw_text_of(draw, nk_ui_child_id(own, 3u), shown, sizeof(shown)) &&
+                     strcmp(shown, "host[:lobby_port[,data_port]]") == 0;
+            }
+            CHECK(ok, s == 0u ? "a typed server equal to a shipped host marks that row Current "
+                                "and is not shown again on the own row"
+                              : "a typed server equal to a listed host marks that row Current "
+                                "and is not shown again on the own row");
+            if (ui != NULL) nk_ui_destroy(ui);
+        }
+    }
+    /* The card for a typed server names the host and both ports a game connects to. */
+    g_online_play_host = "relay.example.org:40000,40001";
+    g_online_play_card_host = "relay.example.org";
+    g_online_play_card_ports[0] = 40000u;
+    g_online_play_card_ports[1] = 40001u;
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_CARD, 1280, 720, dump, sizeof(dump)) &&
+              dump_says(dump, "Nakagawa connects to relay.example.org on ports 40000 and 40001."),
+          "the card for a typed server names its host and both ports");
+    g_online_play_card_host = NULL;
+    g_online_play_card_ports[0] = g_online_play_card_ports[1] = 0u;
+    g_online_play_host = NULL;
+    /* PPSSPP's list says once, in its heading, where it came from; no row carries a chip
+       that says it again, nor Built in. */
+    CHECK(dump_flow_case(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, dump, sizeof(dump)) &&
+              strstr(dump, "PPSSPP'S LIST") != NULL && strstr(dump, "SHIPPED COPY") == NULL &&
+              strstr(dump, "FROM THE") == NULL && strstr(dump, "BUILT IN") == NULL,
+          "the picker's downloaded list is named once in its heading, and no row has a chip "
+          "but Current");
+    g_online_play_list_shipped = true;
+    CHECK(dump_flow_case(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, dump, sizeof(dump)) &&
+              strstr(dump, "PPSSPP'S LIST (SHIPPED COPY)") != NULL &&
+              strstr(dump, "FROM THE") == NULL,
+          "the shipped copy of PPSSPP's list says so once, in its heading");
+    g_online_play_list_shipped = false;
+    /* A refused Done in the server editor says why, by name. */
+    g_server_refused_reason = "it has a path (a '/'): enter the host only";
+    CHECK(dump_flow_case(FLOW_NICKNAME_REFUSED, dump, sizeof(dump)) &&
+              strstr(dump, "Not used: it has a path") != NULL,
+          "the server editor's refused Done names the reason");
+    g_server_refused_reason = NULL;
     g_flow_text_size_pct = saved;
 }
 
@@ -11168,6 +11375,7 @@ int main(int argc, char **argv) {
     test_online_play_text_is_never_cut();
     test_online_play_picker_rows();
     test_online_play_picker_cut_row_click();
+    test_online_play_own_server_shown();
     test_psp_fonts_page();
     test_wizard_actions();
     test_flow_dumps_fail_closed();

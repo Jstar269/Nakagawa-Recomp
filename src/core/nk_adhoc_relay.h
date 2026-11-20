@@ -207,6 +207,11 @@ bool nk_adhoc_relay_host_ok(const char *host);
 bool nk_adhoc_relay_parse_server(const char *spec, char *host_out, size_t host_cap,
                                  uint16_t *lobby_port, uint16_t *data_port);
 
+/* Why nk_adhoc_relay_parse_server refuses `spec`, in words a player can act on ("it has a
+ * space", "a port is not a whole number from 1 to 65535", ...); NULL when it accepts it.
+ * Static text, never NULL for a refused spec. */
+const char *nk_adhoc_relay_server_problem(const char *spec);
+
 #ifdef __cplusplus
 }
 #endif

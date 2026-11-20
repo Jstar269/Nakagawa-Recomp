@@ -306,12 +306,18 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
                         full ? theme->warning : theme->muted);
     }
     if (model->refused) {
+        char server_note[320];
+        /* A refused server says why first, by name; the server in use stays. */
+        (void)snprintf(server_note, sizeof(server_note),
+                       "Not used: %s. Enter a host name or IPv4 address, with optional "
+                       ":lobby_port or :lobby_port,data_port from 1 to 65535.",
+                       model->refused_reason ? model->refused_reason
+                                             : "it is not a server address");
         nk_ui_text_role(ui, FLOW_ID_NICKNAME_NOTE,
                         model->port_mode
                             ? "Enter a whole number from 0 to 65535."
                         : model->server_mode
-                            ? "Enter a valid host name or IPv4 address (no spaces or paths), with "
-                              "optional :lobby_port or :lobby_port,data_port from 1 to 65535."
+                            ? nk_ui_frame_text(ui, server_note)
                             : "A nickname is 1 to 32 bytes of text (32 plain letters; accented or "
                               "Japanese letters take 2 to 4 bytes each), with no control characters and not only spaces.",
                         NK_UI_TYPE_BODY_S, theme->warning);
