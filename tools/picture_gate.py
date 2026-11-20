@@ -228,7 +228,8 @@ def compare_files(reference: Path, frame: Path, threshold: int = 0,
 
 # ---- accept ---------------------------------------------------------------------------------
 
-def _inside_checkout(path: Path) -> bool:
+def inside_tracked_checkout(path: Path) -> bool:
+    """Return True when ``path`` sits in a tracked folder of this or another git checkout."""
     resolved = Path(path).resolve()
     try:
         rel = resolved.relative_to(ROOT)
@@ -252,6 +253,9 @@ def _inside_checkout(path: Path) -> bool:
     except (OSError, subprocess.SubprocessError):
         return True
     return ig.returncode != 0
+
+
+_inside_checkout = inside_tracked_checkout
 
 
 def _head_commit() -> str:
@@ -285,7 +289,7 @@ def accept(frame: Path, reference: Path, commit: str | None = None,
            slice_us: int = DEFAULT_SLICE_US, present_upscale: str | None = None) -> dict:
     """Store ``frame`` as the reference. Only an explicit command ever replaces one."""
     reference = Path(reference)
-    if _inside_checkout(reference):
+    if inside_tracked_checkout(reference):
         raise PictureError("reference path is inside this checkout; references are game "
                            "pixels and stay in the title's private folder")
     got = load_picture(frame)
@@ -642,6 +646,11 @@ def display_smoke(build_dir: Path, work_dir: Path | None = None) -> int:
 
 
 def _inside_build(path: Path) -> bool:
+    # Kept separate from inside_tracked_checkout: display-smoke checks only
+    # whether its scratch work dir sits under this checkout's build/ (or outside
+    # ROOT entirely) using os.path.abspath with no symlink resolution or git
+    # rev-parse/check-ignore subprocess probe; expressing it as the inverse of
+    # inside_tracked_checkout would change behaviour for paths outside ROOT.
     try:
         rel = Path(os.path.abspath(path)).relative_to(ROOT)
     except ValueError:
