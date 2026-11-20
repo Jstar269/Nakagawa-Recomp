@@ -244,7 +244,7 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
     nk_ui_text_role(ui, FLOW_ID_TITLE,
                     model->port_mode ? "Port offset"
                     : model->server_mode
-                        ? "Your own server"
+                        ? "Other server"
                         : model->first_launch ? "Choose a nickname" : "Change your nickname",
                     NK_UI_TYPE_TITLE, theme->paper);
     nk_ui_text_role(ui, FLOW_ID_LEAD,

@@ -1425,7 +1425,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         model.online_play_servers = player->settings_online_play_servers;
         model.online_play_server_count = rows;
         /* NULL where no list names it: a host typed in, or a downloaded list's entry while that
-           list (kept one session) is not loaded; the page then says "Server in use". */
+           list (kept one session) is not loaded; the page then says "Other server". */
         model.online_play_server_label = label;
         model.online_play_list_status = app->online_play_list_status;
         model.online_play_list_busy = app->online_play_list_busy;
@@ -4035,7 +4035,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             bool save = (unsigned)action.primary == PLAYER_UI_NICKNAME_SAVE;
             const char *chosen = player_ui_nickname_trimmed(player->nickname_text, trimmed,
                                                             sizeof(trimmed));
-            /* Your own server opens the consent card for it, as any server picked does. */
+            /* Other server opens the consent card for it, as any server picked does. */
             bool done = player->nickname_is_port
                 ? !save || player_app_set_online_play_port_offset(app, chosen)
                 : player->nickname_is_server

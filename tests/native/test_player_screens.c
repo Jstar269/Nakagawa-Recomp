@@ -36,8 +36,8 @@
 /* The picker's scrolling list and its scroll bar (scr_settings.c SET_ID_ONLINE_PLAY_*). */
 #define ONLINE_PLAY_TEST_LIST NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E1u)
 #define ONLINE_PLAY_TEST_TRACK NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E2u)
-/* The own server's caption under its row (SET_ID_ONLINE_PLAY_OWN_SENTENCE). */
-#define ONLINE_PLAY_TEST_OWN_CAPTION NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7F0u)
+/* The own server's row, its note the last line inside it (scr_settings.c). */
+#define ONLINE_PLAY_TEST_OWN_CAPTION PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER
 /* The panel round the list (SET_ID_ONLINE_PLAY_BOX). */
 #define ONLINE_PLAY_TEST_PANEL NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E3u)
 
@@ -3983,7 +3983,7 @@ static void test_settings_pages(void) {
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 2u,
          PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER, "a picker row picks its server"},
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
-         PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER, "Your own server opens the editor"},
+         PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER, "Other server opens the editor"},
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT,
          PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT, "the picker's Port offset opens its editor"},
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_ONLINE_PLAY_REFRESH,
@@ -7207,6 +7207,58 @@ static bool rect_inside(NkUiRect rect, NkUiRect view) {
            rect.x >= view.x - 0.5f && rect.x + rect.w <= view.x + view.w + 0.5f;
 }
 
+/* Whether the focus ring drawn round `focused` (the border pieces drawn for it, the outermost
+   `grow` logical px outside the element `rect`) crosses a line of text that shows and is not
+   inside that element: a line under or over the row, not the row's own. Names what it
+   crosses. The ring must be drawn where the element is: the UI's motion cut (Reduce motion),
+   as the clock of these tests does not move. */
+static bool ring_crosses_other_text(const NkUiDrawList *draw, NkUiId focused, NkUiRect rect,
+                                    float grow) {
+    float outer[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float inner[4];
+    float scale;
+    bool any = false;
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        if (cmd->kind != NK_UI_DRAW_BORDER || cmd->element_id != focused) continue;
+        if (!any || (float)cmd->bounds[0] < outer[0]) outer[0] = (float)cmd->bounds[0];
+        if (!any || (float)cmd->bounds[1] < outer[1]) outer[1] = (float)cmd->bounds[1];
+        if (!any || (float)cmd->bounds[2] > outer[2]) outer[2] = (float)cmd->bounds[2];
+        if (!any || (float)cmd->bounds[3] > outer[3]) outer[3] = (float)cmd->bounds[3];
+        any = true;
+    }
+    if (!any || rect.w <= 0.0f) return false;
+    /* Device px per logical px, from the ring's own width. */
+    scale = (outer[2] - outer[0]) / (rect.w + 2.0f * grow);
+    inner[0] = outer[0] + grow * scale;
+    inner[1] = outer[1] + grow * scale;
+    inner[2] = outer[2] - grow * scale;
+    inner[3] = outer[3] - grow * scale;
+    for (uint32_t i = 0u; i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *text = &draw->cmd[i];
+        const NkUiTextRun *run;
+        if (text->kind != NK_UI_DRAW_TEXT || !command_shows(text)) continue;
+        run = (const NkUiTextRun *)text->custom;
+        if (run == NULL || run->length == 0u) continue;
+        if ((float)text->clip[0] >= inner[0] - 0.5f && (float)text->clip[2] <= inner[2] + 0.5f &&
+            (float)text->clip[1] >= inner[1] - 0.5f && (float)text->clip[3] <= inner[3] + 0.5f) {
+            continue; /* the row's own text */
+        }
+        for (uint32_t k = 0u; k < draw->ncmd; ++k) {
+            const NkUiDrawCmd *piece = &draw->cmd[k];
+            if (piece->kind != NK_UI_DRAW_BORDER || piece->element_id != focused ||
+                !command_shows(piece)) {
+                continue;
+            }
+            if (text->clip[0] < piece->clip[2] && text->clip[2] > piece->clip[0] &&
+                text->clip[1] < piece->clip[3] && text->clip[3] > piece->clip[1]) {
+                report_misfit("the focus ring crosses", text);
+                return true;
+            }
+        }
+    }
+    return false;
+}
 /* Whether a run of text that shows is cut by a scroll container's edge: it shows, but only in
    part, above or below. */
 static bool draw_cuts_a_line(const NkUiDrawList *draw) {
@@ -7252,7 +7304,10 @@ static void test_online_play_picker_rows(void) {
                 bool whole = draw != NULL && ui != NULL;
                 bool reachable = whole;
                 bool uncut = whole;
+                bool ring_clear = whole;
                 char message[200];
+                /* The ring jumps to the focused control (Reduce motion): this clock stands. */
+                if (ui != NULL) set_still_prefs(ui, nk_ui_prompt_style(ui));
                 for (NkUiId i = 0u; i < (off ? 5u : 7u); ++i) {
                     controls[control_count++] = PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + i;
                     if (i == 4u) {
@@ -7296,7 +7351,7 @@ static void test_online_play_picker_rows(void) {
                     whole = whole && draw_shows(draw, "Everyone you play with") &&
                             draw_shows(draw, "faster.") &&
                             draw_shows(draw, "relay-asia.arenaanywhere.site") &&
-                            draw_shows(draw, "Your own server") &&
+                            draw_shows(draw, "Other server") &&
                             draw_shows(draw, "host[:lobby_port[,data_port]]");
                     (void)snprintf(message, sizeof(message),
                                    "at %d x %d with 100%% text and Online play %s the picker "
@@ -7327,6 +7382,14 @@ static void test_online_play_picker_rows(void) {
                                 nk_ui_element_rect(ui, scroller, &view) &&
                                 nk_ui_element_rect(ui, controls[c], &rect) &&
                                 rect_inside(rect, view) && !draw_cuts_a_line(draw);
+                    /* Its focus ring crosses no line of text outside it (review of
+                       2026-11-20: the own row's note was under its ring). */
+                    if (reachable &&
+                        ring_crosses_other_text(draw, controls[c], rect,
+                                                NK_UI_FOCUS_RING_GAP + NK_UI_FOCUS_RING_WIDTH)) {
+                        fprintf(stderr, "  with focus on %08X\n", (unsigned)controls[c]);
+                        ring_clear = false;
+                    }
                     if (!reachable) {
                         fprintf(stderr, "  focus on %08X: at y %.1f to %.1f, %08X shows %.1f to "
                                 "%.1f\n", (unsigned)controls[c], (double)rect.y,
@@ -7339,6 +7402,11 @@ static void test_online_play_picker_rows(void) {
                                "picker row, the own server's and Port offset, each wholly inside "
                                "the list", w, h, text_sizes[t], off ? "off" : "on");
                 CHECK(reachable, message);
+                (void)snprintf(message, sizeof(message),
+                               "at %d x %d with %d%% text and Online play %s no picker row's "
+                               "focus ring crosses a line of text outside the row", w, h,
+                               text_sizes[t], off ? "off" : "on");
+                CHECK(ring_clear, message);
                 if (off && ui != NULL) {
                     /* PPSSPP's list is not shown with Online play off, though the model holds
                        it: its rows have no place, and Down from the own server's row and from
@@ -7428,7 +7496,7 @@ static PlayerUiAction online_play_picker_click(NkUi *ui, float x, float y, int w
    names); the press focuses the row, which comes into view whole, and a click on it then opens
    it. Failing-before: the click on the blank strip opened that server's card. Also: with no
    list naming the server in use (typed in, or from PPSSPP's list while it is not loaded), the
-   own row and the Online play page call it "Server in use", not "Your own server". */
+   own row and the Online play page call it "Other server", with Current alone marking it in use. */
 static void test_online_play_picker_cut_row_click(void) {
     static char dump[CASE_DUMP_CAP];
     static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
@@ -7512,15 +7580,19 @@ static void test_online_play_picker_cut_row_click(void) {
     g_flow_text_size_pct = 100;
     g_online_play_host = "relay-gone.example.invalid";
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 1280, 720, dump, sizeof(dump)) &&
-              strstr(dump, "Server in use") != NULL &&
-              strstr(dump, "relay-gone.example.invalid") != NULL,
-          "a server in use that no list names is the own row's \"Server in use\"");
+              strstr(dump, "Other server") != NULL &&
+              strstr(dump, "relay-gone.example.invalid") != NULL &&
+              strstr(dump, "Server in use") == NULL && strstr(dump, "Your own server") == NULL,
+          "a server in use that no list names is on the own row, \"Other server\"");
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY, 1280, 720, dump, sizeof(dump)) &&
-              strstr(dump, "Server in use") != NULL &&
-              strstr(dump, "Choose to pick another.") != NULL &&
+              strstr(dump, "Other server. Choose to pick another.") != NULL &&
               strstr(dump, "A community server: Nakagawa does not run it") == NULL &&
-              strstr(dump, "Your own server") == NULL,
-          "the Online play page names a server no list names \"Server in use\"");
+              strstr(dump, "Server in use") == NULL && strstr(dump, "Your own server") == NULL,
+          "the Online play page names a server no list names \"Other server\"");
+    /* Empty, the own row is "Other server" too. */
+    CHECK(dump_flow_case(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, dump, sizeof(dump)) &&
+              strstr(dump, "Other server") != NULL && strstr(dump, "Your own server") == NULL,
+          "the empty own row is \"Other server\"");
     g_online_play_host = NULL;
     g_flow_text_size_pct = saved;
 }
@@ -7719,7 +7791,7 @@ static void test_online_play_text_is_never_cut(void) {
                                             "relay-sa.arenaanywhere.site",
                                             "relay-asia.arenaanywhere.site",
                                             "relay-long.example.invalid",
-                                            "Your own server", "PORT OFFSET: 10000"};
+                                            "Other server", "PORT OFFSET: 10000"};
         g_flow_text_size_pct = 150;
         CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540, dump, sizeof(dump)) &&
                   strstr(dump, "\xE2\x80\xA6") == NULL &&

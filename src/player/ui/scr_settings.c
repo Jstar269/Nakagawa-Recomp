@@ -1934,7 +1934,6 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
 #define SET_ID_ONLINE_PLAY_OWN_DIVIDER (SET_ID_TEXT + 0x7F7u)
 #define SET_ID_ONLINE_PLAY_OWN_LINE (SET_ID_TEXT + 0x7E8u)
 #define SET_ID_ONLINE_PLAY_OFF_LINE (SET_ID_TEXT + 0x7E9u)
-#define SET_ID_ONLINE_PLAY_OWN_SENTENCE (SET_ID_TEXT + 0x7F0u)
 
 /* How a run of rows lays out: the host beside the name where every row of the run has room
    for both and its chips, else under the name; and where the chips would leave the words less
@@ -2027,11 +2026,13 @@ static bool settings_online_play_take(NkUi *ui, NkUiId id) {
 }
 
 /* One server: the row is the button. `host` is the mono line (the format to type, muted, on
-   the own server's row until one is in use); `chip` says where the server comes from. Returns
-   true when the row is activated. */
+   the own server's row until one is in use); `chip` says where the server comes from; `note`,
+   where not NULL, is a dim line under the name and host inside the row, so the row's focus
+   ring goes round it too. Returns true when the row is activated. */
 static bool settings_online_play_row(NkUi *ui, NkUiId id, const char *name, const char *host,
-                                     const char *chip, bool current, float width,
-                                     OnlinePlayRowLayout layout, NkUiId up, NkUiId down) {
+                                     const char *note, const char *chip, bool current,
+                                     float width, OnlinePlayRowLayout layout, NkUiId up,
+                                     NkUiId down) {
     const NkUiTheme *theme = nk_ui_theme(ui);
     const bool focused = nk_ui_button_focused(ui, id);
     const float chips = settings_online_play_chips_width(ui, chip, current);
@@ -2042,16 +2043,26 @@ static bool settings_online_play_row(NkUi *ui, NkUiId id, const char *name, cons
     NkUiTextStyle host_style = nk_ui_type(NK_UI_TYPE_DATA, theme->muted);
     float blank_height = 0.0f;
     const bool blank = settings_online_play_cut(ui, id, &blank_height);
-    NkUiLayout row = layout_make(layout.chips_under ? NK_UI_LAYOUT_COLUMN : NK_UI_LAYOUT_ROW,
-                                 sizing_fixed(width),
+    const bool has_note = note != NULL && note[0] != '\0';
+    /* The name, host and chips on the row's top line (or stacked), and under them, across
+       the row's whole width, the note: all inside the row, so its focus ring goes round all. */
+    NkUiLayout top = layout_make(layout.chips_under ? NK_UI_LAYOUT_COLUMN : NK_UI_LAYOUT_ROW,
+                                 has_note ? sizing_grow() : sizing_fixed(width),
                                  blank ? sizing_fixed(blank_height) : sizing_fit(),
                                  layout.chips_under ? NK_UI_SPACE_1 : NK_UI_SPACE_3);
+    NkUiLayout row = has_note ? layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(width),
+                                            blank ? sizing_fixed(blank_height) : sizing_fit(),
+                                            2.0f)
+                              : top;
     NkUiStyle style;
     memset(&style, 0, sizeof(style));
     if (!blank) row.height.min = settings_online_play_row_height(ui);
     row.align_y = NK_UI_ALIGN_CENTER;
+    top.align_y = NK_UI_ALIGN_CENTER;
     row.padding_left = row.padding_right = NK_UI_SPACE_3;
-    row.padding_top = row.padding_bottom = NK_UI_SPACE_1;
+    /* As deep as a focus ring reaches outside its row, so the ring of the row above or
+       below (past the 1 px divider) never crosses this row's lines. */
+    row.padding_top = row.padding_bottom = NK_UI_FOCUS_RING_GAP + NK_UI_FOCUS_RING_WIDTH;
     style.corner_radius = NK_UI_RADIUS_CONTROL;
     if (!blank) {
         style.fill_rgba = nk_ui_pressed(ui, id) ? theme->pressed
@@ -2064,6 +2075,8 @@ static bool settings_online_play_row(NkUi *ui, NkUiId id, const char *name, cons
         NkUiLayout text = layout_make(layout.beside ? NK_UI_LAYOUT_ROW : NK_UI_LAYOUT_COLUMN,
                                       layout.beside ? sizing_grow() : sizing_fixed(words),
                                       sizing_fit(), layout.beside ? NK_UI_SPACE_3 : 0.0f);
+        const bool top_open =
+            has_note && nk_ui_begin_container(ui, nk_ui_child_id(id, 7u), &top, NULL);
         text.align_y = NK_UI_ALIGN_CENTER;
         if (nk_ui_begin_container(ui, nk_ui_child_id(id, 1u), &text, NULL)) {
             nk_ui_text(ui, nk_ui_child_id(id, 2u),
@@ -2086,6 +2099,12 @@ static bool settings_online_play_row(NkUi *ui, NkUiId id, const char *name, cons
                 }
                 nk_ui_end_container(ui);
             }
+        }
+        if (top_open) {
+            NkUiTextStyle note_style = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
+            nk_ui_end_container(ui);
+            nk_ui_text(ui, nk_ui_child_id(id, 8u),
+                       nk_ui_text_break(ui, note, &note_style, inside), &note_style);
         }
     }
     nk_ui_end_container(ui);
@@ -2165,6 +2184,7 @@ static void settings_online_play_reveal_row(NkUi *ui, size_t count) {
     float pad = ENHANCED_LIST_PAD;
     NkUiRect view;
     NkUiRect rect;
+    NkUiRect first;
     NkUiScrollState state;
     float offset;
     float top;
@@ -2190,9 +2210,24 @@ static void settings_online_play_reveal_row(NkUi *ui, size_t count) {
         return;
     }
     offset = state.offset;
-    if (rect.y + rect.h > view.y + view.h - pad) offset += rect.y + rect.h - (view.y + view.h - pad);
-    top = rect.y - (offset - state.offset);
-    if (top < view.y + pad) offset -= view.y + pad - top;
+    if (scroller == SET_ID_ONLINE_PLAY_LIST &&
+        nk_ui_element_rect(ui, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE, &first)) {
+        /* Where the row lies in the list's content, measured from the list's first row (its
+           top is the list's padding): both rects come from the same layout, which may have
+           been laid out at another offset than the one now asked for (the focus graph moves
+           the list too), so the offset now asked for is only the starting point. */
+        const float row_top = pad + (rect.y - first.y);
+        const float lowest = row_top + rect.h - (view.h - pad);
+        const float highest = row_top - pad;
+        if (offset < lowest) offset = lowest;
+        if (offset > highest) offset = highest;
+    } else {
+        if (rect.y + rect.h > view.y + view.h - pad) {
+            offset += rect.y + rect.h - (view.y + view.h - pad);
+        }
+        top = rect.y - (offset - state.offset);
+        if (top < view.y + pad) offset -= view.y + pad - top;
+    }
     if (offset > state.max_offset) offset = state.max_offset;
     if (offset < 0.0f) offset = 0.0f;
     if (fabsf(offset - state.offset) >= 0.5f) nk_ui_scroll_to(ui, scroller, offset);
@@ -2227,6 +2262,9 @@ static void settings_online_play_snap(NkUi *ui, const NkUiId *items, size_t coun
         offset = state.offset - (top - rect.y);
         if (nk_ui_element_rect(ui, focused, &mark) && mark.y >= view.y && mark.y < view.y + view.h &&
             mark.y + mark.h + (top - rect.y) > view.y + view.h - ENHANCED_LIST_PAD) {
+            /* Never down past an item that holds the focused control (a tall own row with
+               Port offset under it): focus put it in view, and there it stays. */
+            if (mark.y >= rect.y - 0.5f && mark.y + mark.h <= rect.y + rect.h + 0.5f) return;
             offset = state.offset + (rect.y + rect.h - top);
         }
         if (offset > state.max_offset) offset = state.max_offset;
@@ -2429,7 +2467,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                          : SCR_ONLINE_PLAY_OFF_SENTENCE;
         const char *server = safe_text(model->online_play_server, NK_ADHOC_DEFAULT_SERVER);
         /* No list names the server (typed in, or from PPSSPP's list while it is not loaded). */
-        const char *server_name = safe_text(model->online_play_server_label, "Server in use");
+        const char *server_name = safe_text(model->online_play_server_label, "Other server");
         char server_label[NK_ADHOC_SERVER_MAX_LEN + 16u];
         char server_sentence[NK_ADHOC_SERVER_MAX_LEN + 192u];
         bool server_fits;
@@ -2739,10 +2777,10 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                        safe_text(model->online_play_port_offset, "10000"));
         port_width = nk_ui_button_width(ui, port_label, 0u);
         own_width = row_width - NK_UI_SPACE_3 - port_width;
-        /* A server in use that no row lists (one typed in, or a list entry while the list is
-           not loaded: it lasts one session) is named for what it is, not for where it came
-           from, which the settings do not keep. */
-        own_name = own_current ? "Server in use" : "Your own server";
+        /* The own row is "Other server" whether it is empty, holds a server typed in, or holds a
+           consented server no shown list names (a list entry while the list is not loaded: it
+           lasts one session); Current alone says it is the one in use (owner, 2026-11-20). */
+        own_name = "Other server";
         /* The port offset beside the own server's row while that leaves the row half the
            width and its host whole on one line, else under it: a long typed host (up to 127
            characters) takes the whole width, so the row stays short enough for the list. */
@@ -2766,7 +2804,6 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             NkUiId items[PLAYER_UI_ONLINE_PLAY_SERVERS_MAX + 12u];
             size_t item_count = 0u;
             items[item_count++] = SET_ID_ONLINE_PLAY_OWN_LINE;
-            items[item_count++] = SET_ID_ONLINE_PLAY_OWN_SENTENCE;
             if (model->online_play) {
                 items[item_count++] = SET_ID_ONLINE_PLAY_HEADING + 2u;
                 items[item_count++] = SET_ID_TEXT + 0x7F4u;
@@ -2836,8 +2873,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                             settings_online_play_links(order, order_count, id, &up, &down);
                             if (settings_online_play_row(
                                     ui, id, safe_text(row->name, ""),
-                                    settings_online_play_host_line(ui, row),
-                                    NULL,
+                                    settings_online_play_host_line(ui, row), NULL, NULL,
                                     model->online_play && strcmp(host, server) == 0, row_width,
                                     pass == 1 ? from_list : shipped, up, down)) {
                                 *result = settings_op(PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER);
@@ -2849,7 +2885,8 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                 own_width < row_width ? NK_UI_LAYOUT_ROW : NK_UI_LAYOUT_COLUMN,
                                 sizing_grow(), sizing_fit(), NK_UI_SPACE_3);
                             own_line.align_y = NK_UI_ALIGN_CENTER;
-                            /* No heading: the row is named Your own server already. */
+                            /* No heading: the row is named Other server already, and its note
+                               is its second line, inside the row and its focus ring. */
                             nk_ui_divider(ui, SET_ID_ONLINE_PLAY_OWN_DIVIDER, true);
                             settings_online_play_links(order, order_count,
                                                        PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
@@ -2858,8 +2895,9 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                       NULL)) {
                                 if (settings_online_play_row(
                                         ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER, own_name,
-                                        own_current ? server : SCR_ONLINE_PLAY_OWN_FORMAT, NULL,
-                                        own_current, own_width, own, up, down)) {
+                                        own_current ? server : SCR_ONLINE_PLAY_OWN_FORMAT,
+                                        SCR_ONLINE_PLAY_OWN_SENTENCE, NULL, own_current,
+                                        own_width, own, up, down)) {
                                     *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER);
                                 }
                                 if (settings_online_play_port(ui, port_label, up, down)) {
@@ -2867,15 +2905,15 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                 }
                                 nk_ui_end_container(ui);
                             }
-                            settings_online_play_text(ui, SET_ID_ONLINE_PLAY_OWN_SENTENCE,
-                                                      SCR_ONLINE_PLAY_OWN_SENTENCE,
-                                                      NK_UI_TYPE_CAPTION, theme->muted, 0.0f, 0.0f);
                         }
                     }
                     if (model->online_play && any_listed) {
+                        /* Clear of the last row's focus ring. */
                         settings_online_play_text(ui, SET_ID_TEXT + 0x7F5u,
                                                   SCR_ONLINE_PLAY_RELAY_ONLY_CAPTION,
-                                                  NK_UI_TYPE_CAPTION, theme->muted, 0.0f, 0.0f);
+                                                  NK_UI_TYPE_CAPTION, theme->muted,
+                                                  NK_UI_FOCUS_RING_GAP + NK_UI_FOCUS_RING_WIDTH,
+                                                  0.0f);
                     } else if (!model->online_play) {
                         settings_online_play_text(ui, SET_ID_ONLINE_PLAY_OFF_LINE,
                                                   SCR_ONLINE_PLAY_LIST_OFF_LINE, NK_UI_TYPE_CAPTION,

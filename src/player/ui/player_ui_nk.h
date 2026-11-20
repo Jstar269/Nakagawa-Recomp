@@ -687,7 +687,7 @@ typedef enum {
     PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY,         /* opens Settings > Online play (#1139) */
     PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY,       /* Off: opens the card; On: turns it off */
     PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY_SERVERS, /* the server picker */
-    PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER,  /* the picker's Your own server: the editor */
+    PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER,  /* the picker's Other server: the editor */
     PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER,  /* choice_index: the picker's row; opens the card */
     PLAYER_UI_SETTINGS_REFRESH_ONLINE_PLAY_SERVERS, /* downloads the list again (Online play on) */
     PLAYER_UI_SETTINGS_ONLINE_PLAY_TURN_ON,      /* the card's TURN ON */
@@ -1332,7 +1332,7 @@ enum {
     PLAYER_UI_ID_SETTINGS_ONLINE_PLAY = 0x455Cu,      /* Settings > Online: opens Online play */
     PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE = 0x455Du, /* Online play: On / Off switch */
     PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET = 0x455Eu, /* Online play: Server, opens the picker */
-    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER = 0x455Fu, /* the picker: Your own server (editor) */
+    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER = 0x455Fu, /* the picker: Other server (editor) */
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
