@@ -485,7 +485,7 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 						// bits (environment-blind) before it touches the FP environment.
 						case 0x02: s->f[fd] = sr_fpu_mul_s(s->f[fs], s->f[ft], fcr31); return StopReason::kRunning;
 						case 0x03: s->f[fd] = sr_fpu_div_s(s->f[fs], s->f[ft], fcr31); return StopReason::kRunning;  // div.s
-						case 0x04: s->f[fd] = std::sqrt(s->f[fs]); return StopReason::kRunning;  // sqrt.s
+						case 0x04: s->f[fd] = sr_fpu_sqrt_s(s->f[fs], fcr31); return StopReason::kRunning;  // sqrt.s
 						case 0x05: s->f[fd] = std::fabs(s->f[fs]); return StopReason::kRunning;  // abs.s
 						case 0x06: s->f[fd] = s->f[fs]; return StopReason::kRunning;             // mov.s
 						case 0x07: s->f[fd] = -s->f[fs]; return StopReason::kRunning;            // neg.s

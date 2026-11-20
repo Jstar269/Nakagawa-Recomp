@@ -231,7 +231,8 @@ class TestEmissionShape(unittest.TestCase):
          0x00001234, "div.s", ['SR_NAN_TRAP_F(0x00001234u,"div.s",7u,s->f[7],_a,_b)']),
         ("sqrt.s", lambda options=None: codegen.effect(
             0x00005678, cop1(0x10, 0, 3, 3, 0x04), options=options)[0],
-         0x00005678, "sqrt.s", ['SR_NAN_TRAP_F(0x00005678u,"sqrt.s",3u,s->f[3],_a)']),
+         0x00005678, "sqrt.s", ["s->f[3] = sr_fpu_sqrt_s(s->f[3],s->fcr31);",
+                                'SR_NAN_TRAP_F(0x00005678u,"sqrt.s",3u,s->f[3],_a)']),
         ("vdiv.s", lambda options=None: codegen.effect(0x0000ABCD,
                                           vfpu_lane(0x18, 7, 1, 2, 3, 1), options=options)[0],
          0x0000ABCD, "vdiv.s", ['SR_NAN_TRAP_V2(0x0000abcdu,"vdiv.s",3u,_d,1,_s,1,_t,1)']),

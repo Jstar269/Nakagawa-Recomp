@@ -1422,7 +1422,7 @@ static uint32_t fpu_oracle_direct_binary(unsigned op, float a, float b,
 static uint32_t fpu_oracle_direct_unary(unsigned op, float a, uint32_t fcr31) {
     float result;
     switch (op) {
-    case COSIM_FPU_REFERENCE_SQRT: result = sqrtf(a); break;
+    case COSIM_FPU_REFERENCE_SQRT: result = sr_fpu_sqrt_s(a, fcr31); break;
     case COSIM_FPU_REFERENCE_ABS: result = fabsf(a); break;
     case COSIM_FPU_REFERENCE_MOV: result = a; break;
     default: result = -a; break;
