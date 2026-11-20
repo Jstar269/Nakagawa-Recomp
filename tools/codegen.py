@@ -1829,6 +1829,19 @@ def emit_host_fallthrough(resumable, stack_census=False, sp_kept=False):
     return "s->r[29] = _sp_entry; /* o32 ABI: sp is callee-saved; balance on fall-through end (F3E) */"
 
 
+def stack_census_partition(emitted, resume_owners):
+    """The census's (wrapped, unwrapped) callable entries, each sorted.
+
+    Resume bodies share their owner's census and are in neither list. A body that loads
+    $sp (GUEST_SP_ENTRIES) is never wrapped, so no census enter can observe it: it is
+    counted apart from the expected entries, and the runtime keeps the census PARTIAL.
+    """
+    callable_entries = sorted({a for a in emitted if a not in resume_owners})
+    wrapped = [a for a in callable_entries if a not in GUEST_SP_ENTRIES]
+    unwrapped = [a for a in callable_entries if a in GUEST_SP_ENTRIES]
+    return wrapped, unwrapped
+
+
 def wrap_stack_census_functions(func_texts, emitted, resume_owners):
     """Wrap each callable generated entry with opt-in dynamic SP observation."""
     c_matches_by_symbol = {}
@@ -1844,9 +1857,7 @@ def wrap_stack_census_functions(func_texts, emitted, resume_owners):
         for symbol, match in matches_in_text.items():
             c_matches_by_symbol.setdefault(symbol, []).append((index, match))
 
-    for addr in sorted(set(emitted)):
-        if addr in resume_owners or addr in GUEST_SP_ENTRIES:
-            continue
+    for addr in stack_census_partition(emitted, resume_owners)[0]:
         symbol = f"f_{addr:08x}"
         body = f"_sr_stack_census_body_{addr:08x}"
         llvm = llvm_indexes_by_address.get(addr, [])
@@ -3736,7 +3747,7 @@ def fpu_effect(addr, w, options=None):
         if fn == 0x03:
             stmt = f"{{ float _a={F(fs)},_b={F(ft)}; {F(fdv)} = sr_fpu_div_s(_a,_b,s->fcr31);"
             return stmt + _nanf(addr, "div.s", fdv, F(fdv), ["_a", "_b"], options=options) + " }", None, 0
-        if fn == 0x04: return _fpu_unary(addr, "sqrt.s", fdv, f"sqrtf({F(fs)})", F(fs), options), None, 0
+        if fn == 0x04: return _fpu_unary(addr, "sqrt.s", fdv, f"sr_fpu_sqrt_s({F(fs)},s->fcr31)", F(fs), options), None, 0
         if fn == 0x05: return _fpu_unary(addr, "abs.s", fdv, f"fabsf({F(fs)})", F(fs), options), None, 0
         if fn == 0x06: return _fpu_unary(addr, "mov.s", fdv, F(fs), F(fs), options), None, 0
         if fn == 0x07: return _fpu_unary(addr, "neg.s", fdv, f"-{F(fs)}", F(fs), options), None, 0
@@ -7194,7 +7205,7 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
         main_out += _enhancement_store_lines()
         main_out += _enhancement_data_lines()
         main_out += _enhancement_soft_shadow_lines()
-    census_entries = sorted({a for a in emitted if a not in resume_owners})
+    census_entries, census_unwrapped = stack_census_partition(emitted, resume_owners)
     if stack_census:
         census_values = census_entries or [0]
         main_out.append(
@@ -7274,7 +7285,7 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
     if stack_census:
         main_out.append(
             "    sr_stack_census_begin(sr_stack_census_expected_entries, "
-            f"{len(census_entries)}u);"
+            f"{len(census_entries)}u, {len(census_unwrapped)}u);"
         )
     if options.stale_detect:
         # TD-27 compact translation-time records (address + entry word +
