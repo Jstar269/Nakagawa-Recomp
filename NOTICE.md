@@ -85,8 +85,9 @@ We aim to respond promptly and will remove material where appropriate.
   `third_party/licenses/FFMPEG_MIPS_FFT.txt` and is included in the generated
   native-package third-party notices bundle alongside the FFmpeg LGPL text.
 - **minimp3** — CC0-1.0 public-domain dedication. `src/rt/minimp3/minimp3.h` and
-  its `LICENSE` are imported byte-identical from `https://github.com/lieff/minimp3`
-  at commit `ea99364f61c14656440e8d77e9c233ccf3124633`; the manifest is
+  its `LICENSE` are imported from `https://github.com/lieff/minimp3` at commit
+  `ea99364f61c14656440e8d77e9c233ccf3124633` (the `LICENSE` byte-identical, the
+  header with two later upstream lines as LOCAL DELTA); the manifest is
   `src/rt/minimp3/PROVENANCE.md`. It is statically linked into the runtime through
   the project wrapper `src/rt/mp3_bridge.c` and decodes for `sceMp3`. CC0 asks for no
   notice; it is listed here so the lineage stays discoverable.
