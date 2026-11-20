@@ -334,6 +334,12 @@ typedef struct {
      * otherwise-valid directory enumerable; the count lets the caller report
      * that the listing is not complete. */
     size_t skipped;
+    /* Open-addressed hash of the case-folded names in `entries` (index + 1, 0 is
+     * empty), so a merge finds an earlier spelling without scanning every entry
+     * already merged.  `name_slot_count` is a power of two, or 0 while unbuilt;
+     * a sort reorders `entries` and drops it, and the next merge rebuilds it. */
+    size_t *name_slots;
+    size_t name_slot_count;
 } SrVfsDirList;
 
 static inline int sr_vfs_ascii_tolower(int c) {
@@ -383,12 +389,48 @@ static inline void sr_vfs_dirlist_init(SrVfsDirList *list) {
     list->capacity = 0;
     list->exists = 0;
     list->skipped = 0;
+    list->name_slots = NULL;
+    list->name_slot_count = 0;
 }
 
 static inline void sr_vfs_dirlist_destroy(SrVfsDirList *list) {
     if (!list) return;
     free(list->entries);
+    free(list->name_slots);
     sr_vfs_dirlist_init(list);
+}
+
+/* FNV-1a over the ASCII-folded name: names sr_vfs_strcasecmp calls equal hash equal. */
+static inline uint64_t sr_vfs_name_fold_hash(const char *name) {
+    uint64_t h = 1469598103934665603ull;
+    for (; *name; name++) {
+        h ^= (uint64_t)(unsigned)sr_vfs_ascii_tolower((unsigned char)*name);
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+/* Keep the name hash at most half full for `wanted` entries, rebuilding it from
+ * every entry when it is missing or too small.  Returns 0 on allocation failure. */
+static inline int sr_vfs_dirlist_hash_reserve(SrVfsDirList *list, size_t wanted) {
+    if (list->name_slot_count && wanted <= list->name_slot_count / 2u) return 1;
+    size_t cap = list->name_slot_count ? list->name_slot_count : 64u;
+    while (cap / 2u < wanted) {
+        if (cap > SIZE_MAX / 4u) return 0;
+        cap *= 2u;
+    }
+    if (cap > SIZE_MAX / sizeof(*list->name_slots)) return 0;
+    size_t *slots = (size_t *)calloc(cap, sizeof(*slots));
+    if (!slots) return 0;
+    for (size_t i = 0; i < list->count; i++) {
+        size_t at = (size_t)sr_vfs_name_fold_hash(list->entries[i].name) & (cap - 1u);
+        while (slots[at]) at = (at + 1u) & (cap - 1u);
+        slots[at] = i + 1u;
+    }
+    free(list->name_slots);
+    list->name_slots = slots;
+    list->name_slot_count = cap;
+    return 1;
 }
 
 static inline int sr_vfs_dirlist_reserve(SrVfsDirList *list, size_t wanted) {
@@ -439,9 +481,15 @@ static inline int sr_vfs_dirlist_merge_lba(SrVfsDirList *list, const char *name,
         sr_vfs_strcasecmp(list->entries[list->count - 1u].name, name) == 0) {
         return 1;
     }
-    for (size_t i = 0; i < list->count; i++) {
-        if (sr_vfs_strcasecmp(list->entries[i].name, name) != 0) continue;
-        return 1;
+    /* Any earlier spelling of the name, through the folded-name hash: one probe
+     * run per merge, not a compare against every entry already merged. */
+    if (!sr_vfs_dirlist_hash_reserve(list, list->count + 1u)) return 0;
+    const size_t mask = list->name_slot_count - 1u;
+    size_t at = (size_t)sr_vfs_name_fold_hash(name) & mask;
+    while (list->name_slots[at]) {
+        if (sr_vfs_strcasecmp(list->entries[list->name_slots[at] - 1u].name, name) == 0)
+            return 1;
+        at = (at + 1u) & mask;
     }
     if (!sr_vfs_dirlist_reserve(list, list->count + 1u)) return 0;
     SrVfsDirEntry *slot = &list->entries[list->count];
@@ -449,6 +497,7 @@ static inline int sr_vfs_dirlist_merge_lba(SrVfsDirList *list, const char *name,
     slot->is_dir = is_dir;
     slot->size = is_dir ? 0u : size;
     slot->lba = is_dir ? 0u : lba;
+    list->name_slots[at] = list->count + 1u;
     list->count++;
     return 1;
 }
@@ -461,6 +510,10 @@ static inline int sr_vfs_dirlist_merge(SrVfsDirList *list, const char *name,
 static inline void sr_vfs_dirlist_sort(SrVfsDirList *list) {
     if (!list || list->count < 2u) return;
     qsort(list->entries, list->count, sizeof(*list->entries), sr_vfs_dir_entry_cmp);
+    /* The hash holds entry indices, which the sort just moved. */
+    free(list->name_slots);
+    list->name_slots = NULL;
+    list->name_slot_count = 0;
 }
 
 /* Normalize a guest directory key into the "dir/" prefix the index is keyed

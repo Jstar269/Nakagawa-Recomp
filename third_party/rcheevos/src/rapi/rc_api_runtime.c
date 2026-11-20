@@ -108,7 +108,8 @@ int rc_api_process_fetch_game_data_response(rc_api_fetch_game_data_response_t* r
   return rc_api_process_fetch_game_data_server_response(response, &response_obj);
 }
 
-static int rc_api_process_fetch_game_data_achievements(rc_api_response_t* response, rc_api_achievement_definition_t* achievement, rc_json_field_t* array_field) {
+static int rc_api_process_fetch_game_data_achievements(rc_api_response_t* response, rc_api_achievement_definition_t* achievement, uint32_t* num_achievements, rc_json_field_t* array_field) {
+  const rc_api_achievement_definition_t* first_achievement = achievement;
   rc_json_iterator_t iterator;
   const char* last_author = "";
   const char* last_author_field = "";
@@ -166,8 +167,9 @@ static int rc_api_process_fetch_game_data_achievements(rc_api_response_t* respon
       achievement->author = last_author;
     }
     else {
-      if (!rc_json_get_required_string(&achievement->author, response, &achievement_fields[6], "Author"))
-        return RC_MISSING_VALUE;
+      /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): optional, as in upstream rcheevos commit 8409479c (#577), so a
+       * deleted author (null) still loads now that required strings refuse null. */
+      rc_json_get_optional_string(&achievement->author, response, &achievement_fields[6], "Author", "");
 
       if (achievement->author == NULL) {
         /* ensure we don't pass NULL out to client */
@@ -220,10 +222,18 @@ static int rc_api_process_fetch_game_data_achievements(rc_api_response_t* respon
     ++achievement;
   }
 
+  /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): upstream rcheevos commit c0a3ebdd (#553); an array
+   * that holds a non-object stops the loop early, so a short fill is refused, not left uninitialized. */
+  if (achievement < first_achievement + *num_achievements) {
+    *num_achievements = (uint32_t)(achievement - first_achievement);
+    return RC_INVALID_VALUE;
+  }
+
   return RC_OK;
 }
 
-static int rc_api_process_fetch_game_data_leaderboards(rc_api_response_t* response, rc_api_leaderboard_definition_t* leaderboard, rc_json_field_t* array_field) {
+static int rc_api_process_fetch_game_data_leaderboards(rc_api_response_t* response, rc_api_leaderboard_definition_t* leaderboard, uint32_t* num_leaderboards, rc_json_field_t* array_field) {
+  const rc_api_leaderboard_definition_t* first_leaderboard = leaderboard;
   rc_json_iterator_t iterator;
   size_t len;
   int result;
@@ -270,6 +280,13 @@ static int rc_api_process_fetch_game_data_leaderboards(rc_api_response_t* respon
     }
 
     ++leaderboard;
+  }
+
+  /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): upstream rcheevos commit c0a3ebdd (#553); an array
+   * that holds a non-object stops the loop early, so a short fill is refused, not left uninitialized. */
+  if (leaderboard < first_leaderboard + *num_leaderboards) {
+    *num_leaderboards = (uint32_t)(leaderboard - first_leaderboard);
+    return RC_INVALID_VALUE;
   }
 
   return RC_OK;
@@ -348,7 +365,7 @@ int rc_api_process_fetch_game_data_server_response(rc_api_fetch_game_data_respon
     if (!response->achievements)
       return RC_OUT_OF_MEMORY;
 
-    result = rc_api_process_fetch_game_data_achievements(&response->response, response->achievements, &array_field);
+    result = rc_api_process_fetch_game_data_achievements(&response->response, response->achievements, &response->num_achievements, &array_field);
     if (result != RC_OK)
       return result;
   }
@@ -361,7 +378,7 @@ int rc_api_process_fetch_game_data_server_response(rc_api_fetch_game_data_respon
     if (!response->leaderboards)
       return RC_OUT_OF_MEMORY;
 
-    result = rc_api_process_fetch_game_data_leaderboards(&response->response, response->leaderboards, &array_field);
+    result = rc_api_process_fetch_game_data_leaderboards(&response->response, response->leaderboards, &response->num_leaderboards, &array_field);
     if (result != RC_OK)
       return result;
   }
@@ -405,7 +422,9 @@ int rc_api_init_fetch_game_sets_request_hosted(rc_api_request_t* request,
 
 static int rc_api_process_fetch_game_sets_achievement_sets(rc_api_fetch_game_sets_response_t* response,
                                                            rc_api_achievement_set_definition_t* subset,
+                                                           uint32_t* num_subsets,
                                                            rc_json_field_t* subset_array_field) {
+  const rc_api_achievement_set_definition_t* first_subset = subset;
   rc_json_iterator_t iterator;
   rc_json_field_t array_field;
   size_t len;
@@ -431,8 +450,9 @@ static int rc_api_process_fetch_game_sets_achievement_sets(rc_api_fetch_game_set
     if (!rc_json_get_required_unum(&subset->game_id, &response->response, &subset_fields[1], "GameId"))
       return RC_MISSING_VALUE;
 
-    if (!rc_json_get_required_string(&subset->title, &response->response, &subset_fields[2], "Title"))
-      return RC_MISSING_VALUE;
+    /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): optional, as in upstream rcheevos commit 8409479c (#577); a null
+     * title falls back to the game's below. */
+    rc_json_get_optional_string(&subset->title, &response->response, &subset_fields[2], "Title", "");
     if (!subset->title || !subset->title[0])
       subset->title = response->title;
 
@@ -477,7 +497,7 @@ static int rc_api_process_fetch_game_sets_achievement_sets(rc_api_fetch_game_set
       if (!subset->achievements)
         return RC_OUT_OF_MEMORY;
 
-      result = rc_api_process_fetch_game_data_achievements(&response->response, subset->achievements, &array_field);
+      result = rc_api_process_fetch_game_data_achievements(&response->response, subset->achievements, &subset->num_achievements, &array_field);
       if (result != RC_OK)
         return result;
     }
@@ -490,12 +510,19 @@ static int rc_api_process_fetch_game_sets_achievement_sets(rc_api_fetch_game_set
       if (!subset->leaderboards)
         return RC_OUT_OF_MEMORY;
 
-      result = rc_api_process_fetch_game_data_leaderboards(&response->response, subset->leaderboards, &array_field);
+      result = rc_api_process_fetch_game_data_leaderboards(&response->response, subset->leaderboards, &subset->num_leaderboards, &array_field);
       if (result != RC_OK)
         return result;
     }
 
     ++subset;
+  }
+
+  /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): upstream rcheevos commit c0a3ebdd (#553); an array
+   * that holds a non-object stops the loop early, so a short fill is refused, not left uninitialized. */
+  if (subset < first_subset + *num_subsets) {
+    *num_subsets = (uint32_t)(subset - first_subset);
+    return RC_INVALID_VALUE;
   }
 
   return RC_OK;
@@ -548,7 +575,7 @@ int rc_api_process_fetch_game_sets_server_response(rc_api_fetch_game_sets_respon
     if (!response->sets)
       return RC_OUT_OF_MEMORY;
 
-    result = rc_api_process_fetch_game_sets_achievement_sets(response, response->sets, &array_field);
+    result = rc_api_process_fetch_game_sets_achievement_sets(response, response->sets, &response->num_sets, &array_field);
     if (result != RC_OK)
       return result;
   }
@@ -889,6 +916,13 @@ int rc_api_process_submit_lboard_entry_server_response(rc_api_submit_lboard_entr
         return RC_MISSING_VALUE;
 
       ++entry;
+    }
+
+    /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): upstream rcheevos commit c0a3ebdd (#553); an array
+     * that holds a non-object stops the loop early, so a short fill is refused, not left uninitialized. */
+    if (entry < response->top_entries + response->num_top_entries) {
+      response->num_top_entries = (uint32_t)(entry - response->top_entries);
+      return RC_INVALID_VALUE;
     }
   }
 

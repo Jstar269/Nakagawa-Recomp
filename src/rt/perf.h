@@ -192,6 +192,8 @@ typedef uint64_t (*SrPerfTestClock)(void);
 void     sr_perf_test_set_clocks(SrPerfTestClock wall_ns, SrPerfTestClock thread_cpu_ns);
 /* Close the CSV and start the counters again from the environment, as a fresh process would. */
 void     sr_perf_test_reinit(void);
+/* The JSON summary path sr_perf_init derives from an SR_PERF_CSV path. */
+void     sr_perf_test_summary_path(const char *csv_path, char *out, size_t out_size);
 void     sr_perf_shutdown(void);
 uint64_t sr_perf_now_ns_impl(void);
 void sr_perf_exclude_thread(void);   /* this host thread's calls account nothing (perf.c) */
@@ -361,6 +363,7 @@ const SrPerfHistory *sr_perf_history(void);
 typedef struct SrPerfTopPc {
     uint32_t pc;
     uint64_t count;
+    uint64_t overcount;   /* how much of count the entry inherited from the one it evicted */
     const char *reason;   /* "dispatch-miss", "stale-block", "aot-handoff", "call-return" */
 } SrPerfTopPc;
 /* direction 0: AOT -> interpreter, 1: interpreter -> AOT. Writes up to `max` entries, most

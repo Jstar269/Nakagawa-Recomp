@@ -15,9 +15,12 @@ diagnosing new issues.
   the Online mode switch is not shown to anyone whose stored setting is Off (see the note under the table).
 - **One host.** Online mode talks to `nakagawa.jaycast.net` over HTTPS and nothing else. The news site (The
   FreshWire) cross-posts to it, so the player's allowlist stays one host. (The update check, outside online mode,
-  uses GitHub's hosts for the releases themselves.)
-- **Nothing is sent on its own.** No telemetry, analytics, crash upload or identifier. The only automatic traffic is
-  fetching the news feed while online mode is on, and the one update check at start when the user turned it on. Requests carry no cookie and no ID; the
+  uses GitHub's hosts for the releases themselves; the opt-in cover-art download uses
+  `thumbnails.libretro.com`.) `docs/SETUP.md` Network use lists every host and connection.
+- **Nothing is sent on its own.** No telemetry, analytics, crash upload or identifier. The automatic traffic is
+  fetching the news feed while online mode is on, the one update check at start when the user turned it on, and
+  the cover-art download when **Download cover art** is on (Settings > Online and developer, off by default), once
+  per verified Redump disc not yet cached. Requests carry no cookie and no ID; the
   update check's user agent is the fixed string `NakagawaRecomp/UpdateCheck`, with no version or system details.
 - **Game data never leaves the PC.** No game code, game data, decrypted module, package, save, guest memory or
   capture is ever uploaded (`AGENTS.md`, section 5). A report sends only the fields the user sees in its preview.

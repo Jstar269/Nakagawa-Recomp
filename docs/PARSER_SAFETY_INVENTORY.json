@@ -610,9 +610,9 @@
           "src/rt/archive_vfs.c:archive_normalize_key"
         ]
       },
-      "allocation_time": "Index, mount and cache arrays grow by checked doubling; the expanded-entry cache is capped by sr_archive_vfs_configure.",
+      "allocation_time": "Index, mount and cache arrays grow by checked doubling; the expanded-entry cache is capped by sr_archive_vfs_configure, and one decoded member larger than that cap (at most the XB provider's entry limit) is held outside it.",
       "failure_atomicity": "A mount that fails rolls back every index entry it added, so earlier mounts stay published unchanged.",
-      "harness": "tests/native/test_fuzz_parsers.c:test_fuzz_archive_vfs; tests/native/test_xb_parser.c:test_archive_vfs_keyless_member_is_invalid",
+      "harness": "tests/native/test_fuzz_parsers.c:test_fuzz_archive_vfs; tests/native/test_xb_parser.c:test_archive_vfs_sjis_trail_5c_member",
       "status": "PARTIAL",
       "id": "archive-vfs-c",
       "source_paths": [
@@ -2184,7 +2184,7 @@
       "test_paths": [
         "tools/test_ppmdiff_coverage.py"
       ],
-      "max_input": "No byte cap and no dimension cap anywhere in the row. read_ppm reads the whole file, then requires w*h*3 payload bytes. ppm2png applies no validation at all before slicing the payload. pngcmp.py reads each whole PNG and zlib-decompresses every IDAT chunk into one buffer, so its accepted size is the decompressed image: an image is rejected only when it is not 8-bit RGB non-interlaced with filter 0 on every scanline, and w*h is never bounded.",
+      "max_input": "No byte cap and no dimension cap anywhere in the row. read_ppm reads the whole file, then requires w*h*3 payload bytes. ppm2png parses with picture_gate.parse_ppm, which requires the P6 magic, maxval 255 and exactly w*h*3 payload bytes before any slicing. pngcmp.py reads each whole PNG and zlib-decompresses every IDAT chunk into one buffer, so its accepted size is the decompressed image: an image is rejected only when it is not 8-bit RGB non-interlaced with filter 0 on every scanline, and w*h is never bounded.",
       "tables_nesting": "No recursive structure; directory comparison is over the two frame directories.",
       "arithmetic": {
         "safe": "PARTIAL",
@@ -2195,14 +2195,14 @@
         ]
       },
       "allocation_time": "A whole-frame read plus a per-frame bytes object; run_diff holds one frame from each side at a time. pngcmp.py holds both decoded images and the full decompressed scanline buffer at once, so its peak memory is roughly the frame size times three.",
-      "failure_atomicity": "read_ppm raises CoverageError on any I/O, format, or truncation problem so coverage cannot be silently lost, and run_diff reports missing frames as failures. ppm2png has no equivalent guard: a malformed header raises an unhandled IndexError or ValueError. pngcmp.py does fail closed, but through SystemExit, which is the manual-developer route rather than the coverage route.",
+      "failure_atomicity": "read_ppm raises CoverageError on any I/O, format, or truncation problem so coverage cannot be silently lost, and run_diff reports missing frames as failures. ppm2png refuses a malformed, non-P6, non-255-maxval, truncated or over-long file by name (picture_gate.PictureError) and exits 1 before writing any PNG. pngcmp.py does fail closed, but through SystemExit, which is the manual-developer route rather than the coverage route.",
       "harness": "tools/test_ppmdiff_coverage.py",
-      "gap": "ppmdiff fails closed and is covered; ppm2png validates nothing, has no direct malformed-input test, and would raise an unhandled Python exception on a truncated or non-P6 file. pngcmp.py is a manual developer comparator: it has no direct test and no CI job.",
+      "gap": "ppmdiff fails closed and is covered; ppm2png refuses a malformed frame through picture_gate.parse_ppm, and tools/test_pngcmp.py covers that refusal. pngcmp.py is a manual developer comparator: it has no direct test and no CI job.",
       "malformed_input_coverage": [
-        "missing, empty, non-P6, bad-dimension, non-255-maxval, and truncated frames through ppmdiff's coverage cases"
+        "missing, empty, non-P6, bad-dimension, non-255-maxval, and truncated frames through ppmdiff's coverage cases",
+        "truncated, over-long, non-P6 and non-255-maxval frames refused by ppm2png in tools/test_pngcmp.py"
       ],
       "resource_gaps": [
-        "ppm2png performs no header, dimension, maxval, or length validation and has no direct test.",
         "None of the three tools caps file size or frame dimensions; pngcmp.py bounds neither the PNG byte length nor w*h.",
         "pngcmp.py has no direct test and is not invoked by any CI job; it is a manual comparator over the PNGs ppm2png.py writes.",
         "No seeded mutation or sanitizer campaign."

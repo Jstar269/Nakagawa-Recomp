@@ -67,6 +67,7 @@ The **Where** column of each table names the places a code can appear:
 | `DISC_IMAGE_EXPANDED_INVALID` | disc, player | The compressed file expanded, but the result is not a readable disc image. |
 | `DISC_IMAGE_HEADER_INVALID` | disc, player | The compressed disc image's header is invalid. |
 | `DISC_IMAGE_ID_MISSING` | disc, player | The disc image has no disc ID in its title information. |
+| `DISC_IMAGE_IMPORT_BUSY` | disc, player | The same compressed disc image is already being expanded by another window or tool. |
 | `DISC_IMAGE_INDEX_INVALID` | disc, player | The compressed disc image's block index is invalid. |
 | `DISC_IMAGE_NOT_COMPRESSED` | disc, player | The file given to the disc expander does not start with a CSO, ZSO or CHD signature. |
 | `DISC_IMAGE_NOT_EXPANDED` | disc, player | A compressed disc image was given to the disc inspector, which reads only the plain ISO made when the image is added to the library. |
@@ -98,6 +99,7 @@ The **Where** column of each table names the places a code can appear:
 | --- | --- | --- |
 | `CONTEXT_REQUIRED` | decrypt, player | The file is bound to the console that installed it (its fuse ID), which Nakagawa cannot take, so it is refused. |
 | `DECOMPRESS_FAILURE` | decrypt, player | The decrypted payload does not decompress; the file looks damaged or changed. |
+| `DISC_DECRYPT_MEMBER_MISSING` | decrypt | An encrypted file found on the disc image was gone when the tools came to decrypt it: the image changed or was cut short during the run. The disc's other files are still decrypted. |
 | `FIRMWARE_OUT_OF_SCOPE` | decrypt, player | The file is PSP system software. Nakagawa never decrypts firmware. |
 | `INTEGRITY_FAILURE` | decrypt, player | The file's signature or hash check failed; the file looks damaged or changed. |
 | `IO_FAILURE` | decrypt, player | The input could not be read or the output could not be written. |
@@ -261,8 +263,9 @@ The **Where** column of each table names the places a code can appear:
 | `CACHE_CLEAR_FAILED` | player | Some files in the shared-library cache could not be removed. |
 | `CANCELLED` | decrypt, disc, player | The operation was cancelled; nothing was kept. |
 | `CLI_NOT_FOUND` | player | The bundled tools folder could not be found. |
-| `DATA_DIR_UNAVAILABLE` | player | Nakagawa's data folder is not available. |
+| `DATA_DIR_UNAVAILABLE` | route, player | Nakagawa's data folder is not available. |
 | `DESTINATION_WRITE_FAILED` | player | A verified download could not be moved into place, or its downloads folder could not be prepared. |
+| `DISC_PATH_TOO_LONG` | player | The disc image picked in the file picker is in a folder too deep to read, so it was not added. |
 | `DISK_FULL` | player | The disk is full. |
 | `DISK_WRITE_FAILED` | player | The Python runtime's staging folder could not be prepared, or its files could not be moved into app data. |
 | `ERROR_UNKNOWN` | player | The player raised an error without a code. This is a defect in the player. |

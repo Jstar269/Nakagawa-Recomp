@@ -6,7 +6,9 @@
 # with its FreeType, HarfBuzz and PlutoSVG submodules. Included by android/app/CMakeLists.txt, and
 # run as a script (cmake -DNK_ANDROID_DEPS_DIR=<dir> -P deps.cmake) by Gradle before Java
 # compilation, because the app's Java build uses SDL's android-project classes from the same
-# checkout. A checkout already at the pinned commit is reused with no network access.
+# checkout. A checkout whose fetch completed at the pinned commit is reused with no network access:
+# its stamp, <name>.ok beside it, is written last, after the submodules and the final HEAD check,
+# so a fetch that failed or was killed partway (a checkout without its submodules) is redone.
 
 set(NK_SDL3_URL https://github.com/libsdl-org/SDL.git)
 set(NK_SDL3_COMMIT f00dc919ca35b9756316e86c4777392de442f9b2)        # release-3.4.20
@@ -25,13 +27,18 @@ function(nk_fetch_pinned name url commit submodules out_dir)
     set(dir "${NK_ANDROID_DEPS_DIR}/${name}")
     file(MAKE_DIRECTORY "${NK_ANDROID_DEPS_DIR}")
     file(LOCK "${NK_ANDROID_DEPS_DIR}/${name}.lock" GUARD FUNCTION TIMEOUT 3600)
+    set(stamp "${NK_ANDROID_DEPS_DIR}/${name}.ok")
     set(head "")
-    if(EXISTS "${dir}/.git")
+    set(done "")
+    if(EXISTS "${stamp}" AND EXISTS "${dir}/.git")
+        file(READ "${stamp}" done)
+        string(STRIP "${done}" done)
         execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${dir}" rev-parse HEAD
             OUTPUT_VARIABLE head OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     endif()
-    if(NOT head STREQUAL commit)
+    if(NOT done STREQUAL commit OR NOT head STREQUAL commit)
         message(STATUS "Fetching ${name} ${commit} into ${dir}")
+        file(REMOVE "${stamp}")
         file(REMOVE_RECURSE "${dir}")
         set(git "${GIT_EXECUTABLE}" -c core.longpaths=true -c advice.detachedHead=false)
         foreach(step
@@ -56,6 +63,7 @@ function(nk_fetch_pinned name url commit submodules out_dir)
         if(NOT head STREQUAL commit)
             message(FATAL_ERROR "${name}: fetched ${head}, expected ${commit}")
         endif()
+        file(WRITE "${stamp}" "${commit}\n")
     endif()
     set(${out_dir} "${dir}" PARENT_SCOPE)
 endfunction()

@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+from io import StringIO
 from pathlib import Path
+import re
+import struct
 import sys
 import tempfile
 import unittest
@@ -24,6 +28,8 @@ class TestPackageNotices(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.pkg_dir = Path(self.tmpdir.name)
+        # Hermetic: the host's own toolchain never feeds these synthetic packages.
+        self.no_toolchain = self.pkg_dir / "missing-toolchain"
 
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
@@ -34,7 +40,9 @@ class TestPackageNotices(unittest.TestCase):
         (self.pkg_dir / "unlicensed_component.dll").write_bytes(b"MZ\0\0dummy")
 
         with self.assertRaises(PackageRouteError) as ctx:
-            package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+            package_notices.generate_package_notices(
+                self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+            )
 
         self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_RECORD_MISSING")
         self.assertIn("unlicensed_component.dll", str(ctx.exception))
@@ -47,7 +55,9 @@ class TestPackageNotices(unittest.TestCase):
         (self.pkg_dir / "rogue.dll").write_bytes(b"MZ\0\0dummy-rogue")
 
         with self.assertRaises(PackageRouteError) as ctx:
-            package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+            package_notices.generate_package_notices(
+                self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+            )
 
         self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_RECORD_MISSING")
         self.assertIn("rogue.dll", str(ctx.exception))
@@ -62,7 +72,9 @@ class TestPackageNotices(unittest.TestCase):
             # Deliberately do not create LICENSE.LGPLv2.1.txt
 
             with self.assertRaises(PackageRouteError) as ctx:
-                package_notices.generate_package_notices(self.pkg_dir, repo_root=fake_repo)
+                package_notices.generate_package_notices(
+                    self.pkg_dir, repo_root=fake_repo, toolchain_root=self.no_toolchain
+                )
 
             self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_TEXT_MISSING")
             self.assertIn("LICENSE_TEXT_MISSING", str(ctx.exception))
@@ -94,7 +106,7 @@ class TestPackageNotices(unittest.TestCase):
             )
             with self.assertRaises(PackageRouteError) as ctx:
                 package_notices.generate_package_notices(
-                    self.pkg_dir, repo_root=fake_repo
+                    self.pkg_dir, repo_root=fake_repo, toolchain_root=self.no_toolchain
                 )
 
         self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_TEXT_MISSING")
@@ -112,8 +124,47 @@ class TestPackageNotices(unittest.TestCase):
             with self.subTest(bad=bad), \
                     mock.patch.object(package_notices, "load_component_inventory", return_value=inventory):
                 with self.assertRaises(PackageRouteError) as ctx:
-                    package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+                    package_notices.generate_package_notices(
+                        self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+                    )
                 self.assertIn("LICENSE_RECORD_MALFORMED", str(ctx.exception))
+
+    def test_freetype_credit_reaches_the_notices(self) -> None:
+        """The FTL's binary-distribution credit is stated in THIRD_PARTY_NOTICES.txt, not only implied."""
+        (self.pkg_dir / "mygame.exe").write_bytes(b"MZ\0\0exe")
+        (self.pkg_dir / "libfreetype-6.dll").write_bytes(b"MZ\0\0freetype")
+
+        result = package_notices.generate_package_notices(
+            self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+        )
+
+        freetype = next(c for c in result["components"] if c.get("binary") == "libfreetype-6.dll")
+        self.assertIn(
+            "This software is based in part on the work of the FreeType Team.",
+            freetype.get("copyright_notices", []),
+        )
+        combined = (self.pkg_dir / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8")
+        section = combined.split("Component: FreeType", 1)[1].split("The FreeType Project LICENSE", 1)[0]
+        self.assertIn("based in part on the work of the FreeType Team", section)
+        self.assertIn("The FreeType Project (https://freetype.org)", section)
+
+    def test_malformed_bundled_copyright_notices_fail_closed(self) -> None:
+        """A bundled DLL record's copyright_notices must also be a list of strings."""
+        (self.pkg_dir / "libfreetype-6.dll").write_bytes(b"MZ\0\0freetype")
+        real = package_notices.load_component_inventory()
+        for bad in ("Portions copyright The FreeType Project", ["ok", 3]):
+            inventory = json.loads(json.dumps(real))
+            inventory["native"]["dlls"]["libfreetype-6.dll"]["copyright_notices"] = bad
+            record = inventory["native"]["dlls"]["libfreetype-6.dll"]
+            with self.subTest(bad=bad), \
+                    mock.patch.object(package_notices, "load_component_inventory", return_value=inventory), \
+                    mock.patch.dict(package_notices.KNOWN_RUNTIME_DLLS, {"libfreetype-6.dll": record}):
+                with self.assertRaises(PackageRouteError) as ctx:
+                    package_notices.generate_package_notices(
+                        self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+                    )
+                self.assertIn("LICENSE_RECORD_MALFORMED", str(ctx.exception))
+                self.assertIn("libfreetype-6.dll", str(ctx.exception))
 
     def test_notices_bundle_generation_with_in_tree_license_texts(self) -> None:
         """Bundle generation reads the checked-in texts, not a host toolchain."""
@@ -122,7 +173,9 @@ class TestPackageNotices(unittest.TestCase):
         (self.pkg_dir / "SDL3.dll").write_bytes(b"MZ\0\0sdl")
         (self.pkg_dir / "libwinpthread-1.dll").write_bytes(b"MZ\0\0pthread")
 
-        result = package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+        result = package_notices.generate_package_notices(
+            self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+        )
 
         self.assertEqual(result["schema_version"], 1)
         self.assertEqual(result["bundle_type"], "native_package_third_party_notices")
@@ -199,6 +252,181 @@ class TestPackageNotices(unittest.TestCase):
         self.assertIn("GNU GENERAL PUBLIC LICENSE", combined_text)
         self.assertIn("Credits and Third-Party Attribution", combined_text)
 
+    def test_source_notice_offers_corresponding_sources_for_staged_lgpl_dlls(self) -> None:
+        records = package_notices.load_component_inventory()["native"]["dlls"]
+        versions = {
+            "glib2": "2.90.1-1",
+            "gettext-runtime": "1.0-1",
+            "libiconv": "1.19-1",
+            "libgcc": "16.2.0-6",
+            "libstdc++": "16.2.0-6",
+        }
+        msys_root = self.pkg_dir / "synthetic-msys64"
+        toolchain_root = msys_root / "ucrt64"
+        local_db = msys_root / "var" / "lib" / "pacman" / "local"
+        for package, version in versions.items():
+            entry = local_db / f"mingw-w64-ucrt-x86_64-{package}-{version}"
+            entry.mkdir(parents=True)
+            (entry / "desc").write_text(
+                f"%NAME%\nmingw-w64-ucrt-x86_64-{package}\n\n%VERSION%\n{version}\n",
+                encoding="utf-8",
+            )
+        for dll_name, record in records.items():
+            if record.get("pacman_package") not in versions:
+                continue
+            (self.pkg_dir / dll_name).write_bytes(b"synthetic staged DLL")
+            for license_entry in record["license_texts"]:
+                source = ROOT / license_entry["file"]
+                target = toolchain_root / license_entry["toolchain_license_rel"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+
+        package_notices.generate_package_notices(
+            self.pkg_dir, repo_root=ROOT, toolchain_root=toolchain_root
+        )
+        source_notice = (self.pkg_dir / "SOURCE.txt").read_text(encoding="utf-8")
+        package_notice = (self.pkg_dir / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8")
+        for _dll_name, record in records.items():
+            package = record.get("pacman_package")
+            if package not in versions:
+                continue
+            version = versions[package]
+            self.assertIn(record["name"], source_notice)
+            self.assertIn(f"MSYS2 package: {package} {version}", source_notice)
+            self.assertIn(record["upstream_origin"], source_notice)
+            self.assertIn(f"MSYS2 package: {package} {version}", package_notice)
+            self.assertIn(record["upstream_origin"], package_notice)
+        self.assertIn("written request", source_notice.lower())
+        self.assertIn(
+            "https://github.com/Jstar269/Nakagawa-Recomp/discussions/categories/help",
+            source_notice,
+        )
+
+    def test_h264_notice_and_relink_section_follow_the_build_feature(self) -> None:
+        for enabled in (False, True):
+            with self.subTest(h264_enabled=enabled), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                repo_root = root / "repo"
+                package_dir = root / "package"
+                repo_root.mkdir()
+                package_dir.mkdir()
+                (repo_root / "Makefile").write_text(
+                    "H264_SUB_SRCS := src/rt/h264_ffmpeg_sub/libavcodec/h264dec.c \\\n "
+                    "\tsrc/rt/h264_ffmpeg_sub/libavutil/utils.c\n",
+                    encoding="utf-8",
+                )
+                if enabled:
+                    objects = repo_root / "build" / "synthetic"
+                    objects.mkdir(parents=True)
+                    (objects / "h264sub_fixture.o").write_bytes(b"synthetic object")
+                h264_license = "third_party/licenses/ffmpeg-h264.txt"
+                project_license = "LICENSE"
+                (repo_root / h264_license).parent.mkdir(parents=True)
+                (repo_root / h264_license).write_text("synthetic LGPL text", encoding="utf-8")
+                (repo_root / project_license).write_text("synthetic GPL text", encoding="utf-8")
+                inventory = {
+                    "native": {
+                        "dlls": {},
+                        "system_dll_patterns": [],
+                        "project_output": {
+                            "name": "Nakagawa Recomp",
+                            "spdx_id": "GPL-3.0-or-later",
+                            "disposition": "project_output",
+                            "license_texts": [{"file": project_license}],
+                        },
+                        "linked_components": [{
+                            "id": "ffmpeg-h264",
+                            "name": "FFmpeg H.264 decoder subset",
+                            "spdx_id": "LGPL-2.1-or-later",
+                            "upstream_origin": "https://github.com/FFmpeg/FFmpeg",
+                            "upstream_revision": "n4.4 / synthetic revision",
+                            "disposition": "statically_linked_subset",
+                            "notice_file": "FFmpeg-H264.txt",
+                            "object_globs": ["build/*/h264sub_*.o"],
+                            "relink_doc": "RELINK.md",
+                            "license_texts": [{"file": h264_license}],
+                        }],
+                    }
+                }
+                (package_dir / "synthetic.exe").write_bytes(b"synthetic executable")
+                with mock.patch.object(
+                    package_notices, "load_component_inventory", return_value=inventory
+                ), mock.patch.dict(
+                    package_notices.os.environ, {"H264_FFMPEG": "1" if enabled else "0"}
+                ):
+                    result = package_notices.generate_package_notices(
+                        package_dir, repo_root=repo_root, toolchain_root=root / "missing-toolchain"
+                    )
+
+                names = [component["name"] for component in result["components"]]
+                relink = (package_dir / "RELINK.md").read_text(encoding="utf-8")
+                if enabled:
+                    self.assertIn("FFmpeg H.264 decoder subset", names)
+                    self.assertIn("src/rt/h264_ffmpeg_sub/libavcodec/h264dec.c", relink)
+                    self.assertIn("build/*/h264sub_*.o", relink)
+                    self.assertIn("FFmpeg H.264 decoder subset", (package_dir / "SOURCE.txt")
+                                  .read_text(encoding="utf-8"))
+                else:
+                    self.assertNotIn("FFmpeg H.264 decoder subset", names)
+                    self.assertNotIn("H.264", relink)
+
+    def test_known_runtime_dlls_uses_the_selected_repository_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo_root = Path(temp)
+            inventory_path = repo_root / package_notices.COMPONENTS_IDENTITY
+            inventory_path.parent.mkdir(parents=True)
+            inventory_path.write_text(json.dumps({
+                "native": {"dlls": {"fixture.dll": {"name": "Fixture"}}}
+            }), encoding="utf-8")
+
+            known = package_notices.known_runtime_dlls(repo_root)
+
+        self.assertIn("fixture.dll", known)
+
+    def test_component_inventory_is_cached_by_resolved_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "components.json"
+            path.write_text(json.dumps({
+                "native": {"dlls": {"fixture.dll": {"name": "Fixture"}}}
+            }), encoding="utf-8")
+
+            first = package_notices.load_component_inventory(path)
+            second = package_notices.load_component_inventory(path)
+
+        self.assertIs(first, second)
+
+    def test_module_import_defers_component_inventory_loading(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "package_notices_import_probe", ROOT / "tools" / "package_notices.py"
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.object(
+            package_notices.json,
+            "loads",
+            side_effect=AssertionError("inventory parsing is lazy"),
+        ):
+            spec.loader.exec_module(module)
+
+        self.assertNotIn("KNOWN_RUNTIME_DLLS", module.__dict__)
+        self.assertNotIn("SYSTEM_DLL_PATTERNS", module.__dict__)
+
+    def test_cli_reports_package_route_error_without_traceback(self) -> None:
+        package_dir = self.pkg_dir / "package"
+        package_dir.mkdir()
+        stderr = StringIO()
+        with mock.patch.object(
+            package_notices,
+            "generate_package_notices",
+            side_effect=PackageRouteError("PACKAGE_LICENSE_TEXT_MISSING", "synthetic missing license"),
+        ), mock.patch("sys.stderr", new=stderr):
+            result = package_notices.main([str(package_dir)])
+
+        self.assertEqual(result, 2)
+        self.assertEqual(stderr.getvalue().strip(),
+                         "PACKAGE_LICENSE_TEXT_MISSING: synthetic missing license")
+
     def test_toolchain_licenses_are_the_fallback_when_in_tree_text_is_absent(self) -> None:
         """A host whose toolchain is newer than the checked-in text still resolves one."""
         inventory = package_notices.load_component_inventory()
@@ -219,10 +447,7 @@ class TestPackageNotices(unittest.TestCase):
                 for license_entry in sdl_record["license_texts"]:
                     target = toolchain_root / license_entry["toolchain_license_rel"]
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(
-                        "toolchain copy of " + license_entry["toolchain_license_rel"],
-                        encoding="utf-8",
-                    )
+                    target.write_bytes((ROOT / license_entry["file"]).read_bytes())
 
                 (self.pkg_dir / "SDL3.dll").write_bytes(b"MZ\0\0sdl")
                 result = package_notices.generate_package_notices(
@@ -234,7 +459,148 @@ class TestPackageNotices(unittest.TestCase):
             self.assertNotIn(":", sdl["source_path"])
             self.assertNotIn("\\", sdl["source_path"])
             combined = (self.pkg_dir / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8")
-            self.assertIn("toolchain copy of share/licenses/SDL3/LICENSE.txt", combined)
+            self.assertIn(
+                (ROOT / sdl_record["license_texts"][0]["file"])
+                .read_text(encoding="utf-8").strip(),
+                combined,
+            )
+
+    def test_toolchain_license_drift_is_named_when_in_tree_text_exists(self) -> None:
+        record = package_notices.load_component_inventory()["native"]["dlls"]["sdl3.dll"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_root = root / "repo"
+            toolchain_root = root / "ucrt64"
+            in_tree = repo_root / record["license_texts"][0]["file"]
+            in_tree.parent.mkdir(parents=True)
+            in_tree.write_bytes((ROOT / record["license_texts"][0]["file"]).read_bytes())
+            toolchain_copy = toolchain_root / record["license_texts"][0]["toolchain_license_rel"]
+            toolchain_copy.parent.mkdir(parents=True)
+            toolchain_copy.write_text("synthetic changed toolchain license", encoding="utf-8")
+
+            with self.assertRaises(PackageRouteError) as ctx:
+                package_notices.component_license_sources(record, toolchain_root, repo_root)
+
+        self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_TEXT_MISSING")
+        self.assertIn("LICENSE_TEXT_DRIFT", str(ctx.exception))
+
+    def test_binary_import_scan_refuses_unparsable_pe_but_accepts_no_import_pe(self) -> None:
+        invalid = {
+            "non-PE bytes": b"synthetic non-PE executable",
+            "bad PE signature": b"MZ" + bytes(64),
+        }
+        unmapped_import = bytearray(88 + 224)
+        unmapped_import[:2] = b"MZ"
+        struct.pack_into("<I", unmapped_import, 0x3C, 64)
+        unmapped_import[64:68] = b"PE\0\0"
+        struct.pack_into("<H", unmapped_import, 64 + 20, 224)
+        struct.pack_into("<H", unmapped_import, 64 + 24, 0x10B)
+        struct.pack_into("<I", unmapped_import, 64 + 24 + 92, 16)
+        struct.pack_into("<I", unmapped_import, 64 + 24 + 96 + 8, 0x1234)
+        struct.pack_into("<I", unmapped_import, 64 + 24 + 96 + 12, 20)
+        invalid["unmapped import table"] = bytes(unmapped_import)
+
+        valid_no_imports = bytearray(88 + 224)
+        valid_no_imports[:2] = b"MZ"
+        struct.pack_into("<I", valid_no_imports, 0x3C, 64)
+        valid_no_imports[64:68] = b"PE\0\0"
+        struct.pack_into("<H", valid_no_imports, 64 + 20, 224)
+        struct.pack_into("<H", valid_no_imports, 64 + 24, 0x10B)
+        struct.pack_into("<I", valid_no_imports, 64 + 24 + 92, 16)
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            package_notices.shutil, "which", return_value=None
+        ):
+            for label, data in invalid.items():
+                with self.subTest(binary=label):
+                    path = Path(temp) / f"{label.replace(' ', '-')}.dll"
+                    path.write_bytes(data)
+                    with self.assertRaises(PackageRouteError) as ctx:
+                        package_notices.get_binary_imports(path)
+                    self.assertEqual(ctx.exception.code, "PACKAGE_BUILD_FAILED")
+                    self.assertIn("cannot parse PE imports", str(ctx.exception))
+
+            valid_path = Path(temp) / "valid-empty-import-table.dll"
+            valid_path.write_bytes(valid_no_imports)
+            self.assertEqual(package_notices.get_binary_imports(valid_path), [])
+
+    def test_notice_generation_names_the_runtime_dll_it_stages(self) -> None:
+        # The title-package route writes notices before tools/nk_cli.py stages the
+        # runtime DLLs, so this one-level import staging is what names SDL3.dll there.
+        package_dir = self.pkg_dir / "package"
+        toolchain_root = self.pkg_dir / "toolchain"
+        package_dir.mkdir()
+        (package_dir / "synthetic.exe").write_bytes(b"synthetic executable")
+        bin_dir = toolchain_root / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "SDL3.dll").write_bytes(b"synthetic runtime DLL")
+
+        def imports_of(binary, _toolchain_root=None):
+            return ["SDL3.dll"] if binary.name == "synthetic.exe" else []
+
+        with mock.patch.object(package_notices, "get_binary_imports", side_effect=imports_of):
+            package_notices.generate_package_notices(
+                package_dir, repo_root=ROOT, toolchain_root=toolchain_root
+            )
+
+        self.assertEqual((package_dir / "SDL3.dll").read_bytes(), b"synthetic runtime DLL")
+        index = json.loads(
+            (package_dir / "THIRD_PARTY_NOTICES" / "index.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("SDL3.dll", [component.get("binary") for component in index["components"]])
+
+    def test_notice_regeneration_removes_stale_component_notices(self) -> None:
+        package_dir = self.pkg_dir / "package"
+        package_dir.mkdir()
+        (package_dir / "SDL3.dll").write_bytes(b"synthetic runtime DLL")
+        notices_dir = package_dir / "THIRD_PARTY_NOTICES"
+        notices_dir.mkdir()
+        stale = notices_dir / "retired-component.txt"
+        stale.write_text("stale synthetic notice", encoding="utf-8")
+
+        package_notices.generate_package_notices(
+            package_dir, repo_root=ROOT, toolchain_root=self.pkg_dir / "missing-toolchain"
+        )
+
+        self.assertFalse(stale.exists())
+
+    def test_failed_notice_regeneration_preserves_previous_bundle(self) -> None:
+        package_dir = self.pkg_dir / "package"
+        package_dir.mkdir()
+        custom_dll = package_dir / "custom_math.dll"
+        custom_dll.write_bytes(b"synthetic custom DLL")
+        empty_license = self.pkg_dir / "empty-license.txt"
+        empty_license.write_text("", encoding="utf-8")
+        notices_dir = package_dir / "THIRD_PARTY_NOTICES"
+        notices_dir.mkdir()
+        (notices_dir / "previous.txt").write_text("previous bundle", encoding="utf-8")
+        previous_root_files = {
+            "SOURCE.txt": "previous source",
+            "RELINK.md": "previous relink",
+            "THIRD_PARTY_NOTICES.txt": "previous combined notices",
+        }
+        for name, contents in previous_root_files.items():
+            (package_dir / name).write_text(contents, encoding="utf-8")
+        custom_map = {
+            "custom_math.dll": {
+                "name": "Custom Math",
+                "spdx_id": "Apache-2.0",
+                "license_path": str(empty_license),
+            }
+        }
+
+        with self.assertRaises(PackageRouteError):
+            package_notices.generate_package_notices(
+                package_dir,
+                repo_root=ROOT,
+                toolchain_root=self.pkg_dir / "missing-toolchain",
+                custom_license_map=custom_map,
+            )
+
+        self.assertEqual(sorted(path.name for path in notices_dir.iterdir()), ["previous.txt"])
+        self.assertEqual((notices_dir / "previous.txt").read_text(encoding="utf-8"), "previous bundle")
+        for name, contents in previous_root_files.items():
+            self.assertEqual((package_dir / name).read_text(encoding="utf-8"), contents)
 
     def test_custom_license_map_resolves_custom_bundled_dll(self) -> None:
         """Custom license map allows explicit declaration of third-party DLLs."""
@@ -254,6 +620,7 @@ class TestPackageNotices(unittest.TestCase):
         result = package_notices.generate_package_notices(
             self.pkg_dir,
             repo_root=ROOT,
+            toolchain_root=self.no_toolchain,
             custom_license_map=custom_map,
         )
         comp_names = [c["name"] for c in result["components"]]
@@ -280,6 +647,35 @@ class TestPackageNotices(unittest.TestCase):
         self.assertIn("unknown (built without git metadata)", clean)
         self.assertNotIn("Tag:", clean)
         self.assertNotIn("local changes", clean)
+
+    def test_package_licence_statements_name_the_gpl3_only_parts(self) -> None:
+        """The project-output row and the package texts do not call the whole package
+        GPL-3.0-or-later: they name the project's own code and the GPL-3.0-only parts
+        (audit 2026-11-17 finding F-e136ba9a)."""
+        native = package_notices.load_component_inventory()["native"]
+        xbrz = [c for c in native["linked_components"] if c.get("id") == "xbrz"]
+        self.assertEqual([c["spdx_id"] for c in xbrz], ["GPL-3.0-only"])
+        project = native["project_output"]
+        self.assertEqual(project["spdx_id"], "GPL-3.0-or-later")
+        self.assertIn("project code", project["name"])
+        for fact in ("project's own code", "GPL-3.0-or-later", "xBRZ", "GPL-3.0-only",
+                     "pspdecrypt"):
+            self.assertIn(fact, project.get("note", ""))
+
+        source = " ".join(package_notices.render_source_notice({
+            "repository": package_notices.PROJECT_REPOSITORY_URL,
+            "commit": None, "tag": None, "local_changes": None,
+        }).split())
+        relink = " ".join(package_notices.render_relink_guide(ROOT, h264_enabled=False).split())
+        for text in (source, relink):
+            self.assertNotIn("distributed under the GNU General Public License version 3 or later",
+                             text)
+            self.assertNotIn("whole program is licensed under", text)
+            self.assertIn("The project's own code is licensed under the GNU General Public "
+                          "License version 3 or later.", text)
+            self.assertIn("xBRZ texture scaler, which is licensed under the GNU General Public "
+                          "License version 3 only", text)
+            self.assertIn("pspdecrypt", text)
 
     def test_source_reference_reads_this_checkout(self) -> None:
         reference = package_notices.source_reference(ROOT)
@@ -313,11 +709,103 @@ class TestPackageNotices(unittest.TestCase):
         """RELINK.md lists exactly the ATRAC3+ objects the Makefile builds, plus the bridge."""
         objects = package_notices.atrac3p_object_names(ROOT)
         makefile = read_makefile(ROOT)
-        self.assertGreater(len(objects), 1)
-        for obj in objects[:-1]:
-            source = "src/rt/atrac3p/" + obj[len("$(BUILD_DIR)/atrac3p_"):-2] + ".c"
-            self.assertIn(source, makefile)
-        self.assertEqual(objects[-1], "$(BUILD_DIR)/atrac3p_bridge.o")
+        runtime_mk = (ROOT / "mk" / "runtime_sources.mk").read_text(encoding="utf-8")
+        pat_match = re.search(
+            r"^ATRAC3P_OBJS\s*:=\s*\$\(patsubst\s+([^,]+),([^,]+),\$\(ATRAC3P_SRCS\)\)",
+            runtime_mk,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(pat_match)
+        assert pat_match is not None
+        src_pat, obj_pat = pat_match.group(1).strip(), pat_match.group(2).strip()
+        src_prefix, src_suffix = src_pat.split("%", 1)
+        obj_prefix, obj_suffix = obj_pat.split("%", 1)
+        srcs_match = re.search(r"^ATRAC3P_SRCS\s*:?=\s*((?:.*\\\n)*.*)$", makefile, re.MULTILINE)
+        self.assertIsNotNone(srcs_match)
+        assert srcs_match is not None
+        srcs = srcs_match.group(1).replace("\\\n", " ").split()
+        expected = [
+            obj_prefix + src[len(src_prefix):-len(src_suffix)] + obj_suffix
+            for src in srcs
+            if src.startswith(src_prefix) and src.endswith(src_suffix)
+        ] + ["$(BUILD_DIR)/atrac3p_bridge.o"]
+        self.assertGreater(len(expected), 1)
+        self.assertEqual(objects, expected)
+
+    def test_recorded_relink_globs_match_every_lgpl_object_the_makefile_builds(self) -> None:
+        """Each LGPL subset's object_globs find every object its Makefile rule derives, subdirectories included."""
+        makefile = read_makefile(ROOT)
+
+        def sources(variable: str) -> list[str]:
+            for match in re.finditer(rf"^{variable}\s*:?=\s*((?:.*\\\n)*.*)$", makefile, re.MULTILINE):
+                found = match.group(1).replace("\\\n", " ").split()
+                if found:
+                    return found
+            return []
+
+        # mk/runtime_sources.mk: $(patsubst <dir>/%.c,$(BUILD_DIR)/<prefix>%.o,$(<VAR>)).
+        rules = {
+            "ffmpeg-atrac3p": ("ATRAC3P_SRCS", "src/rt/atrac3p/", "atrac3p_", ["atrac3p_bridge.o"]),
+            "ffmpeg-h264": ("H264_SUB_SRCS", "src/rt/h264_ffmpeg_sub/", "h264sub_", []),
+        }
+        for variable, directory, prefix, _extra in rules.values():
+            self.assertIn(
+                f"$(patsubst {directory}%.c,$(BUILD_DIR)/{prefix}%.o,$({variable}))",
+                (ROOT / "mk" / "runtime_sources.mk").read_text(encoding="utf-8"),
+            )
+        inventory = package_notices.load_component_inventory()
+        by_id = {c.get("id"): c for c in inventory["native"]["linked_components"]}
+        for component_id, (variable, directory, prefix, extra) in rules.items():
+            with self.subTest(component=component_id):
+                srcs = [s for s in sources(variable) if s.startswith(directory) and s.endswith(".c")]
+                self.assertGreater(len(srcs), 1)
+                expected = {f"build/game/{prefix}{s[len(directory):-2]}.o" for s in srcs}
+                expected.update(f"build/game/{name}" for name in extra)
+                self.assertTrue(any("/" in o[len("build/game/"):] for o in expected))
+                with tempfile.TemporaryDirectory() as tree_dir:
+                    tree = Path(tree_dir)
+                    for obj in expected:
+                        (tree / obj).parent.mkdir(parents=True, exist_ok=True)
+                        (tree / obj).write_bytes(b"")
+                    globs = by_id[component_id].get("object_globs")
+                    self.assertIsInstance(globs, list)
+                    matched = {
+                        path.relative_to(tree).as_posix()
+                        for pattern in globs for path in tree.glob(pattern) if path.is_file()
+                    }
+                self.assertEqual(matched, expected)
+
+    def test_relink_objects_in_the_package_index_carry_every_recorded_glob(self) -> None:
+        (self.pkg_dir / "game.exe").write_bytes(b"MZ\0\0exe")
+        result = package_notices.generate_package_notices(
+            self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+        )
+        atrac = next(c for c in result["components"] if c["name"] == "FFmpeg ATRAC3+ subset")
+        self.assertEqual(atrac["relink_objects"], ["build/*/atrac3p_*.o", "build/*/atrac3p_*/**/*.o"])
+
+    def test_malformed_relink_globs_fail_closed(self) -> None:
+        """A single-string glob (which cannot reach the per-library subdirectories) is a named failure."""
+        (self.pkg_dir / "game.exe").write_bytes(b"MZ\0\0exe")
+        real = package_notices.load_component_inventory()
+        cases: tuple[tuple[str, object], ...] = (
+            ("object_glob", "build/*/atrac3p_*.o"),
+            ("object_globs", "build/*/atrac3p_*.o"),
+            ("object_globs", []),
+            ("object_globs", ["build/*/atrac3p_*.o", 3]),
+        )
+        for key, bad in cases:
+            inventory = json.loads(json.dumps(real))
+            linked = next(c for c in inventory["native"]["linked_components"] if c["id"] == "ffmpeg-atrac3p")
+            linked.pop("object_globs")
+            linked[key] = bad
+            with self.subTest(key=key, value=bad):
+                with mock.patch.object(package_notices, "load_component_inventory", return_value=inventory):
+                    with self.assertRaises(PackageRouteError) as ctx:
+                        package_notices.generate_package_notices(
+                            self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+                        )
+                self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_RECORD_MISSING")
+                self.assertIn("LICENSE_RECORD_MALFORMED", str(ctx.exception))
 
     def test_installed_package_version_reads_pacman_database(self) -> None:
         """Component versions come from the toolchain's package database, never a literal."""
@@ -337,7 +825,22 @@ class TestPackageNotices(unittest.TestCase):
     def test_gcc_runtime_ships_gplv3_with_exception(self) -> None:
         """GCC runtime DLLs carry both the GPLv3 text and the runtime library exception."""
         (self.pkg_dir / "libgcc_s_seh-1.dll").write_bytes(b"MZ\0\0gcc")
-        result = package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+        with tempfile.TemporaryDirectory() as msys_dir:
+            msys_root = Path(msys_dir)
+            toolchain_root = msys_root / "ucrt64"
+            package_version = "16.2.0-6"
+            entry = (
+                msys_root / "var" / "lib" / "pacman" / "local"
+                / f"mingw-w64-ucrt-x86_64-libgcc-{package_version}"
+            )
+            entry.mkdir(parents=True)
+            (entry / "desc").write_text(
+                f"%NAME%\nmingw-w64-ucrt-x86_64-libgcc\n\n%VERSION%\n{package_version}\n",
+                encoding="utf-8",
+            )
+            result = package_notices.generate_package_notices(
+                self.pkg_dir, repo_root=ROOT, toolchain_root=toolchain_root
+            )
         gcc = next(c for c in result["components"] if c.get("binary") == "libgcc_s_seh-1.dll")
         self.assertEqual(gcc["spdx_id"], "GPL-3.0-or-later WITH GCC-exception-3.1")
         self.assertEqual(len(gcc["additional_license_files"]), 1)

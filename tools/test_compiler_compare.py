@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import io
 from pathlib import Path
@@ -14,10 +15,134 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict, cast
 
+# The repository root, so ``tools.`` imports also resolve when this file runs as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import compiler_compare  # noqa: E402
+if TYPE_CHECKING:
+    from tools import compiler_compare
+else:
+    import compiler_compare  # noqa: E402
+
+
+class _TimedWorkloadResult(TypedDict):
+    status: str
+    summary: str | None
+    note: NotRequired[str]
+    output: str
+
+
+class MeasurementTrialIsolationTests(unittest.TestCase):
+    def test_reused_trial_root_drops_old_events_and_build_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build_root = Path(temporary) / "build"
+            trial_root = build_root / "trial-1"
+            trial_root.mkdir(parents=True)
+            events_path = trial_root / "compiler_events.jsonl"
+            stale_events = (
+                {"category": "compile", "generated_c": True, "duration_s": 90.0,
+                 "peak_working_set_bytes": 900_000, "compiler": "stale",
+                 "argv": ["-O0", "-c", "old.c"]},
+                {"category": "link", "duration_s": 80.0, "compiler": "stale",
+                 "argv": ["-O0", "-o", "old.exe"]},
+            )
+            events_path.write_text("".join(json.dumps(event) + "\n" for event in stale_events),
+                                   encoding="utf-8")
+            (trial_root / "old.o").write_bytes(b"old object")
+            (trial_root / "old.exe").write_bytes(b"old executable")
+            wrote_events = False
+
+            def fake_run(command, *, env):
+                nonlocal wrote_events
+                if not wrote_events:
+                    event_path = Path(env["NK_COMPILER_COMPARE_EVENTS"])
+                    compiler_compare._append_event(event_path, {
+                        "category": "compile", "generated_c": True, "duration_s": 2.5,
+                        "peak_working_set_bytes": 12_345, "compiler": "fresh",
+                        "argv": ["-O0", "-c", "new.c"],
+                    })
+                    compiler_compare._append_event(event_path, {
+                        "category": "link", "duration_s": 0.75, "compiler": "fresh",
+                        "argv": ["-O0", "-o", "new.exe"],
+                    })
+                    root = Path(env["NK_COMPILER_COMPARE_BUILD_ROOT"])
+                    (root / "new.o").write_bytes(b"new object")
+                    (root / "new.exe").write_bytes(b"new executable")
+                    wrote_events = True
+                return compiler_compare.Outcome(0, "PASS\n", 0.001)
+
+            with mock.patch.object(compiler_compare, "_run", side_effect=fake_run), \
+                    mock.patch.object(compiler_compare, "_wrapper_cc", return_value="/fake/wrapper"):
+                trials = compiler_compare._measurement_trials(
+                    "/fake/compiler", "/fake/make", "python", {"CFLAGS": "-O0"},
+                    build_root, 1, env={},
+                )
+
+        record = trials[0]
+        self.assertEqual(record["generated_c_compile_wall_seconds"], 2.5)
+        self.assertEqual(record["link_wall_seconds"], 0.75)
+        self.assertEqual(record["peak_working_set_bytes"], 12_345)
+        self.assertEqual(record["object_bytes"], len(b"new object"))
+        self.assertEqual(record["executable_bytes"], len(b"new executable"))
+
+
+class SubprocessTimeoutTests(unittest.TestCase):
+    def test_timeout_becomes_a_named_failed_outcome_with_partial_output(self) -> None:
+        timeout = subprocess.TimeoutExpired(["fake-compiler"], 10, output=b"partial output")
+        with mock.patch.object(compiler_compare.subprocess, "run", side_effect=timeout) as run:
+            outcome = compiler_compare._run(["fake-compiler"], env={})
+        self.assertIsNone(outcome.returncode)
+        self.assertIn("timed out", outcome.output)
+        self.assertIn("partial output", outcome.output)
+        self.assertEqual(run.call_args.kwargs["timeout"],
+                         compiler_compare.COMMAND_TIMEOUT_SECONDS)
+
+
+class ProcessTreeSamplingTests(unittest.TestCase):
+    def test_process_api_bindings_are_reused_across_samples(self) -> None:
+        rows = ((1, 0), (2, 1), (3, 2))
+        cursor = {"index": 0}
+
+        def advance(_snapshot, entry_pointer):
+            if cursor["index"] == len(rows):
+                return False
+            entry = entry_pointer._obj
+            entry.th32ProcessID, entry.th32ParentProcessID = rows[cursor["index"]]
+            cursor["index"] += 1
+            return True
+
+        kernel = mock.Mock()
+        kernel.CreateToolhelp32Snapshot.return_value = 7
+        kernel.Process32FirstW.side_effect = lambda snapshot, entry: (
+            cursor.update(index=0) or advance(snapshot, entry))
+        kernel.Process32NextW.side_effect = advance
+        kernel.OpenProcess.side_effect = lambda _access, _inherit, pid: pid + 100
+        kernel.CloseHandle.return_value = True
+        psapi = mock.Mock()
+
+        def memory_info(_process, counters_pointer, _size):
+            counters_pointer._obj.WorkingSetSize = _process
+            return True
+
+        psapi.GetProcessMemoryInfo.side_effect = memory_info
+        api_loader = mock.Mock(side_effect=lambda name, **_kwargs:
+                               kernel if name == "kernel32" else psapi)
+        had_cached_apis = hasattr(compiler_compare, "_PROCESS_APIS")
+        previous_apis = getattr(compiler_compare, "_PROCESS_APIS", None)
+        try:
+            if had_cached_apis:
+                compiler_compare._PROCESS_APIS = None
+            with mock.patch.object(compiler_compare.sys, "platform", "win32"), \
+                    mock.patch.object(compiler_compare.ctypes, "WinDLL", api_loader, create=True):
+                first = compiler_compare._process_tree_working_set(1)
+                cursor["index"] = 0
+                second = compiler_compare._process_tree_working_set(1)
+        finally:
+            if had_cached_apis:
+                compiler_compare._PROCESS_APIS = previous_apis
+        self.assertEqual((first, second), (306, 306))
+        self.assertEqual(api_loader.call_count, 2)
 
 
 class FakeToolchain:
@@ -28,6 +153,8 @@ class FakeToolchain:
         self.available = available
         self.failing_gate = failing_gate
         self.workload_status = compiler_compare.GATE_PASS
+        # (compiler path, trial index) -> semantic_sha256; every trial agrees by default.
+        self.semantic_hash: Callable[[str, int], str] = lambda _compiler, _index: "a" * 64
         self.gate_calls: list[str] = []
         self.measurement_calls: list[tuple[str, Path]] = []
         self.workload_calls: list[dict[str, Any]] = []
@@ -97,7 +224,7 @@ class FakeToolchain:
                 "link_wall_seconds": 0.5 + index / 10,
                 "object_bytes": 1000,
                 "executable_bytes": 4000,
-                "semantic_sha256": "a" * 64,
+                "semantic_sha256": self.semantic_hash(compiler, index),
                 "generated_c_commands": [{"compiler": compiler, "argv": ["-O0", "-c", "fixture_recomp_0.c"]}],
                 "link_commands": [{"compiler": compiler, "argv": ["-O0", "-o", "fixture.exe"]}],
             }
@@ -129,6 +256,15 @@ class FakeToolchain:
 
 
 class CompilerCompareTests(unittest.TestCase):
+    def test_the_module_runs_as_a_script(self) -> None:
+        # ``python tools/test_compiler_compare.py`` puts only tools/ on the path;
+        # its imports still resolve.
+        with tempfile.TemporaryDirectory() as cwd:
+            run = subprocess.run([sys.executable, "-E", str(Path(__file__).resolve()), "-h"],
+                                 cwd=cwd, capture_output=True, text=True, check=False,
+                                 timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -349,6 +485,28 @@ class CompilerCompareTests(unittest.TestCase):
         clang_settings = report["toolchains"][1]["build_settings"]
         self.assertEqual(clang_settings["RECOMP_CC_IS_CLANG_OVERRIDE"], "clang")
 
+    def test_hashes_that_differ_across_compiler_rows_are_reported_different(self) -> None:
+        self.fake.semantic_hash = lambda compiler, _index: (
+            "c" * 64 if "clang" in compiler else "a" * 64)
+        report = self.compare(compilers=["gcc", "clang"])
+        comparison = report["semantic_hash_comparison"]
+        self.assertEqual(comparison["status"], "DIFFERENT")
+        self.assertEqual(sorted(comparison["sha256_by_toolchain"].values()), ["a" * 64, "c" * 64])
+
+    def test_a_row_without_measurements_makes_the_comparison_incomplete(self) -> None:
+        self.fake.available = ("gcc",)
+        report = self.compare(compilers=["gcc", "clang"])
+        statuses = [entry["status"] for entry in report["toolchains"]]
+        self.assertEqual(statuses, [compiler_compare.STATUS_MEASURED,
+                                    compiler_compare.STATUS_NOT_AVAILABLE])
+        self.assertEqual(report["semantic_hash_comparison"]["status"], "INCOMPLETE")
+
+    def test_a_row_with_unstable_hashes_makes_the_comparison_unstable(self) -> None:
+        self.fake.semantic_hash = lambda compiler, index: (
+            f"{index:064x}" if "clang" in compiler else "a" * 64)
+        report = self.compare(compilers=["gcc", "clang"])
+        self.assertEqual(report["semantic_hash_comparison"]["status"], "UNSTABLE")
+
     def test_minimum_median_and_hash_stability_are_reported(self) -> None:
         report = self.compare()
         summary = report["toolchains"][0]["measurements"]["summary"]
@@ -400,6 +558,18 @@ class CompilerCompareTests(unittest.TestCase):
             compiler_compare.validate_report(report)
         report["toolchains"][0]["veto"]["failed_gate"] = gates[-1]["name"]
         report["schema"] = "foreign-schema"
+        with self.assertRaises(compiler_compare.CompareError):
+            compiler_compare.validate_report(report)
+
+    def test_measured_report_requires_every_veto_gate_to_pass(self) -> None:
+        report = self.compare()
+        veto = report["toolchains"][0]["veto"]
+        veto["gates"] = veto["gates"][:1]
+        with self.assertRaises(compiler_compare.CompareError):
+            compiler_compare.render_markdown(report)
+
+        report = self.compare()
+        report["toolchains"][0]["veto"]["gates"][2]["status"] = compiler_compare.GATE_FAIL
         with self.assertRaises(compiler_compare.CompareError):
             compiler_compare.validate_report(report)
 
@@ -476,6 +646,32 @@ class CompilerCompareTests(unittest.TestCase):
         self.assertEqual(report["schema"], compiler_compare.SCHEMA)
         markdown = (self.output / "compiler_compare.md").read_text(encoding="utf-8")
         self.assertIn("Semantic SHA-256", markdown)
+
+    def test_main_redacts_host_paths_from_json_and_stdout(self) -> None:
+        report = self.compare()
+        # Joined at run time, so this file itself carries no user-profile path.
+        profile = "\\".join(("C:", "Users", "AuditFixture", "AppData", "Local"))
+        private_path = profile + "\\toolchain\\gcc.exe"
+        report["host_tools"]["python_path"] = private_path
+        entry = report["toolchains"][0]
+        entry["compiler_path"] = private_path
+        entry["build_root"] = profile + "\\build"
+        entry["veto"]["gates"][0]["command"] = ["make", f"BUILD_ROOT={entry['build_root']}"]
+        entry["veto"]["gates"][0]["output"] = "open /PSP_GAME/USRDIR/a.bin ok"
+        output = io.StringIO()
+        with mock.patch.object(compiler_compare, "compare", return_value=report), \
+                mock.patch("sys.stdout", output):
+            result = compiler_compare.main([
+                "--compilers", "gcc", "--linkers", "default", "--make", "mingw32-make",
+                "--python", sys.executable, "--repeats", "3", "--output", str(self.output),
+            ])
+        self.assertEqual(result, 0)
+        serialized = (self.output / "compiler_compare.json").read_text(encoding="utf-8")
+        self.assertNotIn("AuditFixture", serialized, "JSON output must redact local path components")
+        self.assertNotIn("AuditFixture", output.getvalue(), "stdout must redact local path components")
+        self.assertIn("<HOST_PATH>", serialized)
+        self.assertIn("<HOST_PATH>", output.getvalue())
+        self.assertIn("/PSP_GAME/USRDIR/a.bin", serialized)
 
     def test_main_writes_veto_report_and_returns_failure(self) -> None:
         self.fake.failing_gate = "cosim-selftest"
@@ -1007,6 +1203,14 @@ class CompilerCompareTests(unittest.TestCase):
             diff_text = compiler_compare._format_semantic_diff_text(diff)
             self.assertIn("acc=0x00000001ff76c43b", diff_text)
             self.assertIn("acc=0x00000001ff76c43c", diff_text)
+            with mock.patch.object(compiler_compare, "_measurement_trials", return_value=trials):
+                report = self.compare()
+            report_summary = report["toolchains"][0]["measurements"]["summary"]
+            report_summary["semantic_hash_stable"] = False
+            report_summary["semantic_diff"] = diff
+            markdown = compiler_compare.render_markdown(report)
+            self.assertIn("acc=0x00000001ff76c43b", markdown)
+            self.assertIn("acc=0x00000001ff76c43c", markdown)
 
     def test_align_first_divergence_bounds_pairing_work_on_many_differing_lines(self) -> None:
         count = 300
@@ -1152,14 +1356,17 @@ class RuntimeWorkloadRunnerTests(unittest.TestCase):
 class TimingOnlyWorkloadTests(unittest.TestCase):
     """The platform ladder clears SR_*, so its benchmark runs are timed, not failed."""
 
-    def _run(self, name: str) -> dict:
+    def _run(self, name: str) -> _TimedWorkloadResult:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import run_perf_benchmarks
         done = subprocess.CompletedProcess(args=[], returncode=0, stdout="built and ran\n")
         with tempfile.TemporaryDirectory() as temp, \
                 mock.patch.object(run_perf_benchmarks.subprocess, "run", return_value=done):
-            return run_perf_benchmarks._run_one("make", sys.executable, name, (name,), Path(temp),
-                                                True, "build/perf-benchmark")
+            return cast(
+                _TimedWorkloadResult,
+                run_perf_benchmarks._run_one("make", sys.executable, name, (name,), Path(temp),
+                                             True, "build/perf-benchmark"),
+            )  # _run_one emits these fields; note is optional for timing-only workloads.
 
     def test_a_ladder_workload_without_a_summary_is_timed_not_failed(self) -> None:
         for name in ("platform-ladder-gap", "platform-ladder-sched", "platform-ladder-fs"):
@@ -1220,6 +1427,69 @@ class TimingOnlyWorkloadTests(unittest.TestCase):
             ])
         self.assertEqual(result, 0)
         self.assertEqual(captured, [("CC=clang", "LDFLAGS=-fuse-ld=lld")])
+
+    def _main_commands(self, *argv: str) -> tuple[int, list[list[str]]]:
+        """main() over one workload with make replaced; returns its status and make commands."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import run_perf_benchmarks
+        captured: list[list[str]] = []
+        done = subprocess.CompletedProcess(args=[], returncode=0, stdout="built and ran\n")
+
+        def fake_run(command, **_kwargs):
+            captured.append([str(part) for part in command])
+            return done
+
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.object(run_perf_benchmarks.shutil, "which", return_value="make"), \
+                mock.patch.object(run_perf_benchmarks, "WORKLOADS",
+                                  (("platform-ladder-gap", ("platform-ladder-gap",)),)), \
+                mock.patch.object(run_perf_benchmarks.subprocess, "run", side_effect=fake_run), \
+                contextlib.redirect_stdout(io.StringIO()):
+            status = run_perf_benchmarks.main(["--make", "make", "--output", temp, *argv])
+        return status, captured
+
+    def test_every_workload_builds_under_its_compilers_own_build_root(self) -> None:
+        # Targets such as production-smoke-gap, cosim-selftest and the platform ladder
+        # build beneath BUILD_ROOT, so a prefix that set only BUILD_DIR shared their trees.
+        _status, commands = self._main_commands("--build-prefix", "build/cc-a")
+        make_commands = [command for command in commands if command[0] == "make"]
+        self.assertTrue(make_commands)
+        for command in make_commands:
+            self.assertIn("BUILD_ROOT=build/cc-a", command)
+
+    def test_the_overhead_build_uses_the_same_make_assignments(self) -> None:
+        _status, commands = self._main_commands("--build-prefix", "build/cc-a", "--make-arg",
+                                                "CC=clang", "--overhead", "--samples", "1")
+        overhead = [command for command in commands
+                    if "BUILD_DIR=build/cc-a/overhead-build" in command]
+        self.assertEqual(len(overhead), 1)
+        self.assertIn("CC=clang", overhead[0])
+
+    def test_a_matrix_that_measured_nothing_does_not_pass(self) -> None:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import run_perf_benchmarks
+        skipped = {"name": "audio", "status": "SKIP"}
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.object(run_perf_benchmarks.shutil, "which", return_value="make"), \
+                mock.patch.object(run_perf_benchmarks, "_run_one", return_value=skipped), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            status = run_perf_benchmarks.main(["--make", "make", "--output", temp])
+        self.assertNotEqual(status, 0)
+        self.assertIn("SKIP=%d" % len(run_perf_benchmarks.WORKLOADS), stderr.getvalue())
+
+    def test_undecodable_make_output_is_kept_not_fatal(self) -> None:
+        # A stray byte is undefined in cp1252 (0x9d) and invalid UTF-8 (0xff).
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import run_perf_benchmarks
+        emit = "import sys; sys.stdout.buffer.write(b'before \\x9d\\xff after\\n')"
+        with tempfile.TemporaryDirectory() as temp:
+            record = run_perf_benchmarks._run_one(
+                sys.executable, sys.executable, "audio", ("audio-selftest",), Path(temp), False,
+                "build/perf-benchmark", make_assignments=("-c", emit))
+        self.assertEqual(record["status"], "PASS", record["output"])
+        self.assertIn("before", record["output"])
+        self.assertIn("after", record["output"])
 
 
 if __name__ == "__main__":

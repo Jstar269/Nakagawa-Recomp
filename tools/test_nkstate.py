@@ -120,6 +120,15 @@ class ParseTest(unittest.TestCase):
                 edit(data)
                 self.assertRefused(bytes(data), reason)
 
+    def test_an_identity_less_build_loads_no_file(self) -> None:
+        # Mirrors the C loader: an empty runtime field in the file would compare equal to
+        # this build's empty identity, so the load is refused before any identity compare.
+        anon = nkstate.Identity(SELF.kind, SELF.executable, "", SELF.disc_id, SELF.flags)
+        data = bytearray(_good())
+        data[OFF_RUNTIME:OFF_RUNTIME + 64] = bytes(64)
+        _rehash(data)
+        self.assertRefused(bytes(data), "no-runtime-identity", self_identity=anon)
+
     def test_a_tampered_payload_is_caught_even_after_a_rehash(self) -> None:
         data = bytearray(_good())
         data[OFF_TABLE + 96] ^= 1

@@ -155,6 +155,11 @@ class TestProductionSmoke(unittest.TestCase):
         prx = self.prx_path.read_bytes()
         psp = self.psp_path.read_bytes()
         manifest_path = self.out_dir / "manifest.json"
+        # Keep the no-churn check independent of the filesystem's timestamp tick.
+        # A redundant rewrite must move these outputs off this old timestamp.
+        sentinel_mtime_ns = 946_684_800_000_000_000  # 2000-01-01 UTC
+        for path in (self.prx_path, self.psp_path, manifest_path):
+            os.utime(path, ns=(sentinel_mtime_ns, sentinel_mtime_ns))
         before = {
             path.name: (path.read_bytes(), path.stat().st_mtime_ns)
             for path in (self.prx_path, self.psp_path, manifest_path)
@@ -537,6 +542,28 @@ class TestProductionSmoke(unittest.TestCase):
                 os.chdir(cwd)
             self.assertIn(omitted_object, str(raised.exception))
             self.assertNotIn(retained_object, str(raised.exception))
+
+    def test_verify_link_map_reports_every_omitted_chunk_object(self):
+        # The aot build emits five chunks: a map that drops chunk 3 or 4 (the sceImpose
+        # stubs) fails like one that drops chunk 0.
+        for omitted in ("production_smoke_recomp_3.o", "production_smoke_recomp_4.o"):
+            with self.subTest(omitted=omitted), \
+                    tempfile.TemporaryDirectory(prefix="nk_prod_smoke_chunk_") as tmp_dir:
+                temp_root = Path(tmp_dir)
+                relative_dir = "sub_build"
+                build_dir = self._fabricated_aot_tree(temp_root, relative_dir)
+                map_path = build_dir / "production_smoke.map"
+                paths = [path for path in map_path.read_text(encoding="utf-8").splitlines()
+                         if path.rsplit("/", 1)[-1] != omitted]
+                map_path.write_text("\n".join(paths) + "\n", encoding="utf-8")
+                cwd = os.getcwd()
+                try:
+                    os.chdir(temp_root)
+                    with self.assertRaisesRegex(RuntimeError, "production link map omits") as raised:
+                        generator.verify(Path(relative_dir), mode="aot")
+                finally:
+                    os.chdir(cwd)
+                self.assertIn(omitted, str(raised.exception))
 
     def _assert_title_link_uses_response_file(self, makefile):
         """The title link reads its objects from a response file, never the command line.
@@ -1402,6 +1429,11 @@ class TestCodegenStageReuse(unittest.TestCase):
     stage's output, but only after the checks the native-only reuse of a package's
     generated C performs, and any refusal regenerates under a named reason."""
 
+    root: Path
+    fixture_dir: Path
+    manifest_path: Path
+    manifest: dict[str, object]
+
     @classmethod
     def setUpClass(cls):
         # The borrowed skip helper builds its probe under the class scratch BUILD_ROOT,
@@ -1799,9 +1831,11 @@ class TestPresenterContract(unittest.TestCase):
         source = (ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
         presenter = source[source.index("int gui_present("):]
         offscreen = presenter[presenter.index("if (s_offscreen)"):presenter.index("int accepted")]
+        # SR_PRESENT_TRACE is read once, on the first accepted frame, and gates every event.
         self.assertRegex(
             offscreen,
-            r'if \(getenv\("SR_PRESENT_TRACE"\)\)\s*\{\s*'
+            r'if \(s_present_trace < 0\) s_present_trace = getenv\("SR_PRESENT_TRACE"\) != NULL;\s*'
+            r'if \(s_present_trace\)\s*\{\s*'
             r'sr_gui_boot_event\("BOOT_EVENT phase=frame_present backend=offscreen',
         )
 
@@ -1972,6 +2006,210 @@ class TestPresenterContract(unittest.TestCase):
         self.assertTrue(headless.startswith("headless\n"))
         self.assertTrue(offscreen.startswith("offscreen\n"))
 
+    @staticmethod
+    def _cheats_base0_output(cheats, frames=1, file_name="cheats-base0.ini"):
+        """What the base-0 runtime prints when it models the layout (src/rt/cheats.c)."""
+        image_end = display_generator.PSP_IMAGE_BASE + display_generator.IMAGE_SIZE - 1
+        lines = [
+            "BOOT_EVENT phase=init public_safe=1",
+            "BOOT_EVENT phase=image_loaded entry=0x00000000",
+        ]
+        if cheats:
+            lines += [
+                "CHEATS: this game's image is at 0x00000000 here and at 0x08804000 on a PSP: a "
+                f"cheat's address inside the image (0x08804000 to 0x{image_end:08X}) is moved with "
+                "it, and a cheat that names any other address is refused",
+                f"CHEATS: {file_name}: 1 on, 2 refused, 0 off, 0 for other discs",
+                'CHEATS: refused "Code in the image" (line 3): line 4 writes 4 byte(s) at 0x08804000 '
+                "(0x00000000 in this run), inside code the recompiler translated; a recompiled game "
+                "does not read its code again at run time; no line of this cheat is applied",
+                'CHEATS: refused "Outside the image" (line 5): line 6 names 4 byte(s) at 0x09000000, '
+                "outside the game's image as a PSP loads it (0x08804000 to "
+                f"0x{image_end:08X}); this run has the image at 0x00000000, and where other PSP "
+                "addresses are in it is not known; no line of this cheat is applied",
+                "CHEATS: the code forms are read as PPSSPP reads them (Core/CwCheat.cpp at "
+                "c437463bc5cb78a0236312ad23f9c3b56fb9ae67): PPSSPP-derived, not PSP-measured",
+            ]
+        lines += [
+            f"DRIVER_EXPECT_U32 addr=0x{address:08x} got=0x{value:08x} expected=0x{value:08x} status=PASS"
+            for address, value in display_generator.cheats_base0_expectations(frames, cheats)
+        ]
+        return "\n".join(lines) + "\n"
+
+    def test_cheats_base0_file_names_the_image_as_a_psp_has_it(self):
+        gen = display_generator
+        self.assertEqual(
+            gen.cheats_base0_file(),
+            "_C1 Data in the image\n_L 0x0000508F 0x000000A5\n"
+            "_C1 Code in the image\n_L 0x20004000 0x03E00008\n"
+            "_C1 Outside the image\n_L 0x20800000 0x12345678\n",
+        )
+        # The data byte is the image's last, in .bss; the third address is user memory past it.
+        self.assertEqual(gen.IMAGE_SIZE, 0x1090)
+        self.assertGreaterEqual(gen.IMAGE_SIZE - 1, gen.DATA_VADDR + gen.DATA_FILE_SIZE)
+        self.assertGreaterEqual(gen.CHEATS_OUTSIDE_IMAGE, gen.PSP_IMAGE_BASE + gen.IMAGE_SIZE)
+        # The two bases are the runtime's and the reader's.
+        runtime = (ROOT / "src" / "rt" / "cheats.c").read_text(encoding="utf-8")
+        reader = (ROOT / "src" / "core" / "nk_cheats.h").read_text(encoding="utf-8")
+        self.assertIn(f"#define CHEATS_PSP_IMAGE_BASE 0x{gen.PSP_IMAGE_BASE:08X}u", runtime)
+        self.assertIn(f"#define NK_CHEATS_ADDRESS_BASE 0x{gen.CWCHEAT_ADDRESS_BASE:08X}u", reader)
+        with_cheats = dict(gen.cheats_base0_expectations(1, True))
+        without = dict(gen.cheats_base0_expectations(1, False))
+        self.assertEqual(with_cheats[0x108C], 0xA5000000)
+        self.assertEqual(without[0x108C], 0)
+        self.assertEqual(with_cheats[0x0880508C], 0)
+        self.assertEqual(with_cheats[0], 0x27BDFFE0)
+        self.assertEqual(with_cheats[0x08804000], 0)
+        self.assertEqual(with_cheats[0x09000000], 0)
+
+    def test_cheats_base0_judgement_accepts_only_the_modelled_layout(self):
+        gen = display_generator
+        on = self._cheats_base0_output(True)
+        off = self._cheats_base0_output(False)
+        self.assertIsNone(gen.cheats_base0_evidence_failure(on, off, 1, "cheats-base0.ini"))
+        # What the runtime printed before the layout was modelled: every cheat on, the write at
+        # the PSP address as written, the code patch and the outside write applied.
+        before = (
+            "BOOT_EVENT phase=init public_safe=1\n"
+            "BOOT_EVENT phase=image_loaded entry=0x00000000\n"
+            "CHEATS: cheats-base0.ini: 3 on, 0 refused, 0 off, 0 for other discs\n"
+            "CHEATS: the code forms are read as PPSSPP reads them (Core/CwCheat.cpp at "
+            "c437463bc5cb78a0236312ad23f9c3b56fb9ae67): PPSSPP-derived, not PSP-measured\n"
+            "DRIVER_EXPECT_U32 addr=0x0000108c got=0x00000000 expected=0xa5000000 status=FAIL\n"
+            "DRIVER_EXPECT_U32 addr=0x0880508c got=0xa5000000 expected=0x00000000 status=FAIL\n"
+        )
+        failure = gen.cheats_base0_evidence_failure(before, off, 1, "cheats-base0.ini")
+        self.assertIsNotNone(failure)
+        self.assertIn("cheats on: omits: CHEATS: this game's image is at 0x00000000 here", failure)
+        self.assertIn("1 on, 2 refused", failure)
+        # Each named refusal, the layout line and each guest word is required on its own.
+        for line in on.splitlines():
+            if line.startswith("BOOT_EVENT phase=init") or "PPSSPP-derived" in line:
+                continue
+            without_line = on.replace(line + "\n", "")
+            self.assertIsNotNone(
+                gen.cheats_base0_evidence_failure(without_line, off, 1, "cheats-base0.ini"), line
+            )
+        # A word that is right by its own account but is not the one the route expects.
+        wrong = on.replace(
+            "addr=0x0000108c got=0xa5000000 expected=0xa5000000",
+            "addr=0x0000108c got=0x00000000 expected=0x00000000",
+        )
+        self.assertIn("omits", gen.cheats_base0_evidence_failure(wrong, off, 1, "cheats-base0.ini"))
+        # The PPSSPP-derived line is said once: not never, not twice.
+        origin = [line for line in on.splitlines() if "PPSSPP-derived" in line][0] + "\n"
+        for text in (on.replace(origin, ""), on + origin):
+            failure = gen.cheats_base0_evidence_failure(text, off, 1, "cheats-base0.ini")
+            self.assertIn("the PPSSPP-derived line appears", failure)
+        # With cheats off nothing is read or said, and the data byte is not written.
+        said = off + "CHEATS: cheats-base0.ini: 1 on, 2 refused, 0 off, 0 for other discs\n"
+        self.assertIn(
+            "cheats off: the runtime read or reported cheats",
+            gen.cheats_base0_evidence_failure(on, said, 1, "cheats-base0.ini"),
+        )
+        self.assertIn("cheats off: omits", gen.cheats_base0_evidence_failure(on, on, 1, "cheats-base0.ini"))
+        self.assertIn(
+            "contains: status=FAIL",
+            gen.cheats_base0_evidence_failure(
+                on + "DRIVER_EXPECT_U32 addr=0x00000004 got=0x1 expected=0x2 status=FAIL\n", off, 1,
+                "cheats-base0.ini"),
+        )
+
+    def test_cheats_base0_runs_the_base_zero_image_with_and_without_cheats(self):
+        gen = display_generator
+        calls = []
+
+        def fake_run(command, **kwargs):
+            env = dict(kwargs["env"])
+            calls.append((list(command), env, kwargs["cwd"]))
+            return subprocess.CompletedProcess(
+                command, 0, "", self._cheats_base0_output(env["SR_CHEATS"] == "1"))
+
+        ambient = {
+            "SR_DISC_ID": "ULUS-12345", "SR_RECORD": "run.nkrec", "SR_REPLAY": "run.nkrec",
+            "SR_HEADLESS_ACCEPT_PRESENTED_FRAMES": "3", "SR_VIDEO": "gdi", "SR_CHEATS": "1",
+            "SR_CHEATS_FILE": "someone-elses.ini",
+        }
+        with tempfile.TemporaryDirectory(prefix="display-smoke-base0-") as temp_dir:
+            build_dir = Path(temp_dir)
+            (build_dir / "fixture").mkdir()
+            (build_dir / "fixture" / "manifest.json").write_text('{"frames": 1}\n', encoding="ascii")
+            suffix = ".exe" if os.name == "nt" else ""
+            (build_dir / f"{gen.BASE0_ARTIFACT_STEM}{suffix}").write_bytes(b"runtime")
+            (build_dir / f"{gen.BASE0_ARTIFACT_STEM}_image.bin").write_bytes(b"image")
+            with mock.patch.dict(os.environ, ambient), mock.patch.object(
+                gen.subprocess, "run", side_effect=fake_run
+            ), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(gen.cheats_base0(build_dir), 0)
+            cheat_file = build_dir / "cheats-base0.ini"
+            self.assertEqual(cheat_file.read_text(encoding="ascii"), gen.cheats_base0_file())
+            logs = sorted(path.name for path in build_dir.glob("*.log"))
+            # A run that exits non-zero, or whose evidence does not hold, fails the route.
+            with mock.patch.object(
+                gen.subprocess, "run",
+                side_effect=lambda command, **kwargs: subprocess.CompletedProcess(command, 3, "", ""),
+            ), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(gen.main(["cheats-base0", "--build-dir", str(build_dir)]), 1)
+            with mock.patch.object(
+                gen.subprocess, "run",
+                side_effect=lambda command, **kwargs: subprocess.CompletedProcess(
+                    command, 0, "", self._cheats_base0_output(False)),
+            ), contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(gen.main(["cheats-base0", "--build-dir", str(build_dir)]), 1)
+            self.assertIn("DISPLAY_SMOKE_CHEATS-BASE0 status=FAIL: base-0 cheats evidence cheats on: omits",
+                          err.getvalue())
+        self.assertIn("DISPLAY_SMOKE_CHEATS-BASE0 status=PASS frames=1 on=1 refused=2", out.getvalue())
+        self.assertEqual([env["SR_CHEATS"] for _, env, _ in calls], ["1", "0"])
+        self.assertEqual(logs, [
+            f"{gen.BASE0_ARTIFACT_STEM}.cheats-off.stderr.log",
+            f"{gen.BASE0_ARTIFACT_STEM}.cheats-off.stdout.log",
+            f"{gen.BASE0_ARTIFACT_STEM}.cheats-on.stderr.log",
+            f"{gen.BASE0_ARTIFACT_STEM}.cheats-on.stdout.log",
+        ])
+        for cheats, (command, env, cwd) in zip((True, False), calls, strict=True):
+            self.assertEqual(command[1:9], [
+                "--image", str((build_dir / f"{gen.BASE0_ARTIFACT_STEM}_image.bin").resolve()),
+                "0x00000000", "0x00000000", "none", "none", "--sched", "--gui",
+            ])
+            self.assertEqual(command[9:], [
+                f"--expect-u32=0x{address:08x}:0x{value:08x}"
+                for address, value in gen.cheats_base0_expectations(1, cheats)
+            ])
+            self.assertEqual(Path(env["SR_CHEATS_FILE"]), cheat_file.resolve())
+            self.assertEqual(env["SR_VIDEO"], "offscreen")
+            for selector in ("SDL_VIDEO_DRIVER", "SDL_VIDEODRIVER", "SDL_AUDIO_DRIVER", "SDL_AUDIODRIVER"):
+                self.assertEqual(env[selector], "dummy")
+            # Each of these would make the runtime refuse every cheat or pick another section.
+            for refused in ("SR_DISC_ID", "SR_RECORD", "SR_REPLAY", "SR_HEADLESS_ACCEPT_PRESENTED_FRAMES"):
+                self.assertNotIn(refused, env)
+            self.assertEqual(Path(cwd), ROOT)
+
+    def test_display_smoke_run_ends_with_the_base_zero_cheats_route(self):
+        makefile = read_makefile(ROOT)
+        self.assertIn(
+            f"DISPLAY_SMOKE_BASE0_NAME    := {display_generator.BASE0_ARTIFACT_STEM}\n", makefile)
+        run_recipe = makefile.split("\ndisplay-smoke-run: display-smoke\n", 1)[1].split("\n\n", 1)[0]
+        self.assertTrue(run_recipe.rstrip().endswith("\t$(MAKE) display-smoke-cheats-base0"), run_recipe)
+        recipe = makefile.split("\ndisplay-smoke-cheats-base0:\n", 1)[1].split("\n\n", 1)[0]
+        for part in (
+            "generate --out-dir $(DISPLAY_SMOKE_BASE0_FIXTURE)",
+            "--frames $(DISPLAY_SMOKE_FRAMES)",
+            "$(MAKE) all",
+            "GAME_NAME=$(DISPLAY_SMOKE_BASE0_NAME)",
+            "GAME_ELF=$(DISPLAY_SMOKE_BASE0_FIXTURE)/guest.prx",
+            "GAME_BASE=0 ",
+            "GAME_ENTRY=0 ",
+            "GAME_PSP_HEADER=$(DISPLAY_SMOKE_BASE0_FIXTURE)/guest.psp",
+            "GAME_EXTRA_ELFS= TITLE_MANIFEST=",
+            "BUILD_DIR=$(DISPLAY_SMOKE_BASE0_DIR)",
+            "FUNCS_PER_CHUNK=1 PUBLIC_SAFE=1",
+            "$(DISPLAY_SMOKE_GENERATOR) cheats-base0 --build-dir $(DISPLAY_SMOKE_BASE0_DIR)",
+        ):
+            self.assertIn(part, recipe)
+        self.assertIn("\tdisplay-smoke-cheats-base0 \\\n", makefile)
+        clean = makefile.split("\ndisplay-smoke-clean:\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("$(MAKE) BUILD_DIR=$(DISPLAY_SMOKE_BASE0_DIR) clean", clean)
+
     def test_display_smoke_offscreen_without_gui_is_a_usage_error(self):
         with self.assertRaises(SystemExit) as raised, contextlib.redirect_stderr(None):
             display_generator.parse_args(["run", "--build-dir", "x", "--offscreen"])
@@ -2017,8 +2255,9 @@ class TestSanitizedBringup(unittest.TestCase):
         self, failure=None, *, launch_code=0, launch_output="", timeout=False,
         flight_events=None, flight_dropped=0, instruction_trace=False,
         unsupported_opcodes=None, analyzer_error=None, launch_bytes=None,
+        package_document=None, package_executable=True, case_name=None,
     ):
-        case_root = self.root / (failure or "success")
+        case_root = self.root / (case_name or failure or "success")
         report_path = case_root / "bringup.json"
         args = argparse.Namespace(
             iso=str(self.iso),
@@ -2063,10 +2302,11 @@ class TestSanitizedBringup(unittest.TestCase):
             stage_observer("compile", "PASS", 3)
             package_dir = build_args.user_data_root / "packages" / "ULUS99998"
             package_dir.mkdir(parents=True, exist_ok=True)
-            (package_dir / "runtime.exe").write_bytes(b"synthetic runtime marker")
+            if package_executable:
+                (package_dir / "runtime.exe").write_bytes(b"synthetic runtime marker")
             (package_dir / "runtime_image.bin").write_bytes(b"synthetic runtime image")
             (package_dir / "package.json").write_text(
-                json.dumps({
+                package_document if package_document is not None else json.dumps({
                     "executable": {"path": "runtime.exe"},
                     "runtime": {"run_entry": "0x08800100"},
                     "required_local_assets": [{"path": "data"}],
@@ -2644,6 +2884,13 @@ class TestSanitizedBringup(unittest.TestCase):
 
         def fake_package_build(build_args, stage_observer=None):
             self.last_build_module_dir = build_args.module_dir
+            # The bring-up removes its staged module copies when it ends: keep what
+            # the package build was given.
+            self.last_build_module_files = (
+                {path.name: path.read_bytes()
+                 for path in Path(build_args.module_dir).iterdir()}
+                if build_args.module_dir is not None else None
+            )
             stage_observer("codegen", "START", 0)
             stage_observer("codegen", "PASS", 1)
             build_args.aot_stage_result = {"status": "REUSED", "reason": "NONE"}
@@ -2748,12 +2995,10 @@ class TestSanitizedBringup(unittest.TestCase):
         profile_dir = (
             work_root / "work" / "user-data" / "experimental" / "ULUS99998"
         )
-        module_dirs = list(profile_dir.glob("module-stage-*"))
-        self.assertEqual(len(module_dirs), 1)
-        self.assertEqual(
-            sorted(path.name for path in module_dirs[0].iterdir()),
-            ["alpha.prx", "beta.elf"],
-        )
+        self.assertEqual(Path(self.last_build_module_dir).parent, profile_dir)
+        self.assertEqual(sorted(self.last_build_module_files), ["alpha.prx", "beta.elf"])
+        # The staged copies are removed when the bring-up ends.
+        self.assertEqual(list(profile_dir.glob("module-stage-*")), [])
         profile = json.loads((profile_dir / "profile.json").read_text(encoding="utf-8"))
         modules = profile["manifest"]["modules"]
         self.assertEqual([module["name"] for module in modules], ["alpha.prx", "beta.elf"])
@@ -2763,6 +3008,27 @@ class TestSanitizedBringup(unittest.TestCase):
         self.assertTrue(all("load_address" not in module for module in modules))
         self.assertTrue(all(module["required"] and module["role"] == "guest-prx" for module in modules))
         nk_cli.validate_bringup_report(report)
+
+    def test_a_module_layout_failure_leaves_no_staged_module_copies(self):
+        work_root = self.root / "module-layout-failure-case"
+        work_root.mkdir(parents=True)
+        iso_path = work_root / "multi-module.iso"
+        create_test_iso_with_modules(
+            iso_path,
+            bytes(build_synthetic_iso_elf()),
+            sysdir_modules={"alpha.prx": build_synthetic_decrypted_prx()},
+            usrdir_modules={},
+            disc_id="ULUS99998",
+            title="Synthetic Module Layout Failure",
+        )
+        with mock.patch.object(nk_cli, "plan_guest_module_layout",
+                               side_effect=OSError("synthetic layout failure")):
+            status, report = self._run_module_fixture(iso_path, work_root)
+        self.assertEqual(status, 1, report)
+        self.assertEqual(report["failure_class"],
+                         "GUEST_MODULE_LOAD_ADDRESS_LAYOUT_UNAVAILABLE")
+        profile_dir = work_root / "work" / "user-data" / "experimental" / "ULUS99998"
+        self.assertEqual(list(profile_dir.glob("module-stage-*")), [])
 
     def test_disc_whose_modules_the_runtime_serves_translates_no_guest_module(self):
         """A disc module the runtime replaces completely is left out of translation.
@@ -3146,11 +3412,7 @@ class TestSanitizedBringup(unittest.TestCase):
         self.assertEqual(report["failure_class"], "NONE")
         self.assertEqual(report["counts"]["modules"], 2)
         self.assertEqual(report["counts"]["encrypted_modules"], 1)
-        module_stage = next(
-            (work_root / "work" / "user-data" / "experimental" / "ULUS99998")
-            .glob("module-stage-*"),
-        )
-        self.assertEqual((module_stage / "encrypted.prx").read_bytes(), bytes(module_bytes))
+        self.assertEqual(self.last_build_module_files["encrypted.prx"], bytes(module_bytes))
         profile = json.loads(
             (work_root / "work" / "user-data" / "experimental" / "ULUS99998" / "profile.json")
             .read_text(encoding="utf-8")
@@ -3581,6 +3843,90 @@ class TestSanitizedBringup(unittest.TestCase):
         self.assertNotRegex(summary, r"#[0-9]+")
         nk_cli.validate_bringup_report(report)
 
+    def test_a_dispatch_miss_without_the_exit_summary_is_still_named(self):
+        """The summary block is printed only from atexit; a run that aborts after a miss
+        (or is killed) leaves only the per-miss line, which still names the miss."""
+        status, report = self._run_case(
+            "launch", launch_code=134,
+            launch_output=(
+                "DISPATCH_MISS_NEW[1]: target=0x08800000 caller_pc=0x08800004 "
+                "ra=0x08800008 uid=0x1\n"
+                "guest_interp: unsupported form; aborting\n"
+            ),
+        )
+        self.assertNotEqual(status, 0)
+        self.assertEqual(report["runtime_output_kind"], "DISPATCH_MISS")
+        self.assertEqual(report["failure_class"], "UNRESOLVED_DISPATCH_TARGET")
+        self.assertNotIn("08800000", json.dumps(report))
+        nk_cli.validate_bringup_report(report)
+        # A line that only begins like one is not a miss.
+        self.assertEqual(nk_cli.runtime_output_kind("DISPATCH_MISS_NEW[1]: nothing\n", []), "OTHER")
+
+    def test_a_timed_out_launch_keeps_what_its_runtime_printed(self):
+        """The runtime ran until the limit: the report classifies its output, it does not
+        claim the runtime never ran."""
+        cases = (
+            ("  SEMANTIC_BOUNDARY: target-not-executable; in the works: #308\n",
+             "SEMANTIC_BOUNDARY", "target-not-executable"),
+            ("DISPATCH_MISS_NEW[1]: target=0x08800000 caller_pc=0x08800004 "
+             "ra=0x08800008 uid=0x1\n", "DISPATCH_MISS", None),
+            ("BOOT_EVENT phase=window_ready backend=offscreen\n", "OTHER", None),
+        )
+        for index, (output, kind, boundary) in enumerate(cases):
+            with self.subTest(kind=kind):
+                status, report = self._run_case(
+                    case_name=f"timeout-kind-{index}", timeout=True, launch_output=output)
+                self.assertNotEqual(status, 0)
+                self.assertEqual(report["failure_class"], "LAUNCH_TIMEOUT")
+                self.assertEqual(report["exit_classification"], "TIMED_OUT")
+                self.assertEqual(report["runtime_output_kind"], kind)
+                self.assertEqual(report["runtime_boundary"], boundary)
+                self.assertEqual(report["runtime_imports"], [])
+                nk_cli.validate_bringup_report(report)
+
+    def test_a_package_the_launch_cannot_use_is_a_reported_launch_failure(self):
+        """A missing executable or a damaged package.json is recorded as LAUNCH_FAILED in a
+        written report, not a traceback that leaves none."""
+        cases = {
+            "missing-executable": {"package_executable": False},
+            "missing-runtime-key": {"package_document": json.dumps(
+                {"executable": {"path": "runtime.exe"}})},
+            "wrong-shape": {"package_document": json.dumps(
+                {"executable": {"path": "runtime.exe"}, "runtime": None})},
+            "replaced-after-build": {},
+        }
+        # An executable path that leaves the package folder is refused before it runs, even
+        # when the program it names exists (audit 2026-11-17).
+        outside = self.root / "outside-runtime.exe"
+        outside.write_bytes(b"synthetic program outside the package")
+        for label, path in (("absolute", str(outside)),
+                            ("parent", "../../../../../outside-runtime.exe")):
+            cases[f"escaping-executable-{label}"] = {"package_document": json.dumps({
+                "executable": {"path": path},
+                "runtime": {"run_entry": "0x08800100"},
+                "required_local_assets": [{"path": "data"}],
+            })}
+        real_stub_report = nk_cli._packaged_stub_report
+
+        def replace_after_build(package_dir):
+            # Another bring-up sharing the data folder replaced the package between the
+            # build and the launch.
+            stub_report = real_stub_report(package_dir)
+            (package_dir / "package.json").write_text("{not json", encoding="utf-8")
+            return stub_report
+
+        for name, options in cases.items():
+            with self.subTest(case=name), contextlib.ExitStack() as stack:
+                if name == "replaced-after-build":
+                    stack.enter_context(mock.patch.object(
+                        nk_cli, "_packaged_stub_report", side_effect=replace_after_build))
+                status, report = self._run_case(case_name=f"package-{name}", **options)
+                self.assertEqual(status, 1)
+                self.assertEqual(report["failure_class"], "LAUNCH_FAILED")
+                self.assertEqual(report["stages"]["launch"]["status"], "FAIL")
+                self.assertIsNone(self.last_launch_command)
+                nk_cli.validate_bringup_report(report)
+
     def test_launch_timeout_is_a_bounded_reported_exit(self):
         status, report = self._run_case(timeout=True)
         self.assertNotEqual(status, 0)
@@ -3896,11 +4242,52 @@ class TestBringupCaptureRounds(unittest.TestCase):
         self.assertEqual(report["code_capture"]["stop"], "BRINGUP_CAPTURE_MISSING")
         self.assertIn("BRINGUP_CAPTURE_MISSING: round 1 stopped at", self.printed)
 
+    def test_a_capture_folder_with_a_space_is_named_by_its_short_form(self):
+        """CODEGEN_USER_ARGS reaches the codegen recipe unquoted, so a capture under a data
+        folder with a space is named by its 8.3 short form, never word-split."""
+        case_root = self.root / "data root" / "case"
+        capture_dir = (case_root / "work" / "user-data" / "cache" / "bringup" / "ULUS99998"
+                       / "captures")
+        short_dir = self.root / "DATARO~1" / "captures"
+
+        def short_form(path):
+            self.assertEqual(Path(path).resolve(), capture_dir.resolve())
+            return short_dir
+
+        with mock.patch.object(title_codegen_plan, "_windows_short_path", side_effect=short_form):
+            status, report = self._run([("wrote", self.CAPTURE_A), None], case_root=case_root)
+        self.assertEqual(status, 0, report)
+        self.assertEqual(self.build_user_args[1], f"--code-capture={(short_dir / self.CAPTURE_A).as_posix()}")
+        self.assertEqual(self._translated(1), [(short_dir / self.CAPTURE_A).as_posix()])
+
+    def test_a_capture_folder_with_no_safe_name_is_a_named_codegen_failure(self):
+        case_root = self.root / "data root" / "case"
+        with mock.patch.object(title_codegen_plan, "_windows_short_path", return_value=None):
+            status, report = self._run([("wrote", self.CAPTURE_A)], case_root=case_root)
+        self.assertEqual(status, 1)
+        # Round 2 never built with a split argument: only round 1's build ran.
+        self.assertEqual(self.build_user_args, [None])
+        self.assertEqual(report["failure_class"], "CODEGEN_FAILED")
+        self.assertEqual(report["stages"]["codegen"]["status"], "FAIL")
+        self.assertIn("PACKAGE_UNSUPPORTED_PATH: code-capture folder", self.printed)
+
     def test_the_round_limit_option_is_checked(self):
         self.assertEqual(nk_cli._capture_rounds_argument("3"), 3)
         for value in ("0", str(nk_cli.BRINGUP_CAPTURE_ROUNDS_MAX + 1), "two"):
             with self.assertRaises(argparse.ArgumentTypeError):
                 nk_cli._capture_rounds_argument(value)
+
+    def test_a_launch_timeout_outside_its_range_is_refused_not_clamped(self):
+        # It used to run 600 as 120 and 0 as 1 without a word (audit 2026-11-17).
+        for value in ("0", "-5", str(nk_cli.BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS + 1), "600"):
+            argv = ["nk_cli.py", "bringup", "x.iso", "--launch-timeout", value]
+            with self.subTest(value=value), mock.patch.object(sys, "argv", argv):
+                with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    with self.assertRaises(SystemExit) as raised:
+                        nk_cli.main()
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn(f"must be 1..{nk_cli.BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS}", stderr.getvalue())
+        self.assertEqual(nk_cli._launch_timeout_argument("120"), 120)
 
 
 class TestBringupReportOpcodeNames(unittest.TestCase):
@@ -3919,11 +4306,21 @@ class TestBringupReportOpcodeNames(unittest.TestCase):
         self.root = Path(self.temporary.name)
 
     def _key_pattern(self) -> str:
-        schema = json.loads(nk_cli.BRINGUP_SCHEMA_PATH.read_text(encoding="utf-8"))
-        return (
-            schema["properties"]["counts"]["properties"]["unsupported_opcodes"]
-            ["propertyNames"]["pattern"]
-        )
+        schema: object = json.loads(nk_cli.BRINGUP_SCHEMA_PATH.read_text(encoding="utf-8"))
+        assert isinstance(schema, dict)
+        properties = schema.get("properties")
+        assert isinstance(properties, dict)
+        counts = properties.get("counts")
+        assert isinstance(counts, dict)
+        count_properties = counts.get("properties")
+        assert isinstance(count_properties, dict)
+        unsupported = count_properties.get("unsupported_opcodes")
+        assert isinstance(unsupported, dict)
+        property_names = unsupported.get("propertyNames")
+        assert isinstance(property_names, dict)
+        pattern = property_names.get("pattern")
+        assert isinstance(pattern, str)
+        return pattern
 
     def test_every_cfg_opcode_identity_normalizes_to_a_schema_legal_name(self):
         pattern = self._key_pattern()

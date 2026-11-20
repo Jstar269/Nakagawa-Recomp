@@ -8,8 +8,8 @@
 runtime binary, which made two builds of identical inputs differ in the compile
 clock.  This module pins the replacement contract:
 
-* two compilations of ``src/rt/flight_recorder.c`` with identical inputs,
-  separated by at least one wall-clock second, produce byte-identical objects,
+* two compilations of ``src/rt/flight_recorder.c`` with identical inputs and
+  different explicit ``SOURCE_DATE_EPOCH`` values produce byte-identical objects,
   so the compile clock cannot hide in the object;
 * the written bundle records the reproducible identity the *build* forwarded --
   ``SOURCE_DATE_EPOCH`` as ``build.source_date_epoch`` (the
@@ -30,12 +30,14 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -90,18 +92,98 @@ def _find_compiler() -> str:
 
 
 COMPILER = _find_compiler()
+
+# A hang fails by name (subprocess.TimeoutExpired) instead of holding the whole run.
+COMPILE_TIMEOUT_S = 300
+RUN_TIMEOUT_S = 120
+
+# Recorder switches a developer may have exported (the documented SR_FLIGHT*, SR_WATCH and
+# SR_TRACE* runtime switches). Every harness run starts without them and sets only what
+# its test arms, so an ambient trigger or watch never changes a bundle under test.
+_RECORDER_SWITCHES = ("SR_FLIGHT", "SR_FLIGHT_OUTPUT", "SR_FLIGHT_TRIGGER", "SR_WATCH")
+
+
+def _recorder_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key not in _RECORDER_SWITCHES and not key.startswith("SR_TRACE")}
 requires_compiler = unittest.skipUnless(COMPILER, "no C compiler on PATH")
+
+
+def _find_make() -> str:
+    return shutil.which("mingw32-make") or shutil.which("make") or ""
+
+
+def _compiler_info(*overrides: str) -> dict[str, str]:
+    """Query the Makefile's ``compiler-info`` without side effects."""
+    make = _find_make()
+    if not make:
+        raise AssertionError("GNU Make is required to read Makefile build flags")
+    with scratch_dir.TemporaryDirectory() as tmp:
+        result = subprocess.run(
+            [
+                make,
+                "--no-print-directory",
+                "NK_INFO_ONLY=1",
+                f"BUILD_ROOT={Path(tmp).as_posix()}",
+                *overrides,
+                "compiler-info",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=COMPILE_TIMEOUT_S,
+            check=False,
+        )
+    if result.returncode != 0:
+        raise AssertionError(result.stdout + result.stderr)
+    info: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            info[key.strip()] = value.strip()
+    return info
+
+
+def _reproducible_flags(compiler: str) -> tuple[list[str], list[str]]:
+    """Return the Makefile's reproducible compile and link flags for ``compiler``."""
+    info = _compiler_info(f"CC={Path(compiler).as_posix()}")
+    return (
+        shlex.split(info.get("REPRODUCIBLE_COMPILE_FLAG", "")),
+        shlex.split(info.get("REPRODUCIBLE_LINK_FLAG", "")),
+    )
+
+
+def _coff_timestamp(data: bytes) -> int:
+    """Return COFF ImageFileHeader.TimeDateStamp (little-endian uint32 at offset 4)."""
+    if len(data) < 8:
+        raise AssertionError(f"object file too short for COFF header ({len(data)} bytes)")
+    return int(struct.unpack_from("<I", data, 4)[0])
+
+
+def _pe_timestamp(data: bytes) -> int:
+    """Return PE ImageFileHeader.TimeDateStamp from a Windows executable."""
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        raise AssertionError("linked output is not a valid PE image (missing MZ header)")
+    pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+    if len(data) < pe_offset + 12 or data[pe_offset:pe_offset + 4] != b"PE\x00\x00":
+        raise AssertionError("linked output is missing the PE signature")
+    return int(struct.unpack_from("<I", data, pe_offset + 8)[0])
 
 
 class RecorderObjectTests(unittest.TestCase):
     """Two compiles of identical inputs must produce identical objects."""
 
-    def _compile(self, output: Path) -> None:
+    def _compile(
+        self, output: Path, *, source_date_epoch: int, extra_flags: list[str]
+    ) -> None:
+        env = os.environ.copy()
+        env["SOURCE_DATE_EPOCH"] = str(source_date_epoch)
         result = subprocess.run(
             [
                 COMPILER,
                 "-std=c99",
                 "-O0",
+                *extra_flags,
                 "-I",
                 str(SRC_RT),
                 "-DSR_FLIGHT_RECORDER_LINKED",
@@ -111,23 +193,62 @@ class RecorderObjectTests(unittest.TestCase):
                 str(output),
             ],
             cwd=ROOT,
+            env=env,
             capture_output=True,
             text=True,
+            timeout=COMPILE_TIMEOUT_S,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def _link_small_executable(
+        self,
+        output: Path,
+        *,
+        source_date_epoch: int,
+        compile_flags: list[str],
+        link_flags: list[str],
+    ) -> None:
+        env = os.environ.copy()
+        env["SOURCE_DATE_EPOCH"] = str(source_date_epoch)
+        result = subprocess.run(
+            [
+                COMPILER,
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-I",
+                str(SRC_RT),
+                *compile_flags,
+                *link_flags,
+                "tests/native/strbuf_selftest.c",
+                "-o",
+                str(output),
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=COMPILE_TIMEOUT_S,
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @requires_compiler
     def test_two_compilations_produce_identical_objects(self):
+        if not _find_make():
+            self.skipTest("GNU Make is not on PATH")
+        compile_flags, _ = _reproducible_flags(COMPILER)
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             first = tmp_path / "first.o"
             second = tmp_path / "second.o"
-            self._compile(first)
-            # Cross at least one wall-clock second so a __TIME__ stamp (or any
-            # other clock stamp) would change the second object.
-            time.sleep(1.1)
-            self._compile(second)
+            # Give the compiler two explicit, different timestamps. This exercises
+            # __DATE__/__TIME__ without depending on a wall-clock delay or tick.
+            self._compile(first, source_date_epoch=1_700_000_000, extra_flags=compile_flags)
+            self._compile(second, source_date_epoch=1_700_000_001, extra_flags=compile_flags)
             left = first.read_bytes()
             right = second.read_bytes()
             self.assertEqual(
@@ -136,6 +257,52 @@ class RecorderObjectTests(unittest.TestCase):
                 "two compiles of identical inputs produced different objects; "
                 "flight_recorder.c still embeds the compile clock",
             )
+            if os.name == "nt":
+                self.assertEqual(
+                    _coff_timestamp(left),
+                    0,
+                    "COFF object header still carries a non-zero wall-clock TimeDateStamp",
+                )
+
+    @requires_compiler
+    def test_two_links_produce_identical_executables(self):
+        if not _find_make():
+            self.skipTest("GNU Make is not on PATH")
+        compile_flags, link_flags = _reproducible_flags(COMPILER)
+        suffix = ".exe" if os.name == "nt" else ""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            first_dir = tmp_path / "first"
+            second_dir = tmp_path / "second"
+            first_dir.mkdir()
+            second_dir.mkdir()
+            first = first_dir / f"strbuf_selftest{suffix}"
+            second = second_dir / f"strbuf_selftest{suffix}"
+            self._link_small_executable(
+                first,
+                source_date_epoch=1_700_000_000,
+                compile_flags=compile_flags,
+                link_flags=link_flags,
+            )
+            self._link_small_executable(
+                second,
+                source_date_epoch=1_700_000_001,
+                compile_flags=compile_flags,
+                link_flags=link_flags,
+            )
+            left = first.read_bytes()
+            right = second.read_bytes()
+            self.assertEqual(
+                hashlib.sha256(left).hexdigest(),
+                hashlib.sha256(right).hexdigest(),
+                "two links of identical inputs produced different executables",
+            )
+            if os.name == "nt":
+                self.assertEqual(
+                    _pe_timestamp(left),
+                    0,
+                    "PE image header still carries a non-zero link TimeDateStamp",
+                )
 
 
 @requires_compiler
@@ -167,12 +334,13 @@ class RecorderBundleTests(unittest.TestCase):
             cwd=ROOT,
             capture_output=True,
             text=True,
+            timeout=COMPILE_TIMEOUT_S,
             check=False,
         )
         self.assertEqual(
             compile_result.returncode, 0, compile_result.stdout + compile_result.stderr
         )
-        env = dict(os.environ)
+        env = _recorder_env()
         env["SR_FLIGHT"] = f"{classes};{limit}"
         env["SR_FLIGHT_OUTPUT"] = str(bundle_path)
         run_result = subprocess.run(
@@ -181,6 +349,7 @@ class RecorderBundleTests(unittest.TestCase):
             env=env,
             capture_output=True,
             text=True,
+            timeout=RUN_TIMEOUT_S,
             check=False,
         )
         self.assertEqual(run_result.returncode, 0, run_result.stdout + run_result.stderr)
@@ -262,6 +431,19 @@ class RecorderBundleTests(unittest.TestCase):
         self.assertNotIn("compiled_time", raw)
         flight_diff.validate_bundle(bundle)
 
+    def test_bundles_ignore_an_exported_trigger_and_watch(self):
+        # SR_FLIGHT_TRIGGER and SR_WATCH are documented runtime switches a developer may
+        # have exported; the harness pins the recorder's environment instead of inheriting them.
+        ambient = {"SR_FLIGHT_TRIGGER": "watch", "SR_WATCH": "0x08800000:4"}
+        with scratch_dir.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, ambient):
+            bundle, _, _ = self._build_and_dump(
+                Path(tmp), "ambient", [f'-DSR_BUILD_ID="{FAKE_COMMIT}"']
+            )
+        self.assertEqual(bundle["recorder"]["triggers"]["mode"], "none")
+        self.assertEqual(bundle["recorder"]["triggers"]["fired"], 0)
+        self.assertIsNone(bundle["recorder"]["watch_range"])
+        flight_diff.validate_bundle(bundle)
+
     def test_build_id_alone_is_a_valid_identity(self):
         with scratch_dir.TemporaryDirectory() as tmp:
             bundle, _, _ = self._build_and_dump(
@@ -306,6 +488,19 @@ class RecorderBundleTests(unittest.TestCase):
             )
         self.assertIsNone(bundle["build"]["source_date_epoch"])
         self.assertNotIn("253402300800", raw)
+        self.assertIn("SR_FLIGHT", stderr)
+        flight_diff.validate_bundle(bundle)
+
+    def test_epoch_with_a_leading_zero_fails_closed_to_null(self):
+        # JSON has no leading zeros, and the text is emitted verbatim as a number.
+        with scratch_dir.TemporaryDirectory() as tmp:
+            bundle, raw, stderr = self._build_and_dump(
+                Path(tmp),
+                "zero-epoch",
+                [f"-DSR_SOURCE_DATE_EPOCH=0{FAKE_EPOCH}", f'-DSR_BUILD_ID="{FAKE_COMMIT}"'],
+            )
+        self.assertIsNone(bundle["build"]["source_date_epoch"])
+        self.assertNotIn(f"0{FAKE_EPOCH}", raw)
         self.assertIn("SR_FLIGHT", stderr)
         flight_diff.validate_bundle(bundle)
 
@@ -373,6 +568,7 @@ int main(void) {
                     cwd=ROOT,
                     capture_output=True,
                     text=True,
+                    timeout=COMPILE_TIMEOUT_S,
                     check=False,
                 )
                 self.assertEqual(
@@ -380,8 +576,7 @@ int main(void) {
                     0,
                     compile_result.stdout + compile_result.stderr,
                 )
-                env = dict(os.environ)
-                env.pop("SR_WATCH", None)
+                env = _recorder_env()
                 env["SR_FLIGHT"] = "hle,sched,prx;8"
                 env["SR_FLIGHT_OUTPUT"] = str(bundle_path)
                 run_result = subprocess.run(
@@ -390,6 +585,7 @@ int main(void) {
                     env=env,
                     capture_output=True,
                     text=True,
+                    timeout=RUN_TIMEOUT_S,
                     check=False,
                 )
                 self.assertEqual(run_result.returncode, 0, run_result.stderr)
@@ -416,6 +612,7 @@ int main(void) {
                 ],
                 capture_output=True,
                 text=True,
+                timeout=RUN_TIMEOUT_S,
                 check=False,
             )
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -489,6 +686,7 @@ int main(void) {
                     cwd=ROOT,
                     capture_output=True,
                     text=True,
+                    timeout=COMPILE_TIMEOUT_S,
                     check=False,
                 )
                 self.assertEqual(
@@ -496,8 +694,7 @@ int main(void) {
                     0,
                     compile_result.stdout + compile_result.stderr,
                 )
-                env = dict(os.environ)
-                env.pop("SR_WATCH", None)
+                env = _recorder_env()
                 env["SR_FLIGHT"] = "hle,sched,prx,media;4"
                 env["SR_FLIGHT_OUTPUT"] = str(bundle_path)
                 run_result = subprocess.run(
@@ -506,6 +703,7 @@ int main(void) {
                     env=env,
                     capture_output=True,
                     text=True,
+                    timeout=RUN_TIMEOUT_S,
                     check=False,
                 )
                 self.assertEqual(run_result.returncode, 0, run_result.stderr)
@@ -539,8 +737,7 @@ int main(void) {
             bundles_full: dict[str, Path] = {}
             for name in ("baseline", "injected"):
                 bundle_path = temp_path / f"{name}-full.json"
-                env = dict(os.environ)
-                env.pop("SR_WATCH", None)
+                env = _recorder_env()
                 env["SR_FLIGHT"] = "hle,sched,prx,media;8"
                 env["SR_FLIGHT_OUTPUT"] = str(bundle_path)
                 run_result = subprocess.run(
@@ -549,6 +746,7 @@ int main(void) {
                     env=env,
                     capture_output=True,
                     text=True,
+                    timeout=RUN_TIMEOUT_S,
                     check=False,
                 )
                 self.assertEqual(run_result.returncode, 0, run_result.stderr)
@@ -576,6 +774,7 @@ int main(void) {
                 ],
                 capture_output=True,
                 text=True,
+                timeout=RUN_TIMEOUT_S,
                 check=False,
             )
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -655,6 +854,10 @@ int main(int argc, char **argv) {
         pick(2u);
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_RAW_SYSCALL, 0x08800200u, 0x0cu, 0u);
         pick(3u);
+    } else if (strcmp(scenario, "refusal") == 0) {
+        pick(1u);
+        sr_flight_unsupported(0x1579a159u, 0x80110001u, 0u, 0x08900100u);
+        pick(2u);
     } else {
         return 2;
     }
@@ -684,7 +887,7 @@ class RecorderTriggerModeTests(unittest.TestCase):
                 [COMPILER, "-std=c99", "-O0", "-Wall", "-Wextra", "-Werror", "-I", str(SRC_RT),
                  "-DSR_FLIGHT_RECORDER_LINKED", f'-DSR_BUILD_ID="{FAKE_COMMIT}"', *defines,
                  str(source), "src/rt/flight_recorder.c", "-o", str(executable)],
-                cwd=ROOT, capture_output=True, text=True, check=False,
+                cwd=ROOT, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, check=False,
             )
             if result.returncode != 0:
                 cls._scratch.cleanup()
@@ -700,9 +903,7 @@ class RecorderTriggerModeTests(unittest.TestCase):
         bundle_path = self.tmp / f"{tag or scenario}-{name}.json"
         if bundle_path.exists():
             bundle_path.unlink()
-        env = dict(os.environ)
-        for key in ("SR_FLIGHT_TRIGGER", "SR_WATCH"):
-            env.pop(key, None)
+        env = _recorder_env()
         env["SR_FLIGHT"] = flight
         env["SR_FLIGHT_OUTPUT"] = str(bundle_path)
         if trigger is not None:
@@ -710,7 +911,7 @@ class RecorderTriggerModeTests(unittest.TestCase):
         if watch is not None:
             env["SR_WATCH"] = watch
         result = subprocess.run([str(self.executables[name]), scenario], cwd=self.tmp, env=env,
-                                capture_output=True, text=True, check=False)
+                                capture_output=True, text=True, timeout=RUN_TIMEOUT_S, check=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         bundle = (json.loads(bundle_path.read_text(encoding="utf-8"))
                   if bundle_path.exists() else None)
@@ -790,6 +991,38 @@ class RecorderTriggerModeTests(unittest.TestCase):
         self.assertEqual(bundle["terminal"]["kind"], 12)
         self.assertEqual(bundle["recorder"]["recorded"], 3)
 
+    def test_a_fatal_on_the_last_event_the_window_owes_still_wins_the_terminal(self):
+        # The window opens at the second pick and owes one event; the fatal is that event.
+        # A terminal never spends the window, so it is the terminal, not a trigger freeze.
+        bundle, _, _ = self._run("checkpoint-fatal", "sched,fatal;8", "checkpoint:3:2:1",
+                                 tag="last-owed-fatal")
+        flight_diff.validate_bundle(bundle)
+        self.assertEqual(bundle["terminal"]["reason"], "fatal")
+        self.assertEqual(bundle["terminal"]["kind"], 12)
+        self.assertEqual(bundle["terminal"]["arg0"], 0x0C)
+        self.assertEqual(bundle["recorder"]["recorded"], 3)
+
+    def test_a_refusal_that_fires_a_mode_is_counted_in_the_bundle(self):
+        refusal_pc = 0x08900100
+        cases = (
+            (f"pc:0x{refusal_pc:08x}", {"reason": "trigger", "sequence": 2, "kind": 2,
+                                        "arg0": refusal_pc}, 2),
+            ("checkpoint:2:1:0", {"reason": "trigger", "sequence": 2, "kind": 2, "arg0": 1}, 2),
+            ("checkpoint:3:1:1", {"reason": "trigger", "sequence": 1, "kind": 3, "arg0": 1}, 2),
+        )
+        for index, (trigger, terminal, recorded) in enumerate(cases):
+            with self.subTest(trigger=trigger):
+                bundle, _, _ = self._run("refusal", "sched,unsupported;8", trigger,
+                                         tag=f"refusal-mode{index}")
+                flight_diff.validate_bundle(bundle)
+                self.assertEqual(bundle["terminal"], terminal)
+                self.assertEqual(bundle["recorder"]["recorded"], recorded)
+                refusals = bundle["refusals"]
+                self.assertEqual(refusals["count"], 1)
+                self.assertEqual(refusals["first_nid"], 0x1579A159)
+                self.assertEqual(refusals["first_pc"], refusal_pc)
+                self.assertEqual(refusals["nids"], [{"nid": 0x1579A159, "count": 1}])
+
     def test_refused_specs_disable_the_recorder_and_say_why(self):
         cases = (
             ("pc", "hle;8", "pc:", None),
@@ -827,12 +1060,12 @@ class RecorderTriggerModeTests(unittest.TestCase):
                                        tag="diff-other")
         tool = str(ROOT / "tools" / "flight_diff.py")
         result = subprocess.run([sys.executable, tool, str(baseline), str(injected)],
-                                capture_output=True, text=True, check=False)
+                                capture_output=True, text=True, timeout=RUN_TIMEOUT_S, check=False)
         self.assertEqual(result.returncode, flight_diff.EXIT_DIVERGENCE, result.stdout + result.stderr)
         self.assertIn(f"trigger mode: pc=0x{TRIGGER_PC_B:08x}", result.stdout)
         self.assertIn("DIVERGENCE: sequence 2", result.stdout)
         result = subprocess.run([sys.executable, tool, str(baseline), str(other_policy)],
-                                capture_output=True, text=True, check=False)
+                                capture_output=True, text=True, timeout=RUN_TIMEOUT_S, check=False)
         self.assertEqual(result.returncode, flight_diff.EXIT_INCOMPARABLE,
                          result.stdout + result.stderr)
         self.assertIn("trigger policies differ", result.stdout)
@@ -848,6 +1081,7 @@ class RecorderTriggerHotPathTests(unittest.TestCase):
     """
 
     HOT_PATHS = ("static uint64_t record_locked(", "static uint64_t record_checked(",
+                 "static void trigger_after_record(",
                  "static void check_trigger(", "static int event_pc(",
                  "static void watch_flight_note(", "void sr_flight_record(",
                  "uint64_t sr_flight_hle_import(", "int sr_flight_class_enabled(")
@@ -869,6 +1103,16 @@ class RecorderTriggerHotPathTests(unittest.TestCase):
             if depth == 0:
                 return source[brace:index + 1]
         raise AssertionError(f"unterminated body for {signature}")
+
+    def test_a_bundle_rewrite_never_deletes_the_previous_bundle_first(self):
+        # The bundle is rewritten several times in a run (provisional refusals, a freeze,
+        # the terminal). Removing the old one before the rename left no bundle at all when
+        # the process died between the two calls; the replace is one step on both hosts.
+        body = self._body(self._source(), "static int write_bundle(int reason)")
+        self.assertNotIn("remove(output)", body)
+        self.assertIn("MoveFileExA(temporary, output, MOVEFILE_REPLACE_EXISTING", body)
+        self.assertIn("rename(temporary, output) == 0", body)
+        self.assertLess(body.index("#if defined(_WIN32)"), body.index("MoveFileExA("))
 
     def test_event_and_trigger_paths_do_no_io_or_allocation(self):
         source = self._source()
@@ -901,6 +1145,7 @@ class MakeIdentityResolutionTests(unittest.TestCase):
         """
         make = shutil.which("mingw32-make") or shutil.which("make")
         self.assertTrue(make, "GNU Make is required for the build-identity check")
+        assert make is not None
         environment = dict(os.environ)
         environment.update(env or {})
         # A scratch BUILD_ROOT: even a dry run parses the Makefile, and that writes the
@@ -954,6 +1199,19 @@ class MakeIdentityResolutionTests(unittest.TestCase):
                 )
                 self.assertEqual(values, {FAKE_COMMIT}, output)
 
+    def test_epoch_with_a_leading_zero_is_refused_by_make(self):
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        self.assertTrue(make, "GNU Make is required for the build-identity check")
+        environment = dict(os.environ)
+        environment["SOURCE_DATE_EPOCH"] = f"0{FAKE_EPOCH}"
+        result = subprocess.run(
+            [make, "--no-print-directory", "-n", "clean-preview",
+             f"BUILD_ROOT={_scratch_build_root(self, 'identity-zero-epoch').as_posix()}"],
+            cwd=ROOT, capture_output=True, text=True, timeout=300, env=environment, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SOURCE_DATE_EPOCH must be a decimal Unix timestamp", result.stderr)
+
     def test_caller_supplied_identity_wins_over_a_missing_git(self):
         """The Windows job's environment: no git, identity forwarded by CI."""
         values, output = self._resolved(
@@ -999,6 +1257,97 @@ class MakeIdentityResolutionTests(unittest.TestCase):
         self.assertIn("-DSR_BUILD_ID=", compile_line)
         self.assertIn(FAKE_COMMIT, compile_line)
         self.assertIn(f"-DSR_SOURCE_DATE_EPOCH={FAKE_EPOCH}", compile_line)
+
+
+class ReproducibleFlagsMakefileTests(unittest.TestCase):
+    """Makefile emits COFF/PE determinism flags only for the targets and compilers that need them."""
+
+    def test_makefile_wires_reproducible_flags_for_windows_and_clang_only(self):
+        makefile = read_makefile(ROOT)
+        clang_detect = (
+            'RECOMP_CC_IS_CLANG := $(findstring clang version,$(shell "$(CC)" --version 2>&1))'
+        )
+        self.assertEqual(makefile.count(clang_detect), 1)
+        win_start = makefile.index("ifeq ($(NK_TARGET_OS),windows)\nVULKAN_LIB_NAME")
+        win_else = makefile.index("\nelse\n", win_start)
+        win_end = makefile.index("\nendif\n", win_else)
+        win_block = makefile[win_start:win_else]
+        non_win_block = makefile[win_else:win_end]
+
+        self.assertIn(
+            "REPRODUCIBLE_COMPILE_FLAG := $(if $(RECOMP_CC_IS_CLANG),"
+            "-mno-incremental-linker-compatible,)",
+            win_block,
+        )
+        self.assertIn("REPRODUCIBLE_LINK_FLAG := -Wl,--no-insert-timestamp", win_block)
+        self.assertRegex(non_win_block, r"(?m)^REPRODUCIBLE_COMPILE_FLAG :=$")
+        self.assertRegex(non_win_block, r"(?m)^REPRODUCIBLE_LINK_FLAG :=$")
+
+        for var in ("CFLAGS", "PORTABLE_CORE_CFLAGS", "GE_CFLAGS", "RECOMP_FLAGS"):
+            with self.subTest(variable=var):
+                self.assertIn(f"override {var} += $(REPRODUCIBLE_COMPILE_FLAG)", makefile)
+        self.assertIn("LIBCHDR_CFLAGS += $(REPRODUCIBLE_COMPILE_FLAG)", makefile)
+        self.assertIn("override LDFLAGS += $(REPRODUCIBLE_LINK_FLAG)", makefile)
+        for target in ("strbuf-selftest:", "xr-selftest:"):
+            with self.subTest(target=target):
+                start = makefile.index(f"\n{target}\n")
+                recipe = makefile[start:makefile.index("\n\n", start)]
+                self.assertIn("$(REPRODUCIBLE_COMPILE_FLAG)", recipe)
+                self.assertIn("$(REPRODUCIBLE_LINK_FLAG)", recipe)
+
+    def test_compiler_info_emits_determinism_flags_only_for_matching_compiler_and_target(self):
+        if not _find_make():
+            self.skipTest("GNU Make is not on PATH")
+        cases = (
+            (
+                "windows-clang",
+                ("OS=Windows_NT", "RECOMP_CC_IS_CLANG=clang version"),
+                "-mno-incremental-linker-compatible",
+                "-Wl,--no-insert-timestamp",
+            ),
+            (
+                "windows-gcc",
+                ("OS=Windows_NT", "RECOMP_CC_IS_CLANG="),
+                "",
+                "-Wl,--no-insert-timestamp",
+            ),
+            (
+                "posix-clang",
+                ("OS=", "RECOMP_CC_IS_CLANG=clang version"),
+                "",
+                "",
+            ),
+            (
+                "posix-gcc",
+                ("OS=", "RECOMP_CC_IS_CLANG="),
+                "",
+                "",
+            ),
+            (
+                "android-clang",
+                ("OS=Windows_NT", "NK_TARGET=android", "RECOMP_CC_IS_CLANG=clang version"),
+                "",
+                "",
+            ),
+        )
+        for label, overrides, expected_compile, expected_link in cases:
+            with self.subTest(case=label):
+                info = _compiler_info(*overrides)
+                self.assertEqual(info.get("REPRODUCIBLE_COMPILE_FLAG", ""), expected_compile)
+                self.assertEqual(info.get("REPRODUCIBLE_LINK_FLAG", ""), expected_link)
+                for var in ("CFLAGS", "GE_CFLAGS", "RECOMP_FLAGS"):
+                    words = shlex.split(info.get(var, ""))
+                    if expected_compile:
+                        self.assertIn(expected_compile, words, f"{label}: {var}")
+                    else:
+                        self.assertNotIn(
+                            "-mno-incremental-linker-compatible", words, f"{label}: {var}"
+                        )
+                ld_words = shlex.split(info.get("LDFLAGS", ""))
+                if expected_link:
+                    self.assertIn(expected_link, ld_words, f"{label}: LDFLAGS")
+                else:
+                    self.assertNotIn("-Wl,--no-insert-timestamp", ld_words, f"{label}: LDFLAGS")
 
 
 if __name__ == "__main__":

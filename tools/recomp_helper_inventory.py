@@ -42,6 +42,7 @@ import ast
 import bisect
 import json
 import re
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -297,8 +298,29 @@ def _reach(direct: int, macros: dict[str, int], prod: Counter, harn: Counter, ad
     return "none"
 
 
+def tracked_sources(root: Path) -> list[str]:
+    """The tracked ``.c``/``.h`` paths under ``src/``, in sorted order.
+
+    The committed inventory describes the tree, so an untracked scratch file in a
+    working copy must not change it (hosted CI's ``--check`` sees a clean checkout).
+    """
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--", "src"],
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise OSError(f"cannot run git ls-files in {root}: {exc}") from exc
+    if listed.returncode != 0:
+        detail = listed.stderr.decode("utf-8", "replace").strip() or listed.returncode
+        raise ValueError(f"git ls-files failed in {root}: {detail}")
+    paths = listed.stdout.decode("utf-8").split("\0")
+    return sorted(rel for rel in paths if rel.endswith((".c", ".h")))
+
+
 def load_inputs(root: Path = ROOT, overrides: dict[str, str] | None = None) -> tuple[dict[str, str], tuple[str, ...], dict]:
-    """Read the C sources under ``src/``, the emitter and the public ledger.
+    """Read the tracked C sources under ``src/``, the emitter and the public ledger.
 
     ``overrides`` replaces the text of a repository-relative path (tests mutate an
     input in memory this way without touching the tree).
@@ -311,9 +333,8 @@ def load_inputs(root: Path = ROOT, overrides: dict[str, str] | None = None) -> t
         return (root / rel).read_text(encoding="utf-8", errors="replace")
 
     sources: dict[str, str] = {}
-    for p in sorted((root / "src").rglob("*")):
-        if p.is_file() and p.suffix in (".c", ".h"):
-            rel = p.relative_to(root).as_posix()
+    for rel in tracked_sources(root):
+        if (root / rel).is_file():
             sources[rel] = read(rel)
     for rel in overrides:
         if rel.startswith("src/") and rel.endswith((".c", ".h")):

@@ -32,24 +32,6 @@ static const ControlsRowSpec k_rows[] = {
     {"Select", NK_PSP_BTN_SELECT_BIT, 0}
 };
 
-/* The button bit of each NkPspButton, from the header's own bit values. */
-static const uint32_t k_psp_bits[NK_PSP_BTN_COUNT] = {
-    [NK_PSP_BTN_SELECT] = NK_PSP_BTN_SELECT_BIT,
-    [NK_PSP_BTN_START] = NK_PSP_BTN_START_BIT,
-    [NK_PSP_BTN_UP] = NK_PSP_BTN_UP_BIT,
-    [NK_PSP_BTN_RIGHT] = NK_PSP_BTN_RIGHT_BIT,
-    [NK_PSP_BTN_DOWN] = NK_PSP_BTN_DOWN_BIT,
-    [NK_PSP_BTN_LEFT] = NK_PSP_BTN_LEFT_BIT,
-    [NK_PSP_BTN_LTRIGGER] = NK_PSP_BTN_LTRIGGER_BIT,
-    [NK_PSP_BTN_RTRIGGER] = NK_PSP_BTN_RTRIGGER_BIT,
-    [NK_PSP_BTN_TRIANGLE] = NK_PSP_BTN_TRIANGLE_BIT,
-    [NK_PSP_BTN_CIRCLE] = NK_PSP_BTN_CIRCLE_BIT,
-    [NK_PSP_BTN_CROSS] = NK_PSP_BTN_CROSS_BIT,
-    [NK_PSP_BTN_SQUARE] = NK_PSP_BTN_SQUARE_BIT,
-    [NK_PSP_BTN_HOME] = NK_PSP_BTN_HOME_BIT,
-    [NK_PSP_BTN_HOLD] = NK_PSP_BTN_HOLD_BIT
-};
-
 /* Per family: Xbox-style (A south), Switch-style (A east), PlayStation-style,
    then the position names any other pad gets. */
 enum { FAMILY_A_SOUTH, FAMILY_A_EAST, FAMILY_SHAPES, FAMILY_NEUTRAL, FAMILY_SETS };
@@ -206,7 +188,7 @@ static void describe_keys(NameList *list, KeyWords *words, const NkInputProfile 
         for (b = 0; b < NK_PSP_STICK_DIR_COUNT; ++b) keys_collect(keys, &count, &profile->stick_keys[b]);
     }
     for (b = 0; b < NK_PSP_BTN_COUNT; ++b) {
-        if ((k_psp_bits[b] & bits) == 0u) continue;
+        if ((nk_psp_button_bitmask((NkPspButton)b) & bits) == 0u) continue;
         keys_collect(keys, &count, &profile->psp_keys[b]);
     }
     memset(taken, 0, sizeof(taken));
@@ -270,7 +252,7 @@ void nk_overlay_describe_controls(NkOverlayControls *out, const NkInputProfile *
         } else if (profile != NULL) {
             int b;
             for (b = 0; b < NK_PSP_BTN_COUNT; ++b) {
-                if ((k_psp_bits[b] & spec->bits) == 0u) continue;
+                if ((nk_psp_button_bitmask((NkPspButton)b) & spec->bits) == 0u) continue;
                 name_add(&controller, source_name(&profile->psp_buttons[b].primary, set));
                 name_add(&controller, source_name(&profile->psp_buttons[b].secondary, set));
             }

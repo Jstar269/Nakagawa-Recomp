@@ -273,12 +273,38 @@ def write_latin_index_fixture(root: Path) -> dict[str, bytes]:
     (source / "ltn4.pgf").write_bytes(bold)
     (source / "ltn8.pgf").write_bytes(ninth)
 
+    # A mixed cache: one indexed import (ltn0, the large size group only) beside the old shared
+    # import. SR_FONTDIR pointed at it must not hide the vouched legacy file from the small group.
+    mixed = cache_dir(root / "mixed")
+    mixed.mkdir(parents=True, exist_ok=True)
+    (mixed / "nkltn.pgf").write_bytes(legacy)
+    (mixed / "ltn0.pgf").write_bytes(first)
+    mixed_manifest = dict(manifest)
+    mixed_manifest["latin_indices"] = {
+        "ltn0.pgf": manifest["latin_indices"]["ltn0.pgf"],
+    }
+    (mixed / fonts.MANIFEST_NAME).write_text(json.dumps(mixed_manifest, indent=2) + "\n",
+                                             encoding="utf-8")
+
     legacy_source = root / "legacy-source"
     legacy_source.mkdir(parents=True, exist_ok=True)
     (legacy_source / "nkltn.pgf").write_bytes(legacy)
     legacy_result = fonts.import_fonts(legacy_source, user_data_root=root / "legacy-data")
     if legacy_result["status"] != "OK":
         raise AssertionError(f"the legacy-only fixture import failed: {legacy_result['outcomes']}")
+
+    # Review of #2783: an import of replacement fonts (the project stand-in name marks them): a
+    # Japanese font and Latin index 11 (ltn10.pgf), which no other request of the selftest reaches.
+    replacement_source = root / "replacement-source"
+    replacement_source.mkdir(parents=True, exist_ok=True)
+    (replacement_source / "jpn0.pgf").write_bytes(
+        synthetic_pgf(JAPANESE_PROJECT_CODES, "Nakagawa Open Japanese", 648))
+    (replacement_source / "ltn10.pgf").write_bytes(
+        synthetic_pgf(LATIN_PROJECT_CODES, "Nakagawa Open Latin", 9 * 64))
+    replacement_result = fonts.import_fonts(replacement_source,
+                                            user_data_root=root / "replacement-data")
+    if replacement_result["replacement_count"] != 2:
+        raise AssertionError(f"the replacement fixture import failed: {replacement_result['outcomes']}")
     return payloads
 
 
@@ -349,10 +375,13 @@ def request_lines(stderr: str) -> list[str]:
     return [line for line in stderr.splitlines() if re.match(r"flash0: \w+ registry index=", line)]
 
 
-def latin_request_line(index: int, backing: str, source: str, fallback: str | None = None) -> str:
+def latin_request_line(index: int, backing: str, source: str, fallback: str | None = None,
+                       replacement: bool = False) -> str:
     """The line for Latin file ordinal ``index``. A request served by another file than its own
-    import is a substitute and names its fallback rule (#1300)."""
-    selection = "selection=exact" if fallback is None else f"selection=substitute fallback={fallback}"
+    import is a substitute and names its fallback rule (#1300); its own import is exact, or a
+    replacement when that file is a replacement font (#2783)."""
+    exact = "selection=replacement" if replacement else "selection=exact"
+    selection = exact if fallback is None else f"selection=substitute fallback={fallback}"
     return (f"flash0: Latin registry index={index + 1} requested=ltn{index}.pgf backing={backing} "
             f"source={source} {selection}")
 
@@ -509,7 +538,12 @@ class Flash0ConfiguredRootSourceContractTests(unittest.TestCase):
         """The POSIX helper refuses a non-absolute value and never anchors it to the working directory."""
         posix = self.source[self.second:self.source.index("\n}\n", self.second)]
         self.assertNotIn("sr_wide_full_path_alloc(wide", posix)
-        self.assertRegex(posix, r"if \(!sr_wide_is_absolute\(wide\)\) \{\s*free\(wide\);\s*return 0;")
+        refusal = re.search(r"if \(!sr_wide_is_absolute\(wide\)\) \{\s*free\(wide\);\s*return 0;", posix)
+        if refusal is None:
+            self.fail("the POSIX helper no longer refuses a relative value")
+        # '.' and '..' are collapsed only after the refusal, and only lexically.
+        collapse = posix.find("sr_wide_lexical_canonical_alloc(wide, &canonical)")
+        self.assertGreater(collapse, refusal.end())
 
     def test_win32_configured_root_refuses_a_relative_value(self) -> None:
         """The Win32 definition, which the POSIX one now matches, refuses anything not absolute."""
@@ -597,12 +631,14 @@ bool nk_platform_absolute_path(const char *path, char *out_path, size_t max_len)
 }
 
 NkFontSlotCheck nk_font_check_cache_slot_file(const char *user_data_root, NkFontSlot slot,
-                                              FILE *cache_file, char *reason, size_t reason_len) {
+                                              FILE *cache_file, char *reason, size_t reason_len,
+                                              bool *replacement) {
     (void)user_data_root;
     (void)slot;
     (void)cache_file;
     (void)reason;
     (void)reason_len;
+    if (replacement) *replacement = false;
     return NK_FONT_SLOT_CHECK_FILE_INVALID;
 }
 
@@ -670,6 +706,28 @@ int main(int argc, char **argv) {
             info.slot != NK_FONT_SLOT_KOREAN || strcmp(info.source, "project") != 0 ||
             strcmp(info.font_name, "Nakagawa Project Korean") != 0) return 5;
         printf("index17 %s %s\n", info.source, info.file_name);
+    }
+    {
+        /* The PSP's own name for the Korean font (its flash0 listing holds kr0.pgf) opens and
+         * stats the slot's file, as nkkr.pgf does; the Japanese slot, with no file here, is the
+         * named missing slot under its PSP name too, not an unknown name. */
+        FILE *by_project_name = NULL, *by_psp_name = NULL;
+        uint32_t project_size = 0, psp_size = 0, stat_size = 0;
+        int is_dir = 1;
+        if (sr_flash0_font_open("flash0:/font/" NK_FONT_SLOT_KOREAN_FILE, 0u, &sources,
+                                &by_project_name, &project_size) != 0u || !by_project_name)
+            return 6;
+        fclose(by_project_name);
+        if (sr_flash0_font_open("flash0:/font/KR0.pgf", 0u, &sources, &by_psp_name,
+                                &psp_size) != 0u || !by_psp_name || psp_size != project_size)
+            return 7;
+        fclose(by_psp_name);
+        if (sr_flash0_font_stat("flash0:/font/kr0.pgf", &sources, &stat_size, &is_dir) != 0u ||
+            stat_size != project_size || is_dir)
+            return 8;
+        if (sr_flash0_font_stat("flash0:/font/jpn0.pgf", &sources, &stat_size, &is_dir) !=
+            SR_FLASH0_ERR_NOT_FOUND)
+            return 9;
     }
     return 0;
 }
@@ -809,8 +867,11 @@ class Flash0FontDirRefusalNativeTests(unittest.TestCase):
         project = self.tmp / "project"
         project.mkdir(parents=True, exist_ok=True)
         result = self.run_case(self.tmp, str(project))
-        self.assertIn("project", result["project"] or "")
-        self.assertIn("project", result["again"] or "")
+        # Exactly the configured directory, not any path that happens to contain the word.
+        self.assertTrue(result["project"], result["stderr"])
+        self.assertEqual(Path(result["project"]).resolve(), project.resolve())
+        self.assertTrue(result["again"], result["stderr"])
+        self.assertEqual(Path(result["again"]).resolve(), project.resolve())
         self.assertFalse([text for text in result["stderr"].splitlines() if text.startswith("flash0: SR_FONTDIR")])
 
 
@@ -843,6 +904,21 @@ class Flash0FontDeviceTests(unittest.TestCase):
         header_value = c_unsigned_define(FLASH0_HEADER, "SR_FLASH0_ERR_NOT_FOUND")
         self.assertEqual(header_value, vfs_not_found)
         self.assertEqual(c_unsigned_define(SELFTEST_SOURCE, "F0T_ERR_NOT_FOUND"), header_value)
+
+    def test_listing_out_of_memory_returns_enomem(self) -> None:
+        # A listing the host could not allocate returns ENOMEM (0x8001000C), the runtime's other
+        # ENOMEM value (hle_system.c SREG_ERR_NOMEM). Failing before: both sites returned
+        # 0x80010008, which is ENOEXEC in the PSP errno space.
+        defines = re.findall(r"^#define SREG_ERR_NOMEM\s+(0x[0-9A-Fa-f]+)u\b",
+                             hle_sources.text(headers=False), re.MULTILINE)
+        self.assertEqual(len(defines), 1, "the runtime HLE defines SREG_ERR_NOMEM once")
+        enomem = int(defines[0], 16)
+        self.assertEqual(enomem, 0x8001000C)
+        self.assertEqual(c_unsigned_define(FLASH0_HEADER, "SR_FLASH0_ERR_NO_MEMORY"), enomem)
+        source = (ROOT / "src" / "rt" / "flash0_font.c").read_text(encoding="utf-8")
+        self.assertNotIn("0x80010008u", source)
+        self.assertEqual(
+            source.count('flash0_refuse(SR_FLASH0_ERR_NO_MEMORY, "listing ran out of memory"'), 2)
 
     def test_native_device_contract_on_synthetic_fonts(self) -> None:
         if sys.platform != "win32" and unguarded_windows_include(
@@ -969,6 +1045,11 @@ class Flash0FontDeviceTests(unittest.TestCase):
                 latin_request_line(13, "nkltn13.pgf", "project", "project"),
                 latin_request_line(12, project_small, "project", "project"),
                 latin_request_line(14, project_small, "project", "project"),
+                # #2783: an imported replacement font is named as one, never as exact.
+                "flash0: Japanese registry index=0 requested=jpn0.pgf "
+                f"backing={header_string('NK_FONT_SLOT_JAPANESE_FILE')} source=user-imported "
+                "selection=replacement",
+                latin_request_line(10, "ltn10.pgf", "user-imported", replacement=True),
             ])
             # The registry lines cover every font the game could ask for; this one, what it opened.
             self.assertEqual(run.stderr.count("flash0: game opened "), 1, run.stderr[-2000:])

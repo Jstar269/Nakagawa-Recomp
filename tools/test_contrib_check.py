@@ -12,6 +12,10 @@ regenerating the controls from the private trusted ledger.
 
 from __future__ import annotations
 
+import ast
+from contextlib import redirect_stdout
+import io
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -54,6 +58,51 @@ class TestRouting(unittest.TestCase):
         modules = contrib_check.python_test_modules(["tools/policy_sync.py"])
         self.assertIn("tools.test_publication_policy_gate", modules)
 
+    def test_a_deleted_file_is_not_handed_to_a_gate_that_opens_it(self) -> None:
+        """Failing-before: a file the branch deleted went to ruff (E902), unittest (an import error) and
+        markdownlint, so a valid deletion failed contrib-check."""
+        deleted = ["docs/no_such_page.md", "tools/no_such_tool.py", "tools/test_no_such_tool.py"]
+        gate = contrib_check.Gate("x", contrib_check.NOT_RUN)
+        with mock.patch.object(contrib_check, "changed_paths", return_value=deleted), \
+                mock.patch.object(contrib_check, "ruff_gate", return_value=gate) as ruff, \
+                mock.patch.object(contrib_check, "unit_gate", return_value=gate) as unit, \
+                mock.patch.object(contrib_check, "markdown_gate", return_value=gate) as markdown, \
+                mock.patch.object(contrib_check, "c_gate", return_value=gate), \
+                mock.patch.object(contrib_check, "docs_gate", return_value=gate) as docs, \
+                mock.patch.object(contrib_check, "purity_gate", return_value=gate), \
+                mock.patch.object(contrib_check, "publication_gate", return_value=(gate, gate)), \
+                mock.patch("sys.stdout"):
+            contrib_check.run("origin/main")
+        ruff.assert_called_once_with([])
+        unit.assert_called_once_with([])
+        markdown.assert_called_once_with([])
+        # The deletion still routes: the documentation check runs over what remains.
+        docs.assert_called_once_with(deleted)
+
+    def test_a_module_whose_test_has_another_name_selects_that_test(self) -> None:
+        """Failing-before: routing went by basename only, so these selected no test module."""
+        for path, module in (
+            ("tools/nk_core/disc_expand_tool.py", "tools.test_disc_expand"),
+            ("tests/fixtures/cosim/mutate.py", "tools.test_cosim_mutation_gate_outcome"),
+        ):
+            with self.subTest(path=path):
+                self.assertTrue((ROOT / path).is_file())
+                self.assertTrue((ROOT / (module.replace(".", "/") + ".py")).is_file())
+                self.assertIn(module, contrib_check.python_test_modules([path]))
+
+    def test_an_unknown_base_is_the_named_stop_not_a_traceback(self) -> None:
+        """Failing-before: `git merge-base` exiting non-zero raised CalledProcessError."""
+        with self.assertRaises(SystemExit) as raised:
+            contrib_check.changed_paths("refs/heads/contrib-check-no-such-base")
+        self.assertIn("cannot resolve a merge base with refs/heads/contrib-check-no-such-base",
+                      str(raised.exception))
+
+    def test_a_base_with_no_common_ancestor_is_the_named_stop(self) -> None:
+        with mock.patch.object(contrib_check, "_git", return_value=_Completed(1)):
+            with self.assertRaises(SystemExit) as raised:
+                contrib_check.changed_paths("unrelated")
+        self.assertIn("no common ancestor", str(raised.exception))
+
     def test_documentation_and_build_files_select_no_python_module(self) -> None:
         self.assertEqual(
             contrib_check.python_test_modules(["CONTRIBUTING.md", "Makefile", "mk/build_common.mk"]),
@@ -68,7 +117,288 @@ class TestRouting(unittest.TestCase):
         self.assertNotIn("def _is_native", source)
 
 
+def _derive_source_test_pairs(root: Path) -> dict[str, set[str]]:
+    """Independently derive ``(source_path -> {tools.test_*})`` pairs from test sources.
+
+    Scans every ``tools/test_*.py`` AST for literal paths that exist under
+    ``src/`` or ``tests/native/`` (string literals, ``Path`` ``/`` joins with
+    directory-variable resolution, ``Path``/``os.path.join``/``joinpath`` calls,
+    and inline ``#include "<unit>.c/.inc"`` directives).
+    """
+    existing: set[str] = set()
+    by_basename: dict[str, list[str]] = {}
+    for base in ("src", "tests/native"):
+        base_dir = root / base
+        if not base_dir.is_dir():
+            continue
+        for dirpath, _dirnames, filenames in os.walk(base_dir):
+            rel_dir = Path(dirpath).relative_to(root).as_posix()
+            for filename in filenames:
+                rel_path = f"{rel_dir}/{filename}"
+                existing.add(rel_path)
+                by_basename.setdefault(filename, []).append(rel_path)
+
+    include_re = re.compile(r'#\s*include\s*"([^"]+)"')
+
+    def norm(raw: str) -> str:
+        s = raw.replace("\\", "/").strip("/")
+        while s.startswith("./"):
+            s = s[2:]
+        return s
+
+    def anchor(joined: str) -> str | None:
+        for prefix in ("src", "tests/native"):
+            if joined == prefix:
+                return prefix
+            marker = prefix + "/"
+            if joined.startswith(marker):
+                return joined
+            pos = joined.find("/" + marker)
+            if pos != -1:
+                return joined[pos + 1:]
+        return None
+
+    def div_path(node: ast.BinOp, env: dict[str, str]) -> str | None:
+        parts: list[str] = []
+        cur: ast.AST = node
+        while isinstance(cur, ast.BinOp) and isinstance(cur.op, ast.Div):
+            if isinstance(cur.right, ast.Constant) and isinstance(cur.right.value, str):
+                parts.append(cur.right.value)
+            else:
+                return None
+            cur = cur.left
+        if isinstance(cur, ast.Constant) and isinstance(cur.value, str):
+            parts.append(cur.value)
+        elif isinstance(cur, ast.Name) and cur.id in env:
+            parts.append(env[cur.id])
+        elif isinstance(cur, ast.Attribute) and cur.attr in env:
+            parts.append(env[cur.attr])
+        parts.reverse()
+        return anchor("/".join(norm(p) for p in parts if p))
+
+    def call_path(node: ast.Call, env: dict[str, str]) -> str | None:
+        fn = node.func
+        base: str | None = None
+        if isinstance(fn, ast.Attribute) and fn.attr == "joinpath":
+            if isinstance(fn.value, ast.Name) and fn.value.id in env:
+                base = env[fn.value.id]
+            elif isinstance(fn.value, ast.BinOp) and isinstance(fn.value.op, ast.Div):
+                base = div_path(fn.value, env)
+        elif isinstance(fn, ast.Attribute) and fn.attr == "join":
+            pass
+        elif isinstance(fn, ast.Name) and fn.id in {"Path", "PurePosixPath", "PurePath"}:
+            pass
+        else:
+            return None
+        parts: list[str] = [base] if base else []
+        for idx, arg in enumerate(node.args):
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                parts.append(arg.value)
+            elif isinstance(arg, ast.Name) and arg.id in env:
+                parts.append(env[arg.id])
+            elif idx == 0 and base is None:
+                continue
+            else:
+                return None
+        if not parts:
+            return None
+        return anchor("/".join(norm(p) for p in parts if p))
+
+    pairs: dict[str, set[str]] = {}
+    for test_file in sorted((root / "tools").glob("test_*.py")):
+        if not test_file.is_file():
+            continue
+        module = f"tools.{test_file.stem}"
+        text = test_file.read_text(encoding="utf-8")
+        if "src" not in text and "tests" not in text and "#include" not in text:
+            continue
+        tree = ast.parse(text, filename=str(test_file))
+        docs: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.body and isinstance(node.body[0], ast.Expr):
+                    val = node.body[0].value
+                    if isinstance(val, ast.Constant) and isinstance(val.value, str):
+                        docs.add(id(val))
+        env: dict[str, str] = {}
+        assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign) and len(n.targets) == 1]
+        for _ in range(2):
+            for assign in assigns:
+                target = assign.targets[0]
+                name = (
+                    target.id if isinstance(target, ast.Name)
+                    else target.attr if isinstance(target, ast.Attribute)
+                    else None
+                )
+                if not name:
+                    continue
+                resolved: str | None = None
+                if isinstance(assign.value, ast.BinOp) and isinstance(assign.value.op, ast.Div):
+                    resolved = div_path(assign.value, env)
+                elif isinstance(assign.value, ast.Call):
+                    resolved = call_path(assign.value, env)
+                elif isinstance(assign.value, ast.Constant) and isinstance(assign.value.value, str):
+                    cand = norm(assign.value.value)
+                    if cand in {"src", "tests/native"} or cand.startswith(("src/", "tests/native/")):
+                        resolved = cand
+                if resolved:
+                    env[name] = resolved
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if id(node) in docs:
+                    continue
+                literal = norm(node.value)
+                if literal in existing:
+                    pairs.setdefault(literal, set()).add(module)
+                if "#include" in node.value:
+                    for match in include_re.finditer(node.value):
+                        inc = match.group(1).replace("\\", "/")
+                        if inc.endswith((".c", ".inc")):
+                            matches = by_basename.get(inc, [])
+                            if len(matches) == 1:
+                                pairs.setdefault(matches[0], set()).add(module)
+            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+                div_resolved = div_path(node, env)
+                if div_resolved and div_resolved in existing:
+                    pairs.setdefault(div_resolved, set()).add(module)
+            elif isinstance(node, ast.Call):
+                call_resolved = call_path(node, env)
+                if call_resolved and call_resolved in existing:
+                    pairs.setdefault(call_resolved, set()).add(module)
+    return pairs
+
+
+class TestSourceFileTestSelection(unittest.TestCase):
+    """Changing a ``tests/native/`` or ``src/`` file must select the Python tests that exercise it."""
+
+    derived_pairs: dict[str, set[str]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.derived_pairs = _derive_source_test_pairs(ROOT)
+
+    def test_dispatch_isolation_selftest_selects_dispatch_call_boundary(self) -> None:
+        modules = contrib_check.python_test_modules(["tests/native/dispatch_isolation_selftest.c"])
+        self.assertIn("tools.test_dispatch_call_boundary", modules)
+        self.assertIn("tools.test_dispatch_c", modules)
+        self.assertIn("tools.test_analyzer_span_scope", modules)
+        self.assertIn("tools.test_title_runtime_config", modules)
+        self.assertIn("tools.test_trace_window_probe", modules)
+
+    def test_every_literal_source_path_in_test_modules_is_selected_or_excluded(self) -> None:
+        self.assertTrue(self.derived_pairs, "expected literal src/ or tests/native/ references in tools/test_*.py")
+        missed: list[tuple[str, str]] = []
+        leaked_excluded: list[tuple[str, str]] = []
+        for source_path, expected_modules in sorted(self.derived_pairs.items()):
+            selected = set(contrib_check.python_test_modules([source_path]))
+            for module in sorted(expected_modules):
+                if module in contrib_check.SOURCE_TEST_EXCLUSIONS:
+                    if module in selected:
+                        leaked_excluded.append((source_path, module))
+                elif module not in selected:
+                    missed.append((source_path, module))
+        self.assertEqual(
+            missed,
+            [],
+            f"contrib_check.python_test_modules missed {len(missed)} (source, test) pair(s): {missed[:10]}",
+        )
+        self.assertEqual(
+            leaked_excluded,
+            [],
+            f"excluded test modules were still selected by source changes: {leaked_excluded[:10]}",
+        )
+
+    def test_source_test_exclusions_are_valid_documented_and_non_stale(self) -> None:
+        referenced_modules = {mod for mods in self.derived_pairs.values() for mod in mods}
+        for module, reason in contrib_check.SOURCE_TEST_EXCLUSIONS.items():
+            with self.subTest(module=module):
+                self.assertTrue(module.startswith("tools.test_"), f"{module} is not a tools.test_* name")
+                rel = f"tools/{module.removeprefix('tools.')}.py"
+                self.assertTrue((ROOT / rel).is_file(), f"{module} does not exist at {rel}")
+                self.assertTrue(reason.strip(), f"{module} exclusion has an empty reason")
+                self.assertIn(
+                    module,
+                    referenced_modules,
+                    f"{module} is in SOURCE_TEST_EXCLUSIONS but no longer references any src/ or tests/native/ path",
+                )
+                # Direct edits to an excluded test module itself must still run that module.
+                self.assertIn(module, contrib_check.python_test_modules([rel]))
+
+    def test_selection_stays_focused_on_affected_modules(self) -> None:
+        all_test_modules = list((ROOT / "tools").glob("test_*.py"))
+        selected = contrib_check.python_test_modules(["tests/native/dispatch_isolation_selftest.c"])
+        self.assertGreater(len(selected), 0)
+        self.assertLess(len(selected), len(all_test_modules) // 10)
+        self.assertEqual(
+            contrib_check.python_test_modules(["src/rt/nonexistent_unreferenced_file.c"]),
+            [],
+        )
+
+    def test_synthetic_root_selects_and_excludes_literal_source_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_root = Path(tmp)
+            (fake_root / "src" / "rt").mkdir(parents=True)
+            (fake_root / "tests" / "native").mkdir(parents=True)
+            (fake_root / "tools").mkdir(parents=True)
+            (fake_root / "src" / "rt" / "demo_unit.c").write_text("int demo(void) { return 0; }\n", encoding="utf-8")
+            (fake_root / "tests" / "native" / "demo_selftest.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+            (fake_root / "tools" / "test_demo_unit.py").write_text(
+                'from pathlib import Path\n'
+                'ROOT = Path(__file__).resolve().parent.parent\n'
+                'UNIT = ROOT / "src" / "rt" / "demo_unit.c"\n'
+                'SELFTEST = "tests/native/demo_selftest.c"\n',
+                encoding="utf-8",
+            )
+            with mock.patch.object(contrib_check, "ROOT", fake_root):
+                self.assertEqual(
+                    contrib_check.python_test_modules(["src/rt/demo_unit.c"]),
+                    ["tools.test_demo_unit"],
+                )
+                self.assertEqual(
+                    contrib_check.python_test_modules(["tests/native/demo_selftest.c"]),
+                    ["tools.test_demo_unit"],
+                )
+                with mock.patch.dict(
+                    contrib_check.SOURCE_TEST_EXCLUSIONS,
+                    {"tools.test_demo_unit": "synthetic exclusion"},
+                ):
+                    self.assertEqual(
+                        contrib_check.python_test_modules(["src/rt/demo_unit.c"]),
+                        [],
+                    )
+                    self.assertEqual(
+                        contrib_check.python_test_modules(["tools/test_demo_unit.py"]),
+                        ["tools.test_demo_unit"],
+                    )
+
+
 class TestGateStatusVocabulary(unittest.TestCase):
+    def test_a_header_only_native_change_names_the_hosted_build(self) -> None:
+        """The hosted classifier routes a header to native_runtime; the local NOT_RUN says so."""
+        gate = contrib_check.c_gate(["src/core/nk_example.h"])
+        self.assertEqual(gate.status, contrib_check.NOT_RUN)
+        self.assertIn("native_runtime", gate.detail)
+        self.assertIn("hosted CI", gate.detail)
+
+    def test_a_changed_header_is_named_unchecked_and_ok_says_so(self) -> None:
+        """Failing-before: a header-only change printed a bare NOT_RUN and `contrib-check: OK`."""
+        header = "src/rt/recomp.h"
+        self.assertTrue((ROOT / header).is_file())
+        gate = contrib_check.c_gate([header])
+        self.assertEqual(gate.status, contrib_check.NOT_RUN)
+        self.assertTrue(gate.unchecked)
+        self.assertIn(f"changed header(s) not compiled: {header}", gate.detail)
+        out = io.StringIO()
+        with mock.patch.object(contrib_check, "run", return_value=[gate]), redirect_stdout(out):
+            self.assertEqual(contrib_check.main([]), 0)
+        self.assertIn("NOT CHECKED here, although the change touches it: strict-c-compile", out.getvalue())
+        # A surface the change does not touch is NOT_RUN without that line.
+        out = io.StringIO()
+        with mock.patch.object(contrib_check, "run", return_value=[contrib_check.c_gate(["docs/a.md"])]), \
+                redirect_stdout(out):
+            contrib_check.main([])
+        self.assertNotIn("NOT CHECKED", out.getvalue())
+
     def test_an_untouched_surface_is_not_run_not_pass(self) -> None:
         self.assertEqual(contrib_check.c_gate(["docs/a.md"]).status, contrib_check.NOT_RUN)
         self.assertEqual(contrib_check.markdown_gate(["tools/a.py"]).status, contrib_check.NOT_RUN)
@@ -191,7 +521,11 @@ def _assignments(text: str) -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
     pattern = re.compile(r"^(?:override\s+)?([A-Za-z0-9_.-]+)\s*(?::=|\?=|\+=|=)\s*(.*)$", re.M)
     for name, value in pattern.findall(text):
-        found.setdefault(name, []).append(value)
+        values = found.setdefault(name, [])
+        # The same value assigned twice is one alternative; joining both copies
+        # would split a flag such as -I$(DIR)/include into "-Idir dir/include".
+        if value not in values:
+            values.append(value)
     return found
 
 
@@ -225,6 +559,50 @@ def _has_flag(text: str, flag: str) -> bool:
     return re.search(re.escape(flag) + r"(?![A-Za-z0-9_./-])", text) is not None
 
 
+def _python_builder_info(
+    module_path: str, func_name: str,
+) -> tuple[set[str], set[str], set[str], set[str]]:
+    """Return ``(sources, defines, includes, warnings)`` from a Python build helper."""
+    path = ROOT / module_path
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=module_path)
+    func = next(
+        (node for node in ast.walk(tree)
+         if isinstance(node, ast.FunctionDef) and node.name == func_name),
+        None,
+    )
+    if func is None:
+        raise AssertionError(f"no function `{func_name}` in {module_path}")
+
+    sources: set[str] = set()
+    defines: set[str] = set()
+    includes: set[str] = set()
+    warnings: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            text = node.value
+            if text.startswith("-D") and len(text) > 2:
+                defines.add(text[2:])
+            elif text.startswith("-I") and len(text) > 2:
+                includes.add(text[2:])
+            elif text.startswith("-Wno-"):
+                warnings.add(text)
+            elif text.endswith(".c"):
+                sources.add(text)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            parts: list[str] = []
+            cur: ast.AST = node
+            while isinstance(cur, ast.BinOp) and isinstance(cur.op, ast.Div):
+                if isinstance(cur.right, ast.Constant) and isinstance(cur.right.value, str):
+                    parts.append(cur.right.value)
+                    cur = cur.left
+                else:
+                    parts = []
+                    break
+            if parts and isinstance(cur, ast.Name) and cur.id == "ROOT":
+                sources.add("/".join(reversed(parts)))
+    return sources, defines, includes, warnings
+
+
 class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
     """Each source is compiled with the flags the build compiles it with.
 
@@ -232,7 +610,7 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
     whose hooks are declared under its own define (`SR_HLE_THREAD_SELFTEST`,
     `SR_SCHED_LIVENESS_TEST`), a player screen that includes `nk_ui.h`, and the
     Vulkan backend all failed on unchanged `origin/main`, for every contributor
-    who touched them.  The per-source table must stay the Makefile's own flags.
+    who touched them.  The per-source table must stay the build's own flags.
     """
     assignments: dict[str, list[str]]
     makefile: str
@@ -242,45 +620,87 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
         cls.makefile = _makefile_text()
         cls.assignments = _assignments(cls.makefile)
 
+    def _assert_unit_matches_build(self, source: str, unit: contrib_check.StrictUnit) -> None:
+        self.assertTrue((ROOT / source).is_file(), f"{source} is not in the tree")
+        self.assertTrue(
+            bool(unit.recipes) != bool(unit.builder),
+            f"{source} must name either Makefile recipes or a Python builder, not neither or both",
+        )
+        if unit.builder is not None:
+            module_path, func_name = unit.builder
+            self.assertTrue((ROOT / module_path).is_file(), f"{module_path} is not in the tree")
+            sources, defines, includes, warnings = _python_builder_info(module_path, func_name)
+            self.assertIn(
+                source, sources,
+                f"{module_path}:{func_name} does not compile {source}; the table names the wrong builder",
+            )
+            self.assertEqual(
+                set(unit.defines), defines,
+                f"defines for {source} ({sorted(unit.defines)}) differ from "
+                f"{module_path}:{func_name} ({sorted(defines)})",
+            )
+            for include in unit.includes:
+                self.assertIn(
+                    include, includes,
+                    f"-I{include} is listed for {source} but is not on {module_path}:{func_name}",
+                )
+            covered_includes = set(contrib_check.STRICT_C_FLAGS) | {f"-I{inc}" for inc in unit.includes}
+            for include in sorted(includes):
+                self.assertIn(
+                    f"-I{include}", covered_includes,
+                    f"{module_path}:{func_name} passes -I{include} for {source}, "
+                    "which is missing from STRICT_C_FLAGS and STRICT_C_UNITS",
+                )
+            for warning in unit.warnings:
+                self.assertIn(
+                    warning, warnings,
+                    f"{warning} is listed for {source} but is not on {module_path}:{func_name}",
+                )
+            self.assertFalse(
+                unit.generated,
+                f"{source} uses a Python builder and cannot name Makefile generated headers",
+            )
+            return
+
+        building: list[str] = []
+        raw: list[str] = []
+        for target in unit.recipes:
+            blocks = _rule_blocks(self.makefile, target)
+            self.assertTrue(blocks, f"no Makefile rule `{target}:` (named for {source})")
+            for block in blocks:
+                expanded = _expand(block, self.assignments)
+                if source in expanded:
+                    building.append(expanded)
+                    raw.append(block)
+        self.assertTrue(
+            building, f"none of {unit.recipes} compiles {source}; the table names the wrong rule",
+        )
+        recipe = "\n".join(building)
+        for define in unit.defines:
+            self.assertTrue(
+                _has_flag(recipe, f"-D{define}"),
+                f"-D{define} is listed for {source} but is not on {unit.recipes}",
+            )
+        for include in unit.includes:
+            self.assertTrue(
+                _has_flag(recipe, f"-I{include}"),
+                f"-I{include} is listed for {source} but is not on {unit.recipes}",
+            )
+        for warning in unit.warnings:
+            self.assertTrue(
+                _has_flag(recipe, warning),
+                f"{warning} is listed for {source} but is not on {unit.recipes}",
+            )
+        for header in unit.generated:
+            self.assertTrue(
+                any(header.include in block for block in raw),
+                f"{header.include} ({header.name}) is not on {unit.recipes}",
+            )
+
     def test_every_listed_flag_is_on_the_recipe_that_builds_the_source(self) -> None:
         for source, unit in contrib_check.STRICT_C_UNITS.items():
             with self.subTest(source=source):
-                self.assertTrue((ROOT / source).is_file(), f"{source} is not in the tree")
-                self.assertTrue(unit.recipes, f"{source} names no Makefile recipe")
-                building: list[str] = []
-                raw: list[str] = []
-                for target in unit.recipes:
-                    blocks = _rule_blocks(self.makefile, target)
-                    self.assertTrue(blocks, f"no Makefile rule `{target}:` (named for {source})")
-                    for block in blocks:
-                        expanded = _expand(block, self.assignments)
-                        if source in expanded:
-                            building.append(expanded)
-                            raw.append(block)
-                self.assertTrue(
-                    building, f"none of {unit.recipes} compiles {source}; the table names the wrong rule",
-                )
-                recipe = "\n".join(building)
-                for define in unit.defines:
-                    self.assertTrue(
-                        _has_flag(recipe, f"-D{define}"),
-                        f"-D{define} is listed for {source} but is not on {unit.recipes}",
-                    )
-                for include in unit.includes:
-                    self.assertTrue(
-                        _has_flag(recipe, f"-I{include}"),
-                        f"-I{include} is listed for {source} but is not on {unit.recipes}",
-                    )
-                for warning in unit.warnings:
-                    self.assertTrue(
-                        _has_flag(recipe, warning),
-                        f"{warning} is listed for {source} but is not on {unit.recipes}",
-                    )
-                for header in unit.generated:
-                    self.assertTrue(
-                        any(header.include in block for block in raw),
-                        f"{header.include} ({header.name}) is not on {unit.recipes}",
-                    )
+                self._assert_unit_matches_build(source, unit)
 
     def test_every_common_include_directory_is_one_the_makefile_uses(self) -> None:
         for flag in contrib_check.STRICT_C_FLAGS:
@@ -297,6 +717,41 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
         self.assertTrue(_has_flag(recipe, "-DSR_SCHED_LIVENESS_TEST"))
         self.assertFalse(_has_flag(recipe, "-DSR_SCHED_LIVENESS"))
         self.assertFalse(_has_flag(recipe, "-DSR_HLE_THREAD_SELFTEST"))
+
+    def test_the_drift_check_catches_a_python_builder_define_mismatch(self) -> None:
+        """Guard the guard: missing or extra defines on a Python-built unit fail."""
+        missing = contrib_check.StrictUnit(
+            builder=("tools/nk_cli.py", "_build_vram_decoder"),
+            defines=(),
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_unit_matches_build("src/rt/ge_vram_cli.c", missing)
+
+        wrong = contrib_check.StrictUnit(
+            builder=("tools/nk_cli.py", "_build_vram_decoder"),
+            defines=("SR_GE_VRAM_DECODER_CLI", "SR_NOT_IN_BUILDER"),
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_unit_matches_build("src/rt/ge_vram_cli.c", wrong)
+
+    def test_sources_that_include_vendored_headers_compile_clean(self) -> None:
+        """The achievements and CHD sources find their vendored headers.
+
+        Failing before: strict-c-compile reported ``rc_client.h`` and
+        ``libchdr/chd.h`` as missing for any change to these files, a FAIL the
+        build never sees.
+        """
+        compiler = contrib_check.find_tool("gcc") or contrib_check.find_tool("cc")
+        if compiler is None:
+            self.skipTest("no C compiler on PATH")
+        for source in ("src/core/nk_achievements.c", "src/core/nk_disc_chd.c",
+                       "tests/native/test_disc_expand.c"):
+            with self.subTest(source=source):
+                command, reason = contrib_check.strict_compile_command(compiler, source, [])
+                self.assertEqual(reason, "")
+                assert command is not None
+                result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=600)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_a_selftest_is_compiled_with_its_own_defines(self) -> None:
         command, reason = contrib_check.strict_compile_command("cc", "tests/native/hle_thread_selftest.c", [])
@@ -408,6 +863,23 @@ class TestStrictCompileUnavailableInputs(unittest.TestCase):
                 self.assertEqual(gate.status, contrib_check.FAIL)
                 self.assertIn("unknown type name", gate.detail)
 
+    def test_a_real_error_far_above_a_missing_sdk_header_still_fails(self) -> None:
+        """Failing-before: the SDK classification read only the six lines shown in the detail, so an error with
+        its source and caret lines above the missing header's block was classified as a missing SDK (SKIP)."""
+        source = "tests/fixtures/psp_oracle/probe_ge_sample.c"
+        gate = self._gate_for_output(
+            source,
+            "In file included from tests/fixtures/psp_oracle/probe_ge_sample.c:1:\n"
+            "tests/fixtures/psp_oracle/h.h:1:1: error: unknown type name 'foo_t'\n"
+            "    1 | foo_t x;\n"
+            "      | ^~~~~\n"
+            f"{source}:2:10: fatal error: vulkan/vulkan.h: No such file or directory\n"
+            "    2 | #include <vulkan/vulkan.h>\n"
+            "      |          ^~~~~~~~~~~~~~~~~\n"
+            "compilation terminated.",
+        )
+        self.assertEqual(gate.status, contrib_check.FAIL, gate.detail)
+
     def test_a_discovered_vulkan_sdk_is_on_the_include_path(self) -> None:
         sdk = Path(tempfile.gettempdir()) / "VulkanSDK" / "1.4.0"
         with mock.patch.object(contrib_check, "discover_vulkan_sdk", return_value=sdk):
@@ -455,6 +927,7 @@ class TestStrictCompileOnUnchangedMain(unittest.TestCase):
         "src/rt/gpu_sdl3vk/ge_gpu.c",
         "tests/fixtures/cosim/cosim_selftest.c",
         "tests/native/texrepl_selftest.c",
+        "src/rt/ge_vram_cli.c",
     )
 
     def test_no_unchanged_source_fails_the_strict_compile(self) -> None:
@@ -464,7 +937,31 @@ class TestStrictCompileOnUnchangedMain(unittest.TestCase):
         for source in self.SOURCES:
             with self.subTest(source=source):
                 gate = contrib_check.c_gate([source])
-                self.assertNotEqual(gate.status, contrib_check.FAIL, gate.detail)
+                if gate.status in (contrib_check.SKIP, contrib_check.NOT_RUN):
+                    # Not compiled here: a skipped subtest, never a pass (AGENTS.md section 9).
+                    self.skipTest(f"{gate.status}: {gate.detail}")
+                self.assertEqual(gate.status, contrib_check.PASS, gate.detail)
+
+    def test_an_uncompiled_source_is_reported_skipped_not_passed(self) -> None:
+        """Failing-before: the test asserted only `!= FAIL`, so a source the gate never compiled
+        (an absent SDK or generated header) counted as a pass."""
+        for status in (contrib_check.SKIP, contrib_check.NOT_RUN):
+            with self.subTest(status=status):
+                inner = TestStrictCompileOnUnchangedMain("test_no_unchanged_source_fails_the_strict_compile")
+                result = unittest.TestResult()
+                with mock.patch.object(contrib_check, "find_tool", return_value="gcc"), \
+                        mock.patch.object(contrib_check, "c_gate",
+                                          return_value=contrib_check.Gate("C", status, "not compiled")):
+                    inner.run(result)
+                self.assertEqual(len(result.skipped), len(self.SOURCES), result.skipped)
+                self.assertEqual(result.failures + result.errors, [])
+        inner = TestStrictCompileOnUnchangedMain("test_no_unchanged_source_fails_the_strict_compile")
+        result = unittest.TestResult()
+        with mock.patch.object(contrib_check, "find_tool", return_value="gcc"), \
+                mock.patch.object(contrib_check, "c_gate",
+                                  return_value=contrib_check.Gate("C", "BLOCKED", "odd")):
+            inner.run(result)
+        self.assertEqual(len(result.failures), len(self.SOURCES))
 
 
 class TestPublicationGateSplit(unittest.TestCase):
@@ -499,6 +996,22 @@ class TestPublicationGateSplit(unittest.TestCase):
     def test_a_clean_audit_passes(self) -> None:
         _policy, audit = self._run("publication audit: OK\n", audit_returncode=0)
         self.assertEqual(audit.status, contrib_check.PASS)
+
+    def test_the_stale_control_hint_does_not_turn_maintainer_side_into_a_failure(self) -> None:
+        """publish_audit prints its regen hint after a stale-control finding; the hint is not a finding."""
+        import publish_audit
+
+        _policy, audit = self._run(f"{MAINTAINER_LINE}\n{SUMMARY_LINE}\n{publish_audit.STALE_CONTROL_FIX}\n")
+        self.assertEqual(audit.status, contrib_check.MAINTAINER_SIDE, audit.detail)
+
+    def test_an_audit_without_a_complete_verdict_fails_rather_than_passes(self) -> None:
+        """A killed, crashed or silent audit with no finding line never reports a pass."""
+        for stdout, returncode in (("", 1), ("", -9), ("MemoryError\n", 1), ("", 0),
+                                   ("publication audit: FAIL (0 findings)\n", 1)):
+            with self.subTest(stdout=stdout, returncode=returncode):
+                _policy, audit = self._run(stdout, audit_returncode=returncode)
+                self.assertEqual(audit.status, contrib_check.FAIL)
+                self.assertIn(f"exited {returncode}", audit.detail)
 
     def test_policy_drift_fails_before_the_audit_runs(self) -> None:
         def fake_run(command, **kwargs):

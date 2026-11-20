@@ -36,10 +36,11 @@ policy into a public-safe PGF fixture:
 - **Japanese project font.** The project pins Noto Sans JP Regular (the UI
   font's static instance) and M PLUS 1p Regular, both under SIL OFL 1.1, and
   converts the `--japanese-text` repertoire described below from Noto Sans JP,
-  with M PLUS 1p drawing through `--fallback` the one point Noto Sans JP lacks
-  (#2005). The converter is
-  codepoint-driven; any additional font pin still needs its own pin file and
-  coverage set. The output is not claimed to be pixel-identical to a firmware
+  with M PLUS 1p drawing through `--fallback` the 341 points of that set Noto
+  Sans JP lacks (#2005, #1300). The converter is
+  codepoint-driven; any additional font needs its own pin (a pin file, or
+  for a font the project already ships its record in the static font list,
+  section 7) and coverage set. The output is not claimed to be pixel-identical to a firmware
   font (`FONT_ORIGINS.md` records the source and conversion).
 
 ## 2. Input contract
@@ -96,8 +97,8 @@ scaling.
 | `bad-codepoint-list` | A `--codepoints` file is unreadable, not ASCII, holds a line that is not a code point, or leaves 16 bits. |
 | `codepoints-unsorted` | A `--codepoints` file repeats a code or is not in ascending order. |
 | `empty-codepoint-set` | A `--codepoints` file lists no code point. |
-| `japanese-codec-unavailable` / `japanese-mapping-invalid` | A built-in ASCII/EUC-JP/CP932 codec or its pinned Japanese mapping is unavailable or has changed. |
-| `latin-mapping-invalid` | A built-in Latin mapping has changed from its pinned digest or count. |
+| `japanese-codec-unavailable` / `japanese-mapping-invalid` | A built-in ASCII/EUC-JP/CP932/Shift_JIS-2004 codec or its pinned Japanese mapping is unavailable or has changed. |
+| `latin-mapping-invalid` / `latin-codec-unavailable` | A built-in Latin mapping has changed from its pinned digest or count, a code page codec is unavailable, or the face does not draw all of printable ASCII for `--latin-cyrillic-text`. |
 | `ppem-out-of-range` | Size outside 1..128. |
 | `embolden-out-of-range` | `--embolden-x`, `--embolden-y`, or `--embolden-advance` outside 0..8 sub-samples. |
 | `baseline-ellipsis-unavailable` | `--baseline-ellipsis` without U+2026 in the code set, without an outline for U+2026 or U+002E, or with U+2026 drawn by the `--fallback` font. |
@@ -107,10 +108,13 @@ scaling.
 | `snap-overshoot-out-of-range` | `--snap-overshoot` outside 0..8 sub-samples. |
 | `snap-overshoot-unavailable` | `--snap-overshoot` with a drawing font that lacks an outline for `H` or `x`, or whose flat edges do not ascend (section 3, rule 13). |
 | `snap-overshoot-zones-overlap` | At the chosen ppem the band above the x-height reaches the cap height (section 3, rule 13). |
+| `scale-x-out-of-range` | `--scale-x` outside 800..1250 thousandths (section 3, rule 14). |
+| `vertical-metric-out-of-range` | `--vertical-advance` or `--vertical-origin` outside 1..2000 thousandths of the em (section 3, rule 16). |
+| `horizontal-metrics-invalid` | A `--horizontal-metrics` table is unreadable, has another schema, evidence label or field list, lacks the slot `--horizontal-metrics-slot` names, or lists a key that is not `U+XXXX` or a value that is not three integers in range (section 3, rule 18). |
 | `glyph-too-large` | A raster exceeds the writer's 7-bit record fields (127 px). |
 | `composite-too-deep` / `composite-too-many-components` | Composite expansion bounds. |
 | `metric-targets-invalid` / `metric-target-unreachable` | Policy document is malformed / no size satisfies it. |
-| `conflicting-parameters` | `--ppem` together with `--metric-targets`; `--fallback-pin` without `--fallback`; or only one of `--pin` and `--fallback-pin` when a fallback is given. (`--codes`, `--codepoints`, `--jis-x-0208-japanese`, `--japanese-text`, `--latin-1-text`, `--latin-cyrillic-text`, and `--ks-x-1001-korean` are mutually exclusive at the CLI.) |
+| `conflicting-parameters` | `--ppem` together with `--metric-targets`; `--fallback-pin` without `--fallback`; only one of `--pin` and `--fallback-pin` when a fallback is given; or only one of `--horizontal-metrics` and `--horizontal-metrics-slot`. (`--codes`, `--codepoints`, `--jis-x-0208-japanese`, `--japanese-text`, `--latin-1-text`, `--latin-cyrillic-text`, and `--ks-x-1001-korean` are mutually exclusive at the CLI.) |
 | `pin-invalid` / `pin-digest-mismatch` / `pin-size-mismatch` / `pin-license-mismatch` | Source pin does not bind the exact input and licence bytes. |
 | `reserved-font-name` / `camouflage-font-name` | Output name policy violation (section 6). |
 | writer reasons (`font-field-invalid`, `nominal-size-out-of-range`, `metric-table-overflow`, ...) | Re-raised unchanged from `pgf_writer.py`. |
@@ -139,21 +143,99 @@ assigned punctuation and symbols U+2010-U+2027, U+2030, U+2039-U+203A, U+20AC,
 and U+2122 (29). The set contains 348 unique points with canonical SHA-256
 `7fbcaac92248acdb1c2704c3fef2181e7bc49f2b0e9d0f970cd029fb58057340`.
 
-`--latin-cyrillic-text` (#2005) is the `--latin-1-text` set without U+2011,
-U+2023, U+2024, U+2025 and U+2027, plus 111 more: the WGL4 Cyrillic letters
-U+0401-040C, U+040E-044F, U+0451-045C, U+045E-045F and U+0490-0491 and U+04C0
-(95); U+0192, U+02C6 and U+02DC; the combining accents U+0301, U+0306, U+0308
-and U+0338; and U+2116, U+2206, U+2219, U+221A, U+221E, U+2248, U+2260, U+2264
-and U+2265. The set contains 454 unique points with canonical SHA-256
-`6b8511988b7ce6199c99a45ab3a00ee498986067343117205c22031e2b8b330d`.
+`--latin-cyrillic-text` (#2005, #1300) is a rule over public standards, applied
+to the face being converted: every code point of the Unicode blocks and the
+single-byte code pages below that the face's own character map draws. Code
+pages are read through Python's standard codecs, bytes 0x20-0xFF, without the
+C1 controls and the Private Use Area. Invisible format controls (Unicode general
+category Cf, such as the bidirectional marks of General Punctuation) and the
+line and paragraph separators U+2028 and U+2029 (categories Zl and Zp, which a
+face such as Geist maps but which end a line rather than draw) are left out,
+except the soft hyphen U+00AD that Latin-1 text writes. A face that does
+not draw all of printable ASCII is refused (`latin-mapping-invalid`). No list
+of characters is taken from a console font. The blocks, each with its reason:
 
-`--japanese-text` (#2005) is the `--jis-x-0208-japanese` set widened by the
-EUC-JP mapping of JIS X 0208 rows 48..84 (the 3,390 level-2 kanji), every
-assigned double-byte character of Python's standard `cp932` table outside the
+| Block | Why it is in |
+| --- | --- |
+| Basic Latin U+0020-007E | ASCII: every Latin-script text. |
+| Latin-1 Supplement U+00A0-00FF | The letters and signs of Western European text. |
+| Latin Extended-A U+0100-017F | The letters of Central and Eastern European, Baltic, Turkish and Esperanto text. |
+| Spacing Modifier Letters U+02B0-02FF | The accents text writes on their own (`ˆ ˇ ˘ ˙ ˚ ˛ ˜ ˝`). |
+| General Punctuation U+2000-206F | Dashes, quotation marks, the ellipsis, daggers, the bullet and the per mille sign. |
+| Letterlike Symbols U+2100-214F | The trade mark sign, the numero sign and the other symbols written in text. |
+
+The code pages, each with its reason:
+
+| Code page | Why it is in |
+| --- | --- |
+| Windows-1250, -1251, -1252, -1254 and -1257 (`cp1250`, `cp1251`, `cp1252`, `cp1254`, `cp1257`) | The character sets of Central European, Cyrillic, Western, Turkish and Baltic text on Windows: the Cyrillic alphabets, `ƒ`, `€` and their punctuation. |
+| ISO 8859-16 (`iso8859_16`) | The Romanian letters with a comma below (`Ș ș Ț ț`). |
+| Mac Cyrillic (`mac_cyrillic`) | The symbols of Macintosh text (`∆ √ ∞ ≈ ≠ ≤ ≥`). |
+
+Left out, with the reason:
+
+| Block or code page | Why it is out |
+| --- | --- |
+| Latin Extended-B, Cyrillic (as a whole block), Currency Symbols | Their digraphs, historic letters and some currency signs are wider or taller than any letter, so they would grow the font's glyph box and maximum advance; games size glyph buffers and place lines by those (Hot Shots Tennis' dialog moved). Their text letters come in through the code pages. |
+| Combining Diacritical Marks | PGF text is drawn glyph by glyph and cannot set a mark over a letter; the precomposed letters are in. |
+| Mathematical Operators, Arrows, Number Forms | Not text characters. Hot Shots Tennis writes the minus sign U+2212 in its dialog and draws its own character where the font has none. |
+| Mac Roman, KOI8-R, CP866 | Their integral, box-drawing and block characters are taller than any letter (the glyph box again). |
+
+With each face of the build (Liberation, or Geist with its Liberation Sans
+`--fallback`, which the set's `draws` test counts) the set has 556 points, the
+same for all eight faces (canonical SHA-256
+`7eb9461a9b5e1012ff653746e9b0e3ff7947b8d51b27cc9fa224003a1705647d`); the
+manifest records the set's digest and source `builtin:latin-text-blocks`.
+
+`--japanese-text` (#2005, #1300) has a pinned core and a rule over public
+standards. The core is the `--jis-x-0208-japanese` set widened by the EUC-JP
+mapping of JIS X 0208 rows 48..84 (the 3,390 level-2 kanji), every assigned
+double-byte character of Python's standard `cp932` table outside the
 user-defined area (lead bytes 0xF0-0xF9, Unicode Private Use; 7,326
-characters, with the NEC and IBM extensions), and the Latin-1 Supplement
-U+00A0-U+00FF. The set contains 7,575 unique points with canonical SHA-256
-`7c737cfedb45385d553dbfeecce9949135f185b5ca31ce486428cd4082904497`.
+characters, with the NEC and IBM extensions) and the Latin-1 Supplement
+U+00A0-U+00FF: 7,575 unique points with the pinned canonical SHA-256
+`7c737cfedb45385d553dbfeecce9949135f185b5ca31ce486428cd4082904497`. The
+command line adds every character of JIS X 0213:2004 and of the Unicode blocks
+below that the input face, or the `--fallback` face where the input has no
+glyph, draws. JIS X 0213 is read through Python's `shift_jis_2004` codec over
+lead bytes 0x81-0x9F and 0xE0-0xFC, keeping cells that map to one code point
+up to U+FFFF (10,905 points, pinned by count and digest; a cell that maps to a
+base letter and a combining mark has no single code). No list of characters is
+taken from a console font. The blocks, each with its reason:
+
+| Block | Why it is in |
+| --- | --- |
+| Latin Extended-A U+0100-017F | Romanized Japanese with macrons (`ā ō ū`). |
+| Superscripts and Subscripts U+2070-209F | Superscript and subscript digits in units and notes. |
+| Combining Diacritical Marks for Symbols U+20D0-20FF | The enclosing circle and other marks JIS X 0213 uses with symbols. |
+| Letterlike Symbols U+2100-214F | The trade mark sign (Ace Combat: Joint Assault writes "Memory Stick™"), `℃`, `№`, `℡`. |
+| Number Forms U+2150-218F | Roman numerals and fractions. |
+| Arrows U+2190-21FF | Arrows in menus and instructions. |
+| Miscellaneous Technical U+2300-23FF | The arc `⌒` and the technical symbols of JIS X 0213. |
+| Enclosed Alphanumerics U+2460-24FF | Circled and parenthesized numbers and letters. |
+| Box Drawing U+2500-257F | Table and frame lines, the rounded corners included. |
+| Block Elements U+2580-259F | Shades and half blocks. |
+| Geometric Shapes U+25A0-25FF | Circles, triangles, squares and diamonds used as markers. |
+| Dingbats U+2700-27BF | Check marks and negative circled numbers. |
+| CJK Radicals Supplement U+2E80-2EFF, Kangxi Radicals U+2F00-2FDF | The radical forms of dictionaries and kanji lessons. |
+| Hiragana U+3040-309F, Katakana U+30A0-30FF, Katakana Phonetic Extensions U+31F0-31FF | The kana beyond JIS X 0208 (`ゔ`, the small kana of Ainu). |
+| Enclosed CJK Letters and Months U+3200-32FF | Parenthesized and circled kanji (`㈱`, `㊤`). |
+| CJK Compatibility U+3300-33FF | Squared words and units (`㌔`, `㍻`). |
+| CJK Unified Ideographs Extension A U+3400-4DBF, CJK Unified Ideographs U+4E00-9FFF | Kanji outside JIS X 0208: names, places and older forms. |
+| Alphabetic Presentation Forms U+FB00-FB4F | The Latin ligatures (`ﬁ`, `ﬂ`). |
+| CJK Compatibility Forms U+FE30-FE4F | The vertical forms of punctuation for text set in columns. |
+
+Left out, with the reason. What CP932 and JIS X 0213 hold of these blocks is in
+through the core and JIS X 0213:
+
+| Block | Why it is out |
+| --- | --- |
+| Mathematical Operators, CJK Symbols and Punctuation | Their remaining characters (multiple integrals, the two-cell vertical repeat marks, the tone marks) are wider or taller than a full-width cell, so they would grow the font's glyph box that games size glyph buffers and place lines by. |
+| Latin Extended-B, IPA Extensions, Combining Diacritical Marks, Greek and Coptic, Cyrillic, Latin Extended Additional, General Punctuation, Currency Symbols, Miscellaneous Symbols, Halfwidth and Fullwidth Forms | Their glyphs' sizes would overflow the 255-entry dimension table (section 6, `metric-table-overflow`); Western scripts are the Latin fonts' text. |
+
+With Noto Sans JP and M PLUS 1p the set has 15,631 points (M PLUS 1p draws
+341 of them); the manifest records the set's digest and source
+`builtin:jis-x-0208-cp932-japanese+jis-x-0213+blocks`.
 
 `--ks-x-1001-korean` decodes assigned cells in KS X 1001 rows 1-4 and 6-9
 through Python's standard `euc_kr` codec, adds ASCII, and includes every modern
@@ -199,7 +281,7 @@ manifest in memory first and writes only after every stage succeeds.
    0..64, mapping to the writer's 4-bit samples.
 7. **Advances.** `hmtx` advance scaled by rule 1 (with the upem of the font
    that draws the code, rule 12), plus `(--embolden-advance + --tracking) * 8`
-   26.6 units; `advance_y` is 0. `--tracking K` (-8..16 sub-samples, default
+   26.6 units; `advance_y` is rule 16's. `--tracking K` (-8..16 sub-samples, default
    0) spaces every glyph alike. `--digit-advance D` (26.6) replaces the scaled
    advance of each digit 0-9 with `D` before that addition (tabular figures),
    and shifts that digit's outline right by `floor((D - natural) / 2)` 26.6
@@ -280,7 +362,10 @@ manifest in memory first and writes only after every stage succeeds.
     largest of those overshoots is 0.30 px at 20 ppem, under 3/8, and the
     nearest flat height that is not an overshoot, the top of Liberation
     Sans `f` 73 units above the cap height, is 0.46 px at 13 ppem, over 3/8,
-    so ascenders keep their own height. The rule does not tell an overshoot
+    so ascenders keep their own height. The Geist faces (#1300), with the
+    same `N` (the bold ones drawn at 19 and 12 ppem), set their round letters
+    on the same rows as their flat ones too, with `l` as drawn without the
+    option (`tools/test_ttf2pgf.py`). The rule does not tell an overshoot
     from a small deliberate excursion: at 13 ppem the extremes of `/`, `\`,
     `ø`, `Ø`, `§`, `∞`, `ƒ`, `@`, `×`, `÷`, the fractions `¼` and `¾`, and
     the spur of Liberation Serif `q`, which lie within 3/8 px of an edge,
@@ -290,24 +375,169 @@ manifest in memory first and writes only after every stage succeeds.
     the chosen ppem the band above `X` must end below `C`
     (`(C - X) * ppem * 8 > N * unitsPerEm`), so no point is in two bands.
 
+14. **Horizontal scale** (optional, default off). `--scale-x P` (800..1250, in
+    thousandths; 1000 is off) multiplies every `x` of every outline, in font
+    units, by exactly `P / 1000` as a rational, after rule 11's shift and
+    rule 13's alignment (which never moves `x`) and before rule 7's digit
+    centring and rule 1's scaling; the `hmtx` advance of each code is
+    multiplied the same way before rule 1. `y`, and so every row, is
+    untouched, and at 1000 the output is byte-identical to a conversion
+    without the option. Rule 7's digit centring uses the scaled advance.
+    *Project decision* (#1300): the sans-serif stand-ins (Geist for the
+    regular and bold styles, Liberation Sans for the italic ones) have letters
+    that at the console's sizes come out narrower than the console fonts' and
+    spaced looser to keep the console's line lengths. A horizontal scale moves
+    ink from the gaps into the letters; the project's parameters were tuned
+    against a private comparison with the console's own fonts, and only those
+    parameters are recorded.
+15. **Ink trim** (always on, from converter 0.7.0). After rule 6, each glyph
+    image is cut to the columns and rows that hold a nonzero sample: the
+    empty columns at its left and right and the empty rows at its top and
+    bottom are removed, and the box's `left` grows by the columns cut on the
+    left and its `top` falls by the rows cut on the top, so every kept sample
+    stays on the same pixel relative to the pen and the baseline. The advance
+    (rule 7) is not changed. A glyph with no nonzero sample becomes a
+    zero-area record with only its advance, like a space. Rule 3's box holds
+    every covered sub-sample, but a pixel with one or two covered sub-samples
+    rounds to 0 under rule 6, and rule 10 grows the box by whole pixels for
+    ink that may not reach the new column or row, so without the cut an image
+    could start or end in a blank column or row.
+    *Project decision* (#1300), from a measurement: the console's Latin fonts
+    store their images cut to the ink in both directions (in three of them,
+    at most 9 of the 94 printable ASCII images have a blank column or row on
+    any one side, against 82 blank last columns in a 0.6.0 stand-in),
+    and their space is a zero-area record. A game may place text by the image
+    rather than by the advance: Hot Shots Tennis puts each glyph one pixel
+    after the previous image's right edge, so every blank column widened its
+    lines. Only that rule is taken from the measurement; no glyph data is.
+16. **Vertical metrics** (always on, from converter 0.8.0). After rule 15,
+    every record, a zero-area one included, gets the three vertical fields
+    the character information returns as vertical bearing X (`x_center`,
+    `0x28`), vertical bearing Y (`y_top`, `0x2C`) and vertical advance
+    (`advance_y`, `0x34`). Let `em` be the em the header declares: the
+    nominal size (26.6 points) at the resolution (26.6 dpi),
+    `nominal * resolution / 4608` in 26.6 px (1152, 18 px, for 10.125 points
+    at 128 dpi), and `frac(T)` be `T / 1000` of it, rounded half up to a
+    whole 26.6 unit.
+    - `x_center = -floor(dimension_width / 2)`: the box centred on the
+      vertical origin.
+    - `advance_y = frac(A)`, `A` from `--vertical-advance A` (1..2000,
+      default 1000: one em).
+    - With `--vertical-origin O` (1..2000): `y_top = frac(O) - y_base`, the
+      distance from `O / 1000` em above the baseline down to the glyph's top.
+      Without it: `y_top = floor((advance_y - (ascender - descender)) / 2)`,
+      the same for every glyph, with the header's ascender and descender
+      (`--header-ascender` and `--header-descender`, else the extremes the
+      writer derives).
+    The header's minimum centre X, maximum top Y and maximum vertical
+    advance follow from the records. No row, column or horizontal metric
+    changes, so text set horizontally draws the same pixels.
+    *Project decision* (#1300), from a measurement of one console's fonts
+    through the project's reader: in its Latin, Japanese and Korean fonts
+    every glyph's vertical bearing X is minus half its 26.6 width, and each
+    font has one vertical advance: 0.950 em in the larger Latin size, 0.917 em
+    in the smaller, one em in the Japanese font and 1.185 em in the Korean.
+    The Latin and Korean fonts give every glyph the same vertical bearing Y,
+    half the room that advance leaves beyond the font's ascender-to-descender
+    height (17 or 18, 11 or 12, and 57 or 58 26.6 units); the Japanese font
+    gives each glyph the distance from 0.88 em above the baseline down to its
+    top (503 of 529 glyphs sampled; the others are 25 full-width small Latin
+    letters and the full-width dollar sign). The stand-ins wrote the box's
+    left edge plus half the advance, its top and 0. Only these rules and
+    ratios are taken from the measurement; no glyph data is. The project's
+    reader passes the three fields to the game unchanged and draws nothing
+    by them, and the console library draws by the image alone
+    (`PGF_SPEC.md` section 3.5, #1055); a game that sets text vertically or
+    steps lines by the vertical advance would read them.
+17. **Fit to the em** (`--fit-em`, from converter 0.9.0; off by default, and
+    output without it is unchanged). Before rule 1, for each code, let `L`
+    be the lesser of 0 and its outline's leftmost x, and `R` the greater of
+    its advance and its outline's rightmost x, in font units after rule 14's
+    scale. When `R - L` exceeds the font's units per em, the outline's x and
+    the advance are multiplied by `units_per_em / (R - L)`, so the glyph,
+    advance included, spans one em: a full-width cell. Its y is untouched.
+    `--tracking` is added after, and rules 6, 10 and 15 then apply as to any
+    glyph, so the image can lose a row whose ink falls under the coverage
+    threshold. A code within the em keeps every byte. The manifest lists the
+    narrowed codes (`fit_em.codes`).
+    *Project decision* (#1300): the console's Korean font draws every glyph
+    within one full-width cell (its widest image is 20 px, its maximum
+    advance 19.53 px), while Gowun Dodum draws 191 characters of KS X 1001
+    (circled and parenthesized letters and numbers, squared units and the
+    telephone sign) wider than the em: U+3392 came out 34 px wide with a
+    35.3 px advance, and the header's maximum sizes and maximum glyph width
+    with it. LocoRoco 2 lays out its button prompt from those header fields,
+    and drew it 85 px wide where the console's fonts give 116 (121 with the
+    fitted font; most of the rest is the maximum glyph width, 20 against the
+    console's 21). The console's
+    header maxima are not a function of its glyphs (its maximum glyph width
+    is 21 where no image is wider than 20), so the converter keeps deriving
+    them from the glyphs (section 4) and fits the glyphs instead.
+18. **Measured horizontal metrics** (`--horizontal-metrics FILE
+    --horizontal-metrics-slot NAME`, from converter 0.10.0; off by default,
+    and output without it is unchanged). The file is an
+    `nk-psp-horizontal-metrics/v1` table: its `evidence` label
+    (`PSP-measured`, or `PPSSPP-derived, not PSP-measured` for values that
+    came from PPSSPP), its `fields`, exactly `advance_h_26_6`, `bitmap_width`
+    and `bitmap_left`, and per slot a map from `U+XXXX` to those three
+    integers. For each converted code the slot lists:
+    - the advance is `advance_h_26_6`, exactly: `--tracking`,
+      `--embolden-advance` and `--digit-advance` do not apply to it, and a
+      digit it lists is not shifted;
+    - when `bitmap_width` is above 0 and the glyph has ink, the outline's x is
+      multiplied by `k / 1000` on top of rules 14 and 17, for the `k` in
+      750..1250 nearest 1000 whose image, after rules 1-15, is `bitmap_width`
+      pixels wide and reaches half coverage (a sample of 8 or more) on the same
+      top and bottom rows as at `k = 1000` (a horizontal scale must not move an
+      x-height or cap-height row). The image width grows with `k`, so a binary
+      search finds the range of `k` for a width. When no such `k` exists, the
+      nearest narrower width up to 3 pixels less that one does is used and
+      the image is padded with blank columns to `bitmap_width`, half on each
+      side and the odd one on the right; failing that, the nearest wider width
+      up to 3 pixels more; failing that, `k = 1000`;
+    - the image's left (`adjust_x`, `x_left`) is `bitmap_left`.
+    The glyph's rows, its y and every other field are as without the option.
+    Codes the slot does not list, and listed codes outside the code set, are
+    converted as without it. The manifest records the table (section 7).
+    *Project decision* (#1300), from a measurement the maintainer approved
+    for publication: the table `assets/fonts/psp_measured_latin_metrics.json` holds,
+    for each character the stand-ins draw, the advance, image width and left
+    of the console's Latin fonts `ltn0`, `ltn4`, `ltn8` and `ltn12`, read
+    from the fonts of the maintainer's own PSP-3000 (firmware 6.61) through
+    the project's reader (`src/rt/pgf_public.c`) as the character
+    information fields `sfp26AdvanceH`, `bitmapWidth` and `bitmapLeft`. It
+    is labelled `PSP-measured`; none of its values comes from PPSSPP. It
+    holds those numbers only: no outline, bitmap, hinting or other byte of a
+    console font. A game lays text out from these three numbers (Hot Shots
+    Tennis by the image width, the others by the advance and the left), so
+    with them the Geist stand-ins set each line where the console's fonts
+    do, while every letter keeps Geist's own outline. Over the 2,195 values
+    the built titles query, the advance and the left now match the console's
+    in every character and the image width in 96 % (the rest is listed in
+    the manifest); the line widths of the measured strings are within one
+    pixel.
+
 Same pinned input plus same parameters plus same converter version therefore
 produce byte-identical `.pgf` and manifest output on every supported host,
 which `tools/test_ttf2pgf.py` asserts by repeated runs.
 
 ## 4. Geometry to PGF metrics
 
-For a glyph whose raster box is `left, bottom, right, top` in whole pixels
-(relative to the origin on the baseline, y up):
+For a glyph whose raster box, cut to its ink by rule 15, is
+`left, bottom, right, top` in whole pixels (relative to the origin on the
+baseline, y up):
 
 | Field | Value |
 | --- | --- |
 | `width`, `height` | box size in pixels (7-bit record fields). |
 | `dimension_width`, `dimension_height` | `width * 64`, `height * 64`. |
 | `x_left` | `left * 64` (bitmap left edge relative to the pen). |
-| `x_center` | writer default: `x_left + advance_x // 2`. |
+| `x_center` | `-floor(dimension_width / 2)` (rule 16). |
 | `y_base` | `top * 64` (pixels of bitmap above the baseline). |
+| `y_top` | rule 16: `frac(O) - y_base` with `--vertical-origin`, else the margin above the ascender. |
+| `advance_y` | rule 16: `frac(A)`, one em by default. |
 | descender (derived) | `y_base - dimension_height = bottom * 64`, matching `PGF_SPEC.md` section 3.9. |
-| `adjust_x`, `adjust_y` | 0; positioning is carried by the 26.6 metrics, and the reader's draw path uses only the caller's position (`PGF_SPEC.md` section 3.10). |
+| `adjust_x`, `adjust_y` | `left`, `top`: the reader returns them as the character information's bitmap left and top (`0x08`, `0x0C`); its draw path uses only the caller's position (`PGF_SPEC.md` section 3.10). |
 | `row_order` | 1 (raster order). |
 
 Header extrema are then whatever `pgf_writer` derives from those records:
@@ -391,6 +621,28 @@ Generated PGFs are fixtures, never an authenticity claim.
 | `license.spdx`, `license.copyright`, `license.reserved_font_names` | Carried into the manifest verbatim. |
 | `source.url`, `source.repository`, `source.path`, `source.retrieved` | Static provenance of the pinned bytes; carried into the manifest. |
 
+A font the project already ships may instead be pinned by the static font list
+that records it (`assets/fonts/ui/manifest.json`: a JSON object with
+`schema_version` 1, an `upstream` object and a `fonts` list, and no `schema`
+field). The converter takes the one entry whose `sha256` is the input's
+digest and refuses the input (`pin-digest-mismatch`) when no entry, or more
+than one, has it. It then requires, each a `pin-invalid` refusal otherwise:
+the entry's `file` names the input file (the same leaf name), `static` is
+`true`, and `license_file` is in the same folder as `file`. `size_bytes` is
+verified as for a pin (`pin-size-mismatch`), and the licence text is the file
+of that leaf name beside the input, verified against `license_sha256`
+(`pin-license-mismatch`). The list records no copyright line, so the licence
+text's first paragraph (up to the first blank line), which must begin with
+`Copyright`, is the manifest's copyright line, whitespace runs joined by single
+spaces. The Reserved Font Names are the entry's `reserved_font_names` (none when
+absent), and a copyright paragraph that mentions a reserved font name while the
+entry lists none is refused, so a reserved name cannot be missed. The
+manifest's `source` record is the list's `upstream.repository` and
+`upstream.commit` with the entry's `upstream_path`, `upstream_sha256`,
+`source_kind` and, for a variable-font instance, its `instance` axes
+(`wght=400`). `family` is the entry's. The CLI passes the input and
+`--fallback` paths for this; a pin file needs neither.
+
 `--manifest FILE` (which requires `--pin`) emits canonical JSON with:
 
 | Block | Contents |
@@ -402,7 +654,7 @@ Generated PGFs are fixtures, never an authenticity claim.
 | `code_points` | For `--codepoints`: the file's leaf name, count, and SHA-256; `null` for a range. |
 | `glyphs` | Count, zero-area codes, maximum pixel dimensions. |
 | `metric_targets` | The policy, the chosen ppem, and achieved 26.6 values - or `null`. |
-| `parameters` | ppem, nominal em size (26.6), resolution (26.6), any header ascender and descender given, whether the ellipsis was set on the baseline, supersample, coverage bits, rounding formulas, hinting mode, and the `embolden` strengths (x, y, advance, in sub-samples); `tracking_sub_samples` and `digit_advance_26_6` only when given; `snap_overshoot` only when given: its unit, threshold `N`, and the flat edges `B`, `X` and `C` in font units of the first font (`zones`) and, with a fallback that draws codes, of the second (`fallback_zones`). |
+| `parameters` | ppem, nominal em size (26.6), resolution (26.6), any header ascender and descender given, whether the ellipsis was set on the baseline, supersample, coverage bits, rounding formulas, hinting mode, and the `embolden` strengths (x, y, advance, in sub-samples); `tracking_sub_samples` and `digit_advance_26_6` only when given; `snap_overshoot` only when given: its unit, threshold `N`, and the flat edges `B`, `X` and `C` in font units of the first font (`zones`) and, with a fallback that draws codes, of the second (`fallback_zones`); `scale_x_thousandths` only when it is not 1000; `vertical_advance_thousandths` and `vertical_origin_thousandths` only when given; `fit_em` only when given: the ascending `codes` it narrowed; `horizontal_metrics` only when given: the table's leaf name (`path`), SHA-256, `slot`, `evidence` label and `fields`, how many codes it lists (`codes`) and how many of them were converted (`codes_applied`), the codes padded to their width (`width_padded_codes`) and those left wider than it (`width_not_met_codes`), and each scaled code's `k` (`width_factors`). |
 | `fallback` | Only with `--fallback`: the second font's `input` record (as above), its `license` block, and the ascending `codes` it draws. |
 | `license` | SPDX id, copyright line, reserved font names, the **full licence text**, its digest, and the source pin's provenance record - or `null` without a pin. |
 
@@ -420,6 +672,13 @@ Generated PGFs are fixtures, never an authenticity claim.
   retail, firmware, or camouflaged font payload. No bytes of those inputs are
   read, embedded, or compared against. This record exists so the claim in
   issue #313 is checkable rather than asserted.
+- **Measured numbers.** Rules 15 to 18 rest on measurements of the console's
+  own fonts through the project's reader. Rules 15 to 17 take only rules and
+  ratios from them. Rule 18's table records, per character, three numbers the
+  console's Latin fonts give a game (advance, image width and left), labelled
+  `PSP-measured` with the device, firmware, fonts and fields; the maintainer
+  approved publishing them. The converter reads only that table, never a
+  console font, and no outline, bitmap or hinting byte of one is recorded.
 - **Classification.** Candidate `project-authored-independent` under
   `INDEPENDENCE_MODEL.md`: behaviour established from public format facts and
   project-owned specification, expression written for this project. The
@@ -450,9 +709,13 @@ Generated PGFs are fixtures, never an authenticity claim.
 | Code-point set converts only the listed codes, sparse map, digest in manifest, nominal size | `CodePointSetTests` |
 | Sparse code-point set reads back through the reader; absent codes are misses | `ReaderRoundTripTests` |
 | Every named refusal writes nothing | `RefusalTests`, `CompositeRefusalTests` |
-| Tracking, tabular digits and the second font: effect, manifest record and refusals | `SpacingAndFallbackOptionTests` |
-| Built-in Latin, Japanese and Korean sets and the pinned fonts' coverage of them | `ProjectCodePointCoverageTests`, `JapaneseCodePointCoverageTests` |
-| Project Latin faces: one per console index, line widths, class widths and ink | `ProjectLatinStrikeTests` |
+| Tracking, tabular digits, the horizontal scale and the second font: effect, manifest record and refusals | `SpacingAndFallbackOptionTests` |
+| Built-in Latin, Japanese and Korean sets and the pinned fonts' coverage of them; the block and code-page rules equal their definition over the faces' character maps; the small sans face keeps its glyph box | `ProjectCodePointCoverageTests`, `JapaneseCodePointCoverageTests` |
+| Project Latin faces: one per console index, line widths, class widths, ink, and the sans faces' x-height and cap-height rows | `ProjectLatinStrikeTests` |
 | Overshoot alignment: round and flat letters share their rows, flat letters and deep features unchanged, manifest record and refusals | `OvershootSnapTests`, `ProjectLatinStrikeTests` |
-| Project Japanese and Korean nominal size and advances | `ProjectCjkSizeTests` |
+| Ink trim: no image starts or ends in a blank column or row, a string drawn through the reader by advance keeps every pixel, advances unchanged | `InkTrimTests`, `ReaderRoundTripTests` |
+| Vertical metrics: the reader returns bearing X, bearing Y and advance by rule 16 with and without each option; the project fonts carry the console's values; out-of-range options refused | `ReaderRoundTripTests`, `ProjectLatinStrikeTests`, `ProjectCjkSizeTests`, `SpacingAndFallbackOptionTests` |
+| Project Japanese and Korean nominal size and advances; Korean glyphs wider than the em fit it, the others unchanged | `ProjectCjkSizeTests` |
+| Measured horizontal metrics: the table's PSP-measured labelling and fields, the Geist faces' advance, width and left equal to it, rows kept, padding, manifest record and refusals | `HorizontalMetricsTests`, `InkTrimTests` |
+| A font the project ships pinned by its font-list record, and that form's refusals | `FontListPinTests` |
 | Independent structural validation | `nk_core.fonts.validate_pgf_data` on the output |

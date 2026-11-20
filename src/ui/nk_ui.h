@@ -111,7 +111,8 @@ typedef struct {
     bool scroll;
 } NkUiLayout;
 
-/* Scroll containers one frame may hold; a frame that opens more is dropped. */
+/* Scroll containers one frame may hold; a frame that opens more is dropped and
+   reported (SCROLL_CONTAINERS_EXCEEDED). */
 #define NK_UI_SCROLL_MAX 16u
 
 /* A scroll container's state, in logical px: where it is now, and its last layout. */
@@ -176,6 +177,11 @@ typedef struct {
     float y;
     float advance_x;
     float advance_y;
+    /* Characters (UTF-8 code points) in the run's text before the first one this
+       glyph draws. A renderer adds that many letter-spacing gaps, as layout
+       reserves one after every character, the spaces and ligatures that draw
+       no glyph of their own included. */
+    uint32_t text_index;
 } NkUiGlyph;
 
 typedef struct {
@@ -189,6 +195,8 @@ typedef struct {
     float advance_y;
 } NkUiGlyphBitmap;
 
+/* shape writes at most `max` glyphs to `out` and returns how many it wrote;
+   renderers draw no more than `max` whatever it returns. */
 typedef struct {
     void *user;
     NkUiTextSize (*measure)(void *user, int font, int px, const char *s, size_t n);
@@ -202,7 +210,11 @@ typedef struct {
    word or byte that did not fit, an internal error): those are fatal and
    nk_ui_end drops the frame. A duplicate id, a floating element without its
    parent, or a percentage over 100% still lays out a whole frame, so it is
-   drawn and the error is only reported. */
+   drawn and the error is only reported. nk_ui reports its own limits the same
+   way, all fatal: FRAME_TEXT_FULL (no memory for the frame's text),
+   SCROLL_CONTAINERS_EXCEEDED, CUSTOM_SLOTS_EXCEEDED, CONTAINER_LEFT_OPEN and
+   DRAW_COMMAND_FAILED; and one that is not, EVENT_QUEUE_FULL (an input event
+   was dropped). */
 typedef struct {
     const char *kind;   /* Clay's error type without its prefix, e.g. "DUPLICATE_ID" */
     const char *text;   /* Clay's explanation: text_length bytes, not NUL-terminated */
@@ -344,6 +356,10 @@ typedef struct {
     int device;
     NkUiPadFamily pad_family;
     uint32_t codepoint;
+    /* Set by nk_ui, never by a host: the control an NK_UI_EV_ACTIVATE belongs
+       to (the one focused when it was pressed, or clicked), when a later event
+       of its frame moved focus. 0 means the control focused when it is taken. */
+    NkUiId target;
 } NkUiEvent;
 
 enum {
@@ -358,7 +374,11 @@ enum {
     /* Left and right change the control instead of moving focus (a segmented
        control, a slider): while it is focused they stay queued as NK_UI_EV_NAV for
        nk_ui_take_event. For nk_ui_register_button. */
-    NK_UI_BUTTON_OWNS_HORIZONTAL = 1u << 8
+    NK_UI_BUTTON_OWNS_HORIZONTAL = 1u << 8,
+    /* A pointer target inside a control that takes the keys (one choice in a row of
+       choices): it can be hovered and clicked, and no directional move, Tab or first
+       focus lands on it. The screen moves focus back to the owning control. */
+    NK_UI_BUTTON_POINTER_ONLY = 1u << 9
 };
 
 /* Device scale and edge rounding are shared helpers for hosts and tests. The
@@ -367,12 +387,19 @@ enum {
 NkUiScale nk_ui_scale_for_viewport(const NkUiViewport *viewport);
 float nk_ui_text_scale_for_viewport(const NkUiViewport *viewport);
 NkUiPixelRect nk_ui_round_rect(NkUiRect rect, float density);
+/* One edge at a logical position, rounded to the nearest device pixel as
+   nk_ui_round_rect rounds each edge: 0 for a non-finite position or density,
+   and clamped two short of the int range. */
+int nk_ui_round_edge(float position, float density);
 
 NkUi *nk_ui_create(const NkUiConfig *config);
 void nk_ui_destroy(NkUi *ui);
 void nk_ui_set_viewport(NkUi *ui, const NkUiViewport *viewport);
 void nk_ui_set_prefs(NkUi *ui, const NkUiPrefs *prefs);
 void nk_ui_push_event(NkUi *ui, const NkUiEvent *event);
+/* Drops every queued event, the input a screen's first frame held for its laid-out graph
+   included (nk_ui_end puts that back in the queue). Called between frames. */
+void nk_ui_drop_input(NkUi *ui);
 /* A pointer press activates nothing by itself: the release does, when it lands
    on the control the press landed on. A host calls this when its screen changes,
    so the rest of a click that began on the old screen activates nothing on the
@@ -398,12 +425,20 @@ void nk_ui_end_container(NkUi *ui);
    was queued; the event is consumed. It returns false otherwise, including
    when the button could not be added. */
 bool nk_ui_button(NkUi *ui, NkUiId id, const char *label, uint32_t flags);
+/* The same button, naming the controls an up and a down move from it land on (0: the
+   nearest that way). See nk_ui_register_button_between in nk_ui_widgets.h. */
+bool nk_ui_button_between(NkUi *ui, NkUiId id, const char *label, uint32_t flags, NkUiId up,
+                          NkUiId down);
+/* A text run in a font and size. The text is copied into the frame, so a
+   temporary buffer is fine. */
 void nk_ui_label(NkUi *ui, NkUiId id, const char *text, int font, int size_px);
 /* A text run with an explicit style. The text is copied into the frame, so a
    temporary buffer is fine. */
 void nk_ui_text(NkUi *ui, NkUiId id, const char *text, const NkUiTextStyle *style);
-/* Copies text into storage that lives until the next nk_ui_begin. Returns ""
-   when the frame arena is full or no frame is open. */
+/* Copies text into storage that lives until the next nk_ui_begin; the storage
+   grows with the frame's text. Text already in that storage is returned as it
+   is. Returns "" when no frame is open, or when the storage cannot grow: that
+   frame is then dropped and reported (FRAME_TEXT_FULL). */
 const char *nk_ui_frame_text(NkUi *ui, const char *text);
 /* Word-wraps text in `style` at max_width logical px and keeps at most
    max_lines lines, ending the last kept line with an ellipsis when text was cut.
@@ -411,13 +446,25 @@ const char *nk_ui_frame_text(NkUi *ui, const char *text);
    most ten containers per layout, so long names are shortened, not clipped. */
 const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *style,
                              float max_width, int max_lines);
+/* Text for a wrapping box `max_width` logical px wide that shows it whole: a word (a run
+   between spaces or line breaks) wider than the box is broken onto lines of its own, each
+   piece as long as fits, after the piece's last '/', '\\', '_', '-' or '.' where that keeps at
+   least half of it, else after its last character that fits (CSS's overflow-wrap:
+   break-word). Words that fit are left to the layout's own word wrap, and no character is
+   left out or added but the line breaks. Measured after the display rules, as the run is
+   drawn. Returns frame storage, or "" when no frame is open or its text storage is full (as
+   nk_ui_frame_text). */
+const char *nk_ui_text_break(NkUi *ui, const char *text, const NkUiTextStyle *style,
+                             float max_width);
 /* One line of a list from *rest: text whose items are joined by " \xC2\xB7 "
    ("16x filtering \xC2\xB7 crisp keyboard"). The line is the whole items that
    fit max_width, each space a no-break space, so it is one run that is measured
    and drawn alike and never wraps; the dot after its last item stays on it while
-   items follow. It always takes one item: an item wider than the line ends in an
-   ellipsis. With `last` set and items left over, the line ends "and N more" for
-   the N items it leaves out, after as many items as still fit. Moves *rest past
+   items follow. Without `last` it always takes one item: an item wider than the
+   line ends in an ellipsis. With `last` set and items left over, the line ends
+   "and N more" for the N items it leaves out, after as many items as still fit;
+   the count is never cut for an item, so a line too narrow for the first item and
+   the count is the count alone ("and N more", every item counted). Moves *rest past
    what the line took (to "" after a last line). Returns frame storage. */
 const char *nk_ui_list_line(NkUi *ui, const char **rest, const NkUiTextStyle *style,
                             float max_width, bool last);
@@ -525,7 +572,13 @@ bool nk_ui_laid_out(const NkUi *ui);
    a screen sized from the window's own width runs on under the panel. Set
    between frames. */
 void nk_ui_set_layout_debug(NkUi *ui, bool enabled);
+/* Whether the inspector is on. Its panel has its own close button, which turns
+   it off in the frame it is clicked; a host that asks for the inspector reads
+   this after nk_ui_end, so it does not turn the panel on again. */
+bool nk_ui_layout_debug(const NkUi *ui);
 NkUiId nk_ui_focused(const NkUi *ui);
+/* Focuses control id. Id 0 drops the focus, and what the active scope
+   remembers, so the frame ends on the scope's default control. */
 void nk_ui_focus(NkUi *ui, NkUiId id);
 size_t nk_ui_dump(const NkUi *ui, char *out, size_t cap);
 

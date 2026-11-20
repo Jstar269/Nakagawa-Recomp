@@ -94,6 +94,9 @@ static void test_poll_arg_validation(void) {
     /* Shared wait validation still applies. */
     EXPECT(sr_evf_check_poll_args(0x1u, 0x40u) == SR_EVF_ERR_ILLEGAL_MODE);
     EXPECT(sr_evf_check_poll_args(0u, 0) == SR_EVF_ERR_ILPAT);
+    /* The combined clear modes are rejected before the zero pattern. */
+    EXPECT(sr_evf_check_poll_args(0u, SR_EVF_WAIT_CLEAR | SR_EVF_WAIT_CLEARALL)
+           == SR_EVF_ERR_ILLEGAL_MODE);
 }
 
 static void test_error_codes_are_psp_values(void) {

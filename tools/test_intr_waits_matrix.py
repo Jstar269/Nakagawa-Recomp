@@ -69,6 +69,7 @@ def _find_waits_expected() -> pathlib.Path | None:
 WAITS_EXPECTED = _find_waits_expected()
 
 NID_SUSPEND_DISPATCH_THREAD = "0x3ad58b8c"
+NID_RESUME_DISPATCH_THREAD = "0x27e22ec2"
 
 # Sentinels mirrored from intr_conformance.h.  Kept here rather than parsed so a
 # renamed sentinel is a loud failure instead of a silently skipped comparison.
@@ -263,27 +264,52 @@ class TestRegistryScope(unittest.TestCase):
         self.assertIsNotNone(body, "hle_register_wait_conformance_handlers() not found")
         return body
 
+    def selftest_reachable_triples(self):
+        """The (nid, name, handler) triples the matrix harness build registers: the
+        conformance helper plus every registration helper sr_hle_init() calls before,
+        inside or after its SR_HLE_THREAD_SELFTEST branch.  The production-only #else
+        branch is not reachable from the harness."""
+        reachable = set(self.triples(self.conformance_helper()))
+        body = self.init_body()
+        thread_selftest = body.index("#ifdef SR_HLE_THREAD_SELFTEST")
+        shared = body[:thread_selftest]
+        # Walk the ThreadMan guard's own #else and #endif by nesting depth: sr_hle_init
+        # opens with another feature guard (the MPEG media selftest), so neither the
+        # first #else nor the first #endif in the body is necessarily this one.
+        depth, production_start, guard_end = 0, None, None
+        for m in re.finditer(r"^[ \t]*#[ \t]*(if|ifdef|ifndef|else|elif|endif)\b.*$",
+                             body[thread_selftest:], re.M):
+            directive, at = m.group(1), thread_selftest + m.start()
+            if directive.startswith("if"):
+                depth += 1
+            elif directive == "endif":
+                depth -= 1
+                if depth == 0:
+                    guard_end = thread_selftest + m.end()
+                    break
+            elif depth == 1 and production_start is None:
+                production_start = at
+        self.assertIsNotNone(production_start, "the ThreadMan guard has no production #else")
+        self.assertIsNotNone(guard_end, "the ThreadMan guard has no #endif")
+        selftest = body[thread_selftest:production_start]
+        after = body[guard_end:]
+        called = set(re.findall(r"(hle_register_\w+)\(\);", shared + selftest + after))
+        self.assertIn("hle_register_wait_conformance_handlers", called)
+        for name in called:
+            helper = self.registration_body(name)
+            if helper is not None:
+                reachable |= set(self.triples(helper))
+        return reachable
+
     def test_helper_covers_the_matrix_nids(self):
         """Every NID the executable matrix dispatches must be registered by the helper
         or by another helper both builds call.  A NID that is only in the production
         branch is unreachable from the harness."""
         helper_nids = {nid for nid, _, _ in self.triples(self.conformance_helper())}
         self.assertGreaterEqual(len(helper_nids), 25, "registry helper is suspiciously small")
-        body = self.init_body()
-        thread_selftest = body.index("#ifdef SR_HLE_THREAD_SELFTEST")
-        shared = body[:thread_selftest]
-        # The first #else belongs to whichever feature guard opens sr_hle_init
-        # (the MPEG media selftest), so look for the one after the ThreadMan guard.
-        selftest = body[thread_selftest: body.index("#else", thread_selftest)]
-        called = set(re.findall(r"(hle_register_\w+)\(\);", shared + selftest))
-        self.assertIn("hle_register_wait_conformance_handlers", called)
+        reachable = {nid for nid, _, _ in self.selftest_reachable_triples()}
 
         rows = list(parse_matrix(strip_comments(HEADER.read_text(encoding="utf-8"))))
-        reachable = set(helper_nids)
-        for name in called:
-            body = self.registration_body(name)
-            if body is not None:
-                reachable |= {nid for nid, _, _ in self.triples(body)}
         for row in rows:
             nid = re.search(r"0x[0-9a-fA-F]+", row["raw"]).group(0).lower()
             self.assertIn(
@@ -328,16 +354,17 @@ class TestRegistryScope(unittest.TestCase):
             seen[nid] = name
 
     def test_suspend_dispatch_thread_is_registered(self):
-        """Verify sceKernelSuspendDispatchThread and sceKernelResumeDispatchThread are registered."""
-        registered = self.triples(self.src)
-        self.assertIn(
-            "sceKernelSuspendDispatchThread", {name for _, name, _ in registered},
-            "sceKernelSuspendDispatchThread must be registered in hle.c",
-        )
-        self.assertIn(
-            "sceKernelResumeDispatchThread", {name for _, name, _ in registered},
-            "sceKernelResumeDispatchThread must be registered in hle.c",
-        )
+        """sceKernelSuspendDispatchThread and sceKernelResumeDispatchThread are registered
+        by a helper the matrix harness build reaches, under their own NIDs."""
+        reachable = {(nid, name) for nid, name, _ in self.selftest_reachable_triples()}
+        for nid, name in (
+            (NID_SUSPEND_DISPATCH_THREAD, "sceKernelSuspendDispatchThread"),
+            (NID_RESUME_DISPATCH_THREAD, "sceKernelResumeDispatchThread"),
+        ):
+            self.assertIn(
+                (nid, name), reachable,
+                f"{name} ({nid}) must be registered by a helper the selftest build calls",
+            )
 
 
 if __name__ == "__main__":

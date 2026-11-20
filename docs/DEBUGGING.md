@@ -521,11 +521,11 @@ python tools/vblank_ledger.py --perf logs/perf.csv --stderr logs/stderr_run.log
 ```
 
 ```text
-VBLANK_CHECK: presenting PASS presenting_s=3454 wall_s=3457.723 source_periods=207256.1 delivered=207248
+VBLANK_CHECK: presenting INFO presenting_s=3454 wall_s=3457.723 source_periods=207256.1 delivered=207248
 VBLANK_CHECK: rate PASS ratio=0.99992 band=[0.99500,1.00500] excess_episodes=-16 ... per_second_delivered={59: 617, 60: 2209, 61: 623}
 VBLANK_CHECK: identity PASS owed=205096 coalesced=7 delivered=205102 dropped=0 in_flight=1 residual=1 late_owed=84207 late_delivered=84206
 VBLANK_CHECK: masked PASS coalesced=7 masked_periods=11 credit=-4 in_flight=1
-VBLANK_AUDIT: verdict=PASS checks=4 failures=0
+VBLANK_AUDIT: verdict=PASS checks=3 failures=0
 ```
 
 - `rate` divides delivered episodes by the source periods that elapsed
@@ -540,6 +540,9 @@ VBLANK_AUDIT: verdict=PASS checks=4 failures=0
   (`PERF_ATTRIB vblank_late ... masked_periods=`). A credit beyond the in-flight
   residual is a masked window counted twice; the hardware probe measured `+1` for a
   window however many periods it covered (`docs/ARCHITECTURE.md`).
+- `presenting` is `INFO`: it names the window the rate is judged over and is not a
+  check, so a run that presented frames but could judge neither the rate nor the
+  ledger is still `NOT_RUN`.
 - A missing ledger is `SKIP` with its reason, and a run where nothing could be
   judged is `NOT_RUN` with a non-zero exit: an absent artifact is not a pass.
 
@@ -609,19 +612,21 @@ observations.
 
 | Line (exact text) | Where | Meaning and next step |
 | --- | --- | --- |
-| `HLE: unverified: <name> (NID 0x<nid>) has no recorded evidence (docs/HLE_COVERAGE.md)` | `src/rt/hle.c:106` | Once per NID, just before its handler first runs. The handler exists, but no test records evidence for it. The line changes no result. Look the NID up in [`HLE_COVERAGE.md`](HLE_COVERAGE.md) before you trust what the handler returned. |
-| `HLE: controlled refusal: <name> (NID 0x<nid>) returned 0x<code>; in the works (#341)` | `src/rt/hle.c:87` | Once per NID. The handler is registered only to answer a fixed error code (`0x8...`), because the function is not modelled yet. The game gets that error, not an invented success. Find the handler with the "Find an HLE handler" recipe in [Quick recipes](#quick-recipes). |
-| `HLE: compatibility exception: <name> (NID 0x<nid>) keeps result 0; semantics in the works (<issue>)` | `src/rt/hle.c:115` | Once per NID, after the handler ran. The handler returns 0 so the game can go on, but the real semantics are not modelled; `<issue>` is the tracking issue. If the game misbehaves near this call, start from that issue. |
-| `HLE unimplemented summary: <name> (NID 0x<nid>) -> 0x<code>; in the works (#341)` or `HLE unimplemented summary: <name> (NID 0x<nid>) kept compatibility result 0; in the works (<issue>)` | `src/rt/hle.c:72`, `src/rt/hle.c:77` | Printed once at process exit (registered with `atexit`), one line for each NID that earlier printed a controlled refusal or a compatibility exception. It is the same information gathered at the end of the log. A run that ends with `_Exit`, such as the stop below, does not print it. |
-| `UNSUPPORTED_IMPORT: <name> <detail>; the run stops here (#308)` | `src/rt/hle.c:1932` (`hle_unmodelled_stop`) | A handler met an argument shape the runtime does not model. Under the scheduler the run exits with code 7 and the player shows an `unsupported-import-<name>` stop card. See `UNSUPPORTED_IMPORT` in [`FAILURE_CODES.md`](FAILURE_CODES.md). Fix or model the case; do not work around the stop. |
-| `HLE: unimplemented nid 0x<nid> (<name>) (thread uid 0x<uid>)`, then an indented line `-> add a handler in src/rt/hle.c: sr_hle_register(0x<nid>u, "<name>", h_...);` | `src/rt/hle.c:4103` (`sr_syscall`) | The game called an import with no handler at all (`<name>` is `unknown` if the NID is not in the name table). The run stops: exit code 7 under the scheduler, an HLE-miss stop otherwise. Add a handler, or an unsupported registration, for that NID. |
+| `HLE: unverified: <name> (NID 0x<nid>) has no recorded evidence (docs/HLE_COVERAGE.md)` | `hle_note_unverified()` (`src/rt/hle.c`) | Once per NID, just before its handler first runs. The handler exists, but no test records evidence for it. The line changes no result. Look the NID up in [`HLE_COVERAGE.md`](HLE_COVERAGE.md) before you trust what the handler returned. |
+| `HLE: controlled refusal: <name> (NID 0x<nid>) returned 0x<code>; in the works (#341)` | `hle_note_unsupported()` (`src/rt/hle.c`) | Once per NID. The handler is registered only to answer a fixed error code (`0x8...`), because the function is not modelled yet. The game gets that error, not an invented success. Find the handler with the "Find an HLE handler" recipe in [Quick recipes](#quick-recipes). |
+| `HLE: compatibility exception: <name> (NID 0x<nid>) keeps result 0; semantics in the works (<issue>)` | `hle_note_success_exception()` (`src/rt/hle.c`) | Once per NID, after the handler ran. The handler returns 0 so the game can go on, but the real semantics are not modelled; `<issue>` is the tracking issue. If the game misbehaves near this call, start from that issue. |
+| `HLE unimplemented summary: <name> (NID 0x<nid>) -> 0x<code>; in the works (#341)` or `HLE unimplemented summary: <name> (NID 0x<nid>) kept compatibility result 0; in the works (<issue>)` | `hle_unsupported_summary()` (`src/rt/hle.c`), registered by `hle_register_unsupported_summary()` | Printed once at process exit (registered with `atexit`), one line for each NID that earlier printed a controlled refusal or a compatibility exception. It is the same information gathered at the end of the log. A run that ends with `_Exit`, such as the stop below, does not print it. |
+| `UNSUPPORTED_IMPORT: <name> <detail>; the run stops here (#308)` | `hle_unmodelled_stop()` (`src/rt/hle.c`) | A handler met an argument shape the runtime does not model. Under the scheduler the run exits with code 7 and the player shows an `unsupported-import-<name>` stop card. See `UNSUPPORTED_IMPORT` in [`FAILURE_CODES.md`](FAILURE_CODES.md). Fix or model the case; do not work around the stop. |
+| `HLE: unimplemented nid 0x<nid> (<name>) (thread uid 0x<uid>)`, then an indented line `-> add a handler in src/rt/hle.c: sr_hle_register(0x<nid>u, "<name>", h_...);` | `sr_syscall()` (`src/rt/hle.c`) | The game called an import with no handler at all (`<name>` is `unknown` if the NID is not in the name table). The run stops: exit code 7 under the scheduler, an HLE-miss stop otherwise. Add a handler, or an unsupported registration, for that NID. |
 
 Two more lines come from registration and mean a build problem, not a game problem:
-`HLE: duplicate NID 0x<nid> (<name>) rejected; first was <name>` (`src/rt/hle.c:217`) and
-`HLE: invalid unsupported result 0x<code> for <name> (NID 0x<nid>)` (`src/rt/hle.c:244`; an unsupported
-result must have its top bit set). Both are printed while handlers register; the second registration is dropped.
+`HLE: duplicate NID 0x<nid> (<name>) rejected; first was <name>` (`sr_hle_register_entry()` in
+`src/rt/hle.c`) and `HLE: invalid unsupported result 0x<code> for <name> (NID 0x<nid>)`
+(`sr_hle_register_unsupported()` in `src/rt/hle.c`; an unsupported result must have its top bit
+set). Both are printed while handlers register; the second registration is dropped.
 
-`SR_HLELOG=1` adds the per-call `HLE: calling <name> (0x<nid>) from 0x<uid>` lines (`src/rt/hle.c:4096`). The
+`SR_HLELOG=1` adds the per-call `HLE: calling <name> (0x<nid>) from 0x<uid>` lines (`sr_syscall()` in
+`src/rt/hle.c`). The
 coverage classes, such as `unverified` and `synthetic`, are defined in [`HLE_COVERAGE.md`](HLE_COVERAGE.md).
 
 ### Thread Scheduling (→ SR_DBG_SCHED)
@@ -829,8 +834,10 @@ $env:SR_NOINPUT = "1"
 
 The converter expands shorter presses so a replay holds each press for as many
 vblanks as a person would. A one-vblank pulse can no longer fall between the
-game's controller reads, because scripted input waits for a read (below). Use
-`--minimum-width 1` only when an exact-width replay is required.
+game's controller reads, because scripted input waits for a read (below). An
+expanded press stops where the next row starts (a vblank earlier for the same
+button), so it never replays a chord or merges two presses the recording did not
+hold. Use `--minimum-width 1` only when an exact-width replay is required.
 
 The left stick is recorded with the buttons. Each `ctrl_latch:` line carries the
 stick the guest was handed (`lx=`, `ly=`; a title in digital mode reads 128, 128),
@@ -997,6 +1004,15 @@ keeps the original behaviour exactly, and a file mixing the two is refused.
 | `READS <step>` / `VBLANKS <step>` | The unit of that one `PRESS`, `DELAY`, `PRESS_UNTIL`, `PRESS_WHILE` or `PRESS_UNTIL_NID` line; overrides `WIDTHS` |
 | `STICK <lx> <ly> <step>` | Hold the left stick at `lx`, `ly` (decimal 0-255, 128 centred) while that `PRESS`, `PRESS_UNTIL`, `PRESS_WHILE` or `PRESS_UNTIL_NID` presses; comes before `READS` / `VBLANKS` ([below](#holding-the-left-stick)) |
 | `END` | Route complete |
+
+Every count (widths, periods, timeouts, `DELAY`, `SAMPLE_EVERY`, `TOLERANCE`, `tol=` and the
+legacy row's frame and width) is plain decimal digits and nothing else: `-1`, `12x` or `abc` refuses
+the file at load rather than becoming a near-endless hold, `12` or `0`. Every step that names a
+checkpoint (`WAIT`, `EXPECT`, `PRESS_UNTIL`, `PRESS_WHILE`) must name one a `CHECKPOINT` line
+defines. All recordings of one checkpoint share one tolerance, so an alternate whose tolerance
+(its `tol=`, or `TOLERANCE` without one) differs from an earlier recording's is refused. A route
+file `SR_PADSCRIPT` names that cannot be opened, or that holds no step, fails the run with
+`ROUTE_FAIL:` and status 86 instead of running unscripted on the automatic START pulse.
 
 A mask is either a button name (see [Naming the buttons a route presses](#naming-the-buttons-a-route-presses))
 or a hex literal of at most eight digits with an optional `0x` prefix. Anything else refuses
@@ -1519,7 +1535,7 @@ reaches it and writes exactly one verdict to stderr:
 | Verdict | Meaning |
 | --- | --- |
 | `REPLAY_REFUSED reason=<name> line=<n>` | exit 1 before the guest runs: another executable, disc, `CpuState` ABI or clock, or a line it cannot read |
-| `REPLAY_MISMATCH frame=<f> index=<i> kind=<k> digest=<name>` | exit 1 at the first checkpoint that differs, naming the thread, scheduler or memory chunk |
+| `REPLAY_MISMATCH frame=<f> index=<i> kind=<k> digest=<name>` | exit 1 at the first checkpoint that differs, naming the thread, scheduler or memory chunk. `kind=overflow digest=-` means the replay's own checkpoint did not fit (more threads than a checkpoint holds), so the run diverged there |
 | `REPLAY_MISSING_ANSWER call=osk request=<k> frame=<f> detail=<why>` | exit 1: the guest asked for an answer the recording does not hold. Nothing is made up |
 | `REPLAY_COMPLETE frame=<f> checkpoints=<n> answers=<k>` | every checkpoint matched. Input recorded after the last one is still served; the pad and the keyboard each go live when the recording runs out |
 | `REPLAY_NOT_RUN reached=<f> end=<f> checkpoints=<i>/<n>` | at exit, when the run stopped before the recording was used up. This is never a pass |
@@ -1582,9 +1598,11 @@ frames, which is tracked in #2172.
 A soak or title route writes to whichever Memory Stick the session resolves.
 `tools/isolated_run.py` copies the stick (and optional settings files) into a new folder
 under a private work directory, points `SR_MEMSTICK` at the copy, runs your command, and
-re-hashes the originals. It prints `ORIGINALS_UNCHANGED`, or `ORIGINAL_CHANGED` naming the
-first differing path (exit status 3). It does not stop the guest writing; keep the work
-directory private, because the copy can hold save data.
+re-hashes the originals. It prints `ORIGINALS_UNCHANGED: command_status=N` and exits with
+the command's own status, or prints `ORIGINAL_CHANGED` naming the first differing path and
+exits 121. A setup failure, or a command that cannot be started, exits 120; neither code
+collides with the small statuses the wrapped tools use. It does not stop the guest writing;
+keep the work directory private, because the copy can hold save data.
 
 The copy is only used by a command that honours an inherited `SR_MEMSTICK`: the bare
 runtime and the launcher route (`nk_launch.c` keeps an explicit `SR_MEMSTICK` instead of
@@ -1621,9 +1639,11 @@ python tools/soak_audit.py --perf logs/perf.csv --proc proc.csv --stderr logs/st
 | `compat_patches` | never: it names each temporary compatibility patch that fired (the runtime's `COMPAT_PATCH_REPORT`, #1274), so a defect can be traced to an active patch; `--compat-counts-only` keeps the ids out of a summary you will publish |
 
 Output is one `SOAK_CHECK:` line per assertion plus a `SOAK_AUDIT:` verdict line, and the exit
-status is non-zero if any assertion failed. Two rules keep it honest: an input it was not
-given reports `SKIP` with the reason rather than passing, and a quantity the runtime does not
-publish is reported as absent.
+status is 1 if any assertion failed. Three rules keep it honest: an input it was not
+given reports `SKIP` with the reason rather than passing, a quantity the runtime does not
+publish is reported as absent, and a run in which nothing was judged (`compat_patches` only
+reports) is `verdict=SKIP` with exit status 77, never a pass. `--compat-counts-only` also
+names only the kinds of fatal marker, not the raw line, which can carry a host path.
 
 **Audio drift** is the one that was unmeasurable until the telemetry published it. The runtime
 reads the queue depth the blocking output paces against in `src/rt/hle_audio.c`
@@ -1681,7 +1701,6 @@ scan: they are excluded from `presenting` and never counted as a stall.
 | ---------- | ------------- |
 | `SR_IOLOG=1` | Log file open/read/write operations |
 | `SR_STATLOG=1` | Log stat operations |
-| `SR_UMDDUMP=1` | Dump UMD data |
 
 ### Display & Video (→ SR_DBG_VIDEO)
 
@@ -1700,7 +1719,7 @@ scan: they are excluded from `presenting` and never counted as a stall.
 | `SR_VIDEOREC_DIR=PATH` | Record the run: one video frame per VBLANK at the presenter's output size plus the game's mixed audio, on one guest timeline. Needs `SR_DETERMINISTIC_CLOCK=1`; without it the recording is refused ([Recording a video of a run](#recording-a-video-of-a-run)) |
 | `SR_VIDEOREC_CODEC=ffv1\|x264rgb\|nvenc\|raw` | Encoder for a recording (default `ffv1`, lossless); `raw` writes unencoded frames and needs no FFmpeg. An encoder that cannot run refuses the recording; it never falls back to `raw` |
 | `SR_VIDEOREC_SIZE=WxH` | Output size of a recording, independent of the window (even numbers); default: the window's size at the first recorded present |
-| `SR_VIDEOREC_START=V` | Start the recording at VBLANK V (its first presented picture from there on); earlier pictures and sound are not recorded |
+| `SR_VIDEOREC_START=V` | Start the recording at VBLANK V (its first presented picture from there on); earlier pictures and sound are not recorded. V is decimal digits only, at most 4294967295; any other value (a sign, a space, a suffix) refuses the recording by name |
 | `SR_VIDEOREC_FFMPEG=PATH` | Absolute path of the FFmpeg a recording uses; default: the first absolute `PATH` entry that holds it |
 | `SR_DEVELOPER_MODE=0\|1` | Developer mode (the launcher exports its setting): `F3`'s profile HUD and the pause menu's VRAM viewer and Profile page |
 | `SR_REDUCE_MOTION=on\|off\|system` | The launcher's Reduce motion choice (it always exports one): `on` makes the pause overlay's transitions cuts, `off` lets them ease, and `system` (the launcher's Automatic), unset or anything else follows Windows' Animation effects as the overlay draws |
@@ -1748,7 +1767,6 @@ committed.
 | `SR_GE_TIMING=1` | Opt-in GE completion timing (issue #1296), off by default. A display list that reached its END completes -- finish callback, `sceGeDrawSync`, `sceGeListSync` -- only once guest time passes its cost on one serial GE timeline; the callback is delivered as an interrupt, and the peeks read 2 until it is handled. The cost model in `src/rt/ge.c` is in GE clocks (the bus clock, converted at the emulated bus clock) and every coefficient was measured on a PSP-3000 with `CASE=ge-timing` (PR #1321): per list, command word and PRIM, per vertex by format, per span by width and fill state, texel fetch, CLUT loads and block transfers. Classes the measurement did not cover are charged as the nearest measured class and tagged `UNMEASURED_NEAREST` in the source. Startup prints `GE_TIMING: on, GE time model measured on PSP-3000 ...` |
 | `SR_AUDIO_DISABLED=1` | Disable audio output (null backend). `SR_AUDIO_BACKEND=null` (or `none`, `0`, `off`) does the same; `SR_AUDIO_BACKEND=dummy` keeps the device open on SDL's dummy driver. `SR_HEADLESS=1` also selects the null backend unless `SR_AUDIO_BACKEND` is set |
 | `SR_AUDIODUMP=PATH` | Debug only, off by default. Write the device mix (every channel's stream after the master gain, as SDL is about to submit it) to a 16-bit PCM WAV at the device's own rate and channel count. The header is patched once per second of audio data and at close, and a stats line (`AUDIODUMP: ... frames= silent_frames= clipped_samples= peak= dropped_frames=`) is printed there. `dropped_frames` counts the frames the dump was offered but did not write, whether past its size limit, after a changed device format, or after a failed write; the first refusal prints one line. The file is closed at a normal exit and at `SR_EXIT_AT_VBLANK`, with or without `SR_AUDIOSTAT`; a runtime that is killed, crashes, or ends on another path that skips `atexit` (`sceKernelExitGame`, the watchdog, a route failure) keeps the last once-a-second patch, so up to a second at the end lies past the header's length. It runs on SDL's audio thread and does file I/O there, so it changes host pacing; never compare timing with it on. Audit the file for silence, clipping, gaps and sample rate |
-| `SR_POSTUMD=1` | Post-UMD processing |
 | `SR_HEAP_BASE=HEX` | Override heap base address |
 | `SR_PARTITION_TOP=HEX` | Override partition top |
 | `SR_CALLCOUNT=1` | Enable call counting |
@@ -2528,7 +2546,8 @@ one subtitle per 60 frames (`game 29.9 fps (30 frames)`), and `record.json` give
 
 The folder receives `video.mkv` (FFV1, piped to FFmpeg's standard input), `audio.wav`, `frames.csv`
 (one row per frame: VBLANK, guest time, whether it is a `new` picture, a `repeat` or a `gap`, and its
-guest flips), `logic.srt`, `record.json` (the summary, `PASS` or `FAIL` with the reason) and
+guest flips; a `gap` row carries the guest time of the VBLANK that wrote it, since none was serviced
+at its own), `logic.srt`, `record.json` (the summary, `PASS` or `FAIL` with the reason) and
 `recording.mkv`: picture, sound and the frame-rate subtitles (a track that is off by default) muxed
 without re-encoding. With `SR_VIDEOREC_CODEC=raw` the frames go to `video.bgr0` instead (raw BGRX,
 size and rate in `record.json`, no mux, `"muxed": null`).
@@ -2561,7 +2580,8 @@ if another program creates one of those names after the clear, the start is refu
 `video.bgr0`, made at the first picture, the recording is `FAIL`), naming the file, and that
 program's file is left as it was. FFmpeg runs with `-n` for the same reason. An encoded recording is `PASS` only when the encoder and the mux both exited 0, so
 `PASS` always comes with `"muxed": true`. Under 1 GiB free during the run the recorder stops writing
-video and the recording is `FAIL`; so is any write that fails.
+video and audio (`audio.wav` ends with the last video frame) and the recording is `FAIL`; an encoder
+that stops taking frames stops both the same way. Any write that fails is `FAIL` too.
 
 FFmpeg is the user's own local tool: Nakagawa never ships, downloads or bundles it. The recorder
 starts the FFmpeg it finds in an absolute `PATH` entry, or the one `SR_VIDEOREC_FFMPEG` names, without

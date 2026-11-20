@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from typing import NamedTuple
 import unittest
 
 try:
@@ -21,6 +22,20 @@ except ModuleNotFoundError:
 ROOT = Path(__file__).resolve().parent.parent
 CODEGEN = ROOT / "tools" / "codegen.py"
 CC = shutil.which("gcc")
+
+
+class _Outcome(NamedTuple):
+    """Each stage of one fixture run, separately: codegen, the C compile, then the run.
+
+    A stage that did not run (a failed stage stops the rest) is None, so a compile
+    failure can never be mistaken for a failing run."""
+
+    gen_rc: int
+    gen_out: str
+    cc_rc: int | None
+    cc_out: str
+    run_rc: int | None
+    run_out: str
 
 
 def _synthetic_elf(words: dict[int, int], entry: int) -> bytes:
@@ -167,7 +182,10 @@ int main(void) {{
     )
 
 
-def _generate_compile_run(codegen_path: Path, work: Path, target: int, owner: int) -> tuple[int, str, int, str]:
+def _generate_compile_run(codegen_path: Path, work: Path, target: int, owner: int,
+                          cc: str | None = None) -> _Outcome:
+    compiler = cc or CC
+    assert compiler is not None, "gcc is required for the compiled mutation proof"
     elf = work / "direct_j.elf"
     generated = work / "direct_j.c"
     elf.write_bytes(_synthetic_elf({
@@ -186,24 +204,26 @@ def _generate_compile_run(codegen_path: Path, work: Path, target: int, owner: in
          "--profile=hst", "--funcs-per-chunk=1", f"--omit-aot=0x{target:08x}"],
         cwd=ROOT, env=env, capture_output=True, text=True,
     )
+    gen_out = generated_result.stderr + generated_result.stdout
     if generated_result.returncode != 0:
-        return generated_result.returncode, generated_result.stderr + generated_result.stdout, 1, ""
+        return _Outcome(generated_result.returncode, gen_out, None, "", None, "")
 
     _write_harness(work, target, owner)
     chunks = sorted(work.glob("direct_j_[0-9]*.c"))
     exe = work / "direct_j.exe"
     compile_result = subprocess.run(
         [
-            CC, "-std=c11", "-O0", "-Wall", "-Wextra", "-I", str(work),
+            compiler, "-std=c11", "-O0", "-Wall", "-Wextra", "-I", str(work),
             str(work / "harness.c"), str(generated),
             *(str(path) for path in chunks), "-lm", "-o", str(exe),
         ],
         cwd=ROOT, capture_output=True, text=True,
     )
+    cc_out = compile_result.stderr + compile_result.stdout
     if compile_result.returncode != 0:
-        return 0, generated_result.stderr + generated_result.stdout, compile_result.returncode, compile_result.stderr + compile_result.stdout
+        return _Outcome(0, gen_out, compile_result.returncode, cc_out, None, "")
     run_result = subprocess.run([str(exe)], cwd=ROOT, capture_output=True, text=True)
-    return 0, generated_result.stderr + generated_result.stdout, run_result.returncode, run_result.stderr + run_result.stdout
+    return _Outcome(0, gen_out, 0, cc_out, run_result.returncode, run_result.stderr + run_result.stdout)
 
 
 @unittest.skipUnless(CC, "gcc is required for the compiled mutation proof")
@@ -229,34 +249,45 @@ class DirectJOmissionMutationTests(unittest.TestCase):
             pristine_dir.mkdir()
             mutant_dir.mkdir()
 
-            pristine_compile, pristine_gen, pristine_run, pristine_out = _generate_compile_run(
-                CODEGEN, pristine_dir, target, owner
-            )
-            self.assertEqual(pristine_compile, 0, pristine_gen + pristine_out)
-            self.assertEqual(pristine_run, 0, "pristine direct-j fixture failed\n" + pristine_out)
-            self.assertIn("dispatch_hits=1", pristine_out)
+            pristine = _generate_compile_run(CODEGEN, pristine_dir, target, owner)
+            self.assertEqual(pristine.gen_rc, 0, pristine.gen_out)
+            self.assertEqual(pristine.cc_rc, 0, pristine.cc_out)
+            self.assertEqual(pristine.run_rc, 0, "pristine direct-j fixture failed\n" + pristine.run_out)
+            self.assertIn("dispatch_hits=1", pristine.run_out)
 
             mutant_codegen = root / "mutant_codegen.py"
             mutant_codegen.write_text(mutant, encoding="utf-8", newline="\n")
-            mutant_compile, mutant_gen, mutant_run, mutant_out = _generate_compile_run(
-                mutant_codegen, mutant_dir, target, owner
+            outcome = _generate_compile_run(mutant_codegen, mutant_dir, target, owner)
+            self.assertEqual(
+                outcome.gen_rc, 0,
+                "MUTANT_CODEGEN_FAILED: direct-j mutant did not generate\n" + outcome.gen_out,
             )
             self.assertEqual(
-                mutant_compile, 0,
-                "MUTANT_BUILD_FAILED: direct-j mutant did not compile cleanly\n"
-                + mutant_gen + mutant_out,
+                outcome.cc_rc, 0,
+                "MUTANT_BUILD_FAILED: direct-j mutant did not compile cleanly\n" + outcome.cc_out,
             )
             self.assertNotEqual(
-                mutant_run, 0,
+                outcome.run_rc, 0,
                 "MUTANT_SURVIVED: omitted direct-j target was not semantically required\n"
-                + mutant_out,
+                + outcome.run_out,
             )
             self.assertIn(
-                "dispatch_hits=0", mutant_out,
+                "dispatch_hits=0", outcome.run_out,
                 "MUTANT_NON_SEMANTIC_FAILURE: direct-j mutant did not inline the target\n"
-                + mutant_out,
+                + outcome.run_out,
             )
             print("direct-j-omission: MUTANT_EXECUTED_AND_SEMANTIC_TEST_FAILED")
+
+    def test_a_compile_failure_is_reported_as_a_build_failure_not_a_run(self):
+        # A compiler that rejects every input stands in for a mutant whose generated C
+        # does not build: the run stage must not happen or inherit the compile status.
+        with scratch_dir.TemporaryDirectory(prefix="direct_j_cc_fail_") as tmp:
+            outcome = _generate_compile_run(CODEGEN, Path(tmp), 0x00001040, 0x00001000,
+                                            cc=sys.executable)
+        self.assertEqual(outcome.gen_rc, 0, outcome.gen_out)
+        self.assertIsNotNone(outcome.cc_rc)
+        self.assertNotEqual(outcome.cc_rc, 0, outcome.cc_out)
+        self.assertIsNone(outcome.run_rc)
 
 
 if __name__ == "__main__":

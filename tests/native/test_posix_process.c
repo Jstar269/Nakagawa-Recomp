@@ -44,8 +44,13 @@ int main(void) {
 #include "nk_launch.h"
 #include "nk_platform.h"
 
+/* The checks below spawn and wait inside assert(): keep them in every build. */
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -108,6 +113,17 @@ static int child_main(int argc, char **argv) {
         int status = 0;
         if (waitpid(grandchild, &status, 0) != grandchild) return 96;
         return WIFEXITED(status) ? WEXITSTATUS(status) : 95;
+    }
+    /* --child-mask reports what the program started with: 1 when SIGTERM is blocked, 2 when
+       SIGPIPE is ignored, 0 when neither. */
+    if (strcmp(argv[1], "--child-mask") == 0) {
+        sigset_t blocked;
+        if (sigprocmask(SIG_BLOCK, NULL, &blocked) != 0) return 94;
+        if (sigismember(&blocked, SIGTERM)) return 1;
+        struct sigaction pipe_action;
+        if (sigaction(SIGPIPE, NULL, &pipe_action) != 0) return 93;
+        if (pipe_action.sa_handler == SIG_IGN) return 2;
+        return 0;
     }
     return 99;
 }
@@ -217,9 +233,14 @@ static void touch(const char *path) {
 static void tool_dir_rule_subtest(void) {
     printf("[POSIX_PROCESS_TEST] Subtest 9: the bundled-tool folder rule\n");
     fflush(stdout);
+    /* Inside the run's scratch BUILD_ROOT, never the host's shared TMPDIR, so a failed run
+       leaves its tree only there. Absolute, so the links below resolve from any folder. */
     char root[NK_MAX_PATH];
-    snprintf(root, sizeof(root), "%s/nk-tool-rule-XXXXXX",
-             getenv("TMPDIR") && getenv("TMPDIR")[0] ? getenv("TMPDIR") : "/tmp");
+    char *scratch = realpath(SR_SELFTEST_BUILD_ROOT, NULL);
+    assert(scratch != NULL);
+    int root_len = snprintf(root, sizeof(root), "%s/nk-tool-rule-XXXXXX", scratch);
+    free(scratch);
+    assert(root_len > 0 && (size_t)root_len < sizeof(root));
     assert(mkdtemp(root) != NULL);
     char tools[NK_MAX_PATH + 8], other[NK_MAX_PATH + 8], nested[NK_MAX_PATH + 8];
     char tool[NK_MAX_PATH + 32], outside[NK_MAX_PATH + 32], deep[NK_MAX_PATH + 32];
@@ -325,6 +346,175 @@ static void env_utf8_subtest(void) {
     assert(nk_platform_env_utf8("NK_ENV_UTF8_TEST", out, 10) == -1 && out[0] == '\0');
     assert(unsetenv("NK_ENV_UTF8_TEST") == 0);
 }
+
+static void scratch_root(char *root, size_t capacity, const char *name) {
+    snprintf(root, capacity, "%s/%s-XXXXXX",
+             getenv("TMPDIR") && getenv("TMPDIR")[0] ? getenv("TMPDIR") : "/tmp", name);
+    assert(mkdtemp(root) != NULL);
+}
+
+/* 12. nk_platform_mkdir_p_private follows a symlink at an ancestor that already exists
+ * (/home -> var/home on Fedora Silverblue, /tmp -> private/tmp on macOS) and still refuses a
+ * symlink as the final folder. It used to lstat every prefix, so any data path under a
+ * symlinked folder failed and every library lock with it. */
+static void mkdir_private_symlink_subtest(void) {
+    printf("[POSIX_PROCESS_TEST] Subtest 12: a symlinked ancestor of a private folder\n");
+    fflush(stdout);
+    char root[NK_MAX_PATH];
+    scratch_root(root, sizeof(root), "nk-mkdir-private");
+    char real[NK_MAX_PATH + 16], link[NK_MAX_PATH + 16], below[NK_MAX_PATH + 32];
+    char leaf[NK_MAX_PATH + 32], mid[NK_MAX_PATH + 32];
+    snprintf(real, sizeof(real), "%s/real", root);
+    snprintf(link, sizeof(link), "%s/link", root);
+    snprintf(below, sizeof(below), "%s/link/a/b", root);
+    snprintf(mid, sizeof(mid), "%s/real/a", root);
+    snprintf(leaf, sizeof(leaf), "%s/real/a/b", root);
+    assert(mkdir(real, 0700) == 0);
+    assert(symlink("real", link) == 0);
+
+    assert(nk_platform_mkdir_p_private(below));
+    /* One descriptor answers for the folder itself, so its kind and its mode are said
+       of the same folder; O_NOFOLLOW refuses a link in the leaf's place. */
+    int leaf_fd = open(leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    assert(leaf_fd >= 0);
+    struct stat st;
+    assert(fstat(leaf_fd, &st) == 0 && S_ISDIR(st.st_mode));
+    assert((st.st_mode & 0777) == 0700);
+    assert(close(leaf_fd) == 0);
+    assert(!nk_platform_mkdir_p_private(link));          /* a final symlink stays refused */
+
+    rmdir(leaf);
+    rmdir(mid);
+    remove(link);
+    rmdir(real);
+    rmdir(root);
+}
+
+/* 13. The per-user folders nk_platform_get_path creates are owner-only. They were made
+ * 0755, so under umask 022 other local users could list and read saves and logs. */
+static void get_path_private_subtest(void) {
+    printf("[POSIX_PROCESS_TEST] Subtest 13: per-user folders are created owner-only\n");
+    fflush(stdout);
+    char root[NK_MAX_PATH];
+    scratch_root(root, sizeof(root), "nk-get-path");
+    char data_root[NK_MAX_PATH + 16];
+    snprintf(data_root, sizeof(data_root), "%s/data", root);
+    mode_t old_mask = umask(022);
+    assert(nk_platform_set_app_data_dir_override(data_root));
+    char saves[NK_MAX_PATH];
+    assert(nk_platform_get_path(NK_PATH_SAVES, saves, sizeof(saves)));
+    assert(nk_platform_set_app_data_dir_override(NULL));
+    umask(old_mask);
+    struct stat st;
+    assert(stat(data_root, &st) == 0 && S_ISDIR(st.st_mode));
+    assert((st.st_mode & 0777) == 0700);
+    assert(stat(saves, &st) == 0 && S_ISDIR(st.st_mode));
+    assert((st.st_mode & 0777) == 0700);
+    assert(nk_platform_remove_tree(root, NULL));
+}
+
+struct listed_names {
+    int hidden;
+    int shown;
+    int other;
+};
+
+static bool count_listed_name(const char *name, void *ctx) {
+    struct listed_names *seen = (struct listed_names *)ctx;
+    if (strcmp(name, ".hidden.json") == 0) seen->hidden++;
+    else if (strcmp(name, "shown.json") == 0) seen->shown++;
+    else seen->other++;
+    return true;
+}
+
+/* 14. nk_platform_list_files lists a file whose name starts with a dot, as the Win32 backend
+ * does and as nk_platform.h says ("each regular file directly inside dir"). POSIX dropped
+ * every such name, so a caller saw different files on the two hosts. */
+static void list_files_dot_subtest(void) {
+    printf("[POSIX_PROCESS_TEST] Subtest 14: list_files lists dot-files\n");
+    fflush(stdout);
+    char root[NK_MAX_PATH];
+    scratch_root(root, sizeof(root), "nk-list-files");
+    char hidden[NK_MAX_PATH + 32], shown[NK_MAX_PATH + 32], sub[NK_MAX_PATH + 32];
+    snprintf(hidden, sizeof(hidden), "%s/.hidden.json", root);
+    snprintf(shown, sizeof(shown), "%s/shown.json", root);
+    snprintf(sub, sizeof(sub), "%s/.sub", root);
+    touch(hidden);
+    touch(shown);
+    assert(mkdir(sub, 0700) == 0);
+    struct listed_names seen = { 0, 0, 0 };
+    assert(nk_platform_list_files(root, count_listed_name, &seen));
+    assert(seen.hidden == 1 && seen.shown == 1 && seen.other == 0);
+    rmdir(sub);
+    remove(shown);
+    remove(hidden);
+    rmdir(root);
+}
+
+/* 15. A child starts with no signal blocked and SIGPIPE at its default, whatever the spawning
+ * thread had. SDL's threads block SIGTERM and the player starts games from one, so the child
+ * kept SIGTERM blocked and every Stop waited out the grace period and ended in SIGKILL. */
+static void child_signal_state_subtest(void) {
+    printf("[POSIX_PROCESS_TEST] Subtest 15: a child does not inherit blocked signals\n");
+    fflush(stdout);
+    sigset_t block, old_set;
+    sigemptyset(&block);
+    sigaddset(&block, SIGTERM);
+    sigaddset(&block, SIGINT);
+    assert(sigprocmask(SIG_BLOCK, &block, &old_set) == 0);
+    struct sigaction ignore, old_pipe;
+    memset(&ignore, 0, sizeof(ignore));
+    ignore.sa_handler = SIG_IGN;
+    sigemptyset(&ignore.sa_mask);
+    assert(sigaction(SIGPIPE, &ignore, &old_pipe) == 0);
+
+    NkProcessHandle child;
+    memset(&child, 0, sizeof(child));
+    bool started = spawn_self("--child-mask", "", &child);
+    assert(sigaction(SIGPIPE, &old_pipe, NULL) == 0);
+    assert(sigprocmask(SIG_SETMASK, &old_set, NULL) == 0);
+    assert(started);
+    assert(nk_platform_wait_process(&child, 10000) == 0);
+    nk_platform_close_process(&child);
+}
+
+#if !defined(__ANDROID__)
+/* 16. A program that exists but cannot be executed fails the spawn with exec's errno. The
+ * spawn reported success with spawn_error 0, and the caller only later saw exit code 127. */
+static void exec_failure_subtest(void) {
+    printf("[POSIX_PROCESS_TEST] Subtest 16: a failed exec fails the spawn with its errno\n");
+    fflush(stdout);
+    char root[NK_MAX_PATH];
+    scratch_root(root, sizeof(root), "nk-exec-fail");
+    char plain[NK_MAX_PATH + 32], missing[NK_MAX_PATH + 32];
+    snprintf(plain, sizeof(plain), "%s/not-executable", root);
+    snprintf(missing, sizeof(missing), "%s/missing", root);
+    touch(plain);
+    assert(chmod(plain, 0600) == 0);
+
+    NkProcessHandle child;
+    memset(&child, 0, sizeof(child));
+    const char *argv_plain[] = { plain, NULL };
+    assert(!nk_platform_spawn_process(plain, argv_plain, NULL, NULL, NULL, &child));
+    assert(child.spawn_error == EACCES);
+    assert(!child.is_active && child.process_id == 0);
+
+    memset(&child, 0, sizeof(child));
+    const char *argv_missing[] = { missing, NULL };
+    assert(!nk_platform_spawn_process(missing, argv_missing, NULL, NULL, NULL, &child));
+    assert(child.spawn_error == ENOENT);
+    assert(!child.is_active && child.process_id == 0);
+
+    /* A working folder that cannot be entered fails the same way, before exec. */
+    memset(&child, 0, sizeof(child));
+    const char *argv_self[] = { s_self, "--child-exit", "0", NULL };
+    assert(!nk_platform_spawn_process(s_self, argv_self, NULL, missing, NULL, &child));
+    assert(child.spawn_error == ENOENT);
+
+    remove(plain);
+    rmdir(root);
+}
+#endif
 
 int main(int argc, char **argv) {
     if (argc >= 2 && strncmp(argv[1], "--child-", 8) == 0) return child_main(argc, argv);
@@ -524,6 +714,13 @@ int main(int argc, char **argv) {
     android_refusals_subtest();
 #else
     desktop_tool_subtest();
+#endif
+    mkdir_private_symlink_subtest();
+    get_path_private_subtest();
+    list_files_dot_subtest();
+    child_signal_state_subtest();
+#if !defined(__ANDROID__)
+    exec_failure_subtest();
 #endif
 
     printf("[POSIX_PROCESS_TEST] ALL POSIX PROCESS TESTS PASSED!\n");

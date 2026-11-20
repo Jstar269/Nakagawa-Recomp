@@ -274,6 +274,16 @@ int sr_h264_reset(int id) {
         return -1;
     int result = instance->backend->reset(instance->backend_id);
     if (result < 0) {
+        /* A backend whose reopen fails may already have released its decoder slot (Media
+         * Foundation and FFmpeg do), and the next create can hand that slot to another
+         * instance.  The caller still owns this instance id until sr_h264_destroy (mpeg.c keeps
+         * it after a failed flush), so detach it from the backend now: release the slot (a
+         * no-op on one already released) and drop the backend, so no later submit, frame,
+         * reset or destroy through this id can reach a decoder that belongs to someone else. */
+        if (instance->backend->destroy) instance->backend->destroy(instance->backend_id);
+        instance->backend = NULL;
+        instance->backend_id = -1;
+        instance->ps_failed = 1;
         report_unavailable();
         return result;
     }

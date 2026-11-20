@@ -234,22 +234,13 @@ static NkContainerKind classify(const uint8_t *d, size_t size)
 
 /* ---------------------------- probe ---------------------------------- */
 
-int nk_container_probe(NkPspCtx *ctx, const uint8_t *data, size_t size,
-                       NkContainerInfo *out)
+/* Classify and validate a view view_unwrap has already unwrapped; out is
+   zeroed by the caller. nk_container_decrypt calls this on its own unwrapped
+   view, so the wrappers are stripped and the firmware forms refused once. */
+static int probe_view(NkPspCtx *ctx, const View *view, NkContainerInfo *out)
 {
-    View v;
+    View v = *view;
     int rc;
-    if (out == NULL) return NK_PSP_ERR_INTERNAL;
-    memset(out, 0, sizeof(*out));
-    if (data == NULL || size == 0u) {
-        return nk_psp_fail(ctx, NK_PSP_ERR_INPUT, NULL,
-                           "input is empty");
-    }
-    v.data = data;
-    v.size = size;
-    v.wrappers = 0;
-    rc = view_unwrap(ctx, &v);
-    if (rc != NK_PSP_OK) return rc;
     out->wrappers_skipped = v.wrappers;
     out->kind = classify(v.data, v.size);
     switch (out->kind) {
@@ -271,6 +262,25 @@ int nk_container_probe(NkPspCtx *ctx, const uint8_t *data, size_t size,
                            "unrecognized container magic "
                            "(expected ~PSP, ~SCE, PBP, gzip or ELF)");
     }
+}
+
+int nk_container_probe(NkPspCtx *ctx, const uint8_t *data, size_t size,
+                       NkContainerInfo *out)
+{
+    View v;
+    int rc;
+    if (out == NULL) return NK_PSP_ERR_INTERNAL;
+    memset(out, 0, sizeof(*out));
+    if (data == NULL || size == 0u) {
+        return nk_psp_fail(ctx, NK_PSP_ERR_INPUT, NULL,
+                           "input is empty");
+    }
+    v.data = data;
+    v.size = size;
+    v.wrappers = 0;
+    rc = view_unwrap(ctx, &v);
+    if (rc != NK_PSP_OK) return rc;
+    return probe_view(ctx, &v, out);
 }
 
 /* ------------------------ key-entry listing --------------------------- */
@@ -349,7 +359,11 @@ static int decompress_payload(NkPspCtx *ctx, const uint8_t *payload,
                                    "out of memory decompressing payload");
             }
             /* The magic is 4 bytes; the stream may not read past the
-             * decrypted payload we actually have. */
+             * decrypted payload we actually have.  decompress_kle returns the
+             * decoded byte count (> 0) on success, a negative SCE error
+             * (SCE_ERROR_INVALID_SIZE 0x80000104 or SCE_ERROR_INVALID_FORMAT
+             * 0x80000108) on a malformed or truncated stream, and 0 for an
+             * empty stored stream; only a positive count is a payload. */
             rc = decompress_kle(d, (int)elf_size,
                                 (uint8_t *)(void *)(payload + 4),
                                 (int)(payload_size - 4u), &end, is_kl4e);
@@ -399,7 +413,8 @@ int nk_container_decrypt(NkPspCtx *ctx, const uint8_t *data, size_t size,
     rc = view_unwrap(ctx, &v);
     if (rc != NK_PSP_OK) return rc;
 
-    rc = nk_container_probe(ctx, v.data, v.size, &info);
+    memset(&info, 0, sizeof(info));
+    rc = probe_view(ctx, &v, &info);
     if (rc != NK_PSP_OK) return rc;
 
     if (info.kind == NK_CTR_PLAIN_ELF) {
@@ -423,6 +438,13 @@ int nk_container_decrypt(NkPspCtx *ctx, const uint8_t *data, size_t size,
             return nk_psp_fail(ctx, NK_PSP_ERR_DECOMPRESS, NULL,
                                "gzip input failed to decompress: %s",
                                detail[0] != '\0' ? detail : "malformed stream");
+        }
+        /* The same ELF check the ~PSP path makes: a gzip of anything else (an
+           image, an archive, a still-encrypted module) is not a decryption. */
+        if (dlen < 4u || memcmp(d, "\x7f" "ELF", 4) != 0) {
+            free(d);
+            return nk_psp_fail(ctx, NK_PSP_ERR_FORMAT, NULL,
+                               "decompressed gzip input is not an ELF image");
         }
         *out = d;
         *out_size = dlen;

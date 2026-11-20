@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -99,6 +101,113 @@ class TestThirdPartyComponentInventory(unittest.TestCase):
                         f"{entry['file']} no longer matches the digest recorded in {INVENTORY_IDENTITY}",
                     )
 
+    def test_old_mit_grant_is_recorded_as_mit_modern_variant(self) -> None:
+        """The 'without written agreement' grant (HarfBuzz's COPYING) is SPDX MIT-Modern-Variant, not MIT.
+
+        HarfBuzz's record also ships src/ms-use/COPYING, an MIT grant, so its expression names both.
+        """
+        for key, record in self.records.items():
+            for entry in record.get("license_texts", []):
+                text = " ".join((ROOT / entry["file"]).read_text(encoding="utf-8", errors="replace").split())
+                if "without written agreement and without license or royalty fees" not in text:
+                    continue
+                with self.subTest(component=key, text=entry["file"]):
+                    self.assertEqual(record["spdx_id"], "MIT-Modern-Variant AND MIT")
+
+    def test_harfbuzz_records_the_subdirectory_licence_of_its_compiled_tables(self) -> None:
+        """HarfBuzz's COPYING defers to subdirectory COPYING files; the one whose inputs are compiled in ships.
+
+        At the packaged release, src/ms-use/COPYING (MIT, Microsoft) is the licence of the
+        data files gen-use-table.py and gen-vowel-constraints.py turn into tables built into
+        libharfbuzz-0.dll. The MSYS2 package installs only the top-level COPYING, so the text
+        comes from upstream at the tag the pinned package version names; a version bump fails
+        here until the subdirectory texts are checked again at the new tag.
+        """
+        record = self.data["native"]["dlls"]["libharfbuzz-0.dll"]
+        top = (ROOT / record["license_texts"][0]["file"]).read_text(encoding="utf-8")
+        self.assertIn("see individual\nfiles names COPYING in subdirectories", top)
+        entries = {entry["file"]: entry for entry in record["license_texts"]}
+        ms_use = entries.get("third_party/licenses/harfbuzz/ms-use-COPYING.txt")
+        self.assertIsNotNone(ms_use, "libharfbuzz-0.dll does not record the src/ms-use/COPYING text")
+        assert ms_use is not None
+        self.assertIn("Copyright (c) Microsoft Corporation.",
+                      (ROOT / ms_use["file"]).read_text(encoding="utf-8"))
+        self.assertRegex(ms_use.get("sha256") or "", r"^[0-9a-f]{64}$")
+        self.assertNotIn("toolchain_license_rel", ms_use, "the MSYS2 package does not install this text")
+        prereqs = json.loads((ROOT / "assets/prereq_manifest.json").read_text(encoding="utf-8"))
+        pinned = next(
+            entry["version"] for entry in prereqs["artifacts"]
+            if entry.get("id") == "mingw-w64-ucrt-x86_64-harfbuzz"
+        )
+        upstream_tag = pinned.rsplit("-", 1)[0]
+        self.assertIn(f"src/ms-use/COPYING at tag {upstream_tag} (commit ", ms_use["copied_from"])
+
+    def test_libchdr_names_every_copyright_holder_of_its_linked_sources(self) -> None:
+        """BSD-3-Clause binary redistribution reproduces every holder's notice, not just LICENSE.txt's."""
+        libchdr = next(
+            record for record in self.data["native"]["linked_components"] if record.get("id") == "libchdr"
+        )
+        notices = " ".join(libchdr.get("copyright_notices", []))
+        sources = sorted((ROOT / "third_party/libchdr/src").glob("*.c")) + sorted(
+            (ROOT / "third_party/libchdr/include/libchdr").glob("*.h")
+        )
+        holders: set[str] = set()
+        for source in sources:
+            text = source.read_text(encoding="utf-8", errors="replace")
+            holders.update(m.strip() for m in re.findall(r"copyright-holders:\s*([^\r\n*]+)", text))
+            holders.update(m.strip() for m in re.findall(r"^\s*Copyright ([A-Z][A-Za-z .]+?)\s*$", text, re.M))
+        self.assertIn("Aaron Giles", holders)
+        for holder in sorted(holders):
+            with self.subTest(holder=holder):
+                self.assertIn(holder, notices)
+
+    def test_recorded_pacman_package_owns_the_dll_and_its_license_text(self) -> None:
+        """The named MSYS2 package, where installed, really carries the DLL and toolchain_license_rel."""
+        toolchain_root = package_notices.resolve_toolchain_root()
+        if toolchain_root is None:
+            self.skipTest("no MSYS2 toolchain on this host")
+        local_db = toolchain_root.parent / "var" / "lib" / "pacman" / "local"
+        if not local_db.is_dir():
+            self.skipTest("the toolchain has no pacman database")
+        owned: dict[str, set[str]] = {}
+        for entry in local_db.iterdir():
+            desc, files = entry / "desc", entry / "files"
+            if not desc.is_file() or not files.is_file():
+                continue
+            name = re.search(r"%NAME%\n([^\n]+)", desc.read_text(encoding="utf-8", errors="replace"))
+            if name:
+                owned[name.group(1).strip()] = set(files.read_text(encoding="utf-8", errors="replace").split())
+        prefix = toolchain_root.name + "/"
+        checked = 0
+        for dll_name, record in self.data["native"]["dlls"].items():
+            package = record.get("pacman_package")
+            matches = [files for name, files in owned.items()
+                       if package and re.fullmatch(rf"mingw-w64-[a-z0-9_]+-x86_64-{re.escape(package)}", name)]
+            if not matches:
+                continue
+            files = {path.lower() for path in matches[0]}
+            with self.subTest(dll=dll_name, package=package):
+                checked += 1
+                self.assertIn((prefix + "bin/" + dll_name).lower(), files)
+                for entry in record.get("license_texts", []):
+                    rel = entry.get("toolchain_license_rel")
+                    if rel:
+                        self.assertIn((prefix + rel).lower(), files)
+        if not checked:
+            self.skipTest("none of the recorded MSYS2 packages is installed on this host")
+
+    def test_gpl2_text_origin_does_not_claim_sal063_bytes(self) -> None:
+        """GPL-2.0.txt is the 59 Temple Place revision; sal063's LICENSE is the 51 Franklin Street one."""
+        gpl2 = ROOT / "third_party/licenses/GPL-2.0.txt"
+        self.assertIn("59 Temple Place", gpl2.read_text(encoding="utf-8"))
+        for key, record in self.records.items():
+            for entry in record.get("license_texts", []):
+                if entry["file"] != "third_party/licenses/GPL-2.0.txt":
+                    continue
+                with self.subTest(component=key):
+                    self.assertNotIn("inherited with the sal063 lineage", entry["copied_from"])
+                    self.assertIn("59 Temple Place", entry["copied_from"])
+
     def test_every_dll_a_copy_route_can_copy_has_a_record(self) -> None:
         """The obligation follows the copy list, not the conditional that guards it."""
         dll_records = {name.lower() for name in self.data["native"]["dlls"]}
@@ -154,31 +263,155 @@ class TestThirdPartyComponentInventory(unittest.TestCase):
                 )
 
 
+def _runtime_sources() -> list[Path]:
+    """The C sources mk/runtime_sources.mk compiles into every title runtime."""
+    text = (ROOT / "mk/runtime_sources.mk").read_text(encoding="utf-8")
+    names = sorted(set(re.findall(r"\b((?:src|third_party)/[\w./+-]+\.c)\b", text)))
+    return [ROOT / name for name in names if (ROOT / name).is_file()]
+
+
+def _vendored_directory(path: Path) -> Path | None:
+    """The nearest vendored directory (a PROVENANCE.md beside an upstream licence text) holding path."""
+    stops = {ROOT, ROOT / "src", ROOT / "src" / "rt"}
+    for directory in (path.parent, *path.parent.parents):
+        if directory in stops or ROOT not in directory.parents:
+            return None
+        if (directory / "PROVENANCE.md").is_file() and any(
+            any(directory.glob(pattern)) for pattern in ("LICENSE*", "COPYING*", "License*")
+        ):
+            return directory
+    return None
+
+
+def _vendored_directories_in_runtime() -> dict[Path, list[str]]:
+    """Map each vendored directory a runtime source compiles or includes to the sources that reach it."""
+    reached: dict[Path, list[str]] = {}
+    for source in _runtime_sources():
+        candidates = [source.resolve()]
+        for include in re.findall(r'^\s*#\s*include\s+"([^"]+)"', source.read_text(encoding="utf-8", errors="replace"), re.M):
+            for base in (source.parent, ROOT / "src" / "rt"):
+                resolved = (base / include).resolve()
+                if resolved.is_file():
+                    candidates.append(resolved)
+                    break
+        for candidate in candidates:
+            directory = _vendored_directory(candidate)
+            if directory is not None:
+                reached.setdefault(directory, []).append(source.relative_to(ROOT).as_posix())
+    return reached
+
+
+class TestRuntimeLinkedComponents(unittest.TestCase):
+    """Every vendored component compiled into a title runtime is in the linked-component inventory."""
+
+    def setUp(self) -> None:
+        self.linked = inventory()["native"].get("linked_components", [])
+        self.reached = _vendored_directories_in_runtime()
+
+    def _records_for(self, directory: Path) -> list[dict]:
+        prefix = directory.relative_to(ROOT).as_posix() + "/"
+        return [
+            record for record in self.linked
+            if any(entry["file"].startswith(prefix) for entry in record.get("license_texts", []))
+        ]
+
+    def test_reach_includes_known_runtime_components(self) -> None:
+        names = {directory.relative_to(ROOT).as_posix() for directory in self.reached}
+        self.assertIn("third_party/xbrz", names)
+        self.assertIn("src/rt/minimp3", names)
+
+    def test_every_vendored_runtime_directory_has_a_linked_component(self) -> None:
+        for directory, sources in sorted(self.reached.items()):
+            with self.subTest(directory=directory.relative_to(ROOT).as_posix(), reached_from=sources[0]):
+                self.assertTrue(self._records_for(directory), f"no linked component names {directory}")
+
+    def test_runtime_component_notes_say_they_reach_the_runtime(self) -> None:
+        for directory, sources in sorted(self.reached.items()):
+            for record in self._records_for(directory):
+                note = record.get("note")
+                if not note:
+                    continue
+                with self.subTest(component=record["id"], reached_from=sources[0]):
+                    self.assertNotIn("Not linked into the runtime", note)
+                    self.assertIn("runtime", note)
+
+
 class TestNativePackageNoticesGate(unittest.TestCase):
     """The native package gate fails closed for an unrecorded or textless DLL."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.pkg_dir = Path(self.tmpdir.name)
+        # These synthetic binaries are not PE files: the gate under test is the license
+        # record, not the import scan that stages a missing runtime DLL.
+        imports = patch.object(package_notices, "get_binary_imports", return_value=[])
+        imports.start()
+        self.addCleanup(imports.stop)
 
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
 
     def test_every_dll_the_copy_route_ships_generates_a_notice(self) -> None:
         """Each DLL from the inventory's copy list gets a notice, version and text."""
+        # A copied (L)GPL DLL's written source offer needs the exact installed MSYS2 package
+        # version, so the route reads it from the toolchain's pacman database. A synthetic
+        # toolchain root holds that database, so every host runs the same check without an
+        # MSYS2 install (the license texts still resolve from the source tree).
+        records = package_notices.load_component_inventory()["native"]["dlls"]
+        msys_root = self.pkg_dir / "synthetic-msys64"  # a folder: the package scan skips it
+        toolchain_root = msys_root / "ucrt64"
+        local_db = msys_root / "var" / "lib" / "pacman" / "local"
+        versions: dict[str, str] = {}
+        for record in records.values():
+            package = record.get("pacman_package")
+            if not package or package in versions:
+                continue
+            versions[package] = f"{len(versions) + 1}.0-1"
+            entry_dir = local_db / f"mingw-w64-ucrt-x86_64-{package}-{versions[package]}"
+            entry_dir.mkdir(parents=True)
+            (entry_dir / "desc").write_text(
+                f"%NAME%\nmingw-w64-ucrt-x86_64-{package}\n\n%VERSION%\n{versions[package]}\n",
+                encoding="utf-8",
+            )
         for dll_name in sorted(package_notices.packaged_dll_names()):
             with self.subTest(dll=dll_name):
                 (self.pkg_dir / dll_name).write_bytes(b"MZ\0\0synthetic")
-                result = package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+                result = package_notices.generate_package_notices(
+                    self.pkg_dir, repo_root=ROOT, toolchain_root=toolchain_root
+                )
                 entry = next(
                     c for c in result["components"] if c.get("binary", "").lower() == dll_name
                 )
                 self.assertNotIn("NOASSERTION", entry["spdx_id"])
+                if "msys2_package" in entry:
+                    self.assertEqual(
+                        entry["msys2_package_version"], versions[entry["msys2_package"]]
+                    )
+                    self.assertTrue(entry["upstream_origin"].startswith("https://"))
                 notices = self.pkg_dir / "THIRD_PARTY_NOTICES"
                 self.assertTrue((notices / entry["license_file"]).is_file())
                 for extra in entry.get("additional_license_files", []):
                     self.assertTrue((notices / extra).is_file())
                 (self.pkg_dir / dll_name).unlink()
+
+    def test_harfbuzz_package_notices_carry_the_ms_use_licence(self) -> None:
+        """A package with libharfbuzz-0.dll ships both HarfBuzz texts and names both in the notices."""
+        (self.pkg_dir / "libharfbuzz-0.dll").write_bytes(b"MZ\0\0synthetic")
+        result = package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+        entry = next(
+            c for c in result["components"] if c.get("binary", "").lower() == "libharfbuzz-0.dll"
+        )
+        self.assertEqual(entry["license_file"], "HarfBuzz.txt")
+        self.assertIn("HarfBuzz-ms-use-COPYING.txt", entry.get("additional_license_files", []))
+        notices = self.pkg_dir / "THIRD_PARTY_NOTICES"
+        self.assertIn(
+            "Copyright (c) Microsoft Corporation.",
+            (notices / "HarfBuzz-ms-use-COPYING.txt").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "Copyright (c) Microsoft Corporation.",
+            (self.pkg_dir / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8"),
+        )
 
     def test_host_resolved_loader_present_in_a_package_gets_a_notice(self) -> None:
         """A user-supplied Vulkan loader is named, not waved through as a system library."""

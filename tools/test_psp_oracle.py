@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+import dataclasses
+from datetime import datetime, timedelta
+import ast
 import hashlib
 import io
 import json
@@ -12,6 +15,7 @@ import re
 from pathlib import Path
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -39,6 +43,7 @@ from psp_oracle.protocol import (
     STATUSES,
     ge_corpus_report,
     PSP_MODEL_INTERPRETATION_RULE,
+    compare_outputs,
     compare_texts,
     decode_psp_model_code,
     model_identity_fields,
@@ -54,6 +59,7 @@ from psp_oracle.run_psplink import (
     CAMPAIGN_QUEUE_CASES,
     PsplinkCampaignRunner,
     PsplinkSnapshot,
+    _run_command,
     _campaign_completeness_contract,
     _campaign_host0_log_path,
     _campaign_stream_complete,
@@ -117,6 +123,27 @@ from makefile_text import read_makefile  # noqa: E402
 def _matched(match: re.Match[str] | None) -> re.Match[str]:
     """Return a regex match at call sites that already rely on it being present."""
     return cast(re.Match[str], match)
+
+
+def _oracle_scratch_parent() -> Path:
+    """The parent of a scratch directory a test must keep inside the repository.
+
+    run_psplink.py refuses a --results-directory outside the repository root, so these
+    tests cannot use the system temporary directory. The fixture's build directory is
+    ignored (.gitignore), so a directory a killed run leaves behind never makes the
+    checkout read as dirty to the Makefile's clean-tree guard.
+    """
+    parent = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "build"
+    parent.mkdir(parents=True, exist_ok=True)
+    return parent
+
+
+#: Variables that would point a git command at another repository or index (the list
+#: tools/admit_paths.py strips for the same reason).
+GIT_REPOSITORY_VARIABLES = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+)
 
 
 META = (
@@ -295,6 +322,19 @@ class PspOracleProtocolTests(unittest.TestCase):
         self.assertEqual(fields["MODEL_INTERPRETATION_RULE"], PSP_MODEL_INTERPRETATION_RULE)
         self.assertEqual(fields["MODEL_IDENTITY_AGREEMENT"], "AGREES")
 
+    def test_model_identity_accepts_retail_region_suffixes(self) -> None:
+        for label, raw_code, expected in (
+            ("PSP-3001", "3", "PSP-3000"),
+            ("PSP-1004", "0", "PSP-1000"),
+            ("PSP-2001", "1", "PSP-2000"),
+            ("PSP-3004", "3", "PSP-3000"),
+            ("PSP-N1001", "4", "PSP-N1000"),
+        ):
+            with self.subTest(label=label):
+                fields = model_identity_fields(label, raw_code)
+                self.assertEqual(fields["INTERPRETED_MODEL_FAMILY"], expected)
+                self.assertEqual(fields["MODEL_IDENTITY_AGREEMENT"], "AGREES")
+
     def test_unknown_model_rule_leaves_the_raw_value_untouched(self) -> None:
         stored_envelope = {
             "PHYSICAL_MODEL_LABEL": "PSP-3000",
@@ -310,6 +350,48 @@ class PspOracleProtocolTests(unittest.TestCase):
         self.assertEqual(fields["INTERPRETED_MODEL_FAMILY"], "UNKNOWN")
         self.assertEqual(fields["MODEL_IDENTITY_AGREEMENT"], "UNKNOWN")
 
+    def test_campaign_registration_rejects_unpaired_cases_and_supports_ordered_rows(self) -> None:
+        probe_case = "u09-registration-test"
+        with self.assertRaisesRegex(ValueError, "out_counts keys must match"):
+            parse_golden._register_campaign_probe(
+                probe_case, "PSP-TEST-001", ("first", "second"), {"first": 1}
+            )
+        self.assertNotIn(probe_case, parse_golden.CAMPAIGN_PROBE_CASES)
+        parse_golden._register_campaign_probe(
+            probe_case, "PSP-TEST-001", (("first", 2), ("second", 1)),
+            terminal_case="done",
+        )
+        spec, counts = parse_golden.CAMPAIGN_PROBE_CASES[probe_case]
+        self.assertEqual(spec.semantic_cases, ("first", "second"))
+        self.assertEqual(counts, {"first": 2, "second": 1, "done": 1})
+        del parse_golden.CAMPAIGN_PROBE_CASES[probe_case]
+        parse_golden._register_campaign_probe(
+            probe_case, "PSP-TEST-001", {"first": 2, "second": 1, "done": 1},
+            terminal_case="done",
+        )
+        spec, counts = parse_golden.CAMPAIGN_PROBE_CASES[probe_case]
+        self.assertEqual(spec.semantic_cases, ("first", "second"))
+        self.assertEqual(counts, {"first": 2, "second": 1, "done": 1})
+        del parse_golden.CAMPAIGN_PROBE_CASES[probe_case]
+
+    def test_vcodec_failure_fields_are_declared_per_case(self) -> None:
+        spec, counts = parse_golden.CAMPAIGN_PROBE_CASES["vcodec-words"]
+        self.assertEqual(
+            dict(spec.fail_optional_fields)["vc-csc-struct"], frozenset({"result"})
+        )
+        fields = " ".join(f"out{index}=0x0" for index in range(counts["vc-csc-struct"]))
+        raw = META.format(
+            source="psp", model="PSP-3000", firmware="6.61-ARK",
+            binary=MEASURED_SHA, commit=MEASURED_COMMIT,
+        ) + (
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-VCODEC-001 "
+            f"case_id=vc-csc-struct status=FAIL {fields}\n"
+        )
+        parsed = parse_golden.parse_campaign_probe_output(
+            raw, "vcodec-words", require_complete=False
+        )
+        self.assertIn("vc-csc-struct", parsed.results)
+
     def test_parser_requires_metadata_and_orders_records(self) -> None:
         parsed = parse_output(stream("psp"))
         self.assertEqual(parsed.metadata_dict()["source"], "psp")
@@ -324,9 +406,34 @@ class PspOracleProtocolTests(unittest.TestCase):
         self.assertEqual(match["comparisons"][0]["comparison"], "MATCH")
         difference = compare_texts(stream("psp", "0x2"), stream("nakagawa"))
         self.assertEqual(difference["comparisons"][0]["comparison"], "DIFFERENCE")
-        psp_only = compare_texts(stream("psp"), stream("nakagawa") +
-                                 "NAKAGAWA_PSP_TEST schema=1 test_id=EXTRA case_id=one status=PASS result=0x2\n")
-        self.assertIn(psp_only["comparisons"][1]["comparison"], {"NAKAGAWA_ONLY", "MATCH"})
+        extra = "NAKAGAWA_PSP_TEST schema=1 test_id=EXTRA case_id=one status=PASS result=0x2\n"
+
+        def labels(report: dict[str, Any]) -> dict[tuple[str, str], str]:
+            return {(row["test_id"], row["case_id"]): row["comparison"] for row in report["comparisons"]}
+
+        nakagawa_only = compare_texts(stream("psp"), stream("nakagawa") + extra)
+        self.assertEqual(labels(nakagawa_only),
+                         {("EXTRA", "one"): "NAKAGAWA_ONLY", ("SMOKE", "one"): "MATCH"})
+        self.assertEqual(nakagawa_only["classification"], "INCONCLUSIVE")
+        psp_only = compare_texts(stream("psp") + extra, stream("nakagawa"))
+        self.assertEqual(labels(psp_only), {("EXTRA", "one"): "PSP_ONLY", ("SMOKE", "one"): "MATCH"})
+        self.assertEqual(psp_only["classification"], "INCONCLUSIVE")
+        # Every record on one side only: the stream-level verdict names that side.
+        other = stream("nakagawa").replace("test_id=SMOKE", "test_id=OTHER")
+        self.assertEqual(compare_texts(stream("psp"), other)["classification"], "INCONCLUSIVE")
+        # A stream with no records does not parse, so the empty side is built directly.
+        empty_psp = dataclasses.replace(parse_output(stream("psp")), results=())
+        empty_nakagawa = dataclasses.replace(parse_output(stream("nakagawa")), results=())
+        all_psp = compare_outputs(parse_output(stream("psp") + extra), empty_nakagawa)
+        self.assertEqual(set(labels(all_psp).values()), {"PSP_ONLY"})
+        self.assertEqual(all_psp["classification"], "PSP_ONLY")
+        all_nakagawa = compare_outputs(empty_psp, parse_output(stream("nakagawa") + extra))
+        self.assertEqual(set(labels(all_nakagawa).values()), {"NAKAGAWA_ONLY"})
+        self.assertEqual(all_nakagawa["classification"], "NAKAGAWA_ONLY")
+        # A difference outranks one-sided records.
+        mixed = compare_texts(stream("psp", "0x2"), stream("nakagawa") + extra)
+        self.assertEqual(labels(mixed), {("EXTRA", "one"): "NAKAGAWA_ONLY", ("SMOKE", "one"): "DIFFERENCE"})
+        self.assertEqual(mixed["classification"], "DIFFERENCE")
 
     def test_malformed_hex_is_rejected(self) -> None:
         with self.assertRaises(ProtocolError):
@@ -876,6 +983,30 @@ class NewProbeResultParserTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             parse_registry_readonly_output(self._stream(moved))
 
+    def test_registry_non_strict_mode_accepts_one_record_header_prefix(self) -> None:
+        first = self._row("PSP-REGISTRY-001", "registry-open", 2)
+        report = parse_registry_readonly_output(self._stream([first]), require_complete=False)
+        self.assertFalse(report.complete)
+        self.assertEqual(report.categories, ())
+        self.assertEqual(report.keys, ())
+
+    def test_hle_intr_failed_vblank_register_without_result_is_protocol_error(self) -> None:
+        raw = self._stream([
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-HLE-INTR-001 "
+            "case_id=vbl-register status=FAIL out0=0xffffffff out1=0x0\n"
+        ])
+        with self.assertRaisesRegex(ProtocolError, "vbl-register FAIL has no result"):
+            parse_hle_intr_cells_output(raw, require_complete=False)
+
+    def test_vram_integer_reads_reuse_the_parsed_value_map(self) -> None:
+        record = parse_output(self._stream([
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-VRAM-MIRROR-001 "
+            "case_id=vram-info status=PASS result=0x0 out0=0x00001000 out1=0x00000002\n"
+        ])).results[0]
+        first = parse_golden._vram_mirror_values(record)
+        self.assertIs(first, parse_golden._vram_mirror_values(record))
+        self.assertEqual(parse_golden._vram_mirror_integer(record, "out0"), 0x1000)
+
 
 class GeCorpusGateTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -889,8 +1020,7 @@ class GeCorpusGateTests(unittest.TestCase):
         command = [sys.executable, str(self.root / "tools" / "psp_oracle" / "run_psplink.py"), "--ge-corpus-gate"]
         if document is None:
             return subprocess.run(command, capture_output=True, text=True, check=False)
-        fixture_dir = self.root / "tests" / "fixtures" / "psp_oracle"
-        with tempfile.TemporaryDirectory(prefix="ge-corpus-gate-", dir=fixture_dir) as scratch:
+        with tempfile.TemporaryDirectory(prefix="ge-corpus-gate-", dir=_oracle_scratch_parent()) as scratch:
             results_dir = Path(scratch) / "results"
             results_dir.mkdir()
             for relative, text in (results or {}).items():
@@ -902,6 +1032,23 @@ class GeCorpusGateTests(unittest.TestCase):
             corpus_path.write_text(json.dumps(document), encoding="utf-8")
             command.extend(["--ge-corpus", str(corpus_path)])
             return subprocess.run(command, capture_output=True, text=True, check=False)
+
+    def test_a_left_over_scratch_directory_never_reads_as_a_dirty_checkout(self) -> None:
+        # A run killed before cleanup leaves its scratch directory behind; the Makefile's
+        # clean-tree guard (git status --porcelain --untracked-files=normal) must not see it.
+        git = shutil.which("git")
+        env = {k: v for k, v in os.environ.items() if k not in GIT_REPOSITORY_VARIABLES}
+        if git is None or subprocess.run([git, "-C", str(self.root), "rev-parse", "--git-dir"],
+                                         capture_output=True, env=env, check=False).returncode:
+            self.skipTest("needs git and a git checkout")
+        with scratch_dir.TemporaryDirectory(prefix="left-over-", dir=_oracle_scratch_parent()) as scratch:
+            (Path(scratch) / "results.txt").write_text("left over\n", encoding="utf-8")
+            status = subprocess.run(
+                [git, "-C", str(self.root), "status", "--porcelain", "--untracked-files=normal",
+                 "--", scratch],
+                capture_output=True, text=True, env=env, check=True,
+            )
+        self.assertEqual(status.stdout, "")
 
     def _report(self, completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
         self.assertTrue(completed.stdout, completed.stderr)
@@ -934,6 +1081,16 @@ class GeCorpusGateTests(unittest.TestCase):
         report = ge_corpus_report(self.corpus, schema)
         self.assertEqual(report["status"], "REFUSED")
         self.assertIn("minium", report["cases"][0]["reason"])
+
+    def test_ref_with_an_enforced_sibling_keyword_is_refused(self) -> None:
+        schema = self._schema()
+        schema["$defs"]["probe_run"]["properties"]["evidence_envelope"]["required"] = [
+            "unvalidated_sibling"
+        ]
+        report = ge_corpus_report(self.corpus, schema)
+        self.assertEqual(report["status"], "REFUSED")
+        self.assertIn("$ref", report["cases"][0]["reason"])
+        self.assertIn("sibling", report["cases"][0]["reason"])
 
     def test_packed_pixel_values_must_fit_the_declared_format(self) -> None:
         document = json.loads(json.dumps(self.corpus))
@@ -1065,6 +1222,109 @@ class GeCorpusGateTests(unittest.TestCase):
             },
         }
         return document
+
+    def _measured_case_record(
+        self,
+        *,
+        metadata: dict[str, str] | None = None,
+        envelope_case_id: str | None = None,
+        record_framebuffer_sha256: str | None = None,
+        pixels: dict[tuple[int, int], int | str] | None = None,
+        omitted_pixels: set[tuple[int, int]] | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        document: dict[str, Any] = json.loads(json.dumps(self.corpus))
+        case = document["cases"][0]
+        case["source_tier"] = "PSP_HARDWARE"
+        framebuffer_sha = "a" * 64
+        case["framebuffer_sha256"] = framebuffer_sha
+        for pixel in case["selected_pixels"]:
+            pixel["pixel_value"] = 0
+        identity = {
+            "source": "psp",
+            "model": "PSP-3000",
+            "firmware": "6.61-ARK",
+            "binary": MEASURED_SHA,
+            "commit": MEASURED_COMMIT,
+            **(metadata or {}),
+        }
+        case_id = case["case_id"]
+        fields = [f"framebuffer_sha256={record_framebuffer_sha256 or framebuffer_sha}"]
+        for pixel in case["selected_pixels"]:
+            coordinates = (pixel["x"], pixel["y"])
+            if coordinates in (omitted_pixels or set()):
+                continue
+            value = (pixels or {}).get(coordinates, pixel["pixel_value"])
+            formatted = value if isinstance(value, str) else f"0x{value:08x}"
+            fields.append(f"pixel_{pixel['x']}_{pixel['y']}={formatted}")
+        raw = META.format(**identity) + (
+            f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-001 case_id={case_id} "
+            "status=PASS " + " ".join(fields) + "\n"
+        )
+        case["evidence_envelope"] = {
+            "EVIDENCE_CLASS": "PSP_HARDWARE",
+            "ACCEPTANCE_ELIGIBLE": True,
+            "CASE_ID": envelope_case_id or case_id,
+            "CONSOLE_MODEL": "PSP-3000",
+            "FW": "6.61-ARK",
+            "SOURCE_COMMIT": MEASURED_COMMIT,
+            "BINARY_SHA256": MEASURED_SHA,
+            "RESULT_RECORD": {
+                "path": "ge/run.txt",
+                "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+            },
+        }
+        return document, raw
+
+    def test_measured_hardware_case_rederives_identity_digest_case_and_pixels(self) -> None:
+        document, raw = self._measured_case_record()
+        completed = self._run_gate(document, {"ge/run.txt": raw})
+        measured = self._report(completed)["cases"][0]
+        self.assertEqual(measured["status"], "MEASURED")
+        self.assertIn("matches this case and its pixel results", measured["reason"])
+
+        identity_failures = (
+            ({"model": "PSP-2000"}, "model does not match CONSOLE_MODEL"),
+            ({"firmware": "6.60-ARK"}, "firmware does not match FW"),
+            ({"commit": "c" * 40}, "source_commit does not match SOURCE_COMMIT"),
+            ({"binary": "c" * 64}, "binary_sha256 does not match BINARY_SHA256"),
+        )
+        for metadata, reason in identity_failures:
+            with self.subTest(metadata=tuple(metadata)):
+                document, raw = self._measured_case_record(metadata=metadata)
+                completed = self._run_gate(document, {"ge/run.txt": raw})
+                refused = self._report(completed)["cases"][0]
+                self.assertEqual(refused["status"], "REFUSED")
+                self.assertIn(reason, refused["reason"])
+
+        with self.subTest(boundary="CASE_ID"):
+            document, raw = self._measured_case_record(envelope_case_id="another-case")
+            completed = self._run_gate(document, {"ge/run.txt": raw})
+            refused = self._report(completed)["cases"][0]
+            self.assertEqual(refused["status"], "REFUSED")
+            self.assertIn("oracle CASE_ID does not match", refused["reason"])
+
+        first_pixel = self.corpus["cases"][0]["selected_pixels"][0]
+        coordinates = (first_pixel["x"], first_pixel["y"])
+        pixel_key = f"pixel_{coordinates[0]}_{coordinates[1]}"
+        pixel_failures = (
+            ({"omitted_pixels": {coordinates}}, f"missing a valid {pixel_key}"),
+            ({"pixels": {coordinates: "not-a-pixel"}}, f"missing a valid {pixel_key}"),
+            ({"pixels": {coordinates: 1}}, f"{pixel_key} does not match the case pixel vector"),
+        )
+        for options, reason in pixel_failures:
+            with self.subTest(pixel_case=tuple(options)):
+                document, raw = self._measured_case_record(**options)
+                completed = self._run_gate(document, {"ge/run.txt": raw})
+                refused = self._report(completed)["cases"][0]
+                self.assertEqual(refused["status"], "REFUSED")
+                self.assertIn(reason, refused["reason"])
+
+        with self.subTest(boundary="framebuffer digest"):
+            document, raw = self._measured_case_record(record_framebuffer_sha256="b" * 64)
+            completed = self._run_gate(document, {"ge/run.txt": raw})
+            refused = self._report(completed)["cases"][0]
+            self.assertEqual(refused["status"], "REFUSED")
+            self.assertIn("framebuffer_sha256 does not match the case digest", refused["reason"])
 
     def test_hardware_claim_without_a_results_directory_is_not_run(self) -> None:
         document = self._hardware_case(stream("psp"))
@@ -1254,6 +1514,13 @@ class GeCorpusGateTests(unittest.TestCase):
                 "path": f"ge-corpus/PSP-GE-RTT-001-{MEASURED_COMMIT[:12]}.txt",
                 "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()})
             self.assertEqual((results / record_ref["path"]).read_text(encoding="utf-8"), raw)
+            wrong_identity = json.loads(json.dumps(written))
+            wrong_identity["probe_runs"][0]["evidence_envelope"]["FW"] = "6.60"
+            refused_identity = ge_corpus_report(
+                wrong_identity, self._schema(), results
+            )["probe_runs"][0]
+            self.assertEqual(refused_identity["status"], "REFUSED")
+            self.assertIn("raw result firmware does not match FW", refused_identity["reason"])
             self.assertEqual(run["cells"][0]["records"][0]["words"],
                              " ".join(f"{(1 * 0x10001 + i * 0x101):08x}" for i in range(16)))
             # A corpus row that is not the record's, with its digest made consistent, is refused.
@@ -1646,18 +1913,40 @@ class PspOracleDeviceIdentityTests(unittest.TestCase):
             "PROBE_BUILD_COMMIT could not be determined",
             missing.stdout + missing.stderr,
         )
-        # git status never lists an empty directory, so the scratch directory
-        # needs a file for the checkout to read as dirty.
-        with tempfile.TemporaryDirectory(
-            prefix="probe-build-dirty-", dir=makefile_path
-        ) as scratch:
-            (Path(scratch) / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+        git = shutil.which("git")
+        if git is None:
+            self.skipTest("git is unavailable")
+        env = {k: v for k, v in os.environ.items() if k not in GIT_REPOSITORY_VARIABLES}
+        live_status = [git, "-C", str(makefile_path.parents[2]), "status", "--porcelain",
+                       "--untracked-files=normal"]
+        before = subprocess.run(live_status, capture_output=True, text=True, env=env, check=True)
+        # The dirt lives in a throwaway repository with one commit, and the Makefile's git
+        # calls are pointed at it. git status never lists an empty directory, so the
+        # repository needs a file to read as dirty.
+        with tempfile.TemporaryDirectory(prefix="probe-build-dirty-") as scratch:
+            repo = Path(scratch)
+            subprocess.run([git, "init", "-q", str(repo)], capture_output=True, env=env, check=True)
+            tree = subprocess.run([git, "-C", str(repo), "write-tree"], capture_output=True,
+                                  text=True, env=env, check=True).stdout.strip()
+            identity = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+            commit = subprocess.run([git, "-C", str(repo), "commit-tree", tree, "-m", "synthetic"],
+                                    capture_output=True, text=True, env={**env, **identity},
+                                    check=True).stdout.strip()
+            subprocess.run([git, "-C", str(repo), "update-ref", "HEAD", commit],
+                           capture_output=True, env=env, check=True)
+            (repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
             completed = subprocess.run(
                 [make, "-C", str(makefile_path)],
                 capture_output=True,
                 text=True,
+                env={**env, "GIT_DIR": str(repo / ".git"), "GIT_WORK_TREE": str(repo)},
                 check=False,
             )
+            during = subprocess.run(live_status, capture_output=True, text=True, env=env, check=True)
+        # The live checkout never carries the dirt, so a run killed here, or another run
+        # reading git status meanwhile, never sees it.
+        self.assertEqual(during.stdout, before.stdout)
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("source tree is dirty", completed.stdout + completed.stderr)
 
@@ -1671,6 +1960,419 @@ class PspOracleDeviceIdentityTests(unittest.TestCase):
 
 
 class PspOracleRunnerTests(unittest.TestCase):
+    def test_unknown_campaign_contract_refuses_direct_record_parsing(self) -> None:
+        text = META.format(
+            source="psp",
+            model="synthetic",
+            firmware="test",
+            binary="0" * 64,
+            commit="0" * 40,
+        ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
+        with self.assertRaisesRegex(ProtocolError, "no registered completion contract"):
+            _parse_campaign_records(text, "unregistered-synthetic-case")
+
+    def test_campaign_completeness_contract_tracks_parser_registries(self) -> None:
+        from psp_oracle import run_psplink
+
+        text = META.format(
+            source="psp",
+            model="synthetic",
+            firmware="test",
+            binary="0" * 64,
+            commit="0" * 40,
+        ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
+        cache_clear = getattr(run_psplink._parse_campaign_records, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
+        try:
+            with patch.dict(
+                "psp_oracle.run_psplink._COMPLETE_CAMPAIGN_PARSERS",
+                {"new-complete-case": lambda _text, *, require_complete: None},
+            ):
+                self.assertTrue(_campaign_stream_complete(text, "new-complete-case"))
+            with patch.dict(
+                "psp_oracle.run_psplink._SINGLE_RECORD_CAMPAIGN_CASES",
+                {"new-single-case": ("SMOKE", "one")},
+            ):
+                self.assertTrue(_campaign_stream_complete(text, "new-single-case"))
+        finally:
+            if cache_clear is not None:
+                cache_clear()
+
+    def _compare_output_report(
+        self,
+        source: str,
+        *,
+        device_binary_sha: str | None = None,
+        device_source_commit: str | None = None,
+    ) -> dict[str, Any]:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="compare-output-", dir=build_root
+        ) as name:
+            scratch = Path(name)
+            binary = scratch / "probe.prx"
+            binary.write_bytes(STAGED_PRX)
+            digest = hashlib.sha256(STAGED_PRX).hexdigest()
+            psp_text = META.format(
+                source=source,
+                model="PSP-3000",
+                firmware="6.61-ARK",
+                binary=device_binary_sha or digest,
+                commit=device_source_commit or MEASURED_COMMIT,
+            ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
+            nakagawa_text = META.format(
+                source="nakagawa",
+                model="PSP-3000",
+                firmware="6.61-ARK",
+                binary=digest,
+                commit=MEASURED_COMMIT,
+            ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
+            psp_path = scratch / "psp.txt"
+            nakagawa_path = scratch / "nakagawa.txt"
+            results = scratch / "results"
+            report_path = scratch / "report.json"
+            psp_path.write_text(psp_text, encoding="utf-8")
+            nakagawa_path.write_text(nakagawa_text, encoding="utf-8")
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                return_value={"boot_number": 42},
+            ), patch(
+                "psp_oracle.run_psplink._run_command",
+                return_value=(0, "synthetic capture\n", "", "PROCESS_EXITED"),
+            ):
+                code = run_psplink_main([
+                    "--command", "fake-pspsh",
+                    "--session-id", "synthetic-session",
+                    "--results-directory", str(results),
+                    "--out", str(report_path),
+                    "--psp-output", str(psp_path),
+                    "--nakagawa-output", str(nakagawa_path),
+                    "--binary", str(binary),
+                    "--source-commit", MEASURED_COMMIT,
+                    "--model", "PSP-3000",
+                    "--firmware", "6.61-ARK",
+                ])
+            self.assertEqual(code, 0)
+            return cast(dict[str, Any], json.loads(report_path.read_text(encoding="utf-8")))
+
+    def _capture_argv(
+        self,
+        scratch: Path,
+        *,
+        results_directory: Path | None = None,
+        psp_text: str | None = None,
+        nakagawa_text: str | None = None,
+        report_name: str = "report.json",
+    ) -> tuple[list[str], Path]:
+        binary = scratch / "probe.prx"
+        binary.write_bytes(STAGED_PRX)
+        report = scratch / report_name
+        results = results_directory or scratch / "results"
+        args = [
+            "--command", "fake-pspsh",
+            "--session-id", "synthetic-session",
+            "--results-directory", str(results),
+            "--out", str(report),
+            "--binary", str(binary),
+            "--source-commit", MEASURED_COMMIT,
+            "--model", "PSP-3000",
+            "--firmware", "6.61-ARK",
+        ]
+        if psp_text is not None and nakagawa_text is not None:
+            psp_path = scratch / f"{report.stem}-psp.txt"
+            nakagawa_path = scratch / f"{report.stem}-nakagawa.txt"
+            psp_path.write_text(psp_text, encoding="utf-8")
+            nakagawa_path.write_text(nakagawa_text, encoding="utf-8")
+            args.extend(["--psp-output", str(psp_path), "--nakagawa-output", str(nakagawa_path)])
+        return args, report
+
+    def test_results_directory_must_be_git_ignored(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="results-policy-", dir=build_root) as name:
+            args, _report = self._capture_argv(
+                Path(name), results_directory=root / "docs"
+            )
+            from psp_oracle import run_psplink
+
+            stderr = io.StringIO()
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                side_effect=run_psplink.HardwareLockError("HARDWARE_LOCK_NOT_HELD"),
+            ), redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as raised:
+                    run_psplink_main(args)
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("ignored", stderr.getvalue())
+
+    def test_command_captures_in_the_same_second_do_not_overwrite(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="capture-unique-", dir=build_root) as name:
+            scratch = Path(name)
+            first_args, first_report_path = self._capture_argv(scratch, report_name="first.json")
+            second_args, second_report_path = self._capture_argv(scratch, report_name="second.json")
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                return_value={"boot_number": 42},
+            ), patch(
+                "psp_oracle.run_psplink._run_command",
+                side_effect=[
+                    (0, "first synthetic capture\n", "", "PROCESS_EXITED"),
+                    (0, "second synthetic capture\n", "", "PROCESS_EXITED"),
+                ],
+            ), patch("psp_oracle.run_psplink.time.strftime", return_value="same-second"):
+                self.assertEqual(run_psplink_main(first_args), 0)
+                self.assertEqual(run_psplink_main(second_args), 0)
+            first_report = json.loads(first_report_path.read_text(encoding="utf-8"))
+            second_report = json.loads(second_report_path.read_text(encoding="utf-8"))
+            first_capture = (root / first_report["stdout_file"]).resolve()
+            second_capture = (root / second_report["stdout_file"]).resolve()
+            self.assertNotEqual(first_capture, second_capture)
+            self.assertEqual(first_capture.read_text(encoding="utf-8"), "first synthetic capture\n")
+            self.assertEqual(second_capture.read_text(encoding="utf-8"), "second synthetic capture\n")
+
+    def test_malformed_psp_compare_writes_an_inconclusive_report(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="malformed-compare-", dir=build_root) as name:
+            args, report_path = self._capture_argv(
+                Path(name),
+                psp_text="malformed PSP stream\n",
+                nakagawa_text=measured_stream("nakagawa"),
+            )
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                return_value={"boot_number": 42},
+            ), patch(
+                "psp_oracle.run_psplink._run_command",
+                return_value=(0, "synthetic capture\n", "", "PROCESS_EXITED"),
+            ):
+                try:
+                    code = run_psplink_main(args)
+                except Exception as exc:
+                    self.fail(f"malformed comparison escaped without a report: {type(exc).__name__}")
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(code, 2)
+        self.assertEqual(report["comparison"]["classification"], "INCONCLUSIVE")
+        self.assertFalse(report["comparison"]["acceptance_eligible"])
+
+    def test_inconclusive_comparison_returns_nonzero(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="inconclusive-compare-", dir=build_root) as name:
+            psp_text = measured_stream("psp")
+            args, report_path = self._capture_argv(
+                Path(name), psp_text=psp_text, nakagawa_text="not a Nakagawa stream\n"
+            )
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                return_value={"boot_number": 42},
+            ), patch(
+                "psp_oracle.run_psplink._run_command",
+                return_value=(0, "synthetic capture\n", "", "PROCESS_EXITED"),
+            ):
+                code = run_psplink_main(args)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["comparison"]["classification"], "INCONCLUSIVE")
+        self.assertNotEqual(code, 0)
+
+    def test_compare_cli_preserves_emulator_source_for_acceptance_gate(self) -> None:
+        comparison = self._compare_output_report("ppsspp")["comparison"]
+        self.assertEqual(comparison["classification"], "MATCH")
+        self.assertFalse(comparison["acceptance_eligible"])
+        self.assertIn(
+            "psp: stream declares source='ppsspp', not 'psp'",
+            comparison["acceptance_blockers"],
+        )
+
+    def test_compare_cli_closes_acceptance_for_placeholder_device_identity(self) -> None:
+        comparison = self._compare_output_report(
+            "psp", device_binary_sha="0" * 64, device_source_commit="0" * 40
+        )["comparison"]
+        self.assertFalse(comparison["acceptance_eligible"])
+        self.assertEqual(comparison["SOURCE_COMMIT_BINDING"], "PLACEHOLDER")
+        self.assertIn("IDENTITY_NOT_BOUND", " | ".join(comparison["DEVICE_IDENTITY_BLOCKERS"]))
+
+    def test_run_command_retains_stdout_beyond_64k_on_exit_and_timeout(self) -> None:
+        large_stdout = "x" * 65536 + "NAKAGAWA_PSP_META schema=1 source=psp\n"
+        large_stderr = "e" * 65536 + "final diagnostic\n"
+        with patch(
+            "psp_oracle.run_psplink.subprocess.run",
+            return_value=SimpleNamespace(
+                returncode=0, stdout=large_stdout, stderr=large_stderr
+            ),
+        ):
+            code, stdout, stderr, status = _run_command(["synthetic"], 1)
+        self.assertEqual((code, status), (0, "PROCESS_EXITED"))
+        self.assertEqual(stdout, large_stdout)
+        self.assertEqual(stderr, large_stderr)
+
+        timeout = subprocess.TimeoutExpired(
+            ["synthetic"], 1, output=large_stdout.encode(), stderr=large_stderr.encode()
+        )
+        with patch("psp_oracle.run_psplink.subprocess.run", side_effect=timeout):
+            code, stdout, stderr, status = _run_command(["synthetic"], 1)
+        self.assertEqual((code, status), (None, "TIMEOUT"))
+        self.assertEqual(stdout, large_stdout)
+        self.assertEqual(stderr, large_stderr)
+
+    def test_resumed_campaign_case_resets_before_first_launch(self) -> None:
+        runner = PsplinkCampaignRunner(
+            SimpleNamespace(), console_model="synthetic", source_commit="0" * 40
+        )
+        case = SimpleNamespace(case_id="resumed-case", binary=Path("resumed.prx"), timeout=1.0)
+        phases: list[str] = []
+        with patch.object(runner, "_hardware_lock_held", return_value=True), patch.object(
+            runner, "_reset_once", return_value=False
+        ) as reset:
+            runner._run_case(
+                case,
+                case_index=1,
+                local_index=0,
+                cases=[case],
+                host0_path=None,
+                progress=SimpleNamespace(),
+                reset_between_cases=True,
+                stop_on_incomplete=True,
+                on_case_start=lambda _index, _case, phase: phases.append(phase),
+                on_case_complete=None,
+            )
+        reset.assert_called_once_with("campaign soft reset before resumed-case")
+        self.assertEqual(phases, ["RESET_BEFORE_CASE"])
+
+    def test_failed_reset_before_a_resumed_first_case_names_no_queued_case(self) -> None:
+        runner = PsplinkCampaignRunner(
+            SimpleNamespace(), console_model="synthetic", source_commit="0" * 40
+        )
+        first = SimpleNamespace(case_id="resumed-case", binary=Path("resumed.prx"), timeout=1.0)
+        last = SimpleNamespace(case_id="last-queued-case", binary=Path("last.prx"), timeout=1.0)
+
+        def failed_reset(_detail: str) -> bool:
+            runner._physical_intervention("synthetic reset failure")
+            return False
+
+        with patch.object(runner, "_hardware_lock_held", return_value=True), patch.object(
+            runner, "_reset_once", side_effect=failed_reset
+        ):
+            kept_going = runner._run_case(
+                first,
+                case_index=3,
+                local_index=0,
+                cases=[first, last],
+                host0_path=None,
+                progress=SimpleNamespace(),
+                reset_between_cases=True,
+                stop_on_incomplete=True,
+                on_case_start=None,
+                on_case_complete=None,
+            )
+        self.assertFalse(kept_going)
+        self.assertEqual(runner.terminal_reason, "PHYSICAL_INTERVENTION_REQUIRED")
+        # The case before a resumed first case ran in an earlier run; no case in
+        # this run's list was launched, so none is named.
+        self.assertIsNone(runner.intervention_case_id)
+        self.assertEqual(runner.resume_case_index, 3)
+
+    def test_reset_campaign_case_verifies_and_removes_host0_roundtrip_file(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(
+            prefix="campaign-roundtrip-", dir=root / "tests" / "fixtures" / "psp_oracle"
+        ) as name:
+            host0_root = Path(name)
+            binary = host0_root / "later.prx"
+            binary.write_bytes(STAGED_PRX)
+            roundtrip = host0_root / "nakagawa_transport_write.bin"
+            roundtrip.write_bytes(bytes(
+                (0x5A ^ (index * 0x25 + (index >> 3))) & 0xFF
+                for index in range(64)
+            ))
+            prior = SimpleNamespace(case_id="prior-case", binary=binary, timeout=1.0)
+            case = SimpleNamespace(case_id="later-case", binary=binary, timeout=1.0)
+            runner = PsplinkCampaignRunner(
+                SimpleNamespace(host0_root=host0_root),
+                console_model="synthetic",
+                source_commit="0" * 40,
+            )
+            host0_text = "NAKAGAWA_PSP_COMPLETE schema=1 status=PASS\n"
+            with patch.object(runner, "_hardware_lock_held", return_value=True), patch.object(
+                runner, "_reset_once", return_value=True
+            ), patch.object(runner, "_take_baseline", return_value=(object(), None)), patch.object(
+                runner, "_take_snapshot", return_value=(object(), None)
+            ), patch.object(
+                runner, "_request", side_effect=[
+                    (0, "UID: 0x00000008", "", "PROCESS_EXITED"),
+                    (0, "", "", "PROCESS_EXITED"),
+                ]
+            ), patch.object(
+                runner, "_module_threads", return_value=(frozenset(), None)
+            ), patch.object(
+                runner, "_unload_status", return_value="PASS"
+            ), patch.object(
+                runner, "_settle_after_unload", return_value=("PASS", 1)
+            ), patch.object(
+                runner, "_shell_qualified", return_value=True
+            ), patch.object(
+                runner, "_probe_case_succeeded", return_value=True
+            ), patch(
+                "psp_oracle.run_psplink._wait_for_host0_output",
+                return_value=(host0_text, time.time_ns()),
+            ), patch(
+                "psp_oracle.run_psplink.evaluate_teardown_snapshots",
+                return_value={"status": "PASS", "issues": [], "recovery_eligible": False},
+            ), patch.object(
+                runner, "_envelope", return_value={"CASE_ID": "later-case"}
+            ), patch.object(
+                runner, "_verify_host0_roundtrip", wraps=runner._verify_host0_roundtrip
+            ) as verify_roundtrip:
+                kept_going = runner._run_case(
+                    case,
+                    case_index=1,
+                    local_index=1,
+                    cases=[prior, case],
+                    host0_path=host0_root,
+                    progress=SimpleNamespace(),
+                    reset_between_cases=True,
+                    stop_on_incomplete=True,
+                    on_case_start=None,
+                    on_case_complete=None,
+                )
+            self.assertTrue(kept_going)
+            verify_roundtrip.assert_called_once_with()
+            self.assertFalse(roundtrip.exists())
+
+    def test_campaign_plan_exprint_status_reports_the_command_status(self) -> None:
+        before = PsplinkSnapshot(
+            threads=frozenset({("0x00000001", "PspLink")}),
+            memory_free_bytes=(),
+            modules=frozenset({("0x00000003", "PspLink")}),
+        )
+        report = evaluate_teardown_snapshots(
+            before,
+            before,
+            before,
+            "0x00000008",
+            frozenset(),
+            unload_confirmed=True,
+            sentinel_status="PASS",
+            shell_qualified=True,
+            host0_roundtrip=True,
+            exprint_command_status="PROCESS_EXITED",
+        )
+        self.assertEqual(report["exprint_status"], "PROCESS_EXITED")
+
     def test_dmac_host0_capture_uses_the_runner_validation_path(self) -> None:
         args = SimpleNamespace(
             validate_dmac_size_matrix=True,
@@ -1683,7 +2385,74 @@ class PspOracleRunnerTests(unittest.TestCase):
         report = _validate_host0_capture(dmac_matrix_stream(), args)
         self.assertEqual(report["classification"], "PASS")
         self.assertEqual(report["test_record_count"], 16)
-        self.assertTrue(report["acceptance_eligible"])
+        self.assertFalse(report["acceptance_eligible"])
+        self.assertIn("IDENTITY_NOT_BOUND", " | ".join(report["acceptance_blockers"]))
+
+    def test_campaign_parse_cache_validates_each_identical_stream_once(self) -> None:
+        from psp_oracle import run_psplink
+
+        text = META.format(
+            source="psp",
+            model="PSP-3000",
+            firmware="6.61-ARK",
+            binary="0" * 64,
+            commit="0" * 40,
+        ) + "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id=model-profile status=PASS result=0x3 out0=0x3 out1=0x06060110 out2=0xde\n"
+        text += "NAKAGAWA_PSP_COMPLETE schema=1 status=PASS\n"
+        records = text.split("NAKAGAWA_PSP_COMPLETE", 1)[0]
+        normalized = run_psplink._normalise_unbound_identity_fields(records)
+        cache_clear = getattr(run_psplink._parse_campaign_records, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
+        original = run_psplink._validate_campaign_contract
+        with patch.object(
+            run_psplink, "_validate_campaign_contract", wraps=original
+        ) as validate:
+            self.assertTrue(run_psplink._campaign_stream_complete(text, "model-profile"))
+            run_psplink._parse_campaign_records(normalized, "model-profile")
+        self.assertEqual(validate.call_count, 1)
+        if cache_clear is not None:
+            cache_clear()
+
+    def test_canonicalization_and_identity_share_one_binary_hash_per_args(self) -> None:
+        from psp_oracle import run_psplink
+
+        with tempfile.TemporaryDirectory(prefix="binary-hash-cache-") as name:
+            args = identity_args(Path(name))
+            text = device_identity_stream(binary="0" * 64, commit="0" * 40)
+            with patch.object(
+                run_psplink,
+                "_host_binary_sha256",
+                wraps=run_psplink._host_binary_sha256,
+            ) as hash_binary:
+                run_psplink._device_identity(text, args)
+                run_psplink._canonicalize_psp(text, args)
+                run_psplink._canonicalize_psp(text, args)
+            self.assertEqual(hash_binary.call_count, 1)
+
+    def test_progress_detail_ignores_an_unterminated_final_step(self) -> None:
+        from psp_oracle import run_psplink
+
+        text = (
+            "NAKAGAWA_PSP_STEP schema=1 case_id=registry-readonly step=last-complete\n"
+            "NAKAGAWA_PSP_STEP schema=1 case_id=registry-readonly step=partial"
+        )
+        detail = run_psplink._host0_progress_detail(text, 2_000_000_000, 1_000_000_000)
+        self.assertIn("last step marker: last-complete", detail)
+        self.assertNotIn("partial", detail)
+
+    def test_dmac_host0_readiness_derives_its_record_count_from_protocol(self) -> None:
+        from psp_oracle import run_psplink
+
+        nine_sizes = tuple(range(9))
+        with patch.object(
+            run_psplink, "DMAC_SIZE_MATRIX_SIZES", nine_sizes, create=True
+        ), patch.object(
+            run_psplink, "_canonicalize_psp", side_effect=lambda text, _args: text
+        ), patch.object(
+            run_psplink, "parse_output", return_value=SimpleNamespace(results=[None] * 18)
+        ):
+            self.assertTrue(run_psplink._host0_capture_complete("synthetic", SimpleNamespace()))
 
     def test_capture_records_distinguish_result_skip_and_no_record(self) -> None:
         self.assertEqual(_record_summary("transport only\n"), ("NO_RECORD", 0))
@@ -1752,7 +2521,7 @@ class PspOracleRunnerTests(unittest.TestCase):
     def test_capture_uses_selected_scratch_results_directory(self) -> None:
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(
-            prefix="run-psplink-", dir=root / "tests" / "fixtures" / "psp_oracle"
+            prefix="run-psplink-", dir=_oracle_scratch_parent()
         ) as scratch_name:
             scratch = Path(scratch_name)
             results = scratch / "results"
@@ -1894,10 +2663,104 @@ class PspOracleRunnerTests(unittest.TestCase):
         self.assertIn("nakagawa_psp_oracle_sum_u32", text)
         self.assertNotIn("NAKAGAWA_PSP_TEST", text)
 
+    def test_smoke_builder_looks_up_symbols_through_analyze_elf(self) -> None:
+        from psp_oracle import build_nakagawa_smoke  # noqa: PLC0415
+
+        strings = b"\0target\0"
+        def fake_elf(addresses):
+            symbols = bytearray(16 * (len(addresses) + 1))
+            for index, address in enumerate(addresses, 1):
+                struct.pack_into("<IIIBBH", symbols, 16 * index, 1, address, 4, 0x12, 0, 1)
+            data = bytes(symbols) + strings
+
+            class FakeElf:
+                def __init__(self, _path):
+                    self.data = data
+
+                def sec(self, name):
+                    return {
+                        ".symtab": {"off": 0, "size": len(symbols), "entsz": 16},
+                        ".strtab": {"off": len(symbols), "size": len(strings)},
+                    }.get(name)
+
+            return FakeElf(Path("synthetic.elf"))
+
+        with patch.object(build_nakagawa_smoke.analyze, "Elf", side_effect=[
+            fake_elf([0x08801234]), fake_elf([0x08801234, 0x08805678])
+        ]):
+            self.assertEqual(
+                build_nakagawa_smoke._symbol_address(Path("synthetic.elf"), "target"),
+                0x08801234,
+            )
+            with self.assertRaisesRegex(ValueError, "expected one target function, found 2"):
+                build_nakagawa_smoke._symbol_address(Path("synthetic.elf"), "target")
+
+    def test_smoke_builder_does_not_write_unused_absolute_path_manifest(self) -> None:
+        from psp_oracle import build_nakagawa_smoke  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory(prefix="smoke-builder-") as scratch:
+            root = Path(scratch)
+            elf = root / "guest.elf"
+            elf.write_bytes(b"synthetic source ELF")
+            out_dir = root / "out"
+
+            def build_chunks(command, **_kwargs):
+                base = Path(command[3])
+                base.with_name("smoke_recomp_funcs.h").write_text(
+                    "void f_08800000(CpuState *s);\n", encoding="utf-8"
+                )
+                base.with_name("smoke_recomp_0.c").write_text("/* synthetic */\n", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch.object(build_nakagawa_smoke, "_symbol_address", return_value=0x08800000), \
+                 patch.object(build_nakagawa_smoke.subprocess, "run", side_effect=build_chunks):
+                self.assertEqual(
+                    build_nakagawa_smoke.main(["--elf", str(elf), "--out-dir", str(out_dir)]),
+                    0,
+                )
+            self.assertFalse((out_dir / "smoke_manifest.json").exists())
+
     def test_oracle_capture_launcher_preserves_child_stdout(self) -> None:
+        # The capture holds exactly the child's stdout bytes (no newline translation, no
+        # stderr), and the launcher returns the child's exit code.
         launcher = Path(__file__).resolve().parent / "psp_oracle" / "run_nakagawa.py"
-        self.assertTrue(launcher.is_file())
-        self.assertIn("stdout=subprocess.PIPE", launcher.read_text(encoding="utf-8"))
+        child = ("import sys; sys.stdout.buffer.write(b'NAKAGAWA_PSP_TEST a=1\\r\\nrow 2\\n\\x00end'); "
+                 "sys.stdout.flush(); sys.stderr.write('not a record\\n'); sys.exit(3)")
+        with tempfile.TemporaryDirectory(prefix="run-nakagawa-") as scratch:
+            output = Path(scratch) / "nested" / "capture.log"
+            completed = subprocess.run(
+                [sys.executable, str(launcher), "--executable", sys.executable,
+                 "--output", str(output), "--", "-c", child],
+                capture_output=True, check=False,
+            )
+            self.assertEqual(completed.returncode, 3, completed.stderr)
+            self.assertEqual(output.read_bytes(), b"NAKAGAWA_PSP_TEST a=1\r\nrow 2\n\x00end")
+        self.assertEqual(completed.stdout, b"")
+        self.assertIn(b"not a record", completed.stderr)
+
+    def test_oracle_capture_launchers_report_timeout_and_preserve_partial_stdout(self) -> None:
+        from psp_oracle import run_nakagawa, run_nakagawa_vfpu  # noqa: PLC0415
+
+        for launcher in (run_nakagawa, run_nakagawa_vfpu):
+            with self.subTest(launcher=launcher.__name__), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                exe = root / "synthetic.exe"
+                exe.write_bytes(b"synthetic executable")
+                output = root / "partial.txt"
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch.object(sys, "argv", [
+                    launcher.__name__, "--executable", str(exe), "--output", str(output),
+                    "--timeout", "3", "--", "arg",
+                ]), patch.object(
+                    launcher.subprocess, "run",
+                    side_effect=subprocess.TimeoutExpired(
+                        "synthetic.exe", 3, output=b"partial record\n"
+                    ),
+                ) as run, redirect_stdout(stdout), redirect_stderr(stderr):
+                    self.assertEqual(launcher.main(), 124)
+                self.assertEqual(output.read_bytes(), b"partial record\n")
+                self.assertIn("TIMEOUT", stderr.getvalue())
+                self.assertEqual(run.call_args.kwargs["timeout"], 3.0)
 
 
 class PspLinkTeardownSnapshotTests(unittest.TestCase):
@@ -2172,7 +3035,7 @@ class PspLinkTeardownSnapshotTests(unittest.TestCase):
             exprint_command_status="PROCESS_EXITED",
         )
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(report["exprint_status"], "NOT_RUN")
+        self.assertEqual(report["exprint_status"], "PROCESS_EXITED")
         self.assertEqual(report["exprint_command_status"], "PROCESS_EXITED")
 
     def test_three_snapshot_check_reports_allocator_drift_without_failing_teardown(self) -> None:
@@ -2443,8 +3306,7 @@ int main(void) {
     return 0;
 }
 '''
-        fixture = root / "tests" / "fixtures" / "psp_oracle"
-        with scratch_dir.TemporaryDirectory(prefix="interrupt-resume-host-", dir=fixture) as scratch:
+        with scratch_dir.TemporaryDirectory(prefix="interrupt-resume-host-", dir=_oracle_scratch_parent()) as scratch:
             source_path = Path(scratch) / "interrupt_resume_host.c"
             binary_path = Path(scratch) / "interrupt_resume_host.exe"
             source_path.write_text(harness, encoding="utf-8")
@@ -2579,8 +3441,7 @@ int main(void) {
     return 0;
 }
 '''
-        fixture = root / "tests" / "fixtures" / "psp_oracle"
-        with scratch_dir.TemporaryDirectory(prefix="child-teardown-host-", dir=fixture) as scratch:
+        with scratch_dir.TemporaryDirectory(prefix="child-teardown-host-", dir=_oracle_scratch_parent()) as scratch:
             source_path = Path(scratch) / "child_teardown_host.c"
             binary_path = Path(scratch) / "child_teardown_host.exe"
             source_path.write_text(harness, encoding="utf-8")
@@ -2734,7 +3595,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 164)
+        self.assertEqual(len(routes), 168)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2742,8 +3603,8 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertEqual(set(range(1, 79)) | set(range(90, 106)) | {180} | {106, 107, 108, 109}
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
-                         | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186, 187, 188},
+                         | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141}
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -3183,6 +4044,19 @@ class PspOracleBuildRouteTests(unittest.TestCase):
             root = Path(scratch)
             repo = root / "repo"
             repo.mkdir()
+            # A caller that exported GIT_DIR and GIT_INDEX_FILE (a hook, rebase -x) must not
+            # have the fixture staged or committed into its repository.
+            decoy = root / "decoy"
+            decoy.mkdir()
+            decoy_index = root / "decoy.index"
+            subprocess.run(
+                ["git", "init", "-q"], cwd=decoy, check=True, capture_output=True,
+                env={key: value for key, value in os.environ.items()
+                     if key not in GIT_REPOSITORY_VARIABLES},
+            )
+            self.enterContext(patch.dict(
+                os.environ, {"GIT_DIR": str(decoy / ".git"), "GIT_INDEX_FILE": str(decoy_index)}
+            ))
             dated = time.time() - 3600
             # The Makefile and every source and header it may name as a prerequisite.
             sources = [self.fixture / "Makefile"]
@@ -3205,8 +4079,10 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                 "    log.write('compiled\\n')\n",
                 encoding="utf-8",
             )
+            # The git commands below, and the Makefile's clean-tree check, use this repo.
             env = {
-                **os.environ,
+                **{key: value for key, value in os.environ.items()
+                   if key not in GIT_REPOSITORY_VARIABLES},
                 "GIT_CONFIG_GLOBAL": os.devnull,
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_AUTHOR_NAME": "oracle-case-stamp test",
@@ -3246,6 +4122,14 @@ class PspOracleBuildRouteTests(unittest.TestCase):
             # make kept the smoke object.
             self.assertEqual(build("callback-notify-check"), ("-DPSP_ORACLE_CASE=1\n", 2))
             self.assertEqual(build("smoke"), ("-DPSP_ORACLE_CASE=0\n", 3))
+            # The fixture commit is the scratch repository's own; the decoy is untouched.
+            history = subprocess.run(["git", "log", "--format=%s"], cwd=repo, env=env,
+                                     check=True, capture_output=True, text=True).stdout
+            self.assertEqual(history, "fixture\n")
+            decoy_refs = subprocess.run(["git", "for-each-ref"], cwd=decoy, env=env,
+                                        check=True, capture_output=True, text=True).stdout
+            self.assertEqual(decoy_refs, "")
+            self.assertFalse(decoy_index.exists())
 
 
 class PspDmacProbeTests(unittest.TestCase):
@@ -3610,10 +4494,10 @@ class PspDmacProbeTests(unittest.TestCase):
         """`status` stays probe-source prose; the hardware tier comes from the cited run."""
         manifest = self._oracle_manifest()
         by_id = {entry["id"]: entry for entry in manifest["tests"]}
-        for test_id in ("PSP-FPU-001", "PSP-CACHE-001"):
+        for test_id in ("PSP-FPU-001", "PSP-GE-001", "PSP-MUTEX-001", "PSP-CACHE-001"):
             self.assertEqual(
                 by_id[test_id]["status"],
-                "implemented" if test_id == "PSP-CACHE-001" else "planned",
+                "implemented",
             )
             self.assertEqual(by_id[test_id]["hardware_evidence"], "MEASURED")
             self.assertEqual(
@@ -3778,6 +4662,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # The 2026-11-10 acceptance-eligible ge-through-z (boot 180, e4e6a3a2) and
                 # vfpu-reserved-widths (#326, boot 182, c6abab53) runs.
                 "PSP-GE-THROUGHZ-001", "PSP-VFPU-RESERVED-001",
+                # The 2026-11-17 (UTC) acceptance-eligible safe-scalar (#2640, boot 221, XMB context)
+                # run of 86279e852.
+                "PSP-SAFE-SCALAR-001",
             },
         )
         self.assertEqual(
@@ -3938,7 +4825,7 @@ class PspDmacProbeTests(unittest.TestCase):
                 if test_id in {"PSP-AUDIO-001", "PSP-GE-001"}:
                     self.assertEqual(
                         entry["status"],
-                        "implemented" if test_id == "PSP-AUDIO-001" else "planned",
+                        "implemented",
                     )
                     self.assertEqual(entry["hardware_evidence"], "MEASURED")
                     self.assertEqual(entry["evidence_cases"], entry["case_ids"])
@@ -4177,8 +5064,7 @@ int main(void) {
 }
 '''.replace("/* MAILBOX PROBE SNIPPET */", mailbox_probe)
 
-        fixture = root / "tests" / "fixtures" / "psp_oracle"
-        with scratch_dir.TemporaryDirectory(prefix="mbx-cleanup-host-", dir=fixture) as scratch:
+        with scratch_dir.TemporaryDirectory(prefix="mbx-cleanup-host-", dir=_oracle_scratch_parent()) as scratch:
             source_path = Path(scratch) / "mbx_cleanup_host.c"
             binary_path = Path(scratch) / "mbx_cleanup_host.exe"
             source_path.write_text(harness, encoding="utf-8")
@@ -4369,6 +5255,23 @@ class UserModeImportGateTests(unittest.TestCase):
         self.assertEqual(status, user_mode_imports.EXIT_OK)
         self.assertIn("kernel-mode module (SceModuleInfo attribute 0x1000)", out)
 
+    def test_kernel_mode_registry_driver_import_fails_closed(self) -> None:
+        data = build_import_elf(
+            [("sceReg_driver", [0x17768E14])],
+            module_attributes=user_mode_imports.PSP_MODULE_KERNEL,
+        )
+        result = user_mode_imports.check_module(data)
+        self.assertFalse(result.passed)
+        self.assertEqual(
+            [(violation.library, violation.nids) for violation in result.violations],
+            [("sceReg_driver", (0x17768E14,))],
+        )
+        status, out, err = self._run_main(data)
+        self.assertEqual(status, user_mode_imports.EXIT_KERNEL_IMPORT)
+        self.assertEqual(out, "")
+        self.assertIn("sceReg_driver", err)
+        self.assertIn("sceRegSetKeyValue", err)
+
     def test_unattributed_stub_slots_fail_closed(self) -> None:
         user_shape = [(name.replace("ForKernel", "ForUser"), first, count)
                       for name, first, count in INTERLEAVED_SHAPE]
@@ -4510,6 +5413,9 @@ class ProbeProgressAndBoundedWaitTests(unittest.TestCase):
         report = parse_campaign_probe_output(self._stream(rows), "ge-break-continue")
         statuses = {record.case_id: record.status for record in report.results.values()}
         self.assertEqual(statuses["ge-continue-drain"], "TIMEOUT")
+        # A TIMEOUT is a complete, measured stream, but not an all-PASS one.
+        self.assertTrue(report.complete)
+        self.assertFalse(report.all_passed)
 
     def test_ge_break_continue_resets_before_any_dequeue(self) -> None:
         # The reset cell is separable only if the sceGeBreak(1) reset cell comes before every
@@ -4532,9 +5438,17 @@ class ProbeProgressAndBoundedWaitTests(unittest.TestCase):
             if "case_id=ge-list-dequeue-stalled " in row else row
             for row in rows
         ]
+        self.assertNotEqual(busy, rows)
         report = parse_campaign_probe_output(self._stream(busy), "ge-break-continue")
-        statuses = {record.case_id: record.status for record in report.results.values()}
-        self.assertEqual(set(statuses.values()), {"PASS"})
+        spec, _ = CAMPAIGN_PROBE_CASES["ge-break-continue"]
+        # The parser keeps the measured BUSY word, keeps every cancelled cell in its place,
+        # and still finds the stream complete and eligible.
+        self.assertTrue(report.complete)
+        self.assertTrue(report.all_passed)
+        self.assertEqual(report.observed_order, tuple(spec.ordered_cases))
+        self.assertEqual(dict(report.results["ge-list-dequeue-stalled"].values)["result"], "0x80000021")
+        for cancelled in ("ge-list-sync-cancelled", "ge-draw-sync-cancelled", "ge-quiesce-after-cancel"):
+            self.assertEqual(dict(report.results[cancelled].values)["result"], "0x0")
 
     def test_campaign_specs_match_the_records_the_probe_emits(self) -> None:
         defines = {name: int(value) for name, value in
@@ -4568,23 +5482,42 @@ class ProbeProgressAndBoundedWaitTests(unittest.TestCase):
         # cpu-timing's blocking sceGeDrawSync(0) cell): inside a helper-thread entry whose
         # creator waits for it with a timeout and terminates it when the wait fails, so a
         # sync that never returns costs one cell.
+        checked = 0
         for source in sorted(self.fixture.glob("*.c")):
             text = re.sub(r"/\*.*?\*/|//[^\n]*", "", source.read_text(encoding="utf-8"),
                           flags=re.DOTALL)
-            for call in re.finditer(r"sceGeListSync\([^;]*,\s*0\s*\)|sceGeDrawSync\(\s*0\s*\)", text):
-                head = text.rfind("\nstatic ", 0, call.start())
-                entry = re.match(r"\nstatic int (\w+)\(SceSize \w+, void \*\w+\) \{",
-                                 text[head:text.index("{", head) + 1])
-                self.assertIsNotNone(entry, f"{source.name}: {call.group(0)} outside a helper thread")
-                create = re.search(
-                    r"sceKernelCreateThread\([^;]*\b%s\b" % _matched(entry).group(1), text
-                )
-                self.assertIsNotNone(create, f"{source.name}: {_matched(entry).group(1)} is never started")
-                caller_head = text.rfind("\nstatic ", 0, _matched(create).start())
-                caller = text[caller_head:text.index("\n}\n", _matched(create).start())]
-                self.assertRegex(caller, r"sceKernelWaitThreadEnd\(\s*\w+\s*,\s*&\w+\s*\)", source.name)
-                self.assertIn("sceKernelTerminateDeleteThread(", caller, source.name)
-            self.assertNotIn("sceGuSync(", text, source.name)
+            checked += len(_GE_BLOCKING_SYNC_RE.findall(text))
+            self.assertEqual(_unbounded_ge_sync_problems(source.name, text), [])
+        self.assertGreater(checked, 0)
+
+    def test_a_blocking_sync_after_a_helper_thread_is_credited_to_its_own_function(self) -> None:
+        # A non-static function placed after a helper-thread entry is its own function: its
+        # blocking sync runs on the caller's thread with no bound and is reported.
+        text = (
+            "\nstatic int gs_thread(SceSize args, void *argp) {\n"
+            "    (void)args; (void)argp;\n    sceGeDrawSync(0);\n    return 0;\n}\n"
+            "int gs_caller_sync(void) {\n    sceGeDrawSync(0);\n    return 0;\n}\n"
+            "static void gs_run(void) {\n"
+            "    SceUID t = sceKernelCreateThread(\"gs\", gs_thread, 0x20, 0x1000, 0, NULL);\n"
+            "    SceUInt timeout = 1000;\n"
+            "    if (sceKernelWaitThreadEnd(t, &timeout) < 0) {\n"
+            "        sceKernelTerminateDeleteThread(t);\n    }\n}\n"
+        )
+        self.assertEqual(_unbounded_ge_sync_problems("synthetic.c", text),
+                         ["synthetic.c: sceGeDrawSync(0) in gs_caller_sync, outside a helper thread"])
+        # The creator is also its own function, not the nearest static line above the call.
+        waits = text.replace("int gs_caller_sync(void) {\n    sceGeDrawSync(0);\n    return 0;\n}\n", "")
+        self.assertEqual(_unbounded_ge_sync_problems("synthetic.c", waits), [])
+        unbounded = waits[:waits.index("static void gs_run(void) {\n")] + (
+            "static void gs_other(void) {\n    SceUInt timeout = 1;\n"
+            "    if (sceKernelWaitThreadEnd(0, &timeout) < 0) {\n"
+            "        sceKernelTerminateDeleteThread(0);\n    }\n}\n"
+            "void gs_run(void) {\n"
+            "    SceUID t = sceKernelCreateThread(\"gs\", gs_thread, 0x20, 0x1000, 0, NULL);\n"
+            "    sceKernelWaitThreadEnd(t, NULL);\n}\n")
+        self.assertEqual(_unbounded_ge_sync_problems("synthetic.c", unbounded), [
+            "synthetic.c: gs_thread's creator gs_run does not wait for it with a timeout",
+            "synthetic.c: gs_thread's creator gs_run does not terminate it when the wait fails"])
 
     def test_ge_break_continue_writes_the_list_back_before_enqueueing_it(self) -> None:
         body = self._function("static void run_ge_break_continue(int emulated) {")
@@ -4600,9 +5533,55 @@ class ProbeProgressAndBoundedWaitTests(unittest.TestCase):
             block = self._case_block(macro)
             self.assertNotIn("for (;;)", block, macro)
             self.assertNotIn("sceKernelSleepThread(", block, macro)
-            for call in re.finditer(r"sceKernel(?:WaitSema|WaitThreadEnd)\(([^;]*)\);", block):
-                self.assertFalse(call.group(1).rstrip().endswith("NULL"), (macro, call.group(0)))
+            for name, timeout, call in self._blocking_waits(block):
+                if (macro, call) in self.UNCONTENDED_WAITS:
+                    continue
+                self.assertNotIn(timeout, {"NULL", "0"}, (macro, name, call))
             self.assertIn("probe_step(emulated,", block, macro)
+
+    # Infinite-timeout waits that cannot block: (case, call text) -> why.
+    UNCONTENDED_WAITS: ClassVar[dict[tuple[str, str], str]] = {
+        ("CPU_TIMING", "sceKernelLockLwMutex(&s_cpu_timing_lwmutex, 1, NULL)"):
+            "a non-recursive LwMutex only this thread locks, unlocked after every lock",
+    }
+
+    @staticmethod
+    def _blocking_waits(block: str) -> list[tuple[str, str, str]]:
+        """(name, timeout argument, call text) for every Wait/Lock/Receive kernel call.
+
+        The call is closed by bracket matching, so it is found in a condition, a ternary or
+        an assignment as well as a bare statement; its last argument is the timeout pointer.
+        """
+
+        code = _c_code(block)
+        waits = []
+        for call in re.finditer(r"\b(sceKernel(?:Wait|Lock|Receive)\w*)\s*\(", code):
+            close = _c_close(code, call.end() - 1)
+            args = _c_split(code[call.end():close])
+            waits.append((call.group(1), args[-1].strip() if args else "",
+                          " ".join(code[call.start():close + 1].split())))
+        return waits
+
+    def test_the_wait_scan_sees_every_shape_and_family(self) -> None:
+        shapes = (
+            "if (sceKernelWaitSema(s, 1, NULL) < 0) { foo(); }",
+            "rc = sceKernelWaitThreadEnd(t, NULL) ;",
+            "sceKernelWaitEventFlag(f, 1, 0, &o, NULL);",
+            "x = cond ? y : sceKernelReceiveMbx(m, &msg, 0);",
+            "sceKernelLockMutex(m, 1, NULL);",
+        )
+        for shape in shapes:
+            with self.subTest(shape):
+                ((_, timeout, _),) = self._blocking_waits(shape)
+                self.assertIn(timeout, {"NULL", "0"})
+        ((_, timeout, _),) = self._blocking_waits("sceKernelWaitSema(s, 1, &timeout);")
+        self.assertEqual(timeout, "&timeout")
+
+    def test_every_uncontended_wait_exception_is_still_in_its_case(self) -> None:
+        for (macro, call), _reason in self.UNCONTENDED_WAITS.items():
+            with self.subTest(macro=macro, call=call):
+                calls = [text for _, _, text in self._blocking_waits(self._case_block(macro))]
+                self.assertEqual(calls.count(call), 1)
 
     def test_exhaustion_loops_are_capped_and_record_the_cap(self) -> None:
         registry = self._case_block("REGISTRY_READONLY")
@@ -4636,6 +5615,88 @@ def _c_function_list(code: str) -> list[tuple[str, str]]:
         brace = code.index("{", match.end() - 1)
         found.append((match.group(1), code[brace:_c_close(code, brace) + 1]))
     return found
+
+
+def _c_definitions(code: str) -> list[tuple[str, str, int, int]]:
+    """(name, header through its brace, start, closing-brace index) of every top-level
+    function definition of comment-free C text, static or not, in source order."""
+    found: list[tuple[str, str, int, int]] = []
+    for match in re.finditer(r"^(?:static\s+)?[A-Za-z_][\w \t\*]*?\b(\w+)\s*\(([^;{}]*)\)\s*\{",
+                             code, re.MULTILINE):
+        if match.group(1) in _C_NOT_CALLS or (found and match.start() <= found[-1][3]):
+            continue
+        brace = code.index("{", match.end() - 1)
+        found.append((match.group(1), code[match.start():brace + 1], match.start(),
+                      _c_close(code, brace)))
+    return found
+
+
+def _manifest_pattern_problems(case: str, patterns: list[str], emitted: tuple[str, ...]) -> list[str]:
+    """Why a manifest row's case_ids patterns are not exactly the records a probe emits: an
+    emitted record no pattern names, a pattern that names no record, or a catch-all."""
+    import fnmatch
+    problems = [f"pattern {pattern!r} names every record of the case"
+                for pattern in patterns if pattern in ("*", f"{case}-*")]
+    problems += [f"record {record!r} matches no pattern" for record in emitted
+                 if not any(fnmatch.fnmatchcase(record, pattern) for pattern in patterns)]
+    problems += [f"pattern {pattern!r} matches no record" for pattern in patterns
+                 if not any(fnmatch.fnmatchcase(record, pattern) for record in emitted)]
+    return problems
+
+
+def _makefile_route_objs(makefile: str, case: str) -> list[str]:
+    """The OBJS words of the oracle Makefile's build route for CASE=case (its TARGET block)."""
+    start = makefile.find(f"else ifeq ($(CASE),{case})\nTARGET = ")
+    if start < 0:
+        raise AssertionError(f"no build route for CASE={case}")
+    end = makefile.find("\nelse", start + 1)
+    objs: list[str] = re.findall(r"^OBJS = (.*)$",
+                                 makefile[start:end if end >= 0 else len(makefile)], re.MULTILINE)
+    if len(objs) != 1:
+        raise AssertionError(f"CASE={case}'s build route has {len(objs)} OBJS lines")
+    return objs[0].split()
+
+
+_GE_BLOCKING_SYNC_RE = re.compile(r"sceGeListSync\([^;]*,\s*0\s*\)|sceGeDrawSync\(\s*0\s*\)")
+
+
+def _unbounded_ge_sync_problems(name: str, text: str) -> list[str]:
+    """Blocking GE syncs of a comment-free oracle source that are not a bounded cell.
+
+    A blocking sync is allowed only in a helper-thread entry
+    ``static int X(SceSize a, void *b)`` whose creator waits for it with a timeout and
+    terminates it when the wait fails. The function holding the sync and the one holding the
+    create call are found by brace matching, so a function of any linkage is its own scope.
+    """
+    definitions = _c_definitions(text)
+
+    def enclosing(at: int) -> tuple[str, str, int, int] | None:
+        return next((d for d in definitions if d[2] <= at <= d[3]), None)
+
+    problems = []
+    for call in _GE_BLOCKING_SYNC_RE.finditer(text):
+        owner = enclosing(call.start())
+        entry = owner and re.fullmatch(r"static int (\w+)\(SceSize \w+, void \*\w+\) \{", owner[1])
+        if not entry:
+            where = owner[0] if owner else "no function"
+            problems.append(f"{name}: {call.group(0)} in {where}, outside a helper thread")
+            continue
+        thread = entry.group(1)
+        create = re.search(r"sceKernelCreateThread\([^;]*\b%s\b" % thread, text)
+        creator = enclosing(create.start()) if create else None
+        if creator is None:
+            problems.append(f"{name}: {thread} is never started")
+            continue
+        body = text[creator[2]:creator[3] + 1]
+        if not re.search(r"sceKernelWaitThreadEnd\(\s*\w+\s*,\s*&\w+\s*\)", body):
+            problems.append(f"{name}: {thread}'s creator {creator[0]} does not wait for it "
+                            "with a timeout")
+        if "sceKernelTerminateDeleteThread(" not in body:
+            problems.append(f"{name}: {thread}'s creator {creator[0]} does not terminate it "
+                            "when the wait fails")
+    if "sceGuSync(" in text:
+        problems.append(f"{name}: sceGuSync")
+    return problems
 
 
 def _c_depth(body: str, at: int) -> int:
@@ -4682,8 +5743,21 @@ def _gu_teardown_problems(source: str) -> list[str]:
             cbid = re.escape(call.group(1))
             if "null_ge_drawsync_bounded(" not in body[:call.start()]:
                 problems.append(f"{name} sets its GE callback before a bounded idle check")
-            if not re.search(r"sceGeUnsetCallback\(\s*%s\s*\)" % cbid, body[call.end():]):
-                problems.append(f"{name} never unsets its GE callback ID")
+            # The unset runs on every path that registered: a statement at the function's
+            # top level, unconditional or guarded only by `<id> >= 0` (a failed set
+            # registered nothing), with no return or goto between the set and it.
+            for unset in re.finditer(r"sceGeUnsetCallback\(\s*%s\s*\)" % cbid, body[call.end():]):
+                at = call.end() + unset.start()
+                statement = body[max(body.rfind(c, 0, at) for c in ";{}") + 1:at]
+                if _c_depth(body, at) == 1 and (
+                        not re.search(r"\b(?:if|else|for|while|do|case|switch)\b|\?|&&|\|\|", statement)
+                        or re.fullmatch(r"\s*(?:const\s+)?int\s+\w+\s*=\s*%s\s*>=\s*0\s*\?\s*" % cbid,
+                                        statement)):
+                    if re.search(r"\b(?:return|goto)\b", body[call.end():at]):
+                        problems.append(f"{name} can return before it unsets its GE callback ID")
+                    break
+            else:
+                problems.append(f"{name} never unsets its GE callback ID on every path")
         return problems
 
     def reaches(name: str, body: str, start: int, pattern: str, what: str) -> int:
@@ -4798,6 +5872,32 @@ class GuTeardownContractTests(unittest.TestCase):
         for name, mutant in mutants.items():
             with self.subTest(mutant=name):
                 self.assertNotEqual(mutant, self.probe)
+                self.assertNotEqual(_gu_teardown_problems(mutant), [], name)
+
+    def test_the_callback_only_check_refuses_a_path_that_skips_the_unset(self) -> None:
+        # probe_hle_issues.c sets a GE callback without sceGuInit (null-code-registration).
+        source = (self.fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        self.assertNotIn("sceGuInit(", _c_code(source))
+        set_block = "        ge_callback_id = sceGeSetCallback(&ge_callback);\n    }\n"
+        unset = "    const int ge_unset = ge_callback_id >= 0 ? sceGeUnsetCallback(ge_callback_id) : -1;\n"
+        for anchor in (set_block, unset):
+            self.assertEqual(source.count(anchor), 1, anchor)
+        self.assertEqual(_gu_teardown_problems(source), [])
+        mutants = {
+            "early-return": source.replace(
+                set_block, set_block + "    if (ge_callback_id >= 0) {\n        return 0;\n    }\n"),
+            "goto": source.replace(set_block, set_block + "    goto done;\n"),
+            "conditional-unset": source.replace(
+                unset, "    int ge_unset = -1;\n    if (draw_sync == 0) {\n"
+                "        ge_unset = sceGeUnsetCallback(ge_callback_id);\n    }\n"),
+            "extra-guard": source.replace(unset, unset.replace(
+                "ge_callback_id >= 0 ?", "ge_callback_id >= 0 && draw_sync == 0 ?")),
+            "other-guard": source.replace(unset, unset.replace(
+                "ge_callback_id >= 0 ?", "draw_sync_complete ?")),
+        }
+        for name, mutant in mutants.items():
+            with self.subTest(mutant=name):
+                self.assertNotEqual(mutant, source)
                 self.assertNotEqual(_gu_teardown_problems(mutant), [], name)
 
     def test_ge_nan_and_vram_mirror_record_the_teardown(self) -> None:
@@ -5358,7 +6458,8 @@ class VfpuTranscendentalParserFormatTests(unittest.TestCase):
             domains[name] = words(_matched(match).group(1))
             self.assertEqual(len(domains[name]), 43, name)
 
-        old_probe = (self.root / "tests" / "fixtures" / "vfpu_oracle" / "vfpu_probe.c").read_text(
+        # The measured probe's words, in the header it shares with the Nakagawa-side emitter.
+        old_probe = (self.root / "tests" / "fixtures" / "vfpu_oracle" / "vfpu_oracle_cases.h").read_text(
             encoding="utf-8")
         old_match = re.search(r"VASIN_DOMAIN_INPUTS\[\]\s*=\s*\{([^}]*)\}", old_probe)
         self.assertIsNotNone(old_match)
@@ -5558,20 +6659,63 @@ def _c_walk(name, env, functions, defines, arrays, emit, active=()):
             _c_walk(callee, inner, functions, defines, arrays, emit, active + (name,))
 
 
-_SHARED_FAMILY_SECTIONS = {"HLE_CASE_UTILITY_NETCONF_SHARING": "HLE_CASE_UTILITY_DIALOGS"}
+_SHARED_FAMILY_SECTIONS = {"HLE_CASE_UTILITY_NETCONF_SHARING": "HLE_CASE_UTILITY_DIALOGS",
+                           "HLE_CASE_UTILITY_ATTENDED_NETCONF": "HLE_CASE_UTILITY_DIALOGS",
+                           "HLE_CASE_UTILITY_ATTENDED_SHARING": "HLE_CASE_UTILITY_DIALOGS",
+                           "HLE_CASE_UTILITY_ATTENDED_GAMEDATA": "HLE_CASE_UTILITY_DIALOGS"}
+
+
+def _bool_expr(node: ast.expr) -> bool | None:
+    """The value of a parsed expression of True, False, not, and, or; None for anything else."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        value = _bool_expr(node.operand)
+        return None if value is None else not value
+    if isinstance(node, ast.BoolOp):
+        values = [_bool_expr(item) for item in node.values]
+        if any(value is None for value in values):
+            return None
+        return all(values) if isinstance(node.op, ast.And) else any(values)
+    return None
 
 
 def _select_case_blocks(section: str, macro: str) -> str:
     """Resolve the `#if PSP_ORACLE_CASE == X` / `#else` / `#endif` blocks inside a section that
-    two cases compile (161 and 166 share one): keep the lines `macro` builds, drop the rest.
+    several cases compile (161, 166 and 189-191 share one): keep the lines `macro` builds, drop
+    the rest.
+    A guard is resolved when it is built only from `PSP_ORACLE_CASE == X`, `!=`, `!`, `||`, `&&`,
+    parentheses and section macros defined the same way (HLE_UD_WITH_NETCONF and its kind); any
+    other #if keeps both of its branches.
     The section's own header and closing #endif are outside any block and kept as they are."""
+    guards = dict(re.findall(r"^#define (HLE_UD_[A-Z_]+) \((.*)\)$", section, re.MULTILINE))
+
+    def resolve(expr: str, depth: int = 0) -> bool | None:
+        if depth > 4:
+            return None
+        expr = re.sub(r"PSP_ORACLE_CASE (==|!=) (\w+)",
+                      lambda m: str((m.group(2) == macro) == (m.group(1) == "==")), expr)
+        for name, body in guards.items():
+            if re.search(rf"\b{name}\b", expr):
+                value = resolve(body, depth + 1)
+                if value is None:
+                    return None
+                expr = re.sub(rf"\b{name}\b", str(value), expr)
+        expr = expr.replace("||", " or ").replace("&&", " and ").replace("!", " not ")
+        try:
+            tree = ast.parse(expr.strip(), mode="eval").body
+        except SyntaxError:
+            return None
+        return _bool_expr(tree)
+
     out: list[str] = []
     stack: list[tuple[bool, bool]] = []  # (is a case block, lines kept)
     for index, line in enumerate(section.split("\n")):
         text = line.strip()
-        case = re.fullmatch(r"#if PSP_ORACLE_CASE == (\w+)", text)
-        if index > 0 and case:
-            stack.append((True, case.group(1) == macro))
+        case = re.fullmatch(r"#if (.+)", text)
+        resolved = resolve(case.group(1)) if case else None
+        if index > 0 and resolved is not None:
+            stack.append((True, resolved))
         elif index > 0 and text.startswith("#if"):
             stack.append((False, True))
         elif text == "#else" and stack and stack[-1][0]:
@@ -5718,6 +6862,16 @@ class HleMeasureProbeTests(unittest.TestCase):
         ("hle-utility-netconf-sharing", 166, "hle_utility_netconf_sharing",
          "hle_utility_imports.S", "HLE_CASE_UTILITY_NETCONF_SHARING",
          "PSP-HLE-UTILITY-DIALOG-002"),
+        # #1386's attended runs, one dialog type each, dismissed by a person at the console.
+        ("hle-utility-attended-netconf", 189, "hle_utility_attended_netconf",
+         "hle_utility_imports.S", "HLE_CASE_UTILITY_ATTENDED_NETCONF",
+         "PSP-HLE-UTILITY-DIALOG-003"),
+        ("hle-utility-attended-sharing", 190, "hle_utility_attended_sharing",
+         "hle_utility_imports.S", "HLE_CASE_UTILITY_ATTENDED_SHARING",
+         "PSP-HLE-UTILITY-DIALOG-004"),
+        ("hle-utility-attended-gamedata", 191, "hle_utility_attended_gamedata",
+         "hle_utility_imports.S", "HLE_CASE_UTILITY_ATTENDED_GAMEDATA",
+         "PSP-HLE-UTILITY-DIALOG-005"),
         ("hle-io-seek", 162, "hle_io_seek", None,
          "HLE_CASE_IO_SEEK", "PSP-HLE-IO-SEEK-001"),
         # #1380's cells hle-io-seek left open: flash0: SEEK_CUR and past-2^32 seeks, ms0: flags.
@@ -5839,6 +6993,30 @@ class HleMeasureProbeTests(unittest.TestCase):
             "nkUtilGameSharingShutdownStart": 0xEFC6F80F,
             "sceUtilityLoadNetModule": 0x1579A159,
             "sceUtilityUnloadNetModule": 0x64D50C56,
+        },
+        # The attended cases: one dialog type's four calls each, no message dialog call; the net
+        # module pair for the two radio dialogs.
+        ("hle_utility_imports.S", 189): {
+            "nkUtilNetconfInitStart": 0x4DB1E739,
+            "nkUtilNetconfGetStatus": 0x6332AA39,
+            "nkUtilNetconfUpdate": 0x91E70E35,
+            "nkUtilNetconfShutdownStart": 0xF88155F6,
+            "sceUtilityLoadNetModule": 0x1579A159,
+            "sceUtilityUnloadNetModule": 0x64D50C56,
+        },
+        ("hle_utility_imports.S", 190): {
+            "nkUtilGameSharingInitStart": 0xC492F751,
+            "nkUtilGameSharingGetStatus": 0x946963F3,
+            "nkUtilGameSharingUpdate": 0x7853182D,
+            "nkUtilGameSharingShutdownStart": 0xEFC6F80F,
+            "sceUtilityLoadNetModule": 0x1579A159,
+            "sceUtilityUnloadNetModule": 0x64D50C56,
+        },
+        ("hle_utility_imports.S", 191): {
+            "nkUtilGamedataInstallInitStart": 0x24AC31EB,
+            "nkUtilGamedataInstallGetStatus": 0xB57E95D9,
+            "nkUtilGamedataInstallUpdate": 0x4AECD179,
+            "nkUtilGamedataInstallShutdownStart": 0x32E32DCB,
         },
     }
     # Calls supplied by the SDK's default IO/audio libraries, not by the hand-written
@@ -5981,8 +7159,9 @@ class HleMeasureProbeTests(unittest.TestCase):
                       self._imports(self._block_text(block, case_id))}
         return names
 
-    # Case 166 compiles case 161's section; the cells only 161 builds sit in `#if 161` blocks.
-    SHARED_SECTIONS = {"HLE_CASE_UTILITY_NETCONF_SHARING": "HLE_CASE_UTILITY_DIALOGS"}
+    # Cases 166 and 189-191 compile case 161's section; the cells only one case builds sit in
+    # `#if PSP_ORACLE_CASE == <case>` blocks.
+    SHARED_SECTIONS = _SHARED_FAMILY_SECTIONS
 
     @classmethod
     def _family_span(cls, text: str, macro: str) -> tuple[int, int]:
@@ -6087,7 +7266,7 @@ class HleMeasureProbeTests(unittest.TestCase):
         hle-sysparam can import no savedata call."""
         block = "hle_utility_imports.S"
         self.assertEqual(re.findall(r"^#if PSP_ORACLE_CASE == (\d+)$", self._block_text(block),
-                                    re.MULTILINE), ["104", "180", "140", "161", "166"])
+                                    re.MULTILINE), ["104", "180", "140", "161", "166", "189", "190", "191"])
         self.assertIn("#define HLE_CASE_SAVEDATA_GETSIZE 104\n", self.probe)
         self.assertIn("else ifeq ($(CASE),hle-savedata-getsize)\nCASE_ID = 104\n", self.makefile)
         users = [(case, case_id) for case, case_id, _stem, linked, _macro, _test
@@ -6096,6 +7275,9 @@ class HleMeasureProbeTests(unittest.TestCase):
                                  ("hle-utility-none", 140), ("hle-savedata-nodata", 180),
                                  ("hle-utility-dialogs", 161),
                                  ("hle-utility-netconf-sharing", 166),
+                                 ("hle-utility-attended-netconf", 189),
+                                 ("hle-utility-attended-sharing", 190),
+                                 ("hle-utility-attended-gamedata", 191),
                                  ("hle-nickname-limit", 164), ("hle-io-trunc", 105)])
         for case, case_id in users:
             with self.subTest(case=case):
@@ -6182,36 +7364,56 @@ class HleMeasureProbeTests(unittest.TestCase):
     # ---- probe source rules ------------------------------------------------------
 
     def test_every_measured_call_follows_a_step_marker_within_three_lines(self) -> None:
-        lines = self.probe.splitlines()
-        callback_start = self.probe.index("static void hle_timer_order_capture(")
-        callback_end = self.probe.index("\n}\n", callback_start)
+        unstepped, checked = self._unstepped_measured_lines(self.probe)
+        self.assertEqual(unstepped, [])
+        self.assertGreaterEqual(checked, 40)
+
+    def test_a_copy_of_the_callback_clock_line_elsewhere_needs_its_own_step(self) -> None:
+        # Only the callback's own clock line is exempt: an identical line in a later function
+        # with no step before it is reported.
+        start = self.probe.index("static void hle_timer_order_capture(")
+        clock = next(line for line in self.probe[start:].splitlines()
+                     if "const uint64_t now = (uint64_t)sceKernelGetSystemTimeWide();" in line)
+        copied = self.probe + f"\nstatic void hle_copied_clock(void)\n{{\n{clock}\n    (void)now;\n}}\n"
+        unstepped, _checked = self._unstepped_measured_lines(copied)
+        self.assertEqual(unstepped, [f"line {copied.count(chr(10), 0, copied.rindex(clock)) + 1} "
+                                     f"has no hle_step before it: {clock.strip()}"])
+
+    def _unstepped_measured_lines(self, probe: str) -> tuple[list[str], int]:
+        """Measured calls of probe_hle_measure.c with no hle_step in the three lines before
+        them, outside the exempt spans, and how many calls were checked."""
+        lines = probe.splitlines()
+        callback_start = probe.index("static void hle_timer_order_capture(")
+        callback_lines = (probe.count("\n", 0, callback_start),
+                          probe.count("\n", 0, probe.index("\n}\n", callback_start)))
         callback_clock_line = "const uint64_t now = (uint64_t)sceKernelGetSystemTimeWide();"
         # hle-audio-rest (#279) times back-to-back blocking outputs: a host0 write between two
         # of them can take longer than a block and would starve the channel. One step names the
         # whole run, written before the reserve, and nothing reaches host0 until the release.
-        arest_start = self.probe.index("static void hle_arest_size(")
-        arest_end = self.probe.index("\n}\n", arest_start)
-        arest = self.probe[arest_start:arest_end]
+        arest_start = probe.index("static void hle_arest_size(")
+        arest_end = probe.index("\n}\n", arest_start)
+        arest = probe[arest_start:arest_end]
         reserve = arest.index("sceAudioChReserve(")
         release = arest.index("sceAudioChRelease(")
         self.assertIn("hle_step(step);", arest[:reserve])
         self.assertEqual(arest[:reserve].count("hle_step("), 1)
         for writer in ("hle_step(", "hle_write(", "hle_record(", "hle_skip("):
             self.assertNotIn(writer, arest[reserve:release])
-        arest_lines = (self.probe.count("\n", 0, arest_start + reserve),
-                       self.probe.count("\n", 0, arest_start + release))
+        arest_lines = (probe.count("\n", 0, arest_start + reserve),
+                       probe.count("\n", 0, arest_start + release))
         # hle-io-trunc's it_st() is a sceIoGetstat helper; every call to it runs inside a cell
         # that has already written its step.
-        it_st_start = self.probe.index("static uint32_t it_st(void)")
-        it_st_lines = (self.probe.count("\n", 0, it_st_start),
-                       self.probe.count("\n", 0, self.probe.index("\n}\n", it_st_start)))
+        it_st_start = probe.index("static uint32_t it_st(void)")
+        it_st_lines = (probe.count("\n", 0, it_st_start),
+                       probe.count("\n", 0, probe.index("\n}\n", it_st_start)))
         checked = 0
+        unstepped: list[str] = []
         for index, line in enumerate(lines):
             if not self.MEASURED_CALL_RE.search(line):
                 continue
             if self.PROTOTYPE_LINE_RE.fullmatch(line):
                 continue  # a whole-line prototype, not a call
-            if callback_start <= self.probe.find(line) < callback_end and callback_clock_line in line:
+            if callback_lines[0] <= index <= callback_lines[1] and callback_clock_line in line:
                 continue  # the callback samples time; host logging is unsafe there
             if arest_lines[0] <= index <= arest_lines[1]:
                 continue  # covered by the run's one step (above)
@@ -6219,9 +7421,9 @@ class HleMeasureProbeTests(unittest.TestCase):
                 continue  # called only inside a stepped hle-io-trunc cell (above)
             checked += 1
             window = lines[max(0, index - 3):index]
-            self.assertTrue(any("hle_step(" in previous for previous in window),
-                            f"line {index + 1} has no hle_step before it: {line.strip()}")
-        self.assertGreaterEqual(checked, 40)
+            if not any("hle_step(" in previous for previous in window):
+                unstepped.append(f"line {index + 1} has no hle_step before it: {line.strip()}")
+        return unstepped, checked
 
     def test_timer_callback_samples_only_the_clock_and_owned_capture(self) -> None:
         start = self.probe.index("static void hle_timer_order_capture(")
@@ -7177,22 +8379,25 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
                 self.assertNotIn("NULL is the only invalid pointer", other["risk"])
 
     def test_manual_campaign_refuses_retired_null_out_case(self) -> None:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(self.h.root / "tools" / "psp_oracle" / "run_psplink.py"),
-                "--campaign-case", f"{self.NULL_CASE}=not-present.prx",
-                "--source-commit", "0" * 40,
-                "--model", "PSP-3000",
-                "--firmware", "6.6.1",
-                "--host0-root", str(self.h.fixture),
-                "--session-id", "test-retired-case",
-            ],
-            cwd=self.h.root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        build_root = self.h.fixture / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="retired-case-", dir=build_root) as scratch:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(self.h.root / "tools" / "psp_oracle" / "run_psplink.py"),
+                    "--campaign-case", f"{self.NULL_CASE}=not-present.prx",
+                    "--source-commit", "0" * 40,
+                    "--model", "PSP-3000",
+                    "--firmware", "6.6.1",
+                    "--host0-root", scratch,
+                    "--session-id", "test-retired-case",
+                ],
+                cwd=self.h.root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("retired and cannot be scheduled", completed.stderr)
         self.assertNotIn("campaign PRX is missing", completed.stderr)
@@ -7233,6 +8438,27 @@ _HLE_INTR_REMOVERS = {
     "sceKernelEnableSubIntr": "sceKernelDisableSubIntr",
     "sceKernelCpuSuspendIntr": "sceKernelCpuResumeIntr",
 }
+#: The one guard a remover may sit under: the install's handle is valid. Every other remover
+#: runs directly in its function's own block.
+_HLE_INTR_REMOVER_GUARDS = {
+    "sceKernelSetAlarm": "alarm",
+    "sceKernelRegisterSubIntrHandler": "slot",
+    "sceKernelEnableSubIntr": "slot",
+}
+
+
+def _c_enclosing_brace(body: str, at: int) -> int:
+    """Index of the `{` that opens the innermost block holding index `at` of a function body."""
+    text = re.sub(r'"(?:[^"\\]|\\.)*"', lambda m: '"' + " " * (len(m.group()) - 2) + '"', body[:at])
+    depth = 0
+    for index in range(len(text) - 1, -1, -1):
+        if text[index] == "}":
+            depth += 1
+        elif text[index] == "{":
+            if depth == 0:
+                return index
+            depth -= 1
+    raise ValueError("index is outside the function body")
 
 
 def _hle_intr_cleanup_problems(probe: str) -> list[str]:
@@ -7261,11 +8487,27 @@ def _hle_intr_cleanup_problems(probe: str) -> list[str]:
         if f"{remove}(" not in body[at:]:
             problems.append(f"{owners[0]} calls {install} without a later {remove}")
             continue
-        between = body[at:body.index(f"{remove}(", at)]
-        # The install's own failure branch (`if (vt < 0) { ...; return; }`) installed nothing.
-        between = re.sub(r"if \(\w+ < 0\) \{[^{}]*\}", "", between)
-        if re.search(r"\breturn\b", between):
+        removed_at = body.index(f"{remove}(", at)
+        between = body[at:removed_at]
+        # The install's own failure branch (`if (vt < 0) { ...; return; }`) installed nothing;
+        # only the branch on the install's own result is exempt.
+        result = re.search(r"\b(\w+) = [^;]*\b%s\(" % install, body)
+        if result:
+            between = re.sub(r"if \(%s < 0\) \{[^{}]*\}" % re.escape(result.group(1)), "", between)
+        if re.search(r"\b(?:return|goto)\b", between):
             problems.append(f"{owners[0]} can return between {install} and {remove}")
+        # The remover runs on every path: a plain statement directly in the function's own
+        # block, or directly in the one block its guard allows (`if (<var> >= 0) {`).
+        statement = body[max(body.rfind(c, 0, removed_at) for c in ";{}") + 1:removed_at]
+        if re.search(r"\b(?:if|else|for|while|do|case|switch)\b|\?|&&|\|\|", statement):
+            problems.append(f"{owners[0]} calls {remove} in a conditional statement")
+            continue
+        block = _c_enclosing_brace(body, removed_at)
+        header = body[max(body.rfind(c, 0, block) for c in ";{}") + 1:block].strip()
+        allowed_guard = _HLE_INTR_REMOVER_GUARDS.get(install)
+        if block != 0 and not (allowed_guard and header == f"if ({allowed_guard} >= 0)"
+                               and _c_enclosing_brace(body, block) == 0):
+            problems.append(f"{owners[0]} calls {remove} only under `{header}`, not on every path")
     vtimer = functions.get("ic_vtimer_series", "")
     if not re.search(r"if \(vt < 0\) \{[^{}]*return;\s*\}", vtimer):
         problems.append("ic_vtimer_series has no early return for a failed create only")
@@ -7369,8 +8611,7 @@ class KernelEntryNullcodeProbeTests(unittest.TestCase):
         for case, case_id in expected_ids.items():
             with self.subTest(case=case):
                 self.assertEqual(routes.get(case), case_id)
-                self.assertIn(f"else ifeq ($(CASE),{case})\n", makefile)
-                self.assertIn("probe_hle_issues.o", makefile)
+                self.assertIn("$(BUILD_DIR)/probe_hle_issues.o", _makefile_route_objs(makefile, case))
         for macro in ("HLE_CASE_NULL_CODE_REGISTRATION", "HLE_CASE_NULL_THREAD_INVOCATION",
                       "HLE_CASE_NULL_CALLBACK_INVOCATION"):
             self.assertIn(f"#define {macro} ", probe)
@@ -7397,6 +8638,24 @@ class KernelEntryNullcodeProbeTests(unittest.TestCase):
         self.assertIn("jr $25", exception_probe)
         self.assertIn("case_id=fetch-armed status=SKIP", exception_probe)
         self.assertIn("NAKAGAWA_PSP_STEP schema=1", exception_probe)
+
+    def test_build_route_objects_are_read_from_each_case_route(self) -> None:
+        # A null-handler route that builds another source is caught even though other routes
+        # still name probe_hle_issues.o.
+        makefile = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+                    / "Makefile").read_text(encoding="utf-8")
+        route = ("else ifeq ($(CASE),null-thread-invocation)\n"
+                 "TARGET = $(BUILD_DIR)/null_thread_invocation\n"
+                 "OBJS = $(BUILD_DIR)/probe_hle_issues.o")
+        self.assertEqual(makefile.count(route), 1)
+        moved = makefile.replace(route, route.replace("probe_hle_issues.o", "probe_dmac_timing.o"))
+        self.assertIn("probe_hle_issues.o", moved)
+        self.assertNotIn("$(BUILD_DIR)/probe_hle_issues.o",
+                         _makefile_route_objs(moved, "null-thread-invocation"))
+        self.assertIn("$(BUILD_DIR)/probe_hle_issues.o",
+                      _makefile_route_objs(moved, "null-callback-invocation"))
+        with self.assertRaises(AssertionError):
+            _makefile_route_objs(makefile, "no-such-case")
 
     def test_interrupt_and_ge_null_handlers_are_registered_but_never_enabled_or_queued(self) -> None:
         probe = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
@@ -7845,6 +9104,26 @@ class HleIssuesProbeTests(unittest.TestCase):
                 "(void)sceKernelStartVTimer(vt);\n    if (first_us == 0u) {\n        return;\n    }\n", 1),
             "no-resume": self.probe.replace("sceKernelCpuResumeIntr(flags);", "", 1),
         }
+        # A remover that runs only under a condition leaves the install behind on the other path.
+        for remover in ("(void)sceKernelStopVTimer(vt);", "(void)sceKernelDeleteVTimer(vt);",
+                        "sceKernelCpuResumeIntr(flags);"):
+            mutants[f"conditional-{remover}"] = self.probe.replace(
+                f"    {remover}\n", f"    if (s_ic_flag) {{\n        {remover}\n    }}\n", 1)
+        mutants["unbraced-delete"] = self.probe.replace(
+            "    (void)sceKernelDeleteVTimer(vt);\n",
+            "    if (s_ic_flag)\n        (void)sceKernelDeleteVTimer(vt);\n", 1)
+        for remover in ("const int dis = sceKernelDisableSubIntr(PSP_VBLANK_INT, slot);",
+                        "const int rel = sceKernelReleaseSubIntrHandler(PSP_VBLANK_INT, slot);"):
+            mutants[f"conditional-{remover}"] = self.probe.replace(
+                f"        {remover}\n",
+                f"        int {remover[10:13]} = 0;\n        if (s_ic_flag) {{\n"
+                f"            {remover[10:]}\n        }}\n", 1)
+        # Only the install's own failure branch is exempt from the no-return rule.
+        for install in ("(void)sceKernelStartVTimer(vt);",
+                        "const SceUID alarm = sceKernelSetAlarm(first_us, ic_alarm_handler, NULL);",
+                        "const int en = slot >= 0 ? sceKernelEnableSubIntr(PSP_VBLANK_INT, slot) : -1;"):
+            mutants[f"other-negative-return-{install}"] = self.probe.replace(
+                f"    {install}\n", f"    {install}\n    if (bogus < 0) {{\n        return 0;\n    }}\n", 1)
         for name, mutant in mutants.items():
             with self.subTest(mutant=name):
                 self.assertNotEqual(mutant, self.probe)
@@ -12535,11 +13814,25 @@ class _GeNewCaseMixin:
         report = parse_campaign_probe_output("".join(lines), self.CASE)
         test.assertTrue(report.complete)
         # The manifest's case patterns name every record and only those.
-        import fnmatch
         patterns = self.row["case_ids"]
         test.assertEqual(patterns[-1], f"{self.CASE}-done")
-        for case in (*spec.semantic_cases, spec.terminal_case):
-            test.assertTrue(any(fnmatch.fnmatchcase(case, pattern) for pattern in patterns), case)
+        test.assertEqual(_manifest_pattern_problems(
+            self.CASE, patterns, (*spec.semantic_cases, spec.terminal_case)), [])
+
+    def test_manifest_patterns_that_over_claim_are_refused(self) -> None:
+        test = cast(unittest.TestCase, self)
+        spec, _counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        emitted = (*spec.semantic_cases, spec.terminal_case)
+        patterns = list(self.row["case_ids"])
+        test.assertEqual(_manifest_pattern_problems(self.CASE, patterns, emitted), [])
+        test.assertEqual(_manifest_pattern_problems(self.CASE, [*patterns, "stale-*"], emitted),
+                         ["pattern 'stale-*' matches no record"])
+        test.assertEqual(_manifest_pattern_problems(self.CASE, ["*"], emitted),
+                         ["pattern '*' names every record of the case"])
+        test.assertIn(f"pattern '{self.CASE}-*' names every record of the case",
+                      _manifest_pattern_problems(self.CASE, [f"{self.CASE}-*", *patterns], emitted))
+        test.assertEqual(_manifest_pattern_problems(self.CASE, patterns[:-1], emitted),
+                         [f"record '{self.CASE}-done' matches no pattern"])
 
 
 class GeRasterBoundsProbeTests(_GeNewCaseMixin, unittest.TestCase):
@@ -13168,6 +14461,8 @@ class KernelSemanticsProbeTests(unittest.TestCase):
             "sceKernelDelayThread", "sceKernelGetSystemTimeLow", "sceKernelSleepThread",
             "sceKernelExitThread", "sceKernelWakeupThread", "sceKernelWaitThreadEnd",
             "sceKernelDeleteThread", "sceKernelGetThreadId",
+            # safe-scalar (SafeScalarProbeTests pins its section's own set)
+            *SafeScalarProbeTests.CALLS,
         }
         self.assertEqual(sorted(called - expected), [])
 
@@ -13178,7 +14473,8 @@ class KernelSemanticsProbeTests(unittest.TestCase):
         literals = set(re.findall(r'"((?:ms0|host0|flash0|disc0|umd0):[^"]*)"', self.code))
         self.assertEqual(literals, {"ms0:/NKKSEM00", "host0:/kernel_semantics_log.txt",
                                     "ms0:/NKKSEM01", "host0:/io_seek_eof_log.txt",
-                                    "host0:/io_umd_eof_log.txt", "disc0:/UMD_DATA.BIN",
+                                    "host0:/io_umd_eof_log.txt", "host0:/safe_scalar_log.txt",
+                                    "disc0:/UMD_DATA.BIN",
                                     "disc0:/PSP_GAME/PARAM.SFO", "umd0:",
                                     "host0:/nakagawa_transport_write.bin"})
         io = self.bodies["ks_io"]
@@ -13391,6 +14687,737 @@ class KernelSemanticsProbeTests(unittest.TestCase):
         self.assertIn("changed += s_ku_buf[i] != KU_FILL;", read)
 
 
+def _c_statement_end(text: str, start: int) -> int:
+    """Index of the semicolon that ends the statement starting at start (brackets skipped)."""
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            i += 1
+            while text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif ch in "({[":
+            i = _c_close(text, i)
+        elif ch == ";":
+            return i
+        i += 1
+    raise AssertionError("statement without a terminating semicolon")
+
+
+def _c_top_level_conditional(statement: str) -> bool:
+    """Whether a C statement has a short-circuit or ternary operator outside every bracket
+    (string and character literals skipped), so part of it may not run."""
+    depth = 0
+    i = 0
+    while i < len(statement):
+        ch = statement[i]
+        if ch in "\"'":
+            i += 1
+            while statement[i] != ch:
+                i += 2 if statement[i] == "\\" else 1
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and (ch == "?" or statement.startswith(("&&", "||"), i)):
+            return True
+        i += 1
+    return False
+
+
+def _c_block_paths(block: str, events: Any, loop: Any,
+                   env: dict[str, Any]) -> list[tuple[tuple[str, ...], bool]]:
+    """Every control-flow path through a comment-free C block: (what it emits, returned).
+
+    Understood: if / else if / else with braced bodies, for loops, return, nested blocks and
+    plain statements. events(statement, env) names what a plain statement emits;
+    loop(header, body, env) gives a for loop's variable and the values it takes. Anything else
+    (while, do, switch, goto, break, continue, an if body without braces, a loop body whose
+    emission depends on a branch or that returns, a statement that emits behind a top-level
+    &&, || or ?) raises, so a construct this walker cannot
+    count fails the test instead of being passed over.
+    """
+    text = block[1:-1]
+    paths: set[tuple[tuple[str, ...], bool]] = {((), False)}
+
+    def extend(more: Any) -> None:
+        nonlocal paths
+        paths = ({(emitted, True) for emitted, done in paths if done}
+                 | {(emitted + extra, ended) for emitted, done in paths if not done
+                    for extra, ended in more})
+
+    def braced(at: int) -> tuple[str, int]:
+        while text[at].isspace():
+            at += 1
+        if text[at] != "{":
+            raise AssertionError("a branch body without braces")
+        end = _c_close(text, at)
+        return text[at:end + 1], end + 1
+
+    i = 0
+    while True:
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text):
+            return sorted(paths)
+        word = re.match(r"[A-Za-z_]\w*", text[i:])
+        head = word.group(0) if word else ""
+        if head in ("while", "do", "switch", "goto", "case", "default", "break", "continue"):
+            raise AssertionError(f"unsupported construct: {head}")
+        if head == "if":
+            branches: set[tuple[tuple[str, ...], bool]] = set()
+            closed = False
+            while True:
+                body, i = braced(_c_close(text, text.index("(", i)) + 1)
+                branches |= set(_c_block_paths(body, events, loop, env))
+                tail = re.match(r"\s*else\b\s*", text[i:])
+                if tail is None:
+                    break
+                i += tail.end()
+                if re.match(r"if\b", text[i:]):
+                    continue
+                body, i = braced(i)
+                branches |= set(_c_block_paths(body, events, loop, env))
+                closed = True
+                break
+            if not closed:
+                branches.add(((), False))
+            extend(branches)
+        elif head == "for":
+            close = _c_close(text, text.index("(", i))
+            header = text[text.index("(", i) + 1:close]
+            at = close + 1
+            while text[at].isspace():
+                at += 1
+            if text[at] == "{":
+                body, i = braced(at)
+            else:
+                end = _c_statement_end(text, at)
+                body, i = "{" + text[at:end + 1] + "}", end + 1
+            variable, values = loop(header, body, env)
+            emitted: tuple[str, ...] = ()
+            for value in values:
+                once = _c_block_paths(body, events, loop, {**env, variable: value, "loop": body})
+                if len(once) != 1 or once[0][1]:
+                    raise AssertionError(f"a loop body whose emission depends on a branch: {header}")
+                emitted += once[0][0]
+            extend({(emitted, False)})
+        elif head == "return":
+            i = _c_statement_end(text, i) + 1
+            extend({((), True)})
+        elif text[i] == "{":
+            body, i = braced(i)
+            extend(_c_block_paths(body, events, loop, env))
+        else:
+            end = _c_statement_end(text, i)
+            statement = text[i:end + 1]
+            emitted_here = tuple(events(statement, env))
+            if emitted_here and _c_top_level_conditional(statement):
+                raise AssertionError(f"a record made conditional inside one statement: {statement}")
+            extend({(emitted_here, False)})
+            i = end + 1
+
+
+class _SafeScalarRows:
+    """The record rows each path of the safe-scalar section emits, read from its C text.
+
+    rows(function) walks every path of a function of the section and returns the one row
+    sequence they all emit; it raises when two paths differ. A call to another function of
+    the section stands for that function's own sequence, with its first parameter bound to the
+    call's first argument, so an early return that skips a record, or writes one twice, shows
+    as a path with a different sequence.
+    """
+
+    def __init__(self, section: str) -> None:
+        self.section = section
+        self.bodies = _c_function_bodies(section)
+        self.parameters = {
+            name: (re.findall(r"(\w+)\s*(?:,|$)", arguments.strip())[:1] or [""])[0]
+            for name, arguments in re.findall(
+                r"^static\s+[\w \t\*]*?\b(\w+)\s*\(([^;{}]*)\)\s*\{", section, re.MULTILINE)}
+        self.enum = re.findall(r"\bSS_T_\w+", _matched(re.search(r"enum \{([^}]*)\}", section)).group(1))
+        self.tls_rows = re.findall(r'"(tls-[a-z0-9-]+)"', _matched(re.search(
+            r"k_ss_tls_rows\[SS_TLS_ROWS\] = \{([^}]*)\}", section)).group(1))
+
+    def define(self, name: str) -> int:
+        return int(_matched(re.search(rf"^#define {name} (\w+?)(?:u|ull)?$", self.section,
+                                      re.MULTILINE)).group(1), 0)
+
+    def table(self, name: str) -> list[str]:
+        body = _matched(re.search(rf"{name}\[\w+\] = \{{(.*?)\n\}};", self.section, re.S)).group(1)
+        return re.findall(r'\{ "([a-z0-9-]+)",', body)
+
+    def value(self, text: str, env: dict[str, Any]) -> Any:
+        """An integer, a row name, or None for an expression this reader does not evaluate."""
+        text = text.strip()
+        if re.fullmatch(r"(?:0x[0-9a-fA-F]+|\d+)u?", text):
+            return int(text.rstrip("u"), 0)
+        if text in env:
+            return env[text]
+        if text in self.enum:
+            return self.enum.index(text)
+        if re.fullmatch(r'"[a-z0-9-]+"', text):
+            return text[1:-1]
+        indexed = re.fullmatch(r"k_ss_tls_rows\[(\w+)\]", text)
+        if indexed:
+            index = self.value(indexed.group(1), env)
+            return self.tls_rows[index] if isinstance(index, int) else None
+        if text == "in->row" and "loop" in env:
+            alias = re.search(r"\*in = &(k_ss_\w+)\[(\w+)\];", env["loop"])
+            if alias and isinstance(env.get(alias.group(2)), int):
+                return self.table(alias.group(1))[env[alias.group(2)]]
+        if re.fullmatch(r"SS_[A-Z0-9_]+", text) and re.search(rf"^#define {text} ", self.section,
+                                                              re.MULTILINE):
+            return self.define(text)
+        return None
+
+    def _loop(self, header: str, _body: str, env: dict[str, Any]) -> tuple[str, list[int]]:
+        match = re.fullmatch(r"(?:unsigned|int|uint32_t|size_t) (\w+) = (\w+); \1 < (\w+); \1\+\+",
+                             header.strip())
+        if match is None:
+            raise AssertionError(f"a loop that does not count up to a constant: {header}")
+        first, bound = self.value(match.group(2), env), self.value(match.group(3), env)
+        if not isinstance(first, int) or not isinstance(bound, int):
+            raise AssertionError(f"a loop bound this reader cannot evaluate: {header}")
+        return match.group(1), list(range(first, bound))
+
+    def _events(self, statement: str, env: dict[str, Any]) -> list[str]:
+        emitted: list[str] = []
+        for call in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", statement):
+            name = call.group(1)
+            if name != "hle_record" and name not in self.bodies:
+                continue
+            arguments = statement[call.end():_c_close(statement, call.end() - 1)]
+            depth, first = 0, len(arguments)
+            for index, ch in enumerate(arguments):
+                depth += ch in "([{"
+                depth -= ch in ")]}"
+                if ch == "," and depth == 0:
+                    first = index
+                    break
+            argument = self.value(arguments[:first], env)
+            if name == "hle_record":
+                if not isinstance(argument, str):
+                    raise AssertionError(f"a record whose row this reader cannot name: {statement}")
+                emitted.append(argument)
+            else:
+                emitted.extend(self.rows(name, argument))
+        return emitted
+
+    def paths(self, function: str, argument: Any = None) -> list[tuple[tuple[str, ...], bool]]:
+        env = {self.parameters.get(function, ""): argument}
+        return _c_block_paths(self.bodies[function], self._events, self._loop, env)
+
+    def rows(self, function: str, argument: Any = None) -> tuple[str, ...]:
+        sequences = {emitted for emitted, _returned in self.paths(function, argument)}
+        if len(sequences) != 1:
+            raise AssertionError(f"{function}: its paths do not all emit the same rows: "
+                                 f"{sorted(sequences)}")
+        return next(iter(sequences))
+
+
+class SafeScalarProbeTests(unittest.TestCase):
+    """CASE=safe-scalar (141, PSP-SAFE-SCALAR-001) in probe_kernel_semantics.c: #2640 cells the
+    runtime stops at by name or answers from an emulator (RTC edge dates, the thread-list classes
+    9 and 10, TLS pool placement). The case may call no device, dialog, GE or radio function,
+    install no handler, pass the kernel no pointer that is not its own buffer or a documented
+    optional NULL, and record no address except as a difference."""
+
+    CASE = "safe-scalar"
+    TEST_ID = "PSP-SAFE-SCALAR-001"
+    # Every firmware call the section may make.
+    CALLS = frozenset({
+        "sceRtcCheckValid", "sceRtcGetDayOfWeek", "sceRtcGetTime_t", "sceRtcTickAddYears",
+        "sceKernelGetThreadmanIdList",
+        "sceKernelCreateTlspl", "sceKernelGetTlsAddr", "sceKernelReferTlsplStatus",
+        "sceKernelFreeTlspl", "sceKernelDeleteTlspl",
+        "sceKernelAllocPartitionMemory", "sceKernelGetBlockHeadAddr",
+        "sceKernelFreePartitionMemory", "sceKernelTotalFreeMemSize", "sceKernelMaxFreeMemSize",
+        "sceKernelCreateThread", "sceKernelStartThread", "sceKernelWaitThreadEnd",
+        "sceKernelDeleteThread", "sceKernelTerminateDeleteThread", "sceKernelExitThread",
+    })
+    # The link-time gate's exact sets: library -> {NID: name}.
+    EXACT_IMPORTS = {
+        "sceRtc": {0x4B1B5E82: "sceRtcCheckValid", 0x57726BC1: "sceRtcGetDayOfWeek",
+                   0x27C4594C: "sceRtcGetTime_t", 0x42842C77: "sceRtcTickAddYears"},
+        "SysMemUserForUser": {
+            0x237DBD4F: "sceKernelAllocPartitionMemory", 0xB6D61D02: "sceKernelFreePartitionMemory",
+            0x9D9A5BA1: "sceKernelGetBlockHeadAddr", 0xA291F107: "sceKernelMaxFreeMemSize",
+            0xF919F628: "sceKernelTotalFreeMemSize",
+        },
+        "Kernel_Library": {0xBEA46419: "sceKernelLockLwMutex", 0x15B6446B: "sceKernelUnlockLwMutex",
+                           0xFA835CDE: "sceKernelGetTlsAddr"},
+    }
+    FORBIDDEN = ("InterruptManager", "KUBridge", "SystemCtrlForUser", "sceAudio", "sceCtrl",
+                 "sceDisplay", "sceGe_user", "sceOpenPSID", "scePower", "sceReg",
+                 "sceSuspendForUser", "sceUmdUser", "sceWlanDrv")
+    TLS_POOL_STUBS = {"sceKernelCreateTlspl": 0x8DAFF657, "sceKernelDeleteTlspl": 0x32BF938E,
+                      "sceKernelFreeTlspl": 0x4A719FB2, "sceKernelReferTlsplStatus": 0x721067F3}
+    root: ClassVar[Path]
+    probe: ClassVar[str]
+    makefile: ClassVar[str]
+    threadman: ClassVar[str]
+    kernel_library: ClassVar[str]
+    section: ClassVar[str]
+    bodies: ClassVar[dict[str, str]]
+    row: ClassVar[dict[str, Any]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.root = Path(__file__).resolve().parents[1]
+        fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_kernel_semantics.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.threadman = (fixture / "threadman_user_imports.S").read_text(encoding="utf-8")
+        cls.kernel_library = (fixture / "kernel_library_tls_imports.S").read_text(encoding="utf-8")
+        start = cls.probe.index("#if PSP_ORACLE_CASE == KS_CASE_SAFE_SCALAR\n/* ----")
+        cls.section = _c_code(cls.probe[start:cls.probe.index("#endif /* KS_CASE_SAFE_SCALAR */")])
+        cls.bodies = _c_function_bodies(cls.section)
+        manifest = json.loads((cls.root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.row = next(row for row in manifest["tests"] if row["id"] == cls.TEST_ID)
+
+    def _define(self, name: str) -> int:
+        return int(_matched(re.search(rf"^#define {name} (\w+?)(?:u|ull)?$", self.section,
+                                      re.MULTILINE)).group(1), 0)
+
+    def _table(self, name: str) -> list[tuple[str, list[int]]]:
+        """One of the row tables: (row name, the integers after it)."""
+        body = _matched(re.search(rf"{name}\[\w+\] = \{{(.*?)\n\}};", self.section, re.S)).group(1)
+        return [(row, [int(value, 0) for value in re.findall(r"-?(?:0x[0-9a-f]+|\d+)\b", rest)])
+                for row, rest in re.findall(r'\{ "([a-z0-9-]+)", ([^}]*) \}', body)]
+
+    def _stream(self, statuses: dict[str, str] | None = None, drop: str | None = None,
+                short: str | None = None) -> str:
+        spec, counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        lines = [META.format(source="psp", model="unknown", firmware="unknown",
+                             binary="0" * 64, commit="1" * 40)]
+        for case_id in spec.ordered_cases:
+            if case_id == drop:
+                continue
+            words = counts[case_id] - (1 if case_id == short else 0)
+            outs = "".join(f" out{index}=0xa5a5a5a5" for index in range(words))
+            if case_id == spec.terminal_case:
+                outs = f" out0=0x{spec.terminal_count:x}"
+            status = (statuses or {}).get(case_id, "PASS")
+            lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id={self.TEST_ID} case_id={case_id} "
+                         f"status={status} result=0x00000000{outs}\n")
+        return "".join(lines)
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),safe-scalar)\nCASE_ID = 141\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),safe-scalar)\nTARGET = $(BUILD_DIR)/safe_scalar\n"
+                      "OBJS = $(BUILD_DIR)/probe_kernel_semantics.o "
+                      "$(BUILD_DIR)/threadman_user_imports.o "
+                      "$(BUILD_DIR)/kernel_library_tls_imports.o\n", self.makefile)
+        self.assertIn("$(BUILD_DIR)/kernel_library_tls_imports.o: kernel_library_tls_imports.S\n"
+                      "\t$(CC) $(ASFLAGS) -c $< -o $@\n", self.makefile)
+        # The Kernel_Library block is linked by this case alone.
+        self.assertEqual(len(re.findall(r"^OBJS \+?= .*kernel_library_tls_imports\.o.*$",
+                                        self.makefile, re.MULTILINE)), 1)
+        self.assertIn("#define KS_CASE_SAFE_SCALAR 141\n", self.probe)
+        self.assertIn("#if PSP_ORACLE_CASE == 141\n#include <psprtc.h>\n#endif\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "safe-scalar"\n'
+                      '#define HLE_TEST_ID "PSP-SAFE-SCALAR-001"\n'
+                      '#define HLE_LOG "host0:/safe_scalar_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), self.CASE).name,
+                         "safe_scalar_log.txt")
+        self.assertEqual(_campaign_completeness_contract(self.CASE), "strict-golden-sequence")
+        self.assertNotIn(self.CASE, CAMPAIGN_QUEUE_CASES)
+        run = _c_function_bodies(_c_code(self.probe))["hle_run"]
+        order = [run.index(call) for call in ("ss_rtc();", "ss_tmid();", "ss_tls();",
+                                              "ks_subintr_order();")]
+        self.assertEqual(order, sorted(order))
+
+    def test_stream_shape_matches_the_registry_and_the_manifest(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        rows = tuple(row for row, _ in parse_golden.SAFE_SCALAR_ROWS)
+        self.assertEqual(spec.test_id, self.TEST_ID)
+        self.assertEqual(spec.terminal_case, "safe-scalar-done")
+        self.assertEqual(spec.ordered_cases[:-1], rows)
+        self.assertEqual(len(rows), 49)
+        # Every row is named once in the source, in the order it is emitted.
+        self.assertEqual(tuple(re.findall(r'"((?:rtc|tmid|tls)-[a-z0-9-]+)"', self.section)), rows)
+        for table, prefix, count, words in (
+                ("k_ss_valid", "rtc-valid-", "SS_VALID_ROWS", "SS_VALID_WORDS"),
+                ("k_ss_dow", "rtc-dow-", "SS_DOW_ROWS", "SS_DOW_WORDS"),
+                ("k_ss_time", "rtc-time-", "SS_TIME_ROWS", "SS_TIME_WORDS"),
+                ("k_ss_add", "rtc-addyears-", "SS_ADD_ROWS", "SS_ADD_WORDS")):
+            with self.subTest(table=table):
+                named = [row for row, _values in self._table(table)]
+                self.assertEqual(named, [row for row in rows if row.startswith(prefix)])
+                self.assertEqual(len(named), self._define(count))
+                self.assertEqual({counts[row] for row in named}, {self._define(words)})
+        self.assertEqual({counts["tmid-9-list"], counts["tmid-10-list"]},
+                         {self._define("SS_TMID_WORDS")})
+        tls_rows = re.findall(r'"(tls-[a-z0-9-]+)"', _matched(re.search(
+            r"k_ss_tls_rows\[SS_TLS_ROWS\] = \{([^}]*)\}", self.section)).group(1))
+        tls_words = [int(word) for word in re.findall(r"(\d+)u", _matched(re.search(
+            r"k_ss_tls_words\[SS_TLS_ROWS\] = \{([^}]*)\}", self.section)).group(1))]
+        self.assertEqual(tls_rows, [row for row in rows if row.startswith("tls-")])
+        self.assertEqual([counts[row] for row in tls_rows], tls_words)
+        self.assertEqual(len(tls_rows), self._define("SS_TLS_ROWS"))
+        # The row indexes are the table's positions.
+        indexes = re.findall(r"\bSS_T_\w+", _matched(re.search(r"enum \{([^}]*)\}",
+                                                               self.section)).group(1))
+        self.assertEqual([name[len("SS_T_"):].lower().replace("_", "-") for name in indexes],
+                         [row[len("tls-"):] for row in tls_rows])
+        self.assertLessEqual(max(counts[row] for row in rows), self._define("SS_WORDS_MAX"))
+        self.assertEqual(self.row["hardware_evidence"], "MEASURED")
+        self.assertEqual(self.row["case_ids"], [*rows, "safe-scalar-done"])
+        self.assertEqual(self.row["diagnostic_case_ids"], [self.CASE])
+        self.assertEqual(self.row["prx"], "safe_scalar.prx")
+        self.assertEqual(self.row["source"], "tests/fixtures/psp_oracle/probe_kernel_semantics.c")
+        self.assertEqual(self.row["issues"], [2640])
+        # The API list is exactly the firmware calls the section makes, read from its source:
+        # none missing, none extra, none twice.
+        called = set(re.findall(r"\b(sce\w+)\s*\(", self.section))
+        self.assertEqual(sorted(self.row["apis"]), sorted(called))
+        self.assertEqual(len(self.row["apis"]), len(set(self.row["apis"])))
+
+    def test_parser_takes_pass_and_skip_and_refuses_fail_or_another_shape(self) -> None:
+        spec, _counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        self.assertIn(self.CASE, parse_golden.HLE_MACHINERY_STATUS_CASES)
+        report = parse_campaign_probe_output(self._stream(), self.CASE)
+        self.assertTrue(report.complete)
+        self.assertEqual(report.record_count, 50)
+        self.assertEqual(spec.terminal_count, 49)
+        skipped = parse_campaign_probe_output(
+            self._stream({"tls-place-high": "SKIP", "tls-thread": "SKIP"}), self.CASE)
+        self.assertTrue(skipped.complete)
+        for text in (self._stream({"tls-create-high": "FAIL"}),
+                     self._stream(drop="tmid-9-list"),
+                     self._stream(short="rtc-time-1969")):
+            with self.assertRaises(ProtocolError):
+                parse_campaign_probe_output(text, self.CASE)
+
+    def _all_rows(self, section: str) -> tuple[str, ...]:
+        walker = _SafeScalarRows(section)
+        return walker.rows("ss_rtc") + walker.rows("ss_tmid") + walker.rows("ss_tls")
+
+    def test_every_path_emits_every_row_once_and_in_order(self) -> None:
+        """#2651 review: the parser takes only the complete ordered stream, so an early return
+        that left out its SKIP record would lose the launch on the console. Every path of every
+        function of the section is walked, and all of them must emit the same rows."""
+        spec, _counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        rows = tuple(row for row, _ in parse_golden.SAFE_SCALAR_ROWS)
+        tls = tuple(row for row in rows if row.startswith("tls-"))
+        walker = _SafeScalarRows(self.section)
+        self.assertEqual(walker.rows("ss_rtc"), tuple(row for row in rows if row.startswith("rtc-")))
+        self.assertEqual(walker.rows("ss_tmid"), ("tmid-9-list", "tmid-10-list"))
+        self.assertEqual(walker.rows("ss_tls"), tls)
+        self.assertEqual(self._all_rows(self.section), rows)
+        self.assertEqual((len(rows), len(tls), spec.terminal_count), (49, 16, 49))
+        # ss_tls has the bracket-failure path beside the full one; both were walked.
+        self.assertGreaterEqual(len(walker.paths("ss_tls")), 2)
+        # Each row function emits its own row and nothing else on every one of its paths, the
+        # early returns included; the skip helper emits every row from its argument on.
+        for function, argument, expected in (
+                ("ss_tls_fragmentation", None, ("tls-fragmentation",)),
+                ("ss_tls_create", tls.index("tls-create-high"), ("tls-create-high",)),
+                ("ss_tls_place", tls.index("tls-place-high"), ("tls-place-high",)),
+                ("ss_tls_addr", tls.index("tls-addr-high-2"), ("tls-addr-high-2",)),
+                ("ss_tls_status", tls.index("tls-status-normal"), ("tls-status-normal",)),
+                ("ss_tls_second_thread", None, ("tls-thread",)),
+                ("ss_tls_skip_from", tls.index("tls-create-normal"), tls[2:]),
+                ("ss_tls_skip_from", 0, tls),
+                ("ss_tmid_row", "tmid-10-list", ("tmid-10-list",)),
+                # The second thread and the block helpers write no record.
+                ("ss_tls_thread", None, ()), ("ss_block", "nksslo", ()), ("ss_block_free", None, ())):
+            with self.subTest(function=function, argument=argument):
+                self.assertEqual(walker.rows(function, argument), expected)
+        # The early returns walked above: one in each of the place, addr and status rows and
+        # in ss_tls (the bracket failure), two in the second-thread row.
+        for function, returns in (("ss_tls_place", 1), ("ss_tls_addr", 1), ("ss_tls_status", 1),
+                                  ("ss_tls_second_thread", 2), ("ss_tls", 1)):
+            with self.subTest(early_returns=function):
+                self.assertEqual(len(re.findall(r"\breturn(?: 0u)?;\n\s*\}", self.bodies[function])),
+                                 returns)
+        # hle_run's branch for this case runs the three groups once each and nothing else.
+        run = _c_function_bodies(_c_code(self.probe))["hle_run"]
+        branch = run[run.index("#elif PSP_ORACLE_CASE == KS_CASE_SAFE_SCALAR\n"):]
+        branch = branch[branch.index("\n") + 1:branch.index("#else")]
+        self.assertEqual(_c_block_paths("{" + branch + "}", walker._events, walker._loop, {}),
+                         [(rows, True)])
+
+    def test_the_row_walk_refuses_a_record_made_conditional_inside_one_statement(self) -> None:
+        def events(statement: str, _env: dict[str, Any]) -> list[str]:
+            return re.findall(r'hle_record\("([a-z-]+)"', statement)
+
+        def loop(header: str, _body: str, _env: dict[str, Any]) -> tuple[str, list[int]]:
+            raise AssertionError(header)
+
+        for statement in ('ok && (hle_record("tls-thread", "PASS", 0, out, 1), 0);',
+                          'ok || hle_record("tls-thread", "PASS", 0, out, 1);',
+                          'ok ? hle_record("tls-thread", "PASS", 0, out, 1) : (void)0;'):
+            with self.subTest(statement=statement):
+                with self.assertRaisesRegex(AssertionError, "conditional inside one statement"):
+                    _c_block_paths("{ " + statement + " }", events, loop, {})
+        # A conditional inside the record's own arguments, or in a literal, still records once.
+        for statement in ('hle_record("tls-thread", ok ? "PASS" : "FAIL", 0, out, 1);',
+                          'hle_record("tls-thread", "a?b||c", 0, out, 1);',
+                          "hle_record(\"tls-thread\", q == '?' ? \"PASS\" : \"FAIL\", 0, out, 1);"):
+            with self.subTest(statement=statement):
+                self.assertEqual(_c_block_paths("{ " + statement + " }", events, loop, {}),
+                                 [(("tls-thread",), False)])
+        # A conditional statement that records nothing is plain code.
+        self.assertEqual(_c_block_paths("{ x = ok ? 1 : 2; }", events, loop, {}), [((), False)])
+
+    def test_the_row_walk_fails_when_any_record_is_dropped_or_doubled(self) -> None:
+        """The walk is not vacuous: removing or repeating any one record statement of the
+        section, the SKIP record of an early return included, changes what some path emits."""
+        golden = self._all_rows(self.section)
+        statements = list(re.finditer(
+            r"^[ \t]*(?:\(void\))?(?:ss_tls_rec|ss_tls_skip_from|hle_record|ss_tmid_row|"
+            r"ss_tls_fragmentation|ss_tls_place|ss_tls_addr|ss_tls_status|ss_tls_second_thread)"
+            r"\([^;]*\);\n", self.section, re.MULTILINE))
+        self.assertGreaterEqual(len(statements), 25)
+        per_function = {name: sum(statement.group(0) in body for statement in statements)
+                        for name, body in self.bodies.items()}
+        # The early returns the review named: three records in the second-thread row (two of
+        # them SKIP), two in each of the place, addr and status rows.
+        self.assertGreaterEqual(per_function["ss_tls_second_thread"], 3)
+        for function in ("ss_tls_place", "ss_tls_addr", "ss_tls_status"):
+            self.assertGreaterEqual(per_function[function], 2, function)
+        survivors = []
+        for statement in statements:
+            dropped = self.section[:statement.start()] + self.section[statement.end():]
+            doubled = (self.section[:statement.end()] + statement.group(0)
+                       + self.section[statement.end():])
+            for kind, mutant in (("dropped", dropped), ("doubled", doubled)):
+                try:
+                    emitted = self._all_rows(mutant)
+                except AssertionError:
+                    continue
+                if emitted == golden:
+                    line = self.section.count("\n", 0, statement.start()) + 1
+                    survivors.append(f"{kind} at section line {line}: {statement.group(0).strip()}")
+        self.assertEqual(survivors, [])
+
+    def test_status_buffer_is_larger_than_the_sixty_bytes_the_kernel_writes(self) -> None:
+        """#2651 review: a PSP writes all 60 bytes of the status record for any non-zero size
+        word (pspautotests tests/threads/tls/refer.expected), so the buffer's own size, not the
+        size word, is what keeps the probe's stack intact."""
+        body = self.bodies["ss_tls_status"]
+        declared = _matched(re.search(r"\buint32_t info\[(\w+)\];", body)).group(1)
+        words = int(declared) if declared.isdigit() else self._define(declared)
+        size = self._define("SS_TLS_INFO_SIZE")
+        self.assertEqual(size, 60)
+        self.assertGreaterEqual(words * 4, size + 4)
+        self.assertEqual(len(re.findall(r"\b\w+ info\[\w+\];", body)), 1)
+        self.assertIn("sceKernelReferTlsplStatus(pool, info)", body)
+        # The compiler refuses a shorter buffer or another structure size.
+        self.assertIn('_Static_assert(SS_TLS_INFO_SIZE == 60u, "SceKernelTlsplInfo is 60 bytes");',
+                      body)
+        self.assertIn("_Static_assert(sizeof(info) >= SS_TLS_INFO_SIZE + sizeof(info[0]),", body)
+        # The whole buffer is preset, the size word is the structure's, and every word read
+        # lies inside it: the six fields after the 32-byte name, then the one guard word.
+        self.assertIn(f"for (unsigned i = 0; i < {declared}; i++) info[i] = HLE_SENTINEL;", body)
+        self.assertIn("info[0] = SS_TLS_INFO_SIZE;", body)
+        self.assertIn("for (unsigned i = 0; i < 6; i++) w[1 + i] = info[9 + i];", body)
+        guard = int(_matched(re.search(r"w\[7\] = info\[(\d+)\];", body)).group(1))
+        self.assertEqual(guard, size // 4)
+        self.assertLess(guard, words)
+        self.assertLess(9 + 5, guard)
+
+    def test_fragmentation_row_is_a_size_difference_taken_before_any_allocation(self) -> None:
+        """#2651 review: tls-place reads "0x100 means nothing new at that end" only when the free
+        memory was one run, so the first TLS row records total free minus largest free."""
+        _spec, counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        self.assertEqual(counts["tls-fragmentation"], 1)
+        row = self.bodies["ss_tls_fragmentation"]
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", row)),
+                         {"sceKernelTotalFreeMemSize", "sceKernelMaxFreeMemSize"})
+        self.assertIn("const uint32_t total = (uint32_t)sceKernelTotalFreeMemSize();", row)
+        self.assertIn("w[0] = total - (uint32_t)sceKernelMaxFreeMemSize();", row)
+        # It is the first thing ss_tls does: no block, pool or thread exists yet.
+        tls = self.bodies["ss_tls"]
+        first_call = _matched(re.search(r"\b(?:sce\w+|ss_\w+)\s*\(", tls))
+        self.assertEqual(first_call.group(0), "ss_tls_fragmentation(")
+        self.assertLess(tls.index("ss_tls_fragmentation();"), tls.index("ss_block("))
+        # The docs and the manifest say how the row changes the reading.
+        docs = (self.root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        section = docs[docs.index("### Reading the safe-scalar TLS rows\n"):]
+        section = section[:section.index("\n### ", 1)]
+        for term in ("tls-fragmentation", "one run", "cross-check only", "tls-addr-normal",
+                     "decide the placement", "never an address"):
+            self.assertIn(term, section)
+        self.assertIn("(#reading-the-safe-scalar-tls-rows)", docs)
+        self.assertIn("one run", self.row["invariant"])
+        self.assertIn("cross-check only", self.row["invariant"])
+        self.assertIn("49 records", self.row["measurement_note"])
+
+    def test_import_gate_pins_the_three_libraries_and_refuses_device_libraries(self) -> None:
+        start = self.makefile.index("ifeq ($(CASE),safe-scalar)\nLIBS += -lpsprtc\n")
+        block = self.makefile[start:self.makefile.index("\nendif\n", start)]
+        pins = {library: {int(nid, 16) for nid in nids.split(",")}
+                for library, nids in re.findall(r"--exact-library (\w+)=((?:0x[0-9A-F]{8},?)+)",
+                                                block)}
+        self.assertEqual(pins, {library: set(table)
+                                for library, table in self.EXACT_IMPORTS.items()})
+        self.assertEqual(sorted(re.findall(r"--forbid-library (\w+)", block)),
+                         sorted(self.FORBIDDEN))
+        nid_names = dict(
+            (int(nid, 16), name) for nid, name in re.findall(
+                r'\{0x([0-9a-f]{8})u, "(\w+)"\}',
+                (self.root / "src" / "rt" / "nid_names.h").read_text(encoding="utf-8")))
+        for table in (*self.EXACT_IMPORTS.values(),
+                      {nid: name for name, nid in self.TLS_POOL_STUBS.items()}):
+            for nid, name in table.items():
+                self.assertEqual(nid_names[nid], name, hex(nid))
+        # The Kernel_Library block: one library, the SDK's version word for it, the two calls
+        # the PSPSDK libc glue imports and sceKernelGetTlsAddr, which no PSPSDK stub provides.
+        self.assertEqual(re.findall(r'IMPORT_START\s+"([^"]+)",\s*0x([0-9A-Fa-f]+)',
+                                    self.kernel_library), [("Kernel_Library", "00010000")])
+        declared = HleMeasureProbeTests._imports(self.kernel_library)
+        self.assertEqual({(library, nid, name) for library, nid, name in declared},
+                         {("Kernel_Library", nid, name)
+                          for nid, name in self.EXACT_IMPORTS["Kernel_Library"].items()})
+        self.assertEqual(HleMeasureProbeTests._nid("sceKernelGetTlsAddr"), 0xFA835CDE)
+        threadman = {name: nid for _lib, nid, name in HleMeasureProbeTests._imports(self.threadman)}
+        for name, nid in self.TLS_POOL_STUBS.items():
+            with self.subTest(stub=name):
+                self.assertEqual(threadman[name], nid)
+                self.assertEqual(HleMeasureProbeTests._nid(name), nid)
+        # The gate takes exactly this table and refuses one more import from a pinned library
+        # or any import from a forbidden one.
+        tables = {"ThreadManForUser": sorted(threadman.values()),
+                  **{library: sorted(table) for library, table in self.EXACT_IMPORTS.items()}}
+        exact = {library: frozenset(table) for library, table in self.EXACT_IMPORTS.items()}
+        forbidden = frozenset(self.FORBIDDEN)
+        self.assertTrue(user_mode_imports.check_module(
+            build_import_elf(sorted(tables.items())), exact, forbidden).passed)
+        extra = {**tables, "sceRtc": [*tables["sceRtc"], 0x3F7AD767]}
+        self.assertFalse(user_mode_imports.check_module(
+            build_import_elf(sorted(extra.items())), exact, forbidden).passed)
+        device = {**tables, "sceGe_user": [0xE47E40E4]}
+        self.assertFalse(user_mode_imports.check_module(
+            build_import_elf(sorted(device.items())), exact, forbidden).passed)
+
+    def test_calls_only_the_listed_functions_and_no_device_dialog_ge_radio_or_handler(self) -> None:
+        called = set(re.findall(r"\b(sce\w+)\s*\(", self.section))
+        self.assertEqual(called, set(self.CALLS))
+        for banned in ("sceIo", "sceGe", "sceDisplay", "sceUtility", "sceCtrl", "sceWlan", "sceNet",
+                       "sceAudio", "scePower", "sceUmd", "sceReg", "SetAlarm", "SubIntr",
+                       "EventHandler(", "Callback", "ModuleIdList", "DelayThread", "host0:", "ms0:",
+                       "flash", "while (", "do {", "goto ", "malloc("):
+            self.assertNotIn(banned, self.section, banned)
+        # A NULL goes only where the call documents an optional argument.
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\([^;]*\bNULL\b", self.section)),
+                         {"sceKernelAllocPartitionMemory", "sceKernelCreateTlspl",
+                          "sceKernelCreateThread", "sceKernelStartThread"})
+        # The list classes are the two enumerators, read into a 16-slot buffer of the probe's.
+        self.assertEqual(re.findall(r"ss_tmid_row\(\"[a-z0-9-]+\", (\w+)\);", self.section),
+                         ["SCE_KERNEL_TMID_ThreadEventHandler", "SCE_KERNEL_TMID_Alarm"])
+        self.assertIn("sceKernelGetThreadmanIdList(type, (SceUID *)ids, (int)SS_ID_SLOTS, &count)",
+                      self.bodies["ss_tmid_row"])
+        self.assertIn("uint32_t ids[SS_ID_SLOTS];", self.bodies["ss_tmid_row"])
+
+    def test_dates_stay_in_the_range_a_month_lookup_can_take(self) -> None:
+        dates = [*self._table("k_ss_valid"), *self._table("k_ss_time")]
+        self.assertEqual(len(dates), 18)
+        for row, (year, month, day, hour, minute, second) in dates:
+            with self.subTest(row=row):
+                self.assertTrue(1 <= year <= 9999 and 0 <= month <= 13 and 0 <= day <= 32)
+                self.assertTrue(0 <= hour <= 24 and 0 <= minute <= 59 and 0 <= second <= 60)
+        days = self._table("k_ss_dow")
+        self.assertEqual(len(days), 9)
+        for row, (year, month, day) in days:
+            with self.subTest(row=row):
+                self.assertTrue(0 <= month <= 24 and 0 <= year <= 10000 and 0 <= day <= 0x7FFFFFFF)
+        # The first second a 32-bit time_t cannot hold, and the two ticks past year 9999
+        # (tick 0 is 0001-01-01 and a tick is a microsecond).
+        self.assertEqual(dict(self._table("k_ss_time"))["rtc-time-2106-past"],
+                         [2106, 2, 7, 6, 28, 16])
+        self.assertEqual(datetime(1970, 1, 1) + timedelta(seconds=2 ** 32),
+                         datetime(2106, 2, 7, 6, 28, 16))
+        days_to_10000 = (datetime(9999, 12, 31) - datetime(1, 1, 1)).days + 1
+        self.assertEqual(self._define("SS_TICK_Y10000"), days_to_10000 * 86400 * 1000000)
+        self.assertEqual(self._define("SS_TICK_Y10001"), (days_to_10000 + 366) * 86400 * 1000000)
+        adds = re.findall(r'\{ "(rtc-addyears-[a-z0-9-]+)", (SS_TICK_Y\d+), (-?\d+) \}', self.section)
+        self.assertEqual([(tick, int(years)) for _row, tick, years in adds],
+                         [("SS_TICK_Y10000", 0), ("SS_TICK_Y10000", 1), ("SS_TICK_Y10000", -1),
+                          ("SS_TICK_Y10001", -2)])
+
+    def test_no_address_is_recorded_except_as_a_difference(self) -> None:
+        for name, body in self.bodies.items():
+            with self.subTest(function=name):
+                # A record word never takes a block head, a TLS address or an identifier whole.
+                self.assertEqual(re.findall(
+                    r"w\[\d\] = (?:\(uint32_t\))?(?:\w+(?:\.|->)(?:head|uid)|addr|again|thid|uid|"
+                    r"s_ss_t_addr\[\d\]|pool|normal|high2?|ids\[\w+\]);", body), [])
+        self.assertIn("w[1] = addr - lo->head;", self.bodies["ss_tls_addr"])
+        self.assertIn("w[2] = hi->head - addr;", self.bodies["ss_tls_addr"])
+        self.assertIn("w[3] = addr & 0xffu;", self.bodies["ss_tls_addr"])
+        self.assertIn("w[2] = low.head - lo->head;", self.bodies["ss_tls_place"])
+        self.assertIn("w[3] = hi->head - high.head;", self.bodies["ss_tls_place"])
+        self.assertIn("return uid > 0 ? 1u : (uint32_t)uid;", self.bodies["ss_obtained"])
+        self.assertIn("written += ids[i] != HLE_SENTINEL;", self.bodies["ss_tmid_row"])
+
+    def test_every_cell_writes_its_step_first_and_every_object_is_released(self) -> None:
+        # Helpers that are only called inside a stepped cell, and the second thread's body.
+        helpers = {"ss_block", "ss_block_free", "ss_tls_thread"}
+        stepped = 0
+        for name, body in self.bodies.items():
+            calls = [match.start() for match in re.finditer(r"\b(?:sce\w+|ss_block)\s*\(", body)]
+            if name in helpers or not calls:
+                continue
+            with self.subTest(function=name):
+                stepped += 1
+                self.assertIn("hle_step(", body)
+                self.assertLess(body.index("hle_step("), calls[0])
+        self.assertEqual(stepped, 9)
+        rtc = self.bodies["ss_rtc"]
+        for call in ("sceRtcCheckValid(", "sceRtcGetDayOfWeek(", "sceRtcGetTime_t(",
+                     "sceRtcTickAddYears("):
+            with self.subTest(call=call):
+                self.assertEqual(rtc.count(call), 1)
+                before = rtc[:rtc.index(call)]
+                self.assertIn("hle_step(in->row);", before[before.rindex("for ("):])
+        # Loops: every one counts up to a constant.
+        headers = [self.section[loop.end():_c_close(self.section, loop.end() - 1)]
+                   for loop in re.finditer(r"\bfor \(", self.section)]
+        self.assertEqual(len(headers), 12)
+        for header in headers:
+            self.assertRegex(header, r"^unsigned (\w+) = (?:0|first); \1 < (?:\d+|SS_[A-Z_]+); \1\+\+$")
+        # Pools: four blocks each and two threads, so no request for a block can wait.
+        self.assertEqual((self._define("SS_TLS_BLOCKS"), self._define("SS_TLS_BLOCK"),
+                          self._define("SS_TLS_HIGHMEM"), self._define("SS_PART")),
+                         (4, 0x100, 0x4000, 2))
+        tls = self.bodies["ss_tls"]
+        self.assertEqual(re.findall(r'ss_tls_create\(\w+, "(\w+)", (\w+)\)', tls),
+                         [("nktls0", "0u"), ("nktls1", "SS_TLS_HIGHMEM"),
+                          ("nktls2", "SS_TLS_HIGHMEM")])
+        order = [tls.index(text) for text in (
+            "ss_tls_second_thread(", "sceKernelFreeTlspl(normal)", "sceKernelFreeTlspl(high)",
+            "sceKernelFreeTlspl(high2)", "sceKernelDeleteTlspl(normal)", "sceKernelDeleteTlspl(high)",
+            "sceKernelDeleteTlspl(high2)", "w[0] = ss_block_free(&lo);", "w[1] = ss_block_free(&hi);")]
+        self.assertEqual(order, sorted(order))
+        # The brackets are freed on the early return too.
+        early = tls[:tls.index("return;")]
+        self.assertIn("(void)ss_block_free(&lo);", early)
+        self.assertIn("(void)ss_block_free(&hi);", early)
+        place = self.bodies["ss_tls_place"]
+        self.assertIn("w[4] = ss_block_free(&low);", place)
+        self.assertIn("w[5] = ss_block_free(&high);", place)
+        # The second thread frees the block it took, and the main thread's wait for it is one
+        # second; the thread is deleted on both outcomes.
+        worker = self.bodies["ss_tls_thread"]
+        self.assertLess(worker.index("sceKernelGetTlsAddr(s_ss_t_pool[i])"),
+                        worker.index("sceKernelFreeTlspl(s_ss_t_pool[i])"))
+        second = self.bodies["ss_tls_second_thread"]
+        self.assertEqual(self._define("SS_THREAD_WAIT_US"), 1000000)
+        self.assertIn("SceUInt timeout = SS_THREAD_WAIT_US;", second)
+        self.assertIn("sceKernelWaitThreadEnd(thid, &timeout)", second)
+        self.assertIn("(void)sceKernelTerminateDeleteThread(thid);", second)
+        # A thread that did not start is dormant: it is deleted, not terminated. One that
+        # ended in time is deleted after its words are read.
+        not_started = second[second.index("if (started < 0) {"):second.index("} else if (waited >= 0) {")]
+        self.assertIn("(void)sceKernelDeleteThread(thid);", not_started)
+        self.assertEqual(second.count("(void)sceKernelDeleteThread(thid);"), 2)
+        self.assertEqual(second.count("sceKernelTerminateDeleteThread("), 1)
+
+
 class HleIoSeekMemoryStickSetupAndCleanupTests(unittest.TestCase):
     """hle-io-seek and hle-io-seek-edges touch only the Memory Stick directory they made (#1380)."""
 
@@ -13551,7 +15578,10 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
         run = run[run.index("static int hle_run"):run.index("\n}\n")]
         self.assertEqual(re.findall(r"\b(hle_ud_\w+)\(", run), ["hle_ud_sharing", "hle_ud_netconf"])
         self.assertNotIn("gamedata", run)
-        # Every gamedata and savedata definition sits under the case-161-only guard.
+        # Every gamedata and savedata definition sits under a guard that leaves case 166 out: the
+        # case-161-only guard, or HLE_UD_WITH_GAMEDATA (cases 161 and 191 only).
+        self.assertIn("#define HLE_UD_WITH_GAMEDATA (PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || "
+                      "PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_GAMEDATA)\n", self.probe)
         for marker in ("static const HleUdType k_ud_gamedata = {",
                        "static uint32_t hle_ud_gamedata_precheck(void)",
                        "static void hle_ud_gamedata(void)",
@@ -13561,7 +15591,8 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
                 before = self.probe[:self.probe.index(marker)]
                 opened = before.rindex("#if ")
                 self.assertTrue(before[opened:].startswith(
-                    "#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS\n"), marker)
+                    ("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS\n",
+                     "#if HLE_UD_WITH_GAMEDATA\n")), marker)
                 self.assertNotIn("#endif", before[opened:])
 
     def test_import_set_has_no_gamedata_savedata_or_umd_call(self) -> None:
@@ -13739,6 +15770,218 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
         self.assertIn("[PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13]", paragraph)
 
 
+class HleUtilityAttendedProbeTests(unittest.TestCase):
+    """CASE=hle-utility-attended-netconf, -sharing and -gamedata (189-191,
+    PSP-HLE-UTILITY-DIALOG-003 to -005): #1386's attended runs. One dialog type per launch, in case
+    161's section with its blocks, setup, teardown, precheck and cleanup; a person at the console
+    dismisses the dialog by hand within a 90-second window, so the run can reach FINISHED. These pin
+    the route, the record shapes the parser expects, that the probe still presses and cancels
+    nothing early, and the operator conditions in the manifest, README and docs rows."""
+
+    CASES = (
+        # campaign, CASE_ID, macro, test id, kind, the hle_run calls in order
+        ("hle-utility-attended-netconf", 189, "HLE_CASE_UTILITY_ATTENDED_NETCONF",
+         "PSP-HLE-UTILITY-DIALOG-003", "netconf",
+         ["hle_ud_netconf_setup", "hle_ud_attended", "hle_ud_netconf_teardown"]),
+        ("hle-utility-attended-sharing", 190, "HLE_CASE_UTILITY_ATTENDED_SHARING",
+         "PSP-HLE-UTILITY-DIALOG-004", "sharing",
+         ["hle_ud_sharing_setup", "hle_ud_attended", "hle_ud_sharing_teardown"]),
+        ("hle-utility-attended-gamedata", 191, "HLE_CASE_UTILITY_ATTENDED_GAMEDATA",
+         "PSP-HLE-UTILITY-DIALOG-005", "gamedata",
+         ["hle_ud_gamedata_precheck", "hle_ud_attended", "hle_ud_gamedata_cleanup"]),
+    )
+
+    probe: ClassVar[str]
+    makefile: ClassVar[str]
+    imports: ClassVar[str]
+    section: ClassVar[str]
+    root: ClassVar[Path]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.root = Path(__file__).resolve().parents[1]
+        fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
+        start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || ")
+        cls.section = cls.probe[start:cls.probe.index("#endif /* HLE_CASE_UTILITY_DIALOGS */")]
+
+    def _code(self, macro: str) -> str:
+        return _c_code(_select_case_blocks(self.section, macro))
+
+    @staticmethod
+    def _body(code: str, signature: str) -> str:
+        body = code[code.index(signature):]
+        return body[:body.index("\n}\n")]
+
+    def test_routes_ids_and_parser_rows(self) -> None:
+        for campaign, case_id, macro, test_id, kind, _calls in self.CASES:
+            with self.subTest(campaign=campaign):
+                self.assertIn(f"else ifeq ($(CASE),{campaign})\nCASE_ID = {case_id}\n", self.makefile)
+                self.assertIn(f"#define {macro} {case_id}\n", self.probe)
+                stem = campaign.replace("-", "_")
+                self.assertIn(f'#define HLE_CAMPAIGN_ID "{campaign}"\n#define HLE_TEST_ID "{test_id}"\n'
+                              f'#define HLE_LOG "host0:/{stem}_log.txt"', self.probe)
+                self.assertIn(f"else ifeq ($(CASE),{campaign})\nTARGET = $(BUILD_DIR)/{stem}\n",
+                              self.makefile)
+                spec, counts = CAMPAIGN_PROBE_CASES[campaign]
+                self.assertEqual(spec.test_id, test_id)
+                first = "gamedata-precheck" if kind == "gamedata" else f"{kind}-setup"
+                last = "gamedata-cleanup" if kind == "gamedata" else f"{kind}-teardown"
+                self.assertEqual(spec.ordered_cases[:-1],
+                                 (first, f"{kind}-attended", f"{kind}-attended-shutdown", last))
+                self.assertEqual(counts[f"{kind}-attended"], 24)
+                self.assertEqual(counts[f"{kind}-attended-shutdown"], 20)
+                # The setup, teardown, precheck and cleanup rows keep case 161's shapes.
+                dialogs = dict(parse_golden.HLE_UTILITY_DIALOGS_ROWS)
+                self.assertEqual((counts[first], counts[last]), (dialogs[first], dialogs[last]))
+                # The source walk yields the registry's cells in the registry's order.
+                self.assertEqual(_out_count_mismatches(self.probe, campaign, macro), [])
+
+    def test_each_run_is_one_dialog_type_with_its_setup_and_teardown(self) -> None:
+        for campaign, _case_id, macro, _test_id, kind, calls in self.CASES:
+            with self.subTest(campaign=campaign):
+                own = self.section.split(f"#if PSP_ORACLE_CASE == {macro}\n")
+                self.assertEqual(len(own), 2)
+                run = own[1][:own[1].index("#endif")]
+                self.assertEqual(re.findall(r"\b(hle_ud_\w+)\(", run), calls)
+                self.assertIn(f'hle_ud_attended("{kind}-attended", "{kind}-attended-shutdown", '
+                              f"&k_ud_{kind}, reason);", run)
+                # A net teardown runs on every path that ran its setup, a stuck dialog's included.
+                if kind != "gamedata":
+                    self.assertIn(f"hle_ud_{kind}_teardown(stage, 0u);", run)
+                code = self._code(macro)
+                # No other dialog type, no wrong-state cell and no message dialog is compiled in.
+                for other in {"netconf", "sharing", "gamedata"} - {kind}:
+                    self.assertNotIn(f"k_ud_{other} =", code)
+                for gone in ("k_ud_savedata", "hle_ud_state(", "hle_ud_timing(", "hle_ud_drive(",
+                             "nkUtilMsgDialogInitStart(s_ud_msg)", "s_ud_msg["):
+                    self.assertNotIn(gone, code)
+
+    def test_the_attended_drive_waits_for_the_person_and_cancels_nothing_early(self) -> None:
+        code = self._code("HLE_CASE_UTILITY_ATTENDED_NETCONF")
+        self.assertIn("#define HLE_UD_ATTEND_POLLS 5400u", code)
+        self.assertIn("#define HLE_UD_ATTEND_RUN_PROBE 30u", code)
+        drive = self._body(code, "static void hle_ud_attend_drive(HleUdRun *r)")
+        # Bounded: one poll per vblank, at most the attended window.
+        self.assertIn("for (uint32_t i = 0; i < HLE_UD_ATTEND_POLLS; i++) {", drive)
+        self.assertIn("(void)sceDisplayWaitVblankStart();", drive)
+        # No cancel bound ends a RUNNING or INIT dialog inside the window.
+        for gone in ("HLE_UD_CANCEL_POLLS *", "HLE_UD_INIT_CANCEL_POLLS", "HLE_UD_RUN_SHUTDOWNS"):
+            self.assertNotIn(gone, drive)
+        # Update(1) on every RUNNING poll but the one probe poll; every ShutdownStart goes through
+        # the marked helper, once in each status.
+        self.assertIn("running == HLE_UD_ATTEND_RUN_PROBE && !r->accepted", drive)
+        self.assertEqual(drive.count("r->t->update(1)"), 1)
+        self.assertNotIn("r->t->shutdown()", drive)
+        self.assertEqual(drive.count("hle_ud_attend_shutdown(r, "), 5)
+        helper = self._body(code, "static void hle_ud_attend_shutdown(HleUdRun *r, int status)")
+        self.assertLess(helper.index('hle_ud_step(r->t, "shutdown");'),
+                        helper.index("const int rc = r->t->shutdown();"))
+        self.assertLess(helper.index("const int before = r->t->get_status();"),
+                        helper.index("const int rc = r->t->shutdown();"))
+        self.assertIn("if (slot < HLE_UD_ATTEND_SLOTS && !s_ud_probe_made[slot]) {", helper)
+        # A stuck run is a failure of the launch, as in the unattended cases.
+        attended = self._body(code, "static void hle_ud_attended(")
+        self.assertIn("hle_ud_settle(&r);", attended)
+        self.assertIn('hle_record(shutdown_id, "PASS", r.sd_calls, s_ud_probe, '
+                      "HLE_UD_ATTEND_SD_WORDS);", attended)
+        header = " ".join(self.section[:self.section.index("*/")].split())
+        for term in ("ATTENDED cases 189-191", "The probe still presses nothing.",
+                     "One launch per boot, one dialog type per launch, in the game context.",
+                     "that boot then needs a power cycle"):
+            with self.subTest(term=term):
+                self.assertIn(term, header)
+
+    def test_each_build_links_only_its_own_dialog_and_libraries(self) -> None:
+        sets = {189: ("Netconf", "sceNetApctl"), 190: ("GameSharing", "sceNetAdhocctl"),
+                191: ("GamedataInstall", "sceUmdUser")}
+        for campaign, case_id, _macro, _test_id, _kind, _calls in self.CASES:
+            with self.subTest(campaign=campaign):
+                block = self.imports[self.imports.index(f"#if PSP_ORACLE_CASE == {case_id}\n"):]
+                block = block[:block.index("#endif")]
+                names = re.findall(r'IMPORT_FUNC\s+"sceUtility", 0x[0-9A-F]{8}, (\w+)', block)
+                dialog, library = sets[case_id]
+                self.assertEqual([n for n in names if n.startswith("nkUtil")],
+                                 [f"nkUtil{dialog}{call}" for call in
+                                  ("InitStart", "GetStatus", "Update", "ShutdownStart")])
+                self.assertEqual("sceUtilityLoadNetModule" in names, case_id != 191)
+                gate = self.makefile[self.makefile.index(f"\nifeq ($(CASE),{campaign})\n"):]
+                gate = gate[:gate.index("\nendif\n")]
+                self.assertIn(f"--exact-library {library}=", gate)
+                self.assertIn("--forbid-library sceReg", gate)
+                if case_id == 191:
+                    self.assertIn("--forbid-library sceNet ", gate)
+                else:
+                    self.assertIn("--forbid-library sceUmdUser", gate)
+                if case_id == 189:
+                    self.assertIn("--forbid-library sceNetAdhoc --forbid-library sceNetAdhocctl", gate)
+                if case_id == 190:
+                    self.assertIn("--forbid-library sceNetApctl", gate)
+
+    def test_an_attended_stream_parses_and_a_short_one_is_refused(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["hle-utility-attended-netconf"]
+        lines = [META.format(source="psp", model="PSP-3000", firmware="6.61-ARK",
+                             binary=MEASURED_SHA, commit=MEASURED_COMMIT)]
+        for case in spec.semantic_cases:
+            outs = " ".join(f"out{i}=0x00000000" for i in range(counts[case]))
+            lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-HLE-UTILITY-DIALOG-003 "
+                         f"case_id={case} status=PASS result=0x00000000 {outs}\n")
+        done = ("NAKAGAWA_PSP_TEST schema=1 test_id=PSP-HLE-UTILITY-DIALOG-003 "
+                "case_id=hle-utility-attended-netconf-done status=PASS result=0x00000000 "
+                f"out0=0x{len(spec.semantic_cases):08x}\n")
+        sequence = parse_golden.parse_campaign_probe_output(
+            "".join([*lines, done]), "hle-utility-attended-netconf")
+        self.assertTrue(sequence.complete)
+        self.assertEqual(sequence.observed_order[:-1], tuple(spec.semantic_cases))
+        self.assertEqual(sum(key.startswith("out") for key, _value in
+                             sequence.results["netconf-attended-shutdown"].values), 20)
+        # A stream whose shutdown row has the timing row's word count is refused.
+        short = [line.replace(" out19=0x00000000", "") if "attended-shutdown" in line else line
+                 for line in lines]
+        with self.assertRaises(ProtocolError):
+            parse_golden.parse_campaign_probe_output(
+                "".join([*short, done]), "hle-utility-attended-netconf")
+
+    def test_manifest_readme_and_docs_rows_state_the_attended_conditions(self) -> None:
+        manifest = json.loads((self.root / "tools" / "psp_oracle" / "manifest.json").read_text(
+            encoding="utf-8"))
+        rows = {t["id"]: t for t in manifest["tests"]}
+        hardware = (self.root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        readme = (self.root / "tests" / "fixtures" / "psp_oracle" / "README.md").read_text(encoding="utf-8")
+        for campaign, case_id, _macro, test_id, kind, _calls in self.CASES:
+            with self.subTest(campaign=campaign):
+                row = rows[test_id]
+                self.assertEqual(row["hardware_evidence"], "NOT_RUN")
+                self.assertEqual(row["diagnostic_case_ids"], [campaign])
+                self.assertEqual(row["case_ids"], [f"{kind}-*"])
+                self.assertEqual(row["prx"], f"{campaign.replace('-', '_')}.prx")
+                self.assertEqual(row["issues"], [1386])
+                self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_measure.c")
+                self.assertTrue(row["risk"].startswith("ATTENDED, POWER RISK: needs a person at "
+                                                       "the console to dismiss the"))
+                for term in ("Circle or Cross, whichever the dialog shows",
+                             "within about a minute", "touch nothing else",
+                             "that boot then needs a power cycle"):
+                    self.assertIn(term, row["risk"])
+                self.assertIn("RADIO: the WLAN switch on" if kind != "gamedata"
+                              else "No radio use; no UMD in the drive", row["risk"])
+                self.assertTrue(row["reset"].startswith("game context: standalone PSPLink"))
+                self.assertIn(f"one {campaign} launch per boot", row["reset"])
+                self.assertIn("a person at the console for the whole launch", row["reset"])
+                self.assertIn(f"case {case_id}", row["evidence_note"])
+                self.assertIn("NOT_RUN until measured", row["invariant"])
+                doc = next(line for line in hardware.splitlines()
+                           if line.startswith(f"| `{campaign}` |"))
+                self.assertIn(f"| `{test_id}` | `NOT_RUN` |", doc)
+                self.assertIn("one launch per boot", doc)
+                text = next(line for line in readme.splitlines()
+                            if line.startswith(f"| `{campaign}` |"))
+                self.assertIn(f"Built case {case_id} from `probe_hle_measure.c`", text)
+                self.assertIn("**NOT_RUN**", text)
+
+
 class HleUtilityDialogsProbeTests(unittest.TestCase):
     """CASE=hle-utility-dialogs (161, PSP-HLE-UTILITY-DIALOG-001) in probe_hle_measure.c: #1386's
     dialog status timing and wrong-state answers in game context. These pin the safety design:
@@ -13757,7 +16000,7 @@ class HleUtilityDialogsProbeTests(unittest.TestCase):
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || "
-                                "PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING\n\n")
+                                "PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING || ")
         cls.section = cls.probe[start:cls.probe.index("#endif /* HLE_CASE_UTILITY_DIALOGS */")]
 
     def _body(self, signature: str) -> str:
@@ -13987,14 +16230,50 @@ class HleNicknameLimitProbeTests(unittest.TestCase):
         self.assertNotIn("HLE_PRIVATE_STRINGS_PATH", code)
         self.assertNotRegex(code, r"\b(?:sceIo\w+|fopen|fwrite|fprintf|printf|hle_write|hle_emit"
                                   r"|snprintf)\s*\(")
-        # The buffer is handed only to the call, scanned for its NUL position and zeroed.
-        for use in re.findall(r"[^\n]*s_nick_buffer[^\n]*", code):
-            self.assertRegex(use, r"memset\(s_nick_buffer|s_nick_buffer\[j\] == 0|"
-                                  r"\(char \*\)s_nick_buffer|s_nick_buffer\[HLE_NICK_BUFFER_BYTES\]"
-                                  r"|sizeof\(s_nick_buffer\)")
+        self.assertEqual(self._nick_buffer_stray_uses(code), [])
         self.assertNotRegex(code, r"hle_(?:record|emit)\([^;]*s_nick_buffer")
         self.assertNotRegex(code, r"hle_(?:record|emit)\([^;]*s_nick_keys")
         self.assertEqual(code.count("memset(s_nick_buffer, 0, sizeof(s_nick_buffer));"), 1)
+
+    #: Every statement that may name the nickname buffer, each exactly once: the
+    #: definition, the fill, the read call, the NUL scan and the zeroing.
+    NICK_BUFFER_USES = (
+        r"static uint8_t s_nick_buffer\[HLE_NICK_BUFFER_BYTES\];",
+        r"memset\(s_nick_buffer, 0xA5, sizeof\(s_nick_buffer\)\);",
+        r"const int rc = sceUtilityGetSystemParamString\(PSP_SYSTEMPARAM_ID_STRING_NICKNAME,"
+        r"\s*\(char \*\)s_nick_buffer, length\);",
+        r"if \(s_nick_buffer\[j\] == 0\) \{",
+        r"memset\(s_nick_buffer, 0, sizeof\(s_nick_buffer\)\);",
+    )
+
+    @classmethod
+    def _nick_buffer_stray_uses(cls, code: str) -> list[str]:
+        """Lines of comment-free `code` that name s_nick_buffer outside the allowed statements.
+
+        The buffer is handed only to the read call, scanned for its NUL position and zeroed;
+        any other use (a copy, an alias, a second read) could carry a nickname byte out.
+        """
+        problems: list[str] = []
+        rest = code
+        for pattern in cls.NICK_BUFFER_USES:
+            rest, count = re.subn(pattern, "", rest)
+            if count != 1:
+                problems.append(f"{count} uses of {pattern}, not one")
+        problems.extend(line.strip() for line in re.findall(r"[^\n]*\bs_nick_buffer\b[^\n]*", rest))
+        return problems
+
+    def test_the_nickname_check_refuses_a_copy_or_an_alias(self) -> None:
+        code = _c_code(self.section)
+        zero = "memset(s_nick_buffer, 0, sizeof(s_nick_buffer));"
+        self.assertEqual(code.count(zero), 1)
+        for name, leak in {
+            "memcpy": "memcpy(out, s_nick_buffer, sizeof(s_nick_buffer));",
+            "strncpy": "strncpy((char *)out, (char *)s_nick_buffer, sizeof(out));",
+            "alias": "const char *alias = (char *)s_nick_buffer;",
+            "byte": "out[0] = s_nick_buffer[0];",
+        }.items():
+            with self.subTest(leak=name):
+                self.assertNotEqual(self._nick_buffer_stray_uses(code.replace(zero, leak + "\n" + zero)), [])
 
     def test_the_length_cells_pass_the_eight_lengths_in_order(self) -> None:
         self.assertIn("{0x10, 0x11, 0x20, 0x21, 0x40, 0x41, 0x80, 0x81}", self.section)
@@ -15202,6 +17481,23 @@ def _font_tree(info_count: int = 2) -> list[str]:
     return nodes
 
 
+class HostHarnessClassCleanupTests(unittest.TestCase):
+    """A host harness whose compile fails still removes its scratch directory."""
+
+    def test_a_failed_compile_leaves_no_scratch_directory(self) -> None:
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="synthetic compile failure")
+        for harness in (RegistryFontWalkHostTests, IoCasesHostTests, FontListHostTests):
+            with self.subTest(harness=harness.__name__):
+                probe: Any = type(f"{harness.__name__}CleanupProbe", (harness,), {})
+                with patch("subprocess.run", return_value=failed):
+                    with self.assertRaisesRegex(AssertionError, "did not compile"):
+                        probe.setUpClass()
+                scratch = probe.tmp
+                self.assertTrue(os.path.isdir(scratch))
+                probe.doClassCleanups()
+                self.assertFalse(os.path.exists(scratch))
+
+
 @unittest.skipUnless(_HOST_CC, "no host C compiler on PATH")
 class RegistryFontWalkHostTests(unittest.TestCase):
     """registry_walk.h, the probe's font-registry walk, run against a fake registry.
@@ -15221,6 +17517,8 @@ class RegistryFontWalkHostTests(unittest.TestCase):
         cls.root = Path(__file__).resolve().parents[1]
         cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
         cls.tmp = tempfile.mkdtemp(prefix="registry_walk_host_")
+        # A class cleanup runs even when setUpClass fails; tearDownClass would not.
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
         cls.exe = str(Path(cls.tmp) / "registry_walk_host.exe")
         result = subprocess.run(
             [cast(str, _HOST_CC), "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror",
@@ -15229,10 +17527,6 @@ class RegistryFontWalkHostTests(unittest.TestCase):
         )
         if result.returncode != 0:
             raise AssertionError("registry_walk_host.c did not compile:\n" + result.stderr)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _run(self, nodes: list[str], *, root_lists: bool = True,
              options: tuple[str, ...] = ()) -> SimpleNamespace:
@@ -15656,6 +17950,8 @@ class IoCasesHostTests(unittest.TestCase):
         cls.root = Path(__file__).resolve().parents[1]
         cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
         cls.tmp = tempfile.mkdtemp(prefix="io_cases_host_")
+        # A class cleanup runs even when setUpClass fails; tearDownClass would not.
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
         cls.exe = str(Path(cls.tmp) / "io_cases_host.exe")
         result = subprocess.run(
             [cast(str, _HOST_CC), "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror",
@@ -15664,10 +17960,6 @@ class IoCasesHostTests(unittest.TestCase):
         )
         if result.returncode != 0:
             raise AssertionError("io_cases_host.c did not compile:\n" + result.stderr)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _run(self, mode: str, lines: list[str]) -> SimpleNamespace:
         result = subprocess.run([self.exe, mode], input="\n".join(lines) + "\n",
@@ -15689,10 +17981,15 @@ class IoCasesHostTests(unittest.TestCase):
         emitted = "".join(line[5:] + "\n" for line in out if line.startswith("EMIT "))
         stream = META.format(source="psp", model="PSP-3000", firmware="6.6.1",
                              binary=MEASURED_SHA, commit=MEASURED_COMMIT) + emitted
-        return SimpleNamespace(lines=out, calls=calls, host0=host0, stream=stream)
+        return SimpleNamespace(lines=out, calls=calls, host0=host0, stream=stream, scenario=lines)
 
     def _assert_font_calls_safe(self, run: SimpleNamespace) -> None:
-        listed: set[str] = set()
+        # The names the fake flash0:/font listing returns, from the scenario's entry lines.
+        listed = {bytes.fromhex(line.split()[3]).decode("ascii", "replace")
+                  if line.split()[3] != "-" else "" for line in run.scenario
+                  if line.startswith("entry ")}
+        read_from_flash: set[str] = set()
+        opened_for_write: set[str] = set()
         for name, fields in run.calls:
             path = fields.get("path", "")
             if name == "sceIoDopen":
@@ -15703,18 +18000,44 @@ class IoCasesHostTests(unittest.TestCase):
                 flags = int(fields["flags"], 16)
                 if path.startswith("flash0:"):
                     self.assertEqual(flags, 0x1, path)
+                    self.assertTrue(path.startswith("flash0:/font/"), path)
+                    leaf = path[len("flash0:/font/"):]
+                    self.assertIn(leaf, listed, f"{path} was never listed")
+                    read_from_flash.add(leaf)
                 else:
                     self.assertTrue(path.startswith("host0:/fonts/"), path)
                     self.assertIn(flags, (0x1, 0x602), path)
                     leaf = path[len("host0:/fonts/"):]
                     self.assertRegex(leaf, r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,62}$")
                     if flags == 0x602:
-                        listed.add(leaf)
+                        self.assertIn(leaf, read_from_flash,
+                                      f"{path} is written before its listed flash0 file is read")
+                        opened_for_write.add(path)
             elif name == "sceIoWrite":
-                self.assertTrue(fields["target"].startswith("host0:/fonts/"), fields)
+                self.assertIn(fields["target"], opened_for_write, fields)
             else:
                 self.assertIn(name, ("sceIoDread", "sceIoDclose", "sceIoRead", "sceIoClose"))
         self.assertNotIn("DREAD-PRIVATE-NOT-NULL", run.lines)
+
+    def test_the_safety_replay_refuses_a_write_to_a_name_never_listed(self) -> None:
+        listing = [("sceIoDopen", {"path": "flash0:/font"}),
+                   ("sceIoOpen", {"path": "flash0:/font/a.bin", "flags": "0x00000001"})]
+        never = [("sceIoOpen", {"path": "host0:/fonts/never.bin", "flags": "0x00000602"}),
+                 ("sceIoWrite", {"target": "host0:/fonts/never.bin"})]
+        listed = [("sceIoOpen", {"path": "host0:/fonts/a.bin", "flags": "0x00000602"}),
+                  ("sceIoWrite", {"target": "host0:/fonts/a.bin"})]
+        scenario = [_entry("a.bin", 4, 1)]
+        self._assert_font_calls_safe(SimpleNamespace(lines=[], scenario=scenario,
+                                                     calls=listing + listed))
+        with self.assertRaisesRegex(AssertionError, "host0:/fonts/never.bin is written before"):
+            self._assert_font_calls_safe(SimpleNamespace(lines=[], scenario=scenario,
+                                                         calls=listing + never))
+        with self.assertRaisesRegex(AssertionError, "flash0:/font/b.bin was never listed"):
+            self._assert_font_calls_safe(SimpleNamespace(lines=[], scenario=scenario, calls=[
+                *listing, ("sceIoOpen", {"path": "flash0:/font/b.bin", "flags": "0x00000001"})]))
+        with self.assertRaises(AssertionError):
+            self._assert_font_calls_safe(SimpleNamespace(lines=[], scenario=scenario, calls=[
+                *listing, ("sceIoWrite", {"target": "host0:/fonts/a.bin"})]))
 
     def test_listing_is_copied_byte_for_byte_and_verified(self) -> None:
         files = {"a.bin": (100, 7), "large.bin": (140_000, 9), "empty.bin": (0, 3),
@@ -16122,6 +18445,135 @@ class IoCasesHostTests(unittest.TestCase):
         self.assertEqual(failed, {"ltn0.pgf": "0x80010013", "ltn1.pgf": "0x8001001c"})
         self.assertEqual(int(dict(run.records[-1].values)["out2"], 16), 0)
 
+    def _app_outcome(self, run: SimpleNamespace) -> dict[str, str]:
+        """The app's own verdict (fontcopy_outcome in fontcopy_config.h) on the run's records."""
+        line = next((line for line in run.lines if line.startswith("OUTCOME ")), None)
+        self.assertIsNotNone(line, "the harness reports the app's fontcopy_outcome")
+        return dict(item.split("=", 1) for item in cast(str, line).split()[1:])
+
+    def test_font_copy_app_reports_a_listing_that_stopped_early(self) -> None:
+        # sceIoDread fails after two of five .pgf entries: font_files.h copies the two it listed
+        # and closes the listing with status=FAIL and out1 = that error. The copy counts alone
+        # (two of two) made the app say "Done: all 2 fonts were copied and checked".
+        fonts = [_entry(f"ltn{index}.pgf", 100, index + 1) for index in range(5)]
+        run = self._app(fonts + ["option dread-fails 2 0x80010013"])
+        self._assert_app_calls_safe(run)
+        done = dict(run.records[-1].values)
+        self.assertEqual((int(done["out1"], 16), int(done["out2"], 16)), (2, 2))
+        outcome = self._app_outcome(run)
+        self.assertEqual((outcome["kind"], outcome["code"]), ("listing-cut", "0x80010013"))
+        # FONTFILES_ENTRIES_MAX stopping the listing is cut short as well (out1 0xffffffff).
+        many = [_entry(f"f{index:02d}.pgf", 10, 1) for index in range(65)]
+        outcome = self._app_outcome(self._app(many))
+        self.assertEqual((outcome["kind"], outcome["code"]), ("listing-cut", "0xffffffff"))
+        # A failing first read leaves no candidate, and none of the known names opens: the shown
+        # code is that read's, not 0.
+        unknown = [_entry(f"f{index}.pgf", 100, index + 1) for index in range(5)]
+        outcome = self._app_outcome(self._app(unknown + ["option dread-fails 0 0x80010013"]))
+        self.assertEqual((outcome["kind"], outcome["code"]), ("none-found", "0x80010013"))
+        # A complete listing is a success, and so is a refused listing the known names filled.
+        self.assertEqual(self._app_outcome(self._app(fonts))["kind"], "all-copied")
+        refused = self._app(["fontdir 0x80010002 0x80010002", _entry("ltn0.pgf", 100, 1)])
+        self.assertEqual(self._app_outcome(refused)["kind"], "all-copied")
+
+    def test_font_copy_app_tries_the_known_names_when_the_listing_names_none(self) -> None:
+        # The listing opens, but its first sceIoDread fails (or ends at once, or names no .pgf
+        # file). The known names used to be tried only when sceIoDopen failed, so nothing was
+        # copied from a PSP whose fonts open by name.
+        present = {"jpn0.pgf": (5_000, 1), "ltn3.pgf": (70_000, 2)}
+        fonts = [_entry(name, size, seed) for name, (size, seed) in present.items()]
+        for listing in (["option dread-fails 0 0x80010013"], ["option dread-fails 0 0x0"],
+                        [_entry("imagefont.bin", 50, 4)]):
+            with self.subTest(listing=listing):
+                lines = fonts + listing
+                if listing[0].startswith("entry"):  # only the .bin file is listed
+                    lines = [listing[0]] + ["option dread-fails 1 0x0"] + fonts
+                run = self._app(lines)
+                self._assert_app_calls_safe(run)
+                known = [dict(record.values)["detail"] for record in run.records
+                         if record.case_id.startswith("font-known-")]
+                self.assertEqual(known, self._KNOWN)
+                self.assertEqual(run.host0, {name: (size, True)
+                                             for name, (size, _seed) in present.items()})
+                done = dict(run.records[-1].values)
+                self.assertEqual((int(done["out1"], 16), int(done["out2"], 16)), (2, 2))
+                self.assertEqual(self._app_outcome(run)["kind"], "all-copied")
+
+    def test_font_copy_app_shows_the_font_it_is_copying(self) -> None:
+        # The app draws "Copying font N of M: <name>" at a copy's first step, before the font is
+        # read. It used to draw it from the finished copy's record, so the line named the font
+        # that had just been copied, and nothing showed while the first font was copied.
+        names = ["jpn0.pgf", "ltn0.pgf", "ltn1.pgf"]
+        run = self._app([_entry(name, 1000, index + 1) for index, name in enumerate(names)])
+        progress = [index for index, line in enumerate(run.lines) if line.startswith("PROGRESS ")]
+        self.assertEqual([run.lines[index] for index in progress],
+                         [f"PROGRESS {number} of 3 {name}"
+                          for number, name in enumerate(names, start=1)])
+        copies = [index for index, line in enumerate(run.lines)
+                  if line.startswith("EMIT ") and " case_id=font-copy-" in line]
+        self.assertEqual(len(copies), 3)
+        for number, at in enumerate(progress):
+            self.assertLess(at, copies[number])
+            if number:
+                self.assertGreater(at, copies[number - 1])
+            reads = [line for line in run.lines[at:copies[number]]
+                     if line.startswith(f"CALL sceIoOpen path=flash0:/font/{names[number]} ")]
+            self.assertTrue(reads, names[number])
+
+    def test_font_copy_app_says_which_side_a_failed_copy_failed_on(self) -> None:
+        # Every copy that failed used to be reported as a Memory Stick write failure, even when
+        # the PSP's own font could not be read or read differently the second time.
+        two = [_entry("ltn0.pgf", 100, 1), _entry("ltn1.pgf", 200, 2)]
+        cases = {
+            "read error and unstable reread": (
+                ["option read-fails ltn0.pgf 0 0x80010005", "option unstable ltn1.pgf"],
+                ("none-written", "0x80010005", "read")),
+            "destination open refused": (
+                ["option host-open-fails ltn0.pgf 0x80010013",
+                 "option host-open-fails ltn1.pgf 0x80010013"],
+                ("none-written", "0x80010013", "write")),
+            "write error": (
+                ["option write-fails ltn0.pgf 0x8001001c", "option unstable ltn1.pgf"],
+                ("none-written", "0x8001001c", "write")),
+            "read back differs": (["option host-corrupt ltn1.pgf"],
+                                  ("some-copied", "0x80000106", "write")),
+            "second read differs": (["option unstable ltn1.pgf"],
+                                    ("some-copied", "0x80000106", "read")),
+            "all copied": ([], ("all-copied", "0x00000000", "none")),
+        }
+        for label, (options, want) in cases.items():
+            with self.subTest(label):
+                run = self._app(two + options)
+                self._assert_app_calls_safe(run)
+                outcome = self._app_outcome(run)
+                self.assertEqual((outcome["kind"], outcome["code"], outcome["fault"]), want)
+
+    def test_font_copy_app_retry_keeps_a_copy_that_already_matches(self) -> None:
+        # "Try again" runs the copy again. Every font used to be reopened with PSP_O_TRUNC, so a
+        # retry that failed to write destroyed a copy the earlier run had verified. A copy that
+        # matches a fresh flash0 read is now kept without being opened for writing; a partial
+        # one is copied again.
+        fonts = {"ltn0.pgf": (100, 1), "ltn1.pgf": (200, 2), "ltn2.pgf": (300, 3)}
+        lines = [_entry(name, size, seed) for name, (size, seed) in fonts.items()]
+        lines += ["option host-existing ltn0.pgf 100", "option write-fails ltn0.pgf 0x8001001c",
+                  "option host-existing ltn1.pgf 50"]
+        run = self._app(lines)
+        self._assert_app_calls_safe(run)
+        rewritten = [fields["path"] for name, fields in run.calls
+                     if name == "sceIoOpen" and fields["flags"] == "0x00000602"]
+        self.assertEqual(rewritten, [run.folder + "/ltn1.pgf", run.folder + "/ltn2.pgf"])
+        self.assertEqual(run.host0, {name: (size, True) for name, (size, _seed) in fonts.items()})
+        kept = [dict(record.values) for record in run.records
+                if record.case_id.startswith("font-kept-")]
+        self.assertEqual([(entry["detail"], entry["sha256"]) for entry in kept],
+                         [("ltn0.pgf", hashlib.sha256(_gen_bytes(100, 1)).hexdigest())])
+        done = dict(run.records[-1].values)
+        self.assertEqual((int(done["out1"], 16), int(done["out2"], 16)), (3, 3))
+        self.assertEqual(self._app_outcome(run)["kind"], "all-copied")
+        self.assertEqual([line for line in run.lines if line.startswith("PROGRESS ")],
+                         [f"PROGRESS {number} of 3 {name}"
+                          for number, name in enumerate(fonts, start=1)])
+
 
 class IoCasesSourceTests(unittest.TestCase):
     """Source-level rules for the font-files and umd-io cases."""
@@ -16194,9 +18646,18 @@ class IoCasesSourceTests(unittest.TestCase):
         config = self._code((app_dir / "fontcopy_config.h").read_text(encoding="utf-8"))
         self.assertEqual(re.findall(r"\bsceIo\w+\s*\(", app + config), [])
         self.assertIn("fontfiles_run(&s_files);", app)
-        self.assertIn("fontcopy_configure(&s_files, &s_target, s_argv0);", app)
+        # The target is chosen once from argv[0]; each run applies it, as the harness does.
+        self.assertEqual(app.count("fontcopy_target(&s_target, "), 1)
+        self.assertIn("fontcopy_use_target(&s_files, &s_target);", app)
+        harness = self._code((self.fixture / "io_cases_host.c").read_text(encoding="utf-8"))
+        self.assertIn("fontcopy_use_target(&fonts, &target);", harness)
         self.assertIn('#define FONTCOPY_FOLDER "/NAKAGAWA/fonts"', config)
         self.assertIn("files->pgf_only = 1u;", config)
+        self.assertIn("files->keep_verified = 1u;", config)
+        # The folder always fits, so a font-dest refusal is a build error, not a screen message.
+        self.assertIn('_Static_assert(sizeof("ms0:" FONTCOPY_FOLDER) - 1u + 1u + FONTFILES_NAME_MAX'
+                      " < FONTFILES_PATH_MAX,", config)
+        self.assertNotIn("font-dest", config)
         makefile = (app_dir / "Makefile").read_text(encoding="utf-8")
         self.assertIn("IMPORT_GATE_ARGS = --forbid-library sceReg", makefile)
         pinned = next(line for line in makefile.splitlines() if "IoFileMgrForUser=" in line)
@@ -16210,6 +18671,10 @@ class IoCasesSourceTests(unittest.TestCase):
         self.assertNotIn("-lpspuser", libs.split())
         self.assertNotIn("-lpspkernel", libs.split())
         self.assertIn("stubs out of order", makefile)
+        # The SDK links the ELF before FIXUP gates it: a rejected ELF must not survive.
+        self.assertIn("\n.DELETE_ON_ERROR:\n", makefile)
+        self.assertIn("\n$(OBJS) $(PSP_EBOOT_SFO): $(BUILD_CONFIG_STAMP)\n", makefile)
+        self.assertIn("IMPORT_GATE_ARGS=$(IMPORT_GATE_ARGS)", makefile)
 
     def test_font_copy_build_fails_closed_on_a_fixup_warning(self) -> None:
         # Runs the app Makefile's own FIXUP command under GNU Make with a stand-in
@@ -16253,6 +18718,95 @@ class IoCasesSourceTests(unittest.TestCase):
                     self.assertEqual(marker.exists(), not fails, "the import gate ran or not")
                     if shown is not None:
                         self.assertIn(shown, run.stdout + run.stderr)
+
+    def test_font_copy_build_never_packages_a_rejected_or_stale_elf(self) -> None:
+        # Runs the app's real Makefile under GNU Make with a stub SDK whose ELF rule, like
+        # build.mak's, links and then runs $(FIXUP) $@, a stand-in compiler, psp-fixup-imports
+        # and import gate. The link writes the ELF before the gate rejects it, so without
+        # .DELETE_ON_ERROR the next make took that ELF as up to date and packaged it; and the
+        # SDK's ELF and PARAM.SFO rules depend on no setting, so a new gate policy or title
+        # was not applied until a clean.
+        if sys.platform == "win32":
+            self.skipTest("the app Makefile's recipes need a POSIX shell")
+        make = shutil.which("make")
+        if make is None or shutil.which("bash") is None or shutil.which("cmp") is None:
+            self.skipTest("GNU Make, bash and cmp are unavailable")
+        with scratch_dir.TemporaryDirectory(prefix="fontcopy-stale-") as scratch:
+            root = Path(scratch)
+            dated = time.time() - 7200
+            app = root / "src" / "psp_companion"
+            app.mkdir(parents=True)
+            fixture = root / "tests" / "fixtures" / "psp_oracle"
+            fixture.mkdir(parents=True)
+            copies = [(self.root / "src" / "psp_companion" / name, app / name)
+                      for name in ("Makefile", "fontcopy.c", "fontcopy_config.h")]
+            copies.append((self.fixture / "font_files.h", fixture / "font_files.h"))
+            gate = root / "tools" / "psp_oracle" / "user_mode_imports.py"
+            gate.parent.mkdir(parents=True)
+            gate.write_text("import sys\n"
+                            "with open(__file__ + '.log', 'a') as log:\n"
+                            "    log.write(' '.join(sys.argv[1:-1]) + '\\n')\n"
+                            "sys.exit(1 if '--reject' in sys.argv else 0)\n", encoding="utf-8")
+            for source, copy in copies:
+                shutil.copyfile(source, copy)
+            for path in [copy for _source, copy in copies] + [gate]:
+                os.utime(path, (dated, dated))
+            (root / "sdk" / "lib").mkdir(parents=True)
+            (root / "sdk" / "lib" / "build.mak").write_text(
+                "all: $(EXTRA_TARGETS)\n"
+                "$(TARGET).elf: $(OBJS)\n\t$(CC) $^ -o $@\n\t$(FIXUP) $@\n"
+                "$(PSP_EBOOT_SFO):\n\tprintf '%s\\n' '$(PSP_EBOOT_TITLE)' > $@\n"
+                "$(PSP_EBOOT): $(TARGET).elf $(PSP_EBOOT_SFO)\n\tcat $^ > $@\n",
+                encoding="utf-8")
+            compiler = root / "stand_in_cc.py"
+            compiler.write_text(
+                "import sys\n"
+                "args = sys.argv[1:]\n"
+                "kind = 'compile' if '-c' in args else 'link'\n"
+                "with open(args[args.index('-o') + 1], 'w') as out:\n"
+                "    out.write(kind + '\\n')\n"
+                "with open(sys.argv[0] + '.log', 'a') as log:\n"
+                "    log.write(kind + '\\n')\n", encoding="utf-8")
+            tools = root / "bin"
+            tools.mkdir()
+            fixup = tools / "psp-fixup-imports"
+            fixup.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fixup.chmod(0o755)
+            build = root / "build"
+            env = dict(os.environ, PATH=f"{tools}{os.pathsep}{os.environ.get('PATH', '')}")
+
+            def run(*settings: str) -> tuple[int, int, int]:
+                # Move every output an equal step back, so a rewritten stamp is clearly newer
+                # than the outputs it should rebuild and a coarse clock cannot tie them.
+                for path in build.glob("*") if build.exists() else ():
+                    stat = path.stat()
+                    os.utime(path, (stat.st_atime - 60, stat.st_mtime - 60))
+                completed = subprocess.run(
+                    [make, "--no-print-directory", "-C", str(app), f"PSPSDK={root / 'sdk'}",
+                     f"BUILD_DIR={build}", f"PYTHON={sys.executable}",
+                     f"CC={shlex.join([sys.executable, str(compiler)])}", *settings],
+                    env=env, capture_output=True, text=True, check=False)
+                log = Path(f"{gate}.log")
+                return (completed.returncode,
+                        Path(f"{compiler}.log").read_text(encoding="utf-8").count("compile\n"),
+                        log.read_text(encoding="utf-8").count("\n") if log.exists() else 0)
+
+            elf, eboot = build / "fontcopy.elf", build / "EBOOT.PBP"
+            self.assertEqual(run(), (0, 1, 1))
+            self.assertEqual(eboot.read_text(encoding="utf-8"), "link\nNakagawa Font Copy\n")
+            # Nothing changed: nothing is rebuilt and the gate does not run again.
+            self.assertEqual(run(), (0, 1, 1))
+            # A new title rebuilds PARAM.SFO (and the object, the ELF and its gate run).
+            self.assertEqual(run("PSP_EBOOT_TITLE=Other"), (0, 2, 2))
+            self.assertEqual(eboot.read_text(encoding="utf-8"), "link\nOther\n")
+            # A new gate policy relinks and gates again; the rejected ELF does not survive.
+            reject = ("PSP_EBOOT_TITLE=Other", "IMPORT_GATE_ARGS=--reject")
+            self.assertEqual(run(*reject), (2, 3, 3))
+            self.assertFalse(elf.exists(), "the rejected ELF must be deleted")
+            # The next make gates again rather than packaging the rejected ELF.
+            self.assertEqual(run(*reject), (2, 3, 4))
+            self.assertFalse(elf.exists())
+            self.assertEqual(eboot.read_text(encoding="utf-8"), "link\nOther\n")
 
     def test_device_case_reads_state_only_and_its_lists_match_the_parser(self) -> None:
         code = self._code(self.umd[:self.umd.index("#define UMDRAW_TEST_ID")])
@@ -16505,6 +19059,8 @@ class FontListHostTests(unittest.TestCase):
         cls.root = Path(__file__).resolve().parents[1]
         cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
         cls.tmp = tempfile.mkdtemp(prefix="font_list_host_")
+        # A class cleanup runs even when setUpClass fails; tearDownClass would not.
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
         cls.exe = str(Path(cls.tmp) / "io_cases_host.exe")
         result = subprocess.run(
             [cast(str, _HOST_CC), "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror",
@@ -16513,10 +19069,6 @@ class FontListHostTests(unittest.TestCase):
         )
         if result.returncode != 0:
             raise AssertionError("io_cases_host.c did not compile:\n" + result.stderr)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _run(self, lines: list[str]) -> SimpleNamespace:
         result = subprocess.run([self.exe, "fontlist"], input="\n".join(lines) + "\n",
@@ -16857,20 +19409,50 @@ class LlscLinkProbeTests(unittest.TestCase):
                 self.assertNotIn("jal", template)
                 self.assertNotIn("break", template)
 
+    @staticmethod
+    def _llsc_window_problems(body: str) -> list[str]:
+        """How run_llsc_link's suspended spans break "the window and nothing else".
+
+        Each of the three cells suspends interrupts, runs its one llsc_window_* call and
+        resumes; no record, step, print or other call runs while interrupts are off (host
+        IO there can stall the PSPLink USB transport), and the spans do not overlap.
+        """
+        problems: list[str] = []
+        spans = list(re.finditer(r"token = sceKernelCpuSuspendIntr\(\);(.*?)sceKernelCpuResumeIntr\(token\);",
+                                 body, re.DOTALL))
+        if len(spans) != 3 or body.count("sceKernelCpuSuspendIntr(") != 3 or \
+                body.count("sceKernelCpuResumeIntr(") != 3:
+            return [f"{len(spans)} suspend/resume spans, not three"]
+        for span, window in zip(spans, ("one", "twice", "other"), strict=True):
+            if not re.fullmatch(r"\s*(?:first\[\d\] = )?llsc_window_%s\(&[^;()]*\);\s*" % window,
+                                span.group(1)):
+                problems.append(f"the llsc_window_{window} span holds more than its window: "
+                                f"{span.group(1).strip()!r}")
+        return problems
+
     def test_every_window_is_bracketed_by_suspend_and_resume_with_no_host_io_inside(self) -> None:
         body = self._run_body()
-        suspends = [m.start() for m in re.finditer(r"sceKernelCpuSuspendIntr\(\)", body)]
+        self.assertEqual(self._llsc_window_problems(body), [])
         resumes = [m.start() for m in re.finditer(r"sceKernelCpuResumeIntr\(token\)", body)]
-        calls = [body.index(name) for name in (
-            "llsc_window_one(&", "llsc_window_twice(&", "llsc_window_other(&")]
-        self.assertEqual(len(suspends), 3)
-        self.assertEqual(len(resumes), 3)
-        for suspend, call, resume in zip(suspends, calls, resumes, strict=True):
-            self.assertLess(suspend, call)
-            self.assertLess(call, resume)
         self.assertLess(resumes[-1], body.index("emit_record_extended("))
         self.assertNotIn("for (;;)", self._block())
         self.assertNotIn("while (", self._block().split("static void run_llsc_link")[1])
+
+    def test_the_window_check_refuses_host_io_or_a_second_call_inside(self) -> None:
+        body = self._run_body()
+        suspend = "    token = sceKernelCpuSuspendIntr();\n"
+        self.assertEqual(body.count(suspend), 3)
+        for name, inside in {
+            "printf": '    printf("x\\n");\n',
+            "step": '    probe_step(emulated, "llsc-link", "inside");\n',
+            "record": "    emit_record_extended(0, 0, 0, 0, 0);\n",
+            "second-window": "    (void)llsc_window_one(&s_llsc_mem[0][0], LLSC_LINK_FIRST, &loaded[0]);\n",
+        }.items():
+            for index in range(3):
+                with self.subTest(io=name, window=index):
+                    parts = body.split(suspend)
+                    parts[index + 1] = inside + parts[index + 1]
+                    self.assertNotEqual(self._llsc_window_problems(suspend.join(parts)), [])
 
     def test_each_cell_writes_its_sentinels_and_steps_before_its_window(self) -> None:
         body = self._run_body()
@@ -17148,25 +19730,44 @@ class Record20261015Tests(unittest.TestCase):
             ("26 case envelopes", "acceptance-eligible"),
             "the number of acceptance-eligible campaign envelopes",
         )
-        table_rows = self._table_rows(entry)
-        eligible_rows = {
-            (row[0], row[1]) for row in table_rows if len(row) >= 3 and row[0] != "Campaign case"
-        }
+        self._assert_requalification_table(entry)
         for case, test_id in self.REQUALIFIED.items():
             with self.subTest(case=case):
-                self.assertIn((case, test_id), eligible_rows)
                 row = self.rows[test_id]
                 self.assertEqual(row["hardware_evidence"], "MEASURED")
                 self.assertIn("f2d6c91a", row["measurement_note"])
-        for case in self.NOT_ELIGIBLE:
-            with self.subTest(case=case):
-                self.assertIn(case, entry)
-                self.assertNotIn(case, {row[0] for row in table_rows if row})
         # Captured-only rows stay captured: the requalification run adds no measured cell.
         self.assertEqual(self.rows["PSP-TEARDOWN-001"]["hardware_evidence"], "CAPTURED")
         self.assertIn("f2d6c91a", self.rows["PSP-TEARDOWN-001"]["evidence_note"])
         self.assertIn("f2d6c91a", self.rows["PSP-DMAC-001"]["measurement_note"])
-        self.assertEqual(len(self.REQUALIFIED) + len(self.NOT_ELIGIBLE), 32)
+
+    def _assert_requalification_table(self, entry: str) -> None:
+        """The entry's table names exactly the acceptance-eligible cases, each once, and with
+        the cases it leaves out accounts for the entry's case count."""
+        table_rows = self._table_rows(entry)
+        # The case table runs from its "Campaign case" header to the first non-table line.
+        lines = entry[entry.index("| Campaign case |"):].splitlines()
+        end = next((i for i, line in enumerate(lines) if not line.strip().startswith("|")),
+                   len(lines))
+        eligible_rows = [(row[0], row[1]) for row in self._table_rows("\n".join(lines[:end]))
+                         if row[0] != "Campaign case"]
+        self.assertEqual(sorted(eligible_rows), sorted(self.REQUALIFIED.items()))
+        for case in self.NOT_ELIGIBLE:
+            self.assertIn(case, entry, case)
+            self.assertNotIn(case, {row[0] for row in table_rows if row}, case)
+        total = len(eligible_rows) + len(self.NOT_ELIGIBLE)
+        self.assertEqual(total, 32)
+        self.assertIn(f"requalification of the {total}-case campaign queue", entry)
+
+    def test_a_requalification_table_that_differs_from_the_cases_is_refused(self) -> None:
+        entry = self._entry("- **PSP-3000 requalification of the 32-case campaign queue")
+        self._assert_requalification_table(entry)
+        row = "  | `wait-outcomes` | `PSP-WAIT-001` | 5 records PASS, all identical |\n"
+        self.assertEqual(entry.count(row), 1)
+        for changed in (entry.replace(row, row + row.replace("wait-outcomes", "wait-extra")),
+                        entry.replace(row, row + row), entry.replace(row, "")):
+            with self.assertRaises(AssertionError):
+                self._assert_requalification_table(changed)
 
     def test_readme_and_index_agree_on_the_status_of_the_new_probes(self) -> None:
         rows = self._table_rows(self.readme)
@@ -17213,11 +19814,15 @@ class Record20261015Tests(unittest.TestCase):
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
             ("hle-utility-netconf-sharing", "PSP-HLE-UTILITY-DIALOG-002", "CAPTURED"),
+            ("hle-utility-attended-netconf", "PSP-HLE-UTILITY-DIALOG-003", "NOT_RUN"),
+            ("hle-utility-attended-sharing", "PSP-HLE-UTILITY-DIALOG-004", "NOT_RUN"),
+            ("hle-utility-attended-gamedata", "PSP-HLE-UTILITY-DIALOG-005", "NOT_RUN"),
             ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "MEASURED"),
             ("ge-raster-bounds", "PSP-GE-RASTER-002", "MEASURED"),
             ("ge-depth-round", "PSP-GE-RASTER-003", "MEASURED"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
             ("hle-io-trunc", "PSP-HLE-IO-TRUNC-001", "MEASURED"),
+            ("safe-scalar", "PSP-SAFE-SCALAR-001", "MEASURED"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}
         readme = {row[0]: row for row in self._table_rows(self.readme) if len(row) == 3}
@@ -17239,6 +19844,40 @@ class Record20261015Tests(unittest.TestCase):
                      "0x80020323", "0x80010016", "queues nothing"):
             self.assertIn(term, note)
         self.assertIn("- **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**", self.doc)
+
+    def test_the_safe_scalar_run_is_measured_from_the_runner_envelope(self) -> None:
+        """#2640: the 2026-11-17 safe-scalar run. The host wrapper printed no verdict, so the
+        record says what it rests on: the runner's acceptance-eligible envelopes."""
+        row = self.rows["PSP-SAFE-SCALAR-001"]
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertNotIn("evidence_note", row)
+        self.assertEqual(row["evidence_ref"],
+                         "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        note = row["measurement_note"]
+        for term in ("2026-11-17", "PSP-3000", "boot 221", "XMB context", "86279e852",
+                     "ARK-5 5.2.0", "0x06060010", "acceptance-eligible with 0 blockers",
+                     "printed no verdict", "rests on the runner's report",
+                     "0xfffffffd", "0x800001fe", "0x7fffffff", "0x0008b600",
+                     "directly below the high bracket"):
+            self.assertIn(term, note)
+        start = self.doc.index("- **PSP-3000 single-case run of `safe-scalar` (2026-11-17 UTC)**")
+        entry = self.doc[start:self.doc.index("\n- **", start + 1)]
+        for term in ("printed no verdict", "acceptance-eligible with 0 blockers", "boot 221",
+                     "oracle_matrix.py` would not have named a launch `ACCEPTED`"):
+            self.assertIn(term, " ".join(entry.split()))
+        # The record table names every row once, in stream order, PASS, with the row's word
+        # count, and the done record counts the 49 rows.
+        table = [[cell.strip() for cell in line.strip().strip("|").split("|")]
+                 for line in entry.splitlines() if line.startswith("  | `")]
+        records = [cells for cells in table if len(cells) == 4 and cells[1] == "PASS"]
+        expected = [*parse_golden.SAFE_SCALAR_ROWS, ("safe-scalar-done", 1)]
+        self.assertEqual([cells[0].strip("`") for cells in records], [name for name, _ in expected])
+        for cells, (name, words) in zip(records, expected, strict=True):
+            with self.subTest(row=name):
+                self.assertRegex(cells[2], r"^`0x[0-9a-f]{8}`$")
+                self.assertEqual(len(re.findall(r"`0x[0-9a-f]{8}`", cells[3])), words)
+        self.assertEqual(records[-1][3], "`0x00000031`")
 
     def test_the_io_trunc_run_is_measured_in_game_context(self) -> None:
         """#1892: the 2026-11-02 hle-io-trunc run was built from 08934592f, which is not an
@@ -17318,6 +19957,69 @@ class Record20261015Tests(unittest.TestCase):
         mpeg = self.rows["PSP-MPEG-YCBCR-001"]
         self.assertEqual(mpeg["hardware_evidence"], "NOT_RUN")
         self.assertIn("2026-11-12 boot 202", mpeg["evidence_note"])
+
+    def test_the_std_handles_xmb_reread_names_the_launch_context(self) -> None:
+        """#341, #2397: the 2026-11-17 XMB launch under ARK-5 5.2.0 read the close value of the
+        XMB launch under 5.1.0, where the game-context launch under 5.2.0 had read another. The
+        record names the launch context as what decides it, and keeps what was not measured."""
+        row = self.rows["PSP-HLE-STDIO-001"]
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_ref"], self.ANCHOR)
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        note = row["measurement_note"]
+        for term in ("2026-11-17", "boot 222, XMB context", "same commit 3872796c", "0x06060010",
+                     "ARK-5 5.2.0 (operator-declared, not read by a tool)", "PSPLink v3.2.1",
+                     "the runner exited 0", "acceptance-eligible with 0 blockers",
+                     "the launch context decides the close's answer and the ARK-5 version does not",
+                     "0x800200d1 in the XMB context under ARK-5 5.1.0 and under 5.2.0",
+                     "0x80020325 in the game context under 5.2.0",
+                     "Not measured: the game context under ARK-5 5.1.0, a launch without PSPLink"):
+            self.assertIn(term, note)
+        unmeasured = "which factor decides"
+        self.assertNotIn(unmeasured, note)
+        entry = self._entry("- **PSP-3000 single-case run of `hle-std-handles` in the XMB context "
+                            "under ARK-5 5.2.0 (2026-11-17 UTC)**")
+        flat = " ".join(entry.split())
+        for term in ("boot 222", "`0x06060010`", "version 5.2.0 (operator-declared, not read by a tool)",
+                     "PSPLink v3.2.1", "at `3872796c`", "The runner exited 0",
+                     "acceptance-eligible with 0 blockers",
+                     "the launch context decides the close's answer and the ARK-5 version does not",
+                     "Not measured: the game context under ARK-5 5.1.0, a launch without PSPLink"):
+            self.assertIn(term, flat)
+        # The record table names every row once, in stream order, PASS, with the row's word
+        # count; the done record counts the four rows.
+        tables = self._table_rows(entry)
+        records = [cells for cells in tables if len(cells) == 4 and cells[1] == "PASS"]
+        expected = [*parse_golden.HLE_STD_HANDLES_ROWS, ("hle-std-handles-done", 1)]
+        self.assertEqual([cells[0] for cells in records], [name for name, _ in expected])
+        for cells, (name, words) in zip(records, expected, strict=True):
+            with self.subTest(row=name):
+                self.assertRegex(cells[2], r"^0x[0-9a-f]{8}$")
+                self.assertEqual(len(re.findall(r"0x[0-9a-f]{8}", cells[3])), words)
+        by_case = {cells[0]: cells for cells in records}
+        self.assertEqual(by_case["stdio-close-stdout"][2], "0x800200d1")
+        self.assertEqual(by_case["stdio-close-stdout"][3].split()[0], "0x00000001")
+        self.assertEqual(by_case["hle-std-handles-done"][3], "0x00000004")
+        # One cell per launch context and ARK-5 version; the fourth stays unmeasured.
+        grid = {cells[0]: cells[1:] for cells in tables if len(cells) == 3}
+        self.assertEqual(grid["Launch context"], ("ARK-5 5.1.0", "ARK-5 5.2.0"))
+        self.assertEqual(grid["XMB"], ("0x800200d1 (boot 135, d5fed0ba)", "0x800200d1 (boot 222, 3872796c)"))
+        self.assertEqual(grid["game"], ("not measured", "0x80020325 (boot 200, 3872796c)"))
+        # The earlier game-context entry, the campaign index row and the fixtures README row no
+        # longer call the deciding factor unmeasured, and each names the new launch.
+        earlier = self._entry("- **PSP-3000 single-case run of `hle-std-handles` in the game context "
+                              "(2026-11-12 UTC)**")
+        self.assertIn("The 2026-11-17 XMB run above does: the launch context decides the close's answer.",
+                      " ".join(earlier.split()))
+        index = {cells[0]: cells for cells in self._table_rows(self.doc) if len(cells) == 4}
+        readme = {cells[0]: cells for cells in self._table_rows(self.readme) if len(cells) == 3}
+        for text in (index["hle-std-handles"][2] + " " + index["hle-std-handles"][3],
+                     readme["hle-std-handles"][2]):
+            for term in ("2026-11-17 utc", "boot 222", "the launch context decides",
+                         "not the ark-5 version", "the game context under ark-5 5.1.0 is not measured"):
+                self.assertIn(term, text.lower())
+            self.assertNotIn(unmeasured, text)
+        self.assertNotIn(unmeasured, self.doc)
 
     def test_the_audio_src_and_timer_comparisons_are_recorded_and_pinned(self) -> None:
         for name in ("test_audio_src_matches_the_measured_contract",

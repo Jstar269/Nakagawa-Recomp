@@ -241,12 +241,12 @@ bool package_builder_find_python_in_root(const char *data_root,
 
 /* Maximum ordered tools/nk_cli.py candidates from
  * package_builder_cli_candidate_paths(). */
-#define PACKAGE_BUILDER_CLI_MAX_CANDIDATES 6
+#define PACKAGE_BUILDER_CLI_MAX_CANDIDATES 4
 
 /* Pure: fill out[0..return-1] with the ordered tools/nk_cli.py candidate paths.
  * override_root is the NK_INSTALL_ROOT value (NULL/empty when unset) and wins;
- * install_root is the executable's folder (NULL/empty when unknown); the working
- * directory and its parent are appended as relative paths. */
+ * install_root is the executable's folder (NULL/empty when unknown). The working
+ * directory is never searched: a planted tools/nk_cli.py there would run. */
 int package_builder_cli_candidate_paths(
     const char *install_root,
     const char *override_root,
@@ -254,8 +254,8 @@ int package_builder_cli_candidate_paths(
     int max_out
 );
 
-/* Locate tools/nk_cli.py: NK_INSTALL_ROOT, beside/above the executable, the
- * v0.0.1 release layout (<exe>/../source/tools), then the working directory. */
+/* Locate tools/nk_cli.py: NK_INSTALL_ROOT, beside/above the executable, then the
+ * v0.0.1 release layout (<exe>/../source/tools). */
 bool package_builder_find_cli(const char *install_root, char *out_path, size_t out_size);
 
 /* Pure: guidance text for the CLI_NOT_FOUND card, naming every location the
@@ -392,7 +392,8 @@ typedef struct {
 /* Windows-only install of the pinned embedded CPython ("cpython-embed-amd64") into
  * <data_root>/prerequisites/python on a worker thread: it downloads and verifies the
  * archive, expands it into python.pending, then moves it into place. start returns
- * false on bad arguments, on other platforms, or when the thread cannot start.
+ * false on bad arguments, on other platforms, while the session's previous worker is
+ * still running (a finished one is joined first), or when the thread cannot start.
  * poll reports progress and, once `finished`, the outcome with its error code and
  * message; it returns false only for a NULL session or an unsupported platform.
  * cancel asks the worker to stop; close waits for it and releases its handle. */

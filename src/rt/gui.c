@@ -27,6 +27,7 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 #include "recomp.h"
+#include "../core/nk_display_size.h"
 #include "../core/nk_shared_helpers.h"
 #include "gpu_sdl3vk/sdl3vk.h"
 #include "fbcap.h"
@@ -35,6 +36,7 @@
 #include "osk_overlay.h"        /* the in-window keyboard: keys in, the frame drawn over */
 #include "osk_overlay_paint.h"
 #include "ace.h"             /* Ace Mode: crisp keyboard; refused by the acceptance checkpoint */
+#include "cheats.h"          /* the user's cheats: read at start, their marker drawn (#2639) */
 #include "ge_shared.h"       /* the software renderer's twin rows (#2050) and the VRAM viewer's
                                 decoders (#314) */
 #ifdef SR_SDL3VK
@@ -48,7 +50,7 @@
 #include "nk_ui_theme.h"         /* the pause overlay's scrim token */
 #include "overlay/overlay_host.h" /* the pause overlay's pages (C9c) */
 #include "gpu_sdl3vk/ace_ui.h"   /* Ace Mode's in-game UI: notice, readout, crisp keyboard */
-#include "nk_platform.h"         /* the system's Reduce motion, for the Ace UI */
+#include "nk_platform.h"         /* the system's Reduce motion, and SR_UI_ROOT in UTF-8 */
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_render.h>
 #endif
@@ -67,8 +69,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#define PSP_W 480
-#define PSP_H 272
+#define PSP_W NK_PSP_DISPLAY_WIDTH
+#define PSP_H NK_PSP_DISPLAY_HEIGHT
 #define PSP_SCANOUT_RATE_NUMERATOR 60000ull
 #define PSP_SCANOUT_RATE_DENOMINATOR 1001ull
 #define PSP_SCANOUT_PERIOD_NS \
@@ -388,6 +390,8 @@ static void *gui_ace_show_pass(void *cmd, void *src, int *w, int *h) {
     s_ace_present_kind = ACE_PRESENT_REAL;
     s_ace_show_pending = ACE_SHOW_REAL;
     gui_ace_collect_motion();
+    /* What the pass changes is kept until its present ends: undone if it is never submitted. */
+    ace_smooth_begin(s_ace_smooth);
     if (!src) {
         VkImage held = ace_smooth_held(s_ace_smooth, vk_cmd);
         if (!held) return NULL;
@@ -440,10 +444,17 @@ static void *gui_ace_show_pass(void *cmd, void *src, int *w, int *h) {
  * the owed frame and holds the new one again (ace.h, ace_pace_owed_failed). Failed before its
  * submission, the pass's commands never ran, so the frame is given up and counted. The new frame of a
  * failed in-between is not held, so the CPU present shows it as itself and no VBLANK shows it
- * again, and an in-between nobody saw is not measured. */
+ * again, and an in-between nobody saw is not measured. Whatever the pass showed, when its commands
+ * were never submitted the pass's own state goes back to what it was before it (ace_smooth_discard):
+ * its private frames still hold what they held, in the layouts they were in. The frame it took is
+ * then not the pass's (ace_smooth_untake), so the next one is not paired with it. */
 static void gui_ace_show_done(int result, uint64_t submission) {
     const AceShow shown = s_ace_show_pending;
     s_ace_show_pending = ACE_SHOW_REAL;
+    if (!submission) {
+        ace_smooth_discard(s_ace_smooth);
+        ace_smooth_untake();
+    }
     if (shown == ACE_SHOW_OWED) {
         if (result == 1) {
             ace_smooth_shown_owed(SDL_GetTicksNS());
@@ -850,10 +861,11 @@ static void gui_release_presenter(void);
 
 #if defined(SR_SDL3VK) && !defined(SR_GUI_PRESENT_SELFTEST)
 /* ---- Ace Mode's in-game UI (ace.h, gpu_sdl3vk/ace_ui.h) ---------------------------------------
- * Made once at start in an Ace run that shows any of it, or for the render notice (#2151) when
- * one is due; an authentic run with nothing to say never makes it and never registers the
- * presenter's UI pass. Without SDL3_ttf, the UI fonts or the Vulkan backend the three features
- * are off for the run, said once, and the keyboard keeps today's path. */
+ * Made once at start in an Ace run that shows any of it, for the render notice (#2151) when
+ * one is due, or for the cheats marker (#2639) in a run that applies cheats; an authentic run
+ * with nothing to say never makes it and never registers the presenter's UI pass. Without
+ * SDL3_ttf, the UI fonts or the Vulkan backend the three features are off for the run, said
+ * once, and the keyboard keeps today's path; cheats are then refused (gui_cheats_marker_init). */
 #define ACE_NOTICE_NS 3000000000ull              /* the launch notice stays 3 s */
 #define HOST_TOAST_NS 3000000000ull              /* a local host message stays 3 s */
 static NkOverlayFonts *s_ace_fonts;
@@ -939,6 +951,8 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
      * not in the presenter's box in the readout's corner. */
     if (p->logic_slowed)
         f.logic_notice = sdl3vk_logic_notice_text(logic, sizeof(logic), p->logic_rate);
+    /* The cheats marker (cheats.h), in any mode, for as long as the run applies cheats. */
+    f.cheats_marker = sr_cheats_marker();
     if (s_ace_ui_ready && ace->notice && s_ace_first_frame_ns &&
         now - s_ace_first_frame_ns < ACE_NOTICE_NS) {
         double left = (double)(ACE_NOTICE_NS - (now - s_ace_first_frame_ns)) / 1e9;
@@ -987,7 +1001,13 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     t.image_count = p->image_count;
     t.image_index = p->image_index;
     t.swapchain_gen = p->swapchain_gen;
-    return ace_ui_record(s_ace_ui, &t, &f);
+    {
+        const int drawn = ace_ui_record(s_ace_ui, &t, &f);
+        /* A present that asked for the cheats marker and did not get it drawn (the pass, its
+         * targets or its vertex data could not be made): the cheats stop (cheats.h). */
+        if (f.cheats_marker) sr_cheats_marker_drawn(drawn);
+        return drawn;
+    }
 }
 
 static void gui_ace_ui_off(const char *why) {
@@ -998,16 +1018,24 @@ static void gui_ace_ui_off(const char *why) {
     if (ace_effective()->notice) ace_feature_unavailable(ACE_FEATURE_NOTICE, reason);
 }
 
+/* The launcher's SR_UI_ROOT (the player's folder) in UTF-8, or NULL when it is unset or does not
+ * fit: the narrow getenv gives ANSI code-page bytes on Win32, which miss a non-ASCII folder. */
+static const char *gui_ui_root(char *out, size_t cap) {
+    return nk_platform_env_utf8("SR_UI_ROOT", out, cap) == 1 ? out : NULL;
+}
+
 /* The UI's fonts and renderer, and its pass registered with the presenter: 1, or 0 with the
  * reason. Shared by an Ace run's UI and the render notice (#2151); it confirms no Ace feature. */
 static int gui_ui_create(char *error, size_t error_size) {
     Sdl3VkInfo vi;
+    char ui_root[1024];
     memset(&vi, 0, sizeof(vi));
     if (!sdl3vk_get_vk(&vi) || !vi.get_instance_proc_addr) {
         snprintf(error, error_size, "no Vulkan device");
         return 0;
     }
-    s_ace_fonts = nk_overlay_fonts_create(getenv("SR_UI_ROOT"), error, error_size);
+    s_ace_fonts = nk_overlay_fonts_create(gui_ui_root(ui_root, sizeof(ui_root)), error,
+                                          error_size);
     if (s_ace_fonts) {
         AceUiInit init;
         memset(&init, 0, sizeof(init));
@@ -1054,6 +1082,15 @@ static void gui_ace_ui_init(void) {
     ace_confirm(ACE_FEATURE_TEXT);
     ace_confirm(ACE_FEATURE_READOUT);
     ace_confirm(ACE_FEATURE_NOTICE);
+}
+
+/* The cheats marker (cheats.h, #2639) is drawn by the same UI pass, in an authentic run too. The
+ * UI is made here, at start, unless an Ace run made it. A window that cannot make it cannot show
+ * the marker, and the run then refuses its cheats by name. */
+static void gui_cheats_marker_init(void) {
+    char error[256] = "";
+    if (!sr_cheats_marker() || s_ui_ready) return;
+    if (!gui_ui_create(error, sizeof(error))) sr_cheats_marker_unavailable(error);
 }
 
 /* ---- Ace Mode's smooth motion (ace.h, gpu_sdl3vk/ace_smooth.h) ----------------------------------
@@ -1117,9 +1154,7 @@ static void gui_cull_sync(void) {
     /* Confirmed only while no matrix was left alone; a full table is a partial run (contract 11.3.6). */
     ace_set_cull_untracked(ge_wide_cull_untracked());
     if (ge_wide_cull_untracked())
-        ace_feature_unavailable(ACE_FEATURE_CULL,
-                                "partial: more than 4096 widened matrices were in guest memory at once, "
-                                "later matrices were left alone");
+        ace_feature_unavailable(ACE_FEATURE_CULL, ACE_CULL_PARTIAL_REASON);
     else if (ge_wide_cull_calls())
         ace_confirm(ACE_FEATURE_CULL);   /* the title's hook has run */
 }
@@ -1431,6 +1466,9 @@ static void gui_texdump_at_start(void);   /* the texture dump, started with the 
 
 void gui_init(const char *title) {
     (void)title;
+    /* The user's cheats (cheats.h, #2639) are read before the window is made, which shows their
+     * marker or, where it cannot, refuses them. SR_CHEATS off: nothing is read. */
+    sr_cheats_init();
 #if defined(SR_SDL3VK) || defined(_WIN32)
     static int cleanup_registered;
     if (!cleanup_registered && atexit(gui_shutdown) == 0) cleanup_registered = 1;
@@ -1525,6 +1563,7 @@ void gui_init(const char *title) {
 #ifndef SR_GUI_PRESENT_SELFTEST
                 gui_ace_ui_init();
                 gui_host_toast_init();
+                gui_cheats_marker_init();
                 gui_ace_smooth_init();
                 gui_wide_init();   /* after smooth motion, which it steps aside for */
                 gui_upscale_init();
@@ -1570,7 +1609,9 @@ void gui_init(const char *title) {
     wc.hInstance = GetModuleHandleA(0);
     wc.lpszClassName = "psp_recomp";
     wc.hCursor = LoadCursor(0, IDC_ARROW);
-    RegisterClassA(&wc);
+    /* A class left by an earlier gui_init is still the one this window needs. */
+    DWORD class_error = RegisterClassA(&wc) ? 0u : GetLastError();
+    if (class_error == ERROR_CLASS_ALREADY_EXISTS) class_error = 0u;
     RECT r = {0, 0, PSP_W * 2, PSP_H * 2};
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
     /* Centred on the monitor that holds the launcher window, as the SDL presenter does
@@ -1603,10 +1644,29 @@ void gui_init(const char *title) {
     s_hwnd = CreateWindowA("psp_recomp", title ? title : SR_APP_TITLE,
         WS_OVERLAPPEDWINDOW | WS_VISIBLE, win_x, win_y,
         r.right - r.left, r.bottom - r.top, 0, 0, GetModuleHandleA(0), 0);
+    if (!s_hwnd) {
+        /* No window, so none is claimed: the refusal is reported and s_on stays 0, as on a
+         * host without GDI. The guest keeps running and framebuffer capture keeps working. */
+        DWORD window_error = GetLastError();
+        if (class_error)
+            fprintf(stderr, "gui_init: the GDI window class could not be registered (Win32 error "
+                            "%lu); running without a window (framebuffer capture still works)\n",
+                    (unsigned long)class_error);
+        else
+            fprintf(stderr, "gui_init: the GDI window could not be created (Win32 error %lu); "
+                            "running without a window (framebuffer capture still works)\n",
+                    (unsigned long)window_error);
+        s_on = 0;
+#ifdef SR_SDL3VK
+        gui_texdump_at_start();   /* nor without a window: an asked-for dump is refused and said */
+#endif
+        sr_gui_boot_event("BOOT_EVENT phase=window_unavailable backend=gdi");
+        return;
+    }
     s_px = (uint32_t *)malloc(PSP_W * PSP_H * 4);
     if (!s_px) {
         fprintf(stderr, "gui_init: frame copy allocation failed\n");
-        if (s_hwnd) DestroyWindow(s_hwnd);
+        DestroyWindow(s_hwnd);
         s_hwnd = NULL;
         sr_gui_boot_event("BOOT_EVENT phase=window_unavailable backend=gdi");
         return;
@@ -1619,12 +1679,14 @@ void gui_init(const char *title) {
     s_bmi.bmiHeader.biCompression = BI_RGB;
     s_last_ns = SDL_GetTicksNS();
     s_on = 1;
-    if (s_headless_accept_requested && s_hwnd) s_headless_accept_ready = 1;
+    if (s_headless_accept_requested) s_headless_accept_ready = 1;
     sr_gui_request_launcher_foreground(
-        s_hwnd && IsWindowVisible(s_hwnd), s_hwnd,
+        IsWindowVisible(s_hwnd), s_hwnd,
         sr_gui_raise_gdi_window, "gdi");
     /* Here when SR_VIDEO=gdi asked for this window, or when Vulkan did not start. */
     gui_report_render_path(vulkan_asked, false, gpu_ge_asked, false);
+    /* This window has no in-game UI pass, so it cannot show the cheats marker (cheats.h). */
+    sr_cheats_marker_unavailable("the GDI window has no in-game UI");
 #ifdef SR_SDL3VK
     gui_texdump_at_start();   /* no Vulkan GE in the GDI window: an asked-for dump is refused and said */
 #endif
@@ -1883,19 +1945,26 @@ static int gdi_blit(void) {
 }
 #endif
 
+#endif /* !SR_GUI_PRESENT_SELFTEST */
+
 /* CPU-backed presenters consume guest memory, so cross the same lazy GE read
  * barrier as the scalar accessors before converting a complete framebuffer. The
- * direct Vulkan present path bypasses this helper and keeps its target resident. */
+ * direct Vulkan present path bypasses this helper and keeps its target resident.
+ * The span is every byte convert_fb_pixels reads: PSP_W pixels on each of PSP_H rows,
+ * stride pixels apart. sceDisplaySetFrameBuf takes any stride that is a multiple of 64,
+ * so under PSP_W the rows overlap and the last one ends past stride * PSP_H; the span is
+ * then (PSP_H - 1) * stride + PSP_W pixels. */
 static int display_cpu_source_current(uint32_t fbaddr, int fmt, uint32_t stride) {
     if (fmt < 0 || fmt > 3 || stride == 0u) return 0;
-    uint32_t row_bytes, total_bytes;
+    uint32_t row_bytes, total_bytes, last_row_start, read_bytes;
     uint32_t bytes_per_pixel = fmt == 3 ? 4u : 2u;
     if (!sr_size_mul_ok(stride, bytes_per_pixel, &row_bytes) ||
-        !sr_size_mul_ok(row_bytes, PSP_H, &total_bytes)) return 0;
+        !sr_size_mul_ok(row_bytes, PSP_H, &total_bytes) ||
+        !sr_size_mul_ok(row_bytes, PSP_H - 1u, &last_row_start) ||
+        !sr_size_add_ok(last_row_start, PSP_W * bytes_per_pixel, &read_bytes)) return 0;
+    if (read_bytes > total_bytes) total_bytes = read_bytes;
     return sr_guest_span_readable_current(fbaddr, total_bytes);
 }
-
-#endif /* !SR_GUI_PRESENT_SELFTEST */
 
 #ifdef SR_GUI_INPUT_PATH
 /* The VBLANK after an in-between: its held frame goes to the screen. Nothing of the guest runs
@@ -1954,7 +2023,9 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
         }
         convert_fb(fbaddr, fmt, stride);
         s_offscreen_frames++;
-        if (getenv("SR_PRESENT_TRACE")) {
+        static int s_present_trace = -1;   /* SR_PRESENT_TRACE, read once */
+        if (s_present_trace < 0) s_present_trace = getenv("SR_PRESENT_TRACE") != NULL;
+        if (s_present_trace) {
             sr_gui_boot_event("BOOT_EVENT phase=frame_present backend=offscreen frame=%llu",
                     (unsigned long long)s_offscreen_frames);
         }
@@ -2270,6 +2341,9 @@ _Static_assert((int)GE_VRAM_VIEW_DISPLAY == (int)NK_OVERLAY_VRAM_DISPLAY &&
                "the GE's VRAM view sources are the overlay page's, index for index");
 _Static_assert(GE_VRAM_CAPTURE_MAX == NK_OVERLAY_VRAM_CAPTURES,
                "the overlay's Capture row lists every capture ge.c records");
+_Static_assert(NK_OVERLAY_VRAM_MAX_SIDE == GE_VRAM_VIEW_MAX_WIDTH &&
+                   NK_OVERLAY_VRAM_MAX_SIDE == GE_VRAM_VIEW_MAX_HEIGHT,
+               "the overlay clamps a window to the largest one ge.c decodes");
 static void gui_pause_copy_vram_sources(const GeVramSources *sources,
                                         NkOverlayVramSurface *out, bool *present,
                                         bool *swizzled) {
@@ -2555,11 +2629,14 @@ static int gui_pause_compose(int w, int h, int rgba) {
                 model.profile = &s_pause_profile;
             }
         }
-        if (!nk_overlay_host_draw(s_pause_host, s_pause_ren, display_scale, pixels_per_point,
-                                  &model, &action))
-            return 0;
-        SDL_RenderPresent(s_pause_ren);
+        /* The host consumed this frame's events to make its choice, whether or not the frame
+         * could then be drawn (overlay_host.h), so the choice is carried out either way: a
+         * Resume or Quit chosen on a failed frame is never lost. */
+        bool drawn = nk_overlay_host_draw(s_pause_host, s_pause_ren, display_scale,
+                                          pixels_per_point, &model, &action);
+        if (drawn) SDL_RenderPresent(s_pause_ren);
         gui_pause_act(action);
+        if (!drawn) return 0;
     }
     return 1;
 }
@@ -2649,8 +2726,10 @@ void gui_pause_enter(void) {
      * folder. Without them the pause shows the frozen frame alone, and says why once. */
     if (!s_pause_host && !s_pause_host_tried) {
         char error[256];
+        char ui_root[1024];
         s_pause_host_tried = 1;
-        s_pause_host = nk_overlay_host_create(getenv("SR_UI_ROOT"), error, sizeof(error));
+        s_pause_host = nk_overlay_host_create(gui_ui_root(ui_root, sizeof(ui_root)), error,
+                                              sizeof(error));
         if (!s_pause_host)
             fprintf(stderr, "SR_PAUSE: the overlay pages are unavailable (%s); the pause shows the "
                             "frozen frame only\n", error);
@@ -2701,7 +2780,8 @@ SrPauseFrame gui_pause_frame(void) {
                         w, h, SDL_GetError());
             }
             s_pause_dirty = 1;
-            return SR_PAUSE_FRAME_CONTINUE;
+            /* A Resume chosen on the frame that failed is still carried out. */
+            return s_pause_resume ? SR_PAUSE_FRAME_RESUME : SR_PAUSE_FRAME_CONTINUE;
         }
         if (s_pause_resume) return SR_PAUSE_FRAME_RESUME;
         px = s_pause_surface->pixels;
@@ -2752,6 +2832,11 @@ static void gui_release_presenter(void) {
         if (s_pause_open) sdl3vk_set_input_claim(NULL, NULL);
         s_pause_open = 0;
         gui_pause_free_canvas();
+        /* The pages' fonts, layout core and prompt images go before SDL does; a later
+         * gui_init loads them again on its first pause. */
+        nk_overlay_host_destroy(s_pause_host);
+        s_pause_host = NULL;
+        s_pause_host_tried = 0;
         s_pause_vram.image = NULL;
         free(s_pause_vram_px);
         s_pause_vram_px = NULL;
@@ -3168,9 +3253,13 @@ typedef struct {
     int fails;                  /* how many */
     uint64_t submitted;         /* present submissions made */
     unsigned keeps;             /* pictures the recording was told to keep (sr_videorec_frame_keep) */
+    int gaps;                   /* in-betweens made of two frames that are not consecutive */
 } BusyRun;
 
 static BusyRun *s_busy;
+/* The first present made in this VBLANK fails before its submission (a capture buffer that cannot
+ * be made): the show pass ran, but its commands never reach the GPU. */
+static uint32_t s_busy_unsubmitted_vcount = BUSY_NO_FAIL;
 
 static struct {
     int have_new, have_old;     /* the frames the pass keeps, by number */
@@ -3200,6 +3289,30 @@ void ace_smooth_unrecord(AceBetween *s) {
     s_stub_smooth.have_old = 0;
 }
 
+/* The pass's frames as they were at the show pass's start, as ace_smooth.c keeps them. */
+static struct { int valid, have_new, have_old, newest, older; uint64_t serial; } s_stub_undo;
+static unsigned s_stub_discards;
+void ace_smooth_begin(AceBetween *s) {
+    (void)s;
+    s_stub_undo.valid = 1;
+    s_stub_undo.have_new = s_stub_smooth.have_new;
+    s_stub_undo.have_old = s_stub_smooth.have_old;
+    s_stub_undo.newest = s_stub_smooth.newest;
+    s_stub_undo.older = s_stub_smooth.older;
+    s_stub_undo.serial = s_stub_smooth.serial;
+}
+void ace_smooth_discard(AceBetween *s) {
+    (void)s;
+    if (!s_stub_undo.valid) return;
+    s_stub_undo.valid = 0;
+    s_stub_discards++;
+    s_stub_smooth.have_new = s_stub_undo.have_new;
+    s_stub_smooth.have_old = s_stub_undo.have_old;
+    s_stub_smooth.newest = s_stub_undo.newest;
+    s_stub_smooth.older = s_stub_undo.older;
+    s_stub_smooth.serial = s_stub_undo.serial;
+}
+
 /* A failed present is an out-of-date swapchain, unless a run makes the renderer terminal. */
 static int s_stub_terminal;
 int sdl3vk_renderer_terminal(void) { return s_stub_terminal; }
@@ -3219,6 +3332,7 @@ VkImage ace_smooth_record_aux(AceBetween *s, VkCommandBuffer cmd, VkImage src, i
     s_stub_smooth.newest = (int)(uintptr_t)src - BUSY_IMG_FRAME;
     s_stub_smooth.have_new = 1;
     if (!between || !had) return VK_NULL_HANDLE;
+    if (s_busy && s_stub_smooth.newest != s_stub_smooth.older + 1) s_busy->gaps++;
     s_stub_smooth.serial++;
     s_stub_smooth.submission[s_stub_smooth.serial % ACE_SMOOTH_MOTION_RING] = 0;   /* not submitted yet */
     return busy_image(BUSY_IMG_BETWEEN, s_stub_smooth.newest);
@@ -3277,6 +3391,9 @@ static int busy_present(VkImage src) {
     uint64_t submission = 0;
     if (!shown) {
         result = -1;                    /* nothing to show: nothing is submitted */
+    } else if (r->vcount == s_busy_unsubmitted_vcount) {
+        s_busy_unsubmitted_vcount = BUSY_NO_FAIL;
+        result = -1;                    /* failed after the show pass, before the submission */
     } else {
         submission = ++r->submitted;
         if (s_stub_smooth.serial != made)
@@ -3492,6 +3609,21 @@ static void selftest_busy_display_keeps_real_frames(void) {
      * guessed. */
     busy_run(&r, 0, busy_never, BUSY_NO_FAIL, 0, 5u);
     busy_check_motion(&r, 1u);
+
+    /* An in-between's present fails before its submission (frame 150's flip): the pass's commands
+     * never ran, so what it recorded is undone (ace_smooth_discard) and the pass still holds 149.
+     * The CPU present of the same flip shows 150 as itself, and 151 is not paired with 149, two
+     * frames back: it is shown as itself, counted unpaired, and in-betweens resume with 152. */
+    s_stub_discards = 0;
+    s_busy_unsubmitted_vcount = 300u;
+    busy_run(&r, 0, busy_never, BUSY_NO_FAIL, 0, 0u);
+    assert(s_busy_unsubmitted_vcount == BUSY_NO_FAIL);
+    assert(s_stub_discards == 1u && r.gaps == 0);
+    assert(!r.between[150] && r.real[150] == 1 && !r.between[151] && r.real[151] == 1);
+    assert(r.between[152] == 1 && busy_most(r.real) == 1);
+    assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES && r.order_ok);
+    busy_check_motion(&r, 0u);
+    busy_check_report("\"superseded\": 0, \"unpaired\": 1, \"busy\": 0}");
     g_ace_on = 0;
 }
 
@@ -3851,6 +3983,38 @@ static void selftest_gdi_notice(const char *argv0) {
 }
 #endif
 
+/* ---- the CPU presenters' framebuffer span (display_cpu_source_current) ------------------
+ * convert_fb_pixels reads PSP_W pixels from each of PSP_H rows, stride pixels apart. The span
+ * the presenters validate must hold all of them, also for a stride under PSP_W, which
+ * sceDisplaySetFrameBuf accepts (any multiple of 64): there the rows overlap and the last one
+ * ends (PSP_H - 1) * stride + PSP_W pixels in, past stride * PSP_H. No GE read is pending, so
+ * the lazy read barrier is never asked for. */
+volatile int g_sr_vram_read_pending = 0;
+void sr_ge_vram_read_prepare(uint32_t physical_addr, uint32_t width) {
+    (void)physical_addr;
+    (void)width;
+    abort();
+}
+
+static void selftest_cpu_source_span_covers_the_read(void) {
+    const uint32_t arena_end = 0x0c000000u;
+    /* stride 64, 8888: the read is (271 * 64 + 480) * 4 = 0x11680 bytes, more than 64 * 272 * 4. */
+    const uint32_t read64 = (271u * 64u + 480u) * 4u;
+    assert(read64 > 64u * 272u * 4u);
+    assert(display_cpu_source_current(arena_end - read64, 3, 64u));
+    assert(!display_cpu_source_current(arena_end - read64 + 4u, 3, 64u));
+    assert(!display_cpu_source_current(arena_end - 64u * 272u * 4u, 3, 64u));
+    /* The same for a 16-bit format at stride 256. */
+    const uint32_t read256 = (271u * 256u + 480u) * 2u;
+    assert(display_cpu_source_current(arena_end - read256, 0, 256u));
+    assert(!display_cpu_source_current(arena_end - 256u * 272u * 2u, 1, 256u));
+    /* At the usual stride the whole stride * PSP_H span is still required. */
+    assert(display_cpu_source_current(arena_end - 512u * 272u * 4u, 3, 512u));
+    assert(!display_cpu_source_current(arena_end - 512u * 272u * 4u + 4u, 3, 512u));
+    assert(!display_cpu_source_current(0x08000000u, 4, 512u));
+    assert(!display_cpu_source_current(0x08000000u, 3, 0u));
+}
+
 /* The unset SR_FPS_CAP default is the PSP scanout period, not a slower title-specific
  * rate: a guest may submit a framebuffer several times per scanout and every submission
  * past the next output slot is dropped rather than delaying the guest. */
@@ -3882,6 +4046,7 @@ int main(int argc, char **argv) {
     selftest_two_flips_per_scanout_present_once_per_scanout();
     selftest_burst_presents_once();
     selftest_explicit_cap_halves_scanout_flips();
+    selftest_cpu_source_span_covers_the_read();
     selftest_render_notice();
 #ifdef _WIN32
     assert(argc >= 1 && argv[0]);

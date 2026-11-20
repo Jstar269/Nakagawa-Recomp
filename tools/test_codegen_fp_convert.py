@@ -1024,5 +1024,46 @@ class GeneratedScalarFcr31Tests(unittest.TestCase):
         self.assertNotIn("isinf(_a)", emitted)        # no FP compare classifier
 
 
+def _gcc_targets_x86() -> bool:
+    if not CC:
+        return False
+    machine = subprocess.run([CC, "-dumpmachine"], capture_output=True, text=True).stdout
+    return machine.startswith(("x86_64", "i686", "i586", "i386"))
+
+
+@unittest.skipUnless(_gcc_targets_x86(), "an x86 gcc is required for the x87-math gate")
+class X87MathFailsClosedTests(unittest.TestCase):
+    """The MXCSR window controls only SSE arithmetic, so x87 float math must not build.
+
+    With -mfpmath=387 (the 32-bit GCC default) add/sub/mul/div run on the x87 unit under its own
+    control word and extended precision while the helpers set only MXCSR, so the guest RM and FS
+    would be ignored. Failing before: the header admitted any __SSE2__ or _M_X64 build (MinGW-w64's
+    headers define _M_X64 for GCC too), so this compiled and emitted an x87 fadd.
+    """
+
+    SOURCE = ('#include <stdint.h>\n#include <string.h>\n#include "fp_convert.h"\n'
+              "float f(float a, float b, uint32_t c) { return sr_fpu_add_s(a, b, c); }\n")
+
+    def _compile(self, *flags: str) -> subprocess.CompletedProcess:
+        if CC is None:  # the class's skipUnless already requires an x86 gcc
+            self.skipTest("an x86 gcc is required for the x87-math gate")
+        with scratch_dir.TemporaryDirectory(prefix="fp_x87_") as tmp:
+            src = Path(tmp) / "x87.c"
+            src.write_text(self.SOURCE, encoding="utf-8")
+            return subprocess.run(
+                [CC, *flags, "-O2", "-S", "-I", str(ROOT / "src" / "rt"), str(src),
+                 "-o", str(Path(tmp) / "x87.s")],
+                capture_output=True, text=True)
+
+    def test_sse_math_build_compiles(self):
+        result = self._compile()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_x87_math_build_fails_closed(self):
+        result = self._compile("-mfpmath=387")
+        self.assertNotEqual(result.returncode, 0, "an x87-math build compiled the MXCSR window")
+        self.assertIn("__SSE_MATH__", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -47,7 +47,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # The Windows embeddable Python runtime uses a fixed ``._pth`` search path and
 # may omit the directory containing this script. Keep sibling tool imports
@@ -55,6 +55,9 @@ from typing import Any
 _TOOLS_DIRECTORY = str(Path(__file__).resolve().parent)
 if _TOOLS_DIRECTORY not in sys.path:
     sys.path.insert(0, _TOOLS_DIRECTORY)
+
+if TYPE_CHECKING:
+    from .nk_core.package_cache import PackageCacheKey
 
 import title_manifest
 
@@ -155,7 +158,8 @@ def available_physical_memory() -> int | None:
     Windows reports it through ``GlobalMemoryStatusEx``; Linux through ``MemAvailable``
     (which counts reclaimable cache); other POSIX systems through free pages.
     """
-    if os.name == "nt":
+    # sys.platform, not os.name: type checkers narrow on it, so ctypes.windll needs no cast.
+    if sys.platform == "win32":
         status = _MemoryStatusEx()
         status.dwLength = ctypes.sizeof(_MemoryStatusEx)
         try:
@@ -415,20 +419,18 @@ def _make_build_command(
     return command
 
 
-_COMPILE_OBJECT_RE = re.compile(r"(?:^|\s)-c\s(?:.*\s)?-o\s+\"?([^\s\"]+\.o)\"?(?:\s|$)")
-
-
 def planned_compile_objects(dry_run_output: str, cwd: Path) -> list[Path]:
     """Return the objects a ``make -n`` listing compiles, in order and without repeats."""
+    from nk_core import package_cache
+
     objects: list[Path] = []
     seen: set[Path] = set()
-    for line in dry_run_output.splitlines():
-        match = _COMPILE_OBJECT_RE.search(line)
-        if match is None:
+    logical = re.sub(r"\\\r?\n", " ", dry_run_output)
+    for line in logical.splitlines():
+        command = package_cache.parse_compile_command(line)
+        if command is None:
             continue
-        path = Path(match.group(1))
-        if not path.is_absolute():
-            path = cwd / path
+        path = _object_path(command.output, cwd)
         if path not in seen:
             seen.add(path)
             objects.append(path)
@@ -602,7 +604,10 @@ class CompiledObjectReuse:
         return match.group(1) if match else Path(command.source).name
 
     def _key(self, command: Any) -> str | None:
-        from nk_core import package_cache
+        if TYPE_CHECKING:
+            from .nk_core import package_cache
+        else:
+            from nk_core import package_cache
 
         identity = self._identities.get(command.argv[0])
         if identity is None:
@@ -952,11 +957,7 @@ def build_plan(
         raise TitleCodegenPlanError(
             "unknown optional module(s): " + ", ".join(unknown_optional)
         )
-    guest_modules = [
-        module for module in manifest["modules"]
-        if module["role"] == "guest-prx"
-        or (module["role"] == "optional-guest-prx" and module["name"] in requested_optional)
-    ]
+    guest_modules = _selected_guest_modules(manifest, requested_optional)
     if guest_modules:
         module_dir = _required_path(module_dir, "module_dir")
         if "@" in _path_text(module_dir, "module_dir"):
@@ -1079,12 +1080,7 @@ def build_manager_plan(
     )
     executable = normalized["executable"]
     requested_optional = include_optional_modules or set()
-    selected_guest = [
-        module
-        for module in normalized["modules"]
-        if module["role"] == "guest-prx"
-        or (module["role"] == "optional-guest-prx" and module["name"] in requested_optional)
-    ]
+    selected_guest = _selected_guest_modules(normalized, requested_optional)
     required_guest = [module for module in selected_guest if module["required"]]
     optional_guest = [module for module in selected_guest if not module["required"]]
     build_dir_text = _path_text(build_dir, "build_dir")
@@ -1212,7 +1208,8 @@ def _make_safe_directory(path: Path, label: str) -> Path:
 
 
 def _windows_short_path(path: Path) -> Path | None:
-    if os.name != "nt":
+    # sys.platform, not os.name: type checkers narrow on it, so ctypes.windll needs no cast.
+    if sys.platform != "win32":
         return None
     try:
         import ctypes
@@ -1321,14 +1318,18 @@ def _stage_for_make(path: Path, stage_dir: Path, label: str) -> Path:
         return path
     _require_file(path, label)
     name = re.sub(r"[^A-Za-z0-9._-]", "_", path.name) or "input"
+    prefix = re.sub(r"[^A-Za-z0-9._-]", "_", label).strip("._-") or "input"
     stage_dir.mkdir(parents=True, exist_ok=True)
-    staged = stage_dir / name
+    staged = stage_dir / f"{prefix}_{name}"
     shutil.copyfile(path, staged)
     return staged
 
 
 def _package_game_name(manifest: dict[str, Any], requested: str | None) -> str:
-    candidate = requested or manifest.get("game_name") or manifest["id"].lower()
+    candidate = requested or manifest.get("game_name")
+    if not candidate:
+        title_id = manifest["id"].lower()
+        candidate = re.sub(r"-v\d+$", "", title_id) or title_id
     if not GAME_NAME_RE.fullmatch(candidate):
         raise PackageRouteError(
             "PACKAGE_INVALID_GAME_NAME",
@@ -1588,21 +1589,21 @@ def _read_unit_fallbacks(opt_makefile: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     levels: dict[str, str] = {}
     for line in text.splitlines():
-        row = _UNIT_FALLBACK_ROW.fullmatch(line)
-        level = _UNIT_FALLBACK_LEVEL.fullmatch(line)
-        if row:
-            rows.append({"unit": row.group(1), "body": row.group(2), "bytes": int(row.group(3))})
-        elif level:
-            if level.group(1) in levels:
-                raise refuse(f"{level.group(1)} has two levels")
-            levels[level.group(1)] = level.group(2)
+        row_match = _UNIT_FALLBACK_ROW.fullmatch(line)
+        level_match = _UNIT_FALLBACK_LEVEL.fullmatch(line)
+        if row_match:
+            rows.append({"unit": row_match.group(1), "body": row_match.group(2), "bytes": int(row_match.group(3))})
+        elif level_match:
+            if level_match.group(1) in levels:
+                raise refuse(f"{level_match.group(1)} has two levels")
+            levels[level_match.group(1)] = level_match.group(2)
         elif not line.startswith("# "):
             raise refuse(f"unexpected line {line[:80]!r}")
     units = [row["unit"] for row in rows]
     if len(set(units)) != len(units) or set(units) != set(levels):
         raise refuse("every unit row needs exactly one level line, and every level a row")
-    for row in rows:
-        row["level"] = levels[row["unit"]]
+    for unit_row in rows:
+        unit_row["level"] = levels[unit_row["unit"]]
     return rows
 
 
@@ -1966,7 +1967,7 @@ def _copy_verified_aot_stage(
 
 def _accept_aot_stage(
     stage_dir: Path,
-    cache_key: dict[str, Any],
+    cache_key: PackageCacheKey,
     destination: Path,
     game_name: str,
 ):
@@ -2003,7 +2004,7 @@ def _record_aot_stage(
     build_workspace: Path,
     output_dir: Path,
     game_name: str,
-    cache_key: dict[str, Any],
+    cache_key: PackageCacheKey,
     title_input_identity: dict[str, Any],
 ) -> dict[str, Any]:
     """Record a finished generation phase as a reusable generated-code stage.
@@ -2056,9 +2057,12 @@ def _cache_key_for_build(
     compiler_name: str,
     enhancement_package_path: Path | None = None,
     code_hook_package_path: Path | None = None,
-) -> dict[str, Any]:
+) -> tuple[PackageCacheKey, dict[str, Any], dict[str, str]]:
     # Imported lazily: planning (--manager-plan) must not depend on the package cache.
-    from nk_core import package_cache
+    if TYPE_CHECKING:
+        from .nk_core import package_cache
+    else:
+        from nk_core import package_cache
 
     options = _cache_codegen_options(
         plan,
@@ -2067,15 +2071,18 @@ def _cache_key_for_build(
         enhancement_package_path=enhancement_package_path,
         code_hook_package_path=code_hook_package_path,
     )
-    options["planner_sha256"] = package_cache.sha256_file(
-        ROOT / "tools" / "title_codegen_plan.py"
-    )
-    return package_cache.build_cache_key(
+    tool_digests = {
+        "planner": package_cache.sha256_file(ROOT / "tools" / "title_codegen_plan.py"),
+        "analyzer": package_cache.analyzer_sources_sha256(ROOT / "tools"),
+        "codegen": package_cache.sha256_file(ROOT / "tools" / "codegen.py"),
+    }
+    options["planner_sha256"] = tool_digests["planner"]
+    key = package_cache.build_cache_key(
         input_hashes=input_hashes,
         title_input_identity=title_input_identity,
         codegen_options=options,
-        analyzer_sha256=package_cache.analyzer_sources_sha256(ROOT / "tools"),
-        codegen_sha256=package_cache.sha256_file(ROOT / "tools" / "codegen.py"),
+        analyzer_sha256=tool_digests["analyzer"],
+        codegen_sha256=tool_digests["codegen"],
         compiler=package_cache.compiler_identity(compiler_name, repository_root=ROOT),
         target=package_cache.compiler_target(repository_root=ROOT),
         runtime_source_digest=package_cache.source_tree_digest(ROOT),
@@ -2088,6 +2095,7 @@ def _cache_key_for_build(
         ),
         link_flags=os.environ.get("LDFLAGS", ""),
     )
+    return key, options, tool_digests
 
 
 def _build_report_text(report: dict[str, Any]) -> str:
@@ -2470,7 +2478,7 @@ def build_package(
         make_display_name, make_identity = _version_identity(make_executable, "Make")
         cc_display_name, cc_identity = _version_identity(cc_executable, "C compiler")
         try:
-            cache_key = _cache_key_for_build(
+            cache_key, cache_options, tool_digests = _cache_key_for_build(
                 input_hashes=input_hashes,
                 title_input_identity=title_input_identity,
                 plan=plan,
@@ -2517,7 +2525,8 @@ def build_package(
             if arg.startswith("--extra-elf=")
         ]
         link_map = build_workspace / f"{selected_name}.map"
-        build_environment = os.environ.copy()
+        import nk_powershell
+        build_environment = nk_powershell.powershell_env(os.environ)
         # The optimization the cache key above names is what Make compiles with.
         build_environment.update(
             package_cache.package_optimization(build_environment)
@@ -2568,10 +2577,10 @@ def build_package(
         library_cache = _object_cache_from_environment(
             build_environment, package_cache.SHARED_LIBRARY_CACHE_DIR_ENV
         )
-        for target in _make_build_targets(native_only=pregenerated, aot_stage=aot_stage):
+        for make_target in _make_build_targets(native_only=pregenerated, aot_stage=aot_stage):
             jobs = build_jobs
             job_plan = jobs_plan
-            if target == "compile":
+            if make_target == "compile":
                 # Make executes the per-unit levels: refuse content codegen did not write. A
                 # missing file runs nothing, and is refused with the other missing outputs.
                 opt_makefile = build_workspace / f"{selected_name}_recomp_opt.mk"
@@ -2585,9 +2594,9 @@ def build_package(
                 if jobs != build_jobs or job_plan.memory_short:
                     print(f"PACKAGE_BUILD_JOBS: {jobs} for compile, largest unit {largest} bytes "
                           f"({job_plan.reason}; limit: {job_plan.limit})", flush=True)
-            command = _make_build_command(make_executable, target, jobs=jobs)
+            command = _make_build_command(make_executable, make_target, jobs=jobs)
             try:
-                if target == "compile" and (progress_file is not None or object_cache is not None):
+                if make_target == "compile" and (progress_file is not None or object_cache is not None):
                     returncode = _run_compile_phase(
                         make_executable,
                         env=build_environment,
@@ -2669,9 +2678,9 @@ def build_package(
         runtime_header_hash = _sha256_file(ROOT / "src" / "rt" / "recomp.h")
         tools = {
             "python": platform.python_version(),
-            "planner": {"sha256": _sha256_file(Path(__file__).resolve())},
-            "analyzer": {"sha256": package_cache.analyzer_sources_sha256(ROOT / "tools")},
-            "codegen": {"sha256": _sha256_file(ROOT / "tools" / "codegen.py")},
+            "planner": {"sha256": tool_digests["planner"]},
+            "analyzer": {"sha256": tool_digests["analyzer"]},
+            "codegen": {"sha256": tool_digests["codegen"]},
             "make": {"command": make_display_name, "identity": make_identity},
             "compiler": {"command": cc_display_name, "identity": cc_identity},
         }
@@ -2699,16 +2708,6 @@ def build_package(
             "unsupported_region_count": len(unsupported_regions),
             "static": _read_static_coverage(build_workspace / f"{selected_name}_recomp_coverage.json"),
         }
-        cache_options = _cache_codegen_options(
-            plan,
-            selected_optional=selected_optional,
-            funcs_per_chunk=funcs_per_chunk,
-            enhancement_package_path=enhancement_package_path,
-            code_hook_package_path=code_hook_package_path,
-        )
-        cache_options["planner_sha256"] = package_cache.sha256_file(
-            ROOT / "tools" / "title_codegen_plan.py"
-        )
         cache = package_cache.cache_metadata(cache_key, cache_options)
         backends_mode = "public"
         backend_limits = [

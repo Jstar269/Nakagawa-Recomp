@@ -39,7 +39,6 @@ import struct
 import sys
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import cast
 
 MAGIC = b"PGF0"
 HEADER_SIZE = 392
@@ -590,9 +589,21 @@ def build_pgf(
     return image
 
 
+def _json_int(key: str, value: object) -> int:
+    """Return a JSON glyph field unchanged when it is an integer, else refuse it by name.
+
+    ``int()`` would turn ``true`` into 1, truncate ``3.9`` to 3 and parse ``"65"``,
+    so a malformed glyph set would silently become a font with altered metrics.
+    bool is an int subclass and is refused explicitly.
+    """
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise _refuse("unsupported-input", f"glyph field {key} must be an integer, not {value!r}")
+    return value
+
+
 def _optional_int(entry: dict[str, object], key: str) -> int | None:
     value = entry.get(key)
-    return None if value is None else int(cast("int | str", value))
+    return None if value is None else _json_int(key, value)
 
 
 def _glyph_from_dict(entry: object) -> Glyph:
@@ -602,26 +613,29 @@ def _glyph_from_dict(entry: object) -> Glyph:
     unknown = sorted(set(entry) - set(field.name for field in fields(Glyph)))
     if unknown:
         raise _refuse("unsupported-input", f"unknown glyph fields: {', '.join(unknown)}")
-    try:
-        return Glyph(
-            code=int(entry["code"]),  # type: ignore[arg-type]
-            width=int(entry["width"]),  # type: ignore[arg-type]
-            height=int(entry["height"]),  # type: ignore[arg-type]
-            samples=tuple(int(sample) for sample in entry["samples"]),  # type: ignore[arg-type]
-            row_order=int(entry.get("row_order", 1)),  # type: ignore[arg-type]
-            adjust_x=int(entry.get("adjust_x", 0)),  # type: ignore[arg-type]
-            adjust_y=int(entry.get("adjust_y", 0)),  # type: ignore[arg-type]
-            advance_x=_optional_int(entry, "advance_x"),
-            advance_y=_optional_int(entry, "advance_y"),
-            dimension_width=_optional_int(entry, "dimension_width"),
-            dimension_height=_optional_int(entry, "dimension_height"),
-            x_left=_optional_int(entry, "x_left"),
-            x_center=_optional_int(entry, "x_center"),
-            y_base=_optional_int(entry, "y_base"),
-            y_top=_optional_int(entry, "y_top"),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise _refuse("unsupported-input", f"glyph entry is malformed: {exc}") from exc
+    missing = sorted(key for key in ("code", "width", "height", "samples") if key not in entry)
+    if missing:
+        raise _refuse("unsupported-input", f"glyph entry is missing: {', '.join(missing)}")
+    samples = entry["samples"]
+    if not isinstance(samples, list):
+        raise _refuse("unsupported-input", "glyph field samples must be a JSON array")
+    return Glyph(
+        code=_json_int("code", entry["code"]),
+        width=_json_int("width", entry["width"]),
+        height=_json_int("height", entry["height"]),
+        samples=tuple(_json_int("samples", sample) for sample in samples),
+        row_order=_json_int("row_order", entry.get("row_order", 1)),
+        adjust_x=_json_int("adjust_x", entry.get("adjust_x", 0)),
+        adjust_y=_json_int("adjust_y", entry.get("adjust_y", 0)),
+        advance_x=_optional_int(entry, "advance_x"),
+        advance_y=_optional_int(entry, "advance_y"),
+        dimension_width=_optional_int(entry, "dimension_width"),
+        dimension_height=_optional_int(entry, "dimension_height"),
+        x_left=_optional_int(entry, "x_left"),
+        x_center=_optional_int(entry, "x_center"),
+        y_base=_optional_int(entry, "y_base"),
+        y_top=_optional_int(entry, "y_top"),
+    )
 
 
 def _font_option(document: dict[str, object], key: str, default: str) -> str:

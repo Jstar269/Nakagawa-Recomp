@@ -59,6 +59,20 @@ int nk_rename_noreplace_utf8(const char *from, const char *to);
 char nk_platform_path_separator(void);
 /* The separator between entries of a PATH-style list: ';' on Windows, ':' elsewhere. */
 char nk_platform_path_list_separator(void);
+/* Whether the host compares file names without regard to case: true on Windows
+   (NTFS folds case), false on POSIX hosts, whose realpath() names are compared
+   byte for byte. */
+bool nk_platform_paths_fold_case(void);
+/* Orders two UTF-8 file names the way the host's file system matches them, so 0 means
+   the host opens both as one file. Win32: the UTF-16 names compared ordinally with case
+   ignored through the system's upper-case table (CompareStringOrdinal), so two names
+   that differ only in case, or that are different UTF-8 for one UTF-16 text, order
+   equal; POSIX: the bytes (strcmp). Returns <0, 0 or >0, one consistent order fit for
+   sorting. On Win32 a name that is not valid UTF-8 or has NK_PLATFORM_FILE_NAME_UNITS
+   UTF-16 units or more is ordered by its bytes after every name that converts; a name
+   shorter than NK_PLATFORM_FILE_NAME_UNITS UTF-8 bytes always converts when valid. */
+#define NK_PLATFORM_FILE_NAME_UNITS 4096u
+int nk_platform_compare_file_names(const char *a, const char *b);
 bool nk_platform_file_exists(const char *path);
 bool nk_platform_dir_exists(const char *path);
 /* True only when the OS says the name does not exist: ENOENT or ENOTDIR on POSIX, and
@@ -357,6 +371,27 @@ bool nk_platform_real_path(const char *path, char *out_path, size_t max_len);
  * open. NULL on refusal or failure. */
 FILE *nk_platform_open_regular_file(const char *path);
 
+/* Open the file at `path` for reading in binary mode and, while the stream stays
+ * open, keep other programs from changing it where the platform can. Windows:
+ * the handle shares reads only, so no other open may write to, replace, rename
+ * or delete the file until it is closed, on a local volume or a server that
+ * enforces share modes. When another program already has the file open for
+ * writing (a seeding or syncing program), that open is refused by the system;
+ * the file is then opened shared, as an ordinary read, and *opened_shared is set
+ * so the caller can say so. POSIX has no such share mode: the stream is an
+ * ordinary read and a writer is not stopped (*opened_shared stays false). Either
+ * way a caller that needs the bytes to stay put still checks them. NULL only
+ * when the file cannot be opened for reading at all. opened_shared may be NULL. */
+FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared);
+
+/* What a writer cannot put back about the file at `path`: its change time (POSIX
+ * st_ctim in nanoseconds; Windows the NTFS ChangeTime) and its identity (POSIX
+ * st_dev and st_ino; Windows the volume serial number and file index). A field
+ * the file system does not report, or a call that fails, leaves 0; the caller
+ * treats 0 as "not known", never as a difference. Never blocks another open. */
+void nk_platform_file_change_identity(const char *path, uint64_t *changed, uint64_t *volume,
+                                      uint64_t *file_id);
+
 /* Whether `path` is longer than the file APIs this process uses accept, so a
  * create or open of it fails for its length alone. On Win32 that is MAX_PATH
  * (260 with the terminator; 248 for a new directory) unless the process has
@@ -378,8 +413,10 @@ typedef struct {
     bool has_cached_exit;
     int cached_exit_code;
     /* Why the last nk_platform_spawn_process into this handle failed, as the
-       OS said it: GetLastError() after CreateProcessW on Win32, errno on POSIX.
-       0 when the spawn succeeded or failed before the OS was asked. */
+       OS said it: GetLastError() after CreateProcessW on Win32, errno on POSIX,
+       where a failed exec (EACCES, ENOENT, ENOEXEC) or child set-up fails the
+       spawn with its own errno. 0 when the spawn succeeded or failed before the
+       OS was asked. */
     int spawn_error;
     /* Set by nk_platform_spawn_tool on Android, where a tool program is an ordinary forked
        child and a title is another app process: the process calls below take this handle
@@ -532,6 +569,11 @@ typedef enum {
 } NkHostKind;
 
 NkHostKind nk_platform_host_kind(void);
+
+/* Linux Steam integration: discover the common per-user Steam root and conservatively check
+   `$HOME/.steam/steam.pid`. These POSIX-backend helpers return false on non-Linux hosts. */
+bool nk_platform_linux_steam_find_root(char *root, size_t root_cap);
+bool nk_platform_linux_steam_client_running(void);
 
 /* Path text comparison as the host's file system compares names: Win32 folds ASCII case
    and treats '/' and '\\' as one separator; POSIX compares bytes. Used to find a folder's

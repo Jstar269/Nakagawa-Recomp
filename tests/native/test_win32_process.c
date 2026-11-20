@@ -2,6 +2,11 @@
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
 #include "nk_platform.h"
+/* Every spawn, wait and environment probe runs inside assert: a release-flag build
+ * must not compile them away and report a pass for checks that never ran. */
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +72,34 @@ int main(int argc, char *argv[]) {
     assert(strstr(stdio_output, "PROCESS_STDOUT_MARKER") != NULL);
     assert(strstr(stdio_output, "PROCESS_STDERR_MARKER") != NULL);
     remove(stdio_log_path);
+
+    /* The log is append-only, as O_APPEND is on POSIX: the launcher passes the
+       boot-event file, which the runtime also appends to with fopen("ab"), so a
+       child write must land at the end, never at the handle's own offset 0 over
+       lines already there. Before FILE_APPEND_DATA alone, the child's first
+       line overwrote the line below. */
+    {
+        FILE *seed = fopen(stdio_log_path, "wb");
+        assert(seed != NULL);
+        fputs("EARLIER_EVENT_LINE_KEPT_WHOLE_ACROSS_THE_CHILD_WRITES\n", seed);
+        fclose(seed);
+        NkProcessHandle appended_process;
+        assert(nk_platform_spawn_process(helper_exe, console_probe_argv, NULL, NULL,
+                                         stdio_log_path, &appended_process));
+        assert(nk_platform_wait_process(&appended_process, 5000) == 0);
+        nk_platform_close_process(&appended_process);
+        FILE *appended_log = fopen(stdio_log_path, "rb");
+        assert(appended_log != NULL);
+        size_t appended_size = fread(stdio_output, 1, sizeof(stdio_output) - 1, appended_log);
+        fclose(appended_log);
+        stdio_output[appended_size] = '\0';
+        assert(strncmp(stdio_output, "EARLIER_EVENT_LINE_KEPT_WHOLE_ACROSS_THE_CHILD_WRITES\n",
+                       strlen("EARLIER_EVENT_LINE_KEPT_WHOLE_ACROSS_THE_CHILD_WRITES\n")) == 0);
+        assert(strstr(stdio_output, "PROCESS_STDOUT_MARKER") != NULL);
+        assert(strstr(stdio_output, "PROCESS_STDERR_MARKER") != NULL);
+        remove(stdio_log_path);
+    }
+    printf("[PROCESS_TEST] Child output appends after lines already in the log.\n");
 
     const char *out_file = SR_SELFTEST_BUILD_ROOT "\\argv_echo_out.txt";
     /* Sized for an absolute BUILD_ROOT: the scratch path is far longer than the default. */
@@ -222,6 +255,79 @@ int main(int argc, char *argv[]) {
     }
     printf("[PROCESS_TEST] A 20000-character environment entry reached the child intact.\n");
 
+    /* A command line that does not fit is refused, never cut: before, the
+       argument was truncated (or lost its closing quote) and the child still
+       started with a different argv. Both the plain and the quoted form. */
+    {
+        enum { HUGE_ARG_LEN = 40000 };
+        char *huge_arg = (char *)malloc(HUGE_ARG_LEN + 1);
+        assert(huge_arg != NULL);
+        for (int i = 0; i < HUGE_ARG_LEN; i++) huge_arg[i] = (char)('a' + (i % 26));
+        huge_arg[HUGE_ARG_LEN] = '\0';
+        const char *huge_argv[] = {helper_exe, out_arg, huge_arg, NULL};
+        NkProcessHandle huge_proc;
+        assert(!nk_platform_spawn_process(helper_exe, huge_argv, NULL, NULL, NULL, &huge_proc));
+        assert(!huge_proc.is_active);
+        assert(huge_proc.spawn_error == ERROR_FILENAME_EXCED_RANGE);
+        huge_arg[100] = ' ';
+        assert(!nk_platform_spawn_process(helper_exe, huge_argv, NULL, NULL, NULL, &huge_proc));
+        assert(!huge_proc.is_active);
+        assert(huge_proc.spawn_error == ERROR_FILENAME_EXCED_RANGE);
+        free(huge_arg);
+
+        /* Three bytes of UTF-8 are one UTF-16 unit, so a cut command line of 32767
+           bytes was short enough for CreateProcessW and the child started with the
+           argument cut; a cut inside a character failed with no error code. The
+           ASCII pad moves the cut across each byte of a character. */
+        enum { CJK_CHARS = 12000 };
+        char *cjk_arg = (char *)malloc(3 + CJK_CHARS * 3 + 1);
+        assert(cjk_arg != NULL);
+        for (int pad = 0; pad < 3; pad++) {
+            size_t at = 0;
+            for (int i = 0; i < pad; i++) cjk_arg[at++] = 'x';
+            for (int i = 0; i < CJK_CHARS; i++) {
+                memcpy(cjk_arg + at, "\xE6\x97\xA5", 3);
+                at += 3;
+            }
+            cjk_arg[at] = '\0';
+            const char *cjk_argv[] = {helper_exe, out_arg, cjk_arg, NULL};
+            bool started = nk_platform_spawn_process(helper_exe, cjk_argv, NULL, NULL, NULL,
+                                                     &huge_proc);
+            if (started) {
+                (void)nk_platform_wait_process(&huge_proc, 5000);
+                nk_platform_close_process(&huge_proc);
+            }
+            assert(!started);
+            assert(huge_proc.spawn_error == ERROR_FILENAME_EXCED_RANGE);
+        }
+        free(cjk_arg);
+    }
+    printf("[PROCESS_TEST] A command line over the limit is refused, not truncated.\n");
+
+    /* USERPROFILE and USERNAME come from the wide environment as UTF-8, like
+       every other path the platform layer returns: the narrow getenv gives
+       code-page bytes ('?' for these characters), which the redaction of the
+       profile path and user name and the personal-folder checks never match. */
+    {
+        static WCHAR saved_profile[32768];
+        static WCHAR saved_user[32768];
+        DWORD profile_len = GetEnvironmentVariableW(L"USERPROFILE", saved_profile, 32768);
+        DWORD user_len = GetEnvironmentVariableW(L"USERNAME", saved_user, 32768);
+        assert(_wputenv_s(L"USERPROFILE", L"D:\\Profiles\\" L"Jos\x00E9_\x65E5\x672C") == 0);
+        assert(_wputenv_s(L"USERNAME", L"Jos\x00E9_\x65E5\x672C") == 0);
+        const char *home = nk_platform_env_home_dir();
+        const char *user = nk_platform_env_user_name();
+        assert(home != NULL && strcmp(home, "D:\\Profiles\\" "Jos\xC3\xA9_\xE6\x97\xA5\xE6\x9C\xAC") == 0);
+        assert(user != NULL && strcmp(user, "Jos\xC3\xA9_\xE6\x97\xA5\xE6\x9C\xAC") == 0);
+        assert(_wputenv_s(L"USERPROFILE",
+                          profile_len > 0 && profile_len < 32768 ? saved_profile : L"") == 0);
+        assert(_wputenv_s(L"USERNAME",
+                          user_len > 0 && user_len < 32768 ? saved_user : L"") == 0);
+        home = nk_platform_env_home_dir();
+        assert((profile_len > 0) == (home != NULL));
+    }
+    printf("[PROCESS_TEST] Profile folder and user name read as UTF-8.\n");
+
     /* A refused start keeps the code CreateProcessW gave, which is the only
      * thing a Windows Security block reaches the player as. A folder is refused
      * with ERROR_ACCESS_DENIED, the code an attack surface reduction rule gives;
@@ -268,6 +374,12 @@ int main(int argc, char *argv[]) {
     assert(_wputenv_s(L"LOCALAPPDATA", wbase) == 0);
     char expected[4096];
     assert(WideCharToMultiByte(CP_UTF8, 0, wbase, -1, expected, sizeof(expected), NULL, NULL) > 0);
+    /* A tree an earlier run left would satisfy the dir_exists check below without
+     * this run creating it: remove it first, and again once the check is done. */
+    char profile_root[4096];
+    snprintf(profile_root, sizeof(profile_root), "%s", expected);
+    assert(nk_platform_remove_tree(profile_root, NULL));
+    assert(!nk_platform_dir_exists(profile_root));
     const char *sep = "\\";
     size_t exp_len = strlen(expected);
     snprintf(expected + exp_len, sizeof(expected) - exp_len, "%sNakagawa%scache", sep, sep);
@@ -280,6 +392,8 @@ int main(int argc, char *argv[]) {
     assert(nk_platform_dir_exists(got));
     assert(_wputenv_s(L"LOCALAPPDATA",
                       saved_len > 0 && saved_len < 32768 ? saved_lad : L"") == 0);
+    assert(nk_platform_remove_tree(profile_root, NULL));
+    assert(!nk_platform_dir_exists(profile_root));
     printf("[PROCESS_TEST] Non-code-page profile directory resolved as UTF-8.\n");
 
     /* Process tree termination:

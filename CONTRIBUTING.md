@@ -459,5 +459,18 @@ evidence. In every substantive pull request:
 A partial PR does not close an issue merely because CI is green. Record which acceptance criteria
 remain unresolved in the issue/PR discussion.
 
+### After your pull request lands
+
+The maintainer lands a pull request by rebase-merge, sometimes as one commit of a batch. Either way `main` receives
+new commits with your change's content and new commit IDs, so your own commits never appear in `main`'s history.
+GitHub then still shows your branch as ahead of `main` and offers to open a pull request from it, although every
+file already matches. Do not open one: it would only repeat what landed.
+
+- A pull request that landed alone shows as **Merged**. One that landed in a batch shows as **Closed**, with a
+  comment naming the commit on `main` that carries it.
+- To check that your change is in, look for its commit on `main`, whose subject ends with the pull request's
+  number: `git fetch origin`, then `git log origin/main --oneline --grep "(#123)"` with your number.
+- Delete the branch, and start your next change from freshly fetched `origin/main`.
+
 Follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) in all project spaces, including Discussions. Report
 security problems privately through [SECURITY.md](SECURITY.md), never in a public issue or discussion.

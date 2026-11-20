@@ -46,8 +46,8 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **711** (dedicated **627**, fake_success **4**, controlled_unsupported **80**).
-Semantic handler census: **601** handlers across **30** API families, covering **634** handler-associated NID registrations.
+Registered NIDs: **711** (dedicated **628**, fake_success **3**, controlled_unsupported **80**).
+Semantic handler census: **603** handlers across **30** API families, covering **635** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
@@ -55,14 +55,14 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 | `partial` | 348 | 360 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 235 | 243 |
+| `unreviewed` | 237 | 244 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `newlib` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `other` | 1 | 1 | 0 | 0 | 0 | 2 | 2 |
-| `sceAtrac` | 0 | 0 | 0 | 0 | 33 | 33 | 34 |
-| `sceAudio` | 0 | 11 | 0 | 0 | 5 | 16 | 18 |
+| `sceAtrac` | 0 | 0 | 0 | 0 | 34 | 34 | 35 |
+| `sceAudio` | 0 | 11 | 0 | 0 | 6 | 17 | 18 |
 | `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceCtrl` | 0 | 12 | 0 | 0 | 0 | 12 | 12 |
 | `sceDisplay` | 1 | 14 | 0 | 0 | 1 | 16 | 16 |
@@ -89,7 +89,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **348** | **1** | **3** | **235** | **601** | **634** |
+| **Total** | **14** | **348** | **1** | **3** | **237** | **603** | **635** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -163,7 +163,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_imports_20261102_measured_contracts
   - Evidence: PSPAutotests tests/threads/callbacks/exit.expected (1a9e6c31, recorded on a PSP, compiled SDK 3.95): checkpoints under LoadExecForUser_362A956B
 - **`h_AudioChRelease`** (`sceAudio`): `sceAudioChRelease` (0x6fc46853)
-  - Limitation: the cells release channel 0 after the two valid blocking-output calls and query it after release; unreserved, out-of-range, and other channel-state release results are unmeasured (#341)
+  - Limitation: the cells release channel 0 after the two valid blocking-output calls and query it after release; a release clears the channel's length, format and volumes; the out-of-range (0x80260003) and not-reserved (0x80260008) refusals follow PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp sceAudioChRelease and are unmeasured, as are other channel-state release results (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
   - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-release, audio-ch-query-released
@@ -173,7 +173,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cell: audio-ch-reserve
 - **`h_AudioOutput2Blocking`** (`sceAudio`): `sceAudioOutput2OutputBlocking` (0x2d53f36e)
-  - Limitation: audio-out2-output-blocking measures one valid silent 1024-sample block at volume 0x8000 and makes no acoustic claim; volumes above 0xFFFFF are refused with 0x8026000b following PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp, unmeasured; not-reserved, buffer-error and audio_output error-propagation behavior are not covered (the handler discards audio_output's return) (#341)
+  - Limitation: audio-out2-output-blocking measures one valid silent 1024-sample block at volume 0x8000 and makes no acoustic claim; volumes above 0xFFFFF are refused with 0x8026000b following PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp, unmeasured; an unreadable buffer returns audio_output's 0x80000103 to the guest, a host contract that is unmeasured; the not-reserved code is not covered (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
   - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cell: audio-out2-output-blocking
@@ -194,7 +194,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-out2-query-before, audio-out2-query-after
 - **`h_AudioOutputBlocking`** (`sceAudio`): `sceAudioOutputBlocking` (0x136caf51)
-  - Limitation: the cells exercise two maximum-volume outputs with a valid silent stereo buffer and record timing and rest-length values, not audible output; mono, other volumes, invalid buffers/channels, and error precedence are unmeasured (#341)
+  - Limitation: the cells exercise two maximum-volume outputs with a valid silent stereo buffer and record timing and rest-length values, not audible output; mono, other volumes, invalid buffers, and error precedence are unmeasured; a channel of 8 or more (0x80260003) and an unreserved channel (0x80260001) are refused following PPSSPP caa91b54b535, corroborated by PSPAutotests output.expected for channel -1 and unreserved channel 5 (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
   - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-output-blocking-0, audio-ch-output-blocking-1
@@ -552,12 +552,14 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
   - Evidence: tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall
 - **`h_AllocMemoryBlock`** (`sceKernel`): `sceKernelAllocMemoryBlock` (0xfe707fdf)
-  - Limitation: types 0 (Low, the partition's bump and free-list path) and 1 (High, from the top of the arena thread stacks share, 0x100 granularity) allocate, and the type, size, option-size and NULL-name codes are pspautotests-recorded; the code for an unmapped name or option pointer is uOFW's 0x800200D3, not measured; memory-block UIDs are separate from partition-block UIDs here, while the PSP shares them (memblock.expected Partition usage)
+  - Limitation: types 0 (Low, the partition's bump and free-list path) and 1 (High, from the top of the arena thread stacks share, 0x100 granularity) allocate, and the type, size, option-size and NULL-name codes are pspautotests-recorded; in a partition based below the runtime stacks a High block lies above the bump region, so the free sizes, which measure that region, do not count it (#2640); the code for an unmapped name or option pointer is uOFW's 0x800200D3, not measured; memory-block UIDs are separate from partition-block UIDs here, while the PSP shares them (memblock.expected Partition usage)
   - Evidence: tests/native/hle_thread_selftest.c:test_kernel_import_sweep_memory_blocks_and_sdk_alias
   - Evidence: PSPAutotests tests/sysmem/memblock.expected (2ed7c9c5, recorded on a PSP): names, types, sizes, option sizes and type-1 placement deltas
   - Evidence: uOFW src/kd/sysmem/memblock.c (MIT): validation order and the AllocPartitionMemory call
+  - Evidence: tests/native/hle_thread_selftest.c:test_memory_block_high_in_low_based_partition
+  - Evidence: PSPAutotests tests/sysmem/memblock.expected lines 9 and 25 to 33 (774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP): type 1 allocates, and a second type-1 block lies its size rounded up to 0x100 below the first
 - **`h_AllocPartitionMemory`** (`sceKernel`): `sceKernelAllocPartitionMemory` (0x237dbd4f)
-  - Limitation: partition and type refusals, the volatile-partition cells and the unplaceable-Addr code match the recorded cells; where a PSP places a partition-6 block is unmeasured, partitions 2 and 6 accept a NULL name that the PSP refuses (existing callers rely on it), a zero size allocates 16 bytes rather than being checked against the recorded size cells, and blocks are placed from a bump heap rather than the kernel's allocator (#341)
+  - Limitation: partition and type refusals, the volatile-partition cells and the unplaceable-Addr code match the recorded cells; where a PSP places a partition-6 block is unmeasured, partitions 2 and 6 accept a NULL name that the PSP refuses (existing callers rely on it), and blocks are placed from a bump heap rather than the kernel's allocator (#341)
   - Evidence: PSPAutotests tests/sysmem/partition.expected at 2ed7c9c5 (partitions 1, 3 and 4 0x800200D6, other numbers 0x800200D2, type past 4 0x800200D8)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: vmem-alloc-free and vmem-alloc-held, a partition-5 Low block at 0x08400000 and a partition-2 Addr block there 0x800200D9)
   - Evidence: tests/native/hle_thread_selftest.c:test_partition_unknown_block_codes
@@ -656,7 +658,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_evf_create_and_refer
   - Evidence: tests/native/hle_thread_selftest.c:test_sync_objects_past_the_old_table
 - **`h_CreateFpl`** (`sceKernel`): `sceKernelCreateFpl` (0xc07bb470)
-  - Limitation: valid pool creation, block size 0 and a pool the partition cannot hold are measured; a block count of 0 still becomes 1, a create with no free FPL slot keeps its pre-measurement code, and partition, attribute and option error precedence need separate evidence
+  - Limitation: valid pool creation, block size 0 and a pool the partition cannot hold are measured; a block count of 0 still becomes 1, and partition, attribute and option error precedence need separate evidence
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-001: fpl-create and valid pool status/allocation cells)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics: FPL blocks are blockSize apart)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-002: block size 0 is 0x800201B7, a 0x7FFFFFFF-byte block 0x80020190)
@@ -683,13 +685,17 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-NULLCODE-001: CreateThread with a NULL entry returned a UID)
   - Evidence: docs/research/PSP_THREADING_SEMANTICS.md (FIRMWARE_CREATE_THREAD_ARG5_T0: attribute arrives in $t0)
 - **`h_CreateTlspl`** (`sceKernel`): `sceKernelCreateTlspl` (0x8daff657)
-  - Limitation: the recorded arguments are reproduced; attribute 0x4000 (allocation from the top of the partition) is accepted but not exercised by a test, and partitions 5 and 11 and above and alignments above 0x10000 keep a refusal the cells do not record (#341)
+  - Limitation: the recorded arguments are reproduced; where an attribute 0x4000 pool lies is PSP-measured for one pool shape only (PSP-SAFE-SCALAR-001: partition 2, attribute exactly 0x4000, four 0x100-byte blocks, NULL options): the top of the partition; for every other attribute 0x4000 pool (another block size or count, an options block, another attribute bit beside 0x4000, partition 6) the top of the partition is PPSSPP-derived, not PSP-measured (hrydgard/ppsspp 65181eea1deb7361beb3be6062ea98e8427f2786, Core/HLE/sceKernelMemory.cpp sceKernelCreateTlspl; jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414 SceKernelTls agrees) and is logged once per run; the measured free-size words are not reproduced exactly: the free total carries a 0x100 tail per block slot, and in a partition based below the runtime stacks the free sizes do not count such a pool, which lies above the bump region they measure (#2640); partitions 5 and 11 and above and alignments above 0x10000 keep a refusal the cells do not record (#341)
   - Evidence: PSPAutotests tests/threads/tls/create.expected (a NULL name 0x80020190; partitions 2 and 6 accepted, 1, 3 and 4 0x800200D1, others 0x800200D2; a block size or count of 0 or -1 0x800201B7; power-of-two alignments; the 17th pool 0x800201D1)
   - Evidence: tests/native/hle_thread_selftest.c:test_wb_tlspl_vpl_cells
+  - Evidence: PSPAutotests tests/threads/tls/create.expected line 29 (774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP): attribute 0x4000 creates a pool that reports the attribute and takes 1024 bytes from the partition's free total, returned by the delete
+  - Evidence: tests/native/hle_thread_selftest.c:test_tlspl_highmem_pool
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: tls-create-normal, tls-place-normal, tls-addr-normal, tls-create-high, tls-place-high, tls-addr-high, tls-create-high-2, tls-addr-high-2: in partition 2 a pool of four 0x100-byte blocks with NULL options lies at the low end of the free memory without attribute 0x4000 and at the high end with it, a second such pool below the first)
+  - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_tls_20261117
 - **`h_CreateVTimer`** (`sceKernel`): `sceKernelCreateVTimer` (0x20fff560)
   - Limitation: the option struct is ignored, as on a PSP (pspautotests vtimers/create.expected at 2ed7c9c5, recorded on a PSP: every declared size creates the same timer), and an unreadable one stops the run by name; 64 creates in a row are measured (PSP-HLE-VTIMER-003), so the table holds 64, while the same PSP-recorded output shows 1024 creates succeed; a NULL name is accepted here, where that output shows 0x80020001; the no-slot code 0x80020190 is unmeasured; the microsecond unit is consistent with PSP-HLE-VTIMER-002, not a precise rate measurement (#325)
 - **`h_CreateVpl`** (`sceKernel`): `sceKernelCreateVpl` (0x56c039b5)
-  - Limitation: valid pool creation and measured accounting are covered; the handler maps size zero to VPL_EXHAUSTED and ignores the partition argument, but the cited valid-pool cells do not establish those edge results, allocation exhaustion, or option behavior
+  - Limitation: valid pool creation and measured accounting are covered; the handler maps size zero to VPL_EXHAUSTED and ignores the partition argument, but the cited valid-pool cells do not establish those edge results or option behavior; a pool the partition cannot hold returns NO_MEMORY as pspautotests threads/vpl/create.expected records
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-B1-01 and PSP-B2-01: valid VPL creation, accounting, allocation, and deletion)
 - **`h_DcacheRangeMaintenance`** (`sceKernel`): `sceKernelDcacheWritebackRange` (0x3ee30821), `sceKernelDcacheInvalidateRange` (0xbfa98062)
   - Limitation: guest RAM is one coherent array, so the post-maintenance words the cells check are met, but the pre-maintenance contrast words (an uncached read before writeback, a stale cached read before invalidate) are not reproduced; a title that reads stale data through the cached alias is outside this model
@@ -713,7 +719,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/threads/events/delete/delete.expected at 2ed7c9c5 (NULL, invalid and deleted ids 0x8002019A; a blocked waiter leaves with 0x800201B5)
   - Evidence: tests/native/hle_thread_selftest.c:test_evf_typed_uids_and_delete
 - **`h_DeleteFpl`** (`sceKernel`): `sceKernelDeleteFpl` (0xed1410e0)
-  - Limitation: valid deletion and the delete-wait outcome are covered; an invalid or already-deleted UID currently returns success in the handler, while the cited delete cells use a valid pool, and multi-waiter teardown ordering is not measured
+  - Limitation: valid deletion and the delete-wait outcome are covered; an invalid or already-deleted UID returns UNKNOWN_FPLID as pspautotests threads/fpl/delete.expected records, outside the cited cells, which use a valid pool, and multi-waiter teardown ordering is not measured
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-001: valid fpl-delete and refer-after-delete cells)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B2-01: deleting an FPL with a waiter)
 - **`h_DeleteLwMutex`** (`sceKernel`): `sceKernelDeleteLwMutex` (0x60107536)
@@ -789,9 +795,10 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 - **`h_GetMemoryBlockAddr`** (`sceKernel`): `sceKernelGetMemoryBlockAddr` (0xdb83a952)
   - Limitation: resolves UIDs created by the modeled Low allocation path; output-pointer and unknown-UID results are source-tested but not hardware measured
 - **`h_GetModuleIdList`** (`sceKernel`): `sceKernelGetModuleIdList` (0x644395e2)
-  - Limitation: lists only the main module and the modules the runtime loaded (a PSP also lists firmware modules), main first and then in load order, an order that is not measured; an unwritable count or buffer is not measured and stops the run by name
+  - Limitation: lists only the main module and the modules the runtime loaded (a PSP also lists firmware modules), main first and then in load order, an order that is not measured; the recorded 0x800200D3 covers a NULL pointer and one whose address, end or size has bit 31 set, of which the recording has 0x88000000; a count pointer or buffer that passes that check and is not guest memory has no recorded cell and stops the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_imports_20261102_measured_contracts
-  - Evidence: PSPAutotests tests/modules/idlist/idlist.expected (1a9e6c31, recorded on a PSP): byte size, whole entries, count is the total, the caller's module is listed
+  - Evidence: PSPAutotests tests/modules/idlist/idlist.expected (774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP): byte size, whole entries, count is the total, the caller's module is listed; 0x800200D3 for a NULL count and for a count pointer or a buffer in the kernel segment (lines 14 to 16)
+  - Evidence: uOFW src/kd/modulemgr/queryModule.c (f7b0623168842f02cddbdbf9437ac0c2380c51c8, MIT): both pointers pass the kernel's user-pointer check before anything is written
 - **`h_GetSystemTime`** (`sceKernel`): `sceKernelGetSystemTime` (0xdb738f35)
   - Limitation: writes the 64-bit modeled microsecond clock and returns 0; the illegal-address result is the runtime's own code (RTC_ILLEGAL_ADDR), not a PSP measurement, and the clock origin is not compared with hardware
 - **`h_GetSystemTimeLow`** (`sceKernel`): `sceKernelGetSystemTimeLow` (0x369ed59d)
@@ -812,9 +819,11 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/threads/threads/stackfree.expected (0xea0 free on an unused 0x1000 stack and after 1 KiB of 0xFF, 0xaa0 after 1 KiB of zeros, 0 without the stack-fill attribute; unknown ids 0x80020198)
   - Evidence: tests/native/hle_thread_selftest.c:test_thread_stack_free_size_contract
 - **`h_GetThreadmanIdList`** (`sceKernel`): `sceKernelGetThreadmanIdList` (0x94416130)
-  - Limitation: the recorded sizes and types are reproduced; the list order for objects created in another order than uid order is not measured (#341)
+  - Limitation: the recorded sizes and types are reproduced; the thread event handler class (type 9) answers only the measured call shape, a 16-slot buffer and a count pointer, with the measured empty list, whose precondition (no handler registered) holds for every guest because this runtime has no call that registers one; type 9 with any other buffer size, or a NULL or unmapped buffer or count pointer, is not measured and stops the run by name; the list order for objects created in another order than uid order is not measured (#341)
   - Evidence: PSPAutotests tests/threads/threads/threadmanidlist.expected (a negative size 0x800200D3 with the count unwritten; types 1 to 14 listed, 15 and above illegal)
   - Evidence: tests/native/hle_thread_selftest.c:test_threadman_id_list_cells
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: tmid-9-list and tmid-10-list, an empty list returns 0 with a count of 0 and no slot written)
+  - Evidence: tests/native/hle_thread_selftest.c:test_threadman_id_list
 - **`h_GetVTimerBase`** (`sceKernel`): `sceKernelGetVTimerBase` (0xb3a59970)
   - Limitation: returns the same base as ReferVTimerStatus, measured equal while running and 0 once stopped (PSP-HLE-VTIMER-002); the value, guest time at the most recent Start, is consistent with that run's system-clock reads, not measured exactly; NULL out-pointer returns ILLEGAL_ADDR as a runtime safety choice after PSP-3000 hung on ReferSystemStatus(NULL) (PSP-HLE-NULL-OUT-001), not as a measured VTimer result; deleted-UID code is unmeasured and reused by analogy; no game relies on the NULL output (#325)
 - **`h_GetVTimerTime`** (`sceKernel`): `sceKernelGetVTimerTime` (0x034a921f)
@@ -890,7 +899,8 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/threads/lwmutex/refer.expected (the sceKernelReferLwMutexStatusByID block: the same fields and sizes as by workarea)
   - Evidence: tests/native/hle_thread_selftest.c:test_td24d_hle_batch
 - **`h_ReferMbxStatus`** (`sceKernel`): `sceKernelReferMbxStatus` (0xa8e8c846)
-  - Limitation: size-field caller contract (whether Refer preserves or overwrites size) unmeasured (#339, #341)
+  - Limitation: the cited cells establish bytes written and size-word behavior at four buffer sizes; full field values, unknown UID codes, invalid pointers, and error precedence are not established by that size row (#339, #341)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-KERNEL-STATUS-001: mbx-size-zero, mbx-size-8, mbx-size-40, and mbx-size-full)
 - **`h_ReferMsgPipeStatus`** (`sceKernel`): `sceKernelReferMsgPipeStatus` (0x33be4024)
   - Limitation: reports name, attr, buffer size, free size and the active send and receive waiter counts for a known pipe, honours a short or zero size word and checks the whole span before writing; the unknown-UID and NULL-pointer codes and error precedence are source-selftested, not hardware measured (#1381)
   - Evidence: public ABI (PSPSDK pspthreadman.h: SceKernelMppInfo, 56 bytes)
@@ -927,7 +937,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/intr/releasesub.expected and enablesub.expected at f573fe8c (the code for every line and VBLANK sub-interrupt -2 to 69; NOTFOUND_HANDLER for a number never registered, released or NULL-registered; Release clears the enable state)
   - Evidence: tests/native/hle_thread_selftest.c:test_vblank_subintr_measured_codes
 - **`h_ReleaseWaitThread`** (`sceKernel`): `sceKernelReleaseWaitThread` (0x2c34e053)
-  - Limitation: the cited cell covers releasing one blocked target and the waiter's WAIT_RELEASE result; self/UID-zero targets, already-finished targets, and multiple-waiter ordering are not established
+  - Limitation: the cited cell covers releasing one blocked target and the waiter's WAIT_RELEASE result; self/UID-zero targets, already-finished targets, and multiple-waiter ordering are not established; a DelayThread wait is released with WAIT_RELEASE as PPSSPP does (PPSSPP-derived, not PSP-measured), and a ready, dormant or runtime-internally delayed target stops by name
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-B3-01: ReleaseWaitThread wakes a blocked target with WAIT_RELEASE)
 - **`h_ResumeDispatchThread`** (`sceKernel`): `sceKernelResumeDispatchThread` (0x27e22ec2)
   - Limitation: Resume with the token 1 is measured; other token values are not (#341)
@@ -1015,7 +1025,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/threads/threads/terminate.expected (sceKernelTerminateDeleteThread: created, ready, finished, suspended and waiting threads 0; 0 and the current thread 0x80020197; the id answers 0x80020198 afterwards)
   - Evidence: tests/native/hle_thread_selftest.c:test_issue339_terminate_waiting_thread
 - **`h_TerminateThread`** (`sceKernel`): `sceKernelTerminateThread` (0x616403ba)
-  - Limitation: the recorded thread states and the waiter's wake code are reproduced; terminating a thread that holds a mutex or is blocked inside an HLE I/O wait is not measured (#341)
+  - Limitation: the recorded thread states and the waiter's wake code are reproduced; terminating a thread that holds a mutex or is blocked inside an HLE I/O wait is not measured (#341); from an interrupt handler the call answers ILLEGAL_CONTEXT for a compiled SDK version of 3.08 or later (PPSSPP-derived, not PSP-measured) and stops by name for an earlier one
   - Evidence: PSPAutotests tests/threads/threads/terminate.expected (unknown and deleted ids 0x80020198; 0 and the current thread 0x80020197; created and finished threads 0x800201a2; ready, suspended and waiting threads 0; a thread waiting for the end wakes with 0x800201ac)
   - Evidence: tests/native/hle_thread_selftest.c:test_issue339_terminate_waiting_thread
 - **`h_TryAllocateFpl`** (`sceKernel`): `sceKernelTryAllocateFpl` (0x623ae665)
@@ -1050,7 +1060,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 - **`h_USec2SysClockWide`** (`sceKernel`): `sceKernelUSec2SysClockWide` (0xc8cd158c)
   - Limitation: returns the unsigned microsecond duration in $v0 with a zero $v1 high word under the runtime's microsecond SceKernelSysClock representation; hardware conversion is not measured
 - **`h_UnlockLwMutex`** (`sceKernel`): `sceKernelUnlockLwMutex` (0x15b6446b), `_sceKernelUnlockLwMutex` (0xbeed3a47)
-  - Limitation: owner release, direct hand-off to one waiter, and non-owner/underflow behavior are measured; invalid workareas, negative or excessive unlock counts, and several-waiter ordering are not measured
+  - Limitation: owner release, direct hand-off to one waiter, and non-owner/underflow behavior are measured; invalid workareas, negative or excessive unlock counts, and several-waiter ordering are not measured: waiters are served in arrival order, or by current priority under attr 0x100 (PPSSPP-derived, not PSP-measured)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01 and PSP-B2-01 LwMutex cells)
 - **`h_UnlockMutex`** (`sceKernel`): `sceKernelUnlockMutex` (0x6b30100f)
   - Limitation: the cited cases cover owner release in the priority-inheritance control and interrupt-context refusal; invalid UIDs, bad counts, and multi-waiter priority ordering are not established
@@ -1069,7 +1079,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-WAIT-001: event signal/cancel before deadline and late dispatch)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01: event flag poll/wait modes and outputs)
 - **`h_WaitSema`** (`sceKernel`): `sceKernelWaitSema` (0x4e3a1105)
-  - Limitation: the cited cells cover selected count, signal/cancel, and timeout outcomes; invalid timeout pointers, negative counts, general multi-waiter ordering, and all error-precedence cases are not established
+  - Limitation: the cited cells cover selected count, signal/cancel, and timeout outcomes; invalid timeout pointers, negative counts, general multi-waiter ordering, and all error-precedence cases are not established; the time left written back after a satisfied timed wait is PPSSPP-derived, not PSP-measured
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-WAIT-001: semaphore signal/cancel before deadline and late dispatch)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01: semaphore count and wait results)
 - **`h_WaitThreadEnd`** (`sceKernel`): `sceKernelWaitThreadEnd` (0x278c0df5)
@@ -1296,9 +1306,11 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 - **`h_RegSetKeyValue`** (`sceReg`): `sceRegSetKeyValue` (0x17768e14)
   - Limitation: writes an existing key through a mode-2 category handle (mode 1 is EACCES): INT exactly 4 bytes, a STR takes the size of its new value (string sizes follow their values, measured on PSP-3000 6.6.1, 2026-10-09, read-only enumeration), BIN up to its fixed size with the rest zero-filled; persists on a flush; write semantics and the errno-class codes are not hardware measured
 - **`h_RtcCheckValid`** (`sceRtc`): `sceRtcCheckValid` (0x4b1b5e82)
-  - Limitation: returns 0 or the first failing field as -1 year, -2 month, -3 day, -4 hour, -5 minute, -6 second, -7 microsecond (measured); a day of 0 or one from the month length to 31, and a NULL or unmapped pointer, are not measured and stop the run by name
+  - Limitation: returns 0 or the first failing field as -1 year, -2 month, -3 day, -4 hour, -5 minute, -6 second, -7 microsecond (measured); a day of 0 or past the month's length is -3, measured by PSP-SAFE-SCALAR-001 in January, February and April and applied to the other months from the same month table; a NULL or unmapped pointer is not measured and stops the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest
   - Evidence: PSPAutotests tests/rtc/lookup.expected (f573fe8c, recorded on a PSP): checkRtcCheckValid and checkMaxYear
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-valid-day-0, rtc-valid-feb-29-2023, rtc-valid-feb-29-1900, rtc-valid-feb-30-2024, rtc-valid-feb-31-2024, rtc-valid-apr-31-2024, rtc-valid-day-0-hour-24)
+  - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117
 - **`h_RtcConvertLocalToUtc`** (`sceRtc`): `sceRtcConvertLocalTimeToUTC` (0x779242a2)
   - Limitation: applies the time zone and daylight saving of the system profile, the registry keys sceUtilityGetSystemParamInt reports; the 60-minute daylight-saving shift is the setting's meaning, not measured, and the checked-overflow failure class is not autotest-verified (#1382, #341)
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_local_time_follows_the_system_profile
@@ -1310,17 +1322,21 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_local_time_follows_the_system_profile
   - Evidence: src/rt/hle.c:psp_profile_local_offset_minutes
 - **`h_RtcGetDayOfWeek`** (`sceRtc`): `sceRtcGetDayOfWeek` (0x57726bc1)
-  - Limitation: Sunday is 0; months 1..12 of years 1..9999 with the day carried linearly (the measured cells); a month of 0 or above 12 answers only the seven measured triples, and any other month, year or day outside those stops the run by name
+  - Limitation: Sunday is 0; months 1..12 of years 1..9999 with the day carried linearly up to 1000000 (the pspautotests cells); a month of 0 or above 12, a year outside 1..9999 and a day above 1000000 answer only the fifteen measured triples (seven pspautotests, eight PSP-SAFE-SCALAR-001), which fit no single calendar rule, and any other such month, year or day stops the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest
   - Evidence: PSPAutotests tests/rtc/lookup.expected (f573fe8c, recorded on a PSP): checkDayOfWeek
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-dow-month-0, rtc-dow-month-13, rtc-dow-month-13-again, rtc-dow-month-14, rtc-dow-month-24, rtc-dow-year-0, rtc-dow-year-10000, rtc-dow-day-1000001, rtc-dow-day-max)
+  - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117
 - **`h_RtcGetTime64_t`** (`sceRtc`): `sceRtcGetTime64_t` (0xe1c93e47)
   - Limitation: out-of-range fields normalise by calendar carry, whose exact seconds are this arithmetic rather than measured; year 0, month 0 and day 0 are refused with 0x800001fe and a refusal leaves the output unwritten, both unmeasured; a NULL or unreadable date and an unwritable non-NULL output take the HLE guest-fault stop
   - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_rtc_time64_20261024
   - Evidence: hardware measurement 2026-10-24, PSP-3000 6.61 (valid dates convert; year 1 and pre-1970 dates return 0x800001fe; month 13, day 32, Feb 30 and hour 24 return 0 and normalise; NULL output returns 0; NULL date faults inside the module)
 - **`h_RtcGetTime_t`** (`sceRtc`): `sceRtcGetTime_t` (0x27c4594c)
-  - Limitation: converts in-range dates from 1970 whose seconds fit 32 bits, as one 32-bit word (the measured cell); a field out of range, a date before 1970, a value past 32 bits and a NULL or unmapped pointer are not measured for this function and stop the run by name
+  - Limitation: converts in-range dates from 1970 whose seconds fit 32 bits, as one 32-bit word; PSP-SAFE-SCALAR-001 measured eleven dates: 1601-01-01 00:00:00 and 1969-12-31 23:59:59 return 0x800001fe and write 0; 2106-02-07 06:28:16 (the first second past 32 bits) and 9999-12-31 23:59:59 return 0x800001fe and write 0x7fffffff; the runtime applies each answer to the valid dates between its two measured ends, which is its rule and not a measurement (the seconds count is monotone in the date and both ends give one answer); seven dates with one field out of range (2024-00-10, 2024-13-01, 2024-01-00, 2024-01-32, 2024-02-30, 2024-01-01 24:00:00 and 2024-01-01 00:00:60, microsecond 0) return 0 and write the measured seconds, and are answered as those exact dates only; every other date with a field out of range, a valid date before 1601 and a NULL or unmapped pointer are not measured and stop the run by name; where between 2038-01-19 03:14:08 and 2106-02-07 06:28:15 the PSP begins to refuse is not measured, and those dates still convert
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_time_t_add_years_resolution_autotest
   - Evidence: PSPAutotests tests/rtc/convert.expected (2ed7c9c5, recorded on a PSP): checkRtcGetTime_t, 2012-09-20 07:12:15.000500 -> 1348125135
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-time-1969, rtc-time-1601, rtc-time-2106-past, rtc-time-9999 and the seven one-field-out-of-range cells, rtc-time-month-0 to rtc-time-second-60)
+  - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117
 - **`h_RtcGetWin32FileTime`** (`sceRtc`): `sceRtcGetWin32FileTime` (0xcf561893)
   - Limitation: cold-first-call error reporting may differ from firmware (PSPAutotests convert.c notes errors report properly only after a prior error and that the rules are hard to determine); component bounds beyond the measured year/epoch/day-carry cases stay fail-closed rather than measured (#341)
 - **`h_RtcTickAddDays`** (`sceRtc`): `sceRtcTickAddDays` (0xe51b4b7a)
@@ -1348,9 +1364,11 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_minutes_hours_weeks_autotest
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddWeeks, the 8 fixed rows
 - **`h_RtcTickAddYears`** (`sceRtc`): `sceRtcTickAddYears` (0x42842c77)
-  - Limitation: moves the calendar year with the leap day clamped to February 28, and a result outside years 1..9999 returns 0 with dest unwritten (pspautotests-recorded); a source tick past year 9999 and NULL or unmapped pointers are not measured and stop the run by name
+  - Limitation: moves the calendar year with the leap day clamped to February 28, and a result outside years 1..9999 returns 0 with dest unwritten (pspautotests-recorded); PSP-SAFE-SCALAR-001 measured two source ticks past year 9999, 10000-01-01 00:00:00 and 10001-01-01 00:00:00, which follow the same rule; the runtime applies it to the source ticks between those two (the rest of year 10000), which is its rule and not a measurement; a source tick past 10001-01-01 00:00:00 and NULL or unmapped pointers are not measured and stop the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_time_t_add_years_resolution_autotest
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (2ed7c9c5, recorded on a PSP): checkRtcTickAddYears
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-addyears-y10000-plus-0, rtc-addyears-y10000-plus-1, rtc-addyears-y10000-minus-1, rtc-addyears-y10001-minus-2)
+  - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117
 - **`h_UmdActivate`** (`sceUmd`): `sceUmdActivate` (0xc6183d47)
   - Limitation: the callback argument follows PPSSPP (0x22 when no compiled SDK version is set, 0x32 otherwise) and is host-selftested, not hardware measured; the activation result and argument checks are not hardware measured either
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_unregister_callback
@@ -1618,22 +1636,22 @@ reproduced here.
 
 ---
 
-### 3.3 Remaining Fake-Success Registrations and #281 Dispositions
+### 3.3 Dispositions from #281 and Later Handlers
 
-The current registration classes and semantic statuses are in the generated census above. At the time of the #281 migration, the then-18 fake-success registrations were reclassified as 13 controlled refusals, one bounded UMD compatibility implementation, one partial `sceIoDevctl` implementation, and three named compatibility exceptions; those are historical migration counts, not the current census. Static refusal entries carry a literal PSP-visible error in `sr_hle_register_unsupported`; `sr_syscall` logs each function/NID once and emits one summary line per called function at process exit. That migration was issue #281, now closed. Unregistered NIDs still use the fatal unknown-import path.
+The current registration classes and semantic statuses are in the generated census above. At the time of the #281 migration, the then-18 fake-success registrations were reclassified as 13 controlled refusals, one bounded UMD compatibility implementation, one partial `sceIoDevctl` implementation, and three named compatibility exceptions; those are historical migration counts, not the current census. Static refusal entries carry a literal PSP-visible error in `sr_hle_register_unsupported`; `sr_syscall` logs each function/NID once and emits one summary line per called function at process exit. That migration was issue #281, now closed. Unregistered NIDs still use the fatal unknown-import path. Rows below that gained handlers after the migration are marked implemented.
 
 | API family | Registration(s) | Disposition |
 | :--- | :--- | :--- |
 | `sceAtrac3plus` | `sceAtracLowLevelDecode` (`0x0c116e1b`), `sceAtracLowLevelInitDecoder` (`0x1575d64b`), and `sceAtracStartEntry` (`0xd1f59fdb`) | Controlled refusal: `0x80630004` (`ATRAC_ERROR_INVALID_CODECTYPE`). |
-| `sceAtrac3plus` | `_sceAtracGetContextAddress` (`0x231fc6b7`) | Controlled refusal: `0x80630003` (`ATRAC_ERROR_NO_ATRACID`). |
-| `sceReg` | `sceRegCloseCategory` (`0x0cae832b`), `sceRegOpenCategory` (`0x1d8a762e`), `sceRegGetKeyValue` (`0x28a8e98a`), `sceRegOpenRegistry` (`0x92e41280`), `sceRegGetKeyInfo` (`0xd4475aa8`), and `sceRegCloseRegistry` (`0xfa8a5739`) | Controlled refusal: `0x80010086` (function not supported). The registry object model remains unimplemented. |
-| `sceUtility` | `sceUtilityLoadNetModule` (`0x1579a159`) and `sceUtilityUnloadNetModule` (`0x64d50c56`) | Controlled refusal: `0x80110001` (`SCE_ERROR_UTILITY_INVALID_STATUS`). |
-| `sceUmdUser` | `sceUmdCancelWaitDriveStat` (`0x6af9b50a`) | Controlled refusal: `0x80010086` (function not supported). Drive-wait cancellation is not modeled. |
+| `sceAtrac3plus` | `_sceAtracGetContextAddress` (`0x231fc6b7`) | Implemented: `h_AtracGetContextAddress` allocates and returns the context table; a bad AtracID keeps the `0x80630003` (`ATRAC_ERROR_NO_ATRACID`) refusal. |
+| `sceReg` | `sceRegCloseCategory` (`0x0cae832b`), `sceRegOpenCategory` (`0x1d8a762e`), `sceRegGetKeyValue` (`0x28a8e98a`), `sceRegOpenRegistry` (`0x92e41280`), `sceRegGetKeyInfo` (`0xd4475aa8`), and `sceRegCloseRegistry` (`0xfa8a5739`) | Implemented: the six NIDs dispatch to `h_Reg*` handlers over the `s_sreg_*` registry model (read/write, error codes and category creation in [#299](https://github.com/Jstar269/nakagawa-recomp/issues/299)). |
+| `sceUtility` | `sceUtilityLoadNetModule` (`0x1579a159`) and `sceUtilityUnloadNetModule` (`0x64d50c56`) | Implemented: `h_UtilityLoadNetModule` and `h_UtilityUnloadNetModule` call the shared `utility_module_load`/`utility_module_unload`, so they record the module as loaded or unloaded exactly as `sceUtilityLoadModule` does and make no connection ([#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)). A bad module number returns `SCE_ERROR_MODULE_BAD_ID`. |
+| `sceUmdUser` | `sceUmdCancelWaitDriveStat` (`0x6af9b50a`) | Implemented: `h_UmdCancelWaitDriveStat` wakes every drive waiter with `SCE_KERNEL_ERROR_WAIT_CANCEL` and returns 0. |
 | `sceUmdUser` | `sceUmdGetErrorStat` (`0x20628e6f`) | Compatibility implementation: returns no error while the virtual ISO drive reports its modeled PRESENT/READY/READABLE state; other drive-error states are not modeled (#281). |
 | `IoFileMgrForUser` | `sceIoDevctl` (`0x54f5fb11`) | Partial Memory Stick support for `ms0:` and `fatms0:`: capacity/free-cluster geometry comes from the unified Memory Stick root shared with ordinary `sceIo*` and savedata (`SR_MEMSTICK`, default `memstick/`); inserted and ready queries write 1 and 4; registering a live callback for insert/eject events adds it to a 32-entry list and queues one notification with argument 1 (inserted), delivered on the owning thread at its next callback point; unregister removes one matching entry, an unknown UID returns `0x80010016`, and deleting a callback drops its registrations. No later insert or eject event exists ([#1378](https://github.com/Jstar269/nakagawa-recomp/issues/1378)). Other device/command pairs return `0x80010086`, log once per pair, and appear in the #281 exit summary. |
-| `sceAtrac3plus` | `sceAtracGetOutputChannel` (`0xb3b5d042`) | Compatibility exception: existing acceptance is retained while output-channel mapping is tracked by #286. |
+| `sceAtrac3plus` | `sceAtracGetOutputChannel` (`0xb3b5d042`) | Compatibility exception at the migration. It now refuses an unknown ID with `0x80630005` (`ATRAC_ERROR_BAD_ATRACID`) and an unwritable output word with `0x80000103`, and writes the channel count `sceAtracDecodeData` interleaves (the track's own channels). A PSP's stereo output of a mono track set without the MOut calls is not modeled (#286). |
 | `sceKernelVolatileMemUnlock` | `sceKernelVolatileMemUnlock` (`0xa569e425`) | Compatibility exception at the migration: the documented asset-loading route uses this call around the shared volatile-memory scratch buffer (#281). It now returns the PSP-measured states (#1135) and hands the lock to the oldest `sceKernelVolatileMemLock` caller blocked on it (#1383). |
-| `sceUtility` | `sceUtilityOskUpdate` (`0x4b85c861`) | Compatibility exception: the current route collects text and advances the OSK state from `sceUtilityOskGetStatus`; update keeps its no-op success while that dialog contract is unfinished (#281). |
+| `sceUtility` | `sceUtilityOskUpdate` (`0x4b85c861`) | Compatibility exception: `h_OskUpdate` follows the PSP-3000 measurements (#363): `SCE_ERROR_UTILITY_WRONG_TYPE` (`0x80110005`) before a keyboard starts, 0 in VISIBLE, and `0x80110001` in INIT, QUIT and NONE after use. FINISHED returns 0, which is not measured (#341); Update does not drive the keyboard, whose text is collected from `sceUtilityOskGetStatus` (#281); and the call is still named in the end-of-run compatibility-exception summary (`hle_success_exception_issue` in `src/rt/hle_internal.h`). |
 
 ### 3.4 Libraries in both forms: HLE handler and disc module (#2148)
 
@@ -1681,8 +1699,9 @@ report proves only that title's calls and stays private.
 
 ## 4. Workaround Elimination
 
-The workarounds that remain are the entries in section 3 that are not marked retired, and the compatibility
-exceptions in the generated census above. Each entry names the lower-level solution that removes it.
+The workarounds that remain are the section 3 entries still marked controlled refusal, no-op or compatibility
+exception; entries marked implemented or retired are not workarounds. The compatibility exceptions in the
+generated census above also remain. Each entry names the lower-level solution that removes it.
 
 ### The Invariant for Each Migration Step
 

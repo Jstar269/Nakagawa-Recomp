@@ -111,6 +111,14 @@ typedef struct {
     /* Optional local shared guest-memory channel, empty unless the player enabled
        its per-frame memory service for this launch. It never carries network data. */
     char guest_memory_channel[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
+    /* Cheats (#2639, src/rt/cheats.h): off as prepare_session leaves it. SR_CHEATS and
+       SR_CHEATS_FILE are always exported, 0 and empty while this is off, so an inherited value
+       cannot opt a launch in. On, the file is cheats_file when that names one (the player's
+       --cheats-file), else cheats/<DISC-ID>.ini under the per-user data directory; the launcher
+       does not create, read or check it. A session with an acceptance checkpoint refuses to
+       launch with cheats on. */
+    bool cheats;
+    char cheats_file[NK_MAX_PATH];
 } NkRuntimeConfig;
 
 typedef struct {
@@ -211,7 +219,9 @@ typedef struct {
  * shared contract in generated/nk_title_catalog.h); an unknown title, or a
  * workspace holding only another title's build, is not "available". This is
  * the same probe used by nk_launch_prepare_session, so UI readiness cannot
- * drift from the eventual launch path. */
+ * drift from the eventual launch path. A NULL or empty `root` stands for the
+ * per-user data directory (or "." when the platform names none), exactly as
+ * it does for nk_launch_prepare_session. */
 bool nk_launch_runtime_available(const char *root, const char *title_id);
 
 /* True only when the selected title's identity-matched runtime executable and
@@ -282,6 +292,11 @@ NkResult nk_launch_prepare_session(
     const char *repo_or_install_root
 );
 
+/* Whether the runtime in a package's executable reads the cheats switch (#2639): false for a
+ * package built before cheats existed, which nk_launch_start refuses to start with cheats on
+ * instead of letting it ignore them silently. True when the file cannot be read. */
+bool nk_launch_runtime_reads_cheats(const char *executable_path);
+
 /* Start the prepared session, launching the native runtime as a child process.
  * Immediately before spawn the session identity and the resolved executable
  * path are re-checked against each other: a session whose executable or title
@@ -302,8 +317,16 @@ bool nk_launch_format_input_profile_env(
 /* Check if runtime child process is currently running */
 bool nk_launch_is_running(NkLaunchSession *session);
 
-/* Wait for runtime process to exit (timeout_ms < 0 for infinite) */
+/* Wait for runtime process to exit (timeout_ms < 0 for infinite). Returns the
+ * exit code, or -1 when a bounded wait expired with the child still running;
+ * a child that ended with no exit status (a signal on POSIX) also returns -1,
+ * so a caller that must tell the two apart uses nk_launch_wait_status. */
 int nk_launch_wait(NkLaunchSession *session, int timeout_ms);
+
+/* nk_launch_wait that also says why it returned: *timed_out (when not NULL)
+ * is true only when a bounded wait expired with the child still running, which
+ * leaves the session running and the caller's to wait on again or stop. */
+int nk_launch_wait_status(NkLaunchSession *session, int timeout_ms, bool *timed_out);
 
 /* Terminate child process cleanly if running */
 void nk_launch_stop(NkLaunchSession *session);

@@ -46,6 +46,10 @@
 #define TITLE_ID_RENDER_EYEBROW TITLE_ID(0x000072u)
 #define TITLE_ID_RENDER_PILL TITLE_ID(0x000073u)
 #define TITLE_ID_RENDER_TEXT TITLE_ID(0x000074u)
+#define TITLE_ID_FONT_NOTE TITLE_ID(0x000078u)
+#define TITLE_ID_FONT_EYEBROW TITLE_ID(0x000079u)
+#define TITLE_ID_FONT_TEXT TITLE_ID(0x00007Au)
+#define TITLE_ID_FONT_ACTIONS TITLE_ID(0x00007Bu)
 #define TITLE_ID_START_CARD TITLE_ID(0x000039u)
 #define TITLE_ID_START_NAME TITLE_ID(0x00003Au)
 #define TITLE_ID_START_TEXT TITLE_ID(0x00003Bu)
@@ -346,6 +350,45 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                  NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
                     result = action(PLAYER_UI_ACTION_HIDE_RENDER_NOTICE, model->title_index,
                                     PLAYER_UI_PRIMARY_NONE);
+                }
+                nk_ui_end_container(ui);
+            }
+            /* The font note (owner request 2026-11-19): Authentic is the game as released, and
+               stand-in or replacement fonts are not, so the page says so in one sentence, with
+               the way to the PSP's own fonts and Hide. A fact in the page's own colours, never a
+               warning: nothing stops the game from starting, and it is never the default focus,
+               which stays on PLAY. */
+            if (model->font_note_text != NULL && model->font_note_text[0] != '\0' &&
+                nk_ui_card_begin(ui, TITLE_ID_FONT_NOTE, sizing_grow(), sizing_fit(),
+                                 NK_UI_SPACE_2)) {
+                nk_ui_eyebrow(ui, TITLE_ID_FONT_EYEBROW, "Fonts");
+                nk_ui_text_role(ui, TITLE_ID_FONT_TEXT, model->font_note_text, NK_UI_TYPE_BODY_S,
+                                theme->paper);
+                row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
+                row.align_y = NK_UI_ALIGN_CENTER;
+                {
+                    /* Full-size secondary buttons (NK_UI_CONTROL_HEIGHT, 44 px), as the
+                       ENHANCEMENTS card's: the small control is kept for the library's heading row
+                       and the on-screen keyboard (docs/PLAYER_UI_DESIGN.md, Accessibility). */
+                    NkUiFlowRow flow;
+                    const uint32_t flags = NK_UI_BUTTON_NOT_DEFAULT;
+                    if (nk_ui_flow_begin(ui, &flow, TITLE_ID_FONT_ACTIONS, &row,
+                                         width - 2.0f * gutter - NK_UI_DETAIL_GAP - aside -
+                                             2.0f * NK_UI_SPACE_5)) {
+                        nk_ui_flow_item(ui, &flow,
+                                        nk_ui_button_width(ui, "Get fonts from my PSP", flags));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_FONT_NOTE_GET,
+                                         "Get fonts from my PSP", flags)) {
+                            result = action(PLAYER_UI_ACTION_FONT_NOTE_GET_FONTS,
+                                            model->title_index, PLAYER_UI_PRIMARY_NONE);
+                        }
+                        nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Hide", flags));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_FONT_NOTE_HIDE, "Hide", flags)) {
+                            result = action(PLAYER_UI_ACTION_HIDE_FONT_NOTE, model->title_index,
+                                            PLAYER_UI_PRIMARY_NONE);
+                        }
+                        nk_ui_flow_end(ui, &flow);
+                    }
                 }
                 nk_ui_end_container(ui);
             }

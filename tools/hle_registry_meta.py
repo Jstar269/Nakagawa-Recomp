@@ -210,8 +210,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_kernel_import_sweep_memory_blocks_and_sdk_alias",
             "PSPAutotests tests/sysmem/memblock.expected (2ed7c9c5, recorded on a PSP): names, types, sizes, option sizes and type-1 placement deltas",
             "uOFW src/kd/sysmem/memblock.c (MIT): validation order and the AllocPartitionMemory call",
+            "tests/native/hle_thread_selftest.c:test_memory_block_high_in_low_based_partition",
+            "PSPAutotests tests/sysmem/memblock.expected lines 9 and 25 to 33 (774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP): type 1 allocates, and a second type-1 block lies its size rounded up to 0x100 below the first",
         ],
-        "limitation": "types 0 (Low, the partition's bump and free-list path) and 1 (High, from the top of the arena thread stacks share, 0x100 granularity) allocate, and the type, size, option-size and NULL-name codes are pspautotests-recorded; the code for an unmapped name or option pointer is uOFW's 0x800200D3, not measured; memory-block UIDs are separate from partition-block UIDs here, while the PSP shares them (memblock.expected Partition usage)",
+        "limitation": "types 0 (Low, the partition's bump and free-list path) and 1 (High, from the top of the arena thread stacks share, 0x100 granularity) allocate, and the type, size, option-size and NULL-name codes are pspautotests-recorded; in a partition based below the runtime stacks a High block lies above the bump region, so the free sizes, which measure that region, do not count it (#2640); the code for an unmapped name or option pointer is uOFW's 0x800200D3, not measured; memory-block UIDs are separate from partition-block UIDs here, while the PSP shares them (memblock.expected Partition usage)",
     },
     "h_GetMemoryBlockAddr": {
         "status": "partial",
@@ -1067,7 +1069,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     },
     "h_ReferMbxStatus": {
         "status": "partial",
-        "limitation": "size-field caller contract (whether Refer preserves or overwrites size) unmeasured (#339, #341)",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-KERNEL-STATUS-001: mbx-size-zero, mbx-size-8, mbx-size-40, and mbx-size-full)",
+        ],
+        "limitation": "the cited cells establish bytes written and size-word behavior at four buffer sizes; full field values, unknown UID codes, invalid pointers, and error precedence are not established by that size row (#339, #341)",
     },
     # sceKernelReferSystemStatus: bytes written = min(size, 0x1c), return 0, and the size word reads back
     # 0x1c, all PSP-measured (PR #1003 head 3072bd7d, 2026-10-15).
@@ -1182,7 +1187,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cells: audio-ch-release, audio-ch-query-released",
         ],
-        "limitation": "the cells release channel 0 after the two valid blocking-output calls and query it after release; unreserved, out-of-range, and other channel-state release results are unmeasured (#341)",
+        "limitation": "the cells release channel 0 after the two valid blocking-output calls and query it after release; a release clears the channel's length, format and volumes; the out-of-range (0x80260003) and not-reserved (0x80260008) refusals follow PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp sceAudioChRelease and are unmeasured, as are other channel-state release results (#341)",
     },
     "h_AudioChReserve": {
         "status": "partial",
@@ -1220,7 +1225,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cell: audio-out2-output-blocking",
         ],
-        "limitation": "audio-out2-output-blocking measures one valid silent 1024-sample block at volume 0x8000 and makes no acoustic claim; volumes above 0xFFFFF are refused with 0x8026000b following PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp, unmeasured; not-reserved, buffer-error and audio_output error-propagation behavior are not covered (the handler discards audio_output's return) (#341)",
+        "limitation": "audio-out2-output-blocking measures one valid silent 1024-sample block at volume 0x8000 and makes no acoustic claim; volumes above 0xFFFFF are refused with 0x8026000b following PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp, unmeasured; an unreadable buffer returns audio_output's 0x80000103 to the guest, a host contract that is unmeasured; the not-reserved code is not covered (#341)",
     },
     "h_AudioOutput2Release": {
         "status": "partial",
@@ -1248,7 +1253,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cells: audio-ch-output-blocking-0, audio-ch-output-blocking-1",
         ],
-        "limitation": "the cells exercise two maximum-volume outputs with a valid silent stereo buffer and record timing and rest-length values, not audible output; mono, other volumes, invalid buffers/channels, and error precedence are unmeasured (#341)",
+        "limitation": "the cells exercise two maximum-volume outputs with a valid silent stereo buffer and record timing and rest-length values, not audible output; mono, other volumes, invalid buffers, and error precedence are unmeasured; a channel of 8 or more (0x80260003) and an unreserved channel (0x80260001) are refused following PPSSPP caa91b54b535, corroborated by PSPAutotests output.expected for channel -1 and unreserved channel 5 (#341)",
     },
     "h_GeEdramGetAddr": {
         "status": "complete",
@@ -1351,16 +1356,20 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "tests/native/hle_thread_selftest.c:test_rtc_time_t_add_years_resolution_autotest",
             "PSPAutotests tests/rtc/convert.expected (2ed7c9c5, recorded on a PSP): checkRtcGetTime_t, 2012-09-20 07:12:15.000500 -> 1348125135",
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-time-1969, rtc-time-1601, rtc-time-2106-past, rtc-time-9999 and the seven one-field-out-of-range cells, rtc-time-month-0 to rtc-time-second-60)",
+            "tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117",
         ],
-        "limitation": "converts in-range dates from 1970 whose seconds fit 32 bits, as one 32-bit word (the measured cell); a field out of range, a date before 1970, a value past 32 bits and a NULL or unmapped pointer are not measured for this function and stop the run by name",
+        "limitation": "converts in-range dates from 1970 whose seconds fit 32 bits, as one 32-bit word; PSP-SAFE-SCALAR-001 measured eleven dates: 1601-01-01 00:00:00 and 1969-12-31 23:59:59 return 0x800001fe and write 0; 2106-02-07 06:28:16 (the first second past 32 bits) and 9999-12-31 23:59:59 return 0x800001fe and write 0x7fffffff; the runtime applies each answer to the valid dates between its two measured ends, which is its rule and not a measurement (the seconds count is monotone in the date and both ends give one answer); seven dates with one field out of range (2024-00-10, 2024-13-01, 2024-01-00, 2024-01-32, 2024-02-30, 2024-01-01 24:00:00 and 2024-01-01 00:00:60, microsecond 0) return 0 and write the measured seconds, and are answered as those exact dates only; every other date with a field out of range, a valid date before 1601 and a NULL or unmapped pointer are not measured and stop the run by name; where between 2038-01-19 03:14:08 and 2106-02-07 06:28:15 the PSP begins to refuse is not measured, and those dates still convert",
     },
     "h_RtcTickAddYears": {
         "status": "partial",
         "evidence": [
             "tests/native/hle_thread_selftest.c:test_rtc_time_t_add_years_resolution_autotest",
             "PSPAutotests tests/rtc/arithmetic.expected (2ed7c9c5, recorded on a PSP): checkRtcTickAddYears",
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-addyears-y10000-plus-0, rtc-addyears-y10000-plus-1, rtc-addyears-y10000-minus-1, rtc-addyears-y10001-minus-2)",
+            "tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117",
         ],
-        "limitation": "moves the calendar year with the leap day clamped to February 28, and a result outside years 1..9999 returns 0 with dest unwritten (pspautotests-recorded); a source tick past year 9999 and NULL or unmapped pointers are not measured and stop the run by name",
+        "limitation": "moves the calendar year with the leap day clamped to February 28, and a result outside years 1..9999 returns 0 with dest unwritten (pspautotests-recorded); PSP-SAFE-SCALAR-001 measured two source ticks past year 9999, 10000-01-01 00:00:00 and 10001-01-01 00:00:00, which follow the same rule; the runtime applies it to the source ticks between those two (the rest of year 10000), which is its rule and not a measurement; a source tick past 10001-01-01 00:00:00 and NULL or unmapped pointers are not measured and stop the run by name",
     },
     "h_RtcTickAddMicroseconds": {
         "status": "partial",
@@ -1415,16 +1424,20 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest",
             "PSPAutotests tests/rtc/lookup.expected (f573fe8c, recorded on a PSP): checkDayOfWeek",
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-dow-month-0, rtc-dow-month-13, rtc-dow-month-13-again, rtc-dow-month-14, rtc-dow-month-24, rtc-dow-year-0, rtc-dow-year-10000, rtc-dow-day-1000001, rtc-dow-day-max)",
+            "tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117",
         ],
-        "limitation": "Sunday is 0; months 1..12 of years 1..9999 with the day carried linearly (the measured cells); a month of 0 or above 12 answers only the seven measured triples, and any other month, year or day outside those stops the run by name",
+        "limitation": "Sunday is 0; months 1..12 of years 1..9999 with the day carried linearly up to 1000000 (the pspautotests cells); a month of 0 or above 12, a year outside 1..9999 and a day above 1000000 answer only the fifteen measured triples (seven pspautotests, eight PSP-SAFE-SCALAR-001), which fit no single calendar rule, and any other such month, year or day stops the run by name",
     },
     "h_RtcCheckValid": {
         "status": "partial",
         "evidence": [
             "tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest",
             "PSPAutotests tests/rtc/lookup.expected (f573fe8c, recorded on a PSP): checkRtcCheckValid and checkMaxYear",
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-valid-day-0, rtc-valid-feb-29-2023, rtc-valid-feb-29-1900, rtc-valid-feb-30-2024, rtc-valid-feb-31-2024, rtc-valid-apr-31-2024, rtc-valid-day-0-hour-24)",
+            "tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117",
         ],
-        "limitation": "returns 0 or the first failing field as -1 year, -2 month, -3 day, -4 hour, -5 minute, -6 second, -7 microsecond (measured); a day of 0 or one from the month length to 31, and a NULL or unmapped pointer, are not measured and stop the run by name",
+        "limitation": "returns 0 or the first failing field as -1 year, -2 month, -3 day, -4 hour, -5 minute, -6 second, -7 microsecond (measured); a day of 0 or past the month's length is -3, measured by PSP-SAFE-SCALAR-001 in January, February and April and applied to the other months from the same month table; a NULL or unmapped pointer is not measured and stops the run by name",
     },
     "h_DisplayIsForeground": {
         "status": "partial",
@@ -1438,9 +1451,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "tests/native/hle_thread_selftest.c:test_imports_20261102_measured_contracts",
-            "PSPAutotests tests/modules/idlist/idlist.expected (1a9e6c31, recorded on a PSP): byte size, whole entries, count is the total, the caller's module is listed",
+            "PSPAutotests tests/modules/idlist/idlist.expected (774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP): byte size, whole entries, count is the total, the caller's module is listed; 0x800200D3 for a NULL count and for a count pointer or a buffer in the kernel segment (lines 14 to 16)",
+            "uOFW src/kd/modulemgr/queryModule.c (f7b0623168842f02cddbdbf9437ac0c2380c51c8, MIT): both pointers pass the kernel's user-pointer check before anything is written",
         ],
-        "limitation": "lists only the main module and the modules the runtime loaded (a PSP also lists firmware modules), main first and then in load order, an order that is not measured; an unwritable count or buffer is not measured and stops the run by name",
+        "limitation": "lists only the main module and the modules the runtime loaded (a PSP also lists firmware modules), main first and then in load order, an order that is not measured; the recorded 0x800200D3 covers a NULL pointer and one whose address, end or size has bit 31 set, of which the recording has 0x88000000; a count pointer or buffer that passes that check and is not guest memory has no recorded cell and stops the run by name",
     },
     "h_LoadExecForUser_362A956B": {
         "status": "partial",
@@ -1594,7 +1608,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01 and PSP-B2-01 LwMutex cells)",
         ],
-        "limitation": "owner release, direct hand-off to one waiter, and non-owner/underflow behavior are measured; invalid workareas, negative or excessive unlock counts, and several-waiter ordering are not measured",
+        "limitation": "owner release, direct hand-off to one waiter, and non-owner/underflow behavior are measured; invalid workareas, negative or excessive unlock counts, and several-waiter ordering are not measured: waiters are served in arrival order, or by current priority under attr 0x100 (PPSSPP-derived, not PSP-measured)",
     },
     "h_AllocateFpl": {
         "status": "partial",
@@ -1654,7 +1668,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "docs/HARDWARE_ORACLE.md (Kernel-object semantics: FPL blocks are blockSize apart)",
             "docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-002: block size 0 is 0x800201B7, a 0x7FFFFFFF-byte block 0x80020190)",
         ],
-        "limitation": "valid pool creation, block size 0 and a pool the partition cannot hold are measured; a block count of 0 still becomes 1, a create with no free FPL slot keeps its pre-measurement code, and partition, attribute and option error precedence need separate evidence",
+        "limitation": "valid pool creation, block size 0 and a pool the partition cannot hold are measured; a block count of 0 still becomes 1, and partition, attribute and option error precedence need separate evidence",
     },
     "h_CreateLwMutex": {
         "status": "partial",
@@ -1683,7 +1697,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "docs/HARDWARE_ORACLE.md (PSP-B1-01 and PSP-B2-01: valid VPL creation, accounting, allocation, and deletion)",
         ],
-        "limitation": "valid pool creation and measured accounting are covered; the handler maps size zero to VPL_EXHAUSTED and ignores the partition argument, but the cited valid-pool cells do not establish those edge results, allocation exhaustion, or option behavior",
+        "limitation": "valid pool creation and measured accounting are covered; the handler maps size zero to VPL_EXHAUSTED and ignores the partition argument, but the cited valid-pool cells do not establish those edge results or option behavior; a pool the partition cannot hold returns NO_MEMORY as pspautotests threads/vpl/create.expected records",
     },
     "h_DeleteFpl": {
         "status": "partial",
@@ -1691,7 +1705,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-001: valid fpl-delete and refer-after-delete cells)",
             "docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B2-01: deleting an FPL with a waiter)",
         ],
-        "limitation": "valid deletion and the delete-wait outcome are covered; an invalid or already-deleted UID currently returns success in the handler, while the cited delete cells use a valid pool, and multi-waiter teardown ordering is not measured",
+        "limitation": "valid deletion and the delete-wait outcome are covered; an invalid or already-deleted UID returns UNKNOWN_FPLID as pspautotests threads/fpl/delete.expected records, outside the cited cells, which use a valid pool, and multi-waiter teardown ordering is not measured",
     },
     "h_DeleteLwMutex": {
         "status": "partial",
@@ -1756,7 +1770,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "docs/HARDWARE_ORACLE.md (PSP-B3-01: ReleaseWaitThread wakes a blocked target with WAIT_RELEASE)",
         ],
-        "limitation": "the cited cell covers releasing one blocked target and the waiter's WAIT_RELEASE result; self/UID-zero targets, already-finished targets, and multiple-waiter ordering are not established",
+        "limitation": "the cited cell covers releasing one blocked target and the waiter's WAIT_RELEASE result; self/UID-zero targets, already-finished targets, and multiple-waiter ordering are not established; a DelayThread wait is released with WAIT_RELEASE as PPSSPP does (PPSSPP-derived, not PSP-measured), and a ready, dormant or runtime-internally delayed target stops by name",
     },
     "h_TryAllocateFpl": {
         "status": "partial",
@@ -1910,7 +1924,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "docs/HARDWARE_ORACLE.md (PSP-WAIT-001: semaphore signal/cancel before deadline and late dispatch)",
             "docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01: semaphore count and wait results)",
         ],
-        "limitation": "the cited cells cover selected count, signal/cancel, and timeout outcomes; invalid timeout pointers, negative counts, general multi-waiter ordering, and all error-precedence cases are not established",
+        "limitation": "the cited cells cover selected count, signal/cancel, and timeout outcomes; invalid timeout pointers, negative counts, general multi-waiter ordering, and all error-precedence cases are not established; the time left written back after a satisfied timed wait is PPSSPP-derived, not PSP-measured",
     },
     "h_WakeupThread": {
         "status": "partial",
@@ -2283,7 +2297,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_td23_guest_pointer_validation",
             "tests/native/hle_thread_selftest.c:test_td28_partition_free_reuse",
         ],
-        "limitation": "partition and type refusals, the volatile-partition cells and the unplaceable-Addr code match the recorded cells; where a PSP places a partition-6 block is unmeasured, partitions 2 and 6 accept a NULL name that the PSP refuses (existing callers rely on it), a zero size allocates 16 bytes rather than being checked against the recorded size cells, and blocks are placed from a bump heap rather than the kernel's allocator (#341)",
+        "limitation": "partition and type refusals, the volatile-partition cells and the unplaceable-Addr code match the recorded cells; where a PSP places a partition-6 block is unmeasured, partitions 2 and 6 accept a NULL name that the PSP refuses (existing callers rely on it), and blocks are placed from a bump heap rather than the kernel's allocator (#341)",
     },
     "h_CtrlReadBuffer": {
         "status": "partial",
@@ -2551,7 +2565,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "PSPAutotests tests/threads/threads/terminate.expected (unknown and deleted ids 0x80020198; 0 and the current thread 0x80020197; created and finished threads 0x800201a2; ready, suspended and waiting threads 0; a thread waiting for the end wakes with 0x800201ac)",
             "tests/native/hle_thread_selftest.c:test_issue339_terminate_waiting_thread",
         ],
-        "limitation": "the recorded thread states and the waiter's wake code are reproduced; terminating a thread that holds a mutex or is blocked inside an HLE I/O wait is not measured (#341)",
+        "limitation": "the recorded thread states and the waiter's wake code are reproduced; terminating a thread that holds a mutex or is blocked inside an HLE I/O wait is not measured (#341); from an interrupt handler the call answers ILLEGAL_CONTEXT for a compiled SDK version of 3.08 or later (PPSSPP-derived, not PSP-measured) and stops by name for an earlier one",
     },
     "h_TerminateDeleteThread": {
         "status": "partial",
@@ -2768,8 +2782,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "PSPAutotests tests/threads/threads/threadmanidlist.expected (a negative size 0x800200D3 with the count unwritten; types 1 to 14 listed, 15 and above illegal)",
             "tests/native/hle_thread_selftest.c:test_threadman_id_list_cells",
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: tmid-9-list and tmid-10-list, an empty list returns 0 with a count of 0 and no slot written)",
+            "tests/native/hle_thread_selftest.c:test_threadman_id_list",
         ],
-        "limitation": "the recorded sizes and types are reproduced; the list order for objects created in another order than uid order is not measured (#341)",
+        "limitation": "the recorded sizes and types are reproduced; the thread event handler class (type 9) answers only the measured call shape, a 16-slot buffer and a count pointer, with the measured empty list, whose precondition (no handler registered) holds for every guest because this runtime has no call that registers one; type 9 with any other buffer size, or a NULL or unmapped buffer or count pointer, is not measured and stops the run by name; the list order for objects created in another order than uid order is not measured (#341)",
     },
     "h_VolatileMemUnlock": {
         "status": "partial",
@@ -2898,8 +2914,12 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "PSPAutotests tests/threads/tls/create.expected (a NULL name 0x80020190; partitions 2 and 6 accepted, 1, 3 and 4 0x800200D1, others 0x800200D2; a block size or count of 0 or -1 0x800201B7; power-of-two alignments; the 17th pool 0x800201D1)",
             "tests/native/hle_thread_selftest.c:test_wb_tlspl_vpl_cells",
+            "PSPAutotests tests/threads/tls/create.expected line 29 (774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP): attribute 0x4000 creates a pool that reports the attribute and takes 1024 bytes from the partition's free total, returned by the delete",
+            "tests/native/hle_thread_selftest.c:test_tlspl_highmem_pool",
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: tls-create-normal, tls-place-normal, tls-addr-normal, tls-create-high, tls-place-high, tls-addr-high, tls-create-high-2, tls-addr-high-2: in partition 2 a pool of four 0x100-byte blocks with NULL options lies at the low end of the free memory without attribute 0x4000 and at the high end with it, a second such pool below the first)",
+            "tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_tls_20261117",
         ],
-        "limitation": "the recorded arguments are reproduced; attribute 0x4000 (allocation from the top of the partition) is accepted but not exercised by a test, and partitions 5 and 11 and above and alignments above 0x10000 keep a refusal the cells do not record (#341)",
+        "limitation": "the recorded arguments are reproduced; where an attribute 0x4000 pool lies is PSP-measured for one pool shape only (PSP-SAFE-SCALAR-001: partition 2, attribute exactly 0x4000, four 0x100-byte blocks, NULL options): the top of the partition; for every other attribute 0x4000 pool (another block size or count, an options block, another attribute bit beside 0x4000, partition 6) the top of the partition is PPSSPP-derived, not PSP-measured (hrydgard/ppsspp 65181eea1deb7361beb3be6062ea98e8427f2786, Core/HLE/sceKernelMemory.cpp sceKernelCreateTlspl; jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414 SceKernelTls agrees) and is logged once per run; the measured free-size words are not reproduced exactly: the free total carries a 0x100 tail per block slot, and in a partition based below the runtime stacks the free sizes do not count such a pool, which lies above the bump region they measure (#2640); partitions 5 and 11 and above and alignments above 0x10000 keep a refusal the cells do not record (#341)",
     },
     "h_DeleteTlspl": {
         "status": "partial",
@@ -2999,7 +3019,6 @@ PARTIAL_WITHOUT_EVIDENCE = frozenset({
     "h_PsmfGetVideo",
     "h_ReceiveMbx",
     "h_ReceiveMbxCB",
-    "h_ReferMbxStatus",
     "h_ReferProfilerNull",
     "h_ReferSemaStatus",
     "h_ReferSystemStatus",
@@ -3051,10 +3070,12 @@ ALIAS_RULES = (
 # registration whose name disagrees with this map is a `mislabeled_nid`
 # finding, so the fixed label cannot silently regress.
 #
-# tools/hle_manifest.py now also cross-checks EVERY registration against
-# src/rt/nid_names.h automatically (the exhaustive NID->name integrity pass,
-# issues #75/#78/#83/#86), so this map is only needed for NIDs whose canonical
-# name cannot come from the generated table or to override it deliberately.
+# tools/hle_manifest.py also cross-checks EVERY registration against
+# src/rt/nid_names.h (the exhaustive NID->name integrity pass, issues
+# #75/#78/#83/#86). Every entry below repeats its nid_names.h name on purpose:
+# these are regression pins for the NIDs that were once mislabeled, kept
+# independent of the generated table. A rename in tools/nid_corpus.json must
+# change the matching pin here in the same commit, or the two checks disagree.
 KNOWN_NID_NAMES = {
     0x1B4217BC: "sceKernelSetCompiledSdkVersion603_605",
     # --- sceSasCore routing integrity ---
@@ -3116,29 +3137,6 @@ FLOAT_RETURN_HANDLERS = {
     "h_PowerGetBusClockFrequencyFloat",
 }
 
-# Tracking issue for each canonical NID above, so a `mislabeled_nid` finding in
-# the gate output points at the routing-correctness owner. Every key here must
-# appear in KNOWN_NID_NAMES and must be registered in hle.c
-# (tools/hle_manifest.py enforces both).
-#
-# NOTE: a corrected label and a dedicated handler are separate checks. The SAS
-# NIDs above now route through handlers with their canonical signatures. The
-# remaining issue links cover the unrelated canonical-name audits below.
-KNOWN_NID_ISSUES = {
-    0x0CAE832B: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0x1D8A762E: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0x28A8E98A: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0x92E41280: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0xD4475AA8: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0xFA8A5739: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0x36CDFADE: "https://github.com/Jstar269/nakagawa-recomp/issues/83",
-    0x2085D15D: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-    0x0AFD0D8B: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-    0x87440F5E: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-    0xFDB5BFE9: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-    0x478FE6F5: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-}
-
 # Acknowledged findings. The gate requires the live finding set to equal this
 # waiver set exactly: a new finding fails CI, and a waiver whose finding no
 # longer reproduces is stale and also fails CI (so fixes must retire their
@@ -3171,7 +3169,7 @@ WAIVERS: tuple[FindingWaiver, ...] = ()
 # Never add an entry to make that gate pass: review the handler instead.
 PROFILE_ZERO_ISSUE = "https://github.com/Jstar269/nakagawa-recomp/issues/341"
 PROFILE_ZERO_UNREVIEWED_IMPORTS = {
-    0x13F592BC: {"name": "sceAudioOutputPannedBlocking", "issue": PROFILE_ZERO_ISSUE},  # h_AudioOutputPannedBlocking: output.expected records bad channel 0x80260003, unreserved 0x80260001 and volume over 0xFFFF 0x8026000b, which audio_output() does not check (shared with h_AudioOutputBlocking and the non-blocking Panned NID); needs its own fix
+    0x13F592BC: {"name": "sceAudioOutputPannedBlocking", "issue": PROFILE_ZERO_ISSUE},  # h_AudioOutputPannedBlocking: output.expected records bad channel 0x80260003, unreserved 0x80260001 (both refused now) and volume over 0xFFFF 0x8026000b (refused now, as by h_AudioOutputBlocking and h_AudioOutputPanned; a negative volume is refused here alone)
     0x172D316E: {"name": "sceKernelStdin", "issue": PROFILE_ZERO_ISSUE},  # h_StdFd: PSP-HLE-STDIO-001 measured three distinct handles, none of them 1, where all three return 1 here (#2397), so a close through the Stdin or Stderr handle answers as Stdout's does; the measured Stdout write and close results are reproduced, sceIoCloseAsync of a std stream is unmeasured
     0xA6BAB2E9: {"name": "sceKernelStdout", "issue": PROFILE_ZERO_ISSUE},  # h_StdFd: same reason as sceKernelStdin
     0xD675EBB8: {"name": "sceKernelSelfStopUnloadModule", "issue": PROFILE_ZERO_ISSUE},  # h_SelfStopUnloadModule: PSP-HLE-SELFSTOP-001 measured (0, 0, NULL), (1, 0, NULL) and (0, 4, argp past RAM) from a helper thread; the first two are reproduced (a first argument of 1 only with no argument block), the third is refused with ILLEGAL_ADDR here where the PSP ran module_stop with an argp it chose (#2397)

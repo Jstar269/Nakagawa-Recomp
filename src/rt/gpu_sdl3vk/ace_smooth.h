@@ -79,6 +79,14 @@ VkImage ace_smooth_previous(AceBetween *s, VkCommandBuffer cmd);
  * had not been made, and there is no previous frame until the next record. Only for a record
  * made without an in-between (ACE_SHOW_OWED records none). */
 void ace_smooth_unrecord(AceBetween *s);
+/* The start of a show pass: what ace_smooth_record_aux, ace_smooth_held and ace_smooth_previous
+ * then change on the host (the newest frame, what each frame has, the layouts the private images
+ * are tracked in, the pair counts and the serial) is kept until the next ace_smooth_begin. */
+void ace_smooth_begin(AceBetween *s);
+/* The command buffer the pass recorded into since ace_smooth_begin was never submitted, so none
+ * of its commands ran: the host side goes back to what it was at ace_smooth_begin, as if the pass
+ * had recorded nothing. Once per ace_smooth_begin; nothing without one. */
+void ace_smooth_discard(AceBetween *s);
 /* The pair counts (pairs, pairs_mask, pairs_depth, depth_refused) of AceSmoothAuxStats; the
  * other fields are left as they are. */
 void ace_smooth_aux_stats(const AceBetween *s, AceSmoothAuxStats *out);

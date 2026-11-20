@@ -58,8 +58,17 @@ def summarize(runs: dict[str, list[dict[str, dict[str, str]]]], key: str) -> lis
     linked, absent = runs["linked"], runs["absent"]
     if len(linked) != len(absent) or not linked:
         raise ValueError("linked and absent need the same non-zero number of runs")
+    workloads = [w for w in linked[0] if w != "class_check"]
+    if not workloads:
+        raise ValueError("the bench reported no workload; nothing was measured")
+    for flavour, flavour_runs in (("linked", linked), ("absent", absent)):
+        for index, run in enumerate(flavour_runs, start=1):
+            reported = sorted(w for w in run if w != "class_check")
+            if reported != sorted(workloads):
+                raise ValueError(f"{flavour} run {index} reported workloads {reported}; "
+                                 f"the first linked run reported {sorted(workloads)}")
     lines = []
-    for workload in (w for w in linked[0] if w != "class_check"):
+    for workload in workloads:
         hashes = {run[workload]["fb_hash"] for run in linked + absent}
         if len(hashes) != 1:
             raise ValueError(f"{workload}: builds drew different pixels ({sorted(hashes)})")

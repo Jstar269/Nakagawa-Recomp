@@ -49,6 +49,7 @@ The analysis inputs are derived from a title and so is the report: keep both pri
 from __future__ import annotations
 
 import argparse
+import bisect
 import collections
 import difflib
 import hashlib
@@ -79,7 +80,16 @@ GP = 28
 _BRANCH_OPS = frozenset({0x04, 0x05, 0x06, 0x07, 0x14, 0x15, 0x16, 0x17})
 _REGIMM_BRANCH_RT = frozenset({0x00, 0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x13})
 _ADDRESS_ARITHMETIC_OPS = frozenset({0x08, 0x09, 0x0D})
-_FIRST_MEMORY_OP = 0x20
+#: Primary opcodes whose rs field is a base register and whose low 16 bits are its offset: the
+#: integer loads and stores, cache, ll/sc, the FPU and the VFPU loads and stores. The VFPU
+#: compute groups 0x34, 0x37, 0x3C and 0x3F are not here: their bits 21-25 name no base
+#: register, and their low 16 bits hold VFPU registers or an immediate.
+_BASE_OFFSET_OPS = frozenset({
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26,
+    0x28, 0x29, 0x2A, 0x2B, 0x2E, 0x2F,
+    0x30, 0x31, 0x32, 0x35, 0x36,
+    0x38, 0x39, 0x3A, 0x3D, 0x3E,
+})
 
 
 class BindingCarryError(ValueError):
@@ -127,6 +137,7 @@ class Module:
                 "calls": [item["target"] for item in calls],
             }
         self.entries = sorted(self.function)
+        self.position: dict[int, int] = {entry: index for index, entry in enumerate(self.entries)}
         self.owner_of: dict[int, list[int]] = collections.defaultdict(list)
         for entry, fn in self.function.items():
             for address in fn["addresses"]:
@@ -165,7 +176,7 @@ class Module:
                 tokens.append(("b", word) if entry <= target < end else ("b-out", word & 0xFFFF0000))
             elif op == 0x0F:
                 tokens.append(("lui", rt))
-            elif (op in _ADDRESS_ARITHMETIC_OPS or op >= _FIRST_MEMORY_OP) and (rs in high or rs == GP):
+            elif (op in _ADDRESS_ARITHMETIC_OPS or op in _BASE_OFFSET_OPS) and (rs in high or rs == GP):
                 tokens.append(("addr", word >> 16))
             else:
                 tokens.append(("w", word))
@@ -272,25 +283,26 @@ class Matcher:
                 self._assign(olds[0], news[0], "exact")
 
     # -- 2. neighbour tie-break --------------------------------------------
-    def _anchor(self, entries: list[int], entry: int, anchors: set[int], step: int) -> int | None:
-        index = entries.index(entry) + step
-        while 0 <= index < len(entries):
-            if entries[index] in anchors:
-                return entries[index]
-            index += step
-        return None
+    @staticmethod
+    def _nearest_anchors(module: Module, entry: int, anchor_positions: list[int]) -> tuple[int | None, int | None]:
+        """The closest matched function before and after ``entry`` in address order, or ``None``."""
+        position = module.position[entry]
+        below = bisect.bisect_left(anchor_positions, position)
+        above = bisect.bisect_right(anchor_positions, position)
+        before = module.entries[anchor_positions[below - 1]] if below else None
+        after = module.entries[anchor_positions[above]] if above < len(anchor_positions) else None
+        return before, after
 
-    def _context_score(self, old_entry: int, new_entry: int, old_anchors: set[int], new_anchors: set[int]) -> int:
+    def _context_score(self, old_entry: int, new_entry: int, old_near: tuple[int | None, int | None],
+                       new_near: tuple[int | None, int | None]) -> int:
         score = 0
         old_calls = self.old.function[old_entry]["calls"]
         new_calls = self.new.function[new_entry]["calls"]
         for old_target, new_target in zip(old_calls, new_calls, strict=False):
             if old_target in self.match:
                 score += 1 if self.match[old_target] == new_target else -1
-        for step in (-1, 1):
-            old_near = self._anchor(self.old.entries, old_entry, old_anchors, step)
-            new_near = self._anchor(self.new.entries, new_entry, new_anchors, step)
-            if old_near is not None and new_near is not None and self.match[old_near] == new_near:
+        for old_anchor, new_anchor in zip(old_near, new_near, strict=True):
+            if old_anchor is not None and new_anchor is not None and self.match[old_anchor] == new_anchor:
                 score += 1
         return score
 
@@ -298,11 +310,15 @@ class Matcher:
         changed = True
         while changed:
             changed = False
-            anchors_old = set(self.match)
-            anchors_new = set(self.taken)
+            # Anchor positions are sorted once per round, so each function finds its nearest matched
+            # neighbours by bisection instead of a scan over every entry.
+            anchors_old = sorted(self.old.position[entry] for entry in self.match)
+            anchors_new = sorted(self.new.position[entry] for entry in self.taken)
             picks: list[tuple[int, int]] = []
             for _digest_key, (olds, news) in sorted(self._groups().items()):
-                scores = {(o, n): self._context_score(o, n, anchors_old, anchors_new) for o in olds for n in news}
+                old_near = {o: self._nearest_anchors(self.old, o, anchors_old) for o in olds}
+                new_near = {n: self._nearest_anchors(self.new, n, anchors_new) for n in news}
+                scores = {(o, n): self._context_score(o, n, old_near[o], new_near[n]) for o in olds for n in news}
                 for old_entry in olds:
                     best = self._unique_best([scores[(old_entry, n)] for n in news])
                     if best is None or scores[(old_entry, news[best])] < 1:
@@ -311,14 +327,22 @@ class Matcher:
                     back = self._unique_best([scores[(o, new_entry)] for o in olds])
                     if back is not None and olds[back] == old_entry:
                         picks.append((old_entry, new_entry))
-                if len(olds) > 1 or len(news) > 1:
-                    for old_entry in olds:
-                        self.refused[old_entry] = {"reason": "several functions share this code and their "
-                                                             "neighbours do not tell them apart",
-                                                   "candidates": sorted(news), "exact_code": True}
+                # Every round rewrites the refusal with the copies still free. A group that has shrunk
+                # to one old and one new copy is still refused when neighbours do not confirm it: the
+                # other copies were matched by neighbours, so this pair is never inferred by elimination.
+                for old_entry in olds:
+                    self.refused[old_entry] = {"reason": "several functions share this code and their "
+                                                         "neighbours do not tell them apart",
+                                               "candidates": sorted(news), "exact_code": True}
             for old_entry, new_entry in picks:
                 self._assign(old_entry, new_entry, "neighbour")
                 changed = True
+        # An old copy whose every new copy went to another function has no candidate left.
+        live = {entry for olds, _ in self._groups().values() for entry in olds}
+        for old_entry, info in self.refused.items():
+            if info.get("exact_code") and old_entry not in live and old_entry not in self.match:
+                self.refused[old_entry] = {"reason": "several functions share this code and every new copy "
+                                                     "of it is matched to another function", "exact_code": True}
 
     @staticmethod
     def _unique_best(values: list[int]) -> int | None:

@@ -110,8 +110,8 @@ static int run(int argc, char **argv) {
         json_string(stdout, result.disc_id);
         fputs(",\"iso_path\":", stdout);
         json_string(stdout, result.iso_path);
-        printf(",\"fingerprint\":\"%s\",\"expanded_bytes\":%" PRIu64 ",\"reused\":%s}\n",
-               result.fingerprint, result.expanded_bytes, result.reused ? "true" : "false");
+        printf(",\"identity\":\"%s\",\"expanded_bytes\":%" PRIu64 ",\"reused\":%s}\n",
+               result.identity, result.expanded_bytes, result.reused ? "true" : "false");
         return 0;
     }
     if (strcmp(command, "expand") == 0 && positional_count == 2 && !data_root) {

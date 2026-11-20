@@ -57,6 +57,20 @@ $(PROJECT_FONT_GENERATED_DIR)/$(2): $(3) $(4) $(5) tools/ttf2pgf.py tools/pgf_wr
 	"$(PYTHON)" -c "import shutil; shutil.copyfile('$(5)', '$(PROJECT_FONT_GENERATED_DIR_PY)/$(basename $(2))-OFL.txt')"
 endef
 
+# The same for a font drawn from two pinned sources: the first draws every character it has and the
+# second (--fallback) the rest. Arguments 1-9 as above, then 10 fallback TTF, 11 its pin, 12 its licence
+# text, 13 the first source's name and 14 the fallback's, which head their licences in the one licence
+# file that ships beside the font (each source's copyright notice and licence, OFL section 2). The Geist
+# faces that use this rule also read the console's measured horizontal metrics (below).
+define PROJECT_FALLBACK_FONT_RULE
+project-$(1)-font: $(PROJECT_FONT_GENERATED_DIR)/$(2)
+
+$(PROJECT_FONT_GENERATED_DIR)/$(2): $(3) $(4) $(5) $(10) $(11) $(12) $(PSP_MEASURED_LATIN_METRICS) tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md mk/housekeeping.mk
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(PROJECT_FONT_GENERATED_DIR_PY)').mkdir(parents=True, exist_ok=True)"
+	"$(PYTHON)" tools/ttf2pgf.py "$$@" "$(3)" --pin "$(4)" --fallback "$(10)" --fallback-pin "$(11)" $(6) $(8) --font-name "$(7)" --font-type "$(9)" --manifest "$(PROJECT_FONT_GENERATED_DIR_PY)/$(basename $(2)).json"
+	"$(PYTHON)" -c "from pathlib import Path; parts = [Path(p).read_text(encoding='utf-8') for p in ('$(5)', '$(12)')]; Path('$(PROJECT_FONT_GENERATED_DIR_PY)/$(basename $(2))-OFL.txt').write_text('$(13):\n\n' + parts[0] + '\n\n$(14) (the characters $(13) lacks):\n\n' + parts[1], encoding='utf-8', newline='\n')"
+endef
+
 # The console's two Latin sizes, 10.125 and 7 points at 128 dpi (#2005, font/README.md). Every face of
 # a size shares its strike: the size and emboldening that put the regular face's ink where the console
 # font of that size has it (x-height, cap height, descender, stem), and the console fonts' header
@@ -64,24 +78,42 @@ endef
 # baseline, x-height and cap height of the face's flat letters, so an e or an o ends on the row an R ends
 # on (#1300, docs/cleanroom/PGF_CONVERTER_SPEC.md section 3, rule 13). Each face then has its own spacing,
 # chosen so that its lines are as long as the console face's of the same index; the sans-serif faces also
-# get the console's digit width.
+# get the console's digit width. The vertical advance (0.950 em at the larger size, 0.917 em at the
+# smaller) and the other vertical settings below are rounded design proportions, tuned against a private
+# comparison with the console's fonts (#1300, rule 16); each glyph's vertical bearing Y sits at the margin
+# above the ascender. The repertoire is the Latin text rule over Unicode blocks and code pages, as far as
+# each face draws it (docs/cleanroom/PGF_CONVERTER_SPEC.md, --latin-cyrillic-text).
 LIBERATION := tests/fixtures/fonts/liberation
-PROJECT_LATIN_STRIKE_ARGS := --ppem 20 --snap-overshoot 3 --embolden-x 4 --embolden-advance 4 --nominal-size 648 --resolution 8192 --header-ascender 863 --header-descender -196
-PROJECT_LATIN_SMALL_STRIKE_ARGS := --ppem 13 --snap-overshoot 3 --embolden-x 2 --embolden-advance 2 --nominal-size 448 --resolution 8192 --header-ascender 576 --header-descender -131
-# Per index: source face, PGF style, then that face's spacing (--tracking, eighths of a pixel), where
-# measured its digit advance (26.6 px), and its horizontal-stroke weight (--embolden-y, eighths of a
-# pixel). The weight puts each sans-serif face's ink per letter within 2 % of the console face's (#1300);
-# the serif faces keep none, because they already carry more ink than the console's. The bold sans-serif
-# faces are already at the largest --embolden-y, so their vertical strokes take one sub-sample more
-# --embolden-x than the strike's (a later flag wins) to reach that.
-PROJECT_LATIN_0_FACE := LiberationSans-Regular
+GEIST := assets/fonts/ui/geist
+PROJECT_LATIN_STRIKE_ARGS := --ppem 20 --snap-overshoot 3 --embolden-x 4 --embolden-advance 4 --nominal-size 648 --resolution 8192 --header-ascender 863 --header-descender -196 --vertical-advance 950
+PROJECT_LATIN_SMALL_STRIKE_ARGS := --ppem 13 --snap-overshoot 3 --embolden-x 2 --embolden-advance 2 --nominal-size 448 --resolution 8192 --header-ascender 576 --header-descender -131 --vertical-advance 917
+# Per face within a size: source folder, source face and PGF style. The regular and bold sans-serif
+# faces (ltn0, ltn4, ltn8, ltn12) are Geist Regular and SemiBold, the player's own interface font,
+# whose letters fill their width as the console's do (#1300); the project ships no Geist italic or
+# Bold, so the italic sans-serif faces and every serif face are Liberation, and SemiBold takes the
+# bold weight with emboldening below. Liberation Sans Regular and Bold draw the characters Geist lacks
+# (--fallback). Geist's pin is the font list that already records the shipped UI fonts
+# (assets/fonts/ui/manifest.json, spec section 7); a Liberation face's is the pin file beside it.
+PROJECT_LATIN_0_DIR := $(GEIST)
+PROJECT_LATIN_1_DIR := $(LIBERATION)
+PROJECT_LATIN_2_DIR := $(LIBERATION)
+PROJECT_LATIN_3_DIR := $(LIBERATION)
+PROJECT_LATIN_4_DIR := $(GEIST)
+PROJECT_LATIN_5_DIR := $(LIBERATION)
+PROJECT_LATIN_6_DIR := $(LIBERATION)
+PROJECT_LATIN_7_DIR := $(LIBERATION)
+PROJECT_LATIN_0_FACE := Geist-Regular
 PROJECT_LATIN_1_FACE := LiberationSerif-Regular
 PROJECT_LATIN_2_FACE := LiberationSans-Italic
 PROJECT_LATIN_3_FACE := LiberationSerif-Italic
-PROJECT_LATIN_4_FACE := LiberationSans-Bold
+PROJECT_LATIN_4_FACE := Geist-SemiBold
 PROJECT_LATIN_5_FACE := LiberationSerif-Bold
 PROJECT_LATIN_6_FACE := LiberationSans-BoldItalic
 PROJECT_LATIN_7_FACE := LiberationSerif-BoldItalic
+PROJECT_LATIN_0_FALLBACK := LiberationSans-Regular
+PROJECT_LATIN_4_FALLBACK := LiberationSans-Bold
+PROJECT_LATIN_0_PIN := assets/fonts/ui/manifest.json
+PROJECT_LATIN_4_PIN := assets/fonts/ui/manifest.json
 PROJECT_LATIN_0_STYLE := Regular
 PROJECT_LATIN_1_STYLE := Regular
 PROJECT_LATIN_2_STYLE := Italic
@@ -90,25 +122,45 @@ PROJECT_LATIN_4_STYLE := Bold
 PROJECT_LATIN_5_STYLE := Bold
 PROJECT_LATIN_6_STYLE := Bold Italic
 PROJECT_LATIN_7_STYLE := Bold Italic
-PROJECT_LATIN_0_SPACING := --tracking 7 --digit-advance 852 --embolden-y 3
+# Per index, that face's spacing (--tracking, eighths of a pixel), where measured its digit advance
+# (26.6 px), and its horizontal-stroke weight (--embolden-y, eighths of a pixel). The weight puts each
+# sans-serif face's ink per letter within 2 % of the console face's (#1300); the serif faces keep none,
+# because they already carry more ink than the console's. The Liberation sans-serif faces of the
+# smaller size and the bold one of the larger size also take a horizontal scale (--scale-x,
+# thousandths, spec section 3 rule 14) and, for the bold ones, more --embolden-x than the strike's (a
+# later flag wins) in place of --embolden-y: thickening upwards had set their x-height (and the bold
+# faces' cap height) a row above the console's. The Geist faces take their own scale and weight, and
+# the bold ones their own size (--ppem), so that their images are as wide as the console's (a game that
+# places text by image width, as Hot Shots Tennis does, draws their lines as long as the console's),
+# their x-height and cap height sit on the console's rows, and their advances meet the line widths;
+# SemiBold's strokes are thickened both ways to the console bold faces' ink.
+# These values were tuned against a private comparison with the console's own fonts (#1300).
+# The Geist faces then take, for each character the console's font of the same index has, that font's
+# advance, image width and left, measured on the maintainer's PSP-3000 (firmware 6.61) and published as
+# numbers only (assets/fonts/psp_measured_latin_metrics.json, PSP-measured, spec section 3 rule 18): each such
+# letter keeps Geist's own outline, drawn as wide as the console's letter and placed where it is, so a
+# game's layout lands where the console's does. The spacing flags above then shape only the characters
+# the table does not list.
+PSP_MEASURED_LATIN_METRICS := assets/fonts/psp_measured_latin_metrics.json
+PROJECT_LATIN_0_SPACING := --scale-x 1150 --embolden-x 3 --embolden-y 0 --tracking -8 --digit-advance 972 --horizontal-metrics $(PSP_MEASURED_LATIN_METRICS) --horizontal-metrics-slot ltn0
 PROJECT_LATIN_1_SPACING := --tracking 2
 PROJECT_LATIN_2_SPACING := --tracking 7 --digit-advance 852 --embolden-y 3
 PROJECT_LATIN_3_SPACING := --tracking 3
-PROJECT_LATIN_4_SPACING := --tracking 6 --digit-advance 840 --embolden-y 8 --embolden-x 5
+PROJECT_LATIN_4_SPACING := --ppem 19 --scale-x 1125 --embolden-x 7 --embolden-y 6 --tracking -3 --digit-advance 945 --horizontal-metrics $(PSP_MEASURED_LATIN_METRICS) --horizontal-metrics-slot ltn4
 PROJECT_LATIN_5_SPACING := --tracking 1
-PROJECT_LATIN_6_SPACING := --tracking 6 --digit-advance 840 --embolden-y 8 --embolden-x 5
+PROJECT_LATIN_6_SPACING := --scale-x 1080 --embolden-x 8 --embolden-y 2 --tracking -2 --digit-advance 904
 PROJECT_LATIN_7_SPACING := --tracking 2
-PROJECT_LATIN_8_SPACING := --tracking 7 --digit-advance 555 --embolden-y 5
+PROJECT_LATIN_8_SPACING := --scale-x 1200 --embolden-x 1 --embolden-y 2 --tracking -6 --digit-advance 659 --horizontal-metrics $(PSP_MEASURED_LATIN_METRICS) --horizontal-metrics-slot ltn8
 PROJECT_LATIN_9_SPACING := --tracking 3
-PROJECT_LATIN_10_SPACING := --tracking 7 --digit-advance 555 --embolden-y 4
+PROJECT_LATIN_10_SPACING := --scale-x 1030 --tracking 5 --digit-advance 571 --embolden-y 4
 PROJECT_LATIN_11_SPACING := --tracking 4
-PROJECT_LATIN_12_SPACING := --tracking 6 --digit-advance 559 --embolden-y 8 --embolden-x 3
+PROJECT_LATIN_12_SPACING := --ppem 12 --scale-x 1250 --embolden-x 3 --embolden-y 6 --tracking -5 --digit-advance 659 --horizontal-metrics $(PSP_MEASURED_LATIN_METRICS) --horizontal-metrics-slot ltn12
 PROJECT_LATIN_13_SPACING := --tracking 3
-PROJECT_LATIN_14_SPACING := --tracking 6 --digit-advance 559 --embolden-y 8 --embolden-x 3
+PROJECT_LATIN_14_SPACING := --scale-x 1105 --embolden-x 6 --embolden-y 2 --tracking 0 --digit-advance 607
 PROJECT_LATIN_15_SPACING := --tracking 3
 # $(1) index, $(2) target stem, $(3) output, $(4) the face index within its size (0-7), $(5) strike.
 define PROJECT_LATIN_FACE_RULE
-$(call PROJECT_FONT_RULE,$(2),$(3),$(LIBERATION)/$(PROJECT_LATIN_$(4)_FACE).ttf,$(LIBERATION)/$(PROJECT_LATIN_$(4)_FACE).pin.json,$(LIBERATION)/OFL.txt,--latin-cyrillic-text,Nakagawa Open Latin,$(5) $(PROJECT_LATIN_$(1)_SPACING),$(PROJECT_LATIN_$(4)_STYLE))
+$(if $(PROJECT_LATIN_$(4)_FALLBACK),$(call PROJECT_FALLBACK_FONT_RULE,$(2),$(3),$(PROJECT_LATIN_$(4)_DIR)/$(PROJECT_LATIN_$(4)_FACE).ttf,$(or $(PROJECT_LATIN_$(4)_PIN),$(PROJECT_LATIN_$(4)_DIR)/$(PROJECT_LATIN_$(4)_FACE).pin.json),$(PROJECT_LATIN_$(4)_DIR)/OFL.txt,--latin-cyrillic-text,Nakagawa Open Latin,$(5) $(PROJECT_LATIN_$(1)_SPACING),$(PROJECT_LATIN_$(4)_STYLE),$(LIBERATION)/$(PROJECT_LATIN_$(4)_FALLBACK).ttf,$(LIBERATION)/$(PROJECT_LATIN_$(4)_FALLBACK).pin.json,$(LIBERATION)/OFL.txt,Geist,Liberation Sans),$(call PROJECT_FONT_RULE,$(2),$(3),$(PROJECT_LATIN_$(4)_DIR)/$(PROJECT_LATIN_$(4)_FACE).ttf,$(or $(PROJECT_LATIN_$(4)_PIN),$(PROJECT_LATIN_$(4)_DIR)/$(PROJECT_LATIN_$(4)_FACE).pin.json),$(PROJECT_LATIN_$(4)_DIR)/OFL.txt,--latin-cyrillic-text,Nakagawa Open Latin,$(5) $(PROJECT_LATIN_$(1)_SPACING),$(PROJECT_LATIN_$(4)_STYLE)))
 endef
 $(eval $(call PROJECT_LATIN_FACE_RULE,0,latin,nkltn.pgf,0,$(PROJECT_LATIN_STRIKE_ARGS)))
 $(eval $(call PROJECT_LATIN_FACE_RULE,1,latin-1,nkltn1.pgf,1,$(PROJECT_LATIN_STRIKE_ARGS)))
@@ -128,17 +180,23 @@ $(eval $(call PROJECT_LATIN_FACE_RULE,14,latin-14,nkltn14.pgf,6,$(PROJECT_LATIN_
 $(eval $(call PROJECT_LATIN_FACE_RULE,15,latin-15,nkltn15.pgf,7,$(PROJECT_LATIN_SMALL_STRIKE_ARGS)))
 
 # Japanese and Korean at the console's 10.125 points (18 pixels per em at 128 dpi). The Japanese
-# font draws CP932 and both JIS kanji levels from Noto Sans JP (the UI font's pinned instance); the
-# one character of that set Noto Sans JP lacks comes from M PLUS 1p. Its licence file carries both
-# licences. The header ascender and descender are the console fonts'.
-PROJECT_JAPANESE_FONT_ARGS := --ppem 18 --nominal-size 648 --resolution 8192 --header-ascender 1013 --header-descender -139 --baseline-ellipsis
-PROJECT_KOREAN_FONT_ARGS := --ppem 20 --tracking 1 --nominal-size 648 --resolution 8192 --header-ascender 1000 --header-descender -250
+# font draws CP932, both JIS kanji levels, JIS X 0213 and the named Unicode blocks of the Japanese text
+# rule (docs/cleanroom/PGF_CONVERTER_SPEC.md, --japanese-text) from Noto Sans JP (the UI font's pinned
+# instance); the 341 characters of that set Noto Sans JP lacks come from M PLUS 1p. Its licence file
+# carries both licences. The header ascender and descender are the console fonts'. Vertical metrics
+# (#1300, rule 16): Japanese advances one em down from an origin 0.88 em above the baseline; Korean
+# advances 1.185 em with bearing Y at the margin. Like the Latin vertical settings, these are rounded
+# design proportions tuned against a private comparison with the console's fonts. The Korean font
+# narrows each glyph wider than the em to the em (--fit-em, rule 17): the console's Korean font draws
+# every glyph within one full-width cell, and a game lays out text from the header maxima (#1300).
+PROJECT_JAPANESE_FONT_ARGS := --ppem 18 --nominal-size 648 --resolution 8192 --header-ascender 1013 --header-descender -139 --baseline-ellipsis --vertical-origin 880
+PROJECT_KOREAN_FONT_ARGS := --ppem 20 --fit-em --tracking 1 --nominal-size 648 --resolution 8192 --header-ascender 1000 --header-descender -250 --vertical-advance 1185
 NOTO_SANS_JP := assets/fonts/ui/noto-sans-jp
 project-japanese-font: $(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf
-$(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf: $(NOTO_SANS_JP)/NotoSansJP-Regular.ttf tests/fixtures/fonts/notosansjp/PIN.json $(NOTO_SANS_JP)/OFL.txt tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf tests/fixtures/fonts/mplus1p/PIN.json tests/fixtures/fonts/mplus1p/OFL.txt tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md
+$(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf: $(NOTO_SANS_JP)/NotoSansJP-Regular.ttf tests/fixtures/fonts/notosansjp/PIN.json $(NOTO_SANS_JP)/OFL.txt tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf tests/fixtures/fonts/mplus1p/PIN.json tests/fixtures/fonts/mplus1p/OFL.txt tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md mk/housekeeping.mk
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(PROJECT_FONT_GENERATED_DIR_PY)').mkdir(parents=True, exist_ok=True)"
 	"$(PYTHON)" tools/ttf2pgf.py "$@" "$(NOTO_SANS_JP)/NotoSansJP-Regular.ttf" --pin tests/fixtures/fonts/notosansjp/PIN.json --fallback tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf --fallback-pin tests/fixtures/fonts/mplus1p/PIN.json --japanese-text $(PROJECT_JAPANESE_FONT_ARGS) --font-name "Nakagawa Open Japanese" --font-type "Regular" --manifest "$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn.json"
-	"$(PYTHON)" -c "from pathlib import Path; parts = [Path(p).read_text(encoding='utf-8') for p in ('$(NOTO_SANS_JP)/OFL.txt', 'tests/fixtures/fonts/mplus1p/OFL.txt')]; Path('$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn-OFL.txt').write_text('Noto Sans JP:\n\n' + parts[0] + '\n\nM PLUS 1p (U+2252 only):\n\n' + parts[1], encoding='utf-8')"
+	"$(PYTHON)" -c "from pathlib import Path; parts = [Path(p).read_text(encoding='utf-8') for p in ('$(NOTO_SANS_JP)/OFL.txt', 'tests/fixtures/fonts/mplus1p/OFL.txt')]; Path('$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn-OFL.txt').write_text('Noto Sans JP:\n\n' + parts[0] + '\n\nM PLUS 1p (the characters Noto Sans JP lacks):\n\n' + parts[1], encoding='utf-8')"
 $(eval $(call PROJECT_FONT_RULE,korean,nkkr.pgf,tests/fixtures/fonts/gowundodum/GowunDodum-Regular.ttf,tests/fixtures/fonts/gowundodum/PIN.json,tests/fixtures/fonts/gowundodum/OFL.txt,--ks-x-1001-korean,Nakagawa Open Korean,$(PROJECT_KOREAN_FONT_ARGS),Regular))
 
 project-fonts: $(PROJECT_FONT_SLOT_TARGETS)
@@ -165,8 +223,13 @@ $(BUILD_DIR)/nk_android_title.o: android/app/src/main/cpp/nk_android_title.c $(R
 clean:
 	"$(PYTHON)" -c "import shutil, sys; from pathlib import Path; p = Path(r'$(BUILD_DIR)'); [shutil.rmtree(p) if p.is_dir() else p.unlink()] if p.exists() else None"
 
-# The shared fixture trees clean-fixtures removes, all beneath BUILD_ROOT.
-CLEAN_FIXTURE_DIRS := $(PRODUCTION_SMOKE_DIR) $(PRODUCTION_SMOKE_GAP_DIR) $(COSIM_DIR) \
+# The shared fixture trees clean-fixtures removes, all beneath BUILD_ROOT: the smoke gates
+# (production, gap, display, platform ladder), the cosimulation corpus and each of its lanes
+# (mk/cosim_snapshot.mk), the snapshot runner, the form sweep, the oracles and verify. A gate
+# that adds a fixture tree beneath BUILD_ROOT adds it here.
+CLEAN_FIXTURE_DIRS := $(PRODUCTION_SMOKE_DIR) $(PRODUCTION_SMOKE_GAP_DIR) $(DISPLAY_SMOKE_DIR) \
+	$(PLATFORM_LADDER_DIR) $(COSIM_DIR) $(COSIM_DIR)-split $(SNAPSHOT_DIR) $(FORM_SWEEP_ROOT) \
+	$(addprefix $(BUILD_ROOT)/,cosim-opt cosim-llvm cosim-llvm-mutants cosim-promoted cosim-resume) \
 	$(addprefix $(BUILD_ROOT)/,nakagawa_psp_oracle vfpu_oracle portable-core verify link)
 
 # The ephemeral build and run logs distclean and clean-all remove from LOG_DIR (the set
@@ -190,10 +253,12 @@ clean-all: clean clean-fixtures
 	$(REMOVE_EPHEMERAL_LOGS)
 
 # Preview-first workspace clean (issue #368): plans allowlisted output roots and
-# prints the exact file set. Deletion requires CONFIRM=1 (which passes --yes);
-# OLDER_THAN=<days> bounds the plan by file age. Existing clean targets are untouched.
+# prints the exact file set. Deletion requires CONFIRM=1 on the make command line (which
+# passes --yes; a CONFIRM inherited from the environment does not count); INCLUDE_TITLE=1
+# passes --include-title-outputs; OLDER_THAN=<days> bounds the plan by file age. Existing
+# clean targets are untouched.
 clean-preview:
-	"$(PYTHON)" tools/nk_clean.py $(if $(filter 1,$(CONFIRM)),--yes,) $(if $(strip $(OLDER_THAN)),--older-than $(OLDER_THAN),)
+	"$(PYTHON)" tools/nk_clean.py $(if $(and $(filter command line,$(origin CONFIRM)),$(filter 1,$(CONFIRM))),--yes,) $(if $(filter 1,$(INCLUDE_TITLE)),--include-title-outputs,) $(if $(strip $(OLDER_THAN)),--older-than $(OLDER_THAN),)
 
 # sched-selftest — white-box scheduler/lifecycle unit tests (tests/native/sched_selftest.c).
 # No game inputs needed; #includes sched.c for direct access to pick_next()/TCB state and

@@ -100,14 +100,18 @@ float nk_overlay_page_begin(NkUi *ui, const NkOverlayModel *model, float card_wi
     }
     card = width - 2.0f * NK_UI_GUTTER_NARROW;
     if (card > card_width) card = card_width;
+    /* The containers are open now, so the inner width returned below must stay positive: a
+       page reads 0 or less as "nothing was opened" and would leave them open. A window just
+       past the 80 px floor keeps a card one inner pixel wide instead. */
+    if (card < NK_UI_DIALOG_PAD_LEFT + NK_UI_DIALOG_PAD_RIGHT + 1.0f)
+        card = NK_UI_DIALOG_PAD_LEFT + NK_UI_DIALOG_PAD_RIGHT + 1.0f;
     /* Scrolling is the last resort: a page that fits its room does not move. */
     if (!nk_ui_dialog_begin_scroll(ui, OVERLAY_ID_CARD, card, nk_overlay_card_room(model))) {
         nk_ui_end_container(ui);
         nk_ui_end_container(ui);
         return 0.0f;
     }
-    /* The dialog card's padding is 28 px on each side. */
-    return card - 56.0f;
+    return card - (NK_UI_DIALOG_PAD_LEFT + NK_UI_DIALOG_PAD_RIGHT);
 }
 
 void nk_overlay_page_end(NkUi *ui, const char *hint, const NkUiPromptItem *prompts,
@@ -118,23 +122,49 @@ void nk_overlay_page_end(NkUi *ui, const char *hint, const NkUiPromptItem *promp
     nk_ui_end_container(ui); /* root */
 }
 
+bool nk_overlay_row_open(NkUi *ui, NkUiId id, const NkUiLayout *layout) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    bool focused = nk_ui_button_focused(ui, id);
+    NkUiStyle style;
+    memset(&style, 0, sizeof(style));
+    style.corner_radius = NK_UI_RADIUS_CONTROL;
+    style.fill_rgba = nk_ui_pressed(ui, id) ? theme->pressed :
+                      focused || nk_ui_hovered(ui, id) ? theme->surface_high : 0u;
+    nk_ui_register_button(ui, id, NK_UI_BUTTON_OWNS_HORIZONTAL);
+    if (!nk_ui_begin_container(ui, id, layout, &style)) return false;
+    if (focused) nk_ui_focus_ring(ui, id, NK_UI_RADIUS_CONTROL);
+    return true;
+}
+
+NkOverlayRowInput nk_overlay_row_input(NkUi *ui, NkUiId id, bool focused, NkUiNavDir *dir) {
+    if (focused && nk_ui_take_event(ui, NK_UI_EV_NAV, dir)) return NK_OVERLAY_ROW_STEP;
+    if (nk_ui_take_activation(ui, id)) return NK_OVERLAY_ROW_ACTIVATE;
+    return NK_OVERLAY_ROW_NONE;
+}
+
+/* How many of `text`'s bytes fit in `room`, cut before a whole UTF-8 sequence. */
+static size_t utf8_fit(const char *text, size_t room) {
+    size_t length = strlen(text);
+    if (length <= room) return length;
+    while (room > 0u && ((unsigned char)text[room] & 0xC0u) == 0x80u) --room;
+    return room;
+}
+
 void nk_overlay_eyebrow(NkUi *ui, NkUiId id, const char *marker, const char *text,
                         uint32_t rgba) {
     char line[160];
+    size_t used = 0u;
+    size_t t;
     if (marker != NULL && marker[0] != '\0') {
-        size_t m = strlen(marker);
-        size_t t = strlen(text);
-        if (m + 1u + t >= sizeof(line)) t = sizeof(line) - m - 2u;
+        /* The marker, a space, and at least the terminator always fit. */
+        size_t m = utf8_fit(marker, sizeof(line) - 2u);
         memcpy(line, marker, m);
         line[m] = ' ';
-        memcpy(line + m + 1u, text, t);
-        line[m + 1u + t] = '\0';
-    } else {
-        size_t t = strlen(text);
-        if (t >= sizeof(line)) t = sizeof(line) - 1u;
-        memcpy(line, text, t);
-        line[t] = '\0';
+        used = m + 1u;
     }
+    t = utf8_fit(text, sizeof(line) - 1u - used);
+    memcpy(line + used, text, t);
+    line[used + t] = '\0';
     nk_ui_text_role(ui, id, nk_ui_caps(ui, line), NK_UI_TYPE_EYEBROW, rgba);
 }
 

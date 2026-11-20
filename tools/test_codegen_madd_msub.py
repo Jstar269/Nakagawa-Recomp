@@ -6,7 +6,6 @@ The PSP Allegrex places these multiply-accumulate instructions in the normal SPE
 table (opcode 0), NOT in generic MIPS32 SPECIAL2 (opcode 0x1C). Verified against:
   - PPSSPP Core/MIPS/MIPSTables.cpp (tableSpecial[64])
   - PPSSPP Core/MIPS/MIPSInt.cpp Int_MulDivType
-  - Private HST ELF: 0x00026BAC word 0x0062001C (madd), 13 total occurrences
   - Binutils Allegrex patch: madd encoding 0x0000001c
 
 Generic MIPS32 SPECIAL2 (opcode 0x1C) contains madd/maddu/mul/msub/msubu/clz/clo at
@@ -98,9 +97,7 @@ class TestAllegrexMaddDecoding(unittest.TestCase):
     def test_madd_is_opcode0_not_opcode1C(self):
         # PSP Allegrex madd: opcode 0, funct 0x1C
         word_psp = encode_special(4, 5, 0, 0x1C)
-        stmt, _, _ = codegen.effect(0x00026BAC, word_psp)
-        # Must NOT raise Unsupported
-        self.assertNotIn("Unsupported", stmt)
+        stmt, _, _ = codegen.effect(0, word_psp)
         self.assertIn("_acc", stmt)
         self.assertIn("s->hi", stmt)
 
@@ -120,20 +117,17 @@ class TestAllegrexMaddDecoding(unittest.TestCase):
     def test_maddu_is_opcode0_funct1D(self):
         word = encode_special(4, 5, 0, 0x1D)
         stmt, _, _ = codegen.effect(0, word)
-        self.assertNotIn("Unsupported", stmt)
         self.assertIn("_acc", stmt)
 
     def test_msub_is_opcode0_funct2E(self):
         word = encode_special(4, 5, 0, 0x2E)
         stmt, _, _ = codegen.effect(0, word)
-        self.assertNotIn("Unsupported", stmt)
         self.assertIn("_acc", stmt)
         self.assertIn("_prod", stmt)
 
     def test_msubu_is_opcode0_funct2F(self):
         word = encode_special(4, 5, 0, 0x2F)
         stmt, _, _ = codegen.effect(0, word)
-        self.assertNotIn("Unsupported", stmt)
         self.assertIn("_acc", stmt)
 
 
@@ -322,49 +316,60 @@ class TestAllegrexEncodingsDocumented(unittest.TestCase):
     alongside the register-generated words for MADD and CLZ.
     """
 
+    # clz, clo, max and min write rd, so their words name rd=6: a write to r0
+    # is dropped and would leave nothing to check.
     CASES = (
-        ("clz", 0x16, (encode_special(4, 5, 0, 0x16), 0x01005016)),
-        ("clo", 0x17, (encode_special(4, 5, 0, 0x17),)),
+        ("clz", 0x16, (encode_special(4, 5, 6, 0x16), 0x01005016)),
+        ("clo", 0x17, (encode_special(4, 5, 6, 0x17),)),
         ("madd", 0x1C, (encode_special(4, 5, 0, 0x1C), 0x0109001C)),
         ("maddu", 0x1D, (encode_special(4, 5, 0, 0x1D),)),
-        ("max", 0x2C, (encode_special(4, 5, 0, 0x2C),)),
-        ("min", 0x2D, (encode_special(4, 5, 0, 0x2D),)),
+        ("max", 0x2C, (encode_special(4, 5, 6, 0x2C),)),
+        ("min", 0x2D, (encode_special(4, 5, 6, 0x2D),)),
         ("msub", 0x2E, (encode_special(4, 5, 0, 0x2E),)),
         ("msubu", 0x2F, (encode_special(4, 5, 0, 0x2F),)),
     )
 
+    # The operation each function's C must perform. The shapes exclude each
+    # other, so a word decoded as a sibling function (clz as clo, max as min,
+    # madd as maddu) lacks its own shape and shows the sibling's.
+    SHAPES = {
+        "clz": "__builtin_clz(s->r[",
+        "clo": "__builtin_clz(~s->r[",
+        "madd": "_acc+=_prod;",
+        "maddu": "_acc+=(uint64_t)s->r[",
+        "max": "(uint32_t)(_x>_y?_x:_y)",
+        "min": "(uint32_t)(_x<_y?_x:_y)",
+        "msub": "_acc-=_prod;",
+        "msubu": "_acc-=(uint64_t)s->r[",
+    }
+
     def test_each_psp_special_word_decodes_for_its_function(self):
+        self.assertEqual({name for name, _, _ in self.CASES}, set(self.SHAPES))
         for name, funct, words in self.CASES:
             for word in words:
                 with self.subTest(name=name, word=f"0x{word:08x}"):
                     self.assertEqual((word >> 26) & 0x3F, 0x00)
                     self.assertEqual(word & 0x3F, funct)
                     stmt, _, _ = codegen.effect(0, word)
-                    self.assertNotIn(
-                        "Unsupported",
-                        stmt,
-                        msg=f"{name} (funct 0x{funct:02x}) should be supported",
-                    )
+                    self.assertIn(self.SHAPES[name], stmt,
+                                  msg=f"{name} (funct 0x{funct:02x}) decodes as {stmt!r}")
+                    for other, shape in self.SHAPES.items():
+                        if other != name:
+                            self.assertNotIn(shape, stmt, msg=f"{name} decodes like {other}")
 
-    def test_private_elf_madd_words_are_translated(self):
-        """The private HST ELF contains madd at these addresses.
-        This test encodes the exact word values (opcode 0 / funct 0x1C)
-        and verifies codegen translates them without fallback."""
-        # Words extracted from private ELF .text: opcode 0 / funct 0x1C / various rs/rt
-        known_madd_words = [
-            0x0062001C,  # 0x00026BAC: madd $t3, $t2 (rs=3, rt=2 from word decode)
-            0x00C3001C,  # 0x00026BC8: madd $t6, $t3
-            0x0068001C,  # 0x00026BE4: madd $t3, $t8
-            0x00E9001C,  # 0x0003328C: madd $t7, $t9
-            0x0064001C,  # 0x00036684: madd $t3, $t4
-            0x0062001C,  # 0x00040E4C: madd $t3, $t2
-            0x0062001C,  # 0x000410FC: madd $t3, $t2
+    def test_madd_words_with_varied_registers_are_translated(self):
+        """madd words (opcode 0 / funct 0x1C) with varied rs/rt, generated from
+        their fields; codegen translates each without fallback."""
+        madd_words = [
+            encode_special(3, 2, 0, 0x1C),  # madd $v1, $v0 (rs=3, rt=2)
+            encode_special(6, 3, 0, 0x1C),  # madd $a2, $v1 (rs=6, rt=3)
+            encode_special(3, 8, 0, 0x1C),  # madd $v1, $t0 (rs=3, rt=8)
+            encode_special(7, 9, 0, 0x1C),  # madd $a3, $t1 (rs=7, rt=9)
+            encode_special(3, 4, 0, 0x1C),  # madd $v1, $a0 (rs=3, rt=4)
         ]
-        for word in known_madd_words:
+        for word in madd_words:
             with self.subTest(word=f"0x{word:08x}"):
                 stmt, _, _ = codegen.effect(0, word)
-                self.assertNotIn("Unsupported", stmt,
-                    msg=f"PSP madd word 0x{word:08x} should be translated, not fallback")
                 self.assertIn("_acc", stmt)
                 self.assertIn("s->hi", stmt)
 
@@ -378,7 +383,6 @@ class TestSyncDecoding(unittest.TestCase):
     def test_sync_word_translates_to_noop(self):
         # Canonical SYNC word: SPECIAL, all register fields and stype zero, funct 0x0f.
         stmt, saddr, width = codegen.effect(0x08804000, 0x0000000F)
-        self.assertNotIn("Unsupported", stmt)
         self.assertEqual(stmt, "(void)0;")
         self.assertIsNone(saddr)
         self.assertEqual(width, 0)

@@ -3,9 +3,12 @@
 
 """Host-neutral regression for the dynamic extracted-asset index."""
 
+import json
 import os
 from pathlib import Path
+import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -21,6 +24,28 @@ ROOT = Path(__file__).resolve().parent.parent
 SELFTEST_C = ROOT / "tests" / "native" / "asset_index_selftest.c"
 CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
 POWERSHELL = shutil.which("powershell") or shutil.which("pwsh")
+
+
+def synthetic_pe(marker: str) -> bytes:
+    """A minimal well-formed PE32+ image with no import table, then ``marker``.
+
+    The copy route reads the import table of every DLL and executable it stages and refuses
+    a file that is not a PE image, so a stand-in for SDL3.dll, a runtime DLL or a game
+    executable carries a DOS header, the PE signature, an x86-64 COFF header and a PE32+
+    optional header with sixteen empty data directories. A test that needs imports reports
+    them through its synthetic objdump; the marker keeps each stand-in's bytes distinct.
+    """
+    optional_size = 240
+    image = bytearray(64 + 24 + optional_size)
+    image[:2] = b"MZ"
+    struct.pack_into("<I", image, 0x3C, 64)
+    image[64:68] = b"PE\0\0"
+    struct.pack_into("<H", image, 64 + 4, 0x8664)  # IMAGE_FILE_MACHINE_AMD64
+    struct.pack_into("<H", image, 64 + 20, optional_size)
+    struct.pack_into("<H", image, 64 + 22, 0x0022)  # executable image, large-address-aware
+    struct.pack_into("<H", image, 64 + 24, 0x20B)  # PE32+
+    struct.pack_into("<I", image, 64 + 24 + 108, 16)  # NumberOfRvaAndSizes; all zero
+    return bytes(image) + marker.encode("ascii")
 
 CAPTION_HARNESS = r'''
 #include "recomp.h"
@@ -90,12 +115,16 @@ class TestAssetIndexSelftestC(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("asset index selftest: OK", result.stdout)
 
-    def test_synthetic_filesystem_tree_crosses_legacy_limits(self):
-        """The same source-owned files enumerate under short and >512-byte roots.
+    def test_host_filesystem_accepts_the_long_path_fixture(self):
+        """The host filesystem and UCRT accept the short and >512-byte fixture roots.
 
-        Windows receives an explicit ``\\\\?\\`` prefix so this is a real
-        wide-path filesystem check rather than a test that silently skips the
-        platform whose path handling is being repaired.
+        This checks the fixture and the platform, not the runtime: the inventory is
+        Python's ``rglob`` and the Windows step is a bare UCRT ``_wfopen``, so the
+        runtime's own directory walk (``data_walk`` in src/rt/hle_data.c) does not
+        run here, and ``test_short_and_long_host_paths_have_identical_lookup``
+        builds its long-root index in memory. Windows receives an explicit
+        ``\\\\?\\`` prefix so the platform whose path handling matters is not
+        silently skipped.
         """
         with tempfile.TemporaryDirectory(prefix="asset_tree_") as tmp:
             base = Path(tmp)
@@ -188,6 +217,94 @@ class TestProjectFontBuildWiring(unittest.TestCase):
         self.assertIn("compile: | project-fonts", makefile)
 
 
+class TestProjectFontPackageContents(unittest.TestCase):
+    """#1300: the package's font folder holds what the player's slots use and nothing else, and the
+    notices name every source font a shipped font draws from, and no other.
+
+    The release stages ``bin/font`` with ``tools/copy_build_assets.ps1 -ExcludeOptionalFonts``
+    (``.github/workflows/provenance-attestation.yml``), which copies exactly the names of its list;
+    ``font/README.md`` and the pinned source fonts are not copied."""
+
+    @staticmethod
+    def _staged() -> list[str]:
+        script = (ROOT / "tools" / "copy_build_assets.ps1").read_text(encoding="utf-8")
+        block = script.split("foreach ($name in @(", 1)[1].split("))", 1)[0]
+        return re.findall(r"'([^']+)'", block)
+
+    @staticmethod
+    def _variable(makefile: str, name: str) -> str:
+        match = re.search(rf"^{name} := (.+)$", makefile, re.MULTILINE)
+        assert match is not None, name
+        return match.group(1).strip()
+
+    def _slot_sources(self) -> dict[str, list[str]]:
+        """Each generated PGF and the source font files the Makefile converts into it, fallback first-class."""
+        makefile = read_makefile(ROOT)
+        folders = {"$(LIBERATION)": self._variable(makefile, "LIBERATION"),
+                   "$(GEIST)": self._variable(makefile, "GEIST")}
+        sources: dict[str, list[str]] = {}
+        for output, group in re.findall(r"PROJECT_LATIN_FACE_RULE,\d+,[\w-]+,(nk\w+\.pgf),(\d+),", makefile):
+            folder = folders[self._variable(makefile, f"PROJECT_LATIN_{group}_DIR")]
+            files = [f"{folder}/{self._variable(makefile, f'PROJECT_LATIN_{group}_FACE')}.ttf"]
+            if re.search(rf"^PROJECT_LATIN_{group}_FALLBACK := ", makefile, re.MULTILINE):
+                files.append(f"{folders['$(LIBERATION)']}/{self._variable(makefile, f'PROJECT_LATIN_{group}_FALLBACK')}.ttf")
+            sources[output] = files
+        sources["nkjpn.pgf"] = [f"{self._variable(makefile, 'NOTO_SANS_JP')}/NotoSansJP-Regular.ttf",
+                                "tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf"]
+        korean = re.search(r"PROJECT_FONT_RULE,korean,(nk\w+\.pgf),([^,]+\.ttf),", makefile)
+        assert korean is not None
+        sources[korean.group(1)] = [korean.group(2)]
+        return sources
+
+    def test_the_package_ships_each_slot_font_with_its_manifest_and_licence_and_nothing_else(self):
+        sources = self._slot_sources()
+        # The runtime's eighteen slot files (src/core/nk_font.c and nk_font_slots.h).
+        runtime = (ROOT / "src" / "core" / "nk_font.c").read_text(encoding="utf-8")
+        slots = (ROOT / "src" / "core" / "nk_font_slots.h").read_text(encoding="utf-8")
+        named = set(re.findall(r'"(nk\w+\.pgf)"', runtime)) | set(re.findall(r'"(nk\w+\.pgf)"', slots))
+        self.assertEqual(set(sources), named)
+        self.assertEqual(len(sources), 18)
+        expected = {f"{Path(name).stem}{suffix}" for name in sources for suffix in (".pgf", ".json", "-OFL.txt")}
+        staged = self._staged()
+        self.assertEqual(len(staged), len(set(staged)), "a name is staged twice")
+        self.assertEqual(set(staged), expected)
+
+    def test_the_notices_name_exactly_the_sources_of_the_shipped_fonts(self):
+        used = {Path(path).parent.as_posix() for files in self._slot_sources().values() for path in files}
+        notice = (ROOT / "NOTICE.md").read_text(encoding="utf-8")
+        entry = notice.split("**Stand-in PSP font sources", 1)[1].split("\n- **", 1)[0]
+        named = set(re.findall(r"`((?:tests/fixtures/fonts|assets/fonts/ui)/[\w-]+)/`", entry))
+        # Noto Sans JP is the project UI font, credited under "Project UI fonts" in NOTICE.md.
+        self.assertEqual(named | {"assets/fonts/ui/noto-sans-jp"}, used)
+        ui_fonts = {item["file"]: item["family"] for item in json.loads(
+            (ROOT / "assets" / "fonts" / "ui" / "manifest.json").read_text(encoding="utf-8"))["fonts"]}
+        for files in self._slot_sources().values():
+            for path in files:
+                if path in ui_fonts and not path.startswith("assets/fonts/ui/noto-sans-jp/"):
+                    # A shipped UI font (Geist): its record is the UI font list.
+                    self.assertIn(ui_fonts[path], entry, f"NOTICE.md names {ui_fonts[path]}, a source of a shipped font")
+                    continue
+                pin = Path(path).with_suffix(".pin.json")
+                if not (ROOT / pin).is_file():
+                    pin = Path(path).parent / "PIN.json"
+                if not (ROOT / pin).is_file():
+                    continue  # Noto Sans JP: its pin is tests/fixtures/fonts/notosansjp/PIN.json.
+                family = json.loads((ROOT / pin).read_text(encoding="utf-8"))["family"]
+                family = {"M PLUS 1p": "M+ 1p"}.get(family, family)
+                self.assertIn(family, entry, f"NOTICE.md names {family}, a source of a shipped font")
+
+    def test_a_font_drawn_from_two_sources_ships_both_licences(self):
+        makefile = read_makefile(ROOT)
+        rule = makefile.split("define PROJECT_FALLBACK_FONT_RULE", 1)[1].split("endef", 1)[0]
+        # The licence copy is the first source's licence text and then the fallback's.
+        self.assertIn("('$(5)', '$(12)')", rule)
+        self.assertIn("-OFL.txt').write_text('$(13):", rule)
+        self.assertIn("$(14) (the characters $(13) lacks)", rule)
+        self.assertIn("$(LIBERATION)/OFL.txt,Geist,Liberation Sans)", makefile)
+        japanese = makefile.split("$(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf:", 1)[1].split("\n$(eval", 1)[0]
+        self.assertIn("'$(NOTO_SANS_JP)/OFL.txt', 'tests/fixtures/fonts/mplus1p/OFL.txt'", japanese)
+
+
 @unittest.skipUnless(POWERSHELL, "PowerShell is required to exercise tools/copy_build_assets.ps1")
 class TestProjectFontAssetCopy(unittest.TestCase):
     OUTPUTS = (
@@ -258,7 +375,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             msys_bin = root / "custom-ucrt64" / "bin"
             msys_bin.mkdir(parents=True)
             sdl = msys_bin / "SDL3.dll"
-            sdl.write_bytes(b"synthetic SDL3 runtime")
+            sdl.write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             env = os.environ.copy()
             env["MSYS_PATH"] = str(msys_bin)
             env["PATH"] = os.pathsep.join([str(root / "empty-path"), str(Path(sys.executable).parent)])
@@ -280,7 +397,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             gcc_bin.mkdir()
             (gcc_bin / "gcc.exe").write_bytes(b"synthetic executable path marker")
             sdl = gcc_bin / "SDL3.dll"
-            sdl.write_bytes(b"synthetic SDL3 runtime")
+            sdl.write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             stale = root / "stale-msys" / "bin"
             stale.mkdir(parents=True)
             env = os.environ.copy()
@@ -290,6 +407,166 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             result = self._run_copy(build, env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual((build / "SDL3.dll").read_bytes(), sdl.read_bytes())
+
+    def _generated_fonts(self, build: Path) -> None:
+        generated = build / "project-font"
+        generated.mkdir(parents=True)
+        for name in self.OUTPUTS:
+            (generated / name).write_bytes(f"synthetic project asset: {name}\n".encode("ascii"))
+
+    @staticmethod
+    def _toolchain(root: Path, imports: dict[str, str]) -> Path:
+        """A synthetic toolchain bin directory whose objdump reports ``imports`` (binary -> DLL)."""
+        gcc_bin = root / "gcc-bin"
+        gcc_bin.mkdir()
+        (gcc_bin / "gcc.exe").write_bytes(b"synthetic executable path marker")
+        lines = ["@echo off"] + [f'if /i "%~nx2"=="{binary}" echo \tDLL Name: {dll}'
+                                 for binary, dll in imports.items()]
+        (gcc_bin / "objdump.cmd").write_text("\r\n".join(lines) + "\r\n", encoding="ascii")
+        return gcc_bin
+
+    def test_a_failed_font_copy_stops_the_script(self):
+        with tempfile.TemporaryDirectory(prefix="project-font-copy-fails-") as tmp:
+            build = Path(tmp) / "build"
+            self._generated_fonts(build)
+            # A directory where a font file belongs makes that one copy fail.
+            blocker = build / "font" / "nkjpn.pgf"
+            blocker.mkdir(parents=True)
+            (blocker / "keep").write_bytes(b"synthetic\n")
+            result = self._run_copy(build)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("nkjpn.pgf", result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "the Windows staging route copies DLLs")
+    def test_sdl3_import_closure_is_staged_by_the_copy_itself(self):
+        # SDL3.dll imports libiconv-2.dll. The gcc here has no share/licenses beside it, so the
+        # notice generator's own import copy cannot be what stages it.
+        with tempfile.TemporaryDirectory(prefix="project-font-sdl-closure-") as tmp:
+            root = Path(tmp)
+            build = root / "build"
+            self._generated_fonts(build)
+            gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
+            (gcc_bin / "SDL3.dll").write_bytes(synthetic_pe("synthetic SDL3 runtime"))
+            iconv = gcc_bin / "libiconv-2.dll"
+            iconv.write_bytes(synthetic_pe("synthetic libiconv runtime"))
+            env = os.environ.copy()
+            env.pop("MSYS_PATH", None)
+            env.pop("MINGW_PREFIX", None)
+            env["PATH"] = os.pathsep.join([str(gcc_bin), str(Path(sys.executable).parent)])
+
+            result = self._run_copy(build, env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((build / "libiconv-2.dll").read_bytes(), iconv.read_bytes())
+
+    @unittest.skipUnless(os.name == "nt", "the Windows staging route copies DLLs")
+    def test_a_stale_staged_runtime_dll_is_refreshed_with_its_imports(self):
+        with tempfile.TemporaryDirectory(prefix="project-font-stale-dll-") as tmp:
+            root = Path(tmp)
+            build = root / "build"
+            self._generated_fonts(build)
+            (build / "game.exe").write_bytes(synthetic_pe("synthetic game executable"))
+            (build / "libstdc++-6.dll").write_bytes(synthetic_pe("runtime from an older toolchain"))
+            gcc_bin = self._toolchain(root, {"game.exe": "libstdc++-6.dll",
+                                             "libstdc++-6.dll": "libgcc_s_seh-1.dll"})
+            current = gcc_bin / "libstdc++-6.dll"
+            current.write_bytes(synthetic_pe("runtime from the current toolchain"))
+            libgcc = gcc_bin / "libgcc_s_seh-1.dll"
+            libgcc.write_bytes(synthetic_pe("synthetic libgcc runtime"))
+            env = os.environ.copy()
+            env.pop("MSYS_PATH", None)
+            env.pop("MINGW_PREFIX", None)
+            env["PATH"] = os.pathsep.join([str(gcc_bin), str(Path(sys.executable).parent)])
+
+            result = self._run_copy(build, env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((build / "libstdc++-6.dll").read_bytes(), current.read_bytes())
+            self.assertEqual((build / "libgcc_s_seh-1.dll").read_bytes(), libgcc.read_bytes())
+
+    @staticmethod
+    def _compiler_cache_shim(root: Path) -> Path:
+        """A directory holding only a ``gcc``, as a compiler cache's masquerade directory does."""
+        shim = root / "compiler-cache" / "bin"
+        shim.mkdir(parents=True)
+        (shim / "gcc.exe").write_bytes(b"synthetic compiler-cache shim marker")
+        return shim
+
+    @unittest.skipUnless(os.name == "nt", "the Windows staging route copies DLLs")
+    def test_a_compiler_cache_shim_first_on_path_does_not_hide_the_toolchain(self):
+        # Hosted CI routes compiles through ccache: the first gcc on PATH is a link in a directory
+        # that holds nothing else, and the compiler it runs is the next gcc on PATH. The runtime
+        # DLLs and SDL3.dll are that toolchain's, not the shim directory's.
+        with tempfile.TemporaryDirectory(prefix="project-font-cache-shim-") as tmp:
+            root = Path(tmp)
+            build = root / "build"
+            self._generated_fonts(build)
+            (build / "game.exe").write_bytes(synthetic_pe("synthetic game executable"))
+            shim = self._compiler_cache_shim(root)
+            gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll",
+                                             "game.exe": "libstdc++-6.dll"})
+            sdl = gcc_bin / "SDL3.dll"
+            sdl.write_bytes(synthetic_pe("synthetic SDL3 runtime"))
+            iconv = gcc_bin / "libiconv-2.dll"
+            iconv.write_bytes(synthetic_pe("synthetic libiconv runtime"))
+            stdcxx = gcc_bin / "libstdc++-6.dll"
+            stdcxx.write_bytes(synthetic_pe("synthetic libstdc++ runtime"))
+            env = os.environ.copy()
+            env.pop("MSYS_PATH", None)
+            env.pop("MINGW_PREFIX", None)
+            env["PATH"] = os.pathsep.join([str(shim), str(gcc_bin), str(Path(sys.executable).parent)])
+
+            result = self._run_copy(build, env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((build / "SDL3.dll").read_bytes(), sdl.read_bytes())
+            self.assertEqual((build / "libiconv-2.dll").read_bytes(), iconv.read_bytes())
+            self.assertEqual((build / "libstdc++-6.dll").read_bytes(), stdcxx.read_bytes())
+
+    @unittest.skipUnless(os.name == "nt", "the Windows staging route copies DLLs")
+    def test_an_import_no_toolchain_directory_holds_is_a_named_stop(self):
+        # Skipping the shim must not turn the stop into a silent skip: with no gcc directory on
+        # PATH holding the DLL, the script names the import and every directory it looked in.
+        with tempfile.TemporaryDirectory(prefix="project-font-unresolved-dll-") as tmp:
+            root = Path(tmp)
+            build = root / "build"
+            self._generated_fonts(build)
+            (build / "SDL3.dll").write_bytes(synthetic_pe("synthetic SDL3 runtime"))
+            shim = self._compiler_cache_shim(root)
+            gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
+            env = os.environ.copy()
+            env.pop("MSYS_PATH", None)
+            env.pop("MINGW_PREFIX", None)
+            env["PATH"] = os.pathsep.join([str(shim), str(gcc_bin), str(Path(sys.executable).parent)])
+
+            result = self._run_copy(build, env)
+            output = "".join((result.stdout + result.stderr).split())
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("RUNTIME_DLL_UNRESOLVED:SDL3.dllimportslibiconv-2.dll", output)
+            for searched in (shim, gcc_bin):
+                self.assertIn("".join(str(searched).split()), output)
+            self.assertFalse((build / "libiconv-2.dll").exists())
+
+    @unittest.skipUnless(os.name == "nt", "the Windows staging route copies DLLs")
+    def test_the_first_toolchain_directory_holding_a_dll_supplies_it(self):
+        # Two gcc directories on PATH both hold libiconv-2.dll: the earlier one on PATH supplies
+        # it, as it did when only the first gcc's directory was read. A later directory is used
+        # only for a file the earlier ones lack.
+        with tempfile.TemporaryDirectory(prefix="project-font-two-holders-") as tmp:
+            root = Path(tmp)
+            build = root / "build"
+            self._generated_fonts(build)
+            (build / "SDL3.dll").write_bytes(synthetic_pe("synthetic SDL3 runtime"))
+            first = self._compiler_cache_shim(root)
+            (first / "libiconv-2.dll").write_bytes(synthetic_pe("synthetic libiconv runtime, first directory"))
+            gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
+            (gcc_bin / "libiconv-2.dll").write_bytes(synthetic_pe("synthetic libiconv runtime, later directory"))
+            env = os.environ.copy()
+            env.pop("MSYS_PATH", None)
+            env.pop("MINGW_PREFIX", None)
+            env["PATH"] = os.pathsep.join([str(first), str(gcc_bin), str(Path(sys.executable).parent)])
+
+            result = self._run_copy(build, env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((build / "libiconv-2.dll").read_bytes(),
+                             (first / "libiconv-2.dll").read_bytes())
 
     def test_missing_project_slot_output_fails_by_name(self):
         with tempfile.TemporaryDirectory(prefix="project-font-missing-") as tmp:
@@ -372,6 +649,8 @@ class TestProjectFontAssetCopy(unittest.TestCase):
         sched_idx = driver.find("sched_init(&s)")
         fn_idx = driver.find("dispatch_from_host(&s, entry);")
         boot_begin = driver.find("BOOT_EVENT phase=index_prepare_begin")
+        self.assertNotEqual(boot_begin, -1,
+                            "driver.c must announce index_prepare_begin")
         self.assertLess(boot_begin, prepare_idx,
                         "preparation is announced before it runs")
         for name, idx in (("gui_init", gui_idx), ("sched_init", sched_idx),

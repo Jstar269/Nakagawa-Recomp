@@ -79,8 +79,10 @@ from psp_oracle.run_psplink import (
 from psp_oracle import run_psplink as run_psplink_module
 from psp_oracle.parse_golden import (
     DMAC_INVALID_CASES,
+    CACHE_OUT_COUNTS,
     CACHE_SPEC,
     EXPECTED_CELLS as FPU_EXPECTED_CELLS,
+    IO_OUT_COUNTS,
     IO_SPEC,
     MBX_DELETE_WAIT_EXPECTED_FIELDS,
     MBX_DELETE_WAIT_SPEC,
@@ -123,6 +125,10 @@ class TransportDead(Exception):
 
 class CommandTimeout(Exception):
     """The peer produced no complete frame inside its deadline."""
+
+
+class UnqualifiedEpoch(RuntimeError):
+    """A case was asked to run outside a qualified epoch."""
 
 
 def frame_encode(msg_type: int, seq: int, payload: bytes) -> bytes:
@@ -192,14 +198,15 @@ def _campaign_fpu_line(case_id: str) -> str:
 def _campaign_spec_line(spec, case_id: str) -> str:
     if case_id == spec.terminal_case:
         out0 = spec.terminal_count
+        outputs = f"out0=0x{out0:08x}"
     else:
-        out0 = 1
-    suffix = f"out0=0x{out0:08x}"
-    if case_id != spec.terminal_case:
-        suffix += " out1=0x00000002"
+        counts = CACHE_OUT_COUNTS if spec == CACHE_SPEC else IO_OUT_COUNTS
+        outputs = " ".join(
+            f"out{index}=0x{index + 1:08x}" for index in range(counts[case_id])
+        )
     return (
         f"NAKAGAWA_PSP_TEST schema=1 test_id={spec.test_id} case_id={case_id} "
-        f"status=PASS result=0x00000000 {suffix}\n"
+        f"status=PASS result=0x00000000 {outputs}\n"
     )
 
 
@@ -788,7 +795,7 @@ class Orchestrator:
         self.recovery_events: list[str] = []
         self.l1_used = 0
         self.max_l1_recoveries = max_l1_recoveries
-        self.terminal_reason = None
+        self.terminal_reason: str | None = None
         self.expected_identity = {"runner_sha": RUNNER_SHA, "source_commit": SOURCE_COMMIT}
         self.qualified = False
 
@@ -858,7 +865,8 @@ class Orchestrator:
         self.state = "READY"
 
     def run_case(self, case_id: str, iteration: int = 1) -> None:
-        assert self.qualified, "cases may only run in a qualified epoch"
+        if not self.qualified:
+            raise UnqualifiedEpoch("cases may only run in a qualified epoch")
         self.state = "RUN_CASE"
         try:
             self._request(LOAD_CASE, f"case={case_id}\n".encode())
@@ -905,21 +913,24 @@ class Orchestrator:
         }
 
     def _on_transport_fault(self, case_id: str, error: Exception) -> None:
-        """Bounded ladder: L0 once, L1 once, then L4. Never fabricates."""
+        """Bounded ladder: L0, then L1 while its budget lasts, then L4.
+
+        A fault ends the qualified epoch: no case runs again until qualify()
+        succeeds anew. The budget alone decides between L1 and L4, so an earlier
+        recovery or evidence rejection cannot hide exhaustion. Never fabricates.
+        """
+        self.qualified = False
         self.state = "RECOVERABLE_FAULT"
         self._escalate("L0", f"transport fault during {case_id}: {error!r}")
         if isinstance(error, TransportDead) and not self.transport.runner.alive:
             self._escalate("L3", "control process dead; standalone relaunch required")
-        if self.terminal_reason is None and self.l1_used < self.max_l1_recoveries:
+        if self.l1_used < self.max_l1_recoveries:
             self.l1_used += 1
             self._escalate("L1", "host stack restart and requalify")
             self.terminal_reason = "RECOVERED_WITH_L1"
             self.state = "OFFLINE"
             return
-        if self.terminal_reason is None:
-            self._escalate("L4", "recovery budget exhausted")
-            self.terminal_reason = "PHYSICAL_INTERVENTION_REQUIRED"
-            self.state = "SESSION_WEDGED"
+        self._escalate("L4", "recovery budget exhausted")
 
 
 def _lock_held(_session_id, boot_number=42):
@@ -1055,6 +1066,57 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         transport.drop_after_send = True
         orch.run_case("vfpu_d_09")
         self.assertEqual(orch.terminal_reason, "PHYSICAL_INTERVENTION_REQUIRED")
+
+    @staticmethod
+    def _restart_link(transport: FakeTransport) -> None:
+        """Model the L1 host stack restart: a fresh, empty, live link."""
+        transport.drop_after_send = False
+        transport.dead = False
+        transport.rx.clear()
+
+    def test_10b_fault_ends_the_qualified_epoch_until_requalified(self):
+        orch, _, transport = self.build()
+        orch.qualify()
+        transport.drop_after_send = True
+        orch.run_case("vfpu_c_04")
+        self.assertEqual(orch.terminal_reason, "RECOVERED_WITH_L1")
+        self.assertFalse(orch.qualified)
+        # The link comes back, but nobody requalified: no case may run.
+        self._restart_link(transport)
+        with self.assertRaises(UnqualifiedEpoch):
+            orch.run_case("vfpu_c_05")
+        self.assertEqual(orch.envelopes, [])
+        orch.qualify()
+        orch.run_case("vfpu_c_05")
+        self.assertEqual(len(orch.envelopes), 1)
+
+    def test_10c_second_fault_after_recovery_exhausts_to_l4(self):
+        orch, _, transport = self.build()
+        orch.qualify()
+        transport.drop_after_send = True
+        orch.run_case("vfpu_c_06")
+        self.assertEqual(orch.terminal_reason, "RECOVERED_WITH_L1")
+        self._restart_link(transport)
+        orch.qualify()
+        transport.drop_after_send = True
+        orch.run_case("vfpu_c_07")
+        self.assertTrue(orch.recovery_events[-1].startswith("L4:"))
+        self.assertEqual(orch.terminal_reason, "PHYSICAL_INTERVENTION_REQUIRED")
+        self.assertEqual(orch.state, "SESSION_WEDGED")
+        self.assertEqual(orch.envelopes, [])
+
+    def test_10d_fault_after_evidence_rejection_still_exhausts_to_l4(self):
+        runner = RunnerModel(partial_result=True)
+        transport = FakeTransport(runner)
+        orch = Orchestrator(transport, max_l1_recoveries=0)
+        orch.qualify()
+        orch.run_case("vfpu_b_08")
+        self.assertEqual(orch.terminal_reason, "EVIDENCE_REJECTED")
+        transport.drop_after_send = True
+        orch.run_case("vfpu_b_09")
+        self.assertTrue(orch.recovery_events[-1].startswith("L4:"))
+        self.assertEqual(orch.terminal_reason, "PHYSICAL_INTERVENTION_REQUIRED")
+        self.assertEqual(orch.state, "SESSION_WEDGED")
 
     # -- 5/11. duplicate/stale rejection ---------------------------------
     def test_11_result_from_prior_epoch_is_discarded_as_stale(self):
@@ -2329,6 +2391,37 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertIn("did not exit", adapter.stop_detail)
         self.assertIn("not released", adapter.stop_detail)
 
+    def test_stop_records_a_post_kill_timeout_and_finishes_cleanup(self):
+        class NeverReapedProcess(CommandInputUsbHostFsProcess):
+            def __init__(self):
+                super().__init__(USBHOSTFS_BANNER, obeys_exit=False)
+                self.killed = False
+
+            def wait(self, timeout):
+                raise subprocess.TimeoutExpired("fake-usbhostfs", timeout)
+
+            def kill(self):
+                self.killed = True
+
+        process = NeverReapedProcess()
+        adapter = PsplinkProcessTransport(
+            session_id="synthetic-session",
+            pspsh_argv=["fake-pspsh"],
+            usbhostfs_argv=["fake-usbhostfs"],
+            host0_root=Path("host0-root"),
+            command_runner=lambda _command, _timeout: (0, "", "", "PROCESS_EXITED"),
+            popen_factory=lambda _command, **_kwargs: process,
+        )
+        adapter.server = process
+        with patch.object(run_psplink_module, "USBHOSTFS_EXIT_TIMEOUT", 0.05):
+            adapter.stop()
+
+        self.assertTrue(process.killed)
+        self.assertTrue(process.stdin.closed)
+        self.assertIsNone(adapter.server)
+        self.assertIsNone(adapter._server_output_thread)
+        self.assertIn("after kill", adapter.stop_detail)
+
     @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
     def test_stop_of_a_usbhostfs_that_already_exited_sends_nothing(self):
         process, adapter, scratch = self._started_command_input_server()
@@ -2625,7 +2718,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
 
         teardown = report["envelopes"][0]["TEARDOWN_CHECK"]
         self.assertEqual(teardown["status"], "PASS")
-        self.assertEqual(teardown["exprint_status"], "NOT_RUN")
+        self.assertEqual(teardown["exprint_status"], "PROCESS_EXITED")
         self.assertEqual(teardown["exprint_command_status"], "PROCESS_EXITED")
         self.assertEqual(
             teardown["exprint_reply"], "Synthetic exception query is unqualified\n"
@@ -3451,6 +3544,10 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
                 report["estimated_total_seconds"],
                 _campaign_queue_summary()["estimated_total_seconds"],
             )
+            self.assertEqual(
+                report["case_time_seconds"],
+                sum(row["estimated_seconds"] for row in report["queue"]),
+            )
             self.assertFalse((output_root / "checkpoint.json").exists())
 
     def test_campaign_resets_between_cases_and_reuses_preflight_qualification(self):
@@ -3464,9 +3561,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
                 binary = scratch / f"{case_id}.prx"
                 binary.write_bytes(b"synthetic PRX")
                 cases.append(CampaignCase(case_id, binary, 1.0))
-            transport = SimulatedPsplinkTransport(
-                transport_file_cases={"transport-write"}
-            )
+            transport = SimulatedPsplinkTransport()
             transport.host0_root = scratch
             report = PsplinkCampaignRunner(
                 transport,
@@ -3514,6 +3609,176 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(commands.count("ldstart host0:/smoke.prx"), 0)
         self.assertNotIn("reset", commands[second_launch + 1:])
         self.assertNotIn("modstun 0x04280001", commands[second_launch + 1:])
+
+
+    def test_direct_campaign_requires_intervention_when_a_launched_probe_is_not_unloaded(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_dir / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="direct-unload-failure-", dir=build_root) as name:
+            scratch = Path(name)
+            case_args = []
+            for case_id in ("transport-write", "model-profile"):
+                binary = scratch / f"{case_id}.prx"
+                binary.write_bytes(b"synthetic PRX")
+                case_args.extend(["--campaign-case", f"{case_id}={binary}"])
+            transport = SimulatedPsplinkTransport(
+                timeout_cases={"model-profile"},
+                fail_modstun_cases={"model-profile"},
+            )
+            transport.host0_root = scratch
+            with patch.object(
+                run_psplink_module, "PsplinkProcessTransport", return_value=transport
+            ):
+                code = run_psplink_module.main([
+                    *case_args,
+                    "--host0-root", str(scratch),
+                    "--model", "PSP-3000",
+                    "--source-commit", SOURCE_COMMIT,
+                    "--session-id", "synthetic-session",
+                    "--out", str(scratch / "report.json"),
+                ])
+            report = json.loads((scratch / "report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 3)
+        self.assertEqual(report["terminal_reason"], "PHYSICAL_INTERVENTION_REQUIRED")
+        self.assertEqual(report["intervention_case_id"], "model-profile")
+        self.assertEqual(report["state"], "SESSION_WEDGED")
+
+    def test_transport_start_keyboard_interrupt_stops_the_owned_transport(self):
+        class InterruptedTransport:
+            host0_root = None
+
+            def __init__(self):
+                self.stopped = False
+
+            def start(self):
+                raise KeyboardInterrupt()
+
+            def stop(self):
+                self.stopped = True
+
+        transport = InterruptedTransport()
+        runner = PsplinkCampaignRunner(
+            transport,
+            console_model="synthetic",
+            source_commit=SOURCE_COMMIT,
+        )
+        with patch.object(run_psplink_module, "_check_source_tree", return_value=None):
+            with self.assertRaises(KeyboardInterrupt):
+                runner.run([CampaignCase("transport-write", Path("synthetic.prx"), 1.0)])
+        self.assertTrue(transport.stopped)
+
+    def test_lock_loss_from_case_start_callback_is_a_named_lock_refusal(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="callback-lock-loss-", dir=fixture_dir) as name:
+            scratch = Path(name)
+            binary = scratch / "transport-write.prx"
+            binary.write_bytes(b"synthetic PRX")
+            transport = SimulatedPsplinkTransport()
+            transport.host0_root = scratch
+
+            def lock_was_revoked(_index, _case, _phase):
+                raise HardwareLockError("HARDWARE_LOCK_SESSION_MISMATCH")
+
+            runner = PsplinkCampaignRunner(
+                transport,
+                console_model="PSP-3000-04g",
+                source_commit=SOURCE_COMMIT,
+                model_code=3,
+            )
+            with patch.object(run_psplink_module, "_check_source_tree", return_value=None):
+                report = runner.run(
+                    [CampaignCase("transport-write", binary, 1.0)],
+                    on_case_start=lock_was_revoked,
+                )
+
+        self.assertEqual(report["terminal_reason"], "HARDWARE_LOCK_REFUSED")
+        self.assertEqual(report["hardware_lock_status"], "HARDWARE_LOCK_SESSION_MISMATCH")
+        self.assertNotIn(
+            "ldstart host0:/transport-write.prx",
+            [command for command, _timeout in transport.commands],
+        )
+
+    def test_recovery_skips_modstun_after_case_already_confirmed_unload(self):
+        transport = SimulatedPsplinkTransport()
+        runner = PsplinkCampaignRunner(
+            transport,
+            console_model="PSP-3000-04g",
+            source_commit=SOURCE_COMMIT,
+            model_code=3,
+        )
+        report = {
+            "status": "FAIL",
+            "issues": ["post-unload module set differs from S0"],
+            "recovery_eligible": True,
+        }
+        with patch.object(runner, "_unload_status", wraps=runner._unload_status) as unload, patch.object(
+            runner, "_reset_once", return_value=True
+        ) as reset:
+            self.assertTrue(
+                runner._enforce_teardown_check(
+                    report,
+                    module_uid="0x04280001",
+                    probe_succeeded=True,
+                    unload_status="PASS",
+                )
+            )
+        unload.assert_not_called()
+        reset.assert_called_once()
+        self.assertEqual(report["recovery_status"], "RECOVERED")
+
+    def test_roundtrip_preflight_refuses_a_dangling_host0_symlink(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="dangling-roundtrip-", dir=fixture_dir) as name:
+            root = Path(name)
+            binary = root / "transport-write.prx"
+            binary.write_bytes(b"synthetic PRX")
+            link = root / "nakagawa_transport_write.bin"
+            try:
+                link.symlink_to(root / "missing-target.bin")
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symbolic links are unavailable in this environment: {exc}")
+            transport = SimulatedPsplinkTransport()
+            transport.host0_root = root
+            runner = PsplinkCampaignRunner(
+                transport,
+                console_model="PSP-3000-04g",
+                source_commit=SOURCE_COMMIT,
+                model_code=3,
+            )
+            with patch.object(run_psplink_module, "_check_source_tree", return_value=None):
+                report = runner.run([CampaignCase("transport-write", binary, 1.0)])
+
+        self.assertEqual(report["terminal_reason"], "HOST0_ROUNDTRIP_PATH_EXISTS")
+        self.assertFalse(transport.started)
+
+    def test_roundtrip_read_refuses_a_symlink_without_following_it(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="roundtrip-symlink-", dir=fixture_dir) as name:
+            root = Path(name)
+            expected = bytes(
+                (0x5A ^ (index * 0x25 + (index >> 3))) & 0xFF
+                for index in range(64)
+            )
+            target = root / "target.bin"
+            target.write_bytes(expected)
+            link = root / "nakagawa_transport_write.bin"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symbolic links are unavailable in this environment: {exc}")
+            transport = SimulatedPsplinkTransport()
+            transport.host0_root = root
+            runner = PsplinkCampaignRunner(
+                transport,
+                console_model="synthetic",
+                source_commit=SOURCE_COMMIT,
+            )
+
+            self.assertFalse(runner._verify_host0_roundtrip())
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(target.read_bytes(), expected)
 
 
 @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
@@ -3887,6 +4152,8 @@ class CampaignCheckpointTransitionTests(unittest.TestCase):
         start, carried = _checkpoint_resume(launched, device_state=newer, case_count=self.CASES)
         self.assertEqual(start, 5)
         self.assertTrue(carried["host0_qualified"])
+        self.assertEqual(carried["interrupted_cases"], ["ge-break-continue"])
+        self.assertEqual(carried["failed_case_id"], "ge-break-continue")
         reset = dict(launched, phase="RESET_BEFORE_CASE")
         self.assertEqual(
             _checkpoint_resume(reset, device_state=newer, case_count=self.CASES)[0], 4
@@ -3940,6 +4207,43 @@ class CampaignCheckpointTransitionTests(unittest.TestCase):
             _checkpoint_state(next_case_index=0), case_count=self.CASES
         )
         self.assertEqual(start, 0)
+
+    def test_stop_without_a_named_case_keeps_the_carried_lost_case(self):
+        resumed = _checkpoint_case_started(
+            _checkpoint_state(
+                next_case_index=3, failed_case_id="kernel-alarm", host0_qualified=True,
+                interrupted_cases=["kernel-alarm"],
+            ),
+            3, "wait-outcomes", "RESET_BEFORE_CASE", device_boot_number=42,
+        )
+        final = _checkpoint_after_run(
+            resumed, terminal_reason="PHYSICAL_INTERVENTION_REQUIRED",
+            intervention_case_id=None, resume_case_index=3, case_count=self.CASES,
+        )
+        self.assertEqual(final["state"], "WAITING_FOR_NEW_QUALIFIED_BOOT")
+        self.assertEqual(final["next_case_index"], 3)
+        self.assertEqual(final["interrupted_cases"], ["kernel-alarm"])
+        self.assertEqual(final["failed_case_id"], "kernel-alarm")
+
+    def test_checkpoint_write_fsyncs_and_removes_temporary_file_on_replace_failure(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="checkpoint-write-", dir=fixture_dir) as name:
+            root = Path(name)
+            target = root / "checkpoint.json"
+            real_fsync = run_psplink_module.os.fsync
+            with patch.object(
+                run_psplink_module.os, "fsync", wraps=real_fsync
+            ) as fsync, patch.object(
+                run_psplink_module.os,
+                "replace",
+                side_effect=PermissionError("synthetic replace failure"),
+            ):
+                with self.assertRaises(PermissionError):
+                    run_psplink_module._write_campaign_json(target, {"state": "IN_PROGRESS"})
+            leftovers = list(root.glob(".checkpoint.json.*.tmp"))
+
+        self.assertGreaterEqual(fsync.call_count, 1)
+        self.assertEqual(leftovers, [])
 
 
 class CampaignPlanCheckpointTests(unittest.TestCase):
@@ -4042,11 +4346,143 @@ class CampaignPlanCheckpointTests(unittest.TestCase):
             code, report = self._run(plan_path, transport=fourth, boot_number=42)
             self.assertEqual(code, 3)
             self.assertEqual(self._launched(fourth), ["thread-scheduler"])
-            self.assertNotIn("reset", [command for command, _timeout in fourth.commands])
+            self.assertEqual(
+                [command for command, _timeout in fourth.commands].count("reset"), 1
+            )
             checkpoint = self._checkpoint(plan_path)
             self.assertEqual(checkpoint["state"], "WAITING_FOR_NEW_QUALIFIED_BOOT")
             self.assertEqual(checkpoint["next_case_index"], 3)
             self.assertEqual(checkpoint["interrupted_cases"], ["kernel-alarm", "thread-scheduler"])
+
+    def test_campaign_resume_with_lost_last_case_records_incomplete_checkpoint(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="campaign-lost-last-", dir=fixture_dir) as name:
+            plan_path = self._plan(Path(name))
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            last_index = len(CAMPAIGN_QUEUE_CASES) - 1
+            last_case = CAMPAIGN_QUEUE_CASES[last_index]
+            checkpoint = {
+                "schema": 2,
+                "campaign_id": plan["campaign_id"],
+                "source_commit": plan["source_commit"],
+                "session_id": plan["session_id"],
+                "queue": list(CAMPAIGN_QUEUE_CASES),
+                "state": "RUNNING",
+                "completed_cases": list(CAMPAIGN_QUEUE_CASES[:last_index]),
+                "interrupted_cases": [],
+                "host0_qualified": True,
+                "next_case_index": last_index,
+                "active_case_index": last_index,
+                "active_case_id": last_case,
+                "active_case_boot_number": 41,
+                "phase": "CASE_ACTIVE",
+                "failed_case_id": None,
+            }
+            (plan_path.parent / "checkpoint.json").write_text(
+                json.dumps(checkpoint), encoding="utf-8"
+            )
+            code, report = self._run(
+                plan_path, transport=SimulatedPsplinkTransport(), boot_number=42
+            )
+            saved = self._checkpoint(plan_path)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(report["status"], "INCOMPLETE")
+        self.assertEqual(report["failed_case_id"], last_case)
+        self.assertEqual(report["interrupted_cases"], [last_case])
+        self.assertEqual(saved["state"], "IN_PROGRESS")
+        self.assertEqual(saved["next_case_index"], len(CAMPAIGN_QUEUE_CASES))
+        self.assertEqual(saved["failed_case_id"], last_case)
+        self.assertEqual(saved["interrupted_cases"], [last_case])
+
+    def test_failed_checkpoint_case_active_write_keeps_the_case_queued(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="campaign-active-write-", dir=fixture_dir) as name:
+            plan_path = self._plan(Path(name))
+            transport = SimulatedPsplinkTransport()
+            original_write = run_psplink_module._write_campaign_json
+            failed = False
+
+            def fail_once(path, value):
+                nonlocal failed
+                if (
+                    not failed
+                    and path.name == "checkpoint.json"
+                    and value.get("phase") == "CASE_ACTIVE"
+                    and value.get("active_case_id") == "kernel-alarm"
+                ):
+                    failed = True
+                    raise PermissionError("synthetic checkpoint lock")
+                original_write(path, value)
+
+            with patch.object(run_psplink_module, "_write_campaign_json", side_effect=fail_once):
+                code, report = self._run(plan_path, transport=transport)
+            checkpoint = self._checkpoint(plan_path)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(report["terminal_reason"], "CHECKPOINT_WRITE_FAILED")
+        self.assertNotIn("kernel-alarm", self._launched(transport))
+        self.assertEqual(checkpoint["state"], "IN_PROGRESS")
+        self.assertEqual(checkpoint["next_case_index"], 1)
+        self.assertNotIn("kernel-alarm", checkpoint["interrupted_cases"])
+        self.assertIsNone(checkpoint["failed_case_id"])
+
+    def test_failed_checkpoint_completion_write_is_retried_before_reporting(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="campaign-complete-write-", dir=fixture_dir) as name:
+            plan_path = self._plan(Path(name))
+            transport = SimulatedPsplinkTransport()
+            original_write = run_psplink_module._write_campaign_json
+            failed = False
+
+            def fail_once(path, value):
+                nonlocal failed
+                if (
+                    not failed
+                    and path.name == "checkpoint.json"
+                    and "kernel-alarm" in value.get("completed_cases", [])
+                ):
+                    failed = True
+                    raise PermissionError("synthetic completion checkpoint lock")
+                original_write(path, value)
+
+            with patch.object(run_psplink_module, "_write_campaign_json", side_effect=fail_once):
+                code, report = self._run(plan_path, transport=transport)
+            checkpoint = self._checkpoint(plan_path)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(report["terminal_reason"], "CHECKPOINT_WRITE_FAILED")
+        self.assertEqual(report["checkpoint_state"], checkpoint["state"])
+        self.assertEqual(report["checkpoint_next_case_index"], checkpoint["next_case_index"])
+        self.assertIn("kernel-alarm", checkpoint["completed_cases"])
+
+    def test_failed_checkpoint_write_does_not_replace_power_cycle_requirement(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="campaign-wait-write-", dir=fixture_dir) as name:
+            plan_path = self._plan(Path(name))
+            transport = SimulatedPsplinkTransport(unfinished_cases={"kernel-alarm"})
+            original_write = run_psplink_module._write_campaign_json
+            failed = False
+
+            def fail_once(path, value):
+                nonlocal failed
+                if (
+                    not failed
+                    and path.name == "checkpoint.json"
+                    and value.get("state") == "WAITING_FOR_NEW_QUALIFIED_BOOT"
+                ):
+                    failed = True
+                    raise PermissionError("synthetic intervention checkpoint lock")
+                original_write(path, value)
+
+            with patch.object(run_psplink_module, "_write_campaign_json", side_effect=fail_once):
+                code, report = self._run(plan_path, transport=transport)
+            checkpoint = self._checkpoint(plan_path)
+
+        self.assertEqual(code, 3)
+        self.assertEqual(report["terminal_reason"], "PHYSICAL_INTERVENTION_REQUIRED")
+        self.assertEqual(checkpoint["state"], "WAITING_FOR_NEW_QUALIFIED_BOOT")
+        self.assertEqual(checkpoint["failed_case_id"], "kernel-alarm")
 
     def test_fresh_campaign_transport_start_failure_stays_at_the_preflight(self):
         fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
@@ -4267,14 +4703,33 @@ class HardwareLockGateTests(unittest.TestCase):
 
     def test_campaign_case_mode_requires_a_session_id(self):
         fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
-        with tempfile.TemporaryDirectory(prefix="lock-case-", dir=fixture_dir) as scratch_name:
+        build_root = fixture_dir / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="lock-case-", dir=build_root) as scratch_name:
             with self.assertRaises(SystemExit) as raised:
                 run_psplink_module.main(self._campaign_case_argv(Path(scratch_name)))
         self.assertEqual(raised.exception.code, 2)
 
+    def test_campaign_case_mode_rejects_an_unignored_host0_root(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="lock-case-visible-", dir=fixture_dir) as scratch_name:
+            argv = self._campaign_case_argv(
+                Path(scratch_name), "--session-id", "synthetic-session"
+            )
+            with patch.object(
+                run_psplink_module, "_read_hardware_lock",
+                return_value=(False, "HARDWARE_LOCK_NOT_HELD", None),
+            ), contextlib.redirect_stderr(io.StringIO()) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    run_psplink_module.main(argv)
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("ignored", stderr.getvalue())
+
     def test_campaign_case_mode_refuses_before_spawning_the_transport(self):
         fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
-        with tempfile.TemporaryDirectory(prefix="lock-case-", dir=fixture_dir) as scratch_name:
+        build_root = fixture_dir / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="lock-case-", dir=build_root) as scratch_name:
             scratch = Path(scratch_name)
             argv = self._campaign_case_argv(scratch, "--session-id", "synthetic-session")
             with patch.object(run_psplink_module, "_read_hardware_lock",
@@ -4294,7 +4749,9 @@ class HardwareLockGateTests(unittest.TestCase):
         # thread survived the stop, host0 went silent and the device needed a power cycle.
         fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         minimum = run_psplink_module.CAMPAIGN_CASE_MIN_TIMEOUT_SECONDS["ge-timing"]
-        with tempfile.TemporaryDirectory(prefix="lock-case-", dir=fixture_dir) as scratch_name:
+        build_root = fixture_dir / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="lock-case-", dir=build_root) as scratch_name:
             scratch = Path(scratch_name)
             transport, binary = scratch / "transport-write.prx", scratch / "ge-timing.prx"
             transport.write_bytes(b"synthetic PRX")
@@ -4512,9 +4969,7 @@ class ConsoleCaptureRegressionTests(unittest.TestCase):
             binary = scratch / f"{case_id}.prx"
             binary.write_bytes(b"synthetic PRX")
             cases.append(CampaignCase(case_id, binary, 0.3))
-        transport = SimulatedPsplinkTransport(
-            transport_file_cases={"transport-write"}, **transport_options
-        )
+        transport = SimulatedPsplinkTransport(**transport_options)
         transport.host0_root = scratch
         runner = PsplinkCampaignRunner(
             transport, console_model="PSP-3000-04g", source_commit=SOURCE_COMMIT, model_code=3,
@@ -4586,7 +5041,6 @@ class HostErrorContainmentTests(unittest.TestCase):
     @staticmethod
     def _alarm_transport(**options) -> SimulatedPsplinkTransport:
         return SimulatedPsplinkTransport(
-            transport_file_cases={"transport-write"},
             host0_log_contents={
                 "kernel-alarm": _console_capture("kernel_alarm.20261008-run3.txt")
             },
@@ -4843,7 +5297,6 @@ class ProgressiveHost0StreamTests(unittest.TestCase):
             cases.append(CampaignCase(case_id, binary, case_timeout))
         transport = _SlowHost0Transport(
             "registry-readonly", _registry_census_stream(),
-            transport_file_cases={"transport-write"},
             stdout_record_cases={"registry-readonly", "smoke"}, **transport_options,
         )
         transport.host0_root = scratch

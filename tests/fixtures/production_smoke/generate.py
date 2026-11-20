@@ -840,11 +840,11 @@ def verify(build_dir: Path, mode: str = "aot") -> int:
         raise RuntimeError("reduced gate_stub leaked into the production link")
     normalized_targets = _normalized_map_targets(map_text)
     absent = []
+    # Every chunk object the build emitted (5 for aot, 7 for aot-gap), not only the first three.
+    chunk_names = tuple(f"{stem}_recomp_{index}.o" for index in range(emitted_count))
     for name in (
         f"{stem}_recomp.o",
-        f"{stem}_recomp_0.o",
-        f"{stem}_recomp_1.o",
-        f"{stem}_recomp_2.o",
+        *chunk_names,
         "ge.o",
         "flight_recorder.o",
         "recomp.o",

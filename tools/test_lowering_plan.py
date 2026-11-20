@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -74,7 +75,7 @@ def _addr(text: str) -> int:
 def c_signature(text: str) -> dict:
     """The same facts, read from emit_function's C for one function."""
     # Each TAIL record, with a `_t` or `s->pc` target bound to the literal it was loaded from.
-    tails = []
+    tails: list[tuple[int | None, str | None]] = []
     for match in re.finditer(r"(?:uint32_t _t = (0x[0-9a-f]{8}u); )?(?:s->pc = (0x[0-9a-f]{8}u); )?"
                              r"sr_tail_record\(s, ([^,]+), ([^,]+),", text):
         loaded_t, loaded_pc, target, fn = match.groups()
@@ -280,6 +281,23 @@ class TransferRuleTests(unittest.TestCase):
             P.decode_op(0x10, 0x40026000)                          # mfc0
         with self.assertRaisesRegex(P.Unsupported, "INS with msb below lsb"):
             P.decode_op(0x10, 0x1F << 26 | 1 << 11 | 4 << 6 | 0x04)
+
+    def test_each_body_word_is_decoded_once(self):
+        # The scope pass decodes every non-control word; the emission pass reuses that
+        # decode instead of repeating it. (A delay slot is decoded again by its transfer.)
+        addu = 4 << 21 | 5 << 16 | 2 << 11 | 0x21                  # addu v0, a0, a1
+        words = {0x1000: addu, 0x1004: addu, 0x1008: JR_RA, 0x100C: NOP}
+        real = P.decode_op
+        calls = Counter()
+
+        def counting(addr, w, **kwargs):
+            calls[addr] += 1
+            return real(addr, w, **kwargs)
+
+        with mock.patch.object(P, "decode_op", counting):
+            plan, c_text = _plan_and_c(words)
+        self.assertEqual(plan_signature(plan), c_signature(c_text))
+        self.assertEqual((calls[0x1000], calls[0x1004]), (1, 1))
 
 
 if __name__ == "__main__":

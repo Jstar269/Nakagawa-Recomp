@@ -7,10 +7,12 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
+import json
 from pathlib import Path
 import struct
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -289,6 +291,24 @@ class XBProbeTests(unittest.TestCase):
                 self.assertEqual(main([str(path), "--lookup", "data/missing.bin"]), 2)
             self.assertIn("inner key not found", stderr.getvalue())
 
+    def test_cli_output_names_archive_by_leaf_only(self) -> None:
+        data = _make_archive([("data/test.bin", b"x", XBCompression.NONE)])
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="nk-private-dir-") as directory:
+            path = Path(directory) / "sample.xb2"
+            path.write_bytes(data)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(main([str(path), "--json"]), 0)
+            self.assertEqual(json.loads(stdout.getvalue())["path"], "sample.xb2")
+            self.assertEqual(XBArchiveReader(path).metadata()["path"], "sample.xb2")
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(main([str(path)]), 0)
+            self.assertIn("archive=sample.xb2 ", stdout.getvalue())
+            self.assertNotIn(Path(directory).name, stdout.getvalue())
+
     def test_shortest_valid_archive(self) -> None:
         raw = _make_archive([("a.bin", b"x", XBCompression.NONE)])
         reader = XBArchiveReader.from_bytes(raw)
@@ -427,16 +447,11 @@ class XBProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.xb"
             path.write_bytes(raw)
-            original_read_bytes = Path.read_bytes
-
-            def forbidden_read_bytes(self):
+            def forbidden_read_bytes(self: Path) -> bytes:
                 raise AssertionError("archive must not use an unbounded path read")
 
-            Path.read_bytes = forbidden_read_bytes
-            try:
+            with mock.patch.object(Path, "read_bytes", new=forbidden_read_bytes):
                 reader = XBArchiveReader(path)
-            finally:
-                Path.read_bytes = original_read_bytes
             self.assertEqual(reader.read_entry("a.bin"), b"payload")
 
     def test_variant_labeling(self) -> None:
@@ -528,12 +543,9 @@ class XBProbeTests(unittest.TestCase):
                     return ShortReadHandle(raw, f)
                 return real_open(self_path, *args, **kwargs)
 
-            Path.open = custom_open
-            try:
+            with mock.patch.object(Path, "open", new=custom_open):
                 reader = XBArchiveReader(path)
                 self.assertEqual(reader.read_entry("a.bin"), b"payload")
-            finally:
-                Path.open = real_open
 
 
 def _raw_archive(

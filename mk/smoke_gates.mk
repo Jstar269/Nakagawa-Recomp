@@ -95,6 +95,28 @@ display-smoke-run: display-smoke
 		-o $(DISPLAY_SMOKE_DIR)/videorec_fake_ffmpeg.exe tests/native/videorec_selftest.c src/rt/videorec.c
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) videorec --build-dir $(DISPLAY_SMOKE_DIR) \
 		--fake-ffmpeg $(DISPLAY_SMOKE_DIR)/videorec_fake_ffmpeg.exe
+	$(MAKE) display-smoke-cheats-base0
+
+# display-smoke-cheats-base0 builds the same guest with its image at 0, as a title manifest with
+# "base": 0 has its image loaded, and runs the full runtime with a CWCheat file (#2639). A cheat
+# names PSP addresses, and in this layout the image is not where a PSP has it: the run must move
+# the cheat that writes the image's data with the image, refuse by name the one that writes its
+# translated code and the one that names memory outside the image, and leave the guest's last
+# frame as it is; a second run with cheats off must leave the data byte unwritten.
+# display-smoke-run ends with it, so hosted CI runs it wherever it runs the display smoke.
+display-smoke-cheats-base0:
+	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) generate --out-dir $(DISPLAY_SMOKE_BASE0_FIXTURE) \
+		--frames $(DISPLAY_SMOKE_FRAMES)
+	$(MAKE) all \
+		GAME_NAME=$(DISPLAY_SMOKE_BASE0_NAME) \
+		GAME_ELF=$(DISPLAY_SMOKE_BASE0_FIXTURE)/guest.prx \
+		GAME_BASE=0 \
+		GAME_ENTRY=0 \
+		GAME_PSP_HEADER=$(DISPLAY_SMOKE_BASE0_FIXTURE)/guest.psp \
+		GAME_EXTRA_ELFS= TITLE_MANIFEST= \
+		BUILD_DIR=$(DISPLAY_SMOKE_BASE0_DIR) \
+		FUNCS_PER_CHUNK=1 PUBLIC_SAFE=1
+	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) cheats-base0 --build-dir $(DISPLAY_SMOKE_BASE0_DIR)
 
 # display-smoke-picture-gate runs the picture gate (#1845) headless: no reference gives SKIP, a run
 # accepted as the reference then matches at 0.00%, and a one-pixel change to it is reported.
@@ -139,6 +161,7 @@ display-smoke-player: player display-smoke-run
 
 display-smoke-clean:
 	$(MAKE) BUILD_DIR=$(DISPLAY_SMOKE_DIR) clean
+	$(MAKE) BUILD_DIR=$(DISPLAY_SMOKE_BASE0_DIR) clean
 
 # Public title qualification (issue #699). title-qualification validates the checked-in
 # public manifests, input profiles and staging declarations without building or launching.
@@ -379,6 +402,11 @@ override GE_CFLAGS += -DSR_GE_FRONTEND_PROFILE
 override PORTABLE_CORE_CFLAGS += -DSR_GE_FRONTEND_PROFILE
 endif
 override GE_CFLAGS += -DSR_FLIGHT_RECORDER_LINKED
+ifneq ($(strip $(REPRODUCIBLE_COMPILE_FLAG)),)
+ifeq ($(filter $(REPRODUCIBLE_COMPILE_FLAG),$(GE_CFLAGS)),)
+override GE_CFLAGS += $(REPRODUCIBLE_COMPILE_FLAG)
+endif
+endif
 # A trace build compiles the runtime with the trace writer too. This must precede the
 # runtime profile hash so switching TRACE rebuilds the runtime objects.
 TRACE ?= 0
@@ -394,7 +422,7 @@ endif
 # -ftrack-macro-expansion=0: Reduces memory overhead for macro-heavy code. GCC only: Clang
 #   refuses the option, so it is passed only when $(CC) is not Clang (#317). GCC builds are unchanged.
 RECOMP_OPT ?= -O0
-RECOMP_CC_IS_CLANG := $(findstring clang version,$(shell "$(CC)" --version 2>&1))
+# RECOMP_CC_IS_CLANG is resolved in the root Makefile beside REPRODUCIBLE_COMPILE_FLAG.
 RECOMP_GCC_ONLY_FLAGS := $(if $(RECOMP_CC_IS_CLANG),,-ftrack-macro-expansion=0)
 RECOMP_FLAGS ?= $(RECOMP_OPT) -w -fno-strict-aliasing -fno-var-tracking $(RECOMP_GCC_ONLY_FLAGS) $(NAN_TRAP_CFLAG)
 # An Android title is a shared library: its generated and GE objects are position
@@ -405,6 +433,11 @@ override RECOMP_FLAGS += -fPIC
 endif
 override RECOMP_FLAGS += $(STACK_CENSUS_CFLAG)
 override RECOMP_FLAGS += -DSR_FLIGHT_RECORDER_LINKED
+ifneq ($(strip $(REPRODUCIBLE_COMPILE_FLAG)),)
+ifeq ($(filter $(REPRODUCIBLE_COMPILE_FLAG),$(RECOMP_FLAGS)),)
+override RECOMP_FLAGS += $(REPRODUCIBLE_COMPILE_FLAG)
+endif
+endif
 ifeq ($(TRACE),1)
 override RECOMP_FLAGS += -DSR_INSTRUCTION_TRACE
 endif
@@ -414,28 +447,26 @@ endif
 ifeq ($(VERIFY),1)
 override RECOMP_FLAGS += -DSR_VERIFY
 endif
-export NK_RUNTIME_PROFILE_ENTRIES := CFLAGS=$(CFLAGS)$(NEWLINE)GE_CFLAGS=$(GE_CFLAGS)$(NEWLINE)TITLE_CONFIG_DIGEST=$(TITLE_CONFIG_DIGEST)$(NEWLINE)SDL3_PROVIDER=$(SDL3_PROVIDER)$(NEWLINE)SDL3_VERSION=$(SDL3_VERSION)$(NEWLINE)SDL3_DIR=$(SDL3_DIR)$(NEWLINE)PERF_AOT_INSTRUCTIONS=$(PERF_AOT_INSTRUCTIONS)
+export NK_RUNTIME_PROFILE_ENTRIES := CFLAGS=$(CFLAGS)$(NEWLINE)GE_CFLAGS=$(GE_CFLAGS)$(NEWLINE)TITLE_CONFIG_DIGEST=$(TITLE_CONFIG_DIGEST)$(NEWLINE)SDL3_PROVIDER=$(SDL3_PROVIDER)$(NEWLINE)SDL3_VERSION=$(SDL3_VERSION)$(NEWLINE)SDL3_DIR=$(SDL3_DIR)$(NEWLINE)SDL3_TTF=$(SDL3_TTF_AVAILABLE)$(NEWLINE)SDL3_TTF_CFLAGS=$(SDL3_TTF_CFLAGS)$(NEWLINE)PERF_AOT_INSTRUCTIONS=$(PERF_AOT_INSTRUCTIONS)
 
-# profile_hash(ENTRIES_VAR, COMPILER, ENTRIES_FILE): the parse-time hash of a build
-# profile whose entries are the newline-separated value of the exported ENTRIES_VAR.
-# Recipes read that variable from their environment (--entries-env), but GNU Make
-# before 4.4 -- the Linux runners' 4.3 among them -- does not hand exported variables
-# to $(shell ...), which silently hashed an empty profile there. So the parse-time
-# hash reads the same text from ENTRIES_FILE, written with $(file ...): no command
-# line, no quoting, any length. The file sits beside the profile stamps in
-# $(BUILD_DIR), which the parse-time mkdir creates; a parse that creates nothing (a
-# clean preview or an info-only parse) keeps the environment form.
-ifdef NK_BUILD_DIR_READY
-profile_hash = $(file >$(3),$($(1)))$(shell "$(PYTHON)" $(BUILD_PROFILE_TOOL) hash --compiler "$(2)" --entries-file "$(3)" --file "$(CPU_STATE_ABI_HEADER)")
-else
+# profile_hash(ENTRIES_VAR, COMPILER): the parse-time hash of a build profile whose
+# entries are the newline-separated value of the exported ENTRIES_VAR, read from the
+# environment (--entries-env). Only a parse that creates no build directory (a clean
+# preview or an info-only parse) calls it; a build parse hashes every profile at once
+# below.
 profile_hash = $(shell "$(PYTHON)" $(BUILD_PROFILE_TOOL) hash --compiler "$(2)" --entries-env $(1) --file "$(CPU_STATE_ABI_HEADER)")
-endif
 
 # The codegen profile's entries never travel on a command line: EXTRA_ELF_ARGS names
 # every guest module, and a title with a hundred modules under a long private path
 # overruns the command line a shell will accept. The entries and their order are the
 # ones the --entry form used, so the hash is unchanged.
 export NK_CODEGEN_PROFILE_ENTRIES := GAME_NAME=$(GAME_NAME)$(NEWLINE)GAME_BASE=$(GAME_BASE)$(NEWLINE)CODEGEN_PROFILE_ARG=$(CODEGEN_PROFILE_ARG)$(NEWLINE)EXTRA_ELF_ARGS=$(EXTRA_ELF_ARGS)$(NEWLINE)EXTRA_SPAN_ARG=$(EXTRA_SPAN_ARG)$(NEWLINE)FUNCS_PER_CHUNK=$(FUNCS_PER_CHUNK)$(NEWLINE)CODEGEN_USER_ARGS=$(CODEGEN_USER_ARGS)$(NEWLINE)CODEGEN_TOOL=$(CODEGEN_TOOL)$(CHUNK_TARGET_PROFILE_LINE)$(SYMBOL_MAP_PROFILE_LINE)$(NAME_IMPORTS_PROFILE_LINE)$(ENHANCEMENT_PACKAGE_PROFILE_LINE)
+# Recipes read the exported entries from their environment (--entries-env), but GNU
+# Make before 4.4 -- the Linux runners' 4.3 among them -- does not hand exported
+# variables to $(shell ...), which silently hashed an empty profile there. So the
+# build parse writes the same text with $(file ...) (no command line, no quoting, any
+# length) beside the profile stamps in $(BUILD_DIR), which the parse-time mkdir
+# creates, and hashes those files.
 ifdef NK_BUILD_DIR_READY
 $(file >$(BUILD_DIR)/.codegen-profile-entries,$(NK_CODEGEN_PROFILE_ENTRIES))
 $(file >$(BUILD_DIR)/.runtime-profile-entries,$(NK_RUNTIME_PROFILE_ENTRIES))
@@ -444,7 +475,7 @@ CODEGEN_PROFILE_HASH := $(word 1,$(_PROFILE_HASHES))
 RUNTIME_PROFILE_HASH := $(word 2,$(_PROFILE_HASHES))
 RECOMP_PROFILE_HASH := $(word 3,$(_PROFILE_HASHES))
 else
-CODEGEN_PROFILE_HASH := $(call profile_hash,NK_CODEGEN_PROFILE_ENTRIES,$(PYTHON),$(BUILD_DIR)/.codegen-profile-entries)
+CODEGEN_PROFILE_HASH := $(call profile_hash,NK_CODEGEN_PROFILE_ENTRIES,$(PYTHON))
 endif
 CODEGEN_PROFILE_STAMP := $(BUILD_DIR)/.codegen-profile-$(CODEGEN_PROFILE_HASH)
 

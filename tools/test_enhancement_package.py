@@ -33,7 +33,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Literal, overload
 import unittest
 from unittest import mock
 
@@ -77,6 +77,46 @@ from nk_core import package_cache
 
 SCHEMA_PATH = ROOT / "assets" / "enhancement_package.schema.json"
 GCC = shutil.which("gcc") or shutil.which("cc")
+SUBPROCESS_TIMEOUT_S = 120
+
+
+@overload
+def _run(*args: Any, text: Literal[True], **kwargs: Any) -> subprocess.CompletedProcess[str]: ...
+@overload
+def _run(*args: Any, text: Literal[False] = ..., **kwargs: Any) -> subprocess.CompletedProcess[bytes]: ...
+def _run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+    """subprocess.run with a bound, for this module's CLI and compiled-harness calls only.
+    Text-mode calls (text=True) return CompletedProcess[str]; the rest return bytes."""
+    kwargs.setdefault("timeout", SUBPROCESS_TIMEOUT_S)
+    return subprocess.run(*args, **kwargs)
+
+
+def _exit_path_prelude(lines: list[str], line: int, column: int) -> str | None:
+    """The code of the block enclosing an exit call that runs before it: the text from the
+    block's '{' to the call, at that block's own depth only. Nested sibling blocks are skipped
+    whole, since their statements do not run on this exit's path. None when no enclosing '{'
+    exists (the call is not inside a block this scan can see)."""
+    collected: list[str] = []
+    depth = 0
+    for j in range(line, -1, -1):
+        clean = lines[j].split("//", 1)[0]
+        if j == line:
+            clean = clean[:column]
+        elif clean.lstrip().startswith(("*", "/*")):
+            continue
+        kept: list[str] = []
+        for ch in reversed(clean):
+            if ch == "}":
+                depth += 1
+            elif ch == "{":
+                if depth == 0:
+                    collected.append("".join(reversed(kept)))
+                    return "\n".join(reversed(collected))
+                depth -= 1
+            elif depth == 0:
+                kept.append(ch)
+        collected.append("".join(reversed(kept)))
+    return None
 
 
 def _f32_decay_reference(k: float) -> int:
@@ -86,6 +126,15 @@ def _f32_decay_reference(k: float) -> int:
         exact = 1 - (1 - decimal.Decimal(k)).sqrt()
     return _bits_of(float(exact))
 
+
+
+class TestSubprocessBound(unittest.TestCase):
+    """The timeout bound is local to this module: other test modules share the interpreter
+    under one unittest run, so the shared subprocess module must stay untouched."""
+
+    def test_shared_subprocess_run_is_not_replaced(self) -> None:
+        self.assertEqual(subprocess.run.__module__, "subprocess")
+        self.assertEqual(subprocess.run.__name__, "run")
 
 
 class TestEnhancementPackageSchema(unittest.TestCase):
@@ -200,6 +249,17 @@ class TestEnhancementPackageSchema(unittest.TestCase):
             array_json_path.write_text("[]", encoding="utf-8")
             with self.assertRaises(EnhancementPackageError):
                 load_package(array_json_path)
+
+    def test_symbol_map_string_addresses_require_a_hex_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "synthetic.symbols.json"
+            path.write_text(json.dumps({"synth_entry": "0x08804000"}), encoding="utf-8")
+            self.assertEqual(
+                enhancement_package.load_symbol_map(path), {"synth_entry": 0x08804000}
+            )
+            path.write_text(json.dumps({"synth_entry": "08804000"}), encoding="utf-8")
+            with self.assertRaisesRegex(EnhancementPackageError, "0x-prefixed hex"):
+                enhancement_package.load_symbol_map(path)
 
     def test_valid_synthetic_packages_pass_validation(self) -> None:
         """Standard synthetic packages across categories must validate cleanly."""
@@ -443,7 +503,7 @@ class TestEnhancementPackageSchema(unittest.TestCase):
             invalid_path.write_text(json.dumps(bad_pkg), encoding="utf-8")
 
             # Valid file CLI run
-            res_ok = subprocess.run(
+            res_ok = _run(
                 [sys.executable, "-m", "enhancement_package", str(valid_path)],
                 cwd=ROOT / "tools",
                 capture_output=True,
@@ -453,7 +513,7 @@ class TestEnhancementPackageSchema(unittest.TestCase):
             self.assertIn("OK", res_ok.stdout)
 
             # Invalid file CLI run
-            res_bad = subprocess.run(
+            res_bad = _run(
                 [sys.executable, "-m", "enhancement_package", str(invalid_path)],
                 cwd=ROOT / "tools",
                 capture_output=True,
@@ -588,7 +648,8 @@ class TestEnhancementPackageSchema(unittest.TestCase):
 
 
 def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
-                              sections: tuple[tuple[str, int, int, int], ...] = ()) -> bytes:
+                              sections: tuple[tuple[str, int, int, int], ...] = (),
+                              symbols: tuple[tuple[str, int, int, int, int], ...] = ()) -> bytes:
     """Write a minimal synthetic MIPS32 little-endian ET_EXEC ELF for testing.
 
     ``sections`` adds a section header table of (name, addr, size, flags) PROGBITS
@@ -619,19 +680,67 @@ def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
     struct.pack_into("<8I", blob, 52, 1, payload_off, 0, 0, filesz, filesz, 5, 4)
     for addr, word in words.items():
         struct.pack_into("<I", blob, payload_off + addr, word)
-    if sections:
-        names = b"\0.shstrtab\0" + b"".join(name.encode() + b"\0" for name, *_ in sections)
-        strtab_off = len(blob)
-        blob += names
+    if sections or symbols:
+        names = [name for name, *_ in sections]
+        if symbols:
+            names.extend((".strtab", ".symtab"))
+        section_name_offsets: dict[str, int] = {}
+        name_at = 1
+        for name in (".shstrtab", *names):
+            section_name_offsets[name] = name_at
+            name_at += len(name) + 1
+        shstr = b"\0" + b"".join(name.encode() + b"\0" for name in (".shstrtab", *names))
+
+        strtab_off = 0
+        symtab_off = 0
+        if symbols:
+            string_table = bytearray(b"\0")
+            name_offsets: dict[str, int] = {}
+            for name, *_ in symbols:
+                name_offsets[name] = len(string_table)
+                string_table.extend(name.encode("ascii") + b"\0")
+            symbol_table = bytearray(16)  # the required all-zero first symbol
+            for name, value, size, symbol_type, section_index in symbols:
+                symbol_table.extend(struct.pack(
+                    "<IIIBBH", name_offsets[name], value, size, symbol_type, 0, section_index
+                ))
+            strtab_off = len(blob)
+            blob.extend(string_table)
+            while len(blob) % 4:
+                blob.append(0)
+            symtab_off = len(blob)
+            blob.extend(symbol_table)
+            while len(blob) % 4:
+                blob.append(0)
+
+        shstr_off = len(blob)
+        blob.extend(shstr)
         while len(blob) % 4:
             blob.append(0)
         shoff = len(blob)
-        headers = [bytes(40), struct.pack("<10I", 1, 3, 0, 0, strtab_off, len(names), 0, 0, 1, 0)]
-        name_at = len(b"\0.shstrtab\0")
+        headers = [
+            bytes(40),
+            struct.pack(
+                "<10I", section_name_offsets[".shstrtab"], 3, 0, 0,
+                shstr_off, len(shstr), 0, 0, 1, 0,
+            ),
+        ]
         for name, addr, size, flags in sections:
-            headers.append(struct.pack("<10I", name_at, 1, flags, addr, payload_off + addr, size, 0, 0, 4, 0))
-            name_at += len(name) + 1
-        blob += b"".join(headers)
+            headers.append(struct.pack(
+                "<10I", section_name_offsets[name], 1, flags, addr,
+                payload_off + addr, size, 0, 0, 4, 0,
+            ))
+        if symbols:
+            strtab_index = len(headers)
+            headers.append(struct.pack(
+                "<10I", section_name_offsets[".strtab"], 3, 0, 0,
+                strtab_off, len(string_table), 0, 0, 1, 0,
+            ))
+            headers.append(struct.pack(
+                "<10I", section_name_offsets[".symtab"], 2, 0, 0,
+                symtab_off, len(symbol_table), strtab_index, 1, 4, 16,
+            ))
+        blob.extend(b"".join(headers))
         struct.pack_into("<I", blob, 32, shoff)
         struct.pack_into("<HHH", blob, 46, 40, len(headers), 1)
     raw = bytes(blob)
@@ -1050,9 +1159,9 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             )
             exe = tmp / "drops.exe"
             assert GCC is not None
-            subprocess.run([GCC, "-std=c11", "-Wall", "-Werror", "-Wno-unused-function",
+            _run([GCC, "-std=c11", "-Wall", "-Werror", "-Wno-unused-function",
                             "-o", str(exe), str(harness)], check=True, capture_output=True)
-            out = subprocess.run([str(exe)], check=True, capture_output=True, text=True).stdout
+            out = _run([str(exe)], check=True, capture_output=True, text=True).stdout
             runs, alternations, begins = (int(v) for v in out.split())
             self.assertEqual(runs, 600)
             self.assertEqual(alternations, 1200)
@@ -1116,7 +1225,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                           f"nk_enh_file_data_0, {len(rewritten)}u)", combined)
             if GCC:
                 # The start-up block is C the runtime build compiles; check it is valid C.
-                checked = subprocess.run(
+                checked = _run(
                     [GCC, "-std=gnu11", "-fsyntax-only", "-Wall", "-Werror", "-Wno-unused-function",
                      f"-I{ROOT / 'src' / 'rt'}", f"-I{out_dir}", str(out_dir / "out.c")],
                     capture_output=True, text=True)
@@ -1143,6 +1252,9 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                     self.assertEqual(rc, 1, output)
                     self.assertIn(why, output)
                     self.assertEqual(files, {})
+        if not GCC:
+            # Reported last, so the refusal subtests above still run on a host without a compiler.
+            self.skipTest("needs a host C compiler for the -fsyntax-only start-up check")
 
     def test_float_pair_rewrite_scales_the_whole_constant(self) -> None:
         """lui+ori of one register names a float exactly; anything else refuses."""
@@ -1394,12 +1506,12 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                 exe = tmp / f"{name}.exe"
                 # The generated call statement keeps its guards on one line, as codegen emits it.
                 assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
-                built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                         "-Wno-misleading-indentation", "-Wno-unused-variable",
                                         f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
                                        capture_output=True, text=True)
                 self.assertEqual(built.returncode, 0, built.stderr)
-                run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+                run = _run([str(exe)], check=True, capture_output=True, text=True)
                 lines: list[str] = run.stdout.split("\n")
                 return lines
 
@@ -1574,13 +1686,13 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                 )
                 exe = tmp / f"{name}.exe"
                 assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
-                built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                         "-Wno-misleading-indentation", "-Wno-unused-variable",
                                         "-Wno-unused-value",
                                         f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
                                        capture_output=True, text=True)
                 self.assertEqual(built.returncode, 0, built.stderr)
-                run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+                run = _run([str(exe)], check=True, capture_output=True, text=True)
                 return run.stdout.split("\n")
 
             out = program("store_gate", enhanced)
@@ -1920,9 +2032,9 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                             encoding="utf-8",
                         )
                         exe = tmp / "map.exe"
-                        subprocess.run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe),
+                        _run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe),
                                         str(harness), "-lm"], check=True, capture_output=True, text=True)
-                        out = subprocess.run([str(exe), str(tmp / "k.txt")], check=True, capture_output=True,
+                        out = _run([str(exe), str(tmp / "k.txt")], check=True, capture_output=True,
                                              text=True).stdout.split()
                     self.assertEqual(out.pop(), "reports=1")
                     transform = {"decay": "decay_k_to_1-sqrt(1-k)", "retention": "retention_m_to_sqrt(m)"}[kind]
@@ -1983,9 +2095,9 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                             encoding="utf-8",
                         )
                         exe = tmp / "copy.exe"
-                        subprocess.run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe),
+                        _run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe),
                                         str(harness), "-lm"], check=True, capture_output=True, text=True)
-                        out = subprocess.run([str(exe)], check=True, capture_output=True, text=True).stdout.split()
+                        out = _run([str(exe)], check=True, capture_output=True, text=True).stdout.split()
                     stock = struct.unpack("<I", struct.pack("<f", k))[0]
                     mapped = struct.unpack("<I", struct.pack("<f", _scale_value(transform, k)))[0]
                     self.assertNotEqual(mapped, stock)
@@ -2038,6 +2150,17 @@ class TestEnhancementDataTransforms(unittest.TestCase):
         ):
             with self.subTest(transform=transform, dtype=dtype), self.assertRaises(ValueError):
                 plan_data_value(transform, dtype, raw)
+
+    def test_f32_data_overflow_is_reported_as_a_rescale_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "overflows when rescaled"):
+            plan_data_value("count_x2", "f32", struct.pack("<f", 3.0e38))
+
+    def test_f32_float_pair_overflow_is_a_named_refusal(self) -> None:
+        bits = struct.unpack("<I", struct.pack("<f", 3.0e38))[0]
+        lui = 0x3C020000 | (bits >> 16)
+        ori = 0x34420000 | (bits & 0xFFFF)
+        with self.assertRaisesRegex(EnhancementPackageError, "overflows when rescaled"):
+            plan_float_pair_rewrite({"id": "PAIR", "transform": "count_x2"}, lui, ori)
 
     def test_data_sites_resolve_fail_closed(self) -> None:
         stock = struct.pack("<2i", 15, 45)
@@ -2443,6 +2566,27 @@ class TestEnhancementDraft(unittest.TestCase):
                          0x1300: [_jal(0x1200), _NOP, _JR_RA, _NOP],          # frame body
                          0x1400: [_jal(0x1300), _NOP, _JR_RA, _NOP]})         # main loop
 
+    def test_draft_json_and_symbol_map_use_lf_newlines(self) -> None:
+        words = self._counter_title()
+        with tempfile.TemporaryDirectory() as temp:
+            executable = Path(temp) / "synthetic.elf"
+            executable.write_bytes(b"synthetic executable placeholder")
+            output = Path(temp) / "synth-60hz.json"
+            with mock.patch.object(
+                enhancement_package,
+                "_executable_view",
+                return_value=(words, self.IMPORTS, [], "a" * 64),
+            ), mock.patch("sys.stdout", new=StringIO()):
+                result = enhancement_package.main([
+                    "--draft", str(executable), "--title-id", "synthetic-allegrex-v1",
+                    "--id", "synth-60hz", "--game-version", "1.00", "--out", str(output),
+                ])
+
+            self.assertEqual(result, 0)
+            sidecar = output.with_name("synth-60hz.symbols.json")
+            self.assertNotIn(b"\r\n", output.read_bytes())
+            self.assertNotIn(b"\r\n", sidecar.read_bytes())
+
     def test_counter_poll_through_a_registration_wrapper(self) -> None:
         for wrapper in (True, False):
             with self.subTest(wrapper=wrapper):
@@ -2456,6 +2600,23 @@ class TestEnhancementDraft(unittest.TestCase):
                 self.assertTrue(site["handler_registered"])
                 self.assertEqual(draft["boundary_candidates"], [{"function": 0x1300, "calls": [0x1300]}])
                 self.assertEqual(draft["unexplained_waits"], [])   # the poll's own one-VBLANK wait
+
+    def test_intervening_call_clobbers_the_registered_handler_argument(self) -> None:
+        words = self._counter_title(wrapper=False)
+        words.update(_program({
+            0x1100: [
+                _i(0x0F, 0, _A2, 0),
+                _i(0x09, _A2, _A2, 0x1000),
+                _jal(0x1180), _NOP,
+                _i(0x09, _ZERO, _A0, 30),
+                _jal(self.STUB_REG), _NOP, _JR_RA, _NOP,
+            ],
+            0x1180: [_i(0x09, _ZERO, _A2, 0), _JR_RA, _NOP],
+        }))
+
+        draft = draft_timing_package(words, self.IMPORTS)
+
+        self.assertFalse(draft["pacing_sites"][0]["handler_registered"])
 
     def test_package_validates_and_rewrites_the_poll(self) -> None:
         words = self._counter_title()
@@ -2963,6 +3124,11 @@ class TestEnhancementRateComparison(unittest.TestCase):
                                            "--json", str(self.tmp / "r.json"), *extra])
         return rc, out.getvalue(), json.loads((self.tmp / "r.json").read_text(encoding="utf-8"))
 
+    def test_json_report_uses_lf_newlines(self) -> None:
+        self._run({"serves": lambda n, v: str(n // 45)},
+                  {"serves": lambda n, v: str(n // 90)})
+        self.assertNotIn(b"\r\n", (self.tmp / "r.json").read_bytes())
+
     def test_rescaled_events_match_and_pass(self) -> None:
         # One serve every 45 stock updates; the package doubles the count, so every 90 enhanced updates.
         rc, text, data = self._run({"serves": lambda n, v: str(n // 45)}, {"serves": lambda n, v: str(n // 90)},
@@ -3411,7 +3577,7 @@ class TestEnhancementStoreSites(unittest.TestCase):
         for on in (0, 1):
             exes[on] = tmp / f"{name}{on}.exe"
             assert GCC is not None
-            built = subprocess.run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+            built = _run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                     f"-DNK_ON={on}", f"-I{ROOT / 'src' / 'rt'}", "-o", str(exes[on]), str(src),
                                     str(ROOT / "src" / "rt" / "vfpu_tables.c"), "-lm"],
                                    capture_output=True, text=True)
@@ -3452,12 +3618,12 @@ class TestEnhancementStoreSites(unittest.TestCase):
             ]
             for on, args in runs:
                 with self.subTest(on=on, args=args):
-                    results = {name: subprocess.run([str(e[on]), *args], capture_output=True, text=True)
+                    results = {name: _run([str(e[on]), *args], capture_output=True, text=True)
                                for name, e in exes.items()}
                     self.assertEqual(
                         (results["keyed"].returncode, results["keyed"].stdout, results["keyed"].stderr),
                         (results["plain"].returncode, results["plain"].stdout, results["plain"].stderr))
-            res = subprocess.run([str(exes["keyed"][1]), "I:10"], capture_output=True, text=True)
+            res = _run([str(exes["keyed"][1]), "I:10"], capture_output=True, text=True)
             self.assertEqual(res.returncode, 1)
             self.assertIn("ENHANCEMENT_DATA_MISMATCH: site I_STORE at 0x00001200 stores 10 (0x0000000a), "
                           "not one of the package's stock values; the run stops here", res.stderr)
@@ -3536,13 +3702,13 @@ class TestEnhancementStoreSites(unittest.TestCase):
             exes = {}
             for on in (0, 1):
                 exes[on] = tmp / f"store{on}.exe"
-                subprocess.run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                _run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                 f"-DNK_ON={on}", f"-I{ROOT / 'src' / 'rt'}", "-o", str(exes[on]), str(src),
                                 str(ROOT / "src" / "rt" / "perf.c"), "-lm"],
                                check=True, capture_output=True, text=True)
 
             def run(on: int, *args: str) -> subprocess.CompletedProcess[str]:
-                return subprocess.run([str(exes[on]), *args], capture_output=True, text=True)
+                return _run([str(exes[on]), *args], capture_output=True, text=True)
 
             f30, f60, f120 = (f"0x{_f32_bits_of(v):08x}" for v in (30.0, 60.0, 120.0))
             f_unreached, i_unreached = (
@@ -3670,12 +3836,12 @@ class TestEnhancementStoreSites(unittest.TestCase):
                 src.write_text(harness, encoding="utf-8")
                 exe = tmp / "gate.exe"
                 assert GCC is not None
-                built = subprocess.run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                built = _run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                         "-Wno-misleading-indentation", f"-I{ROOT / 'src' / 'rt'}", "-o",
                                         str(exe), str(src), str(ROOT / "src" / "rt" / "perf.c"), "-lm"],
                                        capture_output=True, text=True)
                 self.assertEqual(built.returncode, 0, built.stderr)
-                res = subprocess.run([str(exe)], capture_output=True, text=True)
+                res = _run([str(exe)], capture_output=True, text=True)
                 self.assertEqual(res.returncode, 0, res.stderr)
                 # Stock, every update, while F_STORE has not applied; then every second update.
                 self.assertEqual(res.stdout.splitlines(), ["before 4", "after 2"])
@@ -3700,10 +3866,32 @@ class TestEnhancementStoreSites(unittest.TestCase):
                 if not exit_call.search(code) or code.lstrip().startswith(("*", "/*")):
                     continue
                 paths += 1
-                window = "\n".join(lines[max(0, n - 10):n + 1])
                 with self.subTest(path=f"{path.name}:{n + 1}"):
-                    self.assertRegex(window, report)
+                    match = exit_call.search(code)
+                    assert match is not None
+                    prelude = _exit_path_prelude(lines, n, match.start())
+                    self.assertIsNotNone(prelude, "no enclosing '{' before the exit call")
+                    assert prelude is not None
+                    self.assertRegex(prelude, report)
         self.assertGreaterEqual(paths, 12)
+
+    def test_exit_path_scan_ignores_sibling_blocks(self) -> None:
+        """The exit-path scan reads only the exit's own block: a sibling block's shutdown call
+        does not count, and an exit with no enclosing block is reported, not passed."""
+        def prelude(source: str) -> str | None:
+            lines = source.splitlines()
+            n = next(i for i, text in enumerate(lines) if "_Exit(2)" in text)
+            return _exit_path_prelude(lines, n, lines[n].index("_Exit(2)"))
+
+        sibling = prelude("void f(int a) {\nif (a) {\n sr_perf_shutdown();\n _Exit(1);\n}\n_Exit(2);\n}\n")
+        self.assertIsNotNone(sibling)
+        self.assertNotIn("sr_perf_shutdown", sibling or "")
+        same_block = prelude("void f(void) {\n sr_perf_shutdown(); if (x) { y(); }\n _Exit(2); }\n")
+        self.assertIn("sr_perf_shutdown();", same_block or "")
+        self.assertNotIn("y();", same_block or "")
+        after_call = prelude("void f(void) {\n _Exit(2); sr_perf_shutdown(); }\n")
+        self.assertNotIn("sr_perf_shutdown", after_call or "")
+        self.assertIsNone(prelude("_Exit(2);\n"))
 
     def test_package_without_store_keys_emits_no_store_table(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3878,6 +4066,99 @@ class TestAltGateStaticChecks(unittest.TestCase):
     CALLER, TARGET, TABLE, TICK1, TICK2, LEAF, OTHER, END = (
         0x1000, 0x2000, 0x3000, 0x4000, 0x4100, 0x4200, 0x4300, 0x4400)
     SITE = 0x100C
+
+    def test_reserved_blez_rt_encoding_is_refused_by_the_instruction_graph(self) -> None:
+        import analyze
+
+        start = 0x1000
+        reserved_blez = 0x18010001  # blez with reserved rt=1
+        self.assertIsNone(analyze.branch_target(start, reserved_blez))
+        words = {
+            start: reserved_blez,
+            start + 4: 0,
+            start + 8: 0x03E00008,
+            start + 12: 0,
+        }
+        read_words = lambda address, count: [
+            words[address + 4 * index]
+            for index in range(count)
+            if address + 4 * index in words
+        ]
+
+        with self.assertRaisesRegex(EnhancementPackageError, "reserved branch encoding"):
+            enhancement_package._Graph(
+                start, start + 16, read_words, "synthetic target", "sites[0](SYNTH)"
+            )
+
+    def test_function_start_queries_use_the_sorted_sequence_without_materializing_it(self) -> None:
+        class SortedStarts:
+            values = (0x1000, 0x5000)
+
+            def __len__(self):
+                return len(self.values)
+
+            def __getitem__(self, index):
+                return self.values[index]
+
+            def __iter__(self):
+                raise AssertionError("sorted starts must not be copied into a new set")
+
+            def __contains__(self, _value):
+                raise AssertionError("sorted starts must not use linear membership")
+
+        target = 0x1000 + 4 * enhancement_package.ALT_GATE_MAX_FUNCTION_WORDS + 0x100
+        starts = SortedStarts()
+        starts.values = (0x1000, target)
+        self.assertEqual(
+            enhancement_package._function_end(0x1000, starts, "synthetic function", "site"),
+            0x1000 + 4 * enhancement_package.ALT_GATE_MAX_FUNCTION_WORDS,
+        )
+        words = {
+            0x1000: 0x08000000 | (target >> 2),
+            0x1004: 0,
+            target: 0x03E00008,
+            target + 4: 0,
+        }
+        read_words = lambda address, count: [
+            words[address + 4 * index]
+            for index in range(count)
+            if address + 4 * index in words
+        ]
+        graph = enhancement_package._Graph(
+            0x1000, 0x1010, read_words, "synthetic function", "site", starts
+        )
+        self.assertEqual(graph.calls[0x1004], target)
+        self.assertEqual(
+            enhancement_package._direct_call_tree("site", 0x1000, read_words, starts),
+            {0x1000, target},
+        )
+
+    def test_jump_table_names_an_unreadable_word(self) -> None:
+        words = {
+            0x1000: (0x0B << 26) | (8 << 16) | 2,  # sltiu t0, zero, 2
+            0x1004: (0x04 << 26) | (8 << 21) | 1,  # beq t0, zero, +1
+            0x1008: NOP,
+            0x100C: NOP,
+            0x1010: NOP,
+            0x1018: NOP,
+            0x101C: NOP,
+        }
+
+        def read_words(address: int, count: int):
+            return [words[address + 4 * index] for index in range(count)
+                    if address + 4 * index in words]
+
+        lazy_words = enhancement_package._LazyWords(read_words)
+        with self.assertRaisesRegex(EnhancementPackageError, "cannot be read at 0x00001014"):
+            enhancement_package._jump_table(
+                0x1020,
+                (8 << 21) | 0x08,
+                0x1000,
+                lazy_words,
+                read_words,
+                "synthetic switch",
+                "sites[0](SWITCH)",
+            )
 
     def _caller(self) -> list[int]:
         return [_addiu(SP, SP, -8), _sw(RA, 4, SP), _addiu(A0, ZERO, 0x40), _jal(self.TARGET), NOP,
@@ -4154,12 +4435,12 @@ class TestAltGateStaticChecks(unittest.TestCase):
                 )
                 exe = tmp / f"{name}.exe"
                 assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
-                built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                         "-Wno-misleading-indentation", "-Wno-unused-variable",
                                         f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
                                        capture_output=True, text=True)
                 self.assertEqual(built.returncode, 0, built.stderr)
-                run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+                run = _run([str(exe)], check=True, capture_output=True, text=True)
                 return run.stdout.splitlines()
 
             out = program("alt", alt)
@@ -4649,6 +4930,268 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             self.assertIn("site_mismatch: sites[1](SYNTH_COUNT)", out_bad)
             self.assertEqual(files_bad, {})
 
+    def test_publish_refuses_data_object_names_from_the_executable_symbol_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_path = tmp / "synth.elf"
+            words = dict(self.words)
+            words[0x00002000] = struct.unpack("<I", struct.pack("<f", 0.75))[0]
+            elf_bytes = _write_synthetic_mips_elf(
+                elf_path,
+                words,
+                self.entry,
+                sections=((".text", 0x00001000, 0x700, 6), (".data", 0x00002000, 4, 3)),
+                symbols=(("synth_table", 0x00002000, 4, 1, 3),),
+            )
+            private, symbols = self._make_package_and_symbols(elf_bytes)
+            private["data_sites"] = [{
+                "id": "TABLE",
+                "symbol": "synth_table",
+                "offset": 0,
+                "type": "f32",
+                "count": 1,
+                "stock_digest": hashlib.sha256(struct.pack("<f", 0.75)).hexdigest(),
+                "transform": "retention_m_to_sqrt(m)",
+            }]
+            symbols["synth_table"] = "0x00002000"
+            private_path = tmp / "synthetic.json"
+            private_path.write_text(json.dumps(private), encoding="utf-8")
+            private_path.with_suffix(".symbols.json").write_text(
+                json.dumps(symbols), encoding="utf-8"
+            )
+            output = tmp / "published.json"
+            stderr = StringIO()
+            args = [
+                "--publish", str(private_path), "--elf", str(elf_path), "--base", "0",
+                "--disc-id", self.DISC, "--disc-version", self.VERSION,
+                "--out", str(output),
+            ]
+
+            with mock.patch("sys.stderr", new=stderr), mock.patch("sys.stdout", new=StringIO()):
+                result = enhancement_package.main(args)
+
+            self.assertEqual(result, 1)
+            self.assertIn("the executable's own symbols", stderr.getvalue())
+            self.assertFalse(output.exists())
+
+    # A byte table at 0x2001, a halfword table at 0x2002 and a word at 0x2004, in initialised data.
+    _ALIGN_WORDS = {0x00002000: 0x001E1E00, 0x00002004: 21}
+    _ALIGN_SYMBOLS = {"synth_byte_table": 0x00002001, "synth_half_table": 0x00002002, "synth_word_table": 0x00002004}
+
+    def _aligned_data_package(self, elf_bytes: bytes) -> tuple[dict[str, Any], dict[str, str]]:
+        """The synthetic package plus a u8 site on an odd symbol and a u16 site on a 2-aligned one."""
+        private, symbols = self._make_package_and_symbols(elf_bytes)
+        private["data_sites"] = [
+            {"id": "BYTE_TABLE", "symbol": "synth_byte_table", "offset": 0, "type": "u8", "count": 1,
+             "stock_digest": hashlib.sha256(bytes((30,))).hexdigest(), "transform": "count_x2"},
+            {"id": "HALF_TABLE", "symbol": "synth_half_table", "offset": 0, "type": "u16", "count": 1,
+             "stock_digest": hashlib.sha256(struct.pack("<H", 30)).hexdigest(), "transform": "count_x2"},
+        ]
+        symbols.update({name: f"0x{addr:08x}" for name, addr in self._ALIGN_SYMBOLS.items()})
+        return private, symbols
+
+    def _aligned_data_elf(self, path: Path) -> bytes:
+        return _write_synthetic_mips_elf(
+            path, {**self.words, **self._ALIGN_WORDS}, self.entry,
+            sections=((".text", 0x00001000, 0x700, 6), (".data", 0x00002000, 8, 3)))
+
+    def test_data_symbols_publish_at_their_element_alignment(self) -> None:
+        """A data-only name needs the alignment of its element type, not a function's 4 bytes: a u8
+        site on an odd symbol and a u16 site on a 2-aligned one build, publish through --publish,
+        pass the published form's check, and the published build writes the same bytes at the same
+        addresses as the private build (F-9143fc69)."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_path = tmp / "synth.elf"
+            self._aligned_data_elf(elf_path)
+            elf_bytes = elf_path.read_bytes()
+            private, symbols = self._aligned_data_package(elf_bytes)
+            priv_path = tmp / "private" / "synth-60hz.json"
+            priv_path.parent.mkdir()
+            priv_path.write_text(json.dumps(private), encoding="utf-8")
+            priv_path.with_suffix(".symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+            pub_path = tmp / "public" / "ulus99999-60hz.json"
+            pub_path.parent.mkdir()
+            stderr = StringIO()
+            with mock.patch("sys.stdout", new=StringIO()), mock.patch("sys.stderr", new=stderr):
+                rc = enhancement_package.main([
+                    "--publish", str(priv_path), "--elf", str(elf_path), "--base", "0",
+                    "--disc-id", self.DISC, "--disc-version", self.VERSION, "--out", str(pub_path)])
+            self.assertEqual(rc, 0, stderr.getvalue())
+            published = json.loads(pub_path.read_text(encoding="utf-8"))
+            self.assertEqual(enhancement_package.published_package_findings(published), [])
+            self.assertEqual(published["site_map"]["synth_byte_table"], "0x00002001")
+            self.assertEqual(published["site_map"]["synth_half_table"], "0x00002002")
+
+            runs = {}
+            for label, path in (("private", priv_path), ("published", pub_path)):
+                out_dir = tmp / f"out-{label}"
+                out_dir.mkdir()
+                rc_run, output, files = self._run_codegen(elf_path, out_dir / "out.c",
+                                                          [f"--enhancement-package={path}"])
+                self.assertEqual(rc_run, 0, output)
+                runs[label] = files
+            self.assertEqual(runs["published"], runs["private"])
+            combined = b"\n".join(runs["published"].values()).decode("utf-8")
+            # Each site is checked and written at its own address: 30 -> 60 in one byte at 0x2001
+            # and in one halfword at 0x2002.
+            self.assertIn("nk_enh_data_new_0[] = {0x3c}", combined)
+            self.assertIn("if (!sr_guest_span_writable(0x00002001u, 1u) ||", combined)
+            self.assertIn("memcpy(sr_host_address(0x00002001u), nk_enh_data_new_0, 1u);", combined)
+            self.assertIn("nk_enh_data_new_1[] = {0x3c, 0x00}", combined)
+            self.assertIn("if (!sr_guest_span_writable(0x00002002u, 2u) ||", combined)
+            self.assertIn("memcpy(sr_host_address(0x00002002u), nk_enh_data_new_1, 2u);", combined)
+
+            # A published map edited to put the u16 table at an odd address is refused by name when
+            # the package is resolved and when codegen builds it: nothing is written.
+            hostile = copy.deepcopy(published)
+            hostile["site_map"]["synth_half_table"] = "0x00002001"
+            refusal = (r"site_map\.synth_half_table: address '0x00002001' must be a 2-byte-aligned "
+                       r"0x%08x hex string")
+            findings = enhancement_package.published_package_findings(hostile)
+            self.assertEqual(len(findings), 1, findings)
+            self.assertRegex(findings[0], refusal)
+            read_words, read_data = self._readers(elf_bytes)
+            with self.assertRaisesRegex(EnhancementPackageError, refusal):
+                enhancement_package.resolve_published_package(
+                    hostile, executable=elf_bytes, read_words_fn=read_words, read_data_fn=read_data)
+            hostile_path = tmp / "public" / "hostile.json"
+            hostile_path.write_text(json.dumps(hostile), encoding="utf-8")
+            hostile_dir = tmp / "out-hostile"
+            hostile_dir.mkdir()
+            rc_bad, out_bad, files_bad = self._run_codegen(elf_path, hostile_dir / "out.c",
+                                                           [f"--enhancement-package={hostile_path}"])
+            self.assertNotEqual(rc_bad, 0)
+            self.assertRegex(out_bad, refusal)
+            self.assertEqual(files_bad, {})
+
+    def test_publish_refuses_a_data_symbol_below_its_element_alignment(self) -> None:
+        """--publish and the published form refuse, by name, a u16 symbol at an odd address and a
+        u32 symbol at a 2-aligned address; a function name keeps the 4-byte rule, also when a data
+        site uses it too."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_bytes = self._aligned_data_elf(tmp / "synth.elf")
+            private, symbols = self._aligned_data_package(elf_bytes)
+            read_words, read_data = self._readers(elf_bytes)
+
+            def publish(pkg: dict[str, Any], **moved: int) -> dict[str, Any]:
+                published: dict[str, Any] = enhancement_package.publish_package(
+                    pkg, {**{name: int(value, 16) for name, value in symbols.items()}, **moved},
+                    executable=elf_bytes, disc_id=self.DISC, disc_version=self.VERSION,
+                    read_words_fn=read_words, read_data_fn=read_data)
+                return published
+
+            # u16 at an odd address: the stock bytes there are 0x1e, 0x1e (30, 30).
+            odd_half = copy.deepcopy(private)
+            odd_half["data_sites"][1]["stock_digest"] = hashlib.sha256(bytes((30, 30))).hexdigest()
+            with self.assertRaisesRegex(EnhancementPackageError,
+                                        r"site_map\.synth_half_table: address '0x00002001' must be a "
+                                        r"2-byte-aligned 0x%08x hex string"):
+                publish(odd_half, synth_half_table=0x00002001)
+            # u32 at a 2-aligned address: the stock bytes at 0x2002..0x2005 are 0x1e, 0, 21, 0.
+            word = copy.deepcopy(private)
+            word["data_sites"].append({
+                "id": "WORD_TABLE", "symbol": "synth_word_table", "offset": 0, "type": "u32", "count": 1,
+                "stock_digest": hashlib.sha256(bytes((0x1E, 0, 21, 0))).hexdigest(), "transform": "count_x2"})
+            with self.assertRaisesRegex(EnhancementPackageError,
+                                        r"site_map\.synth_word_table: address '0x00002002' must be a "
+                                        r"4-byte-aligned 0x%08x hex string"):
+                publish(word, synth_word_table=0x00002002)
+
+            published = publish(private)
+            self.assertEqual(enhancement_package.published_package_findings(published), [])
+
+        def finding(pkg: dict[str, Any]) -> str:
+            findings: list[str] = enhancement_package.published_package_findings(pkg)
+            self.assertEqual(len(findings), 1, findings)
+            return findings[0]
+
+        # A function name at an address that is not 4-byte aligned.
+        code = copy.deepcopy(published)
+        code["site_map"]["synth_timer_duration"] = "0x00001202"
+        self.assertRegex(finding(code), r"site_map\.synth_timer_duration: address '0x00001202' must be a "
+                                        r"4-byte-aligned 0x%08x hex string")
+        # The u16 table's name also used as a function: the 4-byte rule holds at 0x2002.
+        both = copy.deepcopy(published)
+        both["sites"][1]["function"] = "synth_half_table"
+        del both["site_map"]["synth_timer_duration"]
+        self.assertRegex(finding(both), r"site_map\.synth_half_table: address '0x00002002' must be a "
+                                        r"4-byte-aligned 0x%08x hex string")
+        # The u16 site retyped u32 in the published form: its 2-aligned address is refused.
+        retyped = copy.deepcopy(published)
+        retyped["data_sites"][1]["type"] = "u32"
+        self.assertRegex(finding(retyped), r"site_map\.synth_half_table: address '0x00002002' must be a "
+                                           r"4-byte-aligned 0x%08x hex string")
+
+    def test_data_site_resolution_refuses_an_element_below_its_alignment(self) -> None:
+        """verify_and_resolve_data_sites, which every build applies, refuses a symbol whose address
+        puts an element below its type's alignment, from any symbol map."""
+        image = {0x00002001: bytes((30, 30)), 0x00002002: struct.pack("<H", 30)}
+        pkg: dict[str, Any] = {
+            "schema_version": 1, "id": "synth.align", "display_name": "Synthetic alignment", "version": "1.0.0",
+            "category": "timing_frame_presentation", "target_title_id": "synthetic-allegrex-v1",
+            "game_version": "1.00", "executable_sha256": "a" * 64, "capabilities": ["count_x2"],
+            "rng_policy": {"mode": "subtick_30hz", "reason": "Every roll stays on alternate updates."},
+            "sites": [{"id": "S1", "function": "f", "insn_offset": 0,
+                       "stock_digest": "b" * 64, "transform": "count_x2"}],
+            "data_sites": [{"id": "HALF", "symbol": "table", "offset": 0, "type": "u16",
+                            "stock_digest": hashlib.sha256(bytes((30, 30))).hexdigest(),
+                            "transform": "count_x2"}],
+        }
+        with self.assertRaisesRegex(EnhancementPackageError,
+                                    r"data_sites\[0\]\(HALF\): table\+0 is at 0x00002001, which is not "
+                                    r"aligned to its 2-byte u16 element \(fail-closed refusal\)"):
+            verify_and_resolve_data_sites(pkg, symbol_to_addr={"table": 0x00002001},
+                                          read_data_fn=lambda a, n: image.get(a))
+        pkg["data_sites"][0]["stock_digest"] = hashlib.sha256(struct.pack("<H", 30)).hexdigest()
+        resolved = verify_and_resolve_data_sites(pkg, symbol_to_addr={"table": 0x00002002},
+                                                 read_data_fn=lambda a, n: image.get(a))
+        self.assertEqual([(e["addr"], e["data"]) for e in resolved], [(0x00002002, struct.pack("<H", 60))])
+
+    def test_publish_walks_the_extracted_data_tree_once_for_multiple_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_bytes = _write_synthetic_mips_elf(tmp / "synth.elf", self.words, self.entry)
+            private, symbols = self._make_package_and_symbols(elf_bytes)
+            data_root = tmp / "data"
+            files = (
+                ("PSP_GAME/TUNE.CSV", b"name,frames\nidle,30\n"),
+                ("PSP_GAME/alternate/TUNE.CSV", b"name,frames\nmenu,60\n"),
+            )
+            entries = []
+            for index, (relative, contents) in enumerate(files):
+                path = data_root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(contents)
+                entries.append({
+                    "id": f"TUNE{index}",
+                    "path": relative,
+                    "sha256": hashlib.sha256(contents).hexdigest(),
+                    "format": "csv",
+                    "header_row": 0,
+                    "first_data_row": 1,
+                    "cells": [{"column": "frames", "transform": "count_x2"}],
+                })
+            private["data_files"] = entries
+            read_words, read_data = self._readers(elf_bytes)
+
+            real_walk = os.walk
+            with mock.patch.object(enhancement_package.os, "walk", wraps=real_walk) as walk:
+                published = enhancement_package.publish_package(
+                    private,
+                    {name: int(address, 16) for name, address in symbols.items()},
+                    executable=elf_bytes,
+                    disc_id=self.DISC,
+                    disc_version=self.VERSION,
+                    read_words_fn=read_words,
+                    read_data_fn=read_data,
+                    data_root=data_root,
+                )
+
+        self.assertEqual(len(published["data_files"]), 2)
+        self.assertEqual(walk.call_count, 1)
+
     def test_resolve_refuses_another_executable_by_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             elf_bytes = _write_synthetic_mips_elf(Path(tmp_dir) / "synth.elf", self.words, self.entry)
@@ -4909,7 +5452,7 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             "extra address": (broken(site_map=dict(site_map, synth_other="0x00004000")), "no site uses"),
             "address-literal name": (broken(site_map=dict(site_map, sub_00001200="0x00001200")), "Address-literal"),
             "misaligned address": (broken(site_map=dict(site_map, synth_timer_duration="0x00001202")), "aligned"),
-            "decimal address": (broken(site_map=dict(site_map, synth_timer_duration=4608)), "aligned"),
+            "decimal address": (broken(site_map=dict(site_map, synth_timer_duration=4608)), "hex string"),
             "digest scheme": (broken(digest_scheme="sha256"), "digest_scheme"),
             "disc id": (broken(disc_id="ulus99999"), "disc_id"),
             "disc version": (broken(disc_version="1"), "disc_version"),
@@ -5018,6 +5561,8 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             "function name stem": renamed("fn_" + hexes[:64]),
             "nine hex digits in a name": renamed("synth_" + hexes[:9]),
             "base64 run": with_field(("display_name",), "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY"),
+            "short disassembly in a free-text field": with_field(
+                ("rng_policy", "reason"), "lw ra, 0x1c(sp); addiu sp, sp, -0x20"),
             "escaped byte": with_field(("rng_policy", "reason"), "Same odds: \\x1e per update."),
             # Instruction words written as separated 8-hex tokens, as a disassembly paste would be.
             "separated words in a reason": with_field(
@@ -5061,6 +5606,30 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                 self.assertTrue(all(f.code in ("ENHANCEMENT_PACKAGE_NAME", "ENHANCEMENT_PACKAGE_UNREADABLE")
                                     for f in findings), findings)
 
+    def test_executable_symbol_names_include_a_name_at_string_index_zero(self) -> None:
+        """A symbol is skipped only when its name is empty. In a string table that does not start
+        with a NUL, the symbol whose st_name is 0 has a name, and --publish must see it."""
+        strings = b"synth_first\x00synth_data\x00"
+        symbols = (
+            (0, 0x00001000, 2),                              # STT_FUNC named by index 0
+            (strings.index(b"synth_data"), 0x00002000, 1),   # STT_OBJECT
+            (strings.index(b"\x00"), 0x00003000, 2),         # an empty name: unnamed
+            (len(strings), 0x00004000, 2),                   # an index past the table
+        )
+        table = b"".join(struct.pack("<IIIBBH", name, value, 0, kind, 0, 1) for name, value, kind in symbols)
+        sections = {
+            ".strtab": {"off": 0, "size": len(strings)},
+            ".symtab": {"off": len(strings), "size": len(table), "entsz": 16},
+        }
+        elf = mock.Mock(data=strings + table, base=0, reloc=None)
+        elf.sec.side_effect = sections.get
+
+        names = enhancement_package.extract_elf_symbol_names(elf)
+
+        self.assertEqual(names, {"synth_first", "synth_data"})
+        # Every function name origin/main's check compared against is among them.
+        self.assertEqual(set(enhancement_package.extract_elf_func_symbols(elf)), {"synth_first"})
+
     def test_publish_refuses_names_from_the_executables_symbol_table(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
@@ -5076,7 +5645,8 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             # A synthetic symbol table that holds one of the package's names: a string from the game.
             game_symbols = {"synth_timer_duration": int(symbols["synth_timer_duration"], 16), "other": 0x1000}
             err = StringIO()
-            with mock.patch.object(enhancement_package, "extract_elf_func_symbols", return_value=game_symbols), \
+            with mock.patch.object(
+                    enhancement_package, "extract_elf_symbol_names", return_value=set(game_symbols)), \
                     mock.patch("sys.stderr", new=err), mock.patch("sys.stdout", new=StringIO()):
                 rc = enhancement_package.main(args)
             self.assertEqual(rc, 1)
@@ -5084,9 +5654,13 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             self.assertFalse(out.exists())
             # The names resolve only through the project's map: without it, nothing is published.
             priv_path.with_suffix(".symbols.json").unlink()
-            with mock.patch.object(enhancement_package, "extract_elf_func_symbols", return_value=game_symbols), \
-                    mock.patch("sys.stderr", new=StringIO()), mock.patch("sys.stdout", new=StringIO()):
+            err2 = StringIO()
+            with mock.patch.object(
+                    enhancement_package, "extract_elf_symbol_names", return_value=set(game_symbols)), \
+                    mock.patch("sys.stderr", new=err2), mock.patch("sys.stdout", new=StringIO()):
                 self.assertNotEqual(enhancement_package.main(args), 0)
+            self.assertIn("the symbol map does not name", err2.getvalue())
+            self.assertIn("synth_timer_duration", err2.getvalue())
             self.assertFalse(out.exists())
 
 
@@ -5993,7 +6567,8 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         self.assertEqual(enhancement_package.phase_runs(huge), ((0, 1, 0.0, huge, huge),))
         self.assertEqual(enhancement_package.phase_of_time(huge, huge), 1)
         self.assertIsNone(enhancement_package.phase_of_time(float("inf"), huge))
-        for bad in (0.0, -half, float("inf"), float("nan"), 1.0e-46, half * (1 + 2.0 ** -30)):
+        for bad in (0.0, -half, float("inf"), float("nan"), 1.0e-46, 1.0e100,
+                    half * (1 + 2.0 ** -30)):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "is not a positive float32"):
                 enhancement_package.phase_runs(bad)
 
@@ -6124,12 +6699,12 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         )
         exe = tmp / f"{name}.exe"
         assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
-        built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+        built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                 "-Wno-misleading-indentation", "-Wno-unused-variable", "-Wno-unused-but-set-variable",
                                 f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness), "-lm"],
                                capture_output=True, text=True)
         self.assertEqual(built.returncode, 0, built.stderr)
-        run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+        run = _run([str(exe)], check=True, capture_output=True, text=True)
         return run.stdout.splitlines(), run.stderr.splitlines()
 
     @staticmethod
@@ -6312,9 +6887,9 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                 encoding="utf-8",
             )
             exe = tmp / "scale.exe"
-            subprocess.run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe), str(harness), "-lm"],
+            _run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe), str(harness), "-lm"],
                            check=True, capture_output=True, text=True)
-            out = subprocess.run([str(exe), str(tmp / "v.txt")], check=True, capture_output=True,
+            out = _run([str(exe), str(tmp / "v.txt")], check=True, capture_output=True,
                                  text=True).stdout.split()
         per_value = sum(len(cells) for _name, _word, _rewrite, cells in forms)
         self.assertEqual(len(out), per_value * len(values))
@@ -6482,12 +7057,12 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                 )
                 exe = tmp / f"{name}.exe"
                 assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
-                built = subprocess.run([GCC, "-std=gnu11", "-ffp-contract=off", "-Wall", "-Werror",
+                built = _run([GCC, "-std=gnu11", "-ffp-contract=off", "-Wall", "-Werror",
                                         "-Wno-unused-function", "-Wno-misleading-indentation", "-Wno-unused-variable",
                                         f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness), "-lm"],
                                        capture_output=True, text=True)
                 self.assertEqual(built.returncode, 0, built.stderr)
-                run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+                run = _run([str(exe)], check=True, capture_output=True, text=True)
                 self.assertEqual(run.stderr, "")
                 arcs[name] = run.stdout.splitlines()
 
@@ -6895,6 +7470,29 @@ class _AcePartsFixture(unittest.TestCase):
 class TestAcePartsLoad(_AcePartsFixture):
     """ace_parts.load and its vblank_wait_skip transform (ENHANCEMENT_CONTRACT.md sections 9.8 and
     11.3.10)."""
+
+    def test_llvm_keeps_update_boundary_function_in_c(self) -> None:
+        pkg = self.package()
+        # Keep the other executable rewrite outside the boundary function so that the
+        # manifest proves update_boundary itself caused the LLVM fallback.
+        pkg["sites"][0].update({
+            "function": "synth_loader",
+            "insn_offset": 4,
+            "stock_digest": self._digest("synth_loader", 4),
+            "stock_values": [1],
+        })
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rc, output, files = self._codegen(
+                Path(tmp_dir), "llvm_boundary", pkg, self.symbols(),
+                extra=("--backend=llvm",),
+            )
+        self.assertEqual(rc, 0, output)
+        c_output = "\n".join(text for name, text in files.items() if name.endswith(".c"))
+        self.assertEqual(c_output.count("nk_enhancement_updates++"), 1, output)
+        manifest = json.loads(files["out_llvm.json"])
+        self.assertIn(
+            {"address": f"0x{self.callee:08x}",
+             "reason": "enhancement-package update_boundary"}, manifest["fallbacks"])
 
     def test_a_code_hook_site_on_an_ace_part_site_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -7314,12 +7912,12 @@ class TestAcePartsLoad(_AcePartsFixture):
             )
             exe = tmp / "gate.exe"
             assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
-            built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+            built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                     "-Wno-misleading-indentation", "-Wno-unused-variable",
                                     f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
                                    capture_output=True, text=True)
             self.assertEqual(built.returncode, 0, built.stderr)
-            run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+            run = _run([str(exe)], check=True, capture_output=True, text=True)
         ra = f"0x{self.loader + 16:08x}"
         # Off: the stock call runs once and its $v0 stands. On: it never runs and $v0 is 0. Either
         # way the runtime is asked once, the delay slot ran once (a0 += 7) and $ra = site + 8.
@@ -7623,13 +8221,13 @@ class TestAcePartsSoftShadows(_AcePartsFixture):
             def build(name: str, text: str) -> tuple[subprocess.CompletedProcess[str], Path]:
                 harness, exe = tmp / f"{name}.c", tmp / f"{name}.exe"
                 harness.write_text("#include <stdio.h>\n#include \"ace.h\"\n" + text + "\n" + main, encoding="utf-8")
-                return (subprocess.run([GCC, "-std=c99", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
+                return (_run([GCC, "-std=c99", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
                                         f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness),
                                         str(ROOT / "src" / "rt" / "ace.c")], capture_output=True, text=True), exe)
 
             built, exe = build("declare", block)
             self.assertEqual(built.returncode, 0, built.stderr)
-            run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+            run = _run([str(exe)], check=True, capture_output=True, text=True)
             # The negative control: the same unit with the emitted prototype's count widened.
             self.assertEqual(block.count("uint32_t count,"), 1)
             drifted, _exe = build("drift", block.replace("uint32_t count,", "uint64_t count,"))
@@ -7656,6 +8254,101 @@ class TestAcePartsSoftShadows(_AcePartsFixture):
         text = "\n".join(files.values())
         self.assertEqual(text.count("sr_enhancement_widen_clip_x(s->r[2], _nk_clip_off, 1u);"), 1)
         self.assertEqual(text.count("(void)nk_ace_soft_shadows_declare("), 1)
+
+
+class TestLinkingBranchesAreCalls(unittest.TestCase):
+    """bltzal, bgezal, bltzall and bgezall link $ra: the package walkers read them as calls, never
+    as conditional branches, and this file decodes them itself (it does not take the analyzer's
+    word for what a branch is)."""
+
+    BASE = 0x08900000
+    LINKING_RT = (0x10, 0x11, 0x12, 0x13)  # bltzal, bgezal, bltzall, bgezall
+
+    @staticmethod
+    def _reader(base: int, body: list[int]) -> Any:
+        words = {base + 4 * index: word for index, word in enumerate(body)}
+        return lambda address, count: [
+            words[address + 4 * index] for index in range(count) if address + 4 * index in words
+        ]
+
+    def test_the_instruction_graph_refuses_every_linking_branch(self) -> None:
+        for rt in self.LINKING_RT:
+            body = [_i(0x01, ZERO, rt, 3), NOP, JR_RA, NOP, JR_RA, NOP]
+            with self.subTest(rt=rt), self.assertRaisesRegex(
+                    EnhancementPackageError, r"fn has a linking branch at 0x08900000 \(fail-closed refusal\)"):
+                enhancement_package._Graph(
+                    self.BASE, self.BASE + 4 * len(body), self._reader(self.BASE, body), "fn", "sites[0](SYNTH)")
+
+    def test_a_linking_branch_is_a_call_and_never_falls_through(self) -> None:
+        for rt in self.LINKING_RT:
+            for rs in (ZERO, A0):
+                word = _i(0x01, rs, rt, 8)
+                with self.subTest(rt=rt, rs=rs):
+                    self.assertIsNone(enhancement_package._branch_target(word, self.BASE))
+                    self.assertTrue(enhancement_package._is_jump(word))
+                    self.assertFalse(enhancement_package._falls_through(word, self.BASE))
+
+    def test_a_referenced_load_is_not_followed_back_past_a_linking_branch(self) -> None:
+        load = _lwc1(0, 16, T0)
+        for rt in self.LINKING_RT:
+            # The lui runs before a call: the callee may leave anything in the base register.
+            before_call = [_lui(T0, 0x0890), _i(0x01, ZERO, rt, 8), NOP, load]
+            # The lui is the call's delay slot.
+            in_the_slot = [NOP, _i(0x01, A0, rt, 8), _lui(T0, 0x0890), NOP, load]
+            for name, body in (("lui before the call", before_call), ("lui in the call's slot", in_the_slot)):
+                site = self.BASE + 4 * (len(body) - 1)
+                with self.subTest(name, rt=rt), self.assertRaisesRegex(
+                        EnhancementPackageError, "site 'X' does not load from a constant address"):
+                    enhancement_package._loaded_float_address(
+                        "sites[0](X)", "X", self.BASE, site, load, self._reader(self.BASE, body))
+
+    def test_the_call_tree_reads_a_linking_branchs_delay_slot_as_code(self) -> None:
+        """origin/main's reading, kept: the call tree does not follow a linking branch's target, and
+        reads the word after it as the next instruction, so a call there joins the tree. Reading the
+        linking branch as a conditional branch instead skipped that word."""
+        callee = self.BASE + 0x100
+        words: dict[int, int] = {callee: JR_RA, callee + 4: NOP}
+
+        def read_words(address: int, count: int) -> list[int]:
+            return [words[address + 4 * index] for index in range(count) if address + 4 * index in words]
+
+        for rt in self.LINKING_RT:
+            body = [_i(0x01, ZERO, rt, 2), _jal(callee), NOP, JR_RA, NOP]
+            words.update({self.BASE + 4 * index: word for index, word in enumerate(body)})
+            with self.subTest(rt=rt):
+                self.assertEqual(
+                    enhancement_package._direct_call_tree("sites[0](SYNTH)", self.BASE, read_words,
+                                                          [self.BASE, callee]),
+                    {self.BASE, callee})
+
+    def test_branch_decoding_is_pinned_over_the_whole_opcode_space(self) -> None:
+        """Every opcode, rs and rt: which words are conditional branches, linking branches and
+        reserved encodings here, and that no word the analyzer follows as a branch is read here as
+        an instruction that only falls through."""
+        import analyze
+
+        pc = self.BASE
+        for op in range(64):
+            for rs in range(32):
+                for rt in range(32):
+                    word = (op << 26) | (rs << 21) | (rt << 16) | 3
+                    branch = (op in (0x04, 0x05, 0x06, 0x07, 0x14, 0x15, 0x16, 0x17)
+                              or (op == 0x01 and rt in (0x00, 0x01, 0x02, 0x03))
+                              or (op in (0x11, 0x12) and rs == 0x08))
+                    linking = op == 0x01 and rt in self.LINKING_RT
+                    reserved = op in (0x06, 0x07, 0x16, 0x17) and rt != 0
+                    got = (enhancement_package._branch_target(word, pc),
+                           enhancement_package._is_jump(word),
+                           enhancement_package._is_reserved_zero_branch(word))
+                    want = (pc + 16 if branch else None,
+                            linking or op in (0x02, 0x03),
+                            reserved)
+                    if got != want:
+                        self.fail(f"0x{word:08x}: (target, jump, reserved) is {got}, expected {want}")
+                    if analyze.branch_target(pc, word) is not None and not (branch or linking):
+                        self.fail(f"0x{word:08x}: the analyzer follows a branch this file reads as plain code")
+                    if branch and not reserved and analyze.branch_target(pc, word) != pc + 16:
+                        self.fail(f"0x{word:08x}: a branch here that the analyzer does not follow")
 
 
 if __name__ == "__main__":

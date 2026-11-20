@@ -64,12 +64,14 @@ static const struct {
     {"ZIP_ZIP64", "It uses ZIP64, the format for very large archives, which Nakagawa does "
                   "not read."},
     {"ZIP_CENTRAL_DIRECTORY", "Its list of files is damaged or not where it should be."},
-    {"ZIP_TOO_MANY_ENTRIES", "It holds more than 4096 files and folders."},
-    {"ZIP_TOO_LARGE", "Its files add up to more than 512 MiB."},
+    /* The caps and the methods read are the caller's (NkZipReadOptions: save backups and
+       texture packs differ), so these words name no number and no one kind of archive. */
+    {"ZIP_TOO_MANY_ENTRIES", "It holds more files and folders than Nakagawa reads from this "
+                             "kind of archive."},
+    {"ZIP_TOO_LARGE", "Its files add up to more than Nakagawa reads from this kind of archive."},
     {"ZIP_OFFSET", "A file in it points past the end of its part of the archive."},
     {"ZIP_OVERLAP", "Two files in it share the same bytes."},
-    {"ZIP_METHOD", "A file in it is compressed. Nakagawa backups store files without "
-                   "compression."},
+    {"ZIP_METHOD", "A file in it uses a compression method Nakagawa does not read here."},
     {"ZIP_ENCRYPTED", "A file in it is encrypted."},
     {"ZIP_DATA_DESCRIPTOR", "A file in it gives its size after its data, which Nakagawa "
                             "does not read."},
@@ -327,39 +329,88 @@ NkZipStatus nk_zip_check_name(const char *name, size_t size, bool *is_folder) {
 
 /* Two names that land on the same Windows path, or a file named like a folder
    another entry is in. A name is compared without a folder's trailing '/', with
-   ASCII case folded and '/' sorted first, so everything inside "a/" follows
-   "a" directly. */
+   case folded and '/' sorted first, so everything inside "a/" follows "a"
+   directly. Case folds as Windows folds it for ASCII, Latin-1, Latin
+   Extended-A, Greek and Cyrillic: each pair there is two bytes in UTF-8 in
+   either case, so two names that fold equal are equal byte for byte in length,
+   and a byte offset in one is the same offset in the other. */
 typedef struct {
     const char *name;
     size_t size;   /* without a folder's trailing '/' */
     bool folder;
 } ZipNameRef;
 
-static int zip_fold(unsigned char c) {
-    if (c >= 'A' && c <= 'Z') return c + 32;
-    if (c == '/') return 1;
+/* A two-byte UTF-8 code point (U+0080..U+07FF) folded to its lower case, or
+   itself. Only pairs whose two cases both take two bytes are listed. */
+static uint32_t zip_fold_code_point(uint32_t c) {
+    if (c >= 0xC0u && c <= 0xDEu && c != 0xD7u) return c + 0x20u;           /* Latin-1 */
+    if (c == 0x178u) return 0xFFu;                                           /* Y diaeresis */
+    if ((c >= 0x100u && c <= 0x12Fu) || (c >= 0x132u && c <= 0x137u) ||
+        (c >= 0x14Au && c <= 0x177u)) {
+        return c | 1u;                                                       /* even upper */
+    }
+    if ((c >= 0x139u && c <= 0x148u) || (c >= 0x179u && c <= 0x17Eu)) {
+        return (c & 1u) ? c + 1u : c;                                        /* odd upper */
+    }
+    if (c == 0x386u) return 0x3ACu;                                          /* Greek */
+    if (c >= 0x388u && c <= 0x38Au) return c + 0x25u;
+    if (c == 0x38Cu) return 0x3CCu;
+    if (c == 0x38Eu || c == 0x38Fu) return c + 0x3Fu;
+    if ((c >= 0x391u && c <= 0x3A1u) || (c >= 0x3A3u && c <= 0x3ABu)) return c + 0x20u;
+    if (c == 0x3C2u) return 0x3C3u;                                          /* final sigma */
+    if (c >= 0x400u && c <= 0x40Fu) return c + 0x50u;                        /* Cyrillic */
+    if (c >= 0x410u && c <= 0x42Fu) return c + 0x20u;
+    if ((c >= 0x460u && c <= 0x481u) || (c >= 0x48Au && c <= 0x4BFu) ||
+        (c >= 0x4D0u && c <= 0x52Fu)) {
+        return c | 1u;
+    }
+    if (c == 0x4C0u) return 0x4CFu;
+    if (c >= 0x4C1u && c <= 0x4CEu) return (c & 1u) ? c + 1u : c;
     return c;
+}
+
+/* The folded unit at name[*i] (a byte below `end`), advancing *i past it: an
+   ASCII byte, a two-byte code point, or any other byte on its own above both. */
+static uint32_t zip_fold_next(const char *name, size_t *i, size_t end) {
+    unsigned char c = (unsigned char)name[*i];
+    if (c >= 'A' && c <= 'Z') {
+        ++*i;
+        return c + 32u;
+    }
+    if (c == '/') {
+        ++*i;
+        return 1u;
+    }
+    if (c >= 0xC2u && c <= 0xDFu && *i + 1u < end &&
+        ((unsigned char)name[*i + 1u] & 0xC0u) == 0x80u) {
+        uint32_t cp = ((uint32_t)(c & 0x1Fu) << 6) | ((unsigned char)name[*i + 1u] & 0x3Fu);
+        *i += 2u;
+        return zip_fold_code_point(cp);
+    }
+    ++*i;
+    return c < 0x80u ? c : 0x800u + c;
 }
 
 static int zip_name_compare(const void *a, const void *b) {
     NK_SORT_COMPARE_COUNT();
     const ZipNameRef *x = (const ZipNameRef *)a;
     const ZipNameRef *y = (const ZipNameRef *)b;
-    size_t n = x->size < y->size ? x->size : y->size;
-    for (size_t i = 0; i < n; ++i) {
-        int d = zip_fold((unsigned char)x->name[i]) - zip_fold((unsigned char)y->name[i]);
-        if (d) return d;
+    size_t i = 0, j = 0;
+    while (i < x->size && j < y->size) {
+        uint32_t cx = zip_fold_next(x->name, &i, x->size);
+        uint32_t cy = zip_fold_next(y->name, &j, y->size);
+        if (cx != cy) return cx < cy ? -1 : 1;
     }
-    return (x->size > y->size) - (x->size < y->size);
+    return (i < x->size) - (j < y->size);
 }
 
+/* The first n bytes of a and b fold equal (n is at most either size). */
 static bool zip_folded_prefix(const ZipNameRef *a, const ZipNameRef *b, size_t n) {
-    for (size_t i = 0; i < n; ++i) {
-        if (zip_fold((unsigned char)a->name[i]) != zip_fold((unsigned char)b->name[i])) {
-            return false;
-        }
+    size_t i = 0, j = 0;
+    while (i < n && j < n) {
+        if (zip_fold_next(a->name, &i, n) != zip_fold_next(b->name, &j, n)) return false;
     }
-    return true;
+    return i == n && j == n;
 }
 
 /* Heapsort: at most about 2 n log2 n comparisons whatever the order, so an archive or a pack
@@ -1096,15 +1147,32 @@ NkZipStatus nk_zip_reader_open_file(NkZipReader **out, const char *path, NkZipEr
 
 NkZipStatus nk_zip_reader_open_file_with(NkZipReader **out, const char *path,
                                          const NkZipReadOptions *options, NkZipError *err) {
-    NkZipReader *r;
-    int64_t size;
+    FILE *file;
     if (!out) return zip_fail(err, NK_ZIP_ERR_ARGUMENT, NULL, 0);
     *out = NULL;
     if (!path || !path[0]) return zip_fail(err, NK_ZIP_ERR_ARGUMENT, NULL, 0);
+    file = nk_fopen_utf8(path, "rb");
+    if (!file) return zip_fail(err, NK_ZIP_ERR_IO, NULL, 0);
+    return nk_zip_reader_open_stream_with(out, file, options, err);
+}
+
+NkZipStatus nk_zip_reader_open_stream_with(NkZipReader **out, FILE *file,
+                                           const NkZipReadOptions *options, NkZipError *err) {
+    NkZipReader *r;
+    int64_t size;
+    if (!out || !file) {
+        if (file) fclose(file);
+        if (out) *out = NULL;
+        return zip_fail(err, NK_ZIP_ERR_ARGUMENT, NULL, 0);
+    }
+    *out = NULL;
     r = (NkZipReader *)calloc(1, sizeof(*r));
-    if (!r) return zip_fail(err, NK_ZIP_ERR_NO_MEMORY, NULL, 0);
-    r->file = nk_fopen_utf8(path, "rb");
-    if (!r->file || nk_fseek64(r->file, 0, SEEK_END) != 0 || (size = nk_ftell64(r->file)) < 0) {
+    if (!r) {
+        fclose(file);
+        return zip_fail(err, NK_ZIP_ERR_NO_MEMORY, NULL, 0);
+    }
+    r->file = file;
+    if (nk_fseek64(r->file, 0, SEEK_END) != 0 || (size = nk_ftell64(r->file)) < 0) {
         nk_zip_reader_close(r);
         return zip_fail(err, NK_ZIP_ERR_IO, NULL, 0);
     }

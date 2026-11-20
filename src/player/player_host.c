@@ -49,8 +49,18 @@ void player_host_show_picker(PlayerHostPick what, SDL_Window *window,
 bool player_host_open_folder(const char *path) {
     if (!path || !path[0]) return false;
 #if defined(_WIN32) || defined(_WIN64)
-    /* The shell shows its own message when the folder cannot be opened. */
-    (void)ShellExecuteA(NULL, "open", path, NULL, NULL, SW_SHOWNORMAL);
+    /* The path is UTF-8: the ANSI ShellExecuteA would misread a non-ASCII one.
+       A folder the shell cannot open is reported, so the player can say so
+       (audit 2026-11-17). */
+    WCHAR wide[NK_MAX_PATH];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide,
+                            (int)(sizeof(wide) / sizeof(wide[0]))) <= 0) {
+        return SDL_SetError("The folder path is not valid UTF-8 or is too long.");
+    }
+    INT_PTR shell = (INT_PTR)ShellExecuteW(NULL, L"open", wide, NULL, NULL, SW_SHOWNORMAL);
+    if (shell <= 32) {
+        return SDL_SetError("Windows could not open the folder (shell error %d).", (int)shell);
+    }
     return true;
 #else
     char url[NK_MAX_PATH * 3u];

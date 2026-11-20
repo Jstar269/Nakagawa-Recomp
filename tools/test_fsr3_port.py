@@ -21,12 +21,20 @@ No GPU, no DXC and no game data.
 """
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
+import os
 from pathlib import Path
 import re
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 from typing import Any
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -422,27 +430,142 @@ class MutantTextTests(unittest.TestCase):
     def test_every_gpu_mutant_names_a_cell(self) -> None:
         text = (ROOT / fsr3_mutants.PASS_SELFTEST).read_text(encoding="utf-8")
         cells = set(re.findall(r'\{ "([A-Z]-[0-9A-Z]+)", cell_', text))
-        self.assertEqual(cells, {"P-0", "F-S", "F-M", "F-R", "F-T", "F-C", "F-D"})
+        self.assertEqual(cells, {"P-0", "P-L", "P-H", "F-S", "F-M", "F-R", "F-T", "F-C", "F-D"})
         for mutant in fsr3_mutants.PASS_MUTANTS + fsr3_mutants.PASS_RECORDED:
             self.assertIn(mutant[4], cells, mutant[0])
 
     def test_every_frame_generation_gpu_mutant_names_a_cell(self) -> None:
         text = (ROOT / fsr3_mutants.FG_PASS_SELFTEST).read_text(encoding="utf-8")
         cells = set(re.findall(r'\{ "([A-Z]-[0-9A-Z]+)", cell_', text))
-        self.assertEqual(cells, {"G-R", "G-0", "G-M", "G-D", "G-H", "G-C"})
+        self.assertEqual(cells, {"G-R", "G-0", "G-M", "G-D", "G-H", "G-C", "G-F"})
         for mutant in fsr3_mutants.FG_PASS_MUTANTS + fsr3_mutants.FG_PASS_RECORDED:
             self.assertIn(mutant[4], cells, mutant[0])
         # Every quality cell has a mutant: a cell no defect can fail proves nothing.
         self.assertEqual({m[4] for m in fsr3_mutants.FG_PASS_MUTANTS}, cells - {"G-R"})
 
 
+class MutantDriverTests(unittest.TestCase):
+    """The campaign driver's own verdicts, with the compiler replaced by a stub."""
+
+    @staticmethod
+    def pass_args() -> argparse.Namespace:
+        return argparse.Namespace(cell=None, cc="cc", calibrate=False)
+
+    def run_main_pass(self, headers_found: bool, env: dict[str, str]) -> tuple[int, str]:
+        def fake_run(cmd, **_kwargs):
+            if "-E" in cmd:  # the Vulkan header probe
+                return subprocess.CompletedProcess(cmd, 0 if headers_found else 1, "", "")
+            return subprocess.CompletedProcess(cmd, 1, "", "fsr3_pass.c:1: error: unused variable [-Werror]")
+
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(fsr3_mutants.subprocess, "run", side_effect=fake_run), \
+                mock.patch.object(fsr3_mutants, "vulkan_includes", return_value=[]), \
+                mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stdout(output):
+            if "NK_UI_VK_REQUIRE" not in env:
+                os.environ.pop("NK_UI_VK_REQUIRE", None)
+            rc = fsr3_mutants.main_pass(self.pass_args(), Path(tmp))
+        return rc, output.getvalue()
+
+    def test_a_base_compile_error_with_the_headers_present_fails(self) -> None:
+        rc, out = self.run_main_pass(headers_found=True, env={})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL", out)
+        self.assertNotIn("SKIP", out)
+
+    def test_missing_vulkan_headers_skip(self) -> None:
+        rc, out = self.run_main_pass(headers_found=False, env={})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("SKIP", out)
+        rc, out = self.run_main_pass(headers_found=False, env={"NK_UI_VK_REQUIRE": "1"})
+        self.assertEqual(rc, 1, out)
+
+    def test_a_build_dir_holding_other_files_is_not_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = Path(tmp) / "keep.txt"
+            keep.write_text("not the campaign's", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", ["fsr3_mutants.py", "--build-dir", tmp]), \
+                    mock.patch.object(fsr3_mutants, "build_and_run", return_value=("RAN", 1, "")), \
+                    contextlib.redirect_stdout(output):
+                rc = fsr3_mutants.main()
+            self.assertTrue(keep.is_file(), "the driver deleted a folder it did not create")
+            self.assertNotEqual(rc, 0)
+
+    def test_the_checkout_and_build_are_refused(self) -> None:
+        for work in (ROOT, ROOT.parent, ROOT / "build", ROOT / "tools"):
+            with self.subTest(work=str(work)):
+                self.assertIsNotNone(fsr3_mutants.work_dir_refusal(work))
+
+    def test_a_marked_or_empty_work_dir_is_recreated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / "fsr3-mutants"
+            self.assertIsNone(fsr3_mutants.work_dir_refusal(work))
+            fsr3_mutants.prepare_work_dir(work)
+            (work / "m00").mkdir()
+            self.assertIsNone(fsr3_mutants.work_dir_refusal(work))
+            fsr3_mutants.prepare_work_dir(work)
+            self.assertEqual(sorted(p.name for p in work.iterdir()), [fsr3_mutants.WORKDIR_MARKER])
+
+    def test_the_kill_verdicts(self) -> None:
+        cases = [
+            (("BUILD", 1, "error"), True, "INVALID m: the mutant does not build"),
+            (("RAN", 0, ""), True, "SURVIVED m"),
+            (("RAN", 1, "FAIL other"), True, "WRONG_REASON m: expected 'want', first failure: FAIL other"),
+            (("RAN", 1, "FAIL want"), False, "KILLED m"),
+        ]
+        for (status, rc, out), failed, printed in cases:
+            with self.subTest(status=status, rc=rc, out=out):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(fsr3_mutants.judge_mutant("m", status, rc, out, "want"), failed)
+                self.assertTrue(output.getvalue().startswith(printed), output.getvalue())
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertTrue(fsr3_mutants.judge_mutant("m", "RAN", 3, "x", "want", measured="    F-R 1"))
+        self.assertEqual(output.getvalue(), "WRONG_REASON m: expected 'want' (exit 3)\n    F-R 1\n")
+
+
 class InertTests(unittest.TestCase):
     """F-A-lite's static half: no FSR 3 code is in what the player builds or runs."""
+
+    MAKE = shutil.which("mingw32-make") or shutil.which("make") or "make"
+    # Every list the runtime and the player compile or link, as Make expands it: the lists pull in
+    # fragments defined elsewhere (mk/nk_ui.mk's NK_UI_* lists feed both), so the two files that
+    # spell PLAYER_SRCS and RT_SRCS are not the whole input.
+    BUILD_LISTS = ("PLAYER_SRCS", "PLAYER_CHD_SRCS", "RT_SRCS", "RT_OBJS", "GEGPU_SRCS")
+
+    def _expanded_build_inputs(self, *overrides: str) -> list[str]:
+        """The words of BUILD_LISTS after the real Makefile is read, for a synthetic title."""
+        listing = " ".join(f"$({name})" for name in self.BUILD_LISTS)
+        with tempfile.TemporaryDirectory(prefix="nk-inert-make-") as build_root:
+            proc = subprocess.run(
+                [self.MAKE, "-f", str(ROOT / "Makefile"), "GAME_NAME=synthetic2",
+                 f"BUILD_ROOT={Path(build_root).as_posix()}", *overrides,
+                 "--eval", f"nk_print_build_inputs: ; $(info NK_BUILD_INPUTS={listing})",
+                 "nk_print_build_inputs"],
+                cwd=ROOT, capture_output=True, text=True, timeout=300)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        rows = [line for line in proc.stdout.splitlines() if line.startswith("NK_BUILD_INPUTS=")]
+        self.assertEqual(len(rows), 1, "the Make probe printed no source listing:\n" + proc.stdout)
+        return rows[0].split("=", 1)[1].split()
 
     def test_no_fsr3_file_in_the_runtime_or_player_sources(self) -> None:
         for mk in ("mk/runtime_sources.mk", "mk/pipeline.mk"):
             with self.subTest(file=mk):
                 self.assertNotIn("fsr3", (ROOT / mk).read_text(encoding="utf-8"))
+        inputs = self._expanded_build_inputs()
+        # Positive control: the probe reads the real lists (runtime, player and Vulkan backend).
+        for known in ("src/rt/recomp.c", "src/player/main.c", "src/ui/nk_ui.c",
+                      "src/rt/gpu_sdl3vk/ge_gpu.c"):
+            self.assertIn(known, inputs)
+        self.assertEqual([word for word in inputs if "fsr3" in Path(word).name.lower()], [],
+                         "an FSR 3 file is compiled or linked into the runtime or the player")
+
+    def test_the_expanded_lists_see_a_fragment_outside_the_two_scanned_files(self) -> None:
+        # mk/nk_ui.mk's core list feeds PLAYER_SRCS and RT_SRCS; an FSR 3 file there must show.
+        core = self._expanded_build_inputs("NK_UI_CORE_SRCS=src/ui/nk_ui.c src/rt/fsr3_host.c")
+        self.assertIn("src/rt/fsr3_host.c", core)
 
     def test_no_runtime_or_player_source_refers_to_fsr3(self) -> None:
         own = {"fsr3_host.c", "fsr3_host.h", "fsr3_jitter.c", "fsr3_jitter.h", "fsr3_pass.c", "fsr3_pass.h",

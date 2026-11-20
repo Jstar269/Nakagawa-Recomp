@@ -25,6 +25,7 @@ below and the native ones (test_intc_poll_delivery, test_intc_safe_points,
 test_intc_delivery_aot_interp_parity) fail there.
 """
 
+import ast
 import re
 import os
 import shutil
@@ -32,6 +33,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -45,6 +47,121 @@ CPU_LLE_H = ROOT / "src" / "rt" / "cpu_lle.h"
 CPU_LLE_C = ROOT / "src" / "rt" / "cpu_lle.c"
 GUEST_INTERP_H = ROOT / "src" / "rt" / "guest_interp.h"
 MAKEFILE = read_makefile(ROOT)
+
+# --- link-surface audits: who links a runtime source, and what links with it -------------
+
+_MAKE_ASSIGN = re.compile(
+    r"^(?:override\s+|export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*(?::{1,3}|\?|\+|!)?=(.*)$")
+_MAKE_REF = re.compile(r"\$[({]([A-Za-z_][A-Za-z0-9_.-]*)[)}]")
+_MAKE_OUTPUT = re.compile(r"(?:^|\s)-o(?:\s|$)")
+_C_SOURCE = re.compile(r"[\w./-]+\.c\b")
+_C_INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]+"([^"]+\.c)"', re.MULTILINE)
+
+
+def _make_logical_lines(makefile):
+    """(first physical line number, text) per logical line, backslash continuations joined."""
+    logical, start, parts = [], None, []
+    for number, raw in enumerate(makefile.split("\n"), start=1):
+        if start is None:
+            start = number
+        if raw.endswith("\\"):
+            parts.append(raw[:-1])
+            continue
+        parts.append(raw)
+        logical.append((start, " ".join(parts)))
+        start, parts = None, []
+    if parts:
+        logical.append((start, " ".join(parts)))
+    return logical
+
+
+def _expand_make(text, variables, seen=()):
+    def substitute(match):
+        name = match.group(1)
+        if name in seen or name not in variables:
+            return match.group(0)
+        return _expand_make(variables[name], variables, seen + (name,))
+    return _MAKE_REF.sub(substitute, text)
+
+
+def _with_included_sources(paths):
+    """``paths`` plus every ``.c`` file they ``#include``, transitively (white-box TUs)."""
+    found, pending = set(), [ROOT / p for p in paths]
+    while pending:
+        path = pending.pop().resolve()
+        if path in found or not path.is_file():
+            continue
+        found.add(path)
+        for name in _C_INCLUDE.findall(path.read_text(encoding="utf-8", errors="replace")):
+            for base in (path.parent, ROOT / "src" / "rt"):
+                if (base / name).is_file():
+                    pending.append(base / name)
+                    break
+    return {p.relative_to(ROOT).as_posix() for p in found if p.is_relative_to(ROOT)}
+
+
+def makefile_link_recipes(makefile, source):
+    """Every recipe command that builds an output (``-o``) from ``source``.
+
+    Returns (line number, command, linked sources). Continuation lines are joined and
+    ``$(VAR)`` references expanded (all of a name's assignments, ``+=`` and conditional
+    ones included), so a source listed through a variable such as RT_SRCS counts; a
+    ``.c`` file a linked source ``#include``s (a white-box selftest) counts as linked.
+    """
+    lines = _make_logical_lines(makefile)
+    values = {}
+    for _number, line in lines:
+        if line.startswith("\t"):
+            continue
+        assignment = _MAKE_ASSIGN.match(line.strip())
+        if assignment:
+            values.setdefault(assignment.group(1), []).append(assignment.group(2).strip())
+    variables = {name: " ".join(parts) for name, parts in values.items()}
+    recipes = []
+    for number, line in lines:
+        if not line.startswith("\t") or not _MAKE_OUTPUT.search(line):
+            continue
+        sources = set(_C_SOURCE.findall(_expand_make(line, variables)))
+        if source in sources:
+            recipes.append((number, " ".join(line.split()), _with_included_sources(sources)))
+    return recipes
+
+
+# tools/*.py files that quote a runtime source and pass "-o" for some other compile, but
+# never link guest_interp.c: they audit link surfaces or compile one unrelated TU.
+PYTHON_LINK_AUDIT_ONLY = frozenset({
+    "test_dispatch_c.py",           # compiles tests/native/dispatch_selftest.c alone
+    "test_title_runtime_config.py", # audits Makefile recipes; compiles title_config.c alone
+    "test_trace_window_probe.py",   # reads guest_interp.c as text; compiles flight_recorder.c alone
+})
+
+
+def _string_constants(path):
+    tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"), str(path))
+    return {node.value for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+
+
+def _names_source(constants, name):
+    pattern = re.compile(rf"(?:^|[/\\]){re.escape(name)}$")
+    return any(pattern.search(value) for value in constants)
+
+
+def python_link_harnesses(source_name):
+    """{file name: string constants} for tools/*.py that build a link of ``source_name``.
+
+    A harness is a file whose string constants hold ``source_name`` as a path operand
+    (``"guest_interp.c"``, ``"src/rt/guest_interp.c"``, a ``Path`` part) and an ``"-o"``
+    argv element; prose in a docstring or comment is never an operand.
+    """
+    harnesses = {}
+    for path in sorted((ROOT / "tools").glob("*.py")):
+        if path.name in PYTHON_LINK_AUDIT_ONLY:
+            continue
+        constants = _string_constants(path)
+        if "-o" in constants and _names_source(constants, source_name):
+            harnesses[path.name] = constants
+    return harnesses
 
 
 class FakeElf:
@@ -590,6 +707,8 @@ static inline int SDL_SetCurrentThreadPriority(SDL_ThreadPriority p) { (void)p; 
 static inline const char *SDL_GetError(void) { return ""; }
 static inline SDL_Mutex *SDL_CreateMutex(void) { return 0; }
 static inline SDL_Condition *SDL_CreateCondition(void) { return 0; }
+static inline void SDL_DestroyMutex(SDL_Mutex *mutex) { (void)mutex; }
+static inline void SDL_DestroyCondition(SDL_Condition *cond) { (void)cond; }
 static inline SDL_Thread *SDL_CreateThread(SDL_ThreadFunction fn, const char *name, void *data) {
     (void)fn; (void)name; (void)data; return 0;
 }
@@ -734,6 +853,24 @@ class LleSchedulerIntegrationTests(unittest.TestCase):
         """
         self._run_generated_tail_eret_case(direct_tail=False, mixed_chain=True)
 
+    @unittest.skipUnless(os.name == "nt", "the MSYS2 UCRT64 layout probe runs on Windows only")
+    def test_windows_host_without_msys2_ucrt64_at_the_default_root_uses_the_sdl_shim(self):
+        """A Windows host whose MSYS2 is not at C:/msys64 has no SDL3 the fixture can find.
+
+        The fixture then builds with the default gcc and the test-only SDL shim, as on a
+        Linux host without SDL3. Assuming SDL3 on every Windows host linked sched.c's SDL
+        calls with no -lSDL3 and failed the build for a machine-layout reason.
+        """
+        real_exists = Path.exists
+
+        def exists(path, *args, **kwargs):
+            if Path(path).as_posix().lower().startswith("c:/msys64/"):
+                return False
+            return real_exists(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "exists", exists):
+            self._run_generated_tail_eret_case(direct_tail=False)
+
     def test_computed_step_passes_its_restore_up_to_a_chain_without_one(self):
         """A resume body (it owes no SP restore) takes a computed tail to H, which lowers SP
         and takes a direct tail to X, whose computed tail reaches F (#855 review).
@@ -788,13 +925,17 @@ class LleSchedulerIntegrationTests(unittest.TestCase):
         link_flags = []
         # A host without SDL3 development headers (the hosted Python gate) gets a
         # test-only timer shim below; sched.c reaches SDL for its monotonic clock
-        # and precise delay only, and the fixture runs with VBLANK pacing off.
-        sdl_available = os.name == "nt"
+        # and precise delay only, and the fixture runs with VBLANK pacing off. A
+        # Windows host counts as having SDL3 only when the MSYS2 UCRT64 gcc and
+        # its SDL3 headers are both found at the default root.
+        sdl_available = False
         if os.name == "nt":
             msys_bin = Path("C:/msys64/ucrt64/bin")
             msys_usr_bin = Path("C:/msys64/usr/bin")
             msys_gcc = msys_bin / "gcc.exe"
-            if msys_gcc.exists():
+            msys_sdl_header = msys_bin.parent / "include" / "SDL3" / "SDL.h"
+            if msys_gcc.exists() and msys_sdl_header.exists():
+                sdl_available = True
                 compiler = str(msys_gcc)
                 env["PATH"] = os.pathsep.join(
                     [str(msys_bin), str(msys_usr_bin), env.get("PATH", "")]
@@ -1063,8 +1204,26 @@ int main(void) {
         self.assertIn("generated tail ERET and scheduler reuse: OK", ran.stdout)
 
 
+def _enum_value_pattern(name, value):
+    """``name`` defined as exactly ``value`` (enum ``NAME = 4u,`` or ``#define NAME 4u``).
+
+    Both ends are anchored, so ``SR_EXC_ADEL = 40u`` is not read as 4 and
+    ``XSR_FLOW_ERET`` is not read as ``SR_FLOW_ERET``.
+    """
+    return rf"\b{name}\s*=?\s*{value}u?\b"
+
+
 class CpuLleSourcesTests(unittest.TestCase):
     """Source-owned COP0/exception implementation matches spec 3.2/3.3."""
+
+    def test_enum_value_pattern_rejects_a_value_that_only_starts_with_the_spec_value(self):
+        for name, value, right, wrong in (
+                ("SR_EXC_ADEL", 4, "SR_EXC_ADEL = 4u,", "SR_EXC_ADEL = 40u,"),
+                ("SR_FLOW_ERET", 2, "SR_FLOW_ERET = 2,", "SR_FLOW_ERET = 23u,"),
+                ("SR_CP0_STATUS", 12, "#define SR_CP0_STATUS 12u", "#define SR_CP0_STATUS 120u")):
+            with self.subTest(name=name):
+                self.assertRegex(right, _enum_value_pattern(name, value))
+                self.assertNotRegex(wrong, _enum_value_pattern(name, value))
 
     def test_header_defines_cop0_registers(self):
         text = CPU_LLE_H.read_text(encoding="utf-8")
@@ -1072,7 +1231,7 @@ class CpuLleSourcesTests(unittest.TestCase):
                             ("SR_CP0_COMPARE", 11), ("SR_CP0_STATUS", 12),
                             ("SR_CP0_CAUSE", 13), ("SR_CP0_EPC", 14),
                             ("SR_CP0_PRID", 15), ("SR_CP0_CONFIG", 16)):
-            self.assertRegex(text, rf"{name}\s*=?\s*{value}u?")
+            self.assertRegex(text, _enum_value_pattern(name, value))
 
     def test_header_defines_exceptions_and_flows(self):
         text = CPU_LLE_H.read_text(encoding="utf-8")
@@ -1083,7 +1242,7 @@ class CpuLleSourcesTests(unittest.TestCase):
                             ("SR_FLOW_NONE", 0), ("SR_FLOW_EXCEPTION", 1),
                             ("SR_FLOW_ERET", 2), ("SR_FLOW_INTERRUPT", 3),
                             ("SR_FLOW_FATAL", 4)):
-            self.assertRegex(text, rf"{name}\s*=?\s*{value}u?")
+            self.assertRegex(text, _enum_value_pattern(name, value))
 
     def test_header_declares_spec_helpers(self):
         text = CPU_LLE_H.read_text(encoding="utf-8")
@@ -1282,30 +1441,78 @@ class MakefileWiringTests(unittest.TestCase):
             self.assertIn("src/rt/cpu_lle.c", block.group(1))
 
     def test_every_guest_interp_link_also_links_cpu_lle(self):
-        offenders = []
-        for number, raw in enumerate(MAKEFILE.splitlines(), start=1):
-            if "src/rt/guest_interp.c" in raw and "-o " in raw:
-                if "src/rt/cpu_lle.c" not in raw:
-                    offenders.append(f"Makefile:{number}: {raw.strip()}")
+        recipes = makefile_link_recipes(MAKEFILE, "src/rt/guest_interp.c")
+        # The audit must see the recipes it guards: the selftests named here link
+        # guest_interp.c directly or through a source variable.
+        commands = " ".join(command for _number, command, _linked in recipes)
+        for output in ("cpu_lle_selftest.exe", "heap_selftest.exe", "nkstate_selftest.exe",
+                       "snapshot_runner.exe"):
+            self.assertIn(output, commands)
+        offenders = [f"inlined Makefile line {number}: {command[:160]}"
+                     for number, command, linked in recipes
+                     if "src/rt/cpu_lle.c" not in linked]
         self.assertEqual(offenders, [])
+
+    def test_the_makefile_link_audit_sees_continuations_variables_and_includes(self):
+        makefile = "\n".join((
+            "SRCS := src/rt/sr_coro.c \\",
+            "        src/rt/guest_interp.c",
+            "SRCS += src/rt/cpu_lle.c",
+            "joined:",
+            "\t$(CC) $(CFLAGS) -o $(BUILD_DIR)/joined.exe \\",
+            "\t\tsrc/rt/guest_interp.c src/rt/stale_code.c -lm",
+            "through-variable:",
+            "\t$(CC) -o $(BUILD_DIR)/variable.exe $(SRCS)",
+            "white-box:",
+            "\t$(CC) -o $(BUILD_DIR)/white_box.exe tests/native/domain_mode_selftest.c \\",
+            "\t\tsrc/rt/guest_interp.c",
+            "compile-only:",
+            "\t$(CC) -c src/rt/guest_interp.c",
+        ))
+        recipes = makefile_link_recipes(makefile, "src/rt/guest_interp.c")
+        self.assertEqual([number for number, _command, _linked in recipes], [5, 8, 10])
+        joined, variable, white_box = (linked for _number, _command, linked in recipes)
+        self.assertNotIn("src/rt/cpu_lle.c", joined)
+        self.assertIn("src/rt/cpu_lle.c", variable)
+        # tests/native/domain_mode_selftest.c #includes recomp.c, cpu_lle.c, domain_mode.c.
+        self.assertIn("src/rt/cpu_lle.c", white_box)
+        self.assertIn("src/rt/domain_mode.c", white_box)
 
     def test_every_python_harness_link_also_links_cpu_lle(self):
         # tools/*.py inline gcc commands that link guest_interp.c must also
         # link cpu_lle.c (same drift class as test_native_gate_stub_link).
-        # Only quoted path operands count, so prose mentions in docstrings
-        # are not mistaken for link surfaces; only files that actually build
-        # a link command (an "-o" output operand) are surfaces at all, so
-        # audit-only tests that quote the filename are excluded.
+        # Only string constants count as operands, so prose mentions in
+        # docstrings are not mistaken for link surfaces; files that only audit
+        # link surfaces are listed in PYTHON_LINK_AUDIT_ONLY.
         # NOTE: .github/workflows/ci.yml carries two more such commands
-        # (vfpu_interp_selftest + its ASan twin); agents may not edit
-        # .github/, so that hunk is a maintainer followup, not asserted here.
-        offenders = []
-        for path in sorted((ROOT / "tools").glob("*.py")):
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if re.search(r"""["']guest_interp\.c["']""", text) and '"-o "' in text:
-                if "cpu_lle.c" not in text:
-                    offenders.append(path.name)
+        # (vfpu_interp_selftest + its ASan twin), outside this audit.
+        harnesses = python_link_harnesses("guest_interp.c")
+        for known in ("codegen_gate.py", "test_analyzer_span_scope.py",
+                      "test_dispatch_call_boundary.py", "test_dispatch_fatal_policy.py",
+                      "test_miss_seeds.py", "test_native_gate_stub_link.py"):
+            self.assertIn(known, harnesses)
+        offenders = [name for name, constants in harnesses.items()
+                     if not _names_source(constants, "cpu_lle.c")]
         self.assertEqual(offenders, [])
+
+    def test_the_python_link_audit_reads_operands_not_prose(self):
+        with scratch_dir.TemporaryDirectory(prefix="link_audit_") as tmp:
+            work = Path(tmp)
+            linker = work / "linker.py"
+            linker.write_text(
+                'CMD = ["gcc", "-o", "probe", str(RT / "guest_interp.c"), "recomp.c"]\n',
+                encoding="utf-8")
+            prose = work / "prose.py"
+            prose.write_text(
+                '"""Links guest_interp.c with cpu_lle.c; see "-o "."""\n'
+                'CMD = ["gcc", "-c", "x.c"]\n', encoding="utf-8")
+            linked = _string_constants(linker)
+            self.assertIn("-o", linked)
+            self.assertTrue(_names_source(linked, "guest_interp.c"))
+            self.assertFalse(_names_source(linked, "cpu_lle.c"))
+            described = _string_constants(prose)
+            self.assertNotIn("-o", described)
+            self.assertFalse(_names_source(described, "guest_interp.c"))
 
     def test_native_core_tests_depends_on_cpu_lle_selftest(self):
         self.assertRegex(MAKEFILE, r"(?m)^native-core-tests:\s*cpu-lle-selftest\b")

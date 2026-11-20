@@ -89,31 +89,56 @@ def materialize(ref: str, destination: Path, profile_path: Path) -> dict:
 
     profile = load_profile(profile_path)
     commit = _git("rev-parse", "--verify", f"{ref}^{{commit}}")
-    with tempfile.TemporaryDirectory(prefix="nakagawa-public-candidate-") as temp_raw:
+    # The tree is built in a sibling staging directory and renamed to the
+    # destination only once every entry is written. A refused entry or an OSError
+    # partway leaves no half-written destination to block the next run: the
+    # staging directory goes with its context.
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="nakagawa-public-candidate-") as temp_raw, \
+            tempfile.TemporaryDirectory(
+                prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent,
+            ) as staging_raw:
         archive = Path(temp_raw) / "source.zip"
         _git("archive", "--format=zip", f"--output={archive}", commit)
-        destination.mkdir(parents=True)
+        staging = Path(staging_raw).resolve() / "tree"
+        staging.mkdir()
         copied: list[str] = []
+        ref_profile_sha256: str | None = None
         with zipfile.ZipFile(archive) as source_zip:
             for info in source_zip.infolist():
-                relative = PurePosixPath(info.filename)
-                if relative.is_absolute() or ".." in relative.parts:
+                name = info.filename[:-1] if info.is_dir() else info.filename
+                parts = name.split("/")
+                # The same refusals as publish_audit._committed_tree_entries: a tree
+                # made on another system can carry a drive letter ("D:"), a backslash
+                # or an empty or dot part, which a Windows path join would read as a
+                # location outside the destination.
+                if (name.startswith("/") or "\\" in name or ":" in name
+                        or any(part in ("", ".", "..") for part in parts)):
                     raise ValueError(f"unsafe archive path: {info.filename}")
+                relative = PurePosixPath(name)
+                if not info.is_dir() and relative.as_posix() == "assets/public_source_profile.json":
+                    ref_profile_sha256 = hashlib.sha256(source_zip.read(info)).hexdigest()
                 if info.is_dir() or is_excluded(relative.as_posix(), profile):
                     continue
                 unix_mode = info.external_attr >> 16
                 if stat.S_ISLNK(unix_mode):
                     raise ValueError(f"candidate archive contains symlink: {info.filename}")
-                target = destination.joinpath(*relative.parts)
+                target = staging.joinpath(*parts)
+                if not target.resolve().is_relative_to(staging):
+                    raise ValueError(f"unsafe archive path: {info.filename}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with source_zip.open(info) as source, target.open("wb") as output:
                     shutil.copyfileobj(source, output)
                 copied.append(relative.as_posix())
+        staging.rename(destination)
 
     metadata = {
         "profile": profile["name"],
         "source_commit": commit,
+        # The profile that filtered the tree, and the one the exported ref itself
+        # carries (None when the ref has none); the two differ for an older --ref.
         "profile_sha256": hashlib.sha256(profile_path.read_bytes()).hexdigest(),
+        "ref_profile_sha256": ref_profile_sha256,
         "file_count": len(copied),
     }
     manifest = destination.parent / f"{destination.name}.PUBLIC_CANDIDATE.json"
@@ -123,13 +148,24 @@ def materialize(ref: str, destination: Path, profile_path: Path) -> dict:
     return metadata
 
 
-def audit_candidate(destination: Path, provenance_ledger: Path | None = None) -> list[publish_audit.Finding]:
+def audit_candidate(
+    destination: Path, provenance_ledger: Path | None = None, profile_path: Path = DEFAULT_PROFILE,
+) -> list[publish_audit.Finding]:
+    """Audit the materialized tree as a candidate root, judged by the profile that selected it.
+
+    The same mode as ``publish_audit.py --candidate-root --candidate-tree --public-scope
+    --policy <profile>``: the bytes are the directory's, the audit is exhaustive, and the
+    policy is the one ``materialize`` filtered with, never the checkout's default.
+    """
     entries = publish_audit._get_filesystem_entries(destination)
     return publish_audit.audit_entries(
         entries,
         manifest_path=destination / "assets" / "release_manifest.json",
         public_scope=True,
         repo_root=destination,
+        exhaustive=True,
+        is_candidate_root=True,
+        policy_path=profile_path,
         provenance_ledger_path=provenance_ledger,
     )
 
@@ -156,8 +192,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     try:
-        metadata = materialize(args.ref, args.destination, args.profile.resolve())
-        findings = audit_candidate(args.destination.absolute(), args.provenance_ledger.resolve())
+        profile_path = args.profile.resolve()
+        metadata = materialize(args.ref, args.destination, profile_path)
+        findings = audit_candidate(args.destination.absolute(), args.provenance_ledger.resolve(), profile_path)
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, zipfile.BadZipFile) as error:
         print(f"public candidate: FAIL: {error}")
         return 2

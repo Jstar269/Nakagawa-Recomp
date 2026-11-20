@@ -111,11 +111,15 @@ static Flash0PathKind flash0_parse(const char *path, const char **name_out) {
     return FLASH0_PATH_FONT_FILE;
 }
 
-/* The slot a served name belongs to. A pending entry never matches. */
+/* The slot a served name belongs to: its project name, or for Japanese and Korean the PSP's own
+ * name (jpn0.pgf, kr0.pgf: the measured listing), which a game can open directly. A pending entry
+ * never matches. */
 static int flash0_slot_for_name(const char *name, NkFontSlot *slot_out) {
     for (int i = 0; i < NK_FONT_SLOT_COUNT; i++) {
         const Flash0SlotEntry *entry = &s_flash0_slots[i];
-        if (entry->measured && ascii_ci_equal(name, entry->served_name)) {
+        const char *psp_name = nk_font_slot_psp_filename((NkFontSlot)i);
+        if (entry->measured && (ascii_ci_equal(name, entry->served_name) ||
+                                (psp_name && ascii_ci_equal(name, psp_name)))) {
             *slot_out = (NkFontSlot)i;
             return 1;
         }
@@ -218,12 +222,13 @@ static void flash0_refuse_import_cache(NkFontSlot slot) {
 
 /* One line per Japanese or Korean request for the life of the process, the first time the slot
  * is resolved, in the Latin lines' fields (#1300): the PSP file the slot stands for, the file that
- * backs it, and its source. The user's imported font is the PSP's own; the project font is a
+ * backs it, and its source. The user's imported font is the PSP's own, unless it is a replacement
+ * font (nk_font_is_replacement), whose line says selection=replacement; the project font is a
  * stand-in with a different face, so its line says substitute. The legacy Latin alias is not a
  * request a game makes by a PSP name, so it has no line; the Latin indices have their own. */
 static unsigned char s_flash0_slot_logged[NK_FONT_SLOT_COUNT];
 
-static void flash0_log_slot(NkFontSlot slot, Flash0Source source) {
+static void flash0_log_slot(NkFontSlot slot, Flash0Source source, bool replacement) {
     const char *requested = nk_font_slot_psp_filename(slot);
     const char *language = slot == NK_FONT_SLOT_JAPANESE ? "Japanese" : "Korean";
     unsigned index = slot == NK_FONT_SLOT_JAPANESE ? 0u : SR_FONT_REGISTRY_COUNT - 1u;
@@ -233,8 +238,9 @@ static void flash0_log_slot(NkFontSlot slot, Flash0Source source) {
         fprintf(stderr, "flash0: %s registry index=%u requested=%s backing=none source=none fallback=missing\n",
                 language, index, requested);
     } else if (source == FLASH0_SOURCE_USER) {
-        fprintf(stderr, "flash0: %s registry index=%u requested=%s backing=%s source=user-imported selection=exact\n",
-                language, index, requested, s_flash0_slots[slot].served_name);
+        fprintf(stderr, "flash0: %s registry index=%u requested=%s backing=%s source=user-imported selection=%s\n",
+                language, index, requested, s_flash0_slots[slot].served_name,
+                replacement ? "replacement" : "exact");
     } else {
         fprintf(stderr, "flash0: %s registry index=%u requested=%s backing=%s source=project "
                         "selection=substitute fallback=project\n",
@@ -284,10 +290,11 @@ static Flash0Source flash0_resolve_path(const Flash0Sources *sources, NkFontSlot
         /* The check reads this open handle, so the bytes it hashes are the bytes served. A later
          * in-place write to the file is not checked again, as with any open file. */
         char reason[NK_FONT_TEXT_MAX] = "";
+        bool replacement = false;
         NkFontSlotCheck check = nk_font_check_cache_slot_file(sources->user_data_dir, slot, *fp_out,
-                                                              reason, sizeof(reason));
+                                                              reason, sizeof(reason), &replacement);
         if (check == NK_FONT_SLOT_CHECK_OK) {
-            flash0_log_slot(slot, FLASH0_SOURCE_USER);
+            flash0_log_slot(slot, FLASH0_SOURCE_USER, replacement);
             return FLASH0_SOURCE_USER;
         }
         flash0_refuse_user_cache(slot, check, reason);
@@ -299,7 +306,7 @@ static Flash0Source flash0_resolve_path(const Flash0Sources *sources, NkFontSlot
         flash0_project_path(path, capacity, sources->project_dir, file) &&
         flash0_probe(path, slot, 0, fp_out, size_out)) {
         if (!flash0_project_is_import_cache(sources)) {
-            flash0_log_slot(slot, FLASH0_SOURCE_PROJECT);
+            flash0_log_slot(slot, FLASH0_SOURCE_PROJECT, false);
             return FLASH0_SOURCE_PROJECT;
         }
         flash0_refuse_import_cache(slot);
@@ -308,7 +315,7 @@ static Flash0Source flash0_resolve_path(const Flash0Sources *sources, NkFontSlot
         *size_out = 0;
     }
     path[0] = '\0';
-    flash0_log_slot(slot, FLASH0_SOURCE_NONE);
+    flash0_log_slot(slot, FLASH0_SOURCE_NONE, false);
     return FLASH0_SOURCE_NONE;
 }
 
@@ -329,7 +336,8 @@ static const char *flash0_latin_backing_name(const NkFontLatinResolution *resolu
 /* One line per Latin registry index for the life of the process, the first time the index is
  * resolved. A request served by any file other than its own imported ltnN.pgf is a substitute with
  * a different face (#1300): its line says so and names the fallback rule that chose the file, a
- * same-size-group import, the legacy single Latin import, or the project font. */
+ * same-size-group import, the legacy single Latin import, or the project font. Its own imported
+ * file is selection=exact, or selection=replacement when that file is a replacement font. */
 static void flash0_log_latin_index(int index, const NkFontLatinResolution *resolution) {
     if ((unsigned)index >= NK_FONT_LATIN_INDEX_COUNT || s_flash0_latin_logged[index]) return;
     s_flash0_latin_logged[index] = 1u;
@@ -341,8 +349,9 @@ static void flash0_log_latin_index(int index, const NkFontLatinResolution *resol
     const char *source = resolution->source == NK_FONT_SOURCE_USER ? "user-imported" : "project";
     const char *backing = flash0_latin_backing_name(resolution);
     if (resolution->source == NK_FONT_SOURCE_USER && resolution->served_index == index) {
-        fprintf(stderr, "flash0: Latin registry index=%d requested=%s backing=%s source=%s selection=exact\n",
-                index + 1, nk_font_latin_index_filename(index), backing, source);
+        fprintf(stderr, "flash0: Latin registry index=%d requested=%s backing=%s source=%s selection=%s\n",
+                index + 1, nk_font_latin_index_filename(index), backing, source,
+                resolution->replacement ? "replacement" : "exact");
         return;
     }
     const char *fallback = resolution->source == NK_FONT_SOURCE_PROJECT ? "project" :
@@ -364,9 +373,18 @@ static Flash0Source flash0_resolve_latin_index(const Flash0Sources *sources, int
     *fp_out = NULL;
     *size_out = 0;
     if (path && capacity > 0) path[0] = '\0';
-    if (!sources || !path || capacity == 0 || (unsigned)index >= NK_FONT_LATIN_INDEX_COUNT ||
-        !nk_font_resolve_latin_index(sources->user_data_dir, sources->project_dir,
+    if (!sources || !path || capacity == 0 || (unsigned)index >= NK_FONT_LATIN_INDEX_COUNT) {
+        flash0_log_latin_index(index, NULL);
+        return FLASH0_SOURCE_NONE;
+    }
+    /* The project source never serves an imported cache, so a cache named as the project
+     * directory is not handed to the resolver as one: its nkltn.pgf would be picked as a project
+     * font and refused here, before the resolver's vouched legacy-import fallback is reached. */
+    const int project_is_cache = sources->project_dir[0] && flash0_project_is_import_cache(sources);
+    if (!nk_font_resolve_latin_index(sources->user_data_dir,
+                                     project_is_cache ? "" : sources->project_dir,
                                      index, &resolution)) {
+        if (project_is_cache) flash0_refuse_import_cache(NK_FONT_SLOT_LATIN);
         flash0_log_latin_index(index, NULL);
         return FLASH0_SOURCE_NONE;
     }
@@ -397,7 +415,7 @@ static Flash0Source flash0_resolve_latin_index(const Flash0Sources *sources, int
             ? nk_font_check_cache_latin_index_file(sources->user_data_dir, resolution.served_index,
                                                    *fp_out, reason, sizeof(reason))
             : nk_font_check_cache_slot_file(sources->user_data_dir, NK_FONT_SLOT_LATIN,
-                                            *fp_out, reason, sizeof(reason));
+                                            *fp_out, reason, sizeof(reason), NULL);
         if (check != NK_FONT_SLOT_CHECK_OK) {
             flash0_refuse_user_cache(NK_FONT_SLOT_LATIN, check, reason);
             fclose(*fp_out);
@@ -407,14 +425,6 @@ static Flash0Source flash0_resolve_latin_index(const Flash0Sources *sources, int
             flash0_log_latin_index(index, NULL);
             return FLASH0_SOURCE_NONE;
         }
-    } else if (flash0_project_is_import_cache(sources)) {
-        flash0_refuse_import_cache(NK_FONT_SLOT_LATIN);
-        fclose(*fp_out);
-        *fp_out = NULL;
-        *size_out = 0;
-        path[0] = '\0';
-        flash0_log_latin_index(index, NULL);
-        return FLASH0_SOURCE_NONE;
     }
     if (resolution_out) *resolution_out = resolution;
     flash0_log_latin_index(index, &resolution);
@@ -612,7 +622,7 @@ uint32_t sr_flash0_font_list_dir(const char *guest_path, const Flash0Sources *so
         if (flash0_resolve(sources, slot, &fp, &size) == FLASH0_SOURCE_NONE) continue;
         fclose(fp);
         if (!sr_vfs_dirlist_merge_lba(list, s_flash0_slots[i].served_name, 0, size, 0u))
-            return flash0_refuse(0x80010008u, "listing ran out of memory", guest_path);
+            return flash0_refuse(SR_FLASH0_ERR_NO_MEMORY, "listing ran out of memory", guest_path);
     }
     for (int index = 0; index < NK_FONT_LATIN_INDEX_COUNT; index++) {
         char path[SR_FLASH0_PATH_MAX + 64];
@@ -622,7 +632,7 @@ uint32_t sr_flash0_font_list_dir(const char *guest_path, const Flash0Sources *so
                                        &fp, &size, NULL) == FLASH0_SOURCE_NONE) continue;
         fclose(fp);
         if (!sr_vfs_dirlist_merge_lba(list, nk_font_latin_index_filename(index), 0, size, 0u))
-            return flash0_refuse(0x80010008u, "listing ran out of memory", guest_path);
+            return flash0_refuse(SR_FLASH0_ERR_NO_MEMORY, "listing ran out of memory", guest_path);
     }
     sr_vfs_dirlist_sort(list);
     return 0u;

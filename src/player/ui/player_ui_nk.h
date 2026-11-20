@@ -154,8 +154,11 @@ typedef enum {
     PLAYER_UI_ACTION_NICKNAME,          /* a nickname editor control; .primary carries the
                                            op (PlayerUiNicknameOp) */
     PLAYER_UI_ACTION_HIDE_RENDER_NOTICE, /* the title page's render notice: Hide (#2151) */
-    PLAYER_UI_ACTION_QUEUE              /* a build queue control; .primary carries the op
+    PLAYER_UI_ACTION_QUEUE,             /* a build queue control; .primary carries the op
                                            (PlayerUiQueueOp), .title_index its game */
+    PLAYER_UI_ACTION_FONT_NOTE_GET_FONTS, /* the title page's font note: Get fonts from my PSP,
+                                             which opens Settings > PSP fonts and looks for a PSP */
+    PLAYER_UI_ACTION_HIDE_FONT_NOTE     /* the title page's font note: Hide, for .title_index's game */
 } PlayerUiActionKind;
 
 /* What a build queue control asks for (PLAYER_UI_ACTION_QUEUE). main.c runs
@@ -253,6 +256,7 @@ typedef struct {
     PlayerUiActionKind kind;
     PlayerUiPrimaryAction primary;
     size_t title_index;
+    int choice_index;       /* selected value for setting actions; -1 when not used */
 } PlayerUiAction;
 
 /* The files a disc still needs before Nakagawa can use it (#308): decrypted
@@ -636,10 +640,18 @@ typedef enum {
     PLAYER_UI_SETTINGS_CYCLE_HIGH_CONTRAST,  /* Automatic, On, Off */
     PLAYER_UI_SETTINGS_CYCLE_TEXT_SIZE,      /* Standard, Large, Larger (100, 125, 150%) */
     PLAYER_UI_SETTINGS_OPEN_ACE,             /* Settings > Enhanced, the library's page */
-    PLAYER_UI_SETTINGS_CYCLE_PRESET,         /* the next graphics preset (#2150) */
-    PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE,      /* that page's play mode: the library's default,
-                                                or the title's choice on a title's page */
-    PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART,  /* the part in the action's title_index */
+    PLAYER_UI_SETTINGS_CYCLE_PRESET,         /* the graphics preset (#2150): the next one, or
+                                                the one before for a choice_index under 0 */
+    PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE,      /* that page's play mode, to the next one (the select
+                                                button): the library's default, or the title's
+                                                choice on a title's page */
+    PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART,  /* the part in title_index, to its next value (the
+                                                select button) */
+    PLAYER_UI_SETTINGS_SET_PLAY_MODE,        /* Left and Right: choice_index is the page's mode
+                                                list index */
+    PLAYER_UI_SETTINGS_SET_ENHANCED_PART,    /* Left, Right or a clicked value: title_index is the
+                                                part; choice_index is its value, -1 the library's
+                                                on a title's page */
     PLAYER_UI_SETTINGS_OPEN_PROBLEM_REPORT,  /* Settings > Problem report: lists the files */
     PLAYER_UI_SETTINGS_CREATE_REPORT,        /* write the bundle on this PC */
     PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER,
@@ -655,29 +667,69 @@ typedef enum {
     PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS,
     PLAYER_UI_SETTINGS_TOGGLE_COVER_ART,     /* Settings > Online and developer (#2632) */
     PLAYER_UI_SETTINGS_REFRESH_COVER_ART,    /* Settings > Build tools and cache (#2632) */
+    PLAYER_UI_SETTINGS_TOGGLE_CHEATS,        /* Settings > Online and developer (#2639) */
     PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC, /* launcher background music (#2207) */
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP
 } PlayerUiSettingsOp;
 
-/* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
-   PlayerEnhancedPart), in that order. */
+/* Settings > Enhanced: every PlayerEnhancedPart belongs to one visual group. The macro is the
+   single row-to-group table used by the page and its native screen fixture. Its length is checked
+   against PLAYER_PART_COUNT in both translation units that build it. */
 #define PLAYER_UI_ENHANCED_ROWS 21
+typedef enum {
+    PLAYER_UI_ENHANCED_GROUP_PICTURE = 0,
+    PLAYER_UI_ENHANCED_GROUP_MOTION,
+    PLAYER_UI_ENHANCED_GROUP_SOUND,
+    PLAYER_UI_ENHANCED_GROUP_CONTROLS,
+    PLAYER_UI_ENHANCED_GROUP_ON_SCREEN,
+    PLAYER_UI_ENHANCED_GROUP_ADVANCED,
+    PLAYER_UI_ENHANCED_GROUP_COUNT
+} PlayerUiEnhancedGroup;
+/* A group's name as its tab shows it ("Picture", "On-screen"); "" for no group. */
+const char *player_ui_enhanced_group_label(PlayerUiEnhancedGroup group);
+#define PLAYER_UI_ENHANCED_LAYOUT(X) \
+    X(PLAYER_PART_FILTERING, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_WIDE, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_UPSCALE, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_TEXPACK, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_TWIN, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_SSAA, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_MIPS, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_TEXSCALE, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_SMART2D, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_TEXT, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_SMOOTH, PLAYER_UI_ENHANCED_GROUP_MOTION) \
+    X(PLAYER_PART_SAS, PLAYER_UI_ENHANCED_GROUP_SOUND) \
+    X(PLAYER_PART_PEAK, PLAYER_UI_ENHANCED_GROUP_SOUND) \
+    X(PLAYER_PART_STICK, PLAYER_UI_ENHANCED_GROUP_CONTROLS) \
+    X(PLAYER_PART_READOUT, PLAYER_UI_ENHANCED_GROUP_ON_SCREEN) \
+    X(PLAYER_PART_NOTICE, PLAYER_UI_ENHANCED_GROUP_ON_SCREEN) \
+    X(PLAYER_PART_TESS, PLAYER_UI_ENHANCED_GROUP_ADVANCED) \
+    X(PLAYER_PART_CULL, PLAYER_UI_ENHANCED_GROUP_ADVANCED) \
+    X(PLAYER_PART_LOAD, PLAYER_UI_ENHANCED_GROUP_ADVANCED) \
+    X(PLAYER_PART_PAD, PLAYER_UI_ENHANCED_GROUP_ADVANCED) \
+    X(PLAYER_PART_SHADOW, PLAYER_UI_ENHANCED_GROUP_ADVANCED)
 typedef struct {
+    int part;                   /* PlayerEnhancedPart; rows are in visual, not enum, order */
+    PlayerUiEnhancedGroup group;
+    /* Which of the row's choices is marked: an index into `labels`, after the library's choice
+       (index 0) on a title's page. It is the value in `value`: a row that cannot apply marks
+       the value that runs, not the one it keeps. */
+    int selected_index;
     const char *name;           /* "Texture filtering" */
     const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
     const char *sentence;
-    bool on;                    /* in effect for the page: lit */
-    /* Every other value the row can show on this page: the part's own words ("16x" ... "Off")
-       and, on a title's page, the library's ("Library (16x)"). The page sizes its button
-       column from the widest of them, so changing a setting never reflows the rows. */
+    bool on;                    /* the value that runs is other than Off: its box takes the accent */
+    bool inherited;             /* this title follows the library value */
+    bool disabled;              /* shown, dimmed and inert: it cannot apply as the page stands */
+    const char *disabled_reason;
+    const char *tag;            /* a condition tag ("Ace only"), or NULL */
+    /* Every value the row offers: the part's own words ("16x" ... "Off") and, on a title's
+       page, the library's ("Library (16x)") before them. */
     const char *const *labels;
     int label_count;
     const char *library_value;  /* NULL on the library's page */
-    /* A value another setting on the page can give the row, or NULL: on a game's page,
-       Smooth motion's "Off (this game runs at 60 FPS)", which stepping the play mode turns
-       on and off with the game's 60 FPS game logic. */
-    const char *other_value;
 } PlayerUiEnhancedRow;
 
 #define PLAYER_UI_REPORT_LINES 24u   /* PLAYER_REPORT_MAX_FILES */
@@ -714,6 +766,7 @@ typedef struct {
     /* Main page: the current value of each control, in words */
     const char *resolution;         /* "2x (960x544)" */
     const char *pacing;             /* "PSP timing" */
+    const char *pacing_sentence;    /* what Frame pacing changes, for Enhanced's panel */
     const char *scaling;            /* "Sharp" */
     const char *preset;             /* "Medium", or "Custom" (#2150) */
     bool vsync;
@@ -738,19 +791,24 @@ typedef struct {
     int system_scale_pct;               /* the display's scale */
     bool system_high_contrast;
     bool system_reduced_motion;
-    /* Settings > Enhanced (VIEW_ACE_SETTINGS, #2055) and the GAME card's row. The page is the
-       library's, or one title's when enhanced_title is set. Its first row is the play mode;
-       then one row per Enhanced part, so a new part needs no change to the page. */
+    /* Settings > Enhanced (VIEW_ACE_SETTINGS, #2055). The graphics preset and the play mode stay
+       above its tabs; the active tab lists its options, and one panel describes the focused
+       one. The page is the library's, or one title's when enhanced_title is set. */
     bool enhanced_library_on;       /* the library's default is Enhanced */
     const char *enhanced_title;     /* the game's name on its own page; NULL for the library */
     const char *enhanced_mode;      /* "Enhanced", "Ace", "Library (Authentic)" */
     const char *enhanced_mode_sentence;
-    /* Every play mode the page's first row steps through, for the column's width. */
+    /* Every play mode the play mode row steps through, in order. */
     const char *const *enhanced_modes;
     int enhanced_mode_count;
     bool enhanced_on;               /* Enhanced or Ace in effect: the part rows can change */
     int enhanced_row_count;
     PlayerUiEnhancedRow enhanced_rows[PLAYER_UI_ENHANCED_ROWS];
+    int enhanced_tab;                /* session UI state, not a saved settings value */
+    int *enhanced_tab_chosen;        /* where the page writes the tab chosen this frame (a click,
+                                        Enter or a shoulder), else leaves it alone; NULL: nowhere.
+                                        The tab is not an action, so a step on a row in the same
+                                        frame keeps the frame's one action (audit 2026-11-17) */
     /* A title's page only (texpack_row): the Texture pack folder row, its pack's name and texture
        count or "None", and, with a pack chosen, a Remove row. */
     bool texpack_row;
@@ -761,8 +819,8 @@ typedef struct {
     const char *saves_folder;
     const char *notice;             /* a settings notice (a failed save), or NULL */
     const char *nickname;           /* the console nickname games read (#2197) */
-    /* The main page's graphics preset note (#2150): where the preset applies, or NULL for
-       Custom. Drawn, in the muted colour, when there is no notice. */
+    /* The graphics preset's note (#2150): where the preset applies, or NULL for Custom. Settings >
+       Enhanced draws it in the panel while the Graphics preset row has focus. */
     const char *preset_notice;
     /* Build tools and cache: builds share compiled system libraries (#1306) */
     bool share_system_libraries;
@@ -787,6 +845,8 @@ typedef struct {
        under Settings > Build tools and cache. */
     bool download_cover_art;
     const char *cover_art_cache_size;
+    /* Cheats (#2639): the stored switch, off by default. */
+    bool cheats;
     const char *current_version;    /* "0.0.3" */
     const char *update_version;     /* "0.0.4", once checked */
     bool update_prerelease;
@@ -1049,6 +1109,9 @@ typedef struct {
        a heading and a sentence (player_render_notice_text), with Hide; NULL hides it. */
     const char *render_notice_heading;
     const char *render_notice_text;
+    /* The font note (player_app_font_note): in Authentic, the sentence that the game's text uses
+       stand-in fonts, with Get fonts from my PSP and Hide; NULL hides it. */
+    const char *font_note_text;
     double now_s;           /* drives the starting bar (0 holds it still) */
     float logical_width;    /* 0 selects 1280 */
     float logical_height;   /* 0 selects 800 */
@@ -1110,6 +1173,8 @@ enum {
     PLAYER_UI_ID_TITLE_PLAY_OPTIONS = 0x200Bu,       /* the ENHANCEMENTS card's Enhanced options */
     PLAYER_UI_ID_TITLE_STEAM = 0x200Cu,              /* Add to Steam (#2152) */
     PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE = 0x200Du, /* the render notice's Hide (#2151) */
+    PLAYER_UI_ID_TITLE_FONT_NOTE_GET = 0x200Eu,      /* the font note's Get fonts from my PSP */
+    PLAYER_UI_ID_TITLE_FONT_NOTE_HIDE = 0x200Fu,     /* the font note's Hide */
     PLAYER_UI_ID_REMOVE_CANCEL = 0x4401u,
     PLAYER_UI_ID_REMOVE_CONFIRM = 0x4402u,
     PLAYER_UI_ID_REMOVE_SAVES = 0x4403u,
@@ -1137,7 +1202,7 @@ enum {
     PLAYER_UI_ID_DISC_OPEN_FOLDER = 0x4803u,
     PLAYER_UI_ID_DISC_VERIFY_BASE = 0x4900u,         /* reserved: disc verification's controls */
     PLAYER_UI_ID_SETTINGS_RESOLUTION = 0x4501u,
-    PLAYER_UI_ID_SETTINGS_PACING = 0x4502u,
+    PLAYER_UI_ID_SETTINGS_PACING = 0x4502u,           /* Frame pacing, on Enhanced's Motion tab */
     PLAYER_UI_ID_SETTINGS_VSYNC = 0x4503u,
     PLAYER_UI_ID_SETTINGS_FULLSCREEN = 0x4504u,
     PLAYER_UI_ID_SETTINGS_SCALING = 0x4505u,
@@ -1151,7 +1216,7 @@ enum {
     PLAYER_UI_ID_SETTINGS_ONLINE = 0x450Du,
     PLAYER_UI_ID_SETTINGS_NOTICES = 0x450Eu,
     PLAYER_UI_ID_SETTINGS_REMOVE_TOOLS = 0x450Fu,
-    PLAYER_UI_ID_SETTINGS_PRESET = 0x4510u,           /* the GAME card's graphics preset */
+    PLAYER_UI_ID_SETTINGS_PRESET = 0x4510u,           /* Enhanced's first row: global preset */
     PLAYER_UI_ID_SETTINGS_ONLINE_MODE = 0x4511u,
     PLAYER_UI_ID_SETTINGS_NEWS = 0x4513u,
     PLAYER_UI_ID_SETTINGS_REPORTS = 0x4514u,
@@ -1198,11 +1263,13 @@ enum {
     PLAYER_UI_ID_SETTINGS_TEXT_SIZE = 0x452Fu,
     PLAYER_UI_ID_SETTINGS_ACE = 0x4540u,              /* retired: the GAME card's old switch */
     PLAYER_UI_ID_SETTINGS_ACE_OPEN = 0x4541u,         /* the GAME card's row that opens Enhanced */
-    PLAYER_UI_ID_SETTINGS_ACE_MODE = 0x4542u,         /* the Enhanced page's play mode */
+    PLAYER_UI_ID_SETTINGS_ACE_MODE = 0x4542u,         /* the Enhanced page's play mode row */
     /* The part rows (PlayerEnhancedPart), PLAYER_UI_ENHANCED_ROWS of them, take their ids from
-       PLAYER_UI_ID_ENHANCED_PART(part): parts 0 to 12 at 0x4543 to 0x454F (the range ends before
-       0x4550), parts 13 and on at 0x4680 to 0x469F (room for PLAYER_UI_ENHANCED_MORE_IDS, 32
-       parts), so adding a part moves no other part's id */
+       PLAYER_UI_ID_ENHANCED_PART(part), whichever tab shows them: parts 0 to 12 at 0x4543 to
+       0x454F (the range ends before 0x4550), parts 13 and on at 0x4680 to 0x469F (room for
+       PLAYER_UI_ENHANCED_MORE_IDS, 32 parts), so adding a part moves no other part's id. A
+       row's values are pointer targets with ids of the settings screen's own
+       (scr_settings.c). */
     PLAYER_UI_ID_SETTINGS_ENHANCED_PART = 0x4543u,
     PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE = 0x4680u,
     PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT = 0x4550u,   /* Settings: opens the Problem report page */
@@ -1224,6 +1291,7 @@ enum {
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
     PLAYER_UI_ID_SETTINGS_COVER_ART = 0x4563u,        /* Settings > Online: Download cover art */
     PLAYER_UI_ID_SETTINGS_REFRESH_COVER_ART = 0x4564u,/* Settings > Build cache: Refresh cover art */
+    PLAYER_UI_ID_SETTINGS_CHEATS = 0x4565u,           /* Settings > Online: Cheats */
     PLAYER_UI_ID_NICKNAME_KEY_BASE = 0x4570u,         /* + its keyboard key's place */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
@@ -1284,6 +1352,11 @@ enum {
                   ? PLAYER_UI_ID_SETTINGS_ENHANCED_PART + (uint32_t)(part)                     \
                   : PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE +                                 \
                         ((uint32_t)(part) - PLAYER_UI_ENHANCED_FIRST_IDS)))
+/* Settings > Enhanced's detail panel and the column inside it that scrolls (scr_settings.c).
+   Neither is a focus stop; they are named here so that a test finds them in a frame's draw
+   list and scroll state. */
+#define PLAYER_UI_ID_ENHANCED_DETAIL NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000B00u)
+#define PLAYER_UI_ID_ENHANCED_DETAIL_BODY NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000B01u)
 
 NkUiRouter *nk_ui_router_create(void);
 void nk_ui_router_destroy(NkUiRouter *router);
@@ -1399,6 +1472,8 @@ typedef struct {
     size_t row_count;           /* up to PLAYER_UI_SAVES_ROW_CAP */
     size_t first_row;           /* the page's first backup, from 0 (the newest) */
     size_t total;               /* backups found */
+    size_t listed;              /* the newest of them listed, which the pages reach;
+                                   0 lists all of total */
     PlayerUiSavesAsk ask;
     size_t ask_row;             /* the row Restore asks about, on this page */
     const char *ask_name;       /* the save Add a save would replace */
@@ -1594,14 +1669,18 @@ void player_ui_nk_note_window_focus(PlayerUiNk *player, bool focused);
 /* Once per loop, whatever view shows: the launcher music follows its setting,
    whether a game is starting or running, and the window's focus (#2207). */
 void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app);
-/* True when the launcher music holds no audio stream and no worker is decoding
-   the track: a game may start. True for a NULL player. */
+/* True when neither the launcher music nor the UI sounds hold an audio stream and
+   no worker is decoding the track: a game may start. True for a NULL player. */
 bool player_ui_nk_launcher_audio_closed(const PlayerUiNk *player);
+/* Whether the UI sounds hold an audio stream, for reports. */
+bool player_ui_nk_ui_sounds_hold_audio(const PlayerUiNk *player);
 /* The launcher music's state (PlayerUiMusicState) and its name, for reports. */
 int player_ui_nk_music_state(const PlayerUiNk *player);
 /* Whether the launcher music's worker is reading or decoding the track. */
 bool player_ui_nk_music_decoding(const PlayerUiNk *player);
 const char *player_ui_nk_music_state_name(const PlayerUiNk *player);
+/* Draws one launcher frame. False when it could not be drawn; *out_action still
+   holds an action the frame committed, which the caller applies either way. */
 bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                          struct SDL_Renderer *renderer,
                          struct SDL_Window *window,

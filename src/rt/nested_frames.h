@@ -31,8 +31,9 @@
  * address-keyed guard bands either side of each slot's usable stack.  It owns
  * frame OWNERSHIP and ISOLATION only.  It deliberately does NOT change the
  * register-seeding convention of a nested call: the zeroed CpuState, the
- * inherited $gp, $ra = 0 and the 0xe4 VFPU prefix seeds are unchanged, and only
- * the value written to $sp comes from here.
+ * inherited $gp, $ra = SR_HOST_RETURN_PC (0xFFFFFFF0, the sentinel the
+ * return-boundary machinery in recomp.c recognises) and the 0xe4 VFPU prefix
+ * seeds are unchanged, and only the value written to $sp comes from here.
  *
  * WHAT IT IS NOT.  This is not a PSP contract.  Whether hardware shares a stack
  * across nested guest calls, and what stack the PSP kernel hands a GE or MPEG

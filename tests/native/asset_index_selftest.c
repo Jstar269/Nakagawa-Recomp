@@ -6,6 +6,7 @@
 #include "asset_index.h"
 
 #include <stdio.h>
+#include <time.h>
 
 typedef struct {
     const char *relative;
@@ -110,6 +111,40 @@ static int dir_index_of(const SrVfsDirList *list, const char *name) {
     for (size_t i = 0; i < list->count; i++)
         if (strcmp(list->entries[i].name, name) == 0) return (int)i;
     return -1;
+}
+
+/* Audit 2026-11-17: a merge looks an earlier spelling up by its folded name instead of
+ * comparing it with every entry already merged, so listing a flat directory of N files
+ * costs O(N), not N^2/2 compares inside one guest sceIoDopen. 40,000 distinct names took
+ * 8*10^8 compares before (seconds of CPU); the bound below is two orders of magnitude
+ * above the hashed cost. First-source-wins still holds, before and after a sort. */
+static int vfs_flat_directory_merge_is_linear(void) {
+    enum { N = 40000 };
+    SrVfsDirList list;
+    char name[32];
+    sr_vfs_dirlist_init(&list);
+    clock_t started = clock();
+    for (unsigned i = 0; i < N; i++) {
+        snprintf(name, sizeof name, "File_%05u.dat", i);
+        if (!sr_vfs_dirlist_merge(&list, name, 0, i)) {
+            sr_vfs_dirlist_destroy(&list);
+            return fail("flat directory merge failed to allocate");
+        }
+    }
+    double cpu_s = (double)(clock() - started) / (double)CLOCKS_PER_SEC;
+    int ok = list.count == (size_t)N && cpu_s < 0.5;
+    if (!ok) fprintf(stderr, "asset index selftest: %zu entries, %.3f s of CPU\n", list.count, cpu_s);
+    /* A later source's spelling of an existing name is ignored, before a sort and after. */
+    ok = ok && sr_vfs_dirlist_merge(&list, "FILE_00007.DAT", 1, 1u) && list.count == (size_t)N;
+    sr_vfs_dirlist_sort(&list);
+    ok = ok && sr_vfs_dirlist_merge(&list, "file_39999.dat", 1, 1u) && list.count == (size_t)N;
+    ok = ok && sr_vfs_dirlist_merge(&list, "New.dat", 0, 5u) && list.count == (size_t)N + 1u;
+    int seven = ok ? dir_index_of(&list, "File_00007.dat") : -1;
+    int last = ok ? dir_index_of(&list, "File_39999.dat") : -1;
+    ok = ok && seven >= 0 && !list.entries[seven].is_dir && list.entries[seven].size == 7u &&
+         last >= 0 && !list.entries[last].is_dir && dir_index_of(&list, "New.dat") >= 0;
+    sr_vfs_dirlist_destroy(&list);
+    return ok ? 0 : fail("flat directory merge is not linear or not first-source-wins");
 }
 
 static int vfs_dir_tests(void) {
@@ -411,6 +446,7 @@ int main(void) {
     sr_asset_index_destroy(&empty);
 
     if (vfs_dir_tests() != 0) return 1;
+    if (vfs_flat_directory_merge_is_linear() != 0) return 1;
     sr_asset_index_destroy(&short_index);
     sr_asset_index_destroy(&long_index);
     puts("asset index selftest: OK");

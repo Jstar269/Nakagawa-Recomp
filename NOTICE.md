@@ -65,19 +65,29 @@ We aim to respond promptly and will remove material where appropriate.
   `proAdhocServer.cpp`, and its port offset from
   PPSSPP's `Core/HLE/sceNetAdhoc.cpp` (Copyright (c) 2013- PPSSPP Project) at the
   same revision, and it is conveyed as GPL-3.0-or-later. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
+- **Cheat files (#2639)** — the CWCheat reader, the decode of each code form and
+  the applier (`src/core/nk_cheats.c`, `src/core/nk_cheats.h`) are translated
+  from PPSSPP's `Core/CwCheat.cpp` and `Core/CwCheat.h` at
+  `c437463bc5cb78a0236312ad23f9c3b56fb9ae67` (GPL-2.0-or-later), conveyed as
+  GPL-3.0-or-later. Neither upstream file carries a notice of its own; the files
+  here carry the notice of PPSSPP's source files (Copyright (c) 2012- PPSSPP
+  Project, as `Core/Core.cpp` has it at that revision). Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
 - **PSPSDK / PSPDEV** — permissive per-component declarations and BSD-family
   notices for public ABI definitions and source-owned fixtures. The applicable
   notices are in `third_party/licenses/PSPSDK.txt` and `assets/upstream/`.
 - **FFmpeg n4.4 ATRAC3 and ATRAC3+ subsets** — LGPL-2.1-or-later. The imported
-  decoders and their license/provenance file are under `src/rt/atrac3p/`; the project wrapper
-  remains separately identified in the ledger. Two byte-identical imports,
+  decoders, the project-authored API layer over them (`atrac3p_api.c`/`.h`) and their
+  license/provenance file are under `src/rt/atrac3p/`. The provenance ledger lists all of
+  these under the FFmpeg decoder-import record; the HLE bridge that drives them,
+  `src/rt/atrac3p_bridge.c`, has its own project-authored record. Two byte-identical imports,
   `libavcodec/fft_init_table.c` and `libavcodec/fft_table.h`, also carry a MIPS
   Technologies, Inc. BSD-3-Clause notice. Its verbatim text is in
   `third_party/licenses/FFMPEG_MIPS_FFT.txt` and is included in the generated
   native-package third-party notices bundle alongside the FFmpeg LGPL text.
 - **minimp3** — CC0-1.0 public-domain dedication. `src/rt/minimp3/minimp3.h` and
-  its `LICENSE` are imported byte-identical from `https://github.com/lieff/minimp3`
-  at commit `ea99364f61c14656440e8d77e9c233ccf3124633`; the manifest is
+  its `LICENSE` are imported from `https://github.com/lieff/minimp3` at commit
+  `ea99364f61c14656440e8d77e9c233ccf3124633` (the `LICENSE` byte-identical, the
+  header with two later upstream lines as LOCAL DELTA); the manifest is
   `src/rt/minimp3/PROVENANCE.md`. It is statically linked into the runtime through
   the project wrapper `src/rt/mp3_bridge.c` and decodes for `sceMp3`. CC0 asks for no
   notice; it is listed here so the lineage stays discoverable.
@@ -89,21 +99,34 @@ We aim to respond promptly and will remove material where appropriate.
 - **Portable Snippets `safe-math`** — `CC0-1.0` (public domain dedication). The
   byte-identical header, upstream `COPYING.md`, pinned source manifest, and
   SHA-256 values are under `third_party/portable-snippets/`. It is compiled into
-  the native player through `src/core/nk_iso.c` and `src/core/nk_xb.c`.
+  the native player through `src/core/nk_iso.c` and `src/core/nk_xb.c`, and into
+  every title runtime through `src/core/nk_xb.c` (`mk/runtime_sources.mk`).
 - **dr_libs `dr_wav`** — the Unlicense (public domain), elected from upstream's
   Unlicense or `MIT-0` choice; both texts are kept. The byte-identical header,
   upstream `LICENSE`, pinned source manifest, and SHA-256 values are under
   `third_party/dr_libs/`. Only selftests compile it; it is not in the player or
   the runtime.
-- **libchdr** — `BSD-3-Clause`, Copyright Romain Tisserand. The CHD reader, pinned at
+- **libchdr** — `BSD-3-Clause`, Copyright Romain Tisserand; the MAME-derived CHD, CD-ROM,
+  Huffman, bitstream, FLAC and A/V Huffman sources are Copyright Aaron Giles, under the
+  BSD-3-Clause text at the top of `third_party/libchdr/src/libchdr_chd.c`. The CHD reader,
+  pinned at
   `47d794151b2b64f6aba60304e6480f4f5a2bc24b`, with the codecs it carries: miniz 3.1.2
   (`MIT`), the Zstandard 1.5.7 single-file decompressor (`BSD-3-Clause`, elected from
   upstream's `BSD-3-Clause OR GPL-2.0-only`), the LZMA SDK decoder (public domain) and
-  dr_flac v0.13.4 (the Unlicense, elected from its Unlicense or `MIT-0` choice). Every file
-  keeps its upstream bytes apart from LF line endings (recorded as LOCAL DELTA); the
+  the dr_flac v0.13.4 development snapshot libchdr carries at that pin (the Unlicense, elected from its Unlicense or `MIT-0` choice). Every file
+  keeps its upstream bytes apart from LF line endings, one added final newline and two small code fixes in
+  `src/libchdr_codec_flac.c` and `src/libchdr_huffman.c`, all recorded as LOCAL DELTA in
+  `third_party/libchdr/PROVENANCE.md`; the
   licence texts and the pinned manifest are under `third_party/libchdr/`. It is compiled into the native player, which uses it only
   to expand a CHD disc image into a plain `.iso` when the image is added; it is not in the
   runtime.
+- **xBRZ 1.9** — `GPL-3.0-only`, Copyright (C) Zenju, with the author's linking exception for
+  MAME, FreeFileSync, Snes9x and ePSXe kept unchanged. The pixel-art scaler is a C translation
+  of the upstream C++ release (LOCAL DELTA), pinned to release 1.9 (`xBRZ_1.9.zip`, 2026-01-24;
+  zip SHA-256 `b2dff73b3abd24a18a7cde78d5ff5ed8f0922296dce6ed734dce2264cd0a0fc9`). The licence,
+  the manifest and the SHA-256 values are under `third_party/xbrz/`. It is statically linked
+  into the runtime, where the Vulkan GE renderer's Ace Mode texture scaling uses it; it is not
+  in `nk_decrypt`.
 - **Monocypher 4.0.3 Ed25519 signature check** — upstream offers `BSD-2-Clause OR CC0-1.0`;
   the project uses it under CC0-1.0. Four byte-identical source files, the complete upstream
   `LICENCE.md` and the pinned manifest are under `third_party/monocypher/`. It is compiled into
@@ -112,8 +135,10 @@ We aim to respond promptly and will remove material where appropriate.
 - **FFmpeg n4.4 H.264 decoder subset** — LGPL-2.1-or-later, the same pin as the ATRAC3+
   subset. The imported libavcodec/libavutil files (generic C only, no `--enable-gpl` or
   `--enable-nonfree` component), their license text and the byte-exact manifest are under
-  `src/rt/h264_ffmpeg_sub/`; the project API layer and configuration stand-ins there are
-  separately identified in the ledger. It is the default H.264 decoder where no platform decoder
+  `src/rt/h264_ffmpeg_sub/`. One imported file, `libavcodec/h264_slice.c`, is modified: it
+  carries two upstream FFmpeg `release/4.4` fixes as a dated LOCAL DELTA, recorded in the
+  file header and the manifest; the project API layer and configuration stand-ins there are
+  identified in `src/rt/h264_ffmpeg_sub/PROVENANCE.md`. It is the default H.264 decoder where no platform decoder
   exists (`H264_FFMPEG=1`, the default off Windows); Windows uses Media Foundation, an operating
   system component, and links none of it. Build notes are in `docs/PLATFORM_PORTABILITY.md`.
 - **SDL3** — zlib; used by the optional host renderer/audio integration. The
@@ -164,22 +189,31 @@ We aim to respond promptly and will remove material where appropriate.
   deterministic converter `tools/ttf2pgf.py` for test fixtures only. The font
   is not packaged, generated PGFs stay in temporary or `build/` paths, and the
   output name is project-owned so the Reserved Font Name is never claimed.
-- **Stand-in PSP font sources (issues #313 and #2005)** — SIL Open Font License 1.1:
+- **Stand-in PSP font sources (issues #313, #2005 and #1300)** — SIL Open Font License 1.1:
   Liberation Sans and Liberation Serif 2.1.5 (Digitized data copyright (c) 2010
   Google Corporation, with Reserved Font Names Arimo, Tinos and Cousine; Copyright
   (c) 2012 Red Hat, Inc., with Reserved Font Name Liberation) in
-  `tests/fixtures/fonts/liberation/`; Gowun Dodum (Copyright 2021 The Gowun Dodum Project
-  Authors) in `tests/fixtures/fonts/gowundodum/`; and M+ 1p (Copyright 2016 The M+ Project
-  Authors) in `tests/fixtures/fonts/mplus1p/`. Each is pinned with its licence text and a
-  `font-pin/v1` record. Unlike Gudea, these are build inputs: `tools/ttf2pgf.py`
-  converts them into the stand-in PSP fonts that a build puts in its `font/` folder
-  and the release ships (`font/README.md`). Liberation makes the Latin `nkltn*.pgf`
-  fonts and Gowun Dodum makes `nkkr.pgf`. `nkjpn.pgf` is made from Noto Sans JP (see
-  Project UI fonts below), with M+ 1p drawing the one character Noto Sans JP lacks
-  (U+2252). Each generated font is shipped with its conversion manifest and the licence
-  text of every font it draws from; `nkjpn-OFL.txt` carries both Noto Sans JP's and
-  M+ 1p's. The generated fonts carry project-owned names (`Nakagawa Open Latin`,
-  `Nakagawa Open Japanese`, `Nakagawa Open Korean`), so no Reserved Font Name is used.
+  `tests/fixtures/fonts/liberation/`; Geist Regular and Geist SemiBold (Copyright 2024
+  The Geist Project Authors; no Reserved Font Name), the project UI font in
+  `assets/fonts/ui/geist/` (static instances of `google/fonts` at
+  `45e3d5269e4a17d823f6d84470bc084dc5ae46f6`, see Project UI fonts below); Gowun Dodum
+  (Copyright 2021 The Gowun Dodum Project Authors) in `tests/fixtures/fonts/gowundodum/`;
+  and M+ 1p (Copyright 2016 The M+ Project Authors) in `tests/fixtures/fonts/mplus1p/`.
+  Each is pinned with its licence text and a `font-pin/v1` record, and Geist by its
+  record in `assets/fonts/ui/manifest.json`. Unlike Gudea, these
+  are build inputs: `tools/ttf2pgf.py` converts them (to PGF, scaled, emboldened and
+  cut to each glyph's ink) into the stand-in PSP fonts that a build puts in its `font/`
+  folder and the release ships (`font/README.md`). Geist makes the regular and bold
+  sans-serif Latin fonts (`nkltn.pgf` and `nkltns.pgf` from Regular, `nkltn4.pgf` and
+  `nkltn12.pgf` from SemiBold), with Liberation Sans Regular and Bold drawing the 110
+  characters of their set Geist lacks; Liberation makes the other twelve `nkltn*.pgf` fonts, and Gowun Dodum makes
+  `nkkr.pgf`. `nkjpn.pgf` is made from Noto Sans JP (see Project UI fonts below), with
+  M+ 1p drawing the 341 characters of its set Noto Sans JP lacks (U+2252 among them).
+  Each generated font is shipped with its conversion manifest and the licence text of
+  every font it draws from; `nkjpn-OFL.txt` carries both Noto Sans JP's and M+ 1p's,
+  and the four Geist fonts' licence copies both Geist's and Liberation's. The generated
+  fonts carry project-owned names (`Nakagawa Open Latin`, `Nakagawa Open Japanese`,
+  `Nakagawa Open Korean`), so no Reserved Font Name is used.
 - **stb_image 2.30** — Sean Barrett; upstream offers `MIT OR Unlicense`, and the
   project uses it under the public-domain (Unlicense) alternative. The byte-identical
   header, upstream `LICENSE` and the pinned manifest are under `third_party/stb/`. It is
@@ -231,15 +265,16 @@ executable (`tools/stage_runtime_dlls.py`, PE import-table walk stopping at
 Windows system DLLs). The launcher's fonts are the project's own, under
 `assets/fonts/ui/` (see Project UI fonts below). Every staged DLL ships its upstream
 license text, copied verbatim from the MSYS2 UCRT64 toolchain packages
-(`ucrt64/share/licenses/`, read-only) and recorded with its SHA-256 in
-`assets/third_party_components.json`:
+(`ucrt64/share/licenses/`, read-only), or from the upstream source at the
+packaged tag for a text the package does not install, and recorded with its
+SHA-256 in `assets/third_party_components.json`:
 
 | DLL | License | License text |
 | --- | --- | --- |
 | `SDL3.dll` | Zlib | `third_party/licenses/sdl3/LICENSE.txt` |
 | `SDL3_ttf.dll` | Zlib | `third_party/licenses/SDL3_ttf.txt` |
 | `libfreetype-6.dll` | FTL | `third_party/licenses/FreeType-FTL.txt` |
-| `libharfbuzz-0.dll` | MIT | `third_party/licenses/HarfBuzz.txt` |
+| `libharfbuzz-0.dll` | MIT-Modern-Variant AND MIT | `third_party/licenses/HarfBuzz.txt`, `third_party/licenses/harfbuzz/ms-use-COPYING.txt` |
 | `libgraphite2.dll` | MIT (chosen) | `third_party/licenses/Graphite2.txt` |
 | `libpng16-16.dll` | libpng-2.0 | `third_party/licenses/libpng.txt` |
 | `zlib1.dll` | Zlib | `third_party/licenses/zlib.txt` |
@@ -255,9 +290,19 @@ license text, copied verbatim from the MSYS2 UCRT64 toolchain packages
 License choices and combination notes:
 
 - **FreeType** is dual-licensed FTL or GPL-2.0-or-later; this distribution uses
-  the **FTL** option, which the FSF lists as GPL-compatible.
+  the **FTL** option, which the FSF lists as GPL-compatible. As the FTL asks of
+  a binary distribution: portions of this software are copyright (C) 1996-2026
+  The FreeType Project (<https://freetype.org>), and this software is based in
+  part on the work of the FreeType Team. The package's `THIRD_PARTY_NOTICES.txt`
+  repeats that statement.
 - **Graphite2** is granted under four licenses (LGPL-2.1+, MPL-2.0, GPL-2.0+,
   or MIT) by its upstream `LICENSE`; this distribution uses the **MIT** option.
+- **HarfBuzz**'s `COPYING` refers readers to `COPYING` files in subdirectories.
+  At the packaged tag, `src/ms-use/COPYING` (MIT, Microsoft Corporation) is the
+  licence of the data from which the Universal Shaping Engine and vowel-constraint
+  tables compiled into `libharfbuzz-0.dll` are generated, so the package ships it
+  beside `HarfBuzz.txt`. The other subdirectory `COPYING` files cover benchmark
+  and test data that the MSYS2 build does not compile.
 - **GLib, libintl and libiconv** are LGPL-2.1-or-later and are dynamically
   linked as separate replaceable DLLs. LGPL-2.1 section 3 permits use under
   GPL-3 terms, so they combine with this GPL-3 distribution.
@@ -268,7 +313,7 @@ The FFmpeg ATRAC3 and ATRAC3+ subsets and, in builds with `H264_FFMPEG=1`, the F
 subset (LGPL-2.1-or-later) are statically linked. The whole
 program is distributed under the GNU GPL version 3 (the project's own files are
 GPL-3.0-or-later; the player and `nk_decrypt` also link the GPL-3.0-only decryption files
-listed above) with its complete corresponding source, and `SOURCE.txt` names the exact repository commit or tag of each
+listed above, and the player links the GPL-3.0-only xBRZ scaler) with its complete corresponding source, and `SOURCE.txt` names the exact repository commit or tag of each
 package, which is what lets a user modify and relink it (issue #421).
 
 ## Public-safe exclusions
@@ -364,4 +409,6 @@ upstream revisions, file hashes, static weights, and license hashes are recorded
 docs/provenance/FONT_ORIGINS.md and assets/fonts/ui/manifest.json. These are project UI
 assets, not game data. The build also converts the Noto Sans JP file into the Japanese
 stand-in PSP font `nkjpn.pgf` (#2005); `tests/fixtures/fonts/notosansjp/PIN.json` pins it for
-the converter, and its Reserved Font Name `Source` is not used.
+the converter, and its Reserved Font Name `Source` is not used. It converts Geist Regular and
+SemiBold into the regular and bold sans-serif Latin stand-in fonts (#1300); the converter checks
+them against their records in assets/fonts/ui/manifest.json, and Geist reserves no font name.

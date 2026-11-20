@@ -563,6 +563,102 @@ static void test_controls(void) {
     nk_ui_destroy(ui);
 }
 
+/* The union of element `id`'s draw commands of `kind` in `list`. */
+static bool list_union(const NkUiDrawList *list, NkUiId id, int kind, int out[4]) {
+    bool found = false;
+    for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &list->cmd[i];
+        if (cmd->element_id != id || (int)cmd->kind != kind) continue;
+        if (!found) {
+            for (int k = 0; k < 4; ++k) out[k] = cmd->bounds[k];
+        } else {
+            if (cmd->bounds[0] < out[0]) out[0] = cmd->bounds[0];
+            if (cmd->bounds[1] < out[1]) out[1] = cmd->bounds[1];
+            if (cmd->bounds[2] > out[2]) out[2] = cmd->bounds[2];
+            if (cmd->bounds[3] > out[3]) out[3] = cmd->bounds[3];
+        }
+        found = true;
+    }
+    return found;
+}
+
+/* A remapped profile's long bindings stay in their cells: the keyboard and controller
+   text of every row is cut to its cell, ending in an ellipsis, and never runs into the
+   next column or past the card, in the one-table layout and in the two tables a short
+   window splits the list into. */
+static void test_controls_long_bindings_fit_their_cells(void) {
+    static const char *const keyboard = "Right Ctrl / Left Click / Left Arrow / Down Arrow / "
+                                        "Right Alt / Page Down / Backspace / Up Arrow";
+    static const char *const controller = "Left paddle 1 / Left paddle 2 / Right shoulder / "
+                                          "Left shoulder / Right stick press";
+    static NkOverlayControlRow rows[10];
+    char what[192];
+    static const int sizes[2][2] = {{1280, 800}, {960, 600}};
+    const NkUiId table = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x003010u);
+    const NkUiId card_id = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x000003u);
+    for (size_t r = 0; r < 10u; ++r) {
+        rows[r].psp = k_controls[r].psp;
+        rows[r].keyboard = keyboard;
+        rows[r].controller = controller;
+    }
+    for (int s = 0; s < 2; ++s) {
+        NkUi *ui = overlay_ui(sizes[s][0], sizes[s][1], 1.0f);
+        NkOverlayModel model = base_model((float)sizes[s][0], (float)sizes[s][1]);
+        NkOverlayState state;
+        const NkUiDrawList *list;
+        static char dump[TEXT_DUMP_CAP];
+        bool split = s == 1;
+        size_t first = split ? 5u : 10u;
+        int card[4];
+        if (ui == NULL) return;
+        model.controls = rows;
+        model.control_count = 10u;
+        nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
+        nk_overlay_go(&state, NK_OVERLAY_SCREEN_CONTROLS, 0u);
+        (void)settle(ui, &state, &model);
+        nk_ui_begin(ui, 0.0);
+        (void)nk_overlay_frame(ui, &state, &model);
+        list = nk_ui_end(ui);
+        snprintf(what, sizeof what, "%dx%d: the controls card is drawn", sizes[s][0], sizes[s][1]);
+        CHECK(list_union(list, card_id, NK_UI_DRAW_RECTANGLE, card), what);
+        for (size_t t = 0; t < (split ? 2u : 1u); ++t) {
+            const NkUiId base = (NkUiId)(table + (NkUiId)t * 0x100u);
+            size_t count = t == 0u ? first : 10u - first;
+            for (size_t i = 1u; i <= count; ++i) {
+                const NkUiId row_id = (NkUiId)(base + 1u + (NkUiId)i * 8u);
+                int keys[4];
+                int pad[4];
+                int edge = card[2] - (int)NK_UI_DIALOG_PAD_RIGHT;
+                int next[4];
+                bool have = list_union(list, (NkUiId)(row_id + 5u), NK_UI_DRAW_TEXT, keys) &&
+                            list_union(list, (NkUiId)(row_id + 6u), NK_UI_DRAW_TEXT, pad);
+                snprintf(what, sizeof what, "%dx%d table %zu row %zu: both binding cells are drawn",
+                         sizes[s][0], sizes[s][1], t, i);
+                CHECK(have, what);
+                if (!have) continue;
+                if (split && t == 0u &&
+                    list_union(list, (NkUiId)(table + 0x100u + 1u + (NkUiId)i * 8u + 4u),
+                               NK_UI_DRAW_TEXT, next)) {
+                    edge = next[0];
+                }
+                snprintf(what, sizeof what, "%dx%d table %zu row %zu: the keyboard text (right %d) "
+                         "stays left of the controller column (left %d)", sizes[s][0], sizes[s][1],
+                         t, i, keys[2], pad[0]);
+                CHECK(keys[2] <= pad[0], what);
+                snprintf(what, sizeof what, "%dx%d table %zu row %zu: the controller text (right %d) "
+                         "stays inside its table (edge %d)", sizes[s][0], sizes[s][1], t, i, pad[2], edge);
+                CHECK(pad[2] <= edge, what);
+            }
+        }
+        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        snprintf(what, sizeof what, "%dx%d: a binding too long for its cell ends in an ellipsis",
+                 sizes[s][0], sizes[s][1]);
+        CHECK(strstr(dump, "Right Ctrl") != NULL && strstr(dump, "\xE2\x80\xA6") != NULL &&
+                  strstr(dump, "Up Arrow\"") == NULL, what);
+        nk_ui_destroy(ui);
+    }
+}
+
 static void test_quit(void) {
     NkUi *ui = overlay_ui(1280, 800, 1.0f);
     NkOverlayModel model = base_model(1280.0f, 800.0f);
@@ -1052,6 +1148,30 @@ static void test_fits_every_window(void) {
     }
 }
 
+/* A runtime window has no minimum size, so its logical width can fall just past the 80 px
+   floor nk_overlay_page_begin falls back below. There the card's inner width is at most zero,
+   and a page that took that as "nothing was opened" left the page frame open: every frame
+   failed, nothing drew over the paused game and Back did nothing. Every page still completes. */
+static void test_narrow_window_pages_complete(void) {
+    for (int width = 81; width <= 90; ++width) {
+        NkUi *ui = overlay_ui(width, 600, 1.0f);
+        NkOverlayModel model = base_model((float)width, 600.0f);
+        if (ui == NULL) continue;
+        for (int screen = 0; screen < NK_OVERLAY_SCREEN_COUNT; ++screen) {
+            NkOverlayState state;
+            const NkUiDrawList *list;
+            nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
+            state.screen = (NkOverlayScreen)screen;
+            nk_ui_begin(ui, 0.0);
+            (void)nk_overlay_frame(ui, &state, &model);
+            list = nk_ui_end(ui);
+            if (list == NULL) fprintf(stderr, "  page %d at logical width %d fails\n", screen, width);
+            CHECK(list != NULL, "every page completes in a window just past the width floor");
+        }
+        nk_ui_destroy(ui);
+    }
+}
+
 /* ---- Developer pages (#314) ---------------------------------------------------------- */
 
 static uint8_t g_pixels[4u * 4u * 4u];
@@ -1170,6 +1290,28 @@ static void test_developer_gate(void) {
           "profile: Back returns to the menu");
     (void)settle(ui, &state, &model);
     CHECK(nk_ui_focused(ui) == NK_OVERLAY_ID_PROFILE, "profile: the menu comes back on PROFILE");
+    {
+        /* Audit 2026-11-17: parts that add up to 1 but round up one by one (14 + 14 + 14 + 7
+           of 48 px) stay inside the 48 px bar; so do parts that add up to more than 1. */
+        static const float shares[2][NK_OVERLAY_PROFILE_PART_COUNT] = {
+            {0.2813f, 0.2813f, 0.2813f, 0.1561f}, {0.9f, 0.5f, 0.3f, 0.2f}
+        };
+        for (int s = 0; s < 2; ++s) {
+            int total = 0;
+            memcpy(profile.bars[0], shares[s], sizeof(shares[s]));
+            nk_overlay_go(&state, NK_OVERLAY_SCREEN_PROFILE, 0u);
+            (void)settle(ui, &state, &model);
+            for (int p = 0; p < NK_OVERLAY_PROFILE_PART_COUNT; ++p) {
+                int piece[4];
+                if (frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x007201u + (uint32_t)p),
+                                 NK_UI_DRAW_RECTANGLE, piece)) {
+                    total += piece[3] - piece[1];
+                }
+            }
+            CHECK(total == 48, "profile: a bar's stacked parts fill its 48 px and stay inside it");
+        }
+        nk_overlay_go(&state, NK_OVERLAY_SCREEN_MENU, NK_OVERLAY_ID_PROFILE);
+    }
     model.profile = NULL;
     nk_overlay_go(&state, NK_OVERLAY_SCREEN_PROFILE, 0u);
     CHECK(frame_has_text(ui, &state, &model, "No interval has closed yet."),
@@ -1269,6 +1411,18 @@ static void test_vram_page(void) {
           "vram: Back returns to the menu");
     nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
     CHECK(!state.vram.chosen, "vram: a new pause starts the viewer afresh");
+    /* Audit 2026-11-17: when the GE state names only the bound texture, the first entry lands
+       on it and keeps its own main-RAM address, CLUT8 format and size, as choosing it through
+       the Source row does; it is not clamped into a VRAM window. */
+    vram.present[NK_OVERLAY_VRAM_DISPLAY] = false;
+    vram.present[NK_OVERLAY_VRAM_DRAW] = false;
+    vram.present[NK_OVERLAY_VRAM_DEPTH] = false;
+    nk_overlay_go(&state, NK_OVERLAY_SCREEN_VRAM, 0u);
+    action = frame_with(ui, &state, &model, -1, NK_UI_DIR_NONE);
+    CHECK(action.kind == NK_OVERLAY_ACT_VRAM_VIEW && state.vram.source == NK_OVERLAY_VRAM_TEXTURE &&
+              state.vram.view.addr == 0x08A00000u && state.vram.view.format == 5u &&
+              state.vram.view.width == 128u && state.vram.view.height == 64u,
+          "vram: a first entry on the texture keeps its own address, format and size");
     nk_ui_destroy(ui);
 }
 
@@ -1624,10 +1778,15 @@ static bool append_case(char *out, size_t cap, size_t *used, const char *name, N
     nk_ui_begin(ui, 0.0);
     (void)nk_overlay_frame(ui, state, model);
     if (nk_ui_end(ui) == NULL) return false;
+    /* nk_ui_dump returns the length it needed: a cut dump is refused before it is read. */
     dumped = nk_ui_dump(ui, dump, sizeof(dump));
+    if (dumped >= sizeof(dump)) {
+        fprintf(stderr, "FAIL: the %s dump needs %zu bytes, past its %zu-byte buffer\n", name, dumped,
+                sizeof(dump));
+        return false;
+    }
     while (dumped > 0u && (dump[dumped - 1u] == '\n' || dump[dumped - 1u] == '\r')) --dumped;
-    return dumped < sizeof(dump) && append_text(out, cap, used, dump, dumped) &&
-           append_text(out, cap, used, "\n", 1u);
+    return append_text(out, cap, used, dump, dumped) && append_text(out, cap, used, "\n", 1u);
 }
 
 static bool build_golden(char *out, size_t cap, size_t *used) {
@@ -1899,11 +2058,77 @@ static int capture_overlay(const char *directory) {
 }
 #endif
 
+static bool utf8_whole(const char *text, size_t length) {
+    size_t i = 0u;
+    while (i < length) {
+        unsigned char c = (unsigned char)text[i];
+        size_t need = c < 0x80u ? 0u : (c & 0xE0u) == 0xC0u ? 1u : (c & 0xF0u) == 0xE0u ? 2u :
+                      (c & 0xF8u) == 0xF0u ? 3u : 4u;
+        if (need == 4u || length - i - 1u < need) return false;
+        for (size_t k = 1u; k <= need; ++k) {
+            if (((unsigned char)text[i + k] & 0xC0u) != 0x80u) return false;
+        }
+        i += need + 1u;
+    }
+    return true;
+}
+
+/* Every byte the eyebrow `id` draws, joined, in `out`; its length, or -1 when none is drawn. */
+static int eyebrow_drawn(NkUi *ui, NkUiId id, const char *marker, const char *text, char *out,
+                         size_t cap) {
+    const NkUiDrawList *list;
+    size_t used = 0u;
+    bool found = false;
+    nk_ui_begin(ui, 0.0);
+    nk_overlay_eyebrow(ui, id, marker, text, nk_ui_theme(ui)->muted);
+    list = nk_ui_end(ui);
+    for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+        const NkUiTextRun *run;
+        if (list->cmd[i].element_id != id || list->cmd[i].kind != NK_UI_DRAW_TEXT) continue;
+        run = (const NkUiTextRun *)list->cmd[i].custom;
+        for (size_t k = 0u; k < run->length && used + 1u < cap; ++k) out[used++] = run->text[k];
+        found = true;
+    }
+    out[used] = '\0';
+    return found ? (int)used : -1;
+}
+
+/* Audit 2026-11-17: an eyebrow longer than its 159 bytes is cut on a whole UTF-8 sequence, and
+   a marker of any length is cut to the line, never past it. */
+static void test_eyebrow_cut(void) {
+    NkUi *ui = overlay_ui(1280, 800, 1.0f);
+    const NkUiId id = NK_OVERLAY_ID(0x00F001u);
+    char text[256];
+    char marker[200];
+    char drawn[512];
+    size_t at = 0u;
+    int length;
+    if (ui == NULL) return;
+    /* "ab" and then two-byte letters: the 155 bytes left after the marker end inside one. */
+    text[at++] = 'a';
+    text[at++] = 'b';
+    while (at + 2u < sizeof(text)) {
+        text[at++] = (char)0xC3;
+        text[at++] = (char)0xA9;
+    }
+    text[at] = '\0';
+    length = eyebrow_drawn(ui, id, "\xE2\x96\xB8", text, drawn, sizeof(drawn));
+    CHECK(length > 0 && length <= 159 && utf8_whole(drawn, (size_t)length),
+          "eyebrow: a long text is cut on a whole UTF-8 sequence");
+    memset(marker, 'x', sizeof(marker) - 1u);
+    marker[sizeof(marker) - 1u] = '\0';
+    length = eyebrow_drawn(ui, id, marker, "MARK", drawn, sizeof(drawn));
+    CHECK(length > 0 && length <= 159, "eyebrow: a marker longer than the line is cut to it");
+    nk_ui_destroy(ui);
+}
+
 int main(int argc, char **argv) {
     static char golden[DUMP_CAP];
     size_t golden_size = 0u;
     bool write = argc > 1 && strcmp(argv[1], "--write-goldens") == 0;
     const char *capture_dir = NULL;
+    bool built;
+    int capture_result = 0;
     for (int i = 1; i < argc; ++i) {
         if (strncmp(argv[i], "--capture-dir=", 14u) == 0) {
             capture_dir = argv[i] + 14u;
@@ -1914,9 +2139,11 @@ int main(int argc, char **argv) {
     test_ace();
     test_display_rows();
     test_controls();
+    test_controls_long_bindings_fit_their_cells();
     test_quit();
     test_pad_lost();
     test_fits_every_window();
+    test_narrow_window_pages_complete();
     test_menu_fits_small_windows();
     test_menu_height_sweep();
     test_ace_caption_every_part();
@@ -1926,19 +2153,32 @@ int main(int argc, char **argv) {
     test_vram_clamp();
     test_developer_pages_fit();
     test_describe_controls();
-    CHECK(build_golden(golden, sizeof(golden), &golden_size), "build the overlay golden");
+    test_eyebrow_cut();
+    built = build_golden(golden, sizeof(golden), &golden_size);
+    CHECK(built, "build the overlay golden");
     if (write) {
-        CHECK(write_golden(GOLDEN_PATH, golden, golden_size), "write the overlay golden");
+        /* A failed build or check leaves the tracked golden as it was, not cut short. */
+        if (built && failures == 0) {
+            CHECK(write_golden(GOLDEN_PATH, golden, golden_size), "write the overlay golden");
+        } else {
+            fprintf(stderr, "overlay screens: %s not written: the checks above failed\n",
+                    GOLDEN_PATH);
+        }
     } else {
         compare_golden(GOLDEN_PATH, golden, golden_size);
     }
     if (capture_dir != NULL && failures == 0) {
-        int capture_result = capture_overlay(capture_dir);
+        capture_result = capture_overlay(capture_dir);
         if (capture_result != 0 && capture_result != 77) ++failures;
     }
     if (failures != 0) {
         fprintf(stderr, "overlay screens: %d failure(s)\n", failures);
         return 1;
+    }
+    /* Captures were asked for and none were made: a SKIP, not a PASS. */
+    if (capture_result == 77) {
+        printf("overlay screens: SKIP (the checks passed; captures were not made)\n");
+        return 77;
     }
     printf("overlay screens: PASS\n");
     return 0;

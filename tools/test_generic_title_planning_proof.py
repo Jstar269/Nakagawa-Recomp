@@ -44,12 +44,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from typing import Any
+from typing import Any, TypedDict, cast
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+# The repository root resolves `tools.`; the tools folder resolves bare sibling imports.
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
-import title_codegen_plan  # noqa: E402
+from tools import title_codegen_plan  # noqa: E402
 import title_manifest  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
 
@@ -59,6 +61,33 @@ SYNTHETIC2 = TITLES / "synthetic-title2.json"
 PSPDEV = TITLES / "pspdev-phase5.json"
 PLANNER = ROOT / "tools" / "title_codegen_plan.py"
 HELPER = ROOT / "tools" / "title_manager_plan.ps1"
+
+
+class _ManagerMakePlan(TypedDict):
+    game_name: str
+    codegen_profile_arg: str
+    build_dir: str
+
+
+class _ManagerPlanEnvironment(TypedDict):
+    GAME_BASE: str
+    GAME_ENTRY: str
+    TITLE_EXTRA_SPANS: str
+
+
+class _ManagerPlanView(TypedDict):
+    title_manifest_id: str
+    title_kind: str
+    game_name: str
+    game_base: int
+    game_entry: int
+    codegen_profile: str
+    bss_metadata_source: str
+    extra_executable_spans: list[object]
+    disc: object
+    make: _ManagerMakePlan
+    environment: _ManagerPlanEnvironment
+    private_binding_requirements: dict[str, bool]
 
 
 def _scratch_build_root(test: unittest.TestCase) -> pathlib.Path:
@@ -128,16 +157,27 @@ class GenericTitleProofFixtures(unittest.TestCase):
         """The three public synthetics use disjoint address families; matrix can distinguish."""
         fixtures = [SYNTHETIC, PSPDEV, SYNTHETIC2]
         bases = set()
+        used_by_fixture: dict[str, set[int]] = {}
         for path in fixtures:
             norm = title_manifest.validate_manifest(_load(path))
             bases.add(norm["executable"]["base"])
             # collect runtime binding addresses
             bindings = norm.get("runtime_bindings", {})
-            used = {v for k, v in bindings.items() if isinstance(v, int)}
+            # Address-valued bindings only: schema_version is a format number, not an address.
+            used = {v for k, v in bindings.items()
+                    if isinstance(v, int) and not isinstance(v, bool) and k != "schema_version"}
             for alias in bindings.get("dispatch_aliases", []):
                 used |= {alias["from"], alias["to"]}
             # check against HST retired span/modules
             self.assertNotIn(HST_SPAN[0], used)
+            used_by_fixture[path.name] = used
+        # No binding or dispatch-alias address is shared by two fixtures.
+        names = sorted(used_by_fixture)
+        for i, first in enumerate(names):
+            for second in names[i + 1:]:
+                shared = used_by_fixture[first] & used_by_fixture[second]
+                self.assertEqual(sorted(hex(address) for address in shared), [],
+                                 f"{first} and {second} share runtime binding addresses")
         self.assertEqual(len(bases), 3, "each fixture must have a distinct executable base")
         # synthetic-title2 sits in its own 1 MiB address family, apart from the other two,
         # so no literal can satisfy it and another fixture at once.
@@ -147,15 +187,18 @@ class GenericTitleProofFixtures(unittest.TestCase):
 
 
 class GenericPlannerAcceptsSyntheticTitle2(unittest.TestCase):
-    def _plan(self, manifest_path: pathlib.Path, game_name: str, build_dir: pathlib.Path) -> dict:
+    def _plan(self, manifest_path: pathlib.Path, game_name: str, build_dir: pathlib.Path) -> _ManagerPlanView:
         manifest = _load(manifest_path)
-        return title_codegen_plan.build_manager_plan(
-            manifest,
-            game_name=game_name,
-            game_elf=pathlib.Path("build/fixtures/synthetic2.elf"),
-            build_dir=build_dir,
-            funcs_per_chunk=64,
-        )
+        return cast(
+            _ManagerPlanView,
+            title_codegen_plan.build_manager_plan(
+                manifest,
+                game_name=game_name,
+                game_elf=pathlib.Path("build/fixtures/synthetic2.elf"),
+                build_dir=build_dir,
+                funcs_per_chunk=64,
+            ),
+        )  # The builder constructs these projected keys with the annotated value types.
 
     def test_synthetic_title2_plans_successfully_via_generic_planner(self) -> None:
         """Generic fields are projected without pretending to be HST."""
@@ -259,6 +302,7 @@ class HstProfileIsolation(unittest.TestCase):
         self.shell = shutil.which("pwsh")
         if self.shell is None:
             self.skipTest("pwsh required for adapter isolation checks")
+        assert self.shell is not None
 
     def _run_adapter_reject(self, plan: dict, expected_fragment: str) -> None:
         import json as _json
@@ -278,7 +322,9 @@ class HstProfileIsolation(unittest.TestCase):
                 "  exit 3",
                 "}",
             ])
-            proc = subprocess.run([self.shell, "-NoProfile", "-NonInteractive", "-Command", script],
+            shell = self.shell
+            assert shell is not None
+            proc = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", script],
                                   cwd=ROOT, capture_output=True, text=True)
             self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
             self.assertIn(expected_fragment, proc.stdout)
@@ -568,7 +614,7 @@ class MakeSpanPrecedenceTests(unittest.TestCase):
         for line in proc.stdout.splitlines():
             if line.strip().startswith("EFFECTIVE="):
                 return line.strip().split("=", 1)[1].strip()
-        return ""
+        self.fail("the Make probe printed no EFFECTIVE= line:\n" + proc.stdout)
 
     def test_undefined_is_empty(self) -> None:
         self.assertEqual(self._effective("synthetic2"), "")
@@ -819,7 +865,20 @@ class DirectMakeRetirementTests(unittest.TestCase):
             if stripped.startswith(f"{var}="):
                 value = stripped.split(f"{var}=", 1)[1].strip()
                 return value.replace(build_root, "$(BUILD_ROOT)")
-        return ""
+        self.fail(f"the Make probe printed no {var}= line:\n" + proc.stdout)
+
+    def test_the_probed_profile_variable_is_the_one_codegen_reads(self) -> None:
+        # Make expands an undefined name to "", so the empty checks below hold for a renamed
+        # variable too. Pin that CODEGEN_PROFILE_ARG is declared, fed to the codegen recipe,
+        # recorded in the profile stamp, and that the probe reports a value it is given.
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertRegex(makefile, r"(?m)^CODEGEN_PROFILE_ARG \?=")
+        pipeline = (ROOT / "mk" / "pipeline.mk").read_text(encoding="utf-8")
+        self.assertRegex(pipeline, r"(?m)^\t.*\$\(CODEGEN_TOOL\) .*\$\(CODEGEN_PROFILE_ARG\)")
+        stamps = (ROOT / "mk" / "smoke_gates.mk").read_text(encoding="utf-8")
+        self.assertIn("CODEGEN_PROFILE_ARG=$(CODEGEN_PROFILE_ARG)", stamps)
+        self.assertEqual(self._get("CODEGEN_PROFILE_ARG", "hst", "CODEGEN_PROFILE_ARG=--profile=probe"),
+                         "--profile=probe")
 
     def test_hst_name_has_no_direct_make_title_defaults(self) -> None:
         self.assertEqual(self._get("CODEGEN_PROFILE_ARG", "hst"), "")
@@ -889,7 +948,7 @@ class PathTextRenderingTests(unittest.TestCase):
 
     def test_path_text_is_rendering_only(self):
         # It replaces backslashes with slashes but does not claim containment
-        from title_codegen_plan import _path_text
+        _path_text = title_codegen_plan._path_text
         self.assertEqual(_path_text(pathlib.Path(r"C:\foo\bar"), "label"), "C:/foo/bar")
         self.assertEqual(_path_text(pathlib.Path("a/b"), "label"), "a/b")
         # Ensure comments/tests say rendering only (checked by searching planner)
@@ -899,6 +958,17 @@ class PathTextRenderingTests(unittest.TestCase):
         # The planner's _path_text should not be described as containment
         self.assertNotIn("containment", text.lower())
         self.assertNotIn("security validation", text.lower())
+
+    def test_file_imports_when_run_as_a_script(self) -> None:
+        # Script mode puts only tools/ on sys.path, never the repository root or the cwd.
+        env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+        with tempfile.TemporaryDirectory() as tmp:
+            run = subprocess.run(
+                [sys.executable, "-s", str(pathlib.Path(__file__).resolve()), "--help"],
+                cwd=tmp, env=env, capture_output=True, text=True, check=False, timeout=120,
+            )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertNotIn("ModuleNotFoundError", run.stderr)
 
 
 if __name__ == "__main__":

@@ -74,7 +74,7 @@ def _jump(word: int) -> int:
 
 INTENDED_TOTAL = 2742
 INTENDED_FAMILY_COUNTS = {0x18: 144, 0x19: 204, 0x1B: 60, 0x34: 2020, 0x37: 182, 0x3C: 132}
-INTENDED_SIZE_COUNTS = {1: 718, 2: 682, 3: 677, 4: 665}
+INTENDED_SIZE_COUNTS = {1: 718, 2: 714, 3: 661, 4: 649}
 
 # Family -> sub (3-bit for 0x18/0x19/0x1B/0x3C) -> count
 INTENDED_FAMILY_SUB_COUNTS = {
@@ -105,7 +105,7 @@ INTENDED_FAMILY_SIZE_COUNTS = {
     0x19: {1: 48, 2: 48, 3: 60, 4: 48},
     0x1B: {1: 15, 2: 15, 3: 15, 4: 15},
     0x34: {1: 505, 2: 505, 3: 505, 4: 505},
-    0x37: {1: 114, 2: 36, 3: 16, 4: 16},
+    0x37: {1: 114, 2: 68, 3: 0, 4: 0},
     0x3C: {1: 0, 2: 42, 3: 45, 4: 45},
 }
 # (family, sub) -> size -> count  (sub is 3-bit for 0x18/0x19/0x1B/0x3C; for 0x34 use jump)
@@ -311,7 +311,7 @@ class IndependentPrefixImmediateIteratorTests(unittest.TestCase):
         # Ensure another legal VPFX encoding exists but does NOT substitute the literal
         self.assertIn(0xDC0000E4, s, "legal VPFX with swizzle 0xE4 must also be generated")
         self.assertIn(0xDD0000E4, s)
-        self.assertIn(0xDE00000F, s)  # vpfxd with mask 15
+        self.assertIn(0xDE000F00, s)  # vpfxd with write mask 15 (bits 8-11)
         # The literal presence assertion above ensures a mutant that replaces
         # 0xDC000000 with 0xDC0000E4 would be detected (literal missing).
 
@@ -583,7 +583,7 @@ class IntendedCoverageContractTests(unittest.TestCase):
             self.assertIn(op, INTENDED_FAMILY_COUNTS, f"unexpected family 0x{op:02x}")
     def test_drop_Q_killed(self):
         cnt=Counter(_size_independent(w) for w in self.corpus)
-        self.assertEqual(cnt[4], INTENDED_SIZE_COUNTS[4], "Q must be 665")
+        self.assertEqual(cnt[4], INTENDED_SIZE_COUNTS[4], "Q must be 649")
         self.assertGreater(cnt[4], 0, "Q must be present")
         # Also per-family Q
         fam_q = Counter(_size_independent(w) for w in self.corpus if _op6(w)==0x3C)
@@ -792,6 +792,45 @@ class MemoryCop2CorpusTests(unittest.TestCase):
         body, _, _ = codegen.vfpu_effect(0x08900000, word)
         self.assertIn("s->vi[1]", body)
         self.assertNotIn("s->vi[32]", body)
+
+class PrefixFieldLayoutTests(unittest.TestCase):
+    """The prefix words exercise the fields the runtime decodes (src/rt/recomp.c sr_vread/sr_vwrite).
+
+    VPFXS/VPFXT: swizzle bits 0-7, abs bits 8-11, constant bits 12-15, negate bits 16-19.
+    VPFXD: saturation two bits per lane in bits 0-7, write mask bits 8-11. The layout is
+    decoded here independently of the generator, so a generator that shifts a mask into
+    the wrong field fails by name.
+    """
+
+    def _source_fields(self, top: int) -> set[tuple[int, int, int]]:
+        from vfpu_synth_gen import _iter_vpfx
+        return {((w >> 8) & 0xF, (w >> 12) & 0xF, (w >> 16) & 0xF)
+                for w in _iter_vpfx() if (w >> 24) == top}
+
+    def test_source_prefixes_set_abs_on_every_lane_and_a_single_constant_lane(self):
+        for top in (0xDC, 0xDD):
+            fields = self._source_fields(top)
+            with self.subTest(prefix=hex(top)):
+                # (abs, constant, negate) as the runtime reads them.
+                self.assertIn((0xF, 0x0, 0x0), fields, "abs on lanes x, y, z and w")
+                self.assertIn((0x0, 0x1, 0x0), fields, "a constant on lane x only")
+                self.assertIn((0x0, 0x0, 0xF), fields, "negate on every lane")
+                self.assertIn((0xF, 0x1, 0xF), fields, "abs, constant and negate together")
+
+    def test_destination_prefixes_cover_every_write_mask_and_saturation_mode(self):
+        from vfpu_synth_gen import _iter_vpfx
+        words = [w for w in _iter_vpfx() if (w >> 24) == 0xDE]
+        masks = {(w >> 8) & 0xF for w in words}
+        self.assertEqual(masks, set(range(16)), "all 16 destination write masks")
+        for w in words:
+            self.assertEqual(w & 0x00FFF000, 0, f"0x{w:08x} sets bits outside the D prefix")
+            lanes = {(w >> (2 * i)) & 3 for i in range(4)}
+            self.assertEqual(len(lanes), 1, f"0x{w:08x} saturation is uniform across lanes")
+        modes = {w & 3 for w in words}
+        # none, [0, 1] (code 1) and [-1, 1] (code 3); code 2 is not a saturation mode.
+        self.assertEqual(modes, {0, 1, 3})
+        self.assertIn(0xDE000F00, set(words), "vpfxd masking every lane")
+
 
 class VfpuWordsTxtAbsenceTest(unittest.TestCase):
     def test_vfpu_words_txt_is_not_committed(self):

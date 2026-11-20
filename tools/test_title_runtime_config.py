@@ -27,7 +27,7 @@ import sys
 import tempfile
 import time
 import unittest
-from typing import Any
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -73,7 +73,7 @@ GENERIC_RUNTIME_SOURCES = ("src/rt/driver.c", "src/rt/sched.c", "src/rt/recomp.c
                            "src/rt/title_config.c", "src/rt/title_config.h")
 
 
-def base_manifest(**bindings: int) -> dict:
+def base_manifest(**bindings: object) -> dict:
     manifest = json.loads(FIXTURE_A.read_text(encoding="utf-8"))
     if bindings:
         manifest["runtime_bindings"] = {"schema_version": 1, **bindings}
@@ -401,14 +401,14 @@ class GeneratedConfiguration(unittest.TestCase):
                 manifest["codegen_profile"] = codegen_profile
             header = title_runtime_config.render_header(
                 title_runtime_config.bindings_from_manifest(manifest))
-            bits = []
+            bits: list[str] = []
             for macro in ("SR_TITLE_CONFIG_DIAGNOSTICS_PROFILE",
                           "SR_TITLE_CONFIG_COMPAT_PROFILE"):
                 emitted = re.search(rf"#define {macro} ([01])$", header, re.MULTILINE)
                 self.assertIsNotNone(emitted, f"{macro} is not emitted at all")
                 assert emitted is not None
                 bits.append(emitted.group(1))
-            return tuple(bits)
+            return cast(tuple[str, str], tuple(bits))  # The loop above visits exactly the two profile macros.
 
         self.assertEqual(profile_bits(None), ("0", "0"))
         self.assertEqual(profile_bits("none"), ("0", "0"))
@@ -1077,6 +1077,9 @@ class GenericRuntimeCarriesNoTitleAddress(unittest.TestCase):
             if line.startswith("export NK_RUNTIME_PROFILE_ENTRIES :=")
         )
         self.assertIn("TITLE_CONFIG_DIGEST=$(TITLE_CONFIG_DIGEST)", export_line)
+        # The UI and overlay objects compile with or without NK_UI_WITH_SDL_TTF.
+        self.assertIn("SDL3_TTF=$(SDL3_TTF_AVAILABLE)", export_line)
+        self.assertIn("SDL3_TTF_CFLAGS=$(SDL3_TTF_CFLAGS)", export_line)
         # The generic build must not default to a title manifest.
         self.assertRegex(makefile, r"(?m)^TITLE_MANIFEST \?=\s*$")
         # The scheduler matrix must cover a generic build and two distinct fixtures.
@@ -1084,6 +1087,33 @@ class GenericRuntimeCarriesNoTitleAddress(unittest.TestCase):
         self.assertRegex(makefile, r"(?m)^SCHED_SELFTEST_MANIFEST_generic :=\s*$")
         fixtures = set(re.findall(r"(?m)^SCHED_SELFTEST_MANIFEST_fixture-\w+ := (\S+)$", makefile))
         self.assertEqual(len(fixtures), 2, "the matrix must use two distinct fixtures")
+
+    def test_sdl3_ttf_availability_changes_the_runtime_profile(self) -> None:
+        """Installing or removing sdl3-ttf must rebuild the UI and overlay objects.
+
+        RT_NK_UI_FLAGS adds -DNK_UI_WITH_SDL_TTF and SDL3_TTF_CFLAGS only when SDL3_ttf is
+        found, and those objects' only profile prerequisite is the runtime profile stamp, so
+        the parse-time runtime profile hash must change with them.
+        """
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            self.skipTest("GNU Make is required for the parse-time profile check")
+        probe = "nk-print-runtime-profile: ; @echo NK_RUNTIME_PROFILE_HASH=$(RUNTIME_PROFILE_HASH)"
+        hashes: dict[tuple[str, str], str] = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            build_root = Path(tmp) / "build"
+            for available, cflags in (("yes", "-I/nk-ttf-a"), ("yes", "-I/nk-ttf-b"), ("", "")):
+                proc = subprocess.run(
+                    [make, "--no-print-directory", "-s", "--eval", probe, "nk-print-runtime-profile",
+                     f"BUILD_ROOT={build_root.as_posix()}", f"BUILD_DIR={(build_root / 'ttf').as_posix()}",
+                     f"SDL3_TTF_AVAILABLE={available}", f"SDL3_TTF_CFLAGS={cflags}"],
+                    cwd=ROOT, capture_output=True, text=True, timeout=300,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                found = re.findall(r"(?m)^NK_RUNTIME_PROFILE_HASH=(\S+)$", proc.stdout)
+                self.assertEqual(len(found), 1, proc.stdout)
+                hashes[(available, cflags)] = found[0]
+        self.assertEqual(len(set(hashes.values())), 3, hashes)
 
     def test_an_explicit_hst_build_without_a_manifest_fails_closed(self):
         """GAME_NAME=hst with no title configuration must refuse, not build generically."""
@@ -1619,7 +1649,8 @@ class RequiredRuntimeBindingsTests(unittest.TestCase):
             self.manifest(bindings={"schema_version": 1, "dispatch_aliases": self.ALIASES},
                           required=["dispatch_aliases", "dispatch_aliases"]),
             "duplicate required binding family")
-        for bad in ({}, "dispatch_aliases", 7, [5], [None]):
+        bad_values: tuple[object, ...] = ({}, "dispatch_aliases", 7, [5], [None])
+        for bad in bad_values:
             with self.subTest(value=bad):
                 with self.assertRaises(title_manifest.TitleManifestError):
                     title_manifest.validate_manifest(

@@ -30,11 +30,11 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import pathlib
 import re
 import subprocess
 import sys
-from collections.abc import Iterator
 from urllib.parse import unquote
 
 try:
@@ -187,6 +187,8 @@ FROZEN_HLE_CENSUS_PATS = [
 # maintained, so a missing row must fail closed instead of buying a free pass.
 HLE_CENSUS_BLOCK_BEGIN = "<!-- BEGIN GENERATED HLE STATUS CENSUS -->"
 HLE_CENSUS_BLOCK_END = "<!-- END GENERATED HLE STATUS CENSUS -->"
+#: The one page whose generated census block is pinned against the generator.
+HLE_CENSUS_BLOCK_DOC = "docs/HLE_AND_WORKAROUND_INVENTORY.md"
 
 # The nouns the generated census uses for its counts. Generic stubs, dedicated
 # handlers, refusals and NIDs are one census, so a hand-written count of any of
@@ -209,9 +211,10 @@ HLE_CENSUS_COUNT_PAT = re.compile(
 # 380 registrations added"), because "were added" is not a capture-time label.
 # Once one count on a line is past evidence, later counts on that line share its
 # context ("was 380 registrations and 51 stubs") unless the line also speaks of
-# the present.
+# the present. A bare "then" is not a label: it is as often the next step of an
+# instruction ("412 registrations; then run the census") as a past time.
 HLE_CENSUS_HISTORICAL_LABEL_PAT = re.compile(
-    r"histor|capture[- ]time|\bthen\b|previous|former|\bas of\b|snapshot"
+    r"histor|capture[- ]time|\bat the time\b|previous|former|\bas of\b|snapshot"
     r"|supersed|no longer|\b[0-9a-f]{7,40}\b",
     re.IGNORECASE,
 )
@@ -279,8 +282,100 @@ CAPABILITY_PATH_TOKEN_PAT = re.compile(r"`([A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)
 # URL. Both are cited in practice, so both are accepted.
 CAPABILITY_ISSUE_REF_PAT = re.compile(r"(?:issues|pull)/(\d+)\b|#(\d+)\b")
 
-MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)\)")
+# An inline link or image destination, in every CommonMark form: a bare run of
+# non-space characters or an <angle-bracket> destination (which may hold spaces),
+# optionally followed by a "title", 'title' or (title).
+MARKDOWN_LINK_RE = re.compile(
+    r"!?\[[^\]]*\]\(\s*(<[^>\n]*>|[^)\s]+)(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*\)"
+)
+# A reference-style link definition, "[label]: destination" (a footnote "[^1]:" is not one).
+MARKDOWN_REF_DEF_RE = re.compile(r"^\s*\[(?!\^)[^\]]+\]:\s*(<[^>\n]*>|\S+)")
 EXTERNAL_LINK_PREFIXES = ("http://", "https://", "mailto:", "tel:", "data:")
+
+_ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
+_SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+_HTML_ANCHOR_RE = re.compile(r"""<[A-Za-z][^>]*?\b(?:id|name)\s*=\s*["']([^"']+)["']""")
+_INLINE_HTML_RE = re.compile(r"<[^>]+>")
+_INLINE_LINK_TEXT_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+# GitHub's heading slug keeps letters, digits, underscores, hyphens and spaces.
+_SLUG_DROP_RE = re.compile(r"[^\w\- ]")
+_anchor_cache: dict[tuple[str, int, int], frozenset[str]] = {}
+
+
+def _github_heading_slug(heading: str) -> str:
+    """The anchor GitHub gives a heading: its text, lower-cased, punctuation dropped, spaces -> '-'."""
+    text = _INLINE_HTML_RE.sub("", heading)
+    text = _INLINE_LINK_TEXT_RE.sub(r"\1", text).replace("`", "")
+    return _SLUG_DROP_RE.sub("", text.strip().lower()).replace(" ", "-")
+
+
+def markdown_anchors(path: pathlib.Path) -> frozenset[str]:
+    """Every fragment a Markdown file answers to: heading slugs (with GitHub's -1, -2 suffixes
+    for repeats) and explicit HTML id/name anchors, lower-cased."""
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    cached = _anchor_cache.get(key)
+    if cached is not None:
+        return cached
+    anchors: set[str] = set()
+    seen: dict[str, int] = {}
+
+    def add_heading(heading: str) -> None:
+        slug = _github_heading_slug(heading)
+        count = seen.get(slug, 0)
+        seen[slug] = count + 1
+        anchors.add(slug if count == 0 else f"{slug}-{count}")
+
+    in_fence = False
+    previous = ""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            previous = ""
+            continue
+        if in_fence:
+            continue
+        anchors.update(match.group(1).lower() for match in _HTML_ANCHOR_RE.finditer(line))
+        atx = _ATX_HEADING_RE.match(line)
+        if atx:
+            add_heading(atx.group(1) or "")
+            previous = ""
+            continue
+        if (_SETEXT_UNDERLINE_RE.match(line) and previous.strip()
+                and not previous.lstrip().startswith(("|", "-", "*", "+", ">"))):
+            add_heading(previous)
+            previous = ""
+            continue
+        previous = line
+    result = frozenset(anchors)
+    _anchor_cache[key] = result
+    return result
+
+
+def _exists_with_exact_case(repo_root: pathlib.Path, candidate: str,
+                            listings: dict[str, frozenset[str]]) -> bool:
+    """Whether every component of *candidate* below *repo_root* exists with exactly that case.
+
+    A case-insensitive file system (Windows, macOS) finds docs/setup.md for docs/SETUP.md;
+    GitHub does not.
+    """
+    relative = os.path.relpath(candidate, os.path.normpath(str(repo_root)))
+    current = os.path.normpath(str(repo_root))
+    for part in pathlib.PurePath(relative).parts:
+        if part in ("", os.curdir):
+            continue
+        names = listings.get(current)
+        if names is None:
+            try:
+                names = frozenset(os.listdir(current))
+            except OSError:
+                return False
+            listings[current] = names
+        if part not in names:
+            return False
+        current = os.path.join(current, part)
+    return True
 
 
 def get_tracked_markdown_files(repo_root: pathlib.Path = ROOT) -> list[pathlib.Path]:
@@ -352,6 +447,7 @@ def lint_doc_links_and_topology(
 
     in_fence = False
     root_resolved = repo_root.resolve()
+    listings: dict[str, frozenset[str]] = {}
     for idx, line in enumerate(text.splitlines(), 1):
         stripped = line.lstrip()
         if stripped.startswith("```") or stripped.startswith("~~~"):
@@ -366,13 +462,18 @@ def lint_doc_links_and_topology(
                 )
         if in_fence:
             continue
-        for match in MARKDOWN_LINK_RE.finditer(line):
-            raw_target = match.group(1).strip("<>")
+        destinations = [match.group(1) for match in MARKDOWN_LINK_RE.finditer(line)]
+        ref_def = MARKDOWN_REF_DEF_RE.match(line)
+        if ref_def:
+            destinations.append(ref_def.group(1))
+        for destination in destinations:
+            raw_target = destination.strip("<>")
             if raw_target.startswith("#") or raw_target.lower().startswith(
                 EXTERNAL_LINK_PREFIXES
             ):
                 continue
-            target = unquote(raw_target.split("#", 1)[0])
+            path_part, _, fragment = raw_target.partition("#")
+            target = unquote(path_part)
             if not target:
                 continue
             resolved = (doc_path.parent / target).resolve()
@@ -386,6 +487,21 @@ def lint_doc_links_and_topology(
             if not resolved.exists():
                 errors.append(
                     f"{rel_path}:{idx}: missing repository-relative link target: {raw_target}"
+                )
+                continue
+            if not _exists_with_exact_case(
+                repo_root, os.path.normpath(str(doc_path.parent / target)), listings
+            ):
+                errors.append(
+                    f"{rel_path}:{idx}: link target differs in letter case from the file "
+                    f"(GitHub paths are case-sensitive): {raw_target}"
+                )
+                continue
+            if (fragment and resolved.is_file() and resolved.suffix.lower() == ".md"
+                    and unquote(fragment).lower() not in markdown_anchors(resolved)):
+                errors.append(
+                    f"{rel_path}:{idx}: link names a heading anchor the target does not have: "
+                    f"{raw_target}"
                 )
 
     return errors
@@ -421,20 +537,55 @@ def _is_current_doc(rel_path: str, index_statuses: dict[str, str]) -> bool:
     return index_statuses.get(name, "CURRENT") not in NON_CURRENT_DOC_STATUSES
 
 
-def _census_prose_lines(text: str) -> Iterator[tuple[int, str]]:
-    """Yield (line number, line) for every line outside the generated census block."""
-    in_block = False
+def _census_prose_lines(text: str, rel_path: str) -> tuple[list[tuple[int, str]], list[str]]:
+    """Return the (line number, line) pairs outside the generated census block, and marker errors.
+
+    Only HLE_CENSUS_BLOCK_DOC may hold the block, because only there is its content checked
+    against the generator (tools/test_hle_manifest.py). A marker on any other page, a nested
+    BEGIN, an END with no BEGIN and an unterminated BEGIN are errors, and the lines they would
+    have exempted are still checked as prose.
+    """
+    block_allowed = rel_path == HLE_CENSUS_BLOCK_DOC
+    prose: list[tuple[int, str]] = []
+    errors: list[str] = []
+    block: list[tuple[int, str]] = []
+    begin_line: int | None = None
     for idx, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
+        if stripped in (HLE_CENSUS_BLOCK_BEGIN, HLE_CENSUS_BLOCK_END) and not block_allowed:
+            errors.append(
+                f"{rel_path}:{idx}: carries a generated HLE census marker; only "
+                f"{HLE_CENSUS_BLOCK_DOC} holds the generated block, whose content "
+                "tools/test_hle_manifest.py checks against the generator"
+            )
+            continue
         if stripped == HLE_CENSUS_BLOCK_BEGIN:
-            in_block = True
+            if begin_line is not None:
+                errors.append(
+                    f"{rel_path}:{idx}: opens a generated HLE census block inside the one "
+                    f"opened at line {begin_line}"
+                )
+            else:
+                begin_line = idx
             continue
         if stripped == HLE_CENSUS_BLOCK_END:
-            in_block = False
+            if begin_line is None:
+                errors.append(
+                    f"{rel_path}:{idx}: closes a generated HLE census block that was never opened"
+                )
+            begin_line = None
+            block = []
             continue
-        if in_block:
+        if begin_line is not None:
+            block.append((idx, line))
             continue
-        yield idx, line
+        prose.append((idx, line))
+    if begin_line is not None:
+        errors.append(
+            f"{rel_path}:{begin_line}: opens a generated HLE census block that is never closed"
+        )
+        prose.extend(block)
+    return prose, errors
 
 
 def lint_hle_census_counts(
@@ -459,7 +610,9 @@ def lint_hle_census_counts(
     if not _is_current_doc(rel_path, index_statuses):
         return errors
 
-    for idx, line in _census_prose_lines(doc_path.read_text(encoding="utf-8")):
+    prose, marker_errors = _census_prose_lines(doc_path.read_text(encoding="utf-8"), rel_path)
+    errors.extend(marker_errors)
+    for idx, line in prose:
         if HLE_CENSUS_HISTORICAL_LABEL_PAT.search(line):
             continue
         past_context = False
@@ -499,25 +652,40 @@ def _is_hst_manifest_tracked(repo_root: pathlib.Path = ROOT) -> bool | None:
         return None
 
 
-def _commit_exists_in_history(sha: str, repo_root: pathlib.Path = ROOT) -> bool:
-    try:
-        res = subprocess.run(
-            ["git", "cat-file", "-e", sha],
-            cwd=repo_root,
-            env=isolated_git_env(root=repo_root),
-            capture_output=True,
-            text=True,
+#: The ref whose history is public. A commit only in the local object store (unpushed, a
+#: stash, a reflog entry, a pull request's own commit, which rebase-merge replaces) is not.
+PUBLIC_HISTORY_REF = "origin/main"
+
+
+def _commit_in_public_history(sha: str, repo_root: pathlib.Path = ROOT) -> bool | None:
+    """Whether *sha* names a commit reachable from PUBLIC_HISTORY_REF.
+
+    ``None`` means it cannot be told here (no Git, no repository, or the public ref was never
+    fetched); the caller reports that by name rather than passing the link.
+    """
+    env = isolated_git_env(root=repo_root)
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", *args], cwd=repo_root, env=env, capture_output=True, text=True,
         )
-        if res.returncode == 0:
-            return True
-        stderr = (res.stderr or "").lower()
-        if "not a git repository" in stderr or "not a repo" in stderr:
-            # No repository readable here: no evidence either way, so skip
-            # rather than flag.
-            return True
-        return False
+
+    try:
+        public = git("rev-parse", "--verify", "--quiet", f"{PUBLIC_HISTORY_REF}^{{commit}}")
+        if public.returncode != 0 or not public.stdout.strip():
+            return None
+        # ^{commit} refuses a tree or blob SHA put in a /commit/ URL.
+        commit = git("rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}")
+        if commit.returncode != 0 or not commit.stdout.strip():
+            return False
+        ancestor = git("merge-base", "--is-ancestor", commit.stdout.strip(), public.stdout.strip())
     except OSError:
+        return None
+    if ancestor.returncode == 0:
         return True
+    if ancestor.returncode == 1:
+        return False
+    return None
 
 
 def lint_doc_truth(
@@ -569,7 +737,14 @@ def lint_doc_truth(
             if rel_path in HISTORICAL_EVIDENCE_DOCS:
                 continue
             sha = match.group(1)
-            if not _commit_exists_in_history(sha, repo_root):
+            in_public = _commit_in_public_history(sha, repo_root)
+            if in_public is None:
+                errors.append(
+                    f"{rel_path}:{idx}: links repository commit {sha}, which cannot be checked "
+                    f"against public history here ({PUBLIC_HISTORY_REF} is not available: no Git "
+                    "checkout or no fetched origin); fetch origin and run the lint again"
+                )
+            elif not in_public:
                 errors.append(
                     f"{rel_path}:{idx}: links repository commit {sha} which is "
                     "unavailable in public history; name it as plain "
@@ -809,8 +984,12 @@ PAGES_SITE_PATH = "Nakagawa-Recomp"
 PAGES_SITE_SEARCH = r"github[.]io/nakagawa-recomp"
 
 
-def lint_pages_url_case(repo_root: pathlib.Path = ROOT) -> list[str]:
-    """GitHub Pages paths are case-sensitive: `/nakagawa-recomp/` is a 404, `/Nakagawa-Recomp/` is the site."""
+def lint_pages_url_case(repo_root: pathlib.Path = ROOT, skips: list[str] | None = None) -> list[str]:
+    """GitHub Pages paths are case-sensitive: `/nakagawa-recomp/` is a 404, `/Nakagawa-Recomp/` is the site.
+
+    Without Git there are no tracked files to check: the lint returns no errors and appends a
+    named note to *skips*, which ``main`` prints as a SKIP line (a skip is not a pass).
+    """
     try:
         result = subprocess.run(
             ["git", "grep", "-n", "-o", "-I", "-i", "-e", PAGES_SITE_SEARCH],
@@ -822,12 +1001,14 @@ def lint_pages_url_case(repo_root: pathlib.Path = ROOT) -> list[str]:
             errors="replace",
             check=False,
         )
-    except OSError:
+    except OSError as exc:
+        _note_skip(skips, f"lint_pages_url_case: git is not available ({exc})")
         return []
     if result.returncode not in (0, 1):  # 1: no match
         stderr = (result.stderr or "").strip()
         if "not a git repository" in stderr.lower():
-            return []  # no tracked files to check here, as the other git-based lints skip
+            _note_skip(skips, "lint_pages_url_case: not a git repository, so no tracked files were checked")
+            return []
         return [f"lint_pages_url_case: git grep failed (exit {result.returncode}): {stderr}"]
     errors: list[str] = []
     for line in result.stdout.splitlines():
@@ -840,10 +1021,20 @@ def lint_pages_url_case(repo_root: pathlib.Path = ROOT) -> list[str]:
     return errors
 
 
-def run_all_doc_lints(repo_root: pathlib.Path = ROOT) -> list[str]:
+def _note_skip(skips: list[str] | None, note: str) -> None:
+    """Record a check that could not run here, for ``main`` to print as a SKIP line."""
+    if skips is not None:
+        skips.append(note)
+
+
+def run_all_doc_lints(repo_root: pathlib.Path = ROOT, skips: list[str] | None = None) -> list[str]:
+    """Return every documentation lint error; checks that cannot run here are appended to *skips*."""
     errors = lint_readme(repo_root / "README.md")
     md_files = get_tracked_markdown_files(repo_root)
     hst_tracked = _is_hst_manifest_tracked(repo_root)
+    if hst_tracked is None:
+        _note_skip(skips, f"lint_doc_truth HST manifest wording: Git could not report whether "
+                          f"{TITLES_DIR}/hst-ucus98701.json is tracked")
     index_statuses = docs_index_statuses(repo_root)
     for md_file in md_files:
         errors.extend(lint_doc_links_and_topology(md_file, repo_root))
@@ -853,7 +1044,7 @@ def run_all_doc_lints(repo_root: pathlib.Path = ROOT) -> list[str]:
     errors.extend(lint_toolchain_baseline_marker(repo_root))
     errors.extend(lint_capability_disposition_table(repo_root))
     errors.extend(lint_docs_index_completeness(repo_root))
-    errors.extend(lint_pages_url_case(repo_root))
+    errors.extend(lint_pages_url_case(repo_root, skips))
     return errors
 
 
@@ -884,7 +1075,8 @@ def tools_index_rows(repo_root: pathlib.Path = ROOT) -> list[tuple[str, str]]:
     """
     listed = subprocess.run(
         ["git", "ls-files", "--", "tools"],
-        cwd=repo_root, capture_output=True, text=True, check=True,
+        cwd=repo_root, env=isolated_git_env(root=repo_root),
+        capture_output=True, text=True, check=True,
     ).stdout.splitlines()
     modules = sorted(
         pathlib.PurePosixPath(path).name
@@ -924,14 +1116,20 @@ def main() -> int:
         sys.stdout.write(render_tools_index(tools_index_rows(args.repo_root)))
         return 0
 
-    errors = run_all_doc_lints(args.repo_root)
+    skips: list[str] = []
+    errors = run_all_doc_lints(args.repo_root, skips)
+    for note in skips:
+        print(f"SKIP: {note}")
     if errors:
         print("Documentation Freshness Linter: FAIL", file=sys.stderr)
         for error in errors:
             print(f"  {error}", file=sys.stderr)
         return 1
 
-    print("Documentation Freshness Linter: OK")
+    if skips:
+        print(f"Documentation Freshness Linter: OK, with {len(skips)} check(s) skipped (SKIP is not a pass)")
+    else:
+        print("Documentation Freshness Linter: OK")
     return 0
 
 

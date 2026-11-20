@@ -7,12 +7,15 @@ SQLite databases only.  No live UI, database, or HST process is touched.
 """
 
 import io
+import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import generate_benchmarks as g  # noqa: E402
@@ -165,6 +168,23 @@ class TestValidateRunRow(GenerateReportBase):
         }
         self.assertIsNone(g.validate_run_row(row))
 
+    def test_byte_completion_is_a_fraction_not_a_percentage(self):
+        # Every renderer prints byteCompletionPct * 100, so a stored 45.0 would
+        # read as 4500 %; the validator must hold the fraction contract.
+        row = {
+            "id": "run_0001", "timestamp": "2026-01-01 10:00:00",
+            "totalUnits": 10, "unitsEarned": 5, "unitsRegressed": 0,
+            "completionPct": 50.0, "byteCompletionPct": 45.0, "vrPassRate": 100.0,
+            "fuzzCoveragePct": 0.0,
+            "totalFunctions": 1, "matchedFunctions": 1, "totalBytes": 1,
+            "matchedBytes": 1, "fuzzTotalTrials": 0, "fuzzPassedTrials": 0,
+            "fuzzFailedTrials": 0, "vrTotalFrames": 0, "vrPassedFrames": 0,
+            "vrFailedFrames": 0,
+        }
+        self.assertIsNone(g.validate_run_row(row))
+        row["byteCompletionPct"] = 1.0
+        self.assertIsNotNone(g.validate_run_row(row))
+
     def test_negative_int_rejected(self):
         row = {
             "id": "run_0001", "timestamp": "2026-01-01 10:00:00",
@@ -286,13 +306,16 @@ class TestGenerateReport(GenerateReportBase):
         # exercised separately below against the report-side URI reader.
         special_db = os.path.join(self.tmp.name, "dev #1.db")
         make_db(special_db, [{}])
+        with open(special_db, "rb") as f:
+            before = f.read()
         out = os.path.join(self.tmp.name, "r.md")
         self.assertTrue(g.generate_report(special_db, out))
         with open(out, encoding="utf-8") as f:
             content = f.read()
         self.assertIn("## Current Status Snapshot", content)
-        # Still read-only: the DB was not rewritten by generation.
-        self.assertIn("dev #1.db", os.listdir(self.tmp.name))
+        # Still read-only: the DB's bytes are unchanged by generation.
+        with open(special_db, "rb") as f:
+            self.assertEqual(f.read(), before)
 
     def test_uri_query_escaping_isolated(self):
         # '?' and '#' are URI-delimiter characters; the module's readonly_uri()
@@ -349,15 +372,47 @@ class TestGenerateReport(GenerateReportBase):
         self.assertTrue(content.startswith(b"%PDF"))
         self.assertNotIn(b"\xe9", content)
 
+    def test_pdf_object_graph_is_linked(self):
+        make_db(self.db, [{}])
+        out = os.path.join(self.tmp.name, "r.pdf")
+        self.assertTrue(g.generate_report(self.db, None, pdf_path=out))
+        with open(out, "rb") as f:
+            content = f.read()
+        objects = {
+            int(m.group(1)): m.group(2)
+            for m in re.finditer(rb"(?ms)^(\d+) 0 obj\n(.*?)\nendobj\n", content)
+        }
+
+        def ref(body, key):
+            m = re.search(rb"/" + key + rb" (\d+) 0 R", body)
+            self.assertIsNotNone(m, f"/{key.decode()} missing in {body[:80]!r}")
+            return int(m.group(1))
+
+        root = int(re.search(rb"/Root (\d+) 0 R", content).group(1))
+        self.assertIn(b"/Type /Catalog", objects[root])
+        pages = objects[ref(objects[root], b"Pages")]
+        self.assertIn(b"/Type /Pages", pages)
+        kid = int(re.search(rb"/Kids \[(\d+) 0 R\]", pages).group(1))
+        page = objects[kid]
+        self.assertRegex(page, rb"/Type /Page(?!s)")
+        self.assertIs(objects[ref(page, b"Parent")], pages)
+        self.assertTrue(objects[ref(page, b"Contents")].startswith(b"<< /Length"))
+        resources = objects[ref(page, b"Resources")]
+        self.assertNotEqual(ref(page, b"Resources"), kid)
+        for font in (b"F1", b"F2"):
+            self.assertIn(b"/Type /Font", objects[ref(resources, font)])
+        info = int(re.search(rb"/Info (\d+) 0 R", content).group(1))
+        self.assertIn(b"/Title", objects[info])
+
     def test_oversized_report_rejected(self):
-        g.MAX_REPORT_BYTES = 100  # shrink budget; report exceeds it
-        try:
+        original = g.MAX_REPORT_BYTES
+        # Shrink the budget so the report exceeds it; the patch restores the real limit.
+        with mock.patch.object(g, "MAX_REPORT_BYTES", 100):
             make_db(self.db, [{}])
             out = os.path.join(self.tmp.name, "r.md")
             with self.assertRaises(ValueError):
                 g.generate_report(self.db, out)
-        finally:
-            g.MAX_REPORT_BYTES = 32 * 1024 * 1024
+        self.assertEqual(g.MAX_REPORT_BYTES, original)
 
 
 class TestAtomicWrite(GenerateReportBase):
@@ -383,6 +438,40 @@ class TestAtomicWrite(GenerateReportBase):
         with open(target, encoding="utf-8") as f:
             self.assertEqual(f.read(), "new")
 
+
+
+class TestSyncFromProgress(GenerateReportBase):
+    def test_each_history_row_keeps_its_own_unit_totals(self):
+        progress = {
+            "total_units": 1000, "units_earned": 900, "units_regressed": 0,
+            "completion_pct": 90.0,
+            "opengrip_progress": [
+                {"timestamp": "2026-01-01T10:00:00Z", "total_units": 100,
+                 "units_earned": 10, "units_regressed": 0, "completion_pct": 10.0},
+                {"timestamp": "2026-01-02T10:00:00Z", "total_units": 200,
+                 "units_earned": 50, "units_regressed": 10},
+                {"timestamp": "2026-01-03T10:00:00Z", "matched_functions": 3},
+            ],
+        }
+        progress_path = os.path.join(self.tmp.name, "progress.json")
+        with open(progress_path, "w", encoding="utf-8") as f:
+            json.dump(progress, f)
+        self.assertEqual(g.sync_database_from_progress(self.db, progress_path), 3)
+        conn = sqlite3.connect(self.db)
+        try:
+            rows = conn.execute(
+                'SELECT "timestamp", "totalUnits", "unitsEarned", "unitsRegressed", '
+                '"completionPct" FROM "TelemetryRun" ORDER BY "timestamp"'
+            ).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(rows, [
+            ("2026-01-01 10:00:00", 100, 10, 0, 10.0),
+            ("2026-01-02 10:00:00", 200, 50, 10, 20.0),
+            # No unit fields recorded for that run: nothing is borrowed from
+            # today's top-level totals.
+            ("2026-01-03 10:00:00", 0, 0, 0, 0.0),
+        ])
 
 
 class TestMainCli(GenerateReportBase):

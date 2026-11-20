@@ -2,6 +2,7 @@
 # Copyright (C) 2026 the Nakagawa Recomp authors
 
 from contextlib import redirect_stderr, redirect_stdout
+from email.message import Message
 import hashlib
 import importlib.metadata
 import io
@@ -136,6 +137,132 @@ class TestSBOMTooling(unittest.TestCase):
             cdx_names = {c["name"]: c["licenses"][0]["license"]["id"] for c in cyclonedx["components"] if "licenses" in c}
             self.assertIn("SDL3.dll", cdx_names)
             self.assertEqual(cdx_names["SDL3.dll"], "Zlib")
+
+    def test_manifest_only_sbom_merges_all_inventory_dlls_with_manifest_overrides(self):
+        import package_notices
+
+        manifest_data = json.loads(
+            (generate_sbom.ROOT / "assets" / "release_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        inventory = package_notices.load_component_inventory()
+        expected_names = set(inventory["native"]["dlls"])
+        expected_names.update(
+            record["dll"]
+            for record in inventory["native"].get("host_resolved_components", [])
+            if record.get("dll")
+        )
+
+        with mock.patch.object(package_notices, "resolve_toolchain_root", return_value=None):
+            shipped = generate_sbom.resolve_shipped_dlls(manifest_data=manifest_data)
+
+        by_name = {component["name"]: component for component in shipped}
+        self.assertEqual(
+            {name.lower() for name in by_name},
+            {name.lower() for name in expected_names},
+        )
+        self.assertNotIn(">=", by_name["SDL3.dll"]["version"])
+        self.assertEqual(by_name["SDL3.dll"]["version"], "NOASSERTION")
+
+    def test_python_license_classifier_does_not_guess_lgpl_or_agpl_as_gpl(self):
+        classifiers = (
+            "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
+            "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+            "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+        )
+        for classifier in classifiers:
+            metadata = Message()
+            metadata["Classifier"] = classifier
+            with self.subTest(classifier=classifier), \
+                    mock.patch.object(generate_sbom, "recorded_python_package_licenses", return_value={}), \
+                    mock.patch.object(importlib.metadata, "metadata", return_value=metadata):
+                self.assertEqual(
+                    generate_sbom._resolve_python_package_license("synthetic-package"),
+                    "NOASSERTION",
+                )
+        metadata = Message()
+        metadata["Classifier"] = (
+            "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)"
+        )
+        with mock.patch.object(generate_sbom, "recorded_python_package_licenses", return_value={}), \
+                mock.patch.object(importlib.metadata, "metadata", return_value=metadata):
+            self.assertEqual(
+                generate_sbom._resolve_python_package_license("synthetic-package"),
+                "GPL-3.0-or-later",
+            )
+
+    def test_python_package_spdx_id_slugs_underscores(self):
+        digest = "a" * 64
+        with tempfile.TemporaryDirectory() as temp:
+            lock = Path(temp) / "requirements-lock.txt"
+            lock.write_text(f"typing_extensions==4.12.2 --hash=sha256:{digest}\n", encoding="utf-8")
+            artifact_metadata = {
+                ("typing-extensions", "4.12.2"): [{
+                    "filename": "typing_extensions-4.12.2-py3-none-any.whl",
+                    "sha256": digest,
+                    "url": "https://files.example.invalid/typing_extensions.whl",
+                }],
+            }
+            with mock.patch.object(
+                generate_sbom, "recorded_python_package_licenses", return_value={"typing-extensions": "MIT"}
+            ):
+                packages = generate_sbom.parse_python_lockfile(lock, artifact_metadata)
+
+        self.assertEqual(packages[0]["spdx_id"], "SPDXRef-pip-typing-extensions-4.12.2")
+
+    def test_python_lock_loads_recorded_license_map_once(self):
+        first, second = "a" * 64, "b" * 64
+        with tempfile.TemporaryDirectory() as temp:
+            lock = Path(temp) / "requirements-lock.txt"
+            lock.write_text(
+                f"typing_extensions==4.12.2 --hash=sha256:{first}\n"
+                f"other_package==1.2.3 --hash=sha256:{second}\n",
+                encoding="utf-8",
+            )
+            artifact_metadata = {
+                ("typing-extensions", "4.12.2"): [{
+                    "filename": "typing_extensions-4.12.2-py3-none-any.whl",
+                    "sha256": first,
+                    "url": "https://files.example.invalid/typing_extensions.whl",
+                }],
+                ("other-package", "1.2.3"): [{
+                    "filename": "other_package-1.2.3-py3-none-any.whl",
+                    "sha256": second,
+                    "url": "https://files.example.invalid/other_package.whl",
+                }],
+            }
+            with mock.patch.object(
+                generate_sbom,
+                "recorded_python_package_licenses",
+                return_value={"typing-extensions": "MIT", "other-package": "BSD-3-Clause"},
+            ) as license_map:
+                packages = generate_sbom.parse_python_lockfile(lock, artifact_metadata)
+
+        self.assertEqual([package["license"] for package in packages], ["MIT", "BSD-3-Clause"])
+        license_map.assert_called_once_with()
+
+    def test_shipped_dll_inventory_caches_toolchain_root_and_package_versions(self):
+        import package_notices
+
+        with tempfile.TemporaryDirectory() as temp:
+            package_dir = Path(temp) / "package"
+            package_dir.mkdir()
+            # Two DLLs of one MSYS2 package: the second reuses the first one's version lookup.
+            for name in ("libbrotlicommon.dll", "libbrotlidec.dll"):
+                (package_dir / name).write_bytes(b"synthetic runtime DLL")
+            toolchain_root = Path(temp) / "ucrt64"
+            with mock.patch.object(
+                package_notices, "resolve_toolchain_root", return_value=toolchain_root
+            ) as resolve_root, mock.patch.object(
+                package_notices, "installed_package_version", return_value="1.2.0-1"
+            ) as installed_version:
+                shipped = generate_sbom.resolve_shipped_dlls(package_dir=package_dir)
+
+        self.assertEqual({item["name"] for item in shipped},
+                         {"libbrotlicommon.dll", "libbrotlidec.dll"})
+        resolve_root.assert_called_once_with()
+        installed_version.assert_called_once_with(toolchain_root, "brotli")
 
     def test_ruff_lock_matches_pre_commit_pin(self):
         lock_text = (generate_sbom.ROOT / "tools" / "requirements-lock.txt").read_text(
@@ -780,6 +907,75 @@ class TestToolchainPolicyVerification(unittest.TestCase):
             str(errors),
         )
 
+    VALID_OBSERVED = {
+        "compiler": "16.1.0",
+        "make": "4.4.1",
+        "python": "3.15.1",
+        "sdl3": "3.4.12",
+        "vulkan_sdk": "1.4.363.0",
+    }
+
+    def test_observed_version_the_policy_cannot_evaluate_fails(self):
+        # Failing before: satisfies_policy raised ValueError for these and the verifier
+        # swallowed it, so the component counted as inside its policy. The recorder writes
+        # the raw --version line when it finds no dotted version (record_toolchain.py).
+        for comp, observed in (
+            ("vulkan_sdk", "not found"),
+            ("compiler", "gcc (GCC) unknown"),
+            ("make", "GNU Make"),
+        ):
+            with self.subTest(comp=comp, observed=observed):
+                errors = verify_sbom.verify_release_locks(
+                    self.MANIFEST_PATH, observed_toolchain=dict(self.VALID_OBSERVED, **{comp: observed}))
+                self.assertTrue(
+                    any(f"observed toolchain component '{comp}' version {observed!r} cannot be checked "
+                        "against policy" in e for e in errors),
+                    str(errors),
+                )
+
+    def test_bare_equals_and_bang_operators_are_invalid_syntax(self):
+        # Failing before: "=" and "!" parsed as operators, compare_version then raised
+        # "unsupported operator" for them, and the swallow made any observation pass.
+        for spec in ("=4.9.0", "!1.0", ">=4.0,=5.0"):
+            with self.subTest(spec=spec):
+                with self.assertRaisesRegex(ValueError, "invalid constraint syntax"):
+                    verify_sbom.parse_policy_spec(spec)
+                policy = {
+                    "compiler": spec,
+                    "make": ">=4.0 (rolling-msys2)",
+                    "python": ">=3.15,<3.16",
+                    "sdl3": ">=3.0.0 (rolling-msys2)",
+                    "vulkan_sdk": ">=1.1.0",
+                }
+                path = self._manifest_with_policy(policy)
+                try:
+                    errors = verify_sbom.verify_release_locks(path)
+                    self.assertTrue(
+                        any("toolchain_policy component 'compiler' has invalid range syntax" in e for e in errors),
+                        str(errors),
+                    )
+                finally:
+                    path.unlink(missing_ok=True)
+        for spec, parsed in ((">=4.9.0", [(">=", (4, 9, 0))]), ("==1.2", [("==", (1, 2))]),
+                             ("!=1.0", [("!=", (1, 0))]), ("<3.16", [("<", (3, 16))])):
+            with self.subTest(spec=spec):
+                self.assertEqual(verify_sbom.parse_policy_spec(spec), parsed)
+
+    def test_observed_version_is_the_dotted_token_not_the_first_digit(self):
+        # Failing before: the first digit run was the version, so the "2" of "MSYS2" read
+        # as 2 and a current compiler failed ">=4.9.0".
+        for observed in ("MSYS2 gcc 14.2.0", "gcc.exe (Rev2, Built by MSYS2 project) 14.2.0"):
+            with self.subTest(observed=observed):
+                errors = verify_sbom.verify_release_locks(
+                    self.MANIFEST_PATH, observed_toolchain=dict(self.VALID_OBSERVED, compiler=observed))
+                self.assertEqual(errors, [])
+        self.assertTrue(verify_sbom.satisfies_policy("MSYS2 gcc 14.2.0", [("<", (15,))]))
+        self.assertFalse(verify_sbom.satisfies_policy("MSYS2 gcc 14.2.0", [("<", (14,))]))
+        with self.assertRaisesRegex(ValueError, "ambiguous version"):
+            verify_sbom.satisfies_policy("gcc 14.2.0 (built with 13.1.0)", [(">=", (4, 9, 0))])
+        with self.assertRaisesRegex(ValueError, "cannot extract a dotted version"):
+            verify_sbom.satisfies_policy("MSYS2 gcc", [(">=", (4, 9, 0))])
+
     def test_in_policy_observation_passes(self):
         valid_observed = {
             "compiler": "16.1.0",
@@ -885,6 +1081,35 @@ class TestToolchainPolicyVerification(unittest.TestCase):
         self.assertIn("available", recorded["shader_compiler"])
         errors = verify_sbom.verify_release_locks(self.MANIFEST_PATH, observed_toolchain=recorded)
         self.assertEqual(errors, [])
+
+    def test_vulkan_version_from_header_names_the_sdk_minor(self):
+        # A non-numeric SDK directory falls back to vulkan_core.h. Headers before
+        # 1.2.175 spell the complete version with VK_MAKE_VERSION, and every header
+        # defines VK_API_VERSION_1_0 before the higher minors.
+        older = (
+            "#define VK_API_VERSION_1_0 VK_MAKE_VERSION(1, 0, 0)\n"
+            "#define VK_API_VERSION_1_1 VK_MAKE_VERSION(1, 1, 0)\n"
+            "#define VK_API_VERSION_1_2 VK_MAKE_VERSION(1, 2, 0)\n"
+            "#define VK_HEADER_VERSION 162\n"
+            "#define VK_HEADER_VERSION_COMPLETE VK_MAKE_VERSION(1, 2, VK_HEADER_VERSION)\n"
+        )
+        no_complete = (
+            "#define VK_API_VERSION_1_0 VK_MAKE_VERSION(1, 0, 0)\n"
+            "#define VK_API_VERSION_1_1 VK_MAKE_VERSION(1, 1, 0)\n"
+            "#define VK_HEADER_VERSION 131\n"
+        )
+        newer = (
+            "#define VK_API_VERSION_1_0 VK_MAKE_API_VERSION(0, 1, 0, 0)\n"
+            "#define VK_API_VERSION_1_3 VK_MAKE_API_VERSION(0, 1, 3, 0)\n"
+            "#define VK_HEADER_VERSION 290\n"
+            "#define VK_HEADER_VERSION_COMPLETE VK_MAKE_API_VERSION(0, 1, 3, VK_HEADER_VERSION)\n"
+        )
+        for text, expected in ((older, "1.2.162"), (no_complete, "1.1.131"), (newer, "1.3.290")):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as tmp:
+                sdk = Path(tmp) / "VulkanSDK-current"
+                (sdk / "Include" / "vulkan").mkdir(parents=True)
+                (sdk / "Include" / "vulkan" / "vulkan_core.h").write_text(text, encoding="utf-8")
+                self.assertEqual(record_toolchain._detect_vulkan_version(sdk), expected)
 
     def test_record_toolchain_rejects_ambiguous_path_binary(self):
         dummy_candidate = {

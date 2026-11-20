@@ -17,6 +17,22 @@ class VulkanSdkError(RuntimeError):
 
 _VERSION_RE = re.compile(r"^\d+(?:\.\d+)+$")
 
+#: The header and import library a usable SDK provides, as path parts below the SDK
+#: root. tools/vulkan_sdk.ps1 (the Windows manager's copy) lists the same candidates;
+#: tools/test_vulkan_sdk.py checks that the two agree.
+HEADER_CANDIDATES: tuple[tuple[str, ...], ...] = (
+    ("Include", "vulkan", "vulkan.h"),
+    ("include", "vulkan", "vulkan.h"),
+)
+LIBRARY_CANDIDATES: tuple[tuple[str, ...], ...] = (
+    ("Lib", "vulkan-1.lib"),
+    ("lib", "vulkan-1.lib"),
+    # The project also supports the official MSYS2 UCRT64 loader package,
+    # whose GCC import archive uses MinGW's DLL-import naming convention.
+    ("lib", "libvulkan-1.dll.a"),
+    ("Lib", "libvulkan-1.dll.a"),
+)
+
 
 def _resolve(path: Path) -> Path:
     try:
@@ -29,19 +45,11 @@ def is_usable_vulkan_sdk(path: Path) -> bool:
     """Return whether *path* contains the header and import library the build needs."""
 
     root = _resolve(path)
-    headers = (
-        root / "Include" / "vulkan" / "vulkan.h",
-        root / "include" / "vulkan" / "vulkan.h",
-    )
-    libraries = (
-        root / "Lib" / "vulkan-1.lib",
-        root / "lib" / "vulkan-1.lib",
-        # The project also supports the official MSYS2 UCRT64 loader package,
-        # whose GCC import archive uses MinGW's DLL-import naming convention.
-        root / "lib" / "libvulkan-1.dll.a",
-        root / "Lib" / "libvulkan-1.dll.a",
-    )
-    return any(candidate.is_file() for candidate in headers) and any(candidate.is_file() for candidate in libraries)
+
+    def present(candidates: tuple[tuple[str, ...], ...]) -> bool:
+        return any(root.joinpath(*candidate).is_file() for candidate in candidates)
+
+    return present(HEADER_CANDIDATES) and present(LIBRARY_CANDIDATES)
 
 
 def _version_key(name: str) -> tuple[int, ...] | None:
@@ -97,3 +105,20 @@ def discover_vulkan_sdk(
         "No usable Vulkan SDK found. Pass --vulkan-sdk <path> or set VULKAN_SDK to a current "
         "SDK containing Include/vulkan/vulkan.h and Lib/vulkan-1.lib."
     )
+
+
+def vulkan_sdk_build_error(value: str) -> str:
+    """Return why the build's VULKAN_SDK is unusable, or "" when it is usable.
+
+    The Windows player build calls this before its compile. An explicit VULKAN_SDK
+    skips discovery, so without this check a stale value reaches the compiler as a
+    missing vulkan/vulkan.h. The reason is the one discovery gives for the same value.
+    """
+
+    if not value.strip():
+        return "No usable Vulkan SDK found; set VULKAN_SDK to the SDK root."
+    try:
+        discover_vulkan_sdk(environment=value)
+    except VulkanSdkError as exc:
+        return str(exc)
+    return ""

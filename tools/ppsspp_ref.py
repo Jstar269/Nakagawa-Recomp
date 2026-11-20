@@ -177,9 +177,17 @@ def capture_us(frame: int) -> int:
 
 
 def input_us(frame: int) -> int:
-    """Half a period before vblank ``frame``, so that vblank's controller sample sees it."""
-    if frame <= 0:
-        return 0
+    """Half a period before vblank ``frame``, so that vblank's controller sample sees it.
+
+    Frame 0 has no prior vblank; 1 us is the earliest strictly-after-reset time
+    ``cpu.runUntilTime`` accepts (0 us is already at the reset clock, which PPSSPP
+    refuses as already passed), while staying before frame 0's capture and frame 1's
+    input (both at 8342 us).
+    """
+    if frame < 0:
+        raise ValueError(f"frame must be >= 0, got {frame}")
+    if frame == 0:
+        return 1
     return round((2 * frame - 1) * PERIOD_US_NUM / (2 * PERIOD_US_DEN))
 
 
@@ -211,8 +219,13 @@ def parse_mask(token: str) -> int:
     return mask
 
 
+def _decimal(token: str) -> bool:
+    """ASCII decimal digits only: str.isdigit() also accepts digits int() cannot read."""
+    return token.isascii() and token.isdigit()
+
+
 def _axis(token: str) -> int:
-    if not token.isdigit() or int(token) > 255:
+    if not _decimal(token) or int(token) > 255:
         raise RefError(f"stick value '{token}' is not 0-255")
     return int(token)
 
@@ -224,7 +237,7 @@ def parse_padscript(text: str, label: str = "pad") -> list[PadRow]:
         tokens = raw.split()
         if not tokens or tokens[0].startswith("#"):
             continue
-        if not tokens[0][0].isdigit():
+        if not _decimal(tokens[0][0]):
             raise RefError(f"{label}:{lineno}: '{tokens[0]}' starts a route program; PPSSPP cannot "
                            "report guest state, so only the legacy '<frame> <mask> <width>' table "
                            "is accepted")
@@ -232,7 +245,7 @@ def parse_padscript(text: str, label: str = "pad") -> list[PadRow]:
         tokens = tokens[:cut]
         if len(tokens) not in (3, 5):
             raise RefError(f"{label}:{lineno}: expected '<frame> <mask> <width> [<lx> <ly>]'")
-        if not tokens[0].isdigit() or not tokens[2].isdigit():
+        if not _decimal(tokens[0]) or not _decimal(tokens[2]):
             raise RefError(f"{label}:{lineno}: frame and width are decimal vblank counts")
         try:
             mask = parse_mask(tokens[1])
@@ -271,7 +284,9 @@ def pad_states(rows: Sequence[PadRow]) -> list[PadState]:
         for r in held:
             mask |= r.mask
         with_stick = [r for r in held if r.stick is not None]
-        latest = max(with_stick, key=lambda r: r.frame).stick if with_stick else None
+        # The later row in file order wins a tie, as f[i] >= f[stick_row] does in the runtime.
+        latest = (max(enumerate(with_stick), key=lambda t: (t[1].frame, t[0]))[1].stick
+                  if with_stick else None)
         stick = latest if latest is not None else (CENTRE, CENTRE)
         if states and states[-1].mask == mask and states[-1].stick == stick:
             continue
@@ -320,13 +335,8 @@ class SceneFile:
         return self.out / f"{scene.name}.png"
 
 
-def _inside_checkout(path: Path) -> bool:
-    path = Path(os.path.abspath(path))
-    try:
-        rel = path.relative_to(ROOT)
-    except ValueError:
-        return False
-    return not (rel.parts and rel.parts[0] == "build")
+# The one checkout guard: game pixels never land in a tracked folder (build/ is ignored).
+_inside_checkout = picture_gate._inside_checkout
 
 
 def load_scene_file(path: Path) -> SceneFile:
@@ -405,9 +415,10 @@ def load_scene_file(path: Path) -> SceneFile:
             raise RefError(f"{where}: 'nakagawa' must be a path string")
         scenes.append(Scene(name, frame, (base / nk).resolve() if nk else None, threshold,
                             float(max_percent)))
-    names = [s.name for s in scenes]
+    # Each name is a reference file name, and Windows file names ignore case.
+    names = [s.name.casefold() for s in scenes]
     if len(set(names)) != len(names):
-        raise RefError(f"{path.name}: scene names repeat")
+        raise RefError(f"{path.name}: scene names repeat (names are compared ignoring case)")
     return SceneFile(path, title, opt_path("disc"), opt_path("pad"), out, rtc, float(timeout),
                      ini_norm, tuple(scenes))
 
@@ -463,6 +474,12 @@ def effective_ini(port: int, overrides: Mapping[str, Mapping[str, str]]) -> dict
         raise RefError("the scene file's 'ini' turns the debugger off; the driver needs it")
     general["RemoteISOPort"] = str(port)  # the driver's choice, never the scene file's
     return ini
+
+
+def capture_settings(ini: Mapping[str, Mapping[str, str]]) -> dict[str, dict[str, str]]:
+    """The settings a reference sidecar records: the port is the run's own choice and differs
+    every time, so it is not a capture setting."""
+    return {s: {k: v for k, v in kv.items() if k != "RemoteISOPort"} for s, kv in ini.items()}
 
 
 def render_ini(ini: Mapping[str, Mapping[str, str]]) -> str:
@@ -548,6 +565,29 @@ def build_plan(rows: Sequence[PadRow], scenes: Sequence[Scene]) -> list[Action]:
     order = {"capture": 0, "input": 1}
     actions.sort(key=lambda a: (a.us, order[a.kind]))
     return actions
+
+
+def _action_label(action: Action) -> str:
+    if action.scene:
+        return f"{action.kind} {action.scene!r} (v{action.frame})"
+    return f"{action.kind} v{action.frame}"
+
+
+def validate_plan(plan: Sequence[Action]) -> None:
+    """Refuse any plan with an action at/before reset (<= 0 us) or out of time order."""
+    prev_us: int | None = None
+    for action in plan:
+        if action.us <= 0:
+            raise RefError(
+                f"planned {_action_label(action)} at {action.us} us is at or before reset "
+                "(0 us); planned times must be > 0 us"
+            )
+        if prev_us is not None and action.us < prev_us:
+            raise RefError(
+                f"planned {_action_label(action)} at {action.us} us is earlier than the "
+                f"previous action ({prev_us} us)"
+            )
+        prev_us = action.us
 
 
 # ---- a minimal WebSocket client (RFC 6455), loopback only -----------------------------------
@@ -747,6 +787,41 @@ def _unknown_event(exc: DebuggerError) -> bool:
     return "unknown event" in str(exc).lower()
 
 
+# Bit-replication tables expanding 4-, 5-, and 6-bit channels to 8 bits (not plain left shifts,
+# so full-scale channels map to 255).
+_EXPAND_BITS: dict[int, tuple[int, ...]] = {
+    4: tuple((v << 4) | v for v in range(16)),
+    5: tuple((v << 3) | (v >> 2) for v in range(32)),
+    6: tuple((v << 2) | (v >> 4) for v in range(64)),
+}
+
+_BYTE_LAYOUTS: dict[str, tuple[int, tuple[int, int, int]]] = {
+    "R8G8B8A8_UNORM": (4, (0, 1, 2)),
+    "B8G8R8A8_UNORM": (4, (2, 1, 0)),
+    "R8G8B8_UNORM": (3, (0, 1, 2)),
+}
+
+# PPSSPP-derived, not PSP-measured: 16-bit color framebuffer format names and little-endian
+# uint16 bit-field layouts (r_shift, r_bits, g_shift, g_bits, b_shift, b_bits) established from
+# hrydgard/ppsspp commit cb6d1dc557c15549e19d6705727d6ed8ddb1eaf5:
+#   - Core/Debugger/WebSocket/GPUBufferSubscriber.cpp (WebSocketGPUBufferScreenshot, DescribeFormat)
+#   - GPU/Common/GPUDebugInterface.h (GPUDebugBufferFormat)
+#   - GPU/Debugger/State.cpp (DescribePixelRGBA)
+#   - Common/Data/Convert/ColorConv.h (Convert4To8, Convert5To8, Convert6To8)
+# The first three correspond to PSP display formats 5650, 5551 and 4444; the remaining five are
+# PPSSPP's reversed and BGRA 16-bit color variants. Depth/stencil formats stay refused.
+_PACK16_LAYOUTS: dict[str, tuple[int, int, int, int, int, int]] = {
+    "B5G6R5_UNORM_PACK16": (0, 5, 5, 6, 11, 5),
+    "A1B5G5R5_UNORM_PACK16": (0, 5, 5, 5, 10, 5),
+    "A4B4G4R4_UNORM_PACK16": (0, 4, 4, 4, 8, 4),
+    "R5G6B5_UNORM_PACK16": (11, 5, 5, 6, 0, 5),
+    "R5G5B5A1_UNORM_PACK16": (11, 5, 6, 5, 1, 5),
+    "R4G4B4A4_UNORM_PACK16": (12, 4, 8, 4, 4, 4),
+    "A1R5G5B5_UNORM_PACK16": (10, 5, 5, 5, 0, 5),
+    "A4R4G4B4_UNORM_PACK16": (8, 4, 4, 4, 0, 4),
+}
+
+
 def decode_screenshot(msg: Mapping) -> picture_gate.Frame:
     """A ``gpu.buffer.screenshot`` base64 answer as RGB rows, top row first."""
     try:
@@ -755,17 +830,29 @@ def decode_screenshot(msg: Mapping) -> picture_gate.Frame:
         data = base64.b64decode(msg["base64"], validate=True)
     except (KeyError, TypeError, ValueError):
         raise CaptureFailed("the screenshot answer lacks width, height, format or base64") from None
-    layouts = {"R8G8B8A8_UNORM": (4, (0, 1, 2)), "B8G8R8A8_UNORM": (4, (2, 1, 0)),
-               "R8G8B8_UNORM": (3, (0, 1, 2))}
-    if fmt not in layouts:
+    byte_layout = _BYTE_LAYOUTS.get(fmt)
+    pack16_layout = _PACK16_LAYOUTS.get(fmt)
+    if byte_layout is None and pack16_layout is None:
         raise CaptureFailed(f"the screenshot format {fmt!r} is not one the driver reads")
-    bpp, (ri, gi, bi) = layouts[fmt]
+    bpp = byte_layout[0] if byte_layout is not None else 2
     if width <= 0 or height <= 0 or len(data) != width * height * bpp:
         raise CaptureFailed(f"the screenshot holds {len(data)} bytes, not {width}x{height}x{bpp}")
-    rgb = bytearray(width * height * 3)
-    rgb[0::3] = data[ri::bpp]
-    rgb[1::3] = data[gi::bpp]
-    rgb[2::3] = data[bi::bpp]
+    pixels = width * height
+    rgb = bytearray(pixels * 3)
+    if byte_layout is not None:
+        _, (ri, gi, bi) = byte_layout
+        rgb[0::3] = data[ri::bpp]
+        rgb[1::3] = data[gi::bpp]
+        rgb[2::3] = data[bi::bpp]
+    else:
+        assert pack16_layout is not None
+        rs, rb, gs, gb, bs, bb = pack16_layout
+        r_lut, g_lut, b_lut = _EXPAND_BITS[rb], _EXPAND_BITS[gb], _EXPAND_BITS[bb]
+        rm, gm, bm = (1 << rb) - 1, (1 << gb) - 1, (1 << bb) - 1
+        words = struct.unpack(f"<{pixels}H", data)
+        rgb[0::3] = bytes(r_lut[(w >> rs) & rm] for w in words)
+        rgb[1::3] = bytes(g_lut[(w >> gs) & gm] for w in words)
+        rgb[2::3] = bytes(b_lut[(w >> bs) & bm] for w in words)
     if msg.get("flipped"):
         stride = width * 3
         rgb = bytearray(b"".join(bytes(rgb[y * stride:(y + 1) * stride]) for y in reversed(range(height))))
@@ -807,6 +894,7 @@ def drive(dbg: Debugger, plan: Sequence[Action], pid: int | None, rtc: int, time
           clock: Callable[[], float] = time.monotonic, pause: Callable[[float], None] = time.sleep
           ) -> DriveResult:
     """Run one capture against a connected PPSSPP debugger."""
+    validate_plan(plan)
     deadline = clock() + timeout
 
     def left() -> float:
@@ -820,7 +908,12 @@ def drive(dbg: Debugger, plan: Sequence[Action], pid: int | None, rtc: int, time
     if "pid" not in info:
         raise NotRun("ppsspp-too-old", f"PPSSPP {version} does not report its process id; the "
                      "driver needs a build newer than v1.20.4")
-    if pid is not None and int(info["pid"]) != pid:
+    try:
+        reported_pid = int(info["pid"])
+    except (TypeError, ValueError):
+        raise CaptureFailed(f"the debugger on this port reports process {info['pid']!r}, not a "
+                            "process id") from None
+    if pid is not None and reported_pid != pid:
         raise CaptureFailed(f"the debugger on this port is process {info['pid']}, not the "
                             f"PPSSPP the driver started ({pid})")
     while dbg.request("game.status").get("game") is None:
@@ -840,25 +933,35 @@ def drive(dbg: Debugger, plan: Sequence[Action], pid: int | None, rtc: int, time
         raise NotRun("ppsspp-too-old", f"PPSSPP {version} reports no emulated time in cpu.status")
     base_us = int(status["us"])
     result = DriveResult(version, base_us)
+    current_us = base_us
+    last_planned_us: int | None = None
     for action in plan:
         target = base_us + action.us
-        dbg.clear_events()
-        try:
-            dbg.request("cpu.runUntilTime", us=target)
-        except DebuggerError as exc:
-            if _unknown_event(exc):
-                raise NotRun("ppsspp-too-old", f"PPSSPP {version} has no cpu.runUntilTime") from None
-            raise CaptureFailed(f"cpu.runUntilTime {target} refused ({exc})") from None
-        dbg.wait_event("cpu.stepping", left())
-        reached = int(dbg.request("cpu.status").get("us", -1))
-        if reached < target - CLOCK_SLACK_US:
-            raise CaptureFailed(f"PPSSPP stopped at {reached} us before the {target} us the plan "
-                                f"asked for (a breakpoint or an exception?)")
-        if reached > target + LATE_LIMIT_US:
-            raise CaptureFailed(f"PPSSPP stopped at {reached} us, past the next vblank after the "
-                                f"{target} us the plan asked for")
-        result.max_early_us = max(result.max_early_us, target - reached)
-        result.max_late_us = max(result.max_late_us, reached - target)
+        if action.us != last_planned_us:
+            if target <= current_us:
+                raise CaptureFailed(
+                    f"planned {_action_label(action)} at {target} us is at or before the "
+                    f"debugger's current time ({current_us} us)"
+                )
+            dbg.clear_events()
+            try:
+                dbg.request("cpu.runUntilTime", us=target)
+            except DebuggerError as exc:
+                if _unknown_event(exc):
+                    raise NotRun("ppsspp-too-old", f"PPSSPP {version} has no cpu.runUntilTime") from None
+                raise CaptureFailed(f"cpu.runUntilTime {target} refused ({exc})") from None
+            dbg.wait_event("cpu.stepping", left())
+            reached = int(dbg.request("cpu.status").get("us", -1))
+            if reached < target - CLOCK_SLACK_US:
+                raise CaptureFailed(f"PPSSPP stopped at {reached} us before the {target} us the plan "
+                                    f"asked for (a breakpoint or an exception?)")
+            if reached > target + LATE_LIMIT_US:
+                raise CaptureFailed(f"PPSSPP stopped at {reached} us, past the next vblank after the "
+                                    f"{target} us the plan asked for")
+            result.max_early_us = max(result.max_early_us, target - reached)
+            result.max_late_us = max(result.max_late_us, reached - target)
+            current_us = reached
+            last_planned_us = action.us
         if action.kind == "input":
             if action.buttons:
                 dbg.request("input.buttons.send", buttons=dict(action.buttons))
@@ -867,7 +970,7 @@ def drive(dbg: Debugger, plan: Sequence[Action], pid: int | None, rtc: int, time
                             y=analog_value(action.stick[1], invert=True))
         else:
             shot = dbg.request("gpu.buffer.screenshot", type="base64")
-            result.shots.append(Shot(action.scene, action.frame, reached - base_us,
+            result.shots.append(Shot(action.scene, action.frame, current_us - base_us,
                                      decode_screenshot(shot)))
     return result
 
@@ -928,6 +1031,7 @@ def capture(sf: SceneFile, exe: Path, runs: int, replace: bool, keep_work: bool 
     if existing and not replace:
         raise RefError(f"references exist for {existing}; pass --replace to capture over them")
     plan = build_plan(rows, sf.scenes)
+    validate_plan(plan)
     results: list[DriveResult] = []
     ini: dict = {}
     for run in range(runs):
@@ -950,29 +1054,45 @@ def capture(sf: SceneFile, exe: Path, runs: int, replace: bool, keep_work: bool 
         for a in first.shots:
             if theirs.get(a.scene) != a.picture:
                 disagree.add(a.scene)
-    # The port is the run's own choice and differs every time; it is not a capture setting.
-    settings = {s: {k: v for k, v in kv.items() if k != "RemoteISOPort"} for s, kv in ini.items()}
+    settings = capture_settings(ini)
     sf.out.mkdir(parents=True, exist_ok=True)
-    for shot in first.shots:
-        if shot.scene in disagree:
-            # A reference this run was asked to replace must not survive as if it still held.
-            for stale in (sf.out / f"{shot.scene}.png", sf.out / f"{shot.scene}.png.json"):
-                stale.unlink(missing_ok=True)
-            verdicts.append((shot.scene, f"{FAIL} nondeterministic (PPSSPP runs differ; "
-                                         "no reference stored)"))
-            continue
-        ref = sf.out / f"{shot.scene}.png"
-        write_png(ref, shot.picture)
-        meta = {"tool": TOOL_NAME, "tool_version": TOOL_VERSION, "ppsspp_version": first.version,
-                "title": sf.title, "frame": shot.frame, "emulated_us": shot.us,
-                "rtc": sf.rtc, "runs": runs, "width": shot.picture.width,
-                "height": shot.picture.height,
-                "sha256": hashlib.sha256(shot.picture.pixels).hexdigest(),
-                "ini": settings}
-        Path(str(ref) + ".json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n",
-                                            encoding="utf-8")
-        verdicts.append((shot.scene, f"CAPTURED {shot.picture.width}x{shot.picture.height} "
-                                     f"v{shot.frame} ({runs} run{'s' if runs > 1 else ''})"))
+    # Every picture and sidecar is staged beside its final name first; the stored set
+    # changes only once all of them are written, so a failed write leaves the previous
+    # references whole instead of a mix no single capture produced.
+    staged: list[tuple[Path, Path]] = []
+    stale: list[Path] = []
+    try:
+        for shot in first.shots:
+            if shot.scene in disagree:
+                # A reference this run was asked to replace must not survive as if it still held.
+                stale += [sf.out / f"{shot.scene}.png", sf.out / f"{shot.scene}.png.json"]
+                verdicts.append((shot.scene, f"{FAIL} nondeterministic (PPSSPP runs differ; "
+                                             "no reference stored)"))
+                continue
+            ref = sf.out / f"{shot.scene}.png"
+            picture = sf.out / f".{shot.scene}.png.partial"
+            staged.append((picture, ref))
+            write_png(picture, shot.picture)
+            meta = {"tool": TOOL_NAME, "tool_version": TOOL_VERSION,
+                    "ppsspp_version": first.version, "title": sf.title, "frame": shot.frame,
+                    "emulated_us": shot.us, "rtc": sf.rtc, "runs": runs,
+                    "width": shot.picture.width, "height": shot.picture.height,
+                    "sha256": hashlib.sha256(shot.picture.pixels).hexdigest(),
+                    "ini": settings}
+            sidecar = sf.out / f".{shot.scene}.png.json.partial"
+            staged.append((sidecar, Path(str(ref) + ".json")))
+            sidecar.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n",
+                               encoding="utf-8")
+            verdicts.append((shot.scene, f"CAPTURED {shot.picture.width}x{shot.picture.height} "
+                                         f"v{shot.frame} ({runs} run{'s' if runs > 1 else ''})"))
+    except BaseException:
+        for partial, _final in staged:
+            partial.unlink(missing_ok=True)
+        raise
+    for path in stale:
+        path.unlink(missing_ok=True)
+    for partial, final in staged:
+        os.replace(partial, final)
     return verdicts
 
 
@@ -1009,6 +1129,37 @@ class Grade:
                 + (f" {self.detail}" if self.detail else ""))
 
 
+def _stale_reference(sf: SceneFile, scene: Scene, ref_path: Path,
+                     reference: picture_gate.Frame) -> str | None:
+    """Why the stored reference is not this scene's capture, or None when its sidecar agrees.
+
+    The sidecar records what capture stored: the frame, the RTC, the settings and the pixels'
+    digest. A scene edited since, or a picture replaced by hand, is not the same frames.
+    """
+    sidecar = Path(str(ref_path) + ".json")
+    try:
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+    except OSError:
+        return f"{sidecar.name} is missing"
+    except json.JSONDecodeError:
+        return f"{sidecar.name} is not JSON"
+    if not isinstance(meta, dict):
+        return f"{sidecar.name} is not an object"
+    if meta.get("frame") != scene.frame:
+        return f"captured at v{meta.get('frame')}, the scene asks for v{scene.frame}"
+    if meta.get("rtc") != sf.rtc:
+        return "captured with another RTC"
+    try:
+        settings = capture_settings(effective_ini(0, sf.ini))
+    except RefError as exc:
+        return str(exc)
+    if meta.get("ini") != settings:
+        return "captured with other PPSSPP settings"
+    if meta.get("sha256") != hashlib.sha256(reference.pixels).hexdigest():
+        return "the picture is not the one captured"
+    return None
+
+
 def grade_scene(sf: SceneFile, scene: Scene, diff_dir: Path | None) -> Grade:
     ref_path = sf.reference(scene)
     if not ref_path.exists():
@@ -1017,6 +1168,9 @@ def grade_scene(sf: SceneFile, scene: Scene, diff_dir: Path | None) -> Grade:
         reference = picture_gate.load_picture(ref_path)
     except picture_gate.PictureError as exc:
         return Grade(scene.name, scene.frame, FAIL, f"unreadable-reference ({exc})")
+    stale = _stale_reference(sf, scene, ref_path, reference)
+    if stale:
+        return Grade(scene.name, scene.frame, FAIL, f"stale-reference ({stale}; run capture --replace)")
     if scene.nakagawa is None:
         return Grade(scene.name, scene.frame, NOT_RUN, "no-capture (the scene names no Nakagawa frame)")
     if not scene.nakagawa.exists():

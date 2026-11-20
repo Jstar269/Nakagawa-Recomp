@@ -8,12 +8,15 @@ properties the comparison silently DEPENDS on, each of which has already been
 observed to fail in practice or would make a cell pass vacuously.
 """
 
+from importlib.abc import Loader
+from importlib.machinery import ModuleSpec
 import importlib.util
 import shutil
 import struct
 import subprocess
 import unittest
 from pathlib import Path
+from typing import cast
 
 try:
     import scratch_dir
@@ -25,12 +28,20 @@ ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = ROOT / "tests" / "fixtures" / "cosim" / "generate.py"
 FPU_REFERENCE = ROOT / "tests" / "fixtures" / "cosim" / "fpu_reference.c"
 
-_spec = importlib.util.spec_from_file_location("cosim_generate", GENERATOR)
+_spec = cast(ModuleSpec, importlib.util.spec_from_file_location("cosim_generate", GENERATOR))  # Fixed .py fixture.
 cosim = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cosim)
+_loader = cast(Loader, _spec.loader)  # The fixed .py fixture has a source loader.
+_loader.exec_module(cosim)
 
 
 JR_RA = 0x03E00008
+
+
+def branch_target_index(index: int, word: int) -> int:
+    """Word index a taken I-type branch at ``index`` lands on: the delay slot plus the
+    sign-extended 16-bit word offset, so a backward branch lands before the branch."""
+    offset = ((word & 0xFFFF) ^ 0x8000) - 0x8000
+    return index + 1 + offset
 
 
 def decode(word: int) -> tuple:
@@ -519,11 +530,19 @@ class FixtureSemanticTests(unittest.TestCase):
 
         # Taking the branch must skip at least one instruction, so a lane that
         # evaluated the condition after the slot lands somewhere different.
-        target_index = index + 1 + (branch & 0xFFFF)
+        target_index = branch_target_index(index, branch)
         self.assertGreater(target_index, index + 2,
                            "taken and not-taken paths converge; nothing is proven")
+        self.assertLessEqual(target_index, len(words), "the branch leaves its cell")
         skipped = words[index + 2]
         self.assertEqual(skipped >> 26, 0x09, "the skipped word should be the addiu marker")
+
+    def test_branch_target_index_sign_extends_the_offset(self):
+        beq = 0x10000000  # beq $zero, $zero, offset
+        self.assertEqual(branch_target_index(9, beq | 0x0002), 12)
+        # A backward branch lands before the branch, never past the cell's end.
+        self.assertEqual(branch_target_index(9, beq | 0xFFFE), 8)
+        self.assertEqual(branch_target_index(9, beq | 0x8000), 10 - 0x8000)
 
     def test_branch_likely_cell_covers_taken_and_nullified_paths_for_each_form(self):
         _offset, words = self.layout["branch_likely"]

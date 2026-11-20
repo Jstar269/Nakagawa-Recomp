@@ -52,6 +52,7 @@ PRIVATE_EXTENSIONS = {
     ".chd",
     ".cso",
     ".dax",
+    ".dmp",
     ".edat",
     ".elf",
     ".gim",
@@ -61,7 +62,9 @@ PRIVATE_EXTENSIONS = {
     ".pmf",
     ".prx",
     ".psar",
+    ".psess",
     ".sfo",
+    ".sqlite",
     ".trace",
     ".vag",
 }

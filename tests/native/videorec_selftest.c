@@ -19,7 +19,8 @@
 //     is read back before it can be replaced, and without a keep the newest picture wins;
 //   - a picture of another size is refused and reported, never written;
 //   - the recorder never writes the pixels or samples it is handed;
-//   - with FFmpeg on PATH, the FFV1 encode and the mux finish with status PASS (SKIP otherwise);
+//   - with FFmpeg on PATH, the FFV1 encode and the mux finish with status PASS (SKIP otherwise,
+//     and the final line names the skip);
 //   - recording only on the deterministic clock; a named encoder, FFmpeg or codec that cannot
 //     run refuses the recording (never raw frames in its place); free space under 4 GiB
 //     refuses it and under 1 GiB stops it; a used folder keeps no earlier PASS; an output name
@@ -28,8 +29,12 @@
 //     audio.wav each FAIL the recording with its reason (a fake FFmpeg: this binary);
 //   - a fatal stop (_Exit, no atexit) after sr_videorec_finish_at leaves PASS naming the stop,
 //     and one without it leaves INCOMPLETE, never PASS; a clean end records its exit status
-//     0, and an exit(1) that names no end records "exit_status": null (a child process: this
-//     binary).
+//     0, and an exit(1) that names no end records "exit_status": null through the atexit
+//     fallback the recorder arms when it starts from the environment (a child process: this
+//     binary);
+//   - the WAV header is 16-bit stereo PCM at 44100 Hz with sizes matching the file, sound handed
+//     over before the recording starts is dropped and counted, a picture is read at its row
+//     pitch, and a refused start's free-space credit is the earlier run's files.
 // No game data, no GPU, no window: exit 0 = every check passed.
 
 #ifndef _POSIX_C_SOURCE
@@ -69,6 +74,9 @@
 #define H 36u
 
 static int s_failures;
+/* What did not run, carried into the final line: a run with a skip is never a bare PASS. */
+static int s_skips;
+static char s_skipped[128];
 #define CHECK(cond, msg)                                              \
     do {                                                              \
         if (!(cond)) {                                                \
@@ -94,16 +102,32 @@ static long file_size(const char *path) {
     return n;
 }
 
+static uint32_t le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint32_t le16(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8); }
+
+/* audio.wav's samples, or NULL unless its header is the one the recording claims: a 44-byte PCM
+ * header for 16-bit stereo at 44100 Hz whose RIFF and data sizes match the file's length. */
 static int16_t *read_wav(const char *path, uint32_t *samples) {
+    long size = file_size(path);
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     uint8_t h[44];
-    if (fread(h, 1, 44, f) != 44 || memcmp(h, "RIFF", 4) || memcmp(h + 36, "data", 4)) {
+    int ok = size >= 44 && fread(h, 1, 44, f) == 44 && memcmp(h, "RIFF", 4) == 0 &&
+             memcmp(h + 8, "WAVEfmt ", 8) == 0 && le32(h + 16) == 16u && le16(h + 20) == 1u &&
+             le16(h + 22) == 2u && le32(h + 24) == 44100u && le32(h + 28) == 44100u * 4u &&
+             le16(h + 32) == 4u && le16(h + 34) == 16u && memcmp(h + 36, "data", 4) == 0;
+    uint32_t bytes = ok ? le32(h + 40) : 0u;
+    ok = ok && bytes % 4u == 0 && (uint64_t)bytes == (uint64_t)size - 44u &&
+         le32(h + 4) == 36u + bytes;
+    if (!ok) {
+        fprintf(stderr, "videorec_selftest: %s is not a 44100 Hz 16-bit stereo PCM WAV whose "
+                        "sizes match its length\n", path);
         fclose(f);
         return NULL;
     }
-    uint32_t bytes = (uint32_t)h[40] | ((uint32_t)h[41] << 8) | ((uint32_t)h[42] << 16) |
-                     ((uint32_t)h[43] << 24);
     *samples = bytes / 4u;
     int16_t *s = (int16_t *)malloc(bytes ? bytes : 4u);
     uint8_t *raw = (uint8_t *)malloc(bytes ? bytes : 4u);
@@ -125,6 +149,7 @@ static void path_in(char *out, size_t n, const char *dir, const char *name) {
 }
 
 static int record_says(const char *dir, const char *status, const char *reason_part);
+static void read_record_text(const char *dir, char *text, size_t cap);
 
 static void make_dir(const char *d) {
 #ifdef _WIN32
@@ -149,6 +174,16 @@ static void test_timeline(const char *root) {
     sr_videorec_audio(0, buf, 1024, 0x8000, 0x8000, vtime(99));
     sr_videorec_vblank(99, vtime(99)); /* no picture yet: nothing starts */
 
+    /* The samples mixed into the recording below, with copies: the recorder must not write
+     * them either (an in-place volume would turn imp2's -12000 at 0x4000 into -6000). */
+    static int16_t imp[1024 * 2], imp_copy[1024 * 2];
+    imp[0] = imp[1] = 20000;
+    memcpy(imp_copy, imp, sizeof imp);
+    int16_t imp2[2] = { -12000, 12000 }, next[2] = { 7000, 7000 }, one[2] = { 100, 100 };
+    int16_t loud[2] = { 30000, -30000 };
+    const int16_t imp2_copy[2] = { -12000, 12000 }, next_copy[2] = { 7000, 7000 };
+    const int16_t one_copy[2] = { 100, 100 }, loud_copy[2] = { 30000, -30000 };
+
     uint32_t v = 100;
     uint32_t written_value[64];
     int written = 0;
@@ -172,27 +207,26 @@ static void test_timeline(const char *root) {
         if (step == 10) {
             /* A 1024-sample buffer on channel 1 at frame 10's VBLANK, an impulse at its start,
              * and a one-sample impulse 8 ms later on channel 2. */
-            static int16_t imp[1024 * 2];
-            imp[0] = imp[1] = 20000;
             sr_videorec_audio(1, imp, 1024, 0x8000, 0x8000, vtime(v));
-            int16_t imp2[2] = { -12000, 12000 };
             sr_videorec_audio(2, imp2, 1, 0x4000, 0x8000, vtime(v) + 8000u);
             /* Channel 1's next buffer, handed over while the first still plays, follows it. */
-            int16_t next[2] = { 7000, 7000 };
             sr_videorec_audio(1, next, 1, 0x8000, 0x8000, vtime(v) + 5000u);
             /* Channel 5 runs dry: its next buffer, handed over 12 ms on, starts then. */
-            int16_t one[2] = { 100, 100 };
             sr_videorec_audio(5, one, 1, 0x8000, 0x8000, vtime(v) + 1000u);
             sr_videorec_audio(5, one, 1, 0x8000, 0x8000, vtime(v) + 12000u);
         }
         if (step == 30) {
             /* Two channels summing past full scale clip. */
-            int16_t loud[2] = { 30000, -30000 };
             sr_videorec_audio(3, loud, 1, 0x8000, 0x8000, vtime(v));
             sr_videorec_audio(4, loud, 1, 0x8000, 0x8000, vtime(v));
         }
     }
-    CHECK(memcmp(buf, buf_copy, sizeof buf) == 0, "the recorder leaves the guest samples alone");
+    CHECK(memcmp(buf, buf_copy, sizeof buf) == 0,
+          "the recorder leaves the samples handed over before the recording alone");
+    CHECK(memcmp(imp, imp_copy, sizeof imp) == 0 && memcmp(imp2, imp2_copy, sizeof imp2) == 0 &&
+              memcmp(next, next_copy, sizeof next) == 0 && memcmp(one, one_copy, sizeof one) == 0 &&
+              memcmp(loud, loud_copy, sizeof loud) == 0,
+          "the recorder leaves the guest samples it mixes alone");
 
     /* A picture of another size is refused, not written. */
     static uint32_t big[W * 2 * H];
@@ -231,7 +265,13 @@ static void test_timeline(const char *root) {
     CHECK(a != NULL, "audio.wav reads back");
     CHECK(n == (uint32_t)sr_videorec_frame_sample(41), "audio length equals the video's");
     CHECK(n == 30165u, "41 frames are 30165 samples at 44100 Hz");
-    if (a) {
+    /* The indexed reads below need the full length; a short file already failed above. */
+    if (a && n == 30165u) {
+        /* The +1000/-1000 buffer handed over before the first picture is dropped, not placed at
+         * the recording's start (or trimmed into it). */
+        int pre_start_silent = 1;
+        for (uint32_t i = 0; i < 1024u * 2u; i++) pre_start_silent &= a[i] == 0;
+        CHECK(pre_start_silent, "sound handed over before the first picture is not recorded");
         uint64_t s10 = sr_videorec_frame_sample(10);
         CHECK(a[s10 * 2] == 20000 && a[s10 * 2 + 1] == 20000,
               "an impulse at frame 10's VBLANK is frame 10's first sample");
@@ -246,11 +286,15 @@ static void test_timeline(const char *root) {
         /* Step 30 is frame 31: the gap frame at step 20 keeps its place on the timeline. */
         uint64_t s31 = sr_videorec_frame_sample(31);
         CHECK(a[s31 * 2] == 32767 && a[s31 * 2 + 1] == -32768, "the sum of two channels clips");
-        free(a);
     }
+    free(a);
 
     path_in(p, sizeof p, dir, "record.json");
     CHECK(file_size(p) > 0, "record.json is written");
+    static char text[8192];
+    read_record_text(dir, text, sizeof text);
+    CHECK(strstr(text, "\"audio_before_start\": 1024,") != NULL,
+          "record.json counts the 1024 samples handed over before the first picture");
     path_in(p, sizeof p, dir, "frames.csv");
     f = fopen(p, "r");
     int rows = 0, gaps = 0;
@@ -432,7 +476,11 @@ static void test_order_and_pass(const char *root) {
     for (uint32_t i = 0; i < W * H; i++) {
         rgbx[i * 4] = 0x11; rgbx[i * 4 + 1] = 0x22; rgbx[i * 4 + 2] = 0x33; rgbx[i * 4 + 3] = 0xff;
     }
+    static uint8_t rgbx_copy[W * H * 4];
+    memcpy(rgbx_copy, rgbx, sizeof rgbx);
     sr_videorec_frame(rgbx, W, H, W * 4u, SR_CAP_ORDER_RGBX);
+    CHECK(memcmp(rgbx, rgbx_copy, sizeof rgbx) == 0,
+          "the RGBX reorder leaves the presented pixels alone");
     for (uint32_t v = 7; v < 12; v++) sr_videorec_vblank(v, vtime(v));
     /* A late host: two VBLANKs serviced at nearly the same guest instant. */
     sr_videorec_vblank(12, vtime(11) + 100u);
@@ -453,6 +501,58 @@ static void test_order_and_pass(const char *root) {
     int16_t *a = read_wav(p, &n);
     CHECK(a && n == (uint32_t)sr_videorec_frame_sample(6), "a silent run still has full-length audio");
     free(a);
+}
+
+/* A picture whose rows are longer than its width (a PSP framebuffer is 480 pixels wide in a
+ * 512-pixel stride) is read row by row at its row pitch in both orders: every written row is its
+ * own source row, the padding past the width is never written, and the source stays as it was. */
+static void test_stride(const char *root) {
+    enum { PITCH = W + 8u };
+    static uint8_t src[PITCH * 4u * H], src_copy[PITCH * 4u * H], got[W * H * 4u];
+    static const struct { const char *name; int order; } orders[] = {
+        { "stride-bgrx", SR_CAP_ORDER_BGRX },
+        { "stride-rgbx", SR_CAP_ORDER_RGBX },
+    };
+    for (size_t o = 0; o < sizeof orders / sizeof orders[0]; o++) {
+        char dir[600], p[700];
+        snprintf(dir, sizeof dir, "%s/%s", root, orders[o].name);
+        for (uint32_t y = 0; y < H; y++) {
+            for (uint32_t x = 0; x < PITCH; x++) {
+                uint8_t *q = src + ((size_t)y * PITCH + x) * 4u;
+                if (x < W) {
+                    q[0] = (uint8_t)y; q[1] = (uint8_t)x; q[2] = (uint8_t)(0x40u + y); q[3] = 0x7f;
+                } else {
+                    q[0] = q[1] = q[2] = q[3] = 0xee; /* the stride's padding */
+                }
+            }
+        }
+        memcpy(src_copy, src, sizeof src);
+        CHECK(sr_videorec_test_start(dir, "raw"), orders[o].name);
+        sr_videorec_frame(src, W, H, PITCH * 4u, orders[o].order);
+        CHECK(memcmp(src, src_copy, sizeof src) == 0,
+              "the recorder leaves a padded picture's pixels alone");
+        sr_videorec_vblank(1, vtime(1));
+        CHECK(sr_videorec_finish() == 1, "a padded picture's recording reports PASS");
+        path_in(p, sizeof p, dir, "video.bgr0");
+        CHECK(file_size(p) == (long)(W * H * 4u), "a padded picture is one frame of its own width");
+        FILE *f = fopen(p, "rb");
+        int read_ok = f && fread(got, 1, sizeof got, f) == sizeof got;
+        if (f) fclose(f);
+        CHECK(read_ok, "the padded picture's frame reads back");
+        int rows_ok = read_ok;
+        for (uint32_t y = 0; y < H && rows_ok; y++) {
+            for (uint32_t x = 0; x < W; x++) {
+                const uint8_t *s = src + ((size_t)y * PITCH + x) * 4u;
+                const uint8_t *d = got + ((size_t)y * W + x) * 4u;
+                int same = orders[o].order == SR_CAP_ORDER_BGRX
+                               ? memcmp(d, s, 4) == 0
+                               : d[0] == s[2] && d[1] == s[1] && d[2] == s[0] && d[3] == 0;
+                if (!same) { rows_ok = 0; break; }
+            }
+        }
+        CHECK(rows_ok, "each written row is its source row at the row pitch, without padding");
+    }
+    sr_videorec_test_reset();
 }
 
 /* SR_VIDEOREC_START: nothing before the start VBLANK, and the picture presented in the period
@@ -484,6 +584,29 @@ static void test_start(const char *root) {
         fclose(f);
     }
     CHECK(first == 50u, "the first frame is the picture presented just before VBLANK 50");
+    uint32_t n = 0;
+    path_in(p, sizeof p, dir, "audio.wav");
+    int16_t *a = read_wav(p, &n);
+    CHECK(a && n == (uint32_t)sr_videorec_frame_sample(10), "a started recording's audio is its ten frames long");
+    if (a && n == (uint32_t)sr_videorec_frame_sample(10)) {
+        /* Each sample is handed over 10 us after its VBLANK, before that VBLANK is serviced: the
+         * ones for VBLANKs 40..50 come before the recording starts and are dropped, and those for
+         * 51..59 land on frames 1..9's first samples. Nothing else is in the file. */
+        uint32_t nonzero = 0;
+        for (uint32_t i = 0; i < n * 2u; i++) nonzero += a[i] != 0;
+        int placed = 1;
+        for (uint64_t k = 1; k <= 9; k++) {
+            uint64_t s = sr_videorec_frame_sample(k);
+            placed &= a[s * 2] == 1 && a[s * 2 + 1] == 1;
+        }
+        CHECK(placed && nonzero == 9u * 2u,
+              "only the sound handed over after the start is recorded, each at its frame");
+    }
+    free(a);
+    static char text[8192];
+    read_record_text(dir, text, sizeof text);
+    CHECK(strstr(text, "\"audio_before_start\": 11,") != NULL,
+          "record.json counts the 11 samples handed over before the start");
 }
 
 /* With FFmpeg on PATH: the FFV1 encode and the mux. */
@@ -494,6 +617,8 @@ static void test_ffmpeg(const char *root) {
         CHECK(record_says(dir, "REFUSED", "is not in any absolute PATH entry"),
               "without FFmpeg an encoded recording is refused, not written raw");
         printf("videorec_selftest: SKIP ffv1 (FFmpeg is not on PATH; the recording was refused)\n");
+        s_skips++;
+        snprintf(s_skipped, sizeof s_skipped, "ffv1");
         return;
     }
     static uint32_t px[W * H];
@@ -557,6 +682,30 @@ static const char *fake_mode(const char *role, char *out, size_t n) {
 
 static const char *strip_file_url(const char *p) { return strncmp(p, "file:", 5) == 0 ? p + 5 : p; }
 
+/* The mux must not read the runtime's stdin: "-nostdin" is on its command line and its stdin is
+ * the null device, not the runtime's console, terminal or a harness's pipe. */
+static int fake_mux_has_no_stdin(int argc, char **argv) {
+    int nostdin = 0;
+    for (int i = 1; i < argc; i++)
+        if (strcmp(argv[i], "-nostdin") == 0) nostdin = 1;
+    if (!nostdin) {
+        fprintf(stderr, "fake ffmpeg: the mux was started without -nostdin\n");
+        return 0;
+    }
+#ifdef _WIN32
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    int null_in = in && in != INVALID_HANDLE_VALUE && GetFileType(in) == FILE_TYPE_CHAR &&
+                  !GetConsoleMode(in, &mode);
+#else
+    struct stat a, b;
+    int null_in = fstat(0, &a) == 0 && stat("/dev/null", &b) == 0 && S_ISCHR(a.st_mode) &&
+                  a.st_rdev == b.st_rdev;
+#endif
+    if (!null_in) fprintf(stderr, "fake ffmpeg: the mux's stdin is not the null device\n");
+    return null_in;
+}
+
 static int fake_ffmpeg(int argc, char **argv) {
     const char *out = strip_file_url(argv[argc - 1]);
     const char *first_input = NULL;
@@ -582,6 +731,7 @@ static int fake_ffmpeg(int argc, char **argv) {
                 encoder ? "enc" : "mux");
         return 2;
     }
+    if (!encoder && !fake_mux_has_no_stdin(argc, argv)) return 6;
     FILE *in = encoder ? stdin : fopen(strip_file_url(first_input), "rb");
     FILE *o = fopen(out, "wb");
     if (!in || !o) return 4;
@@ -617,7 +767,7 @@ static int self_path(char *out, size_t n) {
     return len > 0 && len < n;
 #else
     ssize_t len = readlink("/proc/self/exe", out, n - 1u);
-    if (len <= 0) return 0;
+    if (len <= 0 || (size_t)len >= n - 1u) return 0; /* unreadable, or perhaps cut short */
     out[len] = '\0';
     return 1;
 #endif
@@ -697,6 +847,48 @@ static void test_refusals(const char *root) {
               "a raw recording has no mux step, so a PASS never says muxed: false");
     }
 
+    /* SR_VIDEOREC_START is a VBLANK number or nothing: anything else refuses by name, never a
+     * start at boot (strtoul's 0) or one that never comes (a wrapped negative). */
+    {
+        char sdir[600];
+        snprintf(sdir, sizeof sdir, "%s/refuse-start", root);
+        set_env("SR_VIDEOREC_DIR", sdir);
+        static const char *const bad[] = { "abc", "-1", "1e3", " 50", "50 ", "+5", "4294967296" };
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            set_env("SR_VIDEOREC_START", bad[i]);
+            CHECK(!sr_videorec_test_start_from_env(), "a bad SR_VIDEOREC_START refuses the recording");
+            CHECK(record_says(sdir, "REFUSED", "SR_VIDEOREC_START is not a VBLANK number"),
+                  "and the refusal names SR_VIDEOREC_START");
+        }
+        set_env("SR_VIDEOREC_START", "50");
+        CHECK(sr_videorec_test_start_from_env(), "SR_VIDEOREC_START=50 records");
+        CHECK(!sr_videorec_wants_frames(), "and wants no picture before VBLANK 50 is near");
+        set_env("SR_VIDEOREC_START", "4294967295");
+        CHECK(sr_videorec_test_start_from_env(), "the largest VBLANK number is accepted");
+        set_env("SR_VIDEOREC_START", "");
+        CHECK(sr_videorec_test_start_from_env() && sr_videorec_wants_frames(),
+              "an empty SR_VIDEOREC_START records from the first picture");
+        sr_videorec_test_reset();
+        set_env("SR_VIDEOREC_START", NULL);
+        set_env("SR_VIDEOREC_DIR", dir);
+
+        uint32_t sw = 0, sh = 0;
+        set_env("SR_VIDEOREC_SIZE", "640x360");
+        CHECK(sr_videorec_requested_size(&sw, &sh) && sw == 640 && sh == 360, "SR_VIDEOREC_SIZE=640x360");
+        set_env("SR_VIDEOREC_SIZE", "3840X2160");
+        CHECK(sr_videorec_requested_size(&sw, &sh) && sw == 3840 && sh == 2160, "an upper-case X");
+        static const char *const bad_size[] = { "641x360", "14x16", "16x16384x", "16386x16", "640",
+                                                "640x", "x360", "-640x360" };
+        for (size_t i = 0; i < sizeof bad_size / sizeof bad_size[0]; i++) {
+            set_env("SR_VIDEOREC_SIZE", bad_size[i]);
+            sw = sh = 7;
+            CHECK(!sr_videorec_requested_size(&sw, &sh) && sw == 7 && sh == 7,
+                  "an odd, out-of-range or malformed SR_VIDEOREC_SIZE is not used");
+        }
+        set_env("SR_VIDEOREC_SIZE", NULL);
+        CHECK(!sr_videorec_requested_size(&sw, &sh), "no SR_VIDEOREC_SIZE: the window's size");
+    }
+
     set_env("SR_VIDEOREC_CODEC", "ffv1");
     set_env("SR_VIDEOREC_FFMPEG", "ffmpeg");
     CHECK(!sr_videorec_test_start_from_env(), "a relative SR_VIDEOREC_FFMPEG refuses");
@@ -768,17 +960,27 @@ static void test_disk_space(const char *root) {
 
     CHECK(sr_videorec_test_start(dir, "raw"), "a recording starts with space");
     static uint32_t px[W * H];
-    for (uint32_t v = 1; v <= 130; v++) {
+    int16_t tone[735 * 2];
+    for (int i = 0; i < 735; i++) tone[i * 2] = tone[i * 2 + 1] = (int16_t)(i * 5);
+    /* The run goes on well past the stop, with sound: the stop must stop audio.wav too. */
+    for (uint32_t v = 1; v <= 400; v++) {
         if (v == 70) sr_videorec_test_set_free_bytes(((uint64_t)1u << 30) - 1u);
         fill(px, v);
         sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
         sr_videorec_vblank(v, vtime(v));
+        sr_videorec_audio(0, tone, 735, 0x8000, 0x8000, vtime(v));
     }
     CHECK(sr_videorec_finish() == 0, "the disk filling up fails the recording");
     CHECK(record_says(dir, "FAIL", "under 1 GiB free"), "and says why");
     SrVideoRecStats st;
     sr_videorec_test_stats(&st);
     CHECK(st.frames == 120, "no frame is written after the check that found the disk full");
+    char wav[700];
+    path_in(wav, sizeof wav, dir, "audio.wav");
+    CHECK(file_size(wav) == (long)(44u + 4u * sr_videorec_frame_sample(120)) &&
+              st.audio_samples == sr_videorec_frame_sample(120),
+          "audio.wav stops where the video stopped and does not grow after the stop");
+    CHECK(st.audio_overflow == 0, "sound handed over after the stop is not mixed");
 }
 
 /* A folder an earlier run left: its PASS and its recording are gone before this run writes. */
@@ -842,11 +1044,31 @@ static void test_stale_folder(const char *root) {
     CHECK(record_says(dir2, "REFUSED", "video.bgr0"), "naming the file it could not clear");
     CHECK(file_size(inner) == 1, "and the folder in the way keeps what it holds");
 
-    /* The earlier run's files count as free space, since the clear frees them: 2 bytes short of
-     * 4 GiB free with a 3-byte earlier recording starts, and removes it. */
+    /* The earlier run's files count as free space, since the clear frees them: 3 bytes short of
+     * 4 GiB free with a 3-byte earlier recording starts, and removes it. Only that recording is
+     * left in the folder, so the start succeeds only if it is the file credited, and one byte
+     * further short is refused. */
     set_env("SR_VIDEOREC_DIR", dir);
+    static const char *const others[] = { "record.json", "record.json.tmp", "video.mkv",
+                                          "video.bgr0", "audio.wav", "frames.csv", "logic.srt" };
+    int only_mkv = file_size(p) == 3;
+    for (size_t i = 0; i < sizeof others / sizeof others[0]; i++) {
+        char other[700];
+        path_in(other, sizeof other, dir, others[i]);
+        (void)remove(other); /* this run's, or one an earlier selftest run left */
+        only_mkv &= file_size(other) < 0;
+    }
+    CHECK(only_mkv, "only the 3-byte earlier recording.mkv is left before the free-space checks");
+    char rec[700];
+    path_in(rec, sizeof rec, dir, "record.json");
     sr_videorec_test_reset();
-    sr_videorec_test_set_free_bytes(((uint64_t)4u << 30) - 2u);
+    sr_videorec_test_set_free_bytes(((uint64_t)4u << 30) - 4u);
+    CHECK(!sr_videorec_active(), "4 bytes short of 4 GiB with 3 bytes to free is refused");
+    CHECK(record_says(dir, "REFUSED", "a recording needs at least"), "for want of free space");
+    CHECK(file_size(p) == 3, "and the refusal keeps the earlier recording.mkv");
+    (void)remove(rec);
+    sr_videorec_test_reset();
+    sr_videorec_test_set_free_bytes(((uint64_t)4u << 30) - 3u);
     CHECK(sr_videorec_active(), "the earlier run's files count as free space at the start");
     CHECK(file_size(p) < 0, "and the start removed the earlier recording.mkv");
     sr_videorec_test_reset();
@@ -943,6 +1165,88 @@ static void test_encoder_failures(const char *root, const char *self) {
     set_env("NK_VIDEOREC_FAKE_FFMPEG", NULL);
 }
 
+/* A directory is not an encoder. SR_VIDEOREC_FFMPEG naming one refuses the recording with the
+ * earlier run's output left in place, and the PATH search walks past an entry whose "ffmpeg" is
+ * a directory instead of stopping there. The folders sit beside the selftest binary, so their
+ * paths are absolute as the recorder requires. */
+static void test_ffmpeg_directory(const char *root, const char *self) {
+    char base[1024], fake[1100], exe_dir[1200], dir[600], p[700];
+    snprintf(base, sizeof base, "%s", self);
+    char *cut = strrchr(base, '/');
+    char *bs = strrchr(base, '\\');
+    if (bs && (!cut || bs > cut)) cut = bs;
+    CHECK(cut != NULL, "the selftest path has a folder");
+    if (!cut) return;
+    cut[0] = 0;
+    snprintf(fake, sizeof fake, "%s/videorec-ffmpeg-dir", base);
+    make_dir(fake);
+#ifdef _WIN32
+    snprintf(exe_dir, sizeof exe_dir, "%s/ffmpeg.exe", fake);
+#else
+    snprintf(exe_dir, sizeof exe_dir, "%s/ffmpeg", fake);
+#endif
+    make_dir(exe_dir);
+    snprintf(dir, sizeof dir, "%s/ffmpeg-dir", root);
+    set_env("SR_VIDEOREC_DIR", dir);
+    set_env("SR_VIDEOREC_CODEC", "raw");
+    set_env("SR_VIDEOREC_FFMPEG", NULL);
+    set_env("SR_DETERMINISTIC_CLOCK", "1");
+    CHECK(sr_videorec_test_start_from_env() && record_ten() == 1 && record_says(dir, "PASS", NULL),
+          "the earlier raw recording finishes PASS");
+    set_env("SR_VIDEOREC_CODEC", "ffv1");
+    set_env("SR_VIDEOREC_FFMPEG", exe_dir);
+    CHECK(!sr_videorec_test_start_from_env(), "an SR_VIDEOREC_FFMPEG that names a directory refuses");
+    CHECK(record_says(dir, "REFUSED", "is not an executable file"), "and says so");
+    path_in(p, sizeof p, dir, "video.bgr0");
+    CHECK(file_size(p) == (long)(10u * W * H * 4u),
+          "the refusal leaves the earlier run's video as it was");
+    sr_videorec_test_reset();
+    set_env("SR_VIDEOREC_FFMPEG", NULL);
+    const char *saved = getenv("PATH");
+    char *path_copy = saved ? strdup(saved) : NULL;
+    set_env("PATH", fake);
+    CHECK(!sr_videorec_test_start_from_env(),
+          "a PATH entry whose ffmpeg is a directory does not count as FFmpeg on PATH");
+    CHECK(record_says(dir, "REFUSED", "is not in any absolute PATH entry"), "and says so");
+    sr_videorec_test_reset();
+    set_env("PATH", path_copy);
+    free(path_copy);
+    set_env("SR_VIDEOREC_DIR", NULL);
+    set_env("SR_VIDEOREC_CODEC", NULL);
+    set_env("SR_DETERMINISTIC_CLOCK", NULL);
+}
+
+#ifdef _WIN32
+/* A recording folder whose name is not ASCII: SR_VIDEOREC_DIR arrives in the ANSI code page and
+ * the recorder's own file calls use it so, so FFmpeg's command line must carry the same folder.
+ * Widened as UTF-8, a byte such as 0xE9 (e-acute in code page 1252) became U+FFFD and FFmpeg was
+ * told to write somewhere else. The fake FFmpeg opens exactly the paths it is given. */
+static void test_ansi_folder(const char *root, const char *self) {
+    char name[64], dir[700], p[800];
+    BOOL lossy = FALSE;
+    const UINT acp = GetACP();
+    static const wchar_t wide[] = { L'v', L'i', L'd', 0x00E9, L'o', L's', 0 };
+    const int n = acp == CP_UTF8
+                      ? WideCharToMultiByte(CP_UTF8, 0, wide, -1, name, (int)sizeof name, NULL, NULL)
+                      : WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, wide, -1, name,
+                                            (int)sizeof name, NULL, &lossy);
+    if (n <= 0 || lossy) {
+        printf("videorec_selftest: non-ASCII folder: SKIP (code page %u has no e-acute)\n", (unsigned)acp);
+        return;
+    }
+    snprintf(dir, sizeof dir, "%s/%s", root, name);
+    set_env("SR_VIDEOREC_FFMPEG", self);
+    set_env("NK_VIDEOREC_FAKE_FFMPEG", "enc=ok;mux=ok");
+    CHECK(sr_videorec_test_start(dir, "ffv1"), "a non-ASCII recording folder starts");
+    CHECK(record_ten() == 1 && record_says(dir, "PASS", NULL),
+          "FFmpeg is given the same non-ASCII folder the recorder writes, and the recording passes");
+    path_in(p, sizeof p, dir, "recording.mkv");
+    CHECK(file_size(p) == (long)(10u * W * H * 4u), "the mux in the non-ASCII folder holds every frame");
+    set_env("SR_VIDEOREC_FFMPEG", NULL);
+    set_env("NK_VIDEOREC_FAKE_FFMPEG", NULL);
+}
+#endif
+
 /* Audio that runs more than the ring ahead, and samples that never reach audio.wav, FAIL. */
 static void test_audio_failures(const char *root) {
     char dir[600];
@@ -974,13 +1278,20 @@ static void test_audio_failures(const char *root) {
 #define FATAL_STOP_WHY "a fatal stop ended the run"
 #define CLEAN_END_WHY "the run returned to the driver"
 
-static void exit_child_finish_at_exit(void) { (void)sr_videorec_finish(); }
-
 /* mode: "finish" or "skip" stop with _Exit(7); "clean" names its end and status 0 and exits 0;
- * "exit1" leaves through exit(1), which only the atexit fallback sees. */
+ * "exit1" leaves through exit(1), which only the atexit fallback sees. That child starts from the
+ * environment as the runtime does, so the fallback it reaches is the one the recorder arms itself,
+ * not one the test registers. */
 static int exit_child(const char *dir, const char *mode) {
-    if (!sr_videorec_test_start(dir, "raw")) return 3;
-    if (strcmp(mode, "exit1") == 0) atexit(exit_child_finish_at_exit);
+    if (strcmp(mode, "exit1") == 0) {
+        set_env("SR_VIDEOREC_DIR", dir);
+        set_env("SR_VIDEOREC_CODEC", "raw");
+        set_env("SR_VIDEOREC_START", NULL);
+        set_env("SR_DETERMINISTIC_CLOCK", "1");
+        if (!sr_videorec_test_start_from_env()) return 3;
+    } else if (!sr_videorec_test_start(dir, "raw")) {
+        return 3;
+    }
     static uint32_t px[W * H];
     int16_t tone[735 * 2];
     for (int i = 0; i < 735; i++) tone[i * 2] = tone[i * 2 + 1] = (int16_t)(i * 5);
@@ -1003,12 +1314,48 @@ static int exit_child(const char *dir, const char *mode) {
     _Exit(7);
 }
 
-/* The child's exit code, or -1 when it did not exit normally. */
+#ifdef _WIN32
+/* One argument quoted for the C runtime's command-line parser (the rules videorec.c's
+ * vr_append_arg follows): _spawn* joins its arguments with spaces and quotes nothing, so a path
+ * with a space would reach the child as two arguments. 0 when it does not fit. */
+static int quote_arg(char *out, size_t cap, const char *arg) {
+    size_t n = 0;
+    if (cap < 3) return 0;
+    out[n++] = '"';
+    for (const char *a = arg;; a++) {
+        size_t slashes = 0;
+        while (*a == '\\') { slashes++; a++; }
+        size_t need = !*a ? slashes * 2 : (*a == '"' ? slashes * 2 + 2 : slashes + 1);
+        if (n + need + 2 > cap) return 0;
+        if (!*a) {
+            for (size_t i = 0; i < slashes * 2; i++) out[n++] = '\\';
+            break;
+        }
+        if (*a == '"') {
+            for (size_t i = 0; i < slashes * 2 + 1; i++) out[n++] = '\\';
+            out[n++] = '"';
+        } else {
+            for (size_t i = 0; i < slashes; i++) out[n++] = '\\';
+            out[n++] = *a;
+        }
+    }
+    out[n++] = '"';
+    out[n] = '\0';
+    return 1;
+}
+#endif
+
+/* The child's exit code, or -1 when it did not exit normally or could not be started. */
 static int run_exit_child(const char *self, const char *dir, const char *mode) {
     fflush(stdout);
     fflush(stderr);
 #ifdef _WIN32
-    return (int)_spawnl(_P_WAIT, self, self, "--exit-child", dir, mode, NULL);
+    static char q[4][2200];
+    const char *const args[4] = { self, "--exit-child", dir, mode };
+    for (int i = 0; i < 4; i++)
+        if (!quote_arg(q[i], sizeof q[i], args[i])) return -1;
+    const char *const argv[] = { q[0], q[1], q[2], q[3], NULL };
+    return (int)_spawnv(_P_WAIT, self, argv);
 #else
     (void)self;
     pid_t pid = fork();
@@ -1131,15 +1478,92 @@ static void test_filters(const char *root) {
     sr_videorec_test_reset();
 }
 
+/* audio.wav past the 4 GiB a WAV header can describe fails the recording by name instead of
+ * passing with a clamped header; exactly at the limit it still passes. */
+static void test_wav_limit(const char *root) {
+    char dir[600];
+    const uint64_t limit = 0xFFFFFFD3u / 4u; /* the most samples the 32-bit sizes hold */
+    snprintf(dir, sizeof dir, "%s/wav-limit", root);
+    CHECK(sr_videorec_test_start(dir, "raw"), "the WAV limit recording starts");
+    sr_videorec_test_wav_extra_samples(limit - sr_videorec_frame_sample(10));
+    CHECK(record_ten() == 1 && record_says(dir, "PASS", NULL), "audio exactly at the WAV limit passes");
+    snprintf(dir, sizeof dir, "%s/wav-over", root);
+    CHECK(sr_videorec_test_start(dir, "raw"), "the over-limit recording starts");
+    sr_videorec_test_wav_extra_samples(limit - sr_videorec_frame_sample(10) + 1u);
+    CHECK(record_ten() == 0, "audio past the WAV limit fails the recording");
+    CHECK(record_says(dir, "FAIL", "more than the 4 GiB a WAV header can describe"), "and says why");
+    sr_videorec_test_reset();
+}
+
+/* A frame store that cannot be allocated in full fails the recording by that name and keeps no
+ * partial store: no later present is counted as a picture of another size. */
+static void test_frame_store_failure(const char *root) {
+    static uint32_t px[W * H];
+    for (int nth = 1; nth <= 3; nth++) {
+        char dir[600];
+        snprintf(dir, sizeof dir, "%s/store-fail-%d", root, nth);
+        CHECK(sr_videorec_test_start(dir, "raw"), "the frame store recording starts");
+        sr_videorec_test_fail_store_alloc(nth);
+        for (uint32_t v = 1; v <= 4; v++) {
+            fill(px, v);
+            sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+            sr_videorec_vblank(v, vtime(v));
+        }
+        SrVideoRecStats st;
+        sr_videorec_test_stats(&st);
+        CHECK(sr_videorec_finish() == 0, "a frame store that cannot be allocated fails the recording");
+        CHECK(record_says(dir, "FAIL", "out of memory for the frame store"), "and says why");
+        CHECK(st.refused_frames == 0 && st.width == 0 && st.frames == 0,
+              "no later present is refused as a picture of another size");
+    }
+    sr_videorec_test_reset();
+}
+
+#ifdef _WIN32
+/* FFmpeg inherits only its own handles: a file the runtime opened before the encoder started and
+ * closed while it runs can be deleted, since no copy of its handle stays open in FFmpeg. */
+static void test_handle_inheritance(const char *root, const char *self) {
+    char dir[600], probe[700];
+    snprintf(dir, sizeof dir, "%s/inherit", root);
+    snprintf(probe, sizeof probe, "%s/inherit-probe.txt", root);
+    (void)remove(probe);
+    set_env("SR_VIDEOREC_FFMPEG", self);
+    set_env("NK_VIDEOREC_FAKE_FFMPEG", "enc=ok;mux=ok");
+    CHECK(sr_videorec_test_start(dir, "ffv1"), "the handle inheritance recording starts");
+    FILE *f = fopen(probe, "wb"); /* a CRT handle, inheritable by default */
+    CHECK(f != NULL, "the probe file opens");
+    static uint32_t px[W * H];
+    fill(px, 0x00102030u);
+    sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_vblank(1, vtime(1)); /* the encoder starts here, while the probe is open */
+    if (f) fclose(f);
+    CHECK(remove(probe) == 0, "a file the runtime closed is not held open by the encoder");
+    sr_videorec_vblank(2, vtime(2));
+    CHECK(sr_videorec_finish() == 1 && record_says(dir, "PASS", NULL),
+          "the encoder and the mux still get their stdin, stdout and stderr");
+    (void)remove(probe);
+    set_env("SR_VIDEOREC_FFMPEG", NULL);
+    set_env("NK_VIDEOREC_FAKE_FFMPEG", NULL);
+}
+#endif
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "-hide_banner") == 0) return fake_ffmpeg(argc, argv);
-    if (argc == 4 && strcmp(argv[1], "--exit-child") == 0)
+    if (argc > 1 && strcmp(argv[1], "--exit-child") == 0) {
+        /* A child whose arguments arrived split or short stops by name, never runs the suite. */
+        if (argc != 4) {
+            fprintf(stderr, "videorec_selftest: --exit-child takes a folder and a mode, got %d "
+                            "argument(s)\n", argc - 2);
+            return 2;
+        }
         return exit_child(argv[2], argv[3]);
+    }
     const char *root = argc > 1 ? argv[1] : SR_SELFTEST_BUILD_ROOT "/videorec_selftest";
     make_dir(root);
     test_timeline(root);
     test_order_and_pass(root);
     test_start(root);
+    test_stride(root);
     test_ffmpeg(root);
     test_refusals(root);
     test_disk_space(root);
@@ -1148,15 +1572,30 @@ int main(int argc, char **argv) {
     test_audio_failures(root);
     test_filters(root);
     test_keep(root);
-    char self[1024];
-    CHECK(self_path(self, sizeof self), "the selftest finds its own path for the fake FFmpeg");
-    test_encoder_failures(root, self);
-    test_fatal_stop(root, self);
+    test_wav_limit(root);
+    test_frame_store_failure(root);
+    char self[1024] = { 0 };
+    int have_self = self_path(self, sizeof self);
+    CHECK(have_self, "the selftest finds its own path for the fake FFmpeg");
+    /* Without its own path the fake FFmpeg and the child cannot run: that failure is counted
+     * above, and nothing runs an unresolved path. */
+    if (have_self) {
+        test_encoder_failures(root, self);
+        test_ffmpeg_directory(root, self);
+#ifdef _WIN32
+        test_ansi_folder(root, self);
+        test_handle_inheritance(root, self);
+#endif
+        test_fatal_stop(root, self);
+    }
     sr_videorec_test_reset();
     if (s_failures) {
         fprintf(stderr, "videorec_selftest: %d check(s) FAILED\n", s_failures);
         return 1;
     }
-    printf("videorec_selftest: PASS\n");
+    if (s_skips)
+        printf("videorec_selftest: PASS (%d SKIP: %s)\n", s_skips, s_skipped);
+    else
+        printf("videorec_selftest: PASS\n");
     return 0;
 }

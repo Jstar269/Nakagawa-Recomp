@@ -28,6 +28,7 @@ read anywhere.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import hashlib
 import json
@@ -41,6 +42,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 from fractions import Fraction
 from unittest import mock
@@ -74,15 +76,38 @@ KOREAN_FONT_DIR = ROOT / "tests" / "fixtures" / "fonts" / "gowundodum"
 KOREAN_FONT = KOREAN_FONT_DIR / "GowunDodum-Regular.ttf"
 KOREAN_PIN = KOREAN_FONT_DIR / "PIN.json"
 LIBERATION_DIR = ROOT / "tests" / "fixtures" / "fonts" / "liberation"
+GEIST_DIR = ROOT / "assets" / "fonts" / "ui" / "geist"
+UI_FONT_LIST = ROOT / "assets" / "fonts" / "ui" / "manifest.json"
 NOTO_JP_FONT = ROOT / "assets" / "fonts" / "ui" / "noto-sans-jp" / "NotoSansJP-Regular.ttf"
 NOTO_JP_PIN = ROOT / "tests" / "fixtures" / "fonts" / "notosansjp" / "PIN.json"
-#: The console's Latin index order within a size group (#2005): family, then style.
+#: The console's Latin index order within a size group (#2005): family, then style. The regular and
+#: bold sans-serif faces are Geist Regular and SemiBold (#1300), the player's interface font, with
+#: Liberation Sans Regular and Bold for what Geist lacks.
 LATIN_FACES = (
-    ("LiberationSans-Regular", "Regular"), ("LiberationSerif-Regular", "Regular"),
+    ("Geist-Regular", "Regular"), ("LiberationSerif-Regular", "Regular"),
     ("LiberationSans-Italic", "Italic"), ("LiberationSerif-Italic", "Italic"),
-    ("LiberationSans-Bold", "Bold"), ("LiberationSerif-Bold", "Bold"),
+    ("Geist-SemiBold", "Bold"), ("LiberationSerif-Bold", "Bold"),
     ("LiberationSans-BoldItalic", "Bold Italic"), ("LiberationSerif-BoldItalic", "Bold Italic"),
 )
+#: The fallback face of each Geist face (``--fallback``).
+LATIN_FALLBACKS = {"Geist-Regular": "LiberationSans-Regular", "Geist-SemiBold": "LiberationSans-Bold"}
+
+
+def _latin_dir(stem: str) -> Path:
+    """The folder of a Latin source face."""
+    return GEIST_DIR if stem.startswith("Geist-") else LIBERATION_DIR
+
+
+def _latin_pin_path(stem: str) -> Path:
+    """A Latin source face's pin: the UI font list for Geist, else the pin file beside the face."""
+    return UI_FONT_LIST if stem.startswith("Geist-") else LIBERATION_DIR / f"{stem}.pin.json"
+
+
+def _latin_source(stem: str) -> tuple[bytes, ttf2pgf.SourcePin]:
+    """A Latin source face's bytes and pin."""
+    path = _latin_dir(stem) / f"{stem}.ttf"
+    data = path.read_bytes()
+    return data, load_pin(_latin_pin_path(stem), data, path)
 
 DEFAULT_CODES = (0x20, 0x7E)
 PPEM_SHAPE = 16  # large enough that the source-owned H shape is unambiguous
@@ -113,6 +138,17 @@ def _cli(*args: object) -> subprocess.CompletedProcess[str]:
 
 def _glyph_map(glyphs: tuple[Glyph, ...]) -> dict[int, Glyph]:
     return {glyph.code: glyph for glyph in glyphs}
+
+
+def _untrimmed(left: int, top: int, width: int, height: int, samples: tuple[int, ...]):
+    """Stands in for ``ttf2pgf._trim_to_ink`` to convert as before rule 15: the raster box unchanged."""
+    return left, top, width, height, samples
+
+
+def _without_vertical(glyphs: list, **_: object) -> list:
+    """Stands in for ``ttf2pgf._vertical_metrics`` to convert as before rule 16: a vertical advance
+    of 0 and the writer's default vertical bearings."""
+    return [dataclasses.replace(glyph, advance_y=0) for glyph in glyphs]
 
 
 def _clusters(samples: list[int], row: int, width: int) -> list[int]:
@@ -313,6 +349,115 @@ class SourcePinTests(unittest.TestCase):
             self.assertEqual(caught.exception.reason, "pin-invalid")
 
 
+class FontListPinTests(unittest.TestCase):
+    """Spec section 7 (#1300): a font the project already ships is pinned by its record in the
+    static font list (``assets/fonts/ui/manifest.json``), the licence beside it."""
+
+    def setUp(self) -> None:
+        self.font = GEIST_DIR / "Geist-Regular.ttf"
+        self.data = self.font.read_bytes()
+        self.document = json.loads(UI_FONT_LIST.read_text(encoding="utf-8"))
+        self._tmp = tempfile.TemporaryDirectory(prefix="ttf2pgf_font_list_")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def _copy(self, license_text: str | None = None, edit=None) -> tuple[Path, Path]:
+        """The list, the font and its licence copied to a temporary folder, optionally changed."""
+        folder = self.tmp / "geist"
+        folder.mkdir(exist_ok=True)
+        font = folder / self.font.name
+        font.write_bytes(self.data)
+        text = (GEIST_DIR / "OFL.txt").read_bytes() if license_text is None else license_text.encode("utf-8")
+        (folder / "OFL.txt").write_bytes(text)
+        document = json.loads(json.dumps(self.document))
+        entry = next(item for item in document["fonts"] if item["file"].endswith("/" + self.font.name))
+        entry["license_sha256"] = hashlib.sha256(text).hexdigest()
+        if edit is not None:
+            edit(entry)
+        listing = self.tmp / "manifest.json"
+        listing.write_text(json.dumps(document), encoding="utf-8")
+        return listing, font
+
+    def _refusal(self, listing: Path, data: bytes, path: Path | None) -> str:
+        with self.assertRaises(TtfConvertError) as caught:
+            load_pin(listing, data, path)
+        return str(caught.exception.reason)
+
+    def test_the_shipped_list_pins_geist(self) -> None:
+        pin = load_pin(UI_FONT_LIST, self.data, self.font)
+        self.assertEqual(pin.sha256, hashlib.sha256(self.data).hexdigest())
+        self.assertEqual((pin.spdx, pin.family, pin.reserved_font_names), ("OFL-1.1", "Geist", ()))
+        self.assertEqual(pin.copyright, "Copyright 2024 The Geist Project Authors (https://github.com/vercel/geist-font.git)")
+        self.assertEqual(pin.license_text, (GEIST_DIR / "OFL.txt").read_text(encoding="utf-8"))
+        self.assertEqual(pin.license_text_file, "OFL.txt")
+        self.assertEqual(pin.source, {
+            "repository": "https://github.com/google/fonts",
+            "commit": "45e3d5269e4a17d823f6d84470bc084dc5ae46f6",
+            "path": "ofl/geist/Geist[wght].ttf",
+            "upstream_sha256": "73894e0448cae90a92b6c2f8732b7bb9acb7b94c418bff559dad4a18e1de9659",
+            "source_kind": "variable-instance",
+            "instance": "wght=400",
+        })
+        ttf2pgf.validate_output_name("Nakagawa Open Latin", pin)
+
+    def test_the_input_must_be_the_entry_by_digest_and_name(self) -> None:
+        flipped = bytearray(self.data)
+        flipped[5000] ^= 0xFF
+        self.assertEqual(self._refusal(UI_FONT_LIST, bytes(flipped), self.font), "pin-digest-mismatch")
+        renamed = self.tmp / "Other.ttf"
+        renamed.write_bytes(self.data)
+        self.assertEqual(self._refusal(UI_FONT_LIST, self.data, renamed), "pin-invalid")
+        self.assertEqual(self._refusal(UI_FONT_LIST, self.data, None), "pin-invalid")
+
+    def test_the_licence_beside_the_font_must_match_the_list(self) -> None:
+        listing, font = self._copy()
+        self.assertEqual(load_pin(listing, self.data, font).family, "Geist")
+        (font.parent / "OFL.txt").write_bytes(b"Copyright 2024 someone else\n")
+        self.assertEqual(self._refusal(listing, self.data, font), "pin-license-mismatch")
+
+    def test_a_reserved_name_the_list_does_not_record_is_refused(self) -> None:
+        notice = "Copyright 2024 The Example Authors, with Reserved Font Name \"Example\".\n\nSIL OFL 1.1\n"
+        listing, font = self._copy(notice)
+        self.assertEqual(self._refusal(listing, self.data, font), "pin-invalid")
+        listing, font = self._copy(notice, lambda entry: entry.update(reserved_font_names=["Example"]))
+        pin = load_pin(listing, self.data, font)
+        self.assertEqual(pin.reserved_font_names, ("Example",))
+        with self.assertRaises(TtfConvertError) as caught:
+            ttf2pgf.validate_output_name("Example Latin", pin)
+        self.assertEqual(caught.exception.reason, "reserved-font-name")
+
+    def test_a_licence_without_its_copyright_notice_first_is_refused(self) -> None:
+        listing, font = self._copy("SIL OPEN FONT LICENSE Version 1.1\n")
+        self.assertEqual(self._refusal(listing, self.data, font), "pin-invalid")
+
+    def test_a_licence_in_another_folder_or_a_variable_font_is_refused(self) -> None:
+        listing, font = self._copy(edit=lambda entry: entry.update(license_file="assets/fonts/ui/OFL.txt"))
+        self.assertEqual(self._refusal(listing, self.data, font), "pin-invalid")
+        listing, font = self._copy(edit=lambda entry: entry.update(static=False))
+        self.assertEqual(self._refusal(listing, self.data, font), "pin-invalid")
+        listing, font = self._copy(edit=lambda entry: entry.update(size_bytes=1))
+        self.assertEqual(self._refusal(listing, self.data, font), "pin-size-mismatch")
+
+    def test_the_cli_pins_the_input_and_the_fallback_by_their_paths(self) -> None:
+        liberation = LIBERATION_DIR / "LiberationSans-Regular.ttf"
+        output = self.tmp / "nkltn.pgf"
+        manifest = self.tmp / "nkltn.json"
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "ttf2pgf.py"), str(output), str(self.font),
+             "--pin", str(UI_FONT_LIST), "--fallback", str(liberation),
+             "--fallback-pin", str(LIBERATION_DIR / "LiberationSans-Regular.pin.json"),
+             "--latin-cyrillic-text", "--ppem", "13", "--font-name", "Nakagawa Open Latin",
+             "--manifest", str(manifest)],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(manifest.read_text(encoding="utf-8"))
+        self.assertEqual(record["license"]["family"], "Geist")
+        self.assertEqual(record["license"]["reserved_font_names"], [])
+        self.assertEqual(record["license"]["source"]["commit"], "45e3d5269e4a17d823f6d84470bc084dc5ae46f6")
+        self.assertEqual(len(record["fallback"]["codes"]), 110)
+        self.assertIn("Liberation", record["fallback"]["license"]["reserved_font_names"])
+
+
 class RefusalTests(CliRefusalMixin):
     """Layer 3: every malformed, unsupported, or policy-violating input is named."""
 
@@ -494,6 +639,76 @@ class RefusalTests(CliRefusalMixin):
                 metric_targets=ttf2pgf.load_metric_targets(targets),
             )
         self.assertEqual(caught.exception.reason, "conflicting-parameters")
+
+    def test_mac_roman_and_symbol_cmaps_are_not_accepted_as_unicode(self) -> None:
+        cmap_entry = self.entries["cmap"]
+        cmap_offset = struct.unpack_from(">I", self.data, cmap_entry + 8)[0]
+        count = struct.unpack_from(">H", self.data, cmap_offset + 2)[0]
+        for platform, encoding in ((1, 0), (3, 0)):
+            with self.subTest(platform=platform, encoding=encoding):
+                mutated = bytearray(self.data)
+                for index in range(count):
+                    rec_off = cmap_offset + 4 + 8 * index
+                    struct.pack_into(">HH", mutated, rec_off, platform, encoding)
+                with self.assertRaises(TtfConvertError) as caught:
+                    convert(bytes(mutated), input_path="crafted.ttf", output_path="out.pgf", codes=(0x41, 0x41))
+                self.assertEqual(caught.exception.reason, "malformed-cmap")
+
+    def test_metric_targets_with_embolden_y_match_written_header_ascender(self) -> None:
+        targets = ttf2pgf._MetricTargets(
+            ascender_px=10, descender_px=-2, tolerance_px=1, ppem_min=6, ppem_max=24,
+        )
+        conversion = convert(
+            self.data,
+            input_path=str(FONT),
+            output_path="out.pgf",
+            codes=(0x41, 0x48),
+            metric_targets=targets,
+            embolden_y=8,
+        )
+        self.assertEqual(
+            conversion.manifest["metric_targets"]["achieved_ascender_26_6"],
+            conversion.manifest["output"]["ascender_26_6"],
+        )
+        self.assertLessEqual(
+            abs(conversion.manifest["output"]["ascender_26_6"] / 64 - targets.ascender_px),
+            targets.tolerance_px,
+        )
+
+    def test_overlapping_cmap_segments_and_groups_are_refused(self) -> None:
+        sub4 = _format4_subtable([(0x41, 0x45, 0), (0x43, 0x46, 0), (0xFFFF, 0xFFFF, 1)])
+        with self.assertRaises(TtfConvertError) as caught:
+            ttf2pgf._parse_cmap4(sub4, 0)
+        self.assertEqual(caught.exception.reason, "malformed-cmap")
+        sub12 = struct.pack(">HHIII", 12, 0, 16 + 24, 0, 2) + struct.pack(">IIIIII", 0x41, 0x45, 1, 0x45, 0x48, 1)
+        with self.assertRaises(TtfConvertError) as caught:
+            ttf2pgf._parse_cmap12(sub12, 0)
+        self.assertEqual(caught.exception.reason, "malformed-cmap")
+
+    def test_font_type_using_camouflage_or_reserved_name_is_refused(self) -> None:
+        self.assert_cli_refused(
+            "camouflage-font-name", self.output, FONT, "--font-type", _joined("Font", "works")
+        )
+        self.assert_cli_refused(
+            "reserved-font-name", self.output, FONT, "--pin", PIN, "--font-type", "Gudea"
+        )
+
+    def test_failed_output_write_leaves_no_partial_pgf(self) -> None:
+        orig_write_bytes = Path.write_bytes
+
+        def fail_pgf_write(self_path: Path, data: bytes) -> int:
+            if self_path.name.startswith("out.pgf"):
+                self_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self_path, "wb") as handle:
+                    handle.write(data[:16])
+                raise OSError("disk full")
+            return orig_write_bytes(self_path, data)
+
+        with mock.patch.object(Path, "write_bytes", fail_pgf_write):
+            code = ttf2pgf._main([str(self.output), str(FONT), "--codes", "0x41-0x41"])
+        self.assertEqual(code, 1)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.tmp.glob("out.pgf*")), [])
 
 
 class CompositeRefusalTests(unittest.TestCase):
@@ -742,6 +957,7 @@ class IntegerRasterEquivalenceTests(unittest.TestCase):
 
     def test_crossing_rasterizer_matches_the_rational_reference(self) -> None:
         rng = random.Random(2026)
+        large_den_cases = 0
         for case in range(400):
             # Large outlines push edge denominators past 2**16 and take the Fraction sort.
             span = 1 << (8 if case % 4 else 18)
@@ -751,31 +967,50 @@ class IntegerRasterEquivalenceTests(unittest.TestCase):
                 edges.extend((x0, y0, x1, y1) for (x0, y0), (x1, y1) in zip(points, points[1:] + points[:1], strict=True))
             xs = [x for edge in edges for x in (edge[0], edge[2])]
             ys = [y for edge in edges for y in (edge[1], edge[3])]
-            raster = ttf2pgf._Raster(
-                edges=tuple(edges), left=min(xs) // 64, bottom=min(ys) // 64,
-                right=-((-max(xs)) // 64), top=-((-max(ys)) // 64),
-            )
-            if raster.width * raster.height > 4096:
-                continue
+            left, bottom = min(xs) // 64, min(ys) // 64
+            right, top = -((-max(xs)) // 64), -((-max(ys)) // 64)
+            if (right - left) * (top - bottom) > 4096:
+                # Clip to a 16x16 pixel window around the origin so large-denominator edges run.
+                left, bottom, right, top = -8, -8, 8, 8
+            raster = ttf2pgf._Raster(edges=tuple(edges), left=left, bottom=bottom, right=right, top=top)
+            if any(
+                abs(y1 - y0) >= (1 << 16) and min(y0, y1) < top * 64 and max(y0, y1) > bottom * 64
+                for _, y0, _, y1 in edges
+            ):
+                large_den_cases += 1
             embolden = (case % 3, case % 2)
             self.assertEqual(ttf2pgf._rasterize(raster, *embolden),
                              _rasterize_rational_reference(raster, *embolden))
+        self.assertGreater(large_den_cases, 0)
 
     def test_latin_project_font_output_is_pinned(self) -> None:
-        # The digest the converter has produced for the Latin project font since #1309's build;
-        # the integer arithmetic must reproduce it byte for byte.
+        # The digest the converter has produced for the Latin project font since #1309's build, with
+        # the raster box as it was before rule 15's ink trim: the integer arithmetic must reproduce
+        # it byte for byte. The second digest is the same font cut to its ink (converter 0.7.0), the
+        # third that font with the console's vertical metrics (rule 16, converter 0.8.0).
         fixture = ROOT / "tests" / "fixtures" / "fonts" / "mplus1p"
-        conversion = convert(
-            (fixture / "MPLUS1p-Regular.ttf").read_bytes(),
-            input_path="tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf",
-            output_path="nkltn.pgf",
-            pin=load_pin(fixture / "PIN.json", (fixture / "MPLUS1p-Regular.ttf").read_bytes()),
-            code_points=ttf2pgf.latin_1_text_code_points(),
-            ppem=13, embolden_x=6, embolden_y=4, embolden_advance=3,
-            font_name="Nakagawa Open Latin", font_type="Regular",
-        )
-        self.assertEqual(hashlib.sha256(conversion.image).hexdigest(),
+
+        def make() -> ttf2pgf.Conversion:
+            return convert(
+                (fixture / "MPLUS1p-Regular.ttf").read_bytes(),
+                input_path="tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf",
+                output_path="nkltn.pgf",
+                pin=load_pin(fixture / "PIN.json", (fixture / "MPLUS1p-Regular.ttf").read_bytes()),
+                code_points=ttf2pgf.latin_1_text_code_points(),
+                ppem=13, embolden_x=6, embolden_y=4, embolden_advance=3,
+                font_name="Nakagawa Open Latin", font_type="Regular",
+            )
+
+        with mock.patch.object(ttf2pgf, "_vertical_metrics", _without_vertical):
+            with mock.patch.object(ttf2pgf, "_trim_to_ink", _untrimmed):
+                whole = make()
+            trimmed = make()
+        self.assertEqual(hashlib.sha256(whole.image).hexdigest(),
                          "e10068b52f117295792fe29698a97ab52faedaac1aabfee59a8cf498437b1d15")
+        self.assertEqual(hashlib.sha256(trimmed.image).hexdigest(),
+                         "532bfec6aa133cb323a3cc11b136d31449270ec7058e96a843c4d6e74af04057")
+        self.assertEqual(hashlib.sha256(make().image).hexdigest(),
+                         "5c4e76bfbeec133dbae3eb2894cae1a6d34fa20c35537a536d2bb1177087c425")
 
 
 def _format4_subtable(segments: list[tuple[int, int, int]]) -> bytes:
@@ -926,6 +1161,7 @@ class JapaneseCodePointCoverageTests(unittest.TestCase):
         """#2005: the first set stopped at JIS level 1; the text set adds level 2 and CP932."""
         points = ttf2pgf.japanese_text_code_points()
         self.assertEqual(len(points.codes), 7575)
+        self.assertEqual(len(points.codes), ttf2pgf.JAPANESE_TEXT_CODE_POINT_COUNT)
         self.assertEqual(points.codes, tuple(sorted(set(points.codes))))
         self.assertEqual(points.source, "builtin:jis-x-0208-cp932-japanese")
         self.assertEqual(points.sha256, ttf2pgf.JAPANESE_TEXT_CODE_POINTS_SHA256)
@@ -940,16 +1176,69 @@ class JapaneseCodePointCoverageTests(unittest.TestCase):
         self.assertTrue({0x5F0C, 0x9ED1, 0x2460, 0x2252, 0x7E8A}.issubset(codes))
         self.assertFalse(any(0xE000 <= code <= 0xF8FF for code in codes), "no user-defined area")
 
-    def test_noto_sans_jp_draws_the_text_set_with_m_plus_for_one_point(self) -> None:
+    def test_jis_x_0213_set_is_codec_derived(self) -> None:
+        codes = ttf2pgf.jis_x_0213_code_points()
+        self.assertEqual(len(codes), ttf2pgf.JIS_X_0213_CODE_POINT_COUNT)
+        self.assertEqual(len(codes), 10905)
+        self.assertEqual(codes, tuple(sorted(set(codes))))
+        self.assertTrue(set(ttf2pgf._jis_x_0208_rows(range(16, 85))) <= set(codes))
+        # Plane 1's additions: a kanji outside JIS X 0208, katakana for Ainu and a Latin letter.
+        self.assertTrue({0x4FF1, 0x31F0, 0x0101} <= set(codes))
+        self.assertFalse(any(code > 0xFFFF for code in codes))
+
+    @staticmethod
+    def _stand_in_faces() -> tuple[ttf2pgf._Ttf, ttf2pgf._Ttf]:
+        return ttf2pgf._Ttf(NOTO_JP_FONT.read_bytes()), ttf2pgf._Ttf(JAPANESE_FONT.read_bytes())
+
+    def test_japanese_text_set_adds_jis_x_0213_and_the_named_blocks_the_faces_draw(self) -> None:
+        """#1300: the stand-in drew the replacement character for every character outside CP932,
+        the trade mark sign among them (Ace Combat: Joint Assault writes "Memory Stick™" with it).
+        The set the build converts adds every character of JIS X 0213 and of the named Unicode
+        blocks that the faces draw; it is computed from the faces' character maps."""
+        noto, mplus = self._stand_in_faces()
+
+        def draws(code: int) -> bool:
+            return noto.glyph_id(code) is not None or mplus.glyph_id(code) is not None
+
+        points = ttf2pgf.japanese_text_code_points(draws)
+        codes = set(points.codes)
+        self.assertEqual(points.codes, tuple(sorted(codes)))
+        self.assertEqual(points.source, "builtin:jis-x-0208-cp932-japanese+jis-x-0213+blocks")
+        core = set(ttf2pgf.japanese_text_code_points().codes)
+        jis_x_0213 = {code for code in ttf2pgf.jis_x_0213_code_points() if draws(code)}
+        blocks = {code for _, first, last in ttf2pgf.JAPANESE_TEXT_BLOCKS for code in range(first, last + 1)
+                  if draws(code)}
+        self.assertTrue(core <= codes)
+        self.assertTrue(jis_x_0213 <= codes)
+        self.assertTrue(blocks <= codes)
+        self.assertEqual(codes, core | jis_x_0213 | blocks)
+        self.assertTrue(all(draws(code) for code in codes - core))
+        self.assertEqual(len(codes), 15631)
+        # The trade mark sign, a Kangxi radical, a kanji outside JIS X 0208, a squared word,
+        # parenthesized numbers, a Latin letter with a macron and a box-drawing arc.
+        self.assertTrue({0x2122, 0x2F00, 0x4E04, 0x3300, 0x2474, 0x0100, 0x256D} <= codes)
+        # Two blocks stay out (their wider and taller glyphs would grow the font's glyph box); what
+        # CP932 and JIS X 0213 hold of them is in.
+        names = {name for name, _, _ in ttf2pgf.JAPANESE_TEXT_BLOCKS}
+        self.assertFalse({"Mathematical Operators", "CJK Symbols and Punctuation"} & names)
+        self.assertFalse({0x2230, 0x3031} & codes)
+        self.assertTrue({0x2212, 0x221E, 0x3005, 0x3033} <= codes)
+        self.assertFalse(any(0xE000 <= code <= 0xF8FF for code in codes), "no user-defined area")
+
+    def test_noto_sans_jp_draws_the_text_set_with_m_plus_for_what_it_lacks(self) -> None:
         data = NOTO_JP_FONT.read_bytes()
         pin = load_pin(NOTO_JP_PIN, data)
         self.assertEqual(pin.spdx, "OFL-1.1")
         ttf2pgf.validate_output_name("Nakagawa Open Japanese", pin)
-        noto = ttf2pgf._Ttf(data)
-        mplus = ttf2pgf._Ttf(JAPANESE_FONT.read_bytes())
-        codes = ttf2pgf.japanese_text_code_points().codes
-        self.assertEqual([code for code in codes if noto.glyph_id(code) is None], [0x2252])
-        self.assertIsNotNone(mplus.glyph_id(0x2252))
+        noto, mplus = self._stand_in_faces()
+        core = ttf2pgf.japanese_text_code_points().codes
+        self.assertEqual([code for code in core if noto.glyph_id(code) is None], [0x2252])
+        codes = ttf2pgf.japanese_text_code_points(
+            lambda code: noto.glyph_id(code) is not None or mplus.glyph_id(code) is not None).codes
+        lacking = [code for code in codes if noto.glyph_id(code) is None]
+        self.assertEqual(len(lacking), 341)
+        self.assertEqual([code for code in lacking if mplus.glyph_id(code) is None], [])
+        self.assertIsNotNone(noto.glyph_id(0x2122), "Noto Sans JP draws the trade mark sign")
 
 
 class ProjectCodePointCoverageTests(unittest.TestCase):
@@ -976,42 +1265,137 @@ class ProjectCodePointCoverageTests(unittest.TestCase):
         missing = [code for code in points.codes if font.glyph_id(code) is None]
         self.assertEqual(missing, [], "M PLUS 1p must cover all 348 Latin text points")
 
-    def test_latin_cyrillic_set_adds_the_111_console_characters(self) -> None:
-        """#2005: 111 of the console Latin fonts' 322 non-ASCII characters were missing."""
-        points = ttf2pgf.latin_cyrillic_text_code_points()
-        self.assertEqual(len(points.codes), 454)
-        self.assertEqual(points.codes, tuple(sorted(set(points.codes))))
-        self.assertEqual(points.source, "builtin:latin-cyrillic-text")
-        self.assertEqual(points.sha256, ttf2pgf.LATIN_CYRILLIC_CODE_POINTS_SHA256)
-        codes = set(points.codes)
-        first = set(ttf2pgf.latin_1_text_code_points().codes)
-        added = codes - first
-        self.assertEqual(len(added), 111)
-        cyrillic = set(range(0x0401, 0x040D)) | set(range(0x040E, 0x0450)) | set(range(0x0451, 0x045D)) \
-            | {0x045E, 0x045F, 0x0490, 0x0491, 0x04C0}
-        self.assertEqual(len(cyrillic), 95)
-        self.assertTrue(cyrillic <= added)
-        self.assertEqual(added - cyrillic, {0x0192, 0x02C6, 0x02DC, 0x0301, 0x0306, 0x0308, 0x0338, 0x2116,
-                                            0x2206, 0x2219, 0x221A, 0x221E, 0x2248, 0x2260, 0x2264, 0x2265})
-        self.assertEqual(first - codes, {0x2011, 0x2023, 0x2024, 0x2025, 0x2027})
-        # Every Windows-1252 character is in it.
-        cp1252 = {ord(bytes((byte,)).decode("cp1252")) for byte in (*range(0x20, 0x7F), *range(0x80, 0x100))
-                  if byte not in (0x81, 0x8D, 0x8F, 0x90, 0x9D)}
-        self.assertTrue(cp1252 <= codes)
+    def test_latin_cyrillic_set_is_the_named_blocks_and_code_pages_the_face_draws(self) -> None:
+        """#2005, #1300: the Latin text set is every character of the named Unicode blocks and code
+        pages that the face draws, computed from the face's character map."""
+        font = ttf2pgf._Ttf((LIBERATION_DIR / "LiberationSans-Regular.ttf").read_bytes())
 
-    def test_every_liberation_face_draws_the_latin_cyrillic_set(self) -> None:
-        codes = ttf2pgf.latin_cyrillic_text_code_points().codes
-        license_text = (LIBERATION_DIR / "OFL.txt").read_text(encoding="utf-8")
+        def draws(code: int) -> bool:
+            return font.glyph_id(code) is not None
+
+        points = ttf2pgf.latin_cyrillic_text_code_points(draws)
+        codes = set(points.codes)
+        self.assertEqual(points.codes, tuple(sorted(codes)))
+        self.assertEqual(points.source, "builtin:latin-text-blocks")
+        self.assertEqual(len(codes), 556)
+        self.assertEqual(points.sha256, "7eb9461a9b5e1012ff653746e9b0e3ff7947b8d51b27cc9fa224003a1705647d")
+        blocks = {code for _, first, last in ttf2pgf.LATIN_TEXT_BLOCKS for code in range(first, last + 1)}
+        pages: set[int] = set()
+        for codec in ttf2pgf.LATIN_TEXT_CODE_PAGES:
+            pages |= ttf2pgf._code_page_characters(codec)
+        expected = {code for code in blocks | pages if draws(code)}
+        format_controls = {code for code in expected if unicodedata.category(chr(code)) == "Cf"}
+        self.assertEqual(codes, (expected - format_controls) | {0x00AD})
+        self.assertIn(0x200F, format_controls, "the bidirectional marks are format controls")
+        # The 348-point Latin-1 text set, every letter of Windows-1251 Cyrillic and the
+        # Romanian letters with a comma below are in it.
+        self.assertTrue({code for code in ttf2pgf.latin_1_text_code_points().codes if draws(code)} <= codes)
+        self.assertTrue(set(range(0x0410, 0x0450)) | {0x0401, 0x0451, 0x0490, 0x0491} <= codes)
+        self.assertTrue({0x0218, 0x0219, 0x021A, 0x021B, 0x0192, 0x20AC, 0x2116, 0x2122} <= codes)
+        # Hot Shots Tennis writes the minus sign U+2212 in its dialog and draws its own character
+        # where the font has none: the set stays out of Mathematical Operators beyond the code pages.
+        self.assertNotIn(0x2212, codes)
+        self.assertFalse(set(range(0x0300, 0x0370)) & codes, "no combining marks")
+
+    def test_latin_set_leaves_out_the_line_and_paragraph_separators(self) -> None:
+        """#1300: Geist maps U+2028 and U+2029 (categories Zl and Zp), which end a line or a paragraph
+        rather than draw; like the format controls they stay out, so a Geist face with its Liberation
+        Sans fallback gives the same set as every Liberation face."""
+        geist = ttf2pgf._Ttf((GEIST_DIR / "Geist-Regular.ttf").read_bytes())
+        self.assertIsNotNone(geist.glyph_id(0x2028))
+        self.assertIsNotNone(geist.glyph_id(0x2029))
+        codes = set(ttf2pgf.latin_cyrillic_text_code_points(lambda code: geist.glyph_id(code) is not None).codes)
+        self.assertFalse({0x2028, 0x2029} & codes)
+        self.assertIn(0x2026, codes, "the ellipsis of the same block stays")
+
+    @staticmethod
+    def _latin_faces_draw(stem: str):
+        """Whether the face, or the fallback face the build gives it, draws a code point."""
+        faces = [ttf2pgf._Ttf(_latin_source(name)[0]) for name in (stem, LATIN_FALLBACKS.get(stem)) if name]
+        return lambda code: any(face.glyph_id(code) is not None for face in faces)
+
+    def test_every_latin_face_draws_the_same_latin_cyrillic_set(self) -> None:
+        # Each source folder's licence text and Reserved Font Names (Geist reserves none).
+        licenses = {LIBERATION_DIR: (("Liberation",), (LIBERATION_DIR / "OFL.txt").read_text(encoding="utf-8")),
+                    GEIST_DIR: ((), (GEIST_DIR / "OFL.txt").read_text(encoding="utf-8"))}
+        digests = set()
         for stem, _style in LATIN_FACES:
             with self.subTest(face=stem):
-                data = (LIBERATION_DIR / f"{stem}.ttf").read_bytes()
-                pin = load_pin(LIBERATION_DIR / f"{stem}.pin.json", data)
-                self.assertEqual(pin.spdx, "OFL-1.1")
-                self.assertEqual(pin.license_text, license_text)
-                self.assertIn("Liberation", pin.reserved_font_names)
-                ttf2pgf.validate_output_name("Nakagawa Open Latin", pin)
-                font = ttf2pgf._Ttf(data)
-                self.assertEqual([code for code in codes if font.glyph_id(code) is None], [])
+                for name in (stem, LATIN_FALLBACKS.get(stem)):
+                    if name is None:
+                        continue
+                    _data, pin = _latin_source(name)
+                    reserved, license_text = licenses[_latin_dir(name)]
+                    self.assertEqual(pin.spdx, "OFL-1.1")
+                    self.assertEqual(pin.license_text, license_text)
+                    self.assertTrue(set(reserved) <= set(pin.reserved_font_names))
+                    self.assertEqual(bool(reserved), bool(pin.reserved_font_names))
+                    ttf2pgf.validate_output_name("Nakagawa Open Latin", pin)
+                points = ttf2pgf.latin_cyrillic_text_code_points(self._latin_faces_draw(stem))
+                self.assertTrue(set(range(0x20, 0x7F)) <= set(points.codes))
+                digests.add(points.sha256)
+        self.assertEqual(digests, {"7eb9461a9b5e1012ff653746e9b0e3ff7947b8d51b27cc9fa224003a1705647d"},
+                         "every face of the build draws the same Latin text set")
+
+    def test_geist_faces_take_from_liberation_only_what_geist_lacks(self) -> None:
+        """#1300: Geist draws the letters of the regular and bold sans faces; Liberation Sans Regular
+        and Bold draw the 110 characters of the set that Geist lacks (the soft hyphen, eleven Latin
+        Extended-A letters, modifier letters, spaces of General Punctuation, a few dashes, quotes and
+        primes, and six letterlike symbols)."""
+        lacks = ({0x00AD, 0x0114, 0x0115, 0x012C, 0x012D, 0x0138, 0x013F, 0x0140, 0x0149, 0x014E, 0x014F, 0x017F}
+                 | set(range(0x02B0, 0x02B9)) | {0x02BA, 0x02BB} | set(range(0x02BD, 0x02C6))
+                 | set(range(0x02C9, 0x02D8)) | set(range(0x02DE, 0x0300)) | set(range(0x2000, 0x200B))
+                 | {0x2010, 0x2012, 0x2015, 0x2016, 0x2017, 0x201B, 0x201F, 0x202F, 0x2034, 0x203C, 0x203E,
+                    0x205E, 0x2105, 0x2113, 0x2126, 0x212E, 0x214D, 0x214E})
+        self.assertEqual(len(lacks), 110)
+        for stem, fallback in LATIN_FALLBACKS.items():
+            with self.subTest(face=stem):
+                geist = ttf2pgf._Ttf(_latin_source(stem)[0])
+                points = ttf2pgf.latin_cyrillic_text_code_points(self._latin_faces_draw(stem))
+                self.assertEqual({code for code in points.codes if geist.glyph_id(code) is None}, lacks)
+                # The fallback has the slot's weight: Regular for Regular, Bold for the SemiBold that
+                # draws the bold slots.
+                self.assertEqual(fallback, {"Geist-Regular": "LiberationSans-Regular",
+                                            "Geist-SemiBold": "LiberationSans-Bold"}[stem])
+
+    def test_latin_set_keeps_the_small_sans_glyph_box_height(self) -> None:
+        """#1300: Hot Shots Tennis places the second line of its dialogs from the height of the font's
+        glyph box. A wider set whose tall glyphs (historic Cyrillic letters, box drawing) grew the box
+        moved that line; the full set must leave the small sans faces' box as high as the Latin-1
+        text set (section 6.3 of the font origins), whose accented capitals set it. The widths grow;
+        the game spaces text by each glyph's own image."""
+        for index in (8, 12):
+            stem = _makefile_flags(f"PROJECT_LATIN_{index % 8}_FACE")[0]
+            with self.subTest(index=index):
+                data, pin = _latin_source(stem)
+                fallback = LATIN_FALLBACKS.get(stem)
+                extra: dict = {}
+                if fallback is not None:
+                    fallback_data, fallback_pin = _latin_source(fallback)
+                    extra = {"fallback_data": fallback_data, "fallback_path": f"{fallback}.ttf",
+                             "fallback_pin": fallback_pin}
+                tokens = _makefile_flags("PROJECT_LATIN_SMALL_STRIKE_ARGS") + _makefile_flags(
+                    f"PROJECT_LATIN_{index}_SPACING")
+                arguments = dict(input_path=f"{stem}.ttf", output_path="nkltns.pgf", font_name="Nakagawa Open Latin",
+                                 font_type=" ".join(_makefile_flags(f"PROJECT_LATIN_{index % 8}_STYLE")), pin=pin,
+                                 **_convert_arguments(tokens))
+                draws = self._latin_faces_draw(stem)
+                full = convert(data, code_points=ttf2pgf.latin_cyrillic_text_code_points(draws), **extra,
+                               **arguments).image
+                latin_1 = {code for code in ttf2pgf.latin_1_text_code_points().codes if draws(code)}
+                first = convert(data, code_points=_code_set(latin_1), **extra, **arguments).image
+
+                def height(image: bytes) -> tuple:
+                    # base_y, top_y, maximum height, glyph height.
+                    return (struct.unpack_from("<i", image, 0xE0)[0], struct.unpack_from("<i", image, 0xE8)[0],
+                            struct.unpack_from("<i", image, 0xF8)[0], struct.unpack_from("<H", image, 0xFE)[0])
+
+                self.assertEqual(height(full), height(first))
+
+    def test_latin_set_refuses_a_face_without_ascii(self) -> None:
+        with self.assertRaises(ttf2pgf.TtfConvertError) as caught:
+            ttf2pgf.latin_cyrillic_text_code_points(lambda code: code != 0x41)
+        self.assertEqual(caught.exception.reason, "latin-mapping-invalid")
 
     def test_korean_set_is_codec_derived_and_gowun_covers_every_assigned_point(self) -> None:
         points = ttf2pgf.ks_x_1001_korean_code_points()
@@ -1169,6 +1553,119 @@ class ReaderRoundTripTests(unittest.TestCase):
         )
         self.assertTrue(any(glyph.samples), "the composite glyph has ink")
 
+    def _vertical_fields(self, conversion: ttf2pgf.Conversion, probe: list[int]) -> dict[int, dict[str, int]]:
+        """The character information's 26.6 metrics (0x10-0x37) the reader returns for each drawn code."""
+        lines = self._read_back(conversion.image, probe)
+        self.assertEqual(lines[0], "open ok")
+        names = ("width", "height", "ascender", "descender", "bearing_hx", "bearing_hy", "bearing_vx",
+                 "bearing_vy", "advance_h", "advance_v")
+        fields = {}
+        for index, code in enumerate(probe):
+            char_line = lines[2 + index * 2].split(" ")
+            self.assertEqual(char_line[2], "1", f"U+{code:04X} presence")
+            fields[code] = dict(zip(names, struct.unpack_from("<10i", bytes.fromhex(char_line[3]), 0x10), strict=True))
+        return fields
+
+    def test_vertical_fields_follow_the_console_rule(self) -> None:
+        """#1300 (rule 16): the stand-ins wrote vertical bearing X as the box's left edge plus half
+        the advance, vertical bearing Y as the box's top and a vertical advance of 0. Every console
+        font centres the box on the vertical origin (bearing X minus half the width); its vertical
+        advance is a fraction of the em; its Latin and Korean fonts put each glyph's bearing Y at the
+        margin between that advance and the ascender-to-descender height, and its Japanese font at
+        the distance from 0.88 em above the baseline down to the glyph's top."""
+        data = FONT.read_bytes()
+        pin = load_pin(PIN, data)
+        probe = [0x48, 0x67, 0x2E, 0x69, 0x2D]
+        common = {"input_path": str(FONT), "output_path": "converted.pgf", "codes": DEFAULT_CODES, "ppem": 20,
+                  "pin": pin, "nominal_size_26_6": 648, "resolution_26_6": 8192}
+        # The em is 10.125 points at 128 dpi: 18 px, 1152 in 26.6. Without an option the vertical
+        # advance is one em and bearing Y the margin above the ascender.
+        plain = convert(data, **common, header_ascender_26_6=863, header_descender_26_6=-196)
+        for code, info in self._vertical_fields(plain, probe).items():
+            with self.subTest(rule="default", code=f"U+{code:04X}"):
+                self.assertEqual(info["bearing_vx"], -(info["width"] // 2))
+                self.assertEqual(info["advance_v"], 1152)
+                self.assertEqual(info["bearing_vy"], (1152 - (863 + 196)) // 2)
+        latin = convert(data, **common, header_ascender_26_6=863, header_descender_26_6=-196,
+                        vertical_advance=950)
+        for code, info in self._vertical_fields(latin, probe).items():
+            with self.subTest(rule="margin", code=f"U+{code:04X}"):
+                self.assertEqual(info["bearing_vx"], -(info["width"] // 2))
+                self.assertEqual(info["advance_v"], 1094, "950/1000 of 1152, rounded")
+                self.assertEqual(info["bearing_vy"], (1094 - (863 + 196)) // 2)
+        self.assertEqual(struct.unpack_from("<i", latin.image, 0xF0)[0], 1094, "header vertical advance")
+        self.assertEqual(latin.manifest["parameters"]["vertical_advance_thousandths"], 950)
+
+        ideographic = convert(data, **common, vertical_origin=880)
+        for code, info in self._vertical_fields(ideographic, probe).items():
+            with self.subTest(rule="origin", code=f"U+{code:04X}"):
+                self.assertEqual(info["bearing_vx"], -(info["width"] // 2))
+                self.assertEqual(info["advance_v"], 1152, "the default is one em")
+                self.assertEqual(info["bearing_vy"], 1014 - info["bearing_hy"], "880/1000 of 1152 is 1013.76")
+        self.assertEqual(ideographic.manifest["parameters"]["vertical_origin_thousandths"], 880)
+        self.assertNotIn("vertical_advance_thousandths", ideographic.manifest["parameters"])
+
+    def _render(self, conversion: ttf2pgf.Conversion, text: str) -> dict[tuple[int, int], int]:
+        """Draw ``text`` from what the reader returns: each bitmap at the pen plus its bitmap left
+        and top (CharInfo 0x08 and 0x0C), the pen moved by the advance. Keys are pixels (x right,
+        y down from the baseline); a pixel left blank is absent."""
+        glyphs = _glyph_map(conversion.glyphs)
+        codes = sorted({ord(char) for char in text})
+        lines = self._read_back(conversion.image, codes)
+        self.assertEqual(lines[0], "open ok")
+        records = lines[2:]
+        bitmaps: dict[int, tuple[int, int, int, int, int, bytes]] = {}
+        for index, code in enumerate(codes):
+            char_line = records[index * 2].split(" ")
+            draw_line = records[index * 2 + 1].split(" ")
+            if char_line[2] == "0":  # a zero-area glyph: only its advance
+                self.assertEqual(draw_line[4], "skipped", f"U+{code:04X}")
+                bitmaps[code] = (0, 0, 0, 0, cast(int, glyphs[code].advance_x), b"")
+                continue
+            info = bytes.fromhex(char_line[3])
+            width, height, left, top = struct.unpack_from("<IIii", info, 0x00)
+            advance = struct.unpack_from("<i", info, 0x30)[0]
+            bitmaps[code] = (width, height, left, top, advance, bytes.fromhex(draw_line[4]))
+        canvas: dict[tuple[int, int], int] = {}
+        pen = 0
+        for char in text:
+            width, height, left, top, advance, samples = bitmaps[ord(char)]
+            for row in range(height):
+                for column in range(width):
+                    sample = samples[row * width + column]
+                    if sample:
+                        pixel = ((pen >> 6) + left + column, row - top)
+                        canvas[pixel] = canvas.get(pixel, 0) + sample
+            pen += advance
+        return canvas
+
+    def test_ink_trim_draws_every_pixel_where_it_was(self) -> None:
+        """#1300, rule 15: each image is cut to its inked columns and rows and its bitmap left and
+        top move with the cut, so a string placed by advance draws the same pixels as before."""
+        data = FONT.read_bytes()
+        liberation = (LIBERATION_DIR / "LiberationSans-Regular.ttf").read_bytes()
+        cases = {
+            "plain": lambda: self._convert(),
+            "emboldened": lambda: convert(
+                data, input_path=str(FONT), output_path="converted.pgf", codes=DEFAULT_CODES, ppem=13,
+                pin=load_pin(PIN, data), embolden_x=4, embolden_y=4, embolden_advance=2, tracking=-2),
+            "scaled": lambda: convert(
+                liberation, input_path="LiberationSans-Regular.ttf", output_path="converted.pgf",
+                codes=DEFAULT_CODES, ppem=13, pin=load_pin(LIBERATION_DIR / "LiberationSans-Regular.pin.json",
+                                                           liberation),
+                scale_x=1080, embolden_y=4, snap_overshoot=3, digit_advance_26_6=571),
+        }
+        text = "The quick brown fox jumps over the lazy dog. NEW GAME 0123456789 {|}~ Reload? No save data found."
+        for name, make in cases.items():
+            with self.subTest(case=name):
+                trimmed = make()
+                with mock.patch.object(ttf2pgf, "_trim_to_ink", _untrimmed):
+                    whole = make()
+                self.assertNotEqual(trimmed.image, whole.image, "the trim changed no image")
+                before = self._render(whole, text)
+                self.assertTrue(before)
+                self.assertEqual(self._render(trimmed, text), before)
+
     def test_a_second_read_is_identical(self) -> None:
         conversion = self._convert()
         codes = [0x41, 0x67, 0x20]
@@ -1319,8 +1816,11 @@ class EmboldenTests(CliRefusalMixin):
         )
 
     def test_strokes_thicken_rightwards_and_upwards_without_moving_the_baseline(self) -> None:
-        plain = _glyph_map(self._convert().glyphs)
-        bold = _glyph_map(self._convert(embolden_x=6, embolden_y=4, embolden_advance=3).glyphs)
+        # Rule 10 grows the raster box; rule 15 then cuts each image to its ink, which this test
+        # leaves out so that it sees the box (InkTrimTests covers the cut).
+        with mock.patch.object(ttf2pgf, "_trim_to_ink", _untrimmed):
+            plain = _glyph_map(self._convert().glyphs)
+            bold = _glyph_map(self._convert(embolden_x=6, embolden_y=4, embolden_advance=3).glyphs)
         for code in range(self.CODES[0], self.CODES[1] + 1):
             before, after = plain[code], bold[code]
             if before.width == 0:
@@ -1415,7 +1915,8 @@ _CONVERT_FLAGS = {
     "--embolden-advance": "embolden_advance", "--nominal-size": "nominal_size_26_6",
     "--resolution": "resolution_26_6", "--header-ascender": "header_ascender_26_6",
     "--header-descender": "header_descender_26_6", "--tracking": "tracking",
-    "--digit-advance": "digit_advance_26_6", "--snap-overshoot": "snap_overshoot",
+    "--digit-advance": "digit_advance_26_6", "--snap-overshoot": "snap_overshoot", "--scale-x": "scale_x",
+    "--vertical-advance": "vertical_advance", "--vertical-origin": "vertical_origin",
 }
 
 
@@ -1425,6 +1926,16 @@ def _convert_arguments(tokens: list[str]) -> dict:
     if "--baseline-ellipsis" in tokens:
         tokens.remove("--baseline-ellipsis")
         arguments["baseline_ellipsis"] = True
+    if "--fit-em" in tokens:
+        tokens.remove("--fit-em")
+        arguments["fit_em"] = True
+    if "--horizontal-metrics" in tokens:
+        at = tokens.index("--horizontal-metrics")
+        path = tokens[at + 1].replace("$(PSP_MEASURED_LATIN_METRICS)", _makefile_flags("PSP_MEASURED_LATIN_METRICS")[0])
+        slot_at = tokens.index("--horizontal-metrics-slot")
+        arguments["horizontal_metrics"] = ttf2pgf.load_horizontal_metrics(ROOT / path, tokens[slot_at + 1])
+        for index in sorted((at, slot_at), reverse=True):
+            del tokens[index:index + 2]
     for flag, value in zip(tokens[0::2], tokens[1::2], strict=True):
         arguments[_CONVERT_FLAGS[flag]] = int(value)
     return arguments
@@ -1483,11 +1994,11 @@ class ProjectLatinStrikeTests(unittest.TestCase):
             strike = "PROJECT_LATIN_STRIKE_ARGS" if index < 8 else "PROJECT_LATIN_SMALL_STRIKE_ARGS"
             tokens = _makefile_flags(strike) + _makefile_flags(f"PROJECT_LATIN_{index}_SPACING")
             stem, style = cls._face(index)
-            data = (LIBERATION_DIR / f"{stem}.ttf").read_bytes()
+            # Geist draws every code of CODES, so the Geist faces need no fallback here.
+            data, pin = _latin_source(stem)
             cls._cache[index] = convert(
                 data, input_path=f"{stem}.ttf", output_path="nkltn.pgf", code_points=_code_set(cls.CODES),
-                font_name="Nakagawa Open Latin", font_type=style,
-                pin=load_pin(LIBERATION_DIR / f"{stem}.pin.json", data), **_convert_arguments(tokens))
+                font_name="Nakagawa Open Latin", font_type=style, pin=pin, **_convert_arguments(tokens))
         return cls._cache[index]
 
     @staticmethod
@@ -1518,6 +2029,13 @@ class ProjectLatinStrikeTests(unittest.TestCase):
                 conversion = self._convert(index)
                 field = conversion.image[0x75:0x75 + 64].split(b"\0", 1)[0].decode("ascii")
                 self.assertEqual(field, LATIN_FACES[index % 8][1])
+                # #1300, rule 16: the console's vertical advance, 0.950 em of the larger size (18 px)
+                # and 0.917 em of the smaller (7 points at 128 dpi), and the margin above the
+                # ascender as every glyph's vertical bearing Y.
+                advance_y, margin = (1094, 17) if index < 8 else (730, 11)
+                self.assertEqual(struct.unpack_from("<i", conversion.image, 0xF0)[0], advance_y)
+                for glyph in conversion.glyphs:
+                    self.assertEqual((glyph.advance_y, glyph.y_top), (advance_y, margin))
 
     def test_each_index_meets_the_console_line_widths(self) -> None:
         for index, (sentence, menu) in enumerate(self.LINES):
@@ -1560,8 +2078,22 @@ class ProjectLatinStrikeTests(unittest.TestCase):
                 ink = sum(sum(glyphs[code].samples) for code in letters) / 15 / len(letters)
                 self.assertLessEqual(abs(ink - target) / target, 0.02, f"ink per letter {ink:.1f}")
 
+    def test_sans_faces_set_the_console_x_height_and_cap_height_rows(self) -> None:
+        """#1300: the sans-serif faces' --embolden-y thickened strokes upwards far enough that the
+        x-height and cap height of the bold faces of both sizes, and the x-height of the smaller
+        regular face, came out one row above the console's, so game text looked taller and
+        narrower than the console's. Each sans face now tops x and H on the console rows of
+        ``INK`` (shared by every sans face of a size); the parameters were tuned against a
+        private comparison with the console's own fonts."""
+        for index in (0, 2, 4, 6, 8, 10, 12, 14):
+            _nominal, _ascender, _descender, x_height, cap, _drop, _stem = self.INK[0 if index < 8 else 8]
+            with self.subTest(index=index):
+                glyphs = _glyph_map(self._convert(index).glyphs)
+                self.assertEqual(self._ink_rows(glyphs[ord("x")])[0], x_height, "x-height row")
+                self.assertEqual(self._ink_rows(glyphs[ord("H")])[0], cap, "cap-height row")
+
     def test_the_ellipsis_sits_on_the_line_of_the_full_stop(self) -> None:
-        # No strike passes --baseline-ellipsis: every Liberation face already draws U+2026 there.
+        # No strike passes --baseline-ellipsis: every Geist and Liberation face already draws U+2026 there.
         for index in range(16):
             with self.subTest(index=index):
                 glyphs = _glyph_map(self._convert(index).glyphs)
@@ -1590,11 +2122,136 @@ class ProjectLatinStrikeTests(unittest.TestCase):
                 arguments = _convert_arguments(_makefile_flags(strike) + _makefile_flags(f"PROJECT_LATIN_{index}_SPACING"))
                 self.assertEqual(arguments.pop("snap_overshoot"), 3)
                 stem, style = self._face(index)
-                data = (LIBERATION_DIR / f"{stem}.ttf").read_bytes()
+                data = _latin_source(stem)[0]
                 plain = convert(data, input_path=f"{stem}.ttf", output_path="nkltn.pgf",
                                 code_points=_code_set({ord("l")} | set(range(0x30, 0x3A))), font_type=style,
                                 **arguments)
                 self.assertEqual(glyphs[ord("l")], _glyph_map(plain.glyphs)[ord("l")])
+
+
+class LatinSourceCreditTests(unittest.TestCase):
+    """#1300: every source face the build converts into a Latin stand-in, its fallback face included,
+    is credited where the project credits font sources: the family, its Reserved Font Names, and
+    for the Google Fonts faces the pinned revision; and it is an approved pinned binary of the
+    release manifest with its digest."""
+
+    @staticmethod
+    def _sources() -> set[str]:
+        stems = set()
+        for group in range(8):
+            stems.add(_makefile_flags(f"PROJECT_LATIN_{group}_FACE")[0])
+            if re.search(rf"^PROJECT_LATIN_{group}_FALLBACK := ", read_makefile(ROOT), re.MULTILINE):
+                stems.add(_makefile_flags(f"PROJECT_LATIN_{group}_FALLBACK")[0])
+        return stems
+
+    def test_the_build_uses_geist_with_liberation_sans_fallbacks(self) -> None:
+        sources = self._sources()
+        self.assertTrue({"Geist-Regular", "Geist-SemiBold", "LiberationSans-Regular", "LiberationSans-Bold"} <= sources)
+        readme = (ROOT / "font" / "README.md").read_text(encoding="utf-8").splitlines()
+        for stem, fallback in LATIN_FALLBACKS.items():
+            group = next(index for index, (face, _style) in enumerate(LATIN_FACES) if face == stem)
+            self.assertEqual(_makefile_flags(f"PROJECT_LATIN_{group}_FALLBACK"), [fallback])
+            # font/README.md's "Made from" column names the face and its fallback for the file.
+            output = "nkltn.pgf" if group == 0 else f"nkltn{group}.pgf"
+            row = next(line for line in readme if line.startswith(f"| `{output}`") or f", `{output}` |" in line)
+            self.assertIn(stem.replace("-", " "), row)
+            self.assertIn(fallback.split("-")[0].replace("Sans", " Sans"), row)
+
+    def test_every_latin_source_is_credited_and_an_approved_binary(self) -> None:
+        texts = {path: (ROOT / path).read_text(encoding="utf-8") for path in (
+            "CREDITS.md", "NOTICE.md", "docs/provenance/FONT_ORIGINS.md", "font/README.md",
+            "tests/fixtures/fonts/README.md")}
+        components = {item["source_path"]: item for item in json.loads(
+            (ROOT / "assets" / "release_manifest.json").read_text(encoding="utf-8"))["components"]
+            if "source_path" in item}
+        for stem in sorted(self._sources()):
+            with self.subTest(face=stem):
+                data, pin = _latin_source(stem)
+                family = pin.family
+                assert family is not None
+                for path, text in texts.items():
+                    self.assertRegex(text, rf"\b{re.escape(family)}\b", f"{path} names {family}")
+                for path in ("CREDITS.md", "NOTICE.md"):
+                    for name in pin.reserved_font_names:
+                        self.assertIn(name, texts[path], f"{path} names the Reserved Font Name {name}")
+                self.assertIn(pin.sha256, texts["docs/provenance/FONT_ORIGINS.md"])
+                if pin.source.get("repository") == "https://github.com/google/fonts":
+                    revision = pin.source["commit"]
+                    for path in ("CREDITS.md", "NOTICE.md", "docs/provenance/FONT_ORIGINS.md"):
+                        self.assertIn(revision, texts[path], f"{path} gives the pinned revision")
+                relative = (_latin_dir(stem) / f"{stem}.ttf").relative_to(ROOT).as_posix()
+                component = components.get(relative)
+                self.assertIsNotNone(component, f"assets/release_manifest.json lists {relative}")
+                assert component is not None
+                self.assertEqual(component["disposition"], "approved_binary")
+                self.assertEqual(component["license"], pin.spdx)
+                self.assertEqual(component["notice_path"], (_latin_dir(stem) / "OFL.txt").relative_to(ROOT).as_posix())
+                self.assertEqual(component["hashes"]["sha256"], hashlib.sha256(data).hexdigest())
+
+
+class InkTrimTests(unittest.TestCase):
+    """Specification section 3 rule 15 (#1300): the console's glyph images are cut to their ink in
+    both directions, and a game that places the next glyph one pixel after the image's right edge
+    (Hot Shots Tennis does) spaced the stand-ins' text by their blank columns too. Every image is now
+    tight; the advances are those of the raster box."""
+
+    @staticmethod
+    def _conversions() -> dict[str, ttf2pgf.Conversion]:
+        data = FONT.read_bytes()
+        found = {
+            "fixture": convert(data, input_path=str(FONT), output_path="converted.pgf", codes=DEFAULT_CODES,
+                               ppem=PPEM_SHAPE, pin=load_pin(PIN, data)),
+            "fixture-emboldened": convert(data, input_path=str(FONT), output_path="converted.pgf",
+                                          codes=DEFAULT_CODES, ppem=13, pin=load_pin(PIN, data),
+                                          embolden_x=8, embolden_y=8, embolden_advance=2),
+        }
+        for index in range(16):
+            found[f"latin-{index}"] = ProjectLatinStrikeTests._convert(index)
+        return found
+
+    def test_no_image_has_an_empty_edge_column_or_row(self) -> None:
+        for name, conversion in self._conversions().items():
+            with self.subTest(conversion=name):
+                loose: list[str] = []
+                # Rule 18 pads an image its outline cannot fill to the console's measured width with
+                # blank columns, which HorizontalMetricsTests checks; its rows stay tight.
+                record = conversion.manifest["parameters"].get("horizontal_metrics", {})
+                padded = set(record.get("width_padded_codes", []))
+                for glyph in conversion.glyphs:
+                    width, height, samples = glyph.width, glyph.height, glyph.samples
+                    if width == 0 or height == 0:
+                        self.assertEqual((width, height, samples), (0, 0, ()), f"U+{glyph.code:04X}")
+                        continue
+                    edges = {
+                        "first column": samples[0::width],
+                        "last column": samples[width - 1::width],
+                        "first row": samples[:width],
+                        "last row": samples[-width:],
+                    }
+                    if glyph.code in padded:
+                        del edges["first column"], edges["last column"]
+                    loose += [f"U+{glyph.code:04X} {edge}" for edge, line in edges.items() if not any(line)]
+                self.assertEqual(loose, [], f"{len(loose)} empty image edges")
+
+    def test_the_trim_keeps_every_advance(self) -> None:
+        data = FONT.read_bytes()
+        for embolden in (0, 8):
+            with self.subTest(embolden=embolden):
+                def make(strength: int = embolden) -> ttf2pgf.Conversion:
+                    return convert(data, input_path=str(FONT), output_path="converted.pgf", codes=DEFAULT_CODES,
+                                   ppem=13, pin=load_pin(PIN, data), embolden_x=strength, embolden_y=strength,
+                                   tracking=3)
+                trimmed = make()
+                with mock.patch.object(ttf2pgf, "_trim_to_ink", _untrimmed):
+                    whole = make()
+                self.assertEqual([(glyph.code, glyph.advance_x, glyph.advance_y) for glyph in trimmed.glyphs],
+                                 [(glyph.code, glyph.advance_x, glyph.advance_y) for glyph in whole.glyphs])
+                # The header's nominal size (0x24, 0x28) and advance maxima (0xEC, 0xF0) as well.
+                for offset in (0x24, 0x28, 0xEC, 0xF0):
+                    self.assertEqual(struct.unpack_from("<i", trimmed.image, offset),
+                                     struct.unpack_from("<i", whole.image, offset), hex(offset))
+                trimmed_space = _glyph_map(trimmed.glyphs)[0x20]
+                self.assertEqual((trimmed_space.width, trimmed_space.height, trimmed_space.samples), (0, 0, ()))
 
 
 class OvershootSnapTests(CliRefusalMixin):
@@ -1672,7 +2329,7 @@ class OvershootSnapTests(CliRefusalMixin):
 
     def test_the_option_is_recorded_and_absent_when_off(self) -> None:
         conversion = self._convert(13, snap_overshoot=3)
-        self.assertEqual(conversion.manifest["converter"]["version"], "0.5.0")
+        self.assertEqual(conversion.manifest["converter"]["version"], "0.10.0")
         self.assertEqual(conversion.manifest["parameters"]["snap_overshoot"], {
             "unit": "sub-sample (1/8 pixel)", "threshold": 3,
             "zones": {"baseline": 0, "x_height": 1082, "cap_height": 1409},
@@ -1739,9 +2396,12 @@ class ProjectCjkSizeTests(unittest.TestCase):
                                    font_name="Nakagawa Open Japanese")
         self.assertEqual(struct.unpack_from("<iiii", conversion.image, 0x24), (648, 648, 8192, 8192))
         self.assertEqual(struct.unpack_from("<ii", conversion.image, 0xD4), (1013, -139))
+        # #1300, rule 16: one em down, from an origin 0.88 em above the baseline.
+        self.assertEqual(struct.unpack_from("<i", conversion.image, 0xF0)[0], 18 * 64)
         for glyph in conversion.glyphs:
             with self.subTest(code=f"U+{glyph.code:04X}"):
                 self.assertEqual(glyph.advance_x, 18 * 64)
+                self.assertEqual((glyph.advance_y, glyph.y_top), (18 * 64, 1014 - cast(int, glyph.y_base)))
 
     def test_korean_font_is_set_at_ten_point_one_two_five(self) -> None:
         hangul = set(ttf2pgf.ks_x_1001_korean_code_points().codes) & set(range(0xAC00, 0xD7A4))
@@ -1750,8 +2410,47 @@ class ProjectCjkSizeTests(unittest.TestCase):
                                    font_name="Nakagawa Open Korean")
         self.assertEqual(struct.unpack_from("<iiii", conversion.image, 0x24), (648, 648, 8192, 8192))
         self.assertEqual(struct.unpack_from("<ii", conversion.image, 0xD4), (1000, -250))
+        # #1300, rule 16: 1.185 em down, bearing Y at the margin above the ascender.
+        self.assertEqual({(glyph.advance_y, glyph.y_top) for glyph in conversion.glyphs}, {(1365, 57)})
         average = sum(cast(int, glyph.advance_x) for glyph in conversion.glyphs) / 64 / len(conversion.glyphs)
         self.assertLessEqual(abs(average - 18.356), 0.25)
+
+    def test_korean_glyphs_wider_than_the_em_fit_it(self) -> None:
+        """#1300, rule 17: the console's Korean font draws every glyph within its full-width cell, and
+        LocoRoco 2 lays out its prompt from the header's maximum glyph sizes. Gowun Dodum draws the
+        circled and parenthesized characters, the squared units and the telephone sign of KS X 1001
+        wider than the em (U+3392 34 px at 20 ppem); --fit-em narrows them to the em, so the header's maxima stay
+        within the em, and leaves every narrower glyph as it was."""
+        self.assertIn("--fit-em", _makefile_flags("PROJECT_KOREAN_FONT_ARGS"))
+        korean = set(ttf2pgf.ks_x_1001_korean_code_points().codes)
+        wide = {code for code in korean if code >> 8 in (0x21, 0x24, 0x25, 0x32, 0x33)}
+        sample = wide | {0xAC00, 0xD55C, 0x3000, 0x41}
+        data = KOREAN_FONT.read_bytes()
+        fitted = self._convert("PROJECT_KOREAN_FONT_ARGS", data, sample, font_name="Nakagawa Open Korean")
+        plain = self._convert("PROJECT_KOREAN_FONT_ARGS", data, sample, font_name="Nakagawa Open Korean",
+                              fit_em=False)
+        em = 20 * 64
+        tracking = 1 * 8  # --tracking 1, one sub-sample in 26.6
+        max_w, max_h = struct.unpack_from("<ii", fitted.image, 0xF4)
+        glyph_w, _glyph_h = struct.unpack_from("<HH", fitted.image, 0xFC)
+        self.assertLessEqual(max_w, em)
+        self.assertLessEqual(glyph_w, 20)
+        self.assertGreater(struct.unpack_from("<i", plain.image, 0xF4)[0], em, "the fixture has glyphs wider than the em")
+        before = {glyph.code: glyph for glyph in plain.glyphs}
+        narrowed = fitted.manifest["parameters"]["fit_em"]["codes"]
+        self.assertIn(0x3392, narrowed)
+        for glyph in fitted.glyphs:
+            with self.subTest(code=f"U+{glyph.code:04X}"):
+                self.assertLessEqual(cast(int, glyph.advance_x), em + tracking)
+                self.assertLessEqual(glyph.width, 20)
+                if glyph.code not in narrowed:
+                    self.assertEqual(glyph, before[glyph.code], "a glyph within the em is unchanged")
+                else:
+                    self.assertLess(cast(int, glyph.advance_x), cast(int, before[glyph.code].advance_x))
+                    # Only the width is scaled; a row whose ink was a sliver can fall under the
+                    # coverage threshold and be trimmed (rule 15), so the height may lose one row.
+                    self.assertIn(before[glyph.code].height - glyph.height, (0, 1))
+        self.assertNotIn("fit_em", plain.manifest["parameters"])
 
 
 class SpacingAndFallbackOptionTests(CliRefusalMixin):
@@ -1812,6 +2511,61 @@ class SpacingAndFallbackOptionTests(CliRefusalMixin):
                 self.assertEqual(glyphs[code].adjust_x, direct[code].adjust_x)
                 self.assertEqual(glyphs[code].samples, direct[code].samples)
 
+    def test_scale_x_widens_outlines_and_advances_only_and_is_recorded(self) -> None:
+        """#1300: ``--scale-x`` (spec section 3, rule 14) scales x in font units before rule 1."""
+        plain = self._convert()
+        self.assertNotIn("scale_x_thousandths", plain.manifest["parameters"])
+        neutral = self._convert(scale_x=ttf2pgf.SCALE_X_NEUTRAL)
+        self.assertEqual(neutral.image, plain.image, "1000 is byte-identical to no option")
+        wide = self._convert(scale_x=1200)
+        self.assertEqual(wide.manifest["parameters"]["scale_x_thousandths"], 1200)
+        font = ttf2pgf._Ttf(self.data)
+        before, after = _glyph_map(plain.glyphs), _glyph_map(wide.glyphs)
+        for code, glyph in after.items():
+            with self.subTest(code=hex(code)):
+                units = font.advance_units(cast(int, font.glyph_id(code)))
+                self.assertEqual(glyph.advance_x,
+                                 ttf2pgf._to26_6(Fraction(units * 1200, 1000), 13, font.units_per_em))
+                # Rows are untouched: same top row and height.
+                self.assertEqual((glyph.adjust_y, glyph.height), (before[code].adjust_y, before[code].height))
+        h_plain, h_wide = before[0x48], after[0x48]
+        self.assertGreater(h_wide.width, h_plain.width)
+        self.assertGreater(sum(h_wide.samples), sum(h_plain.samples))
+        self.assertEqual(self._convert(scale_x=1200).image, wide.image, "deterministic")
+
+    def test_scale_x_cli_matches_the_api_and_misuse_is_refused(self) -> None:
+        output = self.tmp / "wide.pgf"
+        result = _cli(output, FONT, "--codes", "0x30-0x48", "--ppem", "13", "--scale-x", "1080")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(output.read_bytes(), self._convert(scale_x=1080, pin=None, output_path=str(output)).image)
+        for value in (ttf2pgf.MIN_SCALE_X - 1, ttf2pgf.MAX_SCALE_X + 1, True):
+            with self.subTest(value=value), self.assertRaises(TtfConvertError) as caught:
+                self._convert(scale_x=value)
+            self.assertEqual(caught.exception.reason, "scale-x-out-of-range")
+        self.assert_cli_refused("scale-x-out-of-range", self.tmp / "out.pgf", FONT, "--codes", "0x48-0x48",
+                                "--scale-x", "1251")
+
+    def test_vertical_options_cli_match_the_api_and_misuse_is_refused(self) -> None:
+        output = self.tmp / "vertical.pgf"
+        result = _cli(output, FONT, "--codes", "0x30-0x48", "--ppem", "13", "--vertical-advance", "917",
+                      "--vertical-origin", "880")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            output.read_bytes(),
+            self._convert(vertical_advance=917, vertical_origin=880, pin=None, output_path=str(output)).image,
+        )
+        for kwargs in (
+            {"vertical_advance": ttf2pgf.MIN_VERTICAL - 1},
+            {"vertical_advance": ttf2pgf.MAX_VERTICAL + 1},
+            {"vertical_origin": ttf2pgf.MIN_VERTICAL - 1},
+            {"vertical_origin": True},
+        ):
+            with self.subTest(**kwargs), self.assertRaises(TtfConvertError) as caught:
+                self._convert(**kwargs)
+            self.assertEqual(caught.exception.reason, "vertical-metric-out-of-range")
+        self.assert_cli_refused("vertical-metric-out-of-range", self.tmp / "out.pgf", FONT, "--codes", "0x48-0x48",
+                                "--vertical-advance", "0")
+
     def test_spacing_options_out_of_range_are_refused(self) -> None:
         for kwargs, reason in (
             ({"tracking": ttf2pgf.MAX_TRACKING + 1}, "tracking-out-of-range"),
@@ -1862,6 +2616,163 @@ class SpacingAndFallbackOptionTests(CliRefusalMixin):
         font = ttf2pgf._Ttf(NOTO_JP_FONT.read_bytes())
         self.assertIsNotNone(font.glyph_id(0x4E00))
         self.assertNotIn("STAT", ttf2pgf.VARIABLE_FONT_TABLES)
+
+
+class HorizontalMetricsTests(CliRefusalMixin):
+    """Spec section 3 rule 18 (#1300): the Geist stand-ins take each character's advance, image width
+    and left from the console's own Latin fonts, while every letter keeps Geist's outline.
+
+    The table assets/fonts/psp_measured_latin_metrics.json holds those three numbers per character and
+    nothing else. They are PSP-measured: read from the Latin fonts ltn0, ltn4, ltn8 and ltn12 of
+    the maintainer's own PSP-3000 (firmware 6.61) through the project's PGF reader, as the
+    sceFontGetCharInfo fields sfp26AdvanceH, bitmapWidth and bitmapLeft. None of them is
+    PPSSPP-derived; a table that were would have to say "PPSSPP-derived, not PSP-measured".
+    """
+
+    TABLE = ROOT / "assets" / "fonts" / "psp_measured_latin_metrics.json"
+
+    def setUp(self) -> None:
+        self.data = FONT.read_bytes()
+        self.pin = load_pin(PIN, self.data)
+        self.tmp = Path(tempfile.mkdtemp(prefix="ttf2pgf-metrics-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _table(self, slot_values: dict[str, list], **overrides: object) -> Path:
+        document: dict = {
+            "schema": ttf2pgf.HORIZONTAL_METRICS_SCHEMA,
+            "evidence": "PSP-measured",
+            "fields": [{"name": name} for name in ttf2pgf.HORIZONTAL_METRICS_FIELDS],
+            "slots": {"ltn0": slot_values},
+        }
+        document.update(overrides)
+        path = self.tmp / "metrics.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        return path
+
+    def _convert(self, table: ttf2pgf.HorizontalMetrics | None = None) -> ttf2pgf.Conversion:
+        return convert(self.data, input_path=str(FONT), output_path="out.pgf", codes=(0x41, 0x5A), ppem=16,
+                       pin=self.pin, tracking=5, horizontal_metrics=table)
+
+    def test_the_published_table_is_labelled_psp_measured_and_holds_only_the_three_numbers(self) -> None:
+        document = json.loads(self.TABLE.read_text(encoding="utf-8"))
+        self.assertEqual(set(document), {"schema", "evidence", "description", "measurement", "fields", "slots"})
+        self.assertEqual(document["schema"], "nk-psp-horizontal-metrics/v1")
+        self.assertEqual(document["evidence"], "PSP-measured")
+        self.assertIn("None comes from PPSSPP", document["description"])
+        measurement = document["measurement"]
+        self.assertEqual((measurement["device"], measurement["firmware"]), ("PSP-3000", "6.61"))
+        self.assertEqual(measurement["fonts"], {f"ltn{i}": f"flash0:/font/ltn{i}.pgf" for i in (0, 4, 8, 12)})
+        self.assertEqual([(field["name"], field["char_info_field"]) for field in document["fields"]], [
+            ("advance_h_26_6", "sfp26AdvanceH"), ("bitmap_width", "bitmapWidth"), ("bitmap_left", "bitmapLeft"),
+        ])
+        self.assertEqual(set(document["slots"]), {"ltn0", "ltn4", "ltn8", "ltn12"})
+        codes = set(document["slots"]["ltn0"])
+        for slot in document["slots"]:
+            with self.subTest(slot=slot):
+                table = ttf2pgf.load_horizontal_metrics(self.TABLE, slot)
+                self.assertEqual(table.evidence, "PSP-measured")
+                self.assertEqual(set(document["slots"][slot]), codes)
+                self.assertIn(ord("A"), table.values)
+                for values in table.values.values():
+                    self.assertEqual(len(values), 3)
+
+    def test_each_geist_face_takes_the_measured_advance_width_and_left(self) -> None:
+        for index, slot in ((0, "ltn0"), (4, "ltn4"), (8, "ltn8"), (12, "ltn12")):
+            with self.subTest(index=index):
+                tokens = _makefile_flags(f"PROJECT_LATIN_{index}_SPACING")
+                self.assertEqual(tokens[tokens.index("--horizontal-metrics-slot") + 1], slot)
+                conversion = ProjectLatinStrikeTests._convert(index)
+                record = conversion.manifest["parameters"]["horizontal_metrics"]
+                self.assertEqual((record["path"], record["slot"], record["evidence"]),
+                                 (self.TABLE.name, slot, "PSP-measured"))
+                self.assertEqual(record["sha256"], hashlib.sha256(self.TABLE.read_bytes()).hexdigest())
+                measured = ttf2pgf.load_horizontal_metrics(self.TABLE, slot).values
+                wider = set(record["width_not_met_codes"])
+                glyphs = _glyph_map(conversion.glyphs)
+                checked = [code for code in glyphs if code in measured]
+                self.assertEqual(len(checked), record["codes_applied"])
+                for code in checked:
+                    advance, width, left = measured[code]
+                    glyph = glyphs[code]
+                    self.assertEqual(glyph.advance_x, advance, f"U+{code:04X} advance")
+                    if width and glyph.width:
+                        self.assertEqual(glyph.adjust_x, left, f"U+{code:04X} left")
+                        if code not in wider:
+                            self.assertEqual(glyph.width, width, f"U+{code:04X} width")
+                # The alphabet meets the width except where the outline cannot narrow without moving
+                # a row (l); every miss is listed in the manifest, never hidden.
+                letters = {ord(c) for c in string.ascii_letters}
+                self.assertLessEqual(wider & letters, {ord("l")})
+
+    def test_measured_codes_take_the_table_and_others_keep_the_options(self) -> None:
+        plain = _glyph_map(self._convert().glyphs)
+        table = ttf2pgf.load_horizontal_metrics(self._table({
+            "U+0048": [700, plain[0x48].width, 2],  # H: its own width, so its own image, moved to left 2
+            "U+004F": [900, plain[0x4F].width + 2, 1],  # O: two pixels wider than drawn
+            "U+0020": [256, 0, 0],  # outside the converted range: ignored
+        }), "ltn0")
+        conversion = self._convert(table)
+        glyphs = _glyph_map(conversion.glyphs)
+        self.assertEqual((glyphs[0x48].advance_x, glyphs[0x48].adjust_x), (700, 2))
+        self.assertEqual(glyphs[0x48].samples, plain[0x48].samples, "the font's own image")
+        self.assertEqual((glyphs[0x4F].advance_x, glyphs[0x4F].width, glyphs[0x4F].adjust_x),
+                         (900, plain[0x4F].width + 2, 1))
+        self.assertEqual(glyphs[0x4F].height, plain[0x4F].height, "only the horizontal scale moves")
+        self.assertEqual(glyphs[0x41], plain[0x41], "a code the table lacks keeps --tracking and its image")
+        record = conversion.manifest["parameters"]["horizontal_metrics"]
+        self.assertEqual((record["codes"], record["codes_applied"], record["evidence"]), (3, 2, "PSP-measured"))
+        self.assertEqual(record["fields"], ["advance_h_26_6", "bitmap_width", "bitmap_left"])
+        self.assertIn("U+004F", record["width_factors"])
+        self.assertNotIn("horizontal_metrics", self._convert().manifest["parameters"])
+        self.assertEqual(conversion.manifest["converter"]["version"], "0.10.0")
+
+    def test_a_narrowed_glyph_keeps_the_rows_its_ink_reaches(self) -> None:
+        plain = _glyph_map(self._convert().glyphs)
+        table = ttf2pgf.load_horizontal_metrics(self._table(
+            {f"U+{code:04X}": [600, max(1, plain[code].width - 2), 0] for code in range(0x41, 0x5B)}), "ltn0")
+        glyphs = _glyph_map(self._convert(table).glyphs)
+
+        def rows(glyph: Glyph) -> tuple[int, int] | None:
+            found: tuple[int, int] | None = ttf2pgf._half_coverage_rows(
+                (0, cast(int, glyph.adjust_y), glyph.width, glyph.height, glyph.samples))
+            return found
+
+        for code in range(0x41, 0x5B):
+            with self.subTest(code=f"U+{code:04X}"):
+                self.assertEqual(rows(glyphs[code]), rows(plain[code]))
+
+    def test_an_image_its_outline_cannot_fill_is_padded_with_blank_columns(self) -> None:
+        image = (0, 5, 2, 2, (1, 2, 3, 4))
+        self.assertEqual(ttf2pgf._pad_columns(image, 5), (-1, 5, 5, 2, (0, 1, 2, 0, 0, 0, 3, 4, 0, 0)))
+
+    def test_malformed_tables_are_named_refusals(self) -> None:
+        good = {"U+0048": [700, 9, 1]}
+        cases: dict[str, tuple[dict[str, list], dict[str, object]]] = {
+            "schema": ({}, {"schema": "nk-psp-horizontal-metrics/v0"}),
+            "evidence": ({}, {"evidence": "guessed"}),
+            "fields": ({}, {"fields": [{"name": "advance_h_26_6"}]}),
+            "key": ({"0048": [700, 9, 1]}, {}),
+            "count": ({"U+0048": [700, 9]}, {}),
+            "type": ({"U+0048": [700, 9.5, 1]}, {}),
+            "range": ({"U+0048": [700, 400, 1]}, {}),
+            "empty-left": ({"U+0048": [700, 0, 3]}, {}),
+        }
+        for name, (values, overrides) in cases.items():
+            with self.subTest(case=name):
+                path = self._table(values or good, **overrides)
+                with self.assertRaises(TtfConvertError) as caught:
+                    ttf2pgf.load_horizontal_metrics(path, "ltn0")
+                self.assertEqual(caught.exception.reason, "horizontal-metrics-invalid")
+        with self.assertRaises(TtfConvertError) as caught:
+            ttf2pgf.load_horizontal_metrics(self._table(good), "ltn4")
+        self.assertEqual(caught.exception.reason, "horizontal-metrics-invalid")
+
+    def test_the_cli_needs_the_table_and_its_slot_together(self) -> None:
+        table = self._table({"U+0048": [700, 9, 1]})
+        self.assert_cli_refused("conflicting-parameters", self.tmp / "out.pgf", FONT, "--codes", "0x48-0x48",
+                                "--horizontal-metrics", table)
+        self.assert_cli_refused("horizontal-metrics-invalid", self.tmp / "out.pgf", FONT, "--codes", "0x48-0x48",
+                                "--horizontal-metrics", table, "--horizontal-metrics-slot", "ltn8")
 
 
 class NameDenylistTests(unittest.TestCase):
@@ -1955,24 +2866,25 @@ class VendorFontNameScanTests(unittest.TestCase):
     def test_tracked_source_names_no_vendor_font(self) -> None:
         if shutil.which("git") is None:
             self.skipTest("git is required to enumerate the tracked tree")
-        listing = subprocess.run(
-            ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, text=True, check=True,
+        raw_listing = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=True,
         ).stdout
         offenders: list[str] = []
-        for entry in sorted(filter(None, listing.split("\0"))):
+        unreadable: list[str] = []
+        for raw_entry in sorted(filter(None, raw_listing.split(b"\0"))):
+            entry = raw_entry.decode("utf-8", errors="surrogateescape")
             if entry.lower().endswith(".md"):
                 continue
             try:
                 data = (ROOT / entry).read_bytes()
-            except OSError:
+            except OSError as exc:
+                unreadable.append(f"{entry}: {exc}")
                 continue
             if b"\0" in data:
                 continue
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
+            text = data.decode("utf-8", errors="replace")
             offenders.extend(f"{entry}:{number}" for number in self._hit_lines(text))
+        self.assertEqual(unreadable, [], "every tracked file must be readable by the vendor font scan")
         self.assertEqual(offenders, [], "tracked source names a vendor font; use a project-owned name")
 
 

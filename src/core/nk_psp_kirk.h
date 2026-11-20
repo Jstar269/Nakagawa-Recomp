@@ -12,7 +12,8 @@
  * contract, run-time KeyStore threading (every command takes an NkPspCtx),
  * removal of the embedded key vault / fuse-ID / private-key operations, and
  * fail-closed refusal of key generation, signing, PRNG and encryption
- * commands.  No key material remains in this header.
+ * commands.  No key material remains in this header.  2026-11-18: CMD1, CMD4,
+ * CMD7 and CMD11 take the output size.
  */
 
 #ifndef NK_PSP_KIRK_H
@@ -152,20 +153,23 @@ typedef struct
  * key material is fetched from the KeyStore and a missing entry fails
  * closed with its exact name.  Commands that would need embedded private
  * material (0x0C keygen, 0x0E PRNG, 0x10 sign) or that package content
- * (0x00 encrypt) refuse with KIRK_INVALID_OPERATION.
+ * (0x00 encrypt) refuse with NK_PSP_ERR_UNSUPPORTED (negative), recorded in
+ * ctx's message. A command that writes output refuses an outsize smaller
+ * than what it writes with KIRK_INVALID_SIZE and writes nothing.
  */
-int kirk_CMD1(NkPspCtx *ctx, u8 *outbuff, u8 *inbuff, int size);
-int kirk_CMD4(NkPspCtx *ctx, u8 *outbuff, u8 *inbuff, int size);
-int kirk_CMD7(NkPspCtx *ctx, u8 *outbuff, u8 *inbuff, int size);
+int kirk_CMD1(NkPspCtx *ctx, u8 *outbuff, int outsize, u8 *inbuff, int size);
+int kirk_CMD4(NkPspCtx *ctx, u8 *outbuff, int outsize, u8 *inbuff, int size);
+int kirk_CMD7(NkPspCtx *ctx, u8 *outbuff, int outsize, u8 *inbuff, int size);
 int kirk_CMD10(NkPspCtx *ctx, u8 *inbuff, int insize);
-int kirk_CMD11(NkPspCtx *ctx, u8 *outbuff, u8 *inbuff, int size);
+int kirk_CMD11(NkPspCtx *ctx, u8 *outbuff, int outsize, u8 *inbuff, int size);
 int kirk_CMD12(NkPspCtx *ctx, u8 *outbuff, int outsize);
 int kirk_CMD13(NkPspCtx *ctx, u8 *outbuff, int outsize, u8 *inbuff, int insize);
 int kirk_CMD14(NkPspCtx *ctx, u8 *outbuff, int outsize);
 int kirk_CMD16(NkPspCtx *ctx, u8 *outbuff, int outsize, u8 *inbuff, int insize);
 int kirk_CMD17(NkPspCtx *ctx, u8 *inbuff, int insize);
 
-/* Load the KIRK CMD1 wrapping key from the KeyStore. */
+/* Check that ctx's KeyStore holds a usable KIRK CMD1 wrapping key. No
+ * state is kept: CMD1 and CMD10 read the key from their own ctx. */
 int kirk_init(NkPspCtx *ctx);
 
 /* overhead-free helpers (raw AES-CBC passes under a keyvault slot) */

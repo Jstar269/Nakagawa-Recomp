@@ -143,7 +143,11 @@ _Static_assert(SR_NESTED_FRAME_END <= SR_STACK_ARENA_FLOOR,
                "the runtime's stacks must lie below the thread-stack arena");
 _Static_assert(SR_VBLANK_STACK_TOP == SR_NESTED_FRAME_BASE,
                "the VBLANK reservation must end exactly at the nested-frame region base");
-#define SR_STACK_RANGE_MAX   (MAXTHREADS + 1)
+/* The arena's free ranges are disjoint and coalesced, so a live extent separates any two of them:
+ * there is at most one more range than live extents. The extents are the thread stacks (one per
+ * TCB, MAXTHREADS) and the user partition's High blocks (sched_partition_alloc_high, at most
+ * SR_SCHED_ARENA_HIGH_BLOCK_MAX live, recomp.h), so neither a release nor a split finds it full. */
+#define SR_STACK_RANGE_MAX   (MAXTHREADS + SR_SCHED_ARENA_HIGH_BLOCK_MAX + 1)
 
 typedef struct {
     uint32_t base;
@@ -182,6 +186,8 @@ typedef struct {
                                   * would be blamed for the code that ran next */
     int      exec_tier;          /* execution-share tier (perf.h SrExecTier) when suspended */
     int      is_cb_wait;         /* 1 when thread is in callback-aware wait */
+    int      guest_delay;        /* 1 while blocked in sceKernelDelayThread[CB]'s own delay
+                                  * (sched_delay_thread_current); 0 for a runtime-internal delay */
     int      deleted;             /* kernel object has been removed; slot may be recycled */
     int      suspended;           /* sceKernelSuspendThread is in effect.  Orthogonal to `state`:
                                    * a suspended thread keeps its READY/WAIT state (a wait still
@@ -593,6 +599,7 @@ static uint32_t s_pending_vblanks;
 
 static void scheduler_service_pending(void);
 static void sched_preempt_timer_arm(void);
+static void sched_preempt_timer_rearm(void);
 static void sched_alarm_reset(void);
 static void scheduler_add_time(uint64_t delta);
 static uint64_t scheduler_deadline_after(uint64_t delta);
@@ -609,9 +616,10 @@ static uint32_t resolve_thread_uid(uint32_t uid) {
 
 /* Guest stacks live in a descending arena, but deletion must return the exact
  * range rather than permanently consuming the high-water mark.  A small
- * first-fit range list is sufficient here: there are at most MAXTHREADS live
- * kernel objects, and every release coalesces adjacent ranges before another
- * allocation can split them.  The allocator owns only the synthetic PSP stack
+ * first-fit range list is sufficient here: there are at most MAXTHREADS thread
+ * stacks and SR_SCHED_ARENA_HIGH_BLOCK_MAX High blocks live (SR_STACK_RANGE_MAX),
+ * and every release coalesces adjacent ranges before another allocation can
+ * split them.  The allocator owns only the synthetic PSP stack
  * plus TLS reservation; the host coroutine stack is released by sr_coro_destroy. */
 static void stack_ranges_update_top(void) {
     uint32_t top = SR_STACK_ARENA_FLOOR;
@@ -723,36 +731,31 @@ static void stack_range_return(uint32_t base, uint32_t size) {
     }
     int pos = 0;
     while (pos < s_stack_free_count && s_stack_free[pos].base < base) pos++;
-    if (s_stack_free_count >= SR_STACK_RANGE_MAX) {
-        fprintf(stderr, "FATAL: guest stack range table exhausted while releasing [0x%08x,0x%08x)\n",
-                base, base + size);
-        abort();
-    }
-    for (int j = s_stack_free_count; j > pos; j--)
-        s_stack_free[j] = s_stack_free[j - 1];
-    s_stack_free[pos] = (StackRange){base, size};
-    s_stack_free_count++;
-
-    if (pos > 0) {
-        StackRange *prev = &s_stack_free[pos - 1];
-        StackRange *cur = &s_stack_free[pos];
-        if (prev->base + prev->size == cur->base) {
-            prev->size += cur->size;
-            for (int j = pos + 1; j < s_stack_free_count; j++)
-                s_stack_free[j - 1] = s_stack_free[j];
-            s_stack_free_count--;
-            pos--;
+    /* Coalesce first: a release that touches a free neighbour never needs a new slot. */
+    const int joins_prev = pos > 0 &&
+                           s_stack_free[pos - 1].base + s_stack_free[pos - 1].size == base;
+    const int joins_next = pos < s_stack_free_count && base + size == s_stack_free[pos].base;
+    if (joins_prev && joins_next) {
+        s_stack_free[pos - 1].size += size + s_stack_free[pos].size;
+        for (int j = pos + 1; j < s_stack_free_count; j++)
+            s_stack_free[j - 1] = s_stack_free[j];
+        s_stack_free_count--;
+    } else if (joins_prev) {
+        s_stack_free[pos - 1].size += size;
+    } else if (joins_next) {
+        s_stack_free[pos].base = base;
+        s_stack_free[pos].size += size;
+    } else {
+        /* Unreachable while SR_STACK_RANGE_MAX bounds the live extents: a broken invariant. */
+        if (s_stack_free_count >= SR_STACK_RANGE_MAX) {
+            fprintf(stderr, "FATAL: guest stack range table exhausted while releasing "
+                            "[0x%08x,0x%08x)\n", base, base + size);
+            abort();
         }
-    }
-    if (pos + 1 < s_stack_free_count) {
-        StackRange *cur = &s_stack_free[pos];
-        StackRange *next = &s_stack_free[pos + 1];
-        if (cur->base + cur->size == next->base) {
-            cur->size += next->size;
-            for (int j = pos + 2; j < s_stack_free_count; j++)
-                s_stack_free[j - 1] = s_stack_free[j];
-            s_stack_free_count--;
-        }
+        for (int j = s_stack_free_count; j > pos; j--)
+            s_stack_free[j] = s_stack_free[j - 1];
+        s_stack_free[pos] = (StackRange){base, size};
+        s_stack_free_count++;
     }
     stack_ranges_update_top();
 }
@@ -1576,6 +1579,8 @@ static void pace_set_speed(uint32_t speed) {
     s_ff_host_anchor_ns = host;
     if (speed > 1u && s_ff_speed == 1u) s_ff_epoch++;
     s_ff_speed = speed;
+    /* The preemption timer's deadline is a host time converted at the old speed. */
+    sched_preempt_timer_rearm();
     ace_note_fast_forward(speed > 1u);
     fprintf(stderr, "FAST_FORWARD: %s\n", speed > 1u ? "on" : "off");
 }
@@ -1696,15 +1701,18 @@ static uint64_t host_us(void) {
     return (pace_ns() - s_clock_epoch_ns) / 1000u;
 }
 
+/* A paced run's guest clock follows the host clock and never steps back. */
+static void vtime_take_host_sample(void) {
+    uint64_t t = host_us();
+    if (t > s_vtime_us) s_vtime_us = t;
+}
+
 /* Observe host time without manufacturing guest time in deterministic mode.  All
  * turbo-mode advancement happens at explicit scheduler/event boundaries below. */
 static void vtime_refresh(void) {
     sched_pause_assert_no_guest("vtime_refresh");
     pace_setup();
-    if (s_pace_on) {
-        uint64_t t = host_us();
-        if (t > s_vtime_us) s_vtime_us = t;
-    }
+    if (s_pace_on) vtime_take_host_sample();
     scheduler_latch_due_events();
 }
 
@@ -1716,8 +1724,7 @@ static void vtime_refresh(void) {
 static void scheduler_progress_time(void) {
     pace_setup();
     if (s_pace_on) {
-        uint64_t t = host_us();
-        if (t > s_vtime_us) s_vtime_us = t;
+        vtime_take_host_sample();
     } else {
         /* A deterministic scheduler quantum, never a clock-read side effect. Turbo charges a
          * fixed 10 ms; the deterministic clock charges the slice of PSP time its yield points
@@ -1894,10 +1901,7 @@ void sr_hle_advance_time(uint32_t us) {
  * sched.c sr_yield path already handles that, so a no-op is fine. */
 void sr_hle_refresh(void) {
     pace_setup();
-    if (s_pace_on) {
-        uint64_t t = host_us();
-        if (t > s_vtime_us) s_vtime_us = t;
-    }
+    if (s_pace_on) vtime_take_host_sample();
     scheduler_latch_due_events();
 }
 
@@ -2179,9 +2183,9 @@ static void deliver_vblank(void) {
             fflush(stderr);
         }
     }
-    /* Deliver every active callback slot in stable slot/registration order.  A callback
-     * may delete itself or another slot; the HLE walker snapshots each slot immediately
-     * before dispatch, so later slots observe that change on this same VBLANK. */
+    /* The VBLANK callback hook. sr_vblank_dispatch_registered() is a deliberate no-op (the
+     * vblank interrupt dispatches no callbacks); its return-boundary scope stays so that a
+     * future hook running guest code is bounded the same way as the handlers above. */
     SrAotReturnBoundaryScope callback_scope;
     sr_aot_return_boundary_scope_begin(&callback_scope);
     sr_vblank_dispatch_registered();
@@ -2249,10 +2253,10 @@ static int vblank_event_producible(void) {
  *     delivered ahead of alarms; due alarms run in deadline order, oldest set first.
  *   - The handler gets the `common` word in $a0.  Its $v0 is the re-arm period in
  *     microseconds: non-zero re-arms the SAME alarm UID that many microseconds after
- *     the time it was delivered (docs/HARDWARE_ORACLE.md: "An alarm handler's non-zero
- *     return reschedules it"), zero ends it and releases the UID.  Measured against
- *     delivery time rather than the original deadline so a delayed service point can
- *     never owe a burst of catch-up calls.
+ *     the call's SCHEDULED time, not the time it was delivered (docs/HARDWARE_ORACLE.md:
+ *     "An alarm handler's non-zero return reschedules it"; PSP-HLE-INTR-001 put the calls
+ *     on the scheduled grid), zero ends it and releases the UID.  A late call therefore
+ *     owes the calls it fell behind on, one per service pass (scheduler_alarm_deliver).
  *   - Cancel releases a pending alarm.  A cancel from inside the alarm's own handler
  *     also works and suppresses the re-arm.  A UID that was cancelled, or whose
  *     one-shot already ran, is unknown: SCE_KERNEL_ERROR_UNKNOWN_ALMID.
@@ -2492,6 +2496,28 @@ static void scheduler_vtimer_service(void) {
     sr_cpu_link_clear(s_cpu);
 }
 
+/* The timed sources that ready a waiter without being a thread's own wait: an alarm, a GE
+ * list's modelled completion, a VTimer and a transfer window's end, each SCHED_WAIT_FOREVER
+ * when it has nothing pending. Every scan that bounds an idle wait or a turbo jump reads
+ * this one list, so no copy can leave a source out. */
+enum { SCHED_TIMED_SOURCES = 4 };
+static void sched_timed_source_deadlines(uint64_t out[SCHED_TIMED_SOURCES]) {
+    out[0] = sched_alarm_wake_deadline();
+    out[1] = sched_ge_wake_deadline();
+    out[2] = sched_vtimer_wake_deadline();
+    out[3] = sched_transfer_wake_deadline();
+}
+
+/* The earliest of them, SCHED_WAIT_FOREVER when none is pending. */
+static uint64_t sched_timed_source_soonest(void) {
+    uint64_t d[SCHED_TIMED_SOURCES];
+    sched_timed_source_deadlines(d);
+    uint64_t soonest = SCHED_WAIT_FOREVER;
+    for (int i = 0; i < SCHED_TIMED_SOURCES; i++)
+        if (d[i] < soonest) soonest = d[i];
+    return soonest;
+}
+
 /* The scheduler's idle classification, as a pure read of scheduler state.
  *
  * Factored out of sched_run so the policy is directly testable: the loop it used
@@ -2523,14 +2549,8 @@ static SchedIdleState sched_classify_idle(void) {
      * waiting: its handler can release a waiter, whereas with nobody waiting there is
      * nothing left for it to wake and it must not keep a finished run alive. */
     if (any_waiting) {
-        uint64_t alarm = sched_alarm_wake_deadline();
-        if (alarm < st.soonest) st.soonest = alarm;
-        uint64_t ge = sched_ge_wake_deadline();
-        if (ge < st.soonest) st.soonest = ge;
-        uint64_t vtimer = sched_vtimer_wake_deadline();
-        if (vtimer < st.soonest) st.soonest = vtimer;
-        uint64_t xfer = sched_transfer_wake_deadline();
-        if (xfer < st.soonest) st.soonest = xfer;
+        const uint64_t source = sched_timed_source_soonest();
+        if (source < st.soonest) st.soonest = source;
     }
     /* Object identity alone is not a licence to keep spinning: the source has to
      * still be able to fire and to be serviced. */
@@ -2578,12 +2598,14 @@ static void scheduler_service_pending(void) {
         s_pending_vblanks = 0;
         for (uint32_t i = 0; i < episodes; i++) {
             /* The handler itself can mask interrupts.  The episodes it never took
-             * stay owed -- they elapsed with the I-bit set -- and a batch that ends
-             * exactly on the mask point hands the window's own coalesced episode to
-             * the next resume. */
+             * stay owed -- they elapsed with the I-bit set -- and the next resume
+             * delivers them. */
             if (!s_interrupts_enabled) {
-                s_pending_vblanks = episodes - i - 1u;
-                if (!s_pending_vblanks) s_vblank_masked_pending = 1;
+                /* episodes - i were not delivered. The latch already credited VCOUNT for each
+                 * of them, so they are owed as episodes, not as a masked-window period: the
+                 * coalesced flag (one more episode and one more VCOUNT at resume) is left to a
+                 * period that comes due under the mask. */
+                s_pending_vblanks = episodes - i;
                 episodes = i;      /* what the guest actually received */
                 break;
             }
@@ -2720,11 +2742,14 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
  * termination release the callback and wait state, while DeleteThread also
  * returns the guest stack range.  The flags live on the TCB so a repeated
  * lifecycle call is an observable no-op instead of a second teardown. */
+static void sched_transfer_forget(uint32_t uid);
+
 static void sched_release_thread_resources(TCB *t) {
     unsigned stranded;
     if (!t || t->resources_released) return;
     sr_callback_unregister_owner(t->uid);
     sched_wait_abandon_owner(t);
+    sched_transfer_forget(t->uid);
     sr_hle_release_thread_resources(t->uid);
     /* Last net under this thread's nested host->guest call frames.  Every normal
      * and error return releases its own frame, and the coro_body unwind path
@@ -2968,6 +2993,7 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
         t->state = TH_DORMANT;
         t->entry = 0;
         t->started = 0;
+        t->deleted = 1;   /* a reused slot below the tail: nobody holds its UID, reclaim it */
         if (t == &s_tcb[s_ntcb - 1]) s_ntcb--;
         return 0;
     }
@@ -3024,6 +3050,9 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
         t->state = TH_DORMANT;
         t->entry = 0;
         t->started = 0;
+        /* No UID was handed out. A reused slot below the tail (the MAXTHREADS reclaim) stays a
+         * deleted, reclaimable slot no lookup or id list sees; the tail slot is released. */
+        t->deleted = 1;
         if (t == &s_tcb[s_ntcb - 1]) s_ntcb--;   /* tail slot: fully release it */
         return 0;
     }
@@ -3114,11 +3143,17 @@ uint32_t sched_start_thread(uint32_t uid, uint32_t arglen, uint32_t argp) {
     if (t->started && t->state == TH_DORMANT) {
         sched_destroy_thread_coro(t);
         t->started = 0;
-        t->wakeups = 0; t->sleeping = 0; t->wait_obj = 0; t->wake = 0;
+        t->wakeups = 0; t->sleeping = 0; t->wait_obj = 0; t->wake = 0; t->guest_delay = 0;
         /* The re-seeded pc is the entry, where the thread really resumes: the "switched out
          * inside a call" mark from its last run must not hide it from unload safety (#286). */
         t->pc_stale = 0;
         t->yield_switched = 0;
+        /* The fresh entry is inside no call: the HLE depth, runtime phase and execution tier
+         * saved at the last switch-out (an exit from inside sr_hle_call keeps a depth of 1)
+         * go back to their creation values, or sched_run would load them for the new body. */
+        t->hle_depth = 0;
+        t->rt_phase = SR_RT_PHASE_OTHER;
+        t->exec_tier = SR_EXEC_TIER_NONE;
         memset(&t->saved, 0, sizeof(t->saved));
         t->saved.r[26] = t->k0_init;
         t->saved.r[29] = t->sp_init;
@@ -3156,10 +3191,10 @@ uint32_t sched_start_thread(uint32_t uid, uint32_t arglen, uint32_t argp) {
         int src_ok = size_ok && src_phys < 0x0c000000u && arglen <= 0x0c000000u - src_phys;
         int dst_ok = size_ok && dst >= stack_base && dst_phys < 0x0c000000u &&
                      rounded <= 0x0c000000u - dst_phys;
-        if (argp != 0u && src_ok && dst_ok) {
-            /* memmove also handles the uncommon case where a restarted thread
-             * passes an argument block already resident on its own stack. */
-            memmove(SR_HOST(dst), SR_HOST(argp), arglen);
+        /* sr_guest_memmove copies the bytes scalar loads at argp return, through a swizzled
+         * VRAM view as well, after a pending GE write to VRAM lands, and handles the uncommon
+         * case where a restarted thread passes an argument block already on its own stack. */
+        if (argp != 0u && src_ok && dst_ok && sr_guest_memmove(dst, argp, arglen)) {
             if (rounded > arglen)
                 memset(SR_HOST(dst + arglen), 0, rounded - arglen);
             t->argp = dst;
@@ -3300,6 +3335,18 @@ static void sched_transfer_hand_off(void) {
     sched_transfer_reset();
 }
 
+/* A thread that exits, is terminated or is deleted gives up its place in the channel: it leaves
+ * the queue, and a reservation it holds passes on. A restart reuses the UID, so a stale entry would
+ * otherwise hand the channel to a thread that no longer waits for it, and the reservation would
+ * never end. A window it opened runs to its deadline (sched_transfer_window_step). */
+static void sched_transfer_forget(uint32_t uid) {
+    int kept = 0;
+    for (int i = 0; i < s_xfer_queued; i++)
+        if (s_xfer_queue[i] != uid) s_xfer_queue[kept++] = s_xfer_queue[i];
+    s_xfer_queued = kept;
+    if (s_xfer_obj != 0u && s_xfer_reserved && s_xfer_owner_uid == uid) sched_transfer_hand_off();
+}
+
 /* Part of every scheduling decision, like an expired deadline: an open window whose
  * deadline has passed ends (its owner is woken) and the channel passes on; a reservation
  * whose holder is gone passes on too. Restores who is runnable; decides nothing about who
@@ -3367,15 +3414,12 @@ static void sched_idle_wait(void) {
             if (!s_tcb[i].suspended && s_tcb[i].wake < soonest_runnable)
                 soonest_runnable = s_tcb[i].wake;
         }
-    /* An armed alarm is a timed wake like a delay, while someone is waiting for it. */
-    if (any_waiting && sched_alarm_wake_deadline() < soonest)
-        soonest = sched_alarm_wake_deadline();
-    if (any_waiting && sched_ge_wake_deadline() < soonest)
-        soonest = sched_ge_wake_deadline();
-    if (any_waiting && sched_vtimer_wake_deadline() < soonest)
-        soonest = sched_vtimer_wake_deadline();
-    if (any_waiting && sched_transfer_wake_deadline() < soonest)
-        soonest = sched_transfer_wake_deadline();
+    /* An armed alarm (or another timed source) is a timed wake like a delay, while someone
+     * is waiting for it. */
+    if (any_waiting) {
+        const uint64_t source = sched_timed_source_soonest();
+        if (source < soonest) soonest = source;
+    }
     scheduler_progress_time();
     /* A wait that came due, by the host clock or by the slice just charged, runs now, on every
      * clock. On a virtual clock it used to fall into the display-period step below, so a wait
@@ -3402,9 +3446,10 @@ static void sched_idle_wait(void) {
                 s_tcb[i].wake > s_vtime_us && s_tcb[i].wake < ahead)
                 ahead = s_tcb[i].wake;
         if (any_waiting) {
-            const uint64_t sources[4] = { sched_alarm_wake_deadline(), sched_ge_wake_deadline(),
-                                          sched_vtimer_wake_deadline(), sched_transfer_wake_deadline() };
-            for (int i = 0; i < 4; i++) {
+            /* Read after the time charged above, which the due test compares with. */
+            uint64_t sources[SCHED_TIMED_SOURCES];
+            sched_timed_source_deadlines(sources);
+            for (int i = 0; i < SCHED_TIMED_SOURCES; i++) {
                 if (sources[i] <= s_vtime_us) source_due = 1;
                 else if (sources[i] < ahead) ahead = sources[i];
             }
@@ -3623,6 +3668,12 @@ static SDL_Mutex *s_preempt_timer_mutex;
 static SDL_Condition *s_preempt_timer_cond;
 static uint64_t s_preempt_timer_at_ns = UINT64_MAX;   /* host ns; under the mutex in THREAD mode */
 static uint64_t s_preempt_timer_published = UINT64_MAX;   /* the guest thread's last published value */
+/* The running slice ended (sched_preempt_timer_spend): whatever the timer still holds belongs
+ * to that slice, so the next publish writes even a value equal to the published copy. Without
+ * this a slice that ended by its count, followed by a switch into a thread with no stronger
+ * waiter, left the old deadline armed: both values read "none", and the timer ended the new
+ * thread's slices at the old thread's deadline. */
+static int s_preempt_timer_spent;
 
 /* The earliest wake deadline (guest us) of a waiting thread stronger than the running one. */
 static uint64_t sched_preempt_timer_target_us(void) {
@@ -3645,17 +3696,31 @@ static void sched_preempt_timer_check(uint64_t now_ns) {
     atomic_store_explicit(&sr_preempt_due, 1, memory_order_relaxed);
 }
 
+/* A guest-time deadline as the host time the timer thread compares with its own clock.
+ * Guest time is the paced clock (pace_ns), which runs ahead of the host clock by every
+ * fast-forward span so far and faster than it while fast forward is on, so the deadline is
+ * the paced time left until it, converted at the current speed, from now: the conversion
+ * sched_vblank_deadline_ns uses. UINT64_MAX: no deadline. */
+static uint64_t sched_preempt_timer_host_ns(uint64_t at_us) {
+    if (at_us == SCHED_WAIT_FOREVER || at_us > (UINT64_MAX - s_clock_epoch_ns) / 1000u)
+        return UINT64_MAX;
+    const uint64_t paced = s_clock_epoch_ns + at_us * 1000u;
+    const uint64_t host = host_now_ns();
+    const uint64_t pace_now = pace_ns_at(host);
+    const uint64_t left = paced > pace_now ? pace_to_host_ns(paced - pace_now) : 0u;
+    return left >= UINT64_MAX - host ? UINT64_MAX : host + left;
+}
+
 /* Publish the deadline for the thread that is running now. Called on the guest's host
  * thread wherever the running thread or its stronger waiters can have changed: a switch
- * into a thread, a yield that kept it, a change of its priority. */
-static void sched_preempt_timer_arm(void) {
+ * into a thread, a yield that kept it, a change of its priority. `force` publishes even an
+ * unchanged value, for a clock change that moved the host time of the same deadline. */
+static void sched_preempt_timer_publish(int force) {
     if (s_preempt_timer_mode == SCHED_PREEMPT_TIMER_OFF) return;
-    const uint64_t at_us = sched_preempt_timer_target_us();
-    uint64_t at_ns = UINT64_MAX;
-    if (at_us != SCHED_WAIT_FOREVER && at_us <= (UINT64_MAX - s_clock_epoch_ns) / 1000u)
-        at_ns = s_clock_epoch_ns + at_us * 1000u;
-    if (at_ns == s_preempt_timer_published) return;
-    const int earlier = at_ns < s_preempt_timer_published;
+    const uint64_t at_ns = sched_preempt_timer_host_ns(sched_preempt_timer_target_us());
+    if (!force && !s_preempt_timer_spent && at_ns == s_preempt_timer_published) return;
+    const int earlier = force || at_ns < s_preempt_timer_published;
+    s_preempt_timer_spent = 0;
     s_preempt_timer_published = at_ns;
     if (s_preempt_timer_mode == SCHED_PREEMPT_TIMER_MANUAL) {
         s_preempt_timer_at_ns = at_ns;
@@ -3668,6 +3733,17 @@ static void sched_preempt_timer_arm(void) {
     if (earlier) SDL_SignalCondition(s_preempt_timer_cond);
     SDL_UnlockMutex(s_preempt_timer_mutex);
 }
+
+static void sched_preempt_timer_arm(void) { sched_preempt_timer_publish(0); }
+
+/* The running slice ended, by its count or by the timer: the next arm publishes afresh. */
+static void sched_preempt_timer_spend(void) {
+    s_preempt_timer_published = UINT64_MAX;
+    s_preempt_timer_spent = 1;
+}
+
+/* A fast-forward speed change: the same guest deadline now falls at another host time. */
+static void sched_preempt_timer_rearm(void) { sched_preempt_timer_publish(1); }
 
 /* The two host threads that keep guest time (#1296): the scheduler's, which runs every guest
  * thread and sleeps until the next deadline when none is ready, and the preemption timer's. At
@@ -3879,7 +3955,7 @@ void sr_yield(CpuState *s) {
     sr_tail_assert_empty("tail-transfer-live-at-yield");
     /* The slice ended, by its count or by the preemption timer: whatever the timer
      * held is spent, so the next arm publishes afresh. */
-    s_preempt_timer_published = UINT64_MAX;
+    sched_preempt_timer_spend();
     atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
     if (s->r[28] != 0u) {
         s_gp = s->r[28];
@@ -3947,7 +4023,6 @@ void sr_yield(CpuState *s) {
         return;                            /* not in a thread */
     }
     s_tick++;
-    if ((s_tick & 0xff) == 0) vtime_refresh(); /* observation only; time already progressed above */
     t111_trace(s);
     /* Pump messages if we are spinning/loading and not calling gui_present. */
     sched_pump_host_window();
@@ -4060,21 +4135,15 @@ void sr_yield(CpuState *s) {
                     if (adv == 0 || delta < adv) adv = delta;
                 }
             }
-            /* An alarm deadline is a scheduled event too: never skip past it. */
-            uint64_t alarm_at = sched_alarm_wake_deadline();
-            if (alarm_at != SCHED_WAIT_FOREVER && alarm_at > s_vtime_us) {
-                uint64_t delta = alarm_at - s_vtime_us;
-                if (adv == 0 || delta < adv) adv = delta;
-            }
-            uint64_t vtimer_at = sched_vtimer_wake_deadline();
-            if (vtimer_at != SCHED_WAIT_FOREVER && vtimer_at > s_vtime_us) {
-                uint64_t delta = vtimer_at - s_vtime_us;
-                if (adv == 0 || delta < adv) adv = delta;
-            }
-            uint64_t xfer_at = sched_transfer_wake_deadline();
-            if (xfer_at != SCHED_WAIT_FOREVER && xfer_at > s_vtime_us) {
-                uint64_t delta = xfer_at - s_vtime_us;
-                if (adv == 0 || delta < adv) adv = delta;
+            /* A timed source's deadline (an alarm, a GE completion, a VTimer, a transfer
+             * window's end) is a scheduled event too: never skip past it. */
+            uint64_t sources[SCHED_TIMED_SOURCES];
+            sched_timed_source_deadlines(sources);
+            for (int i = 0; i < SCHED_TIMED_SOURCES; i++) {
+                if (sources[i] != SCHED_WAIT_FOREVER && sources[i] > s_vtime_us) {
+                    uint64_t delta = sources[i] - s_vtime_us;
+                    if (adv == 0 || delta < adv) adv = delta;
+                }
             }
             scheduler_add_time(adv);
         }
@@ -4220,7 +4289,7 @@ void sched_preempt(void) {
 void sched_preempt_point(void) {
     atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
     if (s_cur < 0 || !s_interrupts_enabled || !s_dispatch_enabled) return;
-    s_preempt_timer_published = UINT64_MAX;
+    sched_preempt_timer_spend();
     scheduler_progress_time();
     sched_preempt();
     sched_preempt_timer_arm();
@@ -4300,6 +4369,38 @@ void sched_delay_current_dispatching(uint64_t usec) {
     if (s_cur < 0) return;
     s_hold_expiry = s_cur;
     sched_delay_current(usec);
+}
+
+/* The delay of sceKernelDelayThread[CB] itself, which sceKernelReleaseWaitThread may end early
+ * (sched_release_thread_delay). A delay the runtime takes inside another call (a GE, audio or
+ * codec wait) uses sched_delay_current and is not released. Returns 1 with the release result
+ * when the delay was ended that way, 0 when it ran its course. */
+int sched_delay_thread_current(uint64_t usec, uint32_t *result_out) {
+    if (s_cur < 0) return 0;
+    s_tcb[s_cur].wake_result_valid = 0;   /* only a release of this delay is answered */
+    s_tcb[s_cur].guest_delay = 1;
+    sched_delay_current(usec);
+    if (s_cur < 0) return 0;
+    s_tcb[s_cur].guest_delay = 0;
+    return sched_take_wake_result(result_out);
+}
+
+/* sceKernelReleaseWaitThread on a thread in sceKernelDelayThread[CB]: the delay ends now and the
+ * thread's call returns `result`. PPSSPP-derived, not PSP-measured: hrydgard/ppsspp
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceKernelThread.cpp,
+ * sceKernelReleaseWaitThread resumes a WAITTYPE_DELAY wait with SCE_KERNEL_ERROR_RELEASE_WAIT
+ * (it refuses only its own HLE-internal delays and the start_module wait). Returns 1 when such a
+ * delay was ended. */
+int sched_release_thread_delay(uint32_t thread_uid, uint32_t result) {
+    TCB *t = tcb_by_uid(thread_uid);
+    if (!t || t->deleted || t->state != TH_WAIT_DELAY || !t->guest_delay) return 0;
+    t->wake_result = result;
+    t->wake_result_valid = 1;
+    t->wake_cause = SCHED_WAKE_SIGNAL;
+    t->state = TH_READY;
+    SR_FLIGHT_RECORD_CLASS(SR_FLIGHT_CLASS_SCHED, SR_FLIGHT_KIND_SCHED_WAKE,
+                           s_cur >= 0 && s_cur < s_ntcb ? s_tcb[s_cur].uid : 0u, t->uid, 0u, 1u);
+    return 1;
 }
 
 void sched_block_on(uint32_t obj) {
@@ -4751,7 +4852,10 @@ int sched_count_waiters(uint32_t obj) {
 
 /* Measured (PSP-B3-01): ReleaseWaitThread readies one blocked thread and
  * hands it WAIT_RELEASE as its wait result. The target must be in an object
- * wait; anything else (running, dormant, deleted, delay) reports no waiter. */
+ * wait; anything else (running, dormant, deleted, delay) reports no waiter.
+ * A thread in SleepThread[CB] waits on its own uid: the release ends its sleep
+ * too, so it leaves the sleep loop and returns the result (sched_thread_sleep).
+ * The measured cell is a semaphore waiter; a sleeper takes the same result. */
 int sched_wake_one_object_waiter_with_result(uint32_t thread_uid, uint32_t result) {
     TCB *t = tcb_by_uid(thread_uid);
     if (t && !t->deleted && t->state == TH_WAIT_OBJ) {
@@ -4759,6 +4863,7 @@ int sched_wake_one_object_waiter_with_result(uint32_t thread_uid, uint32_t resul
         t->wake_result = result;
         t->wake_result_valid = 1;
         t->wake_cause = SCHED_WAKE_SIGNAL;
+        if (t->sleeping && t->wait_obj == t->uid) t->sleeping = 0;
         t->state = TH_READY;
 #ifdef SR_SCHED_LIVENESS_TEST
         sched_liveness_record_wake(t->wait_obj, 1u);
@@ -4857,34 +4962,45 @@ void sched_wake_callbacks(uint32_t thread_uid) {
 /* sceKernelSleepThread[CB]: PSP wakeup-count semantics. If a wakeup is already pending, consume it
  * and return without blocking; otherwise block until sceKernelWakeupThread targets this thread.
  * This is distinct from sceKernelDelayThread (a timed sleep) -- conflating the two left the main
- * thread sleeping ~forever on a poisoned (0xDEADBEEF) delay argument. */
-void sched_thread_sleep(void) {
-    if (s_cur < 0) return;
+ * thread sleeping ~forever on a poisoned (0xDEADBEEF) delay argument.
+ *
+ * Both return the call's result: 0 for a wakeup, or the result a ReleaseWaitThread handed
+ * the sleeper (sched_wake_one_object_waiter_with_result), which also ends the sleep. */
+static uint32_t sched_thread_sleep_result(void) {
+    uint32_t result = 0u;
+    return sched_take_wake_result(&result) ? result : 0u;
+}
+
+uint32_t sched_thread_sleep(void) {
+    if (s_cur < 0) return 0u;
     TCB *t = &s_tcb[s_cur];
     if (sched_wakelog_on()) {
         fprintf(stderr, "DEBUG_SLEEP: thread=0x%x wakeups=%d state=%d\n", t->uid, t->wakeups, t->state);
     }
-    if (t->wakeups > 0) { t->wakeups--; return; }   /* pending wakeup: don't block */
+    if (t->wakeups > 0) { t->wakeups--; return 0u; }   /* pending wakeup: don't block */
     t->sleeping = 1;
     memcpy(&t->saved, s_cpu, sizeof(CpuState));
     sched_note_block(t);
     t->state = TH_WAIT_OBJ;
-    t->wait_obj = t->uid;       /* sleep marker: woken only by sched_thread_wakeup(uid) */
+    t->wait_obj = t->uid;       /* sleep marker: woken by sched_thread_wakeup(uid) or a release */
     t->wake = SCHED_WAIT_FOREVER;
+    t->wake_result_valid = 0;
     switch_to_scheduler();
+    return sched_thread_sleep_result();
 }
 
-void sched_thread_sleep_cb(void) {
-    if (s_cur < 0) return;
+uint32_t sched_thread_sleep_cb(void) {
+    if (s_cur < 0) return 0u;
     TCB *t = &s_tcb[s_cur];
     if (sched_wakelog_on()) {
         fprintf(stderr, "DEBUG_SLEEP_CB: thread=0x%x wakeups=%d state=%d\n", t->uid, t->wakeups, t->state);
     }
     if (t->wakeups > 0) {
         t->wakeups--;
-        return;
+        return 0u;
     }
     t->sleeping = 1;
+    t->wake_result_valid = 0;
     while (t->sleeping) {
         /* A wakeup delivered while this thread was dispatching callbacks (below)
          * cannot take the sched_thread_wakeup fast path -- state is not yet
@@ -4910,6 +5026,7 @@ void sched_thread_sleep_cb(void) {
         switch_to_scheduler();
         t->is_cb_wait = 0;
     }
+    return sched_thread_sleep_result();
 }
 
 /* sceKernelWakeupThread(uid): wake a sleeping thread, or bank a pending wakeup if it is not
@@ -5317,10 +5434,23 @@ uint32_t sched_change_current_thread_attr(uint32_t clear_mask, uint32_t set_mask
  * TerminateDeleteThread handler composes them so a target is first reported as
  * terminated to existing joiners, then disappears as a kernel object. */
 uint32_t sched_terminate_thread(uint32_t uid) {
+    /* An interrupt handler (VBLANK, alarm, VTimer, GE finish) runs on the
+     * interrupted thread's own host coroutine with s_cur forced to -1, so the
+     * self check below cannot see that it would destroy the coroutine that is
+     * executing.  The scheduler refuses the call from interrupt context with
+     * ILLEGAL_CONTEXT as its own guard. The guest-visible decision is the HLE
+     * handlers': h_TerminateThread answers that code with its PPSSPP-derived note
+     * and h_TerminateDeleteThread stops by name, both before reaching here. */
+    if (s_servicing_interrupts) return 0x80020064u; /* SCE_KERNEL_ERROR_ILLEGAL_CONTEXT */
     uid = resolve_thread_uid(uid);
     TCB *t = tcb_by_uid(uid);
     if (!t) return SCE_KERNEL_ERROR_UNKNOWN_THID;
     if (s_cur >= 0 && s_tcb[s_cur].uid == uid) {
+        return SCE_KERNEL_ERROR_ILLEGAL_THID;
+    }
+    /* Whatever the context, a thread whose host coroutine is the one running
+     * now is the caller itself and cannot be torn down from inside. */
+    if (t->coro && t->coro == sr_coro_current()) {
         return SCE_KERNEL_ERROR_ILLEGAL_THID;
     }
     /* CONFLICT (PSP-B3-01 vs sched_selftest lifecycle contract): hardware
@@ -5341,7 +5471,7 @@ uint32_t sched_terminate_thread(uint32_t uid) {
     t->sleeping = 0; t->wait_obj = 0; t->wake = 0;
     t->wait_kind = 0; t->pending_wait_kind = 0;
     t->wake_result = 0; t->wake_result_valid = 0;
-    t->wakeups = 0; t->is_cb_wait = 0;
+    t->wakeups = 0; t->is_cb_wait = 0; t->guest_delay = 0;
     t->join_waiting = 0; t->join_target = 0; t->join_result = 0;
     t->join_result_valid = 0;
     sched_wake_thread_joiners(uid, SCE_KERNEL_ERROR_THREAD_TERMINATED);
@@ -5377,6 +5507,7 @@ uint32_t sched_delete_thread(uint32_t uid) {
     t->wake = 0;
     t->wakeups = 0;
     t->is_cb_wait = 0;
+    t->guest_delay = 0;
     t->join_waiting = 0;
     t->join_result_valid = 0;
     t->deleted = 1;
@@ -5445,11 +5576,15 @@ uint32_t sched_resume_thread(uint32_t uid) {
  * Suspended threads are not in the ready queue and are never rotated.  The yield is
  * deferred, like every other switch, while interrupts or dispatch are disabled; the
  * rotation itself still takes effect.  A priority with no ready thread is a successful
- * no-op; no range-error code is returned because none is sourced. */
+ * no-op.  A named priority outside the user range answers ILLEGAL_PRIORITY: the PSP
+ * returns 0x80020193 for 0xff (PSP-THREAD-003 thread-rotate-range); only 0xff is measured,
+ * and the 0x08..0x77 bounds are the ones thread creation and ChangeThreadPriority check. */
 uint32_t sched_rotate_thread_ready_queue(int priority) {
     if (priority == 0) {
         if (s_cur < 0) return 0;   /* no calling thread, so no queue to rotate */
         priority = s_tcb[s_cur].priority;
+    } else if (priority < SCHED_USER_PRIORITY_MIN || priority > SCHED_USER_PRIORITY_MAX) {
+        return SCE_KERNEL_ERROR_ILLEGAL_PRIORITY;
     }
     sched_promote_expired_waits();
     int head = -1;
@@ -5881,13 +6016,25 @@ static int sched_pause_run(void) {
 }
 
 /* The scheduler loop. Runs on the main (converted) fiber. Creates the entry thread, then keeps
- * resuming the highest-priority ready thread until none remain runnable. */
-void sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {
+ * resuming the highest-priority ready thread until none remain runnable. Returns 0 once the
+ * loop ends, and SCHED_RUN_NO_ENTRY_THREAD when the entry thread could not be created, so the
+ * driver ends that run with a failure status instead of a clean exit. */
+int sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {
     sched_pause_script_load();
     uint32_t uid = sched_create_thread_ex(entry, s_module_start_priority,
                                           s_module_start_stack_size, s_module_start_attr,
                                           s_module_start_name);
-    TCB *t0 = tcb_by_uid(uid);
+    TCB *t0 = uid ? tcb_by_uid(uid) : NULL;
+    if (!t0) {
+        /* The module record's thread parameters (sched_set_module_start_thread) are the
+         * title's: a stack no free range holds, or a priority creation refuses, stops here by
+         * name instead of running nothing. */
+        fprintf(stderr, "SCHED: module_start thread create failed (entry=0x%08x priority=%d "
+                        "stack=0x%x attr=0x%x); no guest thread runs\n",
+                entry, s_module_start_priority, s_module_start_stack_size, s_module_start_attr);
+        fflush(stderr);
+        return SCHED_RUN_NO_ENTRY_THREAD;
+    }
     t0->module_start = 1;
     /* The entry (module_start) keeps the driver-seeded state -- real sp, gp, and module args
      * -- rather than the synthetic thread stack. With no seeded $gp it starts with the
@@ -5974,9 +6121,11 @@ void sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {
                 } else if (soonest > s_vtime_us) {
                     s_vtime_us = soonest;
                 }
-                /* The jump may have reached an alarm deadline: its handler is what readies
-                 * the waiter, and it only runs from an interrupt-service step. */
-                if (s_alarm_live || sched_ge_next_deadline() != SCHED_WAIT_FOREVER)
+                /* The jump may have reached an alarm, GE or VTimer deadline (the timer sources
+                 * sched_classify_idle counted): its handler is what readies the waiter, and it
+                 * only runs from an interrupt-service step. */
+                if (s_alarm_live || sched_ge_next_deadline() != SCHED_WAIT_FOREVER ||
+                    scheduler_vtimer_due())
                     scheduler_service_pending();
                 idx = pick_next();
                 if (idx < 0) {
@@ -6064,4 +6213,5 @@ void sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {
         s_tick++;
         sr_rt_phase = SR_RT_PHASE_SCHED;
     }
+    return 0;
 }

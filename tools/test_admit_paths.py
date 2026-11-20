@@ -20,7 +20,7 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import subprocess
@@ -28,7 +28,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -37,6 +37,11 @@ import admit_paths  # noqa: E402
 from admit_paths import AdmitError  # noqa: E402
 import provenance_attest_verify as verifier  # noqa: E402
 import provenance_ledger  # noqa: E402
+
+if TYPE_CHECKING:
+    from tools.admit_paths import AdmissionResult
+else:
+    AdmissionResult = admit_paths.AdmissionResult
 
 #: Commits run by the tool need an identity, and a host's own Git configuration
 #: must not change what the tests observe.
@@ -50,6 +55,11 @@ import provenance_ledger  # noqa: E402
 #: cleanup fails with ENOTEMPTY. The same settings as
 #: nk_core/git_isolation.isolated_git_env, in the environment so that the
 #: repositories the tests create keep their default configuration.
+#:
+#: ``GIT_EDITOR`` and ``GIT_SEQUENCE_EDITOR`` are also pinned to ``true``: Git
+#: checks ``$GIT_EDITOR`` before ``-c core.editor=true``, so a caller exporting
+#: ``GIT_EDITOR=false`` (or an interactive editor) would otherwise break
+#: ``git rebase --continue`` inside the fixture.
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "Nakagawa Recomp Tests",
     "GIT_AUTHOR_EMAIL": "tests@nakagawa-recomp.invalid",
@@ -64,6 +74,8 @@ GIT_ENV = {
     "GIT_CONFIG_VALUE_1": "false",
     "GIT_CONFIG_KEY_2": "gc.autoDetach",
     "GIT_CONFIG_VALUE_2": "false",
+    "GIT_EDITOR": "true",
+    "GIT_SEQUENCE_EDITOR": "true",
 }
 
 
@@ -108,7 +120,7 @@ def authority_claims(fixture: "_Fixture"):
 def assert_policy_delta(
     testcase: unittest.TestCase, fixture: "_Fixture", record: str, *,
     baseline: bytes, candidate: bytes, files: dict[str, bytes],
-) -> dict:
+) -> dict[str, list[str]]:
     """The stored V4 delta is named after its selector and approves exactly ``baseline`` -> ``candidate``.
 
     ``files`` are the candidate's new files; the delta binds each one's origin claim.
@@ -121,11 +133,14 @@ def assert_policy_delta(
         policy_file = Path(scratch) / "candidate-policy.json"
         policy_file.write_bytes(candidate)
         candidate_policy = admit_paths.load_policy(policy_file)
-    return provenance_ledger.verify_policy_delta_v4(
-        raw, baseline_policy_bytes=baseline, candidate_policy_bytes=candidate,
-        base_blobs={}, candidate_blobs=files, candidate_policy=candidate_policy,
-        claim_of=authority_claims(fixture),
-    )
+    return cast(
+        dict[str, list[str]],
+        provenance_ledger.verify_policy_delta_v4(
+            raw, baseline_policy_bytes=baseline, candidate_policy_bytes=candidate,
+            base_blobs={}, candidate_blobs=files, candidate_policy=candidate_policy,
+            claim_of=authority_claims(fixture),
+        ),
+    )  # The verifier returns normalized string path lists and rule-change names.
 
 
 class _Fixture:
@@ -210,13 +225,16 @@ class _Fixture:
         git(root, "commit", "-qm", f"include {relative}")
         return root, branch
 
-    def admit(self, *paths: str, **kwargs) -> dict:
+    def admit(self, *paths: str, **kwargs) -> AdmissionResult:
         kwargs.setdefault("approval_basis", "Owner request: synthetic fixture pages.")
         kwargs.setdefault("date", "2026-10-22")
-        return admit_paths.admit(
-            pr_worktree=self.pr, paths=list(paths), private_repo=self.authority,
-            scratch_root=self.tmp, **kwargs,
-        )
+        return cast(
+            AdmissionResult,
+            admit_paths.admit(
+                pr_worktree=self.pr, paths=list(paths), private_repo=self.authority,
+                scratch_root=self.tmp, **kwargs,
+            ),
+        )  # The single-admission helper returns its declared result shape.
 
     def record(self, relative: str) -> dict:
         returned: dict[str, Any] = json.loads((self.authority / relative).read_text(encoding="utf-8"))
@@ -350,6 +368,45 @@ class AdmitPathsTest(unittest.TestCase):
         self.assertEqual(fixture.remote_main(), result["private_commit"])
         self.assertNotIn("push origin main", " ".join(admit_paths.remaining_steps(result)))
 
+    def test_a_refused_private_commit_leaves_the_authority_clean(self) -> None:
+        """A commit-msg hook that refuses the private commit leaves nothing written or staged (audit F-54c608e5)."""
+        fixture = _Fixture(self)
+        fixture.add("docs/new-page.md", "# New page\n")
+        hooks = fixture.tmp / "refusing-hooks"
+        hooks.mkdir()
+        hook = hooks / "commit-msg"
+        hook.write_text("#!/bin/sh\necho 'refused by the test hook' >&2\nexit 1\n", encoding="utf-8", newline="\n")
+        os.chmod(hook, 0o755)
+        git(fixture.authority, "config", "core.hooksPath", hooks.as_posix())
+        before = git(fixture.authority, "rev-parse", "HEAD")
+        with self.assertRaises(AdmitError) as caught:
+            fixture.admit("docs/new-page.md")
+        self.assertEqual(caught.exception.code, "GIT_ERROR")
+        self.assertEqual(git(fixture.authority, "rev-parse", "HEAD"), before)
+        self.assertEqual(git(fixture.authority, "status", "--porcelain", "--untracked-files=all"), "",
+                         "no record is left written or staged")
+        self.assertEqual(git(fixture.pr, "branch", "--list", "admit/*"), "")
+
+        git(fixture.authority, "config", "--unset", "core.hooksPath")
+        result = fixture.admit("docs/new-page.md")
+        self.assertNotEqual(result["private_commit"], before, "the next run is not stopped by AUTHORITY_DIRTY")
+
+    def test_a_failed_push_keeps_the_committed_admission_and_its_branch(self) -> None:
+        """The private commit exists once the push runs, so a push failure removes nothing (audit F-81f277c0)."""
+        fixture = _Fixture(self)
+        fixture.add("docs/new-page.md", "# New page\n")
+        git(fixture.authority, "remote", "set-url", "origin", (fixture.tmp / "missing.git").as_posix())
+        before = git(fixture.authority, "rev-parse", "HEAD")
+        with self.assertRaises(AdmitError) as caught:
+            fixture.admit("docs/new-page.md", push=True)
+        self.assertEqual(caught.exception.code, "PRIVATE_PUSH_FAILED")
+        committed = git(fixture.authority, "rev-parse", "HEAD")
+        self.assertNotEqual(committed, before, "the private records are committed")
+        self.assertIn(committed[:12], str(caught.exception))
+        branches = git(fixture.pr, "branch", "--list", "admit/*")
+        self.assertNotEqual(branches, "", "the admission branch is kept")
+        self.assertIn(branches.strip(" *+"), str(caught.exception))
+
     def test_implementation_path_needs_an_existing_record(self) -> None:
         fixture = _Fixture(self)
         fixture.add("src/rt/new.c", "// SPDX-License-Identifier: GPL-3.0-or-later\nint fresh(void);\n")
@@ -381,7 +438,7 @@ class AdmitPathsTest(unittest.TestCase):
     def test_refusals_leave_nothing_behind(self) -> None:
         fixture = _Fixture(self)
         fixture.add("docs/new-page.md", "# New page\n")
-        cases = {
+        cases: dict[str, dict[str, object]] = {
             "ADMISSION_PATH_EXISTING": dict(paths=["docs/guide.md"]),
             "ADMISSION_PATH_EXCLUDED": dict(paths=["docs/private-notes.md"]),
             "ADMIT_PATH_MISSING": dict(paths=["docs/absent.md"]),
@@ -394,7 +451,7 @@ class AdmitPathsTest(unittest.TestCase):
         git(fixture.pr, "commit", "-qm", "excluded file")
         for code, case in cases.items():
             with self.subTest(code=code):
-                paths = case.pop("paths")
+                paths = cast(list[str], case.pop("paths"))  # Each case fixture supplies a string path list.
                 with self.assertRaises(AdmitError) as caught:
                     fixture.admit(*paths, **case)
                 self.assertEqual(caught.exception.code, code)
@@ -713,6 +770,35 @@ class BatchAdmitPathsTest(unittest.TestCase):
             path=paths[order[1]], record=second["record"],
         )
 
+    def test_rebase_continue_ignores_inherited_git_editor(self) -> None:
+        """An inherited GIT_EDITOR (such as GIT_EDITOR=false) must not defeat rebase --continue."""
+        repo = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with mock.patch.dict(os.environ, {"GIT_EDITOR": "false", "GIT_SEQUENCE_EDITOR": "false"}):
+            git(repo, "init", "-q", "-b", "main")
+            write(repo, "note.txt", "base\n")
+            git(repo, "add", "note.txt")
+            git(repo, "commit", "-qm", "base")
+            base = git(repo, "rev-parse", "HEAD")
+
+            write(repo, "note.txt", "ours\n")
+            git(repo, "add", "note.txt")
+            git(repo, "commit", "-qm", "ours")
+
+            git(repo, "checkout", "-q", "--detach", base)
+            write(repo, "note.txt", "theirs\n")
+            git(repo, "add", "note.txt")
+            git(repo, "commit", "-qm", "theirs")
+
+            env = {**os.environ, **GIT_ENV}
+            rebase = subprocess.run(["git", "rebase", "main"], cwd=repo, env=env,
+                                    capture_output=True, check=False)
+            self.assertEqual(rebase.returncode, 1, rebase.stderr.decode("utf-8", errors="replace"))
+            write(repo, "note.txt", "merged\n")
+            git(repo, "add", "note.txt")
+            subprocess.run(["git", "-c", "core.editor=true", "rebase", "--continue"], cwd=repo,
+                           env=env, check=True, capture_output=True)
+            self.assertEqual(git(repo, "show", "HEAD:note.txt"), "merged")
+
     def test_batch_has_no_entry_count_cap(self) -> None:
         five = [
             {"pr_worktree": "C:/temporary/pr", "paths": [f"docs/path-{index}.md"],
@@ -878,6 +964,47 @@ class BatchAdmitPathsTest(unittest.TestCase):
             admit_paths.merge_profile(ours)
         self.assertEqual(caught.exception.code, "MERGE_LEDGER_ENTRY_CONFLICT")
         self.assertEqual(git(ours, "ls-files", "--unmerged"), unmerged_before)
+        git(ours, "merge", "--abort")
+
+    def test_merge_profile_stages_nothing_when_a_later_write_fails(self) -> None:
+        """A failed ledger write (a locked file) leaves the profile unmerged and unwritten too (audit F-4a576128)."""
+        fixture = _Fixture(self)
+        git(fixture.pr, "checkout", "-q", "main")
+        write(fixture.pr, admit_paths.LEDGER, admit_paths.provenance_ledger.claims_ledger_bytes(
+            self._claims(("docs/guide.md", "reviewed_documentation"))).decode("utf-8"))
+        git(fixture.pr, "add", admit_paths.LEDGER)
+        git(fixture.pr, "commit", "-qm", "a claims ledger on the base")
+        fixture.base = git(fixture.pr, "rev-parse", "HEAD")
+        git(fixture.pr, "update-ref", "refs/remotes/origin/main", fixture.base)
+        sides = {}
+        for side in ("ours", "theirs"):
+            worktree = sides[side] = fixture.worktree(f"ledger-{side}")
+            fixture.add_pr_path(worktree, f"docs/{side}.md", f"# {side}\n")
+            write(worktree, admit_paths.LEDGER, admit_paths.provenance_ledger.claims_ledger_bytes(self._claims(
+                ("docs/guide.md", "reviewed_documentation"), (f"docs/{side}.md", "reviewed_documentation"),
+            )).decode("utf-8"))
+            git(worktree, "add", admit_paths.LEDGER)
+            git(worktree, "commit", "-qm", f"{side} records its page")
+        ours = sides["ours"]
+        subprocess.run(["git", "merge", "--no-commit", "--no-ff", git(sides["theirs"], "rev-parse", "HEAD")],
+                       cwd=ours, env={**os.environ, **GIT_ENV}, capture_output=True, check=False)
+        unmerged_before = git(ours, "ls-files", "--unmerged")
+        self.assertIn(admit_paths.POLICY, unmerged_before)
+        self.assertIn(admit_paths.LEDGER, unmerged_before)
+        profile_before = (ours / admit_paths.POLICY).read_bytes()
+        real_write = Path.write_bytes
+
+        def locked_ledger(path: Path, data: bytes) -> int:
+            if path.name == PurePosixPath(admit_paths.LEDGER).name:
+                raise PermissionError(13, "locked by another process", str(path))
+            return real_write(path, data)
+
+        with mock.patch.object(Path, "write_bytes", locked_ledger), self.assertRaises(PermissionError):
+            admit_paths.merge_profile(ours)
+        self.assertEqual(git(ours, "ls-files", "--unmerged"), unmerged_before, "nothing was staged")
+        self.assertEqual((ours / admit_paths.POLICY).read_bytes(), profile_before, "the profile is restored")
+        admit_paths.merge_profile(ours)
+        self.assertEqual(git(ours, "ls-files", "--unmerged"), "")
         git(ours, "merge", "--abort")
 
     @staticmethod
@@ -1208,6 +1335,21 @@ class PolicyDeltaIssueTest(unittest.TestCase):
                          "a V4 delta is named after its selector")
         return path, document
 
+    def test_an_explicit_base_must_be_an_ancestor(self) -> None:
+        """A base the branch has not merged would read main's new paths as removed (audit F-af8a5e9b)."""
+        fixture = _Fixture(self)
+        self._commit_profile(fixture, lambda policy: policy["include_paths"].remove("docs/guide.md"))
+        git(fixture.pr, "checkout", "-q", "main")
+        fixture.add("docs/other.md", "# Elsewhere\n")
+        unrelated = git(fixture.pr, "rev-parse", "HEAD")
+        git(fixture.pr, "checkout", "-q", "docs/new-pages-20261022")
+        before = git(fixture.authority, "rev-parse", "HEAD")
+        with self.assertRaises(AdmitError) as caught:
+            self._issue(fixture, base=unrelated)
+        self.assertEqual(caught.exception.code, "TRUSTED_BASE_NOT_ANCESTOR")
+        self.assertEqual(git(fixture.authority, "rev-parse", "HEAD"), before)
+        self.assertEqual(git(fixture.authority, "status", "--porcelain"), "")
+
     def test_rule_change_issues_a_v4_delta_the_gate_reads(self) -> None:
         fixture = _Fixture(self)
 
@@ -1298,11 +1440,11 @@ class ClaimBindingAdmissionTest(unittest.TestCase):
               "paths": ["src/lib/up.h"], "upstream": "synthetic-upstream",
               "upstream_revision": "commit 0123456789abcdef0123456789abcdef01234567", "upstream_license": "MIT"}
 
-    def _entry(self, fixture: _Fixture, result: dict, path: str) -> dict:
+    def _entry(self, fixture: _Fixture, result: AdmissionResult, path: str) -> dict:
         return next(item for item in fixture.record(result["policy_delta_record"])["include_added"]
                     if item["path"] == path)
 
-    def _forget_v4(self, fixture: _Fixture, result: dict) -> None:
+    def _forget_v4(self, fixture: _Fixture, result: AdmissionResult) -> None:
         """Make ``result`` look like an admission recorded before V4 deltas existed."""
         git(fixture.authority, "rm", "-q", result["policy_delta_record"])
         git(fixture.authority, "commit", "-qm", "an admission from before V4 deltas")
@@ -1802,8 +1944,12 @@ class HookCheckTest(unittest.TestCase):
         self.enterContext(mock.patch.object(admit_paths, "check_rewriting_hooks", _REAL_HOOK_CHECK))
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="nakagawa-admit-hooks-test-")))
 
-    def _repo(self, base_files: dict[str, bytes], head_files: dict[str, bytes]) -> tuple[Path, str, str]:
-        repo = self.tmp / "repo"
+    def _repo(
+        self, base_files: dict[str, bytes], head_files: dict[str, bytes], name: str = "repo",
+        unfiltered_head: bool = False,
+    ) -> tuple[Path, str, str]:
+        """``unfiltered_head`` commits the head files' exact bytes, past the base's ``.gitattributes``."""
+        repo = self.tmp / name
         repo.mkdir()
         git(repo, "init", "-q")
         git(repo, "config", "core.autocrlf", "false")
@@ -1814,6 +1960,10 @@ class HookCheckTest(unittest.TestCase):
                 path.write_bytes(data)
             (repo / "anchor").write_bytes(str(len(files)).encode() + b"\n")
             git(repo, "add", "-A")
+            if unfiltered_head and files is head_files:
+                for relative in files:
+                    blob = git(repo, "hash-object", "-w", "--no-filters", "--", relative)
+                    git(repo, "update-index", "--cacheinfo", f"100644,{blob},{relative}")
             git(repo, "commit", "-qm", "commit")
             if files is base_files:
                 base = git(repo, "rev-parse", "HEAD")
@@ -1838,7 +1988,13 @@ class HookCheckTest(unittest.TestCase):
         self.assertEqual(statement["sha256"], digest)
 
     def test_each_rule_matches_the_hook_it_stands_for(self) -> None:
-        findings = admit_paths.rewriting_hook_findings
+        # identify gives a name without an extension no tag, so its content test decides.
+        self.enterContext(mock.patch.object(admit_paths, "_identify_filename_tags", return_value=set()))
+
+        def findings(data: bytes) -> dict[str, str]:
+            found: dict[str, str] = admit_paths.rewriting_hook_findings(data, "notes")
+            return found
+
         self.assertEqual(findings(b""), {})
         self.assertEqual(findings(b"clean\ntext\n"), {})
         self.assertEqual(set(findings(b"a \nb\n")), {"trailing-whitespace"})
@@ -1850,6 +2006,51 @@ class HookCheckTest(unittest.TestCase):
         self.assertEqual(set(findings(b"a\rb\n")), {"mixed-line-ending"})
         self.assertEqual(set(findings(b"\xef\xbb\xbfa\n")), {"fix-byte-order-marker"})
         self.assertEqual(findings(b"\x00\x01binary \r\n\n\n"), {}, "binary files are left alone, as identify types them")
+
+    @unittest.skipUnless(admit_paths._identify_filename_tags("x.txt") is not None, "identify is not installed")
+    def test_the_file_name_types_a_file_before_its_content_as_identify_does(self) -> None:
+        """A ``.txt`` file with a NUL is text to pre-commit, so the text hooks rewrite it (audit F-1dbfd4f7)."""
+        findings = admit_paths.rewriting_hook_findings
+        self.assertEqual(set(findings(b"\x00 data \nno end", "tests/fixtures/sample.txt")),
+                         {"trailing-whitespace", "end-of-file-fixer"})
+        self.assertEqual(findings(b"text only \n", "assets/logo.png"), {}, "a .png is binary by name")
+        self.assertEqual(findings(b"\x00 data \n", "assets/table.bin2"), {}, "no tag from the name: content decides")
+        repo, base, head = self._repo({"README": b"base\n"}, {"tests/fixtures/sample.txt": b"\x00head \n"})
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.check_rewriting_hooks(repo, base, head, ["tests/fixtures/sample.txt"])
+        self.assertEqual(caught.exception.code, "ADMIT_HOOKS_WOULD_REWRITE")
+        self.assertIn("tests/fixtures/sample.txt: trailing whitespace on line 1", str(caught.exception))
+
+    def test_without_identify_a_binary_looking_file_is_refused_by_name(self) -> None:
+        self.enterContext(mock.patch.object(admit_paths, "_identify_filename_tags", return_value=None))
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.rewriting_hook_findings(b"\x00 data \n", "tests/fixtures/sample.txt")
+        self.assertEqual(caught.exception.code, "ADMIT_HOOKS_TYPING_UNAVAILABLE")
+        self.assertIn("tests/fixtures/sample.txt", str(caught.exception))
+        self.assertEqual(set(admit_paths.rewriting_hook_findings(b"text \n", "assets/logo.png")),
+                         {"trailing-whitespace"}, "a text-looking file is checked as text")
+
+    def test_hooks_the_trusted_base_does_not_declare_are_not_applied(self) -> None:
+        """No configured hook removes a byte-order mark; CRLF in a text path stays refused (audit F-f76b74f6)."""
+        declared = (
+            b"repos:\n  - repo: https://github.com/pre-commit/pre-commit-hooks\n    rev: v6.0.0\n    hooks:\n"
+            b"      - id: trailing-whitespace\n      - id: end-of-file-fixer\n"
+        )
+        head_files = {"docs/bom.md": b"\xef\xbb\xbf# Imported\n", "docs/crlf.md": b"a\r\nb\r\n"}
+        repo, base, head = self._repo({admit_paths.PRE_COMMIT_CONFIG: declared}, head_files)
+        admit_paths.check_rewriting_hooks(repo, base, head, ["docs/bom.md"])
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.check_rewriting_hooks(repo, base, head, ["docs/crlf.md"])
+        self.assertIn("docs/crlf.md: CRLF", str(caught.exception))
+        self.assertIn("(Git text normalization; convert it to LF)", str(caught.exception),
+                      "no configured hook is named for a rewrite no hook makes (audit F-b51af626)")
+
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="nakagawa-admit-hooks-test-")))
+        bom_declared = declared + b"      - id: fix-byte-order-marker\n"
+        repo, base, head = self._repo({admit_paths.PRE_COMMIT_CONFIG: bom_declared}, head_files)
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.check_rewriting_hooks(repo, base, head, ["docs/bom.md"])
+        self.assertIn("docs/bom.md: a UTF-8 byte-order mark (fix-byte-order-marker)", str(caught.exception))
 
     def test_exclusions_come_from_the_trusted_base_not_the_pull_request(self) -> None:
         base_config = (
@@ -1894,13 +2095,25 @@ class HookCheckTest(unittest.TestCase):
 
     def test_nothing_from_the_pull_request_is_executed(self) -> None:
         marker = (self.tmp / "executed").as_posix()
-        payload = f"open({marker!r}, 'w').write('ran')\n".encode()
+        source = f"open({marker!r}, 'w').write('ran')"
+        payload = f"{source}\n".encode()
+        command = shlex.join([Path(sys.executable).as_posix(), "-c", source])
+        # A JSON string is a valid YAML double-quoted scalar, so the candidate
+        # configuration parses and its hook would really run if anything ran it.
         candidate_config = (
             "repos:\n  - repo: local\n    hooks:\n      - id: trailing-whitespace\n"
             "        name: trailing-whitespace\n"
-            f'        entry: "{shlex.join([Path(sys.executable).as_posix(), "-c", payload.decode()])}"\n'
+            f"        entry: {json.dumps(command)}\n"
             "        language: system\n"
         ).encode()
+        # Control: the entry reads back as the command, and the command writes the
+        # marker, so the canary can fire. Without this a broken hook would never run
+        # and the final assertion would pass for the wrong reason.
+        (entry_line,) = [line for line in candidate_config.decode().splitlines() if "entry:" in line]
+        self.assertEqual(json.loads(entry_line.split("entry:", 1)[1]), command)
+        subprocess.run(shlex.split(command), check=True)
+        self.assertTrue(Path(marker).exists(), "the canary command does not write its marker")
+        Path(marker).unlink()
         repo, base, head = self._repo(
             {"README": b"base\n"},
             {
@@ -1930,6 +2143,163 @@ class HookCheckTest(unittest.TestCase):
                 admit_paths.rewriting_hook_exclusions(config)
             self.assertEqual(caught.exception.code, "ADMIT_HOOKS_CONFIG_INVALID")
 
+    def test_a_declaration_form_the_reader_does_not_read_is_refused_not_skipped(self) -> None:
+        """pre-commit runs a hook declared in any valid YAML form; the reader reads only ``- id: x``.
+
+        Each form below makes pre-commit strip the trailing space of ``docs/a.md`` (review of
+        #2720, L1). Read as "not declared", the rule was skipped and the file admitted.
+        """
+        repo_head = (
+            "repos:\n  - repo: https://github.com/pre-commit/pre-commit-hooks\n    rev: v6.0.0\n"
+        )
+        forms = {
+            "id-second-key": repo_head + "    hooks:\n      - name: trim\n        id: trailing-whitespace\n",
+            "flow-sequence": repo_head + "    hooks: [{id: trailing-whitespace}, {id: end-of-file-fixer}]\n",
+            "quoted-key": repo_head + '    hooks:\n      - "id": trailing-whitespace\n',
+            "space-before-colon": repo_head + "    hooks:\n      - id : trailing-whitespace\n",
+            "hash-in-a-quoted-scalar": repo_head + "    hooks: [{name: 'a # b', id: trailing-whitespace}]\n",
+            # Round 2 of the review: a double-quoted escape spells the id without its text, and a
+            # stray quote in a plain scalar must not hide a later declaration.
+            "escape-x2d-later-key": repo_head + '    hooks:\n      - name: trim\n        id: "trailing\\x2dwhitespace"\n',
+            "escape-u002d-flow": repo_head + '    hooks: [{id: "trailing\\u002dwhitespace"}]\n',
+            "escaped-line-break": repo_head + '    hooks:\n      - name: trim\n        id: "trailing-\\\n          whitespace"\n',
+            "stray-apostrophe": repo_head + "    hooks:\n      - id: check-yaml\n        name: rock 'n roll\n"
+                                "      - {name: \"it's # tidy\", id: trailing-whitespace}\n",
+            "stray-double-quote": repo_head + '    hooks:\n      - id: check-yaml\n        name: say "cheese\n'
+                                  "      - {name: 'a \" # b', id: trailing-whitespace}\n",
+            "only-in-a-comment": repo_head + "    hooks:\n      - id: check-yaml  # unlike trailing-whitespace\n",
+        }
+        for name, config in forms.items():
+            with self.subTest(form=name):
+                repo, base, head = self._repo(
+                    {admit_paths.PRE_COMMIT_CONFIG: config.encode()}, {"docs/a.md": b"# A \n"}, name=name,
+                )
+                with self.assertRaises(AdmitError) as caught:
+                    admit_paths.check_rewriting_hooks(repo, base, head, ["docs/a.md"])
+                self.assertEqual(caught.exception.code, "ADMIT_HOOKS_CONFIG_INVALID")
+                self.assertIn("trailing-whitespace", str(caught.exception))
+
+        # A rewriting hook named nowhere is not declared: no hook runs, and the file is admitted.
+        config = repo_head + "    hooks:\n      - id: check-yaml  # no fixer here\n"
+        repo, base, head = self._repo(
+            {admit_paths.PRE_COMMIT_CONFIG: config.encode()}, {"docs/a.md": b"# A \n"}, name="not-named",
+        )
+        self.assertEqual(admit_paths.check_rewriting_hooks(repo, base, head, ["docs/a.md"]),
+                         list(admit_paths.REWRITING_HOOKS))
+        # A hook read as `- id: x` may be mentioned elsewhere: its id is not searched for.
+        _top, hooks = admit_paths.rewriting_hook_exclusions(
+            repo_head + "    hooks:\n      # trailing-whitespace keeps imports as recorded\n"
+            "      - id: trailing-whitespace\n        name: trailing-whitespace\n"
+        )
+        self.assertEqual(set(hooks), {"trailing-whitespace"})
+
+    def test_the_repository_configuration_names_no_undeclared_hook_and_holds_no_escape(self) -> None:
+        """The two refusals above never fire on the repository's own configuration."""
+        config = (ROOT / admit_paths.PRE_COMMIT_CONFIG).read_text(encoding="utf-8")
+        _top, hooks = admit_paths.rewriting_hook_exclusions(config)
+        self.assertEqual(set(hooks), {"trailing-whitespace", "end-of-file-fixer"})
+        self.assertFalse([line for line in config.splitlines() if '"' in line and "\\" in line])
+        for hook_id in hooks:
+            (line,) = [line for line in config.splitlines() if hook_id in line]
+            self.assertEqual(line.strip(), f"- id: {hook_id}")
+
+    def test_a_binary_name_under_minus_text_is_admitted_with_mixed_line_ending_declared(self) -> None:
+        """The CRLF in a ``-text`` path is rewritten by the declared hook only when pre-commit types it text.
+
+        ``logo.png`` (binary by name, CRLF text inside) under ``*.png -text``: Git stores it as it is
+        and the ``types: [text]`` hook skips a ``.png``, so neither rewrites it and it is admitted
+        (main refused it). ``page.md`` under ``*.md -text`` is still refused: the hook rewrites it.
+        """
+        self._name_tags()
+        config = (
+            "repos:\n  - repo: https://github.com/pre-commit/pre-commit-hooks\n    rev: v6.0.0\n    hooks:\n"
+            + "".join(f"      - id: {hook}\n" for hook in admit_paths.REWRITING_HOOKS)
+        )
+        repo, base, head = self._repo(
+            {admit_paths.PRE_COMMIT_CONFIG: config.encode(), ".gitattributes": b"*.png -text\n*.md -text\n"},
+            {"assets/logo.png": b"a\r\nb\r\n", "docs/page.md": b"a\r\nb\r\n"},
+            unfiltered_head=True,
+        )
+        check = admit_paths.check_rewriting_hooks
+        self.assertEqual(check(repo, base, head, ["assets/logo.png"]), list(admit_paths.REWRITING_HOOKS))
+        with self.assertRaises(AdmitError) as caught:
+            check(repo, base, head, ["docs/page.md"])
+        self.assertIn("docs/page.md: CRLF or CR line endings (the repository stores text with LF) (mixed-line-ending)",
+                      str(caught.exception))
+
+    #: identify 2.6.20's ``tags_from_filename`` for the names below (checked against the
+    #: installed package when there is one).
+    _NAME_TAGS = {
+        "data.jar": {"binary", "jar", "zip"},
+        "figure.eps": {"binary", "eps"},
+        "logo.png": {"binary", "image", "png"},
+        "page.md": {"text", "markdown"},
+        "Dockerfile.png": {"binary", "dockerfile", "image", "png", "text"},
+    }
+
+    def _name_tags(self) -> None:
+        installed = admit_paths._identify_filename_tags("x.txt") is not None
+        for name, tags in self._NAME_TAGS.items():
+            if installed:
+                self.assertEqual(admit_paths._identify_filename_tags(name), tags, name)
+        self.enterContext(mock.patch.object(
+            admit_paths, "_identify_filename_tags",
+            side_effect=lambda path: set(self._NAME_TAGS[PurePosixPath(path).name]),
+        ))
+
+    def test_the_line_ending_rule_follows_git_not_the_file_name(self) -> None:
+        """Git normalizes CRLF in a path its attributes leave as text, whatever ``identify`` says the name is.
+
+        The repository's ``* text=auto eol=lf`` leaves ``.jar`` and ``.eps`` to Git's content test,
+        so a text ``.jar`` with CRLF is rewritten by ``git add --renormalize`` (review of #2720, L2).
+        """
+        self._name_tags()
+        base = {
+            admit_paths.PRE_COMMIT_CONFIG: (ROOT / admit_paths.PRE_COMMIT_CONFIG).read_bytes(),
+            ".gitattributes": (ROOT / ".gitattributes").read_bytes(),
+        }
+        head_files = {
+            "assets/data.jar": b"a\r\nb\r\n",
+            "assets/figure.eps": b"%!PS-Adobe-3.0 EPSF-3.0\r\n%%EOF\r\n",
+            "assets/real/data.jar": b"PK\x03\x04\x14\x00\x00\x00\x08\x00\r\n\x00\x00 \n",
+            "assets/logo.png": b"text \r\nonly\r\n",
+            "docs/page.md": b"a\r\nb\r\n",
+        }
+        repo, base_sha, head = self._repo(base, head_files, unfiltered_head=True)
+        for path, data in head_files.items():
+            self.assertEqual(git_bytes(repo, "cat-file", "blob", f"{head}:{path}"), data, "the blob keeps its CRLF")
+        check = admit_paths.check_rewriting_hooks
+        for path in ("assets/data.jar", "assets/figure.eps", "docs/page.md"):
+            with self.subTest(path=path):
+                with self.assertRaises(AdmitError) as caught:
+                    check(repo, base_sha, head, [path])
+                self.assertEqual(caught.exception.code, "ADMIT_HOOKS_WOULD_REWRITE")
+                self.assertIn(f"{path}: CRLF or CR line endings", str(caught.exception))
+                self.assertIn("(Git text normalization; convert it to LF)", str(caught.exception))
+        # Bytes that are not text, under a binary name: neither Git nor the hooks touch them.
+        self.assertEqual(check(repo, base_sha, head, ["assets/real/data.jar"]), list(admit_paths.REWRITING_HOOKS))
+        # *.png is binary in the repository's attributes, so Git leaves the CRLF, and the hooks skip a .png.
+        self.assertEqual(check(repo, base_sha, head, ["assets/logo.png"]), list(admit_paths.REWRITING_HOOKS))
+        self.assertEqual(admit_paths.rewriting_hook_findings(b"a \r\nb\r\n", "assets/data.jar"),
+                         {"mixed-line-ending": "CRLF or CR line endings (the repository stores text with LF)"},
+                         "the name still keeps the three other rules away, as it keeps the hooks away")
+
+    def test_a_name_identify_tags_both_text_and_binary_is_text(self) -> None:
+        """``Dockerfile.png`` is tagged both ``text`` and ``binary``: the text hooks run on it.
+
+        pre-commit selects a hook's files with ``tags >= types``, so a ``types: [text]`` hook runs
+        on any file carrying the ``text`` tag, whatever else it carries; the review's ground truth
+        saw the pinned hooks rewrite this name. The text tag therefore wins over the binary one.
+        """
+        self._name_tags()
+        self.assertTrue(admit_paths.hook_file_is_text("Dockerfile.png", b"\x89PNG\r\n\x1a\n\x00"))
+        self.assertEqual(set(admit_paths.rewriting_hook_findings(b"FROM scratch \n", "Dockerfile.png")),
+                         {"trailing-whitespace"})
+        repo, base, head = self._repo({"README": b"base\n"}, {"Dockerfile.png": b"FROM scratch \n"})
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.check_rewriting_hooks(repo, base, head, ["Dockerfile.png"])
+        self.assertIn("Dockerfile.png: trailing whitespace on line 1 (trailing-whitespace)", str(caught.exception))
+
     def test_the_repository_configuration_is_read(self) -> None:
         config = (ROOT / admit_paths.PRE_COMMIT_CONFIG).read_text(encoding="utf-8")
         top, hooks = admit_paths.rewriting_hook_exclusions(config)
@@ -1952,7 +2322,7 @@ class HookCheckTest(unittest.TestCase):
         self.assertFalse(hooks["trailing-whitespace"].search("tests/fixtures/fonts/gudea/PIN.json"))
         self.assertFalse(hooks["trailing-whitespace"].search("fixtures/fonts/gudea/OFL.txt"))
         data = (ROOT / "tests" / "fixtures" / "fonts" / "gudea" / "OFL.txt").read_bytes()
-        self.assertIn("trailing-whitespace", admit_paths.rewriting_hook_findings(data),
+        self.assertIn("trailing-whitespace", admit_paths.rewriting_hook_findings(data, "tests/fixtures/fonts/gudea/OFL.txt"),
                       "the exclusion is only needed while the text has trailing whitespace")
 
     def test_no_rewriting_hook_exclusion_names_a_path_the_top_level_exclusion_already_removes(self) -> None:
