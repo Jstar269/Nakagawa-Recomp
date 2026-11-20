@@ -11986,7 +11986,10 @@ bool player_app_recheck_inspected_disc(PlayerApp *app) {
     }
     memset(&inspected, 0, sizeof(inspected));
     if (!iso_inspect_file(game->iso_path, &inspected) || !inspected.success ||
-        !inspected.param_sfo_parsed || strcmp(inspected.disc_id, game->disc_id) != 0) {
+        !inspected.param_sfo_parsed ||
+        nk_iso_library_key_match(inspected.disc_id, inspected.disc_key_version,
+                                 inspected.legacy_disc_id, game->disc_id,
+                                 game->disc_key_version) == NK_ISO_KEY_NO_MATCH) {
         /* The image moved, stopped reading, or is now another game: the card
            keeps the first disc's identity, so nothing from this file is used. */
         player_app_build_compatibility_preflight(app, false, false, NULL);
@@ -12246,7 +12249,10 @@ bool player_app_build_package_preflight(PlayerApp *app, int game_index,
         player_package_preflight_action_folder(preflight, game, runtime_root);
         return false;
     }
-    if (strcmp(inspected.disc_id, game->disc_id) != 0) {
+    /* An entry made before the v2 key keeps its v1 key (nk_iso_library_key_match). */
+    if (nk_iso_library_key_match(inspected.disc_id, inspected.disc_key_version,
+                                 inspected.legacy_disc_id, game->disc_id,
+                                 game->disc_key_version) == NK_ISO_KEY_NO_MATCH) {
         snprintf(message, sizeof(message),
                  "SOURCE_ISO_IDENTITY_MISMATCH: ISO has disc ID %.32s; library entry expects %.32s.",
                  inspected.disc_id, game->disc_id);

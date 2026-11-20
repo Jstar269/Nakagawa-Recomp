@@ -1572,6 +1572,18 @@ static bool nk_iso_non_retail_identity(const char *iso_path, const uint8_t *sfo,
         ok = nk_iso_sha256_update_extent(&ctx, reader, boot_lba, boot_size, buffer,
                                          (uint32_t)CHUNK);
     }
+    /* A v2-keyed disc also carries its v1 key: a library entry made before v2
+       holds that one and keeps it (nk_iso_library_key_match). */
+    uint8_t legacy_digest[32] = {0};
+    if (ok && boot_keyed) {
+        NkSha256 legacy;
+        nk_sha256_init(&legacy);
+        nk_sha256_update(&legacy, (const uint8_t *)domain_v1, sizeof(domain_v1));
+        nk_iso_sha256_update_u64(&legacy, sfo_size);
+        nk_sha256_update(&legacy, sfo, sfo_size);
+        ok = nk_iso_sha256_update_extent(&legacy, reader, lba, size, buffer, (uint32_t)CHUNK);
+        if (ok) nk_sha256_finish(&legacy, legacy_digest);
+    }
     free(buffer);
     if (reader) nk_iso_reader_close(reader);
     if (!ok) {
@@ -1591,7 +1603,53 @@ static bool nk_iso_non_retail_identity(const char *iso_path, const uint8_t *sfo,
     meta->identity_sha256[64] = '\0';
     nk_non_retail_disc_key(digest, meta->disc_id);
     meta->non_retail = true;
+    meta->disc_key_version = boot_keyed ? 2u : 1u;
+    meta->legacy_disc_id[0] = '\0';
+    meta->legacy_identity_sha256[0] = '\0';
+    if (boot_keyed) {
+        for (size_t i = 0; i < sizeof(legacy_digest); i++) {
+            meta->legacy_identity_sha256[i * 2u] = hex[legacy_digest[i] >> 4];
+            meta->legacy_identity_sha256[i * 2u + 1u] = hex[legacy_digest[i] & 15u];
+        }
+        meta->legacy_identity_sha256[64] = '\0';
+        nk_non_retail_disc_key(legacy_digest, meta->legacy_disc_id);
+    }
     return true;
+}
+
+NkIsoKeyMatch nk_iso_library_key_match(const char *image_key, uint32_t image_key_version,
+                                       const char *legacy_key, const char *entry_key,
+                                       uint32_t entry_key_version) {
+    if (!image_key || !entry_key || !entry_key[0]) return NK_ISO_KEY_NO_MATCH;
+    if (entry_key_version == 2u) {
+        return image_key_version == 2u && strcmp(image_key, entry_key) == 0
+                   ? NK_ISO_KEY_MATCH : NK_ISO_KEY_NO_MATCH;
+    }
+    if (image_key_version == 2u) {
+        return legacy_key && legacy_key[0] && strcmp(legacy_key, entry_key) == 0
+                   ? NK_ISO_KEY_MATCH_LEGACY : NK_ISO_KEY_NO_MATCH;
+    }
+    return strcmp(image_key, entry_key) == 0 ? NK_ISO_KEY_MATCH : NK_ISO_KEY_NO_MATCH;
+}
+
+uint32_t nk_iso_library_key_for_image(const NkGameEntry *entries, int count,
+                                      const char *image_key, uint32_t image_key_version,
+                                      const char *legacy_key, char *out_key,
+                                      size_t out_key_size) {
+    if (!image_key || !out_key || out_key_size == 0u) return 0u;
+    /* The old key first: an entry made before v2 keeps it. */
+    if (entries && image_key_version == 2u && legacy_key && legacy_key[0]) {
+        for (int i = 0; i < count; i++) {
+            if (nk_iso_library_key_match(image_key, image_key_version, legacy_key,
+                                         entries[i].disc_id, entries[i].disc_key_version) ==
+                NK_ISO_KEY_MATCH_LEGACY) {
+                snprintf(out_key, out_key_size, "%s", legacy_key);
+                return 1u;
+            }
+        }
+    }
+    snprintf(out_key, out_key_size, "%s", image_key);
+    return image_key_version;
 }
 
 /* The PSP ELF32/MIPS image layout rule, shared by every reader in this tree.

@@ -21,6 +21,10 @@ typedef struct {
     NkIsoExecutableReport executables;
     char matched_title_id[65];
     GameSupportStatus status;
+    /* NkIsoMetadata.disc_key_version and legacy_disc_id: which key disc_id is, and
+       the v1 key of a v2-keyed disc (nk_iso_library_key_match). */
+    uint32_t disc_key_version;
+    char legacy_disc_id[MAX_DISC_ID_LEN];
 } IsoInspectResult;
 
 /* Inspects a raw PSP ISO9660 disc image directly */

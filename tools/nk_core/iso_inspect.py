@@ -7,13 +7,14 @@ from __future__ import annotations
 
 from collections import deque
 import hashlib
+import dataclasses
 from dataclasses import dataclass
 import functools
 from pathlib import Path
 import re
 import struct
 import threading
-from typing import Any, Dict, Iterator, Optional, Sequence, overload
+from typing import Any, Dict, Iterable, Iterator, NamedTuple, Optional, Sequence, overload
 
 import psp_import_table
 import title_manifest
@@ -789,10 +790,22 @@ def is_non_retail_key(disc_id: str) -> bool:
     )
 
 
+class NonRetailIdentity(NamedTuple):
+    """A non-retail disc's content key (_non_retail_identity)."""
+    key: str
+    sha256: str
+    # 1 for the v1 key (PARAM.SFO and EBOOT.BIN), 2 for the v2 key that covers BOOT.BIN.
+    version: int
+    # For a v2-keyed disc, its v1 key and digest: the key a library entry made before v2
+    # holds, which that entry keeps (key_match_for_library_entry). Empty otherwise.
+    legacy_key: str = ""
+    legacy_sha256: str = ""
+
+
 def _non_retail_identity(
     stream, file_size: int, raw_sfo: bytes, sfo_disc_id: str
-) -> tuple[str, str]:
-    """Key a non-retail disc by its contents: returns (library key, SHA-256 hex).
+) -> NonRetailIdentity:
+    """Key a non-retail disc by its contents.
 
     The digest is SHA-256 over NON_RETAIL_KEY_DOMAIN, then the PARAM.SFO bytes and
     the bytes of the disc's main executable, PSP_GAME/SYSDIR/EBOOT.BIN (the file a
@@ -835,21 +848,98 @@ def _non_retail_identity(
         parts.append(boot_entry)
     elif entry[1] == 0:
         raise refusal
-    digest = hashlib.sha256(NON_RETAIL_KEY_DOMAIN_BOOT if boot_keyed else NON_RETAIL_KEY_DOMAIN)
-    digest.update(struct.pack("<Q", len(raw_sfo)))
-    digest.update(raw_sfo)
-    try:
-        for lba, size in parts:
-            digest.update(struct.pack("<Q", size))
-            offset = 0
-            while offset < size:
-                count = min(1024 * 1024, size - offset)
-                digest.update(_read_iso_extent(stream, file_size, lba, size, offset, count))
-                offset += count
-    except IsoInspectionError as exc:
-        raise refusal from exc
-    value = digest.digest()
-    return non_retail_disc_key(value), value.hex()
+    def content_digest(domain: bytes, extents: list[tuple[int, int]]) -> bytes:
+        digest = hashlib.sha256(domain)
+        digest.update(struct.pack("<Q", len(raw_sfo)))
+        digest.update(raw_sfo)
+        try:
+            for lba, size in extents:
+                digest.update(struct.pack("<Q", size))
+                offset = 0
+                while offset < size:
+                    count = min(1024 * 1024, size - offset)
+                    digest.update(_read_iso_extent(stream, file_size, lba, size, offset, count))
+                    offset += count
+        except IsoInspectionError as exc:
+            raise refusal from exc
+        return digest.digest()
+
+    if not boot_keyed:
+        value = content_digest(NON_RETAIL_KEY_DOMAIN, parts)
+        return NonRetailIdentity(non_retail_disc_key(value), value.hex(), 1)
+    value = content_digest(NON_RETAIL_KEY_DOMAIN_BOOT, parts)
+    legacy = content_digest(NON_RETAIL_KEY_DOMAIN, parts[:1])
+    return NonRetailIdentity(
+        non_retail_disc_key(value), value.hex(), 2, non_retail_disc_key(legacy), legacy.hex()
+    )
+
+
+# How a disc image's key relates to a library entry's (nk_iso_library_key_match in
+# src/core/nk_iso.c).
+KEY_NO_MATCH = 0
+KEY_MATCH = 1
+KEY_MATCH_LEGACY = 2
+
+
+def key_match_for_library_entry(meta: IsoMetadata, entry_key: str, entry_key_version: int) -> int:
+    """Whether a library entry is this image's (docs/YOUR_OWN_GAMES.md).
+
+    An entry records the version of its key (disc_key_version; absent or 0 for an entry
+    written before versions were recorded, read as 1). An entry of version 2 is this
+    image's only under its v2 key; an entry of version 0 or 1 only under its v1 key,
+    which for a v2-keyed image is legacy_disc_id (KEY_MATCH_LEGACY). The two kinds
+    never stand for each other.
+    """
+    if not entry_key:
+        return KEY_NO_MATCH
+    if entry_key_version == 2:
+        return KEY_MATCH if meta.disc_key_version == 2 and meta.disc_id == entry_key             else KEY_NO_MATCH
+    if meta.disc_key_version == 2:
+        return KEY_MATCH_LEGACY if meta.legacy_disc_id and meta.legacy_disc_id == entry_key             else KEY_NO_MATCH
+    return KEY_MATCH if meta.disc_id == entry_key else KEY_NO_MATCH
+
+
+def keyed_as_legacy(meta: IsoMetadata) -> IsoMetadata:
+    """The same image named by its v1 key, as the library entry made before v2 holds it."""
+    return dataclasses.replace(
+        meta, disc_id=meta.legacy_disc_id, identity_sha256=meta.legacy_identity_sha256,
+        disc_key_version=1, legacy_disc_id="", legacy_identity_sha256="",
+    )
+
+
+def metadata_for_library_entry(
+    meta: IsoMetadata, entry_key: str, entry_key_version: int
+) -> IsoMetadata | None:
+    """The image keyed as the library entry holds it, or None when the entry is not its."""
+    match = key_match_for_library_entry(meta, entry_key, entry_key_version)
+    if match == KEY_MATCH_LEGACY:
+        return keyed_as_legacy(meta)
+    return meta if match == KEY_MATCH else None
+
+
+def library_record_key_version(record: Any) -> int:
+    """A library record's disc_key_version: 0 when absent; a value other than 0, 1 or 2
+    is refused, as the player's loader refuses it."""
+    value = record.get("disc_key_version", 0) if isinstance(record, dict) else 0
+    if type(value) is not int or value not in (0, 1, 2):
+        raise IsoInspectionError("a library record's disc_key_version is not 0, 1 or 2")
+    return value
+
+
+def metadata_for_new_library_record(meta: IsoMetadata, records: Iterable[Any]) -> IsoMetadata:
+    """The key an image is added under (nk_iso_library_key_for_image): a v2-keyed image
+    whose v1 key an entry made before v2 holds keeps that key, so adding the same disc
+    again finds its entry; any other image keeps its own key. Nothing is changed."""
+    if meta.disc_key_version == 2 and meta.legacy_disc_id:
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            entry_key = str(record.get("disc_id", "")).upper()
+            if key_match_for_library_entry(
+                meta, entry_key, library_record_key_version(record)
+            ) == KEY_MATCH_LEGACY:
+                return keyed_as_legacy(meta)
+    return meta
 
 
 def _pbp_display_title(title: str) -> str:
@@ -1003,6 +1093,7 @@ def inspect_iso(
 
         sfo_disc_id = ""
         identity_sha256 = ""
+        content_identity: NonRetailIdentity | None = None
         if sfo_entry is None:
             disc_id = "UNKNOWN"
             title = "Unknown PSP Title"
@@ -1018,9 +1109,9 @@ def inspect_iso(
             sfo_disc_id = sfo_dict.get("DISC_ID", "")
             key = disc_id_library_key(sfo_disc_id)
             if key is None:
-                key, identity_sha256 = _non_retail_identity(
-                    f, size_bytes, raw_sfo, sfo_disc_id
-                )
+                content_identity = _non_retail_identity(f, size_bytes, raw_sfo, sfo_disc_id)
+                key = content_identity.key
+                identity_sha256 = content_identity.sha256
             disc_id = key
             title = sfo_dict.get("TITLE", "")
             version = sfo_dict.get("DISC_VERSION", "1.00")
@@ -1102,6 +1193,9 @@ def inspect_iso(
             sfo_disc_id=sfo_disc_id,
             non_retail=bool(identity_sha256),
             identity_sha256=identity_sha256,
+            disc_key_version=content_identity.version if content_identity else 0,
+            legacy_disc_id=content_identity.legacy_key if content_identity else "",
+            legacy_identity_sha256=content_identity.legacy_sha256 if content_identity else "",
         )
 
 

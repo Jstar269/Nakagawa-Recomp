@@ -140,6 +140,13 @@ class IsoMetadata:
     sfo_disc_id: str = ""
     non_retail: bool = False
     identity_sha256: str = ""
+    # Which key disc_id is: 0 for the disc's own ID, 1 for the v1 content key, 2 for
+    # the v2 content key of a disc that boots BOOT.BIN beside an empty or zero-filled
+    # EBOOT.BIN. A v2-keyed disc also carries its v1 key and digest, the key a library
+    # entry made before v2 holds (iso_inspect.key_match_for_library_entry).
+    disc_key_version: int = 0
+    legacy_disc_id: str = ""
+    legacy_identity_sha256: str = ""
 
     @property
     def is_supported(self) -> bool:

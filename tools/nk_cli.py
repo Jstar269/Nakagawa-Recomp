@@ -88,6 +88,9 @@ from nk_core.library import (  # noqa: E402
 )
 from nk_core.prereq_fetcher import PrerequisiteFetchError, default_data_root  # noqa: E402
 from nk_core.iso_inspect import (  # noqa: E402
+    library_record_key_version,
+    metadata_for_library_entry,
+    metadata_for_new_library_record,
     MAX_EXECUTABLE_BYTES,
     MAX_MODULE_CANDIDATES,
     IsoInspectionError,
@@ -3106,8 +3109,14 @@ def _package_preflight(st):
             metadata.qualification_error +
             " Rebuild with --register-local-compatibility-record only after reviewing this exact local input."
         )
-    if metadata.disc_id != disc_id:
+    # An entry made before the v2 key keeps its v1 key (docs/YOUR_OWN_GAMES.md).
+    try:
+        keyed = metadata_for_library_entry(metadata, disc_id, library_record_key_version(entry))
+    except IsoInspectionError as exc:
+        raise PackageBuildError(f"Library entry {disc_id}: {exc}.") from exc
+    if keyed is None:
         raise PackageBuildError(f"ISO identity {metadata.disc_id} no longer matches library entry {disc_id}.")
+    metadata = keyed
     preflight = inspect_compatibility_preflight(iso_path, metadata=metadata,
                                                 runtime_root=user_root)
     selected_value = preflight.get("selected_executable")
@@ -5177,6 +5186,23 @@ def _library_record_to_replace(games: list, disc_id: str, digest: disc_verify.Di
     return None
 
 
+def _bringup_library_records(user_root: Path) -> list:
+    """The bring-up library's records, for choosing a disc's key; none when there is no
+    library yet. A library that cannot be read is refused by its writer
+    (_write_bringup_library_locked) before anything is added."""
+    library_path = user_root / "library.json"
+    if not library_path.is_file():
+        return []
+    try:
+        payload = _read_library_json(library_path)
+    except (OSError, ValueError) as exc:
+        raise PackageBuildError(
+            f"The bring-up user library at {library_path} is unreadable or exceeds a bounded-input limit: {exc}"
+        ) from exc
+    games = payload.get("games") if isinstance(payload, dict) else None
+    return list(games) if isinstance(games, list) else []
+
+
 def _write_bringup_library(user_root: Path, iso_path: Path, metadata, title_id: str,
                            selected: str, is_experimental: bool,
                            boot_executable: str = "",
@@ -5221,6 +5247,11 @@ def _write_bringup_library_locked(user_root: Path, iso_path: Path, metadata, tit
         if digest is not None and digest.sha1 and \
                 isinstance(old, dict) and _library_content_sha1(old) == digest.sha1:
             record = dict(old)
+    # The version of a content key (1 or 2), so an entry's key is never read as the other
+    # kind; a disc keyed by its own ID records none.
+    key_version = getattr(metadata, "disc_key_version", 0)
+    if type(key_version) is int and key_version in (1, 2):
+        record["disc_key_version"] = key_version
     record.update({
         "disc_id": metadata.disc_id.upper(),
         "title_id": title_id,
@@ -5824,6 +5855,8 @@ def _bringup_inspect(st):
         registry = TitleRegistry(include_defaults=True)
         registry.load_local_manifests(user_root / "manifests")
         metadata = inspect_iso(iso_path, registry=registry)
+        # The same disc added before the v2 key keeps its entry's v1 key.
+        metadata = metadata_for_new_library_record(metadata, _bringup_library_records(user_root))
         preflight = inspect_compatibility_preflight(
             iso_path, metadata=metadata, runtime_root=user_root
         )

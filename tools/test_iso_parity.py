@@ -762,6 +762,9 @@ int main(int argc, char **argv) {
         printf("NON_RETAIL:%d\\n", meta.non_retail ? 1 : 0);
         printf("IDENTITY_SHA256:%s\\n", meta.identity_sha256);
         printf("NON_RETAIL_KEY_LABEL:%d\\n", nk_disc_id_is_non_retail_key(meta.disc_id) ? 1 : 0);
+        printf("DISC_KEY_VERSION:%u\\n", (unsigned)meta.disc_key_version);
+        printf("LEGACY_DISC_ID:%s\\n", meta.legacy_disc_id);
+        printf("LEGACY_IDENTITY_SHA256:%s\\n", meta.legacy_identity_sha256);
         printf("TITLE:%s\\n", meta.title_name);
         printf("VERSION:%s\\n", meta.disc_version);
         printf("VOLUME_ID:%s\\n", meta.volume_id);
@@ -774,6 +777,42 @@ int main(int argc, char **argv) {
         printf("BOOT_FALLBACK:%d\\n", meta.executables.boot_fallback ? 1 : 0);
         printf("MATCHED_ID:%s\\n", meta.matched_title_id[0] ? meta.matched_title_id : "NONE");
         printf("STATUS:%d\\n", (int)meta.status);
+        return 0;
+    }
+
+    if (strcmp(mode, "library_key") == 0) {
+        /* The key an image is added under and how each entry of a library file relates
+           to it (nk_iso_library_key_for_image, nk_iso_library_key_match); then the image
+           is added under that key and removed again, as the player does. */
+        if (argc < 4) return 1;
+        static NkLibrary lib;  /* too large for the stack (NK_MAX_GAMES) */
+        static NkLibrary saved;
+        static NkIsoMetadata meta;
+        if (nk_library_load(&lib, argv[3]) != NK_OK) return 3;
+        if (nk_iso_inspect(argv[2], &meta) != NK_OK) return 4;
+        for (int i = 0; i < lib.count; i++) {
+            printf("MATCH:%s:%u:%d\\n", lib.entries[i].disc_id,
+                   (unsigned)lib.entries[i].disc_key_version,
+                   (int)nk_iso_library_key_match(meta.disc_id, meta.disc_key_version,
+                                                 meta.legacy_disc_id, lib.entries[i].disc_id,
+                                                 lib.entries[i].disc_key_version));
+        }
+        NkGameEntry added;
+        memset(&added, 0, sizeof(added));
+        added.disc_key_version = nk_iso_library_key_for_image(
+            lib.entries, lib.count, meta.disc_id, meta.disc_key_version, meta.legacy_disc_id,
+            added.disc_id, sizeof(added.disc_id));
+        printf("ADD:%s:%u\\n", added.disc_id, (unsigned)added.disc_key_version);
+        snprintf(added.title_name, sizeof(added.title_name), "%s", meta.title_name);
+        snprintf(added.iso_path, sizeof(added.iso_path), "%s", argv[2]);
+        if (nk_library_add_or_update(&lib, &added) != NK_OK) return 5;
+        if (nk_library_save(&lib, argv[3]) != NK_OK) return 6;
+        if (nk_library_load(&saved, argv[3]) != NK_OK) return 7;
+        printf("COUNT_AFTER_ADD:%d\\n", saved.count);
+        const NkGameEntry *found = nk_library_find_by_disc_id(&saved, added.disc_id);
+        printf("SAVED_VERSION:%u\\n", found ? (unsigned)found->disc_key_version : 99u);
+        if (nk_library_remove_by_file(&saved, added.disc_id, argv[2]) != NK_OK) return 8;
+        printf("COUNT_AFTER_REMOVE:%d\\n", saved.count);
         return 0;
     }
 
@@ -2535,6 +2574,128 @@ int main(int argc, char **argv) {
                 if name == "real-eboot-alone":
                     self.assertEqual(key, self.BETA_KEY)
                 self._assert_identity_in_both_tiers(iso_file, key, digest)
+
+    def _native_library_key(self, iso_file: Path, library: Path) -> dict[str, list[str]]:
+        res = subprocess.run(
+            [str(self.exe_path), "library_key", str(iso_file), str(library)],
+            capture_output=True, text=True, encoding="utf-8", errors="strict",
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        lines: dict[str, list[str]] = {}
+        for line in res.stdout.splitlines():
+            name, _, value = line.partition(":")
+            lines.setdefault(name, []).append(value)
+        return lines
+
+    @staticmethod
+    def _write_library(path: Path, records: list[dict]) -> None:
+        path.write_bytes(json.dumps({"schema_version": 1, "games": records}).encode("utf-8"))
+
+    def test_prototype_entry_made_before_v2_keeps_its_v1_key(self) -> None:
+        """Owner decision of 2026-11-20 on F-2281ebab (option b): a library entry made under
+        the v1 key keeps it. The image is found, opened, added again and removed under that
+        key in both tiers; a library without such an entry adds the disc under its v2 key;
+        and an entry's recorded key version keeps the two kinds from standing for each other.
+        """
+        sfo = build_param_sfo(self.BETA_DISC_ID, "Synthetic Beta")
+        placeholder = bytes(2048)
+        boot = build_plain_mips_elf()
+        iso_file = self.temp_dir / "proto-old-entry.iso"
+        create_test_iso_with_executables(
+            iso_file, placeholder, boot, disc_id=self.BETA_DISC_ID, title="Synthetic Beta",
+        )
+        v1_key, v1_digest = self._expected_identity(sfo, placeholder)
+        v2_key, v2_digest = self._expected_boot_identity(sfo, placeholder, boot)
+        self.assertNotEqual(v1_key, v2_key)
+
+        meta = inspect_iso(iso_file)
+        self.assertEqual(
+            (meta.disc_id, meta.identity_sha256, meta.disc_key_version, meta.legacy_disc_id,
+             meta.legacy_identity_sha256),
+            (v2_key, v2_digest, 2, v1_key, v1_digest),
+        )
+        c_meta = self._run_native_inspect(iso_file)
+        self.assertEqual(
+            (c_meta.get("DISC_ID"), c_meta.get("IDENTITY_SHA256"), c_meta.get("DISC_KEY_VERSION"),
+             c_meta.get("LEGACY_DISC_ID"), c_meta.get("LEGACY_IDENTITY_SHA256")),
+            (v2_key, v2_digest, "2", v1_key, v1_digest),
+        )
+
+        # An entry written before key versions were recorded, under the v1 key.
+        old_record = {"disc_id": v1_key, "title_name": "Synthetic Beta", "iso_path": str(iso_file)}
+        keyed = iso_inspect.metadata_for_library_entry(meta, v1_key, 0)
+        assert keyed is not None
+        self.assertEqual(
+            (keyed.disc_id, keyed.identity_sha256, keyed.disc_key_version, keyed.legacy_disc_id),
+            (v1_key, v1_digest, 1, ""),
+        )
+        self.assertEqual(
+            iso_inspect.metadata_for_new_library_record(meta, [old_record]).disc_id, v1_key
+        )
+        library = self.temp_dir / "old-key-library.json"
+        self._write_library(library, [old_record])
+        lines = self._native_library_key(iso_file, library)
+        self.assertEqual(lines.get("MATCH"), [f"{v1_key}:0:2"])
+        self.assertEqual(lines.get("ADD"), [f"{v1_key}:1"])
+        self.assertEqual(
+            (lines.get("COUNT_AFTER_ADD"), lines.get("SAVED_VERSION"),
+             lines.get("COUNT_AFTER_REMOVE")),
+            (["1"], ["1"], ["0"]),
+            "the disc added again is the entry already there, under its v1 key",
+        )
+
+        # A library without that entry adds the disc under its v2 key, and records it.
+        self.assertIs(iso_inspect.metadata_for_new_library_record(meta, []), meta)
+        fresh = self.temp_dir / "fresh-library.json"
+        self._write_library(fresh, [])
+        lines = self._native_library_key(iso_file, fresh)
+        self.assertEqual(lines.get("ADD"), [f"{v2_key}:2"])
+        self.assertEqual((lines.get("COUNT_AFTER_ADD"), lines.get("SAVED_VERSION")),
+                         (["1"], ["2"]))
+
+        # The recorded version decides which key an entry holds; the kinds never mix.
+        cases = {
+            "v1 entry": (v1_key, 1, iso_inspect.KEY_MATCH_LEGACY),
+            "v2 entry": (v2_key, 2, iso_inspect.KEY_MATCH),
+            "v1 key marked v2": (v1_key, 2, iso_inspect.KEY_NO_MATCH),
+            "v2 key marked v1": (v2_key, 1, iso_inspect.KEY_NO_MATCH),
+            "v2 key unmarked": (v2_key, 0, iso_inspect.KEY_NO_MATCH),
+        }
+        for name, (entry_key, version, expected) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(
+                    iso_inspect.key_match_for_library_entry(meta, entry_key, version), expected
+                )
+                record = {"disc_id": entry_key, "title_name": "Synthetic Beta",
+                          "iso_path": str(self.temp_dir / "elsewhere.iso"),
+                          "disc_key_version": version}
+                case_library = self.temp_dir / f"key-case-{version}-{entry_key}.json"
+                self._write_library(case_library, [record])
+                lines = self._native_library_key(iso_file, case_library)
+                self.assertEqual(lines.get("MATCH"), [f"{entry_key}:{version}:{expected}"])
+                self.assertEqual(
+                    lines.get("ADD"),
+                    [f"{v1_key}:1"] if expected == iso_inspect.KEY_MATCH_LEGACY
+                    else [f"{v2_key}:2"],
+                )
+
+        # A disc with a v1 key (a real EBOOT.BIN) matches its entry as before.
+        real = self.temp_dir / "real-eboot.iso"
+        create_test_iso_with_executables(
+            real, self.BETA_EXECUTABLE, disc_id=self.BETA_DISC_ID, title="Synthetic Beta",
+        )
+        real_meta = inspect_iso(real)
+        self.assertEqual((real_meta.disc_id, real_meta.disc_key_version, real_meta.legacy_disc_id),
+                         (self.BETA_KEY, 1, ""))
+        for version in (0, 1):
+            self.assertEqual(
+                iso_inspect.key_match_for_library_entry(real_meta, self.BETA_KEY, version),
+                iso_inspect.KEY_MATCH,
+            )
+        self.assertEqual(
+            iso_inspect.key_match_for_library_entry(real_meta, self.BETA_KEY, 2),
+            iso_inspect.KEY_NO_MATCH,
+        )
 
     def test_cli_inspect_names_a_non_retail_disc(self) -> None:
         iso_file = self.temp_dir / "cli-beta.iso"

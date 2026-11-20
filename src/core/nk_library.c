@@ -350,6 +350,9 @@ NkResult nk_library_save(const NkLibrary *lib, const char *file_path) {
             write_json_string_field(f, "content_sha1", g->content_sha1);
             write_json_string_field(f, "content_crc32", g->content_crc32);
         }
+        if (g->disc_key_version != 0u) {
+            fprintf(f, "      \"disc_key_version\": %u,\n", (unsigned)g->disc_key_version);
+        }
         if (g->disc_verification != NK_DISC_TIER_NOT_CHECKED) {
             write_json_string_field(f, "disc_verification",
                                     nk_disc_tier_name((NkDiscTier)g->disc_verification));
@@ -779,10 +782,12 @@ static NkResult nk_library_load_from_file(NkLibrary *lib, const char *target,
                            strcmp(key, "extracted_layout_count") == 0 ||
                            strcmp(key, "executable_eboot_kind") == 0 ||
                            strcmp(key, "executable_boot_kind") == 0 ||
-                           strcmp(key, "executable_selection") == 0) {
+                           strcmp(key, "executable_selection") == 0 ||
+                           strcmp(key, "disc_key_version") == 0) {
                     char *endptr = NULL;
                     unsigned long value = strtoul(p, &endptr, 10);
                     unsigned long maximum = UINT32_MAX;
+                    if (strcmp(key, "disc_key_version") == 0) maximum = 2;
                     if (strcmp(key, "executable_eboot_kind") == 0 ||
                         strcmp(key, "executable_boot_kind") == 0) maximum = 5;
                     if (strcmp(key, "executable_selection") == 0) maximum = 2;
@@ -790,7 +795,9 @@ static NkResult nk_library_load_from_file(NkLibrary *lib, const char *target,
                         entry_failed = true;
                         break;
                     }
-                    if (strcmp(key, "executable_eboot_kind") == 0) {
+                    if (strcmp(key, "disc_key_version") == 0) {
+                        entry.disc_key_version = (uint32_t)value;
+                    } else if (strcmp(key, "executable_eboot_kind") == 0) {
                         entry.executable_eboot_kind = (uint32_t)value;
                     } else if (strcmp(key, "executable_boot_kind") == 0) {
                         entry.executable_boot_kind = (uint32_t)value;

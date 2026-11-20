@@ -44,6 +44,9 @@ bool iso_inspect_file(const char *iso_path, IsoInspectResult *out_result) {
              sizeof(out_result->matched_title_id), "%s",
              meta.matched_title_id);
     out_result->status = (GameSupportStatus)meta.status;
+    out_result->disc_key_version = meta.disc_key_version;
+    snprintf(out_result->legacy_disc_id, sizeof(out_result->legacy_disc_id), "%s",
+             meta.legacy_disc_id);
     out_result->success = true;
 
     return true;

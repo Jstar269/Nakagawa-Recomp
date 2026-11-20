@@ -119,6 +119,17 @@ card.
   different non-retail discs share a key with a chance of about one in
   1.76 billion; for a library of 100 of them, about 3 in a million. The key is
   what the library, `packages/<key>` and `titles/<key>` use.
+- **Prototype discs added before the v2 key keep their key.** A library entry
+  records which kind of key it holds (`disc_key_version`: `1` or `2`; an entry
+  written before this field existed counts as `1`). An entry made under the v1
+  key goes on being found, opened, built, updated and removed under that key,
+  with its packages, saves and folders where they are. Adding the same disc again
+  looks for its v1 key in the library first, so it finds that entry rather than
+  adding a second one; only a prototype disc with no such entry gets the v2 key.
+  An entry of one kind never stands for the other, and nothing is renamed, moved
+  or deleted. An entry with `disc_key_version` `2` that a Nakagawa from before
+  this rule saves again loses the field, and is then refused by name as a
+  different disc until the disc is added again.
 - **The disc's own ID** stays as it is. `python tools/nk_cli.py inspect <iso>`
   shows it beside the key (`sfo_disc_id` in `--json`). Nakagawa never changes the
   disc's `PARAM.SFO` or any other file on it.
