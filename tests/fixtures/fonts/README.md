@@ -36,27 +36,39 @@ for the full contract, including why generated PGFs are never committed here:
 | Liberation Sans and Liberation Serif | `liberation/Liberation{Sans,Serif}-{Regular,Italic,Bold,BoldItalic}.ttf` | OFL-1.1 | `Arimo`, `Tinos`, `Cousine`, `Liberation` |
 | M PLUS 1p | `mplus1p/MPLUS1p-Regular.ttf` | OFL-1.1 | none declared |
 | Noto Sans JP | `../../../assets/fonts/ui/noto-sans-jp/NotoSansJP-Regular.ttf` (pin in `notosansjp/`) | OFL-1.1 | `Source` |
+| Geist | `../../../assets/fonts/ui/geist/Geist-{Regular,SemiBold}.ttf` (pinned by `assets/fonts/ui/manifest.json`) | OFL-1.1 | none declared |
 
-Noto Sans JP is the project Japanese build input (#2005). The built-in
+Noto Sans JP is the project Japanese build input (#2005). The
 `--japanese-text` set is all of JIS X 0208 (rows 1-8 and the 6,355 kanji of
 levels 1 and 2), every character of code page 932 outside its user-defined
-area, JIS X 0201 and the Latin-1 Supplement: 7,575 points. Noto Sans JP draws
-all but one, U+2252, which M PLUS 1p draws through the converter's
-`--fallback` option. The Japanese font is built at 18 ppem with the console's
+area, JIS X 0201 and the Latin-1 Supplement (7,575 points), and every
+character of JIS X 0213 and of the named Unicode blocks of
+`docs/cleanroom/PGF_CONVERTER_SPEC.md` that these faces draw (#1300): 15,631
+points. Noto Sans JP draws all but 341, U+2252 among them, which M PLUS 1p
+draws through the converter's `--fallback` option. The Japanese font is built at 18 ppem with the console's
 10.125-point nominal size.
 
-Liberation Sans and Liberation Serif (release 2.1.5) are the project Latin
-build inputs (#2005): one face for each of the console's eight Latin styles,
-at each of its two sizes. They are byte-identical to the release tarball
-recorded in each pin. Their built-in `--latin-cyrillic-text` set has 454
-points (ASCII, Latin-1, Latin Extended-A, the Windows-1252 punctuation and
-symbols, WGL4 Cyrillic and nine mathematical symbols), and every face covers
-all of them. The larger size is built at 20 ppem and the smaller at 13 ppem,
+Liberation Sans and Liberation Serif (release 2.1.5) and Geist are the project
+Latin build inputs (#2005, #1300): one face for each of the console's eight
+Latin styles, at each of its two sizes. Geist Regular and Geist SemiBold, the
+player's interface font, draw the regular and bold sans-serif styles, with
+Liberation Sans Regular and Bold drawing, through `--fallback`, the 110
+characters of the set Geist lacks; Liberation draws the other six styles. The
+Liberation files are byte-identical to the release tarball recorded in each
+pin; the Geist files are the static instances recorded, with their upstream
+Google Fonts commit, in `assets/fonts/ui/manifest.json`, which the converter
+reads as their pin.
+Their `--latin-cyrillic-text` set, the Latin text rule
+over Unicode blocks and code pages of `docs/cleanroom/PGF_CONVERTER_SPEC.md`
+computed from each face's character map, has the same 556 points for every
+face (ASCII, Latin-1, Latin Extended-A, the punctuation and symbols of text,
+and the Cyrillic alphabets). The larger size is built at 20 ppem and the smaller at 13 ppem
+(Geist SemiBold at 19 and 12 ppem),
 with the converter's synthetic emboldening and a per-face tracking (and, for
 the sans-serif faces, tabular digits) chosen so that each face's line widths
 come within 3 % of the console font it stands in for. The sans-serif faces also
-thicken horizontal strokes (`--embolden-y`), so that a letter carries the ink
-of the console's within 4 % (#1300).
+thicken horizontal strokes where they need it (`--embolden-y`), so that a
+letter carries the ink of the console's within 2 % (#1300).
 
 M PLUS 1p was the first project Japanese build input. Its pin uses the immutable
 Google Fonts commit recorded in `mplus1p/PIN.json`; the adjacent `OFL.txt`
@@ -80,7 +92,11 @@ is decoded with Python's standard `euc_kr` codec and includes ASCII, assigned
 symbols and jamo in rows 1-4 and 6-9, plus all 11,172 modern Hangul syllables.
 It contains 11,951 unique points and the selected input covers every one.
 The Korean font is built at 20 ppem with the console's 10.125-point nominal
-size, so a Hangul syllable moves about as far as on the console.
+size, so a Hangul syllable moves about as far as on the console. The 191
+characters Gowun Dodum draws wider than the em (circled and parenthesized
+letters and numbers, squared units, the telephone sign) are narrowed to the
+em (`--fit-em`, #1300), as the console's Korean font draws every glyph within
+one full-width cell.
 Hanja is out of scope; Roman numerals, Japanese kana, Greek, and Cyrillic are
 outside this Korean-text repertoire. The generated PGF name is
 `Nakagawa Open Korean`; the source-family name is not copied into its header.
