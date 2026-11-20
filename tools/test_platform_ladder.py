@@ -18,6 +18,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -99,29 +100,39 @@ def _find_cc() -> str | None:
     return None
 
 
+#: The diagnostics that name a missing toolchain dependency, and nothing else. Make echoes
+#: every link recipe, which ends in -lSDL3 and -lvulkan(-1), so a bare flag or a path
+#: fragment in the output proves nothing: only the linker's own "cannot find -l<lib>",
+#: the compiler's "fatal error: <system header>: No such file", and the Makefile's
+#: fail-closed discovery messages (player-vulkan-check, sdl3-check, #331) count.
+_VULKAN_MISSING = re.compile(
+    r"no usable vulkan sdk found"
+    r"|cannot find -lvulkan"
+    r"|fatal error: vulkan/vulkan[a-z0-9_]*\.h: no such file"
+)
+_SDL3_MISSING = re.compile(
+    r"cannot find -lsdl3"
+    r"|fatal error: sdl3/[a-z0-9_]+\.h: no such file"
+    r"|sdl3 dependency is missing"
+    r"|explicit sdl3 directory does not exist"
+)
+_SYSTEM_LIBRARY_MISSING = re.compile(r"cannot find -l(?:mfplat|winmm|gdi32|ole32)\b")
+
+
 def _is_toolchain_missing_error(output: str) -> str | None:
-    """Check if build failure output is due to missing toolchain dependencies."""
+    """Name the missing toolchain dependency a build failure reports, or return None.
+
+    None means the failure is the project's own (a compile error, an undefined
+    reference, a missing project header) and must be reported as a failure.
+    """
     out_lower = output.lower()
-    if (
-        "no usable vulkan sdk found" in out_lower
-        or ("vulkan/" in out_lower and "no such file" in out_lower)
-        or "-lvulkan" in out_lower
-        or "cannot find -lvulkan" in out_lower
-    ):
+    if _VULKAN_MISSING.search(out_lower):
         return "Vulkan SDK dependency is missing or unusable"
-    if (
-        ("sdl3/" in out_lower and "no such file" in out_lower)
-        or "-lsdl3" in out_lower
-        or "cannot find -lsdl3" in out_lower
-        # The Makefile's own fail-closed discovery message (sdl3-check, #331).
-        or "sdl3 dependency is missing" in out_lower
-        or "explicit sdl3 directory does not exist" in out_lower
-    ):
+    if _SDL3_MISSING.search(out_lower):
         return "SDL3 dependency (headers or library) is missing"
-    if "cannot find -l" in out_lower and any(
-        lib in out_lower for lib in ("vulkan", "sdl3", "mfplat", "winmm", "gdi32", "ole32")
-    ):
-        return f"missing toolchain library dependency: {output.strip().splitlines()[-1]}"
+    library = _SYSTEM_LIBRARY_MISSING.search(out_lower)
+    if library:
+        return f"missing toolchain library dependency: {library.group(0)}"
     return None
 
 
@@ -158,6 +169,116 @@ def _ensure_workload(
                 test.skipTest(f"cannot build {target}: {missing_dep}")
             test.fail(f"failed to build target {target} (exit {proc.returncode}):\n{blob}")
         test.fail(f"build of target {target} succeeded but expected artifact was not created")
+
+
+#: What a generic ladder run's stdout and stderr must never carry: an HST-shaped data
+#: tree (xbdata, place_game_here, hst_image), and the runtime's own stop diagnostics in
+#: the forms it prints them: the named stop record (src/rt/hle.c, src/rt/recomp.c), an
+#: unhandled import (src/rt/hle.c) and an interpreter rejection (src/rt/recomp.c).
+GENERIC_RUN_FORBIDDEN = (
+    "xbdata",
+    "place_game_here",
+    "hst_image",
+    "BOOT_EVENT phase=stop",
+    "HLE: unimplemented nid",
+    "INTERP_REJECT",
+)
+
+
+def _forbidden_in_generic_run(combined: str) -> list[str]:
+    return [marker for marker in GENERIC_RUN_FORBIDDEN if marker in combined]
+
+
+def _hermetic_child(test: unittest.TestCase, *, dataroot: bool = True) -> tuple[dict[str, str], str]:
+    """The environment and cwd of a direct workload run, as generate.py's run() builds them.
+
+    Every ambient SR_* key is removed, the host roots are fresh empty directories
+    (SR_DATAROOT left unset when ``dataroot`` is False), and the child runs in a
+    scratch directory, so neither a developer's settings nor the checkout can decide
+    the result."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("SR_")}
+    keys = ("SR_DATAROOT", "SR_MEMSTICK", "SR_FSDIR") if dataroot else ("SR_MEMSTICK", "SR_FSDIR")
+    for key in keys:
+        root = tempfile.TemporaryDirectory(prefix="pl_child_root_")
+        test.addCleanup(root.cleanup)
+        environment[key] = root.name
+    cwd = tempfile.TemporaryDirectory(prefix="pl_child_cwd_")
+    test.addCleanup(cwd.cleanup)
+    return environment, cwd.name
+
+
+class ToolchainMissingClassifierTests(unittest.TestCase):
+    """Only a missing dependency turns a workload build failure into a skip."""
+
+    #: The link recipe Make echoes before running it (mk/housekeeping.mk, Makefile LIBS).
+    ECHOED_LINK = (
+        "gcc -O2 -o build/platform-ladder/ladder-zero/pl_zero.exe "
+        "build/platform-ladder/ladder-zero/pl_zero_recomp_0.o -lSDL3 -lvulkan-1 "
+        "-lmfplat -lwinmm -lgdi32 -lole32\n"
+    )
+
+    def test_project_failures_with_echoed_dependency_flags_are_not_skips(self):
+        for failure in (
+            self.ECHOED_LINK + "pl_zero_recomp_0.c:(.text+0x1c): undefined reference to `sr_missing'\n"
+                               "collect2.exe: error: ld returned 1 exit status\n",
+            self.ECHOED_LINK + "ld.exe: cannot find -lnk_missing_project_lib: No such file or directory\n",
+            "src/rt/recomp.c:12:10: fatal error: vulkan/nk_project_header.h: No such file or directory\n",
+            "src/rt/recomp.c:12:10: fatal error: rt/sdl3/nk_project_header.h: No such file or directory\n",
+            "src/rt/recomp.c:40:5: error: 'sr_missing' undeclared (first use in this function)\n",
+        ):
+            with self.subTest(failure=failure.splitlines()[-1]):
+                self.assertIsNone(_is_toolchain_missing_error(failure))
+
+    def test_missing_dependency_diagnostics_are_named(self):
+        for output, reason in (
+            (self.ECHOED_LINK + "ld.exe: cannot find -lvulkan-1: No such file or directory\n", "Vulkan"),
+            ("src/rt/vk.c:3:10: fatal error: vulkan/vulkan.h: No such file or directory\n", "Vulkan"),
+            ("mk/pipeline.mk:196: *** No usable Vulkan SDK found; set VULKAN_SDK.  Stop.\n", "Vulkan"),
+            ("/usr/bin/ld: cannot find -lSDL3: No such file or directory\n", "SDL3"),
+            ("src/player/main.c:9:10: fatal error: SDL3/SDL.h: No such file or directory\n", "SDL3"),
+            ("SDL3 dependency is missing: install mingw-w64-ucrt-x86_64-sdl3\n", "SDL3"),
+            ("ld.exe: cannot find -lmfplat: No such file or directory\n", "-lmfplat"),
+        ):
+            with self.subTest(output=output.splitlines()[-1]):
+                found = _is_toolchain_missing_error(output)
+                self.assertIsNotNone(found)
+                self.assertIn(reason, found)
+
+
+class DirectRunHarnessTests(unittest.TestCase):
+    """The helpers the direct (non-generate.py) workload runs are judged by."""
+
+    def test_hermetic_child_drops_every_ambient_runtime_control(self):
+        ambient = {"SR_EXIT_AT_VBLANK": "1", "SR_PERF_JSON": "ambient.json",
+                   "SR_DATAROOT": ".", "SR_FSDIR": ".", "PL_HARNESS_SENTINEL": "keep-me"}
+        with mock.patch.dict(os.environ, ambient, clear=False):
+            env, cwd = _hermetic_child(self)
+            bare, _ = _hermetic_child(self, dataroot=False)
+        self.assertEqual({key for key in env if key.startswith("SR_")},
+                         {"SR_DATAROOT", "SR_MEMSTICK", "SR_FSDIR"})
+        self.assertEqual({key for key in bare if key.startswith("SR_")},
+                         {"SR_MEMSTICK", "SR_FSDIR"})
+        self.assertEqual(env["PL_HARNESS_SENTINEL"], "keep-me")
+        for path in (env["SR_DATAROOT"], env["SR_MEMSTICK"], env["SR_FSDIR"], cwd):
+            self.assertTrue(os.path.isdir(path))
+            self.assertEqual(os.listdir(path), [])
+            self.assertFalse(Path(path).resolve().is_relative_to(ROOT.resolve()))
+
+    def test_generic_run_markers_match_what_the_runtime_prints(self):
+        clean = ("BOOT_EVENT phase=init public_safe=1\nsr_register_all: completed\n"
+                 "DRIVER_EXPECT_U32 addr=0x08940100 got=0x1 expected=0x1 status=PASS\n")
+        self.assertEqual(_forbidden_in_generic_run(clean), [])
+        for line, marker in (
+            ("HLE: unimplemented nid 0xdead2f02 (unknown) (thread uid 0x133)",
+             "HLE: unimplemented nid"),
+            ("BOOT_EVENT phase=stop reason=semantic-boundary boundary=interpreter-rejection issue=0",
+             "BOOT_EVENT phase=stop"),
+            ("  INTERP_REJECT: target=0x08940040 result=unsupported fault_pc=0x08940044",
+             "INTERP_REJECT"),
+            ("could not open xbdata/menu.xb", "xbdata"),
+        ):
+            with self.subTest(marker=marker):
+                self.assertEqual(_forbidden_in_generic_run(clean + line + "\n"), [marker])
 
 
 class LadderGapEncodingTests(unittest.TestCase):
@@ -368,8 +489,7 @@ class HostileEnvironmentTests(unittest.TestCase):
         )
         combined = result.stdout + result.stderr
         self.assertIn("status=PASS", combined)
-        for forbidden in ("xbdata", "place_game_here", "hst_image", "UNKNOWN NID"):
-            self.assertNotIn(forbidden, combined)
+        self.assertEqual(_forbidden_in_generic_run(combined), [], combined[-4000:])
 
     @nightly_tier
     def test_generator_ignores_ambient_runtime_output_controls(self):
@@ -578,26 +698,63 @@ class MutationKillTests(unittest.TestCase):
         results = generator.l4_results()
         drifted = results[1] ^ 0xFFFF
         addr = 0x08980000 + 0x3000 + generator.L4_RESULTS + 4
-        env = dict(os.environ)
-        env["SR_DATAROOT"] = self.tmp.name if hasattr(self, "tmp") else "."
+        env, cwd = _hermetic_child(self)
         result = subprocess.run(
             [str(exe), "--image", str(image), "0x08980000", "0x08980008",
              "none", "none", "--sched", f"--expect-u32=0x{addr:08x}:0x{drifted:08x}"],
-            capture_output=True, text=True, env=env, timeout=120,
-            cwd=str(ROOT),
+            capture_output=True, text=True, env=env, timeout=120, cwd=cwd,
         )
-        self.assertIn("status=FAIL", result.stdout + result.stderr)
+        # The kill is the flipped expectation and nothing else: the guest wrote its
+        # real word (an early stop would leave the slot unwritten), and only the
+        # expected value disagrees with it.
+        self.assertIn(
+            f"DRIVER_EXPECT_U32 addr=0x{addr:08x} got=0x{results[1]:08x} "
+            f"expected=0x{drifted:08x} status=FAIL",
+            result.stdout + result.stderr,
+        )
         self.assertNotEqual(result.returncode, 0)
 
-    def test_m7_breaking_nid_mapping_is_visible_in_generated_text(self):
-        """M7: swapping two NIDs in the sched fixture changes each stub's
-        sr_syscall target; verify() pins the mapping via required symbols."""
+    @nightly_tier
+    def test_m7_verify_refuses_a_build_whose_stubs_swap_two_nids(self):
+        """M7: verify() pins each import stub to its own NID, not to the NID set.
+
+        A scratch copy of the real ladder-sched build has the sr_syscall
+        targets of stubs 0 and 1 exchanged in its generated chunks; every NID
+        still appears once, so only a per-slot check refuses it."""
         plan = generator.PLANS["ladder-sched"]
         nids = plan.flat_nids()
         self.assertEqual(len(nids), 6)
-        # The stub at slot i must map to nids[i]; assert distinct NIDs so a
-        # swapped table cannot satisfy the pin.
         self.assertEqual(len(set(nids)), len(nids))
+        built = self.workloads / "ladder-sched"
+        exe = built / "pl_sched.exe"
+        _ensure_workload(self, "platform-ladder-sched", lambda: exe.is_file())
+
+        scratch = Path(tempfile.mkdtemp(prefix="pl_m7_"))
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        shutil.copytree(built / "fixture", scratch / "fixture")
+        chunks = sorted(built.glob("pl_sched_recomp_[0-9]*.c"))
+        for name in ("pl_sched.exe", "pl_sched_image.bin", "pl_sched_recomp.c",
+                     "pl_sched_recomp_funcs.h", "pl_sched_imports.toml"):
+            shutil.copy2(built / name, scratch / name)
+        for chunk in chunks:
+            shutil.copy2(chunk, scratch / chunk.name)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(generator.verify(scratch, "ladder-sched"), 0)
+
+        first, second = (f"sr_syscall(s, 0x{nid:08x}u);" for nid in nids[:2])
+        swapped_any = False
+        for chunk in chunks:
+            text = (scratch / chunk.name).read_text(encoding="ascii")
+            mutant = (text.replace(first, "\0").replace(second, first).replace("\0", second))
+            swapped_any |= mutant != text
+            (scratch / chunk.name).write_text(mutant, encoding="ascii")
+        self.assertTrue(swapped_any, "the generated chunks name neither stub NID")
+        with self.assertRaisesRegex(
+            RuntimeError,
+            rf"import stub 0 at 0x{plan.stub_address(0):08x} dispatches "
+            rf"0x{nids[1]:08x}, not NID 0x{nids[0]:08x}",
+        ):
+            generator.verify(scratch, "ladder-sched")
 
     @nightly_tier
     def test_m3_generic_workload_does_not_require_dataroot(self):
@@ -606,19 +763,18 @@ class MutationKillTests(unittest.TestCase):
         image = self.workloads / "ladder-zero" / "pl_zero_image.bin"
         _ensure_workload(self, "platform-ladder-zero", lambda: exe.is_file() and image.is_file())
         plan = generator.PLANS["ladder-zero"]
-        env = os.environ.copy()
-        env.pop("SR_DATAROOT", None)
-        env.pop("SR_FSDIR", None)
+        env, cwd = _hermetic_child(self, dataroot=False)
+        self.assertNotIn("SR_DATAROOT", env)
         result = subprocess.run(
             [str(exe), "--image", str(image),
              f"0x{plan.base:08x}", f"0x{plan.entry:08x}",
              "none", "none", "--sched",
              f"--expect-u32=0x{plan.result_addr():08x}:0x{plan.expected_value():08x}"],
-            capture_output=True, text=True, env=env, timeout=120, cwd=str(ROOT),
+            capture_output=True, text=True, env=env, timeout=120, cwd=cwd,
         )
         combined = result.stdout + result.stderr
         self.assertIn("status=PASS", combined)
-        self.assertNotIn("xbdata_extracted ...", combined.replace("\n", ""))
+        self.assertEqual(_forbidden_in_generic_run(combined), [], combined[-4000:])
 
 
 class Title2ContractTests(unittest.TestCase):
@@ -715,18 +871,25 @@ class Title2ContractTests(unittest.TestCase):
         self.assertEqual(plan.flat_nids(), [generator.TITLE2_UNSUPPORTED_NID])
         self.assertEqual(generator.hashlib.sha256(generator.build_prx(plan)[0]).hexdigest(), EXPECTED_PRX_SHA256[plan.name])
 
-    def test_memory_cell_mutation_is_oracle(self):
+    def test_memory_cell_constants_are_pinned_into_the_image_and_result_block(self):
+        """Pins the cell's constants where the run reads them; no guest runs here.
+
+        The image carries the initial value at the cell, and the nine-word result
+        block expects the doubled value, so a title2 run whose cell update drifts
+        fails its DRIVER_EXPECT_U32 check (the run itself is the nightly route)."""
         self.assertEqual(generator.TITLE2_MEM_CELL_INIT, 7)
         self.assertEqual(generator.TITLE2_MEM_CELL_EXPECTED, 14)
-        env = dict(os.environ)
-        env["SR_DATAROOT"] = "."
-        result = subprocess.run(
-            [sys.executable, "-c",
-             "import sys; sys.path.insert(0, 'tests/fixtures/platform_ladder'); import generate as g; "
-             "print(f'cell={g.TITLE2_MEM_CELL_INIT}->{g.TITLE2_MEM_CELL_EXPECTED}')"],
-            capture_output=True, text=True, env=env, cwd=str(ROOT),
+        plan = generator.PLANS["ladder-title2"]
+        data = generator.data_bytes_for(plan)
+        self.assertEqual(
+            struct.unpack_from("<I", data, generator.TITLE2_MEM_CELL_OFF)[0],
+            generator.TITLE2_MEM_CELL_INIT,
         )
-        self.assertIn("cell=7->14", result.stdout)
+        self.assertEqual(
+            generator.title2_result_expectations(plan)[4],
+            (plan.base + plan.data_seg_vaddr + generator.TITLE2_RESULT_OFF + 16,
+             generator.TITLE2_MEM_CELL_EXPECTED),
+        )
 
     def test_unsupported_nid_is_absent_from_registrations(self):
         manifest = importlib.import_module("hle_manifest")
@@ -748,26 +911,35 @@ class Title2ContractTests(unittest.TestCase):
             self.assertNotIn(needle, path.read_text(encoding="utf-8").lower(), str(path))
         self.assertNotIn(needle, hle_sources.text().lower(), "runtime HLE sources")
 
-    def test_title2_negative_acceptance_kills_h_ok_mutant(self):
-        """Replacing the unsupported stub with h_ok semantics cannot pass the gate."""
-        plan = generator.PLANS["ladder-title2-negative"]
-        build_dir = WORKLOADS / plan.name
-        _ensure_workload(
-            self,
-            "platform-ladder-title2-negative",
-            lambda: bool(sorted(build_dir.glob(f"{plan.game_name}_recomp_[0-9]*.c"))),
+    def test_title2_negative_validator_accepts_only_the_named_unsupported_import_stop(self):
+        """The negative gate's validator, branch by branch, on hand-written outputs.
+
+        This is not a mutation kill: no mutant is compiled or run. It pins what the
+        validator refuses, so an import answered as success (exit 0, or a run that
+        reaches its expectations) or a stop for another reason cannot pass the gate."""
+        nid = f"0x{generator.TITLE2_UNSUPPORTED_NID:08x}"
+        stop = (
+            f"HLE: unimplemented nid {nid} (unknown) (thread uid 0x133)\n"
+            f'     -> add a handler in src/rt/hle.c: sr_hle_register({nid}u, "sceUnknown", h_...);\n'
         )
-        chunks = sorted(build_dir.glob(f"{plan.game_name}_recomp_[0-9]*.c"))
-        generated = "\n".join(path.read_text(encoding="ascii") for path in chunks)
-        marker = f"sr_syscall(s, 0x{generator.TITLE2_UNSUPPORTED_NID:08x}u);"
-        self.assertIn(marker, generated)
-        mutant = generated.replace(marker, "s->r[2] = 0; /* h_ok mutant */")
-        self.assertNotIn(marker, mutant)
-        completed = subprocess.CompletedProcess(
-            args=["h_ok-mutant"], returncode=0, stdout="", stderr=""
-        )
-        with self.assertRaisesRegex(RuntimeError, "expected exit 7"):
-            generator.validate_title2_negative_output(completed)
+
+        def output(returncode: int, stdout: str) -> subprocess.CompletedProcess:
+            return subprocess.CompletedProcess(["pl_title2_neg"], returncode, stdout=stdout, stderr="")
+
+        generator.validate_title2_negative_output(output(7, stop))
+        for completed, refusal in (
+            (output(0, ""), "expected exit 7, got 0"),
+            (output(0, stop), "expected exit 7, got 0"),
+            (output(7, "scheduler: no runnable thread\n"), "evidence omits: HLE: unimplemented nid"),
+            (output(7, stop.replace(nid, "0x12345678")), "evidence omits"),
+            (output(7, stop + "DRIVER_EXPECT_U32 addr=0x08a83000 got=0x0 expected=0x0 status=PASS\n"),
+             "evidence contains: DRIVER_EXPECT_U32"),
+            (output(7, stop + "PLATFORM_LADDER_RUN workload=ladder-title2-negative status=PASS\n"),
+             "evidence contains: PLATFORM_LADDER_RUN"),
+        ):
+            with self.subTest(refusal=refusal, stdout=completed.stdout[-60:]):
+                with self.assertRaisesRegex(RuntimeError, re.escape(refusal)):
+                    generator.validate_title2_negative_output(completed)
 
 
 class LadderOverlayTests(unittest.TestCase):

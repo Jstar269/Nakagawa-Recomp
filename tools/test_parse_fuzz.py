@@ -63,17 +63,18 @@ def valid_seed_prx() -> bytes:
 def _run_stage(stage: str, action, data: bytes):
     """Run one parser stage, allowing only its documented malformed-input error.
 
-    A library ``SystemExit`` is converted to an assertion failure with the
-    stage and input summary. Other exception types are deliberately not caught:
-    unittest must expose them as parser escapes rather than hiding them.
+    Any other escape (a library ``SystemExit``, ``IndexError``, ``struct.error``,
+    ...) fails as an assertion that names the stage and carries the offending
+    bytes, so the input can be kept as a regression fixture; the original
+    exception stays chained for its traceback.
     """
     try:
         return "accepted", action()
     except ValueError as exc:
         return "rejected", str(exc)
-    except SystemExit as exc:
+    except (Exception, SystemExit) as exc:
         raise AssertionError(
-            f"{stage} raised SystemExit for {describe(data)}: {exc!r}"
+            f"{stage} raised {type(exc).__name__} for {describe(data)}: {exc!r}"
         ) from exc
 
 
@@ -83,7 +84,8 @@ def exercise(data: bytes, base: int, path: Path | None = None) -> dict[str, obje
     A rejected stage stops the dependent stages and marks them ``not_reached``;
     it is not reported as if every parser had consumed the same bytes.
     """
-    if path is not None and not isinstance(data, (bytes, bytearray, memoryview)):
+    if path is not None:
+        # The input under test, on disk while its stages run.
         path.write_bytes(data)
     report = {
         "prx": "not_reached",
@@ -238,6 +240,24 @@ class TestParseFuzz(unittest.TestCase):
                 exercise(valid_seed_prx(), SEED_BASE, self.path)
         finally:
             imports.parse_imports = original
+
+    def test_a_parser_escape_carries_the_offending_bytes(self) -> None:
+        original = imports.parse_imports
+
+        def raise_index_error(_elf):
+            raise IndexError("library escape")
+
+        seed = valid_seed_prx()
+        imports.parse_imports = raise_index_error
+        try:
+            with self.assertRaises(AssertionError) as caught:
+                exercise(seed, SEED_BASE, self.path)
+        finally:
+            imports.parse_imports = original
+        self.assertIn("imports raised IndexError", str(caught.exception))
+        self.assertIn(f"bytes={seed.hex()}", str(caught.exception))
+        self.assertIsInstance(caught.exception.__cause__, IndexError)
+        self.assertEqual(self.path.read_bytes(), seed)
 
     def test_param_sfo_fuzz(self) -> None:
         rng = random.Random(0x5F0)

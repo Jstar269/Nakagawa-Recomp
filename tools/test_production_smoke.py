@@ -399,7 +399,11 @@ class TestProductionSmoke(unittest.TestCase):
         }
         for name, log in mutants.items():
             with self.subTest(name=name), self.assertRaises(RuntimeError):
-                generator.assert_gap_runtime_evidence(log, returncode=1 if name == "old-fatal-miss" else 0)
+                generator.assert_gap_runtime_evidence(log, returncode=0)
+        # The old fatal miss also exited 1, but the exit check alone must not be what
+        # rejects it: the NONPLT_MISS marker is refused whatever the exit status.
+        with self.assertRaisesRegex(RuntimeError, "contains: NONPLT_MISS"):
+            generator.assert_gap_runtime_evidence(mutants["old-fatal-miss"], returncode=1)
 
     def _fabricated_aot_tree(self, root: Path, relative_dir: str) -> Path:
         """Minimal build tree satisfying verify(--mode aot) with RELATIVE-spelled

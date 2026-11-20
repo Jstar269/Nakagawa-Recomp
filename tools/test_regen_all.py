@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,15 @@ class StepInventoryTests(unittest.TestCase):
                     self.assertTrue((ROOT / output).is_file(), f"{step.name} names a missing output")
                     self.assertNotIn(output, seen, f"{output} belongs to {seen.get(output)} and {step.name}")
                     seen[output] = step.name
+        # On disk is not tracked: an ignored or never-added output would pass the check above.
+        git = shutil.which("git")
+        if git is None or not (ROOT / ".git").exists():
+            self.skipTest("git or the checkout's .git is unavailable, so whether the outputs are tracked is unchecked")
+        listed = subprocess.run(
+            [git, "-C", str(ROOT), "ls-files", "-z", "--", *seen],
+            capture_output=True, check=True, timeout=60,
+        ).stdout.decode("utf-8").split(chr(0))
+        self.assertEqual(sorted(set(seen) - set(listed)), [], "regen_all names outputs Git does not track")
 
     def test_every_step_either_runs_or_says_why_not(self) -> None:
         for step in regen_all.STEPS:

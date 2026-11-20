@@ -836,6 +836,16 @@ class VfpuWordsTxtAbsenceTest(unittest.TestCase):
     def test_vfpu_words_txt_is_not_committed(self):
         gitignore=(ROOT/".gitignore").read_text(encoding="utf-8")
         self.assertIn("vfpu_words.txt",gitignore)
+        # The ignore rule alone does not stop `git add -f`; ask the index itself.
+        import shutil
+        if shutil.which("git") is None:
+            self.skipTest("git is not available to read the index")
+        from nk_core.git_isolation import run_git
+        result = run_git(["ls-files", "-z", "--", "tools/vfpu_words.txt"], cwd=ROOT,
+                         capture_output=True, check=False)
+        if result.returncode != 0:
+            self.skipTest("not a git checkout: " + result.stderr.decode("utf-8", "replace").strip())
+        self.assertEqual(result.stdout, b"", "tools/vfpu_words.txt is tracked")
 
 if __name__=="__main__":
     unittest.main()

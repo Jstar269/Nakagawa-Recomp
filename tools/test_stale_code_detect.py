@@ -51,6 +51,8 @@ STALE_C = (RT / "stale_code.c").read_text(encoding="utf-8")
 SELFTEST_C = ROOT / "tests" / "native" / "stale_code_selftest.c"
 SELFTEST_TEXT = SELFTEST_C.read_text(encoding="utf-8")
 HLE_C = hle_sources.text()
+# The cache-op HLE unit, found through tools/hle_sources.py by the function it defines.
+HLE_CACHE_DMA_C = dict(hle_sources.sources())[hle_sources.defining_file("h_cache_invalidate_all_common")]
 RECOMP_H = (RT / "recomp.h").read_text(encoding="utf-8")
 MAKEFILE = read_makefile(ROOT)
 CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
@@ -70,12 +72,29 @@ def _enabled_env():
     return env
 
 
+def _c_function_body(source: str, signature: str) -> str:
+    """The body of the top-level C function whose definition line is ``signature``."""
+    parts = source.split(signature, 1)
+    if len(parts) != 2:
+        raise AssertionError(f"function anchor drifted: {signature!r}")
+    return parts[1].split("\n}\n", 1)[0]
+
+
+# The selftest's own failure exit (``return 1`` after its FAILED banner). A mutant counts as
+# killed only when it exits with this code and prints the CHECK lines it targets; a crash,
+# a signal or an unrelated failure is not a kill.
+SELFTEST_FAIL_EXIT = 1
+
+
 @unittest.skipUnless(CC, "no C compiler on PATH")
 class TestStaleCodeSelftestC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         assert CC is not None
         cls.tmp = tempfile.mkdtemp(prefix="stalecode_")
+        # Registered before the compile: unittest skips tearDownClass when setUpClass fails,
+        # but it always runs class cleanups, so a failed compile does not leak the directory.
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.exe = os.path.join(cls.tmp, "stale_code_selftest.exe")
         result = subprocess.run(
             [CC, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
@@ -86,9 +105,35 @@ class TestStaleCodeSelftestC(unittest.TestCase):
         if result.returncode != 0:
             raise AssertionError("stale_code selftest did not compile:\n" + result.stderr)
 
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
+    def _assert_killed(self, run, gate, want, unwanted=()):
+        """The mutant failed through the selftest's own CHECKs, naming each ``want`` message."""
+        out = run.stdout + run.stderr
+        self.assertEqual(run.returncode, SELFTEST_FAIL_EXIT,
+                         f"mutant ({gate}) must fail through the selftest's own exit, "
+                         f"not crash or pass:\n{out}")
+        banner = ("stale_code selftest: FAILED (gate off)" if gate == "gate off"
+                  else "stale_code selftest: FAILED\n")
+        self.assertIn(banner, run.stderr, out)
+        for message in want:
+            self.assertRegex(run.stderr, r"FAIL L\d+: " + re.escape(message), out)
+        for message in unwanted:
+            self.assertNotIn(message, run.stderr, out)
+
+    def test_setup_failure_removes_its_temp_dir(self):
+        """A harness that does not compile must not leave its scratch directory behind."""
+        from unittest import mock
+
+        class _Probe(TestStaleCodeSelftestC):
+            pass
+
+        failed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom")
+        with mock.patch.object(subprocess, "run", return_value=failed):
+            with self.assertRaises(AssertionError):
+                _Probe.setUpClass()
+        self.assertTrue(os.path.isdir(_Probe.tmp))
+        _Probe.doClassCleanups()
+        self.assertFalse(os.path.exists(_Probe.tmp),
+                         "setUpClass must register its temp-dir removal before compiling")
 
     def test_gate_off_overwrite_stays_silent(self):
         result = subprocess.run([self.exe], capture_output=True, text=True,
@@ -129,8 +174,13 @@ class TestStaleCodeSelftestC(unittest.TestCase):
             )
             self.assertEqual(comp.returncode, 0, "mutant did not compile:\n" + comp.stderr)
             run = subprocess.run([exe], capture_output=True, text=True, env=_enabled_env())
-            self.assertNotEqual(run.returncode, 0,
-                                "neutered detector still passed; the selftest is vacuous")
+            # Pristine ranges now fire and overwritten ones go silent.
+            self._assert_killed(run, "gate on", (
+                "pristine range must be silent",
+                "pristine check-all must be silent",
+                "fire must name off=",
+                "restored bytes must clear the flag",
+            ))
 
     def test_invalidation_half_self_modifying_case(self):
         """The gate-on run must exercise the modeled tier branch: the
@@ -172,8 +222,18 @@ class TestStaleCodeSelftestC(unittest.TestCase):
             )
             self.assertEqual(comp.returncode, 0, "mutant did not compile:\n" + comp.stderr)
             run = subprocess.run([exe], capture_output=True, text=True, env=_enabled_env())
-            self.assertNotEqual(run.returncode, 0,
-                                "flag-neutered tracker still passed; the query is vacuous")
+            # Only the invalidation half may fail: the firing return values are intact, so the
+            # detector matrix's own checks stay quiet.
+            self._assert_killed(run, "gate on", (
+                "firing check must set the flag",
+                "stale dispatch must follow the new bytes",
+                "interpreted result must differ from stale AOT",
+                "check-all must set the flag",
+            ), unwanted=(
+                "pristine range must be silent",
+                "fire must name off=",
+                "check-all must name the same word",
+            ))
 
     def test_query_kill_mutation_breaks_both_gates(self):
         """Failing-before proof for the query: forcing it to always report
@@ -198,11 +258,16 @@ class TestStaleCodeSelftestC(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(comp.returncode, 0, "mutant did not compile:\n" + comp.stderr)
-            for env, name in ((_scrubbed_env(), "gate off"), (_enabled_env(), "gate on")):
+            cases = (
+                (_scrubbed_env(), "gate off",
+                 ("gate off: query must stay clean so dispatch keeps the AOT path",)),
+                (_enabled_env(), "gate on",
+                 ("pristine block must not be stale", "unregistered probe must be clean",
+                  "restored bytes must clear the flag")),
+            )
+            for env, name, want in cases:
                 run = subprocess.run([exe], capture_output=True, text=True, env=env)
-                self.assertNotEqual(run.returncode, 0,
-                                    f"always-stale query still passed {name}; "
-                                    "the tier branch is vacuous")
+                self._assert_killed(run, name, want)
 
 
 class TestStaleCodeWiring(unittest.TestCase):
@@ -233,7 +298,31 @@ class TestStaleCodeWiring(unittest.TestCase):
         )
         for handler in ("h_CacheInvalidateAll", "h_CacheInvalidateRange", "sr_stale_note_cache_op"):
             self.assertIn(handler, HLE_C)
-        self.assertIn("abort();", HLE_C)
+        # Each firing path stops through stale_code_stop after its own check, and that one stop
+        # records the fatal and then aborts, not merely somewhere in the HLE sources (hle.c has
+        # unrelated aborts).
+        stop = _c_function_body(
+            HLE_CACHE_DMA_C,
+            "__attribute__((noreturn, cold)) static void stale_code_stop(uint32_t pc, uint32_t bad,",
+        )
+        at_fatal = stop.find("sr_flight_fatal(")
+        self.assertNotEqual(at_fatal, -1, "stale_code_stop must record the fatal")
+        self.assertNotEqual(stop.find("abort();", at_fatal), -1,
+                            "stale_code_stop must abort after recording the fatal")
+        self.assertEqual(HLE_CACHE_DMA_C.count("abort();"), 1,
+                         "hle_cache_dma.c aborts only in stale_code_stop")
+        firing = (
+            ("static uint32_t h_cache_invalidate_all_common(CpuState *s) {", "sr_stale_check_all("),
+            ("static uint32_t h_cache_invalidate_range_common(CpuState *s) {",
+             "sr_stale_check_range("),
+            ("void sr_stale_note_cache_op(uint32_t addr) {", "sr_stale_check_range("),
+        )
+        for signature, check in firing:
+            body = _c_function_body(HLE_CACHE_DMA_C, signature)
+            at_check = body.find(check)
+            self.assertNotEqual(at_check, -1, f"{signature} must run {check}")
+            self.assertNotEqual(body.find("stale_code_stop(", at_check), -1,
+                                f"{signature} must stop through stale_code_stop after the firing check")
 
     def test_stale_flags_are_per_entry_and_cleared_on_match(self):
         self.assertIn("int sr_stale_block_is_stale(uint32_t addr);", STALE_H)

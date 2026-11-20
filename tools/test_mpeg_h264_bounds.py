@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 the Nakagawa Recomp authors
 
-"""Static contracts and small independent arithmetic fixtures for issues #170, #283, and #302.
+"""Static contracts for issues #170, #283, and #302.
 
 The common PS demux is portable and the Media Foundation decoder backend is Windows-only.
-These tests pin both production boundaries and exercise overflow arithmetic independently;
-native compilation and private title acceptance remain separate evidence labels.
+These tests pin both production boundaries by source shape only. They do not execute
+src/rt/mpeg.c, so the u32_mul_checked/u32_add_checked overflow refusals are not exercised
+here; native compilation and private title acceptance remain separate evidence labels.
 """
 
 from pathlib import Path
@@ -19,16 +20,6 @@ MPEG = (ROOT / "src" / "rt" / "mpeg.c").read_text(encoding="utf-8")
 H264 = (ROOT / "src" / "rt" / "h264_mf.c").read_text(encoding="utf-8")
 PSMF_MEDIA = (ROOT / "tests" / "native" / "psmf_media_selftest.c").read_text(encoding="utf-8")
 PSMF_PRODUCER = (ROOT / "src" / "rt" / "psmf_producer.c").read_text(encoding="utf-8")
-
-
-def checked_mul_u32(a: int, b: int) -> int | None:
-    value = a * b
-    return value if 0 <= value <= 0xFFFFFFFF else None
-
-
-def checked_add_u32(a: int, b: int) -> int | None:
-    value = a + b
-    return value if 0 <= value <= 0xFFFFFFFF else None
 
 
 class TestMpegH264Bounds(unittest.TestCase):
@@ -120,20 +111,6 @@ class TestMpegH264Bounds(unittest.TestCase):
         pull = H264[H264.index("static int pull_frame") : H264.index("int sr_h264_frame(")]
         self.assertIn("if (r > 0) return r == 1 ? 1 : -1;", pull)
         self.assertIn("if (r < 0) { d->failed = 1; return -1; }", pull)
-
-
-class TestMpegArithmeticFixtures(unittest.TestCase):
-    def test_packet_count_and_data_end_must_fit_u32(self) -> None:
-        self.assertEqual(checked_mul_u32(1024, 2048), 2 * 1024 * 1024)
-        self.assertIsNone(checked_mul_u32(0xFFFFFFFF, 2048))
-        self.assertEqual(checked_add_u32(0x08000000, 2 * 1024 * 1024), 0x08200000)
-        self.assertIsNone(checked_add_u32(0xFFFFFFF0, 0x40))
-
-    def test_ring_put_capacity_subtraction_avoids_add_wrap(self) -> None:
-        total, avail = 0x100, 0xF0
-        requested = min(0xFFFFFFFF, total - avail)
-        self.assertEqual(requested, 0x10)
-        self.assertLessEqual(avail + requested, total)
 
 
 class TestMpegYcbcrContracts(unittest.TestCase):

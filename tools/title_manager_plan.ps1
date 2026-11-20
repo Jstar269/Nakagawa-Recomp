@@ -30,7 +30,8 @@
         - Get-HstManifestMakeArgs pins the local HST retail manifest
           (hst-ucus98701-v1, UCUS98701, exact-disc-id, 0-base, hst profile,
           psp-header, 0x00303194-0x00306e24 span, three required modules).
-          That file is publication-excluded and never checked in.
+          The manifest (assets/titles/hst-ucus98701.json) is tracked and included in
+          the public catalog; the retail game files it describes stay private.
         This is the ONLY place that names HST constants. Generic code never
         compares title_manifest_id to hst-... nor inherits HST modules/spans.
         See the function header for the exact pin set.
@@ -138,11 +139,31 @@ function Assert-TitleManagerPlan {
 
     $disc = $Plan.disc
     if ($null -ne $disc) {
-        Assert-TitlePlanObject $disc '$.disc' @('id', 'region', 'revision_policy', 'compatible_revisions') @('id', 'region', 'revision_policy') | Out-Null
+        # The planner passes the validated disc object through unchanged, so every field
+        # title_manifest.validate_disc can emit is admitted here and type-checked.
+        Assert-TitlePlanObject $disc '$.disc' @('id', 'region', 'revision_policy', 'compatible_revisions', 'require_local_compatibility_record', 'builds') @('id', 'region', 'revision_policy') | Out-Null
         foreach ($field in @('id', 'region', 'revision_policy')) { Assert-TitlePlanString $disc.$field "`$.disc.$field" | Out-Null }
         if ($disc.PSObject.Properties.Name -contains 'compatible_revisions') {
             if ($disc.compatible_revisions -isnot [System.Array]) { throw '$.disc.compatible_revisions must be an array' }
             foreach ($revision in @($disc.compatible_revisions)) { Assert-TitlePlanString $revision '$.disc.compatible_revisions[]' | Out-Null }
+        }
+        if ($disc.PSObject.Properties.Name -contains 'require_local_compatibility_record') {
+            [void](Assert-TitlePlanBoolean $disc.require_local_compatibility_record '$.disc.require_local_compatibility_record')
+        }
+        if ($disc.PSObject.Properties.Name -contains 'builds') {
+            if ($disc.builds -isnot [System.Array]) { throw '$.disc.builds must be an array' }
+            $builds = @($disc.builds)
+            for ($index = 0; $index -lt $builds.Count; $index++) {
+                $build = $builds[$index]
+                $buildPath = "`$.disc.builds[$index]"
+                Assert-TitlePlanObject $build $buildPath @('executable_sha256', 'status', 'label', 'reason') @('executable_sha256', 'status', 'label') | Out-Null
+                Assert-TitlePlanString $build.executable_sha256 "$buildPath.executable_sha256" | Out-Null
+                if ($build.executable_sha256 -cnotmatch '^[0-9a-f]{64}$') { throw "$buildPath.executable_sha256 must be 64 lowercase hexadecimal digits" }
+                Assert-TitlePlanString $build.status "$buildPath.status" | Out-Null
+                if ($build.status -cnotin @('supported', 'experimental', 'known-bad')) { throw "$buildPath.status is not a supported build status" }
+                Assert-TitlePlanString $build.label "$buildPath.label" | Out-Null
+                if ($build.PSObject.Properties.Name -contains 'reason') { Assert-TitlePlanString $build.reason "$buildPath.reason" | Out-Null }
+            }
         }
     }
 
