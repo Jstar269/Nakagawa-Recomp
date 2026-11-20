@@ -51,6 +51,9 @@
 // with this software.  If not, see
 // <https://creativecommons.org/publicdomain/zero/1.0/>
 
+// Modified by Nakagawa Recomp contributors, 2026-11-20. The local changes are
+// marked LOCAL DELTA and listed in PROVENANCE.md.
+
 #include "monocypher.h"
 
 #ifdef MONOCYPHER_CPP_NAMESPACE

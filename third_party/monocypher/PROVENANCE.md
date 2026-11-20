@@ -34,7 +34,7 @@ vendored files contain no network code and no key.
 
 | File | Upstream path | Kind | Upstream 4.0.3 blob SHA | SHA-256 |
 | --- | --- | --- | --- | --- |
-| `monocypher.c` | `src/monocypher.c` | imported + LOCAL DELTA | `c7c5450e84e4dffda44514d9f918162f1830de56` | `97ff742e46e6c921d8df73f4099a804bff5d65501eb7a94b7574e9593aca1439` (this tree's bytes) |
+| `monocypher.c` | `src/monocypher.c` | imported + LOCAL DELTA | `c7c5450e84e4dffda44514d9f918162f1830de56` | `5a60a58d2867a8378c4425ca9f7a0d336203250cb59b930059f4c5aae119f4f0` (this tree's bytes) |
 | `monocypher.h` | `src/monocypher.h` | imported byte-identical | `cf635e88e4f5851e1f58a9e2b3e85b8029a73861` | `fcaf6ed771358bb4f40fba016f6518ae86ec02b1b877d2cc35ad92d3a26fd7b3` |
 | `monocypher-ed25519.c` | `src/optional/monocypher-ed25519.c` | imported byte-identical | `4fdd07641e1c4d54a348e95d0ab05c28f84654a6` | `ce0d2f8e32ca8f66398ba5b3456cc74327c3eff14e7b950ce7d57be9025cc453` |
 | `monocypher-ed25519.h` | `src/optional/monocypher-ed25519.h` | imported byte-identical | `d7aa004123e1d38b891fdabd4171fbf9957242ae` | `3a3035181f991a158d0e1c7567258f0bae8ba0f1f23c5512b4a1db1b3c9730ce` |
@@ -53,9 +53,11 @@ standing decision of 2026-11-19 to take upstream fixes). Its upstream 4.0.3 byte
 `f1f838cdd483bdebe0df0ff5c5ed60535e496f769c6a2f933ac4c0b114207123`; the table gives this tree's. The change is
 upstream commit `55158d37f4d86a536fb807096fa9cacc7d4469db` ("Fix timing leak in constant time comparisons",
 committed 2026-10-01, in no release yet; `4.0.3` is still the newest tag on 2026-11-20, and `LICENCE.md` is
-unchanged at `master` `ab22d3c2dc14e4c5e2b069134aa7db4c57b0ac57`), applied unchanged; the only other difference
-from that commit's `src/monocypher.c` is the three-line `LOCAL DELTA (Nakagawa Recomp)` comment above `neq0`. A
-pin that includes the commit drops this delta.
+unchanged at `master` `ab22d3c2dc14e4c5e2b069134aa7db4c57b0ac57`), applied unchanged; the only other differences
+from that commit's `src/monocypher.c` are the three-line `LOCAL DELTA (Nakagawa Recomp)` comment above `neq0` and
+a two-line `// Modified by Nakagawa Recomp contributors, 2026-11-20.` notice, with a blank line after it, right
+after upstream's licence header (the SPDX line stays where upstream has it, line 10). A pin that includes the
+commit drops this delta and the notice.
 
 - `neq0`, the helper behind `crypto_verify16/32/64`, folds the difference to 32 bits and takes the sign bit of
   `fold | -fold`. The pinned form computed the same result in a way that, depending on compiler and target, could be
