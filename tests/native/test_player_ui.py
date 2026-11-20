@@ -7920,6 +7920,24 @@ class NativePlayerUiTests(unittest.TestCase):
         assert isinstance(other_frames, list)
         self.assertEqual(other_frames[0]["error_badge"], "Problem")
 
+    def test_tools_download_for_a_title_that_left_the_library_says_so(self) -> None:
+        """Audit 2026-11-17 F-7dc315bd: the build after a tools download resumes for the title
+        it was started for, by its disc ID and image. When that title has left the library,
+        the card says so by name instead of building another game or reporting a package
+        "completed without its library title"."""
+        screenshots = os.environ.get("NAKAGAWA_PLAYER_UI_SP_SCREENSHOTS")
+        run = self.run_player(
+            "library", ("WAIT_MS=50",), error_code="PREREQUISITE_TITLE_GONE",
+            screenshot_path=(Path(screenshots) / "prerequisite-title-gone.bmp"
+                             if screenshots else None))
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[0]["view"], "error")
+        self.assertEqual(frames[0]["error"], "PREREQUISITE_TITLE_GONE")
+        self.assertEqual(frames[0]["error_title"], "Game_not_in_the_library")
+        self.assertEqual(frames[0]["error_badge"], "Game_not_in_library")
+        self.assertEqual(frames[0]["package_building"], "0", "nothing was built")
+
     def test_failed_close_confirmation_needs_a_second_explicit_close(self) -> None:
         run = self.run_player(
             "library",
@@ -8330,6 +8348,106 @@ class FirstRunRouteTests(unittest.TestCase):
             self.assertTrue(library["games"][0]["assets_staged"])
             self.assertTrue((user_root / "games" / "ULUS99996" / "xbdata" / "menu" /
                              "assets.xb.d" / "data" / "raw.bin").is_file())
+
+    def test_dropped_uncatalogued_disc_keeps_its_profile_under_the_runtime_root(self) -> None:
+        """Audit 2026-11-17 F-1fc4e8af: the runtime root owns experimental profiles.
+
+        With --user-data-root and --runtime-root apart, the profile of an uncatalogued disc
+        is written where the build's preflight, the package build and the manifest load at
+        start read it: under the runtime root. Failing before: the writer used the per-user
+        data folder, so the profile landed under --user-data-root and the title page's
+        preflight refused the build with TITLE_PROFILE."""
+        with tempfile.TemporaryDirectory(prefix=".first-run-runtime-profile-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            iso = scratch / "experimental.iso"
+            executable = build_plain_mips_elf() + bytes(i % 251 for i in range(70000))
+            create_test_iso_with_executables(
+                iso, executable, disc_id="ULUS99995", title="Runtime Root Profile"
+            )
+            user_root = scratch / "user data"
+            user_root.mkdir()
+            runtime_root = scratch / "runtime"
+            completed = subprocess.run(
+                [str(PLAYER_EXE), f"--user-data-root={user_root}", f"--iso={iso}",
+                 "--ui-test-events=WAIT_VIEW=experimental,15000;WAIT_MS=100;KEY_RETURN;"
+                 "WAIT_VIEW=library,10000;WAIT_MS=300;KEY_RETURN;WAIT_MS=500;QUIT",
+                 f"--ui-test-screenshot={scratch / 'last-frame.bmp'}",
+                 f"--runtime-root={runtime_root}"],
+                cwd=ROOT, env=self.scratch_env(scratch), capture_output=True, text=True,
+                timeout=120, check=False,
+            )
+            output = completed.stdout + completed.stderr
+            self.assertEqual(completed.returncode, 0, output)
+            self.assertTrue(
+                (runtime_root / "experimental" / "ULUS99995" / "profile.json").is_file(), output)
+            self.assertFalse((user_root / "experimental").exists(),
+                             "nothing of the profile is written under the user-data root")
+            library = json.loads((user_root / "library.json").read_text(encoding="utf-8"))
+            self.assertEqual([game["disc_id"] for game in library["games"]], ["ULUS99995"])
+            self.assertTrue(library["games"][0]["is_experimental"])
+            title_frames = [frame for frame in parse_frames(completed.stdout)
+                            if frame.get("next_route") == "2"]
+            self.assertTrue(title_frames, output)
+            self.assertNotEqual(title_frames[-1]["next_preflight_code"], "TITLE_PROFILE",
+                                title_frames[-1]["next_preflight_detail"])
+
+    def launch_index_layout_run(self, scratch: Path,
+                                play: dict[str, str] | None) -> subprocess.CompletedProcess:
+        """--launch-index=0 on a library of the catalogued TEST00006 whose runtime root holds
+        only a developer layout (no v1 package) and the title's 60 FPS enhancement package;
+        `play` is the title's saved play choice (settings.json title_play), if any."""
+        user_root = scratch / "user data"
+        user_root.mkdir(exist_ok=True)
+        if play is not None:
+            # --user-data-root keeps the settings in its config folder.
+            (user_root / "config").mkdir(exist_ok=True)
+            (user_root / "config" / "settings.json").write_text(json.dumps(
+                {"schema_version": 2, "enhanced": {"default": "authentic"},
+                 "title_play": {"TEST00006": play}}), encoding="utf-8")
+        (user_root / "library.json").write_text(json.dumps({"schema_version": 1, "games": [
+            {"disc_id": "TEST00006", "title_name": "Synthetic Display Smoke",
+             "iso_path": str(scratch / "display.iso"), "title_id": "display-smoke-v1"},
+        ]}), encoding="utf-8")
+        runtime_root = scratch / "runtime"
+        layout = runtime_root / "build" / "display-smoke-v1"
+        layout.mkdir(parents=True, exist_ok=True)
+        # The launcher finds a developer layout by path existence; these empty files are
+        # synthetic sentinels.
+        (layout / "display-smoke-v1.exe").write_bytes(b"")
+        (layout / "display-smoke-v1").write_bytes(b"")
+        (layout / "display-smoke-v1_image.bin").write_bytes(b"")
+        (runtime_root / "tests" / "fixtures" / "display_smoke").mkdir(parents=True,
+                                                                      exist_ok=True)
+        enhancements = runtime_root / "enhancements"
+        enhancements.mkdir(exist_ok=True)
+        (enhancements / "test00006-60hz.json").write_text(
+            json.dumps({"id": "fixture-60hz", "target_title_id": "display-smoke-v1"}),
+            encoding="utf-8")
+        return self.run_route(scratch, [f"--user-data-root={user_root}",
+                                        "--launch-index=0", "--headless-launch"])
+
+    def test_launch_index_never_stands_a_developer_layout_in_for_an_enhanced_build(
+            self) -> None:
+        """Audit 2026-11-17 F-f8907a6e: one rule says whether a title's runtime is there.
+
+        A developer layout stands in for a missing authentic package, never for an enhanced
+        build. Failing before: --launch-index left the enhancement term out, so for a title
+        saved as Ace (60 FPS game logic) it printed "PLAY NOW available" although its enhanced
+        build is missing, and failed later in the launch worker instead of exiting 3."""
+        with tempfile.TemporaryDirectory(prefix=".first-run-enhanced-layout-", dir=ROOT) as tmp:
+            enhanced = self.launch_index_layout_run(Path(tmp), {"mode": "ace"})
+        output = enhanced.stdout + enhanced.stderr
+        self.assertEqual(enhanced.returncode, 3, output)
+        self.assertIn("Launch index 0 has no prepared runtime; PLAY NOW is unavailable.",
+                      enhanced.stderr)
+        self.assertNotIn("PLAY NOW available", enhanced.stdout)
+
+        # The same layout still stands in for the authentic package.
+        with tempfile.TemporaryDirectory(prefix=".first-run-authentic-layout-", dir=ROOT) as tmp:
+            authentic = self.launch_index_layout_run(Path(tmp), None)
+        self.assertIn("Launch index 0: PLAY NOW available for TEST00006", authentic.stdout,
+                      authentic.stdout + authentic.stderr)
+        self.assertNotEqual(authentic.returncode, 3, authentic.stdout + authentic.stderr)
 
     def test_launch_index_on_an_empty_library_fails_with_a_clear_message(self) -> None:
         with tempfile.TemporaryDirectory(prefix=".first-run-empty-", dir=ROOT) as tmp:

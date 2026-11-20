@@ -96,13 +96,15 @@ static bool player_populate_inspected_game(PlayerApp *app, const char *iso_path,
     bool profile_refused = player_app_title_profile_refusal_for_disc(
         app, result->disc_id, refused_profile, sizeof(refused_profile));
     if (!result->is_supported && result->param_sfo_parsed && !profile_refused) {
-        char user_data_root[NK_MAX_PATH];
+        /* The runtime root owns experimental profiles: the build's preflight, the
+           package build and the manifest load at start all read them there. */
+        char profile_root[NK_MAX_PATH];
         char profile_id[64];
-        if (!nk_platform_get_app_data_dir(user_data_root, sizeof(user_data_root)) ||
+        if (!player_app_data_root(app, profile_root, sizeof(profile_root)) ||
             !nk_title_manifest_write_experimental_profile(
                 iso_path, result->param_sfo_parsed, result->disc_id,
                 result->title_name, result->executables.selected_path,
-                user_data_root, profile_id, sizeof(profile_id), error, error_len)) {
+                profile_root, profile_id, sizeof(profile_id), error, error_len)) {
             if (error && error_len && !error[0]) {
                 snprintf(error, error_len, "Could not create the local experimental title profile.");
             }
@@ -2419,13 +2421,7 @@ static int SDLCALL player_package_status_thread_main(void *userdata) {
     } else if (root) {
         job->status = nk_launch_validate_runtime_package(
             root, &job->game, NULL, job->reason, sizeof(job->reason));
-        /* A developer layout can stand in for a missing authentic package,
-           never for the enhanced build. */
-        job->runtime_available = job->status == NK_RUNTIME_PACKAGE_OK ||
-            (job->status == NK_RUNTIME_PACKAGE_MISSING &&
-             !job->game.is_experimental &&
-             !job->game.enhancement_package_id[0] &&
-             nk_launch_runtime_available(root, job->game.title_id));
+        job->runtime_available = player_runtime_available(job->status, &job->game, root);
     } else {
         job->status = NK_RUNTIME_PACKAGE_MISSING;
         snprintf(job->reason, sizeof(job->reason),
@@ -2902,7 +2898,7 @@ static bool start_staging_job(PlayerApp *app, PlayerStagingJob **job_slot) {
                                             "Could not allocate the staging worker.");
         return false;
     }
-    if (!player_app_build_stage_plan(&app->inspecting_game, &job->plan)) {
+    if (!player_app_build_stage_plan(app, &app->inspecting_game, &job->plan)) {
         free(job);
         player_app_wizard_finish_extraction(app, NK_ERROR_UNSUPPORTED_TITLE,
                                             PLAYER_STAGE_PROFILE_UNAVAILABLE);
@@ -3680,7 +3676,7 @@ static int player_stage_inspected_title(PlayerApp *app) {
         fprintf(stderr, "[PLAYER] Not enough memory to set up this game's files.\n");
         return 3;
     }
-    if (!player_app_build_stage_plan(&app->inspecting_game, plan)) {
+    if (!player_app_build_stage_plan(app, &app->inspecting_game, plan)) {
         free(plan);
         player_app_wizard_finish_extraction(app, NK_ERROR_UNSUPPORTED_TITLE,
                                             PLAYER_STAGE_PROFILE_UNAVAILABLE);
@@ -5227,13 +5223,9 @@ static int player_command_line_launch(PlayerRun *run) {
         NkRuntimePackageStatus launch_status =
             player_app_validate_runtime_package(
                 app, launch_game, NULL, NULL, 0);
-        bool launch_available = launch_status == NK_RUNTIME_PACKAGE_OK ||
-            (launch_status == NK_RUNTIME_PACKAGE_MISSING &&
-             !launch_game->is_experimental &&
-             nk_launch_runtime_available(
-                 app->runtime_root[0] ? app->runtime_root : NULL,
-                 launch_game->title_id));
-        if (!launch_available) {
+        /* The launch worker's own rule, under the root it validated the package in. */
+        if (!player_runtime_available(launch_status, launch_game,
+                                      player_app_package_root(app, launch_game))) {
             if (sample_entry) {
                 fprintf(stderr, "[PLAYER] Launch index %d is a bundled SAMPLE demo, not in "
                         "library.json, and has no prepared runtime; PLAY NOW is unavailable.\n",
@@ -5864,10 +5856,9 @@ static void player_frame_requests(PlayerRun *run) {
     }
     player_update_prerequisite_operation(app);
     if (player_app_prereq_take_resume(app)) {
-        int game_index = app->prerequisites.game_index;
-        if (!player_app_start_package_build(app, game_index)) {
-            /* The state helper has already opened the actionable error card. */
-        }
+        /* By the title's identity, not its index: the library may have changed during
+           the download. On a refusal the card that says why is already open. */
+        (void)player_app_prereq_resume_build(app);
     }
 
     bool build_check_identity_changed = run->build_check_pending &&
@@ -5897,10 +5888,13 @@ static void player_frame_requests(PlayerRun *run) {
        current library selection. */
     player_app_poll_package_build(app, SDL_GetTicks());
     /* nk_cli.py reports the package PASS before it has finished writing, so the
-       build counts as done only once its child has exited cleanly. */
+       build counts as done only once its child has exited cleanly. A finished
+       tools download leaves the session complete too; that is the prerequisite
+       card's, not a package build's. */
     if (app->build_session.is_complete && !app->build_session.is_building &&
         !app->build_session.is_failed && !run->build_check_pending &&
-        !build_check_session_already_handled) {
+        !build_check_session_already_handled &&
+        !player_app_build_session_is_prerequisite_fetch(app)) {
         /* The card of the image built, not another image with its disc ID. */
         int build_game_index = player_app_find_built_game(
             app, app->build_session.disc_id, app->build_session.iso_path);

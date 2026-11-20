@@ -14623,6 +14623,63 @@ static void test_wizard_ready_step_reports_a_title_not_saved(void) {
     printf("[PLAYER_STATE_TEST] the wizard's Ready step reports a title not saved PASS\n");
 }
 
+static void prereq_resume_set_game(GameRecord *game, const char *disc_id, const char *iso) {
+    memset(game, 0, sizeof(*game));
+    snprintf(game->disc_id, sizeof(game->disc_id), "%s", disc_id);
+    snprintf(game->title_id, sizeof(game->title_id), "synthetic-%s", disc_id);
+    snprintf(game->title_name, sizeof(game->title_name), "Synthetic %s", disc_id);
+    snprintf(game->iso_path, sizeof(game->iso_path), "%s", iso);
+}
+
+/* Audit 2026-11-17 F-7dc315bd: after a tools download (minutes long), the build resumes
+ * for the title the download was started for, found again by its image, never by its
+ * index in the game list, which a title added or removed meanwhile moves.
+ *
+ * Failing before: the resume built app->games[<index at begin>], so a title added ahead
+ * of it built the other game, and a removed one built whatever took its place. */
+static void test_prerequisite_resume_follows_the_title(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: the build after a tools download follows its title\n");
+    fflush(stdout);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    prereq_resume_set_game(&app->games[0], "TEST71001", "first.iso");
+    prereq_resume_set_game(&app->games[1], "TEST71002", "second.iso");
+    app->game_count = 2;
+    assert(player_app_prereq_begin(app, 1, false, true));
+    assert(player_app_prereq_resume_game(app) == 1);
+
+    /* A title added ahead of it moves it one card on. */
+    memmove(&app->games[1], &app->games[0], 2u * sizeof(GameRecord));
+    prereq_resume_set_game(&app->games[0], "TEST71003", "added.iso");
+    app->game_count = 3;
+    assert(player_app_prereq_resume_game(app) == 2);
+    assert(strcmp(app->games[2].disc_id, "TEST71002") == 0);
+
+    /* Another image of the same disc ID is not the one the download was for. */
+    prereq_resume_set_game(&app->games[3], "TEST71002", "translation.iso");
+    app->game_count = 4;
+    assert(player_app_prereq_resume_game(app) == 2);
+
+    /* Both images removed: no card, and the resume says so by name and builds nothing. */
+    app->game_count = 2;
+    assert(player_app_prereq_resume_game(app) == -1);
+    assert(!player_app_prereq_resume_build(app));
+    assert(strcmp(app->last_error.error_code, "PREREQUISITE_TITLE_GONE") == 0);
+    assert(strstr(app->last_error.message, "TEST71002") != NULL);
+    assert(app->active_view == VIEW_ERROR);
+    assert(!app->build_session.is_building);
+
+    /* The fetcher reuses the build session: its finished state is the prerequisite
+       card's, and a later build (a new session generation) is a package build again. */
+    app->build_session.session_generation = 7u;
+    app->prerequisite_session_generation = 7u;
+    assert(player_app_build_session_is_prerequisite_fetch(app));
+    app->build_session.session_generation = 8u;
+    assert(!player_app_build_session_is_prerequisite_fetch(app));
+    free(app);
+    printf("[PLAYER_STATE_TEST] the build after a tools download follows its title PASS\n");
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -20797,7 +20854,7 @@ int main(int argc, char **argv) {
 
         PlayerStagePlan *plan = (PlayerStagePlan *)calloc(1, sizeof(PlayerStagePlan));
         assert(plan != NULL);
-        assert(player_app_build_stage_plan(inspected, plan));
+        assert(player_app_build_stage_plan(probe, inspected, plan));
         assert(plan->request.loose_content_root_count == 1);
         assert(strcmp(plan->request.loose_content_roots[0], ".") == 0);
         assert(strcmp(plan->request.data_root, "xbdata") == 0);
@@ -21111,6 +21168,7 @@ int main(int argc, char **argv) {
     test_input_classification_and_check_again();
     test_game_build_check_names_the_executable_build();
     test_wizard_ready_step_reports_a_title_not_saved();
+    test_prerequisite_resume_follows_the_title();
 
     /* Last: it changes how this whole process loads libraries. */
     printf("[PLAYER_STATE_TEST] Subtest 27: library loads leave the current folder and PATH\n");

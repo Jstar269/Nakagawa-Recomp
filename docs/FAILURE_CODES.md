@@ -287,6 +287,7 @@ The **Where** column of each table names the places a code can appear:
 | `PREREQUISITE_FETCH_START_FAILED` | player | The prerequisite download could not start. |
 | `PREREQUISITE_INSTALL_FAILED` | player | The prerequisite install failed. |
 | `PREREQUISITE_MANIFEST_INVALID` | player | The prerequisite manifest is invalid. |
+| `PREREQUISITE_TITLE_GONE` | player | The build tools finished installing, but the game they were downloaded for has left the library, so no build started. |
 | `PYTHON_ARCHIVE_EXTRACT_FAILED` | player | The verified Python archive could not be extracted. |
 | `PYTHON_ARCHIVE_INVALID` | player | The verified Python archive does not contain Python. |
 | `PYTHON_BOOTSTRAP_FAILED` | player | The verified Python runtime could not be installed. |

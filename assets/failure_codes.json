@@ -1269,6 +1269,12 @@
         "player"
       ]
     },
+    "PREREQUISITE_TITLE_GONE": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
     "PYTHON_ARCHIVE_EXTRACT_FAILED": {
       "stage": "host",
       "in": [
