@@ -1285,7 +1285,7 @@ def _class_for(path: str, record: dict | None) -> tuple[str, dict]:
                                          "upstream_paths": record.get("upstream_paths", []),
                                          "upstream_revision": record.get("upstream_revision"),
                                          "license": record.get("upstream_license") or "see NOTICE.md",
-                                         "modification_status": "modified_or_translated; see record"}
+                                         "modification_status": public_label(classification)}
         if classification == "derived-data":
             return "generated_from_public_source", {**evidence, "generator": "documented public-source data path",
                                                        "source_family": record.get("upstream") or "public PSP data"}
@@ -1301,7 +1301,7 @@ def _class_for(path: str, record: dict | None) -> tuple[str, dict]:
         if classification == "unresolved":
             return "unresolved", {**evidence, "reason": "implementation ledger marks provenance unresolved"}
         if classification in ("behavior-informed", "project-authored-independent"):
-            return "project_authored_attested", {**evidence, "authorship": "independent implementation record",
+            return "project_authored_attested", {**evidence, "authorship": public_label(classification),
                                                    "upstream_attribution": record.get("upstream")}
 
     # The root ``fixtures/`` prefix stays while a trusted base can still carry the tree there:
@@ -1785,7 +1785,8 @@ PUBLIC_LABEL_SETS: dict[str, dict[str, str]] = {
 
 #: The label set the generators emit. The hosted attestation runs the default branch's copy of
 #: the verifier, so a new set is accepted (``PUBLIC_LABEL_SETS``) before any generator emits it.
-PUBLIC_LABEL_SET = "v1"
+#: ``v1`` stays accepted while a pull request branched before ``v2`` can still carry it.
+PUBLIC_LABEL_SET = "v2"
 
 
 def public_class_of_detailed(record_classification: str) -> str:
