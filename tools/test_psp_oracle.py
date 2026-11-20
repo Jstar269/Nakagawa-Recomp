@@ -13450,11 +13450,38 @@ class GeThroughZProbeTests(unittest.TestCase):
         self.assertLess(body.index("gtz_prepare();"), body.index("sceGeListEnQueue("))
         self.assertLess(body.index("sceKernelDcacheWritebackAll();"), body.index("sceGeListEnQueue("))
         self.assertIn("reset_rc = sceGeBreak(1, &param);", body)
-        # The ge-raster and ge-rtt blocks: colour at 0x100000, depth at 0x110000, 64x32.
-        for fragment in ("#define GTZ_FB_OFFSET 0x00100000u", "#define GTZ_ZB_OFFSET 0x00110000u",
+        # Colour at 0x120000 and depth at 0x110000, 64x32, both inside the saved block.
+        for fragment in ("#define GTZ_FB_OFFSET 0x00120000u", "#define GTZ_ZB_OFFSET 0x00110000u",
                          "#define GTZ_STRIDE 64u", "#define GTZ_ROWS 32u",
-                         "#define GTZ_ZCLEAR 0x1234u"):
+                         "#define GTZ_ZCLEAR 0x1234u", "#define GTZ_SAVE_OFFSET 0x00110000u",
+                         "#define GTZ_SAVE_WORDS (0x00011000u / 4u)"):
             self.assertIn(fragment, self.section)
+
+    def test_the_block_is_saved_first_and_restored_last_and_lists_use_a_ge_context(self) -> None:
+        bodies = _c_function_bodies(self.section)
+        run = bodies["hle_run"]
+        order = ["gtz_mirror(GTZ_SAVE_OFFSET)", "s_gtz_save[i] = vram[i];", "gtz_draw(&gtz_cells[i]);",
+                 "vram[i] = s_gtz_save[i];", "mismatches += vram[i] != s_gtz_save[i];",
+                 'hle_record("vram-restore", mismatches == 0u ? "PASS" : "FAIL", 0, restore, 2);']
+        positions = [run.index(text) for text in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(run.count("i < GTZ_SAVE_WORDS; i++"), 3)
+        self.assertIn("const uint32_t restore[2] = {GTZ_SAVE_WORDS, mismatches};", run)
+        # Both buffers, and the depth words under the plain and the XOR 0x2040 address rule, lie
+        # inside the saved 0x110000..0x120fff.
+        save_lo, save_hi = 0x110000, 0x110000 + 0x11000
+        for lo in (0x120000, 0x110000, 0x110000 ^ 0x2040):
+            self.assertTrue(save_lo <= lo and lo + 64 * 32 * 2 <= save_hi)
+        # No CPU write to VRAM outside the fill, and that fill stays in the two buffers.
+        prepare = bodies["gtz_prepare"]
+        self.assertEqual(re.findall(r"\b(fb|zb)\[[^\]]*\] = ", prepare), ["fb", "zb"])
+        self.assertIn("for (uint32_t i = 0; i < GTZ_PIXELS; i++) {", prepare)
+        draw = bodies["gtz_draw"]
+        self.assertNotRegex(draw, r"\b(fb|zb|vram)\[[^\]]*\] = ")
+        self.assertIn("args.size = sizeof(args);\n    args.context = &s_gtz_ctx;", draw)
+        self.assertIn("sceGeListEnQueue(s_gtz_list, NULL, -1, &args);", draw)
+        self.assertEqual(self.section.count("sceGeListEnQueue("), 1)
+        self.assertIn("static PspGeContext s_gtz_ctx;", self.section)
 
     def test_list_words(self) -> None:
         body = _c_function_bodies(self.section)["gtz_list"]
@@ -13486,10 +13513,11 @@ class GeThroughZProbeTests(unittest.TestCase):
         self.assertEqual(spec.test_id, "PSP-GE-THROUGHZ-001")
         self.assertEqual(spec.terminal_case, "ge-through-z-done")
         cases = parse_golden.GE_THROUGH_Z_CASES
-        self.assertEqual(len(cases), 22)
+        self.assertEqual(len(cases), 23)
         self.assertEqual(cases[:2], ("zm1-draw", "zm1-z"))
-        self.assertEqual(cases[-1], "znan-z")
-        self.assertEqual(set(counts.values()), {16, 1})
+        self.assertEqual(cases[-2:], ("znan-z", "vram-restore"))
+        self.assertEqual(parse_golden.GE_THROUGH_Z_ROWS[-1], ("vram-restore", 2))
+        self.assertEqual(set(counts.values()), {16, 2, 1})
         self.assertIn("hle_record(row, qid < 0 ? \"FAIL\" : idle ? \"PASS\" : \"TIMEOUT\", "
                       "(uint32_t)qid, draw, 16);", self.section)
         self.assertIn("hle_record(row, \"PASS\", 0, s_gtz_row, GTZ_SIDE);", self.section)
@@ -13502,9 +13530,10 @@ class GeThroughZProbeTests(unittest.TestCase):
         self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_ge_sample.c")
         self.assertEqual(row["diagnostic_case_ids"], ["ge-through-z"])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
-        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertEqual(row["case_ids"], ["z*-draw", "z*-z", "vram-restore", "ge-through-z-done"])
+        self.assertEqual(row["evidence_cases"], ["z*-draw", "z*-z", "ge-through-z-done"])
+        self.assertEqual(row["uncited_cases"], ["vram-restore"])
         self.assertNotIn("evidence_note", row)
-        self.assertEqual(row["case_ids"][-1], "ge-through-z-done")
 
     def test_measurement_note_names_the_run_and_what_it_does_not_show(self) -> None:
         note = self.rows[0]["measurement_note"]
@@ -13530,6 +13559,27 @@ class GeThroughZProbeTests(unittest.TestCase):
             self.assertIn(term, section)
         self.assertIn("**MEASURED** on 2026-11-10 UTC (PSP-3000, boot 180, XMB context, "
                       "`e4e6a3a2`; 23 records", self.readme)
+
+    def test_the_boot_229_run_of_the_saving_revision_is_recorded(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("commit 1972d515c", "boot 229", "23 records and the done record (out0 0x17)",
+                     "acceptance-eligible with 0 blockers", "exactly 256 colour pixels",
+                     "0x4400 words and found 0 that differed", "5 minutes 48 seconds", "did not restart",
+                     "One run does not establish"):
+            with self.subTest(term=term):
+                self.assertIn(term, note)
+        self.assertIn("5 minutes 48 seconds", self.rows[0]["risk"])
+        start = self.doc.index("- **PSP-3000 single-case reruns of `ge-through-z` and `ge-depth-bounds` "
+                               "(2026-11-20 UTC, second sitting)**")
+        section = " ".join(self.doc[start:self.doc.index("\n- **", start + 1)].split())
+        for term in ("boot 229 at `1972d515c`", "boot 230 at `306579a11`",
+                     "`PSP-GE-THROUGHZ-001` | `z*-draw`, `z*-z`, `ge-through-z-done` (boot 229)",
+                     "`PSP-GE-RASTER-004` | `edram`, `ctl-*`, `dw-*`, `dr-*`, `dc-*`, `ge-depth-bounds-done` "
+                     "(boot 230)", "`0x4400` words", "*No restart this time.*", "`0x04088000`",
+                     "word for word"):
+            with self.subTest(doc=term):
+                self.assertIn(term, section)
+        self.assertIn("boot 229, XMB context, `1972d515c`; 23 records and the done record", self.readme)
 
 
 class GeRasterProbeTests(unittest.TestCase):
