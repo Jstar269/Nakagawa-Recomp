@@ -1712,9 +1712,11 @@ def network_egress_offenders(root: Path) -> list[str]:
     return offenders
 
 
-# The transport's one declaration, in package_builder.h; any other mention of the name is a use.
+# The transport's two declarations, in package_builder.h: the download transport and the one
+# request RetroAchievements makes through it (#1316). Any other mention of the names is a use.
 NATIVE_TRANSPORT_PROTOTYPE = re.compile(
-    r"\bPackageHttpOpen\s+package_builder_native_transport\s*\(\s*void\s*\)\s*;")
+    r"\bPackageHttpOpen\s+package_builder_native_transport\s*\(\s*void\s*\)\s*;"
+    r"|\bbool\s+package_builder_native_transport_request\s*\([^;{]*\)\s*;")
 
 
 def native_transport_callers(root: Path) -> set[str]:
@@ -2165,14 +2167,22 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
             player = Path(scratch) / "src" / "player"
             player.mkdir(parents=True)
             (player / "package_builder.h").write_text(
-                "PackageHttpOpen package_builder_native_transport(void);\n", encoding="utf-8")
+                "PackageHttpOpen package_builder_native_transport(void);\n"
+                "bool package_builder_native_transport_request(\n"
+                "    void *options, const char *url, const char *allowed_hosts,\n"
+                "    const void *body, size_t body_size, PackageHttpResponse *response);\n",
+                encoding="utf-8")
             (player / "wrapper.h").write_text(
                 "static inline PackageHttpOpen open(void) { return package_builder_native_transport(); }\n",
                 encoding="utf-8")
             (player / "fetch.cpp").write_text(
                 "PackageHttpOpen t = package_builder_native_transport();\n", encoding="utf-8")
+            (player / "post.h").write_text(
+                "static inline bool post(void) {\n"
+                "    return package_builder_native_transport_request(0, 0, 0, 0, 0, 0);\n}\n",
+                encoding="utf-8")
             self.assertEqual(native_transport_callers(Path(scratch)),
-                             {"src/player/wrapper.h", "src/player/fetch.cpp"})
+                             {"src/player/wrapper.h", "src/player/fetch.cpp", "src/player/post.h"})
 
     def test_allowlisted_downloaders_still_exist(self) -> None:
         for rel in sorted(NETWORK_EGRESS_ALLOWLIST):
