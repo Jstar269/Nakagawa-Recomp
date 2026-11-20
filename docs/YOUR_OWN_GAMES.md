@@ -108,7 +108,11 @@ card.
 - **The key.** A non-retail disc is named by its contents: SHA-256 over the tag
   `nakagawa-non-retail-disc-key-v1` (with its NUL), then the bytes of
   `PSP_GAME/PARAM.SFO` and of `PSP_GAME/SYSDIR/EBOOT.BIN`, each preceded by its
-  length as a little-endian 64-bit number. The first eight bytes of the digest,
+  length as a little-endian 64-bit number. A prototype disc whose `EBOOT.BIN` is
+  empty or all zeros boots its plain `BOOT.BIN` instead, so its key also covers
+  `PSP_GAME/SYSDIR/BOOT.BIN`, after `EBOOT.BIN` and in the same form, under the
+  tag `nakagawa-non-retail-disc-key-v2`; two such builds that differ only in
+  `BOOT.BIN` get two keys. The first eight bytes of the digest,
   modulo 26³ × 10⁵, become three letters and five digits after an `X`, for
   example `XRQY66517`. No retail or test ID starts with `X`, so the key never
   meets another disc's ID, and the same disc always gets the same key. Two
@@ -118,9 +122,9 @@ card.
 - **The disc's own ID** stays as it is. `python tools/nk_cli.py inspect <iso>`
   shows it beside the key (`sfo_disc_id` in `--json`). Nakagawa never changes the
   disc's `PARAM.SFO` or any other file on it.
-- **Fail closed.** A non-retail disc without a readable `EBOOT.BIN` cannot be
-  told apart from other discs and is refused, as is a disc without a usable
-  `PARAM.SFO`.
+- **Fail closed.** A non-retail disc without a readable `EBOOT.BIN` (or with an
+  empty one and no plain `BOOT.BIN`) cannot be told apart from other discs and is
+  refused, as is a disc without a usable `PARAM.SFO`.
 
 A beta added before this rule existed, under an ID like `ABCD12345`, now reads
 with its `X` key, so its old library entry reports a different disc. Add the

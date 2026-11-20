@@ -1508,35 +1508,69 @@ static void nk_iso_sha256_update_u64(NkSha256 *ctx, uint64_t value) {
     nk_sha256_update(ctx, bytes, sizeof(bytes));
 }
 
+static void nk_iso_classify_executable(NkIsoReader *reader, const char *path,
+                                       NkIsoExecutableCandidate *out);
+
+/* Hashes one file's length, as a little-endian 64-bit integer, then its bytes. */
+static bool nk_iso_sha256_update_extent(NkSha256 *ctx, NkIsoReader *reader, uint32_t lba,
+                                        uint32_t size, uint8_t *buffer, uint32_t chunk) {
+    nk_iso_sha256_update_u64(ctx, size);
+    for (uint32_t offset = 0; offset < size;) {
+        uint32_t count = size - offset < chunk ? size - offset : chunk;
+        if (!nk_iso_read_extent_exact(reader, lba, size, offset, buffer, count)) return false;
+        nk_sha256_update(ctx, buffer, count);
+        offset += count;
+    }
+    return true;
+}
+
 /* Keys a non-retail disc by its contents (_non_retail_identity in
  * tools/nk_core/iso_inspect.py): SHA-256 over a domain tag, then PARAM.SFO and
  * PSP_GAME/SYSDIR/EBOOT.BIN, each preceded by its length as a little-endian
- * 64-bit integer. Nothing on the disc is changed. Without a readable EBOOT.BIN
- * the disc cannot be told apart from other discs and is refused. */
+ * 64-bit integer. A disc whose EBOOT.BIN is empty or zero-filled and whose
+ * BOOT.BIN is a plain MIPS ELF boots BOOT.BIN (nk_iso_classify_executables), so
+ * its key covers BOOT.BIN too, under the v2 tag; every other disc keeps its v1
+ * key. Nothing on the disc is changed. Without a readable EBOOT.BIN (or that
+ * boot-fallback layout) the disc cannot be told apart from other discs and is
+ * refused. */
 static bool nk_iso_non_retail_identity(const char *iso_path, const uint8_t *sfo,
                                        uint32_t sfo_size, NkIsoMetadata *meta) {
-    static const char domain[] = "nakagawa-non-retail-disc-key-v1";
+    static const char domain_v1[] = "nakagawa-non-retail-disc-key-v1";
+    static const char domain_v2[] = "nakagawa-non-retail-disc-key-v2";
     enum { CHUNK = 64 * 1024 };
     NkIsoReader *reader = nk_iso_reader_open(iso_path);
     uint8_t *buffer = (uint8_t *)malloc(CHUNK);
-    uint32_t lba = 0, size = 0;
+    uint32_t lba = 0, size = 0, boot_lba = 0, boot_size = 0;
     bool is_directory = false;
+    bool boot_keyed = false;
     bool ok = reader && buffer &&
         nk_iso_reader_lookup(reader, "PSP_GAME/SYSDIR/EBOOT.BIN", &lba, &size,
                              &is_directory) == 0 &&
-        !is_directory && size > 0 && size <= NK_ISO_MAX_EXECUTABLE_BYTES &&
+        !is_directory && size <= NK_ISO_MAX_EXECUTABLE_BYTES &&
         nk_iso_extent_span_valid(reader, lba, size, 0, size);
+    if (ok) {
+        NkIsoExecutableCandidate eboot, boot;
+        nk_iso_classify_executable(reader, "PSP_GAME/SYSDIR/EBOOT.BIN", &eboot);
+        nk_iso_classify_executable(reader, "PSP_GAME/SYSDIR/BOOT.BIN", &boot);
+        boot_keyed = eboot.kind == NK_ISO_EXEC_EMPTY_OR_ZERO && boot.kind == NK_ISO_EXEC_MIPS_ELF32 &&
+            nk_iso_reader_lookup(reader, "PSP_GAME/SYSDIR/BOOT.BIN", &boot_lba, &boot_size,
+                                 &is_directory) == 0 &&
+            !is_directory && boot_size > 0 && boot_size <= NK_ISO_MAX_EXECUTABLE_BYTES;
+        ok = size > 0 || boot_keyed;
+    }
     NkSha256 ctx;
     nk_sha256_init(&ctx);
-    nk_sha256_update(&ctx, (const uint8_t *)domain, sizeof(domain));
+    if (boot_keyed) {
+        nk_sha256_update(&ctx, (const uint8_t *)domain_v2, sizeof(domain_v2));
+    } else {
+        nk_sha256_update(&ctx, (const uint8_t *)domain_v1, sizeof(domain_v1));
+    }
     nk_iso_sha256_update_u64(&ctx, sfo_size);
     nk_sha256_update(&ctx, sfo, sfo_size);
-    nk_iso_sha256_update_u64(&ctx, size);
-    for (uint32_t offset = 0; ok && offset < size;) {
-        uint32_t count = size - offset < (uint32_t)CHUNK ? size - offset : (uint32_t)CHUNK;
-        ok = nk_iso_read_extent_exact(reader, lba, size, offset, buffer, count);
-        if (ok) nk_sha256_update(&ctx, buffer, count);
-        offset += count;
+    ok = ok && nk_iso_sha256_update_extent(&ctx, reader, lba, size, buffer, (uint32_t)CHUNK);
+    if (ok && boot_keyed) {
+        ok = nk_iso_sha256_update_extent(&ctx, reader, boot_lba, boot_size, buffer,
+                                         (uint32_t)CHUNK);
     }
     free(buffer);
     if (reader) nk_iso_reader_close(reader);

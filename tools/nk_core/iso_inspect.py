@@ -44,9 +44,13 @@ SFO_DISC_ID_MAX_BYTES = 31
 NON_RETAIL_KEY_PREFIX = "X"
 # The SHA-256 input starts with this tag, so the digest names nothing else.
 NON_RETAIL_KEY_DOMAIN = b"nakagawa-non-retail-disc-key-v1\0"
+# The tag of a disc that boots BOOT.BIN beside an empty or zero-filled EBOOT.BIN
+# (_non_retail_identity): its digest covers BOOT.BIN too.
+NON_RETAIL_KEY_DOMAIN_BOOT = b"nakagawa-non-retail-disc-key-v2\0"
 # Three letters and five digits follow the prefix: 26^3 * 10^5 distinct keys.
 NON_RETAIL_KEY_SPACE = 26 ** 3 * 10 ** 5
 NON_RETAIL_MAIN_EXECUTABLE = ("PSP_GAME", "SYSDIR", "EBOOT.BIN")
+NON_RETAIL_BOOT_EXECUTABLE = ("PSP_GAME", "SYSDIR", "BOOT.BIN")
 _SYNTHETIC_DISC_ID_KEY = re.compile(r"TEST[0-9]{5}")
 EXPERIMENTAL_PROFILE_SCHEMA_VERSION = 1
 _EXPERIMENTAL_PROFILE_WRITE_LOCK = threading.Lock()
@@ -793,9 +797,13 @@ def _non_retail_identity(
     The digest is SHA-256 over NON_RETAIL_KEY_DOMAIN, then the PARAM.SFO bytes and
     the bytes of the disc's main executable, PSP_GAME/SYSDIR/EBOOT.BIN (the file a
     PSP boots from a disc), each preceded by its length as a little-endian 64-bit
-    integer. Nothing on the disc is changed. A disc whose EBOOT.BIN is missing,
-    empty, over MAX_EXECUTABLE_BYTES or not fully inside the image cannot be told
-    apart from other discs and is refused.
+    integer. A disc whose EBOOT.BIN is empty or zero-filled and whose BOOT.BIN is a
+    plain MIPS ELF boots BOOT.BIN (_BOOT_FALLBACK_EBOOT_KINDS), so its digest is
+    over NON_RETAIL_KEY_DOMAIN_BOOT and covers BOOT.BIN too, after EBOOT.BIN and in
+    the same form; every other disc keeps its v1 key. Nothing on the disc is
+    changed. A disc whose EBOOT.BIN is missing, over MAX_EXECUTABLE_BYTES or not
+    fully inside the image, or empty without that boot-fallback layout, cannot be
+    told apart from other discs and is refused.
     """
     refusal = IsoInspectionError(
         f"PARAM.SFO names this disc '{sfo_disc_id}', which is not a retail disc ID, and "
@@ -806,19 +814,38 @@ def _non_retail_identity(
         entry = _lookup_iso_file(stream, file_size, NON_RETAIL_MAIN_EXECUTABLE)
     except IsoInspectionError as exc:
         raise refusal from exc
-    if entry is None or not 0 < entry[1] <= MAX_EXECUTABLE_BYTES:
+    if entry is None or entry[1] > MAX_EXECUTABLE_BYTES:
         raise refusal
-    lba, size = entry
-    digest = hashlib.sha256(NON_RETAIL_KEY_DOMAIN)
+    parts = [entry]
+    try:
+        eboot_kind = _classify_iso_executable(stream, file_size, "EBOOT.BIN")["classification"]
+        boot_kind = _classify_iso_executable(stream, file_size, "BOOT.BIN")["classification"]
+        boot_entry = _lookup_iso_file(stream, file_size, NON_RETAIL_BOOT_EXECUTABLE)
+    except (IsoInspectionError, struct.error):
+        eboot_kind = boot_kind = None
+        boot_entry = None
+    boot_keyed = False
+    if (
+        eboot_kind == "EMPTY_OR_ZERO_FILLED"
+        and boot_kind == "PLAIN_MIPS_ELF32"
+        and boot_entry is not None
+        and 0 < boot_entry[1] <= MAX_EXECUTABLE_BYTES
+    ):
+        boot_keyed = True
+        parts.append(boot_entry)
+    elif entry[1] == 0:
+        raise refusal
+    digest = hashlib.sha256(NON_RETAIL_KEY_DOMAIN_BOOT if boot_keyed else NON_RETAIL_KEY_DOMAIN)
     digest.update(struct.pack("<Q", len(raw_sfo)))
     digest.update(raw_sfo)
-    digest.update(struct.pack("<Q", size))
-    offset = 0
     try:
-        while offset < size:
-            count = min(1024 * 1024, size - offset)
-            digest.update(_read_iso_extent(stream, file_size, lba, size, offset, count))
-            offset += count
+        for lba, size in parts:
+            digest.update(struct.pack("<Q", size))
+            offset = 0
+            while offset < size:
+                count = min(1024 * 1024, size - offset)
+                digest.update(_read_iso_extent(stream, file_size, lba, size, offset, count))
+                offset += count
     except IsoInspectionError as exc:
         raise refusal from exc
     value = digest.digest()

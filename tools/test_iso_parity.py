@@ -2451,6 +2451,91 @@ int main(int argc, char **argv) {
             inspect_iso(empty)
         self.assertEqual(self._run_native_inspect(empty).get("MESSAGE"), message)
 
+    @staticmethod
+    def _expected_boot_identity(sfo: bytes, eboot: bytes, boot: bytes) -> tuple[str, str]:
+        """The v2 derivation for a disc that boots BOOT.BIN beside an empty or zero-filled
+        EBOOT.BIN, restated: the v2 tag, then PARAM.SFO, EBOOT.BIN and BOOT.BIN, each after
+        its length as a little-endian 64-bit integer."""
+        digest = hashlib.sha256(
+            b"nakagawa-non-retail-disc-key-v2\0"
+            + struct.pack("<Q", len(sfo)) + sfo
+            + struct.pack("<Q", len(eboot)) + eboot
+            + struct.pack("<Q", len(boot)) + boot
+        ).digest()
+        value = int.from_bytes(digest[:8], "big") % (26 ** 3 * 10 ** 5)
+        letters, digits = divmod(value, 100000)
+        key = "X" + "".join(
+            chr(65 + part) for part in (letters // 676, letters // 26 % 26, letters % 26)
+        ) + f"{digits:05d}"
+        return key, digest.hex()
+
+    def _assert_identity_in_both_tiers(self, iso_file: Path, key: str, digest: str) -> None:
+        py_meta = inspect_iso(iso_file)
+        self.assertEqual(
+            (py_meta.disc_id, py_meta.non_retail, py_meta.identity_sha256), (key, True, digest),
+        )
+        c_meta = self._run_native_inspect(iso_file)
+        self.assertEqual(c_meta.get("RESULT"), "OK", c_meta)
+        self.assertEqual(
+            (c_meta.get("DISC_ID"), c_meta.get("NON_RETAIL"), c_meta.get("IDENTITY_SHA256")),
+            (key, "1", digest),
+        )
+
+    def test_non_retail_key_covers_boot_bin_beside_a_placeholder_eboot(self) -> None:
+        """Audit F-2281ebab: a prototype disc whose EBOOT.BIN is zero-filled boots its plain
+        BOOT.BIN, so the key covers BOOT.BIN too (the v2 tag). Two such discs differing only
+        in BOOT.BIN get two keys, not one shared package, title folder and saves."""
+        sfo = build_param_sfo(self.BETA_DISC_ID, "Synthetic Beta")
+        placeholder = bytes(2048)
+        boots = (build_plain_mips_elf(), build_plain_mips_elf(vaddr=0x08804000))
+        keys = []
+        for index, boot in enumerate(boots):
+            with self.subTest(boot=index):
+                iso_file = self.temp_dir / f"proto-boot-{index}.iso"
+                create_test_iso_with_executables(
+                    iso_file, placeholder, boot, disc_id=self.BETA_DISC_ID,
+                    title="Synthetic Beta",
+                )
+                key, digest = self._expected_boot_identity(sfo, placeholder, boot)
+                self._assert_identity_in_both_tiers(iso_file, key, digest)
+                keys.append(key)
+        self.assertEqual(len(set(keys)), 2, "two prototype builds must not share one key")
+
+    def test_non_retail_disc_with_an_empty_eboot_and_a_plain_boot_is_keyed(self) -> None:
+        """A size-0 EBOOT.BIN beside a plain BOOT.BIN is the boot-fallback layout, keyed by
+        the v2 rule rather than refused."""
+        sfo = build_param_sfo(self.BETA_DISC_ID, "Synthetic Beta")
+        boot = build_plain_mips_elf()
+        iso_file = self.temp_dir / "proto-empty-eboot.iso"
+        create_test_iso_with_executables(
+            iso_file, b"", boot, disc_id=self.BETA_DISC_ID, title="Synthetic Beta",
+        )
+        key, digest = self._expected_boot_identity(sfo, b"", boot)
+        self._assert_identity_in_both_tiers(iso_file, key, digest)
+
+    def test_non_retail_key_stays_v1_unless_boot_bin_is_the_boot_file(self) -> None:
+        """A disc that boots its EBOOT.BIN keeps its v1 key byte for byte, whatever BOOT.BIN
+        holds; so does a zero-filled EBOOT.BIN without a plain BOOT.BIN, and an encrypted
+        EBOOT.BIN (it differs per build and is hashed as stored)."""
+        sfo = build_param_sfo(self.BETA_DISC_ID, "Synthetic Beta")
+        cases = {
+            "real-eboot-alone": (self.BETA_EXECUTABLE, None),
+            "real-eboot-with-boot": (self.BETA_EXECUTABLE, build_plain_mips_elf()),
+            "zero-eboot-alone": (bytes(2048), None),
+            "zero-eboot-unusable-boot": (bytes(2048), b"not an executable\n"),
+            "encrypted-eboot-with-boot": (build_psp_container(), build_plain_mips_elf()),
+        }
+        for name, (eboot, boot) in cases.items():
+            with self.subTest(case=name):
+                iso_file = self.temp_dir / f"v1-{name}.iso"
+                create_test_iso_with_executables(
+                    iso_file, eboot, boot, disc_id=self.BETA_DISC_ID, title="Synthetic Beta",
+                )
+                key, digest = self._expected_identity(sfo, eboot)
+                if name == "real-eboot-alone":
+                    self.assertEqual(key, self.BETA_KEY)
+                self._assert_identity_in_both_tiers(iso_file, key, digest)
+
     def test_cli_inspect_names_a_non_retail_disc(self) -> None:
         iso_file = self.temp_dir / "cli-beta.iso"
         create_test_iso_with_executables(

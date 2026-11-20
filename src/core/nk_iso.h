@@ -161,7 +161,8 @@ typedef struct {
     char sfo_disc_id[NK_MAX_DISC_ID_LEN];
     /* A disc whose own ID is not a retail ID (a beta, a prototype, an SDK
        placeholder): disc_id is then the key nk_non_retail_disc_key derived from
-       identity_sha256, the digest of its PARAM.SFO and main executable. */
+       identity_sha256, the digest of its PARAM.SFO and main executable (and of
+       BOOT.BIN when it boots BOOT.BIN beside an empty or zero-filled EBOOT.BIN). */
     bool non_retail;
     char identity_sha256[65];
 } NkIsoMetadata;
