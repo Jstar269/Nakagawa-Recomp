@@ -993,7 +993,7 @@ class EnvironmentContractTests(unittest.TestCase):
 
     # F-b5187cd8: on Linux (native or WSL 2) the build scope checks the Linux build tools
     # instead of failing on HOST_WINDOWS. The probes are injected, so this runs on Windows too.
-    LINUX_TOOLS = {"gcc": "/usr/bin/gcc", "make": "/usr/bin/make", "python": "/home/dev/.venvs/nk/bin/python"}
+    LINUX_TOOLS = {"gcc": "/usr/bin/gcc", "make": "/usr/bin/make", "python": "/usr/local/bin/python"}
     LINUX_VERSIONS = {
         "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0",
         "make": "GNU Make 4.3",
