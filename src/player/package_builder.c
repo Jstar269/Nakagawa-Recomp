@@ -17,6 +17,7 @@
 #endif
 
 #include "package_builder.h"
+#include "nk_achievements.h"
 #include "nk_json.h"
 #include "nk_launch.h"
 #include "nk_platform.h"
@@ -660,12 +661,59 @@ static void winhttp_close(void *context) {
     free(state);
 }
 
+/* The user agent a WinHTTP session carries: NK_ACH_USER_AGENT_MAX UTF-16 units, as UTF-8
+   never takes more units than bytes. The options' text, converted whole, or the default;
+   else the refusal, which names why. */
+typedef wchar_t WinHttpUserAgent[NK_ACH_USER_AGENT_MAX];
+
+static const char *winhttp_user_agent(const PackageHttpOptions *options,
+                                      WinHttpUserAgent user_agent) {
+    static const wchar_t k_default[] = L"NakagawaRecomp/PrerequisiteBootstrap";
+    memcpy(user_agent, k_default, sizeof k_default);
+    if (!options || !options->user_agent) return NULL;
+    if (strlen(options->user_agent) >= NK_ACH_USER_AGENT_MAX)
+        return "refused: the user agent is longer than the transport carries";
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, options->user_agent, -1, user_agent,
+                            (int)NK_ACH_USER_AGENT_MAX) <= 0)
+        return "refused: the user agent is not UTF-8";
+    return NULL;
+}
+
+static HINTERNET winhttp_open_session(const WinHttpUserAgent user_agent) {
+    return WinHttpOpen(user_agent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+                       WINHTTP_NO_PROXY_BYPASS, 0);
+}
+
+const char *package_builder_native_session_user_agent(const PackageHttpOptions *options,
+                                                      char *agent, size_t agent_size) {
+    WinHttpUserAgent user_agent;
+    wchar_t carried[NK_ACH_USER_AGENT_MAX];
+    DWORD carried_size = sizeof(carried);
+    bool read = false;
+    if (!agent || agent_size == 0u || agent_size > INT_MAX)
+        return "refused: no room for the user agent";
+    agent[0] = '\0';
+    const char *refused = winhttp_user_agent(options, user_agent);
+    if (refused) return refused;
+    HINTERNET session = winhttp_open_session(user_agent);
+    if (!session) return "refused: WinHTTP opened no session";
+    read = WinHttpQueryOption(session, WINHTTP_OPTION_USER_AGENT, carried, &carried_size) &&
+           WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, carried, -1, agent,
+                               (int)agent_size, NULL, NULL) > 0;
+    WinHttpCloseHandle(session);
+    if (!read) {
+        agent[0] = '\0';
+        return "refused: the session's user agent could not be read back";
+    }
+    return NULL;
+}
+
 static bool winhttp_open_request(void *context, const char *url, const char *allowed_hosts,
                                  PackageHttpResponse *response, const char *method,
                                  const char *content_type, const void *body, size_t body_size,
                                  bool follow_redirects, bool require_success) {
     const PackageHttpOptions *options = (const PackageHttpOptions *)context;
-    wchar_t user_agent[64] = L"NakagawaRecomp/PrerequisiteBootstrap";
+    WinHttpUserAgent user_agent;
     WCHAR wide_method[16];
     WCHAR headers[256];
     const WCHAR *header_ptr = WINHTTP_NO_ADDITIONAL_HEADERS;
@@ -674,6 +722,9 @@ static bool winhttp_open_request(void *context, const char *url, const char *all
     LPVOID request_body;
     if (!response) return false;
     memset(response, 0, sizeof(*response));
+    /* First, so a refused user agent is named whatever else the request holds. */
+    response->refused = winhttp_user_agent(options, user_agent);
+    if (response->refused) return false;
     if (!allowed_url(url, allowed_hosts) || !method ||
         (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0) ||
         (body_size != 0u && !body) || body_size > UINT32_MAX ||
@@ -699,11 +750,6 @@ static bool winhttp_open_request(void *context, const char *url, const char *all
     }
     request_body_size = (DWORD)body_size;
     request_body = body_size != 0u ? (LPVOID)body : WINHTTP_NO_REQUEST_DATA;
-    if (options && options->user_agent &&
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, options->user_agent, -1, user_agent,
-                            (int)(sizeof(user_agent) / sizeof(user_agent[0]))) <= 0) {
-        return false;
-    }
     WinHttpDownload *state = (WinHttpDownload *)calloc(1, sizeof(*state));
     if (!state) return false;
     if (strlen(url) >= sizeof(state->final_url)) {
@@ -711,9 +757,7 @@ static bool winhttp_open_request(void *context, const char *url, const char *all
         return false;
     }
     snprintf(state->final_url, sizeof(state->final_url), "%s", url);
-    state->session = WinHttpOpen(user_agent,
-                                 WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                 WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    state->session = winhttp_open_session(user_agent);
     if (!state->session) {
         winhttp_close(state);
         return false;

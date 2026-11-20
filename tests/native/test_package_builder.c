@@ -7,6 +7,7 @@
 #endif
 
 #include "package_builder.h"
+#include "nk_achievements.h"
 #include "nk_platform.h"
 
 #ifdef NDEBUG
@@ -2041,6 +2042,59 @@ static void test_allowed_hosts_overflow_is_named(void) {
     assert(strcmp(error, "PREREQUISITE_MANIFEST_INVALID: the allow-listed hosts are too long.") == 0);
 }
 
+#if defined(_WIN32) || defined(_WIN64)
+/* Review 2026-11-20: the WinHTTP user agent was a 64-unit buffer while nk_ach_user_agent
+ * writes up to NK_ACH_USER_AGENT_MAX - 1 bytes, so a long RetroAchievements user agent failed
+ * to convert, and the request came back as an unnamed failure the player answered as a retry.
+ * Nothing here is sent: the session is opened and closed, and every request below is refused
+ * before a session exists (its host is in no allow-list). */
+static void test_native_transport_user_agent_limit(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: the native transport carries the longest user agent\n");
+    char longest[NK_ACH_USER_AGENT_MAX];
+    char too_long[NK_ACH_USER_AGENT_MAX + 1u];
+    char carried[NK_ACH_USER_AGENT_MAX * 2u];
+    for (size_t i = 0; i + 1u < sizeof longest; i++) longest[i] = (char)('a' + (int)(i % 26u));
+    /* Ends in a two-byte character, so the whole of a UTF-8 agent is converted. */
+    memcpy(longest + sizeof longest - 3u, "\xc3\xa9", 2u);
+    longest[sizeof longest - 1u] = '\0';
+    assert(strlen(longest) == NK_ACH_USER_AGENT_MAX - 1u);
+    memset(too_long, 'b', sizeof too_long - 1u);
+    too_long[sizeof too_long - 1u] = '\0';
+
+    PackageHttpOptions options = {longest};
+    const char *refused = package_builder_native_session_user_agent(&options, carried,
+                                                                    sizeof carried);
+    printf("   longest (%u bytes): %s\n", (unsigned)strlen(longest), refused ? refused : "carried");
+    assert(!refused);
+    assert(strcmp(carried, longest) == 0);
+
+    options.user_agent = too_long;
+    refused = package_builder_native_session_user_agent(&options, carried, sizeof carried);
+    printf("   one byte over: %s\n", refused ? refused : "carried");
+    assert(refused && strcmp(refused,
+                             "refused: the user agent is longer than the transport carries") == 0);
+    assert(carried[0] == '\0');
+
+    options.user_agent = "NakagawaRecomp/0.1.0 \xff";
+    refused = package_builder_native_session_user_agent(&options, carried, sizeof carried);
+    printf("   not UTF-8: %s\n", refused ? refused : "carried");
+    assert(refused && strcmp(refused, "refused: the user agent is not UTF-8") == 0);
+
+    /* The request path names the same refusal in its response. */
+    PackageHttpResponse response;
+    options.user_agent = too_long;
+    assert(!package_builder_native_transport_request(&options, "https://example.invalid/", "",
+                                                     "GET", NULL, NULL, 0u, &response));
+    assert(response.refused && strcmp(response.refused,
+                                      "refused: the user agent is longer than the transport "
+                                      "carries") == 0);
+    options.user_agent = longest;
+    assert(!package_builder_native_transport_request(&options, "https://example.invalid/", "",
+                                                     "GET", NULL, NULL, 0u, &response));
+    assert(!response.refused); /* refused for its host, which names no user agent */
+}
+#endif
+
 /* Audit 2026-11-17: the build tools' fetch start reset a running session and spawned
  * into its process slot, orphaning the live child, where package_builder_start refuses.
  * Failing before: the start cleared is_building and returned a manifest error. It now
@@ -2126,6 +2180,7 @@ int main(int argc, char *argv[]) {
     test_bundled_prerequisites();
 #if defined(_WIN32) || defined(_WIN64)
     test_native_download_verification();
+    test_native_transport_user_agent_limit();
 #else
     puts("[PACKAGE_BUILDER_TEST] SKIP native WinHTTP/SHA-256 transport tests (non-Windows host)");
 #endif
