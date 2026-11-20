@@ -1316,13 +1316,15 @@ class TestPrerequisiteFetcher(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.server_thread.join(timeout=5)
+        # The probe stays bound, never listening, for the whole download: the connection is
+        # refused, and no other process can take the port and answer in the meantime.
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             unused_port = probe.getsockname()[1]
-        item = self.item()
-        item["url"] = f"http://127.0.0.1:{unused_port}/payload"
-        with self.assertRaisesRegex(PrerequisiteFetchError, "OFFLINE_OR_NETWORK_ERROR"):
-            download_verified_item(item, self.root / "payload.zip", retries=2, allow_http=True)
+            item = self.item()
+            item["url"] = f"http://127.0.0.1:{unused_port}/payload"
+            with self.assertRaisesRegex(PrerequisiteFetchError, "OFFLINE_OR_NETWORK_ERROR"):
+                download_verified_item(item, self.root / "payload.zip", retries=2, allow_http=True)
 
     def test_font_closure_packages_are_pinned_in_the_manifest(self) -> None:
         """The readable-font DLL closure must ship on the prerequisite route (#421).
@@ -1652,35 +1654,111 @@ NATIVE_TRANSPORT_CALLERS = frozenset({
     "src/player/cover_art.c",
 })
 
-# Shipped code: everything under src/ and the Python the player runs. Maintainer
-# tools elsewhere in tools/ (SBOM and issue-link audits) never ship and are not
-# covered.
-NETWORK_EGRESS_SCOPES = (("src", (".c", ".h", ".cpp", ".hpp")), ("tools/nk_core", (".py",)))
+# Shipped code: everything under src/ and the Python the player runs. The player runs
+# tools/nk_cli.py (report, build-package), and BUILD PACKAGE runs the Makefile's
+# codegen, analysis and staging tools, all from the committed tree it ships; so every
+# tools/ Python file is scanned except the unit tests and the maintainer tools below.
+NETWORK_EGRESS_SCOPES = (("src", (".c", ".h", ".cpp", ".hpp")), ("tools", (".py",)))
+
+# Maintainer and CI tools the player never runs, which name a network API: each opens a
+# connection only when a maintainer or a CI job runs it, or names the API without opening one.
+# The player must never invoke one (test_player_runs_no_maintainer_network_tool).
+MAINTAINER_NETWORK_TOOLS = frozenset({
+    "tools/audit_public_issue_links.py",  # checks issue links against the GitHub API
+    "tools/ci_paths.py",  # reads a pull request's labels in CI
+    "tools/ci_trust_verdict.py",  # posts the CI verdict through the GitHub API
+    "tools/generate_sbom.py",  # fetches upstream release metadata for the SBOM
+    "tools/library_regress.py",  # socket.gethostname() for a run label; no connection
+    "tools/ppsspp_ref.py",  # drives a local PPSSPP over its loopback debugger
+    "tools/verify_installer.py",  # names network DLLs to refuse them in the installer
+})
 
 NETWORK_EGRESS_PATTERN = re.compile(
     r"\bWinHttp\w*|\bwinhttp\.h\b|\bInternet(?:Open|Connect|ReadFile)\w*|\bwininet\b"
-    r"|\bURLDownloadToFile\w*|\bWSAStartup\b|\bwinsock2?\.h\b|<sys/socket\.h>"
-    r"|\bgetaddrinfo\b|\bSDL_net\b|\bcurl_easy_\w+|\bsocket\s*\("
-    r"|\burllib\.request\b|\bfrom\s+urllib\s+import\s+request\b|\burlopen\b"
-    r"|\bhttp\.client\b|^\s*(?:import|from)\s+(?:requests|socket|httpx|aiohttp)\b",
+    r"|\bURLDownloadToFile\w*|\bWSAStartup\b|\bWSASocket\w*|\bwinsock2?\.h\b|\bws2tcpip\.h\b"
+    r"|<sys/socket\.h>|<netdb\.h>|\bgetaddrinfo\b|\bgethostbyname\w*|\bSDL_net\b|\bcurl_easy_\w+"
+    r"|\bsocket\s*\(|\bcreate_connection\b|\bopen_connection\b|\bHTTPS?Connection\b"
+    r"|\burllib\.request\b|\bfrom\s+urllib\s+import\s+[^\n#]*\brequest\b|\burlopen\b"
+    r"|\bhttp\.client\b|^[ \t]*from[ \t]+http[ \t]+import[ \t]+[^\n#]*\bclient\b"
+    # An import of a network module anywhere in an import list: `import ssl, socket`.
+    r"|^[ \t]*(?:import|from)[ \t]+(?:[\w.]+(?:[ \t]+as[ \t]+\w+)?[ \t]*,[ \t]*)*"
+    r"(?:requests|socket|ssl|urllib3|httpx|aiohttp|websockets?)\b",
     re.MULTILINE,
 )
 
 
+def network_egress_scanned(rel: str) -> bool:
+    """True when the egress scan reads this repository-relative path."""
+    path = PurePosixPath(rel)
+    for scope, suffixes in NETWORK_EGRESS_SCOPES:
+        if rel.startswith(scope + "/") and path.suffix in suffixes:
+            if scope == "tools" and (path.name.startswith("test_") or rel in MAINTAINER_NETWORK_TOOLS):
+                return False
+            return rel not in NETWORK_EGRESS_ALLOWLIST
+    return False
+
+
+def network_egress_offenders(root: Path) -> list[str]:
+    """Every scanned file under root that names a network API, with the matching text."""
+    offenders = []
+    for scope, _suffixes in NETWORK_EGRESS_SCOPES:
+        for path in sorted((root / scope).rglob("*")):
+            rel = path.relative_to(root).as_posix()
+            if not path.is_file() or not network_egress_scanned(rel):
+                continue
+            match = NETWORK_EGRESS_PATTERN.search(path.read_text(encoding="utf-8", errors="replace"))
+            if match:
+                offenders.append(f"{rel}: {match.group(0).strip()}")
+    return offenders
+
+
+# The transport's one declaration, in package_builder.h; any other mention of the name is a use.
+NATIVE_TRANSPORT_PROTOTYPE = re.compile(
+    r"\bPackageHttpOpen\s+package_builder_native_transport\s*\(\s*void\s*\)\s*;")
+
+
+def native_transport_callers(root: Path) -> set[str]:
+    """Every C or C++ source or header under root/src that uses the native transport."""
+    callers = set()
+    suffixes = NETWORK_EGRESS_SCOPES[0][1]
+    for path in sorted((root / "src").rglob("*")):
+        if not path.is_file() or path.suffix not in suffixes:
+            continue
+        text = NATIVE_TRANSPORT_PROTOTYPE.sub("", path.read_text(encoding="utf-8", errors="replace"))
+        if "package_builder_native_transport" in text:
+            callers.add(path.relative_to(root).as_posix())
+    return callers
+
+
 class TestNetworkEgressAllowlist(unittest.TestCase):
     def test_only_the_prerequisite_downloaders_use_network_apis(self) -> None:
-        offenders = []
-        for scope, suffixes in NETWORK_EGRESS_SCOPES:
-            for path in sorted((REPO_ROOT / scope).rglob("*")):
-                if not path.is_file() or path.suffix not in suffixes:
-                    continue
-                rel = path.relative_to(REPO_ROOT).as_posix()
-                if rel in NETWORK_EGRESS_ALLOWLIST:
-                    continue
-                match = NETWORK_EGRESS_PATTERN.search(path.read_text(encoding="utf-8", errors="replace"))
-                if match:
-                    offenders.append(f"{rel}: {match.group(0).strip()}")
+        offenders = network_egress_offenders(REPO_ROOT)
         self.assertEqual(offenders, [], "network API outside the egress allowlist; see AGENTS.md section 5")
+
+    def test_scan_reads_the_python_the_player_runs(self) -> None:
+        # The player starts tools/nk_cli.py itself, and BUILD PACKAGE runs the Makefile's
+        # codegen and staging tools; an egress added to any of them must fail the scan.
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            for rel in ("tools/nk_cli.py", "tools/stage_install.py", "tools/codegen.py"):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text("import urllib.request\n", encoding="utf-8")
+            (root / "tools" / "test_nk_cli.py").write_text("import socket\n", encoding="utf-8")
+            self.assertEqual(network_egress_offenders(root), [
+                "tools/codegen.py: urllib.request",
+                "tools/nk_cli.py: urllib.request",
+                "tools/stage_install.py: urllib.request",
+            ])
+
+    def test_player_runs_no_maintainer_network_tool(self) -> None:
+        # The maintainer-tool exemption holds only while the player never starts one.
+        player = "\n".join(path.read_text(encoding="utf-8", errors="replace")
+                           for path in sorted((REPO_ROOT / "src").rglob("*"))
+                           if path.is_file() and path.suffix in NETWORK_EGRESS_SCOPES[0][1])
+        for rel in sorted(MAINTAINER_NETWORK_TOOLS):
+            with self.subTest(tool=rel):
+                self.assertTrue((REPO_ROOT / rel).is_file(), f"stale maintainer entry: {rel}")
+                self.assertNotIn(PurePosixPath(rel).name, player)
 
     def test_pinned_downloads_reach_only_the_documented_hosts(self) -> None:
         # Release staging and the consented download fetch only manifest pins over
@@ -2046,13 +2124,22 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertIn("**Discord status**", setup)
 
     def test_only_the_known_callers_use_the_native_transport(self) -> None:
-        callers = set()
-        for path in sorted((REPO_ROOT / "src").rglob("*.c")):
-            if "package_builder_native_transport" in path.read_text(encoding="utf-8",
-                                                                     errors="replace"):
-                callers.add(path.relative_to(REPO_ROOT).as_posix())
-        self.assertEqual(callers, NATIVE_TRANSPORT_CALLERS,
+        self.assertEqual(native_transport_callers(REPO_ROOT), NATIVE_TRANSPORT_CALLERS,
                          "a new caller of the native transport is a new egress (AGENTS.md section 5)")
+
+    def test_native_transport_use_in_a_header_or_cpp_file_is_a_caller(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            player = Path(scratch) / "src" / "player"
+            player.mkdir(parents=True)
+            (player / "package_builder.h").write_text(
+                "PackageHttpOpen package_builder_native_transport(void);\n", encoding="utf-8")
+            (player / "wrapper.h").write_text(
+                "static inline PackageHttpOpen open(void) { return package_builder_native_transport(); }\n",
+                encoding="utf-8")
+            (player / "fetch.cpp").write_text(
+                "PackageHttpOpen t = package_builder_native_transport();\n", encoding="utf-8")
+            self.assertEqual(native_transport_callers(Path(scratch)),
+                             {"src/player/wrapper.h", "src/player/fetch.cpp"})
 
     def test_allowlisted_downloaders_still_exist(self) -> None:
         for rel in sorted(NETWORK_EGRESS_ALLOWLIST):
@@ -2062,9 +2149,18 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         for sample in ("WinHttpOpen(", "#include <winsock2.h>", "#include <sys/socket.h>",
                        "getaddrinfo(", "socket (AF_INET", "import urllib.request",
                        "from urllib import request", "import requests", "import socket",
-                       "http.client.HTTPSConnection", "InternetOpenW("):
+                       "http.client.HTTPSConnection", "InternetOpenW(",
+                       # The forms the original pattern missed (audit 2026-11-17).
+                       "import ssl, socket", "import os, socket as s",
+                       "s = socket.create_connection((host, 443))",
+                       "from http import client", "conn = client.HTTPSConnection(host)",
+                       "await asyncio.open_connection(host, 443)", "import urllib3",
+                       "from urllib import parse, request", "#include <ws2tcpip.h>",
+                       "WSASocketW(AF_INET, SOCK_STREAM, 0, NULL, 0, 0)",
+                       "gethostbyname(host); connect(fd, addr, len)", "#include <netdb.h>"):
             self.assertIsNotNone(NETWORK_EGRESS_PATTERN.search(sample), sample)
-        for sample in ("from urllib.parse import quote", "sceNetAdhocInit", "s_socket_count"):
+        for sample in ("from urllib.parse import quote", "sceNetAdhocInit", "s_socket_count",
+                       "from http import HTTPStatus", "import os, sys", "sslice_count = 0"):
             self.assertIsNone(NETWORK_EGRESS_PATTERN.search(sample), sample)
 
 

@@ -76,6 +76,35 @@ class SeedRecordsTest(unittest.TestCase):
                 self.assertEqual(classification, published["classification"])
                 self.assertEqual(evidence["record_id"], record["id"])
 
+    def test_a_label_that_names_one_class_seeds_that_class(self) -> None:
+        """The v2 labels name the record's class (audit F-cb647ba8), so the seed adopts exactly it."""
+        v2 = provenance_ledger.PUBLIC_LABEL_SETS["v2"]
+        ledger = {"entries": [
+            _entry("src/a.c", "project_authored_attested", "rec-a",
+                   authorship=v2["project-authored-independent"]),
+            _entry("src/b.c", "project_authored_attested", "rec-b", authorship=v2["behavior-informed"]),
+            _entry("src/c.c", "upstream_derived", "rec-c", license="MIT",
+                   modification_status=v2["upstream-third-party"]),
+            _entry("src/d.c", "upstream_derived", "rec-d", license="MIT",
+                   modification_status=v2["derived-translated"]),
+            # A v1 label names two classes: the seed keeps the weaker one.
+            _entry("src/e.c", "project_authored_attested", "rec-e",
+                   authorship=provenance_ledger.PUBLIC_LABEL_SETS["v1"]["project-authored-independent"]),
+        ]}
+        records = {record["id"]: record for record in fork_init.seed_records(ledger, "c" * 40)}
+        self.assertEqual(
+            {key: record["classification"] for key, record in records.items()},
+            {"rec-a": "project-authored-independent", "rec-b": "behavior-informed",
+             "rec-c": "upstream-third-party", "rec-d": "derived-translated", "rec-e": "behavior-informed"},
+        )
+        # Each seeded record gives its path back the label it was seeded from.
+        for record_id in ("rec-a", "rec-b", "rec-c", "rec-d"):
+            record = records[record_id]
+            published = next(entry for entry in ledger["entries"] if entry["path"] == record["paths"][0])
+            field = provenance_ledger.PUBLIC_LABEL_FIELDS[published["classification"]]
+            _, evidence = provenance_ledger._refresh_class_for(record["paths"][0], record, label_set="v2")
+            self.assertEqual(evidence[field], published["evidence"][field])
+
     def test_one_id_with_two_claims_is_refused(self) -> None:
         ledger = {"entries": [
             _entry("src/a.c", "project_authored_attested", "rec-a"),

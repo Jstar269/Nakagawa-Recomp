@@ -18146,17 +18146,6 @@
       }
     },
     {
-      "path": "tools/nid_auditor.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "import-and-nid-audit-tooling-20260909",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
       "path": "tools/nid_corpus.json",
       "classification": "generated_from_public_source",
       "evidence": {

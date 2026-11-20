@@ -63,6 +63,7 @@ if _TOOLS_DIRECTORY not in sys.path:
     sys.path.insert(0, _TOOLS_DIRECTORY)
 
 import analysis_ir
+import analyze
 import title_manifest
 
 #: Fuzzy similarity needed, the gap to the runner-up, and the shortest body worth comparing.
@@ -77,8 +78,6 @@ TRUSTED_METHODS = ("exact", "neighbour")
 REVIEW_METHODS = ("fuzzy", "caller")
 
 GP = 28
-_BRANCH_OPS = frozenset({0x04, 0x05, 0x06, 0x07, 0x14, 0x15, 0x16, 0x17})
-_REGIMM_BRANCH_RT = frozenset({0x00, 0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x13})
 _ADDRESS_ARITHMETIC_OPS = frozenset({0x08, 0x09, 0x0D})
 #: Primary opcodes whose rs field is a base register and whose low 16 bits are its offset: the
 #: integer loads and stores, cache, ll/sc, the FPU and the VFPU loads and stores. The VFPU
@@ -171,8 +170,7 @@ class Module:
                     tokens.append(("j", target - entry))
                 else:
                     tokens.append(("j" if op == 0x02 else "jal", self.callee_class(entry, target)))
-            elif _is_branch(word):
-                target = address + 4 + (_signed16(word) << 2)
+            elif (target := analyze.branch_target(address, word)) is not None:
                 tokens.append(("b", word) if entry <= target < end else ("b-out", word & 0xFFFF0000))
             elif op == 0x0F:
                 tokens.append(("lui", rt))
@@ -188,16 +186,6 @@ class Module:
             else:
                 high.difference_update(effect["writes"])
         return tokens
-
-
-def _signed16(word: int) -> int:
-    value = word & 0xFFFF
-    return value - 0x10000 if value & 0x8000 else value
-
-
-def _is_branch(word: int) -> bool:
-    op, rs, rt = word >> 26, (word >> 21) & 31, (word >> 16) & 31
-    return op in _BRANCH_OPS or (op == 0x01 and rt in _REGIMM_BRANCH_RT) or (op == 0x11 and rs == 0x08)
 
 
 def _digest(tokens: list[tuple]) -> str:

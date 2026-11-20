@@ -205,6 +205,48 @@ class MaskingTests(unittest.TestCase):
                 self.assertEqual(self.tokens([word])[0], ("addr", word >> 16))
         self.assertEqual(self.tokens([LUI_A0, ADDIU_A0])[1], ("addr", ADDIU_A0 >> 16))
 
+    def test_vfpu_branch_leaving_function_matches_exact_across_layout_shift(self):
+        # bvt 0 targeting an address outside the function: when the function shifts by 0x40
+        # relative to that target, the raw PC-relative offset changes, so the branch must be
+        # masked as b-out and keep an exact match.
+        target = BASE + 0x100
+
+        def bvt_to(site: int, dest: int) -> int:
+            offset = ((dest - (site + 4)) >> 2) & 0xFFFF
+            return (0x12 << 26) | (0x08 << 21) | (0x01 << 16) | offset
+
+        def make_ir(entry: int) -> dict:
+            words = [bvt_to(entry, target), NOP] + body(11, 8)
+            return {
+                "schema": binding_carry.analysis_ir.IR_SCHEMA,
+                "functions": [{"kind": "callable", "entry": entry, "calls": [], "tail_calls": []}],
+                "instructions": [
+                    {"address": entry + 4 * index, "word": word, "owners": [entry]}
+                    for index, word in enumerate(words)
+                ],
+            }
+
+        old_entry = BASE
+        new_entry = BASE + 0x40
+        matcher = binding_carry.Matcher(
+            binding_carry.Module(make_ir(old_entry)),
+            binding_carry.Module(make_ir(new_entry)),
+            binding_carry.FUZZY_MIN_SIMILARITY,
+            binding_carry.FUZZY_MARGIN,
+        )
+        matcher.run()
+        self.assertEqual(
+            matcher.status(old_entry),
+            {"status": "exact", "new": new_entry, "similarity": 1.0},
+        )
+
+    def test_blez_with_nonzero_rt_does_not_tokenize_as_a_branch(self):
+        # op 6 (blez) is only a branch when rt == 0 (matching analyze.branch_target).
+        non_branch = (0x06 << 26) | (4 << 21) | (1 << 16) | 0x0040
+        self.assertEqual(self.tokens([non_branch, NOP, JR_RA, NOP])[0], ("w", non_branch))
+        valid_blez = (0x06 << 26) | (4 << 21) | (0 << 16) | 0x0040
+        self.assertEqual(self.tokens([valid_blez, NOP, JR_RA, NOP])[0], ("b-out", valid_blez & 0xFFFF0000))
+
 
 class ManifestTests(Revisions, unittest.TestCase):
     @classmethod

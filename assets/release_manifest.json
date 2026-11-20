@@ -106,7 +106,7 @@
       "revision": "35b5c392cc15456736c440a68dbe073178bbffe0",
       "notice_path": "third_party/dr_libs/LICENSE.txt",
       "evidence_path": "third_party/dr_libs/PROVENANCE.md",
-      "disposition": "vendored_source_only; selftests only, not linked into the player or runtime"
+      "disposition": "vendored_source_only; selftests only, not linked into the player or runtime; dr_wav.h carries four later upstream fixes as LOCAL DELTA (third_party/dr_libs/PROVENANCE.md)"
     },
     {
       "id": "monocypher-ed25519",
@@ -116,7 +116,7 @@
       "revision": "4.0.3 / ab2b16dd619ad5f6979a4fbe69cfa324a6fcc35f",
       "notice_path": "third_party/monocypher/LICENCE.md",
       "evidence_path": "third_party/monocypher/PROVENANCE.md",
-      "disposition": "linked into the player for the signed update check (src/core/nk_sig.c, mk/pipeline.mk UPDATE_SIG_SRCS); upstream dual BSD-2-Clause OR CC0-1.0, CC0-1.0 elected"
+      "disposition": "linked into the player for the signed update check (src/core/nk_sig.c, mk/pipeline.mk UPDATE_SIG_SRCS); upstream dual BSD-2-Clause OR CC0-1.0, CC0-1.0 elected; monocypher.c carries upstream commit 55158d37 as a LOCAL DELTA (third_party/monocypher/PROVENANCE.md)"
     },
     {
       "id": "sdl3",
@@ -150,10 +150,10 @@
     },
     {
       "id": "stb-image",
-      "name": "stb_image 2.30 PNG decoder",
+      "name": "stb_image 2.34 PNG decoder",
       "license": "Unlicense",
       "origin": "https://github.com/nothings/stb",
-      "revision": "v2.30 / 003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5",
+      "revision": "v2.34 / 6b5799bae8a1fe3792691ef4b72ae26434c3e799",
       "notice_path": "third_party/stb/LICENSE",
       "evidence_path": "third_party/stb/PROVENANCE.md",
       "disposition": "vendored_source; MIT OR Unlicense upstream, used under Unlicense; linked into the player (PNG only)"
@@ -176,7 +176,7 @@
       "revision": "v12.5.0 / 1433173220a7eaede6a9ed7a18e94117be1821e0",
       "notice_path": "third_party/rcheevos/LICENSE",
       "evidence_path": "third_party/rcheevos/PROVENANCE.md",
-      "disposition": "vendored_source; MIT, with L. Peter Deutsch's MD5 under zlib; imported with LOCAL DELTA fixes in src/rc_client.c, src/rapi/ and src/rcheevos/ (alloc.c, richpresence.c, runtime_progress.c; see third_party/rcheevos/PROVENANCE.md); opt-in RetroAchievements support (#1316)"
+      "disposition": "vendored_source; MIT, with L. Peter Deutsch's MD5 under zlib; imported with LOCAL DELTA fixes in src/rc_client.c, src/rapi/ and src/rcheevos/ (alloc.c, richpresence.c, runtime.c, runtime_progress.c; see third_party/rcheevos/PROVENANCE.md); opt-in RetroAchievements support (#1316)"
     },
     {
       "id": "kenney-input-prompts",

@@ -15,20 +15,33 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SELFTEST_C = ROOT / "tests" / "native" / "vfs_selftest.c"
 CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
+#: A gate that exists to run these selftests (the Win32 containment step in CI) sets
+#: NK_REQUIRE_CC=1, so a compiler missing from PATH fails the run instead of skipping it.
+REQUIRE_CC = os.environ.get("NK_REQUIRE_CC") == "1"
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+def _require_compiler() -> None:
+    if CC is None:
+        raise AssertionError("NK_REQUIRE_CC=1 but no C compiler (gcc, cc or clang) is on PATH")
+
+
+@unittest.skipUnless(CC or REQUIRE_CC, "no C compiler on PATH")
 class TestVfsSelftestC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        assert CC is not None
+        _require_compiler()
         cls.tmp = tempfile.mkdtemp(prefix="vfsc_")
+        # A class cleanup runs even when setUpClass raises (a compile failure), unlike
+        # tearDownClass, so the scratch folder never outlives the run.
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.exe = os.path.join(cls.tmp, "vfs_selftest.exe")
         result = subprocess.run(
             [
@@ -48,10 +61,6 @@ class TestVfsSelftestC(unittest.TestCase):
         )
         if result.returncode != 0:
             raise AssertionError("vfs_selftest.c did not compile:\n" + result.stderr)
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_vfs_path_join_invariants_hold(self):
         result = subprocess.run([self.exe], capture_output=True, text=True)
@@ -545,12 +554,13 @@ int main(int argc, char **argv) {
 """
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC or REQUIRE_CC, "no C compiler on PATH")
 class TestPublicIsoVfsC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        assert CC is not None
+        _require_compiler()
         cls.tmp = tempfile.mkdtemp(prefix="isovfsc_")
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.iso_path = Path(cls.tmp) / "vfs_test.iso"
         create_synthetic_vfs_iso(cls.iso_path)
 
@@ -577,10 +587,6 @@ class TestPublicIsoVfsC(unittest.TestCase):
         if result.returncode != 0:
             raise AssertionError("iso_test_harness did not compile:\n" + result.stderr)
 
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
     def test_public_iso_vfs_contract(self):
         result = subprocess.run([self.exe, str(self.iso_path)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -592,6 +598,44 @@ class TestPublicIsoVfsC(unittest.TestCase):
         )
         self.assertEqual(result.stderr.count("ISO_PATH_TOO_LONG: PSP_ISO is 1100 bytes"), 1,
                          result.stderr)
+
+
+class TestSelftestHarness(unittest.TestCase):
+    """The two selftest classes fail loudly where a gate needs them, and clean up after a failure."""
+
+    def _run_without_compiler(self, require: bool) -> subprocess.CompletedProcess:
+        env = {key: value for key, value in os.environ.items() if key != "NK_REQUIRE_CC"}
+        if require:
+            env["NK_REQUIRE_CC"] = "1"
+        with tempfile.TemporaryDirectory() as empty:
+            env["PATH"] = empty
+            env["PYTHONPATH"] = str(ROOT / "tools")
+            return subprocess.run(
+                [sys.executable, "-m", "unittest", "test_vfs_c.TestVfsSelftestC",
+                 "test_vfs_c.TestPublicIsoVfsC"],
+                cwd=empty, env=env, capture_output=True, text=True, timeout=120)
+
+    def test_required_compiler_missing_fails_instead_of_skipping(self):
+        skipped = self._run_without_compiler(require=False)
+        self.assertEqual(skipped.returncode, 0, skipped.stdout + skipped.stderr)
+        self.assertIn("skipped=2", skipped.stderr)
+        required = self._run_without_compiler(require=True)
+        self.assertNotEqual(required.returncode, 0, required.stdout + required.stderr)
+        self.assertIn("NK_REQUIRE_CC=1 but no C compiler", required.stderr)
+        self.assertNotIn("skipped", required.stderr)
+
+    def test_a_compile_failure_leaves_no_scratch_folder(self):
+        for base in (TestVfsSelftestC, TestPublicIsoVfsC):
+            probe = type(base.__name__ + "Probe", (base,), {})
+            with self.subTest(selftest=base.__name__):
+                # The interpreter is not a C compiler, so the compile step fails for certain.
+                with mock.patch(f"{__name__}.CC", sys.executable):
+                    with self.assertRaises(AssertionError):
+                        probe.setUpClass()
+                scratch = Path(probe.tmp)
+                self.assertTrue(scratch.is_dir(), "setUpClass made no scratch folder")
+                probe.doClassCleanups()
+                self.assertFalse(scratch.exists(), f"{scratch.name} outlived the failed setUpClass")
 
 
 if __name__ == "__main__":

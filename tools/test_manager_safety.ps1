@@ -120,6 +120,50 @@ try {
             Assert-True (Test-Path -LiteralPath (Join-Path $root "oracle_x/snap_0.ppm")) "evidence deleted despite refusal"
             Assert-True (Test-Path -LiteralPath (Join-Path $outside "marker.txt")) "outside marker destroyed"
         }
+
+        Test-Case "a junction inside the root is removed as a link and its target survives" {
+            # logs/oracle_x is a junction to logs/shared, both inside the root: only the link goes.
+            $root = Join-Path $tmpRoot "junc4/logs"
+            $shared = Join-Path $root "shared"
+            New-Item -ItemType Directory -Path $shared -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $shared "marker.txt") -Value "x"
+            $link = Join-Path $root "oracle_x"
+            New-Item -ItemType Junction -Path $link -Target $shared -Force | Out-Null
+            Assert-True (Remove-SafeDirectory -Path $link -Root $root) "link removal not reported"
+            Assert-True (-not (Test-Path -LiteralPath $link)) "the junction is still there"
+            Assert-True (Test-Path -LiteralPath $shared -PathType Container) "the junction's target folder was deleted"
+            Assert-True (Test-Path -LiteralPath (Join-Path $shared "marker.txt")) "the junction's target content was deleted"
+        }
+
+        Test-Case "archive reset overwrite through an in-root junction keeps the target" {
+            $root = Join-Path $tmpRoot "junc5/logs"
+            $shared = Join-Path $root "shared"
+            New-Item -ItemType Directory -Path $shared -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $shared "marker.txt") -Value "x"
+            $link = Join-Path $root "oracle_x"
+            New-Item -ItemType Junction -Path $link -Target $shared -Force | Out-Null
+            Assert-True (Reset-OracleArchive -Path $link -AllowedRoot $root -Overwrite) "overwrite refused"
+            Assert-True (Test-Path -LiteralPath (Join-Path $shared "marker.txt")) "the junction's target content was deleted"
+            $fresh = Get-Item -LiteralPath $link -Force
+            Assert-True (-not ($fresh.Attributes -band [IO.FileAttributes]::ReparsePoint)) "the archive is still the junction"
+            Assert-True (@(Get-ChildItem -LiteralPath $link -Force).Count -eq 0) "the new archive is not empty"
+        }
+
+        Test-Case "a junction to the root itself and the root are refused" {
+            $root = Join-Path $tmpRoot "junc6/logs"
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $root "marker.txt") -Value "x"
+            $link = Join-Path $root "self"
+            New-Item -ItemType Junction -Path $link -Target $root -Force | Out-Null
+            try {
+                Assert-Throws { Remove-SafeDirectory -Path $link -Root $root } "delete of a junction to the root" -Expected "refusing recursive delete of *: canonical target * is the allowed root * itself"
+                Assert-Throws { Remove-SafeDirectory -Path $root -Root $root } "delete of the root" -Expected "refusing recursive delete of *: canonical target * is the allowed root * itself"
+                Assert-True (Test-Path -LiteralPath (Join-Path $root "marker.txt")) "root content deleted"
+            } finally {
+                # Remove the self-link as a link (never through it) so the temp cleanup is plain.
+                if (Test-Path -LiteralPath $link) { [IO.Directory]::Delete($link, $false) }
+            }
+        }
     } else {
         Test-Case "symlink escape is refused and the outside target survives (POSIX)" {
             $root = Join-Path $tmpRoot "junc3/logs"

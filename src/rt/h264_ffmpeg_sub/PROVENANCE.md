@@ -3,8 +3,9 @@
 Portable H.264 video decoder for the Nakagawa recomp runtime (PSMF movies on Linux and
 Android; Windows keeps Media Foundation). The decoder is FFmpeg's libavcodec H.264 decoder,
 imported byte-exact together with the libavcodec/libavutil framework files it needs, built
-from generic C only. One imported file, `libavcodec/h264_slice.c`, carries two FFmpeg
-release/4.4 security and robustness fixes as a LOCAL DELTA (see "LOCAL DELTAs" below). A thin C API written for this project (`nk_h264_api.h`) wraps it.
+from generic C only. A few imported files carry FFmpeg security and robustness fixes, each from
+a named upstream commit, as a LOCAL DELTA (see "LOCAL DELTAs" below). A thin C API written for
+this project (`nk_h264_api.h`) wraps it.
 
 Decision: maintainer, 2026-10-24, on issue #283 (pinned FFmpeg H.264 subset, following the
 `src/rt/atrac3p/` pattern, as PPSSPP does).
@@ -113,7 +114,7 @@ Legend:
 | `libavcodec/h2645_parse.h` | imported byte-identical | `3e47f86c53b2f993983d9418e94c99e51a2782d4` |
 | `libavcodec/h264_cabac.c` | imported byte-identical | `86f0a412faa738ae2997f518345578252eb9e25e` |
 | `libavcodec/h264_cavlc.c` | imported byte-identical | `9f5f692331ca4ac529431850d5de88e4314327fc` |
-| `libavcodec/h264_direct.c` | imported byte-identical | `8f079811303c67daac0d601774a623696964d052` |
+| `libavcodec/h264_direct.c` | imported + LOCAL DELTA | `8f079811303c67daac0d601774a623696964d052` |
 | `libavcodec/h264_loopfilter.c` | imported byte-identical | `558ec6c02dfb3b1d2e3dfaf59a4b02c5de88112f` |
 | `libavcodec/h264_mb.c` | imported byte-identical | `3cd17b7e4bafdd3f62670ca7686051471fa7d1b6` |
 | `libavcodec/h264_mb_template.c` | imported byte-identical | `d5ea26a6e3fc21a2a25e552cc00b7a20cabbde58` |
@@ -124,7 +125,7 @@ Legend:
 | `libavcodec/h264_picture.c` | imported byte-identical | `eec5e9fb9a0a85cdc361caf7355d79217baec842` |
 | `libavcodec/h264_ps.c` | imported byte-identical | `e21c2b56acf4bb199f4452da1e8428cfd0edadfe` |
 | `libavcodec/h264_ps.h` | imported byte-identical | `3f1ab72e385a8fd8f1528cb95701c04b7457e9be` |
-| `libavcodec/h264_refs.c` | imported byte-identical | `dae8bd278adbe7ab14cbcb64a308ba71f12bbcc3` |
+| `libavcodec/h264_refs.c` | imported + LOCAL DELTA | `dae8bd278adbe7ab14cbcb64a308ba71f12bbcc3` |
 | `libavcodec/h264_sei.c` | imported byte-identical | `ca2ca59e1f5482c59b7d302ffd6ad0b1f757d848` |
 | `libavcodec/h264_sei.h` | imported byte-identical | `14cc559361d614a4e943e9b47fa9685155c28874` |
 | `libavcodec/h264_slice.c` | imported + LOCAL DELTA | `62f7a61aed9af051c78ee6202f386c999c1dbd4b` |
@@ -192,11 +193,11 @@ Legend:
 | `libavcodec/startcode.c` | imported byte-identical | `9efdffe8c6628e2d0e491f8cb641d56ad266c5db` |
 | `libavcodec/startcode.h` | imported byte-identical | `cfa02b08602eb45e6edbb1d226f14e23cd343059` |
 | `libavcodec/thread.h` | imported byte-identical | `413196269f59dc007b3db4a0f36e8c267ecce3b0` |
-| `libavcodec/utils.c` | imported byte-identical | `896b99dc3f2eb31b4e848e942822411849d2e466` |
+| `libavcodec/utils.c` | imported + LOCAL DELTA | `896b99dc3f2eb31b4e848e942822411849d2e466` |
 | `libavcodec/version.h` | imported byte-identical | `cfdde469600bd30a6d60cfe8816747dba6edbd2b` |
 | `libavcodec/videodsp.c` | imported byte-identical | `ce9e9eb1439d8c134f12caef79daad82d94c37f6` |
 | `libavcodec/videodsp.h` | imported byte-identical | `c0545f22b02789425d956c7989540fa98433c9ca` |
-| `libavcodec/videodsp_template.c` | imported byte-identical | `55123a5844689607c95aed73d9c0b4ee5633d925` |
+| `libavcodec/videodsp_template.c` | imported + LOCAL DELTA | `55123a5844689607c95aed73d9c0b4ee5633d925` |
 | `libavcodec/vlc.h` | imported byte-identical | `6879c3ca6a7c29a3b1e8a87f13a849aac1aa8b0a` |
 | `libavutil/attributes.h` | imported byte-identical | `5cb9fe345288e1e5a892a454cc6fbc0ae7883cf5` |
 | `libavutil/avassert.h` | imported byte-identical | `9abeadea4a2319832491e57d6b4ab16da2e738f5` |
@@ -286,8 +287,8 @@ Legend:
 
 ### `libavcodec/h264_slice.c`
 
-Modified 2026-11-17 (maintainer-approved new bytes, audit 2026-11-17). Two commits from FFmpeg's
-`release/4.4` branch are applied verbatim to the n4.4 blob; nothing else changes, and each change
+Modified 2026-11-17 (maintainer-approved new bytes, audit 2026-11-17) and 2026-11-20. Commits from
+FFmpeg's `release/4.4` branch are applied verbatim to the n4.4 blob; nothing else changes, and each change
 is marked `LOCAL DELTA` in the file.
 
 - `6d574288584a81779068b032e405f74da0dd9ba1` "avcodec/h264_slice: reject slice_num >= 0xFFFF"
@@ -300,10 +301,109 @@ is marked `LOCAL DELTA` in the file.
   parsing failure". `h264_slice_header_parse` zeroes `poc_lsb`, `delta_poc_bottom` and
   `delta_poc[0..1]` before the conditional reads, so a slice whose header fails to parse
   cannot hand its POC fields to a next slice whose parameter sets do not code them.
+- Added 2026-11-20 (new bytes await the maintainer's approval):
+  `c5baeda37e6f297a9a2ac134040f1db577e7c9bc` "avcodec/h264: recompute per-slice direct mode state
+  for every slice" (`release/4.4`, cherry-pick of master `17723863922bd80e29cc957507cef7ae79eddccb`;
+  testcase `poc10`, a NULL pointer dereference; it touches `h264_direct.c` and `h264_slice.c`).
+  `h264_slice_init` calls `ff_h264_direct_ref_list_init` for every slice, and only that
+  function's writes to the current picture stay behind `!h->setup_finished`. The regression it
+  fixes is a frame-threading one: `setup_finished` is set only under frame threading, which this
+  build does not use (`HAVE_THREADS 0`), so here the change leaves decoding as it was. It is
+  taken to keep the subset in line with `release/4.4`.
 
 Regressions: `test_ffmpeg_slice_number_cap` and `test_ffmpeg_failed_slice_poc_is_not_inherited`
 in `tests/native/psmf_media_selftest.c` (`make H264_FFMPEG=1 psmf-media-selftest`) fail on the
 unmodified n4.4 blob and pass with the delta.
+
+### `libavcodec/h264_direct.c`
+
+Modified 2026-11-20 (audit 2026-11-17 finding F-06b369c6; new bytes await the maintainer's
+approval). The commits below are applied verbatim to the n4.4 blob; nothing else changes, and
+each change is marked `LOCAL DELTA` in the file.
+
+- `27b7fa0c107cf6f8f8d3fac541a96ee14940b202` "avcodec/h264_direct: do not read the other field's
+  rows of colocated mb_type" (FFmpeg `master`, also on `release/9.1`; cherry-picked to
+  `release/5.1` `7499ccc61a`, `release/6.1` `a4f6f7588e`, `release/7.1` `3978a28d5b`,
+  `release/8.0` `281c902aa1`, `release/8.1` `139afe709a` and `release/9.0` `16dfae5c88`; not on
+  `release/4.4`; FFmpeg ticket 10891). Both direct-prediction functions treat the colocated
+  picture as field coded when its `field_picture` is set, before reading its `mb_type` at the
+  current, not yet remapped, macroblock address. Every macroblock of a field picture carries
+  `MB_TYPE_INTERLACED`, so a valid stream takes the same branch as before; upstream fixed an
+  unsynchronised read under frame threading, which this single-threaded build does not use.
+  It is taken because the next fix is written against it: its message relies on a colocated
+  field picture always taking the field branch.
+- `2546b6f061fe6bc869ac9a1c0ed892555bd24402` (FFmpeg `master`; cherry-picked to `release/6.1`
+  `30e346c76f`, `release/7.1` `f9db090b14`, `release/8.0` `4ea01b43b6`, `release/8.1`
+  `a35157abb9` and `release/9.0` `b204e94e90`; not on `release/4.4`) "avcodec/h264_direct: keep the colocated type
+  interlaced in the field branch" (heap-buffer-overflow read, oss-fuzz 553213954). In
+  `pred_spatial_direct_motion` and `pred_temp_direct_motion`, the branch for an interlaced
+  colocated macroblock sets `col_field = MB_TYPE_INTERLACED` before `goto single_col`, and
+  `single_col` ORs it into `mb_type_col`. A macroblock never decoded in a broken field picture
+  keeps a stale type without that flag; without the fix the frame path then reads the colocated
+  motion vectors with the field remapping, past the end of the picture's arrays.
+
+- `c5baeda37e6f297a9a2ac134040f1db577e7c9bc` "avcodec/h264: recompute per-slice direct mode state
+  for every slice" (`release/4.4`, cherry-pick of master `17723863922bd80e29cc957507cef7ae79eddccb`;
+  testcase `poc10`, a NULL pointer dereference; it touches `h264_direct.c` and `h264_slice.c`).
+  `h264_slice_init` calls `ff_h264_direct_ref_list_init` for every slice, and only that
+  function's writes to the current picture stay behind `!h->setup_finished`. The regression it
+  fixes is a frame-threading one: `setup_finished` is set only under frame threading, which this
+  build does not use (`HAVE_THREADS 0`), so here the change leaves decoding as it was. It is
+  taken to keep the subset in line with `release/4.4`.
+
+Taken on upstream's authority: the read was not reproduced in this project, so no regression
+test shows the change is needed. The media selftests confirm that valid streams decode as before.
+
+### `libavcodec/h264_refs.c`
+
+Modified 2026-11-20 (audit 2026-11-17 finding F-8eabcf01; new bytes await the maintainer's
+approval). One commit from FFmpeg's `release/4.4` branch is applied verbatim to the n4.4 blob
+(its parent's `h264_refs.c` is the n4.4 blob itself); nothing else changes, and each change is
+marked `LOCAL DELTA` in the file.
+
+- `3dc35e8529c4f6000dcc803fbf082a39aa7e85e8` "avcodec/h264_refs: Clear stale pointers from
+  ref_list" (cherry-pick of master `1886c3269d8a5cc15391ace1db598230d4fba5a4`; testcase
+  `poc10.bin`, reported by Chromium). Both `memset` calls in `h264_initialise_ref_list` clear
+  `32 - len` entries instead of only those below `ref_count`, so no entry above `ref_count`
+  keeps a pointer to a picture of an earlier slice or picture.
+
+Taken on upstream's authority: no single-threaded path reading `ref_list` above `ref_count`
+was found or reproduced in this project, so no regression test shows the change is needed. The
+media selftests confirm that valid streams decode as before.
+
+### `libavcodec/utils.c`
+
+Modified 2026-11-20 (new bytes await the maintainer's approval). One commit from FFmpeg's
+`release/4.4` branch is applied verbatim to the n4.4 blob; nothing else changes, and the change
+is marked `LOCAL DELTA` in the file.
+
+- `e39140d9d30b5589fbbb61b6655a9767143fe397` "avcodec/h264_slice: guard color_frame() against
+  chroma-width underflow". On master (`c79dfd29e6afca56294395be843d98d10858a7fa`) and
+  `release/6.1` (`b47f49586c`) the change is in `h264_slice.c`; FFmpeg adapted it to 4.4, where
+  the same code is `ff_color_frame` in `utils.c`. The H.264 decoder calls `ff_color_frame` to
+  grey out a missing reference frame; for a high-bit-depth plane one sample wide, `bytes - 2`
+  underflowed to a huge `av_memcpy_backptr` length, a heap out-of-bounds write. The first sample
+  and the copy are now guarded and the copy length is `2 * (bytes - 1)` bytes.
+
+Taken on upstream's authority, not reproduced in this project. For planes at least two samples
+wide the bytes written are the same as before.
+
+### `libavcodec/videodsp_template.c`
+
+Modified 2026-11-20 (new bytes await the maintainer's approval). One commit from FFmpeg's
+`release/4.4` branch is applied verbatim to the n4.4 blob; nothing else changes, and each change
+is marked `LOCAL DELTA` in the file.
+
+- `545cfeeebd2868ae8e161f33f1e28f80dcbff2d4` "avcodec/videodsp_template: Adjust pointers to avoid
+  undefined pointer things" (cherry-pick of master `f0150cd41c2d3c01050a6c4f3df1de511a217913`;
+  oss-fuzz 48567, a pointer overflow reported by UBSan). `ff_emulated_edge_mc`, which the H.264
+  decoder uses for motion compensation that reaches past a picture edge, multiplies `start_x`
+  by a signed `(ptrdiff_t)sizeof(pixel)` instead of the unsigned `sizeof(pixel)`, so the two
+  pointer adjustments are signed offsets rather than wrapped unsigned ones.
+
+Taken on upstream's authority, not reproduced in this project. With the wrap-around pointer
+arithmetic of the targets the project builds for, the addresses are the same as before; the
+change removes the undefined behaviour UBSan reports.
 
 ## Authored stand-ins
 
@@ -382,3 +482,19 @@ code is not held to the project warning set), the `nk_h264_symbols.h` force-incl
   `7a31f986a2c0fcf1d19607126b96e3c83047912f` (SHA-256
   `5e00ee27cb743b4d26def23f15f45cc2cb75d6de5c6bdfbef0eb384caa661f94`). The other imported files
   are unchanged and still byte-identical to n4.4.
+- 2026-11-20: `h264_direct.c`, `h264_refs.c`, `utils.c` and `videodsp_template.c` became
+  `imported + LOCAL DELTA` and `h264_slice.c` took one more fix (the commits above). Each file
+  equals its n4.4 blob with the listed upstream commits applied by `patch`, once the dated header
+  note and the `LOCAL DELTA` marker lines are removed (for `h264_slice.c`, apart from the comment
+  that 2026-11-17 marker replaced). Working-tree `git hash-object` and SHA-256 of the modified
+  files:
+  - `libavcodec/h264_direct.c`: `e5b6830f72ca130dfac8d4750801559f9fcd6366`, SHA-256
+    `b689c45eed7c541be3ffe1e38f1ff588d98174f1b77ee1cae727206e4baf654d`
+  - `libavcodec/h264_refs.c`: `b422bf371461082aca8f46cb09c43cc7af1634f2`, SHA-256
+    `96f7e7dd213adb1a49711294049331969f44cd64c2d69201e0a84ea5198bc417`
+  - `libavcodec/h264_slice.c`: `8ef45121049c333f103e98b22d85faad20ac6665`, SHA-256
+    `06aa8aa51b51e061a5e4c70113dfaae85d5b961eb118904485f36befcedba667`
+  - `libavcodec/utils.c`: `0f8db83e71b222094e71a6f249a65ed2928a6b05`, SHA-256
+    `5544c0b2f93e1a3c1dd10b55af593af5ec38235bf67a1c66e0c72a1bd6606f6f`
+  - `libavcodec/videodsp_template.c`: `13972917e119182ab3a1d7c9fd6e6afb9c436a90`, SHA-256
+    `268ceeacf5dd96ba4068cd2fe3ac94c3e7a0c570d82b44e32c1856cda3a1cfc8`

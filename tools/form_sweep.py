@@ -815,20 +815,30 @@ def parse_verdicts(text: str) -> dict[int, tuple[str, str]]:
 
 
 #: Forms whose reference run is expected to stop, so their NOT_CHECKED instances are
-#: allowed. Any other form with a NOT_CHECKED instance, even beside MATCH instances, fails
-#: the report: a reference regression must not hide behind the instances that still pass.
+#: allowed when the stop is on the first state (``state=0``): the reference cannot run the
+#: instruction at all. Any other form with a NOT_CHECKED instance, even beside MATCH
+#: instances, fails the report: a reference regression must not hide behind the instances
+#: that still pass. So does a stop on a later state, or one that names no state, even for
+#: these forms: earlier states ran, so the instance is not the expected shape.
 EXPECTED_NOT_CHECKED = frozenset({"sync", "cache"})
+
+_STOP_STATE = re.compile(r"(?:^|\s)state=(\d+)(?:\s|$)")
 
 
 def unexpected_not_checked(man: dict, verdicts: dict[int, tuple[str, str]]) -> dict[str, int]:
-    """{form name: NOT_CHECKED instance count} for forms outside EXPECTED_NOT_CHECKED."""
+    """{form name: NOT_CHECKED instance count} for every NOT_CHECKED instance that is not a
+    state-0 stop of a form in EXPECTED_NOT_CHECKED."""
     names = {f["key"]: f["name"] for f in man["forms"]}
     out: dict[str, int] = {}
     for rec in man["instances"]:
-        if verdicts.get(rec["index"], ("MISSING", ""))[0] == "NOT_CHECKED":
-            name = names.get(rec["form"], rec["form"])
-            if name not in EXPECTED_NOT_CHECKED:
-                out[name] = out.get(name, 0) + 1
+        verdict, detail = verdicts.get(rec["index"], ("MISSING", ""))
+        if verdict != "NOT_CHECKED":
+            continue
+        name = names.get(rec["form"], rec["form"])
+        stop = _STOP_STATE.search(detail)
+        if name in EXPECTED_NOT_CHECKED and stop is not None and int(stop.group(1)) == 0:
+            continue
+        out[name] = out.get(name, 0) + 1
     return out
 
 
@@ -888,7 +898,7 @@ def report(manifest_path: Path, results_path: Path) -> int:
         print("form-sweep: forms with no checked instance (NOT_CHECKED): " + ", ".join(unchecked))
     unexpected = unexpected_not_checked(man, verdicts)
     if unexpected:
-        print("form-sweep: NOT_CHECKED instances outside the expected set ("
+        print("form-sweep: NOT_CHECKED instances outside the expected shape (a state-0 stop of "
               + ", ".join(sorted(EXPECTED_NOT_CHECKED)) + "): "
               + ", ".join(f"{n} x{c}" for n, c in sorted(unexpected.items())))
     return 1 if (totals["MISMATCH"] or totals["AOT_FAILED"] or totals["MISSING"]

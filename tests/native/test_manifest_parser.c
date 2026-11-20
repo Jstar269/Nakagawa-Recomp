@@ -1246,6 +1246,20 @@ int main(int argc, char *argv[]) {
             printf("ACCEPT: id=%s entry=0x%08x base=0x%08x modules=%d disc_id=%s\n",
                    entry.id, entry.executable_entry, entry.executable_base,
                    entry.module_count, entry.primary_disc_id ? entry.primary_disc_id : "none");
+            /* The decoded display name as hex bytes, so a differential test can compare the
+             * parsers' string decoding (\u escapes, surrogates) byte for byte. */
+            printf("DISPLAY_NAME_HEX=");
+            if (entry.display_name) {
+                for (const unsigned char *p = (const unsigned char *)entry.display_name; *p; ++p) {
+                    printf("%02x", (unsigned)*p);
+                }
+            }
+            printf("\n");
+            for (int i = 0; i < entry.module_count; ++i) {
+                printf("MODULE: name=%s load_address=0x%08x required=%d\n",
+                       entry.modules[i].name ? entry.modules[i].name : "",
+                       entry.modules[i].load_address, entry.modules[i].required ? 1 : 0);
+            }
             return 0;
         }
     }

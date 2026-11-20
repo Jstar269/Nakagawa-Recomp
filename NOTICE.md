@@ -102,8 +102,9 @@ We aim to respond promptly and will remove material where appropriate.
   the native player through `src/core/nk_iso.c` and `src/core/nk_xb.c`, and into
   every title runtime through `src/core/nk_xb.c` (`mk/runtime_sources.mk`).
 - **dr_libs `dr_wav`** — the Unlicense (public domain), elected from upstream's
-  Unlicense or `MIT-0` choice; both texts are kept. The byte-identical header,
-  upstream `LICENSE`, pinned source manifest, and SHA-256 values are under
+  Unlicense or `MIT-0` choice; both texts are kept. The header (pinned, with four
+  later upstream fixes as LOCAL DELTA), upstream `LICENSE`, pinned source manifest,
+  and SHA-256 values are under
   `third_party/dr_libs/`. Only selftests compile it; it is not in the player or
   the runtime.
 - **libchdr** — `BSD-3-Clause`, Copyright Romain Tisserand; the MAME-derived CHD, CD-ROM,
@@ -128,16 +129,17 @@ We aim to respond promptly and will remove material where appropriate.
   into the runtime, where the Vulkan GE renderer's Ace Mode texture scaling uses it; it is not
   in `nk_decrypt`.
 - **Monocypher 4.0.3 Ed25519 signature check** — upstream offers `BSD-2-Clause OR CC0-1.0`;
-  the project uses it under CC0-1.0. Four byte-identical source files, the complete upstream
+  the project uses it under CC0-1.0. Four source files (`monocypher.c` with one later upstream
+  fix as LOCAL DELTA, the other three byte-identical), the complete upstream
   `LICENCE.md` and the pinned manifest are under `third_party/monocypher/`. It is compiled into
   the `ed25519-verify-selftest` (RFC 8032 vectors) and into the player, where `src/core/nk_sig.c`
   uses it to check the signature of an update download.
 - **FFmpeg n4.4 H.264 decoder subset** — LGPL-2.1-or-later, the same pin as the ATRAC3+
   subset. The imported libavcodec/libavutil files (generic C only, no `--enable-gpl` or
   `--enable-nonfree` component), their license text and the byte-exact manifest are under
-  `src/rt/h264_ffmpeg_sub/`. One imported file, `libavcodec/h264_slice.c`, is modified: it
-  carries two upstream FFmpeg `release/4.4` fixes as a dated LOCAL DELTA, recorded in the
-  file header and the manifest; the project API layer and configuration stand-ins there are
+  `src/rt/h264_ffmpeg_sub/`. A few imported files are modified: each carries fixes from named
+  upstream FFmpeg commits as a dated LOCAL DELTA, recorded in the file header and the
+  manifest; the project API layer and configuration stand-ins there are
   identified in `src/rt/h264_ffmpeg_sub/PROVENANCE.md`. It is the default H.264 decoder where no platform decoder
   exists (`H264_FFMPEG=1`, the default off Windows); Windows uses Media Foundation, an operating
   system component, and links none of it. Build notes are in `docs/PLATFORM_PORTABILITY.md`.
@@ -214,7 +216,7 @@ We aim to respond promptly and will remove material where appropriate.
   and the four Geist fonts' licence copies both Geist's and Liberation's. The generated
   fonts carry project-owned names (`Nakagawa Open Latin`, `Nakagawa Open Japanese`,
   `Nakagawa Open Korean`), so no Reserved Font Name is used.
-- **stb_image 2.30** — Sean Barrett; upstream offers `MIT OR Unlicense`, and the
+- **stb_image 2.34** — Sean Barrett; upstream offers `MIT OR Unlicense`, and the
   project uses it under the public-domain (Unlicense) alternative. The byte-identical
   header, upstream `LICENSE` and the pinned manifest are under `third_party/stb/`. It is
   built for PNG only into the `nk_ui` core and the player, where it decodes the

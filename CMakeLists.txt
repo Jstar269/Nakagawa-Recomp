@@ -83,6 +83,15 @@ target_include_directories(nakagawa_core PUBLIC
 # both build files agree.
 target_compile_definitions(nakagawa_core PUBLIC SR_PUBLIC_SAFE)
 
+# Adding a compressed disc image or a PSN package reads every byte of it for its SHA-256
+# (nk_disc_file_identity in nk_disc_expand.c), so this one unit builds at -O2 whatever the build
+# type, as the Makefile's PLAYER_DISC_EXPAND_OPT does; tools/test_build_system_parity.py checks
+# that both say the same level. MSVC keeps its configuration's flags (its /O2 cannot join the
+# Debug configuration's /RTC1).
+if(NOT MSVC)
+    set_source_files_properties(src/core/nk_disc_expand.c PROPERTIES COMPILE_OPTIONS -O2)
+endif()
+
 # -----------------------------------------------------------------------------
 # libchdr (third_party/libchdr, BSD-3-Clause; see its PROVENANCE.md)
 # -----------------------------------------------------------------------------

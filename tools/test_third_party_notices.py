@@ -55,6 +55,17 @@ def all_component_records(data: dict) -> dict[str, dict]:
     return records
 
 
+def undigested_license_texts(records: dict[str, dict]) -> set[tuple[str, str]]:
+    """Return (component, file) for every license text without a lowercase 64-hex sha256."""
+    missing: set[tuple[str, str]] = set()
+    for key, record in records.items():
+        for entry in record.get("license_texts", []):
+            digest = entry.get("sha256")
+            if not (isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)):
+                missing.add((key, entry["file"]))
+    return missing
+
+
 class TestThirdPartyComponentInventory(unittest.TestCase):
     """Every declared component is complete enough to ship a notice for."""
 
@@ -87,13 +98,34 @@ class TestThirdPartyComponentInventory(unittest.TestCase):
                         f"{key} license text is empty: {entry['file']}",
                     )
 
+    def test_every_license_text_records_a_digest_unless_it_is_the_projects_own(self) -> None:
+        """Only the project's own LICENSE, under its recorded digest_policy, may go undigested."""
+        self.assertEqual(undigested_license_texts(self.records), {("native.project_output", "LICENSE")})
+        (entry,) = self.data["native"]["project_output"]["license_texts"]
+        self.assertIsNone(entry["sha256"])
+        self.assertTrue(entry.get("digest_policy"), "the undigested project LICENSE must say why")
+
+    def test_a_third_party_license_text_without_a_digest_is_reported(self) -> None:
+        """Vacuity guard: dropping or nulling a component's digest is a finding, not a skip."""
+        dll_name = next(iter(self.data["native"]["dlls"]))
+        for label, change in (("missing", lambda entry: entry.pop("sha256")),
+                              ("null", lambda entry: entry.update(sha256=None)),
+                              ("short", lambda entry: entry.update(sha256="ab" * 8))):
+            with self.subTest(case=label):
+                data = copy.deepcopy(self.data)
+                entry = data["native"]["dlls"][dll_name]["license_texts"][0]
+                change(entry)
+                self.assertIn((f"native.dlls.{dll_name}", entry["file"]),
+                              undigested_license_texts(all_component_records(data)))
+
     def test_recorded_license_texts_match_their_recorded_digest(self) -> None:
         """A license text may not be edited into the tree without re-recording it."""
+        undigested = undigested_license_texts(self.records)
         for key, record in self.records.items():
             for entry in record.get("license_texts", []):
-                digest = entry.get("sha256")
-                if digest is None:
-                    continue
+                if (key, entry["file"]) in undigested:
+                    continue  # the test above allows exactly one: the project's own LICENSE
+                digest = entry["sha256"]
                 with self.subTest(component=key, text=entry["file"]):
                     actual = hashlib.sha256((ROOT / entry["file"]).read_bytes()).hexdigest()
                     self.assertEqual(

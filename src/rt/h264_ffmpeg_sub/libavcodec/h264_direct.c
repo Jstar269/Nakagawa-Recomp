@@ -17,6 +17,21 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with FFmpeg; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ *
+ * Modified 2026-11-20 for the Nakagawa Recomp project (LOCAL DELTA against FFmpeg n4.4):
+ * FFmpeg fixes are applied, each change marked LOCAL DELTA below.
+ *  - 27b7fa0c10 "avcodec/h264_direct: do not read the other field's rows of colocated
+ *    mb_type" (master; also on release/5.1 to release/9.1): the colocated picture counts
+ *    as field coded when it is a field picture, before its mb_type is read.
+ *  - 2546b6f061 "avcodec/h264_direct: keep the colocated type interlaced in the field
+ *    branch" (master; also on release/6.1 to release/9.0, not on release/4.4): in
+ *    pred_spatial_direct_motion and pred_temp_direct_motion, the field branch ORs
+ *    MB_TYPE_INTERLACED into the colocated type, so an undecoded macroblock of a broken
+ *    field picture cannot send the frame path past the end of the colocated motion data.
+ *  - c5baeda37e "avcodec/h264: recompute per-slice direct mode state for every slice"
+ *    (release/4.4, cherry-pick of 1772386392): ff_h264_direct_ref_list_init runs for every
+ *    slice and only its updates of the current picture wait for !setup_finished.
+ * See src/rt/h264_ffmpeg_sub/PROVENANCE.md.
  */
 
 /**
@@ -122,26 +137,31 @@ void ff_h264_direct_ref_list_init(const H264Context *const h, H264SliceContext *
 {
     H264Ref *const ref1 = &sl->ref_list[1][0];
     H264Picture *const cur = h->cur_pic_ptr;
-    int list, j, field;
+    int list, field;
     int sidx     = (h->picture_structure & 1) ^ 1;
     int ref1sidx = (ref1->reference      & 1) ^ 1;
 
-    for (list = 0; list < sl->list_count; list++) {
-        cur->ref_count[sidx][list] = sl->ref_count[list];
-        for (j = 0; j < sl->ref_count[list]; j++)
-            cur->ref_poc[sidx][list][j] = 4 * sl->ref_list[list][j].parent->frame_num +
-                                          (sl->ref_list[list][j].reference & 3);
-    }
+    /* LOCAL DELTA: upstream c5baeda37e (release/4.4), see the file header. */
+    /* Updates to cur_pic are not safe once ff_thread_finish_setup() has been
+     * called (other threads may already be reading these fields). */
+    if (!h->setup_finished) {
+        for (list = 0; list < sl->list_count; list++) {
+            cur->ref_count[sidx][list] = sl->ref_count[list];
+            for (int j = 0; j < sl->ref_count[list]; j++)
+                cur->ref_poc[sidx][list][j] = 4 * sl->ref_list[list][j].parent->frame_num +
+                                                 (sl->ref_list[list][j].reference & 3);
+        }
 
-    if (h->picture_structure == PICT_FRAME) {
-        memcpy(cur->ref_count[1], cur->ref_count[0], sizeof(cur->ref_count[0]));
-        memcpy(cur->ref_poc[1],   cur->ref_poc[0],   sizeof(cur->ref_poc[0]));
-    }
+        if (h->picture_structure == PICT_FRAME) {
+            memcpy(cur->ref_count[1], cur->ref_count[0], sizeof(cur->ref_count[0]));
+            memcpy(cur->ref_poc[1],   cur->ref_poc[0],   sizeof(cur->ref_poc[0]));
+        }
 
-    if (h->current_slice == 0) {
-        cur->mbaff = FRAME_MBAFF(h);
-    } else {
-        av_assert0(cur->mbaff == FRAME_MBAFF(h));
+        if (h->current_slice == 0) {
+            cur->mbaff = FRAME_MBAFF(h);
+        } else {
+            av_assert0(cur->mbaff == FRAME_MBAFF(h));
+        }
     }
 
     sl->col_fieldoff = 0;
@@ -204,6 +224,8 @@ static void pred_spatial_direct_motion(const H264Context *const h, H264SliceCont
     int b4_stride = h->b_stride;
     int mb_xy = sl->mb_xy, mb_y = sl->mb_y;
     int mb_type_col[2];
+    /* LOCAL DELTA: upstream 2546b6f061 (master), see the file header. */
+    int col_field = 0;
     const int16_t (*l1mv0)[2], (*l1mv1)[2];
     const int8_t *l1ref0, *l1ref1;
     const int is_b8x8 = IS_8X8(*mb_type);
@@ -284,7 +306,9 @@ static void pred_spatial_direct_motion(const H264Context *const h, H264SliceCont
         return;
     }
 
-    if (IS_INTERLACED(sl->ref_list[1][0].parent->mb_type[mb_xy])) { // AFL/AFR/FR/FL -> AFL/FL
+    /* LOCAL DELTA: upstream 27b7fa0c10 (master), see the file header. */
+    if (sl->ref_list[1][0].parent->field_picture ||
+        IS_INTERLACED(sl->ref_list[1][0].parent->mb_type[mb_xy])) { // AFL/AFR/FR/FL -> AFL/FL
         if (!IS_INTERLACED(*mb_type)) {                    //     AFR/FR    -> AFL/FL
             mb_y  = (sl->mb_y & ~1) + sl->col_parity;
             mb_xy = sl->mb_x +
@@ -294,6 +318,10 @@ static void pred_spatial_direct_motion(const H264Context *const h, H264SliceCont
             mb_y  += sl->col_fieldoff;
             mb_xy += h->mb_stride * sl->col_fieldoff; // non-zero for FL -> FL & differ parity
         }
+        /* LOCAL DELTA: upstream 2546b6f061 (master), see the file header. */
+        // Undecoded macroblocks of a broken field picture lack the flag, the
+        // colocated type has to agree with the branch taken here.
+        col_field = MB_TYPE_INTERLACED;
         goto single_col;
     } else {                                             // AFL/AFR/FR/FL -> AFR/FR
         if (IS_INTERLACED(*mb_type)) {                   // AFL       /FL -> AFR/FR
@@ -319,8 +347,9 @@ static void pred_spatial_direct_motion(const H264Context *const h, H264SliceCont
             }
         } else {                                         //     AFR/FR    -> AFR/FR
 single_col:
+            /* LOCAL DELTA: upstream 2546b6f061 (master), see the file header. */
             mb_type_col[0] =
-            mb_type_col[1] = sl->ref_list[1][0].parent->mb_type[mb_xy];
+            mb_type_col[1] = sl->ref_list[1][0].parent->mb_type[mb_xy] | col_field;
 
             sub_mb_type |= MB_TYPE_16x16 | MB_TYPE_DIRECT2; /* B_SUB_8x8 */
             if (!is_b8x8 && (mb_type_col[0] & MB_TYPE_16x16_OR_INTRA)) {
@@ -491,6 +520,8 @@ static void pred_temp_direct_motion(const H264Context *const h, H264SliceContext
     int b4_stride = h->b_stride;
     int mb_xy = sl->mb_xy, mb_y = sl->mb_y;
     int mb_type_col[2];
+    /* LOCAL DELTA: upstream 2546b6f061 (master), see the file header. */
+    int col_field = 0;
     const int16_t (*l1mv0)[2], (*l1mv1)[2];
     const int8_t *l1ref0, *l1ref1;
     const int is_b8x8 = IS_8X8(*mb_type);
@@ -502,7 +533,9 @@ static void pred_temp_direct_motion(const H264Context *const h, H264SliceContext
     await_reference_mb_row(h, &sl->ref_list[1][0],
                            sl->mb_y + !!IS_INTERLACED(*mb_type));
 
-    if (IS_INTERLACED(sl->ref_list[1][0].parent->mb_type[mb_xy])) { // AFL/AFR/FR/FL -> AFL/FL
+    /* LOCAL DELTA: upstream 27b7fa0c10 (master), see the file header. */
+    if (sl->ref_list[1][0].parent->field_picture ||
+        IS_INTERLACED(sl->ref_list[1][0].parent->mb_type[mb_xy])) { // AFL/AFR/FR/FL -> AFL/FL
         if (!IS_INTERLACED(*mb_type)) {                    //     AFR/FR    -> AFL/FL
             mb_y  = (sl->mb_y & ~1) + sl->col_parity;
             mb_xy = sl->mb_x +
@@ -512,6 +545,10 @@ static void pred_temp_direct_motion(const H264Context *const h, H264SliceContext
             mb_y  += sl->col_fieldoff;
             mb_xy += h->mb_stride * sl->col_fieldoff; // non-zero for FL -> FL & differ parity
         }
+        /* LOCAL DELTA: upstream 2546b6f061 (master), see the file header. */
+        // Undecoded macroblocks of a broken field picture lack the flag, the
+        // colocated type has to agree with the branch taken here.
+        col_field = MB_TYPE_INTERLACED;
         goto single_col;
     } else {                                        // AFL/AFR/FR/FL -> AFR/FR
         if (IS_INTERLACED(*mb_type)) {              // AFL       /FL -> AFR/FR
@@ -540,8 +577,9 @@ static void pred_temp_direct_motion(const H264Context *const h, H264SliceContext
             }
         } else {                                    //     AFR/FR    -> AFR/FR
 single_col:
+            /* LOCAL DELTA: upstream 2546b6f061 (master), see the file header. */
             mb_type_col[0]     =
-                mb_type_col[1] = sl->ref_list[1][0].parent->mb_type[mb_xy];
+                mb_type_col[1] = sl->ref_list[1][0].parent->mb_type[mb_xy] | col_field;
 
             sub_mb_type = MB_TYPE_16x16 | MB_TYPE_P0L0 | MB_TYPE_P0L1 |
                           MB_TYPE_DIRECT2;                  /* B_SUB_8x8 */

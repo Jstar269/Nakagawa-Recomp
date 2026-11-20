@@ -100,8 +100,10 @@ class PerfSummaryDiffTests(unittest.TestCase):
         after["guest"]["aot_ns"] = 7
         result = perf_summary_diff.diff_summaries(before, after)
         self.assertTrue(result["changed"])
-        self.assertNotIn({"path": "$.wall_ns"}, result["changes"])
-        self.assertIn("$.guest.aot_ns", {change["path"] for change in result["changes"]})
+        paths = {change["path"] for change in result["changes"]}
+        self.assertNotIn("$.wall_ns", paths)
+        self.assertNotIn("$.interval_count", paths)
+        self.assertIn("$.guest.aot_ns", paths)
 
     def test_null_is_not_zero(self):
         before = summary()

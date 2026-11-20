@@ -386,8 +386,8 @@ class PublicCiWiringTests(unittest.TestCase):
 
     def test_linux_showcase_ci_uses_pinned_runtime_dependencies(self) -> None:
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        lock = json.loads((ROOT / "assets" / "upstream" / "pspdev.lock.json").read_text())
-        evidence = json.loads((ROOT / "assets" / "upstream" / "pspdev.evidence.json").read_text())
+        lock = json.loads((ROOT / "assets" / "upstream" / "pspdev.lock.json").read_text(encoding="utf-8"))
+        evidence = json.loads((ROOT / "assets" / "upstream" / "pspdev.evidence.json").read_text(encoding="utf-8"))
         self.assertIn("Build pinned SDL3 for headless Linux runtime", ci)
         self.assertIn("f00dc919ca35b9756316e86c4777392de442f9b2", ci)
         self.assertIn("libvulkan-dev", ci)
@@ -663,6 +663,56 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", text)
         self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
                          ["if: matrix.part == 'translation'"])
+
+    def test_glsl_shaders_are_reproduced_with_the_pinned_linux_glslc(self) -> None:
+        """The hosted job downloads the Vulkan SDK archive shader_embed.py pins, checks its SHA-256
+        before it unpacks only glslc, and runs the tool itself, so a SKIP (exit 77, any other
+        glslc) fails the step."""
+        sys.path.insert(0, str(ROOT / "tools"))
+        import shader_embed
+        release = shader_embed.GLSLC_RELEASE
+        self.assertTrue(release["linux_url"].startswith("https://sdk.lunarg.com/"))
+        self.assertIn(f"/{release['sdk']}/", release["linux_url"])
+        self.assertTrue(release["linux_member"].startswith(f"{release['sdk']}/"))
+        self.assertRegex(release["linux_sha256"], r"^[0-9a-f]{64}$")
+        step = _ci_step(_ci_job_blocks()["native_tools"], "Reproduce the GLSL shaders with the pinned glslc")
+        self.assertIsNotNone(step, "native_tools must reproduce the GLSL shaders")
+        assert step is not None
+        text = "\n".join(step)
+        self.assertIn("set -euo pipefail", text)
+        self.assertIn(release["linux_url"], text)
+        self.assertIn(f"printf '%s  %s\\n' {release['linux_sha256']} \"$archive\"", text)
+        self.assertIn("sha256sum --check --strict", text)
+        unpack = f'tar -xJf "$archive" -C "$sdk_dir" {release["linux_member"]}'
+        self.assertIn(unpack, text)
+        self.assertLess(text.index("sha256sum --check --strict"), text.index(unpack))
+        for shader_set in ("psp", "ui"):
+            self.assertIn(f"python tools/shader_embed.py verify --shader-set {shader_set} --recompile "
+                          f'--glslc "$sdk_dir/{release["linux_member"]}"', text)
+        self.assertNotIn("make ", text, "make maps exit 77 to a SKIP line; the step must see it")
+        self.assertNotIn("continue-on-error", text)
+        self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
+                         ["if: matrix.part == 'translation'"])
+
+    def test_parser_fuzzers_run_under_the_sanitizers_at_a_fixed_depth(self) -> None:
+        """F-6cc53528: native_tools runs make fuzz-parsers, whose build off Windows adds ASan and
+        UBSan with recovery off, at a fixed iteration count over the harness's fixed seed."""
+        step = _ci_step(_ci_job_blocks()["native_tools"], "Run the parser mutation fuzzers under ASan and UBSan")
+        self.assertIsNotNone(step, "native_tools must run the parser fuzzers under the sanitizers")
+        assert step is not None
+        text = "\n".join(step)
+        self.assertRegex(text, r'(?m)^ {8}run: make CC=gcc BUILD_ROOT="\$RUNNER_TEMP/fuzz-parsers-build" '
+                               r"FUZZ_ITERS=[1-9][0-9]* fuzz-parsers$")
+        self.assertNotIn("continue-on-error", text)
+        self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
+                         ["if: matrix.part == 'core'"])
+        recipe = (ROOT / "mk" / "native_ui_tests.mk").read_text(encoding="utf-8")
+        self.assertIn("else\nFUZZ_SAN_FLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all\nendif",
+                      recipe)
+        fuzz = recipe[recipe.index("\nfuzz-parsers:\n"):]
+        self.assertIn("$(FUZZ_SAN_FLAGS)", fuzz.split("\n\n", 1)[0])
+        harness = (ROOT / "tests" / "native" / "test_fuzz_parsers.c").read_text(encoding="utf-8")
+        self.assertIn("static uint64_t s_rng_state = 0x5EEDF007CAFE1234ULL;", harness)
 
     def test_ffmpeg_h264_media_selftest_is_wired_in_linux_ci(self) -> None:
         """The vendored H.264 subset must build and execute its real media fixture in CI.
@@ -1029,6 +1079,7 @@ _WINDOWS_SERIAL_GATES = {
     "Build and run HLE thread selftest": "CC=gcc VULKAN_SDK=/ucrt64 hle-thread-selftest",
     "Build and run flash0 font device selftest": 'PYTHONPATH=tools "$py" -m unittest -v test_flash0_font',
     "Build and run the Win32 Memory Stick containment selftest": 'PYTHONPATH=tools "$py" -m unittest -v test_vfs_c',
+    "Run the Windows-only Python tests": 'PYTHONPATH=tools "$py" -m unittest -v $tests 2>&1 | tee "$log"',
     "Build and run the Media Foundation H.264 media selftest": "CC=gcc VULKAN_SDK=/ucrt64 psmf-media-selftest",
     "Build and run the vendored FFmpeg H.264 media selftest on Windows":
         "CC=gcc VULKAN_SDK=/ucrt64 H264_FFMPEG=1 psmf-media-selftest",
@@ -1151,11 +1202,53 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
                 self.assertIsNotNone(part, f"{name}: a step with its own limit must be in a part")
                 required_part = _required(part, f"{name}: a step with its own limit must be in a part")
                 step_limits[required_part] = step_limits.get(required_part, 0) + int(limit.group(1))
-        self.assertEqual(step_limits, {"smoke": 15})
+        self.assertEqual(step_limits, {"smoke": 15, "selftests": 20})
         for group, (parts, timeout) in _windows_matrix_entries(self.block).items():
             with self.subTest(group=group):
                 self.assertEqual(timeout, sum(25 + step_limits.get(part, 0) for part in parts))
         self.assertIn("      fail-fast: false", text)
+
+    def test_windows_only_python_tests_run_from_the_planner_and_fail_closed(self) -> None:
+        """The Linux shards skip the Windows-only tests, so a Windows group runs exactly the
+        planner's list of them, stops on an empty or failing planner, and passes only on a
+        bare OK; a module the planner leaves out must still run whole in the step it names."""
+        import ci_test_shards
+        step = _required(self.steps.get("Run the Windows-only Python tests"),
+                         "windows_runtime must run the Windows-only Python tests")
+        text = "\n".join(line.strip() for line in step)
+        self.assertEqual(self.part_of("Run the Windows-only Python tests"), "selftests")
+        self.assertIn("shell: msys2 {0}", text)
+        self.assertIn("MSYS2_PATH_TYPE: inherit", text)
+        self.assertIn("set -euo pipefail", text)
+        planner = 'tests="$("$py" tools/ci_test_shards.py --windows-only | tr -d \'\\r\')"'
+        self.assertIn(planner, text)
+        self.assertLess(text.index(planner), text.index('test -n "$tests"'))
+        self.assertLess(text.index('test -n "$tests"'), text.index("-m unittest -v $tests"))
+        self.assertIn("tail -n 1 \"$log\" | tr -d '\\r' | grep -qx 'OK'", text)
+        self.assertNotIn("continue-on-error", text)
+        # The 8.3 short-name tests run, never skip: their volume creates short names, a probe
+        # proves it before any test, and their temporary folders are made on that volume.
+        order = [
+            'tmp="$(cygpath -m "$RUNNER_TEMP")/windows-only-tmp"',
+            'volume="${tmp%%/*}"',
+            'fsutil.exe 8dot3name set 2',
+            'fsutil.exe 8dot3name set "$volume" 0',
+            'mkdir -p "$tmp/Spaced short name probe"',
+            '"$py" - "$(cygpath -w "$tmp/Spaced short name probe")" <<\'PY\'',
+            'sys.exit(f"SHORT_NAMES_UNAVAILABLE: {sys.argv[1]} has no 8.3 alias")',
+            'export TMPDIR="$tmp"',
+            "-m unittest -v $tests",
+        ]
+        for earlier, later in zip(order, order[1:], strict=False):
+            with self.subTest(earlier=earlier):
+                self.assertIn(earlier, text)
+                self.assertLess(text.index(earlier), text.index(later))
+        installer = _ci_job_blocks()["windows_installer"]
+        for module, step_name in ci_test_shards.WINDOWS_ONLY_RUN_ELSEWHERE.items():
+            with self.subTest(module=module):
+                other = _required(_ci_step(installer, step_name) or _ci_step(self.block, step_name),
+                                  f"{step_name!r} no longer exists to run {module}")
+                self.assertRegex("\n".join(other), rf"(?m)-m unittest -v (tools\.)?{module}$")
 
     def test_grouped_fuzz_shards_rebuild_and_rerun_in_order(self) -> None:
         # Both shard steps regenerate the cases header and run `vfpu_fuzz_build`, a phony
@@ -1343,6 +1436,8 @@ _NATIVE_SERIAL_GATES = {
         "run: python tools/format_portability_check.py",
     "Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)":
         "run: NK_REQUIRE_SDL3=1 make CC=gcc native-core-tests",
+    "Run the parser mutation fuzzers under ASan and UBSan":
+        'run: make CC=gcc BUILD_ROOT="$RUNNER_TEMP/fuzz-parsers-build" FUZZ_ITERS=5000 fuzz-parsers',
     "Run title-configured HLE behaviour tests on Linux":
         'PYTHONPATH=tools python -m unittest -v test_hle_title_config_behavior 2>&1 | tee "$log"',
     "Compile GE frontend profiling mode":
@@ -1376,6 +1471,8 @@ _NATIVE_SERIAL_GATES = {
         'NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-fg-pass-selftest FSR3FG_PASS_ARGS="--cell G-R"',
     "Reproduce the FSR 3 shaders with the pinned DXC":
         'python tools/shader_embed.py verify --shader-set fsr3 --recompile --dxc "$dxc_dir/bin/dxc"',
+    "Reproduce the GLSL shaders with the pinned glslc":
+        'python tools/shader_embed.py verify --shader-set psp --recompile --glslc "$sdk_dir/1.4.363.0/x86_64/bin/glslc"',
     "Configure, build, and test CMake Linux player": 'ctest --test-dir "$player_build" --output-on-failure',
     "Build and run the Linux showcase headlessly": "make CC=gcc showcase-linux",
     "Build and run the profile-zero production route on Linux":
@@ -1638,6 +1735,176 @@ class AndroidBuildWiringTests(unittest.TestCase):
         self.assertIn("ANDROID_RESULT: ${{ needs.android_build.result }}", required_job)
         required = (ROOT / "tools" / "ci_required.py").read_text(encoding="utf-8")
         self.assertIn('("android-build", "ANDROID_RESULT", "RUN_NATIVE")', required)
+
+
+def _step_env_value(step: list[str], key: str) -> str:
+    """One step-level `env:` value written as a `|` block, with its lines dedented."""
+    header = next(i for i, line in enumerate(step) if line.strip() == f"{key}: |")
+    indent = len(step[header]) - len(step[header].lstrip()) + 2
+    body: list[str] = []
+    for line in step[header + 1:]:
+        if line.strip() and not line.startswith(" " * indent):
+            break
+        body.append(line[indent:])
+    while body and not body[-1].strip():
+        body.pop()
+    return "".join(line + "\n" for line in body)
+
+
+# A stand-in for gradle: each call appends its user home to the log; the first
+# NK_TEST_FAILURES calls print NK_TEST_MESSAGE and exit 1, later calls succeed.
+_GRADLE_STUBS = {
+    "gradle": (
+        '#!/bin/bash\nn=$(( $(cat "$NK_TEST_COUNT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$NK_TEST_COUNT"\n'
+        'echo "gradle ${GRADLE_USER_HOME:-default} $*" >> "$NK_TEST_LOG"\n'
+        'if [ "$n" -le "$NK_TEST_FAILURES" ]; then\n'
+        '  printf \'FAILURE: Build failed with an exception.\\n\\n* What went wrong:\\n%s\\n\' "$NK_TEST_MESSAGE" >&2\n'
+        '  exit 1\nfi\necho "BUILD SUCCESSFUL"\n'
+    ),
+    "sleep": '#!/bin/sh\necho "sleep $*" >> "$NK_TEST_LOG"\n',
+}
+
+# Messages from a repository that did not answer or answered wrongly: retried.
+_GRADLE_TRANSIENT = (
+    "Could not resolve all artifacts for configuration 'classpath'.\n"
+    "   > Could not find org.jetbrains.kotlin:kotlin-stdlib:2.3.0.",
+    "Could not resolve all artifacts for configuration 'classpath'.\n"
+    "   > Could not resolve com.google.guava:guava:33.4.0-jre.\n"
+    "      > Could not get resource 'https://repo.maven.apache.org/maven2/com/google/guava/guava/33.4.0-jre/"
+    "guava-33.4.0-jre.pom'.",
+    "   > Could not GET 'https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/9.5.1/"
+    "gradle-9.5.1.pom'. Received status code 503 from server: Service Unavailable",
+    "   > Could not HEAD 'https://repo.maven.apache.org/maven2/org/ow2/asm/asm/9.8/asm-9.8.jar'.",
+    "   > Could not parse POM https://dl.google.com/dl/android/maven2/com/android/tools/sdk-common/32.5.1/"
+    "sdk-common-32.5.1.pom",
+    "   > Could not GET 'https://repo.maven.apache.org/maven2/commons-io/commons-io/2.18.0/"
+    "commons-io-2.18.0.pom'.\n      > Read timed out",
+    "Plugin [id: 'com.android.application', version: '9.5.1'] was not found in any of the following sources:",
+)
+
+# Failures of the build itself, including ones worded like a lookup: never retried.
+_GRADLE_PERMANENT = (
+    "Execution failed for task ':app:compileDebugJavaWithJavac'.\n"
+    "> Compilation failed; see the compiler error output for details.",
+    "Execution failed for task ':app:buildCMakeDebug[arm64-v8a]'.\n"
+    "  Could not find a package configuration file provided by \"SDL3\" with any of the following names:",
+    "  Could not find toolchain file: /opt/ndk/build/cmake/android.toolchain.cmake",
+    "Could not resolve all files for configuration ':app:debugRuntimeClasspath'.\n"
+    "   > Could not resolve project :player.",
+    "Could not determine the dependencies of task ':app:compileDebugKotlin'.",
+)
+
+
+class GradleRetryHelperTests(unittest.TestCase):
+    """The Android build's Gradle helper (NK_GRADLE_RETRY), run as the step runs it, against a stub.
+
+    On 2026-11-20 a short outage of the public Maven repositories failed the Android launcher
+    build of a landing batch that did not touch Android, which cost the batch's whole run.
+    """
+
+    STEP = "Build the Android launcher APK for arm64-v8a"
+    COMMAND = ("gradle", "--no-daemon", "-p", "android", "assembleDebug", "-Pnk.abis=arm64-v8a")
+
+    step: ClassVar[list[str]]
+    helper: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        step = _ci_step(_ci_job_blocks()["android_build"], cls.STEP)
+        assert step is not None, f"android_build has no step {cls.STEP!r}"
+        cls.step = step
+        cls.helper = _step_env_value(step, "NK_GRADLE_RETRY")
+
+    def run_helper(self, failures: int, message: str = "",
+                   command: Sequence[str] = COMMAND) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        bash, reason = _step_bash()
+        if bash is None:
+            self.skipTest(reason)
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        scratch = Path(holder.name)
+        stubs = scratch / "bin"
+        stubs.mkdir()
+        for name, body in _GRADLE_STUBS.items():
+            (stubs / name).write_bytes(body.encode("utf-8"))
+            (stubs / name).chmod(0o755)
+        log = scratch / "log"
+        log.write_text("", encoding="utf-8")
+        env = {key: value for key, value in os.environ.items() if key != "GRADLE_USER_HOME"}
+        env.update({
+            "NK_GRADLE_RETRY": self.helper,
+            "NK_TEST_STUBS": _bash_path(stubs),
+            "NK_TEST_LOG": _bash_path(log),
+            "NK_TEST_COUNT": _bash_path(scratch / "count"),
+            "NK_TEST_FAILURES": str(failures),
+            "NK_TEST_MESSAGE": message,
+        })
+        # The step's own invocation, with the stubs first on PATH.
+        wrapper = 'export PATH="$NK_TEST_STUBS:$PATH"; bash -c "$NK_GRADLE_RETRY" nk-gradle-retry "$@"'
+        done = subprocess.run([bash, "-c", wrapper, "wrapper", *command], capture_output=True, text=True,
+                              env=env, timeout=120, check=False)
+        return done, log.read_text(encoding="utf-8").splitlines()
+
+    def test_the_step_builds_through_the_helper(self) -> None:
+        text = "\n".join(self.step)
+        self.assertIn('bash -c "$NK_GRADLE_RETRY" nk-gradle-retry \\\n'
+                      '            gradle --no-daemon -p android assembleDebug -Pnk.abis=arm64-v8a \\\n', text)
+        self.assertEqual(text.count("gradle --no-daemon"), 1, "the build runs only through the helper")
+        # Three attempts, a pause before each retry, and nothing that skips or relaxes a check.
+        self.assertIn("for attempt in 1 2 3; do", self.helper)
+        self.assertIn('sleep "$((30 * attempt))"', self.helper)
+        for banned in ("continue-on-error", "--refresh-dependencies", "--offline", "|| true"):
+            with self.subTest(banned=banned):
+                self.assertNotIn(banned, text)
+
+    def test_a_short_outage_succeeds_on_a_retry_with_an_empty_user_home(self) -> None:
+        done, log = self.run_helper(2, _GRADLE_TRANSIENT[0])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        calls = [line for line in log if line.startswith("gradle ")]
+        self.assertEqual(len(calls), 3, log)
+        for call in calls:
+            self.assertTrue(call.endswith(" " + " ".join(self.COMMAND[1:])), call)
+        homes = [call.split()[1] for call in calls]
+        self.assertEqual(homes[0], "default")
+        self.assertNotIn("default", homes[1:])
+        self.assertEqual(len(set(homes)), 3, homes)
+        self.assertEqual([line for line in log if line.startswith("sleep ")], ["sleep 30", "sleep 60"])
+        self.assertEqual(done.stderr.count("::warning::nk-gradle-retry: attempt "), 2, done.stderr)
+        self.assertIn("BUILD SUCCESSFUL", done.stdout)
+
+    def test_an_outage_past_the_bound_fails_the_step(self) -> None:
+        done, log = self.run_helper(99, _GRADLE_TRANSIENT[0])
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(sum(line.startswith("gradle ") for line in log), 3)
+        self.assertEqual([line for line in log if line.startswith("sleep ")], ["sleep 30", "sleep 60"])
+        self.assertIn("::error::nk-gradle-retry: fetching the build's dependencies failed on every attempt",
+                      done.stderr)
+
+    def test_a_build_failure_is_not_retried(self) -> None:
+        done, log = self.run_helper(1, _GRADLE_PERMANENT[0])
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(log, [f"gradle default {' '.join(self.COMMAND[1:])}"])
+        self.assertNotIn("nk-gradle-retry", done.stderr)
+        self.assertIn("Compilation failed", done.stdout)
+
+    def test_each_repository_error_is_retried(self) -> None:
+        for message in _GRADLE_TRANSIENT:
+            with self.subTest(message=message.splitlines()[-1]):
+                done, log = self.run_helper(1, message)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(sum(line.startswith("gradle ") for line in log), 2)
+
+    def test_lookup_wording_from_the_build_itself_is_not_retried(self) -> None:
+        for message in _GRADLE_PERMANENT:
+            with self.subTest(message=message.splitlines()[-1]):
+                done, log = self.run_helper(1, message)
+                self.assertEqual(done.returncode, 1)
+                self.assertEqual(sum(line.startswith("gradle ") for line in log), 1)
+
+    def test_no_command_is_a_usage_error(self) -> None:
+        done, log = self.run_helper(0, command=())
+        self.assertEqual(done.returncode, 2)
+        self.assertEqual(log, [])
 
 
 class WindowsCompilerCacheTests(unittest.TestCase):
@@ -2562,6 +2829,9 @@ class CoverageWiringTests(unittest.TestCase):
         _GPU_TWIN_MUTANTS_STEP: "mutants",
         "Run Linux cosimulation mutation corpus": "mutants",
         "Reproduce the FSR 3 shaders with the pinned DXC": "shader bytes, no C",
+        "Reproduce the GLSL shaders with the pinned glslc": "shader bytes, no C",
+        "Run the parser mutation fuzzers under ASan and UBSan":
+            "sanitizer builds; native-core-tests measures the same harness",
         "Configure, build, and test CMake Linux player": "an end-to-end player route",
         "Build and run the Linux showcase headlessly": "an end-to-end player route",
         "Build and run the profile-zero production route on Linux": "an end-to-end route",
@@ -2940,6 +3210,9 @@ def _job_if(block: list[str]) -> str:
 _EXPRESSION_TOKEN = re.compile(r"\s*(\|\||&&|==|!=|!|\(|\)|,|'(?:[^']|'')*'|\d+(?:\.\d+)?|[A-Za-z_][A-Za-z0-9_.-]*)")
 
 
+_ACTIONS_LITERALS: dict[str, object] = {"true": True, "false": False, "null": None}
+
+
 def _actions_eval(expression: str, context: Mapping[str, object]) -> bool:
     """Whether a job guard holds: ``_actions_value``, read as Actions reads an ``if:``."""
     return _actions_value(expression, context) not in (None, False, 0, "")
@@ -2949,7 +3222,7 @@ def _actions_value(expression: str, context: Mapping[str, object]) -> object:
     """Evaluate the GitHub Actions expression subset the job guards and run names use.
 
     Supported: ``||``, ``&&``, ``!``, ``==``, ``!=``, parentheses, single-quoted strings, number literals,
-    context paths (a missing or null step reads as null), ``startsWith``, ``format`` and ``always``.
+    the ``true``, ``false`` and ``null`` literals, context paths (a missing or null step reads as null), ``startsWith``, ``format`` and ``always``.
     As in Actions, ``!`` binds tighter than ``==`` and ``!=``, two strings compare without
     case, operands of different types compare as numbers (null and '' are 0, a non-numeric
     string is NaN), and ``startsWith`` reads null as the empty string.
@@ -3035,6 +3308,9 @@ def _actions_value(expression: str, context: Mapping[str, object]) -> object:
                 values = ["" if value is None else str(value) for value in arguments[1:]]
                 return re.sub(r"\{(\d+)\}", lambda match: values[int(match.group(1))], str(arguments[0]))
             raise AssertionError(f"unsupported function {token}")
+        # Actions reads these three words as literals, never as context names.
+        if token in _ACTIONS_LITERALS:
+            return _ACTIONS_LITERALS[token]
         return lookup(token)
 
     def negation() -> object:
@@ -3118,6 +3394,17 @@ class ActionsExpressionEvaluatorTests(unittest.TestCase):
         self.assertFalse(_actions_eval("run.attempt == 1", {"run": {"attempt": 2}}))
         self.assertTrue(_actions_eval("run.attempt == 1", {"run": {"attempt": "1"}}))
         self.assertFalse(_actions_eval("missing == 1", {}))
+
+    def test_boolean_and_null_literals_are_literals_not_context_names(self) -> None:
+        # A context name read in their place is null, which would invert a draft guard.
+        draft = {"github": {"event": {"pull_request": {"draft": True}}}}
+        ready = {"github": {"event": {"pull_request": {"draft": False}}}}
+        self.assertTrue(_actions_eval("github.event.pull_request.draft == true", draft))
+        self.assertFalse(_actions_eval("github.event.pull_request.draft == true", ready))
+        self.assertTrue(_actions_eval("github.event.pull_request.draft == false", ready))
+        self.assertFalse(_actions_eval("github.event.pull_request.draft == false", draft))
+        self.assertTrue(_actions_eval("github.missing == null", {}))
+        self.assertIs(_actions_value("true", {"true": "a context named true"}), True)
 
     def test_strings_compare_without_case(self) -> None:
         self.assertTrue(_actions_eval("github.repository == 'jstar269/NAKAGAWA-recomp'",

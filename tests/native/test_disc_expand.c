@@ -56,7 +56,9 @@
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32) || defined(_WIN64)
+#include <fcntl.h>
 #include <io.h>
+#include <sys/stat.h>
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -1619,6 +1621,129 @@ static void free_twins(TwinImages *t) {
     free(t->second_bytes);
 }
 
+/* Standard error sent to a file between begin and end, so a test can read what
+   an import logged. */
+typedef struct {
+    int saved;
+    char path[NATIVE_TEST_PATH_MAX];
+} StderrCapture;
+
+static void stderr_capture_begin(StderrCapture *c, const char *name) {
+    int fd;
+    path_in(c->path, sizeof(c->path), name);
+    fflush(stderr);
+#if defined(_WIN32) || defined(_WIN64)
+    c->saved = _dup(_fileno(stderr));
+    fd = _open(c->path, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, _S_IREAD | _S_IWRITE);
+    assert(c->saved >= 0 && fd >= 0);
+    assert(_dup2(fd, _fileno(stderr)) == 0);
+    _close(fd);
+#else
+    c->saved = dup(fileno(stderr));
+    fd = open(c->path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    assert(c->saved >= 0 && fd >= 0);
+    assert(dup2(fd, fileno(stderr)) >= 0);
+    close(fd);
+#endif
+}
+
+/* Puts standard error back; whether the captured log holds `line`. */
+static bool stderr_capture_end(StderrCapture *c, const char *line) {
+    char log[8192];
+    size_t got;
+    FILE *f;
+    fflush(stderr);
+#if defined(_WIN32) || defined(_WIN64)
+    assert(_dup2(c->saved, _fileno(stderr)) == 0);
+    _close(c->saved);
+#else
+    assert(dup2(c->saved, fileno(stderr)) >= 0);
+    close(c->saved);
+#endif
+    f = nk_fopen_utf8(c->path, "rb");
+    assert(f != NULL);
+    got = fread(log, 1, sizeof(log) - 1, f);
+    fclose(f);
+    log[got] = '\0';
+    return strstr(log, line) != NULL;
+}
+
+/* Every permission taken from a file and given back later, both through one
+   handle or descriptor opened once, so both changes reach the file the test
+   then opens by name. Windows: a security descriptor that grants no one
+   anything, then none at all (everyone may again); elsewhere mode 0, then
+   0600. */
+typedef struct {
+#if defined(_WIN32) || defined(_WIN64)
+    HANDLE handle;
+#else
+    int fd;
+#endif
+} NoAccess;
+
+static void no_access_begin(NoAccess *n, const char *path) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[NATIVE_TEST_PATH_MAX];
+    SECURITY_DESCRIPTOR descriptor;
+    ACL nobody;
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide,
+                               NATIVE_TEST_PATH_MAX) > 0);
+    /* Its security only: no read or write of the data, every sharing allowed, so
+       the opens under test see only the permissions. */
+    n->handle = CreateFileW(wide, READ_CONTROL | WRITE_DAC,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(n->handle != INVALID_HANDLE_VALUE);
+    assert(InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION));
+    assert(InitializeAcl(&nobody, sizeof(nobody), ACL_REVISION));
+    assert(SetSecurityDescriptorDacl(&descriptor, TRUE, &nobody, FALSE));
+    assert(SetKernelObjectSecurity(n->handle, DACL_SECURITY_INFORMATION, &descriptor));
+#else
+    n->fd = open(path, O_RDONLY | O_NOFOLLOW);
+    assert(n->fd >= 0);
+    assert(fchmod(n->fd, 0) == 0);
+#endif
+}
+
+/* Whether this account is now refused a read of the file: false for a user no
+   permission stops (root, or a Windows token using its backup privilege). */
+static bool no_access_refused(const char *path) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[NATIVE_TEST_PATH_MAX];
+    HANDLE probe;
+    bool refused;
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide,
+                               NATIVE_TEST_PATH_MAX) > 0);
+    probe = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, NULL);
+    refused = probe == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED;
+    if (probe != INVALID_HANDLE_VALUE) CloseHandle(probe);
+    return refused;
+#else
+    FILE *probe = nk_fopen_utf8(path, "rb");
+    if (probe == NULL) return true;
+    fclose(probe);
+    return false;
+#endif
+}
+
+static void no_access_end(NoAccess *n) {
+#if defined(_WIN32) || defined(_WIN64)
+    SECURITY_DESCRIPTOR descriptor;
+    assert(InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION));
+    assert(SetSecurityDescriptorDacl(&descriptor, TRUE, NULL, FALSE));
+    assert(SetKernelObjectSecurity(n->handle, DACL_SECURITY_INFORMATION, &descriptor));
+    assert(CloseHandle(n->handle));
+#else
+    assert(fchmod(n->fd, 0600) == 0);
+    assert(close(n->fd) == 0);
+#endif
+}
+
+#define SHARED_READ_LOG                                                                   \
+    "[DISC_IMPORT] The disc image is open in another program, so it is read twice to " \
+    "check that it does not change while it is added."
+
 /* Nothing of an import of `identity` under root: no ref, no staging image,
    and no per-title image named for it. */
 static bool nothing_recorded(const char *root, const char *identity) {
@@ -1937,10 +2062,19 @@ static void test_import_open_for_writing_elsewhere(void) {
                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     assert(undone.writer != INVALID_HANDLE_VALUE);
 
-    /* Open for writing elsewhere, not written: imported. */
+    /* Open for writing elsewhere, not written: imported, and the log says it
+       was read shared. */
     path_in(root, sizeof(root), "in-use-root");
     CHECK(nk_platform_mkdir_p(root));
-    ok = nk_disc_import(t.first, root, NULL, &result, &status);
+    {
+        StderrCapture capture;
+        bool logged;
+        stderr_capture_begin(&capture, "in-use-stderr.log");
+        ok = nk_disc_import(t.first, root, NULL, &result, &status);
+        logged = stderr_capture_end(&capture, SHARED_READ_LOG);
+        if (!logged) fprintf(stderr, "in use: the shared read was not logged\n");
+        CHECK(logged);
+    }
     if (!ok) fprintf(stderr, "in use: %s: %s\n", status.code, status.message);
     CHECK(ok && !result.reused && file_equals(result.iso_path, g_iso, ISO_BYTES));
     CHECK(strcmp(result.identity, identity) == 0);
@@ -2047,11 +2181,9 @@ static void test_import_stored_image_short_or_unreadable(void) {
         assert(held != INVALID_HANDLE_VALUE);
         unreadable = true;
 #else
-        FILE *probe;
-        assert(chmod(legacy_iso, 0) == 0);
-        probe = nk_fopen_utf8(legacy_iso, "rb");
-        unreadable = probe == NULL;
-        if (probe) fclose(probe);
+        NoAccess no_access;
+        no_access_begin(&no_access, legacy_iso);
+        unreadable = no_access_refused(legacy_iso);
 #endif
         if (unreadable) {
             bool ok = nk_disc_import(t.first, root, NULL, &result, &status);
@@ -2066,11 +2198,95 @@ static void test_import_stored_image_short_or_unreadable(void) {
 #if defined(_WIN32) || defined(_WIN64)
         CloseHandle(held);
 #else
-        assert(chmod(legacy_iso, 0600) == 0);
+        no_access_end(&no_access);
 #endif
     }
     free_twins(&t);
     printf("PASS a short or unreadable stored image gets a fresh expansion\n");
+}
+
+/* A source this account may not read: the refusal says access was denied, not
+   that the drive may be gone (NoAccess: no permission at all; skipped where the
+   test runs as a user no permission stops). An ordinary
+   import, held with writes denied, logs no shared read. */
+static void test_import_access_denied(void) {
+    TwinImages t;
+    char root[NATIVE_TEST_PATH_MAX];
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    NoAccess no_access;
+    bool denied;
+    bool ok;
+    make_twins(&t, "denied");
+    path_in(root, sizeof(root), "denied-root");
+    CHECK(nk_platform_mkdir_p(root));
+    {
+        StderrCapture capture;
+        bool logged;
+        stderr_capture_begin(&capture, "held-stderr.log");
+        ok = nk_disc_import(t.second, root, NULL, &result, &status);
+        logged = stderr_capture_end(&capture, SHARED_READ_LOG);
+        if (logged) fprintf(stderr, "held: a shared read was logged for a file nobody writes\n");
+        CHECK(ok && !logged);
+    }
+    no_access_begin(&no_access, t.first);
+    denied = no_access_refused(t.first);
+    if (denied) {
+        ok = nk_disc_import(t.first, root, NULL, &result, &status);
+        if (ok || strcmp(status.code, NK_DISC_READ_FAILED) != 0 ||
+            strstr(status.message, "Access to the disc image was denied") == NULL) {
+            fprintf(stderr, "access denied: ok=%d %s: %s\n", (int)ok, status.code,
+                    status.message);
+            CHECK(false);
+        }
+    } else {
+        printf("SKIP access denied: this user reads a file it has no permission for\n");
+    }
+    no_access_end(&no_access);
+    free_twins(&t);
+    printf("PASS a source this account may not read is refused as access denied\n");
+}
+
+/* A stamp field read the first time and 0 the next (or the other way round)
+   is a change; a field 0 both times is one the file system does not keep. */
+static void test_source_stamp_field_lost(void) {
+    TwinImages t;
+    NkDiscSourceStamp stamp;
+    NkDiscSourceStamp lost;
+    NkDiscExpandStatus status;
+    int fields = 0;
+    make_twins(&t, "stamp-lost");
+    CHECK(nk_disc_source_stamp(t.first, &stamp));
+    CHECK(nk_disc_source_unchanged(t.first, &stamp, &status));
+    if (stamp.changed != 0) {
+        lost = stamp;
+        lost.changed = 0;
+        CHECK(!nk_disc_source_unchanged(t.first, &lost, &status));
+        CHECK(strcmp(status.code, NK_DISC_READ_FAILED) == 0);
+        fields++;
+    }
+    if (stamp.volume != 0) {
+        lost = stamp;
+        lost.volume = 0;
+        CHECK(!nk_disc_source_unchanged(t.first, &lost, &status));
+        fields++;
+    }
+    if (stamp.file_id != 0) {
+        lost = stamp;
+        lost.file_id = 0;
+        if (nk_disc_source_unchanged(t.first, &lost, &status)) {
+            fprintf(stderr, "stamp: a file identity read once and lost the next time "
+                            "was taken as unchanged\n");
+            CHECK(false);
+        }
+        fields++;
+    }
+    free_twins(&t);
+    if (fields == 0) {
+        printf("SKIP stamp field lost: this file system reports no change time or file identity\n");
+    } else {
+        printf("PASS a stamp field read once and not again is a change (%d fields)\n", fields);
+    }
 }
 
 /* Records that are not whole are never a match: an upgrade interrupted
@@ -2353,6 +2569,8 @@ int main(void) {
 #endif
     test_import_cancel_during_comparison();
     test_import_stored_image_short_or_unreadable();
+    test_import_access_denied();
+    test_source_stamp_field_lost();
     test_import_damaged_records();
     test_import_name_collision();
     test_import_busy();

@@ -2,6 +2,8 @@
 # Copyright (C) 2025-2026 the psp-recomp authors
 # Copyright (C) 2026 the Nakagawa Recomp authors
 
+import contextlib
+import io
 from pathlib import Path
 import sys
 import tempfile
@@ -239,6 +241,67 @@ class TestPadscriptFromLog(unittest.TestCase):
             padscript.parse_transitions(
                 ["ctrl_latch: vcount=10 buttons 0x0000 -> 0x100000000\n"]
             )
+
+    def test_log_ending_held_warns_on_stderr_and_keeps_default_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log = Path(temp) / "stderr.log"
+            out = Path(temp) / "route.pad"
+            log.write_text(
+                "ctrl_latch: vcount=100 buttons 0x0000 -> 0x4000 lx=128 ly=128\n",
+                encoding="utf-8",
+            )
+            argv = ["padscript_from_log.py", str(log), "-o", str(out)]
+            stderr = io.StringIO()
+            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(stderr):
+                self.assertEqual(padscript.main(), 0)
+            self.assertEqual(out.read_text(encoding="utf-8"), "100 0x4000 8\n")
+            self.assertIn("100", stderr.getvalue())
+            self.assertIn("0x4000", stderr.getvalue())
+
+    def test_end_vcount_holds_unreleased_press_and_off_centre_stick_without_warning(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log = Path(temp) / "press.log"
+            out = Path(temp) / "press.pad"
+            log.write_text(
+                "ctrl_latch: vcount=100 buttons 0x0000 -> 0x4000 lx=128 ly=128\n",
+                encoding="utf-8",
+            )
+            argv = ["padscript_from_log.py", str(log), "-o", str(out), "--end-vcount", "5000"]
+            stderr = io.StringIO()
+            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(stderr):
+                self.assertEqual(padscript.main(), 0)
+            self.assertEqual(out.read_text(encoding="utf-8"), "100 0x4000 4900\n")
+            self.assertEqual(stderr.getvalue(), "")
+
+            stick_log = Path(temp) / "stick.log"
+            stick_out = Path(temp) / "stick.pad"
+            stick_log.write_text(
+                "ctrl_latch: vcount=100 buttons 0x0000 -> 0x0000 lx=0 ly=255\n",
+                encoding="utf-8",
+            )
+            stick_argv = [
+                "padscript_from_log.py",
+                str(stick_log),
+                "-o",
+                str(stick_out),
+                "--end-vcount",
+                "5000",
+            ]
+            stick_stderr = io.StringIO()
+            with (
+                mock.patch.object(sys, "argv", stick_argv),
+                contextlib.redirect_stderr(stick_stderr),
+            ):
+                self.assertEqual(padscript.main(), 0)
+            self.assertEqual(stick_out.read_text(encoding="utf-8"), "100 0x0000 4900 0 255\n")
+            self.assertEqual(stick_stderr.getvalue(), "")
+
+    def test_end_vcount_before_last_transition_is_rejected(self):
+        transitions = [padscript.Transition(100, 0, 0x4000)]
+        with self.assertRaisesRegex(ValueError, "end_vcount"):
+            padscript.pulses_from_transitions(transitions, end_vcount=50)
+        with self.assertRaisesRegex(ValueError, "end_vcount"):
+            padscript.pulses_from_transitions([], end_vcount=-1)
 
 
 if __name__ == "__main__":

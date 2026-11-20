@@ -23,7 +23,8 @@ import argparse
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Iterable
+import sys
+from typing import Iterable, TextIO
 
 
 LATCH_RE = re.compile(
@@ -135,7 +136,12 @@ def _spans(transitions: Iterable[Transition], stick_min_width: int) -> list[_Spa
 
 
 def pulses_from_transitions(
-    transitions: Iterable[Transition], minimum_width: int = 8, stick_min_width: int = 4
+    transitions: Iterable[Transition],
+    minimum_width: int = 8,
+    stick_min_width: int = 4,
+    end_vcount: int | None = None,
+    *,
+    warning_stream: TextIO | None = None,
 ) -> list[Pulse]:
     """Convert pad-state spans into replay pulses.
 
@@ -145,14 +151,29 @@ def pulses_from_transitions(
     is split at each move, and the expansion applies to the press as a whole,
     on its last split, so a split press is never held longer than an unsplit
     one.
+
+    When an input is still held at the end of the log, ``end_vcount`` holds it
+    until that vcount; otherwise it is shortened to the minimum width and a
+    warning naming the vcount and mask is written to ``warning_stream``
+    (defaulting to ``sys.stderr``).
     """
 
     if minimum_width < 1:
         raise ValueError("minimum_width must be at least 1")
     if stick_min_width < 1:
         raise ValueError("stick_min_width must be at least 1")
+    if end_vcount is not None and end_vcount < 0:
+        raise ValueError("end_vcount must be non-negative")
 
-    spans = _spans(transitions, stick_min_width)
+    transition_list = list(transitions)
+    if end_vcount is not None and transition_list:
+        last_frame = max(transition.frame for transition in transition_list)
+        if end_vcount < last_frame:
+            raise ValueError(
+                f"end_vcount ({end_vcount}) precedes last transition vcount ({last_frame})"
+            )
+
+    spans = _spans(transition_list, stick_min_width)
     pulses: list[Pulse] = []
     press_start = 0
     for index, span in enumerate(spans):
@@ -162,7 +183,24 @@ def pulses_from_transitions(
             continue
         following = spans[index + 1] if index + 1 < len(spans) else None
         if following is None:
-            width = max(1, minimum_width - (span.frame - press_start)) if span.mask else minimum_width
+            if end_vcount is not None:
+                width = max(1, end_vcount - span.frame)
+                if span.mask:
+                    width = max(width, minimum_width - (span.frame - press_start))
+            else:
+                width = max(1, minimum_width - (span.frame - press_start)) if span.mask else minimum_width
+                stream = sys.stderr if warning_stream is None else warning_stream
+                stick = (
+                    ""
+                    if (span.lx, span.ly) == (CENTRE, CENTRE)
+                    else f" lx={span.lx} ly={span.ly}"
+                )
+                print(
+                    f"warning: input still held at end of log "
+                    f"(vcount={span.frame} mask=0x{span.mask:04x}{stick}); "
+                    f"shortened to {width} vblank(s) (pass --end-vcount to hold until a target vcount)",
+                    file=stream,
+                )
         else:
             # A press that starts and ends at the same vcount is still a press: expand it.
             width = max(1, following.frame - span.frame)
@@ -210,13 +248,24 @@ def main() -> int:
         default=4,
         help="fold stick positions held for fewer vblanks into the next one (default: 4)",
     )
+    parser.add_argument(
+        "--end-vcount",
+        type=int,
+        default=None,
+        help="hold an unreleased press or off-centre stick at the end of the log until this vcount",
+    )
     args = parser.parse_args()
 
     try:
         with args.input.open("r", encoding="utf-8", errors="replace") as stream:
             transitions = parse_transitions(stream)
         output = render_padscript(
-            pulses_from_transitions(transitions, args.minimum_width, args.stick_min_width)
+            pulses_from_transitions(
+                transitions,
+                args.minimum_width,
+                args.stick_min_width,
+                end_vcount=args.end_vcount,
+            )
         )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))

@@ -496,7 +496,8 @@ typedef struct {
     char path[NK_MAX_PATH];     /* the written ZIP */
     char message[480];          /* why it failed */
     char command[160];          /* what to run by hand */
-    int file_count;
+    int file_count;             /* entries kept below, at most PLAYER_REPORT_MAX_FILES */
+    int file_total;             /* every file the ZIP holds, kept or not */
     char file_names[PLAYER_REPORT_MAX_FILES][PLAYER_REPORT_FILE_NAME];
     unsigned long long file_bytes[PLAYER_REPORT_MAX_FILES];
 } PlayerReportState;
@@ -514,7 +515,10 @@ typedef enum {
 typedef struct {
     PlayerPrerequisitePhase phase;
     PackagePrerequisiteList items;
-    int game_index;
+    /* The title the download was started for, by identity: the build resumes for this
+       image, wherever the library has moved it meanwhile (player_app_prereq_resume_game). */
+    char disc_id[NK_MAX_DISC_ID_LEN];
+    char iso_path[NK_MAX_PATH];
     int item_count;
     uint64_t total_bytes;
     uint64_t total_received_bytes;
@@ -1608,6 +1612,19 @@ NkRuntimePackageStatus player_app_validate_runtime_package(
     size_t reason_size
 );
 bool player_app_game_has_runtime(const PlayerApp *app, const GameRecord *game);
+/* The one rule for "this title's runtime is there", given its package's validation status
+ * and the root it was validated under (player_app_package_root): a valid package, or a
+ * developer layout under that root standing in for a missing authentic package. A
+ * developer layout never stands in for an experimental title or an enhanced build. */
+bool player_runtime_available(NkRuntimePackageStatus status, const GameRecord *game,
+                              const char *package_root);
+/* The root a title's package is looked up under: the showcase folder for a bundled
+ * showcase demo, else the runtime root; NULL for the per-user data folder. */
+const char *player_app_package_root(const PlayerApp *app, const GameRecord *game);
+/* The root that owns build-side files (packages, caches, experimental profiles): the
+ * runtime root when one is set, else the per-user data folder. False when neither can be
+ * named. */
+bool player_app_data_root(const PlayerApp *app, char *out, size_t out_size);
 /* The cache entry holds the status of exactly this title's package: the same
  * disc, title, selected executable and package variant. */
 bool player_runtime_package_cache_entry_is_for(
@@ -2251,8 +2268,11 @@ typedef struct {
 
 /* Fill the one staging request every route uses (the wizard's worker,
  * --stage-only, --launch-now, ADD TO LIBRARY) from the game's catalog or
- * experimental profile entry. Returns false when that entry cannot be read. */
-bool player_app_build_stage_plan(const GameRecord *game, PlayerStagePlan *plan);
+ * experimental profile entry, which is read under player_app_data_root (the runtime
+ * root when one is set), where the import writes it. Returns false when that entry
+ * cannot be read. */
+bool player_app_build_stage_plan(const PlayerApp *app, const GameRecord *game,
+                                 PlayerStagePlan *plan);
 
 /* True when the inspected disc's title takes its data from the disc and the
  * data is not in place yet, so ADD TO LIBRARY must set its files up first. */
@@ -2552,6 +2572,18 @@ void player_app_prereq_retry(PlayerApp *app);
 void player_app_prereq_cancel(PlayerApp *app);
 void player_app_prereq_finish_cancel(PlayerApp *app);
 bool player_app_prereq_take_resume(PlayerApp *app);
+/* The card the tools download was started for, found again by the image recorded at
+   player_app_prereq_begin (player_app_find_built_game's rule), so a title added or removed
+   during the download does not move the build to another game; -1 when that title is no
+   longer in the library. */
+int player_app_prereq_resume_game(const PlayerApp *app);
+/* After the tools download: starts the package build of the title it was started for, or,
+   when that title has left the library, opens the PREREQUISITE_TITLE_GONE card. False when
+   no build started (the card that says why is open). */
+bool player_app_prereq_resume_build(PlayerApp *app);
+/* True when the build session's state is the prerequisite fetcher's: it reuses the build
+   session, and its outcome belongs to the prerequisite card, not to a package build. */
+bool player_app_build_session_is_prerequisite_fetch(const PlayerApp *app);
 bool player_app_open_prerequisite_about(PlayerApp *app);
 /* Asks the main loop to open the downloaded tools' licence texts folder. Asks
    nothing, and returns false, when the per-user data folder can't be found. */

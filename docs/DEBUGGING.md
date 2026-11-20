@@ -2279,7 +2279,10 @@ mingw32-make --no-print-directory form-sweep-selftest
   stopped on the instruction: `sync` and `cache` today, listed by name with their op word),
   `AOT_FAILED` (the translated side stopped or had no body for an instruction the reference
   ran) or `MISSING`. `NOT_CHECKED` is never a pass; `AOT_FAILED` and `MISSING` fail the run
-  even when another instance of the same form matched.
+  even when another instance of the same form matched. A stop never hides an earlier
+  mismatch: when a state compared before the stop differed, the instance is a `MISMATCH`
+  whose line names the stop. Only a stop on the first state of `sync` or `cache` is the
+  expected `NOT_CHECKED`; a stop on a later state fails the run for those forms too.
 - **Replay.** `build/form-sweep/public/form_sweep.exe --only <index> --dump <state>
   <image> 0x08C00000 <plan>` runs one instance and prints that state's inputs; the index is in
   `fixture/manifest.json`.

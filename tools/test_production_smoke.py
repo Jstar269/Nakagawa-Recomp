@@ -399,7 +399,11 @@ class TestProductionSmoke(unittest.TestCase):
         }
         for name, log in mutants.items():
             with self.subTest(name=name), self.assertRaises(RuntimeError):
-                generator.assert_gap_runtime_evidence(log, returncode=1 if name == "old-fatal-miss" else 0)
+                generator.assert_gap_runtime_evidence(log, returncode=0)
+        # The old fatal miss also exited 1, but the exit check alone must not be what
+        # rejects it: the NONPLT_MISS marker is refused whatever the exit status.
+        with self.assertRaisesRegex(RuntimeError, "contains: NONPLT_MISS"):
+            generator.assert_gap_runtime_evidence(mutants["old-fatal-miss"], returncode=1)
 
     def _fabricated_aot_tree(self, root: Path, relative_dir: str) -> Path:
         """Minimal build tree satisfying verify(--mode aot) with RELATIVE-spelled
@@ -4426,12 +4430,19 @@ class TestProductStatusCopy(unittest.TestCase):
         return re.sub(r'"\s*\n\s*"', "", self._source(relative))
 
     def test_about_screen_carries_the_licence_and_no_endorsement_notice(self):
-        # The launcher's notices page (Settings > Third-party notices) and its About page.
+        # The launcher's notices page (Settings > Third-party notices) and its About page. The
+        # licence words are the maintainer's (2026-11-19): the program is GNU GPL version 3,
+        # since two included parts are version 3 only; its own code also allows later versions.
         notices = self._c_text("src/player/ui/scr_settings.c")
-        self.assertIn("Nakagawa Recomp is free software (GPL-3.0-or-later; see LICENSE and "
-                      "NOTICE.md). Not affiliated with or endorsed by Sony Interactive "
-                      "Entertainment; PlayStation and PSP are its trademarks.", notices)
+        self.assertIn("Nakagawa Recomp is free software under the GNU GPL version 3. Its own "
+                      "code also allows later versions; see LICENSE and NOTICE.md. Not "
+                      "affiliated with or endorsed by Sony Interactive Entertainment; "
+                      "PlayStation and PSP are its trademarks.", notices)
         about = self._c_text("src/player/ui/scr_about.c")
+        self.assertIn('"GNU GPL version 3"', about)
+        self.assertIn("Free software. Nakagawa's own code also allows later GPL versions; two "
+                      "included parts are version 3 only. Third-party parts keep their own "
+                      "licences.", about)
         self.assertIn("Not affiliated with or endorsed by Sony Interactive Entertainment. "
                       "PSP is a trademark of its owner. No game data is included.", about)
 

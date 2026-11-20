@@ -181,12 +181,14 @@ bool nk_disc_file_identity(const char *path, const NkDiscExpandCallbacks *callba
                            NkDiscExpandStatus *status);
 
 /* A source file's stamp, taken before it is read and compared before anything
-   is recorded for it: its size and write time, which a writer can put back,
-   and what no writer can put back: the time of its last change of any kind
-   (POSIX st_ctim; the NTFS change time) and which file it is (POSIX st_dev and
-   st_ino; the volume serial number and file index). A file system that does not
-   report one of the last three gives 0 for it, and that field is then not
-   compared. */
+   is recorded for it: its size and write time, which any writer can set back,
+   the time of its last change of any kind (POSIX st_ctim, which no ordinary
+   program can set; the NTFS change time, which a program that may write the
+   file can also set), and which file it is (POSIX st_dev and st_ino; the volume
+   serial number and file index). A file system that does not keep one of the
+   last three gives 0 for it in both stamps, and the field then never differs;
+   0 in one stamp only is a change. What this catches on each platform:
+   nk_platform_file_change_identity in nk_platform.h. */
 typedef struct {
     int64_t size;
     uint64_t modified;
@@ -198,10 +200,9 @@ typedef struct {
 /* False when the file's size or write time cannot be read. */
 bool nk_disc_source_stamp(const char *path, NkDiscSourceStamp *out);
 
-/* True when the file still has the stamp `before` (the size and write time
-   always; the change time, volume and file identity where both stamps have
-   them); otherwise NK_DISC_READ_FAILED, saying that the file changed while it
-   was added. */
+/* True when the file still has the stamp `before`, every field equal (a field
+   0 in both is one the file system does not keep); otherwise
+   NK_DISC_READ_FAILED, saying that the file changed while it was added. */
 bool nk_disc_source_unchanged(const char *path, const NkDiscSourceStamp *before,
                               NkDiscExpandStatus *status);
 

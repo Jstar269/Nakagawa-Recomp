@@ -103,6 +103,53 @@ class TestRouting(unittest.TestCase):
                 contrib_check.changed_paths("unrelated")
         self.assertIn("no common ancestor", str(raised.exception))
 
+    def test_a_tools_data_file_selects_the_test_modules_that_name_it(self) -> None:
+        """Failing-before: hosted CI routes a changed tools/*.json, *.toml or tools/README.md to
+        the Python job (ci_paths._is_python_tool), but python_test_modules mapped it to nothing,
+        so python-unittest was NOT_RUN and contrib-check ended OK (audit F-8a1d1877)."""
+        modules = contrib_check.python_test_modules(["tools/import_audit_baseline.json"])
+        self.assertIn("tools.test_hle_manifest", modules)   # names the path in a string
+        self.assertIn("tools.test_hle_sources", modules)    # ROOT / "tools" / "import_audit_baseline.json"
+        self.assertIn("tools.test_regen_all", modules)
+        self.assertIn("tools.test_tree_lint", contrib_check.python_test_modules(["tools/tree_lint_allow.json"]))
+        # Path(__file__).resolve().parent / "README.md" is tools/README.md.
+        self.assertIn("tools.test_lint_docs", contrib_check.python_test_modules(["tools/README.md"]))
+
+    def test_synthetic_root_selects_the_readers_of_a_tools_data_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_root = Path(tmp)
+            (fake_root / "tools").mkdir(parents=True)
+            for name in ("demo.json", "demo.toml", "README.md", "unread.json"):
+                (fake_root / "tools" / name).write_text("{}\n", encoding="utf-8")
+            (fake_root / "tools" / "test_demo_reader.py").write_text(
+                'from pathlib import Path\n'
+                'ROOT = Path(__file__).resolve().parent.parent\n'
+                'DATA = ROOT / "tools" / "demo.json"\n'
+                'CONFIG = "tools/demo.toml"\n'
+                'INDEX = Path(__file__).resolve().parent / "README.md"\n',
+                encoding="utf-8",
+            )
+            # Names tools/demo.json only in its docstring and a comment, and other README files.
+            (fake_root / "tools" / "test_demo_docs.py").write_text(
+                '"""Mentions tools/demo.json in prose only."""\n'
+                'from pathlib import Path\n'
+                'ROOT = Path(__file__).resolve().parent.parent\n'
+                'DOC = ROOT / "docs" / "README.md"\n'
+                'NEAR = Path(__file__).resolve().parent.parent / "README.md"\n'
+                '# tools/demo.toml\n',
+                encoding="utf-8",
+            )
+            with mock.patch.object(contrib_check, "ROOT", fake_root):
+                for path in ("tools/demo.json", "tools/demo.toml", "tools/README.md"):
+                    with self.subTest(path=path):
+                        self.assertEqual(contrib_check.python_test_modules([path]), ["tools.test_demo_reader"])
+                self.assertEqual(contrib_check.python_test_modules(["tools/unread.json"]), [])
+                with mock.patch.dict(
+                    contrib_check.TOOLS_DATA_TEST_EXCLUSIONS,
+                    {"tools.test_demo_reader": "synthetic exclusion"},
+                ):
+                    self.assertEqual(contrib_check.python_test_modules(["tools/demo.json"]), [])
+
     def test_documentation_and_build_files_select_no_python_module(self) -> None:
         self.assertEqual(
             contrib_check.python_test_modules(["CONTRIBUTING.md", "Makefile", "mk/build_common.mk"]),
@@ -404,6 +451,18 @@ class TestGateStatusVocabulary(unittest.TestCase):
         self.assertEqual(contrib_check.markdown_gate(["tools/a.py"]).status, contrib_check.NOT_RUN)
         self.assertEqual(contrib_check.ruff_gate([]).status, contrib_check.NOT_RUN)
         self.assertEqual(contrib_check.purity_gate(["docs/a.md"]).status, contrib_check.NOT_RUN)
+
+    def test_mdx_is_markdown_for_both_markdown_gates(self) -> None:
+        """Failing-before: both gates matched only .md and .markdown, while the hosted classifier
+        (ci_paths._is_markdown) also counts .mdx, so a changed .mdx page was NOT_RUN locally."""
+        page = "docs/page.mdx"
+        self.assertTrue(contrib_check.ci_paths._is_markdown(page))
+        with mock.patch.object(contrib_check, "find_tool", return_value=None):
+            self.assertEqual(contrib_check.markdown_gate([page]).status, contrib_check.SKIP)
+        passed = contrib_check.Gate("documentation-freshness", contrib_check.PASS)
+        with mock.patch.object(contrib_check, "_run", return_value=passed) as run:
+            self.assertEqual(contrib_check.docs_gate([page]).status, contrib_check.PASS)
+        run.assert_called_once()
 
     def test_a_runtime_change_runs_the_core_purity_gate(self) -> None:
         gate = contrib_check.purity_gate(["src/rt/hle.c"])

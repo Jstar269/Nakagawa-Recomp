@@ -106,10 +106,54 @@ def cmake_rcheevos_sources(cmake_text: str) -> set[str]:
     return set(match.group(1).split())
 
 
+def make_disc_expand_opt(makefile_text: str) -> str | None:
+    """The level the Makefile compiles the player's nk_disc_expand.c at, when it compiles that
+    unit on its own and links it in place of the source in both player programs."""
+    match = re.search(r"^PLAYER_DISC_EXPAND_OPT\s*\?=\s*(\S+)\s*$", makefile_text, re.MULTILINE)
+    if match is None or "PLAYER_DISC_EXPAND_SRC := src/core/nk_disc_expand.c" not in makefile_text:
+        return None
+    for target in ("$(PLAYER_EXE):", "$(PLAYER_UI_TEST_EXE):"):
+        start = makefile_text.find(f"\n{target} $(PLAYER_SRCS)")
+        if start < 0:
+            return None
+        # The rule's commands: every line after its prerequisite line, up to the blank line.
+        commands = makefile_text[start:makefile_text.find("\n\n", start)].split("\n")[2:]
+        if not any("$(PLAYER_LINK_SRCS)" in line for line in commands):
+            return None
+        if any("$(PLAYER_SRCS)" in line for line in commands):
+            return None
+    return match.group(1)
+
+
+def cmake_disc_expand_opt(cmake_text: str) -> str | None:
+    """The level CMake gives src/core/nk_disc_expand.c through its source COMPILE_OPTIONS."""
+    match = re.search(r"set_source_files_properties\(src/core/nk_disc_expand\.c\s+PROPERTIES\s+"
+                      r"COMPILE_OPTIONS\s+(\S+)\)", cmake_text)
+    return match.group(1) if match else None
+
+
 class BuildSystemParityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.makefile_text = read_makefile(ROOT)
         self.cmake_text = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    def test_disc_identity_unit_is_optimised_in_both(self) -> None:
+        """Adding a disc image hashes every byte of it in nk_disc_expand.c; the player's RUNTIME_OPT
+        default is -O0, so both build systems compile that one unit at the same optimised level."""
+        make_level = make_disc_expand_opt(self.makefile_text)
+        cmake_level = cmake_disc_expand_opt(self.cmake_text)
+        self.assertIn(make_level, ("-O1", "-O2", "-O3"),
+                      "the Makefile does not compile the player's nk_disc_expand.c at its own optimised level")
+        self.assertEqual(make_level, cmake_level,
+                         "Make and CMake compile src/core/nk_disc_expand.c at different levels")
+
+    def test_disc_identity_level_comparison_sees_a_one_sided_change(self) -> None:
+        """The comparison above can fail: a level changed in one build file only differs."""
+        mutated = self.cmake_text.replace("COMPILE_OPTIONS -O2)", "COMPILE_OPTIONS -O1)")
+        self.assertNotEqual(mutated, self.cmake_text)
+        self.assertNotEqual(make_disc_expand_opt(self.makefile_text), cmake_disc_expand_opt(mutated))
+        unlinked = self.makefile_text.replace("$(PLAYER_LINK_SRCS)", "$(PLAYER_SRCS)")
+        self.assertIsNone(make_disc_expand_opt(unlinked))
 
     def test_core_sources_parity(self) -> None:
         """Verify identical core sources in Makefile and CMakeLists.txt."""
