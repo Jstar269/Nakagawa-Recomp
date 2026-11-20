@@ -2941,6 +2941,44 @@ _register_campaign_probe(
      for case in GE_DEPTH_ROUND_CASES},
 )
 
+# ge-depth-bounds (192, probe_ge_sample.c): #2193's depth bounds cells, read as colour through
+# depth tests. First `display-check` (9 words, as ge-raster-bounds') and `edram` (2 words: the
+# eDRAM size and address); when either is SKIP every later record is SKIP with the same word
+# count. Then per cell of the gdb_cells table, in order: one `-draw` record (9 words), then for a
+# tag cell, per half (`in`, `past`), the `-blue`, `-yellow`, `-red` and `-rest` group masks of
+# rows 0..15 (16 words each) and a `-sum` (9 words: the pixel count, the blue, yellow, red, white,
+# green, fill and other counts, the first other pixel); for dc-scissor the `in` and `out` sums and
+# two raw rows (16 pixels each). Every cell ends with `-zp` and `-zv` (8 words each: position-free
+# counts of the depth block through the plain and the 0x04200000 mirror), and ctl-zbw512 adds
+# `-zx` (3 words). After the last cell, `vram-restore` (2 words).
+GE_DEPTH_BOUNDS_TAG_CELLS = ("ctl-zbw512", "dw-test-zbw256", "dw-clear-zbw256", "dr-zbw256")
+GE_DEPTH_BOUNDS_CELLS = (*GE_DEPTH_BOUNDS_TAG_CELLS, "dc-scissor")
+GE_DEPTH_BOUNDS_HALF_READS = (("blue", 16), ("yellow", 16), ("red", 16), ("rest", 16), ("sum", 9))
+
+
+def _ge_depth_bounds_rows() -> tuple[tuple[str, int], ...]:
+    rows: list[tuple[str, int]] = [("display-check", 9), ("edram", 2)]
+    for cell in GE_DEPTH_BOUNDS_CELLS:
+        rows.append((f"{cell}-draw", 9))
+        if cell in GE_DEPTH_BOUNDS_TAG_CELLS:
+            rows.extend((f"{cell}-{half}-{read}", count)
+                        for half in ("in", "past") for read, count in GE_DEPTH_BOUNDS_HALF_READS)
+        else:
+            rows.extend(((f"{cell}-in-sum", 9), (f"{cell}-out-sum", 9),
+                         (f"{cell}-r0-x92", 16), (f"{cell}-r271-x92", 16)))
+        rows.extend(((f"{cell}-zp", 8), (f"{cell}-zv", 8)))
+        if cell == "ctl-zbw512":
+            rows.append((f"{cell}-zx", 3))
+    rows.append(("vram-restore", 2))
+    return tuple(rows)
+
+
+GE_DEPTH_BOUNDS_ROWS = _ge_depth_bounds_rows()
+GE_DEPTH_BOUNDS_CASES = tuple(case for case, _count in GE_DEPTH_BOUNDS_ROWS)
+_register_campaign_probe(
+    "ge-depth-bounds", "PSP-GE-RASTER-004", GE_DEPTH_BOUNDS_ROWS,
+)
+
 # ge-mip (126, probe_ge_sample.c): the #1373 GE level-of-detail cells. The cells are the gm_cells
 # table of the block probe_ge_sample.c shares with tests/native/hle_thread_selftest.c, in order, with
 # the ge-raster record shape: one `-draw` record (9 words) and one record per window row.
