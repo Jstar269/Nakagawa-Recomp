@@ -3516,7 +3516,7 @@ class NativePlayerUiTests(unittest.TestCase):
                              self.SETTINGS_CHEATS, self.SETTINGS_ACHIEVEMENTS],
                 "the keyboard reaches the Achievements switch, the last row of the page")
             self.assertEqual(
-                said, ["Softcore only. Sign in to connect.",
+                said, ["Sign in to connect.",
                        "RetroAchievements is not available in a UI regression run."],
                 "the switch is refused before the consent box or the credential store is asked")
         else:
@@ -3527,10 +3527,9 @@ class NativePlayerUiTests(unittest.TestCase):
                 "no credential store here: the row is its reason, and nothing is asked")
 
     # #1316: why a title earns nothing (player_state.c achievements_block_reason).
-    ACHIEVEMENTS_CHEATS_REASON = ("Achievements are off while cheats are on: nothing is earned "
-                                  "in a changed game.")
-    ACHIEVEMENTS_TIMING_REASON = ("Achievements are off with 60 FPS game logic, which changes "
-                                  "the game's speed.")
+    # The page's notice heading says "No achievements this session"; the reason does not repeat it.
+    ACHIEVEMENTS_CHEATS_REASON = "Cheats are on, and a changed game earns nothing."
+    ACHIEVEMENTS_TIMING_REASON = "60 FPS game logic changes the game's speed, so it earns nothing."
     # Settings > Online and developer. Tab goes by the order the hub declares its controls in,
     # whatever the window and text size (the arrows go by position, which Larger text moves):
     # sixteen stops from Resolution to Online and developer.
@@ -3567,7 +3566,7 @@ class NativePlayerUiTests(unittest.TestCase):
         title = self.achievements_lines(plain, "title")
         self.assertTrue(title, plain["stdout"])
         self.assertTrue(title[-1].endswith(
-            "Sign in in Settings > Online to load this game's softcore set."), title)
+            "Sign in in Settings > Online to load this game's set."), title)
         cheats = self.next_ui_run("library", self.OPEN_TITLE, wait_background=True,
                                   settings={"achievements_enabled": True, "cheats": True})
         title = self.achievements_lines(cheats, "title")

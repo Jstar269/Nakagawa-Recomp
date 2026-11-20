@@ -73,8 +73,8 @@ typedef struct {
     /* A short-lived message from the local player process, in a top-right toast of a fixed
      * width with an accent edge: an icon slot at the left, then host_toast_head (the eyebrow, in
      * the accent), host_toast (an unlock's title in the strong style, else the message; two lines
-     * at most, ending in an ellipsis), and host_toast_detail under it in the dim style ("25 points
-     * Â· Softcore"; NULL for none). The slot shows host_toast_badge (the achievement's
+     * at most, ending in an ellipsis), and host_toast_detail under it in the dim style ("25 points";
+     * NULL for none). The slot shows host_toast_badge (the achievement's
      * badge picture, which must outlive the frame) or, without one, a trophy drawn from the UI's
      * shapes for an unlock (host_toast_unlock) and an exclamation mark for any other message. */
     const char *host_toast_head;

@@ -179,12 +179,14 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   by its own error leaves the queue and is reported; a refused account keeps every record until the next
   sign-in. The game's title page shows its core achievements under **RetroAchievements · Softcore**:
   how many are unlocked and the points earned of the total, with a bar, then one row each, the
-  unlocked first, each with its badge (or the drawn icon), title, description and points (up to 256;
-  with more, the page says how many it shows and that all of them are on the game's page at
-  retroachievements.org). Unlock notices appear in-game, one after another: **Achievement unlocked**
-  over the achievement's title, its points and its badge. Two unlocks close together are two notices.
-  When the last achievement of the set unlocks, a notice **Set completed** follows with the game's
-  title and "Every achievement unlocked · Softcore"; it is drawn on the PC and sends nothing.
+  unlocked first, each with its badge (or the drawn icon), title, description and its points as a
+  number (up to 256; with more, the page says how many it shows and that all of them are on the
+  game's page at retroachievements.org). Unlock notices appear in-game, one after another:
+  **Achievement unlocked** over the achievement's title, its points ("25 points") and its badge. Two
+  unlocks close together are two notices. When the last achievement of the set unlocks, a notice
+  **Set completed** follows with the game's title and "Every achievement unlocked"; it is drawn on the
+  PC and sends nothing. Softcore is said once, in that page heading and in Settings, not on every
+  notice or row.
 - **One request at a time.** The player carries one RetroAchievements request at a time. A request made
   while another is on its way (a game started while a saved unlock is being sent) waits its turn, in
   order, instead of failing.

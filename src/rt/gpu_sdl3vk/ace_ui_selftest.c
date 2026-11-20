@@ -1265,11 +1265,11 @@ static void cell_notice_every_part(const char *fonts_root) {
  * points. */
 static const char k_toast_words[] = "Champion of the Hot Shots Cup, Undefeated on Every Surface";
 static const char k_toast_head[] = "Achievement unlocked";
-static const char k_toast_detail[] = "50 points \xC2\xB7 Softcore";
+static const char k_toast_detail[] = "50 points";
 /* The toast of a completed set: the game's title, with the drawn trophy. */
 static const char k_toast_completed_words[] = "Hot Shots Tennis: Get a Grip";
 static const char k_toast_completed_head[] = "Set completed";
-static const char k_toast_completed_detail[] = "Every achievement unlocked \xC2\xB7 Softcore";
+static const char k_toast_completed_detail[] = "Every achievement unlocked";
 
 /* A project-drawn sample badge, 64 x 64 (no RetroAchievements picture): a teal tile with a gold
  * disc in a darker ring. Its centre is the gold, which the picture check below reads back. */

@@ -1211,7 +1211,7 @@ void player_ui_test_prepare_app(PlayerUiTest *t, PlayerApp *app) {
         snprintf(app->achievements_account, sizeof(app->achievements_account), "%s",
                  "SampleAccount");
         snprintf(app->achievements_status, sizeof(app->achievements_status), "%s",
-                 "Signed in. Softcore only.");
+                 "Signed in.");
         if (strncmp(achievements, "list:", 5) == 0) {
             /* Twelve, three unlocked, listed as the player lists a set: the unlocked first.
                The longest title is 60 characters. */

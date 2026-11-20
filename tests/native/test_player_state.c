@@ -18385,11 +18385,11 @@ int main(int argc, char **argv) {
             assert(player_launch_achievements_block(&block_work) == NULL);
             block_work.settings.cheats = true;
             assert(player_launch_achievements_block(&block_work) != NULL &&
-                   strstr(player_launch_achievements_block(&block_work), "cheats") != NULL);
+                   strstr(player_launch_achievements_block(&block_work), "Cheats are on") != NULL);
             block_work.settings.cheats = false;
             block_work.cheats_session = true;
             assert(player_launch_achievements_block(&block_work) != NULL &&
-                   strstr(player_launch_achievements_block(&block_work), "cheats") != NULL);
+                   strstr(player_launch_achievements_block(&block_work), "Cheats are on") != NULL);
             block_work.cheats_session = false;
             snprintf(block_work.game.enhancement_package_id,
                      sizeof(block_work.game.enhancement_package_id), "%s", "synthetic-cull");

@@ -1995,7 +1995,9 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                     ? safe_text(model->achievements_account, "Signed in")
                                                     : "Sign in",
                                                 safe_text(model->achievements_status,
-                                                          "Softcore only. Hardcore is unavailable.")};
+                                                          model->achievements_signed_in
+                                                              ? "Signed in."
+                                                              : "Sign in to connect.")};
             }
             /* The RetroAchievements row's button carries the account name, of any length, which
                widens the button column; while it shows, a sentence the column would cut goes
@@ -2065,7 +2067,9 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                      ? safe_text(model->achievements_account, "Signed in")
                                      : "Sign in",
                                  safe_text(model->achievements_status,
-                                           "Softcore only. Hardcore is unavailable."),
+                                           model->achievements_signed_in
+                                               ? "Signed in."
+                                               : "Sign in to connect."),
                                  model->achievements_signed_in, inner - 32.0f, &column)) {
                 *result = settings_op(model->achievements_signed_in
                                           ? PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS

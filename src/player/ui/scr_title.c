@@ -269,7 +269,8 @@ static float title_achievement_icon(const NkUi *ui) {
 }
 
 /* One achievement: its icon slot, its title in the strong style (two lines at most), its
-   description under it in the dim style (one line), and its points in a pill at the right.
+   description under it in the dim style (one line), and its points in a pill at the right:
+   the number alone, since the card's progress line above says "N of M points" once.
    An unlocked one is at full contrast with the accent on its frame; a locked one is dimmed. */
 static void title_achievement_row(NkUi *ui, size_t index, const PlayerUiAchievementRow *row,
                                   float inner) {
@@ -277,12 +278,11 @@ static void title_achievement_row(NkUi *ui, size_t index, const PlayerUiAchievem
     const NkUiId id = TITLE_ID_ACH_ROW + (NkUiId)(index * TITLE_ID_ACH_ROW_PARTS);
     const float side = title_achievement_icon(ui);
     const bool unlocked = row->unlocked;
-    char points[24];
+    char points[16];
     NkUiTextStyle pill_text = nk_ui_type(NK_UI_TYPE_LABEL_S, unlocked ? theme->paper
                                                                        : theme->muted);
-    (void)snprintf(points, sizeof(points), "%u %s", (unsigned)row->points,
-                   row->points == 1u ? "point" : "points");
-    const char *pill_label = nk_ui_caps(ui, points);
+    (void)snprintf(points, sizeof(points), "%u", (unsigned)row->points);
+    const char *pill_label = nk_ui_frame_text(ui, points);
     const float pill_w = nk_ui_text_width(ui, pill_label, &pill_text) + 2.0f * 10.0f + 2.0f;
     const float text_w = inner - side - pill_w - 2.0f * NK_UI_SPACE_3 - 2.0f * NK_UI_SPACE_2;
     NkUiLayout layout = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),

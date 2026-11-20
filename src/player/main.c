@@ -5156,8 +5156,8 @@ static void player_achievements_collect_events(PlayerRun *run) {
                              "%.*s", (int)sizeof(app->achievements_account) - 1, username);
                     player_achievements_rest_status(
                         run, app->is_game_running && !run->guest_memory_channel_active
-                                 ? "Signed in. Restart this game to start softcore tracking."
-                                 : "Signed in. Softcore only.");
+                                 ? "Signed in. Restart this game to start tracking."
+                                 : "Signed in.");
                     nk_ach_replay_pending_unlocks(run->achievements, SDL_GetTicks());
                 }
                 nk_secure_zero(username, sizeof username);
@@ -5246,7 +5246,7 @@ static void player_achievements_collect_events(PlayerRun *run) {
                                                                   toast);
                 }
                 snprintf(app->achievements_status, sizeof app->achievements_status,
-                         "Set completed in softcore: %.*s", player_utf8_fit(game, 150u), game);
+                         "Set completed: %.*s", player_utf8_fit(game, 150u), game);
                 break;
             }
             case NK_ACH_EVENT_DISCONNECTED:
@@ -5296,7 +5296,7 @@ static void player_achievements_sign_in_stored(PlayerRun *run) {
     if (!nk_platform_credential_read(k_ach_credential_target, username, sizeof username,
                                      token, sizeof token)) {
         app->achievements_signed_in = false;
-        player_achievements_rest_status(run, "Sign in to connect. Softcore only.");
+        player_achievements_rest_status(run, "Sign in to connect.");
         return;
     }
     snprintf(app->achievements_account, sizeof app->achievements_account,
@@ -5307,7 +5307,7 @@ static void player_achievements_sign_in_stored(PlayerRun *run) {
     nk_secure_zero(token, sizeof token);
     nk_secure_zero(username, sizeof username);
     snprintf(app->achievements_status, sizeof app->achievements_status,
-             run->achievements_login_pending ? "Signing in. Softcore only."
+             run->achievements_login_pending ? "Signing in."
                                              : "Sign-in could not start.");
 }
 
@@ -5405,8 +5405,7 @@ static bool player_achievements_prompt_sign_in(PlayerRun *run) {
     nk_secure_zero(password, sizeof password);
     run->achievements_login_pending = true;
     run->achievements_signout_pending = false;
-    snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
-             "Signing in. Softcore only.");
+    snprintf(run->app.achievements_status, sizeof run->app.achievements_status, "Signing in.");
     return true;
 }
 
@@ -5517,7 +5516,7 @@ static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork 
     if (blocked) {
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status, "%s",
                  blocked);
-        fprintf(stderr, "[PLAYER] RetroAchievements: %s\n", blocked);
+        fprintf(stderr, "[PLAYER] RetroAchievements is off for this game: %s\n", blocked);
         return;
     }
 
@@ -5569,7 +5568,7 @@ static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork 
         return;
     }
     snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
-             "Loading the game's softcore achievement set.");
+             "Loading the game's achievement set.");
 }
 
 static void player_achievements_sign_out(PlayerRun *run) {

@@ -197,7 +197,7 @@ void player_app_init(PlayerApp *app) {
     app->achievements_store_available = nk_platform_credential_store_available();
     snprintf(app->achievements_status, sizeof(app->achievements_status), "%s",
              app->achievements_store_available
-                 ? "Softcore only. Sign in to connect."
+                 ? "Sign in to connect."
                  : "Sign-in requires Windows Credential Manager; this platform is unsupported.");
 
     /* Initialize native library */
@@ -4231,7 +4231,7 @@ void player_app_set_achievements_enabled(PlayerApp *app, bool enabled) {
     if (app->settings.achievements_enabled == enabled) return;
     app->settings.achievements_enabled = enabled;
     snprintf(app->achievements_status, sizeof(app->achievements_status), "%s",
-             enabled ? "Softcore only. Sign in to connect."
+             enabled ? "Sign in to connect."
                      : "RetroAchievements is off.");
     player_dev_log_add(app, "settings", "RetroAchievements %s", enabled ? "on" : "off");
     maybe_persist_settings(app);
@@ -4239,9 +4239,9 @@ void player_app_set_achievements_enabled(PlayerApp *app, bool enabled) {
 
 static const char *achievements_block_reason(bool cheats, bool timing_package) {
     if (cheats)
-        return "Achievements are off while cheats are on: nothing is earned in a changed game.";
+        return "Cheats are on, and a changed game earns nothing.";
     if (timing_package)
-        return "Achievements are off with 60 FPS game logic, which changes the game's speed.";
+        return "60 FPS game logic changes the game's speed, so it earns nothing.";
     return NULL;
 }
 

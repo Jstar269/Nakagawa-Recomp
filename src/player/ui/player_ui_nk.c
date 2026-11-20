@@ -4197,7 +4197,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 if (app->achievements_list_loaded &&
                     strcmp(app->achievements_list_disc_id, game->disc_id) == 0) {
                     model.achievements_status = app->achievements_status[0]
-                        ? app->achievements_status : "Softcore achievement set loaded.";
+                        ? app->achievements_status : "Achievement set loaded.";
                     model.achievement_count = app->achievements_list_count <
                             PLAYER_ACHIEVEMENTS_LIST_MAX
                         ? app->achievements_list_count : PLAYER_ACHIEVEMENTS_LIST_MAX;
@@ -4226,9 +4226,9 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                                        "this game's page at retroachievements.org.",
                                        model.achievement_count, model.achievement_total);
                 } else if (!app->achievements_signed_in) {
-                    model.achievements_status = "Sign in in Settings > Online to load this game's softcore set.";
+                    model.achievements_status = "Sign in in Settings > Online to load this game's set.";
                 } else {
-                    model.achievements_status = "Play this game to load its softcore achievement set.";
+                    model.achievements_status = "Play this game to load its achievement set.";
                 }
                 /* With cheats or the 60 FPS game-logic package nothing is earned, and the page
                    says why before the game starts (player_app_achievements_block), in the

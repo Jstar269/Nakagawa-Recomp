@@ -2212,8 +2212,17 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         # A completed set: the player writes the game's title after the shared prefix, the
         # runtime reads it back (achievements-selftest checks the parser).
         self.assertIn('NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED "%.*s"', player)
-        self.assertNotIn('"Set completed: ', player)
+        self.assertNotIn('snprintf(toast, sizeof toast, "Set completed: ', player)
         self.assertIn("nk_guest_memory_notification_set_completed(", gui)
+        # The notice's last line: "N points" ("1 point"), or "Every achievement unlocked" for a
+        # completed set. Softcore is said once, on the game's page heading and in Settings, not
+        # on every notice.
+        begin = gui[gui.index("static void gui_host_toast_begin(void) {"):]
+        begin = begin[:begin.index("\n}\n")]
+        self.assertIn('"%u %s"', begin)
+        self.assertIn('== 1u ? "point" : "points"', begin)
+        self.assertIn('"Every achievement unlocked"', begin)
+        self.assertNotIn("Softcore", begin)
         # The message is read, and its badge read from disk and decoded, before the present
         # (gui_host_toast_poll), never inside the UI pass, which only draws it.
         ui_pass = gui[gui.index("static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {"):]

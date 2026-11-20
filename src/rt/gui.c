@@ -950,8 +950,9 @@ static void gui_host_toast_badge_load(const char *name) {
     }
 }
 
-/* A new message for the toast: an unlock's title, "N points · Softcore" and badge, a completed
- * set's game title, or any other message as it came. */
+/* A new message for the toast: an unlock's title, "N points" and badge, a completed set's game
+ * title, or any other message as it came. Softcore is not repeated on each notice: the game's
+ * page heading and Settings say it once. */
 static void gui_host_toast_begin(void) {
     s_host_toast_is_unlock =
         nk_guest_memory_notification_unlock(s_host_toast_text, &s_host_toast_unlock) ? 1 : 0;
@@ -965,15 +966,12 @@ static void gui_host_toast_begin(void) {
     s_host_toast_detail[0] = '\0';
     gui_host_toast_badge_drop();
     if (s_host_toast_is_completed)
-        snprintf(s_host_toast_detail, sizeof s_host_toast_detail,
-                 "Every achievement unlocked \xC2\xB7 Softcore");
+        snprintf(s_host_toast_detail, sizeof s_host_toast_detail, "Every achievement unlocked");
     if (!s_host_toast_is_unlock) return;
     if (s_host_toast_unlock.has_points)
-        snprintf(s_host_toast_detail, sizeof s_host_toast_detail,
-                 "%u %s \xC2\xB7 Softcore", (unsigned)s_host_toast_unlock.points,
+        snprintf(s_host_toast_detail, sizeof s_host_toast_detail, "%u %s",
+                 (unsigned)s_host_toast_unlock.points,
                  s_host_toast_unlock.points == 1u ? "point" : "points");
-    else
-        snprintf(s_host_toast_detail, sizeof s_host_toast_detail, "Softcore");
     gui_host_toast_badge_load(s_host_toast_unlock.badge);
 }
 

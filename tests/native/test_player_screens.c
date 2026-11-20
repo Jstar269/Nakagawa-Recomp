@@ -11,6 +11,7 @@
 #include "player_enhanced_fixture.h"
 #include "nk_ui_image.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5277,6 +5278,8 @@ static void test_title_page_lists_256_achievements(void) {
             size_t images = 0u;
             size_t other_images = 0u;
             bool first_title = false;
+            bool first_pill = false;
+            size_t point_words = 0u;
             for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
                 const NkUiDrawCmd *cmd = &draw->cmd[i];
                 if (cmd->kind == NK_UI_DRAW_CUSTOM && cmd->custom_kind == NK_UI_CUSTOM_IMAGE) {
@@ -5290,6 +5293,19 @@ static void test_title_page_lists_256_achievements(void) {
                     first_title = first_title ||
                                   (run->text != NULL && run->length >= sizeof(head) - 1u &&
                                    memcmp(run->text, head, sizeof(head) - 1u) == 0);
+                    /* The first row's pill is its number alone ("1"). */
+                    first_pill = first_pill ||
+                                 (run->text != NULL && run->length == 1u && run->text[0] == '1');
+                    for (size_t c = 0u; run->text != NULL && c + 5u <= run->length; ++c) {
+                        if (tolower((unsigned char)run->text[c]) == 'p' &&
+                            tolower((unsigned char)run->text[c + 1u]) == 'o' &&
+                            tolower((unsigned char)run->text[c + 2u]) == 'i' &&
+                            tolower((unsigned char)run->text[c + 3u]) == 'n' &&
+                            tolower((unsigned char)run->text[c + 4u]) == 't') {
+                            ++point_words;
+                            break;
+                        }
+                    }
                 }
             }
             CHECK(draw != NULL && g_ended_ok,
@@ -5297,6 +5313,12 @@ static void test_title_page_lists_256_achievements(void) {
             CHECK(images > 0u && other_images == 0u,
                   "the 256-row page draws its rows' badge picture and no other");
             CHECK(first_title, "the 256-row page shows its first row's title");
+            /* The card's progress line says "N of M points" once; each row's pill is the
+               number alone, not the word again on every row. */
+            CHECK(first_pill, "the first row's points pill is its number alone");
+            CHECK(point_words == 1u,
+                  "the word points shows once on the 256-row page (the progress line), not in "
+                  "every row's pill");
             if (ui != NULL) nk_ui_destroy(ui);
             CHECK(flow_case_fits(FLOW_PAGE_TITLE_ACH_256, sizes[s].w, sizes[s].h, NULL, 0u),
                   "the 256-row page draws nothing off the window and no text over text");
