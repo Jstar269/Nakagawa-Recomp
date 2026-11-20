@@ -55,6 +55,11 @@ else:
 #: cleanup fails with ENOTEMPTY. The same settings as
 #: nk_core/git_isolation.isolated_git_env, in the environment so that the
 #: repositories the tests create keep their default configuration.
+#:
+#: ``GIT_EDITOR`` and ``GIT_SEQUENCE_EDITOR`` are also pinned to ``true``: Git
+#: checks ``$GIT_EDITOR`` before ``-c core.editor=true``, so a caller exporting
+#: ``GIT_EDITOR=false`` (or an interactive editor) would otherwise break
+#: ``git rebase --continue`` inside the fixture.
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "Nakagawa Recomp Tests",
     "GIT_AUTHOR_EMAIL": "tests@nakagawa-recomp.invalid",
@@ -69,6 +74,8 @@ GIT_ENV = {
     "GIT_CONFIG_VALUE_1": "false",
     "GIT_CONFIG_KEY_2": "gc.autoDetach",
     "GIT_CONFIG_VALUE_2": "false",
+    "GIT_EDITOR": "true",
+    "GIT_SEQUENCE_EDITOR": "true",
 }
 
 
@@ -762,6 +769,35 @@ class BatchAdmitPathsTest(unittest.TestCase):
             fixture, baseline=first_policy, candidate=expected_profile,
             path=paths[order[1]], record=second["record"],
         )
+
+    def test_rebase_continue_ignores_inherited_git_editor(self) -> None:
+        """An inherited GIT_EDITOR (such as GIT_EDITOR=false) must not defeat rebase --continue."""
+        repo = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with mock.patch.dict(os.environ, {"GIT_EDITOR": "false", "GIT_SEQUENCE_EDITOR": "false"}):
+            git(repo, "init", "-q", "-b", "main")
+            write(repo, "note.txt", "base\n")
+            git(repo, "add", "note.txt")
+            git(repo, "commit", "-qm", "base")
+            base = git(repo, "rev-parse", "HEAD")
+
+            write(repo, "note.txt", "ours\n")
+            git(repo, "add", "note.txt")
+            git(repo, "commit", "-qm", "ours")
+
+            git(repo, "checkout", "-q", "--detach", base)
+            write(repo, "note.txt", "theirs\n")
+            git(repo, "add", "note.txt")
+            git(repo, "commit", "-qm", "theirs")
+
+            env = {**os.environ, **GIT_ENV}
+            rebase = subprocess.run(["git", "rebase", "main"], cwd=repo, env=env,
+                                    capture_output=True, check=False)
+            self.assertEqual(rebase.returncode, 1, rebase.stderr.decode("utf-8", errors="replace"))
+            write(repo, "note.txt", "merged\n")
+            git(repo, "add", "note.txt")
+            subprocess.run(["git", "-c", "core.editor=true", "rebase", "--continue"], cwd=repo,
+                           env=env, check=True, capture_output=True)
+            self.assertEqual(git(repo, "show", "HEAD:note.txt"), "merged")
 
     def test_batch_has_no_entry_count_cap(self) -> None:
         five = [
