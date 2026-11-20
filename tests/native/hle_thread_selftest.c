@@ -3861,6 +3861,7 @@ static void test_io_open_async_notifies_later_callback(void) {
  * (katakana DI) give two keys; a trail 0x5c stays in the name, not a separator; ASCII
  * outside a pair still folds and '\\' still separates. */
 static void test_data_guest_key_keeps_sjis_pairs(void) {
+    extern char *data_normalize_guest_key(const char *guest_path, int *wanted_variant);
     static const struct {
         const char *guest;
         const char *key;
