@@ -635,8 +635,114 @@ def _source_tests_for_paths(paths: list[str], root: Path | None = None) -> set[s
     return modules
 
 
+#: ``tools/test_*.py`` modules not selected when a ``tools/`` data file they name changes.
+#: The source exclusions above do not apply: a module that only feeds synthetic ``src/``
+#: paths to a check (``tools.test_lint_docs``) can still be the reader of a data file
+#: (``tools/README.md``).
+TOOLS_DATA_TEST_EXCLUSIONS: dict[str, str] = {
+    "tools.test_production_smoke": SOURCE_TEST_EXCLUSIONS["tools.test_production_smoke"],
+}
+
+
+def _is_tools_data(path: str) -> bool:
+    """A file under ``tools/`` that hosted CI routes to the Python job but is not Python:
+    ``tools/**/*.json``, ``*.toml`` and ``tools/README.md`` (``ci_paths._is_python_tool``)."""
+    return path.startswith("tools/") and not path.endswith(".py") and ci_paths._is_python_tool(path)
+
+
+def _file_parent_depth(node: ast.AST) -> int:
+    """How many ``.parent`` steps above ``__file__`` *node* is (``Path(__file__).resolve().parent``
+    is 1), or 0 when it is not such an expression."""
+    depth = 0
+    cur = node
+    while isinstance(cur, ast.Attribute) and cur.attr == "parent":
+        depth += 1
+        cur = cur.value
+    if depth and any(isinstance(n, ast.Name) and n.id == "__file__" for n in ast.walk(cur)):
+        return depth
+    return 0
+
+
+def _repo_path_div(node: ast.BinOp, env: dict[str, str]) -> str | None:
+    """The repository path a ``base / "part" / ...`` expression in a ``tools/test_*.py`` module
+    names. A base that is ``Path(__file__)...parent`` is ``tools/`` (one step) or the
+    repository root (two); a name bound earlier to such a path is that path; any other base
+    (``ROOT``, a temporary directory) is taken as the root, which can only over-select."""
+    parts: list[str] = []
+    cur: ast.AST = node
+    while isinstance(cur, ast.BinOp) and isinstance(cur.op, ast.Div):
+        if not (isinstance(cur.right, ast.Constant) and isinstance(cur.right.value, str)):
+            return None
+        parts.append(cur.right.value)
+        cur = cur.left
+    if isinstance(cur, ast.Constant) and isinstance(cur.value, str):
+        parts.append(cur.value)
+    elif isinstance(cur, ast.Name) and cur.id in env:
+        parts.append(env[cur.id])
+    elif _file_parent_depth(cur) == 1:
+        parts.append("tools")
+    parts.reverse()
+    return "/".join(_normalise_repo_path(p) for p in parts if p)
+
+
+#: A ``tools/...`` path written inside a string.
+_TOOLS_PATH_LITERAL = re.compile(r"(?<![\w./-])tools/[\w./-]*\w")
+
+
+@lru_cache(maxsize=512)
+def _module_tools_paths(module_path: Path, text: str) -> frozenset[str]:
+    """Repository paths under ``tools/`` a test module names: in a string (a docstring
+    excluded) or as a ``/`` path expression."""
+    tree = ast.parse(text, filename=str(module_path))
+    docs = _docstring_node_ids(tree)
+    assigns = [
+        (n.targets[0].id, n.value) for n in ast.walk(tree)
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+    ]
+    env: dict[str, str] = {}
+    for _ in range(2):
+        for name, value in assigns:
+            if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Div):
+                resolved = _repo_path_div(value, env)
+                if resolved is not None:
+                    env[name] = resolved
+            elif _file_parent_depth(value) == 1:
+                env[name] = "tools"
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
+            found.update(m.group(0) for m in _TOOLS_PATH_LITERAL.finditer(node.value.replace("\\", "/")))
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            resolved = _repo_path_div(node, env)
+            if resolved and resolved.startswith("tools/"):
+                found.add(resolved)
+    return frozenset(found)
+
+
+def _tools_data_tests_for_paths(paths: list[str], root: Path | None = None) -> set[str]:
+    """Select ``tools/test_*.py`` modules that name a changed ``tools/`` data file (see
+    ``_is_tools_data``): the reader scan ``_source_tests_for_paths`` does for ``src/``."""
+    active_root = ROOT if root is None else root
+    targets = {p for p in (_normalise_repo_path(path) for path in paths) if _is_tools_data(p)}
+    if not targets:
+        return set()
+    basenames = {PurePosixPath(path).name for path in targets}
+    modules: set[str] = set()
+    for module_name, module_path, text in _test_module_texts(active_root):
+        if module_name in TOOLS_DATA_TEST_EXCLUSIONS:
+            continue
+        if not any(name in text for name in basenames):
+            continue
+        if _module_tools_paths(module_path, text) & targets:
+            modules.add(module_name)
+    return modules
+
+
 def python_test_modules(paths: list[str]) -> list[str]:
-    """Map changed ``tools/``, ``src/``, and ``tests/native/`` paths onto covering test modules."""
+    """Map changed ``tools/``, ``src/``, and ``tests/native/`` paths onto covering test modules.
+
+    A changed ``tools/`` data file (JSON, TOML or ``tools/README.md``) selects the test modules
+    that name it, as hosted CI runs the Python job for it."""
     modules: set[str] = set()
     for raw_path in paths:
         path = _normalise_repo_path(raw_path)
@@ -653,6 +759,7 @@ def python_test_modules(paths: list[str]) -> list[str]:
         if (ROOT / f"tools/test_{name}").is_file():
             modules.add(f"tools.test_{name[:-3]}")
     modules.update(_source_tests_for_paths(paths, ROOT))
+    modules.update(_tools_data_tests_for_paths(paths, ROOT))
     return sorted(modules)
 
 
@@ -700,7 +807,7 @@ def unit_gate(modules: list[str]) -> Gate:
 
 
 def markdown_gate(paths: list[str]) -> Gate:
-    markdown = [p for p in paths if PurePosixPath(p).suffix.lower() in {".md", ".markdown"}]
+    markdown = [p for p in paths if ci_paths._is_markdown(p)]
     if not markdown:
         return Gate("markdownlint", NOT_RUN, "no changed Markdown")
     npx = find_tool("npx")
@@ -844,7 +951,7 @@ def c_gate(paths: list[str]) -> Gate:
 
 
 def docs_gate(paths: list[str]) -> Gate:
-    if not any(PurePosixPath(p).suffix.lower() in {".md", ".markdown"} for p in paths):
+    if not any(ci_paths._is_markdown(p) for p in paths):
         return Gate("documentation-freshness", NOT_RUN, "no changed Markdown")
     return _run("documentation-freshness", [GATE_PYTHON, "tools/lint_docs.py"], timeout=300)
 
