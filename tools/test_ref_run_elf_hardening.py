@@ -272,6 +272,7 @@ class TestReferenceRunnerTerminationContract(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
+        assert CC is not None
         cls.tmp = scratch_dir.TemporaryDirectory(prefix="ref_runner_contract_")
         root = Path(cls.tmp.name)
         exe = root / ("run_elf.exe" if os.name == "nt" else "run_elf")

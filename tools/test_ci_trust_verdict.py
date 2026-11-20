@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import copy
+from email.message import Message
 import json
 import os
 from pathlib import Path
@@ -1323,7 +1324,7 @@ class CollectorTests(unittest.TestCase):
         return response
 
     def _http_error(self, code: int) -> urllib.error.HTTPError:
-        return urllib.error.HTTPError("https://api.github.com/x", code, "error", {}, None)
+        return urllib.error.HTTPError("https://api.github.com/x", code, "error", Message(), None)
 
     def test_a_gateway_error_is_retried_until_github_answers(self) -> None:
         # One HTTP 502 made the verifier post "could not judge this head" on several pull requests (2026-10-30).

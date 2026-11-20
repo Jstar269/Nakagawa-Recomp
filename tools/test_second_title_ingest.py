@@ -27,6 +27,7 @@ class SecondTitleIngestTests(unittest.TestCase):
         self.gcc = shutil.which("gcc")
         if not self.gcc:
             self.skipTest("gcc not available")
+        assert self.gcc is not None
 
         # Compile runner
         self.harness_c = self.temp_dir / "multi_title_harness.c"
@@ -206,7 +207,9 @@ int main(void) {
 }
 """
         mock_c.write_text(mock_code, encoding="utf-8")
-        comp = subprocess.run([self.gcc, str(mock_c), "-o", str(mock_exe)], capture_output=True, text=True)
+        gcc = self.gcc
+        assert gcc is not None
+        comp = subprocess.run([gcc, str(mock_c), "-o", str(mock_exe)], capture_output=True, text=True)
         self.assertEqual(comp.returncode, 0, f"Mock runtime compile failed: {comp.stderr}")
         # The launch session is only complete with the title's own image beside
         # its runtime: a plan without --image would exit through driver.c's

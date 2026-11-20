@@ -1175,6 +1175,7 @@ class CompileObjectReuseTests(unittest.TestCase):
         self.make = shutil.which("mingw32-make") or shutil.which("make")
         if self.make is None or shutil.which("gcc") is None:
             self.skipTest("the compile-phase reuse test needs make and gcc")
+        assert self.make is not None
         scratch = tempfile.TemporaryDirectory(prefix="nk-object-reuse-")
         self.addCleanup(scratch.cleanup)
         self.root = Path(scratch.name)
@@ -1340,9 +1341,11 @@ class CompileObjectReuseTests(unittest.TestCase):
             encoding="ascii",
         )
         objects = [f"{build.as_posix()}/{name}.o" for name in ("g_recomp_0", "g_recomp_1", stem)]
+        make = self.make
+        assert make is not None
         # Parsing the Makefile writes beneath BUILD_ROOT and LOG_DIR: keep both in scratch.
         proc = subprocess.run(
-            [self.make, "-n", "--no-print-directory", f"BUILD_ROOT={self.root.as_posix()}",
+            [make, "-n", "--no-print-directory", f"BUILD_ROOT={self.root.as_posix()}",
              f"LOG_DIR={(self.root / 'logs').as_posix()}", f"BUILD_DIR={build.as_posix()}",
              "GAME_NAME=g", "RECOMP_OPT=-O2", *objects],
             cwd=ROOT, capture_output=True, text=True,
