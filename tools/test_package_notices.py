@@ -445,6 +445,11 @@ class TestPackageNotices(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tc_dir:
                 toolchain_root = Path(tc_dir)
                 for license_entry in sdl_record["license_texts"]:
+                    if "toolchain_license_rel" not in license_entry:
+                        # Taken from upstream (yuv2rgb, hidapi): the MSYS2 package never installs
+                        # it, so it can only come from the source tree.
+                        (fake_repo / license_entry["file"]).write_bytes((ROOT / license_entry["file"]).read_bytes())
+                        continue
                     target = toolchain_root / license_entry["toolchain_license_rel"]
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes((ROOT / license_entry["file"]).read_bytes())
