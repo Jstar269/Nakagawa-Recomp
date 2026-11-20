@@ -116,7 +116,7 @@
       "revision": "4.0.3 / ab2b16dd619ad5f6979a4fbe69cfa324a6fcc35f",
       "notice_path": "third_party/monocypher/LICENCE.md",
       "evidence_path": "third_party/monocypher/PROVENANCE.md",
-      "disposition": "linked into the player for the signed update check (src/core/nk_sig.c, mk/pipeline.mk UPDATE_SIG_SRCS); upstream dual BSD-2-Clause OR CC0-1.0, CC0-1.0 elected"
+      "disposition": "linked into the player for the signed update check (src/core/nk_sig.c, mk/pipeline.mk UPDATE_SIG_SRCS); upstream dual BSD-2-Clause OR CC0-1.0, CC0-1.0 elected; monocypher.c carries upstream commit 55158d37 as a LOCAL DELTA (third_party/monocypher/PROVENANCE.md)"
     },
     {
       "id": "sdl3",

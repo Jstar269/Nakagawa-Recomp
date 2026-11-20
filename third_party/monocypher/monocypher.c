@@ -141,13 +141,16 @@ static void store64_le_buf(u8 *dst, const u64 *src, size_t size) {
 static u64 rotr64(u64 x, u64 n) { return (x >> n) ^ (x << (64 - n)); }
 static u32 rotl32(u32 x, u32 n) { return (x << n) ^ (x >> (32 - n)); }
 
+// LOCAL DELTA (Nakagawa Recomp, 2026-11-20): upstream commit 55158d37
+// ("Fix timing leak in constant time comparisons"). The previous form could
+// be compiled to a data-dependent branch; see PROVENANCE.md.
 static int neq0(u64 diff)
 {
 	// constant time comparison to zero
 	// return diff != 0 ? -1 : 0
-	u64 half = (diff >> 32) | ((u32)diff);  // half < 2^32
-	u64 eq0  = 1 & ((half - 1) >> 32);      // half == 0 ? 1 : 0
-	return (int)eq0 - 1;                    // half == 0 ? 0 : -1
+	u32 fold = (u32)(diff >> 32) | (u32)diff;
+	fold |= 0u - fold;
+	return -(int)(fold >> 31);
 }
 
 static u64 x16(const u8 a[16], const u8 b[16])

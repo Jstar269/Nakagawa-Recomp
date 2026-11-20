@@ -128,7 +128,8 @@ We aim to respond promptly and will remove material where appropriate.
   into the runtime, where the Vulkan GE renderer's Ace Mode texture scaling uses it; it is not
   in `nk_decrypt`.
 - **Monocypher 4.0.3 Ed25519 signature check** — upstream offers `BSD-2-Clause OR CC0-1.0`;
-  the project uses it under CC0-1.0. Four byte-identical source files, the complete upstream
+  the project uses it under CC0-1.0. Four source files (`monocypher.c` with one later upstream
+  fix as LOCAL DELTA, the other three byte-identical), the complete upstream
   `LICENCE.md` and the pinned manifest are under `third_party/monocypher/`. It is compiled into
   the `ed25519-verify-selftest` (RFC 8032 vectors) and into the player, where `src/core/nk_sig.c`
   uses it to check the signature of an update download.
