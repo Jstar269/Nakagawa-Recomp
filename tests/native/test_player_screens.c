@@ -397,6 +397,8 @@ static float g_flow_height = 800.0f;
 static int g_flow_text_size_pct = 100;
 /* A player's own server for the Online play page and card (#1139), or NULL for socom.cc. */
 static const char *g_online_play_host = NULL;
+/* The notice New console ID leaves on the Online play page (#1139), or NULL for none. */
+static const char *g_online_play_note = NULL;
 
 /* The check rows player_state.c gives a disc, in its words (#1302). */
 static const PlayerUiCheckRow k_disc_rows_ready[] = {
@@ -661,6 +663,7 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         settings.online_play_server_label = "Your own server";
         settings.online_play_card_server = g_online_play_host;
     }
+    if (g_online_play_note != NULL) settings.online_play_console_note = g_online_play_note;
     {
         /* The picker: shipped servers, the longest shipped name and host among them, one from
            a (synthetic) list, and a list name too long for one button at a larger text size. */
@@ -7071,6 +7074,45 @@ static bool online_play_picker_row_reveals(void) {
     return ok;
 }
 
+/* #1139: on the Online play page at 960 x 540 with Larger (150%) text, NEW CONSOLE ID focused
+   and in view; its press adds a notice above the buttons, and the button stays wholly inside the
+   card after it. */
+static bool online_play_console_button_stays_in_view(void) {
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw;
+    NkUiRect card = {0.0f, 0.0f, 0.0f, 0.0f};
+    NkUiRect button = {0.0f, 0.0f, 0.0f, 0.0f};
+    bool ok;
+    int saved = g_flow_text_size_pct;
+    g_flow_text_size_pct = 150;
+    g_online_play_note = NULL;
+    draw = flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY, 960, 540, &ui);
+    ok = draw != NULL && ui != NULL;
+    if (ok) {
+        nk_ui_focus(ui, PLAYER_UI_ID_SETTINGS_CONSOLE_ID);
+        for (int i = 0; i < 2; ++i) {
+            draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY, 960, 540);
+        }
+        g_online_play_note = "New console ID made. Games use it from the next one you start.";
+        for (int i = 0; i < 3; ++i) {
+            draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY, 960, 540);
+        }
+        ok = draw_shows(draw, "New console ID made.") &&
+             nk_ui_element_rect(ui, FLOW_ID_CARD, &card) &&
+             nk_ui_element_rect(ui, PLAYER_UI_ID_SETTINGS_CONSOLE_ID, &button) &&
+             button.y >= card.y - 0.5f && button.y + button.h <= card.y + card.h + 0.5f;
+        if (!ok) {
+            fprintf(stderr, "  NEW CONSOLE ID at y %.1f to %.1f, the card shows %.1f to %.1f\n",
+                    (double)button.y, (double)(button.y + button.h), (double)card.y,
+                    (double)(card.y + card.h));
+        }
+    }
+    g_online_play_note = NULL;
+    nk_ui_destroy(ui);
+    g_flow_text_size_pct = saved;
+    return ok;
+}
+
 /* #1139: in the Online play server picker and on the consent card nothing is cut, at the
    960 x 540 minimum and at 1280 x 720, at every text size: no run ends in an ellipsis, scrolled
    through to the end (flow_case_text_whole), and the picker shows every server's whole name and
@@ -7149,6 +7191,9 @@ static void test_online_play_text_is_never_cut(void) {
         g_online_play_host = NULL;
         g_flow_text_size_pct = saved;
     }
+    CHECK(online_play_console_button_stays_in_view(),
+          "the notice NEW CONSOLE ID leaves does not push the focused button past the card's "
+          "edge at 960 x 540 with 150% text");
     CHECK(online_play_picker_row_reveals(),
           "focus moving to a picker row below the card's edge shows the row whole: its button, "
           "its host and where it comes from");

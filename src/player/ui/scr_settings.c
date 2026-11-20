@@ -1988,6 +1988,32 @@ static void settings_online_play_reveal_row(NkUi *ui, size_t count) {
     if (fabsf(offset - state.offset) >= 0.5f) nk_ui_scroll_to(ui, FLOW_ID_CARD, offset);
 }
 
+/* The Online play page's lines above its buttons change after a press (New console ID adds a
+   notice), which moves the focused button down after focus brought it into view; at a larger
+   text size that is past the card's edge. When those lines change, focus is set again on the
+   control that has it, which brings it into view where the new layout puts it. */
+static struct {
+    const NkUi *ui;
+    uint32_t lines;
+} s_online_play_page;
+
+static void settings_online_play_keep_focus_in_view(NkUi *ui, const char *const *lines,
+                                                    size_t count) {
+    uint32_t hash = 2166136261u;
+    NkUiId focused;
+    for (size_t i = 0u; i < count; ++i) {
+        for (const char *c = safe_text(lines[i], ""); *c != '\0'; ++c) {
+            hash = (hash ^ (uint8_t)*c) * 16777619u;
+        }
+        hash = (hash ^ 0xFFu) * 16777619u;
+    }
+    if (s_online_play_page.ui == ui && s_online_play_page.lines == hash) return;
+    focused = nk_ui_focused(ui);
+    if (s_online_play_page.ui == ui && focused != 0u) nk_ui_focus(ui, focused);
+    s_online_play_page.ui = ui;
+    s_online_play_page.lines = hash;
+}
+
 /* The consent card is taller than the window at the smallest window or a larger text size, and
    its focus starts on its buttons at the foot. Page Up and Page Down (the pad's triggers) scroll
    it a view less one line, so its first lines and the server's name can be read by keyboard or
@@ -2179,6 +2205,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         }
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "Online play", NK_UI_TYPE_TITLE, theme->paper);
+        {
+            const char *lines[] = {console_line, model->online_play_console_note,
+                                   model->online_play_status, server_sentence};
+            settings_online_play_keep_focus_in_view(ui, lines, sizeof(lines) / sizeof(lines[0]));
+        }
         nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_PLAY_LEAD, NK_UI_TYPE_BODY_S, theme->muted);
         if (scr_wizard_box_begin(ui, 0u)) {
             WizardRow rows[3] = {
