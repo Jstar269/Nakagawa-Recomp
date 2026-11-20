@@ -9160,8 +9160,10 @@ static void test_psn_package_imports_as_its_iso(void) {
     }
 
     /* A package this account may not read is refused as access denied, not as a drive that
-       may be gone (review of #2779). Windows: a security descriptor that grants no one
-       anything; elsewhere no read permission, skipped for a user no permission stops. */
+       may be gone (review of #2779). The permissions are taken away and given back through
+       one handle or descriptor opened once, so both changes reach the file the conversion
+       opens by name. Windows: a security descriptor that grants no one anything, then none
+       at all; elsewhere mode 0, then 0600. Skipped for a user no permission stops. */
     {
         bool denied;
         bool converted_ok;
@@ -9169,20 +9171,29 @@ static void test_psn_package_imports_as_its_iso(void) {
         WCHAR wide[NATIVE_TEST_PATH_MAX];
         SECURITY_DESCRIPTOR descriptor;
         ACL nobody;
+        HANDLE held;
         HANDLE probe;
         assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pbp_path, -1, wide,
                                    NATIVE_TEST_PATH_MAX) > 0);
+        /* Its security only, every sharing allowed: the conversion's own open sees only the
+           permissions. */
+        held = CreateFileW(wide, READ_CONTROL | WRITE_DAC,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        assert(held != INVALID_HANDLE_VALUE);
         assert(InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION));
         assert(InitializeAcl(&nobody, sizeof(nobody), ACL_REVISION));
         assert(SetSecurityDescriptorDacl(&descriptor, TRUE, &nobody, FALSE));
-        assert(SetFileSecurityW(wide, DACL_SECURITY_INFORMATION, &descriptor));
+        assert(SetKernelObjectSecurity(held, DACL_SECURITY_INFORMATION, &descriptor));
         probe = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                             FILE_ATTRIBUTE_NORMAL, NULL);
         denied = probe == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED;
         if (probe != INVALID_HANDLE_VALUE) CloseHandle(probe);
 #else
         FILE *probe;
-        assert(chmod(pbp_path, 0) == 0);
+        int mode_fd = open(pbp_path, O_RDONLY | O_NOFOLLOW);
+        assert(mode_fd >= 0);
+        assert(fchmod(mode_fd, 0) == 0);
         probe = nk_fopen_utf8(pbp_path, "rb");
         denied = probe == NULL;
         if (probe != NULL) fclose(probe);
@@ -9203,9 +9214,11 @@ static void test_psn_package_imports_as_its_iso(void) {
 #if defined(_WIN32) || defined(_WIN64)
         /* No descriptor list at all: everyone may again. */
         assert(SetSecurityDescriptorDacl(&descriptor, TRUE, NULL, FALSE));
-        assert(SetFileSecurityW(wide, DACL_SECURITY_INFORMATION, &descriptor));
+        assert(SetKernelObjectSecurity(held, DACL_SECURITY_INFORMATION, &descriptor));
+        assert(CloseHandle(held));
 #else
-        assert(chmod(pbp_path, 0600) == 0);
+        assert(fchmod(mode_fd, 0600) == 0);
+        assert(close(mode_fd) == 0);
 #endif
     }
 

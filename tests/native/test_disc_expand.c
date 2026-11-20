@@ -1668,6 +1668,78 @@ static bool stderr_capture_end(StderrCapture *c, const char *line) {
     return strstr(log, line) != NULL;
 }
 
+/* Every permission taken from a file and given back later, both through one
+   handle or descriptor opened once, so both changes reach the file the test
+   then opens by name. Windows: a security descriptor that grants no one
+   anything, then none at all (everyone may again); elsewhere mode 0, then
+   0600. */
+typedef struct {
+#if defined(_WIN32) || defined(_WIN64)
+    HANDLE handle;
+#else
+    int fd;
+#endif
+} NoAccess;
+
+static void no_access_begin(NoAccess *n, const char *path) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[NATIVE_TEST_PATH_MAX];
+    SECURITY_DESCRIPTOR descriptor;
+    ACL nobody;
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide,
+                               NATIVE_TEST_PATH_MAX) > 0);
+    /* Its security only: no read or write of the data, every sharing allowed, so
+       the opens under test see only the permissions. */
+    n->handle = CreateFileW(wide, READ_CONTROL | WRITE_DAC,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(n->handle != INVALID_HANDLE_VALUE);
+    assert(InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION));
+    assert(InitializeAcl(&nobody, sizeof(nobody), ACL_REVISION));
+    assert(SetSecurityDescriptorDacl(&descriptor, TRUE, &nobody, FALSE));
+    assert(SetKernelObjectSecurity(n->handle, DACL_SECURITY_INFORMATION, &descriptor));
+#else
+    n->fd = open(path, O_RDONLY | O_NOFOLLOW);
+    assert(n->fd >= 0);
+    assert(fchmod(n->fd, 0) == 0);
+#endif
+}
+
+/* Whether this account is now refused a read of the file: false for a user no
+   permission stops (root, or a Windows token using its backup privilege). */
+static bool no_access_refused(const char *path) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[NATIVE_TEST_PATH_MAX];
+    HANDLE probe;
+    bool refused;
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide,
+                               NATIVE_TEST_PATH_MAX) > 0);
+    probe = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, NULL);
+    refused = probe == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED;
+    if (probe != INVALID_HANDLE_VALUE) CloseHandle(probe);
+    return refused;
+#else
+    FILE *probe = nk_fopen_utf8(path, "rb");
+    if (probe == NULL) return true;
+    fclose(probe);
+    return false;
+#endif
+}
+
+static void no_access_end(NoAccess *n) {
+#if defined(_WIN32) || defined(_WIN64)
+    SECURITY_DESCRIPTOR descriptor;
+    assert(InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION));
+    assert(SetSecurityDescriptorDacl(&descriptor, TRUE, NULL, FALSE));
+    assert(SetKernelObjectSecurity(n->handle, DACL_SECURITY_INFORMATION, &descriptor));
+    assert(CloseHandle(n->handle));
+#else
+    assert(fchmod(n->fd, 0600) == 0);
+    assert(close(n->fd) == 0);
+#endif
+}
+
 #define SHARED_READ_LOG                                                                   \
     "[DISC_IMPORT] The disc image is open in another program, so it is read twice to " \
     "check that it does not change while it is added."
@@ -2109,11 +2181,9 @@ static void test_import_stored_image_short_or_unreadable(void) {
         assert(held != INVALID_HANDLE_VALUE);
         unreadable = true;
 #else
-        FILE *probe;
-        assert(chmod(legacy_iso, 0) == 0);
-        probe = nk_fopen_utf8(legacy_iso, "rb");
-        unreadable = probe == NULL;
-        if (probe) fclose(probe);
+        NoAccess no_access;
+        no_access_begin(&no_access, legacy_iso);
+        unreadable = no_access_refused(legacy_iso);
 #endif
         if (unreadable) {
             bool ok = nk_disc_import(t.first, root, NULL, &result, &status);
@@ -2128,7 +2198,7 @@ static void test_import_stored_image_short_or_unreadable(void) {
 #if defined(_WIN32) || defined(_WIN64)
         CloseHandle(held);
 #else
-        assert(chmod(legacy_iso, 0600) == 0);
+        no_access_end(&no_access);
 #endif
     }
     free_twins(&t);
@@ -2136,15 +2206,15 @@ static void test_import_stored_image_short_or_unreadable(void) {
 }
 
 /* A source this account may not read: the refusal says access was denied, not
-   that the drive may be gone. Windows: a security descriptor that grants no one
-   anything (its owner can still put one back); elsewhere, no read permission
-   (skipped where the test runs as a user no permission stops). An ordinary
+   that the drive may be gone (NoAccess: no permission at all; skipped where the
+   test runs as a user no permission stops). An ordinary
    import, held with writes denied, logs no shared read. */
 static void test_import_access_denied(void) {
     TwinImages t;
     char root[NATIVE_TEST_PATH_MAX];
     NkDiscImport result;
     NkDiscExpandStatus status;
+    NoAccess no_access;
     bool denied;
     bool ok;
     make_twins(&t, "denied");
@@ -2159,28 +2229,8 @@ static void test_import_access_denied(void) {
         if (logged) fprintf(stderr, "held: a shared read was logged for a file nobody writes\n");
         CHECK(ok && !logged);
     }
-#if defined(_WIN32) || defined(_WIN64)
-    WCHAR wide[NATIVE_TEST_PATH_MAX];
-    SECURITY_DESCRIPTOR descriptor;
-    ACL nobody;
-    HANDLE probe;
-    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, t.first, -1, wide,
-                               NATIVE_TEST_PATH_MAX) > 0);
-    assert(InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION));
-    assert(InitializeAcl(&nobody, sizeof(nobody), ACL_REVISION));
-    assert(SetSecurityDescriptorDacl(&descriptor, TRUE, &nobody, FALSE));
-    assert(SetFileSecurityW(wide, DACL_SECURITY_INFORMATION, &descriptor));
-    probe = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                        FILE_ATTRIBUTE_NORMAL, NULL);
-    denied = probe == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED;
-    if (probe != INVALID_HANDLE_VALUE) CloseHandle(probe);
-#else
-    FILE *probe;
-    assert(chmod(t.first, 0) == 0);
-    probe = nk_fopen_utf8(t.first, "rb");
-    denied = probe == NULL;
-    if (probe) fclose(probe);
-#endif
+    no_access_begin(&no_access, t.first);
+    denied = no_access_refused(t.first);
     if (denied) {
         ok = nk_disc_import(t.first, root, NULL, &result, &status);
         if (ok || strcmp(status.code, NK_DISC_READ_FAILED) != 0 ||
@@ -2192,13 +2242,7 @@ static void test_import_access_denied(void) {
     } else {
         printf("SKIP access denied: this user reads a file it has no permission for\n");
     }
-#if defined(_WIN32) || defined(_WIN64)
-    /* No descriptor list at all: everyone may again, so the folder can be removed. */
-    assert(SetSecurityDescriptorDacl(&descriptor, TRUE, NULL, FALSE));
-    assert(SetFileSecurityW(wide, DACL_SECURITY_INFORMATION, &descriptor));
-#else
-    assert(chmod(t.first, 0600) == 0);
-#endif
+    no_access_end(&no_access);
     free_twins(&t);
     printf("PASS a source this account may not read is refused as access denied\n");
 }
