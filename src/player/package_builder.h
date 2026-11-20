@@ -370,13 +370,12 @@ bool package_builder_native_transport_request(
  * ';'-separated `allowed_hosts`, compared without case: the check every caller makes
  * on PackageHttpResponse.final_url after a transport followed redirects. */
 bool package_builder_url_allowed(const char *url, const char *allowed_hosts);
-#if defined(_WIN32) || defined(_WIN64)
-/* Opens the WinHTTP session the native transport would open for `options`, reads back the
- * user agent it carries into `agent`, and closes it: nothing is sent. NULL when it opened,
- * else the refusal PackageHttpResponse.refused would name, with `agent` empty. */
+/* Opens the session the native transport would open for `options`, reads back the user
+ * agent it carries into `agent`, and closes it: nothing is sent. NULL when it opened, else the
+ * refusal PackageHttpResponse.refused would name (or that this build has no native transport),
+ * with `agent` empty. */
 const char *package_builder_native_session_user_agent(const PackageHttpOptions *options,
                                                       char *agent, size_t agent_size);
-#endif
 
 /* Download one manifest item to a .part file, check exact byte count and SHA-256,
  * then atomically promote it. A NULL transport selects native WinHTTP. */

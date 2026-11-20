@@ -899,6 +899,13 @@ static const PackageNativeRequest k_native_request = winhttp_open_request;
 #else
 static const PackageHttpOpen k_native_open = NULL;
 static const PackageNativeRequest k_native_request = NULL;
+
+const char *package_builder_native_session_user_agent(const PackageHttpOptions *options,
+                                                      char *agent, size_t agent_size) {
+    (void)options;
+    if (agent && agent_size) agent[0] = '\0';
+    return "refused: this build has no native HTTPS transport";
+}
 #endif
 
 PackageHttpOpen package_builder_native_transport(void) {
