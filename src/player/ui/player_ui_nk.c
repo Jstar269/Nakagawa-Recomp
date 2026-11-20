@@ -2273,6 +2273,13 @@ bool player_ui_nk_test_laid_out(const PlayerUiNk *player) {
     return player != NULL && player->ui != NULL && nk_ui_laid_out(player->ui);
 }
 
+int player_ui_nk_test_device_resets(const PlayerUiNk *player) {
+    NkUiSdlrStats stats;
+    if (player == NULL || player->backend == NULL) return -1;
+    nk_ui_sdlr_get_stats(player->backend, &stats);
+    return (int)stats.device_resets;
+}
+
 int player_ui_nk_test_backdrop(const PlayerUiNk *player, bool *shown) {
     if (shown != NULL) *shown = false;
     if (player == NULL || player->backdrop_index == SIZE_MAX) return -1;
@@ -2755,7 +2762,15 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     NkUiEvent translated[8];
     size_t count;
     double now_s;
-    if (player == NULL || !player->ready || event == NULL) return false;
+    if (player == NULL || event == NULL) return false;
+    if (event->type == SDL_EVENT_RENDER_DEVICE_RESET) {
+        /* SDL3: after a device reset every texture must be made again (a Direct3D
+           device lost to a driver reset or update). The backend drops its atlas, image
+           and waves textures and the next frame uploads what it draws. */
+        nk_ui_sdlr_reset(player->backend);
+        return true;
+    }
+    if (!player->ready) return false;
     now_s = player_ui_nk_now_s(player);
     if (player->nickname_open) {
         /* The nickname editor takes what is typed as the find box does; Esc or the

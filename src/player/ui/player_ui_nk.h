@@ -1635,6 +1635,9 @@ size_t player_ui_nk_test_library_grid(const PlayerUiNk *player, size_t *total);
 /* Test only: the next UI's last frame was laid out (nk_ui_laid_out), so the
    next frame takes a move at once; false without a next UI. */
 bool player_ui_nk_test_laid_out(const PlayerUiNk *player);
+/* Test only: how many SDL render device resets the next UI's backend has taken
+   (NkUiSdlrStats.device_resets), -1 without a backend. */
+int player_ui_nk_test_device_resets(const PlayerUiNk *player);
 /* Test only: the game whose picture is behind the library (the art rest), -1 for
    none; *shown tells it fading in or whole from fading out. */
 int player_ui_nk_test_backdrop(const PlayerUiNk *player, bool *shown);

@@ -42,6 +42,10 @@ void nk_ui_sdlr_set_scale(NkUiSdlr *renderer, float density) {
     (void)density;
 }
 
+void nk_ui_sdlr_reset(NkUiSdlr *renderer) {
+    (void)renderer;
+}
+
 bool nk_ui_sdlr_render(NkUiSdlr *renderer, const NkUiDrawList *list) {
     (void)renderer;
     (void)list;
@@ -687,6 +691,30 @@ void nk_ui_sdlr_set_scale(NkUiSdlr *r, float density) {
     }
     nk_ui_sdlr_drop_atlas(r);
     r->density = density;
+}
+
+void nk_ui_sdlr_reset(NkUiSdlr *r) {
+    size_t i;
+    if (r == NULL) {
+        return;
+    }
+    /* After a device reset the old textures are gone; the next render rebuilds what
+       it draws. Destroying a lost texture only releases SDL's own record of it. */
+    nk_ui_sdlr_drop_atlas(r);
+    if (r->waves_texture != NULL) {
+        SDL_DestroyTexture(r->waves_texture);
+        r->waves_texture = NULL;
+    }
+    r->waves_w = 0;
+    r->waves_h = 0;
+    r->waves_valid = false;
+    for (i = 0; i < NK_UI_SDLR_IMAGE_CACHE; ++i) {
+        if (r->images[i].texture != NULL) {
+            SDL_DestroyTexture(r->images[i].texture);
+        }
+    }
+    memset(r->images, 0, sizeof(r->images));
+    ++r->stats.device_resets;
 }
 
 void nk_ui_sdlr_get_stats(const NkUiSdlr *r, NkUiSdlrStats *out) {

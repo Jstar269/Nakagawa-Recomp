@@ -421,6 +421,22 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
         event->user.code = PLAYER_UI_TEST_ACTION_ASSERT_GAME_RUNNING;
         return 1;
     }
+    /* SDL's notice that the render device was reset and every texture is lost (a
+       Direct3D device removed by a driver reset or update), queued as SDL sends it. */
+    if (strcmp(token, "RENDER_DEVICE_RESET") == 0) {
+        event->type = SDL_EVENT_RENDER_DEVICE_RESET;
+        return 1;
+    }
+    /* ASSERT_DEVICE_RESETS=<n>: the next UI's backend has taken n device resets. */
+    if (strncmp(token, "ASSERT_DEVICE_RESETS=", 21) == 0) {
+        uint64_t count = 0;
+        if (strcmp(token + 21, "0") != 0 &&
+            (!player_ui_test_parse_positive_u64(token + 21, &count) || count > 1000u)) return -1;
+        event->type = SDL_EVENT_USER;
+        event->user.code = PLAYER_UI_TEST_ACTION_ASSERT_DEVICE_RESETS;
+        event->user.windowID = (Uint32)count;
+        return 1;
+    }
     if (strncmp(token, "ASSERT_CONSENT=", 15) == 0) {
         char *comma = strchr(token + 15, ',');
         if (!comma) return -1;
@@ -1524,6 +1540,18 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
             printf("[PLAYER_UI_TEST] assert_game_running result=%s\n",
                    app->is_game_running ? "PASS" : "FAIL");
             if (!app->is_game_running) {
+                t->failed = true;
+                t->quit_queued = true;
+                *running = false;
+            }
+        } else if (scripted_event.type == SDL_EVENT_USER &&
+                   scripted_event.user.code == PLAYER_UI_TEST_ACTION_ASSERT_DEVICE_RESETS) {
+            int resets = g_ui_test_next_ui != NULL
+                ? player_ui_nk_test_device_resets(g_ui_test_next_ui) : -1;
+            bool matches = resets >= 0 && (Uint32)resets == scripted_event.user.windowID;
+            printf("[PLAYER_UI_TEST] assert_device_resets result=%s actual=%d\n",
+                   matches ? "PASS" : "FAIL", resets);
+            if (!matches) {
                 t->failed = true;
                 t->quit_queued = true;
                 *running = false;
