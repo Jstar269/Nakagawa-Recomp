@@ -56,9 +56,22 @@ Each letter's image is cut to its ink, as in the PSP's fonts, with no blank colu
 converter specification). Some games place each letter one pixel after the previous letter's image rather than by
 its advance; in such a game, Hot Shots Tennis for one, a line drawn with a stand-in is as long as the letters' ink.
 Liberation Sans leaves more space beside its letters than the PSP's fonts do, so in those games its lines came out 8
-to 11 % shorter than on a PSP; that is why the regular and bold sans-serif styles are Geist. With Geist the first line
-of Hot Shots Tennis's auto-save dialog comes out as long as with the PSP's fonts and the second one pixel longer (214
-and 186 pixels against 214 and 185). `ltn10`, Liberation Sans Italic, still draws such lines shorter.
+to 11 % shorter than on a PSP; that is why the regular and bold sans-serif styles are Geist. `ltn10`, Liberation Sans
+Italic, still draws such lines shorter.
+
+The Geist faces also take, for each character the PSP font of the same index has, three numbers from that font: how
+far the letter moves the pen (its advance), how wide its image is and where the image starts (rule 18 of the
+converter specification). These numbers were measured on the maintainer's own PSP-3000 (firmware 6.61), by reading
+its fonts `ltn0`, `ltn4`, `ltn8` and `ltn12` with the player's own font reader, and are published, with the
+maintainer's approval, as numbers only in
+[`assets/fonts/psp_measured_latin_metrics.json`](../assets/fonts/psp_measured_latin_metrics.json), labelled
+PSP-measured; none of them comes from PPSSPP. No letter shape is taken: each letter is still Geist's own outline,
+drawn narrower or wider to the PSP letter's width without moving its rows. A game therefore lays out text with the
+Geist faces where it does with the PSP's fonts: each advance and starting point is the PSP's, and each image width is
+the PSP's except for a few characters per font whose outline cannot be drawn that narrow without moving a row (`l`, the
+underscore, the braces, the en dash and the per mille sign among them), which stay up to two pixels wider; the
+conversion manifest lists them. The two lines of Hot Shots Tennis's auto-save dialog come out 215 and 186 pixels long
+against the PSP's 214 and 185, and the copyright lines of Kurulin Fusion's title screen break and line up as on a PSP.
 
 ## Without your PSP's fonts: what changes
 
@@ -93,9 +106,10 @@ What changes:
   or Gowun Dodum (Korean), not the PSP's fonts. The 191 Korean-font characters Gowun Dodum draws wider than a
   full-width cell (squared units such as `㎒`, circled and parenthesized letters and numbers, `℡`) are narrowed to
   one cell, as the PSP's Korean font draws them.
-- **Capitals against small letters.** In the regular sans-serif faces (Geist) small letters average up to 3 % wider
-  than the PSP's and capitals within 0.3 %; a sentence and a menu line each run up to 1.5 % longer. In Liberation's
-  faces capitals are wider, compared with small letters, than in the PSP's, and the spacing splits the difference.
+- **Capitals against small letters.** The Geist faces (`ltn0`, `ltn4`, `ltn8`, `ltn12`) give every character the
+  PSP font's advance, so their small letters, capitals, digits, sentences and menu lines are as wide as the PSP's
+  (within 0.02 %, the rounding of the sums). In Liberation's faces capitals are wider, compared with small letters,
+  than in the PSP's, and the spacing splits the difference.
 - **Weight of the serif faces.** The serif stand-ins (`ltn1`, `ltn3`, `ltn5`, `ltn7` and the same four of the
   smaller size) carry 6 % to 30 % more ink per letter than the PSP's, because the PSP's serif faces are lighter than
   Liberation Serif. Measured on 2026-11-07 on the PSP-3000's files described under "Measured differences" below.
