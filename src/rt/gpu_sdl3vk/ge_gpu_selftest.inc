@@ -1225,18 +1225,19 @@ static int coherence_run_wide_raster_one(const char *name, uint32_t stride, int 
     return ok;
 }
 
-/* Depth writes stay inside the depth buffer (#2193). The depth surface is zbw columns by 272
- * rows; column x of row y is guest address (y * zbw + x), so a depth write past zbw would be
- * the next row's pixel, or on row 271 one past the buffer. One list on an 8888 target with
- * stride fbw and a depth buffer with stride zbw, depth pre-filled with a sentinel: a depth
- * clear (depth A) of the whole 512x272, a depth-writing sprite (test ALWAYS, depth B) on rows
- * 0-9 at x 256-511, and under a scissor of x 0-99 a depth clear (depth C) of rows 200-271.
- * Every pixel drawn is inside the colour target and the depth buffer, so the depth buffer must
- * hold C in rows 200-271 of columns 0-99, A in the rest of the columns both buffers have, and
- * the sentinel in any column past the colour target's stride and in the row past the buffer.
- * The Vulkan backend and ge.c each run it and must agree byte for byte. A 512-stride target
- * with a 256-wide depth buffer is the case where the sprite lies past zbw; a 256-stride target
- * with a 512-wide depth buffer the case where the draws reach past the colour target. */
+/* Depth writes against the depth buffer's stride (#2193). Column x of row y is depth word
+ * (y * zbw + x) for every column, at or past zbw too (PSP-GE-RASTER-004, PSP-3000 2026-11-20),
+ * so a depth write past zbw is a later row's word, or on the last rows one past the buffer. One
+ * list on an 8888 target with stride fbw and a depth buffer with stride zbw, depth pre-filled
+ * with a sentinel: a depth clear (depth A) of the whole 512x272, a depth-writing sprite (test
+ * ALWAYS, depth B) on rows 0-9 at x 256-511, and under a scissor of x 0-99 a depth clear
+ * (depth C) of rows 200-271. Both renderers draw only the colour target's columns. ge.c must
+ * leave exactly the words that rule gives. The Vulkan backend keeps a column past zbw in that
+ * column's own depth texel and writes back only zbw columns (depth_readback_to_guest), a known
+ * difference from the PSP: it must leave the same words everywhere a column past zbw does not
+ * reach, and the two must agree byte for byte there. A 512-stride target with a 256-wide depth
+ * buffer is the case where the draws lie past zbw; a 256-stride target with a 512-wide depth
+ * buffer the case where they reach past the colour target. */
 static void coherence_reset_depths(void);
 
 enum { COH_WIDE_DEPTH_A = 0x4000u, COH_WIDE_DEPTH_B = 0x0100u, COH_WIDE_DEPTH_C = 0x7777u,
@@ -1309,18 +1310,38 @@ static void coherence_wide_depth_fill(uint32_t zbase, uint32_t zbw, uint32_t spa
     ge_zbuf_invalidate_guest_span(zbase, span);
 }
 
+/* The words the list leaves in the depth buffer and the row past it (zbw * (FB_H + 1) words):
+ * each word holds the last of the three writes that reaches it. With `past_zbw` 0 a column at
+ * or past zbw writes nothing, the words the Vulkan backend writes back. */
+static void coherence_wide_depth_expect(uint16_t *want, uint32_t fbw, uint32_t zbw, int past_zbw) {
+    static const struct { uint32_t x0, y0, x1, y1, last_col; uint16_t z; } draws[] = {
+        {0u, 0u, 512u, FB_H, FB_W - 1u, COH_WIDE_DEPTH_A},
+        {256u, 0u, 512u, 10u, FB_W - 1u, COH_WIDE_DEPTH_B},
+        {0u, 200u, 512u, FB_H, 99u, COH_WIDE_DEPTH_C},
+    };
+    const uint32_t words = zbw * (FB_H + 1u), cols = fbw < FB_W ? fbw : FB_W;
+    for (uint32_t i = 0; i < words; i++) want[i] = COH_WIDE_DEPTH_SENT;
+    for (size_t d = 0; d < sizeof draws / sizeof draws[0]; d++)
+        for (uint32_t y = draws[d].y0; y < draws[d].y1; y++)
+            for (uint32_t x = draws[d].x0; x < draws[d].x1 && x < cols && x <= draws[d].last_col; x++)
+                if ((past_zbw || x < zbw) && y * zbw + x < words) want[y * zbw + x] = draws[d].z;
+}
+
+/* `want` is the PSP rule's words, `vk` the Vulkan backend's; a word where they differ is
+   checked only on the software path. */
 static int coherence_wide_depth_verify(const char *path, const char *name, uint32_t zbase,
-                                       uint32_t fbw, uint32_t zbw) {
-    const uint32_t cols = fbw < zbw ? fbw : zbw;
+                                       uint32_t fbw, uint32_t zbw, const uint16_t *want,
+                                       const uint16_t *vk) {
+    const int gpu = strcmp(path, "gpu") == 0;
     for (uint32_t i = 0; i < zbw * (FB_H + 1u); i++) {
         const uint32_t x = i % zbw, y = i / zbw;
-        uint16_t want = COH_WIDE_DEPTH_SENT, got;
-        if (y < FB_H && x < cols) want = y >= 200u && x < 100u ? COH_WIDE_DEPTH_C : COH_WIDE_DEPTH_A;
+        uint16_t got;
+        if (gpu && want[i] != vk[i]) continue;
         memcpy(&got, coherence_wide_depth_px(zbase, i), 2);
-        if (got != want) {
+        if (got != want[i]) {
             fprintf(stderr, "gpu coherence selftest [%s]: %s depth pixel=(%u,%u) got=%04x want=%04x "
                             "(stride %u, depth stride %u)\n", name, path, (unsigned)x, (unsigned)y,
-                    got, want, (unsigned)fbw, (unsigned)zbw);
+                    got, want[i], (unsigned)fbw, (unsigned)zbw);
             return 0;
         }
     }
@@ -1331,7 +1352,27 @@ static int coherence_run_wide_raster_depth(const char *name, uint32_t fbw, uint3
     const uint32_t base = 0x04000000u | 0x00160000u, zbase = 0x04000000u;
     /* the depth buffer, the row past it, and the 0x2040 swizzle's reach */
     const uint32_t span = zbw * (FB_H + 1u) * 2u + 0x2040u;
+    const uint32_t words = zbw * (FB_H + 1u);
     const size_t fb_bytes = (size_t)fbw * FB_H * 4u;
+    uint16_t *want = (uint16_t *)malloc(words * sizeof *want);
+    uint16_t *vk = (uint16_t *)malloc(words * sizeof *vk);
+    uint8_t *gap = (uint8_t *)calloc(span, 1);   /* bytes of the words the two rules differ in */
+    if (!want || !vk || !gap) {
+        free(want);
+        free(vk);
+        free(gap);
+        return 0;
+    }
+    coherence_wide_depth_expect(want, fbw, zbw, 1);
+    coherence_wide_depth_expect(vk, fbw, zbw, 0);
+    uint32_t gap_words = 0;
+    for (uint32_t i = 0; i < words; i++) {
+        if (want[i] == vk[i]) continue;
+        const uint32_t at = (uint32_t)((uint8_t *)coherence_wide_depth_px(zbase, i) -
+                                       (uint8_t *)SR_HOST_LINEAR(zbase));
+        gap[at] = gap[at + 1u] = 1u;
+        gap_words++;
+    }
 
     coherence_reset_depths();
     memset(SR_HOST(base), 0, fb_bytes);
@@ -1347,11 +1388,20 @@ static int coherence_run_wide_raster_depth(const char *name, uint32_t fbw, uint3
         fprintf(stderr, "gpu coherence selftest [%s]: the GPU took %lu sprite(s), want 3, or the depth "
                         "readback failed\n", name, s_cnt_spr - spr_before);
         coherence_reset_depths();
+        free(want);
+        free(vk);
+        free(gap);
         return 0;
     }
-    ok = coherence_wide_depth_verify("gpu", name, zbase, fbw, zbw);
+    ok = coherence_wide_depth_verify("gpu", name, zbase, fbw, zbw, want, vk);
     uint8_t *gpu = (uint8_t *)malloc(span);
-    if (!gpu) { coherence_reset_depths(); return 0; }
+    if (!gpu) {
+        coherence_reset_depths();
+        free(want);
+        free(vk);
+        free(gap);
+        return 0;
+    }
     memcpy(gpu, SR_HOST_LINEAR(zbase), span);
     coherence_reset_depths();
 
@@ -1366,22 +1416,25 @@ static int coherence_run_wide_raster_depth(const char *name, uint32_t fbw, uint3
         fprintf(stderr, "gpu coherence selftest [%s]: ge.c's depth surface was not written back\n", name);
         ok = 0;
     }
-    ok = coherence_wide_depth_verify("software", name, zbase, fbw, zbw) && ok;
+    ok = coherence_wide_depth_verify("software", name, zbase, fbw, zbw, want, vk) && ok;
     const uint8_t *sw = (const uint8_t *)SR_HOST_LINEAR(zbase);
     uint32_t mismatch = 0;
-    while (mismatch < span && gpu[mismatch] == sw[mismatch]) mismatch++;
+    while (mismatch < span && (gap[mismatch] || gpu[mismatch] == sw[mismatch])) mismatch++;
     if (mismatch != span) {
         fprintf(stderr, "gpu coherence selftest [%s]: GPU/software depth mismatch at byte=%u gpu=%02x "
                         "software=%02x\n", name, (unsigned)mismatch, gpu[mismatch], sw[mismatch]);
         ok = 0;
     }
     free(gpu);
+    free(want);
+    free(vk);
+    free(gap);
     sr_gpu_vram_dirty(base, (uint32_t)fb_bytes);
     sr_gpu_vram_dirty(zbase, span);
     ge_zbuf_invalidate_guest_span(zbase, span);
     if (ok)
-        printf("gpu coherence selftest: PASS %-22s fmt=3 stride=%u depth_stride=%u scale=%d\n",
-               name, (unsigned)fbw, (unsigned)zbw, s_scale);
+        printf("gpu coherence selftest: PASS %-22s fmt=3 stride=%u depth_stride=%u scale=%d "
+               "past_zbw_words=%u\n", name, (unsigned)fbw, (unsigned)zbw, s_scale, (unsigned)gap_words);
     return ok;
 }
 
