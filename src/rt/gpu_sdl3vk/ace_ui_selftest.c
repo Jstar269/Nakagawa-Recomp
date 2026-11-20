@@ -1266,6 +1266,10 @@ static void cell_notice_every_part(const char *fonts_root) {
 static const char k_toast_words[] = "Champion of the Hot Shots Cup, Undefeated on Every Surface";
 static const char k_toast_head[] = "Achievement unlocked";
 static const char k_toast_detail[] = "50 points \xC2\xB7 Softcore";
+/* The toast of a completed set: the game's title, with the drawn trophy. */
+static const char k_toast_completed_words[] = "Hot Shots Tennis: Get a Grip";
+static const char k_toast_completed_head[] = "Set completed";
+static const char k_toast_completed_detail[] = "Every achievement unlocked \xC2\xB7 Softcore";
 
 /* A project-drawn sample badge, 64 x 64 (no RetroAchievements picture): a teal tile with a gold
  * disc in a darker ring. Its centre is the gold, which the picture check below reads back. */
@@ -1310,14 +1314,18 @@ static int box_inside(const int inner[4], const int outer[4]) {
            inner[3] <= outer[3];
 }
 
-/* One picture of the achievement toast alone, with the sample badge or (badge 0) the drawn
- * trophy: drawn inside the window and its safe area at the toast's fixed width, the accent edge
+/* One picture of the achievement toast alone, with the sample badge (variant 1), the drawn
+ * trophy (variant 0), or a completed set's toast with the drawn trophy (variant 2): drawn inside the window and its safe area at the toast's fixed width, the accent edge
  * at its left, the icon slot inside it, every word of the eyebrow, the title (on at most two
  * lines) and the points whole and unclipped, the badge's own pixels in the slot, and nothing else
  * of the frame changed. Written to
- * <dir>/ace_ui_selftest_toast[_drawn]_<w>x<h>_<scale %>.ppm. */
+ * <dir>/ace_ui_selftest_toast[_drawn|_completed]_<w>x<h>_<scale %>.ppm. */
 static void toast_picture_one(AceUi *ui, const NkUiTextBackend *text, int w, int h, float scale,
-                              uint32_t frame_colour, const char *dir, int badge) {
+                              uint32_t frame_colour, const char *dir, int variant) {
+    const int badge = variant == 1;
+    const char *const want_head = variant == 2 ? k_toast_completed_head : k_toast_head;
+    const char *const want_words = variant == 2 ? k_toast_completed_words : k_toast_words;
+    const char *const want_detail = variant == 2 ? k_toast_completed_detail : k_toast_detail;
     AceUiFrame tf;
     memset(&tf, 0, sizeof(tf));
     tf.pixel_w = w;
@@ -1325,13 +1333,13 @@ static void toast_picture_one(AceUi *ui, const NkUiTextBackend *text, int w, int
     tf.display_scale = scale;
     tf.now_s = 1.0;
     tf.reduce_motion = 1;
-    tf.host_toast_head = k_toast_head;
-    tf.host_toast = k_toast_words;
-    tf.host_toast_detail = k_toast_detail;
+    tf.host_toast_head = want_head;
+    tf.host_toast = want_words;
+    tf.host_toast_detail = want_detail;
     tf.host_toast_badge = badge ? toast_badge() : NULL;
     tf.host_toast_unlock = 1;
     tf.host_toast_alpha = 1.0f;
-    const char *kind = badge ? "badge" : "drawn trophy";
+    const char *kind = badge ? "badge" : variant == 2 ? "completed set" : "drawn trophy";
     NkUiConfig config;
     memset(&config, 0, sizeof(config));
     config.host = NK_UI_HOST_OVERLAY;
@@ -1361,24 +1369,24 @@ static void toast_picture_one(AceUi *ui, const NkUiTextBackend *text, int w, int
               scale * 100.0f);
         /* Every word of the eyebrow, the title and the points shows, unclipped and not shortened. */
         int head_box[4], text_box[4], detail_box[4];
-        char head[64], words[sizeof k_toast_words + 8u], detail[64];
+        char head[64], words[sizeof k_toast_words + 8u], detail[80];
         CHECK(chip_words(list, ACE_UI_ID_HOST_TOAST_HEAD, 1, "toast eyebrow", text, head_box,
                          head, sizeof head, w, h) == 1 &&
-                  strcmp(head, k_toast_head) == 0 && box_inside(head_box, chip),
+                  strcmp(head, want_head) == 0 && box_inside(head_box, chip),
               "the toast at %dx%d, %.0f%% has the eyebrow \"%s\", not \"%s\"", w, h,
-              scale * 100.0f, head, k_toast_head);
+              scale * 100.0f, head, want_head);
         const int lines = chip_words(list, ACE_UI_ID_HOST_TOAST_TEXT, ACE_UI_HOST_TOAST_LINES,
                                      "toast title", text, text_box, words, sizeof words, w, h);
-        CHECK(lines >= 1 && lines <= 2 && strcmp(words, k_toast_words) == 0 &&
+        CHECK(lines >= 1 && lines <= 2 && strcmp(words, want_words) == 0 &&
                   box_inside(text_box, chip) && text_box[1] >= head_box[3],
               "the toast at %dx%d, %.0f%% reads \"%s\" on %d line(s), not the whole title under "
               "the eyebrow", w, h, scale * 100.0f, words, lines);
         CHECK(chip_words(list, ACE_UI_ID_HOST_TOAST_DETAIL, 1, "toast points", text, detail_box,
                          detail, sizeof detail, w, h) == 1 &&
-                  strcmp(detail, "50 points \xC2\xB7 Softcore") == 0 &&
+                  strcmp(detail, want_detail) == 0 &&
                   box_inside(detail_box, chip) && detail_box[1] >= text_box[3],
               "the toast at %dx%d, %.0f%% reads \"%s\" under the title, not \"%s\"", w, h,
-              scale * 100.0f, detail, k_toast_detail);
+              scale * 100.0f, detail, want_detail);
         CHECK(slot[2] <= head_box[0] && slot[2] <= text_box[0] && slot[2] <= detail_box[0],
               "the toast at %dx%d, %.0f%%: the words overlap the icon slot", w, h, scale * 100.0f);
         CHECK(chip[0] >= 16 && chip[1] >= 16 && chip[2] <= w - 16 && chip[3] <= h - 16,
@@ -1402,7 +1410,8 @@ static void toast_picture_one(AceUi *ui, const NkUiTextBackend *text, int w, int
         check_outside(text, &tf, w, h, frame_colour, "the toast");
         char path[600];
         snprintf(path, sizeof(path), "%s%sace_ui_selftest_toast%s_%dx%d_%d.ppm", dir ? dir : "",
-                 dir ? "/" : "", badge ? "" : "_drawn", w, h, (int)(scale * 100.0f + 0.5f));
+                 dir ? "/" : "", badge ? "" : variant == 2 ? "_completed" : "_drawn", w, h,
+                 (int)(scale * 100.0f + 0.5f));
         write_ppm(path, w, h);
         printf("ace-ui-selftest: the toast (%s) written to %s\n", kind, path);
     }
@@ -1413,6 +1422,7 @@ static void toast_picture(AceUi *ui, const NkUiTextBackend *text, int w, int h, 
                           uint32_t frame_colour, const char *dir) {
     toast_picture_one(ui, text, w, h, scale, frame_colour, dir, 1);
     toast_picture_one(ui, text, w, h, scale, frame_colour, dir, 0);
+    toast_picture_one(ui, text, w, h, scale, frame_colour, dir, 2);
 }
 
 /* The toast in a 960x540 window, on a device of that size. */

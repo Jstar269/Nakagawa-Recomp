@@ -56,6 +56,69 @@ typedef struct PlayerAchievementRow {
     const struct NkUiImage *badge;
 } PlayerAchievementRow;
 
+/* ---- RetroAchievements badge pictures (#1316) -------------------------------------------
+ * The player keeps the decoded pictures of one run in PLAYER_ACH_BADGE_SLOTS slots
+ * (src/player/main.c holds each slot's picture beside it) and their files in its badge folder,
+ * at most PLAYER_ACH_BADGE_CACHE_FILES_MAX of them. */
+#define PLAYER_ACH_BADGE_SLOTS 512u
+#define PLAYER_ACH_BADGE_CACHE_FILES_MAX 2048u
+typedef enum {
+    PLAYER_ACH_BADGE_FREE = 0,
+    PLAYER_ACH_BADGE_ASKED,  /* requested from the bridge, no answer yet */
+    PLAYER_ACH_BADGE_SHOWN,  /* decoded: the page shows it */
+    PLAYER_ACH_BADGE_FAILED  /* tried this run: the page draws its own icon */
+} PlayerAchBadgeState;
+typedef struct PlayerAchBadgeSlot {
+    char name[PLAYER_ACHIEVEMENT_BADGE_NAME_MAX];
+    bool locked; /* the "_lock" picture */
+    PlayerAchBadgeState state;
+} PlayerAchBadgeSlot;
+
+/* The slot holding name's picture in that state, or slot_count when none does. */
+size_t player_ach_badge_find(const PlayerAchBadgeSlot *slots, size_t slot_count,
+                             const char *name, bool locked);
+/* Whether a page of these rows uses name's picture in that state: a locked row its "_lock"
+ * picture and its unlocked one (the in-game toast shows that one when it unlocks), an unlocked
+ * row its unlocked one. */
+bool player_ach_badge_in_use(const PlayerAchievementRow *rows, size_t row_count,
+                             const char *name, bool locked);
+/* A new list (a game's rows, or none): every slot it does not use is freed, and released[i] is
+ * set for each slot freed so the caller frees its picture (released may be NULL when no slot
+ * holds one). Returns how many were freed. The pictures stay in the badge folder, so a game's
+ * page opened again reads them from this PC. */
+size_t player_ach_badges_release_unused(PlayerAchBadgeSlot *slots, size_t slot_count,
+                                        const PlayerAchievementRow *rows, size_t row_count,
+                                        bool *released);
+/* The next picture the rows lack, in the order the page wants them: each row's own state
+ * first, then the unlocked picture of each locked row. False when no slot is missing one. */
+bool player_ach_badge_next(const PlayerAchievementRow *rows, size_t row_count,
+                           const PlayerAchBadgeSlot *slots, size_t slot_count,
+                           size_t *out_row, bool *out_locked);
+/* A free slot, or slot_count when every slot is in use. */
+size_t player_ach_badge_free_slot(const PlayerAchBadgeSlot *slots, size_t slot_count);
+
+/* The badge folder. player_ach_badge_cache_open removes the "*.part" files an interrupted
+ * write left (they would count toward the folder's limit) and returns how many it removed. */
+size_t player_ach_badge_cache_open(const char *dir);
+/* Whether a picture's bytes are a badge the player can show (it decodes them). */
+typedef bool (*PlayerAchBadgeCheck)(const uint8_t *bytes, size_t size, void *context);
+typedef enum {
+    PLAYER_ACH_BADGE_CACHE_MISSING = 0, /* no file, or it could not be read */
+    PLAYER_ACH_BADGE_CACHE_HIT,         /* *out holds the file's bytes (the caller frees them) */
+    PLAYER_ACH_BADGE_CACHE_REMOVED      /* the file failed check and was removed */
+} PlayerAchBadgeCacheRead;
+/* Reads dir/file, at most max_bytes. A file that is larger or fails check is removed, so the
+ * picture is asked for again. */
+PlayerAchBadgeCacheRead player_ach_badge_cache_read(const char *dir, const char *file,
+                                                    size_t max_bytes, PlayerAchBadgeCheck check,
+                                                    void *context, uint8_t **out,
+                                                    size_t *out_size);
+/* Keeps bytes as dir/file: written to dir/file.part, put on the disk, then renamed over
+ * dir/file. Not written when the folder already holds max_files files. False when nothing was
+ * kept; no ".part" file is left then. */
+bool player_ach_badge_cache_write(const char *dir, const char *file, const uint8_t *bytes,
+                                  size_t size, size_t max_files);
+
 typedef enum {
     VIEW_LIBRARY = 0,
     VIEW_INSPECTING,

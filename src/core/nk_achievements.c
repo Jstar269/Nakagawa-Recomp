@@ -828,10 +828,14 @@ static void RC_CCONV ach_event(const rc_client_event_t *event, rc_client_t *clie
     case RC_CLIENT_EVENT_RECONNECTED:
         ach_push(ach, NK_ACH_EVENT_RECONNECTED, 0u, 0u, 0u, NULL, NULL);
         break;
-    case RC_CLIENT_EVENT_GAME_COMPLETED:
+    case RC_CLIENT_EVENT_GAME_COMPLETED: {
+        /* Raised only while the game is loaded (the vendored rc_client.c's LOCAL DELTA), so
+         * the title is the completed game's. */
+        const rc_client_game_t *game = rc_client_get_game_info(client);
         ach_push(ach, NK_ACH_EVENT_SET_COMPLETED, event->subset ? event->subset->id : 0u, 0u, 0u,
-                 NULL, NULL);
+                 game ? game->title : NULL, NULL);
         break;
+    }
     default:
         break;
     }

@@ -9,6 +9,7 @@
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 #include "player_enhanced_fixture.h"
+#include "nk_ui_image.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -386,7 +387,10 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                /* Not a screen: the build card with a container left open, so its frame
                   fails (nk_ui_end returns NULL) after drawing most of the card. Kept past
                   FLOW_COUNT so no sweep draws it. */
-               FLOW_FAILED_FRAME } FlowCase;
+               FLOW_FAILED_FRAME,
+               /* A game's page listing the largest set the player keeps (256 rows, #1316),
+                  checked by its own test rather than by every sweep. */
+               FLOW_PAGE_TITLE_ACH_256 } FlowCase;
 
 /* The window size the game-found and Settings cases lay out for. */
 static float g_flow_width = 1280.0f;
@@ -1259,6 +1263,52 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         title.title_index = 3u;
         title.logical_width = g_flow_width;
         title.logical_height = g_flow_height;
+        return player_ui_screen_title(ui, &title);
+    }
+    if (which == FLOW_PAGE_TITLE_ACH_256) {
+        /* #1316: the largest set the player lists, 256 rows, every one with a badge picture
+           (one synthetic 4 x 4 image), long two-line titles and long descriptions, half of
+           them unlocked; the last row's title is short and unique. */
+        static PlayerUiTitle fixture;
+        static PlayerUiAchievementRow rows[PLAYER_ACHIEVEMENTS_LIST_MAX];
+        static char titles[PLAYER_ACHIEVEMENTS_LIST_MAX][PLAYER_ACHIEVEMENT_TITLE_MAX];
+        static uint8_t pixels[4u * 4u * 4u];
+        static NkUiImage badge;
+        PlayerUiTitleModel title;
+        for (size_t i = 0u; i < sizeof(pixels); ++i) pixels[i] = (uint8_t)(i % 4u == 3u ? 255u : 96u);
+        badge.width = 4u;
+        badge.height = 4u;
+        badge.rgba_pm = pixels;
+        badge.serial = 0x2560001u;
+        for (size_t i = 0u; i < PLAYER_ACHIEVEMENTS_LIST_MAX; ++i) {
+            if (i + 1u == PLAYER_ACHIEVEMENTS_LIST_MAX) {
+                (void)snprintf(titles[i], sizeof(titles[i]), "%s", "The last of 256");
+            } else {
+                (void)snprintf(titles[i], sizeof(titles[i]),
+                               "Achievement %zu of 256 with a long synthetic title that runs "
+                               "past one line and is cut to two",
+                               i + 1u);
+            }
+            rows[i].title = titles[i];
+            rows[i].description = "A long synthetic description that says what to do in the "
+                                  "game, longer than one line of the row, so it is cut to one.";
+            rows[i].points = (uint32_t)(1u + i % 50u);
+            rows[i].unlocked = i < PLAYER_ACHIEVEMENTS_LIST_MAX / 2u;
+            rows[i].badge = &badge;
+        }
+        fixture = k_titles[3];
+        memset(&title, 0, sizeof(title));
+        title.title = &fixture;
+        title.title_index = 3u;
+        title.logical_width = g_flow_width;
+        title.logical_height = g_flow_height;
+        title.achievements_status = "256 achievements available.";
+        title.achievement_rows = rows;
+        title.achievement_count = PLAYER_ACHIEVEMENTS_LIST_MAX;
+        title.achievement_total = PLAYER_ACHIEVEMENTS_LIST_MAX;
+        title.achievements_unlocked = PLAYER_ACHIEVEMENTS_LIST_MAX / 2u;
+        title.achievements_points_unlocked = 3200u;
+        title.achievements_points_total = 6400u;
         return player_ui_screen_title(ui, &title);
     }
     if (which == FLOW_PAGE_TITLE_TALL) {
@@ -5204,6 +5254,60 @@ static void test_tall_title_page_scrolls(void) {
     /* A tall window has room for all of it: nothing to scroll. */
     CHECK(tall_title_shows(1920, 1200, 0u, &scrolls) && !scrolls,
           "the tallest title page fits a 1920 x 1200 window with nothing to scroll");
+}
+
+static bool title_end_shows_after_scroll(FlowCase which, int width, int height,
+                                         const char *label, bool *scrolled);
+
+/* Review of #2847 (round 7, finding 5): a game's page with the largest set the player lists,
+   256 rows, each with a badge picture. The frame does not fail (the element, text and frame
+   budgets hold), every badge is drawn from the one picture it was given, nothing is drawn off
+   the window or over other text, and scrolling the page to its end shows the last row's
+   title whole: at the default window and the minimum, at 100% and 150% text. */
+static void test_title_page_lists_256_achievements(void) {
+    static const struct { int w; int h; } sizes[] = {{1280, 720}, {960, 540}};
+    static const int text_sizes[] = {100, 150};
+    const int saved = g_flow_text_size_pct;
+    for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+        g_flow_text_size_pct = text_sizes[t];
+        for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+            NkUi *ui = NULL;
+            const NkUiDrawList *draw =
+                flow_case_layout(FLOW_PAGE_TITLE_ACH_256, sizes[s].w, sizes[s].h, &ui);
+            size_t images = 0u;
+            size_t other_images = 0u;
+            bool first_title = false;
+            for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+                const NkUiDrawCmd *cmd = &draw->cmd[i];
+                if (cmd->kind == NK_UI_DRAW_CUSTOM && cmd->custom_kind == NK_UI_CUSTOM_IMAGE) {
+                    const NkUiImage *image = (const NkUiImage *)cmd->custom;
+                    if (image != NULL && image->serial == 0x2560001u) ++images;
+                    else ++other_images;
+                }
+                if (cmd->kind == NK_UI_DRAW_TEXT && cmd->custom != NULL) {
+                    const NkUiTextRun *run = (const NkUiTextRun *)cmd->custom;
+                    static const char head[] = "Achievement 1 of 256";
+                    first_title = first_title ||
+                                  (run->text != NULL && run->length >= sizeof(head) - 1u &&
+                                   memcmp(run->text, head, sizeof(head) - 1u) == 0);
+                }
+            }
+            CHECK(draw != NULL && g_ended_ok,
+                  "a page of 256 achievements lays out without a failed frame");
+            CHECK(images > 0u && other_images == 0u,
+                  "the 256-row page draws its rows' badge picture and no other");
+            CHECK(first_title, "the 256-row page shows its first row's title");
+            if (ui != NULL) nk_ui_destroy(ui);
+            CHECK(flow_case_fits(FLOW_PAGE_TITLE_ACH_256, sizes[s].w, sizes[s].h, NULL, 0u),
+                  "the 256-row page draws nothing off the window and no text over text");
+            bool scrolled = false;
+            CHECK(title_end_shows_after_scroll(FLOW_PAGE_TITLE_ACH_256, sizes[s].w, sizes[s].h,
+                                               "The last of 256", &scrolled) &&
+                      scrolled,
+                  "scrolling the 256-row page to its end shows the last row's title whole");
+        }
+    }
+    g_flow_text_size_pct = saved;
 }
 
 /* Where Settings > Enhanced drew each row of the active tab, in window pixels: the row's name
@@ -10340,6 +10444,7 @@ int main(int argc, char **argv) {
     test_error_details_fit_the_minimum_window();
     test_every_screen_fits_the_window();
     test_tall_title_page_scrolls();
+    test_title_page_lists_256_achievements();
     test_enhanced_rows_stay_put();
     test_enhanced_target_sizes();
     test_font_note_target_sizes();

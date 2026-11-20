@@ -240,13 +240,88 @@ bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *ch
  * in-game toast captions it "RetroAchievements"; any other message keeps the caption
  * "Host notification". */
 #define NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "Achievement unlocked: "
+/* A completed RetroAchievements set is the message this begins, followed by the game's title
+ * (no line feed): "Set completed: Hot Shots Tennis". It is captioned "RetroAchievements" too. */
+#define NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED "Set completed: "
 #define NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX 160u
 #define NK_GUEST_MEMORY_NOTIFICATION_BADGE_MAX 8u
-static inline const char *nk_guest_memory_notification_caption(const char *text) {
-    static const char unlocked[] = NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED;
+/* The text after `prefix` when text begins with it and goes on, else NULL. */
+static inline const char *nk_guest_memory_notification_after(const char *text,
+                                                             const char *prefix) {
     size_t i = 0u;
-    while (text && unlocked[i] && text[i] == unlocked[i]) i++;
-    return text && !unlocked[i] && text[i] ? "RetroAchievements" : "Host notification";
+    while (text && prefix[i] && text[i] == prefix[i]) i++;
+    return text && !prefix[i] && text[i] ? text + i : NULL;
+}
+static inline const char *nk_guest_memory_notification_caption(const char *text) {
+    return nk_guest_memory_notification_after(text, NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED) ||
+                   nk_guest_memory_notification_after(text,
+                                                      NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED)
+               ? "RetroAchievements"
+               : "Host notification";
+}
+
+/* True, with the game's title in title (cut at a whole UTF-8 character to fit, and at a line
+ * feed), for a completed-set message; false and "" for any other. */
+static inline bool nk_guest_memory_notification_set_completed(const char *text, char *title,
+                                                              size_t title_size) {
+    const char *p =
+        nk_guest_memory_notification_after(text, NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED);
+    if (title && title_size) title[0] = '\0';
+    if (!p || !title || title_size == 0u) return false;
+    size_t n = 0u;
+    while (p[n] && p[n] != '\n') n++;
+    if (n >= title_size) {
+        n = title_size - 1u;
+        while (n > 0u && ((unsigned char)p[n] & 0xC0u) == 0x80u) n--; /* a whole character */
+    }
+    memcpy(title, p, n);
+    title[n] = '\0';
+    return n > 0u;
+}
+
+/* The file a badge picture is kept in, inside the player's badge folder (achievements-badges),
+ * the same for the player that writes it and the runtime that reads it: "b", then the badge
+ * name with each capital letter written as "_" and its small letter, then "-lock" for the
+ * locked picture, then ".png" ("00001" -> "b00001.png", "A2b" locked -> "b_a2b-lock.png").
+ * The name must be one to seven ASCII letters and digits; anything else gives false and "".
+ * The leading "b" keeps every file off the Windows device names (CON, NUL, COM1, LPT1 and the
+ * rest, which name a device even with an extension), and the mark before a capital letter
+ * keeps names that differ only in case ("A2b", "a2B") in different files on a file system
+ * that ignores case. */
+#define NK_ACH_BADGE_FILE_MAX 32u
+static inline bool nk_achievement_badge_file_name(const char *name, bool locked, char *out,
+                                                  size_t out_size) {
+    size_t used = 0u;
+    size_t length = 0u;
+    if (out && out_size) out[0] = '\0';
+    if (!name || !out || out_size < NK_ACH_BADGE_FILE_MAX) return false;
+    out[used++] = 'b';
+    for (; name[length]; length++) {
+        const char c = name[length];
+        if (length >= NK_GUEST_MEMORY_NOTIFICATION_BADGE_MAX - 1u) {
+            out[0] = '\0';
+            return false;
+        }
+        if (c >= 'A' && c <= 'Z') {
+            out[used++] = '_';
+            out[used++] = (char)(c - 'A' + 'a');
+        } else if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')) {
+            out[used++] = c;
+        } else {
+            out[0] = '\0';
+            return false;
+        }
+    }
+    if (length == 0u) {
+        out[0] = '\0';
+        return false;
+    }
+    if (locked) {
+        memcpy(out + used, "-lock", 5u);
+        used += 5u;
+    }
+    memcpy(out + used, ".png", 5u); /* with its terminator: at most 1 + 14 + 5 + 4 + 1 bytes */
+    return true;
 }
 
 /* An unlock message's fields. */

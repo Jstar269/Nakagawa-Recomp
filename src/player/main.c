@@ -55,18 +55,6 @@
 
 typedef struct PlayerRun PlayerRun;
 typedef struct PlayerAchHttpJob PlayerAchHttpJob;
-/* One badge picture this run asked for: its state, and its pixels once decoded. */
-typedef enum {
-    PLAYER_ACH_BADGE_ASKED = 1,
-    PLAYER_ACH_BADGE_SHOWN,
-    PLAYER_ACH_BADGE_FAILED
-} PlayerAchBadgeState;
-typedef struct PlayerAchBadge {
-    char name[NK_ACH_BADGE_NAME_MAX];
-    bool locked;
-    PlayerAchBadgeState state;
-    NkUiImage image;
-} PlayerAchBadge;
 static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettingsOp op);
 static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork *work);
 static void player_achievements_stop_channel(PlayerRun *run);
@@ -76,11 +64,10 @@ static void player_achievements_release_channel(PlayerRun *run);
 static const char k_invalid_disc_message[] = "This file isn't a PSP disc image.";
 static const char k_ach_credential_target[] = "NakagawaRecomp/RetroAchievements";
 #define PLAYER_ACH_HTTP_BODY_MAX (4u * 1024u * 1024u)
-/* Badge pictures (nk_ach_request_badge): the decoded ones this run keeps, and the files the
-   cache folder <data>/achievements-badges holds at most. Past either, a badge is not kept: the
-   page draws its own icon for it. */
-#define PLAYER_ACH_BADGE_SLOTS 512u
-#define PLAYER_ACH_BADGE_CACHE_FILES_MAX 2048u
+/* Badge pictures (nk_ach_request_badge): the decoded ones this run keeps
+   (PLAYER_ACH_BADGE_SLOTS, player_state.h), and their files in <data>/achievements-badges, at
+   most PLAYER_ACH_BADGE_CACHE_FILES_MAX. Past either, a badge is not kept: the page draws its
+   own icon for it. */
 #define PLAYER_ACH_BADGE_DIR "achievements-badges"
 enum {
     PLAYER_ACH_HTTP_EVENT_CODE = 0x5241
@@ -4409,14 +4396,16 @@ typedef struct PlayerRun {
     char achievements_queue_notice[160];
     /* nk_ach_events_dropped when last reported: a change is logged and shown once. */
     uint32_t achievements_events_dropped_seen;
-    /* Badge pictures: one try each per run (PlayerAchBadge), the first failure logged once. The
-       cache folder is <data>/achievements-badges (ach_badge_dir, "" when the data folder is
-       unknown: nothing is cached then). ach_badge_cache_lock orders a cache write by the HTTP
-       thread with Sign out's delete; a write made for an older ach_badge_cache_epoch is not
-       made. */
-    PlayerAchBadge ach_badges[PLAYER_ACH_BADGE_SLOTS];
-    size_t ach_badge_count;
+    /* Badge pictures: one try each while a game's list uses it (ach_badges, with each slot's
+       decoded picture in ach_badge_images), the first failure logged once, and a full set of
+       slots logged once. The cache folder is <data>/achievements-badges (ach_badge_dir, "" when
+       the data folder is unknown: nothing is cached then). ach_badge_cache_lock orders the HTTP
+       thread's cache reads and writes with Sign out's delete; a write made for an older
+       ach_badge_cache_epoch is not made. */
+    PlayerAchBadgeSlot ach_badges[PLAYER_ACH_BADGE_SLOTS];
+    NkUiImage ach_badge_images[PLAYER_ACH_BADGE_SLOTS];
     bool ach_badge_failure_logged;
+    bool ach_badge_slots_full_logged;
     char ach_badge_dir[NK_MAX_PATH];
     SDL_Mutex *ach_badge_cache_lock;
     SDL_AtomicInt ach_badge_cache_epoch;
@@ -4465,7 +4454,7 @@ struct PlayerAchHttpJob {
     bool badge;
     size_t body_max;
     char cache_dir[NK_MAX_PATH];
-    char cache_path[NK_MAX_PATH];
+    char cache_file[NK_ACH_BADGE_FILE_MAX]; /* nk_achievement_badge_file_name, "" for none */
     int cache_epoch;
 };
 
@@ -4517,16 +4506,34 @@ static bool player_ach_response_append(PlayerAchHttpJob *job, const unsigned cha
     return true;
 }
 
+/* Whether bytes are a badge picture the page can show: its header within a badge's limits
+   (nk_ach_badge_png_ok), then the whole picture decoded within them, as the pump decodes it. */
+static bool player_ach_badge_decodes(const uint8_t *bytes, size_t size, void *context) {
+    (void)context;
+    if (!nk_ach_badge_png_ok(bytes, size)) return false;
+    const NkUiImageLimits limits = {NK_ACH_BADGE_MAX_BYTES, NK_ACH_BADGE_MAX_SIDE,
+                                    NK_ACH_BADGE_MAX_SIDE};
+    NkUiImage image;
+    memset(&image, 0, sizeof image);
+    const bool ok = nk_ui_image_decode_png(bytes, size, &limits, &image) == NK_UI_IMAGE_OK;
+    nk_ui_image_free(&image);
+    return ok;
+}
+
 /* A badge picture this PC already holds: the cache file's bytes, answered as the server would
-   (200), when they are a badge (nk_ach_badge_png_ok). False sends the request instead. */
-static bool player_ach_badge_cache_read(PlayerAchHttpJob *job, size_t *capacity) {
-    if (!job->cache_path[0]) return false;
-    FILE *file = nk_fopen_utf8(job->cache_path, "rb");
-    if (!file) return false;
-    unsigned char *bytes = (unsigned char *)malloc(NK_ACH_BADGE_MAX_BYTES + 1u);
-    const size_t size = bytes ? fread(bytes, 1u, NK_ACH_BADGE_MAX_BYTES + 1u, file) : 0u;
-    fclose(file);
-    const bool ok = bytes && nk_ach_badge_png_ok(bytes, size) &&
+   (200), when they decode. A file that does not is removed, under the cache lock, and the
+   request is sent instead. False sends the request. */
+static bool player_ach_job_cache_read(PlayerAchHttpJob *job, size_t *capacity) {
+    PlayerRun *run = job->run;
+    if (!job->cache_file[0] || !run->ach_badge_cache_lock) return false;
+    uint8_t *bytes = NULL;
+    size_t size = 0u;
+    SDL_LockMutex(run->ach_badge_cache_lock);
+    const PlayerAchBadgeCacheRead read =
+        player_ach_badge_cache_read(job->cache_dir, job->cache_file, NK_ACH_BADGE_MAX_BYTES,
+                                    player_ach_badge_decodes, NULL, &bytes, &size);
+    SDL_UnlockMutex(run->ach_badge_cache_lock);
+    const bool ok = read == PLAYER_ACH_BADGE_CACHE_HIT &&
                     player_ach_response_append(job, bytes, size, capacity);
     free(bytes);
     if (!ok) {
@@ -4540,34 +4547,22 @@ static bool player_ach_badge_cache_read(PlayerAchHttpJob *job, size_t *capacity)
     return true;
 }
 
-static bool player_ach_count_file(const char *name, void *context) {
-    (void)name;
-    ++*(size_t *)context;
-    return true;
-}
-
-/* Keeps a fetched badge in the cache folder, through a private temporary file and a rename,
-   unless Sign out cleared the folder since the request was made (the epoch moved), the switch
-   went off, or the folder already holds PLAYER_ACH_BADGE_CACHE_FILES_MAX files. */
-static void player_ach_badge_cache_write(PlayerAchHttpJob *job) {
+/* Keeps a fetched badge that decodes in the cache folder (player_ach_badge_cache_write), unless
+   Sign out cleared the folder since the request was made (the epoch moved), the switch went
+   off, or the folder already holds PLAYER_ACH_BADGE_CACHE_FILES_MAX files. */
+static void player_ach_job_cache_write(PlayerAchHttpJob *job) {
     PlayerRun *run = job->run;
-    if (!job->cache_path[0] || !run->ach_badge_cache_lock) return;
+    if (!job->cache_file[0] || !run->ach_badge_cache_lock ||
+        !player_ach_badge_decodes((const uint8_t *)job->response_body, job->response_body_size,
+                                  NULL))
+        return;
     SDL_LockMutex(run->ach_badge_cache_lock);
-    size_t files = 0u;
-    char temporary[NK_MAX_PATH + 8];
-    const int n = snprintf(temporary, sizeof temporary, "%s.part", job->cache_path);
     if (SDL_GetAtomicInt(&run->ach_badge_cache_epoch) == job->cache_epoch &&
-        SDL_GetAtomicInt(&run->achievements_transport_open) && n > 0 &&
-        (size_t)n < sizeof temporary && nk_platform_mkdir_p_private(job->cache_dir) &&
-        nk_platform_list_files(job->cache_dir, player_ach_count_file, &files) &&
-        files < PLAYER_ACH_BADGE_CACHE_FILES_MAX) {
-        FILE *file = nk_platform_fopen_private(temporary, "wb");
-        bool ok = file && fwrite(job->response_body, 1u, job->response_body_size, file) ==
-                              job->response_body_size;
-        if (file && fclose(file) != 0) ok = false;
-        if (ok) ok = nk_rename_utf8(temporary, job->cache_path) == 0;
-        if (!ok && file) (void)nk_remove_utf8(temporary);
-    }
+        SDL_GetAtomicInt(&run->achievements_transport_open))
+        (void)player_ach_badge_cache_write(job->cache_dir, job->cache_file,
+                                           (const uint8_t *)job->response_body,
+                                           job->response_body_size,
+                                           PLAYER_ACH_BADGE_CACHE_FILES_MAX);
     SDL_UnlockMutex(run->ach_badge_cache_lock);
 }
 
@@ -4586,7 +4581,7 @@ static int SDLCALL player_ach_http_thread_main(void *userdata) {
         goto finished;
     }
     /* A badge this PC already keeps is not asked for again. */
-    if (job->badge && player_ach_badge_cache_read(job, &capacity)) goto finished;
+    if (job->badge && player_ach_job_cache_read(job, &capacity)) goto finished;
     if (!package_builder_native_transport_request(
             &options, job->url, job->badge ? NK_ACH_BADGE_HOST : NK_ACH_HOST, method,
             job->content_type[0] ? job->content_type : NULL,
@@ -4628,9 +4623,8 @@ static int SDLCALL player_ach_http_thread_main(void *userdata) {
     }
     response.close(response.context);
     if (!body_ok) job->response_status = NK_ACH_HTTP_RETRY;
-    if (job->badge && body_ok && job->response_status == 200 &&
-        nk_ach_badge_png_ok((const uint8_t *)job->response_body, job->response_body_size))
-        player_ach_badge_cache_write(job);
+    /* Kept only when it decodes, so a damaged answer is not read back in a later run. */
+    if (job->badge && body_ok && job->response_status == 200) player_ach_job_cache_write(job);
 
 finished:
     /* The last chunk read can hold the login reply's token. */
@@ -4702,12 +4696,23 @@ static void player_ach_transport(void *context, const NkAchRequest *request,
     job->badge = badge;
     job->body_max = badge ? NK_ACH_BADGE_MAX_BYTES : PLAYER_ACH_HTTP_BODY_MAX;
     if (badge && run->ach_badge_dir[0]) {
-        /* The file is named by the URL's last part, which the gate allows only as a badge
-           name and ".png" or "_lock.png": no separator or dot from the server reaches it. */
+        /* The file is named from the URL's last part, which the gate allows only as a badge
+           name and ".png" or "_lock.png", through nk_achievement_badge_file_name: no separator
+           or dot from the server reaches it, no Windows device name is formed, and names that
+           differ only in case stay apart. */
         const char *leaf = request->url + sizeof NK_ACH_BADGE_URL_PREFIX - 1u;
-        const int n = snprintf(job->cache_path, sizeof job->cache_path, "%s%c%s",
-                               run->ach_badge_dir, nk_platform_path_separator(), leaf);
-        if (n <= 0 || (size_t)n >= sizeof job->cache_path) job->cache_path[0] = '\0';
+        char name[NK_ACH_BADGE_NAME_MAX];
+        size_t length = 0u;
+        while (length + 1u < sizeof name && leaf[length] && leaf[length] != '.' &&
+               leaf[length] != '_') {
+            name[length] = leaf[length];
+            length++;
+        }
+        name[length] = '\0';
+        const bool locked = strcmp(leaf + length, "_lock.png") == 0;
+        if (!nk_achievement_badge_file_name(name, locked, job->cache_file,
+                                            sizeof job->cache_file))
+            job->cache_file[0] = '\0';
         snprintf(job->cache_dir, sizeof job->cache_dir, "%s", run->ach_badge_dir);
         job->cache_epoch = SDL_GetAtomicInt(&run->ach_badge_cache_epoch);
     }
@@ -4778,6 +4783,9 @@ static bool player_achievements_create(PlayerRun *run) {
                                data_root, nk_platform_path_separator(), PLAYER_ACH_BADGE_DIR);
         if (n <= 0 || (size_t)n >= sizeof run->ach_badge_dir) run->ach_badge_dir[0] = '\0';
     }
+    /* A write a crash or power cut interrupted left a ".part" file: it goes, so it does not
+       count toward the folder's limit. No request is on its way yet. */
+    if (run->ach_badge_dir[0]) (void)player_ach_badge_cache_open(run->ach_badge_dir);
     /* The user agent RetroAchievements documents for a client: this player, its version, the
        operating system and rcheevos (nk_ach_user_agent). Without one nothing starts. */
     char system[NK_ACH_USER_AGENT_SYSTEM_MAX];
@@ -4863,26 +4871,20 @@ static void player_achievements_rest_status(PlayerRun *run, const char *text) {
     }
 }
 
-/* The badge this run asked for by name and state, or NULL. */
-static PlayerAchBadge *player_ach_badge_find(PlayerRun *run, const char *name, bool locked) {
-    for (size_t i = 0u; i < run->ach_badge_count; i++) {
-        PlayerAchBadge *badge = &run->ach_badges[i];
-        if (badge->state && badge->locked == locked && strcmp(badge->name, name) == 0)
-            return badge;
-    }
-    return NULL;
-}
-
 /* Each row's picture: the decoded badge for its state (locked rows the "_lock" one), or none,
    and the page draws its own icon. */
 static void player_achievements_attach_badges(PlayerRun *run) {
     PlayerApp *app = &run->app;
     for (size_t i = 0u; i < app->achievements_list_count; i++) {
         PlayerAchievementRow *row = &app->achievements_list[i];
-        PlayerAchBadge *badge =
-            row->badge_name[0] ? player_ach_badge_find(run, row->badge_name, !row->unlocked)
-                               : NULL;
-        row->badge = badge && badge->state == PLAYER_ACH_BADGE_SHOWN ? &badge->image : NULL;
+        const size_t k = row->badge_name[0]
+                             ? player_ach_badge_find(run->ach_badges, PLAYER_ACH_BADGE_SLOTS,
+                                                     row->badge_name, !row->unlocked)
+                             : PLAYER_ACH_BADGE_SLOTS;
+        row->badge = k < PLAYER_ACH_BADGE_SLOTS &&
+                             run->ach_badges[k].state == PLAYER_ACH_BADGE_SHOWN
+                         ? &run->ach_badge_images[k]
+                         : NULL;
     }
 }
 
@@ -4894,6 +4896,19 @@ _Static_assert(PLAYER_ACHIEVEMENT_DESCRIPTION_MAX >= NK_ACH_DISPLAY_DESCRIPTION_
                "a row holds the bridge's whole description");
 _Static_assert(PLAYER_ACHIEVEMENT_BADGE_NAME_MAX >= NK_ACH_BADGE_NAME_MAX,
                "a row holds the bridge's whole badge name");
+
+/* A new list (a game's rows, or none): the pictures it does not use leave their slots, so the
+   next game's page has room for its own; they stay in the badge folder, and a page that wants
+   one again reads it from this PC. */
+static void player_achievements_release_badges(PlayerRun *run) {
+    bool released[PLAYER_ACH_BADGE_SLOTS];
+    if (!player_ach_badges_release_unused(run->ach_badges, PLAYER_ACH_BADGE_SLOTS,
+                                          run->app.achievements_list,
+                                          run->app.achievements_list_count, released))
+        return;
+    for (size_t i = 0u; i < PLAYER_ACH_BADGE_SLOTS; i++)
+        if (released[i]) nk_ui_image_free(&run->ach_badge_images[i]);
+}
 
 static void player_achievements_refresh_list(PlayerRun *run) {
     if (!run || !run->achievements) return;
@@ -4922,6 +4937,7 @@ static void player_achievements_refresh_list(PlayerRun *run) {
     app->achievements_list_loaded = true;
     snprintf(app->achievements_list_disc_id, sizeof app->achievements_list_disc_id,
              "%s", run->achievements_disc_id);
+    player_achievements_release_badges(run);
     player_achievements_attach_badges(run);
 }
 
@@ -4935,16 +4951,16 @@ static void player_achievements_clear_list(PlayerRun *run) {
     run->app.achievements_points_unlocked = 0u;
     run->app.achievements_points_total = 0u;
     memset(run->app.achievements_list, 0, sizeof run->app.achievements_list);
+    player_achievements_release_badges(run);
 }
 
 /* The badges this run decoded go, and so do the rows' pointers to them. */
 static void player_achievements_forget_badges(PlayerRun *run) {
-    for (size_t i = 0u; i < run->ach_badge_count; i++)
-        nk_ui_image_free(&run->ach_badges[i].image);
-    memset(run->ach_badges, 0, sizeof run->ach_badges);
-    run->ach_badge_count = 0u;
     for (size_t i = 0u; i < run->app.achievements_list_count; i++)
         run->app.achievements_list[i].badge = NULL;
+    for (size_t i = 0u; i < PLAYER_ACH_BADGE_SLOTS; i++)
+        nk_ui_image_free(&run->ach_badge_images[i]);
+    memset(run->ach_badges, 0, sizeof run->ach_badges);
 }
 
 /* Sign out: the badge pictures this PC keeps show which games the account played, so they go
@@ -4963,23 +4979,27 @@ static void player_achievements_clear_badge_cache(PlayerRun *run) {
 /* One step of the badge pictures, each frame: decodes the answer the bridge holds, then asks
    for the next badge the page lacks, one at a time. Each row's own state first (a locked row's
    "_lock" picture), then the unlocked picture of each locked row, which the in-game toast shows
-   when it unlocks. Each badge is asked for once per run; one that fails, or is refused, keeps the
-   page's own icon, and the first failure is logged. Nothing is asked while the switch is off,
+   when it unlocks (player_ach_badge_next). Each badge is asked for once while a game's list
+   uses it (a new list frees the slots it does not use, and the badge folder answers a picture
+   asked for again); one that fails, or is refused, keeps the page's own icon, and the first
+   failure is logged. Nothing is asked while the switch is off,
    nobody is signed in or no game is loaded (nk_ach_request_badge). */
 static void player_achievements_pump_badges(PlayerRun *run) {
     PlayerApp *app = &run->app;
     NkAchBadge answer;
     const bool answered = nk_ach_take_badge(run->achievements, &answer);
     if (answered) {
-        PlayerAchBadge *badge = player_ach_badge_find(run, answer.name, answer.locked);
-        if (badge && badge->state == PLAYER_ACH_BADGE_ASKED) {
+        const size_t k = player_ach_badge_find(run->ach_badges, PLAYER_ACH_BADGE_SLOTS,
+                                               answer.name, answer.locked);
+        if (k < PLAYER_ACH_BADGE_SLOTS && run->ach_badges[k].state == PLAYER_ACH_BADGE_ASKED) {
+            PlayerAchBadgeSlot *badge = &run->ach_badges[k];
             const char *why = answer.why;
             if (answer.ok) {
                 /* Decoded only within a badge's limits, checked from the header first. */
                 const NkUiImageLimits limits = {NK_ACH_BADGE_MAX_BYTES, NK_ACH_BADGE_MAX_SIDE,
                                                 NK_ACH_BADGE_MAX_SIDE};
-                const NkUiImageStatus status =
-                    nk_ui_image_decode_png(answer.png, answer.size, &limits, &badge->image);
+                const NkUiImageStatus status = nk_ui_image_decode_png(
+                    answer.png, answer.size, &limits, &run->ach_badge_images[k]);
                 if (status == NK_UI_IMAGE_OK) badge->state = PLAYER_ACH_BADGE_SHOWN;
                 else why = nk_ui_image_status_name(status);
             }
@@ -4996,37 +5016,39 @@ static void player_achievements_pump_badges(PlayerRun *run) {
             player_achievements_attach_badges(run);
         }
         nk_ach_badge_free(&answer);
-    } else {
+    } else if (!nk_ach_badge_pending(run->achievements)) {
         /* An answer the switch, the game or the account dropped on its way: that badge was not
            tried, and may be asked for again. */
-        for (size_t i = 0u; i < run->ach_badge_count; i++)
-            if (run->ach_badges[i].state == PLAYER_ACH_BADGE_ASKED &&
-                !nk_ach_badge_pending(run->achievements))
+        for (size_t i = 0u; i < PLAYER_ACH_BADGE_SLOTS; i++)
+            if (run->ach_badges[i].state == PLAYER_ACH_BADGE_ASKED)
                 memset(&run->ach_badges[i], 0, sizeof run->ach_badges[i]);
     }
     if (!app->achievements_list_loaded || nk_ach_badge_pending(run->achievements)) return;
-    for (int pass = 0; pass < 2; pass++) {
-        for (size_t i = 0u; i < app->achievements_list_count; i++) {
-            const PlayerAchievementRow *row = &app->achievements_list[i];
-            const bool locked = pass == 0 ? !row->unlocked : false;
-            if (!row->badge_name[0] || (pass == 1 && row->unlocked) ||
-                player_ach_badge_find(run, row->badge_name, locked))
-                continue;
-            PlayerAchBadge *slot = NULL;
-            for (size_t k = 0u; k < run->ach_badge_count && !slot; k++)
-                if (!run->ach_badges[k].state) slot = &run->ach_badges[k];
-            if (!slot && run->ach_badge_count < PLAYER_ACH_BADGE_SLOTS)
-                slot = &run->ach_badges[run->ach_badge_count++];
-            /* Full, or nothing may be sent now: the page keeps its own icons. */
-            if (!slot || !nk_ach_request_badge(run->achievements, row->badge_name, locked))
-                return;
-            memset(slot, 0, sizeof *slot);
-            snprintf(slot->name, sizeof slot->name, "%s", row->badge_name);
-            slot->locked = locked;
-            slot->state = PLAYER_ACH_BADGE_ASKED;
-            return;
+    size_t row = 0u;
+    bool locked = false;
+    if (!player_ach_badge_next(app->achievements_list, app->achievements_list_count,
+                               run->ach_badges, PLAYER_ACH_BADGE_SLOTS, &row, &locked))
+        return;
+    const size_t k = player_ach_badge_free_slot(run->ach_badges, PLAYER_ACH_BADGE_SLOTS);
+    if (k == PLAYER_ACH_BADGE_SLOTS) {
+        /* Every slot holds a picture this game's page uses (a new list releases the rest): the
+           page keeps its own icons for the others, and says so once. */
+        if (!run->ach_badge_slots_full_logged) {
+            run->ach_badge_slots_full_logged = true;
+            fprintf(stderr, "[PLAYER] RetroAchievements: all %u badge picture slots are in use; "
+                            "the page draws its own icon for the other badges\n",
+                    (unsigned)PLAYER_ACH_BADGE_SLOTS);
         }
+        return;
     }
+    /* Nothing may be sent now: the page keeps its own icons. */
+    if (!nk_ach_request_badge(run->achievements, app->achievements_list[row].badge_name, locked))
+        return;
+    PlayerAchBadgeSlot *slot = &run->ach_badges[k];
+    memset(slot, 0, sizeof *slot);
+    snprintf(slot->name, sizeof slot->name, "%s", app->achievements_list[row].badge_name);
+    slot->locked = locked;
+    slot->state = PLAYER_ACH_BADGE_ASKED;
 }
 
 static void player_achievements_save_queue_or_report(PlayerRun *run) {
@@ -5210,6 +5232,21 @@ static void player_achievements_collect_events(PlayerRun *run) {
                          "Unlocked: %.*s", player_utf8_fit(event->title, 150u), event->title);
                 player_achievements_refresh_list(run);
                 player_achievements_save_queue_or_report(run);
+                break;
+            }
+            case NK_ACH_EVENT_SET_COMPLETED: {
+                /* Every achievement of the game's set is unlocked: the runtime's toast says so
+                   with the game's title (nk_guest_memory_notification_set_completed). */
+                const char *game = event->title[0] ? event->title : "This game";
+                char toast[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+                snprintf(toast, sizeof toast, NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED "%.*s",
+                         player_utf8_fit(game, 140u), game);
+                if (run->guest_memory_channel_active) {
+                    (void)nk_platform_guest_memory_channel_notify(&run->guest_memory_channel,
+                                                                  toast);
+                }
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "Set completed in softcore: %.*s", player_utf8_fit(game, 150u), game);
                 break;
             }
             case NK_ACH_EVENT_DISCONNECTED:

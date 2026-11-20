@@ -1520,13 +1520,15 @@ your RetroAchievements user name and API token, the game hash, achievement unloc
 which a running game sends every two minutes. Leaderboard entries are not sent. Every request goes to
 `https://retroachievements.org/dorequest.php`, except the achievement badge pictures: while you are
 signed in, the player asks `https://media.retroachievements.org/Badge/<badge>.png` (`<badge>_lock.png`
-for a locked achievement) for each badge of the loaded set, one at a time and each at most once per
-session, with a plain GET that carries only the user agent below: no user name, token, cookie or
+for a locked achievement) for each badge of the loaded set, one at a time and each at most once while
+its game's page lists it, with a plain GET that carries only the user agent below: no user name, token, cookie or
 console ID. A picture that does not come, is larger than 64 KB or 128 x 128 pixels, or is not a PNG is
 not shown; the game's page and the in-game notice draw their own icon instead. Fetched pictures are kept
 in the `achievements-badges` folder under the player data folder (at most 2,048 files). **Sign out**
 deletes that folder; turning **Achievements** off fetches nothing more and leaves it until the next
-**Sign out**, and you can delete it yourself at any time. No other host is contacted. During sign-in, your user name and password are sent once to obtain the token; the
+**Sign out**, and you can delete it yourself at any time. The pictures are RetroAchievements' public
+artwork and hold no user data; a token replaced outside the player leaves them until the next
+**Sign out**. No other host is contacted. During sign-in, your user name and password are sent once to obtain the token; the
 password is not saved. The token is kept in Windows Credential Manager. Other platforms without that
 credential store refuse sign-in. Nakagawa identifies a game by hashing the raw `PSP_GAME/PARAM.SFO` and
 `PSP_GAME/SYSDIR/EBOOT.BIN` bytes from your readable disc image, in that order; it does not decrypt them for

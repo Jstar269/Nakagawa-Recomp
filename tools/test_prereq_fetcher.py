@@ -2110,8 +2110,9 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         ra = main[main.index("static int player_utf8_fit("):
                   main.index("static void player_achievements_sign_in_stored(")]
         self.assertIsNone(re.search(r"%\.[0-9]+s", ra), "a byte-count cut of RA text")
-        self.assertEqual(ra.count("player_utf8_fit("), 5,
-                         "the helper, three events, the dropped-notices line")
+        self.assertEqual(ra.count("player_utf8_fit("), 7,
+                         "the helper, four events (a completed set's toast and status line "
+                         "among them), the dropped-notices line")
         # The list's rows hold the bridge's whole display text, already cut at a character
         # (ach_copy_text), so the player copies it and never cuts it again.
         self.assertIn("_Static_assert(PLAYER_ACHIEVEMENT_TITLE_MAX >= NK_ACH_DISPLAY_TITLE_MAX,", ra)
@@ -2204,13 +2205,32 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertIn("f.host_toast_head = nk_guest_memory_notification_caption(s_host_toast_text);",
                       gui)
         self.assertEqual(re.findall(r'f\.host_toast_head = "([^"]*)"', gui),
-                         ["Achievement unlocked"])
+                         ["Achievement unlocked", "Set completed"])
         player = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
         self.assertIn('NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "%.*s\\n%u\\n%s"', player)
         self.assertNotIn('"Achievement unlocked: ', player)
+        # A completed set: the player writes the game's title after the shared prefix, the
+        # runtime reads it back (achievements-selftest checks the parser).
+        self.assertIn('NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED "%.*s"', player)
+        self.assertNotIn('"Set completed: ', player)
+        self.assertIn("nk_guest_memory_notification_set_completed(", gui)
+        # The message is read, and its badge read from disk and decoded, before the present
+        # (gui_host_toast_poll), never inside the UI pass, which only draws it.
+        ui_pass = gui[gui.index("static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {"):]
+        ui_pass = ui_pass[:ui_pass.index("\n}\n")]
+        for name in ("sr_host_notification(", "gui_host_toast_begin(", "gui_host_toast_poll(",
+                     "gui_host_toast_badge_load(", "fopen("):
+            with self.subTest(pass_calls=name):
+                self.assertNotIn(name, ui_pass)
+        self.assertEqual(gui.count("gui_host_toast_poll();"), 2,
+                         "before the frame's present and before the held frame's")
         # The badge picture comes from the player's badge folder on this PC: the runtime opens
         # no connection for it (NETWORK_EGRESS_PATTERN, below) and names no host.
         self.assertIn('#define HOST_TOAST_BADGE_DIR "achievements-badges"', gui)
+        # Both sides name a badge's file through the one helper (no device name, case kept
+        # apart; achievements-selftest checks it), never from the badge name itself.
+        self.assertIn("nk_achievement_badge_file_name(name, false, leaf, sizeof leaf)", gui)
+        self.assertIn("nk_achievement_badge_file_name(name, locked, job->cache_file,", player)
         self.assertIsNone(NETWORK_EGRESS_PATTERN.search(gui))
         self.assertEqual(re.findall(r"https?://", gui), [])
         for rel, source in texts.items():

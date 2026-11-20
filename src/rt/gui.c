@@ -891,6 +891,9 @@ static uint64_t s_host_toast_until_ns;
 #define HOST_TOAST_BADGE_MAX_SIDE 128u
 static NkGuestUnlockNotice s_host_toast_unlock;
 static int s_host_toast_is_unlock;
+/* A completed set: the game's title (nk_guest_memory_notification_set_completed). */
+static int s_host_toast_is_completed;
+static char s_host_toast_completed_title[NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX];
 static char s_host_toast_detail[64];
 static NkUiImage s_host_toast_badge;
 static int s_host_toast_has_badge;
@@ -911,11 +914,14 @@ static void gui_host_toast_badge_load(const char *name) {
     if (!name || !name[0]) return;
     char root[1024];
     char path[1200];
+    char leaf[NK_ACH_BADGE_FILE_MAX];
+    /* The player's file name for it (nk_achievement_badge_file_name), never the name itself. */
+    if (!nk_achievement_badge_file_name(name, false, leaf, sizeof leaf)) return;
     flash0_user_data_root(root, sizeof root);
     if (!root[0]) return;
     const char sep = nk_platform_path_separator();
-    const int n = snprintf(path, sizeof path, "%s%c%s%c%s.png", root, sep, HOST_TOAST_BADGE_DIR,
-                           sep, name);
+    const int n = snprintf(path, sizeof path, "%s%c%s%c%s", root, sep, HOST_TOAST_BADGE_DIR,
+                           sep, leaf);
     if (n < 0 || (size_t)n >= sizeof path) return;
     FILE *file = nk_fopen_utf8(path, "rb");
     if (!file) return;
@@ -944,13 +950,23 @@ static void gui_host_toast_badge_load(const char *name) {
     }
 }
 
-/* A new message for the toast: an unlock's title, "N points · Softcore" and badge, or any other
- * message as it came. */
+/* A new message for the toast: an unlock's title, "N points · Softcore" and badge, a completed
+ * set's game title, or any other message as it came. */
 static void gui_host_toast_begin(void) {
     s_host_toast_is_unlock =
         nk_guest_memory_notification_unlock(s_host_toast_text, &s_host_toast_unlock) ? 1 : 0;
+    s_host_toast_is_completed =
+        !s_host_toast_is_unlock &&
+                nk_guest_memory_notification_set_completed(
+                    s_host_toast_text, s_host_toast_completed_title,
+                    sizeof s_host_toast_completed_title)
+            ? 1
+            : 0;
     s_host_toast_detail[0] = '\0';
     gui_host_toast_badge_drop();
+    if (s_host_toast_is_completed)
+        snprintf(s_host_toast_detail, sizeof s_host_toast_detail,
+                 "Every achievement unlocked \xC2\xB7 Softcore");
     if (!s_host_toast_is_unlock) return;
     if (s_host_toast_unlock.has_points)
         snprintf(s_host_toast_detail, sizeof s_host_toast_detail,
@@ -959,6 +975,27 @@ static void gui_host_toast_begin(void) {
     else
         snprintf(s_host_toast_detail, sizeof s_host_toast_detail, "Softcore");
     gui_host_toast_badge_load(s_host_toast_unlock.badge);
+}
+
+/* Before a frame is presented, outside the UI pass: the toast shown ends when its time is up,
+ * and the player's next message, once that one has ended, is read and its badge, if any, read
+ * from the badge folder and decoded here, so the pass itself does no file work. */
+static bool sr_host_notification(char *out, size_t out_size);
+static void gui_host_toast_poll(void) {
+    const uint64_t now = SDL_GetTicksNS();
+    if (s_host_toast_text[0] && now < s_host_toast_until_ns) return;
+    if (s_host_toast_text[0] || s_host_toast_has_badge) {
+        s_host_toast_text[0] = '\0';
+        s_host_toast_until_ns = 0u;
+        s_host_toast_is_unlock = 0;
+        s_host_toast_is_completed = 0;
+        gui_host_toast_badge_drop();
+    }
+    char notification[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+    if (!sr_host_notification(notification, sizeof notification)) return;
+    snprintf(s_host_toast_text, sizeof s_host_toast_text, "%s", notification);
+    s_host_toast_until_ns = now <= UINT64_MAX - HOST_TOAST_NS ? now + HOST_TOAST_NS : UINT64_MAX;
+    gui_host_toast_begin();
 }
 
 /* ---- The player's local guest-memory channel -------------------------------------------------
@@ -1054,23 +1091,22 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     if (render_notice_shows(&s_render_notice, sr_osk_overlay_active()))
         (void)render_notice_words(s_render_notice.fallback, &f.host_notice_head, &f.host_notice,
                                   &f.host_notice_hint);
-    /* The player's messages wait their turn: the next is read once the toast shown ends. */
-    char notification[NK_GUEST_MEMORY_NOTIFICATION_MAX];
-    const bool toast_showing = s_host_toast_text[0] && now < s_host_toast_until_ns;
-    if (!toast_showing && sr_host_notification(notification, sizeof notification)) {
-        snprintf(s_host_toast_text, sizeof s_host_toast_text, "%s", notification);
-        s_host_toast_until_ns = now <= UINT64_MAX - HOST_TOAST_NS
-                                    ? now + HOST_TOAST_NS : UINT64_MAX;
-        gui_host_toast_begin();
-    }
+    /* The player's message for the toast, read and prepared before the present
+     * (gui_host_toast_poll): the pass only draws it. */
     if (s_host_toast_text[0] && now < s_host_toast_until_ns) {
         /* An unlock: "Achievement unlocked" over its title, then its points, with its badge or
-         * the drawn trophy. Anything else: "Host notification" over the message as it came. */
+         * the drawn trophy. A completed set: "Set completed" over the game's title, with the
+         * drawn trophy. Anything else: "Host notification" over the message as it came. */
         if (s_host_toast_is_unlock) {
             f.host_toast_head = "Achievement unlocked";
             f.host_toast = s_host_toast_unlock.title;
             f.host_toast_detail = s_host_toast_detail;
             f.host_toast_badge = s_host_toast_has_badge ? &s_host_toast_badge : NULL;
+            f.host_toast_unlock = 1;
+        } else if (s_host_toast_is_completed) {
+            f.host_toast_head = "Set completed";
+            f.host_toast = s_host_toast_completed_title;
+            f.host_toast_detail = s_host_toast_detail;
             f.host_toast_unlock = 1;
         } else {
             f.host_toast_head = nk_guest_memory_notification_caption(s_host_toast_text);
@@ -1079,11 +1115,6 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
         f.host_toast_alpha = 1.0f;
         if (!f.reduce_motion && s_host_toast_until_ns - now < 300000000ull)
             f.host_toast_alpha = (float)(s_host_toast_until_ns - now) / 300000000.0f;
-    } else {
-        s_host_toast_text[0] = '\0';
-        s_host_toast_until_ns = 0u;
-        s_host_toast_is_unlock = 0;
-        gui_host_toast_badge_drop();
     }
     if (!ace_ui_frame_wants(&f)) return 0;
     AceUiTarget t;
@@ -2074,6 +2105,9 @@ void gui_ace_vblank(uint32_t vcount) {
     if (!ace_smooth_vblank(vcount)) return;
     if (!s_ace_smooth || s_quit_requested || !s_on || !s_sdl3 || s_offscreen ||
         sr_capture_is_armed()) return;
+#ifndef SR_GUI_PRESENT_SELFTEST
+    gui_host_toast_poll(); /* the toast's message and badge, outside the UI pass */
+#endif
     int result = sdl3vk_present_held();
     sync_sdl_input();
     if (result == 0) gui_quit_request();
@@ -2137,6 +2171,7 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
     int gpu_action = GUI_GPU_TRY_CPU;   /* what the GPU present did */
     int cpu_result = GUI_CPU_NOT_RUN;   /* what the CPU present returned, when one ran */
     if (s_sdl3) {
+        gui_host_toast_poll(); /* the toast's message and badge, outside the UI pass */
         /* 1. GPU VRAM image fast path: any frame the GPU rasterizer produced is presented
          *    directly from its Vulkan image. GEGPU_PRESENT_SHOWN skips the CPU path;
          *    GEGPU_PRESENT_NOT_RESIDENT (CPU movie frames etc.) falls through to BGRA. */

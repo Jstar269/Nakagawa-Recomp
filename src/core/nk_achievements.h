@@ -112,9 +112,9 @@ typedef enum NkAchEventKind {
                                     * when to try it again */
     NK_ACH_EVENT_UNLOCKS_DISCARDED, /* count: saved unlocks that belong to another account than
                                     * the one now signed in; they left the queue unsent */
-    NK_ACH_EVENT_SET_COMPLETED     /* id: the core set's ID. Every achievement in it is unlocked;
-                                    * raised by the frame after the award that completed it, and
-                                    * never once its game is unloaded */
+    NK_ACH_EVENT_SET_COMPLETED     /* id: the core set's ID; title: the game's. Every achievement
+                                    * in it is unlocked; raised by the frame after the award that
+                                    * completed it, and never once its game is unloaded */
 } NkAchEventKind;
 
 typedef struct NkAchEvent {

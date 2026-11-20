@@ -18,6 +18,8 @@
 #include "rc_error.h"
 #include "rc_version.h"
 
+#include <ctype.h>
+
 /* rhash's MD5, which signs a progress state's DONE chunk; vendored, not a public header. */
 #include "../../third_party/rcheevos/src/rhash/md5.h"
 
@@ -1459,6 +1461,8 @@ static void test_last_achievement_answered_as_the_game_ends(uint8_t *ram) {
                 told++;
                 CHECK(ev[k].id == 1111u, "route %d: the completed set is the game's core set "
                       "(AchievementSetId 1111), not %u", route, (unsigned)ev[k].id);
+                CHECK(strcmp(ev[k].title, "Synthetic Game") == 0,
+                      "route %d: the completion names the game (\"%s\")", route, ev[k].title);
             }
         }
         CHECK(told == (route == 4 ? 1 : 0),
@@ -2651,6 +2655,113 @@ static void test_unlock_toast_is_captioned_retroachievements(void) {
     longest[at] = '\0';
     CHECK(nk_guest_memory_notification_unlock(longest, &notice) && utf8_ends_whole(notice.title),
           "a long title ends on a whole character (%u bytes)", (unsigned)strlen(notice.title));
+}
+
+/* A completed set's message: the game's title after its prefix, captioned RetroAchievements,
+ * and no unlock. */
+static void test_set_completed_toast_message(void) {
+    char toast[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+    char title[NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX];
+    NkGuestUnlockNotice notice;
+    snprintf(toast, sizeof toast, NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED "%s",
+             "Synthetic Game");
+    CHECK(strcmp(toast, "Set completed: Synthetic Game") == 0, "the message reads \"%s\"", toast);
+    CHECK(nk_guest_memory_notification_set_completed(toast, title, sizeof title) &&
+              strcmp(title, "Synthetic Game") == 0,
+          "a completed set reads as the game's title (%s)", title);
+    CHECK(strcmp(nk_guest_memory_notification_caption(toast), "RetroAchievements") == 0,
+          "a completed set is captioned RetroAchievements");
+    CHECK(!nk_guest_memory_notification_unlock(toast, &notice), "a completed set is no unlock");
+    static const char *const others[] = {"Set completed: ", "Set completed", "set completed: X",
+                                         "Achievement unlocked: First Steps\n5\n00001", ""};
+    for (size_t i = 0; i < sizeof others / sizeof others[0]; i++) {
+        CHECK(!nk_guest_memory_notification_set_completed(others[i], title, sizeof title) &&
+                  !title[0],
+              "\"%s\" is no completed set", others[i]);
+    }
+    CHECK(!nk_guest_memory_notification_set_completed(NULL, title, sizeof title),
+          "no message is no completed set");
+    CHECK(nk_guest_memory_notification_set_completed("Set completed: A\nB", title, sizeof title) &&
+              strcmp(title, "A") == 0,
+          "the title ends at a line feed (%s)", title);
+    char longest[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+    size_t at = (size_t)snprintf(longest, sizeof longest,
+                                 NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED);
+    while (at + 2u < sizeof longest) {
+        longest[at++] = '\xc3';
+        longest[at++] = '\xa9';
+    }
+    longest[at] = '\0';
+    char short_title[8];
+    CHECK(nk_guest_memory_notification_set_completed(longest, short_title, sizeof short_title) &&
+              utf8_ends_whole(short_title) && strlen(short_title) == 6u,
+          "a title cut to fit ends on a whole character (%u bytes)",
+          (unsigned)strlen(short_title));
+}
+
+/* The badge folder's file names (nk_achievement_badge_file_name), which the player writes and
+ * the runtime reads: never a Windows device name, and names that differ only in case never
+ * share a file on a file system that ignores case. */
+static void test_badge_file_names(void) {
+    char file[NK_ACH_BADGE_FILE_MAX];
+    char other[NK_ACH_BADGE_FILE_MAX];
+    CHECK(nk_achievement_badge_file_name("00001", false, file, sizeof file) &&
+              strcmp(file, "b00001.png") == 0,
+          "a numbered badge's file is %s", file);
+    CHECK(nk_achievement_badge_file_name("00001", true, file, sizeof file) &&
+              strcmp(file, "b00001-lock.png") == 0,
+          "its locked picture's file is %s", file);
+    /* The device names, in either case, with and without the lock: the file's own name before
+     * its first dot is never one of them. */
+    static const char *const reserved[] = {"CON",  "con",  "AUX",  "NUL",  "PRN",  "COM1",
+                                           "com9", "COM0", "LPT1", "lpt9", "Con",  "CONIN"};
+    static const char *const devices[] = {"con", "aux", "nul", "prn"};
+    for (size_t i = 0; i < sizeof reserved / sizeof reserved[0]; i++) {
+        for (int locked = 0; locked < 2; locked++) {
+            CHECK(nk_achievement_badge_file_name(reserved[i], locked != 0, file, sizeof file),
+                  "%s is a badge name", reserved[i]);
+            size_t stem = 0u;
+            while (file[stem] && file[stem] != '.') stem++;
+            char lower[NK_ACH_BADGE_FILE_MAX];
+            for (size_t k = 0; k <= stem; k++)
+                lower[k] = k < stem ? (char)tolower((unsigned char)file[k]) : '\0';
+            bool device = false;
+            for (size_t d = 0; d < sizeof devices / sizeof devices[0]; d++)
+                device = device || strcmp(lower, devices[d]) == 0;
+            device = device || (stem == 4u && (strncmp(lower, "com", 3u) == 0 ||
+                                               strncmp(lower, "lpt", 3u) == 0) &&
+                                isdigit((unsigned char)lower[3]));
+            CHECK(file[0] == 'b' && !device, "%s%s is kept as %s, not a device name",
+                  reserved[i], locked ? " (locked)" : "", file);
+        }
+    }
+    /* A pair that differs only in case: two files, even with case folded. */
+    CHECK(nk_achievement_badge_file_name("A2b", false, file, sizeof file) &&
+              nk_achievement_badge_file_name("a2B", false, other, sizeof other),
+          "A2b and a2B are badge names");
+    char a[NK_ACH_BADGE_FILE_MAX];
+    char b[NK_ACH_BADGE_FILE_MAX];
+    for (size_t k = 0; k < sizeof a; k++) {
+        a[k] = (char)tolower((unsigned char)file[k]);
+        b[k] = (char)tolower((unsigned char)other[k]);
+    }
+    CHECK(strcmp(a, b) != 0, "A2b (%s) and a2B (%s) are different files with case folded", file,
+          other);
+    CHECK(strcmp(file, "b_a2b.png") == 0 && strcmp(other, "ba2_b.png") == 0,
+          "capitals are marked (%s, %s)", file, other);
+    /* A name's own letters never read as a picture's lock mark or another name's capital. */
+    CHECK(nk_achievement_badge_file_name("aLock", false, file, sizeof file) &&
+              nk_achievement_badge_file_name("a", true, other, sizeof other) &&
+              strcmp(file, other) != 0,
+          "aLock (%s) and a locked (%s) are different files", file, other);
+    static const char *const refused[] = {"", "12345678", "a.b", "a_b", "a/b", "..", "A-1", " "};
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+        CHECK(!nk_achievement_badge_file_name(refused[i], false, file, sizeof file) && !file[0],
+              "\"%s\" makes no file name", refused[i]);
+    }
+    CHECK(!nk_achievement_badge_file_name(NULL, false, file, sizeof file) &&
+              !nk_achievement_badge_file_name("1", false, file, 8u),
+          "no name, or too small a buffer, makes no file name");
 }
 
 /* Two unlocks close together are two toasts: the runtime reads the player's messages one at a
@@ -3987,6 +4098,8 @@ int main(int argc, char **argv) {
     RUN_RAM(test_long_titles_are_cut_at_a_character);
     RUN(test_frames_are_served_while_the_event_loop_is_stalled);
     RUN(test_unlock_toast_is_captioned_retroachievements);
+    RUN(test_set_completed_toast_message);
+    RUN(test_badge_file_names);
     RUN(test_notifications_are_read_in_order);
     RUN(test_a_message_being_written_is_not_read);
 #ifdef _WIN32

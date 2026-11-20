@@ -122,18 +122,28 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   transport, carrying only the user agent below: no user name, token, cookie or console ID. The
   badge name comes from the set the server sent and is used only when it is one to seven letters and
   digits; an address the server suggests for a picture is not used. Each badge is asked for at most
-  once per session. A picture larger than 64 KB, wider or taller than 128 pixels, or not a PNG is
+  once while its game's page lists it; a game opened later in the same session asks again only for
+  pictures the folder below does not hold. A picture larger than 64 KB, wider or taller than 128
+  pixels, or not a PNG is
   refused by name, and an answer that does not come is not an error: the row (or the in-game notice)
   shows the player's own drawn icon, a trophy for an unlocked achievement and a padlock for a locked
   one, and the log says once per run that a badge could not be shown. Pictures are decoded with the
   vendored stb_image, its size checked before any pixel memory is taken.
 - **Badge cache.** Fetched pictures are kept in `achievements-badges` under the player data folder,
-  named from the badge name only, at most 2,048 files; a kept picture is read from there instead of
-  asked for again. **Sign out** deletes that folder (the pictures say which games were played).
-  Turning the switch off fetches nothing more and leaves the folder as it is: the next **Sign out**
-  deletes it, a factory reset moves it aside with the rest of the data folder, and it can be deleted
-  by hand at any time. The in-game notice reads
-  the unlocked picture from that folder; the runtime itself opens no connection.
+  at most 2,048 files, each named from the badge name only: `b`, the name with a mark before each
+  capital letter, `-lock` for the grey picture, then `.png` (so no file takes a Windows device name
+  such as `CON` or `COM1`, and names that differ only in case keep separate files). A picture is kept
+  only once it decodes, written to a temporary `.part` file, put on the disk and then renamed; a kept
+  picture is read from there instead of asked for again, and one that no longer decodes is deleted and
+  asked for again. A `.part` file a crash left is deleted when the player next starts RetroAchievements.
+  **Sign out** deletes the folder (the pictures say which games were played). Turning the switch off
+  fetches nothing more and leaves the folder as it is: the next **Sign out** deletes it, a factory
+  reset moves it aside with the rest of the data folder, and it can be deleted by hand at any time.
+  The folder is not tied to an account: when the token in Windows Credential Manager is replaced or
+  removed outside the player, without **Sign out**, the pictures stay until the next **Sign out**.
+  They are RetroAchievements' public artwork, the same for every account, and hold no user data. The
+  in-game notice reads the unlocked picture from that folder before the frame is drawn; the runtime
+  itself opens no connection.
 - **User agent.** Each request names the player in the form RetroAchievements documents for clients:
   `NakagawaRecomp/<numeric version> (<operating system and version>) rcheevos/<version>`, for example
   `NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5`. A version that is not numeric, or a
@@ -173,6 +183,8 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   with more, the page says how many it shows and that all of them are on the game's page at
   retroachievements.org). Unlock notices appear in-game, one after another: **Achievement unlocked**
   over the achievement's title, its points and its badge. Two unlocks close together are two notices.
+  When the last achievement of the set unlocks, a notice **Set completed** follows with the game's
+  title and "Every achievement unlocked · Softcore"; it is drawn on the PC and sends nothing.
 - **One request at a time.** The player carries one RetroAchievements request at a time. A request made
   while another is on its way (a game started while a saved unlock is being sent) waits its turn, in
   order, instead of failing.
