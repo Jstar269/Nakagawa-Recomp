@@ -164,7 +164,7 @@ typedef struct {
 /* RetroAchievements (#1316) on Settings > Online and developer: the switch, the reason it is
    missing where sign-in cannot be stored, and the account row's name, spelled out in full. */
 #define SCR_ACHIEVEMENTS_SENTENCE \
-    "Softcore only. Before you sign in, you see what is sent and where."
+    "Casual Mode only. Before you sign in, you see what is sent and where."
 #define SCR_ACHIEVEMENTS_UNAVAILABLE_SENTENCE \
     "Sign-in needs Windows Credential Manager, which this platform does not provide."
 #define SCR_ACHIEVEMENTS_ACCOUNT_NAME "RetroAchievements"

@@ -106,7 +106,8 @@ opt-in and off by default.
 
 ## RetroAchievements
 
-Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed rcheevos client.
+Built for v0.1.0 (#1316): an opt-in client using the MIT-licensed rcheevos client, in Casual Mode only
+(the mode RetroAchievements formerly called Softcore). Hardcore is not offered.
 
 - **Settings > Online and developer options** has an **Achievements** switch, off by default. Turning it on shows a consent
   screen that names `retroachievements.org` and `media.retroachievements.org` and lists every data
@@ -157,14 +158,14 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   - sign-in (`r=login2`): the user name with the password once, or with the stored token;
   - the game's achievement set (`r=achievementsets`): user name, token and the game hash;
   - session start (`r=startsession`): user name, token, the game's RetroAchievements ID, the game hash,
-    `h=0` (softcore) and the rcheevos version;
+    `h=0` (Casual Mode) and the rcheevos version;
   - an unlock (`r=awardachievement`): user name, token, the achievement ID, `h=0`, the game hash, the
     seconds since a queued unlock happened and rcheevos' request signature;
   - Rich Presence (`r=ping`), every two minutes while a game runs: user name, token, the game ID, the
     game's Rich Presence text (what its achievement set says you are doing), `h=0` and the game hash;
     none is sent once the game has exited or its frames have stopped.
 
-  Leaderboard entries are not sent: rcheevos submits them only in hardcore, or in softcore when an
+  Leaderboard entries are not sent: rcheevos submits them only in Hardcore, or in Casual Mode when an
   emulator allows it, which the bridge never does, and the bridge also refuses that request. The hash
   follows RetroAchievements' PSP method: raw bytes from `PSP_GAME/PARAM.SFO`, then
   `PSP_GAME/SYSDIR/EBOOT.BIN`, with no new decryption. No game file, save, package, guest memory,
@@ -177,7 +178,7 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   request up), and one left from an earlier run. The queue holds at most 4,096 records. With no
   definite answer (no connection, a busy server) a record waits 30 seconds; a record the server refuses
   by its own error leaves the queue and is reported; a refused account keeps every record until the next
-  sign-in. The game's title page shows its core achievements under **RetroAchievements · Softcore**:
+  sign-in. The game's title page shows its core achievements under **RetroAchievements · Casual**:
   how many are unlocked and the points earned of the total, with a bar, then one row each, the
   unlocked first, each with its badge (or the drawn icon), title, description and its points as a
   number (up to 256; with more, the page says how many it shows and that all of them are on the
@@ -185,8 +186,8 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   **Achievement unlocked** over the achievement's title, its points ("25 points") and its badge. Two
   unlocks close together are two notices. When the last achievement of the set unlocks, a notice
   **Set completed** follows with the game's title and "Every achievement unlocked"; it is drawn on the
-  PC and sends nothing. Softcore is said once, in that page heading and in Settings, not on every
-  notice or row.
+  PC and sends nothing. The mode, Casual, is said once, in that page heading and in Settings, not on
+  every notice or row.
 - **One request at a time.** The player carries one RetroAchievements request at a time. A request made
   while another is on its way (a game started while a saved unlock is being sent) waits its turn, in
   order, instead of failing.

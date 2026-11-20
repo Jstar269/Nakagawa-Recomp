@@ -628,7 +628,7 @@ static void test_no_transport_sends_nothing(uint8_t *ram) {
     NkAch *ach = nk_ach_create(&mem, NULL, NULL);
     CHECK(ach != NULL, "create");
     if (!ach) return;
-    CHECK(!nk_ach_hardcore(ach), "softcore");
+    CHECK(!nk_ach_hardcore(ach), "Casual Mode");
     CHECK(!nk_ach_begin_login(ach, "", "TOKEN"), "an empty name is refused");
     CHECK(!nk_ach_begin_login(ach, "Player", NULL), "a missing token is refused");
     CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "login starts");
@@ -693,7 +693,7 @@ static void test_login_load_unlock(uint8_t *ram) {
     const int sets = find_request(&fake, "r=achievementsets&");
     CHECK(sets >= 0 && strstr(fake.log[sets], "m=" HASH), "the hash identifies the game");
     const int session = find_request(&fake, "r=startsession&");
-    CHECK(session >= 0 && strstr(fake.log[session], "&h=0"), "the session is softcore: %s",
+    CHECK(session >= 0 && strstr(fake.log[session], "&h=0"), "the session is Casual Mode (h=0): %s",
           session >= 0 ? fake.log[session] : "");
 
     /* The achievement must be seen false before it can trigger. */
@@ -715,8 +715,8 @@ static void test_login_load_unlock(uint8_t *ram) {
               ev[unlocked].points);
     const int award = find_request(&fake, "r=awardachievement&");
     CHECK(award >= 0 && strstr(fake.log[award], "a=5501") && strstr(fake.log[award], "&h=0"),
-          "a softcore award for 5501 is sent: %s", award >= 0 ? fake.log[award] : "");
-    CHECK(!nk_ach_hardcore(ach), "still softcore");
+          "a Casual Mode award for 5501 is sent: %s", award >= 0 ? fake.log[award] : "");
+    CHECK(!nk_ach_hardcore(ach), "still Casual Mode");
     nk_ach_destroy(ach);
 }
 
@@ -2129,7 +2129,7 @@ static void test_hardcore_cannot_be_turned_on(uint8_t *ram) {
     nk_ach_frame(ach);
     const int award = find_request(&fake, "r=awardachievement&");
     CHECK(award >= 0 && strstr(fake.log[award], "&h=0") != NULL,
-          "the unlock is sent as softcore: %s", award >= 0 ? fake.log[award] : "(none)");
+          "the unlock is sent as Casual Mode (h=0): %s", award >= 0 ? fake.log[award] : "(none)");
 
     /* rc_client driven directly, past every bridge entry: its start of session says h=1, and
      * the request gate refuses it. */

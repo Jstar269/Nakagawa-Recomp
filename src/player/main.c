@@ -5352,7 +5352,7 @@ static bool player_achievements_consent(PlayerRun *run) {
         "media.retroachievements.org, the only other host. Those requests send no username, "
         "token or console ID, only the same player, version and system names. The pictures "
         "are kept on this PC until you sign out.\n\n"
-        "Softcore only: hardcore is not available. Achievements are off while cheats are on "
+        "Casual Mode only: Hardcore is not available. Achievements are off while cheats are on "
         "or with 60 FPS game logic.";
     SDL_MessageBoxData data;
     int selected = 0;

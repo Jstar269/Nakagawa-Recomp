@@ -835,7 +835,7 @@ typedef struct {
     bool discord_presence;
     bool discord_available;
     /* RetroAchievements: disabled unless the platform has a credential store and the user
-       accepts the named data/host consent screen. The service is always softcore only. */
+       accepts the named data/host consent screen. The service is always Casual Mode only. */
     bool achievements_enabled;
     bool achievements_available;
     bool achievements_signed_in;
@@ -1115,7 +1115,7 @@ typedef struct {
 typedef struct {
     const PlayerUiTitle *title;
     size_t title_index;
-    const char *achievements_status; /* the signed-in game's softcore status, or NULL */
+    const char *achievements_status; /* the signed-in game's achievement status, or NULL */
     /* Why nothing is earned now (cheats on, the 60 FPS game-logic package), or NULL: the card
        shows it in the notice shape, with an icon and no points. */
     const char *achievements_notice;

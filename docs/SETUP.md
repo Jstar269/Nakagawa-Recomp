@@ -1354,7 +1354,7 @@ A package carries the runtime it was built with. One built before cheats existed
 switch without a word, so the launcher does not start it with cheats on: it says that the package
 was built before cheats existed, and to rebuild the package or turn cheats off.
 
-RetroAchievements is softcore only here, and it is off for a game started with cheats on: no
+RetroAchievements runs in Casual Mode only here, and it is off for a game started with cheats on: no
 achievement set is loaded and nothing is earned. The game's page and Settings > Online and developer
 say so.
 
@@ -1539,8 +1539,8 @@ the unlocks still waiting, and unlocks another account left are discarded and re
 the account now signed in. A queue file that cannot be read is kept beside itself as
 `unlock-queue.bin.unreadable`, never written over. An unlock the server refuses leaves the file and is
 reported on the **RetroAchievements** account line. When the sign-in at start cannot reach the server, the stored token is
-tried again by itself (after 30 seconds, then at doubling waits up to ten minutes); no password is asked. The feature is softcore only:
-hardcore is not available, and a request that would claim it is refused before it is sent. Achievements
+tried again by itself (after 30 seconds, then at doubling waits up to ten minutes); no password is asked. The feature offers only Casual Mode, the mode RetroAchievements formerly called Softcore:
+Hardcore is not available, and a request that would claim it is refused before it is sent. Achievements
 are off for a game started with cheats on or with a package that changes its speed (60 FPS game logic);
 the game's page says why. Turning the switch off sends nothing more: a request waiting its turn is dropped, and only one already on its way finishes.
 Its requests identify themselves in the form RetroAchievements documents:

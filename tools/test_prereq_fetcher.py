@@ -2215,14 +2215,25 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertNotIn('snprintf(toast, sizeof toast, "Set completed: ', player)
         self.assertIn("nk_guest_memory_notification_set_completed(", gui)
         # The notice's last line: "N points" ("1 point"), or "Every achievement unlocked" for a
-        # completed set. Softcore is said once, on the game's page heading and in Settings, not
-        # on every notice.
+        # completed set. The mode (Casual) is said once, on the game's page heading and in
+        # Settings, not on every notice.
         begin = gui[gui.index("static void gui_host_toast_begin(void) {"):]
         begin = begin[:begin.index("\n}\n")]
         self.assertIn('"%u %s"', begin)
         self.assertIn('== 1u ? "point" : "points"', begin)
         self.assertIn('"Every achievement unlocked"', begin)
         self.assertNotIn("Softcore", begin)
+        self.assertNotIn("Casual", begin)
+        # RetroAchievements now calls the mode Casual (rcheevos 13.0 Upgrade Guide, "Rebranding":
+        # Softcore -> Casual Mode). No string a user reads says Softcore; the heading says Casual.
+        title_page = (REPO_ROOT / "src" / "player" / "ui" / "scr_title.c").read_text(
+            encoding="utf-8")
+        self.assertIn('"RetroAchievements \\xC2\\xB7 Casual"', title_page)
+        for path in sorted((REPO_ROOT / "src" / "player").rglob("*.[ch]")) + [
+                REPO_ROOT / "src" / "rt" / "gui.c"]:
+            for literal in re.findall(r'"(?:[^"\\\n]|\\.)*"', path.read_text(encoding="utf-8")):
+                with self.subTest(path=path.name, literal=literal[:40]):
+                    self.assertNotIn("softcore", literal.lower())
         # The message is read, and its badge read from disk and decoded, before the present
         # (gui_host_toast_poll), never inside the UI pass, which only draws it.
         ui_pass = gui[gui.index("static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {"):]

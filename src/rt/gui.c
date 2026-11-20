@@ -951,8 +951,8 @@ static void gui_host_toast_badge_load(const char *name) {
 }
 
 /* A new message for the toast: an unlock's title, "N points" and badge, a completed set's game
- * title, or any other message as it came. Softcore is not repeated on each notice: the game's
- * page heading and Settings say it once. */
+ * title, or any other message as it came. The mode (Casual) is not repeated on each notice: the
+ * game's page heading and Settings say it once. */
 static void gui_host_toast_begin(void) {
     s_host_toast_is_unlock =
         nk_guest_memory_notification_unlock(s_host_toast_text, &s_host_toast_unlock) ? 1 : 0;

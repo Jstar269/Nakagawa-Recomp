@@ -394,7 +394,8 @@ static void title_achievements_notice(NkUi *ui, const char *reason, float inner)
     nk_ui_end_container(ui);
 }
 
-/* The RetroAchievements card: "RetroAchievements · Softcore" once, the set's progress (how
+/* The RetroAchievements card: "RetroAchievements · Casual" once (Casual Mode, which
+   RetroAchievements formerly called Softcore), the set's progress (how
    many are unlocked, the points earned of the total, and a bar), the notice when nothing is
    earned now, the status line while no set is listed, then every achievement the player
    keeps, unlocked first. */
@@ -404,7 +405,7 @@ static void title_achievements_card(NkUi *ui, const PlayerUiTitleModel *model, f
                           NK_UI_SPACE_3)) {
         return;
     }
-    nk_ui_eyebrow(ui, TITLE_ID_ACHIEVEMENTS_HEAD, "RetroAchievements \xC2\xB7 Softcore");
+    nk_ui_eyebrow(ui, TITLE_ID_ACHIEVEMENTS_HEAD, "RetroAchievements \xC2\xB7 Casual");
     if (model->achievement_count > 0u) {
         char count[64];
         char points[64];

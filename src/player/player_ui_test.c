@@ -1202,7 +1202,7 @@ void player_ui_test_prepare_app(PlayerUiTest *t, PlayerApp *app) {
     }
     /* RetroAchievements' signed-in states for the pictures of its rows and its title card
        (#1316). A UI regression run never signs in or reaches a server, so the state is set
-       here: "signed-in" is an account with no set loaded; "list:<disc ID>" adds a softcore set
+       here: "signed-in" is an account with no set loaded; "list:<disc ID>" adds a Casual Mode set
        of eight synthetic achievements for that title, as the player lists one. */
     const char *achievements = t->mode ? getenv("NK_UI_TEST_ACHIEVEMENTS") : NULL;
     if (achievements && achievements[0]) {
