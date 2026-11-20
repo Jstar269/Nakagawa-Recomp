@@ -4304,6 +4304,61 @@ class NativePlayerUiTests(unittest.TestCase):
         assert isinstance(enhanced, dict), settings
         self.assertEqual(enhanced.get("ssaa"), "4-anyway", "the confirmation is saved for the library")
 
+    @staticmethod
+    def enhanced_panels(run: dict[str, object]) -> list[dict[str, str]]:
+        """Each Settings > Enhanced detail panel the run drew, as player_ui_nk.c reports it:
+        the focused control, the text runs shown on the panel, how many of them run past its
+        box, and their text, each run ending in '^'."""
+        panels = []
+        for line in str(run["stdout"]).splitlines():
+            if line.startswith("[PLAYER_UI_TEST] next_ui_enhanced_panel "):
+                fields = line[len("[PLAYER_UI_TEST] next_ui_enhanced_panel "):].split("|", 3)
+                panels.append(dict(field.split("=", 1) for field in fields))
+        return panels
+
+    def test_next_ui_enhanced_panel_shows_a_long_one_word_value_inside_it(self) -> None:
+        """#2643, follow-up to #2644: a game's texture pack whose folder name is one long word
+        (no space to wrap at) is shown whole in the detail panel when the d-pad reaches the
+        Texture pack folder row, broken across lines inside the panel: no run of its text is
+        drawn past the panel's edge. At 1280x720 and at Larger text in a 960x540 window.
+        Failing before: the name was one run, drawn far past the panel's right edge."""
+        name = ("ULUS10000_Remastered_HD_Texture_Pack_v2.1_final_with_widescreen_HUD_"
+                "and_supersampled_fonts")
+        title_open = (*self.OPEN_FIRST, *(("KEY_TAB", "WAIT_MS=80") * 4),
+                      "KEY_RETURN", "WAIT_MS=250")
+        rows = self.enhanced_tab_rows(0, own_page=True)
+        # Down from Graphics preset: Play mode, the Picture tab, then its rows to the pack's.
+        walk = ("PAD_DPAD_DOWN", "WAIT_MS=50") * (2 + len(rows)) + ("WAIT_MS=150",)
+        with tempfile.TemporaryDirectory(prefix=".player-ui-pack-", dir=ROOT) as tmp:
+            pack = Path(tmp) / name
+            pack.mkdir()
+            (pack / "textures.ini").write_text(
+                "[options]\nversion = 1\nhash = quick\n[hashes]\n"
+                "0880000004040000deadbeef = a.png\n0880100004040000cafef00d =\n",
+                encoding="utf-8")
+            for width, height, text_size in ((1280, 720, 100), (960, 540, 150)):
+                with self.subTest(window=f"{width}x{height}", text=text_size):
+                    settings: dict[str, object] = {
+                        **self.LIBRARY_ENHANCED,
+                        "title_play": {"TEST00005": {"mode": "enhanced"}},
+                        "texture_packs": {"TEST00005": str(pack)},
+                    }
+                    if text_size != 100:
+                        settings["text_size"] = text_size
+                    run = self.next_ui_run("library", title_open + walk, settings=settings,
+                                           width=width, height=height, wait_background=True)
+                    trail = self.focus_trail(run)
+                    self.assertEqual(trail[-1], self.SETTINGS_FOCUS["texpack_choose"],
+                                     (trail, run["stdout"]))
+                    shown = [panel for panel in self.enhanced_panels(run)
+                             if panel["focus"] == self.SETTINGS_FOCUS["texpack_choose"]]
+                    self.assertTrue(shown, run["stdout"])
+                    self.assertGreater(int(shown[-1]["runs"]), 0, shown[-1])
+                    self.assertEqual(shown[-1]["outside"], "0",
+                                     f"no run of the panel's text is drawn past it: {shown[-1]}")
+                    self.assertIn(name, shown[-1]["text"].replace("^", ""),
+                                  f"the folder's name is shown whole: {shown[-1]}")
+
     def test_a_dedicated_data_root_keeps_everything_out_of_the_default_profile(self) -> None:
         """--user-data-root=<folder> opens the player on a second profile, for example a
         whole collection under test: a settings change lands in <folder>/config, and
