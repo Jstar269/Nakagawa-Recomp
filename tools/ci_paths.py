@@ -217,6 +217,38 @@ def _is_regenerated_output(path: str) -> bool:
     return outputs is None or path in outputs
 
 
+@lru_cache(maxsize=1)
+def _windows_only_test_modules() -> frozenset[str] | None:
+    """The ``tools/test_*.py`` modules whose tests windows_runtime's "Run the Windows-only Python
+    tests" step runs, or ``None`` when they cannot be computed.
+
+    Read from ``tools/ci_test_shards.py --windows-only``'s own selection, so the route and the
+    step cannot name different modules.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import ci_test_shards
+
+        modules = [module for module in ci_test_shards.discover_modules()
+                   if module not in ci_test_shards.WINDOWS_ONLY_RUN_ELSEWHERE]
+        return frozenset(name.split(".", 1)[0] for name in ci_test_shards.windows_only_tests(modules))
+    except Exception:
+        return None
+
+
+def _is_windows_only_test(path: str) -> bool:
+    """True for a ``tools/test_*.py`` module holding a test only the Windows job runs; an
+    unreadable selection fails closed (every such module).
+
+    The Linux shards skip those tests, so the module's own change routes the Windows job.
+    """
+    pure = PurePosixPath(_normalise(path))
+    if pure.parent != PurePosixPath("tools") or not pure.name.startswith("test_") or pure.suffix != ".py":
+        return False
+    modules = _windows_only_test_modules()
+    return modules is None or pure.stem in modules
+
+
 def _is_public_surface(path: str) -> bool:
     """True when the policy publishes this path.
 
@@ -1865,11 +1897,14 @@ def classify(
     # complete suite.
     python_scope = "all" if python_full or not makefile_recipe_only else "makefile"
     python_num_shards = PYTHON_SHARDS_FULL if python_scope == "all" else PYTHON_SHARDS_MAKEFILE
-    run_windows = run_native
+    # A test module that holds a Windows-only test also routes the Windows job, whose
+    # selftests group runs those tests ("Run the Windows-only Python tests"); it alone
+    # routes neither the native job nor the installer.
+    run_windows = run_native or any(_is_windows_only_test(path) for path in files)
     # The installer consumes a Windows player package. Every existing Windows
     # runtime input therefore routes it too; installer-only changes also run the
     # Windows runtime build so that job can publish the package artifact.
-    run_installer = run_windows or any(_is_installer(path) for path in files)
+    run_installer = run_native or any(_is_installer(path) for path in files)
     # A normal main push is already covered by its PR. Workflow changes are
     # exceptional: validate the new workflow itself on the default branch too.
     # A light pull-request run (a Draft, or any head ``pull_request_tier`` calls

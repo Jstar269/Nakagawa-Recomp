@@ -465,6 +465,177 @@ def makefile_coupled_modules(modules: Iterable[str], tools_dir: Path = TOOLS_DIR
     return sorted(selected)
 
 
+# ---- Windows-only tests ------------------------------------------------------------
+#
+# python_tools runs every module on Linux, so a test that skips on every host but
+# Windows never runs there.  ``windows_only_tests`` names those tests statically, so a
+# hosted Windows step can run exactly them, and a new one joins that step without an
+# edit.  A test is Windows-only when
+#
+# * it, or its class, is decorated ``skipUnless(P)`` where P holds only on Windows
+#   (``os.name == "nt"``, ``sys.platform == "win32"``, ``sys.platform.startswith("win")``,
+#   ``platform.system() == "Windows"``, a module-level name bound to one of those, the
+#   negation of a host-only condition below, or an ``and`` with one of them as an operand),
+#   or ``skipIf(Q)`` where Q holds on every other host (``os.name != "nt"`` and the other
+#   negations, ``os.name == "posix"``, or an ``or`` with one of them as an operand);
+# * a top-level ``if Q:`` statement of the test method (or of its class's ``setUp`` or
+#   ``setUpClass``, for the whole class) skips (``self.skipTest(...)``, ``raise
+#   unittest.SkipTest(...)``), with Q as above;
+# * the module's own top level skips that way (the whole module).
+#
+# A skip whose condition is a tool's presence (``shutil.which("mingw32-make")``) is not
+# a platform condition and is not selected.
+
+#: Modules a hosted Windows step already runs whole, with the step; ``--windows-only``
+#: leaves them out (tools/test_public_ci_wiring.py checks each step still runs its module).
+WINDOWS_ONLY_RUN_ELSEWHERE = {
+    "test_installer": "Run the installer tests with the pinned compiler",
+}
+
+_PLATFORM_SUBJECTS = frozenset({"os.name", "sys.platform", "platform.system()"})
+_WINDOWS_VALUES = frozenset({"nt", "win32", "Windows"})
+
+
+def _platform_subject(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        name = f"{node.value.id}.{node.attr}"
+        return name if name in _PLATFORM_SUBJECTS else None
+    if (isinstance(node, ast.Call) and not node.args and not node.keywords
+            and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+            and f"{node.func.value.id}.{node.func.attr}()" in _PLATFORM_SUBJECTS):
+        return f"{node.func.value.id}.{node.func.attr}()"
+    return None
+
+
+def _platform_comparison(node: ast.expr) -> tuple[str, ast.cmpop, str] | None:
+    """``(subject, operator, value)`` of ``os.name == "nt"`` and its mirror image."""
+    if not (isinstance(node, ast.Compare) and len(node.ops) == 1 and len(node.comparators) == 1):
+        return None
+    left, right = node.left, node.comparators[0]
+    for subject_node, value_node in ((left, right), (right, left)):
+        subject = _platform_subject(subject_node)
+        if subject and isinstance(value_node, ast.Constant) and isinstance(value_node.value, str):
+            return subject, node.ops[0], value_node.value
+    return None
+
+
+class _PlatformConditions:
+    """Classifies conditions, with the module-level names bound to a classified one."""
+
+    def __init__(self, tree: ast.Module) -> None:
+        self.windows_names: set[str] = set()
+        self.other_host_names: set[str] = set()
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target, value = node.targets[0], node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                target, value = node.target, node.value
+            else:
+                continue
+            if isinstance(target, ast.Name):
+                if self.only_on_windows(value):
+                    self.windows_names.add(target.id)
+                elif self.on_every_other_host(value):
+                    self.other_host_names.add(target.id)
+
+    def only_on_windows(self, node: ast.expr) -> bool:
+        """True when ``node`` can hold only on a Windows host."""
+        comparison = _platform_comparison(node)
+        if comparison:
+            _, op, value = comparison
+            return isinstance(op, ast.Eq) and value in _WINDOWS_VALUES
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "startswith" and _platform_subject(node.func.value) == "sys.platform"
+                and len(node.args) == 1 and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "win"):
+            return True
+        if isinstance(node, ast.Name):
+            return node.id in self.windows_names
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+            return any(self.only_on_windows(value) for value in node.values)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return self.on_every_other_host(node.operand)
+        return False
+
+    def on_every_other_host(self, node: ast.expr) -> bool:
+        """True when ``node`` holds on every host that is not Windows."""
+        comparison = _platform_comparison(node)
+        if comparison:
+            subject, op, value = comparison
+            if isinstance(op, ast.NotEq):
+                return value in _WINDOWS_VALUES
+            return isinstance(op, ast.Eq) and subject == "os.name" and value == "posix"
+        if isinstance(node, ast.Name):
+            return node.id in self.other_host_names
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+            return any(self.on_every_other_host(value) for value in node.values)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return self.only_on_windows(node.operand)
+        return False
+
+    def windows_only_decorator(self, decorators: list[ast.expr]) -> bool:
+        for decorator in decorators:
+            if not (isinstance(decorator, ast.Call) and decorator.args):
+                continue
+            func = decorator.func
+            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+            if name == "skipUnless" and self.only_on_windows(decorator.args[0]):
+                return True
+            if name == "skipIf" and self.on_every_other_host(decorator.args[0]):
+                return True
+        return False
+
+    def windows_only_body(self, body: list[ast.stmt]) -> bool:
+        """True when a top-level ``if`` in ``body`` skips on every host but Windows."""
+        for statement in body:
+            if not (isinstance(statement, ast.If) and statement.body
+                    and self.on_every_other_host(statement.test)):
+                continue
+            first = statement.body[0]
+            if isinstance(first, ast.Raise) and first.exc is not None:
+                raised = first.exc.func if isinstance(first.exc, ast.Call) else first.exc
+                if (isinstance(raised, ast.Attribute) and raised.attr == "SkipTest") or (
+                        isinstance(raised, ast.Name) and raised.id == "SkipTest"):
+                    return True
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Call)
+                    and isinstance(first.value.func, ast.Attribute) and first.value.func.attr == "skipTest"):
+                return True
+        return False
+
+
+def windows_only_tests(modules: Iterable[str], tools_dir: Path = TOOLS_DIR) -> list[str]:
+    """Return the unittest names (``module``, ``module.Class`` or ``module.Class.method``) of
+    the Windows-only tests in ``modules``, sorted; a test inside a selected class or module is
+    not named again."""
+
+    selected: list[str] = []
+    for module in sorted(modules):
+        path = tools_dir / f"{module}.py"
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError) as exc:
+            raise ShardDataError(f"cannot read {path.name} for the Windows-only selection: {exc}") from exc
+        conditions = _PlatformConditions(tree)
+        if conditions.windows_only_body(tree.body):
+            selected.append(module)
+            continue
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            methods = [item for item in node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            setup = [item for item in methods if item.name in ("setUp", "setUpClass")]
+            if conditions.windows_only_decorator(node.decorator_list) or any(
+                    conditions.windows_only_body(item.body) for item in setup):
+                selected.append(f"{module}.{node.name}")
+                continue
+            for item in methods:
+                if item.name.startswith("test") and (
+                        conditions.windows_only_decorator(item.decorator_list)
+                        or conditions.windows_only_body(item.body)):
+                    selected.append(f"{module}.{node.name}.{item.name}")
+    return selected
+
+
 def _plan_summary(plan: ShardPlan) -> dict[str, object]:
     return {
         "num_shards": len(plan.shards),
@@ -482,6 +653,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     mode.add_argument("--shard", type=int, help="print this shard's module names, one per line")
     mode.add_argument("--plan", action="store_true", help="print the whole plan as JSON")
     mode.add_argument("--check", action="store_true", help="validate the weight data and the plan")
+    mode.add_argument(
+        "--windows-only",
+        action="store_true",
+        help="print the Windows-only tests no other hosted Windows step runs, one unittest name per line",
+    )
     parser.add_argument("--num-shards", type=int, default=DEFAULT_NUM_SHARDS)
     parser.add_argument(
         "--select",
@@ -492,6 +668,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
     parser.add_argument("--tools-dir", type=Path, default=TOOLS_DIR, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+
+    if args.windows_only:
+        try:
+            modules = [module for module in discover_modules(args.tools_dir)
+                       if module not in WINDOWS_ONLY_RUN_ELSEWHERE]
+            tests = windows_only_tests(modules, args.tools_dir)
+            if not tests:
+                raise ShardDataError("the Windows-only selection is empty")
+        except ShardDataError as exc:
+            print(f"ci_test_shards: {exc}", file=sys.stderr)
+            return 2
+        print(f"ci_test_shards: {len(tests)} Windows-only tests", file=sys.stderr)
+        for test in tests:
+            print(test)
+        return 0
 
     try:
         data = load_weight_data(args.weights)
