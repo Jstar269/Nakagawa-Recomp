@@ -1687,12 +1687,12 @@ class PackageCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             lock_path = Path(tmp) / "shared.lock"
             with open(lock_path, "a+b") as holder, open(lock_path, "a+b") as contender:
-                nk_cli._set_first_byte_lock(holder, unlock=False)
+                nk_cli._try_lock_file(holder)
                 with self.assertRaises(OSError):
-                    nk_cli._set_first_byte_lock(contender, unlock=False)
-                nk_cli._set_first_byte_lock(holder, unlock=True)
-                nk_cli._set_first_byte_lock(contender, unlock=False)
-                nk_cli._set_first_byte_lock(contender, unlock=True)
+                    nk_cli._try_lock_file(contender)
+                nk_cli._unlock_file(holder)
+                nk_cli._try_lock_file(contender)
+                nk_cli._unlock_file(contender)
 
     def test_second_build_of_a_title_is_refused_while_one_runs(self) -> None:
         import argparse
