@@ -207,11 +207,15 @@ bool nk_ach_token_login_due(NkAch *ach, uint64_t now_ms);
  * copy) and the operating system's. False as nk_ach_begin_login is. */
 bool nk_ach_begin_login_with_password(NkAch *ach, const char *username, const char *password);
 bool nk_ach_copy_user_token(const NkAch *ach, char *out, size_t out_size);
+/* The signed-in account's name as the server gave it, cleaned as its other text is (control,
+ * bidirectional and invisible characters removed); false when none, or when out is too small. */
 bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size);
 /* Ends the session and keeps the pending unlocks: the stored credential, and so the account,
  * stays (the Achievements switch turned off). The bridge sends those unlocks itself after the
  * account's next sign-in (nk_ach_replay_pending_unlocks), as it does once the switch is off
- * (nk_ach_set_online): rcheevos gives up a retry that finds nobody signed in or is refused. */
+ * (nk_ach_set_online): rcheevos gives up a retry that finds nobody signed in or is refused. That
+ * sign-in starts on a fresh rc_client, so rcheevos' own retries scheduled before the logout never
+ * send an unlock a second time. A game load still on its way is abandoned and raises nothing. */
 void nk_ach_logout(NkAch *ach);
 /* The user's Sign out: ends the session and discards every pending unlock, returning how many.
  * The queue is the signed-out account's, and nothing of that account stays on this PC: rcheevos'

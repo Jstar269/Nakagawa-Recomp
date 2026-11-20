@@ -85,7 +85,12 @@ struct NkAch {
     uint64_t token_retry_after_ms; /* 0: the next nk_ach_token_login_due starts the wait */
     /* rc_client lives as long as one account (ach_client_replace). */
     uint32_t client_generation;      /* counts the accounts ended (ach_account_requests_end) */
-    bool client_replace_due;         /* a replacement failed: no sign-in until one is made */
+    /* The next sign-in starts on a fresh rc_client: an account ended (nk_ach_logout), or a
+     * replacement failed, and then no sign-in happens until one is made. */
+    bool client_replace_due;
+    /* The current game load: rc_client hands it back to ach_load_done, which raises nothing for
+     * a load that a later load, an unload or the account's end abandoned. */
+    uint32_t load_generation;
     char session_owner[NK_ACH_ACCOUNT_TAG_SIZE]; /* the account this rc_client signed in, or "" */
     const void *sending_call;        /* the AchCall ach_server_call is sending, or NULL */
     /* The transport carries one request at a time (ach_send): the rest wait here, in order. */
@@ -266,18 +271,22 @@ static size_t ach_utf8_char(const unsigned char *p, uint32_t *code_point) {
 }
 
 /* Characters that change how the text around them is shown and are never part of a title or a
- * message: C0 controls and DEL, C1 controls, and the bidirectional controls (LRM, RLM, ALM, the
- * embeddings, overrides and isolates). */
+ * message: C0 controls and DEL, C1 controls, the bidirectional controls (LRM, RLM, ALM, the
+ * embeddings, overrides and isolates), and the invisible zero-width space, word joiner and
+ * byte-order mark. The zero-width joiner and non-joiner stay: emoji sequences and several
+ * scripts are written with them. */
 static bool ach_control_character(uint32_t code_point) {
     return code_point < 0x20u || (code_point >= 0x7Fu && code_point <= 0x9Fu) ||
-           code_point == 0x061Cu || code_point == 0x200Eu || code_point == 0x200Fu ||
+           code_point == 0x061Cu || code_point == 0x200Bu || code_point == 0x200Eu ||
+           code_point == 0x200Fu || code_point == 0x2060u || code_point == 0xFEFFu ||
            (code_point >= 0x202Au && code_point <= 0x202Eu) ||
            (code_point >= 0x2066u && code_point <= 0x2069u);
 }
 
 /* Copies server text (RetroAchievements' titles, descriptions and messages, which reach the toast,
  * the status line and the game's page) into out[0..size) as clean UTF-8: a byte that does not
- * begin a well-formed character is dropped; a tab, line feed or carriage return becomes a space;
+ * begin a well-formed character is dropped; a tab, line feed, carriage return, or line or
+ * paragraph separator becomes a space;
  * every other control character above is removed. The copy is whole when it fits, else it ends
  * at the last whole character that fits. NULL text copies as empty. */
 static void ach_copy_text(char *out, size_t size, const char *text) {
@@ -291,7 +300,8 @@ static void ach_copy_text(char *out, size_t size, const char *text) {
             p++;
             continue;
         }
-        if (code_point == '\t' || code_point == '\n' || code_point == '\r') {
+        if (code_point == '\t' || code_point == '\n' || code_point == '\r' ||
+            code_point == 0x2028u || code_point == 0x2029u) {
             if (used + 1u >= size) break;
             out[used++] = ' ';
         } else if (!ach_control_character(code_point)) {
@@ -385,9 +395,9 @@ static bool ach_pending_remove(NkAch *ach, const char *game_hash, uint32_t id,
 /* rcheevos gives an award up when its retry finds nobody signed in (rc_client.c,
  * rc_client_award_achievement_server_call) or the bridge refuses it (a client error, which it
  * never retries). So once the session ends or the switch goes off, every unlock in the queue is
- * the bridge's to send: ach_replay_pending_unlocks sends it after the next sign-in. Should
- * rcheevos' own retry still reach the server too, the server keeps one unlock and both answers
- * take the same record out of the queue. */
+ * the bridge's to send: ach_replay_pending_unlocks sends it after the next sign-in. rcheevos'
+ * own retries do not reach the server as well: the next sign-in starts on a fresh rc_client
+ * (nk_ach_logout), so each unlock is sent once. */
 static void ach_queue_take_over(NkAch *ach) {
     for (size_t i = 0u; i < ach->pending_unlock_count; i++) ach->pending_unlocks[i].restored = true;
 }
@@ -878,6 +888,7 @@ static rc_client_t *ach_client_new(NkAch *ach) {
  * ach_pending_replay_done), so none reaches the next account's queue. */
 static void ach_account_requests_end(NkAch *ach) {
     ach->client_generation++;
+    ach->load_generation++;
     ach->pending_replay_inflight = false;
     AchOutbound *waiting = ach->outbound_head;
     ach->outbound_head = NULL;
@@ -1110,12 +1121,10 @@ bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size) {
     bool copied = false;
     ach_enter(ach);
     const rc_client_user_t *user = rc_client_get_user_info(ach->client);
-    if (user && user->username) {
-        const size_t length = strlen(user->username);
-        if (length != 0u && length < out_size) {
-            memcpy(out, user->username, length + 1u);
-            copied = true;
-        }
+    if (user && user->username && strlen(user->username) < out_size) {
+        /* The server's text, shown on the account row: cleaned as every other server text is. */
+        ach_copy_text(out, out_size, user->username);
+        copied = out[0] != '\0';
     }
     ach_leave(ach);
     return copied;
@@ -1125,8 +1134,15 @@ void nk_ach_logout(NkAch *ach) {
     if (!ach) return;
     ach_enter(ach);
     ach_token_retry_end(ach);
+    ach->load_generation++; /* the logout unloads the game and abandons a load */
     rc_client_logout(ach->client);
     ach_queue_take_over(ach);
+    /* rc_client keeps its scheduled award retries through a logout and sends them as whoever
+     * signs in next, so with the same account back an unlock went out twice: from rc_client and
+     * from the bridge, which owns it now. The next sign-in starts on a fresh rc_client instead
+     * (ach_client_ready_for). Not here: answers still on their way to this one, a sign-in's
+     * included, still arrive as events. */
+    ach->client_replace_due = true;
     ach_leave(ach);
 }
 
@@ -1154,9 +1170,12 @@ size_t nk_ach_sign_out(NkAch *ach) {
 
 static void RC_CCONV ach_load_done(int result, const char *error_message,
                                    rc_client_t *client, void *userdata) {
-    (void)userdata;
     NkAch *ach = (NkAch *)rc_client_get_userdata(client);
     if (!ach) return;
+    /* A load a later load, an unload or the account's end abandoned: rcheevos answers it
+     * RC_ABORTED, and its GAME_FAILED would end the frames and overwrite the status of the
+     * game that is running now. */
+    if ((uintptr_t)userdata != (uintptr_t)ach->load_generation) return;
     const rc_client_game_t *game = rc_client_get_game_info(client);
     if (result == RC_OK && game && game->console_id != NK_ACH_CONSOLE_PSP) {
         /* A load by hash takes the console from the server's answer; the bridge reads guest
@@ -1192,7 +1211,9 @@ bool nk_ach_begin_load_game(NkAch *ach, const char *hash) {
     ach_enter(ach);
     snprintf(ach->game_hash, sizeof ach->game_hash, "%s", hash);
     ach_softcore(ach);
-    (void)rc_client_begin_load_game(ach->client, hash, ach_load_done, NULL);
+    ach->load_generation++;
+    (void)rc_client_begin_load_game(ach->client, hash, ach_load_done,
+                                    (void *)(uintptr_t)ach->load_generation);
     ach_leave(ach);
     return true;
 }
@@ -1202,7 +1223,8 @@ void nk_ach_unload_game(NkAch *ach) {
     ach_enter(ach);
     /* rc_client never reaches its completed-set state here (ach_award_answer_without_completion),
      * so unloading cannot raise a mastery event with no game. rc_client takes the game's ping off
-     * its schedule; its retries of an award stay. */
+     * its schedule; its retries of an award stay. A load still on its way is abandoned. */
+    ach->load_generation++;
     rc_client_unload_game(ach->client);
     ach_leave(ach);
 }

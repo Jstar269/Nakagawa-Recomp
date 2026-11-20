@@ -2408,6 +2408,75 @@ static void test_unlock_refused_while_off_is_sent_after_sign_in(uint8_t *ram) {
     nk_ach_destroy(ach);
 }
 
+/* Review 2026-11-20 (#2847, B): an award rc_client still has scheduled for a retry when the
+ * switch goes off is the bridge's to send after the next sign-in (ach_queue_take_over). When the
+ * same account signs in again before that retry fires, rc_client must not send it too: exactly
+ * one award request for the unlock follows the sign-in. */
+static void test_unlock_is_sent_once_after_the_switch_cycles(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = NK_ACH_HTTP_RETRY;
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    g_clock_ms = 1000000u;
+    use_fake_clock(ach);
+    earn_five(ach, &fake, ram, "Player", "TOKEN", HASH, false);
+    CHECK(nk_ach_pending_unlock_count(ach) == 1u, "the unsent unlock is queued");
+    /* Off and on again at once: rc_client's scheduled retry has not fired. */
+    nk_ach_set_online(ach, false);
+    nk_ach_logout(ach);
+    fake.award_status = 200;
+    nk_ach_set_online(ach, true);
+    const int awards_before = count_requests(&fake, "r=awardachievement&");
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN") && nk_ach_logged_in(ach), "signed in again");
+    use_fake_clock(ach);
+    nk_ach_replay_pending_unlocks(ach, 5000000u);
+    idle_for(ach, 130000u);
+    const int awards_after = count_requests(&fake, "r=awardachievement&") - awards_before;
+    CHECK(awards_after == 1,
+          "exactly one award request for the unlock follows the sign-in (%d)", awards_after);
+    CHECK(nk_ach_pending_unlock_count(ach) == 0u, "the unlock left the queue (%u queued)",
+          (unsigned)nk_ach_pending_unlock_count(ach));
+    nk_ach_destroy(ach);
+}
+
+/* Review 2026-11-20 (#2847, C): the account name the player shows passes the same filter as
+ * other server text, and line and paragraph separators and invisible zero-width characters are
+ * cleaned too. Zero-width joiners stay: emoji sequences and several scripts need them. */
+static void test_account_name_and_separators_are_clean(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.login_user = "Pla\\u202eyer\\u0007"; /* JSON escapes, as the server writes them */
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN") && nk_ach_logged_in(ach), "signed in");
+    char name[64];
+    CHECK(nk_ach_copy_user_name(ach, name, sizeof name) && strcmp(name, "Player") == 0,
+          "the account name is cleaned: \"%s\"", name);
+    nk_ach_destroy(ach);
+
+    memset(&fake, 0, sizeof fake);
+    fake.login_body = "{\"Success\":false,\"Error\":\"One\\u2028two\\u2029three "
+                      "z\\u200bw\\u2060s\\ufeffp j\\u200dn\\u200cr\"}";
+    ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    (void)nk_ach_begin_login(ach, "Player", "TOKEN");
+    NkAchEvent ev[8];
+    const size_t got = take(ach, ev, 8);
+    const int failed = has_event(ev, got, NK_ACH_EVENT_LOGIN_FAILED);
+    CHECK(failed >= 0 &&
+              strcmp(ev[failed].message,
+                     "One two three zwsp j\xe2\x80\x8dn\xe2\x80\x8cr") == 0,
+          "separators become spaces, ZWSP, word joiner and BOM go, joiners stay: \"%s\"",
+          failed >= 0 ? ev[failed].message : "");
+    nk_ach_destroy(ach);
+}
+
 /* Audit F-282bdd0c: a guest reset. Without nk_ach_reset, the delta trigger kept the 4 it saw
  * before the reset, and the first 5 after it unlocks "Delta" for a change that never happened. */
 static void test_reset_forgets_the_old_guest(uint8_t *ram) {
@@ -3397,6 +3466,66 @@ static void test_progress_chunk_cannot_wrap(uint8_t *ram) {
     nk_ach_destroy(ach);
 }
 
+/* Review 2026-11-20 (#2847, A): the answer to a load that is no longer the current one raises
+ * nothing. rcheevos calls an abandoned load back RC_ABORTED ("The requested game is no longer
+ * active") when game B is loaded over it, and when its session answer arrives after
+ * nk_ach_unload_game; the player ends the frames of whatever channel is live on GAME_FAILED, so
+ * that answer must not reach it. The transport carries one request at a time, so A's answer
+ * comes before B's. Routes:
+ *   0: A unloaded while its set is on its way, then B;
+ *   1: A unloaded while its session is on its way, then B;
+ *   2: B loaded over A while A's set is on its way;
+ *   3: A unloaded while its session is on its way, and nothing after (the status line keeps
+ *      what it said). */
+static void test_stale_load_answer_raises_nothing(uint8_t *ram) {
+    for (int route = 0; route < 4; route++) {
+        Deferred d;
+        NkAch *ach = deferred_login(ram, &d);
+        if (!ach) return;
+        NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+        size_t n = 0u;
+        (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+        CHECK(nk_ach_begin_load_game(ach, HASH), "route %d: game A starts loading", route);
+        if (route == 1 || route == 3)
+            CHECK(deliver(&d, "r=achievementsets&", 200, k_sets), "route %d: A's set arrives", route);
+        if (route != 2) nk_ach_unload_game(ach);
+        if (route != 3) CHECK(nk_ach_begin_load_game(ach, HASH2), "route %d: game B starts", route);
+        n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+        int failed = has_event(ev, n, NK_ACH_EVENT_GAME_FAILED);
+        CHECK(failed < 0, "route %d: abandoning game A's load raises no GAME_FAILED (\"%s\")",
+              route, failed >= 0 ? ev[failed].message : "");
+        CHECK(deliver(&d, route == 1 || route == 3 ? "r=startsession&" : "r=achievementsets&", 200,
+                      route == 1 || route == 3 ? k_session : k_sets),
+              "route %d: game A's last request is answered", route);
+        n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+        failed = has_event(ev, n, NK_ACH_EVENT_GAME_FAILED);
+        CHECK(failed < 0, "route %d: the answer to game A's abandoned load raises no GAME_FAILED "
+                          "(\"%s\")", route, failed >= 0 ? ev[failed].message : "");
+        CHECK(has_event(ev, n, NK_ACH_EVENT_GAME_LOADED) < 0,
+              "route %d: nor does it load anything", route);
+        if (route != 3) {
+            CHECK(deliver(&d, "r=achievementsets&", 200, k_sets),
+                  "route %d: game B's set request is answered", route);
+            CHECK(deliver(&d, "r=startsession&", 200, k_session),
+                  "route %d: game B's session starts", route);
+            n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+            CHECK(has_event(ev, n, NK_ACH_EVENT_GAME_LOADED) >= 0 &&
+                      has_event(ev, n, NK_ACH_EVENT_GAME_FAILED) < 0 && nk_ach_game_loaded(ach),
+                  "route %d: game B loads", route);
+            memset(ram, 0, USER_RAM_SIZE);
+            for (int i = 0; i < 4; i++) nk_ach_frame(ach);
+            ram[ACH_ADDR] = 5;
+            nk_ach_frame(ach);
+            n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+            const int unlocked = has_event(ev, n, NK_ACH_EVENT_UNLOCKED);
+            CHECK(unlocked >= 0 && ev[unlocked].id == 5501u,
+                  "route %d: game B's frames run and its achievement unlocks", route);
+        }
+        drain(&d);
+        nk_ach_destroy(ach);
+    }
+}
+
 typedef struct LbEntries {
     int calls;
     int result;
@@ -3516,6 +3645,9 @@ int main(int argc, char **argv) {
     RUN_RAM(test_dropped_events_are_counted);
     RUN_RAM(test_server_text_is_clean_utf8);
     RUN_RAM(test_unlock_refused_while_off_is_sent_after_sign_in);
+    RUN_RAM(test_unlock_is_sent_once_after_the_switch_cycles);
+    RUN_RAM(test_account_name_and_separators_are_clean);
+    RUN_RAM(test_stale_load_answer_raises_nothing);
     RUN_RAM(test_reset_forgets_the_old_guest);
     RUN_RAM(test_progress_comes_back_with_a_state);
     RUN_RAM(test_leaderboard_entries_without_login);
