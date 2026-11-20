@@ -12,9 +12,11 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -231,6 +233,101 @@ class NmFailureTests(unittest.TestCase):
         names, found, unreadable = proof.library_symbols("gcc", sys.executable)
         self.assertEqual((names, found), (set(), []))
         self.assertTrue(unreadable, "gcc found no link library to read")
+
+
+SYNTHETIC_NM_SAMPLE = "\n".join(
+    [
+        "",
+        "   ",
+        "file.o:",
+        "0000000000000000 T global_func",
+        "0000000000000010 t local_func",
+        "0000000000000020 D global_data",
+        "0000000000000024 d local_data",
+        "                 U undef_func",
+        "0000000000000030 W weak_defined",
+        "0000000000000038 V weak_obj",
+        "                 w weak_undef",
+        "                 A no_addr_sym",
+        "0000000000000040 R .refptr.imported_var",
+        "0000000000000048 T .refptr.imported_fn",
+        "0000000000000050 T ver_fn@VER_1",
+        "0000000000000058 T default_ver_fn@@GLIBC_2.14",
+        "0000000000000060 0000000000000010 T four_field_sym",
+        "0000000000000070 TT multi_char_type",
+    ]
+) + "\n"
+
+
+class NmParsingPinTests(unittest.TestCase):
+    """Pin hle_move_proof._nm output on the same synthetic nm sample."""
+
+    def _run_with_sample(self, *, dynamic: bool) -> tuple[list[str], set[str]]:
+        captured: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            captured.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout=SYNTHETIC_NM_SAMPLE, stderr="")
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            symbols = proof._nm(Path("file.o"), "fake-nm", dynamic=dynamic)
+        return captured[0], symbols
+
+    def test_nm_static_pins_current_behavior(self) -> None:
+        cmd, symbols = self._run_with_sample(dynamic=False)
+        self.assertEqual(cmd, ["fake-nm", "-g", "--defined-only", "file.o"])
+        self.assertEqual(
+            symbols,
+            {
+                "global_func",
+                "local_func",
+                "global_data",
+                "local_data",
+                "weak_defined",
+                "weak_obj",
+                "ver_fn",
+                "default_ver_fn",
+                "four_field_sym",
+            },
+        )
+
+    def test_nm_dynamic_pins_current_behavior(self) -> None:
+        cmd, symbols = self._run_with_sample(dynamic=True)
+        self.assertEqual(cmd, ["fake-nm", "-g", "--defined-only", "-D", "file.o"])
+        self.assertEqual(
+            symbols,
+            {
+                "global_func",
+                "local_func",
+                "global_data",
+                "local_data",
+                "weak_defined",
+                "weak_obj",
+                "ver_fn",
+                "default_ver_fn",
+                "four_field_sym",
+            },
+        )
+
+
+class SharedNmParserDelegationTests(unittest.TestCase):
+    """Verify hle_move_proof._nm delegates to the shared nm_defined_symbols parser."""
+
+    def test_nm_delegates_to_shared_parser(self) -> None:
+        import hle_focus_check  # noqa: PLC0415
+
+        with mock.patch.object(hle_focus_check, "nm_defined_symbols", return_value={"ok_sym"}) as spy:
+            result = proof._nm(Path("libfoo.so"), "fake-nm", dynamic=True)
+        self.assertEqual(result, {"ok_sym"})
+        spy.assert_called_once_with(
+            Path("libfoo.so"),
+            "fake-nm",
+            dynamic=True,
+            local_too=False,
+            text_only=False,
+            strip_version=True,
+            strict_columns=False,
+        )
 
 
 class FlattenTests(unittest.TestCase):

@@ -37,6 +37,77 @@ class FocusError(Exception):
     """The check could not be made, which is a failure, not a pass."""
 
 
+def parse_nm_defined_symbols(
+    output: str,
+    *,
+    text_only: bool = False,
+    strip_version: bool = False,
+    strict_columns: bool = True,
+) -> set[str]:
+    """Parse symbol names from ``nm --defined-only`` output.
+
+    Skips MinGW ``.refptr.`` import pseudo-symbols. When ``strict_columns`` is true
+    (``hle_focus_check``), only 3-field ``<addr> <type> <name>`` lines are accepted;
+    when false (``hle_move_proof``), lines with 3 or more fields whose penultimate token
+    is a 1-character type code are accepted. When ``text_only`` is true, only code
+    symbols (``T`` / ``t``) are kept. When ``strip_version`` is true, ELF symbol version
+    suffixes (``@VER`` / ``@@VER``) are stripped.
+    """
+    names: set[str] = set()
+    for line in output.splitlines():
+        parts = line.split()
+        if strict_columns:
+            if len(parts) != 3:
+                continue
+            sym_type, name = parts[1], parts[2]
+        else:
+            if len(parts) < 3 or len(parts[-2]) != 1:
+                continue
+            sym_type, name = parts[-2], parts[-1]
+        if name.startswith(".refptr."):   # MinGW import pseudo-symbols
+            continue
+        if text_only and sym_type not in ("T", "t"):
+            continue
+        if strip_version:
+            name = name.split("@", 1)[0]
+        names.add(name)
+    return names
+
+
+def nm_defined_symbols(
+    path: Path,
+    nm: str,
+    *,
+    dynamic: bool = False,
+    local_too: bool = False,
+    text_only: bool = False,
+    strip_version: bool = False,
+    strict_columns: bool = True,
+) -> set[str]:
+    """Run ``nm --defined-only`` on ``path`` and return its parsed symbol names.
+
+    Raises ``RuntimeError`` on a nonzero ``nm`` exit (an unreadable object must not
+    silently look empty).
+    """
+    command = [nm, *([] if local_too else ["-g"]), "--defined-only", *(["-D"] if dynamic else []), str(path)]
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"{' '.join(command)} failed (exit {result.returncode}):\n{result.stderr[-2000:]}")
+    return parse_nm_defined_symbols(
+        result.stdout,
+        text_only=text_only,
+        strip_version=strip_version,
+        strict_columns=strict_columns,
+    )
+
+
 def defined_symbols(path: Path, nm: str, local_too: bool = False, text_only: bool = False) -> set[str]:
     """Symbols an object or executable defines, from ``nm --defined-only``.
 
@@ -46,21 +117,18 @@ def defined_symbols(path: Path, nm: str, local_too: bool = False, text_only: boo
     data names collide with unrelated statics of the runtime objects).
     """
     try:
-        command = [nm, *([] if local_too else ["-g"]), "--defined-only", str(path)]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        return nm_defined_symbols(
+            path,
+            nm,
+            local_too=local_too,
+            text_only=text_only,
+            strip_version=False,
+            strict_columns=True,
+        )
     except OSError as error:
         raise FocusError(f"cannot run {nm}: {error}") from error
-    if result.returncode != 0:
-        raise FocusError(f"{nm} failed on {path}: {result.stderr.strip()}")
-    names: set[str] = set()
-    for line in result.stdout.splitlines():
-        fields = line.split()
-        if len(fields) != 3 or fields[2].startswith(".refptr."):   # MinGW import pseudo-symbols
-            continue
-        if text_only and fields[1] not in ("T", "t"):
-            continue
-        names.add(fields[2])
-    return names
+    except RuntimeError as error:
+        raise FocusError(str(error)) from error
 
 
 def stem(source: str) -> str:
