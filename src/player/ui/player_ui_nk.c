@@ -1510,6 +1510,19 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
                      bytes >= 1024u ? "KB" : "bytes");
             model.report_lines[model.report_line_count++] = player->report_lines[i];
         }
+        model.report_file_total = report->file_total > 0 ? (size_t)report->file_total : 0u;
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+        {
+            static size_t reported_more = (size_t)-1;
+            size_t more = player_ui_report_more_count(&model);
+            if (more != reported_more) {
+                reported_more = more;
+                printf("[PLAYER_UI_TEST] next_ui_report_more lines=%zu total=%zu more=%zu\n",
+                       model.report_line_count, model.report_file_total, more);
+                fflush(stdout);
+            }
+        }
+#endif
     }
     model.logical_width = scale.logical_w;
     model.logical_height = scale.logical_h;

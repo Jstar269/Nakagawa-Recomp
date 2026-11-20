@@ -492,7 +492,8 @@ typedef struct {
     char path[NK_MAX_PATH];     /* the written ZIP */
     char message[480];          /* why it failed */
     char command[160];          /* what to run by hand */
-    int file_count;
+    int file_count;             /* entries kept below, at most PLAYER_REPORT_MAX_FILES */
+    int file_total;             /* every file the ZIP holds, kept or not */
     char file_names[PLAYER_REPORT_MAX_FILES][PLAYER_REPORT_FILE_NAME];
     unsigned long long file_bytes[PLAYER_REPORT_MAX_FILES];
 } PlayerReportState;

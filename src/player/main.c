@@ -1525,12 +1525,16 @@ static bool player_report_read_answer(const char *path, PlayerReportState *out) 
     files = nk_json_obj_get(root, "files");
     if (files && nk_json_is_array(files)) {
         size_t count = nk_json_array_count(files);
-        for (size_t i = 0u; i < count && out->file_count < PLAYER_REPORT_MAX_FILES; ++i) {
+        /* The page lists the first PLAYER_REPORT_MAX_FILES; file_total counts every
+           file, so its "and N more" counts what the ZIP really holds. */
+        for (size_t i = 0u; i < count; ++i) {
             NkJsonNode *item = nk_json_array_get(files, i);
             NkJsonNode *name = item ? nk_json_obj_get(item, "name") : NULL;
             NkJsonNode *bytes = item ? nk_json_obj_get(item, "bytes") : NULL;
             double value = 0.0;
             if (!name || !nk_json_is_string(name)) continue;
+            ++out->file_total;
+            if (out->file_count >= PLAYER_REPORT_MAX_FILES) continue;
             snprintf(out->file_names[out->file_count], PLAYER_REPORT_FILE_NAME, "%s",
                      nk_json_get_string(name));
             if (bytes && nk_json_get_number(bytes, &value) && value > 0.0) {
@@ -1622,6 +1626,7 @@ static int SDLCALL player_report_thread_main(void *userdata) {
         player_report_error_line(job->output_path, why, sizeof(why));
         out->phase = PLAYER_REPORT_FAILED;
         out->file_count = 0;
+        out->file_total = 0;
         out->path[0] = '\0';
         snprintf(out->message, sizeof(out->message), "%s%sRun this in a terminal to see more: %s",
                  why, why[0] != '\0' ? " " : "", out->command);
@@ -4360,9 +4365,16 @@ typedef struct PlayerRun {
     bool build_check_pending;
     bool running;
     uint64_t last_tick;
+    /* This frame's clock step (player_frame_begin): the one clock the Controls page's
+       capture and calibration run on. */
+    uint32_t frame_delta_ms;
     /* One launcher per data folder (#2006). */
     NkSingleInstance instance;
 } PlayerRun;
+
+/* The longest clock step one frame gives the stick calibration: a stalled frame (a window
+   drag, a slow disk) must not end its timed rest sampling at once. */
+#define PLAYER_CALIBRATION_MAX_STEP_MS 100u
 
 /* What the startup and window steps return when the run goes on; any other value is
    the process's exit code. */
@@ -5606,6 +5618,7 @@ static void player_frame_begin(PlayerRun *run) {
     uint64_t now_tick = SDL_GetTicks();
     uint32_t delta_ms = (uint32_t)(now_tick >= run->last_tick ? (now_tick - run->last_tick) : 0);
     run->last_tick = now_tick;
+    run->frame_delta_ms = delta_ms;
     if (app->active_view == VIEW_CONTROLLER_SETTINGS && input_settings_is_capturing(&app->input_settings)) {
         input_settings_update_capture(&app->input_settings, delta_ms > 0 ? delta_ms : 1);
     }
@@ -6040,17 +6053,16 @@ static void player_frame_game_session(PlayerRun *run) {
         memset(app->host_axes_live, 0, sizeof(app->host_axes_live));
     }
 
-    /* Update guided analog calibration when active (#357) */
-    if (app->active_view == VIEW_CONTROLLER_SETTINGS) {
-        static uint64_t s_last_cal_tick = 0;
-        uint64_t cur_tick = SDL_GetTicks();
-        if (s_last_cal_tick == 0) s_last_cal_tick = cur_tick;
-        uint32_t dt_ms = (uint32_t)(cur_tick - s_last_cal_tick);
-        s_last_cal_tick = cur_tick;
-        if (input_settings_is_calibrating(&app->input_settings)) {
-            input_settings_update_calibration(&app->input_settings, dt_ms,
-                                              app->host_axes_live);
-        }
+    /* Guided analog calibration (#357), while its page is shown, on the frame's own clock
+       step: time spent on another view (F12's developer log) never arrives as one long
+       step that ends the rest sampling at once, and a stalled frame counts as at most
+       PLAYER_CALIBRATION_MAX_STEP_MS. */
+    if (app->active_view == VIEW_CONTROLLER_SETTINGS &&
+        input_settings_is_calibrating(&app->input_settings)) {
+        uint32_t dt_ms = run->frame_delta_ms < PLAYER_CALIBRATION_MAX_STEP_MS
+            ? run->frame_delta_ms : PLAYER_CALIBRATION_MAX_STEP_MS;
+        input_settings_update_calibration(&app->input_settings, (int)dt_ms,
+                                          app->host_axes_live);
     }
 }
 

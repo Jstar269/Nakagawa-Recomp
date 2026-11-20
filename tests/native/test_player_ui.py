@@ -1527,6 +1527,7 @@ class NativePlayerUiTests(unittest.TestCase):
         expect_failure: bool = False,
         runtime_root_arg: str | None = None,
         library_unwritable: bool = False,
+        config_files: dict[str, str] | None = None,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             scratch = Path(tmp)
@@ -1746,6 +1747,14 @@ class NativePlayerUiTests(unittest.TestCase):
                 config.mkdir(parents=True, exist_ok=True)
                 (config / "settings.json").write_text(
                     json.dumps({"schema_version": 2, **settings}), encoding="utf-8")
+            if config_files:
+                # Other files in the player's settings folder (the report tool lists every
+                # *.json there), written beside settings.json.
+                config = (localappdata / "Nakagawa" / "config" if os.name == "nt"
+                          else userprofile / "data" / "Nakagawa" / "config")
+                config.mkdir(parents=True, exist_ok=True)
+                for name, text in config_files.items():
+                    (config / name).write_text(text, encoding="utf-8")
             if stale_package:
                 synthetic_stale_package(runtime_root)
             if incompatible_package:
@@ -4821,6 +4830,36 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual([view for view, _ in self.screens(leave)], ["controller", "settings"],
                          "Back again leaves without saving")
 
+    def test_next_ui_calibration_rest_sampling_survives_a_visit_to_the_developer_log(
+            self) -> None:
+        """Audit 2026-11-17 F-4403fc76: the stick calibration runs on the frame's own clock.
+
+        The rest step samples the resting stick for about a second (duration_ms). Failing
+        before: calibration kept its own clock, which advanced only while its page was
+        shown, so F12 to the developer log and back gave one step as long as the whole time
+        away, and the rest step ended at once on its first frame back, after a few samples."""
+        focus = self.CONTROLLER_FOCUS
+        run = self.next_ui_run(
+            "controller",
+            ("WAIT_MS=100",) + self.TO_CALIBRATE +
+            ("KEY_RETURN", "KEY_F12", "WAIT_MS=2000", "KEY_F12", "WAIT_MS=100"),
+            settings={"developer_mode": True},
+        )
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertIn(focus["calibrate"], self.focus_trail(run))
+        views = [frame["view"] for frame in frames]
+        self.assertIn("developer_log", views, run["stdout"])
+        away = views.index("developer_log")
+        back = [frame for frame in frames[away:] if frame["view"] == "controller"]
+        self.assertTrue(back, run["stdout"])
+        self.assertEqual(back[0]["calibrating"], "1")
+        self.assertEqual(back[-1]["calib_stage"], "1",
+                         "the rest step is still sampling after the 2 s away")
+        self.assertLess(int(back[-1]["calib_elapsed"]), 1000, back[-1])
+        self.assertGreater(int(back[-1]["calib_samples"]), int(back[0]["calib_samples"]),
+                           "it keeps sampling on the frames after the return")
+
     def test_next_ui_keyboard_keys_rebind_refuse_reset_and_save(self) -> None:
         """#1299: KEYBOARD shows the keys; a chosen button takes the next key pressed,
         a key another control uses moves to it and that control takes its old key,
@@ -5311,6 +5350,37 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertNotIn(5, phases, stdout)
             self.assertEqual(phases[-1], 2, stdout)
             self.assertIn("about.txt", names)
+
+    def test_problem_report_counts_every_file_beyond_the_list(self) -> None:
+        """Audit 2026-11-17 F-8e71bba5: the page lists 16 of the report's files and says
+        "and N more" for the rest, counted from every file the ZIP holds.
+
+        The player keeps the names of the first 24 files only. Failing before: "and N more"
+        was counted from those 24, so a report with 30 settings files and its other files
+        said "and 8 more" while the ZIP held many more."""
+        config_files = {f"synthetic-{index:02d}.json": "{}" for index in range(30)}
+        with tempfile.TemporaryDirectory(prefix="nk-report-test-") as tmp:
+            env = {**self.CLI_INSTALL_ROOT, "NK_UI_TEST_REPORT_DATA_ROOT": tmp}
+            screenshots = os.environ.get("NAKAGAWA_PLAYER_UI_SP_SCREENSHOTS")
+            run = self.next_ui_run(
+                "problem-report", ("WAIT_REPORT=2|5|6,60000", "WAIT_MS=200"), env_extra=env,
+                config_files=config_files,
+                screenshot_path=(Path(screenshots) / "problem-report-more.bmp"
+                                 if screenshots else None))
+            stdout = run["stdout"]
+            assert isinstance(stdout, str)
+            steps, names = self.problem_report_steps(stdout)
+            phases = [int(step["problem_report"]) for step in steps]
+            if 6 in phases:
+                self.skipTest("no Python interpreter on this host, so the page shows the command")
+            self.assertEqual(phases[-1], 2, stdout)
+            total = int(steps[-1]["total"])
+            self.assertGreaterEqual(total, 30, "the 30 settings files and the report's own")
+            self.assertEqual(int(steps[-1]["files"]), 24, "the player keeps 24 names")
+            more = re.findall(r"next_ui_report_more lines=(\d+) total=(\d+) more=(\d+)", stdout)
+            self.assertTrue(more, stdout)
+            self.assertEqual(more[-1], ("24", str(total), str(total - 16)),
+                             "and N more counts every file beyond the 16 listed")
 
     def test_problem_report_that_cannot_start_its_worker_says_so_on_the_page(self) -> None:
         """#1849: if the report thread cannot start, the page shows a failed phase with the
