@@ -55,16 +55,27 @@
       "sdl3.dll": {
         "name": "SDL3",
         "notice_file": "SDL3.txt",
-        "spdx_id": "Zlib",
+        "spdx_id": "Zlib AND BSD-3-Clause",
         "pacman_package": "sdl3",
         "upstream_origin": "https://github.com/libsdl-org/SDL",
         "disposition": "copied_into_package",
+        "note": "SDL's LICENSE.txt is zlib. The MSYS2 build (PKGBUILD of mingw-w64-sdl3 3.4.20-1) keeps SDL's defaults for the two subdirectories with their own licences: CMakeLists.txt always compiles src/video/yuv2rgb (BSD-3-Clause, Adrien Descamps), and SDL_HIDAPI defaults to ON, which on Windows compiles src/hidapi. HIDAPI may be used under GPL-3.0, a BSD-style licence or its original licence (src/hidapi/LICENSE.txt); this distribution uses the BSD-style option (src/hidapi/LICENSE-bsd.txt, BSD-3-Clause). Both binary-redistribution clauses need the text in the documentation, and the MSYS2 package installs only LICENSE.txt, so both texts are taken from upstream at the release tag.",
         "license_texts": [
           {
             "file": "third_party/licenses/sdl3/LICENSE.txt",
             "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-sdl3: ucrt64/share/licenses/SDL3/LICENSE.txt",
             "toolchain_license_rel": "share/licenses/SDL3/LICENSE.txt",
             "sha256": "1c040b8271b37e5076359f8fd54240e371114112924d2df81ef87c7d6a1dfdfd"
+          },
+          {
+            "file": "third_party/licenses/sdl3/yuv2rgb-LICENSE.txt",
+            "copied_from": "SDL upstream (https://github.com/libsdl-org/SDL) src/video/yuv2rgb/LICENSE at tag release-3.4.20 (commit f00dc919ca35b9756316e86c4777392de442f9b2), imported byte-identical (git blob a76efd7be2a36fd95ed2cdab5fe618ddd4405e31)",
+            "sha256": "f7d74004cc75778cae46c5f0139f244d67c07ef64cf51937e8272352197dcb18"
+          },
+          {
+            "file": "third_party/licenses/sdl3/hidapi-LICENSE.txt",
+            "copied_from": "SDL upstream (https://github.com/libsdl-org/SDL) src/hidapi/LICENSE-bsd.txt at tag release-3.4.20 (commit f00dc919ca35b9756316e86c4777392de442f9b2), imported byte-identical (git blob 538cdf95cf63e6f8fab8e9c4c7222a35357b4ce1)",
+            "sha256": "30eb1bef29b46f8ba7ab8b416035dbd93cb034a45481dd97815b944284582cd2"
           }
         ]
       },
@@ -87,14 +98,15 @@
       "libfreetype-6.dll": {
         "name": "FreeType",
         "notice_file": "FreeType-FTL.txt",
-        "spdx_id": "FTL",
+        "spdx_id": "FTL AND MIT",
         "pacman_package": "freetype",
         "upstream_origin": "https://gitlab.freedesktop.org/freetype/freetype",
         "disposition": "copied_into_package",
-        "note": "FreeType is dual-licensed FTL or GPL-2.0-or-later; this distribution uses the FTL option, which the FSF lists as GPL-compatible. The FTL requires a binary distribution's documentation to state that the software is based in part on the work of the FreeType Team; copyright_notices carries that statement into THIRD_PARTY_NOTICES.txt.",
+        "note": "FreeType is dual-licensed FTL or GPL-2.0-or-later; this distribution uses the FTL option, which the FSF lists as GPL-compatible. The FTL requires a binary distribution's documentation to state that the software is based in part on the work of the FreeType Team; copyright_notices carries that statement into THIRD_PARTY_NOTICES.txt. FreeType's LICENSE.TXT gives the contributed BDF and PCF drivers an X11-style (MIT) licence in src/bdf/README and src/pcf/README, and says the same holds for src/base/fthash.c and include/freetype/internal/fthash.h. The MSYS2 meson build (mingw-w64-freetype 2.15.0-1) reads modules.cfg, which enables both drivers, and ftbase.c always compiles fthash.c, so libfreetype-6.dll carries all three. Their licences require the notice in all copies; the MSYS2 package installs only FTL.TXT and GPLv2.TXT, so both READMEs are taken from upstream at the release tag, and copyright_notices repeats fthash.c's own copyright lines, which the BDF README's permission notice covers.",
         "copyright_notices": [
           "Portions of this software are copyright (C) 1996-2026 The FreeType Project (https://freetype.org). All rights reserved.",
-          "This software is based in part on the work of the FreeType Team."
+          "This software is based in part on the work of the FreeType Team.",
+          "Portions of src/base/fthash.c and include/freetype/internal/fthash.h: Copyright 2000 Computing Research Labs, New Mexico State University; Copyright 2001-2015 Francesco Zappa Nardelli (permission notice: src/bdf/README, \"Portions of the driver\")."
         ],
         "license_texts": [
           {
@@ -102,6 +114,16 @@
             "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-freetype: ucrt64/share/licenses/freetype/FTL.TXT",
             "toolchain_license_rel": "share/licenses/freetype/FTL.TXT",
             "sha256": "5a5ee54c5001bbad1cdc1a57cc3dd4c42199b2da09d39c7ee41fab002d02967f"
+          },
+          {
+            "file": "third_party/licenses/freetype/bdf-README.txt",
+            "copied_from": "FreeType upstream (https://gitlab.freedesktop.org/freetype/freetype) src/bdf/README at tag VER-2-15-0 (commit 37515cf56ba3349656049edbed89ffc6f6466f2d), imported byte-identical (git blob d7cb8c14ef6d969fed46151803382c6ea9da7dd9)",
+            "sha256": "7984455e7e5a9faba3797c8bf095fbe10cc846316b7320aff8c58402e22b82fe"
+          },
+          {
+            "file": "third_party/licenses/freetype/pcf-README.txt",
+            "copied_from": "FreeType upstream (https://gitlab.freedesktop.org/freetype/freetype) src/pcf/README at tag VER-2-15-0 (commit 37515cf56ba3349656049edbed89ffc6f6466f2d), imported byte-identical (git blob 09ea970edadb5247e7209e5e0a3d3d30c2a7210a)",
+            "sha256": "18d9782898d9eac04476e2f744678137b2a889689ed3e923e052fc396a86f86b"
           }
         ]
       },
@@ -618,7 +640,7 @@
           {
             "file": "third_party/licenses/SAL063_CREDITS.txt",
             "copied_from": "sal063 CREDITS.md at da17b0e1db209206a407d097d132201e516e3855 with Nakagawa corrections (third_party/licenses/SAL063_CREDITS.txt)",
-            "sha256": "619dd74e6f84e955b99c4adecc167c2e602626fc9555b98cbb07ce04c2b411ef"
+            "sha256": "cb3cdf1236eec851ab898e6b45aafc761da83112b85d2866ee6bbaa0fa23a208"
           }
         ]
       },

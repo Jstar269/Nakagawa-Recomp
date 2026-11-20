@@ -174,6 +174,77 @@ class TestThirdPartyComponentInventory(unittest.TestCase):
         upstream_tag = pinned.rsplit("-", 1)[0]
         self.assertIn(f"src/ms-use/COPYING at tag {upstream_tag} (commit ", ms_use["copied_from"])
 
+    def _pinned_msys2_version(self, package: str) -> str:
+        """The upstream version of the pinned MSYS2 binary package ("2.15.0" from "2.15.0-1")."""
+        prereqs = json.loads((ROOT / "assets/prereq_manifest.json").read_text(encoding="utf-8"))
+        pinned: str = next(
+            entry["version"] for entry in prereqs["artifacts"]
+            if entry.get("id") == f"mingw-w64-ucrt-x86_64-{package}"
+        )
+        return pinned.rsplit("-", 1)[0]
+
+    def _upstream_text(self, record: dict, file: str, origin: str, holders: tuple[str, ...]) -> dict:
+        """The record's license_texts entry for *file*, imported from upstream at the pinned tag."""
+        entries: dict[str, dict] = {entry["file"]: entry for entry in record["license_texts"]}
+        entry = entries.get(file)
+        self.assertIsNotNone(entry, f"{record['name']} does not record {file}")
+        assert entry is not None
+        text = (ROOT / file).read_text(encoding="utf-8")
+        for holder in holders:
+            self.assertIn(holder, text)
+        self.assertRegex(entry.get("sha256") or "", r"^[0-9a-f]{64}$")
+        self.assertNotIn("toolchain_license_rel", entry, "the MSYS2 package does not install this text")
+        self.assertIn(origin, entry["copied_from"])
+        self.assertRegex(entry["copied_from"], r"\(commit [0-9a-f]{40}\)")
+        return entry
+
+    def test_freetype_records_the_bdf_and_pcf_driver_licences(self) -> None:
+        """libfreetype-6.dll compiles the BDF and PCF drivers and fthash; their X11-style notices ship.
+
+        FreeType's LICENSE.TXT names src/bdf/README and src/pcf/README as the licences of the
+        contributed drivers (on in modules.cfg, which the MSYS2 meson build reads) and of
+        src/base/fthash.c, which ftbase.c always compiles. The MSYS2 package installs only
+        FTL.TXT and GPLv2.TXT, so the texts come from upstream at the tag of the pinned
+        package version; a version bump fails here until they are checked again at the new tag.
+        """
+        record = self.data["native"]["dlls"]["libfreetype-6.dll"]
+        tag = "VER-" + self._pinned_msys2_version("freetype").replace(".", "-")
+        for driver, holders in (
+            ("bdf", ("Copyright (C) 2001-2002 by Francesco Zappa Nardelli",
+                     "Copyright 2000 Computing Research Labs, New Mexico State University")),
+            ("pcf", ("Copyright (C) 2000 by Francesco Zappa Nardelli",)),
+        ):
+            with self.subTest(driver=driver):
+                self._upstream_text(
+                    record, f"third_party/licenses/freetype/{driver}-README.txt",
+                    f"src/{driver}/README at tag {tag} (commit ", holders,
+                )
+        self.assertEqual(record["spdx_id"], "FTL AND MIT")
+        notices = " ".join(record.get("copyright_notices", []))
+        self.assertIn("src/base/fthash.c", notices)
+        self.assertIn("Copyright 2000 Computing Research Labs, New Mexico State University", notices)
+        self.assertIn("Copyright 2001-2015 Francesco Zappa Nardelli", notices)
+
+    def test_sdl3_records_the_yuv2rgb_and_hidapi_licences(self) -> None:
+        """SDL3.dll compiles src/video/yuv2rgb (BSD-3-Clause) and, on Windows, hidapi; both notices ship.
+
+        The MSYS2 PKGBUILD leaves SDL_HIDAPI at its default (ON) and SDL's CMakeLists always
+        globs src/video/yuv2rgb. hidapi offers GPL-3.0, a BSD-style licence or its original
+        licence; this distribution uses the BSD-style option, whose binary clause needs the text.
+        """
+        record = self.data["native"]["dlls"]["sdl3.dll"]
+        tag = "release-" + self._pinned_msys2_version("sdl3")
+        self._upstream_text(
+            record, "third_party/licenses/sdl3/yuv2rgb-LICENSE.txt",
+            f"src/video/yuv2rgb/LICENSE at tag {tag} (commit ", ("Copyright (c) 2016, Adrien Descamps",),
+        )
+        self._upstream_text(
+            record, "third_party/licenses/sdl3/hidapi-LICENSE.txt",
+            f"src/hidapi/LICENSE-bsd.txt at tag {tag} (commit ",
+            ("Copyright (c) 2010, Alan Ott, Signal 11 Software",),
+        )
+        self.assertEqual(record["spdx_id"], "Zlib AND BSD-3-Clause")
+
     def test_libchdr_names_every_copyright_holder_of_its_linked_sources(self) -> None:
         """BSD-3-Clause binary redistribution reproduces every holder's notice, not just LICENSE.txt's."""
         libchdr = next(
@@ -444,6 +515,28 @@ class TestNativePackageNoticesGate(unittest.TestCase):
             "Copyright (c) Microsoft Corporation.",
             (self.pkg_dir / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8"),
         )
+
+    def test_freetype_and_sdl3_package_notices_carry_their_subcomponent_licences(self) -> None:
+        """A package with SDL3.dll and libfreetype-6.dll ships the yuv2rgb, hidapi, BDF and PCF texts."""
+        for dll in ("SDL3.dll", "libfreetype-6.dll"):
+            (self.pkg_dir / dll).write_bytes(b"MZ\0\0synthetic")
+        result = package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+        by_binary = {c.get("binary", "").lower(): c for c in result["components"]}
+        notices = self.pkg_dir / "THIRD_PARTY_NOTICES"
+        combined = (self.pkg_dir / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8")
+        for dll, extras in (
+            ("sdl3.dll", {"SDL3-yuv2rgb-LICENSE.txt": "Copyright (c) 2016, Adrien Descamps",
+                          "SDL3-hidapi-LICENSE.txt": "Copyright (c) 2010, Alan Ott, Signal 11 Software"}),
+            ("libfreetype-6.dll", {
+                "FreeType-FTL-bdf-README.txt": "Copyright 2000 Computing Research Labs, New Mexico State University",
+                "FreeType-FTL-pcf-README.txt": "Copyright (C) 2000 by Francesco Zappa Nardelli"}),
+        ):
+            for name, holder in extras.items():
+                with self.subTest(dll=dll, text=name):
+                    self.assertIn(name, by_binary[dll].get("additional_license_files", []))
+                    self.assertIn(holder, (notices / name).read_text(encoding="utf-8"))
+                    self.assertIn(holder, combined)
+        self.assertIn("Copyright: Portions of src/base/fthash.c", combined)
 
     def test_host_resolved_loader_present_in_a_package_gets_a_notice(self) -> None:
         """A user-supplied Vulkan loader is named, not waved through as a system library."""

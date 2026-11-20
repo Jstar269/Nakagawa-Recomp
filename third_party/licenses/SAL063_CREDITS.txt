@@ -3,7 +3,7 @@
 > Nakagawa amendment (2026-09-17): the text below is sal063's `CREDITS.md`
 > verbatim at sal063/PSP-recompilation-project revision
 > `da17b0e1db209206a407d097d132201e516e3855` (line endings normalized),
-> preserved as the upstream attribution document. Six of its statements
+> preserved as the upstream attribution document. Seven of its statements
 > describe sal063's tree, not this one, and are corrected here:
 >
 > - **Combined-work licence.** The text below says the combined work is
@@ -38,11 +38,19 @@
 >   reader the table below lists as a PPSSPP port, are excluded from the
 >   public tree by `assets/public_source_profile.json`. The public PGF code
 >   (`src/rt/pgf_public.c`, `src/rt/pgf_api.h`) is project-authored.
+> - **Game-derived binaries are never redistributed.** The text below gives
+>   "a recompiled game `.exe` plus `SDL3.dll`" as an example of binaries
+>   you may distribute with only the GPL's source obligations. In this
+>   project a binary built from a user's game contains C generated from that
+>   retail game, and it is never redistributed: nothing built from a user's
+>   game is published or shared (the repository's `AGENTS.md`, Section 5).
+>   That paragraph applies only to the player and toolkit binaries.
 >
 > Modified by Nakagawa Recomp contributors, 2026-09-17. On 2026-11-17 the
 > combined-work licence correction and its links were fixed, the last two
 > corrections were added, and two rows of the table below, which had been
-> edited to name this tree's files, were restored to sal063's text.
+> edited to name this tree's files, were restored to sal063's text. On
+> 2026-11-20 the seventh correction, on game-derived binaries, was added.
 > See NOTICE.md for upstream lineage and modification provenance.
 
 This project is **not** built from scratch. Large parts of it are derived from,
