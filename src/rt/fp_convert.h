@@ -504,6 +504,24 @@ static inline float sr_fpu_div_s(float a, float b, uint32_t fcr31) {
     return sr_fpu_invalid_op_nan(a_bits, b_bits, vr);
 }
 
+/* SQRT.S under the guest RM, with subnormal inputs at full weight (DAZ off, FPCR.FZ off), and
+ * the caller's environment restored exactly: a bare host sqrtf rounded under the ambient host
+ * mode, read a subnormal input as zero under an ambient DAZ, and left the inexact sticky bit in
+ * the caller's MXCSR. FS needs no flush here, on either backend: the square root of the
+ * smallest subnormal, 2^-149, is about 2^-74.5, so no result is tiny. A NaN result (a NaN or
+ * negative operand) is the host's word, as it was before; that word is not PSP-measured, and
+ * neither is PSP sqrt.s under an RM other than RN. */
+static inline float sr_fpu_sqrt_s(float a, uint32_t fcr31) {
+    volatile float va = a;
+    const uint32_t saved = sr_fpu_env_save();
+    sr_fpu_env_apply_guest(saved, fcr31);
+    sr_fpu_scalar_barrier();
+    volatile float vr = sqrtf(va);
+    sr_fpu_scalar_barrier();
+    sr_fpu_env_restore(saved);
+    return vr;
+}
+
 /* CVT.S.W rounds per guest RM near the binary32 precision boundary. Unlike the
  * fast-path-guarded arithmetic above there is no host-default shortcut here:
  * a bare int-to-float cast follows whatever mode the host currently has (and

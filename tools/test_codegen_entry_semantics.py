@@ -1045,6 +1045,28 @@ class StackCensusWrapperTests(unittest.TestCase):
             codegen.GUEST_SP_ENTRIES.clear()
             codegen.GUEST_SP_ENTRIES.update(previous_guest_entries)
 
+    def test_guest_sp_body_is_counted_unwrapped_not_expected(self):
+        # A body that loads $sp (GUEST_SP_ENTRIES) is never wrapped, so no census enter can
+        # observe it: listing it among the expected entries kept unobserved above zero even
+        # when the workload ran it. It is counted apart, and a resume owner is in neither set.
+        previous_guest_entries = set(codegen.GUEST_SP_ENTRIES)
+        try:
+            codegen.GUEST_SP_ENTRIES.clear()
+            codegen.GUEST_SP_ENTRIES.add(0x2000)
+            emitted = [0x3000, 0x1000, 0x2000, 0x1000]
+            resume_owners = {0x3000: 0x1000}
+            wrapped, unwrapped = codegen.stack_census_partition(emitted, resume_owners)
+            self.assertEqual(wrapped, [0x1000])
+            self.assertEqual(unwrapped, [0x2000])
+            bodies = [f"void f_{addr:08x}(CpuState *s) {{\n    s->r[29] = 0u;\n}}"
+                      for addr in (0x1000, 0x2000)]
+            texts = codegen.wrap_stack_census_functions(bodies, emitted, resume_owners)
+            self.assertIn("sr_stack_census_enter(0x00001000u);", texts[0])
+            self.assertNotIn("sr_stack_census_enter", texts[1])
+        finally:
+            codegen.GUEST_SP_ENTRIES.clear()
+            codegen.GUEST_SP_ENTRIES.update(previous_guest_entries)
+
     def test_indexed_census_wrapper_output_stays_byte_identical(self):
         bodies = [
             "void f_00001000(CpuState *s) {\n    s->r[29] = 0u;\n}",

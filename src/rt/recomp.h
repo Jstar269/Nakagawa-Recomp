@@ -1683,8 +1683,11 @@ uint32_t sr_module_code_sync_overlays(uint32_t lo, uint32_t hi);
 
 #if defined(SR_STACK_CENSUS_ENABLED)
 /* Opt-in dynamic check of guest stack preservation at generated callable
- * boundaries. Codegen supplies its sorted callable-entry set. Resume entries
- * share an existing callable frame and are deliberately not counted. */
+ * boundaries. Codegen supplies its sorted set of wrapped callable entries and
+ * the count of callable bodies it left unwrapped (a body that loads $sp owns
+ * its exit $sp, so no wrapper can check it); a nonzero unwrapped count keeps
+ * the census PARTIAL. Resume entries share an existing callable frame and are
+ * deliberately not counted. */
 typedef enum SrStackCensusStatus {
     SR_STACK_CENSUS_NOT_OBSERVED = 0,
     SR_STACK_CENSUS_COMPLETE = 1,
@@ -1695,6 +1698,7 @@ typedef struct SrStackCensusSummary {
     SrStackCensusStatus status;
     uint32_t unobserved;
     int unobserved_known;
+    uint32_t unwrapped;
     uint64_t entries;
     uint64_t returns;
     uint64_t excluded;
@@ -1706,7 +1710,8 @@ typedef struct SrStackCensusSummary {
     uint32_t first_mismatch_flow;
     int has_mismatch;
 } SrStackCensusSummary;
-void sr_stack_census_begin(const uint32_t *expected_entries, uint32_t expected_count);
+void sr_stack_census_begin(const uint32_t *expected_entries, uint32_t expected_count,
+                           uint32_t unwrapped_count);
 void sr_stack_census_enter(uint32_t entry);
 void sr_stack_census_exit(uint32_t entry, uint32_t expected_sp,
                           uint32_t actual_sp, uint32_t flow_kind);
