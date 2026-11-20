@@ -82,7 +82,14 @@ typedef struct {
      * "empty", even for the legitimate (slot 0, addr 0) entry, so occupancy here is also
      * independent of the key -- the same bug, avoided the same way. */
     _Atomic(uint64_t) l1[SR_DTAB_L1_SIZE];
+    /* Occupied main slots. Written only by the single registering thread. */
+    uint32_t          occupied;
 } SrDispatchTable;
+
+/* The most keys the main table holds. One slot always stays empty, so every probe of
+ * sr_dtab_lookup ends at an empty slot or its key; registering one more distinct key is
+ * refused rather than filling the table. */
+#define SR_DTAB_CAPACITY (SR_DTAB_SIZE - 1u)
 
 static inline uint32_t sr_dtab_l1_index(uint32_t addr) {
     /* Ignore instruction alignment bits and mix nearby basic-block addresses. */
@@ -93,12 +100,19 @@ static inline uint32_t sr_dtab_l1_index(uint32_t addr) {
 }
 
 /* Register (or re-register) addr -> fn. Single-writer. fn must be non-zero: 0 is the
- * "not found" return of sr_dtab_lookup, and a recompiled function pointer is never NULL. */
-static inline void sr_dtab_register(SrDispatchTable *t, uint32_t addr, uintptr_t fn) {
+ * "not found" return of sr_dtab_lookup, and a recompiled function pointer is never NULL.
+ * Returns 1 when addr is registered, 0 when it is a new key and the table already holds
+ * SR_DTAB_CAPACITY keys; the table is then unchanged and the caller stops by name. */
+static inline int sr_dtab_register(SrDispatchTable *t, uint32_t addr, uintptr_t fn) {
     uint32_t h = (addr >> 2) & SR_DTAB_MASK;
-    for (;;) {
+    for (uint32_t probes = 0u;; probes++) {
+        if (probes == SR_DTAB_SIZE) return 0;   /* no empty slot and no matching key */
         uint32_t st = atomic_load_explicit(&t->main[h].state, memory_order_relaxed);
-        if (st == 0u) break;   /* empty slot -- claim it */
+        if (st == 0u) {        /* empty slot -- claim it, keeping one slot empty */
+            if (t->occupied >= SR_DTAB_CAPACITY) return 0;
+            t->occupied++;
+            break;
+        }
         uint32_t a = atomic_load_explicit(&t->main[h].addr, memory_order_relaxed);
         if (a == addr) break;  /* re-registration of an existing key */
         h = (h + 1u) & SR_DTAB_MASK;
@@ -110,6 +124,7 @@ static inline void sr_dtab_register(SrDispatchTable *t, uint32_t addr, uintptr_t
     atomic_store_explicit(&t->main[h].state, 1u, memory_order_release);
     uint32_t l1 = sr_dtab_l1_index(addr);
     atomic_store_explicit(&t->l1[l1], ((uint64_t)(h + 1u) << 32) | addr, memory_order_release);
+    return 1;
 }
 
 /* Look up addr. Returns the registered fn, or 0 if the address is not registered. */
@@ -124,7 +139,8 @@ static inline uintptr_t sr_dtab_lookup(SrDispatchTable *t, uint32_t addr) {
         return atomic_load_explicit(&t->main[slot].fn, memory_order_acquire);
     }
     uint32_t h = (addr >> 2) & SR_DTAB_MASK;
-    for (;;) {
+    /* Registration keeps one slot empty, so the probe ends; the bound is the backstop. */
+    for (uint32_t probes = 0u; probes < SR_DTAB_SIZE; probes++) {
         uint32_t st = atomic_load_explicit(&t->main[h].state, memory_order_acquire);
         if (st == 0u) return 0u;   /* empty slot terminates the probe -- addr not present */
         uint32_t a = atomic_load_explicit(&t->main[h].addr, memory_order_relaxed);
@@ -136,6 +152,7 @@ static inline uintptr_t sr_dtab_lookup(SrDispatchTable *t, uint32_t addr) {
         }
         h = (h + 1u) & SR_DTAB_MASK;
     }
+    return 0u;
 }
 
 /* This table is deliberately POLICY-FREE. It answers exactly one question -- "is address X

@@ -69,6 +69,7 @@ instrumentation is this test's protection against the historical RAM runaway."
 #include "nk_platform.h"        /* per-user data directory override for the font cache */
 #include "audio_resample.h"
 #include "vfpu_tables.h"        /* sr_vfpu_sha256: enhancement data-file digests */
+#include "../../src/core/nk_shared_helpers.h" /* nk_sha256_*: the oracle artifact digest */
 #include "guest_interp.h"      /* SrGuestInterpCallBoundary: the dispatch entries defined below */
 
 #include <math.h>
@@ -25381,6 +25382,46 @@ static TCB *fixture_thread(uint32_t uid, int state, int priority) {
  * handler behavior. */
 #include "intr_conformance.h"
 
+/* A conformance fixture whose object create fails is SETUP_FAILED, not a probe run with the
+ * error code as its uid. sceKernelCreateFpl never returns 0 (it fails with an error code, bit
+ * 31 set, such as NO_MEMORY), so a check against 0 alone took the error for a pool. */
+static void test_intr_conformance_create_failure_is_setup_failure(void) {
+    extern void sr_hle_test_partition_reset(void);
+    const IcProbe *probe = NULL;
+    for (int i = 0; i < IC_MATRIX_N && !probe; i++) {
+        if (kIcMatrix[i].group == ICG_FPL && kIcMatrix[i].variant == 1) probe = &kIcMatrix[i];
+    }
+    expect(probe != NULL, "the conformance matrix has a valid-pool FPL probe");
+    if (!probe) return;
+
+    reset_fixture(); sr_hle_test_partition_reset(); sr_hle_init();
+    /* The pool table grows, so only memory limits a create. Fill the user partition with pools
+     * of halving sizes, each size until a create of it is refused, down to the probe's own
+     * 0x100 x 0x10 bytes: then no gap is left that holds the probe's pool. Each pool is
+     * remembered to give it back. */
+    uint32_t made[64];
+    int nmade = 0;
+    uint32_t refused = 0u;
+    for (uint32_t bsize = 0x100000u; bsize >= 0x100u; bsize >>= 1) {
+        refused = 0u;
+        while (nmade < (int)(sizeof made / sizeof made[0])) {
+            CpuState setup;
+            memset(&setup, 0, sizeof setup);
+            setup.r[4] = IC_NAMEBUF; setup.r[7] = bsize; setup.r[8] = 0x10u;
+            uint32_t uid = sr_syscall(&setup, NID_IC_CREATE_FPL);
+            if (uid & 0x80000000u) { refused = uid; break; }
+            made[nmade++] = uid;
+        }
+    }
+    expect(refused == FPL_NO_MEMORY_ERR,
+           "with no room left for a 0x100 x 0x10 pool sceKernelCreateFpl refuses it with NO_MEMORY");
+    CpuState cpu;
+    expect(ic_arrange(probe, &cpu) == 0,
+           "a conformance fixture whose FPL create fails reports SETUP_FAILED, not an error uid");
+    for (int i = 0; i < nmade; i++) fpl_free_pool(made[i]);
+    reset_fixture(); sr_hle_test_partition_reset(); sr_hle_init();
+}
+
 /* sceMpegCreate inside an interrupt handler. pspautotests tests/intr/delays
  * measured it on a PSP: from a VBLANK sub-interrupt handler it returns
  * 0x80618008 (delays.expected:24), while the same call on a thread returns 0
@@ -48907,130 +48948,25 @@ typedef struct {
 extern uint32_t sr_psp_oracle_smoke_sum(CpuState *s, uint32_t count);
 #endif
 
-static uint32_t oracle_rotr(uint32_t value, unsigned shift) {
-    return (value >> shift) | (value << (32u - shift));
-}
-
-static const uint32_t oracle_sha_k[64] = {
-    0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
-    0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
-    0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
-    0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
-    0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
-    0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
-    0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
-    0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
-    0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
-    0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
-    0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
-    0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
-    0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
-    0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
-    0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
-    0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
-};
-
-typedef struct {
-    uint32_t h[8];
-    uint64_t bits;
-    uint8_t block[64];
-    size_t used;
-} OracleSha256;
-
-static void oracle_sha_init(OracleSha256 *sha) {
-    static const uint32_t initial[8] = {
-        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
-    };
-    memcpy(sha->h, initial, sizeof(initial));
-    sha->bits = 0;
-    sha->used = 0;
-}
-
-static void oracle_sha_transform(OracleSha256 *sha, const uint8_t block[64]) {
-    uint32_t w[64];
-    for (unsigned i = 0; i < 16; i++) {
-        unsigned j = i * 4u;
-        w[i] = ((uint32_t)block[j] << 24) | ((uint32_t)block[j + 1u] << 16) |
-               ((uint32_t)block[j + 2u] << 8) | (uint32_t)block[j + 3u];
-    }
-    for (unsigned i = 16; i < 64; i++) {
-        uint32_t s0 = oracle_rotr(w[i - 15u], 7) ^ oracle_rotr(w[i - 15u], 18) ^
-                      (w[i - 15u] >> 3);
-        uint32_t s1 = oracle_rotr(w[i - 2u], 17) ^ oracle_rotr(w[i - 2u], 19) ^
-                      (w[i - 2u] >> 10);
-        w[i] = w[i - 16u] + s0 + w[i - 7u] + s1;
-    }
-
-    uint32_t a = sha->h[0], b = sha->h[1], c = sha->h[2], d = sha->h[3];
-    uint32_t e = sha->h[4], f = sha->h[5], g = sha->h[6], h = sha->h[7];
-    for (unsigned i = 0; i < 64; i++) {
-        uint32_t s1 = oracle_rotr(e, 6) ^ oracle_rotr(e, 11) ^ oracle_rotr(e, 25);
-        uint32_t ch = (e & f) ^ ((~e) & g);
-        uint32_t temp1 = h + s1 + ch + oracle_sha_k[i] + w[i];
-        uint32_t s0 = oracle_rotr(a, 2) ^ oracle_rotr(a, 13) ^ oracle_rotr(a, 22);
-        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-        uint32_t temp2 = s0 + maj;
-        h = g; g = f; f = e; e = d + temp1;
-        d = c; c = b; b = a; a = temp1 + temp2;
-    }
-    sha->h[0] += a; sha->h[1] += b; sha->h[2] += c; sha->h[3] += d;
-    sha->h[4] += e; sha->h[5] += f; sha->h[6] += g; sha->h[7] += h;
-}
-
-static void oracle_sha_update(OracleSha256 *sha, const uint8_t *data, size_t size) {
-    sha->bits += (uint64_t)size * 8u;
-    while (size) {
-        size_t take = sizeof(sha->block) - sha->used;
-        if (take > size) take = size;
-        memcpy(sha->block + sha->used, data, take);
-        sha->used += take;
-        data += take;
-        size -= take;
-        if (sha->used == sizeof(sha->block)) {
-            oracle_sha_transform(sha, sha->block);
-            sha->used = 0;
-        }
-    }
-}
-
-static void oracle_sha_final(OracleSha256 *sha, uint8_t digest[32]) {
-    size_t used = sha->used;
-    sha->block[used++] = 0x80u;
-    if (used > 56u) {
-        memset(sha->block + used, 0, 64u - used);
-        oracle_sha_transform(sha, sha->block);
-        used = 0;
-    }
-    memset(sha->block + used, 0, 56u - used);
-    for (unsigned i = 0; i < 8; i++)
-        sha->block[56u + i] = (uint8_t)(sha->bits >> (56u - 8u * i));
-    oracle_sha_transform(sha, sha->block);
-    for (unsigned i = 0; i < 8; i++) {
-        digest[i * 4u] = (uint8_t)(sha->h[i] >> 24);
-        digest[i * 4u + 1u] = (uint8_t)(sha->h[i] >> 16);
-        digest[i * 4u + 2u] = (uint8_t)(sha->h[i] >> 8);
-        digest[i * 4u + 3u] = (uint8_t)sha->h[i];
-    }
-}
-
+/* The artifact digest comes from the one SHA-256 the player and the runtime share
+ * (nk_sha256_* in src/core/nk_shared_helpers.h). */
 static int oracle_sha256_file(const char *path, char out[65]) {
     FILE *file = fopen(path, "rb");
     if (!file) return 0;
-    OracleSha256 sha;
+    NkSha256 sha;
     uint8_t buffer[4096];
     uint8_t digest[32];
-    oracle_sha_init(&sha);
+    nk_sha256_init(&sha);
     for (;;) {
         size_t got = fread(buffer, 1, sizeof(buffer), file);
-        if (got) oracle_sha_update(&sha, buffer, got);
+        if (got) nk_sha256_update(&sha, buffer, got);
         if (got < sizeof(buffer)) {
             if (ferror(file)) { fclose(file); return 0; }
             break;
         }
     }
     if (fclose(file) != 0) return 0;
-    oracle_sha_final(&sha, digest);
+    nk_sha256_finish(&sha, digest);
     static const char hex[] = "0123456789abcdef";
     for (unsigned i = 0; i < sizeof(digest); i++) {
         out[i * 2u] = hex[digest[i] >> 4];
@@ -58027,6 +57963,22 @@ static void test_flash0_latin_index_resolution(void) {
                legacy_source && strcmp(legacy_source, "user-imported") == 0 &&
                legacy_served_index == -2 && strstr(legacy_path, "nkltn.pgf") != NULL,
            "SR_FONTDIR at a legacy-only import cache still resolves all Latin indices");
+    /* A mixed cache (ltn0 imported, plus the legacy single import) named by SR_FONTDIR: Latin
+     * index 9 has no import of its own or in its size group, and the cache's nkltn.pgf is not a
+     * project font, so the vouched legacy import serves it rather than nothing. */
+    Flash0Sources mixed_sources;
+    memset(&mixed_sources, 0, sizeof(mixed_sources));
+    snprintf(mixed_sources.user_data_dir, sizeof(mixed_sources.user_data_dir), "%s/mixed/data", root);
+    snprintf(mixed_sources.project_dir, sizeof(mixed_sources.project_dir), "%s/mixed/data/fonts/v2",
+             root);
+    legacy_source = NULL;
+    legacy_served_index = -3;
+    expect(sr_flash0_font_resolve_latin_index_path(&mixed_sources, 8, legacy_path,
+                                                   sizeof(legacy_path), &legacy_source,
+                                                   &legacy_served_index) &&
+               legacy_source && strcmp(legacy_source, "user-imported") == 0 &&
+               legacy_served_index == -2 && strstr(legacy_path, "nkltn.pgf") != NULL,
+           "SR_FONTDIR at a mixed import cache serves the legacy import where no index import fits");
 
     /* #1300: two indices not resolved above, so each logs its own line (the driver reads them):
      * index 7 has only the legacy import, and index 16 no import at all, only the project font. */
@@ -63644,6 +63596,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_mbx_receive_cb_takes_callback_message();
     test_mbx_refer_honours_size_word();
     test_intr_context_conformance();
+    test_intr_conformance_create_failure_is_setup_failure();
     test_mpeg_create_refused_in_interrupt();
     test_psp_mutex();
     test_kernel_nested_join();

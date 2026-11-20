@@ -32,8 +32,12 @@ static pthread_mutex_t s_iso_lock = PTHREAD_MUTEX_INITIALIZER;
 #define ISO_UNLOCK() pthread_mutex_unlock(&s_iso_lock)
 #endif
 
+/* The longest PSP_ISO path the reader takes, terminator included. The launcher's own paths
+ * are far shorter (NK_MAX_PATH); a longer one is refused by name, never truncated. */
+#define ISO_PATH_CAP 1024u
+
 static NkIsoReader *s_reader = NULL;
-static char s_current_iso_path[1024] = {0};
+static char s_current_iso_path[ISO_PATH_CAP] = {0};
 
 static IsoDirEntry *s_dir_cache = NULL;
 static uint32_t s_dir_cache_count = 0;
@@ -47,11 +51,29 @@ static void dir_cache_clear(void) {
     s_dir_cache_path[0] = '\0';
 }
 
+/* The devices that name the disc: disc0:, umd0:, umd1: and umd: (any case, as the HLE's device
+ * checks read them). A name on any other device (ms0:, host0:, flash0:, ...) is never a disc
+ * file, even when the rest of it matches one. */
+static int iso_disc_device(const char *path, size_t prefix_len) {
+    static const char *const devices[] = {"disc0", "umd0", "umd1", "umd"};
+    for (size_t d = 0; d < sizeof(devices) / sizeof(devices[0]); d++) {
+        size_t n = strlen(devices[d]);
+        if (n != prefix_len) continue;
+        size_t i = 0;
+        while (i < n && tolower((unsigned char)path[i]) == devices[d][i]) i++;
+        if (i == n) return 1;
+    }
+    return 0;
+}
+
 static const char *iso_normalize_path(const char *guest_path, char *buf, size_t buf_sz) {
     if (!guest_path || !buf || buf_sz == 0) return NULL;
     const char *p = guest_path;
     const char *colon = strchr(p, ':');
-    if (colon) p = colon + 1;
+    if (colon) {
+        if (!iso_disc_device(guest_path, (size_t)(colon - guest_path))) return NULL;
+        p = colon + 1;
+    }
     for (;;) {
         while (*p == '/' || *p == '\\') p++;
         if (p[0] == '.' && (p[1] == '/' || p[1] == '\\')) {
@@ -69,34 +91,60 @@ static const char *iso_normalize_path(const char *guest_path, char *buf, size_t 
     return buf;
 }
 
+static void iso_path_too_long(size_t bytes) {
+    static int reported = 0;
+    if (reported) return;
+    reported = 1;
+    fprintf(stderr,
+            "ISO_PATH_TOO_LONG: PSP_ISO is %zu bytes as UTF-8; the ISO reader takes at most %u, "
+            "so no disc image is opened\n",
+            bytes, (unsigned)(ISO_PATH_CAP - 1u));
+}
+
+/* PSP_ISO as UTF-8, or NULL when it is unset, empty or longer than the reader takes. */
 static const char *get_iso_env(void) {
 #if defined(_WIN32) || defined(_WIN64)
     /* nk_iso opens paths as UTF-8 (_wfopen). getenv() returns the ANSI code page,
      * which mangles names such as "Hot Shots Tennis - Get a Grip™ [...].iso", so
      * read the variable as UTF-16 and convert. */
-    static char utf8_env[1024];
+    static char utf8_env[ISO_PATH_CAP];
     const wchar_t *w = _wgetenv(L"PSP_ISO");
     if (!w || !w[0]) return NULL;
+    int need = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    if (need <= 0) return NULL;
+    if ((size_t)need > sizeof(utf8_env)) {
+        iso_path_too_long((size_t)need - 1u);
+        return NULL;
+    }
     int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, utf8_env, (int)sizeof(utf8_env), NULL, NULL);
     return n > 0 ? utf8_env : NULL;
 #else
-    return getenv("PSP_ISO");
+    const char *env = getenv("PSP_ISO");
+    if (!env || !env[0]) return NULL;
+    size_t len = strlen(env);
+    if (len >= ISO_PATH_CAP) {
+        iso_path_too_long(len);
+        return NULL;
+    }
+    return env;
 #endif
 }
 
+/* Opens the image PSP_ISO names, reading the variable afresh: iso_init() and the first use. */
 static int iso_init_locked(void) {
     const char *iso_env = get_iso_env();
-    if (!iso_env || !iso_env[0]) {
-        return -1;
-    }
     if (s_reader) {
-        if (strcmp(s_current_iso_path, iso_env) == 0) {
+        if (iso_env && strcmp(s_current_iso_path, iso_env) == 0) {
             return 0;
         }
+        /* A re-init with PSP_ISO changed or unset no longer reads the old image. */
         nk_iso_reader_close(s_reader);
         s_reader = NULL;
         s_current_iso_path[0] = '\0';
         dir_cache_clear();
+    }
+    if (!iso_env) {
+        return -1;
     }
     s_reader = nk_iso_reader_open(iso_env);
     if (!s_reader) {
@@ -107,12 +155,10 @@ static int iso_init_locked(void) {
     return 0;
 }
 
+/* Every read, lookup and listing comes through here. An open reader is kept: PSP_ISO does not
+ * change during a run, so it is read again only by iso_init() or while no image is open. */
 static int ensure_reader_locked(void) {
-    const char *iso_env = get_iso_env();
-    if (!iso_env || !iso_env[0]) {
-        return -1;
-    }
-    if (s_reader && strcmp(s_current_iso_path, iso_env) == 0) {
+    if (s_reader) {
         return 0;
     }
     return iso_init_locked();
@@ -331,13 +377,20 @@ int iso_list(const char *guest_path, uint32_t index, IsoDirEntry *out) {
                 pos = ((pos / 2048u) + 1u) * 2048u;
                 continue;
             }
-            if (rec_len < 34u || rec_len > dir_size - pos || (pos % 2048u) + rec_len > 2048u) {
-                break;
+            /* A malformed record fails the listing, as nk_iso_reader_list does: stopping there
+             * would hand the guest a short listing as a normal end of directory. */
+            if (rec_len < 34u || rec_len > dir_size - pos || (pos % 2048u) + rec_len > 2048u ||
+                buf[pos + 32] == 0 || 33u + buf[pos + 32] > rec_len) {
+                fprintf(stderr,
+                        "ISO_MALFORMED_DIRECTORY: directory '%s' has a malformed record at byte %u "
+                        "(length %u); the listing fails\n",
+                        norm_path, (unsigned)pos, (unsigned)rec_len);
+                free(buf);
+                dir_cache_clear();
+                ISO_UNLOCK();
+                return -1;
             }
             uint8_t name_len = buf[pos + 32];
-            if (name_len == 0 || 33u + name_len > rec_len) {
-                break;
-            }
 
             const uint8_t *name_bytes = &buf[pos + 33];
             if (name_len == 1 && (name_bytes[0] == 0 || name_bytes[0] == 1)) {

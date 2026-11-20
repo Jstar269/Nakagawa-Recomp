@@ -91,7 +91,7 @@ class TestGateStubLink(unittest.TestCase):
             # that loses one, domain_mode.c beside guest_interp.c included, fails here by name.
             for unit in ("gen.c", "gen_0.c", "recomp.c", "guest_interp.c", "cpu_lle.c", "domain_mode.c",
                          "stale_code.c", "vfpu_tables.c", "driver.c", "nk_shared_helpers.c", "ace.c",
-                         "videorec.c", "title_config.c", "gate_stub.c"):
+                         "videorec.c", "nested_frames.c", "title_config.c", "gate_stub.c"):
                 self.assertIn(unit, linked, f"codegen_gate's driver link no longer names {unit}")
             includes = [Path(argv[i + 1]).resolve() for i, part in enumerate(argv[:-1]) if part == "-I"]
             self.assertIn(RT.resolve(), includes)

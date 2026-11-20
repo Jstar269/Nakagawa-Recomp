@@ -109,9 +109,12 @@ Field order, helper structure, and internal names are the implementer's own.
 ### 3.3 Entry point
 
 The entry address is `e_entry + base` for relocatable inputs and `e_entry` for
-`ET_EXEC` [C1]. When the export list (§3.7) contains the system-library NID
-`0xD632ACDB` (`module_start`), that export's address is reported separately; when it
-does not, callers use the entry address as the start routine [C4]. An `e_entry` of
+`ET_EXEC` [C1]. The start routine is read from the function entries of the first
+system-library export record (§3.7, no library name) that has functions: the address
+of `0xD632ACDB` (`module_start`), otherwise of `0xD3744BE0` (`module_bootstart`), the
+last listed of each winning, is reported separately, as `sr_prx_start_entry` in
+`src/rt/prx_loader.h` reads it; when neither is listed, callers use the entry address
+as the start routine [C4]. An `e_entry` of
 `0xFFFFFFFF` declares no entry, so a module with neither has no start routine.
 
 ### 3.4 Module information block
@@ -119,7 +122,9 @@ does not, callers use the entry address as the start routine [C4]. An `e_entry` 
 1. The module-information block (`SceModuleInfo`) is located by the first loadable
    segment's `p_paddr`: for relocatable modules, `p_paddr` holds the block's absolute
    file offset in the input, so its guest address is `segment 0 address +
-   (p_paddr − p_offset(0))` [C3], [C4]. When a section named `.rodata.sceModuleInfo`
+   ((p_paddr & 0x1FFFFFFF) − p_offset(0))`; the top three bits are address-space bits
+   (a kernel module sets `0x80000000`), masked as the start-entry rule in
+   `src/rt/prx_loader.h` masks them [C3], [C4]. When a section named `.rodata.sceModuleInfo`
    exists, its address must agree; disagreement fails (project decision: two
    sources that disagree mean a malformed module). Every section's file range must
    lie inside the input, except a section of type `SHT_NOBITS` (8), such as
@@ -133,7 +138,10 @@ does not, callers use the entry address as the start routine [C4]. An `e_entry` 
 
 1. Relocation data comes from program headers of type `0x700000A0` (format A) and
    `0x700000A1` (format B) [C3], [C5]. Section headers of type `0x700000A0` are an
-   equivalent source for format A when no such program header exists [C3].
+   equivalent source for format A when no such program header exists [C3]. An
+   `ET_EXEC` image is linked at its own addresses, so relocation data in one is
+   refused by name rather than added to words that already hold them (project
+   decision: such an image is malformed or outside this loader's scope).
 2. Every relocation names an **offset segment** (whose base plus an offset gives the
    site address) and an **address segment** (whose load address is the value
    added). Both indices must be less than the number of loadable segments; the

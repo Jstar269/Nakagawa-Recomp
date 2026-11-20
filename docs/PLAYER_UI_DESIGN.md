@@ -899,20 +899,31 @@ Drawn by the runtime over the frozen game frame under the `scrim` while the game
 
 - Menu (480 px card): `GAME PAUSED` eyebrow in `muted`, the game's name in `TITLE` (two lines at most, else
   "Paused"), the disc ID in `DATA` `muted`, then a full-width column of buttons: RESUME (primary, 52 px, the
-  default focus), SETTINGS, CONTROLS, QUIT TO LIBRARY. Prompts: MOVE, SELECT, RESUME.
+  default focus), SETTINGS, CONTROLS, QUIT TO LIBRARY. In developer mode (the library's setting, passed to the
+  runtime as `SR_DEVELOPER_MODE`) VRAM VIEWER and PROFILE come between CONTROLS and QUIT TO LIBRARY. Prompts: MOVE,
+  SELECT, RESUME.
 - Settings (640 px, or 880 px with shorter rows when the window is under 720 px high): Settings rows as in C6, in
   this order. Fullscreen is a toggle, shown only when the game window can change mode. Game scaling is a segmented
   control (SHARP, INTEGER, SMOOTH; left and right step it, Confirm cycles it). Frame pacing is a segmented control
   with the library's two choices (PSP TIMING, NO EXTRA CAP), shown only when one of them is in force, so a
   developer's numeric `SR_FPS_CAP` gets no row. The performance HUD is a toggle, and Ace Mode's speed readout one
-  more in an Ace run that can draw it. A `FOOTNOTE` says the changes apply now and last until the game closes; the
-  player's Settings keep the saved values. BACK.
+  more in an Ace run that can draw it. Dump textures, last, is a toggle shown only in an Enhanced or Ace run on the
+  Vulkan renderer; its description says what it saves, or why the last start was refused, and while it is on how
+  many files it has saved, why it stopped when it did, and how many textures that change every frame it no longer
+  saves. A `FOOTNOTE` says the changes apply now and last until the game closes; the player's Settings keep the
+  saved values. BACK.
 - Controls (640 px, or 880 px in two side-by-side tables when the window is under 720 px high and there are more
   than six rows): a PSP / KEYBOARD / CONTROLLER header in `EYEBROW` and 38 px rows (34 px when split) with `line`
   dividers; an unbound control shows an em dash. The rows describe the mapping in force: the window's own key
   table and the input profile, with the pad's buttons named for its family (A, B, X, Y and LB for an Xbox-style
   pad, Cross and L1 for a PlayStation-style one, the position for an unknown pad), the prompt bar's rule. A
   `FOOTNOTE` points at the player's Settings for remapping. BACK.
+- VRAM viewer (developer mode, 920 px): `GAME PAUSED · DEVELOPER` eyebrow, "VRAM viewer", rows for Source, Address,
+  Stride and Format (and Capture when the run recorded VRAM captures), the decoded window, and a `FOOTNOTE` that the
+  view is read-only. BACK.
+- Profile (developer mode, 760 px): the same eyebrow, "Profile", the host's formatted performance counters as label
+  and value rows ("No interval has closed yet." before the first), and one bar per second for cpu, ge wait, present
+  and idle. BACK.
 - Quit to library (560 px): `▲ QUIT TO LIBRARY` in `warning`, "Quit" and the game's name, "Anything the game has not saved is
   lost.", then KEEP PLAYING (primary, the default) and QUIT TO LIBRARY (danger, never the default). While a save is
   in progress the dialog says so ("The game is saving") and offers RESUME and BACK only.

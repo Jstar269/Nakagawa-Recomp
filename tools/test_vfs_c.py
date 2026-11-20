@@ -142,8 +142,22 @@ def create_synthetic_vfs_iso(path: Path) -> None:
         + _dir_record(bytes([1]), 34, sector_size, True)
         + _dir_record(b"DATA.BIN;1", 39, 1000, False)
         + _dir_record(b"TAIL.BIN;1", 1023, 2048, False)
+        + _dir_record(b"BADDIR", 40, sector_size, True)
     )
     data[36 * sector_size : 36 * sector_size + len(usrdir_entries)] = usrdir_entries
+
+    # A directory whose third record is malformed (a length below the 34-byte minimum), with a
+    # well-formed record after it: its listing must fail, not end early as if complete.
+    malformed = bytearray(20)
+    malformed[0] = len(malformed)
+    baddir_entries = (
+        _dir_record(bytes([0]), 40, sector_size, True)
+        + _dir_record(bytes([1]), 36, sector_size, True)
+        + _dir_record(b"GOOD.BIN;1", 39, 1000, False)
+        + bytes(malformed)
+        + _dir_record(b"LATE.BIN;1", 39, 1000, False)
+    )
+    data[40 * sector_size : 40 * sector_size + len(baddir_entries)] = baddir_entries
 
     data[pvd_off + 156 : pvd_off + 156 + 34] = _dir_record(bytes([0]), 33, sector_size, True)[:34]
     path.write_bytes(data)
@@ -213,7 +227,7 @@ static int run_concurrency(void) {
 
 static void set_env_iso(const char *val) {
 #if defined(_WIN32) || defined(_WIN64)
-    char buf[1024];
+    char buf[2048];
     snprintf(buf, sizeof(buf), "PSP_ISO=%s", val ? val : "");
     _putenv(buf);
     SetEnvironmentVariableA("PSP_ISO", val ? val : "");
@@ -290,6 +304,39 @@ int main(int argc, char **argv) {
         fprintf(stderr, "FAIL: lookup with alternative prefix failed\n");
         return 1;
     }
+    /* The disc answers only for its own devices, in any case. A Memory Stick, host or flash
+     * name is not a disc file even when the rest of it is one, so the caller's own device
+     * answers it (sceIoGetstat, sceIoOpen and sceIoChstat fall through to the Memory Stick). */
+    if (iso_lookup("DISC0:/PSP_GAME/SYSDIR/EBOOT.BIN", &lba, &sz) != 0 || lba != 37 ||
+        iso_lookup("umd1:/PSP_GAME/SYSDIR/EBOOT.BIN", &lba, &sz) != 0 || lba != 37) {
+        fprintf(stderr, "FAIL: disc device names in any case should resolve\n");
+        return 1;
+    }
+    {
+        static const char *const foreign[] = {
+            "ms0:/PSP_GAME/SYSDIR/EBOOT.BIN",
+            "ms0:/sce_lbn0x25_size0x1000",
+            "MS0:/PSP_GAME/PARAM.SFO",
+            "host0:/PSP_GAME/SYSDIR/EBOOT.BIN",
+            "flash0:/PSP_GAME/SYSDIR/EBOOT.BIN",
+            "disc1:/PSP_GAME/SYSDIR/EBOOT.BIN",
+            "PSP_GAME/SYSDIR:EBOOT.BIN",
+        };
+        for (size_t i = 0; i < sizeof(foreign) / sizeof(foreign[0]); i++) {
+            uint32_t f_lba = 0xFFFFFFFFu, f_sz = 0xFFFFFFFFu;
+            if (iso_lookup(foreign[i], &f_lba, &f_sz) != -1 ||
+                f_lba != 0xFFFFFFFFu || f_sz != 0xFFFFFFFFu) {
+                fprintf(stderr, "FAIL: '%s' is not on the disc device but resolved\n", foreign[i]);
+                return 1;
+            }
+        }
+        IsoDirEntry fde;
+        if (iso_list("ms0:/PSP_GAME", 0, &fde) != -1 || iso_list("ms0:/", 0, &fde) != -1) {
+            fprintf(stderr, "FAIL: a Memory Stick directory should not list the disc\n");
+            return 1;
+        }
+    }
+
     if (iso_lookup("disc0:/PSP_GAME/SYSDIR/MISSING.PRX", &lba, &sz) == 0) {
         fprintf(stderr, "FAIL: lookup missing file should fail\n");
         return 1;
@@ -446,10 +493,59 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* Test 7b: a malformed record fails the listing at every index, every time: no short
+     * listing is served (or cached) as if the directory ended there. */
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (iso_list("disc0:/PSP_GAME/USRDIR/BADDIR", 0, &de) != -1 ||
+            iso_list("disc0:/PSP_GAME/USRDIR/BADDIR", 1, &de) != -1) {
+            fprintf(stderr, "FAIL: a directory with a malformed record should fail its listing\n");
+            return 1;
+        }
+    }
+    /* A well-formed directory still lists after the failed one. */
+    if (iso_list("disc0:/PSP_GAME", 0, &de) != 1 || strcmp(de.name, "PARAM.SFO") != 0) {
+        fprintf(stderr, "FAIL: a good listing after a malformed one mismatched\n");
+        return 1;
+    }
+
+    /* Test 7c: an open image is kept; PSP_ISO is read again only by iso_init(). */
+    {
+        uint8_t keep[16];
+        set_env_iso("nonexistent_file_path.iso");
+        if (iso_read(32, 0, keep, sizeof(keep)) != (int)sizeof(keep) || keep[0] != 0x33 ||
+            iso_lookup("disc0:/PSP_GAME/SYSDIR/EBOOT.BIN", &lba, &sz) != 0 || lba != 37) {
+            fprintf(stderr, "FAIL: the open image should be kept while PSP_ISO is not re-read\n");
+            return 1;
+        }
+        if (iso_init() == 0 || iso_read(32, 0, keep, sizeof(keep)) != -1) {
+            fprintf(stderr, "FAIL: iso_init should re-read PSP_ISO and drop the old image\n");
+            return 1;
+        }
+        set_env_iso(iso_path);
+        if (iso_init() != 0 || iso_read(32, 0, keep, sizeof(keep)) != (int)sizeof(keep)) {
+            fprintf(stderr, "FAIL: iso_init should reopen the image PSP_ISO names\n");
+            return 1;
+        }
+    }
+
     /* Test 8: Multithreaded concurrent reads */
     if (run_concurrency() != 0) {
         fprintf(stderr, "FAIL: multithreaded concurrent read test failed\n");
         return 1;
+    }
+
+    /* Test 9: a PSP_ISO longer than the reader takes is refused by name, never truncated
+     * (a truncated copy never matches the variable again, so every call would reopen). */
+    {
+        static char long_path[1101];
+        memset(long_path, 'a', sizeof(long_path) - 5u);
+        memcpy(long_path + sizeof(long_path) - 5u, ".iso", 5u);
+        set_env_iso(long_path);
+        uint32_t l_lba = 0, l_sz = 0;
+        if (iso_init() == 0 || iso_lookup("disc0:/PSP_GAME/SYSDIR/EBOOT.BIN", &l_lba, &l_sz) != -1) {
+            fprintf(stderr, "FAIL: an over-long PSP_ISO should open no image\n");
+            return 1;
+        }
     }
 
     printf("iso_vfs_test: OK\n");
@@ -495,6 +591,13 @@ class TestPublicIsoVfsC(unittest.TestCase):
         result = subprocess.run([self.exe, str(self.iso_path)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("iso_vfs_test: OK", result.stdout)
+        # Both refusals are named where a person reading the log can see them.
+        self.assertIn(
+            "ISO_MALFORMED_DIRECTORY: directory 'PSP_GAME/USRDIR/BADDIR' has a malformed record",
+            result.stderr,
+        )
+        self.assertEqual(result.stderr.count("ISO_PATH_TOO_LONG: PSP_ISO is 1100 bytes"), 1,
+                         result.stderr)
 
 
 class TestSelftestHarness(unittest.TestCase):

@@ -192,19 +192,12 @@ static int value_row(NkUi *ui, NkUiId id, unsigned row, const char *label, const
                                           nk_overlay_fixed(DEV_ROW_HEIGHT), NK_UI_SPACE_3);
     NkUiLayout cell = nk_overlay_layout(NK_UI_LAYOUT_ROW, nk_overlay_fixed(72.0f),
                                         nk_overlay_fit(), 0.0f);
-    NkUiStyle style;
     NkUiNavDir dir = NK_UI_DIR_NONE;
     char shown[64];
     int change = 0;
-    memset(&style, 0, sizeof(style));
-    style.corner_radius = NK_UI_RADIUS_CONTROL;
-    style.fill_rgba = nk_ui_pressed(ui, id) ? theme->pressed :
-                      focused || nk_ui_hovered(ui, id) ? theme->surface_high : 0u;
     layout.align_y = NK_UI_ALIGN_CENTER;
     layout.padding_left = layout.padding_right = NK_UI_SPACE_3;
-    nk_ui_register_button(ui, id, NK_UI_BUTTON_OWNS_HORIZONTAL);
-    if (nk_ui_begin_container(ui, id, &layout, &style)) {
-        if (focused) nk_ui_focus_ring(ui, id, NK_UI_RADIUS_CONTROL);
+    if (nk_overlay_row_open(ui, id, &layout)) {
         if (nk_ui_begin_container(ui, part(row, 0u), &cell, NULL)) {
             nk_ui_text_role(ui, part(row, 1u), label, NK_UI_TYPE_BODY_S, theme->muted);
             nk_ui_end_container(ui);
@@ -218,10 +211,15 @@ static int value_row(NkUi *ui, NkUiId id, unsigned row, const char *label, const
                         focused ? theme->accent_dark : theme->paper);
         nk_ui_end_container(ui);
     }
-    if (focused && nk_ui_take_event(ui, NK_UI_EV_NAV, &dir)) {
+    switch (nk_overlay_row_input(ui, id, focused, &dir)) {
+    case NK_OVERLAY_ROW_STEP:
         change = dir == NK_UI_DIR_RIGHT ? 1 : dir == NK_UI_DIR_LEFT ? -1 : 0;
-    } else if (nk_ui_take_activation(ui, id)) {
+        break;
+    case NK_OVERLAY_ROW_ACTIVATE:
         change = 1;
+        break;
+    default:
+        break;
     }
     return change;
 }
@@ -319,7 +317,9 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
             (void)choose_source(view, vram,
                                 next_source(vram, view->capture, NK_OVERLAY_VRAM_DISPLAY, 1));
         }
-        nk_overlay_vram_clamp(&view->view);
+        /* choose_source clamped a VRAM source already; only the default custom window still
+           needs it, and the texture keeps its own place and format. */
+        if (view->source == NK_OVERLAY_VRAM_CUSTOM) nk_overlay_vram_clamp(&view->view);
         moved = true;
     }
     inner = nk_overlay_page_begin(ui, model, 920.0f);
@@ -327,7 +327,7 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
     picture = inner - DEV_COLUMN_W - NK_UI_SPACE_6;
     if (picture > DEV_PICTURE_W) picture = DEV_PICTURE_W;
     if (picture < 240.0f) picture = 240.0f;
-    nk_overlay_eyebrow(ui, DEV_ID_EYEBROW, NULL, "Game paused \xC2\xB7 Developer", theme->muted);
+    nk_ui_eyebrow(ui, DEV_ID_EYEBROW, "Game paused \xC2\xB7 Developer");
     nk_ui_text_role(ui, DEV_ID_TITLE, "VRAM viewer", NK_UI_TYPE_TITLE, theme->paper);
     {
         NkUiLayout body = nk_overlay_layout(NK_UI_LAYOUT_ROW, nk_overlay_grow(), nk_overlay_fit(),
@@ -449,11 +449,22 @@ static void profile_bar(NkUi *ui, size_t index, const float *parts) {
     NkUiId id = (NkUiId)(PROFILE_ID_BAR + (NkUiId)index * 8u);
     NkUiLayout bar = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_fixed(PROFILE_BAR_W),
                                        nk_overlay_fixed(PROFILE_GRAPH_H), 0.0f);
+    float heights[NK_OVERLAY_PROFILE_PART_COUNT];
+    float left = PROFILE_GRAPH_H;
+    /* Each part is rounded on its own, so parts that add up to 1 (or more, when the host's
+       counters overlap) can round past the bar: from the CPU up, each piece takes at most
+       the room the pieces below it left. */
+    for (int p = 0; p < NK_OVERLAY_PROFILE_PART_COUNT; ++p) {
+        float share = parts[p] > 0.0f ? (parts[p] < 1.0f ? parts[p] : 1.0f) : 0.0f;
+        float height = (float)(int)(share * PROFILE_GRAPH_H + 0.5f);
+        if (height > left) height = left;
+        heights[p] = height;
+        left -= height;
+    }
     bar.align_y = NK_UI_ALIGN_END;
     if (!nk_ui_begin_container(ui, id, &bar, NULL)) return;
     for (int p = NK_OVERLAY_PROFILE_PART_COUNT - 1; p >= 0; --p) {
-        float share = parts[p] > 0.0f ? (parts[p] < 1.0f ? parts[p] : 1.0f) : 0.0f;
-        float height = (float)(int)(share * PROFILE_GRAPH_H + 0.5f);
+        float height = heights[p];
         NkUiLayout piece;
         NkUiStyle style;
         if (height < 1.0f) continue;
@@ -484,7 +495,7 @@ NkOverlayAction nk_overlay_page_profile(NkUi *ui, NkOverlayState *state,
     if (bars > NK_OVERLAY_PROFILE_BARS) bars = NK_OVERLAY_PROFILE_BARS;
     inner = nk_overlay_page_begin(ui, model, 760.0f);
     if (inner <= 0.0f) return result;
-    nk_overlay_eyebrow(ui, PROFILE_ID_EYEBROW, NULL, "Game paused \xC2\xB7 Developer", theme->muted);
+    nk_ui_eyebrow(ui, PROFILE_ID_EYEBROW, "Game paused \xC2\xB7 Developer");
     nk_ui_text_role(ui, PROFILE_ID_TITLE, "Profile", NK_UI_TYPE_TITLE, theme->paper);
     if (rows == 0u) {
         nk_ui_text_role(ui, PROFILE_ID_EMPTY, "No interval has closed yet.", NK_UI_TYPE_BODY,

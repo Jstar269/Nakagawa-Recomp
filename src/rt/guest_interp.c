@@ -434,15 +434,19 @@ const SrModuleCode *sr_module_code_at(unsigned index) {
     return index < s_module_code_count ? s_module_codes[index] : NULL;
 }
 
+#define MODULE_FNV1A64_BASIS 0xcbf29ce484222325ull
+
+/* One FNV-1a 64 step over one byte. */
+static uint64_t module_fnv1a64_byte(uint64_t h, unsigned char byte) {
+    return (h ^ byte) * 0x100000001b3ull;
+}
+
 /* FNV-1a over bytes, 64-bit. tools/codegen.py records the same digest of an overlay's
  * leading bytes; the shared vectors are pinned by both test suites. */
 uint64_t sr_module_code_fnv1a64(const void *bytes, size_t size) {
     const unsigned char *p = (const unsigned char *)bytes;
-    uint64_t h = 0xcbf29ce484222325ull;
-    for (size_t i = 0; i < size; i++) {
-        h ^= p[i];
-        h *= 0x100000001b3ull;
-    }
+    uint64_t h = MODULE_FNV1A64_BASIS;
+    for (size_t i = 0; i < size; i++) h = module_fnv1a64_byte(h, p[i]);
     return h;
 }
 
@@ -523,12 +527,13 @@ SrModuleBindResult sr_module_code_bind(const SrModuleCode *code, uint32_t base,
             uint64_t f_end = (uint64_t)f->offset + (uint64_t)f->nwords * 4u;
             if (f->nwords == 0u || f->offset < code->link_low || f_end > code->link_high)
                 continue;
+            /* Hash the live words in place: no copy, so no allocation can stop the
+             * registration part way through the module. */
             uint32_t at = base + f->offset;
-            uint32_t *words = (uint32_t *)malloc((size_t)f->nwords * sizeof(uint32_t));
-            if (!words) break;
-            for (uint32_t w = 0; w < f->nwords; w++) words[w] = module_live_word(at + 4u * w);
-            sr_stale_register_block(at, f->nwords, sr_stale_fnv1a(words, f->nwords));
-            free(words);
+            uint32_t h = SR_STALE_FNV1A_BASIS;
+            for (uint32_t w = 0; w < f->nwords; w++)
+                h = sr_stale_fnv1a_step(h, module_live_word(at + 4u * w));
+            sr_stale_register_block(at, f->nwords, h);
         }
     }
     atomic_store_explicit(&s_module_binding_live[free_slot], 1u, memory_order_release);
@@ -595,13 +600,12 @@ RecompFn sr_module_code_lookup(uint32_t pc, int *in_bound_image) {
     return lo < code->nfuncs && code->funcs[lo].offset == link_pc ? code->funcs[lo].fn : NULL;
 }
 
+/* sr_module_code_fnv1a64 continued over guest words, each in little-endian byte order. */
 static uint64_t overlay_hash_words(uint64_t h, uint32_t address, uint32_t nwords) {
     for (uint32_t i = 0; i < nwords; i++) {
         uint32_t word = sr_r32(address + 4u * i);
-        for (unsigned b = 0; b < 4u; b++) {
-            h ^= (word >> (8u * b)) & 0xffu;
-            h *= 0x100000001b3ull;
-        }
+        for (unsigned b = 0; b < 4u; b++)
+            h = module_fnv1a64_byte(h, (unsigned char)(word >> (8u * b)));
     }
     return h;
 }
@@ -609,7 +613,7 @@ static uint64_t overlay_hash_words(uint64_t h, uint32_t address, uint32_t nwords
 /* Whether guest memory holds the words of a code overlay's check ranges
  * (overlay_check_spans), which add up to overlay_check_len bytes. */
 static int overlay_spans_resident(const SrModuleCode *code) {
-    uint64_t total = 0, h = 0xcbf29ce484222325ull;
+    uint64_t total = 0, h = MODULE_FNV1A64_BASIS;
     for (uint32_t i = 0; i < code->noverlay_check_spans; i++) {
         const SrModuleSpan *span = &code->overlay_check_spans[i];
         if (span->end <= span->start || ((span->start | span->end) & 3u) != 0u ||
@@ -630,7 +634,7 @@ static int overlay_resident(const SrModuleCode *code) {
     if ((code->overlay_check_len & 3u) != 0u || end > code->link_high ||
         !sr_guest_span_readable_current(code->link_low, code->overlay_check_len))
         return 0;
-    return overlay_hash_words(0xcbf29ce484222325ull, code->link_low,
+    return overlay_hash_words(MODULE_FNV1A64_BASIS, code->link_low,
                               code->overlay_check_len / 4u) == code->overlay_check_fnv1a64;
 }
 
@@ -1750,6 +1754,14 @@ static int interp_returns_past_its_call(CpuState *s, const SrGuestInterpCallBoun
     return sr_aot_return_boundary_encloses_resume(s, target, sp);
 }
 
+/* SR_DISPLOG, read once: the interpreter is entered on every interpreted dispatch, so it
+ * does not scan the environment each time (recomp.c caches the same switch). */
+static int guest_interp_displog(void) {
+    static int s_displog = -1;
+    if (s_displog < 0) s_displog = getenv("SR_DISPLOG") != NULL ? 1 : 0;
+    return s_displog;
+}
+
 static SrGuestInterpResult sr_guest_interp_run_internal(
     CpuState *s,
     uint32_t entry,
@@ -1758,7 +1770,7 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
     SrGuestInterpFault *fault) {
     uint32_t pc = entry;
     unsigned long long instruction_count = 0u;
-    const int log_dispatch = getenv("SR_DISPLOG") != NULL;
+    const int log_dispatch = guest_interp_displog();
     /* Whether this run has loaded $sp out of the stack its frame allocated (#1935). */
     int loaded_sp = 0;
     uint32_t release_sp = 0u;

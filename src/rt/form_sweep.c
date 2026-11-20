@@ -226,6 +226,7 @@ static int parse_plan(const char *path, uint64_t *seed, uint32_t *states, uint32
     uint32_t cap = 256u, n = 0u;
     SweepInst *v = (SweepInst *)malloc(cap * sizeof *v);
     char line[256];
+    int bad = 0;
     *seed = 0u;
     *states = 0u;
     *scratch = 0u;
@@ -242,6 +243,13 @@ static int parse_plan(const char *path, uint64_t *seed, uint32_t *states, uint32
             *scratch = b;
             *scratch_size = c;
         } else if (sscanf(line, "inst %u %x %x %d %x %x %x", &b, &c, &d2, &base, &e, &g, &h) == 7) {
+            /* make_state indexes cpu->r with the base register: -1 and 0 name no base. */
+            if (base < -1 || base > 31) {
+                fprintf(stderr, "form_sweep: plan instance %u names base register %d, outside -1..31\n",
+                        b, base);
+                bad = 1;
+                break;
+            }
             if (n == cap) {
                 cap *= 2u;
                 v = (SweepInst *)realloc(v, cap * sizeof *v);
@@ -261,6 +269,16 @@ static int parse_plan(const char *path, uint64_t *seed, uint32_t *states, uint32
     if (!v) return 0;
     *out = v;
     *count = n;
+    if (bad) return 0;
+    /* Both sides form host pointers over the whole window (arena_base() + scratch and
+     * nk_ref_ram() + (scratch - NK_REF_RAM_BASE)) and write every byte of it, so the
+     * window must lie inside the reference RAM, which the runtime arena also covers. */
+    if (*scratch < NK_REF_RAM_BASE ||
+        (uint64_t)(*scratch - NK_REF_RAM_BASE) + (uint64_t)*scratch_size > (uint64_t)NK_REF_RAM_SIZE) {
+        fprintf(stderr, "form_sweep: plan scratch window 0x%08x+0x%x is outside guest RAM "
+                "0x%08x+0x%x\n", *scratch, *scratch_size, NK_REF_RAM_BASE, NK_REF_RAM_SIZE);
+        return 0;
+    }
     return *states != 0u && *scratch_size >= 0x40u && n != 0u;
 }
 

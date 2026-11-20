@@ -64,6 +64,12 @@ static void note_guest_start(void) {{
 /* LoadExec restarts the harness's take still reports: 0 unless a mode arms one. */
 static int g_loadexec_restarts = 0;
 static int g_loadexec_armed = 0;
+/* An armed restart whose replacement module the boot refuses (driver.c returns 2). */
+static int g_loadexec_boot_refused = 0;
+/* The run's ordered teardown (driver.c): how often each ran, and whether the presenter was
+ * shut down when the trace closed. */
+static int g_gui_shutdown_calls = 0;
+static int g_trace_close_calls = 0;
 
 uint32_t g_sr_debug = 0;
 int sr_hit_hle = 0;
@@ -102,7 +108,18 @@ SrTailTransfer sr_tail_transfer;
 void sr_tail_fatal(const char *what, uint32_t target) {{ (void)what; (void)target; abort(); }}
 void sr_tail_drain(CpuState *s) {{ (void)s; abort(); }}
 static void synthetic_module_start(uint32_t args, uint32_t argp);
+/* The plain driver's HLE boundary (recomp.c, hle.c): with no scheduler, an unregistered NID
+ * sets sr_hit_hle and longjmps to g_hle_jmp. A mode arms g_unregistered_nid_stop to make the
+ * entry body do that, the way sr_syscall does. */
+jmp_buf g_hle_jmp;
+static int g_unregistered_nid_stop = 0;
+static unsigned g_nested_release_all_calls = 0;
+unsigned sr_nested_frame_release_all(void) {{ g_nested_release_all_calls++; return 0; }}
 static void dummy_recomp_fn(CpuState *s) {{
+    if (g_unregistered_nid_stop) {{
+        sr_hit_hle = 1;
+        longjmp(g_hle_jmp, 1);
+    }}
     const char *boot_path = getenv("SR_BOOT_PATH");
     if (!boot_path || !boot_path[0] || s->r[29] < 16u) return;
     uint32_t prologue_sp = s->r[29] - 16u;
@@ -123,7 +140,7 @@ void dispatch_from_host(CpuState *s, uint32_t entry) {{
     if (fn) sr_call_body(fn, s);
 }}
 int sr_trace_open(const char *path, const char *title, uint32_t entry) {{ (void)path; (void)title; (void)entry; return 0; }}
-void sr_trace_close(void) {{}}
+void sr_trace_close(void) {{ g_trace_close_calls++; }}
 void gui_init(const char *title) {{ (void)title; }}
 /* Headless title-acceptance seam (gui.c, sched.c): this harness never requests an acceptance launch. */
 int gui_headless_acceptance_requested(void) {{ return 0; }}
@@ -139,7 +156,7 @@ void gui_pause_leave(void) {{}}
 /* No window to quit and no GE capture to finish (gui.c, ge.c): nothing stops a scheduler run. */
 int gui_stop_requested(void) {{ return 0; }}
 int gui_quit_requested(void) {{ return 0; }}
-void gui_shutdown(void) {{}}
+void gui_shutdown(void) {{ g_gui_shutdown_calls++; }}
 int ge_capture_exit_due(void) {{ return 0; }}
 void ge_capture_exit_set_deferred(int deferred) {{ (void)deferred; }}
 /* No GE, so no texture dump to finish where the run ends (ge.c, ge_shared.h). */
@@ -192,7 +209,7 @@ void sr_hle_loadexec_release(SrLoadExecRequest *request) {{ (void)request; }}
 void sr_hle_loadexec_reset_guest_state(void) {{}}
 int sr_hle_loadexec_boot_module(const char *guest_path, uint32_t *entry_out, uint32_t *gp_out) {{
     (void)guest_path;
-    if (!g_loadexec_armed) return 0;
+    if (!g_loadexec_armed || g_loadexec_boot_refused) return 0;
     *entry_out = 0x08000010u;
     *gp_out = 0u;
     return 1;
@@ -477,6 +494,25 @@ int main(int argc, char **argv) {{
         return driver_main(7, argv_fake);
     }}
 
+    if (strcmp(mode, "image_unregistered_nid") == 0) {{
+        /* The trace-comparison run (no --sched) reaches an unregistered NID: the stop returns
+         * to the driver, which reclaims nested frames, still checks its expectations and ends
+         * with the named unsupported-import status instead of a jump through an unset jmp_buf. */
+        if (argc < 3) return 126;
+        g_unregistered_nid_stop = 1;
+        char *argv_fake[] = {{
+            "driver", "--image", argv[2], "0x08000000", "0x08000010", "none", "none",
+            "--expect-u32=0x08000020:0x12345678"
+        }};
+        int result = driver_main(8, argv_fake);
+        if (g_nested_release_all_calls != 1u) {{
+            fprintf(stderr, "nested frames reclaimed %u times, expected 1\\n",
+                    g_nested_release_all_calls);
+            return 127;
+        }}
+        return result;
+    }}
+
     if (strcmp(mode, "image_entry_ra") == 0) {{
         /* #1375: the direct entry's $ra is the host return address unless the reference
          * trace recorded one. argv: image, reference trace (or none), expected $ra. */
@@ -523,6 +559,29 @@ int main(int argc, char **argv) {{
         if (strcmp(g_module_start_arg, "disc0:/PSP_GAME/SYSDIR/SYNTHETIC.BIN") != 0)
             return 115;
         return 0;
+    }}
+
+    if (strcmp(mode, "loadexec_refused_teardown") == 0) {{
+        /* A LoadExec restart the driver cannot carry out ("reset": the old threads are not
+         * retired; "boot": the replacement module does not boot), or a first run whose
+         * module_start thread could not be created ("sched_run", with HARNESS_SCHED_RUN_FAILS=1),
+         * still ends through the run's ordered teardown: the presenter shut down and the trace
+         * closed, then status 2. */
+        if (argc < 4) return 128;
+        g_loadexec_restarts = 1;
+        g_loadexec_armed = strcmp(argv[3], "boot") == 0;
+        g_loadexec_boot_refused = g_loadexec_armed;
+        char *argv_fake[] = {{
+            "driver", "--image", argv[2], "0x08000000", "0x08000010", "none", "none", "--sched"
+        }};
+        int result = driver_main(8, argv_fake);
+        if (g_gui_shutdown_calls != 1 || g_trace_close_calls != 1) {{
+            fprintf(stderr, "teardown before the LoadExec refusal returned: gui_shutdown %d, "
+                            "sr_trace_close %d, expected 1 each\\n",
+                    g_gui_shutdown_calls, g_trace_close_calls);
+            return 129;
+        }}
+        return result;
     }}
 
     if (strcmp(mode, "audio_open_sched") == 0) {{
@@ -759,6 +818,26 @@ int main(int argc, char **argv) {{
             # 6. Valid --image load
             valid_img = subprocess.run([str(exe), "image_valid", str(sample_img)], capture_output=True, text=True)
             self.assertEqual(valid_img.returncode, 0, valid_img.stderr + valid_img.stdout)
+
+            unregistered = subprocess.run(
+                [str(exe), "image_unregistered_nid", str(sample_img)],
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(unregistered.returncode, 7, unregistered.stderr + unregistered.stdout)
+            self.assertIn("done (hit_hle=1)", unregistered.stderr)
+            self.assertIn("status=PASS", unregistered.stderr)
+            self.assertIn("HLE_BOUNDARY_STOP", unregistered.stderr)
+
+            for refusal in ("reset", "boot", "sched_run"):
+                with self.subTest(loadexec_refusal=refusal):
+                    refusal_env = os.environ.copy()
+                    if refusal == "sched_run":
+                        refusal_env["HARNESS_SCHED_RUN_FAILS"] = "1"
+                    refused = subprocess.run(
+                        [str(exe), "loadexec_refused_teardown", str(sample_img), refusal],
+                        capture_output=True, text=True, timeout=60, env=refusal_env,
+                    )
+                    self.assertEqual(refused.returncode, 2, refused.stderr + refused.stdout)
 
             # 6b. The direct entry's $ra (#1375): the host return address unless the
             # reference trace recorded one, as the reference runner starts too.

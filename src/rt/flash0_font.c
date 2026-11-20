@@ -111,11 +111,15 @@ static Flash0PathKind flash0_parse(const char *path, const char **name_out) {
     return FLASH0_PATH_FONT_FILE;
 }
 
-/* The slot a served name belongs to. A pending entry never matches. */
+/* The slot a served name belongs to: its project name, or for Japanese and Korean the PSP's own
+ * name (jpn0.pgf, kr0.pgf: the measured listing), which a game can open directly. A pending entry
+ * never matches. */
 static int flash0_slot_for_name(const char *name, NkFontSlot *slot_out) {
     for (int i = 0; i < NK_FONT_SLOT_COUNT; i++) {
         const Flash0SlotEntry *entry = &s_flash0_slots[i];
-        if (entry->measured && ascii_ci_equal(name, entry->served_name)) {
+        const char *psp_name = nk_font_slot_psp_filename((NkFontSlot)i);
+        if (entry->measured && (ascii_ci_equal(name, entry->served_name) ||
+                                (psp_name && ascii_ci_equal(name, psp_name)))) {
             *slot_out = (NkFontSlot)i;
             return 1;
         }
@@ -364,9 +368,18 @@ static Flash0Source flash0_resolve_latin_index(const Flash0Sources *sources, int
     *fp_out = NULL;
     *size_out = 0;
     if (path && capacity > 0) path[0] = '\0';
-    if (!sources || !path || capacity == 0 || (unsigned)index >= NK_FONT_LATIN_INDEX_COUNT ||
-        !nk_font_resolve_latin_index(sources->user_data_dir, sources->project_dir,
+    if (!sources || !path || capacity == 0 || (unsigned)index >= NK_FONT_LATIN_INDEX_COUNT) {
+        flash0_log_latin_index(index, NULL);
+        return FLASH0_SOURCE_NONE;
+    }
+    /* The project source never serves an imported cache, so a cache named as the project
+     * directory is not handed to the resolver as one: its nkltn.pgf would be picked as a project
+     * font and refused here, before the resolver's vouched legacy-import fallback is reached. */
+    const int project_is_cache = sources->project_dir[0] && flash0_project_is_import_cache(sources);
+    if (!nk_font_resolve_latin_index(sources->user_data_dir,
+                                     project_is_cache ? "" : sources->project_dir,
                                      index, &resolution)) {
+        if (project_is_cache) flash0_refuse_import_cache(NK_FONT_SLOT_LATIN);
         flash0_log_latin_index(index, NULL);
         return FLASH0_SOURCE_NONE;
     }
@@ -407,14 +420,6 @@ static Flash0Source flash0_resolve_latin_index(const Flash0Sources *sources, int
             flash0_log_latin_index(index, NULL);
             return FLASH0_SOURCE_NONE;
         }
-    } else if (flash0_project_is_import_cache(sources)) {
-        flash0_refuse_import_cache(NK_FONT_SLOT_LATIN);
-        fclose(*fp_out);
-        *fp_out = NULL;
-        *size_out = 0;
-        path[0] = '\0';
-        flash0_log_latin_index(index, NULL);
-        return FLASH0_SOURCE_NONE;
     }
     if (resolution_out) *resolution_out = resolution;
     flash0_log_latin_index(index, &resolution);
@@ -612,7 +617,7 @@ uint32_t sr_flash0_font_list_dir(const char *guest_path, const Flash0Sources *so
         if (flash0_resolve(sources, slot, &fp, &size) == FLASH0_SOURCE_NONE) continue;
         fclose(fp);
         if (!sr_vfs_dirlist_merge_lba(list, s_flash0_slots[i].served_name, 0, size, 0u))
-            return flash0_refuse(0x80010008u, "listing ran out of memory", guest_path);
+            return flash0_refuse(SR_FLASH0_ERR_NO_MEMORY, "listing ran out of memory", guest_path);
     }
     for (int index = 0; index < NK_FONT_LATIN_INDEX_COUNT; index++) {
         char path[SR_FLASH0_PATH_MAX + 64];
@@ -622,7 +627,7 @@ uint32_t sr_flash0_font_list_dir(const char *guest_path, const Flash0Sources *so
                                        &fp, &size, NULL) == FLASH0_SOURCE_NONE) continue;
         fclose(fp);
         if (!sr_vfs_dirlist_merge_lba(list, nk_font_latin_index_filename(index), 0, size, 0u))
-            return flash0_refuse(0x80010008u, "listing ran out of memory", guest_path);
+            return flash0_refuse(SR_FLASH0_ERR_NO_MEMORY, "listing ran out of memory", guest_path);
     }
     sr_vfs_dirlist_sort(list);
     return 0u;

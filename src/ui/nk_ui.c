@@ -575,6 +575,13 @@ void nk_ui_cancel_press(NkUi *ui) {
     if (ui != NULL) ui->pointer_press_id = 0u;
 }
 
+void nk_ui_drop_input(NkUi *ui) {
+    if (ui == NULL) return;
+    ui->event_count = 0u;
+    ui->held_count = 0u;
+    ui->input_held = false;
+}
+
 void nk_ui_push_event(NkUi *ui, const NkUiEvent *event) {
     bool down;
     size_t i;

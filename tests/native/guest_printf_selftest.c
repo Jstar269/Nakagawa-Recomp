@@ -479,6 +479,18 @@ int main(void) {
         /* Precision 0 rounds the fraction away entirely. */
         EXPECT("hex float precision zero", "%.0a", "0x1p+10",
                dbl_lo(1234.5678), dbl_hi(1234.5678));
+        /* An exact half rounds to even: with no fraction digit kept, the leading digit's
+         * parity decides (1.5 = 0x1.8p+0 rounds up to 0x2p+0, 2.5 = 0x1.4p+1 does not tie). */
+        EXPECT("hex float precision zero tie odd", "%.0a", "0x2p+0",
+               dbl_lo(1.5), dbl_hi(1.5));
+        EXPECT("hex float precision zero below tie", "%.0a", "0x1p+1",
+               dbl_lo(2.5), dbl_hi(2.5));
+        EXPECT("hex float precision zero tie exp", "%.0a", "0x2p+1",
+               dbl_lo(3.0), dbl_hi(3.0));
+        EXPECT("hex float precision one tie even", "%.1a", "0x1.0p+0",
+               dbl_lo(1.03125), dbl_hi(1.03125));
+        EXPECT("hex float precision one tie odd", "%.1a", "0x1.2p+0",
+               dbl_lo(1.09375), dbl_hi(1.09375));
         /* Denormals normalise to a leading 1 with an adjusted exponent. */
         EXPECT("hex float denormal", "%a", "0x1p-1074",
                dbl_lo(bits_to_double(1ULL)), dbl_hi(bits_to_double(1ULL)));

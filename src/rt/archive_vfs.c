@@ -7,21 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int archive_lower(int value) {
-    if (value >= 'A' && value <= 'Z') return value + ('a' - 'A');
-    return value;
-}
-
 int sr_archive_variant_from_name(const char *name, int *variant_out) {
     if (!name || !variant_out) return 0;
     const char *base = strrchr(name, '.');
-    if (!base || base[1] == '\0' ||
-        !((base[1] == 'x' || base[1] == 'X') &&
-          (base[2] == 'b' || base[2] == 'B'))) return 0;
-    const char *suffix = base + 1;
-    if (!(suffix[0] == 'x' || suffix[0] == 'X') ||
-        !(suffix[1] == 'b' || suffix[1] == 'B')) return 0;
-    suffix += 2;
+    if (!base || !(base[1] == 'x' || base[1] == 'X') ||
+        !(base[2] == 'b' || base[2] == 'B')) return 0;
+    const char *suffix = base + 3;
     if (*suffix == '\0') {
         *variant_out = -1;
         return 1;
@@ -38,63 +29,86 @@ int sr_archive_variant_from_name(const char *name, int *variant_out) {
     return 1;
 }
 
+/* A Shift-JIS lead byte, as the XB reader (nk_xb.c) recognizes one. */
+static int archive_sjis_lead(unsigned char value) {
+    return (value >= 0x81u && value <= 0x9fu) || (value >= 0xe0u && value <= 0xfcu);
+}
+
+/* The key byte for the second byte of a Shift-JIS pair, or -1 when `value` cannot follow
+ * a lead byte. The XB reader keeps a pair byte for byte, so a trail 0x5c is part of the
+ * name, never a separator. The guest key (data_normalize_guest_key) folds every byte,
+ * a trail too: 0x5c becomes '/' and 'A'-'Z' become lower case. A '/' never follows a
+ * lead byte in a member name (it is not a trail byte), so after a lead byte it can only
+ * be such a folded 0x5c, and the key takes it back. A trail letter is folded the way
+ * the guest key folds it. */
+static int archive_sjis_trail_key(unsigned char value) {
+    if (value == '/') return 0x5c;
+    if ((value >= 0x40u && value <= 0x7eu) || (value >= 0x80u && value <= 0xfcu)) {
+        return sr_vfs_ascii_tolower(value);
+    }
+    return -1;
+}
+
+static int archive_component_valid(const char *out, size_t start, size_t end) {
+    if (end == start) return 0;
+    if (end - start == 1u && out[start] == '.') return 0;
+    if (end - start == 2u && out[start] == '.' && out[start + 1u] == '.') return 0;
+    return 1;
+}
+
+/* The archive key of a member path or of a guest key: separators become one '/', ASCII
+ * letters fold to lower case, and a Shift-JIS pair stays one unit (see
+ * archive_sjis_trail_key), so its trail byte is neither a separator nor checked against
+ * the forbidden ASCII characters. A directory key may be empty and may end in a
+ * separator, which is dropped. */
 static int archive_normalize_key(const char *input, char *out, size_t capacity,
-                                 int allow_empty) {
+                                 int directory) {
     if (!input || !out || capacity == 0u) return 0;
-    const char *p = input;
+    const unsigned char *p = (const unsigned char *)input;
     while (*p == '/' || *p == '\\') p++;
     size_t out_pos = 0;
     size_t component_start = 0;
     while (*p) {
-        if (*p == '/' || *p == '\\') {
-            if (out_pos == component_start) return 0;
-            if (out_pos - component_start == 1u && out[component_start] == '.') return 0;
-            if (out_pos - component_start == 2u && out[component_start] == '.' &&
-                out[component_start + 1u] == '.') return 0;
+        unsigned char value = *p;
+        if (archive_sjis_lead(value) && p[1] != '\0') {
+            int trail = archive_sjis_trail_key(p[1]);
+            if (trail >= 0) {
+                if (out_pos + 2u >= capacity) return 0;
+                out[out_pos++] = (char)value;
+                out[out_pos++] = (char)trail;
+                p += 2;
+                continue;
+            }
+        }
+        if (value == '/' || value == '\\') {
+            if (!archive_component_valid(out, component_start, out_pos)) return 0;
             if (out_pos + 1u >= capacity) return 0;
             out[out_pos++] = '/';
             component_start = out_pos;
             while (*p == '/' || *p == '\\') p++;
             continue;
         }
-        unsigned char value = (unsigned char)*p++;
         if (value < 0x20u || value == 0x7fu || value == ':' || value == '*' ||
             value == '?' || value == '"' || value == '<' || value == '>' ||
             value == '|') return 0;
         if (out_pos + 1u >= capacity) return 0;
-        out[out_pos++] = (char)archive_lower(value);
+        out[out_pos++] = (char)sr_vfs_ascii_tolower(value);
+        p++;
     }
     if (out_pos == component_start) {
-        if (allow_empty) {
-            out[0] = '\0';
-            return 1;
-        }
+        /* Empty, or ending in a separator. */
+        if (!directory) return 0;
+        if (out_pos > 0u) out_pos--;
+    } else if (!archive_component_valid(out, component_start, out_pos)) {
         return 0;
     }
-    if (out_pos - component_start == 1u && out[component_start] == '.') return 0;
-    if (out_pos - component_start == 2u && out[component_start] == '.' &&
-        out[component_start + 1u] == '.') return 0;
     out[out_pos] = '\0';
     return 1;
 }
 
 static int archive_normalize_directory(const char *input, char *out, size_t capacity) {
     if (!input || !out || capacity == 0u) return 0;
-    const char *start = input;
-    while (*start == '/' || *start == '\\') start++;
-    const char *end = start + strlen(start);
-    while (end > start && (end[-1] == '/' || end[-1] == '\\')) end--;
-    if (end == start) {
-        out[0] = '\0';
-        return 1;
-    }
-    size_t length = (size_t)(end - start);
-    if (length >= capacity) return 0;
-    char temporary[NK_XB_MAX_NAME_BYTES + 1u];
-    if (length >= sizeof(temporary)) return 0;
-    memcpy(temporary, start, length);
-    temporary[length] = '\0';
-    return archive_normalize_key(temporary, out, capacity, 0);
+    return archive_normalize_key(input, out, capacity, 1);
 }
 
 static int archive_index_cmp(const void *left, const void *right) {
@@ -154,16 +168,6 @@ static int archive_mount_reserve(SrArchiveVfs *vfs, size_t wanted) {
     return 1;
 }
 
-static char *archive_strdup(const char *value) {
-    if (!value) return NULL;
-    size_t length = strlen(value);
-    if (length == SIZE_MAX) return NULL;
-    char *copy = (char *)malloc(length + 1u);
-    if (!copy) return NULL;
-    memcpy(copy, value, length + 1u);
-    return copy;
-}
-
 static void archive_index_rollback(SrArchiveVfs *vfs, size_t first) {
     if (!vfs) return;
     while (vfs->index_count > first) {
@@ -207,6 +211,7 @@ void sr_archive_vfs_destroy(SrArchiveVfs *vfs) {
     free(vfs->index);
     for (size_t i = 0; i < vfs->cache_count; i++) free(vfs->cache[i].data);
     free(vfs->cache);
+    free(vfs->oversize_data);
     sr_archive_vfs_init(vfs);
 }
 
@@ -234,17 +239,17 @@ static NkResult archive_adopt(SrArchiveVfs *vfs, NkXbArchive *archive, int varia
             archive_index_rollback(vfs, first);
             return NK_ERROR_INVALID_XB;
         }
-        /* A member name with no key is a malformed archive, not a short allocation: the
-         * XB reader keeps a Shift-JIS trail byte 0x5c, which the key rule reads as a
-         * separator, so such a name can end in one or hold an empty component. */
+        /* A member name with no key is a malformed archive, not a short allocation. The
+         * key rule keeps a Shift-JIS pair whole, as the XB reader does, so a name that
+         * reader accepted has a key; this refusal is the boundary for any other name. */
         char key[NK_XB_MAX_NAME_BYTES + 1u];
         if (!archive_normalize_key(source->path, key, sizeof(key), 0)) {
             archive_index_rollback(vfs, first);
             return NK_ERROR_INVALID_XB;
         }
         SrArchiveIndexEntry *target = &vfs->index[vfs->index_count];
-        target->key = archive_strdup(key);
-        target->path = archive_strdup(source->path);
+        target->key = sr_asset_index_strdup(key);
+        target->path = sr_asset_index_strdup(source->path);
         if (!target->key || !target->path) {
             free(target->key);
             free(target->path);
@@ -320,24 +325,19 @@ int sr_archive_vfs_lookup(const SrArchiveVfs *vfs, const char *key,
     if (!archive_normalize_key(key, normalized, sizeof(normalized), 0)) return 0;
     int wanted = wanted_variant == SR_ARCHIVE_VARIANT_AUTO ? -2 : wanted_variant;
     if (wanted < -2) return 0;
-    const SrArchiveIndexEntry *chosen = NULL;
+    /* The index is sorted by (key, variant, order), so the first selected entry is the
+     * one to open: for an unqualified request an unnumbered (-1) member before any
+     * numbered one and the lowest number otherwise, and among equal variants the first
+     * mount. sr_archive_vfs_list_dir merges entries in the same order and keeps the
+     * first, so the listing and the open describe the same member. */
     size_t first = archive_index_lower_bound(vfs, normalized);
     for (size_t i = first; i < vfs->index_count; i++) {
         const SrArchiveIndexEntry *candidate = &vfs->index[i];
         if (strcmp(candidate->key, normalized) != 0) break;
-        if (wanted >= 0) {
-            if (candidate->variant == wanted) {
-                chosen = candidate;
-                break;
-            }
-            continue;
-        }
-        if (!chosen || candidate->variant == -1 ||
-            (chosen->variant != -1 && candidate->variant < chosen->variant)) {
-            chosen = candidate;
-        }
+        if (!sr_asset_index_variant_selected(candidate->variant, wanted)) continue;
+        return archive_file_from_index(vfs, candidate, file_out);
     }
-    return chosen && archive_file_from_index(vfs, chosen, file_out);
+    return 0;
 }
 
 static uint64_t archive_next_use(SrArchiveVfs *vfs) {
@@ -394,18 +394,23 @@ static int archive_cache_reserve(SrArchiveVfs *vfs, size_t wanted) {
 
 static void archive_cache_insert(SrArchiveVfs *vfs, size_t mount_index,
                                  size_t entry_index, uint8_t *data, size_t size) {
-    if (!vfs || !data || size == 0u || vfs->max_cache_entries == 0u ||
-        size > vfs->max_cache_bytes) {
+    if (!vfs || !data || size == 0u) {
         free(data);
         return;
     }
-    for (size_t i = 0; i < vfs->cache_count;) {
-        if (vfs->cache[i].mount_index == mount_index &&
-            vfs->cache[i].entry_index == entry_index) {
-            archive_cache_remove(vfs, i);
-        } else {
-            i++;
-        }
+    if (size > vfs->max_cache_bytes) {
+        /* Too large for the cache: keep it as the one oversize member, in place of the
+         * previous one, so the next pieces of a sequential read reuse it. */
+        free(vfs->oversize_data);
+        vfs->oversize_data = data;
+        vfs->oversize_size = size;
+        vfs->oversize_mount_index = mount_index;
+        vfs->oversize_entry_index = entry_index;
+        return;
+    }
+    if (vfs->max_cache_entries == 0u) {
+        free(data);
+        return;
     }
     while (vfs->cache_count > 0u &&
            (vfs->cache_count >= vfs->max_cache_entries ||
@@ -466,6 +471,14 @@ NkResult sr_archive_vfs_read(const SrArchiveVfs *vfs, const SrArchiveFile *file,
         if (output_size) *output_size = amount;
         return NK_OK;
     }
+    if (vfs->oversize_data && vfs->oversize_mount_index == file->mount_index &&
+        vfs->oversize_entry_index == file->entry_index) {
+        if (offset > vfs->oversize_size || amount > vfs->oversize_size - (size_t)offset)
+            return NK_ERROR_INVALID_XB;
+        memcpy(output, vfs->oversize_data + (size_t)offset, amount);
+        if (output_size) *output_size = amount;
+        return NK_OK;
+    }
     if (mount->file_backed) archive_handle_switch(mutable_vfs, file->mount_index);
 
     if (entry->compression == NK_XB_COMPRESSION_NONE) {
@@ -487,6 +500,7 @@ NkResult sr_archive_vfs_read(const SrArchiveVfs *vfs, const SrArchiveFile *file,
     size_t expanded = (size_t)entry->expanded_size;
     uint8_t *decoded = (uint8_t *)malloc(expanded);
     if (!decoded) return NK_ERROR_OUT_OF_MEMORY;
+    mutable_vfs->decode_count++;
     NkResult result = nk_xb_read_entry(mount, file->entry_index, decoded, expanded,
                                        NULL, NULL, 0);
     if (result != NK_OK) {
@@ -565,7 +579,7 @@ int sr_archive_vfs_list_dir(const SrArchiveVfs *vfs, const char *dir_key,
         const char *tail = entry->key + prefix_length;
         if (!tail[0]) continue;
         list->exists = 1;
-        if (wanted >= 0 && entry->variant != wanted) continue;
+        if (!sr_asset_index_variant_selected(entry->variant, wanted)) continue;
         const char *slash = strchr(tail, '/');
         int is_dir = slash != NULL;
         size_t folded_length = is_dir ? (size_t)(slash - tail) : strlen(tail);
@@ -604,4 +618,8 @@ size_t sr_archive_vfs_cache_bytes(const SrArchiveVfs *vfs) {
 
 size_t sr_archive_vfs_cache_entry_count(const SrArchiveVfs *vfs) {
     return vfs ? vfs->cache_count : 0u;
+}
+
+size_t sr_archive_vfs_decode_count(const SrArchiveVfs *vfs) {
+    return vfs ? vfs->decode_count : 0u;
 }
