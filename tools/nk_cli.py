@@ -107,6 +107,7 @@ from nk_core.iso_inspect import (  # noqa: E402
     walk_disc_module_entries,
     write_experimental_profile,
 )
+import nk_powershell  # noqa: E402
 import title_manifest  # noqa: E402
 from psp_import_table import MODULE_ATTR_KERNEL as PSP_MODULE_ATTR_KERNEL  # noqa: E402
 from analyze import check_code_overlay, is_code_overlay  # noqa: E402
@@ -1696,6 +1697,7 @@ def _runtime_build_environment(*, instruction_trace: bool = False) -> dict[str, 
         )
         path_parts.insert(python_index, python_bin)
         env["PATH"] = os.pathsep.join(path_parts)
+        env = nk_powershell.powershell_env(env)
     if instruction_trace:
         env["TRACE"] = "1"
         runtime_opt = env.get("RUNTIME_OPT", "-O0")

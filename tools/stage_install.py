@@ -101,7 +101,7 @@ if str(ROOT / "tools") not in sys.path:
 
 import make_app_icon  # noqa: E402
 from nk_core.package_cache import sha256_file  # noqa: E402
-from nk_powershell import powershell_exe  # noqa: E402
+from nk_powershell import powershell_env, powershell_exe  # noqa: E402
 import stage_runtime_dlls  # noqa: E402
 
 IS_WINDOWS = os.name == "nt"
@@ -408,7 +408,7 @@ def _run_powershell(script: str, code: str, env=None) -> subprocess.CompletedPro
     decoding error and leaves the output ``None``. Output that is not UTF-8 raises ``code``."""
     result = subprocess.run(
         [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", _UTF8_OUTPUT + script],
-        capture_output=True, env=env, check=False)
+        capture_output=True, env=powershell_env(env), check=False)
     try:
         stdout = result.stdout.decode("utf-8")
         stderr = result.stderr.decode("utf-8")
