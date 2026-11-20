@@ -2052,9 +2052,10 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             nk_ui_end_container(ui);
         }
         nk_ui_text_role(ui, FLOW_ID_LEAD,
-                        "Nakagawa Recomp is free software (GPL-3.0-or-later; see LICENSE and "
-                        "NOTICE.md). Not affiliated with or endorsed by Sony Interactive "
-                        "Entertainment; PlayStation and PSP are its trademarks.",
+                        "Nakagawa Recomp is free software under the GNU GPL version 3. Its own "
+                        "code also allows later versions; see LICENSE and NOTICE.md. Not "
+                        "affiliated with or endorsed by Sony Interactive Entertainment; "
+                        "PlayStation and PSP are its trademarks.",
                         NK_UI_TYPE_CAPTION, theme->muted);
         {
             NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
