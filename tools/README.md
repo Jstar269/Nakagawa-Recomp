@@ -54,8 +54,10 @@ run on the development host and are never executed by `hst.exe` at runtime. For 
 - **`import_audit_gate.py`** — public import-coverage/fake-success gate:
   fail-closed HLE manifest from the runtime HLE sources (`hle_sources.py`, `hle_manifest.py` +
   `hle_registry_meta.py`), classification baseline drift, and synthetic malformed-ELF
-  fixtures (`import_fixtures.py`, `psp_import_table.py`). `import_audit.py` classifies a
-  developer-supplied private ELF locally — see [`docs/archive/IMPORT_AUDIT.md`](../docs/archive/IMPORT_AUDIT.md).
+  fixtures (`import_fixtures.py`, `psp_import_table.py`). To audit a title's imported NIDs
+  against the HLE table, run `python tools/hle_manifest.py --imports <manifest or PSP module>`;
+  `import_audit.py` classifies a developer-supplied private ELF locally — see
+  [`docs/archive/IMPORT_AUDIT.md`](../docs/archive/IMPORT_AUDIT.md).
 - **`lint_docs.py`** — deterministic offline documentation-freshness gate. It scans tracked Markdown
   and rejects current-facing stale-status patterns while preserving explicitly historical evidence.
   It also rejects a hand-written HLE registration / NID / fake-success count on a CURRENT page:
@@ -158,13 +160,12 @@ set, so a new subpackage cannot ship undiscoverable either:
 | `miss_seeds.py` | Merge the dispatch-miss files a run writes (`SR_MISS_SEEDS`) into a per-title seed list that `analyze.py` and `codegen.py` take as `--miss-seeds` (#1848). |
 | `code_capture.py` | Read the captures a run writes (`SR_CODE_CAPTURE`) of code the game installed at run time, and make each an overlay `codegen.py --code-capture` translates and the runtime binds by its code (#1933). |
 | `elf_bounds.py` | Shared, fail-closed ELF32 envelope checks for the offline PSP tools. |
-| `hle_manifest.py` | Generate the authoritative HLE registration manifest from the runtime HLE table, plus the semantic-status census artifact (`--census-json` / `--census-markdown`). |
+| `hle_manifest.py` | Generate the authoritative HLE registration manifest from the runtime HLE table, audit a title's imports (`python tools/hle_manifest.py --imports <manifest or PSP module>`), and emit the semantic-status census artifact (`--census-json` / `--census-markdown`). |
 | `hle_focus_check.py` | Prove a focused HLE selftest executable links only the HLE files it names: compares the executable's code symbols with those of the excluded files' objects (#307). |
 | `hle_registry_meta.py` | Curated classification metadata for the HLE registration manifest. |
 | `gen_nidnames.py` | Generate the NID name header from the tracked NID corpus. |
 | `gen_ui_assets.py` | Embed the vendored Kenney prompt glyphs and UI sounds (`third_party/kenney/`) in `src/ui/nk_ui_assets.c`; `--check` reports a stale file. |
 | `nid_name_proof.py` | Independently verify and classify the entries of the generated NID name header. |
-| `nid_auditor.py` | NID compliance audit: report which guest imports remain unclassified. |
 | `nidseq.py` | Extract a trace's import sequence and verify it against an oracle trace. |
 | `gen_microtest.py` | Generate per-instruction and per-function translator micro-test cases. |
 | `ghidra_crosscheck.py` | Cross-check a Ghidra function inventory against `analyze.py` discovery. |
