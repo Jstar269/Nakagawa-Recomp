@@ -10,6 +10,8 @@
 #endif
 
 #include "adhoc_servers.h"
+#include "native_test_isolation.h"
+#include "nk_platform.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -287,12 +289,186 @@ static void test_shipped_copy(void) {
           "the shipped copy starts with the default server");
 }
 
+static int hex_digit_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* ---- console ID (New console ID) ------------------------------------------------------------ */
+
+static const char k_registry_good[] =
+    "{\n  \"schema\": \"nakagawa-sceReg-overlay\",\n  \"schema_version\": 1,\n"
+    "  \"categories\": [\n    \"/CONFIG/SYSTEM\"\n  ],\n  \"keys\": [\n"
+    "    {\"path\": \"/CONFIG/SYSTEM\", \"name\": \"owner_name\", \"type\": \"str\", "
+    "\"value_hex\": \"506c6179657200\"}\n  ],\n"
+    "  \"console\": {\"wlan_mac_hex\": \"A4A1B2C3D4E5\", \"open_psid_hex\": "
+    "\"00112233445566778899aabbccddeeff\", \"wlan_switch\": 1}\n}\n";
+
+static bool write_file(const char *path, const char *data, size_t len) {
+    FILE *f = fopen(path, "wb");
+    bool ok = f != NULL && fwrite(data, 1u, len, f) == len;
+    if (f && fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static char *read_file(const char *path, size_t *len) {
+    FILE *f = fopen(path, "rb");
+    char *buf = NULL;
+    long size;
+    *len = 0u;
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) == 0 && (size = ftell(f)) >= 0 && fseek(f, 0, SEEK_SET) == 0) {
+        buf = (char *)malloc((size_t)size + 1u);
+        if (buf && fread(buf, 1u, (size_t)size, f) == (size_t)size) {
+            buf[size] = '\0';
+            *len = (size_t)size;
+        } else {
+            free(buf);
+            buf = NULL;
+        }
+    }
+    fclose(f);
+    return buf;
+}
+
+/* The file must read back byte for byte as written: a refusal leaves it alone. */
+static bool file_is(const char *path, const char *data, size_t len) {
+    size_t got = 0u;
+    char *now = read_file(path, &got);
+    bool same = now != NULL && got == len && memcmp(now, data, len) == 0;
+    free(now);
+    return same;
+}
+
+static void test_console_id(void) {
+    char root[NATIVE_TEST_PATH_MAX], dir[NATIVE_TEST_PATH_MAX + 16], path[NATIVE_TEST_PATH_MAX + 32];
+    char hex[NK_CONSOLE_ID_HEX_LEN + 1u], fresh[NK_CONSOLE_ID_HEX_LEN + 1u], shown[32];
+    const char sep = nk_platform_path_separator();
+    snprintf(root, sizeof(root), "%s", native_test_get_root());
+    snprintf(dir, sizeof(dir), "%s%cregistry", root, sep);
+    CHECK(nk_adhoc_console_registry_path(root, path, sizeof(path)) &&
+              strstr(path, "registry") != NULL && strstr(path, "system.json") != NULL,
+          "the registry path is <root>/registry/system.json (%s)", path);
+    CHECK(!nk_adhoc_console_registry_path("", shown, sizeof(shown)) && shown[0] == '\0' &&
+              !nk_adhoc_console_registry_path(root, shown, 8u),
+          "an empty root or a short buffer gives no path");
+
+    /* No file yet: the runtime makes the ID the first time a game asks. */
+    CHECK(nk_adhoc_console_id_read(path, hex) == NK_CONSOLE_ID_NONE && hex[0] == '\0' &&
+              nk_adhoc_console_id_renew(path, fresh) == NK_CONSOLE_ID_NONE && fresh[0] == '\0' &&
+              !nk_platform_file_exists(path),
+          "with no file, nothing is read and nothing is written");
+    CHECK(nk_platform_mkdir_p_private(dir), "the registry folder is made");
+    static const char no_console[] = "{\n  \"schema\": \"nakagawa-sceReg-overlay\",\n  \"keys\": []\n}\n";
+    CHECK(write_file(path, no_console, sizeof(no_console) - 1u) &&
+              nk_adhoc_console_id_read(path, hex) == NK_CONSOLE_ID_NONE &&
+              nk_adhoc_console_id_renew(path, fresh) == NK_CONSOLE_ID_NONE &&
+              file_is(path, no_console, sizeof(no_console) - 1u),
+          "a file without a console object has no ID yet and is left alone");
+
+    /* The form the runtime writes: read, then replaced in place. */
+    CHECK(write_file(path, k_registry_good, sizeof(k_registry_good) - 1u) &&
+              nk_adhoc_console_id_read(path, hex) == NK_CONSOLE_ID_OK &&
+              strcmp(hex, "a4a1b2c3d4e5") == 0,
+          "the console ID is read as lower-case hex (%s)", hex);
+    CHECK(nk_adhoc_console_id_display(hex, shown, sizeof(shown)) &&
+              strcmp(shown, "a4:a1:b2:c3:d4:e5") == 0 &&
+              !nk_adhoc_console_id_display("a4a1b2c3d4", shown, sizeof(shown)) &&
+              !nk_adhoc_console_id_display("02a1b2c3d4zz", shown, sizeof(shown)),
+          "the ID shows as six octets, and only a 12-digit one does");
+    CHECK(nk_adhoc_console_id_renew(path, fresh) == NK_CONSOLE_ID_OK &&
+              strlen(fresh) == NK_CONSOLE_ID_HEX_LEN && strcmp(fresh, hex) != 0,
+          "New console ID makes a different one (%s)", fresh);
+    {
+        size_t len = 0u;
+        char *now = read_file(path, &len);
+        const char *at = strstr(k_registry_good, "A4A1B2C3D4E5");
+        const size_t off = (size_t)(at - k_registry_good);
+        bool rest_same = now != NULL && len == sizeof(k_registry_good) - 1u &&
+                         memcmp(now, k_registry_good, off) == 0 &&
+                         memcmp(now + off, fresh, NK_CONSOLE_ID_HEX_LEN) == 0 &&
+                         memcmp(now + off + NK_CONSOLE_ID_HEX_LEN, at + NK_CONSOLE_ID_HEX_LEN,
+                                len - off - NK_CONSOLE_ID_HEX_LEN) == 0;
+        CHECK(rest_same, "only the 12 digits change; the OpenPSID and every other byte stay");
+        CHECK((hex_digit_value(fresh[1]) & 0x3) == 0,
+              "the new ID's first octet has its two low bits clear, as the runtime makes it");
+        free(now);
+    }
+    {
+        char again[NK_CONSOLE_ID_HEX_LEN + 1u], leftover[NATIVE_TEST_PATH_MAX + 40];
+        snprintf(leftover, sizeof(leftover), "%s.new", path);
+        CHECK(nk_adhoc_console_id_read(path, again) == NK_CONSOLE_ID_OK &&
+                  strcmp(again, fresh) == 0 && !nk_platform_file_exists(leftover),
+              "the file reads back with the new ID and no temporary file is left");
+    }
+
+    /* Anything but the runtime's own form is left exactly as it is. */
+    static const char twice[] =
+        "{\"console\": {\"wlan_mac_hex\": \"a4a1b2c3d4e5\", \"open_psid_hex\": "
+        "\"00112233445566778899aabbccddeeff\"}, \"copy\": {\"wlan_mac_hex\": \"a4a1b2c3d4e5\"}}";
+    static const char odd_mac[] =
+        "{\"console\": {\"wlan_mac_hex\": \"03a1b2c3d4e5\", \"open_psid_hex\": "
+        "\"00112233445566778899aabbccddeeff\"}}";
+    static const char zero_psid[] =
+        "{\"console\": {\"wlan_mac_hex\": \"a4a1b2c3d4e5\", \"open_psid_hex\": "
+        "\"00000000000000000000000000000000\"}}";
+    static const char short_mac[] =
+        "{\"console\": {\"wlan_mac_hex\": \"a4a1b2c3d4\", \"open_psid_hex\": "
+        "\"00112233445566778899aabbccddeeff\"}}";
+    static const char not_json[] = "{\"console\": {\"wlan_mac_hex\": \"a4a1b2c3d4e5\",";
+    static const char escaped_key[] =
+        "{\"console\": {\"wlan_mac_he\\u0078\": \"a4a1b2c3d4e5\", \"open_psid_hex\": "
+        "\"00112233445566778899aabbccddeeff\"}}";
+    const struct {
+        const char *text;
+        size_t len;
+        const char *what;
+    } bad[] = {
+        {twice, sizeof(twice) - 1u, "a second wlan_mac_hex key"},
+        {odd_mac, sizeof(odd_mac) - 1u, "a multicast first octet"},
+        {zero_psid, sizeof(zero_psid) - 1u, "an all-zero OpenPSID"},
+        {short_mac, sizeof(short_mac) - 1u, "a short ID"},
+        {not_json, sizeof(not_json) - 1u, "text that is not JSON"},
+        {escaped_key, sizeof(escaped_key) - 1u, "the key written with an escape"},
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        const NkConsoleIdStatus renew = write_file(path, bad[i].text, bad[i].len)
+            ? nk_adhoc_console_id_renew(path, fresh) : NK_CONSOLE_ID_OK;
+        CHECK(renew == NK_CONSOLE_ID_UNEXPECTED && fresh[0] == '\0' &&
+                  file_is(path, bad[i].text, bad[i].len),
+              "%s is refused as unexpected and the file is left alone", bad[i].what);
+    }
+    {
+        const size_t big = 1024u * 1024u + 1u;
+        char *huge = (char *)malloc(big);
+        if (huge) {
+            memset(huge, ' ', big);
+            huge[0] = '{';
+            huge[big - 1u] = '}';
+            CHECK(write_file(path, huge, big) &&
+                      nk_adhoc_console_id_renew(path, fresh) == NK_CONSOLE_ID_UNREADABLE &&
+                      nk_adhoc_console_id_read(path, hex) == NK_CONSOLE_ID_UNREADABLE,
+                  "a file over 1 MiB is not read");
+            free(huge);
+        }
+    }
+    for (int s = NK_CONSOLE_ID_OK; s <= NK_CONSOLE_ID_WRITE_FAILED; s++) {
+        const char *text = nk_adhoc_console_id_status_text((NkConsoleIdStatus)s);
+        CHECK(text && text[0], "console ID status %d has a sentence", s);
+    }
+    (void)nk_remove_utf8(path);
+}
+
 int main(void) {
+    native_test_create_root("test_adhoc_servers");
     test_fetch_waits_for_online_play();
     test_fetch_refusals();
     test_hostile_entries();
     test_whole_list_refusals();
     test_shipped_copy();
+    test_console_id();
     if (g_failures) {
         fprintf(stderr, "test_adhoc_servers: %d failure(s)\n", g_failures);
         return 1;

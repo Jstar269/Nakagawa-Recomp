@@ -95,6 +95,39 @@ NkAdhocListStatus nk_adhoc_list_fetch(PackageHttpOpen transport, void *transport
                                       bool online_play_on, NkAdhocServerList *out,
                                       NkAdhocListLogFn log, void *log_context);
 
+/* The console ID Online play sends (#1139; owner decision of 2026-11-19): the random WLAN MAC
+ * address the runtime made for this installation the first time a game asked for it, kept in the
+ * registry overlay <user data root>/registry/system.json ("console": {"wlan_mac_hex": ...}). It
+ * is never the PC's hardware address. "New console ID" replaces only that value with a new random
+ * one (first octet's two low bits clear, as the runtime makes it) and leaves every other byte of
+ * the file as it was, the OpenPSID included. The file is untrusted: it is bounded (1 MiB, the
+ * runtime's own limit), read with the project's JSON reader, and changed only when it holds one
+ * wlan_mac_hex in the form the runtime writes; the new file is written beside it and renamed over
+ * it. The player refuses the change while a game runs, since the runtime keeps the file's values
+ * in memory and writes them back. */
+#define NK_CONSOLE_ID_HEX_LEN 12u
+
+typedef enum NkConsoleIdStatus {
+    NK_CONSOLE_ID_OK = 0,
+    NK_CONSOLE_ID_NONE,        /* no file or no console ID yet: made the first time a game asks */
+    NK_CONSOLE_ID_UNREADABLE,  /* the file exists but cannot be read, or is over 1 MiB */
+    NK_CONSOLE_ID_UNEXPECTED,  /* not the form the runtime writes: left as it is */
+    NK_CONSOLE_ID_NO_RANDOM,   /* the system's random source failed */
+    NK_CONSOLE_ID_WRITE_FAILED /* the new file could not be written; the old one stays */
+} NkConsoleIdStatus;
+
+const char *nk_adhoc_console_id_status_text(NkConsoleIdStatus status);
+/* <root><sep>registry<sep>system.json; false when it does not fit. */
+bool nk_adhoc_console_registry_path(const char *user_data_root, char *out, size_t out_size);
+/* Reads the console ID as 12 lower-case hex digits. */
+NkConsoleIdStatus nk_adhoc_console_id_read(const char *registry_path,
+                                           char out_hex[NK_CONSOLE_ID_HEX_LEN + 1u]);
+/* Replaces it with a new random one, returned in new_hex. */
+NkConsoleIdStatus nk_adhoc_console_id_renew(const char *registry_path,
+                                            char new_hex[NK_CONSOLE_ID_HEX_LEN + 1u]);
+/* "02:1a:2b:3c:4d:5e" from 12 hex digits; false for anything else. */
+bool nk_adhoc_console_id_display(const char *hex, char *out, size_t out_size);
+
 #ifdef __cplusplus
 }
 #endif

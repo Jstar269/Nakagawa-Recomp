@@ -63,8 +63,10 @@ endef
 
 # The Online play server list (src/player/adhoc_servers.c, #1139): fetched only with Online play
 # on, and checked as untrusted input. The transport is an in-process fake; nothing goes online.
+# The console ID cases (New console ID) write a synthetic registry file in a temporary root.
 define ADHOC_SERVERS_TEST_BIN_CMD
-$(CC) $(NC_CFLAGS_PLAYER) $(NC_OBJS_PLAYER) src/player/package_builder.c src/player/adhoc_servers.c 	tests/native/test_adhoc_servers.c $(PLAYER_EXTRA_LIBS) -o $(BUILD_ROOT)/test_adhoc_servers$(EXE_EXT)
+$(CC) $(NC_CFLAGS_PLAYER) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_PLAYER) src/player/package_builder.c src/player/adhoc_servers.c \
+	tests/native/native_test_isolation.c tests/native/test_adhoc_servers.c $(PLAYER_EXTRA_LIBS) -o $(BUILD_ROOT)/test_adhoc_servers$(EXE_EXT)
 endef
 
 .PHONY: adhoc-servers-selftest

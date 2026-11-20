@@ -1,6 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
-/* The Online play server list (#1139): adhoc_servers.h says what it reads, from where and when. */
+/* The Online play server list and console ID (#1139): adhoc_servers.h says what each reads,
+   from where and when. */
+
+#if defined(_WIN32) || defined(_WIN64)
+#define _CRT_RAND_S /* rand_s, the system's random source (RtlGenRandom), as the runtime uses */
+#endif
 
 #include "adhoc_servers.h"
 
@@ -10,7 +15,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32) || defined(_WIN64)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "nk_json.h"
+#include "nk_platform.h"
 
 #define NK_ADHOC_LIST_READ_CHUNK 4096u
 
@@ -280,4 +292,268 @@ NkAdhocListStatus nk_adhoc_list_fetch(PackageHttpOpen transport, void *transport
     }
     free(buffer);
     return status;
+}
+
+/* ---- console ID ---------------------------------------------------------------------------- */
+
+#define NK_CONSOLE_REGISTRY_MAX_BYTES (1024u * 1024u) /* the runtime's SREG_OVERLAY_MAX_BYTES */
+
+static const char k_hex_digits[] = "0123456789abcdef";
+
+const char *nk_adhoc_console_id_status_text(NkConsoleIdStatus status) {
+    switch (status) {
+    case NK_CONSOLE_ID_OK: return "New console ID made.";
+    case NK_CONSOLE_ID_NONE:
+        return "No console ID yet: it is made the first time a game asks for it.";
+    case NK_CONSOLE_ID_UNREADABLE:
+        return "Console ID not changed: the console profile file cannot be read.";
+    case NK_CONSOLE_ID_UNEXPECTED:
+        return "Console ID not changed: the console profile file is not in the expected form.";
+    case NK_CONSOLE_ID_NO_RANDOM:
+        return "Console ID not changed: the system's random source failed.";
+    case NK_CONSOLE_ID_WRITE_FAILED:
+        return "Console ID not changed: the new console profile file could not be written.";
+    }
+    return "Console ID not changed.";
+}
+
+bool nk_adhoc_console_registry_path(const char *user_data_root, char *out, size_t out_size) {
+    const char sep = nk_platform_path_separator();
+    int w;
+    if (!out || out_size == 0u) return false;
+    out[0] = '\0';
+    if (!user_data_root || !user_data_root[0]) return false;
+    w = snprintf(out, out_size, "%s%cregistry%csystem.json", user_data_root, sep, sep);
+    if (w <= 0 || (size_t)w >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+static int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* 12 hex digits whose first octet has its two low bits clear (the runtime's rule). */
+static bool console_mac_hex_ok(const char *hex) {
+    for (size_t i = 0; i < NK_CONSOLE_ID_HEX_LEN; i++)
+        if (hex_value(hex[i]) < 0) return false;
+    return hex[NK_CONSOLE_ID_HEX_LEN] == '\0' && (hex_value(hex[1]) & 0x3) == 0;
+}
+
+static bool console_psid_hex_ok(const char *hex) {
+    bool nonzero = false;
+    for (size_t i = 0; i < 32u; i++) {
+        const int v = hex_value(hex[i]);
+        if (v < 0) return false;
+        nonzero = nonzero || v != 0;
+    }
+    return hex[32] == '\0' && nonzero;
+}
+
+/* Reads the file (bounded) into a NUL-terminated buffer. */
+static NkConsoleIdStatus console_file_read(const char *path, char **out, size_t *len_out) {
+    FILE *f;
+    char *buf;
+    size_t got;
+    int failed;
+    *out = NULL;
+    *len_out = 0u;
+    if (!path || !path[0] || !nk_platform_file_exists(path)) return NK_CONSOLE_ID_NONE;
+    f = nk_fopen_utf8(path, "rb");
+    if (!f) return NK_CONSOLE_ID_UNREADABLE;
+    buf = (char *)malloc((size_t)NK_CONSOLE_REGISTRY_MAX_BYTES + 1u);
+    if (!buf) {
+        fclose(f);
+        return NK_CONSOLE_ID_UNREADABLE;
+    }
+    got = fread(buf, 1u, (size_t)NK_CONSOLE_REGISTRY_MAX_BYTES + 1u, f);
+    failed = ferror(f);
+    fclose(f);
+    if (failed || got > NK_CONSOLE_REGISTRY_MAX_BYTES) {
+        free(buf);
+        return NK_CONSOLE_ID_UNREADABLE;
+    }
+    buf[got] = '\0';
+    *out = buf;
+    *len_out = got;
+    return NK_CONSOLE_ID_OK;
+}
+
+/* The console ID the text holds, checked as the runtime checks it: NONE when the file has no
+   "console" object yet (the runtime adds one the first time a game asks), UNEXPECTED for any
+   other shape. */
+static NkConsoleIdStatus console_id_from_text(const char *text, size_t len,
+                                              char out_hex[NK_CONSOLE_ID_HEX_LEN + 1u]) {
+    char err[96];
+    NkJsonNode *root;
+    const NkJsonNode *console;
+    NkConsoleIdStatus status = NK_CONSOLE_ID_UNEXPECTED;
+    out_hex[0] = '\0';
+    if (memchr(text, '\0', len) != NULL || !nk_json_validate_utf8((const uint8_t *)text, len))
+        return NK_CONSOLE_ID_UNEXPECTED;
+    root = nk_json_parse(text, len, err, sizeof(err));
+    if (!root) return NK_CONSOLE_ID_UNEXPECTED;
+    console = nk_json_is_object(root) ? nk_json_obj_get(root, "console") : NULL;
+    if (nk_json_is_object(root) && !console) {
+        status = NK_CONSOLE_ID_NONE;
+    } else if (console && nk_json_is_object(console)) {
+        const NkJsonNode *mac = nk_json_obj_get(console, "wlan_mac_hex");
+        const NkJsonNode *psid = nk_json_obj_get(console, "open_psid_hex");
+        const char *mac_text = mac && nk_json_is_string(mac) ? nk_json_get_string(mac) : NULL;
+        const char *psid_text = psid && nk_json_is_string(psid) ? nk_json_get_string(psid) : NULL;
+        if (mac_text && psid_text && strlen(mac_text) == NK_CONSOLE_ID_HEX_LEN &&
+            console_mac_hex_ok(mac_text) && strlen(psid_text) == 32u &&
+            console_psid_hex_ok(psid_text)) {
+            for (size_t i = 0; i < NK_CONSOLE_ID_HEX_LEN; i++)
+                out_hex[i] = k_hex_digits[hex_value(mac_text[i])];
+            out_hex[NK_CONSOLE_ID_HEX_LEN] = '\0';
+            status = NK_CONSOLE_ID_OK;
+        }
+    }
+    nk_json_free(root);
+    return status;
+}
+
+NkConsoleIdStatus nk_adhoc_console_id_read(const char *registry_path,
+                                           char out_hex[NK_CONSOLE_ID_HEX_LEN + 1u]) {
+    char *text = NULL;
+    size_t len = 0u;
+    NkConsoleIdStatus status;
+    if (!out_hex) return NK_CONSOLE_ID_UNEXPECTED;
+    out_hex[0] = '\0';
+    status = console_file_read(registry_path, &text, &len);
+    if (status != NK_CONSOLE_ID_OK) return status;
+    status = console_id_from_text(text, len, out_hex);
+    free(text);
+    return status;
+}
+
+static bool console_random_bytes(uint8_t *out, size_t n) {
+#if defined(_WIN32) || defined(_WIN64)
+    for (size_t i = 0; i < n; i++) {
+        unsigned int r = 0;
+        if (rand_s(&r) != 0) return false;
+        out[i] = (uint8_t)r;
+    }
+    return true;
+#else
+    FILE *f = fopen("/dev/urandom", "rb");
+    size_t got;
+    if (!f) return false;
+    got = fread(out, 1u, n, f);
+    fclose(f);
+    return got == n;
+#endif
+}
+
+/* Writes data beside path and renames it over path, as the runtime writes the file. */
+static bool console_file_replace(const char *path, const char *data, size_t len) {
+    const size_t plen = strlen(path);
+    char *tmp = (char *)malloc(plen + sizeof(".new"));
+    FILE *f;
+    bool ok;
+    if (!tmp) return false;
+    snprintf(tmp, plen + sizeof(".new"), "%s.new", path);
+    f = nk_platform_fopen_private(tmp, "wb");
+    ok = f != NULL && fwrite(data, 1u, len, f) == len && fflush(f) == 0;
+    if (f) {
+#if defined(_WIN32) || defined(_WIN64)
+        ok = _commit(_fileno(f)) == 0 && ok;
+#else
+        ok = fsync(fileno(f)) == 0 && ok;
+#endif
+        if (fclose(f) != 0) ok = false;
+    }
+    if (ok && nk_rename_utf8(tmp, path) != 0) ok = false;
+    if (!ok) (void)nk_remove_utf8(tmp);
+    free(tmp);
+    return ok;
+}
+
+/* Where the value of the one "wlan_mac_hex" key starts in the text, in the form the runtime
+   writes ("wlan_mac_hex": "<12 hex digits>") and equal to old_hex; 0 when it is not so. */
+static size_t console_mac_value_offset(const char *text, size_t len, const char *old_hex) {
+    static const char key[] = "\"wlan_mac_hex\"";
+    const char *found = NULL;
+    size_t found_count = 0u;
+    size_t i;
+    for (const char *p = text; (p = strstr(p, key)) != NULL; p += sizeof(key) - 1u) {
+        found = p;
+        found_count++;
+    }
+    if (found_count != 1u) return 0u;
+    i = (size_t)(found - text) + sizeof(key) - 1u;
+    while (i < len && text[i] == ' ') i++;
+    if (i >= len || text[i] != ':') return 0u;
+    i++;
+    while (i < len && text[i] == ' ') i++;
+    if (i + NK_CONSOLE_ID_HEX_LEN + 2u > len || text[i] != '"' ||
+        text[i + 1u + NK_CONSOLE_ID_HEX_LEN] != '"') {
+        return 0u;
+    }
+    for (size_t k = 0; k < NK_CONSOLE_ID_HEX_LEN; k++) {
+        if (hex_value(text[i + 1u + k]) != hex_value(old_hex[k])) return 0u;
+    }
+    return i + 1u;
+}
+
+NkConsoleIdStatus nk_adhoc_console_id_renew(const char *registry_path,
+                                            char new_hex[NK_CONSOLE_ID_HEX_LEN + 1u]) {
+    char old_hex[NK_CONSOLE_ID_HEX_LEN + 1u];
+    char check_hex[NK_CONSOLE_ID_HEX_LEN + 1u];
+    char *text = NULL;
+    size_t len = 0u, value_at;
+    bool fresh = false;
+    NkConsoleIdStatus status;
+    if (!new_hex) return NK_CONSOLE_ID_UNEXPECTED;
+    new_hex[0] = '\0';
+    status = console_file_read(registry_path, &text, &len);
+    if (status != NK_CONSOLE_ID_OK) return status;
+    status = console_id_from_text(text, len, old_hex);
+    value_at = status == NK_CONSOLE_ID_OK ? console_mac_value_offset(text, len, old_hex) : 0u;
+    if (status == NK_CONSOLE_ID_OK && value_at == 0u) status = NK_CONSOLE_ID_UNEXPECTED;
+    for (int attempt = 0; status == NK_CONSOLE_ID_OK && attempt < 4 && !fresh; attempt++) {
+        uint8_t mac[6];
+        if (!console_random_bytes(mac, sizeof(mac))) {
+            status = NK_CONSOLE_ID_NO_RANDOM;
+            break;
+        }
+        mac[0] = (uint8_t)(mac[0] & 0xfcu); /* unicast, as the runtime makes it */
+        for (size_t b = 0; b < sizeof(mac); b++) {
+            new_hex[2u * b] = k_hex_digits[mac[b] >> 4];
+            new_hex[2u * b + 1u] = k_hex_digits[mac[b] & 0x0fu];
+        }
+        new_hex[NK_CONSOLE_ID_HEX_LEN] = '\0';
+        fresh = strcmp(new_hex, old_hex) != 0;
+    }
+    if (status == NK_CONSOLE_ID_OK && !fresh) status = NK_CONSOLE_ID_NO_RANDOM;
+    if (status == NK_CONSOLE_ID_OK) {
+        memcpy(text + value_at, new_hex, NK_CONSOLE_ID_HEX_LEN);
+        /* The changed text must read back as the runtime will read it, with the new value. */
+        if (console_id_from_text(text, len, check_hex) != NK_CONSOLE_ID_OK ||
+            strcmp(check_hex, new_hex) != 0) {
+            status = NK_CONSOLE_ID_UNEXPECTED;
+        } else if (!console_file_replace(registry_path, text, len)) {
+            status = NK_CONSOLE_ID_WRITE_FAILED;
+        }
+    }
+    free(text);
+    if (status != NK_CONSOLE_ID_OK) new_hex[0] = '\0';
+    return status;
+}
+
+bool nk_adhoc_console_id_display(const char *hex, char *out, size_t out_size) {
+    if (!out || out_size < 18u) return false;
+    out[0] = '\0';
+    if (!hex || strlen(hex) != NK_CONSOLE_ID_HEX_LEN) return false;
+    for (size_t i = 0; i < NK_CONSOLE_ID_HEX_LEN; i++)
+        if (hex_value(hex[i]) < 0) return false;
+    snprintf(out, out_size, "%.2s:%.2s:%.2s:%.2s:%.2s:%.2s", hex, hex + 2, hex + 4, hex + 6,
+             hex + 8, hex + 10);
+    return true;
 }

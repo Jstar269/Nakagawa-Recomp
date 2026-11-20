@@ -647,6 +647,7 @@ set_tests_properties(cover_art_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_
 # The Online play server list (#1139) on a fake transport; it never touches the internet.
 add_executable(test_adhoc_servers
     tests/native/test_adhoc_servers.c
+    tests/native/native_test_isolation.c
     src/player/package_builder.c
     src/player/adhoc_servers.c
 )
