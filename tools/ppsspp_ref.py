@@ -90,6 +90,7 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import picture_gate  # noqa: E402  (the shared metric and picture readers)
+from picture_gate import inside_tracked_checkout  # noqa: E402  (shared checkout guard)
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_NAME = "nakagawa-ppsspp-ref"
@@ -339,10 +340,6 @@ class SceneFile:
         return self.out / f"{scene.name}.png"
 
 
-# The one checkout guard: game pixels never land in a tracked folder (build/ is ignored).
-_inside_checkout = picture_gate._inside_checkout
-
-
 def load_scene_file(path: Path) -> SceneFile:
     path = Path(path)
     try:
@@ -371,7 +368,7 @@ def load_scene_file(path: Path) -> SceneFile:
     if not isinstance(title, str) or not title:
         raise RefError(f"{path.name}: 'title' must be a string")
     out = opt_path("out") or (base / "ppsspp-ref").resolve()
-    if _inside_checkout(out):
+    if inside_tracked_checkout(out):
         raise RefError(f"{path.name}: 'out' is inside the checkout; PPSSPP references are game "
                        "pixels and stay in the title's private folder")
     rtc = doc.get("rtc", DEFAULT_RTC)
@@ -1198,7 +1195,7 @@ def grade_scene(sf: SceneFile, scene: Scene, diff_dir: Path | None) -> Grade:
 
 
 def compare(sf: SceneFile, diff_dir: Path | None) -> list[Grade]:
-    if diff_dir is not None and _inside_checkout(diff_dir):
+    if diff_dir is not None and inside_tracked_checkout(diff_dir):
         raise RefError("the diff folder is inside the checkout; diff images are game pixels")
     return [grade_scene(sf, s, diff_dir) for s in sf.scenes]
 

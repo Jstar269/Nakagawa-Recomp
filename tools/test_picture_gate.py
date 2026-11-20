@@ -200,6 +200,12 @@ class AcceptTests(Base):
         # build/ is ignored by git, so it is allowed as a scratch location.
         self.assertFalse(pg._inside_checkout(pg.ROOT / "build" / "x" / "r.ppm"))
 
+    def test_inside_tracked_checkout_is_public_with_private_alias(self):
+        self.assertIs(pg._inside_checkout, pg.inside_tracked_checkout)
+        self.assertTrue(pg.inside_tracked_checkout(pg.ROOT / "tools" / "ref.ppm"))
+        self.assertFalse(pg.inside_tracked_checkout(pg.ROOT / "build" / "x" / "r.ppm"))
+        self.assertFalse(pg.inside_tracked_checkout(self.dir / "ref.ppm"))
+
     def test_accept_refuses_a_reference_inside_another_git_work_tree_or_via_link(self):
         src = self.ppm("f.ppm", frame())
         repo = self.dir / "other_repo"

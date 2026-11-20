@@ -11,6 +11,8 @@ LiveDiscoveryTest discovers a child Python process this file starts and reads
 its mapped PE headers, read-only.
 """
 
+import base64
+from collections.abc import Mapping
 import contextlib
 import io
 import json
@@ -557,6 +559,69 @@ class SimulationBehaviorTest(RedirectedMockState, unittest.TestCase):
         self.assertEqual(md._cpu_field_offset("llbit"), (996, False))
         self.assertEqual(md.CPU_STATE_ABI_VERSION, 3)
         self.assertEqual(md.CPU_STATE_SIZE, 1000)
+
+    def test_simulated_read_mem_and_vram_are_sparse_and_exact(self):
+        class _CountingMemory(Mapping):
+            def __init__(self, backing):
+                self._backing = dict(backing)
+                self.lookups = 0
+
+            def __getitem__(self, key):
+                self.lookups += 1
+                return self._backing[key]
+
+            def __iter__(self):
+                return iter(self._backing)
+
+            def __len__(self):
+                return len(self._backing)
+
+        dbg = self._sim(mutate=True)
+        expected_banner = b"Hot Shots Tennis: Get a Grip - Interactive Debugging Active."
+        expected_ram = bytearray(0x100004)
+        expected_ram[:len(expected_banner)] = expected_banner
+        expected_ram[0x100000:0x100004] = b"\x78\x56\x34\x12"
+
+        # Default mock state: large RAM span and full 2 MiB VRAM read iterate only stored keys.
+        counting = _CountingMemory(dbg.mock["memory"])
+        dbg.mock["memory"] = counting
+        ram_res = dbg.read_mem(0x08800000, len(expected_ram), "hex")
+        self.assertEqual(bytes.fromhex(ram_res["hex"]), bytes(expected_ram))
+        self.assertLessEqual(counting.lookups, len(counting))
+
+        counting.lookups = 0
+        vram_res = dbg.read_vram()
+        self.assertEqual(vram_res["size"], 2 * 1024 * 1024)
+        self.assertEqual(base64.b64decode(vram_res["base64"]), bytes(2 * 1024 * 1024))
+        self.assertLessEqual(counting.lookups, len(counting))
+
+        # Small read (size <= len(memory)) iterates only the requested span.
+        counting.lookups = 0
+        small_res = dbg.read_mem(0x08800000, 4, "hex")
+        self.assertEqual(bytes.fromhex(small_res["hex"]), expected_banner[:4])
+        self.assertLessEqual(counting.lookups, 4)
+
+        # Written VRAM bytes appear at the right offset and non-canonical keys are ignored.
+        dbg.mock["memory"] = dict(counting._backing)
+        self.assertTrue(dbg.write_mem(0x04000100, "aabbccdd")["success"])
+        dbg.mock["memory"]["not-an-address"] = 0xFF
+        dbg.mock["memory"][f"0{0x08800000}"] = 0xEE
+        counting = _CountingMemory(dbg.mock["memory"])
+        dbg.mock["memory"] = counting
+
+        vram_after = dbg.read_vram()
+        expected_vram = bytearray(2 * 1024 * 1024)
+        expected_vram[0x100:0x104] = b"\xaa\xbb\xcc\xdd"
+        self.assertEqual(base64.b64decode(vram_after["base64"]), bytes(expected_vram))
+        self.assertLessEqual(counting.lookups, len(counting))
+
+        counting.lookups = 0
+        banner_span = dbg.read_mem(0x08800000, 128, "hex")
+        self.assertEqual(
+            bytes.fromhex(banner_span["hex"]),
+            expected_banner + bytes(128 - len(expected_banner)),
+        )
+        self.assertLessEqual(counting.lookups, len(counting))
 
 
 class ResolverFailureTest(RedirectedMockState, unittest.TestCase):
