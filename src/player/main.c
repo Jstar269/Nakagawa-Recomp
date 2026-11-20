@@ -4372,10 +4372,6 @@ typedef struct PlayerRun {
     NkSingleInstance instance;
 } PlayerRun;
 
-/* The longest clock step one frame gives the stick calibration: a stalled frame (a window
-   drag, a slow disk) must not end its timed rest sampling at once. */
-#define PLAYER_CALIBRATION_MAX_STEP_MS 100u
-
 /* What the startup and window steps return when the run goes on; any other value is
    the process's exit code. */
 #define PLAYER_RUN_CONTINUE INT_MIN
@@ -5966,6 +5962,10 @@ static void player_frame_requests(PlayerRun *run) {
         player_ui_test_catalog_drive(&run->package_status_job->catalog_test);
     }
 }
+
+/* The longest clock step one frame gives the stick calibration: a stalled frame (a window
+   drag, a slow disk) must not end its timed rest sampling at once. */
+#define PLAYER_CALIBRATION_MAX_STEP_MS 100u
 
 /* The running game and the window handoff to it, and the controller's live input. */
 static void player_frame_game_session(PlayerRun *run) {
