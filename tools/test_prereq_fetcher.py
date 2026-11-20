@@ -1993,6 +1993,7 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         runtime_size = re.search(r"#define SR_GUEST_ARENA_SIZE (0x[0-9a-fA-F]+)u", recomp)
         self.assertIsNotNone(platform_size)
         self.assertIsNotNone(runtime_size)
+        assert platform_size is not None and runtime_size is not None
         self.assertEqual(int(platform_size.group(1), 16), int(runtime_size.group(1), 16))
         self.assertIn("_Static_assert(SR_GUEST_ARENA_SIZE == NK_GUEST_MEMORY_ARENA_SIZE,", gui)
         self.assertIn("NK_GUEST_MEMORY_ARENA_SIZE)) {", main)
