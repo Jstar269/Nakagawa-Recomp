@@ -768,6 +768,9 @@ typedef struct {
     char title[MAX_TITLE_LEN];
     /* A checked conversion is already at iso_path. */
     bool iso_ready;
+    /* Set by player_disc_image_expand: an expansion of the same bytes was in place, and
+       nothing was written. */
+    bool reused;
     /* An EBOOT.PBP holding unencrypted homebrew (#2143): iso_path is a small private disc
        image written from the package, and disc_id is the library key that image will have. */
     bool homebrew;
@@ -2254,14 +2257,19 @@ bool player_path_is_pbp_package(const char *path);
 /* Identify a picked package with no key lookup and name its private ISO.
  * True for a PSN release of a UMD game; otherwise false with the named code
  * (PSONE_CLASSIC_UNSUPPORTED, FIRMWARE_OUT_OF_SCOPE, PBP_PACKAGE_UNSUPPORTED or
- * IO_FAILURE) and a plain sentence. */
+ * IO_FAILURE) and a plain sentence. A PSN release is never iso_ready here: that
+ * needs the package's identity, which player_psn_package_convert reads. */
 bool player_psn_package_inspect(const char *pbp_path, PlayerPsnPackage *package,
                                 char *code, size_t code_size,
                                 char *message, size_t message_size);
 /* Convert the package into package->iso_path: written beside it, checked
  * (ISO9660 volume descriptor and the package's DISC_ID), then renamed into
- * place; a failure or a cancel removes the partial file. On failure code is
- * the boundary's named result (CANCELLED for a cancel). */
+ * place; a failure or a cancel removes the partial file. A PSN release is
+ * first read whole for its identity (nk_disc_file_identity, reported as
+ * progress over the package's size), and an image in place whose record names
+ * that identity is used as it is, nothing written. On failure code is the
+ * boundary's named result (CANCELLED for a cancel, DISC_IMAGE_READ_FAILED when
+ * the package could not be read to its end). */
 bool player_psn_package_convert(const PlayerPsnPackage *package,
                                 const PlayerPsnConvertCallbacks *callbacks,
                                 char *code, size_t code_size,
@@ -2293,10 +2301,12 @@ bool player_app_delete_kept_homebrew(PlayerApp *app, const char *key, char *erro
                                      size_t error_size);
 
 /* Compressed disc images (.cso, .zso, .chd), expanded once at import. */
-/* Check a picked compressed image and fingerprint it. iso_ready is true when
- * the same unchanged file was expanded before; otherwise the image goes to the
- * conversion worker (player_app_psn_conversion_begin). False with a named
- * DISC_IMAGE_* code and a plain sentence for an image the player refuses. */
+/* Check a picked compressed image's header (nk_disc_import_probe), reading no
+ * more than that, so it runs on the UI thread. iso_ready stays false: the image
+ * goes to the conversion worker (player_app_psn_conversion_begin), where
+ * player_disc_image_expand reads it whole for its identity and reuses an
+ * expansion of the same bytes. False with a named DISC_IMAGE_* code and a plain
+ * sentence for an image the player refuses. */
 bool player_disc_image_inspect(const char *image_path, PlayerPsnPackage *package,
                                char *code, size_t code_size,
                                char *message, size_t message_size);
