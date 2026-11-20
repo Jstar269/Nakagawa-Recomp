@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -87,6 +88,125 @@ class FocusCheckTests(unittest.TestCase):
         a, _, _, main = self.build()
         with self.assertRaises(hle_focus_check.FocusError):
             self.run_check(self.link(main, a), ["fake/focus_zzz.c"])
+
+
+SYNTHETIC_NM_SAMPLE = "\n".join(
+    [
+        "",
+        "   ",
+        "file.o:",
+        "0000000000000000 T global_func",
+        "0000000000000010 t local_func",
+        "0000000000000020 D global_data",
+        "0000000000000024 d local_data",
+        "                 U undef_func",
+        "0000000000000030 W weak_defined",
+        "0000000000000038 V weak_obj",
+        "                 w weak_undef",
+        "                 A no_addr_sym",
+        "0000000000000040 R .refptr.imported_var",
+        "0000000000000048 T .refptr.imported_fn",
+        "0000000000000050 T ver_fn@VER_1",
+        "0000000000000058 T default_ver_fn@@GLIBC_2.14",
+        "0000000000000060 0000000000000010 T four_field_sym",
+        "0000000000000070 TT multi_char_type",
+    ]
+) + "\n"
+
+
+class NmParsingPinTests(unittest.TestCase):
+    """Pin hle_focus_check.defined_symbols output on synthetic nm samples."""
+
+    def _run_with_sample(self, *, local_too: bool, text_only: bool) -> tuple[list[str], set[str]]:
+        captured: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            captured.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout=SYNTHETIC_NM_SAMPLE, stderr="")
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            symbols = hle_focus_check.defined_symbols(
+                Path("file.o"), "fake-nm", local_too=local_too, text_only=text_only
+            )
+        return captured[0], symbols
+
+    def test_defined_symbols_all_types_pins_current_behavior(self) -> None:
+        cmd, symbols = self._run_with_sample(local_too=False, text_only=False)
+        self.assertEqual(cmd, ["fake-nm", "-g", "--defined-only", "file.o"])
+        self.assertEqual(
+            symbols,
+            {
+                "global_func",
+                "local_func",
+                "global_data",
+                "local_data",
+                "weak_defined",
+                "weak_obj",
+                "ver_fn@VER_1",
+                "default_ver_fn@@GLIBC_2.14",
+                "multi_char_type",
+            },
+        )
+
+    def test_defined_symbols_text_only_pins_current_behavior(self) -> None:
+        cmd, symbols = self._run_with_sample(local_too=True, text_only=True)
+        self.assertEqual(cmd, ["fake-nm", "--defined-only", "file.o"])
+        self.assertEqual(
+            symbols,
+            {
+                "global_func",
+                "local_func",
+                "ver_fn@VER_1",
+                "default_ver_fn@@GLIBC_2.14",
+            },
+        )
+
+    def test_defined_symbols_errors_raise_focus_error(self) -> None:
+        fail = subprocess.CompletedProcess(["fake-nm"], 1, stdout="", stderr="bad object")
+        with mock.patch("subprocess.run", return_value=fail):
+            with self.assertRaises(hle_focus_check.FocusError):
+                hle_focus_check.defined_symbols(Path("file.o"), "fake-nm")
+        with mock.patch("subprocess.run", side_effect=OSError("no such binary")):
+            with self.assertRaises(hle_focus_check.FocusError):
+                hle_focus_check.defined_symbols(Path("file.o"), "fake-nm")
+
+
+class SharedNmParserTests(unittest.TestCase):
+    """Unit tests for the shared nm parser (F-5f35396b)."""
+
+    def test_parse_nm_defined_symbols_refptr_and_version(self) -> None:
+        canned = "\n".join(
+            [
+                "file.o:",
+                "",
+                "0000000000000000 T foo",
+                "0000000000000008 t bar",
+                "0000000000000010 D baz",
+                "0000000000000018 R .refptr.hidden_import",
+                "0000000000000020 T sym@VER_1",
+                "0000000000000028 T sym2@@VER_2",
+                "0000000000000030 0000000000000004 T sized_sym",
+                "                 U undef_sym",
+            ]
+        )
+        self.assertEqual(
+            hle_focus_check.parse_nm_defined_symbols(canned),
+            {"foo", "bar", "baz", "sym@VER_1", "sym2@@VER_2"},
+        )
+        self.assertEqual(
+            hle_focus_check.parse_nm_defined_symbols(canned, text_only=True),
+            {"foo", "bar", "sym@VER_1", "sym2@@VER_2"},
+        )
+        self.assertEqual(
+            hle_focus_check.parse_nm_defined_symbols(canned, strip_version=True, strict_columns=False),
+            {"foo", "bar", "baz", "sym", "sym2", "sized_sym"},
+        )
+
+    def test_nm_defined_symbols_raises_on_nonzero_exit(self) -> None:
+        fail = subprocess.CompletedProcess(["fake-nm"], 2, stdout="", stderr="invalid format")
+        with mock.patch("subprocess.run", return_value=fail):
+            with self.assertRaisesRegex(RuntimeError, "failed"):
+                hle_focus_check.nm_defined_symbols(Path("bad.o"), "fake-nm")
 
 
 if __name__ == "__main__":
