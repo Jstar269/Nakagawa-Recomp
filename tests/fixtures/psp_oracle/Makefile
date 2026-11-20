@@ -306,6 +306,11 @@ CASE_ID = 187
 # through-mode and transform-mode depths read as colour through EQUAL and GREATER tests.
 else ifeq ($(CASE),ge-depth-round)
 CASE_ID = 188
+# 192: #2193's depth bounds cells (probe_ge_sample.c, PSP-GE-RASTER-004): depth writes and the
+# depth test at columns at or past zbw and a depth-only clear under a scissor, read as colour
+# through depth tests at columns inside the depth buffer.
+else ifeq ($(CASE),ge-depth-bounds)
+CASE_ID = 192
 else ifeq ($(CASE),llsc-link)
 CASE_ID = 69
 else ifeq ($(CASE),fpu-cc)
@@ -841,6 +846,10 @@ OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE depth rounding cells: the same source as the sample-point cells, case 188.
 else ifeq ($(CASE),ge-depth-round)
 TARGET = $(BUILD_DIR)/ge_depth_round
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE depth bounds cells: the same source as the sample-point cells, case 192.
+else ifeq ($(CASE),ge-depth-bounds)
+TARGET = $(BUILD_DIR)/ge_depth_bounds
 OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 # The instruction trace: its own source, the single-step trampoline and the fixtures
 # header, with the same writer, ThreadManForUser block and module lifecycle as the HLE
