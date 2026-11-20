@@ -898,6 +898,87 @@ static void test_lobby_burst_waits_for_queue_room(void) {
     nk_relay_client_destroy(c);
 }
 
+/* Review of #2832 (2026-11-20): more PDP datagrams than a socket's queue holds (NK_NET_PDP_QUEUE)
+ * arrive between two pumps. None is dropped: the ones the queue cannot hold wait in the stream
+ * and arrive, in order, as the queue drains. */
+static void test_pdp_burst_waits_for_queue_room(void) {
+    uint16_t lp = 0u, dp = 0u;
+    TSock ls = t_listen_loopback(&lp);
+    TSock ds = t_listen_loopback(&dp);
+    NkAdhocRelayConfig cfg = {"127.0.0.1", lp, dp, NK_RELAY_PORT_OFFSET};
+    NkAdhocRelayClient *c = nk_relay_client_create(&cfg);
+    CHECK(c != NULL, "pdp burst: client created");
+    NkAdhocTransport *t = nk_relay_client_transport(c);
+    static const uint8_t mac[6] = {0x02, 1, 2, 3, 4, 7};
+    static const uint8_t peer[6] = {0x02, 1, 2, 3, 4, 8};
+    CHECK(t->ops->login(t, mac, "Burst", "ULUS10000") == NK_NET_OK, "pdp burst: login queued");
+    TSock lobby = T_INV;
+    for (int i = 0; i < 400 && (lobby == T_INV || !nk_relay_client_lobby_connected(c)); i++) {
+        if (lobby == T_INV) lobby = accept(ls, NULL, NULL);
+        t->ops->pump(t);
+        test_sleep_ms(1u);
+    }
+    CHECK(lobby != T_INV && nk_relay_client_lobby_connected(c), "pdp burst: lobby connected");
+    const int pdp = t->ops->pdp_open(t, 0x2222u);
+    CHECK(pdp >= 0, "pdp burst: PDP socket open");
+    TSock data = T_INV;
+    uint8_t init[NK_RELAY_INIT_SIZE];
+    size_t init_len = 0u;
+    for (int i = 0; i < 400 && init_len < sizeof(init); i++) {
+        if (data == T_INV) {
+            data = accept(ds, NULL, NULL);
+            if (data != T_INV) t_nonblock(data);
+        }
+        t->ops->pump(t);
+        if (data != T_INV) init_len = t_drain(data, init, init_len, sizeof(init), NULL);
+        test_sleep_ms(1u);
+    }
+    CHECK(data != T_INV && init_len == sizeof(init), "pdp burst: the relay got the stream's init");
+    enum { DGRAMS = 70, PAYLOAD = 100 };
+    static uint8_t burst[DGRAMS * (NK_RELAY_PDP_HEADER_SIZE + PAYLOAD)];
+    for (unsigned g = 0u; g < DGRAMS; g++) {
+        uint8_t *f = burst + g * (NK_RELAY_PDP_HEADER_SIZE + PAYLOAD);
+        CHECK(nk_relay_pdp_header(f, peer, (uint16_t)(0x3333u + NK_RELAY_PORT_OFFSET), PAYLOAD) ==
+                  NK_RELAY_PDP_HEADER_SIZE,
+              "pdp burst: header %u encodes", g);
+        memset(f + NK_RELAY_PDP_HEADER_SIZE, (int)g, PAYLOAD);
+    }
+    CHECK(t_send_all(data, burst, sizeof(burst)), "pdp burst: the relay sent %d datagrams at once",
+          (int)DGRAMS);
+    /* Every datagram reaches the client's socket before it is read: more than the queue holds
+     * are there at the next pump. */
+    test_sleep_ms(50u);
+    t->ops->pump(t);
+    t->ops->pump(t);
+    unsigned got = 0u, in_order = 1u;
+    uint8_t buf[PAYLOAD];
+    for (int round = 0; round < 400 && got < DGRAMS; round++) {
+        uint8_t rmac[6];
+        uint16_t rport = 0u;
+        uint32_t rlen = 0u;
+        const int rc = t->ops->pdp_recv(t, pdp, rmac, &rport, buf, sizeof(buf), &rlen);
+        if (rc == NK_NET_OK) {
+            if (rlen != PAYLOAD || buf[0] != (uint8_t)got || buf[PAYLOAD - 1] != (uint8_t)got ||
+                rport != 0x3333u || memcmp(rmac, peer, 6u) != 0)
+                in_order = 0u;
+            got++;
+            continue;
+        }
+        if (rc != NK_NET_AGAIN) break;
+        t->ops->pump(t);
+        test_sleep_ms(1u);
+    }
+    CHECK(got == DGRAMS && in_order && t->ops->pdp_dropped(t) == 0u,
+          "pdp burst: all %d datagrams arrive in order and none is dropped (got %u, in order %u, "
+          "dropped %u)",
+          (int)DGRAMS, got, in_order, (unsigned)t->ops->pdp_dropped(t));
+    t_close(data);
+    t_close(lobby);
+    t_close(ls);
+    t_close(ds);
+    nk_relay_client_destroy(c);
+}
+
 /* Audit 2026-11-17 (F-008632bb, F-4e51f13d): the relay client refuses a local PTP port by the HLE
  * layer's rule (hle_network.c adhoc_ptp_port_in_use, after PPSSPP's isPTPPortInUse): a listen only
  * for another listener on the port, an open only for a stream with the same local port, peer MAC
@@ -1280,6 +1361,7 @@ int main(void) {
     test_shutdown_ends_every_connection();
     test_ptp_accept_waits_for_free_slot();
     test_lobby_burst_waits_for_queue_room();
+    test_pdp_burst_waits_for_queue_room();
     test_ptp_port_reuse();
     test_lobby_tries_each_resolved_address();
     test_posix_high_fd_above_fd_setsize();

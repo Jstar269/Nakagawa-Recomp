@@ -326,9 +326,11 @@ static int adhoc_parse_port_offset(uint16_t *out) {
 
 /* Turning Online play off in the launcher while a game runs (#1139). The launcher names a file in
  * SR_ADHOC_OFF_FILE when it starts a game with Online play on, and creates that file when the user
- * turns Online play off. While the relay is in use the lobby pump looks for it, at most every
- * 250 ms of host time; once it exists the relay client ends every connection, the lobby-lost path
- * below tells the game, and no new connection is made in this run. One log line names it. */
+ * turns Online play off. While the relay is in use the lobby pump, the socket pump and each socket
+ * open look for it, at most every 250 ms of host time; once it exists adhoc_apply_turn_off ends
+ * every connection (the lobby and each data stream, even after the lobby was lost), the lobby-lost
+ * path below tells the game if it had not been told, and no new connection is made in this run.
+ * Log lines name it. */
 #define ADHOC_OFF_CHECK_MS 250u
 static int s_adhoc_off_state;       /* 0 not read yet, 1 no file named, 2 file named */
 static char *s_adhoc_off_path;
@@ -465,6 +467,9 @@ static int adhocctl_channel(void) {
     return (int)((setting == 1u || setting == 6u || setting == 11u) ? setting : 11u);
 }
 
+/* The nickname the online login sends: the registry's /CONFIG/SYSTEM/owner_name, which is the
+ * player's Nickname setting (SR_NICKNAME) unless a game saved another value there; the Online play
+ * card says so. */
 static void adhoc_fill_nickname(uint8_t out[128]) {
     memset(out, 0, 128u);
     sreg_ensure_loaded();
@@ -472,12 +477,27 @@ static void adhoc_fill_nickname(uint8_t out[128]) {
     if (node >= 0 && s_sreg_nodes[node].type == SREG_TYPE_STR) {
         for (uint32_t i = 0u; i < 127u && i < s_sreg_nodes[node].size && s_sreg_nodes[node].value[i]; i++)
             out[i] = (uint8_t)s_sreg_nodes[node].value[i];
-        sreg_note_placeholder_read(node, "sceNetAdhocctlGetParameter");
+        sreg_note_placeholder_read(node, "sceNetAdhocctlInit (online login)");
     }
 }
 
 static void adhoc_close_sockets_and_matching(void);
 static void adhoc_detach_transport_slots(void);
+
+/* Online play turned off in the launcher ends every connection of this run, whether or not the
+ * lobby is still up: a game's data streams use their own connections to the relay and outlive a
+ * lost lobby (#1139). The lobby pump, the socket pump and each socket open call this. Once it has
+ * run, the relay client opens nothing again (its opens and login answer NK_NET_DEAD) and every
+ * socket the game holds answers DISCONNECTED. */
+static void adhoc_apply_turn_off(void) {
+    if (!s_adhoc_relay_client || nk_relay_client_is_shut_down(s_adhoc_relay_client)) return;
+    if (!adhoc_turned_off()) return;
+    nk_relay_client_shutdown(s_adhoc_relay_client, "online play turned off in the launcher");
+    if (s_adhoc_active_transport == nk_relay_client_transport(s_adhoc_relay_client))
+        adhoc_detach_transport_slots();
+    fprintf(stderr, "HLE: online play turned off: every ad hoc connection of this run is closed, "
+                    "the game's sockets answer DISCONNECTED and no new one is opened\n");
+}
 
 static void adhoc_release_transport(void) {
     adhoc_detach_transport_slots();
@@ -658,10 +678,7 @@ static void adhocctl_call_handlers(CpuState *s, uint32_t gen, uint32_t sp, uint3
 static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp) {
     NkAdhocTransport *t = s_adhoc_active_transport;
     if (!t || !t->ops) return;
-    if (s_adhoc_relay_client && t == nk_relay_client_transport(s_adhoc_relay_client) &&
-        !nk_relay_client_lobby_dead(s_adhoc_relay_client) && adhoc_turned_off()) {
-        nk_relay_client_shutdown(s_adhoc_relay_client, "online play turned off in the launcher");
-    }
+    adhoc_apply_turn_off();
     if (t->ops->pump) t->ops->pump(t);
     NkLobbyEvent ev[16];
     size_t n = t->ops->take_events ? t->ops->take_events(t, ev, 16u) : 0u;
@@ -1761,6 +1778,7 @@ static void adhoc_close_slot_internal(int id) {
 }
 
 static void adhoc_pump_all(void) {
+    adhoc_apply_turn_off();
     NkAdhocTransport *t = s_adhoc_active_transport;
     if (!t || !t->ops) return;
     if (t->ops->pump) t->ops->pump(t);
@@ -1785,6 +1803,7 @@ static void adhoc_pump_all(void) {
 }
 
 static int adhoc_pdp_open_internal(uint16_t port, uint32_t bufsize) {
+    adhoc_apply_turn_off();
     NkAdhocTransport *t = s_adhoc_active_transport;
     if (!s_adhoc.inited || !t || !t->ops || !t->ops->pdp_open) return -1;
     uint8_t self_mac[6];
@@ -2133,6 +2152,7 @@ static int adhoc_ptp_start_connect(AdhocSockSlot *sk, uint32_t *out_err) {
         if (out_err) *out_err = SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED;
         return -1;
     }
+    adhoc_apply_turn_off();
     NkAdhocTransport *t = s_adhoc_active_transport;
     if (!t || !t->ops || !t->ops->ptp_open) {
         if (out_err) *out_err = SCE_NET_ERROR_INTERNAL;
@@ -2270,6 +2290,7 @@ static uint32_t h_NetAdhocPtpListen(CpuState *s) {
         if (!s_adhoc.slots[i].used) { free_idx = i; break; }
     }
     if (free_idx < 0) return SCE_NET_ADHOC_ERROR_SOCKET_ID_NOT_AVAIL;
+    adhoc_apply_turn_off();
     NkAdhocTransport *t = s_adhoc_active_transport;
     if (!t || !t->ops || !t->ops->ptp_listen) return SCE_NET_ERROR_INTERNAL;
     const int th = t->ops->ptp_listen(t, sport, backlog);

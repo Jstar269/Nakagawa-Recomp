@@ -1488,20 +1488,10 @@ runtime can make is listed below, and each is opt-in and off by default.
 | Update download | `github.com`, which redirects to `release-assets.githubusercontent.com` (HTTPS) | Only after a check finds a newer version and you select **DOWNLOAD** | That button, per download |
 | Download cover art | `thumbnails.libretro.com` (HTTPS) | When **Download cover art** is on (Settings > Online and developer, off by default), once per verified Redump disc not yet cached | That switch, and **Refresh cover art** (Settings > Build tools and cache) |
 | Online play (ad hoc relay) | The shipped servers `socom.cc`, `relay.arenaanywhere.site`, `relay-usa.arenaanywhere.site`, `relay-sa.arenaanywhere.site` and `relay-asia.arenaanywhere.site`, a relay server you pick from PPSSPP's list, or a server you enter yourself (`27312` lobby, `27313` data, plain TCP) | Only after you select **TURN ON** on the Online play card, which names that exact server, and only while a game that starts PSP ad hoc networking runs | The Online play card; **Settings > Online and developer > Online play** (`online_play` in `settings.json`, off by default) turns it off and ends the connection |
-| Online play server list | `metadata.ppsspp.org` (HTTPS) | Only while Online play is on, when you open the server picker or select **Refresh** in it | Online play being on; the list is never fetched at start, in the background, or while Online play is off |
+| Online play server list | `metadata.ppsspp.org` (HTTPS) | Only while Online play is on, when you open the server picker or select **Refresh** in it | Online play being on; no download starts at start, in the background, or while Online play is off, and one already under way when you turn it off finishes but its list is thrown away |
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
-
-**Download cover art** (Settings > Online and developer, off by default;
-[#2632](https://github.com/Jstar269/nakagawa-recomp/issues/2632)) fetches box art PNGs over HTTPS
-from `thumbnails.libretro.com` using the player's shared WinHTTP transport
-(`src/player/cover_art.c`, user agent `NakagawaRecomp/CoverArt`). Only discs verified against the
-Redump PSP list are looked up, by exact sanitized Redump `<game name>` under
-`Sony - PlayStation Portable/Named_Boxarts/` (no unverified disc names, file paths, saves, or PC
-identifiers are sent, redirects outside `thumbnails.libretro.com` are refused, and cached PNGs stay
-local under `cache/cover-art/` until **Refresh cover art** clears them). When off, no connection is
-made and discs keep their own `ICON0.PNG` / `PIC1.PNG`.
 
 **Online play** (Settings > Online and developer > Online play, off by default;
 [#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)) carries PSP local wireless ad hoc
@@ -1512,21 +1502,32 @@ server, opens the card, which names that exact server and lists what is sent, wi
 **NOT NOW** and **CHANGE SERVER**. Nothing connects until you select **TURN ON** for that server.
 Its two connections are **unencrypted plain TCP** with no sign-in: lobby port `27312` and data
 relay port `27313` by default, so anyone on the network path or operating the server can read the
-traffic. Only the ID of the game you start, your profile's nickname and its random console ID (a
-MAC address Nakagawa made, never the PC's), the ad hoc group name, and the game's PDP/PTP packets
-are sent (`ONLINE_FEATURES.md` details the exact protocol); no game files, saves, guest memory,
-host paths, or PC identifiers are sent. **New console ID** replaces that random ID. The advanced
-**Port offset** (default `10000`, the value PPSSPP uses) shifts the game's ports on the relay;
-players who want to play together need the same value. Turning Online play off ends a running
-game's connection within a moment. Custom server entries stay local in `settings.json`. When
-Online play is off, no host socket opens and strictly-online ad hoc imports stay fail-closed.
+traffic. Only the ID of the game you start, the console nickname (your **Nickname** setting, or
+the one a game saved in its place, as a PSP game can), the random console ID (a MAC address
+Nakagawa made, never the PC's), the name of the ad hoc group (room) the game makes or joins, and
+the game's PDP/PTP packets are sent (`ONLINE_FEATURES.md` details the exact protocol); no game
+files, saves, guest memory, host paths, or PC identifiers are sent. **New console ID** replaces
+that random ID. The advanced **Port offset** (default `10000`, the value PPSSPP uses) shifts the
+game's ports on the relay; players who want to play together need the same value. Turning Online
+play off ends every connection of a running game within a moment (the lobby and each of the
+game's data streams, even after the lobby was lost), and the game opens no new one until it is
+started again. Custom server entries stay local in `settings.json`. When Online play is off, no
+host socket opens and strictly-online ad hoc imports stay fail-closed.
+
+The card, the turn-off and the masking of inherited values are the player's. It always sets
+`SR_ADHOC_ENABLED`, `SR_ADHOC_SERVER`, `SR_ADHOC_PORT_OFFSET` and `SR_ADHOC_OFF_FILE` for the game
+it starts (`src/core/nk_launch.c`), off unless Online play is on, so an inherited value never turns
+it on. A developer who runs a game executable directly with `SR_ADHOC_ENABLED=1` and
+`SR_ADHOC_SERVER` set connects to that server without the card, and without a turn-off file
+(`SR_ADHOC_OFF_FILE`) nothing but closing the game ends the connection.
 
 The server picker shows the shipped servers first, then PPSSPP's public list of ad hoc servers,
 downloaded over HTTPS from `metadata.ppsspp.org` only while Online play is on, when you open the
 picker or select **Refresh** (`src/player/adhoc_servers.c`, user agent `NakagawaRecomp/OnlinePlay`).
 The download is capped at 64 KiB and 64 servers, read as untrusted input, and kept for that session
 only; an answer from another host is refused, and the list's icon, web, status and Discord links
-are never fetched. Only relay servers this player can talk to (`data_mode` `AemuPostoffice`, a
+are never fetched. The download runs on its own thread and cannot be cancelled: if you turn Online
+play off while it runs, it finishes, its list is thrown away and the picker shows the shipped copy. Only relay servers this player can talk to (`data_mode` `AemuPostoffice`, a
 reading of PPSSPP's code that is PPSSPP-derived, not PSP-measured) are offered. Where the download
 is unavailable, the picker says why and offers the copy shipped with the player instead, the relay
 entries of PPSSPP's list at revision `3bc60270`: `socom.cc`, `psp.mgn.pub`, `eahub.eu`,

@@ -13470,6 +13470,246 @@ static void test_adhoc_turned_off_in_launcher(void) {
 #endif
 }
 
+/* ---- Online play turned off after the lobby is gone: the data streams end too (#1139) ------ */
+/* The lobby can be lost while a game's data streams still run (they use their own connections to
+ * the relay). Turning Online play off must end those as well, and no socket may open after it.
+ * (a) a PDP socket's stream, (b) a live PTP stream the game is sending on, (c) new sockets. */
+static int s_offd_case;
+static int s_offd_done;
+
+/* Data connections the guest has open at the server: every one the peer did not open. */
+static int offd_guest_conns(const uint8_t peer_mac[6]) {
+    int n = 0;
+    for (int i = 0; i < 24; i++) {
+        const MiniRelayConn *dc = &s_off_srv->conns[i];
+        if (dc->active && dc->kind >= 0 && memcmp(dc->src_mac, peer_mac, 6u) != 0) n++;
+    }
+    return n;
+}
+
+static void offd_kill_lobby(CpuState *cpu) {
+    s_off_srv->drop_lobby_mid_session = 1;
+    for (int w = 0; w < 400 && s_adh_events < 2u; w++) d3_step(cpu);
+    s_off_srv->drop_lobby_mid_session = 0;
+}
+
+static void offd_turn_off(void) {
+    FILE *marker = fopen(s_off_path, "wb");
+    expect(marker != NULL, "offd: the marker file is written");
+    if (marker) fclose(marker);
+}
+
+static void offd_main_fn(CpuState *cpu) {
+    static const uint8_t peer_mac[6] = {0x02u, 0x44u, 0x55u, 0x66u, 0x77u, 0x88u};
+    char msg[320];
+    NkAdhocRelayConfig pcfg = {"127.0.0.1", s_off_srv->lobby_port, s_off_srv->data_port, 0u};
+    NkAdhocRelayClient *peer_rc = nk_relay_client_create(&pcfg);
+    NkAdhocTransport *tp = peer_rc ? nk_relay_client_transport(peer_rc) : NULL;
+    const uint8_t grp[8] = {'O', 'F', 'F', 'D', 'A', 'T', '1', 0};
+    expect(tp && tp->ops->login(tp, peer_mac, "OffPeer", "TEST00012") == NK_NET_OK &&
+               tp->ops->connect(tp, grp) == NK_NET_OK,
+           "offd: peer logged into OFFDAT1");
+    if (!tp) {
+        s_offd_done = 1;
+        return;
+    }
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '1', '2'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, peer_mac[i]);
+    s_adh_events = 0u;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+               adh(ADH_NID_WLAN_ETHER, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+               adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+               adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+               adh(ADH_NID_CREATE, adh_name(0, "OFFDAT1"), 0u, 0u) == 0u,
+           "offd: guest Create");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u, "offd: AdhocInit");
+
+    if (s_offd_case == 0) {
+        /* (a) A PDP socket whose stream outlives the lobby. */
+        const int32_t pdp = (int32_t)adh_call_full(0x6f92741bu /* PdpCreate */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0x5100u, 0x2000u, 0u, 0u, 0u, 0u, 0u);
+        for (int w = 0; w < 200 && offd_guest_conns(peer_mac) != 1; w++) d3_step(cpu);
+        snprintf(msg, sizeof(msg), "offd.a: PdpCreate opens one data stream (id=%d streams=%d)", pdp,
+                 offd_guest_conns(peer_mac));
+        expect(pdp > 0 && offd_guest_conns(peer_mac) == 1, msg);
+        offd_kill_lobby(cpu);
+        snprintf(msg, sizeof(msg), "offd.a: the lobby is lost and the PDP stream still runs "
+                                   "(events=%u state=%u streams=%d)",
+                 s_adh_events, adh_state(), offd_guest_conns(peer_mac));
+        expect(s_adh_events == 2u && ADH_AT(1).event == 2 && adh_state() == 0u &&
+                   offd_guest_conns(peer_mac) == 1, msg);
+        offd_turn_off();
+        for (int w = 0; w < 600 && offd_guest_conns(peer_mac) != 0; w++) {
+            MEM_W32(ADH_P2_LEN, 0u);
+            (void)adh(0xc7c1fc57u /* GetPdpStat */, ADH_P2_LEN, 0u, 0u);
+            d3_step(cpu);
+        }
+        MEM_W32(ADH_P2_LEN, 64u);
+        const uint32_t recv_rc = adh_call_full(0xdfe53e03u /* PdpRecv */, cpu->r[29], (uint32_t)pdp,
+                                               ADH_P2_STAT, ADH_P2_PORT, ADH_P2_BUF, ADH_P2_LEN, 0u,
+                                               1u /* nonblock */, 0u);
+        snprintf(msg, sizeof(msg), "offd.a: turning it off closes the PDP stream and PdpRecv answers "
+                                   "DISCONNECTED (streams=%d recv=0x%08x)",
+                 offd_guest_conns(peer_mac), recv_rc);
+        expect(offd_guest_conns(peer_mac) == 0 && recv_rc == 0x8041070cu, msg);
+        const uint32_t again = adh_call_full(0x6f92741bu /* PdpCreate */, cpu->r[29], ADH_P2_SELF_MAC,
+                                             0x5101u, 0x2000u, 0u, 0u, 0u, 0u, 0u);
+        for (int w = 0; w < 50; w++) d3_step(cpu);
+        snprintf(msg, sizeof(msg), "offd.a: a PdpCreate after it is refused and opens nothing "
+                                   "(rc=0x%08x streams=%d)", again, offd_guest_conns(peer_mac));
+        expect(again == 0x8041070fu && offd_guest_conns(peer_mac) == 0, msg);
+    } else if (s_offd_case == 1) {
+        /* (b) A PTP stream the game is sending on, still live after the lobby is lost. */
+        const int peer_lsn = tp->ops->ptp_listen(tp, 0x5201u, 4);
+        for (int w = 0; w < 40; w++) {
+            tp->ops->pump(tp);
+            d3_step(cpu);
+        }
+        const int32_t ptp = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0x5200u, ADH_P2_PEER_MAC, 0x5201u,
+                                                   0x1000u, 100000u, 3u, 0u);
+        int accepted = NK_NET_AGAIN;
+        uint32_t conn_rc = 0xffffffffu;
+        for (int w = 0; w < 400 && (accepted < 0 || conn_rc != 0u); w++) {
+            tp->ops->pump(tp);
+            if (accepted < 0 && peer_lsn >= 0) accepted = tp->ops->ptp_accept(tp, peer_lsn, NULL, NULL);
+            if (ptp > 0) conn_rc = adh((0xfc6fc07bu) /* PtpConnect */, (uint32_t)ptp, 0u, 1u);
+            d3_step(cpu);
+        }
+        snprintf(msg, sizeof(msg), "offd.b: PtpOpen/PtpConnect reach the peer (id=%d connect=0x%08x "
+                                   "accepted=%d)", ptp, conn_rc, accepted);
+        expect(ptp > 0 && conn_rc == 0u && accepted >= 0, msg);
+        char got[64];
+        size_t got_len = 0u;
+        const char *chunks[3] = {"AAAA", "BBBB", "CCCC"};
+        uint32_t send_rc[3] = {0xffffffffu, 0xffffffffu, 0xffffffffu};
+        for (int k = 0; k < 3; k++) {
+            if (k == 1) offd_kill_lobby(cpu);
+            if (k == 2) {
+                offd_turn_off();
+                for (int w = 0; w < 600 && offd_guest_conns(peer_mac) != 0; w++) {
+                    MEM_W32(ADH_P2_LEN, 0u);
+                    (void)adh(0xb9685118u /* GetPtpStat */, ADH_P2_LEN, 0u, 0u);
+                    tp->ops->pump(tp);
+                    d3_step(cpu);
+                }
+            }
+            for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)chunks[k][i]);
+            MEM_W32(ADH_P2_LEN, 4u);
+            send_rc[k] = adh_call_full(0x4da4c788u /* PtpSend */, cpu->r[29], (uint32_t)ptp, ADH_P2_BUF,
+                                       ADH_P2_LEN, 0u, 1u /* nonblock */, 0u, 0u, 0u);
+            for (int w = 0; w < 100; w++) {
+                tp->ops->pump(tp);
+                uint32_t n = 0u;
+                if (accepted >= 0 && got_len < sizeof(got) - 1u &&
+                    tp->ops->ptp_recv(tp, accepted, got + got_len,
+                                      (uint32_t)(sizeof(got) - 1u - got_len), &n) == NK_NET_OK)
+                    got_len += n;
+                if (k < 2 && got_len >= 4u * (size_t)(k + 1)) break;
+                d3_step(cpu);
+            }
+            if (k == 1) {
+                snprintf(msg, sizeof(msg), "offd.b: after the lobby is lost the stream still carries "
+                                           "data (events=%u state=%u send=0x%08x streams=%d)",
+                         s_adh_events, adh_state(), send_rc[1], offd_guest_conns(peer_mac));
+                expect(s_adh_events == 2u && adh_state() == 0u && send_rc[1] == 0u &&
+                           offd_guest_conns(peer_mac) == 1, msg);
+            }
+        }
+        got[got_len] = '\0';
+        snprintf(msg, sizeof(msg), "offd.b: turning it off closes the PTP stream and PtpSend answers "
+                                   "DISCONNECTED; the peer got only what came before "
+                                   "(streams=%d send=0x%08x/0x%08x/0x%08x peer got \"%s\")",
+                 offd_guest_conns(peer_mac), send_rc[0], send_rc[1], send_rc[2], got);
+        expect(offd_guest_conns(peer_mac) == 0 && send_rc[0] == 0u && send_rc[1] == 0u &&
+                   send_rc[2] == 0x8041070cu && strcmp(got, "AAAABBBB") == 0, msg);
+        if (accepted >= 0) tp->ops->ptp_close(tp, accepted);
+        if (peer_lsn >= 0) tp->ops->ptp_close(tp, peer_lsn);
+        if (ptp > 0) (void)adh(0x157e6225u /* PtpClose */, (uint32_t)ptp, 0u, 0u);
+    } else {
+        /* (c) Lobby lost, then turned off, with no socket open: nothing opens after it. */
+        const int peer_lsn = tp->ops->ptp_listen(tp, 0x5301u, 4);
+        offd_kill_lobby(cpu);
+        expect(s_adh_events == 2u && adh_state() == 0u, "offd.c: the lobby is lost");
+        offd_turn_off();
+        for (int w = 0; w < 300; w++) d3_step(cpu); /* past the 250 ms between looks */
+        const uint32_t pdp = adh_call_full(0x6f92741bu /* PdpCreate */, cpu->r[29], ADH_P2_SELF_MAC,
+                                           0x5300u, 0x2000u, 0u, 0u, 0u, 0u, 0u);
+        const int32_t ptp = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0x5302u, ADH_P2_PEER_MAC, 0x5301u,
+                                                   0x1000u, 100000u, 3u, 0u);
+        const uint32_t conn_rc = ptp > 0 ? adh(0xfc6fc07bu /* PtpConnect */, (uint32_t)ptp, 0u, 1u)
+                                         : (uint32_t)ptp;
+        const uint32_t lsn = adh_call_full(0xe08bdac1u /* PtpListen */, cpu->r[29], ADH_P2_SELF_MAC,
+                                           0x5303u, 0x1000u, 100000u, 3u, 1u, 0u, 0u);
+        for (int w = 0; w < 50; w++) {
+            tp->ops->pump(tp);
+            d3_step(cpu);
+        }
+        snprintf(msg, sizeof(msg), "offd.c: PdpCreate, PtpOpen+PtpConnect and PtpListen are refused "
+                                   "and the server sees no stream (pdp=0x%08x ptp=%d connect=0x%08x "
+                                   "listen=0x%08x streams=%d)",
+                 pdp, ptp, conn_rc, lsn, offd_guest_conns(peer_mac));
+        expect(pdp == 0x8041070fu && (ptp <= 0 || conn_rc == 0x80410718u) && lsn >= 0x80000000u &&
+                   offd_guest_conns(peer_mac) == 0, msg);
+        if (ptp > 0) (void)adh(0x157e6225u /* PtpClose */, (uint32_t)ptp, 0u, 0u);
+        if (lsn < 0x80000000u) (void)adh(0x157e6225u /* PtpClose */, lsn, 0u, 0u);
+        if (peer_lsn >= 0) tp->ops->ptp_close(tp, peer_lsn);
+    }
+    tp->ops->logout(tp);
+    nk_relay_client_destroy(peer_rc);
+    (void)adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u);
+    (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+    (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+    s_offd_done = 1;
+}
+
+static void test_adhoc_turned_off_ends_data_streams(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "offd: WSAStartup");
+#endif
+    static char path[512];
+    snprintf(path, sizeof(path), "%s/hle_adhoc_online_off_data.marker", HLE_BUILD_ROOT);
+    for (int c = 0; c < 3; c++) {
+        (void)remove(path);
+        AdhP2MiniRelay srv;
+        expect(mr_start(&srv), "offd: mini relay started");
+        if (!srv.running) continue;
+        s_off_srv = &srv;
+        s_off_path = path;
+        s_offd_case = c;
+        char srv_spec[64];
+        snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u", (unsigned)srv.lobby_port,
+                 (unsigned)srv.data_port);
+        s_offd_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        hle_test_setenv("SR_ADHOC_ENABLED", "1");
+        hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+        hle_test_setenv("SR_ADHOC_OFF_FILE", path);
+        hle_net_reset();
+        adh_run(ADH_P2_MAIN, offd_main_fn);
+        expect(s_offd_done == 1, "offd: case finished");
+        hle_net_reset();
+        hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+        hle_test_setenv("SR_ADHOC_SERVER", NULL);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+        hle_test_setenv("SR_ADHOC_OFF_FILE", NULL);
+        adh_fixture_end(loaded_end);
+        mr_stop(&srv);
+        s_off_srv = NULL;
+        s_off_path = NULL;
+    }
+    (void)remove(path);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
 static void test_adhoc_d3_dead_and_silent_lobby(void) {
 #ifdef _WIN32
     WSADATA wsa;
@@ -66608,6 +66848,7 @@ static int hle_selftest_main(int argc, char **argv) {
         test_adhoc_d4_ptp_open_connect_regression();
         test_adhoc_d3_dead_and_silent_lobby();
         test_adhoc_turned_off_in_launcher();
+        test_adhoc_turned_off_ends_data_streams();
         test_adhoc_d8_d9_regressions();
         test_adhoc_online_all_39_handlers_real_tcp();
         fprintf(stderr, "adhocctl: %d checks, %d failures\n", s_checks, s_failures);
@@ -66775,6 +67016,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_adhoc_d4_ptp_open_connect_regression();
     test_adhoc_d3_dead_and_silent_lobby();
     test_adhoc_turned_off_in_launcher();
+    test_adhoc_turned_off_ends_data_streams();
     test_adhoc_d8_d9_regressions();
     test_adhoc_online_all_39_handlers_real_tcp();
     test_unregistered_batch_profiler_refer_null();

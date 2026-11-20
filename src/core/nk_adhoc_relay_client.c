@@ -25,6 +25,8 @@
  *     literal fast path, and PTP slot reservation before consuming connect frames.
  *   - 2026-11-17: the lobby tries each resolved server address in turn; the DNS worker holds
  *     its own Winsock reference and a destroyed client's pending lookup runs on detached.
+ *   - 2026-11-20: a PDP socket whose queue is full leaves the rest of its stream unread instead
+ *     of dropping datagrams; nk_relay_client_is_shut_down.
  */
 
 #ifndef _WIN32
@@ -239,7 +241,6 @@ struct NkAdhocRelayClient {
     uint32_t ev_dropped;
 
     RelayPdpSocket pdp[NK_NET_PDP_SOCKETS];
-    uint32_t pdp_dropped;
     RelayPtpSocket ptp[NK_RELAY_PTP_SOCKETS];
     uint16_t next_ptp_port;
     int shut_down; /* nk_relay_client_shutdown: every socket closed, none opened again */
@@ -917,13 +918,15 @@ static bool open_data_chan(NkAdhocRelayClient *c, TcpChan *ch, NkRelayInit type,
     return false;
 }
 
-static void pump_pdp_socket(NkAdhocRelayClient *c, RelayPdpSocket *s) {
-    if (!s->used) return;
-    if (s->chan.dead || s->chan.remote_eof) return;
-    if (!ensure_data_chan_connected(c, &s->chan)) return;
-    chan_flush_tx(&s->chan);
-    chan_pump_rx(&s->chan);
-    while (s->chan.rx_len >= NK_RELAY_PDP_HEADER_SIZE) {
+/* Decodes the PDP frames received so far while the socket's queue has room, as parse_lobby_rx does
+ * for the lobby: a frame the queue cannot hold stays in the receive buffer, chan_pump_rx stops
+ * reading at NK_RELAY_CHAN_MAX_BUF, and TCP holds the rest at the relay until the game reads.
+ * No datagram is dropped here. Frames received before the relay closed the stream are still
+ * delivered. A frame that does not parse, or one there is no memory to copy, ends the stream by
+ * name (last error), and pdp_recv then answers NK_NET_DEAD. */
+static void parse_pdp_rx(NkAdhocRelayClient *c, RelayPdpSocket *s) {
+    while (!s->chan.dead && s->chan.rx_len >= NK_RELAY_PDP_HEADER_SIZE &&
+           s->count < NK_NET_PDP_QUEUE) {
         uint8_t src_mac[NK_RELAY_MAC_LEN];
         uint16_t wire_port = 0u;
         uint32_t plen = 0u;
@@ -936,20 +939,29 @@ static void pump_pdp_socket(NkAdhocRelayClient *c, RelayPdpSocket *s) {
         if (s->chan.rx_len < total) break;
         const uint16_t app_port = nk_relay_port_in(wire_port, c->port_offset);
         uint8_t *copy = plen ? malloc(plen) : NULL;
-        if (s->count == NK_NET_PDP_QUEUE || (plen && !copy)) {
-            free(copy);
-            c->pdp_dropped++;
-        } else {
-            if (plen) memcpy(copy, s->chan.rx + NK_RELAY_PDP_HEADER_SIZE, plen);
-            PdpDatagram *d = &s->queue[(s->head + s->count) % NK_NET_PDP_QUEUE];
-            memcpy(d->mac, src_mac, NK_RELAY_MAC_LEN);
-            d->port = app_port;
-            d->len = plen;
-            d->data = copy;
-            s->count++;
+        if (plen && !copy) {
+            s->chan.dead = 1;
+            set_error(c, "out of memory for a PDP datagram");
+            break;
         }
+        if (plen) memcpy(copy, s->chan.rx + NK_RELAY_PDP_HEADER_SIZE, plen);
+        PdpDatagram *d = &s->queue[(s->head + s->count) % NK_NET_PDP_QUEUE];
+        memcpy(d->mac, src_mac, NK_RELAY_MAC_LEN);
+        d->port = app_port;
+        d->len = plen;
+        d->data = copy;
+        s->count++;
         chan_consume_rx(&s->chan, total);
     }
+}
+
+static void pump_pdp_socket(NkAdhocRelayClient *c, RelayPdpSocket *s) {
+    if (!s->used) return;
+    if (!s->chan.dead && !s->chan.remote_eof && ensure_data_chan_connected(c, &s->chan)) {
+        chan_flush_tx(&s->chan);
+        chan_pump_rx(&s->chan);
+    }
+    parse_pdp_rx(c, s);
 }
 
 static unsigned count_accepting_for(const NkAdhocRelayClient *c, int listen_handle) {
@@ -1109,7 +1121,6 @@ static int rc_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], co
     c->ev_head = 0u;
     c->ev_count = 0u;
     c->ev_dropped = 0u;
-    c->pdp_dropped = 0u;
     c->last_lobby_tx_ms = monotonic_ms();
     rc_pump(t);
     return NK_NET_OK;
@@ -1284,8 +1295,11 @@ static int rc_pdp_close(NkAdhocTransport *t, int handle) {
     return NK_NET_OK;
 }
 
+/* The relay client drops no datagram: a socket whose queue is full holds the rest of its stream
+ * back (parse_pdp_rx), so the count stays zero. */
 static uint32_t rc_pdp_dropped(const NkAdhocTransport *t) {
-    return as_const_client(t)->pdp_dropped;
+    (void)t;
+    return 0u;
 }
 
 static int rc_ptp_listen(NkAdhocTransport *t, uint16_t sport, int backlog) {
@@ -1530,6 +1544,10 @@ void nk_relay_client_shutdown(NkAdhocRelayClient *client, const char *reason) {
     client->scanning = 0;
     client->shut_down = 1;
     set_error(client, (reason && reason[0]) ? reason : "shut down");
+}
+
+bool nk_relay_client_is_shut_down(const NkAdhocRelayClient *client) {
+    return client && client->shut_down;
 }
 
 const char *nk_relay_client_last_error(const NkAdhocRelayClient *client) {

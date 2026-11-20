@@ -7191,6 +7191,27 @@ static void test_online_play_text_is_never_cut(void) {
         g_online_play_host = NULL;
         g_flow_text_size_pct = saved;
     }
+    {
+        /* The card names the list host the picker downloads from, says the room name is sent,
+           and that a nickname a game saved goes in place of the setting's (review of #2832,
+           2026-11-20), whole at the minimum window with Larger text and at 1280 x 720. */
+        static const char *const told[] = {"metadata.ppsspp.org", "- The name of the room",
+                                           "instead."};
+        static const struct { int w; int h; int pct; } at[] = {{960, 540, 150},
+                                                               {1280, 720, 100}};
+        for (size_t i = 0u; i < sizeof(at) / sizeof(at[0]); ++i) {
+            char message[160];
+            g_flow_text_size_pct = at[i].pct;
+            (void)snprintf(message, sizeof(message),
+                           "the Online play card names the list host, the room name and whose "
+                           "nickname is sent, whole at %d x %d, %d%% text",
+                           at[i].w, at[i].h, at[i].pct);
+            CHECK(flow_case_text_whole(FLOW_SETTINGS_ONLINE_PLAY_CARD, at[i].w, at[i].h,
+                                       FLOW_ID_CARD, told, sizeof(told) / sizeof(told[0])),
+                  message);
+        }
+        g_flow_text_size_pct = saved;
+    }
     CHECK(online_play_console_button_stays_in_view(),
           "the notice NEW CONSOLE ID leaves does not push the focused button past the card's "
           "edge at 960 x 540 with 150% text");

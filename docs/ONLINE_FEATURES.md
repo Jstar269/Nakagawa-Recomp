@@ -152,7 +152,7 @@ The plan below is the later in-player report, once online mode ships.
 
 ## Online play
 
-Status: opt-in v0.1.0 implementation ([#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)),
+Status: opt-in implementation ([#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)),
 off by default (`online_play: false` in `settings.json`, `SR_ADHOC_ENABLED=0` in runtime). It is on only while
 `online_play_consent` names the server in `online_play_server`, which only the card's **TURN ON** writes; a file
 that says on without it is read as off. When off,
@@ -181,16 +181,18 @@ default 10000).
 - **Consent per server.** The Online play card is the only way to turn Online play on. It names the exact server
   and what is sent, and offers **TURN ON**, **NOT NOW** and **CHANGE SERVER**. Picking a different server opens the
   card again for that server; until the user selects **TURN ON** for it, nothing connects. Turning Online play off
-  ends a running game's connection within a moment (the launcher leaves a marker file the runtime checks while it
-  polls the lobby); turning it on takes effect at the next launch.
+  ends every connection of a running game within a moment, the lobby and each data stream, even after the lobby
+  was lost (the launcher leaves a marker file the runtime checks while it pumps the lobby and the game's sockets and
+  before it opens a socket); the game opens none again in that run. Turning it on takes effect at the next launch.
 - **Two connections, both unencrypted.** The protocol is plain TCP. It has no encryption and no sign-in.
   - **Lobby** (port 27312): log in, find groups, join one, and learn who is in it.
   - **Data relay** (port 27313): one connection per ad hoc socket, carrying the game's own packets.
 
   Anyone on the network path can read this traffic. The consent card and `docs/SETUP.md` say so plainly.
 - **What is sent, and nothing else:**
-  - to the lobby: the disc ID (for example `ULUS10000`), a nickname (the console profile's own, which the user can
-    change), the console profile's MAC address and the group name. The profile's MAC is a random address Nakagawa
+  - to the lobby: the disc ID (for example `ULUS10000`), the console nickname (the registry's
+    `/CONFIG/SYSTEM/owner_name`: the user's **Nickname** setting, or a value a game saved there in its place), the
+    console profile's MAC address and the group name. The profile's MAC is a random address Nakagawa
     made for that profile, never the PC's.
   - to the data relay: the game's own ad hoc packets, addressed by that MAC and the game's ports.
 
@@ -209,7 +211,8 @@ default 10000).
     for deterministic two-console selftests, and `src/core/nk_adhoc_relay_client.c/.h` implements the non-blocking
     plain-TCP `aemu_postoffice` / PPSSPP relay client (`relay-client-selftest`).
   - **Config seam & tests:** the player only sets `SR_ADHOC_ENABLED=1` and `SR_ADHOC_SERVER` (with `+10000`
-    `SR_ADHOC_PORT_OFFSET`) when **Ad hoc online play** is on. Offline selftests (`hle_thread_selftest --adhocctl`)
+    `SR_ADHOC_PORT_OFFSET`) when **Online play** is on. Offline selftests (`make hle-thread-selftest`, which
+    builds and runs the whole HLE suite; the built `hle_thread_selftest.exe --adhocctl` runs only its ad hoc cases)
     and local `127.0.0.1` loopback tests (`relay-client-selftest`, `test_adhoc_online_real_tcp_loopback_e2e`,
     `test_adhoc_online_all_39_handlers_real_tcp`) cover the full stack without touching the internet.
 - **Where the code comes from** (`src/core/PROVENANCE.md` and `src/rt/PROVENANCE.md` have the details).

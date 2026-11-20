@@ -1994,24 +1994,25 @@ static void settings_online_play_reveal_row(NkUi *ui, size_t count) {
    control that has it, which brings it into view where the new layout puts it. */
 static struct {
     const NkUi *ui;
-    uint32_t lines;
+    char lines[2048]; /* the lines last drawn, each ended by a 0x1F byte */
 } s_online_play_page;
 
 static void settings_online_play_keep_focus_in_view(NkUi *ui, const char *const *lines,
                                                     size_t count) {
-    uint32_t hash = 2166136261u;
+    char now[sizeof(s_online_play_page.lines)];
+    size_t used = 0u;
     NkUiId focused;
-    for (size_t i = 0u; i < count; ++i) {
-        for (const char *c = safe_text(lines[i], ""); *c != '\0'; ++c) {
-            hash = (hash ^ (uint8_t)*c) * 16777619u;
-        }
-        hash = (hash ^ 0xFFu) * 16777619u;
+    now[0] = '\0';
+    for (size_t i = 0u; i < count && used < sizeof(now); ++i) {
+        int wrote = snprintf(now + used, sizeof(now) - used, "%s\x1F", safe_text(lines[i], ""));
+        if (wrote < 0) break;
+        used += (size_t)wrote;
     }
-    if (s_online_play_page.ui == ui && s_online_play_page.lines == hash) return;
+    if (s_online_play_page.ui == ui && strcmp(s_online_play_page.lines, now) == 0) return;
     focused = nk_ui_focused(ui);
     if (s_online_play_page.ui == ui && focused != 0u) nk_ui_focus(ui, focused);
     s_online_play_page.ui = ui;
-    s_online_play_page.lines = hash;
+    memcpy(s_online_play_page.lines, now, sizeof(now));
 }
 
 /* The consent card is taller than the window at the smallest window or a larger text size, and
@@ -2282,7 +2283,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         /* The consent card (owner's wording of 2026-11-19 and 2026-11-20): it names the exact
            server each time, and it is the only way Online play turns on. */
         char server_line[NK_ADHOC_SERVER_MAX_LEN + 96u];
-        char nickname_line[96];
+        char nickname_line[160];
         const char *server = safe_text(model->online_play_card_server, NK_ADHOC_DEFAULT_SERVER);
         const bool scrolls = settings_online_play_card_scroll(ui);
         const NkUiTextStyle eyebrow_style = nk_ui_type(NK_UI_TYPE_EYEBROW, 0u);
@@ -2290,7 +2291,10 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         snprintf(server_line, sizeof(server_line),
                  "To do this, Nakagawa connects to %s. This is a community server. Nakagawa does "
                  "not run it.", server);
-        snprintf(nickname_line, sizeof(nickname_line), "- Your Nickname: %s",
+        /* The login sends the console nickname, the registry's owner_name: this setting unless
+           a game saved its own there (hle_network.c adhoc_fill_nickname). */
+        snprintf(nickname_line, sizeof(nickname_line),
+                 "- Your Nickname: %s, or the one a game saved instead.",
                  safe_text(model->nickname, NK_NICKNAME_DEFAULT));
         /* The eyebrow names the server where it fits on its one line; a host too long for it
            (a player's own) is named whole in the card's first line, broken inside the host
@@ -2316,6 +2320,9 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             nk_ui_text_role(ui, SET_ID_TEXT + 0x783u,
                             "- This game's ID: the ID of the game you start, for example ULUS12345",
                             NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x78Eu,
+                            "- The name of the room the game makes or joins.", NK_UI_TYPE_BODY_S,
+                            theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x784u,
                             "- A random console ID that Nakagawa made for you. It is not your "
                             "PC's hardware address.",
@@ -2338,6 +2345,10 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             nk_ui_text_role(ui, SET_ID_TEXT + 0x78Au,
                             "- The connection is not encrypted. Others on the network path could "
                             "read it.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x78Fu,
+                            "While Online play is on, opening the server list also downloads the "
+                            "current list from metadata.ppsspp.org.",
                             NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x78Bu,
                             "Nakagawa never sends your saves, your game files, your PC's user "

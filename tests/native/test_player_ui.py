@@ -3212,6 +3212,23 @@ class NativePlayerUiTests(unittest.TestCase):
         # transport, which answers nothing without NK_UI_TEST_ADHOC_LIST. Nothing goes online.
         self.assertIn("adhoc_list_request=https://metadata.ppsspp.org/adhoc-servers.json",
                       str(run["stdout"]))
+        # Once: the pages and the card before TURN ON asked for nothing.
+        self.assertEqual(str(run["stdout"]).count("adhoc_list_request="), 1, run["stdout"])
+
+        # With the card's answer on file, opening the picker asks for the list.
+        consented = self.next_ui_run(
+            "online-play-servers", ("WAIT_MS=300",),
+            settings={"nickname": "Player", "nickname_asked": True, "online_play": True,
+                      "online_play_server": "socom.cc", "online_play_consent": "socom.cc"})
+        self.assertIn("adhoc_list_request=https://metadata.ppsspp.org/adhoc-servers.json",
+                      str(consented["stdout"]))
+        # A settings file that says on without the card's answer is off: the picker asks for
+        # nothing.
+        unconsented = self.next_ui_run(
+            "online-play-servers", ("WAIT_MS=300",),
+            settings={"nickname": "Player", "nickname_asked": True, "online_play": True,
+                      "online_play_server": "socom.cc"})
+        self.assertNotIn("adhoc_list_request", str(unconsented["stdout"]))
 
         # With Online play off the picker shows the shipped list and asks for nothing.
         off = self.next_ui_run(

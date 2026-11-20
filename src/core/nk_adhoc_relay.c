@@ -27,24 +27,25 @@
  * product-check body earlier, while checking src/core/PROVENANCE.md's wording, and wrote the new
  * one from login_user_data without opening the old one again.
  *
- * Known limits for the wiring step (nothing calls this codec yet; the slice that opens the relay
- * connection decides them):
+ * How the codec is used: src/core/nk_adhoc_relay_client.c reads and writes the relay's TCP streams
+ * with it, and src/rt/hle_network.c consumes what it decodes.
  *   - nk_lobby_parse checks only a packet's opcode and length. A CONNECT from a hostile server may
  *     carry the all-ones, all-zero or a group MAC, the console's own MAC, an empty nickname or a
  *     repeated peer id, a DISCONNECT an unknown id, and a SCAN a group name with any bytes and no
- *     terminator; each is decoded as it is. The consumer validates these fields before it puts a
- *     peer in a list or fans a broadcast out to it.
- *   - The product code and nickname differ from the HLE layer's: sceNetAdhocctlInit accepts any
- *     product (a lower-case one too, as a PSP does), while the server's rule here refuses lower
- *     case; sceNetAdhocctlGetParameter writes at most 127 bytes of the nickname and a NUL, while
- *     the server accepts 128. The player caps a nickname at 32 bytes (#2197), so the second never
- *     shows today; the wiring step maps the first (refuse at login, or report it).
+ *     terminator; each is decoded as it is. hle_network.c (adhoc_upsert_peer) drops a CONNECT with
+ *     a zero, group or own MAC, and a repeated peer id replaces its older holder.
+ *   - sceNetAdhocctlInit accepts a lower-case product code, as a PSP does; the HLE layer upper-cases
+ *     it before nk_relay_product_ok and refuses by name one that still fails. The HLE layer sends
+ *     at most 127 bytes of the nickname, which the server's 128-byte rule accepts.
  *   - An inbound relay port of 0 or of the offset itself (10000 by default) comes back as guest
  *     port 0. A peer that follows the protocol never sends the second, since only port 0 maps
- *     there and it goes out as 0; the consumer refuses a 0 from nk_relay_port_in.
- *   - The codec keeps no state, so the reader that the wiring step adds caps its buffer at the
- *     largest packet (193 bytes on the lobby, 14 + 10240 for a PDP datagram, 4 + 51200 for a PTP
- *     block) and times out a packet a peer leaves unfinished. */
+ *     there and it goes out as 0; the relay client passes a 0 on as it is.
+ *   - The codec keeps no state. The relay client buffers each TCP stream (the lobby and each data
+ *     stream) up to 512 KiB (NK_RELAY_CHAN_MAX_BUF) and decodes whole packets from that buffer.
+ *     There is no timeout: a packet a peer leaves unfinished keeps that stream waiting for the
+ *     rest, which the game sees as no data on that ad hoc socket, or as no lobby event. A lobby
+ *     packet with an unknown opcode, or a PDP or PTP length above the protocol's largest (10240
+ *     and 51200 bytes), ends that stream, and the relay client's last error names it. */
 
 #include "nk_adhoc_relay.h"
 
