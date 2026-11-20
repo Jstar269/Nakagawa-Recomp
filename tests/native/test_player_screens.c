@@ -7616,6 +7616,105 @@ static bool draw_text_of(const NkUiDrawList *draw, NkUiId id, char *out, size_t 
     return found;
 }
 
+/* The text run drawn whose text starts with `prefix`; NULL where none is. */
+static const NkUiDrawCmd *draw_run_starting(const NkUiDrawList *draw, const char *prefix) {
+    const size_t length = strlen(prefix);
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiTextRun *run = draw->cmd[i].kind == NK_UI_DRAW_TEXT
+                                     ? (const NkUiTextRun *)draw->cmd[i].custom : NULL;
+        if (run != NULL && run->text != NULL && run->length >= length &&
+            memcmp(run->text, prefix, length) == 0) {
+            return &draw->cmd[i];
+        }
+    }
+    return NULL;
+}
+
+/* #1139, the owner's look note of 2026-11-20 ("text at bottom looks a little too close to
+   each other"): PPSSPP's list's heading keeps the launcher's gap between blocks (16 px) under
+   the last row above it (the Other server row and its Port offset) and the heading-to-text gap
+   (8 px) above its status line, at 960 x 540 and 1280 x 720, 100%, 125% and 150% text, the
+   list downloaded and its shipped copy. The list is scrolled so the three show; the gaps are
+   read from what is drawn, in the window's pixels. */
+static void test_online_play_list_heading_gaps(void) {
+    static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
+    static const int text_sizes[] = {100, 125, 150};
+    const NkUiId own_line = NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E8u);
+    const NkUiId heading_box = NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E4u + 2u);
+    const int saved = g_flow_text_size_pct;
+    for (int shipped = 0; shipped < 2; ++shipped) {
+        g_online_play_list_shipped = shipped != 0;
+        for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+            g_flow_text_size_pct = text_sizes[t];
+            for (size_t z = 0u; z < sizeof(sizes) / sizeof(sizes[0]); ++z) {
+                const int w = sizes[z].w;
+                const int h = sizes[z].h;
+                NkUi *ui = NULL;
+                const NkUiDrawList *draw =
+                    flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h, &ui);
+                const NkUiDrawCmd *list = NULL;
+                const NkUiDrawCmd *heading;
+                const NkUiDrawCmd *status;
+                NkUiScrollState state;
+                NkUiRect view;
+                NkUiRect line;
+                float scale = 0.0f;
+                float above = -1.0f;
+                float below = -1.0f;
+                char message[240];
+                if (draw != NULL && ui != NULL) {
+                    set_still_prefs(ui, nk_ui_prompt_style(ui));
+                    nk_ui_focus(ui, PLAYER_UI_ID_SETTINGS_BACK);
+                    draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                    /* Scroll so the heading is at the top of the list (the row above may
+                       then be drawn blank; its place is what counts). */
+                    if (nk_ui_scroll_state(ui, ONLINE_PLAY_TEST_LIST, &state) &&
+                        nk_ui_element_rect(ui, ONLINE_PLAY_TEST_LIST, &view) &&
+                        nk_ui_element_rect(ui, heading_box, &line)) {
+                        nk_ui_scroll_to(ui, ONLINE_PLAY_TEST_LIST,
+                                        state.offset + line.y - view.y - 8.0f);
+                        for (int f = 0; f < 3; ++f) {
+                            draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                        }
+                    }
+                }
+                for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+                    if (draw->cmd[i].kind == NK_UI_DRAW_SCISSOR_START &&
+                        draw->cmd[i].element_id == ONLINE_PLAY_TEST_LIST) {
+                        list = &draw->cmd[i];
+                    }
+                }
+                heading = draw_run_starting(draw, "PPSSPP'S LIST");
+                status = draw_run_starting(draw, shipped ? "Live list unavailable"
+                                                         : "Downloaded now");
+                if (list != NULL && heading != NULL && status != NULL && ui != NULL &&
+                    nk_ui_element_rect(ui, ONLINE_PLAY_TEST_LIST, &view) &&
+                    nk_ui_element_rect(ui, own_line, &line) && view.w > 0.0f &&
+                    command_shows(heading) && command_shows(status)) {
+                    /* Window pixels per layout pixel, from the list's own scissor. */
+                    scale = (float)(list->bounds[2] - list->bounds[0]) / view.w;
+                    above = (float)heading->bounds[1] -
+                            ((float)list->bounds[1] + (line.y + line.h - view.y) * scale);
+                    below = (float)(status->bounds[1] - heading->bounds[3]);
+                }
+                (void)snprintf(message, sizeof(message),
+                               "at %d x %d, %d%% text, PPSSPP's list %s: its heading is at "
+                               "least 16 px under the last row (%.1f) and its status at least "
+                               "8 px under it (%.1f), in layout px",
+                               w, h, text_sizes[t], shipped ? "shipped" : "downloaded",
+                               scale > 0.0f ? (double)(above / scale) : -1.0,
+                               scale > 0.0f ? (double)(below / scale) : -1.0);
+                CHECK(scale > 0.0f && above >= (16.0f - 1.0f) * scale &&
+                          below >= (8.0f - 1.0f) * scale,
+                      message);
+                if (ui != NULL) nk_ui_destroy(ui);
+            }
+        }
+    }
+    g_online_play_list_shipped = false;
+    g_flow_text_size_pct = saved;
+}
+
 /* #1139, review of 2026-11-20 ("is it tested how custom servers are shown?"). A server the
    player typed, in each form the player accepts (host; host:lobby_port;
    host:lobby_port,data_port; an IPv4 literal; the longest host, 127 bytes), shows on the own
@@ -11448,6 +11547,7 @@ int main(int argc, char **argv) {
     test_online_play_picker_rows();
     test_online_play_picker_cut_row_click();
     test_online_play_own_server_shown();
+    test_online_play_list_heading_gaps();
     test_psp_fonts_page();
     test_wizard_actions();
     test_flow_dumps_fail_closed();

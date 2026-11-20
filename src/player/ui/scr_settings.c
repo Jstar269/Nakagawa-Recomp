@@ -1925,6 +1925,10 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
    it is, so the heading, the intro and Back stay put. */
 #define ONLINE_PLAY_ROW_HEIGHT NK_UI_CONTROL_HEIGHT /* a row's least height: ACCESSIBILITY.md's target */
 #define ONLINE_PLAY_CHIP_GAP 6.0f
+/* PPSSPP's list's heading: the launcher's gap between blocks above it, the heading-to-text
+   gap under it (docs/PLAYER_UI_DESIGN.md spacing scale). */
+#define ONLINE_PLAY_SECTION_GAP NK_UI_SPACE_4
+#define ONLINE_PLAY_HEADING_GAP NK_UI_SPACE_2
 #define ONLINE_PLAY_CHECK "\xE2\x9C\x93"
 #define SET_ID_ONLINE_PLAY_LIST_ROW (SET_ID_TEXT + 0x7E0u)
 #define SET_ID_ONLINE_PLAY_LIST (SET_ID_TEXT + 0x7E1u)
@@ -2846,17 +2850,20 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                             if (!model->online_play) break;
                             const bool has_status = model->online_play_list_status &&
                                                     model->online_play_list_status[0] != '\0';
-                            /* Whichever line the first row follows keeps clear of its focus
-                               ring. */
+                            /* A new section: the launcher's gap between blocks (16 px,
+                               docs/PLAYER_UI_DESIGN.md) above the heading, and its 8 px
+                               heading-to-text gap under it; whichever line the first row
+                               follows keeps 8 px, clear of the row's 6 px focus ring (owner
+                               look note, 2026-11-20). */
                             settings_online_play_text(ui, SET_ID_ONLINE_PLAY_HEADING + 2u,
                                                       list_heading, NK_UI_TYPE_EYEBROW,
-                                                      theme->muted, 6.0f,
-                                                      has_status ? 0.0f : 6.0f);
+                                                      theme->muted, ONLINE_PLAY_SECTION_GAP,
+                                                      ONLINE_PLAY_HEADING_GAP);
                             if (has_status) {
                                 settings_online_play_text(ui, SET_ID_TEXT + 0x7F4u,
                                                           model->online_play_list_status,
                                                           NK_UI_TYPE_BODY_S, theme->muted, 0.0f,
-                                                          6.0f);
+                                                          ONLINE_PLAY_HEADING_GAP);
                             }
                             first_in_section = true;
                         }
