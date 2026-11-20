@@ -41,7 +41,7 @@ not compiled into the native player, the runtime, or any shipped artifact.
 
 | File | Kind | Upstream blob SHA | SHA-256 |
 | --- | --- | --- | --- |
-| `dr_wav.h` | imported + LOCAL DELTA | `f7920db42ff78e66cb74489435f8772ccc4d4977` | `b6ee38c4ec9392a9bdc8be273f22c607786ed7fba4c5fc4b8e27f236fb269375` (this tree's bytes) |
+| `dr_wav.h` | imported + LOCAL DELTA | `f7920db42ff78e66cb74489435f8772ccc4d4977` | `6aa4fb378f6e7352b65cfcf61e3a6fd32ba4b07e30d40712fe837809ef0562bc` (this tree's bytes) |
 | `LICENSE.txt` | imported byte-identical (upstream `LICENSE`) | `16dfbdfda2b761d1ec2ed57266dbdc777349ad25` | `dd1c647e6f767f8ff4b2dfae0fed314726600a01e0cf1ef556afddd5fa96ff15` |
 | `PROVENANCE.md` | project-authored manifest | n/a | n/a |
 
@@ -54,9 +54,10 @@ the newest dr_wav tag on 2026-11-20, and `LICENSE` is unchanged at `master`. The
 commits to `dr_wav.h` after the tag, every change on `master` up to `e381981afa52800b9a3864df548353ff67252fbc`
 except the version bump: the file's first comment still names `v0.14.6 - 2026-10-31` and
 `DRWAV_VERSION_REVISION` stays 6, since these are fixes taken onto the release, not upstream's unreleased 0.14.7.
-Apart from those two lines and four one-line `LOCAL DELTA (Nakagawa Recomp, 2026-11-20)` comments, one at each
-commit's main change, the file is upstream's `master` file at `e381981a`. A pin that includes the commits drops
-this delta.
+Apart from those two lines, four one-line `LOCAL DELTA (Nakagawa Recomp, 2026-11-20)` comments, one at each
+commit's main change, and a four-line `Modified by Nakagawa Recomp contributors, 2026-11-20.` notice comment right
+after upstream's opening header comment, the file is upstream's `master` file at `e381981a`. A pin that includes
+the commits drops this delta and the notice.
 
 - `ebfea72a291322bf26ce4eb393c98a0262b9b561` (2026-11-09, "Fix some metadata parsing errors", upstream issue
   #353): `drwav__metadata_process_chunk` reads a `LIST` sub-chunk's ID and size only while the chunk has room for
@@ -76,6 +77,6 @@ Only selftests compile the file, and they use the writer and read their own RIFF
 writes with `NK_PCM_WAV_DIR` set are byte-identical before and after this change. The endian fixes matter only on a
 big-endian host, and the metadata parser is not used here.
 
-Five whitespace-only lines in `dr_wav.h` (2673, 2690, 3843, 3861 and 6566; the third and fourth come from
+Five whitespace-only lines in `dr_wav.h` (2677, 2694, 3847, 3865 and 6570; the third and fourth come from
 `e381981a`) end in spaces; the repository's `.gitattributes` exempts that one file from the trailing-space check so
 the bytes stay identical to upstream.

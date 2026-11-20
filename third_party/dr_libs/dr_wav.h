@@ -6,6 +6,10 @@ David Reid - mackron@gmail.com
 
 GitHub: https://github.com/mackron/dr_libs
 */
+/*
+Modified by Nakagawa Recomp contributors, 2026-11-20. The local changes are
+marked LOCAL DELTA and listed in PROVENANCE.md.
+*/
 
 /*
 Introduction
