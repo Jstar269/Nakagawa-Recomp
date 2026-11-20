@@ -112,6 +112,35 @@ class AdmissionBlockTests(unittest.TestCase):
         )
 
 
+class PublicLabelTests(unittest.TestCase):
+    """A ledger that differs from the base's only in public label text is not stale."""
+
+    def _ledger(self, authorship: str, *, classification: str = "project_authored_attested") -> dict:
+        return {"schema_version": 2, "entries": [
+            {"path": "src/a.c", "classification": classification,
+             "evidence": {"record_id": "rec-a", "authorship": authorship}},
+        ]}
+
+    def test_only_known_label_text_is_ignored(self) -> None:
+        sets = regen_all_labels()
+        v1 = self._ledger(sets["v1"]["behavior-informed"])
+        v2 = self._ledger(sets["v2"]["behavior-informed"])
+        self.assertNotEqual(v1, v2)
+        self.assertEqual(regen_all._without_labels(v1), regen_all._without_labels(v2))
+        # Free text is not a label, and a changed claim is not a label change.
+        self.assertNotEqual(regen_all._without_labels(v1), regen_all._without_labels(self._ledger("hand-written")))
+        moved = self._ledger(sets["v2"]["behavior-informed"], classification="upstream_derived")
+        self.assertNotEqual(regen_all._without_labels(v1), regen_all._without_labels(moved))
+
+
+def regen_all_labels() -> dict[str, dict[str, str]]:
+    sys.path.insert(0, str(Path(regen_all.__file__).resolve().parent))
+    import provenance_ledger
+
+    sets: dict[str, dict[str, str]] = provenance_ledger.PUBLIC_LABEL_SETS
+    return sets
+
+
 class CheckModeTests(unittest.TestCase):
     def _run_check(self, steps, provenance=("OK", [], "")) -> tuple[int, str]:
         out = io.StringIO()
