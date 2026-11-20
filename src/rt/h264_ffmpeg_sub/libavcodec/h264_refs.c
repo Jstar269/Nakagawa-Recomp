@@ -17,6 +17,14 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with FFmpeg; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ *
+ * Modified 2026-11-20 for the Nakagawa Recomp project (LOCAL DELTA against FFmpeg n4.4):
+ * one FFmpeg release/4.4 fix is applied, each change marked LOCAL DELTA below.
+ *  - 3dc35e8529 "avcodec/h264_refs: Clear stale pointers from ref_list" (cherry-pick of
+ *    1886c3269d): h264_initialise_ref_list clears every ref_list entry from len up to 32,
+ *    not only up to ref_count, so no entry above ref_count keeps a pointer to a picture
+ *    of an earlier slice.
+ * See src/rt/h264_ffmpeg_sub/PROVENANCE.md.
  */
 
 /**
@@ -159,8 +167,8 @@ static void h264_initialise_ref_list(H264Context *h, H264SliceContext *sl)
                                   h->long_ref, 16, 1, h->picture_structure);
             av_assert0(len <= 32);
 
-            if (len < sl->ref_count[list])
-                memset(&sl->ref_list[list][len], 0, sizeof(H264Ref) * (sl->ref_count[list] - len));
+            /* LOCAL DELTA: upstream 3dc35e8529 (release/4.4), see the file header. */
+            memset(&sl->ref_list[list][len], 0, sizeof(H264Ref) * (32 - len));
             lens[list] = len;
         }
 
@@ -180,8 +188,8 @@ static void h264_initialise_ref_list(H264Context *h, H264SliceContext *sl)
                               h-> long_ref, 16, 1, h->picture_structure);
         av_assert0(len <= 32);
 
-        if (len < sl->ref_count[0])
-            memset(&sl->ref_list[0][len], 0, sizeof(H264Ref) * (sl->ref_count[0] - len));
+        /* LOCAL DELTA: upstream 3dc35e8529 (release/4.4), see the file header. */
+        memset(&sl->ref_list[0][len], 0, sizeof(H264Ref) * (32 - len));
     }
 #ifdef TRACE
     for (i = 0; i < sl->ref_count[0]; i++) {

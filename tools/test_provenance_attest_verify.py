@@ -5078,6 +5078,36 @@ class VendoredManifestTests(unittest.TestCase):
         unmarked = [path for path in deltas if path is None or not notice.search((ROOT / path).read_text("utf-8"))]
         self.assertEqual(unmarked, [])
 
+    def test_h264_local_delta_files_name_each_upstream_commit(self) -> None:
+        """LGPL-2.1 section 2(a): each modified file of the FFmpeg H.264 subset says so, with a date,
+        and every upstream commit its header names is marked at a change site in the file."""
+        manifest = "src/rt/h264_ffmpeg_sub/" + verifier.VENDOR_MANIFEST_NAME
+        rows = verifier._manifest_rows((ROOT / manifest).read_bytes()) or []
+        deltas = sorted(
+            verifier._manifest_row_path(manifest, row.get("file", "")) or ""
+            for row in rows if "local delta" in row.get("kind", "").lower()
+        )
+        self.assertEqual(deltas, [
+            "src/rt/h264_ffmpeg_sub/libavcodec/" + name
+            for name in ("h264_direct.c", "h264_refs.c", "h264_slice.c", "utils.c", "videodsp_template.c")
+        ])
+        manifest_text = (ROOT / manifest).read_text("utf-8")
+        notice = re.compile(r"Modified \d{4}-\d{2}-\d{2} for the Nakagawa Recomp project \(LOCAL DELTA against FFmpeg n4\.4\)")
+        problems: list[str] = []
+        for path in deltas:
+            text = (ROOT / path).read_text("utf-8")
+            header = text[: text.index("*/")]
+            if not notice.search(header):
+                problems.append(f"{path}: no dated modification notice")
+            named = set(re.findall(r"^ \*  - (?:Added \d{4}-\d{2}-\d{2}: )?([0-9a-f]{10}) ", header, re.M))
+            marked = set(re.findall(r"LOCAL DELTA: upstream ([0-9a-f]{10}) ", text))
+            if not named or named != marked:
+                problems.append(f"{path}: header names {sorted(named)}, change sites mark {sorted(marked)}")
+            for commit in named:
+                if not re.search(rf"`{commit}[0-9a-f]{{30}}`", manifest_text):
+                    problems.append(f"{path}: {commit} has no full hash in the manifest")
+        self.assertEqual(problems, [])
+
 
 class IndependentRefreshMergeTests(EphemeralGenerationTests):
     """Two reviewed refreshes of different paths must land without a resync.
