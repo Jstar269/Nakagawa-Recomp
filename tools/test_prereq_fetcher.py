@@ -1629,8 +1629,10 @@ ADHOC_RELAY_PORTS = (27312, 27313)
 # of ad hoc servers. It is downloaded over HTTPS from this host only, and only while Online play
 # is on (src/player/adhoc_servers.h). When the download is unavailable, the copy shipped in
 # src/player/adhoc_servers.c is offered instead: the relay entries of PPSSPP's
-# assets/adhoc-servers.json at 3bc60270, these hosts. A server from either list is reached only
-# after the user picks it and selects TURN ON on the card that names it; docs/SETUP.md lists them.
+# assets/adhoc-servers.json at 3bc60270, these hosts. The downloaded list may name any host
+# (maintainer decision of 2026-11-20); no entry connects by itself: a server from either list is
+# reached only after the user picks it and selects TURN ON on the card that names it;
+# docs/SETUP.md lists the shipped copy's hosts.
 ADHOC_LIST_HOST = "metadata.ppsspp.org"
 ADHOC_LIST_URL = "https://metadata.ppsspp.org/adhoc-servers.json"
 ADHOC_SHIPPED_LIST_HOSTS = (

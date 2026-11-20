@@ -1511,7 +1511,7 @@ runtime can make is listed below, and each is opt-in and off by default.
 | Check for updates | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
 | Update download | `github.com`, which redirects to `release-assets.githubusercontent.com` (HTTPS) | Only after a check finds a newer version and you select **DOWNLOAD** | That button, per download |
 | Download cover art | `thumbnails.libretro.com` (HTTPS) | When **Download cover art** is on (Settings > Online and developer, off by default), once per verified Redump disc not yet cached | That switch, and **Refresh cover art** (Settings > Build tools and cache) |
-| Online play (ad hoc relay) | The shipped servers `socom.cc`, `relay.arenaanywhere.site`, `relay-usa.arenaanywhere.site`, `relay-sa.arenaanywhere.site` and `relay-asia.arenaanywhere.site`, a relay server you pick from PPSSPP's list, or a server you enter yourself (`27312` lobby, `27313` data, plain TCP) | Only after you select **TURN ON** on the Online play card, which names that exact server, and only while a game that starts PSP ad hoc networking runs | The Online play card; **Settings > Online and developer > Online play** (`online_play` in `settings.json`, off by default) turns it off and ends the connection |
+| Online play (ad hoc relay) | The shipped servers `socom.cc`, `relay.arenaanywhere.site`, `relay-usa.arenaanywhere.site`, `relay-sa.arenaanywhere.site` and `relay-asia.arenaanywhere.site`, a relay server you pick from PPSSPP's list (any host it names), or a server you enter yourself (`27312` lobby, `27313` data, plain TCP) | Only after you select **TURN ON** on the Online play card, which names that exact server, and only while a game that starts PSP ad hoc networking runs | The Online play card; **Settings > Online and developer > Online play** (`online_play` in `settings.json`, off by default) turns it off and ends the connection |
 | Online play server list | `metadata.ppsspp.org` (HTTPS) | Only while Online play is on, when you open the server picker or select **Refresh** in it | Online play being on; no download starts at start, in the background, or while Online play is off, and one already under way when you turn it off finishes but its list is thrown away |
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
@@ -1559,8 +1559,10 @@ entries of PPSSPP's list at revision `3bc60270`: `socom.cc`, `psp.mgn.pub`, `eah
 `relay-usa.arenaanywhere.site`, `relay-asia.arenaanywhere.site`, `sayaakanlawan.my.id`,
 `adhoc.gamesnexus.ovh`, `cvn-play.top`, `ntarena.duckdns.org`, `38.54.80.95`, `cat.wjg.jp`,
 `brazil-01.sprawl-relay.link`, `pspbrasil.duckdns.org`, `jeddah-relay.ddns.net`, `140.245.237.12`,
-`185.183.157.234`, `psp.andexplaystream.online` and `132.226.189.224`. A server from either list is
-reached only after you pick it and select **TURN ON** on the card that names it.
+`185.183.157.234`, `psp.andexplaystream.online` and `132.226.189.224`. The downloaded list may name
+any host (a maintainer decision of 2026-11-20 on #1139), so these are only its shipped copy. No entry
+ever connects by itself: a server from either list is reached only after you pick it and select
+**TURN ON** on the card that names it.
 
 The disc check needs no connection either: Redump's PSP list ships beside the player
 (`assets/redump/`), and a newer list is one you download yourself and import

@@ -174,7 +174,9 @@ default 10000).
   ArenaAnywhere relays `relay.arenaanywhere.site` (Europe), `relay-usa.arenaanywhere.site` (US),
   `relay-sa.arenaanywhere.site` (South Africa) and `relay-asia.arenaanywhere.site` (Singapore), the hosts the
   maintainer chose in issue #1139. The server picker also offers the relay servers on PPSSPP's public list, which it
-  downloads over HTTPS only while Online play is on (`docs/SETUP.md` "Network use" has the rules), and lets the user
+  downloads over HTTPS only while Online play is on (`docs/SETUP.md` "Network use" has the rules); that list may
+  name any host (a maintainer decision of 2026-11-20), and no entry ever connects by itself: each is reached only
+  after the user selects **TURN ON** on the card that names it. The picker also lets the user
   type their own address (`host[:lobby_port[,data_port]]`) with the on-screen keyboard. A user-entered server stays
   only in the local `settings.json`. Another shipped server needs its own maintainer decision first (`AGENTS.md`
   section 5).
