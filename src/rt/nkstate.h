@@ -188,8 +188,14 @@ void nkstate_file_free(NkStateFile *file);
 NkStateStatus nkstate_restore(const uint8_t *data, size_t len, const NkStateExpect *expect,
                               char *detail, size_t detail_cap);
 
+/* Writes "<path>.tmp", then replaces path with it in one step. Any failure (create, write,
+ * flush, close or the replace) is NKSTATE_IO_ERROR with the temp file removed, and leaves a
+ * state already at path whole: a good state is never truncated. */
 NkStateStatus nkstate_write_file(const char *path, const NkStateBuf *image,
                                  char *detail, size_t detail_cap);
+/* Test seam: from now on, nkstate_write_file stops after after_bytes bytes and fails as a short
+ * write would; below 0 turns it off (the default). Nothing in the runtime calls it. */
+void nkstate_test_set_write_fault(long after_bytes);
 NkStateStatus nkstate_read_file(const char *path, NkStateBuf *out, char *detail, size_t detail_cap);
 
 /* Segment helpers for the two subsystems every state holds. */

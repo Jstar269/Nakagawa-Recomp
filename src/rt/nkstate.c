@@ -10,6 +10,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <windows.h> /* MoveFileExA: nkstate_write_file replaces an existing state in one step */
+#endif
 
 static const char *const s_status_names[] = {
     [NKSTATE_OK] = "ok",
@@ -455,13 +458,50 @@ NkStateStatus nkstate_restore(const uint8_t *data, size_t len, const NkStateExpe
 
 /* ---- files ----------------------------------------------------------------------- */
 
+/* A test's write fault: below 0 off (the default), else the write stops after that many bytes
+   and fails as a short write would. Nothing in the runtime arms it. */
+static long s_test_write_fault = -1;
+
+void nkstate_test_set_write_fault(long after_bytes) { s_test_write_fault = after_bytes; }
+
+/* The image goes to "<path>.tmp" first; only a write, flush and close that all succeed replace
+   the target, in one step: rename() on POSIX, and on Windows MoveFileExA, since rename() there
+   refuses an existing target (the ace.c report pattern; the narrow call reads the path as fopen
+   does). Any failure removes the temp file, so an existing state at the path stays whole. */
 NkStateStatus nkstate_write_file(const char *path, const NkStateBuf *image, char *detail, size_t detail_cap) {
-    FILE *fp = fopen(path, "wb");
-    if (!fp) return refuse(NKSTATE_IO_ERROR, detail, detail_cap, "cannot create %s", path);
-    size_t wrote = image->len ? fwrite(image->data, 1, image->len, fp) : 0u;
-    int closed = fclose(fp);
-    if (wrote != image->len || closed != 0)
+    const size_t n = strlen(path);
+    char *tmp = malloc(n + sizeof ".tmp");
+    if (!tmp) return refuse(NKSTATE_NO_MEMORY, detail, detail_cap, "writing %s", path);
+    memcpy(tmp, path, n);
+    memcpy(tmp + n, ".tmp", sizeof ".tmp");
+    FILE *fp = fopen(tmp, "wb");
+    if (!fp) {
+        free(tmp);
+        return refuse(NKSTATE_IO_ERROR, detail, detail_cap, "cannot create %s.tmp", path);
+    }
+    size_t want = image->len;
+    int faulted = 0;
+    if (s_test_write_fault >= 0 && (size_t)s_test_write_fault < want) {
+        want = (size_t)s_test_write_fault;
+        faulted = 1;
+    }
+    const size_t wrote = want ? fwrite(image->data, 1, want, fp) : 0u;
+    const int flushed = fflush(fp);
+    const int closed = fclose(fp);
+    int ok = !faulted && wrote == image->len && flushed == 0 && closed == 0;
+    if (ok) {
+#if defined(_WIN32)
+        ok = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+        ok = rename(tmp, path) == 0;
+#endif
+    }
+    if (!ok) {
+        (void)remove(tmp);
+        free(tmp);
         return refuse(NKSTATE_IO_ERROR, detail, detail_cap, "cannot write %s", path);
+    }
+    free(tmp);
     return NKSTATE_OK;
 }
 
