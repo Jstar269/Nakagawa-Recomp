@@ -1941,7 +1941,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                         theme->paper);
         /* RetroAchievements is its own opt-in; the news/reports online mode remains unbuilt. */
         const char *online_line = model->achievements_available || model->achievements_enabled
-            ? "RetroAchievements is separate from Online mode and stays off until you agree."
+            ? "RetroAchievements stays off until you turn it on and agree to what is sent."
             : SCR_ONLINE_NOT_BUILT_LINE;
         nk_ui_text_role(ui, FLOW_ID_LEAD, online_line, NK_UI_TYPE_BODY_S,
                         theme->warning);
@@ -1987,17 +1987,19 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 "Achievements",
                 model->achievements_enabled ? "On" : model->achievements_available ? "Off" : "Unavailable",
                 model->achievements_available
-                    ? "Softcore only. Sends only to retroachievements.org after consent."
-                    : "Sign-in requires Windows Credential Manager; this platform is unsupported."};
+                    ? SCR_ACHIEVEMENTS_SENTENCE
+                    : SCR_ACHIEVEMENTS_UNAVAILABLE_SENTENCE};
             if (model->achievements_enabled) {
-                rows[row_count++] = (WizardRow){"RA account",
+                rows[row_count++] = (WizardRow){SCR_ACHIEVEMENTS_ACCOUNT_NAME,
                                                 model->achievements_signed_in
                                                     ? safe_text(model->achievements_account, "Signed in")
                                                     : "Sign in",
                                                 safe_text(model->achievements_status,
                                                           "Softcore only. Hardcore is unavailable.")};
             }
-            WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
+            /* A long RetroAchievements account name widens the button column; at any text size
+               the sentences then go under their buttons rather than end in an ellipsis. */
+            WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, true);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
                                   "Online mode", SCR_ONLINE_STORED_ON_SENTENCE, true,
@@ -2043,7 +2045,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             if (model->achievements_available || model->achievements_enabled) {
                 if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xF0u,
                                       "Achievements",
-                                      "Softcore only. Agree to the host and data disclosure before signing in.",
+                                      SCR_ACHIEVEMENTS_SENTENCE,
                                       model->achievements_enabled, inner - 32.0f, &column)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS);
                 }
@@ -2051,12 +2053,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 (void)scr_wizard_value_state(
                     ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xF0u,
                     "Achievements", "Unavailable",
-                    "Sign-in needs Windows Credential Manager, which this platform does not provide.",
+                    SCR_ACHIEVEMENTS_UNAVAILABLE_SENTENCE,
                     false, true, inner - 32.0f, &column);
             }
             if (model->achievements_enabled &&
                 scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS_ACCOUNT,
-                                 SET_ID_TEXT + 0xF4u, "RA account",
+                                 SET_ID_TEXT + 0xF4u, SCR_ACHIEVEMENTS_ACCOUNT_NAME,
                                  model->achievements_signed_in
                                      ? safe_text(model->achievements_account, "Signed in")
                                      : "Sign in",

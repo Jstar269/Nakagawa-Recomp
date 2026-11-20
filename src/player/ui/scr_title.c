@@ -570,14 +570,9 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                         model->achievement_lines[i], NK_UI_TYPE_BODY_S,
                                         theme->paper);
                 }
-                if (model->achievement_total > model->achievement_count) {
-                    char more[96];
-                    (void)snprintf(more, sizeof more,
-                                   "Showing %zu of %zu achievements.",
-                                   model->achievement_count, model->achievement_total);
-                    nk_ui_text_role(ui, TITLE_ID_ACHIEVEMENTS_MORE,
-                                    more, NK_UI_TYPE_FOOTNOTE, theme->dim);
-                }
+                if (model->achievements_more[0])
+                    nk_ui_text_role(ui, TITLE_ID_ACHIEVEMENTS_MORE, model->achievements_more,
+                                    NK_UI_TYPE_FOOTNOTE, theme->dim);
                 nk_ui_end_container(ui);
             }
             /* Enhancements, apart from what to expect of the game as released:

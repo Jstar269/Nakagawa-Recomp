@@ -2278,6 +2278,26 @@ static void test_progress_comes_back_with_a_state(uint8_t *ram) {
 
 /* Two unlocks close together are two toasts: the runtime reads the player's messages one at a
  * time, oldest first, so a second message does not replace the first unseen. */
+/* The in-game toast's caption: "RetroAchievements" over an unlock, the player's only message
+ * today, and "Host notification" over any other. */
+static void test_unlock_toast_is_captioned_retroachievements(void) {
+    char toast[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+    snprintf(toast, sizeof toast, NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "%s", "First Steps");
+    CHECK(strcmp(toast, "Achievement unlocked: First Steps") == 0,
+          "the unlock message reads \"%s\"", toast);
+    CHECK(strcmp(nk_guest_memory_notification_caption(toast), "RetroAchievements") == 0,
+          "an unlock is captioned RetroAchievements");
+    static const char *const others[] = {"Saved progress could not be sent.",
+                                         "Achievement unlocked: ", "Achievement unlocked",
+                                         "achievement unlocked: First Steps", ""};
+    for (size_t i = 0; i < sizeof others / sizeof others[0]; i++) {
+        CHECK(strcmp(nk_guest_memory_notification_caption(others[i]), "Host notification") == 0,
+              "\"%s\" keeps the caption Host notification", others[i]);
+    }
+    CHECK(strcmp(nk_guest_memory_notification_caption(NULL), "Host notification") == 0,
+          "no message keeps the caption Host notification");
+}
+
 static void test_notifications_are_read_in_order(void) {
     char channel_name[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
     NkGuestMemoryChannel channel;
@@ -3266,6 +3286,7 @@ int main(int argc, char **argv) {
     RUN_RAM(test_sign_in_ended_by_logout_is_not_tried_again);
     RUN_RAM(test_long_titles_are_cut_at_a_character);
     RUN(test_frames_are_served_while_the_event_loop_is_stalled);
+    RUN(test_unlock_toast_is_captioned_retroachievements);
     RUN(test_notifications_are_read_in_order);
     RUN(test_a_message_being_written_is_not_read);
 #ifdef _WIN32

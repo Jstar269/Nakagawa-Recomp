@@ -142,8 +142,9 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   same transport. The queue holds at most 4,096 records. With no definite answer (no connection, a
   busy server) a record waits 30 seconds; a record the server refuses by its own error leaves the queue
   and is reported; a refused account keeps every record until the next sign-in. The game's title page
-  shows its core achievements and unlock toasts appear in-game, one after another: two unlocks close
-  together are two toasts.
+  shows its core achievements (up to 64; with more, the page says how many it shows and that all of
+  them are on the game's page at retroachievements.org) and unlock toasts captioned
+  **RetroAchievements** appear in-game, one after another: two unlocks close together are two toasts.
 - **One request at a time.** The player carries one RetroAchievements request at a time. A request made
   while another is on its way (a game started while a saved unlock is being sent) waits its turn, in
   order, instead of failing.
@@ -162,8 +163,8 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   empty), then 44-byte records: 32 characters of game hash, a 32-bit achievement ID and a 64-bit unlock
   time in seconds since 1970 UTC. A file the player cannot read (damaged, cut short, from another
   version) is renamed beside itself with the ending `.unreadable`, never loaded and never written over;
-  when it cannot even be renamed, nothing is saved over it in that run, which the **RA account** line
-  says.
+  when it cannot even be renamed, nothing is saved over it in that run, which the **RetroAchievements**
+  account line says.
 - **Sign-in at start** uses the stored token. When the server gives no answer (no connection, a 5xx, 408 or
   429), the token was not refused: the player tries it again after 30 seconds, then after twice as long
   each time, up to ten minutes, with no password asked. A refusal by the server ends that, as do the

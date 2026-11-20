@@ -1259,9 +1259,11 @@ static void cell_notice_every_part(const char *fonts_root) {
 }
 #endif /* !ACE_UI_SELFTEST_S1 */
 
-/* The words the player sends for an unlock (src/player/main.c), with a long title. */
+/* The words the player sends for an unlock (src/player/main.c), with a long title, and the
+ * caption src/rt/gui.c gives an unlock (nk_guest_memory_notification_caption). */
 static const char k_toast_words[] =
     "Achievement unlocked: Champion of the Hot Shots Cup, Undefeated on Every Surface";
+static const char k_toast_head[] = "RetroAchievements";
 
 /* One picture of the notification toast alone: drawn inside the window and its safe area, its
  * chip covering the frame where it stands and nothing else changed. Written to
@@ -1275,7 +1277,7 @@ static void toast_picture(AceUi *ui, const NkUiTextBackend *text, int w, int h, 
     tf.display_scale = scale;
     tf.now_s = 1.0;
     tf.reduce_motion = 1;
-    tf.host_toast_head = "Host notification";
+    tf.host_toast_head = k_toast_head;
     tf.host_toast = k_toast_words;
     tf.host_toast_alpha = 1.0f;
     NkUiConfig config;
@@ -1289,6 +1291,19 @@ static void toast_picture(AceUi *ui, const NkUiTextBackend *text, int w, int h, 
     const int laid_out = list && element_bounds(list, ACE_UI_ID_HOST_TOAST, chip);
     CHECK(laid_out, "the toast at %dx%d, %.0f%% did not lay out", w, h, scale * 100.0f);
     if (laid_out) {
+        /* Every word of the caption and of the message shows, unclipped and not shortened. */
+        int head_box[4], text_box[4];
+        char head[64], words[sizeof k_toast_words + 8u];
+        CHECK(chip_words(list, ACE_UI_ID_HOST_TOAST_HEAD, 1, "toast caption", text, head_box,
+                         head, sizeof head, w, h) == 1 &&
+                  strcmp(head, k_toast_head) == 0,
+              "the toast at %dx%d, %.0f%% is captioned \"%s\", not \"%s\"", w, h,
+              scale * 100.0f, head, k_toast_head);
+        CHECK(chip_words(list, ACE_UI_ID_HOST_TOAST_TEXT, ACE_UI_HOST_TOAST_LINES, "toast", text,
+                         text_box, words, sizeof words, w, h) >= 1 &&
+                  strcmp(words, k_toast_words) == 0,
+              "the toast at %dx%d, %.0f%% reads \"%s\", not the whole message", w, h,
+              scale * 100.0f, words);
         CHECK(chip[0] >= 16 && chip[1] >= 16 && chip[2] <= w - 16 && chip[3] <= h - 16,
               "the toast at %dx%d, %.0f%% leaves the safe area: %d,%d-%d,%d", w, h,
               scale * 100.0f, chip[0], chip[1], chip[2], chip[3]);

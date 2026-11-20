@@ -980,7 +980,8 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
                                     ? now + HOST_TOAST_NS : UINT64_MAX;
     }
     if (s_host_toast_text[0] && now < s_host_toast_until_ns) {
-        f.host_toast_head = "Host notification";
+        /* "RetroAchievements" over an unlock, "Host notification" over anything else. */
+        f.host_toast_head = nk_guest_memory_notification_caption(s_host_toast_text);
         f.host_toast = s_host_toast_text;
         f.host_toast_alpha = 1.0f;
         if (!f.reduce_motion && s_host_toast_until_ns - now < 300000000ull)

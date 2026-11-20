@@ -1109,6 +1109,8 @@ typedef struct {
     const char *achievement_lines[64];
     size_t achievement_count;
     size_t achievement_total;
+    /* With more in the set than the page lists: how many it shows and where to see the rest. */
+    char achievements_more[160];
     bool stalled_game_notice_visible;
     /* The notice is for frames that show nothing, not for frames that stopped. */
     bool stalled_game_dark_picture;

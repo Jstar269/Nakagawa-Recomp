@@ -1398,7 +1398,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     {
-        /* The RA account row's line each time it changes, in hex so every byte reads back. */
+        /* The RetroAchievements account row's line each time it changes, in hex so every byte reads back. */
         static char reported[sizeof(app->achievements_status) + 8];
         const char *line = model.achievements_status ? model.achievements_status : "";
         if (strcmp(reported, line) != 0) {
@@ -4196,6 +4196,12 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                     model.achievement_total = app->achievements_list_total;
                     for (size_t i = 0; i < model.achievement_count; i++)
                         model.achievement_lines[i] = app->achievements_list_lines[i];
+                    /* The page lists as many as the player keeps and says where the rest are. */
+                    if (model.achievement_total > model.achievement_count)
+                        (void)snprintf(model.achievements_more, sizeof model.achievements_more,
+                                       "Showing %zu of %zu achievements. All of them are on "
+                                       "this game's page at retroachievements.org.",
+                                       model.achievement_count, model.achievement_total);
                 } else if (!app->achievements_signed_in) {
                     model.achievements_status = "Sign in in Settings > Online to load this game's softcore set.";
                 } else {
@@ -4209,15 +4215,20 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
             {
                 /* The card's status line each time it changes, in hex so every byte reads back. */
-                static char reported[PLAYER_ACHIEVEMENT_LINE_MAX + MAX_DISC_ID_LEN + 8];
+                static char reported[PLAYER_ACHIEVEMENT_LINE_MAX + MAX_DISC_ID_LEN +
+                                     sizeof model.achievements_more + 8];
                 char now[sizeof(reported)];
-                snprintf(now, sizeof(now), "%s|%s", game->disc_id,
-                         model.achievements_status ? model.achievements_status : "");
+                snprintf(now, sizeof(now), "%s|%s|%s", game->disc_id,
+                         model.achievements_status ? model.achievements_status : "",
+                         model.achievements_more);
                 if (strcmp(reported, now) != 0) {
                     snprintf(reported, sizeof(reported), "%s", now);
                     printf("[PLAYER_UI_TEST] next_ui_title_achievements disc=%s status_hex=",
                            game->disc_id);
                     for (const char *c = model.achievements_status; c && *c; c++)
+                        printf("%02x", (unsigned)(unsigned char)*c);
+                    printf(" more_hex=");
+                    for (const char *c = model.achievements_more; *c; c++)
                         printf("%02x", (unsigned)(unsigned char)*c);
                     printf("\n");
                 }

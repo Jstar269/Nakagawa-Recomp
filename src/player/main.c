@@ -4820,7 +4820,8 @@ static void player_achievements_collect_events(PlayerRun *run) {
                     app->achievements_signed_in = false;
                     app->achievements_account[0] = '\0';
                     snprintf(app->achievements_status, sizeof app->achievements_status,
-                             "Windows Credential Manager could not store the RA token.");
+                             "Windows Credential Manager could not store the "
+                             "RetroAchievements token.");
                 } else {
                     app->achievements_signed_in = true;
                     snprintf(app->achievements_account, sizeof app->achievements_account,
@@ -4889,7 +4890,7 @@ static void player_achievements_collect_events(PlayerRun *run) {
             }
             case NK_ACH_EVENT_UNLOCKED: {
                 char toast[NK_GUEST_MEMORY_NOTIFICATION_MAX];
-                snprintf(toast, sizeof toast, "Achievement unlocked: %.*s",
+                snprintf(toast, sizeof toast, NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "%.*s",
                          player_utf8_fit(event->title, 150u), event->title);
                 if (run->guest_memory_channel_active) {
                     (void)nk_platform_guest_memory_channel_notify(&run->guest_memory_channel,
@@ -5158,7 +5159,8 @@ static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork 
     char hash[33] = "";
     if (!work->game.iso_path[0] || !nk_ach_psp_hash_iso(work->game.iso_path, hash)) {
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
-                 "RA game identification needs a readable ISO containing PARAM.SFO and EBOOT.BIN.");
+                 "RetroAchievements game identification needs a readable ISO containing "
+                 "PARAM.SFO and EBOOT.BIN.");
         return;
     }
     char channel_name[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
@@ -5186,7 +5188,7 @@ static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork 
     if (!nk_ach_begin_load_game(run->achievements, hash)) {
         player_achievements_stop_channel(run);
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
-                 "RA refused the game hash; achievements are off for this run.");
+                 "RetroAchievements refused the game hash; achievements are off for this run.");
         return;
     }
     snprintf(work->guest_memory_channel, sizeof work->guest_memory_channel, "%s", channel_name);

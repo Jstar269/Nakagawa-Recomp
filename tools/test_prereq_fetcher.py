@@ -2116,13 +2116,22 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
                              r"-include strings\.h\nendif\n")
         self.assertNotIn("gnu99, not c99", mk)
 
-    def test_runtime_host_toast_has_no_retroachievements_identity(self) -> None:
+    def test_runtime_host_toast_captions_unlocks_without_retroachievements_code(self) -> None:
         runtime = REPO_ROOT / "src" / "rt"
         shipped = [path for path in runtime.rglob("*")
                    if path.is_file() and path.suffix in {".c", ".h"}]
         texts = {path.relative_to(REPO_ROOT).as_posix(): path.read_text(
             encoding="utf-8", errors="replace") for path in shipped}
         self.assertIn("sr_host_notification", texts["src/rt/gui.c"])
+        # An unlock's toast is captioned "RetroAchievements", any other "Host notification"
+        # (achievements-selftest checks nk_guest_memory_notification_caption): the runtime takes
+        # the caption from the message, and the player writes an unlock with the shared prefix.
+        self.assertIn("f.host_toast_head = nk_guest_memory_notification_caption(s_host_toast_text);",
+                      texts["src/rt/gui.c"])
+        self.assertNotIn('f.host_toast_head = "', texts["src/rt/gui.c"])
+        player = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        self.assertIn('NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "%.*s"', player)
+        self.assertNotIn('"Achievement unlocked: ', player)
         for rel, source in texts.items():
             with self.subTest(path=rel):
                 self.assertNotIn("retroachievements.org", source.lower())

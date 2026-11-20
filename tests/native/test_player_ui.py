@@ -3548,7 +3548,7 @@ class NativePlayerUiTests(unittest.TestCase):
     @staticmethod
     def achievements_lines(run: dict[str, object], kind: str) -> list[str]:
         """Each status line the title card (kind "title", "<disc> <status>") or the Settings
-        RA account row (kind "settings") showed, decoded, in order."""
+        RetroAchievements account row (kind "settings") showed, decoded, in order."""
         stdout = str(run["stdout"])
         if kind == "title":
             return [f"{disc} {bytes.fromhex(status).decode('utf-8')}" for disc, status in
@@ -3585,6 +3585,58 @@ class NativePlayerUiTests(unittest.TestCase):
                                   settings={"achievements_enabled": True, "cheats": True})
         said = self.achievements_lines(online, "settings")
         self.assertTrue(said and said[-1] == self.ACHIEVEMENTS_CHEATS_REASON, said)
+
+    ACHIEVEMENTS_MORE = ("Showing 8 of 12 achievements. All of them are on this game's page at "
+                         "retroachievements.org.")
+    # The smallest window at the largest text size, and the common window at design size.
+    ACHIEVEMENTS_WHOLE_WINDOWS = ((960, 540, 150), (1280, 720, 100))
+
+    @staticmethod
+    def wizard_rows(run: dict[str, object]) -> dict[str, tuple[int, int]]:
+        """Each Settings row's last (label_cut, sentence_cut), by the row's name."""
+        rows: dict[str, tuple[int, int]] = {}
+        for label_cut, sentence_cut, name in re.findall(
+                r"next_ui_wizard_row id=[0-9a-f]+ label_cut=(\d) sentence_cut=(\d) name=(.*?)\r?$",
+                str(run["stdout"]), re.M):
+            rows[name] = (int(label_cut), int(sentence_cut))
+        return rows
+
+    def test_next_ui_achievements_rows_and_list_show_whole(self) -> None:
+        """#1316: at 960x540 with 150% text and at 1280x720 with 100%, the Achievements switch
+        and the RetroAchievements row show their names and sentences whole, signed out
+        and signed in, and a game whose set is longer than the page lists says how many it shows
+        and where all of them are."""
+        if os.name != "nt":
+            self.skipTest("the Achievements switch needs Windows Credential Manager")
+        for width, height, text_size in self.ACHIEVEMENTS_WHOLE_WINDOWS:
+            for fixture in ("", "signed-in"):
+                with self.subTest(window=f"{width}x{height}-{text_size}", fixture=fixture):
+                    settings: dict[str, object] = {"achievements_enabled": True}
+                    if text_size != 100:
+                        settings["text_size"] = text_size
+                    run = self.next_ui_run(
+                        "settings", self.TO_ONLINE_PAGE + ("WAIT_MS=200",), width=width,
+                        height=height, settings=settings,
+                        env_extra={"NK_UI_TEST_ACHIEVEMENTS": fixture} if fixture else None)
+                    rows = self.wizard_rows(run)
+                    self.assertNotIn("RA account", rows, "no RA abbreviation")
+                    for name in ("Achievements", "RetroAchievements"):
+                        self.assertEqual(rows.get(name), (0, 0), (name, rows))
+                    self.assertEqual([name for name, cut in rows.items() if cut != (0, 0)], [],
+                                     "no row on the page is cut short")
+            with self.subTest(window=f"{width}x{height}-{text_size}", page="title"):
+                settings = {"achievements_enabled": True}
+                if text_size != 100:
+                    settings["text_size"] = text_size
+                run = self.next_ui_run("library", self.OPEN_TITLE + ("WAIT_MS=200",),
+                                       width=width, height=height, wait_background=True,
+                                       settings=settings,
+                                       env_extra={"NK_UI_TEST_ACHIEVEMENTS": "list:TEST00005"})
+                more = [bytes.fromhex(line).decode("utf-8") for line in re.findall(
+                    r"next_ui_title_achievements disc=TEST00005 status_hex=[0-9a-f]* "
+                    r"more_hex=([0-9a-f]*)", str(run["stdout"]))]
+                self.assertTrue(more, run["stdout"])
+                self.assertEqual(more[-1], self.ACHIEVEMENTS_MORE)
 
     # The pictures of RetroAchievements' screens a review looks at (#1316): (name, view, events,
     # run arguments, NK_UI_TEST_ACHIEVEMENTS). Each is taken at both window sizes and text sizes.

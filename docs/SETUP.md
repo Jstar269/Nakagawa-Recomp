@@ -1527,7 +1527,7 @@ the account name, not the name), and only that account's session sends its unloc
 the unlocks still waiting, and unlocks another account left are discarded and reported, never sent for
 the account now signed in. A queue file that cannot be read is kept beside itself as
 `unlock-queue.bin.unreadable`, never written over. An unlock the server refuses leaves the file and is
-reported on the **RA account** line. When the sign-in at start cannot reach the server, the stored token is
+reported on the **RetroAchievements** account line. When the sign-in at start cannot reach the server, the stored token is
 tried again by itself (after 30 seconds, then at doubling waits up to ten minutes); no password is asked. The feature is softcore only:
 hardcore is not available, and a request that would claim it is refused before it is sent. Achievements
 are off for a game started with cheats on or with a package that changes its speed (60 FPS game logic);

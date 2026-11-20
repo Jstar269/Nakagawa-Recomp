@@ -232,6 +232,16 @@ bool nk_platform_guest_memory_channel_notify(NkGuestMemoryChannel *channel, cons
 bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *channel,
                                                         uint32_t *seen_sequence,
                                                         char *text, size_t text_size);
+/* A RetroAchievements unlock (#1316) is the message this begins, followed by the achievement's
+ * title. The in-game toast captions it "RetroAchievements"; any other message keeps the caption
+ * "Host notification". */
+#define NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "Achievement unlocked: "
+static inline const char *nk_guest_memory_notification_caption(const char *text) {
+    static const char unlocked[] = NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED;
+    size_t i = 0u;
+    while (text && unlocked[i] && text[i] == unlocked[i]) i++;
+    return text && !unlocked[i] && text[i] ? "RetroAchievements" : "Host notification";
+}
 
 /* An exclusive lock on a file that other programs lock too: Win32 locks byte 0
    with LockFileEx, which excludes Python's msvcrt.locking on it; POSIX uses
