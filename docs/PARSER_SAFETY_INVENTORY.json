@@ -70,10 +70,10 @@
           "campaign": "100 seeded iterations via native-core-tests; family limits/clamps apply."
         },
         "sanitizer": {
-          "status": "AVAILABLE_NOT_CI",
-          "target": "make CC=gcc fuzz-parsers",
+          "status": "CI_ASAN_UBSAN",
+          "target": "make CC=gcc FUZZ_ITERS=5000 fuzz-parsers (native_tools, core part)",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows.",
-          "ci": false
+          "ci": true
         },
         "coverage_guided_fuzzer": "NOT_CONFIGURED",
         "overflow_oob_mutation_kill": "NOT_RUN"
@@ -123,10 +123,10 @@
           "campaign": "100 seeded iterations via native-core-tests; family limits/clamps apply."
         },
         "sanitizer": {
-          "status": "AVAILABLE_NOT_CI",
-          "target": "make CC=gcc fuzz-parsers",
+          "status": "CI_ASAN_UBSAN",
+          "target": "make CC=gcc FUZZ_ITERS=5000 fuzz-parsers (native_tools, core part)",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows.",
-          "ci": false
+          "ci": true
         },
         "coverage_guided_fuzzer": "NOT_CONFIGURED",
         "overflow_oob_mutation_kill": "NOT_RUN"
@@ -178,10 +178,10 @@
           "campaign": "100 seeded iterations via native-core-tests; family limits/clamps apply."
         },
         "sanitizer": {
-          "status": "AVAILABLE_NOT_CI",
-          "target": "make CC=gcc fuzz-parsers",
+          "status": "CI_ASAN_UBSAN",
+          "target": "make CC=gcc FUZZ_ITERS=5000 fuzz-parsers (native_tools, core part)",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows.",
-          "ci": false
+          "ci": true
         },
         "coverage_guided_fuzzer": "NOT_CONFIGURED",
         "overflow_oob_mutation_kill": "NOT_RUN"
@@ -236,10 +236,10 @@
           "campaign": "100 seeded iterations of tests/native/test_fuzz_parsers.c via native-core-tests; family limits/clamps apply. tools/test_prx_loader_cleanroom.py is a deterministic spec test with no byte-mutation loop and is not part of the seeded campaign."
         },
         "sanitizer": {
-          "status": "AVAILABLE_NOT_CI",
-          "target": "make CC=gcc fuzz-parsers",
+          "status": "CI_ASAN_UBSAN",
+          "target": "make CC=gcc FUZZ_ITERS=5000 fuzz-parsers (native_tools, core part)",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows.",
-          "ci": false
+          "ci": true
         },
         "coverage_guided_fuzzer": "NOT_CONFIGURED",
         "overflow_oob_mutation_kill": "NOT_RUN"
@@ -292,10 +292,10 @@
           "campaign": "100 seeded iterations of tests/native/test_fuzz_parsers.c via native-core-tests; family limits/clamps apply. tools/test_prx_loader_cleanroom.py is a deterministic spec test with no byte-mutation loop and is not part of the seeded campaign."
         },
         "sanitizer": {
-          "status": "AVAILABLE_NOT_CI",
-          "target": "make CC=gcc fuzz-parsers",
+          "status": "CI_ASAN_UBSAN",
+          "target": "make CC=gcc FUZZ_ITERS=5000 fuzz-parsers (native_tools, core part)",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows.",
-          "ci": false
+          "ci": true
         },
         "coverage_guided_fuzzer": "NOT_CONFIGURED",
         "overflow_oob_mutation_kill": "NOT_RUN"
@@ -350,10 +350,10 @@
           "campaign": "100 seeded iterations of tests/native/test_fuzz_parsers.c via native-core-tests; family limits/clamps apply. tools/test_prx_loader_cleanroom.py is a deterministic spec test with no byte-mutation loop and is not part of the seeded campaign."
         },
         "sanitizer": {
-          "status": "AVAILABLE_NOT_CI",
-          "target": "make CC=gcc fuzz-parsers",
+          "status": "CI_ASAN_UBSAN",
+          "target": "make CC=gcc FUZZ_ITERS=5000 fuzz-parsers (native_tools, core part)",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows.",
-          "ci": false
+          "ci": true
         },
         "coverage_guided_fuzzer": "NOT_CONFIGURED",
         "overflow_oob_mutation_kill": "NOT_RUN"
@@ -407,10 +407,10 @@
           "campaign": "100 seeded iterations via native-core-tests; family limits/clamps apply."
         },
         "sanitizer": {
-          "status": "AVAILABLE_NOT_CI",
-          "target": "make CC=gcc fuzz-parsers",
+          "status": "CI_ASAN_UBSAN",
+          "target": "make CC=gcc FUZZ_ITERS=5000 fuzz-parsers (native_tools, core part)",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows.",
-          "ci": false
+          "ci": true
         },
         "coverage_guided_fuzzer": "NOT_CONFIGURED",
         "overflow_oob_mutation_kill": "NOT_RUN"
@@ -466,10 +466,10 @@
           "campaign": "100 seeded iterations via native-core-tests; family limits/clamps apply."
         },
         "sanitizer": {
-          "status": "AVAILABLE_NOT_CI",
-          "target": "make CC=gcc fuzz-parsers",
+          "status": "CI_ASAN_UBSAN",
+          "target": "make CC=gcc FUZZ_ITERS=5000 fuzz-parsers (native_tools, core part)",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows.",
-          "ci": false
+          "ci": true
         },
         "coverage_guided_fuzzer": "NOT_CONFIGURED",
         "overflow_oob_mutation_kill": "NOT_RUN"
@@ -587,10 +587,10 @@
           "campaign": "100 seeded iterations via native-core-tests; family limits/clamps apply."
         },
         "sanitizer": {
-          "status": "AVAILABLE_NOT_CI",
-          "target": "make CC=gcc fuzz-parsers",
+          "status": "CI_ASAN_UBSAN",
+          "target": "make CC=gcc FUZZ_ITERS=5000 fuzz-parsers (native_tools, core part)",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows.",
-          "ci": false
+          "ci": true
         },
         "coverage_guided_fuzzer": "NOT_CONFIGURED",
         "overflow_oob_mutation_kill": "NOT_RUN"
@@ -648,10 +648,10 @@
           "campaign": "100 seeded iterations via native-core-tests; family limits/clamps apply."
         },
         "sanitizer": {
-          "status": "AVAILABLE_NOT_CI",
-          "target": "make CC=gcc fuzz-parsers",
+          "status": "CI_ASAN_UBSAN",
+          "target": "make CC=gcc FUZZ_ITERS=5000 fuzz-parsers (native_tools, core part)",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows.",
-          "ci": false
+          "ci": true
         },
         "coverage_guided_fuzzer": "NOT_CONFIGURED",
         "overflow_oob_mutation_kill": "NOT_RUN"
@@ -701,10 +701,10 @@
           "campaign": "100 seeded iterations via native-core-tests; family limits/clamps apply."
         },
         "sanitizer": {
-          "status": "AVAILABLE_NOT_CI",
-          "target": "make CC=gcc fuzz-parsers",
+          "status": "CI_ASAN_UBSAN",
+          "target": "make CC=gcc FUZZ_ITERS=5000 fuzz-parsers (native_tools, core part)",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows.",
-          "ci": false
+          "ci": true
         },
         "coverage_guided_fuzzer": "NOT_CONFIGURED",
         "overflow_oob_mutation_kill": "NOT_RUN"
@@ -756,7 +756,7 @@
         },
         "sanitizer": {
           "status": "CI_ASAN_UBSAN",
-          "target": "make CC=gcc native-core-tests (psmf-producer-selftest); optional make fuzz-parsers",
+          "target": "make CC=gcc native-core-tests (psmf-producer-selftest); make CC=gcc FUZZ_ITERS=5000 fuzz-parsers",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows",
           "ci": true
         },
@@ -813,7 +813,7 @@
         },
         "sanitizer": {
           "status": "CI_ASAN_UBSAN",
-          "target": "make CC=gcc native-core-tests (psmf-producer-selftest); optional make fuzz-parsers",
+          "target": "make CC=gcc native-core-tests (psmf-producer-selftest); make CC=gcc FUZZ_ITERS=5000 fuzz-parsers",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows",
           "ci": true
         },
@@ -867,7 +867,7 @@
         },
         "sanitizer": {
           "status": "CI_ASAN_UBSAN",
-          "target": "make CC=gcc native-core-tests (psmf-producer-selftest); optional make fuzz-parsers",
+          "target": "make CC=gcc native-core-tests (psmf-producer-selftest); make CC=gcc FUZZ_ITERS=5000 fuzz-parsers",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows",
           "ci": true
         },
@@ -1051,7 +1051,7 @@
         },
         "sanitizer": {
           "status": "CI_ASAN_UBSAN",
-          "target": "make CC=gcc native-core-tests (psmf-producer-selftest); optional make fuzz-parsers",
+          "target": "make CC=gcc native-core-tests (psmf-producer-selftest); make CC=gcc FUZZ_ITERS=5000 fuzz-parsers",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows",
           "ci": true
         },
@@ -1106,7 +1106,7 @@
         },
         "sanitizer": {
           "status": "CI_ASAN_UBSAN",
-          "target": "make CC=gcc H264_FFMPEG=1 psmf-media-selftest; optional make fuzz-parsers",
+          "target": "make CC=gcc H264_FFMPEG=1 psmf-media-selftest; make CC=gcc FUZZ_ITERS=5000 fuzz-parsers",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows",
           "ci": true
         },
@@ -1166,10 +1166,10 @@
           "campaign": "Source-owned deterministic mutation loop in the PGF selftest, plus the structure-aware test_fuzz_pgf stage (100 seeded iterations via native-core-tests)."
         },
         "sanitizer": {
-          "status": "AVAILABLE_NOT_CI",
-          "target": "make CC=gcc fuzz-parsers",
+          "status": "CI_ASAN_UBSAN",
+          "target": "make CC=gcc FUZZ_ITERS=5000 fuzz-parsers (native_tools, core part)",
           "instrumentation": "AddressSanitizer and UndefinedBehaviorSanitizer on non-Windows.",
-          "ci": false
+          "ci": true
         },
         "coverage_guided_fuzzer": "NOT_CONFIGURED",
         "overflow_oob_mutation_kill": "NOT_RUN"
@@ -2305,14 +2305,13 @@
   ],
   "campaign_facts": {
     "ci_native_core": "Linux CI runs make CC=gcc native-core-tests. The native parser mutation binary runs --iters 100 without sanitizer flags; the PSMF producer selftest runs 100 seeded iterations with the non-Windows FUZZ_SAN_FLAGS (ASan/UBSan).",
-    "optional_sanitizer_target": "make fuzz-parsers defaults to 5000 iterations and enables ASan/UBSan on non-Windows. Current .github/workflows/ci.yml does not invoke this target.",
+    "optional_sanitizer_target": "make fuzz-parsers defaults to 5000 iterations and enables ASan/UBSan on non-Windows. Linux CI (.github/workflows/ci.yml, native_tools core part) runs make CC=gcc FUZZ_ITERS=5000 fuzz-parsers: the parser mutation binary from its fixed seed, then the PSMF producer and media selftests at the same depth.",
     "python_tests": "CI shards all tools/test_*.py modules. Bounded Python mutation suites run on synthetic inputs; they are not native sanitizer campaigns.",
     "coverage_guided": "No libFuzzer/AFL++/equivalent target is configured.",
     "overflow_oob_mutation_kill": "NOT_RUN: no exact-head compiled/executed integer-overflow or OOB parser mutant kill was located."
   },
   "issue_acceptance_remaining": [
     "No coverage-guided fuzzer is configured.",
-    "The native test_fuzz_parsers ASan/UBSan campaign is available through make fuzz-parsers but is not wired into current CI; PSMF producer and ATRAC3+ decoder sanitizer coverage exists in CI.",
     "nk_json, nk_input_profile, nk_font, the player package-builder and settings routes, Python library/cache/font/flight/tooling JSON, and GIM still lack sanitizer-backed mutation coverage; the Python library/cache/font/flight/tooling readers also lack byte/depth/count ceilings, direct Python SFO/manifest buffers lack independent byte caps, and direct PSP container APIs lack a raw-input cap.",
     "tools/ppm2png.py validates nothing: a truncated or non-P6 frame dump raises an unhandled Python exception, and the tool has no malformed-input test.",
     "The Windows Media Foundation demux seam is not exercised by the Linux sanitizer route and has no current Windows sanitizer campaign.",
