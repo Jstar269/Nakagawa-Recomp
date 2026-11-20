@@ -231,6 +231,12 @@ add_executable(test_disc_expand
     src/core/nk_disc_chd.c
 )
 target_link_libraries(test_disc_expand PRIVATE nakagawa_core nk_libchdr)
+# The failing-allocator case wraps malloc; MSVC's and Apple's linkers have no --wrap, so
+# there the test prints a SKIP for that case and runs the rest.
+if(NOT MSVC AND NOT APPLE)
+    target_compile_definitions(test_disc_expand PRIVATE NK_TEST_WRAP_MALLOC)
+    target_link_options(test_disc_expand PRIVATE "-Wl,--wrap=malloc")
+endif()
 add_test(NAME disc_expand_test COMMAND test_disc_expand)
 
 add_executable(test_disc_verify
