@@ -33,8 +33,10 @@ The one partial pin that exists is described under "Pins" below.
 - Repository: `https://github.com/hrydgard/ppsspp`
 - Copyright: Copyright (c) 2012- PPSSPP Project and contributors
 - Licence: GPL-2.0-or-later, plus PPSSPP's own third-party notices. The
-  project conveys its combined work under GPL-3.0-or-later, which
-  GPL-2.0-or-later permits through its "or any later version" clause. Per-file
+  project's own code is GPL-3.0-or-later, and the packaged build, which also
+  includes GPL-3.0-only parts (xBRZ and the files ported from pspdecrypt), is
+  conveyed under GPL version 3; GPL-2.0-or-later permits both through its "or
+  any later version" clause. Per-file
   GPL-2.0-or-later identifiers are kept unchanged (`third_party/licenses/GPL-2.0.txt`,
   `LICENSE`, `NOTICE.md`).
 - Intermediate upstream: sal063/PSP-recompilation-project, GPL-2.0-or-later,
@@ -265,7 +267,7 @@ Created in this repository. The code moved out of a sal063-lineage file, so the 
 - `rt/atrac3p_bridge.c` and `rt/atrac3p_bridge.h`: say they are not a PPSSPP
   translation. FFmpeg provenance is in `src/rt/atrac3p/PROVENANCE.md`.
 - `rt/mp3_bridge.c` and `rt/mp3_bridge.h`: GPL-3.0-or-later, project-authored frame
-  wrapper over minimp3 (CC0, byte-identical, `src/rt/minimp3/PROVENANCE.md`). They contain
+  wrapper over minimp3 (CC0, LOCAL DELTA, `src/rt/minimp3/PROVENANCE.md`). They contain
   no PPSSPP code.
 - `rt/cheats.c` and `rt/cheats.h` (#2639): GPL-3.0-or-later, project-authored. They bind
   the cheat reader and applier to a run (the switch, the file, guest memory, the translated

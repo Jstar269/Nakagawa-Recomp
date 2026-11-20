@@ -26,6 +26,8 @@ would be invisible to the very test meant to pin it.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 from pathlib import Path
 import shutil
@@ -34,6 +36,7 @@ import sys
 import tempfile
 import unittest
 from typing import ClassVar
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,7 +100,7 @@ class RelocatedCloneTests(unittest.TestCase):
             reason = "GNU Make is required for the relocated-contributor check"
             print(f"SKIP {__name__}: {reason} (no mingw32-make or make on PATH)")
             raise unittest.SkipTest(reason)
-        if not (shutil.which("git") or (ROOT / ".git").exists()):
+        if not (shutil.which("git") and (ROOT / ".git").exists()):
             reason = "Git is required to enumerate the tracked tree"
             print(f"SKIP {__name__}: {reason}")
             raise unittest.SkipTest(reason)
@@ -108,6 +111,9 @@ class RelocatedCloneTests(unittest.TestCase):
 
         cls.make = make
         base = Path(tempfile.mkdtemp(prefix=f"{SPACED_DIR_NAME} "))
+        # unittest skips tearDownClass when setUpClass raises, so a failed copy or the
+        # space check below would leave the copied tree in temp; a class cleanup runs either way.
+        cls.addClassCleanup(shutil.rmtree, base, True)
         cls.clone = base / "nakagawa"
         cls.clone.mkdir()
         cls.copied = copy_tracked_tree(ROOT, cls.clone)
@@ -116,10 +122,6 @@ class RelocatedCloneTests(unittest.TestCase):
             # Unreachable on a sane host, but a harness that silently lost its
             # space would report a meaningless pass.
             raise AssertionError(f"relocated clone path carries no space: {cls.clone}")
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        shutil.rmtree(getattr(cls, "clone", Path()).parent, ignore_errors=True)
 
     def run_step(self, label: str, command: list[str]) -> None:
         proc = subprocess.run(
@@ -242,6 +244,52 @@ def _changed(before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int
     return sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
 
 
+class SetUpClassGuardTests(unittest.TestCase):
+    """The heavy classes' preconditions skip honestly and clean up after a failed setup."""
+
+    @staticmethod
+    def _which(missing: str):
+        real = shutil.which
+        return lambda name, *a, **k: None if name == missing else (real(name, *a, **k) or f"/usr/bin/{name}")
+
+    def test_no_git_binary_skips_even_with_a_git_directory(self) -> None:
+        def no_copy(*_args, **_kwargs):
+            raise AssertionError("the tree was enumerated without a git binary")
+
+        for owner in (RelocatedCloneTests, TwoCheckoutIsolationTests):
+            probe: type[unittest.TestCase] = type(f"{owner.__name__}Probe", (owner,), {})
+            with self.subTest(owner=owner.__name__), \
+                 mock.patch.object(shutil, "which", self._which("git")), \
+                 mock.patch.object(sys.modules[__name__], "copy_tracked_tree", no_copy), \
+                 mock.patch.object(Path, "exists", lambda _self, **_kwargs: True), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(unittest.SkipTest):
+                    probe.setUpClass()
+                probe.doClassCleanups()
+
+    def test_a_failed_copy_still_removes_the_temporary_tree(self) -> None:
+        scratch = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        base = scratch / f"{SPACED_DIR_NAME} probe"
+
+        def make_base(*_args, **_kwargs) -> str:
+            base.mkdir()
+            return str(base)
+
+        def failed_copy(_root: Path, clone: Path) -> int:
+            (clone / "partial.txt").write_text("partial\n", encoding="utf-8")
+            raise OSError("copy failed part way")
+
+        probe: type[RelocatedCloneTests] = type("RelocatedCloneProbe", (RelocatedCloneTests,), {})
+        with mock.patch.object(shutil, "which", self._which("")), \
+             mock.patch.object(tempfile, "mkdtemp", make_base), \
+             mock.patch.object(sys.modules[__name__], "copy_tracked_tree", failed_copy):
+            with self.assertRaises(OSError):
+                probe.setUpClass()
+        self.assertTrue(base.exists(), "the probe never created the temporary tree")
+        probe.doClassCleanups()
+        self.assertFalse(base.exists(), "a failed setUpClass left its copied tree in temp")
+
+
 class TwoCheckoutIsolationTests(unittest.TestCase):
     """Two checkouts building at once use only their own generated and runtime assets (#368).
 
@@ -275,7 +323,7 @@ class TwoCheckoutIsolationTests(unittest.TestCase):
             reason = "GNU Make is required for the two-checkout isolation check"
             print(f"SKIP {__name__}: {reason} (no mingw32-make or make on PATH)")
             raise unittest.SkipTest(reason)
-        if not (shutil.which("git") or (ROOT / ".git").exists()):
+        if not (shutil.which("git") and (ROOT / ".git").exists()):
             reason = "Git is required to enumerate the tracked tree"
             print(f"SKIP {__name__}: {reason}")
             raise unittest.SkipTest(reason)

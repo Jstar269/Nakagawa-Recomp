@@ -88,29 +88,39 @@ def _assigned(tree: ast.Module, names: set[str], keys: set[str], calls: dict[str
                 if isinstance(key, ast.Constant) and key.value in keys:
                     found |= _values(value)
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            assigned_value = node.value
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
                 if isinstance(target, ast.Name) and target.id in names:
-                    found |= _values(node.value)
+                    found |= _values(assigned_value)
                 elif isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant) \
                         and target.slice.value in keys:
-                    found |= _values(node.value)
+                    found |= _values(assigned_value)
                 elif isinstance(target, ast.Tuple):
                     for index, element in enumerate(target.elts):
                         if isinstance(element, ast.Name) and element.id in names:
-                            value = node.value
-                            found |= _values(value.elts[index] if isinstance(value, ast.Tuple)
-                                             else value)
+                            found |= _values(
+                                assigned_value.elts[index]
+                                if isinstance(assigned_value, ast.Tuple)
+                                else assigned_value
+                            )
     return found
 
 
 def _module_dict(tree: ast.Module, name: str) -> ast.Dict:
     for node in tree.body:
-        targets = node.targets if isinstance(node, ast.Assign) else \
-            [node.target] if isinstance(node, ast.AnnAssign) else []
+        value: ast.expr | None
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
         if any(isinstance(target, ast.Name) and target.id == name for target in targets):
-            assert isinstance(node.value, ast.Dict), name
-            return node.value
+            assert isinstance(value, ast.Dict), name
+            return value
     raise AssertionError(f"{name} is not a module-level dict")
 
 
@@ -158,7 +168,7 @@ PLAYER_NOT_CODES = {
     "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT", "DPAD_UP", "LEFT_SHOULDER", "RIGHT_SHOULDER",
     "MOUSE_DOWN", "MOUSE_UP", "MOUSE_X1", "MOUSE_X1_DOWN", "MOUSE_X1_UP", "OPEN_FOLDER",
     "ASSERT_GAME_RUNNING", "DROP_BEGIN", "DROP_COMPLETE", "FOCUS_GAINED", "FOCUS_LOST",
-    "INVALIDATE_PACKAGE_CACHE",
+    "INVALIDATE_PACKAGE_CACHE", "RENDER_DEVICE_RESET",
     # an environment variable the package builder reads to find the MSYS2 UCRT64 bin
     "MSYS_PATH",
     # cover art: fetch status names (nk_cover_art_status_name, used by tests only) and the cache-clear
@@ -348,6 +358,19 @@ class DecryptTests(unittest.TestCase):
         names |= set(re.findall(r'return "([A-Z_]+)";', player)) - {"VALIDATED_DECRYPTED"}
         self.assertGreater(len(names), 12)
         self.assertEqual(sorted(names - codes_in("decrypt")), [])
+
+    def test_every_code_the_disc_decryption_records_is_registered(self) -> None:
+        # decrypt_disc rows feed library_build's decrypt_step.first_failure_code; a coded
+        # exception it raised would reach that record only as INTERNAL_ERROR.
+        tree = _tree("tools/nk_core/decrypt_tool.py")
+        found = _assigned(tree, set(), {"code"}, {}, {"boundary_code", "code"})
+        self.assertIn("DISC_DECRYPT_MEMBER_MISSING", found)
+        self.assertEqual(sorted(found - codes_in("decrypt", "report")), [],
+                         "recorded but not registered")
+        raised = [node for node in ast.walk(tree) if isinstance(node, ast.Raise)
+                  and isinstance(node.exc, ast.Call)
+                  and getattr(node.exc.func, "attr", None) == "IsoInspectionError"]
+        self.assertEqual(raised, [], "a disc refusal is a coded row, not a raise")
 
     def test_nk_decrypt_exit_codes_match_the_tooling(self) -> None:
         names = self._status_names()

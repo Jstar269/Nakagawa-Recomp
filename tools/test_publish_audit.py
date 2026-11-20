@@ -1017,14 +1017,93 @@ class TestPublishAudit(unittest.TestCase):
         self.assertTrue(publish_audit._spdx_required("tools/codegen.py"))
 
     def test_spdx_required_skips_only_the_byte_exact_minimp3_header(self):
-        # minimp3 is vendored byte-identical (src/rt/minimp3/PROVENANCE.md) and keeps its own
-        # CC0 notice instead of an SPDX line. The exemption is that one file: the project's
-        # wrapper and anything else added beside the header still need SPDX.
+        # minimp3 is vendored with a minimal documented LOCAL DELTA (src/rt/minimp3/PROVENANCE.md)
+        # and keeps its own CC0 dedication notice instead of an SPDX line. The exemption is that
+        # one file: the project's wrapper and anything else added beside the header still need SPDX.
         self.assertFalse(publish_audit._spdx_required("src/rt/minimp3/minimp3.h"))
         self.assertTrue(publish_audit._spdx_required("src/rt/minimp3/minimp3_ex.h"))
         self.assertTrue(publish_audit._spdx_required("src/rt/minimp3/wrapper.c"))
         self.assertTrue(publish_audit._spdx_required("src/rt/mp3_bridge.c"))
         self.assertTrue(publish_audit._spdx_required("src/rt/mp3_bridge.h"))
+
+    def test_spdx_vendored_import_paths_match_provenance_manifests(self):
+        # Every path in SPDX_VENDORED_IMPORT_PATHS and every file under SPDX_VENDORED_IMPORT_TREES
+        # must match its PROVENANCE.md manifest using the repository's manifest parser:
+        # single-file exemptions are imported byte-identical or imported + LOCAL DELTA (with a
+        # dated modification note) and have no SPDX identifier in their first eight lines; authored
+        # stand-ins under an exempted tree stay in SPDX_VENDORED_IMPORT_HEADER_PATHS.
+        import provenance_attest_verify as pav
+
+        root = publish_audit.ROOT
+        tracked = run_git(["ls-files"], cwd=root, check=True, capture_output=True, text=True).stdout.splitlines()
+        manifests = sorted(
+            path for path in tracked
+            if PurePath(path).name == pav.VENDOR_MANIFEST_NAME
+        )
+        rows_by_path: dict[str, tuple[str, str]] = {}
+        for manifest in manifests:
+            rows = pav._manifest_rows((root / manifest).read_bytes()) or []
+            for row in rows:
+                resolved = pav._manifest_row_path(manifest, row.get("file", ""))
+                if resolved is not None:
+                    rows_by_path[resolved] = (manifest, row.get("kind", ""))
+
+        vendored_paths = publish_audit.SPDX_VENDORED_IMPORT_PATHS
+        vendored_trees = publish_audit.SPDX_VENDORED_IMPORT_TREES
+        header_paths = publish_audit.SPDX_VENDORED_IMPORT_HEADER_PATHS
+        self.assertIn("src/rt/minimp3/minimp3.h", vendored_paths)
+        self.assertIn("third_party/clay/clay.h", vendored_paths)
+
+        mod_notice = re.compile(r"Modified by Nakagawa Recomp contributors, \d{4}-\d{2}-\d{2}")
+        for path in sorted(vendored_paths):
+            with self.subTest(path=path):
+                full = root / path
+                self.assertTrue(full.is_file(), f"exempted path is missing: {path}")
+                self.assertIn(path, rows_by_path, f"exempted path has no PROVENANCE.md row: {path}")
+                manifest, kind = rows_by_path[path]
+                is_byte_identical = pav._is_byte_identical_kind(kind)
+                is_local_delta = kind.strip().lower().startswith("imported + local delta")
+                self.assertTrue(
+                    is_byte_identical or is_local_delta,
+                    f"{path} has unexpected manifest kind {kind!r} in {manifest}",
+                )
+                raw = full.read_bytes()
+                self.assertEqual(
+                    publish_audit._spdx_identifiers(raw),
+                    [],
+                    f"{path} already declares an SPDX identifier in its first 8 lines",
+                )
+                if is_local_delta:
+                    self.assertRegex(
+                        raw.decode("utf-8", errors="replace"),
+                        mod_notice,
+                        f"{path} is a LOCAL DELTA without a dated modification notice",
+                    )
+
+        authored_in_trees: set[str] = set()
+        for tree in vendored_trees:
+            for path in tracked:
+                if not path.startswith(tree):
+                    continue
+                with self.subTest(tree=tree, path=path):
+                    self.assertIn(path, rows_by_path, f"{path} under {tree} has no PROVENANCE.md row")
+                    manifest, kind = rows_by_path[path]
+                    lowered = kind.strip().lower()
+                    if lowered.startswith("authored"):
+                        authored_in_trees.add(path)
+                        self.assertIn(
+                            path,
+                            header_paths,
+                            f"authored file {path} under {tree} must be in SPDX_VENDORED_IMPORT_HEADER_PATHS",
+                        )
+                    else:
+                        self.assertTrue(
+                            pav._is_byte_identical_kind(kind)
+                            or "local delta" in lowered
+                            or lowered == "project-authored manifest",
+                            f"{path} under {tree} has unexpected manifest kind {kind!r} in {manifest}",
+                        )
+        self.assertEqual(header_paths, frozenset(authored_in_trees))
 
     def _spdx_provenance_findings(self, source_path, source_bytes, classification, license_id=None):
         with tempfile.TemporaryDirectory() as tmp_dir_raw:
@@ -1424,7 +1503,7 @@ class TestPublishAudit(unittest.TestCase):
         format omits the short-name column entirely, so every lookup silently
         reported None and the alias case was never exercised.
         """
-        if os.name != "nt":
+        if sys.platform != "win32":
             return None
         import ctypes
 
@@ -2746,7 +2825,7 @@ class GeneratedEmbeddingSpdxTests(unittest.TestCase):
         self.assertEqual(publish_audit.SPDX_DXC_EMBEDDING_SOURCES, contract)
         for embedded, source in contract.items():
             self.assertNotIn(embedded, publish_audit.SPDX_GENERATED_EMBEDDING_SOURCES)
-            self.assertTrue(source.startswith(publish_audit.SPDX_BYTE_EXACT_IMPORT_TREES), source)
+            self.assertTrue(source.startswith(publish_audit.SPDX_VENDORED_IMPORT_TREES), source)
             head = (Path(publish_audit.ROOT) / source).read_text(encoding="utf-8").splitlines()[:8]
             self.assertTrue(any("Advanced Micro Devices" in line for line in head), source)
 

@@ -18,14 +18,18 @@ import unittest
 from unittest import mock
 from unittest.mock import patch
 import sys
+from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from makefile_text import read_makefile  # noqa: E402
 
-try:
-    import ci_paths as ci_paths_module
-except ModuleNotFoundError:  # Running as ``python -m unittest tools.test_ci_paths``.
-    import tools.ci_paths as ci_paths_module
+if TYPE_CHECKING:
+    from tools import ci_paths as ci_paths_module
+else:
+    try:
+        import ci_paths as ci_paths_module
+    except ModuleNotFoundError:  # Running as ``python -m unittest tools.test_ci_paths``.
+        import tools.ci_paths as ci_paths_module
 
 classify = ci_paths_module.classify
 ROOT = Path(__file__).resolve().parents[1]
@@ -1066,11 +1070,13 @@ class CiPathAdversarialTests(unittest.TestCase):
                 )
             )
             # A native subject routes the native and Windows jobs unless the test module
-            # itself is one no gate runs; a classifier test always routes them.
+            # itself is one no gate runs; a classifier test always routes them. A module that
+            # holds a Windows-only test also routes the Windows job on its own.
             expected_native = subject_native and not ci_paths_module._is_unexecuted_test(relative)
+            expected_windows = expected_native or ci_paths_module._is_windows_only_test(relative)
             result = classify([relative])
             self.assertEqual(result["run_native"] == "true", expected_native, relative)
-            self.assertEqual(result["run_windows"] == "true", expected_native, relative)
+            self.assertEqual(result["run_windows"] == "true", expected_windows, relative)
 
     @patch.object(ci_paths_module.subprocess, "run")
     def test_git_diff_requests_status_and_rename_information(self, run) -> None:
@@ -2374,7 +2380,7 @@ class CodeqlRunnerRoutingTests(unittest.TestCase):
         self.assertEqual(self.route("push", repository="Jstar269/naKagawa-recomp"), self.HOSTED)
 
     def test_outside_and_fork_pull_requests_stay_hosted(self) -> None:
-        cases = {
+        cases: dict[str, dict[str, object]] = {
             "carry branch of an outside pull request": _wake("pull_request", "carry/pr-1757"),
             "desk working branch": _wake("pull_request", "desk/pr1757"),
             "no head branch": _wake("pull_request", ""),
@@ -2597,7 +2603,9 @@ class SelfHostedRunnerRoutingTests(unittest.TestCase):
             self.assertEqual(self.route("pull_request", _pull_request("fix/x", sender=None)), HOSTED)
         with self.subTest("base in another repository"):
             self.assertEqual(self.route("pull_request", _pull_request(base_repo="other/nakagawa-recomp")), HOSTED)
-        for event in ({}, {"pull_request": None}, {"pull_request": {"head": {"ref": "batch/x"}}}):
+        malformed_payload: dict[str, object] = {"pull_request": {"head": {"ref": "batch/x"}}}
+        events: tuple[dict[str, object], ...] = ({}, {"pull_request": None}, malformed_payload)
+        for event in events:
             with self.subTest(event=event):
                 self.assertEqual(self.route("pull_request", event), HOSTED)
 
@@ -2886,6 +2894,80 @@ class CodeqlScopeTests(unittest.TestCase):
             legacy = ci_paths_module._parse_changed_paths(git(root, "diff", "--name-status", base, head))
             self.assertTrue(any(path.endswith('"') for path in legacy))
             self.assertTrue(self.needed(legacy))
+
+
+class WindowsOnlyTestRoutingTests(unittest.TestCase):
+    """A test module holding a Windows-only test routes the Windows job on its own head.
+
+    The Linux shards skip those tests; windows_runtime's selftests group runs them ("Run the
+    Windows-only Python tests"), and ``run_windows`` starts every group of that job.
+    """
+
+    WINDOWS_ONLY = "tools/test_scratch_dir.py"
+    ORDINARY = "tools/test_hst_doctor.py"
+
+    def setUp(self) -> None:
+        ci_paths_module._windows_only_test_modules.cache_clear()
+        self.addCleanup(ci_paths_module._windows_only_test_modules.cache_clear)
+
+    def test_the_route_reads_the_planners_own_selection(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "ci_test_shards.py"), "--windows-only"],
+            cwd=ROOT, capture_output=True, text=True, check=True, timeout=120,
+        )
+        planned = {name.split(".", 1)[0] for name in completed.stdout.split()}
+        self.assertTrue(planned)
+        self.assertEqual(ci_paths_module._windows_only_test_modules(), frozenset(planned))
+        self.assertIn(Path(self.WINDOWS_ONLY).stem, planned)
+        self.assertNotIn(Path(self.ORDINARY).stem, planned)
+
+    def test_every_planned_module_routes_the_windows_job(self) -> None:
+        modules = ci_paths_module._windows_only_test_modules()
+        assert modules is not None
+        for module in sorted(modules):
+            with self.subTest(module=module):
+                self.assertEqual(classify([f"tools/{module}.py"])["run_windows"], "true")
+
+    def test_a_windows_only_test_module_alone_runs_the_windows_job(self) -> None:
+        result = classify([self.WINDOWS_ONLY])
+        self.assertEqual(result["run_python"], "true")
+        self.assertEqual(result["python_scope"], "all")
+        self.assertEqual(result["run_windows"], "true")
+        # It routes neither the native job nor the installer.
+        self.assertEqual(result["run_native"], "false")
+        self.assertEqual(result["run_installer"], "false")
+        self.assertEqual(result["docs_only"], "false")
+
+    def test_an_ordinary_test_module_alone_is_unchanged(self) -> None:
+        result = classify([self.ORDINARY])
+        self.assertEqual(result["run_python"], "true")
+        self.assertEqual(result["python_scope"], "all")
+        self.assertEqual(result["run_native"], "false")
+        self.assertEqual(result["run_windows"], "false")
+        self.assertEqual(result["run_installer"], "false")
+        self.assertEqual(result["docs_only"], "false")
+
+    def test_a_docs_only_change_is_unchanged(self) -> None:
+        result = classify(["docs/CI.md"])
+        self.assertEqual(result["docs_only"], "true")
+        self.assertEqual(result["run_native"], "false")
+        self.assertEqual(result["run_windows"], "false")
+        self.assertEqual(result["run_installer"], "false")
+
+    def test_an_unreadable_selection_routes_every_test_module(self) -> None:
+        others = ("docs/CI.md", "tools/scratch_dir.py", "tools/sub/test_x.py", "tests/native/test_x.py")
+        readable = {path: classify([path]) for path in others}
+        with patch.object(ci_paths_module, "_windows_only_test_modules", return_value=None):
+            result = classify([self.ORDINARY])
+            unreadable = {path: classify([path]) for path in others}
+        self.assertEqual(result["run_windows"], "true")
+        self.assertEqual(result["run_native"], "false")
+        # Only tools/test_*.py modules: every other path keeps its routes.
+        self.assertEqual(unreadable, readable)
+
+    def test_a_failing_planner_import_reads_as_unreadable(self) -> None:
+        with patch.dict(sys.modules, {"ci_test_shards": None}):
+            self.assertIsNone(ci_paths_module._windows_only_test_modules())
 
 
 if __name__ == "__main__":

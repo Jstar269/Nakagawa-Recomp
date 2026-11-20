@@ -1594,12 +1594,14 @@ class DispatchCallBoundaryMutationTests(unittest.TestCase):
         original_interp = GUEST_INTERP.read_text(encoding="utf-8")
         if recomp_old is not None:
             self.assertIsNotNone(recomp_new)
+            assert recomp_new is not None
             self.assertIn(recomp_old, original_recomp, f"{name}: recomp mutation anchor drifted")
             mutated_recomp = original_recomp.replace(recomp_old, recomp_new, 1)
         else:
             mutated_recomp = None
         if interp_old is not None:
             self.assertIsNotNone(interp_new)
+            assert interp_new is not None
             self.assertIn(interp_old, original_interp, f"{name}: interpreter mutation anchor drifted")
             mutated_interp = original_interp.replace(interp_old, interp_new, 1)
         else:
@@ -1834,7 +1836,32 @@ class StackCensusPipelineTests(unittest.TestCase):
             "STACK_CENSUS status=PARTIAL entries=1 returns=1 excluded=0 unexpected=0",
             run_output,
         )
-        self.assertIn("unobserved=1", run_output)
+        self.assertIn("unobserved=1 unwrapped=0", run_output)
+
+    def test_unwrapped_guest_sp_body_is_reported_apart_from_unobserved(self):
+        # 0x2000 loads $sp, so the census leaves it unwrapped and no wrapper can observe it.
+        # Every wrapped body balanced: the report must say unobserved=0 and name the gap as
+        # unwrapped=1, and the status stays PARTIAL because that body was never checked.
+        compile_rc, compile_output, run_rc, run_output = _build_and_run_stack_census(
+            (0x03E00008, 0x00000000),
+            "SR_STACK_CENSUS_PARTIAL",
+            extra_words=(
+                (0x23 << 26) | (4 << 21) | (29 << 16),  # lw sp, 0(a0)
+                0x03E00008, 0x00000000,
+            ),
+            post_call_probe=(
+                "    SrStackCensusSummary probe;\n"
+                "    sr_stack_census_snapshot(&probe);\n"
+                "    if (probe.unobserved != 0u || probe.unwrapped != 1u) return 6;\n"
+            ),
+        )
+        self.assertEqual(compile_rc, 0, compile_output)
+        self.assertEqual(run_rc, 0, run_output)
+        self.assertIn(
+            "STACK_CENSUS status=PARTIAL entries=1 returns=1 excluded=0 unexpected=0 "
+            "mismatches=0 unobserved=0 unwrapped=1",
+            run_output,
+        )
 
 
 @unittest.skipUnless(CC, "gcc is required for the generated depth probe")

@@ -2845,13 +2845,17 @@ for _fetch_case in (
 # ge-through-z (185, probe_ge_sample.c): through-mode vertex z outside 0..65535, fractional,
 # infinite and NaN. Per cell, in order, one `-draw` record (16 words: the GE wait outcome, the
 # list length, the z bits, the colour pixels written, the colour at the sprite centre and the
-# changed depth words) and one `-z` record (the depth words of the sprite's centre row).
+# changed depth words) and one `-z` record (the depth words of the sprite's centre row). Last,
+# `vram-restore`: the 32-bit words of VRAM 0x110000..0x120fff the case wrote back and how many
+# then differed from its saved copy.
 GE_THROUGH_Z_CELLS = (
     "zm1", "zm0p5", "z0", "z0p5", "z1p5", "z65535", "z65535p5", "z65536", "z70000", "zinf",
     "znan",
 )
-GE_THROUGH_Z_ROWS = tuple(
-    row for cell in GE_THROUGH_Z_CELLS for row in ((f"{cell}-draw", 16), (f"{cell}-z", 16)))
+GE_THROUGH_Z_ROWS = (
+    *(row for cell in GE_THROUGH_Z_CELLS for row in ((f"{cell}-draw", 16), (f"{cell}-z", 16))),
+    ("vram-restore", 2),
+)
 GE_THROUGH_Z_CASES = tuple(case for case, _count in GE_THROUGH_Z_ROWS)
 _register_campaign_probe(
     "ge-through-z", "PSP-GE-THROUGHZ-001", GE_THROUGH_Z_ROWS,
@@ -2939,6 +2943,44 @@ GE_DEPTH_ROUND_CASES = tuple(
 _register_campaign_probe(
     "ge-depth-round", "PSP-GE-RASTER-003", {case: 9 if case.endswith("-draw") else 4 if case.endswith("-pass") else 16
      for case in GE_DEPTH_ROUND_CASES},
+)
+
+# ge-depth-bounds (192, probe_ge_sample.c): #2193's depth bounds cells, read as colour through
+# depth tests. First `display-check` (9 words, as ge-raster-bounds') and `edram` (2 words: the
+# eDRAM size and address); when either is SKIP every later record is SKIP with the same word
+# count. Then per cell of the gdb_cells table, in order: one `-draw` record (9 words), then for a
+# tag cell, per half (`in`, `past`), the `-blue`, `-yellow`, `-red` and `-rest` group masks of
+# rows 0..15 (16 words each) and a `-sum` (9 words: the pixel count, the blue, yellow, red, white,
+# green, fill and other counts, the first other pixel); for dc-scissor the `in` and `out` sums and
+# two raw rows (16 pixels each). Every cell ends with `-zp` and `-zv` (8 words each: position-free
+# counts of the depth block through the plain and the 0x04200000 mirror), and ctl-zbw512 adds
+# `-zx` (3 words). After the last cell, `vram-restore` (2 words).
+GE_DEPTH_BOUNDS_TAG_CELLS = ("ctl-zbw512", "dw-test-zbw256", "dw-clear-zbw256", "dr-zbw256")
+GE_DEPTH_BOUNDS_CELLS = (*GE_DEPTH_BOUNDS_TAG_CELLS, "dc-scissor")
+GE_DEPTH_BOUNDS_HALF_READS = (("blue", 16), ("yellow", 16), ("red", 16), ("rest", 16), ("sum", 9))
+
+
+def _ge_depth_bounds_rows() -> tuple[tuple[str, int], ...]:
+    rows: list[tuple[str, int]] = [("display-check", 9), ("edram", 2)]
+    for cell in GE_DEPTH_BOUNDS_CELLS:
+        rows.append((f"{cell}-draw", 9))
+        if cell in GE_DEPTH_BOUNDS_TAG_CELLS:
+            rows.extend((f"{cell}-{half}-{read}", count)
+                        for half in ("in", "past") for read, count in GE_DEPTH_BOUNDS_HALF_READS)
+        else:
+            rows.extend(((f"{cell}-in-sum", 9), (f"{cell}-out-sum", 9),
+                         (f"{cell}-r0-x92", 16), (f"{cell}-r271-x92", 16)))
+        rows.extend(((f"{cell}-zp", 8), (f"{cell}-zv", 8)))
+        if cell == "ctl-zbw512":
+            rows.append((f"{cell}-zx", 3))
+    rows.append(("vram-restore", 2))
+    return tuple(rows)
+
+
+GE_DEPTH_BOUNDS_ROWS = _ge_depth_bounds_rows()
+GE_DEPTH_BOUNDS_CASES = tuple(case for case, _count in GE_DEPTH_BOUNDS_ROWS)
+_register_campaign_probe(
+    "ge-depth-bounds", "PSP-GE-RASTER-004", GE_DEPTH_BOUNDS_ROWS,
 )
 
 # ge-mip (126, probe_ge_sample.c): the #1373 GE level-of-detail cells. The cells are the gm_cells

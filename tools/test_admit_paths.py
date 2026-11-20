@@ -28,7 +28,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -37,6 +37,11 @@ import admit_paths  # noqa: E402
 from admit_paths import AdmitError  # noqa: E402
 import provenance_attest_verify as verifier  # noqa: E402
 import provenance_ledger  # noqa: E402
+
+if TYPE_CHECKING:
+    from tools.admit_paths import AdmissionResult
+else:
+    AdmissionResult = admit_paths.AdmissionResult
 
 #: Commits run by the tool need an identity, and a host's own Git configuration
 #: must not change what the tests observe.
@@ -50,6 +55,11 @@ import provenance_ledger  # noqa: E402
 #: cleanup fails with ENOTEMPTY. The same settings as
 #: nk_core/git_isolation.isolated_git_env, in the environment so that the
 #: repositories the tests create keep their default configuration.
+#:
+#: ``GIT_EDITOR`` and ``GIT_SEQUENCE_EDITOR`` are also pinned to ``true``: Git
+#: checks ``$GIT_EDITOR`` before ``-c core.editor=true``, so a caller exporting
+#: ``GIT_EDITOR=false`` (or an interactive editor) would otherwise break
+#: ``git rebase --continue`` inside the fixture.
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "Nakagawa Recomp Tests",
     "GIT_AUTHOR_EMAIL": "tests@nakagawa-recomp.invalid",
@@ -64,6 +74,8 @@ GIT_ENV = {
     "GIT_CONFIG_VALUE_1": "false",
     "GIT_CONFIG_KEY_2": "gc.autoDetach",
     "GIT_CONFIG_VALUE_2": "false",
+    "GIT_EDITOR": "true",
+    "GIT_SEQUENCE_EDITOR": "true",
 }
 
 
@@ -108,7 +120,7 @@ def authority_claims(fixture: "_Fixture"):
 def assert_policy_delta(
     testcase: unittest.TestCase, fixture: "_Fixture", record: str, *,
     baseline: bytes, candidate: bytes, files: dict[str, bytes],
-) -> dict:
+) -> dict[str, list[str]]:
     """The stored V4 delta is named after its selector and approves exactly ``baseline`` -> ``candidate``.
 
     ``files`` are the candidate's new files; the delta binds each one's origin claim.
@@ -121,11 +133,14 @@ def assert_policy_delta(
         policy_file = Path(scratch) / "candidate-policy.json"
         policy_file.write_bytes(candidate)
         candidate_policy = admit_paths.load_policy(policy_file)
-    return provenance_ledger.verify_policy_delta_v4(
-        raw, baseline_policy_bytes=baseline, candidate_policy_bytes=candidate,
-        base_blobs={}, candidate_blobs=files, candidate_policy=candidate_policy,
-        claim_of=authority_claims(fixture),
-    )
+    return cast(
+        dict[str, list[str]],
+        provenance_ledger.verify_policy_delta_v4(
+            raw, baseline_policy_bytes=baseline, candidate_policy_bytes=candidate,
+            base_blobs={}, candidate_blobs=files, candidate_policy=candidate_policy,
+            claim_of=authority_claims(fixture),
+        ),
+    )  # The verifier returns normalized string path lists and rule-change names.
 
 
 class _Fixture:
@@ -210,13 +225,16 @@ class _Fixture:
         git(root, "commit", "-qm", f"include {relative}")
         return root, branch
 
-    def admit(self, *paths: str, **kwargs) -> dict:
+    def admit(self, *paths: str, **kwargs) -> AdmissionResult:
         kwargs.setdefault("approval_basis", "Owner request: synthetic fixture pages.")
         kwargs.setdefault("date", "2026-10-22")
-        return admit_paths.admit(
-            pr_worktree=self.pr, paths=list(paths), private_repo=self.authority,
-            scratch_root=self.tmp, **kwargs,
-        )
+        return cast(
+            AdmissionResult,
+            admit_paths.admit(
+                pr_worktree=self.pr, paths=list(paths), private_repo=self.authority,
+                scratch_root=self.tmp, **kwargs,
+            ),
+        )  # The single-admission helper returns its declared result shape.
 
     def record(self, relative: str) -> dict:
         returned: dict[str, Any] = json.loads((self.authority / relative).read_text(encoding="utf-8"))
@@ -420,7 +438,7 @@ class AdmitPathsTest(unittest.TestCase):
     def test_refusals_leave_nothing_behind(self) -> None:
         fixture = _Fixture(self)
         fixture.add("docs/new-page.md", "# New page\n")
-        cases = {
+        cases: dict[str, dict[str, object]] = {
             "ADMISSION_PATH_EXISTING": dict(paths=["docs/guide.md"]),
             "ADMISSION_PATH_EXCLUDED": dict(paths=["docs/private-notes.md"]),
             "ADMIT_PATH_MISSING": dict(paths=["docs/absent.md"]),
@@ -433,7 +451,7 @@ class AdmitPathsTest(unittest.TestCase):
         git(fixture.pr, "commit", "-qm", "excluded file")
         for code, case in cases.items():
             with self.subTest(code=code):
-                paths = case.pop("paths")
+                paths = cast(list[str], case.pop("paths"))  # Each case fixture supplies a string path list.
                 with self.assertRaises(AdmitError) as caught:
                     fixture.admit(*paths, **case)
                 self.assertEqual(caught.exception.code, code)
@@ -751,6 +769,35 @@ class BatchAdmitPathsTest(unittest.TestCase):
             fixture, baseline=first_policy, candidate=expected_profile,
             path=paths[order[1]], record=second["record"],
         )
+
+    def test_rebase_continue_ignores_inherited_git_editor(self) -> None:
+        """An inherited GIT_EDITOR (such as GIT_EDITOR=false) must not defeat rebase --continue."""
+        repo = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with mock.patch.dict(os.environ, {"GIT_EDITOR": "false", "GIT_SEQUENCE_EDITOR": "false"}):
+            git(repo, "init", "-q", "-b", "main")
+            write(repo, "note.txt", "base\n")
+            git(repo, "add", "note.txt")
+            git(repo, "commit", "-qm", "base")
+            base = git(repo, "rev-parse", "HEAD")
+
+            write(repo, "note.txt", "ours\n")
+            git(repo, "add", "note.txt")
+            git(repo, "commit", "-qm", "ours")
+
+            git(repo, "checkout", "-q", "--detach", base)
+            write(repo, "note.txt", "theirs\n")
+            git(repo, "add", "note.txt")
+            git(repo, "commit", "-qm", "theirs")
+
+            env = {**os.environ, **GIT_ENV}
+            rebase = subprocess.run(["git", "rebase", "main"], cwd=repo, env=env,
+                                    capture_output=True, check=False)
+            self.assertEqual(rebase.returncode, 1, rebase.stderr.decode("utf-8", errors="replace"))
+            write(repo, "note.txt", "merged\n")
+            git(repo, "add", "note.txt")
+            subprocess.run(["git", "-c", "core.editor=true", "rebase", "--continue"], cwd=repo,
+                           env=env, check=True, capture_output=True)
+            self.assertEqual(git(repo, "show", "HEAD:note.txt"), "merged")
 
     def test_batch_has_no_entry_count_cap(self) -> None:
         five = [
@@ -1393,11 +1440,11 @@ class ClaimBindingAdmissionTest(unittest.TestCase):
               "paths": ["src/lib/up.h"], "upstream": "synthetic-upstream",
               "upstream_revision": "commit 0123456789abcdef0123456789abcdef01234567", "upstream_license": "MIT"}
 
-    def _entry(self, fixture: _Fixture, result: dict, path: str) -> dict:
+    def _entry(self, fixture: _Fixture, result: AdmissionResult, path: str) -> dict:
         return next(item for item in fixture.record(result["policy_delta_record"])["include_added"]
                     if item["path"] == path)
 
-    def _forget_v4(self, fixture: _Fixture, result: dict) -> None:
+    def _forget_v4(self, fixture: _Fixture, result: AdmissionResult) -> None:
         """Make ``result`` look like an admission recorded before V4 deltas existed."""
         git(fixture.authority, "rm", "-q", result["policy_delta_record"])
         git(fixture.authority, "commit", "-qm", "an admission from before V4 deltas")

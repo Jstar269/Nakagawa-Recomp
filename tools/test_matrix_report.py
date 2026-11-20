@@ -18,6 +18,8 @@ import json
 from pathlib import Path
 import re
 import unittest
+from types import ModuleType
+from typing import cast
 from tools.ci_test_shards import nightly_tier
 
 
@@ -182,12 +184,13 @@ def build_report() -> dict[str, object]:
     loader = unittest.TestLoader()
     suite = loader.discover("tools", pattern="test_*.py")
     cases = []
-    modules: dict[str, object] = {}
+    modules: dict[str, ModuleType] = {}
     for case in _flatten(suite):
         module_name = case.__class__.__module__
         module = modules.setdefault(module_name, importlib.import_module(module_name))
         source_file = _source_file(module_name, module)
-        text = Path(module.__file__).read_text(encoding="utf-8")
+        module_file = cast(str, module.__file__)  # unittest discovers these modules from tracked .py files.
+        text = Path(module_file).read_text(encoding="utf-8")
         method_name = getattr(case, "_testMethodName", "")
         class_name = case.__class__.__name__
         method = getattr(case, method_name, None)
@@ -291,11 +294,26 @@ class MatrixReportGenerationTests(unittest.TestCase):
             report["discovery_contract"],
             "python -m unittest discover -s tools -p 'test_*.py'",
         )
-        self.assertGreater(report["case_count"], 0)
-        self.assertGreater(report["module_count"], 1)
-        for case in report["cases"]:
+        case_count = report["case_count"]
+        module_count = report["module_count"]
+        cases = report["cases"]
+        assert isinstance(case_count, int)
+        assert isinstance(module_count, int)
+        assert isinstance(cases, list)
+        self.assertGreater(case_count, 0)
+        self.assertGreater(module_count, 1)
+        for case in cases:
+            assert isinstance(case, dict)
             self.assertIn(case["source_shape_classification"], _DISPOSITION_BY_SHAPE)
             self.assertNotEqual(case["disposition"], "")
+            # Categories C and E are the deletion boundary and stay empty: the
+            # generator never proposes a deletion; that takes a manual review.
+            self.assertNotIn(
+                case["source_shape_classification"],
+                {"C_REDUNDANT_BEHAVIORAL_PROXY", "E_OBSOLETE_INVARIANT"},
+                case["id"],
+            )
+            self.assertNotEqual(case["disposition"], "DELETE_CANDIDATE", case["id"])
             for issue in case["related_issues"]:
                 self.assertRegex(issue, r"^#\d{1,4}$")
 

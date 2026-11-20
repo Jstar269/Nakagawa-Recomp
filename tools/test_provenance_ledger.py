@@ -1384,7 +1384,7 @@ class ProvenanceRefreshTests(unittest.TestCase):
             "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
             "record_id": "PROV-EXISTING",
             "evidence_tier": "H",
-            "authorship": "independent implementation record",
+            "authorship": "project-authored-independent record",
             "upstream_attribution": None,
         })
 
@@ -3668,6 +3668,113 @@ class GeneratorClassMappingRegressions(unittest.TestCase):
         refreshed = provenance_ledger._refresh_class_for("font/README.md", record)
         self.assertEqual(generated, refreshed)
         self.assertIsNone(refreshed[1].get("record_id"))
+
+
+class PublicLabelTests(unittest.TestCase):
+    """The public label states the trusted record's class and no more (audit F-cb647ba8, F-a366d392)."""
+
+    RECORDS = {
+        "project-authored-independent": "project_authored_attested",
+        "behavior-informed": "project_authored_attested",
+        "derived-translated": "upstream_derived",
+        "upstream-third-party": "upstream_derived",
+    }
+
+    def _record(self, classification: str) -> dict:
+        return {"id": f"rec-{classification}", "classification": classification, "evidence_tier": "S",
+                "upstream_license": "MIT"}
+
+    def test_every_set_labels_every_record_backed_class(self) -> None:
+        for label_set, labels in provenance_ledger.PUBLIC_LABEL_SETS.items():
+            self.assertEqual(set(labels), set(self.RECORDS), label_set)
+        for detailed, public in self.RECORDS.items():
+            self.assertEqual(provenance_ledger.public_class_of_detailed(detailed), public)
+
+    def test_v1_labels_are_the_published_text(self) -> None:
+        """v1 is what the public ledger carries until v2 is emitted; it must not drift."""
+        v1 = provenance_ledger.PUBLIC_LABEL_SETS["v1"]
+        self.assertEqual(v1["behavior-informed"], "independent implementation record")
+        self.assertEqual(v1["project-authored-independent"], "independent implementation record")
+        self.assertEqual(v1["upstream-third-party"], "modified_or_translated; see trusted record")
+        self.assertEqual(v1["derived-translated"], "modified_or_translated; see trusted record")
+
+    def test_v2_labels_state_no_more_than_the_record_class(self) -> None:
+        v2 = provenance_ledger.PUBLIC_LABEL_SETS["v2"]
+        # A behavior-informed record supports no independence claim (INDEPENDENCE_MODEL.md tier R).
+        self.assertNotIn("independent", v2["behavior-informed"])
+        self.assertIn("behavior-informed", v2["behavior-informed"])
+        # A vendored import is not "modified" by its class: most are byte-identical.
+        self.assertNotIn("modified", v2["upstream-third-party"])
+        self.assertIn("upstream-third-party", v2["upstream-third-party"])
+        self.assertIn("project-authored-independent", v2["project-authored-independent"])
+        self.assertIn("modified_or_translated", v2["derived-translated"])
+        # Each label names exactly one class, so a reader (and fork_init) can tell them apart.
+        self.assertEqual(len(set(v2.values())), len(v2))
+
+    def test_the_emitted_labels_state_no_more_than_the_record_class(self) -> None:
+        """What every producer writes today: no independence for behavior-informed, no "modified" for a vendored import."""
+        behavior = provenance_ledger._refresh_class_for("src/x.c", self._record("behavior-informed"))[1]
+        vendored = provenance_ledger._refresh_class_for("src/x.c", self._record("upstream-third-party"))[1]
+        self.assertNotIn("independent", behavior["authorship"])
+        self.assertNotIn("modified", vendored["modification_status"])
+        # The full generator and the hosted claim say the same.
+        self.assertEqual(provenance_ledger._class_for("src/x.c", self._record("behavior-informed"))[1]["authorship"],
+                         behavior["authorship"])
+        self.assertEqual(
+            provenance_ledger._class_for("src/x.c", self._record("upstream-third-party"))[1]["modification_status"],
+            vendored["modification_status"],
+        )
+
+    def test_refresh_and_safe_claim_derive_the_same_label(self) -> None:
+        import provenance_attest_verify as verifier
+        for label_set in provenance_ledger.PUBLIC_LABEL_SETS:
+            for detailed, public in self.RECORDS.items():
+                with self.subTest(label_set=label_set, detailed=detailed):
+                    record = self._record(detailed)
+                    refreshed = provenance_ledger._refresh_class_for("src/x.c", record, label_set=label_set)
+                    safe = verifier._safe_public_claim("src/x.c", record, label_set=label_set)
+                    self.assertEqual(refreshed, safe)
+                    field = provenance_ledger.PUBLIC_LABEL_FIELDS[public]
+                    self.assertEqual(refreshed[1][field],
+                                     provenance_ledger.PUBLIC_LABEL_SETS[label_set][detailed])
+
+    def _ledger(self, label_set: str) -> dict:
+        entries = []
+        for detailed in self.RECORDS:
+            classification, evidence = provenance_ledger._refresh_class_for(
+                f"src/{detailed}.c", self._record(detailed), label_set=label_set,
+            )
+            entries.append({"path": f"src/{detailed}.c", "classification": classification, "evidence": evidence})
+        entries.append({"path": "docs/a.md", "classification": "reviewed_documentation",
+                        "evidence": {"source": "public documentation review"}})
+        return {"entries": entries}
+
+    def test_label_set_of_a_ledger(self) -> None:
+        for label_set in provenance_ledger.PUBLIC_LABEL_SETS:
+            self.assertEqual(provenance_ledger.public_label_set_of(self._ledger(label_set)), label_set)
+        # A ledger with no record-backed label, or labels from no single set, gets the emitted set.
+        self.assertEqual(provenance_ledger.public_label_set_of({"entries": []}),
+                         provenance_ledger.PUBLIC_LABEL_SET)
+        mixed = self._ledger("v2")
+        mixed["entries"][1]["evidence"]["authorship"] = provenance_ledger.PUBLIC_LABEL_SETS["v1"]["behavior-informed"]
+        self.assertEqual(provenance_ledger.public_label_set_of(mixed), provenance_ledger.PUBLIC_LABEL_SET)
+
+    def test_relabel_changes_only_the_label(self) -> None:
+        records = {f"src/{detailed}.c": self._record(detailed) for detailed in self.RECORDS}
+        for source, target in (("v1", "v2"), ("v2", "v1")):
+            with self.subTest(source=source, target=target):
+                relabelled = provenance_ledger.relabel_public_ledger(self._ledger(source), records, target)
+                self.assertEqual(relabelled, self._ledger(target))
+
+    def test_relabel_leaves_unknown_text_and_foreign_record_ids_alone(self) -> None:
+        records = {f"src/{detailed}.c": self._record(detailed) for detailed in self.RECORDS}
+        ledger = self._ledger("v1")
+        ledger["entries"][0]["evidence"]["authorship"] = "hand-written text"
+        ledger["entries"][1]["evidence"]["record_id"] = "another-record"
+        relabelled = provenance_ledger.relabel_public_ledger(json.loads(json.dumps(ledger)), records, "v2")
+        self.assertEqual(relabelled["entries"][0]["evidence"]["authorship"], "hand-written text")
+        self.assertEqual(relabelled["entries"][1]["evidence"]["authorship"],
+                         provenance_ledger.PUBLIC_LABEL_SETS["v1"]["behavior-informed"])
 
 
 class EditorConfigImportByteTests(unittest.TestCase):

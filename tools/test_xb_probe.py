@@ -12,6 +12,7 @@ from pathlib import Path
 import struct
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -329,24 +330,28 @@ class XBProbeTests(unittest.TestCase):
             XBArchiveReader.from_bytes(raw, limits=XBLimits(max_total_expanded_bytes=150))
 
     def test_string_table_corruptions(self) -> None:
-        # Unterminated string table
-        raw = _make_archive([("a.bin", b"x", XBCompression.NONE)])
-        st_start = raw.find(b"\x01")
+        name = b"a.bin"
+        raw = _make_archive([(name.decode("ascii"), b"x", XBCompression.NONE)])
+        # One entry: 8-byte header, one 8-byte table entry, then the 8-byte
+        # string-section header; the first name record starts there with its
+        # length byte, then the hash byte, then the NUL-terminated name.
+        record = 8 + 8 * 1 + 8
+        self.assertEqual(raw[record : record + 2 + len(name) + 1], bytes((len(name), _sjis_hash(name))) + name + b"\0")
+        XBArchiveReader.from_bytes(raw)
+
         mutated = bytearray(raw)
-        mutated[st_start + 2] = ord("a")
-        with self.assertRaises(XBProbeError):
+        mutated[record + 2 + len(name)] = ord("a")
+        with self.assertRaisesRegex(XBProbeError, "unterminated string-table path"):
             XBArchiveReader.from_bytes(bytes(mutated))
 
-        # Name length mismatch
         mutated = bytearray(raw)
-        mutated[st_start] = 5
-        with self.assertRaises(XBProbeError):
+        mutated[record] = len(name) - 1
+        with self.assertRaisesRegex(XBProbeError, "string-table path length mismatch"):
             XBArchiveReader.from_bytes(bytes(mutated))
 
-        # Bad name hash
         mutated = bytearray(raw)
-        mutated[st_start + 1] ^= 0xFF
-        with self.assertRaises(XBProbeError):
+        mutated[record + 1] ^= 0xFF
+        with self.assertRaisesRegex(XBProbeError, "string-table path hash mismatch"):
             XBArchiveReader.from_bytes(bytes(mutated))
 
     def test_path_validation_edge_cases(self) -> None:
@@ -446,16 +451,11 @@ class XBProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.xb"
             path.write_bytes(raw)
-            original_read_bytes = Path.read_bytes
-
-            def forbidden_read_bytes(self):
+            def forbidden_read_bytes(self: Path) -> bytes:
                 raise AssertionError("archive must not use an unbounded path read")
 
-            Path.read_bytes = forbidden_read_bytes
-            try:
+            with mock.patch.object(Path, "read_bytes", new=forbidden_read_bytes):
                 reader = XBArchiveReader(path)
-            finally:
-                Path.read_bytes = original_read_bytes
             self.assertEqual(reader.read_entry("a.bin"), b"payload")
 
     def test_variant_labeling(self) -> None:
@@ -547,12 +547,9 @@ class XBProbeTests(unittest.TestCase):
                     return ShortReadHandle(raw, f)
                 return real_open(self_path, *args, **kwargs)
 
-            Path.open = custom_open
-            try:
+            with mock.patch.object(Path, "open", new=custom_open):
                 reader = XBArchiveReader(path)
                 self.assertEqual(reader.read_entry("a.bin"), b"payload")
-            finally:
-                Path.open = real_open
 
 
 def _raw_archive(

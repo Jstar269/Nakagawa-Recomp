@@ -34,7 +34,7 @@ vendored files contain no network code and no key.
 
 | File | Upstream path | Kind | Upstream 4.0.3 blob SHA | SHA-256 |
 | --- | --- | --- | --- | --- |
-| `monocypher.c` | `src/monocypher.c` | imported byte-identical | `c7c5450e84e4dffda44514d9f918162f1830de56` | `f1f838cdd483bdebe0df0ff5c5ed60535e496f769c6a2f933ac4c0b114207123` |
+| `monocypher.c` | `src/monocypher.c` | imported + LOCAL DELTA | `c7c5450e84e4dffda44514d9f918162f1830de56` | `5a60a58d2867a8378c4425ca9f7a0d336203250cb59b930059f4c5aae119f4f0` (this tree's bytes) |
 | `monocypher.h` | `src/monocypher.h` | imported byte-identical | `cf635e88e4f5851e1f58a9e2b3e85b8029a73861` | `fcaf6ed771358bb4f40fba016f6518ae86ec02b1b877d2cc35ad92d3a26fd7b3` |
 | `monocypher-ed25519.c` | `src/optional/monocypher-ed25519.c` | imported byte-identical | `4fdd07641e1c4d54a348e95d0ab05c28f84654a6` | `ce0d2f8e32ca8f66398ba5b3456cc74327c3eff14e7b950ce7d57be9025cc453` |
 | `monocypher-ed25519.h` | `src/optional/monocypher-ed25519.h` | imported byte-identical | `d7aa004123e1d38b891fdabd4171fbf9957242ae` | `3a3035181f991a158d0e1c7567258f0bae8ba0f1f23c5512b4a1db1b3c9730ce` |
@@ -43,16 +43,33 @@ vendored files contain no network code and no key.
 
 ## Local deltas
 
-None. The files build warning-free with `-std=c99 -Wall -Wextra -Wpedantic` under MinGW-w64 GCC and Linux GCC, so
-no compile flag or source edit is needed.
+The files build warning-free with `-std=c99 -Wall -Wextra -Wpedantic` under MinGW-w64 GCC and Linux GCC, so no
+compile flag is needed. One file is modified.
 
-## Upstream fixes not included
+### `monocypher.c`: constant-time `neq0`
 
-- Upstream commit `55158d37f4d86a536fb807096fa9cacc7d4469db` (2026-09-30, "Fix timing leak in constant time
-  comparisons"), made after the `4.0.3` pin and in no release yet (checked 2026-11-17), rewrites `neq0`, the helper
-  behind `crypto_verify16/32/64`. Depending on compiler and target, the pinned form can be lowered to a
-  data-dependent branch that leaks whether two buffers matched. This tree keeps the pinned `neq0`
-  (`monocypher.c`). It does not affect the project's use: `nk_sig.c` only verifies public Ed25519 signatures over
-  public data and hashes public data with BLAKE2b, so nothing secret is compared. Any future use of `crypto_verify*`
-  or another Monocypher function on secret data (a MAC or key comparison) must first take that fix, by re-pinning
-  to a release that carries it or as a recorded LOCAL DELTA.
+`monocypher.c` was modified by Nakagawa Recomp contributors on 2026-11-20 (upstream freshness, the maintainer's
+standing decision of 2026-11-19 to take upstream fixes). Its upstream 4.0.3 bytes have SHA-256
+`f1f838cdd483bdebe0df0ff5c5ed60535e496f769c6a2f933ac4c0b114207123`; the table gives this tree's. The change is
+upstream commit `55158d37f4d86a536fb807096fa9cacc7d4469db` ("Fix timing leak in constant time comparisons",
+committed 2026-10-01, in no release yet; `4.0.3` is still the newest tag on 2026-11-20, and `LICENCE.md` is
+unchanged at `master` `ab22d3c2dc14e4c5e2b069134aa7db4c57b0ac57`), applied unchanged; the only other differences
+from that commit's `src/monocypher.c` are the three-line `LOCAL DELTA (Nakagawa Recomp)` comment above `neq0` and
+a two-line `// Modified by Nakagawa Recomp contributors, 2026-11-20.` notice, with a blank line after it, right
+after upstream's licence header (the SPDX line stays where upstream has it, line 10). A pin that includes the
+commit drops this delta and the notice.
+
+- `neq0`, the helper behind `crypto_verify16/32/64`, folds the difference to 32 bits and takes the sign bit of
+  `fold | -fold`. The pinned form computed the same result in a way that, depending on compiler and target, could be
+  lowered to a data-dependent branch, leaking whether two buffers matched. The project's own use was not exposed
+  (`nk_sig.c` verifies public Ed25519 signatures over public data, and Ed25519's final check compares public
+  values), but the fix keeps any future use on secret data constant-time. A scratch check gave the same result from
+  both forms for 50,000,072 inputs (edge values, every single-bit value, and pseudo-random values).
+
+## Upstream changes not included
+
+- `f5f0a19a5dc6c14a49adb3cd63ea79a60f6ba77b` (2026-10-20, "Skip field inversion in signature check") changes how
+  `crypto_eddsa_check_equation` tests its final point, for about 6 % faster verification. It is an optimisation of
+  the signature path, not a fix, and waits for a release.
+- The other commits after the pin change Argon2 and X25519 code this project does not call, comments and the C++
+  namespace guards.

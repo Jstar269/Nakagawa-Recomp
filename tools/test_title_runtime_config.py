@@ -27,7 +27,7 @@ import sys
 import tempfile
 import time
 import unittest
-from typing import Any
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -36,6 +36,7 @@ import compat_overrides  # noqa: E402
 import title_manifest  # noqa: E402
 import hle_sources  # noqa: E402
 import title_runtime_config  # noqa: E402
+import test_public_title_isolation  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
 
 FIXTURE_A = ROOT / "assets" / "titles" / "pspdev-phase5.json"
@@ -73,7 +74,7 @@ GENERIC_RUNTIME_SOURCES = ("src/rt/driver.c", "src/rt/sched.c", "src/rt/recomp.c
                            "src/rt/title_config.c", "src/rt/title_config.h")
 
 
-def base_manifest(**bindings: int) -> dict:
+def base_manifest(**bindings: object) -> dict:
     manifest = json.loads(FIXTURE_A.read_text(encoding="utf-8"))
     if bindings:
         manifest["runtime_bindings"] = {"schema_version": 1, **bindings}
@@ -401,14 +402,14 @@ class GeneratedConfiguration(unittest.TestCase):
                 manifest["codegen_profile"] = codegen_profile
             header = title_runtime_config.render_header(
                 title_runtime_config.bindings_from_manifest(manifest))
-            bits = []
+            bits: list[str] = []
             for macro in ("SR_TITLE_CONFIG_DIAGNOSTICS_PROFILE",
                           "SR_TITLE_CONFIG_COMPAT_PROFILE"):
                 emitted = re.search(rf"#define {macro} ([01])$", header, re.MULTILINE)
                 self.assertIsNotNone(emitted, f"{macro} is not emitted at all")
                 assert emitted is not None
                 bits.append(emitted.group(1))
-            return tuple(bits)
+            return cast(tuple[str, str], tuple(bits))  # The loop above visits exactly the two profile macros.
 
         self.assertEqual(profile_bits(None), ("0", "0"))
         self.assertEqual(profile_bits("none"), ("0", "0"))
@@ -947,6 +948,16 @@ class TitleDeclaredDispatchBindings(unittest.TestCase):
         declared: list[dict[str, int]] = bindings.get("dispatch_aliases", [])
         return declared
 
+    @staticmethod
+    def title_manifests() -> list[Path]:
+        """Tracked title manifests that are not binding fixtures.
+
+        An untracked manifest in assets/titles/ (a private development title) is not in the
+        public tree, so it must neither fail nor satisfy the inventory checks locally.
+        """
+        return [path for path in test_public_title_isolation.tracked_titles()
+                if path.name not in BINDING_FIXTURES]
+
     def test_hot_shots_tennis_declares_no_dispatch_alias(self) -> None:
         self.assertEqual(self.aliases(HST_MANIFEST), [])
         manifest = json.loads(HST_MANIFEST.read_text(encoding="utf-8"))
@@ -961,8 +972,7 @@ class TitleDeclaredDispatchBindings(unittest.TestCase):
 
     def test_every_alias_a_title_declares_is_inventoried(self) -> None:
         inventoried = {int(o["address"]) for o in compat_overrides.TITLE_CONFIGURED_DISPATCH}
-        titles = [path for path in sorted((ROOT / "assets" / "titles").glob("*.json"))
-                  if path.name not in BINDING_FIXTURES]
+        titles = self.title_manifests()
         self.assertIn(HST_MANIFEST, titles)
         for path in titles:
             with self.subTest(manifest=path.name):
@@ -987,8 +997,7 @@ class TitleDeclaredDispatchBindings(unittest.TestCase):
         # alias source. A second collection needs its own comparison here.
         self.assertEqual(set(title_manifest.RUNTIME_BINDING_COLLECTIONS), {"dispatch_aliases"})
         declared = {alias["from"]
-                    for path in (ROOT / "assets" / "titles").glob("*.json")
-                    if path.name not in BINDING_FIXTURES
+                    for path in self.title_manifests()
                     for alias in self.aliases(path)}
         inventoried = {int(o["address"]) for o in compat_overrides.TITLE_CONFIGURED_DISPATCH}
         self.assertEqual(inventoried - declared, set(),
@@ -1649,7 +1658,8 @@ class RequiredRuntimeBindingsTests(unittest.TestCase):
             self.manifest(bindings={"schema_version": 1, "dispatch_aliases": self.ALIASES},
                           required=["dispatch_aliases", "dispatch_aliases"]),
             "duplicate required binding family")
-        for bad in ({}, "dispatch_aliases", 7, [5], [None]):
+        bad_values: tuple[object, ...] = ({}, "dispatch_aliases", 7, [5], [None])
+        for bad in bad_values:
             with self.subTest(value=bad):
                 with self.assertRaises(title_manifest.TitleManifestError):
                     title_manifest.validate_manifest(
@@ -1715,9 +1725,12 @@ class ExpectedDataFileCountTests(unittest.TestCase):
             title_manifest.validate_manifest(m)
         self.assertIn("must be in range", str(caught.exception))
 
-    def test_mismatch_remains_failure_not_silent_disable(self) -> None:
-        # The failure is in hle.c data_validate_index, not in the validator, but the
-        # accessor must return the configured count so the check is not bypassed.
+    def test_configured_count_reaches_the_runtime_header(self) -> None:
+        # This pins only the hand-off: the configured count reaches the generated header the
+        # runtime accessor reads, so the census is not silently disabled. The mismatch itself
+        # is refused in src/rt/hle_data.c (data_validate_index, data_validate_archive_index);
+        # tools.test_hle_title_config_behavior's configured run executes that refusal for a
+        # loose root and an archive (TITLE_CONFIG_DATA_CENSUS ... loose=refused archive=refused).
         m = json.loads(FIXTURE_A.read_text(encoding="utf-8"))
         m["runtime_bindings"] = {"schema_version": 1, "expected_data_file_count": 56672}
         cfg = title_runtime_config.bindings_from_manifest(m)
@@ -1736,9 +1749,6 @@ class ExpectedDataFileCountTests(unittest.TestCase):
         self.assertIn("expected_data_file_count", normalized["runtime_bindings"])
         # Generic (no block) has no expectation — 0 — but HST's explicit GAME_NAME=hst
         # without a manifest is a build-time refusal, not a silent generic fallback.
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class GuestModuleList(unittest.TestCase):
@@ -1788,3 +1798,7 @@ class GuestModuleList(unittest.TestCase):
         }]
         with self.assertRaises(title_runtime_config.TitleRuntimeConfigError):
             title_runtime_config.render_header(config)
+
+
+if __name__ == "__main__":
+    unittest.main()

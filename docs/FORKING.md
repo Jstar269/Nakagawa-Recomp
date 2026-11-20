@@ -85,11 +85,14 @@ python tools/fork_init.py init --authority ..\my-fork-authority
 This creates a Git repository next to your checkout (never inside it: the tool refuses that). It
 holds `docs/provenance/IMPLEMENTATION_PROVENANCE.json`, seeded from your fork's public ledger: one
 record per record id the ledger names, with the same paths, classification, evidence tier and licence.
-Each seeded record says that it adopts the claim the upstream published at that commit. It makes
-one choice of its own: every project-authored entry gets the detailed class `behavior-informed`,
-the weaker of the two detailed classes behind its project-authored class, because the public ledger
-does not say which of the two, `project-authored-independent` or `behavior-informed`, the upstream
-recorded, and an adopted claim must not assert an independence that no record supports. The tool
+Each seeded record says that it adopts the claim the upstream published at that commit. Its detailed
+class is the one the entry's public label names (`authorship` for a project-authored entry,
+`modification_status` for an upstream-derived one). Where a label names two classes, as the older
+`independent implementation record` and `modified_or_translated` labels do, it makes one choice of
+its own: a project-authored entry gets `behavior-informed`, the weaker of the two detailed classes
+behind its project-authored class, and an upstream-derived entry gets `derived-translated`, because
+such a label does not say which of the two the upstream recorded, and an adopted claim must not assert
+an independence that no record supports. The tool
 then checks that the trusted verifier,
 given only your authority, regenerates the committed public ledger byte for byte, and commits the
 seed with your Git identity. `python tools/fork_init.py verify --authority ..\my-fork-authority`

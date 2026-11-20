@@ -1285,7 +1285,7 @@ def _class_for(path: str, record: dict | None) -> tuple[str, dict]:
                                          "upstream_paths": record.get("upstream_paths", []),
                                          "upstream_revision": record.get("upstream_revision"),
                                          "license": record.get("upstream_license") or "see NOTICE.md",
-                                         "modification_status": "modified_or_translated; see record"}
+                                         "modification_status": public_label(classification)}
         if classification == "derived-data":
             return "generated_from_public_source", {**evidence, "generator": "documented public-source data path",
                                                        "source_family": record.get("upstream") or "public PSP data"}
@@ -1301,7 +1301,7 @@ def _class_for(path: str, record: dict | None) -> tuple[str, dict]:
         if classification == "unresolved":
             return "unresolved", {**evidence, "reason": "implementation ledger marks provenance unresolved"}
         if classification in ("behavior-informed", "project-authored-independent"):
-            return "project_authored_attested", {**evidence, "authorship": "independent implementation record",
+            return "project_authored_attested", {**evidence, "authorship": public_label(classification),
                                                    "upstream_attribution": record.get("upstream")}
 
     # The root ``fixtures/`` prefix stays while a trusted base can still carry the tree there:
@@ -1755,7 +1755,113 @@ def _detailed_records(document: dict) -> dict[str, dict]:
     return result
 
 
-def _refresh_class_for(path: str, record: dict | None) -> tuple[str, dict]:
+#: The evidence field that carries the public label of a record-backed entry, per public class.
+PUBLIC_LABEL_FIELDS = {
+    "project_authored_attested": "authorship",
+    "upstream_derived": "modification_status",
+}
+
+#: The public label each label set gives a record-backed entry, keyed by the trusted record's own
+#: classification (docs/provenance/INDEPENDENCE_MODEL.md). The label is derived, never free text,
+#: and states no more than the record's class. ``v1`` gave both project-authored classes
+#: "independent implementation record" and both upstream classes "modified_or_translated", which
+#: overstated a behavior-informed record and a byte-identical import (audit 2026-11-17,
+#: F-cb647ba8 and F-a366d392). ``v2`` names the record's class instead. The two sets differ only
+#: in this text: a public claim is the classification and the record id, which neither changes.
+PUBLIC_LABEL_SETS: dict[str, dict[str, str]] = {
+    "v1": {
+        "project-authored-independent": "independent implementation record",
+        "behavior-informed": "independent implementation record",
+        "derived-translated": "modified_or_translated; see trusted record",
+        "upstream-third-party": "modified_or_translated; see trusted record",
+    },
+    "v2": {
+        "project-authored-independent": "project-authored-independent record",
+        "behavior-informed": "project-authored, behavior-informed record",
+        "derived-translated": "modified_or_translated; see trusted record",
+        "upstream-third-party": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here",
+    },
+}
+
+#: The label set the generators emit. The hosted attestation runs the default branch's copy of
+#: the verifier, so a new set is accepted (``PUBLIC_LABEL_SETS``) before any generator emits it.
+#: ``v1`` stays accepted while a pull request branched before ``v2`` can still carry it.
+PUBLIC_LABEL_SET = "v2"
+
+
+def public_class_of_detailed(record_classification: str) -> str:
+    """The public class a record of this detailed classification gives a path (``_class_for``)."""
+    classification, _ = _class_for("", {"classification": record_classification, "id": None})
+    return classification
+
+
+def public_label(record_classification: object, label_set: str = PUBLIC_LABEL_SET) -> str | None:
+    """The public label ``label_set`` gives an entry backed by a record of this classification."""
+    if not isinstance(record_classification, str):
+        return None
+    return PUBLIC_LABEL_SETS[label_set].get(record_classification)
+
+
+def _known_public_labels(label_set: str | None = None) -> set[str]:
+    sets = [PUBLIC_LABEL_SETS[label_set]] if label_set else list(PUBLIC_LABEL_SETS.values())
+    return {label for labels in sets for label in labels.values()}
+
+
+def _label_field(entry: object) -> str | None:
+    """The evidence field that holds ``entry``'s public label, if its class carries one."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("classification"), str):
+        return None
+    return PUBLIC_LABEL_FIELDS.get(entry["classification"])
+
+
+def public_label_set_of(document: object) -> str:
+    """The label set a public ledger's labels belong to, the emitted set first.
+
+    Only the strings a set defines are considered; a document whose labels fit no single set is
+    given the emitted set, so the verifier's regeneration reports it as a mismatch.
+    """
+    used: set[str] = set()
+    entries = document.get("entries") if isinstance(document, dict) else None
+    known = _known_public_labels()
+    for entry in entries if isinstance(entries, list) else []:
+        evidence = entry.get("evidence") if isinstance(entry, dict) else None
+        field = _label_field(entry)
+        if isinstance(evidence, dict) and field and evidence.get(field) in known:
+            used.add(evidence[field])
+    for label_set in [PUBLIC_LABEL_SET] + sorted(set(PUBLIC_LABEL_SETS) - {PUBLIC_LABEL_SET}):
+        if used <= _known_public_labels(label_set):
+            return label_set
+    return PUBLIC_LABEL_SET
+
+
+def relabel_public_ledger(document: dict, records: dict[str, dict], label_set: str) -> dict:
+    """Give every record-backed entry of ``document`` the label ``label_set`` derives.
+
+    ``records`` maps each exact path to its trusted record. An entry is relabelled only when it
+    already carries a label some set defines and its record id is that exact record's, so a
+    claim, a record id or any other evidence field never changes here.
+    """
+    known = _known_public_labels()
+    for entry in document.get("entries", []):
+        if not isinstance(entry, dict):
+            continue
+        field = _label_field(entry)
+        evidence = entry.get("evidence")
+        path = entry.get("path")
+        record = records.get(path) if isinstance(path, str) else None
+        if not field or not isinstance(evidence, dict) or not isinstance(record, dict):
+            continue
+        if evidence.get(field) not in known or evidence.get("record_id") != record.get("id"):
+            continue
+        label = public_label(record.get("classification"), label_set)
+        if label is not None:
+            evidence[field] = label
+    return document
+
+
+def _refresh_class_for(
+    path: str, record: dict | None, *, label_set: str = PUBLIC_LABEL_SET,
+) -> tuple[str, dict]:
     fixed = _record_independent_class(path)
     if fixed is not None:
         return fixed
@@ -1771,15 +1877,16 @@ def _refresh_class_for(path: str, record: dict | None) -> tuple[str, dict]:
         "record_id": record["id"],
         "evidence_tier": record.get("evidence_tier"),
     }
+    label = public_label(record.get("classification"), label_set)
     if classification == "project_authored_attested":
-        evidence.update({"authorship": "independent implementation record", "upstream_attribution": None})
+        evidence.update({"authorship": label, "upstream_attribution": None})
     elif classification == "upstream_derived":
         evidence.update({
             "upstream": "documented upstream family",
             # The SPDX identifier is public (it is in the file header) and the
             # publication audit checks the header against it.
             "license": record.get("upstream_license") or "see NOTICE.md",
-            "modification_status": "modified_or_translated; see trusted record",
+            "modification_status": label,
         })
     elif classification == "generated_from_public_source":
         evidence.update({

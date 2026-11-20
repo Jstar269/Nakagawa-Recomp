@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -35,6 +36,11 @@ import test_public_title_isolation
 _WINDOWS = os.name == "nt"
 PLATFORM_SRC = "src/core/nk_platform_win32.c" if _WINDOWS else "src/core/nk_platform_posix.c"
 EXE_EXT = ".exe" if _WINDOWS else ""
+
+#: tests/native/test_manifest_parser.c --check exits 0 after printing ACCEPT and 1 after
+#: printing REJECT; every other exit is a crash or a harness failure.
+NATIVE_ACCEPT_EXIT = 0
+NATIVE_REJECT_EXIT = 1
 
 
 class TitleManifestParityTests(unittest.TestCase):
@@ -82,16 +88,68 @@ class TitleManifestParityTests(unittest.TestCase):
         if allow_override:
             cmd.append("--allow-override")
         res = subprocess.run(cmd, capture_output=True, text=True)
-        is_accept = (res.returncode == 0) and res.stdout.startswith("ACCEPT")
-        return is_accept, res.stdout.strip()
+        # Only the harness's two documented outcomes count: exit 0 with ACCEPT, or exit 1 with
+        # a REJECT line. A crash, an abort or any other exit is a parser defect, never a
+        # refusal (the hostile corpus exists to catch exactly those).
+        if res.returncode == NATIVE_ACCEPT_EXIT and res.stdout.startswith("ACCEPT: "):
+            return True, res.stdout.strip()
+        if res.returncode == NATIVE_REJECT_EXIT and res.stdout.startswith("REJECT: "):
+            return False, res.stdout.strip()
+        self.fail(f"native parser neither accepted nor refused {manifest_path.name} "
+                  f"(exit {res.returncode}):\nstdout: {res.stdout}\nstderr: {res.stderr}")
+
+    @staticmethod
+    def _validate_python(manifest_path: Path) -> dict:
+        validated: dict = title_manifest.validate_manifest(title_manifest.load_manifest(manifest_path))
+        return validated
 
     def _run_python(self, manifest_path: Path) -> tuple[bool, str]:
+        # Only the parser's own refusal counts as a rejection; a TypeError, KeyError or other
+        # crash propagates and fails the test instead of passing as "rejected".
         try:
-            raw = title_manifest.load_manifest(manifest_path)
-            val = title_manifest.validate_manifest(raw)
+            val = self._validate_python(manifest_path)
             return True, f"ACCEPT: id={val['id']}"
-        except Exception as exc:
+        except title_manifest.TitleManifestError as exc:
             return False, f"REJECT: {exc}"
+
+    @staticmethod
+    def _native_fields(c_out: str) -> dict:
+        """The fields the native harness printed for an accepted manifest."""
+        lines = c_out.splitlines()
+        head = re.fullmatch(
+            r"ACCEPT: id=(\S*) entry=0x([0-9a-f]{8}) base=0x([0-9a-f]{8}) modules=(\d+) "
+            r"disc_id=(\S*)", lines[0])
+        if head is None:
+            raise AssertionError(f"unexpected native ACCEPT line: {lines[0]!r}")
+        name_hex = [ln.split("=", 1)[1] for ln in lines if ln.startswith("DISPLAY_NAME_HEX=")]
+        modules = []
+        for ln in lines:
+            match = re.fullmatch(r"MODULE: name=(.*) load_address=0x([0-9a-f]{8}) required=([01])", ln)
+            if match:
+                modules.append((match.group(1), int(match.group(2), 16), match.group(3) == "1"))
+        if len(name_hex) != 1 or len(modules) != int(head.group(4)):
+            raise AssertionError(f"native harness output is incomplete:\n{c_out}")
+        return {
+            "id": head.group(1),
+            "entry": int(head.group(2), 16),
+            "base": int(head.group(3), 16),
+            "disc_id": head.group(5),
+            "display_name_hex": name_hex[0],
+            "modules": modules,
+        }
+
+    @staticmethod
+    def _python_fields(val: dict) -> dict:
+        """The same fields from title_manifest.validate_manifest's result."""
+        return {
+            "id": val["id"],
+            "entry": val["executable"]["entry"],
+            "base": val["executable"]["base"],
+            "disc_id": val["disc"]["id"] if "disc" in val else "none",
+            "display_name_hex": val["display_name"].encode("utf-8").hex(),
+            # A runtime-placed module has no manifest address; the native table holds 0.
+            "modules": [(m["name"], m.get("load_address", 0), m["required"]) for m in val["modules"]],
+        }
 
     def test_public_manifests_parity(self):
         """All *tracked* public manifests must be accepted by both parsers.
@@ -109,9 +167,12 @@ class TitleManifestParityTests(unittest.TestCase):
             self.assertTrue(py_ok, f"Python rejected valid manifest {mf.name}: {py_out}")
             self.assertTrue(c_ok, f"Native rejected valid manifest {mf.name}: {c_out}")
 
-            # Verify identical extracted ID
+            # Verify identical extracted identity, entry, base and modules, field by field.
             raw = json.loads(mf.read_text(encoding="utf-8"))
             self.assertIn(f"id={raw['id']}", c_out)
+            self.assertEqual(self._native_fields(c_out),
+                             self._python_fields(self._validate_python(mf)),
+                             f"parsers disagree on the fields of {mf.name}")
 
     def test_retired_libfont_readiness_binding_has_named_native_migration_error(self):
         manifest = json.loads((ROOT / "assets" / "titles" / "synthetic.json").read_text(encoding="utf-8"))
@@ -655,8 +716,9 @@ class TitleManifestParityTests(unittest.TestCase):
             (lambda d: d["executable"].update({"entry": "0xNOT_A_HEX"}), "malformed hex"),
             # 7. Reserved VFPU target range
             (lambda d: d.update({"runtime_bindings": {"schema_version": 1, "dispatch_aliases": [{"from": 0x40001000, "to": 0x08801000}]}}), "vfpu reserved range"),
-            # 8. Duplicate module name
-            (lambda d: d["modules"].append({"name": "BOOT.PRX", "load_address": 2, "required": True, "role": "guest-prx"}), "duplicate module"),
+            # 8. Duplicate module name, at a distinct valid user-RAM base so only the
+            #    case-insensitive name check can refuse it (checked by message below).
+            (lambda d: d["modules"].append({"name": "BOOT.PRX", "load_address": 0x08C10000, "required": True, "role": "guest-prx"}), "duplicate module"),
             # 9. Duplicate feature requirement
             (lambda d: d["feature_requirements"].append("allegrex"), "duplicate feature"),
             # 10. Non-retail kind with disc object
@@ -722,6 +784,10 @@ class TitleManifestParityTests(unittest.TestCase):
 
                 self.assertFalse(py_ok, f"Python accepted hostile mutation ({label}): {py_err}")
                 self.assertFalse(c_ok, f"Native accepted hostile mutation ({label}): {c_err}")
+                if label == "duplicate module":
+                    for output in (py_err, c_err):
+                        self.assertIn("duplicate module name under case-insensitive comparison",
+                                      output)
 
     def test_runtime_placement_parity(self):
         """Both parsers accept a runtime-placed module without an address, up to the
@@ -891,8 +957,20 @@ class TitleManifestParityTests(unittest.TestCase):
             c_raw_ok, c_raw_out = self._run_native(f_raw)
             c_esc_ok, c_esc_out = self._run_native(f_esc)
 
-            self.assertTrue(py_raw_ok and py_esc_ok)
-            self.assertTrue(c_raw_ok and c_esc_ok)
+            self.assertTrue(py_raw_ok and py_esc_ok, f"{py_raw_out} / {py_esc_out}")
+            self.assertTrue(c_raw_ok and c_esc_ok, f"{c_raw_out} / {c_esc_out}")
+
+            # Identical parsed fields: each parser decodes both spellings alike, and the two
+            # parsers agree with each other and with the intended text, byte for byte.
+            py_raw = self._python_fields(self._validate_python(f_raw))
+            py_esc = self._python_fields(self._validate_python(f_esc))
+            c_raw = self._native_fields(c_raw_out)
+            c_esc = self._native_fields(c_esc_out)
+            self.assertEqual(py_raw, py_esc)
+            self.assertEqual(c_raw, c_esc)
+            self.assertEqual(c_raw, py_raw)
+            self.assertEqual(c_raw["display_name_hex"],
+                             raw_utf8_manifest["display_name"].encode("utf-8").hex())
 
     def test_executable_entry_vs_fallback_contract(self):
         """Native parser must project executable.entry, NOT runtime_bindings.fallback_entry."""

@@ -1411,6 +1411,14 @@ class TestToolsModuleIndex(unittest.TestCase):
         run_git(["init", "-q"], cwd=root, check=True)
         run_git(["add", "tools"], cwd=root, check=True)
 
+    # Built from pieces so this file does not match its own scan (compare TestPagesUrlCase.HOST).
+    RETIRED_AUDITOR_NAME = "nid_" + "auditor"
+    ALLOWED_RETIRED_AUDITOR_LINE = (
+        "tools/hle_manifest.py",
+        "This replaces ad hoc regular-expression scraping "
+        f"(tools/{RETIRED_AUDITOR_NAME}.py) with a",
+    )
+
     def test_repository_tools_index_is_complete(self) -> None:
         errors = lint_tools_index(ROOT)
         self.assertEqual(
@@ -1419,6 +1427,71 @@ class TestToolsModuleIndex(unittest.TestCase):
             "tools/README.md module index does not match the tracked tools modules:\n"
             + "\n".join(errors),
         )
+
+    def test_tools_readme_tables_exist_and_retired_tool_unreferenced(self) -> None:
+        """Every tools/<name>.py named in tools/README.md tables must exist in tools/,
+        and no tracked *.py, Makefile, mk/*.mk or workflow-free text file under tools/,
+        mk/ or the repository root may import or run the retired NID auditor."""
+        readme_text = TOOLS_README.read_text(encoding="utf-8")
+        entries, parse_errors = parse_tools_index(readme_text)
+        self.assertEqual(parse_errors, [], f"tools/README.md index parse errors: {parse_errors}")
+
+        with self.subTest("readme_tables_exist"):
+            missing = [
+                f"{TOOLS_DIR}/README.md:{lineno}: {TOOLS_DIR}/{name} does not exist"
+                for name, lineno in entries
+                if not (ROOT / TOOLS_DIR / name).is_file()
+            ]
+            self.assertEqual(
+                missing,
+                [],
+                "tools/README.md tables name missing file(s) in tools/:\n"
+                + "\n".join(missing),
+            )
+
+        with self.subTest("retired_tool_unreferenced"):
+            tracked_raw = run_git(
+                ["ls-files", "-z"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            tracked_paths = [
+                item.replace("\\", "/")
+                for item in tracked_raw.split("\0")
+                if item
+            ]
+            allowed_path, allowed_line = self.ALLOWED_RETIRED_AUDITOR_LINE
+            unexpected_refs: list[str] = []
+            for rel_path in sorted(tracked_paths):
+                if rel_path.startswith(".github/"):
+                    continue
+                if not (
+                    rel_path.endswith(".py")
+                    or PurePosixPath(rel_path).name == "Makefile"
+                    or rel_path.startswith(("tools/", "mk/"))
+                    or "/" not in rel_path
+                ):
+                    continue
+                source = ROOT / rel_path
+                if not source.is_file():
+                    continue
+                for lineno, line in enumerate(
+                    source.read_text(encoding="utf-8", errors="replace").splitlines(),
+                    start=1,
+                ):
+                    if self.RETIRED_AUDITOR_NAME not in line:
+                        continue
+                    if rel_path == allowed_path and line.strip() == allowed_line:
+                        continue
+                    unexpected_refs.append(f"{rel_path}:{lineno}: {line.strip()}")
+            self.assertEqual(
+                unexpected_refs,
+                [],
+                f"retired tool {self.RETIRED_AUDITOR_NAME} is still referenced:\n"
+                + "\n".join(unexpected_refs),
+            )
 
     def test_an_inherited_git_dir_does_not_list_another_repository(self) -> None:
         """Failing-before: `git ls-files` ran without the isolated environment, so a GIT_DIR and

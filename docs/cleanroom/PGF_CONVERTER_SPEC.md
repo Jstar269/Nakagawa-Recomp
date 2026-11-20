@@ -110,10 +110,11 @@ scaling.
 | `snap-overshoot-zones-overlap` | At the chosen ppem the band above the x-height reaches the cap height (section 3, rule 13). |
 | `scale-x-out-of-range` | `--scale-x` outside 800..1250 thousandths (section 3, rule 14). |
 | `vertical-metric-out-of-range` | `--vertical-advance` or `--vertical-origin` outside 1..2000 thousandths of the em (section 3, rule 16). |
+| `horizontal-metrics-invalid` | A `--horizontal-metrics` table is unreadable, has another schema, evidence label or field list, lacks the slot `--horizontal-metrics-slot` names, or lists a key that is not `U+XXXX` or a value that is not three integers in range (section 3, rule 18). |
 | `glyph-too-large` | A raster exceeds the writer's 7-bit record fields (127 px). |
 | `composite-too-deep` / `composite-too-many-components` | Composite expansion bounds. |
 | `metric-targets-invalid` / `metric-target-unreachable` | Policy document is malformed / no size satisfies it. |
-| `conflicting-parameters` | `--ppem` together with `--metric-targets`; `--fallback-pin` without `--fallback`; or only one of `--pin` and `--fallback-pin` when a fallback is given. (`--codes`, `--codepoints`, `--jis-x-0208-japanese`, `--japanese-text`, `--latin-1-text`, `--latin-cyrillic-text`, and `--ks-x-1001-korean` are mutually exclusive at the CLI.) |
+| `conflicting-parameters` | `--ppem` together with `--metric-targets`; `--fallback-pin` without `--fallback`; only one of `--pin` and `--fallback-pin` when a fallback is given; or only one of `--horizontal-metrics` and `--horizontal-metrics-slot`. (`--codes`, `--codepoints`, `--jis-x-0208-japanese`, `--japanese-text`, `--latin-1-text`, `--latin-cyrillic-text`, and `--ks-x-1001-korean` are mutually exclusive at the CLI.) |
 | `pin-invalid` / `pin-digest-mismatch` / `pin-size-mismatch` / `pin-license-mismatch` | Source pin does not bind the exact input and licence bytes. |
 | `reserved-font-name` / `camouflage-font-name` | Output name policy violation (section 6). |
 | writer reasons (`font-field-invalid`, `nominal-size-out-of-range`, `metric-table-overflow`, ...) | Re-raised unchanged from `pgf_writer.py`. |
@@ -472,6 +473,49 @@ manifest in memory first and writes only after every stage succeeds.
     header maxima are not a function of its glyphs (its maximum glyph width
     is 21 where no image is wider than 20), so the converter keeps deriving
     them from the glyphs (section 4) and fits the glyphs instead.
+18. **Measured horizontal metrics** (`--horizontal-metrics FILE
+    --horizontal-metrics-slot NAME`, from converter 0.10.0; off by default,
+    and output without it is unchanged). The file is an
+    `nk-psp-horizontal-metrics/v1` table: its `evidence` label
+    (`PSP-measured`, or `PPSSPP-derived, not PSP-measured` for values that
+    came from PPSSPP), its `fields`, exactly `advance_h_26_6`, `bitmap_width`
+    and `bitmap_left`, and per slot a map from `U+XXXX` to those three
+    integers. For each converted code the slot lists:
+    - the advance is `advance_h_26_6`, exactly: `--tracking`,
+      `--embolden-advance` and `--digit-advance` do not apply to it, and a
+      digit it lists is not shifted;
+    - when `bitmap_width` is above 0 and the glyph has ink, the outline's x is
+      multiplied by `k / 1000` on top of rules 14 and 17, for the `k` in
+      750..1250 nearest 1000 whose image, after rules 1-15, is `bitmap_width`
+      pixels wide and reaches half coverage (a sample of 8 or more) on the same
+      top and bottom rows as at `k = 1000` (a horizontal scale must not move an
+      x-height or cap-height row). The image width grows with `k`, so a binary
+      search finds the range of `k` for a width. When no such `k` exists, the
+      nearest narrower width up to 3 pixels less that one does is used and
+      the image is padded with blank columns to `bitmap_width`, half on each
+      side and the odd one on the right; failing that, the nearest wider width
+      up to 3 pixels more; failing that, `k = 1000`;
+    - the image's left (`adjust_x`, `x_left`) is `bitmap_left`.
+    The glyph's rows, its y and every other field are as without the option.
+    Codes the slot does not list, and listed codes outside the code set, are
+    converted as without it. The manifest records the table (section 7).
+    *Project decision* (#1300), from a measurement the maintainer approved
+    for publication: the table `assets/fonts/psp_measured_latin_metrics.json` holds,
+    for each character the stand-ins draw, the advance, image width and left
+    of the console's Latin fonts `ltn0`, `ltn4`, `ltn8` and `ltn12`, read
+    from the fonts of the maintainer's own PSP-3000 (firmware 6.61) through
+    the project's reader (`src/rt/pgf_public.c`) as the character
+    information fields `sfp26AdvanceH`, `bitmapWidth` and `bitmapLeft`. It
+    is labelled `PSP-measured`; none of its values comes from PPSSPP. It
+    holds those numbers only: no outline, bitmap, hinting or other byte of a
+    console font. A game lays text out from these three numbers (Hot Shots
+    Tennis by the image width, the others by the advance and the left), so
+    with them the Geist stand-ins set each line where the console's fonts
+    do, while every letter keeps Geist's own outline. Over the 2,195 values
+    the built titles query, the advance and the left now match the console's
+    in every character and the image width in 96 % (the rest is listed in
+    the manifest); the line widths of the measured strings are within one
+    pixel.
 
 Same pinned input plus same parameters plus same converter version therefore
 produce byte-identical `.pgf` and manifest output on every supported host,
@@ -610,7 +654,7 @@ manifest's `source` record is the list's `upstream.repository` and
 | `code_points` | For `--codepoints`: the file's leaf name, count, and SHA-256; `null` for a range. |
 | `glyphs` | Count, zero-area codes, maximum pixel dimensions. |
 | `metric_targets` | The policy, the chosen ppem, and achieved 26.6 values - or `null`. |
-| `parameters` | ppem, nominal em size (26.6), resolution (26.6), any header ascender and descender given, whether the ellipsis was set on the baseline, supersample, coverage bits, rounding formulas, hinting mode, and the `embolden` strengths (x, y, advance, in sub-samples); `tracking_sub_samples` and `digit_advance_26_6` only when given; `snap_overshoot` only when given: its unit, threshold `N`, and the flat edges `B`, `X` and `C` in font units of the first font (`zones`) and, with a fallback that draws codes, of the second (`fallback_zones`); `scale_x_thousandths` only when it is not 1000; `vertical_advance_thousandths` and `vertical_origin_thousandths` only when given; `fit_em` only when given: the ascending `codes` it narrowed. |
+| `parameters` | ppem, nominal em size (26.6), resolution (26.6), any header ascender and descender given, whether the ellipsis was set on the baseline, supersample, coverage bits, rounding formulas, hinting mode, and the `embolden` strengths (x, y, advance, in sub-samples); `tracking_sub_samples` and `digit_advance_26_6` only when given; `snap_overshoot` only when given: its unit, threshold `N`, and the flat edges `B`, `X` and `C` in font units of the first font (`zones`) and, with a fallback that draws codes, of the second (`fallback_zones`); `scale_x_thousandths` only when it is not 1000; `vertical_advance_thousandths` and `vertical_origin_thousandths` only when given; `fit_em` only when given: the ascending `codes` it narrowed; `horizontal_metrics` only when given: the table's leaf name (`path`), SHA-256, `slot`, `evidence` label and `fields`, how many codes it lists (`codes`) and how many of them were converted (`codes_applied`), the codes padded to their width (`width_padded_codes`) and those left wider than it (`width_not_met_codes`), and each scaled code's `k` (`width_factors`). |
 | `fallback` | Only with `--fallback`: the second font's `input` record (as above), its `license` block, and the ascending `codes` it draws. |
 | `license` | SPDX id, copyright line, reserved font names, the **full licence text**, its digest, and the source pin's provenance record - or `null` without a pin. |
 
@@ -628,6 +672,13 @@ manifest's `source` record is the list's `upstream.repository` and
   retail, firmware, or camouflaged font payload. No bytes of those inputs are
   read, embedded, or compared against. This record exists so the claim in
   issue #313 is checkable rather than asserted.
+- **Measured numbers.** Rules 15 to 18 rest on measurements of the console's
+  own fonts through the project's reader. Rules 15 to 17 take only rules and
+  ratios from them. Rule 18's table records, per character, three numbers the
+  console's Latin fonts give a game (advance, image width and left), labelled
+  `PSP-measured` with the device, firmware, fonts and fields; the maintainer
+  approved publishing them. The converter reads only that table, never a
+  console font, and no outline, bitmap or hinting byte of one is recorded.
 - **Classification.** Candidate `project-authored-independent` under
   `INDEPENDENCE_MODEL.md`: behaviour established from public format facts and
   project-owned specification, expression written for this project. The
@@ -665,5 +716,6 @@ manifest's `source` record is the list's `upstream.repository` and
 | Ink trim: no image starts or ends in a blank column or row, a string drawn through the reader by advance keeps every pixel, advances unchanged | `InkTrimTests`, `ReaderRoundTripTests` |
 | Vertical metrics: the reader returns bearing X, bearing Y and advance by rule 16 with and without each option; the project fonts carry the console's values; out-of-range options refused | `ReaderRoundTripTests`, `ProjectLatinStrikeTests`, `ProjectCjkSizeTests`, `SpacingAndFallbackOptionTests` |
 | Project Japanese and Korean nominal size and advances; Korean glyphs wider than the em fit it, the others unchanged | `ProjectCjkSizeTests` |
+| Measured horizontal metrics: the table's PSP-measured labelling and fields, the Geist faces' advance, width and left equal to it, rows kept, padding, manifest record and refusals | `HorizontalMetricsTests`, `InkTrimTests` |
 | A font the project ships pinned by its font-list record, and that form's refusals | `FontListPinTests` |
 | Independent structural validation | `nk_core.fonts.validate_pgf_data` on the output |

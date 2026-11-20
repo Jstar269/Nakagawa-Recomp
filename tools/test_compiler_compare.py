@@ -15,10 +15,22 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from typing import Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict, cast
 
+# The repository root, so ``tools.`` imports also resolve when this file runs as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import compiler_compare  # noqa: E402
+if TYPE_CHECKING:
+    from tools import compiler_compare
+else:
+    import compiler_compare  # noqa: E402
+
+
+class _TimedWorkloadResult(TypedDict):
+    status: str
+    summary: str | None
+    note: NotRequired[str]
+    output: str
 
 
 class MeasurementTrialIsolationTests(unittest.TestCase):
@@ -244,6 +256,15 @@ class FakeToolchain:
 
 
 class CompilerCompareTests(unittest.TestCase):
+    def test_the_module_runs_as_a_script(self) -> None:
+        # ``python tools/test_compiler_compare.py`` puts only tools/ on the path;
+        # its imports still resolve.
+        with tempfile.TemporaryDirectory() as cwd:
+            run = subprocess.run([sys.executable, "-E", str(Path(__file__).resolve()), "-h"],
+                                 cwd=cwd, capture_output=True, text=True, check=False,
+                                 timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -652,6 +673,58 @@ class CompilerCompareTests(unittest.TestCase):
         self.assertIn("<HOST_PATH>", output.getvalue())
         self.assertIn("/PSP_GAME/USRDIR/a.bin", serialized)
 
+    def run_main(self, compilers: str = "gcc") -> int:
+        with mock.patch("sys.stdout", io.StringIO()):
+            return compiler_compare.main([
+                "--compilers", compilers, "--linkers", "default",
+                "--make", "mingw32-make", "--python", sys.executable,
+                "--repeats", "3", "--output", str(self.output),
+            ])
+
+    def test_unstable_semantic_hash_across_repeats_fails_the_run(self) -> None:
+        """F-cb9cb21f: three repeats with three hashes are MEASURED_HASH_UNSTABLE and exit 1."""
+        self.fake.semantic_hash = lambda _compiler, index: f"{index:064x}"
+        result = self.run_main()
+        self.assertEqual(result, 1)
+        report = json.loads((self.output / "compiler_compare.json").read_text(encoding="utf-8"))
+        entry = report["toolchains"][0]
+        self.assertEqual(entry["status"], compiler_compare.STATUS_MEASURED_HASH_UNSTABLE)
+        self.assertFalse(entry["measurements"]["summary"]["semantic_hash_stable"])
+        self.assertEqual(report["summary"][compiler_compare.STATUS_MEASURED_HASH_UNSTABLE], ["gcc/default"])
+        self.assertEqual(report["summary"][compiler_compare.STATUS_MEASURED], [])
+        self.assertEqual(report["semantic_hash_comparison"]["status"], "UNSTABLE")
+        markdown = (self.output / "compiler_compare.md").read_text(encoding="utf-8")
+        row = next(line for line in markdown.splitlines() if line.startswith("| gcc | default |"))
+        # The measurements stay visible; the row names its status and the unstable hash.
+        self.assertIn("MEASURED_HASH_UNSTABLE", row)
+        self.assertIn("| UNSTABLE |", row)
+        self.assertIn(" s |", row)
+
+    def test_semantic_hashes_that_differ_across_toolchains_fail_the_run(self) -> None:
+        """F-cb9cb21f: stable rows whose hashes differ are each MEASURED, but the run exits 1."""
+        self.fake.semantic_hash = lambda compiler, _index: (
+            "c" * 64 if "clang" in compiler else "a" * 64)
+        result = self.run_main("gcc,clang")
+        self.assertEqual(result, 1)
+        report = json.loads((self.output / "compiler_compare.json").read_text(encoding="utf-8"))
+        self.assertEqual([entry["status"] for entry in report["toolchains"]],
+                         [compiler_compare.STATUS_MEASURED] * 2)
+        self.assertEqual(report["semantic_hash_comparison"]["status"], "DIFFERENT")
+
+    def test_matching_stable_hashes_across_toolchains_pass_the_run(self) -> None:
+        self.assertEqual(self.run_main("gcc,clang"), 0)
+
+    def test_report_validator_ties_the_measured_status_to_hash_stability(self) -> None:
+        report = self.compare()
+        report["toolchains"][0]["measurements"]["summary"]["semantic_hash_stable"] = False
+        with self.assertRaises(compiler_compare.CompareError):
+            compiler_compare.validate_report(report)
+        self.fake.semantic_hash = lambda _compiler, index: f"{index:064x}"
+        report = self.compare()
+        report["toolchains"][0]["measurements"]["summary"]["semantic_hash_stable"] = True
+        with self.assertRaises(compiler_compare.CompareError):
+            compiler_compare.validate_report(report)
+
     def test_main_writes_veto_report_and_returns_failure(self) -> None:
         self.fake.failing_gate = "cosim-selftest"
         with mock.patch("sys.stdout", io.StringIO()):
@@ -853,7 +926,8 @@ class CompilerCompareTests(unittest.TestCase):
                 "name": "gcc/default",
                 "compiler": "gcc",
                 "linker_selection": "default",
-                "status": compiler_compare.STATUS_MEASURED,
+                # These repeats disagree, so the row is MEASURED_HASH_UNSTABLE (F-cb9cb21f).
+                "status": compiler_compare.STATUS_MEASURED_HASH_UNSTABLE,
                 "veto": {
                     "status": compiler_compare.GATE_PASS,
                     "failed_gate": None,
@@ -890,7 +964,9 @@ class CompilerCompareTests(unittest.TestCase):
             "name": "gcc/default",
             "compiler": "gcc",
             "linker_selection": "default",
-            "status": compiler_compare.STATUS_MEASURED,
+            # The status a run gives this summary: an unstable hash is MEASURED_HASH_UNSTABLE (F-cb9cb21f).
+            "status": (compiler_compare.STATUS_MEASURED if summary["semantic_hash_stable"]
+                       else compiler_compare.STATUS_MEASURED_HASH_UNSTABLE),
             "veto": {
                 "status": compiler_compare.GATE_PASS,
                 "failed_gate": None,
@@ -1335,14 +1411,17 @@ class RuntimeWorkloadRunnerTests(unittest.TestCase):
 class TimingOnlyWorkloadTests(unittest.TestCase):
     """The platform ladder clears SR_*, so its benchmark runs are timed, not failed."""
 
-    def _run(self, name: str) -> dict:
+    def _run(self, name: str) -> _TimedWorkloadResult:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import run_perf_benchmarks
         done = subprocess.CompletedProcess(args=[], returncode=0, stdout="built and ran\n")
         with tempfile.TemporaryDirectory() as temp, \
                 mock.patch.object(run_perf_benchmarks.subprocess, "run", return_value=done):
-            return run_perf_benchmarks._run_one("make", sys.executable, name, (name,), Path(temp),
-                                                True, "build/perf-benchmark")
+            return cast(
+                _TimedWorkloadResult,
+                run_perf_benchmarks._run_one("make", sys.executable, name, (name,), Path(temp),
+                                             True, "build/perf-benchmark"),
+            )  # _run_one emits these fields; note is optional for timing-only workloads.
 
     def test_a_ladder_workload_without_a_summary_is_timed_not_failed(self) -> None:
         for name in ("platform-ladder-gap", "platform-ladder-sched", "platform-ladder-fs"):

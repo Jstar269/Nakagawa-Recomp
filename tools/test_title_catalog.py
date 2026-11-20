@@ -428,6 +428,99 @@ int main(void) {{
         self.assertEqual(res_exec.returncode, 0, f"Execution failed: {res_exec.stderr}")
         self.assertIn("ALL_NATIVE_CATALOG_C_ASSERTIONS_PASSED", res_exec.stdout)
 
+    def _compile_and_run_catalog_harness(self, header: Path, source: Path, body: str) -> str:
+        gcc = shutil.which("gcc")
+        if not gcc:
+            self.skipTest("gcc not available in PATH on this host")
+        harness = self.temp_dir / "limits_harness.c"
+        harness.write_text(
+            "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
+            f'#include "{header.as_posix()}"\n'
+            "int main(void) {\n" + body + '    printf("HARNESS_OK\\n");\n    return 0;\n}\n',
+            encoding="utf-8",
+        )
+        exe_path = self.temp_dir / ("limits_harness.exe" if sys.platform == "win32" else "limits_harness")
+        res_comp = subprocess.run(
+            [gcc, "-Wall", "-Wextra", "-Werror", "-std=c99", "-I", str(header.parent),
+             str(harness), str(source), "-o", str(exe_path)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(res_comp.returncode, 0, f"Compilation failed: {res_comp.stderr}")
+        res_exec = subprocess.run([str(exe_path)], capture_output=True, text=True)
+        self.assertEqual(res_exec.returncode, 0, f"Execution failed: {res_exec.stdout}{res_exec.stderr}")
+        self.assertIn("HARNESS_OK", res_exec.stdout)
+        return res_exec.stdout
+
+    def test_native_snapshot_admits_every_module_the_validator_admits(self) -> None:
+        """A title with as many modules as title_manifest admits must still be found.
+
+        The snapshot copy used a fixed cap of 32, below the validator's 256,
+        so a valid title with more modules was reported as not found.
+        """
+        limit = title_manifest.MAX_TITLE_MODULES
+        cat_h = ROOT / "src" / "core" / "generated" / "nk_title_catalog.h"
+        cat_c = ROOT / "src" / "core" / "generated" / "nk_title_catalog.c"
+        body = f"""    static NkModuleDefinition modules[{limit}];
+    static char names[{limit}][16];
+    for (int i = 0; i < {limit}; i++) {{
+        snprintf(names[i], sizeof(names[i]), "mod%d.prx", i);
+        modules[i].name = names[i];
+    }}
+    NkTitleEntry overlay;
+    memset(&overlay, 0, sizeof(overlay));
+    overlay.id = "many-modules-v1";
+    overlay.display_name = "Many modules";
+    overlay.kind = NK_TITLE_KIND_HOMEBREW;
+    overlay.primary_disc_id = "MANY00001";
+    overlay.modules = modules;
+    overlay.module_count = {limit};
+    nk_title_catalog_register_overlay(&overlay);
+    NkTitleEntrySnapshot found = {{0}};
+    if (!nk_title_catalog_find_by_id("many-modules-v1", &found)) {{
+        printf("snapshot refused a title with {limit} modules\\n");
+        return 1;
+    }}
+    if (found.entry.module_count != {limit} ||
+        strcmp(found.entry.modules[{limit} - 1].name, "mod{limit - 1}.prx") != 0) return 2;
+    nk_title_catalog_snapshot_release(&found);
+    nk_title_catalog_clear_overlay();
+"""
+        self._compile_and_run_catalog_harness(cat_h, cat_c, body)
+
+    def test_generated_header_limits_come_from_the_validator(self) -> None:
+        titles = title_catalog_codegen.collect_public_manifests(ROOT / "assets" / "titles")[1]
+        header = title_catalog_codegen.generate_header("0" * 16, titles)
+        self.assertIn(
+            f"#define NK_TITLE_MAX_LOOSE_CONTENT_ROOTS {title_manifest.MAX_LOOSE_CONTENT_ROOTS}\n", header
+        )
+        self.assertIn(
+            f"#define NK_TITLE_MAX_LOOSE_CONTENT_EXCLUDES {title_manifest.MAX_LOOSE_CONTENT_EXCLUDES}\n", header
+        )
+        self.assertIn(f"#define NK_TITLE_MAX_MODULES {title_manifest.MAX_TITLE_MODULES}\n", header)
+
+    def test_display_name_with_trigraph_sequences_survives_c99(self) -> None:
+        """'??!' and '??/' in manifest text must reach C unchanged under -std=c99."""
+        titles = copy.deepcopy(
+            title_catalog_codegen.collect_public_manifests(ROOT / "assets" / "titles")[1]
+        )
+        target = next(t for t in titles if t["id"] == "synthetic-allegrex-v1")
+        tricky = "Why??! ok??/"
+        target["display_name"] = tricky
+        out_h = self.temp_dir / "nk_title_catalog.h"
+        out_c = self.temp_dir / "nk_title_catalog.c"
+        out_h.write_text(title_catalog_codegen.generate_header("0" * 16, titles), encoding="utf-8", newline="")
+        out_c.write_text(title_catalog_codegen.generate_source("0" * 16, titles), encoding="utf-8", newline="")
+        expected = "".join(f"\\{b:03o}" for b in tricky.encode("utf-8"))
+        body = f"""    NkTitleEntrySnapshot found = {{0}};
+    if (!nk_title_catalog_find_by_id("synthetic-allegrex-v1", &found)) return 1;
+    if (strcmp(found.entry.display_name, "{expected}") != 0) {{
+        printf("display_name was [%s]\\n", found.entry.display_name);
+        return 2;
+    }}
+    nk_title_catalog_snapshot_release(&found);
+"""
+        self._compile_and_run_catalog_harness(out_h, out_c, body)
+
     def test_snapshot_copy_failure_frees_only_owned_storage(self) -> None:
         """Fail each allocation of a snapshot copy in turn: the failed copy must free
         only what it allocated. A loose root's borrowed root/mount pointers used to

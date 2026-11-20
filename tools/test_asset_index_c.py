@@ -17,6 +17,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import hle_sources  # noqa: E402
+import package_notices  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
 
 
@@ -415,6 +416,25 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             (generated / name).write_bytes(f"synthetic project asset: {name}\n".encode("ascii"))
 
     @staticmethod
+    def _path_only_environment(*path_dirs: Path) -> dict[str, str]:
+        """The copy script's environment: ``path_dirs`` and Python alone on PATH, and no MSYS_PATH.
+
+        The copy then finds each DLL only where the test put it. The notice generator the copy
+        runs still records every copied MSYS2 runtime's exact package version, read from the
+        MSYS2 toolchain this test process resolves (``MINGW_PREFIX`` names it), as a package
+        build in that environment does. Without it the generator fell back to C:/msys64/ucrt64,
+        which on a hosted runner is not the job's MSYS2 and holds no record of those packages.
+        """
+        env = os.environ.copy()
+        env.pop("MSYS_PATH", None)
+        env.pop("MINGW_PREFIX", None)
+        toolchain = package_notices.resolve_toolchain_root()
+        if toolchain is not None:
+            env["MINGW_PREFIX"] = str(toolchain)
+        env["PATH"] = os.pathsep.join([*(str(path) for path in path_dirs), str(Path(sys.executable).parent)])
+        return env
+
+    @staticmethod
     def _toolchain(root: Path, imports: dict[str, str]) -> Path:
         """A synthetic toolchain bin directory whose objdump reports ``imports`` (binary -> DLL)."""
         gcc_bin = root / "gcc-bin"
@@ -449,10 +469,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             (gcc_bin / "SDL3.dll").write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             iconv = gcc_bin / "libiconv-2.dll"
             iconv.write_bytes(synthetic_pe("synthetic libiconv runtime"))
-            env = os.environ.copy()
-            env.pop("MSYS_PATH", None)
-            env.pop("MINGW_PREFIX", None)
-            env["PATH"] = os.pathsep.join([str(gcc_bin), str(Path(sys.executable).parent)])
+            env = self._path_only_environment(gcc_bin)
 
             result = self._run_copy(build, env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -472,10 +489,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             current.write_bytes(synthetic_pe("runtime from the current toolchain"))
             libgcc = gcc_bin / "libgcc_s_seh-1.dll"
             libgcc.write_bytes(synthetic_pe("synthetic libgcc runtime"))
-            env = os.environ.copy()
-            env.pop("MSYS_PATH", None)
-            env.pop("MINGW_PREFIX", None)
-            env["PATH"] = os.pathsep.join([str(gcc_bin), str(Path(sys.executable).parent)])
+            env = self._path_only_environment(gcc_bin)
 
             result = self._run_copy(build, env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -509,10 +523,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             iconv.write_bytes(synthetic_pe("synthetic libiconv runtime"))
             stdcxx = gcc_bin / "libstdc++-6.dll"
             stdcxx.write_bytes(synthetic_pe("synthetic libstdc++ runtime"))
-            env = os.environ.copy()
-            env.pop("MSYS_PATH", None)
-            env.pop("MINGW_PREFIX", None)
-            env["PATH"] = os.pathsep.join([str(shim), str(gcc_bin), str(Path(sys.executable).parent)])
+            env = self._path_only_environment(shim, gcc_bin)
 
             result = self._run_copy(build, env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -531,10 +542,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             (build / "SDL3.dll").write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             shim = self._compiler_cache_shim(root)
             gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
-            env = os.environ.copy()
-            env.pop("MSYS_PATH", None)
-            env.pop("MINGW_PREFIX", None)
-            env["PATH"] = os.pathsep.join([str(shim), str(gcc_bin), str(Path(sys.executable).parent)])
+            env = self._path_only_environment(shim, gcc_bin)
 
             result = self._run_copy(build, env)
             output = "".join((result.stdout + result.stderr).split())
@@ -558,10 +566,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             (first / "libiconv-2.dll").write_bytes(synthetic_pe("synthetic libiconv runtime, first directory"))
             gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
             (gcc_bin / "libiconv-2.dll").write_bytes(synthetic_pe("synthetic libiconv runtime, later directory"))
-            env = os.environ.copy()
-            env.pop("MSYS_PATH", None)
-            env.pop("MINGW_PREFIX", None)
-            env["PATH"] = os.pathsep.join([str(first), str(gcc_bin), str(Path(sys.executable).parent)])
+            env = self._path_only_environment(first, gcc_bin)
 
             result = self._run_copy(build, env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -618,6 +618,34 @@ class TestCaptureAndCompare(unittest.TestCase):
             self.assertEqual(pr.main(["compare", str(self.scene_file())]), pr.EXIT_NOT_PROVEN)
         self.assertIn("PPSSPP_REF menu v12: NO_REFERENCE", out.getvalue())
 
+    def test_capture_refusal_without_flag_names_lan_debugger_and_memory_access(self):
+        path = self.scene_file()
+        exe = self.dir / "PPSSPPWindows64.exe"
+        exe.write_bytes(b"")
+        out = io.StringIO()
+        with patch.dict(os.environ, {"PPSSPP_EXE": str(exe)}), contextlib.redirect_stdout(out):
+            self.assertEqual(pr.main(["capture", str(path)]), pr.EXIT_NOT_PROVEN)
+        refusal = " ".join(out.getvalue().split())
+        self.assertIn("NOT_RUN registration-not-accepted", refusal)
+        self.assertIn("report.ppsspp.org", refusal)
+        self.assertIn("listens on every network interface of this computer", refusal)
+        self.assertIn("reading and writing the game's memory", refusal)
+        self.assertIn("other devices on the same network can reach it", refusal)
+        self.assertIn("trusted network or with the host firewall blocking inbound connections to PPSSPP", refusal)
+
+    def test_capture_flag_help_names_lan_debugger_and_memory_access(self):
+        out = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stdout(out):
+            pr.main(["capture", "--help"])
+        self.assertEqual(cm.exception.code, 0)
+        help_text = " ".join(out.getvalue().split())
+        self.assertIn("--allow-ppsspp-registration", help_text)
+        self.assertIn("report.ppsspp.org", help_text)
+        self.assertIn("listens on every network interface of this computer", help_text)
+        self.assertIn("reading and writing the game's memory", help_text)
+        self.assertIn("other devices on the same network can reach it", help_text)
+        self.assertIn("trusted network or with the host firewall blocking inbound connections to PPSSPP", help_text)
+
     def test_plan_prints_the_timeline(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

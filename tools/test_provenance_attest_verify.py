@@ -4923,6 +4923,121 @@ class LocalRefreshHostedRuleTests(_PolicyDeltaV4Fixture):
         self._refused("REFRESH_HOSTED_VERDICT_FAIL", merged, main_1, None)
 
 
+class PublicLabelSetTests(EphemeralGenerationTests):
+    """The hosted verifier accepts a committed ledger in any public label set its records derive.
+
+    The attestation runs the default branch's verifier, so a label set has to be accepted before
+    any producer emits it (audit F-cb647ba8, F-a366d392). Accepting a set only selects which
+    trusted derivation of the label text is generated; a label the entry's record does not back
+    is still a LEGACY_CONTROL_MISMATCH.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.back_legacy_path()
+        authority = json.loads(self.trusted_ledger.read_text(encoding="utf-8"))
+        for record in authority["records"]:
+            # Give the fixture the two classes whose label v2 changes.
+            if record["id"] == "widget-independent":
+                record["classification"] = "behavior-informed"
+            if record["id"] == "core-runtime":
+                record["classification"] = "upstream-third-party"
+        self.write_trusted(authority)
+        self._heads = 0
+
+    def _fatal_codes(self, verdict: dict) -> set[str]:
+        return {finding["code"] for finding in verdict["findings"] if finding["fatal"]}
+
+    def _commit_labelled(self, label_set: str, edit=None) -> tuple[str, dict]:
+        self._heads += 1
+        controls = verifier.generate_ephemeral_controls(
+            repo=self.repo.root,
+            candidate_tree=self.base,
+            base_rev=self.base,
+            trusted_ledger=self.trusted_ledger,
+            trusted_baseline=self.authority_baseline(),
+            workdir=self.outside / f"labelled-{self._heads}",
+            label_set=label_set,
+        )
+        document = json.loads(controls.committed_ledger_bytes)
+        if edit is not None:
+            edit(document)
+        self.repo.branch(f"labels-{self._heads}", self.base)
+        hook, self.repo.before_commit = self.repo.before_commit, None
+        self.repo.write(verifier.LEDGER_PATH, provenance_ledger._canonical_json_bytes(document))
+        self.repo.write(verifier.EXPORT_PATH, controls.generated_export_bytes)
+        head = self.repo.commit(f"controls in label set {label_set}")
+        self.repo.before_commit = hook
+        return head, document
+
+    def _labels(self, document: dict) -> dict[str, str]:
+        result = {}
+        for entry in document["entries"]:
+            field = provenance_ledger.PUBLIC_LABEL_FIELDS.get(entry["classification"])
+            if field and field in entry["evidence"]:
+                result[entry["path"]] = entry["evidence"][field]
+        return result
+
+    def test_each_label_set_verifies(self) -> None:
+        for label_set, labels in provenance_ledger.PUBLIC_LABEL_SETS.items():
+            with self.subTest(label_set=label_set):
+                head, document = self._commit_labelled(label_set)
+                self.assertEqual(self._labels(document), {
+                    "README.md": labels["project-authored-independent"],
+                    "src/rt/core.c": labels["upstream-third-party"],
+                    "src/rt/widget.c": labels["behavior-informed"],
+                    "tools/legacy.py": labels["project-authored-independent"],
+                })
+                verdict = self.run_ephemeral(head, authority_baseline=True)
+                self.assertEqual(self._fatal_codes(verdict), set(), verdict["findings"])
+                self.assertEqual(verdict["verdict"], "pass")
+
+    def test_a_label_the_record_does_not_back_is_refused(self) -> None:
+        v2 = provenance_ledger.PUBLIC_LABEL_SETS["v2"]
+
+        def overclaim(document: dict) -> None:
+            for entry in document["entries"]:
+                if entry["path"] == "src/rt/widget.c":
+                    entry["evidence"]["authorship"] = v2["project-authored-independent"]
+
+        head, _ = self._commit_labelled("v2", overclaim)
+        verdict = self.run_ephemeral(head, authority_baseline=True)
+        self.assertIn("LEGACY_CONTROL_MISMATCH", self._fatal_codes(verdict))
+
+    def test_labels_from_two_sets_are_refused(self) -> None:
+        v1 = provenance_ledger.PUBLIC_LABEL_SETS["v1"]
+
+        def mix(document: dict) -> None:
+            for entry in document["entries"]:
+                if entry["path"] == "src/rt/core.c":
+                    entry["evidence"]["modification_status"] = v1["upstream-third-party"]
+
+        head, _ = self._commit_labelled("v2", mix)
+        verdict = self.run_ephemeral(head, authority_baseline=True)
+        self.assertIn("LEGACY_CONTROL_MISMATCH", self._fatal_codes(verdict))
+
+    def test_the_emitted_set_is_what_a_producer_writes(self) -> None:
+        """A refresh writes the emitted set whatever set the base carried; the verifier follows the candidate."""
+        other = next(name for name in provenance_ledger.PUBLIC_LABEL_SETS
+                     if name != provenance_ledger.PUBLIC_LABEL_SET)
+        head, _ = self._commit_labelled(other)
+        controls = verifier.generate_ephemeral_controls(
+            repo=self.repo.root, candidate_tree=head, base_rev=self.base,
+            trusted_ledger=self.trusted_ledger, trusted_baseline=self.authority_baseline(),
+            workdir=self.outside / "producer", label_set=provenance_ledger.PUBLIC_LABEL_SET,
+        )
+        self.assertEqual(
+            provenance_ledger.public_label_set_of(json.loads(controls.committed_ledger_bytes)),
+            provenance_ledger.PUBLIC_LABEL_SET,
+        )
+        followed = verifier.generate_ephemeral_controls(
+            repo=self.repo.root, candidate_tree=head, base_rev=self.base,
+            trusted_ledger=self.trusted_ledger, trusted_baseline=self.authority_baseline(),
+            workdir=self.outside / "verifier",
+        )
+        self.assertEqual(provenance_ledger.public_label_set_of(json.loads(followed.committed_ledger_bytes)), other)
+
+
 class VendoredManifestTests(unittest.TestCase):
     """``_vendored_manifest_findings``: an "imported byte-identical" row keeps its bytes bound."""
 
@@ -5077,6 +5192,36 @@ class VendoredManifestTests(unittest.TestCase):
         notice = re.compile(r"Modified by Nakagawa Recomp contributors, \d{4}-\d{2}-\d{2}")
         unmarked = [path for path in deltas if path is None or not notice.search((ROOT / path).read_text("utf-8"))]
         self.assertEqual(unmarked, [])
+
+    def test_h264_local_delta_files_name_each_upstream_commit(self) -> None:
+        """LGPL-2.1 section 2(a): each modified file of the FFmpeg H.264 subset says so, with a date,
+        and every upstream commit its header names is marked at a change site in the file."""
+        manifest = "src/rt/h264_ffmpeg_sub/" + verifier.VENDOR_MANIFEST_NAME
+        rows = verifier._manifest_rows((ROOT / manifest).read_bytes()) or []
+        deltas = sorted(
+            verifier._manifest_row_path(manifest, row.get("file", "")) or ""
+            for row in rows if "local delta" in row.get("kind", "").lower()
+        )
+        self.assertEqual(deltas, [
+            "src/rt/h264_ffmpeg_sub/libavcodec/" + name
+            for name in ("h264_direct.c", "h264_refs.c", "h264_slice.c", "utils.c", "videodsp_template.c")
+        ])
+        manifest_text = (ROOT / manifest).read_text("utf-8")
+        notice = re.compile(r"Modified \d{4}-\d{2}-\d{2} for the Nakagawa Recomp project \(LOCAL DELTA against FFmpeg n4\.4\)")
+        problems: list[str] = []
+        for path in deltas:
+            text = (ROOT / path).read_text("utf-8")
+            header = text[: text.index("*/")]
+            if not notice.search(header):
+                problems.append(f"{path}: no dated modification notice")
+            named = set(re.findall(r"^ \*  - (?:Added \d{4}-\d{2}-\d{2}: )?([0-9a-f]{10}) ", header, re.M))
+            marked = set(re.findall(r"LOCAL DELTA: upstream ([0-9a-f]{10}) ", text))
+            if not named or named != marked:
+                problems.append(f"{path}: header names {sorted(named)}, change sites mark {sorted(marked)}")
+            for commit in named:
+                if not re.search(rf"`{commit}[0-9a-f]{{30}}`", manifest_text):
+                    problems.append(f"{path}: {commit} has no full hash in the manifest")
+        self.assertEqual(problems, [])
 
 
 class IndependentRefreshMergeTests(EphemeralGenerationTests):

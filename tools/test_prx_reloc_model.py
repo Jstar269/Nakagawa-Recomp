@@ -21,7 +21,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import prx_reloc_model as model
+import prxload
 from test_prx_loader_cleanroom import (
+    BASE,
     PT_REL_A,
     PT_REL_B,
     Module,
@@ -34,7 +36,7 @@ from test_prx_loader_cleanroom import (
 
 # Bases chosen to move every relocation-sensitive bit the arena allows: zero,
 # small, both sides of the 0x8000 carry boundary, and odd multiples of four.
-BASES = (0x0, 0x40, 0x7FC0, 0x8000, 0x8004, 0x10000, 0x1C3A4, 0x24000)
+BASES = (0x0, 0x40, 0x6FC0, 0x7FC0, 0x8000, 0x8004, 0x10000, 0x1C3A4, 0x24000)
 SEG0 = 0x1000
 
 B_FLAGS = [0x00, 0x04, 0x01, 0x03, 0x05, 0x09, 0x11]
@@ -42,8 +44,31 @@ SET32, REL00, REL01, REL10, REL00_KEEP, REL00_EXT = 2, 3, 4, 5, 6, 7
 
 
 class ModelMatchesLoader(PrxTestBase):
+    def assert_prxload_matches_model(self, blob, relocations=None, bases=BASES):
+        if relocations is None:
+            relocations = model.model_relocations(blob, "fixture")
+        for base in bases:
+            prx = prxload.Prx(blob, base)
+            prx.relocate()
+            self.assertEqual(len(prx.seg_vaddr), len(relocations.segments))
+            for index, segment in enumerate(relocations.segments):
+                start = prx.seg_vaddr[index] - prx.lo
+                loaded = bytes(prx.mem[start:start + segment.memsz])
+                predicted = relocations.segment_image(index, base)
+                if predicted != loaded:
+                    for offset in range(0, len(predicted), 4):
+                        got = loaded[offset:offset + 4]
+                        want = predicted[offset:offset + 4]
+                        if got != want:
+                            self.fail(
+                                f"base 0x{base:x} segment {index} offset 0x{offset:x}: "
+                                f"prxload {got.hex()} model {want.hex()}"
+                            )
+                    self.fail(f"base 0x{base:x} segment {index} differs between prxload and model")
+        return relocations
+
     def assert_model_matches_loader(self, blob, bases=BASES):
-        relocations = model.model_relocations(blob, "fixture")
+        relocations = self.assert_prxload_matches_model(blob, bases=bases)
         for base in bases:
             info = self.run_load(blob, base)
             self.assertEqual(info.get("result"), "ok", info.get("err"))
@@ -209,6 +234,8 @@ class ModelRefusals(PrxTestBase):
         self.assert_fail(blob, needle="GPREL16")
         with self.assertRaisesRegex(model.RelocationModelError, "GPREL16"):
             model.model_relocations(blob)
+        with self.assertRaisesRegex(ValueError, "GPREL16"):
+            prxload.Prx(blob, BASE).relocate()
 
     def test_twice_relocated_site_is_not_a_single_base_function(self):
         data, offs, memsz = basic_seg_with_words([0x00000010], vaddr=SEG0)
@@ -242,8 +269,12 @@ class ModelRefusals(PrxTestBase):
         module = Module()
         module.add_seg(SEG0, data, memsz)
         module.add_reloc(PT_REL_A, reloc_a(offs[0], 5))
+        blob = module.build()
+        self.assert_fail(blob, needle="partner")
         with self.assertRaisesRegex(model.RelocationModelError, "partner"):
-            model.model_relocations(module.build())
+            model.model_relocations(blob)
+        with self.assertRaisesRegex(ValueError, "partner"):
+            prxload.Prx(blob, BASE).relocate()
 
     def test_fixed_address_module_without_relocations_models_no_sites(self):
         data, _offs, memsz = basic_seg_with_words([0x03E00008, 0], vaddr=SEG0)
@@ -259,8 +290,12 @@ class ModelRefusals(PrxTestBase):
         module = Module(e_type=2)
         module.add_seg(SEG0, data, memsz)
         module.add_reloc(PT_REL_A, reloc_a(offs[0], 2))
+        blob = module.build()
+        self.assert_fail(blob)
         with self.assertRaisesRegex(model.RelocationModelError, "fixed-address"):
-            model.model_relocations(module.build())
+            model.model_relocations(blob)
+        with self.assertRaisesRegex(ValueError, "fixed-address"):
+            prxload.Prx(blob, SEG0).relocate()
 
     def test_segment_larger_than_the_flat_image_bound_is_refused(self):
         # A forged PT_LOAD whose memsz fits the 32-bit address space but not the
@@ -269,8 +304,12 @@ class ModelRefusals(PrxTestBase):
         data, _offs, _memsz = basic_seg_with_words([0x03E00008, 0], vaddr=0)
         module = Module()
         module.add_seg(0, data, 0xFFFFFFF0)
+        blob = module.build()
+        self.assert_fail(blob)
         with self.assertRaisesRegex(model.RelocationModelError, "flat-image bound"):
-            model.model_relocations(module.build())
+            model.model_relocations(blob)
+        with self.assertRaises(ValueError):
+            prxload.Prx(blob, BASE).relocate()
 
 
 class SiteArithmetic(unittest.TestCase):

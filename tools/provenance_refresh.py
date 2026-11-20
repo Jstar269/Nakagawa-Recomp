@@ -284,6 +284,8 @@ def generate_controls(
         workdir=workdir,
         trusted_candidate_policy=trusted_candidate_policy,
         policy_delta_authority=policy_delta_authority,
+        # A producer writes the label set the generators emit, whatever set the base carried.
+        label_set=provenance_ledger.PUBLIC_LABEL_SET,
     )
     if (
         controls.candidate_blobs.get(verifier.POLICY_PATH)

@@ -760,22 +760,46 @@ ENCRYPTED_EXECUTABLE: EBOOT.BIN is encrypted and built-in decryption stopped: KE
 
 The results are `KEY_REQUIRED` (a tag the built-in tables don't carry), `MALFORMED_INPUT`, `INTEGRITY_FAILURE`, `DECOMPRESS_FAILURE`, `VALIDATION_FAILURE`, `FIRMWARE_OUT_OF_SCOPE`, `IO_FAILURE`, `RESOURCE_LIMIT` and `INTERNAL_ERROR`. An encrypted guest module stops the same way with `ENCRYPTED_MODULE: <name> is encrypted and built-in decryption stopped: ...`, naming the module. A plain copy you place there is always used and never overwritten. Nothing is written next to the ISO or into this repository.
 
-A PSN release of a UMD game (an `EBOOT.PBP` whose `DATA.PSAR` is an NPUMDIMG disc image) is picked like a disc. The player converts it once, on a background worker with progress and cancel, into `<user data>/discs/<DISC_ID>/<DISC_ID>.iso`: the image is written beside that name, checked (an ISO9660 volume descriptor and a `PARAM.SFO` `DISC_ID` equal to the package's), then renamed into place, and it is then added exactly as a picked ISO. A cancelled or failed conversion removes the partial file. `--iso=<EBOOT.PBP>` converts the same way before inspection, and `nk_decrypt npumdimg --in EBOOT.PBP --out game.iso` runs the conversion from the command line. A PSOne Classic stops as `PSONE_CLASSIC_UNSUPPORTED` and an updater as `FIRMWARE_OUT_OF_SCOPE` before any key is read; DRM bound to the console that bought the game stops as `CONTEXT_REQUIRED` and is never run with a default. Other PSN (NPDRM) packages and PGD-protected data are not decrypted yet.
+A PSN release of a UMD game (an `EBOOT.PBP` whose `DATA.PSAR` is an NPUMDIMG disc image) is picked like a disc. The player converts it once, on a background worker with progress and cancel, into `<user data>/discs/<DISC_ID>/<DISC_ID>.iso`: the image is written beside that name, checked (an ISO9660 volume descriptor and a `PARAM.SFO` `DISC_ID` equal to the package's), then renamed into place, and it is then added exactly as a picked ISO. A cancelled or failed conversion removes the partial file. Each time the package is added, the worker reads all of it for its SHA-256 and reuses the image in place only when the image's record names that SHA-256; its size, write time, change time and file identity are noted before it is read and checked again before the record is written, and it is read a second time then, so a package that changed meanwhile is refused as `DISC_IMAGE_READ_FAILED` and its image removed. On Windows the package is also held during the conversion so that no other program can write to it (on a local drive, or a server that enforces this); a package another program already has open for writing, such as a download or sync tool, is read shared and relies on those checks, and the log says so (what the checks catch on each system: [Compressed disc images](#compressed-disc-images)). `--iso=<EBOOT.PBP>` is taken the same way once the player's window is open (with `--stage`, `--stage-only`, `--launch-now` or `--headless-launch` it is converted before inspection, with progress on the console), and `nk_decrypt npumdimg --in EBOOT.PBP --out game.iso` runs the conversion from the command line. A PSOne Classic stops as `PSONE_CLASSIC_UNSUPPORTED` and an updater as `FIRMWARE_OUT_OF_SCOPE` before any key is read; DRM bound to the console that bought the game stops as `CONTEXT_REQUIRED` and is never run with a default. Other PSN (NPDRM) packages and PGD-protected data are not decrypted yet.
 
 ### Compressed disc images
 
 The player also takes a compressed disc image: a `.cso` (CISO, versions 1 and 2), a `.zso` (ZISO) or a `.chd`
 made with `chdman createdvd`. It expands the image once, when you add it, into a plain `.iso` at
-`<user data>/discs/<DISC_ID>/<DISC_ID>.<fingerprint>.<cso|zso|chd>.iso`, and every later step reads that `.iso`
-exactly as it reads one you added yourself. The fingerprint (16 hexadecimal digits) names the compressed file, so
-two different images of one disc, such as a retail dump and a fan translation, keep two expansions. This needs
-free space for the whole `.iso` (up to 1.8 GB for a UMD) beside the compressed file, which you can keep or move.
-The expansion runs on a background worker with progress and cancel; it is written beside its final name, its size
-is checked, and then it is renamed into place, so a cancelled or failed expansion leaves nothing behind. A CHD
-whose header records the SHA-1 of its data (every `chdman` image does) is checked against it, and a mismatch stops
-the import as damaged. Adding the same unchanged file again reuses the expansion; adding the same file from a
-second window or tool while the first is still expanding it is refused as `DISC_IMAGE_IMPORT_BUSY`. The library
-keeps the expanded `.iso` for the build and shows the file you picked.
+`<user data>/discs/<DISC_ID>/<DISC_ID>.<identity>.<cso|zso|chd>.iso`, and every later step reads that `.iso`
+exactly as it reads one you added yourself. The identity is the SHA-256 of every byte of the compressed file (what
+`sha256sum` prints for it); the name carries its first 16 hexadecimal digits, or all 64 when another image already
+has that name, so two different images of one disc, such as a retail dump and a fan translation, keep two
+expansions. This needs free space for the whole `.iso` (up to 1.8 GB for a UMD) beside the compressed file, which
+you can keep or move. The work runs on a background worker with progress and cancel: each add reads the whole
+file for its identity, and a file with the same bytes as one added before, under any name or in any folder,
+reuses that expansion. Otherwise the expansion is written beside its final name, its size is checked, the file is
+read once more to check that it did not change meanwhile, and the expansion is renamed into place, so a cancelled
+or failed expansion leaves nothing behind. The file's size, write time, change time and file identity are noted
+before it is read and checked again before anything is recorded; with the second read, they stop a file that
+changed while it was added as `DISC_IMAGE_READ_FAILED`. What that catches depends on the system:
+
+- On Windows the file is also held while it is added, so no other program can write to, rename or replace it (on
+  a local drive, or a server that enforces this): there is no change to catch.
+- On Windows, a file another program already has open for writing, such as a download or sync tool, is read
+  shared, and the log says so. That program can still write to it (not rename or replace it). A change still in
+  place at the second read is always caught; one it undoes before then is caught by the change time, unless the
+  program also sets the change time back, which Windows allows.
+- On Linux nothing holds the file, and any change is caught, even one undone before the second read (the bytes
+  and write time restored, or the file renamed away and back), because no ordinary program can set a file's
+  change time.
+- A drive formatted FAT32 or exFAT stores no change time, so there an undone change may be missed unless it
+  leaves the size or write time different.
+
+A CHD whose header records the
+SHA-1 of its data (every `chdman` image does) is checked against it, and a mismatch stops the import as damaged.
+An image added by an earlier version, which recorded a sample of the file (its size, write time and first 64 KiB)
+instead of its identity, is used again only after it is compared byte for byte with the file; its record is then
+updated in place. Adding the same file from a second window or tool while the first is still adding it is refused
+as `DISC_IMAGE_IMPORT_BUSY`. The library keeps the expanded `.iso` for the build and shows the file you picked.
+`--iso=<file>` takes a compressed image the same way once the player's window is open; with `--stage`,
+`--stage-only`, `--launch-now` or `--headless-launch` it is expanded before inspection, with progress on the
+console.
 
 A file it can't use stops with a named result: `DISC_IMAGE_TRUNCATED`, `DISC_IMAGE_HEADER_INVALID`,
 `DISC_IMAGE_VERSION_UNSUPPORTED`, `DISC_IMAGE_SIZE_INVALID`, `DISC_IMAGE_INDEX_INVALID` or

@@ -851,6 +851,37 @@ FILE *nk_platform_open_regular_file(const char *path) {
     return file;
 }
 
+FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared) {
+    if (opened_shared) *opened_shared = false;
+    if (!path || !*path) {
+        errno = EINVAL;
+        return NULL;
+    }
+    /* No share modes here: an ordinary read (see nk_platform.h). */
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == EPERM) errno = EACCES;
+        return NULL;
+    }
+    FILE *file = fdopen(fd, "rb");
+    if (!file) close(fd);
+    return file;
+}
+
+void nk_platform_file_change_identity(const char *path, uint64_t *changed, uint64_t *volume,
+                                      uint64_t *file_id) {
+    struct stat data;
+    if (changed) *changed = 0;
+    if (volume) *volume = 0;
+    if (file_id) *file_id = 0;
+    if (!path || !*path || stat(path, &data) != 0) return;
+    if (changed) {
+        *changed = (uint64_t)data.st_ctim.tv_sec * 1000000000ull + (uint64_t)data.st_ctim.tv_nsec;
+    }
+    if (volume) *volume = (uint64_t)data.st_dev;
+    if (file_id) *file_id = (uint64_t)data.st_ino;
+}
+
 bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len) {
     (void)out_path;
     (void)max_len;

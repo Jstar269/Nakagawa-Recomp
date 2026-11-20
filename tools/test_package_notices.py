@@ -445,6 +445,11 @@ class TestPackageNotices(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tc_dir:
                 toolchain_root = Path(tc_dir)
                 for license_entry in sdl_record["license_texts"]:
+                    if "toolchain_license_rel" not in license_entry:
+                        # Taken from upstream (yuv2rgb, hidapi): the MSYS2 package never installs
+                        # it, so it can only come from the source tree.
+                        (fake_repo / license_entry["file"]).write_bytes((ROOT / license_entry["file"]).read_bytes())
+                        continue
                     target = toolchain_root / license_entry["toolchain_license_rel"]
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes((ROOT / license_entry["file"]).read_bytes())
@@ -647,6 +652,35 @@ class TestPackageNotices(unittest.TestCase):
         self.assertIn("unknown (built without git metadata)", clean)
         self.assertNotIn("Tag:", clean)
         self.assertNotIn("local changes", clean)
+
+    def test_package_licence_statements_name_the_gpl3_only_parts(self) -> None:
+        """The project-output row and the package texts do not call the whole package
+        GPL-3.0-or-later: they name the project's own code and the GPL-3.0-only parts
+        (audit 2026-11-17 finding F-e136ba9a)."""
+        native = package_notices.load_component_inventory()["native"]
+        xbrz = [c for c in native["linked_components"] if c.get("id") == "xbrz"]
+        self.assertEqual([c["spdx_id"] for c in xbrz], ["GPL-3.0-only"])
+        project = native["project_output"]
+        self.assertEqual(project["spdx_id"], "GPL-3.0-or-later")
+        self.assertIn("project code", project["name"])
+        for fact in ("project's own code", "GPL-3.0-or-later", "xBRZ", "GPL-3.0-only",
+                     "pspdecrypt"):
+            self.assertIn(fact, project.get("note", ""))
+
+        source = " ".join(package_notices.render_source_notice({
+            "repository": package_notices.PROJECT_REPOSITORY_URL,
+            "commit": None, "tag": None, "local_changes": None,
+        }).split())
+        relink = " ".join(package_notices.render_relink_guide(ROOT, h264_enabled=False).split())
+        for text in (source, relink):
+            self.assertNotIn("distributed under the GNU General Public License version 3 or later",
+                             text)
+            self.assertNotIn("whole program is licensed under", text)
+            self.assertIn("The project's own code is licensed under the GNU General Public "
+                          "License version 3 or later.", text)
+            self.assertIn("xBRZ texture scaler, which is licensed under the GNU General Public "
+                          "License version 3 only", text)
+            self.assertIn("pspdecrypt", text)
 
     def test_source_reference_reads_this_checkout(self) -> None:
         reference = package_notices.source_reference(ROOT)

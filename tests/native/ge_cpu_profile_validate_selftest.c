@@ -1534,18 +1534,19 @@ static void test_ge_wide_raster_timing(void) {
     }
 }
 
-/* Every raster write stays inside the buffer it writes (#2193): colour inside the target's
- * stride, depth inside the depth buffer's zbw columns and 272 rows. Column x of row y is guest
- * address (y * stride + x), so a write past the stride lands in the next row, or past the last
- * row. Three cells, software rasterizer, wing off:
+/* Raster writes against the buffers' strides (#2193). Column x of row y is guest address
+ * (y * stride + x), so a write past the stride lands in the next row, or past the last row.
+ * Three cells, software rasterizer, wing off:
  *   colour: a 256-stride 8888 target, scissor x2 479, a sprite x 0-512 on rows 100-109. Rows
  *     100-109 must hold it in columns 0-255, and nothing else may change: not row 110, not the
- *     row past the buffer.
- *   depth: a 512-stride target with a 256-wide depth buffer, cleared to depth A, then a
- *     depth-writing sprite (ALWAYS, depth B) on rows 0-9 at x 256-511, outside the depth
- *     buffer's columns. Every depth pixel must still hold A, and the row past the buffer its
- *     sentinel.
- *   clear: a depth clear (depth C) under a scissor of x 0-99 must write columns 0-99 only. */
+ *     row past the buffer (ge.c's raster_columns).
+ *   depth: a 512-stride target with a 256-wide depth buffer, cleared to depth A over 512x272,
+ *     then a depth-writing sprite (ALWAYS, depth B) on rows 0-9 at x 256-511. A depth write past
+ *     zbw is word y * zbw + x (PSP-GE-RASTER-004, docs/HARDWARE_ORACLE.md, PSP-3000 2026-11-20):
+ *     the sprite's depth lands in rows 1-10 of columns 0-255, and the clear also writes the 256
+ *     words past the buffer's last row (256 x 272 + 256 words in all, as the PSP's did).
+ *   clear: a depth clear (depth C) under a scissor of x 0-99 must write columns 0-99 only
+ *     (PSP-GE-RASTER-004 dc-scissor). */
 #define RSB_FB         0x04000000u
 #define RSB_ZB         0x04100000u
 #define RSB_BG         0x5a5a5a5au
@@ -1621,24 +1622,36 @@ static void rsb_fill_depth(uint32_t pixels, uint16_t z) {
     ge_zbuf_invalidate_guest_span(RSB_ZB, pixels * 2u + 0x2040u);
 }
 
-/* Columns below `cols` hold `inside`, the rest `outside`, and the row past the buffer the
- * sentinel, once ge.c has written its depth surface back to guest memory. */
-static void rsb_check_depth(const char *scenario, uint32_t zbw, uint32_t cols, uint16_t inside,
-                            uint16_t outside) {
+/* The depth the depth cell leaves at word (x, y) of the 256-wide buffer; row 272 is the 256
+ * words past its last row. */
+static uint16_t rsb_want_stride_depth(uint32_t x, uint32_t y) {
+    (void)x;
+    return y >= 1u && y <= 10u ? RSB_DEPTH_B : RSB_DEPTH_A;
+}
+
+/* The depth the clear cell leaves: C in columns 0-99, the sentinel elsewhere. */
+static uint16_t rsb_want_scissored_clear(uint32_t x, uint32_t y) {
+    return y < 272u && x < 100u ? RSB_DEPTH_C : RSB_DEPTH_SENT;
+}
+
+/* Every word of the buffer and of the row past it holds want(x, y), once ge.c has written its
+ * depth surface back to guest memory. */
+static void rsb_check_depth(const char *scenario, uint32_t zbw,
+                            uint16_t (*want_at)(uint32_t x, uint32_t y)) {
     if (!ge_zbuf_materialize_current()) {
         expect(0, scenario, "the depth surface was not written back to guest memory");
         return;
     }
     for (uint32_t i = 0; i < zbw * 273u; i++) {
         const uint32_t x = i % zbw, y = i / zbw;
-        const uint16_t want = y >= 272u ? RSB_DEPTH_SENT : (x < cols ? inside : outside);
+        const uint16_t want = want_at(x, y);
         uint16_t got;
         memcpy(&got, rsb_depth(i), 2);
         if (got != want) {
             fprintf(stderr, "%s: depth pixel (%u,%u) of a %u-wide depth buffer is 0x%04x, want 0x%04x\n",
                     scenario, (unsigned)x, (unsigned)y, (unsigned)zbw, got, want);
-            expect(0, scenario, y >= 272u ? "a depth write landed past the depth buffer's last row"
-                                          : "a depth write landed outside the pixel it was given");
+            expect(0, scenario, y >= 272u ? "a word past the depth buffer's last row is not the measured one"
+                                          : "a depth word is not the one the measured index gives");
             return;
         }
     }
@@ -1677,7 +1690,7 @@ static void test_ge_raster_stride_bounds(void) {
     W(0x23, 1u);                                                  /* depth test on, ALWAYS */
     rsb_sprite(RSB_SPRITE, 256.0f, 0.0f, 512.0f, 10.0f, (float)RSB_DEPTH_B);
     rsb_end("raster_stride_depth");
-    rsb_check_depth("raster_stride_depth", 256u, 256u, RSB_DEPTH_A, RSB_DEPTH_A);
+    rsb_check_depth("raster_stride_depth", 256u, rsb_want_stride_depth);
 
     /* clear: a depth clear under a 100-column scissor */
     rsb_fill_depth(256u * 273u, RSB_DEPTH_SENT);
@@ -1686,7 +1699,7 @@ static void test_ge_raster_stride_bounds(void) {
     rsb_sprite(RSB_SPRITE, 0.0f, 0.0f, 512.0f, 272.0f, (float)RSB_DEPTH_C);
     W(0xD3, 0u);
     rsb_end("raster_stride_depth_clear");
-    rsb_check_depth("raster_stride_depth_clear", 256u, 100u, RSB_DEPTH_C, RSB_DEPTH_SENT);
+    rsb_check_depth("raster_stride_depth_clear", 256u, rsb_want_scissored_clear);
 }
 
 static void print_mask(FILE *out, uint32_t mask) {

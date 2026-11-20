@@ -47,9 +47,7 @@ class ManagerHelpTests(unittest.TestCase):
 
     def test_help_actions_match_validateset(self) -> None:
         source = self.source
-        match = re.search(r'\[ValidateSet\(([^)]+)\)\]\s*\[string\]\$Action', source)
-        assert match is not None
-        self.assertCountEqual(re.findall(r'"([^"]+)"', match.group(1)), self.actions)
+        self.assertTrue(self.actions, "the ValidateSet must name at least one action")
         help_text = source.split("<#", 1)[1].split("#>", 1)[0]
         self.assertIn(".PARAMETER Action", help_text)
         entries = re.findall(r"^    (\w+) - (.+)$", help_text, re.MULTILINE)
@@ -238,7 +236,6 @@ class ManagerSafetyContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.manager = MANAGER.read_text(encoding="utf-8-sig")
         self.safety = SAFETY.read_text(encoding="utf-8-sig")
-        self.support = SAFETY.read_text(encoding="utf-8-sig")
 
     def test_manager_anchors_to_its_own_script_location(self) -> None:
         # The canonical root is the parent of the manager's own folder, never the caller's CWD.
@@ -271,10 +268,10 @@ class ManagerSafetyContractTests(unittest.TestCase):
         self.assertIn("Sync-SaveBase -BasePath $SaveBase", self.manager)
         self.assertIn("-ApprovedRoot $script:RepoRoot", self.manager)
         self.assertIn("-SaveRoot (Join-Path $script:RepoRoot", self.manager)
-        # The transactional contract must live in the support file.
-        self.assertIn(".nk_savebase_manifest.json", self.support)
-        self.assertIn("Remove-SafeDirectory", self.support)
-        self.assertIn("Failpoint", self.support)
+        # The transactional contract lives in the support file, nk_safety.ps1.
+        self.assertIn(".nk_savebase_manifest.json", self.safety)
+        self.assertIn("Remove-SafeDirectory", self.safety)
+        self.assertIn("Failpoint", self.safety)
 
     def test_build_success_requires_a_known_zero_exit(self) -> None:
         # The stale-exe fallback that turned a null exit code into success is gone.
@@ -292,9 +289,12 @@ class ManagerSafetyContractTests(unittest.TestCase):
     def test_process_cleanup_requires_full_identity(self) -> None:
         self.assertIn("Get-ProcessIdentityRecord", self.manager)
         self.assertIn("Invoke-StaleBuildCleanup", self.manager)
-        self.assertIn("creation_ticks", self.safety)
-        self.assertIn("cmd", self.safety)
-        self.assertIn("exe", self.safety)
+        # The identity record must capture creation time, executable path and command
+        # line: match the record's own field assignments, not substrings such as the
+        # "cmd" in "cmdlet" or the "exe" in ".exe".
+        self.assertIn("$rec.creation_ticks = $p.StartTime.ToUniversalTime().Ticks", self.safety)
+        self.assertIn("$rec.exe = [IO.Path]::GetFullPath($p.Path)", self.safety)
+        self.assertIn("$rec.cmd = $wmi.CommandLine", self.safety)
 
     def test_duration_rejects_negative_values(self) -> None:
         self.assertIn("[ValidateRange(0, 2000000000)]\n    [int]$Duration = 0", self.manager)
@@ -348,7 +348,13 @@ class ManagerSafetyContractTests(unittest.TestCase):
     def test_no_early_exit_inside_the_try_body(self) -> None:
         # Every failure inside the action dispatch records a code and breaks, so the
         # finally block runs before the single exit at the end.
-        body = self.manager[self.manager.index("if ($Action) {") : self.manager.index("} catch {")]
+        # The end marker is the outer try's catch at column 0, searched from the start
+        # of the dispatch: the first "} catch {" in the file comes long before it.
+        start = self.manager.index("if ($Action) {")
+        end = self.manager.index("\n} catch {", start)
+        body = self.manager[start:end]
+        self.assertIn("if ($Action) {", body)
+        self.assertGreater(body.count("\n"), 10, "the dispatch slice must hold the action bodies")
         self.assertNotIn("exit 1", body, "action dispatch must not exit before the finally block")
 
     def test_manager_prebuild_and_prerun_fail_fast(self) -> None:

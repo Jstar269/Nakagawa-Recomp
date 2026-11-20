@@ -882,6 +882,7 @@ typedef struct {
     PlayerUiReportStep report_step;
     const char *report_lines[PLAYER_UI_REPORT_LINES];   /* "name  (size)" */
     size_t report_line_count;
+    size_t report_file_total;       /* every file the ZIP holds; report_lines has the first */
     const char *report_path;        /* the written ZIP */
     const char *report_command;     /* what to run by hand without Python */
     const char *report_message;     /* why it failed */
@@ -938,6 +939,12 @@ typedef enum {
 } PlayerUiRefreshAdvice;
 
 PlayerUiRefreshAdvice player_ui_refresh_advice(double refresh_hz);
+/* The Problem report page lists at most this many of the ZIP's files (scr_settings.c). */
+#define PLAYER_UI_REPORT_SHOWN 16u
+/* How many files its "and N more" line names: the files the ZIP holds beyond those the
+   page lists, counted from report_file_total (every file), not from the lines kept; 0 when
+   the page lists them all. */
+size_t player_ui_report_more_count(const PlayerUiSettingsModel *model);
 /* The advisory sentence for `refresh_hz` into out, or an empty string when it is silent. */
 void player_ui_refresh_advisory_text(double refresh_hz, char *out, size_t out_size);
 
@@ -1696,6 +1703,9 @@ size_t player_ui_nk_test_library_grid(const PlayerUiNk *player, size_t *total);
 /* Test only: the next UI's last frame was laid out (nk_ui_laid_out), so the
    next frame takes a move at once; false without a next UI. */
 bool player_ui_nk_test_laid_out(const PlayerUiNk *player);
+/* Test only: how many SDL render device resets the next UI's backend has taken
+   (NkUiSdlrStats.device_resets), -1 without a backend. */
+int player_ui_nk_test_device_resets(const PlayerUiNk *player);
 /* Test only: the game whose picture is behind the library (the art rest), -1 for
    none; *shown tells it fading in or whole from fading out. */
 int player_ui_nk_test_backdrop(const PlayerUiNk *player, bool *shown);

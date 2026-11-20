@@ -29,6 +29,7 @@ import sys
 import tempfile
 import unittest
 from typing import ClassVar, cast
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -210,6 +211,9 @@ class NativeHostBackendTests(unittest.TestCase):
         (ROOT / "build").mkdir(exist_ok=True)
 
         cls._object_dir = Path(tempfile.mkdtemp(prefix="nk_backend_objects_"))
+        # unittest skips tearDownClass when setUpClass raises, so a failed compile below
+        # would leave this directory behind; a class cleanup runs either way.
+        cls.addClassCleanup(shutil.rmtree, cls._object_dir, ignore_errors=True)
         cls._objects = {}
         common_sources = [*CORE_SOURCES, PLATFORM_SRC, "src/rt/pgf_public.c", "src/core/nk_pgf_host.c"]
         for source in common_sources:
@@ -263,13 +267,6 @@ class NativeHostBackendTests(unittest.TestCase):
             cls._objects[source] = _compile_object(
                 cls, source, f"{Path(source).stem}.o", includes
             )
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        object_dir = getattr(cls, "_object_dir", None)
-        if object_dir is not None:
-            shutil.rmtree(object_dir, ignore_errors=True)
-        super().tearDownClass()
 
     def test_launch_resolution(self) -> None:
         """Sibling image discovery and writable save routing, on this host."""
@@ -395,6 +392,12 @@ class NativeHostBackendTests(unittest.TestCase):
             f"audio selftest failed:\n{run.stdout}\n{run.stderr}",
         )
         self.assertIn("ALL AUDIO HOST TESTS PASSED", run.stdout)
+
+
+class NativeHostExitSourceTests(unittest.TestCase):
+    """Source-text pins on the exit and quit paths. They read hle, gui, driver and audio
+    source only, so they run on every host: the gcc requirement of NativeHostBackendTests
+    must not turn them into SKIP."""
 
     def test_vblank_exit_closes_the_audio_dump_outside_the_stat_gate(self) -> None:
         """SR_EXIT_AT_VBLANK leaves through _Exit, which skips atexit, so hle.c closes the
@@ -678,6 +681,51 @@ class NativeHostBackendTests(unittest.TestCase):
                         "the overlay host's fonts must go before SDL shuts down")
         self.assertIn("s_pause_host = NULL;", release)
         self.assertIn("s_pause_host_tried = 0;", release)
+
+
+class NativeHostSetupGuardTests(unittest.TestCase):
+    """The compiler gate covers only what compiles, and a failed setup cleans up after itself."""
+
+    SOURCE_PINS = (
+        "test_vblank_exit_closes_the_audio_dump_outside_the_stat_gate",
+        "test_route_fail_closes_the_audio_dump_before_exit",
+        "test_route_fail_reports_the_audio_stats_the_vblank_exit_reports",
+        "test_every_guest_thread_hard_exit_writes_the_perf_summary_first",
+        "test_every_guest_thread_hard_exit_writes_the_profile_dump_first",
+        "test_quit_requests_stop_the_scheduler_instead_of_exiting",
+    )
+
+    def test_source_pins_run_without_a_compiler(self) -> None:
+        with mock.patch.object(shutil, "which", lambda *_args, **_kwargs: None):
+            with self.assertRaises(unittest.SkipTest):
+                NativeHostBackendTests.setUpClass()
+            NativeHostExitSourceTests.setUpClass()
+        for name in self.SOURCE_PINS:
+            with self.subTest(test=name):
+                self.assertIn(name, vars(NativeHostExitSourceTests))
+                self.assertNotIn(name, vars(NativeHostBackendTests))
+
+    def test_a_failed_compile_still_removes_the_object_directory(self) -> None:
+        scratch = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        objects = scratch / "nk_backend_objects_probe"
+
+        def make_objects(*_args: object, **_kwargs: object) -> str:
+            objects.mkdir()
+            return str(objects)
+
+        def failed_compile(_owner: object, source: str, object_name: str, *_args: object) -> Path:
+            (objects / object_name).write_bytes(b"")
+            raise AssertionError(f"compiling {source} failed")
+
+        probe: type[NativeHostBackendTests] = type("NativeHostBackendProbe", (NativeHostBackendTests,), {})
+        with mock.patch.object(shutil, "which", lambda name, *_args, **_kwargs: f"/usr/bin/{name}"), \
+             mock.patch.object(tempfile, "mkdtemp", make_objects), \
+             mock.patch.object(sys.modules[__name__], "_compile_object", failed_compile):
+            with self.assertRaises(AssertionError):
+                probe.setUpClass()
+        self.assertTrue(objects.exists(), "the probe never created the object directory")
+        probe.doClassCleanups()
+        self.assertFalse(objects.exists(), "a failed setUpClass left its object directory in temp")
 
 
 class CoroutineAsmTargetTests(unittest.TestCase):

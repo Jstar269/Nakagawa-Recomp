@@ -1167,6 +1167,17 @@ jobs:
         if: matrix.part == 'core'
         run: NK_REQUIRE_SDL3=1 make CC=gcc native-core-tests
 
+      # make fuzz-parsers (mk/native_ui_tests.mk): the parser mutation harness
+      # (tests/native/test_fuzz_parsers.c) and the PSMF producer and media selftests' mutation loops,
+      # built with -fsanitize=address,undefined -fno-sanitize-recover=all, so an out-of-bounds read
+      # or undefined behaviour stops the step (audit F-6cc53528). native-core-tests runs the same
+      # harness at 100 iterations without a sanitizer. Bounded and deterministic: a fixed iteration
+      # count over the harnesses' fixed seeds, the per-stage caps, and no input from outside.
+      - name: Run the parser mutation fuzzers under ASan and UBSan
+        if: matrix.part == 'core'
+        timeout-minutes: 20
+        run: make CC=gcc BUILD_ROOT="$RUNNER_TEMP/fuzz-parsers-build" FUZZ_ITERS=5000 fuzz-parsers
+
       # tools/test_hle_title_config_behavior.py builds the production-HLE selftest for
       # synthetic title manifests (libfont startup, module-load collisions, runtime-placed
       # modules, the diagnostics opt-in, the data-file census binding) with make. The
@@ -1383,6 +1394,27 @@ jobs:
           tar -xzf "$archive" -C "$dxc_dir"
           python tools/shader_embed.py verify --shader-set fsr3 --recompile --dxc "$dxc_dir/bin/dxc"
           python tools/shader_embed.py verify --shader-set fsr3fg --recompile --dxc "$dxc_dir/bin/dxc"
+
+      # The embedded GLSL SPIR-V (the GPU backend's psp set and the player UI's ui set) must be what
+      # the glslc both manifests record makes of the sources (tools/shader_embed.py, GLSLC_RELEASE):
+      # the LunarG Vulkan SDK's. Its Linux archive is checked against the pinned SHA-256 before
+      # anything is unpacked, only glslc is extracted, and the tool is run directly, so a SKIP
+      # (exit 77, any other glslc) fails the step.
+      - name: Reproduce the GLSL shaders with the pinned glslc
+        if: matrix.part == 'translation'
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          sdk_dir="$RUNNER_TEMP/vulkansdk-1.4.363.0"
+          mkdir -p "$sdk_dir"
+          archive="$sdk_dir/vulkansdk-linux-x86_64-1.4.363.0.tar.xz"
+          curl --fail --location --retry 3 --output "$archive" \
+            https://sdk.lunarg.com/sdk/download/1.4.363.0/linux/vulkansdk-linux-x86_64-1.4.363.0.tar.xz
+          printf '%s  %s\n' 197962f5cbf80baf2775a03336a01cee7c8745686c65aaa70d3f751ade4d7e43 "$archive" \
+            | sha256sum --check --strict
+          tar -xJf "$archive" -C "$sdk_dir" 1.4.363.0/x86_64/bin/glslc
+          python tools/shader_embed.py verify --shader-set psp --recompile --glslc "$sdk_dir/1.4.363.0/x86_64/bin/glslc"
+          python tools/shader_embed.py verify --shader-set ui --recompile --glslc "$sdk_dir/1.4.363.0/x86_64/bin/glslc"
 
       - name: Configure, build, and test CMake Linux player
         if: matrix.part == 'player'
@@ -2329,10 +2361,54 @@ jobs:
           echo "$gradle_bin" >> "$GITHUB_PATH"
 
       - name: Build the Android launcher APK for arm64-v8a
+        env:
+          # On 2026-11-20 one blip of the public Maven repositories failed this build with
+          # "Could not find <group>:<artifact>:<version>" and "Could not parse POM" for ordinary
+          # libraries, in a batch that did not touch Android. The helper runs the build and, only
+          # when the failed attempt's output names a dependency download or resolution error,
+          # runs it again: three attempts in all, 30 s and then 60 s apart, each retry with an
+          # empty Gradle user home, since Gradle's cache records a module's absence from a
+          # repository and could replay the miss. Any other failure (Java, CMake, the APK checks
+          # below) ends the step at once. tools/test_public_ci_wiring.py runs it against a stub.
+          NK_GRADLE_RETRY: |
+            set -euo pipefail
+            if [ "$#" -eq 0 ]; then
+              echo "::error::nk-gradle-retry: no command named" >&2
+              exit 2
+            fi
+            coordinate='[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+:[A-Za-z0-9_.+-]+'
+            transient="Could not (find|resolve) $coordinate|Could not (GET|HEAD|get resource) '?https?://"
+            transient+="|Could not parse POM https?://|(Read|Connect|connect) timed out"
+            transient+="|Plugin \[id: '[^']+', version: '[^']+'\] was not found in any of the following sources"
+            output="$(mktemp)"
+            for attempt in 1 2 3; do
+              if [ "$attempt" -gt 1 ]; then
+                GRADLE_USER_HOME="$(mktemp -d)"
+                export GRADLE_USER_HOME
+              fi
+              set +e
+              "$@" 2>&1 | tee "$output"
+              status="${PIPESTATUS[0]}"
+              set -e
+              if [ "$status" -eq 0 ]; then
+                exit 0
+              fi
+              if ! grep -Eq "$transient" "$output"; then
+                exit "$status"
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "::warning::nk-gradle-retry: attempt $attempt of 3 could not fetch a dependency;" \
+                  "retrying in $((30 * attempt)) s with an empty Gradle user home" >&2
+                sleep "$((30 * attempt))"
+              fi
+            done
+            echo "::error::nk-gradle-retry: fetching the build's dependencies failed on every attempt" >&2
+            exit "$status"
         run: |
           set -euo pipefail
           export JAVA_HOME="$JAVA_HOME_21_X64"
-          gradle --no-daemon -p android assembleDebug -Pnk.abis=arm64-v8a \
+          bash -c "$NK_GRADLE_RETRY" nk-gradle-retry \
+            gradle --no-daemon -p android assembleDebug -Pnk.abis=arm64-v8a \
             "-Pnk.depsDir=$RUNNER_TEMP/android-deps"
           apk=android/app/build/outputs/apk/debug/app-debug.apk
           listing=$(unzip -l "$apk")
@@ -2411,7 +2487,8 @@ jobs:
     # A group's timeout is the sum of its parts' former 25-minute limits, plus the own
     # limit of any step added to a part since: smoke has the homebrew import routes'
     # 15 minutes (#2143), so 40. They run in smoke, measured at 8.1 minutes, rather than
-    # routes, measured at 13.9, so that no group becomes the run's longest job.
+    # routes, measured at 13.9, so that no group becomes the run's longest job. selftests has
+    # the Windows-only Python tests' 20 minutes, so 45.
     strategy:
       fail-fast: false
       matrix:
@@ -2427,7 +2504,7 @@ jobs:
             timeout: 75
           - group: selftests
             parts: [selftests]
-            timeout: 25
+            timeout: 45
     timeout-minutes: ${{ matrix.timeout }}
     # This job's MSYS2 shell has no git on PATH, so the Makefile cannot resolve a
     # revision here; it used to log a raw `process_begin: CreateProcess(NULL, git
@@ -2938,12 +3015,61 @@ jobs:
       # tests/native/vfs_selftest.c holds the Win32 half of the Memory Stick containment checks
       # (a junction and a hard link inside the root, creates and truncates through them); the
       # python_tools shards run the same module on Linux, where that half is compiled out.
+      # NK_REQUIRE_CC=1 turns a compiler missing from the Windows Python's PATH into a failure,
+      # not a green step of skipped tests.
       - name: Build and run the Win32 Memory Stick containment selftest
         if: contains(matrix.parts, 'selftests')
         shell: msys2 {0}
         run: |
           py="$(cygpath -u "$PYTHON")"
-          PYTHONPATH=tools "$py" -m unittest -v test_vfs_c
+          NK_REQUIRE_CC=1 PYTHONPATH=tools "$py" -m unittest -v test_vfs_c
+
+      # The Python tests that skip on every host but Windows: python_tools runs on Linux, where
+      # they skip. tools/ci_test_shards.py --windows-only names them from their skip conditions,
+      # so a new one joins without an edit; tools/test_installer.py's run in windows_installer.
+      # Only unittest's bare OK passes, so a test that skips here too fails the step.
+      # Two of them need 8.3 short names, which the volume of the tests' temporary folders
+      # did not create here (both skipped): fsutil turns their creation on for the volume
+      # of a fresh folder under RUNNER_TEMP (the Windows default per-volume mode, then that
+      # volume; the hosted runner is elevated and the volume is its own), the tests' temporary
+      # folders are made in that folder (TMPDIR), and a probe stops the step by name when a
+      # new spaced folder there still has no 8.3 alias.
+      - name: Run the Windows-only Python tests
+        if: contains(matrix.parts, 'selftests')
+        shell: msys2 {0}
+        timeout-minutes: 20
+        env:
+          MSYS2_PATH_TYPE: inherit
+        run: |
+          set -euo pipefail
+          command -v git >/dev/null || export PATH="$PATH:/c/Program Files/Git/cmd"
+          command -v pwsh
+          command -v git
+          py="$(cygpath -u "$PYTHON")"
+          tests="$("$py" tools/ci_test_shards.py --windows-only | tr -d '\r')"
+          test -n "$tests"
+          tmp="$(cygpath -m "$RUNNER_TEMP")/windows-only-tmp"
+          volume="${tmp%%/*}"
+          fsutil.exe 8dot3name set 2
+          fsutil.exe 8dot3name set "$volume" 0
+          fsutil.exe 8dot3name query "$volume"
+          mkdir -p "$tmp/Spaced short name probe"
+          "$py" - "$(cygpath -w "$tmp/Spaced short name probe")" <<'PY'
+          import ctypes, sys
+          from pathlib import PureWindowsPath
+          buffer = ctypes.create_unicode_buffer(1024)
+          written = ctypes.windll.kernel32.GetShortPathNameW(sys.argv[1], buffer, len(buffer))
+          alias = PureWindowsPath(buffer.value).name if 0 < written < len(buffer) else ""
+          if not alias or alias.casefold() == PureWindowsPath(sys.argv[1]).name.casefold():
+              sys.exit(f"SHORT_NAMES_UNAVAILABLE: {sys.argv[1]} has no 8.3 alias")
+          print(f"8.3 alias: {alias}")
+          PY
+          export TMPDIR="$tmp"
+          log="$(cygpath -u "$RUNNER_TEMP")/windows-only-python.log"
+          # One unittest name per word.
+          # shellcheck disable=SC2086
+          PYTHONPATH=tools "$py" -m unittest -v $tests 2>&1 | tee "$log"
+          tail -n 1 "$log" | tr -d '\r' | grep -qx 'OK'
 
       # The Windows build decodes H.264 through Media Foundation (src/rt/h264_mf.c), so this
       # runs the source-authored PSMF/H.264 fixture on that backend (#283); native_tools runs

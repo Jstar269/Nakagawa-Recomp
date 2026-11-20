@@ -134,9 +134,14 @@ class TestSBOMTooling(unittest.TestCase):
             self.assertEqual(graph_names["SDL3.dll"], "http://spdx.org/licenses/Zlib")
 
             cyclonedx = generate_sbom.generate_cyclonedx(manifest_data, py_pkgs, shipped_dlls=shipped)
-            cdx_names = {c["name"]: c["licenses"][0]["license"]["id"] for c in cyclonedx["components"] if "licenses" in c}
+            cdx_names = {c["name"]: c["licenses"][0] for c in cyclonedx["components"] if "licenses" in c}
             self.assertIn("SDL3.dll", cdx_names)
-            self.assertEqual(cdx_names["SDL3.dll"], "Zlib")
+            self.assertEqual(cdx_names["SDL3.dll"], {"license": {"id": "Zlib"}})
+            # The package itself declares an expression; a DLL keeps its own licence.
+            self.assertEqual(cdx_names["nakagawa-recomp"],
+                             {"expression": "GPL-3.0-or-later AND GPL-3.0-only"})
+            self.assertEqual(graph_names["nakagawa-recomp"], "GPL-3.0-or-later AND GPL-3.0-only")
+            self.assertEqual(spdx_names["nakagawa-recomp"], "GPL-3.0-or-later AND GPL-3.0-only")
 
     def test_manifest_only_sbom_merges_all_inventory_dlls_with_manifest_overrides(self):
         import package_notices
@@ -164,6 +169,9 @@ class TestSBOMTooling(unittest.TestCase):
         )
         self.assertNotIn(">=", by_name["SDL3.dll"]["version"])
         self.assertEqual(by_name["SDL3.dll"]["version"], "NOASSERTION")
+        # The release manifest's sdl3-runtime row replaces the inventory record, so its licence
+        # must name everything the inventory records for SDL3.dll (zlib, yuv2rgb's and hidapi's BSD).
+        self.assertEqual(by_name["SDL3.dll"]["license"], inventory["native"]["dlls"]["sdl3.dll"]["spdx_id"])
 
     def test_python_license_classifier_does_not_guess_lgpl_or_agpl_as_gpl(self):
         classifiers = (

@@ -269,11 +269,13 @@ class VblankLedgerTest(unittest.TestCase):
         cadence = vblank_ledger.measure_cadence(rows)
         assert cadence is not None
         # A second with no readable cadence reading is left out of the per-second
-        # mean, not counted as 0 Hz.
-        self.assertGreater(cadence.per_second_mean_hz, 0.0)
+        # mean, not counted as 0 Hz: the 299 readable rows all say 59.970, and the
+        # bad row counted as 0 Hz would pull the mean down to about 59.770.
+        self.assertAlmostEqual(cadence.per_second_mean_hz, 59.970, places=3)
 
     def test_source_rate_is_the_rational_one(self) -> None:
-        self.assertAlmostEqual(SOURCE_HZ, 59.94005994, places=6)
+        self.assertAlmostEqual(vblank_ledger.SOURCE_HZ, 59.94005994, places=6)
+        self.assertEqual(vblank_ledger.SOURCE_HZ, SOURCE_HZ, "the fixtures assume the tool's rate")
 
     def test_consecutive_intervals_pass_rate_and_identity(self) -> None:
         """Two consecutive 60 Hz one-second intervals pass the rate and identity checks."""

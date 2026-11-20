@@ -48,7 +48,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-from typing import Any
+from typing import Any, cast
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -231,7 +231,8 @@ class TestEmissionShape(unittest.TestCase):
          0x00001234, "div.s", ['SR_NAN_TRAP_F(0x00001234u,"div.s",7u,s->f[7],_a,_b)']),
         ("sqrt.s", lambda options=None: codegen.effect(
             0x00005678, cop1(0x10, 0, 3, 3, 0x04), options=options)[0],
-         0x00005678, "sqrt.s", ['SR_NAN_TRAP_F(0x00005678u,"sqrt.s",3u,s->f[3],_a)']),
+         0x00005678, "sqrt.s", ["s->f[3] = sr_fpu_sqrt_s(s->f[3],s->fcr31);",
+                                'SR_NAN_TRAP_F(0x00005678u,"sqrt.s",3u,s->f[3],_a)']),
         ("vdiv.s", lambda options=None: codegen.effect(0x0000ABCD,
                                           vfpu_lane(0x18, 7, 1, 2, 3, 1), options=options)[0],
          0x0000ABCD, "vdiv.s", ['SR_NAN_TRAP_V2(0x0000abcdu,"vdiv.s",3u,_d,1,_s,1,_t,1)']),
@@ -611,12 +612,14 @@ uint32_t sr_audio_vbl(void) {
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
-class TrapHarness:
+class TrapHarness(unittest.TestCase):
     """Builds one C fixture: real generated statement + real reporter."""
 
     tmp: Path
 
     def compile(self, name: str, body: str, main: str, extra_sources=(), flight=False) -> Path:
+        compiler = CC
+        assert compiler is not None
         tmp = Path(tempfile.mkdtemp(prefix="nan_trap_"))
         self.addCleanup(shutil.rmtree, tmp, True)
         source = tmp / f"{name}.c"
@@ -634,7 +637,7 @@ class TrapHarness:
                           '-DSR_BUILD_ID="0123456789abcdef0123456789abcdef01234567"'] if flight else []
         recorder_sources = [os.fspath(RT / "flight_recorder.c")] if flight else []
         result = subprocess.run(
-            [CC, "-std=c11", "-O1", "-Isrc/rt", "-Isrc/core", "-DSR_NAN_TRAP", *recorder_flags,
+            [compiler, "-std=c11", "-O1", "-Isrc/rt", "-Isrc/core", "-DSR_NAN_TRAP", *recorder_flags,
              "-o", os.fspath(exe), os.fspath(source), os.fspath(stub),
              os.fspath(RT / "debug.c"), *recorder_sources,
              *[os.fspath(RT / s) for s in extra_sources],
@@ -851,7 +854,7 @@ uint32_t sr_vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n) {
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
-class TestVfpuLaneTrap(TrapHarness, unittest.TestCase):
+class TestVfpuLaneTrap(TrapHarness):
     """A real VFPU lane emission from codegen.py, with the real reporter."""
 
     PC = 0x0000ABCD
@@ -895,7 +898,7 @@ int main(void) {{
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
-class TestFlightRecorderNanOrigin(TrapHarness, unittest.TestCase):
+class TestFlightRecorderNanOrigin(TrapHarness):
     """Issue #320: a reported origin is also one fault-class flight-recorder event.
 
     The real vdiv.s emission, the real reporter (src/rt/debug.c) and the real recorder
@@ -1069,7 +1072,7 @@ int sr_cpu_raise_data_fault(CpuState *s, unsigned code, uint32_t addr, uint32_t 
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
-class TestInterpreterTrap(TrapHarness, unittest.TestCase):
+class TestInterpreterTrap(TrapHarness):
     """The AOT-gap fallback path: the real src/rt/vfpu_interp.c."""
 
     PC = 0x00005678
@@ -1111,7 +1114,7 @@ int main(void) {{
         self.assertEqual(reports, [])
 
 
-class TestInterpreterOneSourceTrap(TrapHarness, unittest.TestCase):
+class TestInterpreterOneSourceTrap(TrapHarness):
     """A one-source form through the interpreter reports its single input."""
 
     PC = 0x00005680
@@ -1149,7 +1152,7 @@ int main(void) {{
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
-class TestVtfmTrap(TrapHarness, unittest.TestCase):
+class TestVtfmTrap(TrapHarness):
     """A vtfm emission compiled against the real reporter: every lane, and a frame.
 
     The blind spot this closes: the check used to gather the matrix lanes only, so
@@ -1248,7 +1251,7 @@ int main(void) {{
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
-class TestVmmulTrap(TrapHarness, unittest.TestCase):
+class TestVmmulTrap(TrapHarness):
     """A vmmul emission: both matrices, every lane, in operand order."""
 
     PC = 0x00002333
@@ -1309,7 +1312,7 @@ class Vfpu3CompareDecodeTests(unittest.TestCase):
 
     def _effect(self, word: int) -> str:
         body, _, _ = codegen.vfpu_effect(0x00031d38, word)
-        return body
+        return cast(str, body)  # The supported VFPU form handlers emit C source in tuple slot zero.
 
     def test_sub6_is_vsge_not_a_conditional_move(self):
         body = self._effect(0x6f1e6040)

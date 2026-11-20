@@ -1581,6 +1581,19 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
                      bytes >= 1024u ? "KB" : "bytes");
             model.report_lines[model.report_line_count++] = player->report_lines[i];
         }
+        model.report_file_total = report->file_total > 0 ? (size_t)report->file_total : 0u;
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+        {
+            static size_t reported_more = (size_t)-1;
+            size_t more = player_ui_report_more_count(&model);
+            if (more != reported_more) {
+                reported_more = more;
+                printf("[PLAYER_UI_TEST] next_ui_report_more lines=%zu total=%zu more=%zu\n",
+                       model.report_line_count, model.report_file_total, more);
+                fflush(stdout);
+            }
+        }
+#endif
     }
     model.logical_width = scale.logical_w;
     model.logical_height = scale.logical_h;
@@ -2358,6 +2371,13 @@ bool player_ui_nk_test_laid_out(const PlayerUiNk *player) {
     return player != NULL && player->ui != NULL && nk_ui_laid_out(player->ui);
 }
 
+int player_ui_nk_test_device_resets(const PlayerUiNk *player) {
+    NkUiSdlrStats stats;
+    if (player == NULL || player->backend == NULL) return -1;
+    nk_ui_sdlr_get_stats(player->backend, &stats);
+    return (int)stats.device_resets;
+}
+
 int player_ui_nk_test_backdrop(const PlayerUiNk *player, bool *shown) {
     if (shown != NULL) *shown = false;
     if (player == NULL || player->backdrop_index == SIZE_MAX) return -1;
@@ -2854,7 +2874,15 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     NkUiEvent translated[8];
     size_t count;
     double now_s;
-    if (player == NULL || !player->ready || event == NULL) return false;
+    if (player == NULL || event == NULL) return false;
+    if (event->type == SDL_EVENT_RENDER_DEVICE_RESET) {
+        /* SDL3: after a device reset every texture must be made again (a Direct3D
+           device lost to a driver reset or update). The backend drops its atlas, image
+           and waves textures and the next frame uploads what it draws. */
+        nk_ui_sdlr_reset(player->backend);
+        return true;
+    }
+    if (!player->ready) return false;
     now_s = player_ui_nk_now_s(player);
     if (player->nickname_open) {
         /* The nickname editor takes what is typed as the find box does; Esc or the

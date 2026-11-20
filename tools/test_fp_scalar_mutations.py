@@ -223,11 +223,19 @@ class FpMutationVerdictTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def _staged(self, **kwargs) -> StagedRun:
-        fields = dict(build_rc=0, build_output="", run_rc=1,
-                      run_output="FAIL: guest rounding wrong\n")
-        fields.update(kwargs)
-        return StagedRun(**fields)
+    def _staged(
+        self,
+        *,
+        build_rc: int | None = 0,
+        build_output: str = "",
+        run_rc: int | None = 1,
+        run_output: str = "FAIL: guest rounding wrong\n",
+        build_timed_out: bool = False,
+        run_timed_out: bool = False,
+    ) -> StagedRun:
+        return StagedRun(
+            build_rc, build_output, run_rc, run_output, build_timed_out, run_timed_out
+        )
 
     def test_the_mocked_staging_tests_run_on_a_host_without_gcc(self):
         """The verdict tests mock the compiler, so a host with no gcc on PATH still runs them."""
@@ -573,6 +581,8 @@ int main(void) {
     return 0;
 }
 """
+
+        assert CC is not None
 
         def build_and_run(header_text: str, tag: str):
             with scratch_dir.TemporaryDirectory(prefix=f"fp_scalar_m13_{tag}_") as tmp:

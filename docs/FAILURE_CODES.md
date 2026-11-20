@@ -99,6 +99,7 @@ The **Where** column of each table names the places a code can appear:
 | --- | --- | --- |
 | `CONTEXT_REQUIRED` | decrypt, player | The file is bound to the console that installed it (its fuse ID), which Nakagawa cannot take, so it is refused. |
 | `DECOMPRESS_FAILURE` | decrypt, player | The decrypted payload does not decompress; the file looks damaged or changed. |
+| `DISC_DECRYPT_MEMBER_MISSING` | decrypt | An encrypted file found on the disc image was gone when the tools came to decrypt it: the image changed or was cut short during the run. The disc's other files are still decrypted. |
 | `FIRMWARE_OUT_OF_SCOPE` | decrypt, player | The file is PSP system software. Nakagawa never decrypts firmware. |
 | `INTEGRITY_FAILURE` | decrypt, player | The file's signature or hash check failed; the file looks damaged or changed. |
 | `IO_FAILURE` | decrypt, player | The input could not be read or the output could not be written. |
@@ -286,6 +287,7 @@ The **Where** column of each table names the places a code can appear:
 | `PREREQUISITE_FETCH_START_FAILED` | player | The prerequisite download could not start. |
 | `PREREQUISITE_INSTALL_FAILED` | player | The prerequisite install failed. |
 | `PREREQUISITE_MANIFEST_INVALID` | player | The prerequisite manifest is invalid. |
+| `PREREQUISITE_TITLE_GONE` | player | The build tools finished installing, but the game they were downloaded for has left the library, so no build started. |
 | `PYTHON_ARCHIVE_EXTRACT_FAILED` | player | The verified Python archive could not be extracted. |
 | `PYTHON_ARCHIVE_INVALID` | player | The verified Python archive does not contain Python. |
 | `PYTHON_BOOTSTRAP_FAILED` | player | The verified Python runtime could not be installed. |

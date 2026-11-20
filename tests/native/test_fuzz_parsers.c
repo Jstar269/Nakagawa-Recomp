@@ -2949,11 +2949,13 @@ static void test_fuzz_kirk(unsigned iters) {
         const uint8_t *seed = ((fuzz_rand32() % 2u) != 0u) ? cmd1_seed : cbc_seed;
         size_t insize = FUZZ_KIRK_SIZE;
         size_t scratch;
-        uint8_t *inbuf = (uint8_t *)malloc(insize);
-        assert(inbuf != NULL);
-        memcpy(inbuf, seed, insize);
+        uint8_t work[FUZZ_KIRK_SIZE];
+        memcpy(work, seed, insize);
         scratch = insize;
-        mutate_buffer(inbuf, &scratch, insize);
+        mutate_buffer(work, &scratch, insize);
+        /* The command gets the mutated length and a copy that ends there, so
+         * a read past the length it was given leaves the allocation. */
+        uint8_t *inbuf = fuzz_exact_copy(work, scratch);
 
         /* Exactly the caller's declared output size, plus a poisoned tail:
          * any write past the negotiated size is caught without a sanitizer. */
@@ -2963,7 +2965,7 @@ static void test_fuzz_kirk(unsigned iters) {
         NkPspCtx ctx;
         nk_psp_ctx_init(&ctx, ks);
         int rc = sceUtilsBufferCopyWithRange(&ctx, outbuf, (int)insize, inbuf,
-                                             (int)insize, cmd);
+                                             (int)scratch, cmd);
         for (unsigned g = 0; g < FUZZ_KIRK_GUARD; g++) {
             assert(outbuf[insize + g] == FUZZ_CANARY);
         }
@@ -3206,6 +3208,40 @@ static void test_kirk_commands_respect_outsize(void) {
 
     nk_keystore_free(ks);
     printf("[KIRK] KIRK commands respect the output size\n");
+    fflush(stdout);
+}
+
+/* CMD10 refuses an input shorter than its 0x90-byte header before it reads
+ * any header field. It used to read the mode at 0x60 and data_size at 0x70
+ * first, so a short input was judged by bytes past its declared size: here a
+ * mode of 0 there gave KIRK_INVALID_MODE, and an exact-size copy is a heap
+ * over-read under a sanitizer. */
+static void test_kirk_cmd10_short_input_is_refused(void) {
+    printf("[KIRK] Testing that CMD10 refuses an input shorter than its header...\n");
+    fflush(stdout);
+    static const int short_sizes[] = {0, 1, 0x60, 0x64, 0x74, 0x8F};
+    uint8_t block[0x90];
+    memset(block, 0, sizeof(block)); /* mode 0 at 0x60, data_size 0 at 0x70 */
+    NkKeystore *ks = kirk_test_keystore(1, 1u);
+    NkPspCtx ctx;
+    for (size_t i = 0; i < sizeof(short_sizes) / sizeof(short_sizes[0]); i++) {
+        const int n = short_sizes[i];
+        nk_psp_ctx_init(&ctx, ks);
+        assert(kirk_CMD10(&ctx, block, n) == KIRK_INVALID_SIZE);
+        uint8_t *exact = fuzz_exact_copy(block, (size_t)n);
+        nk_psp_ctx_init(&ctx, ks);
+        assert(sceUtilsBufferCopyWithRange(&ctx, NULL, 0, exact, n,
+                                           KIRK_CMD_PRIV_SIGN_CHECK) == KIRK_INVALID_SIZE);
+        free(exact);
+    }
+    /* A negative size is refused the same way. */
+    nk_psp_ctx_init(&ctx, ks);
+    assert(kirk_CMD10(&ctx, block, -1) == KIRK_INVALID_SIZE);
+    /* The full header with mode 0 is still judged by its mode. */
+    nk_psp_ctx_init(&ctx, ks);
+    assert(kirk_CMD10(&ctx, block, (int)sizeof(block)) == KIRK_INVALID_MODE);
+    nk_keystore_free(ks);
+    printf("[KIRK] CMD10 refuses short inputs\n");
     fflush(stdout);
 }
 
@@ -4287,10 +4323,10 @@ static FuzzByteBuffer make_xb_members(const FuzzVfsMember *members, size_t count
 
 /* The archive key rule as archive_vfs.c states it: separators '/' or '\\', runs of them
  * collapsed and leading ones dropped, ASCII letters folded to lower case; a Shift-JIS
- * pair (a lead byte 0x81-0x9f or 0xe0-0xfc, then a trail byte 0x40-0x7e or 0x80-0xfc, or
- * the '/' a guest key folds a trail 0x5c into) is one unit, its trail byte folded like a
- * letter and never a separator; an empty, "." or ".." component or a trailing separator
- * has no key. */
+ * pair (a lead byte 0x81-0x9f or 0xe0-0xfc, then a trail byte 0x40-0x7e or 0x80-0xfc) is
+ * one unit kept byte for byte, its trail byte neither folded nor a separator (audit
+ * 2026-11-17 F-27cbd9cd); an empty, "." or ".." component or a trailing separator has no
+ * key. */
 static bool fuzz_vfs_fold(const char *path, char *out, size_t cap) {
     const char *p = path;
     size_t n = 0, component = 0;
@@ -4299,9 +4335,7 @@ static bool fuzz_vfs_fold(const char *path, char *out, size_t cap) {
         unsigned char lead = (unsigned char)p[0];
         if (((lead >= 0x81u && lead <= 0x9fu) || (lead >= 0xe0u && lead <= 0xfcu)) && p[1]) {
             unsigned char trail = (unsigned char)p[1];
-            if (trail == '/') trail = 0x5cu;
             if ((trail >= 0x40u && trail <= 0x7eu) || (trail >= 0x80u && trail <= 0xfcu)) {
-                if (trail >= 'A' && trail <= 'Z') trail = (unsigned char)(trail + 32u);
                 if (n + 2u >= cap) return false;
                 out[n++] = (char)lead;
                 out[n++] = (char)trail;
@@ -4353,12 +4387,22 @@ static void fuzz_vfs_member_path(char *path, size_t cap) {
 }
 
 /* A query for a stored path: letters flipped in case, separators turned to '\\' or
- * doubled, and a leading separator. Its fold equals the stored path's. */
+ * doubled, and a leading separator; a Shift-JIS pair is copied as it is, since its trail
+ * byte is part of the character. Its fold equals the stored path's. */
 static void fuzz_vfs_query(const char *path, char *out, size_t cap) {
     size_t n = 0;
     if (fuzz_rand32() & 1u) out[n++] = fuzz_rand32() & 1u ? '/' : '\\';
     for (const char *p = path; *p && n + 3u < cap; p++) {
         char c = *p;
+        unsigned char lead = (unsigned char)c;
+        unsigned char trail = (unsigned char)p[1];
+        if (((lead >= 0x81u && lead <= 0x9fu) || (lead >= 0xe0u && lead <= 0xfcu)) &&
+            ((trail >= 0x40u && trail <= 0x7eu) || (trail >= 0x80u && trail <= 0xfcu))) {
+            out[n++] = c;
+            out[n++] = p[1];
+            p++;
+            continue;
+        }
         if (c == '/') {
             out[n++] = fuzz_rand32() & 1u ? '/' : '\\';
             if (fuzz_rand32() % 4u == 0u) out[n++] = '/';
@@ -5154,6 +5198,7 @@ int main(int argc, char **argv) {
     test_kirk_pass_of_zero_bytes_is_refused();
     test_kirk_cmd1_key_comes_from_the_callers_ctx();
     test_kirk_commands_respect_outsize();
+    test_kirk_cmd10_short_input_is_refused();
 
     printf("=================================================================\n");
     printf("ALL DETERMINISTIC PARSER FUZZ HARNESSES PASSED SUCCESSFULLY!\n");

@@ -1464,6 +1464,11 @@ def list_iso_directory(
         raise IsoInspectionError("ISO directory could not be read") from exc
 
 
+def _native_component_bytes(name: bytes) -> bytes:
+    """An identifier without one trailing separator '.', as the native reader matches it."""
+    return name[:-1] if len(name) > 1 and name.endswith(b".") else name
+
+
 def _lookup_iso_file(stream, file_size: int, path: tuple[str, ...]) -> tuple[int, int] | None:
     stream.seek(PVD_SECTOR * SECTOR_SIZE)
     pvd = stream.read(SECTOR_SIZE)
@@ -1498,7 +1503,10 @@ def _lookup_iso_file(stream, file_size: int, path: tuple[str, ...]) -> tuple[int
             if name_size == 0 or 33 + name_size > record_size:
                 raise IsoInspectionError("malformed ISO directory identifier")
             name = record[33 : 33 + name_size]
-            if name not in (b"\0", b"\1") and _iso_name_without_version(name).upper() == wanted:
+            # The reader's rule (nk_iso_name_matches in src/core/nk_iso.c): no case, no
+            # ';' version, and one trailing separator '.' ("DATA.;1") dropped.
+            if name not in (b"\0", b"\1") and \
+                    _native_component_bytes(_iso_name_without_version(name)).upper() == wanted:
                 found = _extent_from_record(record, file_size)
                 break
             offset += record_size
@@ -2439,14 +2447,15 @@ def inspect_compatibility_preflight(
     decrypted_elf: Path | None = None
     decrypted_elf_kind = "MISSING"
     if module_dir is not None:
-        candidate_elf: Path | None = module_dir / "EBOOT.elf"
+        candidate_elf = module_dir / "EBOOT.elf"
         try:
             candidate_elf.resolve(strict=False).relative_to(root.expanduser().resolve(strict=False))
         except ValueError:
-            candidate_elf = None
-        if candidate_elf is not None and candidate_elf.is_file():
-            decrypted_elf = candidate_elf
-            decrypted_elf_kind = _classify_decrypted_elf_file(candidate_elf)
+            pass
+        else:
+            if candidate_elf.is_file():
+                decrypted_elf = candidate_elf
+                decrypted_elf_kind = _classify_decrypted_elf_file(candidate_elf)
     if cfw_loader_detected:
         selected = (
             "EBOOT.elf"

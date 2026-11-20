@@ -279,6 +279,46 @@ bool nk_platform_real_path(const char *path, char *out_path, size_t max_len);
  * open. NULL on refusal or failure. */
 FILE *nk_platform_open_regular_file(const char *path);
 
+/* Open the file at `path` for reading in binary mode and, while the stream stays
+ * open, keep other programs from changing it where the platform can. Windows:
+ * the handle shares reads only, so no other open may write to, replace, rename
+ * or delete the file until it is closed, on a local volume or a server that
+ * enforces share modes. When another program already has the file open for
+ * writing (a seeding or syncing program), that open is refused by the system;
+ * the file is then opened shared, as an ordinary read, and *opened_shared is set
+ * so the caller can say so. POSIX has no such share mode: the stream is an
+ * ordinary read and a writer is not stopped (*opened_shared stays false). Either
+ * way a caller that needs the bytes to stay put still checks them. NULL only
+ * when the file cannot be opened for reading at all; errno then says why, and
+ * is EACCES (Windows ERROR_ACCESS_DENIED; POSIX EACCES or EPERM) when this
+ * account may not read the file. opened_shared may be NULL. */
+FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared);
+
+/* What else than the size and write time (which any writer can set back) tells
+ * whether the file at `path` changed: its change time (POSIX st_ctim in
+ * nanoseconds; Windows the NTFS ChangeTime) and its identity (POSIX st_dev and
+ * st_ino; Windows the volume serial number and file index). Read again after a
+ * change, they catch:
+ *   - POSIX: any write, rename or replacement, even one undone afterwards (bytes
+ *     and write time restored, or renamed away and back), since no ordinary
+ *     program can set st_ctim; nothing holds the file open against writers.
+ *   - Windows, while nk_platform_open_read_deny_writes holds the file with
+ *     writes denied (a local volume, or a server that enforces share modes): no
+ *     other program can write, rename or replace it, so nothing is undone; these
+ *     fields are a second check only.
+ *   - Windows, when the file was opened shared because another program has it
+ *     open for writing: that program can write it but not rename or replace it
+ *     while it is held. A write it undoes is caught by ChangeTime, unless the
+ *     program also sets ChangeTime back, which Windows lets a writer do; only a
+ *     change still in place when the caller reads the file again is then caught.
+ * A file system that keeps no change time of its own (FAT32, exFAT) adds
+ * nothing over the write time there. A field the file system does not report,
+ * or a call that fails, leaves 0; a caller compares 0 like any other value, so
+ * a field 0 both times never differs and 0 against a value is a change. Never
+ * blocks another open. */
+void nk_platform_file_change_identity(const char *path, uint64_t *changed, uint64_t *volume,
+                                      uint64_t *file_id);
+
 /* Whether `path` is longer than the file APIs this process uses accept, so a
  * create or open of it fails for its length alone. On Win32 that is MAX_PATH
  * (260 with the terminator; 248 for a new directory) unless the process has

@@ -96,13 +96,15 @@ static bool player_populate_inspected_game(PlayerApp *app, const char *iso_path,
     bool profile_refused = player_app_title_profile_refusal_for_disc(
         app, result->disc_id, refused_profile, sizeof(refused_profile));
     if (!result->is_supported && result->param_sfo_parsed && !profile_refused) {
-        char user_data_root[NK_MAX_PATH];
+        /* The runtime root owns experimental profiles: the build's preflight, the
+           package build and the manifest load at start all read them there. */
+        char profile_root[NK_MAX_PATH];
         char profile_id[64];
-        if (!nk_platform_get_app_data_dir(user_data_root, sizeof(user_data_root)) ||
+        if (!player_app_data_root(app, profile_root, sizeof(profile_root)) ||
             !nk_title_manifest_write_experimental_profile(
                 iso_path, result->param_sfo_parsed, result->disc_id,
                 result->title_name, result->executables.selected_path,
-                user_data_root, profile_id, sizeof(profile_id), error, error_len)) {
+                profile_root, profile_id, sizeof(profile_id), error, error_len)) {
             if (error && error_len && !error[0]) {
                 snprintf(error, error_len, "Could not create the local experimental title profile.");
             }
@@ -201,10 +203,11 @@ static void player_take_picked_disc(PlayerApp *app, const char *selected_path) {
     player_take_picked_disc_from(app, selected_path, NULL);
 }
 
-/* A compressed disc image (.cso, .zso, .chd): expanded once into a private ISO
-   on the conversion worker, then imported exactly as a picked .iso. An
-   expansion of the same unchanged file is used as it is; anything the player
-   cannot read is refused by name. */
+/* A compressed disc image (.cso, .zso, .chd): checked here, then read whole
+   for its identity on the conversion worker and expanded once into a private
+   ISO, which is imported exactly as a picked .iso. An expansion of a file with
+   the same bytes is used as it is; anything the player cannot read is refused
+   by name. */
 static void player_take_picked_compressed(PlayerApp *app, const char *path) {
     PlayerPsnPackage package;
     char code[48];
@@ -220,15 +223,16 @@ static void player_take_picked_compressed(PlayerApp *app, const char *path) {
         player_take_picked_disc_from(app, package.iso_path, package.pbp_path);
         return;
     }
-    printf("[PLAYER] Disc image %s: expanding it into a plain disc image\n",
+    printf("[PLAYER] Disc image %s: reading it, then expanding it unless it was added before\n",
            nk_disc_format_extension(package.disc_format));
     player_app_psn_conversion_begin(app, &package);
 }
 
 /* A PSN release of a UMD game (#295 phase 2): converted once into a private
-   ISO on the conversion worker, then imported exactly as a picked disc. A
-   conversion already in place is used as it is; other packages are refused by
-   name. */
+   ISO on the conversion worker, then imported exactly as a picked disc. The
+   worker reads the package whole for its identity, and a conversion of the
+   same package already in place is used as it is; other packages are refused
+   by name. */
 static void player_take_picked_package(PlayerApp *app, const char *path) {
     PlayerPsnPackage package;
     char code[48];
@@ -996,6 +1000,10 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
     case SDL_EVENT_DROP_COMPLETE:
         player_finish_drop(app);
         return true;
+    case SDL_EVENT_RENDER_DEVICE_RESET:
+        /* Every texture is lost: the next UI's backend drops its own, whichever view
+           is up, so it never draws from one after the reset. */
+        return player_ui_nk_handle_event(next_ui, event);
     default:
         return false;
     }
@@ -1748,12 +1756,16 @@ static bool player_report_read_answer(const char *path, PlayerReportState *out) 
     files = nk_json_obj_get(root, "files");
     if (files && nk_json_is_array(files)) {
         size_t count = nk_json_array_count(files);
-        for (size_t i = 0u; i < count && out->file_count < PLAYER_REPORT_MAX_FILES; ++i) {
+        /* The page lists the first PLAYER_REPORT_MAX_FILES; file_total counts every
+           file, so its "and N more" counts what the ZIP really holds. */
+        for (size_t i = 0u; i < count; ++i) {
             NkJsonNode *item = nk_json_array_get(files, i);
             NkJsonNode *name = item ? nk_json_obj_get(item, "name") : NULL;
             NkJsonNode *bytes = item ? nk_json_obj_get(item, "bytes") : NULL;
             double value = 0.0;
             if (!name || !nk_json_is_string(name)) continue;
+            ++out->file_total;
+            if (out->file_count >= PLAYER_REPORT_MAX_FILES) continue;
             snprintf(out->file_names[out->file_count], PLAYER_REPORT_FILE_NAME, "%s",
                      nk_json_get_string(name));
             if (bytes && nk_json_get_number(bytes, &value) && value > 0.0) {
@@ -1845,6 +1857,7 @@ static int SDLCALL player_report_thread_main(void *userdata) {
         player_report_error_line(job->output_path, why, sizeof(why));
         out->phase = PLAYER_REPORT_FAILED;
         out->file_count = 0;
+        out->file_total = 0;
         out->path[0] = '\0';
         snprintf(out->message, sizeof(out->message), "%s%sRun this in a terminal to see more: %s",
                  why, why[0] != '\0' ? " " : "", out->command);
@@ -2668,13 +2681,7 @@ static int SDLCALL player_package_status_thread_main(void *userdata) {
     } else if (root) {
         job->status = nk_launch_validate_runtime_package(
             root, &job->game, NULL, job->reason, sizeof(job->reason));
-        /* A developer layout can stand in for a missing authentic package,
-           never for the enhanced build. */
-        job->runtime_available = job->status == NK_RUNTIME_PACKAGE_OK ||
-            (job->status == NK_RUNTIME_PACKAGE_MISSING &&
-             !job->game.is_experimental &&
-             !job->game.enhancement_package_id[0] &&
-             nk_launch_runtime_available(root, job->game.title_id));
+        job->runtime_available = player_runtime_available(job->status, &job->game, root);
     } else {
         job->status = NK_RUNTIME_PACKAGE_MISSING;
         snprintf(job->reason, sizeof(job->reason),
@@ -3151,7 +3158,7 @@ static bool start_staging_job(PlayerApp *app, PlayerStagingJob **job_slot) {
                                             "Could not allocate the staging worker.");
         return false;
     }
-    if (!player_app_build_stage_plan(&app->inspecting_game, &job->plan)) {
+    if (!player_app_build_stage_plan(app, &app->inspecting_game, &job->plan)) {
         free(job);
         player_app_wizard_finish_extraction(app, NK_ERROR_UNSUPPORTED_TITLE,
                                             PLAYER_STAGE_PROFILE_UNAVAILABLE);
@@ -3368,7 +3375,8 @@ static void finish_psn_job(PlayerApp *app, PlayerPsnJob *job) {
     job->completion_handled = true;
     player_app_psn_conversion_finish(app);
     if (job->ok && job->package.disc_format != NK_DISC_FORMAT_NONE) {
-        printf("[PLAYER] Disc image %s expanded into %s\n",
+        printf(job->package.reused ? "[PLAYER] Disc image %s: using its expanded disc image for %s\n"
+                                   : "[PLAYER] Disc image %s expanded into %s\n",
                nk_disc_format_extension(job->package.disc_format), job->package.disc_id);
         player_take_picked_disc_from(app, job->package.iso_path, job->package.pbp_path);
     } else if (job->ok) {
@@ -3928,7 +3936,7 @@ static int player_stage_inspected_title(PlayerApp *app) {
         fprintf(stderr, "[PLAYER] Not enough memory to set up this game's files.\n");
         return 3;
     }
-    if (!player_app_build_stage_plan(&app->inspecting_game, plan)) {
+    if (!player_app_build_stage_plan(app, &app->inspecting_game, plan)) {
         free(plan);
         player_app_wizard_finish_extraction(app, NK_ERROR_UNSUPPORTED_TITLE,
                                             PLAYER_STAGE_PROFILE_UNAVAILABLE);
@@ -4568,6 +4576,9 @@ typedef struct PlayerRun {
     char converted_iso_path[NK_MAX_PATH];
     char expanded_iso_path[NK_MAX_PATH];
     const char *initial_source_image;
+    /* A compressed disc image or a PSN package given as --iso in an interactive run: taken
+       once the window is open, as a picked file, so it is read and converted on the worker. */
+    char deferred_pick_path[NK_MAX_PATH];
     /* Entries at or after this index were not loaded from library.json: they are
        the bundled demo samples (or prepared showcase demos). */
     int user_library_count;
@@ -4605,6 +4616,9 @@ typedef struct PlayerRun {
     bool build_check_pending;
     bool running;
     uint64_t last_tick;
+    /* This frame's clock step (player_frame_begin): the one clock the Controls page's
+       capture and calibration run on. */
+    uint32_t frame_delta_ms;
     /* One launcher per data folder (#2006). */
     NkSingleInstance instance;
 } PlayerRun;
@@ -4899,8 +4913,28 @@ static int player_load_library(PlayerRun *run) {
         }
     }
 
-    /* A PSN package given as --iso converts once, here, and its disc image is
-       then inspected like any --iso (#295 phase 2). */
+    /* In an interactive run, a compressed disc image or a PSN package given as --iso is
+       taken once the window is open, exactly as a picked one: read whole for its identity
+       and converted on the worker, with the wizard's progress and Cancel, never as a
+       wait before the window appears. --stage, --stage-only, --launch-now and
+       --headless-launch need the disc image before they go on, so they convert it here,
+       with progress on the console. */
+    if (run->initial_iso_path && !run->stage_only && !run->stage_initial_iso &&
+        !run->launch_now && !app->launch_headless &&
+        (player_path_is_pbp_package(run->initial_iso_path) ||
+         nk_disc_image_format(run->initial_iso_path) != NK_DISC_FORMAT_NONE)) {
+        int n = snprintf(run->deferred_pick_path, sizeof(run->deferred_pick_path), "%s",
+                         run->initial_iso_path);
+        if (n <= 0 || (size_t)n >= sizeof(run->deferred_pick_path)) {
+            fprintf(stderr, "[PLAYER] The path given as --iso is too long.\n");
+            return 2;
+        }
+        run->initial_iso_path = NULL;
+        run->populate_sample = false;
+    }
+
+    /* A PSN package given as --iso to a command-line route converts once, here, and its
+       disc image is then inspected like any --iso (#295 phase 2). */
     if (run->initial_iso_path && player_path_is_pbp_package(run->initial_iso_path)) {
         PlayerPsnPackage package;
         char code[48];
@@ -4937,21 +4971,26 @@ static int player_load_library(PlayerRun *run) {
         }
     }
 
-    /* A compressed disc image given as --iso expands once, here, and the
-       expanded .iso is then inspected like any --iso. */
+    /* A compressed disc image given as --iso to a command-line route expands once, here,
+       and the expanded .iso is then inspected like any --iso. */
     if (run->initial_iso_path && nk_disc_image_format(run->initial_iso_path) != NK_DISC_FORMAT_NONE) {
         PlayerPsnPackage package;
         char code[48];
         char message[512];
         bool ok = player_disc_image_inspect(run->initial_iso_path, &package, code, sizeof(code),
                                             message, sizeof(message));
-        if (ok && !package.iso_ready) {
+        if (ok) {
             int last_percent = -1;
             PlayerPsnConvertCallbacks hooks = { disc_console_progress, NULL, &last_percent };
-            printf("[PLAYER] Expanding disc image %s into a plain disc image...\n",
-                   nk_disc_format_extension(package.disc_format));
+            printf("[PLAYER] Reading disc image %s, then expanding it unless it was added "
+                   "before...\n", nk_disc_format_extension(package.disc_format));
             ok = player_disc_image_expand(&package, &hooks, code, sizeof(code), message,
                                           sizeof(message));
+            if (ok) {
+                printf(package.reused ? "[PLAYER] Disc image %s: using its expanded disc image\n"
+                                      : "[PLAYER] Expanded disc image %s into a plain disc image\n",
+                       nk_disc_format_extension(package.disc_format));
+            }
         }
         if (!ok) {
             fprintf(stderr, "[PLAYER] %s: %s\n", code, message);
@@ -5455,13 +5494,9 @@ static int player_command_line_launch(PlayerRun *run) {
         NkRuntimePackageStatus launch_status =
             player_app_validate_runtime_package(
                 app, launch_game, NULL, NULL, 0);
-        bool launch_available = launch_status == NK_RUNTIME_PACKAGE_OK ||
-            (launch_status == NK_RUNTIME_PACKAGE_MISSING &&
-             !launch_game->is_experimental &&
-             nk_launch_runtime_available(
-                 app->runtime_root[0] ? app->runtime_root : NULL,
-                 launch_game->title_id));
-        if (!launch_available) {
+        /* The launch worker's own rule, under the root it validated the package in. */
+        if (!player_runtime_available(launch_status, launch_game,
+                                      player_app_package_root(app, launch_game))) {
             if (sample_entry) {
                 fprintf(stderr, "[PLAYER] Launch index %d is a bundled SAMPLE demo, not in "
                         "library.json, and has no prepared runtime; PLAY NOW is unavailable.\n",
@@ -5835,6 +5870,7 @@ static void player_frame_begin(PlayerRun *run) {
     uint64_t now_tick = SDL_GetTicks();
     uint32_t delta_ms = (uint32_t)(now_tick >= run->last_tick ? (now_tick - run->last_tick) : 0);
     run->last_tick = now_tick;
+    run->frame_delta_ms = delta_ms;
     if (app->active_view == VIEW_CONTROLLER_SETTINGS && input_settings_is_capturing(&app->input_settings)) {
         input_settings_update_capture(&app->input_settings, delta_ms > 0 ? delta_ms : 1);
     }
@@ -6093,10 +6129,9 @@ static void player_frame_requests(PlayerRun *run) {
     }
     player_update_prerequisite_operation(app);
     if (player_app_prereq_take_resume(app)) {
-        int game_index = app->prerequisites.game_index;
-        if (!player_app_start_package_build(app, game_index)) {
-            /* The state helper has already opened the actionable error card. */
-        }
+        /* By the title's identity, not its index: the library may have changed during
+           the download. On a refusal the card that says why is already open. */
+        (void)player_app_prereq_resume_build(app);
     }
 
     bool build_check_identity_changed = run->build_check_pending &&
@@ -6126,10 +6161,13 @@ static void player_frame_requests(PlayerRun *run) {
        current library selection. */
     player_app_poll_package_build(app, SDL_GetTicks());
     /* nk_cli.py reports the package PASS before it has finished writing, so the
-       build counts as done only once its child has exited cleanly. */
+       build counts as done only once its child has exited cleanly. A finished
+       tools download leaves the session complete too; that is the prerequisite
+       card's, not a package build's. */
     if (app->build_session.is_complete && !app->build_session.is_building &&
         !app->build_session.is_failed && !run->build_check_pending &&
-        !build_check_session_already_handled) {
+        !build_check_session_already_handled &&
+        !player_app_build_session_is_prerequisite_fetch(app)) {
         /* The card of the image built, not another image with its disc ID. */
         int build_game_index = player_app_find_built_game(
             app, app->build_session.disc_id, app->build_session.iso_path);
@@ -6182,6 +6220,10 @@ static void player_frame_requests(PlayerRun *run) {
         player_ui_test_catalog_drive(&run->package_status_job->catalog_test);
     }
 }
+
+/* The longest clock step one frame gives the stick calibration: a stalled frame (a window
+   drag, a slow disk) must not end its timed rest sampling at once. */
+#define PLAYER_CALIBRATION_MAX_STEP_MS 100u
 
 /* The running game and the window handoff to it, and the controller's live input. */
 static void player_frame_game_session(PlayerRun *run) {
@@ -6269,17 +6311,16 @@ static void player_frame_game_session(PlayerRun *run) {
         memset(app->host_axes_live, 0, sizeof(app->host_axes_live));
     }
 
-    /* Update guided analog calibration when active (#357) */
-    if (app->active_view == VIEW_CONTROLLER_SETTINGS) {
-        static uint64_t s_last_cal_tick = 0;
-        uint64_t cur_tick = SDL_GetTicks();
-        if (s_last_cal_tick == 0) s_last_cal_tick = cur_tick;
-        uint32_t dt_ms = (uint32_t)(cur_tick - s_last_cal_tick);
-        s_last_cal_tick = cur_tick;
-        if (input_settings_is_calibrating(&app->input_settings)) {
-            input_settings_update_calibration(&app->input_settings, dt_ms,
-                                              app->host_axes_live);
-        }
+    /* Guided analog calibration (#357), while its page is shown, on the frame's own clock
+       step: time spent on another view (F12's developer log) never arrives as one long
+       step that ends the rest sampling at once, and a stalled frame counts as at most
+       PLAYER_CALIBRATION_MAX_STEP_MS. */
+    if (app->active_view == VIEW_CONTROLLER_SETTINGS &&
+        input_settings_is_calibrating(&app->input_settings)) {
+        uint32_t dt_ms = run->frame_delta_ms < PLAYER_CALIBRATION_MAX_STEP_MS
+            ? run->frame_delta_ms : PLAYER_CALIBRATION_MAX_STEP_MS;
+        input_settings_update_calibration(&app->input_settings, (int)dt_ms,
+                                          app->host_axes_live);
     }
 }
 
@@ -6502,6 +6543,13 @@ int main(int argc, char *argv[]) {
     }
 
     player_loop_start(&run);
+    if (run.deferred_pick_path[0]) {
+        if (player_path_is_pbp_package(run.deferred_pick_path)) {
+            player_take_picked_package(&run.app, run.deferred_pick_path);
+        } else {
+            player_take_picked_compressed(&run.app, run.deferred_pick_path);
+        }
+    }
     while (run.running && !run.app.should_quit) {
         player_frame_begin(&run);
         player_frame_events(&run);

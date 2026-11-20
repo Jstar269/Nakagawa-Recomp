@@ -766,6 +766,7 @@ int main(int argc, char **argv) {
         printf("TITLE:%s\\n", meta.title_name);
         printf("VERSION:%s\\n", meta.disc_version);
         printf("VOLUME_ID:%s\\n", meta.volume_id);
+        printf("HAS_PSP_GAME:%d\\n", meta.has_psp_game_folder ? 1 : 0);
         printf("SUPPORTED:%d\\n", meta.is_supported ? 1 : 0);
         printf("PARAM_SFO_PARSED:%d\\n", meta.param_sfo_parsed ? 1 : 0);
         printf("EBOOT_KIND:%d\\n", (int)meta.executables.eboot.kind);
@@ -4354,6 +4355,89 @@ int main(int argc, char **argv) {
         self.assertEqual(lines.get("LIST_ROOT_1"), "0")
         self.assertGreater(int(lines.get("READ_SFO", "0")), 0)
         self.assertEqual(lines.get("READ_EOF"), "0")
+
+    def test_inspect_finds_psp_game_and_param_sfo_by_the_reader_name_rules(self) -> None:
+        """Audit F-074a12a4: the identifiers PSP_GAME and PARAM.SFO match case-insensitively,
+        without their ';1' version and without one trailing separator '.', in the C inspect as
+        in the C reader, the stager and the Python inspect."""
+        sfo = build_param_sfo("TEST00001", "Name Rules")
+        sector = 2048
+        cases = {
+            "lower-case": (b"psp_game", b"param.sfo;1"),
+            "mixed-case": (b"Psp_Game", b"Param.Sfo"),
+            "separator-dot": (b"PSP_GAME.", b"PARAM.SFO.;1"),
+        }
+        for name, (game_name, sfo_name) in cases.items():
+            with self.subTest(case=name):
+                iso_path = self.temp_dir / f"name-rules-{name}.iso"
+                create_test_iso(iso_path, sfo_bytes=sfo)
+                data = bytearray(iso_path.read_bytes())
+                root = (
+                    _dir_record(bytes([0]), 33, sector, True)
+                    + _dir_record(bytes([1]), 33, sector, True)
+                    + _dir_record(game_name, 34, sector, True)
+                )
+                game = (
+                    _dir_record(bytes([0]), 34, sector, True)
+                    + _dir_record(bytes([1]), 33, sector, True)
+                    + _dir_record(sfo_name, 32, len(sfo), False)
+                )
+                data[33 * sector : 35 * sector] = bytes(2 * sector)
+                data[33 * sector : 33 * sector + len(root)] = root
+                data[34 * sector : 34 * sector + len(game)] = game
+                iso_path.write_bytes(bytes(data))
+
+                py_meta = inspect_iso(iso_path)
+                self.assertEqual((py_meta.disc_id, py_meta.title), ("TEST00001", "Name Rules"))
+                c_meta = self._run_native_inspect(iso_path)
+                self.assertEqual(c_meta.get("RESULT"), "OK", c_meta)
+                self.assertEqual(
+                    (c_meta.get("DISC_ID"), c_meta.get("TITLE"), c_meta.get("HAS_PSP_GAME"),
+                     c_meta.get("PARAM_SFO_PARSED")),
+                    ("TEST00001", "Name Rules", "1", "1"),
+                )
+                res = subprocess.run(
+                    [str(self.exe_path), "lookup", str(iso_path), "PSP_GAME/PARAM.SFO"],
+                    capture_output=True, text=True, encoding="utf-8", errors="strict",
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                fields = next(
+                    line for line in res.stdout.splitlines() if line.startswith("LOOKUP:")
+                ).split(":")
+                self.assertEqual(fields[1:], ["0", "32", str(len(sfo)), "0"])
+
+    def test_non_retail_disc_with_lower_case_names_keeps_its_content_key(self) -> None:
+        """Audit F-074a12a4: a beta disc whose directories and files are named in lower case
+        gets, in the C inspect too, the key the Python inspect already gave it. Names do not
+        enter the key, so it is the pinned key of the same contents under upper-case names."""
+        iso_file = self.temp_dir / "beta-lower-case.iso"
+        create_test_iso_with_executables(
+            iso_file, self.BETA_EXECUTABLE, disc_id=self.BETA_DISC_ID, title="Synthetic Beta",
+        )
+        data = iso_file.read_bytes()
+        for name in (b"PSP_GAME", b"PARAM.SFO;1", b"SYSDIR", b"EBOOT.BIN;1"):
+            # Each identifier follows its one-byte length in exactly one directory record.
+            record_name = bytes([len(name)]) + name
+            self.assertEqual(data.count(record_name), 1, name)
+            data = data.replace(record_name, bytes([len(name)]) + name.lower())
+        iso_file.write_bytes(data)
+        key, digest = self._expected_identity(
+            build_param_sfo(self.BETA_DISC_ID, "Synthetic Beta"), self.BETA_EXECUTABLE,
+        )
+        self.assertEqual(key, self.BETA_KEY)
+
+        py_meta = inspect_iso(iso_file)
+        self.assertEqual(
+            (py_meta.disc_id, py_meta.sfo_disc_id, py_meta.non_retail, py_meta.identity_sha256),
+            (key, self.BETA_DISC_ID, True, digest),
+        )
+        c_meta = self._run_native_inspect(iso_file)
+        self.assertEqual(c_meta.get("RESULT"), "OK", c_meta)
+        self.assertEqual(
+            (c_meta.get("DISC_ID"), c_meta.get("SFO_DISC_ID"), c_meta.get("NON_RETAIL"),
+             c_meta.get("IDENTITY_SHA256"), c_meta.get("HAS_PSP_GAME")),
+            (key, self.BETA_DISC_ID, "1", digest, "1"),
+        )
 
     def test_semicolon_member_names_resolve_the_same_in_python_and_c(self) -> None:
         # A ';' inside a member name is part of the name. Only a trailing ';' and digits is a

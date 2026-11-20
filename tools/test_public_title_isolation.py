@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
+from nk_core import title_registry
 from nk_core.git_isolation import run_git
 import publication_policy
 import title_catalog_codegen
@@ -56,6 +58,58 @@ def tracked_titles() -> list[Path]:
 def is_tracked(rel_posix: str) -> bool:
     """True when the exact path currently has tracked bytes in the index."""
     return rel_posix in tracked_paths(rel_posix)
+
+
+def scratch_checkout(case: unittest.TestCase, *pathspecs: str, with_index: bool = False) -> Path:
+    """A temporary copy of this checkout's tracked files, removed when the test ends.
+
+    The exclusion tests are vacuous unless the untracked manifest they must ignore exists where
+    the tools read manifests: ``assets/titles`` of the tree the tool runs in. Planting it in the
+    developer's checkout writes to, and then deletes from, a live tree, so those tests work on
+    this copy instead. Every tool finds its root from its own file, so a tool run from the copy,
+    or one whose ``ROOT`` names the copy, treats it as the whole repository.
+
+    ``pathspecs`` limit the copy; without them it holds every tracked file. The files carry the
+    worktree's bytes, so an uncommitted change to a tool is what the copy runs. ``with_index``
+    also makes the copy a Git repository whose index is this checkout's index, entry for entry:
+    the blobs are read from this repository's object store through an alternates file, and
+    nothing is written to that store.
+    """
+    tmp = tempfile.TemporaryDirectory(prefix="title-isolation-")
+    case.addCleanup(tmp.cleanup)
+    scratch = Path(tmp.name).resolve()
+    rels = sorted(tracked_paths(*pathspecs))
+    case.assertTrue(rels, f"no tracked file matches {pathspecs}")
+    for rel in rels:
+        source = ROOT / rel
+        if not source.is_file():
+            continue  # tracked but deleted in the worktree: absent from the copy as well
+        target = scratch / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    if with_index:
+        run_git(["init", "--quiet"], cwd=scratch, capture_output=True, check=True)
+        objects = Path(run_git(["rev-parse", "--git-path", "objects"], cwd=ROOT,
+                               capture_output=True, text=True, check=True).stdout.strip())
+        if not objects.is_absolute():
+            objects = ROOT / objects
+        alternates = scratch / ".git" / "objects" / "info" / "alternates"
+        alternates.parent.mkdir(parents=True, exist_ok=True)
+        alternates.write_text(objects.resolve().as_posix() + "\n", encoding="utf-8", newline="\n")
+        entries = run_git(["ls-files", "--stage", "-z", "--", *pathspecs], cwd=ROOT,
+                          capture_output=True, check=True).stdout
+        run_git(["update-index", "-z", "--index-info"], cwd=scratch, input=entries,
+                capture_output=True, check=True)
+    return scratch
+
+
+def plant_untracked_manifest(scratch: Path, name: str, manifest: dict) -> Path:
+    """Write an untracked manifest into a scratch checkout's ``assets/titles``."""
+    path = scratch / "assets" / "titles" / name
+    with path.open("x", encoding="utf-8", newline="\n") as stream:
+        json.dump(manifest, stream, indent=2)
+        stream.write("\n")
+    return path
 
 
 PRIVATE_TITLE_TESTS_ENV = "NK_PRIVATE_TITLE_TESTS"
@@ -212,10 +266,34 @@ class PublicTitleIsolationTests(unittest.TestCase):
         self.assertEqual(text_c.count(f'"{PUBLIC_RETAIL_ID}"'), 1)
 
     def test_verify_flag_detects_out_of_date_or_corrupted_catalog(self) -> None:
-        """--verify flag must return non-zero exit code if generated files differ."""
+        """--verify passes on the tracked catalog and fails on a corrupted or missing copy of it.
+
+        The negative cases run against a temporary copy of the generated files (--output-dir), so
+        the tracked catalog is never touched; manifest drift is covered by tools/test_title_catalog.py.
+        """
         cmd = [sys.executable, str(ROOT / "tools" / "title_catalog_codegen.py"), "--verify"]
         proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
         self.assertEqual(proc.returncode, 0, f"--verify failed on clean tree:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+
+        gen_dir = ROOT / "src" / "core" / "generated"
+        with tempfile.TemporaryDirectory(prefix="catalog-verify-") as tmp:
+            out = Path(tmp)
+            for name in ("nk_title_catalog.h", "nk_title_catalog.c"):
+                shutil.copyfile(gen_dir / name, out / name)
+            verify_copy = cmd + ["--output-dir", str(out)]
+            proc = subprocess.run(verify_copy, capture_output=True, text=True, cwd=str(ROOT))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+            source = out / "nk_title_catalog.c"
+            source.write_bytes(source.read_bytes() + b"/* corrupted */\n")
+            proc = subprocess.run(verify_copy, capture_output=True, text=True, cwd=str(ROOT))
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn("Native public title catalog is out of date", proc.stderr)
+
+            (out / "nk_title_catalog.h").unlink()
+            proc = subprocess.run(verify_copy, capture_output=True, text=True, cwd=str(ROOT))
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn("Generated public catalog files do not exist", proc.stderr)
 
     def test_in_memory_private_overlay_registry(self) -> None:
         """TitleRegistry loads public titles by default, and can load private manifest on demand."""
@@ -347,32 +425,30 @@ class PublicTitleIsolationTests(unittest.TestCase):
                 )
 
     def test_private_overlay_has_zero_effect_on_verify(self) -> None:
-        """External private manifest overlays must have zero effect on catalog verify."""
+        """An untracked private manifest in assets/titles must have zero effect on catalog verify."""
+        # A scratch copy of what --verify reads, with the tool itself: run from the copy, the
+        # tool's default --manifest-dir and --output-dir are the copy's, as in a real checkout.
+        scratch = scratch_checkout(
+            self, "tools/*.py", "assets/public_source_profile.json", "assets/titles/*.json",
+            "src/core/generated/nk_title_catalog.*")
+        cmd = [sys.executable, str(scratch / "tools" / "title_catalog_codegen.py"), "--verify"]
+
         # 1. Clean verify must succeed
-        cmd = [sys.executable, str(ROOT / "tools" / "title_catalog_codegen.py"), "--verify"]
-        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(scratch))
         self.assertEqual(proc.returncode, 0, f"--verify failed on baseline: {proc.stderr}")
 
-        # 2. Simulate private overlay existing outside public assets
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            fake_overlay = {
-                "schema_version": 1,
-                "id": "private-retail-lookalike-v1",
-                "display_name": "Private Retail Overlay",
-                "kind": "retail",
-                "disc": {"id": UNCATALOGUED_RETAIL_DISC_ID, "region": "EU", "revision_policy": "exact-disc-id"}
-            }
-            json.dump(fake_overlay, f)
-            overlay_path = Path(f.name)
+        # 2. A private overlay where --verify reads manifests: assets/titles, untracked. It is a
+        # schema-valid title, so were it collected it would be one more catalog entry and the
+        # verify would report the catalog out of date.
+        overlay_path = plant_untracked_manifest(scratch, "private-overlay-lookalike.json", PRIVATE_OVERLAY)
+        self.assertIn(overlay_path, list((scratch / "assets" / "titles").glob("*.json")))
 
-        try:
-            # Re-run verify; external overlay must not touch or alter verification
-            proc2 = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
-            self.assertEqual(proc2.returncode, 0, f"--verify failed with external overlay present: {proc2.stderr}")
-            self.assertIn("is up to date", proc2.stdout)
-        finally:
-            if overlay_path.is_file():
-                overlay_path.unlink()
+        proc2 = subprocess.run(cmd, capture_output=True, text=True, cwd=str(scratch))
+        self.assertEqual(proc2.returncode, 0, f"--verify failed with a private overlay present: {proc2.stderr}")
+        self.assertIn("is up to date", proc2.stdout)
+        self.assertEqual(proc2.stdout, proc.stdout, "the overlay changed the verified catalog")
+        catalog = (scratch / "src" / "core" / "generated" / "nk_title_catalog.c").read_text(encoding="utf-8")
+        self.assertNotIn("private-retail-lookalike-v1", catalog)
 
     def test_overlay_collision_policy(self) -> None:
         """Section 4: Conflicting overlay on canonical public title must fail closed unless overridden."""
@@ -426,12 +502,14 @@ class PublicTitleIsolationTests(unittest.TestCase):
 PRIVATE_LOOKALIKE_NAME = "private-retail-lookalike.json"
 PRIVATE_LOOKALIKE_REL = f"assets/titles/{PRIVATE_LOOKALIKE_NAME}"
 
+#: Schema-valid on purpose (PlantedManifestTests): a tool that read it would register or
+#: catalogue one more title, and the exclusion tests fail on that leak, not on a schema error.
 SYNTHETIC_LOOKALIKE = {
     "schema_version": 1,
     "id": "private-retail-lookalike",
     "display_name": "Synthetic ignored lookalike (hermetic-suite regression)",
     "kind": "retail",
-    "disc": {"id": "TEST00000", "region": "TEST", "revision_policy": "exact-disc-id"},
+    "disc": {"id": "TEST00000", "region": "OTHER", "revision_policy": "exact-disc-id"},
     "executable": {"base": 0, "entry": 0, "bss_metadata_source": "none", "extra_executable_spans": []},
     "modules": [],
     "filesystem": {
@@ -444,6 +522,18 @@ SYNTHETIC_LOOKALIKE = {
     "feature_requirements": ["allegrex-core"],
     "verification_profile": "synthetic-public",
 }
+
+#: The same stand-in under another region's disc id, for the catalog --verify test.
+PRIVATE_OVERLAY = {
+    **SYNTHETIC_LOOKALIKE,
+    "id": "private-retail-lookalike-v1",
+    "display_name": "Private Retail Overlay",
+    "disc": {"id": UNCATALOGUED_RETAIL_DISC_ID, "region": "EU", "revision_policy": "exact-disc-id"},
+}
+
+
+#: One publication-audit finding line: ``CODE: path: message``.
+AUDIT_FINDING_RE = re.compile(r"^[A-Z][A-Z0-9_]+: ")
 
 
 def staged_index_audit(rel_path: str, blob_bytes: bytes) -> subprocess.CompletedProcess:
@@ -475,6 +565,31 @@ def staged_index_audit(rel_path: str, blob_bytes: bytes) -> subprocess.Completed
              "--provenance-self-consistency"],
             cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=600,
         )
+
+
+class PlantedManifestTests(unittest.TestCase):
+    """The planted stand-ins are loadable titles that collide with nothing tracked.
+
+    An invalid stand-in would make the exclusion tests fail for any tool that merely read it,
+    and pass for one that read it and skipped invalid manifests; a valid one is a title that
+    leaks unless the publication policy keeps it out.
+    """
+
+    def test_planted_manifests_are_valid_titles_with_their_own_identity(self):
+        with tempfile.TemporaryDirectory(prefix="planted-manifest-") as tmp:
+            for planted in (SYNTHETIC_LOOKALIKE, PRIVATE_OVERLAY):
+                with self.subTest(id=planted["id"]):
+                    path = Path(tmp) / f"{planted['id']}.json"
+                    path.write_text(json.dumps(planted), encoding="utf-8")
+                    # The default registry holds the tracked catalog and, in standard mode,
+                    # refuses an id or a disc id it already has: loading proves the stand-in is a
+                    # valid title that would be one more entry.
+                    registry = TitleRegistry()
+                    before = {profile.id for profile in registry.all_profiles()}
+                    profile = registry.load_private_manifest(path)
+                    self.assertEqual(profile.id, planted["id"])
+                    self.assertEqual({p.id for p in registry.all_profiles()}, before | {planted["id"]})
+                    self.assertEqual(registry.find_by_disc_id(planted["disc"]["id"]).id, planted["id"])
 
 
 class TrackedSetHelperTests(unittest.TestCase):
@@ -526,15 +641,26 @@ class CollectorHermeticityTests(unittest.TestCase):
         self.assertEqual(ids, sorted(set(ids)), "collector output must be deterministic")
 
     def test_registry_policy_filter_ignores_lookalike(self):
+        scratch = scratch_checkout(self, "assets/public_source_profile.json", "assets/titles/*.json")
+        titles = scratch / "assets" / "titles"
+        lookalike = plant_untracked_manifest(scratch, PRIVATE_LOOKALIKE_NAME, SYNTHETIC_LOOKALIKE)
+        self.assertIn(lookalike, list(titles.glob("*.json")))
         registry = TitleRegistry(include_defaults=False)
-        registry.load_from_directory(ROOT / "assets" / "titles")
+        # The registry reads the policy from, and keys it on paths relative to, its ROOT: with
+        # ROOT naming the copy, the copy's assets/titles is the repository's.
+        with mock.patch.object(title_registry, "ROOT", scratch):
+            registry.load_from_directory(titles)
         ids = {p.id for p in registry.all_profiles()}
         self.assertNotIn("private-retail-lookalike", ids)
         self.assertIn(PUBLIC_RETAIL_ID, ids)
-        manifest_count = len(list((ROOT / "assets" / "titles").glob("*.json")))
-        self.assertLessEqual(len(ids), manifest_count)
+        self.assertEqual(len(ids), len(tracked_titles()), "every tracked manifest loads, and nothing else")
 
     def test_ambient_glob_sensitivity_mechanism(self):
+        """Control: a bare glob does see a planted file, so the exclusions above are not vacuous.
+
+        This checks pathlib only; the collector and the registry are exercised by the tests above
+        and by SyntheticIgnoredInputsRegressionTests.
+        """
         with tempfile.TemporaryDirectory(prefix="hermetic-glob-") as tmp:
             titles = Path(tmp) / "assets" / "titles"
             titles.mkdir(parents=True)
@@ -640,13 +766,28 @@ class PublicationEnforcementTests(unittest.TestCase):
     """Untracked/ignored material stays invisible; staged material must fail."""
 
     def test_publication_audit_ignores_untracked_ignored_lookalike(self):
+        # The audit runs from a scratch copy of the checkout that carries the same index, so the
+        # lookalikes are on disk in the tree being audited without touching the real checkout.
+        # One is plainly untracked, which only --tracked-only keeps out of the audit; the other
+        # Git also ignores.
+        scratch = scratch_checkout(self, with_index=True)
+        ignored_rel = "assets/titles/private-ignored-lookalike.json"
+        exclude = scratch / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text(f"/{ignored_rel}\n", encoding="utf-8", newline="\n")
+        plant_untracked_manifest(scratch, PRIVATE_LOOKALIKE_NAME, SYNTHETIC_LOOKALIKE)
+        plant_untracked_manifest(scratch, ignored_rel.split("/")[-1], SYNTHETIC_LOOKALIKE)
+        status = run_git(["status", "--porcelain", "--ignored", "--", PRIVATE_LOOKALIKE_REL, ignored_rel],
+                         cwd=scratch, capture_output=True, text=True, check=True)
+        self.assertEqual(status.stdout.splitlines(), [f"?? {PRIVATE_LOOKALIKE_REL}", f"!! {ignored_rel}"],
+                         "the audited tree must hold exactly one untracked and one ignored lookalike")
         proc = subprocess.run(
             [sys.executable, "tools/publish_audit.py", "--tracked-only",
              "--public-scope", "--provenance-self-consistency"],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=600,
+            cwd=str(scratch), capture_output=True, text=True, timeout=600,
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertNotIn(PRIVATE_LOOKALIKE_NAME, proc.stdout + proc.stderr)
+        self.assertNotIn("lookalike.json", proc.stdout + proc.stderr)
 
     def test_staged_private_manifest_is_rejected(self):
         proc = staged_index_audit(
@@ -657,28 +798,47 @@ class PublicationEnforcementTests(unittest.TestCase):
         combined = proc.stdout + proc.stderr
         self.assertIn("private-retail-lookalike", combined, f"rejection must name the path: {combined[:800]}")
 
-    def test_staged_retail_token_in_generated_source_is_rejected(self):
-        proc = staged_index_audit(
-            "src/core/generated/nk_title_catalog.c",
-            b"/* synthetic staged lookalike UCUS-00000 for hermetic-suite regression */\n",
-        )
-        self.assertNotEqual(proc.returncode, 0, "staged retail-token source must be rejected")
+    def test_staged_generated_source_without_its_header_is_rejected(self):
+        """A staged generated source that lost its SPDX header fails the index leg, by name.
+
+        Disc ids are not game data (AGENTS.md), so the audit has no disc-id finding and this test
+        claims none: what it pins is that staged bytes, not the worktree's, are audited.
+        """
+        rel = "src/core/generated/nk_title_catalog.c"
+        proc = staged_index_audit(rel, b"/* synthetic staged replacement for hermetic-suite regression */\n")
+        combined = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, combined[-2000:])
+        self.assertIn(f"SPDX: {rel}: missing SPDX identifier", proc.stderr)
 
     def test_audit_index_leg_matches_worktree_leg_on_clean_tree(self):
-        index_leg = subprocess.run(
-            [sys.executable, "tools/publish_audit.py", "--public-scope",
-             "--provenance-self-consistency"],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=600,
-        )
+        def leg(*extra: str) -> tuple[subprocess.CompletedProcess, list[str]]:
+            proc = subprocess.run(
+                [sys.executable, "tools/publish_audit.py", "--tracked-only", *extra, "--public-scope",
+                 "--provenance-self-consistency"],
+                cwd=str(ROOT), capture_output=True, text=True, timeout=600,
+            )
+            # Findings and a FAIL summary go to stderr, an OK summary to stdout.
+            findings = sorted(line for line in proc.stderr.splitlines() if AUDIT_FINDING_RE.match(line))
+            return proc, findings
+
+        index_leg, index_findings = leg()
+        worktree_leg, worktree_findings = leg("--worktree")
         self.assertEqual(index_leg.returncode, 0, index_leg.stdout + index_leg.stderr)
+        self.assertEqual(worktree_leg.returncode, index_leg.returncode,
+                         worktree_leg.stdout + worktree_leg.stderr)
+        self.assertEqual(worktree_findings, index_findings)
+        self.assertIn("index content)", index_leg.stdout + index_leg.stderr)
+        self.assertIn("worktree content)", worktree_leg.stdout + worktree_leg.stderr)
 
 
 class SyntheticIgnoredInputsRegressionTests(unittest.TestCase):
-    """Proves public test discovery produces identical results whether or not
+    """The public title collector and registry give identical results whether or not
     ignored private inputs exist in the workspace (#335).
 
     Constructs a controlled temp workspace simulating ignored private-looking
-    inputs using synthetic placeholder files (never real private inputs).
+    inputs using synthetic placeholder files (never real private inputs), and
+    runs ``collect_public_manifests`` (with the in-repository policy mapping)
+    and ``TitleRegistry.load_from_directory`` before and after they appear.
     """
 
     def test_synthetic_ignored_inputs_isolation(self) -> None:
@@ -693,31 +853,20 @@ class SyntheticIgnoredInputsRegressionTests(unittest.TestCase):
             build_dir = repo_root / "build" / "hst"
             build_dir.mkdir(parents=True)
 
+            # A copy of the tracked public synthetic manifest: the collector judges it by the
+            # policy decision for assets/titles/synthetic.json.
             public_manifest = titles_dir / "synthetic.json"
-            public_manifest.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "id": "synthetic-allegrex-v1",
-                        "display_name": "Synthetic Title",
-                        "kind": "synthetic",
-                        "disc": {"id": "TEST00001", "region": "TEST", "revision_policy": "exact-disc-id"},
-                        "executable": {"base": 0, "entry": 0, "bss_metadata_source": "none", "extra_executable_spans": []},
-                        "modules": [],
-                        "filesystem": {
-                            "data_root": "synthetic/none",
-                            "memory_stick_root": "build/synthetic/memstick",
-                            "device_prefixes": ["host0:", "ms0:"],
-                        },
-                        "hle_profile": "synthetic-minimal",
-                        "codegen_profile": "none",
-                        "feature_requirements": ["allegrex-core"],
-                        "verification_profile": "synthetic-public",
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
+            shutil.copyfile(ROOT / "assets" / "titles" / "synthetic.json", public_manifest)
+            policy = publication_policy.load_policy(ROOT / "assets" / "public_source_profile.json")
+
+            def public_view() -> tuple[list[str], list[str], list[str]]:
+                files, titles = title_catalog_codegen.collect_public_manifests(
+                    titles_dir, policy=policy, policy_dir=ROOT / "assets" / "titles"
+                )
+                registry = TitleRegistry(include_defaults=False)
+                registry.load_from_directory(titles_dir)
+                return ([p.name for p in files], [t["id"] for t in titles],
+                        sorted(profile.id for profile in registry.all_profiles()))
 
             gitignore = repo_root / ".gitignore"
             gitignore.write_text(
@@ -727,6 +876,7 @@ class SyntheticIgnoredInputsRegressionTests(unittest.TestCase):
 
             run_git(["add", "."], cwd=repo_root, capture_output=True, check=True)
             run_git(["commit", "-m", "init", "--no-gpg-sign"], cwd=repo_root, capture_output=True, check=True)
+            before = public_view()
 
             # Add synthetic ignored private inputs
             fake_private_manifest = titles_dir / PRIVATE_LOOKALIKE_NAME
@@ -765,7 +915,17 @@ class SyntheticIgnoredInputsRegressionTests(unittest.TestCase):
             ambient_manifests = sorted(p.name for p in titles_dir.glob("*.json"))
             self.assertEqual(ambient_manifests, sorted([PRIVATE_LOOKALIKE_NAME, "synthetic.json"]))
 
-            # 2. Tracked paths helper ignores the untracked / ignored lookalike
+            # 2. The real collector and registry do not: their output is unchanged by the lookalike.
+            # The collector admits the copy under its in-repository policy identity; the registry
+            # refuses a directory outside the repository outright, so it loads nothing either way.
+            after = public_view()
+            self.assertEqual(after, before)
+            self.assertEqual(before[0], ["synthetic.json"])
+            self.assertEqual(len(before[1]), 1)
+            self.assertNotIn("private-retail-lookalike", before[1] + before[2])
+            self.assertEqual(before[2], [])
+
+            # 3. Tracked paths helper ignores the untracked / ignored lookalike
             tracked_out = run_git(
                 ["ls-files", "assets/titles/*.json"],
                 cwd=repo_root,
@@ -777,7 +937,7 @@ class SyntheticIgnoredInputsRegressionTests(unittest.TestCase):
             self.assertEqual(tracked_set, ["synthetic.json"])
             self.assertNotIn(PRIVATE_LOOKALIKE_NAME, tracked_set)
 
-            # 3. Ignored private inputs are completely untracked
+            # 4. Ignored private inputs are completely untracked
             all_tracked = run_git(
                 ["ls-files"],
                 cwd=repo_root,

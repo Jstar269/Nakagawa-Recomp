@@ -3595,7 +3595,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 168)
+        self.assertEqual(len(routes), 169)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -3604,7 +3604,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -4650,6 +4650,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # The 2026-11-13 (UTC) acceptance-eligible ge-raster-bounds (#2193, boot 214) and
                 # ge-depth-round (#343, boot 215) runs of 05aafe975, XMB context, unattended.
                 "PSP-GE-RASTER-002", "PSP-GE-RASTER-003",
+                # The 2026-11-20 (UTC) acceptance-eligible ge-depth-bounds (#2193, boot 225) run of
+                # 306579a11, XMB context.
+                "PSP-GE-RASTER-004",
                 # The 2026-11-10 acceptance-eligible hle-issues-batch (#326, #356, boot 172) and
                 # hle-kernel-pool-bounds (boot 173) runs of 979c6a1dd.
                 "PSP-HLE-ISSUES-001", "PSP-HLE-KERNEL-STATUS-002",
@@ -13447,11 +13450,38 @@ class GeThroughZProbeTests(unittest.TestCase):
         self.assertLess(body.index("gtz_prepare();"), body.index("sceGeListEnQueue("))
         self.assertLess(body.index("sceKernelDcacheWritebackAll();"), body.index("sceGeListEnQueue("))
         self.assertIn("reset_rc = sceGeBreak(1, &param);", body)
-        # The ge-raster and ge-rtt blocks: colour at 0x100000, depth at 0x110000, 64x32.
-        for fragment in ("#define GTZ_FB_OFFSET 0x00100000u", "#define GTZ_ZB_OFFSET 0x00110000u",
+        # Colour at 0x120000 and depth at 0x110000, 64x32, both inside the saved block.
+        for fragment in ("#define GTZ_FB_OFFSET 0x00120000u", "#define GTZ_ZB_OFFSET 0x00110000u",
                          "#define GTZ_STRIDE 64u", "#define GTZ_ROWS 32u",
-                         "#define GTZ_ZCLEAR 0x1234u"):
+                         "#define GTZ_ZCLEAR 0x1234u", "#define GTZ_SAVE_OFFSET 0x00110000u",
+                         "#define GTZ_SAVE_WORDS (0x00011000u / 4u)"):
             self.assertIn(fragment, self.section)
+
+    def test_the_block_is_saved_first_and_restored_last_and_lists_use_a_ge_context(self) -> None:
+        bodies = _c_function_bodies(self.section)
+        run = bodies["hle_run"]
+        order = ["gtz_mirror(GTZ_SAVE_OFFSET)", "s_gtz_save[i] = vram[i];", "gtz_draw(&gtz_cells[i]);",
+                 "vram[i] = s_gtz_save[i];", "mismatches += vram[i] != s_gtz_save[i];",
+                 'hle_record("vram-restore", mismatches == 0u ? "PASS" : "FAIL", 0, restore, 2);']
+        positions = [run.index(text) for text in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(run.count("i < GTZ_SAVE_WORDS; i++"), 3)
+        self.assertIn("const uint32_t restore[2] = {GTZ_SAVE_WORDS, mismatches};", run)
+        # Both buffers, and the depth words under the plain and the XOR 0x2040 address rule, lie
+        # inside the saved 0x110000..0x120fff.
+        save_lo, save_hi = 0x110000, 0x110000 + 0x11000
+        for lo in (0x120000, 0x110000, 0x110000 ^ 0x2040):
+            self.assertTrue(save_lo <= lo and lo + 64 * 32 * 2 <= save_hi)
+        # No CPU write to VRAM outside the fill, and that fill stays in the two buffers.
+        prepare = bodies["gtz_prepare"]
+        self.assertEqual(re.findall(r"\b(fb|zb)\[[^\]]*\] = ", prepare), ["fb", "zb"])
+        self.assertIn("for (uint32_t i = 0; i < GTZ_PIXELS; i++) {", prepare)
+        draw = bodies["gtz_draw"]
+        self.assertNotRegex(draw, r"\b(fb|zb|vram)\[[^\]]*\] = ")
+        self.assertIn("args.size = sizeof(args);\n    args.context = &s_gtz_ctx;", draw)
+        self.assertIn("sceGeListEnQueue(s_gtz_list, NULL, -1, &args);", draw)
+        self.assertEqual(self.section.count("sceGeListEnQueue("), 1)
+        self.assertIn("static PspGeContext s_gtz_ctx;", self.section)
 
     def test_list_words(self) -> None:
         body = _c_function_bodies(self.section)["gtz_list"]
@@ -13483,10 +13513,11 @@ class GeThroughZProbeTests(unittest.TestCase):
         self.assertEqual(spec.test_id, "PSP-GE-THROUGHZ-001")
         self.assertEqual(spec.terminal_case, "ge-through-z-done")
         cases = parse_golden.GE_THROUGH_Z_CASES
-        self.assertEqual(len(cases), 22)
+        self.assertEqual(len(cases), 23)
         self.assertEqual(cases[:2], ("zm1-draw", "zm1-z"))
-        self.assertEqual(cases[-1], "znan-z")
-        self.assertEqual(set(counts.values()), {16, 1})
+        self.assertEqual(cases[-2:], ("znan-z", "vram-restore"))
+        self.assertEqual(parse_golden.GE_THROUGH_Z_ROWS[-1], ("vram-restore", 2))
+        self.assertEqual(set(counts.values()), {16, 2, 1})
         self.assertIn("hle_record(row, qid < 0 ? \"FAIL\" : idle ? \"PASS\" : \"TIMEOUT\", "
                       "(uint32_t)qid, draw, 16);", self.section)
         self.assertIn("hle_record(row, \"PASS\", 0, s_gtz_row, GTZ_SIDE);", self.section)
@@ -13499,9 +13530,10 @@ class GeThroughZProbeTests(unittest.TestCase):
         self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_ge_sample.c")
         self.assertEqual(row["diagnostic_case_ids"], ["ge-through-z"])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
-        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertEqual(row["case_ids"], ["z*-draw", "z*-z", "vram-restore", "ge-through-z-done"])
+        self.assertEqual(row["evidence_cases"], ["z*-draw", "z*-z", "ge-through-z-done"])
+        self.assertEqual(row["uncited_cases"], ["vram-restore"])
         self.assertNotIn("evidence_note", row)
-        self.assertEqual(row["case_ids"][-1], "ge-through-z-done")
 
     def test_measurement_note_names_the_run_and_what_it_does_not_show(self) -> None:
         note = self.rows[0]["measurement_note"]
@@ -13527,6 +13559,27 @@ class GeThroughZProbeTests(unittest.TestCase):
             self.assertIn(term, section)
         self.assertIn("**MEASURED** on 2026-11-10 UTC (PSP-3000, boot 180, XMB context, "
                       "`e4e6a3a2`; 23 records", self.readme)
+
+    def test_the_boot_229_run_of_the_saving_revision_is_recorded(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("commit 1972d515c", "boot 229", "23 records and the done record (out0 0x17)",
+                     "acceptance-eligible with 0 blockers", "exactly 256 colour pixels",
+                     "0x4400 words and found 0 that differed", "5 minutes 48 seconds", "did not restart",
+                     "One run does not establish"):
+            with self.subTest(term=term):
+                self.assertIn(term, note)
+        self.assertIn("5 minutes 48 seconds", self.rows[0]["risk"])
+        start = self.doc.index("- **PSP-3000 single-case reruns of `ge-through-z` and `ge-depth-bounds` "
+                               "(2026-11-20 UTC, second sitting)**")
+        section = " ".join(self.doc[start:self.doc.index("\n- **", start + 1)].split())
+        for term in ("boot 229 at `1972d515c`", "boot 230 at `306579a11`",
+                     "`PSP-GE-THROUGHZ-001` | `z*-draw`, `z*-z`, `ge-through-z-done` (boot 229)",
+                     "`PSP-GE-RASTER-004` | `edram`, `ctl-*`, `dw-*`, `dr-*`, `dc-*`, `ge-depth-bounds-done` "
+                     "(boot 230)", "`0x4400` words", "*No restart this time.*", "`0x04088000`",
+                     "word for word"):
+            with self.subTest(doc=term):
+                self.assertIn(term, section)
+        self.assertIn("boot 229, XMB context, `1972d515c`; 23 records and the done record", self.readme)
 
 
 class GeRasterProbeTests(unittest.TestCase):
@@ -14179,6 +14232,189 @@ class GeRasterBoundsProbeTests(_GeNewCaseMixin, unittest.TestCase):
         self.assertEqual({counts[f"{cell}-draw"] for cell in self.CELLS}, {9})
         self.assertIn("const uint32_t draw[9] = {", self.bodies["grb_draw"])
         self.assertIn("c->fbw, c->zbw};", self.bodies["grb_draw"])
+
+
+class GeDepthBoundsProbeTests(_GeNewCaseMixin, unittest.TestCase):
+    """CASE=ge-depth-bounds (192, PSP-GE-RASTER-004) in probe_ge_sample.c: ge-raster-bounds' depth
+    questions read as colour through EQUAL depth tests, in that case's saved and restored VRAM
+    block. Measured on the PSP-3000 on 2026-11-20 (UTC), boot 225: depth writes and the depth test
+    at columns at or past zbw use index y * zbw + x, and a depth-only clear honours the scissor."""
+
+    CASE = "ge-depth-bounds"
+    CASE_ID = 192
+    MACRO = "GE_CASE_DEPTH_BOUNDS"
+    TEST_ID = "PSP-GE-RASTER-004"
+    CELLS = ("ctl-zbw512", "dw-test-zbw256", "dw-clear-zbw256", "dr-zbw256", "dc-scissor")
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._load()
+
+    def test_route_registration_and_log(self) -> None:
+        case, stem = self.CASE, "ge_depth_bounds"
+        self.assertIn(f"else ifeq ($(CASE),{case})\nCASE_ID = {self.CASE_ID}\n", self.makefile)
+        self.assertIn(f"else ifeq ($(CASE),{case})\nTARGET = $(BUILD_DIR)/{stem}\n"
+                      "OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn(f"#define {self.MACRO} {self.CASE_ID}\n", self.probe)
+        self.assertIn(f'#define HLE_CAMPAIGN_ID "{case}"\n#define HLE_TEST_ID "{self.TEST_ID}"\n'
+                      f'#define HLE_LOG "host0:/{stem}_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), case).name, f"{stem}_log.txt")
+        self.assertEqual(_campaign_completeness_contract(case), "strict-golden-sequence")
+        self.assertNotIn(case, CAMPAIGN_QUEUE_CASES)
+        self.assertEqual(self.row["source"], "tests/fixtures/psp_oracle/probe_ge_sample.c")
+        self.assertEqual(self.row["prx"], f"{stem}.prx")
+        self.assertEqual(self.row["diagnostic_case_ids"], [case])
+        self.assertEqual(self.row["issues"], [2193])
+
+    def test_cells_and_record_stream_match_the_registry(self) -> None:
+        table = _matched(re.search(r"gdb_cells\[GDB_CELL_COUNT\] = \{(.*?)\n\};", self.section, re.S))
+        cells = re.findall(r'\{"([\w-]+)", (GDB_K_\w+), (\d+)u\}', table.group(1))
+        self.assertEqual(cells, [
+            ("ctl-zbw512", "GDB_K_CTL", "512"),
+            ("dw-test-zbw256", "GDB_K_WTEST", "256"),
+            ("dw-clear-zbw256", "GDB_K_WCLEAR", "256"),
+            ("dr-zbw256", "GDB_K_READ", "256"),
+            ("dc-scissor", "GDB_K_SCISSOR", "512"),
+        ])
+        self.assertEqual(parse_golden.GE_DEPTH_BOUNDS_CELLS, self.CELLS)
+        rows = parse_golden.GE_DEPTH_BOUNDS_ROWS
+        self.assertEqual(len(rows), 63)
+        self.assertEqual(rows[:2], (("display-check", 9), ("edram", 2)))
+        self.assertEqual(rows[-1], ("vram-restore", 2))
+        self.assertEqual([row for row in rows if row[0].startswith("dr-zbw256-")], [
+            ("dr-zbw256-draw", 9),
+            *((f"dr-zbw256-{half}-{read}", count) for half in ("in", "past")
+              for read, count in (("blue", 16), ("yellow", 16), ("red", 16), ("rest", 16), ("sum", 9))),
+            ("dr-zbw256-zp", 8), ("dr-zbw256-zv", 8),
+        ])
+        self.assertEqual([row for row in rows if row[0].startswith("dc-scissor-")], [
+            ("dc-scissor-draw", 9), ("dc-scissor-in-sum", 9), ("dc-scissor-out-sum", 9),
+            ("dc-scissor-r0-x92", 16), ("dc-scissor-r271-x92", 16),
+            ("dc-scissor-zp", 8), ("dc-scissor-zv", 8),
+        ])
+        self.assertEqual([row for row in rows if row[0].endswith("-zx")], [("ctl-zbw512-zx", 3)])
+        # The suffixes the C code emits are the registry's.
+        for text in ('{"-blue", "-yellow", "-red", "-rest"}', 'gdb_emit(c, part, "-sum", 9u);',
+                     'gdb_emit(c, "zx", "", 3u);', 'gdb_emit(c, part, "", 8u);',
+                     'gdb_emit(c, part, "", 16u);', 'gdb_zcount(c, "zp", s_gdb_zplain);',
+                     'gdb_zcount(c, "zv", s_gdb_zview);', 'gdb_raw(c, "r0-x92", 92u, 0u);',
+                     'gdb_raw(c, "r271-x92", 92u, GDB_ROWS - 1u);', 'hle_record("edram", ',
+                     'hle_record("display-check", ', 'hle_record("vram-restore", '):
+            with self.subTest(text=text):
+                self.assertIn(text, self.section)
+        self._check_stream()
+        self._check_stream("SKIP")
+
+    def test_lists_stay_in_the_saved_block_and_every_wait_is_bounded(self) -> None:
+        # Only state words, VADDR (0x01), sprite PRIM (0x04), FINISH (0x0f) and END (0x0c): no
+        # SIGNAL (0x0e), JUMP (0x08), CALL (0x0a), RET (0x0b), texture or transfer command.
+        commands = {int(word, 16) for word in re.findall(r"gdb_w\((0x[0-9a-f]{2}),", self.section)}
+        self.assertEqual(commands, {
+            0x01, 0x04, 0x0c, 0x0f, 0x10, 0x12, 0x15, 0x16, 0x1e, 0x23, 0x4c, 0x4d, 0x50, 0x53, 0x55,
+            0x58, 0x9c, 0x9d, 0x9e, 0x9f, 0xcd, 0xce, 0xcf, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8,
+            0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1, 0xe6, 0xe7, 0xe8, 0xe9})
+        build = self.bodies["gdb_build"]
+        self.assertTrue(build.rstrip().endswith("gdb_w(0x0f, 0);\n    gdb_w(0x0c, 0);\n}"))
+        self.assertIn("gdb_w(0x04, (6u << 16) | 2u);", self.bodies["gdb_sprite"])
+        # The block is ge-raster-bounds': 0x110000..0x197fff, saved first and restored last.
+        for text in ("#define GDB_FB_OFFSET 0x00110000u", "#define GDB_ZB_OFFSET 0x00154000u",
+                     "#define GDB_BLOCK_BYTES 0x00044000u", "#define GDB_FBW 512u",
+                     "gdb_w(0x16, 511u | ((GDB_ROWS - 1u) << 10));", "#define GDB_WAIT_POLLS 5000u",
+                     "#define GDB_LIST_WORDS 192u", "#define GDB_VTX_MAX 64u"):
+            with self.subTest(text=text):
+                self.assertIn(text, self.section)
+        run = self.bodies["hle_run"]
+        self.assertLess(run.index("s_gdb_save[i] = s_gdb_vram[i];"), run.index("gdb_draw(i)"))
+        self.assertLess(run.index("gdb_draw(i)"), run.index("s_gdb_vram[i] = s_gdb_save[i];"))
+        self.assertLess(run.index('hle_record("display-check", '), run.index("s_gdb_save[i] = s_gdb_vram[i];"))
+        # A list or vertex buffer that would overflow is never queued.
+        self.assertIn("if (s_gdb_n >= GDB_LIST_WORDS) {\n        s_gdb_overflow = 1;", self.bodies["gdb_w"])
+        self.assertIn("if (s_gdb_nv + 2u > GDB_VTX_MAX) {\n        s_gdb_overflow = 1;", self.bodies["gdb_sprite"])
+        draw = self.bodies["gdb_draw"]
+        self.assertLess(draw.index("if (!s_gdb_overflow) {"), draw.index("sceGeListEnQueue("))
+        self.assertIn("args.context = &s_gdb_ctx;", draw)
+        self.assertIn("sceGeListEnQueue(s_gdb_list, NULL, -1, &args)", draw)
+        self.assertEqual(draw.count("sceGeBreak("), 1)
+        self.assertLess(draw.index("if (wait == GDB_WAIT_DEADLINE) {"), draw.index("sceGeBreak(1, &param);"))
+        self.assertEqual(self.section.count("i < GDB_WAIT_POLLS; i++"), 3)
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "sceGu", "sceIo", "sceGeEdramSetAddrTranslation"):
+            with self.subTest(banned=banned):
+                self.assertNotIn(banned, self.section)
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {
+            "sceGeEdramGetAddr", "sceGeEdramGetSize", "sceGeListEnQueue", "sceGeListSync",
+            "sceGeDrawSync", "sceGeBreak", "sceKernelDcacheWritebackAll", "sceKernelDelayThread",
+            "sceKernelGetSystemTimeLow", "sceDisplayGetFrameBuf"})
+        self.assertEqual(set(self.row["apis"]), set(re.findall(r"\b(sce\w+)\s*\(", self.section)))
+
+    def test_the_readout_paints_one_colour_per_depth_value(self) -> None:
+        for text in ("#define GDB_BLUE16 0xf800u", "#define GDB_YELLOW16 0x07ffu",
+                     "#define GDB_RED16 0x001fu", "#define GDB_WHITE16 0xffffu",
+                     "#define GDB_GREEN16 0x07e0u", "#define GDB_Z_TAG 0x0100u",
+                     "#define GDB_Z_CLEAR 0x4000u", "#define GDB_Z_HIGH 0x7000u",
+                     "#define GDB_Z_NONE 0x1234u"):
+            with self.subTest(text=text):
+                self.assertIn(text, self.section)
+        readout = self.bodies["gdb_readout"]
+        # Depth writes off, test on, EQUAL; white (a value nothing wrote) is drawn last.
+        order = ["gdb_w(0xe7, 1);", "gdb_w(0x23, 1);", "gdb_w(0xde, 2);",
+                 "gdb_sprite(GDB_BLUE, 0u, 0u, x1, rows, GDB_Z_TAG);",
+                 "gdb_sprite(GDB_YELLOW, 0u, 0u, x1, rows, GDB_Z_CLEAR);",
+                 "gdb_sprite(GDB_RED, 0u, 0u, x1, rows, red_z);",
+                 "gdb_sprite(GDB_WHITE, 0u, 0u, x1, rows, GDB_Z_NONE);", "gdb_w(0x23, 0);"]
+        positions = [readout.index(text) for text in order]
+        self.assertEqual(positions, sorted(positions))
+        # The write cells read back only at columns inside the depth buffer.
+        build = self.bodies["gdb_build"]
+        self.assertIn("case GDB_K_WTEST:\n    case GDB_K_WCLEAR:\n"
+                      "        gdb_readout(GDB_HALF_COLS, GDB_READ_ROWS, GDB_Z_HIGH, 1, 0);", build)
+        self.assertIn("case GDB_K_READ:\n        gdb_readout(512u, GDB_READ_ROWS, GDB_Z_HIGH, 1, 1);", build)
+        self.assertIn("gdb_readout(512u, GDB_ROWS, GDB_FILL16, 0, 0);", build)
+        self.assertIn("gdb_w(0xd5, (c->kind == GDB_K_SCISSOR ? 99u : 511u) | ((GDB_ROWS - 1u) << 10));", build)
+
+    def test_the_2026_11_20_run_is_recorded_as_measured(self) -> None:
+        self.assertEqual(self.row["status"], "implemented")
+        self.assertEqual(self.row["hardware_evidence"], "MEASURED")
+        self.assertNotIn("evidence_note", self.row)
+        self.assertEqual(self.row["evidence_ref"],
+                         "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize")
+        self.assertEqual(self.row["evidence_cases"],
+                         ["edram", "ctl-*", "dw-*", "dr-*", "dc-*", "ge-depth-bounds-done"])
+        self.assertEqual(self.row["uncited_cases"], ["display-check", "vram-restore"])
+        note = self.row["measurement_note"]
+        for term in ("2026-11-20 (UTC)", "PSP-3000", "system software 6.61", "ARK-5 5.2.0", "XMB context",
+                     "boot 225", "306579a11", "63 records and the done record",
+                     "acceptance-eligible with 0 blockers", "COMPLETE PASS", "row y + 1",
+                     "runs on linearly into the next row", "reads on linearly", "0x11100",
+                     "honours the scissor", "0x00400000", "XOR 0x1020"):
+            with self.subTest(term=term):
+                self.assertIn(term, note)
+        docs_row = next(line for line in self.doc.splitlines() if line.startswith(f"| `{self.CASE}` |"))
+        readme_row = next(line for line in self.readme.splitlines() if line.startswith(f"| `{self.CASE}` |"))
+        for row in (docs_row, readme_row):
+            with self.subTest(row=row[:40]):
+                self.assertIn("boot 225", row)
+                self.assertIn("`306579a11`", row)
+                self.assertIn("y * zbw + x", row)
+        start = self.doc.index("- **PSP-3000 single-case runs of `ge-depth-bounds` and `ge-through-z`")
+        run = " ".join(self.doc[start:self.doc.index("\n- **", start + 1)].split())
+        for term in ("boot 225", "`306579a11`", "boot 226", "`6380c2c5a`", "`edram`", "`ctl-*`", "`dw-*`",
+                     "`dr-*`", "`dc-*`", "`ge-depth-bounds-done`", "row y + 1, group y", "`0x11100`",
+                     "27200 pixels", "`0x00400000`", "`0x1020`", "`0x0001` for 1.5", "`0x7fc00000`"):
+            with self.subTest(run=term):
+                self.assertIn(term, run)
+
+    def test_ge_through_z_reads_the_depth_words_where_the_ge_keeps_them(self) -> None:
+        start = self.probe.index("#if PSP_ORACLE_CASE == GE_CASE_THROUGH_Z\n\n")
+        section = _c_code(self.probe[start:self.probe.index("#endif /* GE_CASE_THROUGH_Z */", start)])
+        self.assertIn("#define GTZ_ZWORD(k) ((k) ^ 0x1020u)", section)
+        # Every depth access goes through the mapping: the fill, the scan and the reads.
+        accesses = re.findall(r"zb\[([^\n;]*?)\]\s*[=;,)}]", section)
+        self.assertEqual(len(accesses), 5)
+        for access in accesses:
+            with self.subTest(access=access):
+                self.assertTrue(access.startswith("GTZ_ZWORD("))
 
 
 class GeDepthRoundProbeTests(_GeNewCaseMixin, unittest.TestCase):
@@ -19820,6 +20056,7 @@ class Record20261015Tests(unittest.TestCase):
             ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "MEASURED"),
             ("ge-raster-bounds", "PSP-GE-RASTER-002", "MEASURED"),
             ("ge-depth-round", "PSP-GE-RASTER-003", "MEASURED"),
+            ("ge-depth-bounds", "PSP-GE-RASTER-004", "MEASURED"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
             ("hle-io-trunc", "PSP-HLE-IO-TRUNC-001", "MEASURED"),
             ("safe-scalar", "PSP-SAFE-SCALAR-001", "MEASURED"),

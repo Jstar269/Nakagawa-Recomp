@@ -1164,7 +1164,9 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
     }
     snprintf(out_meta->volume_id, sizeof(out_meta->volume_id), "%s", vol_id);
 
-    /* Search for PARAM.SFO by reading root directory and PSP_GAME */
+    /* Search for PARAM.SFO by reading root directory and PSP_GAME. Both names are
+       matched by the reader's rule (nk_iso_name_matches), as the reader, the stager
+       and _lookup_iso_file in tools/nk_core/iso_inspect.py match them. */
     /* The root extent rule nk_iso_reader_open applies, so a disc this accepts
        is one the reader, the classifier and the stager can open too. */
     uint32_t root_lba = 0;
@@ -1178,13 +1180,28 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
     }
     uint64_t root_offset = (uint64_t)root_lba * SECTOR_SIZE;
 
-    uint8_t *dir_buf = (uint8_t *)malloc(root_size);
     uint32_t psp_game_lba = 0;
     uint32_t psp_game_size = 0;
 
-    if (dir_buf) {
-        nk_fseek64(f, (int64_t)root_offset, SEEK_SET);
-        size_t read_bytes = fread(dir_buf, 1, root_size, f);
+    /* A directory that cannot be buffered or read whole is refused by name, never
+       read as one without PSP_GAME or PARAM.SFO. */
+    uint8_t *dir_buf = (uint8_t *)malloc(root_size);
+    if (!dir_buf) {
+        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
+                 "Out of memory reading the root directory (%u bytes)", (unsigned int)root_size);
+        fclose(f);
+        return NK_ERROR_OUT_OF_MEMORY;
+    }
+    if (nk_fseek64(f, (int64_t)root_offset, SEEK_SET) != 0 ||
+        fread(dir_buf, 1, root_size, f) != root_size) {
+        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
+                 "Could not read the root directory (%u bytes)", (unsigned int)root_size);
+        free(dir_buf);
+        fclose(f);
+        return NK_ERROR_INVALID_ISO;
+    }
+    {
+        size_t read_bytes = root_size;
         size_t off = 0;
         while (off < read_bytes) {
             uint8_t rec_len = dir_buf[off];
@@ -1239,7 +1256,7 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
             /* Checked arithmetic on candidate extent */
             uint64_t ext_off = (uint64_t)extent_lba * SECTOR_SIZE;
             if (ext_off <= file_size && (uint64_t)extent_size <= file_size - ext_off) {
-                if (name_len == 8 && memcmp(&dir_buf[off + 33], "PSP_GAME", 8) == 0) {
+                if (nk_iso_name_matches("PSP_GAME", &dir_buf[off + 33], name_len)) {
                     psp_game_lba = extent_lba;
                     psp_game_size = extent_size;
                     out_meta->has_psp_game_folder = true;
@@ -1277,9 +1294,24 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
 
         if (psp_game_offset <= file_size && (uint64_t)psp_game_size <= file_size - psp_game_offset) {
             dir_buf = (uint8_t *)malloc(psp_game_size);
-            if (dir_buf) {
-                nk_fseek64(f, (int64_t)psp_game_offset, SEEK_SET);
-                size_t read_bytes = fread(dir_buf, 1, psp_game_size, f);
+            if (!dir_buf) {
+                snprintf(out_meta->error_message, sizeof(out_meta->error_message),
+                         "Out of memory reading the PSP_GAME directory (%u bytes)",
+                         (unsigned int)psp_game_size);
+                fclose(f);
+                return NK_ERROR_OUT_OF_MEMORY;
+            }
+            if (nk_fseek64(f, (int64_t)psp_game_offset, SEEK_SET) != 0 ||
+                fread(dir_buf, 1, psp_game_size, f) != psp_game_size) {
+                snprintf(out_meta->error_message, sizeof(out_meta->error_message),
+                         "Could not read the PSP_GAME directory (%u bytes)",
+                         (unsigned int)psp_game_size);
+                free(dir_buf);
+                fclose(f);
+                return NK_ERROR_INVALID_ISO;
+            }
+            {
+                size_t read_bytes = psp_game_size;
                 size_t off = 0;
                 while (off < read_bytes) {
                     uint8_t rec_len = dir_buf[off];
@@ -1331,8 +1363,7 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
                     uint8_t name_len = dir_buf[off + 32];
 
                     uint64_t ext_off = (uint64_t)extent_lba * SECTOR_SIZE;
-                    if (nk_iso_name_without_version((const char *)&dir_buf[off + 33], name_len) == 9u
-                        && memcmp(&dir_buf[off + 33], "PARAM.SFO", 9) == 0) {
+                    if (nk_iso_name_matches("PARAM.SFO", &dir_buf[off + 33], name_len)) {
                         sfo_found = true;
                         if (ext_off <= file_size && (uint64_t)extent_size <= file_size - ext_off) {
                             sfo_extent_valid = true;

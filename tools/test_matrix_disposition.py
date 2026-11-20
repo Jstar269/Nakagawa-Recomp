@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -46,25 +47,68 @@ class DispositionMappingTests(unittest.TestCase):
         self.assertEqual(mapping["NOT_APPLICABLE"], "KEEP")
 
 
+_DELETION_SHAPES = {"C_REDUNDANT_BEHAVIORAL_PROXY", "E_OBSOLETE_INVARIANT"}
+
+
 class SyntheticMatrixTests(unittest.TestCase):
-    """Exercise the mapping without requiring excluded historical matrix data."""
+    """Exercise the generator without requiring excluded historical matrix data."""
 
-    def test_every_synthetic_shape_maps_to_its_disposition(self) -> None:
-        mapping = test_matrix_report._DISPOSITION_BY_SHAPE
-        cases = [
-            {"id": shape, "source_shape_classification": shape, "disposition": verdict}
-            for shape, verdict in mapping.items()
+    def test_the_classifier_never_generates_a_deletion_category(self) -> None:
+        # Categories C and E are the deletion boundary: a delete verdict requires
+        # manual review, so the generated classification must never reach them.
+        modules = [
+            "test_not_in_any_list",
+            *sorted(test_matrix_report._PROXY_MODULES),
+            *sorted(test_matrix_report._ONLY_AVAILABLE_MODULES),
+            *sorted(test_matrix_report._STRUCTURAL_MODULES),
+            *sorted(test_matrix_report._MIXED_SOURCE_SHAPE_MODULE_CATEGORIES),
         ]
-        for case in cases:
-            self.assertEqual(case["disposition"], mapping[case["source_shape_classification"]])
+        evidences = (
+            "security tripwire",
+            "manifest/structural",
+            "source-shape",
+            "integration",
+            "pure functional/unit",
+        )
+        texts = ("", "plain assertions", "SPDX provenance forbidden manifest contract")
+        seen: set[str] = set()
+        for module_name in modules:
+            for evidence in evidences:
+                for text in texts:
+                    shape = test_matrix_report._source_shape_classification(module_name, text, evidence)
+                    seen.add(shape)
+                    with self.subTest(module=module_name, evidence=evidence, text=text):
+                        self.assertIn(shape, test_matrix_report._DISPOSITION_BY_SHAPE)
+                        self.assertNotIn(shape, _DELETION_SHAPES)
+        # Vacuity guard: the grid reaches every non-deletion category.
+        self.assertEqual(seen, set(test_matrix_report._DISPOSITION_BY_SHAPE) - _DELETION_SHAPES)
 
-    def test_synthetic_matrix_proposes_no_deletions(self) -> None:
+    def test_build_report_fills_disposition_from_the_mapping_and_proposes_no_deletions(self) -> None:
+        # Run the real generator over a small, known suite (this module and a
+        # structural one) instead of discovering the whole tree.
+        loader = unittest.TestLoader()
+        import test_publish_audit
+
+        small_suite = unittest.TestSuite([
+            loader.loadTestsFromModule(sys.modules[__name__]),
+            loader.loadTestsFromModule(test_publish_audit),
+        ])
+        with mock.patch.object(unittest.TestLoader, "discover", return_value=small_suite):
+            report = test_matrix_report.build_report()
+        cases = report["cases"]
+        self.assertGreater(len(cases), 0)
         mapping = test_matrix_report._DISPOSITION_BY_SHAPE
-        deletions = [shape for shape, verdict in mapping.items() if verdict == "DELETE_CANDIDATE"]
-        self.assertEqual(
-            deletions,
-            ["C_REDUNDANT_BEHAVIORAL_PROXY", "E_OBSOLETE_INVARIANT"],
-            "a delete verdict requires manual review, not generation",
+        for case in cases:
+            with self.subTest(case=case["id"]):
+                self.assertNotIn(case["source_shape_classification"], _DELETION_SHAPES)
+                self.assertNotEqual(case["disposition"], "DELETE_CANDIDATE")
+                self.assertNotEqual(case["disposition"], "UNKNOWN")
+                self.assertEqual(case["disposition"], mapping[case["source_shape_classification"]])
+        # Vacuity guard: the structural module really was classified, so the loop
+        # above checked a category other than NOT_APPLICABLE.
+        self.assertIn(
+            "A_LEGITIMATE_STRUCTURAL_INVARIANT",
+            {case["source_shape_classification"] for case in cases},
         )
 
 

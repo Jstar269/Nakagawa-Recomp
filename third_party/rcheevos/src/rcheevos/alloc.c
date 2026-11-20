@@ -81,6 +81,10 @@ char* rc_alloc_str(rc_parse_state_t* parse, const char* text, size_t length) {
     if (parse->offset >= 0)
       parse->offset = RC_OUT_OF_MEMORY;
 
+    /* Nakagawa LOCAL DELTA (2026-11-20): part of upstream commit
+     * e3e7e86bc8ab10295dace443addfb091d1095a0e (#559): don't leave a node without a value in the
+     * tree, where the next lookup would compare against its uninitialised value. */
+    *next = NULL;
     return NULL;
   }
 

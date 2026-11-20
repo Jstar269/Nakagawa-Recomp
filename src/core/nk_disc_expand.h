@@ -10,17 +10,42 @@
  * that .iso exactly as it reads a user's own .iso. Nothing is decompressed
  * into guest or runtime memory: this is an import step only.
  *
- *   <data>/discs/<DISC_ID>/<DISC_ID>.<fp>.<cso|zso|chd>.iso   the expanded image
- *   <data>/discs/<DISC_ID>/<DISC_ID>.<fp>.<ext>.iso.source    its source fingerprint
- *   <data>/discs/expanded/<fingerprint>.ref                   fingerprint -> disc ID
- *   <data>/discs/expanded/<fingerprint>.lock                  held while it is imported
+ *   <data>/discs/<DISC_ID>/<DISC_ID>.<id>.<cso|zso|chd>.iso   the expanded image
+ *   <data>/discs/<DISC_ID>/<DISC_ID>.<id>.<ext>.iso.source    "sha256:<identity>"
+ *   <data>/discs/expanded/<identity>.ref                      "<DISC_ID> <file name>"
+ *   <data>/discs/expanded/<identity>.lock                     held while it is imported
+ *   <data>/discs/expanded/<DISC_ID>.<id>.<ext>.lock           held while that name is placed
  *
- * The fingerprint keys on the source's size, write time and a hash of its
- * first 64 KiB (the header and the start of the block index), so adding the
- * same unchanged file again reuses the expansion instead of writing it again.
- * <fp> is the first NK_DISC_TITLE_FINGERPRINT_CHARS characters of it, so two
- * different images of one disc ID (a retail dump and a fan translation) keep
- * two expansions instead of the second replacing the first.
+ * The identity of a compressed image is the SHA-256 of every byte of the file
+ * the user added, as it is stored (what sha256sum prints for it), computed on
+ * every add (nk_disc_file_identity). Adding a file with the same bytes again,
+ * under any name or in any folder, reuses its expansion; a file that differs
+ * anywhere is its own import. <id> is the first NK_DISC_TITLE_FINGERPRINT_CHARS
+ * characters of the identity, so two images of one disc ID (a retail dump and
+ * a fan translation) keep two expansions. When that name already holds an
+ * image recorded for another identity (the first 64 bits of two hashes alike,
+ * which takes a crafted file), it is never overwritten: <id> is then the whole
+ * identity. The same disc in another container (a CSO and a ZSO of one .iso)
+ * has other bytes, so it is expanded again.
+ *
+ * The bytes recorded are the bytes expanded. The source is held open for the
+ * whole import with writes denied where the platform has share modes
+ * (nk_platform_open_read_deny_writes: Windows, on a local volume or a server
+ * that enforces them; a file another program already has open for writing is
+ * read shared instead). Its stamp (NkDiscSourceStamp: size, write time, change
+ * time and file identity) is taken before anything reads it and checked again
+ * before anything is recorded, and before a record is written for a new
+ * expansion or an upgrade the identity is computed a second time and must be
+ * the same.
+ *
+ * Imports made before the full identity (F-f6233fe0) were recorded under a
+ * sampled fingerprint of the source's size, write time and first 64 KiB
+ * (nk_disc_legacy_fingerprint): a ref <fingerprint>.ref holding the disc ID,
+ * the image as <DISC_ID>.<fp>.<ext>.iso or <DISC_ID>.<ext>.iso, and the
+ * fingerprint as its .source. Such a record is never a match by itself: a file
+ * whose sampled fingerprint names it is expanded in memory and compared byte
+ * for byte with that image. Equal, the record is upgraded where it is (the
+ * image keeps its name); different, the file gets its own expansion.
  *
  * CSO (CISO v1 and v2) and ZSO (ZISO) are read here: the block index, raw
  * DEFLATE blocks through nk_psp_inflate_raw and LZ4 blocks through a small
@@ -48,8 +73,11 @@ extern "C" {
 /* No UMD holds more than 1.8 GB; anything past this bound is a damaged or
    hostile header, refused before any allocation or loop uses it. */
 #define NK_DISC_MAX_EXPANDED_BYTES (4ull * 1024ull * 1024ull * 1024ull)
-#define NK_DISC_FINGERPRINT_CHARS 32u
-/* The part of the fingerprint in an expansion's per-title file name. */
+/* A file's identity: the lowercase hex SHA-256 of all of its bytes. */
+#define NK_DISC_IDENTITY_CHARS 64u
+/* The sampled fingerprint imports were recorded under before the identity. */
+#define NK_DISC_LEGACY_FINGERPRINT_CHARS 32u
+/* The part of the identity in an expansion's per-title file name. */
 #define NK_DISC_TITLE_FINGERPRINT_CHARS 16u
 /* The largest CHD hunk read; a header naming more is refused before libchdr
    allocates anything for it. */
@@ -135,33 +163,86 @@ typedef struct {
     NkDiscFormat format;
     uint64_t source_bytes;
     uint64_t expanded_bytes;
-    char fingerprint[NK_DISC_FINGERPRINT_CHARS + 1];
+    /* The source's identity (nk_disc_file_identity); empty after a probe. */
+    char identity[NK_DISC_IDENTITY_CHARS + 1];
     char disc_id[16];
     char iso_path[NK_MAX_PATH];
     /* A matching expansion was already in place and nothing was written. */
     bool reused;
 } NkDiscImport;
 
-/* Identify a compressed image, check its header and fingerprint it, and look
-   for an expansion of the same unchanged file under data_root. On success
-   out->reused says whether out->iso_path is ready. */
+/* The identity of the file at path: the SHA-256 of all of its bytes, read
+   once in 1 MiB pieces. Progress reports (done, file size) after each piece,
+   and is_cancelled is asked after each report. A file that cannot be read to
+   the end, or that grows or shrinks while it is read, is NK_DISC_READ_FAILED;
+   a cancel is NK_DISC_CANCELLED. out_bytes (optional) is the size hashed. */
+bool nk_disc_file_identity(const char *path, const NkDiscExpandCallbacks *callbacks,
+                           char out[NK_DISC_IDENTITY_CHARS + 1], uint64_t *out_bytes,
+                           NkDiscExpandStatus *status);
+
+/* A source file's stamp, taken before it is read and compared before anything
+   is recorded for it: its size and write time, which any writer can set back,
+   the time of its last change of any kind (POSIX st_ctim, which no ordinary
+   program can set; the NTFS change time, which a program that may write the
+   file can also set), and which file it is (POSIX st_dev and st_ino; the volume
+   serial number and file index). A file system that does not keep one of the
+   last three gives 0 for it in both stamps, and the field then never differs;
+   0 in one stamp only is a change. What this catches on each platform:
+   nk_platform_file_change_identity in nk_platform.h. */
+typedef struct {
+    int64_t size;
+    uint64_t modified;
+    uint64_t changed;
+    uint64_t volume;
+    uint64_t file_id;
+} NkDiscSourceStamp;
+
+/* False when the file's size or write time cannot be read. */
+bool nk_disc_source_stamp(const char *path, NkDiscSourceStamp *out);
+
+/* True when the file still has the stamp `before`, every field equal (a field
+   0 in both is one the file system does not keep); otherwise
+   NK_DISC_READ_FAILED, saying that the file changed while it was added. */
+bool nk_disc_source_unchanged(const char *path, const NkDiscSourceStamp *before,
+                              NkDiscExpandStatus *status);
+
+/* Compute the file's identity again (progress and cancel as for
+   nk_disc_file_identity) and require it to be `identity`: a file rewritten
+   since the first read, even with the same size and write time, is
+   NK_DISC_READ_FAILED, saying that it changed while it was added. */
+bool nk_disc_identity_unchanged(const char *path, const NkDiscExpandCallbacks *callbacks,
+                                const char *identity, NkDiscExpandStatus *status);
+
+/* The sampled fingerprint earlier imports were recorded under: a hash of the
+   format, the file's size, its write time and its first 64 KiB. Only used to
+   find such a record, never to decide that two files are one. */
+bool nk_disc_legacy_fingerprint(const char *source, NkDiscFormat format,
+                                char out[NK_DISC_LEGACY_FINGERPRINT_CHARS + 1],
+                                NkDiscExpandStatus *status);
+
+/* Identify a compressed image and check its header: out->format,
+   out->source_bytes and out->expanded_bytes. Reads no more than the header,
+   so it can run where the user is waiting. Whether the file was imported
+   before needs its identity, which only nk_disc_import computes: a probe never
+   reports reused. */
 bool nk_disc_import_probe(const char *source, const char *data_root, NkDiscImport *out,
                           NkDiscExpandStatus *status);
 
-/* The fingerprint of any other file a disc image is made from (a PSN package the
-   player converts): its size, write time and a hash of its first 64 KiB, keyed
-   apart from a compressed image's, so an image made from it is reused only for
-   the same unchanged file. */
-bool nk_disc_source_fingerprint(const char *source, char out[NK_DISC_FINGERPRINT_CHARS + 1],
-                                NkDiscExpandStatus *status);
-
-/* Probe, then expand when no matching expansion exists: the image is expanded
-   into <data_root>/discs/expanded/, checked to be a PSP disc with a disc ID,
-   and moved into its per-title folder. The import holds
-   <fingerprint>.lock from the probe to the move, so a second import of the
-   same file that starts meanwhile (another program, or another worker) is
-   refused as NK_DISC_IMPORT_BUSY instead of writing over the first one's
-   partial image. */
+/* Probe, compute the source's identity, and reuse the expansion recorded for
+   it; otherwise upgrade an earlier sampled record whose image is this file's
+   expansion byte for byte, or expand: the image is expanded into
+   <data_root>/discs/expanded/, checked to be a PSP disc with a disc ID, and
+   moved into its per-title folder. Progress runs once over the identity (the
+   source's size), the expansion or comparison (the expanded size) and the
+   second identity (the source's size again; a reuse needs none and ends the
+   bar at once). The import holds <identity>.lock from the lookup to the move,
+   and the lock of the per-title file name while it places the image, so a
+   second import of the same file, or of another file that would take the same
+   name, that starts meanwhile (another program, or another worker) is refused
+   as NK_DISC_IMPORT_BUSY instead of writing over the first one's image. A
+   source that cannot be opened with writes denied, or whose size, write time
+   or bytes change during the import, is refused as NK_DISC_READ_FAILED, and
+   nothing of it is kept. */
 bool nk_disc_import(const char *source, const char *data_root,
                     const NkDiscExpandCallbacks *callbacks, NkDiscImport *out,
                     NkDiscExpandStatus *status);

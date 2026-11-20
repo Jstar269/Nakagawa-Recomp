@@ -11,6 +11,7 @@
 #include <shlobj.h>
 #include <objbase.h>
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <io.h>
 #include <process.h>
@@ -1531,6 +1532,79 @@ FILE *nk_platform_open_regular_file(const char *path) {
     FILE *file = _fdopen(fd, "rb");
     if (!file) _close(fd);
     return file;
+}
+
+FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared) {
+    if (opened_shared) *opened_shared = false;
+    if (!path || !*path) {
+        errno = EINVAL;
+        return NULL;
+    }
+    WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        errno = EINVAL;
+        return NULL;
+    }
+    /* FILE_SHARE_READ alone: other readers open it, writers and deleters are refused. */
+    HANDLE handle = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        DWORD why = GetLastError();
+        /* Another program has it open for writing: read it shared, as any reader does. */
+        FILE *shared = why == ERROR_SHARING_VIOLATION ? _wfopen(wpath, L"rb") : NULL;
+        free(wpath);
+        if (shared && opened_shared) *opened_shared = true;
+        if (!shared) {
+            /* The CRT would call a sharing violation EACCES too; only a refusal of this
+               account's access is. */
+            errno = why == ERROR_ACCESS_DENIED                                ? EACCES
+                    : why == ERROR_SHARING_VIOLATION                          ? EBUSY
+                    : why == ERROR_FILE_NOT_FOUND || why == ERROR_PATH_NOT_FOUND ? ENOENT
+                                                                              : EIO;
+        }
+        return shared;
+    }
+    free(wpath);
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(handle);
+        return NULL;
+    }
+    FILE *file = _fdopen(fd, "rb");
+    if (!file) _close(fd);
+    return file;
+}
+
+void nk_platform_file_change_identity(const char *path, uint64_t *changed, uint64_t *volume,
+                                      uint64_t *file_id) {
+    if (changed) *changed = 0;
+    if (volume) *volume = 0;
+    if (file_id) *file_id = 0;
+    if (!path || !*path) return;
+    WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return;
+    }
+    /* Attributes only, every sharing allowed: never in the way of a hold or of
+       another program's open. */
+    HANDLE handle = CreateFileW(wpath, FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wpath);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    FILE_BASIC_INFO basic;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (changed && GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)) &&
+        basic.ChangeTime.QuadPart > 0) {
+        *changed = (uint64_t)basic.ChangeTime.QuadPart;
+    }
+    if (GetFileInformationByHandle(handle, &info)) {
+        if (volume) *volume = info.dwVolumeSerialNumber;
+        if (file_id) *file_id = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+    }
+    CloseHandle(handle);
 }
 
 void nk_platform_terminate_process(NkProcessHandle *process) {

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from typing import ClassVar, cast
 
@@ -460,6 +461,141 @@ class MakefileCouplingTests(unittest.TestCase):
             self.assertEqual(
                 ci_test_shards.makefile_coupled_modules(["test_missing"], Path(scratch)), ["test_missing"]
             )
+
+
+class WindowsOnlySelectionTests(unittest.TestCase):
+    """--windows-only names every test that skips on every host but Windows, and nothing else."""
+
+    def test_selection_reads_decorators_skip_statements_and_module_names(self) -> None:
+        files = {
+            "test_decorated.py": textwrap.dedent("""\
+                import os, platform, sys, unittest
+                WINDOWS = os.name == "nt"
+                POSIX = sys.platform != "win32"
+
+                class Methods(unittest.TestCase):
+                    @unittest.skipUnless(os.name == "nt", "Windows")
+                    def test_nt(self): pass
+                    @unittest.skipUnless(sys.platform == "win32" and True, "Windows")
+                    def test_win32_and(self): pass
+                    @unittest.skipIf(sys.platform != "win32", "Windows")
+                    def test_skip_if_not_win32(self): pass
+                    @unittest.skipIf(os.name == "posix" or False, "Windows")
+                    def test_posix_or(self): pass
+                    @unittest.skipUnless(WINDOWS, "Windows")
+                    def test_module_name(self): pass
+                    @unittest.skipIf(POSIX, "Windows")
+                    def test_module_other_host_name(self): pass
+                    @unittest.skipUnless(platform.system() == "Windows", "Windows")
+                    def test_platform_system(self): pass
+                    @unittest.skipUnless(sys.platform.startswith("win"), "Windows")
+                    def test_startswith(self): pass
+                    @unittest.skipUnless(not (os.name != "nt"), "Windows")
+                    def test_negated(self): pass
+                    @unittest.skipUnless(os.name == "nt" or sys.platform == "darwin", "two hosts")
+                    def test_two_hosts(self): pass
+                    @unittest.skipIf(os.name == "nt", "POSIX")
+                    def test_posix_only(self): pass
+                    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux")
+                    def test_linux_only(self): pass
+                    @unittest.skipIf(os.name != "nt" and WINDOWS, "never")
+                    def test_and_is_not_every_other_host(self): pass
+                    def test_plain(self): pass
+
+                @unittest.skipUnless(os.name == "nt", "Windows")
+                class WholeClass(unittest.TestCase):
+                    def test_a(self): pass
+                """),
+            "test_statements.py": textwrap.dedent("""\
+                import os, shutil, sys, unittest
+
+                class Bodies(unittest.TestCase):
+                    def test_skip_test(self):
+                        if os.name != "nt" or not shutil.which("pwsh"):
+                            self.skipTest("Windows and pwsh")
+                    def test_raise(self):
+                        if sys.platform != "win32":
+                            raise unittest.SkipTest("Windows")
+                    def test_nested_is_not_read(self):
+                        try:
+                            pass
+                        except OSError:
+                            if os.name != "nt":
+                                self.skipTest("only when the call failed")
+                    def test_tool_presence(self):
+                        if not shutil.which("mingw32-make"):
+                            self.skipTest("a tool, not a platform")
+                    def test_and_condition(self):
+                        if os.name != "nt" and shutil.which("x"):
+                            self.skipTest("only sometimes")
+
+                class SetUpClassSkip(unittest.TestCase):
+                    @classmethod
+                    def setUpClass(cls):
+                        if os.name != "nt":
+                            raise unittest.SkipTest("Windows")
+                    def test_a(self): pass
+                """),
+            "test_whole_module.py": textwrap.dedent("""\
+                import sys, unittest
+                if sys.platform != "win32":
+                    raise unittest.SkipTest("Windows")
+                class Anything(unittest.TestCase):
+                    def test_a(self): pass
+                """),
+            "test_portable.py": "import unittest\nclass P(unittest.TestCase):\n    def test_a(self): pass\n",
+        }
+        with tempfile.TemporaryDirectory() as scratch:
+            tools_dir = Path(scratch)
+            for name, text in files.items():
+                (tools_dir / name).write_text(text, encoding="utf-8")
+            selected = ci_test_shards.windows_only_tests(ci_test_shards.discover_modules(tools_dir), tools_dir)
+        self.assertEqual(selected, [
+            "test_decorated.Methods.test_nt",
+            "test_decorated.Methods.test_win32_and",
+            "test_decorated.Methods.test_skip_if_not_win32",
+            "test_decorated.Methods.test_posix_or",
+            "test_decorated.Methods.test_module_name",
+            "test_decorated.Methods.test_module_other_host_name",
+            "test_decorated.Methods.test_platform_system",
+            "test_decorated.Methods.test_startswith",
+            "test_decorated.Methods.test_negated",
+            "test_decorated.WholeClass",
+            "test_statements.Bodies.test_skip_test",
+            "test_statements.Bodies.test_raise",
+            "test_statements.SetUpClassSkip",
+            "test_whole_module",
+        ])
+
+    def test_an_unreadable_module_stops_the_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            (Path(scratch) / "test_broken.py").write_text("def broken(:\n", encoding="utf-8")
+            with self.assertRaises(ci_test_shards.ShardDataError):
+                ci_test_shards.windows_only_tests(["test_broken"], Path(scratch))
+
+    def test_cli_lists_the_live_windows_only_tests_but_not_those_run_elsewhere(self) -> None:
+        result = _run_cli("--windows-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        names = result.stdout.split()
+        # Known members at the time of writing, one per detection route.
+        for name in ("test_scratch_dir.WindowsLockTests",
+                     "test_stage_install.InstallTests.test_shortcut_targets_the_installed_player",
+                     "test_production_smoke.TestProductionSmokePackage."
+                     "test_package_builds_to_real_spaced_destination_without_mocks"):
+            self.assertIn(name, names)
+        self.assertEqual(names, ci_test_shards.windows_only_tests(
+            [m for m in ci_test_shards.discover_modules()
+             if m not in ci_test_shards.WINDOWS_ONLY_RUN_ELSEWHERE]))
+        self.assertTrue(ci_test_shards.windows_only_tests(["test_installer"]))
+        self.assertFalse([name for name in names if name.split(".")[0] in ci_test_shards.WINDOWS_ONLY_RUN_ELSEWHERE])
+
+    def test_cli_exits_2_on_an_empty_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            (Path(scratch) / "test_portable.py").write_text("VALUE = 1\n", encoding="utf-8")
+            result = _run_cli("--windows-only", "--tools-dir", scratch)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("Windows-only selection is empty", result.stderr)
 
 
 class CheckPlanTests(unittest.TestCase):

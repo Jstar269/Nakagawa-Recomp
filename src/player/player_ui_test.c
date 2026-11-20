@@ -421,6 +421,22 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
         event->user.code = PLAYER_UI_TEST_ACTION_ASSERT_GAME_RUNNING;
         return 1;
     }
+    /* SDL's notice that the render device was reset and every texture is lost (a
+       Direct3D device removed by a driver reset or update), queued as SDL sends it. */
+    if (strcmp(token, "RENDER_DEVICE_RESET") == 0) {
+        event->type = SDL_EVENT_RENDER_DEVICE_RESET;
+        return 1;
+    }
+    /* ASSERT_DEVICE_RESETS=<n>: the next UI's backend has taken n device resets. */
+    if (strncmp(token, "ASSERT_DEVICE_RESETS=", 21) == 0) {
+        uint64_t count = 0;
+        if (strcmp(token + 21, "0") != 0 &&
+            (!player_ui_test_parse_positive_u64(token + 21, &count) || count > 1000u)) return -1;
+        event->type = SDL_EVENT_USER;
+        event->user.code = PLAYER_UI_TEST_ACTION_ASSERT_DEVICE_RESETS;
+        event->user.windowID = (Uint32)count;
+        return 1;
+    }
     if (strncmp(token, "ASSERT_CONSENT=", 15) == 0) {
         char *comma = strchr(token + 15, ',');
         if (!comma) return -1;
@@ -736,6 +752,7 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            "bad_disc_notice=%d "
            "picker=%d package_building=%d package_cancelled=%d profile_fallback=%d "
            "controller_capturing=%d controller_conflicts=%d calibrating=%d "
+           "calib_stage=%d calib_samples=%d calib_elapsed=%d "
            "error_details_available=%d "
            "select_binding=%d start_binding=%d circle_binding=%d profile_save_notice=%d "
            "input_scope=%s input_titles=%d input_notice=%d "
@@ -780,6 +797,8 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            input_settings_is_capturing(&app->input_settings) ? 1 : 0,
            input_settings_has_conflicts(&app->input_settings) ? 1 : 0,
            input_settings_is_calibrating(&app->input_settings) ? 1 : 0,
+           (int)app->input_settings.calib.stage, app->input_settings.calib.sample_count,
+           app->input_settings.calib.elapsed_ms,
            app->last_error.details[0] ? 1 : 0,
            app->input_settings.profile.psp_buttons[INPUT_CONTROL_BTN_SELECT].primary.index,
            app->input_settings.profile.psp_buttons[INPUT_CONTROL_BTN_START].primary.index,
@@ -1118,6 +1137,13 @@ void player_ui_test_prepare_app(PlayerUiTest *t, PlayerApp *app) {
                                        "ENCRYPTED_EXECUTABLE: EBOOT.BIN is encrypted and "
                                        "built-in decryption stopped: KEY_REQUIRED.",
                                        NULL);
+        } else if (strcmp(t->error_code, "PREREQUISITE_TITLE_GONE") == 0) {
+            /* The build tools finished downloading for a title that has left the library
+               meanwhile: the resume's own card (player_app_prereq_resume_build). */
+            memset(&app->prerequisites, 0, sizeof(app->prerequisites));
+            snprintf(app->prerequisites.disc_id, sizeof(app->prerequisites.disc_id),
+                     "TEST80009");
+            (void)player_app_prereq_resume_build(app);
         } else {
             player_app_set_error(app, t->error_code, t->error_code,
                                  "Synthetic UI regression error state.",
@@ -1221,8 +1247,9 @@ void player_ui_test_report_update_phase(const PlayerUiTest *t, const PlayerApp *
     static PlayerReportPhase reported_report = PLAYER_REPORT_IDLE;
     if (t->mode && app->report.phase != reported_report) {
         reported_report = app->report.phase;
-        printf("[PLAYER_UI_TEST] problem_report=%d files=%d path=%s\n", (int)app->report.phase,
-               app->report.file_count, app->report.path[0] ? app->report.path : "none");
+        printf("[PLAYER_UI_TEST] problem_report=%d files=%d total=%d path=%s\n",
+               (int)app->report.phase, app->report.file_count, app->report.file_total,
+               app->report.path[0] ? app->report.path : "none");
         if (app->report.message[0]) {
             printf("[PLAYER_UI_TEST] problem_report_message=%s\n", app->report.message);
         }
@@ -1531,6 +1558,18 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
             printf("[PLAYER_UI_TEST] assert_game_running result=%s\n",
                    app->is_game_running ? "PASS" : "FAIL");
             if (!app->is_game_running) {
+                t->failed = true;
+                t->quit_queued = true;
+                *running = false;
+            }
+        } else if (scripted_event.type == SDL_EVENT_USER &&
+                   scripted_event.user.code == PLAYER_UI_TEST_ACTION_ASSERT_DEVICE_RESETS) {
+            int resets = g_ui_test_next_ui != NULL
+                ? player_ui_nk_test_device_resets(g_ui_test_next_ui) : -1;
+            bool matches = resets >= 0 && (Uint32)resets == scripted_event.user.windowID;
+            printf("[PLAYER_UI_TEST] assert_device_resets result=%s actual=%d\n",
+                   matches ? "PASS" : "FAIL", resets);
+            if (!matches) {
                 t->failed = true;
                 t->quit_queued = true;
                 *running = false;

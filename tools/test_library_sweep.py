@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -844,7 +845,7 @@ class LibrarySweepTests(unittest.TestCase):
 
     def test_merge_private_reports_combines_shard_stage_data(self) -> None:
         shard_reports = []
-        durations = {stage: None for stage in library_sweep.STAGES}
+        durations: dict[str, int | None] = {stage: None for stage in library_sweep.STAGES}
         durations["analyze"] = 2400
         timeout_row = {
             **_sweep_row("analyze", run_status="TIMED_OUT"),
@@ -986,7 +987,7 @@ class LibrarySweepTests(unittest.TestCase):
         payload = json.loads(report.read_text(encoding="utf-8"))
         payload.pop("comparison_identity")
         report.write_text(json.dumps(payload), encoding="utf-8")
-        cases = (
+        cases: tuple[tuple[list[Path], str], ...] = (
             ([legacy, shard("current", default)], "missing or invalid comparison identity"),
             ([shard("decrypted", dict(default, decrypted_titles=True)), shard("plain", default)],
              "optional input identity cannot be verified"),
@@ -1004,7 +1005,7 @@ class LibrarySweepTests(unittest.TestCase):
         )
         library_sweep._validate_public_aggregate(aggregate)
         default = aggregate["comparison_identity"]
-        cases = (
+        cases: tuple[object, ...] = (
             dict(default, extra=True),
             {key: value for key, value in default.items() if key != "title_manifests"},
             dict(default, launch_timeout_seconds=True),
@@ -1106,13 +1107,17 @@ class LibrarySweepTests(unittest.TestCase):
     def test_merge_private_reports_names_each_bounded_reader_reason(self) -> None:
         from unittest import mock
 
-        cases = {
+        cases: dict[str, tuple[bytes, dict[str, int], str]] = {
             "too-large": (b'{"schema_version": 2, "pad": "' + b"x" * 64 + b'"}',
                           {"_SWEEP_RESUME_JSON_MAX_BYTES": 32}, "JSON artifact limit"),
             "not-utf8": (b'{"schema_version": 2, "title": "' + bytes([0xFF, 0xFE]) + b'"}',
                          {}, "UTF-8"),
             "too-deep": (b'{"a": ' * 8 + b"1" + b"}" * 8,
                          {"_SWEEP_RESUME_JSON_MAX_DEPTH": 4}, "nesting"),
+            # Every limit of a case applies, not only the first one listed.
+            "too-deep-within-size": (b'{"a": ' * 8 + b"1" + b"}" * 8,
+                                     {"_SWEEP_RESUME_JSON_MAX_BYTES": 4096,
+                                      "_SWEEP_RESUME_JSON_MAX_DEPTH": 4}, "nesting"),
         }
         for name, (payload, limits, reason) in cases.items():
             with self.subTest(name=name):
@@ -1120,10 +1125,9 @@ class LibrarySweepTests(unittest.TestCase):
                 shard_dir.mkdir()
                 report = shard_dir / "library-sweep.json"
                 report.write_bytes(payload)
-                with mock.patch.multiple(library_sweep, **limits) if limits else mock.patch.object(
-                    library_sweep, "_SWEEP_RESUME_JSON_MAX_BYTES",
-                    library_sweep._SWEEP_RESUME_JSON_MAX_BYTES,
-                ):
+                with contextlib.ExitStack() as stack:
+                    for limit_name, limit_value in limits.items():
+                        stack.enter_context(mock.patch.object(library_sweep, limit_name, limit_value))
                     message = self._merge_failure_message(shard_dir)
                 self.assertIn(str(report), message)
                 self.assertIn("not a usable shard report", message)

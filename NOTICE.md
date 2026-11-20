@@ -94,8 +94,9 @@ We aim to respond promptly and will remove material where appropriate.
   `third_party/licenses/FFMPEG_MIPS_FFT.txt` and is included in the generated
   native-package third-party notices bundle alongside the FFmpeg LGPL text.
 - **minimp3** — CC0-1.0 public-domain dedication. `src/rt/minimp3/minimp3.h` and
-  its `LICENSE` are imported byte-identical from `https://github.com/lieff/minimp3`
-  at commit `ea99364f61c14656440e8d77e9c233ccf3124633`; the manifest is
+  its `LICENSE` are imported from `https://github.com/lieff/minimp3` at commit
+  `ea99364f61c14656440e8d77e9c233ccf3124633` (the `LICENSE` byte-identical, the
+  header with two later upstream lines as LOCAL DELTA); the manifest is
   `src/rt/minimp3/PROVENANCE.md`. It is statically linked into the runtime through
   the project wrapper `src/rt/mp3_bridge.c` and decodes for `sceMp3`. CC0 asks for no
   notice; it is listed here so the lineage stays discoverable.
@@ -110,8 +111,9 @@ We aim to respond promptly and will remove material where appropriate.
   the native player through `src/core/nk_iso.c` and `src/core/nk_xb.c`, and into
   every title runtime through `src/core/nk_xb.c` (`mk/runtime_sources.mk`).
 - **dr_libs `dr_wav`** — the Unlicense (public domain), elected from upstream's
-  Unlicense or `MIT-0` choice; both texts are kept. The byte-identical header,
-  upstream `LICENSE`, pinned source manifest, and SHA-256 values are under
+  Unlicense or `MIT-0` choice; both texts are kept. The header (pinned, with four
+  later upstream fixes as LOCAL DELTA), upstream `LICENSE`, pinned source manifest,
+  and SHA-256 values are under
   `third_party/dr_libs/`. Only selftests compile it; it is not in the player or
   the runtime.
 - **libchdr** — `BSD-3-Clause`, Copyright Romain Tisserand; the MAME-derived CHD, CD-ROM,
@@ -136,16 +138,17 @@ We aim to respond promptly and will remove material where appropriate.
   into the runtime, where the Vulkan GE renderer's Ace Mode texture scaling uses it; it is not
   in `nk_decrypt`.
 - **Monocypher 4.0.3 Ed25519 signature check** — upstream offers `BSD-2-Clause OR CC0-1.0`;
-  the project uses it under CC0-1.0. Four byte-identical source files, the complete upstream
+  the project uses it under CC0-1.0. Four source files (`monocypher.c` with one later upstream
+  fix as LOCAL DELTA, the other three byte-identical), the complete upstream
   `LICENCE.md` and the pinned manifest are under `third_party/monocypher/`. It is compiled into
   the `ed25519-verify-selftest` (RFC 8032 vectors) and into the player, where `src/core/nk_sig.c`
   uses it to check the signature of an update download.
 - **FFmpeg n4.4 H.264 decoder subset** — LGPL-2.1-or-later, the same pin as the ATRAC3+
   subset. The imported libavcodec/libavutil files (generic C only, no `--enable-gpl` or
   `--enable-nonfree` component), their license text and the byte-exact manifest are under
-  `src/rt/h264_ffmpeg_sub/`. One imported file, `libavcodec/h264_slice.c`, is modified: it
-  carries two upstream FFmpeg `release/4.4` fixes as a dated LOCAL DELTA, recorded in the
-  file header and the manifest; the project API layer and configuration stand-ins there are
+  `src/rt/h264_ffmpeg_sub/`. A few imported files are modified: each carries fixes from named
+  upstream FFmpeg commits as a dated LOCAL DELTA, recorded in the file header and the
+  manifest; the project API layer and configuration stand-ins there are
   identified in `src/rt/h264_ffmpeg_sub/PROVENANCE.md`. It is the default H.264 decoder where no platform decoder
   exists (`H264_FFMPEG=1`, the default off Windows); Windows uses Media Foundation, an operating
   system component, and links none of it. Build notes are in `docs/PLATFORM_PORTABILITY.md`.
@@ -222,7 +225,7 @@ We aim to respond promptly and will remove material where appropriate.
   and the four Geist fonts' licence copies both Geist's and Liberation's. The generated
   fonts carry project-owned names (`Nakagawa Open Latin`, `Nakagawa Open Japanese`,
   `Nakagawa Open Korean`), so no Reserved Font Name is used.
-- **stb_image 2.30** — Sean Barrett; upstream offers `MIT OR Unlicense`, and the
+- **stb_image 2.34** — Sean Barrett; upstream offers `MIT OR Unlicense`, and the
   project uses it under the public-domain (Unlicense) alternative. The byte-identical
   header, upstream `LICENSE` and the pinned manifest are under `third_party/stb/`. It is
   built for PNG only into the `nk_ui` core and the player, where it decodes the
@@ -279,9 +282,9 @@ SHA-256 in `assets/third_party_components.json`:
 
 | DLL | License | License text |
 | --- | --- | --- |
-| `SDL3.dll` | Zlib | `third_party/licenses/sdl3/LICENSE.txt` |
+| `SDL3.dll` | Zlib AND BSD-3-Clause | `third_party/licenses/sdl3/LICENSE.txt`, `third_party/licenses/sdl3/yuv2rgb-LICENSE.txt`, `third_party/licenses/sdl3/hidapi-LICENSE.txt` |
 | `SDL3_ttf.dll` | Zlib | `third_party/licenses/SDL3_ttf.txt` |
-| `libfreetype-6.dll` | FTL | `third_party/licenses/FreeType-FTL.txt` |
+| `libfreetype-6.dll` | FTL AND MIT | `third_party/licenses/FreeType-FTL.txt`, `third_party/licenses/freetype/bdf-README.txt`, `third_party/licenses/freetype/pcf-README.txt` |
 | `libharfbuzz-0.dll` | MIT-Modern-Variant AND MIT | `third_party/licenses/HarfBuzz.txt`, `third_party/licenses/harfbuzz/ms-use-COPYING.txt` |
 | `libgraphite2.dll` | MIT (chosen) | `third_party/licenses/Graphite2.txt` |
 | `libpng16-16.dll` | libpng-2.0 | `third_party/licenses/libpng.txt` |
@@ -302,7 +305,19 @@ License choices and combination notes:
   a binary distribution: portions of this software are copyright (C) 1996-2026
   The FreeType Project (<https://freetype.org>), and this software is based in
   part on the work of the FreeType Team. The package's `THIRD_PARTY_NOTICES.txt`
-  repeats that statement.
+  repeats that statement. FreeType's `LICENSE.TXT` gives the contributed BDF and
+  PCF drivers, and `src/base/fthash.c` with its header, an X11-style (MIT)
+  licence that asks for its notice in all copies. The MSYS2 build compiles all
+  three into `libfreetype-6.dll` but installs only `FTL.TXT`, so the package
+  ships `src/bdf/README` and `src/pcf/README` from upstream at the packaged tag,
+  and its notices repeat `fthash.c`'s copyright lines.
+- **SDL3** is zlib, but `SDL3.dll` also compiles `src/video/yuv2rgb`
+  (BSD-3-Clause, Adrien Descamps) and, on Windows, HIDAPI, which may be used
+  under GPL-3.0, a BSD-style licence or its original licence; this distribution
+  uses the **BSD-style** option. Both binary clauses ask for the text in the
+  documentation, and the MSYS2 package installs only `LICENSE.txt`, so the
+  package ships `src/video/yuv2rgb/LICENSE` and `src/hidapi/LICENSE-bsd.txt`
+  from upstream at the packaged tag.
 - **Graphite2** is granted under four licenses (LGPL-2.1+, MPL-2.0, GPL-2.0+,
   or MIT) by its upstream `LICENSE`; this distribution uses the **MIT** option.
 - **HarfBuzz**'s `COPYING` refers readers to `COPYING` files in subdirectories.

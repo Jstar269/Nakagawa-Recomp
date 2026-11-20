@@ -4675,8 +4675,29 @@ static void test_settings_pages(void) {
           "without the font note text the game's page has no font note");
     CHECK(dump_flow_case(FLOW_SETTINGS_NOTICES, dump, sizeof(dump)) &&
               strstr(dump, "synthetic-compiler 14.2") != NULL &&
-              strstr(dump, "GPL-3.0-or-later; see LICENSE") != NULL,
-          "the notices list the downloaded tools and the project's licence");
+              strstr(dump, "GNU GPL version 3.") != NULL &&
+              strstr(dump, "also allows later versions;") != NULL,
+          "the notices list the downloaded tools and the program's licence: GNU GPL version 3, "
+          "with later versions allowed only for its own code");
+    /* The About page's licence card (maintainer decision 2026-11-19): the program is GNU GPL
+       version 3, since two included parts are version 3 only; Nakagawa's own code also
+       allows later versions. The page fits the 1280 x 720 design size without scrolling. */
+    {
+        NkUi *ui = NULL;
+        NkUiScrollState body;
+        CHECK(flow_case_fits(FLOW_PAGE_ABOUT, 1280, 720, dump, sizeof(dump)) &&
+                  strstr(dump, "\"GNU GPL version 3\"") != NULL &&
+                  strstr(dump, "version 3 only.") != NULL &&
+                  strstr(dump, "GPL-3.0-or-later") == NULL,
+              "the About licence card says GNU GPL version 3 and that two included parts are "
+              "version 3 only");
+        (void)flow_case_layout(FLOW_PAGE_ABOUT, 1280, 720, &ui);
+        CHECK(ui != NULL && nk_ui_scroll_state(ui, NK_UI_ID(NK_UI_ID_SCREEN_ABOUT, 0x000020u),
+                                               &body) &&
+                  body.max_offset <= 0.0f,
+              "the About page fits a 1280 x 720 window at 100% text without scrolling");
+        if (ui != NULL) nk_ui_destroy(ui);
+    }
     for (size_t i = 0u; i < sizeof(pages) / sizeof(pages[0]); ++i) {
         CHECK(flow_case_fits(pages[i], 960, 540, dump, sizeof(dump)),
               "each Settings page fits the 960 x 540 minimum window");

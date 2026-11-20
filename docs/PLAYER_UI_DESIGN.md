@@ -599,7 +599,7 @@ Reached from the top bar's ABOUT tab (L / R or Q / E switch tabs; Back returns t
   accent: `v`, then `NK_PLAYER_VERSION`, then the build date as `(MM-DD-YYYY)`, for example `v0.0.2 (11-07-2026)`;
 - a `BODY_L` `muted` line saying what it is (a PSP static recompiler: your own game, recompiled to run natively),
   followed by the privacy promise;
-- a LICENCE card (GPL-3.0-or-later, and a THIRD-PARTY NOTICES button that opens the existing licences screen) beside
+- a LICENCE card (GNU GPL version 3, and a THIRD-PARTY NOTICES button that opens the existing licences screen) beside
   a CREDITS card (the upstream lineage in three lines, pointing at `CREDITS.md` and `NOTICE.md`);
 - the non-affiliation notice ending "No game data is included.", the project link in `DATA`, and the short source
   commit as a `FOOTNOTE`.
