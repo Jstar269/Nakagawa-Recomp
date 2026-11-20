@@ -123,6 +123,37 @@ static inline int sr_asset_index_prefix_ci(const char *text,
     return text && prefix && sr_asset_index_find_ci(text, prefix) == text;
 }
 
+/* A two-byte Shift-JIS character starts at `s`: a lead byte, then a trail byte, as the
+ * XB reader (nk_xb.c sjis_lead and sjis_trail) recognizes one. Such a pair is one unit
+ * in every key and name compare in the VFS: its trail byte is never case-folded and
+ * never a separator, so 0x83 0x41 and 0x83 0x61 stay two names and a trail 0x5c is part
+ * of the name. A '/' or NUL is not a trail byte, so it always ends the character
+ * before it. */
+static inline int sr_vfs_sjis_pair(const char *s) {
+    unsigned lead = (unsigned char)s[0];
+    unsigned trail = lead ? (unsigned char)s[1] : 0u;
+    return ((lead >= 0x81u && lead <= 0x9fu) || (lead >= 0xe0u && lead <= 0xfcu)) &&
+           ((trail >= 0x40u && trail <= 0x7eu) || (trail >= 0x80u && trail <= 0xfcu));
+}
+
+/* Folds a guest path into its lookup key in place: '\\' becomes '/' and ASCII letters
+ * fold to lower case, except inside a Shift-JIS pair (sr_vfs_sjis_pair), which stays
+ * byte for byte. The guest key (data_normalize_guest_key), the loose-file index key
+ * (sr_asset_index_key_from_rel) and the enhancement file key all use this one rule, so
+ * the same bytes always give the same key. */
+static inline void sr_vfs_fold_guest_key(char *key) {
+    if (!key) return;
+    while (*key) {
+        if (sr_vfs_sjis_pair(key)) {
+            key += 2;
+            continue;
+        }
+        if (*key == '\\') *key = '/';
+        else if (*key >= 'A' && *key <= 'Z') *key = (char)(*key + ('a' - 'A'));
+        key++;
+    }
+}
+
 /* Convert an extracted-tree relative path to the guest lookup key and retain
  * the archive variant.  Keeping this in the portable core makes the synthetic
  * tree selftest exercise the same key contract as the Windows walker. */
@@ -159,10 +190,7 @@ static inline int sr_asset_index_key_from_rel(const char *relative,
     }
     char *normalized = sr_asset_index_strdup(key);
     if (!normalized) return 0;
-    for (char *p = normalized; *p; p++) {
-        if (*p == '\\') *p = '/';
-        if (*p >= 'A' && *p <= 'Z') *p = (char)(*p + ('a' - 'A'));
-    }
+    sr_vfs_fold_guest_key(normalized);
     *key_out = normalized;
     return 1;
 }
@@ -347,18 +375,28 @@ static inline int sr_vfs_ascii_tolower(int c) {
     return c;
 }
 
-/* ASCII case-insensitive compare.  Guest keys are ASCII-folded by
- * sr_asset_index_normalize_key, so this orders folded names exactly as
- * strcmp orders the keys they came from. */
+/* ASCII case-insensitive compare, with a Shift-JIS pair compared byte for byte (see
+ * sr_vfs_sjis_pair). Guest keys are folded by sr_vfs_fold_guest_key, so this orders
+ * folded names exactly as strcmp orders the keys they came from. */
 static inline int sr_vfs_strcasecmp(const char *s1, const char *s2) {
     if (!s1 || !s2) return s1 ? 1 : (s2 ? -1 : 0);
     for (;;) {
+        int pair = sr_vfs_sjis_pair(s1) && sr_vfs_sjis_pair(s2);
         int c1 = sr_vfs_ascii_tolower((unsigned char)*s1);
         int c2 = sr_vfs_ascii_tolower((unsigned char)*s2);
         if (c1 != c2) return c1 < c2 ? -1 : 1;
         if (c1 == 0) return 0;
         s1++;
         s2++;
+        if (pair) {
+            /* The lead bytes are equal (a lead byte is not a letter); the trail bytes
+             * compare unfolded. */
+            int t1 = (unsigned char)*s1;
+            int t2 = (unsigned char)*s2;
+            if (t1 != t2) return t1 < t2 ? -1 : 1;
+            s1++;
+            s2++;
+        }
     }
 }
 
@@ -400,11 +438,19 @@ static inline void sr_vfs_dirlist_destroy(SrVfsDirList *list) {
     sr_vfs_dirlist_init(list);
 }
 
-/* FNV-1a over the ASCII-folded name: names sr_vfs_strcasecmp calls equal hash equal. */
+/* FNV-1a over the name folded as sr_vfs_strcasecmp folds it (a Shift-JIS pair byte for
+ * byte): names sr_vfs_strcasecmp calls equal hash equal. */
 static inline uint64_t sr_vfs_name_fold_hash(const char *name) {
     uint64_t h = 1469598103934665603ull;
-    for (; *name; name++) {
-        h ^= (uint64_t)(unsigned)sr_vfs_ascii_tolower((unsigned char)*name);
+    while (*name) {
+        if (sr_vfs_sjis_pair(name)) {
+            for (int i = 0; i < 2; i++) {
+                h ^= (uint64_t)(unsigned char)*name++;
+                h *= 1099511628211ull;
+            }
+            continue;
+        }
+        h ^= (uint64_t)(unsigned)sr_vfs_ascii_tolower((unsigned char)*name++);
         h *= 1099511628211ull;
     }
     return h;

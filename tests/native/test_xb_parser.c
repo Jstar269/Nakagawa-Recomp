@@ -1897,8 +1897,10 @@ static const SrVfsDirEntry *archive_list_find(const SrVfsDirList *list, const ch
 
 /* The XB reader keeps a Shift-JIS pair byte for byte, so a trail byte 0x5c (the second
  * byte of characters such as 0x95 0x5c and 0x8f 0x5c) is part of the name, not a
- * separator. Such members mount, open by the guest's folded key (which turns every 0x5c
- * into '/' and folds ASCII letters), and are listed as files, not as directories. */
+ * separator. Such members mount, open by the guest's key (which keeps a pair byte for
+ * byte and folds the ASCII letters around it: sr_vfs_fold_guest_key), and are listed as
+ * files, not as directories. A '/' after a lead byte is a separator, so the spelling an
+ * older guest key folded a trail 0x5c into names another path. */
 static void test_archive_vfs_sjis_trail_5c_member(void) {
     static const uint8_t first_data[] = "first";
     static const uint8_t end_data[] = "trail at the end";
@@ -1932,25 +1934,33 @@ static void test_archive_vfs_sjis_trail_5c_member(void) {
     assert(sr_archive_vfs_entry_count(&vfs) == 6u);
 
     SrArchiveFile file;
-    /* The member's own spelling and the guest's folded key both open it. */
+    /* The member's own spelling and the guest's key both open it: the guest's key of
+     * disc0:/.../DATA\<name> folds the ASCII letters and the '\' separator and keeps
+     * each pair (sr_vfs_fold_guest_key). */
     assert(sr_archive_vfs_lookup(&vfs, "data/\x95\x5c", -2, &file));
     assert(file.size == sizeof(end_data) - 1u);
-    assert(sr_archive_vfs_lookup(&vfs, "data/\x95/", -2, &file));
+    assert(sr_archive_vfs_lookup(&vfs, "DATA\\" "\x95\x5c", -2, &file));
     assert(file.size == sizeof(end_data) - 1u);
     assert(sr_archive_vfs_lookup(&vfs, "DATA/AB\x83\x5c" "CD.BIN", -2, &file));
     assert(file.size == sizeof(middle_data) - 1u);
-    assert(sr_archive_vfs_lookup(&vfs, "data/ab\x83/cd.bin", -2, &file));
+    assert(sr_archive_vfs_lookup(&vfs, "data\\" "ab\x83\x5c" "cd.bin", -2, &file));
     assert(file.size == sizeof(middle_data) - 1u);
     assert(sr_archive_vfs_lookup(&vfs, "data/\x8f\x5c/in.bin", -2, &file));
     assert(file.size == sizeof(nested_data) - 1u);
-    assert(sr_archive_vfs_lookup(&vfs, "data/\x8f//in.bin", -2, &file));
+    assert(sr_archive_vfs_lookup(&vfs, "DATA\\" "\x8f\x5c\\IN.BIN", -2, &file));
     assert(file.size == sizeof(nested_data) - 1u);
-    assert(sr_archive_vfs_lookup(&vfs, "data/\x83" "a.bin", -2, &file));
+    assert(sr_archive_vfs_lookup(&vfs, "data/\x83\x41.BIN", -2, &file));
     assert(file.size == sizeof(upper_data) - 1u);
     assert(sr_archive_vfs_lookup(&vfs, "data/\x83\x7c.bin", -2, &file));
     assert(file.size == sizeof(bar_data) - 1u);
     /* The trail byte is not a separator, so the name is not a directory prefix. */
     assert(!sr_archive_vfs_lookup(&vfs, "data/ab\x83", -2, &file));
+    /* A '/' after a lead byte separates, and a trail letter is not folded: these name
+     * other paths, which this archive does not hold. */
+    assert(!sr_archive_vfs_lookup(&vfs, "data/\x95/", -2, &file));
+    assert(!sr_archive_vfs_lookup(&vfs, "data/ab\x83/cd.bin", -2, &file));
+    assert(!sr_archive_vfs_lookup(&vfs, "data/\x8f//in.bin", -2, &file));
+    assert(!sr_archive_vfs_lookup(&vfs, "data/\x83" "a.bin", -2, &file));
 
     SrVfsDirList list;
     sr_vfs_dirlist_init(&list);
@@ -1967,9 +1977,9 @@ static void test_archive_vfs_sjis_trail_5c_member(void) {
     sr_vfs_dirlist_destroy(&list);
 
     /* A directory whose name ends in a trail 0x5c lists its own children, whether the
-     * guest names it with the raw pair or with the folded '/' and a trailing separator. */
-    const char *nested_dirs[] = { "data/\x8f\x5c", "data/\x8f/", "/data/\x8f\x5c/",
-                                  "data/\x8f//" };
+     * guest names it with or without a trailing separator, with either separator. */
+    const char *nested_dirs[] = { "data/\x8f\x5c", "data\\" "\x8f\x5c\\", "/data/\x8f\x5c/",
+                                  "DATA/\x8f\x5c//" };
     for (size_t i = 0; i < sizeof(nested_dirs) / sizeof(nested_dirs[0]); i++) {
         sr_vfs_dirlist_init(&list);
         assert(sr_archive_vfs_list_dir(&vfs, nested_dirs[i], -2, &list) == 1);
@@ -1978,10 +1988,64 @@ static void test_archive_vfs_sjis_trail_5c_member(void) {
         assert(child && !child->is_dir && child->size == sizeof(nested_data) - 1u);
         sr_vfs_dirlist_destroy(&list);
     }
+    /* The spelling with the lead byte alone before a separator names a directory this
+     * archive does not hold. */
+    sr_vfs_dirlist_init(&list);
+    assert(sr_archive_vfs_list_dir(&vfs, "data/\x8f/", -2, &list) == 1);
+    assert(!list.exists && list.count == 0u);
+    sr_vfs_dirlist_destroy(&list);
 
     sr_archive_vfs_destroy(&vfs);
     free(archive.data);
     printf("[XB_TEST] archive VFS Shift-JIS trail 0x5c members PASSED\n");
+}
+
+/* Audit 2026-11-17 F-27cbd9cd: 0x83 0x41 (katakana A) and 0x83 0x61 (katakana DI) are two
+ * characters, so an archive holding both opens each member by its own name and lists both.
+ * Before, the archive key folded the trail 0x41 to 0x61, both names gave one key, the
+ * second member could never be opened and the listing dropped one name. */
+static void test_archive_vfs_sjis_kana_pairs_stay_distinct(void) {
+    static const uint8_t a_data[] = "katakana a";
+    static const uint8_t di_data[] = "katakana di, a longer member";
+    const FixtureEntry entries[2] = {
+        { "data/\x83\x41.bin", a_data, sizeof(a_data) - 1u, NK_XB_COMPRESSION_NONE },
+        { "data/\x83\x61.bin", di_data, sizeof(di_data) - 1u, NK_XB_COMPRESSION_NONE }
+    };
+    ByteBuffer archive = make_archive(entries, 2u, false);
+    SrArchiveVfs vfs;
+    sr_archive_vfs_init(&vfs);
+    assert(sr_archive_vfs_mount_memory(&vfs, archive.data, archive.size, "kana.xb",
+                                       false, -1, NULL) == NK_OK);
+    assert(sr_archive_vfs_entry_count(&vfs) == 2u);
+
+    /* The keys the guest gives for disc0:/PSP_GAME/USRDIR/DATA/<name> (the directory
+     * folds, the pair does not). */
+    SrArchiveFile a_file, di_file;
+    assert(sr_archive_vfs_lookup(&vfs, "data/\x83\x41.bin", -2, &a_file));
+    assert(sr_archive_vfs_lookup(&vfs, "DATA/\x83\x61.BIN", -2, &di_file));
+    if (a_file.entry_index == di_file.entry_index) {
+        fprintf(stderr, "[XB_TEST] both kana names open member %zu\n", a_file.entry_index);
+    }
+    assert(a_file.entry_index != di_file.entry_index);
+    assert(a_file.size == sizeof(a_data) - 1u);
+    assert(di_file.size == sizeof(di_data) - 1u);
+
+    SrVfsDirList list;
+    sr_vfs_dirlist_init(&list);
+    assert(sr_archive_vfs_list_dir(&vfs, "data", -2, &list) == 1);
+    if (list.count != 2u) {
+        fprintf(stderr, "[XB_TEST] the kana listing holds %zu names\n", list.count);
+    }
+    assert(list.exists && list.count == 2u && list.skipped == 0u);
+    const SrVfsDirEntry *child = archive_list_find(&list, "\x83\x41.bin");
+    assert(child && !child->is_dir && child->size == sizeof(a_data) - 1u);
+    child = archive_list_find(&list, "\x83\x61.bin");
+    assert(child && !child->is_dir && child->size == sizeof(di_data) - 1u);
+    sr_vfs_dirlist_destroy(&list);
+
+    sr_archive_vfs_destroy(&vfs);
+    free(archive.data);
+    printf("[XB_TEST] archive VFS Shift-JIS kana pairs stay distinct PASSED\n");
 }
 
 /* Two unnumbered archives that hold the same member: open and the directory listing
@@ -3082,6 +3146,7 @@ int main(void) {
     test_unpack_sjis_trail_backslash_is_not_a_separator();
     test_deterministic_mutation_fuzz();
     test_archive_vfs_precedence();
+    test_archive_vfs_sjis_kana_pairs_stay_distinct();
     test_archive_vfs_sjis_trail_5c_member();
     test_archive_vfs_duplicate_unqualified_member_first_mount_wins();
     test_archive_vfs_oversize_member_decoded_once();
