@@ -137,9 +137,9 @@ We aim to respond promptly and will remove material where appropriate.
 - **FFmpeg n4.4 H.264 decoder subset** — LGPL-2.1-or-later, the same pin as the ATRAC3+
   subset. The imported libavcodec/libavutil files (generic C only, no `--enable-gpl` or
   `--enable-nonfree` component), their license text and the byte-exact manifest are under
-  `src/rt/h264_ffmpeg_sub/`. One imported file, `libavcodec/h264_slice.c`, is modified: it
-  carries two upstream FFmpeg `release/4.4` fixes as a dated LOCAL DELTA, recorded in the
-  file header and the manifest; the project API layer and configuration stand-ins there are
+  `src/rt/h264_ffmpeg_sub/`. A few imported files are modified: each carries fixes from named
+  upstream FFmpeg commits as a dated LOCAL DELTA, recorded in the file header and the
+  manifest; the project API layer and configuration stand-ins there are
   identified in `src/rt/h264_ffmpeg_sub/PROVENANCE.md`. It is the default H.264 decoder where no platform decoder
   exists (`H264_FFMPEG=1`, the default off Windows); Windows uses Media Foundation, an operating
   system component, and links none of it. Build notes are in `docs/PLATFORM_PORTABILITY.md`.
