@@ -3664,6 +3664,22 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIn("paused", ended)
         self.assertEqual(ended[-1], "playing")
 
+    def test_render_device_reset_reaches_the_launcher_backend(self) -> None:
+        """Audit 2026-11-17 (F-0e49c8f4): SDL_EVENT_RENDER_DEVICE_RESET, after which every
+        texture must be made again, reaches the next UI's SDL_Renderer backend, which drops
+        its glyph, image and waves textures (nk_ui_sdlr_reset) and draws on from new ones.
+        Before, no handler took the event and the launcher drew from lost textures."""
+        run = self.run_player(
+            "ready",
+            ("WAIT_LAID_OUT=5000", "ASSERT_DEVICE_RESETS=0", "RENDER_DEVICE_RESET",
+             "WAIT_MS=300", "ASSERT_DEVICE_RESETS=1", "WAIT_MS=300"),
+        )
+        stdout = str(run["stdout"])
+        self.assert_next_ui_active(stdout)
+        self.assertIn("assert_device_resets result=PASS actual=0", stdout)
+        self.assertIn("assert_device_resets result=PASS actual=1", stdout)
+        self.assertNotIn("assert_device_resets result=FAIL", stdout)
+
     def music_workers(self, stdout: str) -> list[str]:
         return [line for line in stdout.splitlines()
                 if line.startswith("[PLAYER_UI_TEST] launch_worker_start ")]
