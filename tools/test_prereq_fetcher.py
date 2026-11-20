@@ -1791,9 +1791,43 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
             source)
         self.assertEqual(uses, ["package_builder_native_transport_request"])
         self.assertEqual(len(calls), 1)
-        self.assertIn("NK_PLAYER_VERSION", source)
-        self.assertIn('"NakagawaRecomp/%.*s"', source)
-        self.assertIn("components != 3u", source)
+        # Every request names this player in the form RetroAchievements documents, made once by
+        # the bridge (achievements-selftest checks its text): product/version (system) rcheevos.
+        self.assertIn("nk_ach_user_agent(NK_PLAYER_VERSION, system, run->achievements_user_agent,",
+                      source)
+        self.assertIn("nk_platform_os_description(system, sizeof system)", source)
+        self.assertIn("PackageHttpOptions options = {job->user_agent};", source)
+        self.assertNotRegex(source, r'"NakagawaRecomp/%')
+        header = (REPO_ROOT / "src" / "core" / "nk_achievements.h").read_text(encoding="utf-8")
+        self.assertIn('#define NK_ACH_USER_AGENT_PRODUCT "NakagawaRecomp"', header)
+        bridge = (REPO_ROOT / "src" / "core" / "nk_achievements.c").read_text(encoding="utf-8")
+        self.assertIn("rc_client_get_user_agent_clause(", bridge)
+
+    def test_achievements_are_softcore_only_and_off_by_default(self) -> None:
+        # Owner decision 2026-11-20: softcore only. Nothing turns hardcore on: the bridge only ever
+        # turns it off, and neither the player nor the runtime has a setting, flag or variable
+        # for it (achievements-selftest proves a hardcore request is refused and never sent).
+        bridge = (REPO_ROOT / "src" / "core" / "nk_achievements.c").read_text(encoding="utf-8")
+        calls = re.findall(r"rc_client_set_hardcore_enabled\(\s*[^,]+,\s*([^)]*)\)", bridge)
+        self.assertTrue(calls, "the bridge turns hardcore off")
+        self.assertEqual(sorted(set(calls)), ["0"])
+        self.assertIn("ach_request_claims_hardcore(request->post_data)", bridge)
+        for rel in ("src/player/main.c", "src/player/player_state.c", "src/player/player_state.h",
+                    "src/player/ui/player_ui_nk.c", "src/player/ui/scr_settings.c", "src/rt/gui.c"):
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            self.assertNotRegex(text, r"rc_client_set_hardcore_enabled|hardcore_enabled\s*=|"
+                                      r"NK_[A-Z_]*HARDCORE|--hardcore", rel)
+        # Off by default: a settings file without the key, or a new install, keeps it off.
+        state = (REPO_ROOT / "src" / "player" / "player_state.c").read_text(encoding="utf-8")
+        self.assertIn("settings->achievements_enabled = false;", state)
+        self.assertNotRegex(state, r"achievements_enabled\s*=\s*true")
+        # Cheats and the 60 FPS game-logic package turn it off for the launch, with the reason.
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        self.assertIn("player_launch_achievements_block(work)", main)
+        ui = (REPO_ROOT / "src" / "player" / "ui" / "player_ui_nk.c").read_text(encoding="utf-8")
+        self.assertEqual(ui.count("player_app_achievements_block(app, "), 2)
+        # Switching it off stops every request: the bridge goes offline.
+        self.assertIn("nk_ach_set_online(run->achievements, false);", main)
 
     def test_achievement_token_storage_uses_no_plain_file_fallback(self) -> None:
         win32 = (REPO_ROOT / "src" / "core" / "nk_platform_win32.c").read_text(encoding="utf-8")
