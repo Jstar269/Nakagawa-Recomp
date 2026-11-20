@@ -528,7 +528,27 @@ static uint32_t h_ResumeDispatchThread(CpuState *s) {
 }
 size_t s_callbacks_cap;
 
+/* Drop the deleted (unused) slots from the table, keeping the live callbacks in creation order.
+ * Only between dispatch passes: a pass in progress holds slot indices (the once-pass visits the
+ * slots below the length it captured), so no index may shift under it. */
+static void sr_callback_table_compact(void) {
+    if (s_callback_dispatch_depth != 0) return;
+    size_t kept = 0;
+    for (size_t i = 0; i < s_callbacks_len; i++) {
+        if (!s_callbacks[i].used) continue;
+        if (kept != i) s_callbacks[kept] = s_callbacks[i];
+        kept++;
+    }
+    if (kept < s_callbacks_len)
+        memset(&s_callbacks[kept], 0, (s_callbacks_len - kept) * sizeof(*s_callbacks));
+    s_callbacks_len = kept;
+}
+
 static int sr_callback_reserve_one(void) {
+    if (s_callbacks_len < s_callbacks_cap) return 1;
+    /* The table is full: reuse the slots deleted callbacks left before growing, so it holds the
+     * live callbacks and not every callback ever created (audit 2026-11-17, F-319bda61). */
+    sr_callback_table_compact();
     if (s_callbacks_len < s_callbacks_cap) return 1;
     size_t next = s_callbacks_cap ? s_callbacks_cap * 2u : 64u;
     if (next < s_callbacks_cap || next > ((size_t)-1) / sizeof(*s_callbacks)) return 0;
@@ -581,6 +601,7 @@ static int sr_thread_dispatch_callbacks_once(uint32_t thread_uid) {
      * the next pump. */
     const size_t slot_limit = s_callbacks_len;
     int total_dispatched = 0;
+    s_callback_dispatch_depth++;   /* the pass holds slot indices: no compaction until it ends */
     for (size_t i = 0; i < slot_limit; i++) {
         uint32_t selected_uid = 0u;
         if (i < s_callbacks_len && s_callbacks[i].used &&
@@ -590,6 +611,7 @@ static int sr_thread_dispatch_callbacks_once(uint32_t thread_uid) {
         if (selected_uid != 0u)
             total_dispatched += sr_thread_dispatch_callback_uid(thread_uid, cpu, selected_uid);
     }
+    if (s_callback_dispatch_depth > 0) s_callback_dispatch_depth--;   /* a reset may have run */
     return total_dispatched;
 }
 /* h_NotifyCallback: 0xc11ba8c4 — synchronously dispatch a registered callback entry from

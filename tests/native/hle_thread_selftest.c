@@ -28171,6 +28171,60 @@ static void test_callback_check_pump_services_pending_in_slot_order(void) {
     sr_test_guest_fn_reset();
 }
 
+/* The callback table holds the live callbacks, not every callback ever created: a full table
+ * drops the deleted slots before it grows, and the survivors keep creation order, so the pump
+ * still services them in slot order (audit 2026-11-17, F-319bda61). */
+static void test_callback_table_reuses_deleted_slots_in_creation_order(void) {
+    extern size_t s_callbacks_len;   /* the table's length (hle.c) */
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_test_register_guest_fn(WAKEUP_FIRST_ENTRY, wakeup_first_guest_fn);
+    sr_test_register_guest_fn(WAKEUP_SECOND_ENTRY, wakeup_second_guest_fn);
+    s_wakeup_log_len = 0u;
+
+    TCB *owner = fixture_thread(0x3418u, TH_RUNNING, 32);
+    owner->started = 1;
+    s_cur = (int)(owner - s_tcb);
+
+    /* Two survivors created before and after a long churn of created-and-deleted callbacks. */
+    uint32_t first = wakeup_create_callback(WAKEUP_FIRST_NAME, "churn-first",
+                                            WAKEUP_FIRST_ENTRY, WAKEUP_FIRST_COMMON);
+    int churned = 1;
+    for (unsigned i = 0; i < 10000u; i++) {
+        uint32_t uid = wakeup_create_callback(WAKEUP_SECOND_NAME, "churn", WAKEUP_SECOND_ENTRY, 0u);
+        churned &= uid != 0u;
+        wakeup_delete_callback(uid);
+    }
+    uint32_t second = wakeup_create_callback(WAKEUP_SECOND_NAME, "churn-second",
+                                             WAKEUP_SECOND_ENTRY, WAKEUP_SECOND_COMMON);
+    expect(churned && first != 0u && second != 0u,
+           "callback churn: 10 000 callbacks are created and deleted through the production NIDs");
+    char msg[160];
+    snprintf(msg, sizeof(msg), "callback churn: the table holds the 2 live callbacks within one "
+             "growth step (64 slots), not every callback created (len %zu)", s_callbacks_len);
+    expect(s_callbacks_len <= 2u + 64u, msg);
+    expect(sr_callback_find_in_table(first) >= 0 &&
+               sr_callback_find_in_table(first) < sr_callback_find_in_table(second),
+           "callback churn: the survivors keep creation order in the table");
+
+    expect(wakeup_notify(second, WAKEUP_SECOND_NOTIFY) == 0u &&
+               wakeup_notify(first, WAKEUP_FIRST_NOTIFY) == 0u,
+           "callback churn: both survivors are notified, the later one first");
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, hle_selftest_nid("sceKernelCheckCallback")) == 1u &&
+               s_wakeup_log_len == 2u &&
+               wakeup_log_is(0u, 1u, WAKEUP_FIRST_NOTIFY, WAKEUP_FIRST_COMMON) &&
+               wakeup_log_is(1u, 2u, WAKEUP_SECOND_NOTIFY, WAKEUP_SECOND_COMMON),
+           "callback churn: the pump services the survivors in creation order, each with its arguments");
+
+    wakeup_delete_callback(first);
+    wakeup_delete_callback(second);
+    sr_test_guest_fn_reset();
+    s_cur = -1;
+}
+
 /* A player quit request (#1392) notifies the callback registered with
  * sceKernelRegisterExitCallback once, through sr_callback_notify, and its body runs on the
  * owner thread at the next callback-servicing point. A repeat request does not notify again;
@@ -64014,6 +64068,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_delay_thread_zero_loop_still_preempts_at_timeslice();
     test_delay_threadcb_zero_bounds_a_self_renotifying_callback();
     test_callback_check_pump_services_pending_in_slot_order();
+    test_callback_table_reuses_deleted_slots_in_creation_order();
     test_quit_request_notifies_registered_exit_callback();
     test_quit_stop_decision();
     test_io_devctl_memstick_callback_notify();

@@ -3029,10 +3029,13 @@ int console_profile_identity(void) {
 }
 
 /* Generic PSP callback objects are kernel objects, not a 16-entry subsystem
- * table. Hardware creates at least 1024 of them. Keep an append-only host array:
- * deleted holes are never reused, so dispatch order remains callback creation order. */
+ * table. Hardware creates at least 1024 of them. The host array is appended to in creation
+ * order; when it is full, the slots deleted callbacks left are dropped first, keeping the live
+ * ones in creation order (sr_callback_reserve_one), so dispatch order remains callback creation
+ * order. That compaction waits while a dispatch pass runs (s_callback_dispatch_depth). */
 CallbackEntry *s_callbacks;
 size_t s_callbacks_len;
+int s_callback_dispatch_depth;
 
 int sr_callback_find_in_table(uint32_t uid) {
     for (size_t i = 0; i < s_callbacks_len; i++)
@@ -3188,6 +3191,7 @@ int sr_thread_dispatch_callbacks(void) {
     if (!cpu) return 0;
 
     int total_dispatched = 0;
+    s_callback_dispatch_depth++;   /* no compaction while the pump runs (sr_callback_reserve_one) */
     /* Re-scan the owning thread from the beginning after every callback return and dispatch
      * exactly one pending callback per iteration, selected by UID. A callback body runs guest
      * code that may register new callbacks (reallocating s_callbacks), unregister, re-notify,
@@ -3211,6 +3215,7 @@ int sr_thread_dispatch_callbacks(void) {
         if (sr_thread_dispatch_callback_uid(thread_uid, cpu, selected_uid))
             total_dispatched++;
     }
+    if (s_callback_dispatch_depth > 0) s_callback_dispatch_depth--;   /* a reset may have run */
     return total_dispatched;
 }
 

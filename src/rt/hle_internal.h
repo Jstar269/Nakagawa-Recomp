@@ -1604,6 +1604,8 @@ void hle_register_init_kernel_utils_2(void);
 uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name);
 extern CallbackEntry *s_callbacks;
 extern size_t s_callbacks_len;
+/* Callback dispatch passes in progress; the table is compacted only at 0 (hle_kernel_thread.c). */
+extern int s_callback_dispatch_depth;
 int sr_callback_find_in_table(uint32_t uid);
 void hle_register_osk_handlers(void);
 int sr_callback_table_unregister(uint32_t uid);
