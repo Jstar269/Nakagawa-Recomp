@@ -16131,6 +16131,30 @@
       }
     },
     {
+      "path": "third_party/licenses/freetype/bdf-README.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-freetype-bdf-pcf-notice-20261120",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
+      }
+    },
+    {
+      "path": "third_party/licenses/freetype/pcf-README.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-freetype-bdf-pcf-notice-20261120",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
+      }
+    },
+    {
       "path": "third_party/licenses/gcc-libs/COPYING.RUNTIME.txt",
       "classification": "upstream_derived",
       "evidence": {
@@ -16211,6 +16235,30 @@
         "evidence_tier": "S",
         "upstream": "documented upstream family",
         "license": "Zlib",
+        "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
+      }
+    },
+    {
+      "path": "third_party/licenses/sdl3/hidapi-LICENSE.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-sdl3-yuv2rgb-hidapi-notice-20261120",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "BSD-3-Clause",
+        "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
+      }
+    },
+    {
+      "path": "third_party/licenses/sdl3/yuv2rgb-LICENSE.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-sdl3-yuv2rgb-hidapi-notice-20261120",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "BSD-3-Clause",
         "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
       }
     },
@@ -18140,17 +18188,6 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "mypy-baseline-1391-20261031",
-        "evidence_tier": "S",
-        "authorship": "project-authored-independent record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "tools/nid_auditor.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "import-and-nid-audit-tooling-20260909",
         "evidence_tier": "S",
         "authorship": "project-authored-independent record",
         "upstream_attribution": null
