@@ -795,7 +795,7 @@ class Orchestrator:
         self.recovery_events: list[str] = []
         self.l1_used = 0
         self.max_l1_recoveries = max_l1_recoveries
-        self.terminal_reason = None
+        self.terminal_reason: str | None = None
         self.expected_identity = {"runner_sha": RUNNER_SHA, "source_commit": SOURCE_COMMIT}
         self.qualified = False
 

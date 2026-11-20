@@ -18,6 +18,9 @@
 #include "backend/nk_ui_sdlr.h"
 
 #include <SDL3/SDL.h>
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+#include "nk_ui_draw.h" /* the frame's runs, for the detail panel's report */
+#endif
 
 #include <ctype.h>
 #include <limits.h>
@@ -305,6 +308,7 @@ struct PlayerUiNk {
        part cannot cut the line short. */
     char enhanced_reported[PLAYER_PART_COUNT * 64 + 256];
     char enhanced_layout_reported[1024];
+    char enhanced_panel_reported[1024]; /* the detail panel's text as last printed */
     char ace_line_reported[PLAYER_PART_COUNT * 64 + 192]; /* the play line last printed */
     char enhancement_tag_reported[PLAYER_UI_TITLE_CAP][16]; /* the ENHANCEMENTS tag printed */
     char preset_note_reported[200];                /* the global preset's page note */
@@ -3658,6 +3662,58 @@ static void player_ui_library_turn_page(PlayerUiNk *player, size_t count, size_t
     }
 }
 
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+/* Settings > Enhanced's detail panel as drawn, printed on change: the focused control, how
+   many text runs are shown on the panel, how many of those run past its box (across, or down
+   where its scrolling column leaves them showing), and their text in drawing order, each run
+   ending in '^'. */
+static void player_ui_report_enhanced_panel(PlayerUiNk *player, const NkUiDrawList *draw) {
+    const NkUiDrawCmd *panel = NULL;
+    char line[sizeof(player->enhanced_panel_reported)];
+    char text[768];
+    size_t used = 0u;
+    int runs = 0;
+    int outside = 0;
+    text[0] = '\0';
+    for (uint32_t i = 0u; i < draw->ncmd && panel == NULL; ++i) {
+        if (draw->cmd[i].kind == NK_UI_DRAW_RECTANGLE &&
+            draw->cmd[i].element_id == PLAYER_UI_ID_ENHANCED_DETAIL) {
+            panel = &draw->cmd[i];
+        }
+    }
+    if (panel == NULL) {
+        player->enhanced_panel_reported[0] = '\0';
+        return;
+    }
+    for (uint32_t i = 0u; i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        const NkUiTextRun *run = cmd->kind == NK_UI_DRAW_TEXT
+                                     ? (const NkUiTextRun *)cmd->custom : NULL;
+        int top = cmd->bounds[1] > cmd->clip[1] ? cmd->bounds[1] : cmd->clip[1];
+        int bottom = cmd->bounds[3] < cmd->clip[3] ? cmd->bounds[3] : cmd->clip[3];
+        if (run == NULL || run->text == NULL || bottom <= top ||
+            cmd->bounds[0] < panel->bounds[0] || cmd->bounds[0] >= panel->bounds[2] ||
+            bottom <= panel->bounds[1] || top >= panel->bounds[3]) {
+            continue;
+        }
+        ++runs;
+        if (cmd->bounds[2] > panel->bounds[2] || bottom > panel->bounds[3]) ++outside;
+        for (size_t c = 0u; c <= run->length && used + 1u < sizeof(text); ++c) {
+            char ch = c < run->length ? run->text[c] : '^';
+            if (ch != '|' && ch != '\n') text[used++] = ch;
+        }
+        text[used] = '\0';
+    }
+    (void)snprintf(line, sizeof(line), "focus=%u|runs=%d|outside=%d|text=%s",
+                   (unsigned)nk_ui_focused(player->ui), runs, outside, text);
+    if (strcmp(line, player->enhanced_panel_reported) != 0) {
+        (void)snprintf(player->enhanced_panel_reported, sizeof(player->enhanced_panel_reported),
+                       "%s", line);
+        printf("[PLAYER_UI_TEST] next_ui_enhanced_panel %s\n", line);
+    }
+}
+#endif
+
 bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                          SDL_Renderer *renderer, SDL_Window *window,
                          PlayerUiAction *out_action) {
@@ -4104,7 +4160,14 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             (void)player_app_render_notice(app, app->games[index].disc_id,
                                            &model.render_notice_heading,
                                            &model.render_notice_text);
-            model.now_s = player_app_reduce_motion(app) ? 0.0 : now_s;
+            /* The font note is about the next start, so a running game's page leaves it out. */
+            if (!app->is_game_running) {
+                if (app->wizard.font_slot_detail[0][0] == '\0') {
+                    player_app_refresh_font_status(app);
+                }
+                model.font_note_text = player_app_font_note(app, index);
+            }
+            model.now_s =player_app_reduce_motion(app) ? 0.0 : now_s;
             model.logical_width = scale.logical_w;
             model.logical_height = scale.logical_h;
             {
@@ -4167,6 +4230,9 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                     player_app_open_title_enhanced(app, index);
                 }
                 action.kind = PLAYER_UI_ACTION_NONE;
+            } else if (action.kind == PLAYER_UI_ACTION_FONT_NOTE_GET_FONTS) {
+                /* main.c opens Settings > PSP fonts and looks for a PSP; Back comes here. */
+                nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
             } else if (action.kind == PLAYER_UI_ACTION_OPEN_SAVES) {
                 if (player->titles[index].save_folder_enabled) {
                     player_ui_open_saves(player, app, index);
@@ -4469,6 +4535,9 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     }
 #endif
     if (draw_list == NULL) return false;
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    player_ui_report_enhanced_panel(player, draw_list);
+#endif
     {
         NkUiId focus_now = nk_ui_focused(player->ui);
         if (player->pending_sound < 0 && player->sound_focus != 0u && focus_now != 0u &&

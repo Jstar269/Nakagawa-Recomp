@@ -58048,6 +58048,28 @@ static void test_flash0_latin_index_resolution(void) {
     if (opened) fclose(opened);
     expect((sr_flash0_font_test_opens_logged() & opened_bit) != 0u,
            "a game's open of a Latin index is named in the log");
+
+    /* #2783: an import of replacement fonts (the driver imported a Japanese font and ltn10.pgf
+     * under the project stand-in name) is served like any import, and its log lines (the driver
+     * reads them) say replacement, never exact. */
+    Flash0Sources replacement_sources;
+    SrFontRegistryInfo replaced_japanese, replaced_latin;
+    memset(&replacement_sources, 0, sizeof(replacement_sources));
+    snprintf(replacement_sources.user_data_dir, sizeof(replacement_sources.user_data_dir),
+             "%s/replacement-data", root);
+    snprintf(replacement_sources.project_dir, sizeof(replacement_sources.project_dir), "%s",
+             project_dir);
+    expect(sr_flash0_font_registry_info(&replacement_sources, 0u, &replaced_japanese) ==
+                   SR_FONT_REGISTRY_PRESENT &&
+               replaced_japanese.source && strcmp(replaced_japanese.source, "user-imported") == 0 &&
+               strcmp(replaced_japanese.font_name, "Nakagawa Open Japanese") == 0,
+           "an imported replacement Japanese font is served from the user's cache");
+    expect(sr_flash0_font_registry_info(&replacement_sources, 11u, &replaced_latin) ==
+                   SR_FONT_REGISTRY_PRESENT &&
+               replaced_latin.source && strcmp(replaced_latin.source, "user-imported") == 0 &&
+               replaced_latin.file_name && strcmp(replaced_latin.file_name, "ltn10.pgf") == 0 &&
+               strcmp(replaced_latin.font_name, "Nakagawa Open Latin") == 0,
+           "an imported replacement Latin index is served from the user's cache");
 }
 
 /* The guest-visible /DATA/FONT subtree over the synthetic roots the device test set up. Latin and

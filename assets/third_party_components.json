@@ -404,7 +404,7 @@
         "upstream_revision": "ea99364f61c14656440e8d77e9c233ccf3124633",
         "disposition": "statically_linked_subset",
         "notice_file": "minimp3.txt",
-        "note": "The byte-identical header src/rt/minimp3/minimp3.h (src/rt/minimp3/PROVENANCE.md), compiled into every title runtime through the project wrapper src/rt/mp3_bridge.c (a runtime source in mk/runtime_sources.mk), where it decodes for sceMp3. CC0 1.0 asks for no notice; the dedication text travels with the package for clarity.",
+        "note": "The header src/rt/minimp3/minimp3.h, pinned upstream plus two later upstream lines as LOCAL DELTA (src/rt/minimp3/PROVENANCE.md), compiled into every title runtime through the project wrapper src/rt/mp3_bridge.c (a runtime source in mk/runtime_sources.mk), where it decodes for sceMp3. CC0 1.0 asks for no notice; the dedication text travels with the package for clarity.",
         "license_texts": [
           {
             "file": "src/rt/minimp3/LICENSE",
@@ -665,11 +665,12 @@
     ],
     "project_output": {
       "id": "nakagawa-runtime",
-      "name": "Nakagawa Recomp runtime",
+      "name": "Nakagawa Recomp project code",
       "spdx_id": "GPL-3.0-or-later",
       "upstream_origin": "https://github.com/Jstar269/nakagawa-recomp",
       "disposition": "project_output",
       "notice_file": "Nakagawa-Recomp-LICENSE.txt",
+      "note": "This record covers the project's own code in each packaged executable, which is GPL-3.0-or-later (LICENSE). It does not cover the other code linked into the same executables. Every package includes xBRZ, which is GPL-3.0-only (linked component xbrz, third_party/xbrz/License.txt). The player also links the decryption files ported from pspdecrypt, which are GPL-3.0-only except the KIRK engine (NOTICE.md). The other linked components and DLLs are recorded in this inventory with their own licences.",
       "license_texts": [
         {
           "file": "LICENSE",

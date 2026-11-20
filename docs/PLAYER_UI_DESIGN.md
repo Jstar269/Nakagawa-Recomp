@@ -253,6 +253,10 @@ One exception is by design: at the design text size a setting's sentence beside 
 so the rows keep their side-by-side layout (Settings > Enhanced uses compact value rows and one focused-option detail panel instead). Above it, a sentence that would be cut makes the rows stack, and under
 its button the sentence wraps whole.
 
+A word wider than its whole box (a folder's name, a long identifier) would still run past it, as the layout wraps
+only between words: text that can hold one goes through `nk_ui_text_break`, which breaks such a word across lines
+of the box's width and leaves every other word to the layout.
+
 Wrapped text stays inside its box. Clay adds a run up word by word, and a text backend measures in whole pixels, so
 words measured one at a time, each with a lone space, fell short of the line as drawn (8 px for a ten-word line of
 14 px Geist): a line was kept that ran into the padding beside it, and a one-line run's box was narrower than its
@@ -471,7 +475,12 @@ mean bad, only not shown to be retail, and its disc ID isn't one the list names)
 slower drawing path (#2151): a DRAWN IN SOFTWARE pill in the brand blue, as a fact and not a warning, one `BODY_S`
 `paper` paragraph naming the renderer that did not start and what that costs (Internal resolution has no effect, the
 game may run slower, a graphics driver update may help), and a small Hide button, never the default focus, that hides
-that fallback's notice for the rest of the session; then one action row on the column's left edge with every button 52 px (the primary action, PLAY when
+that fallback's notice for the rest of the session; then, when the game starts in Authentic and at least one of the
+18 PSP fonts is a stand-in or a replacement font, a FONTS card: one `BODY_S` `paper` sentence ("Text uses stand-in
+fonts. For the original look, get the fonts from your PSP.") and two 44 px secondary buttons, never the default focus: GET
+FONTS FROM MY PSP opens **Settings > PSP fonts** and looks for a connected PSP there (Back returns to the game's
+page), and Hide hides the card for that game for good (`settings.json` `"font_note_hidden"`). It never blocks PLAY,
+and Enhanced and Ace pages have no such card; then one action row on the column's left edge with every button 52 px (the primary action, PLAY when
 the package is ready, STARTING… while the launch starts, STOP GAME while a game runs, then SAVES (the
 [Saves](#saves-built) dialog) and BACK), and the WHAT TO EXPECT card. Its eyebrow carries a player tier chip (PERFECT and PLAYABLE `ready`, IN-GAME
 and MENU `info`, TITLE SCREEN `warning`, WON'T BOOT `error`; no chip for a title no one has tried). Below it come
@@ -674,7 +683,14 @@ value box is a pointer target only (`NK_UI_BUTTON_POINTER_ONLY`), never a focus 
 and FRAME PACING show their value as `< value >` in one box, as does a row whose values no longer fit beside its
 name at a larger text size. Category tabs are focusable. The panel on the right shows the focused row's name, its
 value, its whole description and, for a dimmed row, the reason; with a tab or BACK focused it shows the tab's first
-option. On a game's page, a row's first value is the library's, LIBRARY (value), in a raised box with muted text,
+option. The panel is as tall as the list box beside it, whatever it says, so its text never pushes BACK down: text
+taller than that scrolls inside the panel, with a thin thumb at its right edge as the list has, by the wheel, a drag,
+Page Up and Page Down or the pad's triggers (a panel less one line a press, as on the developer log), while focus
+stays on the row; another option's text starts at the panel's top. Every line wraps at its words, and a word wider
+than the panel (a texture pack folder's name, a long compound) is broken across lines inside it, after a `/`, `\`,
+`_`, `-` or `.` where one keeps at least half the line, else at the last letter that fits (`nk_ui_text_break`):
+nothing is cut, ellipsized or drawn past the panel (`test_enhanced_panel_fits_its_content` in
+`tests/native/test_player_screens.c`, at four window sizes, two UI scales and every text size). On a game's page, a row's first value is the library's, LIBRARY (value), in a raised box with muted text,
 and a value of the game's own is marked as above. An option that cannot apply as the page stands stays in the walk, dimmed
 and inert, with the reason in the panel; WIDESCREEN under SMOOTH MOTION marks OFF, the value that runs, and keeps
 the choice it had for when SMOOTH MOTION is off. The list shows as many whole rows as the window leaves (four at

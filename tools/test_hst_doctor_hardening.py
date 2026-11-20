@@ -516,6 +516,7 @@ class SetupMatrixScenariosTests(unittest.TestCase):
             eboot_elf_res = next((r for r in report.results if r.code == "INPUT_EBOOT_ELF"), None)
             self.assertIsNotNone(
                 eboot_elf_res, "an absent EBOOT.elf must still be diagnosed")
+            assert eboot_elf_res is not None
             self.assertEqual(eboot_elf_res.status, "FAIL")
             self.assertEqual(report.exit_code(False), 1)
 
@@ -540,6 +541,7 @@ class SetupMatrixScenariosTests(unittest.TestCase):
             check_inputs(root, report, need_iso=True, need_assets=True)
             eboot_elf_res = next((r for r in report.results if r.code == "INPUT_EBOOT_ELF"), None)
             self.assertIsNotNone(eboot_elf_res)
+            assert eboot_elf_res is not None
             self.assertEqual(
                 eboot_elf_res.status, "PASS",
                 "a structurally valid EBOOT.elf must pass the preflight the "

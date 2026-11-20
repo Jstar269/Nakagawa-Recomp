@@ -154,8 +154,11 @@ typedef enum {
     PLAYER_UI_ACTION_NICKNAME,          /* a nickname editor control; .primary carries the
                                            op (PlayerUiNicknameOp) */
     PLAYER_UI_ACTION_HIDE_RENDER_NOTICE, /* the title page's render notice: Hide (#2151) */
-    PLAYER_UI_ACTION_QUEUE              /* a build queue control; .primary carries the op
+    PLAYER_UI_ACTION_QUEUE,             /* a build queue control; .primary carries the op
                                            (PlayerUiQueueOp), .title_index its game */
+    PLAYER_UI_ACTION_FONT_NOTE_GET_FONTS, /* the title page's font note: Get fonts from my PSP,
+                                             which opens Settings > PSP fonts and looks for a PSP */
+    PLAYER_UI_ACTION_HIDE_FONT_NOTE     /* the title page's font note: Hide, for .title_index's game */
 } PlayerUiActionKind;
 
 /* What a build queue control asks for (PLAYER_UI_ACTION_QUEUE). main.c runs
@@ -1092,6 +1095,9 @@ typedef struct {
        a heading and a sentence (player_render_notice_text), with Hide; NULL hides it. */
     const char *render_notice_heading;
     const char *render_notice_text;
+    /* The font note (player_app_font_note): in Authentic, the sentence that the game's text uses
+       stand-in fonts, with Get fonts from my PSP and Hide; NULL hides it. */
+    const char *font_note_text;
     double now_s;           /* drives the starting bar (0 holds it still) */
     float logical_width;    /* 0 selects 1280 */
     float logical_height;   /* 0 selects 800 */
@@ -1153,6 +1159,8 @@ enum {
     PLAYER_UI_ID_TITLE_PLAY_OPTIONS = 0x200Bu,       /* the ENHANCEMENTS card's Enhanced options */
     PLAYER_UI_ID_TITLE_STEAM = 0x200Cu,              /* Add to Steam (#2152) */
     PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE = 0x200Du, /* the render notice's Hide (#2151) */
+    PLAYER_UI_ID_TITLE_FONT_NOTE_GET = 0x200Eu,      /* the font note's Get fonts from my PSP */
+    PLAYER_UI_ID_TITLE_FONT_NOTE_HIDE = 0x200Fu,     /* the font note's Hide */
     PLAYER_UI_ID_REMOVE_CANCEL = 0x4401u,
     PLAYER_UI_ID_REMOVE_CONFIRM = 0x4402u,
     PLAYER_UI_ID_REMOVE_SAVES = 0x4403u,
@@ -1328,6 +1336,11 @@ enum {
                   ? PLAYER_UI_ID_SETTINGS_ENHANCED_PART + (uint32_t)(part)                     \
                   : PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE +                                 \
                         ((uint32_t)(part) - PLAYER_UI_ENHANCED_FIRST_IDS)))
+/* Settings > Enhanced's detail panel and the column inside it that scrolls (scr_settings.c).
+   Neither is a focus stop; they are named here so that a test finds them in a frame's draw
+   list and scroll state. */
+#define PLAYER_UI_ID_ENHANCED_DETAIL NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000B00u)
+#define PLAYER_UI_ID_ENHANCED_DETAIL_BODY NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000B01u)
 
 NkUiRouter *nk_ui_router_create(void);
 void nk_ui_router_destroy(NkUiRouter *router);

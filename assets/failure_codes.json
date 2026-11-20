@@ -321,6 +321,12 @@
         "player"
       ]
     },
+    "DISC_DECRYPT_MEMBER_MISSING": {
+      "stage": "decrypt",
+      "in": [
+        "decrypt"
+      ]
+    },
     "FIRMWARE_OUT_OF_SCOPE": {
       "stage": "decrypt",
       "in": [

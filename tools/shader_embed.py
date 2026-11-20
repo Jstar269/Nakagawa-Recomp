@@ -141,28 +141,51 @@ def regenerate(
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
 
 
-def load_manifest(path: Path) -> dict:
+def normalize_glslc_version(version: str) -> str:
+    """Canonical LF-normalized, stripped ``glslc --version`` output."""
+    return version.replace("\r\n", "\n").strip()
+
+
+def glslc_version_summary(version: str) -> str:
+    """Single-line summary of ``glslc --version`` text for SKIP and error messages."""
+    return "; ".join(line.strip() for line in normalize_glslc_version(version).splitlines() if line.strip())
+
+
+def glslc_is_pinned(manifest: dict[str, Any], version: str) -> bool:
+    """Whether ``version`` matches the compiler version recorded in ``manifest``."""
+    recorded = normalize_glslc_version(str(manifest.get("compiler", {}).get("version", "")))
+    return bool(recorded) and normalize_glslc_version(version) == recorded
+
+
+def load_manifest(path: Path) -> dict[str, Any]:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") != 1 or not isinstance(manifest.get("shaders"), list):
         raise ValueError("unsupported or malformed shader manifest")
     compiler = manifest.get("compiler", {})
+    if not isinstance(compiler, dict):
+        raise ValueError("shader manifest compiler section is malformed")
+    if not compiler.get("name"):
+        raise ValueError("shader manifest does not record compiler name")
     if compiler.get("target_environment") != TARGET_ENV:
         raise ValueError("shader manifest target environment is not vulkan1.1")
+    if compiler.get("options") != [f"--target-env={TARGET_ENV}"]:
+        raise ValueError("shader manifest compiler options do not match the build contract")
     if not compiler.get("version"):
         raise ValueError("shader manifest does not record compiler identity/version")
     returned: dict[str, Any] = manifest
     return returned
 
 
-def verify(
+def verify_glslc(
     gpu_dir: Path, manifest_path: Path, glslc: str | None = None,
     shaders: tuple[tuple[str, Path, Path], ...] = SHADERS,
-) -> list[str]:
+) -> tuple[list[str], str | None]:
+    """Errors, and a SKIP reason when byte reproduction was asked for with a non-pinned glslc."""
     errors: list[str] = []
     try:
         manifest = load_manifest(manifest_path)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        return [f"manifest: {exc}"]
+        return [f"manifest: {exc}"], None
 
     expected = {(stage, source.as_posix(), embedded.as_posix()) for stage, source, embedded in shaders}
     actual = {
@@ -198,31 +221,47 @@ def verify(
                 )
         embedded_spirv[entry.get("embedded", "")] = spirv
 
-    if glslc and not errors:
-        # Name a compiler drift, so a byte mismatch from another glslc is not left unexplained.
-        recorded_version = str(manifest["compiler"]["version"]).strip()
-        try:
-            running_version = glslc_version(glslc)
-        except (OSError, subprocess.SubprocessError) as exc:
-            running_version = f"unknown ({exc})"
-        drift = (
-            f" (the manifest records glslc {recorded_version!r}; this glslc is {running_version!r})"
-            if running_version != recorded_version else ""
+    if not glslc or errors:
+        return errors, None
+
+    recorded_version = normalize_glslc_version(str(manifest["compiler"]["version"]))
+    try:
+        running_version = normalize_glslc_version(glslc_version(glslc))
+    except (OSError, subprocess.SubprocessError) as exc:
+        errors.append(f"glslc: version check failed: {exc}")
+        return errors, None
+
+    if not glslc_is_pinned(manifest, running_version):
+        return errors, (
+            f"glslc is not the pinned version "
+            f"(manifest pins {glslc_version_summary(recorded_version)!r}; "
+            f"found {glslc_version_summary(running_version)!r}); byte reproduction not checked"
         )
-        with tempfile.TemporaryDirectory(prefix="nakagawa-shader-verify-") as temp_name:
-            temp = Path(temp_name)
-            for stage, source_rel, embedded_rel in shaders:
-                try:
-                    rebuilt = compile_shader(
-                        glslc, gpu_dir / source_rel,
-                        temp / f"{source_rel.stem}.{stage}.spv", gpu_dir,
-                        DEFINES.get(embedded_rel, ())
-                    )
-                except (OSError, subprocess.SubprocessError) as exc:
-                    errors.append(f"{stage}: reproducibility compile failed: {exc}")
-                    continue
-                if rebuilt != embedded_spirv.get(embedded_rel.as_posix()):
-                    errors.append(f"{stage}: current glslc output differs from embedded SPIR-V{drift}")
+
+    with tempfile.TemporaryDirectory(prefix="nakagawa-shader-verify-") as temp_name:
+        temp = Path(temp_name)
+        for stage, source_rel, embedded_rel in shaders:
+            try:
+                rebuilt = compile_shader(
+                    glslc, gpu_dir / source_rel,
+                    temp / f"{source_rel.stem}.{stage}.spv", gpu_dir,
+                    DEFINES.get(embedded_rel, ())
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                errors.append(f"{stage}: reproducibility compile failed: {exc}")
+                continue
+            if rebuilt != embedded_spirv.get(embedded_rel.as_posix()):
+                errors.append(f"{stage}: current glslc output differs from embedded SPIR-V")
+    return errors, None
+
+
+def verify(
+    gpu_dir: Path, manifest_path: Path, glslc: str | None = None,
+    shaders: tuple[tuple[str, Path, Path], ...] = SHADERS,
+) -> list[str]:
+    errors, skipped = verify_glslc(gpu_dir, manifest_path, glslc, shaders)
+    if skipped:
+        errors.append(skipped)
     return errors
 
 
@@ -506,7 +545,7 @@ def verify_dxc(
     return errors, None
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("regenerate", "verify"))
     parser.add_argument("--shader-set", choices=("psp", "ui", "fsr3", "fsr3fg"), default="psp")
@@ -515,7 +554,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--glslc")
     parser.add_argument("--dxc", help="DXC for the fsr3 and fsr3fg sets (the pinned release)")
     parser.add_argument("--recompile", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main_dxc(args: argparse.Namespace) -> int:
@@ -551,8 +590,8 @@ def main_dxc(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     if args.shader_set in DXC_SETS:
         return main_dxc(args)
     glslc = args.glslc or shutil.which("glslc")
@@ -569,11 +608,17 @@ def main() -> int:
     if args.recompile and not glslc:
         print("glslc is required for byte-for-byte shader reproduction", file=sys.stderr)
         return 2
-    errors = verify(gpu_dir, manifest, glslc if args.recompile else None, shaders)
+    errors, skipped = verify_glslc(gpu_dir, manifest, glslc if args.recompile else None, shaders)
     if errors:
         for error in errors:
             print(f"shader verification failed: {error}", file=sys.stderr)
         return 1
+    if skipped:
+        # Exit 77, the selftests' SKIP status: reproduction was asked for and did not happen, so
+        # a caller that needs it (make shader-repro-verify) stops on this status with the reason
+        # printed; it is never reported as verified.
+        print(f"{args.shader_set} shader provenance verified; SKIP byte reproduction: {skipped}")
+        return 77
     suffix = " plus byte-for-byte compiler reproduction" if args.recompile else ""
     print(f"shader provenance verified{suffix}")
     return 0

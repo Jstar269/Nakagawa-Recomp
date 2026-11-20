@@ -1433,6 +1433,11 @@ class TestCodegenStageReuse(unittest.TestCase):
     stage's output, but only after the checks the native-only reuse of a package's
     generated C performs, and any refusal regenerates under a named reason."""
 
+    root: Path
+    fixture_dir: Path
+    manifest_path: Path
+    manifest: dict[str, object]
+
     @classmethod
     def setUpClass(cls):
         # The borrowed skip helper builds its probe under the class scratch BUILD_ROOT,
@@ -4305,11 +4310,21 @@ class TestBringupReportOpcodeNames(unittest.TestCase):
         self.root = Path(self.temporary.name)
 
     def _key_pattern(self) -> str:
-        schema = json.loads(nk_cli.BRINGUP_SCHEMA_PATH.read_text(encoding="utf-8"))
-        return (
-            schema["properties"]["counts"]["properties"]["unsupported_opcodes"]
-            ["propertyNames"]["pattern"]
-        )
+        schema: object = json.loads(nk_cli.BRINGUP_SCHEMA_PATH.read_text(encoding="utf-8"))
+        assert isinstance(schema, dict)
+        properties = schema.get("properties")
+        assert isinstance(properties, dict)
+        counts = properties.get("counts")
+        assert isinstance(counts, dict)
+        count_properties = counts.get("properties")
+        assert isinstance(count_properties, dict)
+        unsupported = count_properties.get("unsupported_opcodes")
+        assert isinstance(unsupported, dict)
+        property_names = unsupported.get("propertyNames")
+        assert isinstance(property_names, dict)
+        pattern = property_names.get("pattern")
+        assert isinstance(pattern, str)
+        return pattern
 
     def test_every_cfg_opcode_identity_normalizes_to_a_schema_legal_name(self):
         pattern = self._key_pattern()

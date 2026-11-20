@@ -14,21 +14,32 @@ from pathlib import Path
 import struct
 import subprocess
 import sys
+import re
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
+from nk_core import fonts as fonts_module  # noqa: E402
 from nk_core.fonts import (  # noqa: E402
+    FONT_NAME_OFFSET,
+    FONT_NAME_SIZE,
+    KNOWN_REPLACEMENT_SHA256,
+    LATIN_INDEX_FILES,
     PROJECT_LATIN_INDEX_FILES,
+    PROJECT_STANDIN_NAME_PREFIX,
+    REPLACEMENT_NOTE,
     FontImportError,
     FontValidationError,
     get_font_cache_dir,
     import_fonts,
     inspect_font_cache,
+    is_replacement_font,
     latin_index_states,
+    own_font_count,
     remove_imports,
     resolve_font_directory,
     resolve_latin_index,
@@ -36,7 +47,7 @@ from nk_core.fonts import (  # noqa: E402
     validate_pgf_data,
     validate_pgf_file,
 )
-from pgf_writer import Glyph, build_pgf  # noqa: E402
+from tools.pgf_writer import Glyph, build_pgf  # noqa: E402
 
 SLOT_FILE = {"japanese": "nkjpn.pgf", "latin": "nkltn.pgf", "korean": "nkkr.pgf"}
 
@@ -576,6 +587,155 @@ class FontProvisioningTests(unittest.TestCase):
         res = self._cli("import", str(bad), "--user-data-root", str(self.temp_path / "other"))
         self.assertEqual(res.returncode, 1)
         self.assertIn("Font import error", res.stderr)
+
+    # Replacement fonts ---------------------------------------------------------------------------
+
+    def _psp_set(self, prefix: str) -> dict:
+        """All 18 PSP font files (jpn0, kr0, ltn0..ltn15), every font name starting `prefix`."""
+        files = {
+            "jpn0.pgf": build_pgf([_glyph(0x41), _glyph(0x3042)], font_name=f"{prefix}Japanese"),
+            "kr0.pgf": build_pgf([_glyph(0x41), _glyph(0xAC00)], font_name=f"{prefix}Korean"),
+        }
+        for index, name in enumerate(LATIN_INDEX_FILES):
+            files[name] = latin_strike_pgf(f"{prefix}Latin {index}", (7 + index) * 64)
+        return files
+
+    def test_project_stand_in_name_marks_a_replacement_and_an_ordinary_font_does_not(self) -> None:
+        stand_in = build_pgf([_glyph(0x41), _glyph(0x61)], font_name="Nakagawa Open Latin")
+        self.assertTrue(is_replacement_font(stand_in))
+        self.assertTrue(validate_pgf_data(stand_in)["replacement"])
+        self.assertEqual(validate_pgf_data(stand_in)["slot"], "latin")
+        for ordinary in (latin_pgf(), japanese_pgf(), korean_pgf(),
+                         build_pgf([_glyph(0x41), _glyph(0x61)], font_name="Nakagawa Openly"),
+                         build_pgf([_glyph(0x41), _glyph(0x61)], font_name="Nakagawa Ope")):
+            self.assertFalse(is_replacement_font(ordinary))
+            self.assertFalse(validate_pgf_data(ordinary)["replacement"])
+        # The name is read where the header holds it, not anywhere in the file.
+        self.assertEqual(stand_in[FONT_NAME_OFFSET:FONT_NAME_OFFSET + len(PROJECT_STANDIN_NAME_PREFIX)],
+                         PROJECT_STANDIN_NAME_PREFIX)
+        self.assertLessEqual(len(PROJECT_STANDIN_NAME_PREFIX), FONT_NAME_SIZE)
+        self.assertFalse(is_replacement_font(b"\0" * FONT_NAME_OFFSET + b"Nakagawa Open"))
+
+    def test_the_project_converter_stand_in_is_a_replacement(self) -> None:
+        """tools/ttf2pgf.py, which builds the project's own stand-ins (mk/housekeeping.mk), names
+        them so they are recognised: the pinned open fixture font, converted, is a replacement."""
+        import ttf2pgf
+
+        fixture = ROOT / "tests" / "fixtures" / "fonts" / "gudea"
+        data = (fixture / "Gudea-Regular.ttf").read_bytes()
+        pin = ttf2pgf.load_pin(fixture / "PIN.json", data)
+        converted = ttf2pgf.convert(data, input_path="Gudea-Regular.ttf",
+                                    output_path="nkltn.pgf", codes=(0x20, 0x7E), pin=pin)
+        self.assertTrue(ttf2pgf.DEFAULT_FONT_NAME.encode("ascii").startswith(
+            PROJECT_STANDIN_NAME_PREFIX))
+        info = validate_pgf_data(converted.image, "nkltn.pgf")
+        self.assertEqual(info["slot"], "latin")
+        self.assertTrue(info["replacement"])
+
+    def test_known_replacement_digests_are_well_formed(self) -> None:
+        self.assertGreater(len(KNOWN_REPLACEMENT_SHA256), 0)
+        for digest in KNOWN_REPLACEMENT_SHA256:
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_a_known_replacement_file_is_recognised_by_its_exact_bytes(self) -> None:
+        image = build_pgf([_glyph(0x41), _glyph(0x3042)], font_name="Some Replacement Font")
+        digest = hashlib.sha256(image).hexdigest()
+        self.assertFalse(is_replacement_font(image))
+        with mock.patch.object(fonts_module, "KNOWN_REPLACEMENT_SHA256", frozenset({digest})):
+            self.assertTrue(is_replacement_font(image))
+            self.assertTrue(is_replacement_font(image, digest))
+            changed = bytearray(image)
+            changed[-1] ^= 1
+            self.assertFalse(is_replacement_font(bytes(changed)))
+
+    def test_importing_only_replacements_counts_no_psp_fonts(self) -> None:
+        user_data = self.temp_path / "ud"
+        source = self._folder("replacements", self._psp_set("Nakagawa Open "))
+        result = import_fonts(source, user_data_root=user_data)
+        self.assertEqual(result["imported_count"], 18)
+        self.assertEqual(result["replacement_count"], 18)
+        for outcome in result["outcomes"]:
+            self.assertTrue(outcome["replacement"], outcome["name"])
+            self.assertTrue(outcome["detail"].endswith(f"({REPLACEMENT_NOTE})"), outcome["detail"])
+        slots = slot_states(user_data_root=user_data)
+        latin = latin_index_states(user_data_root=user_data)
+        self.assertEqual(slots["japanese"]["source"], "user")
+        self.assertTrue(slots["japanese"]["replacement"])
+        self.assertEqual(slots["japanese"]["detail"], "Japanese: a replacement font.")
+        self.assertEqual(latin[0]["detail"], "L1 replacement ltn0.pgf")
+        self.assertTrue(all(state["replacement"] for state in latin))
+        self.assertEqual(own_font_count(slots, latin), 0)
+
+        # The same set as the user's own fonts: all 18 count.
+        own_data = self.temp_path / "own"
+        import_fonts(self._folder("own", self._psp_set("Nakagawa Test ")), user_data_root=own_data)
+        own_slots = slot_states(user_data_root=own_data)
+        own_latin = latin_index_states(user_data_root=own_data)
+        self.assertEqual(own_font_count(own_slots, own_latin), 18)
+        self.assertEqual(own_slots["japanese"]["detail"], "Japanese: your imported font.")
+        self.assertEqual(own_latin[0]["detail"], "L1 exact ltn0.pgf")
+
+    def test_a_replacement_digest_imports_as_a_stand_in(self) -> None:
+        """The digest list reaches the import and the status exactly as the name rule does."""
+        files = self._psp_set("Nakagawa Test ")
+        digest = hashlib.sha256(files["jpn0.pgf"]).hexdigest()
+        fonts_module._inspect_file_cached.cache_clear()
+        with mock.patch.object(fonts_module, "KNOWN_REPLACEMENT_SHA256", frozenset({digest})):
+            user_data = self.temp_path / "ud"
+            result = import_fonts(self._folder("mixed", files), user_data_root=user_data)
+            self.assertEqual(result["replacement_count"], 1)
+            slots = slot_states(user_data_root=user_data)
+            latin = latin_index_states(user_data_root=user_data)
+            self.assertTrue(slots["japanese"]["replacement"])
+            self.assertFalse(slots["korean"]["replacement"])
+            self.assertEqual(own_font_count(slots, latin), 17)
+        fonts_module._inspect_file_cached.cache_clear()
+
+    def test_cli_status_and_import_name_replacement_fonts(self) -> None:
+        user_data = self.temp_path / "cli_replacements"
+        source = self._folder("cli_replacements_src", {
+            "jpn0.pgf": build_pgf([_glyph(0x41), _glyph(0x3042)],
+                                  font_name="Nakagawa Open Japanese"),
+            "kr0.pgf": korean_pgf(),
+        })
+        res = self._cli("import", str(source), "--user-data-root", str(user_data))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("1 of them are replacement fonts, not your PSP's own", res.stdout)
+        self.assertIn(f"({REPLACEMENT_NOTE})", res.stdout)
+        status = self._cli("status", "--user-data-root", str(user_data),
+                           "--project-root", str(self.temp_path), "--json")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        data = json.loads(status.stdout)
+        self.assertEqual(data["own_font_count"], 1)
+        self.assertTrue(data["japanese"]["replacement"])
+        text = self._cli("status", "--user-data-root", str(user_data),
+                         "--project-root", str(self.temp_path))
+        self.assertEqual(text.returncode, 0, text.stderr)
+        self.assertIn("Japanese: a replacement font.", text.stdout)
+        self.assertIn("1 of the 18 PSP fonts are your PSP's own", text.stdout)
+
+    def test_c_reader_holds_the_same_replacement_rule(self) -> None:
+        """src/core/nk_font.c applies the same rule to the same bytes: the same name prefix at
+        the same offset, the same digests, the same words."""
+        source = (ROOT / "src" / "core" / "nk_font.c").read_text(encoding="utf-8")
+        header = (ROOT / "src" / "core" / "nk_font.h").read_text(encoding="utf-8")
+        table = re.search(r"kKnownReplacementSha256\[\] = \{(.*?)\n\};", source, re.S)
+        self.assertIsNotNone(table)
+        assert table is not None
+        c_digests = re.findall(r'"([0-9a-f]{64})"', table.group(1))
+        self.assertEqual(len(c_digests), len(set(c_digests)), "a digest is listed twice")
+        self.assertEqual(set(c_digests), set(KNOWN_REPLACEMENT_SHA256))
+        prefix = re.search(r'kProjectStandInNamePrefix\[\] = "([^"]*)";', source)
+        self.assertIsNotNone(prefix)
+        assert prefix is not None
+        self.assertEqual(prefix.group(1).encode("ascii"), PROJECT_STANDIN_NAME_PREFIX)
+        self.assertIn(f"#define NK_FONT_NAME_OFFSET 0x{FONT_NAME_OFFSET:x}u", source)
+        self.assertIn(f"#define NK_FONT_NAME_SIZE {FONT_NAME_SIZE}u", source)
+        self.assertIn(f'#define NK_FONT_REPLACEMENT_NOTE "{REPLACEMENT_NOTE}"', header)
+        # The status lines say the same as slot_states and latin_index_states.
+        self.assertIn('"%s: a replacement font."', source)
+        self.assertIn('"L%d %s %s", index + 1, states[index].replacement ? "replacement" : "exact"',
+                      source)
 
     # Policy and documentation ------------------------------------------------------------------
 

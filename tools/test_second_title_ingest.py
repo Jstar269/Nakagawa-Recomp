@@ -26,6 +26,7 @@ class SecondTitleIngestTests(unittest.TestCase):
         self.gcc = shutil.which("gcc")
         if not self.gcc:
             self.skipTest("gcc not available")
+        assert self.gcc is not None
         self.temp_dir = Path(tempfile.mkdtemp(prefix="nk_second_title_test_"))
         # A cleanup runs even when setUp fails after this point; tearDown would not.
         self.addCleanup(shutil.rmtree, self.temp_dir, ignore_errors=True)
@@ -205,7 +206,9 @@ int main(void) {
 }
 """
         mock_c.write_text(mock_code, encoding="utf-8")
-        comp = subprocess.run([self.gcc, str(mock_c), "-o", str(mock_exe)], capture_output=True, text=True)
+        gcc = self.gcc
+        assert gcc is not None
+        comp = subprocess.run([gcc, str(mock_c), "-o", str(mock_exe)], capture_output=True, text=True)
         self.assertEqual(comp.returncode, 0, f"Mock runtime compile failed: {comp.stderr}")
         # The launch session is only complete with the title's own image beside
         # its runtime: a plan without --image would exit through driver.c's

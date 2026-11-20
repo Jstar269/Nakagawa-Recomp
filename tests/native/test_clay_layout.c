@@ -558,6 +558,67 @@ static int small_word_cache_measures_text(void)
     return ok;
 }
 
+/* A box sized as a percentage of its row's height sizes nothing in that row: the row is as
+   tall as its other children, and the box as tall as the row, however much wrapped text the
+   scroll column inside it holds (Settings > Enhanced's detail panel beside its list box, in
+   src/player/ui/scr_settings.c). The column is clipped there and scrolls over its whole
+   text: ten lines of 10 px, 100 px of content in 40 px. */
+static int percent_height_box_follows_its_row(void)
+{
+    Clay_ElementData row;
+    Clay_ElementData box;
+    Clay_ElementData column;
+    Clay_ScrollContainerData scroll;
+    int ok = 1;
+
+    clay_error_count = 0;
+    for (int frame = 0; frame < 2; ++frame) {
+        Clay_BeginLayout();
+        CLAY(CLAY_ID("pct-row"), {
+            .layout = { .layoutDirection = CLAY_LEFT_TO_RIGHT },
+        }) {
+            CLAY(CLAY_ID("pct-sibling"), {
+                .layout = { .sizing = { .width = CLAY_SIZING_FIXED(20.0f),
+                                        .height = CLAY_SIZING_FIXED(60.0f) } },
+            }) {}
+            CLAY(CLAY_ID("pct-box"), {
+                .layout = { .sizing = { .width = CLAY_SIZING_FIXED(80.0f),
+                                        .height = CLAY_SIZING_PERCENT(1.0f) },
+                            .padding = { .left = 10, .right = 10, .top = 10, .bottom = 10 } },
+            }) {
+                CLAY(CLAY_ID("pct-column"), {
+                    .layout = { .sizing = { .width = CLAY_SIZING_GROW(0),
+                                            .height = CLAY_SIZING_GROW(0) },
+                                .layoutDirection = CLAY_TOP_TO_BOTTOM },
+                    .clip = { .vertical = true, .childOffset = Clay_GetScrollOffset() },
+                }) {
+                    CLAY_TEXT(CLAY_STRING("aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj"),
+                              CLAY_TEXT_CONFIG({ .fontSize = 10, .lineHeight = 10 }));
+                }
+            }
+        }
+        (void)Clay_EndLayout(0.0f);
+    }
+    row = Clay_GetElementData(CLAY_ID("pct-row"));
+    box = Clay_GetElementData(CLAY_ID("pct-box"));
+    column = Clay_GetElementData(CLAY_ID("pct-column"));
+    scroll = Clay_GetScrollContainerData(CLAY_ID("pct-column"));
+    if (clay_error_count != 0 || !row.found || !box.found || !column.found || !scroll.found ||
+        row.boundingBox.height != 60.0f || box.boundingBox.height != 60.0f ||
+        column.boundingBox.height != 40.0f || scroll.contentDimensions.height != 100.0f) {
+        fprintf(stderr, "FAIL: a percent-height box beside a 60 px sibling: row %g px, box %g "
+                        "px, its column %g px over %g px of text (want 60, 60, 40, 100), %d "
+                        "errors\n",
+                row.found ? (double)row.boundingBox.height : -1.0,
+                box.found ? (double)box.boundingBox.height : -1.0,
+                column.found ? (double)column.boundingBox.height : -1.0,
+                scroll.found ? (double)scroll.contentDimensions.height : -1.0,
+                clay_error_count);
+        ok = 0;
+    }
+    return ok;
+}
+
 int main(void)
 {
     uint32_t memory_size = Clay_MinMemorySize();
@@ -777,7 +838,7 @@ int main(void)
         return EXIT_FAILURE;
     }
 
-    if (!wrapped_lines_fit_a_two_pass_layout()) {
+    if (!wrapped_lines_fit_a_two_pass_layout() || !percent_height_box_follows_its_row()) {
         free(memory);
         return EXIT_FAILURE;
     }
@@ -806,6 +867,7 @@ int main(void)
          "a layout after a full element-id map, a timeless drag without momentum, "
          "the wheel on the scroll container after a removed one, a newline after an "
          "overlong word, wrapped lines for both passes of a layout with a transition, "
+         "a percent-height box that follows its row and scrolls its text, "
          "colliding measure-cache ids told apart, evicted and overfull texts' words "
          "reused, the debug view's id digits kept inside the arena, and text measured "
          "with a word cache under 32 words");

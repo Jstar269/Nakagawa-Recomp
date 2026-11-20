@@ -20,7 +20,7 @@ import tempfile
 from contextlib import redirect_stdout
 from types import SimpleNamespace
 import unittest
-from typing import Any
+from typing import Any, TextIO, cast
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -2804,15 +2804,17 @@ int main(int argc, char **argv) {
 
         holder = subprocess.Popen([str(exe), "hold", str(library)], stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, text=True)
+        holder_stdin = cast(TextIO, holder.stdin)  # Popen receives PIPE for stdin and stdout above.
+        holder_stdout = cast(TextIO, holder.stdout)  # Popen receives PIPE for stdin and stdout above.
         try:
-            self.assertEqual(holder.stdout.readline().strip(), "HELD")
+            self.assertEqual(holder_stdout.readline().strip(), "HELD")
             with self.assertRaises(nk_cli.PackageBuildError):
                 with nk_cli._library_lock(self.temp_dir, timeout_seconds=0.2):
                     pass
         finally:
-            holder.stdin.close()
+            holder_stdin.close()
             self.assertEqual(holder.wait(timeout=30), 0)
-            holder.stdout.close()
+            holder_stdout.close()
         with nk_cli._library_lock(self.temp_dir, timeout_seconds=5):
             pass
 

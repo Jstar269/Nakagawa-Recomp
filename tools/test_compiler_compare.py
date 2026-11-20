@@ -15,10 +15,22 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from typing import Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict, cast
 
+# The repository root, so ``tools.`` imports also resolve when this file runs as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import compiler_compare  # noqa: E402
+if TYPE_CHECKING:
+    from tools import compiler_compare
+else:
+    import compiler_compare  # noqa: E402
+
+
+class _TimedWorkloadResult(TypedDict):
+    status: str
+    summary: str | None
+    note: NotRequired[str]
+    output: str
 
 
 class MeasurementTrialIsolationTests(unittest.TestCase):
@@ -244,6 +256,15 @@ class FakeToolchain:
 
 
 class CompilerCompareTests(unittest.TestCase):
+    def test_the_module_runs_as_a_script(self) -> None:
+        # ``python tools/test_compiler_compare.py`` puts only tools/ on the path;
+        # its imports still resolve.
+        with tempfile.TemporaryDirectory() as cwd:
+            run = subprocess.run([sys.executable, "-E", str(Path(__file__).resolve()), "-h"],
+                                 cwd=cwd, capture_output=True, text=True, check=False,
+                                 timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -1335,14 +1356,17 @@ class RuntimeWorkloadRunnerTests(unittest.TestCase):
 class TimingOnlyWorkloadTests(unittest.TestCase):
     """The platform ladder clears SR_*, so its benchmark runs are timed, not failed."""
 
-    def _run(self, name: str) -> dict:
+    def _run(self, name: str) -> _TimedWorkloadResult:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import run_perf_benchmarks
         done = subprocess.CompletedProcess(args=[], returncode=0, stdout="built and ran\n")
         with tempfile.TemporaryDirectory() as temp, \
                 mock.patch.object(run_perf_benchmarks.subprocess, "run", return_value=done):
-            return run_perf_benchmarks._run_one("make", sys.executable, name, (name,), Path(temp),
-                                                True, "build/perf-benchmark")
+            return cast(
+                _TimedWorkloadResult,
+                run_perf_benchmarks._run_one("make", sys.executable, name, (name,), Path(temp),
+                                             True, "build/perf-benchmark"),
+            )  # _run_one emits these fields; note is optional for timing-only workloads.
 
     def test_a_ladder_workload_without_a_summary_is_timed_not_failed(self) -> None:
         for name in ("platform-ladder-gap", "platform-ladder-sched", "platform-ladder-fs"):

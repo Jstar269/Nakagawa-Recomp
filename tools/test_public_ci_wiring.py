@@ -20,7 +20,7 @@ import tempfile
 import textwrap
 import unittest
 from types import ModuleType
-from typing import ClassVar, NamedTuple, TypedDict, cast
+from typing import ClassVar, NamedTuple, TypeGuard, TypeVar, TypedDict
 from collections.abc import Mapping, Sequence
 from unittest import mock
 
@@ -37,6 +37,25 @@ import mypy_baseline  # noqa: E402
 import showcase as showcase_cli  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
 from test_ci_test_shards import _bash_path, _step_bash  # noqa: E402
+
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None, description: str) -> _T:
+    if value is None:
+        raise AssertionError(description)
+    return value
+
+
+def _is_string_keyed_dict(value: object) -> TypeGuard[dict[str, object]]:
+    return isinstance(value, dict) and all(isinstance(key, str) for key in value)
+
+
+def _required_dict(value: object, description: str) -> dict[str, object]:
+    if not _is_string_keyed_dict(value):
+        raise AssertionError(description)
+    return value
 
 
 def _ci_job_blocks() -> dict[str, list[str]]:
@@ -74,8 +93,18 @@ def _ci_step(block: list[str], name: str) -> list[str] | None:
 
 
 def _matched(match: re.Match[str] | None) -> re.Match[str]:
-    """Return a regex match at call sites that already rely on it being present."""
-    return cast(re.Match[str], match)
+    """Return a match or fail with an assertion when the expected regex did not match."""
+    return _required(match, "expected a regex match")
+
+
+class RequiredNarrowingTests(unittest.TestCase):
+    def test_missing_regex_match_is_a_named_assertion(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "expected a regex match"):
+            _matched(None)
+
+    def test_required_dict_rejects_non_string_keys(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "string-keyed dictionary"):
+            _required_dict({1: "value"}, "expected a string-keyed dictionary")
 
 
 # The private backends the retired PUBLIC_SAFE=0 mode compiled. No build file may name them.
@@ -144,10 +173,11 @@ class PublicCiWiringTests(unittest.TestCase):
             self.assertEqual(mypy_baseline.main(["--scope", "issue-1391"]), 0)
         self.assertEqual(tuple(run.call_args.args[0][-len(expected):]), expected)
 
-    def test_mypy_ratchet_stays_below_the_import_fallback_cleanup(self) -> None:
-        """#1391: try/except import fallbacks are typed, so the ratchet sits at or below 246."""
+    def test_mypy_ratchet_stays_at_zero(self) -> None:
+        """#1391: tools/ has no mypy errors, so the ratchet stays empty."""
         baseline = json.loads((ROOT / "tools" / "mypy_baseline.json").read_text(encoding="utf-8"))
-        self.assertLessEqual(baseline["total_errors"], 246)
+        self.assertEqual(baseline["total_errors"], 0)
+        self.assertEqual(baseline["errors_by_module"], {})
 
     def test_mypy_clean_scope_rejects_any_reported_error(self) -> None:
         diagnostic = "tools/hle_manifest.py:7: error: invalid fixture [misc]\n"
@@ -158,6 +188,33 @@ class PublicCiWiringTests(unittest.TestCase):
             result = mypy_baseline.main(["--scope", "issue-1391"])
         self.assertEqual(result, 1)
         self.assertIn(diagnostic.rstrip(), captured.getvalue())
+
+    def test_empty_mypy_ratchet_accepts_zero_and_rejects_a_new_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            baseline_path = Path(temporary) / "mypy_baseline.json"
+            with mock.patch.object(mypy_baseline, "BASELINE", baseline_path):
+                mypy_baseline._write_baseline({})
+                self.assertEqual(mypy_baseline._read_baseline(), ({}, 0))
+                with mock.patch.object(mypy_baseline, "_installed_mypy_version", return_value="2.4.1"), \
+                        mock.patch.object(
+                            mypy_baseline.subprocess,
+                            "run",
+                            return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+                        ), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(mypy_baseline.main([]), 0)
+
+                diagnostic = "tools/new_tool.py:1: error: unexpected regression [misc]\n"
+                with mock.patch.object(mypy_baseline, "_installed_mypy_version", return_value="2.4.1"), \
+                        mock.patch.object(
+                            mypy_baseline.subprocess,
+                            "run",
+                            return_value=subprocess.CompletedProcess([], 1, stdout=diagnostic, stderr=""),
+                        ), contextlib.redirect_stderr(io.StringIO()) as captured:
+                    # The check CI runs (no --update) and an update both refuse the new error.
+                    self.assertEqual(mypy_baseline.main([]), 1)
+                    self.assertIn("tools/new_tool.py", captured.getvalue())
+                    self.assertEqual(mypy_baseline.main(["--update"]), 1)
+                self.assertEqual(mypy_baseline._read_baseline(), ({}, 0))
 
     def test_python_tools_ci_enforces_mypy_baseline(self) -> None:
         python_tools = _ci_job_blocks()["python_tools"]
@@ -911,7 +968,7 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertIsNotNone(native_step, "native_tools no longer runs player-ui-regressions")
         self.assertIn(
             "run: make CC=gcc player-ui-regressions",
-            "\n".join(cast(list[str], native_step)),
+            "\n".join(_required(native_step, "native player UI step is missing")),
         )
         self.assertLess(
             _ci_step_index(native_tools, "Build pinned SDL3 for headless Linux runtime"),
@@ -923,7 +980,7 @@ class PublicCiWiringTests(unittest.TestCase):
             jobs["windows_runtime"], "Run native player UI regressions headlessly on Windows"
         )
         self.assertIsNotNone(windows_step, "windows_runtime no longer runs player-ui-regressions")
-        windows_text = "\n".join(cast(list[str], windows_step))
+        windows_text = "\n".join(_required(windows_step, "Windows player UI step is missing"))
         self.assertIn(
             "mingw32-make --no-print-directory CC=gcc VULKAN_SDK=/ucrt64 player-ui-regressions",
             windows_text,
@@ -1060,7 +1117,8 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
 
     def part_of(self, name: str) -> str | None:
         conditions = [
-            line.strip() for line in cast(list[str], self.steps[name]) if line.strip().startswith("if:")
+            line.strip() for line in _required(self.steps[name], f"workflow step {name!r} is missing")
+            if line.strip().startswith("if:")
         ]
         if not conditions:
             return None
@@ -1091,7 +1149,8 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
             if limit:
                 part = self.part_of(name)
                 self.assertIsNotNone(part, f"{name}: a step with its own limit must be in a part")
-                step_limits[cast(str, part)] = step_limits.get(cast(str, part), 0) + int(limit.group(1))
+                required_part = _required(part, f"{name}: a step with its own limit must be in a part")
+                step_limits[required_part] = step_limits.get(required_part, 0) + int(limit.group(1))
         self.assertEqual(step_limits, {"smoke": 15})
         for group, (parts, timeout) in _windows_matrix_entries(self.block).items():
             with self.subTest(group=group):
@@ -1116,9 +1175,11 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         self.assertIn(".PHONY: $(PUBLIC_TARGETS) $(INTERNAL_TARGETS)", targets)
 
     def test_windows_runtime_pins_windows_cpython_315_for_tools_and_make(self) -> None:
-        setup = "\n".join(cast(list[str], self.steps["Set up Windows CPython 3.15.2"]))
+        setup_name = "Set up Windows CPython 3.15.2"
+        setup = "\n".join(_required(self.steps[setup_name], f"workflow step {setup_name!r} is missing"))
         self.assertIn('python-version: "3.15.2"', setup)
-        pin = "\n".join(cast(list[str], self.steps["Pin the Windows Python toolchain (CPython 3.15.2)"]))
+        pin_name = "Pin the Windows Python toolchain (CPython 3.15.2)"
+        pin = "\n".join(_required(self.steps[pin_name], f"workflow step {pin_name!r} is missing"))
         self.assertIn("shell: pwsh", pin)
         self.assertIn("steps.windows-cpython.outputs.python-path", pin)
         self.assertIn('"PYTHON=$pythonPath`n"', pin)
@@ -1128,12 +1189,14 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
     def test_native_core_tests_find_git_for_the_git_clean_check(self) -> None:
         # The MSYS2 shell has no git of its own; test_player_state's #511 git-clean check needs
         # the runner's Windows git from the inherited PATH, or it cannot run and exits 77.
-        step = "\n".join(cast(list[str], self.steps["Run native core test suite on Windows"]))
+        name = "Run native core test suite on Windows"
+        step = "\n".join(_required(self.steps[name], f"workflow step {name!r} is missing"))
         self.assertIn("shell: msys2 {0}", step)
         self.assertIn("        env:\n          MSYS2_PATH_TYPE: inherit\n", step)
 
     def test_flash0_python_path_assignment_is_separate_from_invocation(self) -> None:
-        step = "\n".join(cast(list[str], self.steps["Build and run flash0 font device selftest"]))
+        name = "Build and run flash0 font device selftest"
+        step = "\n".join(_required(self.steps[name], f"workflow step {name!r} is missing"))
         self.assertRegex(step, r"(?m)^\s+run: \|$")
         self.assertIn(
             'py="$(cygpath -u "$PYTHON")"\n'
@@ -1151,7 +1214,7 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         if name not in self.steps:
             self.fail(f"windows_runtime has no {name!r} step")
         self.assertEqual(self.part_of(name), "selftests")
-        step = "\n".join(cast(list[str], self.steps[name]))
+        step = "\n".join(_required(self.steps[name], f"workflow step {name!r} is missing"))
         self.assertIn("shell: msys2 {0}", step)
         self.assertIn("set -euo pipefail", step)
         self.assertNotIn("continue-on-error", step)
@@ -1183,7 +1246,7 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         if name not in self.steps:
             self.fail(f"windows_runtime has no {name!r} step")
         self.assertEqual(self.part_of(name), "selftests")
-        step = "\n".join(cast(list[str], self.steps[name]))
+        step = "\n".join(_required(self.steps[name], f"workflow step {name!r} is missing"))
         self.assertIn("shell: msys2 {0}", step)
         self.assertIn("set -euo pipefail", step)
         self.assertNotIn("continue-on-error", step)
@@ -1208,7 +1271,7 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
             with self.subTest(step=name):
                 self.assertIn(name, self.steps, "a serial Windows gate was dropped")
                 self.assertIn(command, " ".join(
-                    line.strip() for line in cast(list[str], self.steps[name])
+                    line.strip() for line in _required(self.steps[name], f"workflow step {name!r} is missing")
                 ))
                 self.assertIn(self.part_of(name), self.parts)
 
@@ -1218,23 +1281,22 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
                 if name in _WINDOWS_EVERY_PART:
                     self.assertIsNone(self.part_of(name), f"{name} must run in every group")
                 elif name in _WINDOWS_MAIN_SAVE:
-                    step = " ".join(line.strip() for line in cast(list[str], self.steps[name]))
+                    step = " ".join(line.strip() for line in _required(self.steps[name], f"workflow step {name!r} is missing"))
                     self.assertIn(_WINDOWS_MAIN_SAVE_CONDITION, step, f"{name} runs only on main")
                 elif name in _WINDOWS_INSTALLER_STEPS:
-                    step = " ".join(line.strip() for line in cast(list[str], self.steps[name]))
+                    step = " ".join(line.strip() for line in _required(self.steps[name], f"workflow step {name!r} is missing"))
                     self.assertIn(_WINDOWS_INSTALLER_STEPS[name], step)
                     self.assertIn("needs.classify.outputs.run_installer == 'true'", step)
                 else:
                     self.assertIn(name, _WINDOWS_SERIAL_GATES, f"unclassified Windows step {name!r}")
-        compile_step = " ".join(cast(
-            list[str], self.steps["Compile Windows runtime objects through the default compiler path"]
-        ))
+        compile_name = "Compile Windows runtime objects through the default compiler path"
+        compile_step = " ".join(_required(self.steps[compile_name], f"workflow step {compile_name!r} is missing"))
         self.assertIn("runtime-objects", compile_step)
 
     def test_installer_package_steps_are_scoped_to_the_smoke_group(self) -> None:
         for name in _WINDOWS_INSTALLER_STEPS:
             with self.subTest(step=name):
-                step = "\n".join(cast(list[str], self.steps[name]))
+                step = "\n".join(_required(self.steps[name], f"workflow step {name!r} is missing"))
                 self.assertIn(
                     "if: contains(matrix.parts, 'smoke') && needs.classify.outputs.run_installer == 'true'",
                     step,
@@ -1419,7 +1481,8 @@ class NativeToolsPartitionTests(unittest.TestCase):
 
     def conditions(self, name: str) -> list[str]:
         return [
-            line.strip() for line in cast(list[str], self.steps[name]) if line.strip().startswith("if:")
+            line.strip() for line in _required(self.steps[name], f"workflow step {name!r} is missing")
+            if line.strip().startswith("if:")
         ]
 
     def part_of(self, name: str) -> str | None:
@@ -1440,7 +1503,7 @@ class NativeToolsPartitionTests(unittest.TestCase):
             with self.subTest(step=name):
                 self.assertIn(name, self.steps, "a serial native gate was dropped")
                 self.assertIn(command, "\n".join(
-                    line.strip() for line in cast(list[str], self.steps[name])
+                    line.strip() for line in _required(self.steps[name], f"workflow step {name!r} is missing")
                 ))
                 self.assertIn(self.part_of(name), self.parts)
 
@@ -1460,7 +1523,7 @@ class NativeToolsPartitionTests(unittest.TestCase):
         # The module skips without a native toolchain, so the step that runs it must
         # accept only unittest's bare OK, never "OK (skipped=N)".
         name = "Run title-configured HLE behaviour tests on Linux"
-        step = "\n".join(cast(list[str], self.steps[name]))
+        step = "\n".join(_required(self.steps[name], f"workflow step {name!r} is missing"))
         self.assertIn("set -euo pipefail", step)
         self.assertNotIn("continue-on-error", step)
         self.assertIn("tail -n 1 \"$log\" | grep -qx 'OK'", step)
@@ -1905,12 +1968,15 @@ class VfpuFuzzShardTests(unittest.TestCase):
             with self.subTest(part=part):
                 lines = _ci_step(block, f"Build and run synthetic VFPU fuzzer (shard {index} of 2)")
                 self.assertIsNotNone(lines, f"no fuzz step for {part}")
-                text = "\n".join(cast(list[str], lines))
+                text = "\n".join(_required(lines, f"no fuzz step for {part}"))
                 self.assertIn(f"if: contains(matrix.parts, '{part}')", text)
                 self.assertIn(f'FUZZ_CASE_SHARD: "{index}/2"', text)
         proof = _ci_step(block, "Prove the fuzz shards cover every case exactly once")
         self.assertIsNotNone(proof, "the shard proof step is missing")
-        self.assertIn("if: contains(matrix.parts, 'fuzz-0')", "\n".join(cast(list[str], proof)))
+        self.assertIn(
+            "if: contains(matrix.parts, 'fuzz-0')",
+            "\n".join(_required(proof, "the shard proof step is missing")),
+        )
 
     def test_ci_required_aggregates_every_windows_part(self) -> None:
         required = "\n".join(_ci_job_blocks()["ci_required"])
@@ -3264,7 +3330,8 @@ class TrustedVerdictTriggerTests(unittest.TestCase):
 
     def test_a_head_for_another_base_branch_is_not_judged(self) -> None:
         context = self._target("synchronize")
-        event = cast(dict[str, object], cast(dict[str, object], context["github"])["event"])
+        github = _required_dict(context["github"], "the fixture github context must be a string-keyed dictionary")
+        event = _required_dict(github["event"], "the fixture event must be a string-keyed dictionary")
         event["pull_request"] = {"base": {"ref": "release"}}
         self.assertFalse(_actions_eval(self.guard, context))
 
@@ -3317,7 +3384,9 @@ class TrustedVerdictApprovalDispatchTests(unittest.TestCase):
         self.assertEqual(titles, ["Trusted CI verdict (PR #7)", "Trusted CI verdict (PR #7)",
                                   f"Trusted CI verdict ({self.HEAD})"])
         for title in titles:
-            self.assertIsNone(ci_trust_verdict._APPROVAL_RUN_TITLE.fullmatch(cast(str, title)))
+            if not isinstance(title, str):
+                self.fail("the approval title fixture must evaluate to a string")
+            self.assertIsNone(ci_trust_verdict._APPROVAL_RUN_TITLE.fullmatch(title))
         # Numbers and SHAs only: no pull request title, body or branch name.
         self.assertEqual(set(re.findall(r"(?:github|inputs)\.[A-Za-z_.]+", self.title)),
                          {"github.event_name", "inputs.approve_head_sha", "inputs.pull_request_number",
@@ -3329,7 +3398,9 @@ class TrustedVerdictApprovalDispatchTests(unittest.TestCase):
         self.assertFalse(_actions_eval(guard, self._dispatch()))
         for event_name in ("pull_request_target", "workflow_run"):
             context = self._dispatch(self.HEAD)
-            cast(dict[str, object], context["github"])["event_name"] = event_name
+            _required_dict(
+                context["github"], "the fixture github context must be a string-keyed dictionary"
+            )["event_name"] = event_name
             self.assertFalse(_actions_eval(guard, context))
 
     def test_the_verdict_runs_after_a_dispatched_approval_whatever_its_result(self) -> None:
@@ -3672,7 +3743,9 @@ class TrustedAttestationRouteTests(unittest.TestCase):
         self.assertEqual(_actions_value(group, self._dispatch(pull_request_number="7", head_sha=self.HEAD)), self.HEAD)
         self.assertEqual(_actions_value(group, self._target()), 7)
         candidate = self._dispatch(candidate_sha=self.HEAD)
-        cast(dict[str, object], candidate["github"])["run_id"] = 99
+        _required_dict(
+            candidate["github"], "the fixture github context must be a string-keyed dictionary"
+        )["run_id"] = 99
         self.assertEqual(_actions_value(group, candidate), 99)
 
 
@@ -4222,7 +4295,11 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
             self.assertLess(
                 _ci_step_index(native_tools, single), _ci_step_index(native_tools, _NIGHTLY_REPEAT_STEP)
             )
-            self.assertNotIn("github.event_name", "\n".join(cast(list[str], _ci_step(native_tools, single))))
+            lines = _ci_step(native_tools, single)
+            self.assertNotIn(
+                "github.event_name",
+                "\n".join(_required(lines, f"native step {single!r} is missing")),
+            )
         # The Makefile target is bounded by one variable and reports the failing iteration.
         makefile = read_makefile(ROOT)
         self.assertIn("SELFTEST_REPEAT ?= 20", makefile)

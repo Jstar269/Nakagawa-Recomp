@@ -19,7 +19,7 @@ import shutil
 import tarfile
 import tempfile
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -64,6 +64,7 @@ class _MockPosixPath(PurePosixPath):
 
 
 class _PayloadHandler(BaseHTTPRequestHandler):
+    server: ThreadingHTTPServer
     payload = b""
     payloads: dict[str, bytes] = {}
     mode = "ok"
@@ -811,11 +812,11 @@ class TestPrerequisiteFetcher(unittest.TestCase):
                 "allowed_hosts": ["127.0.0.1"], "filename": filename,
                 "size_bytes": len(body), "sha256": hashlib.sha256(body).hexdigest(),
             })
-        data = {"schema_version": 1, "artifacts": artifacts, "sources": sources}
+        manifest_data = {"schema_version": 1, "artifacts": artifacts, "sources": sources}
         if edit:
-            edit(data)
+            edit(manifest_data)
         manifest = self.root / f"prereq_manifest_{len(list(self.root.glob('prereq_manifest_*')))}.json"
-        manifest.write_text(json.dumps(data), encoding="utf-8")
+        manifest.write_text(json.dumps(manifest_data), encoding="utf-8")
         return manifest
 
     def test_bundle_stages_the_per_user_layout_with_a_full_inventory(self) -> None:
@@ -833,8 +834,8 @@ class TestPrerequisiteFetcher(unittest.TestCase):
         lines = (dest / "bundle-inventory.txt").read_text(encoding="utf-8").splitlines()
         listed = {}
         for line in lines:
-            digest, size, relative = line.split(" ", 2)
-            listed[relative] = (digest, int(size))
+            digest, size_text, relative = line.split(" ", 2)
+            listed[relative] = (digest, int(size_text))
         self.assertEqual(sorted(listed), [
             "msys64/ucrt64/bin/cc.exe", "msys64/ucrt64/bin/gcc.exe",
             "msys64/ucrt64/bin/mingw32-make.exe", "msys64/ucrt64/share/licenses/gcc/COPYING",
@@ -844,8 +845,8 @@ class TestPrerequisiteFetcher(unittest.TestCase):
             "python/LICENSE.txt", "python/python.exe",
         ])
         for relative, (digest, size) in listed.items():
-            data = (dest / relative).read_bytes()
-            self.assertEqual((hashlib.sha256(data).hexdigest(), len(data)), (digest, size), relative)
+            file_bytes = (dest / relative).read_bytes()
+            self.assertEqual((hashlib.sha256(file_bytes).hexdigest(), len(file_bytes)), (digest, size), relative)
         record = json.loads((dest / "installed.json").read_text(encoding="utf-8"))
         self.assertEqual(record["bundle"], bundle)
         self.assertEqual(bundle["file_count"], len(lines))
@@ -1182,7 +1183,7 @@ class TestPrerequisiteFetcher(unittest.TestCase):
         self.assertEqual(json.loads(out.getvalue()), {"event": "sources-verified", **result})
 
     @staticmethod
-    def _tar(members: dict[str, bytes], mode: str) -> bytes:
+    def _tar(members: dict[str, bytes], mode: Literal["w:gz", "w:xz"]) -> bytes:
         stream = io.BytesIO()
         with tarfile.open(fileobj=stream, mode=mode) as archive:
             for name, data in members.items():

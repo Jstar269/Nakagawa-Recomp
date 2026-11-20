@@ -27,7 +27,7 @@ import tempfile
 import threading
 import traceback
 import time
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, BinaryIO, NoReturn, Protocol, cast
 import zlib
 
 
@@ -62,7 +62,10 @@ from nk_core import (  # noqa: E402
     RuntimeLauncher,
     inspect_iso,
 )
-from nk_core import package_cache  # noqa: E402
+if TYPE_CHECKING:
+    from .nk_core import package_cache
+else:
+    from nk_core import package_cache  # noqa: E402
 from nk_core.prep_engine import (  # noqa: E402
     NativeTitleStager,
     SUPPORTED_ARCHIVE_FORMATS,
@@ -111,6 +114,13 @@ import nk_powershell  # noqa: E402
 import title_manifest  # noqa: E402
 from psp_import_table import MODULE_ATTR_KERNEL as PSP_MODULE_ATTR_KERNEL  # noqa: E402
 from analyze import check_code_overlay, is_code_overlay  # noqa: E402
+
+
+class _WindowsMsvcrt(Protocol):
+    LK_NBLCK: int
+    LK_UNLCK: int
+
+    def locking(self, fd: int, mode: int, nbytes: int) -> None: ...
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1088,10 +1098,10 @@ def _declare_experimental_disc_modules(
             "; ".join(lines), lines=tuple(lines),
         )
     if unready:
-        lines = tuple(_unready_module_lines(unready))
+        unready_lines = tuple(_unready_module_lines(unready))
         raise ExperimentalModuleIntakeError(
-            "GUEST_MODULE_FORMAT_UNSUPPORTED", "; ".join(lines),
-            lines=lines, log_lines=lines,
+            "GUEST_MODULE_FORMAT_UNSUPPORTED", "; ".join(unready_lines),
+            lines=unready_lines, log_lines=unready_lines,
         )
     if not module_sources:
         return [], kernel_left_out, None
@@ -2001,7 +2011,7 @@ def _current_package_cache_key(
     instruction_trace: bool = False,
     enhancement_package_path: Path | None = None,
     code_hook_package_path: Path | None = None,
-) -> dict:
+) -> package_cache.PackageCacheKey:
     import title_codegen_plan
 
     selected_modules = [
@@ -2370,7 +2380,7 @@ class _BuildProgressReporter:
         self.current_stage = stage
         if status == "FAIL":
             self._failed = True
-        payload = {"stage": stage, "status": status, "message": message}
+        payload: dict[str, str | int] = {"stage": stage, "status": status, "message": message}
         if detail:
             payload["detail"] = detail
         if completed is not None and total is not None:
@@ -2685,7 +2695,7 @@ PACKAGE_BUILD_LOCKED_MESSAGE = (
 )
 
 
-def _open_user_lock_file(user_root: Path, name: str, label: str):
+def _open_user_lock_file(user_root: Path, name: str, label: str) -> BinaryIO:
     """Open ``<user data>/locks/<name>`` for an exclusive lock; ``label`` names the lock folder."""
     lock_dir = user_root / "locks"
     if lock_dir.is_symlink():
@@ -2695,26 +2705,28 @@ def _open_user_lock_file(user_root: Path, name: str, label: str):
     return open(lock_dir / name, "a+b")
 
 
-def _try_lock_file(handle) -> None:
+def _try_lock_file(handle: BinaryIO) -> None:
     """Take the exclusive lock on byte 0 without waiting; OSError when another process holds it."""
     if os.name == "nt":
         import msvcrt
 
+        windows_msvcrt = cast(_WindowsMsvcrt, msvcrt)  # Windows' runtime exposes APIs omitted by Linux typeshed.
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        windows_msvcrt.locking(handle.fileno(), windows_msvcrt.LK_NBLCK, 1)
     else:
         import fcntl
 
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
-def _unlock_file(handle) -> None:
+def _unlock_file(handle: BinaryIO) -> None:
     if os.name == "nt":
         import msvcrt
 
+        windows_msvcrt = cast(_WindowsMsvcrt, msvcrt)  # Windows' runtime exposes APIs omitted by Linux typeshed.
         handle.seek(0)
         with contextlib.suppress(OSError):
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            windows_msvcrt.locking(handle.fileno(), windows_msvcrt.LK_UNLCK, 1)
     else:
         import fcntl
 
@@ -4247,6 +4259,9 @@ def cmd_fonts_import(args: argparse.Namespace) -> int:
                 print(f"{outcome['name']}: {outcome['detail']}")
             if result["imported_count"]:
                 print(f"Imported {result['imported_count']} font slot(s) into {result['cache_dir']}.")
+            if result["replacement_count"]:
+                print(f"{result['replacement_count']} of them are replacement fonts, not your PSP's own: "
+                      "games still show text that looks different.")
         if not result["imported_count"]:
             sys.stderr.write("Font import error: no font slot was imported.\n")
             return 1
@@ -4309,7 +4324,7 @@ def cmd_redump_import(args: argparse.Namespace) -> int:
 
 
 def cmd_fonts_status(args: argparse.Namespace) -> int:
-    from nk_core.fonts import SLOTS, latin_index_states, slot_states
+    from nk_core.fonts import SLOTS, latin_index_states, own_font_count, slot_states
 
     try:
         user_root = _user_data_root(args.user_data_root, "Imported fonts")
@@ -4318,9 +4333,11 @@ def cmd_fonts_status(args: argparse.Namespace) -> int:
         return 1
     states = slot_states(user_data_root=user_root, project_root=args.project_root)
     latin = latin_index_states(user_data_root=user_root, project_root=args.project_root)
+    own = own_font_count(states, latin)
     if args.json:
-        result = {slot: states[slot] for slot in SLOTS if slot != "latin"}
+        result: dict[str, Any] = {slot: states[slot] for slot in SLOTS if slot != "latin"}
         result["latin_indices"] = {str(index + 1): latin[index] for index in range(len(latin))}
+        result["own_font_count"] = own
         print(json.dumps(result, indent=2))
     else:
         for slot in ("japanese",):
@@ -4328,6 +4345,9 @@ def cmd_fonts_status(args: argparse.Namespace) -> int:
         for state in latin:
             print(state["detail"])
         print(states["korean"]["detail"])
+        print(f"{own} of the {len(latin) + 2} PSP fonts are your PSP's own; the rest are stand-ins, "
+              "replacement fonts or missing." if own < len(latin) + 2
+              else f"All {own} PSP fonts are your PSP's own.")
     return 0
 
 
@@ -5126,15 +5146,14 @@ def _library_record_to_replace(games: list, disc_id: str, digest: disc_verify.Di
     """
     same_id = [index for index, game in enumerate(games) if isinstance(game, dict)
                and str(game.get("disc_id", "")).upper() == disc_id]
-    sha1 = digest.sha1 if digest is not None else ""
-    if sha1:
+    if digest is not None and digest.sha1:
         for index in same_id:
-            if _library_content_sha1(games[index]) == sha1:
+            if _library_content_sha1(games[index]) == digest.sha1:
                 return index
     for index in same_id:
         if _library_same_path(games[index], iso_path):
             return index
-    if not sha1:
+    if digest is None or not digest.sha1:
         if len(same_id) == 1 and not _library_content_sha1(games[same_id[0]]):
             return same_id[0]
         return None
@@ -5148,7 +5167,7 @@ def _library_record_to_replace(games: list, disc_id: str, digest: disc_verify.Di
             other_digest = disc_verify.hash_image(other)
         except (OSError, disc_verify.DiscVerifyError):
             continue
-        if other_digest.sha1 == sha1:
+        if other_digest.sha1 == digest.sha1:
             return index
         # Another image: the record is kept, and now carries its own hashes and tier.
         game.update({"content_sha1": other_digest.sha1, "content_crc32": other_digest.crc32})
@@ -5657,7 +5676,7 @@ def _count_unsupported_opcodes(codegen_report: Path, sources: list[dict]) -> dic
     if not codegen_report.is_file():
         return {}
     _regions, instructions = title_codegen_plan._read_codegen_fallbacks(codegen_report, sources)
-    counts = Counter()
+    counts: Counter[str] = Counter()
     for row in instructions:
         if row.get("word") is None:
             continue

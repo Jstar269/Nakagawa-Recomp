@@ -1424,7 +1424,7 @@ class TestPublishAudit(unittest.TestCase):
         format omits the short-name column entirely, so every lookup silently
         reported None and the alias case was never exercised.
         """
-        if os.name != "nt":
+        if sys.platform != "win32":
             return None
         import ctypes
 

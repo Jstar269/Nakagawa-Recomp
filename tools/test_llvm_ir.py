@@ -45,6 +45,7 @@ def llvm_tool(name: str) -> str | None:
 
 def verify(text: str) -> subprocess.CompletedProcess:
     opt = llvm_tool("opt")
+    assert opt is not None, "LLVM opt is required when a verifier test runs"
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "module.ll"
         path.write_text(text, encoding="ascii", newline="\n")

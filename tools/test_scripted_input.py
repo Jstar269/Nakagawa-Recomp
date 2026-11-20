@@ -223,6 +223,7 @@ class ScriptedInputDeliveryTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
+        assert CC is not None
         cls.tmp = Path(tempfile.mkdtemp(prefix="scripted_input_"))
         # A class cleanup runs even when setUpClass raises; tearDownClass would not.
         cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)

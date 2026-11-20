@@ -12,6 +12,7 @@ from pathlib import Path
 import struct
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -450,16 +451,11 @@ class XBProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.xb"
             path.write_bytes(raw)
-            original_read_bytes = Path.read_bytes
-
-            def forbidden_read_bytes(self):
+            def forbidden_read_bytes(self: Path) -> bytes:
                 raise AssertionError("archive must not use an unbounded path read")
 
-            Path.read_bytes = forbidden_read_bytes
-            try:
+            with mock.patch.object(Path, "read_bytes", new=forbidden_read_bytes):
                 reader = XBArchiveReader(path)
-            finally:
-                Path.read_bytes = original_read_bytes
             self.assertEqual(reader.read_entry("a.bin"), b"payload")
 
     def test_variant_labeling(self) -> None:
@@ -551,12 +547,9 @@ class XBProbeTests(unittest.TestCase):
                     return ShortReadHandle(raw, f)
                 return real_open(self_path, *args, **kwargs)
 
-            Path.open = custom_open
-            try:
+            with mock.patch.object(Path, "open", new=custom_open):
                 reader = XBArchiveReader(path)
                 self.assertEqual(reader.read_entry("a.bin"), b"payload")
-            finally:
-                Path.open = real_open
 
 
 def _raw_archive(
