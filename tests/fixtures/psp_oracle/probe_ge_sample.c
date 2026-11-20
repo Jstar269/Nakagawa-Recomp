@@ -1258,10 +1258,14 @@ static int hle_run(void)
  * VRAM mirror, then `sync` and a data-cache write-back. Like those cases it leaves the two blocks
  * as the last cell drew them.
  *
- * The CPU's view of the GE's depth layout is not assumed: besides the depth words at the
- * sprite's linear positions, each cell counts every depth word in the block that is no longer
- * 0x1234 and records the lowest and highest of them, which does not depend on where the GE put
- * them. The infinity and NaN cells come last.
+ * Where the depth words are: the GE keeps the depth of pixel index k at the 16-bit word index
+ * k ^ 0x1020 of the buffer (byte offset XOR 0x2040: PSP-VRAM-MIRROR-001, and PSP-GE-RASTER-004's
+ * ctl-zbw512-zx read it so through the plain uncached mirror in the XMB context), so this
+ * buffer's words lie at VRAM 0x112000..0x112fff. GTZ_ZWORD maps an index; the fill, the scan and
+ * every depth read go through it. The first hardware run of this case (2026-11-10, boot 180)
+ * filled and scanned the words at the plain index and saw none change. Besides the depth words
+ * at the sprite's positions, each cell counts every depth word of the buffer that is no longer
+ * 0x1234 and records the lowest and highest of them. The infinity and NaN cells come last.
  *
  * Records per cell: `<cell>-draw` (16 words: the GE wait outcome as ge-rtt (qid, list state,
  * draw state, elapsed us, idle, reset result), the list length, the z bits, the number of colour
@@ -1281,6 +1285,7 @@ static int hle_run(void)
 #define GTZ_SIDE 16u
 #define GTZ_CENTRE ((GTZ_Y0 + GTZ_SIDE / 2u) * GTZ_STRIDE + GTZ_X0 + GTZ_SIDE / 2u)
 #define GTZ_ZCLEAR 0x1234u
+#define GTZ_ZWORD(k) ((k) ^ 0x1020u)    /* the 16-bit word that holds pixel index k's depth */
 #define GTZ_COLOUR 0xff00ff00u      /* ABGR green: 5650 0x07e0 */
 #define GTZ_LIST_WORDS 96u
 #define GTZ_WAIT_POLLS 5000u        /* 5000 x 100 us: a half-second bound per draw */
@@ -1337,7 +1342,7 @@ static void gtz_prepare(void)
     volatile uint16_t *zb = (volatile uint16_t *)gtz_mirror(GTZ_ZB_OFFSET);
     for (uint32_t i = 0; i < GTZ_PIXELS; i++) {
         fb[i] = 0u;
-        zb[i] = (uint16_t)GTZ_ZCLEAR;
+        zb[GTZ_ZWORD(i)] = (uint16_t)GTZ_ZCLEAR;
     }
     __asm__ volatile("sync" ::: "memory");
 }
@@ -1458,7 +1463,7 @@ static void gtz_draw(const struct gtz_cell *c)
     uint32_t z_first = 0xffffffffu;
     for (uint32_t i = 0; i < GTZ_PIXELS; i++) {
         colour_written += fb[i] != 0u;
-        const uint32_t z = zb[i];
+        const uint32_t z = zb[GTZ_ZWORD(i)];
         if (z != GTZ_ZCLEAR) {
             if (z_changed == 0u) {
                 z_first = i;
@@ -1469,12 +1474,13 @@ static void gtz_draw(const struct gtz_cell *c)
         }
     }
     for (uint32_t i = 0; i < GTZ_SIDE; i++) {
-        s_gtz_row[i] = zb[(GTZ_Y0 + GTZ_SIDE / 2u) * GTZ_STRIDE + GTZ_X0 + i];
+        s_gtz_row[i] = zb[GTZ_ZWORD((GTZ_Y0 + GTZ_SIDE / 2u) * GTZ_STRIDE + GTZ_X0 + i)];
     }
     const uint32_t draw[16] = {(uint32_t)qid, (uint32_t)list_state, (uint32_t)draw_state,
                                elapsed, (uint32_t)idle, (uint32_t)reset_rc, words, c->zbits,
                                colour_written, fb[GTZ_CENTRE], z_changed, z_min, z_max, z_first,
-                               zb[GTZ_Y0 * GTZ_STRIDE + GTZ_X0], zb[GTZ_CENTRE]};
+                               zb[GTZ_ZWORD(GTZ_Y0 * GTZ_STRIDE + GTZ_X0)],
+                               zb[GTZ_ZWORD(GTZ_CENTRE)]};
     snprintf(row, sizeof(row), "%s-draw", c->name);
     hle_record(row, qid < 0 ? "FAIL" : idle ? "PASS" : "TIMEOUT", (uint32_t)qid, draw, 16);
     snprintf(row, sizeof(row), "%s-z", c->name);
