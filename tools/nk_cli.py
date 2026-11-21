@@ -4536,7 +4536,21 @@ def _schema_at_pointer(schema: dict, pointer: str) -> dict:
     return value
 
 
+# The JSON Schema keywords _validate_schema_value enforces, and the annotations it may ignore.
+# A schema node carrying any other keyword is refused, so a constraint is never skipped unseen.
+_SCHEMA_KEYWORDS_ENFORCED = frozenset({
+    "$ref", "type", "const", "enum", "pattern", "minimum", "uniqueItems", "minItems", "maxItems",
+    "items", "properties", "required", "propertyNames", "additionalProperties",
+})
+_SCHEMA_KEYWORDS_ANNOTATION = frozenset({
+    "$schema", "$id", "$comment", "$defs", "definitions", "title", "description", "default", "examples",
+})
+
+
 def _validate_schema_value(value, schema: dict, root_schema: dict, location: str) -> None:
+    unknown = sorted(set(schema) - _SCHEMA_KEYWORDS_ENFORCED - _SCHEMA_KEYWORDS_ANNOTATION)
+    if unknown:
+        raise ValueError(f"schema for {location} uses unsupported keywords: {', '.join(unknown)}")
     reference = schema.get("$ref")
     if reference is not None:
         if not reference.startswith("#/"):
@@ -4571,6 +4585,10 @@ def _validate_schema_value(value, schema: dict, root_schema: dict, location: str
     if isinstance(value, list):
         if schema.get("uniqueItems") and len(value) != len({json.dumps(item, sort_keys=True) for item in value}):
             raise ValueError(f"{location} contains duplicate items")
+        if "minItems" in schema and len(value) < schema["minItems"]:
+            raise ValueError(f"{location} has fewer items than its schema minimum")
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            raise ValueError(f"{location} has more items than its schema maximum")
         item_schema = schema.get("items")
         if item_schema is not None:
             for index, item in enumerate(value):

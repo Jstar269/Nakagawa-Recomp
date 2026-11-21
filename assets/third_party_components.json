@@ -2,7 +2,7 @@
   "$schema": "./third_party_components.schema.json",
   "name": "nakagawa-recomp-third-party-components",
   "schema_version": 1,
-  "description": "Single machine-readable source of truth for every third-party component that can enter a release artifact. tools/package_notices.py (native package), tools/generate_sbom.py (SBOM) and tools/test_third_party_notices.py (release gate) all read this file. A component without a spdx_id, a license text in the tree, and (for Python tools) a recorded license fails the gate.",
+  "description": "Single machine-readable source of truth for every third-party component that can enter a release artifact. tools/package_notices.py (native package), tools/generate_sbom.py (SBOM) and tools/test_third_party_notices.py (release gate) all read this file. A component without a spdx_id, a license text in the tree, and (for Python tools) a recorded license fails the gate. native.repository_components records vendored material that stays in the repository and never enters a package (no notice bundle, no SBOM entry); only the release gate reads it.",
   "version_source_policy": "No version literal is trusted. Native DLL versions are read from the toolchain's own pacman database (var/lib/pacman/local/<pkg>/desc); Python and npm versions are read from the declared lockfiles. Every license text under third_party/licenses/ was copied verbatim from the component's own distribution: the local toolchain package, or, for a text that package does not install, the upstream source at the exact tag; each record below names the exact file it was copied from.",
   "native": {
     "copy_routes": [
@@ -958,6 +958,26 @@
             "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-vulkan-loader: ucrt64/share/licenses/vulkan-loader/LICENSE",
             "toolchain_license_rel": "share/licenses/vulkan-loader/LICENSE",
             "sha256": "43c0a37e6a0fa7ff3c843b3ec5a4fac84b712558ddac103fbd4c1649662a9ece"
+          }
+        ]
+      }
+    ],
+    "repository_components": [
+      {
+        "id": "spdx-2.3-json-schema",
+        "name": "SPDX 2.3 JSON schema",
+        "spdx_id": "CC-BY-3.0",
+        "upstream_origin": "https://github.com/spdx/spdx-spec",
+        "upstream_revision": "v2.3 / aadf3b0b8dbbabdb4d880b0fc714255fea436ff7",
+        "disposition": "repository_test_data",
+        "copyright_notices": ["Copyright (C) 2010-2022 Linux Foundation and its Contributors"],
+        "source_paths": ["third_party/spdx/"],
+        "note": "Test data that is never shipped: the official schema (upstream schemas/spdx-schema.json), kept byte-identical as third_party/spdx/spdx-schema-2.3.json (third_party/spdx/PROVENANCE.md), against which tools/test_sbom_binding.py checks every generated SPDX document. No build, package, notice bundle or SBOM reads it; tools/package_notices.py and tools/generate_sbom.py do not read repository_components.",
+        "license_texts": [
+          {
+            "file": "third_party/spdx/LICENSE",
+            "copied_from": "spdx/spdx-spec upstream LICENSE (CC-BY-3.0) at commit aadf3b0b8dbbabdb4d880b0fc714255fea436ff7, imported byte-identical",
+            "sha256": "017e38491cccbd2bdb6da0a32a33db9ec245b5dab30fdcd09f2c742c975e5b35"
           }
         ]
       }
