@@ -289,6 +289,7 @@ typedef struct {
     uint32_t band_base;                /* ME allocation for the band buffers; 0 = none */
     uint32_t band_width, band_height;  /* the geometry the bands were sized for */
     uint32_t bands[VC_BAND_SETS][8];
+    int bands_from_earlier_open;       /* the bands outlived a re-open; the next picture may resize them */
 } VcContext;
 
 static VcContext s_vc[VC_MAX_CONTEXTS];
@@ -317,7 +318,30 @@ static void vc_stop_decoder(VcContext *c) {
     c->h264 = -1;
 }
 
-/* sceVideocodecOpen(ctx, type) */
+/* sceVideocodecOpen(ctx, type).
+ *
+ * A type 0 context the runtime already holds opens again and returns 0 (#2885). JPCSP-derived,
+ * not PSP-measured: jpcsp/jpcsp revision 00ac4d6daedd89c0492093ae83fb0d3d819af414,
+ * sceVideocodec.sceVideocodecOpen (with sceMeVideo.sceMeVideo_driver_C441994C, which it calls)
+ * writes the open words and returns 0 whatever the context held before; it keeps no per-context
+ * open state to refuse. A retail title's own module was observed opening a context again after
+ * giving back only its ME memory. No PSP cell measures a second Open (W-LLE-1, PSP-VCODEC-001);
+ * a measurement supersedes this. The first re-open of a run is logged once, by name.
+ *
+ * What the host model keeps across the re-open is this project's rule, not JPCSP's: the host
+ * decoder and the picture state go, as for a fresh open; the context's ME memory stays its own,
+ * since Open writes no EDRAM word and ReleaseEDRAM still frees it; and the band buffers stay
+ * allocated, so every band address an earlier decode wrote into guest structures still names
+ * live ME memory. The next picture reuses them, or replaces them when its size differs. */
+static int s_vc_reopen_noted;
+
+static void vc_note_reopen(void) {
+    if (s_vc_reopen_noted) return;
+    s_vc_reopen_noted = 1;
+    fprintf(stderr, "HLE: JPCSP-derived, not PSP-measured: sceVideocodecOpen (NID 0xc01ec829) "
+                    "opens a context the runtime already holds again and returns 0\n");
+}
+
 static uint32_t h_VideocodecOpen(CpuState *s) {
     const uint32_t ctx = A0, type = A1;
     if (type == VC_TYPE_SECOND && vc_guest_words(ctx, VC_CONTEXT_BYTES) && !vc_find(ctx)) {
@@ -332,16 +356,23 @@ static uint32_t h_VideocodecOpen(CpuState *s) {
         return vc_refuse("sceVideocodecOpen", "codec type other than 0 (AVC) is not modelled", VC_ERR_TYPE);
     if (!vc_guest_words(ctx, VC_CONTEXT_BYTES))
         return vc_refuse("sceVideocodecOpen", "context is not a writable 96-byte guest span", VC_ERR_GUEST_ADDRESS);
-    if (vc_find(ctx))
-        return vc_refuse("sceVideocodecOpen", "context is already open", VC_ERR_STATE);
-    VcContext *c = NULL;
-    for (int i = 0; i < VC_MAX_CONTEXTS && !c; i++)
-        if (!s_vc[i].used) c = &s_vc[i];
-    if (!c) return vc_refuse("sceVideocodecOpen", "no free host context slot", VC_ERR_STATE);
-    memset(c, 0, sizeof(*c));
-    c->used = 1;
-    c->ctx = ctx;
-    c->h264 = -1;
+    VcContext *c = vc_find(ctx);
+    if (c) {
+        vc_note_reopen();
+        vc_stop_decoder(c);
+        c->frame_count = 0u;
+        c->width = 0u;
+        c->height = 0u;
+        c->bands_from_earlier_open = c->band_base != 0u;
+    } else {
+        for (int i = 0; i < VC_MAX_CONTEXTS && !c; i++)
+            if (!s_vc[i].used) c = &s_vc[i];
+        if (!c) return vc_refuse("sceVideocodecOpen", "no free host context slot", VC_ERR_STATE);
+        memset(c, 0, sizeof(*c));
+        c->used = 1;
+        c->ctx = ctx;
+        c->h264 = -1;
+    }
     MEM_W32(ctx, VC_OPEN_WORD0);
     MEM_W32(ctx + 8u, VC_OPEN_WORD8);
     MEM_W32(ctx + 24u, VC_OPEN_EDRAM_BYTES);
@@ -619,6 +650,13 @@ static uint32_t h_VideocodecDecode(CpuState *s) {
         if (info.width <= 0 || info.height <= 0 || w > VC_MAX_WIDTH || h > VC_MAX_HEIGHT ||
             (w & 15u) || (h & 15u))
             return vc_refuse(call, "decoded picture is not whole macroblocks inside the host scratch", VC_ERR_DECODE);
+        /* Bands kept across a re-open are replaced when the new stream's picture size differs;
+         * this decode writes the new band addresses into the guest structures below. */
+        if (c->band_base && c->bands_from_earlier_open && (w != c->band_width || h != c->band_height)) {
+            (void)me_free(c->band_base, ME_OWNER_VIDEO, c->ctx);
+            c->band_base = 0u;
+        }
+        c->bands_from_earlier_open = 0;
         if (!c->band_base && !vc_allocate_bands(c, w, h))
             return vc_refuse(call, "ME RAM cannot hold the band buffers", VC_ERR_NO_ME_MEMORY);
         if (w != c->band_width || h != c->band_height)

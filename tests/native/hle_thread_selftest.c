@@ -711,8 +711,11 @@ void gui_pump(void) {
     if (s_test_gui_pump_polls) s_test_gui_poll_ns = sched_host_now_ns();
 }
 int gui_headless_acceptance_complete(void) { return 0; }
-/* sr_vblank_tick releases the presenter before its SR_EXIT_AT_VBLANK _Exit; this harness has none. */
-void gui_shutdown(void) {}
+/* The run end (sr_run_end) releases the presenter before its _Exit; this harness has none, so it
+ * says it was asked, and a stop's child log shows the release ran. */
+void gui_shutdown(void) {
+    fputs("gui_shutdown: the harness presenter is released\n", stderr);
+}
 uint32_t gui_buttons(void) { return s_test_gui_buttons | s_test_gui_pulse; }
 uint32_t gui_consume_button_pulses(void) {
     const uint32_t pulses = s_test_gui_pulse;
@@ -1115,12 +1118,13 @@ int g_hle_depth;
 jmp_buf g_hle_jmp;
 int sr_hit_hle;
 void sr_trace_close(void) {}
-static uint8_t s_heap_arena[1u << 20];
+/* Only the bump offset is tracked: the guest heap lives in PSP RAM, not in a host array. */
+enum { S_HEAP_ARENA_SIZE = 1u << 20 };
 static size_t s_heap_arena_off;
 uint32_t sr_newlib_malloc(uint32_t size, uint32_t guest_ra) {
     (void)guest_ra;
     size = (size + 15u) & ~15u;
-    if (s_heap_arena_off + size > sizeof(s_heap_arena)) return 0u;
+    if (s_heap_arena_off + size > (size_t)S_HEAP_ARENA_SIZE) return 0u;
     uint32_t p = 0x09000000u + (uint32_t)s_heap_arena_off;
     s_heap_arena_off += size;
     return p;
@@ -1340,6 +1344,10 @@ static void title_hle_write_cstr(uint32_t addr, const char *text) {
 
 static void test_guest_module_load_binding(void);
 static int runtime_module_path(char *out, size_t size, const char *file);
+/* The runtime's UTF-8 host-path layer (hle.c): the guest-module fixtures name SR_MODULE_DIR and
+ * write their files through it, as the loader reads them. */
+int sr_utf8_env_alloc(const wchar_t *name, char **value_out, int *present_out);
+FILE *sr_fopen_utf8(const char *path, const wchar_t *mode);
 
 /* #363: no title configuration arms an HLE display assist. For every profile the
  * production sceDisplaySetMode keeps its PSP success result and dispatches no guest body,
@@ -1564,7 +1572,9 @@ static int write_synthetic_guest_prx(const char *path) {
     fixture_wr32(strtab + 20, (uint32_t)sizeof(section_names));
     fixture_wr32(strtab + 32, 1);
 
-    FILE *f = fopen(path, "wb");
+    /* path is UTF-8 under SR_MODULE_DIR (runtime_module_path), which may hold characters
+     * outside the ANSI code page. */
+    FILE *f = sr_fopen_utf8(path, L"wb");
     if (!f) return 0;
     size_t written = fwrite(image, 1, sizeof(image), f);
     int close_result = fclose(f);
@@ -2296,11 +2306,18 @@ static int runtime_module_identity(const char *path, SrModuleCode *code) {
  * the title-config driver names. Unset or empty, the path is empty (nothing opens), never
  * "/file" at the filesystem root. Returns 1 when the directory is named and the path fits. */
 static int runtime_module_path(char *out, size_t size, const char *file) {
-    const char *root = getenv("SR_MODULE_DIR");
+    /* Read as UTF-8 the way the loader reads it, so a directory outside the ANSI code page is
+     * the one the fixture is written in. */
+    char *root = NULL;
+    int present = 0;
     if (!size) return 0;
     out[0] = '\0';
-    if (!root || !root[0]) return 0;
+    if (!sr_utf8_env_alloc(L"SR_MODULE_DIR", &root, &present) || !present || !root || !root[0]) {
+        free(root);
+        return 0;
+    }
     int written = snprintf(out, size, "%s/%s", root, file);
+    free(root);
     if (written <= 0 || (size_t)written >= size) {
         out[0] = '\0';
         return 0;
@@ -9596,7 +9613,8 @@ static void test_unregistered_batch_refusals(void) {
         uint32_t error;
         const char *name;
     } refused[] = {
-        {0x7ed59bc4u, 0x80020002u, "sceDisplaySetHoldMode"},
+        /* sceDisplaySetHoldMode left this list for a handler (#2886);
+         * test_display_set_hold_mode covers it. */
         {0x72189c48u, 0x80010086u, "sceImposeSetUMDPopup"},
         {0x8c943191u, 0x80010086u, "sceImposeGetBatteryIconStatus"},
         {0x0282a3bdu, 0x80010086u, "sceHttpGetContentLength"},
@@ -18357,6 +18375,85 @@ static void test_first_run_time_zone_comes_from_the_host(void) {
     sysreg_restart();
     rtc_expect_profile(60, 1u, 120, "the saved zone with no host time zone");
 
+    /* A corrupt overlay is ignored as a whole, so its saved zone is gone: that is a first run
+     * too, and the host's zone is seeded and saved, the ignored file kept as <file>.corrupt,
+     * rather than the oracle console's -300 (audit 2026-11-17, F-e01db03a). */
+    {
+        static const char corrupt[] = "not json {";
+        sysreg_scratch_clean();
+        sysreg_write_file(SYSREG_SCRATCH_FILE, corrupt, strlen(corrupt));
+        hle_test_setenv("SR_HOST_TIME_ZONE", "60,1");
+        sysreg_restart();
+        rtc_expect_profile(60, 1u, 120, "the host's zone over a corrupt overlay");
+        char *kept = sysreg_read_file(SYSREG_SCRATCH_FILE ".corrupt");
+        expect(kept && strcmp(kept, corrupt) == 0,
+               "seeding the host's zone over a corrupt overlay keeps it as <file>.corrupt");
+        free(kept);
+        hle_test_setenv("SR_HOST_TIME_ZONE", "-480,0");
+        sysreg_restart();
+        rtc_expect_profile(60, 1u, 120, "the zone seeded over a corrupt overlay is retained");
+        hle_test_setenv("SR_HOST_TIME_ZONE", NULL);
+    }
+
+    /* An overlay that exists but cannot be read is neither a first run nor a corrupt file: its
+     * contents are unknown, so the host's zone is not seeded, the file is not moved aside, and no
+     * flush writes over it; once it can be read it loads as saved (audit 2026-11-17, F-e01db03a
+     * review). Windows holds it open without sharing; POSIX takes away its read permission, which
+     * root ignores, so root skips the case. */
+    {
+        static const char saved[] =
+            "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, \"categories\": [],"
+            " \"keys\": [{\"category\": \"/CONFIG/DATE\", \"name\": \"time_zone_offset\", \"type\": \"int\","
+            " \"value_hex\": \"1c020000\"}, {\"category\": \"/CONFIG/DATE\", \"name\": \"summer_time\","
+            " \"type\": \"int\", \"value_hex\": \"00000000\"}]}";
+        int locked = 0, skipped = 0;
+        sysreg_scratch_clean();
+        sysreg_write_file(SYSREG_SCRATCH_FILE, saved, strlen(saved));
+        hle_test_setenv("SR_HOST_TIME_ZONE", "60,1");
+        sysreg_restart();
+        rtc_expect_profile(540, 0u, 540, "a saved zone of +540 loads over the host's");
+#ifdef _WIN32
+        HANDLE held = CreateFileA(SYSREG_SCRATCH_FILE, GENERIC_READ, 0u, NULL, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL, NULL);
+        locked = held != INVALID_HANDLE_VALUE;
+#else
+        if (geteuid() != 0) {
+            locked = chmod(SYSREG_SCRATCH_FILE, 0) == 0;
+        } else {
+            skipped = 1;
+            fprintf(stderr, "SKIP: the unreadable-overlay case does not apply to root\n");
+        }
+#endif
+        if (locked) {
+            uint32_t r = 0u;
+            sysreg_restart();
+            rtc_expect_profile(-300, 1u, -240,
+                               "an unreadable overlay: the measured seed, not the host's zone");
+            uint32_t reg = sysreg_open_registry(2u, &r);
+            uint32_t cat = sysreg_open_category(reg, "/CONFIG/SYSTEM/XMB", 2u, &r);
+            const uint32_t set = sysreg_set_int(cat, "language", 4u);
+            const uint32_t locked_flush = sysreg_call(NID_SCE_REG_FLUSH_REGISTRY, reg, 0u, 0u, 0u, 0u);
+#ifdef _WIN32
+            CloseHandle(held);
+#else
+            chmod(SYSREG_SCRATCH_FILE, 0644);
+#endif
+            /* Readable again, in the same run: the flush still does not write over the file. */
+            const uint32_t later_flush = sysreg_call(NID_SCE_REG_FLUSH_REGISTRY, reg, 0u, 0u, 0u, 0u);
+            expect(set == 0u && locked_flush != 0u && later_flush != 0u,
+                   "a flush after an unreadable overlay fails (the change stays in memory)");
+            char *kept = sysreg_read_file(SYSREG_SCRATCH_FILE);
+            expect(kept && strcmp(kept, saved) == 0 && !sysreg_file_exists(SYSREG_SCRATCH_FILE ".corrupt"),
+                   "an unreadable overlay is left in place: not moved to <file>.corrupt, not written over");
+            free(kept);
+            sysreg_restart();
+            rtc_expect_profile(540, 0u, 540, "the overlay that could not be read loads once it can");
+        } else if (!skipped) {
+            expect(0, "the unreadable-overlay case can make the overlay unreadable");
+        }
+        hle_test_setenv("SR_HOST_TIME_ZONE", NULL);
+    }
+
     sysreg_scratch_clean();
     sysreg_restart();
 }
@@ -21335,6 +21432,62 @@ static void test_watchdog_no_new_frame_observation(void) {
     sr_watchdog_test_state(NULL, &d_after_refusal);
     expect(d_after_refusal == 600u,
            "a refused request does not reset the no-frame clock");
+}
+
+/* #2875: a thread that never blocks starves every thread below its priority, and at the stall
+ * event it is RUNNING, so it sat in none of the ready/delay/wait counts and the event showed only
+ * the threads it starved. The summary counts it and names it: uid, priority, the import it keeps
+ * returning from, that import's value and how many times in a row. */
+static void test_watchdog_summary_names_running_thread(void) {
+    static const uint32_t NID_ATRAC_DECODE_DATA = 0x6a8c3cd5u;
+    reset_fixture();
+    sr_hle_init();
+    TCB *starved = fixture_thread(0x111u, TH_READY, 32);
+    TCB *ticker = fixture_thread(0x124u, TH_WAIT_DELAY, 16);
+    TCB *busy = fixture_thread(0x130u, TH_RUNNING, 20);
+    (void)starved; (void)ticker;
+    busy->started = 1;
+    s_cur = (int)(busy - s_tcb);
+    for (unsigned i = 0; i < 1000u; i++) sched_note_import_return(NID_ATRAC_DECODE_DATA, 0u);
+
+    SrSchedWatchdogSummary s;
+    sched_watchdog_summary(&s);
+    expect(s.ready == 1u && s.delay == 1u && s.wait == 0u,
+           "stall summary: the starved and delayed threads keep their counts");
+    expect(s.running == 1u && s.busy_valid && s.busy_uid == 0x130u && s.busy_priority == 20,
+           "stall summary: the non-yielding RUNNING thread is counted and named with its priority");
+    expect(s.busy_import_valid && strcmp(s.busy_import, "sceAtracDecodeData") == 0 &&
+               s.busy_import_ret == 0u && s.busy_import_repeats == 1000u,
+           "stall summary: the busy thread's last import, its value and its repeat count");
+
+    char line[256];
+    (void)sched_watchdog_summary_format(&s, line, sizeof line);
+    expect(strncmp(line, "ready=1 delay=1 wait=0 spin=", 28) == 0 &&
+               strstr(line, " running=1 busy_uid=0x130 busy_pri=20 busy_import=sceAtracDecodeData"
+                            " busy_import_ret=0x00000000 busy_repeats=1000") != NULL,
+           "stall summary: the original fields come first, in their order, then the new ones");
+
+    /* An import with no known name is labelled "nid 0x...", which has a space. It must stay
+       one token, or the player's key=value reader drops the busy thread from the report. */
+    static const uint32_t NID_UNNAMED = 0xdeadbeefu;
+    for (unsigned i = 0; i < 3u; i++) sched_note_import_return(NID_UNNAMED, 0x80020001u);
+    sched_watchdog_summary(&s);
+    (void)sched_watchdog_summary_format(&s, line, sizeof line);
+    expect(s.busy_import_valid && strcmp(s.busy_import, "nid_0xdeadbeef") == 0 &&
+               s.busy_import_ret == 0x80020001u && s.busy_import_repeats == 3u &&
+               strstr(line, " busy_import=nid_0xdeadbeef busy_import_ret=0x80020001"
+                            " busy_repeats=3") != NULL,
+           "stall summary: an unnamed import stays one token in the busy fields");
+
+    /* Nothing on the CPU (every thread parked): running=0 and no busy fields. */
+    busy->state = TH_WAIT_OBJ;
+    s_cur = -1;
+    sched_watchdog_summary(&s);
+    (void)sched_watchdog_summary_format(&s, line, sizeof line);
+    expect(s.running == 0u && !s.busy_valid && strstr(line, " running=0") != NULL &&
+               strstr(line, "busy_") == NULL,
+           "stall summary: with no running thread the line ends at running=0");
+    s_ntcb = 0;
 }
 
 /* #77 watchdog boundary semantics under coalesced VCOUNT advance.
@@ -25536,6 +25689,70 @@ static void test_mpeg_create_refused_in_interrupt(void) {
     reset_fixture();
 }
 
+/* sceDisplaySetHoldMode (#2886) through the production dispatch. Mode 0 from a guest thread
+ * returns 0: PSP-measured (project oracle, PSP-KERNEL-MISC-001 display-basic), so it takes no
+ * emulator-derived note. Any other mode from a thread returns 0 and is recorded: PPSSPP-derived,
+ * not PSP-measured (PPSSPP 77106069 accepts all values). From an interrupt handler the call
+ * answers ILLEGAL_CONTEXT and records nothing: JPCSP-derived, not PSP-measured (JPCSP 00ac4d6d
+ * checkInsideInterrupt). Each emulator-derived cell is noted once per run. The mode starts at 0. */
+#define NID_DISPLAY_SET_HOLD_MODE 0x7ed59bc4u
+extern int32_t sr_display_hold_mode(void);
+extern void sr_hle_test_display_hold_mode_reset(void);
+
+static void test_display_set_hold_mode(void) {
+    static const IcProbe hold = {
+        "sceDisplaySetHoldMode", NID_DISPLAY_SET_HOLD_MODE, "", ICG_NONE, 0,
+        {0, 0, 0, 0}, {IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN},
+        {IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN},
+        {IC_PREC_NA, IC_PREC_NA, IC_PREC_NA, IC_PREC_NA}, IC_HW_IMMEDIATE, NULL
+    };
+    static const uint32_t modes[] = { 0u, 1u, 0u, 2u, 0xffffffffu, 0x80000000u, 7u };
+    reset_fixture(); sr_hle_init();
+    sr_hle_test_display_hold_mode_reset();
+    s_vbl_next_us = UINT64_MAX;
+
+    expect(sr_hle_test_is_registered(NID_DISPLAY_SET_HOLD_MODE),
+           "hold-mode: sceDisplaySetHoldMode has a production registration");
+    expect(sr_display_hold_mode() == 0, "hold-mode: the mode starts at 0");
+
+    FILE *capture = NULL;
+    int saved_fd = -1;
+    char captured[2048];
+    int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    expect(capturing, "hold-mode: stderr capture for the first-use notes");
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+        expect(mpi_on_thread_a0(NID_DISPLAY_SET_HOLD_MODE, modes[i]) == 0u,
+               "hold-mode: a thread call returns 0 for any mode (not the old 0x80020002 refusal)");
+        expect(sr_display_hold_mode() == (int32_t)modes[i],
+               "hold-mode: the call records the mode it was given");
+    }
+
+    for (int round = 0; round < 2; round++) {
+        memset(&s_ic_probe_cpu, 0, sizeof s_ic_probe_cpu);
+        s_ic_probe_cpu.r[4] = 3u;
+        expect(ic_call_in_interrupt(&hold) == IC_RET(SCE_KERNEL_ERROR_ILLEGAL_CONTEXT),
+               "hold-mode: a call from an interrupt handler returns ILLEGAL_CONTEXT");
+        expect(sr_display_hold_mode() == 7,
+               "hold-mode: the refused interrupt call leaves the recorded mode alone");
+    }
+    if (capturing) {
+        captured[0] = '\0';
+        hle_data_stderr_capture_end(capture, saved_fd, captured, sizeof(captured));
+        fprintf(stderr, "%s", captured);
+        expect(count_occurrences(captured, "PPSSPP-derived, not PSP-measured: sceDisplaySetHoldMode") == 1 &&
+                   count_occurrences(captured, "sceDisplaySetHoldMode(1) records the mode") == 1,
+               "hold-mode: the PPSSPP-derived cell is noted once, on the first nonzero mode");
+        expect(count_occurrences(captured, "sceDisplaySetHoldMode(0)") == 0,
+               "hold-mode: the PSP-measured mode 0 takes no emulator-derived note");
+        expect(count_occurrences(captured, "JPCSP-derived, not PSP-measured: sceDisplaySetHoldMode from "
+                                           "an interrupt handler returns 0x80020064") == 1,
+               "hold-mode: the JPCSP-derived interrupt refusal is noted once");
+    }
+
+    sr_hle_test_display_hold_mode_reset();
+    reset_fixture();
+}
+
 static void run_worker(TCB *worker) {
     s_cur = (int)(worker - s_tcb);
     worker->state = TH_RUNNING;
@@ -28136,6 +28353,60 @@ static void test_callback_check_pump_services_pending_in_slot_order(void) {
     wakeup_delete_callback(first);
     wakeup_delete_callback(second);
     sr_test_guest_fn_reset();
+}
+
+/* The callback table holds the live callbacks, not every callback ever created: a full table
+ * drops the deleted slots before it grows, and the survivors keep creation order, so the pump
+ * still services them in slot order (audit 2026-11-17, F-319bda61). */
+static void test_callback_table_reuses_deleted_slots_in_creation_order(void) {
+    extern size_t s_callbacks_len;   /* the table's length (hle.c) */
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_test_register_guest_fn(WAKEUP_FIRST_ENTRY, wakeup_first_guest_fn);
+    sr_test_register_guest_fn(WAKEUP_SECOND_ENTRY, wakeup_second_guest_fn);
+    s_wakeup_log_len = 0u;
+
+    TCB *owner = fixture_thread(0x3418u, TH_RUNNING, 32);
+    owner->started = 1;
+    s_cur = (int)(owner - s_tcb);
+
+    /* Two survivors created before and after a long churn of created-and-deleted callbacks. */
+    uint32_t first = wakeup_create_callback(WAKEUP_FIRST_NAME, "churn-first",
+                                            WAKEUP_FIRST_ENTRY, WAKEUP_FIRST_COMMON);
+    int churned = 1;
+    for (unsigned i = 0; i < 10000u; i++) {
+        uint32_t uid = wakeup_create_callback(WAKEUP_SECOND_NAME, "churn", WAKEUP_SECOND_ENTRY, 0u);
+        churned &= uid != 0u;
+        wakeup_delete_callback(uid);
+    }
+    uint32_t second = wakeup_create_callback(WAKEUP_SECOND_NAME, "churn-second",
+                                             WAKEUP_SECOND_ENTRY, WAKEUP_SECOND_COMMON);
+    expect(churned && first != 0u && second != 0u,
+           "callback churn: 10 000 callbacks are created and deleted through the production NIDs");
+    char msg[160];
+    snprintf(msg, sizeof(msg), "callback churn: the table holds the 2 live callbacks within one "
+             "growth step (64 slots), not every callback created (len %zu)", s_callbacks_len);
+    expect(s_callbacks_len <= 2u + 64u, msg);
+    expect(sr_callback_find_in_table(first) >= 0 &&
+               sr_callback_find_in_table(first) < sr_callback_find_in_table(second),
+           "callback churn: the survivors keep creation order in the table");
+
+    expect(wakeup_notify(second, WAKEUP_SECOND_NOTIFY) == 0u &&
+               wakeup_notify(first, WAKEUP_FIRST_NOTIFY) == 0u,
+           "callback churn: both survivors are notified, the later one first");
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, hle_selftest_nid("sceKernelCheckCallback")) == 1u &&
+               s_wakeup_log_len == 2u &&
+               wakeup_log_is(0u, 1u, WAKEUP_FIRST_NOTIFY, WAKEUP_FIRST_COMMON) &&
+               wakeup_log_is(1u, 2u, WAKEUP_SECOND_NOTIFY, WAKEUP_SECOND_COMMON),
+           "callback churn: the pump services the survivors in creation order, each with its arguments");
+
+    wakeup_delete_callback(first);
+    wakeup_delete_callback(second);
+    sr_test_guest_fn_reset();
+    s_cur = -1;
 }
 
 /* A player quit request (#1392) notifies the callback registered with
@@ -63356,6 +63627,18 @@ static int run_atrac_zero_frame_child(const char *route) {
  * sees that the stop reached the dump's finish before the process ended. */
 #define TEXDUMP_STOP_CHILD "--texdump-stop-child="
 
+/* The handler the regfull route registers past HLE_CAP; never dispatched. */
+static uint32_t hle_registry_fill_handler(CpuState *s) {
+    (void)s;
+    return 0u;
+}
+
+/* Stands in for the MPEG_PICTURES report in the watchsample route: it prints the reason= value
+ * the run end hands the PSMF A/V and MPEG report lines, so the parent can check it. */
+static void run_end_report_label_probe(const char *reason) {
+    fprintf(stderr, "RUN_END_REPORT_LABEL=[%s]\n", reason ? reason : "(null)");
+}
+
 /* The child changes directory as it starts, so its files are named from the parent's scratch root,
  * passed down in its argument after the route: --texdump-stop-child=<route>:<root>. */
 static int texdump_stop_paths(char *probe, char *log, size_t capacity, const char *root, const char *route) {
@@ -63430,8 +63713,151 @@ static int run_texdump_stop_child(const char *arg) {
             fclose(f);
             (void)sr_route_load(pad);
         }
+    } else if (strcmp(route, "watchsample") == 0) {
+        /* The watchdog stop runs the whole run end (audit 2026-11-17, F-1ee85ec7): the
+         * SR_SAMPLE_OUT rows sampled before it land, the presenter is released, and the PSMF
+         * A/V and MPEG report lines get the stop's one-token label (SR_MPEGAV turns them on). */
+        extern void sr_hle_test_state_sample_reset(void);
+        extern void sr_psmf_av_set_pictures_report(void (*report)(const char *reason));
+        hle_test_setenv("SR_MPEGAV", "1");
+        sr_psmf_av_set_pictures_report(run_end_report_label_probe);
+        char spec[MAX_PATH], csv[MAX_PATH];
+        const char *root = colon + 1;
+        if (snprintf(spec, sizeof(spec), "%s/texdump_stop_%s.spec", root, route) >= (int)sizeof(spec) ||
+            snprintf(csv, sizeof(csv), "%s/texdump_stop_%s.csv", root, route) >= (int)sizeof(csv))
+            return 96;
+        FILE *f = fopen(spec, "w");
+        if (!f) return 96;
+        fputs("count u32 0x09018500\n", f);
+        fclose(f);
+        hle_test_setenv("SR_SAMPLE_SPEC", spec);
+        hle_test_setenv("SR_SAMPLE_OUT", csv);
+        MEM_W32(0x09018500u, 7u);
+        sr_hle_test_state_sample_reset();
+        hle_test_setenv("SR_WATCHDOG_EXIT", "600");   /* no new frame for 600 vblanks: status 1 */
+        for (unsigned i = 0; i < 1300u; i++) { sr_display_advance_vcount(1u); sr_vblank_tick(); }
+    } else if (strcmp(route, "fbdump1") == 0) {
+        /* A NEXTFRAME (sync=1) flip is presented at the VBLANK: the armed present reports its
+         * capture there and the SR_FBDUMP verdict exit follows it (audit 2026-11-17, F-8972ffa6). */
+        hle_test_setenv("SR_FBDUMP", "1");
+        s_test_gui_on = 1;
+        sr_display_advance_vcount(1u);
+        (void)display_set(0x04000000u, 512, 3, 1);
+        sr_vblank_tick();
+    } else if (strcmp(route, "regfull") == 0) {
+        /* Synthetic NIDs no table uses, past HLE_CAP: each one the registry cannot hold is
+         * named as it is refused (audit 2026-11-17, F-dc2bea8c). Not a stop: returns 0. */
+        extern int sr_hle_test_registered_count(void);
+        for (uint32_t i = 0; i <= 1024u; i++)
+            sr_hle_register(0x7e570000u + i, "sceTestRegistryFill", hle_registry_fill_handler);
+        fflush(stderr);
+        return sr_hle_test_registered_count() == 1024 ? 0 : 97;
     }
     return 98;   /* the stop did not end the run */
+}
+
+/* Read a stop child's whole log (or CSV) into text; returns the byte count. */
+static size_t run_end_read_file(const char *path, char *text, size_t capacity) {
+    FILE *f = fopen(path, "rb");
+    size_t n = f ? fread(text, 1, capacity - 1u, f) : 0u;
+    if (f) fclose(f);
+    text[n] = '\0';
+    return n;
+}
+
+/* Run one stop child (run_texdump_stop_child's route) and read its log into text; returns the
+ * child's exit status, or -2 when its paths do not fit. */
+static int run_end_child(const char *self, const char *root, const char *route, char *text,
+                         size_t capacity) {
+    char probe[MAX_PATH], log[MAX_PATH], mode[MAX_PATH + 64];
+    text[0] = '\0';
+    const int m = snprintf(mode, sizeof(mode), "%s%s:%s", TEXDUMP_STOP_CHILD, route, root);
+    if (!self || m <= 0 || (size_t)m >= sizeof(mode) ||
+        !texdump_stop_paths(probe, log, sizeof(probe), root, route))
+        return -2;
+    remove(probe);
+    remove(log);
+    const int status = aot_spawn_self(self, mode);
+    (void)run_end_read_file(log, text, capacity);
+    return status;
+}
+
+/* A registration past HLE_CAP is named as it is refused, and sr_hle_init stops by name when
+ * one was (audit 2026-11-17, F-dc2bea8c); the registry this build fills stays below the cap. */
+static void test_registry_full_is_named(const char *self) {
+    extern int sr_hle_test_registered_count(void);
+    static char text[65536];
+    char root[MAX_PATH];
+    const int registered = sr_hle_test_registered_count();
+    expect(registered > 0 && registered < 1024,
+           "the HLE registry holds every handler this build registers, below HLE_CAP=1024");
+    if (!hle_scratch_root(root, sizeof(root))) {
+        expect(0, "registry full: the selftest knows its scratch root");
+        return;
+    }
+    const int status = run_end_child(self, root, "regfull", text, sizeof(text));
+    expect(status == 0 &&
+               strstr(text, "HLE: registry full (HLE_CAP=1024), sceTestRegistryFill (0x7e57") != NULL,
+           "a registration past HLE_CAP is named, not dropped without a word");
+}
+
+/* The SR_WATCHDOG_EXIT stop goes through the one run end, so it runs the finalizers its own copy
+ * of the list skipped: the presenter is released and the SR_SAMPLE_OUT file is closed with
+ * every row sampled before the stop (audit 2026-11-17, F-1ee85ec7). The SR_AUDIODUMP close in
+ * the same list is compiled out of this harness (hle_exit_close_audio_dump). The file is
+ * written in text mode, so a row ends in "\r\n" on Windows and "\n" elsewhere. */
+static void test_watchdog_stop_runs_the_run_end(const char *self) {
+    static char text[65536];
+    static char rows[16384];
+    char root[MAX_PATH], csv[MAX_PATH];
+    if (!hle_scratch_root(root, sizeof(root)) ||
+        snprintf(csv, sizeof(csv), "%s/texdump_stop_watchsample.csv", root) >= (int)sizeof(csv)) {
+        expect(0, "watchdog run end: the selftest knows its scratch root");
+        return;
+    }
+    remove(csv);
+    const int status = run_end_child(self, root, "watchsample", text, sizeof(text));
+    const size_t got = run_end_read_file(csv, rows, sizeof(rows));
+    size_t lines = 0u;
+    for (size_t k = 0; k < got; k++) lines += rows[k] == '\n';
+    size_t row_end = got;   /* the last row without its line end */
+    if (row_end > 0u && rows[row_end - 1u] == '\n') row_end--;
+    if (row_end > 0u && rows[row_end - 1u] == '\r') row_end--;
+    const int header_ok = strncmp(rows, "vblank,count\n", 13) == 0 ||
+                          strncmp(rows, "vblank,count\r\n", 14) == 0;
+    expect(status == 1 && strstr(text, "WATCHDOG: aborting after 600 vblanks") != NULL,
+           "the SR_WATCHDOG_EXIT stop ends the run with status 1");
+    expect(strstr(text, "gui_shutdown: the harness presenter is released") != NULL,
+           "the SR_WATCHDOG_EXIT stop releases the presenter (gui_shutdown) before it exits");
+    expect(header_ok && lines >= 500u && row_end < got && row_end >= 2u &&
+               memcmp(rows + row_end - 2u, ",7", 2u) == 0,
+           "the SR_WATCHDOG_EXIT stop lands every SR_SAMPLE_OUT row sampled before it "
+           "(hle_state_sample_close)");
+    expect(strstr(text, "RUN_END_REPORT_LABEL=[watchdog_exit]") != NULL,
+           "the SR_WATCHDOG_EXIT stop hands the PSMF A/V and MPEG report lines the one-token "
+           "label watchdog_exit, not a sentence");
+}
+
+/* SR_FBDUMP=<N> ends the run at the first armed present from vblank N on, whichever way the
+ * title flips: after a NEXTFRAME (sync=1) flip, sr_vblank_tick presents it, reports the capture
+ * and gives the verdict exit, through the run end (audit 2026-11-17, F-8972ffa6). This harness's
+ * presenter publishes no capture, so the policy status is 1. */
+static void test_fbdump_exits_after_a_nextframe_flip(const char *self) {
+    static char text[65536];
+    char root[MAX_PATH], probe[MAX_PATH], log[MAX_PATH];
+    if (!hle_scratch_root(root, sizeof(root)) ||
+        !texdump_stop_paths(probe, log, sizeof(probe), root, "fbdump1")) {
+        expect(0, "SR_FBDUMP sync=1: the selftest knows its scratch root");
+        return;
+    }
+    const int status = run_end_child(self, root, "fbdump1", text, sizeof(text));
+    FILE *pf = fopen(probe, "rb");
+    if (pf) fclose(pf);
+    expect(status == 1 && strstr(text, "present capture result=0") != NULL,
+           "SR_FBDUMP=1 after a NEXTFRAME (sync=1) flip reports the VBLANK's present capture and "
+           "exits with the policy status (1: nothing published)");
+    expect(pf != NULL, "the SR_FBDUMP exit after a NEXTFRAME flip goes through the run end "
+                       "(the texture dump's finish ran)");
 }
 
 static void test_texdump_finished_by_run_stops(const char *self) {
@@ -63495,8 +63921,8 @@ static void test_atrac_zero_frame_routes_322(const char *self) {
         "sceAtracGetRemainFrame after NO_DATA is written into a zero-frame track's context",
         "sceAtracGetRemainFrame after NO_DATA and sceAtracAddStreamData(id, 0) on a zero-frame track",
         "sceAtracDecodeData after NO_DATA and sceAtracAddStreamData(id, 0) on a zero-frame track",
-        "sceAtracGetBufferInfoForResetting after NO_DATA and sceAtracAddStreamData(id, 0) on a "
-        "zero-frame track",
+        ("sceAtracGetBufferInfoForResetting after NO_DATA and sceAtracAddStreamData(id, 0) on a "
+         "zero-frame track"),
     };
     char mode[96];
     char name[256];
@@ -63922,11 +64348,13 @@ static int hle_selftest_main(int argc, char **argv) {
     test_delay_thread_zero_loop_still_preempts_at_timeslice();
     test_delay_threadcb_zero_bounds_a_self_renotifying_callback();
     test_callback_check_pump_services_pending_in_slot_order();
+    test_callback_table_reuses_deleted_slots_in_creation_order();
     test_quit_request_notifies_registered_exit_callback();
     test_quit_stop_decision();
     test_io_devctl_memstick_callback_notify();
     test_callback_wakeup_resumes_delay_wait_in_slot_order();
     test_display_frame_per_sec_float_return();
+    test_display_set_hold_mode();
     test_rtc_conversion_errors_and_full_range();
     test_rtc_pointer_validation_and_measured_conversions();
     test_rtc_local_time_follows_the_system_profile();
@@ -63958,6 +64386,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_display_capture_arms_on_latched_flip();
     test_display_capture_windows_alone_select_fbsnap();
     test_watchdog_no_new_frame_observation();
+    test_watchdog_summary_names_running_thread();
     test_watchdog_fires_on_boundary_crossing_not_exact_multiple();
     test_interrupt_nid_semantics();
     test_is_cpu_intr_suspended_is_token_predicate();
@@ -64034,6 +64463,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_mp3_loadexec_reset();
     test_mp3_notify_past_area_end_reported();
     test_texdump_finished_by_run_stops(argc > 0 ? argv[0] : NULL);
+    test_registry_full_is_named(argc > 0 ? argv[0] : NULL);
+    test_watchdog_stop_runs_the_run_end(argc > 0 ? argv[0] : NULL);
+    test_fbdump_exits_after_a_nextframe_flip(argc > 0 ? argv[0] : NULL);
     test_td24d_hle_batch();
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();

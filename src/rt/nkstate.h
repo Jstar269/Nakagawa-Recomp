@@ -195,13 +195,15 @@ NkStateStatus nkstate_restore(const uint8_t *data, size_t len, const NkStateExpe
  * not flushed, so after a power loss path may still hold the earlier state. */
 NkStateStatus nkstate_write_file(const char *path, const NkStateBuf *image,
                                  char *detail, size_t detail_cap);
-/* Test seam: from now on, nkstate_write_file stops after after_bytes bytes and fails as a short
- * write would; below 0 turns it off (the default). Nothing in the runtime calls it. */
+#if defined(NK_NKSTATE_TEST_SEAMS)
+/* Test seam, present only in a build that defines NK_NKSTATE_TEST_SEAMS (the selftest): from now
+ * on, nkstate_write_file stops after after_bytes bytes and fails as a short write would; below 0
+ * turns it off (the default). */
 void nkstate_test_set_write_fault(long after_bytes);
-/* Test seam: from now on, a nonzero fail makes nkstate_write_file's flush to the disk fail, as a
- * failed fsync or FlushFileBuffers would; 0 turns it off (the default). Nothing in the runtime
- * calls it. */
+/* Test seam, same guard: from now on, a nonzero fail makes nkstate_write_file's flush to the disk
+ * fail, as a failed fsync or FlushFileBuffers would; 0 turns it off (the default). */
 void nkstate_test_set_sync_fault(int fail);
+#endif
 NkStateStatus nkstate_read_file(const char *path, NkStateBuf *out, char *detail, size_t detail_cap);
 
 /* Segment helpers for the two subsystems every state holds. */

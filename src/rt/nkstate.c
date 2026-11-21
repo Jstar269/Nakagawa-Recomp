@@ -465,17 +465,23 @@ NkStateStatus nkstate_restore(const uint8_t *data, size_t len, const NkStateExpe
 
 /* ---- files ----------------------------------------------------------------------- */
 
+#if defined(NK_NKSTATE_TEST_SEAMS)
 /* A test's write fault: below 0 off (the default), else the write stops after that many bytes
-   and fails as a short write would. Nothing in the runtime arms it. */
+   and fails as a short write would. Only a build that defines NK_NKSTATE_TEST_SEAMS (the
+   selftest) carries it; the runtime does not. */
 static long s_test_write_fault = -1;
 
 void nkstate_test_set_write_fault(long after_bytes) { s_test_write_fault = after_bytes; }
 
 /* A test's flush-to-disk fault: nonzero makes that step fail as a failed fsync or
-   FlushFileBuffers would. Nothing in the runtime arms it. */
+   FlushFileBuffers would. Same guard as above. */
 static int s_test_sync_fault = 0;
 
 void nkstate_test_set_sync_fault(int fail) { s_test_sync_fault = fail; }
+#else
+static const long s_test_write_fault = -1;
+static const int s_test_sync_fault = 0;
+#endif
 
 /* The temp file's bytes reach the disk: fsync on POSIX, FlushFileBuffers on Windows (the
    nk_input_profile.c pattern, with the result checked). */
