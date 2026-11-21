@@ -81,6 +81,8 @@ const LoveAllCredit g_love_all_credits[] = {
      "Kenney Vleugels (kenney.nl)"},
     {LOVE_ALL_ENTRY, "Redump PSP datfile",
      "the Redump project (redump.info)"},
+    {LOVE_ALL_ENTRY, "SPDX 2.3 JSON schema",
+     "the Linux Foundation and its contributors (the SPDX project)"},
     {LOVE_ALL_ENTRY, "Inno Setup 6.7.3",
      "Jordan Russell and Martijn Laan"},
     {LOVE_ALL_ENTRY, "LLVM 21.1.8",

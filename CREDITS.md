@@ -87,6 +87,11 @@ Nakagawa has since substantially extended and modified that codebase. This repos
   kept byte for byte. Redump's About page (<https://redump.info/about>, read 2026-11-12) says of its data: "This
   information is considered public domain to be used however people see fit - whether you are a researcher,
   academic, organization, or simply an individual verifying the data for your own media."
+- **SPDX 2.3 JSON schema — the Linux Foundation and its contributors (the SPDX project)** — CC-BY-3.0 (Creative
+  Commons Attribution 3.0 Unported). The official schema from [spdx/spdx-spec](https://github.com/spdx/spdx-spec),
+  tag `v2.3` (commit `aadf3b0b8dbbabdb4d880b0fc714255fea436ff7`), kept byte-identical with its `LICENSE` in
+  [`third_party/spdx/`](third_party/spdx/PROVENANCE.md); the SBOM tests check generated SPDX documents against it.
+  Copyright © 2010-2022 Linux Foundation and its Contributors.
 - **Inno Setup 6.7.3 — Jordan Russell and Martijn Laan** — the Inno Setup License (a permissive, no-copyleft licence; text pinned by hash in [`assets/upstream/innosetup.lock.json`](assets/upstream/innosetup.lock.json)). A build tool for the Windows installer, not vendored: `tools/build_installer.py` runs the user's own pinned copy. The installer's `Setup.exe` embeds Inno's unmodified loader, whose copyright notice and web addresses stay intact.
 - **LLVM 21.1.8 — the LLVM Project** — Apache-2.0 WITH LLVM-exception. clang, lld, compiler-rt builtins, libunwind,
   libc++abi and libc++, built by `tools/android_toolchain.py` from the pinned release tarball for the on-device C

@@ -52,6 +52,8 @@ def all_component_records(data: dict) -> dict[str, dict]:
         records[f"native.linked_components[{index}]"] = record
     for index, record in enumerate(native.get("host_resolved_components", [])):
         records[f"native.host_resolved_components[{index}]"] = record
+    for index, record in enumerate(native.get("repository_components", [])):
+        records[f"native.repository_components[{index}]"] = record
     if "project_output" in native:
         records["native.project_output"] = native["project_output"]
     return records
@@ -509,13 +511,18 @@ def _vendored_directories() -> list[Path]:
 
 
 class TestEveryUpstreamComponentHasARecord(unittest.TestCase):
-    """Vendored or derived code cannot ship without a record in the inventory (and so a package notice)."""
+    """Vendored or derived code cannot ship without a record in the inventory (and so a package notice).
+
+    Vendored material that never ships (native.repository_components, such as test data) still needs a record,
+    but gets no package notice.
+    """
 
     def setUp(self) -> None:
         native = inventory()["native"]
         self.records = [
             *native.get("linked_components", []),
             *native.get("host_resolved_components", []),
+            *native.get("repository_components", []),
             *native["dlls"].values(),
         ]
 
