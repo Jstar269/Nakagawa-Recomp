@@ -56,9 +56,11 @@ GitHub's free plan runs about 20 jobs at once for this repository. A full `CI` r
 change, a manual run, the nightly schedule, a merge group) used to need 23 jobs, so a second
 pull request's run waited for runners while the first ran. The same checks then ran in 14
 jobs; the Android launcher build (`android_build`), added later, makes 15, a fourth Python
-shard makes 16, a fourth Windows group makes 17, and installer and Windows-runtime changes add
-one path-gated Windows installer job. The nightly schedule and a manual run add the informational
-C coverage job (`c_coverage`): 19 jobs in all, with the installer job they also run. Nothing was dropped and no
+shard makes 16, a fourth Windows group makes 17, the short coverage upload job
+(`coverage_upload`), which starts only after the Python shards end, makes 18, and installer and
+Windows-runtime changes add one path-gated Windows installer job. The nightly schedule and a manual
+run add the informational C coverage job (`c_coverage`): 20 jobs in all, with the installer job
+they also run. Nothing was dropped and no
 command changed; jobs were merged and their steps run one after another. Three things differ in
 when or how a step runs, and none of them skips a step
 where it ran before:
@@ -80,6 +82,7 @@ The jobs:
 | `public_export` | 2 jobs: `public_export` 0.2 min, `profile_zero_fixture` 0.4 min | 1 job, about 0.7 min: the export audit, then the profile-zero fixture build |
 | `linux_gcc16` | 1 job, 3.3 min | unchanged (not required, a container job on a hosted runner) |
 | `c_coverage` ("C coverage (informational)") | not present | 1 job, added later, on the nightly schedule and a manual run only (not required, a hosted runner; [Coverage](#coverage)) |
+| `coverage_upload` ("Upload coverage to Codecov (informational)") | not present | 1 job, added later, about a minute after `python_tools` (and `c_coverage`) end: the only job with `id-token: write`, it runs no candidate byte (not required, a hosted runner; [Coverage](#coverage)) |
 | `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
 | `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, about 16 min, and three of about 14 min |
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7) |
@@ -113,14 +116,16 @@ The jobs:
 - **Python.** Four shards over the full suite, and four over the Makefile-coupled subset
   (see [Python test sharding](#python-test-sharding)). `test_production_smoke` alone takes
   about 16 minutes and has a shard to itself, so a fifth shard would not shorten the job.
-- **Windows.** The six parts keep their steps and conditions (`contains(matrix.parts, '<part>')`)
-  and run in four matrix groups: `smoke`, `routes`, `ladder-fuzz` (ladder, fuzz-0, fuzz-1)
+- **Windows.** The five parts keep their steps and conditions (`contains(matrix.parts, '<part>')`)
+  and run in four matrix groups: `smoke`, `routes`, `ladder-fuzz` (ladder, fuzz)
   and `selftests`. A group runs the shared setup and the runtime-object
   compile gate once, then its parts in the workflow's step order. Parts in one group share the
-  checkout and its build tree. The ladder builds under `build/platform-ladder`. The two fuzz
-  shards used to run on separate runners and now share `build/windows-runtime`; that is
-  harmless, because each regenerates its cases header and `vfpu_fuzz_build` has no output
-  file, so it always relinks and reruns the fuzzer. `smoke` and `routes` ran as one group
+  checkout and its build tree. The ladder builds under `build/platform-ladder`, the fuzzer under
+  `build/windows-runtime`. The synthetic VFPU fuzzer runs once over every case and fails unless it
+  tests them all. It used to run as two `FUZZ_CASE_SHARD` shards, then a third run to prove their
+  cover, all on this one runner once the shards shared a group, so the extra runs bought no
+  parallelism (audit 2026-11-17 F-fe9cc4cb). The shard selector stays for local runs, and
+  `VfpuFuzzShardTests` in `tools/test_public_ci_wiring.py` pins it. `smoke` and `routes` ran as one group
   until run 42870221118 measured it at 20 minutes, the longest job of a full run: the shared
   setup about 2.3 minutes, smoke's steps about 7 and routes' about 10.6 (`native-core-tests`
   alone 6.7). Apart, run 43055225113 measured `smoke` at 8.1 minutes and `routes` at 13.9,
@@ -511,9 +516,13 @@ Every step that installs Ubuntu packages (the native parts' dependencies, and
 workflow-level `NK_APT_INSTALL`. It installs only the packages that are missing, so an
 image that carries them needs no mirror. Otherwise it probes each mirror in
 `NK_APT_MIRRORS` once for the release's `InRelease`, points the Ubuntu sources at the
-mirrors that answered, in list order, and makes up to three attempts (3 minutes for the
-index update, 8 for the install), moving the head mirror to the end of the list after a
-failed one. The list starts with the Azure mirror and `archive.ubuntu.com` and goes on to
+mirrors that answered, in list order, and makes up to three attempts, moving the head mirror to
+the end of the list after a failed one. Each attempt bounds only its network phases: 3 minutes
+for the index update and 8 for downloading the packages (`apt-get install --download-only`).
+The install that then unpacks and configures them from the local archive has no per-attempt
+bound, because a kill while dpkg works leaves it interrupted and every later attempt would fail
+on that whichever mirror it used: the step's or job's own limit ends a hung install, and attempts
+2 and 3 first run `dpkg --configure -a` (audit 2026-11-17 F-e5b6b12f). The list starts with the Azure mirror and `archive.ubuntu.com` and goes on to
 mirrors outside `ubuntu.com`: on 2026-11-11 the hosted runners reached none of Canonical's
 hosts, and the image's own mirror list holds only those. apt checks every index against
 the Ubuntu archive key whichever mirror serves it: the helper keeps each source's
@@ -674,9 +683,11 @@ terminal present-fault cases each get a fresh process, because the renderer must
 device after a terminal failure; an exit 77 skip fails the gate. A separate step runs
 `gpu-coherence-selftest` the same way on lavapipe: the Vulkan backend's render-target coherence,
 texture cache, per-draw state template, filtering and blend cases against the software GE. A plain
-run's exit 77 also fails it, but the recipe passes three kinds of SKIP with the step still green: the
-gpu-timestamps legs (its own and the twin's), the interlock dst-read and stencil-once cells on a
-device that refuses the interlock, and `ge-first-bad-draw-selftest` (`GE_FBD_SKIP_STATUS=0`). Its scaled-upload case then runs alone at render scales 2 and 4, where
+run's exit 77 also fails it, and so does a `dst-read mutant N: SKIP` line in its log (audit
+2026-11-17 F-1cbdad44). The recipe passes two kinds of SKIP with the step still green: the
+gpu-timestamps legs (its own and the twin's) and `ge-first-bad-draw-selftest` (`GE_FBD_SKIP_STATUS=0`).
+The interlock dst-read and stencil-once cells would SKIP on a device that refuses the interlock, but the
+hosted lavapipe check before this step requires `VK_EXT_fragment_shader_interlock` and fails without it. Its scaled-upload case then runs alone at render scales 2 and 4, where
 every device pixel of an uploaded target must hold its guest pixel, and so does its mip-lod case,
 where the shader's per-fragment mip level must not change with the render scale, and so does its
 readback-rows case, where guest memory must get the top-left device pixel of each cell while the
@@ -712,15 +723,16 @@ twin must equal its image, and a full-colour twin of the overlapping pair must h
 channel, in drawing order on the interlock path. A device that refuses the
 interlock prints one SKIP line for each interlock leg, and the recipe's last line names every leg that printed a
 SKIP line (a leg that refuses the interlock, supersampling or the twin exits 0 without running its path), or says
-that every leg ran. The lavapipe step prints
-the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
+that every leg ran. The lavapipe step first requires
+`VK_EXT_fragment_shader_interlock` in the `vulkaninfo` output and fails without it, so the hosted interlock legs
+and mutants always run their path. The
 pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Four
 mutant targets follow, and each broken variant must fail its case with its own message:
 `gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
 (`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
 pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths sixteen ways
 (`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 17 run on the interlock path and are a SKIP on a device without it,
-the hosted lavapipe device included; 8 and 9 break the host twin's use of the interlock, 10 runs mutant 9 with the
+which fails the hosted step, whose lavapipe device has it; 8 and 9 break the host twin's use of the interlock, 10 runs mutant 9 with the
 full-colour twin, 3 sends all four kills back to the early depth test and 6, 11 and 12 one each, 13 makes the shader's depth
 test always pass, 14 skips the copy of the shader's depth back to the depth image, and 15 keeps such an op on the
 snapshot path as before the shader owned depth, 16 copies the twin's shader depth back into the image's, and 17
@@ -729,7 +741,7 @@ and `gpu-stencil-once-mutants` breaks the write-once stencil batch three ways (`
 reordering, every state called write-once, no depth condition).
 A mutant target that gets exit 77 (no Vulkan device) prints a SKIP line and fails with status 77, so a
 host without a device never counts a mutant killed; only an interlock leg on a device without the
-interlock is a SKIP that passes.
+interlock is a SKIP that passes the target, and the hosted step fails on a dst-read mutant's.
 A further step runs `gpu-ace-selftest` (Ace Mode's texture filtering: through-mode draws keep the PSP's
 sample points, a transformed linear draw gets the anisotropic sampler) and `gpu-mips-selftest` (host-built
 mip chains at render scales 4, 2 and 1, with 16x filtering and with mips off), then the mutants that must
@@ -1240,8 +1252,8 @@ whenever their jobs run; neither can change a gate's result.
   `src/rt/ge.c`. `-r` keeps system headers out, and reports for the tests' own sources (`tests/`,
   `tests/fixtures/`, `*selftest.c`, `*selftest.cpp`, `*selftest.inc`, `src/player/player_ui_test.c`) and for C
   generated into `build/` are dropped, as `tools/test_*.py` is for Python. Everything is
-  uploaded once, under `flags: c`. A failure in any earlier step skips the upload, so a
-  partial run uploads nothing and the `c` flag carries the last complete report forward.
+  kept as one artifact, which `coverage_upload` uploads once, under `flags: c`. A failure in any
+  earlier step keeps no artifact and skips the upload, so a partial run uploads nothing and the `c` flag carries the last complete report forward.
 
   Measured, with the command `native_tools` runs for each:
 
@@ -1318,11 +1330,37 @@ in run 43094169097. `c_coverage` took 24 min 35 s in run 43094169097:
 
 It took 19 min 42 s in run 43102622567, on the head that added these figures.
 
-Both reports are uploaded with `codecov/codecov-action` (pinned by commit SHA)
-under `flags: python` and `flags: c`, authenticated with the job's OIDC identity
-(`use_oidc: true`, which is why `python_tools` and `c_coverage` -- and only those two -- declare
-`id-token: write` beside `contents: read`). `fail_ci_if_error: false` keeps an
-upload or Codecov outage from failing the job.
+Both reports are uploaded by `coverage_upload`, a short job of its own, with
+`codecov/codecov-action` (pinned by commit SHA) under `flags: python` and `flags: c`,
+authenticated with that job's OIDC identity (`use_oidc: true`). `coverage_upload` is the only job
+that declares `id-token: write` beside `contents: read`, and no byte of the candidate may run in
+it. Its steps are the pinned checkout, artifact download and Codecov actions, with no `run` step,
+on a hosted `ubuntu-24.04` runner:
+
+- The checkout goes into `commit-files/` only so the uploader can list the commit's files for
+  Codecov's path fixing (`root_dir`). The Codecov steps run in the workspace root, which holds
+  nothing else, and the artifacts download under the runner's temporary directory.
+- `cleanup: true` makes the action's wrapper download its CLI into a fresh temporary directory
+  and run it from there. Without it the wrapper downloads to `./codecov` in its working
+  directory and runs whatever is at that path, so a candidate tree carrying its own `codecov`
+  entry there would run with the token (review of #2891).
+- `fail_ci_if_error: true` makes the wrapper stop when the CLI's download, signature or SHA-256
+  check fails. Under `false` it only prints those failures and runs the file anyway.
+- `plugins: noop` keeps the CLI from running any coverage tool.
+- `disable_file_fixes: true` keeps the CLI from opening the reports' source files to send line
+  fixes (blank lines, lone brackets). It would open them relative to its working directory, the
+  workspace root, which holds no source, and run 44930787068 stopped there with
+  `FileNotFoundError`. Codecov counts those lines as the reports give them.
+- The C steps carry `!cancelled()`, so a failed Python upload does not skip them.
+
+`python_tools` and `c_coverage`, which run the candidate's tests, keep the read-only token: each
+`python_tools` shard keeps its `coverage-python.xml` as the artifact `coverage-python-shard-<n>`,
+and `c_coverage` keeps its gcov reports as `coverage-c`. Before audit 2026-11-17 F-6a075a43 the
+two measuring jobs uploaded for themselves and held `id-token: write`, so any test or tool code in
+a same-repository head could mint the job's OIDC token. `coverage_upload` runs once `python_tools`
+or `c_coverage` has run, after both; it uploads the Python reports of every shard that passed and
+the C reports only after a complete `c_coverage` run. `ci_required` neither needs nor reads it, so
+an upload failure or a Codecov outage shows red on this job and never fails a gate.
 
 **The numbers are informational.** [`.github/codecov.yml`](../.github/codecov.yml) marks the
 project and patch status checks `informational: true`, so neither can block a
@@ -2132,7 +2170,7 @@ repository guarantee.
 ## Self-hosted Linux runners
 
 GitHub's free plan runs about 20 jobs at once for this repository, and one full CI run
-needs 17 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
+needs 18 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
 maintainer runs a small pool of self-hosted Linux runners, labelled `nk-wsl`, on their
 own PC. Contributors need nothing from it: every run they can start uses GitHub's
 hosted images, exactly as before.
