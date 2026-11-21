@@ -7,7 +7,6 @@ import contextlib
 import hashlib
 import io
 import json
-import os
 from pathlib import Path
 import sys
 import tempfile
@@ -18,12 +17,32 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 import generate_sbom
+import nk_cli
 import verify_sbom
 
 RELEASE_MANIFEST = ROOT / "assets" / "release_manifest.json"
 PY_LOCK = ROOT / "tools" / "requirements-lock.txt"
 PY_LOCK_ID = "SPDXRef-File-python-requirements-lock"
 PY_LOCK_IDENTITY = "tools/requirements-lock.txt"
+# The official SPDX 2.3 JSON schema, vendored byte-identical (third_party/spdx/PROVENANCE.md).
+SPDX23_SCHEMA = ROOT / "third_party" / "spdx" / "spdx-schema-2.3.json"
+
+
+def validate_spdx23(document):
+    """Raise ValueError unless ``document`` conforms to the vendored official SPDX 2.3 schema."""
+    schema = json.loads(SPDX23_SCHEMA.read_text(encoding="utf-8"))
+    nk_cli._validate_schema_value(document, schema, schema, "spdx")
+
+
+def schema_nodes(schema):
+    """Every subschema of ``schema`` that the validator can visit."""
+    yield schema
+    children = [*schema.get("properties", {}).values(), *schema.get("$defs", {}).values(),
+                *schema.get("definitions", {}).values()]
+    children += [schema[key] for key in ("items", "additionalProperties", "propertyNames")
+                 if isinstance(schema.get(key), dict)]
+    for child in children:
+        yield from schema_nodes(child)
 
 
 class BindingFixture(unittest.TestCase):
@@ -88,14 +107,24 @@ class TestStandardsConformantLockBinding(BindingFixture):
         self.assertIn((PY_LOCK_ID, "DEPENDENCY_MANIFEST_OF", "SPDXRef-Package-nakagawa-recomp"), relationships)
 
     def test_generated_document_validates_against_official_spdx23_schema(self):
-        schema_path = os.environ.get("SPDX23_SCHEMA_PATH")
-        try:
-            import jsonschema
-        except ImportError:
-            self.skipTest("official SPDX 2.3 schema or jsonschema not available")
-        if not (schema_path and Path(schema_path).is_file()):
-            self.skipTest("official SPDX 2.3 schema or jsonschema not available")
-        jsonschema.validate(self.generate(), json.loads(Path(schema_path).read_text(encoding="utf-8")))
+        validate_spdx23(self.generate())
+
+    def test_non_conforming_document_fails_the_official_spdx23_schema(self):
+        cases = {
+            "missing spdxVersion": (lambda d: d.pop("spdxVersion"), "missing a required field"),
+            "extra root field": (lambda d: d.__setitem__("lockEvidence", {}), "non-whitelisted field"),
+            "empty creators": (lambda d: d["creationInfo"].__setitem__("creators", []),
+                               "fewer items than its schema minimum"),
+            "unknown relationship type": (
+                lambda d: d["relationships"][0].__setitem__("relationshipType", "DEPENDS"),
+                "outside its schema enum"),
+        }
+        for name, (mutate, message) in cases.items():
+            with self.subTest(name):
+                document = self.generate()
+                mutate(document)
+                with self.assertRaisesRegex(ValueError, message):
+                    validate_spdx23(document)
 
     def test_no_machine_local_paths_in_generated_document(self):
         document = self.generate()
@@ -414,15 +443,8 @@ class TestRuntimeManifestBinding(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
 
     def test_bound_document_validates_against_official_spdx23_schema(self):
-        schema_path = os.environ.get("SPDX23_SCHEMA_PATH")
-        try:
-            import jsonschema
-        except ImportError:
-            self.skipTest("official SPDX 2.3 schema or jsonschema not available")
-        if not (schema_path and Path(schema_path).is_file()):
-            self.skipTest("official SPDX 2.3 schema or jsonschema not available")
         self.assertEqual(self.generate("--package-dir", str(self.bin))[0], 0)
-        jsonschema.validate(self.load("spdx"), json.loads(Path(schema_path).read_text(encoding="utf-8")))
+        validate_spdx23(self.load("spdx"))
 
     def test_generation_fails_closed_when_a_binary_no_longer_matches_the_manifest(self):
         (self.bin / "SDL3.dll").write_bytes(b"MZ other sdl3 bytes")
@@ -613,6 +635,40 @@ class TestDeclaredLockEnforcement(unittest.TestCase):
         self.lock.unlink()
         with self.assertRaises(generate_sbom.LockfileParseError):
             generate_sbom.resolve_declared_lockfile(self.manifest, self.manifest_path)
+
+
+class TestSchemaValidatorSubset(unittest.TestCase):
+    """nk_cli's JSON Schema subset checks every keyword of the vendored SPDX 2.3 schema."""
+
+    def test_vendored_spdx23_schema_uses_only_enforced_keywords(self):
+        schema = json.loads(SPDX23_SCHEMA.read_text(encoding="utf-8"))
+        self.assertEqual(schema["title"], "SPDX 2.3")
+        allowed = nk_cli._SCHEMA_KEYWORDS_ENFORCED | nk_cli._SCHEMA_KEYWORDS_ANNOTATION
+        for node in schema_nodes(schema):
+            self.assertLessEqual(set(node), allowed)
+
+    def test_min_and_max_items_are_enforced(self):
+        schema = {"type": "array", "minItems": 1, "maxItems": 2}
+        nk_cli._validate_schema_value(["a"], schema, schema, "list")
+        nk_cli._validate_schema_value(["a", "b"], schema, schema, "list")
+        with self.assertRaisesRegex(ValueError, "fewer items than its schema minimum"):
+            nk_cli._validate_schema_value([], schema, schema, "list")
+        with self.assertRaisesRegex(ValueError, "more items than its schema maximum"):
+            nk_cli._validate_schema_value(["a", "b", "c"], schema, schema, "list")
+
+    def test_unknown_keyword_is_refused_not_ignored(self):
+        schema = {"type": "string", "maxLength": 3}
+        with self.assertRaisesRegex(ValueError, "unsupported keywords: maxLength"):
+            nk_cli._validate_schema_value("ok", schema, schema, "name")
+        nested = {"type": "object", "properties": {"name": {"type": "string", "format": "uri"}}}
+        with self.assertRaisesRegex(ValueError, r"schema for doc\.name uses unsupported keywords: format"):
+            nk_cli._validate_schema_value({"name": "x"}, nested, nested, "doc")
+
+    def test_bringup_schema_uses_only_enforced_keywords(self):
+        schema = json.loads(nk_cli.BRINGUP_SCHEMA_PATH.read_text(encoding="utf-8"))
+        allowed = nk_cli._SCHEMA_KEYWORDS_ENFORCED | nk_cli._SCHEMA_KEYWORDS_ANNOTATION
+        for node in schema_nodes(schema):
+            self.assertLessEqual(set(node), allowed)
 
 
 if __name__ == "__main__":
