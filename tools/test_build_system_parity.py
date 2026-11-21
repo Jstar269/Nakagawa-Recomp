@@ -805,7 +805,7 @@ class HostNeutralSelftestWiringTests(unittest.TestCase):
             match = re.match(r"^([a-z0-9-]+-selftest):", line)
             if match is None:
                 continue
-            comment = []
+            comment: list[str] = []
             above = index - 1
             while above >= 0 and lines[above].startswith("#"):
                 comment.insert(0, lines[above])
