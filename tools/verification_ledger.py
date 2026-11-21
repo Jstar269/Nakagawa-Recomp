@@ -104,6 +104,16 @@ PPSSPP_BLOCKS = (
         "prefix": "h_Mp3",
         "reason": "sceMp3 block: derived-translated from PPSSPP at a pinned revision",
     },
+    {
+        "anchor": "sceNetAdhoc (PDP / PTP / PollSocket / SocketAlert)",
+        "prefix": "h_NetAdhoc",
+        "reason": "sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline)",
+    },
+    {
+        "anchor": "sceNetAdhocMatching (over PDP socket, PPSSPP/PSP wire compatible)",
+        "prefix": "h_NetAdhocMatching",
+        "reason": "sceNetAdhocMatching block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline)",
+    },
 )
 
 #: Census differential tests that compare a form with words a PSP measured. The census

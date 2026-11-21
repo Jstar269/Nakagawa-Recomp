@@ -1502,6 +1502,11 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->picker_folder[0] = '\0';
     settings->rebuild_prompt_version[0] = '\0';
     settings->developer_mode = false;
+    settings->online_play = false;
+    snprintf(settings->online_play_server, sizeof(settings->online_play_server), "%s",
+             NK_ADHOC_DEFAULT_SERVER);
+    settings->online_play_consent[0] = '\0';
+    settings->online_play_port_offset = NK_RELAY_PORT_OFFSET;
     snprintf(settings->nickname, sizeof(settings->nickname), "%s", NK_NICKNAME_DEFAULT);
     settings->nickname_asked = false;
     /* Authentic until the player chooses Enhanced; the parts keep their values while it
@@ -2312,6 +2317,58 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.discord_presence = discord_val;
     }
 
+    /* Ad hoc online play (#1139): off unless explicitly true with a valid server. Missing or
+       malformed fields fail closed without inheriting network_mode. */
+    {
+        NkJsonNode *adhoc_node = nk_json_obj_get(root, "online_play");
+        bool adhoc_val = false;
+        if (adhoc_node && nk_json_get_bool(adhoc_node, &adhoc_val)) {
+            app->settings.online_play = adhoc_val;
+        }
+        NkJsonNode *srv_node = nk_json_obj_get(root, "online_play_server");
+        if (srv_node != NULL) {
+            const char *srv = nk_json_get_string(srv_node);
+            if (srv && strlen(srv) < sizeof(app->settings.online_play_server) &&
+                nk_adhoc_relay_parse_server(srv, NULL, 0u, NULL, NULL)) {
+                snprintf(app->settings.online_play_server,
+                         sizeof(app->settings.online_play_server), "%s", srv);
+            } else {
+                app->settings.online_play = false;
+                snprintf(app->settings.online_play_server,
+                         sizeof(app->settings.online_play_server), "%s", NK_ADHOC_DEFAULT_SERVER);
+            }
+        }
+        /* The consent card's server: Online play stays on only for the server the player
+           chose TURN ON for (a file from before the card has none, so it reads off). */
+        NkJsonNode *consent_node = nk_json_obj_get(root, "online_play_consent");
+        const char *consent = consent_node ? nk_json_get_string(consent_node) : NULL;
+        if (consent && consent[0] && strlen(consent) < sizeof(app->settings.online_play_consent) &&
+            nk_adhoc_relay_parse_server(consent, NULL, 0u, NULL, NULL)) {
+            snprintf(app->settings.online_play_consent,
+                     sizeof(app->settings.online_play_consent), "%s", consent);
+        } else {
+            app->settings.online_play_consent[0] = '\0';
+        }
+        if (app->settings.online_play && !player_app_online_play_consented(&app->settings)) {
+            app->settings.online_play = false;
+            app->settings.online_play_consent[0] = '\0';
+            player_dev_log_add(app, "settings",
+                               "online play read as off: the consent card was not answered for %s",
+                               app->settings.online_play_server);
+        }
+        NkJsonNode *offset_node = nk_json_obj_get(root, "online_play_port_offset");
+        int64_t offset_val = 0;
+        if (offset_node && nk_json_get_int64(offset_node, &offset_val) && offset_val >= 0 &&
+            offset_val <= 65535) {
+            app->settings.online_play_port_offset = (uint32_t)offset_val;
+        } else if (offset_node) {
+            app->settings.online_play_port_offset = NK_RELAY_PORT_OFFSET;
+            player_dev_log_add(app, "settings",
+                               "online play port offset is not 0 to 65535; using %u",
+                               (unsigned)NK_RELAY_PORT_OFFSET);
+        }
+    }
+
     /* RetroAchievements is independent of the reserved network_mode switch and is off unless
        the file explicitly stores true. */
     NkJsonNode *achievements_node = nk_json_obj_get(root, "achievements_enabled");
@@ -2582,6 +2639,11 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
     fprintf(f, "  \"online_news\": %s,\n", app->settings.online_news ? "true" : "false");
     fprintf(f, "  \"online_reports\": %s,\n", app->settings.online_reports ? "true" : "false");
     fprintf(f, "  \"developer_mode\": %s,\n", app->settings.developer_mode ? "true" : "false");
+    fprintf(f, "  \"online_play\": %s,\n", app->settings.online_play ? "true" : "false");
+    player_settings_write_string(f, "online_play_server", app->settings.online_play_server);
+    player_settings_write_string(f, "online_play_consent", app->settings.online_play_consent);
+    fprintf(f, "  \"online_play_port_offset\": %u,\n",
+            (unsigned)app->settings.online_play_port_offset);
     play_settings_write(f, &app->settings);
     fprintf(f, "  \"reduce_motion\": %s,\n",
             app->settings.reduce_motion_choice == PLAYER_SYSTEM_CHOICE_ON ? "true" : "false");
@@ -4586,6 +4648,145 @@ void player_app_toggle_online_feature(PlayerApp *app, int feature) {
     maybe_persist_settings(app);
 }
 
+/* Online play (#1139). The consent card is the only way to turn it on: the settings are on
+   only while online_play_consent names online_play_server, and only TURN ON on the card for
+   that exact server writes it. */
+bool player_app_online_play_consented(const PlayerSettings *settings) {
+    return settings != NULL && settings->online_play && settings->online_play_consent[0] != '\0' &&
+           strcmp(settings->online_play_consent, settings->online_play_server) == 0 &&
+           nk_adhoc_relay_parse_server(settings->online_play_server, NULL, 0u, NULL, NULL);
+}
+
+/* While a game runs, turning Online play off creates the file the runtime watches
+   (SR_ADHOC_OFF_FILE, nk_launch_adhoc_off_path): every relay connection ends. A file that
+   cannot be made is said on the page, as the connection then lasts until the game ends. */
+static bool player_online_play_end_running(PlayerApp *app) {
+    char off_path[MAX_PATH_LEN + 32u];
+    FILE *f;
+    if (!nk_launch_adhoc_off_path(app->boot_event_file_path, off_path, sizeof(off_path))) {
+        return false;
+    }
+    f = nk_platform_fopen_private(off_path, "wb");
+    if (!f) return false;
+    if (fputs("online play turned off in the launcher\n", f) < 0) {
+        (void)fclose(f);
+        return false;
+    }
+    return fclose(f) == 0;
+}
+
+/* A turn-off file left from an earlier run with the same boot event path would end the
+   next run's connection: it is removed before each launch. One that cannot be removed leaves
+   that run's Online play off, which is said in the developer log. */
+static void player_online_play_clear_off_file(PlayerApp *app) {
+    char off_path[MAX_PATH_LEN + 32u];
+    if (!app || !nk_launch_adhoc_off_path(app->boot_event_file_path, off_path, sizeof(off_path))) {
+        return;
+    }
+    if (nk_remove_utf8(off_path) != 0 && !nk_platform_path_missing(off_path)) {
+        player_dev_log_add(app, "settings", "online play turn-off file could not be removed: %s",
+                           off_path);
+    }
+}
+
+void player_app_set_online_play(PlayerApp *app, bool on) {
+    if (!app) return;
+    if (on) {
+        /* The switch never turns Online play on by itself: it opens the card. */
+        (void)player_app_open_online_play_card(app, app->settings.online_play_server);
+        return;
+    }
+    app->settings.online_play = false;
+    app->settings.online_play_consent[0] = '\0';
+    app->online_play_card_server[0] = '\0';
+    if (app->is_game_running) {
+        if (player_online_play_end_running(app)) {
+            snprintf(app->online_play_notice, sizeof(app->online_play_notice), "%s",
+                     "Online play is off. The running game's connection has ended.");
+        } else {
+            snprintf(app->online_play_notice, sizeof(app->online_play_notice), "%s",
+                     "Online play is off from the next game. The running game could not be told, "
+                     "so its connection lasts until it closes.");
+        }
+    } else {
+        snprintf(app->online_play_notice, sizeof(app->online_play_notice), "%s",
+                 "Online play is off. Nothing connects.");
+    }
+    player_dev_log_add(app, "settings", "online play off (%s)", app->online_play_notice);
+    maybe_persist_settings(app);
+}
+
+bool player_app_open_online_play_card(PlayerApp *app, const char *server) {
+    if (!app) return false;
+    if (!server || !server[0] || strlen(server) >= sizeof(app->online_play_card_server) ||
+        !nk_adhoc_relay_parse_server(server, NULL, 0u, NULL, NULL)) {
+        /* Refused by name; the server in use and its consent stay as they were. */
+        const char *why = nk_adhoc_relay_server_problem(server);
+        snprintf(app->online_play_notice, sizeof(app->online_play_notice),
+                 "That server address was not used: %s. Online play was not changed.",
+                 why ? why : "it is not host, host:lobby_port or host:lobby_port,data_port");
+        player_dev_log_add(app, "settings", "online play card refused a server address: %s",
+                           why ? why : "invalid");
+        return false;
+    }
+    snprintf(app->online_play_card_server, sizeof(app->online_play_card_server), "%s", server);
+    player_dev_log_add(app, "settings", "online play consent card opened for %s", server);
+    player_app_set_view(app, VIEW_ONLINE_PLAY_CARD);
+    return true;
+}
+
+bool player_app_online_play_turn_on(PlayerApp *app) {
+    if (!app || !app->online_play_card_server[0] ||
+        !nk_adhoc_relay_parse_server(app->online_play_card_server, NULL, 0u, NULL, NULL)) {
+        return false;
+    }
+    snprintf(app->settings.online_play_server, sizeof(app->settings.online_play_server), "%s",
+             app->online_play_card_server);
+    snprintf(app->settings.online_play_consent, sizeof(app->settings.online_play_consent), "%s",
+             app->online_play_card_server);
+    app->settings.online_play = true;
+    app->online_play_card_server[0] = '\0';
+    snprintf(app->online_play_notice, sizeof(app->online_play_notice),
+             app->is_game_running ? "Online play is on with %s from the next game you start."
+                                  : "Online play is on with %s. It connects when a game uses "
+                                    "ad hoc play.",
+             app->settings.online_play_server);
+    player_dev_log_add(app, "settings", "online play on: TURN ON for %s",
+                       app->settings.online_play_server);
+    maybe_persist_settings(app);
+    player_app_set_view(app, VIEW_ONLINE_PLAY_SETTINGS);
+    return true;
+}
+
+void player_app_online_play_not_now(PlayerApp *app) {
+    if (!app) return;
+    app->online_play_card_server[0] = '\0';
+    player_dev_log_add(app, "settings", "online play consent card: NOT NOW");
+    player_app_set_view(app, VIEW_ONLINE_PLAY_SETTINGS);
+}
+
+bool player_app_set_online_play_port_offset(PlayerApp *app, const char *text) {
+    uint32_t value = 0u;
+    size_t len;
+    if (!app || !text) return false;
+    len = strlen(text);
+    if (len == 0u || len > 5u) goto refused;
+    for (size_t i = 0u; i < len; ++i) {
+        if (text[i] < '0' || text[i] > '9') goto refused;
+        value = value * 10u + (uint32_t)(text[i] - '0');
+    }
+    if (value > 65535u) goto refused;
+    app->settings.online_play_port_offset = value;
+    snprintf(app->online_play_notice, sizeof(app->online_play_notice),
+             "Port offset %u from the next game you start.", (unsigned)value);
+    player_dev_log_add(app, "settings", "online play port offset %u", (unsigned)value);
+    maybe_persist_settings(app);
+    return true;
+refused:
+    player_dev_log_add(app, "settings", "online play port offset refused: not 0 to 65535");
+    return false;
+}
+
 void player_app_set_developer_mode(PlayerApp *app, bool on) {
     if (!app) return;
     app->settings.developer_mode = on;
@@ -6442,6 +6643,10 @@ static bool player_prepare_boot_event_file(PlayerApp *app) {
         return false;
     }
 
+    /* An Online play turn-off file from an earlier run with this path must not end this
+       run's connection (#1139). */
+    player_online_play_clear_off_file(app);
+
     /* The path is UTF-8 under the cache folder: the narrow remove() misreads a
        folder name outside the ANSI code page on Windows (audit 2026-11-17). */
     int removal_result = nk_remove_utf8(app->boot_event_file_path);
@@ -7095,6 +7300,16 @@ void player_app_apply_settings_to_session(const PlayerSettings *settings,
     config->fullscreen = settings->fullscreen;
     config->master_volume = settings->master_volume;
     config->developer_mode = settings->developer_mode;
+    /* Only the server the consent card named connects (#1139). */
+    config->online_play = player_app_online_play_consented(settings);
+    config->online_play_port_offset = settings->online_play_port_offset <= 65535u
+        ? settings->online_play_port_offset : NK_RELAY_PORT_OFFSET;
+    if (config->online_play) {
+        snprintf(config->online_play_server, sizeof(config->online_play_server), "%s",
+                 settings->online_play_server);
+    } else {
+        config->online_play_server[0] = '\0';
+    }
     config->cheats = settings->cheats;
     snprintf(config->nickname, sizeof(config->nickname), "%s", settings->nickname);
     config->reduce_motion = settings->reduce_motion_choice == PLAYER_SYSTEM_CHOICE_ON

@@ -52,6 +52,7 @@ set(CORE_SOURCES
     src/core/nk_zip.c
     src/core/nk_steam_shortcuts.c
     src/core/nk_data_migrate.c
+    src/core/nk_adhoc_relay.c
     src/core/nk_memstick_layout.c
     src/core/generated/nk_title_catalog.c
 )
@@ -697,6 +698,23 @@ endif()
 add_test(NAME cover_art_test COMMAND test_cover_art)
 set_tests_properties(cover_art_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# The Online play server list (#1139) on a fake transport; it never touches the internet.
+add_executable(test_adhoc_servers
+    tests/native/test_adhoc_servers.c
+    tests/native/native_test_isolation.c
+    src/player/package_builder.c
+    src/player/adhoc_servers.c
+)
+target_include_directories(test_adhoc_servers PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player
+)
+target_link_libraries(test_adhoc_servers PRIVATE nakagawa_core)
+if(WIN32)
+    target_link_libraries(test_adhoc_servers PRIVATE winhttp bcrypt)
+endif()
+add_test(NAME adhoc_servers_test COMMAND test_adhoc_servers)
+
 # Discord status (#2259) on a fake transport and, on Windows, a fake pipe server with a
 # test-only name; it never opens Discord's own pipes.
 add_executable(test_discord_presence
@@ -873,6 +891,7 @@ if(BUILD_PLAYER)
         src/core/nk_achievements.c
         ${NK_RCHEEVOS_PLAYER_SOURCES}
         src/player/cover_art.c
+        src/player/adhoc_servers.c
         ${NK_UI_CORE_SOURCES}
         ${NK_UI_EDGE_SOURCES}
         src/ui/backend/nk_ui_sdlr.c
@@ -1111,6 +1130,9 @@ set(NK_RUNTIME_SOURCES
     src/rt/flash0_font.c
     src/rt/mp3_bridge.c
     src/core/nk_xb.c
+    src/core/nk_adhoc_relay.c
+    src/core/nk_adhoc_net.c
+    src/core/nk_adhoc_relay_client.c
     src/rt/prx_loader.c
     src/rt/sched.c
     src/rt/sr_coro.c
@@ -1343,6 +1365,9 @@ function(nk_add_title_runtime target package_dir title_id)
         $<TARGET_OBJECTS:${target}_atrac> $<TARGET_OBJECTS:${target}_h264>
         $<TARGET_OBJECTS:${target}_h264_api> $<TARGET_OBJECTS:${target}_gen>)
     target_link_libraries(${target} PRIVATE SDL3::SDL3 vulkan m)
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE ws2_32)
+    endif()
     if(ANDROID)
         target_link_libraries(${target} PRIVATE log android)
     endif()

@@ -705,6 +705,109 @@ static void test_bssid_skip_above_32_bits(void) {
     nk_loopnet_destroy(net);
 }
 
+static void test_ptp_loopback(void) {
+    NkAdhocLoopNet *net = nk_loopnet_create();
+    NkAdhocTransport *a = nk_loopnet_console(net, A), *b = nk_loopnet_console(net, B);
+    NkLobbyEvent ev[8];
+    login(a, k_a, "Alpha", k_game);
+    login(b, k_b, "Bravo", k_game);
+    a->ops->connect(a, k_g1);
+    b->ops->connect(b, k_g1);
+    (void)take(a, ev, 8);
+    (void)take(b, ev, 8);
+
+    const int ls = a->ops->ptp_listen(a, 0x3000u, 2);
+    CHECK(ls >= 0, "ptp_listen succeeds");
+    CHECK(a->ops->ptp_listen(a, 0x3000u, 1) == NK_NET_PORT_IN_USE, "duplicate ptp listen refused");
+
+    /* Connecting to a closed port refuses immediately. */
+    CHECK(b->ops->ptp_open(b, 0x4000u, k_a, 0x3999u) == NK_NET_CONNECTION_REFUSED,
+          "ptp_open to non-listening port refused");
+
+    const int cli = b->ops->ptp_open(b, 0x4001u, k_a, 0x3000u);
+    CHECK(cli >= 0 && b->ops->ptp_connect_poll(b, cli) == 1, "ptp_open connects to listener");
+
+    uint8_t peer_mac[6];
+    uint16_t peer_port = 0u;
+    const int srv = a->ops->ptp_accept(a, ls, peer_mac, &peer_port);
+    CHECK(srv >= 0 && memcmp(peer_mac, k_b, 6) == 0 && peer_port == 0x4001u,
+          "ptp_accept yields connected peer MAC and port");
+
+    uint32_t sent = 0u, got = 0u;
+    uint8_t buf[32];
+    CHECK(b->ops->ptp_send(b, cli, "hello-ptp", 9u, &sent) == NK_NET_OK && sent == 9u,
+          "ptp_send writes 9 bytes");
+    CHECK(a->ops->ptp_peek(a, srv) == 9u, "ptp_peek shows 9 buffered bytes");
+    CHECK(a->ops->ptp_recv(a, srv, buf, 5u, &got) == NK_NET_OK && got == 5u &&
+              memcmp(buf, "hello", 5) == 0,
+          "ptp_recv streams first slice");
+    b->ops->ptp_close(b, cli);
+    CHECK(a->ops->ptp_is_dead(a, srv), "ptp_is_dead reports peer close");
+    CHECK(a->ops->ptp_recv(a, srv, buf, sizeof buf, &got) == NK_NET_OK && got == 4u &&
+              memcmp(buf, "-ptp", 4) == 0,
+          "unread bytes still drain after peer close");
+    CHECK(a->ops->ptp_recv(a, srv, buf, sizeof buf, &got) == NK_NET_DEAD,
+          "after draining, ptp_recv reports NK_NET_DEAD");
+    a->ops->ptp_close(a, srv);
+    a->ops->ptp_close(a, ls);
+    nk_loopnet_destroy(net);
+}
+
+/* Audit 2026-11-17 (F-008632bb, F-4e51f13d): the medium refuses a local PTP port by the HLE
+ * layer's rule (hle_network.c adhoc_ptp_port_in_use, after PPSSPP's isPTPPortInUse): a listen only
+ * for another listener on the port, an open only for a stream with the same local port, peer MAC
+ * and peer port. A listener, its accepted children and streams to other peers share the port. */
+static void test_ptp_port_reuse(void) {
+    NkAdhocLoopNet *net = nk_loopnet_create();
+    NkAdhocTransport *a = nk_loopnet_console(net, A), *b = nk_loopnet_console(net, B);
+    NkAdhocTransport *c = nk_loopnet_console(net, C);
+    NkLobbyEvent ev[8];
+    login(a, k_a, "Alpha", k_game);
+    login(b, k_b, "Bravo", k_game);
+    login(c, k_c, "Charlie", k_game);
+    a->ops->connect(a, k_g1);
+    b->ops->connect(b, k_g1);
+    c->ops->connect(c, k_g1);
+    (void)take(a, ev, 8);
+    (void)take(b, ev, 8);
+    (void)take(c, ev, 8);
+    const int b_ls = b->ops->ptp_listen(b, 0x3100u, 2);
+    const int c_ls = c->ops->ptp_listen(c, 0x3100u, 2);
+    CHECK(b_ls >= 0 && c_ls >= 0, "port reuse: peers B and C listen on 0x3100");
+
+    /* A listens on 0x3000, then opens streams from 0x3000 to two different peers. */
+    const int ls = a->ops->ptp_listen(a, 0x3000u, 2);
+    CHECK(ls >= 0, "port reuse: A listens on 0x3000");
+    const int to_b = a->ops->ptp_open(a, 0x3000u, k_b, 0x3100u);
+    CHECK(to_b >= 0, "port reuse: A opens 0x3000 -> B beside its listener on 0x3000 (got %d)", to_b);
+    const int to_c = a->ops->ptp_open(a, 0x3000u, k_c, 0x3100u);
+    CHECK(to_c >= 0, "port reuse: A opens 0x3000 -> C beside a stream 0x3000 -> B (got %d)", to_c);
+    CHECK(a->ops->ptp_open(a, 0x3000u, k_b, 0x3100u) == NK_NET_PORT_IN_USE,
+          "port reuse: a second stream 0x3000 -> B:0x3100 is refused");
+    CHECK(a->ops->ptp_listen(a, 0x3000u, 1) == NK_NET_PORT_IN_USE,
+          "port reuse: a second listener on 0x3000 is refused");
+
+    /* B connects to A's listener; A accepts, closes the listener and listens again. */
+    const int cli = b->ops->ptp_open(b, 0x3200u, k_a, 0x3000u);
+    uint8_t peer_mac[6];
+    uint16_t peer_port = 0u;
+    const int child = cli >= 0 ? a->ops->ptp_accept(a, ls, peer_mac, &peer_port) : -1;
+    CHECK(child >= 0, "port reuse: A accepts B on 0x3000");
+    a->ops->ptp_close(a, ls);
+    const int ls2 = a->ops->ptp_listen(a, 0x3000u, 2);
+    CHECK(ls2 >= 0, "port reuse: A listens on 0x3000 again while the accepted child lives (got %d)",
+          ls2);
+
+    if (ls2 >= 0) a->ops->ptp_close(a, ls2);
+    if (child >= 0) a->ops->ptp_close(a, child);
+    if (cli >= 0) b->ops->ptp_close(b, cli);
+    if (to_b >= 0) a->ops->ptp_close(a, to_b);
+    if (to_c >= 0) a->ops->ptp_close(a, to_c);
+    b->ops->ptp_close(b, b_ls);
+    c->ops->ptp_close(c, c_ls);
+    nk_loopnet_destroy(net);
+}
+
 int main(void) {
     test_alone();
     test_login_rules();
@@ -722,6 +825,8 @@ int main(void) {
     test_drop_counts_reset_at_login();
     test_group_numbers_past_32_bits();
     test_bssid_skip_above_32_bits();
+    test_ptp_loopback();
+    test_ptp_port_reuse();
     if (g_failures) {
         fprintf(stderr, "test_nk_adhoc_net: %d failure(s)\n", g_failures);
         return 1;

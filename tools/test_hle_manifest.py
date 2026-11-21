@@ -84,6 +84,60 @@ ADHOCCTL_MODELLED = (
     "Term",
 )
 
+# #1139 opt-in online ad hoc tier (PPSSPP-derived, not PSP-measured): registered in
+# src/rt/hle_network.c, failing closed (0x80010086) unless SR_ADHOC_ENABLED=1.
+# Maps PSPSDK name -> C handler in src/rt/hle_network.c; the remaining 10 *GameMode* NIDs
+# from pspsdk_adhoc_refusals() stay static_unsupported (0x80010086).
+ADHOC_ONLINE_MODELLED = (
+    "sceNetAdhocctlJoin",
+    "sceNetAdhocctlGetAddrByName",
+    "sceNetAdhocctlGetNameByAddr",
+    "sceNetAdhocInit",
+    "sceNetAdhocTerm",
+    "sceNetAdhocPdpCreate",
+    "sceNetAdhocPdpDelete",
+    "sceNetAdhocPdpSend",
+    "sceNetAdhocPdpRecv",
+    "sceNetAdhocGetPdpStat",
+    "sceNetAdhocPtpOpen",
+    "sceNetAdhocPtpConnect",
+    "sceNetAdhocPtpListen",
+    "sceNetAdhocPtpAccept",
+    "sceNetAdhocPtpSend",
+    "sceNetAdhocPtpRecv",
+    "sceNetAdhocPtpFlush",
+    "sceNetAdhocPtpClose",
+    "sceNetAdhocGetPtpStat",
+    "sceNetAdhocMatchingInit",
+    "sceNetAdhocMatchingTerm",
+    "sceNetAdhocMatchingCreate",
+    "sceNetAdhocMatchingDelete",
+    "sceNetAdhocMatchingStart",
+    "sceNetAdhocMatchingStop",
+    "sceNetAdhocMatchingSelectTarget",
+    "sceNetAdhocMatchingCancelTarget",
+    "sceNetAdhocMatchingCancelTargetWithOpt",
+    "sceNetAdhocMatchingSetHelloOpt",
+    "sceNetAdhocMatchingGetHelloOpt",
+    "sceNetAdhocMatchingGetMembers",
+    "sceNetAdhocMatchingSendData",
+    "sceNetAdhocMatchingAbortSendData",
+    "sceNetAdhocMatchingGetPoolMaxAlloc",
+    "sceNetAdhocMatchingGetPoolStat",
+)
+
+ADHOC_ONLINE_EXTRA = (
+    "sceNetAdhocPollSocket",
+    "sceNetAdhocSetSocketAlert",
+    "sceNetAdhocGetSocketAlert",
+    "sceNetAdhocMatchingStart2",
+)
+
+
+def _adhoc_handler_name(api_name: str) -> str:
+    assert api_name.startswith("sce"), api_name
+    return f"h_{api_name[3:]}"
+
 
 def pspsdk_adhoc_refusals() -> dict[str, tuple[str, str]]:
     """The public ad hoc surface (#1139 phase 0): NID -> (name, refusal code).
@@ -1265,15 +1319,16 @@ citations (PSP-B1-01, no-colon forms) need their own check.
         self.assertNotIn("issue #31", source)
 
     def test_public_adhoc_surface_is_refused_by_name(self) -> None:
-        """#1139 phase 0: every public PSPSDK ad hoc NID is a named refusal, not an unknown NID.
+        """#1139: public PSPSDK ad hoc NIDs are either real handlers or named 0x80010086 refusals.
 
-        The split is the three public headers' prototype counts (22, 21 and 16). Network HLE
-        stays fail-closed (AGENTS.md section 5): each one refuses with the runtime's documented
-        SCE_KERNEL_ERROR_ERRNO_FUNCTION_NOT_SUPPORTED (0x80010086), not a measured result. The
-        exceptions are the 14 sceNetAdhocctl calls phase 1a models for a console alone, from PSP
-        recordings (ADHOCCTL_MODELLED, src/rt/hle_network.c); they open nothing either.
+        The split is the three public headers' prototype counts (22, 21 and 16 = 59 total):
+        the 14 lone-console sceNetAdhocctl calls (ADHOCCTL_MODELLED, PSP recordings) plus the
+        35 opt-in online handlers (ADHOC_ONLINE_MODELLED, PPSSPP-derived, returning 0x80010086
+        when offline) are registered in src/rt/hle_network.c as ``dedicated``. The 10 unbuilt
+        *GameMode* NIDs (plus sceNetAdhocDiscoverStop) stay ``controlled_unsupported``.
         """
         modelled = {f"sceNetAdhocctl{n}": f"h_NetAdhocctl{n}" for n in ADHOCCTL_MODELLED}
+        modelled.update({n: _adhoc_handler_name(n) for n in ADHOC_ONLINE_MODELLED})
         expected = pspsdk_adhoc_refusals()
         names = [name for name, _ in expected.values()]
         self.assertEqual(
@@ -1300,6 +1355,7 @@ citations (PSP-B1-01, no-colon forms) need their own check.
                         (reg["handler"], reg["owner_file"]), (modelled[name], "src/rt/hle_network.c")
                     )
                     continue
+                self.assertIn("GameMode", name)
                 self.assertEqual(
                     {k: baseline[nid].get(k) for k in ("name", "classification", "refusal_error", "status")},
                     {
@@ -1315,6 +1371,21 @@ citations (PSP-B1-01, no-colon forms) need their own check.
                     (reg["origin"], reg["handler"], reg["owner_file"]),
                     ("static_unsupported", "h_ControlledUnsupported",
                      f"src/rt/hle_{hle_manifest.subsystem_for(name)}.c"),
+                )
+        for name in ADHOC_ONLINE_EXTRA:
+            nid = f"0x{nid_name_proof.nid_of(name):08x}"
+            with self.subTest(nid=nid, name=name):
+                extra_reg: dict[str, Any] | None
+                if name == "sceNetAdhocMatchingStart2":
+                    extra_reg = next((r for r in self.regs.values() if r["name"] == name), None)
+                else:
+                    extra_reg = self.regs.get(int(nid, 16))
+                self.assertIsNotNone(extra_reg, f"{name} missing from production manifest")
+                assert extra_reg is not None
+                self.assertEqual(
+                    (extra_reg["name"], extra_reg["handler"], extra_reg["classification"],
+                     extra_reg["owner_file"]),
+                    (name, _adhoc_handler_name(name), "dedicated", "src/rt/hle_network.c"),
                 )
 
     def test_committed_baseline_is_current_and_reproducible(self) -> None:
@@ -1525,10 +1596,11 @@ static uint32_t h_SynthReal(CpuState *s) {
                 "0x8ab81558": ("sceMp3StartEntry", "0x80010086"),
                 "0x732b042a": ("sceMp3EndEntry", "0x80010086"),
                 # The 59 public PSPSDK ad hoc entry points refuse under the offline network policy (#1139).
-                # The sceNetAdhocctl calls a lone console models (ADHOCCTL_MODELLED) have their own
-                # handlers in src/rt/hle_network.c (#1139 phase 1a).
+                # The 14 lone-console sceNetAdhocctl calls (ADHOCCTL_MODELLED) plus the 35 opt-in
+                # online ad hoc calls (ADHOC_ONLINE_MODELLED) have their own handlers in
+                # src/rt/hle_network.c; the remaining 10 *GameMode* NIDs stay controlled_unsupported.
                 **{nid: entry for nid, entry in pspsdk_adhoc_refusals().items()
-                   if entry[0] not in {f"sceNetAdhocctl{n}" for n in ADHOCCTL_MODELLED}},
+                   if entry[0] not in ({f"sceNetAdhocctl{n}" for n in ADHOCCTL_MODELLED} | set(ADHOC_ONLINE_MODELLED))},
             },
         )
         self.assertEqual(

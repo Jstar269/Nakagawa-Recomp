@@ -44,7 +44,7 @@ static bool player_ui_test_parse_views(char *names, uint32_t *mask) {
         if (next) *next++ = '\0';
         if (!name[0]) return false;
         bool found = false;
-        for (int view = VIEW_LIBRARY; view <= VIEW_PROBLEM_REPORT; view++) {
+        for (int view = VIEW_LIBRARY; view <= VIEW_ONLINE_PLAY_SERVERS; view++) {
             if (strcmp(name, player_ui_test_view_name((PlayerView)view)) == 0) {
                 if ((unsigned)view >= 32) return false;
                 parsed_mask |= UINT32_C(1) << (unsigned)view;
@@ -609,6 +609,9 @@ const char *player_ui_test_view_name(PlayerView view) {
     case VIEW_BUILD_CACHE: return "build_cache";
     case VIEW_PSP_FONTS: return "psp_fonts";
     case VIEW_ONLINE_SETTINGS: return "online_settings";
+    case VIEW_ONLINE_PLAY_SETTINGS: return "online_play_settings";
+    case VIEW_ONLINE_PLAY_CARD: return "online_play_card";
+    case VIEW_ONLINE_PLAY_SERVERS: return "online_play_servers";
     case VIEW_UPDATES: return "updates";
     case VIEW_CONFIRM_FACTORY_RESET: return "confirm_factory_reset";
     case VIEW_ACCESSIBILITY_SETTINGS: return "accessibility_settings";
@@ -781,7 +784,8 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            "titles_pending=%d titles_failed=%d titles_unclaimed=%d "
            "prereq_items=%zu prereq_bytes=%llu game_running=%d build_stage=%d "
            "running=%d pixels=%016llx "
-           "render_ns=%llu package_validations=%llu online_mode=%d developer_mode=%d "
+           "render_ns=%llu package_validations=%llu "
+           "online_mode=%d developer_mode=%d online_play=%d online_play_server=%s "
            "dev_log_lines=%zu next_primary=%d next_primary_label=%s next_detail=%s "
            "next_preflight=%s next_preflight_code=%s next_preflight_detail=%s "
            "next_preflight_action=%s next_build_built=%d "
@@ -850,6 +854,8 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            (unsigned long long)render_elapsed_ns,
            (unsigned long long)validation_calls,
            app->settings.online_mode ? 1 : 0, app->settings.developer_mode ? 1 : 0,
+           app->settings.online_play ? 1 : 0,
+           app->settings.online_play_server[0] ? app->settings.online_play_server : "none",
            player_dev_log_count(app), next_primary, next_primary_label, next_detail,
            next_preflight, next_preflight_code, next_preflight_detail,
            next_preflight_action,
@@ -964,6 +970,7 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
 #include "nk_title_manifest.h"
 #include "update_check.h"
 #include "cover_art.h"
+#include "adhoc_servers.h"
 
 /* The cache-epoch build regression deliberately defers the automatic rescan
    for one invalidation so an old post-build latch cannot be completed by a
@@ -1380,8 +1387,8 @@ void player_ui_test_report_startup(const PlayerUiTest *t, const PlayerUiNk *next
         player_ui_nk_test_report_compatibility();
     }
     if (t->mode && getenv("NK_UI_TEST_REPORT_VIEWS") != NULL) {
-        /* Every PlayerView, VIEW_LIBRARY through the last, VIEW_PROBLEM_REPORT. */
-        for (int view = (int)VIEW_LIBRARY; view <= (int)VIEW_PROBLEM_REPORT; ++view) {
+        /* Every PlayerView, VIEW_LIBRARY through the last, VIEW_ONLINE_PLAY_SERVERS. */
+        for (int view = (int)VIEW_LIBRARY; view <= (int)VIEW_ONLINE_PLAY_SERVERS; ++view) {
             printf("[PLAYER_UI_TEST] view_coverage value=%d name=%s nk=%d\n", view,
                    player_ui_test_view_name((PlayerView)view),
                    player_ui_nk_draws_view(view) ? 1 : 0);
@@ -2302,6 +2309,24 @@ static bool player_cover_art_test_open(void *context, const char *url, const cha
 
 PackageHttpOpen player_ui_test_cover_art_transport(void) {
     return player_cover_art_test_open;
+}
+
+/* The Online play list (#1139): NK_UI_TEST_ADHOC_LIST names the file served for PPSSPP's list
+   URL. Without it the download fails, as one that cannot reach the server; nothing goes online. */
+static bool player_adhoc_list_test_open(void *context, const char *url, const char *allowed_hosts,
+                                        PackageHttpResponse *out) {
+    const char *path = getenv("NK_UI_TEST_ADHOC_LIST");
+    (void)context;
+    if (!url || strcmp(url, NK_ADHOC_LIST_URL) != 0) return false;
+    if (!allowed_hosts || strcmp(allowed_hosts, NK_ADHOC_LIST_HOST) != 0) return false;
+    printf("[PLAYER_UI_TEST] adhoc_list_request=%s\n", url);
+    fflush(stdout);
+    if (!path || !path[0]) return false;
+    return player_ui_test_file_response(path, url, out);
+}
+
+PackageHttpOpen player_ui_test_adhoc_list_transport(void) {
+    return player_adhoc_list_test_open;
 }
 
 /* The key update signatures are checked with: a TEST-ONLY key from

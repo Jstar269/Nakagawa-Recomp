@@ -71,6 +71,9 @@ instrumentation is this test's protection against the historical RAM runaway."
 #include "vfpu_tables.h"        /* sr_vfpu_sha256: enhancement data-file digests */
 #include "../../src/core/nk_shared_helpers.h" /* nk_sha256_*: the oracle artifact digest */
 #include "guest_interp.h"      /* SrGuestInterpCallBoundary: the dispatch entries defined below */
+#include "../core/nk_adhoc_net.h"
+#include "../core/nk_adhoc_relay.h"
+#include "../core/nk_adhoc_relay_client.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -85,10 +88,20 @@ instrumentation is this test's protection against the historical RAM runaway."
 #include <sys/stat.h>         /* stat: a SAVE's modification time */
 #include <time.h>             /* time: the host clock a SAVE's guest time is compared with */
 #ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <process.h>
 #include <windows.h>          /* the Win32-only fixtures: CreateProcessW respawn, the FindFirstFileW
                                  error classifier, the junction, GetModuleFileNameA */
 #else
+#include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>            /* AT_FDCWD */
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <pthread.h>
+#include <sys/select.h>
+#include <sys/socket.h>
 #endif
 
 /* The fixture path buffers are sized by the Win32 MAX_PATH. POSIX publishes no such
@@ -10536,6 +10549,3851 @@ static void test_adhocctl_handler_fault_stops(const char *self) {
            "adhocctl: the fault leaves a flight-recorder fatal for the handler, event 1");
     remove(log);
     remove(bundle);
+}
+
+/* #1139 online play: when SR_ADHOC_ENABLED=1 and SR_ADHOC_SERVER is set, sceNetAdhocInit and
+ * sceNetAdhocMatchingInit initialize cleanly (and when disabled they stay refused with 0x80010086). */
+static void test_adhoc_online_play_init_contract(void) {
+    extern void hle_net_reset(void);
+    const uint32_t loaded_end = adh_fixture_begin();
+    hle_test_setenv("SR_ADHOC_ENABLED", "1");
+    hle_test_setenv("SR_ADHOC_SERVER", "127.0.0.1:27312");
+    hle_net_reset();
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0x20000u; /* sceNetInit */
+    cpu.r[5] = 0x20u;
+    cpu.r[6] = 0x1000u;
+    cpu.r[7] = 0x20u;
+    cpu.r[8] = 0x1000u;
+    expect(sr_syscall(&cpu, 0x39af39a6u) == 0u, "adhoc online: sceNetInit succeeds");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0x20000u; /* sceNetAdhocInit(poolsize) */
+    uint32_t r_adhoc = sr_syscall(&cpu, 0xe1d621d7u);
+    expect(r_adhoc == 0u, "adhoc online: sceNetAdhocInit succeeds when SR_ADHOC_ENABLED=1");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0x20000u; /* sceNetAdhocMatchingInit(memsize) */
+    uint32_t r_match = sr_syscall(&cpu, 0x2a2a1e07u);
+    expect(r_match == 0u, "adhoc online: sceNetAdhocMatchingInit succeeds when SR_ADHOC_ENABLED=1");
+    hle_net_reset();
+    hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+    hle_test_setenv("SR_ADHOC_SERVER", NULL);
+    adh_fixture_end(loaded_end);
+}
+
+/* Verify that every online ad hoc NID stays fail-closed (0x80010086) while SR_ADHOC_ENABLED is
+ * off or unset, without locking NIDs against later opt-in activation. */
+static void test_adhoc_offline_refusal_stays_closed(void) {
+    extern void hle_net_reset(void);
+    static const struct { uint32_t nid; const char *name; } offline_nids[] = {
+        {0xe1d621d7u, "sceNetAdhocInit"},
+        {0xa62c6f57u, "sceNetAdhocTerm"},
+        {0x6f92741bu, "sceNetAdhocPdpCreate"},
+        {0x7f27bb5eu, "sceNetAdhocPdpDelete"},
+        {0xabed3790u, "sceNetAdhocPdpSend"},
+        {0xdfe53e03u, "sceNetAdhocPdpRecv"},
+        {0xc7c1fc57u, "sceNetAdhocGetPdpStat"},
+        {0xe08bdac1u, "sceNetAdhocPtpListen"},
+        {0x877f6d66u, "sceNetAdhocPtpOpen"},
+        {0x9df81198u, "sceNetAdhocPtpAccept"},
+        {0xfc6fc07bu, "sceNetAdhocPtpConnect"},
+        {0x4da4c788u, "sceNetAdhocPtpSend"},
+        {0x8bea2b3eu, "sceNetAdhocPtpRecv"},
+        {0x9ac2eeacu, "sceNetAdhocPtpFlush"},
+        {0x157e6225u, "sceNetAdhocPtpClose"},
+        {0xb9685118u, "sceNetAdhocGetPtpStat"},
+        {0x7a662d6bu, "sceNetAdhocPollSocket"},
+        {0x73bfd52du, "sceNetAdhocSetSocketAlert"},
+        {0x4d2ce199u, "sceNetAdhocGetSocketAlert"},
+        {0x2a2a1e07u, "sceNetAdhocMatchingInit"},
+        {0x7945ecdau, "sceNetAdhocMatchingTerm"},
+        {0xca5eda6fu, "sceNetAdhocMatchingCreate"},
+        {0xf16eaf4fu, "sceNetAdhocMatchingDelete"},
+        {0x93ef3843u, "sceNetAdhocMatchingStart"},
+        {0xe8454c65u, "sceNetAdhocMatchingStart2"},
+        {0x32b156b3u, "sceNetAdhocMatchingStop"},
+        {0x5e3d4b79u, "sceNetAdhocMatchingSelectTarget"},
+        {0xea3c6108u, "sceNetAdhocMatchingCancelTarget"},
+        {0x8f58bedfu, "sceNetAdhocMatchingCancelTargetWithOpt"},
+        {0xb58e61b7u, "sceNetAdhocMatchingSetHelloOpt"},
+        {0xb5d96c2au, "sceNetAdhocMatchingGetHelloOpt"},
+        {0xc58bcd9eu, "sceNetAdhocMatchingGetMembers"},
+        {0xf79472d7u, "sceNetAdhocMatchingSendData"},
+        {0xec19337du, "sceNetAdhocMatchingAbortSendData"},
+        {0x40f8f435u, "sceNetAdhocMatchingGetPoolMaxAlloc"},
+        {0x9c5cfb7du, "sceNetAdhocMatchingGetPoolStat"},
+        {0x5e7f79c9u, "sceNetAdhocctlJoin"},
+        {0x8916c003u, "sceNetAdhocctlGetNameByAddr"},
+        {0x99560abeu, "sceNetAdhocctlGetAddrByName"},
+    };
+    static const struct { uint32_t nid; const char *name; } ctl_preinit_nids[] = {
+        {0xe162cb14u, "sceNetAdhocctlGetPeerList"},
+        {0x81aee1beu, "sceNetAdhocctlGetScanInfo"},
+        {0x8db83fdcu, "sceNetAdhocctlGetPeerInfo"},
+    };
+    const uint32_t loaded_end = adh_fixture_begin();
+    hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+    hle_test_setenv("SR_ADHOC_SERVER", "socom.cc");
+    hle_net_reset();
+    for (int pass = 0; pass < 5; pass++) {
+        const char *en_vals[5] = {NULL, "0", "off", "false", "00"};
+        hle_test_setenv("SR_ADHOC_ENABLED", en_vals[pass]);
+        hle_net_reset();
+        CpuState cpu;
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = 0x20000u;
+        cpu.r[5] = 0x20u;
+        cpu.r[6] = 0x1000u;
+        cpu.r[7] = 0x20u;
+        cpu.r[8] = 0x1000u;
+        expect(sr_syscall(&cpu, 0x39af39a6u) == 0u, "adhoc offline: sceNetInit succeeds");
+        for (size_t i = 0; i < sizeof(offline_nids) / sizeof(offline_nids[0]); i++) {
+            char msg[160];
+            memset(&cpu, 0, sizeof(cpu));
+            uint32_t rc = sr_syscall(&cpu, offline_nids[i].nid);
+            snprintf(msg, sizeof(msg), "adhoc offline (pass %d): %s refuses with 0x80010086 (got 0x%08x)",
+                     pass, offline_nids[i].name, rc);
+            expect(rc == 0x80010086u, msg);
+        }
+        /* Lone-console adhocctl getters keep their PSP-measured pre-Init contract (0x80410b08)
+         * even when SR_ADHOC_SERVER is set without SR_ADHOC_ENABLED=1. */
+        for (size_t i = 0; i < sizeof(ctl_preinit_nids) / sizeof(ctl_preinit_nids[0]); i++) {
+            char msg[160];
+            memset(&cpu, 0, sizeof(cpu));
+            uint32_t rc = sr_syscall(&cpu, ctl_preinit_nids[i].nid);
+            snprintf(msg, sizeof(msg),
+                     "adhoc offline (pass %d): %s keeps pre-Init 0x80410b08 (got 0x%08x)",
+                     pass, ctl_preinit_nids[i].name, rc);
+            expect(rc == 0x80410b08u, msg);
+        }
+        hle_net_reset();
+    }
+    /* Enabling opt-in online play after offline refusals works (no permanent HLE lockout). */
+    hle_test_setenv("SR_ADHOC_ENABLED", "1");
+    hle_test_setenv("SR_ADHOC_SERVER", "127.0.0.1:27312");
+    hle_net_reset();
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0x20000u;
+    expect(sr_syscall(&cpu, 0xe1d621d7u) == 0u,
+           "adhoc offline->online: sceNetAdhocInit succeeds after offline refusal");
+    hle_net_reset();
+    hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+    hle_test_setenv("SR_ADHOC_SERVER", NULL);
+    adh_fixture_end(loaded_end);
+}
+
+enum {
+    ADH_P2_MAIN = 0x089e3f00u,
+    ADH_P2_MATCH_CB = 0x089e3f40u,
+    ADH_P2_SELF_MAC = 0x089e4000u,
+    ADH_P2_PEER_MAC = 0x089e4010u,
+    ADH_P2_FLIP_MAC = 0x089e4020u,
+    ADH_P2_NICK = 0x089e4040u,
+    ADH_P2_LEN = 0x089e4100u,
+    ADH_P2_PORT = 0x089e4110u,
+    ADH_P2_BUF = 0x089e4200u,
+    ADH_P2_STAT = 0x089e4600u,
+    ADH_P2_SDS = 0x089e4a00u,
+    ADH_P2_OPT = 0x089e4c00u
+};
+
+static NkAdhocLoopNet *s_adh_p2_net;
+static int s_adh_p2_loop_done;
+extern void hle_net_reset(void);
+static struct {
+    int count;
+    int event[16];
+    int optlen[16];
+    uint8_t opt[16][32];
+} s_adh_p2_match;
+
+static void adh_p2_match_cb_fn(CpuState *cpu) {
+    const int idx = s_adh_p2_match.count++;
+    if (idx < 16) {
+        s_adh_p2_match.event[idx] = (int)cpu->r[5];
+        int ol = (int)cpu->r[7];
+        if (ol < 0) ol = 0;
+        if (ol > 31) ol = 31;
+        s_adh_p2_match.optlen[idx] = (int)cpu->r[7];
+        for (int i = 0; i < ol; i++) s_adh_p2_match.opt[idx][i] = MEM_R8(cpu->r[8] + (uint32_t)i);
+        s_adh_p2_match.opt[idx][ol] = 0u;
+    }
+    cpu->r[2] = 0u;
+}
+
+static uint32_t adh_call5(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t t0) {
+    CpuState sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.r[4] = a0;
+    sc.r[5] = a1;
+    sc.r[6] = a2;
+    sc.r[7] = a3;
+    sc.r[8] = t0;
+    return sr_syscall(&sc, nid);
+}
+
+static uint32_t adh_call_full(uint32_t nid, uint32_t sp, uint32_t a0, uint32_t a1, uint32_t a2,
+                              uint32_t a3, uint32_t t0, uint32_t t1, uint32_t t2, uint32_t t3) {
+    CpuState sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.r[4] = a0;
+    sc.r[5] = a1;
+    sc.r[6] = a2;
+    sc.r[7] = a3;
+    sc.r[8] = t0;
+    sc.r[9] = t1;
+    sc.r[10] = t2;
+    sc.r[11] = t3;
+    sc.r[29] = sp;
+    return sr_syscall(&sc, nid);
+}
+
+static void adh_p2_wait_state(CpuState *cpu, uint32_t want_state, unsigned min_events) {
+    for (int i = 0; i < 80; i++) {
+        if (adh_state() == want_state && s_adh_events >= min_events) return;
+        cpu->r[4] = 50000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+}
+
+static void adh_p2_loop_main_fn(CpuState *cpu) {
+    static const uint8_t p0_mac[6] = {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x50u};
+    NkAdhocTransport *t0 = nk_loopnet_console(s_adh_p2_net, 0);
+    const uint8_t grp[8] = {'N', 'K', 'L', 'O', 'O', 'P', '0', '1'};
+    expect(t0->ops->login(t0, p0_mac, "PeerZero", "TEST00001") == NK_NET_OK &&
+           t0->ops->connect(t0, grp) == NK_NET_OK,
+           "adhoc loopnet: Peer 0 joins NKLOOP01");
+    int p0_pdp = t0->ops->pdp_open(t0, 0x3001u);
+    expect(p0_pdp >= 0, "adhoc loopnet: Peer 0 PDP socket opens");
+
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u,
+           "adhoc loopnet: sceNetInit succeeds");
+    expect(adh(0x0c622081u /* sceWlanGetEtherAddr */, ADH_P2_SELF_MAC, 0u, 0u) == 0u,
+           "adhoc loopnet: sceWlanGetEtherAddr gives local MAC");
+    uint8_t self_mac[6];
+    for (uint32_t i = 0u; i < 6u; i++) self_mac[i] = MEM_R8(ADH_P2_SELF_MAC + i);
+
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "adhoc loopnet: AdhocctlInit + AddHandler succeed");
+
+    /* Scan for NKLOOP01. */
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u, "adhoc loopnet: Scan starts");
+    adh_p2_wait_state(cpu, 0u, 1u);
+    expect(ADH_AT(0).event == 3 && ADH_AT(0).error == 0u, "adhoc loopnet: SCAN_COMPLETE fired");
+    MEM_W32(ADH_P2_LEN, 256u);
+    expect(adh(0x81aee1beu /* GetScanInfo */, ADH_P2_LEN, ADH_P2_BUF, 0u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 28u,
+           "adhoc loopnet: GetScanInfo returns one 28-byte entry");
+    char got_grp[9] = {0};
+    for (int i = 0; i < 8; i++) got_grp[i] = (char)MEM_R8(ADH_P2_BUF + 8u + (uint32_t)i);
+    expect(strcmp(got_grp, "NKLOOP01") == 0, "adhoc loopnet: GetScanInfo reports NKLOOP01");
+
+    /* Join NKLOOP01 (passing the SceNetAdhocctlScanInfo struct returned by GetScanInfo)
+     * and verify peer list / MAC matching / name resolution (PeerInfoEmu = 152 bytes). */
+    expect(adh(0x5e7f79c9u /* Join */, ADH_P2_BUF, 0u, 0u) == 0u,
+           "adhoc loopnet: Join starts");
+    adh_p2_wait_state(cpu, 1u, 2u);
+    expect(adh_state() == 1u && ADH_AT(1).event == 1, "adhoc loopnet: Join reaches CONNECTED");
+    MEM_W32(ADH_P2_LEN, 512u);
+    expect(adh(0xe162cb14u /* GetPeerList */, ADH_P2_LEN, ADH_P2_BUF, 0u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 152u,
+           "adhoc loopnet: GetPeerList returns 1 peer (152 bytes)");
+    for (uint32_t i = 0u; i < 6u; i++) {
+        MEM_W8(ADH_P2_PEER_MAC + i, p0_mac[i]);
+        MEM_W8(ADH_P2_FLIP_MAC + i, i == 0u ? (uint8_t)(p0_mac[i] ^ 0x02u) : p0_mac[i]);
+    }
+    expect(adh(0x8db83fdcu /* GetPeerInfo */, ADH_P2_FLIP_MAC, 152u, ADH_P2_STAT) == 0u,
+           "adhoc loopnet: GetPeerInfo matches peer ignoring MAC byte 0");
+    expect(adh(0x8916c003u /* GetNameByAddr */, ADH_P2_PEER_MAC, ADH_P2_NICK, 0u) == 0u &&
+           MEM_R8(ADH_P2_NICK) == 'P',
+           "adhoc loopnet: GetNameByAddr returns PeerZero");
+    MEM_W32(ADH_P2_LEN, 152u);
+    expect(adh(0x99560abeu /* GetAddrByName */, ADH_P2_NICK, ADH_P2_LEN, ADH_P2_BUF) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 152u,
+           "adhoc loopnet: GetAddrByName returns 152-byte peer info");
+
+    /* sceNetAdhocInit + PDP send/recv/stat/delete. */
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u,
+           "adhoc loopnet: sceNetAdhocInit succeeds");
+    const int32_t pdp_id = (int32_t)adh(0x6f92741bu /* PdpCreate */, ADH_P2_SELF_MAC, 0x3002u, 0x1000u);
+    expect(pdp_id > 0, "adhoc loopnet: PdpCreate succeeds");
+    const char *pdp_ping = "PING_PDP";
+    for (uint32_t i = 0u; i < 8u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)pdp_ping[i]);
+    expect(adh_call_full(0xabed3790u /* PdpSend */, cpu->r[29], (uint32_t)pdp_id, ADH_P2_PEER_MAC,
+                         0x3001u, ADH_P2_BUF, 8u, 0u, 0u, 0u) == 0u,
+           "adhoc loopnet: PdpSend succeeds");
+    uint8_t p0_rx[64] = {0}, p0_smac[6] = {0};
+    uint16_t p0_sport = 0u;
+    uint32_t p0_rlen = 0u;
+    expect(t0->ops->pdp_recv(t0, p0_pdp, p0_smac, &p0_sport, p0_rx, sizeof(p0_rx), &p0_rlen) == NK_NET_OK &&
+           p0_rlen == 8u && memcmp(p0_rx, "PING_PDP", 8u) == 0 && p0_sport == 0x3002u,
+           "adhoc loopnet: Peer 0 received PING_PDP from guest");
+    expect(t0->ops->pdp_send(t0, p0_pdp, self_mac, 0x3002u, "PONG_PDP", 8u) == NK_NET_OK,
+           "adhoc loopnet: Peer 0 replies PONG_PDP");
+    MEM_W32(ADH_P2_SDS, (uint32_t)pdp_id);
+    MEM_W32(ADH_P2_SDS + 4u, 0x0002u /* ADHOC_EV_RECV */);
+    MEM_W32(ADH_P2_SDS + 8u, 0u);
+    expect(adh(0x7a662d6bu /* PollSocket */, ADH_P2_SDS, 1u, 500000u) == 1u &&
+           (MEM_R32(ADH_P2_SDS + 8u) & 0x0002u) != 0u,
+           "adhoc loopnet: PollSocket reports PDP RECV");
+    MEM_W32(ADH_P2_LEN, 64u);
+    expect(adh_call_full(0xdfe53e03u /* PdpRecv */, cpu->r[29], (uint32_t)pdp_id, ADH_P2_BUF + 64u,
+                         ADH_P2_PORT, ADH_P2_BUF, ADH_P2_LEN, 0u, 1u /* NONBLOCK */, 0u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 8u && MEM_R16(ADH_P2_PORT) == 0x3001u,
+           "adhoc loopnet: PdpRecv reads PONG_PDP from port 0x3001");
+    expect(adh(0x7f27bb5eu /* PdpDelete */, (uint32_t)pdp_id, 0u, 0u) == 0u,
+           "adhoc loopnet: PdpDelete succeeds");
+
+    /* PTP listen/PollSocket(ACCEPT)/Accept/Send/Recv + PtpOpen/Connect. */
+    const int32_t ptp_srv = (int32_t)adh_call_full(0xe08bdac1u /* PtpListen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0x4001u, 0x1000u,
+                                                   100000u, 3u, 4u /* backlog */, 0u, 0u);
+    expect(ptp_srv > 0, "adhoc loopnet: PtpListen succeeds");
+    int p0_cli = t0->ops->ptp_open(t0, 0x4009u, self_mac, 0x4001u);
+    expect(p0_cli >= 0, "adhoc loopnet: Peer 0 connects to guest PTP listener");
+    MEM_W32(ADH_P2_SDS, (uint32_t)ptp_srv);
+    MEM_W32(ADH_P2_SDS + 4u, 0x0008u /* ADHOC_EV_ACCEPT */);
+    MEM_W32(ADH_P2_SDS + 8u, 0u);
+    expect(adh(0x7a662d6bu /* PollSocket */, ADH_P2_SDS, 1u, 500000u) == 1u &&
+           (MEM_R32(ADH_P2_SDS + 8u) & 0x0008u) != 0u,
+           "adhoc loopnet: PollSocket reports PTP ADHOC_EV_ACCEPT");
+    const int32_t ptp_child = (int32_t)adh_call5(0x9df81198u /* PtpAccept */, (uint32_t)ptp_srv,
+                                                 ADH_P2_BUF + 64u, ADH_P2_PORT, 0u, 1u);
+    expect(ptp_child > 0 && MEM_R16(ADH_P2_PORT) == 0x4009u,
+           "adhoc loopnet: PtpAccept returns child socket + peer port 0x4009");
+    uint32_t p0_sent = 0u;
+    expect(t0->ops->ptp_send(t0, p0_cli, "PTPHI", 5u, &p0_sent) == NK_NET_OK && p0_sent == 5u,
+           "adhoc loopnet: Peer 0 sends PTPHI");
+    MEM_W32(ADH_P2_LEN, 64u);
+    expect(adh_call5(0x8bea2b3eu /* PtpRecv */, (uint32_t)ptp_child, ADH_P2_BUF, ADH_P2_LEN, 0u, 1u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 5u,
+           "adhoc loopnet: guest PtpRecv gets PTPHI");
+    const char *ptp_ack = "PTPACK";
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)ptp_ack[i]);
+    MEM_W32(ADH_P2_LEN, 6u);
+    expect(adh_call5(0x4da4c788u /* PtpSend */, (uint32_t)ptp_child, ADH_P2_BUF, ADH_P2_LEN, 0u, 0u) == 0u &&
+           adh(0x9ac2eeacu /* PtpFlush */, (uint32_t)ptp_child, 0u, 0u) == 0u,
+           "adhoc loopnet: guest PtpSend + PtpFlush succeed");
+    expect(t0->ops->ptp_recv(t0, p0_cli, p0_rx, sizeof(p0_rx), &p0_rlen) == NK_NET_OK &&
+           p0_rlen == 6u && memcmp(p0_rx, "PTPACK", 6u) == 0,
+           "adhoc loopnet: Peer 0 reads PTPACK");
+    expect(adh(0x157e6225u /* PtpClose */, (uint32_t)ptp_child, 0u, 0u) == 0u &&
+           adh(0x157e6225u /* PtpClose */, (uint32_t)ptp_srv, 0u, 0u) == 0u,
+           "adhoc loopnet: PtpClose closes both child and listener");
+    (void)t0->ops->ptp_close(t0, p0_cli);
+
+    /* Client-initiated PTP (PtpOpen + PtpConnect). */
+    int p0_lsn = t0->ops->ptp_listen(t0, 0x4002u, 4);
+    expect(p0_lsn >= 0, "adhoc loopnet: Peer 0 PTP listener opens");
+    const int32_t ptp_out = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0u, ADH_P2_PEER_MAC, 0x4002u,
+                                                   0x1000u, 100000u, 3u, 0u);
+    expect(ptp_out > 0 && adh(0xfc6fc07bu /* PtpConnect */, (uint32_t)ptp_out, 0u, 1u) == 0u,
+           "adhoc loopnet: PtpOpen + PtpConnect connect synchronously over loopback");
+    expect(adh(0x157e6225u /* PtpClose */, (uint32_t)ptp_out, 0u, 0u) == 0u,
+           "adhoc loopnet: client PTP closed cleanly");
+    (void)t0->ops->ptp_close(t0, p0_lsn);
+
+    /* Matching Init / Create / Start / synthetic JOIN+DATA+BYE -> guest callback checks. */
+    sr_test_register_guest_fn(ADH_P2_MATCH_CB, adh_p2_match_cb_fn);
+    memset(&s_adh_p2_match, 0, sizeof(s_adh_p2_match));
+    int p0_match_pdp = t0->ops->pdp_open(t0, 0x5001u);
+    expect(p0_match_pdp >= 0, "adhoc loopnet: Peer 0 matching PDP opens");
+    expect(adh(0x2a2a1e07u /* MatchingInit */, 0x20000u, 0u, 0u) == 0u,
+           "adhoc loopnet: MatchingInit succeeds");
+    const uint32_t saved_sp0 = MEM_R32(cpu->r[29]);
+    MEM_W32(cpu->r[29], ADH_P2_MATCH_CB);
+    const int32_t mid = (int32_t)adh_call_full(0xca5eda6fu /* MatchingCreate */, cpu->r[29],
+                                               1u /* HOST */, 4u, 0x5001u, 0x1000u,
+                                               100000u, 100000u, 3u, 50000u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(mid > 0, "adhoc loopnet: MatchingCreate returns valid context");
+    for (uint32_t i = 0u; i < 5u; i++) MEM_W8(ADH_P2_OPT + i, (uint8_t)"HELLO"[i]);
+    expect(adh_call_full(0x93ef3843u /* MatchingStart */, cpu->r[29], (uint32_t)mid,
+                         0x30u, 0x2000u, 0x30u, 0x2000u, 5u, ADH_P2_OPT, 0u) == 0u,
+           "adhoc loopnet: MatchingStart succeeds");
+    /* Peer 0 sends JOIN with 2-byte opt, then DATA, then BYE. */
+    const uint8_t join_pkt[7] = {2u, 2u, 0u, 0u, 0u, 'H', 'I'};
+    expect(t0->ops->pdp_send(t0, p0_match_pdp, self_mac, 0x5001u, join_pkt, sizeof(join_pkt)) == NK_NET_OK,
+           "adhoc loopnet: Peer 0 sends MATCH_PKT_JOIN");
+    cpu->r[4] = 100000u;
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    expect(s_adh_p2_match.count >= 1 && s_adh_p2_match.event[0] == 2 /* REQUEST */,
+           "adhoc loopnet: Matching callback received EVENT_REQUEST");
+    expect(adh_call5(0x5e3d4b79u /* SelectTarget */, (uint32_t)mid, ADH_P2_PEER_MAC, 0u, 0u, 0u) == 0u,
+           "adhoc loopnet: MatchingSelectTarget succeeds");
+    const uint8_t acc_pkt[5] = {3u, 0u, 0u, 0u, 0u};
+    const uint8_t data_pkt[10] = {5u, 5u, 0u, 0u, 0u, 'M', 'D', 'A', 'T', 'A'};
+    const uint8_t bye_pkt[1] = {9u};
+    (void)t0->ops->pdp_send(t0, p0_match_pdp, self_mac, 0x5001u, acc_pkt, sizeof(acc_pkt));
+    (void)t0->ops->pdp_send(t0, p0_match_pdp, self_mac, 0x5001u, data_pkt, sizeof(data_pkt));
+    (void)t0->ops->pdp_send(t0, p0_match_pdp, self_mac, 0x5001u, bye_pkt, sizeof(bye_pkt));
+    cpu->r[4] = 100000u;
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    int saw_est = 0, saw_data = 0, saw_bye = 0;
+    for (int i = 0; i < s_adh_p2_match.count && i < 16; i++) {
+        if (s_adh_p2_match.event[i] == 7) saw_est = 1;
+        if (s_adh_p2_match.event[i] == 11 && strcmp((const char *)s_adh_p2_match.opt[i], "MDATA") == 0)
+            saw_data = 1;
+        if (s_adh_p2_match.event[i] == 10) saw_bye = 1;
+    }
+    expect(saw_est && saw_data && saw_bye,
+           "adhoc loopnet: Matching callback received ESTABLISHED, DATA(MDATA), BYE");
+    expect(adh(0x32b156b3u /* MatchingStop */, (uint32_t)mid, 0u, 0u) == 0u &&
+           adh(0xf16eaf4fu /* MatchingDelete */, (uint32_t)mid, 0u, 0u) == 0u &&
+           adh(0x7945ecdau /* MatchingTerm */, 0u, 0u, 0u) == 0u,
+           "adhoc loopnet: Matching Stop/Delete/Term succeed");
+    (void)t0->ops->pdp_close(t0, p0_match_pdp);
+    (void)t0->ops->pdp_close(t0, p0_pdp);
+
+    /* Teardown. */
+    expect(adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u) == 0u &&
+           adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u,
+           "adhoc loopnet: AdhocTerm + Disconnect succeed");
+    adh_p2_wait_state(cpu, 0u, 3u);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "adhoc loopnet: AdhocctlTerm + NetTerm succeed");
+    s_adh_p2_loop_done = 1;
+}
+
+static void test_adhoc_online_loopnet_e2e(void) {
+    extern void sr_hle_test_set_adhoc_transport(NkAdhocTransport *t);
+    s_adh_p2_net = nk_loopnet_create();
+    expect(s_adh_p2_net != NULL, "adhoc loopnet: create NkAdhocLoopNet");
+    if (!s_adh_p2_net) return;
+    s_adh_p2_loop_done = 0;
+    const uint32_t loaded_end = adh_fixture_begin();
+    sr_hle_test_set_adhoc_transport(nk_loopnet_console(s_adh_p2_net, 1));
+    adh_run(ADH_P2_MAIN, adh_p2_loop_main_fn);
+    expect(s_adh_p2_loop_done == 1, "adhoc loopnet: full two-console HLE flow completed");
+    hle_net_reset();
+    sr_hle_test_set_adhoc_transport(NULL);
+    adh_fixture_end(loaded_end);
+    nk_loopnet_destroy(s_adh_p2_net);
+    s_adh_p2_net = NULL;
+}
+
+/* ---- Audit 2026-11-17 regressions over a shim transport ------------------------------------
+ * The shim forwards every call to a loopnet console and can add lobby events a hostile server
+ * could send, answer pdp_recv with NK_NET_DEAD (a relay PDP stream that closed), or answer
+ * pdp_send with a fixed result. */
+typedef struct {
+    NkAdhocTransport base; /* first, so the HLE layer's pointer is the shim's */
+    NkAdhocTransport *inner;
+    NkLobbyEvent inject[8];
+    size_t inject_count;
+    int pdp_recv_dead;
+    int pdp_send_force; /* nonzero: pdp_send answers this NkNetResult */
+    int hold_lobby;     /* nonzero: take_events passes on at most hold_budget of the console's
+                           events, the rest wait in its queue (a slow lobby) */
+    size_t hold_budget;
+} AdhAuditShim;
+static AdhAuditShim s_adh_shim;
+
+#define SHIM_IN(t) (((AdhAuditShim *)(t))->inner)
+static void shim_pump(NkAdhocTransport *t) {
+    if (SHIM_IN(t)->ops->pump) SHIM_IN(t)->ops->pump(SHIM_IN(t));
+}
+static int shim_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], const char *nickname,
+                      const char *product) {
+    return SHIM_IN(t)->ops->login(SHIM_IN(t), mac, nickname, product);
+}
+static int shim_logout(NkAdhocTransport *t) { return SHIM_IN(t)->ops->logout(SHIM_IN(t)); }
+static int shim_connect(NkAdhocTransport *t, const uint8_t group[NK_RELAY_GROUP_LEN]) {
+    return SHIM_IN(t)->ops->connect(SHIM_IN(t), group);
+}
+static int shim_disconnect(NkAdhocTransport *t) { return SHIM_IN(t)->ops->disconnect(SHIM_IN(t)); }
+static int shim_scan(NkAdhocTransport *t) { return SHIM_IN(t)->ops->scan(SHIM_IN(t)); }
+static size_t shim_take_events(NkAdhocTransport *t, NkLobbyEvent *out, size_t max) {
+    AdhAuditShim *sh = (AdhAuditShim *)t;
+    if (sh->hold_lobby && max > sh->hold_budget) max = sh->hold_budget;
+    size_t n = max ? sh->inner->ops->take_events(sh->inner, out, max) : 0u;
+    if (sh->hold_lobby) sh->hold_budget -= n;
+    size_t k = 0u;
+    while (k < sh->inject_count && n < max) out[n++] = sh->inject[k++];
+    if (k) {
+        memmove(sh->inject, sh->inject + k, (sh->inject_count - k) * sizeof(sh->inject[0]));
+        sh->inject_count -= k;
+    }
+    return n;
+}
+static uint32_t shim_events_dropped(const NkAdhocTransport *t) {
+    const AdhAuditShim *sh = (const AdhAuditShim *)t;
+    return sh->inner->ops->events_dropped(sh->inner);
+}
+static int shim_pdp_open(NkAdhocTransport *t, uint16_t port) {
+    return SHIM_IN(t)->ops->pdp_open(SHIM_IN(t), port);
+}
+static int shim_pdp_send(NkAdhocTransport *t, int handle, const uint8_t mac[NK_RELAY_MAC_LEN],
+                         uint16_t port, const void *data, uint32_t len) {
+    if (((AdhAuditShim *)t)->pdp_send_force) return ((AdhAuditShim *)t)->pdp_send_force;
+    return SHIM_IN(t)->ops->pdp_send(SHIM_IN(t), handle, mac, port, data, len);
+}
+static int shim_pdp_recv(NkAdhocTransport *t, int handle, uint8_t mac[NK_RELAY_MAC_LEN],
+                         uint16_t *port, void *buf, uint32_t cap, uint32_t *len) {
+    if (((AdhAuditShim *)t)->pdp_recv_dead) return NK_NET_DEAD;
+    return SHIM_IN(t)->ops->pdp_recv(SHIM_IN(t), handle, mac, port, buf, cap, len);
+}
+static uint32_t shim_pdp_peek(NkAdhocTransport *t, int handle) {
+    if (((AdhAuditShim *)t)->pdp_recv_dead) return 0u;
+    return SHIM_IN(t)->ops->pdp_peek(SHIM_IN(t), handle);
+}
+static int shim_pdp_close(NkAdhocTransport *t, int handle) {
+    return SHIM_IN(t)->ops->pdp_close(SHIM_IN(t), handle);
+}
+static uint32_t shim_pdp_dropped(const NkAdhocTransport *t) {
+    const AdhAuditShim *sh = (const AdhAuditShim *)t;
+    return sh->inner->ops->pdp_dropped(sh->inner);
+}
+static int shim_ptp_listen(NkAdhocTransport *t, uint16_t sport, int backlog) {
+    return SHIM_IN(t)->ops->ptp_listen(SHIM_IN(t), sport, backlog);
+}
+static bool shim_ptp_accept_pending(const NkAdhocTransport *t, int listen_handle) {
+    const AdhAuditShim *sh = (const AdhAuditShim *)t;
+    return sh->inner->ops->ptp_accept_pending(sh->inner, listen_handle);
+}
+static int shim_ptp_accept(NkAdhocTransport *t, int listen_handle, uint8_t peer_mac[NK_RELAY_MAC_LEN],
+                           uint16_t *peer_port) {
+    return SHIM_IN(t)->ops->ptp_accept(SHIM_IN(t), listen_handle, peer_mac, peer_port);
+}
+static int shim_ptp_open(NkAdhocTransport *t, uint16_t sport, const uint8_t dst[NK_RELAY_MAC_LEN],
+                         uint16_t dport) {
+    return SHIM_IN(t)->ops->ptp_open(SHIM_IN(t), sport, dst, dport);
+}
+static int shim_ptp_connect_poll(NkAdhocTransport *t, int handle) {
+    return SHIM_IN(t)->ops->ptp_connect_poll(SHIM_IN(t), handle);
+}
+static int shim_ptp_send(NkAdhocTransport *t, int handle, const void *data, uint32_t len, uint32_t *sent) {
+    return SHIM_IN(t)->ops->ptp_send(SHIM_IN(t), handle, data, len, sent);
+}
+static int shim_ptp_recv(NkAdhocTransport *t, int handle, void *buf, uint32_t cap, uint32_t *len) {
+    return SHIM_IN(t)->ops->ptp_recv(SHIM_IN(t), handle, buf, cap, len);
+}
+static uint32_t shim_ptp_peek(NkAdhocTransport *t, int handle) {
+    return SHIM_IN(t)->ops->ptp_peek(SHIM_IN(t), handle);
+}
+static bool shim_ptp_is_dead(const NkAdhocTransport *t, int handle) {
+    const AdhAuditShim *sh = (const AdhAuditShim *)t;
+    return sh->inner->ops->ptp_is_dead(sh->inner, handle);
+}
+static int shim_ptp_close(NkAdhocTransport *t, int handle) {
+    return SHIM_IN(t)->ops->ptp_close(SHIM_IN(t), handle);
+}
+#undef SHIM_IN
+static const NkAdhocTransportOps s_adh_shim_ops = {
+    "audit-shim", shim_pump, shim_login, shim_logout, shim_connect, shim_disconnect, shim_scan,
+    shim_take_events, shim_events_dropped, shim_pdp_open, shim_pdp_send, shim_pdp_recv, shim_pdp_peek,
+    shim_pdp_close, shim_pdp_dropped, shim_ptp_listen, shim_ptp_accept_pending, shim_ptp_accept,
+    shim_ptp_open, shim_ptp_connect_poll, shim_ptp_send, shim_ptp_recv, shim_ptp_peek, shim_ptp_is_dead,
+    shim_ptp_close};
+
+static void adh_shim_inject_connect(const uint8_t mac[6], uint32_t peer_id, const char *nick) {
+    if (s_adh_shim.inject_count >= sizeof(s_adh_shim.inject) / sizeof(s_adh_shim.inject[0])) return;
+    NkLobbyEvent *ev = &s_adh_shim.inject[s_adh_shim.inject_count++];
+    memset(ev, 0, sizeof(*ev));
+    ev->kind = NK_LOBBY_CONNECT;
+    memcpy(ev->mac, mac, 6u);
+    snprintf(ev->nickname, sizeof(ev->nickname), "%s", nick);
+    ev->peer_id = peer_id;
+}
+
+static void adh_shim_inject_disconnect(uint32_t peer_id) {
+    if (s_adh_shim.inject_count >= sizeof(s_adh_shim.inject) / sizeof(s_adh_shim.inject[0])) return;
+    NkLobbyEvent *ev = &s_adh_shim.inject[s_adh_shim.inject_count++];
+    memset(ev, 0, sizeof(*ev));
+    ev->kind = NK_LOBBY_DISCONNECT;
+    ev->peer_id = peer_id;
+}
+
+static void adh_audit_delay(CpuState *cpu, uint32_t us) {
+    cpu->r[4] = us;
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+}
+
+/* 1 when GetPeerList lists exactly want[0..n) in some order. */
+static int adh_audit_peer_list_is(const uint8_t (*want)[6], int n) {
+    MEM_W32(ADH_P2_LEN, 2048u);
+    if (adh(ADH_NID_PEER_LIST, ADH_P2_LEN, ADH_P2_BUF, 0u) != 0u) return 0;
+    if (MEM_R32(ADH_P2_LEN) != (uint32_t)n * 152u) return 0;
+    for (int k = 0; k < n; k++) {
+        int found = 0;
+        for (int e = 0; e < n && !found; e++) {
+            int same = 1;
+            for (uint32_t b = 0u; b < 6u; b++)
+                if (MEM_R8(ADH_P2_BUF + (uint32_t)e * 152u + 132u + b) != want[k][b]) same = 0;
+            found = same;
+        }
+        if (!found) return 0;
+    }
+    return 1;
+}
+
+/* 1 when GetMembers answers exactly want[0..n), in that order. */
+static int adh_audit_members_are(int32_t mid, const uint8_t (*want)[6], int n) {
+    MEM_W32(ADH_P2_LEN, 120u);
+    if (adh(0xc58bcd9eu /* GetMembers */, (uint32_t)mid, ADH_P2_LEN, ADH_P2_BUF) != 0u) return 0;
+    if (MEM_R32(ADH_P2_LEN) != (uint32_t)n * 12u) {
+        fprintf(stderr, "  GetMembers: %u bytes, want %u\n", MEM_R32(ADH_P2_LEN), (unsigned)n * 12u);
+        return 0;
+    }
+    for (int i = 0; i < n; i++) {
+        for (uint32_t b = 0u; b < 6u; b++) {
+            if (MEM_R8(ADH_P2_BUF + (uint32_t)i * 12u + 4u + b) != want[i][b]) {
+                fprintf(stderr, "  GetMembers: entry %d byte %u is 0x%02x, want 0x%02x\n", i, b,
+                        MEM_R8(ADH_P2_BUF + (uint32_t)i * 12u + 4u + b), want[i][b]);
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int s_adh_audit_done;
+
+static void adh_audit_main_fn(CpuState *cpu) {
+    static const uint8_t p0_mac[6] = {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x61u};
+    static const uint8_t c2_mac[6] = {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x62u};
+    static const uint8_t bcast[6] = {0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu};
+    static const uint8_t group_mac[6] = {0x03u, 0x00u, 0x5eu, 0x00u, 0x00u, 0x01u};
+    static const uint8_t dup_a[6] = {0x02u, 0xaau, 0xbbu, 0xccu, 0xddu, 0x01u};
+    static const uint8_t dup_b[6] = {0x02u, 0xaau, 0xbbu, 0xccu, 0xddu, 0x02u};
+    const uint8_t grp[8] = {'N', 'K', 'A', 'U', 'D', 'I', 'T', '1'};
+    NkAdhocTransport *t0 = nk_loopnet_console(s_adh_p2_net, 0);
+    NkAdhocTransport *t2 = nk_loopnet_console(s_adh_p2_net, 2);
+    expect(t0->ops->login(t0, p0_mac, "PeerZero", "TEST00001") == NK_NET_OK &&
+           t0->ops->connect(t0, grp) == NK_NET_OK &&
+           t2->ops->login(t2, c2_mac, "PeerTwo", "TEST00001") == NK_NET_OK &&
+           t2->ops->connect(t2, grp) == NK_NET_OK,
+           "adhoc audit: peers 0 and 2 join NKAUDIT1");
+    const int p0_mpdp = t0->ops->pdp_open(t0, 0x5101u);
+    const int c2_mpdp = t2->ops->pdp_open(t2, 0x5101u);
+    expect(p0_mpdp >= 0 && c2_mpdp >= 0, "adhoc audit: peer matching PDP sockets open");
+
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    s_adh_events = 0u;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh(0x0c622081u /* sceWlanGetEtherAddr */, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "adhoc audit: Net/Adhocctl init");
+    uint8_t self_mac[6];
+    for (uint32_t i = 0u; i < 6u; i++) self_mac[i] = MEM_R8(ADH_P2_SELF_MAC + i);
+
+    /* F-ff8afa6a: in the online tier a request while another is in flight answers BUSY, as
+     * PPSSPP does, instead of the offline tier's UNMEASURED named stop. */
+    const uint32_t stops0 = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u, "adhoc audit: online Scan starts");
+    const uint32_t disc_rc = adh(ADH_NID_DISCONNECT, 0u, 0u, 0u);
+    const uint32_t create_rc = adh(ADH_NID_CREATE, adh_name(0, "NKAUDIT1"), 0u, 0u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit: Disconnect and Create during an online Scan answer BUSY "
+                 "(got 0x%08x, 0x%08x; stops %u)", disc_rc, create_rc,
+                 sr_hle_test_unmodelled_stops() - stops0);
+        expect(disc_rc == 0x80410b10u && create_rc == 0x80410b10u &&
+               sr_hle_test_unmodelled_stops() == stops0, msg);
+    }
+    adh_p2_wait_state(cpu, 0u, 1u);
+    expect(adh_state() == 0u && s_adh_events == 1u && ADH_AT(0).event == 3,
+           "adhoc audit: the online Scan still completes");
+    expect(adh(ADH_NID_CONNECT, adh_name(0, "NKAUDIT1"), 0u, 0u) == 0u, "adhoc audit: online Connect starts");
+    const uint32_t scan_rc = adh(ADH_NID_SCAN, 0u, 0u, 0u);
+    {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "adhoc audit: Scan during an online Connect answers BUSY (got 0x%08x)",
+                 scan_rc);
+        expect(scan_rc == 0x80410b10u && sr_hle_test_unmodelled_stops() == stops0, msg);
+    }
+    adh_p2_wait_state(cpu, 1u, 2u);
+    expect(adh_state() == 1u, "adhoc audit: online Connect reaches CONNECTED");
+    {
+        const uint8_t want[2][6] = {{0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x61u},
+                                    {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x62u}};
+        expect(adh_audit_peer_list_is(want, 2), "adhoc audit: GetPeerList lists peers 0 and 2");
+    }
+
+    /* F-b8c3084d: a CONNECT with the all-ones or a group MAC is refused, and a CONNECT that
+     * repeats a peer id replaces the entry holding it, so one DISCONNECT removes one peer. */
+    adh_shim_inject_connect(bcast, 40u, "Bcast");
+    adh_shim_inject_connect(group_mac, 41u, "Group");
+    adh_shim_inject_connect(dup_a, 50u, "DupA");
+    adh_shim_inject_connect(dup_b, 50u, "DupB");
+    adh_audit_delay(cpu, 50000u);
+    {
+        const uint8_t want[3][6] = {{0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x61u},
+                                    {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x62u},
+                                    {0x02u, 0xaau, 0xbbu, 0xccu, 0xddu, 0x02u}};
+        char msg[192];
+        const int ok = adh_audit_peer_list_is(want, 3);
+        snprintf(msg, sizeof(msg), "adhoc audit: group-MAC CONNECTs are refused and a repeated peer id "
+                 "replaces its holder (GetPeerList %u bytes)", MEM_R32(ADH_P2_LEN));
+        expect(ok, msg);
+    }
+    adh_shim_inject_disconnect(50u);
+    adh_audit_delay(cpu, 50000u);
+    {
+        const uint8_t want[2][6] = {{0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x61u},
+                                    {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x62u}};
+        expect(adh_audit_peer_list_is(want, 2), "adhoc audit: DISCONNECT of the repeated id removes one peer");
+    }
+
+    /* F-d8c53678: a child's member list. Peer 2 says HELLO first, so it holds the lower slot;
+     * peer 0 is the parent, peer 2 its other child. Before parent-first applies the list is self,
+     * parent, siblings; after it the parent, then the siblings and self (PPSSPP 3bc60270
+     * sceNetAdhocMatchingGetMembers). */
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u &&
+           adh(0x2a2a1e07u /* MatchingInit */, 0x20000u, 0u, 0u) == 0u,
+           "adhoc audit: AdhocInit + MatchingInit");
+    sr_test_register_guest_fn(ADH_P2_MATCH_CB, adh_p2_match_cb_fn);
+    memset(&s_adh_p2_match, 0, sizeof(s_adh_p2_match));
+    const uint32_t saved_sp0 = MEM_R32(cpu->r[29]);
+    MEM_W32(cpu->r[29], ADH_P2_MATCH_CB);
+    const int32_t mid = (int32_t)adh_call_full(0xca5eda6fu /* MatchingCreate */, cpu->r[29],
+                                               2u /* CHILD */, 4u, 0x5101u, 0x1000u,
+                                               200000u, 200000u, 5u, 50000u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(mid > 0, "adhoc audit: child MatchingCreate");
+    expect(adh_call_full(0x93ef3843u /* MatchingStart */, cpu->r[29], (uint32_t)mid,
+                         0x30u, 0x2000u, 0x30u, 0x2000u, 0u, 0u, 0u) == 0u,
+           "adhoc audit: child MatchingStart");
+    const uint8_t hello_pkt[5] = {1u, 0u, 0u, 0u, 0u};
+    expect(t2->ops->pdp_send(t2, c2_mpdp, self_mac, 0x5101u, hello_pkt, sizeof(hello_pkt)) == NK_NET_OK,
+           "adhoc audit: peer 2 sends HELLO");
+    adh_audit_delay(cpu, 20000u);
+    expect(t0->ops->pdp_send(t0, p0_mpdp, self_mac, 0x5101u, hello_pkt, sizeof(hello_pkt)) == NK_NET_OK,
+           "adhoc audit: peer 0 sends HELLO");
+    adh_audit_delay(cpu, 20000u);
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, p0_mac[i]);
+    expect(adh_call5(0x5e3d4b79u /* SelectTarget */, (uint32_t)mid, ADH_P2_PEER_MAC, 0u, 0u, 0u) == 0u,
+           "adhoc audit: child SelectTarget sends JOIN to peer 0");
+    uint8_t acc_pkt[21] = {3u, 0u, 0u, 0u, 0u, 2u, 0u, 0u, 0u};
+    memcpy(acc_pkt + 9, c2_mac, 6u);
+    memcpy(acc_pkt + 15, self_mac, 6u);
+    expect(t0->ops->pdp_send(t0, p0_mpdp, self_mac, 0x5101u, acc_pkt, sizeof(acc_pkt)) == NK_NET_OK,
+           "adhoc audit: peer 0 ACCEPTs with siblings peer 2 and the child");
+    adh_audit_delay(cpu, 30000u);
+    {
+        const uint8_t want[3][6] = {{self_mac[0], self_mac[1], self_mac[2], self_mac[3], self_mac[4], self_mac[5]},
+                                    {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x61u},
+                                    {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x62u}};
+        expect(adh_audit_members_are(mid, want, 3),
+               "adhoc audit: child GetMembers before parent-first is self, parent, sibling");
+    }
+    adh_audit_delay(cpu, 250000u);
+    {
+        const uint8_t want[3][6] = {{0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x61u},
+                                    {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x62u},
+                                    {self_mac[0], self_mac[1], self_mac[2], self_mac[3], self_mac[4], self_mac[5]}};
+        expect(adh_audit_members_are(mid, want, 3),
+               "adhoc audit: child GetMembers after parent-first is parent, sibling, self (self kept)");
+    }
+    expect(adh(0x32b156b3u /* MatchingStop */, (uint32_t)mid, 0u, 0u) == 0u &&
+           adh(0xf16eaf4fu /* MatchingDelete */, (uint32_t)mid, 0u, 0u) == 0u &&
+           adh(0x7945ecdau /* MatchingTerm */, 0u, 0u, 0u) == 0u,
+           "adhoc audit: Matching Stop/Delete/Term");
+
+    /* F-f03893f0: a broadcast the relay cannot carry answers INVALID_DATALEN, as unicast does. */
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_FLIP_MAC + i, 0xffu);
+    const int32_t pdp_a = (int32_t)adh(0x6f92741bu /* PdpCreate */, ADH_P2_SELF_MAC, 0x3101u, 0x4000u);
+    expect(pdp_a > 0, "adhoc audit: PdpCreate A");
+    const uint32_t big_rc = adh_call_full(0xabed3790u /* PdpSend */, cpu->r[29], (uint32_t)pdp_a,
+                                          ADH_P2_FLIP_MAC, 0x3101u, ADH_P2_BUF, 12u * 1024u, 0u, 1u, 0u);
+    {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "adhoc audit: a 12 KiB broadcast answers INVALID_DATALEN (got 0x%08x)",
+                 big_rc);
+        expect(big_rc == 0x80410705u, msg);
+    }
+
+    /* F-772e6da0: a PDP stream the relay closed is reported: PdpRecv answers DISCONNECTED and
+     * PollSocket raises DISCONNECT, instead of WOULD_BLOCK forever. */
+    s_adh_shim.pdp_recv_dead = 1;
+    MEM_W32(ADH_P2_LEN, 64u);
+    const uint32_t dead_rc = adh_call_full(0xdfe53e03u /* PdpRecv */, cpu->r[29], (uint32_t)pdp_a,
+                                           ADH_P2_BUF + 64u, ADH_P2_PORT, ADH_P2_BUF, ADH_P2_LEN, 0u,
+                                           1u /* NONBLOCK */, 0u);
+    {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "adhoc audit: PdpRecv on a dead relay stream answers DISCONNECTED "
+                 "(got 0x%08x)", dead_rc);
+        expect(dead_rc == 0x8041070cu, msg);
+    }
+    MEM_W32(ADH_P2_SDS, (uint32_t)pdp_a);
+    MEM_W32(ADH_P2_SDS + 4u, 0x0002u /* ADHOC_EV_RECV */);
+    MEM_W32(ADH_P2_SDS + 8u, 0u);
+    const uint32_t poll_rc = adh(0x7a662d6bu /* PollSocket */, ADH_P2_SDS, 1u, 100000u);
+    {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "adhoc audit: PollSocket raises DISCONNECT for the dead PDP stream "
+                 "(got 0x%08x, revents 0x%04x)", poll_rc, MEM_R32(ADH_P2_SDS + 8u));
+        expect(poll_rc == 0x80410717u /* EXCEPTION_EVENT */ && (MEM_R32(ADH_P2_SDS + 8u) & 0x0800u) != 0u,
+               msg);
+    }
+    s_adh_shim.pdp_recv_dead = 0;
+
+    /* F-f03893f0 / F-772e6da0: a broadcast on a dead stream answers DISCONNECTED, not 0. */
+    const int32_t pdp_b = (int32_t)adh(0x6f92741bu /* PdpCreate */, ADH_P2_SELF_MAC, 0x3102u, 0x4000u);
+    expect(pdp_b > 0, "adhoc audit: PdpCreate B");
+    s_adh_shim.pdp_send_force = NK_NET_DEAD;
+    const uint32_t bdead_rc = adh_call_full(0xabed3790u /* PdpSend */, cpu->r[29], (uint32_t)pdp_b,
+                                            ADH_P2_FLIP_MAC, 0x3102u, ADH_P2_BUF, 8u, 0u, 1u, 0u);
+    s_adh_shim.pdp_send_force = 0;
+    const uint32_t after_rc = adh_call_full(0xabed3790u /* PdpSend */, cpu->r[29], (uint32_t)pdp_b,
+                                            ADH_P2_PEER_MAC, 0x3102u, ADH_P2_BUF, 8u, 0u, 1u, 0u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit: a broadcast on a dead stream answers DISCONNECTED and the "
+                 "socket stays lost (got 0x%08x, then 0x%08x)", bdead_rc, after_rc);
+        expect(bdead_rc == 0x8041070cu && after_rc == 0x8041070cu, msg);
+    }
+
+    expect(adh(0x7f27bb5eu /* PdpDelete */, (uint32_t)pdp_a, 0u, 0u) == 0u &&
+           adh(0x7f27bb5eu /* PdpDelete */, (uint32_t)pdp_b, 0u, 0u) == 0u &&
+           adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u) == 0u &&
+           adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u,
+           "adhoc audit: PdpDelete + AdhocTerm + Disconnect");
+    adh_p2_wait_state(cpu, 0u, 3u);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "adhoc audit: AdhocctlTerm + NetTerm");
+    (void)t0->ops->pdp_close(t0, p0_mpdp);
+    (void)t2->ops->pdp_close(t2, c2_mpdp);
+    s_adh_audit_done = 1;
+}
+
+static void test_adhoc_audit_20261117_shim(void) {
+    extern void sr_hle_test_set_adhoc_transport(NkAdhocTransport *t);
+    s_adh_p2_net = nk_loopnet_create();
+    expect(s_adh_p2_net != NULL, "adhoc audit: create NkAdhocLoopNet");
+    if (!s_adh_p2_net) return;
+    memset(&s_adh_shim, 0, sizeof(s_adh_shim));
+    s_adh_shim.base.ops = &s_adh_shim_ops;
+    s_adh_shim.inner = nk_loopnet_console(s_adh_p2_net, 1);
+    s_adh_audit_done = 0;
+    const uint32_t loaded_end = adh_fixture_begin();
+    sr_hle_test_set_adhoc_transport(&s_adh_shim.base);
+    adh_run(ADH_P2_MAIN, adh_audit_main_fn);
+    expect(s_adh_audit_done == 1, "adhoc audit: shim regression flow completed");
+    hle_net_reset();
+    sr_hle_test_set_adhoc_transport(NULL);
+    adh_fixture_end(loaded_end);
+    nk_loopnet_destroy(s_adh_p2_net);
+    s_adh_p2_net = NULL;
+}
+
+/* ---- Audit 2026-11-17, second unit: AbortSendData ends the aborted send, a full matching event
+ * queue reports what it drops, and GetPtpStat counts no pending bytes on a socket with no
+ * transport. Over the shim, with peer 0 as the matching child. */
+extern uint32_t sr_hle_test_match_events_dropped(void);
+static NkAdhocTransport *s_u02_peer;
+static int s_u02_peer_pdp;
+static uint8_t s_u02_self_mac[6];
+static int s_u02_flood;    /* BULK packets peer 0 sends at the next DATA delivery */
+static int s_u02_events[16];
+static int s_u02_done;
+
+static void u02_match_cb_fn(CpuState *cpu) {
+    const int ev = (int)cpu->r[5];
+    if (ev >= 0 && ev < 16) s_u02_events[ev]++;
+    if (ev == 11 /* DATA */ && s_u02_flood > 0) {
+        const int n = s_u02_flood;
+        static const uint8_t pkt[6] = {5u, 1u, 0u, 0u, 0u, 'F'};
+        s_u02_flood = 0;
+        for (int i = 0; i < n; i++)
+            (void)s_u02_peer->ops->pdp_send(s_u02_peer, s_u02_peer_pdp, s_u02_self_mac, 0x5102u, pkt,
+                                            sizeof(pkt));
+    }
+    cpu->r[2] = 0u;
+}
+
+static void u02_peer_send_bulk(int n) {
+    static const uint8_t pkt[6] = {5u, 1u, 0u, 0u, 0u, 'B'};
+    for (int i = 0; i < n; i++)
+        (void)s_u02_peer->ops->pdp_send(s_u02_peer, s_u02_peer_pdp, s_u02_self_mac, 0x5102u, pkt,
+                                        sizeof(pkt));
+}
+
+static void adh_u02_main_fn(CpuState *cpu) {
+    static const uint8_t p0_mac[6] = {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x71u};
+    const uint8_t grp[8] = {'N', 'K', 'A', 'U', 'D', 'I', 'T', '2'};
+    NkAdhocTransport *t0 = nk_loopnet_console(s_adh_p2_net, 0);
+    s_u02_peer = t0;
+    expect(t0->ops->login(t0, p0_mac, "PeerZero", "TEST00001") == NK_NET_OK &&
+               t0->ops->connect(t0, grp) == NK_NET_OK,
+           "adhoc audit u02: peer 0 joins NKAUDIT2");
+    s_u02_peer_pdp = t0->ops->pdp_open(t0, 0x5102u);
+    const int p0_lsn = t0->ops->ptp_listen(t0, 0x4201u, 2);
+    expect(s_u02_peer_pdp >= 0 && p0_lsn >= 0, "adhoc audit u02: peer 0 PDP and PTP listener open");
+
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    s_adh_events = 0u;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+               adh(0x0c622081u /* sceWlanGetEtherAddr */, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+               adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+               adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "adhoc audit u02: Net/Adhocctl init");
+    for (uint32_t i = 0u; i < 6u; i++) s_u02_self_mac[i] = MEM_R8(ADH_P2_SELF_MAC + i);
+    expect(adh(ADH_NID_CONNECT, adh_name(0, "NKAUDIT2"), 0u, 0u) == 0u, "adhoc audit u02: Connect starts");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh_state() == 1u, "adhoc audit u02: Connect reaches CONNECTED");
+
+    /* Peer 0 joins this host's matching context and is accepted. */
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u &&
+               adh(0x2a2a1e07u /* MatchingInit */, 0x20000u, 0u, 0u) == 0u,
+           "adhoc audit u02: AdhocInit + MatchingInit");
+    sr_test_register_guest_fn(ADH_P2_MATCH_CB, u02_match_cb_fn);
+    memset(s_u02_events, 0, sizeof(s_u02_events));
+    const uint32_t saved_sp0 = MEM_R32(cpu->r[29]);
+    MEM_W32(cpu->r[29], ADH_P2_MATCH_CB);
+    /* hello 0.1 s, keepalive 2 s, 5 tries (peer timeout 10.5 s), resend 50 ms (data timeout 250 ms) */
+    const int32_t mid = (int32_t)adh_call_full(0xca5eda6fu /* MatchingCreate */, cpu->r[29],
+                                               1u /* HOST */, 4u, 0x5102u, 0x1000u,
+                                               100000u, 2000000u, 5u, 50000u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(mid > 0, "adhoc audit u02: host MatchingCreate");
+    expect(adh_call_full(0x93ef3843u /* MatchingStart */, cpu->r[29], (uint32_t)mid,
+                         0x30u, 0x2000u, 0x30u, 0x2000u, 0u, 0u, 0u) == 0u,
+           "adhoc audit u02: host MatchingStart");
+    const uint8_t join_pkt[5] = {2u, 0u, 0u, 0u, 0u};
+    (void)t0->ops->pdp_send(t0, s_u02_peer_pdp, s_u02_self_mac, 0x5102u, join_pkt, sizeof(join_pkt));
+    for (int w = 0; w < 20 && s_u02_events[2] == 0; w++) adh_audit_delay(cpu, 20000u);
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, p0_mac[i]);
+    expect(s_u02_events[2] == 1 &&
+               adh_call5(0x5e3d4b79u /* SelectTarget */, (uint32_t)mid, ADH_P2_PEER_MAC, 0u, 0u, 0u) == 0u,
+           "adhoc audit u02: REQUEST from peer 0, SelectTarget");
+    const uint8_t acc_pkt[5] = {3u, 0u, 0u, 0u, 0u};
+    (void)t0->ops->pdp_send(t0, s_u02_peer_pdp, s_u02_self_mac, 0x5102u, acc_pkt, sizeof(acc_pkt));
+    for (int w = 0; w < 20 && s_u02_events[7] == 0; w++) adh_audit_delay(cpu, 20000u);
+    expect(s_u02_events[7] == 1, "adhoc audit u02: peer 0 ESTABLISHED");
+
+    /* F-05efa617: an aborted send is not acknowledged afterwards; a later send still is. */
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)"ABRT"[i]);
+    const uint32_t send_rc = adh_call5(0xf79472d7u /* SendData */, (uint32_t)mid, ADH_P2_PEER_MAC, 4u,
+                                       ADH_P2_BUF, 0u);
+    const uint32_t abort_rc = adh(0xec19337du /* AbortSendData */, (uint32_t)mid, ADH_P2_PEER_MAC, 0u);
+    adh_audit_delay(cpu, 50000u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit u02: no DATA_ACK for a send AbortSendData ended "
+                 "(SendData 0x%08x, Abort 0x%08x, DATA_ACK %d)", send_rc, abort_rc, s_u02_events[12]);
+        expect(send_rc == 0u && abort_rc == 0u && s_u02_events[12] == 0, msg);
+    }
+    expect(adh_call5(0xf79472d7u /* SendData */, (uint32_t)mid, ADH_P2_PEER_MAC, 4u, ADH_P2_BUF, 0u) == 0u,
+           "adhoc audit u02: SendData after the abort");
+    adh_audit_delay(cpu, 50000u);
+    expect(s_u02_events[12] == 1, "adhoc audit u02: the send after the abort gets its DATA_ACK");
+
+    /* F-995596b0: a full event queue reports each event it cannot hold. 64 DATA packets wait at
+     * the first delivery (32 already moved to the socket's queue by GetPtpStat's pump, 32 in the
+     * medium); the first DATA delivery has peer 0 send 32 more, which meet a queue with one free
+     * slot. */
+    const int data0 = s_u02_events[11];
+    u02_peer_send_bulk(32);
+    MEM_W32(ADH_P2_LEN, 0u);
+    (void)adh(0xb9685118u /* GetPtpStat */, ADH_P2_LEN, 0u, 0u);
+    u02_peer_send_bulk(32);
+    s_u02_flood = 32;
+    for (int w = 0; w < 10; w++) adh_audit_delay(cpu, 20000u);
+    {
+        const int delivered = s_u02_events[11] - data0;
+        const uint32_t dropped = sr_hle_test_match_events_dropped();
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit u02: 96 DATA events, each delivered or counted as dropped "
+                 "(delivered %d, dropped %u)", delivered, dropped);
+        expect(s_u02_flood == 0 && dropped > 0u && delivered + (int)dropped == 96, msg);
+    }
+
+    /* F-05efa617: once peer 0 has left the group a send waits for its timeout; AbortSendData ends
+     * that wait, so no DATA_TO follows. */
+    adh_shim_inject_disconnect(1u); /* the medium's peer id for console 0 */
+    adh_audit_delay(cpu, 20000u);
+    const uint32_t left_send_rc = adh_call5(0xf79472d7u /* SendData */, (uint32_t)mid, ADH_P2_PEER_MAC, 4u,
+                                            ADH_P2_BUF, 0u);
+    const uint32_t left_abort_rc = adh(0xec19337du /* AbortSendData */, (uint32_t)mid, ADH_P2_PEER_MAC, 0u);
+    for (int w = 0; w < 8; w++) adh_audit_delay(cpu, 50000u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit u02: no DATA_TO for an aborted send to a peer that left "
+                 "(SendData 0x%08x, Abort 0x%08x, DATA_TO %d, DATA_ACK %d)", left_send_rc,
+                 left_abort_rc, s_u02_events[13], s_u02_events[12]);
+        expect(left_send_rc == 0u && left_abort_rc == 0u && s_u02_events[13] == 0 &&
+                   s_u02_events[12] == 1, msg);
+    }
+    expect(adh(0x32b156b3u /* MatchingStop */, (uint32_t)mid, 0u, 0u) == 0u &&
+               adh(0xf16eaf4fu /* MatchingDelete */, (uint32_t)mid, 0u, 0u) == 0u &&
+               adh(0x7945ecdau /* MatchingTerm */, 0u, 0u, 0u) == 0u,
+           "adhoc audit u02: Matching Stop/Delete/Term");
+
+    /* F-8c0377bf: a PTP socket whose transport went away with sceNetAdhocctlTerm has nothing left
+     * to read, and PtpRecv says DISCONNECTED; GetPtpStat counts 0 pending bytes, not its buffer. */
+    const int32_t ptp = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29], ADH_P2_SELF_MAC,
+                                               0x4202u, ADH_P2_PEER_MAC, 0x4201u, 0x1000u, 100000u, 3u, 0u);
+    expect(ptp > 0 && adh(0xfc6fc07bu /* PtpConnect */, (uint32_t)ptp, 0u, 1u) == 0u,
+           "adhoc audit u02: PtpOpen + PtpConnect to peer 0");
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "adhoc audit u02: AdhocctlTerm detaches the transport");
+    MEM_W32(ADH_P2_LEN, 36u);
+    const uint32_t stat_rc = adh(0xb9685118u /* GetPtpStat */, ADH_P2_LEN, ADH_P2_STAT, 0u);
+    MEM_W32(ADH_P2_LEN, 64u);
+    const uint32_t recv_rc = adh_call5(0x8bea2b3eu /* PtpRecv */, (uint32_t)ptp, ADH_P2_BUF, ADH_P2_LEN, 0u, 1u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit u02: GetPtpStat counts 0 pending bytes on a socket with no "
+                 "transport (stat 0x%08x, rcv_sb_cc %u, PtpRecv 0x%08x)", stat_rc,
+                 MEM_R32(ADH_P2_STAT + 28u), recv_rc);
+        expect(stat_rc == 0u && MEM_R32(ADH_P2_STAT + 28u) == 0u && recv_rc == 0x8041070cu, msg);
+    }
+    expect(adh(0x157e6225u /* PtpClose */, (uint32_t)ptp, 0u, 0u) == 0u &&
+               adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u) == 0u &&
+               net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "adhoc audit u02: PtpClose + AdhocTerm + NetTerm");
+    (void)t0->ops->ptp_close(t0, p0_lsn);
+    (void)t0->ops->pdp_close(t0, s_u02_peer_pdp);
+    s_u02_done = 1;
+}
+
+static void test_adhoc_audit_20261117_u02(void) {
+    extern void sr_hle_test_set_adhoc_transport(NkAdhocTransport *t);
+    s_adh_p2_net = nk_loopnet_create();
+    expect(s_adh_p2_net != NULL, "adhoc audit u02: create NkAdhocLoopNet");
+    if (!s_adh_p2_net) return;
+    memset(&s_adh_shim, 0, sizeof(s_adh_shim));
+    s_adh_shim.base.ops = &s_adh_shim_ops;
+    s_adh_shim.inner = nk_loopnet_console(s_adh_p2_net, 1);
+    s_u02_done = 0;
+    const uint32_t loaded_end = adh_fixture_begin();
+    sr_hle_test_set_adhoc_transport(&s_adh_shim.base);
+    adh_run(ADH_P2_MAIN, adh_u02_main_fn);
+    expect(s_u02_done == 1, "adhoc audit u02: regression flow completed");
+    hle_net_reset();
+    sr_hle_test_set_adhoc_transport(NULL);
+    adh_fixture_end(loaded_end);
+    nk_loopnet_destroy(s_adh_p2_net);
+    s_adh_p2_net = NULL;
+}
+
+/* F-4cec3491: a scan the lobby answers after its timeout does not answer the next scan. The shim
+ * holds console 1's lobby events back (a slow lobby), the first scan times out, a second group
+ * appears and the game scans again; the first scan's late answer then arrives on its own. */
+static int s_u02_scan_done;
+
+static void adh_u02_scan_main_fn(CpuState *cpu) {
+    static const uint8_t p0_mac[6] = {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x81u};
+    static const uint8_t p2_mac[6] = {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x82u};
+    const uint8_t grp_a[8] = {'N', 'K', 'S', 'C', 'A', 'N', 'A', '1'};
+    const uint8_t grp_b[8] = {'N', 'K', 'S', 'C', 'A', 'N', 'B', '1'};
+    NkAdhocTransport *t0 = nk_loopnet_console(s_adh_p2_net, 0);
+    NkAdhocTransport *t2 = nk_loopnet_console(s_adh_p2_net, 2);
+    expect(t0->ops->login(t0, p0_mac, "PeerZero", "TEST00001") == NK_NET_OK &&
+               t0->ops->connect(t0, grp_a) == NK_NET_OK &&
+               t2->ops->login(t2, p2_mac, "PeerTwo", "TEST00001") == NK_NET_OK,
+           "adhoc audit u02 scan: peer 0 holds NKSCANA1, peer 2 logged in");
+
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    s_adh_events = 0u;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+               adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+               adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "adhoc audit u02 scan: Net/Adhocctl init");
+
+    s_adh_shim.hold_lobby = 1;
+    s_adh_shim.hold_budget = 0u;
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u, "adhoc audit u02 scan: first Scan starts");
+    for (int w = 0; w < 120 && s_adh_events == 0u; w++) adh_audit_delay(cpu, 50000u); /* 6 s > 5 s */
+    expect(s_adh_events == 1u && ADH_AT(0).event == 0 && ADH_AT(0).error == 0x80410b05u,
+           "adhoc audit u02 scan: the unanswered Scan ends with ERROR/TIMEOUT");
+
+    expect(t2->ops->connect(t2, grp_b) == NK_NET_OK, "adhoc audit u02 scan: peer 2 creates NKSCANB1");
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u, "adhoc audit u02 scan: second Scan starts");
+    s_adh_shim.hold_budget = 2u; /* the first scan's answer: NKSCANA1, then SCAN_COMPLETE */
+    for (int w = 0; w < 10; w++) adh_audit_delay(cpu, 20000u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit u02 scan: the first Scan's late answer does not complete "
+                 "the second (budget left %u, events %u, last event %d)",
+                 (unsigned)s_adh_shim.hold_budget, s_adh_events, s_adh_events ? ADH_AT(s_adh_events - 1u).event : -1);
+        expect(s_adh_shim.hold_budget == 0u && s_adh_events == 1u, msg);
+    }
+    s_adh_shim.hold_lobby = 0;
+    for (int w = 0; w < 20 && s_adh_events < 2u; w++) adh_audit_delay(cpu, 20000u);
+    MEM_W32(ADH_P2_LEN, 0u);
+    const uint32_t info_rc = adh(ADH_NID_SCAN_INFO, ADH_P2_LEN, 0u, 0u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit u02 scan: the second Scan completes on its own answer, with "
+                 "both groups (events %u, event %d, GetScanInfo 0x%08x, %u bytes)",
+                 s_adh_events, s_adh_events > 1u ? ADH_AT(1).event : -1, info_rc, MEM_R32(ADH_P2_LEN));
+        expect(s_adh_events == 2u && ADH_AT(1).event == 3 && ADH_AT(1).error == 0u && info_rc == 0u &&
+                   MEM_R32(ADH_P2_LEN) == 2u * 28u, msg);
+    }
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "adhoc audit u02 scan: cleanup");
+    s_u02_scan_done = 1;
+}
+
+static void test_adhoc_audit_20261117_u02_scan(void) {
+    extern void sr_hle_test_set_adhoc_transport(NkAdhocTransport *t);
+    s_adh_p2_net = nk_loopnet_create();
+    expect(s_adh_p2_net != NULL, "adhoc audit u02 scan: create NkAdhocLoopNet");
+    if (!s_adh_p2_net) return;
+    memset(&s_adh_shim, 0, sizeof(s_adh_shim));
+    s_adh_shim.base.ops = &s_adh_shim_ops;
+    s_adh_shim.inner = nk_loopnet_console(s_adh_p2_net, 1);
+    s_u02_scan_done = 0;
+    const uint32_t loaded_end = adh_fixture_begin();
+    sr_hle_test_set_adhoc_transport(&s_adh_shim.base);
+    adh_run(ADH_P2_MAIN, adh_u02_scan_main_fn);
+    expect(s_u02_scan_done == 1, "adhoc audit u02 scan: regression flow completed");
+    hle_net_reset();
+    sr_hle_test_set_adhoc_transport(NULL);
+    adh_fixture_end(loaded_end);
+    nk_loopnet_destroy(s_adh_p2_net);
+    s_adh_p2_net = NULL;
+}
+
+#ifdef _WIN32
+typedef SOCKET adh_p2_sock_t;
+#define ADH_P2_BAD_SOCK INVALID_SOCKET
+#define adh_p2_close_sock closesocket
+#else
+typedef int adh_p2_sock_t;
+#define ADH_P2_BAD_SOCK (-1)
+#define adh_p2_close_sock close
+/* usleep left POSIX in 2008, the edition this file asks for (_POSIX_C_SOURCE above), so <unistd.h>
+ * does not declare it and a call is an implicit declaration: a warning in GCC 13, an error from
+ * GCC 14 on. nanosleep is its replacement. */
+static void adh_p2_usleep(unsigned long us) {
+    struct timespec ts;
+    ts.tv_sec = (time_t)(us / 1000000ul);
+    ts.tv_nsec = (long)(us % 1000000ul) * 1000L;
+    (void)nanosleep(&ts, NULL);
+}
+#endif
+
+/* Audit 2026-11-17 (F-ba5fd499): closes a listening socket so that a server thread blocked in
+ * accept() on it returns. On POSIX, close() alone does not wake an accept() in another thread and
+ * the join below would wait forever when the HLE flow failed before the client connected;
+ * shutdown() first makes the accept() fail at once. */
+static void adh_p2_close_listener(adh_p2_sock_t s) {
+#ifdef _WIN32
+    (void)shutdown(s, SD_BOTH);
+#else
+    (void)shutdown(s, SHUT_RDWR);
+#endif
+    adh_p2_close_sock(s);
+}
+
+static int adh_p2_recv_exact(adh_p2_sock_t s, void *buf, size_t n) {
+    uint8_t *p = (uint8_t *)buf;
+    size_t got = 0u;
+    while (got < n) {
+        int r = recv(s, (char *)(p + got), (int)(n - got), 0);
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return 0;
+}
+
+static int adh_p2_send_all(adh_p2_sock_t s, const void *buf, size_t n) {
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t sent = 0u;
+    while (sent < n) {
+        int r = send(s, (const char *)(p + sent), (int)(n - sent), 0);
+        if (r <= 0) return -1;
+        sent += (size_t)r;
+    }
+    return 0;
+}
+
+typedef struct {
+    adh_p2_sock_t lsn;
+    volatile int stop;
+    int got_pdp_ping;
+} AdhP2TcpServer;
+
+#ifdef _WIN32
+static unsigned __stdcall adh_p2_tcp_server_thread(void *arg) {
+#else
+static void *adh_p2_tcp_server_thread(void *arg) {
+#endif
+    AdhP2TcpServer *srv = (AdhP2TcpServer *)arg;
+    static const uint8_t peer_mac[6] = {0x02u, 0x44u, 0x55u, 0x66u, 0x77u, 0x88u};
+    adh_p2_sock_t lobby = accept(srv->lsn, NULL, NULL);
+    adh_p2_sock_t data = ADH_P2_BAD_SOCK;
+    if (lobby != ADH_P2_BAD_SOCK) {
+        uint8_t login[144];
+        if (adh_p2_recv_exact(lobby, login, sizeof(login)) == 0 && login[0] == 1u) {
+            while (!srv->stop) {
+                uint8_t op = 0u;
+                int r = recv(lobby, (char *)&op, 1, 0);
+                if (r <= 0) break;
+                if (op == 0u || op == 3u) continue;
+                if (op == 2u) {
+                    uint8_t grp[8];
+                    if (adh_p2_recv_exact(lobby, grp, 8u) != 0) break;
+                    uint8_t bssid_pkt[7] = {6u, peer_mac[0], peer_mac[1], peer_mac[2],
+                                            peer_mac[3], peer_mac[4], peer_mac[5]};
+                    uint8_t conn_pkt[139];
+                    memset(conn_pkt, 0, sizeof(conn_pkt));
+                    conn_pkt[0] = 2u;
+                    memcpy(conn_pkt + 1, "LoopPeer", 8u);
+                    memcpy(conn_pkt + 129, peer_mac, 6u);
+                    conn_pkt[135] = 7u;
+                    (void)adh_p2_send_all(lobby, bssid_pkt, sizeof(bssid_pkt));
+                    (void)adh_p2_send_all(lobby, conn_pkt, sizeof(conn_pkt));
+                    data = accept(srv->lsn, NULL, NULL);
+                    if (data != ADH_P2_BAD_SOCK) {
+                        uint8_t init[24], hdr[14], pay[64];
+                        if (adh_p2_recv_exact(data, init, sizeof(init)) == 0 &&
+                            adh_p2_recv_exact(data, hdr, sizeof(hdr)) == 0) {
+                            uint32_t plen = (uint32_t)hdr[10] | ((uint32_t)hdr[11] << 8) |
+                                            ((uint32_t)hdr[12] << 16) | ((uint32_t)hdr[13] << 24);
+                            if (plen > 0u && plen <= sizeof(pay) &&
+                                adh_p2_recv_exact(data, pay, plen) == 0 &&
+                                plen == 6u && memcmp(pay, "TCP_GO", 6u) == 0) {
+                                srv->got_pdp_ping = 1;
+                                uint8_t rep[20];
+                                memset(rep, 0, sizeof(rep));
+                                memcpy(rep, peer_mac, 6u);
+                                rep[8] = hdr[8];
+                                rep[9] = hdr[9];
+                                rep[10] = 6u;
+                                memcpy(rep + 14, "TCP_OK", 6u);
+                                (void)adh_p2_send_all(data, rep, sizeof(rep));
+                            }
+                        }
+                        /* Keep data socket alive briefly until lobby closes. */
+                        uint8_t tmp;
+                        while (!srv->stop && recv(lobby, (char *)&tmp, 1, 0) > 0) {}
+                        adh_p2_close_sock(data);
+                    }
+                    break;
+                }
+            }
+        }
+        adh_p2_close_sock(lobby);
+    }
+#ifdef _WIN32
+    return 0u;
+#else
+    return NULL;
+#endif
+}
+
+static int s_adh_p2_tcp_done;
+
+static void adh_p2_tcp_main_fn(CpuState *cpu) {
+    const uint8_t peer_mac[6] = {0x02u, 0x44u, 0x55u, 0x66u, 0x77u, 0x88u};
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh(0x0c622081u /* sceWlanGetEtherAddr */, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "adhoc tcp loopback: Net/Adhocctl init succeed");
+    expect(adh(ADH_NID_CREATE, adh_name(0, "LOOPGRP"), 0u, 0u) == 0u,
+           "adhoc tcp loopback: Create starts");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh_state() == 1u, "adhoc tcp loopback: reaches CONNECTED state");
+    MEM_W32(ADH_P2_LEN, 256u);
+    for (int w = 0; w < 40; w++) {
+        MEM_W32(ADH_P2_LEN, 256u);
+        if (adh(0xe162cb14u /* GetPeerList */, ADH_P2_LEN, ADH_P2_BUF, 0u) == 0u &&
+            MEM_R32(ADH_P2_LEN) >= 152u)
+            break;
+        cpu->r[4] = 25000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    expect(MEM_R32(ADH_P2_LEN) == 152u, "adhoc tcp loopback: GetPeerList sees LoopPeer");
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, peer_mac[i]);
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u,
+           "adhoc tcp loopback: AdhocInit succeeds");
+    const int32_t pdp = (int32_t)adh(0x6f92741bu /* PdpCreate */, ADH_P2_SELF_MAC, 0x3100u, 0x1000u);
+    expect(pdp > 0, "adhoc tcp loopback: PdpCreate succeeds");
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)"TCP_GO"[i]);
+    expect(adh_call_full(0xabed3790u /* PdpSend */, cpu->r[29], (uint32_t)pdp, ADH_P2_PEER_MAC,
+                         0x3100u, ADH_P2_BUF, 6u, 0u, 0u, 0u) == 0u,
+           "adhoc tcp loopback: PdpSend sends TCP_GO");
+    uint32_t rrc = 1u;
+    for (int w = 0; w < 40; w++) {
+        MEM_W32(ADH_P2_LEN, 64u);
+        rrc = adh_call_full(0xdfe53e03u /* PdpRecv */, cpu->r[29], (uint32_t)pdp,
+                            ADH_P2_BUF + 64u, ADH_P2_PORT, ADH_P2_BUF, ADH_P2_LEN, 0u, 1u, 0u);
+        if (rrc == 0u) break;
+        cpu->r[4] = 25000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    char reply[7] = {0};
+    for (int i = 0; i < 6; i++) reply[i] = (char)MEM_R8(ADH_P2_BUF + (uint32_t)i);
+    expect(rrc == 0u && MEM_R32(ADH_P2_LEN) == 6u && strcmp(reply, "TCP_OK") == 0,
+           "adhoc tcp loopback: PdpRecv receives TCP_OK over real loopback TCP");
+    expect(adh(0x7f27bb5eu /* PdpDelete */, (uint32_t)pdp, 0u, 0u) == 0u &&
+           adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u) == 0u &&
+           adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "adhoc tcp loopback: clean teardown succeeds");
+    s_adh_p2_tcp_done = 1;
+}
+
+static void test_adhoc_online_real_tcp_loopback_e2e(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "adhoc tcp loopback: WSAStartup");
+#endif
+    adh_p2_sock_t lsn = socket(AF_INET, SOCK_STREAM, 0);
+    expect(lsn != ADH_P2_BAD_SOCK, "adhoc tcp loopback: listen socket created");
+    if (lsn == ADH_P2_BAD_SOCK) return;
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = 0u;
+    int bind_ok = bind(lsn, (struct sockaddr *)&sa, sizeof(sa)) == 0 && listen(lsn, 4) == 0;
+    socklen_t slen = sizeof(sa);
+    if (bind_ok && getsockname(lsn, (struct sockaddr *)&sa, &slen) != 0) bind_ok = 0;
+    expect(bind_ok, "adhoc tcp loopback: bound 127.0.0.1:0");
+    if (!bind_ok) { adh_p2_close_sock(lsn); return; }
+    const unsigned port = (unsigned)ntohs(sa.sin_port);
+    char srv_spec[64];
+    snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u", port, port);
+
+    AdhP2TcpServer srv = {lsn, 0, 0};
+#ifdef _WIN32
+    uintptr_t th = _beginthreadex(NULL, 0, adh_p2_tcp_server_thread, &srv, 0, NULL);
+    expect(th != 0u, "adhoc tcp loopback: server thread started");
+#else
+    pthread_t th;
+    int pt_ok = pthread_create(&th, NULL, adh_p2_tcp_server_thread, &srv) == 0;
+    expect(pt_ok, "adhoc tcp loopback: server thread started");
+#endif
+    s_adh_p2_tcp_done = 0;
+    const uint32_t loaded_end = adh_fixture_begin();
+    hle_test_setenv("SR_ADHOC_ENABLED", "1");
+    hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+    hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+    adh_run(ADH_P2_MAIN, adh_p2_tcp_main_fn);
+    expect(s_adh_p2_tcp_done == 1 && srv.got_pdp_ping == 1,
+           "adhoc tcp loopback: real relay client + HLE end-to-end TCP round-trip passed");
+    hle_net_reset();
+    hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+    hle_test_setenv("SR_ADHOC_SERVER", NULL);
+    hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+    adh_fixture_end(loaded_end);
+    srv.stop = 1;
+    adh_p2_close_listener(lsn);
+#ifdef _WIN32
+    /* The listener is closed, so the thread leaves accept(); wait for it before srv (on this
+     * stack) goes away. */
+    if (th) { WaitForSingleObject((HANDLE)th, INFINITE); CloseHandle((HANDLE)th); }
+    WSACleanup();
+#else
+    if (pt_ok) pthread_join(th, NULL);
+#endif
+}
+
+/* ---- D2 & D12.{2,3,4,5} regressions -------------------------------------------------------- */
+static int s_d2_d12_tcp_done;
+static int s_d12_last_optlen;
+static uint8_t s_d12_last_opt_byte;
+
+static void d12_match_cb_fn(CpuState *cpu) {
+    const int ev = (int)cpu->r[5];
+    const int ol = (int)cpu->r[7];
+    s_d12_last_optlen = ol;
+    if (ol > 0 && cpu->r[8]) s_d12_last_opt_byte = MEM_R8(cpu->r[8] + (uint32_t)(ol - 1));
+    const int idx = s_adh_p2_match.count++;
+    if (idx < 16) {
+        s_adh_p2_match.event[idx] = ev;
+        s_adh_p2_match.optlen[idx] = ol;
+    }
+    cpu->r[2] = 0u;
+}
+
+typedef struct {
+    adh_p2_sock_t lsn;
+    adh_p2_sock_t trig_lsn;
+    volatile int stop;
+    volatile int sent_unsolicited;
+} D122TcpServer;
+
+#ifdef _WIN32
+static unsigned __stdcall d122_tcp_server_thread(void *arg) {
+#else
+static void *d122_tcp_server_thread(void *arg) {
+#endif
+    D122TcpServer *srv = (D122TcpServer *)arg;
+    static const uint8_t bssid[6] = {0x02u, 0x20u, 0x00u, 0x00u, 0x00u, 0x01u};
+    adh_p2_sock_t lobby = accept(srv->lsn, NULL, NULL);
+    if (lobby != ADH_P2_BAD_SOCK) {
+        uint8_t login[144];
+        if (adh_p2_recv_exact(lobby, login, sizeof(login)) == 0 && login[0] == 1u) {
+            while (!srv->stop) {
+                uint8_t op = 0u;
+                int r = recv(lobby, (char *)&op, 1, 0);
+                if (r <= 0) break;
+                if (op == 0u || op == 3u) continue;
+                if (op == 2u) {
+                    uint8_t grp[8];
+                    if (adh_p2_recv_exact(lobby, grp, 8u) != 0) break;
+                    uint8_t bssid_pkt[7] = {6u, bssid[0], bssid[1], bssid[2],
+                                            bssid[3], bssid[4], bssid[5]};
+                    (void)adh_p2_send_all(lobby, bssid_pkt, sizeof(bssid_pkt));
+                    adh_p2_sock_t trig = accept(srv->trig_lsn, NULL, NULL);
+                    if (trig != ADH_P2_BAD_SOCK) {
+                        const uint8_t scan_done = 5u; /* NK_LOBBY_SCAN_COMPLETE */
+                        const uint8_t ack = 'A';
+                        (void)adh_p2_send_all(lobby, &scan_done, 1u);
+                        srv->sent_unsolicited = 1;
+                        (void)adh_p2_send_all(trig, &ack, 1u);
+                        adh_p2_close_sock(trig);
+                    }
+                    uint8_t drain[16];
+                    while (!srv->stop && recv(lobby, (char *)drain, sizeof(drain), 0) > 0) {}
+                    break;
+                }
+            }
+        }
+        adh_p2_close_sock(lobby);
+    }
+#ifdef _WIN32
+    return 0u;
+#else
+    return NULL;
+#endif
+}
+
+static D122TcpServer *s_d122_srv;
+static uint16_t s_d122_trig_port;
+
+static void d122_main_fn(CpuState *cpu) {
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '2'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "d12.2: init");
+    expect(adh(ADH_NID_CREATE, adh_name(0, "GRP122"), 0u, 0u) == 0u, "d12.2: Create starts");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh_state() == 1u && s_adh_events == 1u, "d12.2: connected in GRP122");
+    /* Poke trigger socket so server immediately sends unsolicited SCAN_COMPLETE while in state 1. */
+    adh_p2_sock_t poke = socket(AF_INET, SOCK_STREAM, 0);
+    if (poke != ADH_P2_BAD_SOCK) {
+        struct sockaddr_in ta;
+        memset(&ta, 0, sizeof(ta));
+        ta.sin_family = AF_INET;
+        ta.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        ta.sin_port = htons(s_d122_trig_port);
+        if (connect(poke, (struct sockaddr *)&ta, sizeof(ta)) == 0) {
+            uint8_t ack = 0u;
+            (void)adh_p2_recv_exact(poke, &ack, 1u);
+        }
+        adh_p2_close_sock(poke);
+    }
+    for (int w = 0; w < 20; w++) {
+        cpu->r[4] = 20000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+        if (adh_state() != 1u || s_adh_events != 1u) break;
+    }
+    char d122_msg[160];
+    snprintf(d122_msg, sizeof(d122_msg),
+             "d12.2: unsolicited SCAN_COMPLETE while in group keeps state 1 and fires no event "
+             "(state=%u events=%u)", adh_state(), s_adh_events);
+    expect(s_d122_srv->sent_unsolicited == 1 && adh_state() == 1u && s_adh_events == 1u, d122_msg);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "d12.2: teardown");
+    s_d2_d12_tcp_done = 1;
+}
+
+static void d2_d12_loop_main_fn(CpuState *cpu) {
+    static const uint8_t p0_mac[6] = {0x02u, 0x21u, 0x22u, 0x33u, 0x44u, 0x50u};
+    NkAdhocTransport *t0 = nk_loopnet_console(s_adh_p2_net, 0);
+    const uint8_t lowgrp[8] = {'l', 'o', 'w', 'g', 'r', 'p', '1', 0};
+    expect(t0->ops->login(t0, p0_mac, "PeerLow", "TEST00003") == NK_NET_OK &&
+           t0->ops->connect(t0, lowgrp) == NK_NET_OK,
+           "d12.5: peer logs in and creates lowercase group lowgrp1");
+    int p0_match_pdp = -1;
+
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '3'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh(0x0c622081u /* sceWlanGetEtherAddr */, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "d2/d12: Net/Adhocctl init");
+    uint8_t self_mac[6];
+    for (uint32_t i = 0u; i < 6u; i++) self_mac[i] = MEM_R8(ADH_P2_SELF_MAC + i);
+
+    /* D12.5: scan returns lowgrp1, Join accepts lower-case PPSSPP validNetworkName without stop. */
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u, "d12.5: Scan starts");
+    adh_p2_wait_state(cpu, 0u, 1u);
+    MEM_W32(ADH_P2_LEN, 256u);
+    expect(adh(0x81aee1beu /* GetScanInfo */, ADH_P2_LEN, ADH_P2_BUF, 0u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 28u,
+           "d12.5: GetScanInfo finds lowgrp1");
+    const uint32_t stops_before = sr_hle_test_unmodelled_stops();
+    const uint32_t jrc = adh(0x5e7f79c9u /* Join */, ADH_P2_BUF, 0u, 0u);
+    char msg[192];
+    snprintf(msg, sizeof(msg),
+             "d12.5: Join on lowercase lowgrp1 succeeds without unmodelled stop (rc=0x%08x)", jrc);
+    expect(jrc == 0u && sr_hle_test_unmodelled_stops() == stops_before, msg);
+    if (jrc == 0u) adh_p2_wait_state(cpu, 1u, 2u);
+
+    /* Invalid control byte in online group name must return INVALID_ARG, not stop the run. */
+    MEM_W8(ADH_P2_STAT, 0x01u); MEM_W8(ADH_P2_STAT + 1u, 'B'); MEM_W8(ADH_P2_STAT + 2u, 0u);
+    const uint32_t inv_rc = adh(ADH_NID_CREATE, ADH_P2_STAT, 0u, 0u);
+    snprintf(msg, sizeof(msg),
+             "d12.5: invalid group byte online returns INVALID_ARG without stop (got 0x%08x)", inv_rc);
+    expect(inv_rc == 0x80410b04u && sr_hle_test_unmodelled_stops() == stops_before, msg);
+
+    /* Move both consoles to an uppercase group for D2 / D12.3 / D12.4 so each fails independently. */
+    if (adh_state() == 1u) {
+        (void)adh(ADH_NID_DISCONNECT, 0u, 0u, 0u);
+        adh_p2_wait_state(cpu, 0u, 3u);
+    }
+    const uint8_t upgrp[8] = {'D', '2', 'G', 'R', 'P', '0', '1', 0};
+    (void)t0->ops->disconnect(t0);
+    (void)t0->ops->connect(t0, upgrp);
+    (void)adh(ADH_NID_CREATE, adh_name(0, "D2GRP01"), 0u, 0u);
+    for (int i = 0; i < 60 && adh_state() != 1u; i++) {
+        cpu->r[4] = 25000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    p0_match_pdp = t0->ops->pdp_open(t0, 0x5200u);
+    expect(adh_state() == 1u && p0_match_pdp >= 0, "d2/d12.3: both consoles ready in D2GRP01");
+
+    /* D12.4: excessive rxbuflen in MatchingCreate fails with NO_SPACE, not huge host calloc. */
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u &&
+           adh(0x2a2a1e07u /* MatchingInit */, 0x20000u, 0u, 0u) == 0u,
+           "d12.4: AdhocInit + MatchingInit");
+    sr_test_register_guest_fn(ADH_P2_MATCH_CB, d12_match_cb_fn);
+    const uint32_t saved_sp0 = MEM_R32(cpu->r[29]);
+    MEM_W32(cpu->r[29], ADH_P2_MATCH_CB);
+    const uint32_t huge_rc = adh_call_full(0xca5eda6fu /* MatchingCreate */, cpu->r[29],
+                                           1u, 4u, 0x5199u, 0x10000000u /* 256 MiB */,
+                                           100000u, 100000u, 3u, 50000u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    snprintf(msg, sizeof(msg),
+             "d12.4: MatchingCreate rejects 256 MiB rxbuflen with NO_SPACE (got 0x%08x)", huge_rc);
+    expect(huge_rc == 0x80410809u /* SCE_NET_ADHOC_MATCHING_ERROR_NO_SPACE */, msg);
+    if ((int32_t)huge_rc > 0) (void)adh(0xf16eaf4fu /* MatchingDelete */, huge_rc, 0u, 0u);
+
+    /* D2: PDP datagram larger than rxbuflen (1024) must be dropped, not stall Matching. */
+    memset(&s_adh_p2_match, 0, sizeof(s_adh_p2_match));
+    MEM_W32(cpu->r[29], ADH_P2_MATCH_CB);
+    const int32_t mid_d2 = (int32_t)adh_call_full(0xca5eda6fu, cpu->r[29], 1u, 4u, 0x5200u, 1024u,
+                                                  100000u, 100000u, 3u, 50000u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(mid_d2 > 0, "d2: MatchingCreate rxbuflen=1024 succeeds");
+    expect(adh_call_full(0x93ef3843u /* MatchingStart */, cpu->r[29], (uint32_t)mid_d2,
+                         0x30u, 0x2000u, 0x30u, 0x2000u, 0u, 0u, 0u) == 0u,
+           "d2: MatchingStart succeeds");
+    uint8_t oversized[1200];
+    memset(oversized, 0x41, sizeof(oversized));
+    oversized[0] = 5u;
+    (void)t0->ops->pdp_send(t0, p0_match_pdp, self_mac, 0x5200u, oversized, sizeof(oversized));
+    const uint8_t valid_join[7] = {2u, 2u, 0u, 0u, 0u, 'O', 'K'};
+    (void)t0->ops->pdp_send(t0, p0_match_pdp, self_mac, 0x5200u, valid_join, sizeof(valid_join));
+    cpu->r[4] = 100000u;
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    snprintf(msg, sizeof(msg),
+             "d2: oversized 1200-byte datagram dropped without stalling Matching (count=%d)",
+             s_adh_p2_match.count);
+    expect(s_adh_p2_match.count >= 1 && s_adh_p2_match.event[0] == 2 /* REQUEST */, msg);
+    (void)adh(0x32b156b3u, (uint32_t)mid_d2, 0u, 0u);
+    (void)adh(0xf16eaf4fu, (uint32_t)mid_d2, 0u, 0u);
+
+    /* D12.3: matching event data > 4088 bytes must not be truncated silently. */
+    memset(&s_adh_p2_match, 0, sizeof(s_adh_p2_match));
+    s_d12_last_optlen = 0;
+    s_d12_last_opt_byte = 0u;
+    MEM_W32(cpu->r[29], ADH_P2_MATCH_CB);
+    const int32_t mid_big = (int32_t)adh_call_full(0xca5eda6fu, cpu->r[29], 1u, 4u, 0x5201u, 8192u,
+                                                   100000u, 100000u, 3u, 50000u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(mid_big > 0 &&
+           adh_call_full(0x93ef3843u, cpu->r[29], (uint32_t)mid_big,
+                         0x30u, 0x2000u, 0x30u, 0x2000u, 0u, 0u, 0u) == 0u,
+           "d12.3: large Matching context started on 0x5201");
+    (void)t0->ops->pdp_send(t0, p0_match_pdp, self_mac, 0x5201u, valid_join, sizeof(valid_join));
+    cpu->r[4] = 80000u;
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, p0_mac[i]);
+    (void)adh_call5(0x5e3d4b79u /* SelectTarget */, (uint32_t)mid_big, ADH_P2_PEER_MAC, 0u, 0u, 0u);
+    const uint8_t acc_pkt[5] = {3u, 0u, 0u, 0u, 0u};
+    (void)t0->ops->pdp_send(t0, p0_match_pdp, self_mac, 0x5201u, acc_pkt, sizeof(acc_pkt));
+    uint8_t big_data[5005];
+    memset(big_data, 0x11, sizeof(big_data));
+    big_data[0] = 5u; /* MATCH_PKT_BULK */
+    big_data[1] = (uint8_t)(5000u & 0xffu);
+    big_data[2] = (uint8_t)((5000u >> 8) & 0xffu);
+    big_data[3] = 0u;
+    big_data[4] = 0u;
+    big_data[5004] = 0x5au;
+    (void)t0->ops->pdp_send(t0, p0_match_pdp, self_mac, 0x5201u, big_data, sizeof(big_data));
+    cpu->r[4] = 100000u;
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    snprintf(msg, sizeof(msg),
+             "d12.3: 5000-byte matching DATA delivered untruncated (got len=%d last=0x%02x)",
+             s_d12_last_optlen, s_d12_last_opt_byte);
+    expect(s_d12_last_optlen == 5000 && s_d12_last_opt_byte == 0x5au, msg);
+    (void)adh(0x32b156b3u, (uint32_t)mid_big, 0u, 0u);
+    (void)adh(0xf16eaf4fu, (uint32_t)mid_big, 0u, 0u);
+    (void)adh(0x7945ecdau, 0u, 0u, 0u);
+    (void)t0->ops->pdp_close(t0, p0_match_pdp);
+    (void)adh(0xa62c6f57u, 0u, 0u, 0u);
+    (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+    (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+    s_adh_p2_loop_done = 1;
+}
+
+static void test_adhoc_d2_d12_regressions(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "d12.2: WSAStartup");
+#endif
+    adh_p2_sock_t lsn = socket(AF_INET, SOCK_STREAM, 0);
+    adh_p2_sock_t trig = socket(AF_INET, SOCK_STREAM, 0);
+    expect(lsn != ADH_P2_BAD_SOCK && trig != ADH_P2_BAD_SOCK, "d12.2: listen sockets created");
+    if (lsn != ADH_P2_BAD_SOCK && trig != ADH_P2_BAD_SOCK) {
+        struct sockaddr_in sa, tsa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        sa.sin_port = 0u;
+        memset(&tsa, 0, sizeof(tsa));
+        tsa.sin_family = AF_INET;
+        tsa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        tsa.sin_port = 0u;
+        socklen_t slen = sizeof(sa), tlen = sizeof(tsa);
+        int bind_ok = bind(lsn, (struct sockaddr *)&sa, sizeof(sa)) == 0 && listen(lsn, 2) == 0 &&
+                      getsockname(lsn, (struct sockaddr *)&sa, &slen) == 0 &&
+                      bind(trig, (struct sockaddr *)&tsa, sizeof(tsa)) == 0 && listen(trig, 2) == 0 &&
+                      getsockname(trig, (struct sockaddr *)&tsa, &tlen) == 0;
+        expect(bind_ok, "d12.2: bound 127.0.0.1:0");
+        if (bind_ok) {
+            s_d122_trig_port = ntohs(tsa.sin_port);
+            D122TcpServer srv = {lsn, trig, 0, 0};
+            s_d122_srv = &srv;
+#ifdef _WIN32
+            uintptr_t th = _beginthreadex(NULL, 0, d122_tcp_server_thread, &srv, 0, NULL);
+#else
+            pthread_t th;
+            int pt_ok = pthread_create(&th, NULL, d122_tcp_server_thread, &srv) == 0;
+#endif
+            char srv_spec[64];
+            snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u",
+                     (unsigned)ntohs(sa.sin_port), (unsigned)ntohs(sa.sin_port));
+            s_d2_d12_tcp_done = 0;
+            const uint32_t loaded_end = adh_fixture_begin();
+            hle_test_setenv("SR_ADHOC_ENABLED", "1");
+            hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+            hle_net_reset();
+            adh_run(ADH_P2_MAIN, d122_main_fn);
+            expect(s_d2_d12_tcp_done == 1, "d12.2: unsolicited SCAN_COMPLETE test completed");
+            hle_net_reset();
+            hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+            hle_test_setenv("SR_ADHOC_SERVER", NULL);
+            adh_fixture_end(loaded_end);
+            srv.stop = 1;
+            adh_p2_close_listener(lsn);
+            adh_p2_close_listener(trig);
+#ifdef _WIN32
+            if (th) { WaitForSingleObject((HANDLE)th, INFINITE); CloseHandle((HANDLE)th); }
+#else
+            if (pt_ok) pthread_join(th, NULL);
+#endif
+            s_d122_srv = NULL;
+        } else {
+            adh_p2_close_sock(lsn);
+            adh_p2_close_sock(trig);
+        }
+    } else {
+        if (lsn != ADH_P2_BAD_SOCK) adh_p2_close_sock(lsn);
+        if (trig != ADH_P2_BAD_SOCK) adh_p2_close_sock(trig);
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
+
+    extern void sr_hle_test_set_adhoc_transport(NkAdhocTransport *t);
+    s_adh_p2_net = nk_loopnet_create();
+    expect(s_adh_p2_net != NULL, "d2/d12: create loopnet");
+    if (s_adh_p2_net) {
+        s_adh_p2_loop_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        sr_hle_test_set_adhoc_transport(nk_loopnet_console(s_adh_p2_net, 1));
+        adh_run(ADH_P2_MAIN, d2_d12_loop_main_fn);
+        expect(s_adh_p2_loop_done == 1, "d2/d12: loopnet regressions completed");
+        hle_net_reset();
+        sr_hle_test_set_adhoc_transport(NULL);
+        adh_fixture_end(loaded_end);
+        nk_loopnet_destroy(s_adh_p2_net);
+        s_adh_p2_net = NULL;
+    }
+}
+
+/* ---- D1 regression: blocking ad hoc calls across sceNetAdhocctlTerm / Term / Close --------- */
+typedef struct {
+    adh_p2_sock_t lobby_lsn, data_lsn;
+    adh_p2_sock_t lobby_fds[4], data_fds[8];
+    uint8_t lobby_rx[4][256], data_rx[8][64];
+    size_t lobby_len[4], data_len[8];
+    int data_ack_sent[8], data_kind[8];
+    volatile int stop, stall_data_recv;
+} D1TcpServer;
+
+static void d1_nonblock(adh_p2_sock_t s) {
+#ifdef _WIN32
+    u_long on = 1u;
+    (void)ioctlsocket(s, FIONBIO, &on);
+#else
+    int fl = fcntl(s, F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(s, F_SETFL, fl | O_NONBLOCK);
+#endif
+    int nd = 1;
+    (void)setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&nd, sizeof(nd));
+}
+
+#ifdef _WIN32
+static unsigned __stdcall d1_tcp_server_thread(void *arg) {
+#else
+static void *d1_tcp_server_thread(void *arg) {
+#endif
+    D1TcpServer *srv = (D1TcpServer *)arg;
+    static const uint8_t bssid[6] = {0x02u, 0xd1u, 0x00u, 0x00u, 0x00u, 0x01u};
+    while (!srv->stop) {
+        for (;;) {
+            adh_p2_sock_t c = accept(srv->lobby_lsn, NULL, NULL);
+            if (c == ADH_P2_BAD_SOCK) break;
+            d1_nonblock(c);
+            int placed = 0;
+            for (int i = 0; i < 4; i++) {
+                if (srv->lobby_fds[i] == ADH_P2_BAD_SOCK) {
+                    srv->lobby_fds[i] = c;
+                    srv->lobby_len[i] = 0u;
+                    placed = 1;
+                    break;
+                }
+            }
+            if (!placed) adh_p2_close_sock(c);
+        }
+        for (;;) {
+            adh_p2_sock_t c = accept(srv->data_lsn, NULL, NULL);
+            if (c == ADH_P2_BAD_SOCK) break;
+            d1_nonblock(c);
+            int rcv = 4096;
+            (void)setsockopt(c, SOL_SOCKET, SO_RCVBUF, (const char *)&rcv, sizeof(rcv));
+            int placed = 0;
+            for (int i = 0; i < 8; i++) {
+                if (srv->data_fds[i] == ADH_P2_BAD_SOCK) {
+                    srv->data_fds[i] = c;
+                    srv->data_len[i] = 0u;
+                    srv->data_ack_sent[i] = 0;
+                    srv->data_kind[i] = -1;
+                    placed = 1;
+                    break;
+                }
+            }
+            if (!placed) adh_p2_close_sock(c);
+        }
+        for (int i = 0; i < 4; i++) {
+            adh_p2_sock_t fd = srv->lobby_fds[i];
+            if (fd == ADH_P2_BAD_SOCK) continue;
+            int closed = 0;
+            while (srv->lobby_len[i] < sizeof(srv->lobby_rx[i])) {
+                int r = recv(fd, (char *)(srv->lobby_rx[i] + srv->lobby_len[i]),
+                             (int)(sizeof(srv->lobby_rx[i]) - srv->lobby_len[i]), 0);
+                if (r > 0) srv->lobby_len[i] += (size_t)r;
+                else { if (r == 0) closed = 1; break; }
+            }
+            while (srv->lobby_len[i] > 0u) {
+                uint8_t op = srv->lobby_rx[i][0];
+                size_t need = (op == 0u || op == 3u || op == 4u) ? 1u
+                            : (op == 1u ? 144u : (op == 2u ? 9u : 0u));
+                if (need == 0u) { srv->lobby_len[i] = 0u; break; }
+                if (srv->lobby_len[i] < need) break;
+                if (op == 2u) {
+                    uint8_t bp[7] = {6u, bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]};
+                    (void)adh_p2_send_all(fd, bp, sizeof(bp));
+                } else if (op == 4u) {
+                    uint8_t done = 5u;
+                    (void)adh_p2_send_all(fd, &done, 1u);
+                }
+                if (need < srv->lobby_len[i])
+                    memmove(srv->lobby_rx[i], srv->lobby_rx[i] + need, srv->lobby_len[i] - need);
+                srv->lobby_len[i] -= need;
+            }
+            if (closed) { adh_p2_close_sock(fd); srv->lobby_fds[i] = ADH_P2_BAD_SOCK; }
+        }
+        for (int i = 0; i < 8; i++) {
+            adh_p2_sock_t fd = srv->data_fds[i];
+            if (fd == ADH_P2_BAD_SOCK) continue;
+            int closed = 0;
+            if (!srv->data_ack_sent[i]) {
+                while (srv->data_len[i] < 24u) {
+                    int r = recv(fd, (char *)(srv->data_rx[i] + srv->data_len[i]),
+                                 (int)(24u - srv->data_len[i]), 0);
+                    if (r > 0) srv->data_len[i] += (size_t)r;
+                    else { if (r == 0) closed = 1; break; }
+                }
+                if (srv->data_len[i] >= 24u) {
+                    srv->data_kind[i] = (int)srv->data_rx[i][0];
+                    srv->data_ack_sent[i] = 1;
+                    if (srv->data_kind[i] == 2) {
+                        uint8_t ack[10];
+                        memset(ack, 0, sizeof(ack));
+                        memcpy(ack, srv->data_rx[i] + 14u, 6u);
+                        ack[8] = srv->data_rx[i][22];
+                        ack[9] = srv->data_rx[i][23];
+                        (void)adh_p2_send_all(fd, ack, sizeof(ack));
+                    }
+                }
+            } else if (!(srv->stall_data_recv && srv->data_kind[i] == 2)) {
+                uint8_t drain[128];
+                int r = recv(fd, (char *)drain, (int)sizeof(drain), 0);
+                if (r == 0) closed = 1;
+            }
+            if (closed) { adh_p2_close_sock(fd); srv->data_fds[i] = ADH_P2_BAD_SOCK; }
+        }
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        adh_p2_sock_t max_fd = 0;
+        if (srv->lobby_lsn != ADH_P2_BAD_SOCK) { FD_SET(srv->lobby_lsn, &rfds); if (srv->lobby_lsn > max_fd) max_fd = srv->lobby_lsn; }
+        if (srv->data_lsn != ADH_P2_BAD_SOCK) { FD_SET(srv->data_lsn, &rfds); if (srv->data_lsn > max_fd) max_fd = srv->data_lsn; }
+        for (int i = 0; i < 4; i++) if (srv->lobby_fds[i] != ADH_P2_BAD_SOCK) {
+            FD_SET(srv->lobby_fds[i], &rfds); if (srv->lobby_fds[i] > max_fd) max_fd = srv->lobby_fds[i];
+        }
+        for (int i = 0; i < 8; i++) if (srv->data_fds[i] != ADH_P2_BAD_SOCK && (!srv->stall_data_recv || !srv->data_ack_sent[i])) {
+            FD_SET(srv->data_fds[i], &rfds); if (srv->data_fds[i] > max_fd) max_fd = srv->data_fds[i];
+        }
+        struct timeval tv = {0, 1000};
+        (void)select((int)max_fd + 1, &rfds, NULL, NULL, &tv);
+    }
+#ifdef _WIN32
+    return 0u;
+#else
+    return NULL;
+#endif
+}
+
+enum { D1_WORKER_ENTRY = 0x089e3f80u, D1_WORKER_NAME = 0x089e4e00u, D1_SEND_BUF = 0x09100000u };
+static D1TcpServer *s_d1_srv;
+static volatile int s_d1_stage;
+static int s_d1_mode; /* 0=PtpAccept, 1=PtpRecv, 2=PtpSend, 3=PdpRecv, 4=PollSocket */
+static int32_t s_d1_sock_id;
+static uint32_t s_d1_worker_rc;
+static int s_d1_done;
+
+static void d1_worker_fn(CpuState *cpu) {
+    s_d1_stage = 1;
+    if (s_d1_mode == 0) {
+        s_d1_worker_rc = adh_call_full(0x9df81198u /* PtpAccept */, cpu->r[29],
+                                       (uint32_t)s_d1_sock_id, ADH_P2_PEER_MAC, ADH_P2_PORT,
+                                       0u /* infinite */, 0u, 0u, 0u, 0u);
+    } else if (s_d1_mode == 1) {
+        MEM_W32(ADH_P2_LEN, 64u);
+        s_d1_worker_rc = adh_call_full(0x8bea2b3eu /* PtpRecv */, cpu->r[29],
+                                       (uint32_t)s_d1_sock_id, ADH_P2_BUF, ADH_P2_LEN,
+                                       0u /* infinite */, 0u, 0u, 0u, 0u);
+    } else if (s_d1_mode == 2) {
+        MEM_W32(ADH_P2_LEN, 0x900000u); /* 9 MiB exceeds SO_SNDBUF + Linux tcp_wmem + 512 KiB TX buf */
+        s_d1_worker_rc = adh_call_full(0x4da4c788u /* PtpSend */, cpu->r[29],
+                                       (uint32_t)s_d1_sock_id, D1_SEND_BUF, ADH_P2_LEN,
+                                       0u /* infinite */, 0u, 0u, 0u, 0u);
+    } else if (s_d1_mode == 3) {
+        MEM_W32(ADH_P2_LEN, 64u);
+        s_d1_worker_rc = adh_call_full(0xdfe53e03u /* PdpRecv */, cpu->r[29],
+                                       (uint32_t)s_d1_sock_id, ADH_P2_PEER_MAC, ADH_P2_PORT,
+                                       ADH_P2_BUF, ADH_P2_LEN, 0u /* infinite */, 0u, 0u);
+    } else if (s_d1_mode == 4) {
+        MEM_W32(ADH_P2_SDS + 0u, (uint32_t)s_d1_sock_id);
+        MEM_W32(ADH_P2_SDS + 4u, 0x0002u /* ADHOC_EV_RECV */);
+        MEM_W32(ADH_P2_SDS + 8u, 0u);
+        s_d1_worker_rc = adh_call_full(0x7a662d6bu /* PollSocket */, cpu->r[29],
+                                       ADH_P2_SDS, 1u, 0u /* infinite */, 0u,
+                                       0u, 0u, 0u, 0u);
+    }
+    s_d1_stage = 2;
+    cpu->r[2] = 0u;
+}
+
+static void d1_spawn_and_wait_parked(CpuState *cpu, int mode, int32_t sock_id) {
+    s_d1_mode = mode;
+    s_d1_sock_id = sock_id;
+    s_d1_stage = 0;
+    s_d1_worker_rc = 0xdeadbeefu;
+    MEM_W8(D1_WORKER_NAME, 'd'); MEM_W8(D1_WORKER_NAME + 1u, '1'); MEM_W8(D1_WORKER_NAME + 2u, 0u);
+    sr_test_register_guest_fn(D1_WORKER_ENTRY, d1_worker_fn);
+    const uint32_t th = adh_call_full(0x446d8de6u /* sceKernelCreateThread */, cpu->r[29],
+                                      D1_WORKER_NAME, D1_WORKER_ENTRY, 0x20u, 0x2000u, 0u, 0u, 0u, 0u);
+    expect(th > 0u && th < 0x80000000u, "d1: worker thread created");
+    expect(adh_call_full(0xf475845du /* sceKernelStartThread */, cpu->r[29],
+                         th, 0u, 0u, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "d1: worker thread started");
+    for (int w = 0; w < 40 && s_d1_stage == 0; w++) {
+        cpu->r[4] = 2000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    /* Let worker execute enough iterations to enter its blocking wait loop (and fill PtpSend). */
+    for (int w = 0; w < 20; w++) {
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    expect(s_d1_stage == 1, "d1: worker thread is parked inside blocking ad hoc call");
+}
+
+static void d1_wait_worker_done(CpuState *cpu) {
+    for (int w = 0; w < 100 && s_d1_stage != 2; w++) {
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+}
+
+static void d1_session_begin(CpuState *cpu) {
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh(0x0c622081u, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "d1: Net/Adhocctl init");
+    expect(adh(ADH_NID_CREATE, adh_name(0, "D1GRP01"), 0u, 0u) == 0u, "d1: Create");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u, "d1: AdhocInit");
+}
+
+static int32_t d1_open_connected_ptp(CpuState *cpu, uint16_t lport, uint16_t dport) {
+    static const uint8_t peer_mac[6] = {0x02u, 0xaau, 0xbbu, 0xccu, 0xddu, 0xeeu};
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, peer_mac[i]);
+    const int32_t id = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                              ADH_P2_SELF_MAC, lport, ADH_P2_PEER_MAC, dport,
+                                              0x1000u, 100000u, 3u, 0u);
+    expect(id > 0, "d1: PtpOpen succeeds");
+    if (id <= 0) return -1;
+    uint32_t crc = 1u;
+    for (int w = 0; w < 200; w++) {
+        crc = adh(0xfc6fc07bu /* PtpConnect */, (uint32_t)id, 0u, 1u /* ADHOC_F_NONBLOCK */);
+        if (crc == 0u || crc != 0x80410709u) break;
+#ifdef _WIN32
+        Sleep(2u);
+#else
+        adh_p2_usleep(2000);
+#endif
+        cpu->r[4] = 2000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    expect(crc == 0u, "d1: PtpConnect reaches ESTABLISHED");
+    return id;
+}
+
+static void d1_main_fn(CpuState *cpu) {
+    char msg[192];
+
+    /* 1. Reviewer scenario: PtpAccept blocked across sceNetAdhocctlTerm. */
+    d1_session_begin(cpu);
+    const int32_t lsn_id = (int32_t)adh_call_full(0xe08bdac1u /* PtpListen */, cpu->r[29],
+                                                  ADH_P2_SELF_MAC, 0x4501u, 0x1000u, 100000u, 3u, 2u, 0u, 0u);
+    expect(lsn_id > 0, "d1(PtpAccept/ctlTerm): PtpListen");
+    d1_spawn_and_wait_parked(cpu, 0, lsn_id);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d1(PtpAccept/ctlTerm): sceNetAdhocctlTerm");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PtpAccept across sceNetAdhocctlTerm woke with DISCONNECTED (got 0x%08x)",
+             s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x8041070cu, msg);
+    expect(adh(0x157e6225u /* PtpClose */, (uint32_t)lsn_id, 0u, 0u) == 0u, "d1: PtpClose after ctlTerm");
+    expect(adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d1: cleanup 1");
+
+    /* 2. Reviewer scenario: PtpRecv blocked across sceNetAdhocctlTerm + re-init safety. */
+    d1_session_begin(cpu);
+    const int32_t rx_id = d1_open_connected_ptp(cpu, 0x4502u, 0x4503u);
+    d1_spawn_and_wait_parked(cpu, 1, rx_id);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d1(PtpRecv/ctlTerm): sceNetAdhocctlTerm");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PtpRecv across sceNetAdhocctlTerm woke with DISCONNECTED (got 0x%08x)",
+             s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x8041070cu, msg);
+    /* Verify re-initializing adhocctl leaves stale socket detached instead of hijacking new handle 0. */
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_CREATE, adh_name(0, "D1GRP02"), 0u, 0u) == 0u, "d1: re-init adhocctl");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    MEM_W32(ADH_P2_LEN, 16u);
+    const uint32_t stale_rc = adh_call_full(0x8bea2b3eu /* PtpRecv */, cpu->r[29], (uint32_t)rx_id,
+                                            ADH_P2_BUF, ADH_P2_LEN, 10000u, 0u, 0u, 0u, 0u);
+    snprintf(msg, sizeof(msg), "d1: stale PtpRecv after adhocctl re-init refuses with DISCONNECTED (got 0x%08x)",
+             stale_rc);
+    expect(stale_rc == 0x8041070cu, msg);
+    expect(adh(0x157e6225u, (uint32_t)rx_id, 0u, 0u) == 0u &&
+           adh(0xa62c6f57u, 0u, 0u, 0u) == 0u &&
+           adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d1: cleanup 2");
+
+    /* 3. Reviewer scenario: PtpSend blocked across sceNetAdhocctlTerm. */
+    d1_session_begin(cpu);
+    s_d1_srv->stall_data_recv = 1;
+    const int32_t tx_id = d1_open_connected_ptp(cpu, 0x4504u, 0x4505u);
+    d1_spawn_and_wait_parked(cpu, 2, tx_id);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d1(PtpSend/ctlTerm): sceNetAdhocctlTerm");
+    d1_wait_worker_done(cpu);
+    s_d1_srv->stall_data_recv = 0;
+    snprintf(msg, sizeof(msg), "d1: PtpSend across sceNetAdhocctlTerm woke with DISCONNECTED (got 0x%08x)",
+             s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x8041070cu, msg);
+    expect(adh(0x157e6225u, (uint32_t)tx_id, 0u, 0u) == 0u &&
+           adh(0xa62c6f57u, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d1: cleanup 3");
+
+    /* 4. Reviewer scenario: PdpRecv blocked across sceNetAdhocctlTerm, plus PollSocket. */
+    d1_session_begin(cpu);
+    const int32_t pdp_id = (int32_t)adh(0x6f92741bu /* PdpCreate */, ADH_P2_SELF_MAC, 0x4510u, 0x1000u);
+    expect(pdp_id > 0, "d1(PdpRecv/ctlTerm): PdpCreate");
+    d1_spawn_and_wait_parked(cpu, 3, pdp_id);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d1(PdpRecv/ctlTerm): sceNetAdhocctlTerm");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PdpRecv across sceNetAdhocctlTerm woke with DISCONNECTED (got 0x%08x)",
+             s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x8041070cu, msg);
+    expect(adh(0x7f27bb5eu /* PdpDelete */, (uint32_t)pdp_id, 0u, 0u) == 0u &&
+           adh(0xa62c6f57u, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d1: cleanup 4");
+
+    /* 5. Close/Delete/sceNetAdhocTerm while blocked + PollSocket across sceNetAdhocctlTerm. */
+    d1_session_begin(cpu);
+    const int32_t l2 = (int32_t)adh_call_full(0xe08bdac1u, cpu->r[29], ADH_P2_SELF_MAC, 0x4520u,
+                                              0x1000u, 100000u, 3u, 2u, 0u, 0u);
+    d1_spawn_and_wait_parked(cpu, 0, l2);
+    expect(adh(0x157e6225u /* PtpClose */, (uint32_t)l2, 0u, 0u) == 0u, "d1: PtpClose while PtpAccept blocked");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PtpAccept across PtpClose returns SOCKET_DELETED (got 0x%08x)", s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x80410707u, msg);
+
+    const int32_t p2 = (int32_t)adh(0x6f92741bu, ADH_P2_SELF_MAC, 0x4521u, 0x1000u);
+    d1_spawn_and_wait_parked(cpu, 3, p2);
+    expect(adh(0x7f27bb5eu /* PdpDelete */, (uint32_t)p2, 0u, 0u) == 0u, "d1: PdpDelete while PdpRecv blocked");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PdpRecv across PdpDelete returns SOCKET_DELETED (got 0x%08x)", s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x80410707u, msg);
+
+    const int32_t r2 = d1_open_connected_ptp(cpu, 0x4522u, 0x4523u);
+    d1_spawn_and_wait_parked(cpu, 1, r2);
+    expect(adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u) == 0u, "d1: sceNetAdhocTerm while PtpRecv blocked");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PtpRecv across sceNetAdhocTerm returns SOCKET_DELETED (got 0x%08x)", s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x80410707u, msg);
+
+    expect(adh(0xe1d621d7u, 0x20000u, 0u, 0u) == 0u, "d1: re-init Adhoc for PollSocket");
+    const int32_t poll_pdp = (int32_t)adh(0x6f92741bu, ADH_P2_SELF_MAC, 0x4524u, 0x1000u);
+    d1_spawn_and_wait_parked(cpu, 4, poll_pdp);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d1: sceNetAdhocctlTerm while PollSocket blocked");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PollSocket across sceNetAdhocctlTerm returns EXCEPTION_EVENT (got 0x%08x rev=0x%08x)",
+             s_d1_worker_rc, MEM_R32(ADH_P2_SDS + 8u));
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x80410717u && MEM_R32(ADH_P2_SDS + 8u) == 0x0800u, msg);
+
+    expect(adh(0x7f27bb5eu, (uint32_t)poll_pdp, 0u, 0u) == 0u &&
+           adh(0xa62c6f57u, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d1: cleanup 5");
+    s_d1_done = 1;
+}
+
+static void test_adhoc_d1_lifetime_across_term(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "d1: WSAStartup");
+#endif
+    D1TcpServer srv;
+    memset(&srv, 0, sizeof(srv));
+    for (int i = 0; i < 4; i++) srv.lobby_fds[i] = ADH_P2_BAD_SOCK;
+    for (int i = 0; i < 8; i++) srv.data_fds[i] = ADH_P2_BAD_SOCK;
+    srv.lobby_lsn = socket(AF_INET, SOCK_STREAM, 0);
+    srv.data_lsn = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in lsa, dsa;
+    memset(&lsa, 0, sizeof(lsa)); lsa.sin_family = AF_INET; lsa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    memset(&dsa, 0, sizeof(dsa)); dsa.sin_family = AF_INET; dsa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t lsl = sizeof(lsa), dsl = sizeof(dsa);
+    int rcv = 4096;
+    if (srv.data_lsn != ADH_P2_BAD_SOCK)
+        (void)setsockopt(srv.data_lsn, SOL_SOCKET, SO_RCVBUF, (const char *)&rcv, sizeof(rcv));
+    int ok = srv.lobby_lsn != ADH_P2_BAD_SOCK && srv.data_lsn != ADH_P2_BAD_SOCK &&
+             bind(srv.lobby_lsn, (struct sockaddr *)&lsa, sizeof(lsa)) == 0 && listen(srv.lobby_lsn, 8) == 0 &&
+             getsockname(srv.lobby_lsn, (struct sockaddr *)&lsa, &lsl) == 0 &&
+             bind(srv.data_lsn, (struct sockaddr *)&dsa, sizeof(dsa)) == 0 && listen(srv.data_lsn, 16) == 0 &&
+             getsockname(srv.data_lsn, (struct sockaddr *)&dsa, &dsl) == 0;
+    expect(ok, "d1: loopback relay server bound");
+    if (ok) {
+        d1_nonblock(srv.lobby_lsn);
+        d1_nonblock(srv.data_lsn);
+        s_d1_srv = &srv;
+#ifdef _WIN32
+        uintptr_t th = _beginthreadex(NULL, 0, d1_tcp_server_thread, &srv, 0, NULL);
+        expect(th != 0u, "d1: server thread started");
+#else
+        pthread_t th;
+        int pt_ok = pthread_create(&th, NULL, d1_tcp_server_thread, &srv) == 0;
+        expect(pt_ok, "d1: server thread started");
+#endif
+        char srv_spec[64];
+        snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u",
+                 (unsigned)ntohs(lsa.sin_port), (unsigned)ntohs(dsa.sin_port));
+        s_d1_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        hle_test_setenv("SR_ADHOC_ENABLED", "1");
+        hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+        hle_net_reset();
+        adh_run(ADH_P2_MAIN, d1_main_fn);
+        expect(s_d1_done == 1, "d1: blocking lifetime regressions completed");
+        hle_net_reset();
+        hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+        hle_test_setenv("SR_ADHOC_SERVER", NULL);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+        adh_fixture_end(loaded_end);
+        srv.stop = 1;
+        adh_p2_close_sock(srv.lobby_lsn);
+        adh_p2_close_sock(srv.data_lsn);
+#ifdef _WIN32
+        if (th) { WaitForSingleObject((HANDLE)th, 3000u); CloseHandle((HANDLE)th); }
+#else
+        if (pt_ok) pthread_join(th, NULL);
+#endif
+        for (int i = 0; i < 4; i++) if (srv.lobby_fds[i] != ADH_P2_BAD_SOCK) adh_p2_close_sock(srv.lobby_fds[i]);
+        for (int i = 0; i < 8; i++) if (srv.data_fds[i] != ADH_P2_BAD_SOCK) adh_p2_close_sock(srv.data_fds[i]);
+        s_d1_srv = NULL;
+    } else {
+        if (srv.lobby_lsn != ADH_P2_BAD_SOCK) adh_p2_close_sock(srv.lobby_lsn);
+        if (srv.data_lsn != ADH_P2_BAD_SOCK) adh_p2_close_sock(srv.data_lsn);
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+/* ---- Reusable multi-client loopback mini-relay for D4 / D3 / D8 / D9 / D7 --------------- */
+typedef struct {
+    adh_p2_sock_t fd;
+    int active, logged_in, in_group;
+    uint32_t peer_id;
+    uint8_t mac[6], group[8], nick[128], rx[2048];
+    size_t rx_len;
+} MiniRelayPeer;
+
+typedef struct {
+    adh_p2_sock_t fd;
+    int active, kind, partner; /* 0=PDP, 1=PTP_LISTEN, 2=PTP_CONNECT, 3=PTP_ACCEPT, 4=PAIRED */
+    uint8_t src_mac[6], dst_mac[6];
+    uint16_t sport, dport;
+    uint8_t rx[65536];
+    size_t rx_len;
+} MiniRelayConn;
+
+typedef struct {
+    adh_p2_sock_t lobby_lsn, data_lsn;
+    uint16_t lobby_port, data_port;
+    MiniRelayPeer peers[6];
+    MiniRelayConn conns[24];
+    int group_exists;
+    uint8_t active_group[8], group_bssid[6];
+    volatile int stop, running;
+    volatile int drop_lobby_on_connect;
+    volatile int drop_lobby_mid_session;
+    volatile int silent_lobby;
+    volatile int hold_connect_reply; /* joins the group but keeps the members and the BSSID back */
+    volatile int inject_late_reply;  /* sends a member and a BSSID to a logged-in client once */
+    volatile int late_reply_before_next; /* the same, just ahead of the answer to the next join */
+    volatile int leaves_seen;        /* DISCONNECT frames from clients that were in a group */
+    volatile int kicked;             /* clients logged out for breaking a server rule (below) */
+    volatile int stall_ptp_forward;
+    volatile int closed_unmatched_ptp_connects;
+    volatile int last_login_ok;
+    char last_login_nick[129], last_login_game[10];
+#ifdef _WIN32
+    uintptr_t th;
+#else
+    pthread_t th;
+    int pt_ok;
+#endif
+} AdhP2MiniRelay;
+
+static void mr_put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v & 0xffu); p[1] = (uint8_t)(v >> 8); }
+static uint16_t mr_get16(const uint8_t *p) { return (uint16_t)p[0] | ((uint16_t)p[1] << 8); }
+static void mr_put32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xffu); p[1] = (uint8_t)((v >> 8) & 0xffu);
+    p[2] = (uint8_t)((v >> 16) & 0xffu); p[3] = (uint8_t)((v >> 24) & 0xffu);
+}
+static uint32_t mr_get32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static void mr_nonblock(adh_p2_sock_t s) {
+#ifdef _WIN32
+    u_long on = 1u;
+    (void)ioctlsocket(s, FIONBIO, &on);
+#else
+    int fl = fcntl(s, F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(s, F_SETFL, fl | O_NONBLOCK);
+#endif
+    int nd = 1;
+    (void)setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&nd, sizeof(nd));
+}
+static void mr_send(adh_p2_sock_t fd, const void *buf, size_t n) {
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t sent = 0u;
+    for (int tries = 0; sent < n && tries < 2000; tries++) {
+        int r = send(fd, (const char *)(p + sent), (int)(n - sent), 0);
+        if (r > 0) sent += (size_t)r;
+    }
+}
+/* The answer to a join the client no longer waits for: a member called Ghost, then a BSSID
+ * (02:00:00:00:00:66) that is not the test group's (02:00:00:00:00:77). */
+static void mr_send_stale_join_reply(adh_p2_sock_t fd) {
+    uint8_t ghost[139], bp[7] = {6u, 0x02u, 0u, 0u, 0u, 0u, 0x66u};
+    memset(ghost, 0, sizeof(ghost));
+    ghost[0] = 2u; memcpy(ghost + 1, "Ghost", 5u);
+    ghost[129] = 0x02u; ghost[130] = 0xdeu; ghost[131] = 0xadu; ghost[134] = 0x01u;
+    mr_put32(ghost + 135, 0x7f000063u);
+    mr_send(fd, ghost, sizeof(ghost));
+    mr_send(fd, bp, sizeof(bp));
+}
+
+static void mr_pump_once(AdhP2MiniRelay *r) {
+    for (;;) {
+        adh_p2_sock_t c = accept(r->lobby_lsn, NULL, NULL);
+        if (c == ADH_P2_BAD_SOCK) break;
+        mr_nonblock(c);
+        int placed = 0;
+        for (int i = 0; i < 6; i++) {
+            if (!r->peers[i].active) {
+                memset(&r->peers[i], 0, sizeof(r->peers[i]));
+                r->peers[i].fd = c; r->peers[i].active = 1; r->peers[i].peer_id = (uint32_t)(i + 1);
+                placed = 1; break;
+            }
+        }
+        if (!placed) adh_p2_close_sock(c);
+    }
+    for (;;) {
+        adh_p2_sock_t c = accept(r->data_lsn, NULL, NULL);
+        if (c == ADH_P2_BAD_SOCK) break;
+        mr_nonblock(c);
+        int placed = 0;
+        for (int i = 0; i < 24; i++) {
+            if (!r->conns[i].active) {
+                memset(&r->conns[i], 0, sizeof(r->conns[i]));
+                r->conns[i].fd = c; r->conns[i].active = 1; r->conns[i].kind = -1; r->conns[i].partner = -1;
+                placed = 1; break;
+            }
+        }
+        if (!placed) adh_p2_close_sock(c);
+    }
+    for (int i = 0; i < 6; i++) {
+        MiniRelayPeer *p = &r->peers[i];
+        if (!p->active) continue;
+        if (r->drop_lobby_mid_session && p->in_group) {
+            adh_p2_close_sock(p->fd); p->fd = ADH_P2_BAD_SOCK; p->active = 0;
+            continue;
+        }
+        int closed = 0;
+        if (r->inject_late_reply && p->logged_in) {
+            mr_send_stale_join_reply(p->fd);
+            r->inject_late_reply = 0;
+        }
+        while (p->rx_len < sizeof(p->rx)) {
+            int n = recv(p->fd, (char *)(p->rx + p->rx_len), (int)(sizeof(p->rx) - p->rx_len), 0);
+            if (n > 0) p->rx_len += (size_t)n;
+            else { if (n == 0) closed = 1; break; }
+        }
+        while (p->rx_len > 0u) {
+            const uint8_t op = p->rx[0];
+            size_t need = (op == 0u || op == 3u || op == 4u) ? 1u : (op == 1u ? 144u : (op == 2u ? 9u : 0u));
+            if (need == 0u) { p->rx_len = 0u; break; }
+            if (p->rx_len < need) break;
+            /* A silent lobby holds a scan back unanswered, as a slow server does: TCP keeps the
+             * request, and the server answers it, in order, once it speaks again. */
+            if (op == 4u && r->silent_lobby) break;
+            if (op == 1u) {
+                memcpy(p->mac, p->rx + 1, 6u);
+                memcpy(p->nick, p->rx + 7, 128u);
+                memcpy(r->last_login_nick, p->rx + 7, 128u);
+                r->last_login_nick[128] = '\0';
+                memcpy(r->last_login_game, p->rx + 135, 9u);
+                r->last_login_game[9] = '\0';
+                r->last_login_ok = 1;
+                p->logged_in = 1;
+            } else if (op == 2u && !r->silent_lobby) {
+                if (r->drop_lobby_on_connect) { closed = 1; p->rx_len = 0u; break; }
+                /* PPSSPP's server logs out a client that joins a group while in one
+                 * (connect_user, Core/HLE/proAdhocServer.cpp:911-942). */
+                if (p->in_group) { r->kicked++; closed = 1; p->rx_len = 0u; break; }
+                memcpy(p->group, p->rx + 1, 8u);
+                if (!r->group_exists) { r->group_exists = 1; memcpy(r->active_group, p->group, 8u); }
+                if (r->hold_connect_reply) {
+                    p->in_group = 1;
+                    if (need < p->rx_len) memmove(p->rx, p->rx + need, p->rx_len - need);
+                    p->rx_len -= need;
+                    continue;
+                }
+                if (r->late_reply_before_next) {
+                    mr_send_stale_join_reply(p->fd);
+                    r->late_reply_before_next = 0;
+                }
+                for (int j = 0; j < 6; j++) {
+                    if (r->peers[j].active && r->peers[j].in_group && memcmp(r->peers[j].group, p->group, 8u) == 0) {
+                        uint8_t cp1[139], cp2[139];
+                        memset(cp1, 0, sizeof(cp1)); memset(cp2, 0, sizeof(cp2));
+                        cp1[0] = 2u; memcpy(cp1 + 1, r->peers[j].nick, 128u); memcpy(cp1 + 129, r->peers[j].mac, 6u); mr_put32(cp1 + 135, r->peers[j].peer_id);
+                        cp2[0] = 2u; memcpy(cp2 + 1, p->nick, 128u); memcpy(cp2 + 129, p->mac, 6u); mr_put32(cp2 + 135, p->peer_id);
+                        mr_send(p->fd, cp1, sizeof(cp1));
+                        mr_send(r->peers[j].fd, cp2, sizeof(cp2));
+                    }
+                }
+                p->in_group = 1;
+                uint8_t bp[7] = {6u, r->group_bssid[0], r->group_bssid[1], r->group_bssid[2],
+                                 r->group_bssid[3], r->group_bssid[4], r->group_bssid[5]};
+                mr_send(p->fd, bp, sizeof(bp));
+            } else if (op == 3u) {
+                if (p->in_group) {
+                    p->in_group = 0;
+                    r->leaves_seen++;
+                    for (int j = 0; j < 6; j++) {
+                        if (j != i && r->peers[j].active && r->peers[j].in_group) {
+                            uint8_t dp[5] = {3u, 0, 0, 0, 0}; mr_put32(dp + 1, p->peer_id);
+                            mr_send(r->peers[j].fd, dp, sizeof(dp));
+                        }
+                    }
+                } else {
+                    /* PPSSPP's server logs out a client that leaves without a group
+                     * (disconnect_user, Core/HLE/proAdhocServer.cpp:1030-1041). */
+                    r->kicked++; closed = 1; p->rx_len = 0u; break;
+                }
+            } else if (op == 4u && !r->silent_lobby) {
+                if (r->drop_lobby_on_connect) { closed = 1; p->rx_len = 0u; break; }
+                if (r->group_exists) {
+                    uint8_t spkt[15]; spkt[0] = 4u;
+                    memcpy(spkt + 1, r->active_group, 8u); memcpy(spkt + 9, r->group_bssid, 6u);
+                    mr_send(p->fd, spkt, sizeof(spkt));
+                }
+                const uint8_t done = 5u; mr_send(p->fd, &done, 1u);
+            }
+            if (need < p->rx_len) memmove(p->rx, p->rx + need, p->rx_len - need);
+            p->rx_len -= need;
+        }
+        if (closed) {
+            adh_p2_close_sock(p->fd); p->fd = ADH_P2_BAD_SOCK; p->active = 0;
+        }
+    }
+    for (int i = 0; i < 24; i++) {
+        MiniRelayConn *dc = &r->conns[i];
+        if (!dc->active) continue;
+        if (dc->kind == 4 && r->stall_ptp_forward) continue;
+        int closed = 0;
+        while (dc->rx_len < sizeof(dc->rx)) {
+            int n = recv(dc->fd, (char *)(dc->rx + dc->rx_len), (int)(sizeof(dc->rx) - dc->rx_len), 0);
+            if (n > 0) dc->rx_len += (size_t)n;
+            else { if (n == 0) closed = 1; break; }
+        }
+        if (dc->kind < 0 && dc->rx_len >= 24u) {
+            dc->kind = (int)mr_get32(dc->rx);
+            memcpy(dc->src_mac, dc->rx + 4, 6u); dc->sport = mr_get16(dc->rx + 12);
+            memcpy(dc->dst_mac, dc->rx + 14, 6u); dc->dport = mr_get16(dc->rx + 22);
+            if (dc->rx_len > 24u) memmove(dc->rx, dc->rx + 24u, dc->rx_len - 24u);
+            dc->rx_len -= 24u;
+            if (dc->kind == 2) {
+                int matched = 0;
+                for (int j = 0; j < 24; j++) {
+                    MiniRelayConn *ls = &r->conns[j];
+                    if (ls->active && ls->kind == 1 &&
+                        memcmp(ls->src_mac, dc->dst_mac, 6u) == 0 && ls->sport == dc->dport) {
+                        uint8_t note[10]; memset(note, 0, sizeof(note));
+                        memcpy(note, dc->src_mac, 6u); mr_put16(note + 8, dc->sport);
+                        mr_send(ls->fd, note, sizeof(note));
+                        matched = 1; break;
+                    }
+                }
+                if (!matched) {
+                    r->closed_unmatched_ptp_connects++;
+                    adh_p2_close_sock(dc->fd); dc->fd = ADH_P2_BAD_SOCK; dc->active = 0; continue;
+                }
+            } else if (dc->kind == 3) {
+                for (int j = 0; j < 24; j++) {
+                    MiniRelayConn *cl = &r->conns[j];
+                    if (cl->active && cl->kind == 2 &&
+                        memcmp(cl->src_mac, dc->dst_mac, 6u) == 0 && cl->sport == dc->dport &&
+                        memcmp(cl->dst_mac, dc->src_mac, 6u) == 0 && cl->dport == dc->sport) {
+                        uint8_t ac1[10], ac2[10];
+                        memset(ac1, 0, sizeof(ac1)); memset(ac2, 0, sizeof(ac2));
+                        memcpy(ac1, dc->src_mac, 6u); mr_put16(ac1 + 8, dc->sport);
+                        memcpy(ac2, cl->src_mac, 6u); mr_put16(ac2 + 8, cl->sport);
+                        mr_send(cl->fd, ac1, sizeof(ac1)); mr_send(dc->fd, ac2, sizeof(ac2));
+                        cl->kind = 4; dc->kind = 4; cl->partner = i; dc->partner = j; break;
+                    }
+                }
+            }
+        }
+        if (dc->kind == 0) {
+            while (dc->rx_len >= 14u) {
+                uint32_t plen = mr_get32(dc->rx + 10);
+                if (dc->rx_len < 14u + plen) break;
+                const uint8_t *dst = dc->rx;
+                const uint16_t dp = mr_get16(dc->rx + 8);
+                for (int j = 0; j < 24; j++) {
+                    MiniRelayConn *tc = &r->conns[j];
+                    if (tc->active && tc->kind == 0 &&
+                        memcmp(tc->src_mac, dst, 6u) == 0 && tc->sport == dp) {
+                        uint8_t hdr[14]; memset(hdr, 0, sizeof(hdr));
+                        memcpy(hdr, dc->src_mac, 6u); mr_put16(hdr + 8, dc->sport); mr_put32(hdr + 10, plen);
+                        mr_send(tc->fd, hdr, sizeof(hdr));
+                        if (plen) mr_send(tc->fd, dc->rx + 14, plen);
+                    }
+                }
+                const size_t tot = 14u + plen;
+                if (tot < dc->rx_len) memmove(dc->rx, dc->rx + tot, dc->rx_len - tot);
+                dc->rx_len -= tot;
+            }
+        } else if (dc->kind == 4 && dc->rx_len > 0u) {
+            if (dc->partner >= 0 && r->conns[dc->partner].active)
+                mr_send(r->conns[dc->partner].fd, dc->rx, dc->rx_len);
+            dc->rx_len = 0u;
+        }
+        if (closed) {
+            if (dc->partner >= 0 && r->conns[dc->partner].active) {
+                adh_p2_close_sock(r->conns[dc->partner].fd);
+                r->conns[dc->partner].fd = ADH_P2_BAD_SOCK;
+                r->conns[dc->partner].active = 0;
+            }
+            adh_p2_close_sock(dc->fd); dc->fd = ADH_P2_BAD_SOCK; dc->active = 0;
+        }
+    }
+}
+#ifdef _WIN32
+static unsigned __stdcall mr_thread_fn(void *arg) {
+#else
+static void *mr_thread_fn(void *arg) {
+#endif
+    AdhP2MiniRelay *r = (AdhP2MiniRelay *)arg;
+    while (!r->stop) {
+        mr_pump_once(r);
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        adh_p2_sock_t max_fd = 0;
+        if (r->lobby_lsn != ADH_P2_BAD_SOCK) { FD_SET(r->lobby_lsn, &rfds); if (r->lobby_lsn > max_fd) max_fd = r->lobby_lsn; }
+        if (r->data_lsn != ADH_P2_BAD_SOCK) { FD_SET(r->data_lsn, &rfds); if (r->data_lsn > max_fd) max_fd = r->data_lsn; }
+        for (int i = 0; i < 6; i++) if (r->peers[i].active && r->peers[i].fd != ADH_P2_BAD_SOCK) {
+            FD_SET(r->peers[i].fd, &rfds); if (r->peers[i].fd > max_fd) max_fd = r->peers[i].fd;
+        }
+        for (int i = 0; i < 24; i++) if (r->conns[i].active && r->conns[i].fd != ADH_P2_BAD_SOCK && !(r->conns[i].kind == 4 && r->stall_ptp_forward)) {
+            FD_SET(r->conns[i].fd, &rfds); if (r->conns[i].fd > max_fd) max_fd = r->conns[i].fd;
+        }
+        struct timeval tv = {0, 1000};
+        (void)select((int)max_fd + 1, &rfds, NULL, NULL, &tv);
+    }
+    return 0;
+}
+static int mr_start(AdhP2MiniRelay *r) {
+    memset(r, 0, sizeof(*r));
+    r->lobby_lsn = socket(AF_INET, SOCK_STREAM, 0);
+    r->data_lsn = socket(AF_INET, SOCK_STREAM, 0);
+    if (r->lobby_lsn == ADH_P2_BAD_SOCK || r->data_lsn == ADH_P2_BAD_SOCK) return 0;
+    struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET; sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t sl = sizeof(sa);
+    if (bind(r->lobby_lsn, (struct sockaddr *)&sa, sizeof(sa)) != 0 || listen(r->lobby_lsn, 8) != 0 ||
+        getsockname(r->lobby_lsn, (struct sockaddr *)&sa, &sl) != 0) return 0;
+    r->lobby_port = ntohs(sa.sin_port);
+    sa.sin_port = 0u; sl = sizeof(sa);
+    if (bind(r->data_lsn, (struct sockaddr *)&sa, sizeof(sa)) != 0 || listen(r->data_lsn, 16) != 0 ||
+        getsockname(r->data_lsn, (struct sockaddr *)&sa, &sl) != 0) return 0;
+    r->data_port = ntohs(sa.sin_port);
+    mr_nonblock(r->lobby_lsn); mr_nonblock(r->data_lsn);
+    r->group_bssid[0] = 0x02u; r->group_bssid[5] = 0x77u;
+    for (int i = 0; i < 6; i++) r->peers[i].fd = ADH_P2_BAD_SOCK;
+    for (int i = 0; i < 24; i++) { r->conns[i].fd = ADH_P2_BAD_SOCK; r->conns[i].kind = -1; r->conns[i].partner = -1; }
+#ifdef _WIN32
+    r->th = _beginthreadex(NULL, 0, mr_thread_fn, r, 0, NULL);
+    r->running = r->th != 0u;
+#else
+    r->pt_ok = pthread_create(&r->th, NULL, mr_thread_fn, r) == 0;
+    r->running = r->pt_ok;
+#endif
+    return r->running;
+}
+static void mr_stop(AdhP2MiniRelay *r) {
+    r->stop = 1;
+#ifdef _WIN32
+    if (r->th) { WaitForSingleObject((HANDLE)r->th, 3000u); CloseHandle((HANDLE)r->th); }
+#else
+    if (r->pt_ok) pthread_join(r->th, NULL);
+#endif
+    adh_p2_close_sock(r->lobby_lsn); adh_p2_close_sock(r->data_lsn);
+    for (int i = 0; i < 6; i++) if (r->peers[i].fd != ADH_P2_BAD_SOCK) adh_p2_close_sock(r->peers[i].fd);
+    for (int i = 0; i < 24; i++) if (r->conns[i].fd != ADH_P2_BAD_SOCK) adh_p2_close_sock(r->conns[i].fd);
+}
+
+/* ---- D4 regression: PtpOpen before Peer listens retries cleanly in PtpConnect; self-connect ---- */
+enum { D4_WORKER_ENTRY = 0x089e3f90u, D4_WORKER_NAME = 0x089e4e20u };
+static AdhP2MiniRelay *s_d4_srv;
+static int32_t s_d4_ptp_id;
+static volatile uint32_t s_d4_conn_rc;
+static volatile int s_d4_conn_done;
+static int s_d4_done;
+
+static void d4_worker_connect_fn(CpuState *cpu) {
+    s_d4_conn_rc = adh_call_full(0xfc6fc07bu /* PtpConnect */, cpu->r[29], (uint32_t)s_d4_ptp_id,
+                                 2000000u, 0u, 0u, 0u, 0u, 0u, 0u);
+    s_d4_conn_done = 1;
+    cpu->r[2] = 0u;
+}
+
+static void d4_main_fn(CpuState *cpu) {
+    static const uint8_t peer_mac[6] = {0x02u, 0x33u, 0x44u, 0x55u, 0x66u, 0x77u};
+    NkAdhocRelayConfig pcfg = {"127.0.0.1", s_d4_srv->lobby_port, s_d4_srv->data_port, 0u};
+    NkAdhocRelayClient *peer_rc = nk_relay_client_create(&pcfg);
+    expect(peer_rc != NULL, "d4: peer relay client created");
+    NkAdhocTransport *tp = nk_relay_client_transport(peer_rc);
+    const uint8_t grp[8] = {'D', '4', 'G', 'R', 'P', '0', '1', 0};
+    expect(tp->ops->login(tp, peer_mac, "D4Peer", "TEST00004") == NK_NET_OK &&
+           tp->ops->connect(tp, grp) == NK_NET_OK,
+           "d4: peer logged into D4GRP01");
+
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '4'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh(0x0c622081u, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "d4: guest init");
+    expect(adh(ADH_NID_CREATE, adh_name(0, "D4GRP01"), 0u, 0u) == 0u, "d4: guest Create");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u, "d4: AdhocInit");
+
+    /* Scenario 2: self-connect to unlistened local port succeeds in PtpOpen, refuses in PtpConnect. */
+    const int32_t self_ptp = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                                    ADH_P2_SELF_MAC, 0u, ADH_P2_SELF_MAC, 0x4299u,
+                                                    0x1000u, 100000u, 3u, 0u);
+    char msg[160];
+    snprintf(msg, sizeof(msg), "d4: PtpOpen targeting self without listener returns valid ID (got %d)", self_ptp);
+    expect(self_ptp > 0, msg);
+    if (self_ptp > 0) {
+        const uint32_t sc = adh(0xfc6fc07bu /* PtpConnect */, (uint32_t)self_ptp, 0u, 0u);
+        snprintf(msg, sizeof(msg),
+                 "d4: PtpConnect targeting self without listener returns CONNECTION_REFUSED (0x%08x)", sc);
+        expect(sc == 0x80410718u, msg);
+        (void)adh(0x157e6225u /* PtpClose */, (uint32_t)self_ptp, 0u, 0u);
+    }
+
+    /* Scenario 1: PtpOpen before peer listens gets relay close, then peer listens, then PtpConnect retries. */
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, peer_mac[i]);
+    const int32_t cli_ptp = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0x4200u, ADH_P2_PEER_MAC, 0x4201u,
+                                                   0x1000u, 100000u, 3u, 0u);
+    expect(cli_ptp > 0, "d4: PtpOpen before peer listens succeeds cleanly");
+    for (int w = 0; w < 200 && s_d4_srv->closed_unmatched_ptp_connects == 0; w++) {
+        cpu->r[4] = 2000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+        tp->ops->pump(tp);
+        if (s_d4_srv->closed_unmatched_ptp_connects == 0) {
+#ifdef _WIN32
+            Sleep(1u);
+#else
+            adh_p2_usleep(1000);
+#endif
+        }
+    }
+    /* Pump HLE via GetPtpStat so early refusal reaches the client handle before PtpConnect. */
+    for (int w = 0; w < 10; w++) {
+        MEM_W32(ADH_P2_LEN, 0u);
+        (void)adh(0xb9685118u /* GetPtpStat */, ADH_P2_LEN, 0u, 0u);
+    }
+
+    const int peer_lsn = tp->ops->ptp_listen(tp, 0x4201u, 4);
+    expect(peer_lsn >= 0, "d4: peer starts listening on 0x4201");
+    for (int w = 0; w < 40; w++) {
+        tp->ops->pump(tp);
+        cpu->r[4] = 1000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        adh_p2_usleep(1000);
+#endif
+    }
+
+    /* Run blocking PtpConnect on a guest worker while main pumps the peer listener/accept. */
+    s_d4_ptp_id = cli_ptp;
+    s_d4_conn_rc = 0xdeadbeefu;
+    s_d4_conn_done = 0;
+    MEM_W8(D4_WORKER_NAME, 'd'); MEM_W8(D4_WORKER_NAME + 1u, '4'); MEM_W8(D4_WORKER_NAME + 2u, 0u);
+    sr_test_register_guest_fn(D4_WORKER_ENTRY, d4_worker_connect_fn);
+    const uint32_t th = adh_call_full(0x446d8de6u /* sceKernelCreateThread */, cpu->r[29],
+                                      D4_WORKER_NAME, D4_WORKER_ENTRY, 0x20u, 0x2000u, 0u, 0u, 0u, 0u);
+    expect(th > 0u && th < 0x80000000u, "d4: connect worker created");
+    expect(adh_call_full(0xf475845du /* sceKernelStartThread */, cpu->r[29],
+                         th, 0u, 0u, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "d4: connect worker started");
+    int accepted = NK_NET_AGAIN;
+    for (int w = 0; w < 400 && (!s_d4_conn_done || accepted < 0); w++) {
+        tp->ops->pump(tp);
+        if (accepted < 0 && peer_lsn >= 0) accepted = tp->ops->ptp_accept(tp, peer_lsn, NULL, NULL);
+        cpu->r[4] = 2000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        adh_p2_usleep(1000);
+#endif
+    }
+    snprintf(msg, sizeof(msg),
+             "d4: PtpConnect after early open+listen succeeds (done=%d got 0x%08x)", s_d4_conn_done, s_d4_conn_rc);
+    expect(s_d4_conn_done && s_d4_conn_rc == 0u, msg);
+    expect(accepted >= 0, "d4: peer accepted retried PTP connection");
+
+    if (accepted >= 0) tp->ops->ptp_close(tp, accepted);
+    if (peer_lsn >= 0) tp->ops->ptp_close(tp, peer_lsn);
+    if (cli_ptp > 0) (void)adh(0x157e6225u, (uint32_t)cli_ptp, 0u, 0u);
+    tp->ops->logout(tp);
+    nk_relay_client_destroy(peer_rc);
+    (void)adh(0xa62c6f57u, 0u, 0u, 0u);
+    (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+    (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+    s_d4_done = 1;
+}
+
+static void test_adhoc_d4_ptp_open_connect_regression(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "d4: WSAStartup");
+#endif
+    AdhP2MiniRelay srv;
+    expect(mr_start(&srv), "d4: mini relay started");
+    if (srv.running) {
+        s_d4_srv = &srv;
+        char srv_spec[64];
+        snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u",
+                 (unsigned)srv.lobby_port, (unsigned)srv.data_port);
+        s_d4_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        hle_test_setenv("SR_ADHOC_ENABLED", "1");
+        hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+        hle_net_reset();
+        adh_run(ADH_P2_MAIN, d4_main_fn);
+        expect(s_d4_done == 1, "d4: PTP open/connect regression finished");
+        hle_net_reset();
+        hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+        hle_test_setenv("SR_ADHOC_SERVER", NULL);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+        adh_fixture_end(loaded_end);
+        mr_stop(&srv);
+        s_d4_srv = NULL;
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+/* ---- D3 regression: dead or silent lobby ends Create/Scan/group with event + log -------- */
+static AdhP2MiniRelay *s_d3_srv;
+static int s_d3_done;
+
+/* One step of real and guest time: a loopback frame needs the first, the ad hoc thread the second. */
+static void d3_step(CpuState *cpu) {
+#ifdef _WIN32
+    Sleep(1u);
+#else
+    adh_p2_usleep(1000);
+#endif
+    cpu->r[4] = 5000u;
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+}
+
+static void d3_main_fn(CpuState *cpu) {
+    char msg[288];
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '3'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+
+    /* 1. Lobby closes on Create: guest gets DISCONNECT event instead of hanging in flight. */
+    s_adh_events = 0u;
+    s_d3_srv->drop_lobby_on_connect = 1;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "d3.1: Net/Adhocctl init");
+    expect(adh(ADH_NID_CREATE, adh_name(0, "D3DROP1"), 0u, 0u) == 0u, "d3.1: Create returns 0");
+    for (int w = 0; w < 100 && s_adh_events == 0u; w++) {
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        adh_p2_usleep(1000);
+#endif
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    snprintf(msg, sizeof(msg),
+             "d3.1: dead lobby ends Create with DISCONNECT (events=%u ev=%d err=0x%08x state=%u)",
+             s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u, adh_state());
+    expect(s_adh_events == 1u && ADH_AT(0).event == 2 &&
+           ADH_AT(0).error == 0x80410b09u && adh_state() == 0u, msg);
+    const uint32_t after_dead = adh(ADH_NID_SCAN, 0u, 0u, 0u);
+    snprintf(msg, sizeof(msg), "d3.1: Scan after dead lobby returns DISCONNECTED, not BUSY (0x%08x)", after_dead);
+    expect(after_dead == 0x80410b09u, msg);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.1: cleanup");
+
+    /* 2. Mid-session lobby drop while in group: GetState resets to 0 + DISCONNECT event fires. */
+    s_adh_events = 0u;
+    s_d3_srv->drop_lobby_on_connect = 0;
+    s_d3_srv->drop_lobby_mid_session = 0;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_CREATE, adh_name(0, "D3MID01"), 0u, 0u) == 0u, "d3.2: Create");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh_state() == 1u && s_adh_events == 1u, "d3.2: in group D3MID01");
+    s_d3_srv->drop_lobby_mid_session = 1;
+    for (int w = 0; w < 100 && s_adh_events < 2u; w++) {
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        adh_p2_usleep(1000);
+#endif
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    s_d3_srv->drop_lobby_mid_session = 0;
+    snprintf(msg, sizeof(msg),
+             "d3.2: mid-session lobby drop resets state=0 and fires DISCONNECT (events=%u ev=%d err=0x%08x state=%u)",
+             s_adh_events, s_adh_events > 1u ? ADH_AT(1).event : -1,
+             s_adh_events > 1u ? ADH_AT(1).error : 0u, adh_state());
+    expect(s_adh_events == 2u && ADH_AT(1).event == 2 &&
+           ADH_AT(1).error == 0x80410b09u && adh_state() == 0u, msg);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.2: cleanup");
+
+    /* 3. A silent lobby (it holds the Scan back) times out Scan at adhocDefaultTimeout (5s) and
+     *    allows a retry, which completes on its own answer after the late one. */
+    s_adh_events = 0u;
+    s_d3_srv->silent_lobby = 1;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u, "d3.3: Scan starts against silent lobby");
+    for (int w = 0; w < 120 && s_adh_events == 0u; w++) {
+        cpu->r[4] = 50000u; /* 120 * 50ms = 6.0s virtual time > 5.0s adhocDefaultTimeout */
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    snprintf(msg, sizeof(msg),
+             "d3.3: silent lobby times out Scan with ERROR/TIMEOUT (events=%u ev=%d err=0x%08x state=%u)",
+             s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u, adh_state());
+    expect(s_adh_events == 1u && ADH_AT(0).event == 0 &&
+           ADH_AT(0).error == 0x80410b05u && adh_state() == 0u, msg);
+    s_d3_srv->silent_lobby = 0;
+    const uint32_t retry_rc = adh(ADH_NID_SCAN, 0u, 0u, 0u);
+    expect(retry_rc == 0u, "d3.3: Scan retries cleanly after timeout instead of BUSY");
+    for (int w = 0; w < 100 && s_adh_events < 2u; w++) {
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        adh_p2_usleep(1000);
+#endif
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    expect(s_adh_events == 2u && ADH_AT(1).event == 3 && ADH_AT(1).error == 0u,
+           "d3.3: retried Scan completes cleanly");
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.3: cleanup");
+
+    /* 4. sceNetAdhocctlDisconnect outside a group sends the lobby no leave: PPSSPP's server logs a
+     *    client out for one, which would lose the lobby and the Create after it. The DISCONNECT
+     *    event still comes, and in a group the lobby is told once. */
+    s_adh_events = 0u;
+    const int kicked0 = s_d3_srv->kicked, leaves0 = s_d3_srv->leaves_seen;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u, "d3.4: Disconnect outside a group returns 0");
+    for (int w = 0; w < 200 && s_adh_events == 0u; w++) d3_step(cpu);
+    expect(s_adh_events == 1u && ADH_AT(0).event == 2 && ADH_AT(0).error == 0u,
+           "d3.4: its DISCONNECT event follows");
+    for (int w = 0; w < 20; w++) d3_step(cpu);
+    const uint32_t keep_rc = adh(ADH_NID_CREATE, adh_name(0, "D3KEEP1"), 0u, 0u);
+    for (int w = 0; w < 200 && keep_rc == 0u && adh_state() != 1u; w++) d3_step(cpu);
+    snprintf(msg, sizeof(msg),
+             "d3.4: the lobby outlives that Disconnect and Create connects "
+             "(rc=0x%08x state=%u events=%u kicked=%d leaves=%d)",
+             keep_rc, adh_state(), s_adh_events, s_d3_srv->kicked - kicked0,
+             s_d3_srv->leaves_seen - leaves0);
+    expect(keep_rc == 0u && adh_state() == 1u && s_adh_events == 2u && ADH_AT(1).event == 1 &&
+           s_d3_srv->kicked == kicked0 && s_d3_srv->leaves_seen == leaves0, msg);
+    expect(adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u, "d3.4: Disconnect in the group returns 0");
+    for (int w = 0; w < 200 && (s_adh_events < 3u || s_d3_srv->leaves_seen == leaves0); w++)
+        d3_step(cpu);
+    snprintf(msg, sizeof(msg),
+             "d3.4: in a group the lobby is told of the leave once (events=%u state=%u leaves=%d kicked=%d)",
+             s_adh_events, adh_state(), s_d3_srv->leaves_seen - leaves0, s_d3_srv->kicked - kicked0);
+    expect(s_adh_events == 3u && ADH_AT(2).event == 2 && adh_state() == 0u &&
+           s_d3_srv->leaves_seen == leaves0 + 1 && s_d3_srv->kicked == kicked0, msg);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.4: cleanup");
+
+    /* 5. A join the lobby does not answer in time is given up: ERROR/TIMEOUT to the handlers and
+     *    the lobby told the console left. Its late answer (a member, then a BSSID) is dropped even
+     *    when it arrives just ahead of the answer to the next join, and so is one nobody asked for. */
+    s_adh_events = 0u;
+    const int kicked1 = s_d3_srv->kicked, leaves1 = s_d3_srv->leaves_seen;
+    s_d3_srv->hold_connect_reply = 1;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_CREATE, adh_name(0, "D3LATE1"), 0u, 0u) == 0u,
+           "d3.5: Create starts against a lobby that holds its answer back");
+    for (int w = 0; w < 20; w++) d3_step(cpu); /* the join reaches the server in real time */
+    for (int w = 0; w < 120 && s_adh_events == 0u; w++) {
+        cpu->r[4] = 50000u; /* 120 * 50 ms = 6.0 s of guest time, past the 5.0 s bound */
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    snprintf(msg, sizeof(msg),
+             "d3.5: the unanswered Create ends with ERROR/TIMEOUT (events=%u ev=%d err=0x%08x state=%u)",
+             s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u, adh_state());
+    expect(s_adh_events == 1u && ADH_AT(0).event == 0 &&
+           ADH_AT(0).error == 0x80410b05u && adh_state() == 0u, msg);
+    for (int w = 0; w < 200 && s_d3_srv->leaves_seen == leaves1; w++) d3_step(cpu);
+    snprintf(msg, sizeof(msg), "d3.5: the lobby is told the abandoned join is over (leaves=%d kicked=%d)",
+             s_d3_srv->leaves_seen - leaves1, s_d3_srv->kicked - kicked1);
+    expect(s_d3_srv->leaves_seen == leaves1 + 1 && s_d3_srv->kicked == kicked1, msg);
+    s_d3_srv->hold_connect_reply = 0;
+    s_d3_srv->late_reply_before_next = 1;
+    const uint32_t new_rc = adh(ADH_NID_CREATE, adh_name(0, "D3NEW01"), 0u, 0u);
+    for (int w = 0; w < 200 && new_rc == 0u &&
+                    (adh_state() != 1u || s_d3_srv->late_reply_before_next); w++)
+        d3_step(cpu);
+    for (int w = 0; w < 20; w++) d3_step(cpu); /* the answer to the new join follows the late one */
+    MEM_W32(ADH_P2_LEN, 256u);
+    uint32_t list_rc = adh(ADH_NID_PEER_LIST, ADH_P2_LEN, ADH_P2_BUF, 0u);
+    uint32_t param_rc = adh(ADH_NID_GET_PARAM, ADH_P2_STAT, 0u, 0u);
+    snprintf(msg, sizeof(msg),
+             "d3.5: the next Create takes its own answer, not the abandoned join's "
+             "(rc=0x%08x sent=%d state=%u events=%u list=0x%08x bytes=%u param=0x%08x bssid=..%02x)",
+             new_rc, s_d3_srv->late_reply_before_next == 0, adh_state(), s_adh_events, list_rc,
+             MEM_R32(ADH_P2_LEN), param_rc, MEM_R8(ADH_P2_STAT + 145u));
+    expect(new_rc == 0u && s_d3_srv->late_reply_before_next == 0 && adh_state() == 1u &&
+           s_adh_events == 2u && ADH_AT(1).event == 1 && list_rc == 0u &&
+           MEM_R32(ADH_P2_LEN) == 0u && param_rc == 0u && MEM_R8(ADH_P2_STAT + 140u) == 0x02u &&
+           MEM_R8(ADH_P2_STAT + 145u) == 0x77u, msg);
+    expect(adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u, "d3.5: Disconnect leaves the group");
+    for (int w = 0; w < 200 && s_adh_events < 3u; w++) d3_step(cpu);
+    s_d3_srv->inject_late_reply = 1;
+    for (int w = 0; w < 200 && s_d3_srv->inject_late_reply; w++) d3_step(cpu);
+    for (int w = 0; w < 40; w++) d3_step(cpu);
+    snprintf(msg, sizeof(msg),
+             "d3.5: a member and a BSSID nobody asked for change nothing "
+             "(sent=%d state=%u events=%u)",
+             s_d3_srv->inject_late_reply == 0, adh_state(), s_adh_events);
+    expect(s_d3_srv->inject_late_reply == 0 && adh_state() == 0u && s_adh_events == 3u &&
+           ADH_AT(2).event == 2, msg);
+    const uint32_t end_rc = adh(ADH_NID_CREATE, adh_name(0, "D3END01"), 0u, 0u);
+    for (int w = 0; w < 200 && end_rc == 0u && adh_state() != 1u; w++) d3_step(cpu);
+    MEM_W32(ADH_P2_LEN, 256u);
+    list_rc = adh(ADH_NID_PEER_LIST, ADH_P2_LEN, ADH_P2_BUF, 0u);
+    param_rc = adh(ADH_NID_GET_PARAM, ADH_P2_STAT, 0u, 0u);
+    snprintf(msg, sizeof(msg),
+             "d3.5: and the Create after them connects alone, with the group's BSSID "
+             "(rc=0x%08x state=%u events=%u list=0x%08x bytes=%u param=0x%08x bssid=..%02x kicked=%d)",
+             end_rc, adh_state(), s_adh_events, list_rc, MEM_R32(ADH_P2_LEN), param_rc,
+             MEM_R8(ADH_P2_STAT + 145u), s_d3_srv->kicked - kicked1);
+    expect(end_rc == 0u && adh_state() == 1u && s_adh_events == 4u && ADH_AT(3).event == 1 &&
+           list_rc == 0u && MEM_R32(ADH_P2_LEN) == 0u && param_rc == 0u &&
+           MEM_R8(ADH_P2_STAT + 145u) == 0x77u && s_d3_srv->kicked == kicked1, msg);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.5: cleanup");
+    s_d3_done = 1;
+}
+
+/* ---- Online play turned off in the launcher while the game runs (#1139) ------------------- */
+static AdhP2MiniRelay *s_off_srv;
+static const char *s_off_path;
+static int s_off_done;
+
+static int off_active_peers(void) {
+    int n = 0;
+    for (int i = 0; i < 6; i++) n += s_off_srv->peers[i].active ? 1 : 0;
+    return n;
+}
+
+static void off_main_fn(CpuState *cpu) {
+    char msg[288];
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '1', '1'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    s_adh_events = 0u;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_CREATE, adh_name(0, "OFFGRP1"), 0u, 0u) == 0u, "off: Create");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh_state() == 1u && s_adh_events == 1u && off_active_peers() == 1,
+           "off: in group OFFGRP1 with the lobby connected");
+    /* The launcher turns Online play off: it creates the file SR_ADHOC_OFF_FILE names. */
+    FILE *marker = fopen(s_off_path, "wb");
+    expect(marker != NULL, "off: the marker file is written");
+    if (marker) fclose(marker);
+    /* The runtime looks at most every 250 ms of host time; give it up to 3 s. */
+    for (int w = 0; w < 600 && (s_adh_events < 2u || off_active_peers() != 0); w++) d3_step(cpu);
+    snprintf(msg, sizeof(msg),
+             "off: turning it off ends the lobby connection and tells the game DISCONNECT "
+             "(events=%u ev=%d err=0x%08x state=%u peers=%d)",
+             s_adh_events, s_adh_events > 1u ? ADH_AT(1).event : -1,
+             s_adh_events > 1u ? ADH_AT(1).error : 0u, adh_state(), off_active_peers());
+    expect(s_adh_events == 2u && ADH_AT(1).event == 2 && ADH_AT(1).error == 0x80410b09u &&
+           adh_state() == 0u && off_active_peers() == 0, msg);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "off: Term");
+    /* The game starts ad hoc again in the same run: no connection is made. */
+    const int logins_before = s_off_srv->last_login_ok;
+    s_off_srv->last_login_ok = 0;
+    s_adh_events = 0u;
+    const uint32_t init_rc = net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u);
+    const uint32_t adh_rc = adh_init(0x2000u, 0x30u, ADH_ID);
+    for (int w = 0; w < 100; w++) d3_step(cpu);
+    snprintf(msg, sizeof(msg),
+             "off: a later Init in the same run connects to nothing (net=0x%08x adhocctl=0x%08x "
+             "peers=%d login=%d)", init_rc, adh_rc, off_active_peers(), s_off_srv->last_login_ok);
+    expect(adh_rc != 0u && off_active_peers() == 0 && s_off_srv->last_login_ok == 0, msg);
+    (void)logins_before;
+    (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+    (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+    s_off_done = 1;
+}
+
+static void test_adhoc_turned_off_in_launcher(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "off: WSAStartup");
+#endif
+    static char path[512];
+    snprintf(path, sizeof(path), "%s/hle_adhoc_online_off.marker", HLE_BUILD_ROOT);
+    (void)remove(path);
+    AdhP2MiniRelay srv;
+    expect(mr_start(&srv), "off: mini relay started");
+    if (srv.running) {
+        s_off_srv = &srv;
+        s_off_path = path;
+        char srv_spec[64];
+        snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u",
+                 (unsigned)srv.lobby_port, (unsigned)srv.data_port);
+        s_off_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        hle_test_setenv("SR_ADHOC_ENABLED", "1");
+        hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+        hle_test_setenv("SR_ADHOC_OFF_FILE", path);
+        hle_net_reset();
+        adh_run(ADH_P2_MAIN, off_main_fn);
+        expect(s_off_done == 1, "off: turned-off regression finished");
+        hle_net_reset();
+        hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+        hle_test_setenv("SR_ADHOC_SERVER", NULL);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+        hle_test_setenv("SR_ADHOC_OFF_FILE", NULL);
+        adh_fixture_end(loaded_end);
+        mr_stop(&srv);
+        s_off_srv = NULL;
+        s_off_path = NULL;
+    }
+    (void)remove(path);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+/* ---- Online play turned off after the lobby is gone: the data streams end too (#1139) ------ */
+/* The lobby can be lost while a game's data streams still run (they use their own connections to
+ * the relay). Turning Online play off must end those as well, and no socket may open after it.
+ * (a) a PDP socket's stream, (b) a live PTP stream the game is sending on, (c) new sockets. */
+static int s_offd_case;
+static int s_offd_done;
+
+/* Data connections the guest has open at the server: every one the peer did not open. */
+static int offd_guest_conns(const uint8_t peer_mac[6]) {
+    int n = 0;
+    for (int i = 0; i < 24; i++) {
+        const MiniRelayConn *dc = &s_off_srv->conns[i];
+        if (dc->active && dc->kind >= 0 && memcmp(dc->src_mac, peer_mac, 6u) != 0) n++;
+    }
+    return n;
+}
+
+static void offd_kill_lobby(CpuState *cpu) {
+    s_off_srv->drop_lobby_mid_session = 1;
+    for (int w = 0; w < 400 && s_adh_events < 2u; w++) d3_step(cpu);
+    s_off_srv->drop_lobby_mid_session = 0;
+}
+
+static void offd_turn_off(void) {
+    FILE *marker = fopen(s_off_path, "wb");
+    expect(marker != NULL, "offd: the marker file is written");
+    if (marker) fclose(marker);
+}
+
+static void offd_main_fn(CpuState *cpu) {
+    static const uint8_t peer_mac[6] = {0x02u, 0x44u, 0x55u, 0x66u, 0x77u, 0x88u};
+    char msg[320];
+    NkAdhocRelayConfig pcfg = {"127.0.0.1", s_off_srv->lobby_port, s_off_srv->data_port, 0u};
+    NkAdhocRelayClient *peer_rc = nk_relay_client_create(&pcfg);
+    NkAdhocTransport *tp = peer_rc ? nk_relay_client_transport(peer_rc) : NULL;
+    const uint8_t grp[8] = {'O', 'F', 'F', 'D', 'A', 'T', '1', 0};
+    expect(tp && tp->ops->login(tp, peer_mac, "OffPeer", "TEST00012") == NK_NET_OK &&
+               tp->ops->connect(tp, grp) == NK_NET_OK,
+           "offd: peer logged into OFFDAT1");
+    if (!tp) {
+        s_offd_done = 1;
+        return;
+    }
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '1', '2'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, peer_mac[i]);
+    s_adh_events = 0u;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+               adh(ADH_NID_WLAN_ETHER, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+               adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+               adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+               adh(ADH_NID_CREATE, adh_name(0, "OFFDAT1"), 0u, 0u) == 0u,
+           "offd: guest Create");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u, "offd: AdhocInit");
+
+    if (s_offd_case == 0) {
+        /* (a) A PDP socket whose stream outlives the lobby. */
+        const int32_t pdp = (int32_t)adh_call_full(0x6f92741bu /* PdpCreate */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0x5100u, 0x2000u, 0u, 0u, 0u, 0u, 0u);
+        for (int w = 0; w < 200 && offd_guest_conns(peer_mac) != 1; w++) d3_step(cpu);
+        snprintf(msg, sizeof(msg), "offd.a: PdpCreate opens one data stream (id=%d streams=%d)", pdp,
+                 offd_guest_conns(peer_mac));
+        expect(pdp > 0 && offd_guest_conns(peer_mac) == 1, msg);
+        offd_kill_lobby(cpu);
+        snprintf(msg, sizeof(msg), "offd.a: the lobby is lost and the PDP stream still runs "
+                                   "(events=%u state=%u streams=%d)",
+                 s_adh_events, adh_state(), offd_guest_conns(peer_mac));
+        expect(s_adh_events == 2u && ADH_AT(1).event == 2 && adh_state() == 0u &&
+                   offd_guest_conns(peer_mac) == 1, msg);
+        offd_turn_off();
+        for (int w = 0; w < 600 && offd_guest_conns(peer_mac) != 0; w++) {
+            MEM_W32(ADH_P2_LEN, 0u);
+            (void)adh(0xc7c1fc57u /* GetPdpStat */, ADH_P2_LEN, 0u, 0u);
+            d3_step(cpu);
+        }
+        MEM_W32(ADH_P2_LEN, 64u);
+        const uint32_t recv_rc = adh_call_full(0xdfe53e03u /* PdpRecv */, cpu->r[29], (uint32_t)pdp,
+                                               ADH_P2_STAT, ADH_P2_PORT, ADH_P2_BUF, ADH_P2_LEN, 0u,
+                                               1u /* nonblock */, 0u);
+        snprintf(msg, sizeof(msg), "offd.a: turning it off closes the PDP stream and PdpRecv answers "
+                                   "DISCONNECTED (streams=%d recv=0x%08x)",
+                 offd_guest_conns(peer_mac), recv_rc);
+        expect(offd_guest_conns(peer_mac) == 0 && recv_rc == 0x8041070cu, msg);
+        const uint32_t again = adh_call_full(0x6f92741bu /* PdpCreate */, cpu->r[29], ADH_P2_SELF_MAC,
+                                             0x5101u, 0x2000u, 0u, 0u, 0u, 0u, 0u);
+        for (int w = 0; w < 50; w++) d3_step(cpu);
+        snprintf(msg, sizeof(msg), "offd.a: a PdpCreate after it is refused and opens nothing "
+                                   "(rc=0x%08x streams=%d)", again, offd_guest_conns(peer_mac));
+        expect(again == 0x8041070fu && offd_guest_conns(peer_mac) == 0, msg);
+    } else if (s_offd_case == 1) {
+        /* (b) A PTP stream the game is sending on, still live after the lobby is lost. */
+        const int peer_lsn = tp->ops->ptp_listen(tp, 0x5201u, 4);
+        for (int w = 0; w < 40; w++) {
+            tp->ops->pump(tp);
+            d3_step(cpu);
+        }
+        const int32_t ptp = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0x5200u, ADH_P2_PEER_MAC, 0x5201u,
+                                                   0x1000u, 100000u, 3u, 0u);
+        int accepted = NK_NET_AGAIN;
+        uint32_t conn_rc = 0xffffffffu;
+        for (int w = 0; w < 400 && (accepted < 0 || conn_rc != 0u); w++) {
+            tp->ops->pump(tp);
+            if (accepted < 0 && peer_lsn >= 0) accepted = tp->ops->ptp_accept(tp, peer_lsn, NULL, NULL);
+            if (ptp > 0) conn_rc = adh((0xfc6fc07bu) /* PtpConnect */, (uint32_t)ptp, 0u, 1u);
+            d3_step(cpu);
+        }
+        snprintf(msg, sizeof(msg), "offd.b: PtpOpen/PtpConnect reach the peer (id=%d connect=0x%08x "
+                                   "accepted=%d)", ptp, conn_rc, accepted);
+        expect(ptp > 0 && conn_rc == 0u && accepted >= 0, msg);
+        char got[64];
+        size_t got_len = 0u;
+        const char *chunks[3] = {"AAAA", "BBBB", "CCCC"};
+        uint32_t send_rc[3] = {0xffffffffu, 0xffffffffu, 0xffffffffu};
+        for (int k = 0; k < 3; k++) {
+            if (k == 1) offd_kill_lobby(cpu);
+            if (k == 2) {
+                offd_turn_off();
+                for (int w = 0; w < 600 && offd_guest_conns(peer_mac) != 0; w++) {
+                    MEM_W32(ADH_P2_LEN, 0u);
+                    (void)adh(0xb9685118u /* GetPtpStat */, ADH_P2_LEN, 0u, 0u);
+                    tp->ops->pump(tp);
+                    d3_step(cpu);
+                }
+            }
+            for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)chunks[k][i]);
+            MEM_W32(ADH_P2_LEN, 4u);
+            send_rc[k] = adh_call_full(0x4da4c788u /* PtpSend */, cpu->r[29], (uint32_t)ptp, ADH_P2_BUF,
+                                       ADH_P2_LEN, 0u, 1u /* nonblock */, 0u, 0u, 0u);
+            for (int w = 0; w < 100; w++) {
+                tp->ops->pump(tp);
+                uint32_t n = 0u;
+                if (accepted >= 0 && got_len < sizeof(got) - 1u &&
+                    tp->ops->ptp_recv(tp, accepted, got + got_len,
+                                      (uint32_t)(sizeof(got) - 1u - got_len), &n) == NK_NET_OK)
+                    got_len += n;
+                if (k < 2 && got_len >= 4u * (size_t)(k + 1)) break;
+                d3_step(cpu);
+            }
+            if (k == 1) {
+                snprintf(msg, sizeof(msg), "offd.b: after the lobby is lost the stream still carries "
+                                           "data (events=%u state=%u send=0x%08x streams=%d)",
+                         s_adh_events, adh_state(), send_rc[1], offd_guest_conns(peer_mac));
+                expect(s_adh_events == 2u && adh_state() == 0u && send_rc[1] == 0u &&
+                           offd_guest_conns(peer_mac) == 1, msg);
+            }
+        }
+        got[got_len] = '\0';
+        snprintf(msg, sizeof(msg), "offd.b: turning it off closes the PTP stream and PtpSend answers "
+                                   "DISCONNECTED; the peer got only what came before "
+                                   "(streams=%d send=0x%08x/0x%08x/0x%08x peer got \"%s\")",
+                 offd_guest_conns(peer_mac), send_rc[0], send_rc[1], send_rc[2], got);
+        expect(offd_guest_conns(peer_mac) == 0 && send_rc[0] == 0u && send_rc[1] == 0u &&
+                   send_rc[2] == 0x8041070cu && strcmp(got, "AAAABBBB") == 0, msg);
+        if (accepted >= 0) tp->ops->ptp_close(tp, accepted);
+        if (peer_lsn >= 0) tp->ops->ptp_close(tp, peer_lsn);
+        if (ptp > 0) (void)adh(0x157e6225u /* PtpClose */, (uint32_t)ptp, 0u, 0u);
+    } else {
+        /* (c) Lobby lost, then turned off, with no socket open: nothing opens after it. */
+        const int peer_lsn = tp->ops->ptp_listen(tp, 0x5301u, 4);
+        offd_kill_lobby(cpu);
+        expect(s_adh_events == 2u && adh_state() == 0u, "offd.c: the lobby is lost");
+        offd_turn_off();
+        for (int w = 0; w < 300; w++) d3_step(cpu); /* past the 250 ms between looks */
+        const uint32_t pdp = adh_call_full(0x6f92741bu /* PdpCreate */, cpu->r[29], ADH_P2_SELF_MAC,
+                                           0x5300u, 0x2000u, 0u, 0u, 0u, 0u, 0u);
+        const int32_t ptp = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0x5302u, ADH_P2_PEER_MAC, 0x5301u,
+                                                   0x1000u, 100000u, 3u, 0u);
+        const uint32_t conn_rc = ptp > 0 ? adh(0xfc6fc07bu /* PtpConnect */, (uint32_t)ptp, 0u, 1u)
+                                         : (uint32_t)ptp;
+        const uint32_t lsn = adh_call_full(0xe08bdac1u /* PtpListen */, cpu->r[29], ADH_P2_SELF_MAC,
+                                           0x5303u, 0x1000u, 100000u, 3u, 1u, 0u, 0u);
+        for (int w = 0; w < 50; w++) {
+            tp->ops->pump(tp);
+            d3_step(cpu);
+        }
+        snprintf(msg, sizeof(msg), "offd.c: PdpCreate, PtpOpen+PtpConnect and PtpListen are refused "
+                                   "and the server sees no stream (pdp=0x%08x ptp=%d connect=0x%08x "
+                                   "listen=0x%08x streams=%d)",
+                 pdp, ptp, conn_rc, lsn, offd_guest_conns(peer_mac));
+        expect(pdp == 0x8041070fu && (ptp <= 0 || conn_rc == 0x80410718u) && lsn >= 0x80000000u &&
+                   offd_guest_conns(peer_mac) == 0, msg);
+        if (ptp > 0) (void)adh(0x157e6225u /* PtpClose */, (uint32_t)ptp, 0u, 0u);
+        if (lsn < 0x80000000u) (void)adh(0x157e6225u /* PtpClose */, lsn, 0u, 0u);
+        if (peer_lsn >= 0) tp->ops->ptp_close(tp, peer_lsn);
+    }
+    tp->ops->logout(tp);
+    nk_relay_client_destroy(peer_rc);
+    (void)adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u);
+    (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+    (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+    s_offd_done = 1;
+}
+
+static void test_adhoc_turned_off_ends_data_streams(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "offd: WSAStartup");
+#endif
+    static char path[512];
+    snprintf(path, sizeof(path), "%s/hle_adhoc_online_off_data.marker", HLE_BUILD_ROOT);
+    for (int c = 0; c < 3; c++) {
+        (void)remove(path);
+        AdhP2MiniRelay srv;
+        expect(mr_start(&srv), "offd: mini relay started");
+        if (!srv.running) continue;
+        s_off_srv = &srv;
+        s_off_path = path;
+        s_offd_case = c;
+        char srv_spec[64];
+        snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u", (unsigned)srv.lobby_port,
+                 (unsigned)srv.data_port);
+        s_offd_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        hle_test_setenv("SR_ADHOC_ENABLED", "1");
+        hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+        hle_test_setenv("SR_ADHOC_OFF_FILE", path);
+        hle_net_reset();
+        adh_run(ADH_P2_MAIN, offd_main_fn);
+        expect(s_offd_done == 1, "offd: case finished");
+        hle_net_reset();
+        hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+        hle_test_setenv("SR_ADHOC_SERVER", NULL);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+        hle_test_setenv("SR_ADHOC_OFF_FILE", NULL);
+        adh_fixture_end(loaded_end);
+        mr_stop(&srv);
+        s_off_srv = NULL;
+        s_off_path = NULL;
+    }
+    (void)remove(path);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+static void test_adhoc_d3_dead_and_silent_lobby(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "d3: WSAStartup");
+#endif
+    AdhP2MiniRelay srv;
+    expect(mr_start(&srv), "d3: mini relay started");
+    if (srv.running) {
+        s_d3_srv = &srv;
+        char srv_spec[64];
+        snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u",
+                 (unsigned)srv.lobby_port, (unsigned)srv.data_port);
+        s_d3_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        hle_test_setenv("SR_ADHOC_ENABLED", "1");
+        hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+        hle_net_reset();
+        adh_run(ADH_P2_MAIN, d3_main_fn);
+        expect(s_d3_done == 1, "d3: dead/silent lobby regression finished");
+        hle_net_reset();
+        hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+        hle_test_setenv("SR_ADHOC_SERVER", NULL);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+        adh_fixture_end(loaded_end);
+        mr_stop(&srv);
+        s_d3_srv = NULL;
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+extern uint64_t sr_host_monotonic_ms(void);
+
+static bool d9_fast_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
+    (void)host; (void)ctx;
+    out_ipv4[0] = 127u; out_ipv4[1] = 0u; out_ipv4[2] = 0u; out_ipv4[3] = 1u;
+    return true;
+}
+
+static bool d9_slow_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
+    (void)host;
+    int *calls = (int *)ctx;
+    if (calls) (*calls)++;
+#ifdef _WIN32
+    Sleep(150u);
+#else
+    adh_p2_usleep(150000);
+#endif
+    out_ipv4[0] = 127u; out_ipv4[1] = 0u; out_ipv4[2] = 0u; out_ipv4[3] = 1u;
+    return true;
+}
+
+static bool d9_fail_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
+    (void)host; (void)out_ipv4; (void)ctx;
+    return false;
+}
+
+static AdhP2MiniRelay *s_d89_srv;
+static int s_d89_done;
+
+static void d89_main_fn(CpuState *cpu) {
+    char msg[160];
+    s_adh_events = 0u;
+    nk_relay_client_set_resolve_hook_for_test(d9_fast_resolve_hook, NULL);
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u, "d89: sceNetInit");
+
+    /* D8.1: invalid short product code must refuse at Init instead of sending TEST00000. */
+    for (uint32_t i = 0u; i < 13u; i++) MEM_W8(ADH_ID + i, 0u);
+    MEM_W8(ADH_ID + 4u, 'h');
+    MEM_W8(ADH_ID + 5u, 'b');
+    const uint32_t bad_prod_rc = adh_init(0x2000u, 0x30u, ADH_ID);
+    if (bad_prod_rc == 0u) {
+        for (int w = 0; w < 20 && !s_d89_srv->last_login_ok; w++) {
+#ifdef _WIN32
+            Sleep(2u);
+#else
+            adh_p2_usleep(2000);
+#endif
+            cpu->r[4] = 5000u;
+            (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+        }
+    }
+    snprintf(msg, sizeof(msg),
+             "d8.1: invalid product code refuses Init (rc=0x%08x sent=%d game=%s)",
+             bad_prod_rc, s_d89_srv->last_login_ok, s_d89_srv->last_login_game);
+    expect(bad_prod_rc == 0x80410b04u && s_d89_srv->last_login_ok == 0, msg);
+    if (bad_prod_rc == 0u) (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+
+    /* D8.2: empty owner_name in sysreg refuses Init instead of inventing "Player". */
+    s_d89_srv->last_login_ok = 0;
+    s_d89_srv->last_login_nick[0] = '\0';
+    static const char empty_nick_overlay[] =
+        "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, \"categories\": [],"
+        " \"keys\": [{\"category\": \"/CONFIG/SYSTEM\", \"name\": \"owner_name\", \"type\": \"str\","
+        " \"value_hex\": \"00\"}]}";
+    expect(sysreg_write_file(SYSREG_SCRATCH_FILE, empty_nick_overlay, sizeof(empty_nick_overlay) - 1u),
+           "d8.2: wrote empty owner_name overlay");
+    sysreg_restart();
+    const char good_prod[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '8'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)good_prod[i]);
+    const uint32_t bad_nick_rc = adh_init(0x2000u, 0x30u, ADH_ID);
+    if (bad_nick_rc == 0u) {
+        for (int w = 0; w < 20 && !s_d89_srv->last_login_ok; w++) {
+#ifdef _WIN32
+            Sleep(2u);
+#else
+            adh_p2_usleep(2000);
+#endif
+            cpu->r[4] = 5000u;
+            (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+        }
+    }
+    snprintf(msg, sizeof(msg),
+             "d8.2: empty nickname refuses Init (rc=0x%08x sent=%d nick=%s)",
+             bad_nick_rc, s_d89_srv->last_login_ok, s_d89_srv->last_login_nick);
+    expect(bad_nick_rc == 0x80410b04u && s_d89_srv->last_login_ok == 0, msg);
+    if (bad_nick_rc == 0u) (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+
+    /* Restore default profile for D9 tests. */
+    static const char d9_nick_overlay[] =
+        "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, \"categories\": [],"
+        " \"keys\": [{\"category\": \"/CONFIG/SYSTEM\", \"name\": \"owner_name\", \"type\": \"str\","
+        " \"value_hex\": \"4439504c4159455200\"}]}";
+    expect(sysreg_write_file(SYSREG_SCRATCH_FILE, d9_nick_overlay, sizeof(d9_nick_overlay) - 1u),
+           "d9: wrote D9PLAYER overlay");
+    sysreg_restart();
+
+    /* D9: 150ms slow DNS must not block sceNetAdhocctlInit on the guest thread. */
+    int resolve_calls = 0;
+    nk_relay_client_set_resolve_hook_for_test(d9_slow_resolve_hook, &resolve_calls);
+    const uint64_t t0 = sr_host_monotonic_ms();
+    const uint32_t d9_init_rc = adh_init(0x2000u, 0x30u, ADH_ID);
+    const uint64_t elapsed = sr_host_monotonic_ms() - t0;
+    snprintf(msg, sizeof(msg),
+             "d9: sceNetAdhocctlInit does not block on slow DNS (rc=0x%08x elapsed=%llu ms calls=%d)",
+             d9_init_rc, (unsigned long long)elapsed, resolve_calls);
+    expect(d9_init_rc == 0u && elapsed < 50u, msg);
+    expect(adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_CREATE, adh_name(0, "D9GRP01"), 0u, 0u) == 0u,
+           "d9: Create queues while DNS resolves");
+    for (int w = 0; w < 120 && (adh_state() != 1u || s_adh_events == 0u); w++) {
+#ifdef _WIN32
+        Sleep(5u);
+#else
+        adh_p2_usleep(5000);
+#endif
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    expect(adh_state() == 1u && s_adh_events == 1u && resolve_calls == 1,
+           "d9: async DNS resolved once and Create connected cleanly");
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d9: Term");
+
+    /* D8.3 + D9: failing async DNS ends lobby with DISCONNECT and logs nk_relay_client_last_error(). */
+    s_adh_events = 0u;
+    nk_relay_client_set_resolve_hook_for_test(d9_fail_resolve_hook, NULL);
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_CREATE, adh_name(0, "D9FAIL1"), 0u, 0u) == 0u,
+           "d8.3/d9: Init+Create starts before async DNS failure");
+    for (int w = 0; w < 80 && s_adh_events == 0u; w++) {
+#ifdef _WIN32
+        Sleep(2u);
+#else
+        adh_p2_usleep(2000);
+#endif
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    snprintf(msg, sizeof(msg),
+             "d8.3/d9: failed DNS surfaces DISCONNECT event and clears state (events=%u ev=%d err=0x%08x)",
+             s_adh_events, s_adh_events ? ADH_AT(0).event : -1, s_adh_events ? ADH_AT(0).error : 0u);
+    expect(s_adh_events == 1u && ADH_AT(0).event == 2 && ADH_AT(0).error == 0x80410b09u, msg);
+    nk_relay_client_set_resolve_hook_for_test(NULL, NULL);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d89: cleanup");
+    s_d89_done = 1;
+}
+
+static void test_adhoc_d8_d9_regressions(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "d89: WSAStartup");
+#endif
+    AdhP2MiniRelay srv;
+    expect(mr_start(&srv), "d89: mini relay started");
+    if (srv.running) {
+        s_d89_srv = &srv;
+        char srv_spec[64];
+        snprintf(srv_spec, sizeof(srv_spec), "slow-dns.test:%u,%u",
+                 (unsigned)srv.lobby_port, (unsigned)srv.data_port);
+        s_d89_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        hle_test_setenv("SR_ADHOC_ENABLED", "1");
+        hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+        hle_net_reset();
+        adh_run(ADH_P2_MAIN, d89_main_fn);
+        expect(s_d89_done == 1, "d89: D8/D9 regressions finished");
+        hle_net_reset();
+        nk_relay_client_set_resolve_hook_for_test(NULL, NULL);
+        hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+        hle_test_setenv("SR_ADHOC_SERVER", NULL);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+        adh_fixture_end(loaded_end);
+        mr_stop(&srv);
+        s_d89_srv = NULL;
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+/* D7: Real loopback TCP end-to-end test covering all 39 opt-in online handlers (plus
+ * sceNetAdhocctlGetParameter) over AdhP2MiniRelay + a second NkAdhocRelayClient peer. */
+static NkAdhocTransport *s_d7_peer;
+static int s_d7_done;
+
+static void d7_step(CpuState *cpu, unsigned sleep_ms, uint32_t delay_us) {
+    if (sleep_ms) {
+#ifdef _WIN32
+        Sleep((DWORD)sleep_ms);
+#else
+        adh_p2_usleep((unsigned long)sleep_ms * 1000ul);
+#endif
+    }
+    if (s_d7_peer) s_d7_peer->ops->pump(s_d7_peer);
+    cpu->r[4] = delay_us;
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    if (s_d7_peer) s_d7_peer->ops->pump(s_d7_peer);
+}
+
+static int d7_count_match_event(int ev) {
+    int n = 0;
+    for (int i = 0; i < s_adh_p2_match.count && i < 16; i++) {
+        if (s_adh_p2_match.event[i] == ev) n++;
+    }
+    return n;
+}
+
+static void d7_all39_main_fn(CpuState *cpu) {
+    static const uint8_t peer_mac[6] = {0x02u, 0x77u, 0x39u, 0x00u, 0x00u, 0x01u};
+    const uint8_t grp[8] = {'R', 'E', 'A', 'L', '3', '9', 'G', 0};
+    NkAdhocTransport *t0 = s_d7_peer;
+    expect(t0->ops->login(t0, peer_mac, "Peer39", "TEST00039") == NK_NET_OK &&
+           t0->ops->connect(t0, grp) == NK_NET_OK,
+           "d7: peer logs into loopback relay and joins REAL39G");
+    int peer_connected = 0;
+    for (int w = 0; w < 60 && !peer_connected; w++) {
+        d7_step(cpu, 2u, 1000u);
+        NkLobbyEvent evs[4];
+        size_t n = t0->ops->take_events(t0, evs, 4u);
+        for (size_t k = 0; k < n; k++) {
+            if (evs[k].kind == NK_LOBBY_CONNECT_BSSID) peer_connected = 1;
+        }
+    }
+    expect(peer_connected == 1, "d7: peer joined REAL39G over real TCP");
+
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '3', '9'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh(0x0c622081u /* sceWlanGetEtherAddr */, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "d7: Net + Adhocctl init");
+    uint8_t self_mac[6];
+    for (uint32_t i = 0u; i < 6u; i++) self_mac[i] = MEM_R8(ADH_P2_SELF_MAC + i);
+
+    /* 1..3: Scan -> Join -> GetParameter -> GetPeerList -> GetNameByAddr -> GetAddrByName. */
+    s_adh_events = 0u;
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u, "d7: Scan starts");
+    for (int w = 0; w < 60 && s_adh_events == 0u; w++) d7_step(cpu, 2u, 20000u);
+    expect(s_adh_events >= 1u && ADH_AT(0).event == 3, "d7: Scan completes over real TCP");
+    MEM_W32(ADH_P2_LEN, 256u);
+    expect(adh(0x81aee1beu /* GetScanInfo */, ADH_P2_LEN, ADH_P2_BUF, 0u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 28u,
+           "d7: GetScanInfo finds REAL39G");
+    expect(adh(0x5e7f79c9u /* Join */, ADH_P2_BUF, 0u, 0u) == 0u, "d7: Join starts");
+    for (int w = 0; w < 60 && adh_state() != 1u; w++) d7_step(cpu, 2u, 20000u);
+    expect(adh_state() == 1u, "d7: Join reaches CONNECTED over real TCP");
+    expect(adh(ADH_NID_GET_PARAM, ADH_P2_STAT, 0u, 0u) == 0u && MEM_R8(ADH_P2_STAT + 4u) == 'R',
+           "d7: GetParameter reports active online group over real TCP");
+    for (int w = 0; w < 40; w++) {
+        MEM_W32(ADH_P2_LEN, 256u);
+        if (adh(0xe162cb14u /* GetPeerList */, ADH_P2_LEN, ADH_P2_BUF, 0u) == 0u &&
+            MEM_R32(ADH_P2_LEN) >= 152u)
+            break;
+        d7_step(cpu, 2u, 20000u);
+    }
+    expect(MEM_R32(ADH_P2_LEN) == 152u, "d7: GetPeerList sees Peer39");
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, peer_mac[i]);
+    char pnick[32] = {0};
+    expect(adh(0x8916c003u /* GetNameByAddr */, ADH_P2_PEER_MAC, ADH_P2_NICK, 0u) == 0u,
+           "d7: GetNameByAddr succeeds");
+    for (int i = 0; i < 16; i++) pnick[i] = (char)MEM_R8(ADH_P2_NICK + (uint32_t)i);
+    expect(strcmp(pnick, "Peer39") == 0, "d7: GetNameByAddr returns Peer39");
+    MEM_W32(ADH_P2_LEN, 152u);
+    expect(adh(0x99560abeu /* GetAddrByName */, ADH_P2_NICK, ADH_P2_LEN, ADH_P2_BUF) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 152u,
+           "d7: GetAddrByName returns 152-byte PeerInfoEmu");
+
+    /* 4..12: AdhocInit, PdpCreate, Set/GetSocketAlert, PdpSend, GetPdpStat, PollSocket, PdpRecv, PdpDelete. */
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u, "d7: AdhocInit");
+    int p0_pdp = t0->ops->pdp_open(t0, 0x3301u);
+    expect(p0_pdp >= 0, "d7: peer PDP open");
+    const int32_t pdp_id = (int32_t)adh(0x6f92741bu /* PdpCreate */, ADH_P2_SELF_MAC, 0x3302u, 0x1000u);
+    expect(pdp_id > 0, "d7: PdpCreate");
+    expect(adh(0x73bfd52du /* SetSocketAlert */, (uint32_t)pdp_id, 0x0040u /* ALERTPOLL */, 0u) == 0u,
+           "d7: SetSocketAlert");
+    MEM_W32(ADH_P2_LEN, 0u);
+    expect(adh(0x4d2ce199u /* GetSocketAlert */, (uint32_t)pdp_id, ADH_P2_LEN, 0u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 0x0040u,
+           "d7: GetSocketAlert reads 0x0040");
+    expect(adh(0x73bfd52du, (uint32_t)pdp_id, 0u, 0u) == 0u, "d7: clear alert flags");
+
+    const char *pdp_msg = "PDP39_PING";
+    for (uint32_t i = 0u; i < 10u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)pdp_msg[i]);
+    expect(adh_call_full(0xabed3790u /* PdpSend */, cpu->r[29], (uint32_t)pdp_id, ADH_P2_PEER_MAC,
+                         0x3301u, ADH_P2_BUF, 10u, 0u, 0u, 0u) == 0u,
+           "d7: PdpSend sends PDP39_PING");
+    uint8_t prx[64] = {0}, pmac[6] = {0};
+    uint16_t pport = 0u;
+    uint32_t prlen = 0u;
+    int got_pdp = 0;
+    for (int w = 0; w < 60 && !got_pdp; w++) {
+        d7_step(cpu, 2u, 5000u);
+        if (t0->ops->pdp_recv(t0, p0_pdp, pmac, &pport, prx, sizeof(prx), &prlen) == NK_NET_OK)
+            got_pdp = 1;
+    }
+    expect(got_pdp == 1 && prlen == 10u && memcmp(prx, "PDP39_PING", 10u) == 0 && pport == 0x3302u,
+           "d7: peer received PDP39_PING over real TCP");
+    expect(t0->ops->pdp_send(t0, p0_pdp, self_mac, 0x3302u, "PDP39_PONG", 10u) == NK_NET_OK,
+           "d7: peer sends PDP39_PONG");
+    t0->ops->pump(t0);
+
+    int polled = 0;
+    for (int w = 0; w < 60 && !polled; w++) {
+        MEM_W32(ADH_P2_SDS, (uint32_t)pdp_id);
+        MEM_W32(ADH_P2_SDS + 4u, 0x0002u /* ADHOC_EV_RECV */);
+        MEM_W32(ADH_P2_SDS + 8u, 0u);
+        if (adh_call5(0x7a662d6bu /* PollSocket */, ADH_P2_SDS, 1u, 1000u, 1u /* NONBLOCK */, 0u) == 1u &&
+            (MEM_R32(ADH_P2_SDS + 8u) & 0x0002u) != 0u) {
+            polled = 1;
+            break;
+        }
+        d7_step(cpu, 2u, 5000u);
+    }
+    expect(polled == 1, "d7: PollSocket detects PDP RECV over real TCP");
+    MEM_W32(ADH_P2_LEN, 64u);
+    expect(adh(0xc7c1fc57u /* GetPdpStat */, ADH_P2_LEN, ADH_P2_STAT, 0u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 20u && MEM_R16(ADH_P2_STAT + 14u) == 0x3302u &&
+           MEM_R32(ADH_P2_STAT + 16u) == 10u,
+           "d7: GetPdpStat reports 10 queued bytes on port 0x3302");
+    MEM_W32(ADH_P2_LEN, 64u);
+    expect(adh_call_full(0xdfe53e03u /* PdpRecv */, cpu->r[29], (uint32_t)pdp_id,
+                         ADH_P2_BUF + 64u, ADH_P2_PORT, ADH_P2_BUF, ADH_P2_LEN, 0u, 1u, 0u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 10u,
+           "d7: PdpRecv reads PDP39_PONG");
+    expect(adh(0x7f27bb5eu /* PdpDelete */, (uint32_t)pdp_id, 0u, 0u) == 0u, "d7: PdpDelete");
+    (void)t0->ops->pdp_close(t0, p0_pdp);
+
+    /* 13..21: PTP Listen, Accept, GetPtpStat, Recv, Send, Flush, Close + Open/Connect. */
+    const int32_t ptp_srv = (int32_t)adh_call_full(0xe08bdac1u /* PtpListen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0x4301u, 0x1000u,
+                                                   100000u, 3u, 4u, 0u, 0u);
+    expect(ptp_srv > 0, "d7: PtpListen on 0x4301");
+    for (int w = 0; w < 10; w++) d7_step(cpu, 2u, 5000u);
+    int p0_cli = t0->ops->ptp_open(t0, 0x4309u, self_mac, 0x4301u);
+    expect(p0_cli >= 0, "d7: peer ptp_open connects to 0x4301");
+    int32_t ptp_child = -1;
+    for (int w = 0; w < 80; w++) {
+        d7_step(cpu, 2u, 5000u);
+        ptp_child = (int32_t)adh_call5(0x9df81198u /* PtpAccept */, (uint32_t)ptp_srv,
+                                       ADH_P2_BUF + 64u, ADH_P2_PORT, 0u, 1u);
+        if (ptp_child > 0) break;
+    }
+    expect(ptp_child > 0 && MEM_R16(ADH_P2_PORT) == 0x4309u, "d7: PtpAccept over real TCP");
+    int p0_est = 0;
+    for (int w = 0; w < 60 && !p0_est; w++) {
+        d7_step(cpu, 2u, 5000u);
+        if (t0->ops->ptp_connect_poll(t0, p0_cli) > 0) p0_est = 1;
+    }
+    expect(p0_est == 1, "d7: peer PTP established");
+    uint32_t p0_sent = 0u;
+    expect(t0->ops->ptp_send(t0, p0_cli, "PTP_TO_G", 8u, &p0_sent) == NK_NET_OK && p0_sent == 8u,
+           "d7: peer sends PTP_TO_G");
+    int saw_ptp_rx = 0;
+    for (int w = 0; w < 60 && !saw_ptp_rx; w++) {
+        d7_step(cpu, 2u, 5000u);
+        MEM_W32(ADH_P2_LEN, 144u);
+        if (adh(0xb9685118u /* GetPtpStat */, ADH_P2_LEN, ADH_P2_STAT, 0u) == 0u &&
+            MEM_R32(ADH_P2_LEN) >= 72u) {
+            for (uint32_t off = 0u; off + 36u <= MEM_R32(ADH_P2_LEN); off += 36u) {
+                if (MEM_R32(ADH_P2_STAT + off + 4u) == (uint32_t)ptp_child &&
+                    MEM_R32(ADH_P2_STAT + off + 28u) == 8u) {
+                    saw_ptp_rx = 1;
+                    break;
+                }
+            }
+        }
+    }
+    expect(saw_ptp_rx == 1, "d7: GetPtpStat reports accepted socket rx=8 over real TCP");
+    MEM_W32(ADH_P2_LEN, 64u);
+    expect(adh_call5(0x8bea2b3eu /* PtpRecv */, (uint32_t)ptp_child, ADH_P2_BUF, ADH_P2_LEN, 0u, 1u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 8u,
+           "d7: PtpRecv reads PTP_TO_G");
+    for (uint32_t i = 0u; i < 8u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)"G_TO_PTP"[i]);
+    MEM_W32(ADH_P2_LEN, 8u);
+    expect(adh_call5(0x4da4c788u /* PtpSend */, (uint32_t)ptp_child, ADH_P2_BUF, ADH_P2_LEN, 0u, 0u) == 0u &&
+           adh(0x9ac2eeacu /* PtpFlush */, (uint32_t)ptp_child, 0u, 0u) == 0u,
+           "d7: PtpSend + PtpFlush");
+    int got_ptp_reply = 0;
+    for (int w = 0; w < 60 && !got_ptp_reply; w++) {
+        d7_step(cpu, 2u, 5000u);
+        if (t0->ops->ptp_recv(t0, p0_cli, prx, sizeof(prx), &prlen) == NK_NET_OK)
+            got_ptp_reply = 1;
+    }
+    expect(got_ptp_reply == 1 && prlen == 8u && memcmp(prx, "G_TO_PTP", 8u) == 0,
+           "d7: peer received G_TO_PTP over real TCP");
+    expect(adh(0x157e6225u /* PtpClose */, (uint32_t)ptp_child, 0u, 0u) == 0u &&
+           adh(0x157e6225u /* PtpClose */, (uint32_t)ptp_srv, 0u, 0u) == 0u,
+           "d7: PtpClose listener and accepted child");
+    (void)t0->ops->ptp_close(t0, p0_cli);
+
+    /* Client PTP: PtpOpen + PtpConnect over real TCP. */
+    int p0_lsn = t0->ops->ptp_listen(t0, 0x4302u, 4);
+    expect(p0_lsn >= 0, "d7: peer ptp_listen on 0x4302");
+    for (int w = 0; w < 10; w++) d7_step(cpu, 2u, 5000u);
+    const int32_t ptp_out = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0u, ADH_P2_PEER_MAC, 0x4302u,
+                                                   0x1000u, 100000u, 3u, 0u);
+    expect(ptp_out > 0, "d7: PtpOpen targeting peer listener");
+    int cli_conn = 0;
+    for (int w = 0; w < 80; w++) {
+        d7_step(cpu, 2u, 5000u);
+        if (adh(0xfc6fc07bu /* PtpConnect */, (uint32_t)ptp_out, 0u, 1u) == 0u) {
+            cli_conn = 1;
+            break;
+        }
+    }
+    expect(cli_conn == 1, "d7: PtpConnect completed over real TCP");
+    expect(adh(0x157e6225u /* PtpClose */, (uint32_t)ptp_out, 0u, 0u) == 0u, "d7: PtpClose client");
+    (void)t0->ops->ptp_close(t0, p0_lsn);
+
+    /* 22..38: All 17 Matching handlers over real TCP. */
+    sr_test_register_guest_fn(ADH_P2_MATCH_CB, d12_match_cb_fn);
+    memset(&s_adh_p2_match, 0, sizeof(s_adh_p2_match));
+    int p0_mpdp = t0->ops->pdp_open(t0, 0x5301u);
+    expect(p0_mpdp >= 0, "d7: peer matching PDP opens on 0x5301");
+    for (int w = 0; w < 10; w++) d7_step(cpu, 2u, 5000u);
+    expect(adh(0x2a2a1e07u /* MatchingInit */, 0x20000u, 0u, 0u) == 0u, "d7: MatchingInit");
+    expect(adh(0x40f8f435u /* GetPoolMaxAlloc */, 0u, 0u, 0u) == 0u,
+           "d7: MatchingGetPoolMaxAlloc is 0 before MatchingCreate");
+    const uint32_t saved_sp0 = MEM_R32(cpu->r[29]);
+    MEM_W32(cpu->r[29], ADH_P2_MATCH_CB);
+    const int32_t mid1 = (int32_t)adh_call_full(0xca5eda6fu /* MatchingCreate */, cpu->r[29],
+                                                1u /* HOST */, 4u, 0x5301u, 0x1000u,
+                                                100000u, 2000000u, 5u, 100000u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(mid1 > 0, "d7: MatchingCreate");
+    expect(adh(0x40f8f435u /* GetPoolMaxAlloc */, 0u, 0u, 0u) > 0u,
+           "d7: MatchingGetPoolMaxAlloc > 0 with live context");
+    expect(adh(0x9c5cfb7du /* GetPoolStat */, ADH_P2_STAT, 0u, 0u) == 0u &&
+           MEM_R32(ADH_P2_STAT) >= 0x10000u && MEM_R32(ADH_P2_STAT + 4u) > 0u,
+           "d7: MatchingGetPoolStat");
+    for (uint32_t i = 0u; i < 5u; i++) MEM_W8(ADH_P2_OPT + i, (uint8_t)"HELLO"[i]);
+    expect(adh_call_full(0x93ef3843u /* MatchingStart */, cpu->r[29], (uint32_t)mid1,
+                         0x30u, 0x2000u, 0x30u, 0x2000u, 5u, ADH_P2_OPT, 0u) == 0u,
+           "d7: MatchingStart");
+    int got_hello = 0;
+    for (int w = 0; w < 60 && !got_hello; w++) {
+        d7_step(cpu, 2u, 20000u);
+        while (t0->ops->pdp_recv(t0, p0_mpdp, pmac, &pport, prx, sizeof(prx), &prlen) == NK_NET_OK) {
+            if (prlen >= 5u && prx[0] == 1u) got_hello = 1;
+        }
+    }
+    expect(got_hello == 1, "d7: peer received MATCH_PKT_HELLO over real TCP");
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_P2_OPT + i, (uint8_t)"HOPT"[i]);
+    expect(adh(0xb58e61b7u /* SetHelloOpt */, (uint32_t)mid1, 4u, ADH_P2_OPT) == 0u,
+           "d7: MatchingSetHelloOpt");
+    MEM_W32(ADH_P2_LEN, 16u);
+    expect(adh(0xb5d96c2au /* GetHelloOpt */, (uint32_t)mid1, ADH_P2_LEN, ADH_P2_BUF) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 4u && MEM_R8(ADH_P2_BUF) == 'H' && MEM_R8(ADH_P2_BUF + 3u) == 'T',
+           "d7: MatchingGetHelloOpt returns HOPT");
+
+    /* Join -> CancelTargetWithOpt, then Join -> CancelTarget. */
+    const uint8_t join_pkt[7] = {2u, 2u, 0u, 0u, 0u, 'J', 'N'};
+    expect(t0->ops->pdp_send(t0, p0_mpdp, self_mac, 0x5301u, join_pkt, sizeof(join_pkt)) == NK_NET_OK,
+           "d7: peer sends JOIN 1");
+    for (int w = 0; w < 60 && d7_count_match_event(2) < 1; w++) d7_step(cpu, 2u, 20000u);
+    expect(d7_count_match_event(2) >= 1, "d7: callback saw REQUEST 1");
+    for (uint32_t i = 0u; i < 3u; i++) MEM_W8(ADH_P2_OPT + i, (uint8_t)"BYE"[i]);
+    expect(adh_call5(0x8f58bedfu /* CancelTargetWithOpt */, (uint32_t)mid1, ADH_P2_PEER_MAC,
+                     3u, ADH_P2_OPT, 0u) == 0u,
+           "d7: MatchingCancelTargetWithOpt");
+    int got_cancel_opt = 0;
+    for (int w = 0; w < 60 && !got_cancel_opt; w++) {
+        d7_step(cpu, 2u, 5000u);
+        while (t0->ops->pdp_recv(t0, p0_mpdp, pmac, &pport, prx, sizeof(prx), &prlen) == NK_NET_OK) {
+            if (prlen == 8u && prx[0] == 4u && memcmp(prx + 5, "BYE", 3u) == 0) got_cancel_opt = 1;
+        }
+    }
+    expect(got_cancel_opt == 1, "d7: peer received CANCEL with opt BYE over real TCP");
+
+    expect(t0->ops->pdp_send(t0, p0_mpdp, self_mac, 0x5301u, join_pkt, sizeof(join_pkt)) == NK_NET_OK,
+           "d7: peer sends JOIN 2");
+    for (int w = 0; w < 60 && d7_count_match_event(2) < 2; w++) d7_step(cpu, 2u, 20000u);
+    expect(adh(0xea3c6108u /* CancelTarget */, (uint32_t)mid1, ADH_P2_PEER_MAC, 0u) == 0u,
+           "d7: MatchingCancelTarget");
+    int got_cancel = 0;
+    for (int w = 0; w < 60 && !got_cancel; w++) {
+        d7_step(cpu, 2u, 5000u);
+        while (t0->ops->pdp_recv(t0, p0_mpdp, pmac, &pport, prx, sizeof(prx), &prlen) == NK_NET_OK) {
+            if (prlen == 5u && prx[0] == 4u) got_cancel = 1;
+        }
+    }
+    expect(got_cancel == 1, "d7: peer received CANCEL over real TCP");
+
+    /* Join 3 -> SelectTarget -> peer ACCEPT -> GetMembers -> SendData -> AbortSendData -> Stop/Delete. */
+    expect(t0->ops->pdp_send(t0, p0_mpdp, self_mac, 0x5301u, join_pkt, sizeof(join_pkt)) == NK_NET_OK,
+           "d7: peer sends JOIN 3");
+    for (int w = 0; w < 60 && d7_count_match_event(2) < 3; w++) d7_step(cpu, 2u, 20000u);
+    expect(adh_call5(0x5e3d4b79u /* SelectTarget */, (uint32_t)mid1, ADH_P2_PEER_MAC, 0u, 0u, 0u) == 0u,
+           "d7: MatchingSelectTarget");
+    const uint8_t acc_pkt[5] = {3u, 0u, 0u, 0u, 0u};
+    expect(t0->ops->pdp_send(t0, p0_mpdp, self_mac, 0x5301u, acc_pkt, sizeof(acc_pkt)) == NK_NET_OK,
+           "d7: peer sends ACCEPT over real TCP");
+    for (int w = 0; w < 60 && d7_count_match_event(7) < 1; w++) d7_step(cpu, 2u, 20000u);
+    expect(d7_count_match_event(7) >= 1, "d7: Matching callback saw ESTABLISHED over real TCP");
+    MEM_W32(ADH_P2_LEN, 64u);
+    expect(adh(0xc58bcd9eu /* GetMembers */, (uint32_t)mid1, ADH_P2_LEN, ADH_P2_BUF) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 24u,
+           "d7: MatchingGetMembers returns 2 members (24 bytes)");
+    for (uint32_t i = 0u; i < 5u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)"MDTCP"[i]);
+    expect(adh_call5(0xf79472d7u /* SendData */, (uint32_t)mid1, ADH_P2_PEER_MAC, 5u, ADH_P2_BUF, 0u) == 0u,
+           "d7: MatchingSendData sends MDTCP");
+    int got_bulk = 0;
+    for (int w = 0; w < 60 && !got_bulk; w++) {
+        d7_step(cpu, 2u, 10000u);
+        while (t0->ops->pdp_recv(t0, p0_mpdp, pmac, &pport, prx, sizeof(prx), &prlen) == NK_NET_OK) {
+            if (prlen == 10u && prx[0] == 5u && memcmp(prx + 5, "MDTCP", 5u) == 0) got_bulk = 1;
+        }
+    }
+    expect(got_bulk == 1, "d7: peer received MATCH_PKT_BULK (MDTCP) over real TCP");
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)"ABRT"[i]);
+    expect(adh_call5(0xf79472d7u /* SendData */, (uint32_t)mid1, ADH_P2_PEER_MAC, 4u, ADH_P2_BUF, 0u) == 0u &&
+           adh_call5(0xf79472d7u, (uint32_t)mid1, ADH_P2_PEER_MAC, 4u, ADH_P2_BUF, 0u) == 0x80410818u &&
+           adh(0xec19337du /* AbortSendData */, (uint32_t)mid1, ADH_P2_PEER_MAC, 0u) == 0u &&
+           adh_call5(0xf79472d7u, (uint32_t)mid1, ADH_P2_PEER_MAC, 4u, ADH_P2_BUF, 0u) == 0u,
+           "d7: MatchingAbortSendData clears DATA_BUSY cleanly");
+    expect(adh(0x32b156b3u /* MatchingStop */, (uint32_t)mid1, 0u, 0u) == 0u &&
+           adh(0xf16eaf4fu /* MatchingDelete */, (uint32_t)mid1, 0u, 0u) == 0u,
+           "d7: MatchingStop + MatchingDelete");
+
+    /* MatchingStart2 over real TCP. */
+    MEM_W32(cpu->r[29], ADH_P2_MATCH_CB);
+    const int32_t mid2 = (int32_t)adh_call_full(0xca5eda6fu, cpu->r[29], 1u, 4u, 0x5301u, 0x1000u,
+                                                100000u, 2000000u, 5u, 100000u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(mid2 > 0, "d7: MatchingCreate #2");
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_P2_OPT + i, (uint8_t)"STR2"[i]);
+    MEM_W32(cpu->r[29], ADH_P2_OPT);
+    const uint32_t s2rc = adh_call_full(0xe8454c65u /* MatchingStart2 */, cpu->r[29],
+                                        (uint32_t)mid2, 0x30u, 0x2000u, 1u,
+                                        0x30u, 0x2000u, 1u, 4u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(s2rc == 0u, "d7: MatchingStart2");
+    int got_hello2 = 0;
+    for (int w = 0; w < 60 && !got_hello2; w++) {
+        d7_step(cpu, 2u, 20000u);
+        while (t0->ops->pdp_recv(t0, p0_mpdp, pmac, &pport, prx, sizeof(prx), &prlen) == NK_NET_OK) {
+            if (prlen >= 9u && prx[0] == 1u && memcmp(prx + 5, "STR2", 4u) == 0) got_hello2 = 1;
+        }
+    }
+    expect(got_hello2 == 1, "d7: peer received MatchingStart2 HELLO (STR2) over real TCP");
+    expect(adh(0x32b156b3u, (uint32_t)mid2, 0u, 0u) == 0u &&
+           adh(0xf16eaf4fu, (uint32_t)mid2, 0u, 0u) == 0u &&
+           adh(0x7945ecdau /* MatchingTerm */, 0u, 0u, 0u) == 0u,
+           "d7: MatchingStart2 Stop/Delete + MatchingTerm");
+    (void)t0->ops->pdp_close(t0, p0_mpdp);
+
+    /* 39: AdhocTerm + AdhocctlTerm + NetTerm. */
+    expect(adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u) == 0u &&
+           adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "d7: AdhocTerm + AdhocctlTerm + NetTerm");
+    (void)t0->ops->logout(t0);
+    s_d7_done = 1;
+}
+
+static void test_adhoc_online_all_39_handlers_real_tcp(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "d7: WSAStartup");
+#endif
+    AdhP2MiniRelay srv;
+    expect(mr_start(&srv), "d7: mini relay started");
+    if (srv.running) {
+        NkAdhocRelayConfig pcfg = {"127.0.0.1", srv.lobby_port, srv.data_port, 0u};
+        NkAdhocRelayClient *peer_rc = nk_relay_client_create(&pcfg);
+        expect(peer_rc != NULL, "d7: peer relay client created");
+        if (peer_rc) {
+            s_d7_peer = nk_relay_client_transport(peer_rc);
+            char srv_spec[64];
+            snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u",
+                     (unsigned)srv.lobby_port, (unsigned)srv.data_port);
+            s_d7_done = 0;
+            const uint32_t loaded_end = adh_fixture_begin();
+            hle_test_setenv("SR_ADHOC_ENABLED", "1");
+            hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+            hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+            hle_net_reset();
+            adh_run(ADH_P2_MAIN, d7_all39_main_fn);
+            expect(s_d7_done == 1, "d7: all 39 online handlers verified over real loopback TCP");
+            hle_net_reset();
+            hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+            hle_test_setenv("SR_ADHOC_SERVER", NULL);
+            hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+            adh_fixture_end(loaded_end);
+            s_d7_peer = NULL;
+            nk_relay_client_destroy(peer_rc);
+        }
+        mr_stop(&srv);
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
 }
 
 extern void sr_hle_test_volatile_mem_reset(void);
@@ -64009,6 +67867,21 @@ static int hle_selftest_main(int argc, char **argv) {
         test_adhocctl_lost_thread();
         test_adhocctl_nickname_from_profile();
         test_adhocctl_handler_fault_stops(argv[0]);
+        test_adhoc_online_play_init_contract();
+        test_adhoc_offline_refusal_stays_closed();
+        test_adhoc_online_loopnet_e2e();
+        test_adhoc_audit_20261117_shim();
+        test_adhoc_audit_20261117_u02();
+        test_adhoc_audit_20261117_u02_scan();
+        test_adhoc_online_real_tcp_loopback_e2e();
+        test_adhoc_d2_d12_regressions();
+        test_adhoc_d1_lifetime_across_term();
+        test_adhoc_d4_ptp_open_connect_regression();
+        test_adhoc_d3_dead_and_silent_lobby();
+        test_adhoc_turned_off_in_launcher();
+        test_adhoc_turned_off_ends_data_streams();
+        test_adhoc_d8_d9_regressions();
+        test_adhoc_online_all_39_handlers_real_tcp();
         fprintf(stderr, "adhocctl: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
@@ -64162,6 +68035,21 @@ static int hle_selftest_main(int argc, char **argv) {
     test_adhocctl_lost_thread();
     test_adhocctl_nickname_from_profile();
     test_adhocctl_handler_fault_stops(argc > 0 ? argv[0] : NULL);
+    test_adhoc_online_play_init_contract();
+    test_adhoc_offline_refusal_stays_closed();
+    test_adhoc_online_loopnet_e2e();
+    test_adhoc_audit_20261117_shim();
+    test_adhoc_audit_20261117_u02();
+    test_adhoc_audit_20261117_u02_scan();
+    test_adhoc_online_real_tcp_loopback_e2e();
+    test_adhoc_d2_d12_regressions();
+    test_adhoc_d1_lifetime_across_term();
+    test_adhoc_d4_ptp_open_connect_regression();
+    test_adhoc_d3_dead_and_silent_lobby();
+    test_adhoc_turned_off_in_launcher();
+    test_adhoc_turned_off_ends_data_streams();
+    test_adhoc_d8_d9_regressions();
+    test_adhoc_online_all_39_handlers_real_tcp();
     test_unregistered_batch_profiler_refer_null();
     test_kernel_import_sweep_ge_head();
     test_ge_blocking_sync_waits_for_stalled_list();

@@ -179,6 +179,39 @@ bool nk_relay_parse_ptp_data_header(const uint8_t in[NK_RELAY_PTP_DATA_HEADER_SI
 uint16_t nk_relay_port_out(uint16_t port, uint16_t offset);
 uint16_t nk_relay_port_in(uint16_t port, uint16_t offset);
 
+/* ---- server address & presets ------------------------------------------------------------- */
+
+#define NK_ADHOC_SERVER_MAX_LEN 127u
+#define NK_ADHOC_DEFAULT_SERVER "socom.cc"
+
+typedef struct NkAdhocServerPreset {
+    const char *host;
+    const char *label;
+} NkAdhocServerPreset;
+
+/* The shipped servers, socom.cc (the default) first. Each is a host the player may contact only after
+ * the user chose TURN ON on the Online play card for it. */
+size_t nk_adhoc_server_preset_count(void);
+const NkAdhocServerPreset *nk_adhoc_server_preset(size_t index);
+
+/* True for a host name or IPv4 literal this client may name: 1 to NK_ADHOC_SERVER_MAX_LEN bytes of
+ * dot-separated labels, each 1 to 63 of A-Z, a-z, 0-9 and '-', not starting or ending with '-'. A name
+ * whose last label is all digits must be a dotted IPv4 address (four decimal parts, 0-255, no leading
+ * zero). No port, user info, path, IPv6, space, control or non-ASCII byte. False for NULL. */
+bool nk_adhoc_relay_host_ok(const char *host);
+
+/* Parses a user server string in the form "host", "host:lobby_port", or
+ * "host:lobby_port,data_port". Missing ports default to NK_RELAY_LOBBY_PORT (27312) and
+ * NK_RELAY_DATA_PORT (27313). Returns true if the host and ports are valid; otherwise writes an
+ * empty string to host_out (when non-NULL with host_cap > 0) and returns false. */
+bool nk_adhoc_relay_parse_server(const char *spec, char *host_out, size_t host_cap,
+                                 uint16_t *lobby_port, uint16_t *data_port);
+
+/* Why nk_adhoc_relay_parse_server refuses `spec`, in words a player can act on ("it has a
+ * space", "a port is not a whole number from 1 to 65535", ...); NULL when it accepts it.
+ * Static text, never NULL for a refused spec. */
+const char *nk_adhoc_relay_server_problem(const char *spec);
+
 #ifdef __cplusplus
 }
 #endif

@@ -787,7 +787,9 @@ class HostThreadCreatorAuditTests(unittest.TestCase):
             if "selftest" not in Path(path).name.lower():
                 creators.append(path)
         self.assertEqual(
-            creators, ["src/core/nk_platform_posix.c",
+            creators, ["src/core/nk_adhoc_relay_client.c",  # Win32 DNS worker (#1139)
+                       "src/core/nk_adhoc_relay_client.c",  # POSIX DNS worker (#1139)
+                       "src/core/nk_platform_posix.c",
                        "src/core/nk_platform_win32.c",  # the RetroAchievements frame service
                        "src/rt/debug.c",
                        "src/rt/gpu_sdl3vk/tex_scale.c", "src/rt/osk_text_entry.c",

@@ -85,13 +85,17 @@ typedef enum NkNetResult {
     NK_NET_TOO_BIG = -6,        /* a datagram over NK_RELAY_PDP_MAX */
     NK_NET_NO_SOCKET = -7,      /* the handle is not an open socket */
     NK_NET_NO_SLOT = -8,        /* every socket slot is in use */
-    NK_NET_SHORT_BUFFER = -9    /* the next datagram is larger than the buffer; it stays queued */
+    NK_NET_SHORT_BUFFER = -9,   /* the next datagram is larger than the buffer; it stays queued */
+    NK_NET_CONNECTION_REFUSED = -10,
+    NK_NET_DEAD = -11           /* session or peer stream closed / failed */
 } NkNetResult;
 
 typedef struct NkAdhocTransport NkAdhocTransport;
 
 typedef struct NkAdhocTransportOps {
     const char *name;
+    /* Optional tick hook (non-blocking I/O, keepalive PING, accept backlog). */
+    void (*pump)(NkAdhocTransport *t);
     /* The lobby. Results arrive later as events, never as return values. */
     int (*login)(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], const char *nickname,
                  const char *product);
@@ -109,8 +113,24 @@ typedef struct NkAdhocTransportOps {
      * is too small it answers NK_NET_SHORT_BUFFER, sets *len, and keeps the datagram. */
     int (*pdp_recv)(NkAdhocTransport *t, int handle, uint8_t mac[NK_RELAY_MAC_LEN],
                     uint16_t *port, void *buf, uint32_t cap, uint32_t *len);
+    uint32_t (*pdp_peek)(NkAdhocTransport *t, int handle);
     int (*pdp_close)(NkAdhocTransport *t, int handle);
     uint32_t (*pdp_dropped)(const NkAdhocTransport *t);
+    /* PTP streams. */
+    int (*ptp_listen)(NkAdhocTransport *t, uint16_t sport, int backlog);
+    bool (*ptp_accept_pending)(const NkAdhocTransport *t, int listen_handle);
+    int (*ptp_accept)(NkAdhocTransport *t, int listen_handle, uint8_t peer_mac[NK_RELAY_MAC_LEN],
+                      uint16_t *peer_port);
+    int (*ptp_open)(NkAdhocTransport *t, uint16_t sport, const uint8_t dst[NK_RELAY_MAC_LEN],
+                    uint16_t dport);
+    /* 1 connected, 0 connecting, negative NkNetResult on failure (e.g. NK_NET_CONNECTION_REFUSED). */
+    int (*ptp_connect_poll)(NkAdhocTransport *t, int handle);
+    int (*ptp_send)(NkAdhocTransport *t, int handle, const void *data, uint32_t len,
+                    uint32_t *sent);
+    int (*ptp_recv)(NkAdhocTransport *t, int handle, void *buf, uint32_t cap, uint32_t *len);
+    uint32_t (*ptp_peek)(NkAdhocTransport *t, int handle);
+    bool (*ptp_is_dead)(const NkAdhocTransport *t, int handle);
+    int (*ptp_close)(NkAdhocTransport *t, int handle);
 } NkAdhocTransportOps;
 
 struct NkAdhocTransport {

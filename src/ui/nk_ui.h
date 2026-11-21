@@ -378,7 +378,10 @@ enum {
     /* A pointer target inside a control that takes the keys (one choice in a row of
        choices): it can be hovered and clicked, and no directional move, Tab or first
        focus lands on it. The screen moves focus back to the owning control. */
-    NK_UI_BUTTON_POINTER_ONLY = 1u << 9
+    NK_UI_BUTTON_POINTER_ONLY = 1u << 9,
+    /* A setting in effect (a switch that is On): outlined and lettered in the accent on a
+       raised ground, so it never reads as the focused control or the primary action. */
+    NK_UI_BUTTON_ON = 1u << 10
 };
 
 /* Device scale and edge rounding are shared helpers for hosts and tests. The
@@ -559,6 +562,10 @@ double nk_ui_wait_s(const NkUi *ui, double now_s, double idle_s);
    the next one soon instead. */
 void nk_ui_scroll_to(NkUi *ui, NkUiId id, float offset);
 bool nk_ui_scroll_state(const NkUi *ui, NkUiId id, NkUiScrollState *out);
+/* Where element id is on the window in logical px by the last layout, scrolled where its
+   scroll containers put it (a scroll container's own rect is the part of it that shows);
+   false before it was laid out. A screen that scrolls a group into view uses it. */
+bool nk_ui_element_rect(const NkUi *ui, NkUiId id, NkUiRect *out);
 bool nk_ui_scroll_in_motion(const NkUi *ui);
 /* Something on screen is still moving: a scroll container, or a transition
    (NkUiStyle.transition) that has not reached its end. A host draws the next

@@ -331,7 +331,7 @@ RECOMP_CC_IS_CLANG := $(findstring clang version,$(shell "$(CC)" --version 2>&1)
 
 ifeq ($(NK_TARGET_OS),windows)
 VULKAN_LIB_NAME := -lvulkan-1
-WIN_ONLY_LIBS   := -lmfplat -lgdi32 -lole32 -lshell32 -luuid -lwinmm
+WIN_ONLY_LIBS   := -lmfplat -lgdi32 -lole32 -lshell32 -luuid -lwinmm -lws2_32
 # Clang's COFF object emitter stamps wall-clock time into ImageFileHeader.TimeDateStamp
 # by default and ignores SOURCE_DATE_EPOCH there; -mno-incremental-linker-compatible
 # zeroes TimeDateStamp so two compiles of identical inputs produce byte-identical

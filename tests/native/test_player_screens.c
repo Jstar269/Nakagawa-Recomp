@@ -35,6 +35,13 @@
     NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000550u + (uint32_t)(tab))
 /* The box around the pinned rows, the tabs and the list, beside the detail panel. */
 #define ENHANCED_TEST_LEFT_ID NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000542u)
+/* The picker's scrolling list and its scroll bar (scr_settings.c SET_ID_ONLINE_PLAY_*). */
+#define ONLINE_PLAY_TEST_LIST NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E1u)
+#define ONLINE_PLAY_TEST_TRACK NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E2u)
+/* The own server's row, its note the last line inside it (scr_settings.c). */
+#define ONLINE_PLAY_TEST_OWN_CAPTION PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER
+/* The panel round the list (SET_ID_ONLINE_PLAY_BOX). */
+#define ONLINE_PLAY_TEST_PANEL NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E3u)
 
 static int failures;
 static const uint8_t k_test_glyph_pixel = 0xFFu;
@@ -354,6 +361,8 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_DISC_CHECKING, FLOW_DISC_SUPPORTED,
                FLOW_DISC_UNTESTED, FLOW_DISC_FONTS, FLOW_DISC_BLOCKED, FLOW_DISC_UNSUPPORTED,
                FLOW_DISC_GUIDED, FLOW_SETTINGS, FLOW_SETTINGS_ONLINE, FLOW_SETTINGS_ONLINE_ON,
+               FLOW_SETTINGS_ONLINE_PLAY, FLOW_SETTINGS_ONLINE_PLAY_CARD,
+               FLOW_SETTINGS_ONLINE_PLAY_SERVERS,
                FLOW_SETTINGS_ONLINE_DISCORD_ON, FLOW_SETTINGS_ONLINE_NO_DISCORD,
                FLOW_SETTINGS_NOTICES,
                FLOW_SETTINGS_REMOVE, FLOW_SETTINGS_BUILD_CACHE, FLOW_SETTINGS_FONTS,
@@ -398,6 +407,20 @@ static float g_flow_width = 1280.0f;
 static float g_flow_height = 800.0f;
 /* The text size flow_case_layout lays a case out at (NkUiViewport.text_size_pct). */
 static int g_flow_text_size_pct = 100;
+/* A player's own server for the Online play page and card (#1139), or NULL for socom.cc. */
+static const char *g_online_play_host = NULL;
+/* The picker's PPSSPP list is its shipped copy (the download unavailable). */
+static bool g_online_play_list_shipped = false;
+/* What the card's server reads as, where a case names its own (the player's model reads it
+   with nk_adhoc_relay_parse_server, unit-tested in test_nk_adhoc_relay.c). */
+static const char *g_online_play_card_host = NULL;
+static unsigned g_online_play_card_ports[2] = {0u, 0u};
+/* The server editor with a refused Done, and why (FLOW_NICKNAME_REFUSED). */
+static const char *g_server_refused_reason = NULL;
+/* The notice New console ID leaves on the Online play page (#1139), or NULL for none. */
+static const char *g_online_play_note = NULL;
+/* The server picker with Online play off (#1139): no list, and its line saying so. */
+static bool g_online_play_picker_off = false;
 
 /* The check rows player_state.c gives a disc, in its words (#1302). */
 static const PlayerUiCheckRow k_disc_rows_ready[] = {
@@ -516,6 +539,9 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                     which == FLOW_SETTINGS_ONLINE_DISCORD_ON ||
                     which == FLOW_SETTINGS_ONLINE_NO_DISCORD
         ? PLAYER_UI_SETTINGS_PAGE_ONLINE
+        : which == FLOW_SETTINGS_ONLINE_PLAY ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY
+        : which == FLOW_SETTINGS_ONLINE_PLAY_CARD ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD
+        : which == FLOW_SETTINGS_ONLINE_PLAY_SERVERS ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS
         : which == FLOW_SETTINGS_NOTICES ? PLAYER_UI_SETTINGS_PAGE_NOTICES
         : which == FLOW_SETTINGS_REMOVE ? PLAYER_UI_SETTINGS_PAGE_REMOVE_TOOLS
         : which == FLOW_SETTINGS_BUILD_CACHE ? PLAYER_UI_SETTINGS_PAGE_BUILD_CACHE
@@ -645,6 +671,48 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.cheats = false;
     settings.cover_art_cache_size = "1.4 MB";
     settings.developer_mode = true;
+    settings.online_play = which == FLOW_SETTINGS_ONLINE_PLAY_SERVERS && !g_online_play_picker_off;
+    settings.online_play_row_value = "Off";
+    settings.online_play_server = "socom.cc";
+    settings.online_play_server_label = "Socom Adhoc Server (France)";
+    settings.online_play_status = "Online play is off. Nothing connects.";
+    settings.online_play_console_id = "a4:c1:b2:c3:d4:e5";
+    settings.online_play_console_id_shown = true;
+    settings.online_play_port_offset = "10000";
+    settings.online_play_card_server = "relay-usa.arenaanywhere.site";
+    settings.online_play_card_host = "relay-usa.arenaanywhere.site";
+    settings.online_play_card_lobby_port = 27312u;
+    settings.online_play_card_data_port = 27313u;
+    if (g_online_play_host != NULL) {
+        settings.online_play_server = g_online_play_host;
+        settings.online_play_server_label = NULL; /* no list names it, as the player's model */
+        settings.online_play_card_server = g_online_play_host;
+        settings.online_play_card_host = g_online_play_card_host;
+        settings.online_play_card_lobby_port = g_online_play_card_ports[0];
+        settings.online_play_card_data_port = g_online_play_card_ports[1];
+    }
+    if (g_online_play_note != NULL) settings.online_play_console_note = g_online_play_note;
+    {
+        /* The picker: the five shipped servers, the longest shipped name and host among them,
+           then two from a (synthetic) downloaded list, one with a name too long for one line
+           beside its host at a larger text size. */
+        static const PlayerUiOnlineServer servers[] = {
+            {"Socom Adhoc Server (France)", "socom.cc", "", false},
+            {"ArenaAnywhere (Europe)", "relay.arenaanywhere.site", "", false},
+            {"ArenaAnywhere (US)", "relay-usa.arenaanywhere.site", "", false},
+            {"ArenaAnywhere (South Africa)", "relay-sa.arenaanywhere.site", "", false},
+            {"ArenaAnywhere (Singapore)", "relay-asia.arenaanywhere.site", "", false},
+            {"Example relay", "relay.example.invalid", "Testland", true},
+            {"An example relay whose name is far too long for one button",
+             "relay-long.example.invalid", "", true}
+        };
+        settings.online_play_servers = servers;
+        settings.online_play_server_count = sizeof(servers) / sizeof(servers[0]);
+        settings.online_play_list_status =
+            g_online_play_list_shipped ? "Live list unavailable: the list server did not answer."
+                                       : "Downloaded now from the list's host.";
+        settings.online_play_list_live = !g_online_play_list_shipped;
+    }
     settings.share_system_libraries = true;
     settings.build_speed = "Background";
     settings.build_speed_sentence = "Up to two parts at a time at low priority, so a game you play "
@@ -1473,6 +1541,10 @@ static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
         nickname.keyboard = &keyboard;
         nickname.current = "Player";
         nickname.refused = which == FLOW_NICKNAME_REFUSED;
+        if (nickname.refused && g_server_refused_reason != NULL) {
+            nickname.server_mode = true;
+            nickname.refused_reason = g_server_refused_reason;
+        }
         nickname.logical_width = g_flow_width;
         nickname.logical_height = g_flow_height;
         return player_ui_screen_nickname(ui, &nickname);
@@ -3078,6 +3150,31 @@ static void test_flow_dumps_fail_closed(void) {
           "a fit whose dump was cut does not pass");
 }
 
+/* Whether `sentence` is in a dump, read across the lines a wrapped text is dumped as: a space
+   in `sentence` may stand for the end of one dumped line's text and the start of the next's. */
+static bool dump_says(const char *dump, const char *sentence) {
+    for (const char *start = dump; dump != NULL && *start != '\0'; ++start) {
+        const char *at = start;
+        const char *want = sentence;
+        while (*want != '\0' && *at != '\0') {
+            if (*want == ' ' && at[0] == '"' && at[1] == '\n') {
+                const char *next = strchr(at + 2, '"');
+                const char *eol = strchr(at + 2, '\n');
+                if (next == NULL || (eol != NULL && eol < next)) break;
+                at = next + 1;
+                ++want;
+            } else if (*want == *at) {
+                ++want;
+                ++at;
+            } else {
+                break;
+            }
+        }
+        if (*want == '\0') return true;
+    }
+    return false;
+}
+
 /* Whether a text run containing `needle` shows in this draw list: drawn, and
    not clipped away by a scroll container. */
 static bool draw_shows(const NkUiDrawList *draw, const char *needle) {
@@ -3464,6 +3561,9 @@ static void test_accessibility_settings_reach_the_design_system(void) {
 }
 
 static bool run_ends_in_ellipsis(const NkUiTextRun *run);
+static bool flow_case_text_whole(FlowCase which, int width, int height, NkUiId scroller,
+                                 const char *const *ends, size_t end_count);
+static bool online_play_card_reads(int width, int height, int text_pct, bool must_scroll);
 
 /* The tabs of Settings > Enhanced as a person reads them: each tab's name on the strip and its
    parts from the top. Written out here, not taken from the page's own table
@@ -3913,6 +4013,34 @@ static void test_settings_pages(void) {
          "Back returns to Settings"},
         {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_DISCORD, PLAYER_UI_SETTINGS_TOGGLE_DISCORD,
          "the Discord status switch toggles it"},
+        {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
+         PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY, "Online play opens its page"},
+        {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE,
+         PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY, "the Online play switch asks for its card"},
+        {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET,
+         PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY_SERVERS, "Server opens the picker"},
+        {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT,
+         PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT, "Port offset opens its editor"},
+        {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_CONSOLE_ID,
+         PLAYER_UI_SETTINGS_NEW_CONSOLE_ID, "New console ID asks for a new one"},
+        {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
+         "Back returns to Online and developer"},
+        {FLOW_SETTINGS_ONLINE_PLAY_CARD, PLAYER_UI_ID_ONLINE_PLAY_TURN_ON,
+         PLAYER_UI_SETTINGS_ONLINE_PLAY_TURN_ON, "the card's TURN ON turns it on"},
+        {FLOW_SETTINGS_ONLINE_PLAY_CARD, PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW,
+         PLAYER_UI_SETTINGS_ONLINE_PLAY_NOT_NOW, "the card's NOT NOW changes nothing"},
+        {FLOW_SETTINGS_ONLINE_PLAY_CARD, PLAYER_UI_ID_ONLINE_PLAY_CHANGE_SERVER,
+         PLAYER_UI_SETTINGS_ONLINE_PLAY_CHANGE_SERVER, "the card's CHANGE SERVER opens the picker"},
+        {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 2u,
+         PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER, "a picker row picks its server"},
+        {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
+         PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER, "Other server opens the editor"},
+        {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT,
+         PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT, "the picker's Port offset opens its editor"},
+        {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_ONLINE_PLAY_REFRESH,
+         PLAYER_UI_SETTINGS_REFRESH_ONLINE_PLAY_SERVERS, "Refresh list downloads it again"},
+        {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
+         "Back leaves the picker"},
         {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_COVER_ART, PLAYER_UI_SETTINGS_TOGGLE_COVER_ART,
          "the Download cover art switch toggles it"},
         {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_CHEATS, PLAYER_UI_SETTINGS_TOGGLE_CHEATS,
@@ -4389,9 +4517,45 @@ static void test_settings_pages(void) {
               strstr(dump, "Online features aren't built yet") != NULL &&
               strstr(dump, "ONLINE MODE") == NULL && strstr(dump, "NEWS:") == NULL &&
               strstr(dump, "REPORTS:") == NULL && strstr(dump, "\"DEVELOPER MODE: ") != NULL &&
+              strstr(dump, "\"ONLINE PLAY: ") != NULL &&
               activate_flow_button(PLAYER_UI_ID_SETTINGS_ONLINE_MODE, FLOW_SETTINGS_ONLINE).kind ==
                   PLAYER_UI_ACTION_NONE,
           "Online and developer shows one plain line instead of an inert online switch");
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "not encrypted") != NULL && strstr(dump, "SOCOM.CC") != NULL &&
+              strstr(dump, "a4:c1:b2:c3:d4:e5") != NULL &&
+              strstr(dump, "your PC's hardware address") != NULL &&
+              strstr(dump, "\"PORT OFFSET: 10000\"") != NULL &&
+              strstr(dump, "\"NEW CONSOLE ID\"") != NULL &&
+              player_ui_server_accepts(':', NULL) && !player_ui_server_accepts(' ', NULL) &&
+              player_ui_port_accepts('7', NULL) && !player_ui_port_accepts('-', NULL),
+          "the Online play page says it is not encrypted, shows the server, the random console "
+          "ID, the port offset's rule and New console ID");
+    /* #1139: the consent card names the exact server, every line of the owner's wording, and
+       TURN ON, NOT NOW and CHANGE SERVER. */
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_CARD, 960, 540, dump, sizeof(dump)) &&
+              dump_says(dump, "Nakagawa connects to relay-usa.arenaanywhere.site on ports 27312 "
+                                    "and 27313.") &&
+              strstr(dump, "the ID of the game you start, for example ULUS12345") != NULL &&
+              strstr(dump, "- Your Nickname: ") != NULL &&
+              strstr(dump, "The people who run the server can see your IP address.") != NULL &&
+              strstr(dump, "The connection is not encrypted.") != NULL,
+          "the Online play card names the server and says what is sent and who can see it");
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_CARD, 1280, 800, NULL, 0u) &&
+              online_play_card_reads(1280, 800, 100, false),
+          "the Online play card offers TURN ON, NOT NOW and CHANGE SERVER");
+    {
+        /* The picker scrolls once it lists more than a few servers: each of these shows
+           somewhere as it is scrolled through. */
+        static const char *const picker[] = {"Example relay", "relay.example.invalid",
+                                             "PPSSPP-derived, not PSP-measured",
+                                             "REFRESH LIST"};
+        CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540, NULL, 0u) &&
+                  flow_case_text_whole(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540,
+                                       ONLINE_PLAY_TEST_LIST, picker, 4u),
+              "the picker lists the servers, says the relay-only reading is PPSSPP-derived, "
+              "and offers Refresh with Online play on");
+    }
     /* Discord status (#2259): off, with what it does, in a build that can show it; no row in
        a build that cannot; and a stored On there keeps its row so it can be turned off. */
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE, 960, 540, dump, sizeof(dump)) &&
@@ -4400,6 +4564,107 @@ static void test_settings_pages(void) {
               strstr(dump, "\"DOWNLOAD COVER ART: OFF\"") != NULL &&
               strstr(dump, "thumbnails.libretro.com") != NULL,
           "Online and developer offers Discord status and opt-in cover art, off by default");
+    {
+        /* Focus steps cleanly through every row on Online and developer, reaching both
+           Online play and Download cover art without duplicate widget IDs. */
+        static const NkUiId expected_order[] = {
+            PLAYER_UI_ID_SETTINGS_DEVELOPER,
+            PLAYER_UI_ID_SETTINGS_DISCORD,
+            PLAYER_UI_ID_SETTINGS_NICKNAME,
+            PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
+            PLAYER_UI_ID_SETTINGS_COVER_ART,
+            PLAYER_UI_ID_SETTINGS_CHEATS,
+            PLAYER_UI_ID_SETTINGS_DEVELOPER_LOG
+        };
+        NkUi *ui = NULL;
+        (void)flow_case_layout(FLOW_SETTINGS_ONLINE, 1280, 800, &ui);
+        CHECK(ui != NULL && nk_ui_focused(ui) == expected_order[0],
+              "Online and developer starts focus on Developer mode");
+        for (size_t step = 1u;
+             ui != NULL && step < sizeof(expected_order) / sizeof(expected_order[0]); ++step) {
+            push_nav(ui, NK_UI_DIR_DOWN);
+            nk_ui_begin(ui, 0.0);
+            (void)draw_flow_case(ui, FLOW_SETTINGS_ONLINE);
+            (void)nk_ui_end(ui);
+            CHECK(nk_ui_focused(ui) == expected_order[step],
+                  "Down steps sequentially through Developer, Discord, Nickname, Online play, Cover art, Cheats, and Developer log");
+        }
+        if (ui != NULL) {
+            push_nav(ui, NK_UI_DIR_LEFT);
+            nk_ui_begin(ui, 0.0);
+            (void)draw_flow_case(ui, FLOW_SETTINGS_ONLINE);
+            (void)nk_ui_end(ui);
+            CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_SETTINGS_BACK,
+                  "Left from Developer log reaches Back on Online and developer");
+            nk_ui_destroy(ui);
+        }
+    }
+    {
+        /* All six optional/standard rows active together (Online mode, Developer mode,
+           Discord status, Nickname, Online play, Download cover art) stay within the row
+           table and keep distinct focusable controls. */
+        NkUiConfig config;
+        NkUiTextBackend text = screen_test_text_backend();
+        PlayerUiSettingsModel six;
+        const NkUiDrawList *draw = NULL;
+        static const NkUiId six_order[] = {
+            PLAYER_UI_ID_SETTINGS_ONLINE_MODE,
+            PLAYER_UI_ID_SETTINGS_DEVELOPER,
+            PLAYER_UI_ID_SETTINGS_DISCORD,
+            PLAYER_UI_ID_SETTINGS_NICKNAME,
+            PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
+            PLAYER_UI_ID_SETTINGS_COVER_ART,
+            PLAYER_UI_ID_SETTINGS_CHEATS,
+            PLAYER_UI_ID_SETTINGS_DEVELOPER_LOG
+        };
+        memset(&config, 0, sizeof(config));
+        config.host = NK_UI_HOST_LAUNCHER;
+        config.text = &text;
+        NkUi *ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create UI for 6-row Online and developer regression");
+        if (ui != NULL) {
+            set_test_viewport(ui, 1280, 800);
+            memset(&six, 0, sizeof(six));
+            six.page = PLAYER_UI_SETTINGS_PAGE_ONLINE;
+            six.online_mode = true;
+            six.developer_mode = true;
+            six.discord_available = true;
+            six.discord_presence = true;
+            six.nickname = "Player";
+            six.online_play = true;
+            six.online_play_row_value = "On (socom.cc)";
+            six.download_cover_art = true;
+            six.logical_width = 1280.0f;
+            six.logical_height = 800.0f;
+            for (int frame = 0; frame < 2; ++frame) {
+                nk_ui_begin(ui, 0.0);
+                (void)player_ui_screen_settings(ui, &six);
+                draw = nk_ui_end(ui);
+            }
+            CHECK(draw != NULL && nk_ui_dump(ui, dump, sizeof(dump)) > 0u &&
+                      strstr(dump, "\"ONLINE MODE: ON\"") != NULL &&
+                      strstr(dump, "\"ONLINE PLAY: ON (SOCOM.CC)\"") != NULL &&
+                      strstr(dump, "\"DOWNLOAD COVER ART: ON\"") != NULL,
+                  "all 6 rows on Online and developer render together cleanly");
+            for (size_t step = 0u; step < sizeof(six_order) / sizeof(six_order[0]); ++step) {
+                CHECK(nk_ui_focused(ui) == six_order[step],
+                      "6-row Online and developer focus visits every control in order");
+                if (step + 1u < sizeof(six_order) / sizeof(six_order[0])) {
+                    push_nav(ui, NK_UI_DIR_DOWN);
+                    nk_ui_begin(ui, 0.0);
+                    (void)player_ui_screen_settings(ui, &six);
+                    (void)nk_ui_end(ui);
+                }
+            }
+            push_nav(ui, NK_UI_DIR_LEFT);
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_settings(ui, &six);
+            (void)nk_ui_end(ui);
+            CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_SETTINGS_BACK,
+                  "Left from Developer log reaches Back in 6-row Online and developer layout");
+            nk_ui_destroy(ui);
+        }
+    }
     CHECK(dump_flow_case(FLOW_SETTINGS_ONLINE_ON, dump, sizeof(dump)) &&
               strstr(dump, "DISCORD STATUS") == NULL &&
               activate_flow_button(PLAYER_UI_ID_SETTINGS_DISCORD, FLOW_SETTINGS_ONLINE_ON).kind ==
@@ -6880,11 +7145,18 @@ static bool flow_case_text_whole(FlowCase which, int width, int height, NkUiId s
             }
         }
         if (!nk_ui_scroll_state(ui, scroller, &state) || offset >= state.max_offset) break;
-        offset += 120.0f;
+        /* 120 px at a time, or a quarter of the view where that is less, as a wheel's notches
+           go: in a short list a longer step can pass every stop at which an item taller than
+           half the view shows whole (the picker's list settles on item boundaries). */
+        offset += state.viewport > 0.0f && 0.25f * state.viewport < 120.0f
+                      ? 0.25f * state.viewport
+                      : 120.0f;
         nk_ui_scroll_to(ui, scroller, offset);
         g_flow_width = scale.logical_w;
         g_flow_height = scale.logical_h;
-        for (int frame = 0; frame < 2; ++frame) {
+        /* Four frames: the scroll, and a list that settles on an item boundary after it (the
+           Online play picker's) with the frame that draws it there. */
+        for (int frame = 0; frame < 4; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)draw_flow_case(ui, which);
             draw = end_frame(ui);
@@ -6911,6 +7183,1004 @@ static bool flow_case_text_whole(FlowCase which, int width, int height, NkUiId s
    size, Settings' Online, Developer, Discord status and Nickname rows, and the wizard's, stack
    under their buttons when a sentence would be cut beside them, and wrap whole there; at
    the design size those rows stay beside their buttons by design (two lines at most). */
+/* Draws `which` again in `ui` at the size flow_case_layout laid it out at, two frames, as a
+   scroll or an event takes effect on the next frame. */
+static const NkUiDrawList *flow_case_redraw(NkUi *ui, FlowCase which, int width, int height) {
+    NkUiViewport viewport = launcher_viewport(width, height, 1.0f);
+    NkUiScale scale;
+    const NkUiDrawList *draw = NULL;
+    viewport.text_size_pct = g_flow_text_size_pct;
+    scale = nk_ui_scale_for_viewport(&viewport);
+    g_flow_width = scale.logical_w;
+    g_flow_height = scale.logical_h;
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)draw_flow_case(ui, which);
+        draw = end_frame(ui);
+    }
+    g_flow_width = 1280.0f;
+    g_flow_height = 800.0f;
+    return draw;
+}
+
+/* #1139: the consent card as a keyboard or pad player meets it. Focus starts on NOT NOW, so the
+   card shows its buttons, TURN ON, NOT NOW and CHANGE SERVER. Where the card is taller than the
+   window (the 960 x 540 minimum with Larger (150%) text: `must_scroll`) that is its foot: the
+   card says how it scrolls, Page Up (the Page Up key, or a pad's left trigger: both arrive as
+   NK_UI_EV_PAGE) a view less one line at a time brings back its first lines and the server's
+   name, and Page Down goes back down. Where it is not, the first lines show already. */
+static bool online_play_card_reads(int width, int height, int text_pct, bool must_scroll) {
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw;
+    NkUiEvent page;
+    NkUiScrollState state;
+    bool ok;
+    bool scrolls;
+    int saved = g_flow_text_size_pct;
+    memset(&state, 0, sizeof(state));
+    g_flow_text_size_pct = text_pct;
+    draw = flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_CARD, width, height, &ui);
+    ok = draw != NULL && ui != NULL;
+    if (ok) {
+        nk_ui_focus(ui, PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW);
+        for (int i = 0; i < 2; ++i) {
+            draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_CARD, width, height);
+        }
+        ok = nk_ui_scroll_state(ui, FLOW_ID_CARD, &state) && draw_shows(draw, "TURN ON") &&
+             draw_shows(draw, "NOT NOW") && draw_shows(draw, "CHANGE SERVER");
+    }
+    scrolls = state.max_offset > 0.5f;
+    if (ok && !scrolls) {
+        ok = !must_scroll && !draw_shows(draw, "Page Up and Page Down") &&
+             draw_shows(draw, "relay-usa.arenaanywhere.site") &&
+             draw_shows(draw, "Online play lets this game");
+    } else if (ok) {
+        ok = state.offset > 0.5f && draw_shows(draw, "Page Up and Page Down") &&
+             !draw_shows(draw, "Online play lets this game");
+        memset(&page, 0, sizeof(page));
+        page.type = NK_UI_EV_PAGE;
+        page.down = true;
+        page.dir = NK_UI_DIR_LEFT;
+        for (int i = 0; ok && i < 8; ++i) {
+            nk_ui_push_event(ui, &page);
+            draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_CARD, width, height);
+        }
+        ok = ok && nk_ui_scroll_state(ui, FLOW_ID_CARD, &state) && state.offset < 0.5f &&
+             draw_shows(draw, "relay-usa.arenaanywhere.site") &&
+             draw_shows(draw, "Online play lets this game");
+        page.dir = NK_UI_DIR_RIGHT;
+        if (ok) {
+            nk_ui_push_event(ui, &page);
+            draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_CARD, width, height);
+            ok = nk_ui_scroll_state(ui, FLOW_ID_CARD, &state) && state.offset > 0.5f;
+        }
+    }
+    if (!ok) {
+        fprintf(stderr, "  the card at %d x %d, %d%% text: offset %.1f of %.1f\n", width, height,
+                text_pct, (double)state.offset, (double)state.max_offset);
+    }
+    nk_ui_destroy(ui);
+    g_flow_text_size_pct = saved;
+    return ok;
+}
+
+/* #1139: focus moving down the picker at 960 x 540 with Larger (150%) text to a row below the
+   list's edge brings the whole row into view: its name, its host and where it is. */
+static bool online_play_picker_row_reveals(void) {
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw;
+    bool ok;
+    int saved = g_flow_text_size_pct;
+    g_flow_text_size_pct = 150;
+    draw = flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540, &ui);
+    ok = draw != NULL && ui != NULL && !draw_shows(draw, "relay-long.example.invalid");
+    if (ok) {
+        nk_ui_focus(ui, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 6u);
+        for (int i = 0; i < 3; ++i) {
+            draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540);
+        }
+        ok = draw_shows(draw, "An example relay") &&
+             draw_shows(draw, "relay-long.example.invalid") &&
+             !draw_shows(draw, "FROM THE DOWNLOADED LIST");
+    }
+    nk_ui_destroy(ui);
+    g_flow_text_size_pct = saved;
+    return ok;
+}
+
+/* #1139: on the Online play page at 960 x 540 with Larger (150%) text, NEW CONSOLE ID focused
+   and in view; its press adds a notice above the buttons, and the button stays wholly inside the
+   card after it. */
+static bool online_play_console_button_stays_in_view(void) {
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw;
+    NkUiRect card = {0.0f, 0.0f, 0.0f, 0.0f};
+    NkUiRect button = {0.0f, 0.0f, 0.0f, 0.0f};
+    bool ok;
+    int saved = g_flow_text_size_pct;
+    g_flow_text_size_pct = 150;
+    g_online_play_note = NULL;
+    draw = flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY, 960, 540, &ui);
+    ok = draw != NULL && ui != NULL;
+    if (ok) {
+        nk_ui_focus(ui, PLAYER_UI_ID_SETTINGS_CONSOLE_ID);
+        for (int i = 0; i < 2; ++i) {
+            draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY, 960, 540);
+        }
+        g_online_play_note = "New console ID made. Games use it from the next one you start.";
+        for (int i = 0; i < 3; ++i) {
+            draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY, 960, 540);
+        }
+        ok = draw_shows(draw, "New console ID made.") &&
+             nk_ui_element_rect(ui, FLOW_ID_CARD, &card) &&
+             nk_ui_element_rect(ui, PLAYER_UI_ID_SETTINGS_CONSOLE_ID, &button) &&
+             button.y >= card.y - 0.5f && button.y + button.h <= card.y + card.h + 0.5f;
+        if (!ok) {
+            fprintf(stderr, "  NEW CONSOLE ID at y %.1f to %.1f, the card shows %.1f to %.1f\n",
+                    (double)button.y, (double)(button.y + button.h), (double)card.y,
+                    (double)(card.y + card.h));
+        }
+    }
+    g_online_play_note = NULL;
+    nk_ui_destroy(ui);
+    g_flow_text_size_pct = saved;
+    return ok;
+}
+
+/* Whether `rect` lies wholly inside `view`, to the half pixel. */
+static bool rect_inside(NkUiRect rect, NkUiRect view) {
+    return rect.y >= view.y - 0.5f && rect.y + rect.h <= view.y + view.h + 0.5f &&
+           rect.x >= view.x - 0.5f && rect.x + rect.w <= view.x + view.w + 0.5f;
+}
+
+/* Whether the focus ring drawn round `focused` (the border pieces drawn for it, the outermost
+   `grow` logical px outside the element `rect`) crosses a line of text that shows and is not
+   inside that element: a line under or over the row, not the row's own. Names what it
+   crosses. The ring must be drawn where the element is: the UI's motion cut (Reduce motion),
+   as the clock of these tests does not move. */
+static bool ring_crosses_other_text(const NkUiDrawList *draw, NkUiId focused, NkUiRect rect,
+                                    float grow) {
+    float outer[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float inner[4];
+    float scale;
+    bool any = false;
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        if (cmd->kind != NK_UI_DRAW_BORDER || cmd->element_id != focused) continue;
+        if (!any || (float)cmd->bounds[0] < outer[0]) outer[0] = (float)cmd->bounds[0];
+        if (!any || (float)cmd->bounds[1] < outer[1]) outer[1] = (float)cmd->bounds[1];
+        if (!any || (float)cmd->bounds[2] > outer[2]) outer[2] = (float)cmd->bounds[2];
+        if (!any || (float)cmd->bounds[3] > outer[3]) outer[3] = (float)cmd->bounds[3];
+        any = true;
+    }
+    if (!any || rect.w <= 0.0f) return false;
+    /* Device px per logical px, from the ring's own width. */
+    scale = (outer[2] - outer[0]) / (rect.w + 2.0f * grow);
+    inner[0] = outer[0] + grow * scale;
+    inner[1] = outer[1] + grow * scale;
+    inner[2] = outer[2] - grow * scale;
+    inner[3] = outer[3] - grow * scale;
+    for (uint32_t i = 0u; i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *text = &draw->cmd[i];
+        const NkUiTextRun *run;
+        if (text->kind != NK_UI_DRAW_TEXT || !command_shows(text)) continue;
+        run = (const NkUiTextRun *)text->custom;
+        if (run == NULL || run->length == 0u) continue;
+        if ((float)text->clip[0] >= inner[0] - 0.5f && (float)text->clip[2] <= inner[2] + 0.5f &&
+            (float)text->clip[1] >= inner[1] - 0.5f && (float)text->clip[3] <= inner[3] + 0.5f) {
+            continue; /* the row's own text */
+        }
+        for (uint32_t k = 0u; k < draw->ncmd; ++k) {
+            const NkUiDrawCmd *piece = &draw->cmd[k];
+            if (piece->kind != NK_UI_DRAW_BORDER || piece->element_id != focused ||
+                !command_shows(piece)) {
+                continue;
+            }
+            if (text->clip[0] < piece->clip[2] && text->clip[2] > piece->clip[0] &&
+                text->clip[1] < piece->clip[3] && text->clip[3] > piece->clip[1]) {
+                report_misfit("the focus ring crosses", text);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+/* Whether a run of text that shows is cut by a scroll container's edge: it shows, but only in
+   part, above or below. */
+static bool draw_cuts_a_line(const NkUiDrawList *draw) {
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        const NkUiTextRun *run = cmd->kind == NK_UI_DRAW_TEXT ? (const NkUiTextRun *)cmd->custom
+                                                              : NULL;
+        if (run == NULL || !command_shows(cmd)) continue;
+        if (cmd->clip[1] > cmd->bounds[1] + 1 || cmd->clip[3] < cmd->bounds[3] - 1) {
+            report_misfit("a line cut by the list's edge", cmd);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* #1139, the picker's look (owner review of 2026-11-20): one row per server across the list,
+   and the list scrolls inside the card. At 960 x 540 and 1280 x 720 with 100% text every
+   shipped server and the own server's row show whole without scrolling; at every text size,
+   Online play on and off, every row is reachable and focus brings its whole hit box inside
+   the list (or, where the list cannot hold two rows, the card); scrolled from top to foot no
+   line is ever cut at the list's edge; and at 150% the list scrolls with its bar showing. */
+static void test_online_play_picker_rows(void) {
+    static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
+    static const int text_sizes[] = {100, 125, 150};
+    const int saved = g_flow_text_size_pct;
+    for (int off = 0; off < 2; ++off) {
+        g_online_play_picker_off = off != 0;
+        for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+            g_flow_text_size_pct = text_sizes[t];
+            for (size_t z = 0u; z < sizeof(sizes) / sizeof(sizes[0]); ++z) {
+                const int w = sizes[z].w;
+                const int h = sizes[z].h;
+                NkUi *ui = NULL;
+                const NkUiDrawList *draw =
+                    flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h, &ui);
+                NkUiId controls[16];
+                size_t control_count = 0u;
+                NkUiScrollState state;
+                NkUiRect view;
+                NkUiRect rect;
+                NkUiRect panel;
+                bool whole = draw != NULL && ui != NULL;
+                bool reachable = whole;
+                bool uncut = whole;
+                bool ring_clear = whole;
+                char message[200];
+                /* The ring jumps to the focused control (Reduce motion): this clock stands. */
+                if (ui != NULL) set_still_prefs(ui, nk_ui_prompt_style(ui));
+                for (NkUiId i = 0u; i < (off ? 5u : 7u); ++i) {
+                    controls[control_count++] = PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + i;
+                    if (i == 4u) {
+                        controls[control_count++] = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER;
+                        controls[control_count++] = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT;
+                    }
+                }
+                if (text_sizes[t] == 100 && whole) {
+                    /* Unscrolled: the shipped rows, the own row and its Port offset whole. */
+                    whole = nk_ui_element_rect(ui, ONLINE_PLAY_TEST_LIST, &view);
+                    for (size_t c = 0u; whole && c < 7u; ++c) {
+                        /* Each row, and Port offset, at least 44 px high (ACCESSIBILITY.md). */
+                        whole = nk_ui_element_rect(ui, controls[c], &rect) &&
+                                rect_inside(rect, view) && rect.h >= 44.0f - 0.01f;
+                        if (!whole) {
+                            fprintf(stderr, "  %08X at y %.1f to %.1f, the list shows %.1f to "
+                                    "%.1f\n", (unsigned)controls[c], (double)rect.y,
+                                    (double)(rect.y + rect.h), (double)view.y,
+                                    (double)(view.y + view.h));
+                        }
+                    }
+                    /* The card itself does not scroll: the list takes what it leaves. */
+                    if (whole && nk_ui_scroll_state(ui, FLOW_ID_CARD, &state) &&
+                        state.max_offset > 0.5f) {
+                        fprintf(stderr, "  the card scrolls by %.1f\n", (double)state.max_offset);
+                        whole = false;
+                    }
+                    /* The hint under the intro (owner, 2026-11-20) is there too. */
+                    /* The own server's caption whole too, in the list's view, with at least
+                       the list's padding (8 px) between it and the panel's bottom edge. */
+                    if (whole && !(nk_ui_element_rect(ui, ONLINE_PLAY_TEST_OWN_CAPTION, &rect) &&
+                                   nk_ui_element_rect(ui, ONLINE_PLAY_TEST_PANEL, &panel) &&
+                                   rect_inside(rect, view) &&
+                                   rect.y + rect.h <= panel.y + panel.h - 8.0f + 0.5f)) {
+                        fprintf(stderr, "  own caption at y %.1f to %.1f, the list shows %.1f to "
+                                "%.1f, the panel ends at %.1f\n", (double)rect.y,
+                                (double)(rect.y + rect.h), (double)view.y,
+                                (double)(view.y + view.h), (double)(panel.y + panel.h));
+                        whole = false;
+                    }
+                    whole = whole && draw_shows(draw, "Everyone you play with") &&
+                            draw_shows(draw, "faster.") &&
+                            draw_shows(draw, "relay-asia.arenaanywhere.site") &&
+                            draw_shows(draw, "Other server") &&
+                            draw_shows(draw, "host[:lobby_port[,data_port]]");
+                    (void)snprintf(message, sizeof(message),
+                                   "at %d x %d with 100%% text and Online play %s the picker "
+                                   "shows every shipped server and the own server's row and caption whole, "
+                                   "unscrolled", w, h, off ? "off" : "on");
+                    CHECK(whole, message);
+                }
+                if (text_sizes[t] == 150 && ui != NULL) {
+                    (void)snprintf(message, sizeof(message),
+                                   "at %d x %d with 150%% text and Online play %s the picker's "
+                                   "list scrolls, its bar showing", w, h, off ? "off" : "on");
+                    CHECK(nk_ui_scroll_state(ui, ONLINE_PLAY_TEST_LIST, &state) &&
+                              state.max_offset > 0.5f &&
+                              nk_ui_element_rect(ui, nk_ui_child_id(ONLINE_PLAY_TEST_TRACK, 2u),
+                                                 &rect) && rect.h > 0.0f,
+                          message);
+                }
+                for (size_t c = 0u; reachable && c < control_count; ++c) {
+                    NkUiId scroller = ONLINE_PLAY_TEST_LIST;
+                    nk_ui_focus(ui, controls[c]);
+                    for (int f = 0; f < 3; ++f) {
+                        draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                    }
+                    if (!nk_ui_scroll_state(ui, scroller, &state) || state.max_offset <= 0.5f) {
+                        scroller = FLOW_ID_CARD;
+                    }
+                    reachable = nk_ui_focused(ui) == controls[c] &&
+                                nk_ui_element_rect(ui, scroller, &view) &&
+                                nk_ui_element_rect(ui, controls[c], &rect) &&
+                                rect_inside(rect, view) && !draw_cuts_a_line(draw);
+                    /* Its focus ring crosses no line of text outside it (review of
+                       2026-11-20: the own row's note was under its ring). */
+                    if (reachable &&
+                        ring_crosses_other_text(draw, controls[c], rect,
+                                                NK_UI_FOCUS_RING_GAP + NK_UI_FOCUS_RING_WIDTH)) {
+                        fprintf(stderr, "  with focus on %08X\n", (unsigned)controls[c]);
+                        ring_clear = false;
+                    }
+                    if (!reachable) {
+                        fprintf(stderr, "  focus on %08X: at y %.1f to %.1f, %08X shows %.1f to "
+                                "%.1f\n", (unsigned)controls[c], (double)rect.y,
+                                (double)(rect.y + rect.h), (unsigned)scroller, (double)view.y,
+                                (double)(view.y + view.h));
+                    }
+                }
+                (void)snprintf(message, sizeof(message),
+                               "at %d x %d with %d%% text and Online play %s focus reaches every "
+                               "picker row, the own server's and Port offset, each wholly inside "
+                               "the list", w, h, text_sizes[t], off ? "off" : "on");
+                CHECK(reachable, message);
+                (void)snprintf(message, sizeof(message),
+                               "at %d x %d with %d%% text and Online play %s no picker row's "
+                               "focus ring crosses a line of text outside the row", w, h,
+                               text_sizes[t], off ? "off" : "on");
+                CHECK(ring_clear, message);
+                if (off && ui != NULL) {
+                    /* PPSSPP's list is not shown with Online play off, though the model holds
+                       it: its rows have no place, and Down from the own server's row and from
+                       Port offset reaches neither. */
+                    bool absent = !nk_ui_element_rect(ui, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 5u,
+                                                      &rect) &&
+                                  !nk_ui_element_rect(ui, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 6u,
+                                                      &rect);
+                    static const NkUiId from[] = {PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
+                                                  PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT};
+                    for (size_t k = 0u; absent && k < 2u; ++k) {
+                        NkUiEvent down_key;
+                        memset(&down_key, 0, sizeof(down_key));
+                        down_key.type = NK_UI_EV_NAV;
+                        down_key.dir = NK_UI_DIR_DOWN;
+                        down_key.down = true;
+                        nk_ui_focus(ui, from[k]);
+                        (void)flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                        nk_ui_push_event(ui, &down_key);
+                        (void)flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                        absent = nk_ui_focused(ui) != PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 5u &&
+                                 nk_ui_focused(ui) != PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 6u &&
+                                 !nk_ui_element_rect(ui, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 5u,
+                                                     &rect);
+                    }
+                    (void)snprintf(message, sizeof(message),
+                                   "at %d x %d with %d%% text and Online play off PPSSPP's list's "
+                                   "rows are neither laid out nor reached by Down", w, h,
+                                   text_sizes[t]);
+                    CHECK(absent, message);
+                }
+                /* From the top to the foot, a third of a view at a time: no line cut. */
+                if (uncut && nk_ui_scroll_state(ui, ONLINE_PLAY_TEST_LIST, &state) &&
+                    state.max_offset > 0.5f) {
+                    for (float at = 0.0f; uncut && at <= state.max_offset + 0.5f;
+                         at += state.viewport / 3.0f) {
+                        nk_ui_focus(ui, PLAYER_UI_ID_SETTINGS_BACK);
+                        nk_ui_scroll_to(ui, ONLINE_PLAY_TEST_LIST, at);
+                        for (int f = 0; f < 3; ++f) {
+                            draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                        }
+                        uncut = !draw_cuts_a_line(draw);
+                    }
+                }
+                (void)snprintf(message, sizeof(message),
+                               "at %d x %d with %d%% text and Online play %s no line of the "
+                               "picker is cut at the list's edge, scrolled top to foot", w, h,
+                               text_sizes[t], off ? "off" : "on");
+                CHECK(uncut, message);
+                if (ui != NULL) nk_ui_destroy(ui);
+            }
+        }
+    }
+    g_online_play_picker_off = false;
+    g_flow_text_size_pct = saved;
+}
+
+/* One click (press and release in one frame) at x, y on the picker at width x height. */
+static PlayerUiAction online_play_picker_click(NkUi *ui, float x, float y, int width,
+                                               int height) {
+    NkUiViewport viewport = launcher_viewport(width, height, 1.0f);
+    NkUiScale scale;
+    NkUiEvent pointer;
+    PlayerUiAction action;
+    viewport.text_size_pct = g_flow_text_size_pct;
+    scale = nk_ui_scale_for_viewport(&viewport);
+    memset(&pointer, 0, sizeof(pointer));
+    pointer.type = NK_UI_EV_POINTER;
+    pointer.x = x;
+    pointer.y = y;
+    pointer.down = true;
+    nk_ui_push_event(ui, &pointer);
+    pointer.down = false;
+    nk_ui_push_event(ui, &pointer);
+    g_flow_width = scale.logical_w;
+    g_flow_height = scale.logical_h;
+    nk_ui_begin(ui, 0.0);
+    action = draw_flow_case(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS);
+    (void)end_frame(ui);
+    g_flow_width = 1280.0f;
+    g_flow_height = 800.0f;
+    return action;
+}
+
+/* Review of #2832 at 5c7468852: a row the list cuts is drawn blank, and a click on the strip
+   of it that shows at the list's edge opens nothing (the player has not seen the server it
+   names); the press focuses the row, which comes into view whole, and a click on it then opens
+   it. Failing-before: the click on the blank strip opened that server's card. Also: with no
+   list naming the server in use (typed in, or from PPSSPP's list while it is not loaded), the
+   own row and the Online play page call it "Other server", with Current alone marking it in use. */
+static void test_online_play_picker_cut_row_click(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
+    const int saved = g_flow_text_size_pct;
+    g_flow_text_size_pct = 150;
+    for (size_t z = 0u; z < sizeof(sizes) / sizeof(sizes[0]); ++z) {
+        const int w = sizes[z].w;
+        const int h = sizes[z].h;
+        NkUi *ui = NULL;
+        NkUiId controls[9];
+        size_t control_count = 0u;
+        NkUiId hit = 0u;
+        NkUiRect view;
+        NkUiRect rect;
+        NkUiScrollState state;
+        PlayerUiAction first;
+        PlayerUiAction second;
+        char message[200];
+        bool shown = false;
+        (void)flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h, &ui);
+        for (NkUiId i = 0u; i < 7u; ++i) {
+            controls[control_count++] = PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + i;
+            if (i == 4u) {
+                controls[control_count++] = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER;
+                controls[control_count++] = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT;
+            }
+        }
+        if (ui == NULL) {
+            CHECK(false, "lay out the picker for the cut-row click");
+            continue;
+        }
+        /* Scrolled a little at a time, focus on Back, until the list's foot cuts a control
+           with at least 3 px of it showing. */
+        nk_ui_focus(ui, PLAYER_UI_ID_SETTINGS_BACK);
+        for (float at = 0.0f; hit == 0u && nk_ui_scroll_state(ui, ONLINE_PLAY_TEST_LIST, &state) &&
+                              at <= state.max_offset + 0.5f;
+             at += 3.0f) {
+            nk_ui_scroll_to(ui, ONLINE_PLAY_TEST_LIST, at);
+            for (int f = 0; f < 2; ++f) {
+                (void)flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+            }
+            if (!nk_ui_element_rect(ui, ONLINE_PLAY_TEST_LIST, &view)) break;
+            for (size_t c = 0u; hit == 0u && c < control_count; ++c) {
+                if (nk_ui_element_rect(ui, controls[c], &rect) &&
+                    rect.y < view.y + view.h - 3.0f && rect.y + rect.h > view.y + view.h + 0.5f) {
+                    hit = controls[c];
+                }
+            }
+        }
+        (void)snprintf(message, sizeof(message),
+                       "at %d x %d with 150%% text the list's foot cuts a row (the case the "
+                       "click needs)", w, h);
+        CHECK(hit != 0u, message);
+        if (hit != 0u) {
+            first = online_play_picker_click(ui, rect.x + 0.5f * rect.w,
+                                             0.5f * (rect.y + view.y + view.h), w, h);
+            (void)snprintf(message, sizeof(message),
+                           "at %d x %d a click on the cut strip of %08X at the list's foot opens "
+                           "nothing", w, h, (unsigned)hit);
+            CHECK(first.kind == PLAYER_UI_ACTION_NONE, message);
+            for (int f = 0; f < 3; ++f) {
+                (void)flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+            }
+            shown = nk_ui_focused(ui) == hit && nk_ui_element_rect(ui, hit, &rect) &&
+                    nk_ui_element_rect(ui, ONLINE_PLAY_TEST_LIST, &view) &&
+                    rect_inside(rect, view);
+            (void)snprintf(message, sizeof(message),
+                           "at %d x %d that click focuses the row and brings it into view whole",
+                           w, h);
+            CHECK(shown, message);
+            if (shown) {
+                second = online_play_picker_click(ui, rect.x + 0.5f * rect.w,
+                                                  rect.y + 0.5f * rect.h, w, h);
+                (void)snprintf(message, sizeof(message),
+                               "at %d x %d a click on the row, now in view, opens it", w, h);
+                CHECK(second.kind != PLAYER_UI_ACTION_NONE, message);
+            }
+        }
+        nk_ui_destroy(ui);
+    }
+    g_flow_text_size_pct = 100;
+    g_online_play_host = "relay-gone.example.invalid";
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 1280, 720, dump, sizeof(dump)) &&
+              strstr(dump, "Other server") != NULL &&
+              strstr(dump, "relay-gone.example.invalid") != NULL &&
+              strstr(dump, "Server in use") == NULL && strstr(dump, "Your own server") == NULL,
+          "a server in use that no list names is on the own row, \"Other server\"");
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY, 1280, 720, dump, sizeof(dump)) &&
+              strstr(dump, "Other server. Choose to pick another.") != NULL &&
+              strstr(dump, "A community server: Nakagawa does not run it") == NULL &&
+              strstr(dump, "Server in use") == NULL && strstr(dump, "Your own server") == NULL,
+          "the Online play page names a server no list names \"Other server\"");
+    /* Empty, the own row is "Other server" too. */
+    CHECK(dump_flow_case(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, dump, sizeof(dump)) &&
+              strstr(dump, "Other server") != NULL && strstr(dump, "Your own server") == NULL,
+          "the empty own row is \"Other server\"");
+    g_online_play_host = NULL;
+    g_flow_text_size_pct = saved;
+}
+
+/* The text drawn for element `id` with its line breaks taken out, in `out`; false where none is
+   drawn. */
+static bool draw_text_of(const NkUiDrawList *draw, NkUiId id, char *out, size_t cap) {
+    size_t n = 0u;
+    bool found = false;
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiTextRun *run = draw->cmd[i].kind == NK_UI_DRAW_TEXT
+                                     ? (const NkUiTextRun *)draw->cmd[i].custom : NULL;
+        if (run == NULL || run->text == NULL || draw->cmd[i].element_id != id) continue;
+        /* A wrapped text is drawn one run per line. */
+        for (size_t at = 0u; at < run->length && n + 1u < cap; ++at) {
+            if (run->text[at] != '\n') out[n++] = run->text[at];
+        }
+        found = true;
+    }
+    if (cap > 0u) out[n] = '\0';
+    return found;
+}
+
+/* The text run drawn whose text starts with `prefix`; NULL where none is. */
+static const NkUiDrawCmd *draw_run_starting(const NkUiDrawList *draw, const char *prefix) {
+    const size_t length = strlen(prefix);
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiTextRun *run = draw->cmd[i].kind == NK_UI_DRAW_TEXT
+                                     ? (const NkUiTextRun *)draw->cmd[i].custom : NULL;
+        if (run != NULL && run->text != NULL && run->length >= length &&
+            memcmp(run->text, prefix, length) == 0) {
+            return &draw->cmd[i];
+        }
+    }
+    return NULL;
+}
+
+/* #1139, the owner's look note of 2026-11-20 ("text at bottom looks a little too close to
+   each other"): PPSSPP's list's heading keeps the launcher's gap between blocks (16 px) under
+   the last row above it (the Other server row and its Port offset) and the heading-to-text gap
+   (8 px) above its status line, at 960 x 540 and 1280 x 720, 100%, 125% and 150% text, the
+   list downloaded and its shipped copy. The list is scrolled so the three show; the gaps are
+   read from what is drawn, in the window's pixels. */
+/* Settings > Online and developer after the RetroAchievements merge (owner look notes of
+   2026-11-20): a switch that is on is outlined in the accent, never filled like the focused
+   primary action; Online play's button names its server in parentheses, and a host too wide
+   for the button goes whole into the row's sentence (no ellipsis); RetroAchievements'
+   "stays off" warning shows only while it is off. */
+static void test_online_page_on_state_and_lead(void) {
+    static const char k_long_host[] =
+        "weekend-league-relay-for-players-who-meet-every-friday-and-sund."
+        "the-longest-host-name-this-player-accepts-for-own-serve.example";
+    static const char k_warning[] =
+        "RetroAchievements stays off until you turn it on and agree to what is sent.";
+    for (int pass = 0; pass < 2; ++pass) {
+        NkUiConfig config;
+        NkUiTextBackend text = screen_test_text_backend();
+        PlayerUiSettingsModel model;
+        const NkUiDrawList *draw = NULL;
+        char value[256];
+        static char dump[262144];
+        const bool long_host = pass == 1;
+        memset(&config, 0, sizeof(config));
+        config.host = NK_UI_HOST_LAUNCHER;
+        config.text = &text;
+        NkUi *ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create UI for the Online and developer on-state checks");
+        if (ui == NULL) return;
+        set_test_viewport(ui, 1280, 720);
+        set_still_prefs(ui, nk_ui_prompt_style(ui));
+        memset(&model, 0, sizeof(model));
+        model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE;
+        model.nickname = "Player";
+        model.online_play = true;
+        model.online_play_server = long_host ? k_long_host : "socom.cc";
+        (void)snprintf(value, sizeof value, "On (%s)", model.online_play_server);
+        model.online_play_row_value = value;
+        model.download_cover_art = true;
+        model.achievements_available = true;
+        model.achievements_enabled = long_host;
+        model.logical_width = 1280.0f;
+        model.logical_height = 720.0f;
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_settings(ui, &model);
+            draw = nk_ui_end(ui);
+        }
+        CHECK(draw != NULL && nk_ui_dump(ui, dump, sizeof(dump)) > 0u, "Online page dumps");
+        if (!long_host) {
+            CHECK(strstr(dump, "\"ONLINE PLAY: ON (SOCOM.CC)\"") != NULL &&
+                      strstr(dump, "ON: SOCOM") == NULL,
+                  "Online play's button names its server in parentheses, one colon");
+            CHECK(dump_says(dump, k_warning), "the RetroAchievements warning shows while it is off");
+        } else {
+            CHECK(strstr(dump, "\"ONLINE PLAY: ON\"") != NULL,
+                  "a host too wide for the button leaves it reading ONLINE PLAY: ON");
+            {
+                /* The sentence breaks inside the host only at line ends: the dump's quoted
+                   lines, joined without their spaces, read the host whole. */
+                static char joined[sizeof(dump)];
+                size_t used = 0u;
+                bool quoted = false;
+                for (const char *at = dump; *at != '\0' && used + 1u < sizeof(joined); ++at) {
+                    if (*at == '"') quoted = !quoted;
+                    else if (*at == '\n') quoted = false;
+                    else if (quoted && *at != ' ') joined[used++] = *at;
+                }
+                joined[used] = '\0';
+                CHECK(strstr(joined, k_long_host) != NULL &&
+                          strstr(dump, "\xE2\x80\xA6") == NULL,
+                      "that host shows whole in the row's sentence, and nothing ends in an "
+                      "ellipsis");
+            }
+            CHECK(!dump_says(dump, k_warning),
+                  "the RetroAchievements warning is gone once it is on");
+        }
+        {
+            const uint32_t accent = nk_ui_theme(ui)->accent_dark;
+            bool filled = false, outlined = false;
+            for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+                const NkUiDrawCmd *cmd = &draw->cmd[i];
+                if (cmd->element_id != PLAYER_UI_ID_SETTINGS_COVER_ART) continue;
+                if (cmd->kind == NK_UI_DRAW_RECTANGLE && cmd->rgba_pm == accent) filled = true;
+                if (cmd->kind == NK_UI_DRAW_BORDER && cmd->rgba_pm == accent) outlined = true;
+            }
+            CHECK(!filled && outlined,
+                  "a switch that is on is outlined in the accent, not filled like the focus");
+        }
+        nk_ui_destroy(ui);
+    }
+}
+
+static void test_online_play_list_heading_gaps(void) {
+    static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
+    static const int text_sizes[] = {100, 125, 150};
+    const NkUiId own_line = NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E8u);
+    const NkUiId heading_box = NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001000u + 0x7E4u + 2u);
+    const int saved = g_flow_text_size_pct;
+    for (int shipped = 0; shipped < 2; ++shipped) {
+        g_online_play_list_shipped = shipped != 0;
+        for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+            g_flow_text_size_pct = text_sizes[t];
+            for (size_t z = 0u; z < sizeof(sizes) / sizeof(sizes[0]); ++z) {
+                const int w = sizes[z].w;
+                const int h = sizes[z].h;
+                NkUi *ui = NULL;
+                const NkUiDrawList *draw =
+                    flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h, &ui);
+                const NkUiDrawCmd *list = NULL;
+                const NkUiDrawCmd *heading;
+                const NkUiDrawCmd *status;
+                NkUiScrollState state;
+                NkUiRect view;
+                NkUiRect line;
+                float scale = 0.0f;
+                float above = -1.0f;
+                float below = -1.0f;
+                char message[240];
+                if (draw != NULL && ui != NULL) {
+                    set_still_prefs(ui, nk_ui_prompt_style(ui));
+                    nk_ui_focus(ui, PLAYER_UI_ID_SETTINGS_BACK);
+                    draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                    /* Scroll so the heading is at the top of the list (the row above may
+                       then be drawn blank; its place is what counts). */
+                    if (nk_ui_scroll_state(ui, ONLINE_PLAY_TEST_LIST, &state) &&
+                        nk_ui_element_rect(ui, ONLINE_PLAY_TEST_LIST, &view) &&
+                        nk_ui_element_rect(ui, heading_box, &line)) {
+                        nk_ui_scroll_to(ui, ONLINE_PLAY_TEST_LIST,
+                                        state.offset + line.y - view.y - 8.0f);
+                        for (int f = 0; f < 3; ++f) {
+                            draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                        }
+                    }
+                }
+                for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+                    if (draw->cmd[i].kind == NK_UI_DRAW_SCISSOR_START &&
+                        draw->cmd[i].element_id == ONLINE_PLAY_TEST_LIST) {
+                        list = &draw->cmd[i];
+                    }
+                }
+                heading = draw_run_starting(draw, "PPSSPP'S LIST");
+                status = draw_run_starting(draw, shipped ? "Live list unavailable"
+                                                         : "Downloaded now");
+                if (list != NULL && heading != NULL && status != NULL && ui != NULL &&
+                    nk_ui_element_rect(ui, ONLINE_PLAY_TEST_LIST, &view) &&
+                    nk_ui_element_rect(ui, own_line, &line) && view.w > 0.0f &&
+                    command_shows(heading) && command_shows(status)) {
+                    /* Window pixels per layout pixel, from the list's own scissor. */
+                    scale = (float)(list->bounds[2] - list->bounds[0]) / view.w;
+                    above = (float)heading->bounds[1] -
+                            ((float)list->bounds[1] + (line.y + line.h - view.y) * scale);
+                    below = (float)(status->bounds[1] - heading->bounds[3]);
+                }
+                (void)snprintf(message, sizeof(message),
+                               "at %d x %d, %d%% text, PPSSPP's list %s: its heading is at "
+                               "least 16 px under the last row (%.1f) and its status at least "
+                               "8 px under it (%.1f), in layout px",
+                               w, h, text_sizes[t], shipped ? "shipped" : "downloaded",
+                               scale > 0.0f ? (double)(above / scale) : -1.0,
+                               scale > 0.0f ? (double)(below / scale) : -1.0);
+                CHECK(scale > 0.0f && above >= (16.0f - 1.0f) * scale &&
+                          below >= (8.0f - 1.0f) * scale,
+                      message);
+                if (ui != NULL) nk_ui_destroy(ui);
+            }
+        }
+    }
+    g_online_play_list_shipped = false;
+    g_flow_text_size_pct = saved;
+}
+
+/* #1139, review of 2026-11-20 ("is it tested how custom servers are shown?"). A server the
+   player typed, in each form the player accepts (host; host:lobby_port;
+   host:lobby_port,data_port; an IPv4 literal; the longest host, 127 bytes), shows on the own
+   row with the host exactly as typed (a host too wide for the row wraps whole, never an
+   ellipsis), the row and Port offset whole in the list and inside the window, and Current on
+   it, at 960 x 540 and 1280 x 720 with 100% and 150% text. A typed server equal to a shipped
+   or listed host marks that row and is not shown a second time on the own row. The card for
+   a typed server names the host and both ports a game connects to, and a refused Done in the
+   server editor says why. */
+static void test_online_play_own_server_shown(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const char *const forms[] = {
+        "relay.example.org", "relay.example.org:40000", "relay.example.org:40000,40001",
+        "192.0.2.10",
+        ("weekend-league-relay-for-players-who-meet-every-friday-and-sund."
+         "the-longest-host-name-this-player-accepts-for-own-serve.example")};
+    static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
+    static const int text_sizes[] = {100, 150};
+    const NkUiId own = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER;
+    const int saved = g_flow_text_size_pct;
+    CHECK(strlen(forms[4]) == 127u, "the longest example host is 127 bytes, the field's most");
+    for (size_t f = 0u; f < sizeof(forms) / sizeof(forms[0]); ++f) {
+        g_online_play_host = forms[f];
+        for (size_t t = 0u; t < 2u; ++t) {
+            g_flow_text_size_pct = text_sizes[t];
+            for (size_t z = 0u; z < 2u; ++z) {
+                const int w = sizes[z].w;
+                const int h = sizes[z].h;
+                NkUi *ui = NULL;
+                const NkUiDrawList *draw =
+                    flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h, &ui);
+                NkUiScrollState state;
+                NkUiRect view;
+                NkUiRect row;
+                NkUiRect port;
+                NkUiRect pill;
+                char shown[160];
+                char message[240];
+                bool ok = draw != NULL && ui != NULL;
+                NkUiId scroller = ONLINE_PLAY_TEST_LIST;
+                if (ok) {
+                    nk_ui_focus(ui, own);
+                    for (int i = 0; i < 3; ++i) {
+                        draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, w, h);
+                    }
+                    if (!nk_ui_scroll_state(ui, scroller, &state) || state.max_offset <= 0.5f) {
+                        scroller = FLOW_ID_CARD;
+                    }
+                    ok = nk_ui_element_rect(ui, scroller, &view) &&
+                         nk_ui_element_rect(ui, own, &row) && rect_inside(row, view) &&
+                         nk_ui_element_rect(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT, &port) &&
+                         port.x >= view.x - 0.5f && port.x + port.w <= view.x + view.w + 0.5f &&
+                         draw_text_of(draw, nk_ui_child_id(own, 3u), shown, sizeof(shown)) &&
+                         strcmp(shown, forms[f]) == 0 &&
+                         nk_ui_element_rect(ui, nk_ui_child_id(own, 6u), &pill) &&
+                         rect_inside(pill, row) && !draw_cuts_a_line(draw);
+                    for (uint32_t i = 0u; ok && i < draw->ncmd; ++i) {
+                        const NkUiTextRun *run =
+                            draw->cmd[i].kind == NK_UI_DRAW_TEXT
+                                ? (const NkUiTextRun *)draw->cmd[i].custom : NULL;
+                        ok = run == NULL || !run_ends_in_ellipsis(run);
+                    }
+                }
+                (void)snprintf(message, sizeof(message),
+                               "own server form %zu at %d x %d, %d%% text: the own row shows the "
+                               "host as typed, whole, with Current, and it and Port offset sit "
+                               "whole in the list", f, w, h, text_sizes[t]);
+                CHECK(ok, message);
+                if (ui != NULL) nk_ui_destroy(ui);
+            }
+        }
+    }
+    g_flow_text_size_pct = 100;
+    {
+        /* A typed server equal to a shipped host, then to a listed one: that row is Current,
+           and the own row shows what to type, not the host a second time. */
+        static const struct { const char *host; NkUiId row; } same[] = {
+            {"relay-usa.arenaanywhere.site", PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 2u},
+            {"relay.example.invalid", PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 5u}};
+        for (size_t s = 0u; s < 2u; ++s) {
+            NkUi *ui = NULL;
+            const NkUiDrawList *draw;
+            NkUiRect pill;
+            char shown[160];
+            bool ok;
+            g_online_play_host = same[s].host;
+            draw = flow_case_layout(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 1280, 720, &ui);
+            ok = draw != NULL && ui != NULL &&
+                 draw_text_of(draw, nk_ui_child_id(own, 3u), shown, sizeof(shown)) &&
+                 strcmp(shown, "host[:lobby_port[,data_port]]") == 0 &&
+                 !nk_ui_element_rect(ui, nk_ui_child_id(own, 6u), &pill);
+            if (ok) {
+                nk_ui_focus(ui, same[s].row);
+                for (int i = 0; i < 3; ++i) {
+                    draw = flow_case_redraw(ui, FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 1280, 720);
+                }
+                ok = nk_ui_element_rect(ui, nk_ui_child_id(same[s].row, 6u), &pill) &&
+                     draw_text_of(draw, nk_ui_child_id(own, 3u), shown, sizeof(shown)) &&
+                     strcmp(shown, "host[:lobby_port[,data_port]]") == 0;
+            }
+            CHECK(ok, s == 0u ? "a typed server equal to a shipped host marks that row Current "
+                                "and is not shown again on the own row"
+                              : "a typed server equal to a listed host marks that row Current "
+                                "and is not shown again on the own row");
+            if (ui != NULL) nk_ui_destroy(ui);
+        }
+    }
+    /* The card for a typed server names the host and both ports a game connects to. */
+    g_online_play_host = "relay.example.org:40000,40001";
+    g_online_play_card_host = "relay.example.org";
+    g_online_play_card_ports[0] = 40000u;
+    g_online_play_card_ports[1] = 40001u;
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_CARD, 1280, 720, dump, sizeof(dump)) &&
+              dump_says(dump, "Nakagawa connects to relay.example.org on ports 40000 and 40001."),
+          "the card for a typed server names its host and both ports");
+    g_online_play_card_host = NULL;
+    g_online_play_card_ports[0] = g_online_play_card_ports[1] = 0u;
+    g_online_play_host = NULL;
+    /* PPSSPP's list says once, in its heading, where it came from; no row carries a chip
+       that says it again, nor Built in. */
+    CHECK(dump_flow_case(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, dump, sizeof(dump)) &&
+              strstr(dump, "PPSSPP'S LIST") != NULL && strstr(dump, "SHIPPED COPY") == NULL &&
+              strstr(dump, "FROM THE") == NULL && strstr(dump, "BUILT IN") == NULL,
+          "the picker's downloaded list is named once in its heading, and no row has a chip "
+          "but Current");
+    g_online_play_list_shipped = true;
+    CHECK(dump_flow_case(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, dump, sizeof(dump)) &&
+              strstr(dump, "PPSSPP'S LIST (SHIPPED COPY)") != NULL &&
+              strstr(dump, "FROM THE") == NULL,
+          "the shipped copy of PPSSPP's list says so once, in its heading");
+    g_online_play_list_shipped = false;
+    /* A refused Done in the server editor says why, by name. */
+    g_server_refused_reason = "it has a path (a '/'): enter the host only";
+    CHECK(dump_flow_case(FLOW_NICKNAME_REFUSED, dump, sizeof(dump)) &&
+              strstr(dump, "Not used: it has a path") != NULL,
+          "the server editor's refused Done names the reason");
+    g_server_refused_reason = NULL;
+    g_flow_text_size_pct = saved;
+}
+
+/* #1139: in the Online play server picker and on the consent card nothing is cut, at the
+   960 x 540 minimum and at 1280 x 720, at every text size: no run ends in an ellipsis, scrolled
+   through to the end (flow_case_text_whole), and the picker shows every server's whole name and
+   whole host, the longest shipped ones among them. */
+static void test_online_play_text_is_never_cut(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
+    static const int text_sizes[] = {100, 125, 150};
+    static const FlowCase pages[] = {FLOW_SETTINGS_ONLINE_PLAY_SERVERS,
+                                     FLOW_SETTINGS_ONLINE_PLAY_CARD};
+    int saved = g_flow_text_size_pct;
+    for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+        g_flow_text_size_pct = text_sizes[t];
+        for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+            for (size_t p = 0u; p < sizeof(pages) / sizeof(pages[0]); ++p) {
+                char message[160];
+                (void)snprintf(message, sizeof(message),
+                               "the Online play %s cuts no text at %d x %d, %d%% text",
+                               p == 0u ? "server picker" : "card", sizes[s].w, sizes[s].h,
+                               text_sizes[t]);
+                CHECK(flow_case_text_whole(pages[p], sizes[s].w, sizes[s].h,
+                                           p == 0u ? ONLINE_PLAY_TEST_LIST : FLOW_ID_CARD, NULL,
+                                           0u),
+                      message);
+            }
+        }
+    }
+    {
+        /* Scrolled through, each whole name and whole host shows (no run ends in an ellipsis:
+           flow_case_text_whole fails on one). */
+        static const char *const names[] = {"Socom Adhoc Server (France)", "socom.cc",
+                                            "Africa)",
+                                            "relay-sa.arenaanywhere.site",
+                                            "relay-asia.arenaanywhere.site",
+                                            "relay-long.example.invalid",
+                                            "Other server", "PORT OFFSET: 10000"};
+        g_flow_text_size_pct = 150;
+        CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540, dump, sizeof(dump)) &&
+                  strstr(dump, "\xE2\x80\xA6") == NULL &&
+                  flow_case_text_whole(FLOW_SETTINGS_ONLINE_PLAY_SERVERS, 960, 540,
+                                       ONLINE_PLAY_TEST_LIST, names,
+                                       sizeof(names) / sizeof(names[0])),
+              "at 960 x 540 with 150% text no label in the picker is elided: every server's "
+              "whole name and whole host, and the own server's row with its Port offset");
+        g_flow_text_size_pct = saved;
+    }
+    {
+        /* A player's own server can be a long host with both ports: on the Online play page
+           the button then reads SERVER: CHOOSE and the host leads its sentence, and the card
+           names it in its first line; neither cuts it, nor runs past the window. */
+        static const char *const ends[] = {"my-own-relay-for-the-weekend-league", "27313"};
+        static const FlowCase host_pages[] = {FLOW_SETTINGS_ONLINE_PLAY,
+                                              FLOW_SETTINGS_ONLINE_PLAY_CARD};
+        g_online_play_host =
+            "my-own-relay-for-the-weekend-league.players-of-this-game.example.invalid:27312,27313";
+        for (size_t t = 0u; t < 2u; ++t) {
+            g_flow_text_size_pct = t == 0u ? 100 : 150;
+            for (size_t z = 0u; z < sizeof(sizes) / sizeof(sizes[0]); ++z) {
+                for (size_t p = 0u; p < 2u; ++p) {
+                    char message[160];
+                    (void)snprintf(message, sizeof(message),
+                                   "the Online play %s shows a long own host whole at %d x %d, "
+                                   "%d%% text",
+                                   p == 0u ? "page" : "card", sizes[z].w, sizes[z].h,
+                                   g_flow_text_size_pct);
+                    CHECK(flow_case_fits(host_pages[p], sizes[z].w, sizes[z].h, NULL, 0u) &&
+                              flow_case_text_whole(host_pages[p], sizes[z].w, sizes[z].h,
+                                                   FLOW_ID_CARD, ends, 2u),
+                          message);
+                }
+            }
+        }
+        g_flow_text_size_pct = 150;
+        CHECK(flow_case_text_whole(FLOW_SETTINGS_ONLINE_PLAY, 960, 540, FLOW_ID_CARD,
+                                   (const char *const[]){"SERVER: CHOOSE"}, 1u),
+              "a host too long for the Server button reads SERVER: CHOOSE");
+        g_online_play_host = NULL;
+        g_flow_text_size_pct = saved;
+    }
+    {
+        /* The card names the list host the picker downloads from, says the room name is sent,
+           and that a nickname a game saved goes in place of the setting's (review of #2832,
+           2026-11-20), whole at the minimum window with Larger text and at 1280 x 720. */
+        static const char *const told[] = {"metadata.ppsspp.org", "- The name of the room",
+                                           "instead."};
+        static const struct { int w; int h; int pct; } at[] = {{960, 540, 150},
+                                                               {1280, 720, 100}};
+        for (size_t i = 0u; i < sizeof(at) / sizeof(at[0]); ++i) {
+            char message[160];
+            g_flow_text_size_pct = at[i].pct;
+            (void)snprintf(message, sizeof(message),
+                           "the Online play card names the list host, the room name and whose "
+                           "nickname is sent, whole at %d x %d, %d%% text",
+                           at[i].w, at[i].h, at[i].pct);
+            CHECK(flow_case_text_whole(FLOW_SETTINGS_ONLINE_PLAY_CARD, at[i].w, at[i].h,
+                                       FLOW_ID_CARD, told, sizeof(told) / sizeof(told[0])),
+                  message);
+        }
+        g_flow_text_size_pct = saved;
+    }
+    CHECK(online_play_console_button_stays_in_view(),
+          "the notice NEW CONSOLE ID leaves does not push the focused button past the card's "
+          "edge at 960 x 540 with 150% text");
+    CHECK(online_play_picker_row_reveals(),
+          "focus moving to a picker row below the list's edge shows the row whole: its name, "
+          "its host and where it comes from");
+    CHECK(online_play_card_reads(960, 540, 150, true),
+          "Page Up (keyboard) and the left trigger (pad) scroll the Online play card at 960 x "
+          "540 with 150% text back to its first lines and the server's name");
+}
+
 static void test_game_page_text_is_never_cut(void) {
     static const struct { int w; int h; } sizes[] = {{960, 540}, {960, 544}};
     static const int text_sizes[] = {100, 125, 150};
@@ -6932,6 +8202,9 @@ static void test_game_page_text_is_never_cut(void) {
         {FLOW_SETTINGS_ACCESSIBILITY, NULL, 0u, "Settings > Accessibility", 125},
         {FLOW_SETTINGS_BUILD_CACHE, NULL, 0u, "Settings > Build tools", 125},
         {FLOW_SETTINGS_ONLINE, NULL, 0u, "Settings > Online", 125},
+        {FLOW_SETTINGS_ONLINE_PLAY, NULL, 0u, "Settings > Online play", 125},
+        {FLOW_SETTINGS_ONLINE_PLAY_CARD, NULL, 0u, "the Online play card", 125},
+        {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, NULL, 0u, "the Online play server picker", 125},
         {FLOW_SETTINGS_ONLINE_ON, NULL, 0u, "Settings > Online with Online mode on", 125},
         {FLOW_SETTINGS_ONLINE_DISCORD_ON, NULL, 0u, "Settings > Online with Discord status on",
          125},
@@ -7929,6 +9202,12 @@ static int capture_screens(const char *directory) {
             {FLOW_DISC_UNSUPPORTED, "disc-unsupported", PLAYER_UI_ID_DISC_PRIMARY},
             {FLOW_SETTINGS, "settings", PLAYER_UI_ID_SETTINGS_RESOLUTION},
             {FLOW_SETTINGS_ONLINE, "settings-online", PLAYER_UI_ID_SETTINGS_DEVELOPER},
+            {FLOW_SETTINGS_ONLINE_PLAY, "settings-online-play",
+             PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE},
+            {FLOW_SETTINGS_ONLINE_PLAY_CARD, "settings-online-play-card",
+             PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW},
+            {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, "settings-online-play-servers",
+             PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE},
             {FLOW_SETTINGS_NOTICES, "settings-notices", PLAYER_UI_ID_SETTINGS_BACK},
             {FLOW_SETTINGS_REMOVE, "settings-remove-tools", PLAYER_UI_ID_SETTINGS_BACK},
             {FLOW_SETTINGS_BUILD_CACHE, "settings-build-cache",
@@ -10480,6 +11759,12 @@ int main(int argc, char **argv) {
     test_enhanced_panel_fits_its_content();
     test_prompt_bar_stays_whole();
     test_game_page_text_is_never_cut();
+    test_online_play_text_is_never_cut();
+    test_online_play_picker_rows();
+    test_online_play_picker_cut_row_click();
+    test_online_play_own_server_shown();
+    test_online_play_list_heading_gaps();
+    test_online_page_on_state_and_lead();
     test_psp_fonts_page();
     test_wizard_actions();
     test_flow_dumps_fail_closed();
