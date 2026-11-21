@@ -2116,6 +2116,77 @@ static void test_iso_inspect_root_extent_matches_reader(const char *test_dir) {
     fflush(stdout);
 }
 
+/* Audit 2026-11-17 (F-074a12a4): nk_iso_inspect finds PSP_GAME and PARAM.SFO by
+ * the reader's name rules (case-insensitive, without a ';' version, one trailing
+ * separator '.' dropped), so a disc the reader, the stager and the Python inspect
+ * accept is not reported here as one without PSP_GAME. */
+static void test_iso_inspect_uses_reader_name_rules(const char *test_dir) {
+    printf("[HOSTILE_TEST] Testing nk_iso_inspect name rules...\n");
+    fflush(stdout);
+    const char sep = nk_platform_path_separator();
+    uint8_t sfo[256];
+    size_t sfo_size = build_sfo_test(sfo, sizeof(sfo), "TEST00001", "Name Rules");
+    assert(sfo_size > 0);
+    static const struct {
+        const char *tag;
+        const char *game;
+        const char *param;
+    } cases[] = {
+        { "lower", "psp_game", "param.sfo;1" },
+        { "mixed", "Psp_Game", "Param.Sfo" },
+        { "dot", "PSP_GAME.", "PARAM.SFO.;1" },
+    };
+    const size_t image_size = 20u * WALK_SECTOR_SIZE;
+    char path[700];
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        uint8_t *image = (uint8_t *)calloc(20u, WALK_SECTOR_SIZE);
+        assert(image != NULL);
+        uint8_t *pvd = WALK_SECTOR(image, 16);
+        pvd[0] = 0x01;
+        memcpy(pvd + 1, "CD001", 5);
+        pvd[6] = 0x01;
+        write_dir_record(pvd, 156, "\0", 1, 17, WALK_SECTOR_SIZE, true);
+        size_t off = walk_dot_records(WALK_SECTOR(image, 17), 17, 17);
+        append_iso_record_test(WALK_SECTOR(image, 17), off, (const uint8_t *)cases[i].game,
+                               (uint8_t)strlen(cases[i].game), 18, WALK_SECTOR_SIZE, true);
+        off = walk_dot_records(WALK_SECTOR(image, 18), 18, 17);
+        append_iso_record_test(WALK_SECTOR(image, 18), off, (const uint8_t *)cases[i].param,
+                               (uint8_t)strlen(cases[i].param), 19, (uint32_t)sfo_size, false);
+        memcpy(WALK_SECTOR(image, 19), sfo, sfo_size);
+        snprintf(path, sizeof(path), "%s%cname_rules_%s.iso", test_dir, sep, cases[i].tag);
+        write_test_file(path, image, image_size);
+        free(image);
+
+        NkIsoMetadata meta;
+        memset(&meta, 0, sizeof(meta));
+        NkResult result = nk_iso_inspect(path, &meta);
+        if (result != NK_OK || !meta.has_psp_game_folder || !meta.param_sfo_parsed ||
+            strcmp(meta.disc_id, "TEST00001") != 0) {
+            fprintf(stderr, "[HOSTILE_TEST] name rule case %s: result %d, PSP_GAME %d, "
+                    "PARAM.SFO parsed %d, disc id '%s'\n", cases[i].tag, (int)result,
+                    meta.has_psp_game_folder ? 1 : 0, meta.param_sfo_parsed ? 1 : 0,
+                    meta.disc_id);
+        }
+        assert(result == NK_OK);
+        assert(meta.has_psp_game_folder);
+        assert(meta.param_sfo_parsed);
+        assert(strcmp(meta.disc_id, "TEST00001") == 0);
+        assert(strcmp(meta.title_name, "Name Rules") == 0);
+
+        /* The reader resolves the same names to the same record. */
+        NkIsoReader *reader = nk_iso_reader_open(path);
+        assert(reader != NULL);
+        uint32_t lba = 0, size = 0;
+        bool is_dir = true;
+        assert(nk_iso_reader_lookup(reader, "PSP_GAME/PARAM.SFO", &lba, &size, &is_dir) == 0);
+        assert(lba == 19u && size == (uint32_t)sfo_size && !is_dir);
+        nk_iso_reader_close(reader);
+        remove(path);
+    }
+    printf("[HOSTILE_TEST] nk_iso_inspect name rules PASSED!\n");
+    fflush(stdout);
+}
+
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -3366,6 +3437,7 @@ int main(void) {
     test_iso_walk_module_tree(hostile_dir);
     test_iso_reader_paths_and_damaged_records(hostile_dir);
     test_iso_inspect_root_extent_matches_reader(hostile_dir);
+    test_iso_inspect_uses_reader_name_rules(hostile_dir);
     test_iso_stage_refuses_device_names(hostile_dir);
     test_iso_stage_keeps_semicolon_names(hostile_dir);
     test_iso_stage_collisions_by_content(hostile_dir);

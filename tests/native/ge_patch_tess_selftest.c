@@ -29,7 +29,8 @@
 //   alloc       a patch draw whose control-point copy, u weights or vertex rows cannot be
 //               allocated draws nothing and is counted (ge_patch_alloc_failures), not dropped
 //               silently; the same draw with the allocations served draws. The link wraps
-//               malloc (mk/selftests.mk) so one chosen call fails.
+//               malloc (mk/selftests.mk) so one chosen call fails; where the linker has no
+//               -Wl,--wrap=malloc (Apple's ld64, MSVC's linker) the case prints a named SKIP.
 //   exit        the run's end prints PATCH_TESS: exit with the quads drawn and the capped draws.
 
 #include "recomp.h"
@@ -50,8 +51,10 @@
 
 extern uint32_t ge_run_list(uint32_t addr, int resume);
 
-/* The link wraps malloc (-Wl,--wrap=malloc): the call s_malloc_fail_at counts down to returns
- * NULL, once; -1 fails none. */
+/* The failing-allocator case wraps malloc (-Wl,--wrap=malloc, Make's GE_PATCH_TESS_WRAP_MALLOC):
+ * the call s_malloc_fail_at counts down to returns NULL, once; -1 fails none. Apple's ld64 and
+ * MSVC's linker have no --wrap, so a build without NK_TEST_WRAP_MALLOC prints a named SKIP. */
+#if defined(NK_TEST_WRAP_MALLOC)
 void *__real_malloc(size_t size);
 void *__wrap_malloc(size_t size);
 static int s_malloc_fail_at = -1;
@@ -59,6 +62,7 @@ void *__wrap_malloc(size_t size) {
     if (s_malloc_fail_at >= 0 && s_malloc_fail_at-- == 0) return NULL;
     return __real_malloc(size);
 }
+#endif
 
 /* ---- Runtime state at its disabled values, and entry points that must stay cold ---- */
 
@@ -496,7 +500,13 @@ int main(void) {
 
     /* alloc: draw_patch allocates the control points, then the u weights and the vertex rows.
      * Each failing in turn draws nothing and is counted, and adds no quads; served, the same
-     * draw draws. Before, the draw returned with no count and no note. */
+     * draw draws. Before, the draw returned with no count and no note. The failures need the
+     * link's malloc wrap; without it the case is skipped by name, never passed silently. */
+#if !defined(NK_TEST_WRAP_MALLOC)
+    printf("ge patch tess selftest: SKIP %-10s built without NK_TEST_WRAP_MALLOC (a linker with "
+           "-Wl,--wrap=malloc): the control-point, u-weight and vertex-row failures are not "
+           "exercised\n", "alloc");
+#else
     {
         static const char *const names[] = { "control points", "u weights", "vertex rows" };
         ge_patch_tess_set(1);
@@ -530,6 +540,7 @@ int main(void) {
                  "allocated draws nothing and is counted, and the served draw draws%s", detail);
         check(ok, "alloc", what);
     }
+#endif
 
     /* exit: the end-of-run report. The settings cell turned the feature on, which registered it;
      * sr_perf_shutdown runs the process-end reports, here into a file that is read back. */

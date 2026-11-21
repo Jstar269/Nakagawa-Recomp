@@ -14,11 +14,14 @@
  * Each prints one JSON object on stdout: {"status":"OK",...} with exit 0, or
  * {"status":"REFUSED","code":"<NK_DISC_* name>","message":"..."} with exit 2.
  * --progress writes "progress <done> <total>" lines to stderr. Exit 64 is a
- * usage error.
+ * usage error. import reads DIR/library.json, as the player reads its library,
+ * to choose the folder of the key the disc's entry holds.
  */
 
 #include "nk_disc_chd.h"
 #include "nk_disc_expand.h"
+#include "nk_library.h"
+#include "nk_platform.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -101,10 +104,30 @@ static int run(int argc, char **argv) {
         return 0;
     }
     if (strcmp(command, "import") == 0 && positional_count == 1 && data_root) {
+        /* The library in the data folder keys the import as the player's does
+           (player_disc_image_expand): a prototype disc whose entry holds its
+           v1 key goes into that key's folder. No library is an empty one; a
+           library that cannot be read, or one a newer Nakagawa wrote, refuses
+           the import by name. */
         NkDiscImport result;
-        if (!nk_disc_import(positional[0], data_root, &callbacks, &result, &status)) {
+        char library_path[NK_MAX_PATH];
+        NkLibrary *library = (NkLibrary *)calloc(1, sizeof(NkLibrary));
+        int written = snprintf(library_path, sizeof(library_path), "%s%clibrary.json",
+                               data_root, nk_platform_path_separator());
+        bool imported;
+        if (!library || written < 0 || (size_t)written >= sizeof(library_path) ||
+            nk_library_load(library, library_path) != NK_OK) {
+            free(library);
+            snprintf(status.code, sizeof(status.code), "%s", NK_DISC_LIBRARY_UNREADABLE);
+            snprintf(status.message, sizeof(status.message),
+                     "Nakagawa's library could not be read, so the folder this disc image "
+                     "belongs in can't be chosen. Nothing was changed.");
             return refused(&status);
         }
+        imported = nk_disc_import_for_library(positional[0], data_root, library->entries,
+                                              library->count, &callbacks, &result, &status);
+        free(library);
+        if (!imported) return refused(&status);
         printf("{\"status\":\"OK\",\"format\":\"%s\",\"disc_id\":",
                nk_disc_format_extension(result.format));
         json_string(stdout, result.disc_id);

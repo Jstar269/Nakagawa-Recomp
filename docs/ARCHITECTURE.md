@@ -123,6 +123,9 @@ flow exits are reported as excluded and keep the result `PARTIAL`, while an
 ordinary unexplained stack delta reports `FAILED`. An unobserved workload reports
 `NOT_OBSERVED`; a balanced workload that misses generated callable entries reports
 `PARTIAL` with `unobserved=N`, so `COMPLETE` requires observing every expected entry.
+A callable body that loads `$sp` owns its exit `$sp`, so the census leaves it unwrapped:
+it is not an expected entry, and the report counts it as `unwrapped=N`, which also keeps
+the result `PARTIAL`.
 These diagnostics are source-owned runtime evidence and make no physical PSP
 correctness claim. The cosimulation harness classifies its source-owned
 `spleak` cell as a positive control and passes only when that cell is the sole observed

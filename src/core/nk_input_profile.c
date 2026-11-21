@@ -454,7 +454,7 @@ uint8_t nk_input_profile_transform_axis_calibrated(
         }
     }
 
-    return (uint8_t)(((int32_t)val + 32768) * 255 / 65535);
+    return nk_input_profile_axis_byte(val);
 }
 
 uint8_t nk_input_profile_transform_axis(

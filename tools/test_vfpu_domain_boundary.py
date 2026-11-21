@@ -32,6 +32,10 @@ eleven ULPs past `-1.0` up to exactly `-2.0`; the two endpoints and
 representative interior words are kept here so the corpus is checkable without
 the private trace.  Guest addresses and opcodes are intentionally absent: this
 is a semantics contract, not a title fixture.
+
+Publication: the nine argument words come from that private run.  The
+maintainer authorized publishing them on 2026-11-20 (audit 2026-11-17,
+finding F-2915ff73).
 """
 
 from __future__ import annotations

@@ -29,6 +29,7 @@ from nk_doctor_checks import (
     TitleDiagnosticContext,
     check_agent_identity,
     check_build_products,
+    check_build_toolchain,
     check_build_profile,
     check_data_directory,
     check_long_paths,
@@ -39,7 +40,6 @@ from nk_doctor_checks import (
     check_runtime_package_cache,
     check_typography_runtime,
     check_save_root,
-    check_toolchain,
     check_vfpu_assets,
     check_worktree_accumulation,
     resolve_build_dir,
@@ -287,7 +287,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.scope in {"build", "run", "all"}:
         check_platform(report)
     if args.scope in {"build", "all"}:
-        check_toolchain(report, args.msys_path, args.vulkan_sdk, root, sdl3_path=args.sdl3_path)
+        check_build_toolchain(report, args.msys_path, args.vulkan_sdk, root, sdl3_path=args.sdl3_path)
     if args.scope in {"inputs", "build", "all"}:
         check_private_inputs(
             report,

@@ -1708,6 +1708,7 @@ static const uint32_t *s_stack_census_expected;
 static unsigned char *s_stack_census_observed_expected;
 static uint32_t s_stack_census_expected_count;
 static uint32_t s_stack_census_unobserved;
+static uint32_t s_stack_census_unwrapped;
 static uint64_t s_stack_census_entries;
 static uint64_t s_stack_census_returns;
 static uint64_t s_stack_census_excluded;
@@ -1736,8 +1737,9 @@ static void sr_stack_census_unlock(void) {
 }
 
 static int sr_stack_census_expected_matches(const uint32_t *entries,
-                                           uint32_t count) {
+                                           uint32_t count, uint32_t unwrapped) {
     if (count != s_stack_census_expected_count
+        || unwrapped != s_stack_census_unwrapped
         || (count != 0u && (entries == NULL || s_stack_census_expected == NULL))) {
         return 0;
     }
@@ -1760,13 +1762,15 @@ static uint32_t sr_stack_census_expected_index(uint32_t entry) {
         && s_stack_census_expected[lo] == entry ? lo : UINT32_MAX;
 }
 
-void sr_stack_census_begin(const uint32_t *expected_entries, uint32_t expected_count) {
+void sr_stack_census_begin(const uint32_t *expected_entries, uint32_t expected_count,
+                           uint32_t unwrapped_count) {
     sr_stack_census_lock();
     if (s_stack_census_armed) {
         /* Generated registration can run once per cosim case. Preserve the
          * accumulated observations; a changed entry set is uncertainty, not
          * permission to silently restart the census. */
-        if (!sr_stack_census_expected_matches(expected_entries, expected_count)) {
+        if (!sr_stack_census_expected_matches(expected_entries, expected_count,
+                                              unwrapped_count)) {
             s_stack_census_invalid_expected = 1;
         }
         sr_stack_census_unlock();
@@ -1776,6 +1780,9 @@ void sr_stack_census_begin(const uint32_t *expected_entries, uint32_t expected_c
     s_stack_census_expected_count = expected_count;
     s_stack_census_observed_expected = NULL;
     s_stack_census_unobserved = expected_count;
+    /* Bodies the census cannot wrap are not expected entries (no enter can
+     * observe them) but are not checked either: reported apart, PARTIAL. */
+    s_stack_census_unwrapped = unwrapped_count;
     s_stack_census_unobserved_known = 1;
     s_stack_census_entries = 0u;
     s_stack_census_returns = 0u;
@@ -1869,6 +1876,7 @@ static SrStackCensusStatus sr_stack_census_status_locked(void) {
         || s_stack_census_tracking_unavailable
         || !s_stack_census_unobserved_known
         || s_stack_census_unobserved != 0u
+        || s_stack_census_unwrapped != 0u
         || s_stack_census_unexpected != 0u
         || s_stack_census_excluded != 0u
         || s_stack_census_entries != s_stack_census_returns) {
@@ -1883,6 +1891,7 @@ void sr_stack_census_snapshot(SrStackCensusSummary *summary) {
     summary->status = sr_stack_census_status_locked();
     summary->unobserved = s_stack_census_unobserved;
     summary->unobserved_known = s_stack_census_unobserved_known;
+    summary->unwrapped = s_stack_census_unwrapped;
     summary->entries = s_stack_census_entries;
     summary->returns = s_stack_census_returns;
     summary->excluded = s_stack_census_excluded;
@@ -1904,7 +1913,7 @@ SrStackCensusStatus sr_stack_census_status(void) {
 
 void sr_stack_census_report(void) {
     uint64_t entries, returns, excluded, unexpected, mismatches;
-    uint32_t unobserved;
+    uint32_t unobserved, unwrapped;
     uint32_t mismatch_entry, mismatch_expected_sp, mismatch_actual_sp, mismatch_flow;
     int has_mismatch, unobserved_known;
     SrStackCensusStatus status;
@@ -1916,6 +1925,7 @@ void sr_stack_census_report(void) {
     s_stack_census_reported = 1;
     unobserved = s_stack_census_unobserved;
     unobserved_known = s_stack_census_unobserved_known;
+    unwrapped = s_stack_census_unwrapped;
     entries = s_stack_census_entries;
     returns = s_stack_census_returns;
     excluded = s_stack_census_excluded;
@@ -1939,10 +1949,11 @@ void sr_stack_census_report(void) {
         (unsigned long long)excluded, (unsigned long long)unexpected,
         (unsigned long long)mismatches);
     if (unobserved_known) {
-        fprintf(stderr, "%u\n", unobserved);
+        fprintf(stderr, "%u", unobserved);
     } else {
-        fprintf(stderr, "unknown\n");
+        fprintf(stderr, "unknown");
     }
+    fprintf(stderr, " unwrapped=%u\n", unwrapped);
     fflush(stderr);
     if (has_mismatch) {
         fprintf(stderr,

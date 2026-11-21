@@ -93,12 +93,17 @@ _PINNED_ASSIGNMENT_GROUPS = {
     "codegen_tool": ("CODEGEN_TOOL",),
 }
 STATUS_MEASURED = "MEASURED"
+#: Passed the veto and the workload matrix, but its semantic hash changed between repeats: the
+#: generated C's output is not deterministic under this toolchain, so the row fails the run.
+STATUS_MEASURED_HASH_UNSTABLE = "MEASURED_HASH_UNSTABLE"
 STATUS_FAILED_VETO = "FAILED_VETO"
 STATUS_FAILED_MEASUREMENT = "FAILED_MEASUREMENT"
 STATUS_WORKLOAD_FAILED = "WORKLOAD_FAILED"
 STATUS_NOT_AVAILABLE = "NOT_AVAILABLE"
-STATUSES = (STATUS_MEASURED, STATUS_FAILED_VETO, STATUS_FAILED_MEASUREMENT,
+STATUSES = (STATUS_MEASURED, STATUS_MEASURED_HASH_UNSTABLE, STATUS_FAILED_VETO, STATUS_FAILED_MEASUREMENT,
             STATUS_WORKLOAD_FAILED, STATUS_NOT_AVAILABLE)
+#: Rows whose measurements are complete (the veto and the workload matrix passed).
+MEASURED_STATUSES = (STATUS_MEASURED, STATUS_MEASURED_HASH_UNSTABLE)
 GATE_PASS = "PASS"
 GATE_FAIL = "FAIL"
 GATE_SKIP = "SKIP"
@@ -1282,7 +1287,12 @@ def _measure_pair(name: str, compiler_name: str, compiler_path: str, linker: str
         "workloads_detail": workloads["detail"],
         "workloads": workloads["workloads"],
     }
-    record["status"] = STATUS_MEASURED if workloads["status"] == GATE_PASS else STATUS_WORKLOAD_FAILED
+    if workloads["status"] != GATE_PASS:
+        record["status"] = STATUS_WORKLOAD_FAILED
+    elif summary["semantic_hash_stable"]:
+        record["status"] = STATUS_MEASURED
+    else:
+        record["status"] = STATUS_MEASURED_HASH_UNSTABLE
     return record
 
 
@@ -1368,8 +1378,12 @@ def validate_report(report: Any) -> None:
         summary = measurements.get("summary")
         if not isinstance(summary, dict) or not isinstance(summary.get("semantic_hashes"), list):
             raise CompareError(f"{path}.measurements.summary: missing repeat summary")
-        if status == STATUS_MEASURED and measurements["workloads_status"] != GATE_PASS:
-            raise CompareError(f"{path}: MEASURED requires a passing runtime workload matrix")
+        if status in MEASURED_STATUSES and measurements["workloads_status"] != GATE_PASS:
+            raise CompareError(f"{path}: {status} requires a passing runtime workload matrix")
+        if status in MEASURED_STATUSES and summary.get("semantic_hash_stable") is not (status == STATUS_MEASURED):
+            raise CompareError(
+                f"{path}: MEASURED requires a stable semantic hash and MEASURED_HASH_UNSTABLE an unstable one"
+            )
         if status == STATUS_WORKLOAD_FAILED and measurements["workloads_status"] not in (GATE_FAIL, GATE_SKIP):
             raise CompareError(f"{path}: WORKLOAD_FAILED requires a failed or skipped runtime workload")
 
@@ -1382,7 +1396,7 @@ def summarize(report: dict[str, Any]) -> dict[str, list[str]]:
 
 
 def _semantic_hash_comparison(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    measured = [entry for entry in entries if entry.get("status") == STATUS_MEASURED]
+    measured = [entry for entry in entries if entry.get("status") in MEASURED_STATUSES]
     hashes = {
         entry["name"]: entry["measurements"]["summary"]["semantic_sha256"]
         for entry in measured
@@ -1426,7 +1440,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for entry in report["toolchains"]:
-        if entry["status"] != STATUS_MEASURED:
+        if entry["status"] not in MEASURED_STATUSES:
             veto = entry.get("veto") or {}
             measurements = entry.get("measurements") or {}
             workload_status = measurements.get("workloads_status", "—")
@@ -1444,8 +1458,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             continue
         summary = entry["measurements"]["summary"]
         semantic = summary["semantic_sha256"] or "UNSTABLE"
+        veto_cell = "PASS" if entry["status"] == STATUS_MEASURED else f"PASS; {entry['status']}"
         lines.append(
-            f"| {entry['compiler']} | {entry['linker_selection']} | PASS "
+            f"| {entry['compiler']} | {entry['linker_selection']} | {veto_cell} "
             f"| {entry['measurements']['workloads_status']} "
             f"| {_format_range(summary['generated_c_compile_wall_seconds'], suffix=' s')} "
             f"| {_format_range(summary['peak_working_set_bytes'], 1024 * 1024, ' MiB')} "
@@ -1789,9 +1804,13 @@ def main(argv: list[str] | None = None) -> int:
     markdown_path.write_text(markdown, encoding="utf-8")
     print(json.dumps(public_report, indent=2, sort_keys=True))
     print(markdown)
+    # A semantic hash that changes between repeats (MEASURED_HASH_UNSTABLE) or differs across the
+    # toolchains (DIFFERENT) means the generated C does not behave the same way: the run fails.
     return 0 if report["summary"][STATUS_MEASURED] and not (
         report["summary"][STATUS_NOT_AVAILABLE] or report["summary"][STATUS_FAILED_VETO]
         or report["summary"][STATUS_FAILED_MEASUREMENT] or report["summary"][STATUS_WORKLOAD_FAILED]
+        or report["summary"][STATUS_MEASURED_HASH_UNSTABLE]
+        or report["semantic_hash_comparison"]["status"] == "DIFFERENT"
     ) else 1
 
 

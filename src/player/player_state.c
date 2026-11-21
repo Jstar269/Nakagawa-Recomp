@@ -10821,11 +10821,31 @@ bool player_disc_image_expand(PlayerPsnPackage *package,
                           "Nakagawa's data folder could not be found.");
         return false;
     }
+    /* The library as saved now: a prototype disc whose entry holds its v1 key is
+       expanded into that key's folder, the one the entry's checks and removal use. */
+    NkLibrary *library = (NkLibrary *)malloc(sizeof(*library));
+    if (library == NULL) {
+        player_psn_result(code, code_size, "INTERNAL_ERROR", message, message_size,
+                          "Out of memory reading the library.");
+        return false;
+    }
+    nk_library_init(library);
+    if (nk_library_load(library, package->library_path[0] ? package->library_path : NULL) !=
+        NK_OK) {
+        free(library);
+        player_psn_result(code, code_size, "IO_FAILURE", message, message_size,
+                          "Nakagawa's library could not be read, so the folder this disc image "
+                          "belongs in can't be chosen. Nothing was changed.");
+        return false;
+    }
     bridge.callbacks = callbacks;
     hooks.on_progress = player_disc_bridge_progress;
     hooks.is_cancelled = player_disc_bridge_cancelled;
     hooks.user = &bridge;
-    if (!nk_disc_import(package->pbp_path, data_root, &hooks, &result, &status)) {
+    bool imported = nk_disc_import_for_library(package->pbp_path, data_root, library->entries,
+                                               library->count, &hooks, &result, &status);
+    free(library);
+    if (!imported) {
         if (strcmp(status.code, NK_DISC_CANCELLED) != 0) {
             fprintf(stderr, "[PLAYER] Disc image expansion stopped: %s: %s\n", status.code,
                     status.message);
@@ -12203,7 +12223,10 @@ bool player_app_recheck_inspected_disc(PlayerApp *app) {
     }
     memset(&inspected, 0, sizeof(inspected));
     if (!iso_inspect_file(game->iso_path, &inspected) || !inspected.success ||
-        !inspected.param_sfo_parsed || strcmp(inspected.disc_id, game->disc_id) != 0) {
+        !inspected.param_sfo_parsed ||
+        nk_iso_library_key_match(inspected.disc_id, inspected.disc_key_version,
+                                 inspected.legacy_disc_id, game->disc_id,
+                                 game->disc_key_version) == NK_ISO_KEY_NO_MATCH) {
         /* The image moved, stopped reading, or is now another game: the card
            keeps the first disc's identity, so nothing from this file is used. */
         player_app_build_compatibility_preflight(app, false, false, NULL);
@@ -12463,7 +12486,10 @@ bool player_app_build_package_preflight(PlayerApp *app, int game_index,
         player_package_preflight_action_folder(preflight, game, runtime_root);
         return false;
     }
-    if (strcmp(inspected.disc_id, game->disc_id) != 0) {
+    /* An entry made before the v2 key keeps its v1 key (nk_iso_library_key_match). */
+    if (nk_iso_library_key_match(inspected.disc_id, inspected.disc_key_version,
+                                 inspected.legacy_disc_id, game->disc_id,
+                                 game->disc_key_version) == NK_ISO_KEY_NO_MATCH) {
         snprintf(message, sizeof(message),
                  "SOURCE_ISO_IDENTITY_MISMATCH: ISO has disc ID %.32s; library entry expects %.32s.",
                  inspected.disc_id, game->disc_id);

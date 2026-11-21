@@ -8,6 +8,9 @@
 
 ***************************************************************************/
 
+/* Modified by Nakagawa Recomp contributors, 2026-11-20. The local change is marked
+ * LOCAL DELTA and listed in third_party/libchdr/PROVENANCE.md. */
+
 #include <stdlib.h>
 #include "../include/libchdr/bitstream.h"
 
@@ -26,6 +29,10 @@ int bitstream_overflow(struct bitstream* bitstream) { return ((bitstream->doffse
 struct bitstream* create_bitstream(const void *src, uint32_t srclength)
 {
 	struct bitstream* bitstream = (struct bitstream*)malloc(sizeof(struct bitstream));
+	/* Nakagawa LOCAL DELTA (2026-11-20): a failed allocation is returned as
+	 * NULL instead of written through. */
+	if (bitstream == NULL)
+		return NULL;
 	bitstream->buffer = 0;
 	bitstream->bits = 0;
 	bitstream->read = (const uint8_t*)src;

@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -36,6 +37,21 @@ SR_CORO = ROOT / "src" / "rt" / "sr_coro.c"
 PERF = ROOT / "src" / "rt" / "perf.c"
 TITLE_CONFIG_TOOL = ROOT / "tools" / "title_runtime_config.py"
 CODEGEN_TOOL = ROOT / "tools" / "codegen.py"
+
+# The crashes an overrun past a removed host-stack check ends with. Windows reports
+# STATUS_STACK_OVERFLOW (0xC00000FD) or, when the fiber's guard page is reached another way,
+# STATUS_ACCESS_VIOLATION (0xC0000005); POSIX reports the signal as a negative return code.
+# Any other crash (abort, illegal instruction, a probe setup code) is a different ending.
+_STACK_FAULT_CODES = frozenset({
+    0xC00000FD,
+    0xC0000005,
+    *(-getattr(signal, name) for name in ("SIGSEGV", "SIGBUS") if hasattr(signal, name)),
+})
+
+
+def _is_host_stack_fault(rc: int) -> bool:
+    """True when ``rc`` is the host stack fault an overrun produces, not just any crash."""
+    return rc in _STACK_FAULT_CODES or (rc & 0xFFFFFFFF) in _STACK_FAULT_CODES
 
 
 def _write_minimal_elf(
@@ -1836,7 +1852,32 @@ class StackCensusPipelineTests(unittest.TestCase):
             "STACK_CENSUS status=PARTIAL entries=1 returns=1 excluded=0 unexpected=0",
             run_output,
         )
-        self.assertIn("unobserved=1", run_output)
+        self.assertIn("unobserved=1 unwrapped=0", run_output)
+
+    def test_unwrapped_guest_sp_body_is_reported_apart_from_unobserved(self):
+        # 0x2000 loads $sp, so the census leaves it unwrapped and no wrapper can observe it.
+        # Every wrapped body balanced: the report must say unobserved=0 and name the gap as
+        # unwrapped=1, and the status stays PARTIAL because that body was never checked.
+        compile_rc, compile_output, run_rc, run_output = _build_and_run_stack_census(
+            (0x03E00008, 0x00000000),
+            "SR_STACK_CENSUS_PARTIAL",
+            extra_words=(
+                (0x23 << 26) | (4 << 21) | (29 << 16),  # lw sp, 0(a0)
+                0x03E00008, 0x00000000,
+            ),
+            post_call_probe=(
+                "    SrStackCensusSummary probe;\n"
+                "    sr_stack_census_snapshot(&probe);\n"
+                "    if (probe.unobserved != 0u || probe.unwrapped != 1u) return 6;\n"
+            ),
+        )
+        self.assertEqual(compile_rc, 0, compile_output)
+        self.assertEqual(run_rc, 0, run_output)
+        self.assertIn(
+            "STACK_CENSUS status=PARTIAL entries=1 returns=1 excluded=0 unexpected=0 "
+            "mismatches=0 unobserved=0 unwrapped=1",
+            run_output,
+        )
 
 
 @unittest.skipUnless(CC, "gcc is required for the generated depth probe")
@@ -2231,10 +2272,10 @@ class GeneratedCallDepthTests(unittest.TestCase):
                              vector=None, timeout=120, may_end=frozenset()):
         """Build and run a mutant; it is killed only when ``check`` holds on runs that ended
         for a semantic reason: the probe finished (rc 0) or the runtime stopped by name
-        (rc 1). A hang (rc -1, PROBE_NO_STOP), a signal, an abort or a probe setup code is
-        WRONG_REASON, never a kill, unless the mutant's semantic is itself that ending:
-        ``may_end`` names it, "hang" (a run that never stops, the bug the fix ended) or
-        "crash" (an overrun past a removed stack check)."""
+        (rc 1). A hang (rc -1, PROBE_NO_STOP), any other signal or abort, or a probe setup
+        code is WRONG_REASON, never a kill, unless the mutant's semantic is itself that
+        ending: ``may_end`` names it, "hang" (a run that never stops, the bug the fix ended)
+        or "crash" (the host stack fault an overrun past a removed stack check produces)."""
         unknown = set(may_end) - {"hang", "crash"}
         if unknown:
             raise AssertionError(f"unsupported mutant ending(s): {sorted(unknown)}")
@@ -2246,9 +2287,13 @@ class GeneratedCallDepthTests(unittest.TestCase):
             results = [_run_depth_probe(exe, n, timeout=timeout) for n in iterations]
         for rc, run_output, _fields in results:
             hung = rc == -1 and run_output.startswith("PROBE_NO_STOP")
-            if rc in (0, 1) or (hung and "hang" in may_end) or (
-                    not hung and "crash" in may_end):
+            if rc in (0, 1) or (hung and "hang" in may_end):
                 continue
+            if "crash" in may_end and _is_host_stack_fault(rc):
+                continue
+            if not hung and "crash" in may_end:
+                self.fail(f"{name}: WRONG_REASON (the run crashed for a reason other than the "
+                          f"host stack fault an overrun produces: rc={rc})\n{run_output}")
             self.fail(f"{name}: WRONG_REASON (the run neither finished nor stopped by name: "
                       f"rc={rc})\n{run_output}")
         self.assertTrue(check(results), f"{name}: MUTANT_SURVIVED {results}")
@@ -3021,7 +3066,7 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # Each mutant must overrun the fiber with no named stop, the shape before the check.
         def overran(results):
             rc, output, _fields = results[0]
-            return rc not in (0, 1) and "host-fiber-stack-exhausted" not in output
+            return _is_host_stack_fault(rc) and "host-fiber-stack-exhausted" not in output
 
         mutants = (
             ("D1-codegen-emits-no-entry-check", {"codegen.py": self._NO_ENTRY_CHECK}),
@@ -3044,6 +3089,22 @@ class GeneratedCallDepthTests(unittest.TestCase):
             with self.subTest(mutant=name):
                 self._assert_mutant_fails(name, _linked_recursion(), (self._DEEP_LINKED,),
                                           mutate, overran, may_end={"crash"})
+
+    def test_a_crash_for_an_unrelated_reason_is_not_a_semantic_kill(self):
+        # The kill predicate used to accept any return code but 0 or 1 without the named
+        # stop, so a mutant that crashed before the recursion counted as the overrun D1-D5
+        # show. A check that traps at every body entry dies of an illegal instruction, not a
+        # host stack fault, and must be WRONG_REASON.
+        trap = (
+            "#define SR_HOST_STACK_CHECK(entry) \\\n"
+            "    SR_HOST_STACK_CHECK_FRAME((entry), (uintptr_t)__builtin_frame_address(0))",
+            "#define SR_HOST_STACK_CHECK(entry) __builtin_trap()",
+        )
+        with self.assertRaisesRegex(AssertionError, "WRONG_REASON"):
+            self._assert_mutant_fails(
+                "X1-entry-check-traps", _linked_recursion(), (16,),
+                {"recomp.h": trap}, lambda results: True, may_end={"crash"},
+            )
 
     @staticmethod
     def _probe_fields(stdout):
@@ -3084,7 +3145,7 @@ class GeneratedCallDepthTests(unittest.TestCase):
             results = {mode: self._run_probe_mode(exe, work, self._DEEP_LINKED, mode)
                        for mode in ("pair", "pair-reverse")}
         overran = [mode for mode, (rc, _out, err, _ev) in results.items()
-                   if rc not in (0, 1) and "host-fiber-stack-exhausted" not in err]
+                   if _is_host_stack_fault(rc) and "host-fiber-stack-exhausted" not in err]
         self.assertTrue(overran, f"D5-window-without-a-top: MUTANT_SURVIVED {results}")
         print("D5-window-without-a-top: MUTANT_EXECUTED_AND_SEMANTIC_TEST_FAILED")
 

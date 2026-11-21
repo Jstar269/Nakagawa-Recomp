@@ -397,7 +397,11 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
         for required in (
             "offline by default",
             "approves opt-in network features in principle",
-            "does not authorize an unlisted host",
+            "does not authorize an upload, or any connection before the player has opted in to the feature",
+            "it is contacted only after that feature's opt-in",
+            "receives nothing beyond what the feature's consent text names",
+            "the pull request names the host and lists it in the feature's public issue, its consent text",
+            "nothing connects before the player answers, and no answer means off",
             "each feature's public issue must name its hosts, payload, consent and data boundaries",
             "before it ships",
             "off by default",
@@ -523,6 +527,32 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
                     rf"(?i)(place_game_here|game\.iso|EBOOT|SaveBase|memstick/|{unix_user_path}|{windows_path}|session[-_ ]?[0-9a-f]{{8,}})",
                 )
                 self.assertNotRegex(content, r"(?i)\b(?:issue|pr)\s*#\d+")
+
+    def test_every_issue_form_applies_a_label(self):
+        """F-41f91e2c: CONTRIBUTING.md says every issue carries at least one label, so each issue
+        form names one (config.yml is the chooser's settings, not a form)."""
+        forms = sorted((ROOT / ".github" / "ISSUE_TEMPLATE").glob("*.yml"))
+        self.assertIn("smoke_test_report.yml", [form.name for form in forms])
+        for form in forms:
+            if form.name == "config.yml":
+                continue
+            with self.subTest(form=form.name):
+                text = form.read_text(encoding="utf-8")
+                match = re.search(r"(?m)^labels:[ \t]*(.*)$", text)
+                self.assertIsNotNone(match, f"{form.name} has no top-level labels key")
+                assert match is not None
+                inline = match.group(1).strip()
+                if inline:
+                    labels = re.findall(r"""["']?([^"',\[\]\s][^"',\[\]]*?)["']?\s*(?:,|\])""", inline)
+                else:
+                    block = text[match.end():].split("\n")
+                    labels = []
+                    for line in block[1:]:
+                        item = re.match(r"^\s+-\s+(.+?)\s*$", line)
+                        if not item:
+                            break
+                        labels.append(item.group(1).strip("\"'"))
+                self.assertTrue([label for label in labels if label.strip()], f"{form.name} names no label")
 
     def test_claude_is_no_longer_ignored(self):
         ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")

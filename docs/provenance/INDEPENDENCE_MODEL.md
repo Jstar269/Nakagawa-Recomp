@@ -188,6 +188,16 @@ The detailed development ledger is deliberately outside the active public source
   or `unresolved` — never `project-authored-independent`; the public-only test skips this check;
 - every record naming an upstream project also carries a license field.
 
+A record-backed public entry also carries a label that names its record's class and claims no more:
+`authorship` is `project-authored-independent record` or `project-authored, behavior-informed record`,
+and `modification_status` is `modified_or_translated; see trusted record` for a `derived-translated`
+record or `upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here` for
+an `upstream-third-party` one; whether a vendored file is byte-identical or a LOCAL DELTA is in its
+area's `PROVENANCE.md`. The tools derive the label from the record (`PUBLIC_LABEL_SETS` in
+`tools/provenance_ledger.py`); it is never free text. Until 2026-11 every project-authored entry read
+`independent implementation record` and every upstream-derived one `modified_or_translated`, whatever
+the record said; the verifier still accepts that older set while a pull request can carry it.
+
 Documentation, configuration, public factual metadata, and explicitly synthetic fixtures keep
 narrow deterministic classifications that need no ledger record. Any other unrecorded path — in
 particular implementation under `src/`, `tools/`, or a user interface — resolves to `unresolved`,

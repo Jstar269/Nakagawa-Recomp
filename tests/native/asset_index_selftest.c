@@ -147,6 +147,43 @@ static int vfs_flat_directory_merge_is_linear(void) {
     return ok ? 0 : fail("flat directory merge is not linear or not first-source-wins");
 }
 
+/* Audit 2026-11-17 F-27cbd9cd: the second byte of a Shift-JIS pair is part of the
+ * character, never a letter to fold. 0x83 0x41 (katakana A) and 0x83 0x61 (katakana DI)
+ * are two names: two index keys, two listing entries; a trail 0x5c stays in the key. An
+ * ASCII letter outside a pair still folds. */
+static int vfs_sjis_pairs_stay_distinct(void) {
+    char *upper = NULL, *lower = NULL, *yen = NULL, *ascii = NULL;
+    int variant = 0;
+    int ok = sr_asset_index_key_from_rel("DATA\\" "\x83\x41.BIN", &upper, &variant) &&
+             sr_asset_index_key_from_rel("DATA\\" "\x83\x61.BIN", &lower, &variant) &&
+             sr_asset_index_key_from_rel("data/\x95\x5c.bin", &yen, &variant) &&
+             sr_asset_index_key_from_rel("Data/K\x41.Bin", &ascii, &variant);
+    if (ok && (strcmp(upper, "data/\x83\x41.bin") != 0 ||
+               strcmp(lower, "data/\x83\x61.bin") != 0 ||
+               strcmp(yen, "data/\x95\x5c.bin") != 0 || strcmp(ascii, "data/ka.bin") != 0)) {
+        fprintf(stderr, "asset index selftest: Shift-JIS keys '%s' '%s' '%s' '%s'\n",
+                upper, lower, yen, ascii);
+        ok = 0;
+    }
+    free(upper);
+    free(lower);
+    free(yen);
+    free(ascii);
+    if (!ok) return fail("a Shift-JIS trail byte was folded into the index key");
+
+    if (sr_vfs_strcasecmp("\x83\x41.bin", "\x83\x61.bin") == 0 ||
+        sr_vfs_strcasecmp("\x83\x41.BIN", "\x83\x41.bin") != 0)
+        return fail("name compare folds a Shift-JIS trail byte or misses an ASCII fold");
+    SrVfsDirList list;
+    sr_vfs_dirlist_init(&list);
+    ok = sr_vfs_dirlist_merge(&list, "\x83\x41.bin", 0, 1u) &&
+         sr_vfs_dirlist_merge(&list, "\x83\x61.bin", 0, 2u) &&
+         sr_vfs_dirlist_merge(&list, "\x83\x41.BIN", 0, 3u) && list.count == 2u &&
+         dir_index_of(&list, "\x83\x41.bin") >= 0 && dir_index_of(&list, "\x83\x61.bin") >= 0;
+    sr_vfs_dirlist_destroy(&list);
+    return ok ? 0 : fail("a listing merged two Shift-JIS names into one");
+}
+
 static int vfs_dir_tests(void) {
     SrAssetIndex ix;
     SrVfsDirList list;
@@ -447,6 +484,7 @@ int main(void) {
 
     if (vfs_dir_tests() != 0) return 1;
     if (vfs_flat_directory_merge_is_linear() != 0) return 1;
+    if (vfs_sjis_pairs_stay_distinct() != 0) return 1;
     sr_asset_index_destroy(&short_index);
     sr_asset_index_destroy(&long_index);
     puts("asset index selftest: OK");

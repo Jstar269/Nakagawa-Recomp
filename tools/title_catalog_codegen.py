@@ -39,6 +39,7 @@ from nk_core.launcher import (
     IMAGE_SUFFIX,
     NAME_SOURCES,
 )
+from nk_core.types import normalize_disc_id
 
 # Re-exported from the single home so this module and
 # tools/nk_core/title_registry.py cannot drift apart again.
@@ -283,7 +284,7 @@ def collect_public_manifests(
             disc_ids = []
 
         for disc_id in disc_ids:
-            norm = "".join(c for c in disc_id if c not in "-_ ").upper()
+            norm = normalize_disc_id(disc_id)
             if norm in seen_disc_ids:
                 raise ValueError(
                     f"catalog contains duplicate disc identity {disc_id!r} for title {t_id!r}"

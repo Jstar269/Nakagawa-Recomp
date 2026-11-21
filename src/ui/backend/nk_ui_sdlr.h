@@ -41,6 +41,13 @@ void nk_ui_sdlr_destroy(NkUiSdlr *renderer);
    changes, since that is part of the density. */
 void nk_ui_sdlr_set_scale(NkUiSdlr *renderer, float density);
 
+/* Forgets every texture the backend made: the atlas pages and their glyph entries,
+   the cached image textures and the waves texture. The host calls it on
+   SDL_EVENT_RENDER_DEVICE_RESET, after which SDL says every texture must be made
+   again (a Direct3D device lost to a driver reset or update); each is rebuilt
+   lazily by the next render. The scale is kept. NULL does nothing. */
+void nk_ui_sdlr_reset(NkUiSdlr *renderer);
+
 /* Draws one frame's list from nk_ui_end(). Returns true when the list was
    drawn. Returns false, drawing nothing, for a NULL argument or a malformed list
    (an index or command range outside the list, scissors nested deeper than
@@ -71,6 +78,7 @@ typedef struct {
     uint32_t images_drawn;    /* image commands drawn, ever */
     uint32_t image_uploads;   /* image textures created, ever */
     uint32_t images_failed;   /* image commands left out for want of a texture, ever */
+    uint32_t device_resets;   /* nk_ui_sdlr_reset calls, ever */
 } NkUiSdlrStats;
 
 void nk_ui_sdlr_get_stats(const NkUiSdlr *renderer, NkUiSdlrStats *out);

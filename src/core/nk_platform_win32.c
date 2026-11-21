@@ -353,6 +353,22 @@ bool nk_platform_remove_tree(const char *path, const char *skip_child) {
     return tree_walk_top(path, NULL, tree_remove_at, NULL, NULL);
 }
 
+bool nk_platform_remove_empty_dir(const char *path) {
+    WCHAR wpath[32768];
+    DWORD attributes;
+    if (!path || !*path || !utf8_to_wide(path, wpath, sizeof(wpath) / sizeof(wpath[0]))) {
+        return false;
+    }
+    attributes = GetFileAttributesW(wpath);
+    /* A link is not this directory: RemoveDirectoryW would remove the link, which
+       POSIX rmdir refuses, so it is refused here too. */
+    if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        return false;
+    }
+    return RemoveDirectoryW(wpath) != 0;
+}
+
 bool nk_platform_list_files(const char *dir, NkDirFileFn fn, void *ctx) {
     if (!dir || !*dir || !fn) return false;
     char pattern[32768];

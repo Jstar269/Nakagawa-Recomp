@@ -40,12 +40,15 @@ it, into the player only, to decode the one track the player ships (`assets/musi
   the licence text at the end of `stb_image.h` is the same at both pins.
 - Import method: `stb_image.h` was downloaded from the pinned commit `6b5799bae8a1fe3792691ef4b72ae26434c3e799`. Its
   Git blob ID matches that commit's file (checked against the GitHub contents API and a second download from
-  `raw.githubusercontent.com` on 2026-11-20), and the SHA-256 below was calculated from the local bytes. `LICENSE`
-  stays at commit `003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5`: upstream reworded its first line on 2026-10-31 (commit
-  `aae9fee018211439eec93986e4dd2d9201e9b82c`, "update license since libraries are inconsistent") to say the
-  repository's libraries are public domain and most of them also MIT; both alternatives' texts are unchanged, and
-  that wording change is left to a maintainer decision. The SHA-256 values below were calculated from the local bytes
-  (corrected 2026-11-18: this bullet sat in the `stb_vorbis.c` section).
+  `raw.githubusercontent.com` on 2026-11-20), and the SHA-256 below was calculated from the local bytes (corrected
+  2026-11-18: this bullet sat in the `stb_vorbis.c` section).
+- `LICENSE`: upstream reworded its opening lines in commit `aae9fee018211439eec93986e4dd2d9201e9b82c`
+  (2026-10-31, "update license since libraries are inconsistent"): the libraries are in the public domain and most are
+  also available under MIT. The two alternatives below the opening are unchanged. On 2026-11-20, with the
+  maintainer's approval of the new wording, `LICENSE` was downloaded again from that commit, which is still the last
+  to change it on `master` (the same file as at the `stb_image.h` pin above); its Git blob ID matches that commit's
+  file, and the SHA-256 below was calculated from the local bytes. The `LICENSE` at the earlier pin
+  `003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5` had blob `a77ae91f3ec0abb0028c9d9bd8d34d880b454d38`.
 
 ### `stb_vorbis.c`
 
@@ -55,8 +58,8 @@ it, into the player only, to decode the one track the player ships (`assets/musi
 - License: the file's own header says "public domain" and its end offers a choice of two licences, "ALTERNATIVE A -
   MIT License" (Copyright (c) 2017 Sean Barrett) or "ALTERNATIVE B - Public Domain (www.unlicense.org)". The project
   uses it under the public-domain alternative (`Unlicense`), as it does `stb_image.h`. Both texts are kept unchanged
-  at the end of the file. The repository's `LICENSE` here stays at commit `003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5`; the file carries its
-  own licence text.
+  at the end of the file. The repository's `LICENSE` here is the one recorded above (commit
+  `aae9fee018211439eec93986e4dd2d9201e9b82c`); the file carries its own licence text.
 - Import method: downloaded from `raw.githubusercontent.com` at the pinned commit. Its Git blob ID matches the pinned
   commit's file (checked against the GitHub contents API on 2026-11-12), and the SHA-256 below was calculated from
   the local bytes.
@@ -67,7 +70,7 @@ it, into the player only, to decode the one track the player ships (`assets/musi
 | --- | --- | --- | --- |
 | `stb_image.h` | imported byte-identical | `9e65b834cfd7e34d9f8f8bd81d1c5e6eae128fc7` | `dfc2aadda6295f67f677587773f25e5bf8c8ad427ed0db7c518525c91e72e020` |
 | `stb_vorbis.c` | imported byte-identical (pin `9f755b604db3492df2cbeb39bf84b81e3e3932e3`) | `f5e80a0f27cbbe78405d01803bcc5e3edb98c2bd` | `b52cf518355f7b2d181f18b97b812f361ffeb26299d935c8cf29e842401d60a6` |
-| `LICENSE` | imported byte-identical | `a77ae91f3ec0abb0028c9d9bd8d34d880b454d38` | `bebfe904b14301657e4e5d655c811d51fd31b97c455b9cc2d8600d6bac6cff63` |
+| `LICENSE` | imported byte-identical (pin `aae9fee018211439eec93986e4dd2d9201e9b82c`) | `48b774af49c4a552d5593e005da685af27be2f20` | `eb36e45c704dd0b59730115523e089b051852625b4db0a6fe76c991900af20e7` |
 | `PROVENANCE.md` | project-authored manifest | n/a | n/a |
 
 ## Build configuration

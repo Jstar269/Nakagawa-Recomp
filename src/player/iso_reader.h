@@ -21,10 +21,22 @@ typedef struct {
     NkIsoExecutableReport executables;
     char matched_title_id[65];
     GameSupportStatus status;
+    /* NkIsoMetadata.disc_key_version and legacy_disc_id: which key disc_id is, and
+       the v1 key of a v2-keyed disc (nk_iso_library_key_match). */
+    uint32_t disc_key_version;
+    char legacy_disc_id[MAX_DISC_ID_LEN];
 } IsoInspectResult;
 
 /* Inspects a raw PSP ISO9660 disc image directly */
 bool iso_inspect_file(const char *iso_path, IsoInspectResult *out_result);
+
+/* Keys an inspected image as the library holds it (nk_iso_library_key_for_image)
+ * and returns that key's version. When an entry made before v2 holds the disc's
+ * v1 key, result is re-keyed under it and the title catalog searched again under
+ * that key (nk_iso_catalog_match), so a manifest kept under the v1 key goes on
+ * matching the disc; otherwise result is left as it is. */
+uint32_t iso_inspect_result_for_library(IsoInspectResult *result, const NkGameEntry *entries,
+                                        int entry_count);
 
 /* Icon and image loading from ISO disc image */
 typedef enum {

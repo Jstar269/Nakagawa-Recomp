@@ -1248,6 +1248,78 @@ static void write_input_class_iso(const char *path, const char *disc_id,
     free(image);
 }
 
+/* A prototype disc that boots its plain BOOT.BIN beside an all-zero EBOOT.BIN, under
+ * a non-retail DISC_ID: PVD at 16, root 17, PSP_GAME 18, SYSDIR 19, PARAM.SFO 20,
+ * EBOOT.BIN 21 (2048 zero bytes), BOOT.BIN 22. Writes its v1 and v2 keys, derived as
+ * docs/YOUR_OWN_GAMES.md states them. Synthetic bytes only. */
+static void write_prototype_boot_iso(const char *path, char v1_key[10], char v2_key[10]) {
+    enum { SECTOR = 2048, ROOT = 17, GAME = 18, SYSDIR = 19, SFO = 20, EBOOT = 21, BOOT = 22,
+           TOTAL = 23 };
+    static const uint8_t dot[1] = { 0 };
+    static const uint8_t dotdot[1] = { 1 };
+    static const char v1_tag[] = "nakagawa-non-retail-disc-key-v1";
+    static const char v2_tag[] = "nakagawa-non-retail-disc-key-v2";
+    unsigned char boot[88];
+    uint8_t sfo[256];
+    size_t sfo_size = build_player_test_param_sfo(sfo, sizeof(sfo), "PROTO1234567",
+                                                  "Prototype fixture");
+    uint8_t *image = (uint8_t *)calloc(TOTAL, SECTOR);
+    size_t off;
+    assert(image != NULL && sfo_size > 0);
+    build_synthetic_mips_elf(boot);
+
+    uint8_t *pvd = image + 16 * SECTOR;
+    pvd[0] = 1;
+    memcpy(pvd + 1, "CD001", 5);
+    pvd[6] = 1;
+    put_iso_both32(pvd + 80, TOTAL);
+    iso_dir_record(pvd + 156, dot, 1, ROOT, SECTOR, true);
+    uint8_t *root = image + ROOT * SECTOR;
+    off = iso_dir_record(root, dot, 1, ROOT, SECTOR, true);
+    off += iso_dir_record(root + off, dotdot, 1, ROOT, SECTOR, true);
+    iso_dir_record(root + off, (const uint8_t *)"PSP_GAME", 8, GAME, SECTOR, true);
+    uint8_t *game = image + GAME * SECTOR;
+    off = iso_dir_record(game, dot, 1, GAME, SECTOR, true);
+    off += iso_dir_record(game + off, dotdot, 1, ROOT, SECTOR, true);
+    off += iso_dir_record(game + off, (const uint8_t *)"PARAM.SFO;1", 11, SFO,
+                          (uint32_t)sfo_size, false);
+    iso_dir_record(game + off, (const uint8_t *)"SYSDIR", 6, SYSDIR, SECTOR, true);
+    uint8_t *sysdir = image + SYSDIR * SECTOR;
+    off = iso_dir_record(sysdir, dot, 1, SYSDIR, SECTOR, true);
+    off += iso_dir_record(sysdir + off, dotdot, 1, GAME, SECTOR, true);
+    off += iso_dir_record(sysdir + off, (const uint8_t *)"BOOT.BIN;1", 10, BOOT,
+                          (uint32_t)sizeof(boot), false);
+    iso_dir_record(sysdir + off, (const uint8_t *)"EBOOT.BIN;1", 11, EBOOT, SECTOR, false);
+    memcpy(image + SFO * SECTOR, sfo, sfo_size);
+    memcpy(image + BOOT * SECTOR, boot, sizeof(boot));
+    FILE *file = fopen(path, "wb");
+    assert(file != NULL);
+    assert(fwrite(image, 1, (size_t)TOTAL * SECTOR, file) == (size_t)TOTAL * SECTOR);
+    assert(fclose(file) == 0);
+
+    for (int version = 1; version <= 2; version++) {
+        uint8_t length[8];
+        uint8_t digest[32];
+        NkSha256 ctx;
+        nk_sha256_init(&ctx);
+        if (version == 1) {
+            nk_sha256_update(&ctx, (const uint8_t *)v1_tag, sizeof(v1_tag));
+        } else {
+            nk_sha256_update(&ctx, (const uint8_t *)v2_tag, sizeof(v2_tag));
+        }
+        for (int part = 0; part < 1 + version; part++) {
+            const uint8_t *bytes = part == 0 ? sfo : part == 1 ? image + EBOOT * SECTOR : boot;
+            uint64_t size = part == 0 ? sfo_size : part == 1 ? SECTOR : sizeof(boot);
+            for (int i = 0; i < 8; i++) length[i] = (uint8_t)(size >> (8 * i));
+            nk_sha256_update(&ctx, length, sizeof(length));
+            nk_sha256_update(&ctx, bytes, (size_t)size);
+        }
+        nk_sha256_finish(&ctx, digest);
+        nk_non_retail_disc_key(digest, version == 1 ? v1_key : v2_key);
+    }
+    free(image);
+}
+
 static const char *const FIXTURE_SHA256 =
     "f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d";
 
@@ -9503,6 +9575,272 @@ static void test_game_build_check_names_the_executable_build(void) {
    title's folder. The synthetic ~PSP containers here do not decrypt with the
    built-in tables (#295), so each stays needed until the test writes a plain
    copy, as a user would. */
+/* Owner decision of 2026-11-20 on F-2281ebab (option b): a prototype disc's library
+ * entry made under the v1 key keeps it. Check again on the disc being added under that
+ * key, and the package check of its library entry, both read the disc as that entry's,
+ * though the disc's own key is now the v2 one. */
+static void test_prototype_entry_keeps_its_v1_key(void) {
+    const char sep = nk_platform_path_separator();
+    char root[256];
+    char user[300];
+    char iso[NK_MAX_PATH];
+    char v1_key[10];
+    char v2_key[10];
+    IsoInspectResult inspected;
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    assert(strlen(native_test_get_root()) < 200);
+    snprintf(root, sizeof(root), "%.200s%cprototype-key", native_test_get_root(), sep);
+    snprintf(user, sizeof(user), "%s%cuser", root, sep);
+    snprintf(iso, sizeof(iso), "%s%cprototype.iso", root, sep);
+    assert(nk_platform_mkdir_p(user));
+    player_app_set_runtime_root(app, user);
+    write_prototype_boot_iso(iso, v1_key, v2_key);
+    assert(strcmp(v1_key, v2_key) != 0);
+    memset(&inspected, 0, sizeof(inspected));
+    assert(iso_inspect_file(iso, &inspected) && inspected.success);
+    assert(strcmp(inspected.disc_id, v2_key) == 0);
+
+    /* Check again on the disc being added under the key its entry holds. */
+    snprintf(app->inspecting_game.disc_id, sizeof(app->inspecting_game.disc_id), "%s", v1_key);
+    snprintf(app->inspecting_game.iso_path, sizeof(app->inspecting_game.iso_path), "%s", iso);
+    snprintf(app->inspecting_game.title_id, sizeof(app->inspecting_game.title_id),
+             "experimental-prototype");
+    app->inspecting_game.is_experimental = true;
+    (void)player_app_recheck_inspected_disc(app);
+    for (size_t i = 0; i < app->wizard.preflight.count; i++) {
+        if (strstr(app->wizard.preflight.checks[i].message, "SOURCE_ISO_CHANGED") != NULL) {
+            fprintf(stderr, "[PLAYER_STATE_TEST] prototype entry: %s\n",
+                    app->wizard.preflight.checks[i].message);
+        }
+        assert(strstr(app->wizard.preflight.checks[i].message, "SOURCE_ISO_CHANGED") == NULL);
+    }
+    assert(strcmp(app->inspecting_game.disc_id, v1_key) == 0);
+
+    /* The package check of the library entry made under the v1 key. */
+    app->game_count = 1;
+    memset(&app->games[0], 0, sizeof(app->games[0]));
+    snprintf(app->games[0].disc_id, sizeof(app->games[0].disc_id), "%s", v1_key);
+    snprintf(app->games[0].title_id, sizeof(app->games[0].title_id), "experimental-prototype");
+    snprintf(app->games[0].title_name, sizeof(app->games[0].title_name), "Prototype fixture");
+    snprintf(app->games[0].iso_path, sizeof(app->games[0].iso_path), "%s", iso);
+    app->games[0].iso_size_bytes = (uint64_t)nk_platform_get_file_size(iso);
+    app->games[0].is_experimental = true;
+    (void)player_app_build_package_preflight(app, 0, false);
+    {
+        const PlayerPreflightCheck *blocking = player_app_package_build_preflight_blocker(app, 0);
+        if (blocking != NULL && strstr(blocking->message, "SOURCE_ISO_IDENTITY_MISMATCH")) {
+            fprintf(stderr, "[PLAYER_STATE_TEST] prototype entry: %s\n", blocking->message);
+        }
+        assert(blocking == NULL ||
+               strstr(blocking->message, "SOURCE_ISO_IDENTITY_MISMATCH") == NULL);
+    }
+
+    /* An entry of the v2 kind is not the v1 entry's, nor the reverse. */
+    app->games[0].disc_key_version = 2;
+    (void)player_app_build_package_preflight(app, 0, true);
+    assert(player_app_package_build_preflight_blocker(app, 0) != NULL);
+    assert(strstr(player_app_package_build_preflight_blocker(app, 0)->message,
+                  "SOURCE_ISO_IDENTITY_MISMATCH") != NULL);
+    snprintf(app->games[0].disc_id, sizeof(app->games[0].disc_id), "%s", v2_key);
+    (void)player_app_build_package_preflight(app, 0, true);
+    {
+        const PlayerPreflightCheck *blocking = player_app_package_build_preflight_blocker(app, 0);
+        assert(blocking == NULL ||
+               strstr(blocking->message, "SOURCE_ISO_IDENTITY_MISMATCH") == NULL);
+    }
+    app->games[0].disc_key_version = 1;
+    (void)player_app_build_package_preflight(app, 0, true);
+    assert(strstr(player_app_package_build_preflight_blocker(app, 0)->message,
+                  "SOURCE_ISO_IDENTITY_MISMATCH") != NULL);
+
+    assert(remove(iso) == 0);
+    free(app);
+    printf("[PLAYER_STATE_TEST] a prototype entry made under the v1 key keeps it PASS\n");
+}
+
+/* A CSO v1 of the file at iso_path, every block stored, at cso_path. */
+static void write_stored_cso(const char *iso_path, const char *cso_path) {
+    enum { BLOCK = 2048 };
+    FILE *in = fopen(iso_path, "rb");
+    assert(in != NULL);
+    assert(fseek(in, 0, SEEK_END) == 0);
+    long size = ftell(in);
+    assert(size > 0 && size % BLOCK == 0);
+    assert(fseek(in, 0, SEEK_SET) == 0);
+    uint8_t *iso = (uint8_t *)malloc((size_t)size);
+    assert(iso != NULL && fread(iso, 1, (size_t)size, in) == (size_t)size);
+    fclose(in);
+    uint32_t blocks = (uint32_t)(size / BLOCK);
+    size_t index_bytes = ((size_t)blocks + 1u) * 4u;
+    size_t total = 24u + index_bytes + (size_t)size;
+    uint8_t *cso = (uint8_t *)calloc(1, total);
+    assert(cso != NULL);
+    memcpy(cso, "CISO", 4);
+    cso[4] = 24;
+    for (int i = 0; i < 8; i++) cso[8 + i] = (uint8_t)((uint64_t)size >> (8 * i));
+    cso[16] = (uint8_t)(BLOCK & 0xFF);
+    cso[17] = (uint8_t)(BLOCK >> 8);
+    cso[20] = 1;
+    for (uint32_t i = 0; i <= blocks; i++) {
+        uint32_t entry = (uint32_t)(24u + index_bytes + (size_t)i * BLOCK);
+        if (i < blocks) entry |= 0x80000000u; /* v1: a stored block */
+        for (int b = 0; b < 4; b++) cso[24u + i * 4u + (uint32_t)b] = (uint8_t)(entry >> (8 * b));
+    }
+    memcpy(cso + 24u + index_bytes, iso, (size_t)size);
+    write_binary_file(cso_path, cso, total);
+    free(cso);
+    free(iso);
+}
+
+/* Review of #2855: a compressed prototype disc is expanded into the folder of the key
+ * its library entry holds, so removing the title removes the expansion too: an entry
+ * made under the v1 key (discs/<v1 key>) and a disc added under its v2 key alike. */
+/* Review F1 of PR #2855: a disc re-keyed under the v1 key its entry holds is
+   looked up in the title catalog under that key, so a manifest kept under it goes
+   on matching (F5: an entry holding the disc's own v2 key comes first). */
+static void test_prototype_old_key_keeps_its_catalog_entry(void) {
+    const char sep = nk_platform_path_separator();
+    char root[256];
+    char iso[NK_MAX_PATH];
+    char v1_key[10];
+    char v2_key[10];
+    IsoInspectResult inspected;
+    IsoInspectResult keyed;
+    NkGameEntry entries[2];
+    NkTitleEntry overlay;
+    assert(strlen(native_test_get_root()) < 200);
+    snprintf(root, sizeof(root), "%.200s%cprototype-catalog", native_test_get_root(), sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(iso, sizeof(iso), "%s%cprototype.iso", root, sep);
+    write_prototype_boot_iso(iso, v1_key, v2_key);
+
+    nk_title_catalog_clear_overlay();
+    memset(&overlay, 0, sizeof(overlay));
+    overlay.id = "prototype-beta";
+    overlay.display_name = "Prototype Beta";
+    overlay.kind = NK_TITLE_KIND_RETAIL;
+    overlay.primary_disc_id = v1_key;
+    assert(nk_title_catalog_register_overlay(&overlay));
+
+    memset(&inspected, 0, sizeof(inspected));
+    assert(iso_inspect_file(iso, &inspected) && inspected.success);
+    assert(strcmp(inspected.disc_id, v2_key) == 0 && !inspected.is_supported);
+
+    memset(entries, 0, sizeof(entries));
+    snprintf(entries[0].disc_id, sizeof(entries[0].disc_id), "%s", v1_key);
+    keyed = inspected;
+    assert(iso_inspect_result_for_library(&keyed, entries, 1) == 1u);
+    if (!keyed.is_supported) {
+        fprintf(stderr, "[PLAYER_STATE_TEST] v1 entry %s: the catalog entry kept under it "
+                "was not found (matched '%s')\n", v1_key, keyed.matched_title_id);
+    }
+    assert(strcmp(keyed.disc_id, v1_key) == 0);
+    assert(keyed.disc_key_version == 1u && keyed.legacy_disc_id[0] == '\0');
+    assert(keyed.is_supported && strcmp(keyed.matched_title_id, "prototype-beta") == 0);
+    assert(keyed.status == (GameSupportStatus)NK_STATUS_VERIFIED);
+
+    snprintf(entries[1].disc_id, sizeof(entries[1].disc_id), "%s", v2_key);
+    entries[1].disc_key_version = 2u;
+    keyed = inspected;
+    assert(iso_inspect_result_for_library(&keyed, entries, 2) == 2u);
+    assert(strcmp(keyed.disc_id, v2_key) == 0 && !keyed.is_supported);
+    assert(memcmp(&keyed, &inspected, sizeof(keyed)) == 0);
+    nk_title_catalog_clear_overlay();
+    printf("[PLAYER_STATE_TEST] a prototype disc keeps its catalog entry under its old key PASS\n");
+}
+
+static void test_prototype_expansion_follows_its_entry_key(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: a prototype disc's expansion follows its entry's key\n");
+    const char sep = nk_platform_path_separator();
+    char cache[512];
+    char library[300], iso[300], cso[300], data_root[NK_MAX_PATH];
+    char v1_key[10], v2_key[10];
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache, sizeof(cache)));
+    assert(strlen(cache) < 200);
+    assert(nk_platform_get_app_data_dir(data_root, sizeof(data_root)));
+    snprintf(iso, sizeof(iso), "%.200s%cprototype_expand.iso", cache, sep);
+    snprintf(cso, sizeof(cso), "%.200s%cprototype_expand.cso", cache, sep);
+    write_prototype_boot_iso(iso, v1_key, v2_key);
+    write_stored_cso(iso, cso);
+    assert(remove(iso) == 0);
+
+    for (int with_old_entry = 1; with_old_entry >= 0; with_old_entry--) {
+        const char *entry_key = with_old_entry ? v1_key : v2_key;
+        const char *other_key = with_old_entry ? v2_key : v1_key;
+        PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        assert(app != NULL);
+        /* A library file of its own for each case. */
+        snprintf(library, sizeof(library), "%.200s%cprototype_expand_library_%d.json", cache,
+                 sep, with_old_entry);
+        nk_library_init(&app->library);
+        assert(strlen(library) < sizeof(app->library.library_path));
+        strcpy(app->library.library_path, library);
+        GameRecord game;
+        seed_entry(&game, v1_key, "Prototype fixture");
+        if (with_old_entry) {
+            /* An entry made before the v2 key whose image is gone, so adding the disc
+               again expands it anew and replaces the record. */
+            assert(strlen(data_root) < 400);
+            snprintf(game.iso_path, sizeof(game.iso_path), "%.400s%cdiscs%c%s%cgone.iso",
+                     data_root, sep, sep, v1_key, sep);
+            assert(player_app_add_game(app, &game));
+        }
+
+        PlayerPsnPackage package;
+        char code[48], message[512];
+        assert(player_disc_image_inspect(cso, &package, code, sizeof(code), message,
+                                         sizeof(message)));
+        snprintf(package.library_path, sizeof(package.library_path), "%s", library);
+        if (!player_disc_image_expand(&package, NULL, code, sizeof(code), message,
+                                      sizeof(message))) {
+            fprintf(stderr, "[PLAYER_STATE_TEST] expansion refused: %s: %s\n", code, message);
+            assert(!"expansion refused");
+        }
+        /* The add: the same key choice the player's add flow makes. */
+        IsoInspectResult inspected;
+        memset(&inspected, 0, sizeof(inspected));
+        assert(iso_inspect_file(package.iso_path, &inspected) && inspected.success);
+        game.disc_key_version = nk_iso_library_key_for_image(
+            app->library.entries, app->library.count, inspected.disc_id,
+            inspected.disc_key_version, inspected.legacy_disc_id, game.disc_id,
+            sizeof(game.disc_id));
+        assert(strcmp(game.disc_id, entry_key) == 0);
+        snprintf(game.iso_path, sizeof(game.iso_path), "%s", package.iso_path);
+        snprintf(game.source_image_path, sizeof(game.source_image_path), "%s", cso);
+        assert(player_app_add_game(app, &game));
+        for (int i = 0; app->game_count != 1 && i < app->game_count; i++) {
+            fprintf(stderr, "[PLAYER_STATE_TEST] old %d lib %d record %d: %s v%u %s\n",
+                    with_old_entry, app->library.count, i,
+                    app->games[i].disc_id, (unsigned)app->games[i].disc_key_version,
+                    app->games[i].iso_path);
+        }
+        assert(app->game_count == 1);
+
+        char error[512] = "";
+        int index = player_app_find_game_by_disc_id(app, entry_key);
+        assert(index >= 0);
+        assert(player_app_remove_game_and_data(app, index, PLAYER_REMOVE_ALSO_DISC_COPY, error,
+                                               sizeof(error)));
+        char folder[NK_MAX_PATH + 32];
+        bool copy_left = !nk_platform_path_missing(package.iso_path);
+        if (copy_left) {
+            fprintf(stderr, "[PLAYER_STATE_TEST] %s entry %s: its expansion %s is left after "
+                    "the title was removed\n", with_old_entry ? "v1" : "v2", entry_key,
+                    package.iso_path);
+        }
+        assert(!copy_left);
+        snprintf(folder, sizeof(folder), "%s%cdiscs%c%s", data_root, sep, sep, entry_key);
+        assert(!nk_platform_dir_exists(folder));
+        snprintf(folder, sizeof(folder), "%s%cdiscs%c%s", data_root, sep, sep, other_key);
+        assert(!nk_platform_dir_exists(folder));
+        assert(strcmp(package.disc_id, entry_key) == 0);
+        free(app);
+    }
+    assert(remove(cso) == 0);
+    printf("[PLAYER_STATE_TEST] a prototype disc's expansion follows its entry's key PASS\n");
+}
+
 static void test_input_classification_and_check_again(void) {
     const char sep = nk_platform_path_separator();
     /* Sized so every path fits the library's NK_MAX_PATH fields. */
@@ -21419,6 +21757,9 @@ int main(int argc, char **argv) {
     printf("[PLAYER_STATE_TEST] Subtest 26: program input classification and check again\n");
     fflush(stdout);
     test_input_classification_and_check_again();
+    test_prototype_entry_keeps_its_v1_key();
+    test_prototype_expansion_follows_its_entry_key();
+    test_prototype_old_key_keeps_its_catalog_entry();
     test_game_build_check_names_the_executable_build();
     test_wizard_ready_step_reports_a_title_not_saved();
     test_prerequisite_resume_follows_the_title();

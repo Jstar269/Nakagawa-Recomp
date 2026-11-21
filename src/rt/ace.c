@@ -5,6 +5,7 @@
  * (contract in ace.h). C library only.
  */
 #include "ace.h"
+#include "../core/nk_input_profile.h"   /* nk_input_profile_axis_byte: the host's stick byte map */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -770,7 +771,9 @@ void ace_set_peak_stats(uint64_t pushes_wide, uint64_t frames_wide, uint64_t fra
 int ace_stick_host_counts(int deadzone_inner_x, int deadzone_inner_y) {
     const int d = deadzone_inner_x > deadzone_inner_y ? deadzone_inner_x : deadzone_inner_y;
     if (d <= 0) return 0;
-    return (int)(((long)d * 255L) / 65535L);
+    /* The host's own byte map, the one its sticks go through: the counts from rest it gives
+       the dead zone's edge. */
+    return (int)nk_input_profile_axis_byte(d) - 128;
 }
 
 /* A host byte as a signed offset from rest (128), at most 127 either way. */

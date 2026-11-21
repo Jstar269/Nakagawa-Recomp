@@ -83,9 +83,14 @@ class CancellationToken:
             raise InterruptedError("Operation cancelled by user")
 
 
+def normalize_disc_id(disc_id: str) -> str:
+    """Return a disc id upper-cased with edge whitespace and '-', '_' and spaces removed."""
+    return "".join(char for char in disc_id.strip().upper() if char not in "-_ ")
+
+
 def _comparable_disc_id(disc_id: str) -> str:
-    """A disc id with case, edge whitespace and the - and _ separators removed."""
-    return disc_id.strip().upper().replace("-", "").replace("_", "")
+    """A disc id normalised for profile matching."""
+    return normalize_disc_id(disc_id)
 
 
 @dataclass(frozen=True)
@@ -104,7 +109,6 @@ class TitleProfile:
     save_namespace: str = ""
     runtime_profile: str = "standard"
     codegen_profile: str = "default"
-    min_iso_bytes: int = 10 * 1024 * 1024  # 10 MB minimum
     game_name: str = ""
     require_local_compatibility_record: bool = False
     loose_content_roots: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
@@ -140,6 +144,13 @@ class IsoMetadata:
     sfo_disc_id: str = ""
     non_retail: bool = False
     identity_sha256: str = ""
+    # Which key disc_id is: 0 for the disc's own ID, 1 for the v1 content key, 2 for
+    # the v2 content key of a disc that boots BOOT.BIN beside an empty or zero-filled
+    # EBOOT.BIN. A v2-keyed disc also carries its v1 key and digest, the key a library
+    # entry made before v2 holds (iso_inspect.key_match_for_library_entry).
+    disc_key_version: int = 0
+    legacy_disc_id: str = ""
+    legacy_identity_sha256: str = ""
 
     @property
     def is_supported(self) -> bool:

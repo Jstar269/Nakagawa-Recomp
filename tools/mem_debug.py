@@ -1090,19 +1090,35 @@ class MemoryDebugger:
         s_cpu_val = int.from_bytes(s_cpu_bytes, byteorder='little')
         return s_cpu_val if s_cpu_val != 0 else None
 
+    def _mock_read(self, addr, size):
+        assert self.mock is not None
+        memory = self.mock["memory"]
+        data = bytearray(size)
+        if len(memory) < size:
+            end = addr + size
+            for key, val in memory.items():
+                try:
+                    key_addr = int(key)
+                except (TypeError, ValueError):
+                    continue
+                if addr <= key_addr < end and str(key_addr) == key:
+                    data[key_addr - addr] = val
+        else:
+            missing = object()
+            for idx in range(size):
+                val = memory.get(str(addr + idx), missing)
+                if val is not missing:
+                    data[idx] = val
+        return bytes(data)
+
     def read_mem(self, addr, size, fmt):
         if fmt not in ("hex", "string", "words"):
             return {"error": "unknown format '%s' (expected hex, string, words)" % fmt}
         if self.is_simulated:
-            assert self.mock is not None
             ok, reason = guest_span_validate(addr, size, MAX_READ_BYTES)
             if not ok:
                 return {"error": "guest span rejected: %s" % reason}
-            data = bytearray(size)
-            for idx in range(size):
-                key = str(addr + idx)
-                data[idx] = self.mock["memory"].get(key, 0)
-            data = bytes(data)
+            data = self._mock_read(addr, size)
         else:
             target_addr, err = self._guest_memory_resolver(addr, size, MAX_READ_BYTES)
             if target_addr is None:
@@ -1186,12 +1202,7 @@ class MemoryDebugger:
         if not ok:
             return {"error": "guest span rejected: %s" % reason}
         if self.is_simulated:
-            assert self.mock is not None
-            data = bytearray(size)
-            for idx in range(size):
-                key = str(addr + idx)
-                data[idx] = self.mock["memory"].get(key, 0)
-            data = bytes(data)
+            data = self._mock_read(addr, size)
         else:
             target_addr, err = self._guest_memory_resolver(addr, size, MAX_READ_BYTES)
             if target_addr is None:

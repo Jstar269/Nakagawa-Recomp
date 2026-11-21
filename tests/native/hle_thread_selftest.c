@@ -3859,6 +3859,32 @@ static void test_io_open_async_notifies_later_callback(void) {
     nk_remove_utf8(host);
 }
 
+/* Audit 2026-11-17 F-27cbd9cd: the guest key keeps a Shift-JIS pair byte for byte, as the
+ * archive key and the loose-file index key do. 0x83 0x41 (katakana A) and 0x83 0x61
+ * (katakana DI) give two keys; a trail 0x5c stays in the name, not a separator; ASCII
+ * outside a pair still folds and '\\' still separates. */
+static void test_data_guest_key_keeps_sjis_pairs(void) {
+    extern char *data_normalize_guest_key(const char *guest_path, int *wanted_variant);
+    static const struct {
+        const char *guest;
+        const char *key;
+    } cases[] = {
+        { "disc0:/PSP_GAME/USRDIR/DATA/\x83\x41.BIN", "data/\x83\x41.bin" },
+        { "disc0:/PSP_GAME/USRDIR/DATA/\x83\x61.BIN", "data/\x83\x61.bin" },
+        { "disc0:/PSP_GAME/USRDIR/data\\" "\x95\x5c\\In.Bin", "data/\x95\x5c/in.bin" },
+        { "umd0:DATA\\SUB/Ab.TO", "data/sub/ab.to" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int variant = 0;
+        char *key = data_normalize_guest_key(cases[i].guest, &variant);
+        int same = key && strcmp(key, cases[i].key) == 0;
+        if (!same) printf("guest key case %zu gave '%s'\n", i, key ? key : "(null)");
+        expect(same, "the guest key keeps a Shift-JIS pair and folds everything else");
+        expect(variant == -2, "an unqualified guest path asks for every variant");
+        free(key);
+    }
+}
+
 /* An enhancement data file is served rewritten only when the stock bytes it replaces match
  * (docs/ENHANCEMENT_CONTRACT.md section 9.6); other paths are untouched. */
 static void test_io_enhancement_data_file(void) {
@@ -5959,6 +5985,7 @@ static void test_fd_namespace(void) {
     test_io_memory_stick_cells_through_syscall();
     test_io_open_async_notifies_later_callback();
     test_io_enhancement_data_file();
+    test_data_guest_key_keeps_sjis_pairs();
     test_state_sampler_rows();
     test_enhancement_logic_speed();
 

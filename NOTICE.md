@@ -115,9 +115,11 @@ We aim to respond promptly and will remove material where appropriate.
   (`MIT`), the Zstandard 1.5.7 single-file decompressor (`BSD-3-Clause`, elected from
   upstream's `BSD-3-Clause OR GPL-2.0-only`), the LZMA SDK decoder (public domain) and
   the dr_flac v0.13.4 development snapshot libchdr carries at that pin (the Unlicense, elected from its Unlicense or `MIT-0` choice). Every file
-  keeps its upstream bytes apart from LF line endings, one added final newline and two small code fixes in
-  `src/libchdr_codec_flac.c` and `src/libchdr_huffman.c`, all recorded as LOCAL DELTA in
-  `third_party/libchdr/PROVENANCE.md`; the
+  keeps its upstream bytes apart from LF line endings, one added final newline and small code fixes in six
+  files: the empty-hunk check in `src/libchdr_codec_flac.c` and the Huffman lookup-table prefill (2026-11-17), and allocation
+  checks on the HUFF codec path (2026-11-20) in `src/libchdr_huffman.c`, `src/libchdr_codec_huff.c`,
+  `src/libchdr_bitstream.c`, `src/libchdr_chd.c` and `include/libchdr/huffman.h`, all recorded as LOCAL DELTA in
+  `third_party/libchdr/PROVENANCE.md`, which lists each file; the
   licence texts and the pinned manifest are under `third_party/libchdr/`. It is compiled into the native player, which uses it only
   to expand a CHD disc image into a plain `.iso` when the image is added; it is not in the
   runtime.
@@ -273,9 +275,9 @@ SHA-256 in `assets/third_party_components.json`:
 
 | DLL | License | License text |
 | --- | --- | --- |
-| `SDL3.dll` | Zlib | `third_party/licenses/sdl3/LICENSE.txt` |
+| `SDL3.dll` | Zlib AND BSD-3-Clause | `third_party/licenses/sdl3/LICENSE.txt`, `third_party/licenses/sdl3/yuv2rgb-LICENSE.txt`, `third_party/licenses/sdl3/hidapi-LICENSE.txt` |
 | `SDL3_ttf.dll` | Zlib | `third_party/licenses/SDL3_ttf.txt` |
-| `libfreetype-6.dll` | FTL | `third_party/licenses/FreeType-FTL.txt` |
+| `libfreetype-6.dll` | FTL AND MIT | `third_party/licenses/FreeType-FTL.txt`, `third_party/licenses/freetype/bdf-README.txt`, `third_party/licenses/freetype/pcf-README.txt` |
 | `libharfbuzz-0.dll` | MIT-Modern-Variant AND MIT | `third_party/licenses/HarfBuzz.txt`, `third_party/licenses/harfbuzz/ms-use-COPYING.txt` |
 | `libgraphite2.dll` | MIT (chosen) | `third_party/licenses/Graphite2.txt` |
 | `libpng16-16.dll` | libpng-2.0 | `third_party/licenses/libpng.txt` |
@@ -296,7 +298,19 @@ License choices and combination notes:
   a binary distribution: portions of this software are copyright (C) 1996-2026
   The FreeType Project (<https://freetype.org>), and this software is based in
   part on the work of the FreeType Team. The package's `THIRD_PARTY_NOTICES.txt`
-  repeats that statement.
+  repeats that statement. FreeType's `LICENSE.TXT` gives the contributed BDF and
+  PCF drivers, and `src/base/fthash.c` with its header, an X11-style (MIT)
+  licence that asks for its notice in all copies. The MSYS2 build compiles all
+  three into `libfreetype-6.dll` but installs only `FTL.TXT`, so the package
+  ships `src/bdf/README` and `src/pcf/README` from upstream at the packaged tag,
+  and its notices repeat `fthash.c`'s copyright lines.
+- **SDL3** is zlib, but `SDL3.dll` also compiles `src/video/yuv2rgb`
+  (BSD-3-Clause, Adrien Descamps) and, on Windows, HIDAPI, which may be used
+  under GPL-3.0, a BSD-style licence or its original licence; this distribution
+  uses the **BSD-style** option. Both binary clauses ask for the text in the
+  documentation, and the MSYS2 package installs only `LICENSE.txt`, so the
+  package ships `src/video/yuv2rgb/LICENSE` and `src/hidapi/LICENSE-bsd.txt`
+  from upstream at the packaged tag.
 - **Graphite2** is granted under four licenses (LGPL-2.1+, MPL-2.0, GPL-2.0+,
   or MIT) by its upstream `LICENSE`; this distribution uses the **MIT** option.
 - **HarfBuzz**'s `COPYING` refers readers to `COPYING` files in subdirectories.

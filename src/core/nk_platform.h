@@ -129,6 +129,11 @@ bool nk_platform_tree_size(const char *path, const char *skip_child, uint64_t *o
  * top-level child named skip_child (NULL for none) is kept, and then so is
  * path. A missing path is already gone: true. */
 bool nk_platform_remove_tree(const char *path, const char *skip_child);
+/* Remove the directory at path only when it is empty: one call the host refuses
+ * for a directory that holds anything, so an entry another program adds at the
+ * same moment is never removed (Win32 RemoveDirectoryW, POSIX rmdir). False when
+ * it is not empty, missing, not a directory or cannot be removed. */
+bool nk_platform_remove_empty_dir(const char *path);
 int64_t nk_platform_get_file_size(const char *path);
 bool nk_platform_mkdir_p(const char *dir_path);
 /* Create a directory tree and private files for user-owned source material.

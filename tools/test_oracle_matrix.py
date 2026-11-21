@@ -26,7 +26,11 @@ import unittest
 from typing import Any, cast
 from unittest.mock import patch
 
-from tools.psp_oracle import oracle_matrix as om
+_TOOLS_DIR = str(Path(__file__).resolve().parent)
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+
+from psp_oracle import oracle_matrix as om  # noqa: E402
 
 COMMIT = "1234567890abcdef1234567890abcdef12345678"
 SESSION = "matrix-test"
@@ -289,7 +293,7 @@ _LOCK_WRITER_PROCESS = """
 import random, sys, time
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from tools.psp_oracle import oracle_matrix as om
+from psp_oracle import oracle_matrix as om
 path, mode, count, label = Path(sys.argv[2]), sys.argv[3], int(sys.argv[4]), sys.argv[5]
 def bump(lock):
     lock[label] = lock.get(label, 0) + 1
@@ -332,7 +336,7 @@ class LockWriterProcessTests(MatrixTestCase):
 
     def start_writer(self, mode: str, label: str, count: int = 0) -> subprocess.Popen[str]:
         process = subprocess.Popen(
-            [sys.executable, "-c", _LOCK_WRITER_PROCESS, str(om.ROOT), str(self.lock_path), mode,
+            [sys.executable, "-c", _LOCK_WRITER_PROCESS, _TOOLS_DIR, str(self.lock_path), mode,
              str(count), label, SESSION],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
@@ -1043,6 +1047,14 @@ class ClassifyLaunchTests(MatrixTestCase):
     def test_probe_command_timeout_is_an_intervention(self) -> None:
         outcome = self.classify(self.private / "missing.json", probe_exit=None, probe_stdout="")
         self.assertEqual(outcome.status, om.INTERVENTION)
+
+
+class ImportIsolationTests(unittest.TestCase):
+    def test_imports_psp_oracle_as_top_level_package(self) -> None:
+        self.assertNotIn("tools.psp_oracle", sys.modules)
+        self.assertNotIn("tools.psp_oracle.oracle_matrix", sys.modules)
+        self.assertIs(sys.modules.get("psp_oracle.oracle_matrix"), om)
+        self.assertNotIn("tools.psp_oracle", _LOCK_WRITER_PROCESS)
 
 
 if __name__ == "__main__":
