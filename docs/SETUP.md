@@ -876,6 +876,42 @@ settings, create an empty file named `portable.txt` in the same folder as `nakag
 - Updating: unpack the new version, then copy `portable.txt` and the `data` folder beside the new
   program. Nakagawa does not move or delete the old folder.
 
+### Start a game from another launcher
+
+A front-end such as Quiver, Pegasus, ES-DE, LaunchBox or Steam ROM Manager starts a game by running a program
+with arguments. Nakagawa Recomp works with any of them that can run an executable with a command line.
+
+- **Program:** `bin\nakagawa_player.exe` inside the unpacked release ZIP
+  (`nakagawa-recomp-<version>-windows-x64.zip`).
+- **A game already in your library:** `nakagawa_player.exe --launch-title=<disc ID>`, for example
+  `--launch-title=ULUS10041` (or `<disc ID>:<SHA-1>` to name one disc image). No launcher window opens; the player
+  waits for the game and passes its exit code on. **Add to Steam** writes this form for you.
+- **A disc image the front-end hands over:** `nakagawa_player.exe --iso=<path> --launch-now`. The player adds the
+  image to your library if it is not there and starts the game. Without `--launch-now` the launcher window opens
+  instead (`--stage` adds the image first; `--stage-only` adds it and exits).
+- **Spaces in a path:** quote the whole path in the front-end's template, as in `--iso "<path>"` or
+  `"--iso=<path>"`. Every option that takes a value accepts `--name=value` or `--name value`, so either
+  spelling works; a value cannot itself start with `--`.
+- **Nothing is ignored.** An unknown option, a game path without `--iso`, an option missing its value, or a value
+  given to a switch is refused: the player names the problem on standard error (and in `player-output.txt` in the
+  logs folder when it has no console), shows no window and exits with code 2. `nakagawa_player.exe --help` lists
+  the options and `--version` prints `Nakagawa Recomp v<version> (commit <hash>)` on one line and exits 0.
+- **Where the data lives:** per user by default (`%LOCALAPPDATA%\Nakagawa\data`). An empty `portable.txt` beside
+  `nakagawa_player.exe` (see Portable mode above; Quiver can add one from its Manage menu) moves it to
+  `<program folder>\data`, and `--user-data-root=<folder>` wins over both. A launcher that backs up saves reads
+  them from the saves folder inside that data root.
+- **One launcher per data folder.** If Nakagawa Recomp is already open on the same data folder, a second start
+  brings that window forward, starts nothing, says so on standard error and exits with code 0. Runs with
+  `--screenshot`, `--stage-only` or `--headless-launch` are not affected.
+
+Exit codes of a start from the command line: `0` finished (a game that was started returns its own exit code
+instead, whatever it is); `1` the launcher window could not be created; `2` the command line, the data folder, the
+`--launch-title` name or the library entry was refused; `3` the game has no runtime prepared for this PC yet (open
+Nakagawa Recomp and build it); `4` the game could not be started, or the launcher cannot start (a missing
+`SDL3_ttf.dll`); `5` the game's window request was lost; `6` the game ended abnormally (a crash); `7` and `8` only
+for `--headless-launch` (timeout, checkpoint not reached). When a `--launch-title` start is refused, the player
+also shows a message box, so a front-end with no console still tells the user.
+
 ### System fonts
 
 Firmware follows PPSSPP's model. The operating system is HLE, the modules a game ships on its disc may run as LLE, and Nakagawa ships no firmware and decrypts none. It ships open replacement fonts. Authentic in-game typography needs the PSP's own system fonts in Sony's PlayStation Glyph Format (`.pgf`): you may copy those plain files from your own console's `flash0:/font/` into a local folder that Nakagawa reads. They stay on your PC. The project never bundles, commits, packages or uploads them, and it does not decrypt anything from `flash0`.
