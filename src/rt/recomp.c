@@ -48,6 +48,9 @@ int sr_hit_hle = 0;
 int g_sr_heap_watch = 0;
 extern CpuState *s_cpu;
 
+/* An arena the shipped runtime handed over before the first sr_mem_init (sr_mem_adopt_arena). */
+static uint8_t *s_adopted_arena;
+
 #include <time.h>
 extern uint64_t SDL_GetTicksNS(void);
 
@@ -269,20 +272,27 @@ void sr_mem_init(void) {
     sr_nan_trap_context_hook = sr_nan_trap_dump_context;
 #endif
     if (!g_mem) {
-        /* Arena covers guest physical [0, 0x0c000000). RAM at 0x08000000, VRAM at 0x04000000.
-         * We set g_mem to the guest RAM base (SR_RAM_BASE) so guest 0x08000000 maps to g_mem. */
-        uint8_t *arena = (uint8_t *)calloc(0x0c000000u, 1);
+        /* Arena covers guest physical [0, SR_GUEST_ARENA_SIZE). RAM at 0x08000000, VRAM at
+         * 0x04000000. g_mem is the guest RAM base (SR_RAM_BASE), so guest 0x08000000 maps to it. */
+        uint8_t *arena = s_adopted_arena ? s_adopted_arena
+                                         : (uint8_t *)calloc(SR_GUEST_ARENA_SIZE, 1);
         if (!arena) {
             fprintf(stderr, "sr_mem_init: out of memory\n");
             abort();
         }
-        g_mem = arena + 0x08000000u;
+        g_mem = arena + SR_RAM_BASE;
         g_sr_heap_watch = getenv("SR_HEAP_WATCH") ? 1 : 0;
         if (g_sr_heap_watch) {
             fprintf(stderr,
                 "HEAP_WATCH: tracking first writes to dynamically freed allocator headers\n");
         }
     }
+}
+
+bool sr_mem_adopt_arena(uint8_t *arena, size_t size) {
+    if (g_mem || !arena || size != SR_GUEST_ARENA_SIZE) return false;
+    s_adopted_arena = arena;
+    return true;
 }
 
 static uint32_t g_loaded_end = 0;   /* highest guest address written by the loader */
@@ -306,7 +316,7 @@ static void sr_heap_reset(void);
 void sr_mem_reset(void) {
     sr_mem_init();
     /* g_mem points at guest RAM 0x08000000 inside the full physical arena. */
-    memset(g_mem - 0x08000000u, 0, 0x0c000000u);
+    memset(g_mem - SR_RAM_BASE, 0, SR_GUEST_ARENA_SIZE);
     /* The memset zeroed the newlib heap arena too, so its allocator metadata (bump
      * pointer, free list, header bits) now describes bytes that no longer exist. */
     sr_heap_reset();

@@ -187,8 +187,8 @@ PLAYER_NOT_CODES = {
     # builder's event statuses, none of them a problem-report code
     "OK", "MISSING", "STALE", "INCOMPATIBLE", "UNKNOWN", "UNSUPPORTED", "HASHED", "RUNNING",
     "PASS", "FAIL",
-    # Discord RPC event names and the HTTP method
-    "READY", "ERROR", "GET",
+    # Discord RPC event names and the HTTP methods (RetroAchievements' requests are POSTs)
+    "READY", "ERROR", "GET", "POST",
     # environment variables without a project prefix
     "APPDATA", "PATH", "PYTHON", "USER", "USERNAME", "USERPROFILE",
     # the second half of an environment variable's name: nk_launch.c writes SR_CHEATS_FILE as
@@ -197,6 +197,8 @@ PLAYER_NOT_CODES = {
     # disc folders, PARAM.SFO keys, module and folder names, file magic and disc-format names
     "EXTRACTED", "KMODULE", "PPSSPP", "SYSDIR", "TEST", "TITLE", "USRDIR", "CD001", "CISO", "CSO",
     "ELF", "IHDR", "ZISO", "ZSO",
+    # PNG chunk names of the UI test's synthetic sample badges (player_ui_test.c)
+    "IDAT", "IEND",
 }
 #: Environment variable names.
 PLAYER_NOT_CODE_PREFIXES = ("NK_", "SR_", "XDG_", "NAKAGAWA_", "PLAYER_UI_TEST_")

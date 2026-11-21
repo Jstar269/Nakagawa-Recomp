@@ -194,6 +194,11 @@ void player_app_init(PlayerApp *app) {
     /* Initialize settings from disk or defaults */
     player_app_settings_init_default(&app->settings);
     player_app_load_settings(app, NULL);
+    app->achievements_store_available = nk_platform_credential_store_available();
+    snprintf(app->achievements_status, sizeof(app->achievements_status), "%s",
+             app->achievements_store_available
+                 ? "Sign in to connect."
+                 : "Sign-in requires Windows Credential Manager; this platform is unsupported.");
 
     /* Initialize native library */
     nk_library_init(&app->library);
@@ -1450,6 +1455,7 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->build_speed = PACKAGE_BUILD_SPEED_BALANCED;
     settings->check_updates_at_start = false;
     settings->discord_presence = false;
+    settings->achievements_enabled = false;
     settings->download_cover_art = false;
     settings->cheats = false;
     settings->picker_folder[0] = '\0';
@@ -2263,6 +2269,14 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.discord_presence = discord_val;
     }
 
+    /* RetroAchievements is independent of the reserved network_mode switch and is off unless
+       the file explicitly stores true. */
+    NkJsonNode *achievements_node = nk_json_obj_get(root, "achievements_enabled");
+    bool achievements_val = false;
+    if (achievements_node && nk_json_get_bool(achievements_node, &achievements_val)) {
+        app->settings.achievements_enabled = achievements_val;
+    }
+
     /* Opt-in cover art (#2632): off unless the file says true. */
     NkJsonNode *cover_art_node = nk_json_obj_get(root, "download_cover_art");
     bool cover_art_val = false;
@@ -2539,6 +2553,8 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
             app->settings.check_updates_at_start ? "true" : "false");
     fprintf(f, "  \"discord_presence\": %s,\n",
             app->settings.discord_presence ? "true" : "false");
+    fprintf(f, "  \"achievements_enabled\": %s,\n",
+            app->settings.achievements_enabled ? "true" : "false");
     fprintf(f, "  \"download_cover_art\": %s,\n",
             app->settings.download_cover_art ? "true" : "false");
     fprintf(f, "  \"cheats\": %s,\n", app->settings.cheats ? "true" : "false");
@@ -4203,6 +4219,198 @@ void player_app_toggle_discord_presence(PlayerApp *app) {
     player_dev_log_add(app, "settings", "Discord status %s",
                        app->settings.discord_presence ? "on" : "off");
     maybe_persist_settings(app);
+}
+
+void player_app_set_achievements_enabled(PlayerApp *app, bool enabled) {
+    if (!app) return;
+    if (enabled && !app->achievements_store_available) {
+        snprintf(app->achievements_status, sizeof(app->achievements_status),
+                 "Sign-in requires Windows Credential Manager; this platform is unsupported.");
+        return;
+    }
+    if (app->settings.achievements_enabled == enabled) return;
+    app->settings.achievements_enabled = enabled;
+    snprintf(app->achievements_status, sizeof(app->achievements_status), "%s",
+             enabled ? "Sign in to connect."
+                     : "RetroAchievements is off.");
+    player_dev_log_add(app, "settings", "RetroAchievements %s", enabled ? "on" : "off");
+    maybe_persist_settings(app);
+}
+
+static const char *achievements_block_reason(bool cheats, bool timing_package) {
+    if (cheats)
+        return "Cheats are on, and a changed game earns nothing.";
+    if (timing_package)
+        return "60 FPS game logic changes the game's speed, so it earns nothing.";
+    return NULL;
+}
+
+const char *player_app_achievements_block(const PlayerApp *app, int game_index) {
+    if (!app) return NULL;
+    const bool timing = game_index >= 0 && game_index < app->game_count &&
+                        player_game_has_timing_package(&app->games[game_index]);
+    return achievements_block_reason(app->settings.cheats || app->cheats_session, timing);
+}
+
+const char *player_launch_achievements_block(const PlayerLaunchWork *work) {
+    if (!work) return NULL;
+    return achievements_block_reason(work->settings.cheats || work->cheats_session,
+                                     player_game_has_timing_package(&work->game));
+}
+
+/* ---- RetroAchievements badge pictures (#1316) ------------------------------------------- */
+
+size_t player_ach_badge_find(const PlayerAchBadgeSlot *slots, size_t slot_count,
+                             const char *name, bool locked) {
+    for (size_t i = 0u; slots && name && i < slot_count; i++) {
+        if (slots[i].state != PLAYER_ACH_BADGE_FREE && slots[i].locked == locked &&
+            strcmp(slots[i].name, name) == 0)
+            return i;
+    }
+    return slot_count;
+}
+
+bool player_ach_badge_in_use(const PlayerAchievementRow *rows, size_t row_count,
+                             const char *name, bool locked) {
+    for (size_t i = 0u; rows && name && name[0] && i < row_count; i++) {
+        if (strcmp(rows[i].badge_name, name) != 0) continue;
+        /* A locked row uses both of its pictures; an unlocked row only its unlocked one. */
+        if (!locked || !rows[i].unlocked) return true;
+    }
+    return false;
+}
+
+size_t player_ach_badges_release_unused(PlayerAchBadgeSlot *slots, size_t slot_count,
+                                        const PlayerAchievementRow *rows, size_t row_count,
+                                        bool *released) {
+    size_t freed = 0u;
+    for (size_t i = 0u; slots && i < slot_count; i++) {
+        if (released) released[i] = false;
+        if (slots[i].state == PLAYER_ACH_BADGE_FREE ||
+            player_ach_badge_in_use(rows, row_count, slots[i].name, slots[i].locked))
+            continue;
+        memset(&slots[i], 0, sizeof slots[i]);
+        if (released) released[i] = true;
+        freed++;
+    }
+    return freed;
+}
+
+bool player_ach_badge_next(const PlayerAchievementRow *rows, size_t row_count,
+                           const PlayerAchBadgeSlot *slots, size_t slot_count,
+                           size_t *out_row, bool *out_locked) {
+    for (int pass = 0; rows && pass < 2; pass++) {
+        for (size_t i = 0u; i < row_count; i++) {
+            const PlayerAchievementRow *row = &rows[i];
+            const bool locked = pass == 0 ? !row->unlocked : false;
+            if (!row->badge_name[0] || (pass == 1 && row->unlocked) ||
+                player_ach_badge_find(slots, slot_count, row->badge_name, locked) < slot_count)
+                continue;
+            if (out_row) *out_row = i;
+            if (out_locked) *out_locked = locked;
+            return true;
+        }
+    }
+    return false;
+}
+
+size_t player_ach_badge_free_slot(const PlayerAchBadgeSlot *slots, size_t slot_count) {
+    for (size_t i = 0u; slots && i < slot_count; i++)
+        if (slots[i].state == PLAYER_ACH_BADGE_FREE) return i;
+    return slot_count;
+}
+
+static bool ach_badge_cache_join(char *out, size_t out_size, const char *dir, const char *file,
+                                 const char *suffix) {
+    const int n = snprintf(out, out_size, "%s%c%s%s", dir, nk_platform_path_separator(), file,
+                           suffix);
+    return n > 0 && (size_t)n < out_size;
+}
+
+static bool ach_badge_part_name(const char *name) {
+    const size_t length = strlen(name);
+    return length > 5u && strcmp(name + length - 5u, ".part") == 0;
+}
+
+typedef struct {
+    const char *dir;
+    size_t removed;
+} AchBadgeCacheSweep;
+
+static bool ach_badge_cache_sweep_file(const char *name, void *context) {
+    AchBadgeCacheSweep *sweep = (AchBadgeCacheSweep *)context;
+    char path[NK_MAX_PATH];
+    if (ach_badge_part_name(name) && ach_badge_cache_join(path, sizeof path, sweep->dir, name, "") &&
+        nk_remove_utf8(path) == 0)
+        sweep->removed++;
+    return true;
+}
+
+size_t player_ach_badge_cache_open(const char *dir) {
+    AchBadgeCacheSweep sweep = {dir, 0u};
+    if (!dir || !dir[0]) return 0u;
+    (void)nk_platform_list_files(dir, ach_badge_cache_sweep_file, &sweep);
+    return sweep.removed;
+}
+
+PlayerAchBadgeCacheRead player_ach_badge_cache_read(const char *dir, const char *file,
+                                                    size_t max_bytes, PlayerAchBadgeCheck check,
+                                                    void *context, uint8_t **out,
+                                                    size_t *out_size) {
+    char path[NK_MAX_PATH];
+    if (out) *out = NULL;
+    if (out_size) *out_size = 0u;
+    if (!dir || !dir[0] || !file || !file[0] || !check || !out || !out_size || max_bytes == 0u ||
+        !ach_badge_cache_join(path, sizeof path, dir, file, ""))
+        return PLAYER_ACH_BADGE_CACHE_MISSING;
+    FILE *stream = nk_fopen_utf8(path, "rb");
+    if (!stream) return PLAYER_ACH_BADGE_CACHE_MISSING;
+    uint8_t *bytes = (uint8_t *)malloc(max_bytes + 1u);
+    const size_t size = bytes ? fread(bytes, 1u, max_bytes + 1u, stream) : 0u;
+    const bool read_failed = !bytes || ferror(stream);
+    fclose(stream);
+    if (read_failed) {
+        free(bytes);
+        return PLAYER_ACH_BADGE_CACHE_MISSING;
+    }
+    if (size == 0u || size > max_bytes || !check(bytes, size, context)) {
+        /* Cut short or damaged (a bad answer kept, or a write the power cut): it goes, and the
+           picture is asked for again. */
+        free(bytes);
+        (void)nk_remove_utf8(path);
+        return PLAYER_ACH_BADGE_CACHE_REMOVED;
+    }
+    *out = bytes;
+    *out_size = size;
+    return PLAYER_ACH_BADGE_CACHE_HIT;
+}
+
+static bool ach_badge_count_file(const char *name, void *context) {
+    (void)name;
+    ++*(size_t *)context;
+    return true;
+}
+
+bool player_ach_badge_cache_write(const char *dir, const char *file, const uint8_t *bytes,
+                                  size_t size, size_t max_files) {
+    char path[NK_MAX_PATH];
+    char temporary[NK_MAX_PATH];
+    size_t files = 0u;
+    if (!dir || !dir[0] || !file || !file[0] || !bytes || size == 0u ||
+        !ach_badge_cache_join(path, sizeof path, dir, file, "") ||
+        !ach_badge_cache_join(temporary, sizeof temporary, dir, file, ".part") ||
+        !nk_platform_mkdir_p_private(dir) ||
+        !nk_platform_list_files(dir, ach_badge_count_file, &files) || files >= max_files)
+        return false;
+    FILE *stream = nk_platform_fopen_private(temporary, "wb");
+    if (!stream) return false;
+    bool ok = fwrite(bytes, 1u, size, stream) == size;
+    /* On the disk before the rename, so a power cut leaves the old file or the whole new one. */
+    if (ok) ok = nk_platform_sync_file(stream);
+    if (fclose(stream) != 0) ok = false;
+    if (ok) ok = nk_rename_utf8(temporary, path) == 0;
+    if (!ok) (void)nk_remove_utf8(temporary);
+    return ok;
 }
 
 bool player_app_discord_activity(const PlayerApp *app, NkDiscordActivity *out) {
@@ -6305,6 +6513,15 @@ void player_launch_work_run(PlayerLaunchWork *work) {
         work->failed_step = PLAYER_LAUNCH_STEP_PREPARE;
         return;
     }
+    if (!memchr(work->guest_memory_channel, '\0', sizeof work->guest_memory_channel)) {
+        snprintf(session->last_error, sizeof(session->last_error),
+                 "The guest-memory channel name is not terminated.");
+        work->failed_step = PLAYER_LAUNCH_STEP_PREPARE;
+        work->result = NK_ERROR_GENERIC;
+        return;
+    }
+    snprintf(session->config.guest_memory_channel,
+             sizeof session->config.guest_memory_channel, "%s", work->guest_memory_channel);
 
     /* Apply user settings via typed runtime configuration */
     player_app_apply_settings_to_session(&work->settings, &session->config);

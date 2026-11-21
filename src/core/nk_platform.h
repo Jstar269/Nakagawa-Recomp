@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -140,6 +141,243 @@ bool nk_platform_mkdir_p(const char *dir_path);
  * the user's application-data ACLs through the wide-character backend. */
 bool nk_platform_mkdir_p_private(const char *dir_path);
 FILE *nk_platform_fopen_private(const char *path, const char *mode);
+
+/* The operating system's name and version for a User-Agent's system part, such as
+ * "Windows 10.0.26100" or "Linux 6.8.0-45-generic": printable ASCII without parentheses. False,
+ * with out empty, when neither can be read or out is too small. */
+bool nk_platform_os_description(char *out, size_t out_size);
+
+/* Per-user OS credential storage. Secrets are never written to a settings or other plain file.
+ * Unsupported platforms return false and do not provide a file fallback. */
+bool nk_platform_credential_store_available(void);
+bool nk_platform_credential_read(const char *target, char *username, size_t username_size,
+                                char *secret, size_t secret_size);
+bool nk_platform_credential_write(const char *target, const char *username, const char *secret);
+bool nk_platform_credential_delete(const char *target);
+/* Asks for a user name and password in the operating system's own credential dialog, which
+ * names target; nothing is stored. 1 when both were entered, 0 when the user cancelled, -1 when
+ * there is no such dialog or it failed. On anything but 1 both buffers are empty. The caller
+ * clears the password after use. */
+int nk_platform_credential_prompt(const char *caption, const char *message, const char *target,
+                                  char *username, size_t username_size,
+                                  char *password, size_t password_size);
+
+/* A local, per-launch view of the runtime's generic guest arena. The parent player creates it;
+ * the runtime opens the named view and synchronizes once at its vblank boundary. Unsupported
+ * platforms return false, leaving ordinary runtime memory allocation in use. */
+#define NK_GUEST_MEMORY_CHANNEL_NAME_MAX 192u
+#define NK_GUEST_MEMORY_CHANNEL_CONTROL_BYTES 4096u
+/* The arena the player creates and the runtime adopts: guest physical [0, 0x0c000000). It is the
+ * runtime's SR_GUEST_ARENA_SIZE (src/rt/recomp.h), which src/rt/gui.c asserts equal; the runtime
+ * refuses a channel of any other size. */
+#define NK_GUEST_MEMORY_ARENA_SIZE 0x0c000000u
+#define NK_GUEST_MEMORY_NOTIFICATION_MAX 192u
+/* The player's last messages kept for the runtime, which shows them one at a time. */
+#define NK_GUEST_MEMORY_NOTIFICATION_RING 8u
+typedef struct {
+    volatile uint32_t owner_pid;
+    volatile uint32_t notification_sequence;
+    char notification[NK_GUEST_MEMORY_NOTIFICATION_MAX]; /* the newest, for older runtimes */
+    /* NK_GUEST_MEMORY_NOTIFICATION_RING from a player that keeps the ring, else 0: message n is
+     * in notification_ring[n % NK_GUEST_MEMORY_NOTIFICATION_RING]. */
+    volatile uint32_t notification_ring_slots;
+    char notification_ring[NK_GUEST_MEMORY_NOTIFICATION_RING][NK_GUEST_MEMORY_NOTIFICATION_MAX];
+    volatile uint32_t runtime_pid; /* set by the runtime's open; 0 until a runtime opened it */
+} NkGuestMemoryChannelControl;
+typedef char nk_guest_memory_channel_control_fits
+    [(sizeof(NkGuestMemoryChannelControl) <= NK_GUEST_MEMORY_CHANNEL_CONTROL_BYTES) ? 1 : -1];
+typedef struct {
+    void *mapping_handle;
+    void *view;
+    void *owner_process;
+    NkGuestMemoryChannelControl *control;
+    uint8_t *arena;
+    size_t arena_size;
+    void *frame_event;
+    void *ack_event;
+    void *stop_event;
+    bool owner;
+    char name[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
+    /* Parent, once nk_platform_guest_memory_channel_serve started its thread. */
+    void *service_thread;
+    void (*service_frame)(void *context);
+    void *service_context;
+    volatile int32_t service_state;
+} NkGuestMemoryChannel;
+bool nk_platform_guest_memory_channel_create(NkGuestMemoryChannel *channel,
+                                             const char *name, size_t arena_size);
+bool nk_platform_guest_memory_channel_open(NkGuestMemoryChannel *channel,
+                                           const char *name, size_t arena_size);
+/* Parent: 1 for one guest vblank, 0 when stopped, -1 on an OS error. */
+int nk_platform_guest_memory_channel_wait_frame(NkGuestMemoryChannel *channel);
+/* Parent: releases the runtime after evaluating one vblank. */
+bool nk_platform_guest_memory_channel_ack_frame(NkGuestMemoryChannel *channel);
+/* Parent: serves the channel on a thread of its own, so the runtime never waits for the
+ * caller's event loop (a modal box or a window being dragged stops that loop, and must not
+ * stop the game). For each vblank the runtime publishes, frame(context) runs once on that
+ * thread while the guest is paused on that vblank, and the vblank is then acknowledged. The
+ * thread ends when the channel is stopped; nk_platform_guest_memory_channel_close waits for it,
+ * so do not close while holding anything frame needs. The channel must stay where it is while
+ * it is served. False when the thread cannot start or the platform has no channel. */
+bool nk_platform_guest_memory_channel_serve(NkGuestMemoryChannel *channel,
+                                            void (*frame)(void *context), void *context);
+/* Parent: 1 while frames are served, 0 when serving never started or ended with a stop, -1 when
+ * it ended on an OS error (the channel is then stopped, which releases the runtime). */
+int nk_platform_guest_memory_channel_serving(NkGuestMemoryChannel *channel);
+/* Parent: true once a runtime has opened the channel. A runtime that ignores it (built before
+ * the channel, or without it) never does, so its frames will never arrive. */
+bool nk_platform_guest_memory_channel_runtime_attached(const NkGuestMemoryChannel *channel);
+/* Runtime: publishes one vblank and waits until the player acknowledges it or stops. */
+bool nk_platform_guest_memory_channel_sync_vblank(NkGuestMemoryChannel *channel);
+void nk_platform_guest_memory_channel_stop(NkGuestMemoryChannel *channel);
+void nk_platform_guest_memory_channel_close(NkGuestMemoryChannel *channel);
+/* Parent: queues one short message for the runtime. Runtime: reads the oldest it has not read
+ * (seen_sequence, which starts at 0), one per call; when more than the ring holds arrived
+ * unread, the oldest of them are passed over. A player that keeps no ring gives the newest only. */
+bool nk_platform_guest_memory_channel_notify(NkGuestMemoryChannel *channel, const char *text);
+bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *channel,
+                                                        uint32_t *seen_sequence,
+                                                        char *text, size_t text_size);
+/* A RetroAchievements unlock (#1316) is the message this begins, followed by the achievement's
+ * title, then a line feed and its points in decimal, then a line feed and its badge name (empty
+ * when it has none): "Achievement unlocked: First Steps\n5\n00001". The title holds no line feed
+ * (the bridge turns control characters into spaces), so the fields cannot run together. The
+ * in-game toast captions it "RetroAchievements"; any other message keeps the caption
+ * "Host notification". */
+#define NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "Achievement unlocked: "
+/* A completed RetroAchievements set is the message this begins, followed by the game's title
+ * (no line feed): "Set completed: Hot Shots Tennis". It is captioned "RetroAchievements" too. */
+#define NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED "Set completed: "
+#define NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX 160u
+#define NK_GUEST_MEMORY_NOTIFICATION_BADGE_MAX 8u
+/* The text after `prefix` when text begins with it and goes on, else NULL. */
+static inline const char *nk_guest_memory_notification_after(const char *text,
+                                                             const char *prefix) {
+    size_t i = 0u;
+    while (text && prefix[i] && text[i] == prefix[i]) i++;
+    return text && !prefix[i] && text[i] ? text + i : NULL;
+}
+static inline const char *nk_guest_memory_notification_caption(const char *text) {
+    return nk_guest_memory_notification_after(text, NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED) ||
+                   nk_guest_memory_notification_after(text,
+                                                      NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED)
+               ? "RetroAchievements"
+               : "Host notification";
+}
+
+/* True, with the game's title in title (cut at a whole UTF-8 character to fit, and at a line
+ * feed), for a completed-set message; false and "" for any other. */
+static inline bool nk_guest_memory_notification_set_completed(const char *text, char *title,
+                                                              size_t title_size) {
+    const char *p =
+        nk_guest_memory_notification_after(text, NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED);
+    if (title && title_size) title[0] = '\0';
+    if (!p || !title || title_size == 0u) return false;
+    size_t n = 0u;
+    while (p[n] && p[n] != '\n') n++;
+    if (n >= title_size) {
+        n = title_size - 1u;
+        while (n > 0u && ((unsigned char)p[n] & 0xC0u) == 0x80u) n--; /* a whole character */
+    }
+    memcpy(title, p, n);
+    title[n] = '\0';
+    return n > 0u;
+}
+
+/* The file a badge picture is kept in, inside the player's badge folder (achievements-badges),
+ * the same for the player that writes it and the runtime that reads it: "b", then the badge
+ * name with each capital letter written as "_" and its small letter, then "-lock" for the
+ * locked picture, then ".png" ("00001" -> "b00001.png", "A2b" locked -> "b_a2b-lock.png").
+ * The name must be one to seven ASCII letters and digits; anything else gives false and "".
+ * The leading "b" keeps every file off the Windows device names (CON, NUL, COM1, LPT1 and the
+ * rest, which name a device even with an extension), and the mark before a capital letter
+ * keeps names that differ only in case ("A2b", "a2B") in different files on a file system
+ * that ignores case. */
+#define NK_ACH_BADGE_FILE_MAX 32u
+static inline bool nk_achievement_badge_file_name(const char *name, bool locked, char *out,
+                                                  size_t out_size) {
+    size_t used = 0u;
+    size_t length = 0u;
+    if (out && out_size) out[0] = '\0';
+    if (!name || !out || out_size < NK_ACH_BADGE_FILE_MAX) return false;
+    out[used++] = 'b';
+    for (; name[length]; length++) {
+        const char c = name[length];
+        if (length >= NK_GUEST_MEMORY_NOTIFICATION_BADGE_MAX - 1u) {
+            out[0] = '\0';
+            return false;
+        }
+        if (c >= 'A' && c <= 'Z') {
+            out[used++] = '_';
+            out[used++] = (char)(c - 'A' + 'a');
+        } else if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')) {
+            out[used++] = c;
+        } else {
+            out[0] = '\0';
+            return false;
+        }
+    }
+    if (length == 0u) {
+        out[0] = '\0';
+        return false;
+    }
+    if (locked) {
+        memcpy(out + used, "-lock", 5u);
+        used += 5u;
+    }
+    memcpy(out + used, ".png", 5u); /* with its terminator: at most 1 + 14 + 5 + 4 + 1 bytes */
+    return true;
+}
+
+/* An unlock message's fields. */
+typedef struct NkGuestUnlockNotice {
+    char title[NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX];
+    uint32_t points;
+    bool has_points;
+    char badge[NK_GUEST_MEMORY_NOTIFICATION_BADGE_MAX]; /* letters and digits only, or "" */
+} NkGuestUnlockNotice;
+
+/* True, with out filled, for an unlock message (the caption "RetroAchievements"). A message with
+ * no points line is an unlock with no points known; a badge name with anything but one to seven
+ * ASCII letters and digits is left empty. */
+static inline bool nk_guest_memory_notification_unlock(const char *text,
+                                                       NkGuestUnlockNotice *out) {
+    static const char unlocked[] = NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED;
+    if (!out) return false;
+    memset(out, 0, sizeof *out);
+    if (!text || strncmp(text, unlocked, sizeof unlocked - 1u) != 0 ||
+        !text[sizeof unlocked - 1u])
+        return false;
+    const char *p = text + sizeof unlocked - 1u;
+    size_t n = 0u;
+    while (p[n] && p[n] != '\n') n++;
+    if (n >= sizeof out->title) {
+        n = sizeof out->title - 1u;
+        while (n > 0u && ((unsigned char)p[n] & 0xC0u) == 0x80u) n--; /* a whole character */
+    }
+    memcpy(out->title, p, n);
+    out->title[n] = '\0';
+    p = strchr(p, '\n');
+    if (!p) return true;
+    p++;
+    uint32_t points = 0u;
+    size_t digits = 0u;
+    while (p[digits] >= '0' && p[digits] <= '9' && digits < 9u)
+        points = points * 10u + (uint32_t)(p[digits++] - '0');
+    if (digits && (p[digits] == '\n' || !p[digits])) {
+        out->points = points;
+        out->has_points = true;
+    }
+    p = strchr(p, '\n');
+    if (!p) return true;
+    p++;
+    size_t b = 0u;
+    while ((p[b] >= '0' && p[b] <= '9') || (p[b] >= 'a' && p[b] <= 'z') ||
+           (p[b] >= 'A' && p[b] <= 'Z'))
+        b++;
+    if (b > 0u && b < sizeof out->badge && !p[b]) memcpy(out->badge, p, b);
+    return true;
+}
 
 /* An exclusive lock on a file that other programs lock too: Win32 locks byte 0
    with LockFileEx, which excludes Python's msvcrt.locking on it; POSIX uses

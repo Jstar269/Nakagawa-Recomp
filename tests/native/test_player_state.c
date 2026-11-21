@@ -15018,6 +15018,177 @@ static void test_prerequisite_resume_follows_the_title(void) {
     printf("[PLAYER_STATE_TEST] the build after a tools download follows its title PASS\n");
 }
 
+/* ---- RetroAchievements badge pictures (#1316) ------------------------------------------- */
+
+/* A game's rows for the badge tests: count rows named first, first + 1, ..., each unlocked
+   or locked as asked. */
+static void badge_test_rows(PlayerAchievementRow *rows, size_t count, unsigned first,
+                            bool unlocked) {
+    memset(rows, 0, count * sizeof rows[0]);
+    for (size_t i = 0u; i < count; i++) {
+        snprintf(rows[i].badge_name, sizeof rows[i].badge_name, "%u", first + (unsigned)i);
+        rows[i].unlocked = unlocked;
+    }
+}
+
+/* What the player's pump does with one game's page: asks for each picture its rows lack, in
+   the page's order, into a free slot, until none is lacking or no slot is free; each answer
+   shown at once. Returns how many it asked for. */
+static size_t badge_test_pump(PlayerAchBadgeSlot *slots, const PlayerAchievementRow *rows,
+                              size_t count) {
+    size_t asked = 0u;
+    size_t row = 0u;
+    bool locked = false;
+    while (player_ach_badge_next(rows, count, slots, PLAYER_ACH_BADGE_SLOTS, &row, &locked)) {
+        const size_t k = player_ach_badge_free_slot(slots, PLAYER_ACH_BADGE_SLOTS);
+        if (k == PLAYER_ACH_BADGE_SLOTS) break;
+        snprintf(slots[k].name, sizeof slots[k].name, "%s", rows[row].badge_name);
+        slots[k].locked = locked;
+        slots[k].state = PLAYER_ACH_BADGE_SHOWN;
+        asked++;
+    }
+    return asked;
+}
+
+/* Review of #2847 (round 7, finding 1): two games in one run. The first game's 256 locked
+   achievements take all 512 slots (each locked row keeps its "_lock" picture and its unlocked
+   one); the second game's page must still get its pictures. Before the fix nothing freed a
+   slot until Sign out, and the second game showed only drawn icons. */
+static void test_achievement_badges_two_games_in_one_run(void) {
+    static PlayerAchBadgeSlot slots[PLAYER_ACH_BADGE_SLOTS];
+    static PlayerAchievementRow first[PLAYER_ACHIEVEMENTS_LIST_MAX];
+    static PlayerAchievementRow second[8];
+    static bool released[PLAYER_ACH_BADGE_SLOTS];
+    memset(slots, 0, sizeof slots);
+    badge_test_rows(first, PLAYER_ACHIEVEMENTS_LIST_MAX, 10000u, false);
+    assert(player_ach_badges_release_unused(slots, PLAYER_ACH_BADGE_SLOTS, first,
+                                            PLAYER_ACHIEVEMENTS_LIST_MAX, released) == 0u);
+    assert(badge_test_pump(slots, first, PLAYER_ACHIEVEMENTS_LIST_MAX) ==
+           PLAYER_ACH_BADGE_SLOTS);
+    assert(player_ach_badge_free_slot(slots, PLAYER_ACH_BADGE_SLOTS) == PLAYER_ACH_BADGE_SLOTS);
+    /* Locked rows first take their "_lock" pictures, then their unlocked ones. */
+    assert(slots[0].locked && strcmp(slots[0].name, "10000") == 0);
+    assert(!slots[PLAYER_ACHIEVEMENTS_LIST_MAX].locked &&
+           strcmp(slots[PLAYER_ACHIEVEMENTS_LIST_MAX].name, "10000") == 0);
+    /* The first game's list again (an unlock refreshes it): every slot is still in use. */
+    assert(player_ach_badges_release_unused(slots, PLAYER_ACH_BADGE_SLOTS, first,
+                                            PLAYER_ACHIEVEMENTS_LIST_MAX, released) == 0u);
+
+    /* The second game, launched in the same run: its list is cleared at the launch, then
+       loaded. */
+    badge_test_rows(second, 8u, 20000u, false);
+    second[0].unlocked = true;
+    const size_t freed_at_launch =
+        player_ach_badges_release_unused(slots, PLAYER_ACH_BADGE_SLOTS, NULL, 0u, released);
+    const size_t freed_at_load =
+        player_ach_badges_release_unused(slots, PLAYER_ACH_BADGE_SLOTS, second, 8u, released);
+    /* One unlocked row (its picture) and seven locked rows (two pictures each). */
+    const size_t second_asked = badge_test_pump(slots, second, 8u);
+    if (second_asked != 15u)
+        fprintf(stderr, "[PLAYER_STATE_TEST] the second game got %zu of its 15 badge pictures\n",
+                second_asked);
+    assert(second_asked == 15u);
+    assert(freed_at_launch == PLAYER_ACH_BADGE_SLOTS && freed_at_load == 0u);
+    for (size_t i = 0u; i < 8u; i++) {
+        const size_t own = player_ach_badge_find(slots, PLAYER_ACH_BADGE_SLOTS,
+                                                 second[i].badge_name, !second[i].unlocked);
+        assert(own < PLAYER_ACH_BADGE_SLOTS && slots[own].state == PLAYER_ACH_BADGE_SHOWN);
+    }
+
+    /* Back to the first game: the second game's pictures leave, the first game's come back
+       (from the badge folder, in the player). */
+    assert(player_ach_badges_release_unused(slots, PLAYER_ACH_BADGE_SLOTS, first,
+                                            PLAYER_ACHIEVEMENTS_LIST_MAX, released) == 15u);
+    assert(badge_test_pump(slots, first, PLAYER_ACHIEVEMENTS_LIST_MAX) ==
+           PLAYER_ACH_BADGE_SLOTS);
+
+    /* A row that unlocks keeps its unlocked picture and frees its "_lock" one. */
+    first[3].unlocked = true;
+    assert(player_ach_badges_release_unused(slots, PLAYER_ACH_BADGE_SLOTS, first,
+                                            PLAYER_ACHIEVEMENTS_LIST_MAX, released) == 1u);
+    const size_t gone = player_ach_badge_find(slots, PLAYER_ACH_BADGE_SLOTS, "10003", true);
+    const size_t kept = player_ach_badge_find(slots, PLAYER_ACH_BADGE_SLOTS, "10003", false);
+    assert(gone == PLAYER_ACH_BADGE_SLOTS && kept < PLAYER_ACH_BADGE_SLOTS);
+    assert(player_ach_badge_in_use(first, PLAYER_ACHIEVEMENTS_LIST_MAX, "10003", false));
+    assert(!player_ach_badge_in_use(first, PLAYER_ACHIEVEMENTS_LIST_MAX, "10003", true));
+    assert(!player_ach_badge_in_use(first, PLAYER_ACHIEVEMENTS_LIST_MAX, "", false));
+    printf("[PLAYER_STATE_TEST] badge pictures: a second game in the same run gets its own "
+           "PASS\n");
+}
+
+static bool badge_test_check(const uint8_t *bytes, size_t size, void *context) {
+    (void)context;
+    return size >= 4u && memcmp(bytes, "GOOD", 4u) == 0;
+}
+
+static bool badge_test_file_exists(const char *dir, const char *name) {
+    char path[NK_MAX_PATH];
+    snprintf(path, sizeof path, "%s%c%s", dir, nk_platform_path_separator(), name);
+    return !nk_platform_path_missing(path);
+}
+
+/* Review of #2847 (round 7, finding 2): the badge folder. A file that does not decode is
+   removed when it is read, so the picture is asked for again and the next write replaces it;
+   an interrupted write's ".part" file is removed when the folder is opened; a write leaves no
+   ".part" file and stops at the folder's limit. The check here stands in for the player's PNG
+   decode (player_ach_badge_decodes in main.c). */
+static void test_achievement_badge_cache(void) {
+    char dir[NK_MAX_PATH];
+    char path[NK_MAX_PATH + 32];
+    uint8_t *bytes = NULL;
+    size_t size = 0u;
+    snprintf(dir, sizeof dir, "%s%cachievements-badges", native_test_get_root(),
+             nk_platform_path_separator());
+    (void)nk_platform_remove_tree(dir, NULL);
+    assert(player_ach_badge_cache_read(dir, "b00001.png", 64u, badge_test_check, NULL, &bytes,
+                                       &size) == PLAYER_ACH_BADGE_CACHE_MISSING);
+
+    /* A damaged file from an earlier run: removed on reading, then replaced. */
+    assert(nk_platform_mkdir_p_private(dir));
+    snprintf(path, sizeof path, "%s%cb00001.png", dir, nk_platform_path_separator());
+    write_text_file(path, "BAD!");
+    assert(player_ach_badge_cache_read(dir, "b00001.png", 64u, badge_test_check, NULL, &bytes,
+                                       &size) == PLAYER_ACH_BADGE_CACHE_REMOVED);
+    assert(bytes == NULL && size == 0u && !badge_test_file_exists(dir, "b00001.png"));
+    assert(player_ach_badge_cache_write(dir, "b00001.png", (const uint8_t *)"GOOD1", 5u,
+                                        PLAYER_ACH_BADGE_CACHE_FILES_MAX));
+    assert(!badge_test_file_exists(dir, "b00001.png.part"));
+    assert(player_ach_badge_cache_read(dir, "b00001.png", 64u, badge_test_check, NULL, &bytes,
+                                       &size) == PLAYER_ACH_BADGE_CACHE_HIT);
+    assert(size == 5u && memcmp(bytes, "GOOD1", 5u) == 0);
+    free(bytes);
+    bytes = NULL;
+    /* A file larger than a badge is removed too. */
+    write_text_file(path, "GOOD but far too long for this test's limit of sixty-four bytes, "
+                          "which it passes");
+    assert(player_ach_badge_cache_read(dir, "b00001.png", 64u, badge_test_check, NULL, &bytes,
+                                       &size) == PLAYER_ACH_BADGE_CACHE_REMOVED);
+    assert(!badge_test_file_exists(dir, "b00001.png"));
+
+    /* Leftover ".part" files go when the folder is opened; pictures stay. */
+    snprintf(path, sizeof path, "%s%cb00002.png.part", dir, nk_platform_path_separator());
+    write_text_file(path, "GOO");
+    snprintf(path, sizeof path, "%s%cb00003-lock.png.part", dir, nk_platform_path_separator());
+    write_text_file(path, "GO");
+    assert(player_ach_badge_cache_write(dir, "b00004.png", (const uint8_t *)"GOOD4", 5u,
+                                        PLAYER_ACH_BADGE_CACHE_FILES_MAX));
+    assert(player_ach_badge_cache_open(dir) == 2u);
+    assert(!badge_test_file_exists(dir, "b00002.png.part"));
+    assert(!badge_test_file_exists(dir, "b00003-lock.png.part"));
+    assert(badge_test_file_exists(dir, "b00004.png"));
+    assert(player_ach_badge_cache_open(dir) == 0u);
+
+    /* The folder's limit: with as many files as it may hold, nothing more is written, and no
+       ".part" file is left. */
+    assert(!player_ach_badge_cache_write(dir, "b00005.png", (const uint8_t *)"GOOD5", 5u, 1u));
+    assert(!badge_test_file_exists(dir, "b00005.png") &&
+           !badge_test_file_exists(dir, "b00005.png.part"));
+    assert(player_ach_badge_cache_write(dir, "b00005.png", (const uint8_t *)"GOOD5", 5u, 2u));
+    assert(nk_platform_remove_tree(dir, NULL));
+    printf("[PLAYER_STATE_TEST] badge folder: a damaged picture is replaced and leftover .part "
+           "files go PASS\n");
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -18506,6 +18677,88 @@ int main(int argc, char **argv) {
             assert(strcmp(activity.state, "Ace") == 0);
             s_app2->is_game_running = false;
             assert(!player_app_discord_activity(s_app2, &activity));
+        }
+
+        /* RetroAchievements is independent of network_mode, off unless true is stored, and the
+           credential token never enters settings.json. */
+        player_app_settings_init_default(&s_app2->settings);
+        assert(!s_app2->settings.achievements_enabled);
+        assert(s_app2->settings.network_mode == NK_NETWORK_MODE_OFFLINE);
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        {
+            char *saved = read_text_file(test_settings_path);
+            assert(saved && strstr(saved, "\"achievements_enabled\": false") != NULL);
+            assert(saved && strstr(saved, "token") == NULL && strstr(saved, "password") == NULL);
+            free(saved);
+        }
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"achievements_enabled\": \"yes\"}");
+        player_app_settings_init_default(&s_app2->settings);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.achievements_enabled);
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"achievements_enabled\": true}");
+        player_app_settings_init_default(&s_app2->settings);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(s_app2->settings.achievements_enabled);
+        if (!s_app2->achievements_store_available) {
+            player_app_settings_init_default(&s_app2->settings);
+            player_app_set_achievements_enabled(s_app2, true);
+            assert(!s_app2->settings.achievements_enabled);
+            assert(strstr(s_app2->achievements_status, "Credential Manager") != NULL);
+        }
+
+        /* RetroAchievements is off for a launch with cheats on or with the 60 FPS game-logic
+           package (#1316, maintainer decision 2026-11-20); the presentation parts do not stop
+           it, nor does a title's culling package alone. */
+        {
+            static PlayerLaunchWork block_work;
+            memset(&block_work, 0, sizeof(block_work));
+            player_app_settings_init_default(&block_work.settings);
+            assert(player_launch_achievements_block(&block_work) == NULL);
+            block_work.settings.fps_cap = 0;
+            block_work.settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+            block_work.settings.enhanced.part[PLAYER_PART_UPSCALE] = 1;
+            block_work.settings.enhanced.part[PLAYER_PART_WIDE] = 1;
+            assert(player_launch_achievements_block(&block_work) == NULL);
+            block_work.settings.cheats = true;
+            assert(player_launch_achievements_block(&block_work) != NULL &&
+                   strstr(player_launch_achievements_block(&block_work), "Cheats are on") != NULL);
+            block_work.settings.cheats = false;
+            block_work.cheats_session = true;
+            assert(player_launch_achievements_block(&block_work) != NULL &&
+                   strstr(player_launch_achievements_block(&block_work), "Cheats are on") != NULL);
+            block_work.cheats_session = false;
+            snprintf(block_work.game.enhancement_package_id,
+                     sizeof(block_work.game.enhancement_package_id), "%s", "synthetic-cull");
+            block_work.game.enhancement_hook_only = true;
+            assert(player_launch_achievements_block(&block_work) == NULL);
+            block_work.game.enhancement_hook_only = false;
+            assert(player_launch_achievements_block(&block_work) != NULL &&
+                   strstr(player_launch_achievements_block(&block_work), "60 FPS") != NULL);
+            assert(player_launch_achievements_block(NULL) == NULL);
+            test_achievement_badges_two_games_in_one_run();
+            test_achievement_badge_cache();
+
+            player_app_init(s_app2);
+            assert(player_app_achievements_block(s_app2, -1) == NULL);
+            s_app2->cheats_session = true;
+            assert(player_app_achievements_block(s_app2, -1) != NULL);
+            s_app2->cheats_session = false;
+            s_app2->settings.cheats = true;
+            assert(player_app_achievements_block(s_app2, -1) != NULL);
+            s_app2->settings.cheats = false;
+
+            /* The User-Agent's system part: this host's name and version, printable ASCII
+               with no parentheses, and refused, empty, when it does not fit. */
+            char os_text[96];
+            assert(nk_platform_os_description(os_text, sizeof os_text));
+            assert(os_text[0] != '\0' && strchr(os_text, ' ') != NULL);
+            for (const char *c = os_text; *c; ++c)
+                assert(*c >= 0x20 && *c <= 0x7e && *c != '(' && *c != ')');
+            char os_short[4] = "xyz";
+            assert(!nk_platform_os_description(os_short, sizeof os_short) && os_short[0] == '\0');
+            assert(!nk_platform_os_description(NULL, sizeof os_text));
         }
 
         /* Cheats (#2639): off by default, an optional key that only a JSON true turns on,

@@ -23,7 +23,10 @@
  *           alone, as an authentic run draws it: its chip at the bottom left and every other
  *           pixel the frame's (<dir>/ace_ui_selftest_notice.ppm). Then the readout with the
  *           slowed-logic warning under it (<dir>/ace_ui_selftest_logic.ppm). Then the launch notice with
- *           every part on (<dir>/ace_ui_selftest_every_part.ppm). Exit 77 without Vulkan.
+ *           every part on (<dir>/ace_ui_selftest_every_part.ppm). Then the player's notification
+ *           toast (an achievement unlocked) at 1280x720 and 960x540, each at 100% and 150%
+ *           display scale (<dir>/ace_ui_selftest_toast_<w>x<h>_<scale>.ppm). Exit 77 without
+ *           Vulkan.
  *
  * Built twice. With ACE_UI_SELFTEST_S1 it is linked from ace_ui.c, osk_overlay.c, nk_ui and its
  * Vulkan backend alone: a reference from the UI pass to anything of the runtime fails that link
@@ -39,6 +42,7 @@
 
 #include "nk_ui_draw.h"
 #include "nk_ui_theme.h"
+#include "nk_ui_image.h"
 #if defined(NK_UI_WITH_SDL_TTF)
 #include "backend/nk_ui_sdlr.h"
 #endif
@@ -407,6 +411,25 @@ static void cell_layout(void) {
     CHECK(!ace_ui_frame_wants(&empty), "an empty render notice is wanted");
     empty.host_notice = k_host_words;
     CHECK(ace_ui_frame_wants(&empty), "the render notice alone is not wanted");
+    empty.host_notice = NULL;
+    empty.host_toast_head = "Host notification";
+    empty.host_toast = "Achievement unlocked: Five";
+    empty.host_toast_alpha = 1.0f;
+    CHECK(ace_ui_frame_wants(&empty), "a host notification toast is not wanted");
+    AceUiFrame toast = frame_full(960, 544, 1.0f);
+    toast.readout = NULL;
+    toast.notice = NULL;
+    toast.keyboard = NULL;
+    toast.host_toast_head = "Host notification";
+    toast.host_toast = "Achievement unlocked: Five";
+    toast.host_toast_alpha = 1.0f;
+    float toast_density = 1.0f;
+    const NkUiDrawList *toast_list = build(ui, &toast, &toast_density);
+    int toast_bounds[4];
+    CHECK(toast_list && element_bounds(toast_list, ACE_UI_ID_HOST_TOAST, toast_bounds) &&
+              toast_bounds[0] >= 0 && toast_bounds[2] <= toast.pixel_w &&
+              toast_bounds[1] >= 0 && toast_bounds[3] <= toast.pixel_h,
+          "a host notification toast is drawn within the game window");
     nk_ui_destroy(ui);
 }
 
@@ -831,6 +854,8 @@ static void gpu_close(void) {
         DestroyDevice(g.device, NULL);
     }
     if (g.instance) DestroyInstance(g.instance, NULL);
+    /* Closed twice, or opened again at another size, it starts from nothing. */
+    memset(&g, 0, sizeof(g));
 }
 
 static void barrier(VkImageLayout from, VkImageLayout to, VkAccessFlags src, VkAccessFlags dst,
@@ -1235,6 +1260,207 @@ static void cell_notice_every_part(const char *fonts_root) {
 }
 #endif /* !ACE_UI_SELFTEST_S1 */
 
+/* The toast the runtime makes of the player's unlock message (src/rt/gui.c): the eyebrow, the
+ * achievement's title (the longest in the launcher's sample set, so it takes both lines), and its
+ * points. */
+static const char k_toast_words[] = "Champion of the Hot Shots Cup, Undefeated on Every Surface";
+static const char k_toast_head[] = "Achievement unlocked";
+static const char k_toast_detail[] = "50 points";
+/* The toast of a completed set: the game's title, with the drawn trophy. */
+static const char k_toast_completed_words[] = "Hot Shots Tennis: Get a Grip";
+static const char k_toast_completed_head[] = "Set completed";
+static const char k_toast_completed_detail[] = "Every achievement unlocked";
+
+/* A project-drawn sample badge, 64 x 64 (no RetroAchievements picture): a teal tile with a gold
+ * disc in a darker ring. Its centre is the gold, which the picture check below reads back. */
+#define TOAST_BADGE_SIDE 64u
+static const uint8_t k_toast_badge_gold[3] = {0xF2u, 0xC1u, 0x4Eu};
+static uint8_t s_toast_badge_pixels[TOAST_BADGE_SIDE * TOAST_BADGE_SIDE * 4u];
+static NkUiImage s_toast_badge;
+
+static const NkUiImage *toast_badge(void) {
+    if (s_toast_badge.rgba_pm) return &s_toast_badge;
+    for (uint32_t y = 0; y < TOAST_BADGE_SIDE; y++)
+        for (uint32_t x = 0; x < TOAST_BADGE_SIDE; x++) {
+            const float dx = (float)x + 0.5f - 32.0f, dy = (float)y + 0.5f - 32.0f;
+            const float d2 = dx * dx + dy * dy;
+            uint8_t *p = &s_toast_badge_pixels[(y * TOAST_BADGE_SIDE + x) * 4u];
+            const uint8_t *c;
+            static const uint8_t teal[3] = {0x1Fu, 0x6Fu, 0x8Bu};
+            static const uint8_t ring[3] = {0x12u, 0x3Fu, 0x50u};
+            c = d2 <= 18.0f * 18.0f ? k_toast_badge_gold : d2 <= 22.0f * 22.0f ? ring : teal;
+            p[0] = c[0];
+            p[1] = c[1];
+            p[2] = c[2];
+            p[3] = 0xFFu;
+        }
+    s_toast_badge.width = TOAST_BADGE_SIDE;
+    s_toast_badge.height = TOAST_BADGE_SIDE;
+    s_toast_badge.rgba_pm = s_toast_badge_pixels;
+    s_toast_badge.serial = nk_ui_image_new_serial();
+    return &s_toast_badge;
+}
+
+static int near_colour(uint32_t c, const uint8_t want[3], int within) {
+    for (int k = 0; k < 3; k++) {
+        const int got = (int)((c >> (16 - 8 * k)) & 0xFFu);
+        if (got < (int)want[k] - within || got > (int)want[k] + within) return 0;
+    }
+    return 1;
+}
+
+static int box_inside(const int inner[4], const int outer[4]) {
+    return inner[0] >= outer[0] && inner[1] >= outer[1] && inner[2] <= outer[2] &&
+           inner[3] <= outer[3];
+}
+
+/* One picture of the achievement toast alone, with the sample badge (variant 1), the drawn
+ * trophy (variant 0), or a completed set's toast with the drawn trophy (variant 2): drawn inside the window and its safe area at the toast's fixed width, the accent edge
+ * at its left, the icon slot inside it, every word of the eyebrow, the title (on at most two
+ * lines) and the points whole and unclipped, the badge's own pixels in the slot, and nothing else
+ * of the frame changed. Written to
+ * <dir>/ace_ui_selftest_toast[_drawn|_completed]_<w>x<h>_<scale %>.ppm. */
+static void toast_picture_one(AceUi *ui, const NkUiTextBackend *text, int w, int h, float scale,
+                              uint32_t frame_colour, const char *dir, int variant) {
+    const int badge = variant == 1;
+    const char *const want_head = variant == 2 ? k_toast_completed_head : k_toast_head;
+    const char *const want_words = variant == 2 ? k_toast_completed_words : k_toast_words;
+    const char *const want_detail = variant == 2 ? k_toast_completed_detail : k_toast_detail;
+    AceUiFrame tf;
+    memset(&tf, 0, sizeof(tf));
+    tf.pixel_w = w;
+    tf.pixel_h = h;
+    tf.display_scale = scale;
+    tf.now_s = 1.0;
+    tf.reduce_motion = 1;
+    tf.host_toast_head = want_head;
+    tf.host_toast = want_words;
+    tf.host_toast_detail = want_detail;
+    tf.host_toast_badge = badge ? toast_badge() : NULL;
+    tf.host_toast_unlock = 1;
+    tf.host_toast_alpha = 1.0f;
+    const char *kind = badge ? "badge" : variant == 2 ? "completed set" : "drawn trophy";
+    NkUiConfig config;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_OVERLAY;
+    config.text = text;
+    NkUi *probe = nk_ui_create(&config);
+    float density = 1.0f;
+    const NkUiDrawList *list = probe ? build(probe, &tf, &density) : NULL;
+    int chip[4], edge[4], slot[4], icon[4];
+    const int laid_out = list && element_bounds(list, ACE_UI_ID_HOST_TOAST, chip);
+    CHECK(laid_out, "the toast (%s) at %dx%d, %.0f%% did not lay out", kind, w, h, scale * 100.0f);
+    if (laid_out) {
+        const float logical_w = (float)w / density;
+        const float want_w = (logical_w - 32.0f < ACE_UI_HOST_TOAST_WIDTH ? logical_w - 32.0f
+                                                                          : ACE_UI_HOST_TOAST_WIDTH) *
+                             density;
+        CHECK((float)(chip[2] - chip[0]) >= want_w - 2.0f &&
+                  (float)(chip[2] - chip[0]) <= want_w + 2.0f,
+              "the toast at %dx%d, %.0f%% is %d px wide, not its fixed %.0f", w, h,
+              scale * 100.0f, chip[2] - chip[0], (double)want_w);
+        CHECK(element_bounds(list, ACE_UI_ID_HOST_TOAST_EDGE, edge) && box_inside(edge, chip) &&
+                  edge[0] - chip[0] <= 2 && edge[3] - edge[1] >= (chip[3] - chip[1]) - 4,
+              "the toast at %dx%d, %.0f%% has no accent edge down its left side", w, h,
+              scale * 100.0f);
+        CHECK(element_bounds(list, ACE_UI_ID_HOST_TOAST_SLOT, slot) && box_inside(slot, chip) &&
+                  element_bounds(list, ACE_UI_ID_HOST_TOAST_ICON, icon) && box_inside(icon, slot),
+              "the toast (%s) at %dx%d, %.0f%% has no icon slot holding its icon", kind, w, h,
+              scale * 100.0f);
+        /* Every word of the eyebrow, the title and the points shows, unclipped and not shortened. */
+        int head_box[4], text_box[4], detail_box[4];
+        char head[64], words[sizeof k_toast_words + 8u], detail[80];
+        CHECK(chip_words(list, ACE_UI_ID_HOST_TOAST_HEAD, 1, "toast eyebrow", text, head_box,
+                         head, sizeof head, w, h) == 1 &&
+                  strcmp(head, want_head) == 0 && box_inside(head_box, chip),
+              "the toast at %dx%d, %.0f%% has the eyebrow \"%s\", not \"%s\"", w, h,
+              scale * 100.0f, head, want_head);
+        const int lines = chip_words(list, ACE_UI_ID_HOST_TOAST_TEXT, ACE_UI_HOST_TOAST_LINES,
+                                     "toast title", text, text_box, words, sizeof words, w, h);
+        CHECK(lines >= 1 && lines <= 2 && strcmp(words, want_words) == 0 &&
+                  box_inside(text_box, chip) && text_box[1] >= head_box[3],
+              "the toast at %dx%d, %.0f%% reads \"%s\" on %d line(s), not the whole title under "
+              "the eyebrow", w, h, scale * 100.0f, words, lines);
+        CHECK(chip_words(list, ACE_UI_ID_HOST_TOAST_DETAIL, 1, "toast points", text, detail_box,
+                         detail, sizeof detail, w, h) == 1 &&
+                  strcmp(detail, want_detail) == 0 &&
+                  box_inside(detail_box, chip) && detail_box[1] >= text_box[3],
+              "the toast at %dx%d, %.0f%% reads \"%s\" under the title, not \"%s\"", w, h,
+              scale * 100.0f, detail, want_detail);
+        CHECK(slot[2] <= head_box[0] && slot[2] <= text_box[0] && slot[2] <= detail_box[0],
+              "the toast at %dx%d, %.0f%%: the words overlap the icon slot", w, h, scale * 100.0f);
+        CHECK(chip[0] >= 16 && chip[1] >= 16 && chip[2] <= w - 16 && chip[3] <= h - 16,
+              "the toast at %dx%d, %.0f%% leaves the safe area: %d,%d-%d,%d", w, h,
+              scale * 100.0f, chip[0], chip[1], chip[2], chip[3]);
+        CHECK(present(ui, &tf, w, h, 0) == 1, "the toast did not draw");
+        CHECK(pixel(w, chip[0] + 1, (chip[1] + chip[3]) / 2) != frame_colour,
+              "no toast chip where it was laid out");
+        const uint32_t middle = pixel(w, (icon[0] + icon[2]) / 2, (icon[1] + icon[3]) / 2);
+        if (badge)
+            CHECK(near_colour(middle, k_toast_badge_gold, 3),
+                  "the toast at %dx%d, %.0f%% does not show the badge in its slot (0x%06X)", w, h,
+                  scale * 100.0f, middle);
+        else
+            CHECK(middle != frame_colour && !near_colour(middle, k_toast_badge_gold, 3),
+                  "the toast at %dx%d, %.0f%% does not draw its trophy in the slot (0x%06X)", w,
+                  h, scale * 100.0f, middle);
+        CHECK(pixel(w, chip[0] - 8, (chip[1] + chip[3]) / 2) == frame_colour &&
+                  pixel(w, w / 2, h - 24) == frame_colour && pixel(w, 8, 8) == frame_colour,
+              "the toast changed the frame outside its chip");
+        check_outside(text, &tf, w, h, frame_colour, "the toast");
+        char path[600];
+        snprintf(path, sizeof(path), "%s%sace_ui_selftest_toast%s_%dx%d_%d.ppm", dir ? dir : "",
+                 dir ? "/" : "", badge ? "" : variant == 2 ? "_completed" : "_drawn", w, h,
+                 (int)(scale * 100.0f + 0.5f));
+        write_ppm(path, w, h);
+        printf("ace-ui-selftest: the toast (%s) written to %s\n", kind, path);
+    }
+    nk_ui_destroy(probe);
+}
+
+static void toast_picture(AceUi *ui, const NkUiTextBackend *text, int w, int h, float scale,
+                          uint32_t frame_colour, const char *dir) {
+    toast_picture_one(ui, text, w, h, scale, frame_colour, dir, 1);
+    toast_picture_one(ui, text, w, h, scale, frame_colour, dir, 0);
+    toast_picture_one(ui, text, w, h, scale, frame_colour, dir, 2);
+}
+
+/* The toast in a 960x540 window, on a device of that size. */
+static void cell_gpu_toast_small(const char *dir, const NkUiTextBackend *text) {
+    const int w = 960, h = 540;
+    char why[128] = "";
+    if (gpu_open(why, sizeof(why), w, h) <= 0) {
+        gpu_close();
+        printf("ace-ui-selftest: the 960x540 toast SKIP (%s)\n", why);
+        return;
+    }
+    AceUiInit init;
+    memset(&init, 0, sizeof(init));
+    init.get_instance_proc_addr = g.gipa;
+    init.instance = g.instance;
+    init.physical_device = g.physical;
+    init.device = g.device;
+    init.queue = g.queue;
+    init.queue_family = g.family;
+    init.frames_in_flight = 1;
+    init.text = text;
+    char error[256];
+    AceUi *ui = ace_ui_create(&init, error, sizeof(error));
+    CHECK(ui != NULL, "ace_ui_create at 960x540: %s", error);
+    if (ui) {
+        AceUiFrame empty;
+        memset(&empty, 0, sizeof(empty));
+        empty.pixel_w = w;
+        empty.pixel_h = h;
+        empty.display_scale = 1.0f;
+        CHECK(present(ui, &empty, w, h, 0) == 0, "an empty 960x540 frame drew");
+        const uint32_t frame_colour = pixel(w, w / 2, h / 2);
+        for (int s = 0; s < 2; s++) toast_picture(ui, text, w, h, s ? 1.5f : 1.0f, frame_colour, dir);
+        ace_ui_destroy(ui);
+    }
+    gpu_close();
+}
+
 static int cell_gpu(const char *dir, const char *fonts_root) {
     const int w = 1280, h = 720;
     char why[128] = "";
@@ -1399,6 +1625,9 @@ static int cell_gpu(const char *dir, const char *fonts_root) {
             }
             nk_ui_destroy(probe);
         }
+        /* The player's notification toast (an achievement unlocked, #1316) at 100% and 150%
+         * display scale: its chip at the window's right, the rest of the frame the game's. */
+        for (int s = 0; s < 2; s++) toast_picture(ui, text, w, h, s ? 1.5f : 1.0f, frame_colour, dir);
 #if !defined(ACE_UI_SELFTEST_S1)
         /* The launch notice with every part on: its chip grows down from the top right, and the
          * frame beside it, under it and in the safe area stays the game's. */
@@ -1417,10 +1646,11 @@ static int cell_gpu(const char *dir, const char *fonts_root) {
 #endif
         ace_ui_destroy(ui);
     }
+    gpu_close();
+    cell_gpu_toast_small(dir, text);
 #if defined(NK_UI_WITH_SDL_TTF)
     nk_ui_ttf_destroy(ttf);
 #endif
-    gpu_close();
     return 0;
 }
 

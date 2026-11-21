@@ -153,6 +153,7 @@
     X("SR_GPU_TWIN_DUMP", "path", "unset (no dump)", "gpu_sdl3vk/ge_gpu_selftest.inc", "File prefix where the coherence self-test's twin-scene case writes each shown frame as raw RGBA.") \
     X("SR_GPU_TWIN_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test's twin cases: a twin-off run writes it, a twin-on run at the same scale checks it.") \
     X("SR_GPU_XFER_RING_KB", "number", "built-in default ring size", "gpu_sdl3vk/ge_gpu.c", "Transfer ring size in KiB (0 disables, above 65536 ignored).") \
+    X("SR_GUEST_MEMORY_CHANNEL", "string", "unset", "gui.c", "Optional local shared guest-memory channel set by the player for a vblank-synchronized host read callback.") \
     X("SR_HEADLESS", "flag-nonzero", "off", "audio_sdl3.c,gui.c,sched.c", "Marks the run headless: silent audio, headless presenter and no pause UI (audio check wants exactly 1).") \
     X("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES", "string", "unset (off)", "cheats.c,gui.c,sched.c", "Requests the headless presented-frames acceptance checkpoint; any non-empty value enables it. Cheats are refused for such a run.") \
     X("SR_HEAP_BASE", "number", "first page-aligned address after the loaded image", "hle.c", "Hexadecimal base address for the user heap partition.") \

@@ -1939,9 +1939,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "Online and developer options", NK_UI_TYPE_TITLE,
                         theme->paper);
-        /* Online mode has nothing to switch yet: one plain line says so rather
-           than a switch that does nothing (#2007). The stored setting stays. */
-        nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_NOT_BUILT_LINE, NK_UI_TYPE_BODY_S,
+        /* RetroAchievements is its own opt-in; the news/reports online mode remains unbuilt. */
+        const char *online_line = model->achievements_available || model->achievements_enabled
+            ? "RetroAchievements stays off until you turn it on and agree to what is sent."
+            : SCR_ONLINE_NOT_BUILT_LINE;
+        nk_ui_text_role(ui, FLOW_ID_LEAD, online_line, NK_UI_TYPE_BODY_S,
                         theme->warning);
         if (scr_wizard_box_begin(ui, 0u)) {
             /* Discord status shows when this build can show it, or while it is stored On
@@ -1959,7 +1961,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             static const char k_cheats_sentence[] =
                 "Apply your CWCheat file, cheats/<disc ID>.ini in the data folder. "
                 "The game shows a marker while any cheat is on.";
-            WizardRow rows[6];
+            WizardRow rows[8];
             size_t row_count = 0u;
             if (model->online_mode) {
                 rows[row_count++] = (WizardRow){"Online mode", "On",
@@ -1979,7 +1981,29 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                             k_cover_art_sentence};
             rows[row_count++] = (WizardRow){"Cheats", settings_on_off(model->cheats),
                                             k_cheats_sentence};
-            WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
+            /* RetroAchievements (#1316) comes last: where it can run it adds a switch, and the
+               rows above keep their keyboard order on every platform. */
+            rows[row_count++] = (WizardRow){
+                "Achievements",
+                model->achievements_enabled ? "On" : model->achievements_available ? "Off" : "Unavailable",
+                model->achievements_available
+                    ? SCR_ACHIEVEMENTS_SENTENCE
+                    : SCR_ACHIEVEMENTS_UNAVAILABLE_SENTENCE};
+            if (model->achievements_enabled) {
+                rows[row_count++] = (WizardRow){SCR_ACHIEVEMENTS_ACCOUNT_NAME,
+                                                model->achievements_signed_in
+                                                    ? safe_text(model->achievements_account, "Signed in")
+                                                    : "Sign in",
+                                                safe_text(model->achievements_status,
+                                                          model->achievements_signed_in
+                                                              ? "Signed in."
+                                                              : "Sign in to connect.")};
+            }
+            /* The RetroAchievements row's button carries the account name, of any length, which
+               widens the button column; while it shows, a sentence the column would cut goes
+               under its button at every text size instead of ending in an ellipsis. */
+            WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f,
+                                                    model->achievements_enabled);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
                                   "Online mode", SCR_ONLINE_STORED_ON_SENTENCE, true,
@@ -2020,6 +2044,36 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                   "Cheats", k_cheats_sentence, model->cheats, inner - 32.0f,
                                   &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_CHEATS);
+            }
+            /* One row: the switch where the feature can run, the reason where it cannot. */
+            if (model->achievements_available || model->achievements_enabled) {
+                if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xF0u,
+                                      "Achievements",
+                                      SCR_ACHIEVEMENTS_SENTENCE,
+                                      model->achievements_enabled, inner - 32.0f, &column)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS);
+                }
+            } else {
+                (void)scr_wizard_value_state(
+                    ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xF0u,
+                    "Achievements", "Unavailable",
+                    SCR_ACHIEVEMENTS_UNAVAILABLE_SENTENCE,
+                    false, true, inner - 32.0f, &column);
+            }
+            if (model->achievements_enabled &&
+                scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS_ACCOUNT,
+                                 SET_ID_TEXT + 0xF4u, SCR_ACHIEVEMENTS_ACCOUNT_NAME,
+                                 model->achievements_signed_in
+                                     ? safe_text(model->achievements_account, "Signed in")
+                                     : "Sign in",
+                                 safe_text(model->achievements_status,
+                                           model->achievements_signed_in
+                                               ? "Signed in."
+                                               : "Sign in to connect."),
+                                 model->achievements_signed_in, inner - 32.0f, &column)) {
+                *result = settings_op(model->achievements_signed_in
+                                          ? PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS
+                                          : PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS);
             }
             nk_ui_end_container(ui);
         }

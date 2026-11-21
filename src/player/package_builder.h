@@ -335,6 +335,10 @@ typedef struct {
     bool (*read)(void *context, unsigned char *buffer, size_t capacity,
                  size_t *bytes_read);
     void (*close)(void *context);
+    int http_status;          /* 0 when no HTTP response arrived */
+    /* Set, with false returned, when the transport refused the request before sending it, and
+     * why: nothing was sent, so sending it again is refused the same way. NULL otherwise. */
+    const char *refused;
 } PackageHttpResponse;
 
 typedef bool (*PackageHttpOpen)(void *context, const char *url,
@@ -345,17 +349,33 @@ typedef bool (*PackageDownloadContinue)(void *context, uint64_t received,
 
 /* What the native transport's context may say; a NULL context keeps its defaults. */
 typedef struct {
-    const char *user_agent;   /* NULL keeps "NakagawaRecomp/PrerequisiteBootstrap" */
+    /* NULL keeps "NakagawaRecomp/PrerequisiteBootstrap". UTF-8 of fewer than
+     * NK_ACH_USER_AGENT_MAX bytes (nk_achievements.h), the one limit its writer and this
+     * transport share; a longer or malformed one is refused (PackageHttpResponse.refused). */
+    const char *user_agent;
 } PackageHttpOptions;
 
 /* The native HTTPS transport (WinHTTP, redirects followed only within the allowed
  * hosts), or NULL where there is none. Its context is NULL or a PackageHttpOptions. */
 PackageHttpOpen package_builder_native_transport(void);
 
+/* One HTTPS request through the same native WinHTTP implementation used by the download
+ * transport. The caller supplies an exact allowed-host set; redirects are refused, and
+ * non-200 HTTP responses are returned for the caller to parse. */
+bool package_builder_native_transport_request(
+    void *options, const char *url, const char *allowed_hosts,
+    const char *method, const char *content_type,
+    const void *body, size_t body_size, PackageHttpResponse *response);
 /* Whether `url` is an https:// URL whose host (no user info, no port) is one of the
  * ';'-separated `allowed_hosts`, compared without case: the check every caller makes
  * on PackageHttpResponse.final_url after a transport followed redirects. */
 bool package_builder_url_allowed(const char *url, const char *allowed_hosts);
+/* Opens the session the native transport would open for `options`, reads back the user
+ * agent it carries into `agent`, and closes it: nothing is sent. NULL when it opened, else the
+ * refusal PackageHttpResponse.refused would name (or that this build has no native transport),
+ * with `agent` empty. */
+const char *package_builder_native_session_user_agent(const PackageHttpOptions *options,
+                                                      char *agent, size_t agent_size);
 
 /* Download one manifest item to a .part file, check exact byte count and SHA-256,
  * then atomically promote it. A NULL transport selects native WinHTTP. */
