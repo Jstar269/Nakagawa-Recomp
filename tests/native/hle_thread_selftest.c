@@ -13958,7 +13958,6 @@ static void test_adhoc_d8_d9_regressions(void) {
 
 /* D7: Real loopback TCP end-to-end test covering all 39 opt-in online handlers (plus
  * sceNetAdhocctlGetParameter) over AdhP2MiniRelay + a second NkAdhocRelayClient peer. */
-static AdhP2MiniRelay *s_d7_srv;
 static NkAdhocTransport *s_d7_peer;
 static int s_d7_done;
 
@@ -14343,7 +14342,6 @@ static void test_adhoc_online_all_39_handlers_real_tcp(void) {
     AdhP2MiniRelay srv;
     expect(mr_start(&srv), "d7: mini relay started");
     if (srv.running) {
-        s_d7_srv = &srv;
         NkAdhocRelayConfig pcfg = {"127.0.0.1", srv.lobby_port, srv.data_port, 0u};
         NkAdhocRelayClient *peer_rc = nk_relay_client_create(&pcfg);
         expect(peer_rc != NULL, "d7: peer relay client created");
@@ -14369,7 +14367,6 @@ static void test_adhoc_online_all_39_handlers_real_tcp(void) {
             nk_relay_client_destroy(peer_rc);
         }
         mr_stop(&srv);
-        s_d7_srv = NULL;
     }
 #ifdef _WIN32
     WSACleanup();

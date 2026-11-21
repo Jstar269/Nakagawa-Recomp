@@ -7944,8 +7944,8 @@ static void test_online_play_own_server_shown(void) {
     static const char *const forms[] = {
         "relay.example.org", "relay.example.org:40000", "relay.example.org:40000,40001",
         "192.0.2.10",
-        "weekend-league-relay-for-players-who-meet-every-friday-and-sund."
-        "the-longest-host-name-this-player-accepts-for-own-serve.example"};
+        ("weekend-league-relay-for-players-who-meet-every-friday-and-sund."
+         "the-longest-host-name-this-player-accepts-for-own-serve.example")};
     static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
     static const int text_sizes[] = {100, 150};
     const NkUiId own = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER;
