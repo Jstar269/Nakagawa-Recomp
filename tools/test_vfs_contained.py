@@ -55,7 +55,7 @@ def _compile(tmpdir, name, extra_flags=(), std="c11"):
     return exe
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestContainedDeleteSelftest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -145,7 +145,7 @@ class TestContainedDeleteSelftest(unittest.TestCase):
                             "vfs_contained.h must be included before " + other)
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestSeamPortability(unittest.TestCase):
     """The seam must stay buildable for hosts this machine cannot execute.
 
@@ -186,7 +186,7 @@ class TestSeamPortability(unittest.TestCase):
         self.assertIn("return sr_cd_psp_error(status);", hle)
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestIsoVfsContained(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

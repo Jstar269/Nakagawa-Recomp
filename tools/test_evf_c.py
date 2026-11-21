@@ -69,7 +69,7 @@ def poll_outbits_order_problem(body):
     return ""
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestEvfSelftestC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -106,7 +106,7 @@ class TestEvfSelftestC(unittest.TestCase):
         self.assertIn("evf selftest: OK", result.stdout)
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestEvfSelftestScratch(unittest.TestCase):
     def test_a_failed_compile_leaves_no_scratch_directory_and_is_bounded(self):
         failed = subprocess.CompletedProcess([], 1, "", "simulated compile failure")

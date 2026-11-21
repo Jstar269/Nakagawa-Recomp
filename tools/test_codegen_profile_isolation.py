@@ -1452,7 +1452,7 @@ class NullPageGuardTests(unittest.TestCase):
     def test_every_generated_access_form_goes_through_the_guard(self):
         cc = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
         if cc is None:
-            self.skipTest("no C compiler")
+            self.skipTest("TOOLCHAIN_MISSING: no C compiler")
         forms = ("MEM_R8(a)", "MEM_R16(a)", "MEM_R32(a)", "MEM_W8(a, v)", "MEM_W16(a, v)",
                  "MEM_W32(a, v)", "MEM_W8_PC(a, v, p)", "MEM_W16_PC(a, v, p)",
                  "MEM_W32_PC(a, v, p)", "sr_lwl(v, a)", "sr_lwr(v, a)",
@@ -1481,7 +1481,7 @@ class NullPageGuardTests(unittest.TestCase):
         # forms its own host pointer is caught the same way as a scalar access.
         cc = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
         if cc is None:
-            self.skipTest("no C compiler")
+            self.skipTest("TOOLCHAIN_MISSING: no C compiler")
         bodies = _CodegenRun.functions("hst")
         self.assertIn("sr_native_memmove(", "".join(bodies.values()))
         marker = "int nk_guarded_bodies_start;"

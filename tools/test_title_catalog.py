@@ -238,7 +238,7 @@ class TitleCatalogTests(unittest.TestCase):
         """Compile generated C catalog with gcc and test native lookups in a C harness."""
         gcc = shutil.which("gcc")
         if not gcc:
-            self.skipTest("gcc not available in PATH on this host")
+            self.skipTest("TOOLCHAIN_MISSING: gcc not available in PATH on this host")
 
         test_c_file = self.temp_dir / "test_harness.c"
         cat_h = ROOT / "src" / "core" / "generated" / "nk_title_catalog.h"
@@ -431,7 +431,7 @@ int main(void) {{
     def _compile_and_run_catalog_harness(self, header: Path, source: Path, body: str) -> str:
         gcc = shutil.which("gcc")
         if not gcc:
-            self.skipTest("gcc not available in PATH on this host")
+            self.skipTest("TOOLCHAIN_MISSING: gcc not available in PATH on this host")
         harness = self.temp_dir / "limits_harness.c"
         harness.write_text(
             "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
@@ -528,7 +528,7 @@ int main(void) {{
         the source's string literal (audit 2026-11-17, F-27efef84)."""
         gcc = shutil.which("gcc")
         if not gcc:
-            self.skipTest("gcc not available in PATH on this host")
+            self.skipTest("TOOLCHAIN_MISSING: gcc not available in PATH on this host")
 
         cat_h = ROOT / "src" / "core" / "generated" / "nk_title_catalog.h"
         cat_c = ROOT / "src" / "core" / "generated" / "nk_title_catalog.c"

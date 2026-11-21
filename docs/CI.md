@@ -1138,7 +1138,9 @@ PR, through its own make gate (`make profile-zero-e2e` sets `NK_TEST_TIER=full`)
 in `windows_runtime` and `native_tools` below. Their constituent legal-blocker, publication,
 fail-closed NID/dispatch, cosimulation, provenance, import-audit, and security
 gates remain in their normal PR jobs and tests. `python_tools` includes a
-one-line summary of skips by `NIGHTLY_TIER`, `WINDOWS_ONLY`, and `PRIVATE_INPUT`.
+one-line summary of skips by `NIGHTLY_TIER`, `WINDOWS_ONLY`, `PRIVATE_INPUT` and
+`TOOLCHAIN_MISSING`. Every python_tools runner has gcc, so a test that skipped with
+`TOOLCHAIN_MISSING:` (no C compiler found) fails the shard: it is a native gate that did not run.
 
 The nightly `schedule`, manual `workflow_dispatch` and a merge-queue group all force the full CI
 matrix and set `NK_TEST_TIER=full`, so every nightly case runs. The normal local

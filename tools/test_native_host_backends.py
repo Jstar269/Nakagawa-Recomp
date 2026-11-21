@@ -109,7 +109,7 @@ def _build_and_run(
     owner = type(test_case)
     if shutil.which("gcc") is None:
         raise unittest.SkipTest(
-            "gcc is unavailable, so the native host-backend test cannot be built; "
+            "TOOLCHAIN_MISSING: gcc is unavailable, so the native host-backend test cannot be built; "
             "reporting SKIP rather than passing without having run it"
         )
 
@@ -199,7 +199,7 @@ class NativeHostBackendTests(unittest.TestCase):
         super().setUpClass()
         if shutil.which("gcc") is None:
             raise unittest.SkipTest(
-                "gcc is unavailable, so the native host-backend test cannot be built; "
+                "TOOLCHAIN_MISSING: gcc is unavailable, so the native host-backend test cannot be built; "
                 "reporting SKIP rather than passing without having run it"
             )
 

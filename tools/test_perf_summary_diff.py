@@ -232,7 +232,7 @@ class PerfSummaryDiffTests(unittest.TestCase):
     def test_runtime_transition_summary_and_disabled_path(self):
         compiler = shutil.which("gcc")
         if compiler is None:
-            self.skipTest("gcc is not available")
+            self.skipTest("TOOLCHAIN_MISSING: gcc is not available")
         with scratch_dir.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / "perf_harness.c"
@@ -312,7 +312,7 @@ class PerfSummaryDiffTests(unittest.TestCase):
     def _run_aot_vfpu_harness(self, census: bool) -> dict:
         compiler = shutil.which("gcc")
         if compiler is None:
-            self.skipTest("gcc is not available")
+            self.skipTest("TOOLCHAIN_MISSING: gcc is not available")
         # 4096 straight-line vadd.s words (opcode 0x18) at consecutive PCs, then 4096 vdot.q
         # (opcode 0x19) words each followed by a jump-away PC, then 8192 scalar words.
         harness = (
@@ -384,7 +384,7 @@ class PerfSummaryDiffTests(unittest.TestCase):
     def test_runtime_csv_exports_gpu_replay_counter_deltas(self):
         compiler = shutil.which("gcc")
         if compiler is None:
-            self.skipTest("gcc is not available")
+            self.skipTest("TOOLCHAIN_MISSING: gcc is not available")
         names = ["queue_submits", "batches", "draws", "snapshot_requests", "snapshot_copies",
                  "upload_ring_reservations", "upload_ring_bytes", "upload_ring_wraps",
                  "upload_ring_fallbacks", "snapshot_copy_px", "fallback_prims",
@@ -454,7 +454,7 @@ class PerfSummaryDiffTests(unittest.TestCase):
     def test_gpu_replay_baseline_is_seeded_when_the_source_registers_after_init(self):
         compiler = shutil.which("gcc")
         if compiler is None:
-            self.skipTest("gcc is not available")
+            self.skipTest("TOOLCHAIN_MISSING: gcc is not available")
         with scratch_dir.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / "gpu_replay_late_harness.c"

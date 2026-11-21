@@ -3286,7 +3286,7 @@ class PspLinkTeardownSnapshotTests(unittest.TestCase):
 
         compiler = shutil.which("gcc")
         if compiler is None:
-            self.skipTest("gcc is unavailable for the interrupt-resume harness")
+            self.skipTest("TOOLCHAIN_MISSING: gcc is unavailable for the interrupt-resume harness")
         untrack_start = probe.index("static int probe_untrack_intr_token(int token) {")
         untrack_end = probe.index("\n}\n", untrack_start) + 2
         untrack = probe[untrack_start:untrack_end]
@@ -3385,7 +3385,7 @@ int main(void) {
         root = Path(__file__).resolve().parents[1]
         compiler = shutil.which("gcc")
         if compiler is None:
-            self.skipTest("gcc is unavailable for the child teardown harness")
+            self.skipTest("TOOLCHAIN_MISSING: gcc is unavailable for the child teardown harness")
 
         probe = (root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(
             encoding="utf-8"
@@ -4906,7 +4906,7 @@ class PspMailboxCleanupTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         compiler = shutil.which("gcc")
         if compiler is None:
-            self.skipTest("gcc is unavailable for the synthetic mailbox cleanup harness")
+            self.skipTest("TOOLCHAIN_MISSING: gcc is unavailable for the synthetic mailbox cleanup harness")
 
         probe = (root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(
             encoding="utf-8"
@@ -17816,7 +17816,7 @@ class HostHarnessClassCleanupTests(unittest.TestCase):
                 self.assertFalse(os.path.exists(scratch))
 
 
-@unittest.skipUnless(_HOST_CC, "no host C compiler on PATH")
+@unittest.skipUnless(_HOST_CC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
 class RegistryFontWalkHostTests(unittest.TestCase):
     """registry_walk.h, the probe's font-registry walk, run against a fake registry.
 
@@ -18249,7 +18249,7 @@ def _entry(name: str | bytes, size: int = 0, seed: int = 0, *, mode: int = _REGU
     return line + (f" {listed}" if listed is not None else "")
 
 
-@unittest.skipUnless(_HOST_CC, "no host C compiler on PATH")
+@unittest.skipUnless(_HOST_CC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
 class IoCasesHostTests(unittest.TestCase):
     """font_files.h (font-files) and umd_io.h (umd-io) run against a fake file system.
 
@@ -19363,7 +19363,7 @@ def _font_style_hex(*, h: float = 10.0, v: float = 10.0, hres: float = 128.0, vr
     return raw.hex()
 
 
-@unittest.skipIf(_HOST_CC is None, "no host C compiler for the font-list harness")
+@unittest.skipIf(_HOST_CC is None, "TOOLCHAIN_MISSING: no host C compiler for the font-list harness")
 class FontListHostTests(unittest.TestCase):
     """font_list.h against io_cases_host.c's fake font library: call order, bounds and records."""
 
