@@ -36,9 +36,12 @@
  * Where an address is. A code names a PSP address, and every address is a whole span checked
  * before a byte is written. Which memory it is depends on where the host loader put the game's
  * image (sr_loaded_base, sr_loaded_end):
- *  - inside PSP user memory, 0x08800000 up (every title the package route places: a relocatable
- *    main module at 0x08804000, a fixed-address one at its own address): memory is laid out as
- *    a PSP's and the address is used as written, anywhere from 0x08800000 to the end of RAM;
+ *  - at 0x08804000, where a PSP loads a relocatable main module (the package route places every
+ *    relocatable one there): memory is laid out as a PSP's and the address is used as written,
+ *    anywhere from 0x08800000 to the end of RAM;
+ *  - anywhere else from 0x08800000 up (a relocatable image moved off 0x08804000, or a
+ *    fixed-address image linked elsewhere, which a run cannot tell apart): nothing is applied,
+ *    by name, because a cheat written for a moved image would land the move's distance off;
  *  - below PSP user memory (a title manifest with "base": 0): the image byte a PSP has at
  *    0x08804000 + x is at base + x here, and the heap and the stacks are not where a PSP's are.
  *    An address inside the PSP's image is moved with the image; a code that names any other

@@ -85,12 +85,15 @@ display-smoke:
 # presenter, then records and compares GE/present events from the same guest, and records a
 # video of it (videorec, #1273) to prove a recording leaves the guest unchanged. The recording
 # goes through the videorec selftest acting as FFmpeg, which stalls every frame write, and runs
-# on the deterministic clock, which recording requires.
+# on the deterministic clock, which recording requires. cheats-relocated runs the guest at its
+# manifest's 0x08810000 with cheats on: a PSP loads the image at 0x08804000, so every cheat is
+# refused by name and nothing is written.
 display-smoke-run: display-smoke
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) run --build-dir $(DISPLAY_SMOKE_DIR)
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) run --build-dir $(DISPLAY_SMOKE_DIR) --gui --offscreen
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) vramdump --build-dir $(DISPLAY_SMOKE_DIR)
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) flight --build-dir $(DISPLAY_SMOKE_DIR)
+	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) cheats-relocated --build-dir $(DISPLAY_SMOKE_DIR)
 	$(CC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt -DSR_VIDEOREC_SELFTEST -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		-o $(DISPLAY_SMOKE_DIR)/videorec_fake_ffmpeg.exe tests/native/videorec_selftest.c src/rt/videorec.c
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) videorec --build-dir $(DISPLAY_SMOKE_DIR) \
@@ -102,7 +105,10 @@ display-smoke-run: display-smoke
 # names PSP addresses, and in this layout the image is not where a PSP has it: the run must move
 # the cheat that writes the image's data with the image, refuse by name the one that writes its
 # translated code and the one that names memory outside the image, and leave the guest's last
-# frame as it is; a second run with cheats off must leave the data byte unwritten.
+# frame as it is; a second run with cheats off must leave the data byte unwritten. Then
+# cheats-windowed runs it with cheats on in the GDI window and in a Vulkan window whose in-game
+# UI cannot be made: neither can show the cheats marker, so each must refuse the cheats by name
+# and leave the data byte unwritten (GDI: Windows only; Vulkan: NOT_RUN without a device).
 # display-smoke-run ends with it, so hosted CI runs it wherever it runs the display smoke.
 display-smoke-cheats-base0:
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) generate --out-dir $(DISPLAY_SMOKE_BASE0_FIXTURE) \
@@ -117,6 +123,7 @@ display-smoke-cheats-base0:
 		BUILD_DIR=$(DISPLAY_SMOKE_BASE0_DIR) \
 		FUNCS_PER_CHUNK=1 PUBLIC_SAFE=1
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) cheats-base0 --build-dir $(DISPLAY_SMOKE_BASE0_DIR)
+	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) cheats-windowed --build-dir $(DISPLAY_SMOKE_BASE0_DIR)
 
 # display-smoke-picture-gate runs the picture gate (#1845) headless: no reference gives SKIP, a run
 # accepted as the reference then matches at 0.00%, and a one-pixel change to it is reported.

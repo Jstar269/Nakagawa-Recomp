@@ -63001,6 +63001,43 @@ static void test_cheats_on_an_image_below_psp_memory(void) {
     cheats_end(path);
 }
 
+/* Audit 2026-11-17, F-86f47689: an image in PSP user memory but not at 0x08804000 (the
+ * display-smoke manifest's 0x08810000, a relocatable image a PSP loads at 0x08804000) used to
+ * take every address as written, so each cheat landed the move's distance off. The run cannot
+ * tell such an image from one linked there, so the cheats are refused by name and no word
+ * changes; at 0x08804000 the same file applies as written. */
+static void test_cheats_refused_for_an_image_moved_in_psp_memory(void) {
+    static const uint32_t moved[] = { 0x08810000u, 0x08800000u, 0x09000000u };
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "moved", "_C1 Write\n_L 0x20005100 0x12345678\n"),
+           "cheats moved image: the cheat file is written");
+    for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
+        char want[192];
+        cheats_image(moved[i], moved[i] + 0x4000u);
+        cheats_start("1", path);
+        sr_cheats_status(&status);
+        snprintf(want, sizeof(want), "CHEATS: refused: this game's image is at 0x%08lX, not at 0x08804000 where a "
+                                     "PSP loads a relocatable main module", (unsigned long)moved[i]);
+        expect(status.switched_on && !status.file_opened && !status.applying && cheats_marker_is(NULL) &&
+               strstr(s_cheat_log, want) != NULL,
+               "cheats moved image: an image elsewhere in PSP user memory refuses the cheats by name");
+        cheats_tick(2);
+        expect(MEM_R32(0x08805100u) == 0u && MEM_R32(moved[i] + 0x1100u) == 0u,
+               "cheats moved image: no word changes, at the address as written or moved with the image");
+        cheats_end(path);
+        expect(cheats_file_write(path, sizeof(path), "moved", "_C1 Write\n_L 0x20005100 0x12345678\n"),
+               "cheats moved image: the cheat file is written again");
+    }
+    cheats_image(CHEAT_BASE + 0x4000u, CHEAT_BASE + 0x8000u);
+    cheats_start("1", path);
+    cheats_tick(1);
+    expect(MEM_R32(0x08805100u) == 0x12345678u && cheats_marker_is("Cheats on: 1"),
+           "cheats moved image: at 0x08804000 the same cheat applies as written");
+    cheats_end(path);
+}
+
 /* The file is read for one program's memory. A run with no host-loaded image, and a run whose
  * program LoadExec replaced, cannot say where a PSP address is: refused by name. */
 static void test_cheats_need_the_program_they_were_read_for(void) {
@@ -64572,6 +64609,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_cheats_refused_for_the_whole_run();
     test_cheats_say_their_origin_once_at_first_use();
     test_cheats_on_an_image_below_psp_memory();
+    test_cheats_refused_for_an_image_moved_in_psp_memory();
     test_cheats_need_the_program_they_were_read_for();
     test_cheats_refused_for_an_acceptance_checkpoint();
     test_cheats_stop_when_the_marker_stops_being_drawn();
