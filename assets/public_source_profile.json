@@ -409,6 +409,8 @@
     "src/core/nk_launch.h",
     "src/core/nk_library.c",
     "src/core/nk_library.h",
+    "src/core/nk_memstick_layout.c",
+    "src/core/nk_memstick_layout.h",
     "src/core/nk_nickname.h",
     "src/core/nk_pbp_homebrew.c",
     "src/core/nk_pbp_homebrew.h",

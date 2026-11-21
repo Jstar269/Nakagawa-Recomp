@@ -52,6 +52,7 @@ set(CORE_SOURCES
     src/core/nk_zip.c
     src/core/nk_steam_shortcuts.c
     src/core/nk_data_migrate.c
+    src/core/nk_memstick_layout.c
     src/core/generated/nk_title_catalog.c
 )
 
