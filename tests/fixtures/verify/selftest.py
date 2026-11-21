@@ -25,7 +25,8 @@ runs this script:
 ``default-unchanged`` requires that the default build's preprocessed ``recomp.c`` and
                      ``hle.c``, the two runtime units that carry a hook, have no verify token.
 ``exit-paths``       requires every ``_Exit`` and ``_exit`` in the runtime sources to write the verify
-                     report first (``SR_VERIFY_REPORT_NOW``), as it writes the other reports.
+                     report first (``SR_VERIFY_REPORT_NOW``), as it writes the other reports; the
+                     stops reach the one ``_Exit`` through the run end, ``sr_run_end``.
 ``recomp-flags``     requires that ``make VERIFY=1`` keeps the generated-code compile flags
                      (``RECOMP_OPT``, ``-fno-strict-aliasing``, ``NAN_TRAP``) beside ``-DSR_VERIFY``.
 """
@@ -336,23 +337,34 @@ def default_unchanged(args: argparse.Namespace) -> None:
 
 
 def exit_paths(_args: argparse.Namespace) -> None:
-    """Each `_Exit(` or `_exit(` call skips atexit, so it has to write the verify report itself."""
+    """Each `_Exit(` or `_exit(` call skips atexit, so it has to write the verify report itself.
+
+    The runtime's stops end the process through one run end, sr_run_end (src/rt/hle_route.c),
+    whose _Exit is the one this scan finds; the stops themselves are its call sites, so the scan
+    counts those to know it still sees them."""
     missing = []
     count = 0
+    stops = 0
     for path in sorted((ROOT / "src" / "rt").glob("*.c")):
         if path.name.endswith("selftest.c") or path.name.startswith(("verify", "snapshot")):
             continue
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         for number, line in enumerate(lines):
-            if not re.search(r"\b_[Ee]xit\(", line) or line.lstrip().startswith(("*", "/")):
+            if line.lstrip().startswith(("*", "/")):
+                continue
+            if re.search(r"\bsr_run_end\(", line) and not re.search(r"\bvoid\s+sr_run_end\(", line):
+                stops += 1
+            if not re.search(r"\b_[Ee]xit\(", line):
                 continue
             count += 1
             window = lines[max(0, number - 8):number + 1]
             if not any("SR_VERIFY_REPORT_NOW" in w for w in window):
                 missing.append(f"{path.name}:{number + 1}")
-    expect(count >= 10, f"found only {count} _Exit/_exit sites; the scan is out of date")
+    expect(count >= 1 and stops >= 10,
+           f"found {count} _Exit/_exit sites and {stops} sr_run_end stops; the scan is out of date")
     expect(not missing, f"_Exit/_exit without SR_VERIFY_REPORT_NOW before it: {missing}")
-    print(f"PASS exit-paths: all {count} runtime _Exit/_exit sites write the verify report")
+    print(f"PASS exit-paths: all {count} runtime _Exit/_exit sites, the run end's for {stops} "
+          f"stops, write the verify report")
 
 
 def recomp_flags(args: argparse.Namespace) -> None:

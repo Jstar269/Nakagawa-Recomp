@@ -3554,7 +3554,11 @@ class TestSanitizedBringup(unittest.TestCase):
         self.assertEqual(disc_id, "ULUS99998")
         env = self.last_launch_env
         self.assertEqual(Path(env["SR_DATAROOT"]).resolve(), (staged / "xbdata").resolve())
-        self.assertIn(str(staged.resolve()), env["SR_LOOSE_CONTENT_ROOTS"])
+        # The launcher gets the native host path; MSYS2's Python prints a Path with forward slashes.
+        staged_host = str(staged.resolve())
+        if os.name == "nt":
+            staged_host = staged_host.replace("/", "\\")
+        self.assertIn(staged_host, env["SR_LOOSE_CONTENT_ROOTS"])
         nk_cli.validate_bringup_report(report)
 
     def test_bringup_codegen_reads_bss_from_the_disc_psp_header(self):
