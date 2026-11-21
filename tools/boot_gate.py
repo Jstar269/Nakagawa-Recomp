@@ -12,13 +12,15 @@ as ``present-submitted`` rather than visual success.
 Frame content rule. The gate judges content over the run, not only the first frame, because
 many games start on a black frame. Content is validated when either (a) the ``first_frame``
 event counts at least one nonzero pixel, or (b) a ``phase=first_content`` event exists with
-``brightest`` above zero. The runtime emits ``first_content`` once per run, when the first
-picture probe (every 300 vblanks, on the CPU and the GPU presenter alike) reads a frame with
-a colour byte above the dark threshold (``SR_PICTURE_DARK_MAX``), with the probe's
-``vblank`` and ``brightest``. Neither (a) nor (b), as in an all-black run, stays
-``frame-content-unvalidated``; a ``first_content`` event without a ``first_frame`` event
-proves nothing (the milestone order fails). An unparsable ``first_content`` field is a
-disqualifying fault, like an unparsable ``nonzero_pixels``. ``frameContentSource`` in the JSON
+``brightest`` above the dark threshold (``PICTURE_DARK_MAX``, 8, the value of
+``SR_PICTURE_DARK_MAX`` in src/rt/fbcap.h; a test pins the two together). The runtime emits
+``first_content`` once per run, when the first picture probe (every 300 vblanks while the GUI is
+on, on the CPU and the GPU presenter alike) reads a frame with a colour byte above that
+threshold, with the probe's ``vblank`` and ``brightest``. Neither (a) nor (b), as in an
+all-black run or one shorter than the first probe, stays ``frame-content-unvalidated``; a
+``first_content`` event without a ``first_frame`` event proves nothing (the milestone order
+fails). A ``first_content`` event whose ``brightest`` is missing, unparsable or at or below the
+threshold cannot come from a correct runtime: it is a disqualifying fault and never content. ``frameContentSource`` in the JSON
 output names which event validated the content.
 
 A ``phase=stalled`` event carrying a known neutral observation is reported in the
@@ -48,6 +50,9 @@ import sys
 from evidence_model import milestones_in_order
 
 
+# The runtime's dark-picture threshold, SR_PICTURE_DARK_MAX in src/rt/fbcap.h (tools/test_boot_gate.py
+# pins the two together): a probed frame counts as visible only when a colour byte is above it.
+PICTURE_DARK_MAX = 8
 EVENT_RE = re.compile(r"\bBOOT_EVENT\s+(.+)$")
 PAIR_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|\S+)')
 # ``window_ready`` is the historical name for the host-presenter initialization
@@ -99,7 +104,7 @@ def _frame_evidence(first_frame: dict[str, str] | None, nonzero_pixels: int) -> 
 
 
 def _first_content(events: list[dict[str, str]], faults: list[str]) -> tuple[dict[str, str] | None, int]:
-    """The first ``first_content`` event and its ``brightest`` value (0 when absent or invalid)."""
+    """The first ``first_content`` event and its ``brightest`` value (0 when absent or not content)."""
     event = next((e for e in events if e.get("phase") == "first_content"), None)
     if event is None:
         return None, 0
@@ -108,6 +113,12 @@ def _first_content(events: list[dict[str, str]], faults: list[str]) -> tuple[dic
         faults.append(
             f"BOOT_GATE: invalid first_content brightest={event.get('brightest')!r} "
             f"at line {event.get('line', '?')}"
+        )
+        return event, 0
+    if brightest <= PICTURE_DARK_MAX:
+        faults.append(
+            f"BOOT_GATE: first_content brightest={brightest} is not above the dark threshold "
+            f"{PICTURE_DARK_MAX} at line {event.get('line', '?')}"
         )
         return event, 0
     return event, brightest
@@ -165,7 +176,7 @@ def parse_log(path: str, *, allow_present_only: bool = False) -> dict:
     frame_content_source: str | None = None
     if frame_evidence == "content-validated":
         frame_content_source = "first_frame"
-    elif first_frame is not None and content_brightest > 0:
+    elif first_frame is not None and content_brightest > PICTURE_DARK_MAX:
         # The first frame was black (or, on the GPU path, uncounted), but a later probe read
         # a visible frame: the run did render content.
         frame_evidence = "content-validated"

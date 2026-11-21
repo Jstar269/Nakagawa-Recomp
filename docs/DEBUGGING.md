@@ -2641,9 +2641,15 @@ retail title is private: keep it out of the repository and every upload.
    presenter alike) emits `BOOT_EVENT phase=first_content vblank=<N> brightest=<M>` once per run. `N` is the
    probe's vblank (probes run every 300 vblanks, so it is a sample, not the earliest visible frame) and `M`
    its brightest colour byte. `tools/boot_gate.py` validates content when `first_frame` counts a nonzero pixel
-   or a `first_content` event with `brightest` above 0 exists, and reports `frameContentSource`
-   (`first_frame` or `first_content`). A run with neither, such as an all-black one, still fails as
-   `frame-content-unvalidated`.
+   or a `first_content` event with `brightest` above 8 (the same dark threshold the runtime uses,
+   `SR_PICTURE_DARK_MAX`) exists, and reports `frameContentSource` (`first_frame` or `first_content`). A
+   `first_content` event with `brightest` of 8 or less, or an unparsable one, cannot come from a correct runtime;
+   the gate reports it as a fault and never counts it as content. A run with neither kind of evidence, such as an
+   all-black one, still fails as `frame-content-unvalidated`.
+
+   Limits: the probe runs only while the GUI is on and its first probe is at
+   vblank 300, so a run shorter than that whose first frame was black has no `first_content` event and still
+   fails as `frame-content-unvalidated`. A game that stays dark for the whole capture fails the same way.
 
 ### Crash on startup
 

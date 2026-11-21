@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -283,13 +284,38 @@ class BootGateTests(unittest.TestCase):
             self.assertIsNone(result["frameContentSource"])
             self.assertIsNone(result["firstContentVblank"])
 
-    def test_first_content_with_zero_brightest_is_not_content(self) -> None:
+    def test_first_content_at_or_below_the_dark_threshold_is_a_named_fault(self) -> None:
+        # The runtime emits first_content only above SR_PICTURE_DARK_MAX, so these cannot come from a
+        # correct runtime: a fault, and never content.
+        for brightest in (0, 1, 8):
+            result = self.parse(
+                self.ordered_prefix()
+                + [event("first_frame", source="cpu", nonzero_pixels=0),
+                   event("first_content", vblank=300, brightest=brightest)]
+            )
+            self.assertFalse(result["ok"], brightest)
+            self.assertEqual(result["faultCount"], 1, brightest)
+            self.assertIn("not above the dark threshold", result["faults"][0])
+            self.assertEqual(
+                result["disqualifyingReasons"], ["disqualifying-fault", "frame-content-unvalidated"]
+            )
+            self.assertIsNone(result["frameContentSource"])
+
+    def test_first_content_just_above_the_dark_threshold_is_content(self) -> None:
         result = self.parse(
             self.ordered_prefix()
-            + [event("first_frame", source="cpu", nonzero_pixels=0), event("first_content", vblank=300, brightest=0)]
+            + [event("first_frame", source="cpu", nonzero_pixels=0), event("first_content", vblank=300, brightest=9)]
         )
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["disqualifyingReasons"], ["frame-content-unvalidated"])
+        self.assertTrue(result["ok"], result["disqualifyingReasons"])
+        self.assertEqual(result["frameContentSource"], "first_content")
+        self.assertEqual(result["faultCount"], 0)
+
+    def test_dark_threshold_matches_the_runtime_constant(self) -> None:
+        header = (ROOT / "src" / "rt" / "fbcap.h").read_text(encoding="utf-8")
+        match = re.search(r"#define\s+SR_PICTURE_DARK_MAX\s+(\d+)", header)
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(boot_gate.PICTURE_DARK_MAX, int(match.group(1)))
 
     def test_first_content_without_first_frame_proves_nothing(self) -> None:
         result = self.parse(self.ordered_prefix() + [event("first_content", vblank=300, brightest=50)])
