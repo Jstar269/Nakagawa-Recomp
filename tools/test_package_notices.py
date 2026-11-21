@@ -10,6 +10,7 @@ import json
 from io import StringIO
 from pathlib import Path
 import re
+import shutil
 import struct
 import sys
 import tempfile
@@ -128,6 +129,36 @@ class TestPackageNotices(unittest.TestCase):
                         self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
                     )
                 self.assertIn("LICENSE_RECORD_MALFORMED", str(ctx.exception))
+
+    def test_project_notice_and_credits_are_staged_into_the_package(self) -> None:
+        """NOTICE.md and CREDITS.md travel with every package, next to the generated notice bundle."""
+        (self.pkg_dir / "mygame.exe").write_bytes(b"MZ\0\0exe")
+        package_notices.generate_package_notices(
+            self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+        )
+        self.assertEqual(package_notices.PROJECT_NOTICE_FILES, ("NOTICE.md", "CREDITS.md"))
+        for name in package_notices.PROJECT_NOTICE_FILES:
+            with self.subTest(name=name):
+                staged = (self.pkg_dir / name).read_bytes()
+                self.assertEqual(staged, (ROOT / name).read_bytes().replace(b"\r\n", b"\n"))
+
+    def test_package_without_the_project_notice_pages_fails_closed(self) -> None:
+        """A source tree lacking NOTICE.md or CREDITS.md cannot produce a package."""
+        (self.pkg_dir / "mygame.exe").write_bytes(b"MZ\0\0exe")
+        with tempfile.TemporaryDirectory() as temp:
+            fake_repo = Path(temp)
+            for tree in ("third_party", "src/rt/xr", "src/rt/atrac3p", "src/rt/minimp3", "src/rt/h264_ffmpeg_sub"):
+                shutil.copytree(ROOT / tree, fake_repo / tree)
+            (fake_repo / "assets").mkdir()
+            shutil.copy2(ROOT / "assets" / "third_party_components.json", fake_repo / "assets" / "third_party_components.json")
+            shutil.copy2(ROOT / "LICENSE", fake_repo / "LICENSE")
+            shutil.copy2(ROOT / "Makefile", fake_repo / "Makefile")
+            with self.assertRaises(PackageRouteError) as ctx:
+                package_notices.generate_package_notices(
+                    self.pkg_dir, repo_root=fake_repo, toolchain_root=self.no_toolchain
+                )
+        self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_TEXT_MISSING")
+        self.assertIn("NOTICE.md", str(ctx.exception))
 
     def test_freetype_credit_reaches_the_notices(self) -> None:
         """The FTL's binary-distribution credit is stated in THIRD_PARTY_NOTICES.txt, not only implied."""
@@ -324,6 +355,8 @@ class TestPackageNotices(unittest.TestCase):
                 (repo_root / h264_license).parent.mkdir(parents=True)
                 (repo_root / h264_license).write_text("synthetic LGPL text", encoding="utf-8")
                 (repo_root / project_license).write_text("synthetic GPL text", encoding="utf-8")
+                (repo_root / "NOTICE.md").write_text("synthetic notice", encoding="utf-8")
+                (repo_root / "CREDITS.md").write_text("synthetic credits", encoding="utf-8")
                 inventory = {
                     "native": {
                         "dlls": {},
@@ -441,6 +474,8 @@ class TestPackageNotices(unittest.TestCase):
                     target.write_text("verbatim text for " + record["name"], encoding="utf-8")
             for license_entry in sdl_record["license_texts"]:
                 (fake_repo / license_entry["file"]).parent.mkdir(parents=True, exist_ok=True)
+            for project_notice in package_notices.PROJECT_NOTICE_FILES:
+                (fake_repo / project_notice).write_text("synthetic " + project_notice, encoding="utf-8")
 
             with tempfile.TemporaryDirectory() as tc_dir:
                 toolchain_root = Path(tc_dir)

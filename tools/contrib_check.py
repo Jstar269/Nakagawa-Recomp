@@ -120,6 +120,11 @@ class StrictUnit:
     builder: tuple[str, str] | None = None
     defines: tuple[str, ...] = ()
     includes: tuple[str, ...] = ()
+    #: Include folders the build puts before the common ones, in its order.
+    #: The compiler searches ``-I`` folders left to right, so a folder whose
+    #: header shadows one under ``src/rt`` (the H.264 subset's ``config.h``)
+    #: must come first, as it does on the build's own line.
+    leading_includes: tuple[str, ...] = ()
     #: ``-Wno-*`` suppressions the build owns, with their reason, for this
     #: source's warning-audited build.  Only the ones this source needs.
     warnings: tuple[str, ...] = ()
@@ -255,6 +260,16 @@ STRICT_C_UNITS: dict[str, StrictUnit] = {
         builder=("tools/nk_cli.py", "_build_vram_decoder"),
         defines=("SR_GE_VRAM_DECODER_CLI",),
     ),
+    # The project's own wrapper over the FFmpeg H.264 subset keeps the project
+    # warning set, but its rule puts the subset folder first (-I$(H264_SUB_DIR)
+    # before $(CFLAGS)) so the subset's config.h wins over any other, and adds
+    # FFmpeg's build defines (H264_SUB_BUILD_FLAGS).
+    "src/rt/h264_ffmpeg_sub/nk_h264_api.c": StrictUnit(
+        recipes=("$(BUILD_DIR)/h264sub_nk_h264_api.o",),
+        leading_includes=("src/rt/h264_ffmpeg_sub",),
+        defines=("HAVE_AV_CONFIG_H", "_ISOC99_SOURCE", "_FILE_OFFSET_BITS=64", "_LARGEFILE_SOURCE",
+                 "_POSIX_C_SOURCE=200112", "_XOPEN_SOURCE=600"),
+    ),
 }
 
 
@@ -269,7 +284,9 @@ class VendoredBuild:
     change to such a file on upstream warnings the build never treats as
     errors.  *recipes* name the Makefile pattern rules that compile the set;
     *flags* are the standard, warning, define and include flags those rules
-    pass, minus optimisation and dependency flags.  ``tools/test_contrib_check.py``
+    pass in the default build (no opt-in debug or trace switch), minus
+    optimisation and dependency flags, with the include folders in the rule's
+    order.  ``tools/test_contrib_check.py``
     fails if they drift from the rules.
     """
 
@@ -285,13 +302,16 @@ VENDORED_BUILDS: dict[str, VendoredBuild] = {
     "src/rt/atrac3p/": VendoredBuild(
         recipes=("$(BUILD_DIR)/atrac3p_%.o",),
         flags=("-Wall", "-Wextra", "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
+               "-DSR_FLIGHT_RECORDER_LINKED", "-DPERF_AOT_INSTRUCTIONS=0", "-DSR_PUBLIC_SAFE",
                "-Isrc/rt", "-Isrc/core", "-Isrc/rt/atrac3p",
                "-Isrc/rt/atrac3p/libavcodec", "-Isrc/rt/atrac3p/libavutil"),
     ),
     "src/rt/h264_ffmpeg_sub/": VendoredBuild(
         recipes=("$(BUILD_DIR)/h264sub_%.o",),
         flags=("-Isrc/rt/h264_ffmpeg_sub", "-Isrc/rt", "-Isrc/core", "-Wall", "-Wextra", "-w", "-std=c11",
-               "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS", "-DHAVE_AV_CONFIG_H",
+               "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
+               "-DSR_FLIGHT_RECORDER_LINKED", "-DPERF_AOT_INSTRUCTIONS=0", "-DSR_PUBLIC_SAFE",
+               "-DHAVE_AV_CONFIG_H",
                "-D_ISOC99_SOURCE", "-D_FILE_OFFSET_BITS=64", "-D_LARGEFILE_SOURCE",
                "-D_POSIX_C_SOURCE=200112", "-D_XOPEN_SOURCE=600",
                "-include", "src/rt/h264_ffmpeg_sub/nk_h264_symbols.h"),
@@ -946,6 +966,7 @@ def strict_compile_command(compiler: str, source: str, vulkan_flags: list[str]) 
         return [compiler, "-fsyntax-only", *vendored.flags, source], ""
     unit = STRICT_C_UNITS.get(source)
     extra: list[str] = []
+    leading = [f"-I{include}" for include in unit.leading_includes] if unit is not None else []
     if unit is not None:
         extra.extend(f"-D{define}" for define in unit.defines)
         extra.extend(f"-I{include}" for include in unit.includes)
@@ -962,7 +983,7 @@ def strict_compile_command(compiler: str, source: str, vulkan_flags: list[str]) 
             flag = f"-I{directory}"
             if flag not in extra:
                 extra.append(flag)
-    return [compiler, *STRICT_C_FLAGS, *vulkan_flags, *extra, source], ""
+    return [compiler, *leading, *STRICT_C_FLAGS, *vulkan_flags, *extra, source], ""
 
 
 def _missing_sdk(output: str) -> str | None:
