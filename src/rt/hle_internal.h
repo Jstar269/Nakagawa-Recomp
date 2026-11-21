@@ -1447,7 +1447,7 @@ void hle_exit_audio_stats(void);
 void hle_exit_close_audio_dump(void);
 /* The end of a run the runtime stops itself: every finalizer atexit would run, the recording
  * finished with `status` and `reason`, then _Exit(status) (hle_route.c). */
-_Noreturn void sr_run_end(int status, const char *reason);
+_Noreturn void sr_run_end(int status, const char *label, const char *reason);
 extern DisplayFrameState s_display_active;
 extern DisplayFrameState s_display_latched;
 extern int s_display_latched_pending;

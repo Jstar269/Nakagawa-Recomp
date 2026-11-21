@@ -223,7 +223,7 @@ static void hle_guest_fault(CpuState *s, const char *name, uint32_t addr, int st
     s_hle_guest_fault_count++;
     s_hle_guest_fault_addr = addr;
 #else
-    if (sr_sched_on) sr_run_end(HLE_GUEST_FAULT_EXIT, "a guest fault stopped the run");
+    if (sr_sched_on) sr_run_end(HLE_GUEST_FAULT_EXIT, "guest_fault", "a guest fault stopped the run");
     longjmp(g_hle_jmp, 1);
 #endif
 }

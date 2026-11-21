@@ -2293,7 +2293,7 @@ uint32_t hle_unmodelled_stop(const char *import_name, const char *fmt, ...) {
     hle_record_unsupported_import_stop(sr_last_nid, import_name);
     sr_flight_unsupported_fatal(sr_last_nid, sched_current_uid(), 0u);
     sr_hit_hle = 1;
-    if (sr_sched_on) sr_run_end(7, "an unsupported import stopped the run");
+    if (sr_sched_on) sr_run_end(7, "unsupported_import", "an unsupported import stopped the run");
     longjmp(g_hle_jmp, 1);
 #endif
 }
@@ -4706,7 +4706,7 @@ uint32_t sr_syscall(CpuState *s, uint32_t nid) {
         sr_hit_hle = 1;
         /* Under the fiber scheduler, longjmp across fibers is invalid; stop the process cleanly
          * after flushing the trace. The plain driver (no scheduler) keeps the longjmp boundary. */
-        if (sr_sched_on) sr_run_end(7, "an unregistered NID stopped the run");
+        if (sr_sched_on) sr_run_end(7, "unregistered_nid", "an unregistered NID stopped the run");
         longjmp(g_hle_jmp, 1);
     }
     if (hle_syslog_on()) {

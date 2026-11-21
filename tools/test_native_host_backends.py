@@ -410,9 +410,9 @@ class NativeHostExitSourceTests(unittest.TestCase):
         SR_AUDIOSTAT gate."""
         hle = hle_sources.text()
         start = hle.index("BOOT_EVENT phase=exit_at_vblank")
-        self.assertIn('sr_run_end(0, "SR_EXIT_AT_VBLANK");', hle[start:start + 1200],
+        self.assertIn('sr_run_end(0, "exit_at_vblank", "SR_EXIT_AT_VBLANK");', hle[start:start + 1200],
                       "the vblank exit must end through the run end")
-        run_end = hle.index("_Noreturn void sr_run_end(int status, const char *reason) {")
+        run_end = hle.index("_Noreturn void sr_run_end(int status, const char *label, const char *reason) {")
         block = hle[run_end:hle.index("_Exit(status);", run_end)]
         stats = block.find("hle_exit_audio_stats();")
         self.assertNotEqual(stats, -1, "the vblank exit must print its audio statistics through the shared block")
@@ -443,7 +443,7 @@ class NativeHostExitSourceTests(unittest.TestCase):
         branch = body.index('if (!getenv("SR_ROUTE_NO_EXIT")) {')
         self.assertGreater(call, branch,
                            "the run end must sit inside the exit branch, not under SR_ROUTE_NO_EXIT")
-        run_end = hle.index("_Noreturn void sr_run_end(int status, const char *reason) {")
+        run_end = hle.index("_Noreturn void sr_run_end(int status, const char *label, const char *reason) {")
         run_end_body = hle[run_end:hle.index("\n}\n", run_end)]
         close = run_end_body.find("hle_exit_close_audio_dump();")
         self.assertNotEqual(close, -1, "the run end does not close the SR_AUDIODUMP file")
@@ -467,7 +467,7 @@ class NativeHostExitSourceTests(unittest.TestCase):
         branch = body.index('if (!getenv("SR_ROUTE_NO_EXIT")) {')
         self.assertGreater(call, branch,
                            "the audio statistics must print inside the exit branch")
-        run_end = hle.index("_Noreturn void sr_run_end(int status, const char *reason) {")
+        run_end = hle.index("_Noreturn void sr_run_end(int status, const char *label, const char *reason) {")
         run_end_body = hle[run_end:hle.index("\n}\n", run_end)]
         stats = run_end_body.find("hle_exit_audio_stats();")
         self.assertNotEqual(stats, -1, "the run end does not print the audio statistics")

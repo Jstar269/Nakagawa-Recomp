@@ -133,7 +133,7 @@ static uint32_t h_ExitThread(CpuState *s) {
         fprintf(stderr, "GAMELOG: Guest requested exit (libc guard chain)\n");
         fflush(stderr);
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, s->pc, uid, 1u);
-        sr_run_end(1, "the guest's own exit path failed");
+        sr_run_end(1, "guest_exit_failed", "the guest's own exit path failed");
     }
     int delete_request = s_exit_delete_request;
     s_exit_delete_request = 0;

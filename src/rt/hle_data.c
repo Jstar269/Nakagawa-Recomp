@@ -2637,7 +2637,7 @@ uint32_t h_io_open_path(const char *path, uint32_t flags, int forced_slot) {
     if (rc < (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) && s_fds[rc].used &&
         hle_enhancement_attach((int)rc, path, flags) < 0) {
         fprintf(stderr, "ENHANCEMENT_DATA_MISMATCH: the run stops here\n");
-        sr_run_end(1, "ENHANCEMENT_DATA_MISMATCH");
+        sr_run_end(1, "enhancement_data_mismatch", "ENHANCEMENT_DATA_MISMATCH");
     }
     return rc;
 }

@@ -115,7 +115,7 @@ class TestDispatchFatalPolicySource(unittest.TestCase):
         self.assertIn("uint32_t sr_syscall(CpuState *s, uint32_t nid)", hle_src)
         fn_body = function_body(hle_src, "uint32_t sr_syscall(CpuState *s, uint32_t nid)")
         self.assertIn("if (!e)", fn_body)
-        self.assertIn('sr_run_end(7, "an unregistered NID stopped the run")', fn_body)
+        self.assertIn('sr_run_end(7, "unregistered_nid", "an unregistered NID stopped the run")', fn_body)
         self.assertIn("longjmp(g_hle_jmp", fn_body)
         self.assertIn("HLE: unimplemented nid", fn_body)
 
@@ -265,7 +265,7 @@ class TestFatalStopsFinishRecording(unittest.TestCase):
             code = _without_comments(path.read_text(encoding="utf-8"))
             for match in FATAL_EXIT_RE.finditer(code):
                 line = code.count("\n", 0, match.start()) + 1
-                start = code.rfind("\n_Noreturn void sr_run_end(int status, const char *reason) {",
+                start = code.rfind("\n_Noreturn void sr_run_end(int status, const char *label, const char *reason) {",
                                    0, match.start())
                 body = function_body(code[start + 1:], "_Noreturn void sr_run_end(") if start >= 0 else ""
                 if body and match.start() < start + 1 + len(body):
@@ -278,7 +278,8 @@ class TestFatalStopsFinishRecording(unittest.TestCase):
     def test_the_run_end_finishes_the_recording_with_its_exit_status(self):
         """The run end finishes a texture dump, then the recording with the status it exits with,
         and every finalizer the SR_EXIT_AT_VBLANK exit ran comes before its _Exit."""
-        body = function_body(hle_sources.text(), "_Noreturn void sr_run_end(int status, const char *reason) {")
+        body = function_body(hle_sources.text(),
+                             "_Noreturn void sr_run_end(int status, const char *label, const char *reason) {")
         self.assertTrue(body, "sr_run_end is not defined in the runtime HLE sources")
         code = _without_comments(body)
         finishes = re.findall(r"\bsr_videorec_finish_status\(\s*reason\s*,\s*status\s*\)", code)
@@ -291,7 +292,7 @@ class TestFatalStopsFinishRecording(unittest.TestCase):
         self.assertLess(dump.start(), code.index("sr_videorec_finish_status"),
                         "the texture dump is finished before the recording")
         for step in ("sr_trace_close();", "hle_exit_audio_stats();", "hle_exit_close_audio_dump();",
-                     "sr_dump_calls();", "psmf_av_final(reason);", "ge_scene_dump_finish();",
+                     "sr_dump_calls();", "psmf_av_final(label);", "ge_scene_dump_finish();",
                      "sr_compat_report();", "gui_shutdown();", "sr_perf_shutdown();",
                      "sr_profile_dump_final();", "SR_VERIFY_REPORT_NOW();",
                      "hle_state_sample_close();", "ace_finish();"):
@@ -304,18 +305,41 @@ class TestFatalStopsFinishRecording(unittest.TestCase):
                         "the presenter writes the SR_PERF summary before the shutdown after it")
 
     def test_every_stop_passes_a_named_reason_and_its_status(self):
-        """Each call names its stop for the recording, with the status it exits with; the stops
-        this covers today, and a new one is checked the same way."""
-        calls = re.findall(r"\bsr_run_end\(\s*([^,()]+?)\s*,\s*\"([^\"]+)\"\s*\)",
-                           hle_sources.text())
+        """Each call names its stop for the recording, with the status it exits with, and gives
+        it a one-token label for the key=value report lines; the stops this covers today, and a
+        new one is checked the same way."""
+        text = hle_sources.text()
+        calls = re.findall(r"\bsr_run_end\(\s*([^,()]+?)\s*,\s*\"([^\"]*)\"\s*,\s*\"([^\"]+)\"\s*\)",
+                           text)
         self.assertGreaterEqual(len(calls), 11, calls)
-        for status, reason in calls:
+        every_call = re.findall(r"(?<!void )\bsr_run_end\(", _without_comments(text))
+        self.assertEqual(len(calls), len(every_call),
+                         "every sr_run_end call passes a literal label and reason")
+        for status, label, reason in calls:
             with self.subTest(stop=reason):
                 self.assertTrue(status and reason.strip(), (status, reason))
+                self.assertRegex(label, r"\A[a-z0-9_]+\Z",
+                                 "the label is one token: it is the reason= value of a "
+                                 "space-separated key=value line")
+        labels = [label for _, label, _ in calls]
+        self.assertEqual(len(labels), len(set(labels)), "each stop has its own label")
+
+    def test_the_report_lines_get_one_token_reasons(self):
+        """PSMF_AV_PRESENT_FINAL and MPEG_PICTURES print reason=%s in a space-separated key=value
+        line, so whatever reaches psmf_av_final is one token: the run end passes its label (never
+        the sentence the recording quotes), and every other caller passes a one-token literal."""
+        args = [arg for arg in re.findall(r"\bpsmf_av_final\(\s*([^()]*?)\s*\)\s*;",
+                                          hle_sources.text())
+                if not arg.startswith("const char")]   # its declarations
+        self.assertIn("label", args)
+        self.assertNotIn("reason", args, "the run end passes its multi-word reason to a report line")
+        for arg in args:
+            with self.subTest(arg=arg):
+                self.assertRegex(arg, r'\A(label|"[a-z0-9_]+")\Z')
 
     def test_exit_at_vblank_records_a_clean_end(self):
         """SR_EXIT_AT_VBLANK is the documented end of a showcase recording: exit status 0."""
-        self.assertIn('sr_run_end(0, "SR_EXIT_AT_VBLANK")', hle_sources.text())
+        self.assertIn('sr_run_end(0, "exit_at_vblank", "SR_EXIT_AT_VBLANK")', hle_sources.text())
 
     def test_texdump_finish_pattern(self):
         code = _without_comments("{ /* sr_texdump_exit_finish(); */ sr_texdump_exit_finish (); _Exit(1); }")

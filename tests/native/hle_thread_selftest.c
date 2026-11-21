@@ -63511,6 +63511,12 @@ static uint32_t hle_registry_fill_handler(CpuState *s) {
     return 0u;
 }
 
+/* Stands in for the MPEG_PICTURES report in the watchsample route: it prints the reason= value
+ * the run end hands the PSMF A/V and MPEG report lines, so the parent can check it. */
+static void run_end_report_label_probe(const char *reason) {
+    fprintf(stderr, "RUN_END_REPORT_LABEL=[%s]\n", reason ? reason : "(null)");
+}
+
 /* The child changes directory as it starts, so its files are named from the parent's scratch root,
  * passed down in its argument after the route: --texdump-stop-child=<route>:<root>. */
 static int texdump_stop_paths(char *probe, char *log, size_t capacity, const char *root, const char *route) {
@@ -63587,8 +63593,12 @@ static int run_texdump_stop_child(const char *arg) {
         }
     } else if (strcmp(route, "watchsample") == 0) {
         /* The watchdog stop runs the whole run end (audit 2026-11-17, F-1ee85ec7): the
-         * SR_SAMPLE_OUT rows sampled before it land, and the presenter is released. */
+         * SR_SAMPLE_OUT rows sampled before it land, the presenter is released, and the PSMF
+         * A/V and MPEG report lines get the stop's one-token label (SR_MPEGAV turns them on). */
         extern void sr_hle_test_state_sample_reset(void);
+        extern void sr_psmf_av_set_pictures_report(void (*report)(const char *reason));
+        hle_test_setenv("SR_MPEGAV", "1");
+        sr_psmf_av_set_pictures_report(run_end_report_label_probe);
         char spec[MAX_PATH], csv[MAX_PATH];
         const char *root = colon + 1;
         if (snprintf(spec, sizeof(spec), "%s/texdump_stop_%s.spec", root, route) >= (int)sizeof(spec) ||
@@ -63701,6 +63711,9 @@ static void test_watchdog_stop_runs_the_run_end(const char *self) {
                memcmp(rows + row_end - 2u, ",7", 2u) == 0,
            "the SR_WATCHDOG_EXIT stop lands every SR_SAMPLE_OUT row sampled before it "
            "(hle_state_sample_close)");
+    expect(strstr(text, "RUN_END_REPORT_LABEL=[watchdog_exit]") != NULL,
+           "the SR_WATCHDOG_EXIT stop hands the PSMF A/V and MPEG report lines the one-token "
+           "label watchdog_exit, not a sentence");
 }
 
 /* SR_FBDUMP=<N> ends the run at the first armed present from vblank N on, whichever way the

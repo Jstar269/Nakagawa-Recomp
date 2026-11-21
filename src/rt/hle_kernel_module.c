@@ -1048,7 +1048,7 @@ static uint32_t hle_libfont_startup_stop(const char *reason) {
     return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
 #else
     sr_hit_hle = 1;
-    if (sr_sched_on) sr_run_end(HLE_LIBFONT_STARTUP_STOP_EXIT, "the libfont start-up stop");
+    if (sr_sched_on) sr_run_end(HLE_LIBFONT_STARTUP_STOP_EXIT, "libfont_startup_stop", "the libfont start-up stop");
     longjmp(g_hle_jmp, 1);
 #endif
 }

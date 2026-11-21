@@ -238,8 +238,11 @@ void hle_exit_close_audio_dump(void) {
  * presenter is released (it writes the SR_PERF summary first, so the shutdown after it is a
  * no-op), the profile and verifier reports print, the SR_SAMPLE_OUT tail lands, and Ace Mode
  * writes its report. Each step is idempotent and a no-op when its feature is off. A stop keeps
- * its own leading lines (its message, the flight-recorder event) before the call. */
-_Noreturn void sr_run_end(int status, const char *reason) {
+ * its own leading lines (its message, the flight-recorder event) before the call.
+ * label is one token ([a-z0-9_]+): it is the reason= value of the space-separated key=value
+ * PSMF_AV_PRESENT_FINAL and MPEG_PICTURES lines. reason is the sentence the recording's
+ * run_end="..." field quotes. */
+_Noreturn void sr_run_end(int status, const char *label, const char *reason) {
     sr_trace_close();
     hle_exit_audio_stats();
     hle_exit_close_audio_dump();
@@ -248,7 +251,7 @@ _Noreturn void sr_run_end(int status, const char *reason) {
     sr_dump_calls();
     fflush(stderr);
     fflush(stdout);
-    psmf_av_final(reason);
+    psmf_av_final(label);
     ge_scene_dump_finish();
     sr_compat_report();
     gui_shutdown();
@@ -278,7 +281,7 @@ static void route_fail(const char *fmt, ...) {
     fflush(stderr);
     if (!getenv("SR_ROUTE_NO_EXIT")) {
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, 0u, ROUTE_FAIL_EXIT);
-        sr_run_end(ROUTE_FAIL_EXIT, "a route check failed");
+        sr_run_end(ROUTE_FAIL_EXIT, "route_fail", "a route check failed");
     }
 }
 
@@ -1830,7 +1833,7 @@ static FILE *s_sample_out;
 
 static void hle_state_sample_refuse(const char *path, int line, const char *why) {
     fprintf(stderr, "SR_SAMPLE_SPEC: %s line %d: %s; the run stops here\n", path, line, why);
-    sr_run_end(2, "SR_SAMPLE_SPEC was refused");
+    sr_run_end(2, "sample_spec_refused", "SR_SAMPLE_SPEC was refused");
 }
 
 static void hle_state_sample_init(void) {

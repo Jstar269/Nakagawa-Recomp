@@ -772,12 +772,12 @@ static void display_after_present(uint32_t armed_vcount) {
             if (!snap_ok) {
                 fprintf(stderr, "SR_FBDUMP: no trustworthy framebuffer snapshot was written\n");
                 sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, 0u, 1u);
-                sr_run_end(1, "SR_FBDUMP found no trustworthy framebuffer");
+                sr_run_end(1, "capture_refused", "SR_FBDUMP found no trustworthy framebuffer");
             }
             {
                 int capture_exit_status = sr_fbcap_exit_status(SR_FBCAP_FBDUMP, cres);
                 sr_flight_exit((uint32_t)capture_exit_status);
-                sr_run_end(capture_exit_status, "SR_FBDUMP capture exit");
+                sr_run_end(capture_exit_status, "capture_exit", "SR_FBDUMP capture exit");
             }
         }
     }
@@ -1222,7 +1222,7 @@ void sr_vblank_tick(void) {
           if (wde > 0 && diff >= (uint32_t)wde) {
               fprintf(stderr, "WATCHDOG: aborting after %u vblanks with no new frame (SR_WATCHDOG_EXIT=%d)\n", diff, wde);
               sr_flight_hang(diff, (uint32_t)wde);
-              sr_run_end(1, "SR_WATCHDOG_EXIT");
+              sr_run_end(1, "watchdog_exit", "SR_WATCHDOG_EXIT");
           }
         }
     }
@@ -1288,7 +1288,7 @@ void sr_vblank_tick(void) {
              * statistics and the SR_AUDIODUMP close, the texture dump and the recording, the
              * PSMF A/V and scene reports, the presenter release (the SR_PERF summary first), the
              * profile, the SR_SAMPLE_OUT tail and Ace Mode's report. Status 0. */
-            sr_run_end(0, "SR_EXIT_AT_VBLANK");
+            sr_run_end(0, "exit_at_vblank", "SR_EXIT_AT_VBLANK");
         }
     }
 }
