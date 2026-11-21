@@ -6,8 +6,8 @@
 // See NOTICE.md for upstream lineage and modification provenance.
 // Derived from PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later
 // Copyright (c) 2012- PPSSPP Project and contributors
-// Modified by Nakagawa Recomp contributors on 2026-11-16: the opt-in online ad hoc tier adapted from PPSSPP 3bc60270 (#1139).
 // This is a direct port of Coldbird's code from http://code.google.com/p/aemu/ - All credit goes to him!
+// Modified by Nakagawa Recomp contributors on 2026-11-16: the opt-in online ad hoc tier adapted from PPSSPP 3bc60270 (#1139).
 
 /* Networking: sceNet, sceHttp, sceSsl, sceWlan, and opt-in ad hoc networking (#1139).
  * Lone-console sceWlan, sceNetInit/Term, and offline sceNetAdhocctl stay PSP-measured (see below).
