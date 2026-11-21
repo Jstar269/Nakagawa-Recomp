@@ -1329,8 +1329,10 @@ static bool place_expansion(const char *data_root, const NkDiscImportPaths *path
    it there. The destination's name is chosen, its folder made and its name lock
    taken before anything moves (placement_begin), and the image keeps its .source
    until the move is recorded. A move whose record cannot be written is put back
-   and its own record written again, so every failure leaves the earlier
-   expansion where its ref names it, with a named error. */
+   and its own record written again, so a failure leaves the earlier expansion
+   where its ref names it, with a named error. Only when the put-back or the
+   rewrite itself fails too does the error say what was left: the image back
+   with no record, or at the new name unrecorded (the next import expands again). */
 static bool move_expansion(const char *data_root, const NkDiscImportPaths *paths,
                            const char *key, NkDiscImport *out, NkDiscExpandStatus *status) {
     NkDiscImport moved = *out;
