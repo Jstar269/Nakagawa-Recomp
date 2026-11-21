@@ -46,13 +46,13 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **711** (dedicated **628**, fake_success **3**, controlled_unsupported **80**).
-Semantic handler census: **603** handlers across **30** API families, covering **635** handler-associated NID registrations.
+Registered NIDs: **711** (dedicated **629**, fake_success **3**, controlled_unsupported **79**).
+Semantic handler census: **604** handlers across **30** API families, covering **636** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 348 | 360 |
+| `partial` | 349 | 361 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
 | `unreviewed` | 237 | 244 |
@@ -65,7 +65,7 @@ Semantic handler census: **603** handlers across **30** API families, covering *
 | `sceAudio` | 0 | 11 | 0 | 0 | 6 | 17 | 18 |
 | `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceCtrl` | 0 | 12 | 0 | 0 | 0 | 12 | 12 |
-| `sceDisplay` | 1 | 14 | 0 | 0 | 1 | 16 | 16 |
+| `sceDisplay` | 1 | 15 | 0 | 0 | 1 | 17 | 17 |
 | `sceDmac` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
 | `sceFont` | 0 | 7 | 0 | 0 | 11 | 18 | 18 |
 | `sceGe` | 2 | 11 | 0 | 0 | 1 | 14 | 14 |
@@ -89,7 +89,7 @@ Semantic handler census: **603** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **348** | **1** | **3** | **237** | **603** | **635** |
+| **Total** | **14** | **349** | **1** | **3** | **237** | **604** | **636** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -306,6 +306,10 @@ Semantic handler census: **603** handlers across **30** API families, covering *
   - Evidence: Makefile:display-smoke-run
   - Evidence: tests/fixtures/display_smoke/generate.py:verify
   - Evidence: tests/fixtures/display_smoke/generate.py:run
+- **`h_DisplaySetHoldMode`** (`sceDisplay`): `sceDisplaySetHoldMode` (0x7ed59bc4)
+  - Limitation: mode 0 from a thread returning 0 is PSP-measured; a nonzero mode returning 0 is PPSSPP-derived and the interrupt-context refusal (0x80020064) JPCSP-derived, neither PSP-measured; the recorded mode has no modeled effect on the picture (#2886)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-KERNEL-MISC-001: display-basic): mode 0 from a user thread returns 0
+  - Evidence: tests/native/hle_thread_selftest.c:test_display_set_hold_mode
 - **`h_DisplaySetMode`** (`sceDisplay`): `sceDisplaySetMode` (0x0e20f177)
   - Limitation: only the argument results are modelled: the PSP blocks until a vblank ('Vblank after set: 1'), the runtime returns at once, and sceDisplayGetMode reports the fixed mode 0 at 480x272 (#341)
   - Evidence: PSPAutotests tests/display/setmode.expected (1a9e6c31, recorded on a PSP): mode 0 at 480x272 returns 0, any other mode 0x80000107, mode 0 at another size 0x80000104, mode checked first

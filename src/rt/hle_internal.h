@@ -1440,6 +1440,8 @@ extern DisplayFrameState s_display_active;
 extern DisplayFrameState s_display_latched;
 extern int s_display_latched_pending;
 extern int s_display_configured;
+/* The mode the last sceDisplaySetHoldMode recorded (0 at process start); see h_DisplaySetHoldMode. */
+int32_t sr_display_hold_mode(void);
 extern uint32_t s_framebuf , s_vcount;
 extern uint32_t s_last_flip_vcount;
 extern unsigned long s_watchdog_fires;
