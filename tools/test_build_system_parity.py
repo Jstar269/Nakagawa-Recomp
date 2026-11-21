@@ -160,11 +160,13 @@ class BuildSystemParityTests(unittest.TestCase):
         ld64 and MSVC's linker lack: Make adds it only off a Mac (DISC_EXPAND_WRAP_MALLOC, chosen
         beside LD_GC_SECTIONS) and CMake only outside MSVC and Apple, so neither build stops
         linking the test there."""
+        # Two links: native-core-tests', and fuzz-parsers' UBSan build of the same test.
         recipe = [line for line in self.makefile_text.splitlines() if "tests/native/test_disc_expand.c" in line]
-        self.assertEqual(len(recipe), 1, "expected one Makefile line linking test_disc_expand.c")
-        self.assertIn("$(DISC_EXPAND_WRAP_MALLOC)", recipe[0])
-        self.assertNotIn("--wrap", recipe[0])
-        self.assertNotIn("NK_TEST_WRAP_MALLOC", recipe[0])
+        self.assertEqual(len(recipe), 2, "expected two Makefile lines linking test_disc_expand.c")
+        for line in recipe:
+            self.assertIn("$(DISC_EXPAND_WRAP_MALLOC)", line)
+            self.assertNotIn("--wrap", line)
+            self.assertNotIn("NK_TEST_WRAP_MALLOC", line)
         choice = re.search(r"^ifeq \(\$\(NK_TARGET_OS\)-\$\(HOST_KIND\),posix-Darwin\)\n(.*?)^else\n(.*?)^endif",
                            self.makefile_text, re.MULTILINE | re.DOTALL)
         self.assertIsNotNone(choice, "the Makefile's Darwin link-option choice is missing")
