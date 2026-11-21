@@ -188,6 +188,116 @@ FILE *nk_fopen_utf8(const char *path, const char *mode) {
 #endif
 }
 
+/* The one bounded whole-file reader (audit 2026-11-17 F-fb975d56): the cheat file, the decrypt
+ * tool's input and the prerequisite bundle record read through it. */
+NkReadFileStatus nk_read_stream_bounded(FILE *file, size_t max, unsigned char **out_data,
+                                        size_t *out_len) {
+    unsigned char *data;
+    unsigned char probe;
+    size_t cap = 4096u; /* the first buffer when the stream reports no size */
+    size_t size = 0u;
+    long start;
+    if (out_data) *out_data = NULL;
+    if (out_len) *out_len = 0u;
+    if (!file || !out_data || !out_len) return NK_READ_FILE_OPEN_FAILED;
+    if (max == SIZE_MAX) max = SIZE_MAX - 1u; /* room for the NUL after the bytes */
+    /* The size the stream reports only sizes the buffer: what is read decides the result, so a
+     * stream that reports no size or a wrong one (a pipe, a directory) is read all the same. */
+    start = ftell(file);
+    if (start >= 0 && fseek(file, 0, SEEK_END) == 0) {
+        long end = ftell(file);
+        if (fseek(file, start, SEEK_SET) != 0) return NK_READ_FILE_READ_FAILED;
+        if (end >= start && (unsigned long)(end - start) <= max) cap = (size_t)(end - start);
+    } else {
+        clearerr(file);
+    }
+    if (cap > max) cap = max;
+    data = (unsigned char *)malloc(cap + 1u);
+    if (!data) return NK_READ_FILE_OUT_OF_MEMORY;
+    for (;;) {
+        size_t got;
+        if (size == cap) {
+            /* The buffer is full: one more byte says whether the file goes on. */
+            size_t next;
+            unsigned char *grown;
+            if (fread(&probe, 1u, 1u, file) == 0u) break;
+            if (size == max) {
+                free(data);
+                return NK_READ_FILE_TOO_LARGE;
+            }
+            if (cap == 0u) next = max < 4096u ? max : 4096u;
+            else next = cap <= max / 2u ? cap * 2u : max;
+            grown = (unsigned char *)realloc(data, next + 1u);
+            if (!grown) {
+                free(data);
+                return NK_READ_FILE_OUT_OF_MEMORY;
+            }
+            data = grown;
+            cap = next;
+            data[size++] = probe;
+            continue;
+        }
+        got = fread(data + size, 1u, cap - size, file);
+        size += got;
+        if (got == 0u) break;
+    }
+    if (ferror(file)) {
+        free(data);
+        return NK_READ_FILE_READ_FAILED;
+    }
+    data[size] = '\0';
+    *out_data = data;
+    *out_len = size;
+    return NK_READ_FILE_OK;
+}
+
+NkReadFileStatus nk_read_file_bounded(const char *path, size_t max, unsigned char **out_data,
+                                      size_t *out_len) {
+    FILE *file;
+    NkReadFileStatus status;
+    if (out_data) *out_data = NULL;
+    if (out_len) *out_len = 0u;
+    if (!path || !path[0] || !out_data || !out_len) return NK_READ_FILE_OPEN_FAILED;
+    file = nk_fopen_utf8(path, "rb");
+    if (!file) return NK_READ_FILE_OPEN_FAILED;
+    status = nk_read_stream_bounded(file, max, out_data, out_len);
+    fclose(file);
+    return status;
+}
+
+/* The one UTF-8 character check (audit 2026-11-17 F-d415a479), by Unicode table 3-7: the lead
+ * byte sets the range the second byte must fall in, which rules out overlong forms, surrogates
+ * and code points past U+10FFFF; every later byte is a plain continuation byte. */
+size_t nk_utf8_char_len(const unsigned char *s, size_t len, unsigned int flags) {
+    unsigned char lead;
+    unsigned char low = 0x80u;
+    unsigned char high = 0xBFu;
+    size_t extra;
+    if (!s || len == 0u) return 0u;
+    lead = s[0];
+    if (lead < 0x80u) return 1u;
+    if (lead >= 0xC2u && lead <= 0xDFu) {
+        extra = 1u;
+        if (lead == 0xC2u && (flags & NK_UTF8_REJECT_C1) != 0u) low = 0xA0u;
+    } else if (lead >= 0xE0u && lead <= 0xEFu) {
+        extra = 2u;
+        if (lead == 0xE0u) low = 0xA0u;
+        else if (lead == 0xEDu) high = 0x9Fu;
+    } else if (lead >= 0xF0u && lead <= 0xF4u) {
+        extra = 3u;
+        if (lead == 0xF0u) low = 0x90u;
+        else if (lead == 0xF4u) high = 0x8Fu;
+    } else {
+        return 0u;
+    }
+    if (len <= extra) return 0u;
+    if (s[1] < low || s[1] > high) return 0u;
+    for (size_t k = 2u; k <= extra; k++) {
+        if ((s[k] & 0xC0u) != 0x80u) return 0u;
+    }
+    return extra + 1u;
+}
+
 void nk_shared_format_size(char *out, size_t out_capacity, uint64_t bytes) {
     if (bytes >= 1024ULL * 1024ULL * 1024ULL) {
         snprintf(out, out_capacity, "%.2f GB",

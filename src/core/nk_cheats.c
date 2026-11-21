@@ -65,10 +65,7 @@
  *     game). */
 
 #include "nk_cheats.h"
-
-#ifndef NK_CHEATS_NO_HOST_IO
 #include "nk_shared_helpers.h"
-#endif
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -228,25 +225,6 @@ static void normal_disc_id(char *out, size_t cap, const char *s, size_t len) {
     out[n] = '\0';
 }
 
-/* The length of the well-formed UTF-8 character at s (1 to 4), or 0. */
-static size_t utf8_char(const unsigned char *s, size_t len) {
-    unsigned long cp, min;
-    size_t extra;
-    if (len == 0u) return 0u;
-    if (s[0] < 0x80u) return 1u;
-    if (s[0] >= 0xC2u && s[0] <= 0xDFu) { extra = 1u; min = 0x80u; cp = s[0] & 0x1Fu; }
-    else if (s[0] >= 0xE0u && s[0] <= 0xEFu) { extra = 2u; min = 0x800u; cp = s[0] & 0x0Fu; }
-    else if (s[0] >= 0xF0u && s[0] <= 0xF4u) { extra = 3u; min = 0x10000u; cp = s[0] & 0x07u; }
-    else return 0u;
-    if (len <= extra) return 0u;
-    for (size_t k = 1u; k <= extra; k++) {
-        if ((s[k] & 0xC0u) != 0x80u) return 0u;
-        cp = (cp << 6) | (s[k] & 0x3Fu);
-    }
-    if (cp < min || cp > 0x10FFFFul || (cp >= 0xD800ul && cp <= 0xDFFFul) || cp <= 0x9Ful) return 0u;
-    return extra + 1u;
-}
-
 /* A cheat's name for a log line or a list: control characters and bytes that are not UTF-8
  * become '?', a '"' becomes an apostrophe (the reports quote the name), and a name too long is
  * cut between characters. */
@@ -257,7 +235,7 @@ static void clean_name(char *out, size_t cap, const char *s, size_t len) {
     while (i < len && is_blank(s[i])) i++;
     while (len > i && is_blank(s[len - 1u])) len--;
     while (i < len) {
-        size_t width = utf8_char(u + i, len - i);
+        size_t width = nk_utf8_char_len(u + i, len - i, NK_UTF8_REJECT_C1);
         if (width == 0u || u[i] < 0x20u || u[i] == 0x7Fu) {
             if (n + 2u > cap) break;
             out[n++] = '?';
@@ -973,46 +951,30 @@ NkCheatSet *nk_cheats_load(const char *text, size_t size, const NkCheatConfig *c
 NkCheatSet *nk_cheats_load_file(const char *path, const NkCheatConfig *config,
                                 const NkCheatHost *host, char *error, size_t error_size) {
     NkCheatSet *set = NULL;
-    char *text = NULL;
-    size_t size = 0u, cap = 0u;
-    FILE *f;
+    unsigned char *text = NULL;
+    size_t size = 0u;
     set_error(error, error_size, "");
     if (!path || !path[0]) {
         set_error(error, error_size, "no cheat file is named");
         return NULL;
     }
-    f = nk_fopen_utf8(path, "rb");
-    if (!f) {
+    switch (nk_read_file_bounded(path, NK_CHEATS_MAX_FILE_BYTES, &text, &size)) {
+    case NK_READ_FILE_OK:
+        set = nk_cheats_load((const char *)text, size, config, host, error, error_size);
+        break;
+    case NK_READ_FILE_OPEN_FAILED:
         set_error(error, error_size, "the cheat file cannot be opened");
-        return NULL;
-    }
-    for (;;) {
-        size_t got;
-        if (size == cap) {
-            size_t next_cap = cap == 0u ? 65536u : cap * 2u;
-            char *next = next_cap > cap ? (char *)realloc(text, next_cap) : NULL;
-            if (!next) {
-                set_error(error, error_size, "out of memory");
-                goto done;
-            }
-            text = next;
-            cap = next_cap;
-        }
-        got = fread(text + size, 1u, cap - size, f);
-        size += got;
-        if (size > NK_CHEATS_MAX_FILE_BYTES) {
-            set_error(error, error_size, "the cheat file is larger than 64 MiB");
-            goto done;
-        }
-        if (got == 0u) break;
-    }
-    if (ferror(f)) {
+        break;
+    case NK_READ_FILE_READ_FAILED:
         set_error(error, error_size, "the cheat file cannot be read");
-        goto done;
+        break;
+    case NK_READ_FILE_TOO_LARGE:
+        set_error(error, error_size, "the cheat file is larger than 64 MiB");
+        break;
+    case NK_READ_FILE_OUT_OF_MEMORY:
+        set_error(error, error_size, "out of memory");
+        break;
     }
-    set = nk_cheats_load(text, size, config, host, error, error_size);
-done:
-    fclose(f);
     free(text);
     return set;
 }
