@@ -1593,6 +1593,16 @@ class PlayerBuildIdentityTests(unittest.TestCase):
         self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR)
         self.assertEqual(result.commit, "abcdef1" + "2" * 33)
 
+    def test_make_writes_the_stamp_beside_the_player_that_this_check_reads(self):
+        """The check is only as good as the Make rule: the stamp sits beside the player and gates its link."""
+        makefile = read_makefile(stage_install.ROOT)
+        self.assertIn("PLAYER_EXE ?= $(BUILD_ROOT)/nakagawa_player$(EXE_EXT)", makefile)
+        self.assertIn("PLAYER_IDENTITY_STAMP := $(BUILD_ROOT)/.player-identity-", makefile)
+        start = makefile.index("\n$(PLAYER_EXE): $(PLAYER_SRCS)")
+        self.assertIn("$(PLAYER_IDENTITY_STAMP)", makefile[start:makefile.index("\n", start + 1)])
+        # A new stamp deletes the older ones, so the newest stamp is the build's commit.
+        self.assertIn("glob('.player-identity-*')", makefile)
+
 
 class PlayerSourceCommitEnforcementTests(unittest.TestCase):
     """stage_install() and main() enforce player/source commit match before touching dest."""
