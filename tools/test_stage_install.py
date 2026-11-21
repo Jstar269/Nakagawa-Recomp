@@ -1494,6 +1494,284 @@ class ReleaseAssetContractTests(unittest.TestCase):
             self.assertIn("ASSET_SECOND_ARCHIVE", stderr.getvalue())
 
 
+class PlayerBuildIdentityTests(unittest.TestCase):
+    """player_build_identity reads mk/pipeline.mk's .player-identity-<commit>-<epoch> stamps."""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.build_dir = Path(self._temp.name) / "build"
+        self.build_dir.mkdir()
+        self.player = self.build_dir / "nakagawa_player.exe"
+        self.player.write_bytes(b"MZplayer")
+        os.utime(self.player, (2000, 2000))
+
+    def _touch_stamp(self, name: str, mtime: int) -> Path:
+        stamp = Path(self.build_dir) / name
+        stamp.write_bytes(b"")
+        os.utime(stamp, (mtime, mtime))
+        return stamp
+
+    def test_stamp_for_exported_commit_not_newer_than_executable_is_built_for(self):
+        exported = "abcdef1" + "0" * 33
+        stamp = self._touch_stamp(".player-identity-abcdef1-1790812800", 1000)
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR)
+        self.assertEqual(result.commit, "abcdef1")
+        # Equal mtime: the executable is not older than the stamp.
+        os.utime(stamp, (2000, 2000))
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR)
+        self.assertEqual(result.commit, "abcdef1")
+
+    def test_stamp_for_different_commit_not_newer_than_executable_is_built_for_other(self):
+        exported = "abcdef1" + "0" * 33
+        self._touch_stamp(".player-identity-deadbee-1790812800", 1000)
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR_OTHER)
+        self.assertEqual(result.commit, "deadbee")
+
+    def test_newest_stamp_not_newer_than_executable_wins(self):
+        exported = "abcdef1" + "0" * 33
+        self._touch_stamp(".player-identity-abcdef1-1790812800", 1000)
+        self._touch_stamp(".player-identity-deadbee-1790812900", 1500)
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR_OTHER)
+        self.assertEqual(result.commit, "deadbee")
+
+        # When the matching stamp is newer (still <= exe), it wins instead.
+        os.utime(self.build_dir / ".player-identity-abcdef1-1790812800", (1800, 1800))
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR)
+        self.assertEqual(result.commit, "abcdef1")
+
+    def test_stamp_newer_than_executable_with_no_older_stamp_is_built_for_other(self):
+        exported = "abcdef1" + "0" * 33
+        self._touch_stamp(".player-identity-abcdef1-1790812800", 3000)
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR_OTHER)
+        self.assertIsNone(result.commit)
+
+    def test_no_stamp_beside_executable_is_unknown(self):
+        exported = "abcdef1" + "0" * 33
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_UNKNOWN)
+        self.assertIsNone(result.commit)
+
+    def test_stamp_with_no_epoch_still_identifies_commit(self):
+        exported = "abcdef1" + "0" * 33
+        self._touch_stamp(".player-identity-abcdef1-none", 1000)
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR)
+        self.assertEqual(result.commit, "abcdef1")
+        other = stage_install.player_build_identity(self.player, "1111111" + "0" * 33)
+        self.assertEqual(other.status, stage_install.PLAYER_BUILD_BUILT_FOR_OTHER)
+        self.assertEqual(other.commit, "abcdef1")
+
+    def test_stamp_with_no_commit_is_unknown(self):
+        exported = "abcdef1" + "0" * 33
+        for name in (".player-identity-none-1790812800", ".player-identity-none-none"):
+            with self.subTest(name=name):
+                for existing in self.build_dir.glob(".player-identity-*"):
+                    existing.unlink()
+                self._touch_stamp(name, 1000)
+                result = stage_install.player_build_identity(self.player, exported)
+                self.assertEqual(result.status, stage_install.PLAYER_BUILD_UNKNOWN)
+                self.assertIsNone(result.commit)
+
+    def test_prefix_comparison_and_malformed_stamps_are_handled(self):
+        (self.build_dir / ".player-identity-deadbee-1790812800").mkdir()  # directory, ignored
+        self._touch_stamp(".player-identity-nothex!-1790812800", 1000)
+        self._touch_stamp(".player-identity-deadbee-badepoch", 1000)
+        self.assertEqual(
+            stage_install.player_build_identity(self.player, "abcdef1" + "0" * 33).status,
+            stage_install.PLAYER_BUILD_UNKNOWN,
+        )
+        # Prefix match works in either direction (7-char stamp vs 40-char commit, or 40-char stamp vs 7-char).
+        self._touch_stamp(".player-identity-" + ("abcdef1" + "2" * 33) + "-1790812800", 1000)
+        result = stage_install.player_build_identity(self.player, "abcdef1")
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR)
+        self.assertEqual(result.commit, "abcdef1" + "2" * 33)
+
+    def test_make_writes_the_stamp_beside_the_player_that_this_check_reads(self):
+        """The check is only as good as the Make rule: the stamp sits beside the player and gates its link."""
+        makefile = read_makefile(stage_install.ROOT)
+        self.assertIn("PLAYER_EXE ?= $(BUILD_ROOT)/nakagawa_player$(EXE_EXT)", makefile)
+        self.assertIn("PLAYER_IDENTITY_STAMP := $(BUILD_ROOT)/.player-identity-", makefile)
+        start = makefile.index("\n$(PLAYER_EXE): $(PLAYER_SRCS)")
+        self.assertIn("$(PLAYER_IDENTITY_STAMP)", makefile[start:makefile.index("\n", start + 1)])
+        # A new stamp deletes the older ones, so the newest stamp is the build's commit.
+        self.assertIn("glob('.player-identity-*')", makefile)
+
+
+class PlayerSourceCommitEnforcementTests(unittest.TestCase):
+    """stage_install() and main() enforce player/source commit match before touching dest."""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        self.repo = _fixture_repo(self.root)
+        self.head = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            check=True, env=_fixture_git_env(), capture_output=True, text=True,
+        ).stdout.strip()
+        self.build_dir = self.root / "build"
+        self.build_dir.mkdir()
+        self.player = self.build_dir / "nakagawa_player.exe"
+        self.player.write_bytes(b"MZplayer")
+        os.utime(self.player, (2000, 2000))
+
+    def _touch_stamp(self, name: str, mtime: int) -> Path:
+        stamp = Path(self.build_dir) / name
+        stamp.write_bytes(b"")
+        os.utime(stamp, (mtime, mtime))
+        return stamp
+
+    def test_mismatch_is_refused_with_both_commits_and_dest_untouched(self):
+        self._touch_stamp(".player-identity-deadbee-1790812800", 1000)
+        dest = self.root / "install"
+        with self.assertRaises(stage_install.InstallError) as caught:
+            stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        message = str(caught.exception)
+        self.assertIn("INSTALL_PLAYER_SOURCE_MISMATCH", message)
+        self.assertIn("deadbee", message)
+        self.assertIn(self.head[:7], message)
+        self.assertFalse(dest.exists())
+
+    def test_unknown_stamp_warns_and_stages_with_null_player_commit(self):
+        dest = self.root / "install"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            record = stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self.assertIn("WARNING", err.getvalue())
+        self.assertEqual(record["source_commit"], self.head)
+        self.assertIn("player_commit", record)
+        self.assertIsNone(record["player_commit"])
+        marker = json.loads((dest / stage_install.MARKER).read_text(encoding="utf-8"))
+        self.assertIsNone(marker["player_commit"])
+
+    def test_override_turns_mismatch_refusal_into_warning_and_records_player_commit(self):
+        self._touch_stamp(".player-identity-deadbee-1790812800", 1000)
+        dest = self.root / "install"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            record = stage_install.stage_install(
+                dest, self.player, repo=self.repo, stage_dlls=_fake_stager,
+                allow_player_source_mismatch=True,
+            )
+        self.assertIn("WARNING", err.getvalue())
+        self.assertIn("INSTALL_PLAYER_SOURCE_MISMATCH", err.getvalue())
+        self.assertEqual(record["player_commit"], "deadbee")
+        marker = json.loads((dest / stage_install.MARKER).read_text(encoding="utf-8"))
+        self.assertEqual(marker["player_commit"], "deadbee")
+
+    def _run_main(self, dest: Path, *extra_args: str) -> tuple[int, str, str]:
+        real_stage = stage_install.stage_install
+        out, err = io.StringIO(), io.StringIO()
+
+        def bound_stage(d, p, *, revision="HEAD", allow_player_source_mismatch=False):
+            return real_stage(
+                d, p, repo=self.repo, revision=revision, stage_dlls=_fake_stager,
+                allow_player_source_mismatch=allow_player_source_mismatch,
+            )
+
+        with mock.patch.object(stage_install, "stage_install", side_effect=bound_stage), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = stage_install.main(["--dest", str(dest), "--player", str(self.player), *extra_args])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_matching_older_stamp_stages_cleanly_without_warning(self):
+        self._touch_stamp(f".player-identity-{self.head[:7]}-1790812800", 1000)
+        dest = self.root / "install"
+        code, out, err = self._run_main(dest)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        self.assertIn(self.head[:12], out)
+        self.assertEqual((dest / "bin" / "nakagawa_player.exe").read_bytes(), b"MZplayer")
+        self.assertTrue((dest / "source" / "tools" / "nk_cli.py").is_file())
+        marker = json.loads((dest / stage_install.MARKER).read_text(encoding="utf-8"))
+        self.assertEqual(marker["source_commit"], self.head)
+        self.assertEqual(marker["player_commit"], self.head[:7])
+
+    def test_mismatch_via_cli_exits_1_and_leaves_existing_install_untouched(self):
+        # Stage a valid initial install first.
+        self._touch_stamp(f".player-identity-{self.head[:7]}-1790812800", 1000)
+        dest = self.root / "install"
+        code, _, err = self._run_main(dest)
+        self.assertEqual(code, 0, err)
+        before_exe = (dest / "bin" / "nakagawa_player.exe").read_bytes()
+        before_marker = (dest / stage_install.MARKER).read_text(encoding="utf-8")
+
+        # Now replace the stamp with one for another commit and mutate the player bytes.
+        (self.build_dir / f".player-identity-{self.head[:7]}-1790812800").unlink()
+        self._touch_stamp(".player-identity-deadbee-1790812800", 1000)
+        self.player.write_bytes(b"MZstale")
+        os.utime(self.player, (2000, 2000))
+
+        code, _, err = self._run_main(dest)
+        self.assertEqual(code, 1)
+        self.assertIn("INSTALL_PLAYER_SOURCE_MISMATCH", err)
+        self.assertIn("deadbee", err)
+        self.assertIn(self.head, err)
+        self.assertEqual((dest / "bin" / "nakagawa_player.exe").read_bytes(), before_exe)
+        self.assertEqual((dest / stage_install.MARKER).read_text(encoding="utf-8"), before_marker)
+        self.assertEqual([p.name for p in dest.iterdir() if p.name.startswith(".staging")], [])
+
+    def test_stamp_for_exported_commit_newer_than_executable_is_refused(self):
+        """A stamp newer than the player means Make started a rebuild that did not finish."""
+        self._touch_stamp(f".player-identity-{self.head[:7]}-1790812800", 3000)
+        dest = self.root / "install"
+        code, _, err = self._run_main(dest)
+        self.assertEqual(code, 1)
+        self.assertIn("INSTALL_PLAYER_SOURCE_MISMATCH", err)
+        self.assertIn(self.head, err)
+        self.assertFalse(dest.exists())
+
+        # Override turns the unfinished-build refusal into a warning and leaves player_commit null.
+        code, _, err = self._run_main(dest, "--allow-player-source-mismatch")
+        self.assertEqual(code, 0, err)
+        self.assertIn("WARNING", err)
+        self.assertIn("INSTALL_PLAYER_SOURCE_MISMATCH", err)
+        marker = json.loads((dest / stage_install.MARKER).read_text(encoding="utf-8"))
+        self.assertIsNone(marker["player_commit"])
+
+    def test_no_stamp_via_cli_warns_and_stages(self):
+        dest = self.root / "install"
+        code, _, err = self._run_main(dest)
+        self.assertEqual(code, 0, err)
+        self.assertIn("WARNING", err)
+        self.assertTrue((dest / "bin" / "nakagawa_player.exe").is_file())
+        marker = json.loads((dest / stage_install.MARKER).read_text(encoding="utf-8"))
+        self.assertEqual(marker["source_commit"], self.head)
+        self.assertIsNone(marker["player_commit"])
+
+    def test_cli_override_turns_mismatch_refusal_into_warning(self):
+        self._touch_stamp(".player-identity-deadbee-1790812800", 1000)
+        dest = self.root / "install"
+        code, _, err = self._run_main(dest, "--allow-player-source-mismatch")
+        self.assertEqual(code, 0, err)
+        self.assertIn("WARNING", err)
+        self.assertIn("INSTALL_PLAYER_SOURCE_MISMATCH", err)
+        self.assertIn("deadbee", err)
+        self.assertTrue((dest / "bin" / "nakagawa_player.exe").is_file())
+        marker = json.loads((dest / stage_install.MARKER).read_text(encoding="utf-8"))
+        self.assertEqual(marker["source_commit"], self.head)
+        self.assertEqual(marker["player_commit"], "deadbee")
+
+    def test_help_documents_allow_player_source_mismatch(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as caught:
+            stage_install.main(["--help"])
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("--allow-player-source-mismatch", out.getvalue())
+
+    def test_setup_doc_mentions_allow_player_source_mismatch(self):
+        setup_doc = (stage_install.ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+        self.assertIn("--allow-player-source-mismatch", setup_doc)
+        self.assertIn("INSTALL_PLAYER_SOURCE_MISMATCH", setup_doc)
+
+
 class ReproducibleBuildTests(unittest.TestCase):
     def test_player_links_carry_the_reproducible_link_flag(self):
         """Without it the PE header holds the link time and two builds of one commit differ (#324)."""

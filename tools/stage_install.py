@@ -91,7 +91,7 @@ import subprocess
 import sys
 import tarfile
 import time
-from typing import NoReturn
+from typing import NamedTuple, NoReturn
 import zipfile
 import zlib
 
@@ -167,6 +167,84 @@ def export_source(repo: Path, destination: Path, revision: str = "HEAD") -> str:
         raise InstallError("INSTALL_SOURCE_EXPORT_FAILED: the export has no tools/nk_cli.py")
     returned: str = commit
     return returned
+
+
+PLAYER_BUILD_BUILT_FOR = "BUILT_FOR"
+PLAYER_BUILD_BUILT_FOR_OTHER = "BUILT_FOR_OTHER"
+PLAYER_BUILD_UNKNOWN = "UNKNOWN"
+#: Stamp file mk/pipeline.mk writes beside the player:
+#: ``$(BUILD_ROOT)/.player-identity-<commit|none>-<epoch|none>``.
+_PLAYER_IDENTITY_STAMP = re.compile(r"\.player-identity-([0-9a-fA-F]{7,64}|none)-(none|[0-9]+)")
+
+
+class PlayerBuildIdentity(NamedTuple):
+    """What the player build folder's identity stamps say about ``expected_commit``."""
+
+    status: str
+    commit: str | None = None
+
+
+def _commits_match(left: str, right: str) -> bool:
+    left_norm = left.strip().lower()
+    right_norm = right.strip().lower()
+    if not left_norm or not right_norm:
+        return False
+    return left_norm.startswith(right_norm) or right_norm.startswith(left_norm)
+
+
+def player_build_identity(player: Path, expected_commit: str) -> PlayerBuildIdentity:
+    """Compare ``player``'s Makefile identity stamp(s) against ``expected_commit``.
+
+    Reads ``.player-identity-<commit|none>-<epoch|none>`` files in ``player.parent``
+    (written by ``mk/pipeline.mk``):
+    - ``BUILT_FOR``: the newest stamp not newer than ``player`` names ``expected_commit``
+      (compared by prefix).
+    - ``BUILT_FOR_OTHER``: the newest stamp not newer than ``player`` names a different
+      commit (returned as ``commit``), or every commit-bearing stamp beside ``player`` is
+      newer than ``player`` (the rebuild did not finish; ``commit`` is ``None``).
+    - ``UNKNOWN``: no commit-bearing stamp beside ``player`` (for example, a ``--player``
+      outside a Make build folder, a CMake build, or a ``none`` no-commit build).
+    """
+    expected = expected_commit.strip().lower()
+    if not expected:
+        return PlayerBuildIdentity(PLAYER_BUILD_UNKNOWN, None)
+    try:
+        exe_mtime_ns = player.stat().st_mtime_ns
+        with os.scandir(player.parent) as scanner:
+            entries = list(scanner)
+    except OSError:
+        return PlayerBuildIdentity(PLAYER_BUILD_UNKNOWN, None)
+    not_newer: list[tuple[int, str, str | None]] = []
+    newer_with_commit = False
+    for entry in entries:
+        match = _PLAYER_IDENTITY_STAMP.fullmatch(entry.name)
+        if not match:
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            stamp_mtime_ns = entry.stat(follow_symlinks=False).st_mtime_ns
+        except OSError:
+            continue
+        raw_commit = match.group(1).lower()
+        stamp_commit = None if raw_commit == "none" else raw_commit
+        if stamp_mtime_ns <= exe_mtime_ns:
+            not_newer.append((stamp_mtime_ns, entry.name, stamp_commit))
+        elif stamp_commit is not None:
+            newer_with_commit = True
+    if not_newer:
+        max_mtime = max(item[0] for item in not_newer)
+        latest = sorted(item for item in not_newer if item[0] == max_mtime)
+        commits = [item[2] for item in latest if item[2] is not None]
+        if not commits:
+            return PlayerBuildIdentity(PLAYER_BUILD_UNKNOWN, None)
+        for commit in commits:
+            if not _commits_match(commit, expected):
+                return PlayerBuildIdentity(PLAYER_BUILD_BUILT_FOR_OTHER, commit)
+        return PlayerBuildIdentity(PLAYER_BUILD_BUILT_FOR, commits[0])
+    if newer_with_commit:
+        return PlayerBuildIdentity(PLAYER_BUILD_BUILT_FOR_OTHER, None)
+    return PlayerBuildIdentity(PLAYER_BUILD_UNKNOWN, None)
 
 
 #: Inno Setup's uninstaller and its data, written beside the program by the Windows installer (#2208).
@@ -255,7 +333,8 @@ def _replace_owned(staged: Path, final: Path, carry: tuple[str, ...] = ()) -> No
 
 
 def stage_install(dest: Path, player: Path, *, repo: Path = ROOT,
-                  revision: str = "HEAD", stage_dlls=None) -> dict:
+                  revision: str = "HEAD", stage_dlls=None,
+                  allow_player_source_mismatch: bool = False) -> dict:
     """Stage bin/, source/ and the icon under ``dest``; return the install record."""
     dest = dest.resolve()
     player = player.resolve()
@@ -264,6 +343,29 @@ def stage_install(dest: Path, player: Path, *, repo: Path = ROOT,
             f"INSTALL_PLAYER_MISSING: {player} was not found; build it with {_build_hint()}"
         )
     _check_destination(dest)
+    commit = _git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}")
+    identity = player_build_identity(player, commit)
+    if identity.status == PLAYER_BUILD_BUILT_FOR_OTHER:
+        if identity.commit is not None:
+            detail = (
+                f"{player} was built from commit {identity.commit}, not {commit}; "
+                f"rebuild it with {_build_hint()} or pass --allow-player-source-mismatch"
+            )
+        else:
+            detail = (
+                f"{player} is older than the build identity stamp in {player.parent}, "
+                f"so it was not built for {commit} (a rebuild did not finish); "
+                f"rebuild it with {_build_hint()} or pass --allow-player-source-mismatch"
+            )
+        if not allow_player_source_mismatch:
+            raise InstallError(f"INSTALL_PLAYER_SOURCE_MISMATCH: {detail}")
+        print(f"stage_install: WARNING: INSTALL_PLAYER_SOURCE_MISMATCH: {detail}", file=sys.stderr)
+    elif identity.status == PLAYER_BUILD_UNKNOWN:
+        print(
+            f"stage_install: WARNING: could not verify which commit {player} was built from "
+            f"(no build identity stamp in {player.parent}); continuing against source {commit}",
+            file=sys.stderr,
+        )
     dest.mkdir(parents=True, exist_ok=True)
     # Shortcuts an earlier staging wrote stay recorded: staging again replaces bin/ and
     # source/, not the shortcuts outside dest.
@@ -299,11 +401,12 @@ def stage_install(dest: Path, player: Path, *, repo: Path = ROOT,
             except stage_runtime_dlls.StageError as exc:
                 raise InstallError(f"INSTALL_RUNTIME_STAGE_FAILED: {exc}") from exc
             runtime_stage = "SKIPPED_NOT_PE"
-        commit = export_source(repo, stage / "source", revision)
+        commit = export_source(repo, stage / "source", commit)
         (stage / "nakagawa.ico").write_bytes(app_icon())
         record = {
             "schema_version": SCHEMA_VERSION,
             "source_commit": commit,
+            "player_commit": identity.commit,
             "platform": _platform_name(),
             "player": f"bin/{player.name}",
             "runtime_stage": runtime_stage,
@@ -1150,6 +1253,9 @@ def main(argv=None) -> int:
     parser.add_argument("--revision", default="HEAD",
                         help="committed revision exported as source/; with --portable-zip, the commit the "
                              "stage's toolchain.json must name (default: HEAD)")
+    parser.add_argument("--allow-player-source-mismatch", action="store_true",
+                        help="warn instead of stopping when the player executable's build identity "
+                             "stamp does not match the source commit being exported")
     parser.add_argument("--desktop-shortcut", action="store_true",
                         help=f"also write '{SHORTCUT_NAME}' on the Desktop (Windows), or a "
                              f"'{DESKTOP_ENTRY_NAME}' entry (Linux)")
@@ -1233,7 +1339,10 @@ def main(argv=None) -> int:
             # nothing half done.
             for shortcut in shortcuts:
                 _check_shortcut_not_another_copys(shortcut, args.dest.resolve())
-        record = stage_install(args.dest, args.player, revision=args.revision)
+        record = stage_install(
+            args.dest, args.player, revision=args.revision,
+            allow_player_source_mismatch=args.allow_player_source_mismatch,
+        )
         print(f"stage_install: staged {record['player']} and source {record['source_commit'][:12]} "
               f"into {args.dest.resolve()}")
         if not IS_WINDOWS:
