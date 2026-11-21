@@ -1393,6 +1393,7 @@ static uint16_t s_sreg_next_id;
 static int s_sreg_loaded;
 int s_sreg_dirty;            /* the live registry differs from the last persisted overlay */
 static int s_sreg_corrupt_on_disk;  /* an ignored corrupt overlay is moved aside by the next flush */
+static int s_sreg_unreadable_on_disk;  /* the overlay could not be read: no flush writes over it */
 
 void sreg_free_node(int i) {
     free(s_sreg_nodes[i].value);
@@ -1985,10 +1986,12 @@ void sreg_ensure_loaded(void) {
     char *path, *text = NULL;
     char why[192];
     size_t len = 0;
-    int got;
+    SregReadResult got;
+    int invalid;
     if (s_sreg_loaded) return;
     s_sreg_loaded = 1;
     s_sreg_corrupt_on_disk = 0;
+    s_sreg_unreadable_on_disk = 0;
     memset(&s_console, 0, sizeof(s_console));
     sreg_clear_nodes();
     sreg_build_defaults();
@@ -1996,18 +1999,26 @@ void sreg_ensure_loaded(void) {
     if (!path) return; /* the first flush that needs a file reports it */
     why[0] = '\0';
     got = sreg_read_file(path, &text, &len, why, sizeof(why));
-    if (got > 0) {
+    invalid = got == SREG_READ_INVALID;
+    if (got == SREG_READ_OK) {
         char parse_error[128];
         NkJsonNode *doc = nk_json_parse(text, len, parse_error, sizeof(parse_error));
         if (!doc) {
             snprintf(why, sizeof(why), "it is not valid JSON (%s)", parse_error);
-            got = -1;
+            invalid = 1;
         } else {
-            if (!sreg_overlay_apply(doc, why, sizeof(why))) got = -1;
+            if (!sreg_overlay_apply(doc, why, sizeof(why))) invalid = 1;
             nk_json_free(doc);
         }
     }
-    if (got < 0) {
+    if (got == SREG_READ_UNREADABLE) {
+        /* Not read, so nothing is known about its contents: it is left in place, never moved
+         * aside or written over, and no setting is seeded into it. */
+        fprintf(stderr, "sceReg: cannot read the per-user registry overlay %s: %s; serving the "
+                        "modeled defaults for this run, the file is left in place and no flush "
+                        "writes over it\n", path, why);
+        s_sreg_unreadable_on_disk = 1;
+    } else if (invalid) {
         fprintf(stderr, "sceReg: ignoring the per-user registry overlay %s: %s; serving the modeled "
                         "defaults (the next flush moves it to %s.corrupt)\n", path, why, path);
         sreg_clear_nodes();
@@ -2018,11 +2029,12 @@ void sreg_ensure_loaded(void) {
     s_sreg_dirty = 0;
     free(text);
     free(path);
-    /* A missing overlay is a first run, and so is one that was ignored as corrupt: its saved
-     * settings are gone either way, so the time zone starts from the host's, never from the
-     * oracle console's seed (audit 2026-11-17, F-e01db03a; owner decision 2026-11-20). The
-     * persist that seeding does moves the ignored file to <file>.corrupt first. */
-    if (got <= 0) sreg_seed_host_time_zone();
+    /* A missing overlay is a first run, and so is an invalid one (it does not parse or apply, or
+     * is too large to load): its saved settings are gone either way, so the time zone starts from
+     * the host's, never from the oracle console's seed (audit 2026-11-17, F-e01db03a; owner
+     * decision 2026-11-20). The persist that seeding does moves the invalid file to
+     * <file>.corrupt first. An overlay that could not be read is neither. */
+    if (got == SREG_READ_ABSENT || invalid) sreg_seed_host_time_zone();
 }
 
 typedef struct {
@@ -2178,6 +2190,12 @@ uint32_t sreg_persist(const char *caller) {
                         "SR_SYSTEM_REGISTRY (the change stays in memory only)\n", caller);
         return SREG_ERR_IO;
     }
+    if (s_sreg_unreadable_on_disk) {
+        fprintf(stderr, "%s: the registry overlay %s could not be read when it was loaded; not "
+                        "writing over it (the change stays in memory only)\n", caller, path);
+        free(path);
+        return SREG_ERR_IO;
+    }
     sreg_overlay_render(&text);
     if (text.failed) rc = SREG_ERR_IO;
     if (!rc && s_sreg_corrupt_on_disk && nk_platform_file_exists(path)) {
@@ -2243,6 +2261,7 @@ void sr_hle_test_sysreg_reset(void) {
     memset(s_sreg_cat, 0, sizeof(s_sreg_cat));
     s_sreg_loaded = 0;
     s_sreg_corrupt_on_disk = 0;
+    s_sreg_unreadable_on_disk = 0;
     s_sreg_owner_name_ready = 0; /* a new process reads SR_NICKNAME again */
 }
 #endif

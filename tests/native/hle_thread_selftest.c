@@ -18393,6 +18393,65 @@ static void test_first_run_time_zone_comes_from_the_host(void) {
         hle_test_setenv("SR_HOST_TIME_ZONE", NULL);
     }
 
+    /* An overlay that exists but cannot be read is neither a first run nor a corrupt file: its
+     * contents are unknown, so the host's zone is not seeded, the file is not moved aside, and no
+     * flush writes over it; once it can be read it loads as saved (audit 2026-11-17, F-e01db03a
+     * review). Windows holds it open without sharing; POSIX takes away its read permission, which
+     * root ignores, so root skips the case. */
+    {
+        static const char saved[] =
+            "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, \"categories\": [],"
+            " \"keys\": [{\"category\": \"/CONFIG/DATE\", \"name\": \"time_zone_offset\", \"type\": \"int\","
+            " \"value_hex\": \"1c020000\"}, {\"category\": \"/CONFIG/DATE\", \"name\": \"summer_time\","
+            " \"type\": \"int\", \"value_hex\": \"00000000\"}]}";
+        int locked = 0, skipped = 0;
+        sysreg_scratch_clean();
+        sysreg_write_file(SYSREG_SCRATCH_FILE, saved, strlen(saved));
+        hle_test_setenv("SR_HOST_TIME_ZONE", "60,1");
+        sysreg_restart();
+        rtc_expect_profile(540, 0u, 540, "a saved zone of +540 loads over the host's");
+#ifdef _WIN32
+        HANDLE held = CreateFileA(SYSREG_SCRATCH_FILE, GENERIC_READ, 0u, NULL, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL, NULL);
+        locked = held != INVALID_HANDLE_VALUE;
+#else
+        if (geteuid() != 0) {
+            locked = chmod(SYSREG_SCRATCH_FILE, 0) == 0;
+        } else {
+            skipped = 1;
+            fprintf(stderr, "SKIP: the unreadable-overlay case does not apply to root\n");
+        }
+#endif
+        if (locked) {
+            uint32_t r = 0u;
+            sysreg_restart();
+            rtc_expect_profile(-300, 1u, -240,
+                               "an unreadable overlay: the measured seed, not the host's zone");
+            uint32_t reg = sysreg_open_registry(2u, &r);
+            uint32_t cat = sysreg_open_category(reg, "/CONFIG/SYSTEM/XMB", 2u, &r);
+            const uint32_t set = sysreg_set_int(cat, "language", 4u);
+            const uint32_t locked_flush = sysreg_call(NID_SCE_REG_FLUSH_REGISTRY, reg, 0u, 0u, 0u, 0u);
+#ifdef _WIN32
+            CloseHandle(held);
+#else
+            chmod(SYSREG_SCRATCH_FILE, 0644);
+#endif
+            /* Readable again, in the same run: the flush still does not write over the file. */
+            const uint32_t later_flush = sysreg_call(NID_SCE_REG_FLUSH_REGISTRY, reg, 0u, 0u, 0u, 0u);
+            expect(set == 0u && locked_flush != 0u && later_flush != 0u,
+                   "a flush after an unreadable overlay fails (the change stays in memory)");
+            char *kept = sysreg_read_file(SYSREG_SCRATCH_FILE);
+            expect(kept && strcmp(kept, saved) == 0 && !sysreg_file_exists(SYSREG_SCRATCH_FILE ".corrupt"),
+                   "an unreadable overlay is left in place: not moved to <file>.corrupt, not written over");
+            free(kept);
+            sysreg_restart();
+            rtc_expect_profile(540, 0u, 540, "the overlay that could not be read loads once it can");
+        } else if (!skipped) {
+            expect(0, "the unreadable-overlay case can make the overlay unreadable");
+        }
+        hle_test_setenv("SR_HOST_TIME_ZONE", NULL);
+    }
+
     sysreg_scratch_clean();
     sysreg_restart();
 }
