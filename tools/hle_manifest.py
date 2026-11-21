@@ -1641,10 +1641,8 @@ def oracle_exercised_apis(manifest: dict) -> dict[str, list[str]]:
         for api in test.get("apis", []):
             if api in cited:
                 out.setdefault(api, []).append(test.get("id", "?"))
-        # A `case_apis` cell promotes its API only when it says it covers the whole contract.
-        for cell in _case_api_cells(test):
-            if cell["complete"] and test_id not in out.get(cell["api"], []):
-                out.setdefault(cell["api"], []).append(test_id)
+        # `case_apis` cells (see `oracle_measured_cells`) are annotation only and never reach
+        # this tier: a row's own assertion cannot grant itself the strongest tier.
     return out
 
 
@@ -1656,8 +1654,8 @@ def _case_api_cells(test: dict) -> list[dict]:
 
     `case_apis` maps a cited case id to the API calls that case's own source makes and the
     exact cell each call measured: `{"call": "sceX(0)", "cell": "mode 0 from a user thread"}`.
-    A cell is a partial claim by default; `"complete": true` says the cell is the whole
-    contract of that API and is the only way a case promotes the function itself.
+    A cell annotates the exact call measured and never grants a tier: whole-function
+    promotion stays with the citation rule of `oracle_exercised_apis`.
     """
     test_id = test.get("id", "?")
     raw = test.get("case_apis")
@@ -1680,19 +1678,16 @@ def _case_api_cells(test: dict) -> list[dict]:
         for entry in entries:
             call = entry.get("call") if isinstance(entry, dict) else None
             cell = entry.get("cell") if isinstance(entry, dict) else None
-            complete = entry.get("complete", False) if isinstance(entry, dict) else None
             match = _CASE_API_CALL_RE.fullmatch(call) if isinstance(call, str) else None
             if (
                 match is None
                 or not isinstance(cell, str)
                 or not cell
-                or not isinstance(complete, bool)
-                or set(entry) - {"call", "cell", "complete"}
+                or set(entry) - {"call", "cell"}
             ):
                 raise ManifestError(
                     f"test {test_id!r} case_apis {case!r} entry {entry!r} must be "
-                    '{"call": "api(args)", "cell": "<what was measured>"} with an optional '
-                    'boolean "complete"'
+                    '{"call": "api(args)", "cell": "<what was measured>"} and no other key'
                 )
             if match.group(1) not in apis:
                 raise ManifestError(
@@ -1701,7 +1696,7 @@ def _case_api_cells(test: dict) -> list[dict]:
                 )
             cells.append({
                 "oracle_id": test_id, "case": case, "api": match.group(1),
-                "call": call, "cell": cell, "complete": complete,
+                "call": call, "cell": cell,
             })
     return cells
 

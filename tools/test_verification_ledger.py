@@ -240,7 +240,7 @@ class RuntimeLogTests(unittest.TestCase):
 
     def test_a_measured_cell_names_the_cell_and_keeps_the_function_class(self) -> None:
         cell = {"oracle_id": "PSP-X-001", "case": "x-basic", "api": "sceExample",
-                "call": "sceExample(0)", "cell": "mode 0 from a user thread", "complete": False}
+                "call": "sceExample(0)", "cell": "mode 0 from a user thread"}
         row = ledger_mod.classify_hle(self._chain([cell]), {}, {})[0]
         self.assertEqual(row["class"], "synthetic")
         self.assertEqual(row["basis"], "HLE selftest dispatch; PSP-measured cells only: `sceExample(0)` "
@@ -264,7 +264,7 @@ class RuntimeLogTests(unittest.TestCase):
     def test_a_linked_hardware_note_is_not_reported_as_unlinked(self) -> None:
         meta_notes = {"h_example_not_registered": ["docs/HARDWARE_ORACLE.md (PSP-X-001: x-basic): returns 0"]}
         cell = {"oracle_id": "PSP-X-001", "case": "x-basic", "api": "sceExample",
-                "call": "sceExample(0)", "cell": "mode 0", "complete": False}
+                "call": "sceExample(0)", "cell": "mode 0"}
         with mock.patch.object(ledger_mod.meta, "HANDLER_EVIDENCE", meta_notes):
             unlinked = ledger_mod.classify_hle(self._chain([]), {}, {})[0]
             linked = ledger_mod.classify_hle(self._chain([cell]), {}, {})[0]

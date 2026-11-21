@@ -2165,14 +2165,31 @@ class EvidenceTierTests(unittest.TestCase):
         with mock.patch.object(hle_manifest, "_cited_section", return_value="cell-case other-case"):
             self.assertEqual(hle_manifest.oracle_exercised_apis({"tests": [row]}), {})
 
-    def test_only_a_complete_cell_promotes_its_function(self) -> None:
-        row = self._cells_row([
+    def test_a_case_api_cell_never_changes_the_tier_grant(self) -> None:
+        # Only the citation rule (api named in evidence_cases) grants a tier; a cell, however it
+        # is written, is annotation (a stray `complete` key included). Compare the grant with and without the cells.
+        entries = [
             {"call": "sceDisplaySetHoldMode(0)", "cell": "mode 0", "complete": True},
             {"call": "sceDisplayGetAccumulatedHcount()", "cell": "one read"},
-        ])
-        with mock.patch.object(hle_manifest, "_cited_section", return_value="cell-case other-case"):
-            self.assertEqual(hle_manifest.oracle_exercised_apis({"tests": [row]}),
-                             {"sceDisplaySetHoldMode": ["PSP-CITED-001"]})
+        ]
+        section = "cell-case other-case sceDisplayGetAccumulatedHcount"
+        with mock.patch.object(hle_manifest, "_cited_section", return_value=section):
+            for cited in (["cell-case", "other-case"],
+                          ["cell-case", "other-case", "sceDisplayGetAccumulatedHcount"]):
+                with self.subTest(cited=cited):
+                    plain = self._cells_row(entries, evidence_cases=cited)
+                    plain.pop("case_apis")
+                    expected = hle_manifest.oracle_exercised_apis({"tests": [plain]})
+                    got = hle_manifest.oracle_exercised_apis(
+                        {"tests": [self._cells_row(entries, evidence_cases=cited)]})
+                    self.assertEqual(got, expected)
+                    self.assertNotIn("sceDisplaySetHoldMode", got)
+
+    def test_a_complete_key_on_a_cell_is_refused_not_honored(self) -> None:
+        row = self._cells_row([
+            {"call": "sceDisplaySetHoldMode(0)", "cell": "mode 0", "complete": True}])
+        with self.assertRaisesRegex(ManifestError, "no other key"):
+            self._cells(row)
 
     def test_a_case_api_call_must_be_made_by_that_cases_own_source(self) -> None:
         # A wrong argument, and a call made only in the other case's record.
@@ -2188,7 +2205,6 @@ class EvidenceTierTests(unittest.TestCase):
             (self._cells_row([{"call": "sceNotListed(0)", "cell": "x"}]), "not one of its apis"),
             (self._cells_row([{"call": "sceGeSetCallback", "cell": "x"}]), "must be"),
             (self._cells_row([{"call": "sceGeSetCallback(&x)", "cell": ""}]), "must be"),
-            (self._cells_row([{"call": "sceGeSetCallback(&x)", "cell": "x", "complete": "yes"}]), "must be"),
             (self._cells_row(hardware_evidence="CAPTURED"), "not a MEASURED row"),
         )
         for row, message in bad:
@@ -2202,7 +2218,6 @@ class EvidenceTierTests(unittest.TestCase):
         hold = cells["sceDisplaySetHoldMode"]
         self.assertEqual([(c["oracle_id"], c["case"], c["call"]) for c in hold],
                          [("PSP-KERNEL-MISC-001", "display-basic", "sceDisplaySetHoldMode(0)")])
-        self.assertFalse(hold[0]["complete"])
         self.assertNotIn("sceDisplaySetHoldMode", hle_manifest.oracle_exercised_apis(document))
 
     def test_malformed_oracle_manifest_json_fails_closed(self) -> None:
