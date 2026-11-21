@@ -369,7 +369,8 @@ set(NK_UI_RESERVED_STUB_SOURCES ${NK_UI_EDGE_SOURCES} ${NK_UI_BACKEND_SOURCES})
 # The screens that came out of the old scr_title.c: the title page, the one-card flow pages,
 # About, the setup wizard, the game-found card, Settings, Controls and the developer log, with
 # the frame and form code they share (scr_flow.c, scr_form.c), and the on-screen keyboard
-# the nickname editor uses (ui_keyboard.c).
+# the nickname editor uses (ui_keyboard.c); the hidden moment, Love All and the launcher
+# themes (launcher_secret.c, scr_love_all.c, love_all_credits.c, launcher_themes.c).
 set(NK_UI_PLAYER_TITLE_SOURCES
     src/player/ui/scr_title.c
     src/player/ui/scr_flow.c
@@ -387,6 +388,10 @@ set(NK_UI_PLAYER_TITLE_SOURCES
     src/player/ui/scr_controller.c
     src/player/ui/scr_devlog.c
     src/player/ui/ui_keyboard.c
+    src/player/ui/launcher_secret.c
+    src/player/ui/launcher_themes.c
+    src/player/ui/scr_love_all.c
+    src/player/ui/love_all_credits.c
 )
 set(NK_UI_PLAYER_C5_SOURCES
     src/player/ui/player_ui_nk.c
