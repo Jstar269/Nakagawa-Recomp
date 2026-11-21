@@ -372,7 +372,9 @@ for their recorded source lineage.
 ## Upstream authors
 
 Nakagawa Recomp is not endorsed by PPSSPP, sal063, FFmpeg, SDL, Khronos, or any
-other upstream author.
+other upstream author. The online play servers it can connect to, `socom.cc` and the
+ArenaAnywhere relays, are run by their own communities, which do not endorse Nakagawa
+Recomp.
 
 ## Private inputs and history
 
