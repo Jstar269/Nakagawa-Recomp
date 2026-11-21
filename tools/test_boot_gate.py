@@ -254,6 +254,58 @@ class BootGateTests(unittest.TestCase):
         self.assertEqual(result["malformedHostPaths"], 1)
         self.assertIn("malformed-host-path", result["disqualifyingReasons"])
 
+    def test_black_first_frame_with_later_content_passes(self) -> None:
+        for source in ("cpu", "gpu"):
+            fields = {"source": source, "nonzero_pixels": 0} if source == "cpu" else {"source": source}
+            result = self.parse(
+                self.ordered_prefix()
+                + [event("first_frame", **fields), event("first_content", vblank=600, brightest=77)]
+            )
+            self.assertTrue(result["ok"], (source, result["disqualifyingReasons"]))
+            self.assertEqual(result["frameEvidence"], "content-validated")
+            self.assertEqual(result["frameContentSource"], "first_content")
+            self.assertEqual(result["firstContentVblank"], 600)
+            self.assertEqual(result["firstContentBrightest"], 77)
+
+    def test_first_frame_content_wins_and_names_its_source(self) -> None:
+        result = self.parse(
+            self.ordered_prefix()
+            + [event("first_frame", source="cpu", nonzero_pixels=4), event("first_content", vblank=300, brightest=9)]
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["frameContentSource"], "first_frame")
+
+    def test_all_black_run_still_fails_by_name(self) -> None:
+        for fields in ({"source": "cpu", "nonzero_pixels": 0}, {"source": "gpu"}):
+            result = self.parse(self.ordered_prefix() + [event("first_frame", **fields)])
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["disqualifyingReasons"], ["frame-content-unvalidated"])
+            self.assertIsNone(result["frameContentSource"])
+            self.assertIsNone(result["firstContentVblank"])
+
+    def test_first_content_with_zero_brightest_is_not_content(self) -> None:
+        result = self.parse(
+            self.ordered_prefix()
+            + [event("first_frame", source="cpu", nonzero_pixels=0), event("first_content", vblank=300, brightest=0)]
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["disqualifyingReasons"], ["frame-content-unvalidated"])
+
+    def test_first_content_without_first_frame_proves_nothing(self) -> None:
+        result = self.parse(self.ordered_prefix() + [event("first_content", vblank=300, brightest=50)])
+        self.assertFalse(result["ok"])
+        self.assertIn("frame-content-unvalidated", result["disqualifyingReasons"])
+
+    def test_invalid_first_content_brightest_is_a_fault(self) -> None:
+        for fields in ({"vblank": 300, "brightest": "bogus"}, {"vblank": 300}):
+            result = self.parse(
+                self.ordered_prefix()
+                + [event("first_frame", source="cpu", nonzero_pixels=0), event("first_content", **fields)]
+            )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["faultCount"], 1)
+            self.assertIn("invalid first_content brightest", result["faults"][0])
+
     def test_missing_frame_fails_with_stable_fields(self) -> None:
         result = self.parse(self.ordered_prefix())
         self.assertFalse(result["ok"])

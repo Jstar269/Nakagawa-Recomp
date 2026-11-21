@@ -2636,6 +2636,14 @@ retail title is private: keep it out of the repository and every upload.
    repeats every 600 vblanks of a dark stretch with the scheduler summary, and
    `BOOT_EVENT phase=resumed observation=picture` ends the stretch. After 30 seconds the native player shows
    its black-screen notice. Like the no-frame watchdog, this is an observation, not a hang verdict.
+5. Many games start on a black frame, so `BOOT_EVENT phase=first_frame` alone is not the whole content
+   evidence. The first picture probe that reads a frame with a colour byte above 8 (on the CPU and the GPU
+   presenter alike) emits `BOOT_EVENT phase=first_content vblank=<N> brightest=<M>` once per run. `N` is the
+   probe's vblank (probes run every 300 vblanks, so it is a sample, not the earliest visible frame) and `M`
+   its brightest colour byte. `tools/boot_gate.py` validates content when `first_frame` counts a nonzero pixel
+   or a `first_content` event with `brightest` above 0 exists, and reports `frameContentSource`
+   (`first_frame` or `first_content`). A run with neither, such as an all-black one, still fails as
+   `frame-content-unvalidated`.
 
 ### Crash on startup
 
