@@ -379,7 +379,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             sdl.write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             env = os.environ.copy()
             env["MSYS_PATH"] = str(msys_bin)
-            env["PATH"] = os.pathsep.join([str(root / "empty-path"), str(Path(sys.executable).parent)])
+            env["PATH"] = os.pathsep.join([str(root / "empty-path"), self._interpreter_path_entry(root)])
 
             result = self._run_copy(build, env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -403,7 +403,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             stale.mkdir(parents=True)
             env = os.environ.copy()
             env["MSYS_PATH"] = str(stale)
-            env["PATH"] = os.pathsep.join([str(gcc_bin), str(Path(sys.executable).parent)])
+            env["PATH"] = os.pathsep.join([str(gcc_bin), self._interpreter_path_entry(root)])
 
             result = self._run_copy(build, env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -416,7 +416,23 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             (generated / name).write_bytes(f"synthetic project asset: {name}\n".encode("ascii"))
 
     @staticmethod
-    def _path_only_environment(*path_dirs: Path) -> dict[str, str]:
+    def _interpreter_path_entry(root: Path) -> str:
+        """The PATH entry that lets the copy script find ``python``.
+
+        Normally the interpreter's own folder. MSYS2's Python lives in the UCRT64 toolchain's bin, which
+        holds gcc and the real SDL3.dll, so that folder would defeat every "no toolchain on PATH" case;
+        there a folder holding only a ``python.cmd`` that runs the interpreter stands in.
+        """
+        folder = Path(sys.executable).parent
+        if not (folder / "gcc.exe").exists():
+            return str(folder)
+        shim = root / "python-on-path"
+        shim.mkdir(exist_ok=True)
+        (shim / "python.cmd").write_text(f'@"{sys.executable}" %*\r\n', encoding="ascii")
+        return str(shim)
+
+    @staticmethod
+    def _path_only_environment(root: Path, *path_dirs: Path) -> dict[str, str]:
         """The copy script's environment: ``path_dirs`` and Python alone on PATH, and no MSYS_PATH.
 
         The copy then finds each DLL only where the test put it. The notice generator the copy
@@ -431,7 +447,8 @@ class TestProjectFontAssetCopy(unittest.TestCase):
         toolchain = package_notices.resolve_toolchain_root()
         if toolchain is not None:
             env["MINGW_PREFIX"] = str(toolchain)
-        env["PATH"] = os.pathsep.join([*(str(path) for path in path_dirs), str(Path(sys.executable).parent)])
+        env["PATH"] = os.pathsep.join(
+            [*(str(path) for path in path_dirs), TestProjectFontAssetCopy._interpreter_path_entry(root)])
         return env
 
     @staticmethod
@@ -469,7 +486,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             (gcc_bin / "SDL3.dll").write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             iconv = gcc_bin / "libiconv-2.dll"
             iconv.write_bytes(synthetic_pe("synthetic libiconv runtime"))
-            env = self._path_only_environment(gcc_bin)
+            env = self._path_only_environment(root, gcc_bin)
 
             result = self._run_copy(build, env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -489,7 +506,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             current.write_bytes(synthetic_pe("runtime from the current toolchain"))
             libgcc = gcc_bin / "libgcc_s_seh-1.dll"
             libgcc.write_bytes(synthetic_pe("synthetic libgcc runtime"))
-            env = self._path_only_environment(gcc_bin)
+            env = self._path_only_environment(root, gcc_bin)
 
             result = self._run_copy(build, env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -523,7 +540,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             iconv.write_bytes(synthetic_pe("synthetic libiconv runtime"))
             stdcxx = gcc_bin / "libstdc++-6.dll"
             stdcxx.write_bytes(synthetic_pe("synthetic libstdc++ runtime"))
-            env = self._path_only_environment(shim, gcc_bin)
+            env = self._path_only_environment(root, shim, gcc_bin)
 
             result = self._run_copy(build, env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -542,14 +559,15 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             (build / "SDL3.dll").write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             shim = self._compiler_cache_shim(root)
             gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
-            env = self._path_only_environment(shim, gcc_bin)
+            env = self._path_only_environment(root, shim, gcc_bin)
 
             result = self._run_copy(build, env)
             output = "".join((result.stdout + result.stderr).split())
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("RUNTIME_DLL_UNRESOLVED:SDL3.dllimportslibiconv-2.dll", output)
             for searched in (shim, gcc_bin):
-                self.assertIn("".join(str(searched).split()), output)
+                # The script prints native paths; MSYS2's Python prints a Path with forward slashes.
+                self.assertIn("".join(str(searched).replace("/", "\\").split()), output)
             self.assertFalse((build / "libiconv-2.dll").exists())
 
     @unittest.skipUnless(os.name == "nt", "the Windows staging route copies DLLs")
@@ -566,7 +584,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             (first / "libiconv-2.dll").write_bytes(synthetic_pe("synthetic libiconv runtime, first directory"))
             gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
             (gcc_bin / "libiconv-2.dll").write_bytes(synthetic_pe("synthetic libiconv runtime, later directory"))
-            env = self._path_only_environment(first, gcc_bin)
+            env = self._path_only_environment(root, first, gcc_bin)
 
             result = self._run_copy(build, env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

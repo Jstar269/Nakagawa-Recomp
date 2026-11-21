@@ -145,3 +145,16 @@ void player_ui_sounds_play(PlayerUiSounds *sounds, PlayerUiSound sound) {
     (void)SDL_ClearAudioStream(sounds->stream);
     (void)SDL_PutAudioStreamData(sounds->stream, clip->pcm, (int)clip->size);
 }
+
+void player_ui_sounds_play_pcm(PlayerUiSounds *sounds, const int16_t *samples, size_t count,
+                               int rate) {
+    const SDL_AudioSpec *spec;
+    if (sounds == NULL || !sounds->enabled || samples == NULL || count == 0u ||
+        count > (size_t)SDL_MAX_SINT32 / sizeof(int16_t) || !player_ui_sounds_open(sounds)) {
+        return;
+    }
+    spec = &sounds->clips[0].spec;
+    if (spec->format != SDL_AUDIO_S16 || spec->channels != 1 || spec->freq != rate) return;
+    (void)SDL_ClearAudioStream(sounds->stream);
+    (void)SDL_PutAudioStreamData(sounds->stream, samples, (int)(count * sizeof(int16_t)));
+}

@@ -2622,40 +2622,139 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIn("LAUNCHER_UNAVAILABLE", completed.stderr)
         self.assertNotIn(marker, completed.stdout)
 
-    def test_removed_ui_switch_and_unknown_options_are_named_not_fatal(self) -> None:
+    def test_removed_ui_switch_is_named_not_fatal(self) -> None:
         """Shortcuts made before the old renderer went still pass --ui=next. The
-        switch is gone, so the player says it ignores it, and any other option it
-        does not know, then starts the launcher as usual."""
+        switch is gone, so the player says it ignores it, then starts the launcher
+        as usual. (Any other option it does not know is refused: see
+        test_command_line_refuses_what_it_does_not_understand.)"""
         default_ui = self.run_player("empty")
         self.assert_next_ui_active(default_ui["stdout"])
         # The harness's own --ui-test-* options are taken first: none is unknown.
         self.assertNotIn("Ignoring", str(default_ui["stderr"]))
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             scratch = Path(tmp)
-            env = os.environ.copy()
-            env.update({
-                "SDL_VIDEODRIVER": "dummy",
-                "SDL_RENDER_DRIVER": "software",
-                "SDL_AUDIO_DRIVER": "dummy",
-                "LOCALAPPDATA": str(scratch),
-                "APPDATA": str(scratch),
-            })
             shot = scratch / "shot.bmp"
-            completed = subprocess.run(
-                [str(PLAYER_EXE), f"--user-data-root={scratch / 'data'}",
-                 "--ui=legacy", "--no-such-option", "--view=library", f"--screenshot={shot}"],
-                cwd=ROOT, env=env, capture_output=True, text=True, timeout=60, check=False,
-            )
+            completed = self.run_player_args(
+                scratch, f"--user-data-root={scratch / 'data'}",
+                "--ui=legacy", "--view=library", f"--screenshot={shot}")
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertTrue(shot.is_file(), completed.stdout + completed.stderr)
             self.assertGreater(shot.stat().st_size, 0)
         self.assertIn("Ignoring --ui=legacy", completed.stderr)
         self.assertIn("the nk launcher is the only launcher", completed.stderr)
-        self.assertIn("Ignoring unknown option: --no-such-option", completed.stderr)
-        self.assertNotIn("Ignoring unknown option: --ui=legacy", completed.stderr)
-        self.assertNotIn("Ignoring unknown option: --view", completed.stderr)
-        self.assertNotIn("Ignoring unknown option: --screenshot", completed.stderr)
-        self.assertNotIn("Ignoring unknown option: --user-data-root", completed.stderr)
+        self.assertNotIn("Unknown option", completed.stderr)
+
+    def run_player_args(self, scratch: Path, *args: str) -> "subprocess.CompletedProcess[str]":
+        """Runs the regression player with the given command line, headless, in `scratch`."""
+        env = os.environ.copy()
+        env.update({
+            "SDL_VIDEODRIVER": "dummy",
+            "SDL_RENDER_DRIVER": "software",
+            "SDL_AUDIO_DRIVER": "dummy",
+            "LOCALAPPDATA": str(scratch),
+            "APPDATA": str(scratch),
+        })
+        return subprocess.run(
+            [str(PLAYER_EXE), *args], cwd=ROOT, env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60, check=False,
+        )
+
+    def test_value_options_take_a_space_or_an_equals_sign(self) -> None:
+        """Pegasus, ES-DE, LaunchBox and Steam ROM Manager templates write `--iso <path>`
+        as often as `--iso=<path>`. Both forms mean the same for every value option,
+        --user-data-root (read before anything else) and a path with spaces included."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            for index, spelling in enumerate((("=", "="), (" ", " "))):
+                data = scratch / f"data {index}"
+                shot = scratch / f"shot {index}.bmp"
+                if spelling[0] == "=":
+                    args = [f"--user-data-root={data}", "--view=library", f"--screenshot={shot}",
+                            "--width=640", "--height=360"]
+                else:
+                    args = ["--user-data-root", str(data), "--view", "library",
+                            "--screenshot", str(shot), "--width", "640", "--height", "360"]
+                completed = self.run_player_args(scratch, *args)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertTrue(shot.is_file(), completed.stdout + completed.stderr)
+                self.assertTrue(data.is_dir(), "--user-data-root was not applied: " + completed.stderr)
+                self.assertNotIn("nknown", completed.stderr)
+
+    def test_command_line_refuses_what_it_does_not_understand(self) -> None:
+        """An unknown option, a stray argument, a value option with no value and a value on a
+        switch are each refused by name with exit code 2, and nothing starts."""
+        cases = (
+            (("--no-such-option",), "Unknown option: --no-such-option"),
+            (("--iso", "--stage-only"), "--iso needs a value"),
+            (("--iso=",), "--iso needs a value"),
+            (("--launch-title",), "--launch-title needs a value"),
+            (("--user-data-root",), "--user-data-root needs a value"),
+            (("--stage-only=yes",), "--stage-only takes no value"),
+            (("game.iso",), "Unexpected argument 'game.iso'"),
+        )
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            for args, message in cases:
+                with self.subTest(args=args):
+                    completed = self.run_player_args(scratch, *args)
+                    self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+                    self.assertIn(message, completed.stderr)
+                    self.assertIn("--help", completed.stderr)
+
+    def test_version_prints_one_line_and_exits_zero(self) -> None:
+        """--version names the version and, when the build knows it, the commit, on one line;
+        it opens no window and wins over an unrelated option."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            completed = self.run_player_args(Path(tmp), "--version")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        lines = completed.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 1, completed.stdout)
+        self.assertRegex(lines[0], r"^Nakagawa Recomp v\d+\.\d+\.\d+")
+
+    def test_a_bad_argument_is_refused_in_either_order_with_help_or_version(self) -> None:
+        """--help and --version never hide a bad argument: both orders exit 2."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            for flag in ("--help", "--version"):
+                for args in ((flag, "--bogus"), ("--bogus", flag), (flag, "--iso")):
+                    with self.subTest(args=args):
+                        completed = self.run_player_args(scratch, *args)
+                        self.assertEqual(completed.returncode, 2,
+                                         completed.stdout + completed.stderr)
+                        self.assertEqual(completed.stdout, "")
+                        self.assertIn("--help", completed.stderr)
+
+    def test_help_prints_the_exit_code_table_in_main_c(self) -> None:
+        """The exit-code table in main.c is the one source: --help prints it row for row, and
+        every literal exit code main.c returns is in it. (docs/SETUP.md is checked against the
+        same table by tools/test_lint_docs.py, which needs no built player.)"""
+        source = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        block = source.split("k_player_exit_codes[] = {", 1)[1].split("};", 1)[0]
+        table = re.findall(r'\{(\d+), "([^"]*)"\}', block)
+        self.assertGreaterEqual(len(table), 10, table)
+        table = [(int(code), meaning) for code, meaning in table]
+        self.assertEqual([code for code, _ in table], list(range(len(table))))
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            helped = self.run_player_args(Path(tmp), "--help").stdout
+        for code, meaning in table:
+            self.assertIn(f"  {code}  {meaning}\n", helped)
+        self.assertEqual(len(re.findall(r"^  \d  ", helped, re.M)), len(table))
+        # (a plain `return N;`, and each arm of `return cond ? N : M;`)
+        literal = {int(n) for n in re.findall(r"\breturn (\d+);", source)}
+        for arms in re.findall(r"\breturn [^;\n]*\? (\d+) : (\d+);", source):
+            literal.update(int(n) for n in arms)
+        self.assertIn(9, literal)
+        self.assertLessEqual(literal, {code for code, _ in table})
+
+    def test_help_lists_every_documented_option_and_the_exit_codes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            completed = self.run_player_args(Path(tmp), "--help")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.startswith("Usage: nakagawa_player"), completed.stdout)
+        for option in ("--user-data-root", "--iso", "--launch-now", "--launch-title",
+                       "--launch-index", "--version", "--help", "--cheats-file"):
+            self.assertIn(option, completed.stdout)
+        self.assertIn("Exit codes", completed.stdout)
 
     def test_every_view_is_drawn_by_the_launcher(self) -> None:
         """Every PlayerView in player_state.h is drawn by the nk_ui launcher."""
@@ -5400,6 +5499,154 @@ class NativePlayerUiTests(unittest.TestCase):
                          "WAIT_MS=100"),
         )
         self.assertEqual([view for view, _ in self.screens(mouse)], ["settings", "controller"])
+
+    # The launcher's classic cheat code (src/player/ui/launcher_secret.h): Up, Up, Down, Down,
+    # Left, Right, Left, Right, then the launcher's Back and Select, on the keyboard or a pad.
+    SECRET_KEYS = ("KEY_UP", "KEY_UP", "KEY_DOWN", "KEY_DOWN", "KEY_LEFT", "KEY_RIGHT",
+                   "KEY_LEFT", "KEY_RIGHT", "KEY_ESCAPE", "KEY_RETURN")
+    SECRET_PAD = ("PAD_DPAD_UP", "PAD_DPAD_UP", "PAD_DPAD_DOWN", "PAD_DPAD_DOWN",
+                  "PAD_DPAD_LEFT", "PAD_DPAD_RIGHT", "PAD_DPAD_LEFT", "PAD_DPAD_RIGHT",
+                  "PAD_EAST", "PAD_SOUTH")
+    LOVE_ALL_ROUTE = "11"  # PLAYER_UI_ROUTE_LOVE_ALL
+    # Scripted runs cut motion unless NK_UI_TEST_MOTION keeps the settings' choice.
+    SECRET_MOTION: dict[str, object] = {"reduce_motion_choice": "off"}
+
+    @staticmethod
+    def secret_lines(run: dict[str, object], kind: str) -> list[dict[str, str]]:
+        """The run's `launcher_secret <kind>` lines, as fields; the toast, which has spaces,
+        is the last field."""
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        prefix = f"[PLAYER_UI_TEST] launcher_secret {kind} "
+        lines: list[dict[str, str]] = []
+        for line in stdout.splitlines():
+            if not line.startswith(prefix):
+                continue
+            head, toast = line[len(prefix):].split("toast=", 1)
+            fields = dict(part.split("=", 1) for part in head.split())
+            fields["toast"] = toast
+            lines.append(fields)
+        return lines
+
+    def secret_run(self, events: tuple[str, ...], local_time: str = "09:30",
+                   motion: bool = False, **kwargs: object) -> dict[str, object]:
+        env = {"NK_UI_TEST_LOCAL_TIME": local_time}
+        if motion:
+            env["NK_UI_TEST_MOTION"] = "1"
+            kwargs.setdefault("settings", dict(self.SECRET_MOTION))
+        return self.next_ui_run("library", events, env_extra=env, **kwargs)
+
+    def test_next_ui_secret_code_on_keyboard_and_pad_unlocks_the_theme(self) -> None:
+        """The code entered on the keyboard (arrows, Esc, Enter) or a pad (the D-pad, B, A)
+        greets by the time of day, opens Love All and records the theme's unlock in
+        settings.json. Its Esc or B is not a Back and its Enter or A not a Select: the
+        launcher stays open and nothing else opens."""
+        for name, keys, local_time, greeting in (
+                ("keyboard", self.SECRET_KEYS, "09:30", "Good morning."),
+                ("pad", self.SECRET_PAD, "13:05", "Good afternoon."),
+                ("keyboard-evening", self.SECRET_KEYS, "02:10", "Good evening.")):
+            with self.subTest(entry=name):
+                run = self.secret_run(("WAIT_MS=100",) + keys + ("WAIT_MS=300",),
+                                      local_time=local_time)
+                found = self.secret_lines(run, "found")
+                self.assertEqual(len(found), 1, run["stdout"])
+                self.assertEqual(found[0]["toast"], greeting)
+                routes = [route for _, route in self.screens(run)]
+                self.assertEqual(routes[-1], self.LOVE_ALL_ROUTE, routes)
+                self.assertNotIn("2", routes, "the code's Select opened no game")
+                self.assertNotIn("3", routes, "Love All opened on its own, not through About")
+                settings = run["settings"]
+                assert isinstance(settings, dict)
+                self.assertEqual(settings.get("theme_unlocks"), ["wave"])
+                self.assertEqual(settings.get("launcher_theme", ""), "",
+                                 "finding the code chooses no theme for the user")
+
+    def test_next_ui_secret_code_wrong_or_paused_does_not_fire(self) -> None:
+        """A wrong press inside the code, or a pause of more than 1.5 s between two of its
+        presses, starts it again: neither run greets, opens Love All or records an unlock."""
+        keys = self.SECRET_KEYS
+        wrong = keys[:7] + ("KEY_LEFT",) + keys[8:]
+        paused = keys[:5] + ("WAIT_MS=1700",) + keys[5:]
+        for name, events in (("wrong", wrong), ("paused", paused)):
+            with self.subTest(sequence=name):
+                run = self.secret_run(("WAIT_MS=100",) + events + ("WAIT_MS=200",))
+                self.assertEqual(self.secret_lines(run, "found"), [], run["stdout"])
+                routes = [route for _, route in self.screens(run)]
+                self.assertNotIn(self.LOVE_ALL_ROUTE, routes)
+                # Nothing changed a setting, so the run may have written no settings.json.
+                settings = run["settings"] or {}
+                assert isinstance(settings, dict)
+                self.assertFalse(settings.get("theme_unlocks"), settings)
+
+    def test_next_ui_secret_farewell_on_leaving_love_all(self) -> None:
+        """Back from Love All returns to the library with "Please come again soon!"; once the
+        unlock is recorded, About offers a Love All button that opens it again, with no
+        greeting."""
+        run = self.secret_run(("WAIT_MS=100",) + self.SECRET_KEYS +
+                              ("WAIT_MS=300", "KEY_ESCAPE", "WAIT_MS=300"))
+        farewell = self.secret_lines(run, "left_love_all")
+        self.assertEqual([line["toast"] for line in farewell], ["Please come again soon!"],
+                         run["stdout"])
+        routes = [route for _, route in self.screens(run)]
+        self.assertEqual(routes[-2:], [self.LOVE_ALL_ROUTE, "1"], routes)
+
+    def test_next_ui_secret_respects_reduce_motion(self) -> None:
+        """With Reduce motion on, the code still greets and records its unlock, without the
+        ripple and confetti, and Love All opens at once and does not roll. With motion on,
+        Love All opens once the ripple is done."""
+        still = self.secret_run(("WAIT_MS=100",) + self.SECRET_KEYS + ("WAIT_MS=60",))
+        found = self.secret_lines(still, "found")
+        self.assertEqual([line["motion"] for line in found], ["0"], still["stdout"])
+        self.assertEqual(self.screens(still)[-1][1], self.LOVE_ALL_ROUTE,
+                         "Love All opens at once without the ripple")
+
+        moving = self.secret_run(("WAIT_MS=100",) + self.SECRET_KEYS + ("WAIT_MS=400",),
+                                 motion=True)
+        found = self.secret_lines(moving, "found")
+        self.assertEqual([line["motion"] for line in found], ["1"], moving["stdout"])
+        self.assertNotIn(self.LOVE_ALL_ROUTE, [route for _, route in self.screens(moving)],
+                         "the ripple plays before Love All opens")
+        handed = self.secret_run(("WAIT_MS=100",) + self.SECRET_KEYS + ("WAIT_MS=2400",),
+                                 motion=True)
+        self.assertEqual(self.screens(handed)[-1][1], self.LOVE_ALL_ROUTE)
+
+    # The pictures of the launcher's secret a review looks at: (name, events after the code,
+    # settings, motion). The toast is taken mid-ripple; Love All with Reduce motion on, which
+    # opens it at once and holds it at its top, after the greeting has gone.
+    SECRET_SCREENSHOTS: tuple[tuple[str, str, tuple[str, ...], dict[str, object], bool], ...] = (
+        ("secret-toast", "library", ("WAIT_MS=700",), {}, True),
+        ("secret-love-all", "library", ("WAIT_MS=3800",), {}, False),
+        ("secret-theme", "accessibility-settings",
+         ("WAIT_MS=100", "KEY_DOWN", "KEY_DOWN", "KEY_DOWN", "KEY_DOWN", "WAIT_MS=200"),
+         {"launcher_theme": "wave", "theme_unlocks": ["wave"]}, False),
+    )
+
+    def test_next_ui_secret_screenshots_when_requested(self) -> None:
+        """With NAKAGAWA_PLAYER_UI_SECRET_SCREENSHOTS naming a folder, writes the UI-test
+        player's own last frame of each SECRET_SCREENSHOTS entry there
+        (<name>-<w>x<h>-<text size>.bmp) at each RA_WINDOWS size. Skipped, and reported as
+        skipped, without the variable."""
+        screenshot_dir = os.environ.get("NAKAGAWA_PLAYER_UI_SECRET_SCREENSHOTS")
+        if not screenshot_dir:
+            self.skipTest("NAKAGAWA_PLAYER_UI_SECRET_SCREENSHOTS names no folder")
+        output = Path(screenshot_dir)
+        for name, view, after, extra, motion in self.SECRET_SCREENSHOTS:
+            for width, height, text_size in self.RA_WINDOWS:
+                picture = f"{name}-{width}x{height}-{text_size}"
+                with self.subTest(picture=picture):
+                    settings: dict[str, object] = dict(self.SECRET_MOTION) if motion else {}
+                    settings.update(extra)
+                    if text_size != 100:
+                        settings["text_size"] = text_size
+                    env = {"NK_UI_TEST_LOCAL_TIME": "09:30"}
+                    if motion:
+                        env["NK_UI_TEST_MOTION"] = "1"
+                    events = after if view != "library" else \
+                        ("WAIT_MS=100",) + self.SECRET_KEYS + after
+                    self.next_ui_run(view, events, width=width, height=height,
+                                     settings=settings, env_extra=env,
+                                     screenshot_path=output / (picture + ".bmp"))
+                    self.assertTrue((output / (picture + ".bmp")).is_file(), picture)
 
     def test_next_ui_developer_log_buttons(self) -> None:
         """The developer log opens on Close; Copy and the layout inspector keep it open."""
@@ -8910,7 +9157,9 @@ class FirstRunRouteTests(unittest.TestCase):
                     completed = self.run_route(
                         scratch, ["--demo", f"--launch-index={value}", "--headless-launch"])
                     self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
-                    self.assertIn("--launch-index must be a whole number", completed.stderr)
+                    # An empty value is refused by the shared parser, by name.
+                    self.assertIn("--launch-index needs a value" if not value
+                                  else "--launch-index must be a whole number", completed.stderr)
                     self.assertNotIn("SAMPLE", completed.stdout + completed.stderr)
 
     def test_screenshot_that_is_not_saved_fails_the_run(self) -> None:
@@ -8932,7 +9181,8 @@ class FirstRunRouteTests(unittest.TestCase):
                     completed = self.run_route(
                         scratch, ["--view=library", size, f"--screenshot={shot}"])
                     self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
-                    self.assertIn("--width and --height must be whole numbers",
+                    self.assertIn("--height needs a value" if size == "--height="
+                                  else "--width and --height must be whole numbers",
                                   completed.stderr)
                     self.assertFalse(shot.exists())
             completed = self.run_route(

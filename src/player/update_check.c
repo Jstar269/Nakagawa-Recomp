@@ -687,7 +687,7 @@ static void offline_error(NkUpdateError *error) {
 }
 
 static PackageHttpOpen resolve_transport(PackageHttpOpen transport, void **context) {
-    static const PackageHttpOptions options = { NK_UPDATE_USER_AGENT };
+    static const PackageHttpOptions options = { NK_UPDATE_USER_AGENT, NULL };
     if (transport) return transport;
     *context = (void *)&options;
     return package_builder_native_transport();

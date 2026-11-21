@@ -672,6 +672,31 @@ static int test_scroll_into_view(void) {
     return 1;
 }
 
+/* With a reveal margin (nk_ui's focus ring reaches outside its control), a scroll into view
+   shows that much around the entry too, and no more than the content holds. */
+static int test_scroll_into_view_shows_the_ring(void) {
+    NkUiFocusGraph *g = nk_ui_focus_graph_create();
+    NkUiFocusScrollRequest r;
+    CHECK(g != NULL, "create graph");
+    nk_ui_focus_set_reveal_margin(g, 8.0f);
+    list_frame(g, 0.0f);
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 2u, "down to row 2");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroll_y == 8.0f,
+          "row 2 ends at the viewport's bottom: the list scrolls on by the ring's reach");
+    list_frame(g, 8.0f);
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 1u, "up to row 1");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroll_y == 0.0f,
+          "row 1's ring above the content's top: the list stops at its top");
+    CHECK(nk_ui_focus_scroll_into_view(g, 10u, &r) && r.scroll_y == 800.0f,
+          "row 10: the list stops at the content's end");
+    nk_ui_focus_set_reveal_margin(g, -1.0f);
+    list_frame(g, 0.0f);
+    CHECK(nk_ui_focus_set(g, 2u), "focus row 2");
+    CHECK(!nk_ui_focus_scroll_into_view(g, 2u, &r), "a negative margin is no margin");
+    nk_ui_focus_graph_destroy(g);
+    return 1;
+}
+
 static int test_dialog_trap_and_scope_memory(void) {
     NkUiFocusGraph *g = nk_ui_focus_graph_create();
     int i;
@@ -2025,7 +2050,8 @@ int main(int argc, char **argv) {
     }
     if (!test_grid() || !test_no_default_entry() || !test_owns_horizontal() ||
         !test_pointer_only_and_named_neighbours() ||
-        !test_ragged_row() || !test_scroll_into_view() || !test_place_follows_the_layout() ||
+        !test_ragged_row() || !test_scroll_into_view() || !test_scroll_into_view_shows_the_ring() ||
+        !test_place_follows_the_layout() ||
         !test_nested_scrollers() || !test_scroller_showing_no_control() ||
         !test_nested_scroller_hides_its_list() || !test_dialog_trap_and_scope_memory() || !test_tab_cycle_and_repair() ||
         !test_repeat_timing() || !test_direction_holders() || !test_stick_hysteresis() ||

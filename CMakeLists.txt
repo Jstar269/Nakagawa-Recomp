@@ -52,6 +52,7 @@ set(CORE_SOURCES
     src/core/nk_zip.c
     src/core/nk_steam_shortcuts.c
     src/core/nk_data_migrate.c
+    src/core/nk_memstick_layout.c
     src/core/generated/nk_title_catalog.c
 )
 
@@ -238,6 +239,8 @@ if(NOT MSVC AND NOT APPLE)
     target_link_options(test_disc_expand PRIVATE "-Wl,--wrap=malloc")
 endif()
 add_test(NAME disc_expand_test COMMAND test_disc_expand)
+# A host that cannot make a folder link runs every other check and exits 77.
+set_tests_properties(disc_expand_test PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(test_disc_verify
     tests/native/test_disc_verify.c
@@ -253,6 +256,12 @@ add_executable(test_nk_zip
     tests/native/native_test_isolation.c
 )
 target_link_libraries(test_nk_zip PRIVATE nakagawa_core)
+# The nested-header case counts reads by wrapping fread; MSVC's and Apple's linkers have no
+# --wrap, so there the test prints a SKIP for that count and runs the rest.
+if(NOT MSVC AND NOT APPLE)
+    target_compile_definitions(test_nk_zip PRIVATE NK_TEST_WRAP_FREAD)
+    target_link_options(test_nk_zip PRIVATE "-Wl,--wrap=fread")
+endif()
 add_test(NAME nk_zip_test COMMAND test_nk_zip)
 
 add_executable(test_steam_shortcuts
@@ -369,7 +378,8 @@ set(NK_UI_RESERVED_STUB_SOURCES ${NK_UI_EDGE_SOURCES} ${NK_UI_BACKEND_SOURCES})
 # The screens that came out of the old scr_title.c: the title page, the one-card flow pages,
 # About, the setup wizard, the game-found card, Settings, Controls and the developer log, with
 # the frame and form code they share (scr_flow.c, scr_form.c), and the on-screen keyboard
-# the nickname editor uses (ui_keyboard.c).
+# the nickname editor uses (ui_keyboard.c); the hidden moment, Love All and the launcher
+# themes (launcher_secret.c, scr_love_all.c, love_all_credits.c, launcher_themes.c).
 set(NK_UI_PLAYER_TITLE_SOURCES
     src/player/ui/scr_title.c
     src/player/ui/scr_flow.c
@@ -387,6 +397,10 @@ set(NK_UI_PLAYER_TITLE_SOURCES
     src/player/ui/scr_controller.c
     src/player/ui/scr_devlog.c
     src/player/ui/ui_keyboard.c
+    src/player/ui/launcher_secret.c
+    src/player/ui/launcher_themes.c
+    src/player/ui/scr_love_all.c
+    src/player/ui/love_all_credits.c
 )
 set(NK_UI_PLAYER_C5_SOURCES
     src/player/ui/player_ui_nk.c
@@ -450,6 +464,31 @@ if(NOT WIN32)
 endif()
 add_test(NAME player_screens_test COMMAND test_player_screens)
 set_tests_properties(player_screens_test PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# The launcher's hidden moment and themes (launcher-secret-selftest), on the SDL-free core.
+add_executable(test_launcher_secret
+    tests/native/test_launcher_secret.c
+    ${NK_UI_CORE_SOURCES}
+    src/player/ui/launcher_secret.c
+    src/player/ui/launcher_themes.c
+    src/player/ui/love_all_credits.c
+)
+target_include_directories(test_launcher_secret PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player/ui
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay
+)
+target_compile_definitions(test_launcher_secret PRIVATE
+    SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
+)
+if(NOT WIN32)
+    target_link_libraries(test_launcher_secret PRIVATE m)
+endif()
+add_test(NAME launcher_secret_test COMMAND test_launcher_secret)
+set_tests_properties(launcher_secret_test PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # The in-game overlay's pages (#1159, C9c): flow, focus, fit and tests/fixtures/nk_ui/overlay.golden.

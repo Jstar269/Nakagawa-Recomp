@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -19,7 +21,7 @@ import tempfile
 import textwrap
 import time
 import unittest
-from typing import ClassVar, cast
+from typing import ClassVar, TypeVar, cast
 from unittest import mock
 
 
@@ -175,6 +177,37 @@ def _run_scratch_make(
         text=True,
         check=False,
     )
+
+
+_Item = TypeVar("_Item")
+_Result = TypeVar("_Result")
+
+#: Worker threads for independent Make probes. Every probe is a separate Make process whose
+#: cost is process start-up (a Make parse runs about eight helper processes), so the cases
+#: of one test overlap well; four keeps a busy or small machine from being flooded.
+_PROBE_WORKERS = max(1, min(4, os.cpu_count() or 1))
+
+
+def _concurrently(
+    function: Callable[[_Item], _Result], items: Sequence[_Item]
+) -> list[Future[_Result]]:
+    """Run ``function`` on each item on a small thread pool; return the finished futures, in order.
+
+    A caller checks each case under its own ``subTest`` by calling ``future.result()``, which
+    re-raises the AssertionError (or any error) the job raised, so a failure is still
+    reported against the case that produced it. Jobs must not share a BUILD_ROOT: the SDL3
+    discovery fragment and the profile stamps are written beneath it while Make parses, and
+    two parses writing one root race. Give each job ``_job_root``. A job must not skip
+    (``skipTest``) or touch the TestCase's subTest state; it only runs a process and asserts.
+    """
+    with ThreadPoolExecutor(max_workers=max(1, min(_PROBE_WORKERS, len(items)))) as pool:
+        futures = [pool.submit(function, item) for item in items]
+    return futures
+
+
+def _job_root(parent: Path, label: object) -> Path:
+    """A BUILD_ROOT of its own for one concurrent probe, beneath ``parent``."""
+    return parent / f"job-{label}"
 
 
 class BuildTruthTests(unittest.TestCase):
@@ -1004,12 +1037,13 @@ class BuildIdentityTests(unittest.TestCase):
             self.skipTest("GNU Make is required")
         self.build_root = _scratch_build_root(self, "build-identity")
 
-    def _probe(self, *assignments: str) -> subprocess.CompletedProcess:
+    def _probe(self, *assignments: str, root: Path | None = None) -> subprocess.CompletedProcess:
         return _run_scratch_make(
             cast(str, self.make), "GAME_NAME=probe", *assignments, "--eval",
             "nkprobe: ; @echo EPOCH=[$(SR_SOURCE_DATE_EPOCH)] PLAYER=[$(NK_PLAYER_BUILD_EPOCH)]"
             " COMMIT=[$(NK_PLAYER_BUILD_COMMIT)] STAMP=[$(notdir $(PLAYER_IDENTITY_STAMP))]",
-            "nkprobe", build_root=self.build_root, log_dir=self.build_root.parent / "logs",
+            "nkprobe", build_root=root or self.build_root,
+            log_dir=self.build_root.parent / "logs",
         )
 
     def test_a_command_line_source_date_epoch_is_accepted(self) -> None:
@@ -1021,9 +1055,16 @@ class BuildIdentityTests(unittest.TestCase):
                       "STAMP=[.player-identity-0123456-1700000000]", proc.stdout)
 
     def test_a_source_date_epoch_that_is_not_decimal_is_refused(self) -> None:
-        for value in ("17e8", "-1", "0x10", "12 34"):
+        values = ("17e8", "-1", "0x10", "12 34")
+        # A scratch root per value, so the four Make parses overlap.
+        runs = _concurrently(
+            lambda case: self._probe(f"SOURCE_DATE_EPOCH={case[1]}",
+                                     root=_job_root(self.build_root.parent, case[0])),
+            list(enumerate(values)),
+        )
+        for value, run in zip(values, runs, strict=True):
             with self.subTest(value=value):
-                proc = self._probe(f"SOURCE_DATE_EPOCH={value}")
+                proc = run.result()
                 self.assertNotEqual(proc.returncode, 0, proc.stdout)
                 self.assertIn("SOURCE_DATE_EPOCH must be a decimal Unix timestamp", proc.stderr)
 
@@ -1063,12 +1104,18 @@ class H264WrapperWarningTests(unittest.TestCase):
             self.skipTest("GNU Make is required")
         build_root = _scratch_build_root(self, "h264-warnings")
         commands = {}
-        for stem in ("nk_h264_api", "libavutil/log2_tab"):
-            obj = (build_root / "probe" / f"h264sub_{stem}.o").as_posix()
-            proc = _run_scratch_make(
-                make, "-n", "CC=gcc", "GAME_NAME=probe", "H264_FFMPEG=1", obj,
-                build_root=build_root, log_dir=build_root.parent / "logs",
-            )
+        stems = ("nk_h264_api", "libavutil/log2_tab")
+        runs = _concurrently(
+            lambda case: _run_scratch_make(
+                make, "-n", "CC=gcc", "GAME_NAME=probe", "H264_FFMPEG=1",
+                (_job_root(build_root.parent, case[0]) / "probe"
+                 / f"h264sub_{case[1]}.o").as_posix(),
+                build_root=_job_root(build_root.parent, case[0]), log_dir=build_root.parent / "logs",
+            ),
+            list(enumerate(stems)),
+        )
+        for stem, run in zip(stems, runs, strict=True):
+            proc = run.result()
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             line = next((text for text in proc.stdout.splitlines()
                          if f"-c src/rt/h264_ffmpeg_sub/{stem}.c" in text), "")
@@ -1380,12 +1427,24 @@ class OptimizationProfileContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def run_compiler_info(self, *extra_args: str) -> dict[str, str]:
+    def run_compiler_infos(self, *argument_sets: tuple[str, ...]) -> list[dict[str, str]]:
+        """``run_compiler_info`` for each argument set, the Make parses overlapping.
+
+        Each probe gets a BUILD_DIR and BUILD_ROOT of its own, so no two parses write one root.
+        """
+        runs = _concurrently(
+            lambda case: self.run_compiler_info(*case[1], root=_job_root(self.build_dir, case[0])),
+            list(enumerate(argument_sets)),
+        )
+        return [run.result() for run in runs]
+
+    def run_compiler_info(self, *extra_args: str, root: Path | None = None) -> dict[str, str]:
+        root = root or self.build_dir
         cmd = [
             self.make,
             "--no-print-directory",
-            f"BUILD_DIR={self.build_dir.as_posix()}",
-            f"BUILD_ROOT={self.build_dir.as_posix()}",
+            f"BUILD_DIR={root.as_posix()}",
+            f"BUILD_ROOT={root.as_posix()}",
             "compiler-info",
             *extra_args,
         ]
@@ -1409,13 +1468,12 @@ class OptimizationProfileContractTests(unittest.TestCase):
         return info
 
     def test_generic_game_implicit_defaults_remain_o0_o0(self) -> None:
-        info_default = self.run_compiler_info()
+        info_default, info_other = self.run_compiler_infos((), ("GAME_NAME=othergame",))
         self.assertEqual(info_default.get("RUNTIME_OPT"), "-O0")
         self.assertEqual(info_default.get("RECOMP_OPT"), "-O0")
         self.assertTrue(info_default.get("CFLAGS", "").startswith("-O0 "), info_default.get("CFLAGS"))
         self.assertTrue(info_default.get("RECOMP_FLAGS", "").startswith("-O0 "), info_default.get("RECOMP_FLAGS"))
 
-        info_other = self.run_compiler_info("GAME_NAME=othergame")
         self.assertEqual(info_other.get("RUNTIME_OPT"), "-O0")
         self.assertEqual(info_other.get("RECOMP_OPT"), "-O0")
         self.assertTrue(info_other.get("CFLAGS", "").startswith("-O0 "), info_other.get("CFLAGS"))
@@ -1424,12 +1482,14 @@ class OptimizationProfileContractTests(unittest.TestCase):
     def test_gcc_only_generated_code_flag_is_not_passed_to_clang(self) -> None:
         # #317: Clang refuses -ftrack-macro-expansion=0, so the generated-code flags carry it only
         # for GCC. GCC's flags are unchanged.
-        gcc = self.run_compiler_info("CC=gcc").get("RECOMP_FLAGS", "")
+        has_clang = shutil.which("clang") is not None
+        infos = self.run_compiler_infos(("CC=gcc",), *((("CC=clang",),) if has_clang else ()))
+        gcc = infos[0].get("RECOMP_FLAGS", "")
         self.assertIn("-ftrack-macro-expansion=0", gcc.split())
         self.assertIn("-fno-var-tracking", gcc.split())
-        if shutil.which("clang") is None:
+        if not has_clang:
             self.skipTest("clang is not on PATH")
-        clang = self.run_compiler_info("CC=clang").get("RECOMP_FLAGS", "")
+        clang = infos[1].get("RECOMP_FLAGS", "")
         self.assertNotIn("-ftrack-macro-expansion=0", clang.split())
         self.assertIn("-fno-var-tracking", clang.split())
 
@@ -1441,78 +1501,65 @@ class OptimizationProfileContractTests(unittest.TestCase):
         self.assertTrue(info.get("RECOMP_FLAGS", "").startswith("-O0 "), info.get("RECOMP_FLAGS"))
 
     def test_explicit_hst_overrides_still_win(self) -> None:
-        info = self.run_compiler_info("GAME_NAME=hst", "RUNTIME_OPT=-O0", "RECOMP_OPT=-O0")
+        info, info_custom = self.run_compiler_infos(
+            ("GAME_NAME=hst", "RUNTIME_OPT=-O0", "RECOMP_OPT=-O0"),
+            ("GAME_NAME=hst", "RUNTIME_OPT=-O1", "RECOMP_OPT=-O2"),
+        )
         self.assertEqual(info.get("RUNTIME_OPT"), "-O0")
         self.assertEqual(info.get("RECOMP_OPT"), "-O0")
         self.assertTrue(info.get("CFLAGS", "").startswith("-O0 "), info.get("CFLAGS"))
         self.assertTrue(info.get("RECOMP_FLAGS", "").startswith("-O0 "), info.get("RECOMP_FLAGS"))
 
-        info_custom = self.run_compiler_info("GAME_NAME=hst", "RUNTIME_OPT=-O1", "RECOMP_OPT=-O2")
         self.assertEqual(info_custom.get("RUNTIME_OPT"), "-O1")
         self.assertEqual(info_custom.get("RECOMP_OPT"), "-O2")
         self.assertTrue(info_custom.get("CFLAGS", "").startswith("-O1 "), info_custom.get("CFLAGS"))
         self.assertTrue(info_custom.get("RECOMP_FLAGS", "").startswith("-O2 "), info_custom.get("RECOMP_FLAGS"))
 
     def test_build_profile_manifests_record_effective_flags(self) -> None:
-        hst_dir = self.build_dir / "hst_default"
-        subprocess.run(
-            [
-                cast(str, self.make),
-                "--no-print-directory",
-                f"BUILD_DIR={hst_dir.as_posix()}",
-                f"BUILD_ROOT={self.build_dir.as_posix()}",
-                "GAME_NAME=hst",
-                "RUNTIME_OPT=-O2",
-                "RECOMP_OPT=-O1",
-                "compiler-info",
-            ],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
+        # Three independent compiler-info runs, each under a BUILD_ROOT of its own so the
+        # parses overlap; each leaves its manifests in its own BUILD_DIR.
+        scenarios = {
+            "hst_default": ("GAME_NAME=hst", "RUNTIME_OPT=-O2", "RECOMP_OPT=-O1"),
+            "generic_default": ("GAME_NAME=mygame",),
+            "hst_override": ("GAME_NAME=hst", "RUNTIME_OPT=-O0", "RECOMP_OPT=-O0"),
+        }
+        dirs = {name: _job_root(self.build_dir, name) / name for name in scenarios}
+        runs = _concurrently(
+            lambda name: subprocess.run(
+                [
+                    cast(str, self.make),
+                    "--no-print-directory",
+                    f"BUILD_DIR={dirs[name].as_posix()}",
+                    f"BUILD_ROOT={_job_root(self.build_dir, name).as_posix()}",
+                    *scenarios[name],
+                    "compiler-info",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=True,
+            ),
+            list(scenarios),
         )
-        runtime_manifest = json.loads((hst_dir / "runtime_profile.json").read_text(encoding="utf-8"))
-        recomp_manifest = json.loads((hst_dir / "recomp_profile.json").read_text(encoding="utf-8"))
-        runtime_entries = runtime_manifest["sections"]["runtime"]["entries"]
-        recomp_entries = recomp_manifest["sections"]["generated"]["entries"]
+        for run in runs:
+            run.result()
+
+        def manifests(name: str) -> tuple[list[str], list[str]]:
+            runtime = json.loads((dirs[name] / "runtime_profile.json").read_text(encoding="utf-8"))
+            recomp = json.loads((dirs[name] / "recomp_profile.json").read_text(encoding="utf-8"))
+            return runtime["sections"]["runtime"]["entries"], recomp["sections"]["generated"]["entries"]
+
+        runtime_entries, recomp_entries = manifests("hst_default")
         self.assertTrue(any(e.startswith("CFLAGS=-O2 ") for e in runtime_entries), runtime_entries)
         self.assertTrue(any(e.startswith("RECOMP_FLAGS=-O1 ") for e in recomp_entries), recomp_entries)
 
-        generic_dir = self.build_dir / "generic_default"
-        subprocess.run(
-            [cast(str, self.make), "--no-print-directory", f"BUILD_DIR={generic_dir.as_posix()}",
-             f"BUILD_ROOT={self.build_dir.as_posix()}", "GAME_NAME=mygame", "compiler-info"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        runtime_generic = json.loads((generic_dir / "runtime_profile.json").read_text(encoding="utf-8"))
-        recomp_generic = json.loads((generic_dir / "recomp_profile.json").read_text(encoding="utf-8"))
-        self.assertTrue(any(e.startswith("CFLAGS=-O0 ") for e in runtime_generic["sections"]["runtime"]["entries"]))
-        self.assertTrue(any(e.startswith("RECOMP_FLAGS=-O0 ") for e in recomp_generic["sections"]["generated"]["entries"]))
+        runtime_generic, recomp_generic = manifests("generic_default")
+        self.assertTrue(any(e.startswith("CFLAGS=-O0 ") for e in runtime_generic))
+        self.assertTrue(any(e.startswith("RECOMP_FLAGS=-O0 ") for e in recomp_generic))
 
-        override_dir = self.build_dir / "hst_override"
-        subprocess.run(
-            [
-                cast(str, self.make),
-                "--no-print-directory",
-                f"BUILD_DIR={override_dir.as_posix()}",
-                f"BUILD_ROOT={self.build_dir.as_posix()}",
-                "GAME_NAME=hst",
-                "RUNTIME_OPT=-O0",
-                "RECOMP_OPT=-O0",
-                "compiler-info",
-            ],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        runtime_override = json.loads((override_dir / "runtime_profile.json").read_text(encoding="utf-8"))
-        recomp_override = json.loads((override_dir / "recomp_profile.json").read_text(encoding="utf-8"))
-        self.assertTrue(any(e.startswith("CFLAGS=-O0 ") for e in runtime_override["sections"]["runtime"]["entries"]))
-        self.assertTrue(any(e.startswith("RECOMP_FLAGS=-O0 ") for e in recomp_override["sections"]["generated"]["entries"]))
+        runtime_override, recomp_override = manifests("hst_override")
+        self.assertTrue(any(e.startswith("CFLAGS=-O0 ") for e in runtime_override))
+        self.assertTrue(any(e.startswith("RECOMP_FLAGS=-O0 ") for e in recomp_override))
 
     def test_private_hst_profile_values_are_supplied_by_the_manifest_adapter(self) -> None:
         adapter = (ROOT / "tools" / "title_manager_plan.ps1").read_text(encoding="utf-8")
@@ -1558,12 +1605,13 @@ class CodegenProfileTransportTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="nakagawa-codegen-profile-")
         self.addCleanup(self.temp.cleanup)
 
-    def _profile_hash(self, modules: list[str], **extra: str) -> str:
+    def _profile_hash(self, modules: list[str], root: Path | None = None, **extra: str) -> str:
         assignments = [f"{key}={value}" for key, value in extra.items()]
+        root = root or Path(self.temp.name)
         completed = subprocess.run(
             [cast(str, self.make), "--no-print-directory", "GAME_NAME=probe",
-             f"BUILD_ROOT={Path(self.temp.name).as_posix()}",
-            f"BUILD_DIR={Path(self.temp.name).as_posix()}",
+             f"BUILD_ROOT={root.as_posix()}",
+            f"BUILD_DIR={root.as_posix()}",
              f"GAME_EXTRA_ELFS={' '.join(modules)}", *assignments,
              "--eval", "nkprobe: ; @echo CODEGEN_PROFILE_HASH=$(CODEGEN_PROFILE_HASH)",
              "nkprobe"],
@@ -1581,14 +1629,20 @@ class CodegenProfileTransportTests(unittest.TestCase):
             for index in range(200)
         ]
         self.assertGreater(len(" ".join(modules)), 16384)
-        self.assertRegex(self._profile_hash(modules), r"^[0-9a-f]{20}$")
-        self.assertNotEqual(self._profile_hash(modules), self._profile_hash(modules[:-1]))
+        # The two Make parses overlap, each under a root of its own.
+        full, shorter = _concurrently(
+            lambda case: self._profile_hash(case[1], _job_root(Path(self.temp.name), case[0])),
+            [("all", modules), ("short", modules[:-1])],
+        )
+        self.assertRegex(full.result(), r"^[0-9a-f]{20}$")
+        self.assertNotEqual(full.result(), shorter.result())
 
-    def _probe(self, *assignments: str) -> tuple[str, str]:
+    def _probe(self, *assignments: str, root: Path | None = None) -> tuple[str, str]:
+        root = root or Path(self.temp.name)
         completed = subprocess.run(
             [cast(str, self.make), "--no-print-directory", "GAME_NAME=probe",
-             f"BUILD_ROOT={Path(self.temp.name).as_posix()}",
-             f"BUILD_DIR={Path(self.temp.name).as_posix()}", *assignments,
+             f"BUILD_ROOT={root.as_posix()}",
+             f"BUILD_DIR={root.as_posix()}", *assignments,
              "--eval", "nkprobe: ; @echo ARG=[$(strip $(ENHANCEMENT_PACKAGE_ARG))] HASH=$(CODEGEN_PROFILE_HASH)",
              "nkprobe"],
             cwd=ROOT, capture_output=True, text=True, check=False,
@@ -1602,14 +1656,24 @@ class CodegenProfileTransportTests(unittest.TestCase):
         # Contract section 9.9: without ENHANCEMENT_CODE_HOOK_PACKAGE the codegen arguments are as
         # before; with it codegen gets --code-hook-package and the profile changes; alone it is still
         # passed, so codegen refuses it instead of building without it.
-        alone_arg, alone_hash = self._probe("ENHANCEMENT_PACKAGE=a.json")
+        # The four Make parses overlap, each under a root of its own.
+        probes = _concurrently(
+            lambda case: self._probe(*case[1], root=_job_root(Path(self.temp.name), case[0])),
+            list(enumerate((
+                ("ENHANCEMENT_PACKAGE=a.json",),
+                ("ENHANCEMENT_PACKAGE=a.json", "ENHANCEMENT_CODE_HOOK_PACKAGE=h.json"),
+                ("ENHANCEMENT_PACKAGE=a.json", "ENHANCEMENT_CODE_HOOK_PACKAGE="),
+                ("ENHANCEMENT_CODE_HOOK_PACKAGE=h.json",),
+            ))),
+        )
+        alone, both, emptied, hook_only = (probe.result() for probe in probes)
+        alone_arg, alone_hash = alone
         self.assertEqual(alone_arg, "[--enhancement-package=a.json]")
-        both_arg, both_hash = self._probe("ENHANCEMENT_PACKAGE=a.json", "ENHANCEMENT_CODE_HOOK_PACKAGE=h.json")
+        both_arg, both_hash = both
         self.assertEqual(both_arg, "[--enhancement-package=a.json --code-hook-package=h.json]")
         self.assertNotEqual(alone_hash, both_hash)
-        self.assertEqual(self._probe("ENHANCEMENT_PACKAGE=a.json", "ENHANCEMENT_CODE_HOOK_PACKAGE=")[1],
-                         alone_hash)
-        self.assertEqual(self._probe("ENHANCEMENT_CODE_HOOK_PACKAGE=h.json")[0], "[--code-hook-package=h.json]")
+        self.assertEqual(emptied[1], alone_hash)
+        self.assertEqual(hook_only[0], "[--code-hook-package=h.json]")
 
     def test_editing_a_package_in_place_regenerates_the_translation(self) -> None:
         # The codegen profile records only the packages' paths, so the codegen rule itself must
@@ -1816,16 +1880,18 @@ class GuestInputTransportTests(unittest.TestCase):
         struct.pack_into("<2I", blob, payload_off, 0x03E00008, 0x00000000)
         path.write_bytes(blob)
 
-    def _build_dir(self, name: str) -> Path:
-        return self.build_root / name
+    def _build_dir(self, name: str, build_root: Path | None = None) -> Path:
+        return (build_root or self.build_root) / name
 
     def _make(self, game_name: str, elf: str, *, makefile: Path | None = None,
-              target: str | None = None, extra: tuple[str, ...] = ()) -> subprocess.CompletedProcess:
-        tgt = target or f"{self._build_dir(game_name).as_posix()}/{game_name}_image.bin"
+              target: str | None = None, extra: tuple[str, ...] = (),
+              build_root: Path | None = None) -> subprocess.CompletedProcess:
+        root = build_root or self.build_root
+        tgt = target or f"{self._build_dir(game_name, root).as_posix()}/{game_name}_image.bin"
         cmd = [cast(str, self.make), "--no-print-directory"]
         if makefile is not None:
             cmd += ["-f", str(makefile)]
-        cmd += [tgt, f"BUILD_ROOT={self.build_root.as_posix()}", f"GAME_NAME={game_name}",
+        cmd += [tgt, f"BUILD_ROOT={root.as_posix()}", f"GAME_NAME={game_name}",
                 f"GAME_ELF={elf}", "GAME_BASE=0x08804000", "GAME_ENTRY=0x08804000", *extra]
         return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", check=False)
@@ -1904,9 +1970,9 @@ class GuestInputTransportTests(unittest.TestCase):
 
     # -- D: freshness is preserved, not dropped --------------------------
 
-    def _first_build(self, game: str, elf: Path) -> Path:
+    def _first_build(self, game: str, elf: Path, build_root: Path | None = None) -> Path:
         self._write_minimal_elf(elf)
-        proc = self._make(game, elf.as_posix())
+        proc = self._make(game, elf.as_posix(), build_root=build_root)
         self.assertEqual(proc.returncode, 0, self._blob(proc))
         return elf
 
@@ -1925,28 +1991,34 @@ class GuestInputTransportTests(unittest.TestCase):
             "dash": "-leading-dash.elf",
             "pct": "pct%PATH%.elf",
         }
-        for key, base in shapes.items():
-            with self.subTest(shape=key):
-                game = f"test_gi_d_{key}"
-                build = self._build_dir(game)
-                elf = self._first_build(game, build / base)
-                image = build / f"{game}_image.bin"
-                self.assertTrue(image.is_file())
+        def check_shape(key: str, base: str) -> None:
+            # Each shape builds twice under a BUILD_ROOT of its own, so the shapes overlap.
+            game = f"test_gi_d_{key}"
+            root = _job_root(self.root, key)
+            build = self._build_dir(game, root)
+            elf = self._first_build(game, build / base, root)
+            image = build / f"{game}_image.bin"
+            self.assertTrue(image.is_file())
 
-                before = image.stat().st_mtime_ns
-                # The input stamp is rewritten by Make, so also make the
-                # existing output unambiguously old.  This avoids relying on
-                # Windows' one-second timestamp resolution for the stamp and
-                # keeps the assertion about the dependency edge deterministic.
-                _set_mtime_before(image)
-                _set_mtime_after(elf, image)
-                proc = self._make(game, elf.as_posix())
-                self.assertEqual(proc.returncode, 0, self._blob(proc))
-                self.assertGreater(
-                    image.stat().st_mtime_ns, before,
-                    f"changing the ELF did not rebuild for shape {key!r}: the dependency "
-                    f"edge was dropped and a stale image would be reused",
-                )
+            before = image.stat().st_mtime_ns
+            # The input stamp is rewritten by Make, so also make the
+            # existing output unambiguously old.  This avoids relying on
+            # Windows' one-second timestamp resolution for the stamp and
+            # keeps the assertion about the dependency edge deterministic.
+            _set_mtime_before(image)
+            _set_mtime_after(elf, image)
+            proc = self._make(game, elf.as_posix(), build_root=root)
+            self.assertEqual(proc.returncode, 0, self._blob(proc))
+            self.assertGreater(
+                image.stat().st_mtime_ns, before,
+                f"changing the ELF did not rebuild for shape {key!r}: the dependency "
+                f"edge was dropped and a stale image would be reused",
+            )
+
+        checks = _concurrently(lambda shape: check_shape(*shape), list(shapes.items()))
+        for key, check in zip(shapes, checks, strict=True):
+            with self.subTest(shape=key):
+                check.result()
 
     def test_M2_mutation_dropping_the_stamp_edge_loses_freshness(self) -> None:
         """M2: removing the stamp prerequisite must make the freshness test fail."""
@@ -2006,14 +2078,21 @@ class GuestInputTransportTests(unittest.TestCase):
         build = self._build_dir(game)
         self._first_build(game, build / "plain.elf")
 
-        for label, value, expect in (
+        cases = (
             ("empty", "", "empty or whitespace-only"),
             ("whitespace", "   ", "empty or whitespace-only"),
             ("missing", (self.build_root / "does" / "not" / "exist.elf").as_posix(), "does not exist"),
             ("directory", build.as_posix(), "is a directory"),
-        ):
+        )
+        # Each refusal runs under a BUILD_ROOT of its own, so the four overlap without sharing
+        # anything a parse writes.
+        runs = _concurrently(
+            lambda case: self._make(game, case[1], build_root=_job_root(self.root, case[0])),
+            cases,
+        )
+        for (label, _value, expect), run in zip(cases, runs, strict=True):
             with self.subTest(value=label):
-                proc = self._make(game, value)
+                proc = run.result()
                 self.assertNotEqual(proc.returncode, 0,
                                     f"{label} GAME_ELF was accepted:\n" + self._blob(proc))
                 self.assertIn(expect, self._blob(proc))
@@ -2291,24 +2370,31 @@ class ShellPortabilityAndRecipeTruthTests(unittest.TestCase):
         if not self.make:
             self.skipTest("GNU Make is required")
 
-        for target, override_var in (
+        targets = (
             ("sched-selftest", "SCHED_SELFTEST_MANIFEST_generic"),
             ("dispatch-isolation-selftest", "DISPATCH_ISO_MANIFEST_generic"),
-        ):
+        )
+        # Each target runs under a scratch BUILD_ROOT of its own, so the two matrices overlap.
+        roots = {target: _scratch_build_root(self, "matrix") for target, _ in targets}
+        runs = _concurrently(
+            lambda case: subprocess.run(
+                [
+                    cast(str, self.make),
+                    "--no-print-directory",
+                    case[0],
+                    f"{case[1]}=nonexistent_manifest_fixture.json",
+                    f"BUILD_ROOT={roots[case[0]].as_posix()}",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            ),
+            targets,
+        )
+        for (target, _override_var), run in zip(targets, runs, strict=True):
             with self.subTest(target=target):
-                proc = subprocess.run(
-                    [
-                        self.make,
-                        "--no-print-directory",
-                        target,
-                        f"{override_var}=nonexistent_manifest_fixture.json",
-                        f"BUILD_ROOT={_scratch_build_root(self, 'matrix').as_posix()}",
-                    ],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                proc = run.result()
                 blob = proc.stdout + proc.stderr
                 self.assertNotEqual(
                     proc.returncode, 0,
@@ -2637,11 +2723,16 @@ class RecipeShellGuardTests(unittest.TestCase):
                 self.skipTest(f"{folder} holds sh.exe; no PATH without sh is available")
         env = {key: value for key, value in os.environ.items() if key.upper() != "PATH"}
         env["PATH"] = os.pathsep.join(str(folder) for folder in path)
-        capture = self._scratch_run("nk-ui-player-screens-capture", "SDL3_TTF_AVAILABLE=yes",
-                                    "NK_UI_CAPTURE_DIR=", env=env)
+        # The two runs use a scratch root each, so their Make parses overlap.
+        capture_run, guarded_run = _concurrently(
+            lambda arguments: self._scratch_run(*arguments, env=env),
+            [("nk-ui-player-screens-capture", "SDL3_TTF_AVAILABLE=yes", "NK_UI_CAPTURE_DIR="),
+             ("selftest-repeat", "SELFTEST_REPEAT=nk-recipe-shell-marker")],
+        )
+        capture = capture_run.result()
         self.assertNotEqual(capture.returncode, 0, capture.stdout + capture.stderr)
         self.assertIn("set NK_UI_CAPTURE_DIR", capture.stderr)
-        guarded = self._scratch_run("selftest-repeat", "SELFTEST_REPEAT=nk-recipe-shell-marker", env=env)
+        guarded = guarded_run.result()
         self.assertNotEqual(guarded.returncode, 0, guarded.stdout + guarded.stderr)
         self.assertIn("selftest-repeat needs a POSIX sh", guarded.stderr)
         self.assertNotIn("nk-recipe-shell-marker", guarded.stdout + guarded.stderr)
@@ -2725,12 +2816,19 @@ class BuildArtifactLifecycleTests(unittest.TestCase):
         run logs whenever this suite ran. A dry run prints each recipe without
         executing it, so this pins the property for every goal at once.
         """
-        build_dir = self.build_root / "title"
         prefix = self.scratch.as_posix()
         default_root = re.compile(r"(?<![\w./-])(?:build|logs)(?![\w.-])")
-        for goal in sorted(DESTRUCTIVE_MAKE_GOALS):
+        goals = sorted(DESTRUCTIVE_MAKE_GOALS)
+        runs = _concurrently(
+            lambda goal: _run_scratch_make(
+                cast(str, self.make), "-n", goal,
+                f"BUILD_DIR={(_job_root(self.scratch, goal) / 'title').as_posix()}",
+                build_root=_job_root(self.scratch, goal), log_dir=self.log_dir),
+            goals,
+        )
+        for goal, run in zip(goals, runs, strict=True):
             with self.subTest(goal=goal):
-                proc = self._lifecycle_make("-n", goal, f"BUILD_DIR={build_dir.as_posix()}")
+                proc = run.result()
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 deletions = [line for line in proc.stdout.splitlines()
                              if "unlink" in line or "rmtree" in line]
@@ -2759,20 +2857,23 @@ class BuildArtifactLifecycleTests(unittest.TestCase):
             "src": "inside the checkout but outside its build tree",
             "place_game_here": "inside the checkout but outside its build tree",
         }
-        for value, reason in refused.items():
+        accepted = ("build/nested", self.build_root.as_posix())
+        # `help` writes nothing, so the probes share no state and overlap.
+        runs = _concurrently(
+            lambda value: subprocess.run(
+                [cast(str, self.make), "--no-print-directory", "help", f"BUILD_ROOT={value}"],
+                cwd=ROOT, capture_output=True, text=True, check=False,
+            ),
+            [*refused, *accepted],
+        )
+        for (value, reason), run in zip(refused.items(), runs, strict=False):
             with self.subTest(build_root=value):
-                proc = subprocess.run(
-                    [self.make, "--no-print-directory", "help", f"BUILD_ROOT={value}"],
-                    cwd=ROOT, capture_output=True, text=True, check=False,
-                )
+                proc = run.result()
                 self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 self.assertIn(reason, proc.stderr)
-        for value in ("build/nested", self.build_root.as_posix()):
+        for value, run in zip(accepted, runs[len(refused):], strict=True):
             with self.subTest(build_root=value):
-                proc = subprocess.run(
-                    [self.make, "--no-print-directory", "help", f"BUILD_ROOT={value}"],
-                    cwd=ROOT, capture_output=True, text=True, check=False,
-                )
+                proc = run.result()
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_build_dir_that_reaches_the_checkout_is_refused(self) -> None:
@@ -2793,9 +2894,15 @@ class BuildArtifactLifecycleTests(unittest.TestCase):
             "src": "inside the checkout but outside its build tree",
             "place_game_here": "inside the checkout but outside its build tree",
         }
-        for value, reason in refused.items():
+        runs = _concurrently(
+            lambda case: _run_scratch_make(
+                cast(str, self.make), "-n", "clean", f"BUILD_DIR={case[1]}",
+                build_root=_job_root(self.scratch, case[0]), log_dir=self.log_dir),
+            list(enumerate(refused)),
+        )
+        for (value, reason), run in zip(refused.items(), runs, strict=True):
             with self.subTest(build_dir=value):
-                proc = self._lifecycle_make("-n", "clean", f"BUILD_DIR={value}")
+                proc = run.result()
                 self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 self.assertIn(f"BUILD_DIR '{value}' is {reason}", proc.stderr)
                 self.assertNotIn("rmtree", proc.stdout)
@@ -2811,13 +2918,19 @@ class BuildArtifactLifecycleTests(unittest.TestCase):
         """
         if not self.make:
             self.skipTest("GNU Make is required")
-        for value in ("..", ".", "...", "../src", "..\\src", "a/b", "C:x"):
+        refused = ("..", ".", "...", "../src", "..\\src", "a/b", "C:x")
+        # NK_INFO_ONLY keeps the parse from writing, so the cases share no state and overlap.
+        runs = _concurrently(
+            lambda value: self._lifecycle_make("-n", "clean", "NK_INFO_ONLY=1", f"GAME_NAME={value}"),
+            [*refused, "my.game-1"],
+        )
+        for value, run in zip(refused, runs, strict=False):
             with self.subTest(game_name=value):
-                proc = self._lifecycle_make("-n", "clean", "NK_INFO_ONLY=1", f"GAME_NAME={value}")
+                proc = run.result()
                 self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 self.assertIn(f"GAME_NAME '{value}' is not a title name", proc.stderr)
                 self.assertNotIn("rmtree", proc.stdout)
-        proc = self._lifecycle_make("-n", "clean", "NK_INFO_ONLY=1", "GAME_NAME=my.game-1")
+        proc = runs[-1].result()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn(f"{self.build_root.as_posix()}/my.game-1", proc.stdout)
 
@@ -2850,13 +2963,15 @@ class BuildArtifactLifecycleTests(unittest.TestCase):
         ]
         if os.name == "nt":
             spellings.append((ROOT / "build").as_posix().upper())
-        for goal in ("clean", "clean-all"):
-            for value in spellings:
-                with self.subTest(goal=goal, build_dir=value):
-                    proc = self._build_dir_refusal(goal, value)
-                    self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-                    self.assertIn(f"BUILD_DIR '{value}' is the whole build root", proc.stderr)
-                    self.assertNotIn("rmtree", proc.stdout)
+        # NK_INFO_ONLY keeps each dry run from writing, so the cases share no state and overlap.
+        cases = [(goal, value) for goal in ("clean", "clean-all") for value in spellings]
+        runs = _concurrently(lambda case: self._build_dir_refusal(*case), cases)
+        for (goal, value), run in zip(cases, runs, strict=True):
+            with self.subTest(goal=goal, build_dir=value):
+                proc = run.result()
+                self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertIn(f"BUILD_DIR '{value}' is the whole build root", proc.stderr)
+                self.assertNotIn("rmtree", proc.stdout)
 
     def test_clean_refuses_every_spelling_of_the_build_root_it_names(self) -> None:
         """A BUILD_DIR equal to an overridden BUILD_ROOT is the whole root, so it is refused.
@@ -2870,13 +2985,15 @@ class BuildArtifactLifecycleTests(unittest.TestCase):
         spellings = [root, root + "/", root + "/.", root + "/sub/..", str(self.build_root)]
         if os.name == "nt":
             spellings.append(root.upper())
-        for goal in ("clean", "clean-all"):
-            for value in spellings:
-                with self.subTest(goal=goal, build_dir=value):
-                    proc = self._build_dir_refusal(goal, value)
-                    self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-                    self.assertIn(f"BUILD_DIR '{value}' is the whole build root", proc.stderr)
-                    self.assertNotIn("rmtree", proc.stdout)
+        # NK_INFO_ONLY keeps each dry run from writing, so the cases share no state and overlap.
+        cases = [(goal, value) for goal in ("clean", "clean-all") for value in spellings]
+        runs = _concurrently(lambda case: self._build_dir_refusal(*case), cases)
+        for (goal, value), run in zip(cases, runs, strict=True):
+            with self.subTest(goal=goal, build_dir=value):
+                proc = run.result()
+                self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertIn(f"BUILD_DIR '{value}' is the whole build root", proc.stderr)
+                self.assertNotIn("rmtree", proc.stdout)
 
     def test_clean_still_cleans_a_per_title_build_dir_beneath_the_root(self) -> None:
         """A per-title BUILD_DIR beneath BUILD_ROOT is not the root and still cleans."""
@@ -4996,18 +5113,26 @@ class LinkerSpellingTests(unittest.TestCase):
             # OS variable, so the Makefile derives a build for the host itself on a POSIX host as
             # it does there; a Mac building for Android links with the NDK's lld, which takes the
             # GNU spelling.
-            for host, target, expected in (("Darwin", "OS=", "-Wl,-dead_strip"),
-                                           ("Linux", "OS=", "-Wl,--gc-sections"),
-                                           ("Darwin", "NK_TARGET=android", "-Wl,--gc-sections")):
+            cases = (("Darwin", "OS=", "-Wl,-dead_strip"),
+                     ("Linux", "OS=", "-Wl,--gc-sections"),
+                     ("Darwin", "NK_TARGET=android", "-Wl,--gc-sections"))
+
+            def probe(index: int, host: str, target: str) -> subprocess.CompletedProcess:
+                root = _job_root(Path(temp), index)
+                return subprocess.run(
+                    [make, "--no-print-directory", "GAME_NAME=probe",
+                     f"BUILD_ROOT={root.as_posix()}",
+                     f"BUILD_DIR={root.as_posix()}", f"HOST_KIND={host}", target,
+                     "--eval", "nkprobe: ; @echo LD_GC_SECTIONS=$(LD_GC_SECTIONS)",
+                     "nkprobe"],
+                    cwd=ROOT, capture_output=True, text=True, check=False,
+                )
+
+            runs = _concurrently(
+                lambda case: probe(case[0], case[1][0], case[1][1]), list(enumerate(cases)))
+            for (host, target, expected), run in zip(cases, runs, strict=True):
                 with self.subTest(host=host, target=target):
-                    completed = subprocess.run(
-                        [make, "--no-print-directory", "GAME_NAME=probe",
-                         f"BUILD_ROOT={Path(temp).as_posix()}",
-                         f"BUILD_DIR={Path(temp).as_posix()}", f"HOST_KIND={host}", target,
-                         "--eval", "nkprobe: ; @echo LD_GC_SECTIONS=$(LD_GC_SECTIONS)",
-                         "nkprobe"],
-                        cwd=ROOT, capture_output=True, text=True, check=False,
-                    )
+                    completed = run.result()
                     self.assertEqual(completed.returncode, 0,
                                      completed.stdout + completed.stderr)
                     self.assertIn(f"LD_GC_SECTIONS={expected}", completed.stdout.splitlines())

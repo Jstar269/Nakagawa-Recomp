@@ -118,6 +118,11 @@ PlayerUiAction player_ui_screen_about(NkUi *ui, const PlayerUiAboutModel *model)
                     if (nk_ui_button(ui, PLAYER_UI_ID_ABOUT_NOTICES, "Third-party notices", 0u)) {
                         result = action(PLAYER_UI_ACTION_OPEN_NOTICES, 0u, PLAYER_UI_PRIMARY_NONE);
                     }
+                    /* The hidden credits, once the classic cheat code has been found. */
+                    if (model->love_all &&
+                        nk_ui_button(ui, PLAYER_UI_ID_ABOUT_LOVE_ALL, "Love All", 0u)) {
+                        result = action(PLAYER_UI_ACTION_OPEN_LOVE_ALL, 0u, PLAYER_UI_PRIMARY_NONE);
+                    }
                     nk_ui_end_container(ui);
                 }
                 if (nk_ui_card_begin(ui, ABOUT_ID_CREDITS, sizing_grow(), sizing_grow(),

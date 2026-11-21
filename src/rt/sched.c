@@ -1349,30 +1349,67 @@ void sched_dump_threads(void) {
     }
 }
 
-/* Snapshot scheduler states for the player-facing no-frame event. `spin` is
- * the number of scheduler spin-watchdog observations since the last snapshot;
- * it is evidence of busy looping, not a count of PSP threads. */
-void sched_watchdog_summary(uint32_t *ready, uint32_t *delay,
-                            uint32_t *wait, uint32_t *spin) {
-    uint32_t ready_count = 0;
-    uint32_t delay_count = 0;
-    uint32_t wait_count = 0;
-    if (ready) *ready = 0;
-    if (delay) *delay = 0;
-    if (wait) *wait = 0;
-    if (spin) *spin = s_watchdog_spin_observations;
+/* Snapshot scheduler states for the player-facing stall events. `spin` is the
+ * number of scheduler spin-watchdog observations since the last snapshot; it is
+ * evidence of busy looping, not a count of PSP threads. A thread that never
+ * blocks (a decode loop at a better priority than the thread that presents, #2875)
+ * is RUNNING when the event is raised, so it is counted and named on its own:
+ * without it the event shows only the threads it starves. */
+void sched_watchdog_summary(SrSchedWatchdogSummary *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->spin = s_watchdog_spin_observations;
+    const TCB *busy = NULL;
     for (int i = 0; i < s_ntcb; i++) {
-        switch (s_tcb[i].state) {
-            case TH_READY:      ready_count++; break;
-            case TH_WAIT_DELAY: delay_count++; break;
-            case TH_WAIT_OBJ:   wait_count++; break;
+        const TCB *t = &s_tcb[i];
+        switch (t->state) {
+            case TH_READY:      out->ready++; break;
+            case TH_WAIT_DELAY: out->delay++; break;
+            case TH_WAIT_OBJ:   out->wait++; break;
+            case TH_RUNNING:
+                out->running++;
+                /* Only s_cur is ever on the CPU; prefer it if another entry claims RUNNING. */
+                if (!busy || i == s_cur) busy = t;
+                break;
             default: break;
         }
     }
-    if (ready) *ready = ready_count;
-    if (delay) *delay = delay_count;
-    if (wait) *wait = wait_count;
+    if (busy) {
+        out->busy_valid = 1;
+        out->busy_uid = busy->uid;
+        out->busy_priority = busy->priority;
+        if (busy->last_import_valid) {
+            char nl[24];
+            const char *name = sched_nid_label(busy->last_import_nid, nl, sizeof nl);
+            size_t n = 0;
+            /* One token: the event is space-separated key=value pairs. */
+            for (; name[n] && n + 1u < sizeof out->busy_import; n++) {
+                const char c = name[n];
+                out->busy_import[n] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                                       (c >= '0' && c <= '9') || c == '_') ? c : '_';
+            }
+            out->busy_import[n] = '\0';
+            out->busy_import_valid = 1;
+            out->busy_import_ret = busy->last_import_ret;
+            out->busy_import_repeats = busy->last_import_repeats;
+        }
+    }
     s_watchdog_spin_observations = 0;
+}
+
+int sched_watchdog_summary_format(const SrSchedWatchdogSummary *s, char *out, size_t cap) {
+    if (!s || !out || cap == 0u) return -1;
+    int n = snprintf(out, cap, "ready=%u delay=%u wait=%u spin=%u running=%u",
+                     s->ready, s->delay, s->wait, s->spin, s->running);
+    if (n < 0 || !s->busy_valid || (size_t)n >= cap) return n;
+    int m = snprintf(out + n, cap - (size_t)n,
+                     " busy_uid=0x%x busy_pri=%d busy_import=%s busy_import_ret=0x%08x"
+                     " busy_repeats=%u",
+                     s->busy_uid, s->busy_priority,
+                     s->busy_import_valid ? s->busy_import : "-",
+                     s->busy_import_valid ? s->busy_import_ret : 0u,
+                     s->busy_import_valid ? s->busy_import_repeats : 0u);
+    return m < 0 ? m : n + m;
 }
 
 /* Run the game's VBLANK interrupt handler (a guest function) on a dedicated interrupt context.

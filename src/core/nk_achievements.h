@@ -102,7 +102,8 @@ typedef enum NkAchEventKind {
     NK_ACH_EVENT_RECONNECTED,      /* every waiting unlock was sent */
     NK_ACH_EVENT_DISABLED,         /* id: an achievement rc_client turned off because guest memory
                                     * it reads could not be read or its trigger could not be
-                                    * parsed; message: rc_client's note */
+                                    * parsed; message: why, in the bridge's words (never
+                                    * rc_client's note, which names an address of the set) */
     NK_ACH_EVENT_QUEUE_FULL,       /* a real unlock could not fit the bounded offline queue */
     NK_ACH_EVENT_QUEUE_CHANGED,    /* the persisted pending queue gained or lost a record */
     NK_ACH_EVENT_UNLOCK_REFUSED,   /* id: a saved unlock the server answered with an error of its
@@ -231,6 +232,13 @@ bool nk_ach_copy_user_token(const NkAch *ach, char *out, size_t out_size);
 /* The signed-in account's name as the server gave it, cleaned as its other text is (control,
  * bidirectional and invisible characters removed); false when none, or when out is too small. */
 bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size);
+/* An account name as the player shows it, whether the server gave it or the credential store
+ * kept it: cleaned as server text is (control, bidirectional and invisible characters removed,
+ * separators made spaces) and at most NK_ACH_DISPLAY_NAME_MAX bytes with its terminator, or
+ * out_size when that is smaller. A name too long for that is cut at a whole character and ends
+ * with an ellipsis (U+2026). NULL gives "". */
+#define NK_ACH_DISPLAY_NAME_MAX 64u
+void nk_ach_display_name(const char *name, char *out, size_t out_size);
 /* Ends the session and keeps the pending unlocks: the stored credential, and so the account,
  * stays (the Achievements switch turned off). The bridge sends those unlocks itself after the
  * account's next sign-in (nk_ach_replay_pending_unlocks), as it does once the switch is off
@@ -275,6 +283,11 @@ uint32_t nk_ach_events_dropped(const NkAch *ach);
  * connection, 5xx, 408, 429) it waits 30 seconds; an unlock the server refuses by its own error
  * leaves the queue as an UNLOCK_REFUSED event, so it cannot hold the others back; a refused
  * account (401, 403) keeps every record and stops the replay until the next sign-in.
+ *
+ * One award request per unlock in a session. rc_client may earn a saved unlock again in a game it
+ * loaded before the replay's answer came: while rc_client's own request for it is on its way the
+ * replay passes that record over, and rc_client's request made while the replay's is on its way,
+ * or after the server awarded it, is not sent: rc_client gets the server's answer to the replay.
  *
  * The queue belongs to one account, the first to put a record in it, and only that account's
  * session sends it. When another account signs in, or a record is added or restored while

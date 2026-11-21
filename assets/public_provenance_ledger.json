@@ -2744,6 +2744,28 @@
       }
     },
     {
+      "path": "src/core/nk_memstick_layout.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "memstick_layout_2744_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/core/nk_memstick_layout.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "memstick_layout_2744_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "src/core/nk_nickname.h",
       "classification": "project_authored_attested",
       "evidence": {
@@ -3521,6 +3543,61 @@
       }
     },
     {
+      "path": "src/player/ui/launcher_secret.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/launcher_secret.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/launcher_themes.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/launcher_themes.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/love_all_credits.c",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "love_all_credits_table_20261121",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
       "path": "src/player/ui/player_ui_art.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -3724,6 +3801,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "player_ui_c5_20261023",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/scr_love_all.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
         "evidence_tier": "S",
         "authorship": "project-authored-independent record",
         "upstream_attribution": null
@@ -12018,6 +12106,17 @@
       }
     },
     {
+      "path": "tests/fixtures/psp_oracle/probe_hle_harness.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "probe_hle_harness_header_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/fixtures/psp_oracle/probe_hle_issues.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -13449,6 +13548,17 @@
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "native-player-047",
         "evidence_tier": "N",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/test_launcher_secret.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
+        "evidence_tier": "S",
         "authorship": "project-authored-independent record",
         "upstream_attribution": null
       }
@@ -17739,6 +17849,17 @@
       }
     },
     {
+      "path": "tools/gen_credits_table.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/gen_key_scrub_spec.py",
       "classification": "project_authored_attested",
       "evidence": {
@@ -20216,6 +20337,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "ge-transition-trace-tools-20260918",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_gen_credits_table.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
         "evidence_tier": "S",
         "authorship": "project-authored-independent record",
         "upstream_attribution": null

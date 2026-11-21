@@ -71,8 +71,12 @@
  *    is replaced atomically; whether firmware persists only the flushed category, or commits on
  *    close without a flush, is unmeasured. The file is SR_SYSTEM_REGISTRY when set, else
  *    <per-user data dir>/registry/system.json; nothing is written anywhere resembling a console. A
- *    missing file means no changes. An unreadable or invalid file is reported once and ignored as a
- *    whole (the defaults are served), and the next flush moves it aside to <file>.corrupt.
+ *    missing file means no changes. An invalid file (not JSON, not the schema, a record that does
+ *    not apply, or larger than 1 MiB) is reported once and ignored as a whole (the defaults are
+ *    served), and the next flush moves it aside to <file>.corrupt; the host's time zone seeding
+ *    (sreg_seed_host_time_zone) is such a flush, made at load. A file that cannot be read (it
+ *    cannot be opened or read, or there is no memory to read it) is reported, the defaults are
+ *    served for the run, and it is left in place: no flush moves it or writes over it.
  *  - /DATA/FONT is generated, not measured as a tree: the guest's own font library asks for it (it
  *    opens the category, reads path_name and num_fonts, then every INFO<n> category in index order;
  *    it was seen to stop at the first INFO<n> it could not open and to leave every later font with an

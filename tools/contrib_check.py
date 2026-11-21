@@ -158,6 +158,11 @@ STRICT_C_UNITS: dict[str, StrictUnit] = {
         recipes=("$(PLAYER_EXE)",),
         includes=("third_party/rcheevos/include", "third_party/rcheevos/src"),
     ),
+    # The bridge's selftest reads rcheevos' version from rc_version.h, which is in its src.
+    "tests/native/test_nk_achievements.c": StrictUnit(
+        recipes=("achievements-selftest",),
+        includes=("third_party/rcheevos/include", "third_party/rcheevos/src"),
+    ),
     "tests/native/atrac3p_bridge_selftest.c": StrictUnit(
         recipes=("atrac3p-bridge-selftest",),
         includes=("tests/native",),
@@ -251,6 +256,79 @@ STRICT_C_UNITS: dict[str, StrictUnit] = {
         defines=("SR_GE_VRAM_DECODER_CLI",),
     ),
 }
+
+
+@dataclass(frozen=True)
+class VendoredBuild:
+    """How the build compiles the upstream files of one vendored source set.
+
+    The build holds imported upstream code to upstream's warning policy, not
+    the project's: `-w` for the H.264 subset, no warning flags for libchdr, and
+    the runtime's `-Wall -Wextra` without `-Werror` for the ATRAC3/ATRAC3+
+    subset.  The common strict line (`-std=c11 ... -Werror`) failed every
+    change to such a file on upstream warnings the build never treats as
+    errors.  *recipes* name the Makefile pattern rules that compile the set;
+    *flags* are the standard, warning, define and include flags those rules
+    pass, minus optimisation and dependency flags.  ``tools/test_contrib_check.py``
+    fails if they drift from the rules.
+    """
+
+    recipes: tuple[str, ...]
+    flags: tuple[str, ...]
+
+
+#: Vendored source sets, keyed by the folder that holds their `PROVENANCE.md`.
+#: Only a `.c` file that manifest lists as imported (byte-identical, or a LOCAL
+#: DELTA) takes these flags; a project-authored file in the same folder, such
+#: as `atrac3p_api.c` or `nk_h264_api.c`, keeps the strict line.
+VENDORED_BUILDS: dict[str, VendoredBuild] = {
+    "src/rt/atrac3p/": VendoredBuild(
+        recipes=("$(BUILD_DIR)/atrac3p_%.o",),
+        flags=("-Wall", "-Wextra", "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
+               "-Isrc/rt", "-Isrc/core", "-Isrc/rt/atrac3p",
+               "-Isrc/rt/atrac3p/libavcodec", "-Isrc/rt/atrac3p/libavutil"),
+    ),
+    "src/rt/h264_ffmpeg_sub/": VendoredBuild(
+        recipes=("$(BUILD_DIR)/h264sub_%.o",),
+        flags=("-Isrc/rt/h264_ffmpeg_sub", "-Isrc/rt", "-Isrc/core", "-Wall", "-Wextra", "-w", "-std=c11",
+               "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS", "-DHAVE_AV_CONFIG_H",
+               "-D_ISOC99_SOURCE", "-D_FILE_OFFSET_BITS=64", "-D_LARGEFILE_SOURCE",
+               "-D_POSIX_C_SOURCE=200112", "-D_XOPEN_SOURCE=600",
+               "-include", "src/rt/h264_ffmpeg_sub/nk_h264_symbols.h"),
+    ),
+    "third_party/libchdr/": VendoredBuild(
+        recipes=("$(LIBCHDR_OBJ_DIR)/%.o",),
+        flags=("-std=c99", "-Ithird_party/libchdr/include",
+               "-Ithird_party/libchdr/deps/lzma-26.02/include",
+               "-Ithird_party/libchdr/deps/miniz-3.1.2",
+               "-Ithird_party/libchdr/deps/zstd-1.5.7",
+               "-DMINIZ_NO_ARCHIVE_APIS", "-DMINIZ_NO_DEFLATE_APIS",
+               "-DMINIZ_NO_STDIO", "-DMINIZ_NO_TIME"),
+    ),
+}
+
+#: A `PROVENANCE.md` file-manifest row: the file, then its kind.
+_MANIFEST_ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|\s*([^|]*?)\s*\|", re.M)
+#: The kinds that mark upstream bytes: an import, kept as is or with a LOCAL DELTA.
+_IMPORTED_KIND = re.compile(r"^(?:imported\b|LOCAL DELTA\b)")
+
+
+@lru_cache(maxsize=None)
+def _manifest_imports(folder: str) -> frozenset[str]:
+    """The files, relative to *folder*, that its `PROVENANCE.md` lists as imported."""
+    manifest = ROOT / folder / "PROVENANCE.md"
+    if not manifest.is_file():
+        return frozenset()
+    text = manifest.read_text(encoding="utf-8", errors="replace")
+    return frozenset(name for name, kind in _MANIFEST_ROW.findall(text) if _IMPORTED_KIND.match(kind))
+
+
+def vendored_build(source: str) -> VendoredBuild | None:
+    """The vendored build of *source*, if its manifest lists it as imported upstream code."""
+    for folder, build in VENDORED_BUILDS.items():
+        if source.startswith(folder) and source[len(folder):] in _manifest_imports(folder):
+            return build
+    return None
 
 #: A missing header from an SDK the build discovers rather than vendors.  The
 #: compile cannot run without it, so the file is SKIP (never PASS, never FAIL).
@@ -860,8 +938,12 @@ def strict_compile_command(compiler: str, source: str, vulkan_flags: list[str]) 
     """The strict compile line for *source*, or ``None`` and why it cannot run.
 
     It cannot run when the source includes a header that only a build step
-    writes and that step has not run here.
+    writes and that step has not run here.  Imported upstream code takes its
+    vendored build's flags instead (`VENDORED_BUILDS`).
     """
+    vendored = vendored_build(source)
+    if vendored is not None:
+        return [compiler, "-fsyntax-only", *vendored.flags, source], ""
     unit = STRICT_C_UNITS.get(source)
     extra: list[str] = []
     if unit is not None:
