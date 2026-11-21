@@ -2622,40 +2622,141 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIn("LAUNCHER_UNAVAILABLE", completed.stderr)
         self.assertNotIn(marker, completed.stdout)
 
-    def test_removed_ui_switch_and_unknown_options_are_named_not_fatal(self) -> None:
+    def test_removed_ui_switch_is_named_not_fatal(self) -> None:
         """Shortcuts made before the old renderer went still pass --ui=next. The
-        switch is gone, so the player says it ignores it, and any other option it
-        does not know, then starts the launcher as usual."""
+        switch is gone, so the player says it ignores it, then starts the launcher
+        as usual. (Any other option it does not know is refused: see
+        test_command_line_refuses_what_it_does_not_understand.)"""
         default_ui = self.run_player("empty")
         self.assert_next_ui_active(default_ui["stdout"])
         # The harness's own --ui-test-* options are taken first: none is unknown.
         self.assertNotIn("Ignoring", str(default_ui["stderr"]))
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             scratch = Path(tmp)
-            env = os.environ.copy()
-            env.update({
-                "SDL_VIDEODRIVER": "dummy",
-                "SDL_RENDER_DRIVER": "software",
-                "SDL_AUDIO_DRIVER": "dummy",
-                "LOCALAPPDATA": str(scratch),
-                "APPDATA": str(scratch),
-            })
             shot = scratch / "shot.bmp"
-            completed = subprocess.run(
-                [str(PLAYER_EXE), f"--user-data-root={scratch / 'data'}",
-                 "--ui=legacy", "--no-such-option", "--view=library", f"--screenshot={shot}"],
-                cwd=ROOT, env=env, capture_output=True, text=True, timeout=60, check=False,
-            )
+            completed = self.run_player_args(
+                scratch, f"--user-data-root={scratch / 'data'}",
+                "--ui=legacy", "--view=library", f"--screenshot={shot}")
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertTrue(shot.is_file(), completed.stdout + completed.stderr)
             self.assertGreater(shot.stat().st_size, 0)
         self.assertIn("Ignoring --ui=legacy", completed.stderr)
         self.assertIn("the nk launcher is the only launcher", completed.stderr)
-        self.assertIn("Ignoring unknown option: --no-such-option", completed.stderr)
-        self.assertNotIn("Ignoring unknown option: --ui=legacy", completed.stderr)
-        self.assertNotIn("Ignoring unknown option: --view", completed.stderr)
-        self.assertNotIn("Ignoring unknown option: --screenshot", completed.stderr)
-        self.assertNotIn("Ignoring unknown option: --user-data-root", completed.stderr)
+        self.assertNotIn("Unknown option", completed.stderr)
+
+    def run_player_args(self, scratch: Path, *args: str) -> "subprocess.CompletedProcess[str]":
+        """Runs the regression player with the given command line, headless, in `scratch`."""
+        env = os.environ.copy()
+        env.update({
+            "SDL_VIDEODRIVER": "dummy",
+            "SDL_RENDER_DRIVER": "software",
+            "SDL_AUDIO_DRIVER": "dummy",
+            "LOCALAPPDATA": str(scratch),
+            "APPDATA": str(scratch),
+        })
+        return subprocess.run(
+            [str(PLAYER_EXE), *args], cwd=ROOT, env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60, check=False,
+        )
+
+    def test_value_options_take_a_space_or_an_equals_sign(self) -> None:
+        """Pegasus, ES-DE, LaunchBox and Steam ROM Manager templates write `--iso <path>`
+        as often as `--iso=<path>`. Both forms mean the same for every value option,
+        --user-data-root (read before anything else) and a path with spaces included."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            for index, spelling in enumerate((("=", "="), (" ", " "))):
+                data = scratch / f"data {index}"
+                shot = scratch / f"shot {index}.bmp"
+                if spelling[0] == "=":
+                    args = [f"--user-data-root={data}", "--view=library", f"--screenshot={shot}",
+                            "--width=640", "--height=360"]
+                else:
+                    args = ["--user-data-root", str(data), "--view", "library",
+                            "--screenshot", str(shot), "--width", "640", "--height", "360"]
+                completed = self.run_player_args(scratch, *args)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertTrue(shot.is_file(), completed.stdout + completed.stderr)
+                self.assertTrue(data.is_dir(), "--user-data-root was not applied: " + completed.stderr)
+                self.assertNotIn("nknown", completed.stderr)
+
+    def test_command_line_refuses_what_it_does_not_understand(self) -> None:
+        """An unknown option, a stray argument, a value option with no value and a value on a
+        switch are each refused by name with exit code 2, and nothing starts."""
+        cases = (
+            (("--no-such-option",), "Unknown option: --no-such-option"),
+            (("--iso", "--stage-only"), "--iso needs a value"),
+            (("--iso=",), "--iso needs a value"),
+            (("--launch-title",), "--launch-title needs a value"),
+            (("--user-data-root",), "--user-data-root needs a value"),
+            (("--stage-only=yes",), "--stage-only takes no value"),
+            (("game.iso",), "Unexpected argument 'game.iso'"),
+        )
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            for args, message in cases:
+                with self.subTest(args=args):
+                    completed = self.run_player_args(scratch, *args)
+                    self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+                    self.assertIn(message, completed.stderr)
+                    self.assertIn("--help", completed.stderr)
+
+    def test_version_prints_one_line_and_exits_zero(self) -> None:
+        """--version names the version and, when the build knows it, the commit, on one line;
+        it opens no window and wins over an unrelated option."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            completed = self.run_player_args(Path(tmp), "--version")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        lines = completed.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 1, completed.stdout)
+        self.assertRegex(lines[0], r"^Nakagawa Recomp v\d+\.\d+\.\d+")
+
+    def test_a_bad_argument_is_refused_in_either_order_with_help_or_version(self) -> None:
+        """--help and --version never hide a bad argument: both orders exit 2."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            for flag in ("--help", "--version"):
+                for args in ((flag, "--bogus"), ("--bogus", flag), (flag, "--iso")):
+                    with self.subTest(args=args):
+                        completed = self.run_player_args(scratch, *args)
+                        self.assertEqual(completed.returncode, 2,
+                                         completed.stdout + completed.stderr)
+                        self.assertEqual(completed.stdout, "")
+                        self.assertIn("--help", completed.stderr)
+
+    def test_exit_codes_in_the_source_help_and_setup_guide_are_one_list(self) -> None:
+        """The exit-code table in main.c is the one source: --help prints it and
+        docs/SETUP.md lists it, row for row."""
+        source = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        block = source.split("k_player_exit_codes[] = {", 1)[1].split("};", 1)[0]
+        table = re.findall(r'\{(\d+), "([^"]*)"\}', block)
+        self.assertGreaterEqual(len(table), 10, table)
+        table = [(int(code), meaning) for code, meaning in table]
+        self.assertEqual([code for code, _ in table], list(range(len(table))))
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            helped = self.run_player_args(Path(tmp), "--help").stdout
+        guide = (ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+        for code, meaning in table:
+            self.assertIn(f"  {code}  {meaning}\n", helped)
+            self.assertIn(f"- `{code}`: {meaning}\n", guide)
+        self.assertEqual(len(re.findall(r"^  \d  ", helped, re.M)), len(table))
+        # Every literal exit code main.c returns is in the table.
+        # (a plain `return N;`, and each arm of `return cond ? N : M;`)
+        literal = {int(n) for n in re.findall(r"\breturn (\d+);", source)}
+        for arms in re.findall(r"\breturn [^;\n]*\? (\d+) : (\d+);", source):
+            literal.update(int(n) for n in arms)
+        self.assertIn(9, literal)
+        self.assertLessEqual(literal, {code for code, _ in table})
+
+    def test_help_lists_every_documented_option_and_the_exit_codes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            completed = self.run_player_args(Path(tmp), "--help")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.startswith("Usage: nakagawa_player"), completed.stdout)
+        for option in ("--user-data-root", "--iso", "--launch-now", "--launch-title",
+                       "--launch-index", "--version", "--help", "--cheats-file"):
+            self.assertIn(option, completed.stdout)
+        self.assertIn("Exit codes", completed.stdout)
 
     def test_every_view_is_drawn_by_the_launcher(self) -> None:
         """Every PlayerView in player_state.h is drawn by the nk_ui launcher."""
@@ -8910,7 +9011,9 @@ class FirstRunRouteTests(unittest.TestCase):
                     completed = self.run_route(
                         scratch, ["--demo", f"--launch-index={value}", "--headless-launch"])
                     self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
-                    self.assertIn("--launch-index must be a whole number", completed.stderr)
+                    # An empty value is refused by the shared parser, by name.
+                    self.assertIn("--launch-index needs a value" if not value
+                                  else "--launch-index must be a whole number", completed.stderr)
                     self.assertNotIn("SAMPLE", completed.stdout + completed.stderr)
 
     def test_screenshot_that_is_not_saved_fails_the_run(self) -> None:
@@ -8932,7 +9035,8 @@ class FirstRunRouteTests(unittest.TestCase):
                     completed = self.run_route(
                         scratch, ["--view=library", size, f"--screenshot={shot}"])
                     self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
-                    self.assertIn("--width and --height must be whole numbers",
+                    self.assertIn("--height needs a value" if size == "--height="
+                                  else "--width and --height must be whole numbers",
                                   completed.stderr)
                     self.assertFalse(shot.exists())
             completed = self.run_route(
