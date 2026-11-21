@@ -213,7 +213,7 @@ NkAdhocListStatus nk_adhoc_list_load_shipped(NkAdhocServerList *out, NkAdhocList
 NkAdhocListStatus nk_adhoc_list_fetch(PackageHttpOpen transport, void *transport_context,
                                       bool online_play_on, NkAdhocServerList *out,
                                       NkAdhocListLogFn log, void *log_context) {
-    static const PackageHttpOptions options = { NK_ADHOC_LIST_USER_AGENT };
+    static const PackageHttpOptions options = { NK_ADHOC_LIST_USER_AGENT, NULL };
     PackageHttpResponse response;
     char *buffer = NULL;
     size_t used = 0u;
