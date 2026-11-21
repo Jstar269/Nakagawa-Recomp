@@ -29,6 +29,9 @@ typedef char nk_ach_retry_matches_rcheevos
 typedef struct NkAchPendingEntry {
     NkAchPendingUnlock unlock;
     bool restored;
+    /* rc_client's own award request for this unlock is with the transport or waiting its turn
+     * (ach_server_call): the bridge's replay does not send the record meanwhile. */
+    bool client_award_inflight;
 } NkAchPendingEntry;
 
 typedef struct AchPendingReplay {
@@ -38,7 +41,23 @@ typedef struct AchPendingReplay {
     rc_api_request_t request;
     NkAchRequest transport_request;
     uint32_t client_generation; /* the account that sent it (ach_account_requests_end) */
+    /* rc_client's award request for the same unlock, made while this one was on its way: it is
+     * never sent, and gets this request's answer (ach_server_call, ach_pending_replay_done). */
+    struct AchCall *held;
 } AchPendingReplay;
+
+/* The server's answer to a saved unlock the bridge sent this session (ach_pending_replay_done).
+ * rc_client, which loaded the game before that answer, still has the achievement locked; when it
+ * earns it again it gets this answer, the server's own for the same award, instead of sending a
+ * second request (ach_server_call). Kept until the account's session ends. */
+typedef struct AchReplayAward {
+    struct AchReplayAward *next;
+    char game_hash[33];
+    uint32_t achievement_id;
+    int http_status;
+    size_t body_length;
+    char *body;
+} AchReplayAward;
 
 static bool ach_hash_ok(const char *hash);
 
@@ -66,7 +85,9 @@ struct NkAch {
     uint32_t events_dropped;
     NkAchPendingEntry pending_unlocks[NK_ACH_PENDING_UNLOCKS_MAX];
     size_t pending_unlock_count;
-    bool pending_replay_inflight;
+    /* The saved unlock this session's replay is sending, or NULL (one at a time). */
+    AchPendingReplay *pending_replay_current;
+    AchReplayAward *replay_awards; /* this session's answered replays (AchReplayAward) */
     uint64_t pending_replay_now_ms;
     uint64_t pending_replay_after_ms;
     bool pending_replay_blocked; /* the server refused the account: wait for the next sign-in */
@@ -295,11 +316,13 @@ static bool ach_control_character(uint32_t code_point) {
  * begin a well-formed character is dropped; a tab, line feed, carriage return, or line or
  * paragraph separator becomes a space;
  * every other control character above is removed. The copy is whole when it fits, else it ends
- * at the last whole character that fits. NULL text copies as empty. */
-static void ach_copy_text(char *out, size_t size, const char *text) {
-    if (!out || size == 0u) return;
+ * at the last whole character that fits. NULL text copies as empty. False when the copy was
+ * cut short. */
+static bool ach_copy_text(char *out, size_t size, const char *text) {
+    if (!out || size == 0u) return false;
     size_t used = 0u;
     const unsigned char *p = (const unsigned char *)text;
+    bool whole = true;
     while (p && *p) {
         uint32_t code_point = 0u;
         const size_t length = ach_utf8_char(p, &code_point);
@@ -309,16 +332,23 @@ static void ach_copy_text(char *out, size_t size, const char *text) {
         }
         if (code_point == '\t' || code_point == '\n' || code_point == '\r' ||
             code_point == 0x2028u || code_point == 0x2029u) {
-            if (used + 1u >= size) break;
+            if (used + 1u >= size) {
+                whole = false;
+                break;
+            }
             out[used++] = ' ';
         } else if (!ach_control_character(code_point)) {
-            if (used + length >= size) break;
+            if (used + length >= size) {
+                whole = false;
+                break;
+            }
             memcpy(out + used, p, length);
             used += length;
         }
         p += length;
     }
     out[used] = '\0';
+    return whole;
 }
 
 static void ach_push(NkAch *ach, NkAchEventKind kind, uint32_t id, uint32_t points,
@@ -429,6 +459,52 @@ static bool ach_pending_remove(NkAch *ach, const char *game_hash, uint32_t id,
  * (nk_ach_logout), so each unlock is sent once. */
 static void ach_queue_take_over(NkAch *ach) {
     for (size_t i = 0u; i < ach->pending_unlock_count; i++) ach->pending_unlocks[i].restored = true;
+}
+
+static const AchReplayAward *ach_replay_award_find(const NkAch *ach, const char *game_hash,
+                                                   uint32_t id) {
+    for (const AchReplayAward *award = ach->replay_awards; award; award = award->next)
+        if (award->achievement_id == id && strcmp(award->game_hash, game_hash) == 0) return award;
+    return NULL;
+}
+
+/* Keeps the server's answer that awarded a saved unlock. When it cannot be kept (no memory), a
+ * later award of the same achievement by rc_client is sent as before, and the server answers it
+ * as one it already has. */
+static void ach_replay_award_keep(NkAch *ach, const char *game_hash, uint32_t id,
+                                  const NkAchResponse *response) {
+    if (!response || !response->body || ach_replay_award_find(ach, game_hash, id)) return;
+    AchReplayAward *award = (AchReplayAward *)calloc(1u, sizeof *award);
+    char *body = award ? (char *)malloc(response->body_length + 1u) : NULL;
+    if (!body) {
+        free(award);
+        return;
+    }
+    memcpy(body, response->body, response->body_length);
+    body[response->body_length] = '\0';
+    snprintf(award->game_hash, sizeof award->game_hash, "%s", game_hash);
+    award->achievement_id = id;
+    award->http_status = response->http_status;
+    award->body_length = response->body_length;
+    award->body = body;
+    award->next = ach->replay_awards;
+    ach->replay_awards = award;
+}
+
+static void ach_replay_awards_free(NkAch *ach) {
+    while (ach->replay_awards) {
+        AchReplayAward *award = ach->replay_awards;
+        ach->replay_awards = award->next;
+        nk_secure_zero(award->body, award->body_length);
+        free(award->body);
+        free(award);
+    }
+}
+
+/* rc_client's award request for game_hash and id has been answered or has ended. */
+static void ach_client_award_settled(NkAch *ach, const char *game_hash, uint32_t id) {
+    const size_t index = ach_pending_find(ach, game_hash, id);
+    if (index != SIZE_MAX) ach->pending_unlocks[index].client_award_inflight = false;
 }
 
 static uint32_t ach_request_award_id(const char *post_data) {
@@ -631,6 +707,7 @@ static bool ach_response_unreachable(const NkAchResponse *response) {
 static void ach_finish(NkAch *ach) {
     rc_client_destroy(ach->client);
     nk_ach_badge_free(&ach->badge_done);
+    ach_replay_awards_free(ach);
     free(ach);
 }
 
@@ -645,6 +722,8 @@ static void ach_done(const NkAchResponse *response, void *done_ctx) {
         ach_leave(ach);
         return;
     }
+    /* Before rc_client sees the answer: a retry it makes at once is marked again when sent. */
+    if (call->award_id) ach_client_award_settled(ach, call->game_hash, call->award_id);
     /* Answered inside the transport call that sent it: rc_client has not raised the trigger. */
     const bool synchronous = ach->sending_call == call;
     rc_api_server_response_t server;
@@ -773,8 +852,34 @@ static void RC_CCONV ach_server_call(const rc_api_request_t *request,
     call->game_hash[0] = '\0';
     if (call->award_id) (void)ach_request_award_hash(request->post_data, call->game_hash);
     call->client_generation = ach->client_generation;
-    NkAchRequest out = {request->url, request->post_data, request->content_type};
     const void *outer_call = ach->sending_call;
+    /* One award request per unlock in a session. A saved unlock of this achievement that the
+     * bridge sent already has the server's answer, which rc_client gets now, as if the transport
+     * had answered at once; one still on its way gives rc_client its answer when it comes. Either
+     * way rc_client's own request is never sent. */
+    if (call->award_id && call->game_hash[0]) {
+        const AchReplayAward *answered =
+            ach_replay_award_find(ach, call->game_hash, call->award_id);
+        AchPendingReplay *replay = ach->pending_replay_current;
+        if (answered) {
+            ach_scrub_request(request);
+            const NkAchResponse answer = {answered->body, answered->body_length,
+                                          answered->http_status};
+            ach->sending_call = call; /* the trigger that follows makes no record (ach_done) */
+            ach_done(&answer, call);
+            ach->sending_call = outer_call;
+            return;
+        }
+        if (replay && !replay->held && replay->achievement_id == call->award_id &&
+            strcmp(replay->game_hash, call->game_hash) == 0) {
+            replay->held = call;
+            ach_scrub_request(request);
+            return;
+        }
+        const size_t index = ach_pending_find(ach, call->game_hash, call->award_id);
+        if (index != SIZE_MAX) ach->pending_unlocks[index].client_award_inflight = true;
+    }
+    NkAchRequest out = {request->url, request->post_data, request->content_type};
     ach->sending_call = call;
     const bool kept = ach_send(ach, &out, ach_done, call);
     ach->sending_call = outer_call; /* call may be freed by now: only its address is compared */
@@ -782,6 +887,7 @@ static void RC_CCONV ach_server_call(const rc_api_request_t *request,
      * is wiped before rc_client frees it. */
     ach_scrub_request(request);
     if (!kept) {
+        if (call->award_id) ach_client_award_settled(ach, call->game_hash, call->award_id);
         free(call);
         ach_refuse(callback, callback_data, "refused: out of memory");
     }
@@ -892,7 +998,12 @@ static void ach_account_requests_end(NkAch *ach) {
     ach->client_generation++;
     ach->load_generation++;
     ach_badges_end(ach);
-    ach->pending_replay_inflight = false;
+    /* The replay on its way, and the calls it holds, end when its answer comes (dropped,
+     * ach_pending_replay_done); the next session sends its records afresh. */
+    ach->pending_replay_current = NULL;
+    ach_replay_awards_free(ach);
+    for (size_t i = 0u; i < ach->pending_unlock_count; i++)
+        ach->pending_unlocks[i].client_award_inflight = false;
     AchOutbound *waiting = ach->outbound_head;
     ach->outbound_head = NULL;
     ach->outbound_tail = NULL;
@@ -1133,6 +1244,19 @@ bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size) {
     return copied;
 }
 
+void nk_ach_display_name(const char *name, char *out, size_t out_size) {
+    static const char ellipsis[] = "\xE2\x80\xA6"; /* U+2026 */
+    if (!out || out_size == 0u) return;
+    out[0] = '\0';
+    if (!name) return;
+    if (out_size > NK_ACH_DISPLAY_NAME_MAX) out_size = NK_ACH_DISPLAY_NAME_MAX;
+    if (ach_copy_text(out, out_size, name) || out_size <= sizeof ellipsis) return;
+    /* Cut: the whole characters that leave room for the ellipsis, then the ellipsis. */
+    (void)ach_copy_text(out, out_size - (sizeof ellipsis - 1u), name);
+    const size_t used = strlen(out);
+    memcpy(out + used, ellipsis, sizeof ellipsis);
+}
+
 void nk_ach_logout(NkAch *ach) {
     if (!ach) return;
     ach_enter(ach);
@@ -1349,6 +1473,12 @@ static void RC_CCONV ach_pending_replay_done(const NkAchResponse *response, void
     AchPendingReplay *replay = (AchPendingReplay *)done_ctx;
     NkAch *ach = replay->ach;
     ach_enter(ach);
+    /* rc_client's award of the same unlock, held while this was on its way, gets this answer
+     * below (ach_done), after the record has been settled; it drops the answer too when its
+     * account has ended, and refuses it when the bridge is closing. */
+    struct AchCall *held = replay->held;
+    replay->held = NULL;
+    if (ach->pending_replay_current == replay) ach->pending_replay_current = NULL;
     if (replay->client_generation != ach->client_generation || ach->closing) {
         /* Sent for an account that has ended (ach_account_requests_end), or answered after
          * nk_ach_destroy: its answer is not the next account's, whose records may name the same
@@ -1356,6 +1486,7 @@ static void RC_CCONV ach_pending_replay_done(const NkAchResponse *response, void
         ach_scrub_request(&replay->request);
         rc_api_destroy_request(&replay->request);
         free(replay);
+        if (held) ach_done(response, held);
         ach_leave(ach);
         return;
     }
@@ -1370,6 +1501,8 @@ static void RC_CCONV ach_pending_replay_done(const NkAchResponse *response, void
         const bool removed = ach_pending_remove(ach, replay->game_hash,
                                                  replay->achievement_id, &restored);
         ach->pending_replay_after_ms = 0u;
+        if (outcome == ACH_REPLAY_AWARDED)
+            ach_replay_award_keep(ach, replay->game_hash, replay->achievement_id, response);
         if (outcome == ACH_REPLAY_REFUSED)
             ach_push(ach, NK_ACH_EVENT_UNLOCK_REFUSED, replay->achievement_id, 0u, 0u, NULL,
                      message);
@@ -1390,15 +1523,15 @@ static void RC_CCONV ach_pending_replay_done(const NkAchResponse *response, void
         ach->pending_replay_after_ms = ach_replay_retry_after(ach->pending_replay_now_ms);
         break;
     }
-    ach->pending_replay_inflight = false;
     ach_scrub_request(&replay->request);
     rc_api_destroy_request(&replay->request);
     free(replay);
+    if (held) ach_done(response, held);
     ach_leave(ach);
 }
 
 static void ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {
-    if (!ach->transport || ach->offline || ach->pending_replay_inflight ||
+    if (!ach->transport || ach->offline || ach->pending_replay_current ||
         ach->pending_replay_blocked || now_ms < ach->pending_replay_after_ms) return;
     const rc_client_user_t *user = rc_client_get_user_info(ach->client);
     if (!user || !user->username || !user->token) return;
@@ -1407,9 +1540,10 @@ static void ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {
     if (ach->pending_unlock_count == 0u || !nk_ach_account_tag(user->username, tag) ||
         strcmp(tag, ach->pending_owner) != 0) return;
 
+    /* A record rc_client is sending itself waits: its answer settles the record (ach_done). */
     size_t index = SIZE_MAX;
     for (size_t i = 0u; i < ach->pending_unlock_count; i++) {
-        if (ach->pending_unlocks[i].restored) {
+        if (ach->pending_unlocks[i].restored && !ach->pending_unlocks[i].client_award_inflight) {
             index = i;
             break;
         }
@@ -1456,10 +1590,10 @@ static void ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {
     replay->transport_request.url = replay->request.url;
     replay->transport_request.post_data = replay->request.post_data;
     replay->transport_request.content_type = replay->request.content_type;
-    ach->pending_replay_inflight = true;
+    ach->pending_replay_current = replay; /* cleared by its answer, which may come at once */
     ach->pending_replay_now_ms = now_ms;
     if (!ach_send(ach, &replay->transport_request, ach_pending_replay_done, replay)) {
-        ach->pending_replay_inflight = false;
+        ach->pending_replay_current = NULL;
         ach->pending_replay_after_ms = ach_replay_retry_after(now_ms);
         ach_scrub_request(&replay->request);
         rc_api_destroy_request(&replay->request);

@@ -2538,6 +2538,185 @@ static void test_account_name_and_separators_are_clean(uint8_t *ram) {
     nk_ach_destroy(ach);
 }
 
+/* Review 2026-11-20 (#2847, C): the account row showed the credential store's name as it was
+ * kept, and cut the server's at a byte count. Both pass nk_ach_display_name: cleaned as server
+ * text is, at most NK_ACH_DISPLAY_NAME_MAX bytes, cut at a whole character with an ellipsis. */
+static void test_display_name_is_clean_and_fits(void) {
+    char out[NK_ACH_DISPLAY_NAME_MAX];
+    nk_ach_display_name("Pla\xe2\x80\xaeyer\x07", out, sizeof out);
+    CHECK(strcmp(out, "Player") == 0, "controls and an override go: \"%s\"", out);
+    nk_ach_display_name("One\xe2\x80\xa8two", out, sizeof out);
+    CHECK(strcmp(out, "One two") == 0, "a line separator is a space: \"%s\"", out);
+    nk_ach_display_name(NULL, out, sizeof out);
+    CHECK(out[0] == '\0', "no name is \"\"");
+
+    char name[256];
+    size_t at = 0u;
+    while (at + 2u < sizeof name) {
+        name[at++] = '\xc3';
+        name[at++] = '\xa9';
+    }
+    name[at] = '\0';
+    nk_ach_display_name(name, out, sizeof out);
+    CHECK(strlen(out) == 63u && utf8_ends_whole(out) &&
+              strcmp(out + 60, "\xe2\x80\xa6") == 0 && strncmp(out, name, 60u) == 0,
+          "a long name keeps 30 whole characters and an ellipsis (%u bytes)",
+          (unsigned)strlen(out));
+    char exact[NK_ACH_DISPLAY_NAME_MAX];
+    memset(exact, 'a', sizeof exact - 1u);
+    exact[sizeof exact - 1u] = '\0';
+    nk_ach_display_name(exact, out, sizeof out);
+    CHECK(strcmp(out, exact) == 0, "a name that fits is whole, with no ellipsis");
+    char wide[200];
+    memset(name, 'b', 100u);
+    name[100] = '\0';
+    nk_ach_display_name(name, wide, sizeof wide);
+    CHECK(strlen(wide) == NK_ACH_DISPLAY_NAME_MAX - 1u &&
+              strcmp(wide + NK_ACH_DISPLAY_NAME_MAX - 4u, "\xe2\x80\xa6") == 0,
+          "a larger buffer still holds at most NK_ACH_DISPLAY_NAME_MAX bytes (%u)",
+          (unsigned)strlen(wide));
+    char small[8];
+    nk_ach_display_name("Abcdefghij", small, sizeof small);
+    CHECK(strcmp(small, "Abcd\xe2\x80\xa6") == 0, "a small buffer: \"%s\"", small);
+    char tiny[3];
+    nk_ach_display_name("Abcdef", tiny, sizeof tiny);
+    CHECK(strcmp(tiny, "Ab") == 0, "no room for an ellipsis: \"%s\"", tiny);
+}
+
+/* ---- one award request per unlock in a session (review 2026-11-20, #2847) --------------- */
+
+static int pending_awards(const Deferred *d) {
+    int count = 0;
+    for (int i = 0; i < d->count; i++)
+        if (starts_with(d->q[i].post, "r=awardachievement&")) count++;
+    return count;
+}
+
+/* A saved record of 5501, signed in over the deferred transport: its first send finds the server
+ * busy, so it waits 30 s, and meanwhile the game loads with 5501 still locked on the server. */
+static NkAch *saved_unlock_then_game(uint8_t *ram, Deferred *d) {
+    memset(d, 0, sizeof *d);
+    memset(ram, 0, USER_RAM_SIZE);
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, deferred_transport, d);
+    CHECK(ach != NULL, "create");
+    if (!ach) return NULL;
+    g_clock_ms = 1000000u;
+    use_fake_clock(ach);
+    const NkAchPendingUnlock saved = saved_unlock(5501u);
+    CHECK(nk_ach_restore_pending_unlock(ach, &saved, player_tag()), "restore 5501");
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN") && deliver(d, "r=login2&", 200, k_login) &&
+              nk_ach_logged_in(ach),
+          "signed in");
+    nk_ach_replay_pending_unlocks(ach, 1000u);
+    CHECK(deliver(d, "r=awardachievement&", 503, ""), "the saved unlock is sent; 503");
+    CHECK(nk_ach_pending_unlock_count(ach) == 1u, "the record waits");
+    CHECK(nk_ach_begin_load_game(ach, HASH) && deliver(d, "r=achievementsets&", 200, k_sets) &&
+              deliver(d, "r=startsession&", 200, k_session) && nk_ach_game_loaded(ach),
+          "the game loads with 5501 locked");
+    for (int i = 0; i < 4; i++) nk_ach_frame(ach);
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    return ach;
+}
+
+/* rc_client earns 5501 again and its award request is made. */
+static void earn_saved_unlock_again(NkAch *ach, uint8_t *ram) {
+    ram[ACH_ADDR] = 5;
+    nk_ach_frame(ach);
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    const size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_UNLOCKED) >= 0, "5501 unlocks in the game");
+}
+
+/* No error and no disconnect: rc_client had a definite answer. */
+static void check_award_settled(NkAch *ach, const char *route) {
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    const size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_SERVER_ERROR) < 0 &&
+              has_event(ev, n, NK_ACH_EVENT_DISCONNECTED) < 0,
+          "%s: no server error or disconnect follows", route);
+    CHECK(nk_ach_pending_unlock_count(ach) == 0u, "%s: the record left the queue (%u queued)",
+          route, (unsigned)nk_ach_pending_unlock_count(ach));
+}
+
+/* The saved record is on its way when rc_client earns the same unlock: rc_client's request is
+ * not sent, and gets the server's answer to the saved one. */
+static void test_unlock_earned_while_its_record_is_sent_goes_once(uint8_t *ram) {
+    Deferred d;
+    NkAch *ach = saved_unlock_then_game(ram, &d);
+    if (!ach) return;
+    nk_ach_replay_pending_unlocks(ach, 31000u);
+    CHECK(pending_awards(&d) == 1, "the saved unlock is sent again after 30 s");
+    earn_saved_unlock_again(ach, ram);
+    CHECK(pending_awards(&d) == 1, "rc_client's award is not sent beside it (%d waiting)",
+          pending_awards(&d));
+    CHECK(deliver(&d, "r=awardachievement&", 200, k_award), "the server awards the saved one");
+    CHECK(pending_awards(&d) == 0, "no second award request follows its answer (%d)",
+          pending_awards(&d));
+    idle_for(ach, 130000u);
+    nk_ach_replay_pending_unlocks(ach, 200000u);
+    CHECK(pending_awards(&d) == 0, "and none later: rc_client has its answer (%d)",
+          pending_awards(&d));
+    check_award_settled(ach, "record first");
+    drain(&d);
+    nk_ach_destroy(ach);
+}
+
+/* rc_client's award is on its way when the saved record's 30 s are up: the record waits for that
+ * answer, which settles it, and is not sent. */
+static void test_saved_record_waits_for_rc_clients_award(uint8_t *ram) {
+    Deferred d;
+    NkAch *ach = saved_unlock_then_game(ram, &d);
+    if (!ach) return;
+    earn_saved_unlock_again(ach, ram);
+    CHECK(pending_awards(&d) == 1, "rc_client's award is sent");
+    nk_ach_replay_pending_unlocks(ach, 31000u);
+    CHECK(deliver(&d, "r=awardachievement&", 200, k_award), "the server awards it");
+    CHECK(pending_awards(&d) == 0, "the saved record is not sent after it (%d waiting)",
+          pending_awards(&d));
+    nk_ach_replay_pending_unlocks(ach, 70000u);
+    CHECK(pending_awards(&d) == 0, "nor later (%d)", pending_awards(&d));
+    check_award_settled(ach, "rc_client first");
+    drain(&d);
+    nk_ach_destroy(ach);
+}
+
+/* The saved record was awarded before rc_client earned the unlock again in the game it had
+ * loaded: rc_client gets that answer, and no request is made. */
+static void test_unlock_earned_after_its_record_was_awarded_is_not_sent(uint8_t *ram) {
+    Deferred d;
+    NkAch *ach = saved_unlock_then_game(ram, &d);
+    if (!ach) return;
+    nk_ach_replay_pending_unlocks(ach, 31000u);
+    CHECK(deliver(&d, "r=awardachievement&", 200, k_award), "the saved unlock is awarded");
+    CHECK(nk_ach_pending_unlock_count(ach) == 0u, "its record left the queue");
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    earn_saved_unlock_again(ach, ram);
+    CHECK(pending_awards(&d) == 0, "rc_client's award of it is not sent (%d waiting)",
+          pending_awards(&d));
+    idle_for(ach, 130000u);
+    CHECK(pending_awards(&d) == 0, "nor retried (%d)", pending_awards(&d));
+    check_award_settled(ach, "record awarded first");
+    drain(&d);
+    nk_ach_destroy(ach);
+}
+
+/* The bridge closes while rc_client's award waits for the saved record's answer: the answer
+ * that comes ends both, and nothing more is sent. */
+static void test_held_award_ends_with_the_bridge(uint8_t *ram) {
+    Deferred d;
+    NkAch *ach = saved_unlock_then_game(ram, &d);
+    if (!ach) return;
+    nk_ach_replay_pending_unlocks(ach, 31000u);
+    earn_saved_unlock_again(ach, ram);
+    nk_ach_destroy(ach);
+    CHECK(deliver(&d, "r=awardachievement&", 200, k_award), "the answer after the close");
+    CHECK(pending_awards(&d) == 0, "nothing is sent after it (%d)", pending_awards(&d));
+    drain(&d);
+}
+
 /* Audit F-282bdd0c: a guest reset. Without nk_ach_reset, the delta trigger kept the 4 it saw
  * before the reset, and the first 5 after it unlocks "Delta" for a change that never happened. */
 static void test_reset_forgets_the_old_guest(uint8_t *ram) {
@@ -2697,6 +2876,55 @@ static void test_set_completed_toast_message(void) {
               utf8_ends_whole(short_title) && strlen(short_title) == 6u,
           "a title cut to fit ends on a whole character (%u bytes)",
           (unsigned)strlen(short_title));
+}
+
+/* The notice that a game's set has loaded (RetroAchievements asks clients to say when
+ * achievements become active): the game's title, then what is unlocked of how many. */
+static void test_set_loaded_toast_message(void) {
+    char toast[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+    snprintf(toast, sizeof toast, NK_GUEST_MEMORY_NOTIFICATION_SET_LOADED "%s\n%u\n%u",
+             "Synthetic Game", 3u, 20u);
+    CHECK(strcmp(toast, "Set loaded: Synthetic Game\n3\n20") == 0, "the message reads \"%s\"",
+          toast);
+    NkGuestSetLoadedNotice loaded;
+    CHECK(nk_guest_memory_notification_set_loaded(toast, &loaded) &&
+              strcmp(loaded.title, "Synthetic Game") == 0 && loaded.unlocked == 3u &&
+              loaded.total == 20u,
+          "a loaded set reads as its title and counts (%s, %u of %u)", loaded.title,
+          (unsigned)loaded.unlocked, (unsigned)loaded.total);
+    CHECK(strcmp(nk_guest_memory_notification_caption(toast), "RetroAchievements") == 0,
+          "a loaded set is captioned RetroAchievements");
+    NkGuestUnlockNotice notice;
+    char title[NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX];
+    CHECK(!nk_guest_memory_notification_unlock(toast, &notice) &&
+              !nk_guest_memory_notification_set_completed(toast, title, sizeof title),
+          "a loaded set is neither an unlock nor a completed set");
+    CHECK(nk_guest_memory_notification_set_loaded("Set loaded: Empty\n0\n0", &loaded) &&
+              loaded.total == 0u && strcmp(loaded.title, "Empty") == 0,
+          "a set with no achievements reads too");
+    static const char *const others[] = {
+        "Set loaded: Game",        "Set loaded: Game\n3",       "Set loaded: \n1\n2",
+        "Set loaded: G\n3\n2",     "Set loaded: G\n1\n2\n",     "Set loaded: G\nx\n2",
+        "Set loaded: G\n1\n",      "Set loaded: G\n1234567890\n1234567890",
+        "set loaded: G\n1\n2",     "Set completed: G",          ""};
+    for (size_t i = 0; i < sizeof others / sizeof others[0]; i++) {
+        CHECK(!nk_guest_memory_notification_set_loaded(others[i], &loaded) && !loaded.title[0] &&
+                  loaded.total == 0u,
+              "message %u is no loaded set", (unsigned)i);
+    }
+    CHECK(!nk_guest_memory_notification_set_loaded(NULL, &loaded), "no message is no loaded set");
+    char longest[NK_GUEST_MEMORY_NOTIFICATION_MAX + 16];
+    size_t at = (size_t)snprintf(longest, sizeof longest, NK_GUEST_MEMORY_NOTIFICATION_SET_LOADED);
+    while (at < NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX + 20u) {
+        longest[at++] = '\xc3';
+        longest[at++] = '\xa9';
+    }
+    memcpy(longest + at, "\n1\n2", 5u);
+    CHECK(nk_guest_memory_notification_set_loaded(longest, &loaded) &&
+              utf8_ends_whole(loaded.title) &&
+              strlen(loaded.title) == NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX - 2u,
+          "a title cut to fit ends on a whole character (%u bytes)",
+          (unsigned)strlen(loaded.title));
 }
 
 /* The badge folder's file names (nk_achievement_badge_file_name), which the player writes and
@@ -4099,6 +4327,7 @@ int main(int argc, char **argv) {
     RUN(test_frames_are_served_while_the_event_loop_is_stalled);
     RUN(test_unlock_toast_is_captioned_retroachievements);
     RUN(test_set_completed_toast_message);
+    RUN(test_set_loaded_toast_message);
     RUN(test_badge_file_names);
     RUN(test_notifications_are_read_in_order);
     RUN(test_a_message_being_written_is_not_read);
@@ -4134,6 +4363,11 @@ int main(int argc, char **argv) {
     RUN_RAM(test_unlock_refused_while_off_is_sent_after_sign_in);
     RUN_RAM(test_unlock_is_sent_once_after_the_switch_cycles);
     RUN_RAM(test_account_name_and_separators_are_clean);
+    RUN(test_display_name_is_clean_and_fits);
+    RUN_RAM(test_unlock_earned_while_its_record_is_sent_goes_once);
+    RUN_RAM(test_saved_record_waits_for_rc_clients_award);
+    RUN_RAM(test_unlock_earned_after_its_record_was_awarded_is_not_sent);
+    RUN_RAM(test_held_award_ends_with_the_bridge);
     RUN_RAM(test_stale_load_answer_raises_nothing);
     RUN_RAM(test_reset_forgets_the_old_guest);
     RUN_RAM(test_progress_comes_back_with_a_state);

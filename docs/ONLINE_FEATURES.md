@@ -178,11 +178,17 @@ Built for v0.1.0 (#1316): an opt-in client using the MIT-licensed rcheevos clien
   request up), and one left from an earlier run. The queue holds at most 4,096 records. With no
   definite answer (no connection, a busy server) a record waits 30 seconds; a record the server refuses
   by its own error leaves the queue and is reported; a refused account keeps every record until the next
-  sign-in. The game's title page shows its core achievements under **RetroAchievements · Casual**:
+  sign-in. Each unlock is sent once in a session: one the game earns again while its saved record is
+  on its way, or after the server awarded that record, gets the server's answer to the record instead
+  of a second request, and a saved record waits while the game's own request for it is on its way.
+  The game's title page shows its core achievements under **RetroAchievements · Casual**:
   how many are unlocked and the points earned of the total, with a bar, then one row each, the
   unlocked first, each with its badge (or the drawn icon), title, description and its points as a
   number (up to 256; with more, the page says how many it shows and that all of them are on the
-  game's page at retroachievements.org). Unlock notices appear in-game, one after another:
+  game's page at retroachievements.org). When the game's set has loaded, a notice **Achievements
+  active** shows the game's title and how many of its achievements are unlocked ("3 of 20 unlocked"),
+  since RetroAchievements asks clients to say when achievements become active. Unlock notices appear
+  in-game, one after another:
   **Achievement unlocked** over the achievement's title, its points ("25 points") and its badge. Two
   unlocks close together are two notices. When the last achievement of the set unlocks, a notice
   **Set completed** follows with the game's title and "Every achievement unlocked"; it is drawn on the
@@ -190,7 +196,8 @@ Built for v0.1.0 (#1316): an opt-in client using the MIT-licensed rcheevos clien
   every notice or row.
 - **One request at a time.** The player carries one RetroAchievements request at a time. A request made
   while another is on its way (a game started while a saved unlock is being sent) waits its turn, in
-  order, instead of failing.
+  order, instead of failing. When the player closes, the request on its way is ended at once instead
+  of waiting out the connection's timeouts; an unlock it carried stays in the queue for the next run.
 - **After a factory reset** the player writes no unlock queue before it closes, so the moved-aside data
   folder is not made again. The token stays in Windows Credential Manager until **Sign out**.
 - **The queue belongs to one account.** It names that account by a tag, the MD5 of a fixed label and the

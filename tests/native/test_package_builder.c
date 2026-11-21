@@ -2061,7 +2061,7 @@ static void test_native_transport_user_agent_limit(void) {
     memset(too_long, 'b', sizeof too_long - 1u);
     too_long[sizeof too_long - 1u] = '\0';
 
-    PackageHttpOptions options = {longest};
+    PackageHttpOptions options = {longest, NULL};
     const char *refused = package_builder_native_session_user_agent(&options, carried,
                                                                     sizeof carried);
     printf("   longest (%u bytes): %s\n", (unsigned)strlen(longest), refused ? refused : "carried");
@@ -2092,6 +2092,35 @@ static void test_native_transport_user_agent_limit(void) {
     assert(!package_builder_native_transport_request(&options, "https://example.invalid/", "",
                                                      "GET", NULL, NULL, 0u, &response));
     assert(!response.refused); /* refused for its host, which names no user agent */
+}
+
+/* Audit F-32444050: the player's shutdown waited for a RetroAchievements request on its way,
+ * up to WinHTTP's timeouts. A cancel ends the request using it (its handle is closed, which
+ * ends the blocked call) and refuses every later one before anything is opened. Nothing can be
+ * sent here: no request names an allowed host, so the refusal's text tells the cancel's check,
+ * which comes first, from the host's. A request blocked on the network is not made: tests send
+ * nothing. */
+static void test_native_transport_cancel(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: a cancelled native request is refused unsent\n");
+    PackageHttpCancel *cancel = package_http_cancel_create();
+    assert(cancel != NULL);
+    PackageHttpOptions options = {"NakagawaRecomp/0.0.0 (test) rcheevos/0.0.0", cancel};
+    PackageHttpResponse response;
+    assert(!package_builder_native_transport_request(&options, "https://example.invalid/", "",
+                                                     "GET", NULL, NULL, 0u, &response));
+    assert(!response.refused); /* before the cancel: refused for its host only */
+    package_http_cancel(cancel);
+    package_http_cancel(cancel); /* a second cancel changes nothing */
+    assert(!package_builder_native_transport_request(&options, "https://example.invalid/", "",
+                                                     "POST", "application/x-www-form-urlencoded",
+                                                     "r=ping", 6u, &response));
+    printf("   after the cancel: %s\n", response.refused ? response.refused : "(none)");
+    assert(response.refused &&
+           strcmp(response.refused, "refused: the request was cancelled") == 0);
+    assert(!response.context && !response.read && !response.close && response.http_status == 0);
+    package_http_cancel_destroy(cancel);
+    package_http_cancel(NULL);
+    package_http_cancel_destroy(NULL);
 }
 #endif
 
@@ -2181,6 +2210,7 @@ int main(int argc, char *argv[]) {
 #if defined(_WIN32) || defined(_WIN64)
     test_native_download_verification();
     test_native_transport_user_agent_limit();
+    test_native_transport_cancel();
 #else
     puts("[PACKAGE_BUILDER_TEST] SKIP native WinHTTP/SHA-256 transport tests (non-Windows host)");
 #endif

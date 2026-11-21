@@ -593,12 +593,93 @@ bool package_builder_url_allowed(const char *url, const char *allowed_hosts) {
 }
 
 #if defined(_WIN32) || defined(_WIN64)
-typedef struct {
+typedef struct WinHttpDownload {
     HINTERNET session;
     HINTERNET connection;
     HINTERNET request;
     char final_url[2048];
+    PackageHttpCancel *cancel; /* the options', or NULL */
+    bool request_closed;       /* package_http_cancel closed request: it is not closed again */
 } WinHttpDownload;
+
+/* One lock guards which request package_http_cancel may close and whether it already did: the
+ * request's thread closes its handle itself unless the cancel came first. */
+struct PackageHttpCancel {
+    SRWLOCK lock;
+    bool cancelled;
+    WinHttpDownload *owner; /* the request whose handle a call may be blocked on, or NULL */
+};
+
+static const char k_request_cancelled[] = "refused: the request was cancelled";
+
+PackageHttpCancel *package_http_cancel_create(void) {
+    PackageHttpCancel *cancel = (PackageHttpCancel *)calloc(1u, sizeof *cancel);
+    if (cancel) InitializeSRWLock(&cancel->lock);
+    return cancel;
+}
+
+void package_http_cancel(PackageHttpCancel *cancel) {
+    if (!cancel) return;
+    AcquireSRWLockExclusive(&cancel->lock);
+    cancel->cancelled = true;
+    if (cancel->owner) {
+        /* Closing a request's handle is how WinHTTP ends a synchronous call blocked on it
+           (WinHttpCloseHandle); the call, and any later one on that request, fails. */
+        WinHttpCloseHandle(cancel->owner->request);
+        cancel->owner->request_closed = true;
+        cancel->owner = NULL;
+    }
+    ReleaseSRWLockExclusive(&cancel->lock);
+}
+
+void package_http_cancel_destroy(PackageHttpCancel *cancel) {
+    free(cancel);
+}
+
+static bool winhttp_cancelled(PackageHttpCancel *cancel) {
+    if (!cancel) return false;
+    AcquireSRWLockShared(&cancel->lock);
+    const bool cancelled = cancel->cancelled;
+    ReleaseSRWLockShared(&cancel->lock);
+    return cancelled;
+}
+
+/* The request's new handle becomes the one package_http_cancel closes; false, with nothing
+   handed over, when the cancel came first. */
+static bool winhttp_cancel_adopt(WinHttpDownload *state) {
+    PackageHttpCancel *cancel = state->cancel;
+    if (!cancel) return true;
+    AcquireSRWLockExclusive(&cancel->lock);
+    const bool open = !cancel->cancelled;
+    if (open) cancel->owner = state;
+    ReleaseSRWLockExclusive(&cancel->lock);
+    return open;
+}
+
+/* Closes the request's handle unless package_http_cancel already did. */
+static void winhttp_close_request(WinHttpDownload *state) {
+    PackageHttpCancel *cancel = state->cancel;
+    bool closed = false;
+    if (cancel) {
+        AcquireSRWLockExclusive(&cancel->lock);
+        if (cancel->owner == state) cancel->owner = NULL;
+        closed = state->request_closed;
+        ReleaseSRWLockExclusive(&cancel->lock);
+    }
+    if (state->request && !closed) WinHttpCloseHandle(state->request);
+    state->request = NULL;
+    state->request_closed = false;
+}
+
+/* True once package_http_cancel closed this request's handle: nothing more is asked of it. */
+static bool winhttp_request_closed(WinHttpDownload *state) {
+    PackageHttpCancel *cancel = state->cancel;
+    if (!cancel) return false;
+    AcquireSRWLockShared(&cancel->lock);
+    const bool closed = state->request_closed;
+    ReleaseSRWLockShared(&cancel->lock);
+    return closed;
+}
 
 static bool winhttp_url_parts(const char *url, wchar_t *host, size_t host_count,
                               wchar_t *path, size_t path_count) {
@@ -641,6 +722,7 @@ static bool winhttp_read(void *context, unsigned char *buffer, size_t capacity,
     DWORD available = 0;
     DWORD received = 0;
     if (!state || !state->request || !buffer || !bytes_read || capacity > UINT32_MAX ||
+        winhttp_request_closed(state) ||
         !WinHttpQueryDataAvailable(state->request, &available)) return false;
     if (available == 0) {
         *bytes_read = 0;
@@ -655,7 +737,7 @@ static bool winhttp_read(void *context, unsigned char *buffer, size_t capacity,
 static void winhttp_close(void *context) {
     WinHttpDownload *state = (WinHttpDownload *)context;
     if (!state) return;
-    if (state->request) WinHttpCloseHandle(state->request);
+    winhttp_close_request(state);
     if (state->connection) WinHttpCloseHandle(state->connection);
     if (state->session) WinHttpCloseHandle(state->session);
     free(state);
@@ -725,6 +807,11 @@ static bool winhttp_open_request(void *context, const char *url, const char *all
     /* First, so a refused user agent is named whatever else the request holds. */
     response->refused = winhttp_user_agent(options, user_agent);
     if (response->refused) return false;
+    PackageHttpCancel *cancel = options ? options->cancel : NULL;
+    if (winhttp_cancelled(cancel)) {
+        response->refused = k_request_cancelled;
+        return false;
+    }
     if (!allowed_url(url, allowed_hosts) || !method ||
         (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0) ||
         (body_size != 0u && !body) || body_size > UINT32_MAX ||
@@ -757,6 +844,7 @@ static bool winhttp_open_request(void *context, const char *url, const char *all
         return false;
     }
     snprintf(state->final_url, sizeof(state->final_url), "%s", url);
+    state->cancel = cancel;
     state->session = winhttp_open_session(user_agent);
     if (!state->session) {
         winhttp_close(state);
@@ -786,6 +874,12 @@ static bool winhttp_open_request(void *context, const char *url, const char *all
                                              WINHTTP_FLAG_SECURE);
         if (!state->request) {
             winhttp_close(state);
+            return false;
+        }
+        if (!winhttp_cancel_adopt(state)) {
+            /* Cancelled while the handles were made: nothing was sent. */
+            winhttp_close(state);
+            response->refused = k_request_cancelled;
             return false;
         }
         DWORD redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
@@ -830,9 +924,8 @@ static bool winhttp_open_request(void *context, const char *url, const char *all
                 response->content_length = 0;
                 return true;
             }
-            WinHttpCloseHandle(state->request);
+            winhttp_close_request(state);
             WinHttpCloseHandle(state->connection);
-            state->request = NULL;
             state->connection = NULL;
             continue;
         }
@@ -899,6 +992,19 @@ static const PackageNativeRequest k_native_request = winhttp_open_request;
 #else
 static const PackageHttpOpen k_native_open = NULL;
 static const PackageNativeRequest k_native_request = NULL;
+
+/* No native transport, so no request to end. */
+PackageHttpCancel *package_http_cancel_create(void) {
+    return NULL;
+}
+
+void package_http_cancel(PackageHttpCancel *cancel) {
+    (void)cancel;
+}
+
+void package_http_cancel_destroy(PackageHttpCancel *cancel) {
+    (void)cancel;
+}
 
 const char *package_builder_native_session_user_agent(const PackageHttpOptions *options,
                                                       char *agent, size_t agent_size) {

@@ -347,12 +347,26 @@ typedef bool (*PackageHttpOpen)(void *context, const char *url,
 typedef bool (*PackageDownloadContinue)(void *context, uint64_t received,
                                         uint64_t expected);
 
+/* A way to end the native transport's requests from another thread (audit F-32444050: the
+ * player's shutdown waited for a RetroAchievements request still on its way, up to WinHTTP's
+ * timeouts). package_http_cancel ends the request using it now: WinHTTP's handle for it is
+ * closed, which makes the call blocked on it, and every later read of its response, fail. A
+ * request started after it is refused before anything is opened or sent
+ * (PackageHttpResponse.refused). Destroy it only once no request uses it. NULL from create when
+ * there is no memory, or where there is no native transport. */
+typedef struct PackageHttpCancel PackageHttpCancel;
+PackageHttpCancel *package_http_cancel_create(void);
+void package_http_cancel(PackageHttpCancel *cancel);
+void package_http_cancel_destroy(PackageHttpCancel *cancel);
+
 /* What the native transport's context may say; a NULL context keeps its defaults. */
 typedef struct {
     /* NULL keeps "NakagawaRecomp/PrerequisiteBootstrap". UTF-8 of fewer than
      * NK_ACH_USER_AGENT_MAX bytes (nk_achievements.h), the one limit its writer and this
      * transport share; a longer or malformed one is refused (PackageHttpResponse.refused). */
     const char *user_agent;
+    /* NULL: the request cannot be ended from another thread. */
+    PackageHttpCancel *cancel;
 } PackageHttpOptions;
 
 /* The native HTTPS transport (WinHTTP, redirects followed only within the allowed
