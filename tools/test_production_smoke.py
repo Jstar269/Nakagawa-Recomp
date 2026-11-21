@@ -4168,12 +4168,26 @@ class TestSanitizedBringup(unittest.TestCase):
     def test_report_schema_rejects_unwhitelisted_and_address_shaped_values(self):
         report = nk_cli._new_bringup_report()
         report["guest_pc"] = "0x08800000"
-        with self.assertRaisesRegex(ValueError, "non-whitelisted"):
+        with self.assertRaisesRegex(ValueError, "guest_pc.*not allowed"):
             nk_cli.validate_bringup_report(report)
         report = nk_cli._new_bringup_report()
         report["unsupported_imports"] = [{"library": "sceKernel", "nid_name": "0x08800000"}]
         with self.assertRaises(ValueError):
             nk_cli.validate_bringup_report(report)
+
+    def test_report_schema_is_read_once_and_reports_the_violating_path(self):
+        nk_cli.validate_bringup_report(nk_cli._new_bringup_report())
+        original = nk_cli.BRINGUP_SCHEMA_PATH
+        nk_cli.BRINGUP_SCHEMA_PATH = Path(tempfile.gettempdir()) / "nk-cli-missing-bringup-schema.json"
+        try:
+            nk_cli.validate_bringup_report(nk_cli._new_bringup_report())
+            nk_cli._minimal_valid_bringup_report(nk_cli._new_bringup_report())
+        finally:
+            nk_cli.BRINGUP_SCHEMA_PATH = original
+        bad = nk_cli._new_bringup_report()
+        bad["reached_stage"] = "no such stage"
+        with self.assertRaisesRegex(ValueError, r"^report\.reached_stage: expected one of"):
+            nk_cli.validate_bringup_report(bad)
 
     def test_illegal_opcode_key_never_crashes_the_route_or_loses_the_report(self):
         status, report = self._run_case(unsupported_opcodes={"REGIMM-OTHER": 1})

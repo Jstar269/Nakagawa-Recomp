@@ -18194,6 +18194,17 @@
       }
     },
     {
+      "path": "tools/json_schema_subset.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "json_schema_subset_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/library_build.py",
       "classification": "project_authored_attested",
       "evidence": {
