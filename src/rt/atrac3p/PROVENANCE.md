@@ -135,7 +135,7 @@ Each file below keeps its upstream licence header unchanged and carries, just
 under it, the dated notice `Modified by Nakagawa Recomp contributors, <date>.`
 (LGPL-2.1 section 2(a)); its changes are marked `LOCAL DELTA` in the file. The
 notices were added on 2026-11-17 and date each file's changes: `atrac3.c`
-2026-10-20 (the plain AT3 import, #1109) and 2026-11-17, `atrac3plus.c` and `sinewin.c`
+2026-10-20 (the plain AT3 import, #1109), 2026-11-17 and 2026-11-21, `atrac3plus.c` and `sinewin.c`
 2026-08-11 (the first public release), `atrac3plusdec.c` 2026-08-11 and
 2026-11-17.
 
@@ -156,6 +156,27 @@ notices were added on 2026-11-17 and date each file's changes: `atrac3.c`
   n4.4 bytes. (2026-11-17: the disabled `atrac3_decode_frame()` wrapper had lost
   two upstream comments, some blank lines and its `"Frame decoding error!"`
   log; those upstream bytes are restored.)
+- 2026-11-21 (vendored-update lane; new bytes need the maintainer's approval at
+  landing): `decode_channel_sound_unit()` sizes the inverse transform from
+  `subband_tab[num_subbands + 1]`, the one-line change of FFmpeg `master`
+  commit `0828a3b6366042a2d65188c89a1f5bf0ae52ec75` ("avcodec/atrac3: fix
+  inconsistent band num calculation", 2025-08-29; first in release `n8.1`,
+  not on `release/4.4`), applied as upstream wrote it, under a `LOCAL DELTA`
+  comment. `decode_spectrum()` codes subbands `0..num_subbands` inclusive, so
+  the last coded subband ends at `subband_tab[num_subbands + 1]`; n4.4 used
+  `subband_tab[num_subbands]` and, when that last subband is the first of a
+  256-line QMF band (subbands 18, 26 and 30), zeroed the band and dropped its
+  coded lines. Upstream changed its FATE references for the ATRAC3 samples
+  with the fix. The commit was fetched from `https://git.ffmpeg.org/ffmpeg.git`
+  (upstream `atrac3.c` blob `fe156fa4821e17e44f86927199939713b97bf4e2` before
+  it, `d91bdc79ac9e88366b9ced89f2ec9763d8e2d7ad` after; the patch, as
+  `git show 0828a3b6 -- libavcodec/atrac3.c` prints it, has SHA-256
+  `e0256cf6b5b57f6880199ef18bfd6fc8736382e32b4b52fc4584faadfec9b759`).
+  The hunk applies to the n4.4 `atrac3.c` without fuzz (`git apply --check`,
+  two lines earlier than in the parent). `test_at3_last_coded_subband_decoded` in
+  `tests/native/atrac3p_selftest.c` decodes one synthetic mono sound unit per
+  such subband through `atrac3_decode()`; on the n4.4 line each decodes to
+  all-zero PCM. This is FFmpeg's fix, not a PSP measurement.
 
 ### `libavcodec/atrac3plus.c`
 

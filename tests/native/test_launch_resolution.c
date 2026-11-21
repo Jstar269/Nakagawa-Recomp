@@ -24,6 +24,7 @@
 #include "nk_font.h"
 #include "nk_iso.h"
 #include "nk_launch.h"
+#include "nk_memstick_layout.h"
 #include "nk_pbp_homebrew.h"
 #include "nk_psp_keystore.h"
 #include "nk_platform.h"
@@ -1763,6 +1764,7 @@ static void test_write_build_identity_iso(const char *path,
     memcpy(pvd + 1, "CD001", 5);
     pvd[6] = 1u;
     test_write_iso_both_endian32(pvd + 158, ROOT_LBA);
+    pvd[181] = 0x02; /* the root record is a directory */
     test_write_iso_both_endian32(pvd + 166, SECTOR_SIZE);
     test_write_iso_directory(image + ROOT_LBA * SECTOR_SIZE,
                              ROOT_LBA, ROOT_LBA, game_name,
@@ -2958,6 +2960,615 @@ static void test_homebrew_folder_named_as_picked(const char *base) {
 #endif
 }
 
+/* The record text nk_memstick_layout_format writes for memstick_layout_sample (#2744). The exact
+ * bytes are pinned: a later player reads them, and a version-1 reader must too. */
+static const char k_memstick_sample_record[] =
+    "{\n"
+    "  \"schema_version\": 1,\n"
+    "  \"layout\": \"shared-memory-stick\",\n"
+    "  \"stick\": \"Memory Stick\",\n"
+    "  \"state\": \"moving\",\n"
+    "  \"written_by\": \"0.1.0\",\n"
+    "  \"sources\": [\n"
+    "    {\"slot\": \"ULUS99999\", \"status\": \"moved\", \"record\": "
+    "\".nakagawa-migration/ULUS99999.json\"},\n"
+    "    {\"slot\": \"XABC12345\", \"status\": \"pending\", \"reason\": "
+    "\"MIGRATION_SOURCE_UNREADABLE\"},\n"
+    "    {\"slot\": \"ULUS99999-backup-20261121\", \"status\": \"not-a-slot\"}\n"
+    "  ]\n"
+    "}\n";
+
+/* A folder name in katakana (U+30BB U+30FC U+30D6), as UTF-8. */
+static const char k_memstick_kana_slot[] = "\xe3\x82\xbb\xe3\x83\xbc\xe3\x83\x96";
+
+static void memstick_layout_sample(NkMemstickLayout *layout) {
+    char err[512];
+    assert(nk_memstick_layout_init(layout, NK_MEMSTICK_STATE_MOVING, "0.1.0"));
+    assert(nk_memstick_layout_put_source(layout, "ULUS99999", NK_MEMSTICK_SOURCE_MOVED,
+                                         ".nakagawa-migration/ULUS99999.json", NULL,
+                                         err, sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
+    assert(nk_memstick_layout_put_source(layout, "XABC12345", NK_MEMSTICK_SOURCE_PENDING, NULL,
+                                         "MIGRATION_SOURCE_UNREADABLE", err, sizeof(err)) ==
+           NK_MEMSTICK_LAYOUT_OK);
+    assert(nk_memstick_layout_put_source(layout, "ULUS99999-backup-20261121",
+                                         NK_MEMSTICK_SOURCE_NOT_A_SLOT, "", "", err,
+                                         sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
+}
+
+/* Parse `text` and expect `want`, with `code` in the message. */
+static void memstick_expect_parse(const char *text, NkMemstickLayoutResult want) {
+    NkMemstickLayout layout;
+    char err[512] = "";
+    NkMemstickLayoutResult got = nk_memstick_layout_parse(text, strlen(text), &layout, err,
+                                                          sizeof(err));
+    if (got != want) {
+        fprintf(stderr, "memstick parse: want %s, got %s (%s) for:\n%s\n",
+                nk_memstick_layout_result_code(want), nk_memstick_layout_result_code(got), err,
+                text);
+    }
+    assert(got == want);
+    if (want != NK_MEMSTICK_LAYOUT_OK) {
+        assert(err[0]);
+        assert(layout.source_count == 0u && layout.sources == NULL);
+        assert(layout.schema_version == 0);
+    }
+    nk_memstick_layout_free(&layout);
+}
+
+/* The write refuses `want` over the record `text`, naming `detail` when it is not NULL, and
+   leaves its bytes, and no temporary file. */
+static void memstick_expect_write_refused_because(const NkMemstickPaths *paths, const char *text,
+                                                  NkMemstickLayoutResult want,
+                                                  const char *detail) {
+    write_file_utf8(paths->record, text);
+    NkMemstickLayout layout;
+    memstick_layout_sample(&layout);
+    char err[1024] = "";
+    NkMemstickLayoutResult got = nk_memstick_layout_write(paths->saves, &layout, err,
+                                                          sizeof(err));
+    nk_memstick_layout_free(&layout);
+    if (got != want || (detail && !strstr(err, detail))) {
+        fprintf(stderr, "memstick write: want %s (%s), got %s (%s)\n",
+                nk_memstick_layout_result_code(want), detail ? detail : "-",
+                nk_memstick_layout_result_code(got), err);
+    }
+    assert(got == want);
+    assert(!detail || strstr(err, detail) != NULL);
+    assert(strstr(err, nk_memstick_layout_result_code(want)) != NULL);
+    assert(strstr(err, "kept and not replaced") != NULL);
+    assert_file_text(paths->record, text);
+    assert(!nk_platform_file_exists(paths->record_temp));
+    NkMemstickLayout read_back;
+    assert(nk_memstick_layout_read(paths->saves, &read_back, err, sizeof(err)) == want);
+    nk_memstick_layout_free(&read_back);
+}
+
+static void memstick_expect_write_refused(const NkMemstickPaths *paths, const char *text,
+                                          NkMemstickLayoutResult want) {
+    memstick_expect_write_refused_because(paths, text, want, NULL);
+}
+
+/* `count` copies of `ch` after `first` (when it is not NUL), as a string the caller frees. */
+static char *memstick_repeat(char first, char ch, size_t count) {
+    char *text = (char *)malloc(count + 1u);
+    assert(text);
+    memset(text, ch, count);
+    if (count && first) text[0] = first;
+    text[count] = '\0';
+    return text;
+}
+
+/* A version-1 record whose written_by is `written_by_bytes` digits and whose one source is a
+   pending slot of `slot_bytes` letters with a reason of `reason_bytes` capitals: the bounds of
+   the record's names. */
+static char *memstick_bound_record(size_t slot_bytes, size_t reason_bytes,
+                                   size_t written_by_bytes) {
+    char *slot = memstick_repeat('\0', 'a', slot_bytes);
+    char *reason = memstick_repeat('R', 'B', reason_bytes);
+    char *written_by = memstick_repeat('\0', '9', written_by_bytes);
+    size_t size = slot_bytes + reason_bytes + written_by_bytes + 512u;
+    char *text = (char *)malloc(size);
+    assert(text);
+    snprintf(text, size, "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+             "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"%s\", \"sources\": "
+             "[{\"slot\": \"%s\", \"status\": \"pending\", \"reason\": \"%s\"}]}\n",
+             written_by, slot, reason);
+    free(slot);
+    free(reason);
+    free(written_by);
+    return text;
+}
+
+/* A version-1 record listing `count` not-a-slot sources S00000, S00001, ... */
+static char *memstick_many_sources_record(size_t count) {
+    static const char head[] = "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", "
+                               "\"stick\": \"Memory Stick\", \"state\": \"ready\", "
+                               "\"written_by\": \"0.1.0\", \"sources\": [";
+    size_t size = sizeof(head) + count * 48u + 8u;
+    char *text = (char *)malloc(size);
+    assert(text);
+    size_t used = (size_t)snprintf(text, size, "%s", head);
+    for (size_t i = 0; i < count; ++i) {
+        used += (size_t)snprintf(text + used, size - used,
+                                 "%s{\"slot\": \"S%05u\", \"status\": \"not-a-slot\"}",
+                                 i ? ", " : "", (unsigned)i);
+        assert(used < size);
+    }
+    snprintf(text + used, size - used, "]}\n");
+    return text;
+}
+
+/* The record `text` on the disk at `paths` reads as a layout into *out. */
+static void memstick_expect_read_ok(const NkMemstickPaths *paths, const char *text,
+                                    NkMemstickLayout *out) {
+    write_file_utf8(paths->record, text);
+    char err[1024] = "";
+    NkMemstickLayoutResult got = nk_memstick_layout_read(paths->saves, out, err, sizeof(err));
+    if (got != NK_MEMSTICK_LAYOUT_OK) fprintf(stderr, "memstick read: %s\n", err);
+    assert(got == NK_MEMSTICK_LAYOUT_OK);
+}
+
+/* #2744: the shared Memory Stick is <saves>/Memory Stick on every platform and in every override,
+ * and its layout record <saves>/nakagawa-saves.json is schema_version 1, with a newer one refused
+ * by name (SAVES_LAYOUT_NEWER) and a damaged or unreadable one kept, never replaced. Synthetic
+ * folders only. */
+static void test_memstick_layout(const char *base, char sep) {
+    printf("[LAUNCH_TEST] Shared Memory Stick layout and record\n");
+    fflush(stdout);
+    char saves[700], expected[900], err[1024];
+
+    /* Every name of the layout is built in the saves folder. */
+    snprintf(saves, sizeof(saves), "%s%cmemstick-layout%csaves", base, sep, sep);
+    assert(nk_platform_mkdir_p(saves));
+    NkMemstickPaths paths;
+    assert(nk_memstick_layout_paths(saves, &paths));
+    assert(strcmp(paths.saves, saves) == 0);
+    snprintf(expected, sizeof(expected), "%s%cMemory Stick", saves, sep);
+    assert(strcmp(paths.stick, expected) == 0);
+    snprintf(expected, sizeof(expected), "%s%cMemory Stick.moving", saves, sep);
+    assert(strcmp(paths.staging, expected) == 0);
+    snprintf(expected, sizeof(expected), "%s%cnakagawa-saves.json", saves, sep);
+    assert(strcmp(paths.record, expected) == 0);
+    snprintf(expected, sizeof(expected), "%s%cnakagawa-saves.json.tmp", saves, sep);
+    assert(strcmp(paths.record_temp, expected) == 0);
+    snprintf(expected, sizeof(expected), "%s%c.nakagawa-migration", saves, sep);
+    assert(strcmp(paths.migration, expected) == 0);
+    snprintf(expected, sizeof(expected), "%s%cKept copies", saves, sep);
+    assert(strcmp(paths.kept_copies, expected) == 0);
+    snprintf(expected, sizeof(expected), "%s%c.nakagawa-stick.lock", saves, sep);
+    assert(strcmp(paths.lock, expected) == 0);
+    snprintf(expected, sizeof(expected), "%s%c.nakagawa-claims", saves, sep);
+    assert(strcmp(paths.claims, expected) == 0);
+    NkMemstickPaths refused;
+    assert(!nk_memstick_layout_paths("", &refused) && refused.stick[0] == '\0');
+    assert(!nk_memstick_layout_paths(NULL, &refused));
+    {
+        char long_root[NK_MAX_PATH];
+        memset(long_root, 'a', sizeof(long_root) - 16u);
+        long_root[sizeof(long_root) - 16u] = '\0';
+        assert(!nk_memstick_layout_paths(long_root, &refused) && refused.saves[0] == '\0');
+    }
+
+    /* The layout's own names are never an old per-game folder, in any case. */
+    assert(nk_memstick_layout_is_reserved_name("Memory Stick"));
+    assert(nk_memstick_layout_is_reserved_name("memory stick"));
+    assert(nk_memstick_layout_is_reserved_name("MEMORY STICK.MOVING"));
+    assert(nk_memstick_layout_is_reserved_name("Nakagawa-Saves.json"));
+    assert(nk_memstick_layout_is_reserved_name("nakagawa-saves.json.tmp"));
+    assert(nk_memstick_layout_is_reserved_name(".nakagawa-migration"));
+    assert(nk_memstick_layout_is_reserved_name("kept copies"));
+    assert(nk_memstick_layout_is_reserved_name(".nakagawa-stick.lock"));
+    assert(nk_memstick_layout_is_reserved_name(".nakagawa-claims"));
+    assert(!nk_memstick_layout_is_reserved_name("ULUS99999"));
+    assert(!nk_memstick_layout_is_reserved_name("XABC12345"));
+    assert(!nk_memstick_layout_is_reserved_name("unidentified"));
+    assert(!nk_memstick_layout_is_reserved_name("Memory Stick2"));
+    assert(!nk_memstick_layout_is_reserved_name(NULL));
+
+    /* The stick follows NK_PATH_SAVES: the platform's folder, and a data-root override's
+       (portable mode, --user-data-root). */
+    {
+        char platform_saves[NK_MAX_PATH];
+        assert(nk_platform_resolve_path(NK_PATH_SAVES, platform_saves, sizeof(platform_saves)));
+        NkMemstickPaths resolved;
+        assert(nk_memstick_layout_resolve_paths(&resolved));
+        assert(strcmp(resolved.saves, platform_saves) == 0);
+        snprintf(expected, sizeof(expected), "%s%cMemory Stick", platform_saves, sep);
+        assert(strcmp(resolved.stick, expected) == 0);
+#if defined(_WIN32) || defined(_WIN64)
+        /* Windows: %LOCALAPPDATA%\Nakagawa\saves\Memory Stick (the isolation sets it). */
+        const char *local = getenv("LOCALAPPDATA");
+        assert(local && local[0]);
+        snprintf(expected, sizeof(expected), "%s\\Nakagawa\\saves\\Memory Stick", local);
+        assert(strcmp(resolved.stick, expected) == 0);
+#elif defined(__ANDROID__)
+        const char *android = getenv("NK_ANDROID_DATA_DIR");
+        assert(android && android[0]);
+        snprintf(expected, sizeof(expected), "%s/saves/Memory Stick", android);
+        assert(strcmp(resolved.stick, expected) == 0);
+#endif
+        char portable[700];
+        snprintf(portable, sizeof(portable), "%s%cportable%cdata", base, sep, sep);
+        assert(nk_platform_set_app_data_dir_override(portable));
+        assert(nk_memstick_layout_resolve_paths(&resolved));
+        assert(nk_platform_set_app_data_dir_override(NULL));
+        snprintf(expected, sizeof(expected), "%s%csaves%cMemory Stick", portable, sep, sep);
+        assert(strcmp(resolved.stick, expected) == 0);
+        snprintf(expected, sizeof(expected), "%s%csaves%cnakagawa-saves.json", portable, sep,
+                 sep);
+        assert(strcmp(resolved.record, expected) == 0);
+        /* Resolving creates nothing. */
+        assert(!nk_platform_dir_exists(portable));
+    }
+
+    /* No record yet: the move has never run. */
+    NkMemstickLayout layout;
+    assert(nk_memstick_layout_read(saves, &layout, err, sizeof(err)) == NK_MEMSTICK_LAYOUT_ABSENT);
+    assert(strstr(err, "SAVES_LAYOUT_ABSENT") != NULL);
+    assert(layout.sources == NULL && layout.schema_version == 0);
+
+    /* A record round-trips byte for byte, through a temporary sibling that does not stay. */
+    memstick_layout_sample(&layout);
+    assert(nk_memstick_layout_write(saves, &layout, err, sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
+    nk_memstick_layout_free(&layout);
+    assert(layout.sources == NULL && layout.source_count == 0u);
+    assert_file_text(paths.record, k_memstick_sample_record);
+    assert(!nk_platform_file_exists(paths.record_temp));
+    assert(!nk_platform_dir_exists(paths.stick));  /* the record makes no stick */
+    assert(nk_memstick_layout_read(saves, &layout, err, sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
+    assert(layout.schema_version == 1 && layout.state == NK_MEMSTICK_STATE_MOVING);
+    assert(strcmp(layout.written_by, "0.1.0") == 0);
+    assert(layout.source_count == 3u);
+    assert(strcmp(layout.sources[0].slot, "ULUS99999") == 0);
+    assert(layout.sources[0].status == NK_MEMSTICK_SOURCE_MOVED);
+    assert(strcmp(layout.sources[0].record, ".nakagawa-migration/ULUS99999.json") == 0);
+    assert(layout.sources[0].reason[0] == '\0');
+    const NkMemstickSource *pending = nk_memstick_layout_find_source(&layout, "XABC12345");
+    assert(pending && pending->status == NK_MEMSTICK_SOURCE_PENDING);
+    assert(strcmp(pending->reason, "MIGRATION_SOURCE_UNREADABLE") == 0 && !pending->record[0]);
+    assert(!nk_memstick_layout_find_source(&layout, "xabc12345"));
+
+    /* A source replaced in place keeps its position; the state moves to ready. */
+    assert(nk_memstick_layout_put_source(&layout, "XABC12345", NK_MEMSTICK_SOURCE_MOVED,
+                                         ".nakagawa-migration/XABC12345.json", NULL, err,
+                                         sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
+    layout.state = NK_MEMSTICK_STATE_READY;
+    assert(layout.source_count == 3u && strcmp(layout.sources[1].slot, "XABC12345") == 0);
+    assert(nk_memstick_layout_write(saves, &layout, err, sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
+    nk_memstick_layout_free(&layout);
+    assert(nk_memstick_layout_read(saves, &layout, err, sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
+    assert(layout.state == NK_MEMSTICK_STATE_READY);
+    assert(layout.sources[1].status == NK_MEMSTICK_SOURCE_MOVED);
+    assert(strcmp(layout.sources[1].record, ".nakagawa-migration/XABC12345.json") == 0);
+
+    /* What a source must hold; a refusal leaves the layout as it was. */
+    {
+        static const struct {
+            const char *slot;
+            NkMemstickSourceStatus status;
+            const char *record;
+            const char *reason;
+        } refused_sources[] = {
+            {"ULJS00001", NK_MEMSTICK_SOURCE_MOVED, NULL, NULL},
+            {"ULJS00001", NK_MEMSTICK_SOURCE_CHANGED_AFTER_MOVE, "", NULL},
+            {"ULJS00001", NK_MEMSTICK_SOURCE_PENDING, NULL, ""},
+            {"ULJS00001", NK_MEMSTICK_SOURCE_PENDING, NULL, "not a code"},
+            {"ULJS00001", NK_MEMSTICK_SOURCE_NOT_A_SLOT, ".nakagawa-migration/x.json", NULL},
+            {"ULJS00001", NK_MEMSTICK_SOURCE_MOVED, "../escape.json", NULL},
+            {"ULJS00001", NK_MEMSTICK_SOURCE_MOVED, ".nakagawa-migration/../escape.json", NULL},
+            {"ULJS00001", NK_MEMSTICK_SOURCE_MOVED, ".nakagawa-migration/", NULL},
+            {"ULJS00001", NK_MEMSTICK_SOURCE_MOVED, ".nakagawa-migration\\x.json", NULL},
+            {"", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"..", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"a/b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"a\\b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"tab\there", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"\xff\xfe", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"Memory Stick", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"KEPT COPIES", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"ULJS00001", (NkMemstickSourceStatus)99, NULL, NULL},
+            /* Names Windows cannot make, refused on every platform so a record stays portable:
+               a forbidden character, a control byte, a trailing dot or space, a device name. */
+            {"a:b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"a<b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"a>b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"a|b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"a?b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"a*b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"my \"saves\"", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"\x01start", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"end\x1f", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"del\x7f", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"ULUS99999.", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"ULUS99999 ", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {".", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"CON", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"prn", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"Aux", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"nul.txt", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"NUL .tar.gz", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"COM1", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"com9.log", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"LPT1", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"lpt9.dat", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+        };
+        for (size_t i = 0; i < sizeof(refused_sources) / sizeof(refused_sources[0]); ++i) {
+            err[0] = '\0';
+            assert(nk_memstick_layout_put_source(&layout, refused_sources[i].slot,
+                                                 refused_sources[i].status,
+                                                 refused_sources[i].record,
+                                                 refused_sources[i].reason, err, sizeof(err)) ==
+                   NK_MEMSTICK_LAYOUT_INVALID);
+            assert(err[0]);
+            assert(layout.source_count == 3u);
+        }
+        assert(!nk_memstick_layout_find_source(&layout, "ULJS00001"));
+        /* Names near those classes are folders on every platform. */
+        static const char *const portable_slots[] = {
+            "CONSOLE", "COM10", "COM0", "LPT", "NULL.txt", "a.b", ".hidden", " lead", "x-con"};
+        for (size_t i = 0; i < sizeof(portable_slots) / sizeof(portable_slots[0]); ++i) {
+            NkMemstickLayout one;
+            assert(nk_memstick_layout_init(&one, NK_MEMSTICK_STATE_READY, "0.1.0"));
+            assert(nk_memstick_layout_put_source(&one, portable_slots[i],
+                                                 NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL, err,
+                                                 sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
+            nk_memstick_layout_free(&one);
+        }
+        /* A slot in another ASCII case is the same folder on NTFS and APFS: refused by name, and
+           the layout keeps its own. */
+        err[0] = '\0';
+        assert(nk_memstick_layout_put_source(&layout, "ulus99999", NK_MEMSTICK_SOURCE_NOT_A_SLOT,
+                                             NULL, NULL, err, sizeof(err)) ==
+               NK_MEMSTICK_LAYOUT_INVALID);
+        assert(strstr(err, "ulus99999") && strstr(err, "ULUS99999") &&
+               strstr(err, "another case"));
+        assert(layout.source_count == 3u && strcmp(layout.sources[0].slot, "ULUS99999") == 0 &&
+               layout.sources[0].status == NK_MEMSTICK_SOURCE_MOVED);
+        /* A layout that holds both anyway is refused when it is formatted or written. */
+        {
+            NkMemstickLayout twice;
+            memstick_layout_sample(&twice);
+            strcpy(twice.sources[2].slot, "ulus99999");
+            char *text = NULL;
+            err[0] = '\0';
+            assert(nk_memstick_layout_format(&twice, &text, NULL, err, sizeof(err)) ==
+                   NK_MEMSTICK_LAYOUT_INVALID && text == NULL);
+            assert(strstr(err, "ulus99999 is listed twice") != NULL);
+            nk_memstick_layout_free(&twice);
+        }
+        NkMemstickLayout bad;
+        assert(!nk_memstick_layout_init(&bad, NK_MEMSTICK_STATE_READY, ""));
+        assert(!nk_memstick_layout_init(&bad, NK_MEMSTICK_STATE_READY, "0.1.0\n"));
+        assert(!nk_memstick_layout_init(&bad, (NkMemstickState)7, "0.1.0"));
+        assert(bad.schema_version == 0 && bad.sources == NULL);
+    }
+    /* A quote or a backslash in written_by is escaped and reads back as itself; a name that is
+       not ASCII is kept as its UTF-8 bytes. */
+    snprintf(layout.written_by, sizeof(layout.written_by), "0.1.0 \"dev\" \\");
+    assert(nk_memstick_layout_put_source(&layout, k_memstick_kana_slot,
+                                         NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL, err,
+                                         sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
+    {
+        char *text = NULL;
+        size_t length = 0u;
+        assert(nk_memstick_layout_format(&layout, &text, &length, err, sizeof(err)) ==
+               NK_MEMSTICK_LAYOUT_OK);
+        assert(text && length == strlen(text));
+        assert(strstr(text, "\"written_by\": \"0.1.0 \\\"dev\\\" \\\\\",\n"));
+        NkMemstickLayout again;
+        assert(nk_memstick_layout_parse(text, length, &again, err, sizeof(err)) ==
+               NK_MEMSTICK_LAYOUT_OK);
+        assert(again.source_count == 4u);
+        assert(strcmp(again.written_by, "0.1.0 \"dev\" \\") == 0);
+        assert(nk_memstick_layout_find_source(&again, k_memstick_kana_slot));
+        nk_memstick_layout_free(&again);
+        free(text);
+    }
+    nk_memstick_layout_free(&layout);
+
+    /* An empty layout formats as an empty list and reads back. */
+    {
+        NkMemstickLayout empty;
+        assert(nk_memstick_layout_init(&empty, NK_MEMSTICK_STATE_READY, "0.1.0-dev"));
+        char *text = NULL;
+        assert(nk_memstick_layout_format(&empty, &text, NULL, err, sizeof(err)) ==
+               NK_MEMSTICK_LAYOUT_OK);
+        assert(strstr(text, "\"sources\": []\n}\n") != NULL);
+        memstick_expect_parse(text, NK_MEMSTICK_LAYOUT_OK);
+        free(text);
+        nk_memstick_layout_free(&empty);
+        empty.schema_version = 2;
+        assert(nk_memstick_layout_format(&empty, &text, NULL, err, sizeof(err)) ==
+               NK_MEMSTICK_LAYOUT_INVALID && text == NULL);
+        assert(nk_memstick_layout_write(saves, &empty, err, sizeof(err)) ==
+               NK_MEMSTICK_LAYOUT_INVALID);
+        assert(strstr(err, "SAVES_LAYOUT_INVALID") != NULL);
+    }
+
+    /* A newer record is SAVES_LAYOUT_NEWER whatever else it holds. */
+    memstick_expect_parse("{\"schema_version\": 2}", NK_MEMSTICK_LAYOUT_NEWER);
+    memstick_expect_parse("{\"schema_version\": 2, \"layout\": \"per-volume\", \"stick\": 7}",
+                          NK_MEMSTICK_LAYOUT_NEWER);
+    memstick_expect_parse("{\"schema_version\": 9223372036854775807}", NK_MEMSTICK_LAYOUT_NEWER);
+    /* Members a version-1 reader does not know are skipped. */
+    memstick_expect_parse("{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", "
+                          "\"stick\": \"Memory Stick\", \"state\": \"ready\", "
+                          "\"written_by\": \"0.1.1\", \"note\": {\"a\": [1]}, \"sources\": "
+                          "[{\"slot\": \"ULUS99999\", \"status\": \"moved\", \"record\": "
+                          "\".nakagawa-migration/ULUS99999.json\", \"bytes\": 12}]}",
+                          NK_MEMSTICK_LAYOUT_OK);
+    /* Anything else that is not a version-1 record is damaged. */
+    {
+        static const char *const damaged[] = {
+            "",
+            "not json",
+            "[1]",
+            "{}",
+            "{\"schema_version\": \"1\"}",
+            "{\"schema_version\": 1.5}",
+            "{\"schema_version\": 0}",
+            "{\"schema_version\": -3}",
+            "{\"schema_version\": 1, \"schema_version\": 2}",
+            "{\"schema_version\": 1}",
+            "{\"schema_version\": 1, \"layout\": \"per-game\", \"stick\": \"Memory Stick\", "
+            "\"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": []}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": \"ms0\", "
+            "\"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": []}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"done\", \"written_by\": \"0.1.0\", \"sources\": []}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"\", \"sources\": []}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\"}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"state\": \"moving\", \"written_by\": "
+            "\"0.1.0\", \"sources\": []}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": {}}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
+            "[\"ULUS99999\"]}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
+            "[{\"slot\": \"XABC12345\", \"status\": \"pending\"}]}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
+            "[{\"slot\": \"XABC12345\", \"status\": \"gone\"}]}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
+            "[{\"slot\": \"A\", \"status\": \"not-a-slot\"}, "
+            "{\"slot\": \"A\", \"status\": \"not-a-slot\"}]}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
+            "[{\"slot\": \"ulus99999\", \"status\": \"not-a-slot\"}, "
+            "{\"slot\": \"ULUS99999\", \"status\": \"not-a-slot\"}]}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
+            "[{\"slot\": \"COM1\", \"status\": \"not-a-slot\"}]}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
+            "[{\"slot\": \"../up\", \"status\": \"not-a-slot\"}]}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
+            "[{\"slot\": \"Memory Stick\", \"status\": \"not-a-slot\"}]}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
+            "[{\"slot\": \"ULUS99999\", \"status\": \"moved\", \"record\": \"../x.json\"}]}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
+            "[{\"slot\": \"ULUS99999\", \"status\": \"moved\", \"record\": 3}]}",
+        };
+        for (size_t i = 0; i < sizeof(damaged) / sizeof(damaged[0]); ++i) {
+            memstick_expect_parse(damaged[i], NK_MEMSTICK_LAYOUT_DAMAGED);
+        }
+    }
+
+    /* A newer or damaged record on the disk stops the write, and nothing changes. */
+    memstick_expect_write_refused(&paths, "{\"schema_version\": 2, \"layout\": \"next\"}\n",
+                                  NK_MEMSTICK_LAYOUT_NEWER);
+    memstick_expect_write_refused(&paths, "{\"schema_version\": 1, \"layout\": \"shared-",
+                                  NK_MEMSTICK_LAYOUT_DAMAGED);
+    memstick_expect_write_refused(&paths, "", NK_MEMSTICK_LAYOUT_DAMAGED);
+
+    /* Every length bound of the record: the largest value reads; one more is refused by name as
+       damaged, and the record is kept byte for byte. */
+    {
+        NkMemstickLayout bound;
+        char *text = memstick_bound_record(NK_MEMSTICK_SLOT_MAX_BYTES,
+                                           NK_MEMSTICK_REASON_MAX_BYTES,
+                                           NK_MEMSTICK_WRITTEN_BY_MAX_BYTES);
+        memstick_expect_read_ok(&paths, text, &bound);
+        assert(bound.source_count == 1u);
+        assert(strlen(bound.sources[0].slot) == NK_MEMSTICK_SLOT_MAX_BYTES);
+        assert(strlen(bound.sources[0].reason) == NK_MEMSTICK_REASON_MAX_BYTES);
+        assert(strlen(bound.written_by) == NK_MEMSTICK_WRITTEN_BY_MAX_BYTES);
+        nk_memstick_layout_free(&bound);
+        free(text);
+
+        text = memstick_bound_record(NK_MEMSTICK_SLOT_MAX_BYTES + 1u,
+                                     NK_MEMSTICK_REASON_MAX_BYTES,
+                                     NK_MEMSTICK_WRITTEN_BY_MAX_BYTES);
+        memstick_expect_write_refused_because(&paths, text, NK_MEMSTICK_LAYOUT_DAMAGED,
+                                              "slot is not a folder name the record can hold");
+        free(text);
+        text = memstick_bound_record(9u, NK_MEMSTICK_REASON_MAX_BYTES + 1u,
+                                     NK_MEMSTICK_WRITTEN_BY_MAX_BYTES);
+        memstick_expect_write_refused_because(&paths, text, NK_MEMSTICK_LAYOUT_DAMAGED,
+                                              "has a reason that is not a named code");
+        free(text);
+        text = memstick_bound_record(9u, NK_MEMSTICK_REASON_MAX_BYTES,
+                                     NK_MEMSTICK_WRITTEN_BY_MAX_BYTES + 1u);
+        memstick_expect_write_refused_because(&paths, text, NK_MEMSTICK_LAYOUT_DAMAGED,
+                                              "written_by is not 1 to 63 printable ASCII");
+        free(text);
+
+        text = memstick_many_sources_record(NK_MEMSTICK_LAYOUT_MAX_SOURCES);
+        memstick_expect_read_ok(&paths, text, &bound);
+        assert(bound.source_count == NK_MEMSTICK_LAYOUT_MAX_SOURCES);
+        nk_memstick_layout_free(&bound);
+        free(text);
+        text = memstick_many_sources_record(NK_MEMSTICK_LAYOUT_MAX_SOURCES + 1u);
+        memstick_expect_write_refused_because(&paths, text, NK_MEMSTICK_LAYOUT_DAMAGED,
+                                              "it lists more than 16384 sources");
+        free(text);
+
+        /* The pinned record, padded with spaces to the byte bound, and one byte past it. */
+        size_t sample = strlen(k_memstick_sample_record);
+        text = (char *)malloc(NK_MEMSTICK_LAYOUT_MAX_BYTES + 2u);
+        assert(text);
+        memcpy(text, k_memstick_sample_record, sample);
+        memset(text + sample, ' ', NK_MEMSTICK_LAYOUT_MAX_BYTES - sample);
+        text[NK_MEMSTICK_LAYOUT_MAX_BYTES] = '\0';
+        memstick_expect_read_ok(&paths, text, &bound);
+        assert(bound.source_count == 3u);
+        nk_memstick_layout_free(&bound);
+        text[NK_MEMSTICK_LAYOUT_MAX_BYTES] = ' ';
+        text[NK_MEMSTICK_LAYOUT_MAX_BYTES + 1u] = '\0';
+        memstick_expect_write_refused_because(&paths, text, NK_MEMSTICK_LAYOUT_DAMAGED,
+                                              "it is larger than 16777216 bytes");
+        free(text);
+    }
+
+    /* A folder where the record belongs is damaged, and kept. */
+    assert(nk_remove_utf8(paths.record) == 0);
+    assert(nk_platform_mkdir_p(paths.record));
+    assert(nk_memstick_layout_read(saves, &layout, err, sizeof(err)) ==
+           NK_MEMSTICK_LAYOUT_DAMAGED);
+    memstick_layout_sample(&layout);
+    assert(nk_memstick_layout_write(saves, &layout, err, sizeof(err)) ==
+           NK_MEMSTICK_LAYOUT_DAMAGED);
+    assert(nk_platform_dir_exists(paths.record));
+    assert(nk_platform_remove_empty_dir(paths.record));
+
+    /* A write that cannot make its temporary file leaves the record as it was. */
+    assert(nk_memstick_layout_write(saves, &layout, err, sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
+    assert(nk_platform_mkdir_p(paths.record_temp));
+    assert(nk_memstick_layout_put_source(&layout, "ULJS00002", NK_MEMSTICK_SOURCE_LEFT_BY_CHOICE,
+                                         NULL, "MIGRATION_SOURCE_CHANGING", err, sizeof(err)) ==
+           NK_MEMSTICK_LAYOUT_OK);
+    assert(nk_memstick_layout_write(saves, &layout, err, sizeof(err)) == NK_MEMSTICK_LAYOUT_IO);
+    assert(strstr(err, "SAVES_LAYOUT_IO") != NULL);
+    assert_file_text(paths.record, k_memstick_sample_record);
+    assert(nk_platform_remove_empty_dir(paths.record_temp));
+    nk_memstick_layout_free(&layout);
+
+    /* A missing saves folder cannot be written to. */
+    {
+        char missing[800];
+        snprintf(missing, sizeof(missing), "%s%cno-such-saves", saves, sep);
+        memstick_layout_sample(&layout);
+        assert(nk_memstick_layout_write(missing, &layout, err, sizeof(err)) ==
+               NK_MEMSTICK_LAYOUT_IO);
+        assert(!nk_platform_dir_exists(missing));
+        nk_memstick_layout_free(&layout);
+    }
+    assert(nk_memstick_layout_read(NULL, &layout, err, sizeof(err)) ==
+           NK_MEMSTICK_LAYOUT_INVALID);
+    assert(strcmp(nk_memstick_layout_result_code((NkMemstickLayoutResult)42),
+                  "SAVES_LAYOUT_INVALID") == 0);
+    nk_memstick_layout_free(NULL);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return write_launch_environment_probe();
@@ -2982,6 +3593,7 @@ int main(int argc, char **argv) {
     snprintf(base, sizeof(base), "%s%claunch_resolution_tests", cache_dir, sep);
     assert(nk_platform_mkdir_p(base));
     test_homebrew_folder_named_as_picked(base);
+    test_memstick_layout(base, sep);
 
     char iso_path[700];
     snprintf(iso_path, sizeof(iso_path), "%s%cgame.iso", base, sep);

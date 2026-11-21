@@ -1167,6 +1167,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     s_callbacks = NULL;
     s_callbacks_len = 0u;
     s_callbacks_cap = 0u;
+    s_callback_dispatch_depth = 0;
     memset(s_memstick_callbacks, 0, sizeof(s_memstick_callbacks));
     s_memstick_callback_count = 0u;
     s_exit_cb_uid = 0u;

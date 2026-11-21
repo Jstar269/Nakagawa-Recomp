@@ -207,7 +207,7 @@ directory, so it does not apply to the data root.
 | `title` | Manifest `id`, display name, kind, raw manifest SHA-256, and protected-semantics digest. |
 | `inputs` | SHA-256 for the manifest, executable ELF, selected PRXs with load addresses, and optional PSP header. Absolute input paths are omitted. |
 | `title_input_identity` | Versioned exact local inputs: manifest/profile and schema, DISC_ID/region/DISC_VERSION, selected PARAM.SFO facts, ISO container facts (format, volume ID, size, PVD sector and sector size; the other keys `inspect_iso` reports, such as the `format_warnings` notes and the `source_format` of a compressed image, are not part of the record), decrypted main executable name/hash, required guest PRX names/hashes, raw selected executable and required module hashes from their ISO members, and optional PSP-header hash/magic. Retail hashes remain only in per-user package data. |
-| `runtime` | `CpuState` ABI version and header hash, resolved guest run entry, runtime contract, bindings, and required bindings. |
+| `runtime` | `CpuState` ABI version and header hash, resolved guest run entry, runtime contract, bindings, and required bindings. Packages built since [issue #2875](https://github.com/Jstar269/nakagawa-recomp/issues/2875) add `source_commit`, the runtime source commit (`{"commit", "origin", "reason"}`): from the install record `tools/stage_install.py` wrote beside an installed `source/` tree (`install-record`), else the checkout's `HEAD` (`git`), else `null` with origin `unknown` and the reason, never a guess. The player accepts packages without it; a malformed record is INCOMPATIBLE. A game's problem report names it on a `Runtime source:` line beside the player's commit. |
 | `executable` | Relative native executable path and hash plus the guest ELF entry address. |
 | `generated_objects` | Empty in v3 runtime packages. V2 packages retain their sorted object paths and hashes. Compiled objects stay in the bounded object cache; generated C stays in the AOT-stage cache for compatible rebuilds. |
 | `required_local_assets` | Manifest title-data/resource roots, selected or optional guest PRXs, and host SDL3/SDL3_ttf/Vulkan runtime requirements. These are references; title assets are not copied into the package. |
@@ -278,7 +278,7 @@ byte-level detection would require hashing package contents on every lookup.
 
 `build-report.json` has format `nakagawa-build-report`, schema version `1`, the
 same `input_hashes`, Python/planner/analyzer/codegen/Make versions, the compiler
-identity, runtime ABI, and deterministic coverage counts (`analyzed_functions`,
+identity, runtime ABI, the same runtime source commit record as `runtime_source` (optional), and deterministic coverage counts (`analyzed_functions`,
 `aot_entries`, callable/resume entries, fallbacks, and unsupported imports,
 instructions, and regions). `coverage.static` is the total of the code generator's
 `<game>_recomp_coverage.json`: owned, unowned, translated and interpreter-only words and
@@ -621,7 +621,7 @@ The folders are the per-user ones of [`SETUP.md`](SETUP.md) (on Windows
 | `<data>/title-input-identities/<DISC_ID>/title-input-identity.json` | `schema_version` 2 | Rebuilt by the next package build | Read as absent; the package card asks for a rebuild |
 | `<data>/fonts/v2/manifest.json` | `schema_version` 2, also named by the folder | n/a (v0.0.1 wrote `v2`) | A later layout gets a folder of its own and leaves `v2` as it is |
 | `<data>/experimental/<DISC_ID>/profile.json` | `schema_version` 1 | n/a | Not accepted: the package check fails closed |
-| `<data>/registry/system.json` (the PSP system settings a game changes; `src/rt/hle.c`, `SR_SYSTEM_REGISTRY` overrides the path) | `schema_version` 1, the only version so far (v0.0.1 and later) | (none exist) | Ignored: the game sees the modeled defaults, and the next registry flush moves the file to `system.json.corrupt` (kept, not deleted) before writing a fresh one |
+| `<data>/registry/system.json` (the PSP system settings a game changes; `src/rt/hle.c`, `SR_SYSTEM_REGISTRY` overrides the path) | `schema_version` 1, the only version so far (v0.0.1 and later) | (none exist) | Ignored: the game sees the modeled defaults, and the next registry flush (at start-up, when the launcher's host time zone is seeded) moves the file to `system.json.corrupt` (kept, not deleted) before writing a fresh one |
 
 Logs, the update download (kept only when its SHA-256 matches) and the
 content-addressed package cache (section 6) hold no state a user could lose.

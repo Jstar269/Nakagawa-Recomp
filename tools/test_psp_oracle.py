@@ -120,6 +120,40 @@ import hle_sources  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
 
 
+#: The PSP probe harness every probe_*.c family source includes (tests/fixtures/psp_oracle).
+PROBE_HARNESS_HEADER = "probe_hle_harness.h"
+PROBE_HARNESS_INCLUDE = '#include "probe_hle_harness.h"'
+PROBE_HARNESS_NO_LIFECYCLE = "#define PROBE_HLE_HARNESS_NO_LIFECYCLE"
+#: The functions only the harness header may define.
+PROBE_HARNESS_FUNCTIONS = ("hle_write", "hle_begin", "hle_step", "hle_emit", "hle_record",
+                           "hle_host0_roundtrip", "hle_finish", "hle_park_until_stop")
+
+
+def probe_source(path: Path) -> str:
+    """A probe source with its harness include replaced by the harness text it compiles.
+
+    The source checks read a probe the way the compiler does: the include line becomes the
+    header's body (the lifecycle block left out where the probe defines
+    PROBE_HLE_HARNESS_NO_LIFECYCLE), which is the text the probe carried before the harness
+    moved into the header."""
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    at = [i for i, line in enumerate(lines) if line.startswith(PROBE_HARNESS_INCLUDE)]
+    if not at:
+        return text
+    header = (path.parent / PROBE_HARNESS_HEADER).read_text(encoding="utf-8")
+    body = header[header.index("static int s_log_failed;\n"):]
+    common, rest = body.split("#ifndef PROBE_HLE_HARNESS_NO_LIFECYCLE\n")
+    lifecycle = rest.split("#endif /* PROBE_HLE_HARNESS_NO_LIFECYCLE */\n")[0]
+    start = at[0]
+    if start and lines[start - 1].startswith(PROBE_HARNESS_NO_LIFECYCLE):
+        start -= 1
+        harness = common.rstrip("\n") + "\n"
+    else:
+        harness = common + lifecycle
+    return "".join(lines[:start]) + harness + "".join(lines[at[0] + 1:])
+
+
 def _matched(match: re.Match[str] | None) -> re.Match[str]:
     """Return a regex match at call sites that already rely on it being present."""
     return cast(re.Match[str], match)
@@ -5891,7 +5925,7 @@ class GuTeardownContractTests(unittest.TestCase):
 
     def test_the_callback_only_check_refuses_a_path_that_skips_the_unset(self) -> None:
         # probe_hle_issues.c sets a GE callback without sceGuInit (null-code-registration).
-        source = (self.fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        source = probe_source(self.fixture / "probe_hle_issues.c")
         self.assertNotIn("sceGuInit(", _c_code(source))
         set_block = "        ge_callback_id = sceGeSetCallback(&ge_callback);\n    }\n"
         unset = "    const int ge_unset = ge_callback_id >= 0 ? sceGeUnsetCallback(ge_callback_id) : -1;\n"
@@ -7106,7 +7140,7 @@ class HleMeasureProbeTests(unittest.TestCase):
         cls.root = Path(__file__).resolve().parents[1]
         cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
         cls.makefile = (cls.fixture / "Makefile").read_text(encoding="utf-8")
-        cls.probe = (cls.fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(cls.fixture / "probe_hle_measure.c")
         cls.threadman = (cls.fixture / "threadman_user_imports.S").read_text(encoding="utf-8")
         cls.manifest = json.loads((cls.root / "tools" / "psp_oracle" / "manifest.json")
                                   .read_text(encoding="utf-8"))
@@ -7246,7 +7280,8 @@ class HleMeasureProbeTests(unittest.TestCase):
             with self.subTest(block=block):
                 self.assertIn(f"$(BUILD_DIR)/{block.replace('.S', '.o')}: {block}\n",
                               self.makefile)
-        self.assertIn("$(BUILD_DIR)/probe_hle_measure.o: probe_hle_measure.c\n", self.makefile)
+        self.assertIn("$(BUILD_DIR)/probe_hle_measure.o: probe_hle_measure.c probe_hle_harness.h\n",
+                      self.makefile)
 
     # ---- import tables -----------------------------------------------------------
 
@@ -7541,7 +7576,7 @@ class HleMeasureProbeTests(unittest.TestCase):
                           "HLE_ISE_FILE", "HLE_ISE_MISSING", "HLE_ISE_FILE", "HLE_ISE_MISSING",
                           # hle-io-trunc: its ms0: file, then the same file again (the cell).
                           "HLE_IT_PATH", "HLE_IT_PATH"])
-        issues = (self.fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        issues = probe_source(self.fixture / "probe_hle_issues.c")
         self.assertNotRegex(issues, r"\bsceIoRemove\s*\(")
 
     def test_probe_emits_the_protocol_lines_and_the_log_the_runner_reads(self) -> None:
@@ -8605,9 +8640,7 @@ class KernelEntryNullcodeProbeTests(unittest.TestCase):
     def test_build_routes_use_the_reserved_case_id_and_existing_probe_source(self) -> None:
         root = Path(__file__).resolve().parents[1]
         makefile = (root / "tests" / "fixtures" / "psp_oracle" / "Makefile").read_text(encoding="utf-8")
-        probe = (root / "tests" / "fixtures" / "psp_oracle" / "probe_hle_issues.c").read_text(
-            encoding="utf-8"
-        )
+        probe = probe_source(root / "tests" / "fixtures" / "psp_oracle" / "probe_hle_issues.c")
         threadman = (root / "tests" / "fixtures" / "psp_oracle" / "threadman_user_imports.S").read_text(
             encoding="utf-8"
         )
@@ -8673,8 +8706,8 @@ class KernelEntryNullcodeProbeTests(unittest.TestCase):
             _makefile_route_objs(makefile, "no-such-case")
 
     def test_interrupt_and_ge_null_handlers_are_registered_but_never_enabled_or_queued(self) -> None:
-        probe = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
-                 / "probe_hle_issues.c").read_text(encoding="utf-8")
+        probe = probe_source(Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+                             / "probe_hle_issues.c")
         start = probe.index("static int ke_null_code_registration(void)\n{")
         end = probe.index("#endif /* HLE_CASE_NULL_CODE_REGISTRATION */", start)
         registration = probe[start:end]
@@ -8824,8 +8857,8 @@ class HleIssuesProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.root = Path(__file__).resolve().parents[1]
         cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (cls.fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
-        cls.measure = (cls.fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(cls.fixture / "probe_hle_issues.c")
+        cls.measure = probe_source(cls.fixture / "probe_hle_measure.c")
         cls.makefile = (cls.fixture / "Makefile").read_text(encoding="utf-8")
         cls.threadman = (cls.fixture / "threadman_user_imports.S").read_text(encoding="utf-8")
         cls.manifest = json.loads((cls.root / "tools" / "psp_oracle" / "manifest.json")
@@ -8872,7 +8905,7 @@ class HleIssuesProbeTests(unittest.TestCase):
                 self.assertIsNotNone(match, case)
                 self.assertEqual(_matched(match).group(1).split(), ["$(BUILD_DIR)/probe_hle_issues.o",
                                                                     "$(BUILD_DIR)/threadman_user_imports.o"])
-        self.assertIn("$(BUILD_DIR)/probe_hle_issues.o: probe_hle_issues.c hle_vfpu_cells.h\n"
+        self.assertIn("$(BUILD_DIR)/probe_hle_issues.o: probe_hle_issues.c hle_vfpu_cells.h probe_hle_harness.h\n"
                       "\t$(CC) $(CFLAGS) -c $< -o $@\n", self.makefile)
         self.assertIn("ifneq ($(filter $(BUILD_DIR)/probe_hle_issues.o,$(OBJS)),)\n"
                       "PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp\nendif\n", self.makefile)
@@ -8942,6 +8975,43 @@ class HleIssuesProbeTests(unittest.TestCase):
                                       if f.library == "ThreadManForUser"}, threadman)
 
     # ---- shared code ------------------------------------------------------------------
+
+    def test_every_family_probe_includes_the_one_harness_and_defines_none_of_it(self) -> None:
+        header = (self.fixture / PROBE_HARNESS_HEADER).read_text(encoding="utf-8")
+        header_code = _c_code(header)
+        for name in PROBE_HARNESS_FUNCTIONS:
+            with self.subTest(header=name):
+                self.assertEqual(len(re.findall(rf"^static \w+ {name}\(", header_code, re.M)), 1)
+        # The module-lifecycle block is the header's only optional part.
+        self.assertEqual(header_code.count("#ifndef PROBE_HLE_HARNESS_NO_LIFECYCLE"), 1)
+        probes = sorted(self.fixture.glob("probe_*.c"))
+        including = [path.name for path in probes
+                     if PROBE_HARNESS_INCLUDE in path.read_text(encoding="utf-8")]
+        self.assertEqual(including, [
+            "probe_dmac_timing.c", "probe_ge_sample.c", "probe_hle_issues.c", "probe_hle_measure.c",
+            "probe_insn_trace.c", "probe_kernel_semantics.c", "probe_memory_edge.c",
+            "probe_module_start.c"])
+        for path in probes:
+            raw = _c_code(path.read_text(encoding="utf-8"))
+            for name in PROBE_HARNESS_FUNCTIONS:
+                with self.subTest(probe=path.name, function=name):
+                    self.assertNotRegex(raw, rf"(?m)^static \w+ {name}\(")
+            if path.name in including:
+                with self.subTest(probe=path.name):
+                    self.assertEqual(raw.count(PROBE_HARNESS_INCLUDE), 1)
+        # probe_module_start.c alone has its own module_start and no parked main.
+        module_start = (self.fixture / "probe_module_start.c").read_text(encoding="utf-8")
+        self.assertIn(PROBE_HARNESS_NO_LIFECYCLE + " ", module_start)
+        self.assertEqual([path.name for path in probes
+                          if PROBE_HARNESS_NO_LIFECYCLE in path.read_text(encoding="utf-8")],
+                         ["probe_module_start.c"])
+        # The fixture Makefile rebuilds every including object when the header changes.
+        for name in including:
+            stem = name[:-2]
+            with self.subTest(rule=stem):
+                rule = next(line for line in self.makefile.splitlines()
+                            if line.startswith(f"$(BUILD_DIR)/{stem}.o: {name}"))
+                self.assertIn(PROBE_HARNESS_HEADER, rule.split())
 
     def test_writer_round_trip_and_lifecycle_are_the_probe_hle_measure_copies(self) -> None:
         for signature in self.SHARED_FUNCTIONS:
@@ -10023,7 +10093,7 @@ class VfpuFormsProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
                               .read_text(encoding="utf-8"))
@@ -10123,7 +10193,7 @@ class IntrCauseProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
                               .read_text(encoding="utf-8"))
@@ -10306,7 +10376,7 @@ class VfpuFunnelProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
                               .read_text(encoding="utf-8"))
@@ -10428,7 +10498,7 @@ class VfpuSortProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
                               .read_text(encoding="utf-8"))
@@ -10547,7 +10617,7 @@ class VfpuUnmodeledProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -10689,7 +10759,7 @@ class VfpuQuadWbProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -10835,7 +10905,7 @@ class VfpuConvertProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -11020,7 +11090,7 @@ class VfpuVus2iProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -11176,7 +11246,7 @@ class VfpuBasicArithProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -11345,7 +11415,7 @@ class VfpuWideDotProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -11519,7 +11589,7 @@ class VfpuMfvMtvProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -11652,7 +11722,7 @@ class VfpuConstantsProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -11801,7 +11871,7 @@ class VfpuRoundSepProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -11972,7 +12042,7 @@ class VfpuPrefixStateProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -12181,7 +12251,7 @@ class VfpuWiderOpsProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -12383,7 +12453,7 @@ class VfpuReservedWidthsProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -12520,7 +12590,7 @@ class VfpuCcCmovProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -12663,7 +12733,7 @@ class VfpuForms2ProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
                               .read_text(encoding="utf-8"))
@@ -13031,8 +13101,8 @@ class GeSampleProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
-        cls.issues = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_ge_sample.c")
+        cls.issues = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_SAMPLE\n\n")
         end = cls.probe.index("#endif /* GE_CASE_SAMPLE */", start)
@@ -13115,8 +13185,8 @@ class DmaTimingProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_dmac_timing.c").read_text(encoding="utf-8")
-        cls.issues = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_dmac_timing.c")
+        cls.issues = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
                                   .read_text(encoding="utf-8"))
@@ -13238,8 +13308,8 @@ class MemoryEdgeProbeTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.header = (fixture / "mem_edge.h").read_text(encoding="utf-8")
-        cls.probe = (fixture / "probe_memory_edge.c").read_text(encoding="utf-8")
-        cls.issues = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_memory_edge.c")
+        cls.issues = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.code = _c_code(cls.probe)
         cls.bodies = _c_function_bodies(cls.code)
@@ -13251,7 +13321,7 @@ class MemoryEdgeProbeTests(unittest.TestCase):
                       self.makefile)
         self.assertIn("ifneq ($(filter $(BUILD_DIR)/probe_memory_edge.o,$(OBJS)),)\n"
                       "PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp\n", self.makefile)
-        self.assertIn("$(BUILD_DIR)/probe_memory_edge.o: probe_memory_edge.c mem_edge.h\n",
+        self.assertIn("$(BUILD_DIR)/probe_memory_edge.o: probe_memory_edge.c mem_edge.h probe_hle_harness.h\n",
                       self.makefile)
         start = self.makefile.index("ifeq ($(CASE),memory-edge)\nUSER_MODE_IMPORT_GATE_ARGS")
         block = self.makefile[start:self.makefile.index("\nendif\n", start)]
@@ -13410,7 +13480,7 @@ class GeThroughZProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_ge_sample.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         cls.doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
@@ -13612,7 +13682,7 @@ class GeRasterProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_ge_sample.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.selftest = (root / "tests" / "native" / "hle_thread_selftest.c").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_RASTER\n\n")
@@ -13764,7 +13834,7 @@ class _GeNewCaseMixin:
     def _load(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_ge_sample.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         cls.doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
@@ -14631,8 +14701,8 @@ class KernelSemanticsProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_kernel_semantics.c").read_text(encoding="utf-8")
-        cls.issues = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_kernel_semantics.c")
+        cls.issues = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.code = _c_code(cls.probe)
         cls.bodies = _c_function_bodies(cls.code)
@@ -15214,7 +15284,7 @@ class SafeScalarProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.root = Path(__file__).resolve().parents[1]
         fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_kernel_semantics.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_kernel_semantics.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.threadman = (fixture / "threadman_user_imports.S").read_text(encoding="utf-8")
         cls.kernel_library = (fixture / "kernel_library_tls_imports.S").read_text(encoding="utf-8")
@@ -15678,7 +15748,7 @@ class HleIoSeekMemoryStickSetupAndCleanupTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_measure.c")
 
     def _body(self, function: str) -> str:
         start = self.probe.index(f"static void {function}(void)\n{{\n")
@@ -15731,7 +15801,7 @@ class HleUtilityNoneProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_measure.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
 
@@ -15792,7 +15862,7 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_measure.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
 
@@ -16049,7 +16119,7 @@ class HleUtilityAttendedProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.root = Path(__file__).resolve().parents[1]
         fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_measure.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || ")
@@ -16244,7 +16314,7 @@ class HleUtilityDialogsProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_measure.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || "
@@ -16419,7 +16489,7 @@ class HleNicknameLimitProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_measure.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_NICKNAME_LIMIT\n\n")
         cls.section = cls.probe[start:cls.probe.index("#endif /* HLE_CASE_NICKNAME_LIMIT */")]
@@ -16551,7 +16621,7 @@ class HleSavedataNodataProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_hle_measure.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
         cls.doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
@@ -16769,7 +16839,7 @@ class GeMipProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_ge_sample.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.selftest = (root / "tests" / "native" / "hle_thread_selftest.c").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_MIP\n\n")
@@ -16850,7 +16920,7 @@ class GeLightProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_ge_sample.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_LIGHT\n\n")
         end = cls.probe.index("#endif /* GE_CASE_LIGHT */", start)
@@ -16934,7 +17004,7 @@ class GeOverlapProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_ge_sample.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_OVERLAP\n\n")
         end = cls.probe.index("#endif /* GE_CASE_OVERLAP */", start)
@@ -17096,7 +17166,7 @@ class GeWeightProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_ge_sample.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_WEIGHT\n\n")
         end = cls.probe.index("#endif /* GE_CASE_WEIGHT */", start)
@@ -17210,7 +17280,7 @@ class GeRttProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_ge_sample.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_RTT\n\n")
         end = cls.probe.index("#endif /* GE_CASE_RTT */", start)
@@ -17391,7 +17461,7 @@ class GeClutMipProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_ge_sample.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_CLUT_MIP\n\n")
         end = cls.probe.index("#endif /* GE_CASE_CLUT_MIP */", start)
@@ -17515,8 +17585,8 @@ class ModuleStartProbeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests" / "fixtures" / "psp_oracle"
-        cls.probe = (fixture / "probe_module_start.c").read_text(encoding="utf-8")
-        cls.issues = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(fixture / "probe_module_start.c")
+        cls.issues = probe_source(fixture / "probe_hle_issues.c")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.threadman = (fixture / "threadman_user_imports.S").read_text(encoding="utf-8")
         cls.code = _c_code(cls.probe)
