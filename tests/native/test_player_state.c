@@ -14091,7 +14091,7 @@ static void test_package_case_sibling_is_outside(void) {
  * nothing, in Settings, in the prompt and in a hand-edited settings file. */
 static void test_player_nickname(void) {
     static const char *const refused[] = {
-        "", "a\x01" "b", "tab\tname", "del\x7F", "c1 \xC2\x85", "\xC3\x28", "\xED\xA0\x80",
+        "", ("a\x01" "b"), "tab\tname", "del\x7F", "c1 \xC2\x85", "\xC3\x28", "\xED\xA0\x80",
     };
     char sep = nk_platform_path_separator();
     char cache_root[512], root[700], path[800], text[400];
