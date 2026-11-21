@@ -1618,6 +1618,9 @@ static int test_scroll_container(void) {
         push_nav(ui, NK_UI_DIR_DOWN);
         (void)draw_scroll_list(ui, NULL);
     }
+    CHECK(NK_UI_FOCUS_RING_OUTSET >= NK_UI_FOCUS_RING_GAP + NK_UI_FOCUS_RING_WIDTH &&
+          NK_UI_FOCUS_RING_OUTSET >= NK_UI_FOCUS_HC_KEYLINE * 2.0f + NK_UI_FOCUS_HC_RING_WIDTH,
+          "the ring outset reaches as far as either focus ring");
     CHECK(nk_ui_focused(ui) == 47u, "focus walks down to row 47");
     CHECK(scroll_offset(ui) == 252.0f + NK_UI_FOCUS_RING_OUTSET,
           "the list scrolls just enough to show the focused row and its focus ring");
