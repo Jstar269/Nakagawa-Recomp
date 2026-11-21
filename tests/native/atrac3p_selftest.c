@@ -495,9 +495,9 @@ static void test_at3_last_coded_subband_decoded(void)
         put_bits_msb(frame, &pos, 1, 1);       /* constant-length coding */
         for (i = 0; i <= ns; i++)
             put_bits_msb(frame, &pos, i == ns ? 2u : 0u, 3); /* only ns coded */
-        put_bits_msb(frame, &pos, 15, 6);      /* scale factor 1.0 */
+        put_bits_msb(frame, &pos, 45, 6);      /* scale factor 2^10 */
         for (i = 0; i < subband_sizes[t]; i++)
-            put_bits_msb(frame, &pos, 1, 3);   /* mantissa +1 */
+            put_bits_msb(frame, &pos, 3, 3);   /* mantissa +3 */
 
         CHECK(atrac3_create(1, (int)sizeof(frame), at3_wav_mono, &at3) == 0,
               "AT3 last-subband create");
@@ -508,6 +508,8 @@ static void test_at3_last_coded_subband_decoded(void)
         CHECK(samples == ATRAC3_FRAME_SAMPLES, "AT3 last-subband nb_samples");
         for (i = 0; i < ATRAC3_FRAME_SAMPLES; i++)
             nonzero += pcm[i] != 0;
+        if (nonzero == 0)
+            fprintf(stderr, "  last coded subband %d decoded to all-zero PCM\n", ns);
         CHECK(nonzero > 0, "AT3 last coded subband starting a band reaches the PCM");
         atrac3_destroy(at3);
     }
