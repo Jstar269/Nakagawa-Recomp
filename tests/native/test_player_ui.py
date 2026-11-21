@@ -2724,9 +2724,10 @@ class NativePlayerUiTests(unittest.TestCase):
                         self.assertEqual(completed.stdout, "")
                         self.assertIn("--help", completed.stderr)
 
-    def test_exit_codes_in_the_source_help_and_setup_guide_are_one_list(self) -> None:
-        """The exit-code table in main.c is the one source: --help prints it and
-        docs/SETUP.md lists it, row for row."""
+    def test_help_prints_the_exit_code_table_in_main_c(self) -> None:
+        """The exit-code table in main.c is the one source: --help prints it row for row, and
+        every literal exit code main.c returns is in it. (docs/SETUP.md is checked against the
+        same table by tools/test_lint_docs.py, which needs no built player.)"""
         source = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
         block = source.split("k_player_exit_codes[] = {", 1)[1].split("};", 1)[0]
         table = re.findall(r'\{(\d+), "([^"]*)"\}', block)
@@ -2735,12 +2736,9 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual([code for code, _ in table], list(range(len(table))))
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             helped = self.run_player_args(Path(tmp), "--help").stdout
-        guide = (ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
         for code, meaning in table:
             self.assertIn(f"  {code}  {meaning}\n", helped)
-            self.assertIn(f"- `{code}`: {meaning}\n", guide)
         self.assertEqual(len(re.findall(r"^  \d  ", helped, re.M)), len(table))
-        # Every literal exit code main.c returns is in the table.
         # (a plain `return N;`, and each arm of `return cond ? N : M;`)
         literal = {int(n) for n in re.findall(r"\breturn (\d+);", source)}
         for arms in re.findall(r"\breturn [^;\n]*\? (\d+) : (\d+);", source):
