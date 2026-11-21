@@ -2403,15 +2403,9 @@ static bool manifest_cancelled(void) {
 /* The largest member the source-media check hashes, as before. */
 #define NK_MEDIA_MAX_MEMBER_BYTES (512u * 1024u * 1024u)
 
-#if defined(_WIN32) || defined(_WIN64)
-static SRWLOCK s_media_memo_lock = SRWLOCK_INIT;
-static void media_memo_lock(void) { AcquireSRWLockExclusive(&s_media_memo_lock); }
-static void media_memo_unlock(void) { ReleaseSRWLockExclusive(&s_media_memo_lock); }
-#else
-static pthread_mutex_t s_media_memo_lock = PTHREAD_MUTEX_INITIALIZER;
-static void media_memo_lock(void) { (void)pthread_mutex_lock(&s_media_memo_lock); }
-static void media_memo_unlock(void) { (void)pthread_mutex_unlock(&s_media_memo_lock); }
-#endif
+/* The display memo's lock (with the validation cache's, below). */
+static void media_memo_lock(void);
+static void media_memo_unlock(void);
 
 static uint64_t s_media_hash_count = 0;
 
@@ -2481,302 +2475,6 @@ static bool nk_manifest_hash_iso_member_reader(NkIsoReader *reader,
                                                char out_hex[65]) {
     return media_member_sha256(reader, relative_path, NK_MEDIA_MAX_MEMBER_BYTES, true,
                                NULL, 0u, out_hex);
-}
-
-/* What the display memo keys an image by, besides its path: none of it proves content
-   (nk_title_manifest.h). Times are in the host's file-time units (100 ns on Windows,
-   1 ns on POSIX). */
-typedef struct {
-    uint64_t size;
-    uint64_t modified;
-    uint64_t changed;
-    uint64_t created;   /* Windows only; 0 on POSIX */
-    uint64_t volume;    /* Windows: the volume serial number; POSIX: st_dev */
-    uint64_t file;      /* Windows: the file index; POSIX: st_ino */
-} MediaFileId;
-
-/* A digest is stored only for an image whose last-write and change times are both this
-   old: a write within the file system's timestamp granularity (2 s on FAT) can leave the
-   times as they were. */
-#if defined(_WIN32) || defined(_WIN64)
-#define MEDIA_SETTLED_UNITS (3ull * 10000000ull)
-#else
-#define MEDIA_SETTLED_UNITS (3ull * 1000000000ull)
-#endif
-
-/* The image's identity, and in `settled` whether its times are old enough to store a
-   digest under. False when any field cannot be read: such an image is never memoized. */
-static bool media_file_id(const char *path, MediaFileId *id, bool *settled) {
-    if (!path || !*path || !id || !settled) return false;
-    memset(id, 0, sizeof(*id));
-    *settled = false;
-    uint64_t now = 0;
-#if defined(_WIN32) || defined(_WIN64)
-    WCHAR *wide = (WCHAR *)malloc(sizeof(WCHAR) * 32768u);
-    if (!wide) return false;
-    bool ok = false;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, 32768) > 0) {
-        HANDLE handle = CreateFileW(wide, FILE_READ_ATTRIBUTES,
-                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (handle != INVALID_HANDLE_VALUE) {
-            BY_HANDLE_FILE_INFORMATION info;
-            FILE_BASIC_INFO basic;
-            memset(&info, 0, sizeof(info));
-            memset(&basic, 0, sizeof(basic));
-            if (GetFileInformationByHandle(handle, &info) &&
-                (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
-                GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic))) {
-                id->size = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
-                id->modified = (uint64_t)basic.LastWriteTime.QuadPart;
-                id->changed = (uint64_t)basic.ChangeTime.QuadPart;
-                id->created = (uint64_t)basic.CreationTime.QuadPart;
-                id->volume = info.dwVolumeSerialNumber;
-                id->file = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
-                ok = true;
-            }
-            CloseHandle(handle);
-        }
-    }
-    free(wide);
-    if (!ok) return false;
-    FILETIME clock_now;
-    GetSystemTimeAsFileTime(&clock_now);
-    now = ((uint64_t)clock_now.dwHighDateTime << 32) | clock_now.dwLowDateTime;
-#else
-    struct stat data;
-    if (stat(path, &data) != 0 || !S_ISREG(data.st_mode)) return false;
-    id->size = (uint64_t)data.st_size;
-    id->modified = (uint64_t)data.st_mtim.tv_sec * 1000000000ull +
-                   (uint64_t)data.st_mtim.tv_nsec;
-    id->changed = (uint64_t)data.st_ctim.tv_sec * 1000000000ull +
-                  (uint64_t)data.st_ctim.tv_nsec;
-    id->volume = (uint64_t)data.st_dev;
-    id->file = (uint64_t)data.st_ino;
-    struct timespec clock_now;
-    if (clock_gettime(CLOCK_REALTIME, &clock_now) != 0 || clock_now.tv_sec < 0) return true;
-    now = (uint64_t)clock_now.tv_sec * 1000000000ull + (uint64_t)clock_now.tv_nsec;
-#endif
-    *settled = now >= MEDIA_SETTLED_UNITS &&
-               id->modified <= now - MEDIA_SETTLED_UNITS &&
-               id->changed <= now - MEDIA_SETTLED_UNITS;
-    return true;
-}
-
-static bool media_file_id_equal(const MediaFileId *a, const MediaFileId *b) {
-    return a->size == b->size && a->modified == b->modified && a->changed == b->changed &&
-           a->created == b->created && a->volume == b->volume && a->file == b->file;
-}
-
-typedef struct {
-    char *member;
-    char sha256[65];
-} MediaMemoDigest;
-
-typedef struct {
-    char *path;
-    MediaFileId id;
-    MediaMemoDigest *digests;
-    size_t count;
-    size_t capacity;
-    uint64_t last_used;
-} MediaMemoImage;
-
-/* In memory only, never written: at most this many images (the least recently used one
-   makes room), each with at most this many member digests. */
-#define MEDIA_MEMO_IMAGES 256u
-#define MEDIA_MEMO_DIGESTS 1024u
-
-static MediaMemoImage s_media_memo[MEDIA_MEMO_IMAGES];
-static uint64_t s_media_memo_clock = 0;
-
-static void media_memo_free_image(MediaMemoImage *image) {
-    for (size_t i = 0; i < image->count; i++) free(image->digests[i].member);
-    free(image->digests);
-    free(image->path);
-    memset(image, 0, sizeof(*image));
-}
-
-static MediaMemoImage *media_memo_find_locked(const char *path) {
-    for (size_t i = 0; i < MEDIA_MEMO_IMAGES; i++) {
-        if (s_media_memo[i].path && strcmp(s_media_memo[i].path, path) == 0) {
-            return &s_media_memo[i];
-        }
-    }
-    return NULL;
-}
-
-/* The display shortcut: the digest this process computed in full for `member` of the
-   image at `path`, while the image had exactly this identity. */
-static bool media_memo_lookup(const char *path, const MediaFileId *id, const char *member,
-                              char out_hex[65]) {
-    bool found = false;
-    media_memo_lock();
-    MediaMemoImage *image = media_memo_find_locked(path);
-    if (image && media_file_id_equal(&image->id, id)) {
-        for (size_t i = 0; i < image->count; i++) {
-            if (strcmp(image->digests[i].member, member) == 0) {
-                memcpy(out_hex, image->digests[i].sha256, 65);
-                image->last_used = ++s_media_memo_clock;
-                found = true;
-                break;
-            }
-        }
-    }
-    media_memo_unlock();
-    return found;
-}
-
-/* A digest just computed in full. When the memo holds a different digest for the same
-   member under the same identity, the identity did not show the change: the image's entry
-   is dropped, so the next display check hashes it again. Otherwise the digest is stored
-   when `store` (the image's identity was settled and stayed the same across the hash). */
-static void media_memo_record(const char *path, const MediaFileId *id, const char *member,
-                              const char hex[65], bool store) {
-    media_memo_lock();
-    MediaMemoImage *image = media_memo_find_locked(path);
-    if (image && media_file_id_equal(&image->id, id)) {
-        for (size_t i = 0; i < image->count; i++) {
-            if (strcmp(image->digests[i].member, member) == 0) {
-                if (strcmp(image->digests[i].sha256, hex) != 0) {
-                    media_memo_free_image(image);
-                } else {
-                    image->last_used = ++s_media_memo_clock;
-                }
-                media_memo_unlock();
-                return;
-            }
-        }
-    }
-    if (!store) {
-        media_memo_unlock();
-        return;
-    }
-    if (image && !media_file_id_equal(&image->id, id)) {
-        media_memo_free_image(image);
-        image = NULL;
-    }
-    if (!image) {
-        /* The first free slot, else the least recently used image. */
-        MediaMemoImage *slot = &s_media_memo[0];
-        for (size_t i = 0; i < MEDIA_MEMO_IMAGES; i++) {
-            if (!s_media_memo[i].path) {
-                slot = &s_media_memo[i];
-                break;
-            }
-            if (s_media_memo[i].last_used < slot->last_used) slot = &s_media_memo[i];
-        }
-        if (slot->path) media_memo_free_image(slot);
-        size_t length = strlen(path);
-        slot->path = (char *)malloc(length + 1u);
-        if (!slot->path) {
-            media_memo_unlock();
-            return;
-        }
-        memcpy(slot->path, path, length + 1u);
-        slot->id = *id;
-        image = slot;
-    }
-    if (image->count == image->capacity) {
-        size_t capacity = image->capacity ? image->capacity * 2u : 8u;
-        MediaMemoDigest *grown = capacity <= MEDIA_MEMO_DIGESTS
-            ? (MediaMemoDigest *)realloc(image->digests, capacity * sizeof(*grown)) : NULL;
-        if (!grown) {
-            media_memo_unlock();
-            return;
-        }
-        image->digests = grown;
-        image->capacity = capacity;
-    }
-    size_t length = strlen(member);
-    char *copy = (char *)malloc(length + 1u);
-    if (copy) {
-        memcpy(copy, member, length + 1u);
-        image->digests[image->count].member = copy;
-        memcpy(image->digests[image->count].sha256, hex, 65);
-        image->count++;
-    }
-    image->last_used = ++s_media_memo_clock;
-    media_memo_unlock();
-}
-
-/* One check's view of an image: its identity before any member was hashed, the digests
-   this check computed in full (recorded in the memo when the check ends), and the read
-   buffer it reuses. A member the check meets twice is hashed once. */
-typedef struct {
-    const char *path;
-    NkSourceMediaCheck check;
-    MediaFileId id;
-    bool id_known;
-    bool settled;
-    uint8_t *chunk;
-    uint32_t chunk_size;
-    struct {
-        const char *member;
-        bool ok;
-        bool hashed;
-        char sha256[65];
-    } seen[64];
-    size_t seen_count;
-} MediaCheck;
-
-static void media_check_begin(MediaCheck *check, const char *path, NkSourceMediaCheck use) {
-    memset(check, 0, sizeof(*check));
-    check->path = path;
-    check->check = use;
-    check->id_known = media_file_id(path, &check->id, &check->settled);
-}
-
-/* The member's digest: from this check if it already met the member, from the memo for a
-   display check, else hashed in full. */
-static bool media_check_member(MediaCheck *check, NkIsoReader *reader, const char *member,
-                               uint32_t max_bytes, bool cancellable, char out_hex[65]) {
-    for (size_t i = 0; i < check->seen_count; i++) {
-        if (strcmp(check->seen[i].member, member) == 0) {
-            if (check->seen[i].ok) memcpy(out_hex, check->seen[i].sha256, 65);
-            return check->seen[i].ok;
-        }
-    }
-    bool ok;
-    bool hashed = false;
-    if (check->check == NK_SOURCE_MEDIA_DISPLAY && check->id_known && check->settled &&
-        media_memo_lookup(check->path, &check->id, member, out_hex)) {
-        ok = true;
-    } else {
-        if (!check->chunk) {
-            check->chunk = (uint8_t *)malloc(NK_MEDIA_HASH_CHUNK);
-            check->chunk_size = check->chunk ? NK_MEDIA_HASH_CHUNK : 0u;
-        }
-        ok = media_member_sha256(reader, member, max_bytes, cancellable,
-                                 check->chunk, check->chunk_size, out_hex);
-        hashed = ok;
-    }
-    if (check->seen_count < sizeof(check->seen) / sizeof(check->seen[0])) {
-        check->seen[check->seen_count].member = member;
-        check->seen[check->seen_count].ok = ok;
-        check->seen[check->seen_count].hashed = hashed;
-        if (ok) memcpy(check->seen[check->seen_count].sha256, out_hex, 65);
-        check->seen_count++;
-    }
-    return ok;
-}
-
-/* Records what the check hashed in full, then frees its buffer. A digest is stored only
-   when the image's identity was settled before the first hash and is the same now. */
-static void media_check_end(MediaCheck *check) {
-    if (check->id_known) {
-        MediaFileId after;
-        bool settled_after = false;
-        bool same = media_file_id(check->path, &after, &settled_after) &&
-                    media_file_id_equal(&after, &check->id);
-        for (size_t i = 0; i < check->seen_count; i++) {
-            if (!check->seen[i].hashed) continue;
-            media_memo_record(check->path, &check->id, check->seen[i].member,
-                              check->seen[i].sha256, check->settled && same);
-        }
-    }
-    free(check->chunk);
-    check->chunk = NULL;
 }
 
 static bool nk_manifest_hash_iso_member(const char *iso_path,
@@ -3461,6 +3159,14 @@ typedef struct {
     uint64_t size;
     uint64_t modified;
     uint64_t changed;
+    /* For the source-media display memo only (media_file_id); the package status identity
+       above keeps its three fields. `complete` is true when every field below was read. */
+    uint64_t created;          /* Windows: the creation time; POSIX: 0 */
+    uint64_t volume;           /* Windows: the volume serial number; POSIX: st_dev */
+    uint64_t file;             /* Windows: the file index; POSIX: st_ino */
+    uint64_t now;              /* the clock when it was read, in the times' units */
+    uint64_t units_per_second; /* 10000000 (Windows, 100 ns) or 1000000000 (POSIX) */
+    bool complete;
 } PackageFileIdentity;
 
 static void package_identity_update_u64(NkSha256 *ctx, uint64_t value);
@@ -3499,6 +3205,9 @@ static void package_validation_cache_lock(void) {
 static void package_validation_cache_unlock(void) {
     ReleaseSRWLockExclusive(&s_package_validation_cache_lock);
 }
+static SRWLOCK s_media_memo_lock = SRWLOCK_INIT;
+static void media_memo_lock(void) { AcquireSRWLockExclusive(&s_media_memo_lock); }
+static void media_memo_unlock(void) { ReleaseSRWLockExclusive(&s_media_memo_lock); }
 #else
 static pthread_mutex_t s_package_validation_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 static void package_validation_cache_lock(void) {
@@ -3507,6 +3216,9 @@ static void package_validation_cache_lock(void) {
 static void package_validation_cache_unlock(void) {
     (void)pthread_mutex_unlock(&s_package_validation_cache_lock);
 }
+static pthread_mutex_t s_media_memo_lock = PTHREAD_MUTEX_INITIALIZER;
+static void media_memo_lock(void) { (void)pthread_mutex_lock(&s_media_memo_lock); }
+static void media_memo_unlock(void) { (void)pthread_mutex_unlock(&s_media_memo_lock); }
 #endif
 
 /* White-box seams (#670), compiled only into a test build that defines
@@ -3548,7 +3260,7 @@ bool nk_title_manifest_test_package_cache_entry(uint64_t *out_catalog_epoch,
 
 static bool package_file_identity(const char *path, PackageFileIdentity *identity) {
     if (!path || !identity) return false;
-    identity->changed = 0;
+    memset(identity, 0, sizeof(*identity));
 #if defined(_WIN32) || defined(_WIN64)
     WCHAR wide[32768];
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
@@ -3568,13 +3280,28 @@ static bool package_file_identity(const char *path, PackageFileIdentity *identit
                                 NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (handle != INVALID_HANDLE_VALUE) {
         FILE_BASIC_INFO basic;
+        BY_HANDLE_FILE_INFORMATION info;
         memset(&basic, 0, sizeof(basic));
+        memset(&info, 0, sizeof(info));
         if (GetFileInformationByHandleEx(handle, FileBasicInfo, &basic,
                                          sizeof(basic))) {
             identity->changed = (uint64_t)basic.ChangeTime.QuadPart;
+            if (GetFileInformationByHandle(handle, &info) &&
+                (uint64_t)basic.LastWriteTime.QuadPart == identity->modified &&
+                (((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow) ==
+                    identity->size) {
+                identity->created = (uint64_t)basic.CreationTime.QuadPart;
+                identity->volume = info.dwVolumeSerialNumber;
+                identity->file = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+                identity->complete = true;
+            }
         }
         CloseHandle(handle);
     }
+    FILETIME clock_now;
+    GetSystemTimeAsFileTime(&clock_now);
+    identity->now = ((uint64_t)clock_now.dwHighDateTime << 32) | clock_now.dwLowDateTime;
+    identity->units_per_second = 10000000ull;
 #else
     struct stat data;
     if (stat(path, &data) != 0 || !S_ISREG(data.st_mode)) return false;
@@ -3583,8 +3310,256 @@ static bool package_file_identity(const char *path, PackageFileIdentity *identit
                          (uint64_t)data.st_mtim.tv_nsec;
     identity->changed = (uint64_t)data.st_ctim.tv_sec * 1000000000ull +
                         (uint64_t)data.st_ctim.tv_nsec;
+    identity->volume = (uint64_t)data.st_dev;
+    identity->file = (uint64_t)data.st_ino;
+    identity->units_per_second = 1000000000ull;
+    struct timespec clock_now;
+    if (clock_gettime(CLOCK_REALTIME, &clock_now) == 0 && clock_now.tv_sec >= 0) {
+        identity->now = (uint64_t)clock_now.tv_sec * 1000000000ull +
+                        (uint64_t)clock_now.tv_nsec;
+        identity->complete = true;
+    }
 #endif
     return true;
+}
+
+/* What the display memo keys an image by, besides its path: none of it proves content
+   (nk_title_manifest.h). Times are in the host's file-time units (100 ns on Windows, 1 ns on
+   POSIX); `now` and `units_per_second` are not part of the key. */
+typedef PackageFileIdentity MediaFileId;
+
+/* A digest is stored only for an image whose last-write and change times are both at least
+   this many seconds old: a write within the file system's timestamp granularity (2 s on FAT)
+   can leave the times as they were. */
+#define MEDIA_SETTLED_SECONDS 3u
+
+/* The image's identity (package_file_identity), and in `settled` whether its times are old
+   enough to store a digest under. False when any field cannot be read: such an image is never
+   memoized. */
+static bool media_file_id(const char *path, MediaFileId *id, bool *settled) {
+    if (!path || !*path || !id || !settled) return false;
+    *settled = false;
+    if (!package_file_identity(path, id) || !id->complete) return false;
+    uint64_t margin = (uint64_t)MEDIA_SETTLED_SECONDS * id->units_per_second;
+    *settled = id->now >= margin && id->modified <= id->now - margin &&
+               id->changed <= id->now - margin;
+    return true;
+}
+
+static bool media_file_id_equal(const MediaFileId *a, const MediaFileId *b) {
+    return a->size == b->size && a->modified == b->modified && a->changed == b->changed &&
+           a->created == b->created && a->volume == b->volume && a->file == b->file;
+}
+
+typedef struct {
+    char *member;
+    char sha256[65];
+} MediaMemoDigest;
+
+typedef struct {
+    char *path;
+    MediaFileId id;
+    MediaMemoDigest *digests;
+    size_t count;
+    size_t capacity;
+    uint64_t last_used;
+} MediaMemoImage;
+
+/* In memory only, never written: at most this many images (the least recently used one
+   makes room), each with at most this many member digests. */
+#define MEDIA_MEMO_IMAGES 256u
+#define MEDIA_MEMO_DIGESTS 1024u
+
+static MediaMemoImage s_media_memo[MEDIA_MEMO_IMAGES];
+static uint64_t s_media_memo_clock = 0;
+
+static void media_memo_free_image(MediaMemoImage *image) {
+    for (size_t i = 0; i < image->count; i++) free(image->digests[i].member);
+    free(image->digests);
+    free(image->path);
+    memset(image, 0, sizeof(*image));
+}
+
+static MediaMemoImage *media_memo_find_locked(const char *path) {
+    for (size_t i = 0; i < MEDIA_MEMO_IMAGES; i++) {
+        if (s_media_memo[i].path && strcmp(s_media_memo[i].path, path) == 0) {
+            return &s_media_memo[i];
+        }
+    }
+    return NULL;
+}
+
+/* The display shortcut: the digest this process computed in full for `member` of the
+   image at `path`, while the image had exactly this identity. */
+static bool media_memo_lookup(const char *path, const MediaFileId *id, const char *member,
+                              char out_hex[65]) {
+    bool found = false;
+    media_memo_lock();
+    MediaMemoImage *image = media_memo_find_locked(path);
+    if (image && media_file_id_equal(&image->id, id)) {
+        for (size_t i = 0; i < image->count; i++) {
+            if (strcmp(image->digests[i].member, member) == 0) {
+                memcpy(out_hex, image->digests[i].sha256, 65);
+                image->last_used = ++s_media_memo_clock;
+                found = true;
+                break;
+            }
+        }
+    }
+    media_memo_unlock();
+    return found;
+}
+
+/* A digest just computed in full. When the memo holds a different digest for the same
+   member under the same identity, the identity did not show the change: the image's entry
+   is dropped, so the next display check hashes it again. Otherwise the digest is stored
+   when `store` (the image's identity was settled and stayed the same across the hash). */
+static void media_memo_record(const char *path, const MediaFileId *id, const char *member,
+                              const char hex[65], bool store) {
+    media_memo_lock();
+    MediaMemoImage *image = media_memo_find_locked(path);
+    if (image && media_file_id_equal(&image->id, id)) {
+        for (size_t i = 0; i < image->count; i++) {
+            if (strcmp(image->digests[i].member, member) == 0) {
+                if (strcmp(image->digests[i].sha256, hex) != 0) {
+                    media_memo_free_image(image);
+                } else {
+                    image->last_used = ++s_media_memo_clock;
+                }
+                media_memo_unlock();
+                return;
+            }
+        }
+    }
+    if (!store) {
+        media_memo_unlock();
+        return;
+    }
+    if (image && !media_file_id_equal(&image->id, id)) {
+        media_memo_free_image(image);
+        image = NULL;
+    }
+    if (!image) {
+        /* The first free slot, else the least recently used image. */
+        MediaMemoImage *slot = &s_media_memo[0];
+        for (size_t i = 0; i < MEDIA_MEMO_IMAGES; i++) {
+            if (!s_media_memo[i].path) {
+                slot = &s_media_memo[i];
+                break;
+            }
+            if (s_media_memo[i].last_used < slot->last_used) slot = &s_media_memo[i];
+        }
+        if (slot->path) media_memo_free_image(slot);
+        size_t length = strlen(path);
+        slot->path = (char *)malloc(length + 1u);
+        if (!slot->path) {
+            media_memo_unlock();
+            return;
+        }
+        memcpy(slot->path, path, length + 1u);
+        slot->id = *id;
+        image = slot;
+    }
+    if (image->count == image->capacity) {
+        size_t capacity = image->capacity ? image->capacity * 2u : 8u;
+        MediaMemoDigest *grown = capacity <= MEDIA_MEMO_DIGESTS
+            ? (MediaMemoDigest *)realloc(image->digests, capacity * sizeof(*grown)) : NULL;
+        if (!grown) {
+            media_memo_unlock();
+            return;
+        }
+        image->digests = grown;
+        image->capacity = capacity;
+    }
+    size_t length = strlen(member);
+    char *copy = (char *)malloc(length + 1u);
+    if (copy) {
+        memcpy(copy, member, length + 1u);
+        image->digests[image->count].member = copy;
+        memcpy(image->digests[image->count].sha256, hex, 65);
+        image->count++;
+    }
+    image->last_used = ++s_media_memo_clock;
+    media_memo_unlock();
+}
+
+/* One check's view of an image: its identity before any member was hashed, the digests
+   this check computed in full (recorded in the memo when the check ends), and the read
+   buffer it reuses. A member the check meets twice is hashed once. */
+typedef struct {
+    const char *path;
+    NkSourceMediaCheck check;
+    MediaFileId id;
+    bool id_known;
+    bool settled;
+    uint8_t *chunk;
+    uint32_t chunk_size;
+    struct {
+        const char *member;
+        bool ok;
+        bool hashed;
+        char sha256[65];
+    } seen[64];
+    size_t seen_count;
+} MediaCheck;
+
+static void media_check_begin(MediaCheck *check, const char *path, NkSourceMediaCheck use) {
+    memset(check, 0, sizeof(*check));
+    check->path = path;
+    check->check = use;
+    check->id_known = media_file_id(path, &check->id, &check->settled);
+}
+
+/* The member's digest: from this check if it already met the member, from the memo for a
+   display check, else hashed in full. */
+static bool media_check_member(MediaCheck *check, NkIsoReader *reader, const char *member,
+                               uint32_t max_bytes, bool cancellable, char out_hex[65]) {
+    for (size_t i = 0; i < check->seen_count; i++) {
+        if (strcmp(check->seen[i].member, member) == 0) {
+            if (check->seen[i].ok) memcpy(out_hex, check->seen[i].sha256, 65);
+            return check->seen[i].ok;
+        }
+    }
+    bool ok;
+    bool hashed = false;
+    if (check->check == NK_SOURCE_MEDIA_DISPLAY && check->id_known && check->settled &&
+        media_memo_lookup(check->path, &check->id, member, out_hex)) {
+        ok = true;
+    } else {
+        if (!check->chunk) {
+            check->chunk = (uint8_t *)malloc(NK_MEDIA_HASH_CHUNK);
+            check->chunk_size = check->chunk ? NK_MEDIA_HASH_CHUNK : 0u;
+        }
+        ok = media_member_sha256(reader, member, max_bytes, cancellable,
+                                 check->chunk, check->chunk_size, out_hex);
+        hashed = ok;
+    }
+    if (check->seen_count < sizeof(check->seen) / sizeof(check->seen[0])) {
+        check->seen[check->seen_count].member = member;
+        check->seen[check->seen_count].ok = ok;
+        check->seen[check->seen_count].hashed = hashed;
+        if (ok) memcpy(check->seen[check->seen_count].sha256, out_hex, 65);
+        check->seen_count++;
+    }
+    return ok;
+}
+
+/* Records what the check hashed in full, then frees its buffer. A digest is stored only
+   when the image's identity was settled before the first hash and is the same now. */
+static void media_check_end(MediaCheck *check) {
+    if (check->id_known) {
+        MediaFileId after;
+        bool settled_after = false;
+        bool same = media_file_id(check->path, &after, &settled_after) &&
+                    media_file_id_equal(&after, &check->id);
+        for (size_t i = 0; i < check->seen_count; i++) {
+            if (!check->seen[i].hashed) continue;
+            media_memo_record(check->path, &check->id, check->seen[i].member,
+                              check->seen[i].sha256, check->settled && same);
+        }
+    }
+    free(check->chunk);
+    check->chunk = NULL;
 }
 
 static void package_cache_identity_update_text(NkSha256 *ctx, const char *text) {
