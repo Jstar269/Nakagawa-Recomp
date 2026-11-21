@@ -672,9 +672,10 @@ class VisualOracleContractTests(unittest.TestCase):
             tail,
             "no tick work may follow the exit check",
         )
-        # Nothing but the closing of the exit block may follow it.
+        # Nothing but the closing of the exit block may follow it. The exit is the run end's
+        # (sr_run_end, audit 2026-11-17 F-1ee85ec7), which ends the process with status 0.
         self.assertIsNotNone(
-            re.search(r"_Exit\(0\);\s*\}\s*\}\s*$", body),
+            re.search(r'sr_run_end\(0,\s*"exit_at_vblank",\s*"SR_EXIT_AT_VBLANK"\);\s*\}\s*\}\s*$', body),
             "the exit check must be the final statement of sr_vblank_tick",
         )
 

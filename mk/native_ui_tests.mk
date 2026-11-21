@@ -589,11 +589,13 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(BUILD_ROOT_RUN)/test_xb_parser$(EXE_EXT)
 	$(CC) $(NC_CFLAGS_CORE) -Werror $(LIBCHDR_INC) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) $(PLAYER_CHD_SRCS) \
 		tests/native/native_test_isolation.c tests/native/test_disc_expand.c $(LIBCHDR_LIB) $(PLAYER_PLATFORM_LIBS) $(DISC_EXPAND_WRAP_MALLOC) -o $(BUILD_ROOT)/test_disc_expand$(EXE_EXT)
-	$(BUILD_ROOT_RUN)/test_disc_expand$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_disc_expand$(EXE_EXT); rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP test_disc_expand link case (exit 77; the reason is printed above)"; \
+	elif [ $$rc -ne 0 ]; then echo "FAIL test_disc_expand (exit $$rc)"; exit $$rc; fi
 	$(CC) $(NC_CFLAGS_CORE) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) 		tests/native/native_test_isolation.c tests/native/test_disc_verify.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_disc_verify$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_disc_verify$(EXE_EXT)
 	$(CC) $(NC_CFLAGS_CORE) -Wpedantic -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
-		tests/native/native_test_isolation.c tests/native/test_nk_zip.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_nk_zip$(EXE_EXT)
+		tests/native/native_test_isolation.c tests/native/test_nk_zip.c $(PLAYER_PLATFORM_LIBS) $(NK_ZIP_WRAP_FREAD) -o $(BUILD_ROOT)/test_nk_zip$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_nk_zip$(EXE_EXT)
 	$(CC) $(NC_CFLAGS_CORE) -Wpedantic -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_steam_shortcuts.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_steam_shortcuts$(EXE_EXT)

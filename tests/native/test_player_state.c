@@ -949,6 +949,7 @@ static void write_player_package_preflight_iso(const char *path,
     put_iso_both32(pvd + 80, SECTORS);
     put_iso_both32(pvd + 158, ROOT_LBA);
     put_iso_both32(pvd + 166, SECTOR);
+    pvd[156 + 25] = 0x02; /* the root record is a directory */
 
     uint8_t *root = image + ROOT_LBA * SECTOR;
     write_iso_record(root, 0, dot, sizeof(dot), ROOT_LBA, SECTOR, true);
@@ -1331,6 +1332,7 @@ static const NkPackageBuildIdentity *g_fixture_build_identity = NULL;
 /* Extra build-report members the next fixture package carries, each with its leading
  * comma; empty for none. */
 static const char *g_fixture_report_extra = "";
+static const char *g_fixture_runtime_extra = "";
 /* The generated-code epoch a fixture records: the current one but for the case that
    writes a package from before it. */
 static int g_fixture_generated_code_abi_epoch = NK_AOT_GENERATED_CODE_ABI_EPOCH;
@@ -1552,12 +1554,13 @@ static void write_runtime_package_fixture_variant(
         "\"runtime\":{\"abi\":\"CpuState\",\"abi_version\":%u,"
         "\"abi_header_sha256\":\"%064d\",\"run_entry\":\"0x00000000\","
         "\"runtime_contract\":null,\"runtime_bindings\":{},"
-        "\"required_runtime_bindings\":[]},"
+        "\"required_runtime_bindings\":[]%s},"
         "\"executable\":{\"path\":\"%s\",\"sha256\":\"%s\","
         "\"guest_entry\":\"0x00000000\"},\"generated_objects\":[],"
         "\"required_local_assets\":[],\"build_report\":\"build-report.json\"}\n",
         cache_json, title_id, 0, 0, 0, input_executable_sha256, identity_json,
-        (unsigned)abi_version, 0, executable_relative_path, executable_hash);
+        (unsigned)abi_version, 0, g_fixture_runtime_extra, executable_relative_path,
+        executable_hash);
     assert(package_length > 0 && (size_t)package_length < sizeof(package_json));
     char package_path[1100];
     snprintf(package_path, sizeof(package_path), "%s%cpackage.json", package_dir,
@@ -2362,6 +2365,52 @@ static void test_report_this_game(void) {
         assert(strstr(report, "Reason: Stopped at ~" RP_SEP "x (<user>)\n") != NULL);
         assert(strstr(report, "Synthetic") == NULL && strstr(report, "synthetic-example") == NULL);
         assert(strstr(report, "%USERPROFILE%") == NULL);
+        assert(strstr(report, "Runtime source: ") == NULL);
+
+        /* #2875: the report names the runtime source commit the package records, beside
+           the player commit; an unknown one says why; a package without the record shows
+           no line, and a store for the same title keeps the line. */
+        {
+            int subject = player_app_error_subject_index(app, &app->last_error);
+            assert(subject == 0);
+            player_app_runtime_package_cache_store(app, subject, &app->games[subject], true,
+                                                   "0123456789abcdef0123456789abcdef"
+                                                   "0123456789abcdef0123456789abcdef",
+                                                   NK_RUNTIME_PACKAGE_OK, true, 1u);
+            player_app_runtime_package_cache_set_runtime_source(
+                app, subject, "89abcdef0123456789abcdef0123456789abcdef", "install-record", "");
+            assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
+                                                      RP_HOME, user, report, sizeof(report)) > 0);
+            assert(strstr(report, "Package: ") != NULL);
+            assert(strstr(report, "Runtime source: 89abcdef0123456789abcdef0123456789abcdef"
+                                  " (install record)\n") != NULL);
+            player_app_runtime_package_cache_store(app, subject, &app->games[subject], true,
+                                                   NULL, NK_RUNTIME_PACKAGE_OK, true, 2u);
+            assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
+                                                      RP_HOME, user, report, sizeof(report)) > 0);
+            assert(strstr(report, "Runtime source: 89abcdef0123456789abcdef0123456789abcdef"
+                                  " (install record)\n") != NULL);
+            player_app_runtime_package_cache_set_runtime_source(
+                app, subject, "", "unknown",
+                "the source tree has no install record and no git metadata");
+            assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
+                                                      RP_HOME, user, report, sizeof(report)) > 0);
+            assert(strstr(report, "Runtime source: unknown (the source tree has no install "
+                                  "record and no git metadata)\n") != NULL);
+            /* A reason never adds a report line of its own. */
+            player_app_runtime_package_cache_set_runtime_source(
+                app, subject, "", "unknown", "none\nPackage: forged\r\nReason: forged");
+            assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
+                                                      RP_HOME, user, report, sizeof(report)) > 0);
+            assert(strstr(report, "Runtime source: unknown (none Package: forged  Reason: "
+                                  "forged)\n") != NULL);
+            assert(strstr(report, "\nPackage: forged") == NULL &&
+                   strstr(report, "\nReason: forged") == NULL);
+            player_app_runtime_package_cache_set_runtime_source(app, subject, "", "", "");
+            assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
+                                                      RP_HOME, user, report, sizeof(report)) > 0);
+            assert(strstr(report, "Runtime source: ") == NULL);
+        }
 
         /* A crash with no boundary: no known issue, its exit code in the
            problem, Windows crash codes in hex. */
@@ -14042,7 +14091,7 @@ static void test_package_case_sibling_is_outside(void) {
  * nothing, in Settings, in the prompt and in a hand-edited settings file. */
 static void test_player_nickname(void) {
     static const char *const refused[] = {
-        "", "a\x01" "b", "tab\tname", "del\x7F", "c1 \xC2\x85", "\xC3\x28", "\xED\xA0\x80",
+        "", ("a\x01" "b"), "tab\tname", "del\x7F", "c1 \xC2\x85", "\xC3\x28", "\xED\xA0\x80",
     };
     char sep = nk_platform_path_separator();
     char cache_root[512], root[700], path[800], text[400];
@@ -14669,6 +14718,7 @@ static void steam_art_test_write_iso(const char *path, const uint8_t *icon0, siz
     put_iso_both32(pvd + 80, SECTORS);
     put_iso_both32(pvd + 158, ROOT_LBA);
     put_iso_both32(pvd + 166, SECTOR);
+    pvd[156 + 25] = 0x02; /* the root record is a directory */
     uint8_t *root = image + ROOT_LBA * SECTOR;
     write_iso_record(root, 0, dot, sizeof(dot), ROOT_LBA, SECTOR, true);
     write_iso_record(root, 34, dotdot, sizeof(dotdot), ROOT_LBA, SECTOR, true);
@@ -19422,6 +19472,141 @@ int main(int argc, char **argv) {
         }
         g_fixture_report_extra = "";
 
+        /* #2875: a package may record the runtime source commit it was built from, in
+           package.json and the build report: from the install record or the checkout, or
+           an explicit unknown with its reason. A malformed record is refused. */
+        static const char *const runtime_source_records[] = {
+            "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"origin\":\"install-record\",\"reason\":null}",
+            "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"origin\":\"git\",\"reason\":null}",
+            "{\"commit\":null,\"origin\":\"unknown\","
+            "\"reason\":\"the source tree has no install record and no git metadata\"}",
+        };
+        static const char *const malformed_runtime_source_records[] = {
+            "{\"commit\":null,\"origin\":\"unknown\",\"reason\":\"\"}",
+            "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"origin\":\"unknown\",\"reason\":\"why\"}",
+            "{\"commit\":\"0123456789ABCDEF0123456789abcdef01234567\","
+            "\"origin\":\"git\",\"reason\":null}",
+            "{\"commit\":\"0123456789abcdef\",\"origin\":\"git\",\"reason\":null}",
+            "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"origin\":\"guess\",\"reason\":null}",
+            "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"origin\":\"git\"}",
+            "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"origin\":\"git\",\"reason\":null,\"extra\":1}",
+            "\"0123456789abcdef0123456789abcdef01234567\"",
+            /* The reason is one report line: an embedded newline could forge one. */
+            "{\"commit\":null,\"origin\":\"unknown\","
+            "\"reason\":\"none\\nPackage: forged\\nReason: forged\"}",
+            "{\"commit\":null,\"origin\":\"unknown\",\"reason\":\"tab\\there\"}",
+            "{\"commit\":null,\"origin\":\"unknown\",\"reason\":\""
+            "0123456789012345678901234567890123456789012345678901234567890123"
+            "0123456789012345678901234567890123456789012345678901234567890123\"}",
+        };
+        char runtime_source_runtime[512];
+        char runtime_source_report[512];
+        NkRuntimePackageInfo runtime_source_info;
+        for (size_t i = 0; i < sizeof(runtime_source_records) / sizeof(runtime_source_records[0]); i++) {
+            snprintf(runtime_source_runtime, sizeof(runtime_source_runtime),
+                     ",\"source_commit\":%s", runtime_source_records[i]);
+            snprintf(runtime_source_report, sizeof(runtime_source_report),
+                     ",\"runtime_source\":%s", runtime_source_records[i]);
+            g_fixture_runtime_extra = runtime_source_runtime;
+            g_fixture_report_extra = runtime_source_report;
+            write_runtime_package_fixture(validation_root, cached_disc_id,
+                                          "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+                                          "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL);
+            assert(nk_launch_validate_runtime_package(
+                       validation_root, &game, &runtime_source_info, reason,
+                       sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+            /* The player reads the record back for the problem report. */
+            static const char *const origins[] = {"install-record", "git", "unknown"};
+            assert(strcmp(runtime_source_info.runtime_source_origin, origins[i]) == 0);
+            assert(strcmp(runtime_source_info.runtime_source_commit,
+                          i < 2 ? "0123456789abcdef0123456789abcdef01234567" : "") == 0);
+            assert(i < 2 ? runtime_source_info.runtime_source_reason[0] == '\0'
+                         : strstr(runtime_source_info.runtime_source_reason,
+                                  "no install record") != NULL);
+        }
+        for (size_t i = 0; i < sizeof(malformed_runtime_source_records) /
+                                   sizeof(malformed_runtime_source_records[0]); i++) {
+            snprintf(runtime_source_runtime, sizeof(runtime_source_runtime),
+                     ",\"source_commit\":%s", malformed_runtime_source_records[i]);
+            g_fixture_runtime_extra = runtime_source_runtime;
+            g_fixture_report_extra = "";
+            write_runtime_package_fixture(validation_root, cached_disc_id,
+                                          "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+                                          "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL);
+            assert(nk_launch_validate_runtime_package(
+                       validation_root, &game, &runtime_source_info, reason,
+                       sizeof(reason)) == NK_RUNTIME_PACKAGE_INCOMPATIBLE);
+            assert(strstr(reason, "runtime.source_commit"));
+            snprintf(runtime_source_report, sizeof(runtime_source_report),
+                     ",\"runtime_source\":%s", malformed_runtime_source_records[i]);
+            g_fixture_runtime_extra = "";
+            g_fixture_report_extra = runtime_source_report;
+            write_runtime_package_fixture(validation_root, cached_disc_id,
+                                          "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+                                          "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL);
+            assert(nk_launch_validate_runtime_package(
+                       validation_root, &game, &runtime_source_info, reason,
+                       sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+            assert(strstr(reason, "runtime_source"));
+        }
+        g_fixture_runtime_extra = "";
+        g_fixture_report_extra = "";
+
+        /* The library's status check validates with an info struct (#2875 review): a
+           package whose paths the player cannot hold is INCOMPATIBLE there, not first at
+           launch, and the reason names what fixes it. Passing no info would report OK. */
+        {
+            char long_root[1024];
+            assert(nk_platform_mkdir_p(SR_SELFTEST_BUILD_ROOT "/tps_long_package"));
+            assert(nk_platform_absolute_path(SR_SELFTEST_BUILD_ROOT "/tps_long_package",
+                                             long_root, sizeof(long_root)));
+            /* <root>/packages/<DISC_ID> fits NK_MAX_PATH; the executable inside does not. */
+            const size_t root_length = 480u;
+            assert(strlen(long_root) + 16u < root_length);
+            while (strlen(long_root) < root_length) {
+                size_t used = strlen(long_root);
+                size_t segment = root_length - used - 1u;
+                if (segment > 120u) segment = 120u;
+                long_root[used] = nk_platform_path_separator();
+                memset(long_root + used + 1u, 'p', segment);
+                long_root[used + 1u + segment] = '\0';
+            }
+            char long_exe_path[1400];
+            snprintf(long_exe_path, sizeof(long_exe_path), "%s%cpackages%c%s%c%s", long_root,
+                     nk_platform_path_separator(), nk_platform_path_separator(),
+                     cached_disc_id, nk_platform_path_separator(), "synthetic-allegrex-v1.exe");
+            assert(strlen(long_exe_path) >= NK_MAX_PATH);
+            if (!nk_platform_mkdir_p(long_root) ||
+                nk_platform_path_exceeds_limit(long_exe_path, false)) {
+                printf("[PLAYER_STATE_TEST] long package path status check NOT_RUN: this host "
+                       "limits paths to MAX_PATH\n");
+            } else {
+                write_runtime_package_fixture(long_root, cached_disc_id,
+                                              "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+                                              "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL);
+                assert(nk_launch_validate_runtime_package(long_root, &game, NULL, reason,
+                                                          sizeof(reason)) ==
+                       NK_RUNTIME_PACKAGE_OK);
+                NkRuntimePackageInfo long_info;
+                assert(player_runtime_package_status_check(long_root, &game, &long_info, reason,
+                                                           sizeof(reason)) ==
+                       NK_RUNTIME_PACKAGE_INCOMPATIBLE);
+                assert(strstr(reason, "Package paths exceed the player path limit.") != NULL);
+                assert(strstr(reason, "shorter location") != NULL);
+                assert(strstr(reason, "build it from the library") == NULL);
+                remove_runtime_package_fixture(long_root, cached_disc_id,
+                                               "synthetic-allegrex-v1");
+                printf("[PLAYER_STATE_TEST] long package path is INCOMPATIBLE at the status "
+                       "check PASSED\n");
+            }
+        }
+
         write_runtime_package_fixture(validation_root, cached_disc_id,
                                       "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
                                       "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL);
@@ -20574,7 +20759,9 @@ int main(int argc, char **argv) {
                 scheduler_summary_kept = rep->stalled_game_no_frame_vblanks == 1800u &&
                     rep->stalled_game_seconds == 30u && rep->stalled_game_ready == 1u &&
                     rep->stalled_game_delay == 2u && rep->stalled_game_wait == 3u &&
-                    rep->stalled_game_spin == 4u;
+                    rep->stalled_game_spin == 4u &&
+                    /* An older runtime's line carries no RUNNING count. */
+                    !rep->stalled_game_running_known && !rep->stalled_game_busy_known;
                 player_app_keep_waiting_for_stalled_game(rep);
                 keep_waiting_dismissed = !rep->stalled_game_notice_visible &&
                     rep->stalled_game_notice_dismissed &&
@@ -20602,10 +20789,14 @@ int main(int argc, char **argv) {
                     !rep->stalled_game_notice_dismissed;
                 warning_return_requested =
                     rep->stalled_game_restore_game_front_requested;
+                /* #2875: a current runtime adds the RUNNING count and the busy thread after
+                   spin; a thread that never blocks starves the others. */
                 events_ok = append_runtime_event(
                     stall_events_path,
                     "BOOT_EVENT phase=stalled observation=no_new_flip "
-                    "no_frame_vblanks=1800 seconds=30 ready=1 delay=2 wait=3 spin=4\n");
+                    "no_frame_vblanks=1800 seconds=30 ready=1 delay=2 wait=3 spin=4 "
+                    "running=1 busy_uid=0x130 busy_pri=20 busy_import=sceAtracDecodeData "
+                    "busy_import_ret=0x00000000 busy_repeats=99\n");
             }
             if (events_ok) {
                 (void)player_app_monitor_game_session(rep, 74000);
@@ -20617,7 +20808,10 @@ int main(int argc, char **argv) {
                     strcmp(rep->last_error.title, "Game stopped early") == 0 &&
                     strstr(rep->last_error.message, "last in-game save") != NULL &&
                     strstr(rep->last_error.details, "no_frame_vblanks=1800") != NULL &&
-                    strstr(rep->last_error.details, "ready=1 delay=2 wait=3 spin=4") != NULL;
+                    strstr(rep->last_error.details, "ready=1 delay=2 wait=3 spin=4") != NULL &&
+                    strstr(rep->last_error.details,
+                           "spin=4 running=1; busy thread uid=0x130 priority=20 last import "
+                           "sceAtracDecodeData -> 0x00000000 x99") != NULL;
             }
         }
         /* Stop even on a failed assertion so the synthetic child cannot outlive

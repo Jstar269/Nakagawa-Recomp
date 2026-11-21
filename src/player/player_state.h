@@ -207,6 +207,9 @@ typedef struct {
        the authentic package's status never answers for the enhanced build. */
     char enhancement_package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
     char package_identity[65];
+    /* The package's runtime source commit line for the problem report (#2875), e.g.
+     * "<40 hex> (install record)" or "unknown (reason)"; empty when not recorded. */
+    char runtime_source[192];
     NkRuntimePackageStatus status;
     uint64_t last_checked_ms;
     /* Why the package is not usable, as the validator said it (may be empty). */
@@ -1108,6 +1111,16 @@ struct PlayerApp {
     uint32_t stalled_game_delay;
     uint32_t stalled_game_wait;
     uint32_t stalled_game_spin;
+    /* The RUNNING count and the busy thread a runtime from #2875 on adds after spin; a stall
+       event from an older runtime leaves stalled_game_running_known false. */
+    bool stalled_game_running_known;
+    uint32_t stalled_game_running;
+    bool stalled_game_busy_known;
+    uint32_t stalled_game_busy_uid;
+    int32_t stalled_game_busy_priority;
+    char stalled_game_busy_import[48];
+    uint32_t stalled_game_busy_import_ret;
+    uint32_t stalled_game_busy_repeats;
     /* Keep the launcher UI headless. An explicit presented-frame acceptance
        request may still open a window in the child runtime. */
     bool launch_headless;
@@ -1763,6 +1776,21 @@ void player_app_runtime_package_cache_store(
  * so it has no new reason to give. */
 void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
                                                  const char *reason);
+/* The library's package status check: validates with an info struct, so the runtime
+ * source commit is read back and a package whose paths the player cannot hold is
+ * INCOMPATIBLE here, not first at launch. */
+NkRuntimePackageStatus player_runtime_package_status_check(const char *user_data_root,
+                                                           const GameRecord *game,
+                                                           NkRuntimePackageInfo *info,
+                                                           char *reason, size_t reason_size);
+/* Records the runtime source commit the validated package records (#2875) for the entry
+ * stored at game_index: commit and origin as NkRuntimePackageInfo holds them. Called
+ * only after a validation ran; an empty origin (a package from before the record)
+ * clears the line. */
+void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int game_index,
+                                                         const char *commit,
+                                                         const char *origin,
+                                                         const char *reason);
 /* The validator's reason for the title's current package state, or NULL. */
 const char *player_app_runtime_package_reason(const PlayerApp *app,
                                               const GameRecord *game);

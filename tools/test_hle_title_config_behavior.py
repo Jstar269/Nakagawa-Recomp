@@ -446,6 +446,25 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
             self.assertIn("GUEST_MODULE_INPUT_MISSING", missing_output)
             self.assertIn("0 failures", missing_output)
 
+            # A module root with characters outside the ANSI code page (a Japanese profile
+            # folder on Windows) is the directory the loader opens: the image loads at its
+            # manifest address and its exports register (audit 2026-11-17, F-3234843d).
+            wide_root = tmp_path / "モジュール"
+            wide_root.mkdir()
+            env["SR_MODULE_DIR"] = str(wide_root)
+            env["SR_TEST_GUEST_MODULE_LOAD"] = "success"
+            wide = subprocess.run(
+                [str(exe), "--title-config"],
+                cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace",
+                env=env, timeout=60,
+            )
+            wide_output = wide.stdout + wide.stderr
+            self.assertEqual(wide.returncode, 0, wide_output)
+            self.assertIn("prx image: runtime -> [0x09f00000", wide_output.lower())
+            self.assertNotIn("GUEST_MODULE_INPUT_MISSING", wide_output)
+            self.assertNotIn("FAILED to open", wide_output)
+            self.assertIn("0 failures", wide_output)
+
     def test_runtime_placed_modules_load_bind_and_unload(self):
         """Guest-placed modules (#704) through the production loader: placement by the
         user-partition allocator, relocation, translation binding, start/stop with the

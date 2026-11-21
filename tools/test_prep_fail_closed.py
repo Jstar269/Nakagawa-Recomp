@@ -434,7 +434,8 @@ class PrepPreflightSideEffectTests(PreparationFailClosedCase):
 
         self.assertTrue(result.success, result.error_message)
         self.assertEqual({path.name for path in source_dir.iterdir()}, source_names)
-        self.assertEqual(list(synthetic_key.parent.iterdir()), [synthetic_key])
+        # Re-parsed: MSYS2's Python joins iterdir() children with a backslash under a forward-slash parent.
+        self.assertEqual([Path(os.fspath(path)) for path in synthetic_key.parent.iterdir()], [synthetic_key])
         self.assertEqual(synthetic_key.read_text(encoding="utf-8"), "synthetic test marker")
         manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(manifest["boot_executable"], "EBOOT.BIN")
