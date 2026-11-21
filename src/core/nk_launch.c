@@ -1895,9 +1895,11 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     envp[env_count++] = env_game_title;
 
     /* The host's local time zone, which the runtime adopts as the console's time zone and
-     * daylight-saving setting on the first run only, when the per-user registry overlay does not
-     * exist yet (#1382, hle.c sreg_seed_host_time_zone). Empty when the host does not say, which
-     * also masks an inherited value; the runtime then keeps its measured seed. */
+     * daylight-saving setting on the first run only: when the per-user registry overlay does not
+     * exist yet, or is invalid and is moved to system.json.corrupt; never over an overlay that
+     * cannot be read (#1382, hle.c sreg_ensure_loaded and sreg_seed_host_time_zone). Empty when
+     * the host does not say, which also masks an inherited value; the runtime then keeps its
+     * measured seed. */
     {
         int zone_minutes = 0;
         bool daylight = false;

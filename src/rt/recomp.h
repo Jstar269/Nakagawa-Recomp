@@ -2788,8 +2788,33 @@ void     sched_set_partition_hole_allocator(SrSchedPartitionHoleAlloc alloc,
 int      sched_guest_stack_overlaps(uint32_t base, uint32_t end);   /* any live thread stack */
 CpuState *sr_cpu_for_callbacks(void);               /* the CpuState guest callbacks run on */
 void     sched_dump_threads(void);                  /* the watchdog's thread table, to stderr */
-void     sched_watchdog_summary(uint32_t *ready, uint32_t *delay,
-                                uint32_t *wait, uint32_t *spin);
+/* The scheduler's state for the player-facing stall events (BOOT_EVENT phase=stalled). The
+ * first four counts are the event's original fields. A thread that never blocks is RUNNING,
+ * in none of them (#2875), so `running` counts it and the busy_* fields name it: its uid and
+ * priority, the last import it finished, that import's return value, and how many times in a
+ * row it returned that value. */
+#define SR_SCHED_SUMMARY_IMPORT_MAX 48
+typedef struct SrSchedWatchdogSummary {
+    uint32_t ready, delay, wait, spin;
+    uint32_t running;
+    int      busy_valid;                 /* busy_* below name the running thread */
+    uint32_t busy_uid;
+    int      busy_priority;
+    int      busy_import_valid;          /* the thread has finished an import */
+    char     busy_import[SR_SCHED_SUMMARY_IMPORT_MAX];   /* one token, no spaces */
+    uint32_t busy_import_ret;
+    uint32_t busy_import_repeats;
+} SrSchedWatchdogSummary;
+/* Fills *out and starts a new spin-observation window (`spin` counts observations since the
+ * previous call). */
+void     sched_watchdog_summary(SrSchedWatchdogSummary *out);
+/* The summary as the stall events print it: "ready=R delay=D wait=W spin=S running=N", then,
+ * when a thread is running, " busy_uid=0x.. busy_pri=P busy_import=NAME busy_import_ret=0x..
+ * busy_repeats=K" (busy_import=- with ret 0 and repeats 0 before its first import). The original
+ * fields keep their names and order so parsers of the older line still read them. Returns
+ * snprintf's count. */
+int      sched_watchdog_summary_format(const SrSchedWatchdogSummary *summary, char *out,
+                                       size_t cap);
 /* Callback and VBLANK service hle.c provides to the scheduler. */
 int      sr_thread_has_pending_callbacks(uint32_t thread_uid);
 int      sr_thread_dispatch_callbacks(void);

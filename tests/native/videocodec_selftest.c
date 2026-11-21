@@ -460,7 +460,15 @@ static void test_context_words(void) {
           "open: +0 = 0x05100601, +8 = 1 and +24 = 0x8344 (unrecorded read)");
     CHECK(bytes_are(G_CTX + 4u, 4u, 0u) && bytes_are(G_CTX + 12u, 12u, 0u) && bytes_are(G_CTX + 28u, 68u, 0u),
           "open: no other context word changes");
-    CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == VC_ERR_STATE, "open: an open context cannot be opened again");
+    MEM_W32(G_CTX + 8u, 0u);
+    MEM_W32(G_CTX + 24u, 0u);
+    CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == 0u && MEM_R32(G_CTX + 8u) == 1u && MEM_R32(G_CTX + 24u) == 0x8344u &&
+              vc_find(G_CTX),
+          "open: an open context opens again and writes the same words (#2885)");
+    CHECK(s_vc_reopen_noted == 1, "open: the first re-open of a run is logged as JPCSP-derived");
+    int held = 0;
+    for (int i = 0; i < VC_MAX_CONTEXTS; i++) held += s_vc[i].used && s_vc[i].ctx == G_CTX;
+    CHECK(held == 1, "open: a second open of a context takes no second host slot");
     CHECK(call(NID_INIT, G_CTX2, 0u, 0, 0) == VC_ERR_NOT_OPEN, "init: a context the runtime did not open is refused");
     CHECK(call(NID_GETEDRAM, G_CTX2, 0u, 0, 0) == VC_ERR_NOT_OPEN, "getedram: an unopened context is refused");
     CHECK(call(NID_SETMEMORY, G_CTX, 1u, 0, 0) == VC_ERR_TYPE, "setmemory: codec type 1 is refused");
@@ -1254,6 +1262,112 @@ static void test_guest_reset(void) {
           "reset: the reopened context closes");
 }
 
+/* A context opened again after giving back only its ME memory (#2885), the call order observed in
+ * a retail title's own module: a library context is opened and takes ME memory, a stream context
+ * is opened, initialised from the library context's +20 and deleted, and the library context gives
+ * back its ME memory without being deleted. The next movie opens the library context again. Before
+ * #2885 that Open returned 0x806201FE, no stream was created, and the stream Delete met a context
+ * the runtime never opened. The success is JPCSP-derived, not PSP-measured (h_VideocodecOpen).
+ *
+ * MUTANT: restore the "context is already open" refusal in h_VideocodecOpen -- the second
+ * library Open returns 0x806201FE. */
+static void test_reopen_after_release(void) {
+    for (int movie = 0; movie < VC_MAX_CONTEXTS + 2; movie++) {
+        int ok = 1;
+        if (movie == 0) memset(host(G_CTX), 0, 96u);
+        memset(host(G_CTX2), 0, 96u);
+        ok &= call(NID_OPEN, G_CTX, 0u, 0, 0) == 0u && MEM_R32(G_CTX + 24u) == 0x8344u;
+        ok &= call(NID_GETEDRAM, G_CTX, 0u, 0, 0) == 0u && MEM_R32(G_CTX + 92u) == 0x10000u;
+        ok &= call(NID_OPEN, G_CTX2, 0u, 0, 0) == 0u;
+        MEM_W32(G_CTX2 + 20u, MEM_R32(G_CTX + 20u));
+        ok &= call(NID_INIT, G_CTX2, 0u, 0, 0) == 0u && MEM_R32(G_CTX2 + 12u) == MEM_R32(G_CTX + 20u);
+        ok &= call(NID_DELETE, G_CTX2, 0u, 0, 0) == 0u && !vc_find(G_CTX2);
+        ok &= call(NID_RELEASE, G_CTX, 0u, 0, 0) == 0u && MEM_R32(G_CTX + 92u) == 0u && s_me_alloc_count == 0;
+        ok &= vc_find(G_CTX) != NULL;
+        CHECK(ok, movie == 0 ? "reopen: the first movie's Init, Create, Delete and Finish run"
+                             : "reopen: every later movie opens the library context again and takes ME memory");
+    }
+
+    /* A second Open while the context still holds ME memory keeps it: Open writes no EDRAM word,
+     * and ReleaseEDRAM still frees the allocation. */
+    CHECK(call(NID_GETEDRAM, G_CTX, 0u, 0, 0) == 0u, "reopen: the library context takes ME memory again");
+    const uint32_t raw = MEM_R32(G_CTX + 92u), aligned = MEM_R32(G_CTX + 20u);
+    CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == 0u && vc_find(G_CTX)->edram == raw &&
+              MEM_R32(G_CTX + 92u) == raw && MEM_R32(G_CTX + 20u) == aligned && s_me_alloc_count == 1,
+          "reopen: an Open over held ME memory leaves the allocation and its words in place");
+    CHECK(call(NID_GETEDRAM, G_CTX, 0u, 0, 0) == VC_ERR_STATE && s_me_alloc_count == 1,
+          "reopen: the reopened context still owns that ME memory");
+    CHECK(call(NID_RELEASE, G_CTX, 0u, 0, 0) == 0u && s_me_alloc_count == 0,
+          "reopen: ReleaseEDRAM frees the memory the context kept");
+    CHECK(call(NID_DELETE, G_CTX, 0u, 0, 0) == 0u && !vc_find(G_CTX), "reopen: the library context closes");
+
+    /* With an H.264 backend, an Open after a decode drops the decoder and the picture state and
+     * keeps the band buffers, so the band addresses that decode wrote into guest structures still
+     * name live ME memory; the next stream reuses them, or replaces them when its size differs. */
+    static const char k_case[] = "an Open after a decode drops the host decoder and keeps the band buffers";
+    if (!sr_h264_backend_available()) { skip(k_case); return; }
+    memset(host(G_CTX), 0, 96u);
+    CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == 0u && call(NID_GETEDRAM, G_CTX, 0u, 0, 0) == 0u &&
+              call(NID_INIT, G_CTX, 0u, 0, 0) == 0u,
+          "reopen: a decoding context opens");
+    memset(host(G_YUV), 0, VC_YUV_BYTES);   /* no info blocks named: the decode places them in its bands */
+    MEM_W32(G_CTX + 16u, G_BUF2);
+    MEM_W32(G_CTX + 44u, G_YUV);
+    MEM_W32(G_CTX + 48u, G_BUF3);
+    MEM_W32(G_CTX + 80u, G_SEI);
+    int decoded = 0;
+    for (int i = 0; i < 8 && !decoded; i++) {
+        const uint32_t len = build_au(i, host(G_AU), 16384u);
+        MEM_W32(G_CTX + 36u, G_AU);
+        MEM_W32(G_CTX + 40u, len);
+        decoded = call(NID_DECODE, G_CTX, 0u, 0, 0) == 0u && vc_find(G_CTX)->band_base != 0u;
+    }
+    CHECK(decoded && vc_find(G_CTX)->h264 >= 0 && s_me_alloc_count == 2,
+          "reopen: a picture decodes and the band buffers are allocated");
+    const uint32_t raw2 = vc_find(G_CTX)->edram, bands = vc_find(G_CTX)->band_base;
+    CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == 0u && vc_find(G_CTX)->h264 < 0 && vc_find(G_CTX)->frame_count == 0u &&
+              vc_find(G_CTX)->width == 0u && vc_find(G_CTX)->edram == raw2 && vc_find(G_CTX)->band_base == bands &&
+              s_me_alloc_count == 2,
+          "reopen: the decoder and the picture state go; the ME memory and the band buffers stay");
+    /* Every band address and info-block pointer the earlier decode published still falls inside a
+     * live ME allocation this context owns. */
+    int live = 1;
+    for (uint32_t i = 0; i < 11u; i++) {
+        if (i == 8u) continue;   /* yuv +32 is a flag word, not an address */
+        const uint32_t addr = MEM_R32(G_YUV + i * 4u);
+        int inside = 0;
+        for (int k = 0; k < s_me_alloc_count; k++)
+            if (s_me_allocs[k].kind == ME_OWNER_VIDEO && s_me_allocs[k].owner == G_CTX &&
+                addr >= s_me_allocs[k].addr && addr - s_me_allocs[k].addr < s_me_allocs[k].size)
+                inside = 1;
+        live &= inside;
+    }
+    CHECK(live, "reopen: no guest word an earlier decode wrote names freed ME memory");
+    CHECK(call(NID_STOP, G_CTX, 0u, 0, 0) == VC_ERR_STATE, "reopen: Stop answers as before any decode");
+
+    /* A stream of another picture size after the re-open replaces the kept bands. The fixture
+     * builds one size only, so the kept bands are marked as sized for another picture: the
+     * stand-in for a second movie of a different size. */
+    vc_find(G_CTX)->band_width = FIX_W + 16u;
+    MEM_W32(G_YUV + 36u, 0u);
+    MEM_W32(G_YUV + 40u, 0u);
+    decoded = 0;
+    for (int i = 0; i < 8 && !decoded; i++) {
+        const uint32_t len = build_au(i, host(G_AU), 16384u);
+        MEM_W32(G_CTX + 36u, G_AU);
+        MEM_W32(G_CTX + 40u, len);
+        decoded = call(NID_DECODE, G_CTX, 0u, 0, 0) == 0u && MEM_R32(G_BUF2 + 32u) == 1u;
+    }
+    const VcContext *after = vc_find(G_CTX);
+    CHECK(decoded && after->band_width == FIX_W && after->band_height == FIX_H && s_me_alloc_count == 2 &&
+              !after->bands_from_earlier_open && MEM_R32(G_YUV) >= after->band_base &&
+              MEM_R32(G_YUV + 36u) == after->band_base,
+          "reopen: a picture of another size replaces the kept bands, and the guest words name the new ones");
+    CHECK(call(NID_RELEASE, G_CTX, 0u, 0, 0) == 0u && call(NID_DELETE, G_CTX, 0u, 0, 0) == 0u &&
+              s_me_alloc_count == 0 && !vc_find(G_CTX),
+          "reopen: the decoding context closes");
+}
+
 /* Band room (review B1). Every band of every set has room for its vc_band_bytes() count inside
  * the band allocation, apart from every other band, at each geometry the ME RAM model holds. At
  * w % 32 == 16, band 2 (the x % 32 == 0 strips, y1 bytes) is longer than JPCSP's size_y2 room. */
@@ -1420,6 +1534,7 @@ int main(void) {
     test_teardown();
     test_audiocodec();
     test_guest_reset();
+    test_reopen_after_release();
     test_band_room();
     test_long_stream();
     test_drain_behind_pictureless_units();

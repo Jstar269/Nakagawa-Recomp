@@ -11,8 +11,8 @@ permissive; SR_DISPATCH_FATAL was removed as vestigial once that floor landed.
 
 Verifies:
 1. Unknown NIDs fail closed: sr_syscall in src/rt/hle.c terminates execution
-   (_Exit(7) or longjmp) when a NID is not registered in the HLE table, and never
-   returns fake success (0 / H_OK).
+   (the run end with status 7, or longjmp) when a NID is not registered in the HLE
+   table, and never returns fake success (0 / H_OK).
 2. Unmapped / non-executable dispatch targets fail closed: dispatch() in src/rt/recomp.c
    terminates via exit(1) on dispatch miss rather than limping onward, and the
    miss path routes to the interpreter floor (dispatch_run_interp).
@@ -24,12 +24,14 @@ Verifies:
    environment variable set and regardless of any hostile continuation flag.
 5. The production runner (tools/nk_manager.ps1) sets no dispatch control and reports
    the retired SR_UNSAFE_CONTINUE_ON_DISPATCH_MISS escape as inert.
-6. Every fatal stop in the HLE files that ends the process with _Exit or _exit, which skip
-   atexit, finishes a video recording first with its exit status
-   (sr_videorec_finish_status, #1273), so record.json never stays INCOMPLETE after a stop the
-   runtime chose, and its exit_status is the code the stop exits with. Each also finishes a
+6. Every stop that ends the process with _Exit, which skips atexit, goes through the one run
+   end, sr_run_end in src/rt/hle_route.c (audit 2026-11-17, F-1ee85ec7): no runtime source
+   outside it calls _Exit or _exit. The run end finishes a video recording with the status it
+   exits with (sr_videorec_finish_status, #1273), so record.json never stays INCOMPLETE after a
+   stop the runtime chose and its exit_status is the code the stop exits with; it finishes a
    texture dump first (sr_texdump_exit_finish, #1880), so the files the dump's workers hold land
-   and its exit line prints.
+   and its exit line prints; and it runs the rest of the finalizer list the SR_EXIT_AT_VBLANK
+   exit established, which the copies at each stop had drifted from.
 """
 
 from __future__ import annotations
@@ -113,7 +115,7 @@ class TestDispatchFatalPolicySource(unittest.TestCase):
         self.assertIn("uint32_t sr_syscall(CpuState *s, uint32_t nid)", hle_src)
         fn_body = function_body(hle_src, "uint32_t sr_syscall(CpuState *s, uint32_t nid)")
         self.assertIn("if (!e)", fn_body)
-        self.assertIn("_Exit(7)", fn_body)
+        self.assertIn('sr_run_end(7, "unregistered_nid", "an unregistered NID stopped the run")', fn_body)
         self.assertIn("longjmp(g_hle_jmp", fn_body)
         self.assertIn("HLE: unimplemented nid", fn_body)
 
@@ -122,7 +124,7 @@ class TestDispatchFatalPolicySource(unittest.TestCase):
         hle_src = hle_sources.text()
         fn_body = function_body(hle_src, "uint32_t sr_syscall(CpuState *s, uint32_t nid)")
         record = fn_body.index("hle_record_unsupported_import_stop(nid, nm);")
-        self.assertLess(record, fn_body.index("_Exit(7)"))
+        self.assertLess(record, fn_body.index("sr_run_end(7,"))
         helper = function_body(
             hle_src,
             "static void hle_record_unsupported_import_stop(uint32_t nid, const char *name)")
@@ -142,7 +144,7 @@ class TestDispatchFatalPolicySource(unittest.TestCase):
             hle_src, "uint32_t hle_unmodelled_stop(const char *import_name, const char *fmt, ...)")
         production = stop.split("#else", 1)[1]
         record = production.index("hle_record_unsupported_import_stop(sr_last_nid, import_name);")
-        self.assertLess(record, production.index("_Exit(7)"))
+        self.assertLess(record, production.index("sr_run_end(7,"))
         self.assertNotIn("return HLE_KERNEL_ERROR_NOT_IMPLEMENTED", production)
 
     def test_recomp_dispatch_miss_terminates(self):
@@ -243,39 +245,101 @@ def _enclosing_block(code: str, at: int) -> str:
 
 
 class TestFatalStopsFinishRecording(unittest.TestCase):
-    """A stop that skips atexit must finish the run's recording itself (#1273, #2080 review)."""
+    """A stop that skips atexit must finish the run's recording itself (#1273, #2080 review),
+    and does so through the one run end (audit 2026-11-17, F-1ee85ec7)."""
 
-    def test_every_hle_exit_that_skips_atexit_finishes_the_recording(self):
-        """Each stop finishes the recording with the status it exits with (record.json
-        exit_status agrees with run_end and the process exit code)."""
-        stops = []
-        # Every runtime HLE source, from the one list (tools/hle_sources.py, #307).
-        for relative, text in hle_sources.sources():
-            name = Path(relative).name
-            code = _without_comments(text)
+    #: The verifier's own test executable (#1843): it links no HLE source, so it has no run end
+    #: to call, and its --hard-exit has no recording, dump or report to finish.
+    NOT_THE_RUNTIME = {"verify_harness.c"}
+
+    def test_every_runtime_exit_goes_through_the_run_end(self):
+        """No source under src/rt ends the process with _Exit or _exit outside sr_run_end, so no
+        stop can skip a finalizer the run end runs (the copies at each stop had drifted: the
+        watchdog and the SR_FBDUMP exits skipped the SR_AUDIODUMP close, the PSMF A/V report,
+        the presenter release, the SR_SAMPLE_OUT tail and Ace Mode's report)."""
+        outside = []
+        inside = 0
+        for path in sorted(RT.glob("*.c")):
+            if path.name in self.NOT_THE_RUNTIME:
+                continue
+            code = _without_comments(path.read_text(encoding="utf-8"))
             for match in FATAL_EXIT_RE.finditer(code):
                 line = code.count("\n", 0, match.start()) + 1
-                stops.append(f"{name}:{line}")
-                with self.subTest(stop=f"{name}:{line}"):
-                    block = _enclosing_block(code, match.start())
-                    finishes = FINISH_STATUS_RE.findall(block)
-                    self.assertTrue(finishes, "the stop exits without finishing a recording "
-                                              "with its exit status (sr_videorec_finish_status)")
-                    exit_arg = EXIT_ARG_RE.match(code, match.start())
-                    self.assertIsNotNone(exit_arg)
-                    self.assertEqual(finishes[-1], exit_arg.group(1),
-                                     "the recorded exit status is not the code the stop exits with")
-                    dump = TEXDUMP_FINISH_RE.search(block)
-                    self.assertIsNotNone(dump, "the stop exits without finishing a texture dump "
-                                               "(sr_texdump_exit_finish)")
-                    self.assertLess(dump.start(), block.rindex("sr_videorec_finish_status"),
-                                    "the texture dump is finished before the recording")
-        # The stops this covers today; a new one is checked the same way.
-        self.assertGreaterEqual(len(stops), 11, stops)
+                start = code.rfind("\n_Noreturn void sr_run_end(int status, const char *label, const char *reason) {",
+                                   0, match.start())
+                body = function_body(code[start + 1:], "_Noreturn void sr_run_end(") if start >= 0 else ""
+                if body and match.start() < start + 1 + len(body):
+                    inside += 1
+                else:
+                    outside.append(f"{path.name}:{line}")
+        self.assertEqual(outside, [], "these stops end the process without the run end (sr_run_end)")
+        self.assertEqual(inside, 1, "the run end ends the process exactly once, with _Exit(status)")
+
+    def test_the_run_end_finishes_the_recording_with_its_exit_status(self):
+        """The run end finishes a texture dump, then the recording with the status it exits with,
+        and every finalizer the SR_EXIT_AT_VBLANK exit ran comes before its _Exit."""
+        body = function_body(hle_sources.text(),
+                             "_Noreturn void sr_run_end(int status, const char *label, const char *reason) {")
+        self.assertTrue(body, "sr_run_end is not defined in the runtime HLE sources")
+        code = _without_comments(body)
+        finishes = re.findall(r"\bsr_videorec_finish_status\(\s*reason\s*,\s*status\s*\)", code)
+        self.assertEqual(len(finishes), 1, "the run end finishes the recording with its own status")
+        exit_arg = EXIT_ARG_RE.search(code)
+        self.assertIsNotNone(exit_arg)
+        self.assertEqual(exit_arg.group(1), "status", "the run end exits with the status it recorded")
+        dump = TEXDUMP_FINISH_RE.search(code)
+        self.assertIsNotNone(dump, "the run end does not finish a texture dump (sr_texdump_exit_finish)")
+        self.assertLess(dump.start(), code.index("sr_videorec_finish_status"),
+                        "the texture dump is finished before the recording")
+        for step in ("sr_trace_close();", "hle_exit_audio_stats();", "hle_exit_close_audio_dump();",
+                     "sr_dump_calls();", "psmf_av_final(label);", "ge_scene_dump_finish();",
+                     "sr_compat_report();", "gui_shutdown();", "sr_perf_shutdown();",
+                     "sr_profile_dump_final();", "SR_VERIFY_REPORT_NOW();",
+                     "hle_state_sample_close();", "ace_finish();"):
+            with self.subTest(step=step):
+                self.assertIn(step, code)
+                self.assertLess(code.index(step), exit_arg.start(), f"{step} runs after _Exit")
+        self.assertLess(code.index("hle_exit_audio_stats();"), code.index("hle_exit_close_audio_dump();"),
+                        "the audio statistics print before the SR_AUDIODUMP file is finalised")
+        self.assertLess(code.index("gui_shutdown();"), code.index("sr_perf_shutdown();"),
+                        "the presenter writes the SR_PERF summary before the shutdown after it")
+
+    def test_every_stop_passes_a_named_reason_and_its_status(self):
+        """Each call names its stop for the recording, with the status it exits with, and gives
+        it a one-token label for the key=value report lines; the stops this covers today, and a
+        new one is checked the same way."""
+        text = hle_sources.text()
+        calls = re.findall(r"\bsr_run_end\(\s*([^,()]+?)\s*,\s*\"([^\"]*)\"\s*,\s*\"([^\"]+)\"\s*\)",
+                           text)
+        self.assertGreaterEqual(len(calls), 11, calls)
+        every_call = re.findall(r"(?<!void )\bsr_run_end\(", _without_comments(text))
+        self.assertEqual(len(calls), len(every_call),
+                         "every sr_run_end call passes a literal label and reason")
+        for status, label, reason in calls:
+            with self.subTest(stop=reason):
+                self.assertTrue(status and reason.strip(), (status, reason))
+                self.assertRegex(label, r"\A[a-z0-9_]+\Z",
+                                 "the label is one token: it is the reason= value of a "
+                                 "space-separated key=value line")
+        labels = [label for _, label, _ in calls]
+        self.assertEqual(len(labels), len(set(labels)), "each stop has its own label")
+
+    def test_the_report_lines_get_one_token_reasons(self):
+        """PSMF_AV_PRESENT_FINAL and MPEG_PICTURES print reason=%s in a space-separated key=value
+        line, so whatever reaches psmf_av_final is one token: the run end passes its label (never
+        the sentence the recording quotes), and every other caller passes a one-token literal."""
+        args = [arg for arg in re.findall(r"\bpsmf_av_final\(\s*([^()]*?)\s*\)\s*;",
+                                          hle_sources.text())
+                if not arg.startswith("const char")]   # its declarations
+        self.assertIn("label", args)
+        self.assertNotIn("reason", args, "the run end passes its multi-word reason to a report line")
+        for arg in args:
+            with self.subTest(arg=arg):
+                self.assertRegex(arg, r'\A(label|"[a-z0-9_]+")\Z')
 
     def test_exit_at_vblank_records_a_clean_end(self):
         """SR_EXIT_AT_VBLANK is the documented end of a showcase recording: exit status 0."""
-        self.assertIn('sr_videorec_finish_status("SR_EXIT_AT_VBLANK", 0)', hle_sources.text())
+        self.assertIn('sr_run_end(0, "exit_at_vblank", "SR_EXIT_AT_VBLANK")', hle_sources.text())
 
     def test_texdump_finish_pattern(self):
         code = _without_comments("{ /* sr_texdump_exit_finish(); */ sr_texdump_exit_finish (); _Exit(1); }")

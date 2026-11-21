@@ -1091,6 +1091,96 @@ static bool nk_iso_dir_record_fits(const uint8_t *record, uint8_t rec_len) {
     return rec_len >= 34u && record[32] != 0 && 33u + record[32] <= rec_len;
 }
 
+/* The directory scan of nk_iso_inspect (the rule in docs/ARCHITECTURE.md, "The PARAM.SFO lookup
+ * rule"). dir_label names the directory in a refusal ("root" or "PSP_GAME"). Records are read in
+ * order and every record before the match must be well formed, a non-matching one included:
+ * ECMA-119 6.8.1.1 (no sector crossing), a length that holds its identifier, equal both-endian
+ * copies of its extent (7.3.3). The first record that name matches, by the reader's rule
+ * (nk_iso_name_matches), ends the scan: its extent must lie inside the image, else the scan is
+ * refused with outside_message and a later record of the name is never consulted. Whether the
+ * match is a directory is the caller's to judge (*out_is_dir). Every refusal text is written to
+ * error_message. Unlike nk_iso_find_in_dir, which passes an outside record over for the reader's
+ * lookups, a PARAM.SFO lookup never reads such a disc as one without the file. */
+typedef enum { NK_ISO_SCAN_ABSENT, NK_ISO_SCAN_FOUND, NK_ISO_SCAN_REFUSED } NkIsoScan;
+
+static NkIsoScan nk_iso_inspect_scan(const uint8_t *dir, size_t size, const char *dir_label,
+                                     const char *name, uint64_t file_size,
+                                     const char *outside_message, uint32_t *out_lba,
+                                     uint32_t *out_size, bool *out_is_dir, char *error_message,
+                                     size_t error_cap) {
+    size_t off = 0;
+    while (off < size) {
+        uint8_t rec_len = dir[off];
+        if (rec_len == 0) {
+            off = ((off / SECTOR_SIZE) + 1) * SECTOR_SIZE;
+            continue;
+        }
+        if ((off % SECTOR_SIZE) + rec_len > SECTOR_SIZE) {
+            snprintf(error_message, error_cap,
+                     "Malformed ISO: %s directory record length %u at offset %zu crosses "
+                     "2048-byte sector boundary (ECMA-119 6.8.1.1)",
+                     dir_label, (unsigned int)rec_len, off);
+            return NK_ISO_SCAN_REFUSED;
+        }
+        if (off + rec_len > size) {
+            snprintf(error_message, error_cap,
+                     "Malformed ISO: %s directory record truncated before sector end", dir_label);
+            return NK_ISO_SCAN_REFUSED;
+        }
+        if (!nk_iso_dir_record_fits(&dir[off], rec_len)) {
+            snprintf(error_message, error_cap,
+                     "Malformed ISO: %s directory record at offset %zu is too short for its "
+                     "identifier", dir_label, off);
+            return NK_ISO_SCAN_REFUSED;
+        }
+        uint32_t lba_le = read_le32(&dir[off + 2]);
+        uint32_t lba_be = read_be32(&dir[off + 6]);
+        uint32_t size_le = read_le32(&dir[off + 10]);
+        uint32_t size_be = read_be32(&dir[off + 14]);
+        if (lba_le != lba_be || size_le != size_be) {
+            snprintf(error_message, error_cap,
+                     "Malformed ISO: %s directory record at offset %zu has conflicting "
+                     "both-endian extent copies (ECMA-119 7.3.3)", dir_label, off);
+            return NK_ISO_SCAN_REFUSED;
+        }
+        if (nk_iso_name_matches(name, &dir[off + 33], dir[off + 32])) {
+            uint64_t ext_off = (uint64_t)lba_le * SECTOR_SIZE;
+            if (ext_off > file_size || (uint64_t)size_le > file_size - ext_off) {
+                snprintf(error_message, error_cap, "%s", outside_message);
+                return NK_ISO_SCAN_REFUSED;
+            }
+            *out_lba = lba_le;
+            *out_size = size_le;
+            *out_is_dir = (dir[off + 25] & 0x02u) != 0;
+            return NK_ISO_SCAN_FOUND;
+        }
+        off += rec_len;
+    }
+    return NK_ISO_SCAN_ABSENT;
+}
+
+/* One directory extent, read whole, or a refusal by name: a directory that cannot be buffered or
+ * read is never read as one without PSP_GAME or PARAM.SFO. The extent is inside the image (the
+ * caller checked it). */
+static NkResult nk_iso_inspect_read_dir(FILE *f, uint32_t lba, uint32_t size, const char *label,
+                                        uint8_t **out_buf, NkIsoMetadata *meta) {
+    uint8_t *buf = (uint8_t *)malloc(size);
+    if (!buf) {
+        snprintf(meta->error_message, sizeof(meta->error_message),
+                 "Out of memory reading the %s directory (%u bytes)", label, (unsigned int)size);
+        return NK_ERROR_OUT_OF_MEMORY;
+    }
+    if (nk_fseek64(f, (int64_t)lba * SECTOR_SIZE, SEEK_SET) != 0 ||
+        fread(buf, 1, size, f) != size) {
+        snprintf(meta->error_message, sizeof(meta->error_message),
+                 "Could not read the %s directory (%u bytes)", label, (unsigned int)size);
+        free(buf);
+        return NK_ERROR_INVALID_ISO;
+    }
+    *out_buf = buf;
+    return NK_OK;
+}
+
 NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
     if (!iso_path || !out_meta) return NK_ERROR_GENERIC;
     memset(out_meta, 0, sizeof(*out_meta));
@@ -1185,114 +1275,68 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
     }
     snprintf(out_meta->volume_id, sizeof(out_meta->volume_id), "%s", vol_id);
 
-    /* Search for PARAM.SFO by reading root directory and PSP_GAME. Both names are
-       matched by the reader's rule (nk_iso_name_matches), as the reader, the stager
-       and _lookup_iso_file in tools/nk_core/iso_inspect.py match them. */
-    /* The root extent rule nk_iso_reader_open applies, so a disc this accepts
-       is one the reader, the classifier and the stager can open too. */
+    /* PSP_GAME/PARAM.SFO is found by the one rule written in docs/ARCHITECTURE.md
+       ("The PARAM.SFO lookup rule"), which tools/nk_core/iso_inspect.py
+       (_lookup_param_sfo) follows too and tools/test_iso_parity.py holds the two to: the root
+       directory and then PSP_GAME are scanned by nk_iso_inspect_scan, each name matched by the
+       reader's rule (nk_iso_name_matches). The root extent is the one nk_iso_reader_open applies,
+       so a disc this accepts is one the reader, the classifier and the stager can open too. */
     uint32_t root_lba = 0;
     uint32_t root_size = 0;
-    if (!nk_iso_pvd_root_extent(pvd, file_size, &root_lba, &root_size)) {
+    if (!nk_iso_pvd_root_extent(pvd, file_size, &root_lba, &root_size) ||
+        (pvd[156 + 25] & 0x02u) == 0) {
         fclose(f);
         snprintf(out_meta->error_message, sizeof(out_meta->error_message),
                  "Root directory extent is invalid (its both-endian copies differ, it is "
-                 "empty or too large, or it extends beyond the ISO file)");
+                 "empty or too large, it is not marked as a directory, or it extends beyond "
+                 "the ISO file)");
         return NK_ERROR_INVALID_ISO;
     }
-    uint64_t root_offset = (uint64_t)root_lba * SECTOR_SIZE;
 
     uint32_t psp_game_lba = 0;
     uint32_t psp_game_size = 0;
-
-    /* A directory that cannot be buffered or read whole is refused by name, never
-       read as one without PSP_GAME or PARAM.SFO. */
-    uint8_t *dir_buf = (uint8_t *)malloc(root_size);
-    if (!dir_buf) {
-        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                 "Out of memory reading the root directory (%u bytes)", (unsigned int)root_size);
+    bool psp_game_is_dir = false;
+    uint8_t *dir_buf = NULL;
+    NkResult read_result = nk_iso_inspect_read_dir(f, root_lba, root_size, "root", &dir_buf, out_meta);
+    if (read_result != NK_OK) {
         fclose(f);
-        return NK_ERROR_OUT_OF_MEMORY;
+        return read_result;
     }
-    if (nk_fseek64(f, (int64_t)root_offset, SEEK_SET) != 0 ||
-        fread(dir_buf, 1, root_size, f) != root_size) {
-        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                 "Could not read the root directory (%u bytes)", (unsigned int)root_size);
-        free(dir_buf);
+    NkIsoScan scan = nk_iso_inspect_scan(dir_buf, root_size, "root", "PSP_GAME", file_size,
+                                         "PSP_GAME directory extent is invalid", &psp_game_lba,
+                                         &psp_game_size, &psp_game_is_dir, out_meta->error_message,
+                                         sizeof(out_meta->error_message));
+    free(dir_buf);
+    dir_buf = NULL;
+    if (scan == NK_ISO_SCAN_REFUSED) {
         fclose(f);
         return NK_ERROR_INVALID_ISO;
     }
-    {
-        size_t read_bytes = root_size;
-        size_t off = 0;
-        while (off < read_bytes) {
-            uint8_t rec_len = dir_buf[off];
-            if (rec_len == 0) {
-                off = ((off / SECTOR_SIZE) + 1) * SECTOR_SIZE;
-                continue;
-            }
-            /* ECMA-119 6.8.1.1: Directory record must not cross sector boundary */
-            if ((off % SECTOR_SIZE) + rec_len > SECTOR_SIZE) {
-                snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                    "Malformed ISO: directory record length %u at offset %zu crosses 2048-byte sector boundary (ECMA-119 6.8.1.1)",
-                    (unsigned int)rec_len, off);
-                free(dir_buf);
-                fclose(f);
-                return NK_ERROR_INVALID_ISO;
-            }
-            if (off + rec_len > read_bytes) {
-                snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                    "Malformed ISO: directory record truncated before sector end");
-                free(dir_buf);
-                fclose(f);
-                return NK_ERROR_INVALID_ISO;
-            }
-            if (!nk_iso_dir_record_fits(&dir_buf[off], rec_len)) {
-                snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                    "Malformed ISO: directory record at offset %zu is too short for its identifier", off);
-                free(dir_buf);
-                fclose(f);
-                return NK_ERROR_INVALID_ISO;
-            }
-
-            uint32_t extent_lba_le = read_le32(&dir_buf[off + 2]);
-            uint32_t extent_lba_be = read_be32(&dir_buf[off + 6]);
-            uint32_t extent_size_le = read_le32(&dir_buf[off + 10]);
-            uint32_t extent_size_be = read_be32(&dir_buf[off + 14]);
-
-            /* Both-endian verification (ECMA-119 7.3.3). A record whose copies
-               disagree refuses the disc, as the stager and iso_inspect.py do:
-               skipping it would report a damaged disc as one without PSP_GAME. */
-            if (extent_lba_le != extent_lba_be || extent_size_le != extent_size_be) {
-                snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                    "Malformed ISO: root directory record at offset %zu has conflicting both-endian extent copies (ECMA-119 7.3.3)", off);
-                free(dir_buf);
-                fclose(f);
-                return NK_ERROR_INVALID_ISO;
-            }
-
-            uint32_t extent_lba = extent_lba_le;
-            uint32_t extent_size = extent_size_le;
-            uint8_t name_len = dir_buf[off + 32];
-
-            /* Checked arithmetic on candidate extent */
-            uint64_t ext_off = (uint64_t)extent_lba * SECTOR_SIZE;
-            if (ext_off <= file_size && (uint64_t)extent_size <= file_size - ext_off) {
-                if (nk_iso_name_matches("PSP_GAME", &dir_buf[off + 33], name_len)) {
-                    psp_game_lba = extent_lba;
-                    psp_game_size = extent_size;
-                    out_meta->has_psp_game_folder = true;
-                    break;
-                }
-            }
-            off += rec_len;
+    if (scan == NK_ISO_SCAN_FOUND) {
+        const char *bad = NULL;
+        if (!psp_game_is_dir) {
+            bad = "PSP_GAME is not a directory";
+        } else if (psp_game_size == 0) {
+            bad = "PSP_GAME directory is empty";
+        } else if (psp_game_size > NK_ISO_MAX_DIR_BYTES) {
+            /* The reader refuses to buffer this directory, so no later step could
+               open PSP_GAME either: refuse it here, not through a smaller window. */
+            snprintf(out_meta->error_message, sizeof(out_meta->error_message),
+                     "PSP_GAME directory extent is larger than %u bytes",
+                     (unsigned int)NK_ISO_MAX_DIR_BYTES);
+            fclose(f);
+            return NK_ERROR_INVALID_ISO;
         }
-        free(dir_buf);
+        if (bad) {
+            snprintf(out_meta->error_message, sizeof(out_meta->error_message), "%s", bad);
+            fclose(f);
+            return NK_ERROR_INVALID_ISO;
+        }
+        out_meta->has_psp_game_folder = true;
     }
 
     uint32_t sfo_lba = 0;
     uint32_t sfo_size = 0;
-    bool sfo_found = false;
-    bool sfo_extent_valid = false;
 
     /* True only when disc_id came from a parsed, validated PARAM.SFO structure.
        A disc id recovered by scanning raw image bytes is a guess: the byte
@@ -1301,117 +1345,41 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
        must never satisfy the catalog and mark the disc supported/verified. */
     bool identity_structured = false;
 
-    if (psp_game_size > NK_ISO_MAX_DIR_BYTES) {
-        /* The reader refuses to buffer this directory, so no later step could
-           open PSP_GAME either: refuse it here, not through a smaller window. */
-        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                 "PSP_GAME directory extent is larger than %u bytes",
-                 (unsigned int)NK_ISO_MAX_DIR_BYTES);
-        fclose(f);
-        return NK_ERROR_INVALID_ISO;
-    }
-    if (psp_game_size > 0) {
-        uint64_t psp_game_offset = (uint64_t)psp_game_lba * SECTOR_SIZE;
-
-        if (psp_game_offset <= file_size && (uint64_t)psp_game_size <= file_size - psp_game_offset) {
-            dir_buf = (uint8_t *)malloc(psp_game_size);
-            if (!dir_buf) {
-                snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                         "Out of memory reading the PSP_GAME directory (%u bytes)",
-                         (unsigned int)psp_game_size);
-                fclose(f);
-                return NK_ERROR_OUT_OF_MEMORY;
+    if (out_meta->has_psp_game_folder) {
+        read_result = nk_iso_inspect_read_dir(f, psp_game_lba, psp_game_size, "PSP_GAME", &dir_buf,
+                                              out_meta);
+        if (read_result != NK_OK) {
+            fclose(f);
+            return read_result;
+        }
+        bool sfo_is_dir = false;
+        scan = nk_iso_inspect_scan(dir_buf, psp_game_size, "PSP_GAME", "PARAM.SFO", file_size,
+                                   "PSP_GAME/PARAM.SFO extent is invalid", &sfo_lba, &sfo_size,
+                                   &sfo_is_dir, out_meta->error_message,
+                                   sizeof(out_meta->error_message));
+        free(dir_buf);
+        dir_buf = NULL;
+        if (scan == NK_ISO_SCAN_REFUSED) {
+            fclose(f);
+            return NK_ERROR_INVALID_ISO;
+        }
+        const char *bad = NULL;
+        if (scan == NK_ISO_SCAN_FOUND) {
+            if (sfo_is_dir) {
+                bad = "PSP_GAME/PARAM.SFO is a directory";
+            } else if (sfo_size == 0) {
+                bad = "PSP_GAME/PARAM.SFO is empty";
+            } else if (sfo_size < 20u || sfo_size > NK_ISO_MAX_SFO_BYTES) {
+                bad = "PSP_GAME/PARAM.SFO has an unsupported size";
             }
-            if (nk_fseek64(f, (int64_t)psp_game_offset, SEEK_SET) != 0 ||
-                fread(dir_buf, 1, psp_game_size, f) != psp_game_size) {
-                snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                         "Could not read the PSP_GAME directory (%u bytes)",
-                         (unsigned int)psp_game_size);
-                free(dir_buf);
-                fclose(f);
-                return NK_ERROR_INVALID_ISO;
-            }
-            {
-                size_t read_bytes = psp_game_size;
-                size_t off = 0;
-                while (off < read_bytes) {
-                    uint8_t rec_len = dir_buf[off];
-                    if (rec_len == 0) {
-                        off = ((off / SECTOR_SIZE) + 1) * SECTOR_SIZE;
-                        continue;
-                    }
-                    /* ECMA-119 6.8.1.1: Directory record must not cross sector boundary */
-                    if ((off % SECTOR_SIZE) + rec_len > SECTOR_SIZE) {
-                        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                            "Malformed ISO: PSP_GAME directory record length %u at offset %zu crosses 2048-byte sector boundary (ECMA-119 6.8.1.1)",
-                            (unsigned int)rec_len, off);
-                        free(dir_buf);
-                        fclose(f);
-                        return NK_ERROR_INVALID_ISO;
-                    }
-                    if (off + rec_len > read_bytes) {
-                        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                            "Malformed ISO: PSP_GAME directory record truncated before sector end");
-                        free(dir_buf);
-                        fclose(f);
-                        return NK_ERROR_INVALID_ISO;
-                    }
-                    if (!nk_iso_dir_record_fits(&dir_buf[off], rec_len)) {
-                        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                            "Malformed ISO: PSP_GAME directory record at offset %zu is too short for its identifier", off);
-                        free(dir_buf);
-                        fclose(f);
-                        return NK_ERROR_INVALID_ISO;
-                    }
-
-                    uint32_t extent_lba_le = read_le32(&dir_buf[off + 2]);
-                    uint32_t extent_lba_be = read_be32(&dir_buf[off + 6]);
-                    uint32_t extent_size_le = read_le32(&dir_buf[off + 10]);
-                    uint32_t extent_size_be = read_be32(&dir_buf[off + 14]);
-
-                    /* Both-endian verification (ECMA-119 7.3.3): refused, as in
-                       the root scan above. */
-                    if (extent_lba_le != extent_lba_be || extent_size_le != extent_size_be) {
-                        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-                            "Malformed ISO: PSP_GAME directory record at offset %zu has conflicting both-endian extent copies (ECMA-119 7.3.3)", off);
-                        free(dir_buf);
-                        fclose(f);
-                        return NK_ERROR_INVALID_ISO;
-                    }
-
-                    uint32_t extent_lba = extent_lba_le;
-                    uint32_t extent_size = extent_size_le;
-                    uint8_t name_len = dir_buf[off + 32];
-
-                    uint64_t ext_off = (uint64_t)extent_lba * SECTOR_SIZE;
-                    if (nk_iso_name_matches("PARAM.SFO", &dir_buf[off + 33], name_len)) {
-                        sfo_found = true;
-                        if (ext_off <= file_size && (uint64_t)extent_size <= file_size - ext_off) {
-                            sfo_extent_valid = true;
-                            sfo_lba = extent_lba;
-                            sfo_size = extent_size;
-                            break;
-                        }
-                    }
-                    off += rec_len;
-                }
-                free(dir_buf);
-            }
+        }
+        if (bad) {
+            snprintf(out_meta->error_message, sizeof(out_meta->error_message), "%s", bad);
+            fclose(f);
+            return NK_ERROR_INVALID_ISO;
         }
     }
 
-    if (sfo_found && !sfo_extent_valid) {
-        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-            "PSP_GAME/PARAM.SFO extent is invalid");
-        fclose(f);
-        return NK_ERROR_INVALID_ISO;
-    }
-    if (sfo_found && sfo_size == 0) {
-        snprintf(out_meta->error_message, sizeof(out_meta->error_message),
-            "PSP_GAME/PARAM.SFO is empty");
-        fclose(f);
-        return NK_ERROR_INVALID_ISO;
-    }
     if (sfo_size > 0) {
         uint64_t sfo_offset = (uint64_t)sfo_lba * SECTOR_SIZE;
         if (sfo_size > NK_ISO_MAX_SFO_BYTES || sfo_offset > file_size ||

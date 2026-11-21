@@ -723,6 +723,54 @@ class TestPackageNotices(unittest.TestCase):
         if reference["commit"] is not None:
             self.assertRegex(reference["commit"], r"^[0-9a-f]{40}$")
 
+    def test_runtime_source_commit_reads_the_install_record(self) -> None:
+        """An installed tree (<install>/source, no git) takes its commit from the install
+        record stage_install.py wrote; it is never re-derived or guessed (#2875)."""
+        commit = "0123456789abcdef0123456789abcdef01234567"
+        with tempfile.TemporaryDirectory() as tmp:
+            install = Path(tmp) / "install"
+            source = install / "source"
+            source.mkdir(parents=True)
+            record = install / package_notices.INSTALL_RECORD_NAME
+            record.write_text(json.dumps({"schema_version": 1, "source_commit": commit,
+                                          "player_commit": commit}), encoding="utf-8")
+            self.assertEqual(package_notices.runtime_source_commit(source),
+                             {"commit": commit, "origin": "install-record", "reason": None})
+            reference = package_notices.source_reference(source)
+            self.assertEqual(reference["commit"], commit)
+            self.assertIsNone(reference["tag"])
+            self.assertIsNone(reference["local_changes"])
+            self.assertIn(f"Commit:     {commit}",
+                          package_notices.render_source_notice(reference))
+
+            for bad in ("{", json.dumps({"source_commit": "abc"}),
+                        json.dumps({"source_commit": commit.upper()}), json.dumps([commit])):
+                record.write_text(bad, encoding="utf-8")
+                resolved = package_notices.runtime_source_commit(source)
+                self.assertIsNone(resolved["commit"])
+                self.assertEqual(resolved["origin"], "unknown")
+                self.assertIn("install record", resolved["reason"])
+
+            # The record sits beside source/, so another directory never reads it.
+            other = install / "elsewhere"
+            other.mkdir()
+            record.write_text(json.dumps({"source_commit": commit}), encoding="utf-8")
+            resolved = package_notices.runtime_source_commit(other)
+            if resolved["origin"] != "git":
+                self.assertEqual(resolved["origin"], "unknown")
+                self.assertIsNone(resolved["commit"])
+                self.assertIn("no install record and no git metadata", resolved["reason"])
+
+    def test_runtime_source_commit_reads_this_checkout(self) -> None:
+        resolved = package_notices.runtime_source_commit(ROOT)
+        if resolved["origin"] == "git":
+            self.assertRegex(resolved["commit"], r"^[0-9a-f]{40}$")
+            self.assertIsNone(resolved["reason"])
+        else:
+            self.assertEqual(resolved["origin"], "unknown")
+            self.assertIsNone(resolved["commit"])
+            self.assertTrue(resolved["reason"])
+
     def test_system_dll_detection(self) -> None:
         """Standard Windows system DLLs are recognized; recorded loaders are not system DLLs."""
         self.assertTrue(package_notices.is_system_dll("kernel32.dll"))
