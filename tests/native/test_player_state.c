@@ -949,6 +949,7 @@ static void write_player_package_preflight_iso(const char *path,
     put_iso_both32(pvd + 80, SECTORS);
     put_iso_both32(pvd + 158, ROOT_LBA);
     put_iso_both32(pvd + 166, SECTOR);
+    pvd[156 + 25] = 0x02; /* the root record is a directory */
 
     uint8_t *root = image + ROOT_LBA * SECTOR;
     write_iso_record(root, 0, dot, sizeof(dot), ROOT_LBA, SECTOR, true);
@@ -14669,6 +14670,7 @@ static void steam_art_test_write_iso(const char *path, const uint8_t *icon0, siz
     put_iso_both32(pvd + 80, SECTORS);
     put_iso_both32(pvd + 158, ROOT_LBA);
     put_iso_both32(pvd + 166, SECTOR);
+    pvd[156 + 25] = 0x02; /* the root record is a directory */
     uint8_t *root = image + ROOT_LBA * SECTOR;
     write_iso_record(root, 0, dot, sizeof(dot), ROOT_LBA, SECTOR, true);
     write_iso_record(root, 34, dotdot, sizeof(dotdot), ROOT_LBA, SECTOR, true);
@@ -20574,7 +20576,9 @@ int main(int argc, char **argv) {
                 scheduler_summary_kept = rep->stalled_game_no_frame_vblanks == 1800u &&
                     rep->stalled_game_seconds == 30u && rep->stalled_game_ready == 1u &&
                     rep->stalled_game_delay == 2u && rep->stalled_game_wait == 3u &&
-                    rep->stalled_game_spin == 4u;
+                    rep->stalled_game_spin == 4u &&
+                    /* An older runtime's line carries no RUNNING count. */
+                    !rep->stalled_game_running_known && !rep->stalled_game_busy_known;
                 player_app_keep_waiting_for_stalled_game(rep);
                 keep_waiting_dismissed = !rep->stalled_game_notice_visible &&
                     rep->stalled_game_notice_dismissed &&
@@ -20602,10 +20606,14 @@ int main(int argc, char **argv) {
                     !rep->stalled_game_notice_dismissed;
                 warning_return_requested =
                     rep->stalled_game_restore_game_front_requested;
+                /* #2875: a current runtime adds the RUNNING count and the busy thread after
+                   spin; a thread that never blocks starves the others. */
                 events_ok = append_runtime_event(
                     stall_events_path,
                     "BOOT_EVENT phase=stalled observation=no_new_flip "
-                    "no_frame_vblanks=1800 seconds=30 ready=1 delay=2 wait=3 spin=4\n");
+                    "no_frame_vblanks=1800 seconds=30 ready=1 delay=2 wait=3 spin=4 "
+                    "running=1 busy_uid=0x130 busy_pri=20 busy_import=sceAtracDecodeData "
+                    "busy_import_ret=0x00000000 busy_repeats=99\n");
             }
             if (events_ok) {
                 (void)player_app_monitor_game_session(rep, 74000);
@@ -20617,7 +20625,10 @@ int main(int argc, char **argv) {
                     strcmp(rep->last_error.title, "Game stopped early") == 0 &&
                     strstr(rep->last_error.message, "last in-game save") != NULL &&
                     strstr(rep->last_error.details, "no_frame_vblanks=1800") != NULL &&
-                    strstr(rep->last_error.details, "ready=1 delay=2 wait=3 spin=4") != NULL;
+                    strstr(rep->last_error.details, "ready=1 delay=2 wait=3 spin=4") != NULL &&
+                    strstr(rep->last_error.details,
+                           "spin=4 running=1; busy thread uid=0x130 priority=20 last import "
+                           "sceAtracDecodeData -> 0x00000000 x99") != NULL;
             }
         }
         /* Stop even on a failed assertion so the synthetic child cannot outlive

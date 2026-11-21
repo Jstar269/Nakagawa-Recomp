@@ -128,18 +128,12 @@ static uint32_t h_ExitThread(CpuState *s) {
             s->r[2], s->r[4], s->r[8], s->r[9], s->r[10], s->r[11],
             s->r[16], s->r[17], s->r[18], s->r[19]);
     if (death_wish) {
-        /* _exit: skip host atexit handlers (libc has already burned -- the death wish
-         * is unconditional at this point). stderr flush so the trace survives. */
+        /* The run end skips the host atexit handlers (libc has already burned -- the death
+         * wish is unconditional at this point) and runs the end-of-process reports itself. */
         fprintf(stderr, "GAMELOG: Guest requested exit (libc guard chain)\n");
         fflush(stderr);
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, s->pc, uid, 1u);
-        SR_VERIFY_REPORT_NOW();  /* _exit skips atexit, which would have written the report */
-        ge_scene_dump_finish();
-        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-        (void)sr_videorec_finish_status("the guest's own exit path failed", 1);
-        sr_perf_shutdown();      /* the end-of-process reports, as on the _Exit paths */
-        sr_profile_dump_final();
-        _exit(1);
+        sr_run_end(1, "guest_exit_failed", "the guest's own exit path failed");
     }
     int delete_request = s_exit_delete_request;
     s_exit_delete_request = 0;
@@ -528,7 +522,27 @@ static uint32_t h_ResumeDispatchThread(CpuState *s) {
 }
 size_t s_callbacks_cap;
 
+/* Drop the deleted (unused) slots from the table, keeping the live callbacks in creation order.
+ * Only between dispatch passes: a pass in progress holds slot indices (the once-pass visits the
+ * slots below the length it captured), so no index may shift under it. */
+static void sr_callback_table_compact(void) {
+    if (s_callback_dispatch_depth != 0) return;
+    size_t kept = 0;
+    for (size_t i = 0; i < s_callbacks_len; i++) {
+        if (!s_callbacks[i].used) continue;
+        if (kept != i) s_callbacks[kept] = s_callbacks[i];
+        kept++;
+    }
+    if (kept < s_callbacks_len)
+        memset(&s_callbacks[kept], 0, (s_callbacks_len - kept) * sizeof(*s_callbacks));
+    s_callbacks_len = kept;
+}
+
 static int sr_callback_reserve_one(void) {
+    if (s_callbacks_len < s_callbacks_cap) return 1;
+    /* The table is full: reuse the slots deleted callbacks left before growing, so it holds the
+     * live callbacks and not every callback ever created (audit 2026-11-17, F-319bda61). */
+    sr_callback_table_compact();
     if (s_callbacks_len < s_callbacks_cap) return 1;
     size_t next = s_callbacks_cap ? s_callbacks_cap * 2u : 64u;
     if (next < s_callbacks_cap || next > ((size_t)-1) / sizeof(*s_callbacks)) return 0;
@@ -581,6 +595,7 @@ static int sr_thread_dispatch_callbacks_once(uint32_t thread_uid) {
      * the next pump. */
     const size_t slot_limit = s_callbacks_len;
     int total_dispatched = 0;
+    s_callback_dispatch_depth++;   /* the pass holds slot indices: no compaction until it ends */
     for (size_t i = 0; i < slot_limit; i++) {
         uint32_t selected_uid = 0u;
         if (i < s_callbacks_len && s_callbacks[i].used &&
@@ -590,6 +605,7 @@ static int sr_thread_dispatch_callbacks_once(uint32_t thread_uid) {
         if (selected_uid != 0u)
             total_dispatched += sr_thread_dispatch_callback_uid(thread_uid, cpu, selected_uid);
     }
+    if (s_callback_dispatch_depth > 0) s_callback_dispatch_depth--;   /* a reset may have run */
     return total_dispatched;
 }
 /* h_NotifyCallback: 0xc11ba8c4 — synchronously dispatch a registered callback entry from

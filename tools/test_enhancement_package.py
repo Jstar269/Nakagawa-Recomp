@@ -3850,7 +3850,10 @@ class TestEnhancementStoreSites(unittest.TestCase):
 
     def test_every_runtime_exit_path_reaches_the_end_of_process_reports(self) -> None:
         """A store site's NOT_REACHED report runs from sr_perf_shutdown(); every _Exit/_exit
-        in the runtime calls it first. HLE self-tests that do not link perf.c stub it."""
+        in the runtime calls it first. HLE self-tests that do not link perf.c stub it. Every stop
+        the runtime makes goes through the one run end, sr_run_end (audit 2026-11-17, F-1ee85ec7;
+        tools/test_dispatch_fatal_policy.py pins that no other _Exit exists), so the runtime has
+        exactly one such exit, and its block calls the shutdown."""
         exit_call = re.compile(r"\b_(?:Exit|exit)\(")
         report = re.compile(r"\bsr_perf_shutdown\(\);")
         # verify_harness.c is its own program (#1843): it runs a synthetic module with no
@@ -3873,7 +3876,7 @@ class TestEnhancementStoreSites(unittest.TestCase):
                     self.assertIsNotNone(prelude, "no enclosing '{' before the exit call")
                     assert prelude is not None
                     self.assertRegex(prelude, report)
-        self.assertGreaterEqual(paths, 12)
+        self.assertEqual(paths, 1, "the runtime's one exit is the run end's (sr_run_end)")
 
     def test_exit_path_scan_ignores_sibling_blocks(self) -> None:
         """The exit-path scan reads only the exit's own block: a sibling block's shutdown call
