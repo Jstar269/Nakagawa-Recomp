@@ -3014,9 +3014,11 @@ static void memstick_expect_parse(const char *text, NkMemstickLayoutResult want)
     nk_memstick_layout_free(&layout);
 }
 
-/* The write refuses `want` over the record `text` and leaves its bytes, and no temporary file. */
-static void memstick_expect_write_refused(const NkMemstickPaths *paths, const char *text,
-                                          NkMemstickLayoutResult want) {
+/* The write refuses `want` over the record `text`, naming `detail` when it is not NULL, and
+   leaves its bytes, and no temporary file. */
+static void memstick_expect_write_refused_because(const NkMemstickPaths *paths, const char *text,
+                                                  NkMemstickLayoutResult want,
+                                                  const char *detail) {
     write_file_utf8(paths->record, text);
     NkMemstickLayout layout;
     memstick_layout_sample(&layout);
@@ -3024,7 +3026,13 @@ static void memstick_expect_write_refused(const NkMemstickPaths *paths, const ch
     NkMemstickLayoutResult got = nk_memstick_layout_write(paths->saves, &layout, err,
                                                           sizeof(err));
     nk_memstick_layout_free(&layout);
+    if (got != want || (detail && !strstr(err, detail))) {
+        fprintf(stderr, "memstick write: want %s (%s), got %s (%s)\n",
+                nk_memstick_layout_result_code(want), detail ? detail : "-",
+                nk_memstick_layout_result_code(got), err);
+    }
     assert(got == want);
+    assert(!detail || strstr(err, detail) != NULL);
     assert(strstr(err, nk_memstick_layout_result_code(want)) != NULL);
     assert(strstr(err, "kept and not replaced") != NULL);
     assert_file_text(paths->record, text);
@@ -3032,6 +3040,71 @@ static void memstick_expect_write_refused(const NkMemstickPaths *paths, const ch
     NkMemstickLayout read_back;
     assert(nk_memstick_layout_read(paths->saves, &read_back, err, sizeof(err)) == want);
     nk_memstick_layout_free(&read_back);
+}
+
+static void memstick_expect_write_refused(const NkMemstickPaths *paths, const char *text,
+                                          NkMemstickLayoutResult want) {
+    memstick_expect_write_refused_because(paths, text, want, NULL);
+}
+
+/* `count` copies of `ch` after `first` (when it is not NUL), as a string the caller frees. */
+static char *memstick_repeat(char first, char ch, size_t count) {
+    char *text = (char *)malloc(count + 1u);
+    assert(text);
+    memset(text, ch, count);
+    if (count && first) text[0] = first;
+    text[count] = '\0';
+    return text;
+}
+
+/* A version-1 record whose written_by is `written_by_bytes` digits and whose one source is a
+   pending slot of `slot_bytes` letters with a reason of `reason_bytes` capitals: the bounds of
+   the record's names. */
+static char *memstick_bound_record(size_t slot_bytes, size_t reason_bytes,
+                                   size_t written_by_bytes) {
+    char *slot = memstick_repeat('\0', 'a', slot_bytes);
+    char *reason = memstick_repeat('R', 'B', reason_bytes);
+    char *written_by = memstick_repeat('\0', '9', written_by_bytes);
+    size_t size = slot_bytes + reason_bytes + written_by_bytes + 512u;
+    char *text = (char *)malloc(size);
+    assert(text);
+    snprintf(text, size, "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+             "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"%s\", \"sources\": "
+             "[{\"slot\": \"%s\", \"status\": \"pending\", \"reason\": \"%s\"}]}\n",
+             written_by, slot, reason);
+    free(slot);
+    free(reason);
+    free(written_by);
+    return text;
+}
+
+/* A version-1 record listing `count` not-a-slot sources S00000, S00001, ... */
+static char *memstick_many_sources_record(size_t count) {
+    static const char head[] = "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", "
+                               "\"stick\": \"Memory Stick\", \"state\": \"ready\", "
+                               "\"written_by\": \"0.1.0\", \"sources\": [";
+    size_t size = sizeof(head) + count * 48u + 8u;
+    char *text = (char *)malloc(size);
+    assert(text);
+    size_t used = (size_t)snprintf(text, size, "%s", head);
+    for (size_t i = 0; i < count; ++i) {
+        used += (size_t)snprintf(text + used, size - used,
+                                 "%s{\"slot\": \"S%05u\", \"status\": \"not-a-slot\"}",
+                                 i ? ", " : "", (unsigned)i);
+        assert(used < size);
+    }
+    snprintf(text + used, size - used, "]}\n");
+    return text;
+}
+
+/* The record `text` on the disk at `paths` reads as a layout into *out. */
+static void memstick_expect_read_ok(const NkMemstickPaths *paths, const char *text,
+                                    NkMemstickLayout *out) {
+    write_file_utf8(paths->record, text);
+    char err[1024] = "";
+    NkMemstickLayoutResult got = nk_memstick_layout_read(paths->saves, out, err, sizeof(err));
+    if (got != NK_MEMSTICK_LAYOUT_OK) fprintf(stderr, "memstick read: %s\n", err);
+    assert(got == NK_MEMSTICK_LAYOUT_OK);
 }
 
 /* #2744: the shared Memory Stick is <saves>/Memory Stick on every platform and in every override,
@@ -3193,6 +3266,30 @@ static void test_memstick_layout(const char *base, char sep) {
             {"Memory Stick", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
             {"KEPT COPIES", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
             {"ULJS00001", (NkMemstickSourceStatus)99, NULL, NULL},
+            /* Names Windows cannot make, refused on every platform so a record stays portable:
+               a forbidden character, a control byte, a trailing dot or space, a device name. */
+            {"a:b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"a<b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"a>b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"a|b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"a?b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"a*b", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"my \"saves\"", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"\x01start", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"end\x1f", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"del\x7f", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"ULUS99999.", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"ULUS99999 ", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {".", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"CON", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"prn", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"Aux", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"nul.txt", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"NUL .tar.gz", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"COM1", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"com9.log", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"LPT1", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
+            {"lpt9.dat", NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL},
         };
         for (size_t i = 0; i < sizeof(refused_sources) / sizeof(refused_sources[0]); ++i) {
             err[0] = '\0';
@@ -3205,16 +3302,48 @@ static void test_memstick_layout(const char *base, char sep) {
             assert(layout.source_count == 3u);
         }
         assert(!nk_memstick_layout_find_source(&layout, "ULJS00001"));
+        /* Names near those classes are folders on every platform. */
+        static const char *const portable_slots[] = {
+            "CONSOLE", "COM10", "COM0", "LPT", "NULL.txt", "a.b", ".hidden", " lead", "x-con"};
+        for (size_t i = 0; i < sizeof(portable_slots) / sizeof(portable_slots[0]); ++i) {
+            NkMemstickLayout one;
+            assert(nk_memstick_layout_init(&one, NK_MEMSTICK_STATE_READY, "0.1.0"));
+            assert(nk_memstick_layout_put_source(&one, portable_slots[i],
+                                                 NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL, err,
+                                                 sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
+            nk_memstick_layout_free(&one);
+        }
+        /* A slot in another ASCII case is the same folder on NTFS and APFS: refused by name, and
+           the layout keeps its own. */
+        err[0] = '\0';
+        assert(nk_memstick_layout_put_source(&layout, "ulus99999", NK_MEMSTICK_SOURCE_NOT_A_SLOT,
+                                             NULL, NULL, err, sizeof(err)) ==
+               NK_MEMSTICK_LAYOUT_INVALID);
+        assert(strstr(err, "ulus99999") && strstr(err, "ULUS99999") &&
+               strstr(err, "another case"));
+        assert(layout.source_count == 3u && strcmp(layout.sources[0].slot, "ULUS99999") == 0 &&
+               layout.sources[0].status == NK_MEMSTICK_SOURCE_MOVED);
+        /* A layout that holds both anyway is refused when it is formatted or written. */
+        {
+            NkMemstickLayout twice;
+            memstick_layout_sample(&twice);
+            strcpy(twice.sources[2].slot, "ulus99999");
+            char *text = NULL;
+            err[0] = '\0';
+            assert(nk_memstick_layout_format(&twice, &text, NULL, err, sizeof(err)) ==
+                   NK_MEMSTICK_LAYOUT_INVALID && text == NULL);
+            assert(strstr(err, "ulus99999 is listed twice") != NULL);
+            nk_memstick_layout_free(&twice);
+        }
         NkMemstickLayout bad;
         assert(!nk_memstick_layout_init(&bad, NK_MEMSTICK_STATE_READY, ""));
         assert(!nk_memstick_layout_init(&bad, NK_MEMSTICK_STATE_READY, "0.1.0\n"));
         assert(!nk_memstick_layout_init(&bad, (NkMemstickState)7, "0.1.0"));
         assert(bad.schema_version == 0 && bad.sources == NULL);
     }
-    /* A name with a quote (legal on POSIX) is escaped and reads back as itself; a name that is
+    /* A quote or a backslash in written_by is escaped and reads back as itself; a name that is
        not ASCII is kept as its UTF-8 bytes. */
-    assert(nk_memstick_layout_put_source(&layout, "my \"saves\"", NK_MEMSTICK_SOURCE_NOT_A_SLOT,
-                                         NULL, NULL, err, sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
+    snprintf(layout.written_by, sizeof(layout.written_by), "0.1.0 \"dev\" \\");
     assert(nk_memstick_layout_put_source(&layout, k_memstick_kana_slot,
                                          NK_MEMSTICK_SOURCE_NOT_A_SLOT, NULL, NULL, err,
                                          sizeof(err)) == NK_MEMSTICK_LAYOUT_OK);
@@ -3224,12 +3353,12 @@ static void test_memstick_layout(const char *base, char sep) {
         assert(nk_memstick_layout_format(&layout, &text, &length, err, sizeof(err)) ==
                NK_MEMSTICK_LAYOUT_OK);
         assert(text && length == strlen(text));
-        assert(strstr(text, "{\"slot\": \"my \\\"saves\\\"\", \"status\": \"not-a-slot\"}"));
+        assert(strstr(text, "\"written_by\": \"0.1.0 \\\"dev\\\" \\\\\",\n"));
         NkMemstickLayout again;
         assert(nk_memstick_layout_parse(text, length, &again, err, sizeof(err)) ==
                NK_MEMSTICK_LAYOUT_OK);
-        assert(again.source_count == 5u);
-        assert(nk_memstick_layout_find_source(&again, "my \"saves\""));
+        assert(again.source_count == 4u);
+        assert(strcmp(again.written_by, "0.1.0 \"dev\" \\") == 0);
         assert(nk_memstick_layout_find_source(&again, k_memstick_kana_slot));
         nk_memstick_layout_free(&again);
         free(text);
@@ -3310,6 +3439,13 @@ static void test_memstick_layout(const char *base, char sep) {
             "{\"slot\": \"A\", \"status\": \"not-a-slot\"}]}",
             "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
             "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
+            "[{\"slot\": \"ulus99999\", \"status\": \"not-a-slot\"}, "
+            "{\"slot\": \"ULUS99999\", \"status\": \"not-a-slot\"}]}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
+            "[{\"slot\": \"COM1\", \"status\": \"not-a-slot\"}]}",
+            "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
+            "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
             "[{\"slot\": \"../up\", \"status\": \"not-a-slot\"}]}",
             "{\"schema_version\": 1, \"layout\": \"shared-memory-stick\", \"stick\": "
             "\"Memory Stick\", \"state\": \"ready\", \"written_by\": \"0.1.0\", \"sources\": "
@@ -3332,6 +3468,65 @@ static void test_memstick_layout(const char *base, char sep) {
     memstick_expect_write_refused(&paths, "{\"schema_version\": 1, \"layout\": \"shared-",
                                   NK_MEMSTICK_LAYOUT_DAMAGED);
     memstick_expect_write_refused(&paths, "", NK_MEMSTICK_LAYOUT_DAMAGED);
+
+    /* Every length bound of the record: the largest value reads; one more is refused by name as
+       damaged, and the record is kept byte for byte. */
+    {
+        NkMemstickLayout bound;
+        char *text = memstick_bound_record(NK_MEMSTICK_SLOT_MAX_BYTES,
+                                           NK_MEMSTICK_REASON_MAX_BYTES,
+                                           NK_MEMSTICK_WRITTEN_BY_MAX_BYTES);
+        memstick_expect_read_ok(&paths, text, &bound);
+        assert(bound.source_count == 1u);
+        assert(strlen(bound.sources[0].slot) == NK_MEMSTICK_SLOT_MAX_BYTES);
+        assert(strlen(bound.sources[0].reason) == NK_MEMSTICK_REASON_MAX_BYTES);
+        assert(strlen(bound.written_by) == NK_MEMSTICK_WRITTEN_BY_MAX_BYTES);
+        nk_memstick_layout_free(&bound);
+        free(text);
+
+        text = memstick_bound_record(NK_MEMSTICK_SLOT_MAX_BYTES + 1u,
+                                     NK_MEMSTICK_REASON_MAX_BYTES,
+                                     NK_MEMSTICK_WRITTEN_BY_MAX_BYTES);
+        memstick_expect_write_refused_because(&paths, text, NK_MEMSTICK_LAYOUT_DAMAGED,
+                                              "slot is not a folder name the record can hold");
+        free(text);
+        text = memstick_bound_record(9u, NK_MEMSTICK_REASON_MAX_BYTES + 1u,
+                                     NK_MEMSTICK_WRITTEN_BY_MAX_BYTES);
+        memstick_expect_write_refused_because(&paths, text, NK_MEMSTICK_LAYOUT_DAMAGED,
+                                              "has a reason that is not a named code");
+        free(text);
+        text = memstick_bound_record(9u, NK_MEMSTICK_REASON_MAX_BYTES,
+                                     NK_MEMSTICK_WRITTEN_BY_MAX_BYTES + 1u);
+        memstick_expect_write_refused_because(&paths, text, NK_MEMSTICK_LAYOUT_DAMAGED,
+                                              "written_by is not 1 to 63 printable ASCII");
+        free(text);
+
+        text = memstick_many_sources_record(NK_MEMSTICK_LAYOUT_MAX_SOURCES);
+        memstick_expect_read_ok(&paths, text, &bound);
+        assert(bound.source_count == NK_MEMSTICK_LAYOUT_MAX_SOURCES);
+        nk_memstick_layout_free(&bound);
+        free(text);
+        text = memstick_many_sources_record(NK_MEMSTICK_LAYOUT_MAX_SOURCES + 1u);
+        memstick_expect_write_refused_because(&paths, text, NK_MEMSTICK_LAYOUT_DAMAGED,
+                                              "it lists more than 16384 sources");
+        free(text);
+
+        /* The pinned record, padded with spaces to the byte bound, and one byte past it. */
+        size_t sample = strlen(k_memstick_sample_record);
+        text = (char *)malloc(NK_MEMSTICK_LAYOUT_MAX_BYTES + 2u);
+        assert(text);
+        memcpy(text, k_memstick_sample_record, sample);
+        memset(text + sample, ' ', NK_MEMSTICK_LAYOUT_MAX_BYTES - sample);
+        text[NK_MEMSTICK_LAYOUT_MAX_BYTES] = '\0';
+        memstick_expect_read_ok(&paths, text, &bound);
+        assert(bound.source_count == 3u);
+        nk_memstick_layout_free(&bound);
+        text[NK_MEMSTICK_LAYOUT_MAX_BYTES] = ' ';
+        text[NK_MEMSTICK_LAYOUT_MAX_BYTES + 1u] = '\0';
+        memstick_expect_write_refused_because(&paths, text, NK_MEMSTICK_LAYOUT_DAMAGED,
+                                              "it is larger than 16777216 bytes");
+        free(text);
+    }
 
     /* A folder where the record belongs is damaged, and kept. */
     assert(nk_remove_utf8(paths.record) == 0);

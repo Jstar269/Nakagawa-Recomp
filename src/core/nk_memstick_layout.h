@@ -41,7 +41,11 @@
  *   stick; "record" names the per-source record under .nakagawa-migration/), "pending" (not moved
  *   yet; "reason" is the named code), "left-by-choice" (the user chose to start without it),
  *   "changed-after-move" (an older player wrote to it after the move; "record" names the record
- *   of the move) or "not-a-slot" (not a game's save folder, left as it is). Slot names are unique.
+ *   of the move) or "not-a-slot" (not a game's save folder, left as it is). Slot names are unique
+ *   without ASCII case ("ulus99999" and "ULUS99999" are one folder on NTFS and APFS), and each is
+ *   a name every platform can make: none of < > : " / \ | ? * or a control byte, no trailing dot
+ *   or space, and no Windows device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9, with or without an
+ *   extension).
  * - Any change to what a version-1 reader must understand bumps "schema_version". A version-1
  *   reader ignores members it does not know, so a later version-1 writer may only add members a
  *   version-1 reader can safely skip.
@@ -186,8 +190,9 @@ const NkMemstickSource *nk_memstick_layout_find_source(const NkMemstickLayout *l
 /* Add the source `slot`, or replace it when the layout has it, keeping its place. `record` and
    `reason` may be NULL or "". Refused with NK_MEMSTICK_LAYOUT_INVALID when a name is out of range
    or the status lacks what it needs ("moved" and "changed-after-move" need a record, "pending"
-   needs a reason, "not-a-slot" takes no record); NK_MEMSTICK_LAYOUT_IO when memory runs out. A
-   refusal leaves the layout as it was. */
+   needs a reason, "not-a-slot" takes no record), or when `slot` is an existing slot in another
+   ASCII case; NK_MEMSTICK_LAYOUT_IO when memory runs out. A refusal leaves the layout as it
+   was. */
 NkMemstickLayoutResult nk_memstick_layout_put_source(NkMemstickLayout *layout, const char *slot,
                                                      NkMemstickSourceStatus status,
                                                      const char *record, const char *reason,

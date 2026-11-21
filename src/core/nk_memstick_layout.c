@@ -171,14 +171,42 @@ static bool written_by_valid(const char *text) {
     return true;
 }
 
-/* One folder name directly in <saves>: a single path component that is not the layout's own. */
+/* A Windows device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9), in any ASCII case, alone or before
+   an extension: Windows opens the device, not a folder, for "nul" or "COM1.txt". The name before
+   the first dot is compared with its trailing spaces dropped, as Windows drops them. */
+static bool windows_device_name(const char *name) {
+    static const char *const devices[] = {"CON", "PRN", "AUX", "NUL"};
+    size_t stem = strcspn(name, ".");
+    while (stem > 0u && name[stem - 1u] == ' ') --stem;
+    if (stem < 3u || stem > 4u) return false;
+    char upper[5];
+    for (size_t i = 0; i < stem; ++i) {
+        char ch = name[i];
+        upper[i] = (ch >= 'a' && ch <= 'z') ? (char)(ch - 'a' + 'A') : ch;
+    }
+    upper[stem] = '\0';
+    if (stem == 3u) {
+        for (size_t i = 0; i < sizeof(devices) / sizeof(devices[0]); ++i) {
+            if (strcmp(upper, devices[i]) == 0) return true;
+        }
+        return false;
+    }
+    return (strncmp(upper, "COM", 3u) == 0 || strncmp(upper, "LPT", 3u) == 0) &&
+           upper[3] >= '1' && upper[3] <= '9';
+}
+
+/* One folder name directly in <saves>: a single path component that is not the layout's own,
+   and one every platform can make, so a record stays portable: no character Windows forbids in
+   a name (< > : " / \ | ? * or a control byte), no trailing dot or space ("." and ".." among
+   them), and no Windows device name. */
 static bool slot_valid(const char *slot) {
     if (!slot) return false;
     size_t length = strlen(slot);
     if (length == 0u || length > NK_MEMSTICK_SLOT_MAX_BYTES) return false;
-    if (strcmp(slot, ".") == 0 || strcmp(slot, "..") == 0) return false;
-    if (strchr(slot, '/') || strchr(slot, '\\')) return false;
+    if (strpbrk(slot, "<>:\"/\\|?*")) return false;
+    if (slot[length - 1u] == '.' || slot[length - 1u] == ' ') return false;
     if (!text_printable(slot, length)) return false;
+    if (windows_device_name(slot)) return false;
     return !nk_memstick_layout_is_reserved_name(slot);
 }
 
@@ -295,6 +323,16 @@ const NkMemstickSource *nk_memstick_layout_find_source(const NkMemstickLayout *l
     return NULL;
 }
 
+/* The first of the first `count` sources whose slot is `slot` without ASCII case, or NULL: on
+   NTFS and APFS "ulus99999" and "ULUS99999" are one folder, so they are one slot. */
+static const NkMemstickSource *find_folded_source(const NkMemstickLayout *layout, size_t count,
+                                                  const char *slot) {
+    for (size_t i = 0; i < count; ++i) {
+        if (ascii_equal_ignoring_case(layout->sources[i].slot, slot)) return &layout->sources[i];
+    }
+    return NULL;
+}
+
 NkMemstickLayoutResult nk_memstick_layout_put_source(NkMemstickLayout *layout, const char *slot,
                                                      NkMemstickSourceStatus status,
                                                      const char *record, const char *reason,
@@ -309,6 +347,12 @@ NkMemstickLayoutResult nk_memstick_layout_put_source(NkMemstickLayout *layout, c
         return NK_MEMSTICK_LAYOUT_INVALID;
     }
     NkMemstickSource *existing = (NkMemstickSource *)nk_memstick_layout_find_source(layout, slot);
+    const NkMemstickSource *folded = existing ? NULL
+        : find_folded_source(layout, layout->source_count, slot);
+    if (folded) {
+        layout_error(err, err_size, "source %s is source %s in another case", slot, folded->slot);
+        return NK_MEMSTICK_LAYOUT_INVALID;
+    }
     if (!existing && layout->source_count >= NK_MEMSTICK_LAYOUT_MAX_SOURCES) {
         layout_error(err, err_size, "the layout already holds %u sources",
                      (unsigned)NK_MEMSTICK_LAYOUT_MAX_SOURCES);
@@ -378,11 +422,10 @@ static bool layout_check(const NkMemstickLayout *layout, char *err, size_t err_s
                           err, err_size)) {
             return false;
         }
-        for (size_t j = 0; j < i; ++j) {
-            if (strcmp(layout->sources[j].slot, source->slot) == 0) {
-                layout_error(err, err_size, "source %s is listed twice", source->slot);
-                return false;
-            }
+        if (find_folded_source(layout, i, source->slot)) {
+            layout_error(err, err_size, "source %s is listed twice (ASCII case aside)",
+                         source->slot);
+            return false;
         }
     }
     return true;
@@ -435,8 +478,8 @@ static NkMemstickLayoutResult parse_source(const NkJsonNode *node, size_t index,
         layout_error(err, err_size, "source %u has an unknown status", (unsigned)index);
         return NK_MEMSTICK_LAYOUT_DAMAGED;
     }
-    if (nk_memstick_layout_find_source(out, slot)) {
-        layout_error(err, err_size, "source %s is listed twice", slot);
+    if (find_folded_source(out, out->source_count, slot)) {
+        layout_error(err, err_size, "source %s is listed twice (ASCII case aside)", slot);
         return NK_MEMSTICK_LAYOUT_DAMAGED;
     }
     NkMemstickLayoutResult put = nk_memstick_layout_put_source(out, slot, status, record, reason,
