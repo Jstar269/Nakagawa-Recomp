@@ -1901,6 +1901,24 @@ class RecompListingMetadataTests(unittest.TestCase):
         self.assertIn("no game data", notes)
 
 
+class TestPlayerExitCodeGuide(unittest.TestCase):
+    def test_the_setup_guide_lists_the_exit_code_table_in_main_c(self) -> None:
+        """src/player/main.c's k_player_exit_codes is the one table (--help prints it; the
+        built player's output is checked in tests/native/test_player_ui.py). docs/SETUP.md must
+        list the same rows, code and wording."""
+        source = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        block = source.split("k_player_exit_codes[] = {", 1)[1].split("};", 1)[0]
+        table = [(int(code), meaning)
+                 for code, meaning in re.findall(r'\{(\d+), "([^"]*)"\}', block)]
+        self.assertGreaterEqual(len(table), 10, table)
+        self.assertEqual([code for code, _ in table], list(range(len(table))))
+        guide = (ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+        for code, meaning in table:
+            self.assertIn(f"- `{code}`: {meaning}\n", guide)
+        listed = re.findall(r"^- `(\d+)`: ", guide, re.M)
+        self.assertEqual(listed, [str(code) for code, _ in table])
+
+
 class TestMainGuard(unittest.TestCase):
     def test_the_main_guard_is_the_last_statement(self) -> None:
         """`python tools/test_lint_docs.py` runs unittest.main(), which runs the classes defined so
