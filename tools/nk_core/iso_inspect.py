@@ -1843,10 +1843,12 @@ def _lookup_param_sfo(stream, file_size: int) -> tuple[int, int] | None:
         or root_size > MAX_DIRECTORY_BYTES
         or root_start > file_size
         or root_size > file_size - root_start
+        or not pvd[181] & 0x02
     ):
         raise IsoInspectionError(
             "Root directory extent is invalid (its both-endian copies differ, it is "
-            "empty or too large, or it extends beyond the ISO file)"
+            "empty or too large, it is not marked as a directory, or it extends beyond "
+            "the ISO file)"
         )
     root = _read_scanned_directory(stream, file_size, root_lba, root_size, "root")
     game = _scan_directory_for(

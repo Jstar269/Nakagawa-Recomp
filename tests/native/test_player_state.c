@@ -949,6 +949,7 @@ static void write_player_package_preflight_iso(const char *path,
     put_iso_both32(pvd + 80, SECTORS);
     put_iso_both32(pvd + 158, ROOT_LBA);
     put_iso_both32(pvd + 166, SECTOR);
+    pvd[156 + 25] = 0x02; /* the root record is a directory */
 
     uint8_t *root = image + ROOT_LBA * SECTOR;
     write_iso_record(root, 0, dot, sizeof(dot), ROOT_LBA, SECTOR, true);
@@ -14669,6 +14670,7 @@ static void steam_art_test_write_iso(const char *path, const uint8_t *icon0, siz
     put_iso_both32(pvd + 80, SECTORS);
     put_iso_both32(pvd + 158, ROOT_LBA);
     put_iso_both32(pvd + 166, SECTOR);
+    pvd[156 + 25] = 0x02; /* the root record is a directory */
     uint8_t *root = image + ROOT_LBA * SECTOR;
     write_iso_record(root, 0, dot, sizeof(dot), ROOT_LBA, SECTOR, true);
     write_iso_record(root, 34, dotdot, sizeof(dotdot), ROOT_LBA, SECTOR, true);

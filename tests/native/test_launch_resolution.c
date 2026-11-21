@@ -1763,6 +1763,7 @@ static void test_write_build_identity_iso(const char *path,
     memcpy(pvd + 1, "CD001", 5);
     pvd[6] = 1u;
     test_write_iso_both_endian32(pvd + 158, ROOT_LBA);
+    pvd[181] = 0x02; /* the root record is a directory */
     test_write_iso_both_endian32(pvd + 166, SECTOR_SIZE);
     test_write_iso_directory(image + ROOT_LBA * SECTOR_SIZE,
                              ROOT_LBA, ROOT_LBA, game_name,

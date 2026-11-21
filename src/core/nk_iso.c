@@ -1283,11 +1283,13 @@ NkResult nk_iso_inspect(const char *iso_path, NkIsoMetadata *out_meta) {
        so a disc this accepts is one the reader, the classifier and the stager can open too. */
     uint32_t root_lba = 0;
     uint32_t root_size = 0;
-    if (!nk_iso_pvd_root_extent(pvd, file_size, &root_lba, &root_size)) {
+    if (!nk_iso_pvd_root_extent(pvd, file_size, &root_lba, &root_size) ||
+        (pvd[156 + 25] & 0x02u) == 0) {
         fclose(f);
         snprintf(out_meta->error_message, sizeof(out_meta->error_message),
                  "Root directory extent is invalid (its both-endian copies differ, it is "
-                 "empty or too large, or it extends beyond the ISO file)");
+                 "empty or too large, it is not marked as a directory, or it extends beyond "
+                 "the ISO file)");
         return NK_ERROR_INVALID_ISO;
     }
 

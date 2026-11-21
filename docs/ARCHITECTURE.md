@@ -195,8 +195,8 @@ case below as a synthetic disc at test time and requires the same result, and fo
 same text, from both. A change to the rule changes both and that table.
 
 1. **Root.** The root extent is the primary volume descriptor's root record. Its both-endian
-   copies agree (ECMA-119 7.3.3), its size is 1 to 512 KiB, and it
-   lies inside the image (the record's flag byte is not read, as in `nk_iso_reader_open`). Otherwise: `Root directory extent is invalid (...)`.
+   copies agree (ECMA-119 7.3.3), its size is 1 to 512 KiB, it is marked as a directory, and it
+   lies inside the image. Otherwise: `Root directory extent is invalid (...)`.
 2. **Scan.** A directory extent is read whole and its records are read in order (a zero length
    byte skips to the next sector). Every record read, a non-matching one included, must not
    cross a sector (6.8.1.1), must lie inside the extent, must hold its identifier (length of at

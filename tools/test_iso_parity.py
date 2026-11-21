@@ -2837,7 +2837,7 @@ int main(int argc, char **argv) {
             return bytes(record)
 
         root_bad = "Root directory extent is invalid (its both-endian copies differ, it is empty or " \
-            "too large, or it extends beyond the ISO file)"
+            "too large, it is not marked as a directory, or it extends beyond the ISO file)"
         sfo_outside = "PSP_GAME/PARAM.SFO extent is invalid"
         game_outside = "PSP_GAME directory extent is invalid"
         short_root = ("Malformed ISO: root directory record at offset 68 is too short for its "
@@ -2920,6 +2920,7 @@ int main(int argc, char **argv) {
             ("root-is-empty", dict(pvd_root=pvd_set(10, both32(0))), root_bad),
             ("root-is-too-large", dict(pvd_root=pvd_set(10, both32(600 * 1024))), root_bad),
             ("root-is-outside-the-image", dict(pvd_root=pvd_set(2, both32(outside))), root_bad),
+            ("root-is-not-marked-a-directory", dict(pvd_root=pvd_set(25, bytes([0]))), root_bad),
         ]
         for name, arguments, expected in cases:
             with self.subTest(case=name):
