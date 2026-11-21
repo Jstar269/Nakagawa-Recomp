@@ -376,20 +376,18 @@ static bool bundle_sha256_equal(const char *left, const char *right) {
 }
 
 static char *bundle_read_file(const char *path, long max_size, long *out_size) {
-    FILE *file = nk_fopen_utf8(path, "rb");
-    long size;
-    char *contents = NULL;
-    if (!file) return NULL;
-    if (fseek(file, 0, SEEK_END) == 0 && (size = ftell(file)) > 0 && size <= max_size &&
-        fseek(file, 0, SEEK_SET) == 0 && (contents = (char *)malloc((size_t)size)) != NULL &&
-        fread(contents, 1, (size_t)size, file) == (size_t)size) {
-        *out_size = size;
-    } else {
-        free(contents);
-        contents = NULL;
+    unsigned char *contents = NULL;
+    size_t size = 0;
+    if (max_size <= 0 ||
+        nk_read_file_bounded(path, (size_t)max_size, &contents, &size) != NK_READ_FILE_OK) {
+        return NULL;
     }
-    fclose(file);
-    return contents;
+    if (size == 0) {
+        free(contents);
+        return NULL;
+    }
+    *out_size = (long)size;
+    return (char *)contents;
 }
 
 bool package_builder_bundled_prerequisites_root(const char *install_root,
