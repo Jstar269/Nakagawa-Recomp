@@ -457,6 +457,31 @@ add_test(NAME player_screens_test COMMAND test_player_screens)
 set_tests_properties(player_screens_test PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# The launcher's hidden moment and themes (launcher-secret-selftest), on the SDL-free core.
+add_executable(test_launcher_secret
+    tests/native/test_launcher_secret.c
+    ${NK_UI_CORE_SOURCES}
+    src/player/ui/launcher_secret.c
+    src/player/ui/launcher_themes.c
+    src/player/ui/love_all_credits.c
+)
+target_include_directories(test_launcher_secret PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player/ui
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay
+)
+target_compile_definitions(test_launcher_secret PRIVATE
+    SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
+)
+if(NOT WIN32)
+    target_link_libraries(test_launcher_secret PRIVATE m)
+endif()
+add_test(NAME launcher_secret_test COMMAND test_launcher_secret)
+set_tests_properties(launcher_secret_test PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # The in-game overlay's pages (#1159, C9c): flow, focus, fit and tests/fixtures/nk_ui/overlay.golden.
 add_executable(test_overlay_screens
     tests/native/test_overlay_screens.c

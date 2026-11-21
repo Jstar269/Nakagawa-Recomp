@@ -22,9 +22,9 @@
 
 /* The id of the theme the launcher draws with when none is chosen. */
 #define LAUNCHER_THEME_STANDARD_ID "standard"
-/* The theme the classic cheat code unlocks: its id (settings.json) and the name Settings
-   shows. The name is written only here, so renaming it is a one-line change. */
-#define LAUNCHER_THEME_WAVE_ID "nami"
+/* The theme the classic cheat code unlocks: its id (settings.json, which never changes) and
+   the name Settings shows. The name is written only here, so renaming it is a one-line change. */
+#define LAUNCHER_THEME_WAVE_ID "wave"
 #define LAUNCHER_THEME_WAVE_NAME "Nami"
 /* The unlock the classic cheat code records (settings.json "theme_unlocks"). It also shows
    the Love All button on About. */

@@ -9,7 +9,7 @@
 #include <math.h>
 #include <string.h>
 
-/* Nami: deep sea water under a sea-spray accent, the colour of the ripple that unlocks it. */
+/* The wave theme: deep sea water under a sea-spray accent, the colour of the ripple that unlocks it. */
 #define LAUNCHER_THEME_WAVE_ACCENT 0x4CC4E8FFu
 #define LAUNCHER_THEME_WAVE_GROUND 0x061A22FFu
 

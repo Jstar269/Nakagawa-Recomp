@@ -298,7 +298,8 @@ static void test_theme_rules(void) {
     CHECK(wave != NULL && wave->rule == LAUNCHER_THEME_UNLOCKED && wave->colors == NULL);
     if (wave == NULL || standard == NULL) return;
 
-    /* Before the code: only Standard is offered, and a saved choice of Nami draws Standard. */
+    /* Before the code: only Standard is offered, and a saved choice of the wave theme draws
+       Standard. */
     CHECK(!launcher_theme_available(wave, &none));
     CHECK(launcher_theme_available_count(&none) == 1u);
     CHECK(launcher_theme_pick(LAUNCHER_THEME_WAVE_ID, &none) == standard);
@@ -381,7 +382,7 @@ static void test_theme_colors(void) {
     /* Standard is the N1 set itself. */
     launcher_theme_colors(launcher_theme_standard(), &out);
     CHECK(memcmp(&out, nk_ui_theme_n1(), sizeof(out)) == 0);
-    /* Nami, and any accent a later Custom theme may give: every text colour keeps its
+    /* The wave theme, and any accent a later Custom theme may give: every text colour keeps its
        contrast. */
     {
         const LauncherTheme *wave = launcher_theme_find(LAUNCHER_THEME_WAVE_ID);

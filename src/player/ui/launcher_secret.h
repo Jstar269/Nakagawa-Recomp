@@ -6,10 +6,10 @@
 
 /* The launcher's hidden moment. Entering the classic cheat code (Up, Up, Down, Down, Left,
    Right, Left, Right, B, A) in the launcher, on a controller or with the arrow keys and the
-   launcher's own Back and Select keys, makes the Nakagawa mark ripple like a wave ("nami";
-   the "kawa" in Nakagawa is a river), plays a short jingle synthesised here, drops a little
+   launcher's own Back and Select keys, makes the Nakagawa mark ripple like a wave (the
+   "kawa" in Nakagawa is a river), plays a short jingle synthesised here, drops a little
    confetti and greets by the time of day; then opens the Love All credits. It also unlocks
-   the Nami launcher theme (launcher_themes.h). Nothing here is drawn or heard in a game.
+   the wave launcher theme (LAUNCHER_THEME_WAVE_NAME, launcher_themes.h). Nothing here is drawn or heard in a game.
 
    Everything in this file is SDL-free: the host feeds it events and its clock, and draws
    what it returns. */
