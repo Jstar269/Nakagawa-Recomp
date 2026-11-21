@@ -2595,5 +2595,52 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
             self.assertIsNone(NETWORK_EGRESS_PATTERN.search(sample), sample)
 
 
+# Download cheat database (#2639; owner decision 2026-11-21): off until the person presses the
+# button, and it reaches one host. The list of sources is this repository's own file, read from
+# its main branch; each source it names is pinned to one commit with its size and SHA-256.
+# src/player/cheat_db.c holds no network API and does not pick the transport itself: main.c
+# passes the native one from the click.
+CHEAT_DB_HOST = "raw.githubusercontent.com"
+CHEAT_DB_SOURCES_PATH = "Jstar269/nakagawa-recomp/main/assets/cheat_db_sources.json"
+
+
+class TestCheatDatabaseEgress(unittest.TestCase):
+    def test_cheat_database_reaches_only_its_documented_host(self) -> None:
+        header = (REPO_ROOT / "src" / "player" / "cheat_db.h").read_text(encoding="utf-8")
+        host = re.search(r'#define NK_CHEAT_DB_HOST\s+"([^"]*)"', header)
+        self.assertIsNotNone(host, "NK_CHEAT_DB_HOST")
+        assert host is not None
+        self.assertEqual(host.group(1), CHEAT_DB_HOST)
+        self.assertRegex(header, r'#define NK_CHEAT_DB_SOURCES_URL\s+\\\s*\n\s*"https://"\s+'
+                                 r'NK_CHEAT_DB_HOST\s+"/' + re.escape(CHEAT_DB_SOURCES_PATH) + '"')
+        impl = (REPO_ROOT / "src" / "player" / "cheat_db.c").read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r"https?://[A-Za-z0-9.-]+", impl), [])
+        self.assertNotIn("package_builder_native_transport", impl)
+        self.assertNotIn("src/player/cheat_db.c", NATIVE_TRANSPORT_CALLERS)
+        setup = (REPO_ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+        network_use = setup.split("### Network use", 1)[1].split("\n### ", 1)[0]
+        self.assertIn(f"`{CHEAT_DB_HOST}`", network_use)
+        self.assertIn("Download cheat database", network_use)
+
+    def test_every_listed_source_is_pinned_on_that_host(self) -> None:
+        import json
+
+        sources = json.loads((REPO_ROOT / "assets" / "cheat_db_sources.json").read_text(encoding="utf-8"))
+        self.assertEqual(sources["format"], "nakagawa-cheat-db-sources")
+        self.assertEqual(sources["schema_version"], 1)
+        self.assertTrue(sources["sources"])
+        for source in sources["sources"]:
+            commit = source["commit"]
+            self.assertRegex(commit, r"^[0-9a-f]{40}$")
+            self.assertRegex(source["sha256"], r"^[0-9a-f]{64}$")
+            self.assertGreater(source["size"], 0)
+            parts = urlsplit(source["url"])
+            self.assertEqual((parts.scheme, parts.netloc, parts.query, parts.fragment),
+                             ("https", CHEAT_DB_HOST, "", ""))
+            self.assertEqual(parts.path.split("/")[3], commit, "the URL carries the pinned commit")
+            for shown in ("name", "maintainer", "licence"):
+                self.assertTrue(source[shown].strip(), shown)
+
+
 if __name__ == "__main__":
     unittest.main()

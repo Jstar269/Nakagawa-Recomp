@@ -1123,6 +1123,96 @@
         "player"
       ]
     },
+    "CHEAT_DB_BAD_ARGUMENT": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_CANCELLED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_EXISTS": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_HASH_MISMATCH": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_HTTP_STATUS": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_IO_ERROR": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_LIST_INVALID": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_LIST_VERSION": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_NOT_A_DATABASE": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_NOT_REACHED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_OUT_OF_MEMORY": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_REDIRECT_REFUSED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_SIZE_MISMATCH": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_TOO_LARGE": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "CHEAT_DB_TRUNCATED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
     "CLI_NOT_FOUND": {
       "stage": "host",
       "in": [

@@ -124,7 +124,8 @@ bool nk_launch_runtime_reads_cheats(const char *executable_path) {
 
 /* The cheat file a launch with cheats on names (#2639): the one the session names, else
    <user_data_root>/cheats/<DISC>.ini with the disc ID as the package folders spell it
-   (ULUS12345). False, with `out_path` empty, when the session names none and has no per-user
+   (ULUS12345), or, when that file does not exist, <user_data_root>/cheats/cheat.db if that
+   does. False, with `out_path` empty, when the session names none and has no per-user
    data directory or no PSP disc ID, or the path does not fit; the runtime then says that no
    file is named and applies nothing. */
 static bool launch_cheats_file(const NkLaunchSession *session, char *out_path, size_t out_size) {
@@ -142,6 +143,19 @@ static bool launch_cheats_file(const NkLaunchSession *session, char *out_path, s
         }
         written = snprintf(out_path, out_size, "%s%ccheats%c%s.ini", session->user_data_root, sep,
                            sep, disc);
+        /* No file of the title's own, but a cheat database (cheats/cheat.db, which Settings
+           downloads or imports; src/player/cheat_db.h): the runtime reads this disc's _S
+           section of it. The title's own file always wins. */
+        if (written >= 0 && (size_t)written < out_size && !nk_platform_file_exists(out_path)) {
+            char database[NK_MAX_PATH];
+            int db_written = snprintf(database, sizeof(database), "%s%ccheats%ccheat.db",
+                                      session->user_data_root, sep, sep);
+            if (db_written > 0 && (size_t)db_written < sizeof(database) &&
+                (size_t)db_written < out_size && nk_platform_file_exists(database)) {
+                memcpy(out_path, database, (size_t)db_written + 1u);
+                written = db_written;
+            }
+        }
     }
     if (written < 0 || (size_t)written >= out_size) {
         out_path[0] = '\0';
