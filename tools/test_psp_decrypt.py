@@ -724,7 +724,7 @@ def tearDownModule():
         _PROFILE_ROOT = None
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestKnownAnswers(unittest.TestCase):
     """Published NIST/RFC vectors for the primitive operations, plus the
     cross-checked zero-IV CBC expectation."""
@@ -831,7 +831,7 @@ int main(void) {
                          ["finals", "1", "wiped", "1", "digest", SHA1_ABC_DIGEST.hex()])
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestSyntheticEndToEnd(unittest.TestCase):
     """A source-owned encrypted fixture is
     unwrapped end-to-end by the production boundary."""
@@ -1190,7 +1190,7 @@ def seal_with_builtin_table(payload: bytes, header_tag: int = BUILTIN_GAME_TAG) 
     )
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestBuiltinTables(unittest.TestCase):
     """nk_decrypt with no key file uses the built-in game tables; firmware is
     refused by name before any key lookup, whatever key store is loaded."""
@@ -1322,7 +1322,7 @@ class TestBuiltinTables(unittest.TestCase):
         self.assertFalse(dst.exists())
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestType01Containers(unittest.TestCase):
     """Type 0 and type 1 (144-byte recipes) through the production boundary.
 
@@ -1409,7 +1409,7 @@ class TestType01Containers(unittest.TestCase):
                 self.assertEqual(dst.read_bytes(), self.elf)
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestMatchedTypeDiagnosis(unittest.TestCase):
     """The reported failure belongs to the container type whose
     shape matched, never to a later type's unmet key entry."""
@@ -1695,7 +1695,7 @@ int main(int argc, char **argv)
 """
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestKeystoreErasure(unittest.TestCase):
     """Key material must not survive the free() that drops it (decryption boundary).
 
@@ -1986,7 +1986,7 @@ def _text_erase_keyfile(tail: bytes = b"", trailer: bytes = b"") -> bytes:
     )
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestKeystoreTextErasure(unittest.TestCase):
     """The key file's hex text must not outlive a load, on success or failure.
 
@@ -2347,7 +2347,7 @@ def npumdimg_pbp(disc_id: str, psar: bytes, *, category: str = "EG",
     return build_pbp(sfo, data_psp, psar)
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestNpumdimg(unittest.TestCase):
     """nk_decrypt npumdimg turns a synthetic PSN UMD package back into its ISO,
     and refuses PSOne Classics, updaters, damaged headers and tables by name."""
@@ -2648,7 +2648,7 @@ int main(void) {
     "@LZRC_SEED_CLEAR@", _c_bytes(_LZRC_SEED_CLEAR))
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestAmctrlAndLzrcBounds(unittest.TestCase):
     """The fuse-ID DRM types are refused as CONTEXT_REQUIRED, and malformed LZRC
     streams fail closed without writing outside the caller's buffer.

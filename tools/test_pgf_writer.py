@@ -462,7 +462,7 @@ class PgfWriterSparseAndHeaderTests(unittest.TestCase):
         self.assertEqual(_signed(image, 0x24), 12 * 64)
         self.assertEqual(_signed(image, 0x28), 12 * 64)
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class PgfWriterReaderRoundTripTests(unittest.TestCase):
     """The generated font opens through the public reader and matches bit-exactly."""
     exe: str

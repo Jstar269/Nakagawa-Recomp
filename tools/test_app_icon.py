@@ -131,7 +131,7 @@ class CDrawerTests(unittest.TestCase):
     def test_c_drawer_draws_the_committed_pixels(self) -> None:
         compiler = shutil.which("gcc") or shutil.which("cc")
         if compiler is None:
-            self.skipTest("SKIP: no C compiler on PATH to build the nk_ui drawer")
+            self.skipTest("TOOLCHAIN_MISSING: no C compiler on PATH to build the nk_ui drawer")
         sources = [str(ROOT / path) for path in _make_list("NK_UI_NATIVE_CORE_SRCS")]
         with tempfile.TemporaryDirectory() as temp:
             work = Path(temp)
@@ -326,8 +326,10 @@ class VersionInfoWindowsExecutableTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         windres, gcc = shutil.which("windres"), shutil.which("gcc")
         powershell = shutil.which("pwsh") or shutil.which("powershell")
-        if not (windres and gcc and powershell):
-            raise unittest.SkipTest("SKIP: windres, gcc and PowerShell are needed")
+        if not (windres and powershell):
+            raise unittest.SkipTest("SKIP: windres and PowerShell are needed")
+        if not gcc:
+            raise unittest.SkipTest("TOOLCHAIN_MISSING: gcc is needed beside windres")
         cls.windres, cls.gcc, cls.powershell = windres, gcc, powershell
 
     def build_exe(self, tmp: Path, name: str, *tool_args: str) -> Path:

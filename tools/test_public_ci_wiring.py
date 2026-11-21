@@ -4610,7 +4610,7 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
         )
         self.assertEqual(
             ci_test_shards.skip_prefix_summary(output),
-            "Python test skip prefixes: NIGHTLY_TIER=1 WINDOWS_ONLY=1 PRIVATE_INPUT=2",
+            "Python test skip prefixes: NIGHTLY_TIER=1 WINDOWS_ONLY=1 PRIVATE_INPUT=2 TOOLCHAIN_MISSING=0",
         )
 
     def test_ci_stays_read_only_and_publishes_nothing_on_any_event(self) -> None:

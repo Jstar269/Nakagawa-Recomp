@@ -81,7 +81,7 @@ int main(void) {
 '''
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestAssetIndexSelftestC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -713,7 +713,7 @@ class TestHleFontSpecTable(unittest.TestCase):
         for literal in ("Nakagawa Open Japanese", "Nakagawa Open Latin", "Nakagawa Open Korean"):
             self.assertNotIn(literal, hle)
 
-    @unittest.skipUnless(CC, "no C compiler")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler")
     def test_window_caption_format_and_sanitisation(self):
         """Caption is "Nakagawa Recomp - <title>"; no/blank title falls back to the plain name;
         control characters and malformed UTF-8 are stripped and the title is length-bounded."""

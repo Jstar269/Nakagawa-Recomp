@@ -223,7 +223,7 @@ class TestDmacSkipProducer(unittest.TestCase):
     def test_s0_and_b1_b4_producer_rows_satisfy_shared_skip_shape(self) -> None:
         compiler = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
         if not compiler:
-            self.skipTest("a native C compiler is required for producer execution")
+            self.skipTest("TOOLCHAIN_MISSING: a native C compiler is required for producer execution")
         probe = (ROOT / "tests/fixtures/psp_oracle/probe.c").read_text(encoding="utf-8")
         record_start = probe.index("static void dmac_invalid_emit_record(")
         record = probe[record_start:probe.index("static int dmac_invalid_probe_neighbor", record_start)]

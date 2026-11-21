@@ -58,7 +58,7 @@ class LdLauncherTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         compiler = shutil.which(os.environ.get("CC", "cc")) or shutil.which("gcc")
         if compiler is None:
-            raise unittest.SkipTest("no C compiler")
+            raise unittest.SkipTest("TOOLCHAIN_MISSING: no C compiler")
         cls._tmp = tempfile.TemporaryDirectory(prefix="nk-ld-launcher-")
         root = Path(cls._tmp.name)
         cls.folder = root / "lib" / "arm64"
@@ -576,14 +576,22 @@ class ToolchainArchiveTests(unittest.TestCase):
                 self.assertTrue(os.access(Path(tmp) / "out" / "lib/python3.15/lib-dynload/_ssl.so", os.X_OK))
                 self.assertFalse(os.access(Path(tmp) / "out" / "usr/include/stdio.h", os.X_OK))
 
-    def refused(self, build: object) -> str:
+    def refused(self, build: object, written: frozenset[str] = frozenset()) -> str:
+        """Unpacks the archive ``build`` writes and returns the refusal line.
+
+        Nothing may land anywhere but the target folder, and in it only ``written`` (the folders
+        and files an archive cut short leaves behind): a refusal comes before any write.
+        """
         with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
             archive = Path(tmp) / "a.tar"
             assert callable(build)
             build(archive)
-            result = self.unpack(archive, Path(tmp) / "out" / "target")
+            target = Path(tmp) / "out" / "target"
+            result = self.unpack(archive, target)
             self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-            self.assertFalse((Path(tmp) / "out" / "evil").exists())
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["a.tar", "out"])
+            self.assertEqual(sorted(p.name for p in (Path(tmp) / "out").iterdir()), ["target"])
+            self.assertEqual({p.relative_to(target).as_posix() for p in target.rglob("*")}, set(written))
             return result.stdout
 
     @staticmethod
@@ -599,9 +607,18 @@ class ToolchainArchiveTests(unittest.TestCase):
         self.assertIn("is not a folder or a file", self.refused(lambda a: self._tar(a, (link, b""))))
 
     def test_a_path_out_of_the_folder_is_refused(self) -> None:
-        for name in ("../evil", "usr/../../evil", "/evil", "usr//evil", "./evil"):
+        # relativePath refuses each name before resolve() could say ": outside": no name reaches it.
+        refusals = {
+            "../evil": ": not a plain relative path",
+            "usr/../../evil": ": not a plain relative path",
+            "/evil": ": not a relative path",
+            "usr//evil": ": not a plain relative path",
+            "./evil": ": not a plain relative path",
+        }
+        for name, reason in refusals.items():
             with self.subTest(name=name):
-                self.assertIn("path", self.refused(lambda a, n=name: self._tar(a, (tarfile.TarInfo(n), b"x"))))
+                out = self.refused(lambda a, n=name: self._tar(a, (tarfile.TarInfo(n), b"x")))
+                self.assertEqual(out.strip(), f"REFUSED {name}{reason}")
 
     def test_a_damaged_header_is_refused(self) -> None:
         def build(archive: Path) -> None:
@@ -615,7 +632,8 @@ class ToolchainArchiveTests(unittest.TestCase):
         def build(archive: Path) -> None:
             self._tar(archive, (tarfile.TarInfo("usr/a.h"), b"a" * 2000))
             archive.write_bytes(archive.read_bytes()[:1024])
-        self.assertIn("ends inside a file", self.refused(build))
+        # The file was being written when the archive ended; nothing else was.
+        self.assertIn("ends inside a file", self.refused(build, frozenset({"usr", "usr/a.h"})))
 
     def test_a_pax_record_length_that_overflows_is_refused(self) -> None:
         # The second record's length, added to its offset, passes Integer.MAX_VALUE; the bound

@@ -385,7 +385,7 @@ int main(void) {
             out = subprocess.run([str(exe_path)], capture_output=True, text=True, check=True)
             return out.stdout.strip()
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_max_signed_semantics(self):
         cases = [
             (0, 1, 1), (-1, 0, 0), (0x80000000, 0x7FFFFFFF, 0x7FFFFFFF),
@@ -397,7 +397,7 @@ int main(void) {
                 got = self._run_snippet_printf(stmt, {8: a, 9: b}, "%u", print_reg=10)
                 self.assertEqual(int(got), expected)
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_min_signed_semantics(self):
         cases = [
             (0, 1, 0), (-1, 0, -1), (0x80000000, 0x7FFFFFFF, -2147483648),
@@ -409,7 +409,7 @@ int main(void) {
                 got = self._run_snippet_printf(stmt, {8: a, 9: b}, "%d", print_reg=10)
                 self.assertEqual(int(got), expected)
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_ext_nonzero_positions(self):
         for pos, size, expected in [(4, 8, 0x67), (8, 16, 0x3456), (12, 8, 0x45)]:
             with self.subTest(pos=pos, size=size):
@@ -417,7 +417,7 @@ int main(void) {
                 got = self._run_snippet_printf(stmt, {8: 0x12345678}, "%08x", print_reg=9)
                 self.assertEqual(int(got, 16), expected)
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_ins_nonzero_positions(self):
         for pos, size, expected in [(8, 8, 0x1234CD78), (4, 12, 0x1234BCD8), (0, 8, 0x123456CD)]:
             with self.subTest(pos=pos, size=size):

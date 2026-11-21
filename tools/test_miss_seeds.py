@@ -1062,11 +1062,11 @@ class CodegenSeedTests(_Fixture):
 
 
 def _native_toolchain():
-    compiler = shutil.which("gcc") or shutil.which("cc")
-    return compiler if compiler and os.environ.get("NK_SKIP_NATIVE_FIXTURES") != "1" else None
+    return shutil.which("gcc") or shutil.which("cc")
 
 
-@unittest.skipUnless(_native_toolchain(), "needs a C compiler")
+@unittest.skipIf(os.environ.get("NK_SKIP_NATIVE_FIXTURES") == "1", "NK_SKIP_NATIVE_FIXTURES=1")
+@unittest.skipUnless(_native_toolchain(), "TOOLCHAIN_MISSING: needs a C compiler")
 class EndToEndTests(_Fixture):
     """Miss, seed file, second build, no miss: the loop of #1848 with the real runtime."""
 

@@ -1112,7 +1112,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                     self.assertIn(why, output)
                     self.assertEqual(files, {})
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_gates_alternate_on_updates_when_frames_drop(self) -> None:
         """Compile the generated gate and boundary count and run updates of 1 to 3 vblanks.
 
@@ -1254,7 +1254,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                     self.assertEqual(files, {})
         if not GCC:
             # Reported last, so the refusal subtests above still run on a host without a compiler.
-            self.skipTest("needs a host C compiler for the -fsyntax-only start-up check")
+            self.skipTest("TOOLCHAIN_MISSING: needs a host C compiler for the -fsyntax-only start-up check")
 
     def test_float_pair_rewrite_scales_the_whole_constant(self) -> None:
         """lui+ori of one register names a float exactly; anything else refuses."""
@@ -1421,7 +1421,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             self.assertIn("if (!nk_enhancement_on() || nk_enhancement_gate_30hz())", combined)
             self.assertIn("} else { s->fi[0] = s->fi[12]; }", combined)
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_count_x2_even_and_gate_30hz_hold_match_30hz_when_run(self) -> None:
         """Compile the generated statements and run 30 Hz against 60 Hz updates.
 
@@ -1610,7 +1610,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             self.assertTrue(any("_sr_return_target" in line for line in lines[at - 4:at]), lines[at - 4:at])
             self.assertIn("return;", lines[at + 2])
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_gate_30hz_store_holds_each_30hz_value_for_two_updates(self) -> None:
         """Compile a field's per-update step with its store gated and run 30 Hz against 60 Hz.
 
@@ -1973,7 +1973,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             codegen.ENHANCEMENT_SITES = saved
             codegen.ENHANCEMENT_APPLIED.clear()
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_mapped_factor_values_match_the_lui_path(self) -> None:
         """Compile the emitted map and run it. Inside (0, 1) each result is bit for bit the f32 the
         lui path's formula gives, and that is the f32 nearest the exact map down to the smallest
@@ -2052,7 +2052,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             codegen.ENHANCEMENT_SITES = saved
             codegen.ENHANCEMENT_APPLIED.clear()
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_mapped_register_copy_keeps_its_source_when_run(self) -> None:
         """A decay or retention site on mov.s fd, fs, as the planner plans it: compile the whole emitted
         statement and run it.
@@ -3584,7 +3584,7 @@ class TestEnhancementStoreSites(unittest.TestCase):
             self.assertEqual(built.returncode, 0, built.stderr)
         return exes
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_published_store_sites_check_the_same_values_by_keyed_digest(self) -> None:
         """A published package keeps no stock value; its store sites accept, scale, refuse and report
         exactly as the private package's do, by digesting the value being stored."""
@@ -3660,7 +3660,7 @@ class TestEnhancementStoreSites(unittest.TestCase):
             raise AssertionError(lines[at - 1])
         return lines[at - 1] + "\n" + lines[at]
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_store_sites_check_report_and_gate_when_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
@@ -3784,7 +3784,7 @@ class TestEnhancementStoreSites(unittest.TestCase):
             res = run(0, "X")
             self.assertEqual((res.returncode, res.stderr), (0, ""))
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_requires_holds_a_gated_call_stock_until_ready(self) -> None:
         """A gate_30hz or gate_30hz_hold call site with ``requires`` makes the call every
         update, as stock, until the required site has applied; then it gates."""
@@ -4378,7 +4378,7 @@ class TestAltGateStaticChecks(unittest.TestCase):
             end = next(i for i in range(at, len(lines)) if "sr_aot_return_boundary_end" in lines[i])
         return "\n".join(lines[at:end + 1])
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_gate_30hz_alt_runs_its_alternates_on_the_skipped_updates(self) -> None:
         """Compile the site statement and run it over a schedule of logic updates.
 
@@ -6714,7 +6714,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
     def _mode(lines: list[str], mode: str) -> list[str]:
         return [line[len(mode) + 1:] for line in lines if line.startswith(mode + " ")]
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_generated_statements_match_the_rules_when_run(self) -> None:
         """Compile the generated statements with the generated run-time code and run them.
 
@@ -6820,7 +6820,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         # The fixture's carried x velocity is never scaled: with no x impulse it keeps its bits.
         self.assertEqual(launch_lines(1)[2].split()[4], f"{_f32_bits_of(2.0):08x}")
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_kappa_scale_is_one_rounding_in_every_form(self) -> None:
         """Compile the emitted scale of each velocity_source_x_kappa form and run it.
 
@@ -6945,7 +6945,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             positions.append((x[0], x[1]))
         return positions
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_emitted_statements_follow_the_stock_arc_in_float32(self) -> None:
         """Run the emitted statements as a guest runs them, in float32, through a whole flight.
 
@@ -7868,7 +7868,7 @@ class TestAcePartsLoad(_AcePartsFixture):
                     self.assertIn(why, output)
                     self.assertEqual(files, {})
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_codegen_gate_runs_the_stock_call_or_skips_it(self) -> None:
         """Compile the emitted statement and run it with the runtime's skip answering 0, then 1.
 
@@ -8188,7 +8188,7 @@ class TestAcePartsSoftShadows(_AcePartsFixture):
                                              "};"))
                             or a == "" for a in added), added)
 
-    @unittest.skipUnless(GCC, "needs a host C compiler")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
     def test_codegen_declaration_compiles_against_ace_h_and_declares(self) -> None:
         """Compile the emitted tables, prototype and call in one unit with src/rt/ace.h, link
         src/rt/ace.c and run it: a prototype that drifts from ace.h fails to compile (checked

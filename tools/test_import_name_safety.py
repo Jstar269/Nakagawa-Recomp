@@ -783,7 +783,7 @@ class TestImportNameSafety(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "address arithmetic"):
             imports_tool.parse_imports(elf)
 
-    @unittest.skipUnless(CC, "no C compiler on PATH")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
     def test_malicious_prx_cli_codegen_and_compiler_integration(self):
         assert CC is not None
         primary_base = 0x08804000

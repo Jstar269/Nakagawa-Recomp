@@ -105,7 +105,7 @@ class RelocatedCloneTests(unittest.TestCase):
             print(f"SKIP {__name__}: {reason}")
             raise unittest.SkipTest(reason)
         if not (os.environ.get("CC") or shutil.which("gcc") or shutil.which("cc")):
-            reason = "a C compiler is required to build the relocated selftest"
+            reason = "TOOLCHAIN_MISSING: a C compiler is required to build the relocated selftest"
             print(f"SKIP {__name__}: {reason} (no gcc or cc on PATH)")
             raise unittest.SkipTest(reason)
 
@@ -328,7 +328,7 @@ class TwoCheckoutIsolationTests(unittest.TestCase):
             print(f"SKIP {__name__}: {reason}")
             raise unittest.SkipTest(reason)
         if not (os.environ.get("CC") or shutil.which("gcc") or shutil.which("cc")):
-            reason = "a C compiler is required to build the isolation route"
+            reason = "TOOLCHAIN_MISSING: a C compiler is required to build the isolation route"
             print(f"SKIP {__name__}: {reason} (no gcc or cc on PATH)")
             raise unittest.SkipTest(reason)
         cls.make = make

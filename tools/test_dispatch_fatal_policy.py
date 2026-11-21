@@ -355,7 +355,7 @@ class TestFatalStopsFinishRecording(unittest.TestCase):
         self.assertEqual(len(FATAL_EXIT_RE.findall(code)), 1)
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestDispatchFatalPolicyBehavioral(unittest.TestCase):
     """The production dispatch() stops a run with exit code 1 on an unowned target."""
 

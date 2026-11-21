@@ -46,7 +46,7 @@ def _body(src: str, name: str) -> str:
     raise AssertionError(f"{name} has no closing brace")
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestGuestmemSelftestC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
