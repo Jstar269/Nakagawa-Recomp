@@ -951,7 +951,7 @@ domain-mode-selftest: $(GENERIC_TITLE_CONFIG_HEADER)
 # checkpoint. Exit code 0 = all hold.
 nkstate-selftest: $(GENERIC_TITLE_CONFIG_HEADER)
 	$(CC) $(CFLAGS) -I$(GENERIC_TITLE_CONFIG_DIR) $(LDFLAGS) -o $(BUILD_DIR)/nkstate_selftest.exe \
-		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
+		-DNK_NKSTATE_TEST_SEAMS -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		tests/native/nkstate_selftest.c src/rt/nkstate.c src/rt/replay_checkpoint.c \
 		src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/guest_interp.c src/rt/domain_mode.c src/rt/stale_code.c \
 		src/rt/vfpu_tables.c src/rt/title_config.c src/rt/perf.c -lm
