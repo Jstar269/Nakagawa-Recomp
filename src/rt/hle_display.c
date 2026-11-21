@@ -1369,7 +1369,7 @@ static uint32_t h_DisplaySetMode(CpuState *s) {
  * Core/HLE/sceDisplay.cpp sceDisplaySetHoldMode, "seems to do nothing in tests and accept all
  * values"): any other call records the mode, whatever its value, and returns 0. What a hold does to
  * the picture is not measured, so the mode changes nothing else in this runtime; it is kept, from 0
- * at HLE start as PPSSPP's display init sets it, for the display code to read once a measurement
+ * at process start as PPSSPP's display init sets it, for the display code to read once a measurement
  * gives it a meaning. Noted once per run. */
 static int32_t s_display_hold_mode;
 static int s_display_hold_mode_noted;
@@ -1391,7 +1391,7 @@ int32_t sr_display_hold_mode(void) { return s_display_hold_mode; }
 #ifdef SR_HLE_THREAD_SELFTEST
 /* Test-build-only call-through to the production DisplaySetMode handler. */
 uint32_t sr_hle_test_display_set_mode(CpuState *s) { return h_DisplaySetMode(s); }
-void sr_hle_test_display_hold_mode_note_reset(void) { s_display_hold_mode_noted = 0; }
+void sr_hle_test_display_hold_mode_reset(void) { s_display_hold_mode = 0; s_display_hold_mode_noted = 0; }
 #endif
 #ifdef SR_HLE_THREAD_SELFTEST
 
@@ -1440,7 +1440,6 @@ void hle_register_kernel_import_sweep_display(void) {
 
 /* From hle_register_unregistered_import_batch(). */
 void hle_register_unregistered_import_display(void) {
-    s_display_hold_mode = 0;
     sr_hle_register(0x7ed59bc4u, "sceDisplaySetHoldMode", h_DisplaySetHoldMode);
 }
 

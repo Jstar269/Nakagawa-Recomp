@@ -25540,10 +25540,10 @@ static void test_mpeg_create_refused_in_interrupt(void) {
 /* sceDisplaySetHoldMode (#2886) through the production dispatch. From a guest thread every value
  * returns 0 and is recorded (PPSSPP 77106069 accepts all values); from an interrupt handler the
  * call answers ILLEGAL_CONTEXT and records nothing (JPCSP 00ac4d6d checkInsideInterrupt). Neither
- * is PSP-measured. sr_hle_init starts the mode at 0. */
+ * is PSP-measured. The mode starts at 0. */
 #define NID_DISPLAY_SET_HOLD_MODE 0x7ed59bc4u
 extern int32_t sr_display_hold_mode(void);
-extern void sr_hle_test_display_hold_mode_note_reset(void);
+extern void sr_hle_test_display_hold_mode_reset(void);
 
 static void test_display_set_hold_mode(void) {
     static const IcProbe hold = {
@@ -25554,12 +25554,12 @@ static void test_display_set_hold_mode(void) {
     };
     static const uint32_t modes[] = { 1u, 0u, 2u, 0xffffffffu, 0x80000000u, 7u };
     reset_fixture(); sr_hle_init();
-    sr_hle_test_display_hold_mode_note_reset();
+    sr_hle_test_display_hold_mode_reset();
     s_vbl_next_us = UINT64_MAX;
 
     expect(sr_hle_test_is_registered(NID_DISPLAY_SET_HOLD_MODE),
            "hold-mode: sceDisplaySetHoldMode has a production registration");
-    expect(sr_display_hold_mode() == 0, "hold-mode: the mode is 0 at HLE start");
+    expect(sr_display_hold_mode() == 0, "hold-mode: the mode starts at 0");
     for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
         expect(mpi_on_thread_a0(NID_DISPLAY_SET_HOLD_MODE, modes[i]) == 0u,
                "hold-mode: a thread call returns 0 for any mode (not the old 0x80020002 refusal)");
@@ -25574,8 +25574,7 @@ static void test_display_set_hold_mode(void) {
     expect(sr_display_hold_mode() == 7,
            "hold-mode: the refused interrupt call leaves the recorded mode alone");
 
-    sr_hle_init();
-    expect(sr_display_hold_mode() == 0, "hold-mode: a new HLE start resets the mode to 0");
+    sr_hle_test_display_hold_mode_reset();
     reset_fixture();
 }
 
