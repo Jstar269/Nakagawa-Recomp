@@ -1029,13 +1029,19 @@ static void test_nested_local_headers(const char *root) {
               what);
 #if defined(NK_TEST_WRAP_FREAD)
         /* The archive is read about once: the end record, the central directory and the
-           first entry's header, 5 reads and a little over the directory's size. A reader
+           first entry's header, 4 reads and a little over the directory's size. A reader
            that read the nested headers first would make 131,000 reads and 4.3 GB. The
            bounds (16 reads, the archive's own size) sit far from both. */
         snprintf(what, sizeof(what),
                  "%zu nested local headers refused after %lu reads of %.1f MiB (archive %.1f MiB)",
                  n, s_fread_calls, (double)s_fread_bytes / 1048576.0, size / 1048576.0);
         CHECK(s_fread_calls <= 16u && s_fread_bytes <= (uint64_t)size, what);
+        /* A count of zero would pass the bounds above without measuring anything: the
+           reader no longer reads through fread, so the wrap in this file (and the link
+           option -Wl,--wrap=fread) must move to the call it uses. */
+        CHECK(s_fread_calls >= 1u && s_fread_bytes >= 1u,
+              "the nested-header count saw no fread: the reader reads another way, "
+              "so move this test's wrap to that call");
 #else
         snprintf(what, sizeof(what), "%zu nested local headers (%.1f MiB): %s", n,
                  size / 1048576.0, nk_zip_status_code(status));
