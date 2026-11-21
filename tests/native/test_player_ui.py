@@ -5500,6 +5500,154 @@ class NativePlayerUiTests(unittest.TestCase):
         )
         self.assertEqual([view for view, _ in self.screens(mouse)], ["settings", "controller"])
 
+    # The launcher's classic cheat code (src/player/ui/launcher_secret.h): Up, Up, Down, Down,
+    # Left, Right, Left, Right, then the launcher's Back and Select, on the keyboard or a pad.
+    SECRET_KEYS = ("KEY_UP", "KEY_UP", "KEY_DOWN", "KEY_DOWN", "KEY_LEFT", "KEY_RIGHT",
+                   "KEY_LEFT", "KEY_RIGHT", "KEY_ESCAPE", "KEY_RETURN")
+    SECRET_PAD = ("PAD_DPAD_UP", "PAD_DPAD_UP", "PAD_DPAD_DOWN", "PAD_DPAD_DOWN",
+                  "PAD_DPAD_LEFT", "PAD_DPAD_RIGHT", "PAD_DPAD_LEFT", "PAD_DPAD_RIGHT",
+                  "PAD_EAST", "PAD_SOUTH")
+    LOVE_ALL_ROUTE = "11"  # PLAYER_UI_ROUTE_LOVE_ALL
+    # Scripted runs cut motion unless NK_UI_TEST_MOTION keeps the settings' choice.
+    SECRET_MOTION: dict[str, object] = {"reduce_motion_choice": "off"}
+
+    @staticmethod
+    def secret_lines(run: dict[str, object], kind: str) -> list[dict[str, str]]:
+        """The run's `launcher_secret <kind>` lines, as fields; the toast, which has spaces,
+        is the last field."""
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        prefix = f"[PLAYER_UI_TEST] launcher_secret {kind} "
+        lines: list[dict[str, str]] = []
+        for line in stdout.splitlines():
+            if not line.startswith(prefix):
+                continue
+            head, toast = line[len(prefix):].split("toast=", 1)
+            fields = dict(part.split("=", 1) for part in head.split())
+            fields["toast"] = toast
+            lines.append(fields)
+        return lines
+
+    def secret_run(self, events: tuple[str, ...], local_time: str = "09:30",
+                   motion: bool = False, **kwargs: object) -> dict[str, object]:
+        env = {"NK_UI_TEST_LOCAL_TIME": local_time}
+        if motion:
+            env["NK_UI_TEST_MOTION"] = "1"
+            kwargs.setdefault("settings", dict(self.SECRET_MOTION))
+        return self.next_ui_run("library", events, env_extra=env, **kwargs)
+
+    def test_next_ui_secret_code_on_keyboard_and_pad_unlocks_the_theme(self) -> None:
+        """The code entered on the keyboard (arrows, Esc, Enter) or a pad (the D-pad, B, A)
+        greets by the time of day, opens Love All and records the theme's unlock in
+        settings.json. Its Esc or B is not a Back and its Enter or A not a Select: the
+        launcher stays open and nothing else opens."""
+        for name, keys, local_time, greeting in (
+                ("keyboard", self.SECRET_KEYS, "09:30", "Good morning."),
+                ("pad", self.SECRET_PAD, "13:05", "Good afternoon."),
+                ("keyboard-evening", self.SECRET_KEYS, "02:10", "Good evening.")):
+            with self.subTest(entry=name):
+                run = self.secret_run(("WAIT_MS=100",) + keys + ("WAIT_MS=300",),
+                                      local_time=local_time)
+                found = self.secret_lines(run, "found")
+                self.assertEqual(len(found), 1, run["stdout"])
+                self.assertEqual(found[0]["toast"], greeting)
+                routes = [route for _, route in self.screens(run)]
+                self.assertEqual(routes[-1], self.LOVE_ALL_ROUTE, routes)
+                self.assertNotIn("2", routes, "the code's Select opened no game")
+                self.assertNotIn("3", routes, "Love All opened on its own, not through About")
+                settings = run["settings"]
+                assert isinstance(settings, dict)
+                self.assertEqual(settings.get("theme_unlocks"), ["wave"])
+                self.assertEqual(settings.get("launcher_theme", ""), "",
+                                 "finding the code chooses no theme for the user")
+
+    def test_next_ui_secret_code_wrong_or_paused_does_not_fire(self) -> None:
+        """A wrong press inside the code, or a pause of more than 1.5 s between two of its
+        presses, starts it again: neither run greets, opens Love All or records an unlock."""
+        keys = self.SECRET_KEYS
+        wrong = keys[:7] + ("KEY_LEFT",) + keys[8:]
+        paused = keys[:5] + ("WAIT_MS=1700",) + keys[5:]
+        for name, events in (("wrong", wrong), ("paused", paused)):
+            with self.subTest(sequence=name):
+                run = self.secret_run(("WAIT_MS=100",) + events + ("WAIT_MS=200",))
+                self.assertEqual(self.secret_lines(run, "found"), [], run["stdout"])
+                routes = [route for _, route in self.screens(run)]
+                self.assertNotIn(self.LOVE_ALL_ROUTE, routes)
+                # Nothing changed a setting, so the run may have written no settings.json.
+                settings = run["settings"] or {}
+                assert isinstance(settings, dict)
+                self.assertFalse(settings.get("theme_unlocks"), settings)
+
+    def test_next_ui_secret_farewell_on_leaving_love_all(self) -> None:
+        """Back from Love All returns to the library with "Please come again soon!"; once the
+        unlock is recorded, About offers a Love All button that opens it again, with no
+        greeting."""
+        run = self.secret_run(("WAIT_MS=100",) + self.SECRET_KEYS +
+                              ("WAIT_MS=300", "KEY_ESCAPE", "WAIT_MS=300"))
+        farewell = self.secret_lines(run, "left_love_all")
+        self.assertEqual([line["toast"] for line in farewell], ["Please come again soon!"],
+                         run["stdout"])
+        routes = [route for _, route in self.screens(run)]
+        self.assertEqual(routes[-2:], [self.LOVE_ALL_ROUTE, "1"], routes)
+
+    def test_next_ui_secret_respects_reduce_motion(self) -> None:
+        """With Reduce motion on, the code still greets and records its unlock, without the
+        ripple and confetti, and Love All opens at once and does not roll. With motion on,
+        Love All opens once the ripple is done."""
+        still = self.secret_run(("WAIT_MS=100",) + self.SECRET_KEYS + ("WAIT_MS=60",))
+        found = self.secret_lines(still, "found")
+        self.assertEqual([line["motion"] for line in found], ["0"], still["stdout"])
+        self.assertEqual(self.screens(still)[-1][1], self.LOVE_ALL_ROUTE,
+                         "Love All opens at once without the ripple")
+
+        moving = self.secret_run(("WAIT_MS=100",) + self.SECRET_KEYS + ("WAIT_MS=400",),
+                                 motion=True)
+        found = self.secret_lines(moving, "found")
+        self.assertEqual([line["motion"] for line in found], ["1"], moving["stdout"])
+        self.assertNotIn(self.LOVE_ALL_ROUTE, [route for _, route in self.screens(moving)],
+                         "the ripple plays before Love All opens")
+        handed = self.secret_run(("WAIT_MS=100",) + self.SECRET_KEYS + ("WAIT_MS=2400",),
+                                 motion=True)
+        self.assertEqual(self.screens(handed)[-1][1], self.LOVE_ALL_ROUTE)
+
+    # The pictures of the launcher's secret a review looks at: (name, events after the code,
+    # settings, motion). The toast is taken mid-ripple; Love All with Reduce motion on, which
+    # opens it at once and holds it at its top, after the greeting has gone.
+    SECRET_SCREENSHOTS: tuple[tuple[str, str, tuple[str, ...], dict[str, object], bool], ...] = (
+        ("secret-toast", "library", ("WAIT_MS=700",), {}, True),
+        ("secret-love-all", "library", ("WAIT_MS=3800",), {}, False),
+        ("secret-theme", "accessibility-settings",
+         ("WAIT_MS=100", "KEY_DOWN", "KEY_DOWN", "KEY_DOWN", "KEY_DOWN", "WAIT_MS=200"),
+         {"launcher_theme": "wave", "theme_unlocks": ["wave"]}, False),
+    )
+
+    def test_next_ui_secret_screenshots_when_requested(self) -> None:
+        """With NAKAGAWA_PLAYER_UI_SECRET_SCREENSHOTS naming a folder, writes the UI-test
+        player's own last frame of each SECRET_SCREENSHOTS entry there
+        (<name>-<w>x<h>-<text size>.bmp) at each RA_WINDOWS size. Skipped, and reported as
+        skipped, without the variable."""
+        screenshot_dir = os.environ.get("NAKAGAWA_PLAYER_UI_SECRET_SCREENSHOTS")
+        if not screenshot_dir:
+            self.skipTest("NAKAGAWA_PLAYER_UI_SECRET_SCREENSHOTS names no folder")
+        output = Path(screenshot_dir)
+        for name, view, after, extra, motion in self.SECRET_SCREENSHOTS:
+            for width, height, text_size in self.RA_WINDOWS:
+                picture = f"{name}-{width}x{height}-{text_size}"
+                with self.subTest(picture=picture):
+                    settings: dict[str, object] = dict(self.SECRET_MOTION) if motion else {}
+                    settings.update(extra)
+                    if text_size != 100:
+                        settings["text_size"] = text_size
+                    env = {"NK_UI_TEST_LOCAL_TIME": "09:30"}
+                    if motion:
+                        env["NK_UI_TEST_MOTION"] = "1"
+                    events = after if view != "library" else \
+                        ("WAIT_MS=100",) + self.SECRET_KEYS + after
+                    self.next_ui_run(view, events, width=width, height=height,
+                                     settings=settings, env_extra=env,
+                                     screenshot_path=output / (picture + ".bmp"))
+                    self.assertTrue((output / (picture + ".bmp")).is_file(), picture)
+
     def test_next_ui_developer_log_buttons(self) -> None:
         """The developer log opens on Close; Copy and the layout inspector keep it open."""
         closed = self.next_ui_run("developer-log", ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100"))

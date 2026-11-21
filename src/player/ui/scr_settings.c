@@ -780,11 +780,14 @@ static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model,
             {"Text size", safe_text(model->text_size, "Standard"),
              "Makes the launcher's text larger. Controls keep their size."},
             {"Contrast", safe_text(model->high_contrast_choice, "Automatic"), contrast_line},
-            {"Motion", safe_text(model->reduce_motion_choice, "Automatic"), motion_line}
+            {"Motion", safe_text(model->reduce_motion_choice, "Automatic"), motion_line},
+            {"Theme", safe_text(model->launcher_theme, "Standard"),
+             "The launcher's colours. A game never shows them."}
         };
-        /* The four buttons line up on one column at every text size. */
-        WizardColumn column = scr_wizard_column(ui, rows, sizeof(rows) / sizeof(rows[0]),
-                                                inner - 32.0f, false);
+        /* The theme row is there once a second theme is offered (launcher_themes.h). */
+        const size_t row_count = model->launcher_theme != NULL ? 5u : 4u;
+        /* The buttons line up on one column at every text size. */
+        WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
         if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE, SET_ID_TEXT + 0x300u,
                          rows[0].name, rows[0].value, rows[0].sentence, false, inner - 32.0f,
                          &column)) {
@@ -804,6 +807,12 @@ static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model,
                          rows[3].name, rows[3].value, rows[3].sentence, model->reduce_motion,
                          inner - 32.0f, &column)) {
             *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_REDUCE_MOTION);
+        }
+        if (row_count > 4u &&
+            scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_LAUNCHER_THEME, SET_ID_TEXT + 0x3E0u,
+                             rows[4].name, rows[4].value, rows[4].sentence, false, inner - 32.0f,
+                             &column)) {
+            *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_LAUNCHER_THEME);
         }
         nk_ui_end_container(ui);
     }
