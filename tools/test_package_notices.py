@@ -283,6 +283,26 @@ class TestPackageNotices(unittest.TestCase):
         self.assertIn("GNU GENERAL PUBLIC LICENSE", combined_text)
         self.assertIn("Credits and Third-Party Attribution", combined_text)
 
+    def test_repository_only_components_never_enter_the_notice_bundle(self) -> None:
+        """A component recorded as repository-only (test data such as the SPDX 2.3 schema) is never shipped."""
+        inventory = json.loads((ROOT / "assets" / "third_party_components.json").read_text(encoding="utf-8"))
+        repository_only = inventory["native"].get("repository_components", [])
+        self.assertIn("spdx-2.3-json-schema", [record["id"] for record in repository_only])
+        (self.pkg_dir / "mygame.exe").write_bytes(b"MZ\0\0exe")
+        result = package_notices.generate_package_notices(
+            self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+        )
+        names = {component["name"] for component in result["components"]}
+        bundle = "\n".join(
+            path.read_text(encoding="utf-8", errors="replace")
+            for path in (self.pkg_dir / "THIRD_PARTY_NOTICES").rglob("*") if path.is_file()
+        )
+        for record in repository_only:
+            with self.subTest(component=record["id"]):
+                self.assertEqual(record["disposition"], "repository_test_data")
+                self.assertNotIn(record["name"], names)
+                self.assertNotIn(record["name"], bundle)
+
     def test_source_notice_offers_corresponding_sources_for_staged_lgpl_dlls(self) -> None:
         records = package_notices.load_component_inventory()["native"]["dlls"]
         versions = {
