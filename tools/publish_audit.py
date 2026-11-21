@@ -2125,6 +2125,10 @@ TEXT_HYGIENE_EXEMPT_SUFFIXES = frozenset({".dat", ".bin", ".png", ".jpg", ".jpeg
 TEXT_HYGIENE_FINAL_NEWLINE_EXCEPTIONS = {
     "third_party/clay/LICENSE.md": "5dd30f9f52093076b7574458f5efb8242fe6cbbd4669d4a2914e7616810d0df8",
     "third_party/fidelityfx_sdk/LICENSE-AMD.md": "410f9c138e766e846acf2dc93db768198def0293a017d7e3296815b451688dbe",
+    # The SPDX 2.3 schema and its CC-BY-3.0 licence end without a newline upstream and are kept
+    # byte-identical (third_party/spdx/PROVENANCE.md).
+    "third_party/spdx/LICENSE": "017e38491cccbd2bdb6da0a32a33db9ec245b5dab30fdcd09f2c742c975e5b35",
+    "third_party/spdx/spdx-schema-2.3.json": "239208b7ac287b3cf5d9a9af23f9d69863971102a5e1587a27a398b43490b89b",
 }
 
 
