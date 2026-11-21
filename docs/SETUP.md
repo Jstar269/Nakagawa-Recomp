@@ -902,15 +902,23 @@ with arguments. Nakagawa Recomp works with any of them that can run an executabl
   them from the saves folder inside that data root.
 - **One launcher per data folder.** If Nakagawa Recomp is already open on the same data folder, a second start
   brings that window forward, starts nothing, says so on standard error and exits with code 0. Runs with
-  `--screenshot`, `--stage-only` or `--headless-launch` are not affected.
+  `--screenshot`, `--view`, `--stage-only`, `--headless-launch` and the test harness
+  (`--ui-test-*`) are not affected: they run beside an open launcher.
 
-Exit codes of a start from the command line: `0` finished (a game that was started returns its own exit code
-instead, whatever it is); `1` the launcher window could not be created; `2` the command line, the data folder, the
-`--launch-title` name or the library entry was refused; `3` the game has no runtime prepared for this PC yet (open
-Nakagawa Recomp and build it); `4` the game could not be started, or the launcher cannot start (a missing
-`SDL3_ttf.dll`); `5` the game's window request was lost; `6` the game ended abnormally (a crash); `7` and `8` only
-for `--headless-launch` (timeout, checkpoint not reached). When a `--launch-title` start is refused, the player
-also shows a message box, so a front-end with no console still tells the user.
+Exit codes of a start from the command line (`--help` prints the same list; a code can have several causes):
+
+- `0`: Done. A game that was started returns its own exit code instead, whatever it is.
+- `1`: The launcher window could not be created, a UI test failed, or a --stage-only or --headless-launch run could not load the manifest overlay or read, convert or inspect the disc image.
+- `2`: The command line, the data folder, the --launch-title name or the library entry was refused, or staging needs a supported --iso.
+- `3`: The game has no runtime prepared for this PC (build it in Nakagawa Recomp), or --stage-only cannot set it up (not in the catalog, no profile, out of memory).
+- `4`: The game or the launcher could not start (a missing SDL3_ttf.dll included), an experimental profile could not be made, or staging failed.
+- `5`: The game's window request was lost.
+- `6`: The game ended abnormally (a crash), or the staged game's folder path is too long for the library record.
+- `7`: A headless run timed out, or the staged game could not be saved to the library.
+- `8`: A headless acceptance checkpoint was not reached, or the game's data folder could not be checked.
+- `9`: Staging is held by another run, or a file takes the game's folder name.
+
+When a `--launch-title` start is refused, the player also shows a message box, so a front-end with no console still tells the user.
 
 ### System fonts
 

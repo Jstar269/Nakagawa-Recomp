@@ -2711,6 +2711,39 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(len(lines), 1, completed.stdout)
         self.assertRegex(lines[0], r"^Nakagawa Recomp v\d+\.\d+\.\d+")
 
+    def test_a_bad_argument_is_refused_in_either_order_with_help_or_version(self) -> None:
+        """--help and --version never hide a bad argument: both orders exit 2."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            for flag in ("--help", "--version"):
+                for args in ((flag, "--bogus"), ("--bogus", flag), (flag, "--iso")):
+                    with self.subTest(args=args):
+                        completed = self.run_player_args(scratch, *args)
+                        self.assertEqual(completed.returncode, 2,
+                                         completed.stdout + completed.stderr)
+                        self.assertEqual(completed.stdout, "")
+                        self.assertIn("--help", completed.stderr)
+
+    def test_exit_codes_in_the_source_help_and_setup_guide_are_one_list(self) -> None:
+        """The exit-code table in main.c is the one source: --help prints it and
+        docs/SETUP.md lists it, row for row."""
+        source = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        block = source.split("k_player_exit_codes[] = {", 1)[1].split("};", 1)[0]
+        table = re.findall(r'\{(\d+), "([^"]*)"\}', block)
+        self.assertGreaterEqual(len(table), 10, table)
+        table = [(int(code), meaning) for code, meaning in table]
+        self.assertEqual([code for code, _ in table], list(range(len(table))))
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            helped = self.run_player_args(Path(tmp), "--help").stdout
+        guide = (ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+        for code, meaning in table:
+            self.assertIn(f"  {code}  {meaning}\n", helped)
+            self.assertIn(f"- `{code}`: {meaning}\n", guide)
+        self.assertEqual(len(re.findall(r"^  \d  ", helped, re.M)), len(table))
+        # Every literal exit code main.c returns is in the table.
+        literal = {int(n) for n in re.findall(r"\breturn (\d+);", source)}
+        self.assertLessEqual(literal, {code for code, _ in table})
+
     def test_help_lists_every_documented_option_and_the_exit_codes(self) -> None:
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             completed = self.run_player_args(Path(tmp), "--help")
@@ -2719,7 +2752,7 @@ class NativePlayerUiTests(unittest.TestCase):
         for option in ("--user-data-root", "--iso", "--launch-now", "--launch-title",
                        "--launch-index", "--version", "--help", "--cheats-file"):
             self.assertIn(option, completed.stdout)
-        self.assertIn("Exit codes:", completed.stdout)
+        self.assertIn("Exit codes", completed.stdout)
 
     def test_every_view_is_drawn_by_the_launcher(self) -> None:
         """Every PlayerView in player_state.h is drawn by the nk_ui launcher."""

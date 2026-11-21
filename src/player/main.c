@@ -4186,6 +4186,27 @@ static bool player_cli_normalize(PlayerCli *cli, int argc, char *argv[]) {
     return true;
 }
 
+/* ---- Exit codes: the one table --help and docs/SETUP.md both come from ----
+ * test_player_ui.py checks the three agree. A code is reachable from several routes, so each row
+ * names every cause. */
+typedef struct {
+    int code;
+    const char *meaning;
+} PlayerExitCode;
+
+static const PlayerExitCode k_player_exit_codes[] = {
+    {0, "Done. A game that was started returns its own exit code instead, whatever it is."},
+    {1, "The launcher window could not be created, a UI test failed, or a --stage-only or --headless-launch run could not load the manifest overlay or read, convert or inspect the disc image."},
+    {2, "The command line, the data folder, the --launch-title name or the library entry was refused, or staging needs a supported --iso."},
+    {3, "The game has no runtime prepared for this PC (build it in Nakagawa Recomp), or --stage-only cannot set it up (not in the catalog, no profile, out of memory)."},
+    {4, "The game or the launcher could not start (a missing SDL3_ttf.dll included), an experimental profile could not be made, or staging failed."},
+    {5, "The game's window request was lost."},
+    {6, "The game ended abnormally (a crash), or the staged game's folder path is too long for the library record."},
+    {7, "A headless run timed out, or the staged game could not be saved to the library."},
+    {8, "A headless acceptance checkpoint was not reached, or the game's data folder could not be checked."},
+    {9, "Staging is held by another run, or a file takes the game's folder name."},
+};
+
 static void player_cli_print_usage(void) {
     printf("Usage: nakagawa_player [options]\n\n"
            "A value is written --name=value or --name value; quote a path with spaces.\n\n");
@@ -4197,11 +4218,11 @@ static void player_cli_print_usage(void) {
                  option->value ? option->value : "");
         printf("  %-30s %s\n", left, option->help);
     }
-    printf("\nExit codes: 0 done (a started game's own exit code is passed on); 1 no window; "
-           "2 bad command line, or a refused data folder or launch; 3 the game has no prepared "
-           "runtime; 4 the game or the launcher could not start; 5 the game's window request was "
-           "lost; 6 the game ended abnormally; 7 and 8 headless runs only.\n"
-           "An unknown option or a missing value is refused, never ignored.\n");
+    printf("\nExit codes (a start from the command line; --stage-only and --headless-launch runs use them too):\n");
+    for (size_t i = 0; i < sizeof(k_player_exit_codes) / sizeof(k_player_exit_codes[0]); i++) {
+        printf("  %d  %s\n", k_player_exit_codes[i].code, k_player_exit_codes[i].meaning);
+    }
+    printf("\nAn unknown option or a missing value is refused with exit code 2, never ignored.\n");
 }
 
 /* --user-data-root=<folder> makes this process keep its library, title
@@ -7746,15 +7767,16 @@ int main(int argc, char *argv[]) {
                         "(SetDefaultDllDirectories); the current folder and PATH may still be "
                         "searched.\n");
     }
-    if (cli.help || cli.version) {
-        if (cli.help) player_cli_print_usage();
-        else printf("Nakagawa Recomp %s\n", player_report_version());
-        return 0;
-    }
+    /* A bad argument is refused wherever it stands, --help and --version included. */
     if (!cli_good) {
         fprintf(stderr, "[PLAYER] %s Run nakagawa_player --help to list the options.\n",
                 cli.error);
         return 2;
+    }
+    if (cli.help || cli.version) {
+        if (cli.help) player_cli_print_usage();
+        else printf("Nakagawa Recomp %s\n", player_report_version());
+        return 0;
     }
     player_report_legacy_data_root();
 
