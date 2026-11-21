@@ -774,5 +774,91 @@ class BuildSystemParityTests(unittest.TestCase):
                 + ", ".join(sorted(p.name for p in build_dir.rglob("*"))),
             )
 
+
+_RULE_LINE = re.compile(r"^([A-Za-z0-9_.-]+(?:[ \t]+[A-Za-z0-9_.-]+)*)[ \t]*:(?![:=])[ \t]*(.*)$")
+
+
+def _make_prerequisites(makefile_text: str) -> dict[str, set[str]]:
+    """Each literally named Make target's literally named prerequisites, over every rule line."""
+    prerequisites: dict[str, set[str]] = {}
+    for line in makefile_text.splitlines():
+        match = _RULE_LINE.match(line)
+        if match is None:
+            continue
+        for target in match.group(1).split():
+            prerequisites.setdefault(target, set()).update(match.group(2).split(";", 1)[0].split())
+    return prerequisites
+
+
+def _reachable(prerequisites: dict[str, set[str]], roots: set[str]) -> set[str]:
+    seen = set(roots)
+    pending = list(roots)
+    while pending:
+        for prerequisite in prerequisites.get(pending.pop(), ()):
+            if prerequisite not in seen:
+                seen.add(prerequisite)
+                pending.append(prerequisite)
+    return seen
+
+
+class HostNeutralSelftestWiringTests(unittest.TestCase):
+    """A selftest that needs nothing but a C compiler runs in a hosted gate.
+
+    Failing-before (audit 2026-11-17 F-803b2d02): dispatch-selftest, stale-code-selftest and
+    asset-index-selftest are host-neutral, and .github/REVIEW.md names dispatch-selftest in the
+    runtime ladder and asks that new selftests be wired into a hosted target such as
+    native-core-tests, yet no aggregate and no workflow ran any of the three targets.
+    """
+
+    def setUp(self) -> None:
+        self.makefile_text = read_makefile(ROOT)
+        self.prerequisites = _make_prerequisites(self.makefile_text)
+        workflows = "\n".join(path.read_text(encoding="utf-8")
+                              for path in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")))
+        named = {target for target in self.prerequisites
+                 if re.search(rf"(?<![\w-]){re.escape(target)}(?![\w-])", workflows)}
+        self.native_core = _reachable(self.prerequisites, {"native-core-tests"})
+        self.hosted = _reachable(self.prerequisites, named) | self.native_core
+
+    def _host_neutral_selftests(self) -> list[str]:
+        """Each `*-selftest` rule whose own comment block calls it host-neutral."""
+        lines = self.makefile_text.splitlines()
+        found = []
+        for index, line in enumerate(lines):
+            match = re.match(r"^([a-z0-9-]+-selftest):", line)
+            if match is None:
+                continue
+            comment: list[str] = []
+            above = index - 1
+            while above >= 0 and lines[above].startswith("#"):
+                comment.insert(0, lines[above])
+                above -= 1
+            if comment and re.match(rf"#\s*{re.escape(match.group(1))}\b", comment[0]) \
+                    and "host-neutral" in " ".join(comment):
+                found.append(match.group(1))
+        return found
+
+    def test_every_host_neutral_selftest_runs_under_native_core_tests(self) -> None:
+        targets = self._host_neutral_selftests()
+        for target in ("dispatch-selftest", "stale-code-selftest", "asset-index-selftest"):
+            self.assertIn(target, targets, f"{target} no longer says it is host-neutral")
+        for target in targets:
+            with self.subTest(target=target):
+                self.assertTrue(target in self.native_core, f"{target} is host-neutral but native-core-tests skips it")
+
+    def test_every_selftest_the_review_ladder_names_runs_in_a_hosted_gate(self) -> None:
+        review = (ROOT / ".github" / "REVIEW.md").read_text(encoding="utf-8")
+        ladder = re.search(r"(?ms)^- Runtime: (.*?)(?=^- )", review)
+        self.assertIsNotNone(ladder, ".github/REVIEW.md has no runtime ladder")
+        assert ladder is not None
+        named = re.findall(r"`([a-z0-9-]+)`", ladder.group(1))
+        selftests = [name for name in named if name.endswith(("selftest", "-mutants"))]
+        self.assertIn("dispatch-selftest", selftests)
+        for target in selftests:
+            with self.subTest(target=target):
+                self.assertTrue(target in self.prerequisites, f"REVIEW.md names a target that does not exist: {target}")
+                self.assertTrue(target in self.hosted, f"REVIEW.md names {target}, which no hosted gate runs")
+
+
 if __name__ == "__main__":
     unittest.main()
