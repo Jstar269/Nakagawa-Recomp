@@ -3,6 +3,10 @@
 
 /* nkstate v1 container (#2146, #2147). The format and the rules are in nkstate.h. */
 
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L /* fileno and fsync under -std=c11 */
+#endif
+
 #include "nkstate.h"
 #include "vfpu_tables.h" /* sr_vfpu_sha256: the runtime's SHA-256 */
 
@@ -10,6 +14,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <io.h>      /* _get_osfhandle: nkstate_write_file flushes the temp file to the disk */
+#include <windows.h> /* MoveFileExA, FlushFileBuffers: nkstate_write_file replaces a state in one step */
+#else
+#include <unistd.h> /* fsync: nkstate_write_file flushes the temp file to the disk */
+#endif
 
 static const char *const s_status_names[] = {
     [NKSTATE_OK] = "ok",
@@ -455,13 +465,73 @@ NkStateStatus nkstate_restore(const uint8_t *data, size_t len, const NkStateExpe
 
 /* ---- files ----------------------------------------------------------------------- */
 
+/* A test's write fault: below 0 off (the default), else the write stops after that many bytes
+   and fails as a short write would. Nothing in the runtime arms it. */
+static long s_test_write_fault = -1;
+
+void nkstate_test_set_write_fault(long after_bytes) { s_test_write_fault = after_bytes; }
+
+/* A test's flush-to-disk fault: nonzero makes that step fail as a failed fsync or
+   FlushFileBuffers would. Nothing in the runtime arms it. */
+static int s_test_sync_fault = 0;
+
+void nkstate_test_set_sync_fault(int fail) { s_test_sync_fault = fail; }
+
+/* The temp file's bytes reach the disk: fsync on POSIX, FlushFileBuffers on Windows (the
+   nk_input_profile.c pattern, with the result checked). */
+static int nkstate_sync_file(FILE *fp) {
+#if defined(_WIN32)
+    const int fd = _fileno(fp);
+    if (fd < 0) return 0;
+    const HANDLE h = (HANDLE)_get_osfhandle(fd);
+    return h != INVALID_HANDLE_VALUE && FlushFileBuffers(h) != 0;
+#else
+    const int fd = fileno(fp);
+    return fd >= 0 && fsync(fd) == 0;
+#endif
+}
+
+/* The image goes to "<path>.tmp" first; only a write, flush, flush to the disk and close that all
+   succeed replace the target, in one step: rename() on POSIX, and on Windows MoveFileExA, since
+   rename() there refuses an existing target (the ace.c report pattern; the narrow call reads the
+   path as fopen does). Any failure removes the temp file, so an existing state at the path stays
+   whole. The directory is not flushed, so after a power loss the path may still hold the
+   earlier state. */
 NkStateStatus nkstate_write_file(const char *path, const NkStateBuf *image, char *detail, size_t detail_cap) {
-    FILE *fp = fopen(path, "wb");
-    if (!fp) return refuse(NKSTATE_IO_ERROR, detail, detail_cap, "cannot create %s", path);
-    size_t wrote = image->len ? fwrite(image->data, 1, image->len, fp) : 0u;
-    int closed = fclose(fp);
-    if (wrote != image->len || closed != 0)
+    const size_t n = strlen(path);
+    char *tmp = malloc(n + sizeof ".tmp");
+    if (!tmp) return refuse(NKSTATE_NO_MEMORY, detail, detail_cap, "writing %s", path);
+    memcpy(tmp, path, n);
+    memcpy(tmp + n, ".tmp", sizeof ".tmp");
+    FILE *fp = fopen(tmp, "wb");
+    if (!fp) {
+        free(tmp);
+        return refuse(NKSTATE_IO_ERROR, detail, detail_cap, "cannot create %s.tmp", path);
+    }
+    size_t want = image->len;
+    int faulted = 0;
+    if (s_test_write_fault >= 0 && (size_t)s_test_write_fault < want) {
+        want = (size_t)s_test_write_fault;
+        faulted = 1;
+    }
+    const size_t wrote = want ? fwrite(image->data, 1, want, fp) : 0u;
+    const int flushed = fflush(fp);
+    const int synced = flushed == 0 && nkstate_sync_file(fp) && !s_test_sync_fault;
+    const int closed = fclose(fp);
+    int ok = !faulted && wrote == image->len && flushed == 0 && synced && closed == 0;
+    if (ok) {
+#if defined(_WIN32)
+        ok = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+        ok = rename(tmp, path) == 0;
+#endif
+    }
+    if (!ok) {
+        (void)remove(tmp);
+        free(tmp);
         return refuse(NKSTATE_IO_ERROR, detail, detail_cap, "cannot write %s", path);
+    }
+    free(tmp);
     return NKSTATE_OK;
 }
 
