@@ -637,7 +637,7 @@
           "Copyright (C) 2025-2026 the psp-recomp authors (sal063 / psp-recomp)",
           "Copyright (c) 2012- PPSSPP Project and contributors"
         ],
-        "note": "Source files under src/rt/ and src/ref/ that carry GPL-2.0-or-later and derive from the sal063 PSP Recompilation Project and, for the files listed in src/rt/PROVENANCE.md, from PPSSPP. They are compiled into the runtime itself, so no separate relink step applies. GPL-2.0-or-later lets them be conveyed under GPL version 3, the licence of the player that links them: the project's own files are GPL-3.0-or-later, and the player also links GPL-3.0-only files (the pspdecrypt-derived src/core/nk_psp_* files and xBRZ), so it is conveyed under GPL version 3 (NOTICE.md). No disposition in this inventory names statically compiled GPL source of this kind; statically_linked_subset is the closest documented value.",
+        "note": "Source files under src/rt/ and src/ref/ that carry GPL-2.0-or-later and derive from the sal063 PSP Recompilation Project and, for the files listed in src/rt/PROVENANCE.md, from PPSSPP. They are compiled into the runtime itself, so no separate relink step applies. GPL-2.0-or-later lets them be conveyed under GPL version 3, the licence of the player that links them: the project's own files are GPL-3.0-or-later, and the player also links GPL-3.0-only files (the pspdecrypt-derived src/core/nk_psp_* files and xBRZ), so it is conveyed under GPL version 3 (NOTICE.md). No disposition in this inventory names statically compiled GPL source of this kind; statically_linked_subset is the closest documented value. source_paths names these files for the drift gate: src/rt/ and src/ref/ as above, and the PPSSPP-derived LZRC decoder src/core/nk_psp_lzrc.* (Copyright (c) 2012- PPSSPP Project, GPL-2.0-or-later).",
         "license_texts": [
           {
             "file": "third_party/licenses/GPL-2.0.txt",
@@ -649,6 +649,11 @@
             "copied_from": "sal063 CREDITS.md at da17b0e1db209206a407d097d132201e516e3855 with Nakagawa corrections (third_party/licenses/SAL063_CREDITS.txt)",
             "sha256": "cb3cdf1236eec851ab898e6b45aafc761da83112b85d2866ee6bbaa0fa23a208"
           }
+        ],
+        "source_paths": [
+          "src/rt/*",
+          "src/ref/*",
+          "src/core/nk_psp_lzrc.*"
         ]
       },
       {
@@ -754,17 +759,12 @@
         "source_paths": [
           "src/rt/hle_videocodec.c"
         ],
-        "note": "src/rt/hle_videocodec.c is derived-translated from JPCSP at the pinned revision (src/rt/PROVENANCE.md, section H) and compiled into every title runtime. JPCSP is GPL-3.0-or-later, the licence of the player that links it. The JPCSP notice is in the file header; the GNU GPL version 3 text is the copy kept for xBRZ.",
+        "note": "src/rt/hle_videocodec.c is derived-translated from JPCSP at the pinned revision (src/rt/PROVENANCE.md, section H) and compiled into every title runtime. JPCSP is GPL-3.0-or-later, the licence of the player that links it. The JPCSP notice is also kept in the file header.",
         "license_texts": [
           {
-            "file": "src/rt/hle_videocodec.c",
-            "copied_from": "header comment of src/rt/hle_videocodec.c, which keeps the JPCSP notice as upstream",
-            "sha256": "20a440ef36914bf88e003048b57f097a2c9f9b2896df572672ffaf4346b14650"
-          },
-          {
-            "file": "third_party/xbrz/License.txt",
-            "copied_from": "GNU General Public License version 3 text, the copy kept for xBRZ (third_party/xbrz/PROVENANCE.md); JPCSP's own COPYING at the pinned revision is not vendored",
-            "sha256": "c61f12da7cdad526bdcbed47a4c0a603e60dbbfdaf8b66933cd088e9132c303f"
+            "file": "LICENSE",
+            "copied_from": "GNU General Public License version 3 text, the project's own LICENSE; JPCSP's COPYING at commit 00ac4d6daedd89c0492093ae83fb0d3d819af414 is byte-identical to it (checked 2026-11-21)",
+            "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
           }
         ]
       },
@@ -895,6 +895,33 @@
             "file": "src/rt/xr/openxr/MIT.txt",
             "copied_from": "OpenXR-SDK LICENSES/MIT.txt at release-1.1.65, imported unchanged",
             "sha256": "8f25018489d6fe0dec34a352314c38dc146247b7de65735790f4398a92afa84b"
+          }
+        ]
+      },
+      {
+        "id": "pspdecrypt",
+        "name": "pspdecrypt (ported game-decryption code)",
+        "spdx_id": "GPL-3.0-only",
+        "upstream_origin": "https://github.com/John-K/pspdecrypt",
+        "upstream_revision": "c156627db7634d395c380c0a9589130f603307fc",
+        "disposition": "statically_linked_subset",
+        "notice_file": "pspdecrypt.txt",
+        "copyright_notices": [
+          "John Kelley (John-K) and contributors",
+          "AES core: Rijndael by Vincent Rijmen, Antoon Bosselaers and Paulo Barreto (public domain, notice kept in src/core/nk_psp_aes.c)"
+        ],
+        "source_paths": [
+          "src/core/nk_psp_aes.*",
+          "src/core/nk_psp_kle.*",
+          "src/core/nk_psp_prx.*",
+          "src/core/nk_psp_sha1.*"
+        ],
+        "note": "The AES, SHA-1, KL4E/KL3E and ~PSP container code of the local game decryption (src/core/PROVENANCE.md, NOTICE.md). pspdecrypt's licence is GPL version 3 with no later-version grant, so these files are GPL-3.0-only; the player that links them is conveyed under GPL version 3. The licence text recorded is the GPL version 3 text of this repository's LICENSE.",
+        "license_texts": [
+          {
+            "file": "LICENSE",
+            "copied_from": "GNU General Public License version 3 text, the project's own LICENSE; pspdecrypt's licence is the same GPL version 3",
+            "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
           }
         ]
       }
