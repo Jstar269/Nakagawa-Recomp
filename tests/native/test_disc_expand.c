@@ -1015,6 +1015,97 @@ static void test_chd_flac_empty_hunk_refused(void) {
     printf("PASS CHD FLAC zero-length hunk refused\n");
 }
 
+/* MSB-first bit writer and the two FLAC checksums, for the crafted frame below. */
+static void flac_put(uint8_t *buf, size_t *pos, uint32_t value, int nbits) {
+    int i;
+    for (i = nbits - 1; i >= 0; i--) {
+        if ((value >> i) & 1u)
+            buf[*pos >> 3] |= (uint8_t)(0x80u >> (*pos & 7u));
+        (*pos)++;
+    }
+}
+
+static uint8_t flac_crc8(const uint8_t *p, size_t n) {
+    uint8_t crc = 0;
+    size_t i;
+    int b;
+    for (i = 0; i < n; i++) {
+        crc ^= p[i];
+        for (b = 0; b < 8; b++)
+            crc = (uint8_t)((crc & 0x80u) ? ((unsigned)crc << 1) ^ 0x07u : (unsigned)crc << 1);
+    }
+    return crc;
+}
+
+static uint16_t flac_crc16(const uint8_t *p, size_t n) {
+    uint16_t crc = 0;
+    size_t i;
+    int b;
+    for (i = 0; i < n; i++) {
+        crc ^= (uint16_t)(p[i] << 8);
+        for (b = 0; b < 8; b++)
+            crc = (uint16_t)((crc & 0x8000u) ? ((unsigned)crc << 1) ^ 0x8005u : (unsigned)crc << 1);
+    }
+    return crc;
+}
+
+/* dr_flac LOCAL DELTA 2026-11-21 (dr_libs 2e7a192): a left/side stereo frame
+   whose side subframe has 16 wasted bits. The s16 reader shifted that side
+   channel's samples by 16 unused + 16 wasted = 32 bits, which C leaves
+   undefined (UBSan stops there in `make disc-expand-ubsan`); dr_flac now
+   decodes the frame as the left channel twice. The frame is 17 samples long,
+   so the scalar tail after the SSE2/NEON groups of four takes that path too.
+   Left is the constant 1000; side is the 1-bit constant -1 << 16. */
+static void test_chd_flac_fully_wasted_side_channel(void) {
+    enum { FRAMES = 17 };
+    flac_codec_data flac;
+    uint8_t src[64];
+    uint8_t dest[FRAMES * 4];
+    size_t pos = 8, header_end, frame_end;
+    uint16_t crc;
+    int i, ok = 1;
+
+    memset(src, 0, sizeof(src));
+    src[0] = 'L';                           /* little-endian output samples */
+    flac_put(src, &pos, 0xFFF8u, 16);       /* frame sync, fixed block size */
+    flac_put(src, &pos, 0x6u, 4);           /* block size: 8 bits, minus one, at the end */
+    flac_put(src, &pos, 0x0u, 4);           /* sample rate from STREAMINFO */
+    flac_put(src, &pos, 0x8u, 4);           /* left/side stereo */
+    flac_put(src, &pos, 0x4u, 3);           /* 16 bits per sample */
+    flac_put(src, &pos, 0u, 1);
+    flac_put(src, &pos, 0u, 8);             /* frame number 0 */
+    flac_put(src, &pos, FRAMES - 1u, 8);
+    header_end = pos >> 3;
+    flac_put(src, &pos, flac_crc8(src + 1, header_end - 1u), 8);
+    flac_put(src, &pos, 0u, 1);             /* left: CONSTANT, no wasted bits */
+    flac_put(src, &pos, 0u, 6);
+    flac_put(src, &pos, 0u, 1);
+    flac_put(src, &pos, 1000u, 16);
+    flac_put(src, &pos, 0u, 1);             /* side: CONSTANT, 16 wasted bits */
+    flac_put(src, &pos, 0u, 6);
+    flac_put(src, &pos, 1u, 1);
+    flac_put(src, &pos, 0u, 15);            /* unary k - 1 = 15 */
+    flac_put(src, &pos, 1u, 1);
+    flac_put(src, &pos, 1u, 1);             /* 17 - 16 = 1 bit: -1 */
+    pos = (pos + 7u) & ~(size_t)7u;
+    frame_end = pos >> 3;
+    crc = flac_crc16(src + 1, frame_end - 1u);
+    flac_put(src, &pos, crc, 16);
+
+    memset(&flac, 0, sizeof(flac));
+    memset(dest, 0xA5, sizeof(dest));
+    CHECK(flac_codec_init(&flac, sizeof(dest)) == CHDERR_NONE);
+    CHECK(flac_codec_decompress(&flac, src, (uint32_t)(pos >> 3), dest, sizeof(dest)) == CHDERR_NONE);
+    for (i = 0; i < FRAMES * 2; i++) {
+        int16_t sample = (int16_t)(uint16_t)(dest[i * 2] | (dest[i * 2 + 1] << 8));
+        if (sample != 1000)
+            ok = 0;
+    }
+    CHECK(ok);
+    flac_codec_free(&flac);
+    printf("PASS CHD FLAC side channel with 16 wasted bits decodes as left twice\n");
+}
+
 /* libchdr's HUFF codec under a failing allocator (libchdr LOCAL DELTA
    2026-11-20): a HUFF-coded CHD is opened and every hunk read through the
    production backend, failing the 1st, 2nd, ... malloc in turn until a run
@@ -2725,6 +2816,7 @@ int main(void) {
     test_malformed_refused();
     test_chd_huffman_gap_is_deterministic();
     test_chd_flac_empty_hunk_refused();
+    test_chd_flac_fully_wasted_side_channel();
     test_chd_huff_allocation_failures();
     test_cancel_removes_partial();
     test_import_and_reuse();

@@ -626,6 +626,7 @@ FUZZ_SAN_FLAGS :=
 else
 FUZZ_SAN_FLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all
 endif
+DISC_EXPAND_UBSAN_FLAGS := -fsanitize=undefined -fno-sanitize-recover=all
 
 fuzz-parsers:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
@@ -637,3 +638,18 @@ fuzz-parsers:
 		PSMF_FUZZ_ITERS=$(FUZZ_ITERS) FUZZ_SAN_FLAGS="$(FUZZ_SAN_FLAGS)"
 	$(MAKE) --no-print-directory psmf-media-selftest \
 		MEDIA_FUZZ_ITERS=$(FUZZ_ITERS) FUZZ_SAN_FLAGS="$(FUZZ_SAN_FLAGS)"
+ifneq ($(strip $(FUZZ_SAN_FLAGS)),)
+# test_disc_expand under UBSan: libchdr's sources are compiled with their own flags plus
+# DISC_EXPAND_UBSAN_FLAGS, so undefined behaviour inside the vendored decoders stops the run
+# (the crafted CHD FLAC frames reach dr_flac's sample reconstruction). UBSan only: the test's
+# failing-allocator cases wrap malloc, which AddressSanitizer's allocator does not go through.
+	$(MAKE) --no-print-directory native-core-objects-core
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)/disc-expand-ubsan').mkdir(parents=True, exist_ok=True)"
+	for src in $(LIBCHDR_SRCS); do \
+		$(CC) $(LIBCHDR_CFLAGS) $(DISC_EXPAND_UBSAN_FLAGS) -c $$src -o $(BUILD_ROOT)/disc-expand-ubsan/$$(basename $$src .c).o || exit 1; \
+	done
+	$(CC) $(NC_CFLAGS_CORE) -Werror $(DISC_EXPAND_UBSAN_FLAGS) $(LIBCHDR_INC) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) $(PLAYER_CHD_SRCS) \
+		tests/native/native_test_isolation.c tests/native/test_disc_expand.c $(BUILD_ROOT)/disc-expand-ubsan/*.o $(PLAYER_PLATFORM_LIBS) $(DISC_EXPAND_WRAP_MALLOC) \
+		-o $(BUILD_ROOT)/test_disc_expand_ubsan$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_disc_expand_ubsan$(EXE_EXT)
+endif

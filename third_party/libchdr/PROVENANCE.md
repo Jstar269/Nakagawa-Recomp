@@ -27,7 +27,7 @@ not linked into the runtime, which never reads a CHD.
   commit (`git cat-file blob <commit>:<path>`). Twenty of them store CRLF line
   endings upstream; the tree's text rule is LF (`.gitattributes`,
   `tools/publish_audit.py`), so those were normalised to LF and one licence file
-  gained a final newline (see [Local deltas](#local-deltas)). Six files
+  gained a final newline (see [Local deltas](#local-deltas)). Seven files
   later gained small code fixes, dated and described in
   [Code changes](#code-changes); nothing else changed. `.gitattributes`
   exempts the imported files from the whitespace checks, because upstream ends
@@ -44,7 +44,7 @@ not linked into the runtime, which never reads a CHD.
 | `deps/miniz-3.1.2/` | miniz (inflate only) | 3.1.2 | MIT | 2013-2014 RAD Game Tools and Valve Software; 2010-2014 Rich Geldreich and Tenacious Software LLC |
 | `deps/zstd-1.5.7/` | Zstandard single-file decompressor | 1.5.7 | BSD-3-Clause (upstream also offers GPL-2.0-only; the project uses BSD-3-Clause) | Meta Platforms, Inc. and affiliates |
 | `deps/lzma-26.02/` | LZMA SDK decoder (`include/real/`, `src/real/` and `LICENSE.txt`) | 26.02 (`LzmaDec.c` dated 2023-04-07) | public domain (SPDX `LZMA-SDK-9.22` text) | Igor Pavlov |
-| `include/dr_libs/` | dr_flac | v0.13.4 development snapshot (the header reads `v0.13.4 - TBD`), as libchdr carries it at the pin; no dr_libs commit is recorded | Unlicense or MIT-0; the project elects the Unlicense, as for `third_party/dr_libs/` | David Reid |
+| `include/dr_libs/` | dr_flac | v0.13.4 development snapshot (the header reads `v0.13.4 - TBD`), as libchdr carries it at the pin: dr_libs commit `dfe8377` (2026-09-01), the one whose `dr_flac.h` blob is `051f37c6` (matched 2026-11-21), plus one LOCAL DELTA (Code changes) | Unlicense or MIT-0; the project elects the Unlicense, as for `third_party/dr_libs/` | David Reid |
 
 The codec sources are the copies in libchdr's `deps/` and `include/dr_libs/`
 at the pin. The two outer LZMA files, `deps/lzma-26.02/include/LzmaDec.h` and
@@ -100,7 +100,7 @@ zstd is linked, so the player's runtime DLL set is unchanged.
 | `include/libchdr/flac.h` | imported byte-identical | `49a3ba90bf44ee3907afe4e9d69cf755656f1757` | `e333975b5ce21afa3d918e769b264df20b18eb7ed8e0388a7e1920790ebd9fc2` |
 | `include/libchdr/huffman.h` | imported + LOCAL DELTA: allocation-failure code (2026-11-20) | `8bfacd05601144dacbf80b9aa9a24f07f2bc08aa` | `db84b3235a6cbe763e30a74e27b53600da1bf18ceffea77faa3cdb5a9ad61818` |
 | `include/libchdr/macros.h` | LOCAL DELTA: CRLF line endings normalised to LF | `445b3b247af4e719026e84cdb664cc88d0b5f068` | `77a4ce9580a91dede40f54c0b361454383fd675bd8a7b9811bf4d72d6c559df9` |
-| `include/dr_libs/dr_flac.h` | imported byte-identical | `051f37c66e5394203efa80e7d048579b4540c078` | `111144e778f55738db6851cb226015c419e00d04b916a09506d4856d9cff945c` |
+| `include/dr_libs/dr_flac.h` | imported + LOCAL DELTA: fully wasted side channel (2026-11-21) | `051f37c66e5394203efa80e7d048579b4540c078` | `e96df576e47f39fe348881895bb0b413ebcacc7b13cbeadfb622121ea723d984` |
 | `src/codec_avhuff.h` | imported byte-identical | `774d1f290619f32f1315359283588e7c6dac3889` | `d13a9d4cb334e3667de8e1f1f057080d9df27a18f3f8208b3b8a8cc047c9ad5d` |
 | `src/codec_cdfl.h` | LOCAL DELTA: CRLF line endings normalised to LF | `a495bf673d9c1c7e055a4fa7476f4950f8469c93` | `3f4fb4525ba841f687d4895350ea4bb2cd9cd10fc7429f9b3b451944f7295175` |
 | `src/codec_cdlz.h` | LOCAL DELTA: CRLF line endings normalised to LF | `2b6796823e4b10e492c9b5fc2a4e7c1d3fcb28e0` | `b3e2ad6b28e88c9cb035e8e761bdd2630c65fa88d98e0dcb49b97d2ddcb63eb0` |
@@ -143,7 +143,7 @@ zstd is linked, so the player's runtime DLL set is unchanged.
 
 ## Local deltas
 
-Six files carry code changes, described in [Code changes](#code-changes); the
+Seven files carry code changes, described in [Code changes](#code-changes); the
 rest are line endings only. The files below store CRLF line endings upstream and are
 kept with LF here, the tree's text rule; `deps/lzma-26.02/LICENSE.txt` has no final
 newline upstream and gained one. No byte other than those line endings
@@ -180,6 +180,7 @@ manifest above gives the SHA-256 in this tree.
 | `src/libchdr_codec_lzma.c` | CRLF to LF | `912932f585dc12b8f399b49b718a3c9533049efa2393b42d51240a22813d8fcd` |
 | `src/libchdr_codec_zstd.c` | CRLF to LF | `92efc390845a76d027cf2c3bbaae0c7643109f3b3654fea07ed01871a9a3b76a` |
 | `src/libchdr_huffman.c` | lookup table prefilled; allocations checked | `1d9617d27ec324674157dbe3e8284ed7ea32d6c6cf5b802996086559cef249f2` |
+| `include/dr_libs/dr_flac.h` | fully wasted side channel (dr_libs `2e7a192`) | `111144e778f55738db6851cb226015c419e00d04b916a09506d4856d9cff945c` |
 
 ### Code changes
 
@@ -195,6 +196,27 @@ is checked by `tests/native/test_disc_expand.c`, which fails on the upstream byt
   never-written compressed buffer (uninitialised memory) before refusing the
   hunk. The result for every input is unchanged: the hunk is still refused with
   `CHDERR_DECOMPRESSION_ERROR`.
+- `include/dr_libs/dr_flac.h` (2026-11-21, vendored-update lane; the new bytes need the
+  maintainer's approval at landing): dr_libs commit
+  `2e7a192443c46c6b41947b47f2a7ac1faea56b71` ("dr_flac: Fix an undefined behavior error due
+  to a shift by 32", 2026-10-21, upstream PR #336), applied as upstream wrote it. Upstream
+  libchdr has not taken it: its `master` is still the pin `47d79415` (checked 2026-11-21) and
+  its newest release, `v0.3.0`, is older. The copy here is dr_libs `dfe8377` (2026-09-01), the
+  blob libchdr carries; the commit's patch (`git format-patch -1 2e7a192 -- dr_flac.h` from
+  `https://github.com/mackron/dr_libs`, SHA-256
+  `dbddaf747888799af8e60bc98efd101546636eee0221f4fe4bfd194e6bb89945`) applies to it without
+  fuzz. In a left/side or right/side stereo frame whose side subframe has every bit wasted
+  (16 wasted bits in a 16-bit stream), the s16, s32 and f32 readers shifted the side samples by
+  32, which C leaves undefined; the commit decodes such a frame as the other channel twice.
+  libchdr reaches this through `drflac_read_pcm_frames_s16` for every CD-FLAC hunk, so a crafted
+  CHD could reach it. Each of the commit's nine code blocks is marked with a one-line
+  `Nakagawa LOCAL DELTA (2026-11-21)` comment, the notice follows the opening comment, and
+  upstream's own revision-history line for the fix is kept. The other dr_flac commits after
+  `dfe8377` are not taken: they touch seeking, metadata blocks and 32-bit streams, which
+  libchdr's path (one STREAMINFO block, 16-bit, read straight through) does not reach, or change
+  behaviour. `test_chd_flac_fully_wasted_side_channel` in `tests/native/test_disc_expand.c`
+  decodes such a frame through `flac_codec_decompress`. `make fuzz-parsers` builds that test
+  with libchdr under UBSan (Linux), where the upstream bytes stop with a shift-exponent error.
 - `src/libchdr_huffman.c` (2026-11-17): the full-table
   `huffman_build_lookup_table` (the one built here, `LOWRAM_TARGET` 0) fills
   the whole `2^maxbits` table with `MAKE_LOOKUP(0, 1)` before writing the codes,
