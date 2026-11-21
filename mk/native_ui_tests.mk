@@ -107,7 +107,7 @@ endif
 # Player UI tests link SDL3 (software renderer, no window), so they run where the
 # player itself builds rather than in the SDL-free native-core-tests set. The
 # optional UI font selftest reports a named skip when SDL3_ttf is unavailable.
-player-ui-tests: osk-overlay-paint-selftest ui-font-selftest nk-ui-player-screens-selftest nk-ui-overlay-screens-selftest nk-ui-overlay-host-selftest
+player-ui-tests: osk-overlay-paint-selftest ui-font-selftest nk-ui-player-screens-selftest nk-ui-overlay-screens-selftest nk-ui-overlay-host-selftest launcher-secret-selftest
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -Wall -Wextra $(PLAYER_INCLUDES) $(LDFLAGS) tests/native/test_ui_clip.c -lSDL3 \
 		-o $(BUILD_ROOT)/test_ui_clip$(EXE_EXT)
@@ -294,6 +294,21 @@ nk-ui-player-screens-selftest:
 		$(NK_UI_CORE_SRCS) $(filter-out src/player/ui/player_ui_nk.c,$(NK_UI_PLAYER_C5_SRCS)) \
 		tests/native/test_player_screens.c -lm -o $(BUILD_ROOT)/test_player_screens$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_player_screens$(EXE_EXT)
+
+# launcher-secret-selftest - the launcher's hidden moment and themes, SDL-free: the classic cheat
+# code's detector, the greeting by the hour, the moment with and without motion and sound, the
+# rippled mark, the confetti, the jingle, the theme rules and the derived colours' contrast, and
+# the Love All table generated from CREDITS.md.
+.PHONY: launcher-secret-selftest
+launcher-secret-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror \
+		-Isrc/core -Isrc/player -Isrc/ui -Isrc/player/ui -Ithird_party/clay \
+		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
+		$(NK_UI_CORE_SRCS) src/player/ui/launcher_secret.c src/player/ui/launcher_themes.c \
+		src/player/ui/love_all_credits.c \
+		tests/native/test_launcher_secret.c -lm -o $(BUILD_ROOT)/test_launcher_secret$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_launcher_secret$(EXE_EXT)
 
 # nk-ui-overlay-screens-selftest - the in-game overlay's pages (#1159, C9c) on the SDL-free core:
 # page flow, focus, actions, fit at every capture size, and tests/fixtures/nk_ui/overlay.golden.

@@ -39,6 +39,10 @@
 #define MAX_PATH_LEN NK_MAX_PATH
 #define MAX_DISC_ID_LEN NK_MAX_DISC_ID_LEN
 #define MAX_SHOWCASE_GAMES 8
+/* A launcher theme id and the unlocks kept (LAUNCHER_THEME_ID_MAX and
+   LAUNCHER_THEME_UNLOCK_MAX in src/player/ui/launcher_themes.h, which checks they match). */
+#define PLAYER_THEME_ID_MAX 24
+#define PLAYER_THEME_UNLOCK_MAX 8
 /* The rows a game's page lists: every achievement of a set this large, the rest counted. */
 #define PLAYER_ACHIEVEMENTS_LIST_MAX 256u
 #define PLAYER_ACHIEVEMENT_TITLE_MAX 128u
@@ -459,6 +463,14 @@ typedef struct {
        from the game's volume, as the menu sounds are. */
     bool launcher_music;
     int launcher_music_volume; /* 0..100 */
+    /* The launcher's colour theme (src/player/ui/launcher_themes.h): the id chosen, "" for
+       none (the launcher picks), and the unlocks found (the classic cheat code's "wave").
+       "launcher_theme" and "theme_unlocks" in settings.json, additions to schema version 2
+       as text_size is; an id is lower-case letters, digits and '-'. Launcher-only: no game
+       reads them. */
+    char launcher_theme[PLAYER_THEME_ID_MAX];
+    char theme_unlocks[PLAYER_THEME_UNLOCK_MAX][PLAYER_THEME_ID_MAX];
+    int theme_unlock_count;
     PlayerLibrarySort library_sort;
     bool launcher_window_maximized;
     bool launcher_window_position_valid;
@@ -1988,6 +2000,13 @@ bool player_app_reduce_motion(const PlayerApp *app);
 bool player_app_high_contrast_focus(const PlayerApp *app);
 void player_app_toggle_ui_sounds(PlayerApp *app);
 void player_app_toggle_launcher_music(PlayerApp *app);
+/* The launcher theme's settings (PlayerSettings.launcher_theme, theme_unlocks). An id is
+ * 1-23 lower-case letters, digits or '-'; anything else is refused. Recording an unlock
+ * already kept, or past PLAYER_THEME_UNLOCK_MAX, changes nothing. Each change is saved. */
+bool player_theme_id_valid(const char *id);
+bool player_app_has_theme_unlock(const PlayerApp *app, const char *unlock);
+bool player_app_record_theme_unlock(PlayerApp *app, const char *unlock);
+bool player_app_set_launcher_theme(PlayerApp *app, const char *id);
 /* The library's sort: Recently played, Name A to Z, Recently added, and round
  * again. The change is saved. */
 void player_app_cycle_library_sort(PlayerApp *app);

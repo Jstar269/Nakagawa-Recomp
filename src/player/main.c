@@ -27,6 +27,7 @@
 #include "package_builder.h"
 #include "iso_reader.h"
 #include "ui/player_ui_nk.h"
+#include "ui/launcher_secret.h" /* Settings' launcher theme row (player_ui_cycle_launcher_theme) */
 #include "nk_title_manifest.h"
 #include "nk_ui_widgets.h"
 #include "nk_disc_chd.h"
@@ -825,6 +826,13 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
     bool use_next_ui = player_ui_nk_view_active(next_ui, app);
     if (!app || !running || !event) return false;
     event = player_back_as_escape(app, next_ui, event, &escape);
+    /* The classic cheat code sees each press first, so its B and A are not also a Back, a
+       Quit or a Select (launcher_secret.h); a control waiting for its binding keeps them. */
+    if (use_next_ui && !(app->active_view == VIEW_CONTROLLER_SETTINGS &&
+                         input_settings_is_capturing(&app->input_settings)) &&
+        player_ui_nk_take_secret(next_ui, event)) {
+        return true;
+    }
 
     switch (event->type) {
     case SDL_EVENT_QUIT:
@@ -2069,6 +2077,7 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_VOLUME_DOWN: player_app_adjust_volume(app, -5); break;
         case PLAYER_UI_SETTINGS_VOLUME_UP: player_app_adjust_volume(app, 5); break;
         case PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS: player_app_toggle_ui_sounds(app); break;
+        case PLAYER_UI_SETTINGS_CYCLE_LAUNCHER_THEME: player_ui_cycle_launcher_theme(app); break;
         case PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC: player_app_toggle_launcher_music(app); break;
         case PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN:
             player_app_adjust_launcher_music_volume(app, -5);
@@ -4835,6 +4844,9 @@ struct PlayerRun {
     char achievements_user_agent[NK_ACH_USER_AGENT_MAX];
     NkGuestMemoryChannel guest_memory_channel;
     PlayerAchHttpJob *ach_http_job;
+    /* Ends the request ach_http_job's thread is making when the player closes, so shutdown
+       does not wait out WinHTTP's timeouts (audit F-32444050); NULL: shutdown waits for it. */
+    PackageHttpCancel *ach_http_cancel;
     char achievements_game_hash[33];
     char achievements_disc_id[MAX_DISC_ID_LEN];
     bool guest_memory_channel_active;
@@ -4896,6 +4908,7 @@ struct PlayerAchHttpJob {
     char url[2048];
     char content_type[128];
     char user_agent[NK_ACH_USER_AGENT_MAX];
+    PackageHttpCancel *cancel; /* the run's ach_http_cancel */
     char *post_data;
     size_t post_data_size;
     char *response_body;
@@ -5020,7 +5033,7 @@ static void player_ach_job_cache_write(PlayerAchHttpJob *job) {
 
 static int SDLCALL player_ach_http_thread_main(void *userdata) {
     PlayerAchHttpJob *job = (PlayerAchHttpJob *)userdata;
-    PackageHttpOptions options = {job->user_agent};
+    PackageHttpOptions options = {job->user_agent, job->cancel};
     PackageHttpResponse response;
     unsigned char chunk[16384];
     memset(&response, 0, sizeof response);
@@ -5169,6 +5182,7 @@ static void player_ach_transport(void *context, const NkAchRequest *request,
         job->cache_epoch = SDL_GetAtomicInt(&run->ach_badge_cache_epoch);
     }
     snprintf(job->user_agent, sizeof job->user_agent, "%s", run->achievements_user_agent);
+    job->cancel = run->ach_http_cancel;
     job->done_callback = done;
     job->done_context = done_context;
     snprintf(job->url, sizeof job->url, "%s", request->url);
@@ -5226,6 +5240,9 @@ static bool player_achievements_create(PlayerRun *run) {
     if (!run->achievements_lock) return false;
     if (!run->ach_badge_cache_lock) run->ach_badge_cache_lock = SDL_CreateMutex();
     if (!run->ach_badge_cache_lock) return false;
+    /* NULL (no memory, or no native transport) leaves shutdown waiting for a request, as it
+       did before. */
+    if (!run->ach_http_cancel) run->ach_http_cancel = package_http_cancel_create();
     /* <data>/achievements-badges, made only when a picture is kept. Unknown: nothing is
        cached, and each badge is fetched once per run. */
     char data_root[NK_MAX_PATH];
@@ -5348,6 +5365,8 @@ _Static_assert(PLAYER_ACHIEVEMENT_DESCRIPTION_MAX >= NK_ACH_DISPLAY_DESCRIPTION_
                "a row holds the bridge's whole description");
 _Static_assert(PLAYER_ACHIEVEMENT_BADGE_NAME_MAX >= NK_ACH_BADGE_NAME_MAX,
                "a row holds the bridge's whole badge name");
+_Static_assert(sizeof(((PlayerApp *)0)->achievements_account) >= NK_ACH_DISPLAY_NAME_MAX,
+               "the account row holds the whole display name (nk_ach_display_name)");
 
 /* A new list (a game's rows, or none): the pictures it does not use leave their slots, so the
    next game's page has room for its own; they stay in the badge folder, and a page that wants
@@ -5604,8 +5623,8 @@ static void player_achievements_collect_events(PlayerRun *run) {
                              "RetroAchievements token.");
                 } else {
                     app->achievements_signed_in = true;
-                    snprintf(app->achievements_account, sizeof app->achievements_account,
-                             "%.*s", (int)sizeof(app->achievements_account) - 1, username);
+                    nk_ach_display_name(username, app->achievements_account,
+                                        sizeof app->achievements_account);
                     player_achievements_rest_status(
                         run, app->is_game_running && !run->guest_memory_channel_active
                                  ? "Signed in. Restart this game to start tracking."
@@ -5651,9 +5670,21 @@ static void player_achievements_collect_events(PlayerRun *run) {
                 player_achievements_refresh_list(run);
                 /* A channel stopped meanwhile keeps its own reason on the status line: no
                    frame reaches these achievements. */
-                if (run->guest_memory_channel_active)
+                if (run->guest_memory_channel_active) {
                     snprintf(app->achievements_status, sizeof app->achievements_status,
                              "%u achievements available.", event->count);
+                    /* The game's notice that its achievements are active, with what this
+                       account has unlocked of them (nk_guest_memory_notification_set_loaded):
+                       RetroAchievements asks clients to say so. */
+                    const char *game = event->title[0] ? event->title : "This game";
+                    char toast[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+                    snprintf(toast, sizeof toast,
+                             NK_GUEST_MEMORY_NOTIFICATION_SET_LOADED "%.*s\n%u\n%u",
+                             player_utf8_fit(game, 140u), game,
+                             (unsigned)app->achievements_unlocked, (unsigned)event->count);
+                    (void)nk_platform_guest_memory_channel_notify(&run->guest_memory_channel,
+                                                                  toast);
+                }
                 break;
             case NK_ACH_EVENT_GAME_FAILED: {
                 player_achievements_clear_list(run);
@@ -5751,8 +5782,8 @@ static void player_achievements_sign_in_stored(PlayerRun *run) {
         player_achievements_rest_status(run, "Sign in to connect.");
         return;
     }
-    snprintf(app->achievements_account, sizeof app->achievements_account,
-             "%.*s", (int)sizeof(app->achievements_account) - 1, username);
+    /* The credential store's name is shown as the server's would be: cleaned and cut to fit. */
+    nk_ach_display_name(username, app->achievements_account, sizeof app->achievements_account);
     app->achievements_signed_in = false;
     run->achievements_login_pending =
         nk_ach_begin_login(run->achievements, username, token);
@@ -5926,6 +5957,10 @@ static void player_achievements_shutdown(PlayerRun *run) {
     PlayerAchHttpJob *job = run->ach_http_job;
     if (job) {
         if (job->thread) {
+            /* The request on its way ends now instead of at WinHTTP's timeouts. It is answered
+               as a retry, or refused when it had not started, and the unlock it carried stays
+               in the queue saved below, for the next run. */
+            package_http_cancel(run->ach_http_cancel);
             SDL_WaitThread(job->thread, NULL);
             job->thread = NULL;
         }
@@ -5948,6 +5983,9 @@ static void player_achievements_shutdown(PlayerRun *run) {
         SDL_DestroyMutex(run->ach_badge_cache_lock);
         run->ach_badge_cache_lock = NULL;
     }
+    /* No request uses it: the job above has ended, and the transport is closed. */
+    package_http_cancel_destroy(run->ach_http_cancel);
+    run->ach_http_cancel = NULL;
 }
 
 static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork *work) {

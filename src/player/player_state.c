@@ -1476,6 +1476,9 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->ui_sounds = false;
     settings->launcher_music = false;
     settings->launcher_music_volume = 80;
+    settings->launcher_theme[0] = '\0';
+    memset(settings->theme_unlocks, 0, sizeof(settings->theme_unlocks));
+    settings->theme_unlock_count = 0;
     settings->library_sort = PLAYER_LIBRARY_SORT_PLAYED;
     settings->launcher_window_maximized = false;
     settings->launcher_window_position_valid = false;
@@ -1902,6 +1905,8 @@ static bool font_note_hidden_store(PlayerSettings *settings, const char *key) {
            PLAYER_DISC_ID_KEY_LEN);
     return true;
 }
+
+static bool theme_unlock_store(PlayerSettings *settings, const char *unlock);
 
 /* Reads "font_note_hidden": ["<disc ID>", ...]. A member that is not a disc ID is not kept; the
    return says how many, so the player is told. */
@@ -2444,6 +2449,19 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         if (music_vol_val > 100) music_vol_val = 100;
         app->settings.launcher_music_volume = (int)music_vol_val;
     }
+    /* The launcher theme: an id that is not one is left out, as if never written. */
+    const char *theme_id = nk_json_get_string(nk_json_obj_get(root, "launcher_theme"));
+    if (theme_id && player_theme_id_valid(theme_id)) {
+        snprintf(app->settings.launcher_theme, sizeof(app->settings.launcher_theme), "%s",
+                 theme_id);
+    }
+    const NkJsonNode *unlock_list = nk_json_obj_get(root, "theme_unlocks");
+    if (unlock_list && nk_json_is_array(unlock_list)) {
+        for (size_t i = 0; i < nk_json_array_count(unlock_list); i++) {
+            const char *unlock = nk_json_get_string(nk_json_array_get(unlock_list, i));
+            if (unlock) (void)theme_unlock_store(&app->settings, unlock);
+        }
+    }
 
     NkJsonNode *vol_node = nk_json_obj_get(root, "master_volume");
     int64_t vol_val = 0;
@@ -2641,6 +2659,14 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
     fprintf(f, "  \"ui_sounds\": %s,\n", app->settings.ui_sounds ? "true" : "false");
     fprintf(f, "  \"launcher_music\": %s,\n", app->settings.launcher_music ? "true" : "false");
     fprintf(f, "  \"launcher_music_volume\": %d,\n", app->settings.launcher_music_volume);
+    fprintf(f, "  \"launcher_theme\": \"%s\",\n",
+            player_theme_id_valid(app->settings.launcher_theme) ? app->settings.launcher_theme
+                                                                : "");
+    fprintf(f, "  \"theme_unlocks\": [");
+    for (int i = 0; i < app->settings.theme_unlock_count; i++) {
+        fprintf(f, "%s\"%s\"", i ? ", " : "", app->settings.theme_unlocks[i]);
+    }
+    fprintf(f, "],\n");
     fprintf(f, "  \"library_sort\": \"%s\",\n",
             kLibrarySortKeys[(int)app->settings.library_sort >= 0 &&
                                      app->settings.library_sort < PLAYER_LIBRARY_SORT_COUNT
@@ -3295,6 +3321,52 @@ void player_app_toggle_launcher_music(PlayerApp *app) {
     if (!app) return;
     app->settings.launcher_music = !app->settings.launcher_music;
     maybe_persist_settings(app);
+}
+
+bool player_theme_id_valid(const char *id) {
+    size_t length = 0;
+    if (!id || !id[0]) return false;
+    for (; id[length]; length++) {
+        char c = id[length];
+        if (length + 1 >= PLAYER_THEME_ID_MAX) return false;
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
+    }
+    return true;
+}
+
+static bool theme_unlock_kept(const PlayerSettings *settings, const char *unlock) {
+    for (int i = 0; i < settings->theme_unlock_count; i++) {
+        if (strcmp(settings->theme_unlocks[i], unlock) == 0) return true;
+    }
+    return false;
+}
+
+static bool theme_unlock_store(PlayerSettings *settings, const char *unlock) {
+    if (!player_theme_id_valid(unlock) || theme_unlock_kept(settings, unlock) ||
+        settings->theme_unlock_count >= PLAYER_THEME_UNLOCK_MAX) {
+        return false;
+    }
+    snprintf(settings->theme_unlocks[settings->theme_unlock_count++], PLAYER_THEME_ID_MAX, "%s",
+             unlock);
+    return true;
+}
+
+bool player_app_has_theme_unlock(const PlayerApp *app, const char *unlock) {
+    return app && unlock && theme_unlock_kept(&app->settings, unlock);
+}
+
+bool player_app_record_theme_unlock(PlayerApp *app, const char *unlock) {
+    if (!app || !theme_unlock_store(&app->settings, unlock)) return false;
+    maybe_persist_settings(app);
+    return true;
+}
+
+bool player_app_set_launcher_theme(PlayerApp *app, const char *id) {
+    if (!app || (id && id[0] && !player_theme_id_valid(id))) return false;
+    snprintf(app->settings.launcher_theme, sizeof(app->settings.launcher_theme), "%s",
+             id ? id : "");
+    maybe_persist_settings(app);
+    return true;
 }
 
 bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_t out_size) {

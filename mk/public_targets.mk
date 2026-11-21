@@ -116,6 +116,7 @@ PUBLIC_TARGETS := \
 	nk-ui-sdlr-selftest \
 	nk-ui-vk-selftest \
 	nk-ui-focus-selftest \
+	launcher-secret-selftest \
 	coro-selftest \
 	coro-selftest-asm \
 	hle-thread-selftest \
@@ -343,6 +344,7 @@ HELP_DESCRIPTION_nk-ui-core-selftest := build and run the nk_ui core selftest (s
 HELP_DESCRIPTION_nk-ui-sdlr-selftest := build and run the nk_ui SDL_Renderer and SDL3_ttf selftest (software snapshots; SKIPs without SDL3_ttf)
 HELP_DESCRIPTION_nk-ui-vk-selftest := build and run the nk_ui Vulkan backend selftest (headless device, offscreen readback; SKIPs without Vulkan)
 HELP_DESCRIPTION_nk-ui-focus-selftest := build and run the nk_ui focus graph, input model and prompt glyph selftest (SDL translation leg SKIPs without SDL3)
+HELP_DESCRIPTION_launcher-secret-selftest := build and run the launcher's hidden moment, its themes and the Love All table, SDL-free
 HELP_DESCRIPTION_coro-selftest := run the coroutine selftest
 HELP_DESCRIPTION_coro-selftest-asm := run the coroutine selftest on the Android stack-switch backend (POSIX hosts)
 HELP_DESCRIPTION_hle-thread-selftest := build and run the HLE thread selftest

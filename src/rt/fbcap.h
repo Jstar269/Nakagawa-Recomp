@@ -152,6 +152,10 @@ typedef struct {
     uint32_t reported;       /* report buckets already emitted for this stretch */
     int pending;             /* a probe was sent whose result has not been fed yet */
     uint32_t pending_vcount; /* VBLANK of that probe */
+    int content_seen;        /* a visible probe has been fed (first-content milestone) */
+    int content_due;         /* that first visible probe was not yet taken */
+    uint32_t content_vcount; /* VBLANK of the first visible probe */
+    uint32_t content_brightest; /* its brightest colour byte */
 } SrPictureWatch;
 
 enum {
@@ -163,6 +167,14 @@ enum {
 /* Feed one probe result taken at vcount. Returns SR_PICTURE_WATCH_RESUMED when it ends a
  * stretch that was reported, else SR_PICTURE_WATCH_NONE. */
 int sr_picture_watch_probe(SrPictureWatch *w, uint32_t vcount, uint32_t brightest);
+
+/* First-content milestone. The first probe fed with a visible frame (a colour byte above
+ * SR_PICTURE_DARK_MAX) is remembered, whatever else it does to the stretch. This returns 1
+ * once, with the probe's VBLANK and brightest byte, after that probe was fed, and 0 at every
+ * other call, so a run whose probes are all dark never returns 1. The runtime reports it as
+ * BOOT_EVENT phase=first_content. The first frame is often black and the probes run only every
+ * SR_PICTURE_PROBE_EVERY VBLANKs, so this is a sample, not the earliest visible frame. */
+int sr_picture_watch_take_first_content(SrPictureWatch *w, uint32_t *vcount, uint32_t *brightest);
 
 /* Check the open stretch at vcount. Returns SR_PICTURE_WATCH_REPORT, with *dark_vblanks set,
  * once per SR_PICTURE_REPORT_EVERY VBLANKs of stretch, and only while probes keep arriving

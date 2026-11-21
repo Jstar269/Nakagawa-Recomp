@@ -1232,7 +1232,13 @@ In `pairs`, `kind` `text` lists the type `roles` drawn there; `focus` and `edge`
     {"name": "wave_month_09", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#7C96DE", "role": "month tint"},
     {"name": "wave_month_10", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#6F86C8", "role": "month tint"},
     {"name": "wave_month_11", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#6479AE", "role": "month tint"},
-    {"name": "wave_month_12", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#5F7F9F", "role": "month tint"}
+    {"name": "wave_month_12", "source": "src/ui/nk_ui_waves.c", "symbol": "g_month_tints", "value": "#5F7F9F", "role": "month tint"},
+    {"name": "theme_wave_accent", "source": "src/player/ui/launcher_themes.c", "symbol": "LAUNCHER_THEME_WAVE_ACCENT", "value": "#4CC4E8", "role": "the unlocked launcher theme's seed accent (sea spray)"},
+    {"name": "theme_wave_ground", "source": "src/player/ui/launcher_themes.c", "symbol": "LAUNCHER_THEME_WAVE_GROUND", "value": "#061A22", "role": "the unlocked launcher theme's seed page colour (deep sea)"},
+    {"name": "theme_derive_tone", "source": "src/player/ui/launcher_themes.c", "symbol": "launcher_theme_derive", "value": "#C8D2DC", "role": "the blue-grey a derived theme's surfaces step toward, mixed with its accent"},
+    {"name": "theme_derive_paper", "source": "src/player/ui/launcher_themes.c", "symbol": "launcher_theme_derive", "value": "#F5F7FA", "role": "a derived theme's starting text colour, moved until it keeps 7:1"},
+    {"name": "theme_contrast_white", "source": "src/player/ui/launcher_themes.c", "symbol": "RGBA_WHITE", "value": "#FFFFFF", "role": "the lightest end a derived colour is moved toward for contrast"},
+    {"name": "theme_contrast_black", "source": "src/player/ui/launcher_themes.c", "symbol": "RGBA_BLACK", "value": "#000000", "role": "the darkest end a derived colour is moved toward for contrast"}
   ],
   "metrics": [
     {"name": "NK_UI_SPACE_1", "source": "src/ui/nk_ui_theme.h", "value": 4, "role": "spacing step, px"},
@@ -1254,6 +1260,7 @@ In `pairs`, `kind` `text` lists the type `roles` drawn there; `focus` and `edge`
     {"name": "NK_UI_FOCUS_RING_GAP", "source": "src/ui/nk_ui_theme.h", "value": 3, "role": "gap between an element and its ring, px"},
     {"name": "NK_UI_FOCUS_HC_RING_WIDTH", "source": "src/ui/nk_ui_theme.h", "value": 4, "role": "high-contrast white ring width, px"},
     {"name": "NK_UI_FOCUS_HC_KEYLINE", "source": "src/ui/nk_ui_theme.h", "value": 2, "role": "high-contrast black keyline width, px"},
+    {"name": "NK_UI_FOCUS_RING_OUTSET", "source": "src/ui/nk_ui_theme.h", "value": 8, "role": "how far the wider ring reaches outside its control; a scroll into view shows this much around it, px"},
     {"name": "NK_UI_CONTROL_HEIGHT", "source": "src/ui/nk_ui_theme.h", "value": 44, "role": "button and row height; the minimum target"},
     {"name": "NK_UI_CONTROL_HEIGHT_LARGE", "source": "src/ui/nk_ui_theme.h", "value": 52, "role": "large button height"},
     {"name": "NK_UI_CONTROL_HEIGHT_SMALL", "source": "src/ui/nk_ui_theme.h", "value": 34, "role": "small button height"},

@@ -802,6 +802,11 @@ int sr_picture_watch_probe(SrPictureWatch *w, uint32_t vcount, uint32_t brightes
     (void)w; (void)vcount; (void)brightest;
     return SR_PICTURE_WATCH_NONE;
 }
+/* No probe is ever fed in this harness, so no first-content milestone is ever due. */
+int sr_picture_watch_take_first_content(SrPictureWatch *w, uint32_t *vcount, uint32_t *brightest) {
+    (void)w; (void)vcount; (void)brightest;
+    return 0;
+}
 int sr_picture_watch_tick(SrPictureWatch *w, uint32_t vcount, uint32_t *dark_vblanks) {
     (void)w; (void)vcount; (void)dark_vblanks;
     return SR_PICTURE_WATCH_NONE;

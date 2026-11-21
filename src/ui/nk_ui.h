@@ -506,6 +506,9 @@ void nk_ui_focus_ring(NkUi *ui, NkUiId id, float corner_radius);
 bool nk_ui_take_event(NkUi *ui, NkUiEventType type, NkUiNavDir *dir);
 /* Theme the frame was created with (a copy owned by ui). */
 const NkUiTheme *nk_ui_theme(const NkUi *ui);
+/* Draws the next frames with this theme (copied; NULL is N1). The launcher's colour theme
+   (src/player/ui/launcher_themes.h) sets it between frames. */
+void nk_ui_set_theme(NkUi *ui, const NkUiTheme *theme);
 /* The prompt-glyph style in the current preferences. */
 NkUiPromptStyle nk_ui_prompt_style(const NkUi *ui);
 /* Glyph images for the prompt bar (an NkUiPromptImages from nk_ui_input.h,

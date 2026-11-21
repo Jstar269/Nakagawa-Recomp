@@ -556,6 +556,32 @@ static void test_picture_watch(void) {
           "watch: an unreported stretch ends without RESUMED");
 }
 
+/* The first-content milestone: the first visible probe is reported once, with its own VBLANK
+ * and brightest byte, even when it also ends a reported dark stretch; a run whose probes are
+ * all dark (or at the threshold) never reports it. */
+static void test_picture_first_content(void) {
+    SrPictureWatch w;
+    uint32_t vcount = 0u, bright = 0u, dark = 0u;
+    memset(&w, 0, sizeof w);
+    CHECK(sr_picture_watch_take_first_content(&w, &vcount, &bright) == 0, "content: nothing fed");
+    (void)sr_picture_watch_probe(&w, 300u, 0u);
+    (void)sr_picture_watch_probe(&w, 600u, SR_PICTURE_DARK_MAX);
+    CHECK(sr_picture_watch_take_first_content(&w, &vcount, &bright) == 0,
+          "content: an all-dark run reports none");
+    CHECK(sr_picture_watch_tick(&w, 900u, &dark) == SR_PICTURE_WATCH_REPORT, "content: stretch reported");
+    CHECK(sr_picture_watch_probe(&w, 1200u, 77u) == SR_PICTURE_WATCH_RESUMED,
+          "content: a visible frame still ends the reported stretch");
+    CHECK(sr_picture_watch_take_first_content(&w, &vcount, &bright) == 1 && vcount == 1200u &&
+          bright == 77u, "content: the first visible probe is reported with its VBLANK and brightest");
+    CHECK(sr_picture_watch_take_first_content(&w, &vcount, &bright) == 0, "content: reported once");
+    (void)sr_picture_watch_probe(&w, 1500u, 200u);
+    CHECK(sr_picture_watch_take_first_content(&w, &vcount, &bright) == 0,
+          "content: a later visible probe is not a new milestone");
+    memset(&w, 0, sizeof w);
+    (void)sr_picture_watch_probe(&w, 300u, SR_PICTURE_DARK_MAX + 1u);
+    CHECK(sr_picture_watch_take_first_content(&w, NULL, NULL) == 1, "content: first probe visible");
+}
+
 /* The probe's result through the host service (synchronous) and through the deferred GPU
  * route (recorded, deferred, then published); both must give the same brightest byte. */
 static uint32_t probe_via_host(const void *px, uint32_t w, uint32_t h, uint32_t row_bytes,
@@ -1395,6 +1421,7 @@ int main(int argc, char **argv) {
     test_windows_imply_every_present();
     test_picture_probe();
     test_picture_watch();
+    test_picture_first_content();
     test_probe_result_pinned();
     test_deferred_probe();
     test_watch_deferred_matches_synchronous();

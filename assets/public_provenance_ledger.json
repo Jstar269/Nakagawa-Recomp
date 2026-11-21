@@ -3589,6 +3589,61 @@
       }
     },
     {
+      "path": "src/player/ui/launcher_secret.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/launcher_secret.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/launcher_themes.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/launcher_themes.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/love_all_credits.c",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "love_all_credits_table_20261121",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
       "path": "src/player/ui/player_ui_art.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -3792,6 +3847,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "player_ui_c5_20261023",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/scr_love_all.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
         "evidence_tier": "S",
         "authorship": "project-authored-independent record",
         "upstream_attribution": null
@@ -13544,6 +13610,17 @@
       }
     },
     {
+      "path": "tests/native/test_launcher_secret.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/test_manifest_parser.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -16328,6 +16405,18 @@
       }
     },
     {
+      "path": "third_party/licenses/rcheevos-MD5.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "license-text-rcheevos-md5-20261121",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "Zlib",
+        "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
+      }
+    },
+    {
       "path": "third_party/licenses/sdl3/LICENSE.txt",
       "classification": "upstream_derived",
       "evidence": {
@@ -16360,6 +16449,18 @@
         "evidence_tier": "S",
         "upstream": "documented upstream family",
         "license": "BSD-3-Clause",
+        "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
+      }
+    },
+    {
+      "path": "third_party/licenses/uOFW.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "license-text-uofw-copying-20261121",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
         "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
       }
     },
@@ -17802,6 +17903,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "ge-transition-trace-tools-20260918",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/gen_credits_table.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
         "evidence_tier": "S",
         "authorship": "project-authored-independent record",
         "upstream_attribution": null
@@ -20285,6 +20397,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "ge-transition-trace-tools-20260918",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_gen_credits_table.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_secret_20261121",
         "evidence_tier": "S",
         "authorship": "project-authored-independent record",
         "upstream_attribution": null

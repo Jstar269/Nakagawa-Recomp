@@ -70,6 +70,12 @@ Nakagawa has since substantially extended and modified that codebase. This repos
 - **stb_image 2.34 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The PNG
   decoder in [`third_party/stb/`](third_party/stb/), for the player's prompt glyphs, the disc art read from your own disc
   and, when you turn on cover art, the cover downloaded from `thumbnails.libretro.com`.
+- **libretro-thumbnails — the libretro project and its volunteers** — the source of the cover images the player downloads from
+  `thumbnails.libretro.com` when you turn on cover art. Its README credits MobyGames, Fandom and volunteer contributors; it states no
+  licence. The images are the publishers' artwork, fetched to your computer when you ask and never redistributed by this project.
+- **CWCheat-Database-Plus — Saramagrean** — the community CWCheat code database that the opt-in cheat download planned in
+  [#2639](https://github.com/Jstar269/nakagawa-recomp/issues/2639) reads. Its README states no licence and credits the PPSSPP forum,
+  GameHacking, LunaMoo and others as its sources. The database is never committed or shipped with the project.
 - **stb_vorbis 1.24 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The Ogg
   Vorbis decoder for the optional launcher music, in [`third_party/stb/`](third_party/stb/PROVENANCE.md).
 - **"Chill lofi inspired" — omfgdude ([OpenGameArt](https://opengameart.org/content/chill-lofi-inspired))** — CC0-1.0.

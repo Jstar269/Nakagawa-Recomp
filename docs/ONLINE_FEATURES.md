@@ -178,11 +178,17 @@ Built for v0.1.0 (#1316): an opt-in client using the MIT-licensed rcheevos clien
   request up), and one left from an earlier run. The queue holds at most 4,096 records. With no
   definite answer (no connection, a busy server) a record waits 30 seconds; a record the server refuses
   by its own error leaves the queue and is reported; a refused account keeps every record until the next
-  sign-in. The game's title page shows its core achievements under **RetroAchievements · Casual**:
+  sign-in. Each unlock is sent once in a session: one the game earns again while its saved record is
+  on its way, or after the server awarded that record, gets the server's answer to the record instead
+  of a second request, and a saved record waits while the game's own request for it is on its way.
+  The game's title page shows its core achievements under **RetroAchievements · Casual**:
   how many are unlocked and the points earned of the total, with a bar, then one row each, the
   unlocked first, each with its badge (or the drawn icon), title, description and its points as a
   number (up to 256; with more, the page says how many it shows and that all of them are on the
-  game's page at retroachievements.org). Unlock notices appear in-game, one after another:
+  game's page at retroachievements.org). When the game's set has loaded, a notice **Achievements
+  active** shows the game's title and how many of its achievements are unlocked ("3 of 20 unlocked"),
+  since RetroAchievements asks clients to say when achievements become active. Unlock notices appear
+  in-game, one after another:
   **Achievement unlocked** over the achievement's title, its points ("25 points") and its badge. Two
   unlocks close together are two notices. When the last achievement of the set unlocks, a notice
   **Set completed** follows with the game's title and "Every achievement unlocked"; it is drawn on the
@@ -190,7 +196,8 @@ Built for v0.1.0 (#1316): an opt-in client using the MIT-licensed rcheevos clien
   every notice or row.
 - **One request at a time.** The player carries one RetroAchievements request at a time. A request made
   while another is on its way (a game started while a saved unlock is being sent) waits its turn, in
-  order, instead of failing.
+  order, instead of failing. When the player closes, the request on its way is ended at once instead
+  of waiting out the connection's timeouts; an unlock it carried stays in the queue for the next run.
 - **After a factory reset** the player writes no unlock queue before it closes, so the moved-aside data
   folder is not made again. The token stays in Windows Credential Manager until **Sign out**.
 - **The queue belongs to one account.** It names that account by a tag, the MD5 of a fixed label and the
@@ -208,6 +215,17 @@ Built for v0.1.0 (#1316): an opt-in client using the MIT-licensed rcheevos clien
   version) is renamed beside itself with the ending `.unreadable`, never loaded and never written over;
   when it cannot even be renamed, nothing is saved over it in that run, which the **RetroAchievements**
   account line says.
+- **RetroAchievements' data.** The achievement set the server sends is RetroAchievements' data. Its
+  titles, descriptions and badges are shown; its trigger logic (the memory addresses and conditions
+  that decide each unlock) belongs to the RetroAchievements community, whose terms forbid reusing or
+  redistributing it. The player keeps the set only in rcheevos' memory while the game runs, and wipes
+  the server's answer once rcheevos has read it. The set is never written to a file, a log, the
+  developer log, a problem report, a save backup, a package or anything the player exports. An
+  achievement turned off because its memory cannot be read is reported in the player's own words,
+  never with the address from the set. The only RetroAchievements files on the disk are the badge
+  pictures and the queue file above (game hash, achievement ID and time), both in the player's data
+  folder. Save backups and folder copies take a game's saves only, a report link carries no file or log,
+  and packages are built from a game's own files, so none of them includes these.
 - **Sign-in at start** uses the stored token. When the server gives no answer (no connection, a 5xx, 408 or
   429), the token was not refused: the player tries it again after 30 seconds, then after twice as long
   each time, up to ten minutes, with no password asked. A refusal by the server ends that, as do the

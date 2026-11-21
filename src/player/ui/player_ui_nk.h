@@ -42,7 +42,8 @@ typedef enum {
     PLAYER_UI_ROUTE_REBUILD = 7,
     PLAYER_UI_ROUTE_SAVES = 8,     /* a title's saves: back up, restore, add (#1883) */
     PLAYER_UI_ROUTE_STEAM = 9,     /* a title's Add to Steam (#2152) */
-    PLAYER_UI_ROUTE_QUEUE = 10     /* the build queue: its order, Remove, Resume */
+    PLAYER_UI_ROUTE_QUEUE = 10,    /* the build queue: its order, Remove, Resume */
+    PLAYER_UI_ROUTE_LOVE_ALL = 11  /* the hidden credits (launcher_secret.h) */
 } PlayerUiRoute;
 
 /* The player's version: the one place it is written. The About page shows
@@ -158,7 +159,8 @@ typedef enum {
                                            (PlayerUiQueueOp), .title_index its game */
     PLAYER_UI_ACTION_FONT_NOTE_GET_FONTS, /* the title page's font note: Get fonts from my PSP,
                                              which opens Settings > PSP fonts and looks for a PSP */
-    PLAYER_UI_ACTION_HIDE_FONT_NOTE     /* the title page's font note: Hide, for .title_index's game */
+    PLAYER_UI_ACTION_HIDE_FONT_NOTE,    /* the title page's font note: Hide, for .title_index's game */
+    PLAYER_UI_ACTION_OPEN_LOVE_ALL      /* About's Love All: the hidden credits */
 } PlayerUiActionKind;
 
 /* What a build queue control asks for (PLAYER_UI_ACTION_QUEUE). main.c runs
@@ -655,6 +657,7 @@ typedef enum {
     PLAYER_UI_SETTINGS_CYCLE_INTERFACE_SIZE, /* Automatic, 100, 125, 150, 200% */
     PLAYER_UI_SETTINGS_CYCLE_HIGH_CONTRAST,  /* Automatic, On, Off */
     PLAYER_UI_SETTINGS_CYCLE_TEXT_SIZE,      /* Standard, Large, Larger (100, 125, 150%) */
+    PLAYER_UI_SETTINGS_CYCLE_LAUNCHER_THEME, /* the next theme offered (launcher_themes.h) */
     PLAYER_UI_SETTINGS_OPEN_ACE,             /* Settings > Enhanced, the library's page */
     PLAYER_UI_SETTINGS_CYCLE_PRESET,         /* the graphics preset (#2150): the next one, or
                                                 the one before for a choice_index under 0 */
@@ -818,6 +821,9 @@ typedef struct {
     int system_scale_pct;               /* the display's scale */
     bool system_high_contrast;
     bool system_reduced_motion;
+    /* The launcher theme's name (launcher_themes.h), or NULL while only one theme is offered:
+       the row is not shown then. */
+    const char *launcher_theme;
     /* Settings > Enhanced (VIEW_ACE_SETTINGS, #2055). The graphics preset and the play mode stay
        above its tabs; the active tab lists its options, and one panel describes the focused
        one. The page is the library's, or one title's when enhanced_title is set. */
@@ -1202,6 +1208,7 @@ typedef struct {
     const char *version_line;   /* "v0.0.1 (10-23-2026)" (player_ui_version_line) */
     const char *build_commit;   /* short source commit, or NULL / "" */
     const char *data_root_line; /* which data folder is in use (#1850), or NULL / "" */
+    bool love_all;              /* the classic cheat code was found: About offers Love All */
     float logical_width;
     float logical_height;
 } PlayerUiAboutModel;
@@ -1275,6 +1282,9 @@ enum {
     PLAYER_UI_ID_TAB_ABOUT = 0x0F02u,
     PLAYER_UI_ID_TAB_SETTINGS = 0x0F03u,
     PLAYER_UI_ID_ABOUT_NOTICES = 0x3001u,
+    PLAYER_UI_ID_ABOUT_LOVE_ALL = 0x3002u,         /* About's Love All, once the code is found */
+    PLAYER_UI_ID_LOVE_ALL_BACK = 0x3003u,          /* Love All's Back */
+    PLAYER_UI_ID_SETTINGS_LAUNCHER_THEME = 0x4512u, /* Accessibility: the launcher theme */
     PLAYER_UI_ID_DISC_PRIMARY = 0x4801u,
     PLAYER_UI_ID_DISC_SECOND = 0x4802u,
     PLAYER_UI_ID_DISC_OPEN_FOLDER = 0x4803u,

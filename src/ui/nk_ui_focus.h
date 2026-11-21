@@ -85,6 +85,10 @@ typedef struct NkUiFocusGraph NkUiFocusGraph;
 
 NkUiFocusGraph *nk_ui_focus_graph_create(void);
 void nk_ui_focus_graph_destroy(NkUiFocusGraph *graph);
+/* How far around an entry a scroll that brings it into view shows too (0 at creation;
+   negative or not finite is taken as 0): the host's focus ring, drawn outside the entry's
+   rect, is shown whole with it. A container scrolls no further than its content. */
+void nk_ui_focus_set_reveal_margin(NkUiFocusGraph *graph, float margin);
 
 /* Clears the registered entries and scrollers. Focus and scope memory persist. */
 void nk_ui_focus_begin_frame(NkUiFocusGraph *graph);

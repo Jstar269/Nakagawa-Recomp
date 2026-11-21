@@ -29,6 +29,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#include "launcher_secret.h"  /* the hidden moment and Love All */
+#include "launcher_themes.h"  /* the launcher's colour themes */
+
+typedef char launcher_theme_ids_fit_the_settings[
+    LAUNCHER_THEME_ID_MAX == PLAYER_THEME_ID_MAX &&
+    LAUNCHER_THEME_UNLOCK_MAX == PLAYER_THEME_UNLOCK_MAX ? 1 : -1];
 
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
 /* The achievement rows the title page drew this frame, for the regression report after it. */
@@ -312,6 +320,26 @@ struct PlayerUiNk {
     int shown_titles[PLAYER_UI_SHOWN_TITLES_MAX];
     size_t shown_count;
     char cover_data_root[NK_MAX_PATH];
+    /* The hidden moment (launcher_secret.h): the code's presses, the moment playing and the
+       shapes it draws, the last frame's clock (the moment's handover to Love All), what the
+       next frame starts, and whether anything still moves (the loop then draws at the
+       display rate). secret_allowed is false while a game starts or runs. */
+    LauncherSecretDetector secret_detector;
+    LauncherMoment secret_moment;
+    LauncherMomentShapes secret_shapes;
+    double secret_prev_s;
+    bool secret_allowed;
+    bool secret_found;
+    bool secret_animating;
+    PlayerUiRoute secret_last_route;
+    int16_t *secret_jingle;          /* the jingle's samples, made on first use */
+    size_t secret_jingle_samples;
+    /* Love All: whether the list rolls by itself, since when, and a scroll asked for. */
+    bool love_all_rolling;
+    double love_all_since_s;
+    bool love_all_scroll_set;
+    float love_all_scroll;
+    const LauncherTheme *theme_drawn;  /* the launcher theme the frames are drawn with */
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     bool icon_reported[PLAYER_UI_TITLE_CAP];
     bool cover_reported[PLAYER_UI_TITLE_CAP];
@@ -630,6 +658,7 @@ void player_ui_nk_destroy(PlayerUiNk *player) {
     nk_ui_prompt_images_free(&player->prompt_images);
     nk_ui_ttf_destroy(player->ttf);
     nk_ui_router_destroy(player->router);
+    free(player->secret_jingle);
     free(player);
 }
 
@@ -714,6 +743,8 @@ uint32_t player_ui_nk_wait_ms(const PlayerUiNk *player, uint32_t idle_ms) {
         double rest_s = player->rest_since_s + NK_UI_MOTION_ART_REST - now_s;
         if (rest_s > 0.0 && rest_s < wait_s) wait_s = rest_s;
     }
+    /* The hidden moment and Love All's roll move every frame. */
+    if (player->secret_animating && wait_s > NK_UI_MOTION_FRAME) wait_s = NK_UI_MOTION_FRAME;
     /* Each read serves one disc and is collected on a frame; without this a
        library page filled in one card per idle wake (audit 2026-11-17). */
     return player_ui_art_wait_ms(player->art, (uint32_t)ceil(wait_s * 1000.0));
@@ -1387,6 +1418,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.system_scale_pct = (int)(player->viewport.display_scale * 100.0f + 0.5f);
     model.system_high_contrast = app->system_high_contrast;
     model.system_reduced_motion = app->system_reduced_motion;
+    model.launcher_theme = player_ui_launcher_theme_name(app);
     snprintf(player->settings_controller, sizeof(player->settings_controller), "%s",
              app->settings.controller_connected
                  ? (app->settings.controller_name[0] != '\0' ? app->settings.controller_name
@@ -2920,6 +2952,88 @@ static bool player_ui_take_typing(PlayerUiNk *player, const SDL_Event *event,
     return false;
 }
 
+/* Love All's list: Up, Down and the page keys scroll it (it has one control, Back), and any
+   scroll stops it rolling by itself. True when the event was the list's. */
+static bool player_ui_love_all_take(PlayerUiNk *player, const NkUiEvent *translated) {
+    NkUiScrollState state;
+    bool vertical = translated->type == NK_UI_EV_NAV &&
+                    (translated->dir == NK_UI_DIR_UP || translated->dir == NK_UI_DIR_DOWN);
+    bool forward;
+    float step;
+    if (translated->type == NK_UI_EV_WHEEL) player->love_all_rolling = false;
+    if (!translated->down || !(vertical || translated->type == NK_UI_EV_PAGE)) return false;
+    player->love_all_rolling = false;
+    if (nk_ui_scroll_state(player->ui, player_ui_love_all_list_id(), &state)) {
+        forward = translated->dir == NK_UI_DIR_DOWN || translated->dir == NK_UI_DIR_RIGHT;
+        step = translated->type == NK_UI_EV_PAGE ? state.viewport * 0.8f : 72.0f;
+        player->love_all_scroll = state.offset + (forward ? step : -step);
+        if (player->love_all_scroll > state.max_offset) player->love_all_scroll = state.max_offset;
+        if (player->love_all_scroll < 0.0f) player->love_all_scroll = 0.0f;
+        player->love_all_scroll_set = true;
+    }
+    return true;
+}
+
+/* A key or pad press as the launcher reads it (the same keys nk_ui_sdl_input gives Back and
+   Select: Esc, which Backspace already is here, the pad's B; Enter, the pad's A), for the
+   code. Releases, repeats, the stick and the pointer are no press. */
+static NkUiEvent player_ui_secret_press(const SDL_Event *event) {
+    NkUiEvent press;
+    memset(&press, 0, sizeof(press));
+    press.type = NK_UI_EV_POINTER; /* no press */
+    if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat) {
+        press.down = true;
+        switch (event->key.key) {
+            case SDLK_UP: press.type = NK_UI_EV_NAV; press.dir = NK_UI_DIR_UP; break;
+            case SDLK_DOWN: press.type = NK_UI_EV_NAV; press.dir = NK_UI_DIR_DOWN; break;
+            case SDLK_LEFT: press.type = NK_UI_EV_NAV; press.dir = NK_UI_DIR_LEFT; break;
+            case SDLK_RIGHT: press.type = NK_UI_EV_NAV; press.dir = NK_UI_DIR_RIGHT; break;
+            case SDLK_ESCAPE: press.type = NK_UI_EV_BACK; break;
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER: press.type = NK_UI_EV_ACTIVATE; break;
+            default: press.type = NK_UI_EV_PAGE; break; /* another key: the code starts again */
+        }
+    } else if (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+        press.down = true;
+        switch (event->gbutton.button) {
+            case SDL_GAMEPAD_BUTTON_DPAD_UP: press.type = NK_UI_EV_NAV; press.dir = NK_UI_DIR_UP; break;
+            case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
+                press.type = NK_UI_EV_NAV; press.dir = NK_UI_DIR_DOWN; break;
+            case SDL_GAMEPAD_BUTTON_DPAD_LEFT:
+                press.type = NK_UI_EV_NAV; press.dir = NK_UI_DIR_LEFT; break;
+            case SDL_GAMEPAD_BUTTON_DPAD_RIGHT:
+                press.type = NK_UI_EV_NAV; press.dir = NK_UI_DIR_RIGHT; break;
+            case SDL_GAMEPAD_BUTTON_EAST: press.type = NK_UI_EV_BACK; break;
+            case SDL_GAMEPAD_BUTTON_SOUTH: press.type = NK_UI_EV_ACTIVATE; break;
+            default: press.type = NK_UI_EV_PAGE; break;
+        }
+    }
+    return press;
+}
+
+/* The classic cheat code (launcher_secret.h), from a controller or the keyboard only, in the
+   launcher while no game starts or runs and no text box is open. True when the press is the
+   code's alone: the B after the eight directions, and the A that completes it. */
+bool player_ui_nk_take_secret(PlayerUiNk *player, const SDL_Event *event) {
+    NkUiEvent press;
+    if (player == NULL || event == NULL || !player->ready || !player->secret_allowed ||
+        player->nickname_open || player_ui_nk_find_open(player)) {
+        return false;
+    }
+    press = player_ui_secret_press(event);
+    switch (launcher_secret_feed(&player->secret_detector, launcher_secret_key_for_event(&press),
+                                 player_ui_nk_now_s(player))) {
+        case LAUNCHER_SECRET_FOUND:
+            player->secret_found = true;
+            return true;
+        case LAUNCHER_SECRET_SWALLOW:
+            return true;
+        case LAUNCHER_SECRET_PASS:
+        default:
+            return false;
+    }
+}
+
 bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     NkUiEvent translated[8];
     size_t count;
@@ -2959,6 +3073,10 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
                                      translated,
                                      sizeof(translated) / sizeof(translated[0]));
     for (size_t i = 0u; i < count; ++i) {
+        if (nk_ui_router_current(player->router) == PLAYER_UI_ROUTE_LOVE_ALL &&
+            player_ui_love_all_take(player, &translated[i])) {
+            continue;
+        }
         if (translated[i].type == NK_UI_EV_BACK && translated[i].down) {
             player->pending_sound = PLAYER_UI_SOUND_BACK;
         } else if (translated[i].type == NK_UI_EV_ACTIVATE && translated[i].down &&
@@ -3891,6 +4009,172 @@ static void player_ui_report_enhanced_panel(PlayerUiNk *player, const NkUiDrawLi
 }
 #endif
 
+/* ---- The hidden moment, Love All and the launcher theme (launcher_secret.h) ------------- */
+
+/* The unlocks kept and today's local date, for the themes' rules. */
+static LauncherThemeContext player_ui_theme_context(const PlayerApp *app) {
+    LauncherThemeContext context;
+    time_t now = time(NULL);
+    const struct tm *local = localtime(&now);
+    memset(&context, 0, sizeof(context));
+    context.unlocks = (const char (*)[LAUNCHER_THEME_ID_MAX])app->settings.theme_unlocks;
+    context.unlock_count = app->settings.theme_unlock_count > 0
+        ? (size_t)app->settings.theme_unlock_count : 0u;
+    if (local != NULL) {
+        context.month = local->tm_mon + 1;
+        context.day = local->tm_mday;
+    }
+    return context;
+}
+
+const char *player_ui_launcher_theme_name(const PlayerApp *app) {
+    LauncherThemeContext context;
+    if (app == NULL) return NULL;
+    context = player_ui_theme_context(app);
+    if (launcher_theme_available_count(&context) < 2u) return NULL;
+    return launcher_theme_pick(app->settings.launcher_theme, &context)->name;
+}
+
+void player_ui_cycle_launcher_theme(PlayerApp *app) {
+    LauncherThemeContext context;
+    if (app == NULL) return;
+    context = player_ui_theme_context(app);
+    (void)player_app_set_launcher_theme(app,
+                                        launcher_theme_next(app->settings.launcher_theme,
+                                                            &context)->id);
+}
+
+/* The frames are drawn with the theme the settings pick, from the next frame on. */
+static void player_ui_follow_theme(PlayerUiNk *player, const PlayerApp *app) {
+    LauncherThemeContext context = player_ui_theme_context(app);
+    const LauncherTheme *theme = launcher_theme_pick(app->settings.launcher_theme, &context);
+    if (theme != player->theme_drawn) {
+        NkUiTheme colors;
+        launcher_theme_colors(theme, &colors);
+        nk_ui_set_theme(player->ui, &colors);
+        player->theme_drawn = theme;
+    }
+}
+
+/* The greeting for this PC's local time. The UI tests give the time in NK_UI_TEST_LOCAL_TIME
+   ("HH:MM"), so a picture says the same words whenever it is taken. */
+static const char *player_ui_secret_greeting(void) {
+    int hour = 12;
+    int minute = 0;
+    time_t now;
+    const struct tm *local;
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    const char *fake = getenv("NK_UI_TEST_LOCAL_TIME");
+    if (fake != NULL && sscanf(fake, "%d:%d", &hour, &minute) == 2) {
+        return launcher_secret_greeting(hour, minute);
+    }
+#endif
+    now = time(NULL);
+    local = localtime(&now);
+    if (local != NULL) {
+        hour = local->tm_hour;
+        minute = local->tm_min;
+    }
+    return launcher_secret_greeting(hour, minute);
+}
+
+static void player_ui_secret_jingle(PlayerUiNk *player) {
+    if (player->secret_jingle == NULL) {
+        size_t samples = launcher_jingle_pcm(NULL, 0u, LAUNCHER_JINGLE_RATE);
+        player->secret_jingle = samples > 0u ? (int16_t *)malloc(samples * sizeof(int16_t)) : NULL;
+        if (player->secret_jingle == NULL) return;
+        player->secret_jingle_samples =
+            launcher_jingle_pcm(player->secret_jingle, samples, LAUNCHER_JINGLE_RATE);
+    }
+    player_ui_sounds_play_pcm(player->sounds, player->secret_jingle,
+                              player->secret_jingle_samples, LAUNCHER_JINGLE_RATE);
+}
+
+static void player_ui_love_all_open(PlayerUiNk *player, bool reduce_motion, double now_s) {
+    nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
+    if (!nk_ui_router_push(player->router, PLAYER_UI_ROUTE_LOVE_ALL)) return;
+    player->love_all_rolling = !reduce_motion;
+    player->love_all_since_s = now_s;
+    player->love_all_scroll = 0.0f;
+    player->love_all_scroll_set = true;
+    player->secret_last_route = PLAYER_UI_ROUTE_LOVE_ALL;
+}
+
+/* Before the frame: start what the code or leaving Love All asks for, and hand the code's
+   moment over to Love All once the ripple is done. */
+static void player_ui_secret_begin(PlayerUiNk *player, PlayerApp *app, double now_s) {
+    PlayerUiRoute route = nk_ui_router_current(player->router);
+    bool reduce_motion = player_app_reduce_motion(app);
+    LauncherMomentFrame frame;
+    player->secret_allowed = !app->is_game_running && !app->launch_pending;
+    if (!player->secret_allowed) {
+        launcher_secret_reset(&player->secret_detector);
+        player->secret_found = false;
+    }
+    if (player->secret_found) {
+        player->secret_found = false;
+        launcher_moment_start(&player->secret_moment, LAUNCHER_MOMENT_FOUND, now_s, reduce_motion,
+                              player_ui_sounds_enabled(player->sounds), player_ui_secret_greeting());
+        (void)player_app_record_theme_unlock(app, LAUNCHER_THEME_UNLOCK_WAVE);
+        if (player->secret_moment.sound) player_ui_secret_jingle(player);
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+        printf("[PLAYER_UI_TEST] launcher_secret found motion=%d sound=%d toast=%s\n",
+               player->secret_moment.motion ? 1 : 0, player->secret_moment.sound ? 1 : 0,
+               player->secret_moment.toast);
+#endif
+    } else if (player->secret_last_route == PLAYER_UI_ROUTE_LOVE_ALL &&
+               route != PLAYER_UI_ROUTE_LOVE_ALL) {
+        launcher_moment_start(&player->secret_moment, LAUNCHER_MOMENT_FAREWELL, now_s,
+                              reduce_motion, false, LAUNCHER_SECRET_FAREWELL);
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+        printf("[PLAYER_UI_TEST] launcher_secret left_love_all toast=%s\n",
+               LAUNCHER_SECRET_FAREWELL);
+#endif
+    }
+    frame = launcher_moment_frame(&player->secret_moment, player->secret_prev_s, now_s);
+    /* Love All opens over the routes; a Settings page or the nickname editor drawn over
+       them keeps the moment and leaves the page for About. */
+    if (frame.open_love_all && route != PLAYER_UI_ROUTE_LOVE_ALL && !player->nickname_open &&
+        !player_ui_nk_flow_view(app->active_view)) {
+        player_ui_love_all_open(player, reduce_motion, now_s);
+        route = nk_ui_router_current(player->router);
+    }
+    if (route == PLAYER_UI_ROUTE_LOVE_ALL && player->love_all_rolling) {
+        /* A slow roll after a moment's rest, until its end or the user scrolls. */
+        NkUiScrollState state;
+        double t = now_s - player->love_all_since_s - 1.2;
+        player->love_all_scroll = t > 0.0 ? (float)(t * 28.0) : 0.0f;
+        player->love_all_scroll_set = true;
+        if (nk_ui_scroll_state(player->ui, player_ui_love_all_list_id(), &state) && t > 0.0 &&
+            state.max_offset > 0.0f && player->love_all_scroll >= state.max_offset) {
+            player->love_all_rolling = false;
+        }
+    }
+    if (!frame.active) player->secret_moment.kind = LAUNCHER_MOMENT_NONE;
+    player->secret_last_route = route;
+    player->secret_prev_s = now_s;
+    player->secret_animating = frame.active ||
+                               (route == PLAYER_UI_ROUTE_LOVE_ALL && player->love_all_rolling);
+}
+
+static PlayerUiAction player_ui_render_love_all(PlayerUiNk *player, NkUiScale scale) {
+    PlayerUiLoveAllModel model;
+    memset(&model, 0, sizeof(model));
+    model.logical_width = scale.logical_w;
+    model.logical_height = scale.logical_h;
+    model.scroll_set = player->love_all_scroll_set;
+    model.scroll_offset = player->love_all_scroll;
+    player->love_all_scroll_set = false;
+    return player_ui_screen_love_all(player->ui, &model);
+}
+
+/* After the screen: the moment's frame over it. */
+static void player_ui_secret_draw(PlayerUiNk *player, NkUiScale scale, double now_s) {
+    LauncherMomentFrame frame = launcher_moment_frame(&player->secret_moment, now_s, now_s);
+    launcher_moment_draw(player->ui, &player->secret_shapes, &frame, player->secret_moment.toast,
+                         scale.logical_w, scale.logical_h);
+}
+
 bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                          SDL_Renderer *renderer, SDL_Window *window,
                          PlayerUiAction *out_action) {
@@ -3974,6 +4258,8 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     }
     player_ui_art_pump(player->art);
     player_ui_nk_follow_sounds(player, app);
+    player_ui_follow_theme(player, app);
+    player_ui_secret_begin(player, app, now_s);
     {
         /* The owner's first run: one click on COPY FILES AND CONTINUE swapped
            in the copy screen, whose CANCEL sits where the button was, and the
@@ -4781,9 +5067,20 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         model.version_line = player->version_line;
         model.build_commit = NK_PLAYER_BUILD_COMMIT;
         model.data_root_line = player->data_root_line;
+        model.love_all = player_app_has_theme_unlock(app, LAUNCHER_THEME_UNLOCK_WAVE);
         model.logical_width = scale.logical_w;
         model.logical_height = scale.logical_h;
         action = player_ui_screen_about(player->ui, &model);
+        if (action.kind == PLAYER_UI_ACTION_OPEN_LOVE_ALL) {
+            player_ui_love_all_open(player, player_app_reduce_motion(app), now_s);
+            action.kind = PLAYER_UI_ACTION_NONE;
+        }
+    } else if (route == PLAYER_UI_ROUTE_LOVE_ALL) {
+        action = player_ui_render_love_all(player, scale);
+        if (action.kind == PLAYER_UI_ACTION_BACK) {
+            (void)nk_ui_router_pop(player->router);
+            action.kind = PLAYER_UI_ACTION_NONE;
+        }
     }
     /* The top-bar sections switch the root screen. */
     if (action.kind == PLAYER_UI_ACTION_OPEN_ABOUT) {
@@ -4806,6 +5103,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         *out_action = action;
     }
     nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
+    player_ui_secret_draw(player, scale, now_s);
     draw_list = nk_ui_end(player->ui);
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     if (g_title_achievement_count) {
@@ -4846,7 +5144,12 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             player->pending_sound = -1;
         }
     }
-    (void)SDL_SetRenderDrawColor(renderer, 11u, 15u, 20u, 255u);
+    {
+        /* The window's ground is the theme's page colour (N1: #0B0F14). */
+        uint32_t page = nk_ui_theme(player->ui)->surface;
+        (void)SDL_SetRenderDrawColor(renderer, (Uint8)(page >> 24), (Uint8)(page >> 16),
+                                     (Uint8)(page >> 8), 255u);
+    }
     (void)SDL_RenderClear(renderer);
     if (!nk_ui_sdlr_render(player->backend, draw_list)) return false;
     SDL_RenderPresent(renderer);

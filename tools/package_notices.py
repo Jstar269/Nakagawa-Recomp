@@ -743,9 +743,15 @@ def _validate_spdx_id(spdx_id: Any, comp_type: str, comp_name: str) -> None:
         )
 
 
+#: The project's own notice and credit pages. Every package carries them next to the generated
+#: bundle, so the credits and the "not endorsed" statement travel with the binaries and the installer
+#: (the installer copies the whole package directory).
+PROJECT_NOTICE_FILES = ("NOTICE.md", "CREDITS.md")
+
+
 def _promote_notice_bundle(package_dir: Path, staged_root: Path) -> None:
     """Replace all generated notice outputs as a rollback-capable transaction."""
-    outputs = ("THIRD_PARTY_NOTICES", "SOURCE.txt", "RELINK.md", "THIRD_PARTY_NOTICES.txt")
+    outputs = ("THIRD_PARTY_NOTICES", "SOURCE.txt", "RELINK.md", "THIRD_PARTY_NOTICES.txt", *PROJECT_NOTICE_FILES)
     backup_root = staged_root / ".previous-notices"
     backup_root.mkdir()
     moved_previous: list[str] = []
@@ -1135,6 +1141,15 @@ def generate_package_notices(
         (staged_root / "THIRD_PARTY_NOTICES.txt").write_text(
             combined_content, encoding="utf-8", newline="\n"
         )
+        for project_notice in PROJECT_NOTICE_FILES:
+            source = repo_root / project_notice
+            if not source.is_file():
+                raise PackageRouteError(
+                    "PACKAGE_LICENSE_TEXT_MISSING",
+                    f"LICENSE_TEXT_MISSING: {project_notice} is missing from the source tree "
+                    f"and cannot be staged into the package",
+                )
+            (staged_root / project_notice).write_bytes(source.read_bytes().replace(b"\r\n", b"\n"))
         _promote_notice_bundle(package_dir, staged_root)
 
     return index_data

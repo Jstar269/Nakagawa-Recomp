@@ -347,12 +347,55 @@ typedef bool (*PackageHttpOpen)(void *context, const char *url,
 typedef bool (*PackageDownloadContinue)(void *context, uint64_t received,
                                         uint64_t expected);
 
+/* A way to end the native transport's requests from another thread (audit F-32444050: the
+ * player's shutdown waited for a RetroAchievements request still on its way, up to WinHTTP's
+ * timeouts). package_http_cancel ends the request using it now: a WinHTTP call in progress on it
+ * fails (its handle is closed), and no later call on it, a read of its response included, starts. A
+ * request started after it is refused before anything is opened or sent
+ * (PackageHttpResponse.refused). Destroy it only once no request uses it. NULL from create when
+ * there is no memory, or where there is no native transport. */
+typedef struct PackageHttpCancel PackageHttpCancel;
+PackageHttpCancel *package_http_cancel_create(void);
+void package_http_cancel(PackageHttpCancel *cancel);
+void package_http_cancel_destroy(PackageHttpCancel *cancel);
+
+/* How the native transport uses one request's handle with a cancel (review of #2890): only the
+ * call in progress may have its handle closed by package_http_cancel, and once a cancel came no
+ * call starts and the handle is closed once, by one side, so no call starts on a handle the
+ * cancel has closed (one window remains, below).
+ *  - package_http_call_begin before each call on the handle: false when the handle is gone or a
+ *    cancel came, and then nothing is called.
+ *  - package_http_call_end after it: false when the cancel came during the call (and then
+ *    closed the handle, which is how a blocked synchronous call is ended), or before; no call
+ *    follows on that handle.
+ *  - package_http_call_release when the request is done: closes the handle unless the cancel
+ *    did, and empties the slot.
+ * One window remains, inherent to ending a synchronous call by closing its handle: a cancel in
+ * the instant between a begin and WinHTTP's own use of the handle closes it before that one call
+ * reads it, and the call can then be handed a value WinHTTP has given a new request on another
+ * thread. Only WinHTTP's asynchronous mode, where the request's own thread closes the handle,
+ * would remove it.
+ * A cancel serves one request thread: while one slot is in a call, begin on another is false.
+ * With a NULL cancel, begin is true for a handle, end is true and release closes it. Where
+ * there is no native transport the cancel is NULL. The slot is the transport's; tests give
+ * their own close. */
+typedef struct PackageHttpCallSlot {
+    void *handle;
+    void (*close)(void *handle);
+    bool closed_by_cancel;
+} PackageHttpCallSlot;
+bool package_http_call_begin(PackageHttpCancel *cancel, PackageHttpCallSlot *slot);
+bool package_http_call_end(PackageHttpCancel *cancel, PackageHttpCallSlot *slot);
+void package_http_call_release(PackageHttpCancel *cancel, PackageHttpCallSlot *slot);
+
 /* What the native transport's context may say; a NULL context keeps its defaults. */
 typedef struct {
     /* NULL keeps "NakagawaRecomp/PrerequisiteBootstrap". UTF-8 of fewer than
      * NK_ACH_USER_AGENT_MAX bytes (nk_achievements.h), the one limit its writer and this
      * transport share; a longer or malformed one is refused (PackageHttpResponse.refused). */
     const char *user_agent;
+    /* NULL: the request cannot be ended from another thread. */
+    PackageHttpCancel *cancel;
 } PackageHttpOptions;
 
 /* The native HTTPS transport (WinHTTP, redirects followed only within the allowed
