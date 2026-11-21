@@ -749,7 +749,6 @@ class NkCoreTests(unittest.TestCase):
                 save_namespace=base.save_namespace,
                 runtime_profile=base.runtime_profile,
                 codegen_profile=base.codegen_profile,
-                min_iso_bytes=base.min_iso_bytes,
             ),
             allow_override=True,
         )
@@ -2913,6 +2912,92 @@ int main(int argc, char **argv) {
         lib.save()
         self.assertEqual(other_temporary.read_bytes(), b"another writer's checkpoint")
         self.assertEqual(GameLibrary.load(path).count(), 1)
+
+
+class TestDiscIdNormalization(unittest.TestCase):
+    """Pin shared disc-ID normalisation across TitleProfile, TitleRegistry and iso_inspect."""
+
+    def test_matches_disc_id_ignores_interior_spaces_and_edge_whitespace(self) -> None:
+        profile = TitleProfile(
+            id="synthetic-norm-v1",
+            name="Synthetic Norm",
+            disc_ids=["UCUS98701"],
+            regions=["NA"],
+        )
+        registry = TitleRegistry(include_defaults=False)
+        registry.register(profile)
+
+        samples = [
+            "UCUS98701",
+            "ucus-98701",
+            "UCUS_98701",
+            "UCUS 98701",
+            "  ucus -_ 98701  ",
+            "\tucus 98701\n",
+        ]
+        for sample in samples:
+            with self.subTest(sample=sample):
+                self.assertTrue(profile.matches_disc_id(sample))
+                self.assertIs(registry.lookup_by_disc_id(sample), profile)
+
+        spaced_profile = TitleProfile(
+            id="synthetic-norm-spaced-v1",
+            name="Synthetic Norm Spaced",
+            disc_ids=["UCUS 98701"],
+            regions=["NA"],
+        )
+        self.assertTrue(spaced_profile.matches_disc_id("UCUS98701"))
+        self.assertFalse(profile.matches_disc_id("UCUS98702"))
+        self.assertIsNone(registry.lookup_by_disc_id("UCUS98702"))
+
+    def test_normalize_disc_id_agrees_with_iso_inspect_normalisers(self) -> None:
+        from nk_core.iso_inspect import _canonical_disc_id, disc_id_library_key
+        from nk_core.types import normalize_disc_id
+
+        printable_samples = [
+            ("UCUS98701", "UCUS98701"),
+            ("ucus-98701", "UCUS98701"),
+            ("UCUS_98701", "UCUS98701"),
+            ("UCUS 98701", "UCUS98701"),
+            ("  ucus -_ 98701  ", "UCUS98701"),
+            ("test-00001", "TEST00001"),
+            (" TEST_00005 ", "TEST00005"),
+            ("  test 00001  ", "TEST00001"),
+        ]
+        for sample, expected in printable_samples:
+            with self.subTest(sample=sample):
+                normalized = normalize_disc_id(sample)
+                self.assertEqual(normalized, expected)
+                self.assertEqual(normalized, disc_id_library_key(sample))
+                self.assertEqual(normalized, _canonical_disc_id(sample))
+
+        edge_whitespace_samples = [
+            ("\tucus-98701\n", "UCUS98701"),
+            ("\r\n UCUS 98701 \t", "UCUS98701"),
+            ("\n test_00001 \r", "TEST00001"),
+        ]
+        for sample, expected in edge_whitespace_samples:
+            with self.subTest(edge_sample=sample):
+                normalized = normalize_disc_id(sample)
+                self.assertEqual(normalized, expected)
+                self.assertEqual(normalized, _canonical_disc_id(sample))
+
+    def test_library_key_preserves_on_disk_separator_format(self) -> None:
+        from nk_core.library import _library_key
+
+        self.assertEqual(_library_key("  ucus-98701  "), "UCUS-98701")
+        self.assertEqual(_library_key("ucus_98701"), "UCUS_98701")
+        self.assertEqual(_library_key("ucus 98701"), "UCUS 98701")
+
+    def test_dead_nk_core_surface_removed(self) -> None:
+        from nk_core import prep_engine
+
+        self.assertFalse(hasattr(prep_engine, "_sha256_file"))
+        self.assertFalse(hasattr(TitleRegistry, "list_all"))
+        self.assertNotIn(
+            "min_iso_bytes",
+            {field.name for field in dataclasses.fields(TitleProfile)},
+        )
 
 
 if __name__ == "__main__":

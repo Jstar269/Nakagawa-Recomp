@@ -590,7 +590,6 @@ class TransactionHardeningTests(PreparationFailClosedCase):
             regions=["TEST"],
             archive_format="raw",
             save_namespace=RAW_ISO,
-            min_iso_bytes=1,
             builds=[{
                 "executable_sha256": executable_sha256,
                 "status": "supported",
