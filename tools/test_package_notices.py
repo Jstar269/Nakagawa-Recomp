@@ -152,7 +152,6 @@ class TestPackageNotices(unittest.TestCase):
             (fake_repo / "assets").mkdir()
             shutil.copy2(ROOT / "assets" / "third_party_components.json", fake_repo / "assets" / "third_party_components.json")
             shutil.copy2(ROOT / "LICENSE", fake_repo / "LICENSE")
-            shutil.copy2(ROOT / "src" / "rt" / "hle_videocodec.c", fake_repo / "src" / "rt" / "hle_videocodec.c")
             shutil.copy2(ROOT / "Makefile", fake_repo / "Makefile")
             with self.assertRaises(PackageRouteError) as ctx:
                 package_notices.generate_package_notices(
