@@ -21370,6 +21370,18 @@ static void test_watchdog_summary_names_running_thread(void) {
                             " busy_import_ret=0x00000000 busy_repeats=1000") != NULL,
            "stall summary: the original fields come first, in their order, then the new ones");
 
+    /* An import with no known name is labelled "nid 0x...", which has a space. It must stay
+       one token, or the player's key=value reader drops the busy thread from the report. */
+    static const uint32_t NID_UNNAMED = 0xdeadbeefu;
+    for (unsigned i = 0; i < 3u; i++) sched_note_import_return(NID_UNNAMED, 0x80020001u);
+    sched_watchdog_summary(&s);
+    (void)sched_watchdog_summary_format(&s, line, sizeof line);
+    expect(s.busy_import_valid && strcmp(s.busy_import, "nid_0xdeadbeef") == 0 &&
+               s.busy_import_ret == 0x80020001u && s.busy_import_repeats == 3u &&
+               strstr(line, " busy_import=nid_0xdeadbeef busy_import_ret=0x80020001"
+                            " busy_repeats=3") != NULL,
+           "stall summary: an unnamed import stays one token in the busy fields");
+
     /* Nothing on the CPU (every thread parked): running=0 and no busy fields. */
     busy->state = TH_WAIT_OBJ;
     s_cur = -1;
