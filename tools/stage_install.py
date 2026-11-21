@@ -91,7 +91,7 @@ import subprocess
 import sys
 import tarfile
 import time
-from typing import NoReturn
+from typing import NamedTuple, NoReturn
 import zipfile
 import zlib
 
@@ -167,6 +167,84 @@ def export_source(repo: Path, destination: Path, revision: str = "HEAD") -> str:
         raise InstallError("INSTALL_SOURCE_EXPORT_FAILED: the export has no tools/nk_cli.py")
     returned: str = commit
     return returned
+
+
+PLAYER_BUILD_BUILT_FOR = "BUILT_FOR"
+PLAYER_BUILD_BUILT_FOR_OTHER = "BUILT_FOR_OTHER"
+PLAYER_BUILD_UNKNOWN = "UNKNOWN"
+#: Stamp file mk/pipeline.mk writes beside the player:
+#: ``$(BUILD_ROOT)/.player-identity-<commit|none>-<epoch|none>``.
+_PLAYER_IDENTITY_STAMP = re.compile(r"\.player-identity-([0-9a-fA-F]{7,64}|none)-(none|[0-9]+)")
+
+
+class PlayerBuildIdentity(NamedTuple):
+    """What the player build folder's identity stamps say about ``expected_commit``."""
+
+    status: str
+    commit: str | None = None
+
+
+def _commits_match(left: str, right: str) -> bool:
+    left_norm = left.strip().lower()
+    right_norm = right.strip().lower()
+    if not left_norm or not right_norm:
+        return False
+    return left_norm.startswith(right_norm) or right_norm.startswith(left_norm)
+
+
+def player_build_identity(player: Path, expected_commit: str) -> PlayerBuildIdentity:
+    """Compare ``player``'s Makefile identity stamp(s) against ``expected_commit``.
+
+    Reads ``.player-identity-<commit|none>-<epoch|none>`` files in ``player.parent``
+    (written by ``mk/pipeline.mk``):
+    - ``BUILT_FOR``: the newest stamp not newer than ``player`` names ``expected_commit``
+      (compared by prefix).
+    - ``BUILT_FOR_OTHER``: the newest stamp not newer than ``player`` names a different
+      commit (returned as ``commit``), or every commit-bearing stamp beside ``player`` is
+      newer than ``player`` (the rebuild did not finish; ``commit`` is ``None``).
+    - ``UNKNOWN``: no commit-bearing stamp beside ``player`` (for example, a ``--player``
+      outside a Make build folder, a CMake build, or a ``none`` no-commit build).
+    """
+    expected = expected_commit.strip().lower()
+    if not expected:
+        return PlayerBuildIdentity(PLAYER_BUILD_UNKNOWN, None)
+    try:
+        exe_mtime_ns = player.stat().st_mtime_ns
+        with os.scandir(player.parent) as scanner:
+            entries = list(scanner)
+    except OSError:
+        return PlayerBuildIdentity(PLAYER_BUILD_UNKNOWN, None)
+    not_newer: list[tuple[int, str, str | None]] = []
+    newer_with_commit = False
+    for entry in entries:
+        match = _PLAYER_IDENTITY_STAMP.fullmatch(entry.name)
+        if not match:
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            stamp_mtime_ns = entry.stat(follow_symlinks=False).st_mtime_ns
+        except OSError:
+            continue
+        raw_commit = match.group(1).lower()
+        stamp_commit = None if raw_commit == "none" else raw_commit
+        if stamp_mtime_ns <= exe_mtime_ns:
+            not_newer.append((stamp_mtime_ns, entry.name, stamp_commit))
+        elif stamp_commit is not None:
+            newer_with_commit = True
+    if not_newer:
+        max_mtime = max(item[0] for item in not_newer)
+        latest = sorted(item for item in not_newer if item[0] == max_mtime)
+        commits = [item[2] for item in latest if item[2] is not None]
+        if not commits:
+            return PlayerBuildIdentity(PLAYER_BUILD_UNKNOWN, None)
+        for commit in commits:
+            if not _commits_match(commit, expected):
+                return PlayerBuildIdentity(PLAYER_BUILD_BUILT_FOR_OTHER, commit)
+        return PlayerBuildIdentity(PLAYER_BUILD_BUILT_FOR, commits[0])
+    if newer_with_commit:
+        return PlayerBuildIdentity(PLAYER_BUILD_BUILT_FOR_OTHER, None)
+    return PlayerBuildIdentity(PLAYER_BUILD_UNKNOWN, None)
 
 
 #: Inno Setup's uninstaller and its data, written beside the program by the Windows installer (#2208).

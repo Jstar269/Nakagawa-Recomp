@@ -1494,6 +1494,106 @@ class ReleaseAssetContractTests(unittest.TestCase):
             self.assertIn("ASSET_SECOND_ARCHIVE", stderr.getvalue())
 
 
+class PlayerBuildIdentityTests(unittest.TestCase):
+    """player_build_identity reads mk/pipeline.mk's .player-identity-<commit>-<epoch> stamps."""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.build_dir = Path(self._temp.name) / "build"
+        self.build_dir.mkdir()
+        self.player = self.build_dir / "nakagawa_player.exe"
+        self.player.write_bytes(b"MZplayer")
+        os.utime(self.player, (2000, 2000))
+
+    def _touch_stamp(self, name: str, mtime: int) -> Path:
+        stamp = self.build_dir / name
+        stamp.write_bytes(b"")
+        os.utime(stamp, (mtime, mtime))
+        return stamp
+
+    def test_stamp_for_exported_commit_not_newer_than_executable_is_built_for(self):
+        exported = "abcdef1" + "0" * 33
+        stamp = self._touch_stamp(".player-identity-abcdef1-1790812800", 1000)
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR)
+        self.assertEqual(result.commit, "abcdef1")
+        # Equal mtime: the executable is not older than the stamp.
+        os.utime(stamp, (2000, 2000))
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR)
+        self.assertEqual(result.commit, "abcdef1")
+
+    def test_stamp_for_different_commit_not_newer_than_executable_is_built_for_other(self):
+        exported = "abcdef1" + "0" * 33
+        self._touch_stamp(".player-identity-deadbee-1790812800", 1000)
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR_OTHER)
+        self.assertEqual(result.commit, "deadbee")
+
+    def test_newest_stamp_not_newer_than_executable_wins(self):
+        exported = "abcdef1" + "0" * 33
+        self._touch_stamp(".player-identity-abcdef1-1790812800", 1000)
+        self._touch_stamp(".player-identity-deadbee-1790812900", 1500)
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR_OTHER)
+        self.assertEqual(result.commit, "deadbee")
+
+        # When the matching stamp is newer (still <= exe), it wins instead.
+        os.utime(self.build_dir / ".player-identity-abcdef1-1790812800", (1800, 1800))
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR)
+        self.assertEqual(result.commit, "abcdef1")
+
+    def test_stamp_newer_than_executable_with_no_older_stamp_is_built_for_other(self):
+        exported = "abcdef1" + "0" * 33
+        self._touch_stamp(".player-identity-abcdef1-1790812800", 3000)
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR_OTHER)
+        self.assertIsNone(result.commit)
+
+    def test_no_stamp_beside_executable_is_unknown(self):
+        exported = "abcdef1" + "0" * 33
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_UNKNOWN)
+        self.assertIsNone(result.commit)
+
+    def test_stamp_with_no_epoch_still_identifies_commit(self):
+        exported = "abcdef1" + "0" * 33
+        self._touch_stamp(".player-identity-abcdef1-none", 1000)
+        result = stage_install.player_build_identity(self.player, exported)
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR)
+        self.assertEqual(result.commit, "abcdef1")
+        other = stage_install.player_build_identity(self.player, "1111111" + "0" * 33)
+        self.assertEqual(other.status, stage_install.PLAYER_BUILD_BUILT_FOR_OTHER)
+        self.assertEqual(other.commit, "abcdef1")
+
+    def test_stamp_with_no_commit_is_unknown(self):
+        exported = "abcdef1" + "0" * 33
+        for name in (".player-identity-none-1790812800", ".player-identity-none-none"):
+            with self.subTest(name=name):
+                for existing in self.build_dir.glob(".player-identity-*"):
+                    existing.unlink()
+                self._touch_stamp(name, 1000)
+                result = stage_install.player_build_identity(self.player, exported)
+                self.assertEqual(result.status, stage_install.PLAYER_BUILD_UNKNOWN)
+                self.assertIsNone(result.commit)
+
+    def test_prefix_comparison_and_malformed_stamps_are_handled(self):
+        (self.build_dir / ".player-identity-deadbee-1790812800").mkdir()  # directory, ignored
+        self._touch_stamp(".player-identity-nothex!-1790812800", 1000)
+        self._touch_stamp(".player-identity-deadbee-badepoch", 1000)
+        self.assertEqual(
+            stage_install.player_build_identity(self.player, "abcdef1" + "0" * 33).status,
+            stage_install.PLAYER_BUILD_UNKNOWN,
+        )
+        # Prefix match works in either direction (7-char stamp vs 40-char commit, or 40-char stamp vs 7-char).
+        self._touch_stamp(".player-identity-" + ("abcdef1" + "2" * 33) + "-1790812800", 1000)
+        result = stage_install.player_build_identity(self.player, "abcdef1")
+        self.assertEqual(result.status, stage_install.PLAYER_BUILD_BUILT_FOR)
+        self.assertEqual(result.commit, "abcdef1" + "2" * 33)
+
+
 class ReproducibleBuildTests(unittest.TestCase):
     def test_player_links_carry_the_reproducible_link_flag(self):
         """Without it the PE header holds the link time and two builds of one commit differ (#324)."""
