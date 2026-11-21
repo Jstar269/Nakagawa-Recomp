@@ -399,16 +399,21 @@ class NativeHostExitSourceTests(unittest.TestCase):
     must not turn them into SKIP."""
 
     def test_vblank_exit_closes_the_audio_dump_outside_the_stat_gate(self) -> None:
-        """SR_EXIT_AT_VBLANK leaves through _Exit, which skips atexit, so hle.c closes the
+        """SR_EXIT_AT_VBLANK leaves through _Exit, which skips atexit, so the runtime closes the
         SR_AUDIODUMP file itself on that path whether or not SR_AUDIOSTAT is set (#802). The
-        close goes through hle_exit_close_audio_dump, the helper route_fail also calls. The
-        audio selftest pins what sr_audio_dump_finish does; this pins that the exit calls the
-        helper after the audio statistics rather than inside them, that the helper sits under the
-        public-backend guard, and that the backend defines the function it calls. The statistics
-        come from the block route_fail shares (#827), which keeps the SR_AUDIOSTAT gate."""
+        exit goes through the run end, sr_run_end, which every stop shares (audit 2026-11-17,
+        F-1ee85ec7), and the close goes through hle_exit_close_audio_dump. The audio selftest
+        pins what sr_audio_dump_finish does; this pins that the exit reaches the run end, that the
+        run end calls the helper after the audio statistics rather than inside them and before
+        _Exit, that the helper sits under the public-backend guard, and that the backend defines
+        the function it calls. The statistics come from the shared block (#827), which keeps the
+        SR_AUDIOSTAT gate."""
         hle = hle_sources.text()
         start = hle.index("BOOT_EVENT phase=exit_at_vblank")
-        block = hle[start:hle.index("_Exit(0);", start)]
+        self.assertIn('sr_run_end(0, "exit_at_vblank", "SR_EXIT_AT_VBLANK");', hle[start:start + 1200],
+                      "the vblank exit must end through the run end")
+        run_end = hle.index("_Noreturn void sr_run_end(int status, const char *label, const char *reason) {")
+        block = hle[run_end:hle.index("_Exit(status);", run_end)]
         stats = block.find("hle_exit_audio_stats();")
         self.assertNotEqual(stats, -1, "the vblank exit must print its audio statistics through the shared block")
         self.assertNotIn("audio_stat_on()", block, "the SR_AUDIOSTAT gate belongs to the shared block")
@@ -423,39 +428,50 @@ class NativeHostExitSourceTests(unittest.TestCase):
         self.assertIn("\nvoid sr_audio_dump_finish(void) {\n", backend)
 
     def test_route_fail_closes_the_audio_dump_before_exit(self) -> None:
-        """route_fail leaves through _Exit(ROUTE_FAIL_EXIT), which skips atexit, so it closes the
-        SR_AUDIODUMP file through the same helper as the SR_EXIT_AT_VBLANK exit (#827). The close
-        sits inside the exit branch and before _Exit. Under SR_ROUTE_NO_EXIT the run carries on,
+        """route_fail leaves through the run end with ROUTE_FAIL_EXIT, which skips atexit, so it
+        closes the SR_AUDIODUMP file through the same helper as the SR_EXIT_AT_VBLANK exit (#827),
+        in the run end both share (audit 2026-11-17, F-1ee85ec7). The run end sits inside the exit
+        branch, and the close runs before its _Exit. Under SR_ROUTE_NO_EXIT the run carries on,
         so the close must not run there. Like the vblank pin, this reads the source: no native
         target runs a route failure with the public audio backend linked."""
         hle = hle_sources.text()
         start = hle.index("static void route_fail(const char *fmt, ...) {")
         body = hle[start:hle.index("\n}\n", start)]
-        call = body.find("hle_exit_close_audio_dump();")
-        self.assertNotEqual(call, -1, "route_fail exits without closing the SR_AUDIODUMP file")
+        call = body.find("sr_run_end(ROUTE_FAIL_EXIT,")
+        self.assertNotEqual(call, -1,
+                            "route_fail exits without the run end, which closes the SR_AUDIODUMP file")
         branch = body.index('if (!getenv("SR_ROUTE_NO_EXIT")) {')
         self.assertGreater(call, branch,
-                           "the dump close must sit inside the exit branch, not under SR_ROUTE_NO_EXIT")
-        self.assertLess(call, body.index("_Exit(ROUTE_FAIL_EXIT);"),
-                        "the dump close must run before _Exit(ROUTE_FAIL_EXIT)")
+                           "the run end must sit inside the exit branch, not under SR_ROUTE_NO_EXIT")
+        run_end = hle.index("_Noreturn void sr_run_end(int status, const char *label, const char *reason) {")
+        run_end_body = hle[run_end:hle.index("\n}\n", run_end)]
+        close = run_end_body.find("hle_exit_close_audio_dump();")
+        self.assertNotEqual(close, -1, "the run end does not close the SR_AUDIODUMP file")
+        self.assertLess(close, run_end_body.index("_Exit(status);"),
+                        "the dump close must run before the run end's _Exit")
 
     def test_route_fail_reports_the_audio_stats_the_vblank_exit_reports(self) -> None:
-        """A failed route leaves through _Exit(ROUTE_FAIL_EXIT) and so loses whatever the SR_AUDIOSTAT
-        block would have printed. route_fail must print the same audio statistics as the
-        SR_EXIT_AT_VBLANK exit, inside the exit branch, before it finalises the SR_AUDIODUMP file
-        (#827). Both exits call one helper so the two cannot drift, and the helper keeps the
-        SR_AUDIOSTAT gate. Like the vblank pin, this reads the source: no native target runs a route
-        failure with the public audio backend linked."""
+        """A failed route leaves through _Exit and so loses whatever the SR_AUDIOSTAT block would
+        have printed. route_fail must print the same audio statistics as the SR_EXIT_AT_VBLANK
+        exit, inside the exit branch, before it finalises the SR_AUDIODUMP file (#827). Both exits
+        go through the one run end (audit 2026-11-17, F-1ee85ec7), which calls the one helper, so
+        the two cannot drift, and the helper keeps the SR_AUDIOSTAT gate. Like the vblank pin,
+        this reads the source: no native target runs a route failure with the public audio
+        backend linked."""
         hle = hle_sources.text()
         start = hle.index("static void route_fail(const char *fmt, ...) {")
         body = hle[start:hle.index("\n}\n", start)]
-        stats = body.find("hle_exit_audio_stats();")
-        self.assertNotEqual(stats, -1,
-                            "route_fail exits without the audio statistics the vblank exit prints")
+        call = body.find("sr_run_end(ROUTE_FAIL_EXIT,")
+        self.assertNotEqual(call, -1,
+                            "route_fail exits without the run end, which prints the audio statistics")
         branch = body.index('if (!getenv("SR_ROUTE_NO_EXIT")) {')
-        self.assertGreater(stats, branch,
+        self.assertGreater(call, branch,
                            "the audio statistics must print inside the exit branch")
-        self.assertLess(stats, body.find("hle_exit_close_audio_dump();"),
+        run_end = hle.index("_Noreturn void sr_run_end(int status, const char *label, const char *reason) {")
+        run_end_body = hle[run_end:hle.index("\n}\n", run_end)]
+        stats = run_end_body.find("hle_exit_audio_stats();")
+        self.assertNotEqual(stats, -1, "the run end does not print the audio statistics")
+        self.assertLess(stats, run_end_body.find("hle_exit_close_audio_dump();"),
                         "the audio statistics must print before the dump is finalised")
         self.assertEqual(hle.count("void hle_exit_audio_stats(void) {"), 1,
                          "the vblank exit and route_fail must share one definition of the stats block")

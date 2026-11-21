@@ -686,6 +686,103 @@ void sr_fbcap_test_reset_config(void) {
 }
 #endif
 
+/* After a present: the SR_FBSNAP report and the SR_FBDUMP verdict for the frame just shown,
+ * armed at armed_vcount. Both presents call it: sceDisplaySetFrameBuf's immediate (sync=0)
+ * flip, and sr_vblank_tick's NEXTFRAME (sync=1) flip, which was armed and presented there
+ * but reported only at the next SetFrameBuf, with a later vcount, and never reached the
+ * SR_FBDUMP=N exit (audit 2026-11-17, F-8972ffa6). */
+static void display_after_present(uint32_t armed_vcount) {
+    /* SR_FBSNAP report (issue #57): fbcap_arm_for_present() above already armed the
+     * present-truthful capture for this frame (path in s_fbcap_armed); the presenter
+     * resolved it before display_present_active() returned. The
+     * legacy VRAM-side oracle keeps its exact historical naming: rotating snap_%u.ppm
+     * (8 most recent kept) without windows, snap_v<vcount>.ppm when windows are set, so
+     * existing routes and tooling are unaffected. Host-side gate only: no guest work is
+     * skipped, no timing changes, and the frames that are captured are byte-identical
+     * to an ungated run. The report below clears the arm, so whether this present was armed
+     * is kept for the SR_FBDUMP verdict after it. */
+    const int capture_armed = s_fbcap_armed[0] != '\0';
+    if (s_fbcap_armed[0]) {
+        if (s_fbcap_legacy[0]) {
+            if (snapshot_sync_ok(s_display_active.addr, (uint32_t)s_display_active.fmt,
+                                  (uint32_t)s_display_active.stride, "FBSNAP")) {
+                dump_fb_fmt(s_fbcap_legacy, s_display_active.addr, s_display_active.fmt,
+                            (uint32_t)s_display_active.stride);
+                fprintf(stderr, "FBSNAP f=%u -> %s\n", armed_vcount, s_fbcap_legacy);
+                /* Issue #64: pair the captured frame with its route signature so a new
+                 * checkpoint is transcribed from the frame the author actually looked at. */
+                if (s_route_learn) route_learn_emit(armed_vcount, NULL);
+            } else {
+                fprintf(stderr, "FBSNAP f=%u -> SKIPPED (synchronisation failed)\n", armed_vcount);
+            }
+        }
+        int cres = sr_capture_result();
+        if (cres != 0) {
+            fprintf(stderr, "FBSNAP f=%u swapchain capture -> %s (result=%d)\n",
+                    armed_vcount, s_fbcap_armed, cres);
+        } else {
+            /* No presenter serviced this frame's arm (the output cap dropped the present):
+             * display_present_active() cancelled it, so it can neither be serviced by a
+             * later frame nor reported with a stale result. */
+            fprintf(stderr, "FBSNAP f=%u swapchain capture -> SKIPPED (no present serviced this frame)\n",
+                    armed_vcount);
+        }
+        s_fbcap_armed[0] = '\0';
+        s_fbcap_legacy[0] = '\0';
+    }
+    /* The buffer handed to SetFrameBuf is a freshly-completed frame. With SR_FBDUMP=<N>, once N
+     * frames have elapsed, the pre-present arm above recorded exactly this presented buffer in
+     * present_source.ppm and the process exits with a policy verdict (issue #57): success(0)
+     * only if the present-truthful capture really was published, failure(1) otherwise. */
+    {
+        static int fbdu = -1; static int fbdu_n = 0;
+        if (fbdu < 0) {
+            const char *fd = getenv("SR_FBDUMP");
+            fbdu = sr_fbcap_env_on("SR_FBDUMP");
+            fbdu_n = fd ? atoi(fd) : 0;
+        }
+        if (fbdu && capture_armed && s_framebuf &&
+            armed_vcount >= (uint32_t)fbdu_n &&
+            display_host_span_valid(&s_display_active)) {
+            int snap_ok = snapshot_sync_ok(s_display_active.addr,
+                                            (uint32_t)s_display_active.fmt,
+                                            (uint32_t)s_display_active.stride, "SR_FBDUMP");
+            if (snap_ok)
+                dump_fb_fmt("fb_present.ppm", s_display_active.addr, s_display_active.fmt,
+                            (uint32_t)s_display_active.stride);
+            /* Also snapshot the whole 2MB eDRAM so any rendered region can be found regardless of which
+             * buffer/stride/format the game settled on. */
+            FILE *raw = fopen("edram.bin", "wb");
+            if (raw) { for (uint32_t a = 0x04000000; a < 0x04200000; a += 4) { uint32_t w = MEM_R32(a); fwrite(&w, 4, 1, raw); } fclose(raw); }
+            sr_trace_close();
+            fprintf(stderr, "presented frame %u: buf=0x%08x fmt=%u stride=%u ge_pixels=%lu tex_samples=%lu tex_nonzero=%lu\n",
+                    armed_vcount, s_display_active.addr, s_display_active.fmt,
+                    (uint32_t)s_display_active.stride, g_ge_pixels, g_tex_samples, g_tex_nonzero);
+            { extern unsigned long g_mpeg_put, g_mpeg_getavc, g_mpeg_avcdec, g_mpeg_nodata;
+              fprintf(stderr, "mpeg: ringPut=%lu getAvcAu=%lu avcDecode=%lu noData=%lu\n",
+                      g_mpeg_put, g_mpeg_getavc, g_mpeg_avcdec, g_mpeg_nodata); }
+            sr_dump_calls();
+            sched_dump_threads();
+            /* Only a capture serviced by this frame's present may affect the exit
+             * verdict. An unserviced arm is a failed attempt, never a stale success. */
+            int cres = sr_capture_result();
+            fprintf(stderr, "present capture result=%d (source=%s)%s\n", cres,
+                    sr_capture_source_label(),
+                    cres == 0 ? " (not serviced: no present this frame)" : "");
+            if (!snap_ok) {
+                fprintf(stderr, "SR_FBDUMP: no trustworthy framebuffer snapshot was written\n");
+                sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, 0u, 1u);
+                sr_run_end(1, "capture_refused", "SR_FBDUMP found no trustworthy framebuffer");
+            }
+            {
+                int capture_exit_status = sr_fbcap_exit_status(SR_FBCAP_FBDUMP, cres);
+                sr_flight_exit((uint32_t)capture_exit_status);
+                sr_run_end(capture_exit_status, "capture_exit", "SR_FBDUMP capture exit");
+            }
+        }
+    }
+}
+
 static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
     static int first_present = 1;
     uint32_t addr = A0;
@@ -780,111 +877,9 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
                     s_display_active.stride);
     }
     /* The active state was presented above. A sync=1 request is intentionally
-     * deferred until sr_vblank_tick applies the pending scanout state. */
-    /* SR_FBSNAP report (issue #57): fbcap_arm_for_present() above already armed the
-     * present-truthful capture for this frame (path in s_fbcap_armed); the presenter
-     * resolved it before display_present_active() returned. The
-     * legacy VRAM-side oracle keeps its exact historical naming: rotating snap_%u.ppm
-     * (8 most recent kept) without windows, snap_v<vcount>.ppm when windows are set, so
-     * existing routes and tooling are unaffected. Host-side gate only: no guest work is
-     * skipped, no timing changes, and the frames that are captured are byte-identical
-     * to an ungated run. The report below clears the arm, so whether this present was armed
-     * is kept for the SR_FBDUMP verdict after it. */
-    const int capture_armed = s_fbcap_armed[0] != '\0';
-    if (s_fbcap_armed[0]) {
-        if (s_fbcap_legacy[0]) {
-            if (snapshot_sync_ok(s_display_active.addr, (uint32_t)s_display_active.fmt,
-                                  (uint32_t)s_display_active.stride, "FBSNAP")) {
-                dump_fb_fmt(s_fbcap_legacy, s_display_active.addr, s_display_active.fmt,
-                            (uint32_t)s_display_active.stride);
-                fprintf(stderr, "FBSNAP f=%u -> %s\n", s_vcount, s_fbcap_legacy);
-                /* Issue #64: pair the captured frame with its route signature so a new
-                 * checkpoint is transcribed from the frame the author actually looked at. */
-                if (s_route_learn) route_learn_emit(s_vcount, NULL);
-            } else {
-                fprintf(stderr, "FBSNAP f=%u -> SKIPPED (synchronisation failed)\n", s_vcount);
-            }
-        }
-        int cres = sr_capture_result();
-        if (cres != 0) {
-            fprintf(stderr, "FBSNAP f=%u swapchain capture -> %s (result=%d)\n",
-                    s_vcount, s_fbcap_armed, cres);
-        } else {
-            /* No presenter serviced this frame's arm (the output cap dropped the present):
-             * display_present_active() cancelled it, so it can neither be serviced by a
-             * later frame nor reported with a stale result. */
-            fprintf(stderr, "FBSNAP f=%u swapchain capture -> SKIPPED (no present serviced this frame)\n",
-                    s_vcount);
-        }
-        s_fbcap_armed[0] = '\0';
-        s_fbcap_legacy[0] = '\0';
-    }
-    /* The buffer handed to SetFrameBuf is a freshly-completed frame. With SR_FBDUMP=<N>, once N
-     * frames have elapsed, the pre-present arm above recorded exactly this presented buffer in
-     * present_source.ppm and the process exits with a policy verdict (issue #57): success(0)
-     * only if the present-truthful capture really was published, failure(1) otherwise. */
-    {
-        static int fbdu = -1; static int fbdu_n = 0;
-        if (fbdu < 0) {
-            const char *fd = getenv("SR_FBDUMP");
-            fbdu = sr_fbcap_env_on("SR_FBDUMP");
-            fbdu_n = fd ? atoi(fd) : 0;
-        }
-        if (sync == 0u && fbdu && capture_armed && s_framebuf &&
-            s_vcount >= (uint32_t)fbdu_n &&
-            display_host_span_valid(&s_display_active)) {
-            int snap_ok = snapshot_sync_ok(s_display_active.addr,
-                                            (uint32_t)s_display_active.fmt,
-                                            (uint32_t)s_display_active.stride, "SR_FBDUMP");
-            if (snap_ok)
-                dump_fb_fmt("fb_present.ppm", s_display_active.addr, s_display_active.fmt,
-                            (uint32_t)s_display_active.stride);
-            /* Also snapshot the whole 2MB eDRAM so any rendered region can be found regardless of which
-             * buffer/stride/format the game settled on. */
-            FILE *raw = fopen("edram.bin", "wb");
-            if (raw) { for (uint32_t a = 0x04000000; a < 0x04200000; a += 4) { uint32_t w = MEM_R32(a); fwrite(&w, 4, 1, raw); } fclose(raw); }
-            sr_trace_close();
-            fprintf(stderr, "presented frame %u: buf=0x%08x fmt=%u stride=%u ge_pixels=%lu tex_samples=%lu tex_nonzero=%lu\n",
-                    s_vcount, s_display_active.addr, s_display_active.fmt,
-                    (uint32_t)s_display_active.stride, g_ge_pixels, g_tex_samples, g_tex_nonzero);
-            { extern unsigned long g_mpeg_put, g_mpeg_getavc, g_mpeg_avcdec, g_mpeg_nodata;
-              fprintf(stderr, "mpeg: ringPut=%lu getAvcAu=%lu avcDecode=%lu noData=%lu\n",
-                      g_mpeg_put, g_mpeg_getavc, g_mpeg_avcdec, g_mpeg_nodata); }
-            sr_dump_calls();
-            sched_dump_threads();
-            /* Only a capture serviced by this frame's present may affect the exit
-             * verdict. An unserviced arm is a failed attempt, never a stale success. */
-            int cres = sr_capture_result();
-            fprintf(stderr, "present capture result=%d (source=%s)%s\n", cres,
-                    sr_capture_source_label(),
-                    cres == 0 ? " (not serviced: no present this frame)" : "");
-            if (!snap_ok) {
-                fprintf(stderr, "SR_FBDUMP: no trustworthy framebuffer snapshot was written\n");
-                sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, 0u, 1u);
-                ge_scene_dump_finish();
-                sr_compat_report();
-                sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-                (void)sr_videorec_finish_status("SR_FBDUMP found no trustworthy framebuffer", 1);
-                sr_perf_shutdown();
-                sr_profile_dump_final();
-                SR_VERIFY_REPORT_NOW();
-                _Exit(1);
-            }
-            {
-                int capture_exit_status = sr_fbcap_exit_status(SR_FBCAP_FBDUMP, cres);
-                sr_flight_exit((uint32_t)capture_exit_status);
-                psmf_av_final("capture_exit");
-                ge_scene_dump_finish();
-                sr_compat_report();
-                sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-                (void)sr_videorec_finish_status("SR_FBDUMP capture exit", capture_exit_status);
-                sr_perf_shutdown();
-                sr_profile_dump_final();
-                SR_VERIFY_REPORT_NOW();
-                _Exit(capture_exit_status);
-            }
-        }
-    }
+     * deferred until sr_vblank_tick applies the pending scanout state, which reports that
+     * present itself (display_after_present). */
+    if (sync == 0u) display_after_present(s_vcount);
     return 0;
 }
 static uint32_t h_DisplayGetFrameBuf(CpuState *s) {
@@ -1129,6 +1124,7 @@ void sr_vblank_tick(void) {
         psmf_av_video_presented(s_display_active.addr, s_display_active.stride, s_display_active.fmt);
         display_present_active();
         screenshot_after_present();
+        display_after_present(s_vcount);
     }
     if (g_ace_on) gui_ace_vblank(s_vcount);
     /* SR_VIDEOREC_DIR (videorec.h): this VBLANK's video frame is the newest picture presented
@@ -1226,14 +1222,7 @@ void sr_vblank_tick(void) {
           if (wde > 0 && diff >= (uint32_t)wde) {
               fprintf(stderr, "WATCHDOG: aborting after %u vblanks with no new frame (SR_WATCHDOG_EXIT=%d)\n", diff, wde);
               sr_flight_hang(diff, (uint32_t)wde);
-              ge_scene_dump_finish();
-              sr_compat_report();
-              sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-              (void)sr_videorec_finish_status("SR_WATCHDOG_EXIT", 1);
-              sr_perf_shutdown();
-              sr_profile_dump_final();
-              SR_VERIFY_REPORT_NOW();
-              _Exit(1);
+              sr_run_end(1, "watchdog_exit", "SR_WATCHDOG_EXIT");
           }
         }
     }
@@ -1294,35 +1283,12 @@ void sr_vblank_tick(void) {
         if (exit_at && s_vcount >= exit_at) {
             fprintf(stderr, "BOOT_EVENT phase=exit_at_vblank vblanks=%u (SR_EXIT_AT_VBLANK=%u)\n",
                     s_vcount, exit_at);
-            hle_exit_audio_stats();
-            /* _Exit skips atexit, so the SR_AUDIODUMP file is closed here whether or not
-             * SR_AUDIOSTAT is set; after the stats call above it is a no-op. */
-            hle_exit_close_audio_dump();
-            /* The same for a texture dump and a video recording: the dump's files land and its
-             * exit line prints, the recorder's encoder is finished and the files muxed. */
-            sr_texdump_exit_finish();
-            (void)sr_videorec_finish_status("SR_EXIT_AT_VBLANK", 0);
-            sr_dump_calls();
-            fflush(stderr);
-            fflush(stdout);
             sr_flight_budget(s_vcount);
-            /* _Exit skips the atexit hook that writes the SR_PERF_JSON summary and the
-             * final CSV row, so the perf shutdown runs here, like the audio dump close
-             * above; it is idempotent and a no-op without SR_PERF. The PSMF A/V summary is an
-             * atexit report too, so it is printed here as well (a no-op unless enabled). */
-            psmf_av_final("exit_at_vblank");
-            ge_scene_dump_finish();
-            sr_compat_report();
-            /* _Exit skips atexit, so release the renderer (and save its pipeline cache) here; it writes
-             * the SR_PERF summary first, so the call below is then a no-op. */
-            gui_shutdown();
-            sr_perf_shutdown();
-            sr_profile_dump_final();
-            SR_VERIFY_REPORT_NOW();
-            hle_state_sample_close();
-            /* Ace Mode's exit stamp and report are an atexit hook too (a no-op when off). */
-            ace_finish();
-            _Exit(0);
+            /* _Exit skips atexit, so the run end runs every finalizer itself: the audio
+             * statistics and the SR_AUDIODUMP close, the texture dump and the recording, the
+             * PSMF A/V and scene reports, the presenter release (the SR_PERF summary first), the
+             * profile, the SR_SAMPLE_OUT tail and Ace Mode's report. Status 0. */
+            sr_run_end(0, "exit_at_vblank", "SR_EXIT_AT_VBLANK");
         }
     }
 }
