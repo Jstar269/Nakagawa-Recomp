@@ -262,6 +262,7 @@
     X("SR_TRACE_V", "list", "unset", "flight_recorder.c", "Comma list of VFPU register indices (0..127) whose absolute value each trace-window record carries.") \
     X("SR_TRACK_LAST_WRITER", "flag-nonzero", "off", "debug.c", "When set and not 0, enables tracking of the last writer of memory words.") \
     X("SR_UI_ROOT", "path", "unset (overlay default)", "gui.c", "Root directory of the overlay UI pages and fonts.") \
+    X("SR_UI_TEST_NO_WORKING_FOLDER", "flag-presence", "off", "overlay/overlay_host.c", "Test builds only: the overlay reads no UI font from the working folder, as a release runtime never does.") \
     X("SR_USER_DATA_ROOT", "path", "platform data directory", "hle_host.c,gpu_sdl3vk/pipeline_cache.h", "Absolute directory used as the user data root; an invalid value is refused.") \
     X("SR_VALUE_WATCH_N", "string", "unset", "debug.c", "Value watch slot N (0..15), formatted 0xVALUE,label; reports when the watched value is seen.") \
     X("SR_VBLANK_Q_US", "number", "16000", "sched.c", "Vblank pacing quantum in microseconds.") \

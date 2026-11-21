@@ -448,7 +448,7 @@ static void test_unreadable_font_is_not_reported_missing(const char *root) {
 
 /* Audit 2026-11-17 (F-2621b1f6): a release runtime never reads a UI font from its working
    folder, which a shortcut or file association may set to any folder; only a test build does,
-   and NK_UI_TEST_ASSETS_BESIDE_ONLY shows what a release build does. The working directory
+   and SR_UI_TEST_NO_WORKING_FOLDER shows what a release build does. The working directory
    here, the repository root, has every face, and neither the folder given nor the
    executable's has one: the host fails, naming a face as not found. */
 static void test_release_build_skips_the_working_folder(void) {
@@ -464,10 +464,10 @@ static void test_release_build_skips_the_working_folder(void) {
                   (int)sizeof(probe) &&
               !SDL_GetPathInfo(probe, NULL),
           "release build: the folder given holds no UI font");
-    set_test_env("NK_UI_TEST_ASSETS_BESIDE_ONLY", "1");
+    set_test_env("SR_UI_TEST_NO_WORKING_FOLDER", "1");
     error[0] = '\0';
     host = nk_overlay_host_create("does-not-exist", error, sizeof(error));
-    set_test_env("NK_UI_TEST_ASSETS_BESIDE_ONLY", NULL);
+    set_test_env("SR_UI_TEST_NO_WORKING_FOLDER", NULL);
     CHECK(host == NULL, "release build: a font only in the working folder is not loaded");
     if (host == NULL && strstr(error, "was not found") == NULL) {
         CHECK(false, "release build: the error names a missing face");

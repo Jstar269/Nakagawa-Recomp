@@ -66,15 +66,16 @@ static bool join(const char *root, const char *relative, char *out, size_t size)
 }
 
 /* The fonts are read from the player's folder and the runtime's own only: the launcher passes
-   the first (SR_UI_ROOT), and a development run passes it too. A runtime never parses a font
-   from its working folder, which a shortcut or file association may set to any folder, as in
-   the player (player_ui_assets_from_working_folder). A test build alone, run from the source
-   tree without staged fonts, also reads them from there; NK_UI_TEST_ASSETS_BESIDE_ONLY turns
-   that off to see what a release build does. SR_SELFTEST_BUILD_ROOT marks a test build: only
-   the test recipes define it, never the runtime's build. */
+   the first (SR_UI_ROOT, from nk_launch.c); a direct run that wants them sets it. A runtime
+   never parses a font from its working folder, which a shortcut or file association may set to
+   any folder, as in the player (player_ui_assets_from_working_folder). A test build alone, run
+   from the source tree without staged fonts, also reads them from there;
+   SR_UI_TEST_NO_WORKING_FOLDER turns that off to see what a release build does.
+   SR_SELFTEST_BUILD_ROOT marks a test build: only the test recipes define it, never the
+   runtime's build. */
 static bool overlay_fonts_from_working_folder(void) {
 #if defined(SR_SELFTEST_BUILD_ROOT)
-    return getenv("NK_UI_TEST_ASSETS_BESIDE_ONLY") == NULL;
+    return getenv("SR_UI_TEST_NO_WORKING_FOLDER") == NULL;
 #else
     return false;
 #endif
