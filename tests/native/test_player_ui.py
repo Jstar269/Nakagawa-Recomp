@@ -8974,7 +8974,9 @@ class FirstRunRouteTests(unittest.TestCase):
                     completed = self.run_route(
                         scratch, ["--demo", f"--launch-index={value}", "--headless-launch"])
                     self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
-                    self.assertIn("--launch-index must be a whole number", completed.stderr)
+                    # An empty value is refused by the shared parser, by name.
+                    self.assertIn("--launch-index needs a value" if not value
+                                  else "--launch-index must be a whole number", completed.stderr)
                     self.assertNotIn("SAMPLE", completed.stdout + completed.stderr)
 
     def test_screenshot_that_is_not_saved_fails_the_run(self) -> None:
@@ -8996,7 +8998,8 @@ class FirstRunRouteTests(unittest.TestCase):
                     completed = self.run_route(
                         scratch, ["--view=library", size, f"--screenshot={shot}"])
                     self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
-                    self.assertIn("--width and --height must be whole numbers",
+                    self.assertIn("--height needs a value" if size == "--height="
+                                  else "--width and --height must be whole numbers",
                                   completed.stderr)
                     self.assertFalse(shot.exists())
             completed = self.run_route(
