@@ -207,7 +207,7 @@ directory, so it does not apply to the data root.
 | `title` | Manifest `id`, display name, kind, raw manifest SHA-256, and protected-semantics digest. |
 | `inputs` | SHA-256 for the manifest, executable ELF, selected PRXs with load addresses, and optional PSP header. Absolute input paths are omitted. |
 | `title_input_identity` | Versioned exact local inputs: manifest/profile and schema, DISC_ID/region/DISC_VERSION, selected PARAM.SFO facts, ISO container facts (format, volume ID, size, PVD sector and sector size; the other keys `inspect_iso` reports, such as the `format_warnings` notes and the `source_format` of a compressed image, are not part of the record), decrypted main executable name/hash, required guest PRX names/hashes, raw selected executable and required module hashes from their ISO members, and optional PSP-header hash/magic. Retail hashes remain only in per-user package data. |
-| `runtime` | `CpuState` ABI version and header hash, resolved guest run entry, runtime contract, bindings, and required bindings. |
+| `runtime` | `CpuState` ABI version and header hash, resolved guest run entry, runtime contract, bindings, and required bindings. Packages built since [issue #2875](https://github.com/Jstar269/nakagawa-recomp/issues/2875) add `source_commit`, the runtime source commit (`{"commit", "origin", "reason"}`): from the install record `tools/stage_install.py` wrote beside an installed `source/` tree (`install-record`), else the checkout's `HEAD` (`git`), else `null` with origin `unknown` and the reason, never a guess. The player accepts packages without it; a malformed record is INCOMPATIBLE. |
 | `executable` | Relative native executable path and hash plus the guest ELF entry address. |
 | `generated_objects` | Empty in v3 runtime packages. V2 packages retain their sorted object paths and hashes. Compiled objects stay in the bounded object cache; generated C stays in the AOT-stage cache for compatible rebuilds. |
 | `required_local_assets` | Manifest title-data/resource roots, selected or optional guest PRXs, and host SDL3/SDL3_ttf/Vulkan runtime requirements. These are references; title assets are not copied into the package. |
@@ -262,7 +262,7 @@ byte-level detection would require hashing package contents on every lookup.
 
 `build-report.json` has format `nakagawa-build-report`, schema version `1`, the
 same `input_hashes`, Python/planner/analyzer/codegen/Make versions, the compiler
-identity, runtime ABI, and deterministic coverage counts (`analyzed_functions`,
+identity, runtime ABI, the same runtime source commit record as `runtime_source` (optional), and deterministic coverage counts (`analyzed_functions`,
 `aot_entries`, callable/resume entries, fallbacks, and unsupported imports,
 instructions, and regions). `coverage.static` is the total of the code generator's
 `<game>_recomp_coverage.json`: owned, unowned, translated and interpreter-only words and

@@ -1331,6 +1331,7 @@ static const NkPackageBuildIdentity *g_fixture_build_identity = NULL;
 /* Extra build-report members the next fixture package carries, each with its leading
  * comma; empty for none. */
 static const char *g_fixture_report_extra = "";
+static const char *g_fixture_runtime_extra = "";
 /* The generated-code epoch a fixture records: the current one but for the case that
    writes a package from before it. */
 static int g_fixture_generated_code_abi_epoch = NK_AOT_GENERATED_CODE_ABI_EPOCH;
@@ -1552,12 +1553,13 @@ static void write_runtime_package_fixture_variant(
         "\"runtime\":{\"abi\":\"CpuState\",\"abi_version\":%u,"
         "\"abi_header_sha256\":\"%064d\",\"run_entry\":\"0x00000000\","
         "\"runtime_contract\":null,\"runtime_bindings\":{},"
-        "\"required_runtime_bindings\":[]},"
+        "\"required_runtime_bindings\":[]%s},"
         "\"executable\":{\"path\":\"%s\",\"sha256\":\"%s\","
         "\"guest_entry\":\"0x00000000\"},\"generated_objects\":[],"
         "\"required_local_assets\":[],\"build_report\":\"build-report.json\"}\n",
         cache_json, title_id, 0, 0, 0, input_executable_sha256, identity_json,
-        (unsigned)abi_version, 0, executable_relative_path, executable_hash);
+        (unsigned)abi_version, 0, g_fixture_runtime_extra, executable_relative_path,
+        executable_hash);
     assert(package_length > 0 && (size_t)package_length < sizeof(package_json));
     char package_path[1100];
     snprintf(package_path, sizeof(package_path), "%s%cpackage.json", package_dir,
@@ -19420,6 +19422,77 @@ int main(int argc, char **argv) {
                        validation_root, &game, &optimization_info, reason,
                        sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
         }
+        g_fixture_report_extra = "";
+
+        /* #2875: a package may record the runtime source commit it was built from, in
+           package.json and the build report: from the install record or the checkout, or
+           an explicit unknown with its reason. A malformed record is refused. */
+        static const char *const runtime_source_records[] = {
+            "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"origin\":\"install-record\",\"reason\":null}",
+            "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"origin\":\"git\",\"reason\":null}",
+            "{\"commit\":null,\"origin\":\"unknown\","
+            "\"reason\":\"the source tree has no install record and no git metadata\"}",
+        };
+        static const char *const malformed_runtime_source_records[] = {
+            "{\"commit\":null,\"origin\":\"unknown\",\"reason\":\"\"}",
+            "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"origin\":\"unknown\",\"reason\":\"why\"}",
+            "{\"commit\":\"0123456789ABCDEF0123456789abcdef01234567\","
+            "\"origin\":\"git\",\"reason\":null}",
+            "{\"commit\":\"0123456789abcdef\",\"origin\":\"git\",\"reason\":null}",
+            "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"origin\":\"guess\",\"reason\":null}",
+            "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"origin\":\"git\"}",
+            "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"origin\":\"git\",\"reason\":null,\"extra\":1}",
+            "\"0123456789abcdef0123456789abcdef01234567\"",
+        };
+        char runtime_source_runtime[512];
+        char runtime_source_report[512];
+        NkRuntimePackageInfo runtime_source_info;
+        for (size_t i = 0; i < sizeof(runtime_source_records) / sizeof(runtime_source_records[0]); i++) {
+            snprintf(runtime_source_runtime, sizeof(runtime_source_runtime),
+                     ",\"source_commit\":%s", runtime_source_records[i]);
+            snprintf(runtime_source_report, sizeof(runtime_source_report),
+                     ",\"runtime_source\":%s", runtime_source_records[i]);
+            g_fixture_runtime_extra = runtime_source_runtime;
+            g_fixture_report_extra = runtime_source_report;
+            write_runtime_package_fixture(validation_root, cached_disc_id,
+                                          "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+                                          "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL);
+            assert(nk_launch_validate_runtime_package(
+                       validation_root, &game, &runtime_source_info, reason,
+                       sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+        }
+        for (size_t i = 0; i < sizeof(malformed_runtime_source_records) /
+                                   sizeof(malformed_runtime_source_records[0]); i++) {
+            snprintf(runtime_source_runtime, sizeof(runtime_source_runtime),
+                     ",\"source_commit\":%s", malformed_runtime_source_records[i]);
+            g_fixture_runtime_extra = runtime_source_runtime;
+            g_fixture_report_extra = "";
+            write_runtime_package_fixture(validation_root, cached_disc_id,
+                                          "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+                                          "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL);
+            assert(nk_launch_validate_runtime_package(
+                       validation_root, &game, &runtime_source_info, reason,
+                       sizeof(reason)) == NK_RUNTIME_PACKAGE_INCOMPATIBLE);
+            assert(strstr(reason, "runtime.source_commit"));
+            snprintf(runtime_source_report, sizeof(runtime_source_report),
+                     ",\"runtime_source\":%s", malformed_runtime_source_records[i]);
+            g_fixture_runtime_extra = "";
+            g_fixture_report_extra = runtime_source_report;
+            write_runtime_package_fixture(validation_root, cached_disc_id,
+                                          "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+                                          "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL);
+            assert(nk_launch_validate_runtime_package(
+                       validation_root, &game, &runtime_source_info, reason,
+                       sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+            assert(strstr(reason, "runtime_source"));
+        }
+        g_fixture_runtime_extra = "";
         g_fixture_report_extra = "";
 
         write_runtime_package_fixture(validation_root, cached_disc_id,

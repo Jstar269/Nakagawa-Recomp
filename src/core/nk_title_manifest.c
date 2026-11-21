@@ -2886,6 +2886,35 @@ static bool package_sha256(const JsonNode *node, const char **out) {
     return true;
 }
 
+/* The runtime source commit record (#2875): {"commit": 40 lowercase hex or null,
+ * "origin": "install-record" | "git" | "unknown", "reason": string or null}. A known
+ * commit carries no reason; an unknown one carries no commit and names why. */
+static bool package_source_commit_record(const JsonNode *node, const char *path,
+                                         char *error, size_t error_size) {
+    static const char * const keys[] = {"commit", "origin", "reason", NULL};
+    if (!package_check_object(node, path, keys, keys, error, error_size)) return false;
+    const JsonNode *commit = obj_get(node, "commit");
+    const JsonNode *reason = obj_get(node, "reason");
+    const char *origin = NULL;
+    bool ok = package_string(obj_get(node, "origin"), &origin);
+    if (ok && strcmp(origin, "unknown") == 0) {
+        const char *why = NULL;
+        ok = commit->type == JSON_NULL && package_string(reason, &why) && why[0];
+    } else if (ok && (strcmp(origin, "install-record") == 0 || strcmp(origin, "git") == 0)) {
+        const char *hex = NULL;
+        ok = reason->type == JSON_NULL && package_string(commit, &hex) && strlen(hex) == 40;
+        for (size_t i = 0; ok && i < 40; i++) {
+            ok = (hex[i] >= '0' && hex[i] <= '9') || (hex[i] >= 'a' && hex[i] <= 'f');
+        }
+    } else {
+        ok = false;
+    }
+    if (!ok && error && error_size) {
+        snprintf(error, error_size, "%s is not a valid runtime source commit record", path);
+    }
+    return ok;
+}
+
 static bool package_number(const JsonNode *node, int64_t expected) {
     return node && node->type == JSON_NUMBER && node->u.num.is_integer &&
            node->u.num.int_val == expected;
@@ -4316,7 +4345,7 @@ static bool package_validate_contract(const JsonNode *package,
     static const char * const inputs_required[] = {"manifest", "executable", "modules", "psp_header", NULL};
     static const char * const runtime_keys[] = {
         "abi", "abi_version", "abi_header_sha256", "run_entry", "runtime_contract",
-        "runtime_bindings", "required_runtime_bindings", NULL
+        "runtime_bindings", "required_runtime_bindings", "source_commit", NULL
     };
     static const char * const runtime_required[] = {
         "abi", "abi_version", "abi_header_sha256", "run_entry", "runtime_contract",
@@ -4460,6 +4489,12 @@ static bool package_validate_contract(const JsonNode *package,
         snprintf(error, error_size, "$.runtime does not match the v1 package schema");
         return false;
     }
+    /* Optional: packages built before #2875 do not record it. */
+    if (obj_get(runtime, "source_commit") &&
+        !package_source_commit_record(obj_get(runtime, "source_commit"),
+                                      "$.runtime.source_commit", error, error_size)) {
+        return false;
+    }
 
     const JsonNode *executable = obj_get(package, "executable");
     if (!package_check_object(executable, "$.executable", executable_keys, executable_required, error, error_size)) return false;
@@ -4559,7 +4594,7 @@ static bool package_validate_build_report(const JsonNode *report,
     static const char * const allowed_root_keys[] = {
         "format", "schema_version", "title_id", "runtime_abi", "cache", "input_hashes",
         "tools", "coverage", "unsupported", "analysis_diagnostics", "artifacts",
-        "backends", "limits", "optimization", NULL
+        "backends", "limits", "optimization", "runtime_source", NULL
     };
     static const char * const required_root_keys[] = {
         "format", "schema_version", "title_id", "runtime_abi", "cache", "input_hashes",
@@ -4575,6 +4610,11 @@ static bool package_validate_build_report(const JsonNode *report,
         !package_number(obj_get(report, "schema_version"), 1) ||
         !package_string(obj_get(report, "title_id"), &value) || strcmp(value, title_id) != 0) {
         if (error && error_size && !error[0]) snprintf(error, error_size, "build report identity/schema does not match package");
+        return false;
+    }
+    if (obj_get(report, "runtime_source") &&
+        !package_source_commit_record(obj_get(report, "runtime_source"),
+                                      "build-report.runtime_source", error, error_size)) {
         return false;
     }
     const JsonNode *backends = obj_get(report, "backends");
