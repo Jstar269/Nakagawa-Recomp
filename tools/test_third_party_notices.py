@@ -18,6 +18,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import fnmatch
 import re
 import sys
 import tempfile
@@ -367,10 +368,17 @@ class TestThirdPartyComponentInventory(unittest.TestCase):
 
 
 def _runtime_sources() -> list[Path]:
-    """The C sources mk/runtime_sources.mk compiles into every title runtime."""
-    text = (ROOT / "mk/runtime_sources.mk").read_text(encoding="utf-8")
-    names = sorted(set(re.findall(r"\b((?:src|third_party)/[\w./+-]+\.c)\b", text)))
-    return [ROOT / name for name in names if (ROOT / name).is_file()]
+    """The C sources any build rule names under src/ or third_party/ (title runtime and player).
+
+    Every Makefile, mk/*.mk and CMakeLists.txt is read, so a source added to the player
+    (not only to mk/runtime_sources.mk) is reached too and cannot ship without a notice.
+    """
+    names: set[str] = set()
+    for build_file in [ROOT / "Makefile", ROOT / "CMakeLists.txt", *sorted((ROOT / "mk").glob("*.mk"))]:
+        if build_file.is_file():
+            text = build_file.read_text(encoding="utf-8", errors="replace")
+            names.update(re.findall(r"\b((?:src|third_party)/[\w./+-]+\.c)\b", text))
+    return [ROOT / name for name in sorted(names) if (ROOT / name).is_file()]
 
 
 def _vendored_directory(path: Path) -> Path | None:
@@ -380,7 +388,7 @@ def _vendored_directory(path: Path) -> Path | None:
         if directory in stops or ROOT not in directory.parents:
             return None
         if (directory / "PROVENANCE.md").is_file() and any(
-            any(directory.glob(pattern)) for pattern in ("LICENSE*", "COPYING*", "License*")
+            any(directory.glob(pattern)) for pattern in ("LICENSE*", "LICENCE*", "COPYING*", "License*", "MIT*", "Apache*")
         ):
             return directory
     return None
@@ -437,6 +445,107 @@ class TestRuntimeLinkedComponents(unittest.TestCase):
                 with self.subTest(component=record["id"], reached_from=sources[0]):
                     self.assertNotIn("Not linked into the runtime", note)
                     self.assertIn("runtime", note)
+
+
+_NON_PROJECT_SPDX = re.compile(r"SPDX-License-Identifier:\s*([^\r\n*]*)")
+_PROJECT_OR_COVERED_IDS = {"GPL-3.0-or-later", "GPL-2.0-or-later", "GPL-3.0-only", "LGPL-2.1-or-later", "AND", "OR", "WITH"}
+_DERIVED_FROM = re.compile(
+    r"(?:derived|adapted|translated|ported)\s+from[\s/*]{0,12}[\w ./+-]{0,40}?\(?(https?://github\.com/[\w.-]+/[\w.-]+)",
+    re.IGNORECASE,
+)
+
+
+def _tracked_source_files() -> list[Path]:
+    """Tracked C, header and shader sources under src/ and third_party/."""
+    import subprocess
+
+    listing = subprocess.run(
+        ["git", "ls-files", "src", "third_party"], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    suffixes = {".c", ".h", ".cpp", ".comp", ".glsl"}
+    return [ROOT / name for name in listing if Path(name).suffix in suffixes and (ROOT / name).is_file()]
+
+
+def _vendored_directories() -> list[Path]:
+    """Every directory with a PROVENANCE.md and an upstream licence text somewhere beneath it."""
+    found = []
+    for base in (ROOT / "src", ROOT / "third_party"):
+        for manifest in sorted(base.rglob("PROVENANCE.md")):
+            directory = manifest.parent
+            if any(
+                path.is_file() and re.match(r"(?i)(licen[cs]e|copying|mit|apache)", path.name)
+                for path in directory.rglob("*")
+            ):
+                found.append(directory)
+    return found
+
+
+class TestEveryUpstreamComponentHasARecord(unittest.TestCase):
+    """Vendored or derived code cannot ship without a record in the inventory (and so a package notice)."""
+
+    def setUp(self) -> None:
+        data = inventory()
+        native = data["native"]
+        self.records = [
+            *native.get("linked_components", []),
+            *native.get("host_resolved_components", []),
+            *native["dlls"].values(),
+        ]
+        self.cited_files = {entry["file"] for record in self.records for entry in record.get("license_texts", [])}
+        self.source_paths = [path for record in self.records for path in record.get("source_paths", [])]
+
+    def _covered(self, relative: str) -> bool:
+        """A record covers a file by a licence text beside it or by naming it in source_paths."""
+        directory = relative.rsplit("/", 1)[0]
+        while directory not in ("", "src", "src/rt", "third_party"):
+            prefix = directory + "/"
+            if any(cited.startswith(prefix) for cited in self.cited_files) and (ROOT / directory / "PROVENANCE.md").is_file():
+                return True
+            directory = directory.rsplit("/", 1)[0] if "/" in directory else ""
+        return any(fnmatch.fnmatch(relative, path) or relative.startswith(path.rstrip("/") + "/") for path in self.source_paths)
+
+    def test_every_vendored_directory_has_a_record(self) -> None:
+        """Each PROVENANCE.md manifest beside an upstream licence names a recorded component."""
+        for directory in _vendored_directories():
+            relative = directory.relative_to(ROOT).as_posix()
+            with self.subTest(directory=relative):
+                prefix = relative + "/"
+                self.assertTrue(
+                    any(cited.startswith(prefix) for cited in self.cited_files),
+                    f"{relative} is vendored but no component in {INVENTORY_IDENTITY} cites its licence text",
+                )
+
+    def test_every_file_under_a_non_project_licence_has_a_record(self) -> None:
+        """A source whose SPDX line names a licence beyond the GPL family is covered by a record."""
+        for path in _tracked_source_files():
+            relative = path.relative_to(ROOT).as_posix()
+            head = "".join(path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)[:12])
+            for match in _NON_PROJECT_SPDX.finditer(head):
+                ids = set(re.findall(r"[A-Za-z0-9.+-]+", match.group(1)))
+                foreign = ids - _PROJECT_OR_COVERED_IDS
+                if foreign:
+                    with self.subTest(path=relative, licences=sorted(foreign)):
+                        self.assertTrue(self._covered(relative), f"{relative} ({', '.join(sorted(foreign))}) has no record in {INVENTORY_IDENTITY}")
+
+    def test_every_derived_from_upstream_in_a_header_has_a_record(self) -> None:
+        """An upstream repository a source header says it derives from appears as a record's upstream_origin."""
+        origins = " ".join(str(record.get("upstream_origin", "")).lower() for record in self.records)
+        wanted: dict[str, str] = {}
+        for path in _tracked_source_files():
+            head = "".join(path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)[:60])
+            for match in _DERIVED_FROM.finditer(head):
+                wanted.setdefault(match.group(1).lower().rstrip(".").split("github.com/")[1], path.relative_to(ROOT).as_posix())
+        self.assertIn("jpcsp/jpcsp", wanted, "the header scan no longer finds the JPCSP-derived file")
+        for repository, example in sorted(wanted.items()):
+            with self.subTest(repository=repository, example=example):
+                self.assertIn(repository, origins, f"{example} derives from {repository}, which no record names")
+
+    def test_every_top_level_licence_text_is_cited_by_a_record(self) -> None:
+        """A licence text kept under third_party/licenses/ is not an orphan: some record ships it."""
+        for path in sorted((ROOT / "third_party" / "licenses").glob("*.txt")):
+            relative = path.relative_to(ROOT).as_posix()
+            with self.subTest(text=relative):
+                self.assertIn(relative, self.cited_files, f"{relative} is cited by no record in {INVENTORY_IDENTITY}")
 
 
 class TestNativePackageNoticesGate(unittest.TestCase):

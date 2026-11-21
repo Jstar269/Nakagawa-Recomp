@@ -362,8 +362,10 @@ for their recorded source lineage.
 
 ## Upstream authors
 
-Nakagawa Recomp is not endorsed by PPSSPP, sal063, FFmpeg, SDL, Khronos, or any
-other upstream author.
+Nakagawa Recomp is not endorsed by PPSSPP, sal063, FFmpeg, SDL, Khronos, AMD, RetroAchievements, libretro,
+the maintainer of the CWCheat-Database-Plus cheat database, the operators of the online play servers it can
+connect to (such as socom.cc and ArenaAnywhere), or any other upstream author. Product and service names belong
+to their owners and are used only to say what the project works with.
 
 ## Private inputs and history
 
