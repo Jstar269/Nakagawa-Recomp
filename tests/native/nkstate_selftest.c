@@ -1640,6 +1640,71 @@ static void test_record_replay(void) {
     rr_env("", "");
 }
 
+/* A failed write never truncates a good state (audit F-243a2741): the writer goes through
+ * "<path>.tmp" and replaces the target only after the write, flush, flush to the disk and close
+ * succeed. A write that stops part way, or a failed flush to the disk, is NKSTATE_IO_ERROR, the
+ * earlier state stays byte for byte, and no temp file is left; a later good write replaces the
+ * state whole. */
+static void test_write_file_keeps_a_good_state(void) {
+    const char *path = SR_SELFTEST_BUILD_ROOT "/nkstate_selftest_replace.nkstate";
+    const char *tmp = SR_SELFTEST_BUILD_ROOT "/nkstate_selftest_replace.nkstate.tmp";
+    char detail[160];
+    NkStateBuf good = {0}, next = {0}, read = {0};
+    static const char good_bytes[] = "the good state, every byte of which must survive a failed write";
+    static const char next_bytes[] = "a newer state that a fault stops after 7 bytes, then is written whole";
+    CHECK(nkstate_buf_put(&good, good_bytes, sizeof good_bytes - 1u) &&
+              nkstate_buf_put(&next, next_bytes, sizeof next_bytes - 1u),
+          "replace: buffers");
+    (void)remove(path);
+    (void)remove(tmp);
+
+    NkStateStatus st = nkstate_write_file(path, &good, detail, sizeof detail);
+    CHECK(st == NKSTATE_OK, "replace: first write: %s %s", nkstate_status_name(st), detail);
+
+    nkstate_test_set_write_fault(7);
+    st = nkstate_write_file(path, &next, detail, sizeof detail);
+    nkstate_test_set_write_fault(-1);
+    CHECK(st == NKSTATE_IO_ERROR, "replace: a write that stops after 7 bytes gave %s, want io-error",
+          nkstate_status_name(st));
+    st = nkstate_read_file(path, &read, detail, sizeof detail);
+    CHECK(st == NKSTATE_OK && read.len == good.len && memcmp(read.data, good.data, good.len) == 0,
+          "replace: the good state did not survive a failed write (%s, %zu bytes, want %zu)",
+          nkstate_status_name(st), read.len, good.len);
+    nkstate_buf_free(&read);
+    FILE *left = fopen(tmp, "rb");
+    CHECK(left == NULL, "replace: a failed write left %s", tmp);
+    if (left) fclose(left);
+
+    /* Every byte written, but the flush to the disk fails: still no replace. */
+    nkstate_test_set_sync_fault(1);
+    st = nkstate_write_file(path, &next, detail, sizeof detail);
+    nkstate_test_set_sync_fault(0);
+    CHECK(st == NKSTATE_IO_ERROR, "replace: a failed flush to the disk gave %s, want io-error",
+          nkstate_status_name(st));
+    st = nkstate_read_file(path, &read, detail, sizeof detail);
+    CHECK(st == NKSTATE_OK && read.len == good.len && memcmp(read.data, good.data, good.len) == 0,
+          "replace: the good state did not survive a failed flush to the disk (%s, %zu bytes, want %zu)",
+          nkstate_status_name(st), read.len, good.len);
+    nkstate_buf_free(&read);
+    left = fopen(tmp, "rb");
+    CHECK(left == NULL, "replace: a failed flush to the disk left %s", tmp);
+    if (left) fclose(left);
+
+    st = nkstate_write_file(path, &next, detail, sizeof detail);
+    CHECK(st == NKSTATE_OK, "replace: the second write: %s %s", nkstate_status_name(st), detail);
+    st = nkstate_read_file(path, &read, detail, sizeof detail);
+    CHECK(st == NKSTATE_OK && read.len == next.len && memcmp(read.data, next.data, next.len) == 0,
+          "replace: a good write did not replace the state whole (%zu bytes, want %zu)", read.len, next.len);
+    left = fopen(tmp, "rb");
+    CHECK(left == NULL, "replace: a good write left %s", tmp);
+    if (left) fclose(left);
+
+    nkstate_buf_free(&read);
+    nkstate_buf_free(&good);
+    nkstate_buf_free(&next);
+    (void)remove(path);
+}
+
 int main(int argc, char **argv) {
     sr_mem_init();
     sr_exec_span_reset();
@@ -1660,6 +1725,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     test_round_trip_continues_identically();
+    test_write_file_keeps_a_good_state();
     test_refusals();
     test_capture_refusals();
     test_capture_writes_required_first();
