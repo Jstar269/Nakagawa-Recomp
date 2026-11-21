@@ -158,6 +158,11 @@ STRICT_C_UNITS: dict[str, StrictUnit] = {
         recipes=("$(PLAYER_EXE)",),
         includes=("third_party/rcheevos/include", "third_party/rcheevos/src"),
     ),
+    # The bridge's selftest reads rcheevos' version from rc_version.h, which is in its src.
+    "tests/native/test_nk_achievements.c": StrictUnit(
+        recipes=("achievements-selftest",),
+        includes=("third_party/rcheevos/include", "third_party/rcheevos/src"),
+    ),
     "tests/native/atrac3p_bridge_selftest.c": StrictUnit(
         recipes=("atrac3p-bridge-selftest",),
         includes=("tests/native",),
