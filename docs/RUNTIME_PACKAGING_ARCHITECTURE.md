@@ -244,6 +244,22 @@ executable and each recorded required module directly from that ISO before a
 cached result can be reused. This rejects changed source bytes even when
 `DISC_ID` and `DISC_VERSION` remain the same, and launch repeats the check
 against the selected ISO before starting the runtime ([issue #315](https://github.com/Jstar269/nakagawa-recomp/issues/315)).
+Each check hashes a member at most once, even when the record names it twice.
+
+A screen (the library list, the details, the picker's status) may instead use
+`nk_title_manifest_validate_aot_package_for_display` or
+`nk_title_manifest_identify_build_for_display`. These are a display shortcut,
+not a security check. They may take a member's digest from an in-memory memo,
+never written to disk, of digests the process computed in full. The memo is
+keyed by the image's path, size, write, change and (Windows) creation times,
+and its file ID or device and inode. A digest is stored only while those stay
+the same across the hash and both times are at least 3 seconds old. Metadata
+does not prove content: an image rewritten in place with its times restored,
+which Windows allows, keeps its old answer on a screen. The launch path
+(`nk_title_manifest_validate_aot_package` in prepare and at the pre-spawn gate)
+never reads the memo and hashes every member in full. When a full hash
+disagrees with the memo, the image's entry is dropped, so the next screen hashes
+again and shows the new result.
 
 Validation is memoized for the life of a process, so the memo is keyed on a
 status identity that covers every input it must not go stale against: the

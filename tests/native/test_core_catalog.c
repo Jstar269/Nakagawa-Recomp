@@ -33,6 +33,9 @@
 #include "nk_platform.h"
 #include "generated/nk_title_catalog.h"
 #include "native_test_isolation.h"
+#include "nk_shared_helpers.h"
+#include "nk_title_manifest.h"
+#include <time.h>
 
 static void seed_game_entry(NkGameEntry *entry, const char *disc_id, const char *title) {
     memset(entry, 0, sizeof(*entry));
@@ -833,6 +836,257 @@ static void test_nk_font_classify_verdict(void) {
     assert(strcmp(small_buf, "cove") == 0);
 }
 
+/* ---- Source media: the display memo and the full check (audit 2026-11-17, F-6e4d1bc2) ----
+ * A synthetic image (no game data): PSP_GAME/SYSDIR/EBOOT.BIN, a little over 2.5 MiB so
+ * the 1 MiB reads end part way, and PSP_GAME/USRDIR/MOD.PRX. The record names the
+ * executable, the module, and the executable again as a module. */
+
+#define MEDIA_SECTOR 2048u
+#define MEDIA_EBOOT_LBA 21u
+#define MEDIA_EBOOT_SIZE (2621440u + 777u)
+#define MEDIA_MOD_SIZE 100000u
+#define MEDIA_MOD_LBA (MEDIA_EBOOT_LBA + (MEDIA_EBOOT_SIZE + MEDIA_SECTOR - 1u) / MEDIA_SECTOR)
+#define MEDIA_IMAGE_SIZE \
+    ((size_t)(MEDIA_MOD_LBA + (MEDIA_MOD_SIZE + MEDIA_SECTOR - 1u) / MEDIA_SECTOR) * MEDIA_SECTOR)
+
+static void media_put_both32(uint8_t *p, uint32_t value) {
+    p[0] = (uint8_t)value;
+    p[1] = (uint8_t)(value >> 8);
+    p[2] = (uint8_t)(value >> 16);
+    p[3] = (uint8_t)(value >> 24);
+    p[4] = (uint8_t)(value >> 24);
+    p[5] = (uint8_t)(value >> 16);
+    p[6] = (uint8_t)(value >> 8);
+    p[7] = (uint8_t)value;
+}
+
+static size_t media_dir_record(uint8_t *sector, size_t offset, const char *name,
+                               uint32_t lba, uint32_t size, bool directory) {
+    size_t name_len = strlen(name);
+    size_t record_len = 33u + name_len + ((33u + name_len) & 1u);
+    memset(sector + offset, 0, record_len);
+    sector[offset] = (uint8_t)record_len;
+    media_put_both32(sector + offset + 2, lba);
+    media_put_both32(sector + offset + 10, size);
+    sector[offset + 25] = directory ? 0x02 : 0x00;
+    sector[offset + 32] = (uint8_t)name_len;
+    memcpy(sector + offset + 33, name, name_len);
+    return offset + record_len;
+}
+
+/* The image, with `eboot_seed` choosing the executable's bytes. */
+static uint8_t *media_build_image(uint8_t eboot_seed) {
+    uint8_t *image = (uint8_t *)calloc(1u, MEDIA_IMAGE_SIZE);
+    assert(image != NULL);
+    uint8_t *pvd = image + 16u * MEDIA_SECTOR;
+    pvd[0] = 0x01;
+    memcpy(pvd + 1, "CD001", 5);
+    memcpy(pvd + 40, "MEDIA_MEMO_FIXTURE              ", 32);
+    media_dir_record(pvd, 156, "\x00", 17u, MEDIA_SECTOR, true);
+    media_dir_record(image + 17u * MEDIA_SECTOR, 0, "PSP_GAME", 18u, MEDIA_SECTOR, true);
+    size_t next = media_dir_record(image + 18u * MEDIA_SECTOR, 0, "SYSDIR", 19u, MEDIA_SECTOR, true);
+    media_dir_record(image + 18u * MEDIA_SECTOR, next, "USRDIR", 20u, MEDIA_SECTOR, true);
+    media_dir_record(image + 19u * MEDIA_SECTOR, 0, "EBOOT.BIN;1", MEDIA_EBOOT_LBA,
+                     MEDIA_EBOOT_SIZE, false);
+    media_dir_record(image + 20u * MEDIA_SECTOR, 0, "MOD.PRX;1", MEDIA_MOD_LBA, MEDIA_MOD_SIZE,
+                     false);
+    for (uint32_t i = 0; i < MEDIA_EBOOT_SIZE; i++) {
+        image[(size_t)MEDIA_EBOOT_LBA * MEDIA_SECTOR + i] = (uint8_t)(i * 31u + eboot_seed);
+    }
+    for (uint32_t i = 0; i < MEDIA_MOD_SIZE; i++) {
+        image[(size_t)MEDIA_MOD_LBA * MEDIA_SECTOR + i] = (uint8_t)(i * 7u + 3u);
+    }
+    return image;
+}
+
+static void media_hex(const uint8_t *data, size_t length, char out[65]) {
+    NkSha256 ctx;
+    uint8_t digest[32];
+    nk_sha256_init(&ctx);
+    nk_sha256_update(&ctx, data, length);
+    nk_sha256_finish(&ctx, digest);
+    for (size_t i = 0; i < 32u; i++) snprintf(out + i * 2u, 3, "%02x", digest[i]);
+}
+
+static void media_write(const char *path, const uint8_t *data, size_t length) {
+    FILE *file = fopen(path, "wb");
+    assert(file != NULL);
+    assert(fwrite(data, 1u, length, file) == length);
+    assert(fclose(file) == 0);
+}
+
+/* Rewrites one byte of the executable where it lies: the size and the file stay. */
+static void media_poke_eboot(const char *path, uint8_t value) {
+    FILE *file = fopen(path, "r+b");
+    assert(file != NULL);
+    assert(fseek(file, (long)((size_t)MEDIA_EBOOT_LBA * MEDIA_SECTOR + 4096u), SEEK_SET) == 0);
+    assert(fputc(value, file) == value);
+    assert(fclose(file) == 0);
+}
+
+#if defined(_WIN32) || defined(_WIN64)
+/* Sets every time Windows keeps for the file (creation, access, write and change) to
+   `when`, in 100 ns units since 1601: what an image rewritten with its times restored
+   looks like to the memo. */
+static void media_set_times(const char *path, int64_t when) {
+    HANDLE handle = CreateFileA(path, FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(handle != INVALID_HANDLE_VALUE);
+    FILE_BASIC_INFO basic;
+    memset(&basic, 0, sizeof(basic));
+    assert(GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)));
+    basic.CreationTime.QuadPart = when;
+    basic.LastAccessTime.QuadPart = when;
+    basic.LastWriteTime.QuadPart = when;
+    basic.ChangeTime.QuadPart = when;
+    assert(SetFileInformationByHandle(handle, FileBasicInfo, &basic, sizeof(basic)));
+    assert(CloseHandle(handle));
+}
+/* A distinct old time per step: 2020-01-01 plus k days, in 100 ns units since 1601. */
+#define MEDIA_TIME(k) ((int64_t)132223104000000000LL + (int64_t)(k) * 864000000000LL)
+#else
+/* POSIX: the write time can be set, the change time cannot (it becomes now). */
+static void media_set_times(const char *path, int64_t when) {
+    struct timespec times[2];
+    times[0].tv_sec = (time_t)when;
+    times[0].tv_nsec = 0;
+    times[1] = times[0];
+    assert(utimensat(AT_FDCWD, path, times, 0) == 0);
+}
+/* A distinct old time per step: 2020-01-01 plus k days, in seconds. */
+#define MEDIA_TIME(k) ((int64_t)1577836800 + (int64_t)(k) * 86400)
+/* A digest is stored only for a file whose change time is 3 s old. */
+static void media_wait_settled(void) {
+    struct timespec wait = { 3, 300000000L };
+    while (nanosleep(&wait, &wait) != 0 && errno == EINTR) {}
+}
+#endif
+
+static bool media_check(const char *path, const char *record, NkSourceMediaCheck check,
+                        uint64_t *hashed, char *error, size_t error_size) {
+    uint64_t before = nk_title_manifest_source_media_hash_count();
+    bool ok = nk_title_manifest_check_source_media(path, record, strlen(record), check,
+                                                    error, error_size);
+    *hashed = nk_title_manifest_source_media_hash_count() - before;
+    return ok;
+}
+
+static void test_source_media_display_memo_and_full_check(void) {
+    printf("[NATIVE_TEST] Source media: display memo and full check...\n");
+    char path[1024], swap[1024], record[1024], error[512];
+    char eboot_hex[65], mod_hex[65];
+    uint64_t hashed = 0;
+    snprintf(path, sizeof(path), "%s%csource-media.iso", native_test_get_root(),
+             nk_platform_path_separator());
+    snprintf(swap, sizeof(swap), "%s%csource-media-swap.iso", native_test_get_root(),
+             nk_platform_path_separator());
+    uint8_t *good = media_build_image(0x11);
+    uint8_t *other = media_build_image(0x12);
+    media_hex(good + (size_t)MEDIA_EBOOT_LBA * MEDIA_SECTOR, MEDIA_EBOOT_SIZE, eboot_hex);
+    media_hex(good + (size_t)MEDIA_MOD_LBA * MEDIA_SECTOR, MEDIA_MOD_SIZE, mod_hex);
+    snprintf(record, sizeof(record),
+             "{\"source_media\":{\"executable\":{\"path\":\"PSP_GAME/SYSDIR/EBOOT.BIN\","
+             "\"sha256\":\"%s\"},\"modules\":[{\"path\":\"PSP_GAME/USRDIR/MOD.PRX\","
+             "\"sha256\":\"%s\"},{\"path\":\"PSP_GAME/SYSDIR/EBOOT.BIN\",\"sha256\":\"%s\"}]}}",
+             eboot_hex, mod_hex, eboot_hex);
+
+    media_write(path, good, MEDIA_IMAGE_SIZE);
+    media_set_times(path, MEDIA_TIME(0));
+#if !defined(_WIN32) && !defined(_WIN64)
+    media_wait_settled();
+#endif
+
+    /* A screen's first check hashes each member once: the executable the record names
+       twice is hashed once in the call. */
+    assert(media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed == 2u);
+    /* The next screen answers from the memo. */
+    assert(media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed == 0u);
+    /* The launch path hashes in full every time, memo or not. */
+    assert(media_check(path, record, NK_SOURCE_MEDIA_FULL, &hashed, error, sizeof(error)));
+    assert(hashed == 2u);
+
+    /* Changed in place: the same size and file, the times put back. */
+    media_poke_eboot(path, 0xA5);
+    media_set_times(path, MEDIA_TIME(0));
+#if defined(_WIN32) || defined(_WIN64)
+    /* Windows lets every time be restored, so the memo still hits and a screen shows the old
+       answer: the display shortcut, which is not a security check. */
+    assert(media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed == 0u);
+#else
+    /* POSIX moved the change time, so a screen hashes again and refuses. */
+    assert(!media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed >= 1u);
+#endif
+    /* The launch path refuses the changed image although its memo entry would hit. */
+    assert(!media_check(path, record, NK_SOURCE_MEDIA_FULL, &hashed, error, sizeof(error)));
+    assert(hashed >= 1u);
+    assert(strstr(error, "Source executable revision changed") != NULL);
+    /* That refusal dropped the memo entry: the next screen hashes and shows the change. */
+    assert(!media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed >= 1u);
+    assert(strstr(error, "Source executable revision changed") != NULL);
+
+    /* Truncated (the module's last sector cut off), the times put back: the size differs,
+       so a screen hashes again, and both checks refuse. On Windows the memo first holds the
+       whole image under these times. */
+    media_write(path, good, MEDIA_IMAGE_SIZE);
+    media_set_times(path, MEDIA_TIME(1));
+#if defined(_WIN32) || defined(_WIN64)
+    assert(media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed == 2u);
+    assert(media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed == 0u);
+#endif
+    media_write(path, good, MEDIA_IMAGE_SIZE - MEDIA_SECTOR);
+    media_set_times(path, MEDIA_TIME(1));
+    assert(!media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed >= 1u);
+    assert(strstr(error, "could not be verified") != NULL);
+    assert(!media_check(path, record, NK_SOURCE_MEDIA_FULL, &hashed, error, sizeof(error)));
+    assert(strstr(error, "could not be verified") != NULL);
+
+    /* Swapped: another image of the same size moved into its place, with the same times.
+       Another file (its file ID or inode) is a miss, and both checks refuse. */
+    media_write(path, good, MEDIA_IMAGE_SIZE);
+    media_set_times(path, MEDIA_TIME(2));
+#if defined(_WIN32) || defined(_WIN64)
+    assert(media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed == 2u);
+    assert(media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed == 0u);
+#endif
+    media_write(swap, other, MEDIA_IMAGE_SIZE);
+    media_set_times(swap, MEDIA_TIME(2));
+#if defined(_WIN32) || defined(_WIN64)
+    assert(MoveFileExA(swap, path, MOVEFILE_REPLACE_EXISTING));
+#else
+    assert(rename(swap, path) == 0);
+#endif
+    media_set_times(path, MEDIA_TIME(2));
+    assert(!media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed >= 1u);
+    assert(strstr(error, "Source executable revision changed") != NULL);
+    assert(!media_check(path, record, NK_SOURCE_MEDIA_FULL, &hashed, error, sizeof(error)));
+    assert(strstr(error, "Source executable revision changed") != NULL);
+
+    /* Only the times change: a screen hashes again, and the image still matches. */
+    media_write(path, good, MEDIA_IMAGE_SIZE);
+    media_set_times(path, MEDIA_TIME(3));
+    assert(media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed == 2u);
+    media_set_times(path, MEDIA_TIME(4));
+    assert(media_check(path, record, NK_SOURCE_MEDIA_DISPLAY, &hashed, error, sizeof(error)));
+    assert(hashed == 2u);
+
+    (void)remove(path);
+    free(good);
+    free(other);
+}
+
 int main(void) {
     native_test_create_root("core-catalog");
     native_test_isolate_user_data_roots();
@@ -856,6 +1110,7 @@ int main(void) {
     test_nk_library_save_refuses_unsynced_file();
 #endif
     test_nk_font_classify_verdict();
+    test_source_media_display_memo_and_full_check();
 
     /* Catalog SIZE is deliberately not asserted here. It is a literal that every
        new public title has to come back and edit, and it never caught anything:
