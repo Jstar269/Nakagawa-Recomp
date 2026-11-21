@@ -1395,7 +1395,11 @@ quietly. Cheats that write values (health, money, items, timers the game stores 
   cannot show the marker; and a run whose window stops drawing the marker later, from the next
   VBLANK on;
 - a run with no game image placed by the host loader, and the rest of a run whose game started
-  another program.
+  another program;
+- a run whose game image is in user memory but not at `0x08804000` (the display-smoke fixture's
+  `0x08810000`, for one): a PSP loads a relocatable image at `0x08804000`, so a cheat written for
+  it would land the distance off, and such a run cannot tell a moved image from one linked where
+  it is.
 
 A package carries the runtime it was built with. One built before cheats existed would ignore the
 switch without a word, so the launcher does not start it with cheats on: it says that the package

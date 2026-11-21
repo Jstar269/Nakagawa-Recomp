@@ -1134,6 +1134,172 @@ def cheats_base0(build_dir: Path) -> int:
     return 0
 
 
+def _cheats_route_run(executable: Path, image_path: Path, base: int, cheat_file: Path,
+                      expectations: list[tuple[int, int]], video: dict[str, str],
+                      log_stem: Path, ui_root: Path | None = None) -> tuple[int, str]:
+    """Run the fixture once with cheats on and the given presenter: its exit code and output."""
+    command = [
+        str(executable), "--image", str(image_path), f"0x{base:08x}", f"0x{base:08x}",
+        "none", "none", "--sched", "--gui",
+        *(f"--expect-u32=0x{address:08x}:0x{value:08x}" for address, value in expectations),
+    ]
+    env = os.environ.copy()
+    # The run picks its own presenter, and nothing else may decide or end it.
+    for key in ("SR_DISC_ID", "SR_RECORD", "SR_REPLAY", "SR_HEADLESS_ACCEPT_PRESENTED_FRAMES",
+                "SR_VIDEOREC_DIR", "SR_TEX_DUMP", "SR_VIDEO", "SR_WINDOW_HIDDEN", "SR_UI_ROOT",
+                "SDL_VIDEO_DRIVER", "SDL_VIDEODRIVER", "SR_EXIT_AT_VBLANK", "SR_PADSCRIPT",
+                "SR_PAUSE_SCRIPT", "SR_GE_CAPTURE_FRAME", "SR_ACE"):
+        env.pop(key, None)
+    env.update({
+        "SDL_AUDIO_DRIVER": "dummy",
+        "SDL_AUDIODRIVER": "dummy",
+        "SR_CHEATS": "1",
+        "SR_CHEATS_FILE": str(cheat_file),
+        **video,
+    })
+    if ui_root is not None:
+        env["SR_UI_ROOT"] = str(ui_root)
+    completed = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True,
+                               timeout=120, check=False)
+    write_if_changed(Path(f"{log_stem}.stdout.log"), completed.stdout.encode("utf-8"))
+    write_if_changed(Path(f"{log_stem}.stderr.log"), completed.stderr.encode("utf-8"))
+    return completed.returncode, completed.stdout + completed.stderr
+
+
+def _cheats_route_exit(returncode: int, output: str, what: str) -> None:
+    if returncode != 0:
+        sys.stderr.write(output)
+        raise RuntimeError(f"{what} exited {returncode}")
+
+
+def _cheats_expect_markers(expectations: list[tuple[int, int]]) -> tuple[str, ...]:
+    return tuple(
+        f"DRIVER_EXPECT_U32 addr=0x{address:08x} got=0x{value:08x} "
+        f"expected=0x{value:08x} status=PASS"
+        for address, value in expectations
+    )
+
+
+def cheats_relocated_expectations(frames: int) -> list[tuple[int, int]]:
+    """Guest words the relocated-image run must end with: no cheat wrote anything."""
+    last_word = IMAGE_SIZE - 4
+    return [
+        # The data cheat's byte, as the file wrote it and moved with the image.
+        (PSP_IMAGE_BASE + last_word, 0),
+        (BASE + last_word, 0),
+        # The code cheat's word, as written and moved with the image.
+        (PSP_IMAGE_BASE, 0),
+        (BASE, _entry_words(frames)[0]),
+        (CHEATS_OUTSIDE_IMAGE, 0),
+        (FRAMEBUFFER, final_frame_first_pixel(frames)),
+    ]
+
+
+def cheats_relocated(build_dir: Path) -> int:
+    """Run the fixture as its manifest places it (0x08810000) with cheats on (F-86f47689).
+
+    A PSP loads this relocatable image at 0x08804000, so a cheat written for it names addresses
+    0xC000 below where this run has them, and the run cannot tell it from an image linked at
+    0x08810000. Every cheat must be refused by name and no word written; before the refusal the
+    cheats were applied at the addresses as written.
+    """
+    build_dir = build_dir.resolve()
+    frames = int(_read_manifest(build_dir / "fixture")["frames"])
+    executable = (build_dir / f"{ARTIFACT_STEM}.exe").resolve()
+    if not executable.exists():
+        executable = (build_dir / ARTIFACT_STEM).resolve()
+    cheat_file = build_dir / "cheats-relocated.ini"
+    write_if_changed(cheat_file, cheats_base0_file().encode("ascii"))
+    expectations = cheats_relocated_expectations(frames)
+    returncode, output = _cheats_route_run(
+        executable, (build_dir / f"{ARTIFACT_STEM}_image.bin").resolve(), BASE, cheat_file,
+        expectations, {"SDL_VIDEO_DRIVER": "dummy", "SDL_VIDEODRIVER": "dummy",
+                       "SR_VIDEO": "offscreen"},
+        build_dir / f"{ARTIFACT_STEM}.cheats-relocated")
+    _cheats_route_exit(returncode, output, "the relocated-image run with cheats on")
+    required = (
+        f"CHEATS: refused: this game's image is at 0x{BASE:08X}, not at 0x{PSP_IMAGE_BASE:08X} "
+        "where a PSP loads a relocatable main module",
+        *_cheats_expect_markers(expectations),
+    )
+    forbidden = ("UNKNOWN NID", "NONPLT_MISS", "INTERP_REJECT", "status=FAIL",
+                 f"CHEATS: {cheat_file.name}:", "PPSSPP-derived, not PSP-measured")
+    if failure := evidence_failure(output, required, forbidden):
+        sys.stderr.write(output)
+        raise RuntimeError(f"relocated-image cheats evidence {failure}")
+    print(f"DISPLAY_SMOKE_CHEATS-RELOCATED status=PASS frames={frames} base=0x{BASE:08x} applied=0")
+    return 0
+
+
+def cheats_windowed(build_dir: Path, win32: bool | None = None) -> int:
+    """Run the base-0 guest with cheats on in the two windows that cannot show the marker (F-9b4bb8a7).
+
+    No cheat applies without its marker (cheats.h). The GDI window has no in-game UI and says so
+    (gui.c, sr_cheats_marker_unavailable at the GDI start); the Vulkan window whose UI cannot be
+    made (SR_UI_ROOT at an empty folder, so no font) says so from gui_cheats_marker_init. In both
+    the data cheat that cheats-base0 sees applied must leave its word unwritten. The GDI variant
+    needs Win32 (SKIP elsewhere, or where the window cannot be made); the Vulkan variant needs a
+    Vulkan device and a window (NOT_RUN without them, as on hosted CI's display-smoke legs).
+    """
+    build_dir = build_dir.resolve()
+    frames = int(_read_manifest(build_dir / "fixture")["frames"])
+    executable = (build_dir / f"{BASE0_ARTIFACT_STEM}.exe").resolve()
+    if not executable.exists():
+        executable = (build_dir / BASE0_ARTIFACT_STEM).resolve()
+    image_path = (build_dir / f"{BASE0_ARTIFACT_STEM}_image.bin").resolve()
+    cheat_file = build_dir / "cheats-windowed.ini"
+    write_if_changed(cheat_file, cheats_base0_file().encode("ascii"))
+    # As in the cheats-off run of cheats-base0: the data byte is the cheat's to write.
+    expectations = cheats_base0_expectations(frames, False)
+    forbidden = ("UNKNOWN NID", "NONPLT_MISS", "INTERP_REJECT", "status=FAIL",
+                 "PPSSPP-derived, not PSP-measured")
+    results = []
+
+    if not (os.name == "nt" if win32 is None else win32):
+        results.append("gdi=SKIP(no_win32_window)")
+    else:
+        returncode, output = _cheats_route_run(
+            executable, image_path, 0, cheat_file, expectations, {"SR_VIDEO": "gdi"},
+            build_dir / f"{BASE0_ARTIFACT_STEM}.cheats-gdi")
+        if "BOOT_EVENT phase=window_ready backend=gdi" not in output:
+            results.append("gdi=SKIP(no_gdi_window)")
+        else:
+            _cheats_route_exit(returncode, output, "the GDI-window run with cheats on")
+            required = (
+                f"CHEATS: {cheat_file.name}: 1 on, 2 refused, 0 off, 0 for other discs",
+                "CHEATS: refused: the window cannot show the cheats marker (the GDI window has no "
+                "in-game UI), and cheats are not applied without it",
+                *_cheats_expect_markers(expectations),
+            )
+            if failure := evidence_failure(output, required, forbidden):
+                sys.stderr.write(output)
+                raise RuntimeError(f"GDI-window cheats evidence {failure}")
+            results.append("gdi=PASS")
+
+    with tempfile.TemporaryDirectory(prefix="display-smoke-no-ui-", dir=build_dir) as empty_ui:
+        returncode, output = _cheats_route_run(
+            executable, image_path, 0, cheat_file, expectations, {"SR_WINDOW_HIDDEN": "1"},
+            build_dir / f"{BASE0_ARTIFACT_STEM}.cheats-vulkan-no-ui", ui_root=Path(empty_ui))
+    # Without a Vulkan window the run is some other presenter's (the GDI fallback, or none),
+    # whose own result is not this variant's evidence.
+    if "BOOT_EVENT phase=window_ready backend=vulkan" not in output:
+        results.append("vulkan=NOT_RUN(no_vulkan_device_or_window)")
+    else:
+        _cheats_route_exit(returncode, output, "the Vulkan-window-without-UI run with cheats on")
+        required = (
+            f"CHEATS: {cheat_file.name}: 1 on, 2 refused, 0 off, 0 for other discs",
+            "CHEATS: refused: the window cannot show the cheats marker (",
+            *_cheats_expect_markers(expectations),
+        )
+        if failure := evidence_failure(output, required, forbidden + (
+                "CHEATS: refused: the window cannot show the cheats marker (the GDI window",)):
+            sys.stderr.write(output)
+            raise RuntimeError(f"Vulkan-window-without-UI cheats evidence {failure}")
+        results.append("vulkan=PASS")
+    print(f"DISPLAY_SMOKE_CHEATS-WINDOWED status=PASS frames={frames} {' '.join(results)}")
+    return 0
+
+
 def run_quit(build_dir: Path) -> int:
     """Close the runtime's window while the fixture guest is still running (#1377).
 
@@ -2252,6 +2418,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="run the guest built at base 0 with a CWCheat file, and again without cheats",
     )
     cheats_base0_parser.add_argument("--build-dir", type=Path, required=True)
+    cheats_relocated_parser = subparsers.add_parser(
+        "cheats-relocated",
+        help="run the guest at its manifest's 0x08810000 with cheats on: every cheat is refused",
+    )
+    cheats_relocated_parser.add_argument("--build-dir", type=Path, required=True)
+    cheats_windowed_parser = subparsers.add_parser(
+        "cheats-windowed",
+        help="run the base-0 guest with cheats on in windows that cannot show the cheats marker",
+    )
+    cheats_windowed_parser.add_argument("--build-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "run" and args.offscreen and not args.gui:
         run_parser.error("--offscreen requires --gui")
@@ -2284,6 +2460,10 @@ def main(argv: list[str] | None = None) -> int:
             return run_quit(args.build_dir)
         if args.command == "cheats-base0":
             return cheats_base0(args.build_dir)
+        if args.command == "cheats-relocated":
+            return cheats_relocated(args.build_dir)
+        if args.command == "cheats-windowed":
+            return cheats_windowed(args.build_dir)
         raise AssertionError(f"unhandled command {args.command}")
     except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as error:
         sys.stderr.write(f"DISPLAY_SMOKE_{args.command.upper()} status=FAIL: {error}\n")
