@@ -585,6 +585,12 @@ def _assignments(text: str) -> dict[str, list[str]]:
         # would split a flag such as -I$(DIR)/include into "-Idir dir/include".
         if value not in values:
             values.append(value)
+    # A `define NAME ... endef` block is a variable too; a recipe uses it as
+    # `$(call NAME)` (the achievements selftest's command, for one).
+    for name, body in re.findall(r"^define\s+([A-Za-z0-9_.-]+)[ \t]*\n(.*?)^endef\b", text, re.M | re.S):
+        values = found.setdefault(name, [])
+        if body not in values:
+            values.append(body)
     return found
 
 
@@ -592,7 +598,7 @@ def _expand(text: str, assignments: dict[str, list[str]], depth: int = 0) -> str
     if depth > 10:
         return text
     return re.sub(
-        r"\$\(([A-Za-z0-9_.-]+)\)",
+        r"\$\((?:call\s+)?([A-Za-z0-9_.-]+)\)",
         lambda match: _expand(" ".join(assignments.get(match.group(1), [])), assignments, depth + 1),
         text,
     )
