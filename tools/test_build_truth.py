@@ -2084,9 +2084,12 @@ class GuestInputTransportTests(unittest.TestCase):
             ("missing", (self.build_root / "does" / "not" / "exist.elf").as_posix(), "does not exist"),
             ("directory", build.as_posix(), "is a directory"),
         )
-        # The first build settled the root, and a refused run writes nothing to it, so the
-        # four refusals overlap.
-        runs = _concurrently(lambda case: self._make(game, case[1]), cases)
+        # Each refusal runs under a BUILD_ROOT of its own, so the four overlap without sharing
+        # anything a parse writes.
+        runs = _concurrently(
+            lambda case: self._make(game, case[1], build_root=_job_root(self.root, case[0])),
+            cases,
+        )
         for (label, _value, expect), run in zip(cases, runs, strict=True):
             with self.subTest(value=label):
                 proc = run.result()
