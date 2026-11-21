@@ -82,7 +82,7 @@ The jobs:
 | `public_export` | 2 jobs: `public_export` 0.2 min, `profile_zero_fixture` 0.4 min | 1 job, about 0.7 min: the export audit, then the profile-zero fixture build |
 | `linux_gcc16` | 1 job, 3.3 min | unchanged (not required, a container job on a hosted runner) |
 | `c_coverage` ("C coverage (informational)") | not present | 1 job, added later, on the nightly schedule and a manual run only (not required, a hosted runner; [Coverage](#coverage)) |
-| `coverage_upload` ("Upload coverage to Codecov (informational)") | not present | 1 job, added later, about a minute after `python_tools` (and `c_coverage`) end: the only job with `id-token: write`, it runs no candidate code (not required, a hosted runner; [Coverage](#coverage)) |
+| `coverage_upload` ("Upload coverage to Codecov (informational)") | not present | 1 job, added later, about a minute after `python_tools` (and `c_coverage`) end: the only job with `id-token: write`, it runs no candidate byte (not required, a hosted runner; [Coverage](#coverage)) |
 | `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
 | `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, about 16 min, and three of about 14 min |
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7) |
@@ -516,9 +516,13 @@ Every step that installs Ubuntu packages (the native parts' dependencies, and
 workflow-level `NK_APT_INSTALL`. It installs only the packages that are missing, so an
 image that carries them needs no mirror. Otherwise it probes each mirror in
 `NK_APT_MIRRORS` once for the release's `InRelease`, points the Ubuntu sources at the
-mirrors that answered, in list order, and makes up to three attempts (3 minutes for the
-index update, 8 for the install), moving the head mirror to the end of the list after a
-failed one. The list starts with the Azure mirror and `archive.ubuntu.com` and goes on to
+mirrors that answered, in list order, and makes up to three attempts, moving the head mirror to
+the end of the list after a failed one. Each attempt bounds only its network phases: 3 minutes
+for the index update and 8 for downloading the packages (`apt-get install --download-only`).
+The install that then unpacks and configures them from the local archive has no per-attempt
+bound, because a kill while dpkg works leaves it interrupted and every later attempt would fail
+on that whichever mirror it used: the step's or job's own limit ends a hung install, and attempts
+2 and 3 first run `dpkg --configure -a` (audit 2026-11-17 F-e5b6b12f). The list starts with the Azure mirror and `archive.ubuntu.com` and goes on to
 mirrors outside `ubuntu.com`: on 2026-11-11 the hosted runners reached none of Canonical's
 hosts, and the image's own mirror list holds only those. apt checks every index against
 the Ubuntu archive key whichever mirror serves it: the helper keeps each source's
@@ -1327,18 +1331,29 @@ It took 19 min 42 s in run 43102622567, on the head that added these figures.
 Both reports are uploaded by `coverage_upload`, a short job of its own, with
 `codecov/codecov-action` (pinned by commit SHA) under `flags: python` and `flags: c`,
 authenticated with that job's OIDC identity (`use_oidc: true`). `coverage_upload` is the only job
-that declares `id-token: write` beside `contents: read`, and it runs no candidate code: its steps
-are the pinned checkout (the commit's file list for Codecov's path fixing; nothing in it runs),
-artifact download and Codecov actions, with `plugins: noop` and no `run` step, on a hosted
-`ubuntu-24.04` runner. `python_tools` and `c_coverage`, which run the candidate's tests, keep the
-read-only token: each `python_tools` shard keeps its `coverage-python.xml` as the artifact
-`coverage-python-shard-<n>`, and `c_coverage` keeps its gcov reports as `coverage-c`. Before
-audit 2026-11-17 F-6a075a43 the two measuring jobs uploaded for themselves and held
-`id-token: write`, so any test or tool code in a same-repository head could mint the job's OIDC
-token. `coverage_upload` runs once `python_tools` or `c_coverage` has run, after both; it uploads
-the Python reports of every shard that passed and the C reports only after a complete
-`c_coverage` run. `ci_required` neither needs nor reads it, and `fail_ci_if_error: false` keeps
-an upload or Codecov outage from failing it.
+that declares `id-token: write` beside `contents: read`, and no byte of the candidate may run in
+it. Its steps are the pinned checkout, artifact download and Codecov actions, with no `run` step,
+on a hosted `ubuntu-24.04` runner:
+
+- The checkout goes into `commit-files/` only so the uploader can list the commit's files for
+  Codecov's path fixing (`root_dir`). The Codecov steps run in the workspace root, which holds
+  nothing else, and the artifacts download under the runner's temporary directory.
+- `cleanup: true` makes the action's wrapper download its CLI into a fresh temporary directory
+  and run it from there. Without it the wrapper downloads to `./codecov` in its working
+  directory and runs whatever is at that path, so a candidate tree carrying its own `codecov`
+  entry there would run with the token (review of #2891).
+- `fail_ci_if_error: true` makes the wrapper stop when the CLI's download, signature or SHA-256
+  check fails. Under `false` it only prints those failures and runs the file anyway.
+- `plugins: noop` keeps the CLI from running any coverage tool.
+
+`python_tools` and `c_coverage`, which run the candidate's tests, keep the read-only token: each
+`python_tools` shard keeps its `coverage-python.xml` as the artifact `coverage-python-shard-<n>`,
+and `c_coverage` keeps its gcov reports as `coverage-c`. Before audit 2026-11-17 F-6a075a43 the
+two measuring jobs uploaded for themselves and held `id-token: write`, so any test or tool code in
+a same-repository head could mint the job's OIDC token. `coverage_upload` runs once `python_tools`
+or `c_coverage` has run, after both; it uploads the Python reports of every shard that passed and
+the C reports only after a complete `c_coverage` run. `ci_required` neither needs nor reads it, so
+an upload failure or a Codecov outage shows red on this job and never fails a gate.
 
 **The numbers are informational.** [`.github/codecov.yml`](../.github/codecov.yml) marks the
 project and patch status checks `informational: true`, so neither can block a

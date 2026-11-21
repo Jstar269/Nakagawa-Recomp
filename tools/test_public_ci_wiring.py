@@ -3064,11 +3064,13 @@ class CoverageWiringTests(unittest.TestCase):
                 # and runs no coverage tool over the checkout. The C reports' gcov plugin would
                 # also run gcov where the objects' repository-relative sources cannot be opened.
                 self.assertIn(f"directory: {directory}", text)
-                self.assertIn("root_dir: ${{ github.workspace }}", text)
+                self.assertIn("root_dir: ${{ github.workspace }}/commit-files", text)
                 self.assertIn("plugins: noop", text)
                 self.assertNotIn("plugins: gcov", text)
                 self.assertIn(f"flags: {flag}", text)
-                self.assertIn("fail_ci_if_error: false", text)
+                # Fail closed: the wrapper must stop on a failed CLI download or check rather than
+                # run what it has (test_only_the_upload_job_that_runs_no_candidate_code_...).
+                self.assertIn("fail_ci_if_error: true", text)
                 # Each upload reads the artifact its measuring job kept.
                 keep_name, artifact, fetch_name = self.ARTIFACTS[job]
                 keep = "\n".join(_ci_step(self.blocks[job], keep_name) or [])
@@ -3114,7 +3116,39 @@ class CoverageWiringTests(unittest.TestCase):
             ["actions/checkout", "actions/download-artifact", "codecov/codecov-action"],
         )
         self.assertIn("    runs-on: ubuntu-24.04", block)
-        self.assertIn("          persist-credentials: false", block)
+        self.assertNotIn("defaults:", "\n".join(block))
+        self.assertNotIn("working-directory:", "\n".join(block))
+        # No candidate byte on the execution path (review of #2891). The pinned wrapper
+        # (codecov-action dist/codecov.sh) downloads its CLI to ./codecov in the step's working
+        # directory and runs that path, and under fail_ci_if_error: false it runs it even after a
+        # failed download or SHA-256 check, so a checkout in the workspace root that carries its
+        # own `codecov` entry ran with the token. The checkout now goes only into a subdirectory,
+        # every Codecov step downloads its CLI into a fresh temporary directory (cleanup: true)
+        # and fails closed, and no step names a binary to run instead of the verified download.
+        steps = [_ci_step(block, line.strip()[len("- name: "):]) or []
+                 for line in block if line.strip().startswith("- name: ")]
+        checkouts = [step for step in steps if any("uses: actions/checkout@" in line for line in step)]
+        self.assertEqual(len(checkouts), 1, "coverage_upload checks out the candidate once, into a subdirectory")
+        self.assertIn("          path: commit-files", checkouts[0])
+        self.assertIn("          persist-credentials: false", checkouts[0])
+        codecov_steps = [step for step in steps if any("uses: codecov/codecov-action@" in line for line in step)]
+        self.assertEqual(len(codecov_steps), len(self.UPLOADS))
+        for step in codecov_steps:
+            with self.subTest(step=step[0].strip()):
+                inputs = {line.strip().split(":", 1)[0] for line in step if re.match(r"^ {10}[a-z_]+:", line)}
+                self.assertIn("          cleanup: true", step)
+                self.assertIn("          fail_ci_if_error: true", step)
+                self.assertIn("          plugins: noop", step)
+                self.assertIn("          root_dir: ${{ github.workspace }}/commit-files", step)
+                self.assertTrue(any(line.startswith("          directory: ${{ runner.temp }}/") for line in step))
+                # Inputs that would run something other than the verified download, or skip its check.
+                self.assertFalse(inputs & {"binary", "use_pypi", "skip_validation", "version", "gcov_executable",
+                                           "run_command", "working-directory"}, inputs)
+        # The downloads land outside the workspace, so the root holds only commit-files/.
+        for step in steps:
+            if any("uses: actions/download-artifact@" in line for line in step):
+                with self.subTest(step=step[0].strip()):
+                    self.assertTrue(any(line.startswith("          path: ${{ runner.temp }}/") for line in step))
         # The workflow itself stays read-only and still names no write permission.
         self.assertIn("permissions:\n  contents: read\n", self.ci)
         self.assertNotIn("contents: write", self.ci)
@@ -4369,6 +4403,15 @@ class AptInstallHelperTests(unittest.TestCase):
         timed = self.timeout_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(timed, 2 * ["apt-get update",
                                      "apt-get install -y --download-only --no-install-recommends libc6-dev-i386"])
+
+    def test_no_text_still_bounds_the_install_itself(self) -> None:
+        # Review of #2891: the 8 minutes bound only the --download-only run now, so a reader told
+        # "8 for the install" expects a hung install to end there.
+        for path in (ROOT / ".github" / "workflows" / "ci.yml", ROOT / "docs" / "CI.md"):
+            with self.subTest(path=path.name):
+                flat = " ".join(line.strip().lstrip("#").strip()
+                                for line in path.read_text(encoding="utf-8").splitlines())
+                self.assertNotIn("8 for the install", flat)
 
     def test_every_attempt_failing_fails_the_step(self) -> None:
         done, log, _ = self.run_helper("libc6-dev-i386", up=self.ALL_MIRRORS, install_failures=99)

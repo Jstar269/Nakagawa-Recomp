@@ -922,9 +922,11 @@ jobs:
           mkdir -p "$archives/partial"
           printf '%s\n' "Dir::Cache::Archives \"$archives\";" 'APT::Keep-Downloaded-Packages "true";' \
             | sudo tee /etc/apt/apt.conf.d/80-ci-apt-cache >/dev/null
-          # NK_APT_INSTALL is the workflow's apt helper: it caps each attempt (3 minutes for the
-          # index update, 8 for the install) so a slow mirror cannot spend the step's budget, and
-          # moves to the next mirror that answered after a failed attempt.
+          # NK_APT_INSTALL is the workflow's apt helper: it caps each attempt's network phases
+          # (3 minutes for the index update, 8 for the package download) so a slow mirror cannot
+          # spend the step's budget, and moves to the next mirror that answered after a failed
+          # attempt. The install that unpacks and configures has no per-attempt bound: the step's
+          # own limit ends a hung one, and a retry first finishes an interrupted dpkg run.
           bash -c "$NK_APT_INSTALL" nk-apt-install build-essential cmake curl gcc-mipsel-linux-gnu \
             git libc6-dev-i386 libvulkan-dev \
             libxcursor-dev libxext-dev libxfixes-dev libxi-dev libxinerama-dev \
@@ -1859,9 +1861,11 @@ jobs:
           mkdir -p "$archives/partial"
           printf '%s\n' "Dir::Cache::Archives \"$archives\";" 'APT::Keep-Downloaded-Packages "true";' \
             | sudo tee /etc/apt/apt.conf.d/80-ci-apt-cache >/dev/null
-          # NK_APT_INSTALL is the workflow's apt helper: it caps each attempt (3 minutes for the
-          # index update, 8 for the install) so a slow mirror cannot spend the step's budget, and
-          # moves to the next mirror that answered after a failed attempt.
+          # NK_APT_INSTALL is the workflow's apt helper: it caps each attempt's network phases
+          # (3 minutes for the index update, 8 for the package download) so a slow mirror cannot
+          # spend the step's budget, and moves to the next mirror that answered after a failed
+          # attempt. The install that unpacks and configures has no per-attempt bound: the step's
+          # own limit ends a hung one, and a retry first finishes an interrupted dpkg run.
           bash -c "$NK_APT_INSTALL" nk-apt-install build-essential cmake curl gcc-mipsel-linux-gnu \
             git libc6-dev-i386 libvulkan-dev \
             libxcursor-dev libxext-dev libxfixes-dev libxi-dev libxinerama-dev \
@@ -2321,15 +2325,22 @@ jobs:
   coverage_upload:
     name: Upload coverage to Codecov (informational)
     # The only job with id-token: write, the OIDC identity Codecov's upload authenticates with
-    # (use_oidc: true) instead of a stored token. It runs no candidate code: its steps are the
-    # pinned checkout, artifact download and Codecov actions, and no run step. The checkout gives
-    # the uploader the commit's file list for Codecov's path fixing; nothing in it is executed,
-    # and plugins: noop keeps the uploader from running coverage tools over it. python_tools and
-    # c_coverage, which run the candidate's tests, keep the read-only token and hand their
-    # reports over as artifacts (audit 2026-11-17 F-6a075a43). A hosted runner, never the nk-wsl
-    # pool. Informational only: ci_required neither needs nor reads it, `fail_ci_if_error: false`
-    # and the Codecov statuses are non-blocking (.github/codecov.yml), so a Codecov outage never
-    # fails a gate.
+    # (use_oidc: true) instead of a stored token. No byte of the candidate may run here: the steps
+    # are the pinned checkout, artifact download and Codecov actions, with no run step.
+    # python_tools and c_coverage, which run the candidate's tests, keep the read-only token and
+    # hand their reports over as artifacts (audit 2026-11-17 F-6a075a43).
+    # The checkout goes into commit-files/, only so the uploader can list the commit's files for
+    # Codecov's path fixing (root_dir). The Codecov steps run in the workspace root, which holds
+    # nothing but that directory, and cleanup: true makes the action's wrapper download its CLI
+    # into a fresh temporary directory and run it from there. Without it the wrapper downloads to
+    # ./codecov and runs whatever is at that path, so a candidate tree with its own codecov entry
+    # at the working directory would run with the token. fail_ci_if_error: true makes the
+    # wrapper stop when the CLI's download, signature or SHA-256 check fails instead of running
+    # an unverified file (with false, the wrapper only prints those failures and goes on), and
+    # plugins: noop keeps the CLI from running any coverage tool. A hosted runner, never the
+    # nk-wsl pool. Informational only: ci_required neither needs nor reads this job, and the
+    # Codecov statuses are non-blocking (.github/codecov.yml), so an upload failure or a Codecov
+    # outage shows red on this job and never fails a gate.
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -2341,9 +2352,10 @@ jobs:
           (needs.python_tools.result != 'skipped' || needs.c_coverage.result != 'skipped') }}
     timeout-minutes: 10
     steps:
-      - name: Check out repository
+      - name: Check out the commit's file list for path fixing
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          path: commit-files
           persist-credentials: false
 
       # Every shard that passed kept its partial report; Codecov merges them under the python flag.
@@ -2359,12 +2371,13 @@ jobs:
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           use_oidc: true
+          cleanup: true
           directory: ${{ runner.temp }}/coverage-python
-          root_dir: ${{ github.workspace }}
+          root_dir: ${{ github.workspace }}/commit-files
           plugins: noop
           flags: python
           name: python-shards
-          fail_ci_if_error: false
+          fail_ci_if_error: true
 
       # c_coverage keeps its reports only when every measurement passed.
       - name: Fetch the C coverage reports
@@ -2380,12 +2393,13 @@ jobs:
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           use_oidc: true
+          cleanup: true
           directory: ${{ runner.temp }}/c-coverage-gcov
-          root_dir: ${{ github.workspace }}
+          root_dir: ${{ github.workspace }}/commit-files
           plugins: noop
           flags: c
           name: c-native-selftests
-          fail_ci_if_error: false
+          fail_ci_if_error: true
 
   android_build:
     name: Android launcher build
