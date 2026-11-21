@@ -2319,6 +2319,19 @@ class TextHygieneTests(unittest.TestCase):
         self.assertNotIn("TEXT_FINAL_NEWLINE", self._codes(data, path=path))
         self.assertIn("TEXT_FINAL_NEWLINE", self._codes(data + b" ", path=path))
 
+    def test_exact_spdx_upstream_files_keep_their_byte_identity(self):
+        # spdx/spdx-spec v2.3 ends LICENSE and schemas/spdx-schema.json without a final newline.
+        for path, digest in (
+            ("third_party/spdx/LICENSE", "017e38491cccbd2bdb6da0a32a33db9ec245b5dab30fdcd09f2c742c975e5b35"),
+            ("third_party/spdx/spdx-schema-2.3.json",
+             "239208b7ac287b3cf5d9a9af23f9d69863971102a5e1587a27a398b43490b89b"),
+        ):
+            with self.subTest(path):
+                data = (publish_audit.ROOT / path).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), digest)
+                self.assertNotIn("TEXT_FINAL_NEWLINE", self._codes(data, path=path))
+                self.assertIn("TEXT_FINAL_NEWLINE", self._codes(data + b" ", path=path))
+
     def test_binary_content_is_never_reported(self):
         # NUL-bearing data is binary; CRLF inside it is not a line-ending defect.
         self.assertEqual(self._codes(NUL + b"payload" + CRLF), [])
