@@ -588,6 +588,41 @@ def _assignments(text: str) -> dict[str, list[str]]:
     return found
 
 
+_CONDITIONAL_OPEN = re.compile(r"^\s*(?:ifeq|ifneq|ifdef|ifndef)\b")
+_CONDITIONAL_CLOSE = re.compile(r"^\s*endif\b")
+_DEFINE_OPEN = re.compile(r"^\s*(?:override\s+)?define\b")
+_DEFINE_CLOSE = re.compile(r"^\s*endef\b")
+
+
+def _default_assignments(text: str) -> dict[str, list[str]]:
+    """The values assigned outside every conditional: the default build.
+
+    Unlike `_assignments`, an append inside an ``ifeq``/``ifdef`` branch (an
+    opt-in debug or trace switch, a platform's SDK folder) is left out, so a
+    rule expanded with this map carries exactly the flags every default build
+    passes, and in the order it passes them.
+    """
+    found: dict[str, list[str]] = {}
+    pattern = re.compile(r"^(?:override\s+)?([A-Za-z0-9_.-]+)\s*(?::=|\?=|\+=|=)\s*(.*)$")
+    depth = 0
+    in_define = False
+    for line in text.splitlines():
+        if in_define:
+            in_define = _DEFINE_CLOSE.match(line) is None
+            continue
+        if _DEFINE_OPEN.match(line):
+            in_define = True
+        elif _CONDITIONAL_OPEN.match(line):
+            depth += 1
+        elif _CONDITIONAL_CLOSE.match(line):
+            depth -= 1
+        elif depth == 0 and (match := pattern.match(line)) is not None:
+            values = found.setdefault(match.group(1), [])
+            if match.group(2) not in values:
+                values.append(match.group(2))
+    return found
+
+
 def _expand(text: str, assignments: dict[str, list[str]], depth: int = 0) -> str:
     if depth > 10:
         return text
@@ -887,11 +922,13 @@ class TestVendoredFilesUseTheirBuildFlags(unittest.TestCase):
 
     makefile: str
     assignments: dict[str, list[str]]
+    default_build: dict[str, list[str]]
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.makefile = _makefile_text()
         cls.assignments = _assignments(cls.makefile)
+        cls.default_build = _default_assignments(cls.makefile)
 
     def test_only_manifest_imports_take_the_vendored_flags(self) -> None:
         for source in ("src/rt/atrac3p/libavcodec/atrac3.c",           # imported + LOCAL DELTA
@@ -944,6 +981,16 @@ class TestVendoredFilesUseTheirBuildFlags(unittest.TestCase):
                     listed = {flag for flag in build.flags if _POLICY_FLAG.match(flag)}
                     self.assertEqual(listed, on_rule,
                                      f"{folder}: the standard and warning flags differ from its rule")
+                    # Defines and include folders, both ways, against the default build's
+                    # expansion; the include folders also in order, since the compiler
+                    # searches them left to right.
+                    default = _expand(" ".join(block.splitlines()[1:]), self.default_build).split()
+                    self.assertEqual({flag for flag in build.flags if flag.startswith(("-D", "-U"))},
+                                     {token for token in default if token.startswith(("-D", "-U"))},
+                                     f"{folder}: the defines differ from its rule")
+                    self.assertEqual(list(dict.fromkeys(flag for flag in build.flags if flag.startswith("-I"))),
+                                     list(dict.fromkeys(token for token in default if token.startswith("-I"))),
+                                     f"{folder}: the include folders or their order differ from its rule")
 
     def test_the_policy_check_catches_an_added_werror(self) -> None:
         """Guard the guard: listing -Werror for a set its rule builds without it must fail."""
@@ -953,6 +1000,38 @@ class TestVendoredFilesUseTheirBuildFlags(unittest.TestCase):
             result = unittest.TestResult()
             TestVendoredFilesUseTheirBuildFlags("test_vendored_flags_mirror_the_makefile_rules").run(result)
         self.assertTrue(result.failures, "an invented -Werror was not caught")
+
+    def _mirror_check_fails(self, folder: str, flags: tuple[str, ...]) -> bool:
+        build = contrib_check.VendoredBuild(contrib_check.VENDORED_BUILDS[folder].recipes, flags)
+        with mock.patch.dict(contrib_check.VENDORED_BUILDS, {folder: build}):
+            result = unittest.TestResult()
+            TestVendoredFilesUseTheirBuildFlags("test_vendored_flags_mirror_the_makefile_rules").run(result)
+        return bool(result.failures)
+
+    def test_the_mirror_check_catches_define_and_include_drift(self) -> None:
+        """Guard the guard, both ways: a define or folder dropped, invented or reordered must fail."""
+        libchdr = contrib_check.VENDORED_BUILDS["third_party/libchdr/"].flags
+        h264 = contrib_check.VENDORED_BUILDS["src/rt/h264_ffmpeg_sub/"].flags
+        local = h264.index("-Isrc/rt/h264_ffmpeg_sub")
+        mutants = {
+            "a define dropped": ("third_party/libchdr/",
+                                 tuple(flag for flag in libchdr if flag != "-DMINIZ_NO_TIME")),
+            "an include dropped": ("third_party/libchdr/",
+                                   tuple(flag for flag in libchdr if flag != "-Ithird_party/libchdr/deps/miniz-3.1.2")),
+            "a define invented": ("third_party/libchdr/", libchdr + ("-DMINIZ_NO_MALLOC",)),
+            "an include invented": ("third_party/libchdr/", libchdr + ("-Ithird_party/libchdr/src",)),
+            "includes reordered": ("src/rt/h264_ffmpeg_sub/",
+                                   h264[:local] + h264[local + 1:] + (h264[local],)),
+        }
+        for name, (folder, flags) in mutants.items():
+            with self.subTest(mutant=name):
+                self.assertTrue(self._mirror_check_fails(folder, flags), f"{name} was not caught")
+
+    def test_the_default_build_leaves_out_conditional_appends(self) -> None:
+        text = ("X ?= -DA\nifeq ($(OPT),1)\nX += -DB\nelse\nX += -DC\nendif\n"
+                "define RULE\nX += -DD\nendef\nX += -DE\n")
+        self.assertEqual(_default_assignments(text), {"X": ["-DA", "-DE"]})
+        self.assertEqual(_assignments(text)["X"], ["-DA", "-DB", "-DC", "-DD", "-DE"])
 
     def test_an_imported_file_compiles_with_its_build_flags(self) -> None:
         compiler = contrib_check.os.environ.get("CC") or contrib_check.find_tool("gcc") or contrib_check.find_tool("cc")

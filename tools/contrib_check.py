@@ -279,7 +279,9 @@ class VendoredBuild:
     change to such a file on upstream warnings the build never treats as
     errors.  *recipes* name the Makefile pattern rules that compile the set;
     *flags* are the standard, warning, define and include flags those rules
-    pass, minus optimisation and dependency flags.  ``tools/test_contrib_check.py``
+    pass in the default build (no opt-in debug or trace switch), minus
+    optimisation and dependency flags, with the include folders in the rule's
+    order.  ``tools/test_contrib_check.py``
     fails if they drift from the rules.
     """
 
@@ -295,13 +297,16 @@ VENDORED_BUILDS: dict[str, VendoredBuild] = {
     "src/rt/atrac3p/": VendoredBuild(
         recipes=("$(BUILD_DIR)/atrac3p_%.o",),
         flags=("-Wall", "-Wextra", "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
+               "-DSR_FLIGHT_RECORDER_LINKED", "-DPERF_AOT_INSTRUCTIONS=0", "-DSR_PUBLIC_SAFE",
                "-Isrc/rt", "-Isrc/core", "-Isrc/rt/atrac3p",
                "-Isrc/rt/atrac3p/libavcodec", "-Isrc/rt/atrac3p/libavutil"),
     ),
     "src/rt/h264_ffmpeg_sub/": VendoredBuild(
         recipes=("$(BUILD_DIR)/h264sub_%.o",),
         flags=("-Isrc/rt/h264_ffmpeg_sub", "-Isrc/rt", "-Isrc/core", "-Wall", "-Wextra", "-w", "-std=c11",
-               "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS", "-DHAVE_AV_CONFIG_H",
+               "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
+               "-DSR_FLIGHT_RECORDER_LINKED", "-DPERF_AOT_INSTRUCTIONS=0", "-DSR_PUBLIC_SAFE",
+               "-DHAVE_AV_CONFIG_H",
                "-D_ISOC99_SOURCE", "-D_FILE_OFFSET_BITS=64", "-D_LARGEFILE_SOURCE",
                "-D_POSIX_C_SOURCE=200112", "-D_XOPEN_SOURCE=600",
                "-include", "src/rt/h264_ffmpeg_sub/nk_h264_symbols.h"),
