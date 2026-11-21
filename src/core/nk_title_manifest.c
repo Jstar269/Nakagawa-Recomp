@@ -5545,6 +5545,25 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         json_free(package);
         return NK_RUNTIME_PACKAGE_STALE;
     }
+    {
+        /* Validated by package_validate_contract when present. */
+        const JsonNode *source = obj_get(obj_get(package, "runtime"), "source_commit");
+        const char *text = NULL;
+        if (source) {
+            if (package_string(obj_get(source, "commit"), &text)) {
+                snprintf(resolved_info.runtime_source_commit,
+                         sizeof(resolved_info.runtime_source_commit), "%s", text);
+            }
+            if (package_string(obj_get(source, "origin"), &text)) {
+                snprintf(resolved_info.runtime_source_origin,
+                         sizeof(resolved_info.runtime_source_origin), "%s", text);
+            }
+            if (package_string(obj_get(source, "reason"), &text)) {
+                snprintf(resolved_info.runtime_source_reason,
+                         sizeof(resolved_info.runtime_source_reason), "%s", text);
+            }
+        }
+    }
     char package_identity_digest[65] = "";
     if (!package_validate_completion(package_root, package, obj_get(package, "cache"),
                                      exe_relative, exe_hash, package_identity_digest,

@@ -203,6 +203,9 @@ typedef struct {
        the authentic package's status never answers for the enhanced build. */
     char enhancement_package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
     char package_identity[65];
+    /* The package's runtime source commit line for the problem report (#2875), e.g.
+     * "<40 hex> (install record)" or "unknown (reason)"; empty when not recorded. */
+    char runtime_source[192];
     NkRuntimePackageStatus status;
     uint64_t last_checked_ms;
     /* Why the package is not usable, as the validator said it (may be empty). */
@@ -1751,6 +1754,14 @@ void player_app_runtime_package_cache_store(
  * so it has no new reason to give. */
 void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
                                                  const char *reason);
+/* Records the runtime source commit the validated package records (#2875) for the entry
+ * stored at game_index: commit and origin as NkRuntimePackageInfo holds them. Called
+ * only after a validation ran; an empty origin (a package from before the record)
+ * clears the line. */
+void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int game_index,
+                                                         const char *commit,
+                                                         const char *origin,
+                                                         const char *reason);
 /* The validator's reason for the title's current package state, or NULL. */
 const char *player_app_runtime_package_reason(const PlayerApp *app,
                                               const GameRecord *game);

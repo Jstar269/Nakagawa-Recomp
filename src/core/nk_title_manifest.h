@@ -59,6 +59,13 @@ typedef struct {
     char executable_path[NK_MAX_PATH];
     char image_path[NK_MAX_PATH];
     bool validation_cache_hit;
+    /* The runtime source commit the package records (#2875): 40 lowercase hex, or empty
+     * when the package predates the record or records it as unknown. origin is
+     * "install-record", "git", "unknown", or empty when not recorded; reason names why
+     * an unknown commit is unknown. */
+    char runtime_source_commit[41];
+    char runtime_source_origin[16];
+    char runtime_source_reason[128];
 } NkRuntimePackageInfo;
 
 /* Parse and validate a manifest from a memory buffer.

@@ -2364,6 +2364,43 @@ static void test_report_this_game(void) {
         assert(strstr(report, "Reason: Stopped at ~" RP_SEP "x (<user>)\n") != NULL);
         assert(strstr(report, "Synthetic") == NULL && strstr(report, "synthetic-example") == NULL);
         assert(strstr(report, "%USERPROFILE%") == NULL);
+        assert(strstr(report, "Runtime source: ") == NULL);
+
+        /* #2875: the report names the runtime source commit the package records, beside
+           the player commit; an unknown one says why; a package without the record shows
+           no line, and a store for the same title keeps the line. */
+        {
+            int subject = player_app_error_subject_index(app, &app->last_error);
+            assert(subject == 0);
+            player_app_runtime_package_cache_store(app, subject, &app->games[subject], true,
+                                                   "0123456789abcdef0123456789abcdef"
+                                                   "0123456789abcdef0123456789abcdef",
+                                                   NK_RUNTIME_PACKAGE_OK, true, 1u);
+            player_app_runtime_package_cache_set_runtime_source(
+                app, subject, "89abcdef0123456789abcdef0123456789abcdef", "install-record", "");
+            assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
+                                                      RP_HOME, user, report, sizeof(report)) > 0);
+            assert(strstr(report, "Package: ") != NULL);
+            assert(strstr(report, "Runtime source: 89abcdef0123456789abcdef0123456789abcdef"
+                                  " (install record)\n") != NULL);
+            player_app_runtime_package_cache_store(app, subject, &app->games[subject], true,
+                                                   NULL, NK_RUNTIME_PACKAGE_OK, true, 2u);
+            assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
+                                                      RP_HOME, user, report, sizeof(report)) > 0);
+            assert(strstr(report, "Runtime source: 89abcdef0123456789abcdef0123456789abcdef"
+                                  " (install record)\n") != NULL);
+            player_app_runtime_package_cache_set_runtime_source(
+                app, subject, "", "unknown",
+                "the source tree has no install record and no git metadata");
+            assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
+                                                      RP_HOME, user, report, sizeof(report)) > 0);
+            assert(strstr(report, "Runtime source: unknown (the source tree has no install "
+                                  "record and no git metadata)\n") != NULL);
+            player_app_runtime_package_cache_set_runtime_source(app, subject, "", "", "");
+            assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
+                                                      RP_HOME, user, report, sizeof(report)) > 0);
+            assert(strstr(report, "Runtime source: ") == NULL);
+        }
 
         /* A crash with no boundary: no known issue, its exit code in the
            problem, Windows crash codes in hex. */
@@ -19466,6 +19503,14 @@ int main(int argc, char **argv) {
             assert(nk_launch_validate_runtime_package(
                        validation_root, &game, &runtime_source_info, reason,
                        sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+            /* The player reads the record back for the problem report. */
+            static const char *const origins[] = {"install-record", "git", "unknown"};
+            assert(strcmp(runtime_source_info.runtime_source_origin, origins[i]) == 0);
+            assert(strcmp(runtime_source_info.runtime_source_commit,
+                          i < 2 ? "0123456789abcdef0123456789abcdef01234567" : "") == 0);
+            assert(i < 2 ? runtime_source_info.runtime_source_reason[0] == '\0'
+                         : strstr(runtime_source_info.runtime_source_reason,
+                                  "no install record") != NULL);
         }
         for (size_t i = 0; i < sizeof(malformed_runtime_source_records) /
                                    sizeof(malformed_runtime_source_records[0]); i++) {

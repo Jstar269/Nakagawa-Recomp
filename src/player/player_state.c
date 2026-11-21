@@ -446,12 +446,17 @@ void player_app_runtime_package_cache_store(
     /* A stored reason survives a store for the same title; a warm cache hit
      * stores no new reason, and the earlier one still describes the package. */
     char prior_reason[sizeof(entry->reason)] = "";
+    char prior_runtime_source[sizeof(entry->runtime_source)] = "";
     if (player_runtime_package_cache_entry_is_for(entry, game)) {
         snprintf(prior_reason, sizeof(prior_reason), "%s", entry->reason);
+        snprintf(prior_runtime_source, sizeof(prior_runtime_source), "%s",
+                 entry->runtime_source);
     }
     memset(entry, 0, sizeof(*entry));
     player_runtime_cache_set_game_key(entry, game);
     snprintf(entry->reason, sizeof(entry->reason), "%s", prior_reason);
+    snprintf(entry->runtime_source, sizeof(entry->runtime_source), "%s",
+             prior_runtime_source);
     entry->status_valid = true;
     entry->identity_valid = identity_valid;
     entry->runtime_available = runtime_available;
@@ -472,6 +477,24 @@ void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
         game_index >= app->game_count) return;
     snprintf(app->runtime_package_cache[game_index].reason,
              sizeof(app->runtime_package_cache[game_index].reason), "%s", reason);
+}
+
+void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int game_index,
+                                                         const char *commit,
+                                                         const char *origin,
+                                                         const char *reason) {
+    if (!app || game_index < 0 || game_index >= app->game_count) return;
+    char *out = app->runtime_package_cache[game_index].runtime_source;
+    const size_t cap = sizeof(app->runtime_package_cache[game_index].runtime_source);
+    out[0] = '\0';
+    if (!origin || !origin[0]) return;
+    if (commit && commit[0]) {
+        snprintf(out, cap, "%s (%s)", commit,
+                 strcmp(origin, "install-record") == 0 ? "install record" :
+                 strcmp(origin, "git") == 0 ? "git checkout" : origin);
+    } else {
+        snprintf(out, cap, "unknown (%s)", reason && reason[0] ? reason : "not recorded");
+    }
 }
 
 const char *player_app_runtime_package_reason(const PlayerApp *app,
@@ -5671,6 +5694,11 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
                      package->package_identity[0] ? ", identity " : "",
                      package->package_identity);
             player_report_append(raw, sizeof(raw), &used, "Package: ", line);
+            /* Beside the player's own commit on the version line (#2875). */
+            if (package->runtime_source[0]) {
+                player_report_append(raw, sizeof(raw), &used, "Runtime source: ",
+                                     package->runtime_source);
+            }
         }
     }
     player_report_append(raw, sizeof(raw), &used, "Boundary: ", error->stop_boundary);
