@@ -1902,10 +1902,25 @@ class PspOracleDeviceIdentityTests(unittest.TestCase):
         makefile_path = (
             Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         )
+        git = shutil.which("git")
+        if git is None:
+            self.skipTest("git is unavailable")
+        # The Makefile's $(shell ...) lines use POSIX redirects (2>/dev/null). A make with no
+        # sh on PATH hands them to cmd.exe, which cannot run them, so no guard can be checked.
+        # Windows make needs sh appended to PATH; where none is installed the test skips.
+        make_env = {k: v for k, v in os.environ.items() if k not in GIT_REPOSITORY_VARIABLES}
+        if os.name == "nt" and shutil.which("sh") is None:
+            git_root = Path(git).resolve().parents[1]
+            sh_dirs = [d for d in (git_root / "usr" / "bin", git_root / "bin")
+                       if (d / "sh.exe").is_file()]
+            if not sh_dirs:
+                self.skipTest("the probe Makefile needs a POSIX sh on PATH (Git for Windows usr/bin)")
+            make_env["PATH"] = os.pathsep.join([make_env.get("PATH", ""), str(sh_dirs[0])])
         missing = subprocess.run(
             [make, "-C", str(makefile_path), "PROBE_BUILD_COMMIT_FULL="],
             capture_output=True,
             text=True,
+            env=make_env,
             check=False,
         )
         self.assertNotEqual(missing.returncode, 0)
@@ -1913,10 +1928,7 @@ class PspOracleDeviceIdentityTests(unittest.TestCase):
             "PROBE_BUILD_COMMIT could not be determined",
             missing.stdout + missing.stderr,
         )
-        git = shutil.which("git")
-        if git is None:
-            self.skipTest("git is unavailable")
-        env = {k: v for k, v in os.environ.items() if k not in GIT_REPOSITORY_VARIABLES}
+        env = make_env
         live_status = [git, "-C", str(makefile_path.parents[2]), "status", "--porcelain",
                        "--untracked-files=normal"]
         before = subprocess.run(live_status, capture_output=True, text=True, env=env, check=True)
