@@ -2724,8 +2724,8 @@ int main(int argc, char **argv) {
         self._assert_refused_in_both_tiers(sfo_outside, "PSP_GAME/PARAM.SFO extent is invalid")
         # inspect_compatibility_preflight: PARAM.SFO.
         self.assertEqual(disc_check(sfo_outside), ("UNSUPPORTED", unreadable))
-        # A PARAM.SFO record outside the image before one inside it is still refused by the
-        # tool. nk_iso_inspect's own PARAM.SFO scan passes it over, as before this PR.
+        # A PARAM.SFO record outside the image before one inside it is refused in both tiers
+        # (the PARAM.SFO lookup rule; test_param_sfo_lookup_gives_one_result_in_both_tiers).
         sfo = build_param_sfo("TEST00001", "Test Game")
         two_sfo = bytearray(good.read_bytes())
         game_dir = (_dir_record(bytes([0]), 34, 2048, True) + _dir_record(bytes([1]), 33, 2048, True)
@@ -2739,7 +2739,8 @@ int main(int argc, char **argv) {
             inspect_iso(sfo_twice)
         self.assertEqual(str(caught.exception), "PSP_GAME/PARAM.SFO extent is invalid")
         self.assertEqual(disc_check(sfo_twice), ("UNSUPPORTED", unreadable))
-        self.assertEqual(self._run_native_inspect(sfo_twice).get("RESULT"), "OK")
+        self.assertEqual(self._run_native_inspect(sfo_twice).get("MESSAGE"),
+                         "PSP_GAME/PARAM.SFO extent is invalid")
 
         # _boot_executable_facts and _classify_iso_executable (preflight and the boot
         # selection), iso_executable_sha256: EBOOT.BIN of a disc with a retail-form ID.
@@ -2777,6 +2778,165 @@ int main(int argc, char **argv) {
             "and PSP_GAME/SYSDIR/EBOOT.BIN is missing or unreadable, so the disc cannot be "
             "identified by its contents",
         )
+
+    # ---- The PARAM.SFO lookup rule (docs/ARCHITECTURE.md): one result in both tiers ----------
+
+    def _param_sfo_image(self, name: str, *, root=None, game=None, sfo=None, pvd_root=None):
+        """A disc made at test time from create_test_iso: root directory records (after the
+        '.' and '..' ones), PSP_GAME records, the PARAM.SFO bytes and a patch of the PVD's
+        root record (a callable on its bytearray). Layout: PARAM.SFO at sector 32, root 33,
+        PSP_GAME 34, an image of 1024 sectors."""
+        base = self.temp_dir / f"{name}-base.iso"
+        create_test_iso(base)
+        data = bytearray(base.read_bytes())
+
+        def put(lba: int, records: bytes) -> None:
+            records = records[:2048]   # one sector; a record may be cut by it, as in a bad disc
+            data[lba * 2048:(lba + 1) * 2048] = records + bytes(2048 - len(records))
+
+        dots = (_dir_record(bytes([0]), 33, 2048, True) + _dir_record(bytes([1]), 33, 2048, True))
+        if sfo is not None:
+            put(32, sfo)
+        if root is not None:
+            put(33, dots + b"".join(root))
+        if game is not None:
+            put(34, dots + b"".join(game))
+        if pvd_root is not None:
+            pvd = bytearray(data[16 * 2048 + 156:16 * 2048 + 190])
+            pvd_root(pvd)
+            data[16 * 2048 + 156:16 * 2048 + 190] = pvd
+        path = self.temp_dir / f"{name}.iso"
+        path.write_bytes(data)
+        return path
+
+    def test_param_sfo_lookup_gives_one_result_in_both_tiers(self) -> None:
+        """Review of PR #2855 (C and Python PARAM.SFO scans): nk_iso_inspect and
+        _lookup_param_sfo follow one rule, so the same synthetic disc gives the same result
+        and, when it is refused, the same text. Every case is made here: no committed
+        image, no game data."""
+        sfo_bytes = build_param_sfo("TEST00001", "Test Game")
+        n = len(sfo_bytes)
+        outside = self.OUTSIDE_LBA
+        rec = _dir_record
+        game_rec = rec(b"PSP_GAME", 34, 2048, True)
+        sfo_rec = rec(b"PARAM.SFO;1", 32, n, False)
+
+        def bad_endian(record: bytes) -> bytes:
+            damaged = bytearray(record)
+            damaged[6] ^= 0x01   # the big-endian extent copy now differs
+            return bytes(damaged)
+
+        def filler(count34: int, count36: int) -> bytes:
+            return rec(b"X", 33, 2048, False) * count34 + rec(b"XYZ", 33, 2048, False) * count36
+
+        def raw_record(length: int, name_length: int) -> bytes:
+            record = bytearray(length)
+            record[0] = length
+            if length > 32:
+                record[32] = name_length
+            return bytes(record)
+
+        root_bad = "Root directory extent is invalid (its both-endian copies differ, it is empty or " \
+            "too large, or it extends beyond the ISO file)"
+        sfo_outside = "PSP_GAME/PARAM.SFO extent is invalid"
+        game_outside = "PSP_GAME directory extent is invalid"
+        short_root = ("Malformed ISO: root directory record at offset 68 is too short for its "
+                      "identifier")
+        short_game = ("Malformed ISO: PSP_GAME directory record at offset 68 is too short for its "
+                      "identifier")
+
+        def pvd_set(offset: int, value: bytes):
+            def patch(record: bytearray) -> None:
+                record[offset:offset + len(value)] = value
+            return patch
+
+        def both32(value: int) -> bytes:
+            return value.to_bytes(4, "little") + value.to_bytes(4, "big")
+
+        # (name, image arguments, expected): ("OK", disc_id, has_psp_game) or the refusal text.
+        cases: list[tuple[str, dict, tuple | str]] = [
+            ("good", {}, ("OK", "TEST00001", "1")),
+            ("names-by-the-readers-rule", dict(
+                root=[rec(b"psp_game", 34, 2048, True)],
+                game=[rec(b"param.sfo.", 32, n, False)]), ("OK", "TEST00001", "1")),
+            ("no-version-suffix", dict(game=[rec(b"PARAM.SFO", 32, n, False)]),
+             ("OK", "TEST00001", "1")),
+            ("no-psp-game", dict(root=[rec(b"OTHER", 34, 2048, True)]), ("OK", "UNKNOWN", "0")),
+            ("no-param-sfo", dict(game=[rec(b"OTHER.BIN;1", 32, n, False)]),
+             ("OK", "UNKNOWN", "1")),
+            ("first-record-of-the-name-wins", dict(
+                game=[sfo_rec, rec(b"PARAM.SFO;1", 32, 10, False)]), ("OK", "TEST00001", "1")),
+            ("first-record-of-the-name-wins-even-when-unusable", dict(
+                game=[rec(b"PARAM.SFO;1", 32, 10, False), sfo_rec]),
+             "PSP_GAME/PARAM.SFO has an unsupported size"),
+            ("sfo-outside-then-inside", dict(
+                game=[rec(b"PARAM.SFO;1", outside, n, False), sfo_rec]), sfo_outside),
+            ("sfo-outside-only", dict(game=[rec(b"PARAM.SFO;1", outside, n, False)]), sfo_outside),
+            ("psp-game-outside-then-inside", dict(
+                root=[rec(b"PSP_GAME", outside, 2048, True), game_rec]), game_outside),
+            ("psp-game-outside-only", dict(root=[rec(b"PSP_GAME", outside, 2048, True)]),
+             game_outside),
+            ("root-record-with-bad-copies-before-psp-game", dict(
+                root=[bad_endian(rec(b"OTHER", 34, 2048, True)), game_rec]),
+             "Malformed ISO: root directory record at offset 68 has conflicting both-endian "
+             "extent copies (ECMA-119 7.3.3)"),
+            ("game-record-with-bad-copies-before-param-sfo", dict(
+                game=[bad_endian(rec(b"OTHER", 34, 2048, True)), sfo_rec]),
+             "Malformed ISO: PSP_GAME directory record at offset 68 has conflicting both-endian "
+             "extent copies (ECMA-119 7.3.3)"),
+            ("psp-game-with-bad-copies", dict(root=[bad_endian(game_rec)]),
+             "Malformed ISO: root directory record at offset 68 has conflicting both-endian "
+             "extent copies (ECMA-119 7.3.3)"),
+            ("record-after-the-match-is-not-read", dict(
+                root=[game_rec, raw_record(20, 1)]), ("OK", "TEST00001", "1")),
+            ("root-record-too-short", dict(root=[raw_record(20, 1), game_rec]), short_root),
+            ("root-record-without-identifier", dict(root=[raw_record(34, 0), game_rec]),
+             short_root),
+            ("root-record-identifier-past-its-length", dict(
+                root=[raw_record(34, 5), game_rec]), short_root),
+            ("game-record-too-short", dict(game=[raw_record(20, 1), sfo_rec]), short_game),
+            ("root-record-crosses-a-sector", dict(
+                root=[filler(42, 14), raw_record(100, 1)]),
+             "Malformed ISO: root directory record length 100 at offset 2000 crosses 2048-byte "
+             "sector boundary (ECMA-119 6.8.1.1)"),
+            ("game-record-past-a-short-extent", dict(
+                root=[rec(b"PSP_GAME", 34, 40, True)]),
+             "Malformed ISO: PSP_GAME directory record truncated before sector end"),
+            ("psp-game-is-a-file", dict(root=[rec(b"PSP_GAME", 34, 2048, False)]),
+             "PSP_GAME is not a directory"),
+            ("psp-game-is-empty", dict(root=[rec(b"PSP_GAME", 34, 0, True)]),
+             "PSP_GAME directory is empty"),
+            ("psp-game-is-too-large", dict(root=[rec(b"PSP_GAME", 100, 600 * 1024, True)]),
+             "PSP_GAME directory extent is larger than 524288 bytes"),
+            ("param-sfo-is-a-directory", dict(game=[rec(b"PARAM.SFO;1", 35, 2048, True)]),
+             "PSP_GAME/PARAM.SFO is a directory"),
+            ("param-sfo-is-empty", dict(game=[rec(b"PARAM.SFO;1", 32, 0, False)]),
+             "PSP_GAME/PARAM.SFO is empty"),
+            ("param-sfo-is-19-bytes", dict(game=[rec(b"PARAM.SFO;1", 32, 19, False)]),
+             "PSP_GAME/PARAM.SFO has an unsupported size"),
+            ("param-sfo-is-over-the-limit", dict(game=[rec(b"PARAM.SFO;1", 100, 64 * 1024 + 1, False)]),
+             "PSP_GAME/PARAM.SFO has an unsupported size"),
+            ("root-copies-differ", dict(pvd_root=pvd_set(6, bytes([0xAA]))), root_bad),
+            ("root-is-empty", dict(pvd_root=pvd_set(10, both32(0))), root_bad),
+            ("root-is-too-large", dict(pvd_root=pvd_set(10, both32(600 * 1024))), root_bad),
+            ("root-is-outside-the-image", dict(pvd_root=pvd_set(2, both32(outside))), root_bad),
+        ]
+        for name, arguments, expected in cases:
+            with self.subTest(case=name):
+                image = self._param_sfo_image(name, sfo=sfo_bytes, **arguments)
+                native = self._run_native_inspect(image)
+                if isinstance(expected, str):
+                    with self.assertRaises(IsoInspectionError) as caught:
+                        inspect_iso(image)
+                    self.assertEqual(str(caught.exception), expected)
+                    self.assertTrue(native.get("RESULT", "").startswith("ERROR:"), native)
+                    self.assertEqual(native.get("MESSAGE"), expected)
+                else:
+                    metadata = inspect_iso(image)
+                    self.assertEqual(native.get("RESULT"), "OK", native)
+                    self.assertEqual((metadata.disc_id, native.get("DISC_ID"),
+                                      native.get("HAS_PSP_GAME")),
+                                     (expected[1], expected[1], expected[2]))
 
     def test_a_disc_without_a_title_is_named_after_the_key_its_entry_holds(self) -> None:
         """Review R4 of PR #2855: a prototype disc whose PARAM.SFO has no TITLE is named

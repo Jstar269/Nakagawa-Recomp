@@ -1212,8 +1212,7 @@ def inspect_iso(
             sfo_facts: dict[str, str] = {}
         else:
             sfo_lba, sfo_size = sfo_entry
-            if sfo_size < 20 or sfo_size > MAX_SFO_BYTES:
-                raise IsoInspectionError("PSP_GAME/PARAM.SFO has an unsupported size")
+            _check_param_sfo_size(sfo_size)
             raw_sfo = _read_iso_extent(f, size_bytes, sfo_lba, sfo_size, 0, sfo_size)
             sfo_dict = parse_param_sfo(raw_sfo, warnings=format_warnings)
             sfo_disc_id = sfo_dict.get("DISC_ID", "")
@@ -1758,15 +1757,130 @@ def _lookup_iso_file_detail(
     return ((lba, size) if not is_dir else None), False
 
 
-def _lookup_param_sfo(stream, file_size: int) -> tuple[int, int] | None:
-    """PSP_GAME/PARAM.SFO. A PARAM.SFO record outside the image is refused with the text
-    nk_iso_inspect gives, never read as a disc without PARAM.SFO."""
+def _scan_directory_for(
+    directory: bytes, label: str, name: str, file_size: int, outside_message: str
+) -> tuple[int, int, bool] | None:
+    """The first record of name in one directory extent, by the PARAM.SFO lookup rule
+    (docs/ARCHITECTURE.md, "The PARAM.SFO lookup rule"); nk_iso_inspect_scan in
+    src/core/nk_iso.c is its twin and tools/test_iso_parity.py holds the two to the same
+    results and the same refusal texts.
+
+    Records are read in order and every record before the match must be well formed, a
+    non-matching one included: no sector crossing (ECMA-119 6.8.1.1), a length that holds
+    its identifier, equal both-endian copies of its extent (7.3.3). The match ends the scan:
+    its extent must lie inside the image, else the lookup is refused with outside_message and
+    a later record of the name is never consulted. None: no record of the name. label names
+    the directory in a refusal."""
+    wanted = name.encode("ascii").upper()
+    offset = 0
+    while offset < len(directory):
+        record_size = directory[offset]
+        if record_size == 0:
+            offset = ((offset // SECTOR_SIZE) + 1) * SECTOR_SIZE
+            continue
+        if (offset % SECTOR_SIZE) + record_size > SECTOR_SIZE:
+            raise IsoInspectionError(
+                f"Malformed ISO: {label} directory record length {record_size} at offset "
+                f"{offset} crosses 2048-byte sector boundary (ECMA-119 6.8.1.1)"
+            )
+        if offset + record_size > len(directory):
+            raise IsoInspectionError(
+                f"Malformed ISO: {label} directory record truncated before sector end"
+            )
+        record = directory[offset : offset + record_size]
+        name_size = record[32] if record_size > 32 else 0
+        if record_size < 34 or name_size == 0 or 33 + name_size > record_size:
+            raise IsoInspectionError(
+                f"Malformed ISO: {label} directory record at offset {offset} is too short "
+                "for its identifier"
+            )
+        lba_le = int.from_bytes(record[2:6], "little")
+        size_le = int.from_bytes(record[10:14], "little")
+        if lba_le != int.from_bytes(record[6:10], "big") or size_le != int.from_bytes(
+            record[14:18], "big"
+        ):
+            raise IsoInspectionError(
+                f"Malformed ISO: {label} directory record at offset {offset} has conflicting "
+                "both-endian extent copies (ECMA-119 7.3.3)"
+            )
+        identifier = record[33 : 33 + name_size]
+        if identifier not in (b"\0", b"\1") and _native_component_bytes(
+            _iso_name_without_version(identifier)
+        ).upper() == wanted:
+            start = lba_le * SECTOR_SIZE
+            if start > file_size or size_le > file_size - start:
+                raise IsoInspectionError(outside_message)
+            return lba_le, size_le, bool(record[25] & 0x02)
+        offset += record_size
+    return None
+
+
+def _read_scanned_directory(stream, file_size: int, lba: int, size: int, label: str) -> bytes:
+    """One directory extent that the scan above found inside the image, read whole."""
     try:
-        return _lookup_iso_file(stream, file_size, ("PSP_GAME", "PARAM.SFO"))
-    except _ExtentOutsideImage as exc:
-        if exc.last_component:
-            raise IsoInspectionError("PSP_GAME/PARAM.SFO extent is invalid") from exc
-        raise
+        return _read_iso_extent(stream, file_size, lba, size, 0, size)
+    except IsoInspectionError as exc:
+        raise IsoInspectionError(f"Could not read the {label} directory ({size} bytes)") from exc
+
+
+def _lookup_param_sfo(stream, file_size: int) -> tuple[int, int] | None:
+    """PSP_GAME/PARAM.SFO by the PARAM.SFO lookup rule (docs/ARCHITECTURE.md), the rule
+    nk_iso_inspect follows in src/core/nk_iso.c: (lba, size), or None for a disc with no
+    PSP_GAME or no PARAM.SFO in it. A record that is there but cannot be read as the file,
+    whatever the reason, is refused with the text nk_iso_inspect gives and never read as a
+    disc without it. The size of the file is the caller's to judge (_check_param_sfo_size)."""
+    stream.seek(PVD_SECTOR * SECTOR_SIZE)
+    pvd = stream.read(SECTOR_SIZE)
+    if len(pvd) != SECTOR_SIZE or pvd[:7] != ISO_MAGIC:
+        raise IsoInspectionError("missing primary volume descriptor")
+    root_lba = int.from_bytes(pvd[158:162], "little")
+    root_size = int.from_bytes(pvd[166:170], "little")
+    root_start = root_lba * SECTOR_SIZE
+    if (
+        root_lba != int.from_bytes(pvd[162:166], "big")
+        or root_size != int.from_bytes(pvd[170:174], "big")
+        or root_size == 0
+        or root_size > MAX_DIRECTORY_BYTES
+        or root_start > file_size
+        or root_size > file_size - root_start
+    ):
+        raise IsoInspectionError(
+            "Root directory extent is invalid (its both-endian copies differ, it is "
+            "empty or too large, or it extends beyond the ISO file)"
+        )
+    root = _read_scanned_directory(stream, file_size, root_lba, root_size, "root")
+    game = _scan_directory_for(
+        root, "root", "PSP_GAME", file_size, "PSP_GAME directory extent is invalid"
+    )
+    if game is None:
+        return None
+    game_lba, game_size, game_is_dir = game
+    if not game_is_dir:
+        raise IsoInspectionError("PSP_GAME is not a directory")
+    if game_size == 0:
+        raise IsoInspectionError("PSP_GAME directory is empty")
+    if game_size > MAX_DIRECTORY_BYTES:
+        raise IsoInspectionError(
+            f"PSP_GAME directory extent is larger than {MAX_DIRECTORY_BYTES} bytes"
+        )
+    game_dir = _read_scanned_directory(stream, file_size, game_lba, game_size, "PSP_GAME")
+    sfo = _scan_directory_for(
+        game_dir, "PSP_GAME", "PARAM.SFO", file_size, "PSP_GAME/PARAM.SFO extent is invalid"
+    )
+    if sfo is None:
+        return None
+    if sfo[2]:
+        raise IsoInspectionError("PSP_GAME/PARAM.SFO is a directory")
+    return sfo[0], sfo[1]
+
+
+def _check_param_sfo_size(size: int) -> None:
+    """The size rule for a PARAM.SFO that was found: empty, or not 20 to MAX_SFO_BYTES bytes
+    (nk_iso_inspect gives the same texts)."""
+    if size == 0:
+        raise IsoInspectionError("PSP_GAME/PARAM.SFO is empty")
+    if size < 20 or size > MAX_SFO_BYTES:
+        raise IsoInspectionError("PSP_GAME/PARAM.SFO has an unsupported size")
 
 
 def _image_read(read, offset: int, count: int) -> bytes | None:

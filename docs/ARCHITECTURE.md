@@ -185,6 +185,44 @@ binding and collision policy in a future host consumer. The current player
 prototype is not integrated by this projection. Source-owned tests generate,
 compile, and execute the header; no retail input is required.
 
+### The PARAM.SFO lookup rule
+
+A disc's `PSP_GAME/PARAM.SFO` is found by one rule in two implementations: `nk_iso_inspect_scan`
+in `src/core/nk_iso.c` (what `nk_iso_inspect` runs) and `_lookup_param_sfo` in
+`tools/nk_core/iso_inspect.py` (what `inspect_iso` and the compatibility preflight run).
+`test_param_sfo_lookup_gives_one_result_in_both_tiers` in `tools/test_iso_parity.py` makes each
+case below as a synthetic disc at test time and requires the same result, and for a refusal the
+same text, from both. A change to the rule changes both and that table.
+
+1. **Root.** The root extent is the primary volume descriptor's root record. Its both-endian
+   copies agree (ECMA-119 7.3.3), its size is 1 to 512 KiB, and it
+   lies inside the image (the record's flag byte is not read, as in `nk_iso_reader_open`). Otherwise: `Root directory extent is invalid (...)`.
+2. **Scan.** A directory extent is read whole and its records are read in order (a zero length
+   byte skips to the next sector). Every record read, a non-matching one included, must not
+   cross a sector (6.8.1.1), must lie inside the extent, must hold its identifier (length of at
+   least 34, an identifier of at least one byte), and must have equal both-endian extent
+   copies. Otherwise the lookup is refused: `Malformed ISO: <root|PSP_GAME> directory record ...`.
+3. **Match.** The first record whose identifier matches by the reader's rule (`nk_iso_name_matches`:
+   no case, no `;version`, one trailing `.` dropped) ends the scan; a later record of the name is
+   never read. Its extent must lie inside the image, otherwise the lookup is refused
+   (`PSP_GAME directory extent is invalid`, `PSP_GAME/PARAM.SFO extent is invalid`). This differs
+   from `nk_iso_find_in_dir`, which the reader's lookups use and which passes such a record over:
+   a PARAM.SFO lookup never reads a disc as one without the file.
+4. **PSP_GAME** must be a directory (`PSP_GAME is not a directory`), not empty
+   (`PSP_GAME directory is empty`) and at most 512 KiB (`PSP_GAME directory extent is larger than
+   524288 bytes`). A disc with no PSP_GAME record, or no PARAM.SFO record in it, is a disc without
+   PARAM.SFO (`UNKNOWN`), not a refusal.
+5. **PARAM.SFO** must not be a directory (`PSP_GAME/PARAM.SFO is a directory`), not empty
+   (`PSP_GAME/PARAM.SFO is empty`) and 20 to 65536 bytes (`PSP_GAME/PARAM.SFO has an unsupported
+   size`). The preflight leaves the size to its own check; every other caller applies it
+   (`_check_param_sfo_size`).
+
+The lookups the reader, the stager and the module walker make (`nk_iso_find_in_dir`,
+`_lookup_iso_file`) follow the looser rule that tests/test_iso_parity.py also keeps in step:
+they read only the records of the wanted name and pass an outside record over where a caller
+asks for it. The scan above is stricter than they are on purpose: it decides what a disc is
+called and whether it is a disc at all.
+
 ## Directory Layout
 
 ```text
