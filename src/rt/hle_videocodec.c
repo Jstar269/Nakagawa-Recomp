@@ -317,7 +317,12 @@ static void vc_stop_decoder(VcContext *c) {
     c->h264 = -1;
 }
 
-/* sceVideocodecOpen(ctx, type) */
+/* sceVideocodecOpen(ctx, type). A context the runtime already holds opens again (#2885): a disc
+ * mpeg.prx opens its library context in sceMpegInit and gives back only its ME memory in
+ * sceMpegFinish, never deleting it, so the next sceMpegInit opens the same context again. The
+ * host decoder, the band buffers and the picture state go, as a fresh open starts without them;
+ * the context's ME memory stays its own, since Open writes no EDRAM word and ReleaseEDRAM still
+ * frees it (synthetic: no PSP cell measures a second Open; W-LLE-1, PSP-VCODEC-001). */
 static uint32_t h_VideocodecOpen(CpuState *s) {
     const uint32_t ctx = A0, type = A1;
     if (type == VC_TYPE_SECOND && vc_guest_words(ctx, VC_CONTEXT_BYTES) && !vc_find(ctx)) {
@@ -332,9 +337,13 @@ static uint32_t h_VideocodecOpen(CpuState *s) {
         return vc_refuse("sceVideocodecOpen", "codec type other than 0 (AVC) is not modelled", VC_ERR_TYPE);
     if (!vc_guest_words(ctx, VC_CONTEXT_BYTES))
         return vc_refuse("sceVideocodecOpen", "context is not a writable 96-byte guest span", VC_ERR_GUEST_ADDRESS);
-    if (vc_find(ctx))
-        return vc_refuse("sceVideocodecOpen", "context is already open", VC_ERR_STATE);
-    VcContext *c = NULL;
+    VcContext *c = vc_find(ctx);
+    uint32_t edram = 0u;
+    if (c) {
+        vc_stop_decoder(c);
+        if (c->band_base) (void)me_free(c->band_base, ME_OWNER_VIDEO, c->ctx);
+        edram = c->edram;
+    }
     for (int i = 0; i < VC_MAX_CONTEXTS && !c; i++)
         if (!s_vc[i].used) c = &s_vc[i];
     if (!c) return vc_refuse("sceVideocodecOpen", "no free host context slot", VC_ERR_STATE);
@@ -342,6 +351,7 @@ static uint32_t h_VideocodecOpen(CpuState *s) {
     c->used = 1;
     c->ctx = ctx;
     c->h264 = -1;
+    c->edram = edram;
     MEM_W32(ctx, VC_OPEN_WORD0);
     MEM_W32(ctx + 8u, VC_OPEN_WORD8);
     MEM_W32(ctx + 24u, VC_OPEN_EDRAM_BYTES);
