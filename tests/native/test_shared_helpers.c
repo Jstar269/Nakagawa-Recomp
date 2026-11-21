@@ -16,6 +16,8 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
+#include <fcntl.h> /* _O_BINARY: the test pipe */
+#include <io.h>    /* _pipe, _write, _close */
 #else
 #include <unistd.h>
 #endif
@@ -49,6 +51,19 @@ static int remove_test_file(const char *path) {
         failures++; \
     } \
 } while (0)
+
+/* With NK_TEST_WRAP_MALLOC the link wraps malloc (-Wl,--wrap=malloc: the shared-helpers-selftest
+   recipe, and CMake where the linker has --wrap) so the bounded reader's allocation can fail:
+   s_malloc_fail_at counts down the calls still to pass. */
+#if defined(NK_TEST_WRAP_MALLOC)
+void *__real_malloc(size_t size);
+void *__wrap_malloc(size_t size);
+static long s_malloc_fail_at = -1;
+void *__wrap_malloc(size_t size) {
+    if (s_malloc_fail_at >= 0 && s_malloc_fail_at-- == 0) return NULL;
+    return __real_malloc(size);
+}
+#endif
 
 static void emit_boot_event(FILE *stderr_stream, uint64_t timestamp_ns,
                             const char *format, ...) {
@@ -724,11 +739,289 @@ static void test_sha256(void) {
     }
 }
 
+/* The reference nk_utf8_char_len is checked against: classify the lead byte by its bit pattern,
+ * decode the code point, then check its range. That is a different method from the helper's
+ * (Unicode table 3-7 second-byte ranges); it is how nk_cheats.c's and player_state.c's own copies
+ * worked before they moved to the helper. */
+static size_t utf8_reference_len(const unsigned char *s, size_t len, unsigned int flags) {
+    unsigned long cp, min;
+    size_t extra;
+    if (len == 0u) return 0u;
+    if (s[0] < 0x80u) return 1u;
+    if ((s[0] & 0xE0u) == 0xC0u) { extra = 1u; min = 0x80u; cp = s[0] & 0x1Fu; }
+    else if ((s[0] & 0xF0u) == 0xE0u) { extra = 2u; min = 0x800u; cp = s[0] & 0x0Fu; }
+    else if ((s[0] & 0xF8u) == 0xF0u) { extra = 3u; min = 0x10000u; cp = s[0] & 0x07u; }
+    else return 0u;
+    if (len <= extra) return 0u;
+    for (size_t k = 1u; k <= extra; k++) {
+        if ((s[k] & 0xC0u) != 0x80u) return 0u;
+        cp = (cp << 6) | (s[k] & 0x3Fu);
+    }
+    if (cp < min || cp > 0x10FFFFul || (cp >= 0xD800ul && cp <= 0xDFFFul)) return 0u;
+    if ((flags & NK_UTF8_REJECT_C1) != 0u && cp <= 0x9Ful) return 0u;
+    return extra + 1u;
+}
+
+/* One table for every copy nk_utf8_char_len replaced. Rule set "strict" (flags 0) is
+ * nk_zip.c's zip_utf8_valid (ZIP entry names), player_state.c's texpack_utf8_valid (texture-pack
+ * paths and names) and texrepl.c's text_clean (pack text printed to a terminal; it turns C1 into
+ * "??" itself). Rule set "no C1" (NK_UTF8_REJECT_C1) is nk_cheats.c's clean_name (cheat names in
+ * logs). nk_iso.c's SFO reader keeps its own decoder: it needs the length of an ill-formed
+ * sequence's maximal subpart, the unit one U+FFFD replaces, which a 0 cannot carry. */
+static void test_utf8_char_len(void) {
+    static const struct {
+        const char *name;
+        unsigned char bytes[5];
+        size_t len;
+        size_t strict;
+        size_t no_c1;
+    } cases[] = {
+        { "no bytes", { 0x41 }, 0u, 0u, 0u },
+        { "NUL", { 0x00 }, 1u, 1u, 1u },
+        { "ASCII letter", { 0x41 }, 1u, 1u, 1u },
+        { "C0 control", { 0x1B }, 1u, 1u, 1u },
+        { "DEL", { 0x7F }, 1u, 1u, 1u },
+        { "lone continuation byte 80", { 0x80 }, 1u, 0u, 0u },
+        { "lone continuation byte 9B (a raw C1 byte)", { 0x9B, 0x41 }, 2u, 0u, 0u },
+        { "lone continuation byte BF", { 0xBF, 0x41 }, 2u, 0u, 0u },
+        { "overlong C0 80", { 0xC0, 0x80 }, 2u, 0u, 0u },
+        { "overlong C1 BF", { 0xC1, 0xBF }, 2u, 0u, 0u },
+        { "U+0080, the first C1 control", { 0xC2, 0x80 }, 2u, 2u, 0u },
+        { "U+009B, CSI", { 0xC2, 0x9B }, 2u, 2u, 0u },
+        { "U+009F, the last C1 control", { 0xC2, 0x9F }, 2u, 2u, 0u },
+        { "U+00A0", { 0xC2, 0xA0 }, 2u, 2u, 2u },
+        { "U+00E9", { 0xC3, 0xA9 }, 2u, 2u, 2u },
+        { "U+07FF", { 0xDF, 0xBF }, 2u, 2u, 2u },
+        { "two bytes cut by len", { 0xC3, 0xA9 }, 1u, 0u, 0u },
+        { "two bytes, second not a continuation", { 0xC3, 0x41 }, 2u, 0u, 0u },
+        { "two bytes, second a lead byte", { 0xC3, 0xC3 }, 2u, 0u, 0u },
+        { "overlong E0 9F BF", { 0xE0, 0x9F, 0xBF }, 3u, 0u, 0u },
+        { "U+0800", { 0xE0, 0xA0, 0x80 }, 3u, 3u, 3u },
+        { "U+3042", { 0xE3, 0x81, 0x82 }, 3u, 3u, 3u },
+        { "U+D7FF", { 0xED, 0x9F, 0xBF }, 3u, 3u, 3u },
+        { "surrogate U+D800", { 0xED, 0xA0, 0x80 }, 3u, 0u, 0u },
+        { "surrogate U+DFFF", { 0xED, 0xBF, 0xBF }, 3u, 0u, 0u },
+        { "U+E000", { 0xEE, 0x80, 0x80 }, 3u, 3u, 3u },
+        { "U+FFFD", { 0xEF, 0xBF, 0xBD }, 3u, 3u, 3u },
+        { "U+FFFF", { 0xEF, 0xBF, 0xBF }, 3u, 3u, 3u },
+        { "three bytes cut by len after two", { 0xE3, 0x81, 0x82 }, 2u, 0u, 0u },
+        { "three bytes cut by len after one", { 0xE3, 0x81, 0x82 }, 1u, 0u, 0u },
+        { "three bytes, third not a continuation", { 0xE3, 0x81, 0x41 }, 3u, 0u, 0u },
+        { "three bytes, NUL second", { 0xE3, 0x00, 0x82 }, 3u, 0u, 0u },
+        { "overlong F0 8F BF BF", { 0xF0, 0x8F, 0xBF, 0xBF }, 4u, 0u, 0u },
+        { "U+10000", { 0xF0, 0x90, 0x80, 0x80 }, 4u, 4u, 4u },
+        { "U+1F600", { 0xF0, 0x9F, 0x98, 0x80 }, 4u, 4u, 4u },
+        { "U+10FFFF", { 0xF4, 0x8F, 0xBF, 0xBF }, 4u, 4u, 4u },
+        { "past U+10FFFF, F4 90", { 0xF4, 0x90, 0x80, 0x80 }, 4u, 0u, 0u },
+        { "lead F5", { 0xF5, 0x80, 0x80, 0x80 }, 4u, 0u, 0u },
+        { "lead F7", { 0xF7, 0xBF, 0xBF, 0xBF }, 4u, 0u, 0u },
+        { "lead F8", { 0xF8, 0x88, 0x80, 0x80, 0x80 }, 5u, 0u, 0u },
+        { "lead FE", { 0xFE }, 1u, 0u, 0u },
+        { "lead FF", { 0xFF }, 1u, 0u, 0u },
+        { "four bytes cut by len after three", { 0xF0, 0x9F, 0x98, 0x80 }, 3u, 0u, 0u },
+        { "four bytes, fourth not a continuation", { 0xF0, 0x9F, 0x98, 0x41 }, 4u, 0u, 0u },
+        { "only the first character counts", { 0x41, 0xFF }, 2u, 1u, 1u },
+        { "bytes after the character are not read into it", { 0xC3, 0xA9, 0xFF }, 3u, 2u, 2u },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        size_t strict = nk_utf8_char_len(cases[i].bytes, cases[i].len, 0u);
+        size_t no_c1 = nk_utf8_char_len(cases[i].bytes, cases[i].len, NK_UTF8_REJECT_C1);
+        if (strict != cases[i].strict || no_c1 != cases[i].no_c1) {
+            fprintf(stderr, "FAIL: UTF-8 length of %s: strict %zu (want %zu), no C1 %zu (want %zu)\n",
+                    cases[i].name, strict, cases[i].strict, no_c1, cases[i].no_c1);
+            failures++;
+        }
+    }
+    CHECK(nk_utf8_char_len(NULL, 4u, 0u) == 0u, "UTF-8 length of no pointer is 0");
+
+    /* Every first and second byte, with the third and fourth bytes over each class boundary,
+     * at every length from 0 to 4, under both rule sets, against the reference. */
+    static const unsigned char edges[] = { 0x00, 0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF,
+                                           0xC0, 0xFF };
+    unsigned long mismatches = 0;
+    for (unsigned first = 0; first < 256u; first++) {
+        for (unsigned second = 0; second < 256u; second++) {
+            for (size_t t = 0; t < sizeof(edges); t++) {
+                for (size_t f = 0; f < sizeof(edges); f++) {
+                    const unsigned char bytes[4] = { (unsigned char)first, (unsigned char)second,
+                                                     edges[t], edges[f] };
+                    for (size_t len = 0; len <= 4u; len++) {
+                        for (unsigned flags = 0; flags <= NK_UTF8_REJECT_C1; flags++) {
+                            if (nk_utf8_char_len(bytes, len, flags) !=
+                                utf8_reference_len(bytes, len, flags) && mismatches++ < 8u) {
+                                fprintf(stderr, "FAIL: UTF-8 length of %02X %02X %02X %02X, len %zu, "
+                                        "flags %u differs from the reference\n", bytes[0], bytes[1],
+                                        bytes[2], bytes[3], len, flags);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CHECK(mismatches == 0, "UTF-8 length agrees with the decoding reference on every sequence");
+}
+
+static bool write_test_bytes(const char *path, const unsigned char *bytes, size_t size) {
+    FILE *file = nk_fopen_utf8(path, "wb");
+    bool ok;
+    if (!file) return false;
+    ok = size == 0u || fwrite(bytes, 1u, size, file) == size;
+    return fclose(file) == 0 && ok;
+}
+
+/* Reads path with max and checks the status, and on success the length and bytes, and that a
+ * NUL follows them; on failure, that no buffer and no length are left. */
+static void check_read(const char *what, const char *path, size_t max, NkReadFileStatus want,
+                       const unsigned char *bytes, size_t size) {
+    unsigned char *data = (unsigned char *)"not touched";
+    size_t len = 12345u;
+    NkReadFileStatus got = nk_read_file_bounded(path, max, &data, &len);
+    bool ok = got == want;
+    if (ok && want == NK_READ_FILE_OK) {
+        ok = data != NULL && len == size && (size == 0u || memcmp(data, bytes, size) == 0) &&
+             data[len] == '\0';
+    } else if (ok) {
+        ok = data == NULL && len == 0u;
+    }
+    if (!ok) {
+        fprintf(stderr, "FAIL: bounded read, %s: status %d (want %d), length %zu\n", what, (int)got,
+                (int)want, len);
+        failures++;
+    }
+    if (got == NK_READ_FILE_OK) free(data);
+}
+
+static void test_read_file_bounded(void) {
+    char path[4096];
+    char missing[4096];
+    unsigned char *data = NULL;
+    size_t len = 0;
+    int written = snprintf(path, sizeof(path), "%s/shared-helper-read-%lu.tmp",
+                           SR_SELFTEST_BUILD_ROOT, test_process_id());
+    int written_missing = snprintf(missing, sizeof(missing), "%s/shared-helper-read-%lu-missing.tmp",
+                                   SR_SELFTEST_BUILD_ROOT, test_process_id());
+    CHECK(written > 0 && (size_t)written < sizeof(path) && written_missing > 0 &&
+          (size_t)written_missing < sizeof(missing), "bounded-read test paths format");
+    if (written <= 0 || (size_t)written >= sizeof(path) || written_missing <= 0 ||
+        (size_t)written_missing >= sizeof(missing)) {
+        return;
+    }
+
+    /* Open errors. */
+    check_read("a missing file", missing, 16u, NK_READ_FILE_OPEN_FAILED, NULL, 0u);
+    check_read("an empty path", "", 16u, NK_READ_FILE_OPEN_FAILED, NULL, 0u);
+    check_read("no path", NULL, 16u, NK_READ_FILE_OPEN_FAILED, NULL, 0u);
+    CHECK(nk_read_file_bounded(missing, 16u, NULL, &len) == NK_READ_FILE_OPEN_FAILED &&
+          nk_read_file_bounded(missing, 16u, &data, NULL) == NK_READ_FILE_OPEN_FAILED,
+          "bounded read without a place for the result opens nothing");
+    CHECK(nk_read_stream_bounded(NULL, 16u, &data, &len) == NK_READ_FILE_OPEN_FAILED &&
+          data == NULL && len == 0u, "bounded read of no stream is an open error");
+
+    /* Sizes around the limit. */
+    static const unsigned char abc[] = { 'a', 'b', 'c' };
+    CHECK(write_test_bytes(path, abc, sizeof(abc)), "bounded-read test file is written");
+    check_read("three bytes, limit 16", path, 16u, NK_READ_FILE_OK, abc, sizeof(abc));
+    check_read("three bytes, limit 3", path, 3u, NK_READ_FILE_OK, abc, sizeof(abc));
+    check_read("three bytes, limit 2", path, 2u, NK_READ_FILE_TOO_LARGE, NULL, 0u);
+    check_read("three bytes, limit 0", path, 0u, NK_READ_FILE_TOO_LARGE, NULL, 0u);
+    check_read("three bytes, no limit", path, (size_t)-1, NK_READ_FILE_OK, abc, sizeof(abc));
+
+    /* Out of memory: the buffer's allocation fails. */
+#if defined(NK_TEST_WRAP_MALLOC)
+    s_malloc_fail_at = 0;
+    check_read("the buffer cannot be allocated", path, 16u, NK_READ_FILE_OUT_OF_MEMORY, NULL, 0u);
+    CHECK(s_malloc_fail_at == -1, "bounded read made the allocation that failed");
+    s_malloc_fail_at = -1;
+#else
+    puts("SKIP: bounded read out-of-memory case (this linker has no --wrap=malloc)");
+#endif
+
+    CHECK(write_test_bytes(path, NULL, 0u), "empty bounded-read test file is written");
+    check_read("an empty file", path, 16u, NK_READ_FILE_OK, NULL, 0u);
+    check_read("an empty file, limit 0", path, 0u, NK_READ_FILE_OK, NULL, 0u);
+
+    enum { BIG = 200000 };
+    unsigned char *big = (unsigned char *)malloc(BIG);
+    CHECK(big != NULL, "bounded-read large pattern buffer");
+    if (big) {
+        for (size_t i = 0; i < BIG; i++) big[i] = (unsigned char)(i * 131u + (i >> 9));
+        CHECK(write_test_bytes(path, big, BIG), "large bounded-read test file is written");
+        check_read("200000 bytes, limit 200000", path, BIG, NK_READ_FILE_OK, big, BIG);
+        check_read("200000 bytes, limit 199999", path, BIG - 1u, NK_READ_FILE_TOO_LARGE, NULL, 0u);
+    }
+
+    /* A read error: a stream open only for writing cannot be read. */
+    FILE *write_only = nk_fopen_utf8(path, "wb");
+    CHECK(write_only != NULL, "write-only stream opens");
+    if (write_only) {
+        data = (unsigned char *)"not touched";
+        len = 7u;
+        CHECK(nk_read_stream_bounded(write_only, 16u, &data, &len) == NK_READ_FILE_READ_FAILED &&
+              data == NULL && len == 0u, "bounded read of a write-only stream is a read error");
+        fclose(write_only);
+    }
+    CHECK(remove_test_file(path) == 0, "bounded-read test file cleanup succeeds");
+
+    /* A stream that reports no size (a pipe): the buffer grows as it reads. */
+    if (big) {
+        static const struct { size_t bytes; size_t max; NkReadFileStatus want; } pipes[] = {
+            { 10000u, 1u << 20, NK_READ_FILE_OK },
+            { 10000u, 10000u, NK_READ_FILE_OK },
+            { 10000u, 9999u, NK_READ_FILE_TOO_LARGE },
+            { 0u, 16u, NK_READ_FILE_OK },
+        };
+        for (size_t p = 0; p < sizeof(pipes) / sizeof(pipes[0]); p++) {
+            int fds[2];
+            FILE *reader;
+#if defined(_WIN32) || defined(_WIN64)
+            CHECK(_pipe(fds, 65536u, _O_BINARY) == 0, "test pipe opens");
+            if (fds[0] < 0) continue;
+            CHECK(_write(fds[1], big, (unsigned)pipes[p].bytes) == (int)pipes[p].bytes,
+                  "test pipe takes the bytes");
+            _close(fds[1]);
+            reader = _fdopen(fds[0], "rb");
+#else
+            if (pipe(fds) != 0) {
+                CHECK(0, "test pipe opens");
+                continue;
+            }
+            CHECK(write(fds[1], big, pipes[p].bytes) == (ssize_t)pipes[p].bytes,
+                  "test pipe takes the bytes");
+            close(fds[1]);
+            reader = fdopen(fds[0], "rb");
+#endif
+            CHECK(reader != NULL, "test pipe reads as a stream");
+            if (!reader) continue;
+            data = NULL;
+            len = 0u;
+            NkReadFileStatus got = nk_read_stream_bounded(reader, pipes[p].max, &data, &len);
+            bool ok = got == pipes[p].want;
+            if (ok && got == NK_READ_FILE_OK) {
+                ok = data != NULL && len == pipes[p].bytes &&
+                     (len == 0u || memcmp(data, big, len) == 0) && data[len] == '\0';
+            } else if (ok) {
+                ok = data == NULL && len == 0u;
+            }
+            if (!ok) {
+                fprintf(stderr, "FAIL: bounded read of a %zu-byte pipe, limit %zu: status %d (want %d)\n",
+                        pipes[p].bytes, pipes[p].max, (int)got, (int)pipes[p].want);
+                failures++;
+            }
+            free(got == NK_READ_FILE_OK ? data : NULL);
+            fclose(reader);
+        }
+        free(big);
+    }
+}
+
 int main(void) {
     test_path_joins();
     test_legacy_path_contracts();
     test_text_copy();
     test_utf8_open();
+    test_utf8_char_len();
+    test_read_file_bounded();
     test_size_format();
     test_boot_events();
     test_render_path();

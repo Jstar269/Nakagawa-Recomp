@@ -10,6 +10,7 @@
 
 #include "nk_zip.h"
 #include "nk_psp_inflate.h"
+#include "nk_shared_helpers.h"
 
 #ifndef NK_ZIP_NO_HOST_IO
 #include "nk_platform.h"
@@ -227,33 +228,8 @@ static void wr32(uint8_t *p, uint32_t v) {
 static bool zip_utf8_valid(const unsigned char *s, size_t n) {
     size_t i = 0;
     while (i < n) {
-        unsigned c = s[i];
-        size_t len;
-        uint32_t cp;
-        if (c < 0x80u) {
-            ++i;
-            continue;
-        }
-        if (c >= 0xC2u && c <= 0xDFu) {
-            len = 2;
-            cp = c & 0x1Fu;
-        } else if (c >= 0xE0u && c <= 0xEFu) {
-            len = 3;
-            cp = c & 0x0Fu;
-        } else if (c >= 0xF0u && c <= 0xF4u) {
-            len = 4;
-            cp = c & 0x07u;
-        } else {
-            return false;
-        }
-        if (n - i < len) return false;
-        for (size_t k = 1; k < len; ++k) {
-            unsigned b = s[i + k];
-            if ((b & 0xC0u) != 0x80u) return false;
-            cp = (cp << 6) | (b & 0x3Fu);
-        }
-        if (len == 3 && (cp < 0x800u || (cp >= 0xD800u && cp <= 0xDFFFu))) return false;
-        if (len == 4 && (cp < 0x10000u || cp > 0x10FFFFu)) return false;
+        size_t len = nk_utf8_char_len(s + i, n - i, 0u);
+        if (len == 0u) return false;
         i += len;
     }
     return true;
