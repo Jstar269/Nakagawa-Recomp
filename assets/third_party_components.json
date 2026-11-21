@@ -2,7 +2,7 @@
   "$schema": "./third_party_components.schema.json",
   "name": "nakagawa-recomp-third-party-components",
   "schema_version": 1,
-  "description": "Single machine-readable source of truth for every third-party component that can enter a release artifact. tools/package_notices.py (native package), tools/generate_sbom.py (SBOM) and tools/test_third_party_notices.py (release gate) all read this file. A component without a spdx_id, a license text in the tree, and (for Python tools) a recorded license fails the gate.",
+  "description": "Single machine-readable source of truth for every third-party component that can enter a release artifact. tools/package_notices.py (native package), tools/generate_sbom.py (SBOM) and tools/test_third_party_notices.py (release gate) all read this file. A component without a spdx_id, a license text in the tree, and (for Python tools) a recorded license fails the gate. native.repository_components records vendored material that stays in the repository and never enters a package (no notice bundle, no SBOM entry); only the release gate reads it.",
   "version_source_policy": "No version literal is trusted. Native DLL versions are read from the toolchain's own pacman database (var/lib/pacman/local/<pkg>/desc); Python and npm versions are read from the declared lockfiles. Every license text under third_party/licenses/ was copied verbatim from the component's own distribution: the local toolchain package, or, for a text that package does not install, the upstream source at the exact tag; each record below names the exact file it was copied from.",
   "native": {
     "copy_routes": [
@@ -446,13 +446,17 @@
         "copyright_notices": [
           "Copyright (C) 2026 Advanced Micro Devices, Inc."
         ],
-        "note": "FSR 1 (ffx_fsr1.h) and the ffx_core headers (ffx_common_types.h, ffx_core.h, ffx_core_gpu_common.h, ffx_core_gpu_common_half.h, ffx_core_portability.h) from FidelityFX SDK v2.4.0, each imported byte-identical (third_party/fidelityfx_sdk/PROVENANCE.md). They are compiled into the SPIR-V of the native player's presentation upscaler, src/rt/gpu_sdl3vk/shaders/fsr1_easu.comp and fsr1_rcas.comp. The SDK's docs/license.md at this revision lists each of these files under MIT; each header carries the MIT notice. The GLSL layer they include is the fidelityfx-sdk-glsl component.",
+        "note": "FSR 1 (ffx_fsr1.h) and the ffx_core headers (ffx_common_types.h, ffx_core.h, ffx_core_gpu_common.h, ffx_core_gpu_common_half.h, ffx_core_portability.h) from FidelityFX SDK v2.4.0, each imported byte-identical (third_party/fidelityfx_sdk/PROVENANCE.md). They are compiled into the SPIR-V of the native player's presentation upscaler, src/rt/gpu_sdl3vk/shaders/fsr1_easu.comp and fsr1_rcas.comp. The SDK's docs/license.md at this revision lists each of these files under MIT; each header carries the MIT notice. The GLSL layer they include is the fidelityfx-sdk-glsl component. The FSR3 host sources named in source_paths are derived from the same SDK revision under the same MIT notice (their headers).",
         "license_texts": [
           {
             "file": "third_party/fidelityfx_sdk/LICENSE.txt",
             "copied_from": "FidelityFX SDK LICENSE.txt at commit c6efa6bf7f2027b3ec94f28578bb5965eabb9e55 (SDK v1.1.4), imported byte-identical; the same MIT text as the notice in every v2.4.0 header",
             "sha256": "82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a"
           }
+        ],
+        "source_paths": [
+          "src/rt/fsr3_*",
+          "src/rt/gpu_sdl3vk/fsr3_*"
         ]
       },
       {
@@ -493,6 +497,9 @@
             "copied_from": "Anime4K LICENSE at commit 4029bf701ecaa15f163cdc49cffe5501c1acf410, imported byte-identical",
             "sha256": "5bad448b737378e3d0c977ad0d0521fa37ad279a7e76ea9a31d9257eeb6953f5"
           }
+        ],
+        "source_paths": [
+          "src/rt/gpu_sdl3vk/shaders/anime4k_*"
         ]
       },
       {
@@ -507,7 +514,7 @@
           "Copyright Romain Tisserand",
           "Copyright Aaron Giles"
         ],
-        "note": "Compiled into the native player (and the nk_disc_expand wrapper the Python tools build) to read CHD disc images at import, through src/core/nk_disc_chd.c; see third_party/libchdr/PROVENANCE.md. Not linked into the runtime.",
+        "note": "Compiled into the native player runtime (and the nk_disc_expand wrapper the Python tools build) to read CHD disc images at import, through src/core/nk_disc_chd.c; see third_party/libchdr/PROVENANCE.md. Not linked into the runtime.",
         "license_texts": [
           {
             "file": "third_party/libchdr/LICENSE.txt",
@@ -630,7 +637,7 @@
           "Copyright (C) 2025-2026 the psp-recomp authors (sal063 / psp-recomp)",
           "Copyright (c) 2012- PPSSPP Project and contributors"
         ],
-        "note": "Source files under src/rt/ and src/ref/ that carry GPL-2.0-or-later and derive from the sal063 PSP Recompilation Project and, for the files listed in src/rt/PROVENANCE.md, from PPSSPP. They are compiled into the runtime itself, so no separate relink step applies. GPL-2.0-or-later lets them be conveyed under GPL version 3, the licence of the player that links them: the project's own files are GPL-3.0-or-later, and the player also links GPL-3.0-only files (the pspdecrypt-derived src/core/nk_psp_* files and xBRZ), so it is conveyed under GPL version 3 (NOTICE.md). No disposition in this inventory names statically compiled GPL source of this kind; statically_linked_subset is the closest documented value.",
+        "note": "Source files under src/rt/ and src/ref/ that carry GPL-2.0-or-later and derive from the sal063 PSP Recompilation Project and, for the files listed in src/rt/PROVENANCE.md, from PPSSPP. They are compiled into the runtime itself, so no separate relink step applies. GPL-2.0-or-later lets them be conveyed under GPL version 3, the licence of the player that links them: the project's own files are GPL-3.0-or-later, and the player also links GPL-3.0-only files (the pspdecrypt-derived src/core/nk_psp_* files and xBRZ), so it is conveyed under GPL version 3 (NOTICE.md). No disposition in this inventory names statically compiled GPL source of this kind; statically_linked_subset is the closest documented value. source_paths names these files for the drift gate: src/rt/ and src/ref/ as above, and the PPSSPP-derived LZRC decoder src/core/nk_psp_lzrc.* (Copyright (c) 2012- PPSSPP Project, GPL-2.0-or-later).",
         "license_texts": [
           {
             "file": "third_party/licenses/GPL-2.0.txt",
@@ -642,6 +649,11 @@
             "copied_from": "sal063 CREDITS.md at da17b0e1db209206a407d097d132201e516e3855 with Nakagawa corrections (third_party/licenses/SAL063_CREDITS.txt)",
             "sha256": "cb3cdf1236eec851ab898e6b45aafc761da83112b85d2866ee6bbaa0fa23a208"
           }
+        ],
+        "source_paths": [
+          "src/rt/*",
+          "src/ref/*",
+          "src/core/nk_psp_lzrc.*"
         ]
       },
       {
@@ -683,6 +695,235 @@
             "sha256": "c61f12da7cdad526bdcbed47a4c0a603e60dbbfdaf8b66933cd088e9132c303f"
           }
         ]
+      },
+      {
+        "id": "rcheevos",
+        "name": "rcheevos",
+        "spdx_id": "MIT",
+        "upstream_origin": "https://github.com/RetroAchievements/rcheevos",
+        "upstream_revision": "v12.5.0 / 1433173220a7eaede6a9ed7a18e94117be1821e0",
+        "disposition": "statically_linked_subset",
+        "notice_file": "rcheevos.txt",
+        "copyright_notices": [
+          "Copyright (c) 2018 RetroAchievements.org",
+          "L. Peter Deutsch's MD5 (src/rhash/md5.c and md5.h): Copyright (C) 1999, 2000, 2002 Aladdin Enterprises, zlib licence"
+        ],
+        "note": "Compiled into the native player runtime (opt-in RetroAchievements client, src/core/nk_achievements.c). A vendored subset with the LOCAL DELTAs recorded in third_party/rcheevos/PROVENANCE.md. The MIT text asks that its notice be included in all copies or substantial portions; the MD5 files carry their own zlib licence text in their headers, shipped here as the second text (a verbatim copy of that header comment).",
+        "license_texts": [
+          {
+            "file": "third_party/rcheevos/LICENSE",
+            "copied_from": "rcheevos upstream LICENSE at v12.5.0, imported byte-identical (third_party/rcheevos/PROVENANCE.md)",
+            "sha256": "bf820c034966a3b6be050bb85f94ec841a0b972bd5d477e362337d0574b5c219"
+          },
+          {
+            "file": "third_party/licenses/rcheevos-MD5.txt",
+            "copied_from": "the opening comment of third_party/rcheevos/src/rhash/md5.h (L. Peter Deutsch's zlib-style licence for the MD5 files), copied verbatim without the comment delimiters",
+            "sha256": "17dddb81bc0499c54f6852ed100a5fb64289f88a15a4dd7961d412bb1014cf3e"
+          }
+        ]
+      },
+      {
+        "id": "uofw-audiocodec",
+        "name": "uOFW (sceAudiocodec checks)",
+        "spdx_id": "MIT",
+        "upstream_origin": "https://github.com/uofw/uofw",
+        "upstream_revision": "28306bb5bd4fcdcc0c1d469bf1f3bdb885dde3e9",
+        "disposition": "statically_linked_subset",
+        "notice_file": "uOFW.txt",
+        "copyright_notices": [
+          "Copyright (c) 2011, 2012 The uOFW team"
+        ],
+        "source_paths": [
+          "src/rt/hle_videocodec.c"
+        ],
+        "note": "The sceAudiocodec argument checks, EDRAM words, error codes and output-size rule in src/rt/hle_videocodec.c are adapted from uOFW src/kd/avcodec/audiocodec.c (src/rt/PROVENANCE.md, section H). The file also keeps uOFW's MIT permission notice in its header; the licence text recorded here is uOFW's own COPYING. The file is compiled into every title runtime.",
+        "license_texts": [
+          {
+            "file": "third_party/licenses/uOFW.txt",
+            "copied_from": "uOFW COPYING (the MIT permission notice) at commit 28306bb5bd4fcdcc0c1d469bf1f3bdb885dde3e9, byte-identical",
+            "sha256": "8ca8134343aad97348048e5f40053ab7be6cafef5f417aa0fc00d0c8965793a1"
+          }
+        ]
+      },
+      {
+        "id": "jpcsp-videocodec",
+        "name": "JPCSP (Media Engine video and audio codec boundary)",
+        "spdx_id": "GPL-3.0-or-later",
+        "upstream_origin": "https://github.com/jpcsp/jpcsp",
+        "upstream_revision": "00ac4d6daedd89c0492093ae83fb0d3d819af414",
+        "disposition": "statically_linked_subset",
+        "notice_file": "JPCSP.txt",
+        "copyright_notices": [
+          "Jpcsp contributors (the GPL-3.0-or-later notice is kept in the header of src/rt/hle_videocodec.c)"
+        ],
+        "source_paths": [
+          "src/rt/hle_videocodec.c"
+        ],
+        "note": "src/rt/hle_videocodec.c is derived-translated from JPCSP at the pinned revision (src/rt/PROVENANCE.md, section H) and compiled into every title runtime. JPCSP is GPL-3.0-or-later, the licence of the player that links it. The JPCSP notice is also kept in the file header.",
+        "license_texts": [
+          {
+            "file": "LICENSE",
+            "copied_from": "GNU General Public License version 3 text, the project's own LICENSE; JPCSP's COPYING at commit 00ac4d6daedd89c0492093ae83fb0d3d819af414 is byte-identical to it (checked 2026-11-21)",
+            "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+          }
+        ]
+      },
+      {
+        "id": "pspsdk",
+        "name": "PSPSDK / PSPDEV public ABI definitions",
+        "spdx_id": "BSD-3-Clause",
+        "upstream_origin": "https://github.com/pspdev/pspsdk",
+        "upstream_revision": "687501d09733390ad75d855f73d69a0672b93a12",
+        "disposition": "statically_linked_subset",
+        "notice_file": "PSPSDK.txt",
+        "copyright_notices": [
+          "Copyright (c) 2005 adresd, Marcus R. Brown, James Forshaw, John Kelley, Jesper Svennevid"
+        ],
+        "note": "Public ABI constants, layouts and error codes named after PSPSDK headers in the runtime sources (for example the pspkerror.h citations in src/rt/sce_kernel_errors.h; assets/upstream/pspdev.lock.json pins the revision). PPSSPP's LICENSE.TXT asks binary redistributions to reproduce this BSD text, so it travels with every package.",
+        "license_texts": [
+          {
+            "file": "third_party/licenses/PSPSDK.txt",
+            "copied_from": "PSPSDK / PSPDEV BSD-family licence text, present in this repository since its initial public export",
+            "sha256": "2a72b3d563b8e080dd2be9a963f44c8396ca615421833d3cffb6d126101c1c82"
+          }
+        ]
+      },
+      {
+        "id": "clay",
+        "name": "Clay",
+        "spdx_id": "Zlib",
+        "upstream_origin": "https://github.com/nicbarker/clay",
+        "upstream_revision": "e6cc36941ab2af5d81107617039d6f527a1c660b",
+        "disposition": "statically_linked_subset",
+        "notice_file": "clay.txt",
+        "copyright_notices": [
+          "Copyright (c) 2024 Nic Barker"
+        ],
+        "note": "Compiled into the native player runtime as the layout library of the launcher and the in-game overlay (src/ui/nk_ui_clay.c compiles the implementation; third_party/clay/PROVENANCE.md).",
+        "license_texts": [
+          {
+            "file": "third_party/clay/LICENSE.md",
+            "copied_from": "Clay upstream LICENSE.md at e6cc36941ab2af5d81107617039d6f527a1c660b, imported byte-identical",
+            "sha256": "5dd30f9f52093076b7574458f5efb8242fe6cbbd4669d4a2914e7616810d0df8"
+          }
+        ]
+      },
+      {
+        "id": "monocypher",
+        "name": "Monocypher",
+        "spdx_id": "CC0-1.0",
+        "upstream_origin": "https://github.com/LoupVaillant/Monocypher",
+        "upstream_revision": "4.0.3 / ab2b16dd619ad5f6979a4fbe69cfa324a6fcc35f",
+        "disposition": "statically_linked_subset",
+        "notice_file": "monocypher.txt",
+        "copyright_notices": [
+          "Copyright (c) 2017-2023 Loup Vaillant, 2017-2019 Michael Savage, 2017-2023 Fabio Scotoni and contributors: BSD-2-Clause or CC0-1.0 at the user's choice; the project elects CC0-1.0"
+        ],
+        "note": "Compiled into the native player runtime (third_party/monocypher/PROVENANCE.md). Upstream offers BSD-2-Clause or CC0-1.0; the project elects CC0-1.0, and the complete upstream LICENCE.md with both licences travels with the package.",
+        "license_texts": [
+          {
+            "file": "third_party/monocypher/LICENCE.md",
+            "copied_from": "Monocypher upstream LICENCE.md at the pinned commit, imported byte-identical",
+            "sha256": "a5781770269d2516e52ba4863f790c10a16da4089a1e81823aee19ff1e9026b0"
+          }
+        ]
+      },
+      {
+        "id": "stb",
+        "name": "stb_image and stb_vorbis",
+        "spdx_id": "Unlicense",
+        "upstream_origin": "https://github.com/nothings/stb",
+        "upstream_revision": "stb_image 6b5799bae8a1fe3792691ef4b72ae26434c3e799; stb_vorbis 9f755b604db3492df2cbeb39bf84b81e3e3932e3",
+        "disposition": "statically_linked_subset",
+        "notice_file": "stb.txt",
+        "copyright_notices": [
+          "Sean Barrett: public domain (Unlicense) or MIT (Copyright (c) 2017 Sean Barrett)"
+        ],
+        "note": "Compiled into the native player runtime (image decoding in src/ui/nk_ui_image.c, Ogg Vorbis in src/player/ui/player_ui_vorbis.c; third_party/stb/PROVENANCE.md). Upstream offers the public-domain alternative or the MIT licence; the project elects the public-domain one, and the upstream LICENSE with both travels with the package.",
+        "license_texts": [
+          {
+            "file": "third_party/stb/LICENSE",
+            "copied_from": "stb upstream LICENSE at the pinned commit, kept unchanged",
+            "sha256": "eb36e45c704dd0b59730115523e089b051852625b4db0a6fe76c991900af20e7"
+          }
+        ]
+      },
+      {
+        "id": "kenney-ui-assets",
+        "name": "Kenney Input Prompts and Interface Sounds",
+        "spdx_id": "CC0-1.0",
+        "upstream_origin": "https://kenney.nl",
+        "upstream_revision": "Input Prompts 1.5A; Interface Sounds 1.0",
+        "disposition": "embedded_assets",
+        "notice_file": "kenney.txt",
+        "copyright_notices": [
+          "Kenney (Kenney Vleugels, www.kenney.nl)"
+        ],
+        "note": "Images and sounds embedded in the native player by tools/gen_ui_assets.py (src/ui/nk_ui_assets.c; third_party/kenney/PROVENANCE.md). CC0 asks for no credit; the licence texts of both packs travel with the package.",
+        "license_texts": [
+          {
+            "file": "third_party/kenney/input-prompts/License.txt",
+            "copied_from": "Input Prompts pack License.txt, kept unchanged",
+            "sha256": "a1a7ee88ca700fabc701c9746ca04436e9f2e4751f42a38afb26464106fe424d"
+          },
+          {
+            "file": "third_party/kenney/interface-sounds/License.txt",
+            "copied_from": "Interface Sounds pack License.txt, kept unchanged",
+            "sha256": "c36200e700dd1f244dc4234dd05aa0ca4d8f44eddd23657998011db728d4db9e"
+          }
+        ]
+      },
+      {
+        "id": "openxr-headers",
+        "name": "Khronos OpenXR headers",
+        "spdx_id": "Apache-2.0 OR MIT",
+        "upstream_origin": "https://github.com/KhronosGroup/OpenXR-SDK",
+        "upstream_revision": "release-1.1.65 / 24a1f2b92d212501a2b1b8d30ffd53abf55fcfa8",
+        "disposition": "statically_linked_subset",
+        "notice_file": "OpenXR.txt",
+        "copyright_notices": [
+          "Copyright The Khronos Group Inc."
+        ],
+        "note": "Types, enumerations and function-pointer typedefs for the optional OpenXR module src/rt/xr/nk_xr.c, compiled into the runtime; the loader is loaded at run time and no loader binary is carried (src/rt/xr/openxr/PROVENANCE.md). Both upstream licence texts are recorded.",
+        "license_texts": [
+          {
+            "file": "src/rt/xr/openxr/Apache-2.0.txt",
+            "copied_from": "OpenXR-SDK LICENSES/Apache-2.0.txt at release-1.1.65, imported unchanged",
+            "sha256": "d3910dee6fe9fe134856d76268fe82adb1ade1ecf51b3568b7da6b94894b88f3"
+          },
+          {
+            "file": "src/rt/xr/openxr/MIT.txt",
+            "copied_from": "OpenXR-SDK LICENSES/MIT.txt at release-1.1.65, imported unchanged",
+            "sha256": "8f25018489d6fe0dec34a352314c38dc146247b7de65735790f4398a92afa84b"
+          }
+        ]
+      },
+      {
+        "id": "pspdecrypt",
+        "name": "pspdecrypt (ported game-decryption code)",
+        "spdx_id": "GPL-3.0-only",
+        "upstream_origin": "https://github.com/John-K/pspdecrypt",
+        "upstream_revision": "c156627db7634d395c380c0a9589130f603307fc",
+        "disposition": "statically_linked_subset",
+        "notice_file": "pspdecrypt.txt",
+        "copyright_notices": [
+          "John Kelley (John-K) and contributors",
+          "AES core: Rijndael by Vincent Rijmen, Antoon Bosselaers and Paulo Barreto (public domain, notice kept in src/core/nk_psp_aes.c)"
+        ],
+        "source_paths": [
+          "src/core/nk_psp_aes.*",
+          "src/core/nk_psp_kle.*",
+          "src/core/nk_psp_prx.*",
+          "src/core/nk_psp_sha1.*"
+        ],
+        "note": "The AES, SHA-1, KL4E/KL3E and ~PSP container code of the local game decryption (src/core/PROVENANCE.md, NOTICE.md). pspdecrypt's licence is GPL version 3 with no later-version grant, so these files are GPL-3.0-only; the player that links them is conveyed under GPL version 3. The licence text recorded is the GPL version 3 text of this repository's LICENSE.",
+        "license_texts": [
+          {
+            "file": "LICENSE",
+            "copied_from": "GNU General Public License version 3 text, the project's own LICENSE; pspdecrypt's licence is the same GPL version 3",
+            "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+          }
+        ]
       }
     ],
     "project_output": {
@@ -717,6 +958,26 @@
             "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-vulkan-loader: ucrt64/share/licenses/vulkan-loader/LICENSE",
             "toolchain_license_rel": "share/licenses/vulkan-loader/LICENSE",
             "sha256": "43c0a37e6a0fa7ff3c843b3ec5a4fac84b712558ddac103fbd4c1649662a9ece"
+          }
+        ]
+      }
+    ],
+    "repository_components": [
+      {
+        "id": "spdx-2.3-json-schema",
+        "name": "SPDX 2.3 JSON schema",
+        "spdx_id": "CC-BY-3.0",
+        "upstream_origin": "https://github.com/spdx/spdx-spec",
+        "upstream_revision": "v2.3 / aadf3b0b8dbbabdb4d880b0fc714255fea436ff7",
+        "disposition": "repository_test_data",
+        "copyright_notices": ["Copyright (C) 2010-2022 Linux Foundation and its Contributors"],
+        "source_paths": ["third_party/spdx/"],
+        "note": "Test data that is never shipped: the official schema (upstream schemas/spdx-schema.json), kept byte-identical as third_party/spdx/spdx-schema-2.3.json (third_party/spdx/PROVENANCE.md), against which tools/test_sbom_binding.py checks every generated SPDX document. No build, package, notice bundle or SBOM reads it; tools/package_notices.py and tools/generate_sbom.py do not read repository_components.",
+        "license_texts": [
+          {
+            "file": "third_party/spdx/LICENSE",
+            "copied_from": "spdx/spdx-spec upstream LICENSE (CC-BY-3.0) at commit aadf3b0b8dbbabdb4d880b0fc714255fea436ff7, imported byte-identical",
+            "sha256": "017e38491cccbd2bdb6da0a32a33db9ec245b5dab30fdcd09f2c742c975e5b35"
           }
         ]
       }

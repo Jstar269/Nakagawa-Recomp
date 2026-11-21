@@ -37,6 +37,12 @@ bool nk_ui_pressed(const NkUi *ui, NkUiId id);
    declared in, above the page (a Clay floating element), and keeps the pointer
    from what is under it. Close it with nk_ui_end_container. */
 bool nk_ui_begin_modal(NkUi *ui, NkUiId id, const NkUiLayout *layout, const NkUiStyle *style);
+/* Opens an overlay: a container that floats at the top left of the one it is declared in (the
+   window, when no container is open), over the page, the dialogs and the focus ring at level
+   z (raised above the ring when lower), and lets the pointer through to what is under it. It
+   holds nothing focusable. Close it with nk_ui_end_container. */
+bool nk_ui_begin_overlay(NkUi *ui, NkUiId id, const NkUiLayout *layout, const NkUiStyle *style,
+                         int16_t z);
 /* True once, on the frame an ACTIVATE press reaches the focused control `id`. */
 bool nk_ui_take_activation(NkUi *ui, NkUiId id);
 /* Label colour of a button with these flags. */

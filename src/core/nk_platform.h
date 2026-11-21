@@ -248,6 +248,13 @@ bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *ch
 /* A completed RetroAchievements set is the message this begins, followed by the game's title
  * (no line feed): "Set completed: Hot Shots Tennis". It is captioned "RetroAchievements" too. */
 #define NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED "Set completed: "
+/* The game's RetroAchievements set has loaded and its achievements are active: the message this
+ * begins, followed by the game's title, then a line feed and the achievements this account has
+ * unlocked, then a line feed and the achievements in the set, both in decimal:
+ * "Set loaded: Hot Shots Tennis\n3\n20". RetroAchievements asks every client to tell the person
+ * when achievements become active (rc_client integration guide, "Showing the game placard").
+ * It is captioned "RetroAchievements" too. */
+#define NK_GUEST_MEMORY_NOTIFICATION_SET_LOADED "Set loaded: "
 #define NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX 160u
 #define NK_GUEST_MEMORY_NOTIFICATION_BADGE_MAX 8u
 /* The text after `prefix` when text begins with it and goes on, else NULL. */
@@ -260,7 +267,9 @@ static inline const char *nk_guest_memory_notification_after(const char *text,
 static inline const char *nk_guest_memory_notification_caption(const char *text) {
     return nk_guest_memory_notification_after(text, NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED) ||
                    nk_guest_memory_notification_after(text,
-                                                      NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED)
+                                                      NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED) ||
+                   nk_guest_memory_notification_after(text,
+                                                      NK_GUEST_MEMORY_NOTIFICATION_SET_LOADED)
                ? "RetroAchievements"
                : "Host notification";
 }
@@ -376,6 +385,55 @@ static inline bool nk_guest_memory_notification_unlock(const char *text,
            (p[b] >= 'A' && p[b] <= 'Z'))
         b++;
     if (b > 0u && b < sizeof out->badge && !p[b]) memcpy(out->badge, p, b);
+    return true;
+}
+
+/* A loaded set's message fields. */
+typedef struct NkGuestSetLoadedNotice {
+    char title[NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX];
+    uint32_t unlocked;
+    uint32_t total;
+} NkGuestSetLoadedNotice;
+
+/* One count of one to nine decimal digits at p, ending at a line feed or the text's end: the
+ * character after it, or NULL when there is none. */
+static inline const char *nk_guest_memory_notification_count(const char *p, uint32_t *out) {
+    uint32_t value = 0u;
+    size_t digits = 0u;
+    while (p[digits] >= '0' && p[digits] <= '9' && digits < 9u)
+        value = value * 10u + (uint32_t)(p[digits++] - '0');
+    if (digits == 0u || (p[digits] != '\n' && p[digits] != '\0')) return NULL;
+    *out = value;
+    return p + digits;
+}
+
+/* True, with out filled, for a loaded-set message: its title (cut at a whole UTF-8 character to
+ * fit) and both counts, with no more unlocked than the set holds. False, with out zeroed, for
+ * any other message, a missing field or anything after the second count. */
+static inline bool nk_guest_memory_notification_set_loaded(const char *text,
+                                                           NkGuestSetLoadedNotice *out) {
+    if (!out) return false;
+    memset(out, 0, sizeof *out);
+    const char *p =
+        nk_guest_memory_notification_after(text, NK_GUEST_MEMORY_NOTIFICATION_SET_LOADED);
+    if (!p) return false;
+    size_t n = 0u;
+    while (p[n] && p[n] != '\n') n++;
+    if (n == 0u || p[n] != '\n') return false;
+    uint32_t unlocked = 0u;
+    uint32_t total = 0u;
+    const char *end = nk_guest_memory_notification_count(p + n + 1u, &unlocked);
+    if (!end || *end != '\n') return false;
+    end = nk_guest_memory_notification_count(end + 1, &total);
+    if (!end || *end != '\0' || unlocked > total) return false;
+    if (n >= sizeof out->title) {
+        n = sizeof out->title - 1u;
+        while (n > 0u && ((unsigned char)p[n] & 0xC0u) == 0x80u) n--; /* a whole character */
+    }
+    memcpy(out->title, p, n);
+    out->title[n] = '\0';
+    out->unlocked = unlocked;
+    out->total = total;
     return true;
 }
 

@@ -27,6 +27,7 @@
 #include "package_builder.h"
 #include "iso_reader.h"
 #include "ui/player_ui_nk.h"
+#include "ui/launcher_secret.h" /* Settings' launcher theme row (player_ui_cycle_launcher_theme) */
 #include "nk_title_manifest.h"
 #include "nk_ui_widgets.h"
 #include "nk_disc_chd.h"
@@ -819,6 +820,13 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
     bool use_next_ui = player_ui_nk_view_active(next_ui, app);
     if (!app || !running || !event) return false;
     event = player_back_as_escape(app, next_ui, event, &escape);
+    /* The classic cheat code sees each press first, so its B and A are not also a Back, a
+       Quit or a Select (launcher_secret.h); a control waiting for its binding keeps them. */
+    if (use_next_ui && !(app->active_view == VIEW_CONTROLLER_SETTINGS &&
+                         input_settings_is_capturing(&app->input_settings)) &&
+        player_ui_nk_take_secret(next_ui, event)) {
+        return true;
+    }
 
     switch (event->type) {
     case SDL_EVENT_QUIT:
@@ -1844,6 +1852,7 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_VOLUME_DOWN: player_app_adjust_volume(app, -5); break;
         case PLAYER_UI_SETTINGS_VOLUME_UP: player_app_adjust_volume(app, 5); break;
         case PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS: player_app_toggle_ui_sounds(app); break;
+        case PLAYER_UI_SETTINGS_CYCLE_LAUNCHER_THEME: player_ui_cycle_launcher_theme(app); break;
         case PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC: player_app_toggle_launcher_music(app); break;
         case PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN:
             player_app_adjust_launcher_music_volume(app, -5);
@@ -2370,6 +2379,7 @@ typedef struct {
     char prior_identity[65];
     char package_identity[65];
     char reason[2048];
+    NkRuntimePackageInfo package_info;
     GameRecord game;
     NkRuntimePackageStatus status;
     PlayerUiTestCatalog catalog_test;
@@ -2462,8 +2472,8 @@ static int SDLCALL player_package_status_thread_main(void *userdata) {
         snprintf(job->package_identity, sizeof(job->package_identity), "%s",
                  before_identity);
     } else if (root) {
-        job->status = nk_launch_validate_runtime_package(
-            root, &job->game, NULL, job->reason, sizeof(job->reason));
+        job->status = player_runtime_package_status_check(
+            root, &job->game, &job->package_info, job->reason, sizeof(job->reason));
         job->runtime_available = player_runtime_available(job->status, &job->game, root);
     } else {
         job->status = NK_RUNTIME_PACKAGE_MISSING;
@@ -2707,6 +2717,12 @@ static void player_package_status_finish(PlayerApp *app,
             job->package_identity, job->status, job->runtime_available,
             SDL_GetTicks());
         player_app_runtime_package_cache_set_reason(app, current_index, job->reason);
+        if (!job->status_unchanged) {
+            player_app_runtime_package_cache_set_runtime_source(
+                app, current_index, job->package_info.runtime_source_commit,
+                job->package_info.runtime_source_origin,
+                job->package_info.runtime_source_reason);
+        }
         if (job->identity_changed_during_validation) {
             player_package_status_queue_game(app, current_index, true,
                                              requested, force_requested);
@@ -2763,6 +2779,12 @@ static void player_package_status_finish(PlayerApp *app,
                     job->runtime_available, SDL_GetTicks());
                 player_app_runtime_package_cache_set_reason(app, current_index,
                                                             job->reason);
+                if (!job->status_unchanged) {
+                    player_app_runtime_package_cache_set_runtime_source(
+                        app, current_index, job->package_info.runtime_source_commit,
+                        job->package_info.runtime_source_origin,
+                        job->package_info.runtime_source_reason);
+                }
             }
             if (queued_build) {
                 player_app_rebuild_queue_build_checked(app, true);
@@ -4050,6 +4072,181 @@ static int player_run_command_line_launch(PlayerApp *app, int game_index,
     return child_code < 0 ? 6 : child_code;
 }
 
+/* ---- The command line: one option table, one parser ----
+ *
+ * Every option the player takes is named once in k_player_cli_options; --help is printed from it
+ * and player_cli_normalize checks the whole command line against it before anything else reads
+ * it. A value option takes its value as `--name=value` or `--name value` (what a launcher
+ * template such as Pegasus, ES-DE, LaunchBox or Steam ROM Manager writes). An unknown option, a
+ * stray argument, a value option with no value, or a value on a switch is refused by name and
+ * the process exits 2: nothing on the command line is ignored in silence. The rest of startup
+ * sees only the canonical `--name=value` form. */
+typedef struct {
+    const char *name;   /* "--iso" */
+    const char *value;  /* NULL for a switch; else the value's name in --help */
+    const char *help;   /* NULL: left out of --help (harness options, legacy spellings) */
+    bool empty_ok;      /* `--name=` is a real value (an empty event script) */
+} PlayerCliOption;
+
+static const PlayerCliOption k_player_cli_options[] = {
+    {"--help", NULL, "Print this list and exit.", false},
+    {"--version", NULL, "Print the version and build commit on one line and exit.", false},
+    {"--user-data-root", "<folder>", "Keep the library, settings, logs and saves in <folder>.", false},
+    {"--iso", "<path>", "Add a disc image (with --stage, --stage-only or --launch-now).", false},
+    {"--stage", NULL, "Stage the --iso image into the library, then open the launcher.", false},
+    {"--stage-only", NULL, "Stage the --iso image and exit.", false},
+    {"--launch-now", NULL, "Start the --iso game without opening the launcher window.", false},
+    {"--launch-title", "<disc ID>",
+     "Start a library game by disc ID (or <disc ID>:<SHA-1>) without the launcher window.",
+     false},
+    {"--launch-index", "<N>", "Start the library game at place N (0 up).", false},
+    {"--runtime-root", "<path>", "Use a runtime folder (a checkout or a title package).", false},
+    {"--runtime-bin", "<path>", NULL, false}, /* the old spelling of --runtime-root */
+    {"--manifest-overlay", "<file>", "Load one more title manifest.", false},
+    {"--view", "<name>", NULL, false},
+    {"--screenshot", "<bmp>", "Draw one page, save it as a BMP and exit.", false},
+    {"--width", "<W>", NULL, false},
+    {"--height", "<H>", NULL, false},
+    {"--render-scale", "<S>", NULL, false},
+    {"--headless-launch", NULL, "Run the launched game without a window.", false},
+    {"--headless-accept-presented-frames", "<N>", NULL, false},
+    {"--headless-timeout-ms", "<N>", NULL, false},
+    {"--experimental-60hz", NULL, "Run at 60 Hz for this session only (experimental).", false},
+    {"--cheats", NULL, "Turn cheats on for this session, from each game's own file.", false},
+    {"--cheats-file", "<path>", "Turn cheats on for this session, from this cheat file.", false},
+    {"--demo", NULL, NULL, false},
+    {"--empty", NULL, NULL, false},
+    {"--wizard", NULL, NULL, false},
+    {"--ui", "<ignored>", NULL, false}, /* removed; shortcuts made before still pass --ui=next */
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    {"--ui-test-events", "<events>", NULL, true},
+    {"--ui-test-screenshot", "<bmp>", NULL, false},
+    {"--ui-test-error-code", "<code>", NULL, false},
+    {"--ui-test-iso-path", "<path>", NULL, false},
+    {"--ui-test-wait-background", NULL, NULL, false},
+    {"--ui-test-catalog-reload-path", "<path>", NULL, false},
+    {"--ui-test-catalog-reload-count", "<N>", NULL, false},
+#endif
+};
+
+typedef struct {
+    int argc;
+    char **argv;      /* argv[0], then each option as `--name` or `--name=value`; no --help/--version */
+    bool help;
+    bool version;
+    char error[512];  /* "" when the command line is good */
+} PlayerCli;
+
+static const PlayerCliOption *player_cli_find(const char *name, size_t length) {
+    for (size_t i = 0; i < sizeof(k_player_cli_options) / sizeof(k_player_cli_options[0]); i++) {
+        const char *known = k_player_cli_options[i].name;
+        if (strlen(known) == length && strncmp(known, name, length) == 0) {
+            return &k_player_cli_options[i];
+        }
+    }
+    return NULL;
+}
+
+/* Checks the command line against the table and rewrites it to the canonical form. The strings it
+   builds live until the process ends. False, with cli->error set, for the first bad argument. */
+static bool player_cli_normalize(PlayerCli *cli, int argc, char *argv[]) {
+    memset(cli, 0, sizeof(*cli));
+    cli->argv = (char **)calloc((size_t)(argc > 0 ? argc : 1) + 1u, sizeof(char *));
+    if (!cli->argv) {
+        snprintf(cli->error, sizeof(cli->error), "Out of memory reading the command line.");
+        return false;
+    }
+    if (argc > 0) cli->argv[cli->argc++] = argv[0];
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        if (strncmp(arg, "--", 2) != 0 || arg[2] == '\0') {
+            snprintf(cli->error, sizeof(cli->error),
+                     "Unexpected argument '%s': every option starts with -- (a game is given "
+                     "as --iso <path> or --launch-title <disc ID>).", arg);
+            return false;
+        }
+        const char *equals = strchr(arg, '=');
+        const size_t name_length = equals ? (size_t)(equals - arg) : strlen(arg);
+        const PlayerCliOption *option = player_cli_find(arg, name_length);
+        if (!option) {
+            snprintf(cli->error, sizeof(cli->error), "Unknown option: %.*s.",
+                     (int)name_length, arg);
+            return false;
+        }
+        if (!option->value) {
+            if (equals) {
+                snprintf(cli->error, sizeof(cli->error), "%s takes no value (got '%s').",
+                         option->name, equals + 1);
+                return false;
+            }
+            if (strcmp(option->name, "--help") == 0) cli->help = true;
+            else if (strcmp(option->name, "--version") == 0) cli->version = true;
+            else cli->argv[cli->argc++] = (char *)arg;
+            continue;
+        }
+        const char *value = NULL;
+        if (equals) {
+            value = equals + 1;
+        } else if (i + 1 < argc && strncmp(argv[i + 1], "--", 2) != 0) {
+            value = argv[++i];
+        }
+        if (!value || (!value[0] && !option->empty_ok)) {
+            snprintf(cli->error, sizeof(cli->error),
+                     "%s needs a value: write %s=%s or %s %s.", option->name, option->name,
+                     option->value, option->name, option->value);
+            return false;
+        }
+        const size_t joined_size = strlen(option->name) + 1u + strlen(value) + 1u;
+        char *joined = (char *)malloc(joined_size);
+        if (!joined) {
+            snprintf(cli->error, sizeof(cli->error), "Out of memory reading the command line.");
+            return false;
+        }
+        snprintf(joined, joined_size, "%s=%s", option->name, value);
+        cli->argv[cli->argc++] = joined;
+    }
+    return true;
+}
+
+/* ---- Exit codes: the one table --help and docs/SETUP.md both come from ----
+ * test_player_ui.py checks the three agree. A code is reachable from several routes, so each row
+ * names every cause. */
+typedef struct {
+    int code;
+    const char *meaning;
+} PlayerExitCode;
+
+static const PlayerExitCode k_player_exit_codes[] = {
+    {0, "Done. A game that was started returns its own exit code instead, whatever it is."},
+    {1, "The launcher window could not be created, a UI test failed, a --screenshot could not be saved, the manifest overlay could not be loaded, or a --stage-only or --headless-launch run could not read, convert or inspect the disc image."},
+    {2, "The command line, the data folder, the --launch-title name or the library entry was refused, or staging needs a supported --iso."},
+    {3, "The game has no runtime prepared for this PC (build it in Nakagawa Recomp), or staging (--stage-only, or --launch-now with --headless-launch) cannot set it up (not in the catalog, no profile, out of memory)."},
+    {4, "The game or the launcher could not start (a missing SDL3_ttf.dll included), an experimental profile could not be made, or staging (--stage-only, or --launch-now with --headless-launch) failed."},
+    {5, "The game's window request was lost."},
+    {6, "The game ended abnormally (a crash), or in staging (--stage-only, or --launch-now with --headless-launch) the game's folder path is too long for the library record."},
+    {7, "A headless run timed out, or in staging (--stage-only, or --launch-now with --headless-launch) the game could not be saved to the library."},
+    {8, "A headless acceptance checkpoint was not reached, or in staging (--stage-only, or --launch-now with --headless-launch) the game's data folder could not be checked."},
+    {9, "In staging (--stage-only, or --launch-now with --headless-launch), another run holds the game's staging, or a file takes the game's folder name."},
+};
+
+static void player_cli_print_usage(void) {
+    printf("Usage: nakagawa_player [options]\n\n"
+           "A value is written --name=value or --name value; quote a path with spaces.\n\n");
+    for (size_t i = 0; i < sizeof(k_player_cli_options) / sizeof(k_player_cli_options[0]); i++) {
+        const PlayerCliOption *option = &k_player_cli_options[i];
+        if (!option->help) continue;
+        char left[64];
+        snprintf(left, sizeof(left), "%s%s%s", option->name, option->value ? " " : "",
+                 option->value ? option->value : "");
+        printf("  %-30s %s\n", left, option->help);
+    }
+    printf("\nExit codes (a start from the command line; --stage-only and --headless-launch runs use them too):\n");
+    for (size_t i = 0; i < sizeof(k_player_exit_codes) / sizeof(k_player_exit_codes[0]); i++) {
+        printf("  %d  %s\n", k_player_exit_codes[i].code, k_player_exit_codes[i].meaning);
+    }
+    printf("\nAn unknown option or a missing value is refused with exit code 2, never ignored.\n");
+}
+
 /* --user-data-root=<folder> makes this process keep its library, title
  * manifests, packages and staged games in <folder>, the same meaning as
  * nk_cli's --user-data-root, and its settings, cache, logs and saves in the
@@ -4396,6 +4593,9 @@ struct PlayerRun {
     char achievements_user_agent[NK_ACH_USER_AGENT_MAX];
     NkGuestMemoryChannel guest_memory_channel;
     PlayerAchHttpJob *ach_http_job;
+    /* Ends the request ach_http_job's thread is making when the player closes, so shutdown
+       does not wait out WinHTTP's timeouts (audit F-32444050); NULL: shutdown waits for it. */
+    PackageHttpCancel *ach_http_cancel;
     char achievements_game_hash[33];
     char achievements_disc_id[MAX_DISC_ID_LEN];
     bool guest_memory_channel_active;
@@ -4457,6 +4657,7 @@ struct PlayerAchHttpJob {
     char url[2048];
     char content_type[128];
     char user_agent[NK_ACH_USER_AGENT_MAX];
+    PackageHttpCancel *cancel; /* the run's ach_http_cancel */
     char *post_data;
     size_t post_data_size;
     char *response_body;
@@ -4581,7 +4782,7 @@ static void player_ach_job_cache_write(PlayerAchHttpJob *job) {
 
 static int SDLCALL player_ach_http_thread_main(void *userdata) {
     PlayerAchHttpJob *job = (PlayerAchHttpJob *)userdata;
-    PackageHttpOptions options = {job->user_agent};
+    PackageHttpOptions options = {job->user_agent, job->cancel};
     PackageHttpResponse response;
     unsigned char chunk[16384];
     memset(&response, 0, sizeof response);
@@ -4730,6 +4931,7 @@ static void player_ach_transport(void *context, const NkAchRequest *request,
         job->cache_epoch = SDL_GetAtomicInt(&run->ach_badge_cache_epoch);
     }
     snprintf(job->user_agent, sizeof job->user_agent, "%s", run->achievements_user_agent);
+    job->cancel = run->ach_http_cancel;
     job->done_callback = done;
     job->done_context = done_context;
     snprintf(job->url, sizeof job->url, "%s", request->url);
@@ -4787,6 +4989,9 @@ static bool player_achievements_create(PlayerRun *run) {
     if (!run->achievements_lock) return false;
     if (!run->ach_badge_cache_lock) run->ach_badge_cache_lock = SDL_CreateMutex();
     if (!run->ach_badge_cache_lock) return false;
+    /* NULL (no memory, or no native transport) leaves shutdown waiting for a request, as it
+       did before. */
+    if (!run->ach_http_cancel) run->ach_http_cancel = package_http_cancel_create();
     /* <data>/achievements-badges, made only when a picture is kept. Unknown: nothing is
        cached, and each badge is fetched once per run. */
     char data_root[NK_MAX_PATH];
@@ -4909,6 +5114,8 @@ _Static_assert(PLAYER_ACHIEVEMENT_DESCRIPTION_MAX >= NK_ACH_DISPLAY_DESCRIPTION_
                "a row holds the bridge's whole description");
 _Static_assert(PLAYER_ACHIEVEMENT_BADGE_NAME_MAX >= NK_ACH_BADGE_NAME_MAX,
                "a row holds the bridge's whole badge name");
+_Static_assert(sizeof(((PlayerApp *)0)->achievements_account) >= NK_ACH_DISPLAY_NAME_MAX,
+               "the account row holds the whole display name (nk_ach_display_name)");
 
 /* A new list (a game's rows, or none): the pictures it does not use leave their slots, so the
    next game's page has room for its own; they stay in the badge folder, and a page that wants
@@ -5165,8 +5372,8 @@ static void player_achievements_collect_events(PlayerRun *run) {
                              "RetroAchievements token.");
                 } else {
                     app->achievements_signed_in = true;
-                    snprintf(app->achievements_account, sizeof app->achievements_account,
-                             "%.*s", (int)sizeof(app->achievements_account) - 1, username);
+                    nk_ach_display_name(username, app->achievements_account,
+                                        sizeof app->achievements_account);
                     player_achievements_rest_status(
                         run, app->is_game_running && !run->guest_memory_channel_active
                                  ? "Signed in. Restart this game to start tracking."
@@ -5212,9 +5419,21 @@ static void player_achievements_collect_events(PlayerRun *run) {
                 player_achievements_refresh_list(run);
                 /* A channel stopped meanwhile keeps its own reason on the status line: no
                    frame reaches these achievements. */
-                if (run->guest_memory_channel_active)
+                if (run->guest_memory_channel_active) {
                     snprintf(app->achievements_status, sizeof app->achievements_status,
                              "%u achievements available.", event->count);
+                    /* The game's notice that its achievements are active, with what this
+                       account has unlocked of them (nk_guest_memory_notification_set_loaded):
+                       RetroAchievements asks clients to say so. */
+                    const char *game = event->title[0] ? event->title : "This game";
+                    char toast[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+                    snprintf(toast, sizeof toast,
+                             NK_GUEST_MEMORY_NOTIFICATION_SET_LOADED "%.*s\n%u\n%u",
+                             player_utf8_fit(game, 140u), game,
+                             (unsigned)app->achievements_unlocked, (unsigned)event->count);
+                    (void)nk_platform_guest_memory_channel_notify(&run->guest_memory_channel,
+                                                                  toast);
+                }
                 break;
             case NK_ACH_EVENT_GAME_FAILED: {
                 player_achievements_clear_list(run);
@@ -5312,8 +5531,8 @@ static void player_achievements_sign_in_stored(PlayerRun *run) {
         player_achievements_rest_status(run, "Sign in to connect.");
         return;
     }
-    snprintf(app->achievements_account, sizeof app->achievements_account,
-             "%.*s", (int)sizeof(app->achievements_account) - 1, username);
+    /* The credential store's name is shown as the server's would be: cleaned and cut to fit. */
+    nk_ach_display_name(username, app->achievements_account, sizeof app->achievements_account);
     app->achievements_signed_in = false;
     run->achievements_login_pending =
         nk_ach_begin_login(run->achievements, username, token);
@@ -5487,6 +5706,10 @@ static void player_achievements_shutdown(PlayerRun *run) {
     PlayerAchHttpJob *job = run->ach_http_job;
     if (job) {
         if (job->thread) {
+            /* The request on its way ends now instead of at WinHTTP's timeouts. It is answered
+               as a retry, or refused when it had not started, and the unlock it carried stays
+               in the queue saved below, for the next run. */
+            package_http_cancel(run->ach_http_cancel);
             SDL_WaitThread(job->thread, NULL);
             job->thread = NULL;
         }
@@ -5509,6 +5732,9 @@ static void player_achievements_shutdown(PlayerRun *run) {
         SDL_DestroyMutex(run->ach_badge_cache_lock);
         run->ach_badge_cache_lock = NULL;
     }
+    /* No request uses it: the job above has ended, and the transport is closed. */
+    package_http_cancel_destroy(run->ach_http_cancel);
+    run->ach_http_cancel = NULL;
 }
 
 static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork *work) {
@@ -5693,22 +5919,11 @@ static void player_run_init(PlayerRun *run) {
     run->capture_render_scale = 1.0f;
 }
 
-/* Reads the command line (and --help), then checks it. */
+/* Reads the normalized command line (player_cli_normalize), then checks it. */
 static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
     PlayerApp *app = &run->app;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--help") == 0) {
-            printf("Usage: nakagawa_player [--user-data-root=<folder>] "
-                   "[--iso=<path> [--stage|--stage-only|--launch-now]] "
-                   "[--runtime-root=<path>] [--view=<name>] [--screenshot=<bmp>] "
-                   "[--width=W --height=H [--render-scale=S]] "
-                   "[--launch-index=N | --launch-title=<disc ID>] [--headless-launch] "
-                   "[--headless-accept-presented-frames=N] "
-                   "[--headless-timeout-ms=N] "
-                   "[--experimental-60hz] "
-                   "[--cheats | --cheats-file=<path>]\n");
-            return 0;
-        } else if (strcmp(argv[i], "--experimental-60hz") == 0) {
+        if (strcmp(argv[i], "--experimental-60hz") == 0) {
             player_app_set_experimental_60hz_session(app, true);
         } else if (strcmp(argv[i], "--cheats") == 0) {
             /* Cheats on for this session (#2639), from each game's own file. A file named by
@@ -5812,7 +6027,10 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
             fprintf(stderr, "[PLAYER] Ignoring %s: that switch was removed, and the nk "
                             "launcher is the only launcher.\n", argv[i]);
         } else {
-            fprintf(stderr, "[PLAYER] Ignoring unknown option: %s\n", argv[i]);
+            /* player_cli_normalize took only names in k_player_cli_options, so an option
+               reaching here is in the table but has no handler: a defect, never ignored. */
+            fprintf(stderr, "[PLAYER] Internal error: the option %s has no handler.\n", argv[i]);
+            return 2;
         }
     }
 
@@ -7581,7 +7799,15 @@ int main(int argc, char *argv[]) {
 
     /* Android: system-log streams and the unpacked-files folder (no-op elsewhere). */
     (void)nk_platform_host_startup("nakagawa");
-    if (!player_apply_user_data_root(argc, argv)) return 2;
+    /* The command line is checked once, here; the data root and the rest of startup read the
+       canonical result. A refusal is printed below, once the output streams exist. */
+    PlayerCli cli;
+    const bool cli_good = player_cli_normalize(&cli, argc, argv);
+    if (cli_good) {
+        argc = cli.argc;
+        argv = cli.argv;
+        if (!player_apply_user_data_root(argc, argv)) return 2;
+    }
     /* Compressed disc images: CHD is read through the vendored libchdr. */
     nk_disc_chd_register();
     /* Windows (a GUI-subsystem program): the parent console, or player-output.txt in the
@@ -7591,6 +7817,17 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "[PLAYER] Windows refused to limit where DLLs are loaded from "
                         "(SetDefaultDllDirectories); the current folder and PATH may still be "
                         "searched.\n");
+    }
+    /* A bad argument is refused wherever it stands, --help and --version included. */
+    if (!cli_good) {
+        fprintf(stderr, "[PLAYER] %s Run nakagawa_player --help to list the options.\n",
+                cli.error);
+        return 2;
+    }
+    if (cli.help || cli.version) {
+        if (cli.help) player_cli_print_usage();
+        else printf("Nakagawa Recomp %s\n", player_report_version());
+        return 0;
     }
     player_report_legacy_data_root();
 

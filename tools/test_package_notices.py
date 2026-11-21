@@ -10,6 +10,7 @@ import json
 from io import StringIO
 from pathlib import Path
 import re
+import shutil
 import struct
 import sys
 import tempfile
@@ -128,6 +129,36 @@ class TestPackageNotices(unittest.TestCase):
                         self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
                     )
                 self.assertIn("LICENSE_RECORD_MALFORMED", str(ctx.exception))
+
+    def test_project_notice_and_credits_are_staged_into_the_package(self) -> None:
+        """NOTICE.md and CREDITS.md travel with every package, next to the generated notice bundle."""
+        (self.pkg_dir / "mygame.exe").write_bytes(b"MZ\0\0exe")
+        package_notices.generate_package_notices(
+            self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+        )
+        self.assertEqual(package_notices.PROJECT_NOTICE_FILES, ("NOTICE.md", "CREDITS.md"))
+        for name in package_notices.PROJECT_NOTICE_FILES:
+            with self.subTest(name=name):
+                staged = (self.pkg_dir / name).read_bytes()
+                self.assertEqual(staged, (ROOT / name).read_bytes().replace(b"\r\n", b"\n"))
+
+    def test_package_without_the_project_notice_pages_fails_closed(self) -> None:
+        """A source tree lacking NOTICE.md or CREDITS.md cannot produce a package."""
+        (self.pkg_dir / "mygame.exe").write_bytes(b"MZ\0\0exe")
+        with tempfile.TemporaryDirectory() as temp:
+            fake_repo = Path(temp)
+            for tree in ("third_party", "src/rt/xr", "src/rt/atrac3p", "src/rt/minimp3", "src/rt/h264_ffmpeg_sub"):
+                shutil.copytree(ROOT / tree, fake_repo / tree)
+            (fake_repo / "assets").mkdir()
+            shutil.copy2(ROOT / "assets" / "third_party_components.json", fake_repo / "assets" / "third_party_components.json")
+            shutil.copy2(ROOT / "LICENSE", fake_repo / "LICENSE")
+            shutil.copy2(ROOT / "Makefile", fake_repo / "Makefile")
+            with self.assertRaises(PackageRouteError) as ctx:
+                package_notices.generate_package_notices(
+                    self.pkg_dir, repo_root=fake_repo, toolchain_root=self.no_toolchain
+                )
+        self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_TEXT_MISSING")
+        self.assertIn("NOTICE.md", str(ctx.exception))
 
     def test_freetype_credit_reaches_the_notices(self) -> None:
         """The FTL's binary-distribution credit is stated in THIRD_PARTY_NOTICES.txt, not only implied."""
@@ -252,6 +283,26 @@ class TestPackageNotices(unittest.TestCase):
         self.assertIn("GNU GENERAL PUBLIC LICENSE", combined_text)
         self.assertIn("Credits and Third-Party Attribution", combined_text)
 
+    def test_repository_only_components_never_enter_the_notice_bundle(self) -> None:
+        """A component recorded as repository-only (test data such as the SPDX 2.3 schema) is never shipped."""
+        inventory = json.loads((ROOT / "assets" / "third_party_components.json").read_text(encoding="utf-8"))
+        repository_only = inventory["native"].get("repository_components", [])
+        self.assertIn("spdx-2.3-json-schema", [record["id"] for record in repository_only])
+        (self.pkg_dir / "mygame.exe").write_bytes(b"MZ\0\0exe")
+        result = package_notices.generate_package_notices(
+            self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+        )
+        names = {component["name"] for component in result["components"]}
+        bundle = "\n".join(
+            path.read_text(encoding="utf-8", errors="replace")
+            for path in (self.pkg_dir / "THIRD_PARTY_NOTICES").rglob("*") if path.is_file()
+        )
+        for record in repository_only:
+            with self.subTest(component=record["id"]):
+                self.assertEqual(record["disposition"], "repository_test_data")
+                self.assertNotIn(record["name"], names)
+                self.assertNotIn(record["name"], bundle)
+
     def test_source_notice_offers_corresponding_sources_for_staged_lgpl_dlls(self) -> None:
         records = package_notices.load_component_inventory()["native"]["dlls"]
         versions = {
@@ -324,6 +375,8 @@ class TestPackageNotices(unittest.TestCase):
                 (repo_root / h264_license).parent.mkdir(parents=True)
                 (repo_root / h264_license).write_text("synthetic LGPL text", encoding="utf-8")
                 (repo_root / project_license).write_text("synthetic GPL text", encoding="utf-8")
+                (repo_root / "NOTICE.md").write_text("synthetic notice", encoding="utf-8")
+                (repo_root / "CREDITS.md").write_text("synthetic credits", encoding="utf-8")
                 inventory = {
                     "native": {
                         "dlls": {},
@@ -441,6 +494,8 @@ class TestPackageNotices(unittest.TestCase):
                     target.write_text("verbatim text for " + record["name"], encoding="utf-8")
             for license_entry in sdl_record["license_texts"]:
                 (fake_repo / license_entry["file"]).parent.mkdir(parents=True, exist_ok=True)
+            for project_notice in package_notices.PROJECT_NOTICE_FILES:
+                (fake_repo / project_notice).write_text("synthetic " + project_notice, encoding="utf-8")
 
             with tempfile.TemporaryDirectory() as tc_dir:
                 toolchain_root = Path(tc_dir)
@@ -687,6 +742,54 @@ class TestPackageNotices(unittest.TestCase):
         self.assertEqual(reference["repository"], package_notices.PROJECT_REPOSITORY_URL)
         if reference["commit"] is not None:
             self.assertRegex(reference["commit"], r"^[0-9a-f]{40}$")
+
+    def test_runtime_source_commit_reads_the_install_record(self) -> None:
+        """An installed tree (<install>/source, no git) takes its commit from the install
+        record stage_install.py wrote; it is never re-derived or guessed (#2875)."""
+        commit = "0123456789abcdef0123456789abcdef01234567"
+        with tempfile.TemporaryDirectory() as tmp:
+            install = Path(tmp) / "install"
+            source = install / "source"
+            source.mkdir(parents=True)
+            record = install / package_notices.INSTALL_RECORD_NAME
+            record.write_text(json.dumps({"schema_version": 1, "source_commit": commit,
+                                          "player_commit": commit}), encoding="utf-8")
+            self.assertEqual(package_notices.runtime_source_commit(source),
+                             {"commit": commit, "origin": "install-record", "reason": None})
+            reference = package_notices.source_reference(source)
+            self.assertEqual(reference["commit"], commit)
+            self.assertIsNone(reference["tag"])
+            self.assertIsNone(reference["local_changes"])
+            self.assertIn(f"Commit:     {commit}",
+                          package_notices.render_source_notice(reference))
+
+            for bad in ("{", json.dumps({"source_commit": "abc"}),
+                        json.dumps({"source_commit": commit.upper()}), json.dumps([commit])):
+                record.write_text(bad, encoding="utf-8")
+                resolved = package_notices.runtime_source_commit(source)
+                self.assertIsNone(resolved["commit"])
+                self.assertEqual(resolved["origin"], "unknown")
+                self.assertIn("install record", resolved["reason"])
+
+            # The record sits beside source/, so another directory never reads it.
+            other = install / "elsewhere"
+            other.mkdir()
+            record.write_text(json.dumps({"source_commit": commit}), encoding="utf-8")
+            resolved = package_notices.runtime_source_commit(other)
+            if resolved["origin"] != "git":
+                self.assertEqual(resolved["origin"], "unknown")
+                self.assertIsNone(resolved["commit"])
+                self.assertIn("no install record and no git metadata", resolved["reason"])
+
+    def test_runtime_source_commit_reads_this_checkout(self) -> None:
+        resolved = package_notices.runtime_source_commit(ROOT)
+        if resolved["origin"] == "git":
+            self.assertRegex(resolved["commit"], r"^[0-9a-f]{40}$")
+            self.assertIsNone(resolved["reason"])
+        else:
+            self.assertEqual(resolved["origin"], "unknown")
+            self.assertIsNone(resolved["commit"])
+            self.assertTrue(resolved["reason"])
 
     def test_system_dll_detection(self) -> None:
         """Standard Windows system DLLs are recognized; recorded loaders are not system DLLs."""

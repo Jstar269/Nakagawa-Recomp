@@ -290,19 +290,30 @@ static inline void nk_sha256_init(NkSha256 *ctx) {
     ctx->block_len = 0;
 }
 
+/* Whole 64-byte blocks are hashed where they lie in `data`; only a partial block at either
+ * end is copied into ctx->block. */
 static inline void nk_sha256_update(NkSha256 *ctx, const uint8_t *data, size_t len) {
     ctx->bit_count += (uint64_t)len * 8u;
-    while (len > 0) {
+    if (len == 0) return;
+    if (ctx->block_len > 0) {
         size_t room = sizeof(ctx->block) - ctx->block_len;
         size_t take = len < room ? len : room;
         memcpy(ctx->block + ctx->block_len, data, take);
         ctx->block_len += take;
         data += take;
         len -= take;
-        if (ctx->block_len == sizeof(ctx->block)) {
-            nk_sha256_transform(ctx, ctx->block);
-            ctx->block_len = 0;
-        }
+        if (ctx->block_len < sizeof(ctx->block)) return;
+        nk_sha256_transform(ctx, ctx->block);
+        ctx->block_len = 0;
+    }
+    while (len >= sizeof(ctx->block)) {
+        nk_sha256_transform(ctx, data);
+        data += sizeof(ctx->block);
+        len -= sizeof(ctx->block);
+    }
+    if (len > 0) {
+        memcpy(ctx->block, data, len);
+        ctx->block_len = len;
     }
 }
 

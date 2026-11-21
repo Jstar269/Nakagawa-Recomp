@@ -68,6 +68,12 @@ Nakagawa has since substantially extended and modified that codebase. This repos
 - **stb_image 2.34 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The PNG
   decoder in [`third_party/stb/`](third_party/stb/), for the player's prompt glyphs, the disc art read from your own disc
   and, when you turn on cover art, the cover downloaded from `thumbnails.libretro.com`.
+- **libretro-thumbnails — the libretro project and its volunteers** — the source of the cover images the player downloads from
+  `thumbnails.libretro.com` when you turn on cover art. Its README credits MobyGames, Fandom and volunteer contributors; it states no
+  licence. The images are the publishers' artwork, fetched to your computer when you ask and never redistributed by this project.
+- **CWCheat-Database-Plus — Saramagrean** — the community CWCheat code database that the opt-in cheat download planned in
+  [#2639](https://github.com/Jstar269/nakagawa-recomp/issues/2639) reads. Its README states no licence and credits the PPSSPP forum,
+  GameHacking, LunaMoo and others as its sources. The database is never committed or shipped with the project.
 - **stb_vorbis 1.24 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The Ogg
   Vorbis decoder for the optional launcher music, in [`third_party/stb/`](third_party/stb/PROVENANCE.md).
 - **"Chill lofi inspired" — omfgdude ([OpenGameArt](https://opengameart.org/content/chill-lofi-inspired))** — CC0-1.0.
@@ -81,6 +87,11 @@ Nakagawa has since substantially extended and modified that codebase. This repos
   kept byte for byte. Redump's About page (<https://redump.info/about>, read 2026-11-12) says of its data: "This
   information is considered public domain to be used however people see fit - whether you are a researcher,
   academic, organization, or simply an individual verifying the data for your own media."
+- **SPDX 2.3 JSON schema — the Linux Foundation and its contributors (the SPDX project)** — CC-BY-3.0 (Creative
+  Commons Attribution 3.0 Unported). The official schema from [spdx/spdx-spec](https://github.com/spdx/spdx-spec),
+  tag `v2.3` (commit `aadf3b0b8dbbabdb4d880b0fc714255fea436ff7`), kept byte-identical with its `LICENSE` in
+  [`third_party/spdx/`](third_party/spdx/PROVENANCE.md); the SBOM tests check generated SPDX documents against it.
+  Copyright © 2010-2022 Linux Foundation and its Contributors.
 - **Inno Setup 6.7.3 — Jordan Russell and Martijn Laan** — the Inno Setup License (a permissive, no-copyleft licence; text pinned by hash in [`assets/upstream/innosetup.lock.json`](assets/upstream/innosetup.lock.json)). A build tool for the Windows installer, not vendored: `tools/build_installer.py` runs the user's own pinned copy. The installer's `Setup.exe` embeds Inno's unmodified loader, whose copyright notice and web addresses stay intact.
 - **LLVM 21.1.8 — the LLVM Project** — Apache-2.0 WITH LLVM-exception. clang, lld, compiler-rt builtins, libunwind,
   libc++abi and libc++, built by `tools/android_toolchain.py` from the pinned release tarball for the on-device C

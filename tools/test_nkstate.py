@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RECOMP_H = (ROOT / "src" / "rt" / "recomp.h").read_text(encoding="utf-8")
 NKSTATE_C = (ROOT / "src" / "rt" / "nkstate.c").read_text(encoding="utf-8")
 NKSTATE_H = (ROOT / "src" / "rt" / "nkstate.h").read_text(encoding="utf-8")
+SELFTESTS_MK = (ROOT / "mk" / "selftests.mk").read_text(encoding="utf-8")
 SELFTEST_C = (ROOT / "tests" / "native" / "nkstate_selftest.c").read_text(encoding="utf-8")
 
 #: The file tests/native/nkstate_selftest.c test_golden writes.
@@ -212,6 +213,34 @@ PINNED_LINE = ("NKCKPT v=1 frame=42 n=1 "
 def _line(frame: int, digests: list[tuple[str, bytes]]) -> str:
     body = "".join(f" {name}={hashlib.sha256(data).hexdigest()}" for name, data in digests)
     return f"NKCKPT v=1 frame={frame} n={len(digests)}{body}\n"
+
+
+class TestSeamGuardTest(unittest.TestCase):
+    """The write and sync fault seams exist only in a build that asks for them (review of #2869)."""
+
+    GUARD = "NK_NKSTATE_TEST_SEAMS"
+
+    @staticmethod
+    def _guarded(text: str, needle: str) -> bool:
+        """True when needle sits between an '#if defined(GUARD)' and its '#else' or '#endif'."""
+        start = text.index(needle)
+        open_at = text.rfind("#if defined(NK_NKSTATE_TEST_SEAMS)", 0, start)
+        if open_at < 0:
+            return False
+        closes = [i for i in (text.find("#else", open_at), text.find("#endif", open_at)) if i >= 0]
+        return start < min(closes)
+
+    def test_the_seam_setters_are_guarded(self) -> None:
+        for text in (NKSTATE_C, NKSTATE_H):
+            for name in ("void nkstate_test_set_write_fault(", "void nkstate_test_set_sync_fault("):
+                self.assertTrue(self._guarded(text, name), name)
+        self.assertTrue(self._guarded(NKSTATE_C, "static long s_test_write_fault"))
+        self.assertTrue(self._guarded(NKSTATE_C, "static int s_test_sync_fault"))
+
+    def test_only_the_selftest_recipe_defines_the_guard(self) -> None:
+        recipe = SELFTESTS_MK[SELFTESTS_MK.index("nkstate-selftest: ") :].split("\n\n", 1)[0]
+        self.assertIn("-D" + self.GUARD, recipe)
+        self.assertEqual(SELFTESTS_MK.count("-D" + self.GUARD), 1)
 
 
 class CheckpointTest(unittest.TestCase):

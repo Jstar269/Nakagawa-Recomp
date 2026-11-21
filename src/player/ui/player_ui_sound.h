@@ -5,6 +5,8 @@
 #define PLAYER_UI_SOUND_H
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,6 +43,11 @@ bool player_ui_sounds_hold_audio(const PlayerUiSounds *sounds);
 
 /* Plays one clip, cutting off the one before it. Does nothing while disabled. */
 void player_ui_sounds_play(PlayerUiSounds *sounds, PlayerUiSound sound);
+/* Plays samples the launcher made itself (16-bit mono at `rate` Hz, the hidden moment's
+   jingle), cutting off the clip before it, on the same stream and level. Does nothing while
+   disabled, or when the stream's format is not that one. */
+void player_ui_sounds_play_pcm(PlayerUiSounds *sounds, const int16_t *samples, size_t count,
+                               int rate);
 
 #ifdef __cplusplus
 }

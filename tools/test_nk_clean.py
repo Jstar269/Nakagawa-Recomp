@@ -71,11 +71,17 @@ def _run_main(root: Path, argv: list[str]) -> tuple[int, str, str]:
     return code, out.getvalue(), err.getvalue()
 
 
+def _windows_path(path: Path) -> str:
+    """A path in Windows form. MSYS2's Python prints a Path with forward slashes, which cmd.exe's
+    `mklink` reads as switches."""
+    return str(path).replace("/", "\\")
+
+
 def _make_dir_link(link: Path, target: Path) -> bool:
     link.parent.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
         proc = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            ["cmd", "/c", "mklink", "/J", _windows_path(link), _windows_path(target)],
             capture_output=True, text=True, check=False,
         )
         return proc.returncode == 0
