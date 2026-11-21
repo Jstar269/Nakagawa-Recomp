@@ -16227,6 +16227,18 @@
       }
     },
     {
+      "path": "third_party/licenses/rcheevos-MD5.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "license-text-rcheevos-md5-20261121",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "Zlib",
+        "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
+      }
+    },
+    {
       "path": "third_party/licenses/sdl3/LICENSE.txt",
       "classification": "upstream_derived",
       "evidence": {
@@ -16259,6 +16271,18 @@
         "evidence_tier": "S",
         "upstream": "documented upstream family",
         "license": "BSD-3-Clause",
+        "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
+      }
+    },
+    {
+      "path": "third_party/licenses/uOFW.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "license-text-uofw-copying-20261121",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
         "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
       }
     },
