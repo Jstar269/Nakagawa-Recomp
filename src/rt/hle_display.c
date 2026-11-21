@@ -1189,12 +1189,14 @@ void sr_vblank_tick(void) {
                 "WATCHDOG: no new frame presented for %u vblanks (~%us) - neutral "
                 "NO-NEW-FLIP observation, not by itself a hang/stall verdict\n",
                 diff, diff / 60);
-        uint32_t ready = 0u, delay = 0u, wait = 0u, spin = 0u;
-        sched_watchdog_summary(&ready, &delay, &wait, &spin);
+        SrSchedWatchdogSummary summary;
+        char sched_fields[256];
+        sched_watchdog_summary(&summary);
+        (void)sched_watchdog_summary_format(&summary, sched_fields, sizeof sched_fields);
         fprintf(stderr,
                 "BOOT_EVENT phase=stalled observation=no_new_flip "
-                "no_frame_vblanks=%u seconds=%u ready=%u delay=%u wait=%u spin=%u\n",
-                diff, diff / 60u, ready, delay, wait, spin);
+                "no_frame_vblanks=%u seconds=%u %s\n",
+                diff, diff / 60u, sched_fields);
         fflush(stderr);
         /* Which side of the display handoff stopped presenting: did the guest stop
          * asking for flips, or are its requests being refused? last_vcount vs
@@ -1248,12 +1250,14 @@ void sr_vblank_tick(void) {
         if (sr_picture_watch_tick_needs_probe(&s_picture_watch, s_vcount))
             picture_probe_collect(1);
         if (sr_picture_watch_tick(&s_picture_watch, s_vcount, &dark) == SR_PICTURE_WATCH_REPORT) {
-            uint32_t ready = 0u, delay = 0u, wait = 0u, spin = 0u;
-            sched_watchdog_summary(&ready, &delay, &wait, &spin);
+            SrSchedWatchdogSummary summary;
+            char sched_fields[256];
+            sched_watchdog_summary(&summary);
+            (void)sched_watchdog_summary_format(&summary, sched_fields, sizeof sched_fields);
             fprintf(stderr,
                     "BOOT_EVENT phase=stalled observation=dark_picture "
-                    "dark_vblanks=%u seconds=%u ready=%u delay=%u wait=%u spin=%u\n",
-                    dark, dark / 60u, ready, delay, wait, spin);
+                    "dark_vblanks=%u seconds=%u %s\n",
+                    dark, dark / 60u, sched_fields);
             fflush(stderr);
         }
     }

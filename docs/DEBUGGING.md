@@ -2636,6 +2636,14 @@ retail title is private: keep it out of the repository and every upload.
    repeats every 600 vblanks of a dark stretch with the scheduler summary, and
    `BOOT_EVENT phase=resumed observation=picture` ends the stretch. After 30 seconds the native player shows
    its black-screen notice. Like the no-frame watchdog, this is an observation, not a hang verdict.
+5. Both stall lines (`observation=no_new_flip` and `observation=dark_picture`) end with the scheduler
+   summary: `ready= delay= wait= spin=`, then `running=`, the threads on the CPU when the line was
+   written. When one is running, `busy_uid= busy_pri= busy_import= busy_import_ret= busy_repeats=`
+   name it: its uid, priority, the last import it finished, that import's value, and how many times in
+   a row it returned that value (`busy_import=-` before its first import). A thread that never blocks
+   starves every thread at a worse priority, and none of the first counts includes it
+   ([#2875](https://github.com/Jstar269/nakagawa-recomp/issues/2875)). The native player copies the
+   same fields into the problem report's `Details` when the stall notice stops the game.
 
 ### Crash on startup
 
