@@ -105,6 +105,30 @@ WizardColumn scr_wizard_column(NkUi *ui, const WizardRow *rows, size_t count, fl
     return column;
 }
 
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+/* Whether a setting row's button label or its sentence was cut short, each time that changes
+   for the row (by its text id), so a test can see that a row shows whole at a window size. */
+static void scr_wizard_report_cut(NkUiId text_id, const char *name, bool label_cut,
+                                  bool sentence_cut) {
+    static struct {
+        NkUiId id;
+        int state;
+    } reported[64];
+    static size_t used;
+    const int state = (label_cut ? 1 : 0) | (sentence_cut ? 2 : 0);
+    size_t i = 0u;
+    while (i < used && reported[i].id != text_id) i++;
+    if (i < used && reported[i].state == state) return;
+    if (i == used) {
+        if (used == sizeof reported / sizeof reported[0]) return;
+        reported[used++].id = text_id;
+    }
+    reported[i].state = state;
+    printf("[PLAYER_UI_TEST] next_ui_wizard_row id=%08x label_cut=%d sentence_cut=%d name=%s\n",
+           (unsigned)text_id, label_cut ? 1 : 0, sentence_cut ? 1 : 0, safe_text(name, ""));
+}
+#endif
+
 /* A setting's button, "Name: value", with the sentence that explains it beside
    it (or under it, as `column` says; NULL lays the row out on its own); the
    button is filled while the setting is in effect. Returns true when the
@@ -156,8 +180,15 @@ bool scr_wizard_value_state(NkUi *ui, NkUiId id, NkUiId text_id, const char *nam
     }
     /* Under its button the sentence has the full width and wraps whole: the rows stack so
        that no sentence is cut, and it says what the setting does nowhere else. */
-    nk_ui_text(ui, text_id + 2u,
-               column->stacked ? sentence : nk_ui_text_clamp(ui, sentence, &text, room, 2), &text);
+    {
+        const char *shown =
+            column->stacked ? sentence : nk_ui_text_clamp(ui, sentence, &text, room, 2);
+        nk_ui_text(ui, text_id + 2u, shown, &text);
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+        scr_wizard_report_cut(text_id, name, text_was_cut(label, buffer),
+                              shown != sentence && text_was_cut(shown, safe_text(sentence, "")));
+#endif
+    }
     nk_ui_end_container(ui);
     return pressed;
 }

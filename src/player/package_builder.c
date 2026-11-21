@@ -17,6 +17,7 @@
 #endif
 
 #include "package_builder.h"
+#include "nk_achievements.h"
 #include "nk_json.h"
 #include "nk_launch.h"
 #include "nk_platform.h"
@@ -660,16 +661,95 @@ static void winhttp_close(void *context) {
     free(state);
 }
 
-static bool winhttp_open(void *context, const char *url, const char *allowed_hosts,
-                         PackageHttpResponse *response) {
+/* The user agent a WinHTTP session carries: NK_ACH_USER_AGENT_MAX UTF-16 units, as UTF-8
+   never takes more units than bytes. The options' text, converted whole, or the default;
+   else the refusal, which names why. */
+typedef wchar_t WinHttpUserAgent[NK_ACH_USER_AGENT_MAX];
+
+static const char *winhttp_user_agent(const PackageHttpOptions *options,
+                                      WinHttpUserAgent user_agent) {
+    static const wchar_t k_default[] = L"NakagawaRecomp/PrerequisiteBootstrap";
+    memcpy(user_agent, k_default, sizeof k_default);
+    if (!options || !options->user_agent) return NULL;
+    if (strlen(options->user_agent) >= NK_ACH_USER_AGENT_MAX)
+        return "refused: the user agent is longer than the transport carries";
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, options->user_agent, -1, user_agent,
+                            (int)NK_ACH_USER_AGENT_MAX) <= 0)
+        return "refused: the user agent is not UTF-8";
+    return NULL;
+}
+
+static HINTERNET winhttp_open_session(const WinHttpUserAgent user_agent) {
+    return WinHttpOpen(user_agent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+                       WINHTTP_NO_PROXY_BYPASS, 0);
+}
+
+const char *package_builder_native_session_user_agent(const PackageHttpOptions *options,
+                                                      char *agent, size_t agent_size) {
+    WinHttpUserAgent user_agent;
+    wchar_t carried[NK_ACH_USER_AGENT_MAX];
+    DWORD carried_size = sizeof(carried);
+    bool read = false;
+    if (!agent || agent_size == 0u || agent_size > INT_MAX)
+        return "refused: no room for the user agent";
+    agent[0] = '\0';
+    const char *refused = winhttp_user_agent(options, user_agent);
+    if (refused) return refused;
+    HINTERNET session = winhttp_open_session(user_agent);
+    if (!session) return "refused: WinHTTP opened no session";
+    read = WinHttpQueryOption(session, WINHTTP_OPTION_USER_AGENT, carried, &carried_size) &&
+           WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, carried, -1, agent,
+                               (int)agent_size, NULL, NULL) > 0;
+    WinHttpCloseHandle(session);
+    if (!read) {
+        agent[0] = '\0';
+        return "refused: the session's user agent could not be read back";
+    }
+    return NULL;
+}
+
+static bool winhttp_open_request(void *context, const char *url, const char *allowed_hosts,
+                                 PackageHttpResponse *response, const char *method,
+                                 const char *content_type, const void *body, size_t body_size,
+                                 bool follow_redirects, bool require_success) {
     const PackageHttpOptions *options = (const PackageHttpOptions *)context;
-    wchar_t user_agent[64] = L"NakagawaRecomp/PrerequisiteBootstrap";
-    if (!allowed_url(url, allowed_hosts) || !response) return false;
-    if (options && options->user_agent &&
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, options->user_agent, -1, user_agent,
-                            (int)(sizeof(user_agent) / sizeof(user_agent[0]))) <= 0) {
+    WinHttpUserAgent user_agent;
+    WCHAR wide_method[16];
+    WCHAR headers[256];
+    const WCHAR *header_ptr = WINHTTP_NO_ADDITIONAL_HEADERS;
+    DWORD header_length = 0u;
+    DWORD request_body_size;
+    LPVOID request_body;
+    if (!response) return false;
+    memset(response, 0, sizeof(*response));
+    /* First, so a refused user agent is named whatever else the request holds. */
+    response->refused = winhttp_user_agent(options, user_agent);
+    if (response->refused) return false;
+    if (!allowed_url(url, allowed_hosts) || !method ||
+        (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0) ||
+        (body_size != 0u && !body) || body_size > UINT32_MAX ||
+        (strcmp(method, "POST") == 0 && body_size != 0u && (!content_type || !*content_type))) {
         return false;
     }
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, method, -1, wide_method,
+                            (int)(sizeof(wide_method) / sizeof(wide_method[0]))) <= 0) {
+        return false;
+    }
+    if (content_type && content_type[0]) {
+        char header_text[192];
+        if (strchr(content_type, '\r') || strchr(content_type, '\n')) return false;
+        const int header_chars = snprintf(header_text, sizeof(header_text),
+                                          "Content-Type: %s\r\n", content_type);
+        if (header_chars <= 0 || (size_t)header_chars >= sizeof(header_text) ||
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, header_text, -1, headers,
+                                (int)(sizeof(headers) / sizeof(headers[0]))) <= 0) {
+            return false;
+        }
+        header_ptr = headers;
+        header_length = (DWORD)-1;
+    }
+    request_body_size = (DWORD)body_size;
+    request_body = body_size != 0u ? (LPVOID)body : WINHTTP_NO_REQUEST_DATA;
     WinHttpDownload *state = (WinHttpDownload *)calloc(1, sizeof(*state));
     if (!state) return false;
     if (strlen(url) >= sizeof(state->final_url)) {
@@ -677,15 +757,13 @@ static bool winhttp_open(void *context, const char *url, const char *allowed_hos
         return false;
     }
     snprintf(state->final_url, sizeof(state->final_url), "%s", url);
-    state->session = WinHttpOpen(user_agent,
-                                 WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                 WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    state->session = winhttp_open_session(user_agent);
     if (!state->session) {
         winhttp_close(state);
         return false;
     }
     WinHttpSetTimeouts(state->session, 15000, 15000, 30000, 30000);
-    for (int redirects = 0; redirects <= 5; redirects++) {
+    for (int redirects = 0; redirects <= (follow_redirects ? 5 : 0); redirects++) {
         wchar_t host[256];
         wchar_t path[2048];
         wchar_t location[2048];
@@ -702,7 +780,7 @@ static bool winhttp_open(void *context, const char *url, const char *allowed_hos
             winhttp_close(state);
             return false;
         }
-        state->request = WinHttpOpenRequest(state->connection, L"GET", path,
+        state->request = WinHttpOpenRequest(state->connection, wide_method, path,
                                              NULL, WINHTTP_NO_REFERER,
                                              WINHTTP_DEFAULT_ACCEPT_TYPES,
                                              WINHTTP_FLAG_SECURE);
@@ -713,8 +791,8 @@ static bool winhttp_open(void *context, const char *url, const char *allowed_hos
         DWORD redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
         if (!WinHttpSetOption(state->request, WINHTTP_OPTION_REDIRECT_POLICY,
                               &redirect_policy, sizeof(redirect_policy)) ||
-            !WinHttpSendRequest(state->request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+            !WinHttpSendRequest(state->request, header_ptr, header_length,
+                                request_body, request_body_size, request_body_size, 0) ||
             !WinHttpReceiveResponse(state->request, NULL) ||
             !WinHttpQueryHeaders(state->request,
                                  WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
@@ -723,7 +801,8 @@ static bool winhttp_open(void *context, const char *url, const char *allowed_hos
             winhttp_close(state);
             return false;
         }
-        if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+        if (follow_redirects &&
+            (status == 301 || status == 302 || status == 303 || status == 307 || status == 308)) {
             DWORD location_size = sizeof(location);
             if (!WinHttpQueryHeaders(state->request, WINHTTP_QUERY_LOCATION,
                                      WINHTTP_HEADER_NAME_BY_INDEX, location,
@@ -743,6 +822,7 @@ static bool winhttp_open(void *context, const char *url, const char *allowed_hos
                 /* Not a download: the response carries the rejected redirect target so the caller's
                  * allowed_url(final_url) check refuses it and can name the host in its error. */
                 response->final_url = state->final_url;
+                response->http_status = (int)status;
                 response->context = state;
                 response->read = winhttp_read;
                 response->close = winhttp_close;
@@ -756,10 +836,11 @@ static bool winhttp_open(void *context, const char *url, const char *allowed_hos
             state->connection = NULL;
             continue;
         }
-        if (status != 200) {
+        if (status != 200 && require_success) {
             winhttp_close(state);
             return false;
         }
+        response->http_status = (int)status;
         response->has_content_length = false;
         response->content_length = 0;
         ULONGLONG content_length = 0;
@@ -781,6 +862,12 @@ static bool winhttp_open(void *context, const char *url, const char *allowed_hos
     return false;
 }
 
+static bool winhttp_open(void *context, const char *url, const char *allowed_hosts,
+                         PackageHttpResponse *response) {
+    return winhttp_open_request(context, url, allowed_hosts, response, "GET", NULL, NULL, 0u,
+                                true, true);
+}
+
 static bool sha256_begin(BCRYPT_ALG_HANDLE *algorithm, BCRYPT_HASH_HANDLE *hash,
                          unsigned char **hash_object) {
     DWORD object_size = 0;
@@ -799,12 +886,42 @@ static bool sha256_begin(BCRYPT_ALG_HANDLE *algorithm, BCRYPT_HASH_HANDLE *hash,
 }
 #endif
 
-PackageHttpOpen package_builder_native_transport(void) {
+/* The native senders behind the two entry points below, or none where this build has no
+   native HTTPS client: one host conditional names both. */
+typedef bool (*PackageNativeRequest)(void *context, const char *url, const char *allowed_hosts,
+                                     PackageHttpResponse *response, const char *method,
+                                     const char *content_type, const void *body,
+                                     size_t body_size, bool follow_redirects,
+                                     bool require_success);
 #if defined(_WIN32) || defined(_WIN64)
-    return winhttp_open;
+static const PackageHttpOpen k_native_open = winhttp_open;
+static const PackageNativeRequest k_native_request = winhttp_open_request;
 #else
-    return NULL;
+static const PackageHttpOpen k_native_open = NULL;
+static const PackageNativeRequest k_native_request = NULL;
+
+const char *package_builder_native_session_user_agent(const PackageHttpOptions *options,
+                                                      char *agent, size_t agent_size) {
+    (void)options;
+    if (agent && agent_size) agent[0] = '\0';
+    return "refused: this build has no native HTTPS transport";
+}
 #endif
+
+PackageHttpOpen package_builder_native_transport(void) {
+    return k_native_open;
+}
+
+bool package_builder_native_transport_request(
+    void *options, const char *url, const char *allowed_hosts,
+    const char *method, const char *content_type,
+    const void *body, size_t body_size, PackageHttpResponse *response) {
+    if (!k_native_request) {
+        if (response) memset(response, 0, sizeof(*response));
+        return false;
+    }
+    return k_native_request(options, url, allowed_hosts, response, method, content_type,
+                            body, body_size, false, false);
 }
 
 bool package_builder_download_verified(

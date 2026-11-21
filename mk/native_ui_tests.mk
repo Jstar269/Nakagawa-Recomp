@@ -221,19 +221,29 @@ nk-cheats-selftest:
 # The RetroAchievements bridge (src/core/nk_achievements.c, #1316) on the vendored rcheevos
 # rc_client, against an in-process fake server: login, game load, a softcore unlock on synthetic
 # guest memory, the PSP memory map's bounds and the retroachievements.org-only request gate.
-# No socket and no network. gnu99, not c99: rcheevos calls strdup and strcasecmp, which glibc
-# declares only outside strict ISO mode; its runtime needs libm (fmod).
+# No socket and no network. Its runtime needs libm (fmod). Strict c99 as the core: rcheevos calls
+# strdup, strcasecmp and strncasecmp, which glibc declares only outside strict ISO mode, so Linux
+# gets _DEFAULT_SOURCE and <strings.h> as CMakeLists.txt gives the player (MinGW declares them).
+# An implicit declaration is an error here on every compiler: one that only warns (GCC 13) would
+# take strdup to return int and cut its pointer on 64-bit hosts.
+ifeq ($(OS),Windows_NT)
+ACHIEVEMENTS_SELFTEST_LIBC_FLAGS :=
+else
+ACHIEVEMENTS_SELFTEST_LIBC_FLAGS := -D_DEFAULT_SOURCE -include strings.h
+endif
 ACHIEVEMENTS_SELFTEST_SRCS := src/core/nk_achievements.c $(wildcard third_party/rcheevos/src/*.c) \
 	$(wildcard third_party/rcheevos/src/rapi/*.c) $(wildcard third_party/rcheevos/src/rcheevos/*.c) \
 	third_party/rcheevos/src/rhash/md5.c tests/native/test_nk_achievements.c
 define ACHIEVEMENTS_SELFTEST_CMD
-	$(CC) -std=gnu99 -Wall -Wextra -Isrc/core -Ithird_party/rcheevos/include $(ACHIEVEMENTS_SELFTEST_SRCS) \
-		-lm -o $(BUILD_ROOT)/test_nk_achievements$(EXE_EXT)
+	$(CC) $(NC_CFLAGS_CORE) -Werror=implicit-function-declaration $(ACHIEVEMENTS_SELFTEST_LIBC_FLAGS) \
+		-Isrc/core -Ithird_party/rcheevos/include -Ithird_party/rcheevos/src \
+		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(ACHIEVEMENTS_SELFTEST_SRCS) $(NC_OBJS_CORE) \
+		-lm $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_nk_achievements$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_nk_achievements$(EXE_EXT)
 endef
 
 .PHONY: achievements-selftest
-achievements-selftest:
+achievements-selftest: native-core-objects-core
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(call ACHIEVEMENTS_SELFTEST_CMD)
 

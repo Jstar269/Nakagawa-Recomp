@@ -133,6 +133,7 @@ round constant, MD5's first sine constant). A file that only calls another file'
 | `tools/ppm2png.py` | CRC-32 | PNG chunk checksum | Keep: the format requires it |
 | `tools/ppsspp_ref.py` | CRC-32 | PNG chunk checksum | Keep: the format requires it |
 | `src/rt/fbcap.c` | CRC-32 | PNG chunk checksum of F12 screenshots | Keep: the format requires it |
+| `src/player/player_ui_test.c` | CRC-32 | PNG chunk checksum of the UI regression player's synthetic sample badges | Keep: the format requires it |
 | `src/core/nk_psp_inflate.c` | CRC-32 | gzip member trailer of a decrypted PSP payload (RFC 1952) | Keep: the format requires it |
 | `src/core/nk_zip.c` | CRC-32 | ZIP entry checksum of save backups (store-only archives, APPNOTE 4.4.7), checked for every entry before a restore writes anything; `src/core/nk_steam_shortcuts.c` also calls `nk_zip_crc32` for the app ID Steam derives for a non-Steam shortcut (the CRC-32 of the quoted executable path and name, top bit set), an identifier in the user's own Steam library, not a security check | Keep: the format requires it; Steam defines the app ID |
 | `src/core/nk_disc_verify.c` | CRC-32 | Disc verification: a whole disc image's CRC-32, compared with Redump's PSP list (the bundled one, or the user's import) together with the SHA-1 below | Keep: Redump lists both; they identify a dump and are not a security check |

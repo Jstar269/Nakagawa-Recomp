@@ -1354,8 +1354,9 @@ A package carries the runtime it was built with. One built before cheats existed
 switch without a word, so the launcher does not start it with cheats on: it says that the package
 was built before cheats existed, and to rebuild the package or turn cheats off.
 
-RetroAchievements has no hardcore mode here yet; when it does, cheats will be refused while it is
-on.
+RetroAchievements runs in Casual Mode only here, and it is off for a game started with cheats on: no
+achievement set is loaded and nothing is earned. The game's page and Settings > Online and developer
+say so.
 
 The start of a run names at most 32 refused cheats one by one and counts the rest on one line.
 
@@ -1510,7 +1511,43 @@ make is listed below, and each is opt-in.
 | Build-tool download | `www.python.org`, `repo.msys2.org` (HTTPS) | Only after you select **DOWNLOAD** on the BUILD PACKAGE consent card | That consent card, per build |
 | Check for updates | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
 | Update download | `github.com`, which redirects to `release-assets.githubusercontent.com` (HTTPS) | Only after a check finds a newer version and you select **DOWNLOAD** | That button, per download |
+| RetroAchievements | `retroachievements.org`, and `media.retroachievements.org` for badge pictures (HTTPS) | Only after you enable **Achievements** in Settings > Online and developer options and accept the consent screen; sign-in, achievement-set, session, unlock and Rich Presence requests follow while it is enabled, and the badge pictures of a loaded set while you are signed in | The Achievements switch and its consent screen |
 | Download cover art | `thumbnails.libretro.com` (HTTPS) | When **Download cover art** is on (Settings > Online and developer, off by default), once per verified Redump disc not yet cached | That switch, and **Refresh cover art** (Settings > Build tools and cache) |
+
+**RetroAchievements** is off by default. Its consent screen names `retroachievements.org` and
+`media.retroachievements.org` and the data sent:
+your RetroAchievements user name and API token, the game hash, achievement unlocks and Rich Presence text,
+which a running game sends every two minutes. Leaderboard entries are not sent. Every request goes to
+`https://retroachievements.org/dorequest.php`, except the achievement badge pictures: while you are
+signed in, the player asks `https://media.retroachievements.org/Badge/<badge>.png` (`<badge>_lock.png`
+for a locked achievement) for each badge of the loaded set, one at a time and each at most once while
+its game's page lists it, with a plain GET that carries only the user agent below: no user name, token, cookie or
+console ID. A picture that does not come, is larger than 64 KB or 128 x 128 pixels, or is not a PNG is
+not shown; the game's page and the in-game notice draw their own icon instead. Fetched pictures are kept
+in the `achievements-badges` folder under the player data folder (at most 2,048 files). **Sign out**
+deletes that folder; turning **Achievements** off fetches nothing more and leaves it until the next
+**Sign out**, and you can delete it yourself at any time. The pictures are RetroAchievements' public
+artwork and hold no user data; a token replaced outside the player leaves them until the next
+**Sign out**. No other host is contacted. During sign-in, your user name and password are sent once to obtain the token; the
+password is not saved. The token is kept in Windows Credential Manager. Other platforms without that
+credential store refuse sign-in. Nakagawa identifies a game by hashing the raw `PSP_GAME/PARAM.SFO` and
+`PSP_GAME/SYSDIR/EBOOT.BIN` bytes from your readable disc image, in that order; it does not decrypt them for
+this check. Game files, saves and guest memory stay on this PC. Offline unlocks wait in an owner-only file
+under the player data folder until they can be submitted. The file names its account by a tag (a hash of
+the account name, not the name), and only that account's session sends its unlocks: **Sign out** discards
+the unlocks still waiting, and unlocks another account left are discarded and reported, never sent for
+the account now signed in. A queue file that cannot be read is kept beside itself as
+`unlock-queue.bin.unreadable`, never written over. An unlock the server refuses leaves the file and is
+reported on the **RetroAchievements** account line. When the sign-in at start cannot reach the server, the stored token is
+tried again by itself (after 30 seconds, then at doubling waits up to ten minutes); no password is asked. The feature offers only Casual Mode, the mode RetroAchievements formerly called Softcore:
+Hardcore is not available, and a request that would claim it is refused before it is sent. Achievements
+are off for a game started with cheats on or with a package that changes its speed (60 FPS game logic);
+the game's page says why. Turning the switch off sends nothing more: a request waiting its turn is dropped, and only one already on its way finishes.
+Its requests identify themselves in the form RetroAchievements documents:
+`NakagawaRecomp/<version> (<operating system and version>) rcheevos/<version>`, such as
+`NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5`. No telemetry is sent.
+To turn it on, open **Settings > Online and developer options**, switch on **Achievements**, read and accept the consent screen,
+then choose **Sign in**. The game's page lists the core achievements after the set loads.
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
@@ -1566,9 +1603,9 @@ project.
 
 There is no telemetry or crash upload. The `network_mode` entry in
 `settings.json` is reserved and always reads `"offline"`; a build treats any other value as
-offline. `tools/test_prereq_fetcher.py` fails if shipped code outside the two
-prerequisite downloaders uses a network API, if a pinned download or the update check names a host not
-listed in this section, or if new code calls the native download transport.
+offline. `tools/test_prereq_fetcher.py` fails if shipped code outside the explicit egress allowlist
+uses a network API, if a pinned download or an opt-in feature names a host not listed in this section,
+or if new code calls the native download transport without adding its own documented opt-in.
 
 Release packaging is a maintainer step, not part of the player:
 `python -m tools.nk_core.prereq_fetcher` with `--bundle-dest` or `--source-archive` downloads

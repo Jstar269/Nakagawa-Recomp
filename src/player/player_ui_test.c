@@ -10,6 +10,8 @@
 
 #include "package_builder.h"
 #include "player_host.h"
+#include "nk_achievements.h"
+#include "nk_ui_image.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -482,6 +484,23 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
         s_ui_test_mouse_y = (float)y;
         return 1;
     }
+    if (strncmp(token, "MOUSE_WHEEL=", 12) == 0) {
+        /* Whole wheel notches at the pointer, as SDL reports them: up is positive, so a
+           negative count scrolls the page down. */
+        int notches = 0;
+        char trailing = '\0';
+        if (sscanf(token + 12, "%d%c", &notches, &trailing) != 1 || notches == 0 ||
+            notches < -8 || notches > 8) {
+            return -1;
+        }
+        event->type = SDL_EVENT_MOUSE_WHEEL;
+        event->wheel.x = 0.0f;
+        event->wheel.y = (float)notches;
+        event->wheel.direction = SDL_MOUSEWHEEL_NORMAL;
+        event->wheel.mouse_x = s_ui_test_mouse_x;
+        event->wheel.mouse_y = s_ui_test_mouse_y;
+        return 1;
+    }
     if (strcmp(token, "MOUSE_DOWN") == 0 || strcmp(token, "MOUSE_UP") == 0 ||
         strcmp(token, "MOUSE_X1_DOWN") == 0 || strcmp(token, "MOUSE_X1_UP") == 0) {
         /* As SDL reports a real click: at the pointer, with its button state. */
@@ -861,6 +880,21 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            player_ui_nk_music_state_name(g_ui_test_next_ui),
            app->dev_log.inspect_layout ? 1 : 0);
 
+    /* RetroAchievements (#1316): its status line each time it changes, in hex so every byte
+       reads back exactly. A UI regression run refuses the feature's actions, and this is where
+       a test reads that it did. */
+    static char last_achievements_status[sizeof(app->achievements_status)];
+    if (strcmp(last_achievements_status, app->achievements_status) != 0) {
+        snprintf(last_achievements_status, sizeof(last_achievements_status), "%s",
+                 app->achievements_status);
+        printf("[PLAYER_UI_TEST] achievements frame=%d enabled=%d status_hex=", frame_number,
+               app->settings.achievements_enabled ? 1 : 0);
+        for (size_t i = 0; app->achievements_status[i] != '\0'; i++) {
+            printf("%02x", (unsigned)(unsigned char)app->achievements_status[i]);
+        }
+        printf("\n");
+    }
+
     if (g_ui_test_next_ui != NULL) {
         /* The nickname editor (#2197) while it is open: what it holds, in hex so a
            space or any byte reads back exactly, and the count it shows. */
@@ -1045,6 +1079,100 @@ static void ui_test_set_card_image(PlayerApp *app, int index, const char *iso_pa
     snprintf(card->iso_path, sizeof(card->iso_path), "%s", iso_path);
 }
 
+/* ---- the sample badges of the RetroAchievements fixture (#1316) ---------------------- */
+
+static uint32_t ui_test_png_crc(const uint8_t *p, size_t n) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) {
+        crc ^= p[i];
+        for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+
+static size_t ui_test_png_put32(uint8_t *out, size_t at, uint32_t v) {
+    out[at] = (uint8_t)(v >> 24);
+    out[at + 1] = (uint8_t)(v >> 16);
+    out[at + 2] = (uint8_t)(v >> 8);
+    out[at + 3] = (uint8_t)v;
+    return at + 4u;
+}
+
+static size_t ui_test_png_chunk(uint8_t *out, size_t at, const char *type, const uint8_t *data,
+                                size_t n) {
+    at = ui_test_png_put32(out, at, (uint32_t)n);
+    const size_t start = at;
+    memcpy(out + at, type, 4u);
+    at += 4u;
+    if (n) memcpy(out + at, data, n);
+    at += n;
+    return ui_test_png_put32(out, at, ui_test_png_crc(out + start, n + 4u));
+}
+
+/* A 64 x 64 badge drawn here: a tinted tile with a ball and its seam, grey when locked, the
+   pixels of a PNG stored without compression and decoded by nk_ui_image_decode_png within a
+   badge's limits, as src/player/main.c decodes a fetched one. damaged cuts the picture's data
+   short, so the decode fails and the row keeps the page's own icon. */
+static bool ui_test_sample_badge(NkUiImage *out, unsigned index, bool locked, bool damaged) {
+    enum { SIDE = 64, ROW = 1 + SIDE * 4, RAW = SIDE * ROW };
+    static const uint8_t tints[][3] = {{0x2Au, 0x6Fu, 0xD4u}, {0xD4u, 0x6Au, 0x2Au},
+                                       {0x2Au, 0xA8u, 0x6Au}, {0x8Au, 0x3Au, 0xC4u}};
+    static uint8_t idat[RAW + 11];
+    static uint8_t png[RAW + 128];
+    const uint8_t *tint = tints[index % 4u];
+    size_t n = 0u;
+    idat[n++] = 0x78u;
+    idat[n++] = 0x01u;
+    idat[n++] = 0x01u;
+    idat[n++] = (uint8_t)(RAW & 0xFF);
+    idat[n++] = (uint8_t)(RAW >> 8);
+    idat[n++] = (uint8_t)(~(unsigned)RAW & 0xFFu);
+    idat[n++] = (uint8_t)((~(unsigned)RAW >> 8) & 0xFFu);
+    const size_t data = n;
+    for (int y = 0; y < SIDE; y++) {
+        idat[n++] = 0u;
+        for (int x = 0; x < SIDE; x++) {
+            const int dx = x - 32, dy = y - 34;
+            const int d2 = dx * dx + dy * dy;
+            /* The seam: two arcs across the ball. */
+            const int sx = dx + 26, sx2 = dx - 26;
+            const bool seam = (sx * sx + dy * dy >= 17 * 17 && sx * sx + dy * dy <= 20 * 20) ||
+                              (sx2 * sx2 + dy * dy >= 17 * 17 && sx2 * sx2 + dy * dy <= 20 * 20);
+            uint8_t r = (uint8_t)(tint[0] * (96 - y / 2) / 96);
+            uint8_t g = (uint8_t)(tint[1] * (96 - y / 2) / 96);
+            uint8_t b = (uint8_t)(tint[2] * (96 - y / 2) / 96);
+            if (d2 <= 20 * 20) {
+                r = seam ? 0xF4u : 0xD8u;
+                g = seam ? 0xF4u : 0xE8u;
+                b = seam ? 0xF0u : 0x3Cu;
+            }
+            if (locked) {
+                const uint8_t grey = (uint8_t)((r * 3u + g * 6u + b) / 10u / 2u + 24u);
+                r = g = b = grey;
+            }
+            idat[n++] = r;
+            idat[n++] = g;
+            idat[n++] = b;
+            idat[n++] = 0xFFu;
+        }
+    }
+    uint32_t a = 1u, s2 = 0u;
+    for (size_t i = data; i < n; i++) {
+        a = (a + idat[i]) % 65521u;
+        s2 = (s2 + a) % 65521u;
+    }
+    n = ui_test_png_put32(idat, n, (s2 << 16) | a);
+    uint8_t ihdr[13] = {0, 0, 0, SIDE, 0, 0, 0, SIDE, 8, 6, 0, 0, 0};
+    static const uint8_t signature[8] = {0x89u, 'P', 'N', 'G', '\r', '\n', 0x1Au, '\n'};
+    memcpy(png, signature, sizeof(signature));
+    size_t at = ui_test_png_chunk(png, sizeof(signature), "IHDR", ihdr, sizeof(ihdr));
+    at = ui_test_png_chunk(png, at, "IDAT", idat, damaged ? n / 2u : n);
+    at = ui_test_png_chunk(png, at, "IEND", NULL, 0u);
+    const NkUiImageLimits limits = {NK_ACH_BADGE_MAX_BYTES, NK_ACH_BADGE_MAX_SIDE,
+                                    NK_ACH_BADGE_MAX_SIDE};
+    return nk_ui_image_decode_png(png, at, &limits, out) == NK_UI_IMAGE_OK;
+}
+
 void player_ui_test_prepare_app(PlayerUiTest *t, PlayerApp *app) {
     if (t->iso_path && app->selected_game_index >= 0 &&
         app->selected_game_index < app->game_count) {
@@ -1086,6 +1214,89 @@ void player_ui_test_prepare_app(PlayerUiTest *t, PlayerApp *app) {
                          app->games[running_index].title_name);
             }
             app->child_window_ready = !starting;
+        }
+    }
+    /* RetroAchievements' signed-in states for the pictures of its rows and its title card
+       (#1316). A UI regression run never signs in or reaches a server, so the state is set
+       here: "signed-in" is an account with no set loaded; "list:<disc ID>" adds a Casual Mode set
+       of eight synthetic achievements for that title, as the player lists one. */
+    const char *achievements = t->mode ? getenv("NK_UI_TEST_ACHIEVEMENTS") : NULL;
+    if (achievements && achievements[0]) {
+        app->achievements_store_available = true;
+        app->achievements_signed_in = true;
+        snprintf(app->achievements_account, sizeof(app->achievements_account), "%s",
+                 "SampleAccount");
+        snprintf(app->achievements_status, sizeof(app->achievements_status), "%s",
+                 "Signed in.");
+        if (strncmp(achievements, "list:", 5) == 0) {
+            /* Twelve, three unlocked, listed as the player lists a set: the unlocked first.
+               The longest title is 60 characters. */
+            static const struct {
+                bool unlocked;
+                unsigned points;
+                const char *title;
+                const char *description;
+                int badge; /* 0: none, the page draws its own icon; 1: a picture; 2: damaged */
+            } k_set[] = {
+                {true, 5u, "First Steps", "Win your first rally in any mode.", 1},
+                {true, 10u, "Warm-Up Rally", "Keep a rally going for twenty shots in practice.", 1},
+                {true, 5u, "Practice Makes Perfect", "Finish every lesson in the tennis school.", 2},
+                {false, 10u, "Straight Sets", "Win a match without dropping a set.", 1},
+                {false, 25u, "Comeback from Love-Forty",
+                 "Win a game on your own serve after trailing love-forty.", 1},
+                {false, 25u, "Every Court in One Season",
+                 "Play a match on every court in a single season.", 0},
+                {false, 50u, "Champion of the Hot Shots Cup, Undefeated on Every Surface",
+                 "Win the Hot Shots Cup without losing a match on any surface, from the first "
+                 "round to the final.", 0},
+                {false, 100u, "Grand Slam", "Win all four major tournaments in one season.", 1},
+                {false, 10u, "Ace Machine", "Serve ten aces in one match.", 0},
+                {false, 10u, "Net Rusher", "Win fifty points at the net.", 0},
+                {false, 25u, "Doubles Partners", "Win a doubles tournament with any partner.", 0},
+                {false, 50u, "Golden Racket", "Unlock every racket in the shop.", 0},
+            };
+            /* The badge pictures: project-drawn PNGs made here and decoded as the player
+               decodes a fetched badge, a damaged one among them that falls back to the
+               page's own icon. No RetroAchievements picture is used. */
+            static NkUiImage badges[sizeof(k_set) / sizeof(k_set[0])];
+            const size_t count = sizeof(k_set) / sizeof(k_set[0]);
+            unsigned decoded = 0u, refused = 0u;
+            app->achievements_list_loaded = true;
+            snprintf(app->achievements_list_disc_id, sizeof(app->achievements_list_disc_id),
+                     "%s", achievements + 5);
+            memset(app->achievements_list, 0, sizeof(app->achievements_list));
+            app->achievements_unlocked = 0u;
+            app->achievements_points_unlocked = 0u;
+            app->achievements_points_total = 0u;
+            for (size_t i = 0; i < count && i < PLAYER_ACHIEVEMENTS_LIST_MAX; i++) {
+                PlayerAchievementRow *row = &app->achievements_list[i];
+                snprintf(row->title, sizeof(row->title), "%s", k_set[i].title);
+                snprintf(row->description, sizeof(row->description), "%s",
+                         k_set[i].description);
+                row->points = k_set[i].points;
+                row->unlocked = k_set[i].unlocked;
+                if (k_set[i].badge) {
+                    snprintf(row->badge_name, sizeof(row->badge_name), "%u", 70001u + (unsigned)i);
+                    if (ui_test_sample_badge(&badges[i], (unsigned)i, !row->unlocked,
+                                             k_set[i].badge == 2)) {
+                        row->badge = &badges[i];
+                        decoded++;
+                    } else {
+                        refused++;
+                    }
+                }
+                app->achievements_points_total += k_set[i].points;
+                if (row->unlocked) {
+                    app->achievements_unlocked++;
+                    app->achievements_points_unlocked += k_set[i].points;
+                }
+            }
+            app->achievements_list_count = count;
+            app->achievements_list_total = count;
+            printf("[PLAYER_UI_TEST] achievements_badge_fixture decoded=%u refused=%u\n",
+                   decoded, refused);
+            snprintf(app->achievements_status, sizeof(app->achievements_status), "%s",
+                     "12 achievements available.");
         }
     }
     if (t->error_code) {

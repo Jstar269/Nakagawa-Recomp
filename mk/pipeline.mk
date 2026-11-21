@@ -271,6 +271,11 @@ $(LIBCHDR_LIB): $(LIBCHDR_OBJS)
 PLAYER_EXE ?= $(BUILD_ROOT)/nakagawa_player$(EXE_EXT)
 PLAYER_UI_TEST_EXE ?= $(BUILD_ROOT)/nakagawa_player_ui_test$(EXE_EXT)
 PLAYER_CORE_SOURCES := src/core/nk_shared_helpers.c src/core/nk_font.c src/rt/pgf_public.c src/rt/texrepl.c src/core/nk_pgf_host.c src/core/nk_iso.c src/core/nk_library.c src/core/nk_launch.c src/core/nk_title_manifest.c src/core/nk_xb.c src/core/nk_input_profile.c src/core/nk_json.c src/core/nk_cheats.c src/core/nk_psp_crypto.c src/core/nk_psp_keystore.c src/core/nk_psp_builtin_keys.c src/core/nk_psp_aes.c src/core/nk_psp_sha1.c src/core/nk_psp_ec.c src/core/nk_psp_kirk.c src/core/nk_psp_prx.c src/core/nk_psp_kle.c src/core/nk_psp_inflate.c src/core/nk_psp_container.c src/core/nk_psp_amctrl.c src/core/nk_psp_lzrc.c src/core/nk_psp_npumdimg.c src/core/nk_pbp_homebrew.c src/core/nk_disc_expand.c src/core/nk_disc_verify.c src/core/nk_zip.c src/core/nk_steam_shortcuts.c src/core/nk_data_migrate.c src/core/nk_memstick_layout.c src/core/generated/nk_title_catalog.c
+PLAYER_RCHEEVOS_SOURCES := $(wildcard third_party/rcheevos/src/*.c) \
+	$(wildcard third_party/rcheevos/src/rapi/*.c) \
+	$(wildcard third_party/rcheevos/src/rcheevos/*.c) \
+	third_party/rcheevos/src/rhash/md5.c
+PLAYER_ACHIEVEMENTS_SOURCES := src/core/nk_achievements.c $(PLAYER_RCHEEVOS_SOURCES)
 PLAYER_CORE_SRCS := $(PLAYER_CORE_SOURCES) $(PLAYER_PLATFORM_SRC)
 PLAYER_NK_UI_SRCS := $(NK_UI_CORE_SRCS) $(NK_UI_EDGE_SRCS) src/ui/backend/nk_ui_sdlr.c $(NK_UI_PLAYER_C5_SRCS) $(NK_UI_PLAYER_HOST_SRCS)
 # The player's About page shows "v<version> (MM-DD-YYYY)" (the version itself is
@@ -309,10 +314,10 @@ $(error $(NK_UPDATE_KEY_FILE) is not a minisign public key; see docs/RELEASE_SIG
 endif
 endif
 NK_UPDATE_KEY_DEFS := $(if $(NK_UPDATE_KEY_LINE),-DNK_UPDATE_SIGNING_KEY=\"$(NK_UPDATE_KEY_LINE)\",)
-PLAYER_SRCS := src/player/main.c src/player/player_host.c src/player/player_state.c src/player/input_settings.c src/player/iso_reader.c src/player/setup_staging.c src/player/package_builder.c src/player/update_check.c src/player/discord_presence.c src/player/cover_art.c $(UPDATE_SIG_SRCS) $(PLAYER_NK_UI_SRCS) $(PLAYER_CORE_SRCS)
+PLAYER_SRCS := src/player/main.c src/player/player_host.c src/player/player_state.c src/player/input_settings.c src/player/iso_reader.c src/player/setup_staging.c src/player/package_builder.c src/player/update_check.c src/player/discord_presence.c $(PLAYER_ACHIEVEMENTS_SOURCES) src/player/cover_art.c $(UPDATE_SIG_SRCS) $(PLAYER_NK_UI_SRCS) $(PLAYER_CORE_SRCS)
 # The UI regression tests' scripted-event harness; only $(PLAYER_UI_TEST_EXE) links it.
 PLAYER_UI_TEST_SRCS := src/player/player_ui_test.c
-PLAYER_INCLUDES := -Isrc/player -Isrc/player/ui -Isrc/ui -Ithird_party/clay -Isrc/core -Isrc/core/generated -Isrc/rt -Ithird_party/monocypher $(SDL3_INC_FLAGS) $(PLAYER_VULKAN_INC)
+PLAYER_INCLUDES := -Isrc/player -Isrc/player/ui -Isrc/ui -Ithird_party/clay -Isrc/core -Isrc/core/generated -Isrc/rt -Ithird_party/monocypher -Ithird_party/rcheevos/include -Ithird_party/rcheevos/src $(SDL3_INC_FLAGS) $(PLAYER_VULKAN_INC)
 # Adding a compressed disc image or a PSN package reads every byte of it for its SHA-256
 # (nk_disc_file_identity in nk_disc_expand.c). At the player's RUNTIME_OPT default of -O0 that
 # hash runs five to six times slower than at -O2 (about 21 s against 4 s per GiB), so this one

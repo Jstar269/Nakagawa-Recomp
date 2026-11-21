@@ -1627,8 +1627,16 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_ui_root[NK_MAX_PATH + 16];
     char env_launcher_display[96];
     char env_nickname[sizeof(session->config.nickname) + 16];
+    char env_guest_memory_channel[NK_GUEST_MEMORY_CHANNEL_NAME_MAX + 32u];
     char env_cheats_file[NK_MAX_PATH + 24];
     char sep = nk_platform_path_separator();
+
+    if (!memchr(session->config.guest_memory_channel, '\0',
+                sizeof session->config.guest_memory_channel)) {
+        snprintf(session->last_error, sizeof(session->last_error),
+                 "The local guest-memory channel name is not terminated.");
+        return NK_ERROR_GENERIC;
+    }
 
     if (session->config.fps_cap == -1) {
         snprintf(env_fps, sizeof(env_fps), "SR_FPS_CAP=native");
@@ -1843,6 +1851,9 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     /* The console nickname (#2197), always exported so an inherited value cannot name it. */
     snprintf(env_nickname, sizeof(env_nickname), "SR_NICKNAME=%s", session->config.nickname);
     envp[env_count++] = env_nickname;
+    snprintf(env_guest_memory_channel, sizeof env_guest_memory_channel,
+             "SR_GUEST_MEMORY_CHANNEL=%s", session->config.guest_memory_channel);
+    envp[env_count++] = env_guest_memory_channel;
     /* Cheats (#2639, src/rt/cheats.h): the switch and the file, both always exported so an
        inherited value cannot turn them on or name a file. The acceptance checkpoint is evidence
        of the game as it is, so a session with one refuses to launch with cheats on. */

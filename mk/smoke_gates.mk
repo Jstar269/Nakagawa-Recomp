@@ -31,6 +31,7 @@ production-smoke:
 		LDFLAGS="$(LDFLAGS) -Wl,-Map,$(PRODUCTION_SMOKE_MAP)"
 	"$(PYTHON)" $(PRODUCTION_SMOKE_GENERATOR) verify --build-dir $(PRODUCTION_SMOKE_DIR) --mode aot
 	"$(PYTHON)" $(PRODUCTION_SMOKE_GENERATOR) run --build-dir $(PRODUCTION_SMOKE_DIR) --mode aot
+	"$(PYTHON)" $(PRODUCTION_SMOKE_GENERATOR) refuse-channel --build-dir $(PRODUCTION_SMOKE_DIR) --mode aot
 
 # Run the same smoke with the executable staged into a fresh directory outside
 # the build tree (#294): a launcher/staging path bug must fail here, not only in

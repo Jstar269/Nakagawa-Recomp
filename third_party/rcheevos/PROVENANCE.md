@@ -67,7 +67,7 @@ host's callback, so nothing here opens a connection.
 | `src/rapi/rc_api_info.c` | `src/rapi/rc_api_info.c` | imported + LOCAL DELTA | `327a6dff3fc8f775f0bf369205c11482e43f9638` | `f036a31dc0d8c0db8cea3ee78a3746a218369e7f10c3c2183751a0c72cf78bfc` (this tree's bytes) |
 | `src/rapi/rc_api_runtime.c` | `src/rapi/rc_api_runtime.c` | imported + LOCAL DELTA | `261741d55aeebf4323b126f993dbf53483529c83` | `2580e58f67b20b020be0d2d29d5cf0e93383b930fe5d2b2613b103be14f569c7` (this tree's bytes) |
 | `src/rapi/rc_api_user.c` | `src/rapi/rc_api_user.c` | imported + LOCAL DELTA | `6943c98c443d647070e637758184fc4c09bec499` | `f8816573734c4b35f8ad9c15636ed6630dd4b6fc4d2199da57aa638947ae8260` (this tree's bytes) |
-| `src/rc_client.c` | `src/rc_client.c` | imported + LOCAL DELTA | `7a7399580ebe48fd92b84d3a198f51b6675a23fd` | `a2ca2e4609fe691f1afe2a94631ffba40fe7517d6d42c32e9070dd6151730484` (this tree's bytes) |
+| `src/rc_client.c` | `src/rc_client.c` | imported + LOCAL DELTA | `7a7399580ebe48fd92b84d3a198f51b6675a23fd` | `862beeae836538aa6e67b49beb958e395f89626223e6bce84a2e18625b792d4f` (this tree's bytes) |
 | `src/rc_client_external.h` | `src/rc_client_external.h` | imported byte-identical | `b3c0e5eba9bfa12f32cc54bf6150bf67d67b6da9` | `dbca667b2ec79cc74347d234085b7c9fb3bd931e22bc2d598fb0af9931edc3ba` |
 | `src/rc_client_external_versions.h` | `src/rc_client_external_versions.h` | imported byte-identical | `90f6f689604498d8d9ec61f6126c6c13f7f7328d` | `47c3a1975907b4d77ae7f427257f15cead2a9eef95c32b6034ebd3c048a330f1` |
 | `src/rc_client_internal.h` | `src/rc_client_internal.h` | imported byte-identical | `fad288d62aee1717d4062bb2661ef5b5c9075a5a` | `a7fa88dbad2cb390cf84a5b2697284c928ef74fd4438afa81e6e633cbd8aacd2` |
@@ -105,7 +105,7 @@ Ten files are modified (corrected 2026-11-18: this line said six; 2026-11-20: `s
 
 `src/rc_client.c` was modified by Nakagawa Recomp contributors on 2026-11-17 (audit 2026-11-17). Its
 upstream v12.5.0 bytes have SHA-256 `f3fcc544f082acef62ca32fdd8d05f43fed5f77e14484c344e8dca9402e0024f`; the three
-changes below and the 2026-11-20 changes in the next section give the SHA-256 in the table. Each is marked `LOCAL DELTA` in the file, and
+changes below and the 2026-11-20 changes in the next two sections give the SHA-256 in the table. Each is marked `LOCAL DELTA` in the file, and
 `tests/native/test_nk_achievements.c` (`achievements-selftest`) fails on the upstream bytes for each of them, with a
 transport that answers later, as `NkAchTransport` allows. The first and third are the changes upstream made after
 the pin, in commit `db8ca2e622f05b5c870c43db9a1d796036aebbb8` ("add null checks to rc_client functions", #570, in
@@ -157,6 +157,22 @@ rc_client_get_user_agent_clause", #572, in `src/client/rc_client.c`), applied un
   Upstream at the pin formed `buffer + result` past the buffer and passed `buffer_size - result`, which wraps, to
   `snprintf`. The code is built only with `RC_CLIENT_SUPPORTS_EXTERNAL`, which no build here defines; the file was
   syntax-checked with it defined.
+
+### `src/rc_client.c`: the completed-set event after an unload (2026-11-20)
+
+Modified by Nakagawa Recomp contributors on 2026-11-20 (the maintainer's decision of that day), on top of the changes
+above, and marked `LOCAL DELTA` in the file:
+
+- `rc_client_subset_raise_pending_events` raises a pending completed-set (mastery) event only while a game is
+  loaded (`client->game` is not NULL). An award answer that completes the set (`"AchievementsRemaining":0`) marks
+  the event pending for the next `rc_client_do_frame`. `rc_client_unload_game` sets `client->game` to NULL and then
+  raises the unloaded game's pending events, and `rc_client_raise_mastery_event` reads `client->game->subsets`, so
+  at the pin a game unloaded (or a user signed out) between that answer and the next frame read through a NULL
+  pointer. The unloaded game's completion is no longer raised; a loaded game's still is, from the next frame.
+  `achievements-selftest` (`test_last_achievement_answered_as_the_game_ends`) answers the last award and then
+  unloads the game, signs out or closes, and also takes the normal route, where the completion is raised once on
+  the next frame; on the previous bytes the Windows selftest stops with an access violation in
+  `rc_client_raise_mastery_event`.
 
 ### `src/rapi/rc_api_common.c`, `rc_api_common.h`, `rc_api_runtime.c`, `rc_api_info.c`
 

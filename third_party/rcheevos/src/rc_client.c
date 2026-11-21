@@ -6439,7 +6439,13 @@ static void rc_client_subset_raise_pending_events(rc_client_t* client, rc_client
     rc_client_raise_leaderboard_events(client, subset);
 
   /* raise mastery event if pending */
-  if (subset->mastery == RC_CLIENT_MASTERY_STATE_PENDING)
+  /* LOCAL DELTA (Nakagawa Recomp, 2026-11-20): only while a game is loaded.
+   * rc_client_unload_game clears client->game before it raises the unloaded game's pending
+   * events, and rc_client_raise_mastery_event reads client->game->subsets, so a set completed
+   * by the last award answer and unloaded before the next frame read through a NULL pointer.
+   * The unloaded game's completion is not raised; a loaded game's still is, from the next
+   * rc_client_do_frame. */
+  if (subset->mastery == RC_CLIENT_MASTERY_STATE_PENDING && client->game)
     rc_client_raise_mastery_event(client, subset);
 }
 

@@ -78,6 +78,34 @@ def cmake_player_includes(cmake_text: str) -> set[str]:
     return dirs
 
 
+RCHEEVOS_SOURCE_TREE = "third_party/rcheevos/src"
+
+
+def make_rcheevos_sources(makefile_text: str, root: Path) -> set[str]:
+    """The files Make's PLAYER_RCHEEVOS_SOURCES names, its $(wildcard ...) patterns expanded
+    against root as GNU Make would."""
+    match = re.search(r"^PLAYER_RCHEEVOS_SOURCES\s*:=\s*((?:.*\\\n)*.*)$", makefile_text,
+                      re.MULTILINE)
+    if match is None:
+        raise AssertionError("PLAYER_RCHEEVOS_SOURCES not found in the Makefile text")
+    body = match.group(1).replace("\\\n", " ")
+    files: set[str] = set()
+    for pattern in re.findall(r"\$\(wildcard\s+([^)]+)\)", body):
+        for word in pattern.split():
+            files.update(path.relative_to(root).as_posix() for path in root.glob(word))
+    literal = re.sub(r"\$\(wildcard\s+[^)]+\)", " ", body)
+    files.update(word for word in literal.split())
+    return files
+
+
+def cmake_rcheevos_sources(cmake_text: str) -> set[str]:
+    """The files CMake's set(NK_RCHEEVOS_PLAYER_SOURCES ...) names."""
+    match = re.search(r"set\(NK_RCHEEVOS_PLAYER_SOURCES\s+(.*?)\)", cmake_text, re.DOTALL)
+    if match is None:
+        raise AssertionError("set(NK_RCHEEVOS_PLAYER_SOURCES ...) not found in CMakeLists.txt")
+    return set(match.group(1).split())
+
+
 def make_disc_expand_opt(makefile_text: str) -> str | None:
     """The level the Makefile compiles the player's nk_disc_expand.c at, when it compiles that
     unit on its own and links it in place of the source in both player programs."""
@@ -258,6 +286,30 @@ class BuildSystemParityTests(unittest.TestCase):
         mutated = re.sub(r"^(PLAYER_SRCS\s*:=)", r"\1 src/player/only_in_make.c", self.makefile_text,
                          count=1, flags=re.MULTILINE)
         self.assertNotEqual(make_player_sources(mutated), cmake_player_sources(self.cmake_text))
+
+    def test_rcheevos_sources_parity(self) -> None:
+        """Audit F-8937a7ca: Make finds the vendored rcheevos sources by wildcard and CMake lists
+        them by hand. Both name every rcheevos .c file the player links, so an upstream update
+        that adds or drops one fails here rather than at CMake's link."""
+        make_set = make_rcheevos_sources(self.makefile_text, ROOT)
+        self.assertEqual(make_set, cmake_rcheevos_sources(self.cmake_text),
+                         "the rcheevos sources differ between make and CMake")
+        vendored = {path.relative_to(ROOT).as_posix()
+                    for path in (ROOT / RCHEEVOS_SOURCE_TREE).rglob("*.c")}
+        self.assertTrue(vendored, "rcheevos is vendored")
+        self.assertEqual(make_set, vendored,
+                         "a vendored rcheevos source is missing from the player's build lists")
+
+    def test_rcheevos_comparison_sees_a_one_sided_file(self) -> None:
+        """The comparison above can fail: a file only one list names makes the sets differ."""
+        mutated = re.sub(r"(set\(NK_RCHEEVOS_PLAYER_SOURCES\s+)",
+                         r"\1third_party/rcheevos/src/only_in_cmake.c ", self.cmake_text, count=1)
+        self.assertNotEqual(make_rcheevos_sources(self.makefile_text, ROOT),
+                            cmake_rcheevos_sources(mutated))
+        dropped = re.sub(r"\s+third_party/rcheevos/src/rc_version\.c", "", self.cmake_text,
+                         count=1)
+        self.assertNotEqual(make_rcheevos_sources(self.makefile_text, ROOT),
+                            cmake_rcheevos_sources(dropped))
 
     def test_player_core_sources_are_one_set(self) -> None:
         """The player's core library is one list in both systems: make's PLAYER_CORE_SOURCES and
