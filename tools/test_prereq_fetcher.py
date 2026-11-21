@@ -1907,6 +1907,18 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertLess(shutdown.index("package_http_cancel(run->ach_http_cancel);"),
                         shutdown.index("SDL_WaitThread(job->thread, NULL);"))
         self.assertIn("job->cancel = run->ach_http_cancel;", source)
+        # Review of #2890: every WinHTTP call on a request starts between package_http_call_begin
+        # and _end (WINHTTP_REQUEST_CALL), so none uses a handle the cancel closed
+        # (test_package_builder runs that protocol with a fake handle).
+        transport = (REPO_ROOT / "src" / "player" / "package_builder.c").read_text(encoding="utf-8")
+        windows = transport[transport.index("typedef struct WinHttpDownload {"):
+                            transport.index("static bool sha256_begin(")]
+        uses = sum(line.count("WINHTTP_REQUEST(state)") for line in windows.splitlines()
+                   if not line.startswith("#define"))
+        self.assertGreater(uses, 0)
+        self.assertEqual(uses, len(re.findall(r"WINHTTP_REQUEST_CALL\(state, WinHttp\w+\(\s*"
+                                              r"WINHTTP_REQUEST\(state\)", windows)))
+        self.assertNotRegex(windows, r"WinHttp\w+\(\s*(?:state->request|\(HINTERNET\)state)")
         self.assertNotRegex(source, r'"NakagawaRecomp/%')
         header = (REPO_ROOT / "src" / "core" / "nk_achievements.h").read_text(encoding="utf-8")
         self.assertIn('#define NK_ACH_USER_AGENT_PRODUCT "NakagawaRecomp"', header)

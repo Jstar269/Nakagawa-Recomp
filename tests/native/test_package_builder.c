@@ -2122,6 +2122,70 @@ static void test_native_transport_cancel(void) {
     package_http_cancel(NULL);
     package_http_cancel_destroy(NULL);
 }
+
+/* Review of #2890: the cancel closed the request's handle and the worker went on calling WinHTTP
+ * with it, a value Windows may since have given another request. The transport's protocol, with
+ * a fake handle: the cancel closes only the handle of a call in progress, no call starts after a
+ * cancel, and each handle is closed once, by one side. */
+typedef struct {
+    int closes;
+    int calls;
+    char order[64];
+} FakeHandleLog;
+
+static FakeHandleLog s_fake_handle_log;
+
+static void fake_handle_close(void *handle) {
+    FakeHandleLog *log = (FakeHandleLog *)handle;
+    log->closes++;
+    strncat(log->order, "x", sizeof log->order - strlen(log->order) - 1u);
+}
+
+/* One call on the slot, as the transport makes it: the cancel may come during it. */
+static bool fake_call(PackageHttpCancel *cancel, PackageHttpCallSlot *slot, bool cancel_during) {
+    if (!package_http_call_begin(cancel, slot)) return false;
+    FakeHandleLog *log = (FakeHandleLog *)slot->handle;
+    assert(log->closes == 0); /* a call never starts on a closed handle */
+    log->calls++;
+    strncat(log->order, "c", sizeof log->order - strlen(log->order) - 1u);
+    if (cancel_during) package_http_cancel(cancel); /* the other thread, while this call blocks */
+    return package_http_call_end(cancel, slot);
+}
+
+static void test_native_transport_cancel_ordering(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: a cancel closes only a call in progress, once\n");
+    for (int when = 0; when < 4; when++) {
+        /* 0: no cancel; 1: before the first call; 2: during the second; 3: after the second */
+        PackageHttpCancel *cancel = package_http_cancel_create();
+        assert(cancel != NULL);
+        memset(&s_fake_handle_log, 0, sizeof s_fake_handle_log);
+        PackageHttpCallSlot slot = {&s_fake_handle_log, fake_handle_close, false};
+        if (when == 1) package_http_cancel(cancel);
+        bool open = fake_call(cancel, &slot, false);
+        if (open) open = fake_call(cancel, &slot, when == 2);
+        if (when == 3) package_http_cancel(cancel);
+        if (open) open = fake_call(cancel, &slot, false);
+        const bool more = fake_call(cancel, &slot, false);
+        package_http_call_release(cancel, &slot);
+        package_http_call_release(cancel, &slot); /* a second release closes nothing */
+        printf("   cancel %s: %s\n",
+               when == 0 ? "never" : when == 1 ? "first" : when == 2 ? "in a call" : "between",
+               s_fake_handle_log.order);
+        static const char *const k_order[] = {"ccccx", "x", "ccx", "ccx"};
+        assert(strcmp(s_fake_handle_log.order, k_order[when]) == 0);
+        assert(s_fake_handle_log.closes == 1);
+        assert(more == (when == 0));
+        assert(slot.handle == NULL && !slot.closed_by_cancel);
+        package_http_cancel_destroy(cancel);
+    }
+    /* No cancel object: the slot is the request's own. */
+    memset(&s_fake_handle_log, 0, sizeof s_fake_handle_log);
+    PackageHttpCallSlot own = {&s_fake_handle_log, fake_handle_close, false};
+    assert(fake_call(NULL, &own, false));
+    package_http_call_release(NULL, &own);
+    assert(strcmp(s_fake_handle_log.order, "cx") == 0);
+    assert(!package_http_call_begin(NULL, &own)); /* released: no handle */
+}
 #endif
 
 /* Audit 2026-11-17: the build tools' fetch start reset a running session and spawned
@@ -2211,6 +2275,7 @@ int main(int argc, char *argv[]) {
     test_native_download_verification();
     test_native_transport_user_agent_limit();
     test_native_transport_cancel();
+    test_native_transport_cancel_ordering();
 #else
     puts("[PACKAGE_BUILDER_TEST] SKIP native WinHTTP/SHA-256 transport tests (non-Windows host)");
 #endif
