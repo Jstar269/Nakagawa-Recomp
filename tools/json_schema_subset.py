@@ -124,7 +124,7 @@ def _canonical(value: Any) -> Any:
 
 
 def _json_equal(left: Any, right: Any) -> bool:
-    return _canonical(left) == _canonical(right)
+    return bool(_canonical(left) == _canonical(right))
 
 
 def compile_pattern(pattern: str) -> re.Pattern[str]:
