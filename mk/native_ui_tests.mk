@@ -546,7 +546,7 @@ nk-ui-focus-selftest:
 shared-helpers-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) $(NC_CFLAGS_CORE) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		src/core/nk_shared_helpers.c tests/native/test_shared_helpers.c \
+		src/core/nk_shared_helpers.c tests/native/test_shared_helpers.c $(SHARED_HELPERS_WRAP_MALLOC) \
 		-o $(BUILD_ROOT)/test_shared_helpers$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_shared_helpers$(EXE_EXT)
 

@@ -191,6 +191,7 @@ target_include_directories(test_shared_helpers PRIVATE
 target_compile_definitions(test_shared_helpers PRIVATE
     SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
 )
+# Its bounded-reader out-of-memory case wraps malloc: see test_disc_expand's block below.
 add_test(NAME shared_helpers_test COMMAND test_shared_helpers)
 
 add_executable(test_parsers_hostile
@@ -233,10 +234,13 @@ add_executable(test_disc_expand
 )
 target_link_libraries(test_disc_expand PRIVATE nakagawa_core nk_libchdr)
 # The failing-allocator case wraps malloc; MSVC's and Apple's linkers have no --wrap, so
-# there the test prints a SKIP for that case and runs the rest.
+# there the test prints a SKIP for that case and runs the rest. test_shared_helpers' bounded-reader
+# out-of-memory case (defined above) wraps malloc the same way, under the same guard.
 if(NOT MSVC AND NOT APPLE)
     target_compile_definitions(test_disc_expand PRIVATE NK_TEST_WRAP_MALLOC)
     target_link_options(test_disc_expand PRIVATE "-Wl,--wrap=malloc")
+    target_compile_definitions(test_shared_helpers PRIVATE NK_TEST_WRAP_MALLOC)
+    target_link_options(test_shared_helpers PRIVATE "-Wl,--wrap=malloc")
 endif()
 add_test(NAME disc_expand_test COMMAND test_disc_expand)
 # A host that cannot make a folder link runs every other check and exits 77.

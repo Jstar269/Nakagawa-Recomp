@@ -114,6 +114,7 @@ from nk_core.iso_inspect import (  # noqa: E402
     walk_disc_module_entries,
     write_experimental_profile,
 )
+import json_schema_subset  # noqa: E402
 import nk_powershell  # noqa: E402
 import title_manifest  # noqa: E402
 from psp_import_table import MODULE_ATTR_KERNEL as PSP_MODULE_ATTR_KERNEL  # noqa: E402
@@ -4529,94 +4530,23 @@ BRINGUP_CAPTURE_ROUNDS_DEFAULT = 4
 BRINGUP_CAPTURE_ROUNDS_MAX = 16
 
 
-def _schema_at_pointer(schema: dict, pointer: str) -> dict:
-    value = schema
-    for part in pointer.removeprefix("#/").split("/"):
-        value = value[part.replace("~1", "/").replace("~0", "~")]
-    return value
+_BRINGUP_VALIDATOR: json_schema_subset.SchemaValidator | None = None
 
 
-# The JSON Schema keywords _validate_schema_value enforces, and the annotations it may ignore.
-# A schema node carrying any other keyword is refused, so a constraint is never skipped unseen.
-_SCHEMA_KEYWORDS_ENFORCED = frozenset({
-    "$ref", "type", "const", "enum", "pattern", "minimum", "uniqueItems", "minItems", "maxItems",
-    "items", "properties", "required", "propertyNames", "additionalProperties",
-})
-_SCHEMA_KEYWORDS_ANNOTATION = frozenset({
-    "$schema", "$id", "$comment", "$defs", "definitions", "title", "description", "default", "examples",
-})
-
-
-def _validate_schema_value(value, schema: dict, root_schema: dict, location: str) -> None:
-    unknown = sorted(set(schema) - _SCHEMA_KEYWORDS_ENFORCED - _SCHEMA_KEYWORDS_ANNOTATION)
-    if unknown:
-        raise ValueError(f"schema for {location} uses unsupported keywords: {', '.join(unknown)}")
-    reference = schema.get("$ref")
-    if reference is not None:
-        if not reference.startswith("#/"):
-            raise ValueError("external schema references are not supported")
-        _validate_schema_value(value, _schema_at_pointer(root_schema, reference), root_schema, location)
-        return
-
-    expected = schema.get("type")
-    if expected is not None:
-        expected_types = expected if isinstance(expected, list) else [expected]
-        matches = any(
-            (kind == "object" and isinstance(value, dict)) or
-            (kind == "array" and isinstance(value, list)) or
-            (kind == "string" and isinstance(value, str)) or
-            (kind == "integer" and isinstance(value, int) and not isinstance(value, bool)) or
-            (kind == "number" and isinstance(value, (int, float)) and not isinstance(value, bool)) or
-            (kind == "boolean" and isinstance(value, bool)) or
-            (kind == "null" and value is None)
-            for kind in expected_types
-        )
-        if not matches:
-            raise ValueError(f"{location} has the wrong JSON type")
-    if "const" in schema and value != schema["const"]:
-        raise ValueError(f"{location} does not match its schema constant")
-    if "enum" in schema and value not in schema["enum"]:
-        raise ValueError(f"{location} is outside its schema enum")
-    if isinstance(value, str) and "pattern" in schema and not re.fullmatch(schema["pattern"], value):
-        raise ValueError(f"{location} is outside its schema pattern")
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if "minimum" in schema and value < schema["minimum"]:
-            raise ValueError(f"{location} is below its schema minimum")
-    if isinstance(value, list):
-        if schema.get("uniqueItems") and len(value) != len({json.dumps(item, sort_keys=True) for item in value}):
-            raise ValueError(f"{location} contains duplicate items")
-        if "minItems" in schema and len(value) < schema["minItems"]:
-            raise ValueError(f"{location} has fewer items than its schema minimum")
-        if "maxItems" in schema and len(value) > schema["maxItems"]:
-            raise ValueError(f"{location} has more items than its schema maximum")
-        item_schema = schema.get("items")
-        if item_schema is not None:
-            for index, item in enumerate(value):
-                _validate_schema_value(item, item_schema, root_schema, f"{location}[{index}]")
-    if isinstance(value, dict):
-        properties = schema.get("properties", {})
-        required = schema.get("required", [])
-        missing = [name for name in required if name not in value]
-        if missing:
-            raise ValueError(f"{location} is missing a required field")
-        property_names = schema.get("propertyNames")
-        for name in value:
-            if property_names is not None:
-                _validate_schema_value(name, property_names, root_schema, f"{location} property name")
-            if name in properties:
-                _validate_schema_value(value[name], properties[name], root_schema, f"{location}.{name}")
-            elif schema.get("additionalProperties") is False:
-                raise ValueError(f"{location} contains a non-whitelisted field")
-            elif isinstance(schema.get("additionalProperties"), dict):
-                _validate_schema_value(
-                    value[name], schema["additionalProperties"], root_schema, f"{location}.{name}"
-                )
+def _bringup_validator() -> json_schema_subset.SchemaValidator:
+    """The bring-up report schema, read and checked once per process (tools/json_schema_subset.py)."""
+    global _BRINGUP_VALIDATOR
+    if _BRINGUP_VALIDATOR is None:
+        _BRINGUP_VALIDATOR = json_schema_subset.SchemaValidator(
+            json.loads(BRINGUP_SCHEMA_PATH.read_text(encoding="utf-8")))
+    return _BRINGUP_VALIDATOR
 
 
 def validate_bringup_report(report: dict) -> None:
-    """Validate the report against its checked-in, strict public-safe schema."""
-    schema = json.loads(BRINGUP_SCHEMA_PATH.read_text(encoding="utf-8"))
-    _validate_schema_value(report, schema, schema, "report")
+    """Validate the report against its checked-in, strict public-safe schema.
+
+    A violation raises ``json_schema_subset.SchemaViolation`` (a ``ValueError``)."""
+    _bringup_validator().validate(report, "report")
 
 
 def new_bringup_report() -> dict:
@@ -4861,14 +4791,14 @@ def _minimal_valid_bringup_report(report: dict) -> dict:
     the stage's failure class so the report never claims success for a failed run.
     """
     minimal = _new_bringup_report()
-    schema = json.loads(BRINGUP_SCHEMA_PATH.read_text(encoding="utf-8"))
-    properties = schema.get("properties", {})
+    validator = _bringup_validator()
+    properties = validator.root.get("properties", {})
     for key, value in report.items():
         property_schema = properties.get(key)
         if property_schema is None:
             continue
         try:
-            _validate_schema_value(value, property_schema, schema, f"report.{key}")
+            validator.validate(value, f"report.{key}", property_schema)
         except ValueError:
             continue
         minimal[key] = value

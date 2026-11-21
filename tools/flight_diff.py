@@ -6,11 +6,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from itertools import zip_longest
 from pathlib import Path
 from typing import Any, NoReturn
+
+try:
+    import json_schema_subset
+except ModuleNotFoundError:
+    from tools import json_schema_subset
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = ROOT / "assets" / "flight_recorder_schema.json"
@@ -96,93 +100,15 @@ def _fail(path: str, message: str) -> NoReturn:
     raise FlightDiffError(f"{path}: {message}")
 
 
-def _validate_schema(value: Any, schema: dict[str, Any], path: str = "$") -> None:
-    if "const" in schema and value != schema["const"]:
-        _fail(path, f"expected {schema['const']!r}")
-    if "enum" in schema and value not in schema["enum"]:
-        _fail(path, f"expected one of {schema['enum']!r}")
-
-    expected = schema.get("type")
-    if expected is not None:
-        expected_types = expected if isinstance(expected, list) else [expected]
-        valid = False
-        for type_name in expected_types:
-            if type_name == "object" and isinstance(value, dict):
-                valid = True
-            elif type_name == "array" and isinstance(value, list):
-                valid = True
-            elif type_name == "string" and isinstance(value, str):
-                valid = True
-            elif type_name == "boolean" and isinstance(value, bool):
-                valid = True
-            elif type_name == "integer" and isinstance(value, int) and not isinstance(value, bool):
-                valid = True
-            elif type_name == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
-                valid = True
-            elif type_name == "null" and value is None:
-                valid = True
-        if not valid:
-            _fail(path, f"expected {expected!r}")
-
-    if isinstance(value, str):
-        if "minLength" in schema and len(value) < schema["minLength"]:
-            _fail(path, "string is too short")
-        if "maxLength" in schema and len(value) > schema["maxLength"]:
-            _fail(path, "string is too long")
-        pattern = schema.get("pattern")
-        if pattern is not None and re.fullmatch(pattern, value) is None:
-            _fail(path, "string does not match its schema pattern")
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if "minimum" in schema and value < schema["minimum"]:
-            _fail(path, "number is below its minimum")
-        if "maximum" in schema and value > schema["maximum"]:
-            _fail(path, "number is above its maximum")
-    if isinstance(value, list):
-        if "minItems" in schema and len(value) < schema["minItems"]:
-            _fail(path, "array is too short")
-        if "maxItems" in schema and len(value) > schema["maxItems"]:
-            _fail(path, "array is too long")
-        if schema.get("uniqueItems"):
-            serialized = [json.dumps(item, sort_keys=True, separators=(",", ":")) for item in value]
-            if len(serialized) != len(set(serialized)):
-                _fail(path, "array items are not unique")
-        item_schema = schema.get("items")
-        if isinstance(item_schema, dict):
-            for index, item in enumerate(value):
-                _validate_schema(item, item_schema, f"{path}[{index}]")
-    if isinstance(value, dict):
-        if len(value) < schema.get("minProperties", 0):
-            _fail(path, f"fewer than {schema['minProperties']} properties")
-        for key in schema.get("required", ()):
-            if key not in value:
-                _fail(path, f"missing required property {key!r}")
-        properties = schema.get("properties", {})
-        if schema.get("additionalProperties") is False:
-            for key in value:
-                if key not in properties:
-                    _fail(path, f"property {key!r} is not allowed")
-        for key, child_schema in properties.items():
-            if key in value:
-                _validate_schema(value[key], child_schema, f"{path}.{key}")
-    if "allOf" in schema:
-        for child_schema in schema["allOf"]:
-            _validate_schema(value, child_schema, path)
-    if "not" in schema:
-        try:
-            _validate_schema(value, schema["not"], path)
-        except FlightDiffError:
-            pass
-        else:
-            _fail(path, "value matches a forbidden schema")
-    if "if" in schema:
-        try:
-            _validate_schema(value, schema["if"], path)
-        except FlightDiffError:
-            branch = schema.get("else")
-        else:
-            branch = schema.get("then")
-        if branch is not None:
-            _validate_schema(value, branch, path)
+def _validate_schema(value: Any, schema: dict[str, Any] | json_schema_subset.SchemaValidator,
+                     path: str = "$") -> None:
+    """Check ``value`` against ``schema`` with the shared validator, reporting a FlightDiffError."""
+    validator = (schema if isinstance(schema, json_schema_subset.SchemaValidator)
+                 else json_schema_subset.SchemaValidator(schema))
+    try:
+        validator.validate(value, path)
+    except json_schema_subset.SchemaViolation as violation:
+        _fail(violation.path, violation.reason)
 
 
 def _forbid_embedded_text(value: Any, path: str = "$") -> None:
@@ -200,18 +126,20 @@ def _forbid_embedded_text(value: Any, path: str = "$") -> None:
             _fail(path, "path-like or guest-derived text is not allowed")
 
 
-_SCHEMA_CACHE: dict[str, Any] | None = None
+_SCHEMA_CACHE: json_schema_subset.SchemaValidator | None = None
 
 
-def _bundle_schema() -> dict[str, Any]:
-    """The bundle schema, read once per process: every bundle is validated against it."""
+def _bundle_schema() -> json_schema_subset.SchemaValidator:
+    """The bundle schema, read and checked once per process: every bundle is validated against it."""
     global _SCHEMA_CACHE
     if _SCHEMA_CACHE is None:
-        _SCHEMA_CACHE = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        _SCHEMA_CACHE = json_schema_subset.SchemaValidator(
+            json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
     return _SCHEMA_CACHE
 
 
-def validate_bundle(bundle: Any, schema: dict[str, Any] | None = None) -> None:
+def validate_bundle(bundle: Any,
+                    schema: dict[str, Any] | json_schema_subset.SchemaValidator | None = None) -> None:
     if schema is None:
         schema = _bundle_schema()
     # The schema also forbids an identity-less v3 build block; this check runs first so

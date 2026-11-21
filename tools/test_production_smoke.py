@@ -2188,6 +2188,129 @@ class TestPresenterContract(unittest.TestCase):
                 self.assertNotIn(refused, env)
             self.assertEqual(Path(cwd), ROOT)
 
+    @staticmethod
+    def _cheats_route_build_dir(build_dir: Path, stem: str) -> None:
+        (build_dir / "fixture").mkdir()
+        (build_dir / "fixture" / "manifest.json").write_text('{"frames": 1}\n', encoding="ascii")
+        suffix = ".exe" if os.name == "nt" else ""
+        (build_dir / f"{stem}{suffix}").write_bytes(b"runtime")
+        (build_dir / f"{stem}_image.bin").write_bytes(b"image")
+
+    @staticmethod
+    def _expect_lines(expectations, got=None):
+        return "".join(
+            f"DRIVER_EXPECT_U32 addr=0x{address:08x} got=0x{(got or {}).get(address, value):08x} "
+            f"expected=0x{value:08x} status="
+            f"{'PASS' if (got or {}).get(address, value) == value else 'FAIL'}\n"
+            for address, value in expectations
+        )
+
+    def test_cheats_relocated_needs_the_refusal_and_no_word_written(self):
+        """Audit 2026-11-17, F-86f47689: the manifest's 0x08810000 image refuses every cheat."""
+        gen = display_generator
+        expectations = gen.cheats_relocated_expectations(1)
+        refusal = (
+            "CHEATS: refused: this game's image is at 0x08810000, not at 0x08804000 where a PSP "
+            "loads a relocatable main module, and this run does not say whether the image was moved "
+            "here or is linked here, so where a cheat's PSP address lives is not known; nothing is "
+            "applied\n"
+        )
+        refused = refusal + self._expect_lines(expectations)
+        # What the runtime did before: the file read, its cheats applied at the addresses as written.
+        applied = (
+            "CHEATS: cheats-relocated.ini: 3 on, 0 refused, 0 off, 0 for other discs\n"
+            + self._expect_lines(expectations, {0x0880508C: 0xA5000000, 0x08804000: 0x03E00008,
+                                                0x09000000: 0x12345678})
+        )
+        calls = []
+        with tempfile.TemporaryDirectory(prefix="display-smoke-relocated-") as temp_dir:
+            build_dir = Path(temp_dir)
+            self._cheats_route_build_dir(build_dir, gen.ARTIFACT_STEM)
+            for output, code, want in ((refused, 0, 0), (applied, 0, 1), (applied, 1, 1)):
+                def fake_run(command, output=output, code=code, **kwargs):
+                    calls.append((list(command), dict(kwargs["env"])))
+                    return subprocess.CompletedProcess(command, code, "", output)
+
+                with mock.patch.object(gen.subprocess, "run", side_effect=fake_run), \
+                        contextlib.redirect_stdout(io.StringIO()) as out, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    self.assertEqual(gen.main(["cheats-relocated", "--build-dir", str(build_dir)]), want)
+                if want == 0:
+                    self.assertIn("DISPLAY_SMOKE_CHEATS-RELOCATED status=PASS frames=1 base=0x08810000",
+                                  out.getvalue())
+                else:
+                    self.assertIn("DISPLAY_SMOKE_CHEATS-RELOCATED status=FAIL", err.getvalue())
+        command, env = calls[0]
+        self.assertEqual(command[1:9], [
+            "--image", str((build_dir / f"{gen.ARTIFACT_STEM}_image.bin").resolve()),
+            "0x08810000", "0x08810000", "none", "none", "--sched", "--gui",
+        ])
+        self.assertEqual(command[9:], [f"--expect-u32=0x{a:08x}:0x{v:08x}" for a, v in expectations])
+        self.assertEqual((env["SR_CHEATS"], env["SR_VIDEO"]), ("1", "offscreen"))
+        self.assertEqual(dict(expectations)[0x0880508C], 0)
+        self.assertEqual(dict(expectations)[0x0881108C], 0)
+
+    def test_cheats_windowed_needs_each_marker_refusal(self):
+        """Audit 2026-11-17, F-9b4bb8a7: a window that cannot show the marker refuses cheats."""
+        gen = display_generator
+        expectations = gen.cheats_base0_expectations(1, False)
+        counts = "CHEATS: cheats-windowed.ini: 1 on, 2 refused, 0 off, 0 for other discs\n"
+        gdi_refusal = ("CHEATS: refused: the window cannot show the cheats marker (the GDI window has no "
+                       "in-game UI), and cheats are not applied without it\n")
+        ui_refusal = ("CHEATS: refused: the window cannot show the cheats marker (no font), and cheats "
+                      "are not applied without it\n")
+        written = self._expect_lines(expectations, {0x108C: 0xA5000000})
+        kept = self._expect_lines(expectations)
+        gdi_ok = "BOOT_EVENT phase=window_ready backend=gdi\n" + counts + gdi_refusal + kept
+        vk_ok = "BOOT_EVENT phase=window_ready backend=vulkan\n" + counts + ui_refusal + kept
+        no_vk = "gui_init: SDL3/Vulkan init failed\nBOOT_EVENT phase=window_ready backend=gdi\n" + counts
+        cases = (
+            # (GDI output, Vulkan output, win32, exit, what stdout or stderr says)
+            (gdi_ok, vk_ok, True, 0, "gdi=PASS vulkan=PASS"),
+            (gdi_ok, no_vk + gdi_refusal + kept, True, 0,
+             "gdi=PASS vulkan=NOT_RUN(no_vulkan_device_or_window)"),
+            (None, vk_ok, False, 0, "gdi=SKIP(no_win32_window) vulkan=PASS"),
+            (gdi_ok.replace(gdi_refusal, ""), vk_ok, True, 1, "GDI-window cheats evidence omits"),
+            (gdi_ok.replace(kept, written), vk_ok, True, 1, "GDI-window cheats evidence omits"),
+            (gdi_ok, vk_ok.replace(ui_refusal, ""), True, 1,
+             "Vulkan-window-without-UI cheats evidence omits"),
+            (gdi_ok, vk_ok.replace(kept, written), True, 1,
+             "Vulkan-window-without-UI cheats evidence omits"),
+            (gdi_ok, vk_ok + gdi_refusal, True, 1, "Vulkan-window-without-UI cheats evidence contains"),
+        )
+        with tempfile.TemporaryDirectory(prefix="display-smoke-windowed-") as temp_dir:
+            build_dir = Path(temp_dir)
+            self._cheats_route_build_dir(build_dir, gen.BASE0_ARTIFACT_STEM)
+            for gdi, vulkan, win32, want, said in cases:
+                envs = []
+
+                def fake_run(command, gdi=gdi, vulkan=vulkan, envs=envs, **kwargs):
+                    env = dict(kwargs["env"])
+                    envs.append(env)
+                    output = gdi if env.get("SR_VIDEO") == "gdi" else vulkan
+                    return subprocess.CompletedProcess(command, 0, "", output)
+
+                with mock.patch.object(gen.subprocess, "run", side_effect=fake_run), \
+                        contextlib.redirect_stdout(io.StringIO()) as out, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    try:
+                        result = gen.cheats_windowed(build_dir, win32=win32)
+                    except RuntimeError as error:
+                        result = 1
+                        err.write(str(error))
+                self.assertEqual(result, want, said)
+                self.assertIn(said, out.getvalue() if want == 0 else err.getvalue())
+                gdi_failed = "GDI-window" in said
+                self.assertEqual([env.get("SR_VIDEO") for env in envs],
+                                 (["gdi"] if win32 else []) + ([] if gdi_failed else [None]))
+                self.assertTrue(all(env["SR_CHEATS"] == "1" for env in envs))
+                if not gdi_failed:
+                    vk_env = envs[-1]
+                    self.assertEqual(vk_env["SR_WINDOW_HIDDEN"], "1")
+                    self.assertNotIn("SDL_VIDEO_DRIVER", vk_env)
+                    # The empty UI folder is the run's own and is gone after it.
+                    self.assertFalse(Path(vk_env["SR_UI_ROOT"]).exists())
+
     def test_display_smoke_run_ends_with_the_base_zero_cheats_route(self):
         makefile = read_makefile(ROOT)
         self.assertIn(
@@ -2208,8 +2331,11 @@ class TestPresenterContract(unittest.TestCase):
             "BUILD_DIR=$(DISPLAY_SMOKE_BASE0_DIR)",
             "FUNCS_PER_CHUNK=1 PUBLIC_SAFE=1",
             "$(DISPLAY_SMOKE_GENERATOR) cheats-base0 --build-dir $(DISPLAY_SMOKE_BASE0_DIR)",
+            "$(DISPLAY_SMOKE_GENERATOR) cheats-windowed --build-dir $(DISPLAY_SMOKE_BASE0_DIR)",
         ):
             self.assertIn(part, recipe)
+        self.assertIn("$(DISPLAY_SMOKE_GENERATOR) cheats-relocated --build-dir $(DISPLAY_SMOKE_DIR)",
+                      run_recipe)
         self.assertIn("\tdisplay-smoke-cheats-base0 \\\n", makefile)
         clean = makefile.split("\ndisplay-smoke-clean:\n", 1)[1].split("\n\n", 1)[0]
         self.assertIn("$(MAKE) BUILD_DIR=$(DISPLAY_SMOKE_BASE0_DIR) clean", clean)
@@ -4042,12 +4168,26 @@ class TestSanitizedBringup(unittest.TestCase):
     def test_report_schema_rejects_unwhitelisted_and_address_shaped_values(self):
         report = nk_cli._new_bringup_report()
         report["guest_pc"] = "0x08800000"
-        with self.assertRaisesRegex(ValueError, "non-whitelisted"):
+        with self.assertRaisesRegex(ValueError, "guest_pc.*not allowed"):
             nk_cli.validate_bringup_report(report)
         report = nk_cli._new_bringup_report()
         report["unsupported_imports"] = [{"library": "sceKernel", "nid_name": "0x08800000"}]
         with self.assertRaises(ValueError):
             nk_cli.validate_bringup_report(report)
+
+    def test_report_schema_is_read_once_and_reports_the_violating_path(self):
+        nk_cli.validate_bringup_report(nk_cli._new_bringup_report())
+        original = nk_cli.BRINGUP_SCHEMA_PATH
+        nk_cli.BRINGUP_SCHEMA_PATH = Path(tempfile.gettempdir()) / "nk-cli-missing-bringup-schema.json"
+        try:
+            nk_cli.validate_bringup_report(nk_cli._new_bringup_report())
+            nk_cli._minimal_valid_bringup_report(nk_cli._new_bringup_report())
+        finally:
+            nk_cli.BRINGUP_SCHEMA_PATH = original
+        bad = nk_cli._new_bringup_report()
+        bad["reached_stage"] = "no such stage"
+        with self.assertRaisesRegex(ValueError, r"^report\.reached_stage: expected one of"):
+            nk_cli.validate_bringup_report(bad)
 
     def test_illegal_opcode_key_never_crashes_the_route_or_loses_the_report(self):
         status, report = self._run_case(unsupported_opcodes={"REGIMM-OTHER": 1})

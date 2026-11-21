@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 import generate_sbom
+import json_schema_subset
 import nk_cli
 import verify_sbom
 
@@ -31,7 +32,7 @@ SPDX23_SCHEMA = ROOT / "third_party" / "spdx" / "spdx-schema-2.3.json"
 def validate_spdx23(document):
     """Raise ValueError unless ``document`` conforms to the vendored official SPDX 2.3 schema."""
     schema = json.loads(SPDX23_SCHEMA.read_text(encoding="utf-8"))
-    nk_cli._validate_schema_value(document, schema, schema, "spdx")
+    json_schema_subset.validate(document, schema, "spdx")
 
 
 def schema_nodes(schema):
@@ -111,13 +112,14 @@ class TestStandardsConformantLockBinding(BindingFixture):
 
     def test_non_conforming_document_fails_the_official_spdx23_schema(self):
         cases = {
-            "missing spdxVersion": (lambda d: d.pop("spdxVersion"), "missing a required field"),
-            "extra root field": (lambda d: d.__setitem__("lockEvidence", {}), "non-whitelisted field"),
+            "missing spdxVersion": (lambda d: d.pop("spdxVersion"), "missing required property 'spdxVersion'"),
+            "extra root field": (lambda d: d.__setitem__("lockEvidence", {}),
+                                 "property 'lockEvidence' is not allowed"),
             "empty creators": (lambda d: d["creationInfo"].__setitem__("creators", []),
-                               "fewer items than its schema minimum"),
+                               r"spdx\.creationInfo\.creators: array is too short"),
             "unknown relationship type": (
                 lambda d: d["relationships"][0].__setitem__("relationshipType", "DEPENDS"),
-                "outside its schema enum"),
+                r"relationshipType: expected one of"),
         }
         for name, (mutate, message) in cases.items():
             with self.subTest(name):
@@ -638,37 +640,38 @@ class TestDeclaredLockEnforcement(unittest.TestCase):
 
 
 class TestSchemaValidatorSubset(unittest.TestCase):
-    """nk_cli's JSON Schema subset checks every keyword of the vendored SPDX 2.3 schema."""
+    """The shared JSON Schema subset (tools/json_schema_subset.py) checks every keyword of the vendored
+    SPDX 2.3 schema and of the bring-up report schema."""
 
     def test_vendored_spdx23_schema_uses_only_enforced_keywords(self):
         schema = json.loads(SPDX23_SCHEMA.read_text(encoding="utf-8"))
         self.assertEqual(schema["title"], "SPDX 2.3")
-        allowed = nk_cli._SCHEMA_KEYWORDS_ENFORCED | nk_cli._SCHEMA_KEYWORDS_ANNOTATION
         for node in schema_nodes(schema):
-            self.assertLessEqual(set(node), allowed)
+            self.assertLessEqual(set(node), json_schema_subset.SUPPORTED_KEYWORDS)
+        json_schema_subset.SchemaValidator(schema)  # builds: every keyword in every branch is enforced
 
     def test_min_and_max_items_are_enforced(self):
-        schema = {"type": "array", "minItems": 1, "maxItems": 2}
-        nk_cli._validate_schema_value(["a"], schema, schema, "list")
-        nk_cli._validate_schema_value(["a", "b"], schema, schema, "list")
-        with self.assertRaisesRegex(ValueError, "fewer items than its schema minimum"):
-            nk_cli._validate_schema_value([], schema, schema, "list")
-        with self.assertRaisesRegex(ValueError, "more items than its schema maximum"):
-            nk_cli._validate_schema_value(["a", "b", "c"], schema, schema, "list")
+        validator = json_schema_subset.SchemaValidator({"type": "array", "minItems": 1, "maxItems": 2})
+        validator.validate(["a"], "list")
+        validator.validate(["a", "b"], "list")
+        with self.assertRaisesRegex(ValueError, r"^list: array is too short$"):
+            validator.validate([], "list")
+        with self.assertRaisesRegex(ValueError, r"^list: array is too long$"):
+            validator.validate(["a", "b", "c"], "list")
 
     def test_unknown_keyword_is_refused_not_ignored(self):
-        schema = {"type": "string", "maxLength": 3}
-        with self.assertRaisesRegex(ValueError, "unsupported keywords: maxLength"):
-            nk_cli._validate_schema_value("ok", schema, schema, "name")
+        with self.assertRaisesRegex(json_schema_subset.UnsupportedKeywordError, "keyword 'multipleOf'"):
+            json_schema_subset.validate(4, {"type": "integer", "multipleOf": 3}, "count")
         nested = {"type": "object", "properties": {"name": {"type": "string", "format": "uri"}}}
-        with self.assertRaisesRegex(ValueError, r"schema for doc\.name uses unsupported keywords: format"):
-            nk_cli._validate_schema_value({"name": "x"}, nested, nested, "doc")
+        with self.assertRaisesRegex(json_schema_subset.UnsupportedKeywordError,
+                                    r"^#/properties/name: unsupported JSON Schema keyword 'format'"):
+            json_schema_subset.validate({"name": "x"}, nested, "doc")
 
     def test_bringup_schema_uses_only_enforced_keywords(self):
         schema = json.loads(nk_cli.BRINGUP_SCHEMA_PATH.read_text(encoding="utf-8"))
-        allowed = nk_cli._SCHEMA_KEYWORDS_ENFORCED | nk_cli._SCHEMA_KEYWORDS_ANNOTATION
         for node in schema_nodes(schema):
-            self.assertLessEqual(set(node), allowed)
+            self.assertLessEqual(set(node), json_schema_subset.SUPPORTED_KEYWORDS)
+        json_schema_subset.SchemaValidator(schema)
 
 
 if __name__ == "__main__":
