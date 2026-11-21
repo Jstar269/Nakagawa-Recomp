@@ -15,7 +15,7 @@
 #define NK_COVER_ART_READ_CHUNK 16384u
 
 static PackageHttpOpen resolve_transport(PackageHttpOpen transport, void **context) {
-    static const PackageHttpOptions options = { NK_COVER_ART_USER_AGENT };
+    static const PackageHttpOptions options = { NK_COVER_ART_USER_AGENT, NULL };
     if (transport) return transport;
     if (context) *context = (void *)&options;
     return package_builder_native_transport();
