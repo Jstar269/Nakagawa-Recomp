@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -225,7 +226,8 @@ class LiveRepositoryPlanTests(unittest.TestCase):
 
     def test_workflow_step_stops_on_a_failing_or_empty_planner(self) -> None:
         """Execute the step's own script with stand-in planners: a planner that fails
-        or prints nothing must fail the step before unittest runs."""
+        or prints nothing must fail the step before unittest runs. A run whose skip summary
+        counts a TOOLCHAIN_MISSING skip, or has no such count, fails after it (F-6a8c715a)."""
         bash, reason = _step_bash()
         if bash is None:
             self.skipTest(reason)
@@ -242,8 +244,12 @@ class LiveRepositoryPlanTests(unittest.TestCase):
         planner_line = 'listing="$(python tools/ci_test_shards.py'
         self.assertEqual(script.count(planner_line), 1, script)
 
-        def run_step(step: str, planner: str) -> tuple[subprocess.CompletedProcess[str], str | None]:
-            """Run ``step`` with ``planner`` standing in for ci_test_shards.py; the unittest modules, if it ran."""
+        no_skips = "Python test skip prefixes: NIGHTLY_TIER=0 WINDOWS_ONLY=0 PRIVATE_INPUT=0 TOOLCHAIN_MISSING=0"
+
+        def run_step(step: str, planner: str,
+                     summary: str = no_skips) -> tuple[subprocess.CompletedProcess[str], str | None]:
+            """Run ``step`` with ``planner`` standing in for ci_test_shards.py and ``summary`` for
+            skip_prefix_summary's line; the unittest modules, if it ran."""
             with tempfile.TemporaryDirectory() as scratch:
                 stub = Path(scratch) / "python"
                 ran = Path(scratch) / "unittest-args"
@@ -255,6 +261,10 @@ class LiveRepositoryPlanTests(unittest.TestCase):
                     "#!/bin/sh\n"
                     'all="$*"\n'
                     'case " $all " in\n'
+                    "  *skip_prefix_summary*)\n"
+                    "    printf '%s\\n' '" + summary + "'\n"
+                    "    exit 0\n"
+                    "    ;;\n"
                     "  *ci_test_shards.py*)\n"
                     "    " + planner + "\n"
                     "    exit 0\n"
@@ -276,14 +286,24 @@ class LiveRepositoryPlanTests(unittest.TestCase):
                 modules = ran.read_text(encoding="utf-8").strip() if ran.exists() else None
             return result, modules
 
-        for label, planner, expect_rc, expect_modules in (
-            ("planner fails", "exit 2", False, None),
-            ("planner prints nothing", "exit 0", False, None),
-            ("planner lists modules", "printf 'test_a\\ntest_b\\n'", True, "test_a test_b"),
+        listing = "printf 'test_a\\ntest_b\\n'"
+        for label, planner, summary, expect_rc, expect_modules in (
+            ("planner fails", "exit 2", no_skips, False, None),
+            ("planner prints nothing", "exit 0", no_skips, False, None),
+            ("planner lists modules", listing, no_skips, True, "test_a test_b"),
+            # gcc is on every python_tools runner: a test that skipped for want of it is a gate not run.
+            ("a test skipped for a missing compiler", listing,
+             no_skips.replace("TOOLCHAIN_MISSING=0", "TOOLCHAIN_MISSING=2"), False, "test_a test_b"),
+            ("ten tests skipped for a missing compiler", listing,
+             no_skips.replace("TOOLCHAIN_MISSING=0", "TOOLCHAIN_MISSING=10"), False, "test_a test_b"),
+            ("the summary has no TOOLCHAIN_MISSING count", listing,
+             no_skips.replace(" TOOLCHAIN_MISSING=0", ""), False, "test_a test_b"),
         ):
             with self.subTest(label):
-                result, modules = run_step(script, planner)
+                result, modules = run_step(script, planner, summary)
                 self.assertEqual(result.returncode == 0, expect_rc, result.stdout + result.stderr)
+                if "TOOLCHAIN_MISSING=0" not in summary:
+                    self.assertIn("TOOLCHAIN_MISSING", result.stderr)
                 if expect_modules is None:
                     self.assertIsNone(modules, "unittest ran after a planner failure")
                 else:
@@ -461,6 +481,244 @@ class MakefileCouplingTests(unittest.TestCase):
             self.assertEqual(
                 ci_test_shards.makefile_coupled_modules(["test_missing"], Path(scratch)), ["test_missing"]
             )
+
+
+def _call_name(node: ast.AST) -> str | None:
+    func = node.func if isinstance(node, ast.Call) else None
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return func.id if isinstance(func, ast.Name) else None
+
+
+def _which_gcc(node: ast.AST) -> bool:
+    """``node`` is ``shutil.which("gcc", ...)``."""
+    return (isinstance(node, ast.Call) and _call_name(node) == "which" and bool(node.args)
+            and isinstance(node.args[0], ast.Constant) and node.args[0].value == "gcc")
+
+
+def _target_names(target: ast.AST) -> list[str]:
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, ast.Attribute):
+        return [target.attr]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [name for element in target.elts for name in _target_names(element)]
+    return []
+
+
+def _assigned_values(assign: ast.Assign | ast.AnnAssign) -> list[tuple[str, ast.AST]]:
+    """(name, value) per target, pairing a tuple target with a tuple value element-wise."""
+    value = assign.value
+    assert value is not None
+    pairs: list[tuple[str, ast.AST]] = []
+    for target in assign.targets if isinstance(assign, ast.Assign) else [assign.target]:
+        if (isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List))
+                and len(target.elts) == len(value.elts)):
+            pairs.extend((name, element) for part, element in zip(target.elts, value.elts, strict=True)
+                         for name in _target_names(part))
+        else:
+            pairs.extend((name, value) for name in _target_names(target))
+    return pairs
+
+
+def _compiler_names(tree: ast.Module) -> set[str]:
+    """Names (variables, attributes, functions) that hold or return the gcc a test looked for.
+
+    A name assigned from an expression that calls ``which("gcc")`` holds it, and so does one
+    assigned plainly (a name, ``or``, a conditional, a list) from such a name. A function whose
+    ``return`` gives one returns it.
+    """
+    names: set[str] = set()
+
+    def holds(value: ast.AST) -> bool:
+        if any(_which_gcc(node) for node in ast.walk(value)):
+            return True
+        if isinstance(value, (ast.Name, ast.Attribute)):
+            return _target_names(value)[0] in names
+        if isinstance(value, ast.BoolOp):
+            return any(holds(v) for v in value.values)
+        if isinstance(value, ast.IfExp):
+            return holds(value.body) or holds(value.orelse)
+        if isinstance(value, (ast.List, ast.Tuple)):
+            return any(holds(v) for v in value.elts)
+        if isinstance(value, ast.Call):
+            return _call_name(value) in names
+        return False
+
+    while True:
+        before = len(names)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                names.update(name for name, value in _assigned_values(node) if holds(value))
+            elif isinstance(node, ast.FunctionDef) and any(
+                    isinstance(r, ast.Return) and r.value is not None and holds(r.value)
+                    for r in ast.walk(node)):
+                names.add(node.name)
+        if len(names) == before:
+            return names
+
+
+def _is_gcc(node: ast.AST, names: set[str]) -> bool:
+    """``node`` is a gcc lookup or a name that holds or returns one (true when gcc was found)."""
+    if _which_gcc(node):
+        return True
+    if isinstance(node, (ast.Name, ast.Attribute)):
+        return _target_names(node)[0] in names
+    return isinstance(node, ast.Call) and _call_name(node) in names
+
+
+def _uses_gcc(test: ast.AST, names: set[str]) -> bool:
+    """``test`` asks whether gcc was found, through ``not``, ``and``/``or`` and ``is (not) None``."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return _uses_gcc(test.operand, names)
+    if isinstance(test, ast.BoolOp):
+        return any(_uses_gcc(value, names) for value in test.values)
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], (ast.Is, ast.IsNot)):
+        return _uses_gcc(test.left, names)
+    return _is_gcc(test, names)
+
+
+def _means_no_gcc(test: ast.AST, value: bool, names: set[str]) -> bool:
+    """Whether ``test`` evaluating to ``value`` proves gcc was not found."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return _means_no_gcc(test.operand, not value, names)
+    if isinstance(test, ast.BoolOp):
+        # A true ``and`` (a false ``or``) makes every operand so; otherwise one is, unknown which.
+        every = isinstance(test.op, ast.And) == value
+        proofs = [_means_no_gcc(operand, value, names) for operand in test.values]
+        return any(proofs) if every else all(proofs)
+    if (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], (ast.Is, ast.IsNot))
+            and isinstance(test.comparators[0], ast.Constant) and test.comparators[0].value is None):
+        return _means_no_gcc(test.left, value != isinstance(test.ops[0], ast.Is), names)
+    return not value and _is_gcc(test, names)
+
+
+def _reason_text(reason: ast.AST, block: list[ast.stmt]) -> str | None:
+    """The literal start of a skip reason; a name is looked up among ``block``'s assignments."""
+    if isinstance(reason, ast.Constant) and isinstance(reason.value, str):
+        return reason.value
+    if isinstance(reason, ast.JoinedStr) and reason.values and isinstance(reason.values[0], ast.Constant):
+        return str(reason.values[0].value)
+    if isinstance(reason, ast.Name):
+        for statement in block:
+            if isinstance(statement, ast.Assign) and _target_names(statement.targets[0]) == [reason.id]:
+                return _reason_text(statement.value, [])
+    return None
+
+
+def gcc_skip_problems(source: str, filename: str) -> list[str]:
+    """Every skip that depends on finding gcc and is not named ``TOOLCHAIN_MISSING:`` (F-6a8c715a).
+
+    A skip is a ``skipIf``/``skipUnless`` decorator, or a ``skipTest``/``SkipTest`` under an
+    ``if``; it depends on gcc when its condition asks whether ``which("gcc")`` found one. Such a
+    skip must fire only when gcc is missing: another requirement (make, nm, a platform) that
+    could fire it takes its own skip first, so a ``TOOLCHAIN_MISSING:`` skip means just that.
+    """
+    tree = ast.parse(source, filename)
+    names = _compiler_names(tree)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    problems: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        kind = _call_name(node)
+        block: list[ast.stmt] = []
+        if kind in ("skipIf", "skipUnless") and len(node.args) >= 2:
+            condition, reason, fires_when = node.args[0], node.args[1], kind == "skipIf"
+        elif kind in ("skipTest", "SkipTest"):
+            parent = parents.get(node)
+            while parent is not None and not isinstance(parent, (ast.If, ast.FunctionDef, ast.Module)):
+                parent = parents.get(parent)
+            if not isinstance(parent, ast.If):
+                continue
+            in_body = any(node in ast.walk(statement) for statement in parent.body)
+            condition, reason, fires_when = parent.test, node.args[0], in_body
+            block = parent.body if in_body else parent.orelse
+        else:
+            continue
+        if not _uses_gcc(condition, names):
+            continue
+        where = f"{filename}:{node.lineno}"
+        if not _means_no_gcc(condition, fires_when, names):
+            problems.append((node.lineno, f"{where}: the skip can fire with gcc found: {ast.unparse(condition)}"))
+            continue
+        text = _reason_text(reason, block)
+        if text is None or not text.startswith("TOOLCHAIN_MISSING:"):
+            problems.append((node.lineno, f"{where}: skip reason {ast.unparse(reason)} lacks the "
+                                          "TOOLCHAIN_MISSING: prefix"))
+    return [problem for _line, problem in sorted(problems)]
+
+
+class ToolchainMissingSkipTests(unittest.TestCase):
+    """A test that skips because gcc is missing says so with TOOLCHAIN_MISSING: (F-6a8c715a, F-a65c02d8)."""
+
+    def test_the_prefix_is_a_counted_skip_reason(self) -> None:
+        self.assertIn("TOOLCHAIN_MISSING:", ci_test_shards.SKIP_REASON_PREFIXES)
+        output = ("test_a ... skipped 'TOOLCHAIN_MISSING: no C compiler on PATH'\n"
+                  "test_b ... skipped 'no C compiler on PATH'\n")
+        self.assertTrue(ci_test_shards.skip_prefix_summary(output).endswith(" TOOLCHAIN_MISSING=1"))
+
+    def test_every_gcc_skip_in_the_test_modules_carries_the_prefix(self) -> None:
+        problems = [problem for path in sorted((ROOT / "tools").glob("test_*.py"))
+                    for problem in gcc_skip_problems(path.read_text(encoding="utf-8"), path.name)]
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_the_check_finds_each_skip_form(self) -> None:
+        source = textwrap.dedent("""\
+            import os, shutil, sys, unittest
+            CC = shutil.which("gcc") or shutil.which("cc")
+            NM = shutil.which("nm")
+
+            def _toolchain():
+                found = shutil.which("gcc")
+                return found if found else None
+
+            @unittest.skipUnless(CC, "no C compiler on PATH")
+            class Bare(unittest.TestCase): pass
+
+            @unittest.skipUnless(CC and NM, "TOOLCHAIN_MISSING: needs a C compiler and nm")
+            class Mixed(unittest.TestCase): pass
+
+            @unittest.skipUnless(_toolchain(), "needs gcc")
+            class Helper(unittest.TestCase): pass
+
+            class Named(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls):
+                    cls.gcc = shutil.which("gcc")
+                    if not cls.gcc:
+                        raise unittest.SkipTest("gcc not available")
+                    windres, gcc = shutil.which("windres"), shutil.which("gcc")
+                    if not (windres and gcc):
+                        raise unittest.SkipTest("TOOLCHAIN_MISSING: windres and gcc")
+
+                def test_a(self):
+                    if not (os.environ.get("CC") or shutil.which("gcc")):
+                        reason = "a C compiler is required"
+                        self.skipTest(reason)
+
+            @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
+            class Good(unittest.TestCase):
+                def test_b(self):
+                    if shutil.which("gcc") is None:
+                        self.skipTest(f"TOOLCHAIN_MISSING: {sys.platform} has no gcc")
+                    if not _probe(CC):
+                        self.skipTest("this gcc cannot build the backend")
+                    if os.environ.get("CC") or shutil.which("gcc"):
+                        reason = "TOOLCHAIN_MISSING: never"
+                    else:
+                        reason = "TOOLCHAIN_MISSING: no compiler"
+                        raise unittest.SkipTest(reason)
+            """)
+        found = [problem.split(": ", 1) for problem in gcc_skip_problems(source, "t.py")]
+        self.assertEqual([(where, text.split(":")[0]) for where, text in found], [
+            ("t.py:9", "skip reason 'no C compiler on PATH' lacks the TOOLCHAIN_MISSING"),
+            ("t.py:12", "the skip can fire with gcc found"),
+            ("t.py:15", "skip reason 'needs gcc' lacks the TOOLCHAIN_MISSING"),
+            ("t.py:23", "skip reason 'gcc not available' lacks the TOOLCHAIN_MISSING"),
+            ("t.py:26", "the skip can fire with gcc found"),
+            ("t.py:31", "skip reason reason lacks the TOOLCHAIN_MISSING"),
+        ])
 
 
 class WindowsOnlySelectionTests(unittest.TestCase):

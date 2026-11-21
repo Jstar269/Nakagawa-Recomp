@@ -336,7 +336,7 @@ void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) { (void)pc; sr_hle_
 """
 
 
-@unittest.skipUnless(CC, "gcc is required to build src/rt/funcdiff.c")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required to build src/rt/funcdiff.c")
 class TestFuncdiffReplay(unittest.TestCase):
     """src/rt/funcdiff.c built headlessly (the codegen-gate link set with funcdiff.c as main)
     against a synthetic function, replaying synthetic reference traces."""

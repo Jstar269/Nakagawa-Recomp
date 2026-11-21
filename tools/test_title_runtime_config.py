@@ -501,7 +501,7 @@ class GeneratedConfiguration(unittest.TestCase):
         """Compile src/rt/title_config.c against a supplied generated artifact."""
         compiler = shutil.which(os.environ.get("CC") or "") or shutil.which("gcc") or shutil.which("cc")
         if not compiler:
-            self.skipTest("no C compiler on PATH; the compile-time contract cannot be exercised")
+            self.skipTest("TOOLCHAIN_MISSING: no C compiler on PATH; the compile-time contract cannot be exercised")
         with tempfile.TemporaryDirectory() as tmp:
             gen = Path(tmp) / "sr_title_config.h"
             gen.write_text(header_text, encoding="utf-8")

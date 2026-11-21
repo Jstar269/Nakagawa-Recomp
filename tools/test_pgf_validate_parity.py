@@ -328,7 +328,7 @@ def _native_verdicts(executable: Path, paths: list) -> list:
     return result.stdout.splitlines()
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class PgfValidatorParityTests(unittest.TestCase):
     exe: Path
     tmp: scratch_dir.TemporaryDirectory

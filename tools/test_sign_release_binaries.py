@@ -95,8 +95,8 @@ exit [int]$env:NK_STUB_VERIFY_EXIT
 """
 
 
-@unittest.skipUnless(sys.platform == "win32" and shutil.which("pwsh") and CC,
-                     "needs Windows, PowerShell 7 and a C compiler (Get-AuthenticodeSignature reads a real PE)")
+@unittest.skipUnless(sys.platform == "win32" and shutil.which("pwsh"), "needs Windows and PowerShell 7")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: needs a C compiler (Get-AuthenticodeSignature reads a real PE)")
 class SignReleaseBinariesRunTests(unittest.TestCase):
     """Runs the script up to the point a real certificate is needed, and checks what a failure leaves."""
 

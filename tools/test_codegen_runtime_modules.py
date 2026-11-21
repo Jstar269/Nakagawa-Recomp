@@ -425,7 +425,7 @@ class RuntimeModuleTranslation(unittest.TestCase):
                 self.assertTrue(cut[name].startswith(head), f"{name} carries every declaration")
                 self.assertLessEqual(len(body.findall(cut[name])), 4)
 
-    @unittest.skipUnless(shutil.which("gcc"), "gcc not installed")
+    @unittest.skipUnless(shutil.which("gcc"), "TOOLCHAIN_MISSING: gcc not installed")
     def test_library_units_compile_alone_and_define_each_body_once(self):
         unit_dir, cut = self.library_build("compile", funcs_per_chunk=4, max_funcs=4)
         defined = []

@@ -216,7 +216,7 @@ def presses_seen(reads: list[tuple[int, int]], mask: int) -> list[int]:
     return edges
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class ScriptedInputDeliveryTests(unittest.TestCase):
     exe: Path
     tmp: Path

@@ -229,7 +229,7 @@ class FpuFieldMappingTests(unittest.TestCase):
         self.assertNotIn("s->r[0]", effect)
 
 
-@unittest.skipUnless(CC, "gcc is required for the generated-C conversion regression")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required for the generated-C conversion regression")
 class GeneratedFpConversionTests(unittest.TestCase):
     def test_generated_instructions_match_fixed_vectors_without_ub(self):
         assert CC is not None
@@ -880,7 +880,7 @@ int main(void) {
 """
 
 
-@unittest.skipUnless(CC, "gcc is required for the generated-C conversion regression")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required for the generated-C conversion regression")
 class GeneratedScalarFcr31Tests(unittest.TestCase):
     """Guest-visible scalar COP1 semantics driven entirely through generated code.
 
@@ -1066,7 +1066,7 @@ class X87MathFailsClosedTests(unittest.TestCase):
 
     def _compile(self, *flags: str) -> subprocess.CompletedProcess:
         if CC is None:  # the class's skipUnless already requires an x86 gcc
-            self.skipTest("an x86 gcc is required for the x87-math gate")
+            self.skipTest("TOOLCHAIN_MISSING: an x86 gcc is required for the x87-math gate")
         with scratch_dir.TemporaryDirectory(prefix="fp_x87_") as tmp:
             src = Path(tmp) / "x87.c"
             src.write_text(self.SOURCE, encoding="utf-8")

@@ -366,7 +366,7 @@ int main(void) {
     def setUpClass(cls):
         cls.cc = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
         if cls.cc is None:
-            raise unittest.SkipTest("no C compiler on PATH")
+            raise unittest.SkipTest("TOOLCHAIN_MISSING: no C compiler on PATH")
         cls.tmp = tempfile.mkdtemp(prefix="callback_dispatch_probe_")
         try:
             source = Path(cls.tmp) / "callback_probe.c"

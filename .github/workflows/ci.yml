@@ -829,6 +829,15 @@ jobs:
           if [ "$test_status" -ne 0 ]; then
             exit "$test_status"
           fi
+          # gcc is on every python_tools runner, so a test that skipped for want of a C compiler
+          # is a native gate that did not run: fail on any such skip, or on a summary without the count.
+          case "$skip_summary" in
+            *" TOOLCHAIN_MISSING=0") ;;
+            *)
+              echo "::error::TOOLCHAIN_MISSING skips where gcc is expected: $skip_summary" >&2
+              exit 1
+              ;;
+          esac
           python -m coverage combine
           python -m coverage xml -o coverage-python.xml
 

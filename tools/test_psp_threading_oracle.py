@@ -755,7 +755,7 @@ class StackAndArithmeticTests(unittest.TestCase):
         self.assertEqual(vals["out5"], "0x00000000") # equality 0 indicates mismatch, but checksums not XORed
 
 
-@unittest.skipUnless(_HOST_CC, "no host C compiler on PATH")
+@unittest.skipUnless(_HOST_CC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
 class HarnessCheckedArithmeticHostTests(unittest.TestCase):
     """thread_oracle.c's own checked_add_u32 and checked_range_u32, compiled on the host.
 

@@ -86,7 +86,7 @@ def _c_function_body(source: str, signature: str) -> str:
 SELFTEST_FAIL_EXIT = 1
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestStaleCodeSelftestC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

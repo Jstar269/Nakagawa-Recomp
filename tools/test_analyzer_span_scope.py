@@ -1146,7 +1146,7 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
             "inter-function-handoff-dispatch",
         )
 
-    @unittest.skipUnless(CC, "gcc is required for the analyzer semantic mutation proof")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required for the analyzer semantic mutation proof")
     def test_cfg_gate_kills_generated_direct_call_root_mutation(self) -> None:
         words = (
             0x0C000404, 0x00000000, 0x03E00008,

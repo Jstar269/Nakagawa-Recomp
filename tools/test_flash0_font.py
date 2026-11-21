@@ -739,7 +739,7 @@ class ProjectSlotResolutionTests(unittest.TestCase):
 
     def test_latin_and_korean_slots_resolve_to_project_files(self) -> None:
         if CC is None:
-            self.skipTest("no C compiler on PATH")
+            self.skipTest("TOOLCHAIN_MISSING: no C compiler on PATH")
         with tempfile.TemporaryDirectory(prefix="flash0-project-slots-") as tmp:
             root = Path(tmp)
             project = root / "project"
@@ -800,7 +800,7 @@ class Flash0FontDirRefusalNativeTests(unittest.TestCase):
             raise unittest.SkipTest("the native harness links on POSIX only; Windows is covered by the source contract")
         compiler = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
         if compiler is None:
-            raise unittest.SkipTest("no C compiler on PATH")
+            raise unittest.SkipTest("TOOLCHAIN_MISSING: no C compiler on PATH")
         cls.scratch = scratch_dir.TemporaryDirectory(prefix="flash0-fontdir-")
         cls.tmp = Path(cls.scratch.name)
         source = cls.tmp / "harness.c"

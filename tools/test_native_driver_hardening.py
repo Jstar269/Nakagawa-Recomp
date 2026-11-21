@@ -21,7 +21,7 @@ RT_DIR = ROOT / "src" / "rt"
 CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang") or shutil.which("g++") or shutil.which("c++")
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestNativeDriverHardening(unittest.TestCase):
     def test_native_driver_malformed_inputs(self):
         assert CC is not None

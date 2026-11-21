@@ -558,7 +558,7 @@ class PrxTestBase(unittest.TestCase):
             cls.EXE = PrxTestBase.EXE
             return
         if shutil.which("gcc") is None:
-            raise unittest.SkipTest("gcc not on PATH")
+            raise unittest.SkipTest("TOOLCHAIN_MISSING: gcc not on PATH")
         tmp = harness_dir()
         exe = build_harness(tmp, "harness")
         PrxTestBase.TMP = cls.TMP = tmp
@@ -1797,7 +1797,7 @@ class HarnessBuildTests(unittest.TestCase):
 
     def setUp(self):
         if shutil.which("gcc") is None:
-            self.skipTest("gcc not on PATH")
+            self.skipTest("TOOLCHAIN_MISSING: gcc not on PATH")
 
     def test_broken_harness_build_fails_instead_of_skipping(self):
         global HARNESS_SRC

@@ -1173,8 +1173,10 @@ class CompileObjectReuseTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.make = shutil.which("mingw32-make") or shutil.which("make")
-        if self.make is None or shutil.which("gcc") is None:
-            self.skipTest("the compile-phase reuse test needs make and gcc")
+        if shutil.which("gcc") is None:
+            self.skipTest("TOOLCHAIN_MISSING: the compile-phase reuse test needs gcc")
+        if self.make is None:
+            self.skipTest("the compile-phase reuse test needs make")
         assert self.make is not None
         scratch = tempfile.TemporaryDirectory(prefix="nk-object-reuse-")
         self.addCleanup(scratch.cleanup)
