@@ -247,17 +247,20 @@ static void test_pad_lost_and_resize(void) {
     nk_overlay_host_close(g_host);
 }
 
-static void set_reduce_motion(const char *value) {
+/* NULL removes the variable. */
+static void set_test_env(const char *name, const char *value) {
 #ifdef _WIN32
-    (void)_putenv_s("SR_REDUCE_MOTION", value != NULL ? value : "");
+    (void)_putenv_s(name, value != NULL ? value : "");
 #else
     if (value != NULL) {
-        (void)setenv("SR_REDUCE_MOTION", value, 1);
+        (void)setenv(name, value, 1);
     } else {
-        (void)unsetenv("SR_REDUCE_MOTION");
+        (void)unsetenv(name);
     }
 #endif
 }
+
+static void set_reduce_motion(const char *value) { set_test_env("SR_REDUCE_MOTION", value); }
 
 /* The pages ease or cut as the player chose (SR_REDUCE_MOTION, which the launcher
    exports): with motion a focus move eases, and the host keeps drawing until it ends;
@@ -323,13 +326,13 @@ static bool copy_font(const char *root, const char *folder, const char *relative
    beside the player: a copy in either fallback would let the host load the face and the check
    pass, or fail, for the wrong reason. False, after a failed CHECK naming `label`'s copy, when
    the folder holds a face or cannot become the working directory. */
-static bool enter_fontless_exe_folder(const char *label) {
+static const char *fontless_exe_folder(const char *label) {
     const char *base = SDL_GetBasePath();
     char probe[1200];
     if (base == NULL || base[0] == '\0') {
         CHECK(false, "font fixture: SDL knows this executable's folder");
         fprintf(stderr, "  (%s)\n", label);
-        return false;
+        return NULL;
     }
     for (int font = 0; font < NK_UI_FONT_COUNT; ++font) {
         if (snprintf(probe, sizeof(probe), "%s%s", base, nk_ui_font_path(font)) >=
@@ -337,9 +340,15 @@ static bool enter_fontless_exe_folder(const char *label) {
             SDL_GetPathInfo(probe, NULL)) {
             CHECK(false, "font fixture: the executable's folder holds no UI font to fall back to");
             fprintf(stderr, "  (%s: %s)\n", label, probe);
-            return false;
+            return NULL;
         }
     }
+    return base;
+}
+
+static bool enter_fontless_exe_folder(const char *label) {
+    const char *base = fontless_exe_folder(label);
+    if (base == NULL) return false;
     if (test_chdir(base) != 0) {
         CHECK(false, "font fixture: the executable's folder becomes the working directory");
         fprintf(stderr, "  (%s)\n", label);
@@ -437,6 +446,36 @@ static void test_unreadable_font_is_not_reported_missing(const char *root) {
     CHECK(test_chdir(saved) == 0, "unreadable font: the working directory comes back");
 }
 
+/* Audit 2026-11-17 (F-2621b1f6): a release runtime never reads a UI font from its working
+   folder, which a shortcut or file association may set to any folder; only a test build does,
+   and NK_UI_TEST_ASSETS_BESIDE_ONLY shows what a release build does. The working directory
+   here, the repository root, has every face, and neither the folder given nor the
+   executable's has one: the host fails, naming a face as not found. */
+static void test_release_build_skips_the_working_folder(void) {
+    char error[256];
+    char probe[1200];
+    NkOverlayHost *host;
+    if (fontless_exe_folder("release build") == NULL) return;
+    for (int font = 0; font < NK_UI_FONT_COUNT; ++font) {
+        CHECK(SDL_GetPathInfo(nk_ui_font_path(font), NULL),
+              "release build: the working directory holds every UI font");
+    }
+    CHECK(snprintf(probe, sizeof(probe), "does-not-exist/%s", nk_ui_font_path(NK_UI_FONT_BODY)) <
+                  (int)sizeof(probe) &&
+              !SDL_GetPathInfo(probe, NULL),
+          "release build: the folder given holds no UI font");
+    set_test_env("NK_UI_TEST_ASSETS_BESIDE_ONLY", "1");
+    error[0] = '\0';
+    host = nk_overlay_host_create("does-not-exist", error, sizeof(error));
+    set_test_env("NK_UI_TEST_ASSETS_BESIDE_ONLY", NULL);
+    CHECK(host == NULL, "release build: a font only in the working folder is not loaded");
+    if (host == NULL && strstr(error, "was not found") == NULL) {
+        CHECK(false, "release build: the error names a missing face");
+        fprintf(stderr, "  (%s)\n", error);
+    }
+    nk_overlay_host_destroy(host);
+}
+
 int main(int argc, char **argv) {
     char error[256];
     const char *root = argc > 1 ? argv[1] : ".";
@@ -452,11 +491,12 @@ int main(int argc, char **argv) {
         return EXIT_SKIP;
     }
     nk_ui_ttf_destroy(probe);
-    /* A folder without the fonts falls back to the runtime's folder and the working
-       directory; the test runs from the repository root, which has them. */
+    /* A folder without the fonts falls back to the runtime's folder and, in this test build,
+       the working directory; the test runs from the repository root, which has them. */
     g_host = nk_overlay_host_create("does-not-exist", error, sizeof(error));
     CHECK(g_host != NULL, "create: a folder without fonts falls back to the working directory");
     nk_overlay_host_destroy(g_host);
+    test_release_build_skips_the_working_folder();
     test_fonts_from_a_utf8_folder(root);
     test_unreadable_font_is_not_reported_missing(root);
     g_host = nk_overlay_host_create(root, error, sizeof(error));
