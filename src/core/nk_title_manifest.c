@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -2392,29 +2393,76 @@ static bool manifest_cancelled(void) {
     return s_manifest_cancel_check != NULL && s_manifest_cancel_check(s_manifest_cancel_user);
 }
 
-static bool nk_manifest_hash_iso_member_reader(NkIsoReader *reader,
-                                               const char *relative_path,
-                                               char out_hex[65]) {
+/* ---- Source media: member digests and the display memo (nk_title_manifest.h,
+   NkSourceMediaCheck) ---------------------------------------------------------- */
+
+/* A disc image member is hashed in reads of this size: a whole number of 2048-byte
+   sectors, so every read starts on a sector boundary, into one buffer that a check
+   reuses for every member it hashes. */
+#define NK_MEDIA_HASH_CHUNK (1024u * 1024u)
+/* The largest member the source-media check hashes, as before. */
+#define NK_MEDIA_MAX_MEMBER_BYTES (512u * 1024u * 1024u)
+
+#if defined(_WIN32) || defined(_WIN64)
+static SRWLOCK s_media_memo_lock = SRWLOCK_INIT;
+static void media_memo_lock(void) { AcquireSRWLockExclusive(&s_media_memo_lock); }
+static void media_memo_unlock(void) { ReleaseSRWLockExclusive(&s_media_memo_lock); }
+#else
+static pthread_mutex_t s_media_memo_lock = PTHREAD_MUTEX_INITIALIZER;
+static void media_memo_lock(void) { (void)pthread_mutex_lock(&s_media_memo_lock); }
+static void media_memo_unlock(void) { (void)pthread_mutex_unlock(&s_media_memo_lock); }
+#endif
+
+static uint64_t s_media_hash_count = 0;
+
+uint64_t nk_title_manifest_source_media_hash_count(void) {
+    media_memo_lock();
+    uint64_t count = s_media_hash_count;
+    media_memo_unlock();
+    return count;
+}
+
+/* SHA-256 of one member of the image, as 64 lowercase hex digits. A member that is
+   missing, a directory, empty or larger than max_bytes, or that cannot be read whole, is
+   false. `chunk` is the caller's read buffer of chunk_size bytes; NULL makes the call
+   use its own (NK_MEDIA_HASH_CHUNK, or 32 KiB on the stack when that cannot be had). A
+   cancellable hash stops between reads once the host's cancel check is true. */
+static bool media_member_sha256(NkIsoReader *reader, const char *relative_path,
+                                uint32_t max_bytes, bool cancellable,
+                                uint8_t *chunk, uint32_t chunk_size, char out_hex[65]) {
     if (!reader || !relative_path || !out_hex) return false;
     uint32_t lba = 0, size = 0;
     bool is_dir = false;
-    bool ok = nk_iso_reader_lookup(reader, relative_path, &lba, &size, &is_dir) == 0 &&
-              !is_dir && size > 0 && size <= 512u * 1024u * 1024u;
+    if (nk_iso_reader_lookup(reader, relative_path, &lba, &size, &is_dir) != 0 ||
+        is_dir || size == 0 || size > max_bytes) {
+        return false;
+    }
+    uint8_t local[32768];
+    uint8_t *owned = NULL;
+    if (!chunk || chunk_size == 0) {
+        owned = (uint8_t *)malloc(NK_MEDIA_HASH_CHUNK);
+        chunk = owned ? owned : local;
+        chunk_size = owned ? NK_MEDIA_HASH_CHUNK : (uint32_t)sizeof(local);
+    }
+    media_memo_lock();
+    s_media_hash_count++;
+    media_memo_unlock();
     NkSha256 ctx;
     nk_sha256_init(&ctx);
-    uint8_t buffer[32768];
+    bool ok = true;
     uint64_t offset = 0;
-    while (ok && offset < size) {
-        uint32_t count = (uint32_t)((uint64_t)size - offset < sizeof(buffer)
-            ? (uint64_t)size - offset : sizeof(buffer));
-        int read_count = nk_iso_reader_read(reader, lba, offset, buffer, count);
-        if (read_count != (int)count || manifest_cancelled()) {
+    while (offset < size) {
+        uint32_t count = (uint64_t)size - offset < chunk_size
+            ? (uint32_t)((uint64_t)size - offset) : chunk_size;
+        int read_count = nk_iso_reader_read(reader, lba, offset, chunk, count);
+        if (read_count != (int)count || (cancellable && manifest_cancelled())) {
             ok = false;
             break;
         }
-        nk_sha256_update(&ctx, buffer, count);
+        nk_sha256_update(&ctx, chunk, count);
         offset += count;
     }
+    free(owned);
     if (!ok) return false;
 
     uint8_t digest[32];
@@ -2426,6 +2474,309 @@ static bool nk_manifest_hash_iso_member_reader(NkIsoReader *reader,
     }
     out_hex[64] = '\0';
     return true;
+}
+
+static bool nk_manifest_hash_iso_member_reader(NkIsoReader *reader,
+                                               const char *relative_path,
+                                               char out_hex[65]) {
+    return media_member_sha256(reader, relative_path, NK_MEDIA_MAX_MEMBER_BYTES, true,
+                               NULL, 0u, out_hex);
+}
+
+/* What the display memo keys an image by, besides its path: none of it proves content
+   (nk_title_manifest.h). Times are in the host's file-time units (100 ns on Windows,
+   1 ns on POSIX). */
+typedef struct {
+    uint64_t size;
+    uint64_t modified;
+    uint64_t changed;
+    uint64_t created;   /* Windows only; 0 on POSIX */
+    uint64_t volume;    /* Windows: the volume serial number; POSIX: st_dev */
+    uint64_t file;      /* Windows: the file index; POSIX: st_ino */
+} MediaFileId;
+
+/* A digest is stored only for an image whose last-write and change times are both this
+   old: a write within the file system's timestamp granularity (2 s on FAT) can leave the
+   times as they were. */
+#if defined(_WIN32) || defined(_WIN64)
+#define MEDIA_SETTLED_UNITS (3ull * 10000000ull)
+#else
+#define MEDIA_SETTLED_UNITS (3ull * 1000000000ull)
+#endif
+
+/* The image's identity, and in `settled` whether its times are old enough to store a
+   digest under. False when any field cannot be read: such an image is never memoized. */
+static bool media_file_id(const char *path, MediaFileId *id, bool *settled) {
+    if (!path || !*path || !id || !settled) return false;
+    memset(id, 0, sizeof(*id));
+    *settled = false;
+    uint64_t now = 0;
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR *wide = (WCHAR *)malloc(sizeof(WCHAR) * 32768u);
+    if (!wide) return false;
+    bool ok = false;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, 32768) > 0) {
+        HANDLE handle = CreateFileW(wide, FILE_READ_ATTRIBUTES,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (handle != INVALID_HANDLE_VALUE) {
+            BY_HANDLE_FILE_INFORMATION info;
+            FILE_BASIC_INFO basic;
+            memset(&info, 0, sizeof(info));
+            memset(&basic, 0, sizeof(basic));
+            if (GetFileInformationByHandle(handle, &info) &&
+                (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+                GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic))) {
+                id->size = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+                id->modified = (uint64_t)basic.LastWriteTime.QuadPart;
+                id->changed = (uint64_t)basic.ChangeTime.QuadPart;
+                id->created = (uint64_t)basic.CreationTime.QuadPart;
+                id->volume = info.dwVolumeSerialNumber;
+                id->file = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+                ok = true;
+            }
+            CloseHandle(handle);
+        }
+    }
+    free(wide);
+    if (!ok) return false;
+    FILETIME clock_now;
+    GetSystemTimeAsFileTime(&clock_now);
+    now = ((uint64_t)clock_now.dwHighDateTime << 32) | clock_now.dwLowDateTime;
+#else
+    struct stat data;
+    if (stat(path, &data) != 0 || !S_ISREG(data.st_mode)) return false;
+    id->size = (uint64_t)data.st_size;
+    id->modified = (uint64_t)data.st_mtim.tv_sec * 1000000000ull +
+                   (uint64_t)data.st_mtim.tv_nsec;
+    id->changed = (uint64_t)data.st_ctim.tv_sec * 1000000000ull +
+                  (uint64_t)data.st_ctim.tv_nsec;
+    id->volume = (uint64_t)data.st_dev;
+    id->file = (uint64_t)data.st_ino;
+    struct timespec clock_now;
+    if (clock_gettime(CLOCK_REALTIME, &clock_now) != 0 || clock_now.tv_sec < 0) return true;
+    now = (uint64_t)clock_now.tv_sec * 1000000000ull + (uint64_t)clock_now.tv_nsec;
+#endif
+    *settled = now >= MEDIA_SETTLED_UNITS &&
+               id->modified <= now - MEDIA_SETTLED_UNITS &&
+               id->changed <= now - MEDIA_SETTLED_UNITS;
+    return true;
+}
+
+static bool media_file_id_equal(const MediaFileId *a, const MediaFileId *b) {
+    return a->size == b->size && a->modified == b->modified && a->changed == b->changed &&
+           a->created == b->created && a->volume == b->volume && a->file == b->file;
+}
+
+typedef struct {
+    char *member;
+    char sha256[65];
+} MediaMemoDigest;
+
+typedef struct {
+    char *path;
+    MediaFileId id;
+    MediaMemoDigest *digests;
+    size_t count;
+    size_t capacity;
+    uint64_t last_used;
+} MediaMemoImage;
+
+/* In memory only, never written: at most this many images (the least recently used one
+   makes room), each with at most this many member digests. */
+#define MEDIA_MEMO_IMAGES 256u
+#define MEDIA_MEMO_DIGESTS 1024u
+
+static MediaMemoImage s_media_memo[MEDIA_MEMO_IMAGES];
+static uint64_t s_media_memo_clock = 0;
+
+static void media_memo_free_image(MediaMemoImage *image) {
+    for (size_t i = 0; i < image->count; i++) free(image->digests[i].member);
+    free(image->digests);
+    free(image->path);
+    memset(image, 0, sizeof(*image));
+}
+
+static MediaMemoImage *media_memo_find_locked(const char *path) {
+    for (size_t i = 0; i < MEDIA_MEMO_IMAGES; i++) {
+        if (s_media_memo[i].path && strcmp(s_media_memo[i].path, path) == 0) {
+            return &s_media_memo[i];
+        }
+    }
+    return NULL;
+}
+
+/* The display shortcut: the digest this process computed in full for `member` of the
+   image at `path`, while the image had exactly this identity. */
+static bool media_memo_lookup(const char *path, const MediaFileId *id, const char *member,
+                              char out_hex[65]) {
+    bool found = false;
+    media_memo_lock();
+    MediaMemoImage *image = media_memo_find_locked(path);
+    if (image && media_file_id_equal(&image->id, id)) {
+        for (size_t i = 0; i < image->count; i++) {
+            if (strcmp(image->digests[i].member, member) == 0) {
+                memcpy(out_hex, image->digests[i].sha256, 65);
+                image->last_used = ++s_media_memo_clock;
+                found = true;
+                break;
+            }
+        }
+    }
+    media_memo_unlock();
+    return found;
+}
+
+/* A digest just computed in full. When the memo holds a different digest for the same
+   member under the same identity, the identity did not show the change: the image's entry
+   is dropped, so the next display check hashes it again. Otherwise the digest is stored
+   when `store` (the image's identity was settled and stayed the same across the hash). */
+static void media_memo_record(const char *path, const MediaFileId *id, const char *member,
+                              const char hex[65], bool store) {
+    media_memo_lock();
+    MediaMemoImage *image = media_memo_find_locked(path);
+    if (image && media_file_id_equal(&image->id, id)) {
+        for (size_t i = 0; i < image->count; i++) {
+            if (strcmp(image->digests[i].member, member) == 0) {
+                if (strcmp(image->digests[i].sha256, hex) != 0) {
+                    media_memo_free_image(image);
+                } else {
+                    image->last_used = ++s_media_memo_clock;
+                }
+                media_memo_unlock();
+                return;
+            }
+        }
+    }
+    if (!store) {
+        media_memo_unlock();
+        return;
+    }
+    if (image && !media_file_id_equal(&image->id, id)) {
+        media_memo_free_image(image);
+        image = NULL;
+    }
+    if (!image) {
+        /* The first free slot, else the least recently used image. */
+        MediaMemoImage *slot = &s_media_memo[0];
+        for (size_t i = 0; i < MEDIA_MEMO_IMAGES; i++) {
+            if (!s_media_memo[i].path) {
+                slot = &s_media_memo[i];
+                break;
+            }
+            if (s_media_memo[i].last_used < slot->last_used) slot = &s_media_memo[i];
+        }
+        if (slot->path) media_memo_free_image(slot);
+        size_t length = strlen(path);
+        slot->path = (char *)malloc(length + 1u);
+        if (!slot->path) {
+            media_memo_unlock();
+            return;
+        }
+        memcpy(slot->path, path, length + 1u);
+        slot->id = *id;
+        image = slot;
+    }
+    if (image->count == image->capacity) {
+        size_t capacity = image->capacity ? image->capacity * 2u : 8u;
+        MediaMemoDigest *grown = capacity <= MEDIA_MEMO_DIGESTS
+            ? (MediaMemoDigest *)realloc(image->digests, capacity * sizeof(*grown)) : NULL;
+        if (!grown) {
+            media_memo_unlock();
+            return;
+        }
+        image->digests = grown;
+        image->capacity = capacity;
+    }
+    size_t length = strlen(member);
+    char *copy = (char *)malloc(length + 1u);
+    if (copy) {
+        memcpy(copy, member, length + 1u);
+        image->digests[image->count].member = copy;
+        memcpy(image->digests[image->count].sha256, hex, 65);
+        image->count++;
+    }
+    image->last_used = ++s_media_memo_clock;
+    media_memo_unlock();
+}
+
+/* One check's view of an image: its identity before any member was hashed, the digests
+   this check computed in full (recorded in the memo when the check ends), and the read
+   buffer it reuses. A member the check meets twice is hashed once. */
+typedef struct {
+    const char *path;
+    NkSourceMediaCheck check;
+    MediaFileId id;
+    bool id_known;
+    bool settled;
+    uint8_t *chunk;
+    uint32_t chunk_size;
+    struct {
+        const char *member;
+        bool ok;
+        bool hashed;
+        char sha256[65];
+    } seen[64];
+    size_t seen_count;
+} MediaCheck;
+
+static void media_check_begin(MediaCheck *check, const char *path, NkSourceMediaCheck use) {
+    memset(check, 0, sizeof(*check));
+    check->path = path;
+    check->check = use;
+    check->id_known = media_file_id(path, &check->id, &check->settled);
+}
+
+/* The member's digest: from this check if it already met the member, from the memo for a
+   display check, else hashed in full. */
+static bool media_check_member(MediaCheck *check, NkIsoReader *reader, const char *member,
+                               uint32_t max_bytes, bool cancellable, char out_hex[65]) {
+    for (size_t i = 0; i < check->seen_count; i++) {
+        if (strcmp(check->seen[i].member, member) == 0) {
+            if (check->seen[i].ok) memcpy(out_hex, check->seen[i].sha256, 65);
+            return check->seen[i].ok;
+        }
+    }
+    bool ok;
+    bool hashed = false;
+    if (check->check == NK_SOURCE_MEDIA_DISPLAY && check->id_known && check->settled &&
+        media_memo_lookup(check->path, &check->id, member, out_hex)) {
+        ok = true;
+    } else {
+        if (!check->chunk) {
+            check->chunk = (uint8_t *)malloc(NK_MEDIA_HASH_CHUNK);
+            check->chunk_size = check->chunk ? NK_MEDIA_HASH_CHUNK : 0u;
+        }
+        ok = media_member_sha256(reader, member, max_bytes, cancellable,
+                                 check->chunk, check->chunk_size, out_hex);
+        hashed = ok;
+    }
+    if (check->seen_count < sizeof(check->seen) / sizeof(check->seen[0])) {
+        check->seen[check->seen_count].member = member;
+        check->seen[check->seen_count].ok = ok;
+        check->seen[check->seen_count].hashed = hashed;
+        if (ok) memcpy(check->seen[check->seen_count].sha256, out_hex, 65);
+        check->seen_count++;
+    }
+    return ok;
+}
+
+/* Records what the check hashed in full, then frees its buffer. A digest is stored only
+   when the image's identity was settled before the first hash and is the same now. */
+static void media_check_end(MediaCheck *check) {
+    if (check->id_known) {
+        MediaFileId after;
+        bool settled_after = false;
+        bool same = media_file_id(check->path, &after, &settled_after) &&
+                    media_file_id_equal(&after, &check->id);
+        for (size_t i = 0; i < check->seen_count; i++) {
+            if (!check->seen[i].hashed) continue;
+            media_memo_record(check->path, &check->id, check->seen[i].member,
+                              check->seen[i].sha256, check->settled && same);
+        }
+    }
+    free(check->chunk);
+    check->chunk = NULL;
 }
 
 static bool nk_manifest_hash_iso_member(const char *iso_path,
@@ -3921,8 +4272,12 @@ static bool package_validate_title_input_identity(const JsonNode *identity,
     return true;
 }
 
+/* The image still holds the executable and modules the title input identity records, by
+   content: every member is hashed in full for NK_SOURCE_MEDIA_FULL; a display check may take
+   a digest from the memo (nk_title_manifest.h). */
 static bool package_validate_live_source_media(const char *source_iso_path,
                                                const JsonNode *identity,
+                                               NkSourceMediaCheck use,
                                                char *error,
                                                size_t error_size) {
     if (!source_iso_path || !*source_iso_path) return true;
@@ -3939,6 +4294,8 @@ static bool package_validate_live_source_media(const char *source_iso_path,
         return false;
     }
 
+    MediaCheck check;
+    media_check_begin(&check, source_iso_path, use);
     bool matches = true;
     const JsonNode *source_executable = obj_get(source_media, "executable");
     const char *executable_path = NULL;
@@ -3946,7 +4303,8 @@ static bool package_validate_live_source_media(const char *source_iso_path,
     char live_hash[65] = "";
     if (!package_string(obj_get(source_executable, "path"), &executable_path) ||
         !package_sha256(obj_get(source_executable, "sha256"), &executable_hash) ||
-        !nk_manifest_hash_iso_member_reader(reader, executable_path, live_hash)) {
+        !media_check_member(&check, reader, executable_path, NK_MEDIA_MAX_MEMBER_BYTES, true,
+                            live_hash)) {
         snprintf(error, error_size,
                  "Source executable revision could not be verified from the disc image.");
         matches = false;
@@ -3965,7 +4323,8 @@ static bool package_validate_live_source_media(const char *source_iso_path,
         if (!package_string(obj_get(source_module, "path"), &module_path) ||
             !package_source_iso_path_valid(module_path) ||
             !package_sha256(obj_get(source_module, "sha256"), &module_hash) ||
-            !nk_manifest_hash_iso_member_reader(reader, module_path, live_hash)) {
+            !media_check_member(&check, reader, module_path, NK_MEDIA_MAX_MEMBER_BYTES, true,
+                                live_hash)) {
             snprintf(error, error_size,
                      "Source module revision could not be verified from the disc image.");
             matches = false;
@@ -3976,7 +4335,34 @@ static bool package_validate_live_source_media(const char *source_iso_path,
         }
     }
     nk_iso_reader_close(reader);
+    media_check_end(&check);
     return matches;
+}
+
+bool nk_title_manifest_check_source_media(const char *iso_path, const char *identity_json,
+                                          size_t identity_length, NkSourceMediaCheck check,
+                                          char *error, size_t error_size) {
+    char parse_error[320] = "";
+    if (error && error_size) error[0] = '\0';
+    if (!iso_path || !*iso_path || !identity_json) {
+        if (error && error_size) snprintf(error, error_size, "Source media check: no image or record.");
+        return false;
+    }
+    JsonNode *identity = json_parse(identity_json, identity_length, parse_error,
+                                    sizeof(parse_error));
+    if (!identity || identity->type != JSON_OBJECT) {
+        if (error && error_size) {
+            snprintf(error, error_size, "Source media check: the record is not a JSON object.");
+        }
+        if (identity) json_free(identity);
+        return false;
+    }
+    char local[512];
+    bool ok = package_validate_live_source_media(iso_path, identity, check,
+                                                 error && error_size ? error : local,
+                                                 error && error_size ? error_size : sizeof(local));
+    json_free(identity);
+    return ok;
 }
 
 static const char *package_title_identity_change(const JsonNode *previous,
@@ -5093,52 +5479,29 @@ static int title_builds_for_disc_id(const char *disc_id, BuildRow rows[MAX_DISC_
     return count;
 }
 
-/* SHA-256 of PSP_GAME/SYSDIR/<name> as stored in the image, as 64 lowercase hex digits. */
-static bool iso_executable_sha256_hex(const char *iso_path, const char *name, char out[65]) {
+/* SHA-256 of PSP_GAME/SYSDIR/<name> as stored in the image, as 64 lowercase hex digits:
+   hashed in full, or for NK_SOURCE_MEDIA_DISPLAY possibly from the display memo. */
+static bool iso_executable_sha256_hex(const char *iso_path, const char *name,
+                                      NkSourceMediaCheck use, char out[65]) {
     char path[64];
-    uint32_t lba = 0;
-    uint32_t size = 0;
-    bool is_dir = false;
-    uint8_t buffer[65536];
-    uint8_t digest[32];
-    NkSha256 sha;
-    NkIsoReader *reader;
-    bool ok = false;
     if (!iso_path || !name ||
         snprintf(path, sizeof(path), "PSP_GAME/SYSDIR/%s", name) >= (int)sizeof(path)) {
         return false;
     }
-    reader = nk_iso_reader_open(iso_path);
+    NkIsoReader *reader = nk_iso_reader_open(iso_path);
     if (!reader) return false;
-    if (nk_iso_reader_lookup(reader, path, &lba, &size, &is_dir) == 0 && !is_dir && size > 0) {
-        if (size > NK_TITLE_MANIFEST_MAX_EXECUTABLE_BYTES) {
-            nk_iso_reader_close(reader);
-            return false;
-        }
-        uint64_t offset = 0;
-        nk_sha256_init(&sha);
-        ok = true;
-        while (offset < size) {
-            uint32_t count = size - offset < sizeof(buffer) ? (uint32_t)(size - offset)
-                                                            : (uint32_t)sizeof(buffer);
-            if (nk_iso_reader_read(reader, lba, offset, buffer, count) != (int)count) {
-                ok = false;
-                break;
-            }
-            nk_sha256_update(&sha, buffer, count);
-            offset += count;
-        }
-        if (ok) {
-            nk_sha256_finish(&sha, digest);
-            for (int i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", digest[i]);
-        }
-    }
+    MediaCheck check;
+    media_check_begin(&check, iso_path, use);
+    bool ok = media_check_member(&check, reader, path, NK_TITLE_MANIFEST_MAX_EXECUTABLE_BYTES,
+                                 false, out);
     nk_iso_reader_close(reader);
+    media_check_end(&check);
     return ok;
 }
 
-bool nk_title_manifest_identify_build(const char *disc_id, const char *iso_path,
-                                      const char *executable_name, NkBuildIdentity *out) {
+static bool identify_build_with(const char *disc_id, const char *iso_path,
+                                const char *executable_name, NkSourceMediaCheck use,
+                                NkBuildIdentity *out) {
     BuildRow rows[MAX_DISC_BUILDS];
     char normalized[10];
     int count;
@@ -5153,7 +5516,7 @@ bool nk_title_manifest_identify_build(const char *disc_id, const char *iso_path,
     snprintf(out->executable, sizeof(out->executable), "%s", executable_name ? executable_name : "");
     if (!iso_path || !executable_name) {
         out->sha256[0] = '\0';
-    } else if (!iso_executable_sha256_hex(iso_path, executable_name, out->sha256)) {
+    } else if (!iso_executable_sha256_hex(iso_path, executable_name, use, out->sha256)) {
         out->sha256[0] = '\0';
         out->unreadable = true;
     }
@@ -5173,6 +5536,18 @@ bool nk_title_manifest_identify_build(const char *disc_id, const char *iso_path,
     }
     if (out->status == NK_BUILD_UNTRACKED) out->status = NK_BUILD_UNLISTED;
     return true;
+}
+
+bool nk_title_manifest_identify_build(const char *disc_id, const char *iso_path,
+                                      const char *executable_name, NkBuildIdentity *out) {
+    return identify_build_with(disc_id, iso_path, executable_name, NK_SOURCE_MEDIA_FULL, out);
+}
+
+bool nk_title_manifest_identify_build_for_display(const char *disc_id, const char *iso_path,
+                                                  const char *executable_name,
+                                                  NkBuildIdentity *out) {
+    return identify_build_with(disc_id, iso_path, executable_name, NK_SOURCE_MEDIA_DISPLAY,
+                               out);
 }
 
 void nk_title_manifest_describe_build(const NkBuildIdentity *id, char *out, size_t out_size) {
@@ -5279,11 +5654,43 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
     const char *current_disc_version,
     const char *source_iso_path,
     uint32_t player_abi_version,
+    NkSourceMediaCheck media_check,
     NkRuntimePackageInfo *out_info,
     char *reason,
     size_t reason_size
 );
 
+static NkRuntimePackageStatus validate_aot_package_with(
+    const char *user_data_root,
+    const char *disc_id,
+    const char *enhancement_package_id,
+    const char *title_id,
+    bool is_experimental,
+    const char *selected_executable,
+    const char *current_disc_version,
+    const char *source_iso_path,
+    uint32_t player_abi_version,
+    NkSourceMediaCheck media_check,
+    NkRuntimePackageInfo *out_info,
+    char *reason,
+    size_t reason_size
+) {
+    NkRuntimePackageStatus status = nk_title_manifest_validate_aot_package_checked(
+        user_data_root, disc_id, enhancement_package_id, title_id, is_experimental,
+        selected_executable,
+        current_disc_version, source_iso_path, player_abi_version, media_check, out_info,
+        reason, reason_size);
+    if (status != NK_RUNTIME_PACKAGE_OK && manifest_cancelled()) {
+        if (out_info) memset(out_info, 0, sizeof(*out_info));
+        if (reason && reason_size) {
+            snprintf(reason, reason_size, "Package validation was cancelled.");
+        }
+        return NK_RUNTIME_PACKAGE_UNKNOWN;
+    }
+    return status;
+}
+
+/* The launch path: the source media are hashed in full (NK_SOURCE_MEDIA_FULL). */
 NkRuntimePackageStatus nk_title_manifest_validate_aot_package(
     const char *user_data_root,
     const char *disc_id,
@@ -5298,19 +5705,31 @@ NkRuntimePackageStatus nk_title_manifest_validate_aot_package(
     char *reason,
     size_t reason_size
 ) {
-    NkRuntimePackageStatus status = nk_title_manifest_validate_aot_package_checked(
+    return validate_aot_package_with(
         user_data_root, disc_id, enhancement_package_id, title_id, is_experimental,
-        selected_executable,
-        current_disc_version, source_iso_path, player_abi_version, out_info,
-        reason, reason_size);
-    if (status != NK_RUNTIME_PACKAGE_OK && manifest_cancelled()) {
-        if (out_info) memset(out_info, 0, sizeof(*out_info));
-        if (reason && reason_size) {
-            snprintf(reason, reason_size, "Package validation was cancelled.");
-        }
-        return NK_RUNTIME_PACKAGE_UNKNOWN;
-    }
-    return status;
+        selected_executable, current_disc_version, source_iso_path, player_abi_version,
+        NK_SOURCE_MEDIA_FULL, out_info, reason, reason_size);
+}
+
+/* A screen's status: a display shortcut, never a reason to start a game. */
+NkRuntimePackageStatus nk_title_manifest_validate_aot_package_for_display(
+    const char *user_data_root,
+    const char *disc_id,
+    const char *enhancement_package_id,
+    const char *title_id,
+    bool is_experimental,
+    const char *selected_executable,
+    const char *current_disc_version,
+    const char *source_iso_path,
+    uint32_t player_abi_version,
+    NkRuntimePackageInfo *out_info,
+    char *reason,
+    size_t reason_size
+) {
+    return validate_aot_package_with(
+        user_data_root, disc_id, enhancement_package_id, title_id, is_experimental,
+        selected_executable, current_disc_version, source_iso_path, player_abi_version,
+        NK_SOURCE_MEDIA_DISPLAY, out_info, reason, reason_size);
 }
 
 static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
@@ -5323,6 +5742,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
     const char *current_disc_version,
     const char *source_iso_path,
     uint32_t player_abi_version,
+    NkSourceMediaCheck media_check,
     NkRuntimePackageInfo *out_info,
     char *reason,
     size_t reason_size
@@ -5432,6 +5852,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
                                                    sizeof(identity_error)) ||
             !package_validate_live_source_media(source_iso_path,
                                                 current_identity,
+                                                media_check,
                                                 identity_error,
                                                 sizeof(identity_error))) {
             package_rebuild_reason(reason, reason_size,
