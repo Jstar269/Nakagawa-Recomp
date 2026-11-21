@@ -65,16 +65,32 @@ static bool join(const char *root, const char *relative, char *out, size_t size)
     return written > 0 && (size_t)written < size;
 }
 
-/* The design system's eight font slots, from the first folder that has the face:
-   the player's, the runtime's own, then the working directory. The roots are UTF-8 (SDL's
-   base path, the launcher's SR_UI_ROOT), so the probe reads them as UTF-8, as SDL_LoadFile
-   does; a narrow fopen would read them in the ANSI code page and miss a non-ASCII folder.
-   Every face falls back to Geist for Latin and to Noto Sans JP for Japanese names, as in
-   the player. False with the reason in `error`: a face no folder has is missing, but one
-   that is there and cannot be read (empty, truncated, too large) is named by its path, so a
-   damaged install is not reported as a missing one. */
+/* The fonts are read from the player's folder and the runtime's own only: the launcher passes
+   the first (SR_UI_ROOT), and a development run passes it too. A runtime never parses a font
+   from its working folder, which a shortcut or file association may set to any folder, as in
+   the player (player_ui_assets_from_working_folder). A test build alone, run from the source
+   tree without staged fonts, also reads them from there; NK_UI_TEST_ASSETS_BESIDE_ONLY turns
+   that off to see what a release build does. SR_SELFTEST_BUILD_ROOT marks a test build: only
+   the test recipes define it, never the runtime's build. */
+static bool overlay_fonts_from_working_folder(void) {
+#if defined(SR_SELFTEST_BUILD_ROOT)
+    return getenv("NK_UI_TEST_ASSETS_BESIDE_ONLY") == NULL;
+#else
+    return false;
+#endif
+}
+
+/* The design system's eight font slots, from the first folder that has the face: the
+   player's, the runtime's own, then (a test build only) the working directory. The roots are
+   UTF-8 (SDL's base path, the launcher's SR_UI_ROOT), so the probe reads them as UTF-8, as
+   SDL_LoadFile does; a narrow fopen would read them in the ANSI code page and miss a
+   non-ASCII folder. Every face falls back to Geist for Latin and to Noto Sans JP for Japanese
+   names, as in the player. False with the reason in `error`: a face no folder has is missing,
+   but one that is there and cannot be read (empty, truncated, too large) is named by its
+   path, so a damaged install is not reported as a missing one. */
 static bool register_fonts(NkUiTtf *ttf, const char *const *roots, size_t root_count,
                            char *error, size_t error_size) {
+    const size_t search_count = root_count + (overlay_fonts_from_working_folder() ? 1u : 0u);
     int font;
     for (font = 0; font < NK_UI_FONT_COUNT; ++font) {
         const char *relative = nk_ui_font_path(font);
@@ -83,7 +99,7 @@ static bool register_fonts(NkUiTtf *ttf, const char *const *roots, size_t root_c
         bool added = false;
         size_t r;
         unreadable[0] = '\0';
-        for (r = 0; r <= root_count && !added; ++r) {
+        for (r = 0; r < search_count && !added; ++r) {
             const char *candidate = path;
             if (r == root_count) {
                 candidate = relative;
@@ -118,8 +134,8 @@ static bool register_fonts(NkUiTtf *ttf, const char *const *roots, size_t root_c
     return true;
 }
 
-/* SDL3_ttf and the UI fonts, from the player's folder, the runtime's own, then the working
-   directory. NULL, with the reason, when either is missing. */
+/* SDL3_ttf and the UI fonts, from the player's folder, the runtime's own, then (the fonts, in
+   a test build only) the working directory. NULL, with the reason, when either is missing. */
 static NkUiTtf *open_fonts(const char *ui_root, char *error, size_t error_size) {
     const char *base = SDL_GetBasePath();
     const char *roots[2];
