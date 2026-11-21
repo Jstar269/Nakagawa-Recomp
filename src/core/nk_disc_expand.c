@@ -1337,7 +1337,8 @@ static bool move_expansion(const char *data_root, const NkDiscImportPaths *paths
     char sidecar[NK_MAX_PATH + 8];
     char old_sidecar[NK_MAX_PATH + 8];
     NkFileLock name_lock;
-    bool restored;
+    bool image_back;
+    bool records_back;
     if (!path_suffix(old_sidecar, sizeof(old_sidecar), out->iso_path, ".source")) {
         return disc_fail(status, NK_DISC_WRITE_FAILED,
                          "The path to Nakagawa's data folder is too long.");
@@ -1354,15 +1355,22 @@ static bool move_expansion(const char *data_root, const NkDiscImportPaths *paths
     }
     if (!write_identity_records(paths->ref, &moved)) {
         (void)nk_remove_utf8(sidecar);
-        restored = nk_rename_utf8(moved.iso_path, out->iso_path) == 0 &&
-                   write_identity_records(paths->ref, out);
+        image_back = nk_rename_utf8(moved.iso_path, out->iso_path) == 0;
+        records_back = image_back && write_identity_records(paths->ref, out);
         nk_platform_file_lock_release(&name_lock);
-        if (restored) {
+        if (records_back) {
             return disc_fail(status, NK_DISC_WRITE_FAILED,
                              "The record of the disc image expanded earlier could not be "
                              "written in Nakagawa's data folder, so the image was put back "
                              "where it was. Check that the folder is writable, then add the "
                              "disc image again.");
+        }
+        if (image_back) {
+            return disc_fail(status, NK_DISC_WRITE_FAILED,
+                             "The record of the disc image expanded earlier could not be "
+                             "written in Nakagawa's data folder. The image is back where it "
+                             "was, but its own record could not be written again. Check that "
+                             "the folder is writable, then add the disc image again.");
         }
         return disc_fail(status, NK_DISC_WRITE_FAILED,
                          "The record of the disc image expanded earlier could not be written in "
