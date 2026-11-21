@@ -161,6 +161,13 @@ typedef struct {
 #define SCR_DISCORD_SENTENCE \
     "Show the game you play and for how long in Discord, through the Discord app on this " \
     "PC. Nakagawa itself connects to nothing."
+/* RetroAchievements (#1316) on Settings > Online and developer: the switch, the reason it is
+   missing where sign-in cannot be stored, and the account row's name, spelled out in full. */
+#define SCR_ACHIEVEMENTS_SENTENCE \
+    "Casual Mode only. Before you sign in, you see what is sent and where."
+#define SCR_ACHIEVEMENTS_UNAVAILABLE_SENTENCE \
+    "Sign-in needs Windows Credential Manager, which this platform does not provide."
+#define SCR_ACHIEVEMENTS_ACCOUNT_NAME "RetroAchievements"
 /* A build that cannot show Discord status (no application ID, or no local pipes) hides the
    row, except for a stored On, which it shows with this sentence so it can be turned off. */
 #define SCR_DISCORD_STORED_ON_SENTENCE \

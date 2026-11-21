@@ -52,7 +52,10 @@ typedef struct {
     bool seen;              /* drawn in this frame */
 } NkUiArtFade;
 
-#define NK_UI_CUSTOM_SLOTS 96u
+/* Pictures, shapes and prompt glyphs one frame may draw. A game's page lists up to 256
+   achievements (#1316), each with its badge picture or drawn glyph, beside the page's own art and
+   the bars' glyphs; 96 dropped the frame of any set past about 80 rows. */
+#define NK_UI_CUSTOM_SLOTS 384u
 /* A wheel notch scrolls three 16 px lines, Windows' default of three lines a
    notch. A held pointer that scrolls a container further than the slop is a
    drag, so its release is no click. */

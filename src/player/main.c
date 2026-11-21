@@ -49,8 +49,29 @@
 #include "nk_portable.h"
 #include "nk_json.h"
 #include "player_host.h"
+#include "nk_achievements.h"
+#include "nk_psp_keystore.h"
+#include "nk_ui_image.h"
+
+typedef struct PlayerRun PlayerRun;
+typedef struct PlayerAchHttpJob PlayerAchHttpJob;
+static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettingsOp op);
+static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork *work);
+static void player_achievements_stop_channel(PlayerRun *run);
+static void player_achievements_end_frames(PlayerRun *run);
+static void player_achievements_release_channel(PlayerRun *run);
 
 static const char k_invalid_disc_message[] = "This file isn't a PSP disc image.";
+static const char k_ach_credential_target[] = "NakagawaRecomp/RetroAchievements";
+#define PLAYER_ACH_HTTP_BODY_MAX (4u * 1024u * 1024u)
+/* Badge pictures (nk_ach_request_badge): the decoded ones this run keeps
+   (PLAYER_ACH_BADGE_SLOTS, player_state.h), and their files in <data>/achievements-badges, at
+   most PLAYER_ACH_BADGE_CACHE_FILES_MAX. Past either, a badge is not kept: the page draws its
+   own icon for it. */
+#define PLAYER_ACH_BADGE_DIR "achievements-badges"
+enum {
+    PLAYER_ACH_HTTP_EVENT_CODE = 0x5241
+};
 
 static bool player_view_is_library(PlayerView view) {
     return view == VIEW_LIBRARY || view == PLAYER_VIEW_READY_LIBRARY;
@@ -2041,7 +2062,7 @@ static void player_ui_developer_log_apply(PlayerApp *app, PlayerUiDeveloperLogOp
     }
 }
 
-static void player_ui_nk_apply_action(PlayerApp *app,
+static void player_ui_nk_apply_action(PlayerRun *run, PlayerApp *app,
                                      const PlayerUiAction *action) {
     int index;
     /* Most frames carry no action, and its title_index is 0: selecting that
@@ -2056,8 +2077,14 @@ static void player_ui_nk_apply_action(PlayerApp *app,
         return;
     }
     if (action->kind == PLAYER_UI_ACTION_SETTINGS) {
-        player_ui_settings_apply(app, (PlayerUiSettingsOp)action->primary, action->title_index,
-                                 action->choice_index);
+        const PlayerUiSettingsOp op = (PlayerUiSettingsOp)action->primary;
+        if (op == PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS ||
+            op == PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS ||
+            op == PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS) {
+            player_achievements_settings_action(run, op);
+        } else {
+            player_ui_settings_apply(app, op, action->title_index, action->choice_index);
+        }
         return;
     }
     if (action->kind == PLAYER_UI_ACTION_CONTROLLER) {
@@ -2295,7 +2322,7 @@ static void player_ui_nk_apply_action(PlayerApp *app,
 }
 
 /* nk_ui draws the frame at the window's real size, from the output's pixels. */
-static void player_render_active_ui(PlayerUiNk *next_ui, PlayerApp *app,
+static void player_render_active_ui(PlayerRun *run, PlayerUiNk *next_ui, PlayerApp *app,
                                     SDL_Renderer *renderer, SDL_Window *window) {
     PlayerUiAction action = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
     bool drawn = player_ui_nk_view_active(next_ui, app) &&
@@ -2303,7 +2330,7 @@ static void player_render_active_ui(PlayerUiNk *next_ui, PlayerApp *app,
     /* An action the frame committed (its dialog already closed) runs even when
        the frame could not be drawn. */
     if (drawn || action.kind != PLAYER_UI_ACTION_NONE) {
-        player_ui_nk_apply_action(app, &action);
+        player_ui_nk_apply_action(run, app, &action);
     }
     if (!drawn) {
         /* The launcher draws every view (player_ui_nk_draws_view); a frame it
@@ -3875,7 +3902,7 @@ static void player_launch_job_spawn(PlayerLaunchJob *job, bool launcher_audio_cl
    close, and player_launch_job_poll starts the worker once both have let go of the
    device. */
 static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index,
-                                                bool launcher_audio_closed) {
+                                                bool launcher_audio_closed, PlayerRun *run) {
     if (!app || app->launch_pending || app->is_game_running ||
         game_index < 0 || game_index >= app->game_count) {
         return NULL;
@@ -3889,6 +3916,7 @@ static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index,
         free(job);
         return NULL;
     }
+    player_achievements_prepare_launch(run, &job->work);
     {
         const char *slow = player_ui_test_slow_start_text();
         uint32_t slow_ms = 0u;
@@ -3912,7 +3940,8 @@ static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index,
  * waiting for the launcher music starts its worker once `launcher_audio_closed`;
  * at shutdown it is dropped, since no game's process has started for it. */
 static PlayerLaunchJob *player_launch_job_poll(PlayerApp *app, PlayerLaunchJob *job,
-                                               bool wait, bool launcher_audio_closed) {
+                                               bool wait, bool launcher_audio_closed,
+                                               PlayerRun *run) {
     if (!job) return NULL;
     if (job->awaiting_audio) {
         if (wait) {
@@ -3920,6 +3949,7 @@ static PlayerLaunchJob *player_launch_job_poll(PlayerApp *app, PlayerLaunchJob *
                             "game started.\n", job->work.game.disc_id);
             app->launch_pending = false;
             app->launch_pending_disc_id[0] = '\0';
+            player_achievements_stop_channel(run);
             free(job);
             return NULL;
         }
@@ -3930,7 +3960,8 @@ static PlayerLaunchJob *player_launch_job_poll(PlayerApp *app, PlayerLaunchJob *
     if (job->thread) SDL_WaitThread(job->thread, NULL);
     app->launch_pending = false;
     app->launch_pending_disc_id[0] = '\0';
-    (void)player_app_launch_finish(app, &job->work);
+    bool started = player_app_launch_finish(app, &job->work);
+    if (!started) player_achievements_stop_channel(run);
     free(job);
     return NULL;
 }
@@ -4304,7 +4335,7 @@ static void player_test_view_preflight(PlayerApp *app, bool encrypted) {
    startup, window, frame and shutdown functions below. It is static because the
    app state alone is tens of megabytes (a full library of NK_MAX_GAMES titles),
    far more than a thread's stack. */
-typedef struct PlayerRun {
+struct PlayerRun {
     PlayerApp app;
     PlayerUiTest ui_test;
     /* The command line. */
@@ -4355,6 +4386,42 @@ typedef struct PlayerRun {
     bool applied_launcher_fullscreen;
     bool launcher_handoff_attempted;
     SDL_Gamepad *gamepad;
+    NkAch *achievements;
+    /* The bridge is entered from this thread and from the guest-memory channel's frame service
+       (player_ach_serve_frame); achievements_lock is the lock it was given, and it also guards
+       ach_http_job. It is never held across anything that waits for the person. */
+    SDL_Mutex *achievements_lock;
+    SDL_AtomicInt achievements_transport_open;
+    /* nk_ach_user_agent's, made once with the bridge: every request carries it. */
+    char achievements_user_agent[NK_ACH_USER_AGENT_MAX];
+    NkGuestMemoryChannel guest_memory_channel;
+    PlayerAchHttpJob *ach_http_job;
+    char achievements_game_hash[33];
+    char achievements_disc_id[MAX_DISC_ID_LEN];
+    bool guest_memory_channel_active;
+    /* The game's window is up and the runtime was asked whether it opened the channel. */
+    bool guest_memory_channel_checked;
+    bool achievements_shutting_down;
+    bool achievements_login_pending;
+    bool achievements_signout_pending;
+    bool achievements_queue_load_checked;
+    /* What the saved queue's load had to say, shown again once the sign-in has settled. */
+    char achievements_queue_notice[160];
+    /* nk_ach_events_dropped when last reported: a change is logged and shown once. */
+    uint32_t achievements_events_dropped_seen;
+    /* Badge pictures: one try each while a game's list uses it (ach_badges, with each slot's
+       decoded picture in ach_badge_images), the first failure logged once, and a full set of
+       slots logged once. The cache folder is <data>/achievements-badges (ach_badge_dir, "" when
+       the data folder is unknown: nothing is cached then). ach_badge_cache_lock orders the HTTP
+       thread's cache reads and writes with Sign out's delete; a write made for an older
+       ach_badge_cache_epoch is not made. */
+    PlayerAchBadgeSlot ach_badges[PLAYER_ACH_BADGE_SLOTS];
+    NkUiImage ach_badge_images[PLAYER_ACH_BADGE_SLOTS];
+    bool ach_badge_failure_logged;
+    bool ach_badge_slots_full_logged;
+    char ach_badge_dir[NK_MAX_PATH];
+    SDL_Mutex *ach_badge_cache_lock;
+    SDL_AtomicInt ach_badge_cache_epoch;
     /* The frame loop. */
     PlayerLaunchJob *launch_job;
     PlayerStagingJob *staging_job;
@@ -4379,11 +4446,1227 @@ typedef struct PlayerRun {
     uint32_t frame_delta_ms;
     /* One launcher per data folder (#2006). */
     NkSingleInstance instance;
-} PlayerRun;
+};
+
+struct PlayerAchHttpJob {
+    SDL_Thread *thread;
+    SDL_AtomicInt done;
+    PlayerRun *run;
+    NkAchDone done_callback;
+    void *done_context;
+    char url[2048];
+    char content_type[128];
+    char user_agent[NK_ACH_USER_AGENT_MAX];
+    char *post_data;
+    size_t post_data_size;
+    char *response_body;
+    size_t response_body_size;
+    int response_status;
+    /* A badge picture's GET (nk_ach_badge_url_allowed): its host is the media host, its body is
+       at most a badge's size, and it is read from and written to the cache file when it can be. */
+    bool badge;
+    size_t body_max;
+    char cache_dir[NK_MAX_PATH];
+    char cache_file[NK_ACH_BADGE_FILE_MAX]; /* nk_achievement_badge_file_name, "" for none */
+    int cache_epoch;
+};
 
 /* What the startup and window steps return when the run goes on; any other value is
    the process's exit code. */
 #define PLAYER_RUN_CONTINUE INT_MIN
+
+/* The bytes of text that fit in max_bytes, for "%.*s": all of it when it fits, else cut at a
+   UTF-8 character, never inside one (RetroAchievements' text is UTF-8). */
+static int player_utf8_fit(const char *text, size_t max_bytes) {
+    size_t length = 0u;
+    if (!text) return 0;
+    while (length < max_bytes && text[length]) length++;
+    if (text[length])
+        while (length > 0u && ((unsigned char)text[length] & 0xC0u) == 0x80u) length--;
+    return length > (size_t)INT_MAX ? INT_MAX : (int)length;
+}
+
+static bool player_ach_response_append(PlayerAchHttpJob *job, const unsigned char *data,
+                                       size_t size, size_t *capacity) {
+    if (!job || !data || !capacity || job->response_body_size > job->body_max ||
+        size > job->body_max - job->response_body_size)
+        return false;
+    const size_t needed = job->response_body_size + size + 1u;
+    if (needed > *capacity) {
+        size_t next = *capacity ? *capacity : 16384u;
+        while (next < needed) {
+            if (next > (job->body_max + 1u) / 2u) {
+                next = job->body_max + 1u;
+                break;
+            }
+            next *= 2u;
+        }
+        /* Not realloc: the old block can hold the login reply's token, so it is wiped before
+           it goes back to the heap. */
+        char *grown = (char *)malloc(next);
+        if (!grown) return false;
+        if (job->response_body) {
+            memcpy(grown, job->response_body, job->response_body_size);
+            nk_secure_zero(job->response_body, *capacity);
+            free(job->response_body);
+        }
+        job->response_body = grown;
+        *capacity = next;
+    }
+    memcpy(job->response_body + job->response_body_size, data, size);
+    job->response_body_size += size;
+    job->response_body[job->response_body_size] = '\0';
+    return true;
+}
+
+/* Whether bytes are a badge picture the page can show: its header within a badge's limits
+   (nk_ach_badge_png_ok), then the whole picture decoded within them, as the pump decodes it. */
+static bool player_ach_badge_decodes(const uint8_t *bytes, size_t size, void *context) {
+    (void)context;
+    if (!nk_ach_badge_png_ok(bytes, size)) return false;
+    const NkUiImageLimits limits = {NK_ACH_BADGE_MAX_BYTES, NK_ACH_BADGE_MAX_SIDE,
+                                    NK_ACH_BADGE_MAX_SIDE};
+    NkUiImage image;
+    memset(&image, 0, sizeof image);
+    const bool ok = nk_ui_image_decode_png(bytes, size, &limits, &image) == NK_UI_IMAGE_OK;
+    nk_ui_image_free(&image);
+    return ok;
+}
+
+/* A badge picture this PC already holds: the cache file's bytes, answered as the server would
+   (200), when they decode. A file that does not is removed, under the cache lock, and the
+   request is sent instead. False sends the request. */
+static bool player_ach_job_cache_read(PlayerAchHttpJob *job, size_t *capacity) {
+    PlayerRun *run = job->run;
+    if (!job->cache_file[0] || !run->ach_badge_cache_lock) return false;
+    uint8_t *bytes = NULL;
+    size_t size = 0u;
+    SDL_LockMutex(run->ach_badge_cache_lock);
+    const PlayerAchBadgeCacheRead read =
+        player_ach_badge_cache_read(job->cache_dir, job->cache_file, NK_ACH_BADGE_MAX_BYTES,
+                                    player_ach_badge_decodes, NULL, &bytes, &size);
+    SDL_UnlockMutex(run->ach_badge_cache_lock);
+    const bool ok = read == PLAYER_ACH_BADGE_CACHE_HIT &&
+                    player_ach_response_append(job, bytes, size, capacity);
+    free(bytes);
+    if (!ok) {
+        free(job->response_body);
+        job->response_body = NULL;
+        job->response_body_size = 0u;
+        *capacity = 0u;
+        return false;
+    }
+    job->response_status = 200;
+    return true;
+}
+
+/* Keeps a fetched badge that decodes in the cache folder (player_ach_badge_cache_write), unless
+   Sign out cleared the folder since the request was made (the epoch moved), the switch went
+   off, or the folder already holds PLAYER_ACH_BADGE_CACHE_FILES_MAX files. */
+static void player_ach_job_cache_write(PlayerAchHttpJob *job) {
+    PlayerRun *run = job->run;
+    if (!job->cache_file[0] || !run->ach_badge_cache_lock ||
+        !player_ach_badge_decodes((const uint8_t *)job->response_body, job->response_body_size,
+                                  NULL))
+        return;
+    SDL_LockMutex(run->ach_badge_cache_lock);
+    if (SDL_GetAtomicInt(&run->ach_badge_cache_epoch) == job->cache_epoch &&
+        SDL_GetAtomicInt(&run->achievements_transport_open))
+        (void)player_ach_badge_cache_write(job->cache_dir, job->cache_file,
+                                           (const uint8_t *)job->response_body,
+                                           job->response_body_size,
+                                           PLAYER_ACH_BADGE_CACHE_FILES_MAX);
+    SDL_UnlockMutex(run->ach_badge_cache_lock);
+}
+
+static int SDLCALL player_ach_http_thread_main(void *userdata) {
+    PlayerAchHttpJob *job = (PlayerAchHttpJob *)userdata;
+    PackageHttpOptions options = {job->user_agent};
+    PackageHttpResponse response;
+    unsigned char chunk[16384];
+    memset(&response, 0, sizeof response);
+    const char *method = job->post_data ? "POST" : "GET";
+    size_t capacity = 0u;
+    bool body_ok = true;
+    if (!job->user_agent[0]) {
+        /* No user agent in RetroAchievements' form: nothing is sent (nk_ach_user_agent). */
+        job->response_status = NK_ACH_HTTP_CLIENT_ERROR;
+        goto finished;
+    }
+    /* A badge this PC already keeps is not asked for again. */
+    if (job->badge && player_ach_job_cache_read(job, &capacity)) goto finished;
+    if (!package_builder_native_transport_request(
+            &options, job->url, job->badge ? NK_ACH_BADGE_HOST : NK_ACH_HOST, method,
+            job->content_type[0] ? job->content_type : NULL,
+            job->post_data, job->post_data_size, &response)) {
+        /* A request the transport refused before sending is refused again the same way, so
+           rc_client is told to give up, with the reason as its error text. */
+        job->response_status = NK_ACH_HTTP_RETRY;
+        if (response.refused) {
+            job->response_status = NK_ACH_HTTP_CLIENT_ERROR;
+            (void)player_ach_response_append(job, (const unsigned char *)response.refused,
+                                             strlen(response.refused), &capacity);
+        }
+        goto finished;
+    }
+    /* The answer must come from where the request went: the API host for rc_client's requests,
+       the badge's own URL on the media host for a badge. */
+    if (!response.final_url ||
+        !(job->badge ? nk_ach_badge_url_allowed(response.final_url) &&
+                           strcmp(response.final_url, job->url) == 0
+                     : nk_ach_url_allowed(response.final_url)) ||
+        !response.read || !response.close ||
+        (response.has_content_length && response.content_length > job->body_max)) {
+        job->response_status = NK_ACH_HTTP_CLIENT_ERROR;
+        if (response.close) response.close(response.context);
+        goto finished;
+    }
+    job->response_status = response.http_status;
+    for (;;) {
+        size_t received = 0u;
+        if (!response.read(response.context, chunk, sizeof chunk, &received)) {
+            body_ok = false;
+            break;
+        }
+        if (received == 0u) break;
+        if (!player_ach_response_append(job, chunk, received, &capacity)) {
+            body_ok = false;
+            break;
+        }
+    }
+    response.close(response.context);
+    if (!body_ok) job->response_status = NK_ACH_HTTP_RETRY;
+    /* Kept only when it decodes, so a damaged answer is not read back in a later run. */
+    if (job->badge && body_ok && job->response_status == 200) player_ach_job_cache_write(job);
+
+finished:
+    /* The last chunk read can hold the login reply's token. */
+    nk_secure_zero(chunk, sizeof chunk);
+    if (!job->response_body) {
+        job->response_body = (char *)calloc(1u, 1u);
+        if (!job->response_body) job->response_status = NK_ACH_HTTP_CLIENT_ERROR;
+    }
+    SDL_SetAtomicInt(&job->done, 1);
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_EVENT_USER;
+    event.user.code = PLAYER_ACH_HTTP_EVENT_CODE;
+    event.user.data1 = job->run;
+    (void)SDL_PushEvent(&event);
+    return 0;
+}
+
+/* Open only while the user's switch is on, the credential store exists and the player is not
+   closing: the default is closed. */
+static void player_achievements_sync_transport(PlayerRun *run) {
+    SDL_SetAtomicInt(&run->achievements_transport_open,
+                     run->app.settings.achievements_enabled &&
+                     run->app.achievements_store_available &&
+                     !run->achievements_shutting_down ? 1 : 0);
+}
+
+static void player_ach_transport(void *context, const NkAchRequest *request,
+                                 NkAchDone done, void *done_context) {
+    PlayerRun *run = (PlayerRun *)context;
+    NkAchResponse refusal = {NULL, 0u, NK_ACH_HTTP_CLIENT_ERROR};
+    if (!done) return;
+    /* Called inside the bridge's lock, on this thread or the frame service's: it reads the one
+       flag player_achievements_sync_transport keeps, not the settings. */
+    if (!run || !request || !request->url ||
+        !SDL_GetAtomicInt(&run->achievements_transport_open)) {
+        done(&refusal, done_context);
+        return;
+    }
+    /* The bridge sends one request at a time (NkAchTransport), so the slot is free whenever it
+       calls; a busy slot would be a broken contract, answered as a retry. */
+    if (run->ach_http_job) {
+        refusal.http_status = NK_ACH_HTTP_RETRY;
+        done(&refusal, done_context);
+        return;
+    }
+    /* The bridge passed the URL through its gate; the transport tells the two kinds apart by
+       it and carries nothing else. */
+    const bool badge = nk_ach_badge_url_allowed(request->url) && !request->post_data;
+    if (!badge && !nk_ach_url_allowed(request->url)) {
+        done(&refusal, done_context);
+        return;
+    }
+    const size_t url_size = strlen(request->url);
+    const size_t post_size = request->post_data ? strlen(request->post_data) : 0u;
+    const size_t content_type_size = request->content_type ? strlen(request->content_type) : 0u;
+    if (url_size >= 2048u || post_size > PLAYER_ACH_HTTP_BODY_MAX ||
+        content_type_size >= sizeof(((PlayerAchHttpJob *)0)->content_type)) {
+        done(&refusal, done_context);
+        return;
+    }
+    PlayerAchHttpJob *job = (PlayerAchHttpJob *)calloc(1u, sizeof(*job));
+    if (!job) {
+        refusal.http_status = NK_ACH_HTTP_RETRY;
+        done(&refusal, done_context);
+        return;
+    }
+    job->run = run;
+    job->badge = badge;
+    job->body_max = badge ? NK_ACH_BADGE_MAX_BYTES : PLAYER_ACH_HTTP_BODY_MAX;
+    if (badge && run->ach_badge_dir[0]) {
+        /* The file is named from the URL's last part, which the gate allows only as a badge
+           name and ".png" or "_lock.png", through nk_achievement_badge_file_name: no separator
+           or dot from the server reaches it, no Windows device name is formed, and names that
+           differ only in case stay apart. */
+        const char *leaf = request->url + sizeof NK_ACH_BADGE_URL_PREFIX - 1u;
+        char name[NK_ACH_BADGE_NAME_MAX];
+        size_t length = 0u;
+        while (length + 1u < sizeof name && leaf[length] && leaf[length] != '.' &&
+               leaf[length] != '_') {
+            name[length] = leaf[length];
+            length++;
+        }
+        name[length] = '\0';
+        const bool locked = strcmp(leaf + length, "_lock.png") == 0;
+        if (!nk_achievement_badge_file_name(name, locked, job->cache_file,
+                                            sizeof job->cache_file))
+            job->cache_file[0] = '\0';
+        snprintf(job->cache_dir, sizeof job->cache_dir, "%s", run->ach_badge_dir);
+        job->cache_epoch = SDL_GetAtomicInt(&run->ach_badge_cache_epoch);
+    }
+    snprintf(job->user_agent, sizeof job->user_agent, "%s", run->achievements_user_agent);
+    job->done_callback = done;
+    job->done_context = done_context;
+    snprintf(job->url, sizeof job->url, "%s", request->url);
+    if (content_type_size) snprintf(job->content_type, sizeof job->content_type, "%s",
+                                    request->content_type);
+    if (request->post_data) {
+        job->post_data = (char *)malloc(post_size + 1u);
+        if (!job->post_data) {
+            free(job);
+            refusal.http_status = NK_ACH_HTTP_RETRY;
+            done(&refusal, done_context);
+            return;
+        }
+        memcpy(job->post_data, request->post_data, post_size + 1u);
+        job->post_data_size = post_size;
+    }
+    run->ach_http_job = job;
+    job->thread = SDL_CreateThread(player_ach_http_thread_main, "ra-http", job);
+    if (!job->thread) {
+        run->ach_http_job = NULL;
+        nk_secure_zero(job->post_data, job->post_data_size);
+        free(job->post_data);
+        free(job);
+        refusal.http_status = NK_ACH_HTTP_RETRY;
+        done(&refusal, done_context);
+    }
+}
+
+static void player_ach_http_poll(PlayerRun *run) {
+    if (!run) return;
+    SDL_LockMutex(run->achievements_lock);
+    PlayerAchHttpJob *job = run->ach_http_job;
+    if (job && SDL_GetAtomicInt(&job->done)) {
+        if (job->thread) SDL_WaitThread(job->thread, NULL);
+        run->ach_http_job = NULL;
+        NkAchResponse response = {job->response_body, job->response_body_size,
+                                  job->response_status};
+        if (job->done_callback) job->done_callback(&response, job->done_context);
+        nk_secure_zero(job->post_data, job->post_data_size);
+        nk_secure_zero(job->response_body, job->response_body_size);
+        free(job->post_data);
+        free(job->response_body);
+        free(job);
+    }
+    SDL_UnlockMutex(run->achievements_lock);
+}
+
+static void player_ach_lock_enter(void *context) { SDL_LockMutex((SDL_Mutex *)context); }
+static void player_ach_lock_leave(void *context) { SDL_UnlockMutex((SDL_Mutex *)context); }
+
+/* The bridge and its lock, made together: SDL's mutex is recursive, as the bridge asks. */
+static bool player_achievements_create(PlayerRun *run) {
+    if (run->achievements) return true;
+    if (!run->achievements_lock) run->achievements_lock = SDL_CreateMutex();
+    if (!run->achievements_lock) return false;
+    if (!run->ach_badge_cache_lock) run->ach_badge_cache_lock = SDL_CreateMutex();
+    if (!run->ach_badge_cache_lock) return false;
+    /* <data>/achievements-badges, made only when a picture is kept. Unknown: nothing is
+       cached, and each badge is fetched once per run. */
+    char data_root[NK_MAX_PATH];
+    run->ach_badge_dir[0] = '\0';
+    if (nk_platform_get_app_data_dir(data_root, sizeof data_root)) {
+        const int n = snprintf(run->ach_badge_dir, sizeof run->ach_badge_dir, "%s%c%s",
+                               data_root, nk_platform_path_separator(), PLAYER_ACH_BADGE_DIR);
+        if (n <= 0 || (size_t)n >= sizeof run->ach_badge_dir) run->ach_badge_dir[0] = '\0';
+    }
+    /* A write a crash or power cut interrupted left a ".part" file: it goes, so it does not
+       count toward the folder's limit. No request is on its way yet. */
+    if (run->ach_badge_dir[0]) (void)player_ach_badge_cache_open(run->ach_badge_dir);
+    /* The user agent RetroAchievements documents for a client: this player, its version, the
+       operating system and rcheevos (nk_ach_user_agent). Without one nothing starts. */
+    char system[NK_ACH_USER_AGENT_SYSTEM_MAX];
+    if (!nk_platform_os_description(system, sizeof system)) system[0] = '\0';
+    if (!nk_ach_user_agent(NK_PLAYER_VERSION, system, run->achievements_user_agent,
+                           sizeof run->achievements_user_agent)) {
+        fprintf(stderr, "[PLAYER] RetroAchievements: no user agent in RetroAchievements' form "
+                        "for version %s\n", NK_PLAYER_VERSION);
+        return false;
+    }
+    run->achievements = nk_ach_create(NULL, player_ach_transport, run);
+    if (!run->achievements) return false;
+    const NkAchLock lock = {run->achievements_lock, player_ach_lock_enter,
+                            player_ach_lock_leave};
+    nk_ach_set_lock(run->achievements, &lock);
+    return true;
+}
+
+/* The offline unlock queue: <app data>/achievements/unlock-queue.bin in the user's private
+   folder. The bridge owns its format, its account tag and its reading and writing
+   (nk_achievements.h); the file holds no account name and no token. */
+static bool player_ach_queue_path(char *path, size_t path_size) {
+    char data_root[NK_MAX_PATH];
+    char directory[NK_MAX_PATH];
+    const char separator = nk_platform_path_separator();
+    if (!path || path_size == 0u ||
+        !nk_platform_get_app_data_dir(data_root, sizeof data_root)) return false;
+    int n = snprintf(directory, sizeof directory, "%s%cachievements", data_root, separator);
+    if (n <= 0 || (size_t)n >= sizeof directory ||
+        !nk_platform_mkdir_p_private(directory)) return false;
+    n = snprintf(path, path_size, "%s%cunlock-queue.bin", directory, separator);
+    return n > 0 && (size_t)n < path_size;
+}
+
+static bool player_achievements_save_queue(PlayerRun *run) {
+    char path[NK_MAX_PATH];
+    return run && run->achievements && player_ach_queue_path(path, sizeof path) &&
+           nk_ach_save_queue_file(run->achievements, path);
+}
+
+/* After a factory reset nothing is saved (player_shutdown): the data folder was moved aside,
+   and writing the queue would make it again with the old account's unlocks in it. */
+static bool player_achievements_queue_saves_allowed(const PlayerRun *run) {
+    return run && !run->app.factory_reset_done;
+}
+
+static void player_achievements_save_queue_or_report(PlayerRun *run);
+
+/* Reads the saved queue once, before any sign-in. Whatever could not be loaded is said in the
+   log and kept as a notice for the status line; a file that could not be read is kept, never
+   written over (nk_ach_load_queue_file). */
+static void player_achievements_load_queue(PlayerRun *run) {
+    char path[NK_MAX_PATH];
+    char *notice = run->achievements_queue_notice;
+    const size_t notice_size = sizeof run->achievements_queue_notice;
+    notice[0] = '\0';
+    if (!player_ach_queue_path(path, sizeof path)) {
+        snprintf(notice, notice_size, "The offline unlock queue folder is unavailable.");
+        fprintf(stderr, "[PLAYER] RetroAchievements: %s\n", notice);
+        return;
+    }
+    NkAchQueueLoad report;
+    const bool loaded = nk_ach_load_queue_file(run->achievements, path, &report);
+    if (report.unreadable && report.kept_aside) {
+        snprintf(notice, notice_size, "A saved offline unlock queue could not be read; it "
+                                      "was kept as unlock-queue.bin.unreadable.");
+    } else if (!loaded) {
+        snprintf(notice, notice_size, "A saved offline unlock queue could not be read; it is "
+                                      "left untouched and nothing is saved over it now.");
+    }
+    if (notice[0]) fprintf(stderr, "[PLAYER] RetroAchievements: %s\n", notice);
+}
+
+/* A status the sign-in comes to rest on, followed once by what the queue's load had to say. */
+static void player_achievements_rest_status(PlayerRun *run, const char *text) {
+    PlayerApp *app = &run->app;
+    if (run->achievements_queue_notice[0]) {
+        snprintf(app->achievements_status, sizeof app->achievements_status, "%s %s", text,
+                 run->achievements_queue_notice);
+        run->achievements_queue_notice[0] = '\0';
+    } else {
+        snprintf(app->achievements_status, sizeof app->achievements_status, "%s", text);
+    }
+}
+
+/* Each row's picture: the decoded badge for its state (locked rows the "_lock" one), or none,
+   and the page draws its own icon. */
+static void player_achievements_attach_badges(PlayerRun *run) {
+    PlayerApp *app = &run->app;
+    for (size_t i = 0u; i < app->achievements_list_count; i++) {
+        PlayerAchievementRow *row = &app->achievements_list[i];
+        const size_t k = row->badge_name[0]
+                             ? player_ach_badge_find(run->ach_badges, PLAYER_ACH_BADGE_SLOTS,
+                                                     row->badge_name, !row->unlocked)
+                             : PLAYER_ACH_BADGE_SLOTS;
+        row->badge = k < PLAYER_ACH_BADGE_SLOTS &&
+                             run->ach_badges[k].state == PLAYER_ACH_BADGE_SHOWN
+                         ? &run->ach_badge_images[k]
+                         : NULL;
+    }
+}
+
+/* A row holds the bridge's whole display text (already cut at a whole UTF-8 character by
+   ach_copy_text), so it is copied, never cut again here. */
+_Static_assert(PLAYER_ACHIEVEMENT_TITLE_MAX >= NK_ACH_DISPLAY_TITLE_MAX,
+               "a row holds the bridge's whole title");
+_Static_assert(PLAYER_ACHIEVEMENT_DESCRIPTION_MAX >= NK_ACH_DISPLAY_DESCRIPTION_MAX,
+               "a row holds the bridge's whole description");
+_Static_assert(PLAYER_ACHIEVEMENT_BADGE_NAME_MAX >= NK_ACH_BADGE_NAME_MAX,
+               "a row holds the bridge's whole badge name");
+
+/* A new list (a game's rows, or none): the pictures it does not use leave their slots, so the
+   next game's page has room for its own; they stay in the badge folder, and a page that wants
+   one again reads it from this PC. */
+static void player_achievements_release_badges(PlayerRun *run) {
+    bool released[PLAYER_ACH_BADGE_SLOTS];
+    if (!player_ach_badges_release_unused(run->ach_badges, PLAYER_ACH_BADGE_SLOTS,
+                                          run->app.achievements_list,
+                                          run->app.achievements_list_count, released))
+        return;
+    for (size_t i = 0u; i < PLAYER_ACH_BADGE_SLOTS; i++)
+        if (released[i]) nk_ui_image_free(&run->ach_badge_images[i]);
+}
+
+static void player_achievements_refresh_list(PlayerRun *run) {
+    if (!run || !run->achievements) return;
+    PlayerApp *app = &run->app;
+    /* Static: a set's rows are larger than a frame's stack should hold. */
+    static NkAchAchievement entries[PLAYER_ACHIEVEMENTS_LIST_MAX];
+    size_t total = 0u;
+    const size_t count = nk_ach_copy_achievement_list(
+        run->achievements, entries, PLAYER_ACHIEVEMENTS_LIST_MAX, &total);
+    NkAchProgress progress;
+    (void)nk_ach_copy_progress(run->achievements, &progress);
+    memset(app->achievements_list, 0, sizeof app->achievements_list);
+    for (size_t i = 0u; i < count; i++) {
+        PlayerAchievementRow *row = &app->achievements_list[i];
+        snprintf(row->title, sizeof row->title, "%s", entries[i].title);
+        snprintf(row->description, sizeof row->description, "%s", entries[i].description);
+        snprintf(row->badge_name, sizeof row->badge_name, "%s", entries[i].badge_name);
+        row->points = entries[i].points;
+        row->unlocked = entries[i].unlocked_softcore;
+    }
+    app->achievements_list_count = count;
+    app->achievements_list_total = total;
+    app->achievements_unlocked = progress.unlocked;
+    app->achievements_points_unlocked = progress.points_unlocked;
+    app->achievements_points_total = progress.points_total;
+    app->achievements_list_loaded = true;
+    snprintf(app->achievements_list_disc_id, sizeof app->achievements_list_disc_id,
+             "%s", run->achievements_disc_id);
+    player_achievements_release_badges(run);
+    player_achievements_attach_badges(run);
+}
+
+static void player_achievements_clear_list(PlayerRun *run) {
+    if (!run) return;
+    run->app.achievements_list_loaded = false;
+    run->app.achievements_list_disc_id[0] = '\0';
+    run->app.achievements_list_count = 0u;
+    run->app.achievements_list_total = 0u;
+    run->app.achievements_unlocked = 0u;
+    run->app.achievements_points_unlocked = 0u;
+    run->app.achievements_points_total = 0u;
+    memset(run->app.achievements_list, 0, sizeof run->app.achievements_list);
+    player_achievements_release_badges(run);
+}
+
+/* The badges this run decoded go, and so do the rows' pointers to them. */
+static void player_achievements_forget_badges(PlayerRun *run) {
+    for (size_t i = 0u; i < run->app.achievements_list_count; i++)
+        run->app.achievements_list[i].badge = NULL;
+    for (size_t i = 0u; i < PLAYER_ACH_BADGE_SLOTS; i++)
+        nk_ui_image_free(&run->ach_badge_images[i]);
+    memset(run->ach_badges, 0, sizeof run->ach_badges);
+}
+
+/* Sign out: the badge pictures this PC keeps show which games the account played, so they go
+   with the account. A cache write still on its way sees the epoch move and is not made. */
+static void player_achievements_clear_badge_cache(PlayerRun *run) {
+    player_achievements_forget_badges(run);
+    if (!run->ach_badge_dir[0] || !run->ach_badge_cache_lock) return;
+    SDL_AddAtomicInt(&run->ach_badge_cache_epoch, 1);
+    SDL_LockMutex(run->ach_badge_cache_lock);
+    if (!nk_platform_remove_tree(run->ach_badge_dir, NULL))
+        fprintf(stderr, "[PLAYER] RetroAchievements: the badge pictures folder could not be "
+                        "removed at sign-out\n");
+    SDL_UnlockMutex(run->ach_badge_cache_lock);
+}
+
+/* One step of the badge pictures, each frame: decodes the answer the bridge holds, then asks
+   for the next badge the page lacks, one at a time. Each row's own state first (a locked row's
+   "_lock" picture), then the unlocked picture of each locked row, which the in-game toast shows
+   when it unlocks (player_ach_badge_next). Each badge is asked for once while a game's list
+   uses it (a new list frees the slots it does not use, and the badge folder answers a picture
+   asked for again); one that fails, or is refused, keeps the page's own icon, and the first
+   failure is logged. Nothing is asked while the switch is off,
+   nobody is signed in or no game is loaded (nk_ach_request_badge). */
+static void player_achievements_pump_badges(PlayerRun *run) {
+    PlayerApp *app = &run->app;
+    NkAchBadge answer;
+    const bool answered = nk_ach_take_badge(run->achievements, &answer);
+    if (answered) {
+        const size_t k = player_ach_badge_find(run->ach_badges, PLAYER_ACH_BADGE_SLOTS,
+                                               answer.name, answer.locked);
+        if (k < PLAYER_ACH_BADGE_SLOTS && run->ach_badges[k].state == PLAYER_ACH_BADGE_ASKED) {
+            PlayerAchBadgeSlot *badge = &run->ach_badges[k];
+            const char *why = answer.why;
+            if (answer.ok) {
+                /* Decoded only within a badge's limits, checked from the header first. */
+                const NkUiImageLimits limits = {NK_ACH_BADGE_MAX_BYTES, NK_ACH_BADGE_MAX_SIDE,
+                                                NK_ACH_BADGE_MAX_SIDE};
+                const NkUiImageStatus status = nk_ui_image_decode_png(
+                    answer.png, answer.size, &limits, &run->ach_badge_images[k]);
+                if (status == NK_UI_IMAGE_OK) badge->state = PLAYER_ACH_BADGE_SHOWN;
+                else why = nk_ui_image_status_name(status);
+            }
+            if (badge->state != PLAYER_ACH_BADGE_SHOWN) {
+                badge->state = PLAYER_ACH_BADGE_FAILED;
+                if (!run->ach_badge_failure_logged) {
+                    run->ach_badge_failure_logged = true;
+                    fprintf(stderr, "[PLAYER] RetroAchievements: badge %s%s is not shown (%s); "
+                                    "the page draws its own icon. Later badge failures this run "
+                                    "are not logged\n",
+                            answer.name, answer.locked ? "_lock" : "", why);
+                }
+            }
+            player_achievements_attach_badges(run);
+        }
+        nk_ach_badge_free(&answer);
+    } else if (!nk_ach_badge_pending(run->achievements)) {
+        /* An answer the switch, the game or the account dropped on its way: that badge was not
+           tried, and may be asked for again. */
+        for (size_t i = 0u; i < PLAYER_ACH_BADGE_SLOTS; i++)
+            if (run->ach_badges[i].state == PLAYER_ACH_BADGE_ASKED)
+                memset(&run->ach_badges[i], 0, sizeof run->ach_badges[i]);
+    }
+    if (!app->achievements_list_loaded || nk_ach_badge_pending(run->achievements)) return;
+    size_t row = 0u;
+    bool locked = false;
+    if (!player_ach_badge_next(app->achievements_list, app->achievements_list_count,
+                               run->ach_badges, PLAYER_ACH_BADGE_SLOTS, &row, &locked))
+        return;
+    const size_t k = player_ach_badge_free_slot(run->ach_badges, PLAYER_ACH_BADGE_SLOTS);
+    if (k == PLAYER_ACH_BADGE_SLOTS) {
+        /* Every slot holds a picture this game's page uses (a new list releases the rest): the
+           page keeps its own icons for the others, and says so once. */
+        if (!run->ach_badge_slots_full_logged) {
+            run->ach_badge_slots_full_logged = true;
+            fprintf(stderr, "[PLAYER] RetroAchievements: all %u badge picture slots are in use; "
+                            "the page draws its own icon for the other badges\n",
+                    (unsigned)PLAYER_ACH_BADGE_SLOTS);
+        }
+        return;
+    }
+    /* Nothing may be sent now: the page keeps its own icons. */
+    if (!nk_ach_request_badge(run->achievements, app->achievements_list[row].badge_name, locked))
+        return;
+    PlayerAchBadgeSlot *slot = &run->ach_badges[k];
+    memset(slot, 0, sizeof *slot);
+    snprintf(slot->name, sizeof slot->name, "%s", app->achievements_list[row].badge_name);
+    slot->locked = locked;
+    slot->state = PLAYER_ACH_BADGE_ASKED;
+}
+
+static void player_achievements_save_queue_or_report(PlayerRun *run) {
+    if (!run || !run->achievements || !player_achievements_queue_saves_allowed(run) ||
+        player_achievements_save_queue(run)) return;
+    snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+             "The offline unlock queue could not be saved to this PC.");
+}
+
+/* The user's Sign out, once the credential is gone: the session ends, the unlocks still
+   waiting are discarded and the queue file is rewritten. The queue was that account's, and
+   nothing of a signed-out account stays on this PC. */
+static void player_achievements_end_account(PlayerRun *run, bool credential_removed) {
+    if (!run) return;
+    if (!credential_removed) {
+        /* The account is still the stored one: its records stay for its next session. */
+        if (run->achievements) nk_ach_logout(run->achievements);
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "Sign-out could not remove the token from Credential Manager.");
+        return;
+    }
+    const size_t discarded = run->achievements ? nk_ach_sign_out(run->achievements) : 0u;
+    player_achievements_clear_badge_cache(run);
+    if (discarded) {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "Signed out. %u unsent unlock%s discarded.", (unsigned)discarded,
+                 discarded == 1u ? " was" : "s were");
+    } else {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "Signed out.");
+    }
+    if (discarded) player_achievements_save_queue_or_report(run);
+}
+
+/* Events the bridge dropped because more arrived than its queue holds before this player read
+   them (the oldest go first, nk_ach_take_events): logged once per change, by the counter's name,
+   and said on the status line, so a missed unlock notice or error is never silent. */
+static void player_achievements_report_dropped_events(PlayerRun *run) {
+    const uint32_t dropped = nk_ach_events_dropped(run->achievements);
+    if (dropped == run->achievements_events_dropped_seen) return;
+    const uint32_t newly = dropped - run->achievements_events_dropped_seen;
+    run->achievements_events_dropped_seen = dropped;
+    fprintf(stderr, "[PLAYER] RetroAchievements: nk_ach_events_dropped=%u (%u more): notices "
+                    "arrived faster than they were read and the oldest were dropped\n",
+            (unsigned)dropped, (unsigned)newly);
+    PlayerApp *app = &run->app;
+    char status[sizeof app->achievements_status];
+    snprintf(status, sizeof status, "%s", app->achievements_status);
+    char note[96];
+    snprintf(note, sizeof note, "%u RetroAchievements notice%s could not be shown.",
+             (unsigned)newly, newly == 1u ? "" : "s");
+    const size_t room = sizeof app->achievements_status - strlen(note) - 2u;
+    snprintf(app->achievements_status, sizeof app->achievements_status, "%.*s%s%s",
+             player_utf8_fit(status, room), status, status[0] ? " " : "", note);
+}
+
+static void player_achievements_collect_events(PlayerRun *run) {
+    if (!run || !run->achievements) return;
+    PlayerApp *app = &run->app;
+    NkAchEvent events[NK_ACH_EVENT_QUEUE];
+    size_t count;
+    while ((count = nk_ach_take_events(run->achievements, events,
+                                       NK_ACH_EVENT_QUEUE)) != 0u) {
+        for (size_t i = 0u; i < count; i++) {
+            const NkAchEvent *event = &events[i];
+            switch (event->kind) {
+            case NK_ACH_EVENT_LOGIN_OK: {
+                run->achievements_login_pending = false;
+                if (run->achievements_signout_pending) {
+                    /* Tried again: an account whose token is still stored keeps its records. */
+                    player_achievements_end_account(
+                        run, nk_platform_credential_delete(k_ach_credential_target));
+                    run->achievements_signout_pending = false;
+                    app->achievements_signed_in = false;
+                    app->achievements_account[0] = '\0';
+                    break;
+                }
+                if (!app->settings.achievements_enabled) {
+                    nk_ach_logout(run->achievements);
+                    app->achievements_signed_in = false;
+                    app->achievements_account[0] = '\0';
+                    snprintf(app->achievements_status, sizeof app->achievements_status,
+                             "RetroAchievements is off.");
+                    break;
+                }
+                char username[256] = "";
+                char token[1024] = "";
+                const bool have_user = nk_ach_copy_user_name(run->achievements, username,
+                                                              sizeof username);
+                const bool have_token = nk_ach_copy_user_token(run->achievements, token,
+                                                                sizeof token);
+                const bool stored = have_user && have_token &&
+                    nk_platform_credential_write(k_ach_credential_target, username, token);
+                nk_secure_zero(token, sizeof token);
+                if (!stored) {
+                    nk_ach_logout(run->achievements);
+                    app->achievements_signed_in = false;
+                    app->achievements_account[0] = '\0';
+                    snprintf(app->achievements_status, sizeof app->achievements_status,
+                             "Windows Credential Manager could not store the "
+                             "RetroAchievements token.");
+                } else {
+                    app->achievements_signed_in = true;
+                    snprintf(app->achievements_account, sizeof app->achievements_account,
+                             "%.*s", (int)sizeof(app->achievements_account) - 1, username);
+                    player_achievements_rest_status(
+                        run, app->is_game_running && !run->guest_memory_channel_active
+                                 ? "Signed in. Restart this game to start tracking."
+                                 : "Signed in.");
+                    nk_ach_replay_pending_unlocks(run->achievements, SDL_GetTicks());
+                }
+                nk_secure_zero(username, sizeof username);
+                break;
+            }
+            case NK_ACH_EVENT_LOGIN_FAILED:
+            case NK_ACH_EVENT_LOGIN_UNREACHABLE:
+                run->achievements_login_pending = false;
+                if (run->achievements_signout_pending) {
+                    run->achievements_signout_pending = false;
+                    player_achievements_end_account(
+                        run, nk_platform_credential_delete(k_ach_credential_target));
+                } else if (!app->settings.achievements_enabled) {
+                    /* The switch was turned off while this sign-in was on its way (its
+                       nk_ach_logout aborted it): "RetroAchievements is off." stays, and the
+                       bridge tries nothing again. */
+                } else if (event->kind == NK_ACH_EVENT_LOGIN_UNREACHABLE) {
+                    /* The stored token was not refused: player_frame_begin signs in with it
+                       again when the bridge says it is due. No password is asked. */
+                    player_achievements_rest_status(
+                        run, "RetroAchievements could not be reached. Sign-in is tried again "
+                             "by itself.");
+                } else {
+                    player_achievements_rest_status(
+                        run, "Sign-in failed. Check the account or connection.");
+                }
+                app->achievements_signed_in = false;
+                app->achievements_account[0] = '\0';
+                break;
+            case NK_ACH_EVENT_UNLOCKS_DISCARDED:
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "%u saved unlock%s of another account %s discarded, not sent.",
+                         event->count, event->count == 1u ? "" : "s",
+                         event->count == 1u ? "was" : "were");
+                fprintf(stderr, "[PLAYER] RetroAchievements: %s\n", app->achievements_status);
+                player_achievements_save_queue_or_report(run);
+                break;
+            case NK_ACH_EVENT_GAME_LOADED:
+                player_achievements_refresh_list(run);
+                /* A channel stopped meanwhile keeps its own reason on the status line: no
+                   frame reaches these achievements. */
+                if (run->guest_memory_channel_active)
+                    snprintf(app->achievements_status, sizeof app->achievements_status,
+                             "%u achievements available.", event->count);
+                break;
+            case NK_ACH_EVENT_GAME_FAILED: {
+                player_achievements_clear_list(run);
+                /* No set, so nothing to evaluate: the guest stops waiting for this player at
+                   each VBLANK. */
+                player_achievements_end_frames(run);
+                /* rc_client's own reason: no set for this game, or a server that could not be
+                   reached, are different things. */
+                const char *reason = event->message[0] ? event->message : "no reason was given.";
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "The achievement set could not be loaded: %.*s",
+                         player_utf8_fit(reason, 150u), reason);
+                break;
+            }
+            case NK_ACH_EVENT_UNLOCKED: {
+                /* The title, its points and its badge name, one to a line
+                   (nk_guest_memory_notification_unlock); the runtime's toast shows the badge
+                   when this PC keeps its picture. */
+                char toast[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+                snprintf(toast, sizeof toast, NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "%.*s\n%u\n%s",
+                         player_utf8_fit(event->title, 140u), event->title,
+                         (unsigned)event->points, event->badge_name);
+                if (run->guest_memory_channel_active) {
+                    (void)nk_platform_guest_memory_channel_notify(&run->guest_memory_channel,
+                                                                  toast);
+                }
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "Unlocked: %.*s", player_utf8_fit(event->title, 150u), event->title);
+                player_achievements_refresh_list(run);
+                player_achievements_save_queue_or_report(run);
+                break;
+            }
+            case NK_ACH_EVENT_SET_COMPLETED: {
+                /* Every achievement of the game's set is unlocked: the runtime's toast says so
+                   with the game's title (nk_guest_memory_notification_set_completed). */
+                const char *game = event->title[0] ? event->title : "This game";
+                char toast[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+                snprintf(toast, sizeof toast, NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED "%.*s",
+                         player_utf8_fit(game, 140u), game);
+                if (run->guest_memory_channel_active) {
+                    (void)nk_platform_guest_memory_channel_notify(&run->guest_memory_channel,
+                                                                  toast);
+                }
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "Set completed: %.*s", player_utf8_fit(game, 150u), game);
+                break;
+            }
+            case NK_ACH_EVENT_DISCONNECTED:
+                player_achievements_save_queue_or_report(run);
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "Offline. Unlocks are waiting to sync.");
+                break;
+            case NK_ACH_EVENT_RECONNECTED:
+                player_achievements_save_queue_or_report(run);
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "Connected. Pending unlocks synced.");
+                break;
+            case NK_ACH_EVENT_QUEUE_CHANGED:
+                player_achievements_save_queue_or_report(run);
+                break;
+            case NK_ACH_EVENT_UNLOCK_REFUSED:
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "RetroAchievements refused a saved unlock; it left the offline queue.");
+                player_achievements_save_queue_or_report(run);
+                break;
+            case NK_ACH_EVENT_QUEUE_FULL:
+                player_achievements_save_queue_or_report(run);
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "The offline unlock queue is full; this unlock may not sync.");
+                break;
+            case NK_ACH_EVENT_DISABLED:
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "An achievement was disabled because its memory range is unavailable.");
+                break;
+            case NK_ACH_EVENT_SERVER_ERROR:
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "RetroAchievements returned an error; pending progress is kept.");
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    player_achievements_report_dropped_events(run);
+}
+
+/* Signs in with the token the credential store holds. No password is asked or needed. */
+static void player_achievements_sign_in_stored(PlayerRun *run) {
+    PlayerApp *app = &run->app;
+    char username[256] = "";
+    char token[1024] = "";
+    if (!nk_platform_credential_read(k_ach_credential_target, username, sizeof username,
+                                     token, sizeof token)) {
+        app->achievements_signed_in = false;
+        player_achievements_rest_status(run, "Sign in to connect.");
+        return;
+    }
+    snprintf(app->achievements_account, sizeof app->achievements_account,
+             "%.*s", (int)sizeof(app->achievements_account) - 1, username);
+    app->achievements_signed_in = false;
+    run->achievements_login_pending =
+        nk_ach_begin_login(run->achievements, username, token);
+    nk_secure_zero(token, sizeof token);
+    nk_secure_zero(username, sizeof username);
+    snprintf(app->achievements_status, sizeof app->achievements_status,
+             run->achievements_login_pending ? "Signing in."
+                                             : "Sign-in could not start.");
+}
+
+static void player_achievements_start(PlayerRun *run) {
+    if (!run) return;
+    PlayerApp *app = &run->app;
+    player_achievements_sync_transport(run);
+    if (!app->settings.achievements_enabled) return;
+    if (!app->achievements_store_available) {
+        snprintf(app->achievements_status, sizeof app->achievements_status,
+                 "Sign-in requires Windows Credential Manager; this platform is unsupported.");
+        return;
+    }
+    if (!player_achievements_create(run)) {
+        snprintf(app->achievements_status, sizeof app->achievements_status,
+                 "RetroAchievements could not initialize.");
+        return;
+    }
+    nk_ach_set_online(run->achievements, true);
+    if (!run->achievements_queue_load_checked) {
+        run->achievements_queue_load_checked = true;
+        player_achievements_load_queue(run);
+    }
+    player_achievements_sign_in_stored(run);
+}
+
+static bool player_achievements_consent(PlayerRun *run) {
+    static const SDL_MessageBoxButtonData buttons[] = {
+        {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Cancel"},
+        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Agree and continue"},
+    };
+    static const char message[] =
+        "RetroAchievements is hosted at https://retroachievements.org.\n\n"
+        "If you agree, Nakagawa Recomp sends only to retroachievements.org: your "
+        "RetroAchievements username and API token, the game's RetroAchievements hash, the "
+        "achievements you unlock, and every two minutes while a game runs its Rich Presence "
+        "text (what the game's achievement set says you are doing). Each request names this "
+        "player, its version, your operating system and the rcheevos version. During sign-in "
+        "your password is sent once to obtain a token and is never saved; the token is kept in "
+        "Windows Credential Manager. Game files, saves and guest memory stay on this PC.\n\n"
+        "While you are signed in, the achievements' badge pictures are downloaded from "
+        "media.retroachievements.org, the only other host. Those requests send no username, "
+        "token or console ID, only the same player, version and system names. The pictures "
+        "are kept on this PC until you sign out.\n\n"
+        "Casual Mode only: Hardcore is not available. Achievements are off while cheats are on "
+        "or with 60 FPS game logic.";
+    SDL_MessageBoxData data;
+    int selected = 0;
+    if (!run || !run->window) return false;
+    memset(&data, 0, sizeof data);
+    data.flags = SDL_MESSAGEBOX_INFORMATION;
+    data.window = run->window;
+    data.title = "RetroAchievements consent";
+    data.message = message;
+    data.numbuttons = (int)(sizeof buttons / sizeof buttons[0]);
+    data.buttons = buttons;
+    return SDL_ShowMessageBox(&data, &selected) && selected == 1;
+}
+
+static bool player_achievements_prompt_sign_in(PlayerRun *run) {
+    if (!run || !run->app.settings.achievements_enabled ||
+        !run->app.achievements_store_available) {
+        if (run) snprintf(run->app.achievements_status,
+                          sizeof run->app.achievements_status,
+                          "Enable RetroAchievements first; this platform needs Windows Credential Manager.");
+        return false;
+    }
+    if (run->achievements_login_pending) {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "Sign-in is already in progress.");
+        return false;
+    }
+    if (!player_achievements_create(run)) return false;
+    /* The operating system's own credential dialog takes the password (nk_platform.h); the
+       player sees it only long enough to hand it to the sign-in request. */
+    char username[256] = "";
+    char password[1024] = "";
+    const int prompt = nk_platform_credential_prompt(
+        "Sign in to RetroAchievements",
+        "Enter your RetroAchievements.org username and password. "
+        "The password is used once to obtain a token and is not stored.",
+        NK_ACH_HOST, username, sizeof username, password, sizeof password);
+    if (prompt != 1) {
+        nk_secure_zero(password, sizeof password);
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 prompt == 0 ? "Sign-in cancelled." : "Credential prompt failed.");
+        return false;
+    }
+    if (!nk_ach_begin_login_with_password(run->achievements, username, password)) {
+        nk_secure_zero(password, sizeof password);
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "Sign-in could not start.");
+        return false;
+    }
+    nk_secure_zero(password, sizeof password);
+    run->achievements_login_pending = true;
+    run->achievements_signout_pending = false;
+    snprintf(run->app.achievements_status, sizeof run->app.achievements_status, "Signing in.");
+    return true;
+}
+
+/* The frame service's thread (nk_platform_guest_memory_channel_serve): one evaluation for each
+   VBLANK the runtime publishes, while the guest is paused on that VBLANK, and the runtime goes
+   on as soon as it returns. It never waits for this player's event loop, which a modal box or
+   a dragged window stops: it enters nothing but the bridge, whose lock it takes. */
+static void player_ach_serve_frame(void *context) {
+    PlayerRun *run = (PlayerRun *)context;
+    nk_ach_frame(run->achievements);
+}
+
+static void player_achievements_stop_channel(PlayerRun *run) {
+    if (!run) return;
+    if (run->guest_memory_channel.view) {
+        /* Stops the frame service, waits for it, then unmaps the arena it read. Nothing here
+           holds the bridge's lock, which a frame in progress needs to finish. */
+        nk_platform_guest_memory_channel_stop(&run->guest_memory_channel);
+        nk_platform_guest_memory_channel_close(&run->guest_memory_channel);
+    }
+    if (run->achievements) {
+        nk_ach_set_memory(run->achievements, NULL);
+        /* The game has ended: rc_client sends no more Rich Presence pings for it. */
+        nk_ach_unload_game(run->achievements);
+    }
+    run->guest_memory_channel_active = false;
+    run->achievements_game_hash[0] = '\0';
+}
+
+/* Ends the frame service but keeps the arena mapped. The runtime may not have opened the channel
+   yet, and a section already gone then would end the game's start
+   (GUEST_MEMORY_CHANNEL_UNAVAILABLE). Its next VBLANK sees the stop and turns its hook off; the
+   mapping is closed by player_achievements_stop_channel once the game has exited, at the next
+   launch or at shutdown, which also waits for the service thread. */
+static void player_achievements_end_frames(PlayerRun *run) {
+    if (!run || !run->guest_memory_channel_active) return;
+    nk_platform_guest_memory_channel_stop(&run->guest_memory_channel);
+    if (run->achievements) {
+        nk_ach_set_memory(run->achievements, NULL);
+        /* No frame is evaluated any more, so no ping says the game is being played. */
+        nk_ach_unload_game(run->achievements);
+    }
+    run->guest_memory_channel_active = false;
+    run->achievements_game_hash[0] = '\0';
+}
+
+/* Audit F-1eacbfb4: while a game runs or is starting, its runtime may not have opened the channel
+   yet, and closing the section now would end the game's start (GUEST_MEMORY_CHANNEL_UNAVAILABLE).
+   Then only the frames end, and player_frame_game_session closes the mapping once the game has
+   exited. With no game, the channel closes now. */
+static void player_achievements_release_channel(PlayerRun *run) {
+    if (!run) return;
+    if (run->app.is_game_running || run->app.launch_pending) {
+        player_achievements_end_frames(run);
+    } else {
+        player_achievements_stop_channel(run);
+    }
+}
+
+static void player_achievements_shutdown(PlayerRun *run) {
+    if (!run) return;
+    run->achievements_shutting_down = true;
+    player_achievements_sync_transport(run);
+    /* After this the bridge is entered from this thread alone. */
+    player_achievements_stop_channel(run);
+    PlayerAchHttpJob *job = run->ach_http_job;
+    if (job) {
+        if (job->thread) {
+            SDL_WaitThread(job->thread, NULL);
+            job->thread = NULL;
+        }
+        SDL_SetAtomicInt(&job->done, 1);
+        player_ach_http_poll(run);
+    }
+    if (run->achievements) {
+        if (player_achievements_queue_saves_allowed(run) && !player_achievements_save_queue(run))
+            fprintf(stderr, "[PLAYER] RetroAchievements: unlock-queue.bin could not be saved at "
+                            "shutdown; unlocks not yet sent are lost\n");
+        nk_ach_destroy(run->achievements);
+        run->achievements = NULL;
+    }
+    player_achievements_forget_badges(run);
+    if (run->achievements_lock) {
+        SDL_DestroyMutex(run->achievements_lock);
+        run->achievements_lock = NULL;
+    }
+    if (run->ach_badge_cache_lock) {
+        SDL_DestroyMutex(run->ach_badge_cache_lock);
+        run->ach_badge_cache_lock = NULL;
+    }
+}
+
+static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork *work) {
+    if (!run || !work) return;
+    work->guest_memory_channel[0] = '\0';
+    player_achievements_clear_list(run);
+    snprintf(run->achievements_disc_id, sizeof run->achievements_disc_id, "%s",
+             work->game.disc_id);
+    if (run->guest_memory_channel_active || run->guest_memory_channel.view) {
+        player_achievements_stop_channel(run);
+    }
+    if (!run->app.settings.achievements_enabled || !run->app.achievements_signed_in ||
+        !run->app.achievements_store_available || !run->achievements ||
+        player_ui_test_active(&run->ui_test)) return;
+    /* An unlock is earned only in the game as released: with cheats or the 60 FPS game-logic
+       package no set is loaded and no frame is evaluated, and the status line says why. */
+    const char *blocked = player_launch_achievements_block(work);
+    if (blocked) {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status, "%s",
+                 blocked);
+        fprintf(stderr, "[PLAYER] RetroAchievements is off for this game: %s\n", blocked);
+        return;
+    }
+
+    char hash[33] = "";
+    if (!work->game.iso_path[0] || !nk_ach_psp_hash_iso(work->game.iso_path, hash)) {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "RetroAchievements game identification needs a readable ISO containing "
+                 "PARAM.SFO and EBOOT.BIN.");
+        return;
+    }
+    char channel_name[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
+    static uint32_t sequence;
+    const uint64_t nonce = SDL_GetTicksNS() ^ ((uint64_t)++sequence << 32);
+    const int written = snprintf(channel_name, sizeof channel_name,
+                                 "Local\\NakagawaRecomp.GuestMemory.%u.%016llx",
+                                 (unsigned)nk_platform_process_id(),
+                                 (unsigned long long)nonce);
+    if (written <= 0 || (size_t)written >= sizeof channel_name ||
+        !nk_platform_guest_memory_channel_create(&run->guest_memory_channel, channel_name,
+                                                  NK_GUEST_MEMORY_ARENA_SIZE)) {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "The local guest-memory channel is unavailable; achievements are off for this run.");
+        return;
+    }
+    /* Every region of rcheevos' PSP map (kernel, user and extended RAM), which the arena holds
+       at its guest addresses. */
+    NkAchMemory memory = {
+        run->guest_memory_channel.arena + NK_ACH_PSP_MAP_GUEST_START,
+        NK_ACH_PSP_MAP_GUEST_START,
+        NK_ACH_PSP_MAP_GUEST_SIZE,
+    };
+    nk_ach_set_memory(run->achievements, &memory);
+    if (!nk_ach_begin_load_game(run->achievements, hash)) {
+        player_achievements_stop_channel(run);
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "RetroAchievements refused the game hash; achievements are off for this run.");
+        return;
+    }
+    snprintf(work->guest_memory_channel, sizeof work->guest_memory_channel, "%s", channel_name);
+    snprintf(run->achievements_game_hash, sizeof run->achievements_game_hash, "%s", hash);
+    run->guest_memory_channel_active = true;
+    run->guest_memory_channel_checked = false;
+    if (!nk_platform_guest_memory_channel_serve(&run->guest_memory_channel,
+                                                player_ach_serve_frame, run)) {
+        player_achievements_stop_channel(run);
+        work->guest_memory_channel[0] = '\0';
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "The local guest-memory service could not start; achievements are off for this run.");
+        return;
+    }
+    snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+             "Loading the game's achievement set.");
+}
+
+static void player_achievements_sign_out(PlayerRun *run) {
+    if (!run) return;
+    bool removed = nk_platform_credential_delete(k_ach_credential_target);
+    player_achievements_release_channel(run);
+    player_achievements_clear_list(run);
+    run->app.achievements_signed_in = false;
+    run->app.achievements_account[0] = '\0';
+    if (run->achievements_login_pending) {
+        /* The sign-in still on its way ends, and its records go, when it answers. */
+        run->achievements_signout_pending = true;
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status, "%s",
+                 removed ? "Signed out."
+                         : "Sign-out could not remove the token from Credential Manager.");
+    } else {
+        player_achievements_end_account(run, removed);
+    }
+}
+
+static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettingsOp op) {
+    if (!run) return;
+    PlayerApp *app = &run->app;
+    if (player_ui_test_active(&run->ui_test)) {
+        /* A native UI regression run stays offline, opens no modal box and reads no
+           credential: the switch, Sign in and Sign out are refused, and say so. */
+        snprintf(app->achievements_status, sizeof app->achievements_status,
+                 "RetroAchievements is not available in a UI regression run.");
+        return;
+    }
+    if (app->launch_pending) {
+        snprintf(app->achievements_status, sizeof app->achievements_status,
+                 "Wait for the current launch before changing RetroAchievements.");
+        return;
+    }
+    switch (op) {
+    case PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS:
+        if (app->settings.achievements_enabled) {
+            player_app_set_achievements_enabled(app, false);
+            player_achievements_sync_transport(run);
+            /* Nothing more is sent: the bridge answers what waits itself (nk_ach_set_online). */
+            if (run->achievements) nk_ach_set_online(run->achievements, false);
+            if (run->achievements_signout_pending) {
+                /* The Sign out that waited for the sign-in's answer ends the account now. When
+                   the token is gone, nk_ach_sign_out replaced rc_client and the answer is
+                   dropped, so no sign-in is pending any more; when it is still stored, the
+                   records stay and the aborted sign-in answers as LOGIN_FAILED. */
+                run->achievements_signout_pending = false;
+                const bool removed = nk_platform_credential_delete(k_ach_credential_target);
+                player_achievements_end_account(run, removed);
+                if (removed) run->achievements_login_pending = false;
+            } else if (run->achievements) {
+                nk_ach_logout(run->achievements);
+            }
+            player_achievements_release_channel(run);
+            player_achievements_clear_list(run);
+            app->achievements_signed_in = false;
+            app->achievements_account[0] = '\0';
+            snprintf(app->achievements_status, sizeof app->achievements_status,
+                     "RetroAchievements is off.");
+            return;
+        }
+        if (!app->achievements_store_available) {
+            snprintf(app->achievements_status, sizeof app->achievements_status,
+                     "Sign-in requires Windows Credential Manager; this platform is unsupported.");
+            return;
+        }
+        if (!player_achievements_consent(run)) {
+            snprintf(app->achievements_status, sizeof app->achievements_status,
+                     "RetroAchievements was not enabled.");
+            return;
+        }
+        player_app_set_achievements_enabled(app, true);
+        player_achievements_start(run);
+        break;
+    case PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS:
+        (void)player_achievements_prompt_sign_in(run);
+        break;
+    case PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS:
+        player_achievements_sign_out(run);
+        break;
+    default:
+        break;
+    }
+}
 
 /* A Linux or macOS install uses its earlier folders while the new one exists too (#324,
    nk_data_migrate.h): the library and the log name both. Nothing is moved, and the start goes on. */
@@ -5493,7 +6776,7 @@ static int player_capture_screenshot(PlayerRun *run) {
                     run->capture_pixel_width, run->capture_pixel_height, SDL_GetError());
         } else {
             player_ui_test_delay_screenshot();
-            player_render_active_ui(run->next_ui, app, run->renderer, run->window);
+            player_render_active_ui(run, run->next_ui, app, run->renderer, run->window);
             saved = player_host_save_screenshot(run->renderer, run->screenshot_path);
             if (saved) {
                 printf("[PLAYER] Screenshot saved to %s (%dx%d pixels, %dx%d layout)\n", run->screenshot_path,
@@ -5590,7 +6873,7 @@ static void player_loop_start(PlayerRun *run) {
        already shows its state; a game the player was started with keeps it
        stopped. */
     player_ui_nk_update_music(run->next_ui, app);
-    player_render_active_ui(run->next_ui, app, run->renderer, run->window);
+    player_render_active_ui(run, run->next_ui, app, run->renderer, run->window);
     if (run->interactive_window && run->have_usable_bounds && !run->window_frame_measured) {
         run->window_frame_measured = player_refit_to_actual_frame(
             run->window, run->requested_window, run->usable_bounds,
@@ -5602,6 +6885,41 @@ static void player_loop_start(PlayerRun *run) {
 /* The start of a frame: update state, the UI-test script step, and the tick. */
 static void player_frame_begin(PlayerRun *run) {
     PlayerApp *app = &run->app;
+    player_achievements_sync_transport(run);
+    player_ach_http_poll(run);
+    if (run->achievements && app->settings.achievements_enabled) {
+        nk_ach_idle(run->achievements);
+        player_achievements_collect_events(run);
+        player_achievements_pump_badges(run);
+        if (app->achievements_signed_in) {
+            nk_ach_replay_pending_unlocks(run->achievements, SDL_GetTicks());
+        } else if (!run->achievements_login_pending && !run->achievements_signout_pending &&
+                   nk_ach_token_login_due(run->achievements, SDL_GetTicks())) {
+            /* A sign-in at start that reached no server: the stored token again. */
+            player_achievements_sign_in_stored(run);
+        }
+    }
+    if (run->guest_memory_channel_active &&
+        nk_platform_guest_memory_channel_serving(&run->guest_memory_channel) < 0) {
+        snprintf(app->achievements_status, sizeof app->achievements_status,
+                 "The local guest-memory channel stopped; achievements are off for this run.");
+        player_achievements_release_channel(run);
+    }
+    /* The runtime opens the channel at its start, before its window exists. A game whose window
+       is up without having opened it ignores the channel (a package built before it, or
+       without it): no frame will ever arrive, so the achievements are not left looking live. */
+    if (run->guest_memory_channel_active && !run->guest_memory_channel_checked &&
+        app->is_game_running && app->child_window_ready) {
+        run->guest_memory_channel_checked = true;
+        if (!nk_platform_guest_memory_channel_runtime_attached(&run->guest_memory_channel)) {
+            fprintf(stderr, "[PLAYER] RetroAchievements: the game's runtime did not open the "
+                            "guest-memory channel\n");
+            snprintf(app->achievements_status, sizeof app->achievements_status,
+                     "This game's package does not support achievements; rebuild it to track "
+                     "them.");
+            player_achievements_stop_channel(run);
+        }
+    }
     player_update_poll(app);
     player_report_poll(app);
     player_ui_test_report_update_phase(&run->ui_test, app);
@@ -5676,7 +6994,13 @@ static void player_frame_events(PlayerRun *run) {
                                           &event)) {
                 switch (event.type) {
                 case SDL_EVENT_USER:
-                    if (run->package_status_job &&
+                    if (event.user.code == PLAYER_ACH_HTTP_EVENT_CODE &&
+                        event.user.data1 == run) {
+                        player_ach_http_poll(run);
+                        if (run->achievements && app->settings.achievements_enabled)
+                            nk_ach_idle(run->achievements);
+                        player_achievements_collect_events(run);
+                    } else if (run->package_status_job &&
                         event.user.data1 == run->package_status_job &&
                         event.user.code == PLAYER_PACKAGE_STATUS_EVENT_CODE) {
                         player_package_status_finish(
@@ -5984,7 +7308,8 @@ static void player_frame_game_session(PlayerRun *run) {
     player_ui_nk_update_music(run->next_ui, app);
     /* A launch the worker finished becomes the running game, or its card. */
     run->launch_job = player_launch_job_poll(app, run->launch_job, false,
-                                             player_ui_nk_launcher_audio_closed(run->next_ui));
+                                             player_ui_nk_launcher_audio_closed(run->next_ui),
+                                             run);
 
     /* Monitor running game process */
     bool child_exited = false;
@@ -5992,6 +7317,10 @@ static void player_frame_game_session(PlayerRun *run) {
             child_exited = player_app_monitor_game_session(app, SDL_GetTicks());
     }
     (void)child_exited;
+    if (!app->is_game_running && !app->launch_pending &&
+        (run->guest_memory_channel_active || run->guest_memory_channel.view)) {
+        player_achievements_stop_channel(run);
+    }
     /* Discord status (#2259), when the user turned it on: shows the running game and
        clears it once the game has exited. Never waits; quiet when Discord is not running. */
     player_app_discord_tick(app, SDL_GetTicks());
@@ -6079,7 +7408,7 @@ static void player_frame_game_session(PlayerRun *run) {
 static void player_frame_render(PlayerRun *run) {
     PlayerApp *app = &run->app;
     player_ui_test_begin_frame(&run->ui_test);
-    player_render_active_ui(run->next_ui, app, run->renderer, run->window);
+    player_render_active_ui(run, run->next_ui, app, run->renderer, run->window);
     /* Consume renderer requests in the same frame that created them. A
        later event batch may change the selected title before the next
        loop iteration, which must not redirect this retry. */
@@ -6089,7 +7418,7 @@ static void player_frame_render(PlayerRun *run) {
             player_note_launcher_display(app, run->window);
             run->launch_job = player_launch_job_start(
                 app, app->request_launch_index,
-                player_ui_nk_launcher_audio_closed(run->next_ui));
+                player_ui_nk_launcher_audio_closed(run->next_ui), run);
         }
         /* A request dropped here (a launch already running, or one refused before
            player_app_launch_begin) must not leave its "Play without the pack" for a later launch;
@@ -6157,10 +7486,12 @@ static int player_shutdown(PlayerRun *run) {
 
     /* A launch still on its worker finishes first, so its game is stopped. */
     run->launch_job = player_launch_job_poll(app, run->launch_job, true,
-                                             player_ui_nk_launcher_audio_closed(run->next_ui));
+                                             player_ui_nk_launcher_audio_closed(run->next_ui),
+                                             run);
     if (app->is_game_running) {
         player_app_stop_game(app);
     }
+    player_achievements_shutdown(run);
 
     /* After a factory reset nothing is saved: the settings would bring the
        config folder back. */
@@ -6290,6 +7621,13 @@ int main(int argc, char *argv[]) {
     if (code != PLAYER_RUN_CONTINUE) {
         nk_platform_single_instance_release(&run.instance);
         return code;
+    }
+
+    /* Native UI regressions and named screenshot views stay offline. In an ordinary interactive
+       run, only the persisted, user-approved switch may start the RA client. */
+    if (run.interactive_window && run.screenshot_path == NULL && run.test_view == NULL &&
+        !player_ui_test_active(&run.ui_test)) {
+        player_achievements_start(&run);
     }
 
     player_loop_start(&run);

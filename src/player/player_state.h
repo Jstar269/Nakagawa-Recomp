@@ -37,6 +37,87 @@
 #define MAX_PATH_LEN NK_MAX_PATH
 #define MAX_DISC_ID_LEN NK_MAX_DISC_ID_LEN
 #define MAX_SHOWCASE_GAMES 8
+/* The rows a game's page lists: every achievement of a set this large, the rest counted. */
+#define PLAYER_ACHIEVEMENTS_LIST_MAX 256u
+#define PLAYER_ACHIEVEMENT_TITLE_MAX 128u
+#define PLAYER_ACHIEVEMENT_DESCRIPTION_MAX 192u
+#define PLAYER_ACHIEVEMENT_BADGE_NAME_MAX 8u
+
+struct NkUiImage;
+/* One achievement as the game's page lists it. The text is the bridge's, already cleaned. */
+typedef struct PlayerAchievementRow {
+    char title[PLAYER_ACHIEVEMENT_TITLE_MAX];
+    char description[PLAYER_ACHIEVEMENT_DESCRIPTION_MAX];
+    char badge_name[PLAYER_ACHIEVEMENT_BADGE_NAME_MAX]; /* "" when the set gave none usable */
+    uint32_t points;
+    bool unlocked;
+    /* The badge picture for this row's state, decoded, or NULL while there is none: the page
+       draws its own icon then. The player's badge store owns it (src/player/main.c). */
+    const struct NkUiImage *badge;
+} PlayerAchievementRow;
+
+/* ---- RetroAchievements badge pictures (#1316) -------------------------------------------
+ * The player keeps the decoded pictures of one run in PLAYER_ACH_BADGE_SLOTS slots
+ * (src/player/main.c holds each slot's picture beside it) and their files in its badge folder,
+ * at most PLAYER_ACH_BADGE_CACHE_FILES_MAX of them. */
+#define PLAYER_ACH_BADGE_SLOTS 512u
+#define PLAYER_ACH_BADGE_CACHE_FILES_MAX 2048u
+typedef enum {
+    PLAYER_ACH_BADGE_FREE = 0,
+    PLAYER_ACH_BADGE_ASKED,  /* requested from the bridge, no answer yet */
+    PLAYER_ACH_BADGE_SHOWN,  /* decoded: the page shows it */
+    PLAYER_ACH_BADGE_FAILED  /* tried this run: the page draws its own icon */
+} PlayerAchBadgeState;
+typedef struct PlayerAchBadgeSlot {
+    char name[PLAYER_ACHIEVEMENT_BADGE_NAME_MAX];
+    bool locked; /* the "_lock" picture */
+    PlayerAchBadgeState state;
+} PlayerAchBadgeSlot;
+
+/* The slot holding name's picture in that state, or slot_count when none does. */
+size_t player_ach_badge_find(const PlayerAchBadgeSlot *slots, size_t slot_count,
+                             const char *name, bool locked);
+/* Whether a page of these rows uses name's picture in that state: a locked row its "_lock"
+ * picture and its unlocked one (the in-game toast shows that one when it unlocks), an unlocked
+ * row its unlocked one. */
+bool player_ach_badge_in_use(const PlayerAchievementRow *rows, size_t row_count,
+                             const char *name, bool locked);
+/* A new list (a game's rows, or none): every slot it does not use is freed, and released[i] is
+ * set for each slot freed so the caller frees its picture (released may be NULL when no slot
+ * holds one). Returns how many were freed. The pictures stay in the badge folder, so a game's
+ * page opened again reads them from this PC. */
+size_t player_ach_badges_release_unused(PlayerAchBadgeSlot *slots, size_t slot_count,
+                                        const PlayerAchievementRow *rows, size_t row_count,
+                                        bool *released);
+/* The next picture the rows lack, in the order the page wants them: each row's own state
+ * first, then the unlocked picture of each locked row. False when no slot is missing one. */
+bool player_ach_badge_next(const PlayerAchievementRow *rows, size_t row_count,
+                           const PlayerAchBadgeSlot *slots, size_t slot_count,
+                           size_t *out_row, bool *out_locked);
+/* A free slot, or slot_count when every slot is in use. */
+size_t player_ach_badge_free_slot(const PlayerAchBadgeSlot *slots, size_t slot_count);
+
+/* The badge folder. player_ach_badge_cache_open removes the "*.part" files an interrupted
+ * write left (they would count toward the folder's limit) and returns how many it removed. */
+size_t player_ach_badge_cache_open(const char *dir);
+/* Whether a picture's bytes are a badge the player can show (it decodes them). */
+typedef bool (*PlayerAchBadgeCheck)(const uint8_t *bytes, size_t size, void *context);
+typedef enum {
+    PLAYER_ACH_BADGE_CACHE_MISSING = 0, /* no file, or it could not be read */
+    PLAYER_ACH_BADGE_CACHE_HIT,         /* *out holds the file's bytes (the caller frees them) */
+    PLAYER_ACH_BADGE_CACHE_REMOVED      /* the file failed check and was removed */
+} PlayerAchBadgeCacheRead;
+/* Reads dir/file, at most max_bytes. A file that is larger or fails check is removed, so the
+ * picture is asked for again. */
+PlayerAchBadgeCacheRead player_ach_badge_cache_read(const char *dir, const char *file,
+                                                    size_t max_bytes, PlayerAchBadgeCheck check,
+                                                    void *context, uint8_t **out,
+                                                    size_t *out_size);
+/* Keeps bytes as dir/file: written to dir/file.part, put on the disk, then renamed over
+ * dir/file. Not written when the folder already holds max_files files. False when nothing was
+ * kept; no ".part" file is left then. */
+bool player_ach_badge_cache_write(const char *dir, const char *file, const uint8_t *bytes,
+                                  size_t size, size_t max_files);
 
 typedef enum {
     VIEW_LIBRARY = 0,
@@ -380,9 +461,9 @@ typedef struct {
     char controller_name[64];
     bool controller_connected;
     NkNetworkMode network_mode; /* reserved master switch; offline is the only mode today */
-    /* Online and developer options (docs/ONLINE_FEATURES.md). These are the
-       user's choices only: this build has no network feature, so online_mode
-       changes nothing yet and network_mode stays offline whatever it says. */
+    /* Online and developer options (docs/ONLINE_FEATURES.md). online_mode covers the
+       separate news/report features; RetroAchievements has its own opt-in below, and the
+       reserved network_mode remains offline in either case. */
     bool online_mode;      /* off by default; asked by the setup wizard */
     bool online_news;      /* the news strip, when online mode ships */
     bool online_reports;   /* user-sent reports, when online mode ships */
@@ -418,6 +499,8 @@ typedef struct {
        play mode and elapsed time. Off by default (owner decision 2026-11-08); it cannot be
        turned on while the build has no Discord application ID (nk_discord_available). */
     bool discord_presence;
+    /* RetroAchievements (#1316) is opt-in, off by default, and independent of network_mode. */
+    bool achievements_enabled;
     /* Opt-in cover art (#2632): fetch Redump-matched PSP box art from thumbnails.libretro.com
        to the local cache folder. Off by default. */
     bool download_cover_art;
@@ -958,6 +1041,22 @@ struct PlayerApp {
     char requested_open_path[NK_MAX_PATH];
     PlayerUpdateState update;
     PlayerReportState report;
+    /* Live RetroAchievements status; credentials and the rc_client stay in PlayerRun, never in
+       settings.json or PlayerApp's persisted state. */
+    bool achievements_store_available;
+    bool achievements_signed_in;
+    char achievements_account[64];
+    char achievements_status[192];
+    /* A bounded, memory-only preview for the currently identified game's page: the unlocked
+       first, then the locked (nk_ach_copy_achievement_list), and the set's progress. */
+    bool achievements_list_loaded;
+    char achievements_list_disc_id[MAX_DISC_ID_LEN];
+    PlayerAchievementRow achievements_list[PLAYER_ACHIEVEMENTS_LIST_MAX];
+    size_t achievements_list_count;
+    size_t achievements_list_total;
+    uint32_t achievements_unlocked;
+    uint32_t achievements_points_unlocked;
+    uint32_t achievements_points_total;
 
     /* Native core state */
     NkLibrary library;
@@ -2173,6 +2272,7 @@ typedef struct {
     char cheats_file[NK_MAX_PATH];
     char boot_event_file_path[MAX_PATH_LEN];
     char input_profile_path[NK_MAX_PATH];
+    char guest_memory_channel[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
     char ui_root[MAX_PATH_LEN];
     int launcher_display_bounds[4];
     /* Results, written by player_launch_work_run. */
@@ -2628,6 +2728,18 @@ void player_app_toggle_online_feature(PlayerApp *app, int feature); /* 0 news, 1
 void player_app_toggle_update_check_at_start(PlayerApp *app);
 /* Discord status (#2259). The switch stays off while nk_discord_available() is false. */
 void player_app_toggle_discord_presence(PlayerApp *app);
+/* RetroAchievements is a separate opt-in, not the reserved network_mode setting. */
+void player_app_set_achievements_enabled(PlayerApp *app, bool enabled);
+/* Why RetroAchievements is off for a game, or NULL when nothing stops it (#1316, maintainer
+ * decision 2026-11-20): an unlock is earned only in the game as released. Cheats on (the stored
+ * switch or this session's --cheats) or a launch with the title's 60 FPS game-logic package,
+ * which changes the game's speed, turn it off for that launch: no achievement set is loaded and
+ * no frame is evaluated. The text says so in the UI. Presentation-only parts (filtering,
+ * upscaling, widescreen, smooth motion, frame pacing) change nothing the game computes and do
+ * not. player_app_achievements_block answers for the title the library shows,
+ * player_launch_achievements_block for the launch about to start. */
+const char *player_app_achievements_block(const PlayerApp *app, int game_index);
+const char *player_launch_achievements_block(const PlayerLaunchWork *work);
 /* What Discord shows now: the running game's title, play mode and start time. False when no
    game runs or nothing can be shown. It ignores the setting; player_app_discord_tick checks
    that. */

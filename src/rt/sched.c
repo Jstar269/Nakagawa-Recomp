@@ -713,6 +713,11 @@ static SrSchedArenaRelease s_arena_release_hook;
 
 void sched_set_arena_release_hook(SrSchedArenaRelease release) { s_arena_release_hook = release; }
 
+/* The program's own work at each delivered VBLANK (recomp.h). NULL: none. */
+static void (*s_vblank_host)(void);
+
+void sched_set_vblank_host(void (*host)(void)) { s_vblank_host = host; }
+
 /* Put [base, base+size) back among the arena's free ranges. stack_range_release() below is the
  * owner's release; a create that took a range and then refused it calls this one directly: the
  * range never had an owner, and the partition is not told. */
@@ -2203,6 +2208,7 @@ static void deliver_vblank(void) {
      * pad sample. Check the pause script after that work so a same-VBLANK press
      * can be deferred until the guest reads it and queues its audio stimulus. */
     sr_vblank_tick();
+    if (s_vblank_host) s_vblank_host();
     sched_pause_script_maybe_request();
 }
 

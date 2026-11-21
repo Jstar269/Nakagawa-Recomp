@@ -731,16 +731,51 @@ class SpecSeamCoverageTests(unittest.TestCase):
                                 "the reading rule needs a [Cn] citation or a project decision")
 
 
+HOST_THREAD_CREATOR_PATTERN = (
+    r"(^|[^[:alnum:]_])(SDL_CreateThread|CreateThread|_beginthread(ex)?|"
+    r"pthread_create|thrd_create|std::jthread|std::thread)[[:space:]]*\("
+)
+FRAME_SERVICE_SOURCE = "src/core/nk_platform_win32.c"
+
+
+def frame_service_creation_problems(source):
+    """What is wrong with nk_platform_win32.c's thread creation, or []: its one native thread
+    is the RetroAchievements frame service, created inside
+    nk_platform_guest_memory_channel_serve and running guest_memory_channel_service_main."""
+    code = strip_comments(source)
+    creations = [m.start(2) for m in re.finditer(
+        _posix_classes_to_python(HOST_THREAD_CREATOR_PATTERN), code, re.M)]
+    if len(creations) != 1:
+        return [f"{len(creations)} thread creations where only the frame service's is allowed"]
+    serve = re.search(r"^bool nk_platform_guest_memory_channel_serve\(", code, re.M)
+    if not serve:
+        return ["nk_platform_guest_memory_channel_serve not found"]
+    start = code.index("{", serve.end())
+    depth = 0
+    end = start
+    for end in range(start, len(code)):
+        if code[end] == "{":
+            depth += 1
+        elif code[end] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+    at = creations[0]
+    if not start < at < end:
+        return ["the thread is created outside nk_platform_guest_memory_channel_serve"]
+    if not re.match(r"CreateThread\s*\([^,;]*,[^,;]*,\s*guest_memory_channel_service_main\s*,",
+                    code[at:]):
+        return ["the thread created there does not run guest_memory_channel_service_main"]
+    return []
+
+
 class HostThreadCreatorAuditTests(unittest.TestCase):
     """Only the documented OSK worker, diagnostic-stream drain, Android output pump,
-    texture-scaling workers and preemption timer may create a native host thread (docs/ARCHITECTURE.md, "Runtime
-    host-thread audit")."""
+    RetroAchievements frame service, texture-scaling workers and preemption timer may create a
+    native host thread (docs/ARCHITECTURE.md, "Runtime host-thread audit")."""
 
     def test_native_thread_creators_are_allowlisted(self):
-        pattern = (
-            r"(^|[^[:alnum:]_])(SDL_CreateThread|CreateThread|_beginthread(ex)?|"
-            r"pthread_create|thrd_create|std::jthread|std::thread)[[:space:]]*\("
-        )
+        pattern = HOST_THREAD_CREATOR_PATTERN
         result = subprocess.run(
             ["git", "grep", "-n", "-I", "-E", pattern, "--", "src/rt", "src/core"],
             cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
@@ -752,12 +787,43 @@ class HostThreadCreatorAuditTests(unittest.TestCase):
             if "selftest" not in Path(path).name.lower():
                 creators.append(path)
         self.assertEqual(
-            creators, ["src/core/nk_platform_posix.c", "src/rt/debug.c",
+            creators, ["src/core/nk_platform_posix.c",
+                       "src/core/nk_platform_win32.c",  # the RetroAchievements frame service
+                       "src/rt/debug.c",
                        "src/rt/gpu_sdl3vk/tex_scale.c", "src/rt/osk_text_entry.c",
                        "src/rt/sched.c",    # the preemption timer
                        "src/rt/sched.c"],   # the host worker (#2361)
             "native thread creation needs a documented owner and guest-state quiescence rule",
         )
+        # nk_platform_win32.c's one entry is the frame service's own creation site, nothing
+        # else in that file.
+        source = (ROOT / FRAME_SERVICE_SOURCE).read_text(encoding="utf-8")
+        self.assertEqual(frame_service_creation_problems(source), [])
+
+    def test_frame_service_allowance_admits_only_its_own_site(self):
+        source = (ROOT / FRAME_SERVICE_SOURCE).read_text(encoding="utf-8")
+        site = ("CreateThread(NULL, 0u, guest_memory_channel_service_main, channel, 0u, "
+                "NULL);")
+        self.assertEqual(source.count(site), 1)
+        other = "static DWORD WINAPI other_main(LPVOID p) { (void)p; return 0u; }\n"
+        mutants = {
+            "a second thread elsewhere in the file": source + "\n" + other +
+                "void extra(void) { (void)CreateThread(NULL, 0u, other_main, NULL, 0u, NULL); }\n",
+            "a second thread in the same function": source.replace(
+                site, site + "\n    (void)CreateThread(NULL, 0u, other_main, NULL, 0u, NULL);"),
+            "another routine at the same site": source.replace(
+                "guest_memory_channel_service_main, channel", "other_main, channel"),
+            "the site moved to another function": source.replace(site, "NULL;").replace(
+                "int nk_platform_guest_memory_channel_serving(NkGuestMemoryChannel *channel) {",
+                "int nk_platform_guest_memory_channel_serving(NkGuestMemoryChannel *channel) {\n"
+                "    (void)" + site),
+            "a commented-out site with the thread made elsewhere": source.replace(
+                site, "/* " + site + " */ NULL;") + "\nvoid extra(void) { (void)" + site + " }\n",
+        }
+        for name, mutant in mutants.items():
+            with self.subTest(mutant=name):
+                self.assertNotEqual(mutant, source)
+                self.assertTrue(frame_service_creation_problems(mutant), name)
 
 
 class HostCallbackEntryAuditTests(unittest.TestCase):

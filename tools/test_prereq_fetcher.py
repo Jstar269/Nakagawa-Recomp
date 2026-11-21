@@ -1632,8 +1632,12 @@ UPDATE_CHECK_HOSTS = frozenset({
 # reaches the RetroAchievements servers only. The bridge (src/core/nk_achievements.c) holds no
 # network code: it passes rc_client's requests to a caller's transport only for this host, and
 # nk_achievements.h names it. Neither the bridge nor the vendored rcheevos may use a network API;
-# the transport that carries them is a new egress and gets its own line above when it ships.
+# the transport that carries them is the existing package_builder WinHTTP implementation.
 ACHIEVEMENTS_HOST = "retroachievements.org"
+# Its achievement badge pictures (owner decision 2026-11-20): GET only, from the one image host
+# rcheevos' own badge URLs use (RETROACHIEVEMENTS_IMAGE_HOST in the vendored rc_api_common.c),
+# once Achievements is on and the person is signed in.
+ACHIEVEMENTS_BADGE_HOST = "media.retroachievements.org"
 ACHIEVEMENTS_NO_NETWORK_PATHS = ("src/core/nk_achievements.c", "src/core/nk_achievements.h")
 ACHIEVEMENTS_VENDORED_TREE = "third_party/rcheevos"
 # Discord status (#2259; owner decision 2026-11-08): opt-in and off by default, and not an
@@ -1643,13 +1647,14 @@ ACHIEVEMENTS_VENDORED_TREE = "third_party/rcheevos"
 # that pipe and must stay outside the allowlist above.
 DISCORD_PRESENCE_PATHS = ("src/player/discord_presence.c", "src/player/discord_presence.h")
 DISCORD_PIPE_PREFIX = "discord-ipc-"
-# The only shipped callers of the native transport: the prerequisite bootstrap (in
-# package_builder.c itself), the update check, and opt-in cover art (#2632). Another
-# caller is a new egress.
+# The native transport callers include the prerequisite bootstrap (in package_builder.c), the
+# update check, opt-in RetroAchievements requests from main.c, and opt-in cover art. Another
+# caller is a new egress and must name its documented host and opt-in.
 COVER_ART_HOSTS = frozenset({"thumbnails.libretro.com"})
 NATIVE_TRANSPORT_CALLERS = frozenset({
     "src/player/package_builder.c",
     "src/player/update_check.c",
+    "src/player/main.c",
     "src/player/cover_art.c",
 })
 
@@ -1711,9 +1716,11 @@ def network_egress_offenders(root: Path) -> list[str]:
     return offenders
 
 
-# The transport's one declaration, in package_builder.h; any other mention of the name is a use.
+# The transport's two declarations, in package_builder.h: the download transport and the one
+# request RetroAchievements makes through it (#1316). Any other mention of the names is a use.
 NATIVE_TRANSPORT_PROTOTYPE = re.compile(
-    r"\bPackageHttpOpen\s+package_builder_native_transport\s*\(\s*void\s*\)\s*;")
+    r"\bPackageHttpOpen\s+package_builder_native_transport\s*\(\s*void\s*\)\s*;"
+    r"|\bbool\s+package_builder_native_transport_request\s*\([^;{]*\)\s*;")
 
 
 def native_transport_callers(root: Path) -> set[str]:
@@ -1830,6 +1837,27 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         assert host is not None
         self.assertEqual(host.group(1), ACHIEVEMENTS_HOST)
         self.assertIsNotNone(prefix, "NK_ACH_URL_PREFIX must be https://NK_ACH_HOST/")
+        # The badge pictures come from the image host rcheevos itself builds badge URLs for,
+        # over HTTPS, under /Badge/ only.
+        badge_host = re.search(r'#define NK_ACH_BADGE_HOST\s+"([^"]*)"', header)
+        self.assertIsNotNone(badge_host, "NK_ACH_BADGE_HOST")
+        assert badge_host is not None
+        self.assertEqual(badge_host.group(1), ACHIEVEMENTS_BADGE_HOST)
+        self.assertRegex(header, r'#define NK_ACH_BADGE_URL_PREFIX\s+"https://"\s+NK_ACH_BADGE_HOST'
+                                 r'\s+"/Badge/"')
+        rapi = (REPO_ROOT / ACHIEVEMENTS_VENDORED_TREE / "src" / "rapi" /
+                "rc_api_common.c").read_text(encoding="utf-8")
+        self.assertIn(f'#define RETROACHIEVEMENTS_IMAGE_HOST "https://{ACHIEVEMENTS_BADGE_HOST}"',
+                      rapi)
+        # docs/SETUP.md "Network use" and docs/ONLINE_FEATURES.md list both hosts and say the
+        # feature is off by default.
+        setup = (REPO_ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+        online = (REPO_ROOT / "docs" / "ONLINE_FEATURES.md").read_text(encoding="utf-8")
+        for documented_host in (ACHIEVEMENTS_HOST, ACHIEVEMENTS_BADGE_HOST):
+            self.assertIn(f"`{documented_host}`", setup)
+            self.assertIn(f"`{documented_host}`", online)
+        self.assertIn("**RetroAchievements** is off by default.", setup)
+        self.assertNotIn("fetches no badge image", setup + online)
         # No other host literal in the bridge: the gate is the one place a host is named.
         bridge = (REPO_ROOT / "src" / "core" / "nk_achievements.c").read_text(encoding="utf-8")
         self.assertEqual(re.findall(r"https?://[A-Za-z0-9.-]+", bridge), [])
@@ -1850,6 +1878,385 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
                 if match:
                     offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}: {match.group(0)}")
         self.assertEqual(offenders, [], "the achievements bridge and rcheevos open no connection")
+
+    def test_achievements_use_the_player_native_transport(self) -> None:
+        # rc_client's only egress is the player's already allowlisted WinHTTP facility.
+        source = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        self.assertIn("package_builder_native_transport_request", source)
+        self.assertIn("NK_ACH_HOST", source)
+        # main.c is a native-transport caller for this one request only: every use of the
+        # transport there is the call whose allowed-host argument is NK_ACH_HOST, or
+        # NK_ACH_BADGE_HOST for a badge picture.
+        uses = re.findall(r"package_builder_native_transport\w*", source)
+        calls = re.findall(
+            r"package_builder_native_transport_request\(\s*&options,\s*job->url,\s*"
+            r"job->badge \? NK_ACH_BADGE_HOST : NK_ACH_HOST,", source)
+        self.assertEqual(uses, ["package_builder_native_transport_request"])
+        self.assertEqual(len(calls), 1)
+        # Every request names this player in the form RetroAchievements documents, made once by
+        # the bridge (achievements-selftest checks its text): product/version (system) rcheevos.
+        self.assertIn("nk_ach_user_agent(NK_PLAYER_VERSION, system, run->achievements_user_agent,",
+                      source)
+        self.assertIn("nk_platform_os_description(system, sizeof system)", source)
+        self.assertIn("PackageHttpOptions options = {job->user_agent};", source)
+        self.assertNotRegex(source, r'"NakagawaRecomp/%')
+        header = (REPO_ROOT / "src" / "core" / "nk_achievements.h").read_text(encoding="utf-8")
+        self.assertIn('#define NK_ACH_USER_AGENT_PRODUCT "NakagawaRecomp"', header)
+        bridge = (REPO_ROOT / "src" / "core" / "nk_achievements.c").read_text(encoding="utf-8")
+        self.assertIn("rc_client_get_user_agent_clause(", bridge)
+
+    def test_documented_user_agent_names_the_vendored_rcheevos(self) -> None:
+        # The rcheevos part of the user agent is whatever the vendored rc_version.h says
+        # (achievements-selftest checks the clause against RCHEEVOS_VERSION_STRING); the examples
+        # the documentation gives must name that same version, in its short form when the patch
+        # number is 0, so an rcheevos update that changes it fails here until they follow.
+        version_h = (REPO_ROOT / "third_party" / "rcheevos" / "src" / "rc_version.h").read_text(
+            encoding="utf-8")
+        parts = {}
+        for name in ("MAJOR", "MINOR", "PATCH"):
+            match = re.search(rf"^#define RCHEEVOS_VERSION_{name} (\d+)$", version_h, re.MULTILINE)
+            self.assertIsNotNone(match, f"rc_version.h defines RCHEEVOS_VERSION_{name}")
+            assert match is not None
+            parts[name] = int(match.group(1))
+        self.assertIn("#if RCHEEVOS_VERSION_PATCH > 0", version_h)
+        expected = f"rcheevos/{parts['MAJOR']}.{parts['MINOR']}"
+        if parts["PATCH"] > 0:
+            expected += f".{parts['PATCH']}"
+        for rel in ("docs/SETUP.md", "docs/ONLINE_FEATURES.md"):
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            examples = re.findall(r"NakagawaRecomp/\d[\d.]* \([^)]*\) (rcheevos/[\d.]+)", text)
+            self.assertTrue(examples, f"{rel} gives an example user agent")
+            self.assertEqual(sorted(set(examples)), [expected],
+                             f"{rel}'s example user agent names the vendored rcheevos")
+
+    def test_achievements_are_softcore_only_and_off_by_default(self) -> None:
+        # Owner decision 2026-11-20: softcore only. Nothing turns hardcore on: the bridge only ever
+        # turns it off, and neither the player nor the runtime has a setting, flag or variable
+        # for it (achievements-selftest proves a hardcore request is refused and never sent).
+        bridge = (REPO_ROOT / "src" / "core" / "nk_achievements.c").read_text(encoding="utf-8")
+        calls = re.findall(r"rc_client_set_hardcore_enabled\(\s*[^,]+,\s*([^)]*)\)", bridge)
+        self.assertTrue(calls, "the bridge turns hardcore off")
+        self.assertEqual(sorted(set(calls)), ["0"])
+        self.assertIn("ach_request_claims_hardcore(request->post_data)", bridge)
+        for rel in ("src/player/main.c", "src/player/player_state.c", "src/player/player_state.h",
+                    "src/player/ui/player_ui_nk.c", "src/player/ui/scr_settings.c", "src/rt/gui.c"):
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            self.assertNotRegex(text, r"rc_client_set_hardcore_enabled|hardcore_enabled\s*=|"
+                                      r"NK_[A-Z_]*HARDCORE|--hardcore", rel)
+        # Off by default: a settings file without the key, or a new install, keeps it off.
+        state = (REPO_ROOT / "src" / "player" / "player_state.c").read_text(encoding="utf-8")
+        self.assertIn("settings->achievements_enabled = false;", state)
+        self.assertNotRegex(state, r"achievements_enabled\s*=\s*true")
+        # Cheats and the 60 FPS game-logic package turn it off for the launch, with the reason.
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        self.assertIn("player_launch_achievements_block(work)", main)
+        ui = (REPO_ROOT / "src" / "player" / "ui" / "player_ui_nk.c").read_text(encoding="utf-8")
+        self.assertEqual(ui.count("player_app_achievements_block(app, "), 2)
+        # Switching it off stops every request: the bridge goes offline.
+        self.assertIn("nk_ach_set_online(run->achievements, false);", main)
+
+    def test_achievement_token_storage_uses_no_plain_file_fallback(self) -> None:
+        win32 = (REPO_ROOT / "src" / "core" / "nk_platform_win32.c").read_text(encoding="utf-8")
+        posix = (REPO_ROOT / "src" / "core" / "nk_platform_posix.c").read_text(encoding="utf-8")
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+
+        def credential_section(source: str) -> str:
+            start = source.index("bool nk_platform_credential_store_available(void)")
+            end = source.index("bool nk_platform_guest_memory_channel_create", start)
+            return source[start:end]
+
+        windows_store = credential_section(win32)
+        other_platform = credential_section(posix)
+        self.assertIn("CredReadW(", windows_store)
+        self.assertIn("CredWriteW(", windows_store)
+        self.assertIn("CRED_PERSIST_LOCAL_MACHINE", windows_store)
+        self.assertIn("CredDeleteW(", windows_store)
+        self.assertNotRegex(windows_store, r"\b(?:fopen|_wfopen|CreateFileW|WriteFile)\s*\(")
+        self.assertIn("return false;", other_platform)
+        self.assertNotRegex(other_platform, r"\b(?:fopen|_wfopen|open|write)\s*\(")
+        self.assertIn("nk_platform_credential_write(k_ach_credential_target", main)
+        self.assertIn("nk_platform_credential_read(k_ach_credential_target", main)
+        self.assertIn("nk_platform_credential_delete(k_ach_credential_target", main)
+        self.assertNotIn("achievements_token", main)
+
+    def test_offline_achievement_queue_is_private_and_token_free(self) -> None:
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        header = (REPO_ROOT / "src" / "core" / "nk_achievements.h").read_text(encoding="utf-8")
+        bridge = (REPO_ROOT / "src" / "core" / "nk_achievements.c").read_text(encoding="utf-8")
+        record = header.split("typedef struct NkAchPendingUnlock {", 1)[1].split("}", 1)[0]
+        for field in ("char game_hash[33]", "uint32_t achievement_id", "uint64_t unlocked_at_utc"):
+            self.assertIn(field, record)
+        self.assertNotRegex(record, r"\b(?:username|password|token|secret)\b")
+        # The player names the file, in the user's private folder, and hands the path to the
+        # bridge; it formats nothing itself.
+        start = main.index("static bool player_ach_queue_path(")
+        end = main.index("static void player_achievements_collect_events", start)
+        player_queue = main[start:end]
+        for required in ("nk_platform_get_app_data_dir", "nk_platform_mkdir_p_private",
+                         "nk_ach_save_queue_file(run->achievements, path)",
+                         "nk_ach_load_queue_file(run->achievements, path, &report)"):
+            self.assertIn(required, player_queue)
+        self.assertNotRegex(player_queue, r"\b(?:fopen|nk_fopen_utf8|fwrite|fread)\s*\(")
+        # The bridge reads and writes it (achievements-selftest runs that code on real files):
+        # a private temporary file renamed into place, the three record fields, and for its
+        # owner a tag, never an account name or a token.
+        start = bridge.index("/* ---- the queue file")
+        queue_code = bridge[start:]
+        for required in ("nk_platform_fopen_private", "nk_rename_utf8",
+                         "entries[i].game_hash", "entries[i].achievement_id",
+                         "entries[i].unlocked_at_utc", "ach->pending_owner"):
+            self.assertIn(required, queue_code)
+        self.assertRegex(queue_code, r"\{'N', 'K', 'R', 'A', 'Q', '0', '0', '1'\}")
+        encode = queue_code[queue_code.index("static uint8_t *ach_queue_encode("):
+                            queue_code.index("typedef struct AchQueueFile")]
+        self.assertNotRegex(encode, r"username|password|token|secret")
+        self.assertIn("bool nk_ach_account_tag(const char *username", header)
+        # The game never waits for the player's event loop: the guest-memory channel's own
+        # thread evaluates each frame, and the loop handles no frame event.
+        self.assertIn("nk_platform_guest_memory_channel_serve(&run->guest_memory_channel,", main)
+        self.assertNotRegex(main, r"nk_platform_guest_memory_channel_(?:wait|ack)_frame")
+        self.assertEqual(len(re.findall(r"\bnk_ach_frame\(", main)), 1)
+        serve_start = main.index("static void player_ach_serve_frame(void *context) {")
+        serve = main[serve_start:
+                     main.index("static void player_achievements_stop_channel", serve_start)]
+        self.assertIn("nk_ach_frame(run->achievements);", serve)
+        self.assertNotRegex(serve, r"\bSDL_|\bapp\b")
+        # A native UI regression run refuses the three Achievements actions before anything else.
+        action = main[main.index("static void player_achievements_settings_action(PlayerRun *run, "
+                                 "PlayerUiSettingsOp op) {"):]
+        self.assertLess(action.index("player_ui_test_active(&run->ui_test)"),
+                        action.index("switch (op)"))
+        # The queue is one account's, so the user's Sign out discards what is still waiting
+        # (nk_ach_sign_out) and rewrites the file; only the switch turned off keeps the records.
+        sign_out = main[main.index("static void player_achievements_end_account"):
+                        main.index("static void player_achievements_collect_events")]
+        self.assertIn("nk_ach_sign_out(run->achievements)", sign_out)
+        self.assertIn("player_achievements_save_queue_or_report(run)", sign_out)
+        action_start = main.index("static void player_achievements_sign_out(PlayerRun *run) {")
+        action = main[action_start:
+                      main.index("static void player_achievements_settings_action", action_start)]
+        self.assertIn("player_achievements_end_account(run, removed)", action)
+        self.assertNotIn("nk_ach_logout", action)
+
+    def test_achievement_account_and_channel_rules_in_the_player(self) -> None:
+        # src/player/main.c has no native harness; these read its source for the rules the
+        # audit of 2026-11-17 found broken (the bridge's side runs in achievements-selftest).
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        # A Sign out that waited for a sign-in's answer ends the account by the credential
+        # delete's own result: a token still stored keeps its account's records.
+        self.assertNotIn("(void)nk_platform_credential_delete(k_ach_credential_target)", main)
+        self.assertNotIn("player_achievements_end_account(run, true)", main)
+        self.assertEqual(main.count("nk_platform_credential_delete(k_ach_credential_target))"), 2)
+        # Turning the switch off completes a pending Sign out instead of cancelling it.
+        action = main[main.index("static void player_achievements_settings_action(PlayerRun *run, "
+                                 "PlayerUiSettingsOp op) {"):]
+        toggle_off = action[action.index("if (app->settings.achievements_enabled) {"):
+                            action.index('"RetroAchievements is off."')]
+        self.assertNotIn("run->achievements_signout_pending = false;\n            if", toggle_off)
+        self.assertNotRegex(toggle_off, r"achievements_login_pending\)\s*run->achievements_"
+                                        r"signout_pending = false")
+        self.assertLess(toggle_off.index("if (run->achievements_signout_pending) {"),
+                        toggle_off.index("player_achievements_end_account(run, removed);"))
+        # After a factory reset no queue file is written: every save goes through the guard.
+        guard = main[main.index("static bool player_achievements_queue_saves_allowed("):]
+        guard = guard[:guard.index("\n}\n")]
+        self.assertIn("!run->app.factory_reset_done", guard)
+        calls = [m.start() for m in re.finditer(r"\(void\)player_achievements_save_queue\(run\)|"
+                                                 r"player_achievements_save_queue\(run\)\)", main)]
+        self.assertEqual(len(calls), 2, "the shutdown save and save_queue_or_report")
+        for at in calls:
+            self.assertIn("player_achievements_queue_saves_allowed(run)", main[at - 200:at])
+        # A runtime that never opened the guest-memory channel by the time its window is up
+        # ends the achievements for that run, by name, instead of looking live.
+        frame = main[main.index("nk_platform_guest_memory_channel_serving(&run->guest_memory_"
+                                "channel) < 0"):]
+        frame = frame[:frame.index("player_update_poll(app);")]
+        self.assertIn("app->child_window_ready", frame)
+        self.assertIn("!nk_platform_guest_memory_channel_runtime_attached(&run->guest_memory_"
+                      "channel)", frame)
+        self.assertIn("player_achievements_stop_channel(run);", frame)
+
+    def test_achievement_status_wipes_and_channel_end_in_the_player(self) -> None:
+        # src/player/main.c has no native harness; these read its source for the rules the
+        # second pass of the audit of 2026-11-17 found broken (the bridge's side of the aborted
+        # sign-in and of the UTF-8 cuts runs in achievements-selftest).
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        events = main[main.index("static void player_achievements_collect_events(PlayerRun *run) {"):]
+        events = events[:events.index("\n}\n")]
+        # Secrets are wiped by the one shared helper, never a second loop of the player's own.
+        self.assertIn('#include "nk_psp_keystore.h"', main)
+        self.assertNotIn("player_secure_clear", main)
+        self.assertGreaterEqual(main.count("nk_secure_zero("), 10)
+        # An empty answer gets its one-byte body in one place, under finished:.
+        self.assertEqual(main.count("job->response_body = (char *)calloc(1u, 1u);"), 1)
+        # A sign-in that the switch turned off aborted keeps "RetroAchievements is off.".
+        failed = events[events.index("case NK_ACH_EVENT_LOGIN_FAILED:"):]
+        failed = failed[:failed.index("break;")]
+        self.assertLess(failed.index("} else if (!app->settings.achievements_enabled) {"),
+                        failed.index("event->kind == NK_ACH_EVENT_LOGIN_UNREACHABLE"))
+        # A game whose set did not load stops the frame service, and keeps the arena mapped
+        # for a runtime that may not have opened it yet; the game's exit closes it.
+        game_failed = events[events.index("case NK_ACH_EVENT_GAME_FAILED:"):]
+        game_failed = game_failed[:game_failed.index("break;")]
+        self.assertIn("player_achievements_end_frames(run);", game_failed)
+        end_frames = main[main.index("static void player_achievements_end_frames(PlayerRun *run) {"):]
+        end_frames = end_frames[:end_frames.index("\n}\n")]
+        self.assertIn("nk_platform_guest_memory_channel_stop(&run->guest_memory_channel);",
+                      end_frames)
+        self.assertNotIn("nk_platform_guest_memory_channel_close", end_frames)
+        self.assertIn("(run->guest_memory_channel_active || run->guest_memory_channel.view)) {\n"
+                      "        player_achievements_stop_channel(run);", main)
+        # RetroAchievements text is cut at a UTF-8 character, never by a bare byte count.
+        ra = main[main.index("static int player_utf8_fit("):
+                  main.index("static void player_achievements_sign_in_stored(")]
+        self.assertIsNone(re.search(r"%\.[0-9]+s", ra), "a byte-count cut of RA text")
+        self.assertEqual(ra.count("player_utf8_fit("), 7,
+                         "the helper, four events (a completed set's toast and status line "
+                         "among them), the dropped-notices line")
+        # The list's rows hold the bridge's whole display text, already cut at a character
+        # (ach_copy_text), so the player copies it and never cuts it again.
+        self.assertIn("_Static_assert(PLAYER_ACHIEVEMENT_TITLE_MAX >= NK_ACH_DISPLAY_TITLE_MAX,", ra)
+        self.assertIn("_Static_assert(PLAYER_ACHIEVEMENT_DESCRIPTION_MAX >= "
+                      "NK_ACH_DISPLAY_DESCRIPTION_MAX,", ra)
+        # The arena's size is one constant, the runtime's SR_GUEST_ARENA_SIZE, asserted equal.
+        platform = (REPO_ROOT / "src" / "core" / "nk_platform.h").read_text(encoding="utf-8")
+        recomp = (REPO_ROOT / "src" / "rt" / "recomp.h").read_text(encoding="utf-8")
+        gui = (REPO_ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
+        platform_size = re.search(r"#define NK_GUEST_MEMORY_ARENA_SIZE (0x[0-9a-fA-F]+)u", platform)
+        runtime_size = re.search(r"#define SR_GUEST_ARENA_SIZE (0x[0-9a-fA-F]+)u", recomp)
+        self.assertIsNotNone(platform_size)
+        self.assertIsNotNone(runtime_size)
+        assert platform_size is not None and runtime_size is not None
+        self.assertEqual(int(platform_size.group(1), 16), int(runtime_size.group(1), 16))
+        self.assertIn("_Static_assert(SR_GUEST_ARENA_SIZE == NK_GUEST_MEMORY_ARENA_SIZE,", gui)
+        self.assertIn("NK_GUEST_MEMORY_ARENA_SIZE)) {", main)
+        self.assertNotIn("0x0c000000u", main)
+
+    def test_achievement_game_end_drops_and_wipes_in_the_player(self) -> None:
+        # src/player/main.c has no native harness (F-1993e125, F-176e1086); these read its
+        # source for the rules the review of 2026-11-20 found missing (the bridge's side of each
+        # runs in achievements-selftest, the transport's in test_package_builder).
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+
+        def body(signature: str) -> str:
+            text = main[main.index(signature):]
+            return text[:text.index("\n}\n")]
+
+        # The game's end unloads it from rc_client, so no Rich Presence ping follows it.
+        for signature in ("static void player_achievements_stop_channel(PlayerRun *run) {",
+                          "static void player_achievements_end_frames(PlayerRun *run) {"):
+            self.assertIn("nk_ach_unload_game(run->achievements);", body(signature), signature)
+        # Notices the bridge dropped are counted, logged by name once per change and shown.
+        events = body("static void player_achievements_collect_events(PlayerRun *run) {")
+        self.assertIn("player_achievements_report_dropped_events(run);", events)
+        dropped = body("static void player_achievements_report_dropped_events(PlayerRun *run) {")
+        self.assertIn("nk_ach_events_dropped(run->achievements)", dropped)
+        self.assertIn("run->achievements_events_dropped_seen", dropped)
+        self.assertIn("nk_ach_events_dropped=%u", dropped)
+        self.assertIn("app->achievements_status", dropped)
+        # The worker's read buffer and every outgrown answer buffer are wiped before release.
+        worker = body("static int SDLCALL player_ach_http_thread_main(void *userdata) {")
+        self.assertIn("nk_secure_zero(chunk, sizeof chunk);",
+                      worker[worker.index("finished:"):])
+        self.assertLess(worker.index("unsigned char chunk["), worker.index("goto finished;"))
+        append = body("static bool player_ach_response_append(")
+        self.assertNotIn("realloc(", append)
+        self.assertIn("nk_secure_zero(job->response_body, *capacity);", append)
+        # A request the transport refused before sending is a named client error, not a retry.
+        refused = worker[worker.index("if (response.refused) {"):]
+        refused = refused[:refused.index("goto finished;")]
+        self.assertIn("job->response_status = NK_ACH_HTTP_CLIENT_ERROR;", refused)
+        self.assertIn("response.refused", refused[refused.index("player_ach_response_append("):])
+        # The shutdown save's failure is reported by name, never discarded.
+        self.assertNotIn("(void)player_achievements_save_queue(run)", main)
+        shutdown = body("static void player_achievements_shutdown(PlayerRun *run) {")
+        self.assertIn("!player_achievements_save_queue(run))", shutdown)
+        self.assertIn("unlock-queue.bin could not be saved at", shutdown)
+
+    def test_achievements_selftest_declares_rcheevos_libc_on_linux(self) -> None:
+        # The selftest builds the vendored rcheevos with the core's strict -std=c99. glibc then
+        # declares no strdup, strcasecmp or strncasecmp; GCC 13 only warns and takes strdup to
+        # return int, cutting its pointer on 64-bit hosts. Linux gets the declarations, as the
+        # CMake player build does, and an implicit declaration fails the gate everywhere.
+        mk = (REPO_ROOT / "mk" / "native_ui_tests.mk").read_text(encoding="utf-8")
+        recipe = mk[mk.index("define ACHIEVEMENTS_SELFTEST_CMD"):]
+        recipe = recipe[:recipe.index("endef")]
+        self.assertIn("-Werror=implicit-function-declaration", recipe)
+        self.assertIn("$(ACHIEVEMENTS_SELFTEST_LIBC_FLAGS)", recipe)
+        self.assertRegex(mk, r"ifeq \(\$\(OS\),Windows_NT\)\nACHIEVEMENTS_SELFTEST_LIBC_FLAGS :=\n"
+                             r"else\nACHIEVEMENTS_SELFTEST_LIBC_FLAGS := -D_DEFAULT_SOURCE "
+                             r"-include strings\.h\nendif\n")
+        self.assertNotIn("gnu99, not c99", mk)
+
+    def test_runtime_host_toast_captions_unlocks_without_retroachievements_code(self) -> None:
+        runtime = REPO_ROOT / "src" / "rt"
+        shipped = [path for path in runtime.rglob("*")
+                   if path.is_file() and path.suffix in {".c", ".h"}]
+        texts = {path.relative_to(REPO_ROOT).as_posix(): path.read_text(
+            encoding="utf-8", errors="replace") for path in shipped}
+        gui = texts["src/rt/gui.c"]
+        self.assertIn("sr_host_notification", gui)
+        # The player writes an unlock with the shared prefix, then its points and badge name
+        # (achievements-selftest checks nk_guest_memory_notification_unlock); the runtime reads
+        # those fields from the message and makes the toast of them, "Achievement unlocked" over
+        # the title, and captions any other message "Host notification".
+        self.assertIn("nk_guest_memory_notification_unlock(s_host_toast_text, &s_host_toast_unlock)",
+                      gui)
+        self.assertIn("f.host_toast_head = nk_guest_memory_notification_caption(s_host_toast_text);",
+                      gui)
+        self.assertEqual(re.findall(r'f\.host_toast_head = "([^"]*)"', gui),
+                         ["Achievement unlocked", "Set completed"])
+        player = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        self.assertIn('NK_GUEST_MEMORY_NOTIFICATION_UNLOCKED "%.*s\\n%u\\n%s"', player)
+        self.assertNotIn('"Achievement unlocked: ', player)
+        # A completed set: the player writes the game's title after the shared prefix, the
+        # runtime reads it back (achievements-selftest checks the parser).
+        self.assertIn('NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED "%.*s"', player)
+        self.assertNotIn('snprintf(toast, sizeof toast, "Set completed: ', player)
+        self.assertIn("nk_guest_memory_notification_set_completed(", gui)
+        # The notice's last line: "N points" ("1 point"), or "Every achievement unlocked" for a
+        # completed set. The mode (Casual) is said once, on the game's page heading and in
+        # Settings, not on every notice.
+        begin = gui[gui.index("static void gui_host_toast_begin(void) {"):]
+        begin = begin[:begin.index("\n}\n")]
+        self.assertIn('"%u %s"', begin)
+        self.assertIn('== 1u ? "point" : "points"', begin)
+        self.assertIn('"Every achievement unlocked"', begin)
+        self.assertNotIn("Softcore", begin)
+        self.assertNotIn("Casual", begin)
+        # RetroAchievements now calls the mode Casual (rcheevos 13.0 Upgrade Guide, "Rebranding":
+        # Softcore -> Casual Mode). No string a user reads says Softcore; the heading says Casual.
+        title_page = (REPO_ROOT / "src" / "player" / "ui" / "scr_title.c").read_text(
+            encoding="utf-8")
+        self.assertIn('"RetroAchievements \\xC2\\xB7 Casual"', title_page)
+        for path in sorted((REPO_ROOT / "src" / "player").rglob("*.[ch]")) + [
+                REPO_ROOT / "src" / "rt" / "gui.c"]:
+            for literal in re.findall(r'"(?:[^"\\\n]|\\.)*"', path.read_text(encoding="utf-8")):
+                with self.subTest(path=path.name, literal=literal[:40]):
+                    self.assertNotIn("softcore", literal.lower())
+        # The message is read, and its badge read from disk and decoded, before the present
+        # (gui_host_toast_poll), never inside the UI pass, which only draws it.
+        ui_pass = gui[gui.index("static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {"):]
+        ui_pass = ui_pass[:ui_pass.index("\n}\n")]
+        for name in ("sr_host_notification(", "gui_host_toast_begin(", "gui_host_toast_poll(",
+                     "gui_host_toast_badge_load(", "fopen("):
+            with self.subTest(pass_calls=name):
+                self.assertNotIn(name, ui_pass)
+        self.assertEqual(gui.count("gui_host_toast_poll();"), 2,
+                         "before the frame's present and before the held frame's")
+        # The badge picture comes from the player's badge folder on this PC: the runtime opens
+        # no connection for it (NETWORK_EGRESS_PATTERN, below) and names no host.
+        self.assertIn('#define HOST_TOAST_BADGE_DIR "achievements-badges"', gui)
+        # Both sides name a badge's file through the one helper (no device name, case kept
+        # apart; achievements-selftest checks it), never from the badge name itself.
+        self.assertIn("nk_achievement_badge_file_name(name, false, leaf, sizeof leaf)", gui)
+        self.assertIn("nk_achievement_badge_file_name(name, locked, job->cache_file,", player)
+        self.assertIsNone(NETWORK_EGRESS_PATTERN.search(gui))
+        self.assertEqual(re.findall(r"https?://", gui), [])
+        for rel, source in texts.items():
+            with self.subTest(path=rel):
+                self.assertNotIn("retroachievements.org", source.lower())
+                self.assertNotIn("rc_client", source)
 
     def test_discord_status_is_local_ipc_only(self) -> None:
         for rel in DISCORD_PRESENCE_PATHS:
@@ -1879,14 +2286,22 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
             player = Path(scratch) / "src" / "player"
             player.mkdir(parents=True)
             (player / "package_builder.h").write_text(
-                "PackageHttpOpen package_builder_native_transport(void);\n", encoding="utf-8")
+                "PackageHttpOpen package_builder_native_transport(void);\n"
+                "bool package_builder_native_transport_request(\n"
+                "    void *options, const char *url, const char *allowed_hosts,\n"
+                "    const void *body, size_t body_size, PackageHttpResponse *response);\n",
+                encoding="utf-8")
             (player / "wrapper.h").write_text(
                 "static inline PackageHttpOpen open(void) { return package_builder_native_transport(); }\n",
                 encoding="utf-8")
             (player / "fetch.cpp").write_text(
                 "PackageHttpOpen t = package_builder_native_transport();\n", encoding="utf-8")
+            (player / "post.h").write_text(
+                "static inline bool post(void) {\n"
+                "    return package_builder_native_transport_request(0, 0, 0, 0, 0, 0);\n}\n",
+                encoding="utf-8")
             self.assertEqual(native_transport_callers(Path(scratch)),
-                             {"src/player/wrapper.h", "src/player/fetch.cpp"})
+                             {"src/player/wrapper.h", "src/player/fetch.cpp", "src/player/post.h"})
 
     def test_allowlisted_downloaders_still_exist(self) -> None:
         for rel in sorted(NETWORK_EGRESS_ALLOWLIST):

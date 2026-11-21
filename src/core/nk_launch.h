@@ -108,6 +108,9 @@ typedef struct {
        SR_NICKNAME so an inherited value cannot name the console. The runtime re-validates it
        and serves NK_NICKNAME_DEFAULT, with a log line, for an empty or invalid value. */
     char nickname[NK_NICKNAME_MAX_BYTES + 1u];
+    /* Optional local shared guest-memory channel, empty unless the player enabled
+       its per-frame memory service for this launch. It never carries network data. */
+    char guest_memory_channel[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
     /* Cheats (#2639, src/rt/cheats.h): off as prepare_session leaves it. SR_CHEATS and
        SR_CHEATS_FILE are always exported, 0 and empty while this is off, so an inherited value
        cannot opt a launch in. On, the file is cheats_file when that names one (the player's

@@ -33,6 +33,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -445,6 +446,130 @@ FILE *nk_platform_fopen_private(const char *path, const char *mode) {
     FILE *file = fdopen(fd, mode);
     if (!file) close(fd);
     return file;
+}
+
+bool nk_platform_os_description(char *out, size_t out_size) {
+    if (!out || out_size == 0u) return false;
+    out[0] = '\0';
+    struct utsname name;
+    if (uname(&name) != 0 || !name.sysname[0]) return false;
+    const int written = snprintf(out, out_size, "%s %s", name.sysname, name.release);
+    if (written <= 0 || (size_t)written >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    /* A User-Agent comment holds no parentheses or control bytes; anything else becomes '_'. */
+    for (char *c = out; *c; ++c) {
+        if (*c < 0x20 || *c > 0x7e || *c == '(' || *c == ')') *c = '_';
+    }
+    return true;
+}
+
+bool nk_platform_credential_store_available(void) {
+    return false;
+}
+
+bool nk_platform_credential_read(const char *target, char *username, size_t username_size,
+                                char *secret, size_t secret_size) {
+    (void)target;
+    if (username && username_size) username[0] = '\0';
+    if (secret && secret_size) secret[0] = '\0';
+    return false;
+}
+
+bool nk_platform_credential_write(const char *target, const char *username, const char *secret) {
+    (void)target;
+    (void)username;
+    (void)secret;
+    return false;
+}
+
+bool nk_platform_credential_delete(const char *target) {
+    (void)target;
+    return false;
+}
+
+int nk_platform_credential_prompt(const char *caption, const char *message, const char *target,
+                                  char *username, size_t username_size,
+                                  char *password, size_t password_size) {
+    (void)caption;
+    (void)message;
+    (void)target;
+    if (username && username_size) username[0] = '\0';
+    if (password && password_size) password[0] = '\0';
+    return -1;
+}
+
+bool nk_platform_guest_memory_channel_create(NkGuestMemoryChannel *channel,
+                                             const char *name, size_t arena_size) {
+    (void)name;
+    (void)arena_size;
+    if (channel) memset(channel, 0, sizeof(*channel));
+    return false;
+}
+
+bool nk_platform_guest_memory_channel_open(NkGuestMemoryChannel *channel,
+                                           const char *name, size_t arena_size) {
+    (void)name;
+    (void)arena_size;
+    if (channel) memset(channel, 0, sizeof(*channel));
+    return false;
+}
+
+int nk_platform_guest_memory_channel_wait_frame(NkGuestMemoryChannel *channel) {
+    (void)channel;
+    return -1;
+}
+
+bool nk_platform_guest_memory_channel_ack_frame(NkGuestMemoryChannel *channel) {
+    (void)channel;
+    return false;
+}
+
+bool nk_platform_guest_memory_channel_serve(NkGuestMemoryChannel *channel,
+                                            void (*frame)(void *context), void *context) {
+    (void)channel;
+    (void)frame;
+    (void)context;
+    return false;
+}
+
+int nk_platform_guest_memory_channel_serving(NkGuestMemoryChannel *channel) {
+    (void)channel;
+    return 0;
+}
+
+bool nk_platform_guest_memory_channel_runtime_attached(const NkGuestMemoryChannel *channel) {
+    (void)channel;
+    return false;
+}
+
+bool nk_platform_guest_memory_channel_sync_vblank(NkGuestMemoryChannel *channel) {
+    (void)channel;
+    return false;
+}
+
+void nk_platform_guest_memory_channel_stop(NkGuestMemoryChannel *channel) {
+    (void)channel;
+}
+
+void nk_platform_guest_memory_channel_close(NkGuestMemoryChannel *channel) {
+    if (channel) memset(channel, 0, sizeof(*channel));
+}
+
+bool nk_platform_guest_memory_channel_notify(NkGuestMemoryChannel *channel, const char *text) {
+    (void)channel;
+    (void)text;
+    return false;
+}
+
+bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *channel,
+                                                        uint32_t *seen_sequence,
+                                                        char *text, size_t text_size) {
+    (void)channel;
+    if (seen_sequence) *seen_sequence = 0u;
+    if (text && text_size) text[0] = '\0';
+    return false;
 }
 
 bool nk_platform_file_lock_acquire(NkFileLock *lock, const char *path, unsigned timeout_ms) {
