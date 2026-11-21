@@ -210,6 +210,15 @@ static void display_present_frame(void) {
 
 /* A probe verdict that ends a reported dark stretch is a boot event for the player. */
 static void picture_probe_resumed(int verdict, uint32_t brightest) {
+    /* The first visible probe of the run, once, on the CPU and the GPU path alike (the probe
+     * reads the presented frame back from either): the content evidence tools/boot_gate.py
+     * accepts when the first frame was black. It is sampled, so the vblank is the probe's. */
+    uint32_t content_vblank = 0u, content_brightest = 0u;
+    if (sr_picture_watch_take_first_content(&s_picture_watch, &content_vblank, &content_brightest)) {
+        fprintf(stderr, "BOOT_EVENT phase=first_content vblank=%u brightest=%u\n",
+                content_vblank, content_brightest);
+        fflush(stderr);
+    }
     if (verdict != SR_PICTURE_WATCH_RESUMED) return;
     fprintf(stderr, "BOOT_EVENT phase=resumed observation=picture brightest=%u\n", brightest);
     fflush(stderr);

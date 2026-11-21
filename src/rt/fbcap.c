@@ -797,10 +797,24 @@ int sr_picture_watch_probe(SrPictureWatch *w, uint32_t vcount, uint32_t brightes
         }
         return SR_PICTURE_WATCH_NONE;
     }
+    if (!w->content_seen) {
+        w->content_seen = 1;
+        w->content_due = 1;
+        w->content_vcount = vcount;
+        w->content_brightest = brightest;
+    }
     int resumed = w->dark && w->reported > 0u;
     w->dark = 0;
     w->reported = 0;
     return resumed ? SR_PICTURE_WATCH_RESUMED : SR_PICTURE_WATCH_NONE;
+}
+
+int sr_picture_watch_take_first_content(SrPictureWatch *w, uint32_t *vcount, uint32_t *brightest) {
+    if (!w || !w->content_due) return 0;
+    w->content_due = 0;
+    if (vcount) *vcount = w->content_vcount;
+    if (brightest) *brightest = w->content_brightest;
+    return 1;
 }
 
 int sr_picture_watch_tick(SrPictureWatch *w, uint32_t vcount, uint32_t *dark_vblanks) {
