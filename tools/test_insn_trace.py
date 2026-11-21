@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from psp_oracle import insn_trace, parse_golden  # noqa: E402
 import tracediff  # noqa: E402
+from test_psp_oracle import probe_source  # noqa: E402
 
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "psp_oracle"
 
@@ -284,7 +285,7 @@ class FixtureHeaderTests(unittest.TestCase):
                          (0x3FC00000, 0x40100000, 0, 0))
         self.assertEqual((state["v0"], state["v1"], state["v2"], state["v3"], state["v32"]),
                          (0x3F000000, 0x40000000, 0, 0, 0x40400000))
-        probe = (FIXTURE_DIR / "probe_insn_trace.c").read_text(encoding="utf-8")
+        probe = probe_source(FIXTURE_DIR / "probe_insn_trace.c")
         self.assertIn("for (unsigned i = 1; i < 32u; i++) s_nt.r[i] = 0x01010101u * i;", probe)
         self.assertIn("s_nt.r[29] = NT_DATA_BASE + 0x800u;", probe)
         self.assertIn("s_nt.f[0] = NT_FPU_F0_INIT;", probe)
@@ -300,9 +301,9 @@ class ProbeSourceTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.probe = (FIXTURE_DIR / "probe_insn_trace.c").read_text(encoding="utf-8")
+        cls.probe = probe_source(FIXTURE_DIR / "probe_insn_trace.c")
         cls.tramp = (FIXTURE_DIR / "insn_trace_tramp.S").read_text(encoding="utf-8")
-        cls.issues = (FIXTURE_DIR / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.issues = probe_source(FIXTURE_DIR / "probe_hle_issues.c")
         cls.makefile = (FIXTURE_DIR / "Makefile").read_text(encoding="utf-8")
 
     def test_route_registration_and_log(self) -> None:
