@@ -46,8 +46,8 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **711** (dedicated **628**, fake_success **3**, controlled_unsupported **80**).
-Semantic handler census: **603** handlers across **30** API families, covering **635** handler-associated NID registrations.
+Registered NIDs: **711** (dedicated **629**, fake_success **3**, controlled_unsupported **79**).
+Semantic handler census: **604** handlers across **30** API families, covering **636** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
@@ -55,7 +55,7 @@ Semantic handler census: **603** handlers across **30** API families, covering *
 | `partial` | 348 | 360 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 237 | 244 |
+| `unreviewed` | 238 | 245 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -65,7 +65,7 @@ Semantic handler census: **603** handlers across **30** API families, covering *
 | `sceAudio` | 0 | 11 | 0 | 0 | 6 | 17 | 18 |
 | `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceCtrl` | 0 | 12 | 0 | 0 | 0 | 12 | 12 |
-| `sceDisplay` | 1 | 14 | 0 | 0 | 1 | 16 | 16 |
+| `sceDisplay` | 1 | 14 | 0 | 0 | 2 | 17 | 17 |
 | `sceDmac` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
 | `sceFont` | 0 | 7 | 0 | 0 | 11 | 18 | 18 |
 | `sceGe` | 2 | 11 | 0 | 0 | 1 | 14 | 14 |
@@ -89,7 +89,7 @@ Semantic handler census: **603** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **348** | **1** | **3** | **237** | **603** | **635** |
+| **Total** | **14** | **348** | **1** | **3** | **238** | **604** | **636** |
 
 #### Complete Handlers (Evidence-Backed)
 

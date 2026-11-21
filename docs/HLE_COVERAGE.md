@@ -24,9 +24,9 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 73 |
-| `ppsspp-derived` | 138 | 88 |
+| `ppsspp-derived` | 139 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 438 | 183 |
+| `synthetic` | 437 | 183 |
 | `unverified` | 71 | 22 |
 | total | 711 | 366 |
 
@@ -433,7 +433,7 @@ a title that translates none has generated code unchanged.
 | `0x7e65b999` | `sceKernelCancelAlarm` | kernel_time | `hardware-measured` | PSP oracle PSP-HLE-TIMER-ORDER-001 |
 | `0x7e69eda4` | `sceHprmIsHeadphoneExist` | input | `hardware-measured` | PSP oracle PSP-HLE-HPRM-001 |
 | `0x7ed29e40` | `sceRtcSetTick` | rtc | `synthetic` | HLE selftest dispatch |
-| `0x7ed59bc4` | `sceDisplaySetHoldMode` | display | `synthetic` | HLE selftest dispatch |
+| `0x7ed59bc4` | `sceDisplaySetHoldMode` | display | `ppsspp-derived` | handler comment names PPSSPP |
 | `0x7f27bb5e` | `sceNetAdhocPdpDelete` | network | `synthetic` | HLE selftest dispatch |
 | `0x7f696782` | `sceMp3GetMp3ChannelNum` | audio_codec | `ppsspp-derived` | sceMp3 block: derived-translated from PPSSPP at a pinned revision |
 | `0x7f75c338` | `sceNetAdhocGameModeCreateMaster` | network | `synthetic` | HLE selftest dispatch |

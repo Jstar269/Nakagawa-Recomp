@@ -9596,7 +9596,8 @@ static void test_unregistered_batch_refusals(void) {
         uint32_t error;
         const char *name;
     } refused[] = {
-        {0x7ed59bc4u, 0x80020002u, "sceDisplaySetHoldMode"},
+        /* sceDisplaySetHoldMode left this list for a handler (#2886);
+         * test_display_set_hold_mode covers it. */
         {0x72189c48u, 0x80010086u, "sceImposeSetUMDPopup"},
         {0x8c943191u, 0x80010086u, "sceImposeGetBatteryIconStatus"},
         {0x0282a3bdu, 0x80010086u, "sceHttpGetContentLength"},
@@ -25533,6 +25534,48 @@ static void test_mpeg_create_refused_in_interrupt(void) {
                mpi_on_thread_a0(NID_MPI_DELETE, MPI_DESC) == 0u,
            "mpeg-intr: after the reset a thread creates and deletes again (delays.expected:29-30)");
     (void)mpi_on_thread_a0(NID_MPI_FINISH, 0u);
+    reset_fixture();
+}
+
+/* sceDisplaySetHoldMode (#2886) through the production dispatch. From a guest thread every value
+ * returns 0 and is recorded (PPSSPP 77106069 accepts all values); from an interrupt handler the
+ * call answers ILLEGAL_CONTEXT and records nothing (JPCSP 00ac4d6d checkInsideInterrupt). Neither
+ * is PSP-measured. sr_hle_init starts the mode at 0. */
+#define NID_DISPLAY_SET_HOLD_MODE 0x7ed59bc4u
+extern int32_t sr_display_hold_mode(void);
+extern void sr_hle_test_display_hold_mode_note_reset(void);
+
+static void test_display_set_hold_mode(void) {
+    static const IcProbe hold = {
+        "sceDisplaySetHoldMode", NID_DISPLAY_SET_HOLD_MODE, "", ICG_NONE, 0,
+        {0, 0, 0, 0}, {IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN},
+        {IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN},
+        {IC_PREC_NA, IC_PREC_NA, IC_PREC_NA, IC_PREC_NA}, IC_HW_IMMEDIATE, NULL
+    };
+    static const uint32_t modes[] = { 1u, 0u, 2u, 0xffffffffu, 0x80000000u, 7u };
+    reset_fixture(); sr_hle_init();
+    sr_hle_test_display_hold_mode_note_reset();
+    s_vbl_next_us = UINT64_MAX;
+
+    expect(sr_hle_test_is_registered(NID_DISPLAY_SET_HOLD_MODE),
+           "hold-mode: sceDisplaySetHoldMode has a production registration");
+    expect(sr_display_hold_mode() == 0, "hold-mode: the mode is 0 at HLE start");
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+        expect(mpi_on_thread_a0(NID_DISPLAY_SET_HOLD_MODE, modes[i]) == 0u,
+               "hold-mode: a thread call returns 0 for any mode (not the old 0x80020002 refusal)");
+        expect(sr_display_hold_mode() == (int32_t)modes[i],
+               "hold-mode: the call records the mode it was given");
+    }
+
+    memset(&s_ic_probe_cpu, 0, sizeof s_ic_probe_cpu);
+    s_ic_probe_cpu.r[4] = 3u;
+    expect(ic_call_in_interrupt(&hold) == IC_RET(SCE_KERNEL_ERROR_ILLEGAL_CONTEXT),
+           "hold-mode: a call from an interrupt handler returns ILLEGAL_CONTEXT");
+    expect(sr_display_hold_mode() == 7,
+           "hold-mode: the refused interrupt call leaves the recorded mode alone");
+
+    sr_hle_init();
+    expect(sr_display_hold_mode() == 0, "hold-mode: a new HLE start resets the mode to 0");
     reset_fixture();
 }
 
@@ -63927,6 +63970,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_io_devctl_memstick_callback_notify();
     test_callback_wakeup_resumes_delay_wait_in_slot_order();
     test_display_frame_per_sec_float_return();
+    test_display_set_hold_mode();
     test_rtc_conversion_errors_and_full_range();
     test_rtc_pointer_validation_and_measured_conversions();
     test_rtc_local_time_follows_the_system_profile();
