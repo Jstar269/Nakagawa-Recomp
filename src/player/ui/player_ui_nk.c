@@ -1452,7 +1452,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
             model.online_play_card_host = player->settings_online_play_card_host;
         }
         snprintf(player->settings_online_play_row, sizeof(player->settings_online_play_row),
-                 model.online_play ? "On: %s" : "Off", srv);
+                 model.online_play ? "On (%s)" : "Off", srv);
         if (app->online_play_notice[0]) {
             snprintf(player->settings_online_play_status,
                      sizeof(player->settings_online_play_status), "%s", app->online_play_notice);

@@ -378,7 +378,10 @@ enum {
     /* A pointer target inside a control that takes the keys (one choice in a row of
        choices): it can be hovered and clicked, and no directional move, Tab or first
        focus lands on it. The screen moves focus back to the owning control. */
-    NK_UI_BUTTON_POINTER_ONLY = 1u << 9
+    NK_UI_BUTTON_POINTER_ONLY = 1u << 9,
+    /* A setting in effect (a switch that is On): outlined and lettered in the accent on a
+       raised ground, so it never reads as the focused control or the primary action. */
+    NK_UI_BUTTON_ON = 1u << 10
 };
 
 /* Device scale and edge rounding are shared helpers for hosts and tests. The

@@ -906,7 +906,7 @@ typedef struct {
     bool developer_mode;
     /* Online play (#1139): off by default; its own page, the consent card and the picker. */
     bool online_play;
-    const char *online_play_row_value;    /* "Off" or "On: socom.cc" */
+    const char *online_play_row_value;    /* "Off" or "On (socom.cc)" */
     const char *online_play_server;       /* current host[:port] */
     const char *online_play_server_label; /* the picker's name for it, or NULL: no list names it */
     const char *online_play_status;       /* what is in effect, or the last change's notice */

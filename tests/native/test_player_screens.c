@@ -4632,7 +4632,7 @@ static void test_settings_pages(void) {
             six.discord_presence = true;
             six.nickname = "Player";
             six.online_play = true;
-            six.online_play_row_value = "On: socom.cc";
+            six.online_play_row_value = "On (socom.cc)";
             six.download_cover_art = true;
             six.logical_width = 1280.0f;
             six.logical_height = 800.0f;
@@ -4643,7 +4643,7 @@ static void test_settings_pages(void) {
             }
             CHECK(draw != NULL && nk_ui_dump(ui, dump, sizeof(dump)) > 0u &&
                       strstr(dump, "\"ONLINE MODE: ON\"") != NULL &&
-                      strstr(dump, "\"ONLINE PLAY: ON: SOCOM.CC\"") != NULL &&
+                      strstr(dump, "\"ONLINE PLAY: ON (SOCOM.CC)\"") != NULL &&
                       strstr(dump, "\"DOWNLOAD COVER ART: ON\"") != NULL,
                   "all 6 rows on Online and developer render together cleanly");
             for (size_t step = 0u; step < sizeof(six_order) / sizeof(six_order[0]); ++step) {
@@ -7762,6 +7762,95 @@ static const NkUiDrawCmd *draw_run_starting(const NkUiDrawList *draw, const char
    (8 px) above its status line, at 960 x 540 and 1280 x 720, 100%, 125% and 150% text, the
    list downloaded and its shipped copy. The list is scrolled so the three show; the gaps are
    read from what is drawn, in the window's pixels. */
+/* Settings > Online and developer after the RetroAchievements merge (owner look notes of
+   2026-11-20): a switch that is on is outlined in the accent, never filled like the focused
+   primary action; Online play's button names its server in parentheses, and a host too wide
+   for the button goes whole into the row's sentence (no ellipsis); RetroAchievements'
+   "stays off" warning shows only while it is off. */
+static void test_online_page_on_state_and_lead(void) {
+    static const char k_long_host[] =
+        "weekend-league-relay-for-players-who-meet-every-friday-and-sund."
+        "the-longest-host-name-this-player-accepts-for-own-serve.example";
+    static const char k_warning[] =
+        "RetroAchievements stays off until you turn it on and agree to what is sent.";
+    for (int pass = 0; pass < 2; ++pass) {
+        NkUiConfig config;
+        NkUiTextBackend text = screen_test_text_backend();
+        PlayerUiSettingsModel model;
+        const NkUiDrawList *draw = NULL;
+        char value[256];
+        static char dump[262144];
+        const bool long_host = pass == 1;
+        memset(&config, 0, sizeof(config));
+        config.host = NK_UI_HOST_LAUNCHER;
+        config.text = &text;
+        NkUi *ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create UI for the Online and developer on-state checks");
+        if (ui == NULL) return;
+        set_test_viewport(ui, 1280, 720);
+        set_still_prefs(ui, nk_ui_prompt_style(ui));
+        memset(&model, 0, sizeof(model));
+        model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE;
+        model.nickname = "Player";
+        model.online_play = true;
+        model.online_play_server = long_host ? k_long_host : "socom.cc";
+        (void)snprintf(value, sizeof value, "On (%s)", model.online_play_server);
+        model.online_play_row_value = value;
+        model.download_cover_art = true;
+        model.achievements_available = true;
+        model.achievements_enabled = long_host;
+        model.logical_width = 1280.0f;
+        model.logical_height = 720.0f;
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_settings(ui, &model);
+            draw = nk_ui_end(ui);
+        }
+        CHECK(draw != NULL && nk_ui_dump(ui, dump, sizeof(dump)) > 0u, "Online page dumps");
+        if (!long_host) {
+            CHECK(strstr(dump, "\"ONLINE PLAY: ON (SOCOM.CC)\"") != NULL &&
+                      strstr(dump, "ON: SOCOM") == NULL,
+                  "Online play's button names its server in parentheses, one colon");
+            CHECK(dump_says(dump, k_warning), "the RetroAchievements warning shows while it is off");
+        } else {
+            CHECK(strstr(dump, "\"ONLINE PLAY: ON\"") != NULL,
+                  "a host too wide for the button leaves it reading ONLINE PLAY: ON");
+            {
+                /* The sentence breaks inside the host only at line ends: the dump's quoted
+                   lines, joined without their spaces, read the host whole. */
+                static char joined[sizeof(dump)];
+                size_t used = 0u;
+                bool quoted = false;
+                for (const char *at = dump; *at != '\0' && used + 1u < sizeof(joined); ++at) {
+                    if (*at == '"') quoted = !quoted;
+                    else if (*at == '\n') quoted = false;
+                    else if (quoted && *at != ' ') joined[used++] = *at;
+                }
+                joined[used] = '\0';
+                CHECK(strstr(joined, k_long_host) != NULL &&
+                          strstr(dump, "\xE2\x80\xA6") == NULL,
+                      "that host shows whole in the row's sentence, and nothing ends in an "
+                      "ellipsis");
+            }
+            CHECK(!dump_says(dump, k_warning),
+                  "the RetroAchievements warning is gone once it is on");
+        }
+        {
+            const uint32_t accent = nk_ui_theme(ui)->accent_dark;
+            bool filled = false, outlined = false;
+            for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+                const NkUiDrawCmd *cmd = &draw->cmd[i];
+                if (cmd->element_id != PLAYER_UI_ID_SETTINGS_COVER_ART) continue;
+                if (cmd->kind == NK_UI_DRAW_RECTANGLE && cmd->rgba_pm == accent) filled = true;
+                if (cmd->kind == NK_UI_DRAW_BORDER && cmd->rgba_pm == accent) outlined = true;
+            }
+            CHECK(!filled && outlined,
+                  "a switch that is on is outlined in the accent, not filled like the focus");
+        }
+        nk_ui_destroy(ui);
+    }
+}
+
 static void test_online_play_list_heading_gaps(void) {
     static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
     static const int text_sizes[] = {100, 125, 150};
@@ -11675,6 +11764,7 @@ int main(int argc, char **argv) {
     test_online_play_picker_cut_row_click();
     test_online_play_own_server_shown();
     test_online_play_list_heading_gaps();
+    test_online_page_on_state_and_lead();
     test_psp_fonts_page();
     test_wizard_actions();
     test_flow_dumps_fail_closed();

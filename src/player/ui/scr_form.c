@@ -132,7 +132,8 @@ static void scr_wizard_report_cut(NkUiId text_id, const char *name, bool label_c
 
 /* A setting's button, "Name: value", with the sentence that explains it beside
    it (or under it, as `column` says; NULL lays the row out on its own); the
-   button is filled while the setting is in effect. Returns true when the
+   button is outlined in the accent while the setting is in effect (NK_UI_BUTTON_ON), apart
+   from the focus ring and the filled primary action. Returns true when the
    button is activated. */
 
 bool scr_wizard_value(NkUi *ui, NkUiId id, NkUiId text_id, const char *name,
@@ -174,7 +175,7 @@ bool scr_wizard_value_state(NkUi *ui, NkUiId id, NkUiId text_id, const char *nam
                                       0.0f);
         if (nk_ui_begin_container(ui, text_id + 1u, &cell, NULL)) {
             pressed = nk_ui_button(ui, id, label,
-                                   NK_UI_BUTTON_GROW | (on && !disabled ? NK_UI_BUTTON_PRIMARY : 0u) |
+                                   NK_UI_BUTTON_GROW | (on && !disabled ? NK_UI_BUTTON_ON : 0u) |
                                        (disabled ? NK_UI_BUTTON_DISABLED : 0u));
             nk_ui_end_container(ui);
         }

@@ -861,6 +861,9 @@ void nk_ui_button_configuration(const NkUi *ui, uint32_t flags,
     } else if (primary) {
         style->fill_rgba = ui->theme.accent_dark;
         style->border_rgba = ui->theme.accent_dark;
+    } else if ((flags & NK_UI_BUTTON_ON) != 0u) {
+        style->fill_rgba = ui->theme.surface_high;
+        style->border_rgba = ui->theme.accent_dark;
     } else {
         style->fill_rgba = 0x00000000u;
         style->border_rgba = ui->theme.line_strong;
@@ -879,6 +882,9 @@ uint32_t nk_ui_button_text_rgba(const NkUi *ui, uint32_t flags) {
     }
     if ((flags & NK_UI_BUTTON_DANGER) != 0u) {
         return ui->theme.error;
+    }
+    if ((flags & NK_UI_BUTTON_ON) != 0u) {
+        return ui->theme.accent_dark;
     }
     return ui->theme.paper;
 }

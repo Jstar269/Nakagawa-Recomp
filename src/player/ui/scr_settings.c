@@ -2352,12 +2352,38 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "Online and developer options", NK_UI_TYPE_TITLE,
                         theme->paper);
-        /* RetroAchievements is its own opt-in; the news/reports online mode remains unbuilt. */
-        const char *online_line = model->achievements_available || model->achievements_enabled
+        /* RetroAchievements is its own opt-in; the news/reports online mode remains unbuilt.
+           The warning says the feature stays off only while it is off: once the player has
+           turned it on and agreed, the line would be wrong, so it goes. */
+        const char *online_line = model->achievements_enabled ? NULL
+            : model->achievements_available
             ? "RetroAchievements stays off until you turn it on and agree to what is sent."
             : SCR_ONLINE_NOT_BUILT_LINE;
-        nk_ui_text_role(ui, FLOW_ID_LEAD, online_line, NK_UI_TYPE_BODY_S,
-                        theme->warning);
+        if (online_line != NULL) {
+            nk_ui_text_role(ui, FLOW_ID_LEAD, online_line, NK_UI_TYPE_BODY_S, theme->warning);
+        }
+        /* Online play's button reads "On (host)" while the whole host fits on it in half the
+           row; a host wider than that moves, whole, to the start of the row's sentence and
+           the button reads "On", so no host is cut to an ellipsis (#1139). */
+        const char *online_play_value = safe_text(model->online_play_row_value, "Off");
+        const char *online_play_sentence = SCR_ONLINE_PLAY_ROW_SENTENCE;
+        bool online_play_host_in_sentence = false;
+        if (model->online_play && model->online_play_server && model->online_play_server[0]) {
+            char label[320];
+            (void)snprintf(label, sizeof label, "Online play: %s", online_play_value);
+            if (nk_ui_button_width(ui, label, 0u) > (inner - 32.0f) * 0.5f) {
+                char sentence[512];
+                (void)snprintf(sentence, sizeof sentence, "On with %s. %s",
+                               model->online_play_server, SCR_ONLINE_PLAY_ROW_SENTENCE);
+                const NkUiTextStyle sentence_style = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+                online_play_value = "On";
+                /* Broken inside the host where it is wider than the row, as the Online play
+                   page's server sentence is (nk_ui_text_break); the rows stack below. */
+                online_play_sentence = nk_ui_text_break(ui, sentence, &sentence_style,
+                                                        inner - 32.0f);
+                online_play_host_in_sentence = true;
+            }
+        }
         if (scr_wizard_box_begin(ui, 0u)) {
             /* Discord status shows when this build can show it, or while it is stored On
                (so it can be turned off), as the Online mode row does (#2007). */
@@ -2389,9 +2415,8 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                 discord_sentence};
             }
             rows[row_count++] = (WizardRow){"Nickname", "", SCR_NICKNAME_SENTENCE};
-            rows[row_count++] = (WizardRow){"Online play",
-                                            safe_text(model->online_play_row_value, "Off"),
-                                            SCR_ONLINE_PLAY_ROW_SENTENCE};
+            rows[row_count++] = (WizardRow){"Online play", online_play_value,
+                                            online_play_sentence};
             rows[row_count++] = (WizardRow){"Download cover art",
                                             settings_on_off(model->download_cover_art),
                                             k_cover_art_sentence};
@@ -2419,7 +2444,9 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                widens the button column; while it shows, a sentence the column would cut goes
                under its button at every text size instead of ending in an ellipsis. */
             WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f,
-                                                    model->achievements_enabled);
+                                                    model->achievements_enabled ||
+                                                        online_play_host_in_sentence);
+            if (online_play_host_in_sentence) column.stacked = true;
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
                                   "Online mode", SCR_ONLINE_STORED_ON_SENTENCE, true,
@@ -2452,9 +2479,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 }
             }
             if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY, SET_ID_TEXT + 0xA8u,
-                                 "Online play",
-                                 safe_text(model->online_play_row_value, "Off"),
-                                 SCR_ONLINE_PLAY_ROW_SENTENCE,
+                                 "Online play", online_play_value, online_play_sentence,
                                  model->online_play, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY);
             }
