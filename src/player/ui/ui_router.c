@@ -41,7 +41,7 @@ static bool nk_ui_router_known(PlayerUiRoute route) {
            route == PLAYER_UI_ROUTE_ABOUT || route == PLAYER_UI_ROUTE_REMOVE ||
            route == PLAYER_UI_ROUTE_STOP || route == PLAYER_UI_ROUTE_REBUILD ||
            route == PLAYER_UI_ROUTE_SAVES || route == PLAYER_UI_ROUTE_STEAM ||
-           route == PLAYER_UI_ROUTE_QUEUE;
+           route == PLAYER_UI_ROUTE_QUEUE || route == PLAYER_UI_ROUTE_LOVE_ALL;
 }
 
 bool nk_ui_router_replace(NkUiRouter *router, PlayerUiRoute route) {

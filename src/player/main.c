@@ -27,6 +27,7 @@
 #include "package_builder.h"
 #include "iso_reader.h"
 #include "ui/player_ui_nk.h"
+#include "ui/launcher_secret.h" /* Settings' launcher theme row (player_ui_cycle_launcher_theme) */
 #include "nk_title_manifest.h"
 #include "nk_ui_widgets.h"
 #include "nk_disc_chd.h"
@@ -819,6 +820,13 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
     bool use_next_ui = player_ui_nk_view_active(next_ui, app);
     if (!app || !running || !event) return false;
     event = player_back_as_escape(app, next_ui, event, &escape);
+    /* The classic cheat code sees each press first, so its B and A are not also a Back, a
+       Quit or a Select (launcher_secret.h); a control waiting for its binding keeps them. */
+    if (use_next_ui && !(app->active_view == VIEW_CONTROLLER_SETTINGS &&
+                         input_settings_is_capturing(&app->input_settings)) &&
+        player_ui_nk_take_secret(next_ui, event)) {
+        return true;
+    }
 
     switch (event->type) {
     case SDL_EVENT_QUIT:
@@ -1844,6 +1852,7 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_VOLUME_DOWN: player_app_adjust_volume(app, -5); break;
         case PLAYER_UI_SETTINGS_VOLUME_UP: player_app_adjust_volume(app, 5); break;
         case PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS: player_app_toggle_ui_sounds(app); break;
+        case PLAYER_UI_SETTINGS_CYCLE_LAUNCHER_THEME: player_ui_cycle_launcher_theme(app); break;
         case PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC: player_app_toggle_launcher_music(app); break;
         case PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN:
             player_app_adjust_launcher_music_volume(app, -5);
