@@ -19,6 +19,7 @@ import hashlib
 import json
 from pathlib import Path
 import fnmatch
+import itertools
 import re
 import sys
 import tempfile
@@ -477,7 +478,7 @@ def _tracked_source_files() -> list[Path]:
 
 def _header(path: Path, lines: int = _HEADER_LINES) -> list[str]:
     with path.open(encoding="utf-8", errors="replace") as stream:
-        return [line for _, line in zip(range(lines), stream)]
+        return list(itertools.islice(stream, lines))
 
 
 def _spdx_groups(expression: str) -> list[set[str]]:
