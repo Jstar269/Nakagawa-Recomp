@@ -3083,6 +3083,11 @@ class CoverageWiringTests(unittest.TestCase):
                 self.assertLess(_ci_step_index(block, fetch_name), _ci_step_index(block, name))
                 self.assertNotIn("codecov", _uncommented("\n".join(self.blocks[job])))
         self.assertIn(f"    needs: [classify, {', '.join(self.UPLOADS)}]", block)
+        # Each upload stands on its own: a failed Python upload must not skip the C steps.
+        for name in ("Fetch the C coverage reports", "Upload C coverage to Codecov"):
+            with self.subTest(step=name):
+                self.assertIn("        if: ${{ !cancelled() && needs.c_coverage.result == 'success' }}",
+                              _ci_step(block, name) or [])
         # Informational means informational: no step may be allowed to fail quietly, and no
         # required aggregate reads the upload.
         self.assertNotIn("continue-on-error", self.ci)
@@ -3138,6 +3143,11 @@ class CoverageWiringTests(unittest.TestCase):
                 inputs = {line.strip().split(":", 1)[0] for line in step if re.match(r"^ {10}[a-z_]+:", line)}
                 self.assertIn("          cleanup: true", step)
                 self.assertIn("          fail_ci_if_error: true", step)
+                # The CLI opens each report's source files for line fixes relative to its working
+                # directory, the workspace root, which holds no source (run 44930787068 stopped on
+                # FileNotFoundError: 'tools/gate_stub.c'). Reading them from commit-files/ by moving
+                # the working directory there would put the candidate tree back on the path.
+                self.assertIn("          disable_file_fixes: true", step)
                 self.assertIn("          plugins: noop", step)
                 self.assertIn("          root_dir: ${{ github.workspace }}/commit-files", step)
                 self.assertTrue(any(line.startswith("          directory: ${{ runner.temp }}/") for line in step))

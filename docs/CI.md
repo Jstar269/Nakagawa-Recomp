@@ -1345,6 +1345,11 @@ on a hosted `ubuntu-24.04` runner:
 - `fail_ci_if_error: true` makes the wrapper stop when the CLI's download, signature or SHA-256
   check fails. Under `false` it only prints those failures and runs the file anyway.
 - `plugins: noop` keeps the CLI from running any coverage tool.
+- `disable_file_fixes: true` keeps the CLI from opening the reports' source files to send line
+  fixes (blank lines, lone brackets). It would open them relative to its working directory, the
+  workspace root, which holds no source, and run 44930787068 stopped there with
+  `FileNotFoundError`. Codecov counts those lines as the reports give them.
+- The C steps carry `!cancelled()`, so a failed Python upload does not skip them.
 
 `python_tools` and `c_coverage`, which run the candidate's tests, keep the read-only token: each
 `python_tools` shard keeps its `coverage-python.xml` as the artifact `coverage-python-shard-<n>`,

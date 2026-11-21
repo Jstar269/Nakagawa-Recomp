@@ -2337,7 +2337,11 @@ jobs:
     # at the working directory would run with the token. fail_ci_if_error: true makes the
     # wrapper stop when the CLI's download, signature or SHA-256 check fails instead of running
     # an unverified file (with false, the wrapper only prints those failures and goes on), and
-    # plugins: noop keeps the CLI from running any coverage tool. A hosted runner, never the
+    # plugins: noop keeps the CLI from running any coverage tool. disable_file_fixes: true keeps the
+    # CLI from opening the reports' source files to send line fixes (blank lines, lone brackets):
+    # it opens them relative to its working directory, the workspace root, which holds no source,
+    # and it stopped with FileNotFoundError on run 44930787068. Codecov's report then counts those
+    # lines as the reports give them. A hosted runner, never the
     # nk-wsl pool. Informational only: ci_required neither needs nor reads this job, and the
     # Codecov statuses are non-blocking (.github/codecov.yml), so an upload failure or a Codecov
     # outage shows red on this job and never fails a gate.
@@ -2372,6 +2376,7 @@ jobs:
         with:
           use_oidc: true
           cleanup: true
+          disable_file_fixes: true
           directory: ${{ runner.temp }}/coverage-python
           root_dir: ${{ github.workspace }}/commit-files
           plugins: noop
@@ -2379,9 +2384,10 @@ jobs:
           name: python-shards
           fail_ci_if_error: true
 
-      # c_coverage keeps its reports only when every measurement passed.
+      # c_coverage keeps its reports only when every measurement passed. !cancelled() lets the C
+      # steps run even when the Python upload failed: each upload stands on its own.
       - name: Fetch the C coverage reports
-        if: ${{ needs.c_coverage.result == 'success' }}
+        if: ${{ !cancelled() && needs.c_coverage.result == 'success' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: coverage-c
@@ -2389,11 +2395,12 @@ jobs:
 
       # The reports were generated in c_coverage, so the action only uploads them (plugins: noop).
       - name: Upload C coverage to Codecov
-        if: ${{ needs.c_coverage.result == 'success' }}
+        if: ${{ !cancelled() && needs.c_coverage.result == 'success' }}
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           use_oidc: true
           cleanup: true
+          disable_file_fixes: true
           directory: ${{ runner.temp }}/c-coverage-gcov
           root_dir: ${{ github.workspace }}/commit-files
           plugins: noop
