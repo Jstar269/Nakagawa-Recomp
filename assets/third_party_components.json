@@ -708,7 +708,7 @@
           "Copyright (c) 2018 RetroAchievements.org",
           "L. Peter Deutsch's MD5 (src/rhash/md5.c and md5.h): Copyright (C) 1999, 2000, 2002 Aladdin Enterprises, zlib licence"
         ],
-        "note": "Compiled into the native player runtime (opt-in RetroAchievements client, src/core/nk_achievements.c). A vendored subset with the LOCAL DELTAs recorded in third_party/rcheevos/PROVENANCE.md. The MIT text asks that its notice be included in all copies or substantial portions; the MD5 files carry their own zlib licence text in their headers, shipped here as the second text.",
+        "note": "Compiled into the native player runtime (opt-in RetroAchievements client, src/core/nk_achievements.c). A vendored subset with the LOCAL DELTAs recorded in third_party/rcheevos/PROVENANCE.md. The MIT text asks that its notice be included in all copies or substantial portions; the MD5 files carry their own zlib licence text in their headers, shipped here as the second text (a verbatim copy of that header comment).",
         "license_texts": [
           {
             "file": "third_party/rcheevos/LICENSE",
@@ -716,9 +716,9 @@
             "sha256": "bf820c034966a3b6be050bb85f94ec841a0b972bd5d477e362337d0574b5c219"
           },
           {
-            "file": "third_party/rcheevos/src/rhash/md5.h",
-            "copied_from": "Header of L. Peter Deutsch's MD5, imported byte-identical at v12.5.0; the zlib licence text of the MD5 files is in its opening comment (md5.c carries the same text)",
-            "sha256": "8341e2a307d7cfaeb816b261d92ce87a07be62e3eb58c98d2c769e75a6e2b959"
+            "file": "third_party/licenses/rcheevos-MD5.txt",
+            "copied_from": "the opening comment of third_party/rcheevos/src/rhash/md5.h (L. Peter Deutsch's zlib-style licence for the MD5 files), copied verbatim without the comment delimiters",
+            "sha256": "17dddb81bc0499c54f6852ed100a5fb64289f88a15a4dd7961d412bb1014cf3e"
           }
         ]
       },
@@ -736,12 +736,12 @@
         "source_paths": [
           "src/rt/hle_videocodec.c"
         ],
-        "note": "The sceAudiocodec argument checks, EDRAM words, error codes and output-size rule in src/rt/hle_videocodec.c are adapted from uOFW src/kd/avcodec/audiocodec.c (src/rt/PROVENANCE.md, section H). The file keeps uOFW's MIT permission notice in its header, which is the licence text recorded here; the file is compiled into every title runtime.",
+        "note": "The sceAudiocodec argument checks, EDRAM words, error codes and output-size rule in src/rt/hle_videocodec.c are adapted from uOFW src/kd/avcodec/audiocodec.c (src/rt/PROVENANCE.md, section H). The file also keeps uOFW's MIT permission notice in its header; the licence text recorded here is uOFW's own COPYING. The file is compiled into every title runtime.",
         "license_texts": [
           {
-            "file": "src/rt/hle_videocodec.c",
-            "copied_from": "header comment of src/rt/hle_videocodec.c, which reproduces the uOFW MIT notice verbatim; the digest changes when the file is edited, and the record is then refreshed",
-            "sha256": "20a440ef36914bf88e003048b57f097a2c9f9b2896df572672ffaf4346b14650"
+            "file": "third_party/licenses/uOFW.txt",
+            "copied_from": "uOFW COPYING (the MIT permission notice) at commit 28306bb5bd4fcdcc0c1d469bf1f3bdb885dde3e9, byte-identical",
+            "sha256": "8ca8134343aad97348048e5f40053ab7be6cafef5f417aa0fc00d0c8965793a1"
           }
         ]
       },

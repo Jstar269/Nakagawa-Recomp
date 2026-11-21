@@ -603,6 +603,13 @@ class TestEveryUpstreamComponentHasARecord(unittest.TestCase):
             findings += self.derivation_findings(self.records, relative, lines)
         self.assertEqual(findings, [])
 
+    def test_no_source_file_is_cited_as_a_licence_text(self) -> None:
+        """A licence text is a licence file, never a source file (it would ship whole in the bundle)."""
+        for record in self.records:
+            for entry in record.get("license_texts", []):
+                with self.subTest(component=record.get("id"), text=entry["file"]):
+                    self.assertNotIn(Path(entry["file"]).suffix.lower(), _SOURCE_SUFFIXES)
+
     def test_every_top_level_licence_text_is_cited_by_a_record(self) -> None:
         """A licence text kept under third_party/licenses/ is not an orphan: some record ships it."""
         cited = {entry["file"] for record in self.records for entry in record.get("license_texts", [])}
