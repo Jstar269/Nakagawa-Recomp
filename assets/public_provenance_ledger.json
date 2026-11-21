@@ -2744,6 +2744,28 @@
       }
     },
     {
+      "path": "src/core/nk_memstick_layout.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "memstick_layout_2744_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/core/nk_memstick_layout.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "memstick_layout_2744_20261121",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "src/core/nk_nickname.h",
       "classification": "project_authored_attested",
       "evidence": {
