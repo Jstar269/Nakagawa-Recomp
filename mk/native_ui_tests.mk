@@ -645,9 +645,7 @@ ifneq ($(strip $(FUZZ_SAN_FLAGS)),)
 # failing-allocator cases wrap malloc, which AddressSanitizer's allocator does not go through.
 	$(MAKE) --no-print-directory native-core-objects-core
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)/disc-expand-ubsan').mkdir(parents=True, exist_ok=True)"
-	for src in $(LIBCHDR_SRCS); do \
-		$(CC) $(LIBCHDR_CFLAGS) $(DISC_EXPAND_UBSAN_FLAGS) -c $$src -o $(BUILD_ROOT)/disc-expand-ubsan/$$(basename $$src .c).o || exit 1; \
-	done
+	$(foreach s,$(LIBCHDR_SRCS),$(CC) $(LIBCHDR_CFLAGS) $(DISC_EXPAND_UBSAN_FLAGS) -c $(s) -o $(BUILD_ROOT)/disc-expand-ubsan/$(notdir $(s:.c=.o))$(NEWLINE))
 	$(CC) $(NC_CFLAGS_CORE) -Werror $(DISC_EXPAND_UBSAN_FLAGS) $(LIBCHDR_INC) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) $(PLAYER_CHD_SRCS) \
 		tests/native/native_test_isolation.c tests/native/test_disc_expand.c $(BUILD_ROOT)/disc-expand-ubsan/*.o $(PLAYER_PLATFORM_LIBS) $(DISC_EXPAND_WRAP_MALLOC) \
 		-o $(BUILD_ROOT)/test_disc_expand_ubsan$(EXE_EXT)
