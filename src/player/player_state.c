@@ -479,6 +479,16 @@ void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
              sizeof(app->runtime_package_cache[game_index].reason), "%s", reason);
 }
 
+NkRuntimePackageStatus player_runtime_package_status_check(const char *user_data_root,
+                                                           const GameRecord *game,
+                                                           NkRuntimePackageInfo *info,
+                                                           char *reason, size_t reason_size) {
+    NkRuntimePackageInfo local;
+    NkRuntimePackageInfo *out = info ? info : &local;
+    memset(out, 0, sizeof(*out));
+    return nk_launch_validate_runtime_package(user_data_root, game, out, reason, reason_size);
+}
+
 void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int game_index,
                                                          const char *commit,
                                                          const char *origin,
@@ -494,6 +504,11 @@ void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int gam
                  strcmp(origin, "git") == 0 ? "git checkout" : origin);
     } else {
         snprintf(out, cap, "unknown (%s)", reason && reason[0] ? reason : "not recorded");
+    }
+    /* One report line: the validator refuses control characters; a caller's string is
+     * kept to one line here too. */
+    for (char *c = out; *c; c++) {
+        if ((unsigned char)*c < 0x20u || (unsigned char)*c == 0x7fu) *c = ' ';
     }
 }
 

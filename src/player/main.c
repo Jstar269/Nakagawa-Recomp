@@ -2463,7 +2463,7 @@ static int SDLCALL player_package_status_thread_main(void *userdata) {
         snprintf(job->package_identity, sizeof(job->package_identity), "%s",
                  before_identity);
     } else if (root) {
-        job->status = nk_launch_validate_runtime_package(
+        job->status = player_runtime_package_status_check(
             root, &job->game, &job->package_info, job->reason, sizeof(job->reason));
         job->runtime_available = player_runtime_available(job->status, &job->game, root);
     } else {

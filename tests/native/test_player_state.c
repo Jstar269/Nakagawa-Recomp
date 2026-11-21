@@ -2396,6 +2396,15 @@ static void test_report_this_game(void) {
                                                       RP_HOME, user, report, sizeof(report)) > 0);
             assert(strstr(report, "Runtime source: unknown (the source tree has no install "
                                   "record and no git metadata)\n") != NULL);
+            /* A reason never adds a report line of its own. */
+            player_app_runtime_package_cache_set_runtime_source(
+                app, subject, "", "unknown", "none\nPackage: forged\r\nReason: forged");
+            assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
+                                                      RP_HOME, user, report, sizeof(report)) > 0);
+            assert(strstr(report, "Runtime source: unknown (none Package: forged  Reason: "
+                                  "forged)\n") != NULL);
+            assert(strstr(report, "\nPackage: forged") == NULL &&
+                   strstr(report, "\nReason: forged") == NULL);
             player_app_runtime_package_cache_set_runtime_source(app, subject, "", "", "");
             assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
                                                       RP_HOME, user, report, sizeof(report)) > 0);
@@ -19486,6 +19495,13 @@ int main(int argc, char **argv) {
             "{\"commit\":\"0123456789abcdef0123456789abcdef01234567\","
             "\"origin\":\"git\",\"reason\":null,\"extra\":1}",
             "\"0123456789abcdef0123456789abcdef01234567\"",
+            /* The reason is one report line: an embedded newline could forge one. */
+            "{\"commit\":null,\"origin\":\"unknown\","
+            "\"reason\":\"none\\nPackage: forged\\nReason: forged\"}",
+            "{\"commit\":null,\"origin\":\"unknown\",\"reason\":\"tab\\there\"}",
+            "{\"commit\":null,\"origin\":\"unknown\",\"reason\":\""
+            "0123456789012345678901234567890123456789012345678901234567890123"
+            "0123456789012345678901234567890123456789012345678901234567890123\"}",
         };
         char runtime_source_runtime[512];
         char runtime_source_report[512];
@@ -19539,6 +19555,62 @@ int main(int argc, char **argv) {
         }
         g_fixture_runtime_extra = "";
         g_fixture_report_extra = "";
+
+        /* The library's status check validates with an info struct (#2875 review): a
+           package whose paths the player cannot hold is INCOMPATIBLE there, not first at
+           launch, and the reason names what fixes it. Passing no info would report OK. */
+        {
+            char long_root[1024];
+            assert(nk_platform_mkdir_p(SR_SELFTEST_BUILD_ROOT "/tps_long_package"));
+            assert(nk_platform_absolute_path(SR_SELFTEST_BUILD_ROOT "/tps_long_package",
+                                             long_root, sizeof(long_root)));
+            const size_t root_length = 300u;
+            assert(strlen(long_root) + 16u < root_length);
+            while (strlen(long_root) < root_length) {
+                size_t used = strlen(long_root);
+                size_t segment = root_length - used - 1u;
+                if (segment > 120u) segment = 120u;
+                long_root[used] = nk_platform_path_separator();
+                memset(long_root + used + 1u, 'p', segment);
+                long_root[used + 1u + segment] = '\0';
+            }
+            char long_exe[256];
+            memset(long_exe, 'x', 200u);
+            snprintf(long_exe + 200, sizeof(long_exe) - 200u, ".exe");
+            char long_exe_path[1400];
+            snprintf(long_exe_path, sizeof(long_exe_path), "%s%cpackages%c%s%c%s", long_root,
+                     nk_platform_path_separator(), nk_platform_path_separator(),
+                     cached_disc_id, nk_platform_path_separator(), long_exe);
+            assert(strlen(long_exe_path) >= NK_MAX_PATH);
+            if (!nk_platform_mkdir_p(long_root) ||
+                nk_platform_path_exceeds_limit(long_exe_path, false)) {
+                printf("[PLAYER_STATE_TEST] long package path status check NOT_RUN: this host "
+                       "limits paths to MAX_PATH\n");
+            } else {
+                write_runtime_package_fixture(long_root, cached_disc_id,
+                                              "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+                                              long_exe, FIXTURE_SHA256, NULL);
+                assert(nk_launch_validate_runtime_package(long_root, &game, NULL, reason,
+                                                          sizeof(reason)) ==
+                       NK_RUNTIME_PACKAGE_OK);
+                NkRuntimePackageInfo long_info;
+                assert(player_runtime_package_status_check(long_root, &game, &long_info, reason,
+                                                           sizeof(reason)) ==
+                       NK_RUNTIME_PACKAGE_INCOMPATIBLE);
+                assert(strstr(reason, "Package paths exceed the player path limit.") != NULL);
+                assert(strstr(reason, "shorter location") != NULL);
+                assert(strstr(reason, "build it from the library") == NULL);
+                remove_runtime_package_fixture(long_root, cached_disc_id,
+                                               "synthetic-allegrex-v1");
+                char long_image_path[1400];
+                snprintf(long_image_path, sizeof(long_image_path), "%.*s_image.bin",
+                         (int)(strlen(long_exe_path) - 4u), long_exe_path);
+                remove(long_exe_path);
+                remove(long_image_path);
+                printf("[PLAYER_STATE_TEST] long package path is INCOMPATIBLE at the status "
+                       "check PASSED\n");
+            }
+        }
 
         write_runtime_package_fixture(validation_root, cached_disc_id,
                                       "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,

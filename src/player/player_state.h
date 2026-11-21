@@ -1754,6 +1754,13 @@ void player_app_runtime_package_cache_store(
  * so it has no new reason to give. */
 void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
                                                  const char *reason);
+/* The library's package status check: validates with an info struct, so the runtime
+ * source commit is read back and a package whose paths the player cannot hold is
+ * INCOMPATIBLE here, not first at launch. */
+NkRuntimePackageStatus player_runtime_package_status_check(const char *user_data_root,
+                                                           const GameRecord *game,
+                                                           NkRuntimePackageInfo *info,
+                                                           char *reason, size_t reason_size);
 /* Records the runtime source commit the validated package records (#2875) for the entry
  * stored at game_index: commit and origin as NkRuntimePackageInfo holds them. Called
  * only after a validation ran; an empty origin (a package from before the record)

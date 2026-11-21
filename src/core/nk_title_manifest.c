@@ -2899,7 +2899,14 @@ static bool package_source_commit_record(const JsonNode *node, const char *path,
     bool ok = package_string(obj_get(node, "origin"), &origin);
     if (ok && strcmp(origin, "unknown") == 0) {
         const char *why = NULL;
-        ok = commit->type == JSON_NULL && package_string(reason, &why) && why[0];
+        /* The reason reaches the problem report as one line: no control characters,
+         * and short enough for NkRuntimePackageInfo.runtime_source_reason. */
+        ok = commit->type == JSON_NULL && package_string(reason, &why) && why[0] &&
+             strlen(why) < sizeof(((NkRuntimePackageInfo *)0)->runtime_source_reason);
+        for (size_t i = 0; ok && why[i]; i++) {
+            const unsigned char c = (unsigned char)why[i];
+            ok = c >= 0x20u && c != 0x7fu;
+        }
     } else if (ok && (strcmp(origin, "install-record") == 0 || strcmp(origin, "git") == 0)) {
         const char *hex = NULL;
         ok = reason->type == JSON_NULL && package_string(commit, &hex) && strlen(hex) == 40;
@@ -5674,8 +5681,12 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
                      strlen(resolved_executable) < sizeof(resolved_info.executable_path) &&
                      strlen(resolved_image) < sizeof(resolved_info.image_path);
     if (out_info && !cacheable) {
-        package_rebuild_reason(reason, reason_size,
-                               "Package paths exceed the player path limit.");
+        /* A rebuild writes the same paths again, so the card names what fixes it. */
+        if (reason && reason_size) {
+            snprintf(reason, reason_size,
+                     "Package paths exceed the player path limit. A rebuild cannot fix this: "
+                     "move the Nakagawa data folder to a shorter location.");
+        }
         return NK_RUNTIME_PACKAGE_INCOMPATIBLE;
     }
     if (cacheable) {
