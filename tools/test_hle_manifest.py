@@ -2149,9 +2149,11 @@ class EvidenceTierTests(unittest.TestCase):
         row.update(overrides)
         return row
 
-    def _cells(self, row: dict) -> dict:
+    def _cells(self, row: dict) -> dict[str, list[dict]]:
         with mock.patch.object(hle_manifest, "_cited_section", return_value="cell-case other-case"):
-            return hle_manifest.oracle_measured_cells({"tests": [row]}, {"probe.c": self._PROBE})
+            cells: dict[str, list[dict]] = hle_manifest.oracle_measured_cells(
+                {"tests": [row]}, {"probe.c": self._PROBE})
+        return cells
 
     def test_a_case_api_cell_is_recorded_for_the_exact_call_and_does_not_promote_the_function(self) -> None:
         row = self._cells_row()
