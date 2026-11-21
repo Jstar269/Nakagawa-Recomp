@@ -15,7 +15,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 static int g_failures = 0;
 static int g_checks = 0;
@@ -41,6 +40,27 @@ typedef struct {
     const uint8_t *local_extra;
     uint16_t local_extra_size;
 } TItem;
+
+/* With NK_TEST_WRAP_FREAD the link wraps fread (-Wl,--wrap=fread: the
+   native-core-tests recipe, and CMake where the linker has --wrap), so the
+   nested-header test can count what the reader reads from the file instead of
+   timing it: a clock reading moves with machine load, a count of reads does
+   not. Without the wrap the count is skipped by name. */
+#if defined(NK_TEST_WRAP_FREAD)
+size_t __real_fread(void *buf, size_t size, size_t count, FILE *file);
+size_t __wrap_fread(void *buf, size_t size, size_t count, FILE *file);
+static bool s_fread_counting = false;
+static unsigned long s_fread_calls = 0;
+static uint64_t s_fread_bytes = 0;
+size_t __wrap_fread(void *buf, size_t size, size_t count, FILE *file) {
+    const size_t got = __real_fread(buf, size, count, file);
+    if (s_fread_counting) {
+        s_fread_calls++;
+        s_fread_bytes += (uint64_t)got * size;
+    }
+    return got;
+}
+#endif
 
 #define TZIP_CAP 16384u
 #define TZIP_ITEMS 8u
@@ -993,14 +1013,41 @@ static void test_nested_local_headers(const char *root) {
         NkZipReadOptions options = {n, 0, false, false};
         NkZipReader *reader = NULL;
         NkZipError err;
-        const clock_t t0 = clock();
-        NkZipStatus status = nk_zip_reader_open_file_with(&reader, path, &options, &err);
-        const double t = (double)(clock() - t0) / CLOCKS_PER_SEC;
-        snprintf(what, sizeof(what), "%zu nested local headers (%.1f MiB): %s in %.3f s", n,
-                 size / 1048576.0, nk_zip_status_code(status), t);
+        NkZipStatus status;
+#if defined(NK_TEST_WRAP_FREAD)
+        s_fread_calls = 0;
+        s_fread_bytes = 0;
+        s_fread_counting = true;
+#endif
+        status = nk_zip_reader_open_file_with(&reader, path, &options, &err);
+#if defined(NK_TEST_WRAP_FREAD)
+        s_fread_counting = false;
+#endif
+        snprintf(what, sizeof(what), "%zu nested local headers (%.1f MiB): %s", n,
+                 size / 1048576.0, nk_zip_status_code(status));
         CHECK(status == NK_ZIP_ERR_OVERLAP && reader == NULL && strcmp(err.entry, "0001") == 0,
               what);
-        CHECK(t < 0.5, what);
+#if defined(NK_TEST_WRAP_FREAD)
+        /* The archive is read about once: the end record, the central directory and the
+           first entry's header, 4 reads and a little over the directory's size. A reader
+           that read the nested headers first would make 131,000 reads and 4.3 GB. The
+           bounds (16 reads, the archive's own size) sit far from both. */
+        snprintf(what, sizeof(what),
+                 "%zu nested local headers refused after %lu reads of %.1f MiB (archive %.1f MiB)",
+                 n, s_fread_calls, (double)s_fread_bytes / 1048576.0, size / 1048576.0);
+        CHECK(s_fread_calls <= 16u && s_fread_bytes <= (uint64_t)size, what);
+        /* A count of zero would pass the bounds above without measuring anything: the
+           reader no longer reads through fread, so the wrap in this file (and the link
+           option -Wl,--wrap=fread) must move to the call it uses. */
+        CHECK(s_fread_calls >= 1u && s_fread_bytes >= 1u,
+              "the nested-header count saw no fread: the reader reads another way, "
+              "so move this test's wrap to that call");
+#else
+        snprintf(what, sizeof(what), "%zu nested local headers (%.1f MiB): %s", n,
+                 size / 1048576.0, nk_zip_status_code(status));
+        printf("SKIP nk_zip read count of the nested headers: built without NK_TEST_WRAP_FREAD "
+               "(a linker with -Wl,--wrap=fread)\n");
+#endif
         printf("nk_zip: %s\n", what);
         if (reader) nk_zip_reader_close(reader);
     }

@@ -5475,7 +5475,7 @@ class HleFamilyHost0RoundTripTests(unittest.TestCase):
     """An HLE family's launch must leave the host0 round-trip file the runner verifies."""
 
     PROBE_HLE_SOURCE = (
-        Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "probe_hle_measure.c"
+        Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "probe_hle_harness.h"
     )
     PATTERN = "(uint8_t)(0x5Au ^ (i * 0x25u + (i >> 3)))"
 
@@ -5504,7 +5504,7 @@ class HleFamilyHost0RoundTripTests(unittest.TestCase):
     def test_round_trip_file_written_per_the_family_contract_passes_verification(self):
         source = self.PROBE_HLE_SOURCE.read_text(encoding="utf-8")
         self.assertTrue(self.PATTERN in source,
-                        "probe_hle_measure.c must write the round-trip byte pattern")
+                        "the probe harness (probe_hle_harness.h) must write the round-trip byte pattern")
         # The 64 bytes the family's expression produces, as _verify_host0_roundtrip expects.
         roundtrip = bytes((0x5A ^ (index * 0x25 + (index >> 3))) & 0xFF for index in range(64))
         report, left_behind = self._launch(roundtrip)
