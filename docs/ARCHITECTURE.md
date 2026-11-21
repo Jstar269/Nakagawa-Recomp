@@ -1080,7 +1080,12 @@ Clock ownership:
   ([#1382](https://github.com/Jstar269/nakagawa-recomp/issues/1382)). On the first run, when no
   per-user registry overlay exists yet, the setting starts from the host's local time zone, which
   the launcher passes as `SR_HOST_TIME_ZONE`, and is saved to the overlay at once; from then on it
-  is retained the way a console keeps its setting, and a later host change does not move it.
+  is retained the way a console keeps its setting, and a later host change does not move it. An
+  invalid overlay (not JSON, not the schema, a record that does not apply, or larger than 1 MiB)
+  is a first run too: it is ignored as a whole, the host's zone is seeded, and that save moves the
+  invalid file to `system.json.corrupt` before writing the new one. An overlay that exists but
+  cannot be read (it cannot be opened or read) is not: the run serves the defaults, seeds nothing,
+  and leaves the file in place; no flush moves it or writes over it.
   Without that variable the seed is the oracle console's measured setting (-300 minutes, daylight
   saving on), not a factory default. The 60-minute daylight-saving shift is the setting's meaning,
   not a measurement. The
@@ -1194,7 +1199,7 @@ the maintained references for exact behavior.
 | `PSP_ISO` | path | Private ISO path where a route consumes it |
 | `SR_MEMSTICK` | path | Canonical host Memory Stick root shared by ordinary `sceIo*` `ms0:` I/O and savedata (default `memstick/`) |
 | `SR_FSDIR` | path | Legacy flat `fs/` source for one-time read-open import into the unified Memory Stick root (default `fs/`) |
-| `SR_HOST_TIME_ZONE` | `<minutes>,<0\|1>` | The host's standard offset from UTC and whether daylight saving is on now, set by the launcher; adopted as the console's time zone only on the first run, when the registry overlay does not exist yet (#1382) |
+| `SR_HOST_TIME_ZONE` | `<minutes>,<0\|1>` | The host's standard offset from UTC and whether daylight saving is on now, set by the launcher; adopted as the console's time zone only on the first run, when the registry overlay does not exist yet or is invalid (the invalid file is moved to `system.json.corrupt`), never over an overlay that cannot be read (#1382) |
 | `SR_SYSTEM_REGISTRY` | path | Per-user overlay file of the virtual PSP system registry that `sceRegFlush*` writes (default `registry/system.json` in the per-user data directory) |
 
 Many legacy Boolean diagnostics are enabled by **presence**, so setting them to the literal string
