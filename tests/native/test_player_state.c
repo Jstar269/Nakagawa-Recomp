@@ -19564,7 +19564,8 @@ int main(int argc, char **argv) {
             assert(nk_platform_mkdir_p(SR_SELFTEST_BUILD_ROOT "/tps_long_package"));
             assert(nk_platform_absolute_path(SR_SELFTEST_BUILD_ROOT "/tps_long_package",
                                              long_root, sizeof(long_root)));
-            const size_t root_length = 300u;
+            /* <root>/packages/<DISC_ID> fits NK_MAX_PATH; the executable inside does not. */
+            const size_t root_length = 480u;
             assert(strlen(long_root) + 16u < root_length);
             while (strlen(long_root) < root_length) {
                 size_t used = strlen(long_root);
@@ -19574,13 +19575,10 @@ int main(int argc, char **argv) {
                 memset(long_root + used + 1u, 'p', segment);
                 long_root[used + 1u + segment] = '\0';
             }
-            char long_exe[256];
-            memset(long_exe, 'x', 200u);
-            snprintf(long_exe + 200, sizeof(long_exe) - 200u, ".exe");
             char long_exe_path[1400];
             snprintf(long_exe_path, sizeof(long_exe_path), "%s%cpackages%c%s%c%s", long_root,
                      nk_platform_path_separator(), nk_platform_path_separator(),
-                     cached_disc_id, nk_platform_path_separator(), long_exe);
+                     cached_disc_id, nk_platform_path_separator(), "synthetic-allegrex-v1.exe");
             assert(strlen(long_exe_path) >= NK_MAX_PATH);
             if (!nk_platform_mkdir_p(long_root) ||
                 nk_platform_path_exceeds_limit(long_exe_path, false)) {
@@ -19589,7 +19587,7 @@ int main(int argc, char **argv) {
             } else {
                 write_runtime_package_fixture(long_root, cached_disc_id,
                                               "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
-                                              long_exe, FIXTURE_SHA256, NULL);
+                                              "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL);
                 assert(nk_launch_validate_runtime_package(long_root, &game, NULL, reason,
                                                           sizeof(reason)) ==
                        NK_RUNTIME_PACKAGE_OK);
@@ -19602,11 +19600,6 @@ int main(int argc, char **argv) {
                 assert(strstr(reason, "build it from the library") == NULL);
                 remove_runtime_package_fixture(long_root, cached_disc_id,
                                                "synthetic-allegrex-v1");
-                char long_image_path[1400];
-                snprintf(long_image_path, sizeof(long_image_path), "%.*s_image.bin",
-                         (int)(strlen(long_exe_path) - 4u), long_exe_path);
-                remove(long_exe_path);
-                remove(long_image_path);
                 printf("[PLAYER_STATE_TEST] long package path is INCOMPATIBLE at the status "
                        "check PASSED\n");
             }
