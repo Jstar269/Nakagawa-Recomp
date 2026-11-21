@@ -238,6 +238,8 @@ if(NOT MSVC AND NOT APPLE)
     target_link_options(test_disc_expand PRIVATE "-Wl,--wrap=malloc")
 endif()
 add_test(NAME disc_expand_test COMMAND test_disc_expand)
+# A host that cannot make a folder link runs every other check and exits 77.
+set_tests_properties(disc_expand_test PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(test_disc_verify
     tests/native/test_disc_verify.c
