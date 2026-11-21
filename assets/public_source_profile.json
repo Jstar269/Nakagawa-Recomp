@@ -1219,6 +1219,7 @@
     "tests/fixtures/psp_oracle/probe_exception_a2.c",
     "tests/fixtures/psp_oracle/probe_exception_a3.c",
     "tests/fixtures/psp_oracle/probe_ge_sample.c",
+    "tests/fixtures/psp_oracle/probe_hle_harness.h",
     "tests/fixtures/psp_oracle/probe_hle_issues.c",
     "tests/fixtures/psp_oracle/probe_hle_measure.c",
     "tests/fixtures/psp_oracle/probe_hle_self_stop_helper.c",
