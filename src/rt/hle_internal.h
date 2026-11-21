@@ -1149,7 +1149,16 @@ void flash0_font_sources(Flash0Sources *out);
 void sreg_build_font_registry(void);
 int sr_utf8_env_alloc(const wchar_t *name, char **value_out, int *present_out);
 char *sreg_overlay_path(void);
-int sreg_read_file(const char *path, char **out, size_t *len_out, char *why, size_t why_len);
+/* sreg_read_file's result. INVALID is a file that can never load (larger than the 1 MiB bound);
+ * UNREADABLE is one that cannot be read now (it cannot be opened or read, or there is no memory to
+ * read it), which says nothing about its contents. */
+typedef enum {
+    SREG_READ_UNREADABLE = -2,
+    SREG_READ_INVALID = -1,
+    SREG_READ_ABSENT = 0,
+    SREG_READ_OK = 1
+} SregReadResult;
+SregReadResult sreg_read_file(const char *path, char **out, size_t *len_out, char *why, size_t why_len);
 int sreg_hex_nibble(char c);
 uint32_t sreg_type_from_name(const char *name);
 const char *sreg_type_name(uint32_t type);
@@ -1436,6 +1445,9 @@ void route_note_nid(uint32_t nid);
 int route_sig_bytes(void);
 void hle_exit_audio_stats(void);
 void hle_exit_close_audio_dump(void);
+/* The end of a run the runtime stops itself: every finalizer atexit would run, the recording
+ * finished with `status` and `reason`, then _Exit(status) (hle_route.c). */
+_Noreturn void sr_run_end(int status, const char *label, const char *reason);
 extern DisplayFrameState s_display_active;
 extern DisplayFrameState s_display_latched;
 extern int s_display_latched_pending;
@@ -1606,6 +1618,8 @@ void hle_register_init_kernel_utils_2(void);
 uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name);
 extern CallbackEntry *s_callbacks;
 extern size_t s_callbacks_len;
+/* Callback dispatch passes in progress; the table is compacted only at 0 (hle_kernel_thread.c). */
+extern int s_callback_dispatch_depth;
 int sr_callback_find_in_table(uint32_t uid);
 void hle_register_osk_handlers(void);
 int sr_callback_table_unregister(uint32_t uid);
