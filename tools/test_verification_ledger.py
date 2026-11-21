@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 from typing import Any, ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -224,6 +225,51 @@ class RuntimeLogTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ledger_mod.LedgerError, "HOST_TESTED with no conformance cell"):
             ledger_mod.classify_hle(chain, {}, {})
+
+    @staticmethod
+    def _chain(cells) -> dict:
+        return {
+            "_manifest": {"registrations": [{"nid": "0x00000001", "subsystem": "kernel"}]},
+            "entries": [{
+                "nid": "0x00000001", "canonical_name": "sceExample", "evidence_tier": "HOST_TESTED",
+                "exercised": {"conformance_cells": [], "hle_selftest_dispatch": True,
+                              "psp_oracle_probes": [], "psp_oracle_cells": cells},
+                "registration": {"handler": "h_example_not_registered", "classification": "implemented"},
+            }],
+        }
+
+    def test_a_measured_cell_names_the_cell_and_keeps_the_function_class(self) -> None:
+        cell = {"oracle_id": "PSP-X-001", "case": "x-basic", "api": "sceExample",
+                "call": "sceExample(0)", "cell": "mode 0 from a user thread", "complete": False}
+        row = ledger_mod.classify_hle(self._chain([cell]), {}, {})[0]
+        self.assertEqual(row["class"], "synthetic")
+        self.assertEqual(row["basis"], "HLE selftest dispatch; PSP-measured cells only: `sceExample(0)` "
+                         "mode 0 from a user thread (PSP-X-001 `x-basic`)")
+        plain = ledger_mod.classify_hle(self._chain([]), {}, {})[0]
+        self.assertEqual(plain["basis"], "HLE selftest dispatch")
+
+    def test_the_hold_mode_row_names_its_measured_cell(self) -> None:
+        row = next(r for r in ledger_mod.build_ledger()["hle"] if r["name"] == "sceDisplaySetHoldMode")
+        self.assertNotEqual(row["class"], "hardware-measured")
+        self.assertIn("`sceDisplaySetHoldMode(0)` mode 0 from a user thread "
+                      "(PSP-KERNEL-MISC-001 `display-basic`)", row["basis"])
+
+    def test_the_unlinked_note_marker_is_a_readable_phrase_never_a_bare_note(self) -> None:
+        table = ledger_mod.render_markdown(ledger_mod.build_ledger())
+        for line in table.splitlines():
+            self.assertFalse(line.startswith("| `0x") and line.rstrip().endswith("; note |"),
+                             f"dangling '; note' fragment: {line}")
+        self.assertIn("; unlinked hardware note |", table)
+
+    def test_a_linked_hardware_note_is_not_reported_as_unlinked(self) -> None:
+        meta_notes = {"h_example_not_registered": ["docs/HARDWARE_ORACLE.md (PSP-X-001: x-basic): returns 0"]}
+        cell = {"oracle_id": "PSP-X-001", "case": "x-basic", "api": "sceExample",
+                "call": "sceExample(0)", "cell": "mode 0", "complete": False}
+        with mock.patch.object(ledger_mod.meta, "HANDLER_EVIDENCE", meta_notes):
+            unlinked = ledger_mod.classify_hle(self._chain([]), {}, {})[0]
+            linked = ledger_mod.classify_hle(self._chain([cell]), {}, {})[0]
+        self.assertTrue(unlinked["unlinked_hardware_note"])
+        self.assertFalse(linked["unlinked_hardware_note"])
 
     def test_census_tier_h_without_a_semantic_measurement_fails(self) -> None:
         census = {"rows": [{

@@ -1641,6 +1641,103 @@ def oracle_exercised_apis(manifest: dict) -> dict[str, list[str]]:
         for api in test.get("apis", []):
             if api in cited:
                 out.setdefault(api, []).append(test.get("id", "?"))
+        # A `case_apis` cell promotes its API only when it says it covers the whole contract.
+        for cell in _case_api_cells(test):
+            if cell["complete"] and test_id not in out.get(cell["api"], []):
+                out.setdefault(cell["api"], []).append(test_id)
+    return out
+
+
+_CASE_API_CALL_RE = re.compile(r"(\w+)\(.*\)", re.DOTALL)
+
+
+def _case_api_cells(test: dict) -> list[dict]:
+    """The validated `case_apis` cells of one `MEASURED` oracle row.
+
+    `case_apis` maps a cited case id to the API calls that case's own source makes and the
+    exact cell each call measured: `{"call": "sceX(0)", "cell": "mode 0 from a user thread"}`.
+    A cell is a partial claim by default; `"complete": true` says the cell is the whole
+    contract of that API and is the only way a case promotes the function itself.
+    """
+    test_id = test.get("id", "?")
+    raw = test.get("case_apis")
+    if raw is None:
+        return []
+    if test.get("hardware_evidence") != "MEASURED":
+        raise ManifestError(f"test {test_id!r} has case_apis but is not a MEASURED row")
+    if not isinstance(raw, dict) or not raw:
+        raise ManifestError(f"test {test_id!r} case_apis must map case ids to call lists")
+    cited = set(test.get("evidence_cases", []))
+    apis = set(test.get("apis", []))
+    cells: list[dict] = []
+    for case, entries in raw.items():
+        if case not in cited or case not in test.get("case_ids", []):
+            raise ManifestError(
+                f"test {test_id!r} case_apis case {case!r} is not one of its cited case_ids"
+            )
+        if not isinstance(entries, list) or not entries:
+            raise ManifestError(f"test {test_id!r} case_apis {case!r} must be a non-empty list")
+        for entry in entries:
+            call = entry.get("call") if isinstance(entry, dict) else None
+            cell = entry.get("cell") if isinstance(entry, dict) else None
+            complete = entry.get("complete", False) if isinstance(entry, dict) else None
+            match = _CASE_API_CALL_RE.fullmatch(call) if isinstance(call, str) else None
+            if (
+                match is None
+                or not isinstance(cell, str)
+                or not cell
+                or not isinstance(complete, bool)
+                or set(entry) - {"call", "cell", "complete"}
+            ):
+                raise ManifestError(
+                    f"test {test_id!r} case_apis {case!r} entry {entry!r} must be "
+                    '{"call": "api(args)", "cell": "<what was measured>"} with an optional '
+                    'boolean "complete"'
+                )
+            if match.group(1) not in apis:
+                raise ManifestError(
+                    f"test {test_id!r} case_apis {case!r} calls {match.group(1)!r}, "
+                    "which is not one of its apis"
+                )
+            cells.append({
+                "oracle_id": test_id, "case": case, "api": match.group(1),
+                "call": call, "cell": cell, "complete": complete,
+            })
+    return cells
+
+
+def _oracle_case_source(source: str, test_id: str, case: str) -> list[str]:
+    """The probe source that runs before each record of `case`, back to the previous record of
+    the same test (or the start of the enclosing function)."""
+    spans = []
+    for hit in re.finditer(rf'"{re.escape(test_id)}"\s*,\s*"{re.escape(case)}"', source):
+        start = max(source.rfind("\nstatic ", 0, hit.start()), source.rfind(f'"{test_id}"', 0, hit.start()), 0)
+        spans.append(source[start:hit.start()])
+    return spans
+
+
+def oracle_measured_cells(manifest: dict, sources: dict[str, str] | None = None) -> dict[str, list[dict]]:
+    """API name -> the exact cells measured PSP-side, from each case's own probe source.
+
+    Every `case_apis` call must appear verbatim in the source that runs before the case's
+    record, so a cell names an argument the probe really passed.  `sources` maps a row's
+    `source` path to its text (the repository file by default).
+    """
+    out: dict[str, list[dict]] = {}
+    for test in manifest.get("tests", []):
+        cells = _case_api_cells(test)
+        if not cells:
+            continue
+        test_id = test.get("id", "?")
+        path = test.get("source", "")
+        text = sources[path] if sources is not None and path in sources else _read_optional(ROOT / path)
+        for cell in cells:
+            if not any(cell["call"] in span for span in _oracle_case_source(text, test_id, cell["case"])):
+                raise ManifestError(
+                    f"test {test_id!r} case_apis {cell['case']!r} call {cell['call']!r} is not made "
+                    f"in the source that records that case ({path!r})"
+                )
+            out.setdefault(cell["api"], []).append(cell)
     return out
 
 
@@ -1886,6 +1983,7 @@ def build_evidence_chain(manifest: dict | None = None, imports_path: Path | None
     except json.JSONDecodeError as e:
         raise ManifestError(f"{PSP_ORACLE_MANIFEST} is not valid JSON: {e.msg} at line {e.lineno}") from e
     oracle = oracle_exercised_apis(oracle_doc)
+    oracle_cells = oracle_measured_cells(oracle_doc)
     imports = load_imports(imports_path)
     test_refs = public_test_references(
         {r["name"] for r in manifest["registrations"]},
@@ -1937,6 +2035,7 @@ def build_evidence_chain(manifest: dict | None = None, imports_path: Path | None
                 "conformance_cells": cells.get(nid, []),
                 "hle_selftest_dispatch": nid in dispatched,
                 "psp_oracle_probes": oracle.get(reg["name"], []),
+                "psp_oracle_cells": oracle_cells.get(reg["name"], []),
             },
         }
         entry["exercised_stub"] = bool(
