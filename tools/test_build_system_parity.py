@@ -180,6 +180,29 @@ class BuildSystemParityTests(unittest.TestCase):
         outside = self.cmake_text.replace(guarded.group(0), "")
         self.assertNotIn("--wrap=malloc", outside)
 
+    def test_nk_zip_fread_wrap_is_conditional_in_both(self) -> None:
+        """test_nk_zip counts the reads of its nested-header archive by wrapping fread, which
+        Apple's ld64 and MSVC's linker cannot: Make adds the wrap only off a Mac
+        (NK_ZIP_WRAP_FREAD, chosen beside DISC_EXPAND_WRAP_MALLOC) and CMake only outside MSVC
+        and Apple; there the test prints a SKIP for the count instead of timing the open."""
+        recipe = [line for line in (ROOT / "mk/native_ui_tests.mk").read_text(encoding="utf-8").splitlines()
+                  if "tests/native/test_nk_zip.c" in line]
+        self.assertEqual(len(recipe), 1, "expected one recipe line linking test_nk_zip.c")
+        self.assertIn("$(NK_ZIP_WRAP_FREAD)", recipe[0])
+        self.assertNotIn("--wrap", recipe[0])
+        choice = re.search(r"^ifeq \(\$\(NK_TARGET_OS\)-\$\(HOST_KIND\),posix-Darwin\)\n(.*?)^else\n(.*?)^endif",
+                           self.makefile_text, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(choice, "the Makefile's Darwin link-option choice is missing")
+        assert choice is not None
+        self.assertRegex(choice.group(1), r"(?m)^NK_ZIP_WRAP_FREAD :=\s*$")
+        self.assertIn("NK_ZIP_WRAP_FREAD := -DNK_TEST_WRAP_FREAD -Wl,--wrap=fread", choice.group(2))
+        guarded = re.search(r"^if\(NOT MSVC AND NOT APPLE\)\n((?:(?!^endif\(\)).)*?test_nk_zip.*?)^endif\(\)",
+                            self.cmake_text, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(guarded, "CMakeLists.txt does not guard test_nk_zip's fread wrap")
+        assert guarded is not None
+        self.assertIn('target_link_options(test_nk_zip PRIVATE "-Wl,--wrap=fread")', guarded.group(1))
+        self.assertIn("target_compile_definitions(test_nk_zip PRIVATE NK_TEST_WRAP_FREAD)", guarded.group(1))
+
     @staticmethod
     def _make_lines_inside_conditionals(text: str) -> set[int]:
         """The 1-based line numbers a Make conditional (ifeq/ifneq/ifdef/ifndef ... endif)
