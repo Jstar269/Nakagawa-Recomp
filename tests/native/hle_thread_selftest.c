@@ -1115,12 +1115,13 @@ int g_hle_depth;
 jmp_buf g_hle_jmp;
 int sr_hit_hle;
 void sr_trace_close(void) {}
-static uint8_t s_heap_arena[1u << 20];
+/* Only the bump offset is tracked: the guest heap lives in PSP RAM, not in a host array. */
+enum { S_HEAP_ARENA_SIZE = 1u << 20 };
 static size_t s_heap_arena_off;
 uint32_t sr_newlib_malloc(uint32_t size, uint32_t guest_ra) {
     (void)guest_ra;
     size = (size + 15u) & ~15u;
-    if (s_heap_arena_off + size > sizeof(s_heap_arena)) return 0u;
+    if (s_heap_arena_off + size > (size_t)S_HEAP_ARENA_SIZE) return 0u;
     uint32_t p = 0x09000000u + (uint32_t)s_heap_arena_off;
     s_heap_arena_off += size;
     return p;
@@ -63495,8 +63496,8 @@ static void test_atrac_zero_frame_routes_322(const char *self) {
         "sceAtracGetRemainFrame after NO_DATA is written into a zero-frame track's context",
         "sceAtracGetRemainFrame after NO_DATA and sceAtracAddStreamData(id, 0) on a zero-frame track",
         "sceAtracDecodeData after NO_DATA and sceAtracAddStreamData(id, 0) on a zero-frame track",
-        "sceAtracGetBufferInfoForResetting after NO_DATA and sceAtracAddStreamData(id, 0) on a "
-        "zero-frame track",
+        ("sceAtracGetBufferInfoForResetting after NO_DATA and sceAtracAddStreamData(id, 0) on a "
+         "zero-frame track"),
     };
     char mode[96];
     char name[256];
