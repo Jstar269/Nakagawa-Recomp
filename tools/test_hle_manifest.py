@@ -1515,7 +1515,6 @@ static uint32_t h_SynthReal(CpuState *s) {
                 "0x08d98894": ("sceNpDrmEdataSetupKey", "0x80020002"),
                 "0xf9275d98": ("sceKernelLoadModuleBufferUsbWlan", "0x80020002"),
                 "0x72189c48": ("sceImposeSetUMDPopup", "0x80010086"),
-                "0x7ed59bc4": ("sceDisplaySetHoldMode", "0x80020002"),
                 "0x8c943191": ("sceImposeGetBatteryIconStatus", "0x80010086"),
                 "0xab1abe07": ("sceHttpInit", "0x80010086"),
                 "0xd1c8945e": ("sceHttpEnd", "0x80010086"),
