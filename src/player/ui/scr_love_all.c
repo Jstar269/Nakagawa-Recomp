@@ -123,7 +123,8 @@ PlayerUiAction player_ui_screen_love_all(NkUi *ui, const PlayerUiLoveAllModel *m
                 nk_ui_text_role(ui, LOVE_ID_TITLE, "LOVE ALL", NK_UI_TYPE_DISPLAY_XL,
                                 theme->paper);
                 nk_ui_text_role(ui, LOVE_ID_LEAD,
-                                "Nothing all, and thanks to everyone: the projects Nakagawa "
+                                "In tennis, love all means a level start: nothing to nothing. "
+                                "Here it means thanks to everyone: the projects Nakagawa "
                                 "builds on, the people who made them, and you.",
                                 NK_UI_TYPE_BODY_L, theme->muted);
                 nk_ui_end_container(ui);

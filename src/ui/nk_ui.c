@@ -495,6 +495,8 @@ NkUi *nk_ui_create(const NkUiConfig *config) {
         free(ui);
         return NULL;
     }
+    /* A control scrolled into view shows its focus ring whole, not cut at the edge. */
+    nk_ui_focus_set_reveal_margin(ui->focus_graph, NK_UI_FOCUS_RING_OUTSET);
     ui->host = config != NULL ? config->host : NK_UI_HOST_LAUNCHER;
     if (ui->host != NK_UI_HOST_LAUNCHER && ui->host != NK_UI_HOST_OVERLAY) {
         nk_ui_focus_graph_destroy(ui->focus_graph);

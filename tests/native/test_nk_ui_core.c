@@ -1619,10 +1619,12 @@ static int test_scroll_container(void) {
         (void)draw_scroll_list(ui, NULL);
     }
     CHECK(nk_ui_focused(ui) == 47u, "focus walks down to row 47");
-    CHECK(scroll_offset(ui) == 252.0f, "the list scrolls just enough to show the focused row");
+    CHECK(scroll_offset(ui) == 252.0f + NK_UI_FOCUS_RING_OUTSET,
+          "the list scrolls just enough to show the focused row and its focus ring");
     push_nav(ui, NK_UI_DIR_UP);
     (void)draw_scroll_list(ui, NULL);
-    CHECK(scroll_offset(ui) == 252.0f, "a row already in view needs no scroll");
+    CHECK(scroll_offset(ui) == 264.0f - NK_UI_FOCUS_RING_OUTSET,
+          "row 46, in view but its ring cut at the top, scrolls just enough to show the ring");
 
     /* A drag: held on row 47 and moved up 70 px, the list follows the pointer
        and the release on the same row is no click. */
@@ -1630,7 +1632,8 @@ static int test_scroll_container(void) {
     (void)draw_scroll_list(ui, NULL);
     push_pointer(ui, 50.0f, 10.0f, true);
     activated = draw_scroll_list(ui, NULL);
-    CHECK(scroll_offset(ui) == 322.0f, "a drag scrolls the list with the pointer");
+    CHECK(scroll_offset(ui) == 264.0f - NK_UI_FOCUS_RING_OUTSET + 70.0f,
+          "a drag scrolls the list with the pointer");
     push_pointer(ui, 50.0f, 10.0f, false);
     for (frame = 0; frame < 2 && activated == 0u; ++frame) activated = draw_scroll_list(ui, NULL);
     CHECK(activated == 0u, "a drag that scrolled is no click");

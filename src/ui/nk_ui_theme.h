@@ -79,6 +79,13 @@ struct NkUiTheme {
 #define NK_UI_FOCUS_RING_GAP 3.0f        /* between the element and the ring */
 #define NK_UI_FOCUS_HC_RING_WIDTH 4.0f   /* high contrast: white ring ... */
 #define NK_UI_FOCUS_HC_KEYLINE 2.0f      /* ... between black keylines */
+/* How far the wider of the two rings reaches outside its control: a scroll that brings a
+   control into view shows this much around it, so its ring is never cut. */
+#define NK_UI_FOCUS_HC_RING_OUTSET (NK_UI_FOCUS_HC_KEYLINE * 2.0f + NK_UI_FOCUS_HC_RING_WIDTH)
+#define NK_UI_FOCUS_RING_OUTSET                                                     \
+    (NK_UI_FOCUS_HC_RING_OUTSET > NK_UI_FOCUS_RING_GAP + NK_UI_FOCUS_RING_WIDTH    \
+         ? NK_UI_FOCUS_HC_RING_OUTSET                                              \
+         : NK_UI_FOCUS_RING_GAP + NK_UI_FOCUS_RING_WIDTH)
 
 /* ---- Control sizes -------------------------------------------------------- */
 #define NK_UI_CONTROL_HEIGHT 44.0f       /* the minimum touch and pointer target */
