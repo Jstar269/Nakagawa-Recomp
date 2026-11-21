@@ -21337,6 +21337,50 @@ static void test_watchdog_no_new_frame_observation(void) {
            "a refused request does not reset the no-frame clock");
 }
 
+/* #2875: a thread that never blocks starves every thread below its priority, and at the stall
+ * event it is RUNNING, so it sat in none of the ready/delay/wait counts and the event showed only
+ * the threads it starved. The summary counts it and names it: uid, priority, the import it keeps
+ * returning from, that import's value and how many times in a row. */
+static void test_watchdog_summary_names_running_thread(void) {
+    static const uint32_t NID_ATRAC_DECODE_DATA = 0x6a8c3cd5u;
+    reset_fixture();
+    sr_hle_init();
+    TCB *starved = fixture_thread(0x111u, TH_READY, 32);
+    TCB *ticker = fixture_thread(0x124u, TH_WAIT_DELAY, 16);
+    TCB *busy = fixture_thread(0x130u, TH_RUNNING, 20);
+    (void)starved; (void)ticker;
+    busy->started = 1;
+    s_cur = (int)(busy - s_tcb);
+    for (unsigned i = 0; i < 1000u; i++) sched_note_import_return(NID_ATRAC_DECODE_DATA, 0u);
+
+    SrSchedWatchdogSummary s;
+    sched_watchdog_summary(&s);
+    expect(s.ready == 1u && s.delay == 1u && s.wait == 0u,
+           "stall summary: the starved and delayed threads keep their counts");
+    expect(s.running == 1u && s.busy_valid && s.busy_uid == 0x130u && s.busy_priority == 20,
+           "stall summary: the non-yielding RUNNING thread is counted and named with its priority");
+    expect(s.busy_import_valid && strcmp(s.busy_import, "sceAtracDecodeData") == 0 &&
+               s.busy_import_ret == 0u && s.busy_import_repeats == 1000u,
+           "stall summary: the busy thread's last import, its value and its repeat count");
+
+    char line[256];
+    (void)sched_watchdog_summary_format(&s, line, sizeof line);
+    expect(strncmp(line, "ready=1 delay=1 wait=0 spin=", 28) == 0 &&
+               strstr(line, " running=1 busy_uid=0x130 busy_pri=20 busy_import=sceAtracDecodeData"
+                            " busy_import_ret=0x00000000 busy_repeats=1000") != NULL,
+           "stall summary: the original fields come first, in their order, then the new ones");
+
+    /* Nothing on the CPU (every thread parked): running=0 and no busy fields. */
+    busy->state = TH_WAIT_OBJ;
+    s_cur = -1;
+    sched_watchdog_summary(&s);
+    (void)sched_watchdog_summary_format(&s, line, sizeof line);
+    expect(s.running == 0u && !s.busy_valid && strstr(line, " running=0") != NULL &&
+               strstr(line, "busy_") == NULL,
+           "stall summary: with no running thread the line ends at running=0");
+    s_ntcb = 0;
+}
+
 /* #77 watchdog boundary semantics under coalesced VCOUNT advance.
  *
  * VCOUNT advances by whole elapsed display periods at the scheduler source
@@ -63958,6 +64002,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_display_capture_arms_on_latched_flip();
     test_display_capture_windows_alone_select_fbsnap();
     test_watchdog_no_new_frame_observation();
+    test_watchdog_summary_names_running_thread();
     test_watchdog_fires_on_boundary_crossing_not_exact_multiple();
     test_interrupt_nid_semantics();
     test_is_cpu_intr_suspended_is_token_predicate();

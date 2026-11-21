@@ -1096,6 +1096,16 @@ struct PlayerApp {
     uint32_t stalled_game_delay;
     uint32_t stalled_game_wait;
     uint32_t stalled_game_spin;
+    /* The RUNNING count and the busy thread a runtime from #2875 on adds after spin; a stall
+       event from an older runtime leaves stalled_game_running_known false. */
+    bool stalled_game_running_known;
+    uint32_t stalled_game_running;
+    bool stalled_game_busy_known;
+    uint32_t stalled_game_busy_uid;
+    int32_t stalled_game_busy_priority;
+    char stalled_game_busy_import[48];
+    uint32_t stalled_game_busy_import_ret;
+    uint32_t stalled_game_busy_repeats;
     /* Keep the launcher UI headless. An explicit presented-frame acceptance
        request may still open a window in the child runtime. */
     bool launch_headless;
