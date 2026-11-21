@@ -446,6 +446,36 @@ class MakeNoticeTests(unittest.TestCase):
         self.assertIn('stage_make_notices(cfg.make_src, assets / "NOTICES"', body)
 
 
+class ProjectNoticeTests(unittest.TestCase):
+    """The APK carries the desktop packages' notice bundle, and refuses to stage without it."""
+
+    def test_the_bundle_holds_the_project_pages_and_component_texts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            toolchain.stage_project_notices(Path(tmp) / "NOTICES")
+            folder = Path(tmp) / "NOTICES" / "project"
+            names = {path.name for path in folder.iterdir()}
+            self.assertLessEqual({"NOTICE.md", "CREDITS.md", "THIRD_PARTY_NOTICES.txt", "THIRD_PARTY_NOTICES", "SOURCE.txt"}, names)
+            texts = {path.name for path in (folder / "THIRD_PARTY_NOTICES").iterdir()}
+            for notice in ("rcheevos.txt", "JPCSP.txt", "uOFW.txt", "PSPSDK.txt"):
+                self.assertIn(notice, texts)
+
+    def test_a_tree_without_the_pages_stops_the_stage(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            root = Path(tmp) / "repo"
+            (root / "assets").mkdir(parents=True)
+            shutil.copy2(Path(toolchain.__file__).resolve().parent.parent / "assets" / "third_party_components.json",
+                         root / "assets" / "third_party_components.json")
+            with self.assertRaises(Exception) as caught:
+                toolchain.stage_project_notices(Path(tmp) / "NOTICES", repo_root=root)
+            self.assertIn("LICENSE_TEXT_MISSING", str(caught.exception))
+            self.assertFalse((Path(tmp) / "NOTICES" / "project").exists())
+
+    def test_stage_output_stages_them(self) -> None:
+        source = Path(toolchain.__file__).read_text(encoding="utf-8")
+        body = source[source.index("def stage_output("):source.index("def main(")]
+        self.assertIn('stage_project_notices(assets / "NOTICES")', body)
+
+
 class GradleWiringTests(unittest.TestCase):
     """The app bundles the staged toolchain only when nk.toolchain names a staged folder."""
 
@@ -1082,7 +1112,7 @@ class StageOutputTests(unittest.TestCase):
         with mock.patch.object(toolchain, "_run", run), \
                 mock.patch.object(toolchain, "read_pinned", lambda *args: b"notice"), \
                 mock.patch.object(toolchain, "third_party_notices", lambda src: "notices\n"), \
-                mock.patch.object(package_notices, "source_reference", lambda: reference):
+                mock.patch.object(package_notices, "source_reference", lambda *args: reference):
             staged: dict[str, str] = toolchain.stage_output(cfg, out)
         return staged
 

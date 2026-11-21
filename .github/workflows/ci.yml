@@ -2749,6 +2749,8 @@ jobs:
           mkdir -p "$package/bin"
           cp build/nakagawa_player.exe "$package/bin/nakagawa_player.exe"
           cp LICENSE "$package/LICENSE"
+          cp NOTICE.md "$package/NOTICE.md"
+          cp CREDITS.md "$package/CREDITS.md"
           py="$(cygpath -u "$PYTHON")"
           "$py" tools/stage_runtime_dlls.py --target "$package/bin" --include-ui-fonts --runtime-manifest
           "$py" -c 'import sys; from pathlib import Path; sys.path.insert(0, "tools"); import stage_install; print(stage_install.write_sha256sums(Path(sys.argv[1])))' "$package"

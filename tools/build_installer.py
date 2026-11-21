@@ -45,7 +45,7 @@ INNO_ENV_DIR = "NK_INNO_SETUP_DIR"
 _VERSION = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 #: What a package must hold for the script's ``[Files]``, icon and licence page to work.
-REQUIRED_PACKAGE_FILES = ("bin/nakagawa_player.exe", "bin/runtime-manifest.json", "LICENSE", SUMS_NAME)
+REQUIRED_PACKAGE_FILES = ("bin/nakagawa_player.exe", "bin/runtime-manifest.json", "LICENSE", "NOTICE.md", "CREDITS.md", SUMS_NAME)
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
