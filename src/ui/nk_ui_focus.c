@@ -38,6 +38,8 @@ struct NkUiFocusGraph {
     /* Layouts still to come after a focus change on which the entry is brought into view
        again (nk_ui_focus_place). */
     int reveal_frames;
+    /* What a scroll into view shows around the entry (nk_ui_focus_set_reveal_margin). */
+    float reveal_margin;
 };
 
 static size_t nk_ui_focus_reveal(const NkUiFocusGraph *graph, NkUiId id,
@@ -279,6 +281,24 @@ NkUiId nk_ui_focus_directional(const NkUiFocusEntry *entries, size_t count,
 
 NkUiFocusGraph *nk_ui_focus_graph_create(void) {
     return (NkUiFocusGraph *)calloc(1, sizeof(NkUiFocusGraph));
+}
+
+void nk_ui_focus_set_reveal_margin(NkUiFocusGraph *graph, float margin) {
+    if (graph == NULL) {
+        return;
+    }
+    graph->reveal_margin = isfinite(margin) && margin > 0.0f ? margin : 0.0f;
+}
+
+/* Entry idx's rect with the reveal margin around it: what a scroll into view shows. */
+static NkUiRect nk_ui_focus_reveal_rect(const NkUiFocusGraph *graph, long idx) {
+    NkUiRect rect = graph->entries[idx].rect;
+    float m = graph->reveal_margin;
+    rect.x -= m;
+    rect.y -= m;
+    rect.w += m * 2.0f;
+    rect.h += m * 2.0f;
+    return rect;
 }
 
 void nk_ui_focus_graph_destroy(NkUiFocusGraph *graph) {
@@ -548,7 +568,7 @@ bool nk_ui_focus_scroll_into_view(const NkUiFocusGraph *graph, NkUiId id,
     }
     s = nk_ui_focus_scroller(graph->scrollers, graph->scroller_count,
                              graph->entries[idx].scroller);
-    rect = graph->entries[idx].rect;
+    rect = nk_ui_focus_reveal_rect(graph, idx);
     if (s == NULL || !nk_ui_focus_scroll_for(s, &rect, &found)) {
         return false;
     }
@@ -569,7 +589,7 @@ static size_t nk_ui_focus_reveal(const NkUiFocusGraph *graph, NkUiId id,
     if (idx < 0) {
         return 0u;
     }
-    rect = graph->entries[idx].rect;
+    rect = nk_ui_focus_reveal_rect(graph, idx);
     s = nk_ui_focus_scroller(graph->scrollers, graph->scroller_count,
                              graph->entries[idx].scroller);
     for (depth = 0; s != NULL && count < cap && depth < NK_UI_FOCUS_SCROLL_DEPTH; ++depth) {

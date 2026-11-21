@@ -31,6 +31,13 @@ import stage_install  # noqa: E402
 import stage_runtime_dlls  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
 
+
+def _windows_path(path: Path) -> str:
+    """A path in Windows form. MSYS2's Python prints a Path with forward slashes, which cmd.exe's
+    `mklink` reads as switches and which a shortcut's stored target never has."""
+    return str(path).replace("/", "\\")
+
+
 _GIT_ENV = {
     "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
     "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
@@ -367,7 +374,7 @@ class InstallTests(unittest.TestCase):
         link = self.root / "Nakagawa Recomp.lnk"
         stage_install.write_shortcut(link, first)
         self.assertEqual(stage_install.read_shortcut_target(link),
-                         str((first / "bin" / "nakagawa_player.exe").resolve()))
+                         _windows_path((first / "bin" / "nakagawa_player.exe").resolve()))
         with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_SHORTCUT_OTHER_COPY"):
             stage_install.write_shortcut(link, second)
 
@@ -1146,7 +1153,7 @@ class UninstallTests(unittest.TestCase):
         outside.mkdir()
         (outside / "keep.txt").write_text("keep", encoding="utf-8")
         junction = self.dest / "source" / "escape"
-        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", _windows_path(junction), _windows_path(outside)],
                               capture_output=True, text=True, check=False)
         self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
         stage_install.uninstall(self.dest)
@@ -1162,7 +1169,7 @@ class UninstallTests(unittest.TestCase):
         (outside / "data" / "keep.sav").write_bytes(b"save")
         (outside / "keep.txt").write_text("keep", encoding="utf-8")
         junction = self.dest / "bin.old"
-        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", _windows_path(junction), _windows_path(outside)],
                               capture_output=True, text=True, check=False)
         self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
         stage_install.uninstall(self.dest)
@@ -1298,7 +1305,7 @@ class UninstallTests(unittest.TestCase):
         (outside / "keep.dll").write_bytes(b"keep")
         link = self.dest / "bin" / "assets"
         if os.name == "nt":  # a junction needs no privilege
-            made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+            made = subprocess.run(["cmd", "/c", "mklink", "/J", _windows_path(link), _windows_path(outside)],
                                   capture_output=True, text=True, check=False)
             self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
         else:

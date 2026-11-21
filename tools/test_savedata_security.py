@@ -1755,7 +1755,7 @@ class TestSavedataSecurityShape(unittest.TestCase):
         self.assertIn("nNumberOfLinks != 1", shared)
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestSavedataSecurityProduction(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX descriptor cases run in the WSL POSIX lane")
     def test_posix_open_and_symlink_regressions(self):

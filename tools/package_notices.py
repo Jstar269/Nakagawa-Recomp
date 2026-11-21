@@ -525,6 +525,44 @@ def _git_text(repo_root: Path, *args: str) -> str | None:
     return completed.stdout.strip()
 
 
+INSTALL_RECORD_NAME = ".nakagawa-install.json"
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def runtime_source_commit(repo_root: Path = ROOT) -> dict[str, Any]:
+    """The commit of the runtime source a package is built from, as already recorded.
+
+    An installed player builds packages from ``<install>/source``, which carries no
+    git metadata; ``tools/stage_install.py`` records that tree's ``source_commit``
+    in ``<install>/.nakagawa-install.json``. That record is read, never re-derived.
+    A development tree is a git checkout, so its ``HEAD`` is used. When neither
+    exists, the commit is ``None`` with the reason, never a guess (#2875).
+    """
+    root = Path(repo_root)
+    record_path = root.parent / INSTALL_RECORD_NAME
+    if root.name == "source" and record_path.is_file():
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            record = None
+        commit = record.get("source_commit") if isinstance(record, dict) else None
+        if isinstance(commit, str) and _COMMIT_RE.match(commit):
+            return {"commit": commit, "origin": "install-record", "reason": None}
+        return {
+            "commit": None,
+            "origin": "unknown",
+            "reason": "the install record has no valid source_commit",
+        }
+    commit = _git_text(root, "rev-parse", "HEAD")
+    if commit and _COMMIT_RE.match(commit):
+        return {"commit": commit, "origin": "git", "reason": None}
+    return {
+        "commit": None,
+        "origin": "unknown",
+        "reason": "the source tree has no install record and no git metadata",
+    }
+
+
 def source_reference(repo_root: Path = ROOT) -> dict[str, Any]:
     """The exact source a package was built from.
 
@@ -535,11 +573,15 @@ def source_reference(repo_root: Path = ROOT) -> dict[str, Any]:
     that the complete corresponding source is the relink mechanism, so every
     package names the repository, commit and (when built from one) tag it came
     from, and says so plainly when the working tree carried local changes.
-    Without git, the commit is recorded as unknown rather than guessed.
+    An installed tree has no git metadata; its commit comes from the install
+    record (runtime_source_commit). Without either, the commit is recorded as
+    unknown rather than guessed.
     """
-    commit = _git_text(repo_root, "rev-parse", "HEAD")
-    tag = _git_text(repo_root, "describe", "--tags", "--exact-match", "HEAD") if commit else None
-    status = _git_text(repo_root, "status", "--porcelain", "--untracked-files=no") if commit else None
+    resolved = runtime_source_commit(repo_root)
+    commit = resolved["commit"]
+    from_git = resolved["origin"] == "git"
+    tag = _git_text(repo_root, "describe", "--tags", "--exact-match", "HEAD") if from_git else None
+    status = _git_text(repo_root, "status", "--porcelain", "--untracked-files=no") if from_git else None
     return {
         "repository": PROJECT_REPOSITORY_URL,
         "commit": commit or None,
@@ -701,9 +743,15 @@ def _validate_spdx_id(spdx_id: Any, comp_type: str, comp_name: str) -> None:
         )
 
 
+#: The project's own notice and credit pages. Every package carries them next to the generated
+#: bundle, so the credits and the "not endorsed" statement travel with the binaries and the installer
+#: (the installer copies the whole package directory).
+PROJECT_NOTICE_FILES = ("NOTICE.md", "CREDITS.md")
+
+
 def _promote_notice_bundle(package_dir: Path, staged_root: Path) -> None:
     """Replace all generated notice outputs as a rollback-capable transaction."""
-    outputs = ("THIRD_PARTY_NOTICES", "SOURCE.txt", "RELINK.md", "THIRD_PARTY_NOTICES.txt")
+    outputs = ("THIRD_PARTY_NOTICES", "SOURCE.txt", "RELINK.md", "THIRD_PARTY_NOTICES.txt", *PROJECT_NOTICE_FILES)
     backup_root = staged_root / ".previous-notices"
     backup_root.mkdir()
     moved_previous: list[str] = []
@@ -1093,6 +1141,15 @@ def generate_package_notices(
         (staged_root / "THIRD_PARTY_NOTICES.txt").write_text(
             combined_content, encoding="utf-8", newline="\n"
         )
+        for project_notice in PROJECT_NOTICE_FILES:
+            source = repo_root / project_notice
+            if not source.is_file():
+                raise PackageRouteError(
+                    "PACKAGE_LICENSE_TEXT_MISSING",
+                    f"LICENSE_TEXT_MISSING: {project_notice} is missing from the source tree "
+                    f"and cannot be staged into the package",
+                )
+            (staged_root / project_notice).write_bytes(source.read_bytes().replace(b"\r\n", b"\n"))
         _promote_notice_bundle(package_dir, staged_root)
 
     return index_data

@@ -226,7 +226,7 @@ class NmFailureTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "failed"):
                 proof._nm(obj, str(shutil.which("nm")))
 
-    @unittest.skipIf(shutil.which("gcc") is None, "needs gcc to locate the link libraries")
+    @unittest.skipIf(shutil.which("gcc") is None, "TOOLCHAIN_MISSING: needs gcc to locate the link libraries")
     def test_unreadable_library_is_not_counted_as_checked(self) -> None:
         # The Python interpreter stands in for an nm that rejects every file (it exits
         # non-zero on nm's options).
@@ -359,7 +359,7 @@ class FlattenTests(unittest.TestCase):
         self.assertEqual(proof.flatten_init(defs)[-1], "@}")
 
 
-@unittest.skipIf(shutil.which("gcc") is None, "needs gcc for the preprocessed layers")
+@unittest.skipIf(shutil.which("gcc") is None, "TOOLCHAIN_MISSING: needs gcc for the preprocessed layers")
 class PreprocessedLayerTests(unittest.TestCase):
     def run_layers(self, split: dict[str, str]) -> list[str]:
         report = proof.compare_items(BASE_UNITS, new_units(split))

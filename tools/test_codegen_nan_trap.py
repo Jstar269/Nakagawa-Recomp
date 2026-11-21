@@ -390,7 +390,7 @@ class TestGeneratedFixtureIsUnchangedWhenOff(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not CC:
-            raise unittest.SkipTest("no C compiler on PATH")
+            raise unittest.SkipTest("TOOLCHAIN_MISSING: no C compiler on PATH")
         cls.tmp = Path(tempfile.mkdtemp(prefix="nan_trap_fixture_"))
         fixture = cls.tmp / "fixture"
         subprocess.run([PY, str(COSIM_GENERATOR), "generate", "--out-dir", str(fixture)],
@@ -457,7 +457,7 @@ class TestGeneratedFixtureIsUnchangedWhenOff(unittest.TestCase):
         self.assertGreater(len(objects["plain"]), 0)
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestMatrixFormsCostNothingWhenOff(unittest.TestCase):
     """The zero-cost claim for the matrix forms, which gather operands.
 
@@ -512,7 +512,7 @@ class TestMatrixFormsCostNothingWhenOff(unittest.TestCase):
         self.assertGreater(len(objects["plain"]), 0)
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestEveryTrappedVfpuFormCompiles(unittest.TestCase):
     """Compile, with -DSR_NAN_TRAP, every VFPU statement the generator traps.
 
@@ -611,7 +611,7 @@ uint32_t sr_audio_vbl(void) {
 """
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TrapHarness(unittest.TestCase):
     """Builds one C fixture: real generated statement + real reporter."""
 
@@ -853,7 +853,7 @@ uint32_t sr_vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n) {
 """
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestVfpuLaneTrap(TrapHarness):
     """A real VFPU lane emission from codegen.py, with the real reporter."""
 
@@ -897,7 +897,7 @@ int main(void) {{
         self.assertEqual(reports, [])
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestFlightRecorderNanOrigin(TrapHarness):
     """Issue #320: a reported origin is also one fault-class flight-recorder event.
 
@@ -1071,7 +1071,7 @@ int sr_cpu_raise_data_fault(CpuState *s, unsigned code, uint32_t addr, uint32_t 
 """
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestInterpreterTrap(TrapHarness):
     """The AOT-gap fallback path: the real src/rt/vfpu_interp.c."""
 
@@ -1151,7 +1151,7 @@ int main(void) {{
         return self.exe, {"ARG": "40800000"}, "RC=1 RESULT=0x40000000", None  # sqrt(4)
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestVtfmTrap(TrapHarness):
     """A vtfm emission compiled against the real reporter: every lane, and a frame.
 
@@ -1250,7 +1250,7 @@ int main(void) {{
         self.assertIn("RC=1", result.stdout, "the interpreter still computed it")
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestVmmulTrap(TrapHarness):
     """A vmmul emission: both matrices, every lane, in operand order."""
 
@@ -1360,7 +1360,7 @@ FINITE_RESULT_CASES = (
 )
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestFiniteResultIsSilent(unittest.TestCase):
     def test_finite_result_is_silent_for_each_emitter_and_operation(self):
         for emitter, op, harness in FINITE_RESULT_CASES:

@@ -976,7 +976,7 @@ class PackageCacheTests(unittest.TestCase):
                        if key not in ("NK_TARGET_TRIPLE", "CC_TARGET")}
         gcc = shutil.which("gcc", path=environment.get("PATH"))
         if gcc is None:
-            self.skipTest("gcc is not on PATH, so there is no compiler target to read")
+            self.skipTest("TOOLCHAIN_MISSING: gcc is not on PATH, so there is no compiler target to read")
         expected = subprocess.run(
             [gcc, "-dumpmachine"], capture_output=True, text=True, check=True,
         ).stdout.strip()
@@ -1615,7 +1615,9 @@ class PackageCacheTests(unittest.TestCase):
                 (backup / "package.json").write_text(marker, encoding="utf-8")
             (cache_dir / "previous-ABCD12345-notes").mkdir()
             restored = nk_cli._restore_interrupted_swap(target, cache_dir)
-            self.assertEqual(restored, cache_dir / "previous-ABCD12345-200")
+            # Path(os.fspath(..)) re-parses the text: MSYS2's Python joins iterdir() children with
+            # a backslash under a forward-slash parent, and two such Paths of one folder compare unequal.
+            self.assertEqual(Path(os.fspath(restored)), cache_dir / "previous-ABCD12345-200")
             self.assertEqual((target / "package.json").read_text(encoding="utf-8"), "newest")
             self.assertFalse((cache_dir / "previous-ABCD12345-200").exists())
             # A package in place is never replaced by a backup.
@@ -1667,8 +1669,9 @@ class PackageCacheTests(unittest.TestCase):
                 "kept", encoding="utf-8")
             target = root / "packages" / "ABCD12345"
             self.assertFalse(target.parent.exists())
-            self.assertEqual(nk_cli._restore_interrupted_swap(target, cache_dir),
-                             cache_dir / "previous-ABCD12345-300")
+            restored = nk_cli._restore_interrupted_swap(target, cache_dir)
+            # Re-parsed as above: MSYS2's Python gives iterdir() children a backslash join.
+            self.assertEqual(Path(os.fspath(restored)), cache_dir / "previous-ABCD12345-300")
             self.assertEqual((target / "package.json").read_text(encoding="utf-8"), "kept")
 
     def test_an_unreadable_cache_folder_stops_the_restore_by_name(self) -> None:

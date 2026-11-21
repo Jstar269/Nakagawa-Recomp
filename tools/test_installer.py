@@ -391,6 +391,8 @@ class VerifierUpgradeTests(unittest.TestCase):
         (self.package / "bin").mkdir(parents=True)
         (self.package / "bin" / "nakagawa_player.exe").write_bytes(b"player")
         (self.package / "LICENSE").write_bytes(b"l")
+        (self.package / "NOTICE.md").write_bytes(b"n")
+        (self.package / "CREDITS.md").write_bytes(b"c")
         stage_install.write_sha256sums(self.package)
         self.older = self.root / "older"
         verify_installer.make_older_package(self.package, self.older)
@@ -504,7 +506,7 @@ class BuildToolTests(unittest.TestCase):
         self.package = self.root / "package"
         (self.package / "bin").mkdir(parents=True)
         for name, data in (("bin/nakagawa_player.exe", b"player"), ("bin/runtime-manifest.json", b"{}"),
-                           ("LICENSE", b"licence"), ("docs/README.md", b"readme")):
+                           ("LICENSE", b"licence"), ("NOTICE.md", b"notice"), ("CREDITS.md", b"credits"), ("docs/README.md", b"readme")):
             path = self.package / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
@@ -639,6 +641,8 @@ class VerifierPureTests(unittest.TestCase):
         (self.package / "bin").mkdir(parents=True)
         (self.package / "bin" / "a.dll").write_bytes(b"a")
         (self.package / "LICENSE").write_bytes(b"l")
+        (self.package / "NOTICE.md").write_bytes(b"n")
+        (self.package / "CREDITS.md").write_bytes(b"c")
         stage_install.write_sha256sums(self.package)
         self.installed = self.root / "installed"
         shutil.copytree(self.package, self.installed)
@@ -789,7 +793,7 @@ _NO_COMPILER = "the pinned Inno Setup is not installed (SKIP, not a pass)"
 
 def _player_package(package: Path) -> None:
     """A minimal package whose player is a real Windows program, so the script compiles."""
-    for name, data in (("bin/runtime-manifest.json", b"{}"), ("LICENSE", b"licence"), ("docs/README.md", b"readme")):
+    for name, data in (("bin/runtime-manifest.json", b"{}"), ("LICENSE", b"licence"), ("NOTICE.md", b"notice"), ("CREDITS.md", b"credits"), ("docs/README.md", b"readme")):
         path = package / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)

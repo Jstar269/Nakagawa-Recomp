@@ -2714,11 +2714,16 @@ def build_package(
             "fonts: import your own PSP fonts; the public PGF reader is available for supported inputs (#474)",
             "PGD-protected data: unavailable; broader ISO-to-Play support is in the works (#308)",
         ]
+        from package_notices import runtime_source_commit
+        # The runtime source commit as the install record (or the checkout) records
+        # it; a problem report names it beside the player commit (#2875).
+        runtime_source = runtime_source_commit(ROOT)
         report = {
             "format": BUILD_REPORT_FORMAT,
             "schema_version": BUILD_REPORT_SCHEMA_VERSION,
             "title_id": normalized["id"],
             "runtime_abi": {"name": "CpuState", "version": codegen_abi_version()},
+            "runtime_source": runtime_source,
             "cache": cache,
             "backends": backends_mode,
             "limits": backend_limits,
@@ -2758,6 +2763,7 @@ def build_package(
                 "runtime_contract": normalized.get("runtime_contract"),
                 "runtime_bindings": normalized.get("runtime_bindings", {}),
                 "required_runtime_bindings": normalized.get("required_runtime_bindings", []),
+                "source_commit": runtime_source,
             },
             "executable": {
                 "path": executable_name,

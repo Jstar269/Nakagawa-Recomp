@@ -1755,8 +1755,8 @@ committed.
 | `SR_DATAROOT=ABSOLUTE_PATH` | Override the extracted-XB data root (relative values are rejected; unset uses the executable-anchored HST tree). The executable-anchored root and walked descendants reject reparse points; an explicitly configured root is operator-trusted and may be a junction for a staged long-path fixture. Access-time replacement races inside that trusted root are not a containment boundary. |
 | `SR_FSDIR=PATH` | Legacy flat `fs/` source for one-time read-open import into the unified Memory Stick root; relative paths, including `.`/`..`, are resolved against the current directory. Write/create never creates under this root |
 | `SR_MEMSTICK=PATH` | Canonical host Memory Stick root shared by ordinary `sceIo*` `ms0:` I/O and savedata (default `memstick/`) |
-| `SR_HOST_TIME_ZONE=MINUTES,0\|1` | Set by the launcher from the host's local time zone: the standard offset from UTC in minutes and whether daylight saving is on now. The runtime adopts it as the console's time zone and daylight saving only when the registry overlay does not exist yet, and saves it there; an empty or malformed value keeps the measured seed (-300, on) |
-| `SR_SYSTEM_REGISTRY=PATH` | Overlay file of the virtual PSP system registry: every `sceReg` change a game saves with `sceRegFlushCategory`/`sceRegFlushRegistry`, as schema-versioned JSON replaced atomically (default `registry/system.json` in the per-user data directory). A corrupt file is reported, ignored, and moved to `<file>.corrupt` on the next save |
+| `SR_HOST_TIME_ZONE=MINUTES,0\|1` | Set by the launcher from the host's local time zone: the standard offset from UTC in minutes and whether daylight saving is on now. The runtime adopts it as the console's time zone and daylight saving only when the registry overlay does not exist yet or is invalid (that save moves the invalid file to `system.json.corrupt`), and saves it there; an overlay that exists but cannot be read gets nothing seeded and is left in place; an empty or malformed value keeps the measured seed (-300, on) |
+| `SR_SYSTEM_REGISTRY=PATH` | Overlay file of the virtual PSP system registry: every `sceReg` change a game saves with `sceRegFlushCategory`/`sceRegFlushRegistry`, as schema-versioned JSON replaced atomically (default `registry/system.json` in the per-user data directory). A corrupt file is reported, ignored, and moved to `<file>.corrupt` on the next save (at start-up, when `SR_HOST_TIME_ZONE` seeds the time zone); a file that cannot be read is reported and left in place, and no save writes over it in that run |
 
 ### Scheduling & Behavior
 
@@ -2636,6 +2636,28 @@ retail title is private: keep it out of the repository and every upload.
    repeats every 600 vblanks of a dark stretch with the scheduler summary, and
    `BOOT_EVENT phase=resumed observation=picture` ends the stretch. After 30 seconds the native player shows
    its black-screen notice. Like the no-frame watchdog, this is an observation, not a hang verdict.
+5. Both stall lines (`observation=no_new_flip` and `observation=dark_picture`) end with the scheduler
+   summary: `ready= delay= wait= spin=`, then `running=`, the threads on the CPU when the line was
+   written. When one is running, `busy_uid= busy_pri= busy_import= busy_import_ret= busy_repeats=`
+   name it: its uid, priority, the last import it finished, that import's value, and how many times in
+   a row it returned that value (`busy_import=-` before its first import). A thread that never blocks
+   starves every thread at a worse priority, and none of the first counts includes it
+   ([#2875](https://github.com/Jstar269/nakagawa-recomp/issues/2875)). The native player copies the
+   same fields into the problem report's `Details` when the stall notice stops the game.
+6. Many games start on a black frame, so `BOOT_EVENT phase=first_frame` alone is not the whole content
+   evidence. The first picture probe that reads a frame with a colour byte above 8 (on the CPU and the GPU
+   presenter alike) emits `BOOT_EVENT phase=first_content vblank=<N> brightest=<M>` once per run. `N` is the
+   probe's vblank (probes run every 300 vblanks, so it is a sample, not the earliest visible frame) and `M`
+   its brightest colour byte. `tools/boot_gate.py` validates content when `first_frame` counts a nonzero pixel
+   or a `first_content` event with `brightest` above 8 (the same dark threshold the runtime uses,
+   `SR_PICTURE_DARK_MAX`) exists, and reports `frameContentSource` (`first_frame` or `first_content`). A
+   `first_content` event with `brightest` of 8 or less, or an unparsable one, cannot come from a correct runtime;
+   the gate reports it as a fault and never counts it as content. A run with neither kind of evidence, such as an
+   all-black one, still fails as `frame-content-unvalidated`.
+
+   Limits: the probe runs only while the GUI is on and its first probe is at
+   vblank 300, so a run shorter than that whose first frame was black has no `first_content` event and still
+   fails as `frame-content-unvalidated`. A game that stays dark for the whole capture fails the same way.
 
 ### Crash on startup
 

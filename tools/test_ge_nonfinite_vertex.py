@@ -573,7 +573,7 @@ def _stat(stderr: str, frame: int) -> dict:
     return stat
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestNonFiniteVertex(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -891,13 +891,31 @@ static uint64_t s_host_toast_until_ns;
 #define HOST_TOAST_BADGE_MAX_SIDE 128u
 static NkGuestUnlockNotice s_host_toast_unlock;
 static int s_host_toast_is_unlock;
-/* A completed set: the game's title (nk_guest_memory_notification_set_completed). */
+/* A completed set or a loaded one: the game's title (nk_guest_memory_notification_set_completed,
+ * nk_guest_memory_notification_set_loaded). */
 static int s_host_toast_is_completed;
-static char s_host_toast_completed_title[NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX];
+static int s_host_toast_is_loaded;
+static int s_host_toast_loaded_empty; /* the loaded set has no achievements */
+static char s_host_toast_game_title[NK_GUEST_MEMORY_NOTIFICATION_TITLE_MAX];
 static char s_host_toast_detail[64];
 static NkUiImage s_host_toast_badge;
 static int s_host_toast_has_badge;
 static int s_host_toast_badge_refusal_named;
+static int s_host_toast_worker_missing_named;
+
+/* An unlock's badge is read and decoded on the scheduler's host worker (sched_host_work_submit),
+ * never on the thread that presents frames, whose time a slow or network disk would take. The
+ * toast waits for it and then shows whole, its picture or its drawn trophy, its 3 s starting
+ * then; the picture is decoded once and shown for the whole toast (the UI backend keeps its
+ * texture by the image's serial). */
+typedef struct HostToastBadgeJob {
+    char path[1200];
+    NkUiImage image;        /* decoded when status is NK_UI_IMAGE_OK */
+    NkUiImageStatus status;
+    int present;            /* the file was there */
+} HostToastBadgeJob;
+static SrHostWork *s_host_toast_badge_work; /* the read on its way, or NULL */
+static HostToastBadgeJob *s_host_toast_badge_job;
 
 static void gui_host_toast_badge_drop(void) {
     if (s_host_toast_has_badge) nk_ui_image_free(&s_host_toast_badge);
@@ -905,26 +923,15 @@ static void gui_host_toast_badge_drop(void) {
     s_host_toast_has_badge = 0;
 }
 
-/* The unlocked badge `name` (one to seven letters and digits, checked by the message parser)
- * from the player's badge folder, decoded within the badge limits. A file that is not there is
- * the usual case (not downloaded yet, or offline) and says nothing; one that is there but
- * refused is named once per run. */
-static void gui_host_toast_badge_load(const char *name) {
-    gui_host_toast_badge_drop();
-    if (!name || !name[0]) return;
-    char root[1024];
-    char path[1200];
-    char leaf[NK_ACH_BADGE_FILE_MAX];
-    /* The player's file name for it (nk_achievement_badge_file_name), never the name itself. */
-    if (!nk_achievement_badge_file_name(name, false, leaf, sizeof leaf)) return;
-    flash0_user_data_root(root, sizeof root);
-    if (!root[0]) return;
-    const char sep = nk_platform_path_separator();
-    const int n = snprintf(path, sizeof path, "%s%c%s%c%s", root, sep, HOST_TOAST_BADGE_DIR,
-                           sep, leaf);
-    if (n < 0 || (size_t)n >= sizeof path) return;
-    FILE *file = nk_fopen_utf8(path, "rb");
+/* The worker's part: the file, at most a badge's size, decoded within the badge limits. It reads
+ * nothing but its job, and touches no guest state. */
+static void gui_host_toast_badge_run(void *ctx) {
+    HostToastBadgeJob *job = (HostToastBadgeJob *)ctx;
+    job->present = 0;
+    job->status = NK_UI_IMAGE_EMPTY;
+    FILE *file = nk_fopen_utf8(job->path, "rb");
     if (!file) return;
+    job->present = 1;
     unsigned char *bytes = (unsigned char *)malloc(HOST_TOAST_BADGE_MAX_BYTES + 1u);
     const size_t size = bytes ? fread(bytes, 1u, HOST_TOAST_BADGE_MAX_BYTES + 1u, file) : 0u;
     fclose(file);
@@ -933,67 +940,159 @@ static void gui_host_toast_badge_load(const char *name) {
     limits.max_bytes = HOST_TOAST_BADGE_MAX_BYTES;
     limits.max_width = HOST_TOAST_BADGE_MAX_SIDE;
     limits.max_height = HOST_TOAST_BADGE_MAX_SIDE;
-    NkUiImageStatus status = bytes ? NK_UI_IMAGE_TOO_LARGE : NK_UI_IMAGE_DECODE_FAILED;
+    job->status = bytes ? NK_UI_IMAGE_TOO_LARGE : NK_UI_IMAGE_DECODE_FAILED;
     if (bytes && size <= HOST_TOAST_BADGE_MAX_BYTES)
-        status = nk_ui_image_decode_png(bytes, size, &limits, &s_host_toast_badge);
+        job->status = nk_ui_image_decode_png(bytes, size, &limits, &job->image);
     free(bytes);
-    if (status == NK_UI_IMAGE_OK) {
-        s_host_toast_has_badge = 1;
-        return;
+}
+
+/* A job whose toast went first (the UI was released while it ran): its picture goes with it. */
+static void gui_host_toast_badge_job_free(void *ctx) {
+    HostToastBadgeJob *job = (HostToastBadgeJob *)ctx;
+    if (!job) return;
+    nk_ui_image_free(&job->image);
+    free(job);
+}
+
+/* Sends the unlocked badge `name` (one to seven letters and digits, checked by the message
+ * parser) to the worker, read from the player's badge folder under the player's file name for
+ * it (nk_achievement_badge_file_name), never the name itself. 1 when the read is on its way.
+ * Without the worker the toast keeps its drawn trophy, said once per run. */
+static int gui_host_toast_badge_start(const char *name) {
+    if (!name || !name[0]) return 0;
+    char root[1024];
+    char leaf[NK_ACH_BADGE_FILE_MAX];
+    if (!nk_achievement_badge_file_name(name, false, leaf, sizeof leaf)) return 0;
+    flash0_user_data_root(root, sizeof root);
+    if (!root[0]) return 0;
+    HostToastBadgeJob *job = (HostToastBadgeJob *)calloc(1u, sizeof *job);
+    if (!job) return 0;
+    const char sep = nk_platform_path_separator();
+    const int n = snprintf(job->path, sizeof job->path, "%s%c%s%c%s", root, sep,
+                           HOST_TOAST_BADGE_DIR, sep, leaf);
+    if (n < 0 || (size_t)n >= sizeof job->path) {
+        free(job);
+        return 0;
     }
-    memset(&s_host_toast_badge, 0, sizeof s_host_toast_badge);
-    if (!s_host_toast_badge_refusal_named) {
+    SrHostWork *work =
+        sched_host_work_submit(gui_host_toast_badge_run, gui_host_toast_badge_job_free, job);
+    if (!work) {
+        free(job);
+        if (!s_host_toast_worker_missing_named) {
+            s_host_toast_worker_missing_named = 1;
+            fprintf(stderr, "HOST_NOTIFICATION: the host worker is unavailable, so achievement "
+                            "badges are not read; the toast shows its drawn trophy\n");
+        }
+        return 0;
+    }
+    s_host_toast_badge_work = work;
+    s_host_toast_badge_job = job;
+    return 1;
+}
+
+/* The read has finished: its picture becomes the toast's. A file that is not there is the usual
+ * case (not downloaded yet, or offline) and says nothing; one that is there but refused is named
+ * once per run. */
+static void gui_host_toast_badge_take(void) {
+    HostToastBadgeJob *job = s_host_toast_badge_job;
+    (void)sched_host_work_finish(s_host_toast_badge_work);
+    s_host_toast_badge_work = NULL;
+    s_host_toast_badge_job = NULL;
+    if (job->present && job->status == NK_UI_IMAGE_OK) {
+        s_host_toast_badge = job->image;
+        s_host_toast_has_badge = 1;
+    } else if (job->present && !s_host_toast_badge_refusal_named) {
         s_host_toast_badge_refusal_named = 1;
         fprintf(stderr, "HOST_NOTIFICATION: an achievement badge in the badge folder was refused "
                         "(%s); the toast shows its drawn trophy\n",
-                nk_ui_image_status_name(status));
+                nk_ui_image_status_name(job->status));
     }
+    free(job); /* its picture, if any, is the toast's now */
+}
+
+/* The UI goes: a read still on its way is the worker's to free when it ends. */
+static void gui_host_toast_release(void) {
+    if (s_host_toast_badge_work) sched_host_work_abandon(s_host_toast_badge_work);
+    s_host_toast_badge_work = NULL;
+    s_host_toast_badge_job = NULL;
+    gui_host_toast_badge_drop();
+    s_host_toast_text[0] = '\0';
+    s_host_toast_until_ns = 0u;
 }
 
 /* A new message for the toast: an unlock's title, "N points" and badge, a completed set's game
- * title, or any other message as it came. The mode (Casual) is not repeated on each notice: the
- * game's page heading and Settings say it once. */
+ * title, a loaded set's game title and what is unlocked of it, or any other message as it came.
+ * The mode (Casual) is not repeated on each notice: the game's page heading and Settings say it
+ * once. */
 static void gui_host_toast_begin(void) {
+    NkGuestSetLoadedNotice loaded;
     s_host_toast_is_unlock =
         nk_guest_memory_notification_unlock(s_host_toast_text, &s_host_toast_unlock) ? 1 : 0;
     s_host_toast_is_completed =
         !s_host_toast_is_unlock &&
                 nk_guest_memory_notification_set_completed(
-                    s_host_toast_text, s_host_toast_completed_title,
-                    sizeof s_host_toast_completed_title)
+                    s_host_toast_text, s_host_toast_game_title, sizeof s_host_toast_game_title)
+            ? 1
+            : 0;
+    s_host_toast_is_loaded =
+        !s_host_toast_is_unlock && !s_host_toast_is_completed &&
+                nk_guest_memory_notification_set_loaded(s_host_toast_text, &loaded)
             ? 1
             : 0;
     s_host_toast_detail[0] = '\0';
     gui_host_toast_badge_drop();
     if (s_host_toast_is_completed)
         snprintf(s_host_toast_detail, sizeof s_host_toast_detail, "Every achievement unlocked");
+    if (s_host_toast_is_loaded) {
+        snprintf(s_host_toast_game_title, sizeof s_host_toast_game_title, "%s", loaded.title);
+        s_host_toast_loaded_empty = loaded.total == 0u;
+        if (loaded.total == 0u)
+            snprintf(s_host_toast_detail, sizeof s_host_toast_detail,
+                     "This game has no achievements");
+        else
+            snprintf(s_host_toast_detail, sizeof s_host_toast_detail, "%u of %u unlocked",
+                     (unsigned)loaded.unlocked, (unsigned)loaded.total);
+    }
     if (!s_host_toast_is_unlock) return;
     if (s_host_toast_unlock.has_points)
         snprintf(s_host_toast_detail, sizeof s_host_toast_detail, "%u %s",
                  (unsigned)s_host_toast_unlock.points,
                  s_host_toast_unlock.points == 1u ? "point" : "points");
-    gui_host_toast_badge_load(s_host_toast_unlock.badge);
+    (void)gui_host_toast_badge_start(s_host_toast_unlock.badge);
+}
+
+static uint64_t gui_host_toast_deadline(uint64_t now) {
+    return now <= UINT64_MAX - HOST_TOAST_NS ? now + HOST_TOAST_NS : UINT64_MAX;
 }
 
 /* Before a frame is presented, outside the UI pass: the toast shown ends when its time is up,
- * and the player's next message, once that one has ended, is read and its badge, if any, read
- * from the badge folder and decoded here, so the pass itself does no file work. */
+ * and the player's next message, once that one has ended, is read here; an unlock's badge is read
+ * and decoded on the host worker (gui_host_toast_badge_start), and the toast shows once that is
+ * done. The pass itself only draws. */
 static bool sr_host_notification(char *out, size_t out_size);
 static void gui_host_toast_poll(void) {
     const uint64_t now = SDL_GetTicksNS();
+    if (s_host_toast_badge_work) {
+        if (!sched_host_work_done(s_host_toast_badge_work)) return;
+        gui_host_toast_badge_take();
+        s_host_toast_until_ns = gui_host_toast_deadline(now);
+        return;
+    }
     if (s_host_toast_text[0] && now < s_host_toast_until_ns) return;
     if (s_host_toast_text[0] || s_host_toast_has_badge) {
         s_host_toast_text[0] = '\0';
         s_host_toast_until_ns = 0u;
         s_host_toast_is_unlock = 0;
         s_host_toast_is_completed = 0;
+        s_host_toast_is_loaded = 0;
         gui_host_toast_badge_drop();
     }
     char notification[NK_GUEST_MEMORY_NOTIFICATION_MAX];
     if (!sr_host_notification(notification, sizeof notification)) return;
     snprintf(s_host_toast_text, sizeof s_host_toast_text, "%s", notification);
-    s_host_toast_until_ns = now <= UINT64_MAX - HOST_TOAST_NS ? now + HOST_TOAST_NS : UINT64_MAX;
     gui_host_toast_begin();
+    /* Shown at once, unless its badge is on its way: until then nothing is drawn. */
+    if (!s_host_toast_badge_work) s_host_toast_until_ns = gui_host_toast_deadline(now);
 }
 
 /* ---- The player's local guest-memory channel -------------------------------------------------
@@ -1094,7 +1193,9 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     if (s_host_toast_text[0] && now < s_host_toast_until_ns) {
         /* An unlock: "Achievement unlocked" over its title, then its points, with its badge or
          * the drawn trophy. A completed set: "Set completed" over the game's title, with the
-         * drawn trophy. Anything else: "Host notification" over the message as it came. */
+         * drawn trophy. A loaded set: "Achievements active" over the game's title, then how many
+         * of its achievements are unlocked, with the drawn trophy. Anything else: "Host
+         * notification" over the message as it came. */
         if (s_host_toast_is_unlock) {
             f.host_toast_head = "Achievement unlocked";
             f.host_toast = s_host_toast_unlock.title;
@@ -1103,7 +1204,14 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
             f.host_toast_unlock = 1;
         } else if (s_host_toast_is_completed) {
             f.host_toast_head = "Set completed";
-            f.host_toast = s_host_toast_completed_title;
+            f.host_toast = s_host_toast_game_title;
+            f.host_toast_detail = s_host_toast_detail;
+            f.host_toast_unlock = 1;
+        } else if (s_host_toast_is_loaded) {
+            /* A set with no achievements activates none: its caption only names the service. */
+            f.host_toast_head = s_host_toast_loaded_empty ? "RetroAchievements"
+                                                          : "Achievements active";
+            f.host_toast = s_host_toast_game_title;
             f.host_toast_detail = s_host_toast_detail;
             f.host_toast_unlock = 1;
         } else {
@@ -1529,6 +1637,7 @@ static void gui_ace_smooth_release(void) {
 
 static void gui_ace_ui_release(void) {
     if (s_ui_ready) sdl3vk_set_ui_pass(NULL);
+    gui_host_toast_release();
     s_ui_ready = 0;
     s_ace_ui_ready = 0;
     ace_ui_destroy(s_ace_ui);

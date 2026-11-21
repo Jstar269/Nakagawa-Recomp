@@ -109,7 +109,7 @@ def _has_generic_dispatch_hook_table(code: str) -> bool:
     return bool(re.search(r"\b(?:DispatchHook|g_exact_hooks|g_range_hooks)\b", code))
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestDispatchSelftestC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -134,7 +134,7 @@ class TestDispatchSelftestC(unittest.TestCase):
         self.assertIn("dispatch selftest: OK", result.stdout)
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestDispatchSelftestScratch(unittest.TestCase):
     def test_a_failed_compile_leaves_no_scratch_directory(self):
         failed = subprocess.CompletedProcess([], 1, "", "simulated compile failure")

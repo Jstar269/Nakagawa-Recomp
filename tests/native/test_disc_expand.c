@@ -2796,6 +2796,57 @@ static void test_remove_empty_dir(void) {
     printf("PASS a folder is removed only while it is empty\n");
 }
 
+/* A folder link at link_path leading to target: a symlink on POSIX, a junction (which needs
+   no rights) on Windows. False where the host cannot make one. */
+static bool make_folder_link(const char *link_path, const char *target) {
+#if defined(_WIN32) || defined(_WIN64)
+    char command[NATIVE_TEST_PATH_MAX * 3];
+    int written = snprintf(command, sizeof(command), "cmd /c mklink /J \"%s\" \"%s\" >NUL",
+                           link_path, target);
+    return written > 0 && (size_t)written < sizeof(command) && system(command) == 0;
+#else
+    return symlink(target, link_path) == 0;
+#endif
+}
+
+static int g_link_legs_not_run;
+
+/* Review S1 of PR #2855: a link to a folder is not the folder. remove_empty_dir refuses it
+   on both hosts (POSIX rmdir fails with ENOTDIR, the Windows backend refuses a reparse
+   point), for a link to an empty folder as well as one to a folder that holds something,
+   and leaves the link and its target as they were. */
+static void test_remove_empty_dir_refuses_a_link(void) {
+    char target[NATIVE_TEST_PATH_MAX];
+    char link[NATIVE_TEST_PATH_MAX];
+    char file[NATIVE_TEST_PATH_MAX];
+    static const unsigned char other[] = "kept";
+    path_in(target, sizeof(target), "link-target");
+    path_in(link, sizeof(link), "link-to-folder");
+    CHECK(nk_platform_mkdir_p(target));
+    if (!make_folder_link(link, target)) {
+        printf("NOT_RUN: remove_empty_dir with a link: this host cannot make a folder link\n");
+        g_link_legs_not_run++;
+        CHECK(nk_platform_remove_empty_dir(target));
+        return;
+    }
+    CHECK(!nk_platform_remove_empty_dir(link));
+    CHECK(!nk_platform_path_missing(link));
+    CHECK(!nk_platform_path_missing(target));
+    CHECK(snprintf(file, sizeof(file), "%s%cheld.bin", target, nk_platform_path_separator()) > 0);
+    write_bytes(file, other, sizeof(other));
+    CHECK(!nk_platform_remove_empty_dir(link));
+    CHECK(file_equals(file, other, sizeof(other)));
+    CHECK(nk_remove_utf8(file) == 0);
+    /* The target, once emptied, is still an ordinary empty folder; the link goes first. */
+#if defined(_WIN32) || defined(_WIN64)
+    CHECK(RemoveDirectoryA(link) != 0);
+#else
+    CHECK(unlink(link) == 0);
+#endif
+    CHECK(nk_platform_remove_empty_dir(target));
+    printf("PASS a link to a folder is not removed as an empty folder\n");
+}
+
 int main(void) {
     char name[64];
     native_test_create_root("disc-expand");
@@ -2841,6 +2892,12 @@ int main(void) {
     test_import_name_collision();
     test_import_busy();
     test_remove_empty_dir();
+    test_remove_empty_dir_refuses_a_link();
+    if (g_link_legs_not_run > 0) {
+        printf("SKIP test_disc_expand (exit 77): %d link leg(s) NOT_RUN because this host cannot "
+               "make a folder link; every other check passed\n", g_link_legs_not_run);
+        return 77;
+    }
     printf("test_disc_expand: %d checks passed\n", g_checks);
     return 0;
 }

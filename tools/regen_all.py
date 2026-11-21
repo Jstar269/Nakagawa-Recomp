@@ -221,6 +221,12 @@ STEPS: tuple[Step, ...] = (
         _single_out("gen_ui_assets.py", "src/ui/nk_ui_assets.c"),
     ),
     Step(
+        "Love All credits table",
+        "python tools/gen_credits_table.py",
+        ("src/player/ui/love_all_credits.c",),
+        _single_out("gen_credits_table.py", "src/player/ui/love_all_credits.c"),
+    ),
+    Step(
         "PGF golden vectors",
         "python tools/test_pgf_validate_parity.py --regenerate",
         ("tests/native/pgf_golden_vectors.h",),

@@ -21,8 +21,8 @@
  */
 
 /*
- * Modified by Nakagawa Recomp contributors, 2026-10-20 and 2026-11-17. The local changes are
- * marked LOCAL DELTA and listed in ../PROVENANCE.md.
+ * Modified by Nakagawa Recomp contributors, 2026-10-20, 2026-11-17 and 2026-11-21.
+ * The local changes are marked LOCAL DELTA and listed in ../PROVENANCE.md.
  */
 
 /**
@@ -620,7 +620,8 @@ static int decode_channel_sound_unit(ATRAC3Context *q, GetBitContext *gb,
 
     /* calculate number of used MLT/QMF bands according to the amount of coded
        spectral lines */
-    num_bands = (subband_tab[num_subbands] - 1) >> 8;
+    /* LOCAL DELTA (2026-11-21): FFmpeg master 0828a3b6366042a2d65188c89a1f5bf0ae52ec75. */
+    num_bands = (subband_tab[num_subbands + 1] - 1) >> 8;
     if (last_tonal >= 0)
         num_bands = FFMAX((last_tonal + 256) >> 8, num_bands);
 

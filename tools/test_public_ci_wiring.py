@@ -291,6 +291,12 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertIn("build/nakagawa_player.exe", package_step)
         self.assertIn("stage_runtime_dlls.py", package_step)
         self.assertIn("write_sha256sums", package_step)
+        # Every file the installer builder requires at the package root must be copied by this step.
+        import build_installer
+        for required in build_installer.REQUIRED_PACKAGE_FILES:
+            if "/" not in required and required != build_installer.SUMS_NAME:
+                with self.subTest(required=required):
+                    self.assertIn(f'cp {required} "$package/{required}"', package_step)
         upload = _ci_step(jobs["windows_runtime"], "Upload Windows installer package")
         self.assertIsNotNone(upload)
         assert upload is not None
@@ -4604,7 +4610,7 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
         )
         self.assertEqual(
             ci_test_shards.skip_prefix_summary(output),
-            "Python test skip prefixes: NIGHTLY_TIER=1 WINDOWS_ONLY=1 PRIVATE_INPUT=2",
+            "Python test skip prefixes: NIGHTLY_TIER=1 WINDOWS_ONLY=1 PRIVATE_INPUT=2 TOOLCHAIN_MISSING=0",
         )
 
     def test_ci_stays_read_only_and_publishes_nothing_on_any_event(self) -> None:

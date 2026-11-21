@@ -245,7 +245,7 @@ def fnv1a_draw_id(vtype: int, vbase: int, prim: int, count: int) -> str:
     return f"{h:08x}"
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestTransitionTraceC(unittest.TestCase):
     tmp: Path
     exe: Path
