@@ -2741,7 +2741,11 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertIn(f"- `{code}`: {meaning}\n", guide)
         self.assertEqual(len(re.findall(r"^  \d  ", helped, re.M)), len(table))
         # Every literal exit code main.c returns is in the table.
+        # (a plain `return N;`, and each arm of `return cond ? N : M;`)
         literal = {int(n) for n in re.findall(r"\breturn (\d+);", source)}
+        for arms in re.findall(r"\breturn [^;\n]*\? (\d+) : (\d+);", source):
+            literal.update(int(n) for n in arms)
+        self.assertIn(9, literal)
         self.assertLessEqual(literal, {code for code, _ in table})
 
     def test_help_lists_every_documented_option_and_the_exit_codes(self) -> None:
