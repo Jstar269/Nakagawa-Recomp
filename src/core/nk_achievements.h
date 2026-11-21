@@ -102,7 +102,8 @@ typedef enum NkAchEventKind {
     NK_ACH_EVENT_RECONNECTED,      /* every waiting unlock was sent */
     NK_ACH_EVENT_DISABLED,         /* id: an achievement rc_client turned off because guest memory
                                     * it reads could not be read or its trigger could not be
-                                    * parsed; message: rc_client's note */
+                                    * parsed; message: why, in the bridge's words (never
+                                    * rc_client's note, which names an address of the set) */
     NK_ACH_EVENT_QUEUE_FULL,       /* a real unlock could not fit the bounded offline queue */
     NK_ACH_EVENT_QUEUE_CHANGED,    /* the persisted pending queue gained or lost a record */
     NK_ACH_EVENT_UNLOCK_REFUSED,   /* id: a saved unlock the server answered with an error of its

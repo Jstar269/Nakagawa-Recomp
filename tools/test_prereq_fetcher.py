@@ -2046,6 +2046,36 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertIn("player_achievements_end_account(run, removed)", action)
         self.assertNotIn("nk_ach_logout", action)
 
+    def test_retroachievements_set_logic_is_never_written(self) -> None:
+        # RetroAchievements' terms keep its trigger logic (each achievement's addresses and
+        # conditions) its own: the set stays in rc_client's memory. achievements-selftest
+        # (test_set_logic_stays_in_memory) checks what the bridge hands out; these read the
+        # source for the places a set could otherwise reach a file or a log.
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        bridge = (REPO_ROOT / "src" / "core" / "nk_achievements.c").read_text(encoding="utf-8")
+        # The bridge writes one file, the unlock queue, and prints nothing.
+        writes = [m.start() for m in re.finditer(r'fopen\w*\([^;]*"[wa]b?\+?"', bridge)]
+        self.assertEqual(len(writes), 1)
+        self.assertGreater(writes[0], bridge.index("bool nk_ach_save_queue_file("))
+        self.assertNotRegex(bridge, r"\b(?:fprintf|printf|vfprintf|fputs|puts)\s*\(")
+        self.assertEqual([m.start() > writes[0] for m in re.finditer(r"\bfwrite\s*\(", bridge)],
+                         [True])
+        # rc_client's warnings name an address of the set: the DISABLED event carries the
+        # bridge's own words instead.
+        log = bridge[bridge.index("static void RC_CCONV ach_log("):]
+        log = log[:log.index("\n}\n")]
+        self.assertNotRegex(log, r"NULL,\s*message\)")
+        self.assertIn("k_disabled_unreadable", log)
+        self.assertIn("k_disabled_unparsed", log)
+        # The player keeps an answer on disk only for a badge picture that decodes; the set's
+        # answer is wiped from memory once rc_client has it.
+        self.assertEqual(main.count("player_ach_job_cache_write(job);"), 1)
+        self.assertIn("if (job->badge && body_ok && job->response_status == 200) "
+                      "player_ach_job_cache_write(job);", main)
+        cache = main[main.index("static void player_ach_job_cache_write(PlayerAchHttpJob *job) {"):]
+        self.assertIn("player_ach_badge_decodes(", cache[:cache.index("\n}\n")])
+        self.assertIn("nk_secure_zero(job->response_body, job->response_body_size);", main)
+
     def test_achievement_account_and_channel_rules_in_the_player(self) -> None:
         # src/player/main.c has no native harness; these read its source for the rules the
         # audit of 2026-11-17 found broken (the bridge's side runs in achievements-selftest).

@@ -688,8 +688,10 @@ static void test_login_load_unlock(uint8_t *ram) {
     const int disabled = has_event(ev, n, NK_ACH_EVENT_DISABLED);
     CHECK(disabled >= 0 && disabled < loaded, "an achievement that cannot read its memory is reported");
     if (disabled >= 0)
-        CHECK(ev[disabled].id == 5502u && strstr(ev[disabled].message, "Invalid address") != NULL,
-              "DISABLED names 5502 (got %u: %s)", ev[disabled].id, ev[disabled].message);
+        CHECK(ev[disabled].id == 5502u &&
+                  strcmp(ev[disabled].message, "its memory cannot be read") == 0,
+              "DISABLED names 5502 in the bridge's words, not rc_client's note with the "
+              "address (got %u: %s)", ev[disabled].id, ev[disabled].message);
     const int sets = find_request(&fake, "r=achievementsets&");
     CHECK(sets >= 0 && strstr(fake.log[sets], "m=" HASH), "the hash identifies the game");
     const int session = find_request(&fake, "r=startsession&");
@@ -1133,6 +1135,83 @@ static void test_queue_file_names_its_account(uint8_t *ram) {
     CHECK(nk_ach_save_queue_file(stranger, path) &&
               read_bytes(path, bytes, sizeof bytes) == 48u, "the file is rewritten empty");
     nk_ach_destroy(stranger);
+    remove_queue_files(path);
+}
+
+/* RetroAchievements' trigger logic (each achievement's MemAddr, the addresses and conditions it
+ * reads) stays in rc_client's memory. With the set loaded, one achievement turned off for
+ * reading outside the span and one unlock saved while offline, nothing the bridge hands out
+ * names it: no event text, and the unlock queue file, the one file the bridge writes, holds its
+ * header and the record (hash, id, time) byte for byte. */
+static bool bytes_contain(const uint8_t *bytes, size_t size, const char *text) {
+    const size_t length = strlen(text);
+    for (size_t i = 0u; length <= size && i <= size - length; i++)
+        if (memcmp(bytes + i, text, length) == 0) return true;
+    return false;
+}
+
+static size_t text_length(const char *text, size_t size) {
+    const char *end = (const char *)memchr(text, '\0', size);
+    return end ? (size_t)(end - text) : size;
+}
+
+static bool names_set_logic(const char *text, size_t size) {
+    static const char *const k_logic[] = {"0xH", "800100", "000100", "=5", "MemAddr", "address"};
+    for (size_t i = 0u; i < sizeof k_logic / sizeof k_logic[0]; i++)
+        if (bytes_contain((const uint8_t *)text, text_length(text, size), k_logic[i])) return true;
+    return false;
+}
+
+static void test_set_logic_stays_in_memory(uint8_t *ram) {
+    char path[NK_MAX_PATH];
+    queue_path(path, sizeof path, "ra-queue-logic-selftest.bin");
+    remove_queue_files(path);
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = NK_ACH_HTTP_RETRY;
+    memset(ram, 0, USER_RAM_SIZE);
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    size_t seen = 0u, named = 0u;
+    bool disabled = false, unlocked = false;
+    nk_ach_begin_login(ach, "Player", "TOKEN");
+    nk_ach_begin_load_game(ach, HASH);
+    for (int round = 0; round < 6; round++) {
+        if (round == 5) ram[ACH_ADDR] = 5;
+        nk_ach_frame(ach);
+        const size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+        for (size_t i = 0u; i < n; i++) {
+            seen++;
+            if (ev[i].kind == NK_ACH_EVENT_DISABLED && ev[i].id == 5502u) disabled = true;
+            if (ev[i].kind == NK_ACH_EVENT_UNLOCKED && ev[i].id == 5501u) unlocked = true;
+            if (names_set_logic(ev[i].message, sizeof ev[i].message) ||
+                names_set_logic(ev[i].title, sizeof ev[i].title)) {
+                named++;
+                fprintf(stderr, "  event %u names the set's logic: %s | %s\n",
+                        (unsigned)ev[i].kind, ev[i].title, ev[i].message);
+            }
+        }
+    }
+    CHECK(disabled && unlocked && seen > 2u, "the set loaded, 5502 was turned off and 5501 "
+          "unlocked offline (%u events)", (unsigned)seen);
+    CHECK(named == 0u, "no event names the set's trigger logic (%u did)", (unsigned)named);
+
+    NkAchPendingUnlock queued;
+    memset(&queued, 0, sizeof queued);
+    CHECK(nk_ach_copy_pending_unlocks(ach, &queued, 1u) == 1u && nk_ach_save_queue_file(ach, path),
+          "the offline unlock is saved");
+    nk_ach_destroy(ach);
+    uint8_t bytes[256], expected[256];
+    const size_t size = read_bytes(path, bytes, sizeof bytes);
+    const size_t expected_size = queue_file(expected, &queued, 1u);
+    CHECK(size == expected_size && memcmp(bytes, expected, size) == 0,
+          "the file is the queue header and one (hash, id, time) record, nothing more (%u bytes)",
+          (unsigned)size);
+    CHECK(!bytes_contain(bytes, size, "0xH") && !bytes_contain(bytes, size, "MemAddr"),
+          "and holds no trigger text");
     remove_queue_files(path);
 }
 
@@ -3312,8 +3391,10 @@ static void test_unparsable_achievement_is_reported(uint8_t *ram) {
     const int disabled = has_event(ev, n, NK_ACH_EVENT_DISABLED);
     CHECK(disabled >= 0, "the unparsable achievement is reported off");
     if (disabled >= 0)
-        CHECK(ev[disabled].id == 5503u && strstr(ev[disabled].message, "Parse error") != NULL,
-              "DISABLED names 5503 (got %u: %s)", ev[disabled].id, ev[disabled].message);
+        CHECK(ev[disabled].id == 5503u &&
+                  strcmp(ev[disabled].message, "this version cannot read its definition") == 0,
+              "DISABLED names 5503 in the bridge's words (got %u: %s)", ev[disabled].id,
+              ev[disabled].message);
     nk_ach_destroy(ach);
 }
 
@@ -4305,6 +4386,7 @@ int main(int argc, char **argv) {
     RUN_RAM(test_no_transport_sends_nothing);
     RUN_RAM(test_login_load_unlock);
     RUN_RAM(test_award_offline_is_pending);
+    RUN_RAM(test_set_logic_stays_in_memory);
     RUN_RAM(test_sign_out_discards_saved_unlocks);
     RUN_RAM(test_refused_saved_unlock_does_not_hold_the_queue);
     RUN_RAM(test_saved_unlock_waits_for_the_server_and_the_account);

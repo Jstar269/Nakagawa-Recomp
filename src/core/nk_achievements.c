@@ -952,10 +952,15 @@ static void RC_CCONV ach_event(const rc_client_event_t *event, rc_client_t *clie
  * rc_client_invalidate_memref_achievements), and a trigger this rcheevos cannot parse logs
  * "Parse error <code> processing achievement <id>" while the set loads (rc_client.c,
  * rc_client_copy_achievements). Each becomes a DISABLED event, so the user is told.
- * achievements-selftest checks both texts, so an rcheevos update that changes one fails there. */
+ * achievements-selftest checks both texts, so an rcheevos update that changes one fails there.
+ * The event carries the bridge's own words, never rc_client's note: the note names an address
+ * the set's trigger logic reads, and that logic is RetroAchievements' data, which stays in
+ * rc_client's memory (docs/ONLINE_FEATURES.md). */
 static const char k_disabled_prefix[] = "Disabled achievement ";
 static const char k_parse_error_prefix[] = "Parse error ";
 static const char k_parse_error_infix[] = " processing achievement ";
+static const char k_disabled_unreadable[] = "its memory cannot be read";
+static const char k_disabled_unparsed[] = "this version cannot read its definition";
 
 static uint32_t ach_parse_id(const char *p) {
     uint32_t id = 0u;
@@ -968,12 +973,14 @@ static void RC_CCONV ach_log(const char *message, const rc_client_t *client) {
     if (!ach || !message) return;
     if (strncmp(message, k_disabled_prefix, sizeof k_disabled_prefix - 1u) == 0) {
         ach_push(ach, NK_ACH_EVENT_DISABLED,
-                 ach_parse_id(message + sizeof k_disabled_prefix - 1u), 0u, 0u, NULL, message);
+                 ach_parse_id(message + sizeof k_disabled_prefix - 1u), 0u, 0u, NULL,
+                 k_disabled_unreadable);
     } else if (strncmp(message, k_parse_error_prefix, sizeof k_parse_error_prefix - 1u) == 0) {
         const char *infix = strstr(message, k_parse_error_infix);
         if (infix)
             ach_push(ach, NK_ACH_EVENT_DISABLED,
-                     ach_parse_id(infix + sizeof k_parse_error_infix - 1u), 0u, 0u, NULL, message);
+                     ach_parse_id(infix + sizeof k_parse_error_infix - 1u), 0u, 0u, NULL,
+                     k_disabled_unparsed);
     }
 }
 

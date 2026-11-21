@@ -215,6 +215,17 @@ Built for v0.1.0 (#1316): an opt-in client using the MIT-licensed rcheevos clien
   version) is renamed beside itself with the ending `.unreadable`, never loaded and never written over;
   when it cannot even be renamed, nothing is saved over it in that run, which the **RetroAchievements**
   account line says.
+- **RetroAchievements' data.** The achievement set the server sends is RetroAchievements' data. Its
+  titles, descriptions and badges are shown; its trigger logic (the memory addresses and conditions
+  that decide each unlock) belongs to the RetroAchievements community, whose terms forbid reusing or
+  redistributing it. The player keeps the set only in rcheevos' memory while the game runs, and wipes
+  the server's answer once rcheevos has read it. The set is never written to a file, a log, the
+  developer log, a problem report, a save backup, a package or anything the player exports. An
+  achievement turned off because its memory cannot be read is reported in the player's own words,
+  never with the address from the set. The only RetroAchievements files on the disk are the badge
+  pictures and the queue file above (game hash, achievement ID and time), both in the player's data
+  folder. Save backups and folder copies take a game's saves only, a report link carries no file or log,
+  and packages are built from a game's own files, so none of them includes these.
 - **Sign-in at start** uses the stored token. When the server gives no answer (no connection, a 5xx, 408 or
   429), the token was not refused: the player tries it again after 30 seconds, then after twice as long
   each time, up to ten minutes, with no password asked. A refusal by the server ends that, as do the
