@@ -1759,6 +1759,7 @@
     "tools/import_stub_census.py",
     "tools/imports.py",
     "tools/isolated_run.py",
+    "tools/json_schema_subset.py",
     "tools/library_build.py",
     "tools/library_regress.py",
     "tools/library_sweep.py",
