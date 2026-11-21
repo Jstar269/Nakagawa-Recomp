@@ -4322,7 +4322,7 @@ static void player_test_view_preflight(PlayerApp *app, bool encrypted) {
    startup, window, frame and shutdown functions below. It is static because the
    app state alone is tens of megabytes (a full library of NK_MAX_GAMES titles),
    far more than a thread's stack. */
-typedef struct PlayerRun {
+struct PlayerRun {
     PlayerApp app;
     PlayerUiTest ui_test;
     /* The command line. */
@@ -4433,7 +4433,7 @@ typedef struct PlayerRun {
     uint32_t frame_delta_ms;
     /* One launcher per data folder (#2006). */
     NkSingleInstance instance;
-} PlayerRun;
+};
 
 struct PlayerAchHttpJob {
     SDL_Thread *thread;
