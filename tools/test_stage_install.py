@@ -1594,6 +1594,74 @@ class PlayerBuildIdentityTests(unittest.TestCase):
         self.assertEqual(result.commit, "abcdef1" + "2" * 33)
 
 
+class PlayerSourceCommitEnforcementTests(unittest.TestCase):
+    """stage_install() and main() enforce player/source commit match before touching dest."""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        self.repo = _fixture_repo(self.root)
+        self.head = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            check=True, env=_fixture_git_env(), capture_output=True, text=True,
+        ).stdout.strip()
+        self.build_dir = self.root / "build"
+        self.build_dir.mkdir()
+        self.player = self.build_dir / "nakagawa_player.exe"
+        self.player.write_bytes(b"MZplayer")
+        os.utime(self.player, (2000, 2000))
+
+    def _touch_stamp(self, name: str, mtime: int) -> Path:
+        stamp = self.build_dir / name
+        stamp.write_bytes(b"")
+        os.utime(stamp, (mtime, mtime))
+        return stamp
+
+    def test_mismatch_is_refused_with_both_commits_and_dest_untouched(self):
+        self._touch_stamp(".player-identity-deadbee-1790812800", 1000)
+        dest = self.root / "install"
+        with self.assertRaises(stage_install.InstallError) as caught:
+            stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        message = str(caught.exception)
+        self.assertIn("INSTALL_PLAYER_SOURCE_MISMATCH", message)
+        self.assertIn("deadbee", message)
+        self.assertIn(self.head[:7], message)
+        self.assertFalse(dest.exists())
+
+    def test_unknown_stamp_warns_and_stages_with_null_player_commit(self):
+        dest = self.root / "install"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            record = stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self.assertIn("WARNING", err.getvalue())
+        self.assertEqual(record["source_commit"], self.head)
+        self.assertIn("player_commit", record)
+        self.assertIsNone(record["player_commit"])
+        marker = json.loads((dest / stage_install.MARKER).read_text(encoding="utf-8"))
+        self.assertIsNone(marker["player_commit"])
+
+    def test_override_turns_mismatch_refusal_into_warning_and_records_player_commit(self):
+        self._touch_stamp(".player-identity-deadbee-1790812800", 1000)
+        dest = self.root / "install"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            record = stage_install.stage_install(
+                dest, self.player, repo=self.repo, stage_dlls=_fake_stager,
+                allow_player_source_mismatch=True,
+            )
+        self.assertIn("WARNING", err.getvalue())
+        self.assertIn("INSTALL_PLAYER_SOURCE_MISMATCH", err.getvalue())
+        self.assertEqual(record["player_commit"], "deadbee")
+        marker = json.loads((dest / stage_install.MARKER).read_text(encoding="utf-8"))
+        self.assertEqual(marker["player_commit"], "deadbee")
+
+    def test_setup_doc_mentions_allow_player_source_mismatch(self):
+        setup_doc = (stage_install.ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+        self.assertIn("--allow-player-source-mismatch", setup_doc)
+        self.assertIn("INSTALL_PLAYER_SOURCE_MISMATCH", setup_doc)
+
+
 class ReproducibleBuildTests(unittest.TestCase):
     def test_player_links_carry_the_reproducible_link_flag(self):
         """Without it the PE header holds the link time and two builds of one commit differ (#324)."""

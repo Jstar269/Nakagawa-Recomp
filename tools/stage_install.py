@@ -333,7 +333,8 @@ def _replace_owned(staged: Path, final: Path, carry: tuple[str, ...] = ()) -> No
 
 
 def stage_install(dest: Path, player: Path, *, repo: Path = ROOT,
-                  revision: str = "HEAD", stage_dlls=None) -> dict:
+                  revision: str = "HEAD", stage_dlls=None,
+                  allow_player_source_mismatch: bool = False) -> dict:
     """Stage bin/, source/ and the icon under ``dest``; return the install record."""
     dest = dest.resolve()
     player = player.resolve()
@@ -342,6 +343,29 @@ def stage_install(dest: Path, player: Path, *, repo: Path = ROOT,
             f"INSTALL_PLAYER_MISSING: {player} was not found; build it with {_build_hint()}"
         )
     _check_destination(dest)
+    commit = _git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}")
+    identity = player_build_identity(player, commit)
+    if identity.status == PLAYER_BUILD_BUILT_FOR_OTHER:
+        if identity.commit is not None:
+            detail = (
+                f"{player} was built from commit {identity.commit}, not {commit}; "
+                f"rebuild it with {_build_hint()} or pass --allow-player-source-mismatch"
+            )
+        else:
+            detail = (
+                f"{player} is older than the build identity stamp in {player.parent}, "
+                f"so it was not built for {commit} (a rebuild did not finish); "
+                f"rebuild it with {_build_hint()} or pass --allow-player-source-mismatch"
+            )
+        if not allow_player_source_mismatch:
+            raise InstallError(f"INSTALL_PLAYER_SOURCE_MISMATCH: {detail}")
+        print(f"stage_install: WARNING: INSTALL_PLAYER_SOURCE_MISMATCH: {detail}", file=sys.stderr)
+    elif identity.status == PLAYER_BUILD_UNKNOWN:
+        print(
+            f"stage_install: WARNING: could not verify which commit {player} was built from "
+            f"(no build identity stamp in {player.parent}); continuing against source {commit}",
+            file=sys.stderr,
+        )
     dest.mkdir(parents=True, exist_ok=True)
     # Shortcuts an earlier staging wrote stay recorded: staging again replaces bin/ and
     # source/, not the shortcuts outside dest.
@@ -377,11 +401,12 @@ def stage_install(dest: Path, player: Path, *, repo: Path = ROOT,
             except stage_runtime_dlls.StageError as exc:
                 raise InstallError(f"INSTALL_RUNTIME_STAGE_FAILED: {exc}") from exc
             runtime_stage = "SKIPPED_NOT_PE"
-        commit = export_source(repo, stage / "source", revision)
+        commit = export_source(repo, stage / "source", commit)
         (stage / "nakagawa.ico").write_bytes(app_icon())
         record = {
             "schema_version": SCHEMA_VERSION,
             "source_commit": commit,
+            "player_commit": identity.commit,
             "platform": _platform_name(),
             "player": f"bin/{player.name}",
             "runtime_stage": runtime_stage,
@@ -1228,6 +1253,9 @@ def main(argv=None) -> int:
     parser.add_argument("--revision", default="HEAD",
                         help="committed revision exported as source/; with --portable-zip, the commit the "
                              "stage's toolchain.json must name (default: HEAD)")
+    parser.add_argument("--allow-player-source-mismatch", action="store_true",
+                        help="warn instead of stopping when the player executable's build identity "
+                             "stamp does not match the source commit being exported")
     parser.add_argument("--desktop-shortcut", action="store_true",
                         help=f"also write '{SHORTCUT_NAME}' on the Desktop (Windows), or a "
                              f"'{DESKTOP_ENTRY_NAME}' entry (Linux)")
@@ -1311,7 +1339,10 @@ def main(argv=None) -> int:
             # nothing half done.
             for shortcut in shortcuts:
                 _check_shortcut_not_another_copys(shortcut, args.dest.resolve())
-        record = stage_install(args.dest, args.player, revision=args.revision)
+        record = stage_install(
+            args.dest, args.player, revision=args.revision,
+            allow_player_source_mismatch=args.allow_player_source_mismatch,
+        )
         print(f"stage_install: staged {record['player']} and source {record['source_commit'][:12]} "
               f"into {args.dest.resolve()}")
         if not IS_WINDOWS:

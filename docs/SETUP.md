@@ -310,7 +310,10 @@ works) and start `bin\nakagawa_player.exe`. For a Start-menu or Desktop entry, r
 choose **Pin to Start**, or send a shortcut to the Desktop. From a source checkout,
 `python tools/stage_install.py --dest "<folder>" --start-menu-shortcut --desktop-shortcut` stages the same layout and writes
 both shortcuts with the player's taskbar identity, so the launcher and the games it starts share one taskbar
-button. The ZIP itself writes no shortcut.
+button. The ZIP itself writes no shortcut. Staging checks the player build's `.player-identity-*` stamp against
+the commit exported into `source/` and stops with `INSTALL_PLAYER_SOURCE_MISMATCH` if the executable was built
+for another commit or an unfinished build; pass `--allow-player-source-mismatch` to downgrade that stop to a
+warning (executables without a stamp warn and still stage).
 
 **Add to Steam** ([#2152](https://github.com/Jstar269/nakagawa-recomp/issues/2152)). To start a game from Steam
 (for Steam Input, Big Picture or a handheld), exit Steam, open the game's page in the player, and choose
