@@ -1447,6 +1447,14 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         ],
         "limitation": "reports whether the active scanout address is non-zero; the result before sceDisplaySetMode or any framebuffer is not measured and follows from the zero address",
     },
+    "h_DisplaySetHoldMode": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-KERNEL-MISC-001: display-basic): mode 0 from a user thread returns 0",
+            "tests/native/hle_thread_selftest.c:test_display_set_hold_mode",
+        ],
+        "limitation": "mode 0 from a thread returning 0 is PSP-measured; a nonzero mode returning 0 is PPSSPP-derived and the interrupt-context refusal (0x80020064) JPCSP-derived, neither PSP-measured; the recorded mode has no modeled effect on the picture (#2886)",
+    },
     "h_GetModuleIdList": {
         "status": "partial",
         "evidence": [

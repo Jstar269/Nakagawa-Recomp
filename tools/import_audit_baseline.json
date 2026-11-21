@@ -2193,7 +2193,7 @@
     "classification": "dedicated",
     "handler": "h_DisplaySetHoldMode",
     "name": "sceDisplaySetHoldMode",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x7f27bb5e": {
     "classification": "controlled_unsupported",

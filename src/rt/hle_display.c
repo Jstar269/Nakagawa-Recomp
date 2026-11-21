@@ -1360,23 +1360,36 @@ static uint32_t h_DisplaySetMode(CpuState *s) {
     return 0; /* SCE_DISPLAY_SET_MODE_SUCCESS */
 }
 
-/* sceDisplaySetHoldMode(holdMode). No PSP measurement or uOFW source pins it, and the PSPSDK
- * headers do not declare it.
- * JPCSP-derived, not PSP-measured (jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414,
- * src/jpcsp/HLE/modules/sceDisplay.java sceDisplaySetHoldMode, checkInsideInterrupt = true): a
- * call from an interrupt handler answers SCE_KERNEL_ERROR_ILLEGAL_CONTEXT and records nothing.
- * PPSSPP-derived, not PSP-measured (hrydgard/ppsspp 77106069bf68fd80d4a7a5a519ae9d06b5677c4b,
- * Core/HLE/sceDisplay.cpp sceDisplaySetHoldMode, "seems to do nothing in tests and accept all
- * values"): any other call records the mode, whatever its value, and returns 0. What a hold does to
- * the picture is not measured, so the mode changes nothing else in this runtime; it is kept, from 0
- * at process start as PPSSPP's display init sets it, for the display code to read once a measurement
- * gives it a meaning. Noted once per run. */
+/* sceDisplaySetHoldMode(holdMode). No uOFW source pins it, and the PSPSDK headers do not declare
+ * it. Three cells, each with its own evidence:
+ *  - Mode 0 from a guest thread returns 0: PSP-measured (project oracle, PSP-KERNEL-MISC-001
+ *    display-basic, tools/psp_oracle/manifest.json).
+ *  - Any other mode from a guest thread records the mode and returns 0: PPSSPP-derived, not
+ *    PSP-measured (hrydgard/ppsspp 77106069bf68fd80d4a7a5a519ae9d06b5677c4b,
+ *    Core/HLE/sceDisplay.cpp sceDisplaySetHoldMode, "seems to do nothing in tests and accept all
+ *    values").
+ *  - A call from an interrupt handler answers SCE_KERNEL_ERROR_ILLEGAL_CONTEXT and records
+ *    nothing: JPCSP-derived, not PSP-measured (jpcsp/jpcsp
+ *    00ac4d6daedd89c0492093ae83fb0d3d819af414, src/jpcsp/HLE/modules/sceDisplay.java
+ *    sceDisplaySetHoldMode, checkInsideInterrupt = true).
+ * Each emulator-derived cell is noted on its first use in a run. What a hold does to the picture is
+ * not measured, so the mode changes nothing else in this runtime; it is kept, from 0 at process
+ * start as PPSSPP's display init sets it, for the display code to read once a measurement gives it
+ * a meaning. */
 static int32_t s_display_hold_mode;
 static int s_display_hold_mode_noted;
+static int s_display_hold_mode_intr_noted;
 
 static uint32_t h_DisplaySetHoldMode(CpuState *s) {
-    if (sched_is_intr_context()) return SCE_KERNEL_ERROR_ILLEGAL_CONTEXT;
-    if (!s_display_hold_mode_noted) {
+    if (sched_is_intr_context()) {
+        if (!s_display_hold_mode_intr_noted) {
+            s_display_hold_mode_intr_noted = 1;
+            fprintf(stderr, "HLE: JPCSP-derived, not PSP-measured: sceDisplaySetHoldMode from an "
+                            "interrupt handler returns 0x80020064 and records nothing\n");
+        }
+        return SCE_KERNEL_ERROR_ILLEGAL_CONTEXT;
+    }
+    if ((int32_t)A0 != 0 && !s_display_hold_mode_noted) {
         s_display_hold_mode_noted = 1;
         fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceDisplaySetHoldMode(%d) records "
                         "the mode and returns 0; a hold has no modeled effect on the picture\n",
@@ -1391,7 +1404,11 @@ int32_t sr_display_hold_mode(void) { return s_display_hold_mode; }
 #ifdef SR_HLE_THREAD_SELFTEST
 /* Test-build-only call-through to the production DisplaySetMode handler. */
 uint32_t sr_hle_test_display_set_mode(CpuState *s) { return h_DisplaySetMode(s); }
-void sr_hle_test_display_hold_mode_reset(void) { s_display_hold_mode = 0; s_display_hold_mode_noted = 0; }
+void sr_hle_test_display_hold_mode_reset(void) {
+    s_display_hold_mode = 0;
+    s_display_hold_mode_noted = 0;
+    s_display_hold_mode_intr_noted = 0;
+}
 #endif
 #ifdef SR_HLE_THREAD_SELFTEST
 

@@ -25537,10 +25537,12 @@ static void test_mpeg_create_refused_in_interrupt(void) {
     reset_fixture();
 }
 
-/* sceDisplaySetHoldMode (#2886) through the production dispatch. From a guest thread every value
- * returns 0 and is recorded (PPSSPP 77106069 accepts all values); from an interrupt handler the
- * call answers ILLEGAL_CONTEXT and records nothing (JPCSP 00ac4d6d checkInsideInterrupt). Neither
- * is PSP-measured. The mode starts at 0. */
+/* sceDisplaySetHoldMode (#2886) through the production dispatch. Mode 0 from a guest thread
+ * returns 0: PSP-measured (project oracle, PSP-KERNEL-MISC-001 display-basic), so it takes no
+ * emulator-derived note. Any other mode from a thread returns 0 and is recorded: PPSSPP-derived,
+ * not PSP-measured (PPSSPP 77106069 accepts all values). From an interrupt handler the call
+ * answers ILLEGAL_CONTEXT and records nothing: JPCSP-derived, not PSP-measured (JPCSP 00ac4d6d
+ * checkInsideInterrupt). Each emulator-derived cell is noted once per run. The mode starts at 0. */
 #define NID_DISPLAY_SET_HOLD_MODE 0x7ed59bc4u
 extern int32_t sr_display_hold_mode(void);
 extern void sr_hle_test_display_hold_mode_reset(void);
@@ -25552,7 +25554,7 @@ static void test_display_set_hold_mode(void) {
         {IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN},
         {IC_PREC_NA, IC_PREC_NA, IC_PREC_NA, IC_PREC_NA}, IC_HW_IMMEDIATE, NULL
     };
-    static const uint32_t modes[] = { 1u, 0u, 2u, 0xffffffffu, 0x80000000u, 7u };
+    static const uint32_t modes[] = { 0u, 1u, 0u, 2u, 0xffffffffu, 0x80000000u, 7u };
     reset_fixture(); sr_hle_init();
     sr_hle_test_display_hold_mode_reset();
     s_vbl_next_us = UINT64_MAX;
@@ -25560,6 +25562,12 @@ static void test_display_set_hold_mode(void) {
     expect(sr_hle_test_is_registered(NID_DISPLAY_SET_HOLD_MODE),
            "hold-mode: sceDisplaySetHoldMode has a production registration");
     expect(sr_display_hold_mode() == 0, "hold-mode: the mode starts at 0");
+
+    FILE *capture = NULL;
+    int saved_fd = -1;
+    char captured[2048];
+    int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    expect(capturing, "hold-mode: stderr capture for the first-use notes");
     for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
         expect(mpi_on_thread_a0(NID_DISPLAY_SET_HOLD_MODE, modes[i]) == 0u,
                "hold-mode: a thread call returns 0 for any mode (not the old 0x80020002 refusal)");
@@ -25567,12 +25575,27 @@ static void test_display_set_hold_mode(void) {
                "hold-mode: the call records the mode it was given");
     }
 
-    memset(&s_ic_probe_cpu, 0, sizeof s_ic_probe_cpu);
-    s_ic_probe_cpu.r[4] = 3u;
-    expect(ic_call_in_interrupt(&hold) == IC_RET(SCE_KERNEL_ERROR_ILLEGAL_CONTEXT),
-           "hold-mode: a call from an interrupt handler returns ILLEGAL_CONTEXT");
-    expect(sr_display_hold_mode() == 7,
-           "hold-mode: the refused interrupt call leaves the recorded mode alone");
+    for (int round = 0; round < 2; round++) {
+        memset(&s_ic_probe_cpu, 0, sizeof s_ic_probe_cpu);
+        s_ic_probe_cpu.r[4] = 3u;
+        expect(ic_call_in_interrupt(&hold) == IC_RET(SCE_KERNEL_ERROR_ILLEGAL_CONTEXT),
+               "hold-mode: a call from an interrupt handler returns ILLEGAL_CONTEXT");
+        expect(sr_display_hold_mode() == 7,
+               "hold-mode: the refused interrupt call leaves the recorded mode alone");
+    }
+    if (capturing) {
+        captured[0] = '\0';
+        hle_data_stderr_capture_end(capture, saved_fd, captured, sizeof(captured));
+        fprintf(stderr, "%s", captured);
+        expect(count_occurrences(captured, "PPSSPP-derived, not PSP-measured: sceDisplaySetHoldMode") == 1 &&
+                   count_occurrences(captured, "sceDisplaySetHoldMode(1) records the mode") == 1,
+               "hold-mode: the PPSSPP-derived cell is noted once, on the first nonzero mode");
+        expect(count_occurrences(captured, "sceDisplaySetHoldMode(0)") == 0,
+               "hold-mode: the PSP-measured mode 0 takes no emulator-derived note");
+        expect(count_occurrences(captured, "JPCSP-derived, not PSP-measured: sceDisplaySetHoldMode from "
+                                           "an interrupt handler returns 0x80020064") == 1,
+               "hold-mode: the JPCSP-derived interrupt refusal is noted once");
+    }
 
     sr_hle_test_display_hold_mode_reset();
     reset_fixture();
