@@ -256,6 +256,12 @@ add_executable(test_nk_zip
     tests/native/native_test_isolation.c
 )
 target_link_libraries(test_nk_zip PRIVATE nakagawa_core)
+# The nested-header case counts reads by wrapping fread; MSVC's and Apple's linkers have no
+# --wrap, so there the test prints a SKIP for that count and runs the rest.
+if(NOT MSVC AND NOT APPLE)
+    target_compile_definitions(test_nk_zip PRIVATE NK_TEST_WRAP_FREAD)
+    target_link_options(test_nk_zip PRIVATE "-Wl,--wrap=fread")
+endif()
 add_test(NAME nk_zip_test COMMAND test_nk_zip)
 
 add_executable(test_steam_shortcuts
