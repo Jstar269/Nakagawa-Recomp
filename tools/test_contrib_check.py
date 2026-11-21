@@ -719,6 +719,7 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
                 unit.generated,
                 f"{source} uses a Python builder and cannot name Makefile generated headers",
             )
+            self.assertFalse(unit.leading_includes, f"{source} uses a Python builder and cannot order Makefile includes")
             return
 
         building: list[str] = []
@@ -750,6 +751,15 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
                 _has_flag(recipe, warning),
                 f"{warning} is listed for {source} but is not on {unit.recipes}",
             )
+        for include in unit.leading_includes:
+            flag = f"-I{include}"
+            commands = [_expand(" ".join(block.splitlines()[1:]), self.assignments).split() for block in raw]
+            self.assertTrue(any(flag in tokens for tokens in commands),
+                            f"{flag} is listed first for {source} but is not on {unit.recipes}")
+            for tokens in commands:
+                if flag in tokens and "-Isrc/rt" in tokens:
+                    self.assertLess(tokens.index(flag), tokens.index("-Isrc/rt"),
+                                    f"{flag} is listed first for {source} but {unit.recipes} passes it after -Isrc/rt")
         for header in unit.generated:
             self.assertTrue(
                 any(header.include in block for block in raw),
@@ -811,6 +821,29 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
                 assert command is not None
                 result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=600)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_leading_include_comes_before_the_common_folders(self) -> None:
+        """Failing before: nk_h264_api.c failed strict-c-compile on unchanged main.
+
+        Its rule puts `-Isrc/rt/h264_ffmpeg_sub` before `$(CFLAGS)`, so the subset's
+        `config.h` is found first. The table could only append include folders, so the
+        strict line found another header first and the compile stopped.
+        """
+        source = "src/rt/h264_ffmpeg_sub/nk_h264_api.c"
+        command, reason = contrib_check.strict_compile_command("cc", source, [])
+        self.assertEqual(reason, "")
+        assert command is not None
+        self.assertLess(command.index("-Isrc/rt/h264_ffmpeg_sub"), command.index("-Isrc/rt"))
+        self.assertIn("-Werror", command)
+        self.assertEqual(command[-1], source)
+
+    def test_the_drift_check_catches_a_leading_include_the_recipe_does_not_pass(self) -> None:
+        """Guard the guard: a first folder the rule does not pass must fail."""
+        unit = contrib_check.STRICT_C_UNITS["src/rt/h264_ffmpeg_sub/nk_h264_api.c"]
+        wrong = contrib_check.StrictUnit(recipes=unit.recipes, defines=unit.defines,
+                                         leading_includes=("src/rt/h264_ffmpeg_sub/libavcodec",))
+        with self.assertRaises(AssertionError):
+            self._assert_unit_matches_build("src/rt/h264_ffmpeg_sub/nk_h264_api.c", wrong)
 
     def test_a_selftest_is_compiled_with_its_own_defines(self) -> None:
         command, reason = contrib_check.strict_compile_command("cc", "tests/native/hle_thread_selftest.c", [])
@@ -987,6 +1020,7 @@ class TestStrictCompileOnUnchangedMain(unittest.TestCase):
         "tests/fixtures/cosim/cosim_selftest.c",
         "tests/native/texrepl_selftest.c",
         "src/rt/ge_vram_cli.c",
+        "src/rt/h264_ffmpeg_sub/nk_h264_api.c",
     )
 
     def test_no_unchanged_source_fails_the_strict_compile(self) -> None:
