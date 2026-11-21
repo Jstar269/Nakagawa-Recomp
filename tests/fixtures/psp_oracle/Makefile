@@ -1298,30 +1298,30 @@ $(BUILD_DIR)/display_user_imports.o: display_user_imports.S
 $(BUILD_DIR)/libfont_imports.o: libfont_imports.S
 	$(CC) $(ASFLAGS) $(LIBFONT_ASFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/probe_hle_measure.o: probe_hle_measure.c
+$(BUILD_DIR)/probe_hle_measure.o: probe_hle_measure.c probe_hle_harness.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/probe_hle_issues.o: probe_hle_issues.c hle_vfpu_cells.h
+$(BUILD_DIR)/probe_hle_issues.o: probe_hle_issues.c hle_vfpu_cells.h probe_hle_harness.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/probe_ge_sample.o: probe_ge_sample.c
+$(BUILD_DIR)/probe_ge_sample.o: probe_ge_sample.c probe_hle_harness.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/probe_dmac_timing.o: probe_dmac_timing.c
+$(BUILD_DIR)/probe_dmac_timing.o: probe_dmac_timing.c probe_hle_harness.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/probe_insn_trace.o: probe_insn_trace.c insn_trace_fixtures.h
+$(BUILD_DIR)/probe_insn_trace.o: probe_insn_trace.c insn_trace_fixtures.h probe_hle_harness.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/probe_hle_self_stop_helper.o: probe_hle_self_stop_helper.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/probe_module_start.o: probe_module_start.c
+$(BUILD_DIR)/probe_module_start.o: probe_module_start.c probe_hle_harness.h
 	$(CC) $(CFLAGS) -c $< -o $@
-$(BUILD_DIR)/probe_kernel_semantics.o: probe_kernel_semantics.c
+$(BUILD_DIR)/probe_kernel_semantics.o: probe_kernel_semantics.c probe_hle_harness.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/probe_memory_edge.o: probe_memory_edge.c mem_edge.h
+$(BUILD_DIR)/probe_memory_edge.o: probe_memory_edge.c mem_edge.h probe_hle_harness.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/insn_trace_tramp.o: insn_trace_tramp.S
