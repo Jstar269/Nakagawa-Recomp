@@ -676,6 +676,7 @@ static void test_hostile_iso_parser(const char *test_dir) {
     memcpy(&pvd[40], "TEST_VOL                        ", 32);
     /* Root extent LBA = 10000 (exceeds 18 sectors!) */
     pvd[158] = 0x10;
+    pvd[181] = 0x02; /* the root record is a directory */
     pvd[159] = 0x27;
     pvd[160] = 0x00;
     pvd[161] = 0x00;
@@ -737,6 +738,7 @@ static void test_hostile_iso_parser(const char *test_dir) {
     memcpy(&pvd_cross[1], "CD001", 5);
     memcpy(&pvd_cross[40], "SECTOR_CROSS_VOL                ", 32);
     pvd_cross[158] = 17; pvd_cross[159] = 0; pvd_cross[160] = 0; pvd_cross[161] = 0;
+    pvd_cross[181] = 0x02; /* the root record is a directory */
     pvd_cross[162] = 0; pvd_cross[163] = 0; pvd_cross[164] = 0; pvd_cross[165] = 17;
     pvd_cross[166] = 0x00; pvd_cross[167] = 0x08; pvd_cross[168] = 0; pvd_cross[169] = 0;
     pvd_cross[170] = 0; pvd_cross[171] = 0; pvd_cross[172] = 0x08; pvd_cross[173] = 0x00;
@@ -794,6 +796,7 @@ static void test_hostile_iso_parser(const char *test_dir) {
     memcpy(&pvd_endian[1], "CD001", 5);
     memcpy(&pvd_endian[40], "ENDIAN_TEST_VOL                 ", 32);
     pvd_endian[158] = 17; pvd_endian[159] = 0; pvd_endian[160] = 0; pvd_endian[161] = 0;
+    pvd_endian[181] = 0x02; /* the root record is a directory */
     pvd_endian[162] = 0; pvd_endian[163] = 0; pvd_endian[164] = 0; pvd_endian[165] = 17;
     pvd_endian[166] = 0x00; pvd_endian[167] = 0x08; pvd_endian[168] = 0; pvd_endian[169] = 0;
     pvd_endian[170] = 0; pvd_endian[171] = 0; pvd_endian[172] = 0x08; pvd_endian[173] = 0x00;
@@ -835,6 +838,7 @@ static void test_hostile_iso_parser(const char *test_dir) {
     memcpy(&pvd_dup[1], "CD001", 5);
     memcpy(&pvd_dup[40], "DUP_SFO_VOL                     ", 32);
     pvd_dup[158] = 17; pvd_dup[159] = 0; pvd_dup[160] = 0; pvd_dup[161] = 0;
+    pvd_dup[181] = 0x02; /* the root record is a directory */
     pvd_dup[162] = 0; pvd_dup[163] = 0; pvd_dup[164] = 0; pvd_dup[165] = 17;
     pvd_dup[166] = 0x00; pvd_dup[167] = 0x08; pvd_dup[168] = 0; pvd_dup[169] = 0;
     pvd_dup[170] = 0; pvd_dup[171] = 0; pvd_dup[172] = 0x08; pvd_dup[173] = 0;
@@ -895,6 +899,7 @@ static void test_hostile_iso_parser(const char *test_dir) {
     memcpy(&pvd_pad[1], "CD001", 5);
     memcpy(&pvd_pad[40], "PAD_VOL                         ", 32);
     pvd_pad[158] = 17; pvd_pad[165] = 17;
+    pvd_pad[181] = 0x02; /* the root record is a directory */
     pvd_pad[166] = 0x00; pvd_pad[167] = 0x10; /* 4096 bytes (2 sectors: 17 and 18) */
     pvd_pad[172] = 0x10; pvd_pad[173] = 0x00;
     /* In sector 17, fill chain up to 2000, and byte 2000 is 0 (padding) */
@@ -960,6 +965,7 @@ static void test_hostile_iso_parser(const char *test_dir) {
     memcpy(&spvd[40], "SCANPROBE_VOL                   ", 32);
     /* Root extent LBA = 17 (an empty directory sector), size = 2048 */
     spvd[158] = 17; spvd[159] = 0; spvd[160] = 0; spvd[161] = 0;
+    spvd[181] = 0x02; /* the root record is a directory */
     spvd[165] = 17; /* big-endian copy */
     spvd[166] = 0x00; spvd[167] = 0x08; spvd[168] = 0; spvd[169] = 0;
     spvd[172] = 0x08; /* big-endian copy */
@@ -986,6 +992,7 @@ static void test_hostile_iso_parser(const char *test_dir) {
     memcpy(&epvd[40], "EMBEDPROBE_VOL                  ", 32);
     /* Root extent is sector 17, an empty directory: PARAM.SFO is NOT reachable. */
     epvd[158] = 17; epvd[166] = 0x00; epvd[167] = 0x08;
+    epvd[181] = 0x02; /* the root record is a directory */
     epvd[165] = 17; epvd[172] = 0x08; /* big-endian copies */
 
     /* A well-formed one-entry SFO parked in unreferenced sector 18. Every
@@ -1039,6 +1046,7 @@ static void test_hostile_iso_parser(const char *test_dir) {
     memcpy(&fpvd[1], "CD001", 5);
     memcpy(&fpvd[40], "FMT_PROBE_VOL                   ", 32);
     fpvd[158] = 17; fpvd[159] = 0; fpvd[160] = 0; fpvd[161] = 0;
+    fpvd[181] = 0x02; /* the root record is a directory */
     fpvd[162] = 0; fpvd[163] = 0; fpvd[164] = 0; fpvd[165] = 17;
     fpvd[166] = 0x00; fpvd[167] = 0x08; fpvd[168] = 0; fpvd[169] = 0;
     fpvd[170] = 0; fpvd[171] = 0; fpvd[172] = 0x08; fpvd[173] = 0;
@@ -1135,6 +1143,7 @@ static void build_executable_iso_test(const char *path,
     memcpy(pvd + 1, "CD001", 5);
     pvd[6] = 1;
     write_both_endian_test(pvd + 158, 17);
+    pvd[181] = 0x02; /* the root record is a directory */
     write_both_endian_test(pvd + 166, (uint32_t)sector_size);
     {
         const uint8_t dot[] = { 0 };
@@ -1509,6 +1518,7 @@ static uint8_t *walk_image_new(void) {
     memcpy(pvd + 1, "CD001", 5);
     pvd[6] = 0x01;
     write_both_endian_test(pvd + 158, 17);
+    pvd[181] = 0x02; /* the root record is a directory */
     write_both_endian_test(pvd + 166, WALK_SECTOR_SIZE);
     write_dir_record(pvd, 156, "\0", 1, 17, WALK_SECTOR_SIZE, true);
     return image;
@@ -1769,6 +1779,7 @@ static void test_iso_walk_module_tree(const char *test_dir) {
         memcpy(pvd + 1, "CD001", 5);
         pvd[6] = 0x01;
         write_both_endian_test(pvd + 158, 17);
+        pvd[181] = 0x02; /* the root record is a directory */
         write_both_endian_test(pvd + 166, WALK_SECTOR_SIZE);
         write_dir_record(pvd, 156, "\0", 1, 17, WALK_SECTOR_SIZE, true);
 
@@ -2072,6 +2083,7 @@ static void test_iso_inspect_root_extent_matches_reader(const char *test_dir) {
     char path[700];
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         write_le32_test(pvd + 158, cases[i].lba_le);
+        pvd[181] = 0x02; /* the root record is a directory */
         pvd[162] = (uint8_t)(cases[i].lba_be >> 24); pvd[163] = (uint8_t)(cases[i].lba_be >> 16);
         pvd[164] = (uint8_t)(cases[i].lba_be >> 8);  pvd[165] = (uint8_t)cases[i].lba_be;
         write_le32_test(pvd + 166, cases[i].size_le);
@@ -2098,6 +2110,7 @@ static void test_iso_inspect_root_extent_matches_reader(const char *test_dir) {
     /* A PSP_GAME extent above 512 KiB is refused, not read as a 4-sector
      * window: the reader would not buffer it either. */
     write_both_endian_test(pvd + 158, 17);
+    pvd[181] = 0x02; /* the root record is a directory */
     write_both_endian_test(pvd + 166, WALK_SECTOR_SIZE);
     off = walk_dot_records(WALK_SECTOR(image, 17), 17, 17);
     append_iso_record_test(WALK_SECTOR(image, 17), off, (const uint8_t *)"PSP_GAME", 8,
@@ -2273,6 +2286,7 @@ static void build_stage_iso_test(const char *path, const char *member, bool memb
     memcpy(pvd + 1, "CD001", 5);
     pvd[6] = 1;
     write_both_endian_test(pvd + 158, 17);
+    pvd[181] = 0x02; /* the root record is a directory */
     write_both_endian_test(pvd + 166, (uint32_t)sector_size);
 
     const uint8_t dot[] = { 0 }, dotdot[] = { 1 };
@@ -2443,6 +2457,7 @@ static void build_stage_data_iso_test(const char *path, const StageDataFile *fil
     memcpy(pvd + 1, "CD001", 5);
     pvd[6] = 1;
     write_both_endian_test(pvd + 158, 17);
+    pvd[181] = 0x02; /* the root record is a directory */
     write_both_endian_test(pvd + 166, (uint32_t)sector_size);
 
     const uint8_t dot[] = { 0 }, dotdot[] = { 1 };
