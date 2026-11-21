@@ -1487,8 +1487,9 @@ Semantic handler census: **603** handlers across **30** API families, covering *
   - Limitation: words synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (type 0): writes +12 = +20 and +8 = 0 and nothing else
   - Evidence: tests/native/videocodec_selftest.c:test_context_words
 - **`h_VideocodecOpen`** (`sceVideocodec`): `sceVideocodecOpen` (0xc01ec829)
-  - Limitation: words synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (zeroed context): type 0 writes +0 = 0x05100601, +8 = 1 and +24 = 0x8344 and returns 0; type 1 writes +0, +8 = 0x80000000 and +24 = 0x264C and returns 0x80628001, and the later calls on a type 1 context are refused; other types are refused
+  - Limitation: words synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (zeroed context): type 0 writes +0 = 0x05100601, +8 = 1 and +24 = 0x8344 and returns 0; type 1 writes +0, +8 = 0x80000000 and +24 = 0x264C and returns 0x80628001, and the later calls on a type 1 context are refused; other types are refused. A type 0 context the runtime already holds opens again and returns 0 (#2885): JPCSP-derived, not PSP-measured (jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414, sceVideocodec.sceVideocodecOpen), logged once per run; the host decoder and picture state go while the ME memory and band buffers stay, a project rule no PSP cell measures
   - Evidence: tests/native/videocodec_selftest.c:test_context_words
+  - Evidence: tests/native/videocodec_selftest.c:test_reopen_after_release
 - **`h_VideocodecReleaseEDRAM`** (`sceVideocodec`): `sceVideocodecReleaseEDRAM` (0x4f160bf4)
   - Limitation: clears +20 and +92 and leaves +12, the rule synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (type 0), and frees the host ME RAM allocation
   - Evidence: tests/native/videocodec_selftest.c:test_teardown
