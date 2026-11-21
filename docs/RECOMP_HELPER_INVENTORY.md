@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **547** (declared in `recomp.h`: 462)
-- reach class: emitter-reached 95, production-runtime-only 411, selftest-only 0, address-only 8, none 33
-- provenance class of the home definition: declared-only 1, project_authored_attested 53, upstream_derived 493
+- helpers: **548** (declared in `recomp.h`: 463)
+- reach class: emitter-reached 95, production-runtime-only 412, selftest-only 0, address-only 8, none 33
+- provenance class of the home definition: declared-only 1, project_authored_attested 53, upstream_derived 494
 
 ## Helpers
 
@@ -265,6 +265,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sched_wake_one_object_waiter_with_result` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_wake_with_result` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_watchdog_summary` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_watchdog_summary_format` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_worker_uid` | `rt/sched.c` | yes | none | `rt/sched.c`: upstream_derived |
 | `sr_alloc_uid` | `rt/hle.c` | yes | production-runtime-only | `rt/hle.c`: upstream_derived |
 | `sr_aot_return_boundaries_reset` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |

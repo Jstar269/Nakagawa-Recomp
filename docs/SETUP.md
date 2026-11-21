@@ -310,7 +310,10 @@ works) and start `bin\nakagawa_player.exe`. For a Start-menu or Desktop entry, r
 choose **Pin to Start**, or send a shortcut to the Desktop. From a source checkout,
 `python tools/stage_install.py --dest "<folder>" --start-menu-shortcut --desktop-shortcut` stages the same layout and writes
 both shortcuts with the player's taskbar identity, so the launcher and the games it starts share one taskbar
-button. The ZIP itself writes no shortcut.
+button. The ZIP itself writes no shortcut. Staging checks the player build's `.player-identity-*` stamp against
+the commit exported into `source/` and stops with `INSTALL_PLAYER_SOURCE_MISMATCH` if the executable was built
+for another commit or an unfinished build; pass `--allow-player-source-mismatch` to downgrade that stop to a
+warning (executables without a stamp warn and still stage).
 
 **Add to Steam** ([#2152](https://github.com/Jstar269/nakagawa-recomp/issues/2152)). To start a game from Steam
 (for Steam Input, Big Picture or a handheld), exit Steam, open the game's page in the player, and choose
@@ -875,6 +878,50 @@ settings, create an empty file named `portable.txt` in the same folder as `nakag
 - **About** shows the data folder in use and says when it is the portable one.
 - Updating: unpack the new version, then copy `portable.txt` and the `data` folder beside the new
   program. Nakagawa does not move or delete the old folder.
+
+### Start a game from another launcher
+
+A front-end such as Quiver, Pegasus, ES-DE, LaunchBox or Steam ROM Manager starts a game by running a program
+with arguments. Nakagawa Recomp works with any of them that can run an executable with a command line.
+
+- **Program:** `bin\nakagawa_player.exe` inside the unpacked release ZIP
+  (`nakagawa-recomp-<version>-windows-x64.zip`).
+- **A game already in your library:** `nakagawa_player.exe --launch-title=<disc ID>`, for example
+  `--launch-title=ULUS10041` (or `<disc ID>:<SHA-1>` to name one disc image). No launcher window opens; the player
+  waits for the game and passes its exit code on. **Add to Steam** writes this form for you.
+- **A disc image the front-end hands over:** `nakagawa_player.exe --iso=<path> --launch-now`. The player adds the
+  image to your library if it is not there and starts the game. Without `--launch-now` the launcher window opens
+  instead (`--stage` adds the image first; `--stage-only` adds it and exits).
+- **Spaces in a path:** quote the whole path in the front-end's template, as in `--iso "<path>"` or
+  `"--iso=<path>"`. Every option that takes a value accepts `--name=value` or `--name value`, so either
+  spelling works; a value cannot itself start with `--`.
+- **Nothing is ignored.** An unknown option, a game path without `--iso`, an option missing its value, or a value
+  given to a switch is refused: the player names the problem on standard error (and in `player-output.txt` in the
+  logs folder when it has no console), shows no window and exits with code 2. `nakagawa_player.exe --help` lists
+  the options and `--version` prints `Nakagawa Recomp v<version> (commit <hash>)` on one line and exits 0.
+- **Where the data lives:** per user by default (`%LOCALAPPDATA%\Nakagawa\data`). An empty `portable.txt` beside
+  `nakagawa_player.exe` (see Portable mode above; Quiver can add one from its Manage menu) moves it to
+  `<program folder>\data`, and `--user-data-root=<folder>` wins over both. A launcher that backs up saves reads
+  them from the saves folder inside that data root.
+- **One launcher per data folder.** If Nakagawa Recomp is already open on the same data folder, a second start
+  brings that window forward, starts nothing, says so on standard error and exits with code 0. Runs with
+  `--screenshot`, `--view`, `--stage-only`, `--headless-launch` and the test harness
+  (`--ui-test-*`) are not affected: they run beside an open launcher.
+
+Exit codes of a start from the command line (`--help` prints the same list; a code can have several causes):
+
+- `0`: Done. A game that was started returns its own exit code instead, whatever it is.
+- `1`: The launcher window could not be created, a UI test failed, a --screenshot could not be saved, the manifest overlay could not be loaded, or a --stage-only or --headless-launch run could not read, convert or inspect the disc image.
+- `2`: The command line, the data folder, the --launch-title name or the library entry was refused, or staging needs a supported --iso.
+- `3`: The game has no runtime prepared for this PC (build it in Nakagawa Recomp), or staging (--stage-only, or --launch-now with --headless-launch) cannot set it up (not in the catalog, no profile, out of memory).
+- `4`: The game or the launcher could not start (a missing SDL3_ttf.dll included), an experimental profile could not be made, or staging (--stage-only, or --launch-now with --headless-launch) failed.
+- `5`: The game's window request was lost.
+- `6`: The game ended abnormally (a crash), or in staging (--stage-only, or --launch-now with --headless-launch) the game's folder path is too long for the library record.
+- `7`: A headless run timed out, or in staging (--stage-only, or --launch-now with --headless-launch) the game could not be saved to the library.
+- `8`: A headless acceptance checkpoint was not reached, or in staging (--stage-only, or --launch-now with --headless-launch) the game's data folder could not be checked.
+- `9`: In staging (--stage-only, or --launch-now with --headless-launch), another run holds the game's staging, or a file takes the game's folder name.
+
+When a `--launch-title` start is refused, the player also shows a message box, so a front-end with no console still tells the user.
 
 ### System fonts
 

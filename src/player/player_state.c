@@ -446,12 +446,17 @@ void player_app_runtime_package_cache_store(
     /* A stored reason survives a store for the same title; a warm cache hit
      * stores no new reason, and the earlier one still describes the package. */
     char prior_reason[sizeof(entry->reason)] = "";
+    char prior_runtime_source[sizeof(entry->runtime_source)] = "";
     if (player_runtime_package_cache_entry_is_for(entry, game)) {
         snprintf(prior_reason, sizeof(prior_reason), "%s", entry->reason);
+        snprintf(prior_runtime_source, sizeof(prior_runtime_source), "%s",
+                 entry->runtime_source);
     }
     memset(entry, 0, sizeof(*entry));
     player_runtime_cache_set_game_key(entry, game);
     snprintf(entry->reason, sizeof(entry->reason), "%s", prior_reason);
+    snprintf(entry->runtime_source, sizeof(entry->runtime_source), "%s",
+             prior_runtime_source);
     entry->status_valid = true;
     entry->identity_valid = identity_valid;
     entry->runtime_available = runtime_available;
@@ -472,6 +477,39 @@ void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
         game_index >= app->game_count) return;
     snprintf(app->runtime_package_cache[game_index].reason,
              sizeof(app->runtime_package_cache[game_index].reason), "%s", reason);
+}
+
+NkRuntimePackageStatus player_runtime_package_status_check(const char *user_data_root,
+                                                           const GameRecord *game,
+                                                           NkRuntimePackageInfo *info,
+                                                           char *reason, size_t reason_size) {
+    NkRuntimePackageInfo local;
+    NkRuntimePackageInfo *out = info ? info : &local;
+    memset(out, 0, sizeof(*out));
+    return nk_launch_validate_runtime_package(user_data_root, game, out, reason, reason_size);
+}
+
+void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int game_index,
+                                                         const char *commit,
+                                                         const char *origin,
+                                                         const char *reason) {
+    if (!app || game_index < 0 || game_index >= app->game_count) return;
+    char *out = app->runtime_package_cache[game_index].runtime_source;
+    const size_t cap = sizeof(app->runtime_package_cache[game_index].runtime_source);
+    out[0] = '\0';
+    if (!origin || !origin[0]) return;
+    if (commit && commit[0]) {
+        snprintf(out, cap, "%s (%s)", commit,
+                 strcmp(origin, "install-record") == 0 ? "install record" :
+                 strcmp(origin, "git") == 0 ? "git checkout" : origin);
+    } else {
+        snprintf(out, cap, "unknown (%s)", reason && reason[0] ? reason : "not recorded");
+    }
+    /* One report line: the validator refuses control characters; a caller's string is
+     * kept to one line here too. */
+    for (char *c = out; *c; c++) {
+        if ((unsigned char)*c < 0x20u || (unsigned char)*c == 0x7fu) *c = ' ';
+    }
 }
 
 const char *player_app_runtime_package_reason(const PlayerApp *app,
@@ -5872,6 +5910,11 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
                      package->package_identity[0] ? ", identity " : "",
                      package->package_identity);
             player_report_append(raw, sizeof(raw), &used, "Package: ", line);
+            /* Beside the player's own commit on the version line (#2875). */
+            if (package->runtime_source[0]) {
+                player_report_append(raw, sizeof(raw), &used, "Runtime source: ",
+                                     package->runtime_source);
+            }
         }
     }
     player_report_append(raw, sizeof(raw), &used, "Boundary: ", error->stop_boundary);
@@ -6490,6 +6533,14 @@ static void player_clear_stalled_game_notice(PlayerApp *app, bool restore_game_w
     app->stalled_game_delay = 0;
     app->stalled_game_wait = 0;
     app->stalled_game_spin = 0;
+    app->stalled_game_running_known = false;
+    app->stalled_game_running = 0;
+    app->stalled_game_busy_known = false;
+    app->stalled_game_busy_uid = 0;
+    app->stalled_game_busy_priority = 0;
+    app->stalled_game_busy_import[0] = '\0';
+    app->stalled_game_busy_import_ret = 0;
+    app->stalled_game_busy_repeats = 0;
 }
 
 void player_app_next_boot_event_path(char *out, size_t out_size) {
@@ -7104,19 +7155,35 @@ void player_app_stop_game(PlayerApp *app) {
     }
 }
 
+/* The problem report's Details for a stopped stall. The original fields keep their order; a
+   runtime that reports its RUNNING thread (#2875) adds the count and, when one is running, the
+   busy thread: a thread that never blocks starves the ones listed before it. */
+static void player_format_stall_details(const PlayerApp *app, char *out, size_t out_size) {
+    int n = snprintf(out, out_size,
+                     "%s=%u seconds=%u; scheduler summary: "
+                     "ready=%u delay=%u wait=%u spin=%u",
+                     app->stalled_game_dark_picture ? "dark_vblanks" : "no_frame_vblanks",
+                     app->stalled_game_no_frame_vblanks, app->stalled_game_seconds,
+                     app->stalled_game_ready, app->stalled_game_delay,
+                     app->stalled_game_wait, app->stalled_game_spin);
+    if (n < 0 || (size_t)n >= out_size || !app->stalled_game_running_known) return;
+    int m = snprintf(out + n, out_size - (size_t)n, " running=%u", app->stalled_game_running);
+    if (m < 0 || (size_t)(n + m) >= out_size || !app->stalled_game_busy_known) return;
+    n += m;
+    (void)snprintf(out + n, out_size - (size_t)n,
+                   "; busy thread uid=0x%x priority=%d last import %s -> 0x%08x x%u",
+                   app->stalled_game_busy_uid, (int)app->stalled_game_busy_priority,
+                   app->stalled_game_busy_import[0] ? app->stalled_game_busy_import : "-",
+                   app->stalled_game_busy_import_ret, app->stalled_game_busy_repeats);
+}
+
 void player_app_stop_stalled_game(PlayerApp *app) {
     if (!app || !app->is_game_running || !app->stalled_game_notice_visible) return;
 
     char disc_id[sizeof(app->launch_session.disc_id)];
     snprintf(disc_id, sizeof(disc_id), "%s", app->launch_session.disc_id);
-    char stall_details[256];
-    snprintf(stall_details, sizeof(stall_details),
-             "%s=%u seconds=%u; scheduler summary: "
-             "ready=%u delay=%u wait=%u spin=%u",
-             app->stalled_game_dark_picture ? "dark_vblanks" : "no_frame_vblanks",
-             app->stalled_game_no_frame_vblanks, app->stalled_game_seconds,
-             app->stalled_game_ready, app->stalled_game_delay,
-             app->stalled_game_wait, app->stalled_game_spin);
+    char stall_details[384];
+    player_format_stall_details(app, stall_details, sizeof(stall_details));
 
     printf("[PLAYER] Stopping stalled game session...\n");
     nk_launch_stop(&app->launch_session);
@@ -7527,6 +7594,33 @@ static void player_consume_stall_event_line(PlayerApp *app, const char *line) {
     app->stalled_game_delay = (uint32_t)delay;
     app->stalled_game_wait = (uint32_t)wait;
     app->stalled_game_spin = (uint32_t)spin;
+    /* Fields a runtime from #2875 on adds after spin; absent from older runtimes. */
+    app->stalled_game_running_known = false;
+    app->stalled_game_busy_known = false;
+    {
+        const char *running_field = strstr(fields, " running=");
+        unsigned int running = 0u;
+        if (running_field && sscanf(running_field, " running=%u", &running) == 1) {
+            app->stalled_game_running_known = true;
+            app->stalled_game_running = (uint32_t)running;
+            unsigned int uid = 0u, ret = 0u, repeats = 0u;
+            int priority = 0;
+            char import_name[sizeof(app->stalled_game_busy_import)];
+            const char *busy_field = strstr(running_field, " busy_uid=");
+            if (busy_field &&
+                sscanf(busy_field, " busy_uid=0x%x busy_pri=%d busy_import=%47s "
+                                   "busy_import_ret=0x%x busy_repeats=%u",
+                       &uid, &priority, import_name, &ret, &repeats) == 5) {
+                app->stalled_game_busy_known = true;
+                app->stalled_game_busy_uid = (uint32_t)uid;
+                app->stalled_game_busy_priority = (int32_t)priority;
+                snprintf(app->stalled_game_busy_import, sizeof(app->stalled_game_busy_import),
+                         "%s", import_name);
+                app->stalled_game_busy_import_ret = (uint32_t)ret;
+                app->stalled_game_busy_repeats = (uint32_t)repeats;
+            }
+        }
+    }
     if (app->stalled_game_seconds >= PLAYER_STALLED_NOTICE_SECONDS &&
         !app->stalled_game_notice_dismissed &&
         !app->stalled_game_notice_visible) {

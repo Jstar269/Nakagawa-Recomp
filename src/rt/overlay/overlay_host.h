@@ -24,8 +24,8 @@ struct SDL_Renderer;
 typedef struct NkOverlayHost NkOverlayHost;
 
 /* ui_root is the player's folder (SR_UI_ROOT, which holds assets/fonts/ui and may hold
-   the SDL3_ttf library); NULL or "" tries the runtime's own folder and the working
-   directory only. */
+   the SDL3_ttf library); NULL or "" tries the runtime's own folder only. A test build also
+   reads the fonts from the working directory. */
 NkOverlayHost *nk_overlay_host_create(const char *ui_root, char *error, size_t error_size);
 void nk_overlay_host_destroy(NkOverlayHost *host);
 

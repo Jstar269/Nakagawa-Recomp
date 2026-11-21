@@ -422,6 +422,13 @@ def classify_hle(chain: dict, mentions: dict[str, set[str]], blocks: dict[str, l
             cls, basis = "synthetic", "registry evidence `" + tests[0].split(" ", 1)[0] + "`"
         else:
             cls, basis = "unverified", "no recorded evidence"
+        # A cell the oracle manifest maps to this API is a linked measurement, whole or partial: the
+        # class stays the strongest the function earns, and the basis names the exact cells.
+        cells = ex.get("psp_oracle_cells", [])
+        if cells and cls != "hardware-measured":
+            basis += "; PSP-measured cells only: " + ", ".join(
+                f"`{c['call']}` {c['cell']} ({c['oracle_id']} `{c['case']}`)" for c in cells
+            )
         notes = [x for x in meta.HANDLER_EVIDENCE.get(handler, []) if HARDWARE_NOTE_RE.search(x)]
         rows.append(
             {
@@ -431,7 +438,7 @@ def classify_hle(chain: dict, mentions: dict[str, set[str]], blocks: dict[str, l
                 "subsystem": subsystems.get(e["nid"]),
                 "class": cls,
                 "basis": basis,
-                "unlinked_hardware_note": bool(notes) and cls != "hardware-measured",
+                "unlinked_hardware_note": bool(notes) and cls != "hardware-measured" and not cells,
             }
         )
     return sorted(rows, key=lambda r: r["nid"])
@@ -670,7 +677,9 @@ def render_markdown(ledger: dict) -> str:
         "  Shared plumbing that every path uses (argument passing, VFPU prefix application) is not",
         "  counted, because it would give every path the same class.",
         "- Hardware runs described only in `tools/hle_registry_meta.py` notes count only when",
-        "  `tools/psp_oracle/manifest.json` links them; the rows marked `note` below carry such a note.",
+        "  `tools/psp_oracle/manifest.json` links them (its `case_apis` cells); a row ending `unlinked hardware",
+        "  note` carries such a note, and a row ending `PSP-measured cells only` names the exact cells measured,",
+        "  not the whole function.",
     ]
     if ledger["vfpu_measured_rows_not_linked"]:
         ids = ", ".join(f"`{i}`" for i in ledger["vfpu_measured_rows_not_linked"])
@@ -707,7 +716,7 @@ def render_markdown(ledger: dict) -> str:
         "| --- | --- | --- | --- | --- |",
     ]
     for r in ledger["hle"]:
-        basis = r["basis"] + ("; note" if r["unlinked_hardware_note"] else "")
+        basis = r["basis"] + ("; unlinked hardware note" if r["unlinked_hardware_note"] else "")
         out.append(f"| `{r['nid']}` | `{r['name']}` | {r['subsystem'] or '-'} | `{r['class']}` | {_cell(basis)} |")
     out += [
         "",

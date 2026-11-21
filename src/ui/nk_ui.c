@@ -1084,6 +1084,8 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
     static const char ellipsis[] = "\xE2\x80\xA6";
     char out[2048]; /* a details box can carry a few install paths */
     char shown[sizeof(out)];
+    const char *given = text; /* the caller's text, the only pointer returned unchanged */
+    bool displayed = false;
     size_t length;
     size_t line_start = 0u;
     size_t cursor = 0u;
@@ -1099,6 +1101,7 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
     if (ui->display_text != NULL) {
         (void)ui->display_text(text, shown, sizeof(shown));
         text = shown;
+        displayed = true;
     }
     length = strlen(text);
     /* Only what the buffer holds is measured. A longer text (or one the
@@ -1125,7 +1128,8 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
     }
     if (!truncated && cursor >= length && (line < max_lines ||
         nk_ui_measure_logical(ui, style, text + line_start, length - line_start) <= max_width)) {
-        return text == shown ? nk_ui_frame_text(ui, shown) : text;
+        /* Never `text` itself: it may point at `shown`, which dies with this call. */
+        return displayed ? nk_ui_frame_text(ui, shown) : given;
     }
     /* Cut the last line back until it and the ellipsis fit. */
     used = cursor > line_start ? cursor : line_start;

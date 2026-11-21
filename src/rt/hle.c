@@ -53,6 +53,11 @@ static uint32_t h_ControlledUnsupported(CpuState *s);
 #define HLE_CAP 1024
 static HleEntry s_hle[HLE_CAP];
 static int s_hle_n = 0;
+/* Set when a registration did not fit in s_hle: sr_hle_init then stops the run by name. */
+static int s_hle_registry_full = 0;
+#ifdef SR_HLE_THREAD_SELFTEST
+int sr_hle_test_registered_count(void) { return s_hle_n; }
+#endif
 /* s_hle's indices sorted by NID, so a lookup is a binary search instead of a walk of every
  * handler on each syscall. s_hle itself keeps registration order. Guarded by hle_lock. */
 static uint16_t s_hle_by_nid[HLE_CAP];
@@ -275,6 +280,12 @@ static void sr_hle_register_entry(uint32_t nid, const char *name, HleFn fn,
         atomic_store_explicit(&e->unsupported_state, 0u, memory_order_release);
         e->unverified = (unsigned char)hle_nid_unverified(nid);
         atomic_store_explicit(&e->unverified_noted, 0u, memory_order_release);
+    } else {
+        /* A handler the table cannot hold would later stop as "unimplemented" although it
+         * exists: name it now, and sr_hle_init stops the run by name. */
+        fprintf(stderr, "HLE: registry full (HLE_CAP=%d), %s (0x%08x) not registered\n",
+                HLE_CAP, name ? name : "?", nid);
+        s_hle_registry_full = 1;
     }
     hle_unlock();
 }
@@ -1384,6 +1395,7 @@ static uint16_t s_sreg_next_id;
 static int s_sreg_loaded;
 int s_sreg_dirty;            /* the live registry differs from the last persisted overlay */
 static int s_sreg_corrupt_on_disk;  /* an ignored corrupt overlay is moved aside by the next flush */
+static int s_sreg_unreadable_on_disk;  /* the overlay could not be read: no flush writes over it */
 
 void sreg_free_node(int i) {
     free(s_sreg_nodes[i].value);
@@ -1976,10 +1988,12 @@ void sreg_ensure_loaded(void) {
     char *path, *text = NULL;
     char why[192];
     size_t len = 0;
-    int got;
+    SregReadResult got;
+    int invalid;
     if (s_sreg_loaded) return;
     s_sreg_loaded = 1;
     s_sreg_corrupt_on_disk = 0;
+    s_sreg_unreadable_on_disk = 0;
     memset(&s_console, 0, sizeof(s_console));
     sreg_clear_nodes();
     sreg_build_defaults();
@@ -1987,18 +2001,26 @@ void sreg_ensure_loaded(void) {
     if (!path) return; /* the first flush that needs a file reports it */
     why[0] = '\0';
     got = sreg_read_file(path, &text, &len, why, sizeof(why));
-    if (got > 0) {
+    invalid = got == SREG_READ_INVALID;
+    if (got == SREG_READ_OK) {
         char parse_error[128];
         NkJsonNode *doc = nk_json_parse(text, len, parse_error, sizeof(parse_error));
         if (!doc) {
             snprintf(why, sizeof(why), "it is not valid JSON (%s)", parse_error);
-            got = -1;
+            invalid = 1;
         } else {
-            if (!sreg_overlay_apply(doc, why, sizeof(why))) got = -1;
+            if (!sreg_overlay_apply(doc, why, sizeof(why))) invalid = 1;
             nk_json_free(doc);
         }
     }
-    if (got < 0) {
+    if (got == SREG_READ_UNREADABLE) {
+        /* Not read, so nothing is known about its contents: it is left in place, never moved
+         * aside or written over, and no setting is seeded into it. */
+        fprintf(stderr, "sceReg: cannot read the per-user registry overlay %s: %s; serving the "
+                        "modeled defaults for this run, the file is left in place and no flush "
+                        "writes over it\n", path, why);
+        s_sreg_unreadable_on_disk = 1;
+    } else if (invalid) {
         fprintf(stderr, "sceReg: ignoring the per-user registry overlay %s: %s; serving the modeled "
                         "defaults (the next flush moves it to %s.corrupt)\n", path, why, path);
         sreg_clear_nodes();
@@ -2009,7 +2031,12 @@ void sreg_ensure_loaded(void) {
     s_sreg_dirty = 0;
     free(text);
     free(path);
-    if (got == 0) sreg_seed_host_time_zone();
+    /* A missing overlay is a first run, and so is an invalid one (it does not parse or apply, or
+     * is too large to load): its saved settings are gone either way, so the time zone starts from
+     * the host's, never from the oracle console's seed (audit 2026-11-17, F-e01db03a; owner
+     * decision 2026-11-20). The persist that seeding does moves the invalid file to
+     * <file>.corrupt first. An overlay that could not be read is neither. */
+    if (got == SREG_READ_ABSENT || invalid) sreg_seed_host_time_zone();
 }
 
 typedef struct {
@@ -2165,6 +2192,12 @@ uint32_t sreg_persist(const char *caller) {
                         "SR_SYSTEM_REGISTRY (the change stays in memory only)\n", caller);
         return SREG_ERR_IO;
     }
+    if (s_sreg_unreadable_on_disk) {
+        fprintf(stderr, "%s: the registry overlay %s could not be read when it was loaded; not "
+                        "writing over it (the change stays in memory only)\n", caller, path);
+        free(path);
+        return SREG_ERR_IO;
+    }
     sreg_overlay_render(&text);
     if (text.failed) rc = SREG_ERR_IO;
     if (!rc && s_sreg_corrupt_on_disk && nk_platform_file_exists(path)) {
@@ -2230,6 +2263,7 @@ void sr_hle_test_sysreg_reset(void) {
     memset(s_sreg_cat, 0, sizeof(s_sreg_cat));
     s_sreg_loaded = 0;
     s_sreg_corrupt_on_disk = 0;
+    s_sreg_unreadable_on_disk = 0;
     s_sreg_owner_name_ready = 0; /* a new process reads SR_NICKNAME again */
 }
 #endif
@@ -2261,18 +2295,7 @@ uint32_t hle_unmodelled_stop(const char *import_name, const char *fmt, ...) {
     hle_record_unsupported_import_stop(sr_last_nid, import_name);
     sr_flight_unsupported_fatal(sr_last_nid, sched_current_uid(), 0u);
     sr_hit_hle = 1;
-    if (sr_sched_on) {
-        sr_trace_close();
-        ge_scene_dump_finish();
-        sr_compat_report();
-        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-        (void)sr_videorec_finish_status("an unsupported import stopped the run", 7);
-        sr_perf_shutdown();
-        sr_profile_dump_final();
-        SR_VERIFY_REPORT_NOW();
-        fflush(stderr);
-        _Exit(7);
-    }
+    if (sr_sched_on) sr_run_end(7, "unsupported_import", "an unsupported import stopped the run");
     longjmp(g_hle_jmp, 1);
 #endif
 }
@@ -3029,10 +3052,13 @@ int console_profile_identity(void) {
 }
 
 /* Generic PSP callback objects are kernel objects, not a 16-entry subsystem
- * table. Hardware creates at least 1024 of them. Keep an append-only host array:
- * deleted holes are never reused, so dispatch order remains callback creation order. */
+ * table. Hardware creates at least 1024 of them. The host array is appended to in creation
+ * order; when it is full, the slots deleted callbacks left are dropped first, keeping the live
+ * ones in creation order (sr_callback_reserve_one), so dispatch order remains callback creation
+ * order. That compaction waits while a dispatch pass runs (s_callback_dispatch_depth). */
 CallbackEntry *s_callbacks;
 size_t s_callbacks_len;
+int s_callback_dispatch_depth;
 
 int sr_callback_find_in_table(uint32_t uid) {
     for (size_t i = 0; i < s_callbacks_len; i++)
@@ -3188,6 +3214,7 @@ int sr_thread_dispatch_callbacks(void) {
     if (!cpu) return 0;
 
     int total_dispatched = 0;
+    s_callback_dispatch_depth++;   /* no compaction while the pump runs (sr_callback_reserve_one) */
     /* Re-scan the owning thread from the beginning after every callback return and dispatch
      * exactly one pending callback per iteration, selected by UID. A callback body runs guest
      * code that may register new callbacks (reallocating s_callbacks), unregister, re-notify,
@@ -3211,6 +3238,7 @@ int sr_thread_dispatch_callbacks(void) {
         if (sr_thread_dispatch_callback_uid(thread_uid, cpu, selected_uid))
             total_dispatched++;
     }
+    if (s_callback_dispatch_depth > 0) s_callback_dispatch_depth--;   /* a reset may have run */
     return total_dispatched;
 }
 
@@ -4544,6 +4572,14 @@ void sr_hle_init(void) {
     (void)ge_timing_on();
     sched_set_vtimer_hooks(vtimer_next_deadline_us, vtimer_service_one);
 #endif
+    if (s_hle_registry_full) {
+        /* Each dropped handler was named as it was refused. A run without them would stop
+         * later at an "unimplemented" NID whose handler exists, so it stops here instead. */
+        fprintf(stderr, "HLE_REGISTRY_FULL: more handlers than HLE_CAP=%d were registered; raise "
+                        "HLE_CAP in src/rt/hle.c; the run stops here\n", HLE_CAP);
+        fflush(stderr);
+        exit(1);
+    }
     atomic_store_explicit(&s_hle_init_state, 2, memory_order_release);
 }
 
@@ -4685,7 +4721,7 @@ uint32_t sr_syscall(CpuState *s, uint32_t nid) {
         sr_hit_hle = 1;
         /* Under the fiber scheduler, longjmp across fibers is invalid; stop the process cleanly
          * after flushing the trace. The plain driver (no scheduler) keeps the longjmp boundary. */
-        if (sr_sched_on) { sr_trace_close(); ge_scene_dump_finish(); sr_compat_report(); sr_texdump_exit_finish(); (void)sr_videorec_finish_status("an unregistered NID stopped the run", 7); sr_perf_shutdown(); sr_profile_dump_final(); SR_VERIFY_REPORT_NOW(); fflush(stderr); _Exit(7); }
+        if (sr_sched_on) sr_run_end(7, "unregistered_nid", "an unregistered NID stopped the run");
         longjmp(g_hle_jmp, 1);
     }
     if (hle_syslog_on()) {

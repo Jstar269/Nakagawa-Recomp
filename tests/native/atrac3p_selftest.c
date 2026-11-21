@@ -446,6 +446,75 @@ static void test_decoder_log_lines(void)
     atrac3p_set_log_sink(NULL, NULL);
 }
 
+/* MSB-first bit writer for the synthetic plain-AT3 sound unit below. */
+static void put_bits_msb(uint8_t *buf, int *pos, unsigned value, int nbits)
+{
+    int i;
+    for (i = nbits - 1; i >= 0; i--) {
+        if ((value >> i) & 1u)
+            buf[*pos >> 3] |= (uint8_t)(0x80u >> (*pos & 7));
+        (*pos)++;
+    }
+}
+
+/* The last coded subband is reconstructed (FFmpeg commit
+ * 0828a3b6366042a2d65188c89a1f5bf0ae52ec75, a LOCAL DELTA in atrac3.c).
+ * decode_spectrum() codes subbands 0..num_subbands inclusive, so subband
+ * num_subbands spans spectral lines subband_tab[num_subbands] to
+ * subband_tab[num_subbands + 1]. n4.4 sized the inverse transform from
+ * subband_tab[num_subbands], which leaves that last subband out when it is the
+ * first one in a new 256-line band. The frame below is one WAV-format (not
+ * scrambled) mono sound unit whose only coded subband is 18, lines 256-287,
+ * the start of band 1: n4.4 counted band 0 only, zeroed band 1 and returned
+ * silence; with the fix the coded lines reach the PCM. The other two
+ * subbands that start a band, 26 (line 512) and 30 (line 768), take the same
+ * path. MUTANT: restoring subband_tab[num_subbands] makes the PCM all-zero. */
+static void test_at3_last_coded_subband_decoded(void)
+{
+    static const uint8_t at3_wav_mono[14] = {
+        1, 0, 0x00, 0x08, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0
+    };
+    static const int last_subbands[3] = { 18, 26, 30 };
+    static const int subband_sizes[3] = { 32, 64, 128 };
+    int t;
+
+    for (t = 0; t < 3; t++) {
+        uint8_t frame[192]; /* a 192-byte mono block (frame factor 1) */
+        int16_t pcm[ATRAC3_FRAME_SAMPLES];
+        Atrac3Handle *at3 = NULL;
+        int pos = 0, i, samples = -1, nonzero = 0, ret;
+        const int ns = last_subbands[t];
+
+        memset(frame, 0, sizeof(frame));
+        put_bits_msb(frame, &pos, 0x28, 6);    /* sound unit id */
+        put_bits_msb(frame, &pos, 3, 2);       /* bands_coded: QMF bands 0..3 */
+        for (i = 0; i < 4; i++)
+            put_bits_msb(frame, &pos, 0, 3);   /* no gain points */
+        put_bits_msb(frame, &pos, 0, 5);       /* no tonal components */
+        put_bits_msb(frame, &pos, (unsigned)ns, 5); /* subbands 0..ns */
+        put_bits_msb(frame, &pos, 1, 1);       /* constant-length coding */
+        for (i = 0; i <= ns; i++)
+            put_bits_msb(frame, &pos, i == ns ? 2u : 0u, 3); /* only ns coded */
+        put_bits_msb(frame, &pos, 45, 6);      /* scale factor 2^10 */
+        for (i = 0; i < subband_sizes[t]; i++)
+            put_bits_msb(frame, &pos, 3, 3);   /* mantissa +3 */
+
+        CHECK(atrac3_create(1, (int)sizeof(frame), at3_wav_mono, &at3) == 0,
+              "AT3 last-subband create");
+        if (!at3)
+            return;
+        ret = atrac3_decode(at3, frame, (int)sizeof(frame), pcm, &samples);
+        CHECK(ret == (int)sizeof(frame), "AT3 last-subband frame consumed");
+        CHECK(samples == ATRAC3_FRAME_SAMPLES, "AT3 last-subband nb_samples");
+        for (i = 0; i < ATRAC3_FRAME_SAMPLES; i++)
+            nonzero += pcm[i] != 0;
+        if (nonzero == 0)
+            fprintf(stderr, "  last coded subband %d decoded to all-zero PCM\n", ns);
+        CHECK(nonzero > 0, "AT3 last coded subband starting a band reaches the PCM");
+        atrac3_destroy(at3);
+    }
+}
+
 static void test_create_validation(void)
 {
     Atrac3pHandle *h = NULL;
@@ -657,6 +726,7 @@ int main(int argc, char **argv)
     test_at3_pcm_polarity();
     test_pcm_saturation();
     test_decoder_log_lines();
+    test_at3_last_coded_subband_decoded();
     test_create_validation();
     test_decode_rejection();
     test_terminator_decode();

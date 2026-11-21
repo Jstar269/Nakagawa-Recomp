@@ -1586,7 +1586,6 @@ static uint32_t h_SynthReal(CpuState *s) {
                 "0x08d98894": ("sceNpDrmEdataSetupKey", "0x80020002"),
                 "0xf9275d98": ("sceKernelLoadModuleBufferUsbWlan", "0x80020002"),
                 "0x72189c48": ("sceImposeSetUMDPopup", "0x80010086"),
-                "0x7ed59bc4": ("sceDisplaySetHoldMode", "0x80020002"),
                 "0x8c943191": ("sceImposeGetBatteryIconStatus", "0x80010086"),
                 "0xab1abe07": ("sceHttpInit", "0x80010086"),
                 "0xd1c8945e": ("sceHttpEnd", "0x80010086"),
@@ -2197,6 +2196,100 @@ class EvidenceTierTests(unittest.TestCase):
                     evidence_cases=["display-ge"],
                 )],
             })
+
+    _PROBE = (
+        "static void run_cells(void) {\n"
+        '    probe_step(emulated, "g", "cell-case");\n'
+        "    int a = sceDisplaySetHoldMode(0);\n"
+        "    int b = sceDisplayGetAccumulatedHcount();\n"
+        '    emit_record_extended(emulated, "PSP-CITED-001", "cell-case", "PASS", 0, &a, 1);\n'
+        "    int c = sceGeSetCallback(&x);\n"
+        '    emit_record_extended(emulated, "PSP-CITED-001", "other-case", "PASS", 0, &c, 1);\n'
+        "}\n"
+    )
+
+    def _cells_row(self, entries=None, **overrides) -> dict:
+        row = self._measured_row(
+            apis=["sceDisplaySetHoldMode", "sceDisplayGetAccumulatedHcount", "sceGeSetCallback"],
+            case_ids=["cell-case", "other-case"],
+            evidence_cases=["cell-case", "other-case"],
+            source="probe.c",
+            case_apis={"cell-case": entries if entries is not None else [
+                {"call": "sceDisplaySetHoldMode(0)", "cell": "mode 0 from a user thread"}]},
+        )
+        row.update(overrides)
+        return row
+
+    def _cells(self, row: dict) -> dict[str, list[dict]]:
+        with mock.patch.object(hle_manifest, "_cited_section", return_value="cell-case other-case"):
+            cells: dict[str, list[dict]] = hle_manifest.oracle_measured_cells(
+                {"tests": [row]}, {"probe.c": self._PROBE})
+        return cells
+
+    def test_a_case_api_cell_is_recorded_for_the_exact_call_and_does_not_promote_the_function(self) -> None:
+        row = self._cells_row()
+        cells = self._cells(row)
+        self.assertEqual(list(cells), ["sceDisplaySetHoldMode"])
+        self.assertEqual(cells["sceDisplaySetHoldMode"][0]["cell"], "mode 0 from a user thread")
+        self.assertEqual(cells["sceDisplaySetHoldMode"][0]["case"], "cell-case")
+        # The case name alone is not the API name: the partial cell grants no whole-function tier.
+        with mock.patch.object(hle_manifest, "_cited_section", return_value="cell-case other-case"):
+            self.assertEqual(hle_manifest.oracle_exercised_apis({"tests": [row]}), {})
+
+    def test_a_case_api_cell_never_changes_the_tier_grant(self) -> None:
+        # Only the citation rule (api named in evidence_cases) grants a tier; a cell, however it
+        # is written, is annotation (a stray `complete` key included). Compare the grant with and without the cells.
+        entries = [
+            {"call": "sceDisplaySetHoldMode(0)", "cell": "mode 0", "complete": True},
+            {"call": "sceDisplayGetAccumulatedHcount()", "cell": "one read"},
+        ]
+        section = "cell-case other-case sceDisplayGetAccumulatedHcount"
+        with mock.patch.object(hle_manifest, "_cited_section", return_value=section):
+            for cited in (["cell-case", "other-case"],
+                          ["cell-case", "other-case", "sceDisplayGetAccumulatedHcount"]):
+                with self.subTest(cited=cited):
+                    plain = self._cells_row(entries, evidence_cases=cited)
+                    plain.pop("case_apis")
+                    expected = hle_manifest.oracle_exercised_apis({"tests": [plain]})
+                    got = hle_manifest.oracle_exercised_apis(
+                        {"tests": [self._cells_row(entries, evidence_cases=cited)]})
+                    self.assertEqual(got, expected)
+                    self.assertNotIn("sceDisplaySetHoldMode", got)
+
+    def test_a_complete_key_on_a_cell_is_refused_not_honored(self) -> None:
+        row = self._cells_row([
+            {"call": "sceDisplaySetHoldMode(0)", "cell": "mode 0", "complete": True}])
+        with self.assertRaisesRegex(ManifestError, "no other key"):
+            self._cells(row)
+
+    def test_a_case_api_call_must_be_made_by_that_cases_own_source(self) -> None:
+        # A wrong argument, and a call made only in the other case's record.
+        for call in ("sceDisplaySetHoldMode(1)", "sceGeSetCallback(&x)"):
+            with self.subTest(call=call):
+                with self.assertRaisesRegex(ManifestError, "is not made in the source"):
+                    self._cells(self._cells_row([{"call": call, "cell": "x"}]))
+
+    def test_case_api_shape_errors_fail_closed(self) -> None:
+        bad = (
+            (self._cells_row(case_apis={"unknown-case": [{"call": "sceGeSetCallback(&x)", "cell": "x"}]}),
+             "not one of its cited case_ids"),
+            (self._cells_row([{"call": "sceNotListed(0)", "cell": "x"}]), "not one of its apis"),
+            (self._cells_row([{"call": "sceGeSetCallback", "cell": "x"}]), "must be"),
+            (self._cells_row([{"call": "sceGeSetCallback(&x)", "cell": ""}]), "must be"),
+            (self._cells_row(hardware_evidence="CAPTURED"), "not a MEASURED row"),
+        )
+        for row, message in bad:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ManifestError, message):
+                    self._cells(row)
+
+    def test_the_committed_display_basic_case_maps_its_calls(self) -> None:
+        document = json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))
+        cells = hle_manifest.oracle_measured_cells(document)
+        hold = cells["sceDisplaySetHoldMode"]
+        self.assertEqual([(c["oracle_id"], c["case"], c["call"]) for c in hold],
+                         [("PSP-KERNEL-MISC-001", "display-basic", "sceDisplaySetHoldMode(0)")])
+        self.assertNotIn("sceDisplaySetHoldMode", hle_manifest.oracle_exercised_apis(document))
 
     def test_malformed_oracle_manifest_json_fails_closed(self) -> None:
         with mock.patch.object(hle_manifest, "_read_optional", side_effect=lambda p: "{bad json" if p == hle_manifest.PSP_ORACLE_MANIFEST else ""):

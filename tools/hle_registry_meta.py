@@ -1448,6 +1448,14 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         ],
         "limitation": "reports whether the active scanout address is non-zero; the result before sceDisplaySetMode or any framebuffer is not measured and follows from the zero address",
     },
+    "h_DisplaySetHoldMode": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-KERNEL-MISC-001: display-basic): mode 0 from a user thread returns 0",
+            "tests/native/hle_thread_selftest.c:test_display_set_hold_mode",
+        ],
+        "limitation": "mode 0 from a thread returning 0 is PSP-measured; a nonzero mode returning 0 is PPSSPP-derived and the interrupt-context refusal (0x80020064) JPCSP-derived, neither PSP-measured; the recorded mode has no modeled effect on the picture (#2886)",
+    },
     "h_GetModuleIdList": {
         "status": "partial",
         "evidence": [
@@ -2339,8 +2347,9 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "tests/native/videocodec_selftest.c:test_context_words",
+            "tests/native/videocodec_selftest.c:test_reopen_after_release",
         ],
-        "limitation": "words synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (zeroed context): type 0 writes +0 = 0x05100601, +8 = 1 and +24 = 0x8344 and returns 0; type 1 writes +0, +8 = 0x80000000 and +24 = 0x264C and returns 0x80628001, and the later calls on a type 1 context are refused; other types are refused",
+        "limitation": "words synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (zeroed context): type 0 writes +0 = 0x05100601, +8 = 1 and +24 = 0x8344 and returns 0; type 1 writes +0, +8 = 0x80000000 and +24 = 0x264C and returns 0x80628001, and the later calls on a type 1 context are refused; other types are refused. A type 0 context the runtime already holds opens again and returns 0 (#2885): JPCSP-derived, not PSP-measured (jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414, sceVideocodec.sceVideocodecOpen), logged once per run; the host decoder and picture state go while the ME memory and band buffers stay, a project rule no PSP cell measures",
     },
     "h_VideocodecInit": {
         "status": "partial",
