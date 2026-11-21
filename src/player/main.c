@@ -2370,6 +2370,7 @@ typedef struct {
     char prior_identity[65];
     char package_identity[65];
     char reason[2048];
+    NkRuntimePackageInfo package_info;
     GameRecord game;
     NkRuntimePackageStatus status;
     PlayerUiTestCatalog catalog_test;
@@ -2462,8 +2463,8 @@ static int SDLCALL player_package_status_thread_main(void *userdata) {
         snprintf(job->package_identity, sizeof(job->package_identity), "%s",
                  before_identity);
     } else if (root) {
-        job->status = nk_launch_validate_runtime_package(
-            root, &job->game, NULL, job->reason, sizeof(job->reason));
+        job->status = player_runtime_package_status_check(
+            root, &job->game, &job->package_info, job->reason, sizeof(job->reason));
         job->runtime_available = player_runtime_available(job->status, &job->game, root);
     } else {
         job->status = NK_RUNTIME_PACKAGE_MISSING;
@@ -2707,6 +2708,12 @@ static void player_package_status_finish(PlayerApp *app,
             job->package_identity, job->status, job->runtime_available,
             SDL_GetTicks());
         player_app_runtime_package_cache_set_reason(app, current_index, job->reason);
+        if (!job->status_unchanged) {
+            player_app_runtime_package_cache_set_runtime_source(
+                app, current_index, job->package_info.runtime_source_commit,
+                job->package_info.runtime_source_origin,
+                job->package_info.runtime_source_reason);
+        }
         if (job->identity_changed_during_validation) {
             player_package_status_queue_game(app, current_index, true,
                                              requested, force_requested);
@@ -2763,6 +2770,12 @@ static void player_package_status_finish(PlayerApp *app,
                     job->runtime_available, SDL_GetTicks());
                 player_app_runtime_package_cache_set_reason(app, current_index,
                                                             job->reason);
+                if (!job->status_unchanged) {
+                    player_app_runtime_package_cache_set_runtime_source(
+                        app, current_index, job->package_info.runtime_source_commit,
+                        job->package_info.runtime_source_origin,
+                        job->package_info.runtime_source_reason);
+                }
             }
             if (queued_build) {
                 player_app_rebuild_queue_build_checked(app, true);
