@@ -1,14 +1,20 @@
 # PROVENANCE.md — `third_party/stb/`
 
 Sean Barrett's single-header PNG decoder, vendored for the native player's next UI: `src/ui/nk_ui_image.c` builds
-it for PNG only, from memory, with no file access, to decode three inputs: the project's embedded prompt glyphs; at
+it for PNG only, from memory, with no file access, to decode four inputs: the project's embedded prompt glyphs; at
 run time, the `ICON0.PNG` and `PIC1.PNG` the player reads from the user's own disc image, which are never written to
 disk or stored in this repository; and, when the user turns on the opt-in cover art
 ([#2632](https://github.com/Jstar269/nakagawa-recomp/issues/2632)), the cover the player downloaded from
 `thumbnails.libretro.com` (`src/player/cover_art.h`) and cached on disk, read back through
 `player_ui_art_decode_cover` (`src/player/ui/player_ui_art.c`) with at most 8 MB and 2048 pixels a side
-(`PLAYER_UI_ART_COVER_MAX_BYTES`, `PLAYER_UI_ART_COVER_MAX_SIDE`). The cover comes from a remote host, so stb_image's
-input is not only local and user-owned (corrected 2026-11-18: this paragraph named only the first two inputs).
+(`PLAYER_UI_ART_COVER_MAX_BYTES`, `PLAYER_UI_ART_COVER_MAX_SIDE`); and, when the user turns on RetroAchievements
+and signs in ([#1316](https://github.com/Jstar269/nakagawa-recomp/issues/1316)), the achievement badge pictures the
+player downloaded from `media.retroachievements.org` and cached in its `achievements-badges` folder, decoded by the
+player (`player_achievements_pump_badges`, `src/player/main.c`) and by the runtime's in-game notice
+(`gui_host_toast_badge_load`, `src/rt/gui.c`) with at most 64 KB and 128 pixels a side (`NK_ACH_BADGE_MAX_BYTES`,
+`NK_ACH_BADGE_MAX_SIDE` in `src/core/nk_achievements.h`). The cover and the badges come from remote hosts, so
+stb_image's input is not only local and user-owned (corrected 2026-11-18: this paragraph named only the first two
+inputs; 2026-11-20: the badges added).
 
 `stb_vorbis.c`, the Ogg Vorbis decoder from the same repository, is vendored for the player's optional launcher
 music ([#2207](https://github.com/Jstar269/nakagawa-recomp/issues/2207)): `src/player/ui/player_ui_vorbis.c` builds

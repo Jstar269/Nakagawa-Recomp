@@ -688,6 +688,11 @@ class TestCaptureAndCompare(unittest.TestCase):
         with self.assertRaises(pr.RefError):
             pr.compare(sf, pr.ROOT / "docs")
 
+    def test_checkout_guard_imports_picture_gate_public_helper(self):
+        self.assertIs(pr.inside_tracked_checkout, pr.picture_gate.inside_tracked_checkout)
+        src = (pr.ROOT / "tools" / "ppsspp_ref.py").read_text(encoding="utf-8")
+        self.assertNotIn("picture_gate._inside_checkout", src)
+
 
 class TestWebSocket(unittest.TestCase):
     """The client against an in-process peer over a local socket pair (no network)."""

@@ -232,6 +232,12 @@ add_executable(test_disc_expand
     src/core/nk_disc_chd.c
 )
 target_link_libraries(test_disc_expand PRIVATE nakagawa_core nk_libchdr)
+# The failing-allocator case wraps malloc; MSVC's and Apple's linkers have no --wrap, so
+# there the test prints a SKIP for that case and runs the rest.
+if(NOT MSVC AND NOT APPLE)
+    target_compile_definitions(test_disc_expand PRIVATE NK_TEST_WRAP_MALLOC)
+    target_link_options(test_disc_expand PRIVATE "-Wl,--wrap=malloc")
+endif()
 add_test(NAME disc_expand_test COMMAND test_disc_expand)
 
 add_executable(test_disc_verify
@@ -805,6 +811,33 @@ if(BUILD_PLAYER)
         FetchContent_MakeAvailable(SDL3)
     endif()
 
+    # rcheevos' rc_client runs in the launcher/player process. The runtime child receives only
+    # the generic guest-memory channel; no rcheevos or network source is linked into src/rt.
+    set(NK_RCHEEVOS_PLAYER_SOURCES
+        third_party/rcheevos/src/rc_client.c
+        third_party/rcheevos/src/rc_compat.c
+        third_party/rcheevos/src/rc_util.c
+        third_party/rcheevos/src/rc_version.c
+        third_party/rcheevos/src/rapi/rc_api_common.c
+        third_party/rcheevos/src/rapi/rc_api_info.c
+        third_party/rcheevos/src/rapi/rc_api_runtime.c
+        third_party/rcheevos/src/rapi/rc_api_user.c
+        third_party/rcheevos/src/rcheevos/alloc.c
+        third_party/rcheevos/src/rcheevos/condition.c
+        third_party/rcheevos/src/rcheevos/condset.c
+        third_party/rcheevos/src/rcheevos/consoleinfo.c
+        third_party/rcheevos/src/rcheevos/format.c
+        third_party/rcheevos/src/rcheevos/lboard.c
+        third_party/rcheevos/src/rcheevos/memref.c
+        third_party/rcheevos/src/rcheevos/operand.c
+        third_party/rcheevos/src/rcheevos/rc_validate.c
+        third_party/rcheevos/src/rcheevos/richpresence.c
+        third_party/rcheevos/src/rcheevos/runtime.c
+        third_party/rcheevos/src/rcheevos/runtime_progress.c
+        third_party/rcheevos/src/rcheevos/trigger.c
+        third_party/rcheevos/src/rcheevos/value.c
+        third_party/rcheevos/src/rhash/md5.c
+    )
     set(PLAYER_SOURCES
         src/player/main.c
         src/player/player_host.c
@@ -816,6 +849,8 @@ if(BUILD_PLAYER)
         src/core/nk_disc_chd.c
         src/player/update_check.c
         src/player/discord_presence.c
+        src/core/nk_achievements.c
+        ${NK_RCHEEVOS_PLAYER_SOURCES}
         src/player/cover_art.c
         src/player/adhoc_servers.c
         ${NK_UI_CORE_SOURCES}
@@ -839,8 +874,19 @@ if(BUILD_PLAYER)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/player/ui
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rcheevos/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rcheevos/src
     )
     target_compile_definitions(nakagawa_player PRIVATE NK_UI_WITH_SDL NK_UI_WITH_SDL3)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # rcheevos' pinned POSIX build uses strcasecmp (strings.h) and strdup (the
+        # default feature set) under this project's strict -std=c99 mode. Keep the
+        # vendor files byte-identical and expose those libc declarations at compile time.
+        set_source_files_properties(${NK_RCHEEVOS_PLAYER_SOURCES}
+            PROPERTIES
+                COMPILE_DEFINITIONS "_DEFAULT_SOURCE"
+                COMPILE_OPTIONS "-include;strings.h")
+    endif()
     # The About page's build date: SOURCE_DATE_EPOCH when set, else the source
     # commit's time (the Makefile does the same; see NK_PLAYER_BUILD_EPOCH).
     set(NK_PLAYER_BUILD_EPOCH "$ENV{SOURCE_DATE_EPOCH}")

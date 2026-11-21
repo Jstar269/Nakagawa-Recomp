@@ -116,6 +116,9 @@ typedef struct {
        NK_RELAY_PORT_OFFSET (10000, PPSSPP's) as prepare_session leaves it. A value past 65535
        keeps online play off for the launch. */
     uint32_t online_play_port_offset;
+    /* Optional local shared guest-memory channel, empty unless the player enabled
+       its per-frame memory service for this launch. It never carries network data. */
+    char guest_memory_channel[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
     /* Cheats (#2639, src/rt/cheats.h): off as prepare_session leaves it. SR_CHEATS and
        SR_CHEATS_FILE are always exported, 0 and empty while this is off, so an inherited value
        cannot opt a launch in. On, the file is cheats_file when that names one (the player's

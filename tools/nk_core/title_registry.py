@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import publication_policy
 import title_manifest
 from . import synthetic_disc_ids
-from .types import TitleProfile
+from .types import TitleProfile, normalize_disc_id
 
 # Synthetic title id -> test disc id, for the synthetic-ISO test harnesses. Re-exported
 # from its single home so this module and tools/title_catalog_codegen.py cannot drift apart.
@@ -234,14 +234,11 @@ class TitleRegistry:
         """Alias for lookup_by_id matching C API naming."""
         return self.lookup_by_id(profile_id)
 
-    def list_all(self) -> List[TitleProfile]:
-        return list(self._profiles.values())
-
     def all_profiles(self) -> List[TitleProfile]:
         return list(self._profiles.values())
 
     def _norm_disc(self, disc_id: str) -> str:
-        return "".join(char for char in disc_id if char not in "-_ ").upper()
+        return normalize_disc_id(disc_id)
 
 
 _DEFAULT_REGISTRY: Optional[TitleRegistry] = None

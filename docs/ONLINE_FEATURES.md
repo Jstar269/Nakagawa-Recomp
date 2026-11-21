@@ -2,8 +2,8 @@
 
 Status: step 1 of the implementation order is built (the switches, the wizard step and the developer log panel).
 The update check is built too, as its own opt-in feature outside online mode (see
-[Update check](#update-check)), and so is [Discord status](#discord-status), which makes no
-network connection; news and reports are not. The player is offline unless the user asks
+[Update check](#update-check)), as are [Discord status](#discord-status) and
+[RetroAchievements](#retroachievements), each with its own opt-in; news and reports are not. The player is offline unless the user asks
 ([`SETUP.md`](SETUP.md#network-use)). This page is the contract the implementation follows. The launcher gets an update check, a reporting system and a news feed, all behind an
 **online mode** that the setup wizard asks about, and a **developer mode** that shows a developer log for
 diagnosing new issues.
@@ -103,6 +103,141 @@ opt-in and off by default.
   setting is On still shows the row, saying the build can't show it, so it can be turned off.
 - **Tests** (`tests/native/test_discord_presence.c`) drive the client against a fake transport and,
   on Windows, a fake pipe server with a test-only name; they never reach Discord.
+
+## RetroAchievements
+
+Built for v0.1.0 (#1316): an opt-in client using the MIT-licensed rcheevos client, in Casual Mode only
+(the mode RetroAchievements formerly called Softcore). Hardcore is not offered.
+
+- **Settings > Online and developer options** has an **Achievements** switch, off by default. Turning it on shows a consent
+  screen that names `retroachievements.org` and `media.retroachievements.org` and lists every data
+  field. The player's requests go to `https://retroachievements.org/dorequest.php` over the existing
+  player HTTPS transport; the achievement badge pictures come from `media.retroachievements.org`, and
+  no other host is used. Turning the switch off stops the requests: one waiting its turn is answered
+  as refused and never sent, nothing new is sent, and only the request already on its way finishes
+  (a badge picture's answer is then thrown away).
+- **Badge pictures.** Once the switch is on and you are signed in, the player asks for the badge of
+  each achievement in the loaded set, one at a time, from the address rcheevos itself builds for it:
+  `https://media.retroachievements.org/Badge/<badge>.png`, or `<badge>_lock.png` for the grey picture
+  of a locked one. The request is a plain HTTPS GET with certificate validation, through the same
+  transport, carrying only the user agent below: no user name, token, cookie or console ID. The
+  badge name comes from the set the server sent and is used only when it is one to seven letters and
+  digits; an address the server suggests for a picture is not used. Each badge is asked for at most
+  once while its game's page lists it; a game opened later in the same session asks again only for
+  pictures the folder below does not hold. A picture larger than 64 KB, wider or taller than 128
+  pixels, or not a PNG is
+  refused by name, and an answer that does not come is not an error: the row (or the in-game notice)
+  shows the player's own drawn icon, a trophy for an unlocked achievement and a padlock for a locked
+  one, and the log says once per run that a badge could not be shown. Pictures are decoded with the
+  vendored stb_image, its size checked before any pixel memory is taken.
+- **Badge cache.** Fetched pictures are kept in `achievements-badges` under the player data folder,
+  at most 2,048 files, each named from the badge name only: `b`, the name with a mark before each
+  capital letter, `-lock` for the grey picture, then `.png` (so no file takes a Windows device name
+  such as `CON` or `COM1`, and names that differ only in case keep separate files). A picture is kept
+  only once it decodes, written to a temporary `.part` file, put on the disk and then renamed; a kept
+  picture is read from there instead of asked for again, and one that no longer decodes is deleted and
+  asked for again. A `.part` file a crash left is deleted when the player next starts RetroAchievements.
+  **Sign out** deletes the folder (the pictures say which games were played). Turning the switch off
+  fetches nothing more and leaves the folder as it is: the next **Sign out** deletes it, a factory
+  reset moves it aside with the rest of the data folder, and it can be deleted by hand at any time.
+  The folder is not tied to an account: when the token in Windows Credential Manager is replaced or
+  removed outside the player, without **Sign out**, the pictures stay until the next **Sign out**.
+  They are RetroAchievements' public artwork, the same for every account, and hold no user data. The
+  in-game notice reads the unlocked picture from that folder before the frame is drawn; the runtime
+  itself opens no connection.
+- **User agent.** Each request names the player in the form RetroAchievements documents for clients:
+  `NakagawaRecomp/<numeric version> (<operating system and version>) rcheevos/<version>`, for example
+  `NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5`. A version that is not numeric, or a
+  system part that would break the form, means no request is sent.
+- **Sign-in.** The player sends the RetroAchievements user name and password once to exchange them for a
+  token, clears the password from its temporary buffers and from rcheevos' request buffer once the request
+  is handed over, and stores only the token in Windows Credential
+  Manager. Sign-out removes that credential. Other platforms without the Windows credential store refuse
+  sign-in rather than saving a token in a plain file.
+- **What is sent**, as form fields of RetroAchievements' `dorequest.php` API:
+  - sign-in (`r=login2`): the user name with the password once, or with the stored token;
+  - the game's achievement set (`r=achievementsets`): user name, token and the game hash;
+  - session start (`r=startsession`): user name, token, the game's RetroAchievements ID, the game hash,
+    `h=0` (Casual Mode) and the rcheevos version;
+  - an unlock (`r=awardachievement`): user name, token, the achievement ID, `h=0`, the game hash, the
+    seconds since a queued unlock happened and rcheevos' request signature;
+  - Rich Presence (`r=ping`), every two minutes while a game runs: user name, token, the game ID, the
+    game's Rich Presence text (what its achievement set says you are doing), `h=0` and the game hash;
+    none is sent once the game has exited or its frames have stopped.
+
+  Leaderboard entries are not sent: rcheevos submits them only in Hardcore, or in Casual Mode when an
+  emulator allows it, which the bridge never does, and the bridge also refuses that request. The hash
+  follows RetroAchievements' PSP method: raw bytes from `PSP_GAME/PARAM.SFO`, then
+  `PSP_GAME/SYSDIR/EBOOT.BIN`, with no new decryption. No game file, save, package, guest memory,
+  telemetry or capture is sent.
+- **Offline unlocks** are stored as owner-only, token-free records in the player's data folder. After the
+  next sign-in, the player submits each pending unlock through rcheevos' award request builder and the
+  same transport. That includes an unlock the switch stopped from being sent (one being sent or
+  waiting for another try when it went off, or earned in the frame it went off, since frames stop
+  with it), which goes once after the next sign-in in the same run (rcheevos itself gives such a
+  request up), and one left from an earlier run. The queue holds at most 4,096 records. With no
+  definite answer (no connection, a busy server) a record waits 30 seconds; a record the server refuses
+  by its own error leaves the queue and is reported; a refused account keeps every record until the next
+  sign-in. The game's title page shows its core achievements under **RetroAchievements · Casual**:
+  how many are unlocked and the points earned of the total, with a bar, then one row each, the
+  unlocked first, each with its badge (or the drawn icon), title, description and its points as a
+  number (up to 256; with more, the page says how many it shows and that all of them are on the
+  game's page at retroachievements.org). Unlock notices appear in-game, one after another:
+  **Achievement unlocked** over the achievement's title, its points ("25 points") and its badge. Two
+  unlocks close together are two notices. When the last achievement of the set unlocks, a notice
+  **Set completed** follows with the game's title and "Every achievement unlocked"; it is drawn on the
+  PC and sends nothing. The mode, Casual, is said once, in that page heading and in Settings, not on
+  every notice or row.
+- **One request at a time.** The player carries one RetroAchievements request at a time. A request made
+  while another is on its way (a game started while a saved unlock is being sent) waits its turn, in
+  order, instead of failing.
+- **After a factory reset** the player writes no unlock queue before it closes, so the moved-aside data
+  folder is not made again. The token stays in Windows Credential Manager until **Sign out**.
+- **The queue belongs to one account.** It names that account by a tag, the MD5 of a fixed label and the
+  account name in lower case: the name itself and the token are not in the file. Only that account's
+  session sends the records. **Sign out** discards what is still waiting, also when it comes while a
+  sign-in is on its way or the switch is turned off before that sign-in answers; when the token cannot be
+  removed from Credential Manager, the account is still the stored one and its records stay. Records
+  another account left (a different account signs in, or the credential was changed outside the player)
+  are discarded and reported, never awarded to the account now signed in.
+- **The queue file** is `achievements/unlock-queue.bin` under the player's data folder, written through a
+  private temporary file and a rename. Integers are little-endian: the 8 bytes `NKRAQ001`, a 32-bit
+  format version (2), a 32-bit record count, the owner's 32-character tag (thirty-two `0` when the queue is
+  empty), then 44-byte records: 32 characters of game hash, a 32-bit achievement ID and a 64-bit unlock
+  time in seconds since 1970 UTC. A file the player cannot read (damaged, cut short, from another
+  version) is renamed beside itself with the ending `.unreadable`, never loaded and never written over;
+  when it cannot even be renamed, nothing is saved over it in that run, which the **RetroAchievements**
+  account line says.
+- **Sign-in at start** uses the stored token. When the server gives no answer (no connection, a 5xx, 408 or
+  429), the token was not refused: the player tries it again after 30 seconds, then after twice as long
+  each time, up to ten minutes, with no password asked. A refusal by the server ends that, as do the
+  switch turned off (also while a sign-in is on its way: the status stays "RetroAchievements is off.")
+  and **Sign out**. A password is never kept, so a password sign-in is not retried.
+- **Frames.** For a game started with achievements on, the runtime and the player share the guest memory
+  through a local channel, and at each VBLANK the runtime waits while the achievements are evaluated once
+  on that frame's memory. A thread of the player's own serves this, so a modal box or a window being
+  dragged, which stop the player's event loop, do not stop the game. A runtime that is told to use a
+  channel it cannot open ends at once with `GUEST_MEMORY_CHANNEL_UNAVAILABLE` and exit status 2. A
+  game whose window is up without having opened the channel (a package built before it, or without it)
+  never sends a frame: the player stops the channel and says the package must be rebuilt to track
+  achievements. When the game's achievement set cannot be loaded, the player stops serving frames, so
+  the runtime's next VBLANK stops waiting for it; the shared memory stays mapped until the game exits.
+- **UI regression runs** refuse the switch, **Sign in** and **Sign out**, and say so: they stay offline,
+  open no consent or credential box and read no credential.
+- **Hardcore is unavailable.** The bridge turns rcheevos' hardcore mode off before every sign-in, game
+  load and frame, and refuses to send any request that claims it (`h=` other than `0`, or a leaderboard
+  entry); neither the player nor the runtime has a setting, option or variable that turns it on.
+- **Off with cheats or a changed speed.** A game started with cheats on (saved, or `--cheats` for the
+  session) or with a package that changes its game logic's speed (60 FPS game logic) loads no achievement
+  set and evaluates no frame. The game's page says why before it starts, and Settings says so while cheats
+  are on.
+- **Frames read the game's own memory.** The achievements are evaluated once per guest VBLANK, on the
+  game's clock, over rcheevos' PSP memory map: RetroAchievements addresses `0x00000000`-`0x03FFFFFF` are
+  guest `0x08000000`-`0x0BFFFFFF` (kernel, user and extended RAM).
+- **No telemetry.** Nothing else about the player, the PC or play is sent.
+- **Tests** use rcheevos' server callback with canned responses and never touch the internet. The
+  egress allowlist permits the player's existing transport as the caller, while the bridge and vendored
+  rcheevos library hold no network implementation of their own.
 
 ## News
 

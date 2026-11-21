@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -198,14 +197,6 @@ class NativeTitleStager:
 
 class PreparationOutputError(RuntimeError):
     """Staged preparation outputs failed validation before atomic promotion."""
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        while chunk := handle.read(65536):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 #: The file in the per-title folder that records which build of the executable

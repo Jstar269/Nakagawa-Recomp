@@ -78,6 +78,34 @@ def cmake_player_includes(cmake_text: str) -> set[str]:
     return dirs
 
 
+RCHEEVOS_SOURCE_TREE = "third_party/rcheevos/src"
+
+
+def make_rcheevos_sources(makefile_text: str, root: Path) -> set[str]:
+    """The files Make's PLAYER_RCHEEVOS_SOURCES names, its $(wildcard ...) patterns expanded
+    against root as GNU Make would."""
+    match = re.search(r"^PLAYER_RCHEEVOS_SOURCES\s*:=\s*((?:.*\\\n)*.*)$", makefile_text,
+                      re.MULTILINE)
+    if match is None:
+        raise AssertionError("PLAYER_RCHEEVOS_SOURCES not found in the Makefile text")
+    body = match.group(1).replace("\\\n", " ")
+    files: set[str] = set()
+    for pattern in re.findall(r"\$\(wildcard\s+([^)]+)\)", body):
+        for word in pattern.split():
+            files.update(path.relative_to(root).as_posix() for path in root.glob(word))
+    literal = re.sub(r"\$\(wildcard\s+[^)]+\)", " ", body)
+    files.update(word for word in literal.split())
+    return files
+
+
+def cmake_rcheevos_sources(cmake_text: str) -> set[str]:
+    """The files CMake's set(NK_RCHEEVOS_PLAYER_SOURCES ...) names."""
+    match = re.search(r"set\(NK_RCHEEVOS_PLAYER_SOURCES\s+(.*?)\)", cmake_text, re.DOTALL)
+    if match is None:
+        raise AssertionError("set(NK_RCHEEVOS_PLAYER_SOURCES ...) not found in CMakeLists.txt")
+    return set(match.group(1).split())
+
+
 def make_disc_expand_opt(makefile_text: str) -> str | None:
     """The level the Makefile compiles the player's nk_disc_expand.c at, when it compiles that
     unit on its own and links it in place of the source in both player programs."""
@@ -127,6 +155,89 @@ class BuildSystemParityTests(unittest.TestCase):
         unlinked = self.makefile_text.replace("$(PLAYER_LINK_SRCS)", "$(PLAYER_SRCS)")
         self.assertIsNone(make_disc_expand_opt(unlinked))
 
+    def test_disc_expand_malloc_wrap_is_conditional_in_both(self) -> None:
+        """test_disc_expand's failing-allocator case links with -Wl,--wrap=malloc, which Apple's
+        ld64 and MSVC's linker lack: Make adds it only off a Mac (DISC_EXPAND_WRAP_MALLOC, chosen
+        beside LD_GC_SECTIONS) and CMake only outside MSVC and Apple, so neither build stops
+        linking the test there."""
+        recipe = [line for line in self.makefile_text.splitlines() if "tests/native/test_disc_expand.c" in line]
+        self.assertEqual(len(recipe), 1, "expected one Makefile line linking test_disc_expand.c")
+        self.assertIn("$(DISC_EXPAND_WRAP_MALLOC)", recipe[0])
+        self.assertNotIn("--wrap", recipe[0])
+        self.assertNotIn("NK_TEST_WRAP_MALLOC", recipe[0])
+        choice = re.search(r"^ifeq \(\$\(NK_TARGET_OS\)-\$\(HOST_KIND\),posix-Darwin\)\n(.*?)^else\n(.*?)^endif",
+                           self.makefile_text, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(choice, "the Makefile's Darwin link-option choice is missing")
+        assert choice is not None
+        self.assertRegex(choice.group(1), r"(?m)^DISC_EXPAND_WRAP_MALLOC :=\s*$")
+        self.assertIn("DISC_EXPAND_WRAP_MALLOC := -DNK_TEST_WRAP_MALLOC -Wl,--wrap=malloc", choice.group(2))
+        guarded = re.search(r"^if\(NOT MSVC AND NOT APPLE\)\n(.*?)^endif\(\)", self.cmake_text,
+                            re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(guarded, "CMakeLists.txt has no if(NOT MSVC AND NOT APPLE) block")
+        assert guarded is not None
+        self.assertIn('target_link_options(test_disc_expand PRIVATE "-Wl,--wrap=malloc")', guarded.group(1))
+        self.assertIn("target_compile_definitions(test_disc_expand PRIVATE NK_TEST_WRAP_MALLOC)", guarded.group(1))
+        outside = self.cmake_text.replace(guarded.group(0), "")
+        self.assertNotIn("--wrap=malloc", outside)
+
+    @staticmethod
+    def _make_lines_inside_conditionals(text: str) -> set[int]:
+        """The 1-based line numbers a Make conditional (ifeq/ifneq/ifdef/ifndef ... endif)
+        encloses, so a link option there is host- or target-dependent. GNU Make's `else ifeq`
+        replaces the branch without changing the depth."""
+        depth = 0
+        inside: set[int] = set()
+        for number, line in enumerate(text.splitlines(), 1):
+            directive = re.match(r"\s*(ifn?def|ifn?eq|else|endif)\b", line)
+            if directive:
+                kind = directive.group(1)
+                if kind == "endif":
+                    depth -= 1
+                elif kind != "else":
+                    depth += 1
+                continue
+            if depth:
+                inside.add(number)
+        return inside
+
+    def test_ge_patch_tess_malloc_wrap_is_conditional_in_the_makefile(self) -> None:
+        """ge-patch-tess-selftest's failing-allocator case links with -Wl,--wrap=malloc, which
+        Apple's ld64 and MSVC's linker lack: the Makefile adds it only off a Mac
+        (GE_PATCH_TESS_WRAP_MALLOC, chosen beside LD_GC_SECTIONS and DISC_EXPAND_WRAP_MALLOC),
+        and CMake builds no such target, so neither build stops linking the selftest there."""
+        selftests = (ROOT / "mk/selftests.mk").read_text(encoding="utf-8")
+        start = selftests.find("\nge-patch-tess-selftest:")
+        self.assertNotEqual(start, -1, "mk/selftests.mk has no ge-patch-tess-selftest rule")
+        recipe = selftests[start:selftests.find("\n\n", start)]
+        self.assertIn("tests/native/ge_patch_tess_selftest.c", recipe)
+        self.assertIn("$(GE_PATCH_TESS_WRAP_MALLOC)", recipe)
+        self.assertNotIn("--wrap", recipe)
+        self.assertNotIn("NK_TEST_WRAP_MALLOC", recipe)
+        choice = re.search(r"^ifeq \(\$\(NK_TARGET_OS\)-\$\(HOST_KIND\),posix-Darwin\)\n(.*?)^else\n(.*?)^endif",
+                           self.makefile_text, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(choice, "the Makefile's Darwin link-option choice is missing")
+        assert choice is not None
+        self.assertRegex(choice.group(1), r"(?m)^GE_PATCH_TESS_WRAP_MALLOC :=\s*$")
+        self.assertIn("GE_PATCH_TESS_WRAP_MALLOC := -DNK_TEST_WRAP_MALLOC -Wl,--wrap=malloc",
+                      choice.group(2))
+        # Every --wrap option in the Makefile and the mk fragments sits inside a conditional, so
+        # no host whose linker lacks the option is asked to take one.
+        for path in (ROOT / "Makefile", *sorted((ROOT / "mk").glob("*.mk"))):
+            text = path.read_text(encoding="utf-8")
+            inside = self._make_lines_inside_conditionals(text)
+            for number, line in enumerate(text.splitlines(), 1):
+                if "--wrap" not in line.split("#", 1)[0]:
+                    continue
+                with self.subTest(file=path.relative_to(ROOT).as_posix(), line=number):
+                    self.assertIn(number, inside,
+                                  f"{path.relative_to(ROOT).as_posix()}:{number} passes --wrap "
+                                  f"outside a host conditional: {line.strip()}")
+        # CMake builds no GE patch-tessellation selftest. A future target there must guard its
+        # wrap like test_disc_expand's, and this test must learn to read that guard.
+        self.assertNotIn("ge_patch_tess_selftest.c", self.cmake_text,
+                         "CMakeLists.txt now builds the GE patch-tessellation selftest: extend this "
+                         "test to require its wrap inside if(NOT MSVC AND NOT APPLE)")
+
     def test_core_sources_parity(self) -> None:
         """Verify identical core sources in Makefile and CMakeLists.txt."""
         expected_core = [
@@ -175,6 +286,30 @@ class BuildSystemParityTests(unittest.TestCase):
         mutated = re.sub(r"^(PLAYER_SRCS\s*:=)", r"\1 src/player/only_in_make.c", self.makefile_text,
                          count=1, flags=re.MULTILINE)
         self.assertNotEqual(make_player_sources(mutated), cmake_player_sources(self.cmake_text))
+
+    def test_rcheevos_sources_parity(self) -> None:
+        """Audit F-8937a7ca: Make finds the vendored rcheevos sources by wildcard and CMake lists
+        them by hand. Both name every rcheevos .c file the player links, so an upstream update
+        that adds or drops one fails here rather than at CMake's link."""
+        make_set = make_rcheevos_sources(self.makefile_text, ROOT)
+        self.assertEqual(make_set, cmake_rcheevos_sources(self.cmake_text),
+                         "the rcheevos sources differ between make and CMake")
+        vendored = {path.relative_to(ROOT).as_posix()
+                    for path in (ROOT / RCHEEVOS_SOURCE_TREE).rglob("*.c")}
+        self.assertTrue(vendored, "rcheevos is vendored")
+        self.assertEqual(make_set, vendored,
+                         "a vendored rcheevos source is missing from the player's build lists")
+
+    def test_rcheevos_comparison_sees_a_one_sided_file(self) -> None:
+        """The comparison above can fail: a file only one list names makes the sets differ."""
+        mutated = re.sub(r"(set\(NK_RCHEEVOS_PLAYER_SOURCES\s+)",
+                         r"\1third_party/rcheevos/src/only_in_cmake.c ", self.cmake_text, count=1)
+        self.assertNotEqual(make_rcheevos_sources(self.makefile_text, ROOT),
+                            cmake_rcheevos_sources(mutated))
+        dropped = re.sub(r"\s+third_party/rcheevos/src/rc_version\.c", "", self.cmake_text,
+                         count=1)
+        self.assertNotEqual(make_rcheevos_sources(self.makefile_text, ROOT),
+                            cmake_rcheevos_sources(dropped))
 
     def test_player_core_sources_are_one_set(self) -> None:
         """The player's core library is one list in both systems: make's PLAYER_CORE_SOURCES and

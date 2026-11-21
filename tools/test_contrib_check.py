@@ -821,6 +821,23 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
         plain, _ = contrib_check.strict_compile_command("cc", "src/rt/hle.c", [])
         self.assertFalse([flag for flag in plain if flag.startswith("-D")])
 
+    def test_achievements_bridge_uses_player_rcheevos_include_paths(self) -> None:
+        source = "src/core/nk_achievements.c"
+        command, reason = contrib_check.strict_compile_command("cc", source, [])
+        self.assertEqual(reason, "")
+        self.assertIn("-Ithird_party/rcheevos/include", command)
+        self.assertIn("-Ithird_party/rcheevos/src", command)
+
+        unit = contrib_check.STRICT_C_UNITS[source]
+        self.assertEqual(unit.recipes, ("$(PLAYER_EXE)",))
+        recipe = " ".join(
+            _expand(block, self.assignments)
+            for block in _rule_blocks(self.makefile, "$(PLAYER_EXE)")
+        )
+        self.assertIn(source, recipe)
+        self.assertTrue(_has_flag(recipe, "-Ithird_party/rcheevos/include"))
+        self.assertTrue(_has_flag(recipe, "-Ithird_party/rcheevos/src"))
+
 
 class TestStrictCompileUnavailableInputs(unittest.TestCase):
     def _fail_if_compiled(self, *args, **kwargs):

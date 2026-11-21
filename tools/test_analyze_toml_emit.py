@@ -194,5 +194,98 @@ class TestTomlEmit(unittest.TestCase):
         self.assertEqual(rep1["edges"], rep2["edges"])
 
 
+class TestMergeSpans(unittest.TestCase):
+    def test_merge_spans_empty_touching_overlapping_and_drop_empty(self):
+        import analyze
+
+        with self.assertRaises(TypeError):
+            analyze.merge_spans([])  # drop_empty is keyword-only
+        with self.assertRaises(TypeError):
+            analyze.merge_spans([], True)
+
+        cases = [
+            ([], [], []),
+            ([(0x1000, 0x1000)], [], [(0x1000, 0x1000)]),
+            ([(0x2000, 0x1000)], [], [(0x2000, 0x1000)]),
+            (
+                [(0x1000, 0x1000), (0x2000, 0x2010)],
+                [(0x2000, 0x2010)],
+                [(0x1000, 0x1000), (0x2000, 0x2010)],
+            ),
+            (
+                [(0x1000, 0x1000), (0x1000, 0x1020), (0x1010, 0x1010), (0x1020, 0x1020)],
+                [(0x1000, 0x1020)],
+                [(0x1000, 0x1020)],
+            ),
+            (
+                [(0x2000, 0x2010), (0x1000, 0x1010), (0x1010, 0x2000)],
+                [(0x1000, 0x2010)],
+                [(0x1000, 0x2010)],
+            ),
+            (
+                [(0x1000, 0x1040), (0x1010, 0x1020), (0x1030, 0x1060), (0x2000, 0x2010)],
+                [(0x1000, 0x1060), (0x2000, 0x2010)],
+                [(0x1000, 0x1060), (0x2000, 0x2010)],
+            ),
+        ]
+        for raw, expected_drop, expected_keep in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(analyze.merge_spans(iter(raw), drop_empty=True), expected_drop)
+                self.assertEqual(analyze.merge_spans(iter(raw), drop_empty=False), expected_keep)
+
+    def test_merge_spans_matches_all_four_call_sites(self):
+        from types import SimpleNamespace
+        import analyze
+
+        sample = [
+            (0x3000, 0x3000),
+            (0x2000, 0x2010),
+            (0x1000, 0x1020),
+            (0x1010, 0x1030),
+            (0x1030, 0x1040),
+        ]
+        drop_expected = analyze.merge_spans(sample, drop_empty=True)
+        keep_expected = analyze.merge_spans(sample, drop_empty=False)
+
+        # 1. _SpanIndex (drop_empty=True)
+        index = analyze._SpanIndex(sample)
+        self.assertEqual(list(zip(index.starts, index.ends, strict=True)), drop_expected)
+
+        # 2. _cfg_normalize_ranges (drop_empty=True, keeps its own range validation)
+        self.assertEqual(analyze._cfg_normalize_ranges(sample), drop_expected)
+        with self.assertRaisesRegex(ValueError, "invalid CFG range"):
+            analyze._cfg_normalize_ranges([(-4, 4)])
+
+        # 3. exec_ranges (drop_empty=False, via extra_spans on an un-relocated image)
+        fake_elf = SimpleNamespace(sections=[], shnum=0, shentsize=0, reloc=None, base=0)
+        self.assertEqual(analyze.exec_ranges(fake_elf, extra_spans=sample), keep_expected)
+
+        # 4. _Discovery.trace_ranges_for_entry (drop_empty=False)
+        disc = object.__new__(analyze._Discovery)
+        disc.ranges = [(0x1000, 0x1020), (0x3000, 0x3000)]
+        disc.file_exec_ranges = [(0x1010, 0x1040)]
+        disc.proven_spans = []
+        self.assertEqual(
+            disc.trace_ranges_for_entry(0x1028),
+            analyze.merge_spans([*disc.ranges, (0x1010, 0x1040)], drop_empty=False),
+        )
+
+    def test_merge_spans_many_overlapping_and_touching_spans(self):
+        import analyze
+
+        spans = [(0x1000 + i * 4, 0x1000 + i * 4 + 8) for i in range(5000)]
+        spans.append((0x80000, 0x80000))
+        spans.reverse()
+        expected_end = 0x1000 + 4999 * 4 + 8
+        self.assertEqual(analyze.merge_spans(spans, drop_empty=True), [(0x1000, expected_end)])
+        self.assertEqual(
+            analyze.merge_spans(spans, drop_empty=False),
+            [(0x1000, expected_end), (0x80000, 0x80000)],
+        )
+        self.assertEqual(analyze._cfg_normalize_ranges(spans), [(0x1000, expected_end)])
+        idx = analyze._SpanIndex(spans)
+        self.assertEqual(list(zip(idx.starts, idx.ends, strict=True)), [(0x1000, expected_end)])
+
+
 if __name__ == "__main__":
     unittest.main()

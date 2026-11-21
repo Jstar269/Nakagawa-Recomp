@@ -52,12 +52,12 @@ _LIBRARY_ROOT_FIELDS = frozenset({"schema_version", "updated_at", "games"})
 # A saved record emits every dataclass field, even defaults. The package-cache
 # structural budgets would reject an ordinary saved library around 1,170 games.
 # Give this route budgets derived from the record schemas that write
-# library.json: this module's, and the player's, whose records carry up to 26
+# library.json: this module's, and the player's, whose records carry up to 27
 # fields (nk_library_save in src/core/nk_library.c: 22, plus the optional
-# source_image_path and the disc check's content_sha1, content_crc32 and
-# disc_verification). The independent byte limit still applies, including to
-# large settings overrides.
-_PLAYER_RECORD_FIELD_COUNT = 26
+# source_image_path, the disc check's content_sha1, content_crc32 and
+# disc_verification, and a content key's disc_key_version). The independent byte
+# limit still applies, including to large settings overrides.
+_PLAYER_RECORD_FIELD_COUNT = 27
 _RECORD_FIELD_BUDGET = max(len(_GAME_RECORD_FIELDS), _PLAYER_RECORD_FIELD_COUNT)
 MAX_LIBRARY_JSON_MEMBERS = max(
     MAX_CACHE_JSON_MEMBERS,
@@ -246,7 +246,13 @@ class LibraryGameRecord:
 
 
 def _library_key(disc_id: str) -> str:
-    """The key a disc id is stored and looked up under: case- and edge-whitespace-insensitive."""
+    """The key a disc id is stored and looked up under: case- and edge-whitespace-insensitive.
+
+    Intentionally does not use ``nk_core.types.normalize_disc_id``: this is an
+    on-disk ``library.json`` lookup and deduplication key shared with the native
+    player, so dropping interior '-', '_' or spaces here would change how
+    persisted records are keyed.
+    """
     return disc_id.upper().strip()
 
 

@@ -678,6 +678,9 @@ typedef enum {
     PLAYER_UI_SETTINGS_REMOVE_TEXPACK,       /* a title's Enhanced page: forget its pack */
     PLAYER_UI_SETTINGS_EDIT_NICKNAME,        /* the nickname editor (#2197) */
     PLAYER_UI_SETTINGS_TOGGLE_DISCORD,       /* Settings > Online and developer (#2259) */
+    PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS,  /* RetroAchievements opt-in (#1316) */
+    PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS,
+    PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS,
     PLAYER_UI_SETTINGS_TOGGLE_COVER_ART,     /* Settings > Online and developer (#2632) */
     PLAYER_UI_SETTINGS_REFRESH_COVER_ART,    /* Settings > Build tools and cache (#2632) */
     PLAYER_UI_SETTINGS_TOGGLE_CHEATS,        /* Settings > Online and developer (#2639) */
@@ -858,6 +861,13 @@ typedef struct {
        turn it on (it has a Discord application ID). */
     bool discord_presence;
     bool discord_available;
+    /* RetroAchievements: disabled unless the platform has a credential store and the user
+       accepts the named data/host consent screen. The service is always Casual Mode only. */
+    bool achievements_enabled;
+    bool achievements_available;
+    bool achievements_signed_in;
+    const char *achievements_account;
+    const char *achievements_status;
     /* Opt-in cover art (#2632): off by default, plus formatted cache size shown
        under Settings > Build tools and cache. */
     bool download_cover_art;
@@ -1144,9 +1154,32 @@ typedef struct {
     float logical_height;
 } PlayerUiErrorModel;
 
+/* One achievement on a game's page: title, description, points, whether it is unlocked, and
+   its badge picture when one was fetched (NULL: the page draws a trophy or a padlock). */
+typedef struct {
+    const char *title;
+    const char *description;
+    uint32_t points;
+    bool unlocked;
+    const struct NkUiImage *badge;
+} PlayerUiAchievementRow;
+
 typedef struct {
     const PlayerUiTitle *title;
     size_t title_index;
+    const char *achievements_status; /* the signed-in game's achievement status, or NULL */
+    /* Why nothing is earned now (cheats on, the 60 FPS game-logic package), or NULL: the card
+       shows it in the notice shape, with an icon and no points. */
+    const char *achievements_notice;
+    /* The set's rows, unlocked first, and its progress; count 0 with no set loaded. */
+    const PlayerUiAchievementRow *achievement_rows;
+    size_t achievement_count;
+    size_t achievement_total;
+    uint32_t achievements_unlocked;
+    uint32_t achievements_points_unlocked;
+    uint32_t achievements_points_total;
+    /* With more in the set than the page lists: how many it shows and where to see the rest. */
+    char achievements_more[160];
     bool stalled_game_notice_visible;
     /* The notice is for frames that show nothing, not for frames that stopped. */
     bool stalled_game_dark_picture;
@@ -1329,10 +1362,8 @@ enum {
     PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP = 0x4559u,
     PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE = 0x455Au,   /* a title's Enhanced page: Texture pack folder */
     PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE = 0x455Bu,   /* a title's Enhanced page: Remove texture pack */
-    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY = 0x455Cu,      /* Settings > Online: opens Online play */
-    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE = 0x455Du, /* Online play: On / Off switch */
-    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET = 0x455Eu, /* Online play: Server, opens the picker */
-    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER = 0x455Fu, /* the picker: Other server (editor) */
+    PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS = 0x455Cu,    /* Settings > Online: RA opt-in */
+    PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS_ACCOUNT = 0x455Du,
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
@@ -1345,6 +1376,10 @@ enum {
     PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW = 0x4569u,       /* its NOT NOW */
     PLAYER_UI_ID_ONLINE_PLAY_CHANGE_SERVER = 0x456Au, /* its CHANGE SERVER */
     PLAYER_UI_ID_ONLINE_PLAY_REFRESH = 0x456Bu,       /* the picker's Refresh list */
+    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY = 0x456Cu,      /* Settings > Online: opens Online play */
+    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE = 0x456Du, /* Online play: On / Off switch */
+    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET = 0x456Eu, /* Online play: Server, opens the picker */
+    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER = 0x456Fu, /* the picker: Other server (editor) */
     PLAYER_UI_ID_NICKNAME_KEY_BASE = 0x4570u,         /* + its keyboard key's place */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
@@ -1459,6 +1494,12 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                                         const PlayerUiLibraryModel *model);
 PlayerUiAction player_ui_screen_title(NkUi *ui,
                                       const PlayerUiTitleModel *model);
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+/* After a frame of the title page, for a UI regression run: prints each drawn achievement row's
+   state, whether it has its icon slot, and whether a part was clipped (scr_title.c). */
+void player_ui_title_report_achievement_rows(const NkUiDrawList *list, size_t count,
+                                             const PlayerUiAchievementRow *rows);
+#endif
 PlayerUiAction player_ui_screen_build(NkUi *ui, const PlayerUiBuildModel *model);
 
 /* Remove from library (#1304): what goes, with sizes, and the saves box. */

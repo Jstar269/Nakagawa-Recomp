@@ -124,9 +124,11 @@ We aim to respond promptly and will remove material where appropriate.
   (`MIT`), the Zstandard 1.5.7 single-file decompressor (`BSD-3-Clause`, elected from
   upstream's `BSD-3-Clause OR GPL-2.0-only`), the LZMA SDK decoder (public domain) and
   the dr_flac v0.13.4 development snapshot libchdr carries at that pin (the Unlicense, elected from its Unlicense or `MIT-0` choice). Every file
-  keeps its upstream bytes apart from LF line endings, one added final newline and two small code fixes in
-  `src/libchdr_codec_flac.c` and `src/libchdr_huffman.c`, all recorded as LOCAL DELTA in
-  `third_party/libchdr/PROVENANCE.md`; the
+  keeps its upstream bytes apart from LF line endings, one added final newline and small code fixes in six
+  files: the empty-hunk check in `src/libchdr_codec_flac.c` and the Huffman lookup-table prefill (2026-11-17), and allocation
+  checks on the HUFF codec path (2026-11-20) in `src/libchdr_huffman.c`, `src/libchdr_codec_huff.c`,
+  `src/libchdr_bitstream.c`, `src/libchdr_chd.c` and `include/libchdr/huffman.h`, all recorded as LOCAL DELTA in
+  `third_party/libchdr/PROVENANCE.md`, which lists each file; the
   licence texts and the pinned manifest are under `third_party/libchdr/`. It is compiled into the native player, which uses it only
   to expand a CHD disc image into a plain `.iso` when the image is added; it is not in the
   runtime.

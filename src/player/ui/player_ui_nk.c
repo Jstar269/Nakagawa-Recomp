@@ -30,6 +30,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+/* The achievement rows the title page drew this frame, for the regression report after it. */
+static const PlayerUiAchievementRow *g_title_achievement_rows;
+static size_t g_title_achievement_count;
+#endif
+
 /* Smooth motion's value on a game's page while that game runs its 60 FPS game logic. */
 #define ENHANCED_SMOOTH_AT_60_VALUE "Off (this game runs at 60 FPS)"
 
@@ -1473,6 +1479,32 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         model.online_play_port_offset = player->settings_online_play_port;
     }
     model.download_cover_art = app->settings.download_cover_art;
+    /* RetroAchievements (#1316) is on the Online and developer page. */
+    model.achievements_enabled = app->settings.achievements_enabled;
+    model.achievements_available = app->achievements_store_available;
+    model.achievements_signed_in = app->achievements_signed_in;
+    model.achievements_account = app->achievements_account[0] ? app->achievements_account : NULL;
+    model.achievements_status = app->achievements_status[0] ? app->achievements_status : NULL;
+    /* Cheats turn achievements off for every game, so this page says so too
+       (player_app_achievements_block; the title page adds the 60 FPS package). */
+    if (model.achievements_enabled) {
+        const char *blocked = player_app_achievements_block(app, -1);
+        if (blocked) model.achievements_status = blocked;
+    }
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    {
+        /* The RetroAchievements account row's line each time it changes, in hex so every byte reads back. */
+        static char reported[sizeof(app->achievements_status) + 8];
+        const char *line = model.achievements_status ? model.achievements_status : "";
+        if (strcmp(reported, line) != 0) {
+            snprintf(reported, sizeof(reported), "%s", line);
+            printf("[PLAYER_UI_TEST] next_ui_settings_achievements enabled=%d status_hex=",
+                   model.achievements_enabled ? 1 : 0);
+            for (const char *c = line; *c; c++) printf("%02x", (unsigned)(unsigned char)*c);
+            printf("\n");
+        }
+    }
+#endif
     model.cheats = app->settings.cheats;
     model.cover_art_cache_size = app->cover_art_cache_size_label;
     model.share_system_libraries = app->settings.share_system_libraries;
@@ -4319,6 +4351,90 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             memset(&model, 0, sizeof(model));
             model.title = &player->titles[index];
             model.title_index = (size_t)index;
+            if (app->settings.achievements_enabled) {
+                /* Static: the rows outlive this function, for the frame that draws them. */
+                static PlayerUiAchievementRow rows[PLAYER_ACHIEVEMENTS_LIST_MAX];
+                if (app->achievements_list_loaded &&
+                    strcmp(app->achievements_list_disc_id, game->disc_id) == 0) {
+                    model.achievements_status = app->achievements_status[0]
+                        ? app->achievements_status : "Achievement set loaded.";
+                    model.achievement_count = app->achievements_list_count <
+                            PLAYER_ACHIEVEMENTS_LIST_MAX
+                        ? app->achievements_list_count : PLAYER_ACHIEVEMENTS_LIST_MAX;
+                    model.achievement_total = app->achievements_list_total;
+                    for (size_t i = 0; i < model.achievement_count; i++) {
+                        const PlayerAchievementRow *row = &app->achievements_list[i];
+                        rows[i].title = row->title;
+                        rows[i].description = row->description;
+                        rows[i].points = row->points;
+                        rows[i].unlocked = row->unlocked;
+                        rows[i].badge = row->badge;
+                    }
+                    model.achievement_rows = rows;
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+                    g_title_achievement_rows = rows;
+                    g_title_achievement_count = model.achievement_count;
+#endif
+                    model.achievements_unlocked = app->achievements_unlocked;
+                    model.achievements_points_unlocked = app->achievements_points_unlocked;
+                    model.achievements_points_total = app->achievements_points_total;
+                    /* The page scrolls and lists every row the player keeps; only a set larger
+                       than that says how many it shows and where the rest are. */
+                    if (model.achievement_total > model.achievement_count)
+                        (void)snprintf(model.achievements_more, sizeof model.achievements_more,
+                                       "Showing %zu of %zu achievements. All of them are on "
+                                       "this game's page at retroachievements.org.",
+                                       model.achievement_count, model.achievement_total);
+                } else if (!app->achievements_signed_in) {
+                    model.achievements_status = "Sign in in Settings > Online to load this game's set.";
+                } else {
+                    model.achievements_status = "Play this game to load its achievement set.";
+                }
+                /* With cheats or the 60 FPS game-logic package nothing is earned, and the page
+                   says why before the game starts (player_app_achievements_block), in the
+                   notice shape. */
+                model.achievements_notice = player_app_achievements_block(app, index);
+            }
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+            {
+                /* The card's sentence (its notice, else its status line) each time it changes,
+                   in hex so every byte reads back, then each row once per change: its state,
+                   whether it shows a badge picture or the page's own icon, and its title. */
+                static char reported[sizeof app->achievements_status + MAX_DISC_ID_LEN +
+                                     sizeof model.achievements_more + 8];
+                char now[sizeof(reported)];
+                const char *said = model.achievements_notice ? model.achievements_notice
+                                                             : model.achievements_status;
+                snprintf(now, sizeof(now), "%s|%s|%s", game->disc_id, said ? said : "",
+                         model.achievements_more);
+                if (strcmp(reported, now) != 0) {
+                    snprintf(reported, sizeof(reported), "%s", now);
+                    printf("[PLAYER_UI_TEST] next_ui_title_achievements disc=%s status_hex=",
+                           game->disc_id);
+                    for (const char *c = said; c && *c; c++)
+                        printf("%02x", (unsigned)(unsigned char)*c);
+                    printf(" more_hex=");
+                    for (const char *c = model.achievements_more; *c; c++)
+                        printf("%02x", (unsigned)(unsigned char)*c);
+                    printf(" notice=%d rows=%zu unlocked=%u points=%u/%u\n",
+                           model.achievements_notice ? 1 : 0, model.achievement_count,
+                           (unsigned)model.achievements_unlocked,
+                           (unsigned)model.achievements_points_unlocked,
+                           (unsigned)model.achievements_points_total);
+                    for (size_t i = 0; i < model.achievement_count; i++) {
+                        printf("[PLAYER_UI_TEST] next_ui_title_achievement disc=%s index=%zu "
+                               "state=%s icon=%s points=%u title_hex=",
+                               game->disc_id, i,
+                               model.achievement_rows[i].unlocked ? "unlocked" : "locked",
+                               model.achievement_rows[i].badge ? "badge" : "drawn",
+                               (unsigned)model.achievement_rows[i].points);
+                        for (const char *c = model.achievement_rows[i].title; c && *c; c++)
+                            printf("%02x", (unsigned)(unsigned char)*c);
+                        printf("\n");
+                    }
+                }
+            }
+#endif
             /* The build check's refusal is on the page only while the build
                waits for it; so are the files it waits for (#308). */
             player_ui_input_guide(&model.input_guide,
@@ -4691,6 +4807,13 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     }
     nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
     draw_list = nk_ui_end(player->ui);
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    if (g_title_achievement_count) {
+        player_ui_title_report_achievement_rows(draw_list, g_title_achievement_count,
+                                                g_title_achievement_rows);
+        g_title_achievement_count = 0u;
+    }
+#endif
     /* The inspector's own close button turns it off in Clay; the setting follows, so the
        next frame does not turn the panel on again. */
     if (app->settings.developer_mode && app->dev_log.inspect_layout &&

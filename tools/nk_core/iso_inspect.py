@@ -7,13 +7,14 @@ from __future__ import annotations
 
 from collections import deque
 import hashlib
+import dataclasses
 from dataclasses import dataclass
 import functools
 from pathlib import Path
 import re
 import struct
 import threading
-from typing import Any, Dict, Iterator, Optional, Sequence, overload
+from typing import Any, Dict, Iterable, Iterator, NamedTuple, Optional, Sequence, overload
 
 import psp_import_table
 import title_manifest
@@ -44,9 +45,13 @@ SFO_DISC_ID_MAX_BYTES = 31
 NON_RETAIL_KEY_PREFIX = "X"
 # The SHA-256 input starts with this tag, so the digest names nothing else.
 NON_RETAIL_KEY_DOMAIN = b"nakagawa-non-retail-disc-key-v1\0"
+# The tag of a disc that boots BOOT.BIN beside an empty or zero-filled EBOOT.BIN
+# (_non_retail_identity): its digest covers BOOT.BIN too.
+NON_RETAIL_KEY_DOMAIN_BOOT = b"nakagawa-non-retail-disc-key-v2\0"
 # Three letters and five digits follow the prefix: 26^3 * 10^5 distinct keys.
 NON_RETAIL_KEY_SPACE = 26 ** 3 * 10 ** 5
 NON_RETAIL_MAIN_EXECUTABLE = ("PSP_GAME", "SYSDIR", "EBOOT.BIN")
+NON_RETAIL_BOOT_EXECUTABLE = ("PSP_GAME", "SYSDIR", "BOOT.BIN")
 _SYNTHETIC_DISC_ID_KEY = re.compile(r"TEST[0-9]{5}")
 EXPERIMENTAL_PROFILE_SCHEMA_VERSION = 1
 _EXPERIMENTAL_PROFILE_WRITE_LOCK = threading.Lock()
@@ -785,17 +790,33 @@ def is_non_retail_key(disc_id: str) -> bool:
     )
 
 
+class NonRetailIdentity(NamedTuple):
+    """A non-retail disc's content key (_non_retail_identity)."""
+    key: str
+    sha256: str
+    # 1 for the v1 key (PARAM.SFO and EBOOT.BIN), 2 for the v2 key that covers BOOT.BIN.
+    version: int
+    # For a v2-keyed disc, its v1 key and digest: the key a library entry made before v2
+    # holds, which that entry keeps (key_match_for_library_entry). Empty otherwise.
+    legacy_key: str = ""
+    legacy_sha256: str = ""
+
+
 def _non_retail_identity(
     stream, file_size: int, raw_sfo: bytes, sfo_disc_id: str
-) -> tuple[str, str]:
-    """Key a non-retail disc by its contents: returns (library key, SHA-256 hex).
+) -> NonRetailIdentity:
+    """Key a non-retail disc by its contents.
 
     The digest is SHA-256 over NON_RETAIL_KEY_DOMAIN, then the PARAM.SFO bytes and
     the bytes of the disc's main executable, PSP_GAME/SYSDIR/EBOOT.BIN (the file a
     PSP boots from a disc), each preceded by its length as a little-endian 64-bit
-    integer. Nothing on the disc is changed. A disc whose EBOOT.BIN is missing,
-    empty, over MAX_EXECUTABLE_BYTES or not fully inside the image cannot be told
-    apart from other discs and is refused.
+    integer. A disc whose EBOOT.BIN is empty or zero-filled and which has a BOOT.BIN
+    file of 1 byte to MAX_EXECUTABLE_BYTES, whatever it holds, is keyed over
+    NON_RETAIL_KEY_DOMAIN_BOOT, covering BOOT.BIN too, after EBOOT.BIN and in the
+    same form; every other disc keeps its v1 key. Nothing on the disc is changed. A
+    disc whose EBOOT.BIN is missing, over MAX_EXECUTABLE_BYTES or not fully inside
+    the image, or empty without such a BOOT.BIN, cannot be told apart from other
+    discs and is refused; so is one whose BOOT.BIN cannot be read, naming BOOT.BIN.
     """
     refusal = IsoInspectionError(
         f"PARAM.SFO names this disc '{sfo_disc_id}', which is not a retail disc ID, and "
@@ -803,26 +824,232 @@ def _non_retail_identity(
         "identified by its contents"
     )
     try:
-        entry = _lookup_iso_file(stream, file_size, NON_RETAIL_MAIN_EXECUTABLE)
+        entry = _lookup_iso_file(
+            stream, file_size, NON_RETAIL_MAIN_EXECUTABLE, skip_outside=True
+        )
     except IsoInspectionError as exc:
         raise refusal from exc
-    if entry is None or not 0 < entry[1] <= MAX_EXECUTABLE_BYTES:
+    if entry is None or entry[1] > MAX_EXECUTABLE_BYTES:
         raise refusal
-    lba, size = entry
-    digest = hashlib.sha256(NON_RETAIL_KEY_DOMAIN)
-    digest.update(struct.pack("<Q", len(raw_sfo)))
-    digest.update(raw_sfo)
-    digest.update(struct.pack("<Q", size))
-    offset = 0
+    boot_refusal = IsoInspectionError(
+        f"PARAM.SFO names this disc '{sfo_disc_id}', which is not a retail disc ID, and its "
+        "PSP_GAME/SYSDIR/EBOOT.BIN is empty or all zeros but PSP_GAME/SYSDIR/BOOT.BIN is "
+        "unreadable, so the disc cannot be identified by its contents"
+    )
+    parts = [entry]
     try:
-        while offset < size:
-            count = min(1024 * 1024, size - offset)
-            digest.update(_read_iso_extent(stream, file_size, lba, size, offset, count))
-            offset += count
-    except IsoInspectionError as exc:
-        raise refusal from exc
-    value = digest.digest()
-    return non_retail_disc_key(value), value.hex()
+        eboot_kind = _classify_iso_executable(
+            stream, file_size, "EBOOT.BIN", skip_outside=True
+        )["classification"]
+    except (IsoInspectionError, struct.error):
+        eboot_kind = None
+    # The v2 key is chosen by the disc's structure alone (nk_iso_non_retail_identity): an
+    # empty or zero-filled EBOOT.BIN and a BOOT.BIN file of 1 byte to MAX_EXECUTABLE_BYTES,
+    # whatever it holds, so no rule about what an executable may contain moves a disc
+    # between keys. A BOOT.BIN that cannot be resolved is refused by name, and so is one
+    # whose only records lie outside the image (a truncated dump), which must not quietly
+    # get the v1 key (nk_iso_non_retail_identity reads both the same way).
+    boot_keyed = False
+    if eboot_kind == "EMPTY_OR_ZERO_FILLED":
+        try:
+            boot_entry, boot_outside = _lookup_iso_file_detail(
+                stream, file_size, NON_RETAIL_BOOT_EXECUTABLE, skip_outside=True
+            )
+        except IsoInspectionError as exc:
+            raise boot_refusal from exc
+        if boot_entry is None and boot_outside:
+            raise boot_refusal
+        if boot_entry is not None and 0 < boot_entry[1] <= MAX_EXECUTABLE_BYTES:
+            boot_keyed = True
+            parts.append(boot_entry)
+    if not boot_keyed and entry[1] == 0:
+        raise refusal
+
+    def content_digest(domain: bytes, extents: list[tuple[int, int]],
+                       failure: IsoInspectionError) -> bytes:
+        digest = hashlib.sha256(domain)
+        digest.update(struct.pack("<Q", len(raw_sfo)))
+        digest.update(raw_sfo)
+        try:
+            for lba, size in extents:
+                digest.update(struct.pack("<Q", size))
+                offset = 0
+                while offset < size:
+                    count = min(1024 * 1024, size - offset)
+                    digest.update(_read_iso_extent(stream, file_size, lba, size, offset, count))
+                    offset += count
+        except IsoInspectionError as exc:
+            raise failure from exc
+        return digest.digest()
+
+    if not boot_keyed:
+        value = content_digest(NON_RETAIL_KEY_DOMAIN, parts, refusal)
+        return NonRetailIdentity(non_retail_disc_key(value), value.hex(), 1)
+    value = content_digest(NON_RETAIL_KEY_DOMAIN_BOOT, parts, boot_refusal)
+    legacy = content_digest(NON_RETAIL_KEY_DOMAIN, parts[:1], boot_refusal)
+    return NonRetailIdentity(
+        non_retail_disc_key(value), value.hex(), 2, non_retail_disc_key(legacy), legacy.hex()
+    )
+
+
+# How a disc image's key relates to a library entry's (nk_iso_library_key_match in
+# src/core/nk_iso.c).
+KEY_NO_MATCH = 0
+KEY_MATCH = 1
+KEY_MATCH_LEGACY = 2
+
+
+def key_match_for_library_entry(meta: IsoMetadata, entry_key: str, entry_key_version: int) -> int:
+    """Whether a library entry is this image's (docs/YOUR_OWN_GAMES.md).
+
+    An entry records the version of its key (disc_key_version; absent or 0 for an entry
+    written before versions were recorded, read as 1). An entry of version 2 is this
+    image's only under its v2 key; an entry of version 0 or 1 only under its v1 key,
+    which for a v2-keyed image is legacy_disc_id (KEY_MATCH_LEGACY). The two kinds
+    never stand for each other.
+    """
+    if not entry_key:
+        return KEY_NO_MATCH
+    if entry_key_version == 2:
+        if meta.disc_key_version == 2 and meta.disc_id == entry_key:
+            return KEY_MATCH
+        return KEY_NO_MATCH
+    if meta.disc_key_version == 2:
+        if meta.legacy_disc_id and meta.legacy_disc_id == entry_key:
+            return KEY_MATCH_LEGACY
+        return KEY_NO_MATCH
+    return KEY_MATCH if meta.disc_id == entry_key else KEY_NO_MATCH
+
+
+def _match_and_qualify(
+    reg: TitleRegistry,
+    disc_id: str,
+    identity_structured: bool,
+    version: str,
+    region: str,
+    sfo_facts: Any,
+    user_data_root: Path | str | None,
+) -> tuple[Any, str]:
+    """The title-list entry for disc_id and, when it asks for one, the local
+    compatibility record's verdict (an empty string when qualified)."""
+    matched = reg.lookup_by_disc_id(disc_id) if identity_structured else None
+    qualification_error = ""
+    if matched is not None and matched.require_local_compatibility_record:
+        from . import package_cache
+
+        recorded = (
+            package_cache.read_local_title_input_identity(user_data_root, disc_id)
+            if user_data_root is not None else None
+        )
+        current_region = region if region in {"JP", "NA", "EU", "KR", "ASIA", "OTHER"} else "OTHER"
+        if recorded is None:
+            qualification_error = (
+                f"Unqualified revision (SFO DISC_VERSION {version}) for manifest/profile "
+                f"'{matched.id}': an explicit local compatibility record is required. "
+                "Register it with --register-local-compatibility-record after reviewing the local inputs."
+            )
+        else:
+            prior = recorded["disc"]
+            if (recorded["manifest"]["id"] != matched.id or
+                prior["id"] != disc_id or prior["region"] != current_region or
+                prior["disc_version"] != version or recorded["param_sfo"] != sfo_facts):
+                if prior["disc_version"] != version:
+                    changed = "SFO revision changed"
+                elif recorded["manifest"]["id"] != matched.id:
+                    changed = "manifest/profile changed"
+                elif prior["id"] != disc_id or prior["region"] != current_region:
+                    changed = "DISC_ID or region changed"
+                else:
+                    changed = "PARAM.SFO facts changed"
+                qualification_error = (
+                    f"Unqualified revision (SFO DISC_VERSION {version}): {changed}; "
+                    "an explicit local compatibility record is required. "
+                    "Register it with --register-local-compatibility-record after reviewing the local inputs."
+                )
+    return matched, qualification_error
+
+
+def keyed_as_legacy(
+    meta: IsoMetadata,
+    registry: Optional[TitleRegistry] = None,
+    *,
+    user_data_root: Path | str | None = None,
+) -> IsoMetadata:
+    """The same image named by its v1 key, as the library entry made before v2 holds it.
+
+    The title list is searched again under that key, and the qualification made again,
+    as inspect_iso does for disc_id: a manifest the user keeps under the v1 key goes on
+    matching the disc. Pass the registry and user_data_root inspect_iso was given."""
+    matched, qualification_error = _match_and_qualify(
+        registry or get_default_registry(), meta.legacy_disc_id, True, meta.version,
+        meta.region, dict(meta.param_sfo_facts), user_data_root,
+    )
+    # A name inspect_iso made from the v2 key (PARAM.SFO has no TITLE) is made again from
+    # the v1 key, as nk_iso_title_for_key does in the player.
+    title = meta.title
+    if title == f"PSP Title ({meta.disc_id})":
+        title = f"PSP Title ({meta.legacy_disc_id})"
+    return dataclasses.replace(
+        meta, disc_id=meta.legacy_disc_id, identity_sha256=meta.legacy_identity_sha256,
+        disc_key_version=1, legacy_disc_id="", legacy_identity_sha256="",
+        matched_profile=matched, qualification_error=qualification_error, title=title,
+    )
+
+
+def metadata_for_library_entry(
+    meta: IsoMetadata,
+    entry_key: str,
+    entry_key_version: int,
+    registry: Optional[TitleRegistry] = None,
+    *,
+    user_data_root: Path | str | None = None,
+) -> IsoMetadata | None:
+    """The image keyed as the library entry holds it, or None when the entry is not its."""
+    match = key_match_for_library_entry(meta, entry_key, entry_key_version)
+    if match == KEY_MATCH_LEGACY:
+        return keyed_as_legacy(meta, registry, user_data_root=user_data_root)
+    return meta if match == KEY_MATCH else None
+
+
+class LibraryRecordError(ValueError):
+    """A library record this module cannot read (library_record_key_version)."""
+
+
+def library_record_key_version(record: Any) -> int:
+    """A library record's disc_key_version: 0 when absent; a value other than 0, 1 or 2
+    is refused by name (LibraryRecordError), as the player's loader refuses it."""
+    value = record.get("disc_key_version", 0) if isinstance(record, dict) else 0
+    if type(value) is not int or value not in (0, 1, 2):
+        disc_id = record.get("disc_id", "") if isinstance(record, dict) else ""
+        raise LibraryRecordError(
+            f"the library record {str(disc_id)[:16]!r} has disc_key_version {value!r:.32}; "
+            "only 0, 1 or 2 is read"
+        )
+    return value
+
+
+def metadata_for_new_library_record(
+    meta: IsoMetadata,
+    records: Iterable[Any],
+    registry: Optional[TitleRegistry] = None,
+    *,
+    user_data_root: Path | str | None = None,
+) -> IsoMetadata:
+    """The key an image is added under (nk_iso_library_key_for_image): an entry that
+    holds this image's own key first; else, for a v2-keyed image, an entry made before
+    v2 under its v1 key, which keeps that key, so adding the same disc again finds its
+    entry; else the image's own key. Nothing in the library is changed."""
+    if meta.disc_key_version != 2 or not meta.legacy_disc_id:
+        return meta
+    listed = [(str(record.get("disc_id", "")).upper(), library_record_key_version(record))
+              for record in records if isinstance(record, dict)]
+    if any(key_match_for_library_entry(meta, key, version) == KEY_MATCH
+           for key, version in listed):
+        return meta
+    if any(key_match_for_library_entry(meta, key, version) == KEY_MATCH_LEGACY
+           for key, version in listed):
+        return keyed_as_legacy(meta, registry, user_data_root=user_data_root)
+    return meta
 
 
 def _pbp_display_title(title: str) -> str:
@@ -972,10 +1199,11 @@ def inspect_iso(
         root_note = _pvd_root_record_note(pvd_data)
         if root_note is not None:
             format_warnings.append(root_note)
-        sfo_entry = _lookup_iso_file(f, size_bytes, ("PSP_GAME", "PARAM.SFO"))
+        sfo_entry = _lookup_param_sfo(f, size_bytes)
 
         sfo_disc_id = ""
         identity_sha256 = ""
+        content_identity: NonRetailIdentity | None = None
         if sfo_entry is None:
             disc_id = "UNKNOWN"
             title = "Unknown PSP Title"
@@ -991,9 +1219,9 @@ def inspect_iso(
             sfo_disc_id = sfo_dict.get("DISC_ID", "")
             key = disc_id_library_key(sfo_disc_id)
             if key is None:
-                key, identity_sha256 = _non_retail_identity(
-                    f, size_bytes, raw_sfo, sfo_disc_id
-                )
+                content_identity = _non_retail_identity(f, size_bytes, raw_sfo, sfo_disc_id)
+                key = content_identity.key
+                identity_sha256 = content_identity.sha256
             disc_id = key
             title = sfo_dict.get("TITLE", "")
             version = sfo_dict.get("DISC_VERSION", "1.00")
@@ -1017,40 +1245,9 @@ def inspect_iso(
         elif upper_disc.startswith("UCAS") or upper_disc.startswith("ULAS"):
             region = "ASIA"
 
-        matched = reg.lookup_by_disc_id(disc_id) if identity_structured else None
-        qualification_error = ""
-        if matched is not None and matched.require_local_compatibility_record:
-            from . import package_cache
-
-            recorded = (
-                package_cache.read_local_title_input_identity(user_data_root, disc_id)
-                if user_data_root is not None else None
-            )
-            current_region = region if region in {"JP", "NA", "EU", "KR", "ASIA", "OTHER"} else "OTHER"
-            if recorded is None:
-                qualification_error = (
-                    f"Unqualified revision (SFO DISC_VERSION {version}) for manifest/profile "
-                    f"'{matched.id}': an explicit local compatibility record is required. "
-                    "Register it with --register-local-compatibility-record after reviewing the local inputs."
-                )
-            else:
-                prior = recorded["disc"]
-                if (recorded["manifest"]["id"] != matched.id or
-                    prior["id"] != disc_id or prior["region"] != current_region or
-                    prior["disc_version"] != version or recorded["param_sfo"] != sfo_facts):
-                    if prior["disc_version"] != version:
-                        changed = "SFO revision changed"
-                    elif recorded["manifest"]["id"] != matched.id:
-                        changed = "manifest/profile changed"
-                    elif prior["id"] != disc_id or prior["region"] != current_region:
-                        changed = "DISC_ID or region changed"
-                    else:
-                        changed = "PARAM.SFO facts changed"
-                    qualification_error = (
-                        f"Unqualified revision (SFO DISC_VERSION {version}): {changed}; "
-                        "an explicit local compatibility record is required. "
-                        "Register it with --register-local-compatibility-record after reviewing the local inputs."
-                    )
+        matched, qualification_error = _match_and_qualify(
+            reg, disc_id, identity_structured, version, region, sfo_facts, user_data_root
+        )
 
         container_metadata: dict[str, object] = {
             "format": "iso9660",
@@ -1075,6 +1272,9 @@ def inspect_iso(
             sfo_disc_id=sfo_disc_id,
             non_retail=bool(identity_sha256),
             identity_sha256=identity_sha256,
+            disc_key_version=content_identity.version if content_identity else 0,
+            legacy_disc_id=content_identity.legacy_key if content_identity else "",
+            legacy_identity_sha256=content_identity.legacy_sha256 if content_identity else "",
         )
 
 
@@ -1348,8 +1548,16 @@ def _extent_fields(record: bytes, file_size: int) -> tuple[int, int, bool]:
         raise IsoInspectionError("ISO directory extent has conflicting endian copies")
     offset = lba_le * SECTOR_SIZE
     if offset > file_size or size_le > file_size - offset:
-        raise IsoInspectionError("ISO directory extent exceeds the image bounds")
+        raise _ExtentOutsideImage("ISO directory extent exceeds the image bounds")
     return lba_le, size_le, bool(record[25] & 0x02)
+
+
+class _ExtentOutsideImage(IsoInspectionError):
+    """A directory record whose extent lies outside the image (_extent_fields).
+    last_component: it is the record of the file a lookup was for, not of a folder on
+    its way (set by _lookup_iso_file_detail)."""
+
+    last_component: bool = False
 
 
 def _read_iso_extent(
@@ -1469,7 +1677,29 @@ def _native_component_bytes(name: bytes) -> bytes:
     return name[:-1] if len(name) > 1 and name.endswith(b".") else name
 
 
-def _lookup_iso_file(stream, file_size: int, path: tuple[str, ...]) -> tuple[int, int] | None:
+def _lookup_iso_file(
+    stream, file_size: int, path: tuple[str, ...], *, skip_outside: bool = False
+) -> tuple[int, int] | None:
+    return _lookup_iso_file_detail(stream, file_size, path, skip_outside=skip_outside)[0]
+
+
+def _lookup_iso_file_detail(
+    stream, file_size: int, path: tuple[str, ...], *, skip_outside: bool = False
+) -> tuple[tuple[int, int] | None, bool]:
+    """The file at path and whether a record of its last component's name was passed over
+    because its extent leaves the image.
+
+    A directory whose bytes cannot be read, or that holds a record whose length or name
+    runs past it, is refused. Records are read in their order; only a record with the
+    wanted name has its location read, and when its both-endian copies disagree the
+    lookup is refused. A record of the name whose extent leaves the image refuses the
+    lookup (_ExtentOutsideImage, with last_component set when it is the file's own
+    record), as every lookup did before content keys: such an image is never read as one
+    without that file. With skip_outside, the rule nk_iso_find_in_dir in src/core/nk_iso.c
+    follows (tests/test_iso_parity.py keeps the two in step), such a record is passed over
+    for a later record of the name, and the first record of the name inside the image is
+    the result. Only the non-retail identity reads EBOOT.BIN and BOOT.BIN that way, as
+    nk_iso_non_retail_identity does."""
     stream.seek(PVD_SECTOR * SECTOR_SIZE)
     pvd = stream.read(SECTOR_SIZE)
     if len(pvd) != SECTOR_SIZE or pvd[:7] != ISO_MAGIC:
@@ -1489,6 +1719,7 @@ def _lookup_iso_file(stream, file_size: int, path: tuple[str, ...]) -> tuple[int
                 "ISO path component is not representable as directory bytes"
             ) from exc
         found: tuple[int, int, bool] | None = None
+        outside = False
         offset = 0
         while offset < len(directory):
             record_size = directory[offset]
@@ -1507,15 +1738,35 @@ def _lookup_iso_file(stream, file_size: int, path: tuple[str, ...]) -> tuple[int
             # ';' version, and one trailing separator '.' ("DATA.;1") dropped.
             if name not in (b"\0", b"\1") and \
                     _native_component_bytes(_iso_name_without_version(name)).upper() == wanted:
-                found = _extent_from_record(record, file_size)
+                try:
+                    found = _extent_from_record(record, file_size)
+                except _ExtentOutsideImage as exc:
+                    if not skip_outside:
+                        exc.last_component = index == len(path) - 1
+                        raise
+                    outside = True
+                    offset += record_size
+                    continue
                 break
             offset += record_size
+        last = index == len(path) - 1
         if found is None:
-            return None
+            return None, outside and last
         lba, size, is_dir = found
-        if index < len(path) - 1 and not is_dir:
-            return None
-    return (lba, size) if not is_dir else None
+        if not last and not is_dir:
+            return None, False
+    return ((lba, size) if not is_dir else None), False
+
+
+def _lookup_param_sfo(stream, file_size: int) -> tuple[int, int] | None:
+    """PSP_GAME/PARAM.SFO. A PARAM.SFO record outside the image is refused with the text
+    nk_iso_inspect gives, never read as a disc without PARAM.SFO."""
+    try:
+        return _lookup_iso_file(stream, file_size, ("PSP_GAME", "PARAM.SFO"))
+    except _ExtentOutsideImage as exc:
+        if exc.last_component:
+            raise IsoInspectionError("PSP_GAME/PARAM.SFO extent is invalid") from exc
+        raise
 
 
 def _image_read(read, offset: int, count: int) -> bytes | None:
@@ -2250,8 +2501,12 @@ def _classify_decrypted_elf_file(path: Path | str, *, module: bool = False) -> s
     return "UNKNOWN"
 
 
-def _classify_iso_executable(stream, file_size: int, path: str) -> dict[str, object]:
-    entry = _lookup_iso_file(stream, file_size, ("PSP_GAME", "SYSDIR", path))
+def _classify_iso_executable(
+    stream, file_size: int, path: str, *, skip_outside: bool = False
+) -> dict[str, object]:
+    entry = _lookup_iso_file(
+        stream, file_size, ("PSP_GAME", "SYSDIR", path), skip_outside=skip_outside
+    )
     if entry is None:
         return {"classification": "UNKNOWN", "present": False, "size_bytes": 0}
     lba, size = entry
@@ -2406,7 +2661,7 @@ def inspect_compatibility_preflight(
     directory_error_code: str | None = None
     try:
         with path.open("rb") as stream:
-            sfo_entry = _lookup_iso_file(stream, size_bytes, ("PSP_GAME", "PARAM.SFO"))
+            sfo_entry = _lookup_param_sfo(stream, size_bytes)
             sfo_parsed = False
             if sfo_entry is not None and 20 <= sfo_entry[1] <= MAX_SFO_BYTES:
                 raw_sfo = _read_iso_extent(stream, size_bytes, *sfo_entry, 0, sfo_entry[1])
