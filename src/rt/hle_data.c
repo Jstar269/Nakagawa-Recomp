@@ -143,39 +143,45 @@ char *sreg_overlay_path(void) {
     return path;
 }
 
-/* Read the overlay file. Returns 1 with a NUL-terminated copy, 0 when there is no file, and -1
- * with *why set when it exists but cannot be read within the size bound. */
-int sreg_read_file(const char *path, char **out, size_t *len_out, char *why, size_t why_len) {
+/* Read the overlay file: SREG_READ_OK with a NUL-terminated copy, SREG_READ_ABSENT when there is
+ * no file, SREG_READ_INVALID when it is larger than the size bound, and SREG_READ_UNREADABLE when
+ * it cannot be opened or read now (or there is no memory to read it). *why names the last two. */
+SregReadResult sreg_read_file(const char *path, char **out, size_t *len_out, char *why, size_t why_len) {
     FILE *f;
     char *buf;
     size_t got;
     int failed;
     *out = NULL;
     *len_out = 0;
-    if (!nk_platform_file_exists(path)) return 0;
+    if (!nk_platform_file_exists(path)) return SREG_READ_ABSENT;
     f = nk_fopen_utf8(path, "rb");
     if (!f) {
         snprintf(why, why_len, "the file cannot be opened");
-        return -1;
+        return SREG_READ_UNREADABLE;
     }
     buf = (char *)malloc((size_t)SREG_OVERLAY_MAX_BYTES + 1u);
     if (!buf) {
         fclose(f);
         snprintf(why, why_len, "no memory to read it");
-        return -1;
+        return SREG_READ_UNREADABLE;
     }
     got = fread(buf, 1u, (size_t)SREG_OVERLAY_MAX_BYTES + 1u, f);
     failed = ferror(f);
     fclose(f);
-    if (failed || got > SREG_OVERLAY_MAX_BYTES) {
+    if (failed) {
         free(buf);
-        snprintf(why, why_len, "%s", failed ? "the file cannot be read" : "the file is larger than 1 MiB");
-        return -1;
+        snprintf(why, why_len, "the file cannot be read");
+        return SREG_READ_UNREADABLE;
+    }
+    if (got > SREG_OVERLAY_MAX_BYTES) {
+        free(buf);
+        snprintf(why, why_len, "the file is larger than 1 MiB");
+        return SREG_READ_INVALID;
     }
     buf[got] = '\0';
     *out = buf;
     *len_out = got;
-    return 1;
+    return SREG_READ_OK;
 }
 
 int sreg_hex_nibble(char c) {
@@ -2631,15 +2637,7 @@ uint32_t h_io_open_path(const char *path, uint32_t flags, int forced_slot) {
     if (rc < (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) && s_fds[rc].used &&
         hle_enhancement_attach((int)rc, path, flags) < 0) {
         fprintf(stderr, "ENHANCEMENT_DATA_MISMATCH: the run stops here\n");
-        sr_trace_close();
-        ge_scene_dump_finish();
-        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-        (void)sr_videorec_finish_status("ENHANCEMENT_DATA_MISMATCH", 1);
-        sr_perf_shutdown();
-        sr_profile_dump_final();
-        SR_VERIFY_REPORT_NOW();
-        fflush(stderr);
-        _Exit(1);
+        sr_run_end(1, "enhancement_data_mismatch", "ENHANCEMENT_DATA_MISMATCH");
     }
     return rc;
 }
