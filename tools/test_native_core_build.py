@@ -216,6 +216,15 @@ class NativeCoreTestsContractTests(unittest.TestCase):
         self.assertIn("src/ui/nk_ui_clay.c", compile_commands[0])
         self.assertIn("build/test_nk_ui_core", _test_runs(self.commands))
 
+    def test_a_test_that_can_exit_77_is_run_so_that_77_is_a_skip(self) -> None:
+        """test_player_state names a case a host cannot run NOT_RUN (a checkout with no working
+        git) and exits 77; a bare run would stop native-core-tests there and no later test
+        would run."""
+        for binary in ("build/test_player_state",):
+            run = [c for c in self.commands if c.replace(".exe", "").startswith(binary + ";")]
+            self.assertEqual(len(run), 1, binary)
+            self.assertIn("77", run[0], f"{binary}: exit 77 must be reported as SKIP")
+
     def test_nk_ui_focus_selftest_has_an_sdl_free_build_and_an_sdl_leg(self) -> None:
         plain = [c for c in self.commands if c.startswith("gcc") and " -o build/test_nk_ui_focus" in c
                  and "_sdl" not in c.split(" -o ", 1)[1]]

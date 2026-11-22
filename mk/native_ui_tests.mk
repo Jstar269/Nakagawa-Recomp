@@ -570,7 +570,9 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(call NK_NICKNAME_SELFTEST_CMD)
 	$(call NK_CHEATS_SELFTEST_CMD)
 	$(call PLAYER_STATE_TEST_BIN_CMD)
-	$(BUILD_ROOT_RUN)/test_player_state$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_player_state$(EXE_EXT); rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP test_player_state (exit 77: a case NOT_RUN on this host; the reason is printed above)"; \
+	elif [ $$rc -ne 0 ]; then echo "FAIL test_player_state (exit $$rc)"; exit $$rc; fi
 	$(call INPUT_SETTINGS_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_input_settings$(EXE_EXT)
 	$(call PACKAGE_BUILDER_TEST_BIN_CMD)
