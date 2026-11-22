@@ -236,14 +236,30 @@ def png_pixel(red: int, green: int, blue: int) -> bytes:
     )
 
 
+def synthetic_snd0_at3(frames: int = 16) -> bytes:
+    """A synthetic PSP_GAME/SND0.AT3: RIFF WAVE, ATRAC3+ (WAVE_FORMAT_EXTENSIBLE), mono,
+    44100 Hz, `frames` copies of a 9-byte frame whose coded spectrum is not empty, so it
+    decodes to sound (SPECTRUM_UNIT_FRAME of tests/native/atrac3p_selftest.c). No game data."""
+    frame = bytes((0x10, 0x5B, 0x7F, 0xCF, 0xF6, 0x7F, 0x67, 0xCB, 0x40))
+    data = frame * frames
+    fmt = struct.pack("<HHIIHH", 0xFFFE, 1, 44100, 44100 // 8, len(frame), 0)
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt
+    body += b"data" + struct.pack("<I", len(data)) + data + (bytes(1) if len(data) & 1 else b"")
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
 def synthetic_art_iso(
     path: Path, *, include_picture: bool = True, icon_bytes: bytes | None = None,
-    source_executable: bytes | None = None,
+    source_executable: bytes | None = None, clip: bytes | None = None,
 ) -> None:
     sector_size = 2048
     icon_image = png_pixel(50, 190, 120) if icon_bytes is None else icon_bytes
     assert len(icon_image) <= sector_size, "the synthetic icon must fit one sector"
     image = bytearray((23 if source_executable is not None else 22) * sector_size)
+    clip_lba = len(image) // sector_size
+    if clip is not None:
+        assert len(clip) <= sector_size, "the synthetic SND0.AT3 must fit one sector"
+        image += bytearray(sector_size)
     if source_executable is not None:
         assert len(source_executable) <= sector_size, "the synthetic executable must fit one sector"
 
@@ -287,6 +303,8 @@ def synthetic_art_iso(
     if include_picture:
         game_records += record(b"PIC1.PNG;1", 20, len(png_pixel(50, 100, 190)), False)
         picture_size = len(png_pixel(50, 100, 190))
+    if clip is not None:
+        game_records += record(b"SND0.AT3;1", clip_lba, len(clip), False)
     if source_executable is not None:
         game_records += record(b"SYSDIR", 21, sector_size, True)
     image[17 * sector_size : 17 * sector_size + len(root_records)] = root_records
@@ -302,6 +320,8 @@ def synthetic_art_iso(
         )
         image[21 * sector_size : 21 * sector_size + len(sysdir_records)] = sysdir_records
         image[22 * sector_size : 22 * sector_size + len(source_executable)] = source_executable
+    if clip is not None:
+        image[clip_lba * sector_size : clip_lba * sector_size + len(clip)] = clip
     path.write_bytes(image)
 
 
@@ -1722,10 +1742,11 @@ class NativePlayerUiTests(unittest.TestCase):
                 if build_preflight == "encrypted":
                     synthetic_experimental_profile(runtime_root, "TEST00009", None)
             if art_iso is not None:
-                if art_iso not in ("available", "unavailable", "icon-only"):
+                if art_iso not in ("available", "unavailable", "icon-only", "clip"):
                     raise ValueError(f"unknown synthetic ISO mode: {art_iso}")
                 ui_iso_path = scratch / "source-owned-synthetic.iso"
-                synthetic_art_iso(ui_iso_path, include_picture=art_iso != "icon-only")
+                synthetic_art_iso(ui_iso_path, include_picture=art_iso != "icon-only",
+                                  clip=synthetic_snd0_at3() if art_iso == "clip" else None)
                 if art_iso == "unavailable":
                     ui_iso_path.rename(scratch / "source-owned-synthetic.iso.offline")
             if ready_source_iso is not None:
@@ -2143,6 +2164,47 @@ class NativePlayerUiTests(unittest.TestCase):
                       "the disc's 1 x 1 ICON0.PNG is decoded and shown on its card")
         self.assertNotIn("next_ui_disc_icon", missing["stdout"],
                          "an unreadable disc keeps the placeholder")
+
+    def library_game_music(self, run: dict[str, object]) -> list[tuple[int, str]]:
+        """Each library frame's (ticks, game_music state)."""
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        return [(int(frame["ticks_ms"]), frame["game_music"]) for frame in frames
+                if frame["view"] in ("library", "ready_library")]
+
+    def test_next_ui_highlighted_game_plays_its_own_startup_clip(self) -> None:
+        """A highlighted game's own startup clip (PSP_GAME/SND0.AT3, player_ui_snd0.h): focus
+        resting on the card for 0.6 s reads the synthetic clip from the synthetic disc image,
+        decodes it with the ATRAC3+ decoder and plays it, on SDL's dummy audio device (never a
+        speaker). A disc without a clip stays silent with no message, and with Preview music off
+        nothing is read."""
+        audio = {"SDL_AUDIO_DRIVER": "dummy"}
+        played = self.run_player("ready", ("FOCUS_GAINED", "WAIT_MS=3000"), art_iso="clip",
+                                 env_extra=audio)
+        self.assert_next_ui_active(str(played["stdout"]))
+        states = self.library_game_music(played)
+        self.assertTrue(states, played["stdout"])
+        start = states[0][0]
+        # The first frames come before the clip's first update ("off").
+        self.assertLessEqual({state for ticks, state in states if ticks - start < 500},
+                             {"off", "idle"},
+                             f"nothing is read before the highlight rests: {states[:8]}")
+        self.assertIn("playing", [state for _, state in states],
+                      f"the rested card's clip plays: {states}")
+        self.assertNotIn("GAME_MUSIC_", str(played["stdout"]) + str(played["stderr"]))
+
+        silent = self.run_player("ready", ("FOCUS_GAINED", "WAIT_MS=2000"), art_iso="available",
+                                 env_extra=audio)
+        seen = {state for _, state in self.library_game_music(silent)}
+        self.assertIn("no_clip", seen, "a disc without SND0.AT3 is looked at once rested")
+        self.assertFalse(seen & {"playing", "damaged"}, seen)
+        self.assertNotIn("GAME_MUSIC_", str(silent["stdout"]) + str(silent["stderr"]),
+                         "a disc without a clip is not an error")
+
+        off = self.run_player("ready", ("FOCUS_GAINED", "WAIT_MS=2000"), art_iso="clip",
+                              settings={"launcher_game_music": False}, env_extra=audio)
+        self.assertEqual({state for _, state in self.library_game_music(off)}, {"off"},
+                         "with Preview music off the clip is never read")
 
     def test_next_ui_wait_wakes_each_frame_while_disc_art_is_read(self) -> None:
         """Audit 2026-11-17 (F-8100ccc0): the launcher loop's wait (player_ui_nk_wait_ms)

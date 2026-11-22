@@ -76,6 +76,14 @@ NkIconStatus nk_iso_read_image_entry(const char *iso_path, const char *rel_path,
                                      uint8_t **out_data, size_t *out_size,
                                      uint32_t *out_w, uint32_t *out_h);
 
+/* Reads any file from an ISO9660 disc image into memory, unvalidated, for a
+ * reader that checks its own format (the launcher's PSP_GAME/SND0.AT3 clip).
+ * NK_ICON_ERR_MISSING: no image, or no such file (or it is a directory);
+ * NK_ICON_ERR_OVERSIZED: larger than max_bytes; NK_ICON_ERR_CORRUPT: empty or
+ * unreadable. *out_data is malloc'd (caller frees) only on NK_ICON_OK. */
+NkIconStatus nk_iso_read_bounded_entry(const char *iso_path, const char *rel_path,
+                                       size_t max_bytes, uint8_t **out_data, size_t *out_size);
+
 /* Which library images an attempt still needs. A disc without one of them is
  * common, so a retry only asks for the image whose texture is still absent
  * instead of re-reading the other one. */

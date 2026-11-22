@@ -797,7 +797,7 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            "rebuild_queue_paused=%d prompt_version=%s "
            "input_class=%s input_files=%zu next_input_class=%s next_input_files=%zu "
            "backdrop=%d backdrop_shown=%d disc_check=%d drop_pending=%zu drop_notice=%s "
-           "music=%s inspect_layout=%d\n",
+           "music=%s game_music=%s inspect_layout=%d\n",
            frame_number, (unsigned long long)SDL_GetTicks(),
            player_ui_test_view_name(app->active_view),
            app->selected_game_index,
@@ -884,6 +884,7 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            !app->drop_notice[0] ? "none"
                : strstr(app->drop_notice, "being set up") ? "busy" : "summary",
            player_ui_nk_music_state_name(g_ui_test_next_ui),
+           player_ui_nk_snd0_state_name(g_ui_test_next_ui),
            app->dev_log.inspect_layout ? 1 : 0);
 
     /* RetroAchievements (#1316): its status line each time it changes, in hex so every byte

@@ -284,6 +284,12 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                                PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP, SET_ID_TEXT + 0x12u,
                                PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
                                PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP, name_width, result);
+            /* A highlighted game's own startup clip (SND0.AT3), at the Music volume. */
+            if (settings_row(ui, 16u, PLAYER_UI_ID_SETTINGS_GAME_MUSIC, "Preview music",
+                             settings_on_off(model->game_music), model->game_music,
+                             name_width)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_GAME_MUSIC);
+            }
             {
                 NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
                 (void)snprintf(line, sizeof(line), "Controller: %s",

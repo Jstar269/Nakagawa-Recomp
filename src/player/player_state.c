@@ -1476,6 +1476,7 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->ui_sounds = false;
     settings->launcher_music = false;
     settings->launcher_music_volume = 80;
+    settings->launcher_game_music = true;
     settings->launcher_theme[0] = '\0';
     memset(settings->theme_unlocks, 0, sizeof(settings->theme_unlocks));
     settings->theme_unlock_count = 0;
@@ -2441,6 +2442,11 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         if (music_vol_val > 100) music_vol_val = 100;
         app->settings.launcher_music_volume = (int)music_vol_val;
     }
+    NkJsonNode *game_music_node = nk_json_obj_get(root, "launcher_game_music");
+    bool game_music_val = true;
+    if (game_music_node && nk_json_get_bool(game_music_node, &game_music_val)) {
+        app->settings.launcher_game_music = game_music_val;
+    }
     /* The launcher theme: an id that is not one is left out, as if never written. */
     const char *theme_id = nk_json_get_string(nk_json_obj_get(root, "launcher_theme"));
     if (theme_id && player_theme_id_valid(theme_id)) {
@@ -2651,6 +2657,8 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
     fprintf(f, "  \"ui_sounds\": %s,\n", app->settings.ui_sounds ? "true" : "false");
     fprintf(f, "  \"launcher_music\": %s,\n", app->settings.launcher_music ? "true" : "false");
     fprintf(f, "  \"launcher_music_volume\": %d,\n", app->settings.launcher_music_volume);
+    fprintf(f, "  \"launcher_game_music\": %s,\n",
+            app->settings.launcher_game_music ? "true" : "false");
     fprintf(f, "  \"launcher_theme\": \"%s\",\n",
             player_theme_id_valid(app->settings.launcher_theme) ? app->settings.launcher_theme
                                                                 : "");
@@ -3312,6 +3320,12 @@ void player_app_toggle_ui_sounds(PlayerApp *app) {
 void player_app_toggle_launcher_music(PlayerApp *app) {
     if (!app) return;
     app->settings.launcher_music = !app->settings.launcher_music;
+    maybe_persist_settings(app);
+}
+
+void player_app_toggle_launcher_game_music(PlayerApp *app) {
+    if (!app) return;
+    app->settings.launcher_game_music = !app->settings.launcher_game_music;
     maybe_persist_settings(app);
 }
 
