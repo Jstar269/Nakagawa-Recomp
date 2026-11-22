@@ -3764,13 +3764,13 @@ class NativePlayerUiTests(unittest.TestCase):
     ACHIEVEMENTS_SIGN_IN = str(0x45B2)
     ACHIEVEMENTS_SIGN_IN_CANCEL = str(0x45B3)
 
-    def achievements_said(self, run: dict[str, object], *, shown_on: bool = False) -> list[str]:
-        """The RetroAchievements status lines a run showed. Nothing is saved as on; nor is it on
-        in the run unless `shown_on` (the achievements-sign-in view shows the switch on)."""
+    def achievements_said(self, run: dict[str, object]) -> list[str]:
+        """The RetroAchievements status lines a run showed. Nothing turns it on in the run, nor
+        is it saved as on: the achievements-sign-in view is a preview with the switch off
+        (#1316 review; before, that view turned the switch on itself)."""
         stdout = run["stdout"]
         assert isinstance(stdout, str)
-        if not shown_on:
-            self.assertNotRegex(stdout, r"achievements frame=\d+ enabled=1")
+        self.assertNotRegex(stdout, r"achievements frame=\d+ enabled=1")
         settings = run.get("settings") or {}
         assert isinstance(settings, dict)
         self.assertIsNot(settings.get("achievements_enabled"), True)
@@ -3843,6 +3843,10 @@ class NativePlayerUiTests(unittest.TestCase):
         stdout = run["stdout"]
         assert isinstance(stdout, str)
         self.assertNotIn("hunter2", stdout, "the password is never printed")
+        self.assertNotIn("hunter2".encode().hex(), stdout,
+                         "nor its bytes: the editor reports a password as its stars")
+        self.assertIn("text_hex=" + "2a" * 7 + " ", stdout,
+                      "the open password editor reports one star per character")
         trail = self.focus_trail(run)
         for control in (self.ACHIEVEMENTS_USERNAME, self.ACHIEVEMENTS_PASSWORD,
                         self.ACHIEVEMENTS_SIGN_IN):
@@ -3851,7 +3855,7 @@ class NativePlayerUiTests(unittest.TestCase):
                         trail.index(self.ACHIEVEMENTS_SIGN_IN),
                         "Done on the password moves the focus to SIGN IN")
         self.assertEqual(
-            self.achievements_said(run, shown_on=True)[-1],
+            self.achievements_said(run)[-1],
             "RetroAchievements is not available in a UI regression run.",
             "SIGN IN is refused in a regression run, before anything is sent")
         views = [view for view, _ in self.screens(run)]
@@ -3874,7 +3878,7 @@ class NativePlayerUiTests(unittest.TestCase):
             ("WAIT_MS=100", "WAIT_LAID_OUT=5000", "KEY_RETURN", "WAIT_MS=100",
              "KEY_ESCAPE", "WAIT_MS=100", "FOCUS_LOST", "WAIT_MS=100", "FOCUS_GAINED",
              "WAIT_MS=100", *(("KEY_DOWN", "WAIT_MS=100") * 2), "KEY_RETURN", "WAIT_MS=200"))
-        said = self.achievements_said(run, shown_on=True)
+        said = self.achievements_said(run)
         self.assertEqual(said, ["Sign in to connect."],
                          "nothing is sent, and no sign-in is even attempted")
         trail = self.focus_trail(run)

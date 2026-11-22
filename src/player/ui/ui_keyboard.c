@@ -16,6 +16,12 @@
 static const char k_rows[UI_KEYBOARD_CHAR_ROWS][UI_KEYBOARD_KEYS_PER_ROW + 1u] = {
     "1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm,.-", "!?@#&*()_+"
 };
+/* Shift: the letters in upper case and the other keys' second characters, so that with the
+   two layers every printable ASCII character can be typed (a RetroAchievements password may
+   hold any of them). A space marks a key that types the same in both. */
+static const char k_shifted[UI_KEYBOARD_CHAR_ROWS][UI_KEYBOARD_KEYS_PER_ROW + 1u] = {
+    "$%^=/\\;\"|~", "          ", "         :", "       <>`", "      []{}"
+};
 
 void ui_keyboard_init(UiKeyboard *keyboard, char *text, size_t cap, UiKeyboardFilter accept,
                       void *user) {
@@ -131,8 +137,13 @@ uint32_t ui_keyboard_key_char(unsigned place, bool shifted) {
     char c;
     if (place >= UI_KEYBOARD_CHAR_KEYS) return 0u;
     c = k_rows[place / UI_KEYBOARD_KEYS_PER_ROW][place % UI_KEYBOARD_KEYS_PER_ROW];
-    if (shifted && c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-    else if (shifted && c == '\'') c = ':';
+    if (shifted && c >= 'a' && c <= 'z') {
+        c = (char)(c - 'a' + 'A');
+    } else if (shifted) {
+        const char second = k_shifted[place / UI_KEYBOARD_KEYS_PER_ROW]
+                                     [place % UI_KEYBOARD_KEYS_PER_ROW];
+        if (second != ' ') c = second;
+    }
     return (uint32_t)(unsigned char)c;
 }
 

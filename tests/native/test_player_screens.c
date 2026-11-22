@@ -11463,8 +11463,10 @@ static void test_nickname_keyboard(void) {
           "Shift turns the letters to upper case");
     (void)nickname_press(ui, &model, q);
     (void)nickname_press(ui, &model, key + UI_KEYBOARD_KEY_SPACE);
+    /* Shift: the 0 key shows and types its second character, ~ (#1316). */
     (void)nickname_press(ui, &model, key + 9u);
-    CHECK(strcmp(typed, "qQ 0") == 0, "keys type in the case shown; Space types a space");
+    CHECK(strcmp(typed, "qQ ~") == 0 && nickname_dump_has(ui, &model, "\"~\""),
+          "keys type in the case shown; Space types a space");
     action = nickname_press(ui, &model, key + UI_KEYBOARD_KEY_DELETE);
     CHECK(nickname_op(action, PLAYER_UI_NICKNAME_EDITED) && strcmp(typed, "qQ ") == 0 &&
               nickname_dump_has(ui, &model, "\"3 / 32 bytes\""),
@@ -12038,6 +12040,32 @@ static void test_achievements_card_and_sign_in(void) {
               strstr(dump, "bytes") == NULL,
           "the password editor shows one star per character and neither the password nor its "
           "byte count");
+    {
+        /* A controller types any password RetroAchievements takes: between its two layers, the
+           on-screen keyboard has every printable ASCII character but the space (its own key),
+           and the password field takes each of them. Failing before: no layer had
+           $ % ^ = / \ ; " | ~ < > ` [ ] { }. */
+        char missing[96];
+        size_t n_missing = 0u;
+        for (uint32_t ch = 0x21u; ch <= 0x7Eu; ++ch) {
+            bool found = false;
+            for (unsigned place = 0u; place < UI_KEYBOARD_CHAR_KEYS && !found; ++place) {
+                found = ui_keyboard_key_char(place, false) == ch ||
+                        ui_keyboard_key_char(place, true) == ch;
+            }
+            if (!found || !player_ui_ra_password_accepts(ch, NULL)) {
+                missing[n_missing++] = (char)ch;
+            }
+        }
+        missing[n_missing] = '\0';
+        if (n_missing != 0u) fprintf(stderr, "  not typeable: %s\n", missing);
+        CHECK(n_missing == 0u,
+              "the on-screen keyboard types every printable ASCII character into a password");
+        CHECK(ui_keyboard_key_char(0u, false) == '1' && ui_keyboard_key_char(0u, true) == '$' &&
+                  ui_keyboard_key_char(10u, true) == 'Q' &&
+                  ui_keyboard_key_char(29u, true) == ':',
+              "Shift gives the digits' row its symbols, upper-case letters, and ' its colon");
+    }
     {
         /* The form's helpers: SIGN IN takes the password once and wipes the form's copy. */
         PlayerUiSignInForm form;

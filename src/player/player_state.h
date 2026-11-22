@@ -1081,6 +1081,12 @@ struct PlayerApp {
     bool achievements_signed_in;
     /* A sign-in is on its way (main.c copies it each frame): the sign-in form's SIGN IN waits. */
     bool achievements_sign_in_pending;
+    /* Leaving the sign-in form while its sign-in is on its way abandons it: main.c ends the
+       request and drops its answer, so nothing is stored and nobody is signed in. */
+    bool achievements_sign_in_abandoned;
+    /* --view=achievements-sign-in shows the form as AGREE leaves it without turning the switch
+       on: never saved, and SIGN IN is refused while it is set. A real AGREE clears it. */
+    bool achievements_preview;
     char achievements_account[64];
     char achievements_status[192];
     /* A bounded, memory-only preview for the currently identified game's page: the unlocked
@@ -2822,9 +2828,9 @@ bool player_app_open_achievements_card(PlayerApp *app);
 bool player_app_achievements_card_agree(PlayerApp *app);
 /* The card's NOT NOW (and Back): nothing changes. */
 void player_app_achievements_card_not_now(PlayerApp *app);
-/* The sign-in form: opens only while RetroAchievements is on with a credential store; closes
-   back to Online and developer options. The form's text stays in the UI (player_ui_nk.c),
-   never in PlayerApp. */
+/* The sign-in form: opens only while RetroAchievements is on (or previewed) with a credential
+   store; closes back to Online and developer options, abandoning a sign-in still on its way.
+   The form's text stays in the UI (player_ui_nk.c), never in PlayerApp. */
 bool player_app_open_achievements_sign_in(PlayerApp *app);
 void player_app_close_achievements_sign_in(PlayerApp *app);
 /* Why RetroAchievements is off for a game, or NULL when nothing stops it (#1316, maintainer

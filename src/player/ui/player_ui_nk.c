@@ -656,6 +656,11 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
 void player_ui_nk_destroy(PlayerUiNk *player) {
     if (player == NULL) return;
     player_ui_sign_in_wipe(&player->ra_form);
+    /* The editor's buffer may still hold a password typed into it. */
+    {
+        volatile char *text = player->nickname_text;
+        for (size_t i = 0u; i < sizeof(player->nickname_text); ++i) text[i] = '\0';
+    }
     player_ui_music_destroy(player->music);
     player_ui_sounds_destroy(player->sounds);
     player_ui_art_destroy(player->art);
@@ -2463,6 +2468,17 @@ const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, si
     if (count != NULL && cap > 0u) count[0] = '\0';
     if (player == NULL || !player->nickname_open) return NULL;
     if (count != NULL) (void)ui_keyboard_count_text(&player->nickname_keyboard, count, cap);
+    if (player->nickname_is_ra_password) {
+        /* A password is reported as the editor shows it: one star per character. */
+        static char stars[PLAYER_UI_RA_PASSWORD_MAX + 1u];
+        size_t n = 0u;
+        for (const unsigned char *c = (const unsigned char *)player->nickname_text;
+             *c != '\0' && n + 1u < sizeof(stars); ++c) {
+            if ((*c & 0xC0u) != 0x80u) stars[n++] = '*';
+        }
+        stars[n] = '\0';
+        return stars;
+    }
     return player->nickname_text;
 }
 

@@ -4870,6 +4870,9 @@ struct PlayerRun {
     bool guest_memory_channel_checked;
     bool achievements_shutting_down;
     bool achievements_login_pending;
+    /* The sign-in form was left while this sign-in was on its way: it was ended
+       (nk_ach_logout), and its answer, whatever it is, stores nothing and signs nobody in. */
+    bool achievements_login_abandoned;
     bool achievements_signout_pending;
     bool achievements_queue_load_checked;
     /* What the saved queue's load had to say, shown again once the sign-in has settled. */
@@ -5599,6 +5602,17 @@ static bool player_run_sign_in_pending(const PlayerRun *run) {
 static void player_achievements_collect_events(PlayerRun *run) {
     if (!run || !run->achievements) return;
     PlayerApp *app = &run->app;
+    if (app->achievements_sign_in_abandoned) {
+        /* Cancel or Back on the sign-in form while its SIGN IN was on its way. */
+        app->achievements_sign_in_abandoned = false;
+        if (run->achievements_login_pending && !run->achievements_signout_pending &&
+            !run->achievements_login_abandoned) {
+            run->achievements_login_abandoned = true;
+            nk_ach_logout(run->achievements);
+            snprintf(app->achievements_status, sizeof app->achievements_status,
+                     "Sign-in cancelled.");
+        }
+    }
     NkAchEvent events[NK_ACH_EVENT_QUEUE];
     size_t count;
     while ((count = nk_ach_take_events(run->achievements, events,
@@ -5608,6 +5622,16 @@ static void player_achievements_collect_events(PlayerRun *run) {
             switch (event->kind) {
             case NK_ACH_EVENT_LOGIN_OK: {
                 run->achievements_login_pending = false;
+                if (run->achievements_login_abandoned) {
+                    /* Cancelled: the token it brought is neither stored nor used. */
+                    run->achievements_login_abandoned = false;
+                    nk_ach_logout(run->achievements);
+                    app->achievements_signed_in = false;
+                    app->achievements_account[0] = '\0';
+                    snprintf(app->achievements_status, sizeof app->achievements_status,
+                             "Sign-in cancelled.");
+                    break;
+                }
                 if (run->achievements_signout_pending) {
                     /* Tried again: an account whose token is still stored keeps its records. */
                     player_achievements_end_account(
@@ -5659,7 +5683,10 @@ static void player_achievements_collect_events(PlayerRun *run) {
             case NK_ACH_EVENT_LOGIN_FAILED:
             case NK_ACH_EVENT_LOGIN_UNREACHABLE:
                 run->achievements_login_pending = false;
-                if (run->achievements_signout_pending) {
+                if (run->achievements_login_abandoned) {
+                    /* Its own nk_ach_logout ended it: "Sign-in cancelled." stays. */
+                    run->achievements_login_abandoned = false;
+                } else if (run->achievements_signout_pending) {
                     run->achievements_signout_pending = false;
                     player_achievements_end_account(
                         run, nk_platform_credential_delete(k_ach_credential_target));
@@ -5855,6 +5882,10 @@ static bool player_achievements_submit_sign_in(PlayerRun *run) {
     if (!taken) {
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
                  "Enter your username and password.");
+    } else if (run->app.achievements_preview) {
+        /* --view=achievements-sign-in: a picture of the form, with the switch off. */
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "This sign-in page is a preview; turn RetroAchievements on to sign in.");
     } else if (!run->app.settings.achievements_enabled ||
                !run->app.achievements_store_available) {
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
@@ -5875,7 +5906,9 @@ static bool player_achievements_submit_sign_in(PlayerRun *run) {
     nk_secure_zero(username, sizeof username);
     if (!started) return false;
     run->achievements_login_pending = true;
+    run->achievements_login_abandoned = false;
     run->achievements_signout_pending = false;
+    run->app.achievements_sign_in_abandoned = false;
     snprintf(run->app.achievements_status, sizeof run->app.achievements_status, "Signing in.");
     return true;
 }
@@ -6906,10 +6939,11 @@ static void player_apply_test_view(PlayerApp *app, const char *test_view) {
             player_app_set_view(app, VIEW_ONLINE_SETTINGS);
             (void)player_app_open_achievements_card(app);
         } else if (strcmp(test_view, "achievements-sign-in") == 0) {
-            /* The form with the switch on, as AGREE leaves it; nothing signs in: SIGN IN is
-               refused in a UI regression run, and a --screenshot run exits after one frame. */
+            /* The form as AGREE leaves it, as a preview: the switch stays off and nothing is
+               saved, the client never starts, and SIGN IN is refused (an interactive run
+               included); a real AGREE ends the preview. */
             player_app_set_view(app, VIEW_ONLINE_SETTINGS);
-            app->settings.achievements_enabled = app->achievements_store_available;
+            app->achievements_preview = app->achievements_store_available;
             (void)player_app_open_achievements_sign_in(app);
         } else if (strcmp(test_view, "online-play-servers") == 0) {
             player_online_play_open_page(app);

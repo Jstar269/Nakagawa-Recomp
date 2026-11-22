@@ -2021,6 +2021,23 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         for call in re.findall(r"nk_platform_credential_write\([^;]*\);", main):
             self.assertIn("token", call)
             self.assertNotIn("password", call)
+        # Cancel or Back on the form while SIGN IN is on its way ends that sign-in, and its
+        # answer stores nothing: LOGIN_OK checks the abandonment before it writes a credential.
+        login_ok = main[main.index("case NK_ACH_EVENT_LOGIN_OK:"):
+                        main.index("case NK_ACH_EVENT_LOGIN_FAILED:")]
+        self.assertLess(login_ok.index("if (run->achievements_login_abandoned)"),
+                        login_ok.index("nk_platform_credential_write("))
+        abandon = main[main.index("if (app->achievements_sign_in_abandoned)"):
+                       main.index("NkAchEvent events[NK_ACH_EVENT_QUEUE];")]
+        self.assertIn("nk_ach_logout(run->achievements);", abandon)
+        # --view=achievements-sign-in is a preview: it never turns the switch on, so nothing is
+        # saved or started, and SIGN IN refuses it before anything is sent.
+        view = main[main.index('strcmp(test_view, "achievements-sign-in") == 0'):
+                    main.index('strcmp(test_view, "online-play-servers") == 0')]
+        self.assertNotIn("achievements_enabled", view)
+        self.assertIn("app->achievements_preview = ", view)
+        self.assertLess(submit.index("run->app.achievements_preview"),
+                        submit.index("nk_ach_begin_login_with_password("))
 
     def test_achievements_use_the_player_native_transport(self) -> None:
         # rc_client's only egress is the player's already allowlisted WinHTTP facility.

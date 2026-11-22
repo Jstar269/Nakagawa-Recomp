@@ -4417,6 +4417,7 @@ bool player_app_open_achievements_card(PlayerApp *app) {
 bool player_app_achievements_card_agree(PlayerApp *app) {
     if (!app || app->active_view != VIEW_ACHIEVEMENTS_CARD) return false;
     player_app_set_view(app, VIEW_ONLINE_SETTINGS);
+    app->achievements_preview = false;
     player_app_set_achievements_enabled(app, true);
     player_dev_log_add(app, "settings", "RetroAchievements consent card: AGREE AND TURN ON");
     return app->settings.achievements_enabled;
@@ -4434,7 +4435,8 @@ void player_app_achievements_card_not_now(PlayerApp *app) {
 
 bool player_app_open_achievements_sign_in(PlayerApp *app) {
     if (!app) return false;
-    if (!app->settings.achievements_enabled || !app->achievements_store_available) {
+    if ((!app->settings.achievements_enabled && !app->achievements_preview) ||
+        !app->achievements_store_available) {
         snprintf(app->achievements_status, sizeof(app->achievements_status),
                  "Enable RetroAchievements first; this platform needs Windows Credential "
                  "Manager.");
@@ -4446,7 +4448,9 @@ bool player_app_open_achievements_sign_in(PlayerApp *app) {
 
 void player_app_close_achievements_sign_in(PlayerApp *app) {
     if (!app) return;
-    if (app->active_view == VIEW_ACHIEVEMENTS_SIGN_IN) player_app_set_view(app, VIEW_ONLINE_SETTINGS);
+    if (app->active_view != VIEW_ACHIEVEMENTS_SIGN_IN) return;
+    if (app->achievements_sign_in_pending) app->achievements_sign_in_abandoned = true;
+    player_app_set_view(app, VIEW_ONLINE_SETTINGS);
 }
 
 static const char *achievements_block_reason(bool cheats, bool timing_package) {

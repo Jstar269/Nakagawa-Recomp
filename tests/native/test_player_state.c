@@ -18948,6 +18948,15 @@ int main(int argc, char **argv) {
             assert(!s_app2->settings.achievements_enabled);
             assert(!player_app_open_achievements_sign_in(s_app2)); /* not on yet */
             assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            /* --view=achievements-sign-in's preview opens the form with the switch off, and
+               AGREE ends the preview. */
+            s_app2->achievements_preview = true;
+            assert(player_app_open_achievements_sign_in(s_app2));
+            assert(s_app2->active_view == VIEW_ACHIEVEMENTS_SIGN_IN);
+            assert(!s_app2->settings.achievements_enabled);
+            player_app_close_achievements_sign_in(s_app2);
+            assert(!s_app2->achievements_sign_in_abandoned); /* nothing was on its way */
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
             assert(player_app_open_achievements_card(s_app2));
             assert(s_app2->active_view == VIEW_ACHIEVEMENTS_CARD);
             assert(!s_app2->settings.achievements_enabled);
@@ -18959,6 +18968,7 @@ int main(int argc, char **argv) {
             assert(player_app_open_achievements_card(s_app2));
             assert(player_app_achievements_card_agree(s_app2));
             assert(s_app2->settings.achievements_enabled);
+            assert(!s_app2->achievements_preview);
             assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
             assert(!player_app_open_achievements_card(s_app2)); /* already on: no card */
             assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
@@ -18966,6 +18976,14 @@ int main(int argc, char **argv) {
             assert(s_app2->active_view == VIEW_ACHIEVEMENTS_SIGN_IN);
             player_app_close_achievements_sign_in(s_app2);
             assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            /* Leaving the form while its sign-in is on its way abandons that sign-in. */
+            assert(player_app_open_achievements_sign_in(s_app2));
+            s_app2->achievements_sign_in_pending = true;
+            player_app_close_achievements_sign_in(s_app2);
+            assert(s_app2->achievements_sign_in_abandoned);
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            s_app2->achievements_sign_in_pending = false;
+            s_app2->achievements_sign_in_abandoned = false;
             /* Closing the form from another page leaves that page alone. */
             player_app_set_view(s_app2, VIEW_SETTINGS);
             player_app_close_achievements_sign_in(s_app2);
