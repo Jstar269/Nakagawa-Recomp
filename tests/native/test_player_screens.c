@@ -1483,9 +1483,13 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
             {"Synthetic Experimental Fixture", "Waiting", 2u, false, true, true},
             {"Synthetic Untested Fixture", "Waiting", 3u, false, true, true}
         };
+        PlayerUiQueueRow page[PLAYER_UI_QUEUE_ROW_CAP];
         PlayerUiQueueModel queue;
+        memcpy(page, rows, sizeof(page));
+        /* As the launcher labels it: a paused queue's next game reads Paused. */
+        if (which != FLOW_PAGE_QUEUE) page[1].status = "Paused";
         memset(&queue, 0, sizeof(queue));
-        queue.rows = rows;
+        queue.rows = page;
         queue.row_count = PLAYER_UI_QUEUE_ROW_CAP;
         queue.first_row = 0u;
         queue.total = 9u;
