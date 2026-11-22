@@ -463,6 +463,10 @@ typedef struct {
        from the game's volume, as the menu sounds are. */
     bool launcher_music;
     int launcher_music_volume; /* 0..100 */
+    /* A game's own startup clip on its page (its disc's PSP_GAME/SND0.AT3), at the
+       Music volume (player_ui_snd0.h): "launcher_game_music" in settings.json, on by
+       default, as a PSP's home menu plays it. */
+    bool launcher_game_music;
     /* The launcher's colour theme (src/player/ui/launcher_themes.h): the id chosen, "" for
        none (the launcher picks), and the unlocks found (the classic cheat code's "wave").
        "launcher_theme" and "theme_unlocks" in settings.json, additions to schema version 2
@@ -2000,6 +2004,7 @@ bool player_app_reduce_motion(const PlayerApp *app);
 bool player_app_high_contrast_focus(const PlayerApp *app);
 void player_app_toggle_ui_sounds(PlayerApp *app);
 void player_app_toggle_launcher_music(PlayerApp *app);
+void player_app_toggle_launcher_game_music(PlayerApp *app);
 /* The launcher theme's settings (PlayerSettings.launcher_theme, theme_unlocks). An id is
  * 1-23 lower-case letters, digits or '-'; anything else is refused. Recording an unlock
  * already kept, or past PLAYER_THEME_UNLOCK_MAX, changes nothing. Each change is saved. */

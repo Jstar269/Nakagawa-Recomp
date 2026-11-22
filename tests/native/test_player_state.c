@@ -17958,6 +17958,8 @@ int main(int argc, char **argv) {
         /* #2207: launcher music is off by default, at its own level. */
         assert(s_app->settings.launcher_music == false);
         assert(s_app->settings.launcher_music_volume == 80);
+        /* A highlighted game's own SND0.AT3 clip is on by default, as on a PSP. */
+        assert(s_app->settings.launcher_game_music == true);
         assert(s_app->settings.launcher_window_width == 1280);
         assert(s_app->settings.launcher_window_height == 720);
         assert(s_app->settings.launcher_window_position_valid == false);
@@ -17985,6 +17987,8 @@ int main(int argc, char **argv) {
         assert(s_app->settings.launcher_music == true);
         player_app_adjust_launcher_music_volume(s_app, -45);
         assert(s_app->settings.launcher_music_volume == 35);
+        player_app_toggle_launcher_game_music(s_app);
+        assert(s_app->settings.launcher_game_music == false);
         s_app->settings.launcher_window_maximized = true;
         s_app->settings.launcher_window_position_valid = true;
         s_app->settings.launcher_window_x = -1600;
@@ -18012,6 +18016,7 @@ int main(int argc, char **argv) {
         assert(s_app2->settings.master_volume == 55);
         assert(s_app2->settings.launcher_music == true);
         assert(s_app2->settings.launcher_music_volume == 35);
+        assert(s_app2->settings.launcher_game_music == false);
         assert(s_app2->settings.library_sort == PLAYER_LIBRARY_SORT_PLAYED);
         /* The sort is saved by name; a name this build does not know keeps the default. */
         s_app2->settings.library_sort = PLAYER_LIBRARY_SORT_NAME;

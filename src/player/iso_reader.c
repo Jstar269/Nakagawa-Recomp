@@ -3,6 +3,7 @@
 
 #include "iso_reader.h"
 #include "nk_iso.h"
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -186,6 +187,42 @@ NkIconStatus nk_iso_read_image_entry(const char *iso_path, const char *rel_path,
     NkIconStatus status = nk_iso_read_image_with_reader(
         reader, rel_path, out_data, out_size, out_w, out_h);
     nk_iso_reader_close(reader);
+    return status;
+}
+
+NkIconStatus nk_iso_read_bounded_entry(const char *iso_path, const char *rel_path,
+                                       size_t max_bytes, uint8_t **out_data, size_t *out_size) {
+    if (out_data) *out_data = NULL;
+    if (out_size) *out_size = 0;
+    if (!iso_path || !iso_path[0] || !rel_path || !rel_path[0] || !out_data || !out_size ||
+        max_bytes == 0 || max_bytes > (size_t)INT_MAX) {
+        return NK_ICON_ERR_INVALID_PARAM;
+    }
+    NkIsoReader *reader = nk_iso_reader_open(iso_path);
+    if (!reader) return NK_ICON_ERR_MISSING;
+    uint32_t lba = 0;
+    uint32_t size = 0;
+    bool is_dir = false;
+    NkIconStatus status = NK_ICON_OK;
+    uint8_t *buf = NULL;
+    if (nk_iso_reader_lookup(reader, rel_path, &lba, &size, &is_dir) != 0 || is_dir) {
+        status = NK_ICON_ERR_MISSING;
+    } else if (size == 0) {
+        status = NK_ICON_ERR_CORRUPT;
+    } else if ((size_t)size > max_bytes) {
+        status = NK_ICON_ERR_OVERSIZED;
+    } else if ((buf = (uint8_t *)malloc(size)) == NULL) {
+        status = NK_ICON_ERR_CORRUPT;
+    } else if (nk_iso_reader_read(reader, lba, 0, buf, size) != (int)size) {
+        free(buf);
+        buf = NULL;
+        status = NK_ICON_ERR_CORRUPT;
+    }
+    nk_iso_reader_close(reader);
+    if (status == NK_ICON_OK) {
+        *out_data = buf;
+        *out_size = size;
+    }
     return status;
 }
 
