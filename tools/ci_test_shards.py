@@ -58,7 +58,8 @@ DEFAULT_WEIGHTS = TOOLS_DIR / "ci_test_weights.json"
 DEFAULT_NUM_SHARDS = 4  # tools/ci_paths.py PYTHON_SHARDS_FULL; the tests keep them equal
 TEST_GLOB = "test_*.py"
 SELECTIONS = ("all", "makefile")
-SKIP_REASON_PREFIXES = ("NIGHTLY_TIER:", "WINDOWS_ONLY:", "PRIVATE_INPUT:")
+#: TOOLCHAIN_MISSING: a test that needs gcc found none; hosted python_tools fails on any (F-6a8c715a).
+SKIP_REASON_PREFIXES = ("NIGHTLY_TIER:", "WINDOWS_ONLY:", "PRIVATE_INPUT:", "TOOLCHAIN_MISSING:")
 
 
 def nightly_tier(test_method):

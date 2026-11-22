@@ -226,7 +226,7 @@ def _generate_compile_run(codegen_path: Path, work: Path, target: int, owner: in
     return _Outcome(0, gen_out, 0, cc_out, run_result.returncode, run_result.stderr + run_result.stdout)
 
 
-@unittest.skipUnless(CC, "gcc is required for the compiled mutation proof")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required for the compiled mutation proof")
 class DirectJOmissionMutationTests(unittest.TestCase):
     def test_direct_j_boundary_mutant_is_compiled_and_killed(self):
         assert CC is not None

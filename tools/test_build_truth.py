@@ -216,8 +216,10 @@ class BuildTruthTests(unittest.TestCase):
         self.cc = os.environ.get("CC")
         if not self.cc:
             self.cc = "gcc" if shutil.which("gcc") else ("cc" if shutil.which("cc") else None)
-        if not self.make or not self.cc:
-            self.skipTest("GNU Make and a C compiler are required")
+        if not self.cc:
+            self.skipTest("TOOLCHAIN_MISSING: a C compiler is required")
+        if not self.make:
+            self.skipTest("GNU Make is required")
         self.temp = tempfile.TemporaryDirectory(prefix="nakagawa-build-truth-")
         self.root = Path(self.temp.name)
         (self.root / "build").mkdir()
@@ -393,7 +395,7 @@ class CpuStateAbiTests(unittest.TestCase):
             found = shutil.which("gcc") or shutil.which("cc")
             self.cc_command = [found] if found else []
         if not self.cc_command:
-            self.skipTest("a C compiler is required")
+            self.skipTest("TOOLCHAIN_MISSING: a C compiler is required")
         self.cc = " ".join(self.cc_command)
         self.temp = tempfile.TemporaryDirectory(prefix="nakagawa-cpustate-abi-")
         self.work = Path(self.temp.name)
@@ -1006,8 +1008,10 @@ class PortableCoreProfileTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.make = shutil.which("mingw32-make") or shutil.which("make")
-        if not self.make or not shutil.which("gcc"):
-            self.skipTest("GNU Make and gcc are required")
+        if not shutil.which("gcc"):
+            self.skipTest("TOOLCHAIN_MISSING: gcc is required")
+        if not self.make:
+            self.skipTest("GNU Make is required")
         self.build_root = _scratch_build_root(self, "portable-core-profile")
         self.object = (self.build_root / "probe" / "portable-core" / "sr_coro.o").as_posix()
 
@@ -1137,8 +1141,10 @@ class LibchdrHeaderDependencyTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.make = shutil.which("mingw32-make") or shutil.which("make")
-        if not self.make or not shutil.which("gcc"):
-            self.skipTest("GNU Make and gcc are required")
+        if not shutil.which("gcc"):
+            self.skipTest("TOOLCHAIN_MISSING: gcc is required")
+        if not self.make:
+            self.skipTest("GNU Make is required")
         self.build_root = _scratch_build_root(self, "libchdr-headers")
 
     def _make(self, *arguments: str) -> subprocess.CompletedProcess:

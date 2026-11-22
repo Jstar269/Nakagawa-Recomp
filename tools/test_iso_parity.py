@@ -625,7 +625,7 @@ class IsoParityTests(unittest.TestCase):
         super().setUpClass()
         cls.gcc = cast(str, shutil.which("gcc"))
         if not cls.gcc:
-            raise unittest.SkipTest("gcc not available")
+            raise unittest.SkipTest("TOOLCHAIN_MISSING: gcc not available")
 
         # Compile the native test runner once.  The tests assert parser and
         # launch behaviour, not compiler freshness; each test still receives

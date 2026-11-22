@@ -1737,7 +1737,7 @@ int main(int argc, char **argv) {
 
     def setUp(self) -> None:
         if not self.gcc:
-            self.skipTest("gcc not available for the native parity harness")
+            self.skipTest("TOOLCHAIN_MISSING: gcc not available for the native parity harness")
         self.temp_dir = Path(tempfile.mkdtemp(prefix="nk_launch_parity_"))
         self.iso = self.temp_dir / "source.iso"
         self.iso.write_bytes(b"iso")
@@ -2250,7 +2250,7 @@ class GenericLauncherReintroductionGateTests(unittest.TestCase):
     def test_native_hst_first_candidate_mutant_is_killed(self) -> None:
         gcc = shutil.which("gcc")
         if not gcc:
-            self.skipTest("gcc not available for the native mutation proof")
+            self.skipTest("TOOLCHAIN_MISSING: gcc not available for the native mutation proof")
 
         src = (REPO_ROOT / "src" / "core" / "nk_launch.c").read_text(encoding="utf-8")
         self.assertIn(self.C_SEP_MARKER, src)
@@ -2775,7 +2775,7 @@ int main(int argc, char **argv) {
         the same lock, each waiting for the other (#1768)."""
         gcc = shutil.which("gcc")
         if not gcc:
-            self.skipTest("gcc not available")
+            self.skipTest("TOOLCHAIN_MISSING: gcc not available")
         harness_c = self.temp_dir / "library_lock_harness.c"
         harness_c.write_text(self.LIBRARY_LOCK_HARNESS_C, encoding="utf-8", newline="\n")
         exe = self.temp_dir / ("library_lock_harness.exe" if sys.platform == "win32"

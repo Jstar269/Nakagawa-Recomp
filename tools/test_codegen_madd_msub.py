@@ -172,7 +172,7 @@ int main(void) {{
         stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, 0x1C))
         self._assert_no_ub_shift(stmt)
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_madd_positive_operands_O0(self):
         stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, 0x1C))
         hi, lo, ra, rb = 0, 0, 0x00000006, 0x00000007
@@ -180,7 +180,7 @@ int main(void) {{
         got_hi, got_lo = self._run_snippet(stmt, hi, lo, ra, rb, "-O0")
         self.assertEqual((got_hi, got_lo), (want_hi, want_lo))
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_madd_positive_operands_O2(self):
         stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, 0x1C))
         hi, lo, ra, rb = 0, 0, 0x00000006, 0x00000007
@@ -188,7 +188,7 @@ int main(void) {{
         got_hi, got_lo = self._run_snippet(stmt, hi, lo, ra, rb, "-O2")
         self.assertEqual((got_hi, got_lo), (want_hi, want_lo))
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_madd_negative_signed_and_hi_sign_bit_O2(self):
         # The case that triggers UB in the old expression: hi=0x80000000 (sign bit set)
         stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, 0x1C))
@@ -197,7 +197,7 @@ int main(void) {{
         got_hi, got_lo = self._run_snippet(stmt, hi, lo, ra, rb, "-O2")
         self.assertEqual((got_hi, got_lo), (want_hi, want_lo))
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_madd_wrap_mod_2_64_O2(self):
         stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, 0x1C))
         hi, lo, ra, rb = 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
@@ -205,7 +205,7 @@ int main(void) {{
         got_hi, got_lo = self._run_snippet(stmt, hi, lo, ra, rb, "-O2")
         self.assertEqual((got_hi, got_lo), (want_hi, want_lo))
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_madd_zero_accumulator_O2(self):
         stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, 0x1C))
         hi, lo, ra, rb = 0, 0, 0, 0
@@ -213,7 +213,7 @@ int main(void) {{
         got_hi, got_lo = self._run_snippet(stmt, hi, lo, ra, rb, "-O2")
         self.assertEqual((got_hi, got_lo), (want_hi, want_lo))
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_madd_int32_min_overflow_O2(self):
         stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, 0x1C))
         # INT32_MIN * -1 = 0x80000000 * 0xFFFFFFFF = 0x8000000000000000 (signed overflow wraps)
@@ -230,7 +230,7 @@ int main(void) {{
         self.assertNotIn("(int64_t)(int32_t)s->hi<<32", compact)
         self.assertIn("(uint64_t)s->hi<<32", compact)
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_maddu_numeric_result_O2(self):
         stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, 0x1D))
         hi, lo, ra, rb = 0, 0, 0xFFFFFFFF, 0xFFFFFFFF
@@ -244,7 +244,7 @@ int main(void) {{
         stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, 0x2E))
         self._assert_no_ub_shift(stmt)
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_msub_negative_signed_and_hi_sign_bit_O2(self):
         stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, 0x2E))
         hi, lo, ra, rb = 0x80000000, 0x00000001, 0xFFFFFFFF, 0x00000002
@@ -252,7 +252,7 @@ int main(void) {{
         got_hi, got_lo = self._run_snippet(stmt, hi, lo, ra, rb, "-O2")
         self.assertEqual((got_hi, got_lo), (want_hi, want_lo))
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_msub_positive_operands_O2(self):
         stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, 0x2E))
         hi, lo, ra, rb = 0x100, 0, 0x00000010, 0x00000020
@@ -268,7 +268,7 @@ int main(void) {{
         self.assertNotIn("(int64_t)(int32_t)s->hi<<32", compact)
         self.assertIn("(uint64_t)s->hi<<32", compact)
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_msubu_numeric_result_O2(self):
         stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, 0x2F))
         hi, lo, ra, rb = 0, 0, 0xFFFFFFFF, 0x00000002
@@ -278,7 +278,7 @@ int main(void) {{
 
     # --- All four at -O0 and -O2 with edge operands ---
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_all_four_instructions_edge_operands_O0(self):
         for fn, sign, oracle in [
             (0x1C, +1, expected_hi_lo),
@@ -293,7 +293,7 @@ int main(void) {{
                 got_hi, got_lo = self._run_snippet(stmt, hi, lo, ra, rb, "-O0")
                 self.assertEqual((got_hi, got_lo), (want_hi, want_lo))
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_all_four_instructions_edge_operands_O2(self):
         for fn, sign, oracle in [
             (0x1C, +1, expected_hi_lo),
@@ -577,7 +577,7 @@ int main(void) {{
             out = subprocess.run([str(exe_path)], check=True, capture_output=True, text=True)
         return int(out.stdout.strip(), 16)
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_rotr_matches_oracle(self):
         for sa in (0, 1, 5, 16, 31):
             stmt, _, _ = codegen.effect(0, encode_shift(1, 8, 10, sa, 0x02))
@@ -586,7 +586,7 @@ int main(void) {{
                     with self.subTest(sa=sa, value=hex(value), opt=opt):
                         self.assertEqual(self._run(stmt, value, 0, opt), rotr32(value, sa))
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_rotrv_matches_oracle(self):
         stmt, _, _ = codegen.effect(0, encode_shift(9, 8, 10, 1, 0x06))
         for amount in (0, 1, 5, 16, 31, 32, 37):  # only the low five bits count
@@ -595,7 +595,7 @@ int main(void) {{
                     with self.subTest(amount=amount, value=hex(value), opt=opt):
                         self.assertEqual(self._run(stmt, value, amount, opt), rotr32(value, amount))
 
-    @unittest.skipUnless(GCC, "no host C compiler on PATH")
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
     def test_plain_srl_and_srlv_are_unchanged(self):
         srl, _, _ = codegen.effect(0, encode_shift(0, 8, 10, 5, 0x02))
         srlv, _, _ = codegen.effect(0, encode_shift(9, 8, 10, 0, 0x06))

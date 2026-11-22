@@ -575,7 +575,7 @@ nk-ui-focus-selftest:
 shared-helpers-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) $(NC_CFLAGS_CORE) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		src/core/nk_shared_helpers.c tests/native/test_shared_helpers.c \
+		src/core/nk_shared_helpers.c tests/native/test_shared_helpers.c $(SHARED_HELPERS_WRAP_MALLOC) \
 		-o $(BUILD_ROOT)/test_shared_helpers$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_shared_helpers$(EXE_EXT)
 
@@ -599,7 +599,9 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(call NK_NICKNAME_SELFTEST_CMD)
 	$(call NK_CHEATS_SELFTEST_CMD)
 	$(call PLAYER_STATE_TEST_BIN_CMD)
-	$(BUILD_ROOT_RUN)/test_player_state$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_player_state$(EXE_EXT); rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP test_player_state (exit 77: a case NOT_RUN on this host; the reason is printed above)"; \
+	elif [ $$rc -ne 0 ]; then echo "FAIL test_player_state (exit $$rc)"; exit $$rc; fi
 	$(call INPUT_SETTINGS_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_input_settings$(EXE_EXT)
 	$(call PACKAGE_BUILDER_TEST_BIN_CMD)
@@ -675,6 +677,7 @@ FUZZ_SAN_FLAGS :=
 else
 FUZZ_SAN_FLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all
 endif
+DISC_EXPAND_UBSAN_FLAGS := -fsanitize=undefined -fno-sanitize-recover=all
 
 fuzz-parsers:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
@@ -686,3 +689,16 @@ fuzz-parsers:
 		PSMF_FUZZ_ITERS=$(FUZZ_ITERS) FUZZ_SAN_FLAGS="$(FUZZ_SAN_FLAGS)"
 	$(MAKE) --no-print-directory psmf-media-selftest \
 		MEDIA_FUZZ_ITERS=$(FUZZ_ITERS) FUZZ_SAN_FLAGS="$(FUZZ_SAN_FLAGS)"
+ifneq ($(strip $(FUZZ_SAN_FLAGS)),)
+# test_disc_expand under UBSan: libchdr's sources are compiled with their own flags plus
+# DISC_EXPAND_UBSAN_FLAGS, so undefined behaviour inside the vendored decoders stops the run
+# (the crafted CHD FLAC frames reach dr_flac's sample reconstruction). UBSan only: the test's
+# failing-allocator cases wrap malloc, which AddressSanitizer's allocator does not go through.
+	$(MAKE) --no-print-directory native-core-objects-core
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)/disc-expand-ubsan').mkdir(parents=True, exist_ok=True)"
+	$(foreach s,$(LIBCHDR_SRCS),$(CC) $(LIBCHDR_CFLAGS) $(DISC_EXPAND_UBSAN_FLAGS) -c $(s) -o $(BUILD_ROOT)/disc-expand-ubsan/$(notdir $(s:.c=.o))$(NEWLINE))
+	$(CC) $(NC_CFLAGS_CORE) -Werror $(DISC_EXPAND_UBSAN_FLAGS) $(LIBCHDR_INC) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) $(PLAYER_CHD_SRCS) \
+		tests/native/native_test_isolation.c tests/native/test_disc_expand.c $(BUILD_ROOT)/disc-expand-ubsan/*.o $(PLAYER_PLATFORM_LIBS) $(DISC_EXPAND_WRAP_MALLOC) \
+		-o $(BUILD_ROOT)/test_disc_expand_ubsan$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_disc_expand_ubsan$(EXE_EXT)
+endif

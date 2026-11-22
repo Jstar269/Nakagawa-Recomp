@@ -146,7 +146,7 @@ def build_and_run_c() -> dict[tuple[int, int], list[int]]:
     """Run the production C decoder over its whole domain."""
     cc = shutil.which("gcc") or shutil.which("cc")
     if cc is None:
-        raise unittest.SkipTest("no C compiler on PATH")
+        raise unittest.SkipTest("TOOLCHAIN_MISSING: no C compiler on PATH")
     with scratch_dir.TemporaryDirectory() as tmp:
         exe = Path(tmp) / "vfpu_addr_selftest"
         build = subprocess.run(

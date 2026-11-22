@@ -132,6 +132,10 @@ static const char *g_enhanced_sentence[PLAYER_PART_COUNT];
    instead of "None" (NULL keeps them): the detail panel's stress cases. */
 static const char *g_enhanced_name[PLAYER_PART_COUNT];
 static const char *g_enhanced_texpack_value;
+/* A part's words instead of the fixture's (NULL keeps them): a row with more values than the
+   page has value boxes for. */
+static const char *const *g_enhanced_labels[PLAYER_PART_COUNT];
+static int g_enhanced_label_count[PLAYER_PART_COUNT];
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -624,6 +628,10 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                         break;
                     }
                 }
+            }
+            if (g_enhanced_labels[part] != NULL) {
+                settings.enhanced_rows[i].labels = g_enhanced_labels[part];
+                settings.enhanced_rows[i].label_count = g_enhanced_label_count[part];
             }
             /* An Ace-only part is dimmed on a game's page until that game's mode is Ace. */
             if (settings.enhanced_rows[i].tag != NULL && title &&
@@ -6184,6 +6192,108 @@ static void enhanced_push(NkUi *ui, NkUiEventType type, NkUiNavDir dir, float x,
    1920 x 1080 at 100% and 150% UI scale, at every text size. Failing before: the one-word
    value ran out of the panel's right side, and long text made the panel taller than the list
    box, pushing Back off the page. */
+/* How many of the active tab's part rows Settings > Enhanced shows whole, by their names drawn
+   in the list, and whether its card scrolls, in a window of this size. Rows are counted from
+   the tab's first: a row shown after one that is not breaks the count (-1). */
+static int enhanced_rows_shown(FlowCase which, int width, int height, bool *card_scrolls) {
+    NkUi *ui = NULL;
+    NkUiScrollState state;
+    const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
+    int shown = 0;
+    bool gap = false;
+    *card_scrolls = true;
+    if (draw != NULL && ui != NULL) {
+        *card_scrolls = nk_ui_scroll_state(ui, FLOW_ID_CARD, &state) && state.max_offset > 0.0f;
+        for (int i = 0; i < PLAYER_PART_COUNT; ++i) {
+            const NkUiId name = nk_ui_child_id(
+                PLAYER_UI_ID_ENHANCED_PART(k_enhanced_layout_fixture[i].part), 2u);
+            bool whole = false;
+            if ((int)k_enhanced_layout_fixture[i].group != g_enhanced_tab) continue;
+            for (uint32_t c = 0u; c < draw->ncmd && !whole; ++c) {
+                const NkUiDrawCmd *cmd = &draw->cmd[c];
+                whole = cmd->kind == NK_UI_DRAW_TEXT && cmd->element_id == name &&
+                        command_shows(cmd) && cmd->clip[1] <= cmd->bounds[1] &&
+                        cmd->clip[3] >= cmd->bounds[3];
+            }
+            if (whole && gap) shown = -1;
+            if (whole && shown >= 0) ++shown;
+            if (!whole) gap = true;
+        }
+    }
+    if (ui != NULL) nk_ui_destroy(ui);
+    return shown;
+}
+
+/* Settings > Enhanced keeps its list to the room the card has between the bars (audit
+   2026-11-17, F-5100c635): in the smallest window and the design one, at every text size, the
+   card does not scroll and the Picture tab shows as many whole rows as that room holds. */
+static void test_enhanced_page_fills_its_room(void) {
+    static const struct { FlowCase which; int w; int h; int text; int rows; } views[] = {
+        {FLOW_SETTINGS_ACE, 960, 540, 100, 3},        {FLOW_SETTINGS_ACE, 960, 540, 125, 3},
+        {FLOW_SETTINGS_ACE, 960, 540, 150, 2},        {FLOW_SETTINGS_ACE, 1280, 720, 100, 3},
+        {FLOW_SETTINGS_ACE, 1280, 720, 125, 3},       {FLOW_SETTINGS_ACE, 1280, 720, 150, 2},
+        {FLOW_SETTINGS_ACE_TITLE, 960, 540, 100, 4},  {FLOW_SETTINGS_ACE_TITLE, 960, 540, 125, 3},
+        {FLOW_SETTINGS_ACE_TITLE, 960, 540, 150, 2},  {FLOW_SETTINGS_ACE_TITLE, 1280, 720, 100, 4},
+        {FLOW_SETTINGS_ACE_TITLE, 1280, 720, 125, 3}, {FLOW_SETTINGS_ACE_TITLE, 1280, 720, 150, 2}
+    };
+    const int saved_tab = g_enhanced_tab;
+    const NkUiId saved_focus = g_enhanced_focus_id;
+    const int saved_text = g_flow_text_size_pct;
+    g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
+    g_enhanced_focus_id = 0u;
+    for (size_t v = 0u; v < sizeof(views) / sizeof(views[0]); ++v) {
+        bool card_scrolls = true;
+        int rows;
+        char message[200];
+        g_flow_text_size_pct = views[v].text;
+        rows = enhanced_rows_shown(views[v].which, views[v].w, views[v].h, &card_scrolls);
+        (void)snprintf(message, sizeof(message),
+                       "Settings > Enhanced (%s) at %d x %d, %d%% text: the card does not scroll "
+                       "and the list shows %d whole rows (shows %d)",
+                       views[v].which == FLOW_SETTINGS_ACE_TITLE ? "a game" : "library",
+                       views[v].w, views[v].h, views[v].text, views[v].rows, rows);
+        CHECK(!card_scrolls && rows == views[v].rows, message);
+    }
+    g_enhanced_tab = saved_tab;
+    g_enhanced_focus_id = saved_focus;
+    g_flow_text_size_pct = saved_text;
+}
+
+/* A part with more values than the page has value boxes for (eight a row, audit 2026-11-17,
+   F-83b5399d) still has its row: it shows "< value >" and steps through every value, the
+   ninth included, rather than leaving the page and the focus walk. */
+static void test_enhanced_row_with_nine_values(void) {
+    static const char *const nine[] = {"Step 1", "Step 2", "Step 3", "Step 4", "Step 5",
+                                       "Step 6", "Step 7", "Step 8", "Step 9"};
+    const int part = PLAYER_PART_TEXSCALE;
+    const NkUiId row = PLAYER_UI_ID_ENHANCED_PART(part);
+    const int saved_tab = g_enhanced_tab;
+    const NkUiId saved_focus = g_enhanced_focus_id;
+    char dump[CASE_DUMP_CAP];
+    PlayerUiAction step;
+    g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
+    g_enhanced_focus_id = 0u;
+    g_enhanced_value[part] = "2x"; /* the fixture's first word: the row marks its first value */
+    g_enhanced_labels[part] = nine;
+    g_enhanced_label_count[part] = (int)(sizeof(nine) / sizeof(nine[0]));
+    step = enhanced_send(FLOW_SETTINGS_ACE, row, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+              step.title_index == (size_t)part && step.choice_index == 1,
+          "a row with nine values is in the walk: Right on it chooses its second value");
+    step = enhanced_send(FLOW_SETTINGS_ACE, row, NK_UI_EV_NAV, NK_UI_DIR_LEFT);
+    CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+              step.title_index == (size_t)part && step.choice_index == 8,
+          "Left on a row with nine values goes round to its ninth");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1200, dump, sizeof(dump)) &&
+              strstr(dump, "\"Step 1\"") != NULL && strstr(dump, "\"Step 2\"") == NULL,
+          "a row with nine values shows its value as \"< value >\", not as nine boxes");
+    g_enhanced_labels[part] = NULL;
+    g_enhanced_label_count[part] = 0;
+    g_enhanced_value[part] = NULL;
+    g_enhanced_tab = saved_tab;
+    g_enhanced_focus_id = saved_focus;
+}
+
 static void test_enhanced_panel_fits_its_content(void) {
     static const struct { int w; int h; float scale; } windows[] = {
         {1280, 720, 1.0f}, {960, 540, 1.0f}, {1366, 705, 1.0f}, {1920, 1080, 1.0f},
@@ -11757,6 +11867,8 @@ int main(int argc, char **argv) {
     test_enhanced_pacing_says_all_games();
     test_enhanced_wheel_scrolls_past_the_focused_row();
     test_enhanced_panel_fits_its_content();
+    test_enhanced_page_fills_its_room();
+    test_enhanced_row_with_nine_values();
     test_prompt_bar_stays_whole();
     test_game_page_text_is_never_cut();
     test_online_play_text_is_never_cut();

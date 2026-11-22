@@ -17170,6 +17170,38 @@
       }
     },
     {
+      "path": "third_party/spdx/LICENSE",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "spdx-2-3-schema-import-20261121",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "CC-BY-3.0",
+        "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
+      }
+    },
+    {
+      "path": "third_party/spdx/PROVENANCE.md",
+      "classification": "reviewed_documentation",
+      "evidence": {
+        "source": "public documentation review",
+        "statement": "generic/public documentation; no private operational evidence"
+      }
+    },
+    {
+      "path": "third_party/spdx/spdx-schema-2.3.json",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "spdx-2-3-schema-import-20261121",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "CC-BY-3.0",
+        "modification_status": "upstream-third-party record; byte-identical or LOCAL DELTA status is not recorded here"
+      }
+    },
+    {
       "path": "third_party/stb/LICENSE",
       "classification": "upstream_derived",
       "evidence": {
@@ -18224,6 +18256,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "memstick-1878",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/json_schema_subset.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "json_schema_subset_20261121",
         "evidence_tier": "S",
         "authorship": "project-authored-independent record",
         "upstream_attribution": null

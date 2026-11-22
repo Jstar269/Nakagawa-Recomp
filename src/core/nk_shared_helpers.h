@@ -14,6 +14,41 @@
 /* Shared file-open primitive also declared by nk_platform.h for platform callers. */
 FILE *nk_fopen_utf8(const char *path, const char *mode);
 
+/* What nk_read_file_bounded and nk_read_stream_bounded report. */
+typedef enum NkReadFileStatus {
+    NK_READ_FILE_OK = 0,
+    NK_READ_FILE_OPEN_FAILED,   /* the file cannot be opened (or no path or result was given) */
+    NK_READ_FILE_READ_FAILED,   /* a read failed before the end of the file */
+    NK_READ_FILE_TOO_LARGE,     /* the file holds more than max bytes */
+    NK_READ_FILE_OUT_OF_MEMORY  /* the buffer cannot be allocated */
+} NkReadFileStatus;
+
+/* Reads the whole file at the UTF-8 path, at most max bytes, into a new buffer. On
+ * NK_READ_FILE_OK *out_data holds *out_len bytes followed by a NUL (never NULL, even for an
+ * empty file) and the caller frees it; on any other status *out_data is NULL and *out_len 0.
+ * A file of exactly max bytes is read; one byte more is NK_READ_FILE_TOO_LARGE. The file's size,
+ * when the stream can tell it, sizes the buffer once; otherwise the buffer grows as it reads,
+ * never past max bytes. */
+NkReadFileStatus nk_read_file_bounded(const char *path, size_t max, unsigned char **out_data,
+                                      size_t *out_len);
+
+/* nk_read_file_bounded's reader on a stream the caller opened (and closes), from its current
+ * position. A NULL stream is NK_READ_FILE_OPEN_FAILED. */
+NkReadFileStatus nk_read_stream_bounded(FILE *file, size_t max, unsigned char **out_data,
+                                        size_t *out_len);
+
+/* nk_utf8_char_len flags. */
+enum {
+    /* U+0080 to U+009F (the C1 controls, bytes C2 80 to C2 9F) count as ill-formed. */
+    NK_UTF8_REJECT_C1 = 1u << 0
+};
+
+/* The length (1 to 4) of the well-formed UTF-8 character at s, which has len bytes left, or 0
+ * when len is 0 or the bytes there are not one well-formed character (Unicode table 3-7: no
+ * overlong form, no surrogate, nothing past U+10FFFF, no sequence cut off by len). Any byte below
+ * 0x80, NUL included, is a character of length 1. It reads no byte at or past s + len. */
+size_t nk_utf8_char_len(const unsigned char *s, size_t len, unsigned int flags);
+
 typedef enum NkSharedPathJoinMode {
     NK_SHARED_PATH_JOIN_ALWAYS,
     NK_SHARED_PATH_JOIN_IF_LEFT_NEEDS_SEPARATOR,

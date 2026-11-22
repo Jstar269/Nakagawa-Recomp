@@ -888,6 +888,9 @@ dispatch-selftest:
 		-o $(BUILD_DIR)/dispatch_selftest.exe tests/native/dispatch_selftest.c
 	$(BUILD_DIR)/dispatch_selftest.exe
 
+# Host-neutral, so the aggregate runs it (audit 2026-11-17 F-803b2d02; .github/REVIEW.md names it).
+native-core-tests: dispatch-selftest
+
 # stale-code-selftest — host-neutral unit tests for the TD-27 opt-in stale
 # translated-code detector (src/rt/stale_code.*). No game inputs needed; links
 # only the standalone detector TU. Runs twice: gate off (an overwritten
@@ -899,6 +902,8 @@ stale-code-selftest:
 		-o $(BUILD_DIR)/stale_code_selftest.exe tests/native/stale_code_selftest.c src/rt/stale_code.c
 	$(BUILD_DIR)/stale_code_selftest.exe
 	"$(PYTHON)" -c "import os,subprocess,sys; e=dict(os.environ); e['SR_STALE_DETECT']='1'; p=os.path.abspath(r'$(BUILD_DIR)/stale_code_selftest.exe'); sys.exit(subprocess.run([p], env=e).returncode)"
+
+native-core-tests: stale-code-selftest
 
 # cpu-lle-selftest — host-neutral unit tests for the LLE Phase 1 COP0,
 # exception, and eret helpers (spec 3.2/3.3) plus the interpreter lane
@@ -1035,6 +1040,8 @@ asset-index-selftest:
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Isrc/rt \
 		-o $(BUILD_DIR)/asset_index_selftest.exe tests/native/asset_index_selftest.c
 	$(BUILD_DIR)/asset_index_selftest.exe
+
+native-core-tests: asset-index-selftest
 
 # gpu-coherence-selftest — Vulkan-backed production-path regression for CPU writes that
 # overlap persistent GPU targets. The harness owns synthetic guest memory only; target

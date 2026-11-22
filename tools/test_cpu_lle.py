@@ -826,7 +826,7 @@ void sr_enhancement_update_waits(void) {}
 '''
 
 
-@unittest.skipUnless(CC, "gcc is required for the generated scheduler ERET proof")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required for the generated scheduler ERET proof")
 class LleSchedulerIntegrationTests(unittest.TestCase):
     """Run generated exception/ERET flow through real dispatch and scheduling."""
 

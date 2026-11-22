@@ -48,7 +48,7 @@ class VfpuFallbackTests(unittest.TestCase):
         self.assertIn("issue=326",line)
         self.assertIn("sr_end",line)
 
-    @unittest.skipUnless(CC, "a host C compiler is required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: a host C compiler is required")
     def test_unknown_vfpu_form_stops_before_following_instruction(self):
         word = (0x34 << 26) | (31 << 21) | 0x8080  # vwbn.q: no measured rule
         line = codegen.normal_line(0x1234, word)
@@ -114,7 +114,7 @@ int main(void) {{ CpuState s = {{0}}; generated(&s); return unsupported == 1 && 
                 for token in ("VFPU_UNSUPPORTED", "issue=326", "sr_unimplemented", "return;"):
                     self.assertIn(token, body)
 
-    @unittest.skipUnless(CC, "a host C compiler is required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: a host C compiler is required")
     def test_vrndi_single_under_a_prefix_stops_before_following_instruction(self):
         # A pending S, T or D prefix on vrndi.s is unmeasured: the generated body must stop
         # the run with the state untouched, as sr_vfpu_interp refuses it. With identity
@@ -201,7 +201,7 @@ int main(void) {{
                 self.assertIn(f"sr_vfpu_interp(s,0x{word:08x}u)", line)
                 self.assertIn("issue=326", line)
 
-    @unittest.skipUnless(CC, "a host C compiler is required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: a host C compiler is required")
     def test_vfpu_forms_under_a_prefix_stop_before_following_instruction(self):
         # A pending S, T or D prefix on these forms is unmeasured: the generated body must
         # stop the run with the state untouched, as sr_vfpu_interp refuses it. With
@@ -356,7 +356,7 @@ int main(void) {{
                 mask = (3 << (2 * cl)) | (1 << (8 + cl))
                 self.assertIn(f"s->vfpuCtrl[2]&~0x{mask:x}u", effect)
 
-    @unittest.skipUnless(CC, "a host C compiler is required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: a host C compiler is required")
     def test_out_of_range_vfpu_memory_access_stops_by_its_own_name(self):
         # sr_vfpu_interp refuses an lv.q/sv.q/lvl/lvr/svl/svr span outside guest memory with
         # SR_VFPU_ACCESS_REFUSED. The generated fallback stops the run as that access, before

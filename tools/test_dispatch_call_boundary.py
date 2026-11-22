@@ -54,6 +54,18 @@ def _is_host_stack_fault(rc: int) -> bool:
     return rc in _STACK_FAULT_CODES or (rc & 0xFFFFFFFF) in _STACK_FAULT_CODES
 
 
+#: The depth probe's flushed line once a frame has less than half the entry check's margin left:
+#: past the window low, deeper than any run the check stops can reach (it stops with all of it).
+_PAST_WINDOW = "DEPTH_PAST_WINDOW "
+
+
+def _overran_the_window(rc: int, output: str) -> bool:
+    """The overrun signature: a frame passed the window low, then the host stack faulted with
+    no named stop. Any other crash, or a fault before the window, is not this overrun."""
+    return (_is_host_stack_fault(rc) and _PAST_WINDOW in output
+            and "host-fiber-stack-exhausted" not in output)
+
+
 def _write_minimal_elf(
     path: Path, words: tuple[int, ...], *, base: int = 0x1000,
 ) -> None:
@@ -1236,6 +1248,7 @@ static void probe_report_interp(void) {
  * host stack. The probe is the production stack-bounds query. */
 static size_t g_probe_min = (size_t)-1;
 static unsigned long g_probe_samples;
+static int g_probe_past_window;
 void sr_yield(CpuState *s) {
     size_t remaining;
     (void)s;
@@ -1246,6 +1259,14 @@ void sr_yield(CpuState *s) {
     if (sr_coro_stack_remaining(&remaining)) {
         if (remaining < g_probe_min) g_probe_min = remaining;
         g_probe_samples++;
+        /* The entry check stops a body while the whole margin remains; half of it left means a
+         * frame passed the window low. Said once, flushed before the overrun can fault. */
+        if (remaining < SR_DISPATCH_STACK_SAFETY_MARGIN / 2 && !g_probe_past_window) {
+            g_probe_past_window = 1;
+            fprintf(stderr, "DEPTH_PAST_WINDOW remaining=%zu samples=%lu\n", remaining,
+                    g_probe_samples);
+            fflush(stderr);
+        }
     }
     atomic_store_explicit(&sr_timeslice, 1, memory_order_relaxed);
 }
@@ -1597,7 +1618,7 @@ def _build_and_run(mutated_recomp: str | None = None,
         return 0, compile_result.stderr + compile_result.stdout, run_result.returncode, run_result.stderr + run_result.stdout
 
 
-@unittest.skipUnless(CC, "gcc is required for the compiled mutation proof")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required for the compiled mutation proof")
 class DispatchCallBoundaryMutationTests(unittest.TestCase):
     """The CALL contract must be load-bearing, not just source decoration."""
 
@@ -1734,7 +1755,7 @@ class DispatchCallBoundaryMutationTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(CC, "gcc is required for the generated stack-census proof")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required for the generated stack-census proof")
 class StackCensusPipelineTests(unittest.TestCase):
     """Generated callable wrappers must measure real CpuState stack values."""
 
@@ -1880,7 +1901,7 @@ class StackCensusPipelineTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(CC, "gcc is required for the generated depth probe")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required for the generated depth probe")
 class GeneratedCallDepthTests(unittest.TestCase):
     """Generated code on a production-size guest fiber, measured at each guest entry."""
 
@@ -2275,7 +2296,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
         (rc 1). A hang (rc -1, PROBE_NO_STOP), any other signal or abort, or a probe setup
         code is WRONG_REASON, never a kill, unless the mutant's semantic is itself that
         ending: ``may_end`` names it, "hang" (a run that never stops, the bug the fix ended)
-        or "crash" (the host stack fault an overrun past a removed stack check produces)."""
+        or "crash" (the host stack fault an overrun past a removed stack check produces,
+        after the probe saw a frame pass the window low: a fault before that is WRONG_REASON)."""
         unknown = set(may_end) - {"hang", "crash"}
         if unknown:
             raise AssertionError(f"unsupported mutant ending(s): {sorted(unknown)}")
@@ -2290,6 +2312,9 @@ class GeneratedCallDepthTests(unittest.TestCase):
             if rc in (0, 1) or (hung and "hang" in may_end):
                 continue
             if "crash" in may_end and _is_host_stack_fault(rc):
+                if _PAST_WINDOW not in run_output:
+                    self.fail(f"{name}: WRONG_REASON (the host stack faulted before any frame "
+                              f"passed the window low: rc={rc})\n{run_output}")
                 continue
             if not hung and "crash" in may_end:
                 self.fail(f"{name}: WRONG_REASON (the run crashed for a reason other than the "
@@ -3066,7 +3091,7 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # Each mutant must overrun the fiber with no named stop, the shape before the check.
         def overran(results):
             rc, output, _fields = results[0]
-            return _is_host_stack_fault(rc) and "host-fiber-stack-exhausted" not in output
+            return _overran_the_window(rc, output)
 
         mutants = (
             ("D1-codegen-emits-no-entry-check", {"codegen.py": self._NO_ENTRY_CHECK}),
@@ -3104,6 +3129,23 @@ class GeneratedCallDepthTests(unittest.TestCase):
             self._assert_mutant_fails(
                 "X1-entry-check-traps", _linked_recursion(), (16,),
                 {"recomp.h": trap}, lambda results: True, may_end={"crash"},
+            )
+
+    def test_a_stack_fault_before_the_window_is_not_a_semantic_kill(self):
+        # The stack-fault code alone is not the overrun (F-1af7cff6): a check that writes
+        # through a null pointer at the first body entry dies with SIGSEGV or 0xC0000005, a
+        # code in the stack-fault set, before any frame nears the window low. Failing-before:
+        # the predicate took that code as the overrun D1-D5 show and counted this a kill.
+        null_write = (
+            "#define SR_HOST_STACK_CHECK(entry) \\\n"
+            "    SR_HOST_STACK_CHECK_FRAME((entry), (uintptr_t)__builtin_frame_address(0))",
+            "#define SR_HOST_STACK_CHECK(entry) \\\n"
+            "    do { volatile uintptr_t sr_at = 0; *(volatile int *)sr_at = (int)(entry); } while (0)",
+        )
+        with self.assertRaisesRegex(AssertionError, "WRONG_REASON.*before any frame passed"):
+            self._assert_mutant_fails(
+                "X2-entry-check-faults-at-once", _linked_recursion(), (self._DEEP_LINKED,),
+                {"recomp.h": null_write}, lambda results: True, may_end={"crash"},
             )
 
     @staticmethod
@@ -3144,8 +3186,12 @@ class GeneratedCallDepthTests(unittest.TestCase):
                                       f"semantic kill)\n{output}")
             results = {mode: self._run_probe_mode(exe, work, self._DEEP_LINKED, mode)
                        for mode in ("pair", "pair-reverse")}
-        overran = [mode for mode, (rc, _out, err, _ev) in results.items()
-                   if _is_host_stack_fault(rc) and "host-fiber-stack-exhausted" not in err]
+        for mode, (rc, out, err, _ev) in results.items():
+            if rc not in (0, 1) and not _overran_the_window(rc, out + err):
+                self.fail(f"D5-window-without-a-top: WRONG_REASON ({mode}: rc={rc} is not a "
+                          f"host stack fault after a frame passed the window low)\n{out}\n{err}")
+        overran = [mode for mode, (rc, out, err, _ev) in results.items()
+                   if _overran_the_window(rc, out + err)]
         self.assertTrue(overran, f"D5-window-without-a-top: MUTANT_SURVIVED {results}")
         print("D5-window-without-a-top: MUTANT_EXECUTED_AND_SEMANTIC_TEST_FAILED")
 

@@ -7,6 +7,9 @@ David Reid - mackron@gmail.com
 GitHub: https://github.com/mackron/dr_libs
 */
 
+/* Modified by Nakagawa Recomp contributors, 2026-11-21. The local change is marked LOCAL DELTA
+ * and listed in third_party/libchdr/PROVENANCE.md. */
+
 /*
 Introduction
 ============
@@ -9286,8 +9289,31 @@ static DRFLAC_INLINE void drflac_read_pcm_frames_s32__decode_left_side__neon(drf
 }
 #endif
 
+/* Nakagawa LOCAL DELTA (2026-11-21): dr_libs 2e7a192443c46c6b41947b47f2a7ac1faea56b71. */
+static DRFLAC_INLINE void drflac_read_pcm_frames_s32__decode_duplicate_mono(drflac_uint64 frameCount, drflac_uint32 shift, const drflac_int32* pInputSamples, drflac_int32* pOutputSamples)
+{
+    drflac_uint64 i;
+    const drflac_uint32* pInputSamplesU32 = (const drflac_uint32*)pInputSamples;
+
+    DRFLAC_ASSERT(shift < 32);
+
+    for (i = 0; i < frameCount; ++i) {
+        drflac_int32 sample;
+
+        sample = (drflac_int32)(pInputSamplesU32[i] << shift);
+        pOutputSamples[i*2+0] = sample;
+        pOutputSamples[i*2+1] = sample;
+    }
+}
+
 static DRFLAC_INLINE void drflac_read_pcm_frames_s32__decode_left_side(drflac* pFlac, drflac_uint64 frameCount, drflac_uint32 unusedBitsPerSample, const drflac_int32* pInputSamples0, const drflac_int32* pInputSamples1, drflac_int32* pOutputSamples)
 {
+    /* Nakagawa LOCAL DELTA (2026-11-21): dr_libs 2e7a192443c46c6b41947b47f2a7ac1faea56b71. */
+    if (unusedBitsPerSample + pFlac->currentFLACFrame.subframes[1].wastedBitsPerSample == 32) {
+        drflac_read_pcm_frames_s32__decode_duplicate_mono(frameCount, unusedBitsPerSample + pFlac->currentFLACFrame.subframes[0].wastedBitsPerSample, pInputSamples0, pOutputSamples);
+        return;
+    }
+
 #if defined(DRFLAC_SUPPORT_SSE2)
     if (drflac__gIsSSE2Supported && pFlac->bitsPerSample <= 24) {
         drflac_read_pcm_frames_s32__decode_left_side__sse2(pFlac, frameCount, unusedBitsPerSample, pInputSamples0, pInputSamples1, pOutputSamples);
@@ -9442,6 +9468,12 @@ static DRFLAC_INLINE void drflac_read_pcm_frames_s32__decode_right_side__neon(dr
 
 static DRFLAC_INLINE void drflac_read_pcm_frames_s32__decode_right_side(drflac* pFlac, drflac_uint64 frameCount, drflac_uint32 unusedBitsPerSample, const drflac_int32* pInputSamples0, const drflac_int32* pInputSamples1, drflac_int32* pOutputSamples)
 {
+    /* Nakagawa LOCAL DELTA (2026-11-21): dr_libs 2e7a192443c46c6b41947b47f2a7ac1faea56b71. */
+    if (unusedBitsPerSample + pFlac->currentFLACFrame.subframes[0].wastedBitsPerSample == 32) {
+        drflac_read_pcm_frames_s32__decode_duplicate_mono(frameCount, unusedBitsPerSample + pFlac->currentFLACFrame.subframes[1].wastedBitsPerSample, pInputSamples1, pOutputSamples);
+        return;
+    }
+
 #if defined(DRFLAC_SUPPORT_SSE2)
     if (drflac__gIsSSE2Supported && pFlac->bitsPerSample <= 24) {
         drflac_read_pcm_frames_s32__decode_right_side__sse2(pFlac, frameCount, unusedBitsPerSample, pInputSamples0, pInputSamples1, pOutputSamples);
@@ -10145,8 +10177,31 @@ static DRFLAC_INLINE void drflac_read_pcm_frames_s16__decode_left_side__neon(drf
 }
 #endif
 
+/* Nakagawa LOCAL DELTA (2026-11-21): dr_libs 2e7a192443c46c6b41947b47f2a7ac1faea56b71. */
+static DRFLAC_INLINE void drflac_read_pcm_frames_s16__decode_duplicate_mono(drflac_uint64 frameCount, drflac_uint32 shift, const drflac_int32* pInputSamples, drflac_int16* pOutputSamples)
+{
+    drflac_uint64 i;
+    const drflac_uint32* pInputSamplesU32 = (const drflac_uint32*)pInputSamples;
+
+    DRFLAC_ASSERT(shift < 32);
+
+    for (i = 0; i < frameCount; ++i) {
+        drflac_int16 sample;
+
+        sample = (drflac_int16)((pInputSamplesU32[i] << shift) >> 16);
+        pOutputSamples[i*2+0] = sample;
+        pOutputSamples[i*2+1] = sample;
+    }
+}
+
 static DRFLAC_INLINE void drflac_read_pcm_frames_s16__decode_left_side(drflac* pFlac, drflac_uint64 frameCount, drflac_uint32 unusedBitsPerSample, const drflac_int32* pInputSamples0, const drflac_int32* pInputSamples1, drflac_int16* pOutputSamples)
 {
+    /* Nakagawa LOCAL DELTA (2026-11-21): dr_libs 2e7a192443c46c6b41947b47f2a7ac1faea56b71. */
+    if (unusedBitsPerSample + pFlac->currentFLACFrame.subframes[1].wastedBitsPerSample == 32) {
+        drflac_read_pcm_frames_s16__decode_duplicate_mono(frameCount, unusedBitsPerSample + pFlac->currentFLACFrame.subframes[0].wastedBitsPerSample, pInputSamples0, pOutputSamples);
+        return;
+    }
+
 #if defined(DRFLAC_SUPPORT_SSE2)
     if (drflac__gIsSSE2Supported && pFlac->bitsPerSample <= 24) {
         drflac_read_pcm_frames_s16__decode_left_side__sse2(pFlac, frameCount, unusedBitsPerSample, pInputSamples0, pInputSamples1, pOutputSamples);
@@ -10328,6 +10383,12 @@ static DRFLAC_INLINE void drflac_read_pcm_frames_s16__decode_right_side__neon(dr
 
 static DRFLAC_INLINE void drflac_read_pcm_frames_s16__decode_right_side(drflac* pFlac, drflac_uint64 frameCount, drflac_uint32 unusedBitsPerSample, const drflac_int32* pInputSamples0, const drflac_int32* pInputSamples1, drflac_int16* pOutputSamples)
 {
+    /* Nakagawa LOCAL DELTA (2026-11-21): dr_libs 2e7a192443c46c6b41947b47f2a7ac1faea56b71. */
+    if (unusedBitsPerSample + pFlac->currentFLACFrame.subframes[0].wastedBitsPerSample == 32) {
+        drflac_read_pcm_frames_s16__decode_duplicate_mono(frameCount, unusedBitsPerSample + pFlac->currentFLACFrame.subframes[1].wastedBitsPerSample, pInputSamples1, pOutputSamples);
+        return;
+    }
+
 #if defined(DRFLAC_SUPPORT_SSE2)
     if (drflac__gIsSSE2Supported && pFlac->bitsPerSample <= 24) {
         drflac_read_pcm_frames_s16__decode_right_side__sse2(pFlac, frameCount, unusedBitsPerSample, pInputSamples0, pInputSamples1, pOutputSamples);
@@ -11044,8 +11105,34 @@ static DRFLAC_INLINE void drflac_read_pcm_frames_f32__decode_left_side__neon(drf
 }
 #endif
 
+/* Nakagawa LOCAL DELTA (2026-11-21): dr_libs 2e7a192443c46c6b41947b47f2a7ac1faea56b71. */
+static DRFLAC_INLINE void drflac_read_pcm_frames_f32__decode_duplicate_mono(drflac_uint64 frameCount, drflac_uint32 shift, const drflac_int32* pInputSamples, float* pOutputSamples)
+{
+    drflac_uint64 i;
+    const drflac_uint32* pInputSamplesU32 = (const drflac_uint32*)pInputSamples;
+    float factor;
+
+    DRFLAC_ASSERT(shift < 32);
+
+    factor = 1 / 2147483648.0f;
+
+    for (i = 0; i < frameCount; ++i) {
+        float sample;
+
+        sample = (drflac_int32)(pInputSamplesU32[i] << shift) * factor;
+        pOutputSamples[i*2+0] = sample;
+        pOutputSamples[i*2+1] = sample;
+    }
+}
+
 static DRFLAC_INLINE void drflac_read_pcm_frames_f32__decode_left_side(drflac* pFlac, drflac_uint64 frameCount, drflac_uint32 unusedBitsPerSample, const drflac_int32* pInputSamples0, const drflac_int32* pInputSamples1, float* pOutputSamples)
 {
+    /* Nakagawa LOCAL DELTA (2026-11-21): dr_libs 2e7a192443c46c6b41947b47f2a7ac1faea56b71. */
+    if (unusedBitsPerSample + pFlac->currentFLACFrame.subframes[1].wastedBitsPerSample == 32) {
+        drflac_read_pcm_frames_f32__decode_duplicate_mono(frameCount, unusedBitsPerSample + pFlac->currentFLACFrame.subframes[0].wastedBitsPerSample, pInputSamples0, pOutputSamples);
+        return;
+    }
+
 #if defined(DRFLAC_SUPPORT_SSE2)
     if (drflac__gIsSSE2Supported && pFlac->bitsPerSample <= 24) {
         drflac_read_pcm_frames_f32__decode_left_side__sse2(pFlac, frameCount, unusedBitsPerSample, pInputSamples0, pInputSamples1, pOutputSamples);
@@ -11212,6 +11299,12 @@ static DRFLAC_INLINE void drflac_read_pcm_frames_f32__decode_right_side__neon(dr
 
 static DRFLAC_INLINE void drflac_read_pcm_frames_f32__decode_right_side(drflac* pFlac, drflac_uint64 frameCount, drflac_uint32 unusedBitsPerSample, const drflac_int32* pInputSamples0, const drflac_int32* pInputSamples1, float* pOutputSamples)
 {
+    /* Nakagawa LOCAL DELTA (2026-11-21): dr_libs 2e7a192443c46c6b41947b47f2a7ac1faea56b71. */
+    if (unusedBitsPerSample + pFlac->currentFLACFrame.subframes[0].wastedBitsPerSample == 32) {
+        drflac_read_pcm_frames_f32__decode_duplicate_mono(frameCount, unusedBitsPerSample + pFlac->currentFLACFrame.subframes[1].wastedBitsPerSample, pInputSamples1, pOutputSamples);
+        return;
+    }
+
 #if defined(DRFLAC_SUPPORT_SSE2)
     if (drflac__gIsSSE2Supported && pFlac->bitsPerSample <= 24) {
         drflac_read_pcm_frames_f32__decode_right_side__sse2(pFlac, frameCount, unusedBitsPerSample, pInputSamples0, pInputSamples1, pOutputSamples);
@@ -12268,6 +12361,7 @@ v0.13.4 - TBD
   - Fix an error with seek point parsing.
   - Fix a possible deadlock when seeking.
   - Fix an error where the decoder can be put into a bad state when seeking fails which then results in a crash when reading and seeking.
+  - Fix an undefined behavior error due to a shift by 32.
 
 v0.13.3 - 2026-01-17
   - Fix a compiler compatibility issue with some inlined assembly.

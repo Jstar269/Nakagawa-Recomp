@@ -43,7 +43,7 @@ _CI_BUILD_TO_MAKE_TARGET = {
 }
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestGateStubLink(unittest.TestCase):
     """Link the headless driver exactly as tools/codegen_gate.py builds it.
 
@@ -217,7 +217,7 @@ int main(int argc, char **argv) {
 """
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestRecorderClockSeam(unittest.TestCase):
     """The recorder records only on the clock the runtime's main() hands it (#2080).
 

@@ -145,11 +145,18 @@ env:
         sudo sed -i -E "s#https?://((azure\.)?archive|security)\.ubuntu\.com/ubuntu/?#mirror+file:$list#g" "$sources"
       fi
     done
+    # Only the network phases are killed when slow: the index update and a --download-only
+    # install. The real install then unpacks and configures from the local archive with no kill
+    # timeout (the job's own limit bounds it), because a kill while dpkg unpacks or configures
+    # leaves dpkg interrupted, and every later attempt would fail on "dpkg was interrupted"
+    # whichever mirror it used. A retry first finishes any such interrupted dpkg run.
     for attempt in 1 2 3; do
       printf '%s\n' "${reachable[@]}" | sudo tee "$list" >/dev/null
       echo "nk-apt-install: attempt $attempt of 3, mirrors in order: ${reachable[*]}"
-      if sudo timeout 180 apt-get update \
-          && sudo timeout 480 apt-get install -y "${options[@]}" "${missing[@]}"; then
+      if { [ "$attempt" -eq 1 ] || sudo dpkg --configure -a; } \
+          && sudo timeout 180 apt-get update \
+          && sudo timeout 480 apt-get install -y --download-only "${options[@]}" "${missing[@]}" \
+          && sudo apt-get install -y "${options[@]}" "${missing[@]}"; then
         exit 0
       fi
       reachable=("${reachable[@]:1}" "${reachable[0]}")
@@ -692,12 +699,12 @@ jobs:
     runs-on: ${{ fromJSON(needs.classify.outputs.linux_runner || '"ubuntu-24.04"') }}
     env:
       NK_TEST_TIER: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group') && 'full' || 'pr' }}
-    # id-token: write lets the coverage upload authenticate to Codecov with the
-    # job's OIDC identity (use_oidc: true) instead of a stored repository token.
-    # It is not a publication permission: contents stays read.
+    # No id-token: this job runs the candidate's whole test suite, so it keeps the workflow's
+    # read-only token alone. Its coverage report goes to coverage_upload as an artifact, and
+    # that job, which runs no candidate code, holds the OIDC identity Codecov needs
+    # (audit 2026-11-17 F-6a075a43).
     permissions:
       contents: read
-      id-token: write
     # Waits for classify and the public-export job (which also builds the profile-zero
     # fixture), not hygiene: hygiene runs beside it and ci_required still requires its
     # result (docs/CI.md, "Hygiene beside the substantive gates").
@@ -829,21 +836,28 @@ jobs:
           if [ "$test_status" -ne 0 ]; then
             exit "$test_status"
           fi
+          # gcc is on every python_tools runner, so a test that skipped for want of a C compiler
+          # is a native gate that did not run: fail on any such skip, or on a summary without the count.
+          case "$skip_summary" in
+            *" TOOLCHAIN_MISSING=0") ;;
+            *)
+              echo "::error::TOOLCHAIN_MISSING skips where gcc is expected: $skip_summary" >&2
+              exit 1
+              ;;
+          esac
           python -m coverage combine
           python -m coverage xml -o coverage-python.xml
 
-      # Informational only: `fail_ci_if_error: false` and the Codecov status checks
-      # are non-blocking (.github/codecov.yml), so an upload or Codecov outage never fails
-      # the Python gate. Each shard uploads its own partial report under the same
-      # `python` flag, which Codecov merges for the commit.
-      - name: Upload Python coverage to Codecov
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      # Each shard keeps its partial report for coverage_upload, which sends them all to Codecov
+      # under the same `python` flag. A failing shard stops before the report exists, so it
+      # keeps none, as it uploaded none before.
+      - name: Keep the Python coverage report for the upload job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          use_oidc: true
-          files: coverage-python.xml
-          flags: python
-          name: python-shard-${{ matrix.shard }}
-          fail_ci_if_error: false
+          name: coverage-python-shard-${{ matrix.shard }}
+          path: coverage-python.xml
+          if-no-files-found: error
+          retention-days: 1
 
   native_tools:
     name: Native and translation gates
@@ -917,9 +931,11 @@ jobs:
           mkdir -p "$archives/partial"
           printf '%s\n' "Dir::Cache::Archives \"$archives\";" 'APT::Keep-Downloaded-Packages "true";' \
             | sudo tee /etc/apt/apt.conf.d/80-ci-apt-cache >/dev/null
-          # NK_APT_INSTALL is the workflow's apt helper: it caps each attempt (3 minutes for the
-          # index update, 8 for the install) so a slow mirror cannot spend the step's budget, and
-          # moves to the next mirror that answered after a failed attempt.
+          # NK_APT_INSTALL is the workflow's apt helper: it caps each attempt's network phases
+          # (3 minutes for the index update, 8 for the package download) so a slow mirror cannot
+          # spend the step's budget, and moves to the next mirror that answered after a failed
+          # attempt. The install that unpacks and configures has no per-attempt bound: the step's
+          # own limit ends a hung one, and a retry first finishes an interrupted dpkg run.
           bash -c "$NK_APT_INSTALL" nk-apt-install build-essential cmake curl gcc-mipsel-linux-gnu \
             git libc6-dev-i386 libvulkan-dev \
             libxcursor-dev libxext-dev libxfixes-dev libxi-dev libxinerama-dev \
@@ -1292,27 +1308,37 @@ jobs:
           export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           vulkaninfo --summary | tee "$RUNNER_TEMP/vulkan-summary.txt"
           grep -qi llvmpipe "$RUNNER_TEMP/vulkan-summary.txt"
-          # Report only: whether lavapipe offers the interlock destination-read path (#2109).
-          # Without it, the interlock legs of gpu-coherence-selftest print SKIP lines.
-          { vulkaninfo 2>/dev/null || true; } | grep -E "VK_EXT_fragment_shader_interlock|fragmentShaderPixelInterlock" || \
-            echo "no VK_EXT_fragment_shader_interlock: the interlock legs SKIP"
+          # lavapipe must offer the interlock destination-read path (#2109): without it the
+          # interlock legs of gpu-coherence-selftest and sixteen of the seventeen dst-read
+          # mutant kills would be SKIP lines on a green step (audit 2026-11-17 F-1cbdad44).
+          { vulkaninfo 2>/dev/null || true; } > "$RUNNER_TEMP/vulkaninfo.txt"
+          if ! grep -q "VK_EXT_fragment_shader_interlock" "$RUNNER_TEMP/vulkaninfo.txt"; then
+            echo "lavapipe offers no VK_EXT_fragment_shader_interlock: the interlock legs and their mutants cannot run" >&2
+            exit 1
+          fi
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
             make CC=gcc gpu-capture-selftest
 
       # The Vulkan backend's coherence selftest (src/rt/gpu_sdl3vk/ge_gpu.c): render-target
       # coherence, the texture cache, the per-draw state template, filtering and blend parity
       # against the software GE. It ran on no hosted job, so a regression from #1481 went
-      # unseen. A plain run's exit 77 fails the step, as for the capture selftest, but the recipe
-      # (mk/selftests.mk) passes three kinds of SKIP: the gpu-timestamps legs (its own and the
-      # twin's), the interlock dst-read and stencil-once cells on a device that refuses the
-      # interlock, and ge-first-bad-draw-selftest (GE_FBD_SKIP_STATUS=0). Those stay green here.
+      # unseen. A plain run's exit 77 fails the step, as for the capture selftest, and so does a
+      # dst-read mutant's SKIP line: the recipe (mk/selftests.mk) turns a mutant's exit 77 into
+      # that line and goes on, and the step before already requires the interlock those
+      # mutants need, so a SKIP here is a kill proof that did not run (audit 2026-11-17
+      # F-1cbdad44). The recipe still passes the gpu-timestamps legs' SKIP (its own and the
+      # twin's) and ge-first-bad-draw-selftest's (GE_FBD_SKIP_STATUS=0); those stay green here.
       - name: Run GPU coherence selftest on lavapipe
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
           export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
-            make CC=gcc gpu-coherence-selftest vram-view-identity-selftest
+            make CC=gcc gpu-coherence-selftest vram-view-identity-selftest 2>&1 | tee "$RUNNER_TEMP/gpu-coherence.log"
+          if grep -E '^dst-read mutant .*: SKIP' "$RUNNER_TEMP/gpu-coherence.log"; then
+            echo "a dst-read mutant skipped on lavapipe: its kill was not proven" >&2
+            exit 1
+          fi
 
       # Ace Mode's texture scaling and smart 2D filter on the same production path
       # (src/rt/gpu_sdl3vk/tex_scale_gpu_selftest.inc), and the mutant that binds a scaled
@@ -1790,8 +1816,8 @@ jobs:
   c_coverage:
     name: C coverage (informational)
     # C statement coverage of the native self-tests (#2394). The job builds and runs, a second
-    # time, the self-tests native_tools runs on Linux, with gcov instrumentation, and uploads the
-    # reports under Codecov's `c` flag. It is not required: ci_required does not need it, so a
+    # time, the self-tests native_tools runs on Linux, with gcov instrumentation, and keeps the
+    # reports for coverage_upload, which uploads them under Codecov's `c` flag. It is not required: ci_required does not need it, so a
     # failure shows red here and on the run without blocking a merge, and native_tools' gates run
     # unprofiled beside it. It runs only on the nightly schedule and on a manual run: the Trusted
     # CI verdict is computed when the whole CI run completes, and this job outlasts the required
@@ -1801,11 +1827,10 @@ jobs:
     # runner, never the nk-wsl pool: the measurement must not take a pool slot from a gate
     # (docs/CI.md, "Coverage").
     runs-on: ubuntu-24.04
-    # id-token: write exists only for the Codecov OIDC upload below; contents
-    # stays read, as everywhere else in this workflow.
+    # No id-token: this job builds and runs the candidate's self-tests, so it keeps the read-only
+    # token; coverage_upload sends its reports to Codecov (audit 2026-11-17 F-6a075a43).
     permissions:
       contents: read
-      id-token: write
     needs: [classify, public_export]
     if: >-
       ${{ always() && needs.classify.result == 'success' &&
@@ -1845,9 +1870,11 @@ jobs:
           mkdir -p "$archives/partial"
           printf '%s\n' "Dir::Cache::Archives \"$archives\";" 'APT::Keep-Downloaded-Packages "true";' \
             | sudo tee /etc/apt/apt.conf.d/80-ci-apt-cache >/dev/null
-          # NK_APT_INSTALL is the workflow's apt helper: it caps each attempt (3 minutes for the
-          # index update, 8 for the install) so a slow mirror cannot spend the step's budget, and
-          # moves to the next mirror that answered after a failed attempt.
+          # NK_APT_INSTALL is the workflow's apt helper: it caps each attempt's network phases
+          # (3 minutes for the index update, 8 for the package download) so a slow mirror cannot
+          # spend the step's budget, and moves to the next mirror that answered after a failed
+          # attempt. The install that unpacks and configures has no per-attempt bound: the step's
+          # own limit ends a hung one, and a retry first finishes an interrupted dpkg run.
           bash -c "$NK_APT_INSTALL" nk-apt-install build-essential cmake curl gcc-mipsel-linux-gnu \
             git libc6-dev-i386 libvulkan-dev \
             libxcursor-dev libxext-dev libxfixes-dev libxi-dev libxinerama-dev \
@@ -2294,18 +2321,101 @@ jobs:
           test "${#reports[@]}" -gt 0
           echo "C coverage: ${#reports[@]} gcov reports from ${#notes[@]} notes files"
 
-      # Informational only: the C number never gates a merge (.github/codecov.yml). The reports
-      # are already generated above, so the action only uploads them (plugins: noop).
-      - name: Upload C coverage to Codecov
+      # coverage_upload sends these reports to Codecov. Any failure before this step keeps
+      # nothing, so a partial run uploads nothing.
+      - name: Keep the C coverage reports for the upload job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-c
+          path: ${{ runner.temp }}/c-coverage-gcov
+          if-no-files-found: error
+          retention-days: 1
+
+  coverage_upload:
+    name: Upload coverage to Codecov (informational)
+    # The only job with id-token: write, the OIDC identity Codecov's upload authenticates with
+    # (use_oidc: true) instead of a stored token. No byte of the candidate may run here: the steps
+    # are the pinned checkout, artifact download and Codecov actions, with no run step.
+    # python_tools and c_coverage, which run the candidate's tests, keep the read-only token and
+    # hand their reports over as artifacts (audit 2026-11-17 F-6a075a43).
+    # The checkout goes into commit-files/, only so the uploader can list the commit's files for
+    # Codecov's path fixing (root_dir). The Codecov steps run in the workspace root, which holds
+    # nothing but that directory, and cleanup: true makes the action's wrapper download its CLI
+    # into a fresh temporary directory and run it from there. Without it the wrapper downloads to
+    # ./codecov and runs whatever is at that path, so a candidate tree with its own codecov entry
+    # at the working directory would run with the token. fail_ci_if_error: true makes the
+    # wrapper stop when the CLI's download, signature or SHA-256 check fails instead of running
+    # an unverified file (with false, the wrapper only prints those failures and goes on), and
+    # plugins: noop keeps the CLI from running any coverage tool. disable_file_fixes: true keeps the
+    # CLI from opening the reports' source files to send line fixes (blank lines, lone brackets):
+    # it opens them relative to its working directory, the workspace root, which holds no source,
+    # and it stopped with FileNotFoundError on run 44930787068. Codecov's report then counts those
+    # lines as the reports give them. A hosted runner, never the
+    # nk-wsl pool. Informational only: ci_required neither needs nor reads this job, and the
+    # Codecov statuses are non-blocking (.github/codecov.yml), so an upload failure or a Codecov
+    # outage shows red on this job and never fails a gate.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    needs: [classify, python_tools, c_coverage]
+    if: >-
+      ${{ always() && needs.classify.result == 'success' &&
+          needs.classify.outputs.allow_substantive == 'true' &&
+          (needs.python_tools.result != 'skipped' || needs.c_coverage.result != 'skipped') }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out the commit's file list for path fixing
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: commit-files
+          persist-credentials: false
+
+      # Every shard that passed kept its partial report; Codecov merges them under the python flag.
+      - name: Fetch the Python coverage reports
+        if: ${{ needs.python_tools.result != 'skipped' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: coverage-python-shard-*
+          path: ${{ runner.temp }}/coverage-python
+
+      - name: Upload Python coverage to Codecov
+        if: ${{ needs.python_tools.result != 'skipped' }}
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           use_oidc: true
+          cleanup: true
+          disable_file_fixes: true
+          directory: ${{ runner.temp }}/coverage-python
+          root_dir: ${{ github.workspace }}/commit-files
+          plugins: noop
+          flags: python
+          name: python-shards
+          fail_ci_if_error: true
+
+      # c_coverage keeps its reports only when every measurement passed. !cancelled() lets the C
+      # steps run even when the Python upload failed: each upload stands on its own.
+      - name: Fetch the C coverage reports
+        if: ${{ !cancelled() && needs.c_coverage.result == 'success' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage-c
+          path: ${{ runner.temp }}/c-coverage-gcov
+
+      # The reports were generated in c_coverage, so the action only uploads them (plugins: noop).
+      - name: Upload C coverage to Codecov
+        if: ${{ !cancelled() && needs.c_coverage.result == 'success' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          cleanup: true
+          disable_file_fixes: true
           directory: ${{ runner.temp }}/c-coverage-gcov
-          root_dir: ${{ github.workspace }}
+          root_dir: ${{ github.workspace }}/commit-files
           plugins: noop
           flags: c
           name: c-native-selftests
-          fail_ci_if_error: false
+          fail_ci_if_error: true
 
   android_build:
     name: Android launcher build
@@ -2462,8 +2572,8 @@ jobs:
     #   routes:    profile-zero production routes, native core tests
     #   selftests: cosimulation + mutants, scheduler, dispatch, FP, strbuf, HLE thread,
     #              Media Foundation H.264 media
-    #   fuzz-0/1:  synthetic VFPU fuzzer, its cases split between two shards (FUZZ_CASE_SHARD)
-    # The six parts run on four runners (docs/CI.md, "Jobs per run"): each matrix
+    #   fuzz:      synthetic VFPU fuzzer, every case in one run
+    # The five parts run on four runners (docs/CI.md, "Jobs per run"): each matrix
     # group runs its parts one after another, in this file's step order, after one
     # copy of the shared setup and the runtime-object compile gate (about 2.3
     # minutes). smoke and routes ran as one group until run 42870221118 measured it
@@ -2473,10 +2583,8 @@ jobs:
     # from main's entries of 2026-11-06, 79 and 62 % hits), beside ladder-fuzz
     # (9.7) and selftests (9.3). Parts in one group share the checkout and its
     # build tree. The
-    # ladder builds under build/platform-ladder; the two fuzz shards, which used to
-    # run on separate runners, now share build/windows-runtime, which is harmless
-    # because each regenerates its cases header and vfpu_fuzz_build always relinks
-    # and reruns the fuzzer. Neither smoke nor routes uses what the other builds:
+    # ladder builds under build/platform-ladder and the fuzzer under build/windows-runtime.
+    # Neither smoke nor routes uses what the other builds:
     # native-core-tests and profile-zero-e2e build their own inputs, the player
     # targets build the libchdr archive native-core-tests used to leave behind (a
     # Make prerequisite), and when the two shared build/, the selftest targets they
@@ -2500,8 +2608,8 @@ jobs:
             parts: [routes]
             timeout: 25
           - group: ladder-fuzz
-            parts: [ladder, fuzz-0, fuzz-1]
-            timeout: 75
+            parts: [ladder, fuzz]
+            timeout: 50
           - group: selftests
             parts: [selftests]
             timeout: 45
@@ -3112,15 +3220,14 @@ jobs:
             exit 1
           fi
 
-      # The synthetic VFPU fuzzer's cases run as two shards: shard k admits the cases with
-      # index % 2 == k (src/rt/vfpu_fuzz.c). Together they admit every case exactly once,
-      # which the "Prove the fuzz shards" step checks from the binary. A shard fails unless
-      # every case it admits is tested, so no case is dropped from the gate.
-      - name: Build and run synthetic VFPU fuzzer (shard 0 of 2)
-        if: contains(matrix.parts, 'fuzz-0')
+      # The synthetic VFPU fuzzer runs once, unsharded: it fails unless every case is tested.
+      # Its FUZZ_CASE_SHARD selector (src/rt/vfpu_fuzz.c) stays for local runs and is pinned by
+      # tools/test_public_ci_wiring.py VfpuFuzzShardTests; the two shards used to run here one
+      # after the other on one runner, which bought no parallelism for a second generate, link
+      # and run, plus a third run to prove the shards' cover (audit 2026-11-17 F-fe9cc4cb).
+      - name: Build and run synthetic VFPU fuzzer
+        if: contains(matrix.parts, 'fuzz')
         shell: msys2 {0}
-        env:
-          FUZZ_CASE_SHARD: "0/2"
         run: |
           py="$(cygpath -u "$PYTHON")"
           "$py" tools/vfpu_fuzz_gen.py --synthetic build/windows-runtime/vfpu_fuzz_cases.h
@@ -3129,31 +3236,6 @@ jobs:
           touch build/windows-runtime/.recomp-trace-0
           mingw32-make GAME_NAME=ci BUILD_DIR=build/windows-runtime \
             VFPU_FUZZ_PREGENERATED=1 CC=gcc VULKAN_SDK=/ucrt64 -j4 vfpu_fuzz_build
-
-      - name: Build and run synthetic VFPU fuzzer (shard 1 of 2)
-        if: contains(matrix.parts, 'fuzz-1')
-        shell: msys2 {0}
-        env:
-          FUZZ_CASE_SHARD: "1/2"
-        run: |
-          py="$(cygpath -u "$PYTHON")"
-          "$py" tools/vfpu_fuzz_gen.py --synthetic build/windows-runtime/vfpu_fuzz_cases.h
-          printf 'void f_00304290(void *s) { (void)s; }\n' > build/windows-runtime/ci_recomp.c
-          touch build/windows-runtime/ci_recomp_funcs.h
-          touch build/windows-runtime/.recomp-trace-0
-          mingw32-make GAME_NAME=ci BUILD_DIR=build/windows-runtime \
-            VFPU_FUZZ_PREGENERATED=1 CC=gcc VULKAN_SDK=/ucrt64 -j4 vfpu_fuzz_build
-
-      # The shard proof runs the same binary once more with FUZZ_TRIALS=1 (case selection does
-      # not depend on the trial count): the default run, then 0/2 and 1/2. It requires the
-      # shards to be disjoint and to union to the default's full case list.
-      - name: Prove the fuzz shards cover every case exactly once
-        if: contains(matrix.parts, 'fuzz-0')
-        shell: msys2 {0}
-        run: |
-          set -euo pipefail
-          py="$(cygpath -u "$PYTHON")"
-          PYTHONPATH=tools NK_VFPU_FUZZ_BIN=build/windows-runtime/vfpu_fuzz.exe "$py" -m unittest -v test_public_ci_wiring.VfpuFuzzShardTests
 
       # A trusted run on main (a push, the nightly schedule or a manual dispatch;
       # tools/ci_paths.py decides) saves this group's cache under the exact key

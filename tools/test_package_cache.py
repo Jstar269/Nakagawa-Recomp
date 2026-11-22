@@ -976,7 +976,7 @@ class PackageCacheTests(unittest.TestCase):
                        if key not in ("NK_TARGET_TRIPLE", "CC_TARGET")}
         gcc = shutil.which("gcc", path=environment.get("PATH"))
         if gcc is None:
-            self.skipTest("gcc is not on PATH, so there is no compiler target to read")
+            self.skipTest("TOOLCHAIN_MISSING: gcc is not on PATH, so there is no compiler target to read")
         expected = subprocess.run(
             [gcc, "-dumpmachine"], capture_output=True, text=True, check=True,
         ).stdout.strip()

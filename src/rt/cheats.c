@@ -117,10 +117,15 @@ void sr_cheats_reset(void) {
 }
 
 /* Where the game's memory is, for the reader (nk_cheats.h, NkCheatConfig). A code names a PSP
- * address. Three layouts reach a run:
- *  - the host loader put the image inside PSP user memory (0x08800000 up): the package route
- *    places a relocatable main module at 0x08804000 and a fixed-address one at its own address,
- *    as a PSP does, so memory is where a PSP has it and an address is used as written;
+ * address. Four layouts reach a run:
+ *  - the host loader put the image at 0x08804000, where a PSP loads a relocatable main module
+ *    (the package route places every relocatable one there): memory is where a PSP has it and
+ *    an address is used as written;
+ *  - the host loader put the image anywhere else in PSP user memory (0x08800000 up): a
+ *    relocatable image moved off 0x08804000 (the display-smoke manifest's 0x08810000) and a
+ *    fixed-address image linked there look the same here, because --image gives only the base
+ *    and the entry. A cheat written for the first would land the move's distance off, so every
+ *    cheat is refused by name (audit 2026-11-17, F-86f47689);
  *  - the host loader put the image below PSP user memory (a title manifest with "base": 0, the
  *    module's link addresses used as guest addresses): the image byte a PSP has at 0x08804000 +
  *    x is at base + x, the heap starts after the image and not where a PSP's is, and the
@@ -139,9 +144,17 @@ static int cheats_layout(NkCheatConfig *config) {
     s_image_base = base;
     s_image_end = end;
     config->user_end = CHEATS_USER_END;
-    if (base >= NK_CHEATS_ADDRESS_BASE) {
+    if (base == CHEATS_PSP_IMAGE_BASE) {
         config->user_base = NK_CHEATS_ADDRESS_BASE;
         return 1;
+    }
+    if (base >= NK_CHEATS_ADDRESS_BASE) {
+        fprintf(stderr, "CHEATS: refused: this game's image is at 0x%08lX, not at 0x%08lX where a PSP loads a "
+                        "relocatable main module, and this run does not say whether the image was moved here "
+                        "or is linked here, so where a cheat's PSP address lives is not known; nothing is "
+                        "applied\n",
+                (unsigned long)base, (unsigned long)CHEATS_PSP_IMAGE_BASE);
+        return 0;
     }
     config->user_base = base;
     config->hole_base = SR_VRAM_CPU_BASE;

@@ -62,7 +62,7 @@ def sdk_variant_registrations():
     ]
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestSdkverSelftestC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -1827,20 +1827,12 @@ static bool title_pack_store(PlayerSettings *settings, const char *key, const ch
 /* Strict UTF-8: no overlong form, surrogate or code point past U+10FFFF. */
 static bool texpack_utf8_valid(const char *s) {
     const unsigned char *p = (const unsigned char *)s;
-    while (*p) {
-        unsigned c = *p++;
-        int more;
-        unsigned cp, min;
-        if (c < 0x80u) continue;
-        if ((c & 0xE0u) == 0xC0u) { more = 1; cp = c & 0x1Fu; min = 0x80u; }
-        else if ((c & 0xF0u) == 0xE0u) { more = 2; cp = c & 0x0Fu; min = 0x800u; }
-        else if ((c & 0xF8u) == 0xF0u) { more = 3; cp = c & 0x07u; min = 0x10000u; }
-        else return false;
-        for (int k = 0; k < more; k++, p++) {
-            if ((*p & 0xC0u) != 0x80u) return false;
-            cp = (cp << 6) | (*p & 0x3Fu);
-        }
-        if (cp < min || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) return false;
+    size_t left = strlen(s);
+    while (left > 0u) {
+        size_t len = nk_utf8_char_len(p, left, 0u);
+        if (len == 0u) return false;
+        p += len;
+        left -= len;
     }
     return true;
 }

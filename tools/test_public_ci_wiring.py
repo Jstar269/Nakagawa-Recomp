@@ -448,8 +448,26 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertIn('xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11', text)
         # The VRAM viewer identity test (#314) needs the same device and window, so it runs in
         # this step, after the coherence selftest.
-        self.assertRegex(text, r"(?m)^\s+make CC=gcc gpu-coherence-selftest vram-view-identity-selftest$")
+        self.assertRegex(text, r"(?m)^\s+make CC=gcc gpu-coherence-selftest vram-view-identity-selftest 2>&1 "
+                               r'\| tee "\$RUNNER_TEMP/gpu-coherence.log"$')
         self.assertNotIn("continue-on-error", text)
+        # Failing-before (audit 2026-11-17 F-1cbdad44): gpu-dst-read-mutants turns a mutant's exit 77
+        # into a SKIP line and continues, so on a device without the interlock sixteen kill proofs
+        # passed green. The step now fails on that line, and the lavapipe check before it requires
+        # the interlock instead of only reporting it.
+        self.assertIn("if grep -E '^dst-read mutant .*: SKIP' \"$RUNNER_TEMP/gpu-coherence.log\"; then", text)
+        self.assertLess(text.index("| tee \"$RUNNER_TEMP/gpu-coherence.log\""),
+                        text.index("if grep -E '^dst-read mutant .*: SKIP'"))
+        self.assertRegex(text, r"its kill was not proven\" >&2\n\s+exit 1\n")
+        verify = _uncommented("\n".join(_ci_step(native_tools, "Verify lavapipe and run GPU capture selftest") or []))
+        self.assertIn('{ vulkaninfo 2>/dev/null || true; } > "$RUNNER_TEMP/vulkaninfo.txt"', verify)
+        self.assertRegex(
+            verify,
+            r'if ! grep -q "VK_EXT_fragment_shader_interlock" "\$RUNNER_TEMP/vulkaninfo.txt"; then\n'
+            r'\s+echo "[^"\n]*" >&2\n\s+exit 1\n\s+fi\n')
+        self.assertNotIn("the interlock legs SKIP", verify)
+        self.assertNotIn("Report only", "\n".join(_ci_step(native_tools, "Verify lavapipe and run GPU capture selftest")
+                                                  or []))
         # Its only condition is the native_tools part that runs it; nothing can skip it there.
         self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
                          ["if: matrix.part == 'translation'"])
@@ -1089,9 +1107,7 @@ _WINDOWS_SERIAL_GATES = {
     "Build and run the Media Foundation H.264 media selftest": "CC=gcc VULKAN_SDK=/ucrt64 psmf-media-selftest",
     "Build and run the vendored FFmpeg H.264 media selftest on Windows":
         "CC=gcc VULKAN_SDK=/ucrt64 H264_FFMPEG=1 psmf-media-selftest",
-    "Build and run synthetic VFPU fuzzer (shard 0 of 2)": "VFPU_FUZZ_PREGENERATED=1 CC=gcc VULKAN_SDK=/ucrt64 -j4 vfpu_fuzz_build",
-    "Build and run synthetic VFPU fuzzer (shard 1 of 2)": "VFPU_FUZZ_PREGENERATED=1 CC=gcc VULKAN_SDK=/ucrt64 -j4 vfpu_fuzz_build",
-    "Prove the fuzz shards cover every case exactly once": 'NK_VFPU_FUZZ_BIN=build/windows-runtime/vfpu_fuzz.exe "$py" -m unittest -v test_public_ci_wiring.VfpuFuzzShardTests',
+    "Build and run synthetic VFPU fuzzer": "VFPU_FUZZ_PREGENERATED=1 CC=gcc VULKAN_SDK=/ucrt64 -j4 vfpu_fuzz_build",
 }
 _WINDOWS_INSTALLER_STEPS = {
     "Stage Windows installer package from the existing player build": "tools/stage_runtime_dlls.py --target",
@@ -1123,12 +1139,12 @@ _WINDOWS_MAIN_SAVE_CONDITION = (
 
 
 #: The Windows parts each matrix group runs, one after another (docs/CI.md, "Jobs per
-#: run"). Parts in one group share the build tree; the fuzz shards, which used to run on
-#: separate runners, share build/windows-runtime, and each rebuilds and reruns there.
+#: run"). Parts in one group share the build tree; the fuzzer runs once, unsharded, in
+#: build/windows-runtime (audit 2026-11-17 F-fe9cc4cb).
 _WINDOWS_GROUPS = {
     "smoke": ["smoke"],
     "routes": ["routes"],
-    "ladder-fuzz": ["ladder", "fuzz-0", "fuzz-1"],
+    "ladder-fuzz": ["ladder", "fuzz"],
     "selftests": ["selftests"],
 }
 
@@ -1189,7 +1205,7 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
 
     def test_every_part_is_in_exactly_one_group_and_the_groups_are_pinned(self) -> None:
         self.assertEqual(self.groups, _WINDOWS_GROUPS)
-        self.assertEqual(sorted(self.parts), sorted({"smoke", "ladder", "routes", "selftests", "fuzz-0", "fuzz-1"}))
+        self.assertEqual(sorted(self.parts), sorted({"smoke", "ladder", "routes", "selftests", "fuzz"}))
         self.assertEqual(len(self.parts), len(set(self.parts)), "a part is in two groups")
         text = "\n".join(self.block)
         # Only the include list defines the jobs: no bare matrix axis adds a cross product.
@@ -1256,16 +1272,24 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
                                   f"{step_name!r} no longer exists to run {module}")
                 self.assertRegex("\n".join(other), rf"(?m)-m unittest -v (tools\.)?{module}$")
 
-    def test_grouped_fuzz_shards_rebuild_and_rerun_in_order(self) -> None:
-        # Both shard steps regenerate the cases header and run `vfpu_fuzz_build`, a phony
-        # target whose recipe links and runs the binary, so shard 1 runs after shard 0 in
-        # the same tree; the proof follows both and reads the binary they built.
-        order = [_ci_step_index(self.block, name) for name in (
-            "Build and run synthetic VFPU fuzzer (shard 0 of 2)",
-            "Build and run synthetic VFPU fuzzer (shard 1 of 2)",
-            "Prove the fuzz shards cover every case exactly once",
-        )]
-        self.assertEqual(order, sorted(order))
+    def test_the_fuzzer_builds_and_runs_every_case_once(self) -> None:
+        # Failing-before (audit 2026-11-17 F-fe9cc4cb): the two shards ran one after the other
+        # on this one runner, each regenerating, relinking and rerunning, and a third run
+        # proved their cover. One step now regenerates the cases header and runs
+        # `vfpu_fuzz_build`, a phony target whose recipe links and runs the binary, with no
+        # shard, so the fuzzer tests every case once and fails unless it tests them all.
+        step = _required(_ci_step(self.block, "Build and run synthetic VFPU fuzzer"),
+                         "windows_runtime no longer runs the synthetic VFPU fuzzer")
+        text = "\n".join(step)
+        self.assertEqual(self.part_of("Build and run synthetic VFPU fuzzer"), "fuzz")
+        self.assertIn("tools/vfpu_fuzz_gen.py --synthetic build/windows-runtime/vfpu_fuzz_cases.h", text)
+        self.assertNotIn("FUZZ_CASE_SHARD", text)
+        workflow = _uncommented((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+        self.assertNotIn("FUZZ_CASE_SHARD", workflow)
+        self.assertNotIn("NK_VFPU_FUZZ_BIN", workflow)
+        self.assertEqual(sum("vfpu_fuzz_build" in line for line in workflow.splitlines()), 1)
+        source = (ROOT / "src" / "rt" / "vfpu_fuzz.c").read_text(encoding="utf-8")
+        self.assertIn("return (bad_cases || skipped || tested != admitted) ? 1 : 0;", source)
         fuzz_rules = (ROOT / "mk" / "fuzz_verify.mk").read_text(encoding="utf-8")
         self.assertRegex(fuzz_rules, r"(?m)^vfpu_fuzz_build: ")
         self.assertRegex(fuzz_rules, r"(?m)^\t\$\(BUILD_DIR\)/vfpu_fuzz\.exe$")
@@ -2213,8 +2237,9 @@ class VfpuFuzzShardTests(unittest.TestCase):
     """The synthetic VFPU fuzzer's two shards admit every case exactly once.
 
     The source and workflow checks run everywhere. The binary checks run only when
-    NK_VFPU_FUZZ_BIN names a built vfpu_fuzz binary (the Windows fuzz-0 part builds it and
-    runs them); elsewhere they report SKIP, never a silent pass.
+    NK_VFPU_FUZZ_BIN names a built vfpu_fuzz binary (a local `vfpu_fuzz_build` leaves one
+    under the build directory); elsewhere they report SKIP, never a silent pass. Hosted CI
+    runs the fuzzer once, unsharded, so the shard selector is a local tool these tests pin.
     """
 
     SOURCE = ROOT / "src" / "rt" / "vfpu_fuzz.c"
@@ -2235,21 +2260,16 @@ class VfpuFuzzShardTests(unittest.TestCase):
         self.assertIn("if ((unsigned)c % shard_n != shard_k) continue;", source)
         self.assertIn("return (bad_cases || skipped || tested != admitted) ? 1 : 0;", source)
 
-    def test_ci_runs_one_shard_per_fuzz_part(self) -> None:
+    def test_ci_runs_the_fuzzer_once_without_a_shard(self) -> None:
+        # Hosted CI runs every case in one unsharded run (audit 2026-11-17 F-fe9cc4cb), so the
+        # shards and their cover proof are pinned here, from the source and a local binary.
         block = _ci_job_blocks()["windows_runtime"]
-        for part, index in (("fuzz-0", 0), ("fuzz-1", 1)):
-            with self.subTest(part=part):
-                lines = _ci_step(block, f"Build and run synthetic VFPU fuzzer (shard {index} of 2)")
-                self.assertIsNotNone(lines, f"no fuzz step for {part}")
-                text = "\n".join(_required(lines, f"no fuzz step for {part}"))
-                self.assertIn(f"if: contains(matrix.parts, '{part}')", text)
-                self.assertIn(f'FUZZ_CASE_SHARD: "{index}/2"', text)
-        proof = _ci_step(block, "Prove the fuzz shards cover every case exactly once")
-        self.assertIsNotNone(proof, "the shard proof step is missing")
-        self.assertIn(
-            "if: contains(matrix.parts, 'fuzz-0')",
-            "\n".join(_required(proof, "the shard proof step is missing")),
-        )
+        text = "\n".join(_required(_ci_step(block, "Build and run synthetic VFPU fuzzer"),
+                                   "no fuzz step in windows_runtime"))
+        self.assertIn("if: contains(matrix.parts, 'fuzz')", text)
+        self.assertNotIn("FUZZ_CASE_SHARD", text)
+        self.assertIsNone(_ci_step(block, "Prove the fuzz shards cover every case exactly once"))
+        self.assertFalse([line for line in block if "shard 1 of 2" in line or "fuzz-1" in line])
 
     def test_ci_required_aggregates_every_windows_part(self) -> None:
         required = "\n".join(_ci_job_blocks()["ci_required"])
@@ -2764,9 +2784,19 @@ class CoverageWiringTests(unittest.TestCase):
     C_WRAPPER_STEP = "Put the coverage gcc wrapper first on PATH"
     C_COLLECT_STEP = "Collect the gcov reports"
     C_MEASURE_PREFIX = "Measure the "
+    #: The one job that uploads, and its two uploads: step name, flag, and the directory the
+    #: step before it downloads the measuring job's artifact into.
+    UPLOAD_JOB = "coverage_upload"
     UPLOADS = {
-        "python_tools": ("Upload Python coverage to Codecov", "python", "coverage-python.xml"),
-        "c_coverage": ("Upload C coverage to Codecov", "c", None),
+        "python_tools": ("Upload Python coverage to Codecov", "python", "${{ runner.temp }}/coverage-python"),
+        "c_coverage": ("Upload C coverage to Codecov", "c", "${{ runner.temp }}/c-coverage-gcov"),
+    }
+    #: Each measuring job's artifact step, the artifact, and the upload job's step that fetches it.
+    ARTIFACTS = {
+        "python_tools": ("Keep the Python coverage report for the upload job", "coverage-python-shard-",
+                         "Fetch the Python coverage reports"),
+        "c_coverage": ("Keep the C coverage reports for the upload job", "coverage-c",
+                       "Fetch the C coverage reports"),
     }
     #: native_tools' setup, repeated byte for byte so both jobs build against the same
     #: packages and pinned libraries and share their caches.
@@ -2883,6 +2913,10 @@ class CoverageWiringTests(unittest.TestCase):
         self.assertEqual(text.count("-m unittest -v"), 1, "a shard must run unittest exactly once")
         self.assertIn("python -m coverage combine", text)
         self.assertIn("python -m coverage xml -o coverage-python.xml", text)
+        keep = "\n".join(_ci_step(self.blocks["python_tools"], self.ARTIFACTS["python_tools"][0]) or [])
+        self.assertIn("name: coverage-python-shard-${{ matrix.shard }}", keep)
+        self.assertIn("path: coverage-python.xml", keep)
+        self.assertIn("if-no-files-found: error", keep)
 
     def test_c_coverage_is_a_hosted_job_beside_native_tools_that_no_gate_reads(self) -> None:
         block = self.blocks[self.C_JOB]
@@ -3021,40 +3055,116 @@ class CoverageWiringTests(unittest.TestCase):
                 self.assertLess(_ci_step_index(self.blocks[self.C_JOB], name), collect)
 
     def test_both_uploads_use_the_pinned_action_oidc_and_the_declared_flags(self) -> None:
-        for job, (name, flag, report) in self.UPLOADS.items():
+        block = self.blocks[self.UPLOAD_JOB]
+        for job, (name, flag, directory) in self.UPLOADS.items():
             with self.subTest(job=job):
-                step = _ci_step(self.blocks[job], name)
-                self.assertIsNotNone(step, f"{job} no longer uploads {report}")
+                step = _ci_step(block, name)
+                self.assertIsNotNone(step, f"{self.UPLOAD_JOB} no longer uploads {job}'s coverage")
                 text = "\n".join(step or [])
                 self.assertRegex(
                     text,
                     r"uses: codecov/codecov-action@[0-9a-f]{40} # v\d+\.\d+\.\d+",
                 )
                 self.assertIn("use_oidc: true", text)
-                if report is None:
-                    # The reports are generated in the measuring step; the action only
-                    # uploads them. Its gcov plugin runs gcov from the build directory,
-                    # where the objects' repository-relative sources cannot be opened.
-                    self.assertIn("directory: ${{ runner.temp }}/c-coverage-gcov", text)
-                    self.assertIn("plugins: noop", text)
-                    self.assertNotIn("plugins: gcov", text)
-                else:
-                    self.assertIn(f"files: {report}", text)
+                # The reports were generated in the measuring job; the action only uploads them,
+                # and runs no coverage tool over the checkout. The C reports' gcov plugin would
+                # also run gcov where the objects' repository-relative sources cannot be opened.
+                self.assertIn(f"directory: {directory}", text)
+                self.assertIn("root_dir: ${{ github.workspace }}/commit-files", text)
+                self.assertIn("plugins: noop", text)
+                self.assertNotIn("plugins: gcov", text)
                 self.assertIn(f"flags: {flag}", text)
-                self.assertIn("fail_ci_if_error: false", text)
-        # Informational means informational: no step may be allowed to fail quietly.
+                # Fail closed: the wrapper must stop on a failed CLI download or check rather than
+                # run what it has (test_only_the_upload_job_that_runs_no_candidate_code_...).
+                self.assertIn("fail_ci_if_error: true", text)
+                # Each upload reads the artifact its measuring job kept.
+                keep_name, artifact, fetch_name = self.ARTIFACTS[job]
+                keep = "\n".join(_ci_step(self.blocks[job], keep_name) or [])
+                self.assertRegex(keep, r"uses: actions/upload-artifact@[0-9a-f]{40} # v\d+\.\d+\.\d+")
+                self.assertIn(f"name: {artifact}", keep)
+                fetch = "\n".join(_ci_step(block, fetch_name) or [])
+                self.assertRegex(fetch, r"uses: actions/download-artifact@[0-9a-f]{40} # v\d+\.\d+\.\d+")
+                self.assertIn(artifact, fetch)
+                self.assertIn(f"path: {directory}", fetch)
+                self.assertLess(_ci_step_index(block, fetch_name), _ci_step_index(block, name))
+                self.assertNotIn("codecov", _uncommented("\n".join(self.blocks[job])))
+        self.assertIn(f"    needs: [classify, {', '.join(self.UPLOADS)}]", block)
+        # Each upload stands on its own: a failed Python upload must not skip the C steps.
+        for name in ("Fetch the C coverage reports", "Upload C coverage to Codecov"):
+            with self.subTest(step=name):
+                self.assertIn("        if: ${{ !cancelled() && needs.c_coverage.result == 'success' }}",
+                              _ci_step(block, name) or [])
+        # Informational means informational: no step may be allowed to fail quietly, and no
+        # required aggregate reads the upload.
         self.assertNotIn("continue-on-error", self.ci)
+        self.assertNotIn(self.UPLOAD_JOB, "\n".join(self.blocks["ci_required"]))
+        self.assertNotIn(self.UPLOAD_JOB, (ROOT / "tools" / "ci_required.py").read_text(encoding="utf-8"))
 
-    def test_only_the_uploading_jobs_gain_id_token_write(self) -> None:
+    def test_only_the_upload_job_that_runs_no_candidate_code_holds_id_token_write(self) -> None:
+        # Failing-before (audit 2026-11-17 F-6a075a43): python_tools, which runs every candidate
+        # tools/test_*.py, and c_coverage, which builds and runs the candidate's self-tests, held
+        # id-token: write for their own Codecov upload, so candidate code could mint the job's
+        # OIDC token.
         expected = "    permissions:\n      contents: read\n      id-token: write\n"
-        for job in self.UPLOADS:
-            with self.subTest(job=job):
-                self.assertIn(expected, "\n".join(self.blocks[job]) + "\n")
         for job, block in self.blocks.items():
-            if job in self.UPLOADS:
-                continue
             with self.subTest(job=job):
-                self.assertNotIn("id-token", "\n".join(block))
+                text = _uncommented("\n".join(block)) + "\n"
+                if job == self.UPLOAD_JOB:
+                    self.assertIn(expected, text)
+                else:
+                    self.assertNotIn("id-token", text)
+                runs_tests = "unittest" in text or "make " in text or "tools/test_" in text
+                if "id-token" in text:
+                    self.assertFalse(runs_tests, f"{job} runs candidate code and holds id-token: write")
+        # The upload job runs no candidate code: no run step and no local action, only the
+        # pinned checkout, artifact download and Codecov actions, on a hosted runner.
+        block = self.blocks[self.UPLOAD_JOB]
+        self.assertFalse([line for line in block if re.match(r"^ {8}run:", line)], "coverage_upload has a run step")
+        self.assertNotIn("shell:", "\n".join(block))
+        uses = [line.strip() for line in block if line.strip().startswith("uses: ")]
+        self.assertEqual(
+            sorted({re.sub(r"@.*", "", line[len("uses: "):]) for line in uses}),
+            ["actions/checkout", "actions/download-artifact", "codecov/codecov-action"],
+        )
+        self.assertIn("    runs-on: ubuntu-24.04", block)
+        self.assertNotIn("defaults:", "\n".join(block))
+        self.assertNotIn("working-directory:", "\n".join(block))
+        # No candidate byte on the execution path (review of #2891). The pinned wrapper
+        # (codecov-action dist/codecov.sh) downloads its CLI to ./codecov in the step's working
+        # directory and runs that path, and under fail_ci_if_error: false it runs it even after a
+        # failed download or SHA-256 check, so a checkout in the workspace root that carries its
+        # own `codecov` entry ran with the token. The checkout now goes only into a subdirectory,
+        # every Codecov step downloads its CLI into a fresh temporary directory (cleanup: true)
+        # and fails closed, and no step names a binary to run instead of the verified download.
+        steps = [_ci_step(block, line.strip()[len("- name: "):]) or []
+                 for line in block if line.strip().startswith("- name: ")]
+        checkouts = [step for step in steps if any("uses: actions/checkout@" in line for line in step)]
+        self.assertEqual(len(checkouts), 1, "coverage_upload checks out the candidate once, into a subdirectory")
+        self.assertIn("          path: commit-files", checkouts[0])
+        self.assertIn("          persist-credentials: false", checkouts[0])
+        codecov_steps = [step for step in steps if any("uses: codecov/codecov-action@" in line for line in step)]
+        self.assertEqual(len(codecov_steps), len(self.UPLOADS))
+        for step in codecov_steps:
+            with self.subTest(step=step[0].strip()):
+                inputs = {line.strip().split(":", 1)[0] for line in step if re.match(r"^ {10}[a-z_]+:", line)}
+                self.assertIn("          cleanup: true", step)
+                self.assertIn("          fail_ci_if_error: true", step)
+                # The CLI opens each report's source files for line fixes relative to its working
+                # directory, the workspace root, which holds no source (run 44930787068 stopped on
+                # FileNotFoundError: 'tools/gate_stub.c'). Reading them from commit-files/ by moving
+                # the working directory there would put the candidate tree back on the path.
+                self.assertIn("          disable_file_fixes: true", step)
+                self.assertIn("          plugins: noop", step)
+                self.assertIn("          root_dir: ${{ github.workspace }}/commit-files", step)
+                self.assertTrue(any(line.startswith("          directory: ${{ runner.temp }}/") for line in step))
+                # Inputs that would run something other than the verified download, or skip its check.
+                self.assertFalse(inputs & {"binary", "use_pypi", "skip_validation", "version", "gcov_executable",
+                                           "run_command", "working-directory"}, inputs)
+        # The downloads land outside the workspace, so the root holds only commit-files/.
+        for step in steps:
+            if any("uses: actions/download-artifact@" in line for line in step):
+                with self.subTest(step=step[0].strip()):
+                    self.assertTrue(any(line.startswith("          path: ${{ runner.temp }}/") for line in step))
         # The workflow itself stays read-only and still names no write permission.
         self.assertIn("permissions:\n  contents: read\n", self.ci)
         self.assertNotIn("contents: write", self.ci)
@@ -4157,7 +4267,10 @@ def _workflow_env_value(name: str, key: str) -> str:
 
 _APT_STUBS = {
     "sudo": '#!/bin/sh\nexec "$@"\n',
-    "timeout": '#!/bin/sh\nshift\nexec "$@"\n',
+    # Records each command it bounds, so a test can tell which apt phase may be killed.
+    "timeout": '#!/bin/sh\nshift\necho "$*" >> "$NK_TEST_TIMEOUT_LOG"\nexec "$@"\n',
+    # `dpkg --configure -a` finishes a dpkg run a killed install left interrupted.
+    "dpkg": '#!/bin/sh\necho "dpkg $*" >> "$NK_TEST_LOG"\nrm -f "$NK_TEST_DPKG_BROKEN"\n',
     "dpkg-query": (
         '#!/bin/bash\nfor last; do :; done\n'
         'case " $NK_TEST_INSTALLED " in *" $last "*) printf installed ;; '
@@ -4171,8 +4284,14 @@ _APT_STUBS = {
     "apt-get": (
         '#!/bin/bash\ncase "$1" in\n'
         '  update) echo "update $(tr \'\\n\' \' \' < "$NK_APT_ROOT/etc/apt/apt-mirrors.txt")" >> "$NK_TEST_LOG" ;;\n'
-        '  install) n=$(( $(cat "$NK_TEST_COUNT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$NK_TEST_COUNT"\n'
-        '    echo "install ${*:2}" >> "$NK_TEST_LOG"; [ "$n" -gt "$NK_TEST_INSTALL_FAILURES" ] ;;\n'
+        '  install) case " $* " in *" --download-only "*) echo "download ${*:2}" >> "$NK_TEST_LOG"; exit 0 ;; esac\n'
+        # A failed install stands for one killed while dpkg unpacked: dpkg stays interrupted,
+        # and apt refuses every later install until `dpkg --configure -a` runs.
+        '    if [ -e "$NK_TEST_DPKG_BROKEN" ]; then echo "refused ${*:2}" >> "$NK_TEST_LOG"\n'
+        '      echo "E: dpkg was interrupted, you must manually run \'dpkg --configure -a\'" >&2; exit 100; fi\n'
+        '    n=$(( $(cat "$NK_TEST_COUNT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$NK_TEST_COUNT"\n'
+        '    echo "install ${*:2}" >> "$NK_TEST_LOG"\n'
+        '    if [ "$n" -gt "$NK_TEST_INSTALL_FAILURES" ]; then exit 0; fi; : > "$NK_TEST_DPKG_BROKEN"; exit 1 ;;\n'
         '  *) exit 64 ;;\nesac\n'
     ),
 }
@@ -4220,6 +4339,8 @@ class AptInstallHelperTests(unittest.TestCase):
             (stubs / name).chmod(0o755)
         log = scratch / "log"
         log.write_text("", encoding="utf-8")
+        self.timeout_log = scratch / "timeout-log"
+        self.timeout_log.write_text("", encoding="utf-8")
         env = {
             **os.environ,
             "NK_APT_INSTALL": _workflow_env_value("ci.yml", "NK_APT_INSTALL"),
@@ -4231,6 +4352,8 @@ class AptInstallHelperTests(unittest.TestCase):
             "NK_TEST_UP": " ".join(up),
             "NK_TEST_INSTALLED": installed,
             "NK_TEST_INSTALL_FAILURES": str(install_failures),
+            "NK_TEST_TIMEOUT_LOG": _bash_path(self.timeout_log),
+            "NK_TEST_DPKG_BROKEN": _bash_path(scratch / "dpkg-interrupted"),
         }
         # The steps' own invocation, with the stubs first on PATH.
         wrapper = 'export PATH="$NK_TEST_STUBS:$PATH"; bash -c "$NK_APT_INSTALL" nk-apt-install "$@"'
@@ -4248,7 +4371,8 @@ class AptInstallHelperTests(unittest.TestCase):
         others = [m for m in self.ALL_MIRRORS if not m.startswith(self.CANONICAL)]
         done, log, root = self.run_helper("--no-install-recommends", "libc6-dev-i386", up=others)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual([line.split()[0] for line in log if not line.startswith("curl ")], ["update", "install"])
+        self.assertEqual([line.split()[0] for line in log if not line.startswith("curl ")],
+                         ["update", "download", "install"])
         self.assertEqual(log[len(self.ALL_MIRRORS)].split()[1:], others)
         self.assertEqual(log[-1], "install -y --no-install-recommends libc6-dev-i386")
         self.assertEqual((root / "etc" / "apt" / "apt-mirrors.txt").read_text(encoding="utf-8").split(), others)
@@ -4277,6 +4401,33 @@ class AptInstallHelperTests(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         updates = [line.split()[1:] for line in log if line.startswith("update ")]
         self.assertEqual(updates, [self.ALL_MIRRORS, self.ALL_MIRRORS[1:] + self.ALL_MIRRORS[:1]])
+
+    def test_an_install_killed_inside_dpkg_is_finished_before_the_retry(self) -> None:
+        # Failing-before (audit 2026-11-17 F-e5b6b12f): the whole install ran under `timeout 480`,
+        # so a slow configure step was killed with dpkg interrupted, and attempts 2 and 3 failed
+        # at once on "dpkg was interrupted" whichever mirror they used.
+        done, log, _ = self.run_helper("--no-install-recommends", "libc6-dev-i386", up=self.ALL_MIRRORS,
+                                       install_failures=1)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("dpkg was interrupted", done.stderr)
+        phases = [line.split()[0] if not line.startswith("dpkg ") else line
+                  for line in log if not line.startswith("curl ")]
+        self.assertEqual(phases, ["update", "download", "install",
+                                  "dpkg --configure -a", "update", "download", "install"])
+        # Only the network phases may be killed: the index update and the download. The install
+        # that unpacks and configures runs unbounded, under the job's own limit.
+        timed = self.timeout_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(timed, 2 * ["apt-get update",
+                                     "apt-get install -y --download-only --no-install-recommends libc6-dev-i386"])
+
+    def test_no_text_still_bounds_the_install_itself(self) -> None:
+        # Review of #2891: the 8 minutes bound only the --download-only run now, so a reader told
+        # "8 for the install" expects a hung install to end there.
+        for path in (ROOT / ".github" / "workflows" / "ci.yml", ROOT / "docs" / "CI.md"):
+            with self.subTest(path=path.name):
+                flat = " ".join(line.strip().lstrip("#").strip()
+                                for line in path.read_text(encoding="utf-8").splitlines())
+                self.assertNotIn("8 for the install", flat)
 
     def test_every_attempt_failing_fails_the_step(self) -> None:
         done, log, _ = self.run_helper("libc6-dev-i386", up=self.ALL_MIRRORS, install_failures=99)
@@ -4610,7 +4761,7 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
         )
         self.assertEqual(
             ci_test_shards.skip_prefix_summary(output),
-            "Python test skip prefixes: NIGHTLY_TIER=1 WINDOWS_ONLY=1 PRIVATE_INPUT=2",
+            "Python test skip prefixes: NIGHTLY_TIER=1 WINDOWS_ONLY=1 PRIVATE_INPUT=2 TOOLCHAIN_MISSING=0",
         )
 
     def test_ci_stays_read_only_and_publishes_nothing_on_any_event(self) -> None:
@@ -4646,8 +4797,9 @@ class CiRunHarness(unittest.TestCase):
     QUICK = frozenset({"hygiene", "public_export"})
     LIGHT_ONLY = frozenset({"quick_checks", "ci_quick"})
     FULL_ONLY = frozenset({"ci_required"})
+    #: coverage_upload is routed with the jobs whose reports it uploads (python_tools, c_coverage).
     HEAVY = frozenset({"python_tools", "native_tools", "linux_gcc16", "android_build", "windows_runtime",
-                       "windows_installer"})
+                       "windows_installer", "coverage_upload"})
     #: Routed like a heavy job, but only on the nightly schedule and a manual run, so it never holds
     #: back a pull request's or a landing batch's verdict (c_coverage, docs/CI.md "Coverage").
     NIGHTLY = frozenset({"c_coverage"})

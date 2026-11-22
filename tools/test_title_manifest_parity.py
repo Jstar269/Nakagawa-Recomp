@@ -53,7 +53,7 @@ class TitleManifestParityTests(unittest.TestCase):
         # Ensure native parser binary is compiled and up-to-date with sources
         if shutil.which("gcc") is None:
             raise unittest.SkipTest(
-                "gcc is unavailable, so the native parser cannot be built; "
+                "TOOLCHAIN_MISSING: gcc is unavailable, so the native parser cannot be built; "
                 "reporting SKIP rather than passing without the differential half"
             )
         cls._temp_dir = scratch_dir.TemporaryDirectory(prefix="nk_manifest_parser_")

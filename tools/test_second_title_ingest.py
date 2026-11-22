@@ -25,7 +25,7 @@ class SecondTitleIngestTests(unittest.TestCase):
     def setUp(self) -> None:
         self.gcc = shutil.which("gcc")
         if not self.gcc:
-            self.skipTest("gcc not available")
+            self.skipTest("TOOLCHAIN_MISSING: gcc not available")
         assert self.gcc is not None
         self.temp_dir = Path(tempfile.mkdtemp(prefix="nk_second_title_test_"))
         # A cleanup runs even when setUp fails after this point; tearDown would not.

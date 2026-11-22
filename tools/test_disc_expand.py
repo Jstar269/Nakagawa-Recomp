@@ -164,7 +164,7 @@ def expanded_name_pattern(extension: str) -> str:
     return rf"^TEST00042\.[0-9a-f]{{16}}\.{extension}\.iso$"
 
 
-@unittest.skipUnless(_have_compiler(), "no C compiler to build nk_disc_expand (SKIP, not a pass)")
+@unittest.skipUnless(_have_compiler(), "TOOLCHAIN_MISSING: no C compiler to build nk_disc_expand (SKIP, not a pass)")
 class DiscExpandToolTests(unittest.TestCase):
     _tmp: ClassVar[tempfile.TemporaryDirectory[str]]
     root: ClassVar[Path]
@@ -332,7 +332,7 @@ class DiscExpandBuildCacheTests(unittest.TestCase):
             self.assertGreater(len(builds), first_build_count)
 
 
-@unittest.skipUnless(_have_compiler(), "no C compiler to build nk_disc_expand (SKIP, not a pass)")
+@unittest.skipUnless(_have_compiler(), "TOOLCHAIN_MISSING: no C compiler to build nk_disc_expand (SKIP, not a pass)")
 class BringupAcceptsCompressedImagesTests(unittest.TestCase):
     def setUp(self) -> None:
         import nk_cli
