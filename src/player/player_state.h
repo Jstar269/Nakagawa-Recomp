@@ -974,18 +974,20 @@ typedef struct {
 
 /* The build queue: one queue for Add to queue and Rebuild all, one build at a
  * time, in its order. Its file, rebuild-queue.json beside settings.json:
- *   {"format": "nakagawa-rebuild-queue", "schema_version": 2,
+ *   {"format": "nakagawa-rebuild-queue", "schema_version": 3, "paused": false,
  *    "titles": [{"disc_id": "TEST00006", "kind": "build", "state": "pending"}, ...]}
+ * paused is the queue screen's Pause: true until Resume, across restarts.
  * The titles are in queue order. kind is "build" or "rebuild"; state is
  * "pending", "done", "missing_disc" or "failed", and a title whose build was
  * running when the player closed is saved as "pending" and starts again.
- * Schema 1 had no kind: every title in it is a rebuild, and the next save
- * writes schema 2. A file with another format or an unknown member is not
+ * Schema 1 had no kind: every title in it is a rebuild. Schemas 1 and 2 had no
+ * paused: their queue is not paused. Loading either rewrites the file as
+ * schema 3 at once. A file with another format or an unknown member is not
  * resumed. A file with a newer schema_version is not resumed and never
  * replaced or removed: this player's queue then lasts until it closes. The
  * file goes once nothing is pending. */
 #define PLAYER_REBUILD_QUEUE_FORMAT "nakagawa-rebuild-queue"
-#define PLAYER_REBUILD_QUEUE_SCHEMA_VERSION 2
+#define PLAYER_REBUILD_QUEUE_SCHEMA_VERSION 3
 #define PLAYER_REBUILD_QUEUE_FILE "rebuild-queue.json"
 
 typedef struct {
@@ -997,6 +999,10 @@ typedef struct {
        or the build tool download was cancelled); Resume, Rebuild all or Add to
        queue starts it again. */
     bool paused;
+    /* The person paused it (the queue screen's Pause): the build that runs
+       finishes, and no next one starts until Resume. Saved in the queue file,
+       so it stays paused after a restart; Add to queue does not resume it. */
+    bool held;
     /* The build session the queue started, once the builder runs; 0 before. */
     uint64_t build_generation;
     /* rebuild-queue.json was written by a newer Nakagawa: it stays as it is. */
@@ -2660,8 +2666,14 @@ bool player_app_build_queue_remove(PlayerApp *app, const char *disc_id);
 /* Moves a waiting game one place earlier (direction < 0) or later (> 0), past
    the next game that waits. False at either end or for the one building. */
 bool player_app_build_queue_move(PlayerApp *app, const char *disc_id, int direction);
-/* A paused queue goes on. */
+/* The queue screen's Pause: the build that runs (if any) finishes, then the
+   queue waits, even after a restart. False when no queue runs or it is already
+   paused. A build cannot be suspended halfway; Cancel build stops one. */
+bool player_app_build_queue_pause(PlayerApp *app);
+/* A paused queue goes on: the person's Pause, or a build that could not start. */
 bool player_app_build_queue_resume(PlayerApp *app);
+/* The person paused the queue (player_app_build_queue_pause). */
+bool player_app_build_queue_held(const PlayerApp *app);
 /* The game's place in the queue, from 1 (the one building, or the next), and
    the number of games waiting or building in *out_total; 0 when it is not
    waiting or building. */

@@ -13220,8 +13220,10 @@ static int player_rebuild_active_index(const PlayerRebuildQueue *queue) {
     return -1;
 }
 
+/* The queue goes on, or a paused one still finishes the build that runs. */
 static bool player_rebuild_queue_running(const PlayerApp *app) {
-    return app && app->rebuild_queue.active && !app->rebuild_queue.paused;
+    return app && app->rebuild_queue.active && !app->rebuild_queue.paused &&
+           (!app->rebuild_queue.held || player_rebuild_active_index(&app->rebuild_queue) >= 0);
 }
 
 bool player_app_rebuild_banner_visible(const PlayerApp *app) {
@@ -13255,7 +13257,8 @@ size_t player_app_rebuild_banner_text(const PlayerApp *app, char *out, size_t ou
                            app->rebuild_queue.count);
     } else if (player_app_build_queue_has_waiting(app) &&
                (app->outdated.count == 0 || app->outdated.banner_dismissed)) {
-        /* Paused: a build could not start. Nothing builds until Resume. */
+        /* Paused (the person's Pause, or a build could not start): nothing
+           builds until Resume. */
         int total = 0;
         (void)player_app_build_queue_place(app, "", &total);
         written = total == 1
@@ -13421,8 +13424,10 @@ bool player_app_rebuild_queue_save(const PlayerApp *app) {
     if (written <= 0 || (size_t)written >= sizeof(tmp_path)) return false;
     FILE *f = nk_fopen_utf8(tmp_path, "wb");
     if (!f) return false;
-    fprintf(f, "{\n  \"format\": \"%s\",\n  \"schema_version\": %d,\n  \"titles\": [",
-            PLAYER_REBUILD_QUEUE_FORMAT, PLAYER_REBUILD_QUEUE_SCHEMA_VERSION);
+    fprintf(f, "{\n  \"format\": \"%s\",\n  \"schema_version\": %d,\n  \"paused\": %s,\n"
+            "  \"titles\": [",
+            PLAYER_REBUILD_QUEUE_FORMAT, PLAYER_REBUILD_QUEUE_SCHEMA_VERSION,
+            app->rebuild_queue.held ? "true" : "false");
     for (int i = 0; i < app->rebuild_queue.count; i++) {
         /* Disc IDs are checked to be plain letters, digits, - and _ when they
            are read back, so they need no escaping. */
@@ -13471,7 +13476,8 @@ bool player_app_rebuild_queue_load(PlayerApp *app) {
     int64_t schema = 0;
     const NkJsonNode *titles = root ? nk_json_obj_get(root, "titles") : NULL;
     const char *format = root ? nk_json_get_string(nk_json_obj_get(root, "format")) : NULL;
-    if (!root || root->type != NK_JSON_OBJECT || root->u.obj.count != 3) {
+    bool held = false;
+    if (!root || root->type != NK_JSON_OBJECT || root->u.obj.count < 3) {
         why = "is not a rebuild queue";
     } else if (!format || strcmp(format, PLAYER_REBUILD_QUEUE_FORMAT) != 0) {
         why = "has another format";
@@ -13481,6 +13487,10 @@ bool player_app_rebuild_queue_load(PlayerApp *app) {
     } else if (schema > PLAYER_REBUILD_QUEUE_SCHEMA_VERSION) {
         why = "was written by a newer Nakagawa";
         app->rebuild_queue.file_is_newer = true;
+    } else if (root->u.obj.count != (schema >= 3 ? 4u : 3u) ||
+               (schema >= 3 && !nk_json_get_bool(nk_json_obj_get(root, "paused"), &held))) {
+        /* Schema 3 added paused; schemas 1 and 2 have exactly three members. */
+        why = "is not a rebuild queue";
     } else if (!titles || titles->type != NK_JSON_ARRAY ||
                nk_json_array_count(titles) > MAX_LIBRARY_GAMES) {
         why = "has no valid title list";
@@ -13525,11 +13535,16 @@ bool player_app_rebuild_queue_load(PlayerApp *app) {
     for (int i = 0; i < count; i++) {
         if (queue->entries[i].state == PLAYER_REBUILD_PENDING) queue->active = true;
     }
-    player_dev_log_add(app, "rebuild", "build queue resumed with %d titles%s", count,
-                       schema == 1 ? " (from a schema 1 rebuild queue)" : "");
-    /* Schema 1 becomes schema 2 on disk at once: every title a rebuild. */
-    if (schema == 1 && !player_app_rebuild_queue_save(app)) {
-        player_dev_log_add(app, "rebuild", "the schema 1 queue file could not be rewritten");
+    queue->held = queue->active && held;
+    player_dev_log_add(app, "rebuild", "build queue %s with %d titles%s",
+                       queue->held ? "loaded, paused," : "resumed", count,
+                       schema == 1 ? " (from a schema 1 rebuild queue)" :
+                       schema == 2 ? " (from a schema 2 build queue)" : "");
+    /* An older schema becomes schema 3 on disk at once: a schema 1 title is a
+       rebuild, and neither older schema was paused. */
+    if (schema < PLAYER_REBUILD_QUEUE_SCHEMA_VERSION && !player_app_rebuild_queue_save(app)) {
+        player_dev_log_add(app, "rebuild", "the schema %d queue file could not be rewritten",
+                           (int)schema);
     }
     return true;
 }
@@ -13651,6 +13666,7 @@ bool player_app_build_queue_remove(PlayerApp *app, const char *disc_id) {
         /* Nothing waits: the queue ends, and its file goes. */
         queue->active = false;
         queue->paused = false;
+        queue->held = false;
         queue->build_generation = 0;
         player_dev_log_add(app, "rebuild", "build queue emptied");
     }
@@ -13690,10 +13706,34 @@ bool player_app_build_queue_move(PlayerApp *app, const char *disc_id, int direct
     return true;
 }
 
+bool player_app_build_queue_pause(PlayerApp *app) {
+    if (!app || !app->rebuild_queue.active || app->rebuild_queue.held) return false;
+    app->rebuild_queue.held = true;
+    player_dev_log_add(app, "rebuild", player_rebuild_active_index(&app->rebuild_queue) >= 0
+                       ? "build queue paused; the current build finishes, then it waits"
+                       : "build queue paused");
+    if (!player_app_rebuild_queue_save(app)) {
+        player_dev_log_add(app, "rebuild", "the paused queue could not be saved; "
+                           "it will not stay paused after a restart");
+    }
+    return true;
+}
+
+bool player_app_build_queue_held(const PlayerApp *app) {
+    return app && app->rebuild_queue.active && app->rebuild_queue.held;
+}
+
 bool player_app_build_queue_resume(PlayerApp *app) {
-    if (!app || !app->rebuild_queue.active || !app->rebuild_queue.paused) return false;
+    PlayerRebuildQueue *queue = app ? &app->rebuild_queue : NULL;
+    if (!queue || !queue->active || (!queue->paused && !queue->held)) return false;
+    queue->paused = false;
+    queue->held = false;
     player_dev_log_add(app, "rebuild", "build queue resumed");
-    return player_rebuild_queue_start(app, 0);
+    if (!player_app_rebuild_queue_save(app)) {
+        player_dev_log_add(app, "rebuild", "the rebuild queue could not be saved; "
+                           "it will not resume after a restart");
+    }
+    return true;
 }
 
 bool player_app_rebuild_all(PlayerApp *app) {
@@ -13728,6 +13768,7 @@ static void player_rebuild_queue_settle(PlayerApp *app) {
     if (!remaining && queue->active) {
         queue->active = false;
         queue->paused = false;
+        queue->held = false;
         app->outdated.scan_requested = true;
         player_dev_log_add(app, "rebuild", "rebuild queue finished");
     }
@@ -13793,8 +13834,10 @@ void player_app_rebuild_queue_step(PlayerApp *app) {
         (void)player_app_rebuild_queue_save(app);
         return;
     }
-    if (queue->paused || app->build_session.is_building || app->launch_pending ||
-        player_prerequisite_flow_active(app)) return;
+    /* Paused: the person's Pause, or a build that could not start. A build
+       that ran when Pause came was followed above; no next one starts. */
+    if (queue->paused || queue->held || app->build_session.is_building ||
+        app->launch_pending || player_prerequisite_flow_active(app)) return;
     for (int i = 0; i < queue->count; i++) {
         PlayerRebuildEntry *entry = &queue->entries[i];
         if (entry->state != PLAYER_REBUILD_PENDING) continue;

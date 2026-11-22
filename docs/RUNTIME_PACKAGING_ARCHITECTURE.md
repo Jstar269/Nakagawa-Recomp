@@ -514,15 +514,22 @@ What the player does (it suggests a rebuild and never forces one):
 * The same queue takes first builds: a game with no package offers Add to
   queue beside BUILD PACKAGE on its page, and Remove from queue while it
   waits. The library line's Queue opens the queue: the game building first,
-  then the ones that wait, each with Up, Down and Remove, and Resume when a
-  build could not start for a reason outside its game. The build card says how
-  many games follow.
+  then the ones that wait, each with Up, Down and Remove, and one Pause button
+  that becomes Resume while the queue is paused. Pause lets the build that
+  runs finish (a build cannot be suspended halfway; Cancel build stops one),
+  then no next game starts until Resume; the screen's title, lead and hint say
+  so, and Add to queue or Rebuild all add games without resuming it. The queue
+  also pauses by itself, with Resume, when a build could not start for a reason
+  outside its game. The build card says how many games follow.
 * The queue survives a restart in `rebuild-queue.json` beside `settings.json`:
-  `{"format": "nakagawa-rebuild-queue", "schema_version": 2, "titles":
-  [{"disc_id": "...", "kind": "build" | "rebuild", "state": "pending" |
-  "done" | "missing_disc" | "failed"}]}`, in queue order. A build that was
-  running is saved as `pending` and starts again. A schema 1 file (no `kind`,
-  every title a rebuild) is read as rebuilds and rewritten as schema 2. A file
+  `{"format": "nakagawa-rebuild-queue", "schema_version": 3, "paused": false,
+  "titles": [{"disc_id": "...", "kind": "build" | "rebuild", "state":
+  "pending" | "done" | "missing_disc" | "failed"}]}`, in queue order.
+  `paused` is the person's Pause, so a paused queue stays paused after a
+  restart. A build that was running is saved as `pending` and starts again
+  (after Resume, when the queue is paused). A schema 1 file (no `kind`, every
+  title a rebuild) is read as rebuilds, and a schema 1 or 2 file (no `paused`)
+  as not paused; either is rewritten as schema 3 at once. A file
   with another format or an unknown member is left in place and not resumed;
   a file with a newer `schema_version` is not resumed and is never replaced or
   removed. The file goes when nothing is pending.

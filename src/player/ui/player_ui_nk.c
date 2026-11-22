@@ -2025,7 +2025,8 @@ static PlayerUiAction player_ui_render_queue(PlayerUiNk *player, const PlayerApp
             }
         } else {
             snprintf(player->queue_status[r], sizeof(player->queue_status[r]), "%s",
-                     first_waiting ? (queue->paused ? "Paused" : "Next") : "Waiting");
+                     first_waiting ? (queue->paused || queue->held ? "Paused" : "Next")
+                                       : "Waiting");
         }
         row->status = player->queue_status[r];
         row->can_move_up = !row->building && at > 0u &&
@@ -2056,6 +2057,8 @@ static PlayerUiAction player_ui_render_queue(PlayerUiNk *player, const PlayerApp
     model.first_row = player->queue_first;
     model.total = total;
     model.paused = queue->active && queue->paused;
+    model.held = player_app_build_queue_held(app);
+    model.building = total > 0u && queue->entries[list[0]].state == PLAYER_REBUILD_ACTIVE;
     model.logical_width = scale.logical_w;
     model.logical_height = scale.logical_h;
     result = player_ui_screen_queue(player->ui, &model);
@@ -2087,9 +2090,8 @@ static PlayerUiAction player_ui_render_queue(PlayerUiNk *player, const PlayerApp
             } else {
                 player->queue_follow_back = true;
             }
-        } else if (op == PLAYER_UI_QUEUE_RESUME) {
-            player->queue_follow_back = true;
         }
+        /* Pause and Resume are one button: the focus stays on it. */
     }
     return result;
 }
