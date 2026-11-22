@@ -350,6 +350,11 @@ void player_ui_snd0_update(PlayerUiSnd0 *snd0, const PlayerUiSnd0Request *reques
             snd0->state = PLAYER_UI_SND0_NO_DEVICE;
             return;
         }
+    } else if (snd0->fading_out) {
+        /* Audible again before a fade-out finished (focus back mid-fade): the
+           device is still open, so the clip fades back in from where it is. */
+        snd0->fading_out = false;
+        player_ui_snd0_locked_ramp(snd0, gain, PLAYER_UI_SND0_FADE_IN_MS);
     } else if (gain != snd0->volume_gain) {
         player_ui_snd0_locked_ramp(snd0, gain, PLAYER_UI_SND0_VOLUME_RAMP_MS);
     }

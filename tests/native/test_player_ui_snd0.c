@@ -205,6 +205,37 @@ static int test_refusals(void) {
     put32(bad + 40, 0xFFFFFFFFu);
     if (!expect_refused(bad, n, PLAYER_UI_SND0_MAX_PCM_BYTES, PLAYER_UI_AT3_DAMAGED,
                         "a chunk size that would wrap the cursor")) return 0;
+    for (uint32_t riff = 0u; riff < 4u; ++riff) {
+        /* A RIFF size of 0 to 3 ends the file inside its header; with a data
+           chunk claiming far more than is there, nothing may be read past the
+           buffer (the cursor must not wrap). */
+        /* Whole frames follow past the file's end inside this buffer, so a
+           parser that wrapped would decode them and report OK. */
+        memcpy(bad, buf, n);
+        for (size_t f = 0u; f < 64u; ++f) {
+            memcpy(bad + 58u + f * sizeof(AT3P_MONO_FRAME), AT3P_MONO_FRAME, sizeof(AT3P_MONO_FRAME));
+        }
+        put32(bad + 4, riff);
+        put32(bad + 54, 64u * (uint32_t)sizeof(AT3P_MONO_FRAME));
+        if (!expect_refused(bad, n, PLAYER_UI_SND0_MAX_PCM_BYTES, PLAYER_UI_AT3_DAMAGED,
+                            "a RIFF size that ends inside the header")) return 0;
+    }
+    memcpy(bad, buf, 12u);
+    put32(bad + 4, 0u);
+    if (!expect_refused(bad, 12u, PLAYER_UI_SND0_MAX_PCM_BYTES, PLAYER_UI_AT3_DAMAGED,
+                        "a 12-byte file with a RIFF size of 0")) return 0;
+    put32(bad + 4, 4u);
+    if (!expect_refused(bad, 12u, PLAYER_UI_SND0_MAX_PCM_BYTES, PLAYER_UI_AT3_DAMAGED,
+                        "a 12-byte file with no chunks")) return 0;
+    memcpy(bad, buf, n);
+    put32(bad + 54, 73728u);
+    {
+        PlayerUiAt3Result got = player_ui_at3_decode(bad, n, PLAYER_UI_SND0_MAX_PCM_BYTES, NULL,
+                                                     NULL, &pcm, detail, sizeof(detail));
+        CHECK(got == PLAYER_UI_AT3_OK && pcm.frames == 4u * 2048u,
+              "a data chunk larger than the file keeps only the frames in the file");
+        player_ui_pcm_free(&pcm);
+    }
     if (!expect_refused(buf, 58u + 4u, PLAYER_UI_SND0_MAX_PCM_BYTES, PLAYER_UI_AT3_DAMAGED,
                         "a data chunk without a whole frame")) return 0;
     if (!expect_refused(buf, 36u, PLAYER_UI_SND0_MAX_PCM_BYTES, PLAYER_UI_AT3_DAMAGED,
@@ -357,6 +388,36 @@ static int test_player(void) {
     request.focused = true;
     CHECK(wait_for(snd0, &request, PLAYER_UI_SND0_PLAYING) && player_ui_snd0_test_reads(snd0) == 1u,
           "back, it plays again without another read");
+
+    /* Focus lost and back during the fade-out: the clip fades back in, keeps
+       the launcher music quiet, and the launcher may sleep again. */
+    {
+        uint64_t deadline = SDL_GetTicks() + WAIT_LIMIT_MS;
+        while (player_ui_snd0_gain(snd0) < 0.79f && SDL_GetTicks() < deadline) {
+            player_ui_snd0_update(snd0, &request, SDL_GetTicks());
+            SDL_Delay(5);
+        }
+        CHECK(player_ui_snd0_gain(snd0) >= 0.79f, "the clip is up to the Music volume");
+    }
+    request.focused = false;
+    player_ui_snd0_update(snd0, &request, SDL_GetTicks());
+    CHECK(player_ui_snd0_state(snd0) == PLAYER_UI_SND0_FADING_OUT &&
+              !player_ui_snd0_quiets_music(snd0),
+          "away, the fade-out starts");
+    request.focused = true;
+    player_ui_snd0_update(snd0, &request, SDL_GetTicks());
+    CHECK(player_ui_snd0_state(snd0) == PLAYER_UI_SND0_PLAYING && player_ui_snd0_holds_audio(snd0) &&
+              player_ui_snd0_quiets_music(snd0) && player_ui_snd0_wait_ms(snd0, 1000u) == 1000u,
+          "back mid-fade, it plays on and the launcher music stays quiet");
+    {
+        uint64_t deadline = SDL_GetTicks() + WAIT_LIMIT_MS;
+        while (player_ui_snd0_gain(snd0) < 0.79f && SDL_GetTicks() < deadline) {
+            player_ui_snd0_update(snd0, &request, SDL_GetTicks());
+            SDL_Delay(5);
+        }
+        CHECK(player_ui_snd0_gain(snd0) >= 0.79f && player_ui_snd0_state(snd0) == PLAYER_UI_SND0_PLAYING,
+              "back mid-fade, it fades back up to the Music volume");
+    }
 
     /* Another game's page, whose disc has no clip: a fade, then silence, no error. */
     request.iso_path = "missing.iso";

@@ -73,7 +73,13 @@ static PlayerUiAt3Result at3_parse(const uint8_t *bytes, size_t size, At3Track *
     if ((uint64_t)at3_le32(bytes + 4) + 8u < (uint64_t)end) {
         end = (size_t)at3_le32(bytes + 4) + 8u;
     }
-    while (end - off >= 8u) {
+    /* A RIFF size of 0 to 3 would end the file inside its own header; the
+       cursor below must never pass the end, so refuse that here. */
+    if (end < off) {
+        return at3_fail(PLAYER_UI_AT3_DAMAGED, detail, detail_size,
+                        "the RIFF size ends inside the file header");
+    }
+    while (off <= end && end - off >= 8u) {
         const uint8_t *chunk = bytes + off;
         size_t payload = (size_t)at3_le32(chunk + 4);
         size_t avail = end - off - 8u;
