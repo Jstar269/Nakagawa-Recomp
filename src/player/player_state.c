@@ -13405,6 +13405,40 @@ static bool player_rebuild_disc_id_valid(const char *disc_id) {
     return disc_id && player_disc_id_text_ok(disc_id, strlen(disc_id));
 }
 
+bool player_app_rebuild_queue_paused_path(const PlayerApp *app, char *out, size_t out_size) {
+    char path[MAX_PATH_LEN];
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    if (!player_app_rebuild_queue_path(app, path, sizeof(path))) return false;
+    size_t length = strlen(path);
+    size_t name = strlen(PLAYER_REBUILD_QUEUE_FILE);
+    if (length < name) return false;
+    path[length - name] = '\0';
+    int written = snprintf(out, out_size, "%s%s", path, PLAYER_REBUILD_QUEUE_PAUSED_FILE);
+    if (written <= 0 || (size_t)written >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+/* The pause marker follows the queue: there while a queue is paused, gone
+   otherwise. Its presence is the whole record. */
+static bool player_rebuild_queue_sync_paused(const PlayerApp *app) {
+    char marker[MAX_PATH_LEN];
+    if (!player_app_rebuild_queue_paused_path(app, marker, sizeof(marker))) return false;
+    if (!(app->rebuild_queue.active && app->rebuild_queue.held)) {
+        return !nk_platform_file_exists(marker) || nk_remove_utf8(marker) == 0;
+    }
+    if (nk_platform_file_exists(marker)) return true;
+    FILE *f = nk_fopen_utf8(marker, "wb");
+    if (!f) return false;
+    bool ok = fputs("paused\n", f) >= 0;
+    ok = fclose(f) == 0 && ok;
+    if (!ok) nk_remove_utf8(marker);
+    return ok;
+}
+
 bool player_app_rebuild_queue_save(const PlayerApp *app) {
     char path[MAX_PATH_LEN];
     char tmp_path[MAX_PATH_LEN + 8];
@@ -13412,8 +13446,9 @@ bool player_app_rebuild_queue_save(const PlayerApp *app) {
     /* A newer Nakagawa's queue is neither replaced nor removed. */
     if (app->rebuild_queue.file_is_newer) return false;
     if (!app->rebuild_queue.active) {
-        /* Nothing is pending: there is nothing to resume. */
-        return !nk_platform_file_exists(path) || nk_remove_utf8(path) == 0;
+        /* Nothing is pending: there is nothing to resume, nor to pause. */
+        bool removed = !nk_platform_file_exists(path) || nk_remove_utf8(path) == 0;
+        return player_rebuild_queue_sync_paused(app) && removed;
     }
     char folder[MAX_PATH_LEN];
     if (player_path_parent_folder(path, folder, sizeof(folder)) &&
@@ -13424,10 +13459,8 @@ bool player_app_rebuild_queue_save(const PlayerApp *app) {
     if (written <= 0 || (size_t)written >= sizeof(tmp_path)) return false;
     FILE *f = nk_fopen_utf8(tmp_path, "wb");
     if (!f) return false;
-    fprintf(f, "{\n  \"format\": \"%s\",\n  \"schema_version\": %d,\n  \"paused\": %s,\n"
-            "  \"titles\": [",
-            PLAYER_REBUILD_QUEUE_FORMAT, PLAYER_REBUILD_QUEUE_SCHEMA_VERSION,
-            app->rebuild_queue.held ? "true" : "false");
+    fprintf(f, "{\n  \"format\": \"%s\",\n  \"schema_version\": %d,\n  \"titles\": [",
+            PLAYER_REBUILD_QUEUE_FORMAT, PLAYER_REBUILD_QUEUE_SCHEMA_VERSION);
     for (int i = 0; i < app->rebuild_queue.count; i++) {
         /* Disc IDs are checked to be plain letters, digits, - and _ when they
            are read back, so they need no escaping. */
@@ -13443,13 +13476,22 @@ bool player_app_rebuild_queue_save(const PlayerApp *app) {
         nk_remove_utf8(tmp_path);
         return false;
     }
-    return true;
+    return player_rebuild_queue_sync_paused(app);
 }
 
 bool player_app_rebuild_queue_load(PlayerApp *app) {
     char path[MAX_PATH_LEN];
-    if (!app || !player_app_rebuild_queue_path(app, path, sizeof(path)) ||
-        !nk_platform_file_exists(path)) return false;
+    char marker[MAX_PATH_LEN];
+    if (!app || !player_app_rebuild_queue_path(app, path, sizeof(path))) return false;
+    bool marked = player_app_rebuild_queue_paused_path(app, marker, sizeof(marker)) &&
+                  nk_platform_file_exists(marker);
+    if (!nk_platform_file_exists(path)) {
+        /* An older player finished the queue and left the pause behind. */
+        if (marked && nk_remove_utf8(marker) == 0) {
+            player_dev_log_add(app, "rebuild", "a pause marker with no queue was removed");
+        }
+        return false;
+    }
     FILE *f = nk_fopen_utf8(path, "rb");
     if (!f) return false;
     char *text = NULL;
@@ -13476,8 +13518,7 @@ bool player_app_rebuild_queue_load(PlayerApp *app) {
     int64_t schema = 0;
     const NkJsonNode *titles = root ? nk_json_obj_get(root, "titles") : NULL;
     const char *format = root ? nk_json_get_string(nk_json_obj_get(root, "format")) : NULL;
-    bool held = false;
-    if (!root || root->type != NK_JSON_OBJECT || root->u.obj.count < 3) {
+    if (!root || root->type != NK_JSON_OBJECT || root->u.obj.count != 3) {
         why = "is not a rebuild queue";
     } else if (!format || strcmp(format, PLAYER_REBUILD_QUEUE_FORMAT) != 0) {
         why = "has another format";
@@ -13487,10 +13528,6 @@ bool player_app_rebuild_queue_load(PlayerApp *app) {
     } else if (schema > PLAYER_REBUILD_QUEUE_SCHEMA_VERSION) {
         why = "was written by a newer Nakagawa";
         app->rebuild_queue.file_is_newer = true;
-    } else if (root->u.obj.count != (schema >= 3 ? 4u : 3u) ||
-               (schema >= 3 && !nk_json_get_bool(nk_json_obj_get(root, "paused"), &held))) {
-        /* Schema 3 added paused; schemas 1 and 2 have exactly three members. */
-        why = "is not a rebuild queue";
     } else if (!titles || titles->type != NK_JSON_ARRAY ||
                nk_json_array_count(titles) > MAX_LIBRARY_GAMES) {
         why = "has no valid title list";
@@ -13535,16 +13572,13 @@ bool player_app_rebuild_queue_load(PlayerApp *app) {
     for (int i = 0; i < count; i++) {
         if (queue->entries[i].state == PLAYER_REBUILD_PENDING) queue->active = true;
     }
-    queue->held = queue->active && held;
+    queue->held = queue->active && marked;
     player_dev_log_add(app, "rebuild", "build queue %s with %d titles%s",
                        queue->held ? "loaded, paused," : "resumed", count,
-                       schema == 1 ? " (from a schema 1 rebuild queue)" :
-                       schema == 2 ? " (from a schema 2 build queue)" : "");
-    /* An older schema becomes schema 3 on disk at once: a schema 1 title is a
-       rebuild, and neither older schema was paused. */
-    if (schema < PLAYER_REBUILD_QUEUE_SCHEMA_VERSION && !player_app_rebuild_queue_save(app)) {
-        player_dev_log_add(app, "rebuild", "the schema %d queue file could not be rewritten",
-                           (int)schema);
+                       schema == 1 ? " (from a schema 1 rebuild queue)" : "");
+    /* Schema 1 becomes schema 2 on disk at once: every title a rebuild. */
+    if (schema == 1 && !player_app_rebuild_queue_save(app)) {
+        player_dev_log_add(app, "rebuild", "the schema 1 queue file could not be rewritten");
     }
     return true;
 }

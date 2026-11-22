@@ -1955,7 +1955,7 @@
         "tests/native/test_player_state.c"
       ],
       "max_input": "1 MiB queue file; parsing then goes through nk_json depth 16; at most MAX_LIBRARY_GAMES titles.",
-      "tables_nesting": "One titles array of objects: disc_id and state in schema 1, disc_id, kind and state in schemas 2 and 3; schema 3 adds a top-level boolean paused; a repeated disc_id, or a document with any other member or shape, is refused.",
+      "tables_nesting": "One titles array of objects: disc_id and state in schema 1, disc_id, kind and state in schema 2; a repeated disc_id, or a document with any other member or shape, is refused.",
       "arithmetic": {
         "safe": "SAFE",
         "evidence": [

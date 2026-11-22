@@ -522,17 +522,21 @@ What the player does (it suggests a rebuild and never forces one):
   also pauses by itself, with Resume, when a build could not start for a reason
   outside its game. The build card says how many games follow.
 * The queue survives a restart in `rebuild-queue.json` beside `settings.json`:
-  `{"format": "nakagawa-rebuild-queue", "schema_version": 3, "paused": false,
-  "titles": [{"disc_id": "...", "kind": "build" | "rebuild", "state":
-  "pending" | "done" | "missing_disc" | "failed"}]}`, in queue order.
-  `paused` is the person's Pause, so a paused queue stays paused after a
-  restart. A build that was running is saved as `pending` and starts again
-  (after Resume, when the queue is paused). A schema 1 file (no `kind`, every
-  title a rebuild) is read as rebuilds, and a schema 1 or 2 file (no `paused`)
-  as not paused; either is rewritten as schema 3 at once. A file
+  `{"format": "nakagawa-rebuild-queue", "schema_version": 2, "titles":
+  [{"disc_id": "...", "kind": "build" | "rebuild", "state": "pending" |
+  "done" | "missing_disc" | "failed"}]}`, in queue order. A build that was
+  running is saved as `pending` and starts again. A schema 1 file (no `kind`,
+  every title a rebuild) is read as rebuilds and rewritten as schema 2. A file
   with another format or an unknown member is left in place and not resumed;
   a file with a newer `schema_version` is not resumed and is never replaced or
   removed. The file goes when nothing is pending.
+* The person's Pause is the marker file `rebuild-queue-paused` beside it, there
+  only while a queue is paused; its presence is the whole record and its bytes
+  are never read. A paused queue's build that was running starts again only
+  after Resume. The queue file keeps the shape every released player reads, so
+  an older player resumes the queue and ignores the pause. A marker with no
+  queue file beside it (an older player finished the queue) is removed at
+  start.
 
 A rebuild never removes the old package first. The build runs in the
 content-addressed cache entry, is validated, copied next to the package,

@@ -974,21 +974,27 @@ typedef struct {
 
 /* The build queue: one queue for Add to queue and Rebuild all, one build at a
  * time, in its order. Its file, rebuild-queue.json beside settings.json:
- *   {"format": "nakagawa-rebuild-queue", "schema_version": 3, "paused": false,
+ *   {"format": "nakagawa-rebuild-queue", "schema_version": 2,
  *    "titles": [{"disc_id": "TEST00006", "kind": "build", "state": "pending"}, ...]}
- * paused is the queue screen's Pause: true until Resume, across restarts.
  * The titles are in queue order. kind is "build" or "rebuild"; state is
  * "pending", "done", "missing_disc" or "failed", and a title whose build was
  * running when the player closed is saved as "pending" and starts again.
- * Schema 1 had no kind: every title in it is a rebuild. Schemas 1 and 2 had no
- * paused: their queue is not paused. Loading either rewrites the file as
- * schema 3 at once. A file with another format or an unknown member is not
+ * Schema 1 had no kind: every title in it is a rebuild, and the next save
+ * writes schema 2. A file with another format or an unknown member is not
  * resumed. A file with a newer schema_version is not resumed and never
  * replaced or removed: this player's queue then lasts until it closes. The
- * file goes once nothing is pending. */
+ * file goes once nothing is pending.
+ *
+ * The queue screen's Pause lives beside it in rebuild-queue-paused, a marker
+ * whose presence alone means "paused" (its bytes are never read). Keeping it
+ * out of rebuild-queue.json leaves that file in the shape every released
+ * player reads, so an older player resumes the queue and ignores the pause.
+ * The marker exists only while a queue is paused; a marker with no queue file
+ * beside it is stale (an older player finished the queue) and goes at start. */
 #define PLAYER_REBUILD_QUEUE_FORMAT "nakagawa-rebuild-queue"
-#define PLAYER_REBUILD_QUEUE_SCHEMA_VERSION 3
+#define PLAYER_REBUILD_QUEUE_SCHEMA_VERSION 2
 #define PLAYER_REBUILD_QUEUE_FILE "rebuild-queue.json"
+#define PLAYER_REBUILD_QUEUE_PAUSED_FILE "rebuild-queue-paused"
 
 typedef struct {
     int count;
@@ -1000,8 +1006,9 @@ typedef struct {
        queue starts it again. */
     bool paused;
     /* The person paused it (the queue screen's Pause): the build that runs
-       finishes, and no next one starts until Resume. Saved in the queue file,
-       so it stays paused after a restart; Add to queue does not resume it. */
+       finishes, and no next one starts until Resume. Saved as the
+       rebuild-queue-paused marker, so it stays paused after a restart; Add to
+       queue does not resume it. */
     bool held;
     /* The build session the queue started, once the builder runs; 0 before. */
     uint64_t build_generation;
@@ -2674,6 +2681,8 @@ bool player_app_build_queue_pause(PlayerApp *app);
 bool player_app_build_queue_resume(PlayerApp *app);
 /* The person paused the queue (player_app_build_queue_pause). */
 bool player_app_build_queue_held(const PlayerApp *app);
+/* The rebuild-queue-paused marker beside rebuild-queue.json. */
+bool player_app_rebuild_queue_paused_path(const PlayerApp *app, char *out, size_t out_size);
 /* The game's place in the queue, from 1 (the one building, or the next), and
    the number of games waiting or building in *out_total; 0 when it is not
    waiting or building. */
