@@ -108,6 +108,14 @@ typedef struct {
        SR_NICKNAME so an inherited value cannot name the console. The runtime re-validates it
        and serves NK_NICKNAME_DEFAULT, with a log line, for an empty or invalid value. */
     char nickname[NK_NICKNAME_MAX_BYTES + 1u];
+    /* Opt-in ad hoc online play (#1139): off by default. Always exported as SR_ADHOC_ENABLED and
+       SR_ADHOC_SERVER (0 and empty when off) so inherited values never enable online play. */
+    bool online_play;
+    char online_play_server[128]; /* NK_ADHOC_SERVER_MAX_LEN + 1 */
+    /* The port offset the relay adds to the game's ports (SR_ADHOC_PORT_OFFSET): 0-65535,
+       NK_RELAY_PORT_OFFSET (10000, PPSSPP's) as prepare_session leaves it. A value past 65535
+       keeps online play off for the launch. */
+    uint32_t online_play_port_offset;
     /* Optional local shared guest-memory channel, empty unless the player enabled
        its per-frame memory service for this launch. It never carries network data. */
     char guest_memory_channel[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
@@ -367,6 +375,11 @@ bool nk_launch_describe_spawn_block(int os_error, const char *program,
                                     const char *program_title,
                                     const char *program_path,
                                     NkSpawnBlockReport *out);
+
+/* The file the launcher creates to turn Online play off while a game runs (#1139): the run's
+   boot event file with ".online-off" added, exported as SR_ADHOC_OFF_FILE. False, with out
+   empty, when there is no boot event file or the result does not fit. */
+bool nk_launch_adhoc_off_path(const char *boot_event_path, char *out, size_t out_size);
 
 #ifdef __cplusplus
 }

@@ -831,7 +831,7 @@ MOUSE AIM: ON says whether the mouse moves that stick too; the card has no room 
 MOUSE AIM (#1791) opens the mouse aiming settings, which replace the cards with a 720 px dialog card as a calibration
 step does: the mapping they belong to in the eyebrow (`MOUSE AIMING · GLOBAL MAPPING`), a lead that says the mouse
 pushes the PSP stick in a game, that the game keeps the pointer until it is paused, and that a change applies when
-a game next starts, then five rows in a box, each with its control on the left as a Settings row has it: MOUSE AIM (ON or OFF, the button filled while on), SPEED and
+a game next starts, then five rows in a box, each with its control on the left as a Settings row has it: MOUSE AIM (ON or OFF, the button outlined in the accent while on), SPEED and
 SMOOTHING with - and + (the speed in steps of 10% up to 200% and of 50% from there to 1000%, the smoothing in steps of
 5% up to 95%; a value a hand-edited profile holds between two steps moves to the next step), INVERT LEFT AND RIGHT and
 INVERT UP AND DOWN. Each change is written to the input profile as it is made. DONE, Esc or East returns to the keys,

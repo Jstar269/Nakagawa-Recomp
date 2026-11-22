@@ -176,6 +176,33 @@ typedef struct {
 /* The developer switch, in the wizard and in Settings. */
 #define WIZARD_DEVELOPER_SENTENCE \
     "Show a developer log on screen to help track down problems. Stays on this PC."
+/* Opt-in ad hoc online play (#1139) on Settings > Online and its own subpage. */
+#define SCR_ONLINE_PLAY_ROW_SENTENCE \
+    "Connect PSP ad hoc multiplayer games through a community relay server over plain TCP. Off by default."
+#define SCR_ONLINE_PLAY_LEAD \
+    "Lets games that play over local wireless find other players over the internet, through a " \
+    "community server. Nakagawa does not run these servers. The connection is not encrypted."
+#define SCR_ONLINE_PLAY_OFF_SENTENCE \
+    "Off: nothing connects. Choose it to see what is sent and to whom, then TURN ON."
+#define SCR_ONLINE_PLAY_ON_SENTENCE \
+    "On from the next game you start. Choose it to turn it off: that ends the connection."
+#define SCR_ONLINE_PLAY_PORT_SENTENCE \
+    "Advanced. Added to the game's ports on the server (default 10000). Players who play " \
+    "together need the same value."
+#define SCR_ONLINE_PLAY_SERVERS_LEAD \
+    "Each server is run by its own community, not by Nakagawa. Choosing one opens the Online " \
+    "play card for it: nothing connects until you choose TURN ON there."
+/* The picker's hint under its intro (owner, 2026-11-20). */
+#define SCR_ONLINE_PLAY_SERVERS_HINT \
+    "Everyone you play with must choose the same server. A closer server responds faster."
+#define SCR_ONLINE_PLAY_OWN_SENTENCE "A server you run or trust. It is kept only on this PC."
+/* What to type for one's own server, on its row until one is in use. */
+#define SCR_ONLINE_PLAY_OWN_FORMAT "host[:lobby_port[,data_port]]"
+#define SCR_ONLINE_PLAY_LIST_OFF_LINE \
+    "With Online play on, the servers on PPSSPP's list show here as well."
+#define SCR_ONLINE_PLAY_RELAY_ONLY_CAPTION \
+    "Listed: the servers that relay game data the way this version does (PPSSPP's data_mode " \
+    "AemuPostoffice; PPSSPP-derived, not PSP-measured)."
 
 /* Frame and box helpers (scr_flow.c). */
 float scr_flow_begin(NkUi *ui, float width, float height, float card_width);

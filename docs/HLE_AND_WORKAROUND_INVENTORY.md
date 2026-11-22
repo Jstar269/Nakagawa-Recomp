@@ -46,13 +46,13 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **711** (dedicated **629**, fake_success **3**, controlled_unsupported **79**).
-Semantic handler census: **604** handlers across **30** API families, covering **636** handler-associated NID registrations.
+Registered NIDs: **715** (dedicated **668**, fake_success **3**, controlled_unsupported **44**).
+Semantic handler census: **643** handlers across **30** API families, covering **675** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 349 | 361 |
+| `partial` | 388 | 400 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
 | `unreviewed` | 237 | 244 |
@@ -76,7 +76,7 @@ Semantic handler census: **604** handlers across **30** API families, covering *
 | `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
 | `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
 | `sceMpegbase` | 0 | 6 | 0 | 0 | 0 | 6 | 6 |
-| `sceNet` | 0 | 5 | 0 | 0 | 13 | 18 | 18 |
+| `sceNet` | 0 | 44 | 0 | 0 | 13 | 57 | 57 |
 | `sceNp` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
 | `sceOpen` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `scePower` | 0 | 19 | 0 | 0 | 0 | 19 | 24 |
@@ -89,7 +89,7 @@ Semantic handler census: **604** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **349** | **1** | **3** | **237** | **604** | **636** |
+| **Total** | **14** | **388** | **1** | **3** | **237** | **643** | **675** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -1159,10 +1159,167 @@ Semantic handler census: **604** handlers across **30** API families, covering *
 - **`h_Mpegbase_0530BE4E`** (`sceMpegbase`): `sceMpegbase_0530BE4E` (0x0530be4e)
   - Limitation: synthetic context words from JPCSP pending W-LLE-1; mode mapping 0=8888, 1=5650, 2=5551, 3=4444 from JPCSP; unknown modes return -1
   - Evidence: tests/native/videocodec_selftest.c:test_csc
+- **`h_NetAdhocGetPdpStat`** (`sceNet`): `sceNetAdhocGetPdpStat` (0xc7c1fc57)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocGetPtpStat`** (`sceNet`): `sceNetAdhocGetPtpStat` (0xb9685118)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocGetSocketAlert`** (`sceNet`): `sceNetAdhocGetSocketAlert` (0x4d2ce199)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocInit`** (`sceNet`): `sceNetAdhocInit` (0xe1d621d7)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingAbortSendData`** (`sceNet`): `sceNetAdhocMatchingAbortSendData` (0xec19337d)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingCancelTarget`** (`sceNet`): `sceNetAdhocMatchingCancelTarget` (0xea3c6108)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingCancelTargetWithOpt`** (`sceNet`): `sceNetAdhocMatchingCancelTargetWithOpt` (0x8f58bedf)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingCreate`** (`sceNet`): `sceNetAdhocMatchingCreate` (0xca5eda6f)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingDelete`** (`sceNet`): `sceNetAdhocMatchingDelete` (0xf16eaf4f)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingGetHelloOpt`** (`sceNet`): `sceNetAdhocMatchingGetHelloOpt` (0xb5d96c2a)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingGetMembers`** (`sceNet`): `sceNetAdhocMatchingGetMembers` (0xc58bcd9e)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingGetPoolMaxAlloc`** (`sceNet`): `sceNetAdhocMatchingGetPoolMaxAlloc` (0x40f8f435)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingGetPoolStat`** (`sceNet`): `sceNetAdhocMatchingGetPoolStat` (0x9c5cfb7d)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingInit`** (`sceNet`): `sceNetAdhocMatchingInit` (0x2a2a1e07)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingSelectTarget`** (`sceNet`): `sceNetAdhocMatchingSelectTarget` (0x5e3d4b79)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingSendData`** (`sceNet`): `sceNetAdhocMatchingSendData` (0xf79472d7)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingSetHelloOpt`** (`sceNet`): `sceNetAdhocMatchingSetHelloOpt` (0xb58e61b7)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingStart`** (`sceNet`): `sceNetAdhocMatchingStart` (0x93ef3843)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingStart2`** (`sceNet`): `sceNetAdhocMatchingStart2` (0xe8454c65)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingStop`** (`sceNet`): `sceNetAdhocMatchingStop` (0x32b156b3)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocMatchingTerm`** (`sceNet`): `sceNetAdhocMatchingTerm` (0x7945ecda)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPdpCreate`** (`sceNet`): `sceNetAdhocPdpCreate` (0x6f92741b)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPdpDelete`** (`sceNet`): `sceNetAdhocPdpDelete` (0x7f27bb5e)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPdpRecv`** (`sceNet`): `sceNetAdhocPdpRecv` (0xdfe53e03)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPdpSend`** (`sceNet`): `sceNetAdhocPdpSend` (0xabed3790)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPollSocket`** (`sceNet`): `sceNetAdhocPollSocket` (0x7a662d6b)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPtpAccept`** (`sceNet`): `sceNetAdhocPtpAccept` (0x9df81198)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPtpClose`** (`sceNet`): `sceNetAdhocPtpClose` (0x157e6225)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPtpConnect`** (`sceNet`): `sceNetAdhocPtpConnect` (0xfc6fc07b)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPtpFlush`** (`sceNet`): `sceNetAdhocPtpFlush` (0x9ac2eeac)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPtpListen`** (`sceNet`): `sceNetAdhocPtpListen` (0xe08bdac1)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPtpOpen`** (`sceNet`): `sceNetAdhocPtpOpen` (0x877f6d66)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPtpRecv`** (`sceNet`): `sceNetAdhocPtpRecv` (0x8bea2b3e)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocPtpSend`** (`sceNet`): `sceNetAdhocPtpSend` (0x4da4c788)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocSetSocketAlert`** (`sceNet`): `sceNetAdhocSetSocketAlert` (0x73bfd52d)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocTerm`** (`sceNet`): `sceNetAdhocTerm` (0xa62c6f57)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocctlGetAddrByName`** (`sceNet`): `sceNetAdhocctlGetAddrByName` (0x99560abe)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
+- **`h_NetAdhocctlGetNameByAddr`** (`sceNet`): `sceNetAdhocctlGetNameByAddr` (0x8916c003)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
 - **`h_NetAdhocctlGetParameter`** (`sceNet`): `sceNetAdhocctlGetParameter` (0xded9d28e)
-  - Limitation: always NOT_INITIALIZED (0x80410b08), writing nothing, because sceNetAdhocctlInit stays refused with no network; GetParameter's own pre-init code is UNMEASURED and follows the measured calls; with the WLAN switch off PPSSPP answers DISCONNECTED (0x80410b09) instead (UNMEASURED)
+  - Limitation: offline before sceNetAdhocctlInit it returns NOT_INITIALIZED (0x80410b08) matching the measured calls; when initialized locally or online (#1139), writes channel, product ID, group name, BSSID, and nickname from console/group state (with the online active state PPSSPP-derived, not PSP-measured; pre-init code and WLAN-off 0x80410b09 remain UNMEASURED)
   - Evidence: tests/native/hle_thread_selftest.c:test_net_core_without_network
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
   - Evidence: PSPAutotests tests/net (70e72391, recorded on a PSP): before sceNetAdhocctlInit, GetState, AddHandler and Create return NOT_INITIALIZED 0x80410b08 (net/adhoc/adhocctl "Before init")
+- **`h_NetAdhocctlJoin`** (`sceNet`): `sceNetAdhocctlJoin` (0x5e7f79c9)
+  - Limitation: PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) unless SR_ADHOC_ENABLED=1 (#1139)
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed
+  - Evidence: tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp
 - **`h_NetEtherNtostr`** (`sceNet`): `sceNetEtherNtostr` (0x89360950)
   - Limitation: formats a readable six-byte MAC address into the bounded 18-byte lowercase text form without a network stack and returns the text address; the return value (PPSSPP treats the call as void), invalid pointer precedence and the complete text domain are not hardware measured
   - Evidence: tests/native/hle_thread_selftest.c:test_named_refusals

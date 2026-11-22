@@ -872,6 +872,9 @@ void nk_ui_button_configuration(const NkUi *ui, uint32_t flags,
     } else if (primary) {
         style->fill_rgba = ui->theme.accent_dark;
         style->border_rgba = ui->theme.accent_dark;
+    } else if ((flags & NK_UI_BUTTON_ON) != 0u) {
+        style->fill_rgba = ui->theme.surface_high;
+        style->border_rgba = ui->theme.accent_dark;
     } else {
         style->fill_rgba = 0x00000000u;
         style->border_rgba = ui->theme.line_strong;
@@ -890,6 +893,9 @@ uint32_t nk_ui_button_text_rgba(const NkUi *ui, uint32_t flags) {
     }
     if ((flags & NK_UI_BUTTON_DANGER) != 0u) {
         return ui->theme.error;
+    }
+    if ((flags & NK_UI_BUTTON_ON) != 0u) {
+        return ui->theme.accent_dark;
     }
     return ui->theme.paper;
 }
@@ -2140,6 +2146,10 @@ void nk_ui_scroll_to(NkUi *ui, NkUiId id, float offset) {
 
 bool nk_ui_scroll_state(const NkUi *ui, NkUiId id, NkUiScrollState *out) {
     return ui != NULL && nk_ui_clay_scroll_state(ui->clay, id, out);
+}
+
+bool nk_ui_element_rect(const NkUi *ui, NkUiId id, NkUiRect *out) {
+    return ui != NULL && out != NULL && nk_ui_clay_element_rect(ui->clay, id, out);
 }
 
 bool nk_ui_scroll_in_motion(const NkUi *ui) {

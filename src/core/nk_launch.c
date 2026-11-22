@@ -12,6 +12,7 @@
  */
 
 #include "nk_launch.h"
+#include "nk_adhoc_relay.h"
 #include "nk_pbp_homebrew.h"
 #include "nk_shared_helpers.h"
 #include "nk_font_slots.h"
@@ -63,6 +64,18 @@ static bool launch_join_path(const char *base, const char *relative,
                                nk_platform_path_separator(), NK_SHARED_PATH_JOIN_ALWAYS,
                                NK_SHARED_PATH_REJECT_ABSOLUTE_RIGHT |
                                    NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
+}
+
+bool nk_launch_adhoc_off_path(const char *boot_event_path, char *out, size_t out_size) {
+    if (!out || out_size == 0u) return false;
+    out[0] = '\0';
+    if (!boot_event_path || !boot_event_path[0]) return false;
+    int w = snprintf(out, out_size, "%s.online-off", boot_event_path);
+    if (w <= 0 || (size_t)w >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
 }
 
 /* Whether the runtime in a package's executable knows the cheats switch (#2639). A package is
@@ -1201,6 +1214,7 @@ NkResult nk_launch_prepare_session(
     snprintf(session->config.ace_spec, sizeof(session->config.ace_spec), "off");
     session->config.ace_report_path[0] = '\0';
     snprintf(session->config.nickname, sizeof(session->config.nickname), "%s", NK_NICKNAME_DEFAULT);
+    session->config.online_play_port_offset = NK_RELAY_PORT_OFFSET;
 
     NkRuntimePackageInfo package_info;
     char package_error[1024] = "";
@@ -1627,6 +1641,10 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_ui_root[NK_MAX_PATH + 16];
     char env_launcher_display[96];
     char env_nickname[sizeof(session->config.nickname) + 16];
+    char env_adhoc_enabled[32];
+    char env_adhoc_server[sizeof(session->config.online_play_server) + 24];
+    char env_adhoc_offset[32];
+    char env_adhoc_off_file[NK_MAX_PATH + 32];
     char env_guest_memory_channel[NK_GUEST_MEMORY_CHANNEL_NAME_MAX + 32u];
     char env_cheats_file[NK_MAX_PATH + 24];
     char sep = nk_platform_path_separator();
@@ -1657,7 +1675,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     snprintf(env_memstick, sizeof(env_memstick), "SR_MEMSTICK=%s", session->memstick_root);
     snprintf(env_tables, sizeof(env_tables), "PSP_VFPU_TABLES=assets%cvfpu", sep);
 
-    const char *envp[52];
+    const char *envp[64];
     int env_count = 0;
     /* An empty value masks an inherited ISO for staged sessions with no ISO. */
     snprintf(env_iso, sizeof(env_iso), "PSP_ISO=%s", session->iso_path);
@@ -1760,6 +1778,35 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     /* Likewise developer mode (#314): the game's developer HUD and pause pages follow the
        launcher's setting, never an inherited value. */
     envp[env_count++] = session->config.developer_mode ? "SR_DEVELOPER_MODE=1" : "SR_DEVELOPER_MODE=0";
+    /* Online ad hoc play (#1139): off unless opted in with a syntactically valid server spec,
+       always exported so an inherited value can never opt a launch in. */
+    {
+        bool adhoc_ok = session->config.online_play &&
+                        session->config.online_play_port_offset <= 65535u &&
+                        nk_adhoc_relay_parse_server(session->config.online_play_server,
+                                                    NULL, 0u, NULL, NULL);
+        char off_path[NK_MAX_PATH];
+        snprintf(env_adhoc_enabled, sizeof(env_adhoc_enabled), "SR_ADHOC_ENABLED=%s",
+                 adhoc_ok ? "1" : "0");
+        snprintf(env_adhoc_server, sizeof(env_adhoc_server), "SR_ADHOC_SERVER=%s",
+                 adhoc_ok ? session->config.online_play_server : "");
+        if (adhoc_ok)
+            snprintf(env_adhoc_offset, sizeof(env_adhoc_offset), "SR_ADHOC_PORT_OFFSET=%u",
+                     (unsigned)session->config.online_play_port_offset);
+        else
+            snprintf(env_adhoc_offset, sizeof(env_adhoc_offset), "SR_ADHOC_PORT_OFFSET=");
+        /* The file the launcher creates when the user turns Online play off during this run;
+           empty (masking an inherited one) when off or when the run has no boot event file. */
+        if (!adhoc_ok || !nk_launch_adhoc_off_path(session->boot_event_file_path, off_path,
+                                                   sizeof(off_path))) {
+            off_path[0] = '\0';
+        }
+        snprintf(env_adhoc_off_file, sizeof(env_adhoc_off_file), "SR_ADHOC_OFF_FILE=%s", off_path);
+        envp[env_count++] = env_adhoc_enabled;
+        envp[env_count++] = env_adhoc_server;
+        envp[env_count++] = env_adhoc_offset;
+        envp[env_count++] = env_adhoc_off_file;
+    }
     /* And Reduce motion: the pause overlay eases or cuts as the launcher does. */
     envp[env_count++] = session->config.reduce_motion == NK_REDUCE_MOTION_ON ? "SR_REDUCE_MOTION=on"
         : session->config.reduce_motion == NK_REDUCE_MOTION_OFF ? "SR_REDUCE_MOTION=off"
