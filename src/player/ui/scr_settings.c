@@ -2364,12 +2364,12 @@ static void settings_online_play_keep_focus_in_view(NkUi *ui, const char *const 
    it a view less one line, so its first lines and the server's name can be read by keyboard or
    controller before choosing; the wheel, a drag and touch scroll it as any card does. Returns
    whether the card scrolls, so it can say how. */
-static bool settings_online_play_card_scroll(NkUi *ui) {
+static bool settings_card_scroll(NkUi *ui, NkUiId scroller) {
     NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
     float line = nk_ui_line_height(ui, &body);
     NkUiScrollState state;
     NkUiNavDir page;
-    const bool known = nk_ui_scroll_state(ui, FLOW_ID_CARD, &state);
+    const bool known = nk_ui_scroll_state(ui, scroller, &state);
     float offset = known ? state.offset : 0.0f;
     const float start = offset;
     while (nk_ui_take_event(ui, NK_UI_EV_PAGE, &page)) {
@@ -2378,8 +2378,31 @@ static bool settings_online_play_card_scroll(NkUi *ui) {
     }
     if (known && offset > state.max_offset) offset = state.max_offset;
     if (offset < 0.0f) offset = 0.0f;
-    if (fabsf(offset - start) >= 0.5f) nk_ui_scroll_to(ui, FLOW_ID_CARD, offset);
+    if (fabsf(offset - start) >= 0.5f) nk_ui_scroll_to(ui, scroller, offset);
     return known && state.max_offset > 0.5f;
+}
+
+static bool settings_online_play_card_scroll(NkUi *ui) {
+    return settings_card_scroll(ui, FLOW_ID_CARD);
+}
+
+/* The most a consent card's scrolling text may take: what the card, at most the room between
+   the bars (scr_flow_begin), leaves after its fixed lines and buttons, as the last layout
+   measured them (the card's content less the text's own height). Before a first layout, half
+   the card; never under three lines, so a window too small for that scrolls the card too. */
+static float settings_consent_text_max(NkUi *ui, NkUiId text, float height) {
+    const NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+    const float least = 3.0f * nk_ui_line_height(ui, &body);
+    const float card = height - NK_UI_TOP_BAR_HEIGHT - NK_UI_PROMPT_BAR_HEIGHT -
+                       2.0f * NK_UI_SPACE_4;
+    NkUiScrollState card_state;
+    NkUiScrollState text_state;
+    float room = card * 0.5f;
+    if (nk_ui_scroll_state(ui, FLOW_ID_CARD, &card_state) &&
+        nk_ui_scroll_state(ui, text, &text_state)) {
+        room = card - (card_state.viewport + card_state.max_offset - text_state.viewport);
+    }
+    return room > least ? floorf(room) : least;
 }
 
 static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float width,
@@ -2831,9 +2854,17 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
     case PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_CARD: {
         /* RetroAchievements' consent card (#1316): the only way the Achievements switch turns
            on. It names both hosts and everything sent (docs/SETUP.md "Network use"); nothing
-           is created or sent while it is open. Laid out as the Online play card is, it wraps
-           at any window and text size and scrolls with Page Up and Page Down. */
-        const bool scrolls = settings_online_play_card_scroll(ui);
+           is created or sent while it is open. Its text wraps at any window and text size and
+           scrolls in its own box, with Page Up and Page Down too, between the title and the
+           buttons: AGREE AND TURN ON and NOT NOW always show whole, so neither is chosen
+           unseen (the message box it replaced ran its buttons off the screen, and Enter
+           agreed). */
+        const NkUiId consent_text = PLAYER_UI_ID_ACHIEVEMENTS_CONSENT_TEXT;
+        const bool scrolls = settings_card_scroll(ui, consent_text);
+        NkUiLayout text_box = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(),
+                                          NK_UI_DIALOG_GAP);
+        text_box.height.max = settings_consent_text_max(ui, consent_text, height);
+        text_box.scroll = true;
         static const char *const sends[] = {
             "- Your RetroAchievements username and its sign-in token.",
             "- Your password, once, when you sign in, to get that token. It is never saved; "
@@ -2847,6 +2878,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         };
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, SCR_ACHIEVEMENTS_HOST, theme->info);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "RetroAchievements", NK_UI_TYPE_TITLE, theme->paper);
+        if (!nk_ui_begin_container(ui, consent_text, &text_box, NULL)) break;
+        if (scrolls) {
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7AEu,
+                            "Page Up and Page Down, or the triggers, scroll this card.",
+                            NK_UI_TYPE_CAPTION, theme->muted);
+        }
         nk_ui_text_role(ui, FLOW_ID_LEAD,
                         "RetroAchievements lets you earn achievements in games that have an "
                         "achievement set. It is a community service hosted at "
@@ -2886,11 +2923,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                             NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_end_container(ui);
         }
-        if (scrolls) {
-            nk_ui_text_role(ui, SET_ID_TEXT + 0x7AEu,
-                            "Page Up and Page Down, or the triggers, scroll this card.",
-                            NK_UI_TYPE_CAPTION, theme->muted);
-        }
+        nk_ui_end_container(ui); /* consent_text */
         {
             NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                          NK_UI_SPACE_3);

@@ -3762,6 +3762,7 @@ class NativePlayerUiTests(unittest.TestCase):
     ACHIEVEMENTS_USERNAME = str(0x45B0)
     ACHIEVEMENTS_PASSWORD = str(0x45B1)
     ACHIEVEMENTS_SIGN_IN = str(0x45B2)
+    ACHIEVEMENTS_SIGN_IN_CANCEL = str(0x45B3)
 
     def achievements_said(self, run: dict[str, object], *, shown_on: bool = False) -> list[str]:
         """The RetroAchievements status lines a run showed. Nothing is saved as on; nor is it on
@@ -3856,6 +3857,37 @@ class NativePlayerUiTests(unittest.TestCase):
         views = [view for view, _ in self.screens(run)]
         self.assertEqual(views[0], "achievements_sign_in")
         self.assertEqual(views[-1], "online_settings", "Esc leaves the sign-in page")
+
+    @unittest.skipUnless(os.name == "nt", "the sign-in page needs Windows Credential Manager")
+    def test_next_ui_achievements_sign_in_cancelled_or_empty_sends_nothing(self) -> None:
+        """#1316: leaving sign-in with nothing typed returns to the settings page, still signed
+        out, with nothing sent. The username editor opens and is cancelled empty; the window
+        loses and regains the focus (clicking away, which left Windows' credential dialog behind
+        a launcher that had stopped answering); with both fields empty SIGN IN is disabled, so
+        the keyboard passes it from Password to CANCEL, which leaves the page. The player goes
+        on running and quits only when the run ends.
+
+        Failing before: there was no such page; Sign in blocked the launcher's event loop in
+        CredUIPromptForCredentialsW, a dialog with no owner window."""
+        run = self.next_ui_run(
+            "achievements-sign-in",
+            ("WAIT_MS=100", "WAIT_LAID_OUT=5000", "KEY_RETURN", "WAIT_MS=100",
+             "KEY_ESCAPE", "WAIT_MS=100", "FOCUS_LOST", "WAIT_MS=100", "FOCUS_GAINED",
+             "WAIT_MS=100", *(("KEY_DOWN", "WAIT_MS=100") * 2), "KEY_RETURN", "WAIT_MS=200"))
+        said = self.achievements_said(run, shown_on=True)
+        self.assertEqual(said, ["Sign in to connect."],
+                         "nothing is sent, and no sign-in is even attempted")
+        trail = self.focus_trail(run)
+        at = trail.index(self.ACHIEVEMENTS_USERNAME)
+        self.assertEqual(trail[at + 2:at + 5],
+                         [self.ACHIEVEMENTS_USERNAME, self.ACHIEVEMENTS_PASSWORD,
+                          self.ACHIEVEMENTS_SIGN_IN_CANCEL],
+                         "the editor's Cancel returns to Username; the empty form's SIGN IN is "
+                         "passed over for CANCEL")
+        self.assertNotIn(self.ACHIEVEMENTS_SIGN_IN, trail, "an empty SIGN IN takes no focus")
+        self.assertEqual([view for view, _ in self.screens(run)],
+                         ["achievements_sign_in", "online_settings"],
+                         "the editor's Cancel stays on the page; CANCEL returns to settings")
 
     # #1316: why a title earns nothing (player_state.c achievements_block_reason).
     # The page's notice heading says "No achievements this session"; the reason does not repeat it.

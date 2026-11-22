@@ -11917,8 +11917,55 @@ static bool dump_text_says(const char *dump, const char *sentence) {
     return strstr(text, sentence) != NULL;
 }
 
+/* Whether a text run containing `needle` is drawn whole in the window on the page's first,
+   unscrolled frame: not clipped at all, by a scroll container or by the window's edge. */
+static bool flow_case_shows_whole(FlowCase which, int width, int height, const char *needle) {
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
+    const size_t needle_length = strlen(needle);
+    bool whole = false;
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd && !whole; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        const NkUiTextRun *run = (const NkUiTextRun *)cmd->custom;
+        if (cmd->kind != NK_UI_DRAW_TEXT || run == NULL || run->length != needle_length ||
+            memcmp(run->text, needle, needle_length) != 0) {
+            continue;
+        }
+        whole = command_shows(cmd) && cmd->clip[0] == cmd->bounds[0] &&
+                cmd->clip[1] == cmd->bounds[1] && cmd->clip[2] == cmd->bounds[2] &&
+                cmd->clip[3] == cmd->bounds[3] && cmd->bounds[0] >= 0 && cmd->bounds[1] >= 0 &&
+                cmd->bounds[2] <= width && cmd->bounds[3] <= height;
+    }
+    if (ui != NULL) nk_ui_destroy(ui);
+    return whole;
+}
+
 static void test_achievements_card_and_sign_in(void) {
     static char dump[CASE_DUMP_CAP];
+    /* The Windows message box this card replaces was wider than the screen, its buttons and even
+       its title bar's off the edge, so Enter (its default) agreed with no choice in sight. The
+       card shows both choices whole on its first frame, before any scroll, at every window and
+       text size; the UI test (test_player_ui.py) shows its focus starts on NOT NOW. */
+    static const int card_sizes[][3] = {
+        {960, 540, 100}, {960, 540, 150}, {1280, 720, 100}, {1280, 720, 150},
+        {1920, 1080, 100}, {1920, 1080, 150}
+    };
+    for (size_t i = 0u; i < sizeof(card_sizes) / sizeof(card_sizes[0]); ++i) {
+        const int saved = g_flow_text_size_pct;
+        bool both;
+        g_flow_text_size_pct = card_sizes[i][2];
+        both = flow_case_shows_whole(FLOW_SETTINGS_ACHIEVEMENTS_CARD, card_sizes[i][0],
+                                     card_sizes[i][1], "AGREE AND TURN ON") &&
+               flow_case_shows_whole(FLOW_SETTINGS_ACHIEVEMENTS_CARD, card_sizes[i][0],
+                                     card_sizes[i][1], "NOT NOW");
+        g_flow_text_size_pct = saved;
+        if (!both) {
+            fprintf(stderr, "  at %d x %d, %d%% text\n", card_sizes[i][0], card_sizes[i][1],
+                    card_sizes[i][2]);
+        }
+        CHECK(both, "the consent card shows AGREE AND TURN ON and NOT NOW whole on its first "
+                    "frame, before any scroll");
+    }
     static const char *const card_says[] = {
         "What Nakagawa sends to " NK_ACH_HOST,
         "Your RetroAchievements username and its sign-in token.",
@@ -11960,7 +12007,8 @@ static void test_achievements_card_and_sign_in(void) {
         const int saved = g_flow_text_size_pct;
         g_flow_text_size_pct = pct;
         CHECK(flow_case_fits(FLOW_SETTINGS_ACHIEVEMENTS_CARD, 960, 540, NULL, 0u) &&
-                  flow_case_text_whole(FLOW_SETTINGS_ACHIEVEMENTS_CARD, 960, 540, FLOW_ID_CARD,
+                  flow_case_text_whole(FLOW_SETTINGS_ACHIEVEMENTS_CARD, 960, 540,
+                                       PLAYER_UI_ID_ACHIEVEMENTS_CONSENT_TEXT,
                                        card_ends, sizeof(card_ends) / sizeof(card_ends[0])),
               "RetroAchievements' consent card fits 960 x 540 and shows every line whole as it "
               "is scrolled, at 100% and 150% text");
