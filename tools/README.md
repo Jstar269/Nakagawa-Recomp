@@ -165,6 +165,7 @@ set, so a new subpackage cannot ship undiscoverable either:
 | `hle_registry_meta.py` | Curated classification metadata for the HLE registration manifest. |
 | `gen_nidnames.py` | Generate the NID name header from the tracked NID corpus. |
 | `gen_ui_assets.py` | Embed the vendored Kenney prompt glyphs and UI sounds (`third_party/kenney/`) in `src/ui/nk_ui_assets.c`; `--check` reports a stale file. |
+| `gen_credits_table.py` | Write the launcher's Love All credits table, `src/player/ui/love_all_credits.c`, from `CREDITS.md`; `--check` reports a stale file. |
 | `nid_name_proof.py` | Independently verify and classify the entries of the generated NID name header. |
 | `nidseq.py` | Extract a trace's import sequence and verify it against an oracle trace. |
 | `gen_microtest.py` | Generate per-instruction and per-function translator micro-test cases. |
@@ -374,6 +375,7 @@ in issue #317. The measured result snapshot is in
 | `test_analyze_import_stub_entries.py` | Import-table stubs outside the named code sections are owned function entries, with codegen bodies. |
 | `test_analyze_toml_emit.py` | Locks the analyzer TOML emitter's fail-closed string contract. |
 | `test_gen_ui_assets.py` | `src/ui/nk_ui_assets.c` embeds every vendored Kenney asset byte for byte and is current. |
+| `test_gen_credits_table.py` | `src/player/ui/love_all_credits.c` carries every section and credited name of `CREDITS.md` and is current. |
 | `test_analyzer_span_scope.py` | Regression tests for analyzer executable-span ownership. |
 | `test_codegen_continuations.py` | Linked transfers carry a resume boundary; unlinked ones stay tail dispatches. |
 | `test_codegen_entry_semantics.py` | End-to-end regressions for callable versus resume-entry codegen semantics. |

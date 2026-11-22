@@ -3,11 +3,25 @@
 """Summarize machine-readable native boot milestones from a runtime log.
 
 Exit 0 means the required boot phases occurred in causal order, no disqualifying
-fault was observed, and frame content was validated as nonblank. Exit 1 means
+fault was observed, and frame content was validated as nonblank (see below). Exit 1 means
 the run started but did not meet that evidence contract. Exit 2 means the log is
 absent/invalid. ``--allow-present-only`` explicitly lowers only the frame-content
 requirement for liveness diagnostics; the JSON output still labels that evidence
 as ``present-submitted`` rather than visual success.
+
+Frame content rule. The gate judges content over the run, not only the first frame, because
+many games start on a black frame. Content is validated when either (a) the ``first_frame``
+event counts at least one nonzero pixel, or (b) a ``phase=first_content`` event exists with
+``brightest`` above the dark threshold (``PICTURE_DARK_MAX``, 8, the value of
+``SR_PICTURE_DARK_MAX`` in src/rt/fbcap.h; a test pins the two together). The runtime emits
+``first_content`` once per run, when the first picture probe (every 300 vblanks while the GUI is
+on, on the CPU and the GPU presenter alike) reads a frame with a colour byte above that
+threshold, with the probe's ``vblank`` and ``brightest``. Neither (a) nor (b), as in an
+all-black run or one shorter than the first probe, stays ``frame-content-unvalidated``; a
+``first_content`` event without a ``first_frame`` event proves nothing (the milestone order
+fails). A ``first_content`` event whose ``brightest`` is missing, unparsable or at or below the
+threshold cannot come from a correct runtime: it is a disqualifying fault and never content. ``frameContentSource`` in the JSON
+output names which event validated the content.
 
 A ``phase=stalled`` event carrying a known neutral observation is reported in the
 ``observations`` JSON list, not as a disqualifying reason: ``observation=no_new_flip``
@@ -36,6 +50,9 @@ import sys
 from evidence_model import milestones_in_order
 
 
+# The runtime's dark-picture threshold, SR_PICTURE_DARK_MAX in src/rt/fbcap.h (tools/test_boot_gate.py
+# pins the two together): a probed frame counts as visible only when a colour byte is above it.
+PICTURE_DARK_MAX = 8
 EVENT_RE = re.compile(r"\bBOOT_EVENT\s+(.+)$")
 PAIR_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|\S+)')
 # ``window_ready`` is the historical name for the host-presenter initialization
@@ -86,6 +103,27 @@ def _frame_evidence(first_frame: dict[str, str] | None, nonzero_pixels: int) -> 
     return "blank-or-unvalidated"
 
 
+def _first_content(events: list[dict[str, str]], faults: list[str]) -> tuple[dict[str, str] | None, int]:
+    """The first ``first_content`` event and its ``brightest`` value (0 when absent or not content)."""
+    event = next((e for e in events if e.get("phase") == "first_content"), None)
+    if event is None:
+        return None, 0
+    brightest, valid = _parse_nonnegative_int(event.get("brightest"))
+    if event.get("brightest") is None or not valid:
+        faults.append(
+            f"BOOT_GATE: invalid first_content brightest={event.get('brightest')!r} "
+            f"at line {event.get('line', '?')}"
+        )
+        return event, 0
+    if brightest <= PICTURE_DARK_MAX:
+        faults.append(
+            f"BOOT_GATE: first_content brightest={brightest} is not above the dark threshold "
+            f"{PICTURE_DARK_MAX} at line {event.get('line', '?')}"
+        )
+        return event, 0
+    return event, brightest
+
+
 def parse_log(path: str, *, allow_present_only: bool = False) -> dict:
     if type(allow_present_only) is not bool:
         raise TypeError("allow_present_only must be a boolean")
@@ -134,6 +172,15 @@ def parse_log(path: str, *, allow_present_only: bool = False) -> dict:
         )
 
     frame_evidence = _frame_evidence(first_frame, nonzero_pixels)
+    content_event, content_brightest = _first_content(events, faults)
+    frame_content_source: str | None = None
+    if frame_evidence == "content-validated":
+        frame_content_source = "first_frame"
+    elif first_frame is not None and content_brightest > PICTURE_DARK_MAX:
+        # The first frame was black (or, on the GPU path, uncounted), but a later probe read
+        # a visible frame: the run did render content.
+        frame_evidence = "content-validated"
+        frame_content_source = "first_content"
     frame_ok = frame_evidence == "content-validated" or (
         allow_present_only and frame_evidence == "present-submitted"
     )
@@ -192,6 +239,9 @@ def parse_log(path: str, *, allow_present_only: bool = False) -> dict:
         "frameEvidence": frame_evidence,
         "requiredFrameEvidence": "present-submitted" if allow_present_only else "content-validated",
         "nonzeroPixels": nonzero_pixels,
+        "frameContentSource": frame_content_source,
+        "firstContentVblank": _parse_nonnegative_int(content_event.get("vblank"))[0] if content_event else None,
+        "firstContentBrightest": content_brightest if content_event else None,
         "malformedHostPaths": malformed_paths,
         "faultCount": len(faults),
         "faults": faults[-20:],

@@ -27,7 +27,7 @@ RT = ROOT / "src" / "rt"
 CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestGeCaptureC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

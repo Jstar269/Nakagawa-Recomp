@@ -495,6 +495,8 @@ NkUi *nk_ui_create(const NkUiConfig *config) {
         free(ui);
         return NULL;
     }
+    /* A control scrolled into view shows its focus ring whole, not cut at the edge. */
+    nk_ui_focus_set_reveal_margin(ui->focus_graph, NK_UI_FOCUS_RING_OUTSET);
     ui->host = config != NULL ? config->host : NK_UI_HOST_LAUNCHER;
     if (ui->host != NK_UI_HOST_LAUNCHER && ui->host != NK_UI_HOST_OVERLAY) {
         nk_ui_focus_graph_destroy(ui->focus_graph);
@@ -806,6 +808,15 @@ bool nk_ui_begin_modal(NkUi *ui, NkUiId id, const NkUiLayout *layout, const NkUi
     return nk_ui_open(ui, id, layout, style, &modal);
 }
 
+bool nk_ui_begin_overlay(NkUi *ui, NkUiId id, const NkUiLayout *layout, const NkUiStyle *style,
+                         int16_t z) {
+    NkUiFloating overlay;
+    memset(&overlay, 0, sizeof(overlay));
+    overlay.z = z > NK_UI_Z_RING ? z : (int16_t)(NK_UI_Z_RING + 1);
+    overlay.passthrough = true;
+    return nk_ui_open(ui, id, layout, style, &overlay);
+}
+
 void nk_ui_end_container(NkUi *ui) {
     if (ui == NULL || !ui->frame_open || ui->container_depth == 0u) {
         return;
@@ -1078,6 +1089,8 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
     static const char ellipsis[] = "\xE2\x80\xA6";
     char out[2048]; /* a details box can carry a few install paths */
     char shown[sizeof(out)];
+    const char *given = text; /* the caller's text, the only pointer returned unchanged */
+    bool displayed = false;
     size_t length;
     size_t line_start = 0u;
     size_t cursor = 0u;
@@ -1093,6 +1106,7 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
     if (ui->display_text != NULL) {
         (void)ui->display_text(text, shown, sizeof(shown));
         text = shown;
+        displayed = true;
     }
     length = strlen(text);
     /* Only what the buffer holds is measured. A longer text (or one the
@@ -1119,7 +1133,8 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
     }
     if (!truncated && cursor >= length && (line < max_lines ||
         nk_ui_measure_logical(ui, style, text + line_start, length - line_start) <= max_width)) {
-        return text == shown ? nk_ui_frame_text(ui, shown) : text;
+        /* Never `text` itself: it may point at `shown`, which dies with this call. */
+        return displayed ? nk_ui_frame_text(ui, shown) : given;
     }
     /* Cut the last line back until it and the ellipsis fit. */
     used = cursor > line_start ? cursor : line_start;
@@ -1482,6 +1497,11 @@ void nk_ui_focus_ring(NkUi *ui, NkUiId id, float corner_radius) {
 
 const NkUiTheme *nk_ui_theme(const NkUi *ui) {
     return ui != NULL ? &ui->theme : nk_ui_theme_n1();
+}
+
+void nk_ui_set_theme(NkUi *ui, const NkUiTheme *theme) {
+    if (ui == NULL) return;
+    ui->theme = theme != NULL ? *theme : *nk_ui_theme_n1();
 }
 
 NkUiPromptStyle nk_ui_prompt_style(const NkUi *ui) {

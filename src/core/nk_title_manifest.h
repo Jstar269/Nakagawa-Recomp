@@ -59,6 +59,13 @@ typedef struct {
     char executable_path[NK_MAX_PATH];
     char image_path[NK_MAX_PATH];
     bool validation_cache_hit;
+    /* The runtime source commit the package records (#2875): 40 lowercase hex, or empty
+     * when the package predates the record or records it as unknown. origin is
+     * "install-record", "git", "unknown", or empty when not recorded; reason names why
+     * an unknown commit is unknown. */
+    char runtime_source_commit[41];
+    char runtime_source_origin[16];
+    char runtime_source_reason[128];
 } NkRuntimePackageInfo;
 
 /* Parse and validate a manifest from a memory buffer.
@@ -189,6 +196,13 @@ typedef struct {
  * `unreadable` set, and its description names the read failure. */
 bool nk_title_manifest_identify_build(const char *disc_id, const char *iso_path,
                                       const char *executable_name, NkBuildIdentity *out);
+/* The same answer for a screen (the game card, the library details), which may take the
+ * executable's digest from the display memo (NK_SOURCE_MEDIA_DISPLAY, below) instead of
+ * hashing it again. A display shortcut, not a security check: a launch calls
+ * nk_title_manifest_identify_build, which always hashes. */
+bool nk_title_manifest_identify_build_for_display(const char *disc_id, const char *iso_path,
+                                                  const char *executable_name,
+                                                  NkBuildIdentity *out);
 /* A one-sentence description for the game card; empty for an untracked title. */
 void nk_title_manifest_describe_build(const NkBuildIdentity *id, char *out, size_t out_size);
 
@@ -247,9 +261,64 @@ NkRuntimePackageStatus nk_title_manifest_validate_aot_package(
     size_t reason_size
 );
 
+/* How a validation checks the source disc image against the digests its title input identity
+ * records (its "source_media": the executable and the modules).
+ *
+ * NK_SOURCE_MEDIA_FULL hashes every recorded member of the image in full, every time. It is
+ * the security check: nk_title_manifest_validate_aot_package (the launch path, prepare and the
+ * pre-spawn gate) and nk_title_manifest_identify_build use it, and it never reads the memo.
+ *
+ * NK_SOURCE_MEDIA_DISPLAY is a display shortcut for a screen (the library list, the details,
+ * the picker's status) and is NOT a security check. It may answer a member's digest from an
+ * in-memory memo, never written to disk, of digests this process computed in full. A memo
+ * entry is keyed by the image's path as given, its size, its last-write and change times, its
+ * creation time (Windows), and its file ID (Windows: volume serial and file index) or device
+ * and inode (POSIX); a digest is stored only while those are unchanged across the hash and
+ * both times are at least 3 seconds old, so a write inside the file system's timestamp
+ * granularity is not mistaken for no write. Metadata does not prove content: someone who
+ * rewrites an image in place and restores its times (which Windows allows) gets the old
+ * answer on a screen. The launch path still hashes and refuses that image, and a full check
+ * whose digest differs from the memo drops that image's memo entry, so the next screen
+ * re-hashes and shows the new result. */
+typedef enum {
+    NK_SOURCE_MEDIA_FULL = 0,
+    NK_SOURCE_MEDIA_DISPLAY = 1
+} NkSourceMediaCheck;
+
+/* nk_title_manifest_validate_aot_package for a screen: the same checks, with the source
+ * media checked as NK_SOURCE_MEDIA_DISPLAY. Never use its result to start a game. */
+NkRuntimePackageStatus nk_title_manifest_validate_aot_package_for_display(
+    const char *user_data_root,
+    const char *disc_id,
+    const char *enhancement_package_id,
+    const char *title_id,
+    bool is_experimental,
+    const char *selected_executable,
+    const char *current_disc_version,
+    const char *source_iso_path,
+    uint32_t player_abi_version,
+    NkRuntimePackageInfo *out_info,
+    char *reason,
+    size_t reason_size
+);
+
+/* The source-media step of validation on its own: true when the image at iso_path holds the
+ * executable and every module that the title input identity record (JSON text, an object
+ * with a "source_media" object) names, with the recorded SHA-256 digests. False with the
+ * reason in `error` (the sentence validation reports). Each member is hashed at most once per
+ * call, even when the record names it twice. */
+bool nk_title_manifest_check_source_media(const char *iso_path, const char *identity_json,
+                                          size_t identity_length, NkSourceMediaCheck check,
+                                          char *error, size_t error_size);
+
+/* The number of disc image members this process has hashed in full: a diagnostic, and what
+ * the tests count to see which checks read the image. */
+uint64_t nk_title_manifest_source_media_hash_count(void);
+
 /* Validation hashes the package's files, which takes seconds for a large
  * package. A host that is shutting down can stop it early: once `cancelled`
- * returns true, the file being hashed is abandoned between 32 KiB reads and
+ * returns true, the file being hashed is abandoned between reads (32 KiB for a
+ * package file, 1 MiB for a disc image member) and
  * the validation fails with NK_RUNTIME_PACKAGE_UNKNOWN and the reason
  * "Package validation was cancelled.".
  * The check must be safe to call from any thread. Install it before any

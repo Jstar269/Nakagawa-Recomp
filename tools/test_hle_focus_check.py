@@ -23,7 +23,8 @@ NM = shutil.which("nm")
 SOURCES = ["fake/focus_a.c", "fake/focus_b.c", "fake/focus_c.c"]
 
 
-@unittest.skipUnless(CC and NM, "needs a C compiler and nm")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: needs a C compiler")
+@unittest.skipUnless(NM, "needs nm")
 class FocusCheckTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

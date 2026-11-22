@@ -433,12 +433,12 @@ static int s_last_prx_host_served = 0;
 
 static const char *var_export_add(const char *lib, uint32_t nid, uint32_t addr, uint32_t owner);
 
-/* host_path is the module as staged (guest_module_root()/<file>). A path that does not open
- * is a missing module, reported by name; the same name under another directory is never
- * taken in its place. */
+/* host_path is the module as staged (guest_module_path(): <SR_MODULE_DIR>/<file>), UTF-8. A path
+ * that does not open is a missing module, reported by name; the same name under another
+ * directory is never taken in its place. */
 unsigned register_prx_exports(const char *host_path, uint32_t base) {
     s_last_prx_host_served = 0;
-    FILE *f = fopen(host_path, "rb");
+    FILE *f = sr_fopen_utf8(host_path, L"rb");
     uint8_t eh[52], mi[52];
     SrElfPhdr ph[16];
     unsigned registered = 0;
@@ -584,20 +584,29 @@ unsigned sr_hle_test_register_prx_exports(const char *host_path, uint32_t base) 
 int sr_hle_test_last_prx_host_served(void) { return s_last_prx_host_served; }
 #endif
 
-static unsigned register_known_module(const char *module_root,
-                                      const char *module_name,
-                                      uint32_t base) {
-    if (!module_root || !module_root[0] || !module_name || !module_name[0]) return 0;
-    char host_path[1024];
-    int written = snprintf(host_path, sizeof(host_path), "%s/%s",
-                           module_root, module_name);
-    if (written < 0 || (size_t)written >= sizeof(host_path)) return 0;
-    return register_prx_exports(host_path, base);
-}
-
-static const char *guest_module_root(void) {
-    const char *module_root = getenv("SR_MODULE_DIR");
-    return (module_root && module_root[0]) ? module_root : "place_game_here/EXTRACTED/decrypted";
+/* The staged path of a guest module, <root>/<file>, as UTF-8. The root is SR_MODULE_DIR, read
+ * through the wide environment on Windows, so a directory with characters outside the ANSI code
+ * page (a Japanese profile folder) is the directory the files are opened in; unset or empty, it
+ * is the default extraction folder. Returns 0 when the variable cannot be read or the path does
+ * not fit. */
+static int guest_module_path(char *out, size_t size, const char *file) {
+    char *configured = NULL;
+    int present = 0;
+    if (!size) return 0;
+    out[0] = '\0';
+    if (!file || !file[0] || !sr_utf8_env_alloc(L"SR_MODULE_DIR", &configured, &present)) {
+        free(configured);
+        return 0;
+    }
+    const char *root = present && configured && configured[0]
+                           ? configured : "place_game_here/EXTRACTED/decrypted";
+    int written = snprintf(out, size, "%s/%s", root, file);
+    free(configured);
+    if (written <= 0 || (size_t)written >= size) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
 }
 
 /* ---- Late-module image load (L4) ----
@@ -860,6 +869,8 @@ static void note_psmfplayer_lib_version(const SrPrxImage *img) {
     }
 }
 
+static unsigned char *read_guest_module_file(const char *path, size_t *size_out, int *unreadable);
+
 int load_prx_image(const char *host_path, uint32_t base, const char *name) {
     for (unsigned i = 0; i < s_prx_image_count; i++) {
         if (s_prx_images[i].base != base) continue;
@@ -876,12 +887,23 @@ int load_prx_image(const char *host_path, uint32_t base, const char *name) {
     SrPrxImage img;
     char err[160] = "";
     memset(&img, 0, sizeof(img));
+    /* The bytes are read here through the UTF-8 path layer and handed to the loader, which
+     * opens nothing itself: a module root outside the ANSI code page loads the same way. */
+    size_t file_size = 0u;
+    int unreadable = 0;
+    unsigned char *bytes = read_guest_module_file(host_path, &file_size, &unreadable);
+    if (!bytes) {
+        fprintf(stderr, "PRX image: %s at 0x%08x: load failed: %s\n", host_path, base,
+                unreadable ? "cannot read input file" : "cannot open input file");
+        return 0;
+    }
     if (s_prx_stage && s_prx_stage_cap) memset(s_prx_stage, 0, s_prx_stage_cap);
     s_prx_stage_base = base;
     s_prx_stage_len = 0;
     s_prx_staging = 1;
-    int rc = sr_prx_load(host_path, base, &img, err, sizeof(err));
+    int rc = sr_prx_load_from_memory(bytes, file_size, base, &img, err, sizeof(err));
     s_prx_staging = 0;
+    free(bytes);
     if (rc != 0) {
         fprintf(stderr, "PRX image: %s at 0x%08x: load failed: %s\n", host_path, base, err);
         return 0;
@@ -938,12 +960,12 @@ static int populate_guest_module(const char *file, uint32_t base, int required) 
     s_last_prx_stop = 0;
     s_last_prx_base = 0;
     char image_path[1024];
-    int written = snprintf(image_path, sizeof(image_path), "%s/%s", guest_module_root(), file);
-    if (written <= 0 || (size_t)written >= sizeof(image_path)) {
-        fprintf(stderr, "GUEST_MODULE_LOAD_FAILED: manifest module path exceeds the runtime limit\n");
+    if (!guest_module_path(image_path, sizeof(image_path), file)) {
+        fprintf(stderr, "GUEST_MODULE_LOAD_FAILED: manifest module path exceeds the runtime limit "
+                        "or SR_MODULE_DIR cannot be read\n");
         return 0;
     }
-    FILE *image = fopen(image_path, "rb");
+    FILE *image = sr_fopen_utf8(image_path, L"rb");
     if (!image) {
         if (required) {
             fprintf(stderr,
@@ -955,7 +977,7 @@ static int populate_guest_module(const char *file, uint32_t base, int required) 
         fclose(image);
         if (!load_prx_image(image_path, base, file)) return 0;
     }
-    (void)register_known_module(guest_module_root(), file, base);
+    (void)register_prx_exports(image_path, base);
     return 1;
 }
 
@@ -1026,18 +1048,7 @@ static uint32_t hle_libfont_startup_stop(const char *reason) {
     return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
 #else
     sr_hit_hle = 1;
-    if (sr_sched_on) {
-        sr_trace_close();
-        ge_scene_dump_finish();
-        sr_compat_report();
-        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
-        (void)sr_videorec_finish_status("the libfont start-up stop", HLE_LIBFONT_STARTUP_STOP_EXIT);
-        sr_perf_shutdown();
-        sr_profile_dump_final();
-        SR_VERIFY_REPORT_NOW();
-        fflush(stderr);
-        _Exit(HLE_LIBFONT_STARTUP_STOP_EXIT);
-    }
+    if (sr_sched_on) sr_run_end(HLE_LIBFONT_STARTUP_STOP_EXIT, "libfont_startup_stop", "the libfont start-up stop");
     longjmp(g_hle_jmp, 1);
 #endif
 }
@@ -1060,7 +1071,7 @@ static uint32_t read_guest_module_option(uint32_t option, GuestModuleLoadOption 
 static unsigned char *read_guest_module_file(const char *path, size_t *size_out, int *unreadable) {
     *size_out = 0;
     *unreadable = 0;
-    FILE *f = fopen(path, "rb");
+    FILE *f = sr_fopen_utf8(path, L"rb");
     if (!f) return NULL;
     unsigned char *bytes = NULL;
     long length = -1;
@@ -1102,8 +1113,7 @@ int loadexec_module_file_matches_translation(const char *file) {
     const SrModuleCode *code = sr_module_code_find(file);
     if (!code || code->unsupported_reason) return 0;
     char path[1024];
-    int written = snprintf(path, sizeof(path), "%s/%s", guest_module_root(), file);
-    if (written <= 0 || (size_t)written >= sizeof(path)) return 0;
+    if (!guest_module_path(path, sizeof(path), file)) return 0;
     size_t size = 0u;
     int unreadable = 0;
     unsigned char *bytes = read_guest_module_file(path, &size, &unreadable);
@@ -1153,10 +1163,10 @@ static uint32_t load_guest_placed_module(const char *file, int required, uint32_
     }
 
     char image_path[1024];
-    int written = snprintf(image_path, sizeof(image_path), "%s/%s", guest_module_root(), file);
-    if (written <= 0 || (size_t)written >= sizeof(image_path))
+    if (!guest_module_path(image_path, sizeof(image_path), file))
         return guest_module_boundary("guest-module-path-too-long", file,
-                                     "the staged module path exceeds the runtime limit");
+                                     "the staged module path exceeds the runtime limit, or "
+                                     "SR_MODULE_DIR cannot be read");
     size_t size = 0;
     int unreadable = 0;
     unsigned char *bytes = read_guest_module_file(image_path, &size, &unreadable);

@@ -77,6 +77,9 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/mygame/psmf_media_focused_selftest --videorec-audio build/mygame/videorec_audio_channel channel",
     "build/mygame/psmf_media_focused_selftest --videorec-audio build/mygame/videorec_audio_output2 output2",
     "build/mygame/psmf_media_focused_selftest --videorec-audio build/mygame/videorec_audio_src src",
+    # dispatch-selftest and stale-code-selftest: host-neutral (audit 2026-11-17 F-803b2d02).
+    "build/mygame/dispatch_selftest",
+    "build/mygame/stale_code_selftest",
     # memory-watch-selftest: the store watch on the interpreter's data word (SR_WATCH from
     # the target), then on a main-RAM word, where unwatched stores take the inline path.
     "build/mygame/dispatch_isolation_selftest_generic",
@@ -85,6 +88,8 @@ _RUNS_BEFORE_PROCESS_TEST = (
     # translation from tools/code_capture.py, the binding that takes the call (#1933).
     "build/mygame/code_capture_selftest_capture build/mygame/code-capture-selftest",
     "build/mygame/code_capture_selftest_bound build/mygame/code-capture-selftest",
+    # asset-index-selftest: host-neutral (audit 2026-11-17 F-803b2d02).
+    "build/mygame/asset_index_selftest",
     # tex-mips-selftest: the host mip chain builder on synthetic textures, no GPU (#1273).
     "build/mygame/tex_mips_selftest",
     # glyph-recon-selftest: sharp game text's CPU side on synthetic glyphs, no GPU (#2110).

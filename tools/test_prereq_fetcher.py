@@ -1898,7 +1898,28 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertIn("nk_ach_user_agent(NK_PLAYER_VERSION, system, run->achievements_user_agent,",
                       source)
         self.assertIn("nk_platform_os_description(system, sizeof system)", source)
-        self.assertIn("PackageHttpOptions options = {job->user_agent};", source)
+        self.assertIn("PackageHttpOptions options = {job->user_agent, job->cancel};", source)
+        # Audit F-32444050: shutdown ends the request on its way before it waits for the HTTP
+        # thread, so it does not wait out WinHTTP's timeouts (test_package_builder checks that a
+        # cancelled request is refused before anything is opened).
+        shutdown = source[source.index("static void player_achievements_shutdown(PlayerRun *run) {"):]
+        shutdown = shutdown[:shutdown.index("\n}\n")]
+        self.assertLess(shutdown.index("package_http_cancel(run->ach_http_cancel);"),
+                        shutdown.index("SDL_WaitThread(job->thread, NULL);"))
+        self.assertIn("job->cancel = run->ach_http_cancel;", source)
+        # Review of #2890: every WinHTTP call on a request starts between package_http_call_begin
+        # and _end (WINHTTP_REQUEST_CALL), so none request_uses a handle the cancel closed
+        # (test_package_builder runs that protocol with a fake handle).
+        transport = (REPO_ROOT / "src" / "player" / "package_builder.c").read_text(encoding="utf-8")
+        windows = transport[transport.index("typedef struct WinHttpDownload {"):
+                            transport.index("static bool sha256_begin(")]
+        request_uses: int = sum(line.count("WINHTTP_REQUEST(state)")
+                                for line in windows.splitlines() if not line.startswith("#define"))
+        self.assertGreater(request_uses, 0)
+        wrapped = re.findall(r"WINHTTP_REQUEST_CALL\(state, WinHttp\w+\(\s*WINHTTP_REQUEST\(state\)",
+                             windows)
+        self.assertEqual(request_uses, len(wrapped))
+        self.assertNotRegex(windows, r"WinHttp\w+\(\s*(?:state->request|\(HINTERNET\)state)")
         self.assertNotRegex(source, r'"NakagawaRecomp/%')
         header = (REPO_ROOT / "src" / "core" / "nk_achievements.h").read_text(encoding="utf-8")
         self.assertIn('#define NK_ACH_USER_AGENT_PRODUCT "NakagawaRecomp"', header)
@@ -2038,6 +2059,36 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertIn("player_achievements_end_account(run, removed)", action)
         self.assertNotIn("nk_ach_logout", action)
 
+    def test_retroachievements_set_logic_is_never_written(self) -> None:
+        # RetroAchievements' terms keep its trigger logic (each achievement's addresses and
+        # conditions) its own: the set stays in rc_client's memory. achievements-selftest
+        # (test_set_logic_stays_in_memory) checks what the bridge hands out; these read the
+        # source for the places a set could otherwise reach a file or a log.
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        bridge = (REPO_ROOT / "src" / "core" / "nk_achievements.c").read_text(encoding="utf-8")
+        # The bridge writes one file, the unlock queue, and prints nothing.
+        writes = [m.start() for m in re.finditer(r'fopen\w*\([^;]*"[wa]b?\+?"', bridge)]
+        self.assertEqual(len(writes), 1)
+        self.assertGreater(writes[0], bridge.index("bool nk_ach_save_queue_file("))
+        self.assertNotRegex(bridge, r"\b(?:fprintf|printf|vfprintf|fputs|puts)\s*\(")
+        self.assertEqual([m.start() > writes[0] for m in re.finditer(r"\bfwrite\s*\(", bridge)],
+                         [True])
+        # rc_client's warnings name an address of the set: the DISABLED event carries the
+        # bridge's own words instead.
+        log = bridge[bridge.index("static void RC_CCONV ach_log("):]
+        log = log[:log.index("\n}\n")]
+        self.assertNotRegex(log, r"NULL,\s*message\)")
+        self.assertIn("k_disabled_unreadable", log)
+        self.assertIn("k_disabled_unparsed", log)
+        # The player keeps an answer on disk only for a badge picture that decodes; the set's
+        # answer is wiped from memory once rc_client has it.
+        self.assertEqual(main.count("player_ach_job_cache_write(job);"), 1)
+        self.assertIn("if (job->badge && body_ok && job->response_status == 200) "
+                      "player_ach_job_cache_write(job);", main)
+        cache = main[main.index("static void player_ach_job_cache_write(PlayerAchHttpJob *job) {"):]
+        self.assertIn("player_ach_badge_decodes(", cache[:cache.index("\n}\n")])
+        self.assertIn("nk_secure_zero(job->response_body, job->response_body_size);", main)
+
     def test_achievement_account_and_channel_rules_in_the_player(self) -> None:
         # src/player/main.c has no native harness; these read its source for the rules the
         # audit of 2026-11-17 found broken (the bridge's side runs in achievements-selftest).
@@ -2110,9 +2161,9 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         ra = main[main.index("static int player_utf8_fit("):
                   main.index("static void player_achievements_sign_in_stored(")]
         self.assertIsNone(re.search(r"%\.[0-9]+s", ra), "a byte-count cut of RA text")
-        self.assertEqual(ra.count("player_utf8_fit("), 7,
-                         "the helper, four events (a completed set's toast and status line "
-                         "among them), the dropped-notices line")
+        self.assertEqual(ra.count("player_utf8_fit("), 8,
+                         "the helper, five events (a loaded set's toast, a completed set's toast "
+                         "and status line among them), the dropped-notices line")
         # The list's rows hold the bridge's whole display text, already cut at a character
         # (ach_copy_text), so the player copies it and never cuts it again.
         self.assertIn("_Static_assert(PLAYER_ACHIEVEMENT_TITLE_MAX >= NK_ACH_DISPLAY_TITLE_MAX,", ra)
@@ -2214,6 +2265,17 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertIn('NK_GUEST_MEMORY_NOTIFICATION_SET_COMPLETED "%.*s"', player)
         self.assertNotIn('snprintf(toast, sizeof toast, "Set completed: ', player)
         self.assertIn("nk_guest_memory_notification_set_completed(", gui)
+        # A loaded set: the player writes the game's title, then what this account has unlocked
+        # and the set's size (achievements-selftest checks the parser), when the set loads; the
+        # runtime's toast says "Achievements active" over the title and "N of M unlocked".
+        self.assertIn('NK_GUEST_MEMORY_NOTIFICATION_SET_LOADED "%.*s\\n%u\\n%u"', player)
+        game_loaded = player[player.index("case NK_ACH_EVENT_GAME_LOADED:"):]
+        game_loaded = game_loaded[:game_loaded.index("break;")]
+        self.assertIn("nk_platform_guest_memory_channel_notify(&run->guest_memory_channel,",
+                      game_loaded)
+        self.assertIn("nk_guest_memory_notification_set_loaded(s_host_toast_text, &loaded)", gui)
+        self.assertRegex(gui, r'f\.host_toast_head = s_host_toast_loaded_empty \? '
+                              r'"RetroAchievements"\s*: "Achievements active";')
         # The notice's last line: "N points" ("1 point"), or "Every achievement unlocked" for a
         # completed set. The mode (Casual) is said once, on the game's page heading and in
         # Settings, not on every notice.
@@ -2222,6 +2284,7 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertIn('"%u %s"', begin)
         self.assertIn('== 1u ? "point" : "points"', begin)
         self.assertIn('"Every achievement unlocked"', begin)
+        self.assertIn('"%u of %u unlocked"', begin)
         self.assertNotIn("Softcore", begin)
         self.assertNotIn("Casual", begin)
         # RetroAchievements now calls the mode Casual (rcheevos 13.0 Upgrade Guide, "Rebranding":
@@ -2234,16 +2297,45 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
             for literal in re.findall(r'"(?:[^"\\\n]|\\.)*"', path.read_text(encoding="utf-8")):
                 with self.subTest(path=path.name, literal=literal[:40]):
                     self.assertNotIn("softcore", literal.lower())
-        # The message is read, and its badge read from disk and decoded, before the present
-        # (gui_host_toast_poll), never inside the UI pass, which only draws it.
+        # The message is read before the present (gui_host_toast_poll), never inside the UI
+        # pass, which only draws it.
         ui_pass = gui[gui.index("static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {"):]
         ui_pass = ui_pass[:ui_pass.index("\n}\n")]
         for name in ("sr_host_notification(", "gui_host_toast_begin(", "gui_host_toast_poll(",
-                     "gui_host_toast_badge_load(", "fopen("):
+                     "gui_host_toast_badge_", "fopen(", "nk_ui_image_decode_png("):
             with self.subTest(pass_calls=name):
                 self.assertNotIn(name, ui_pass)
         self.assertEqual(gui.count("gui_host_toast_poll();"), 2,
                          "before the frame's present and before the held frame's")
+        # Review 2026-11-20 (#2847, item 4): the badge was read and decoded on the presenting
+        # thread. Its file is opened and decoded only in the host worker's job
+        # (gui_host_toast_badge_run, handed to sched_host_work_submit and called nowhere else);
+        # the presenting side only collects the result.
+        def body(name: str) -> str:
+            start = gui.index(name)
+            return gui[start:gui.index("\n}\n", start)]
+        run = body("static void gui_host_toast_badge_run(void *ctx) {")
+        self.assertIn("nk_fopen_utf8(job->path, \"rb\")", run)
+        self.assertIn("nk_ui_image_decode_png(bytes, size, &limits, &job->image)", run)
+        toast = gui[gui.index("static NkGuestUnlockNotice s_host_toast_unlock;"):
+                    gui.index("/* ---- The player's local guest-memory channel")]
+        self.assertEqual(toast.count("nk_fopen_utf8("), 1)
+        self.assertEqual(toast.count("nk_ui_image_decode_png("), 1)
+        self.assertEqual(gui.count("gui_host_toast_badge_run"), 2,
+                         "its definition and the one sched_host_work_submit call")
+        self.assertIn("sched_host_work_submit(gui_host_toast_badge_run, "
+                      "gui_host_toast_badge_job_free, job)", gui)
+        for name in ("static void gui_host_toast_poll(void) {",
+                     "static void gui_host_toast_begin(void) {",
+                     "static void gui_host_toast_badge_take(void) {"):
+            with self.subTest(presenting_side=name):
+                self.assertNotIn("fopen", body(name))
+                self.assertNotIn("nk_ui_image_decode_png(", body(name))
+        # The UI's release leaves a read on its way to the worker, which frees it.
+        self.assertIn("sched_host_work_abandon(s_host_toast_badge_work);",
+                      body("static void gui_host_toast_release(void) {"))
+        self.assertIn("gui_host_toast_release();",
+                      body("static void gui_ace_ui_release(void) {"))
         # The badge picture comes from the player's badge folder on this PC: the runtime opens
         # no connection for it (NETWORK_EGRESS_PATTERN, below) and names no host.
         self.assertIn('#define HOST_TOAST_BADGE_DIR "achievements-badges"', gui)

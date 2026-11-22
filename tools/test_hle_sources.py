@@ -312,8 +312,10 @@ class ThreadHarnessMpegLinkTests(unittest.TestCase):
         return {line.split()[-1] for line in listed.stdout.splitlines() if line.strip()}
 
     def test_the_harness_defines_every_port_function_its_handlers_call(self) -> None:
-        if CC is None or NM is None:
-            self.skipTest("NOT_RUN: needs gcc and nm on PATH")
+        if CC is None:
+            self.skipTest("TOOLCHAIN_MISSING: needs gcc on PATH")
+        if NM is None:
+            self.skipTest("NOT_RUN: needs nm on PATH")
         handlers = ROOT / hle_sources.defining_file("hle_register_psmf_player_handlers")
         with tempfile.TemporaryDirectory() as tmp:
             port = {name for name in self._symbols(MPEG_PORT, Path(tmp) / "mpeg.o", defined=True)

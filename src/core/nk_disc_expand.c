@@ -1329,15 +1329,18 @@ static bool place_expansion(const char *data_root, const NkDiscImportPaths *path
    it there. The destination's name is chosen, its folder made and its name lock
    taken before anything moves (placement_begin), and the image keeps its .source
    until the move is recorded. A move whose record cannot be written is put back
-   and its own record written again, so every failure leaves the earlier
-   expansion where its ref names it, with a named error. */
+   and its own record written again, so a failure leaves the earlier expansion
+   where its ref names it, with a named error. Only when the put-back or the
+   rewrite itself fails too does the error say what was left: the image back
+   with no record, or at the new name unrecorded (the next import expands again). */
 static bool move_expansion(const char *data_root, const NkDiscImportPaths *paths,
                            const char *key, NkDiscImport *out, NkDiscExpandStatus *status) {
     NkDiscImport moved = *out;
     char sidecar[NK_MAX_PATH + 8];
     char old_sidecar[NK_MAX_PATH + 8];
     NkFileLock name_lock;
-    bool restored;
+    bool image_back;
+    bool records_back;
     if (!path_suffix(old_sidecar, sizeof(old_sidecar), out->iso_path, ".source")) {
         return disc_fail(status, NK_DISC_WRITE_FAILED,
                          "The path to Nakagawa's data folder is too long.");
@@ -1354,15 +1357,22 @@ static bool move_expansion(const char *data_root, const NkDiscImportPaths *paths
     }
     if (!write_identity_records(paths->ref, &moved)) {
         (void)nk_remove_utf8(sidecar);
-        restored = nk_rename_utf8(moved.iso_path, out->iso_path) == 0 &&
-                   write_identity_records(paths->ref, out);
+        image_back = nk_rename_utf8(moved.iso_path, out->iso_path) == 0;
+        records_back = image_back && write_identity_records(paths->ref, out);
         nk_platform_file_lock_release(&name_lock);
-        if (restored) {
+        if (records_back) {
             return disc_fail(status, NK_DISC_WRITE_FAILED,
                              "The record of the disc image expanded earlier could not be "
                              "written in Nakagawa's data folder, so the image was put back "
                              "where it was. Check that the folder is writable, then add the "
                              "disc image again.");
+        }
+        if (image_back) {
+            return disc_fail(status, NK_DISC_WRITE_FAILED,
+                             "The record of the disc image expanded earlier could not be "
+                             "written in Nakagawa's data folder. The image is back where it "
+                             "was, but its own record could not be written again. Check that "
+                             "the folder is writable, then add the disc image again.");
         }
         return disc_fail(status, NK_DISC_WRITE_FAILED,
                          "The record of the disc image expanded earlier could not be written in "

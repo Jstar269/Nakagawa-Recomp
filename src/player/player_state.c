@@ -446,12 +446,17 @@ void player_app_runtime_package_cache_store(
     /* A stored reason survives a store for the same title; a warm cache hit
      * stores no new reason, and the earlier one still describes the package. */
     char prior_reason[sizeof(entry->reason)] = "";
+    char prior_runtime_source[sizeof(entry->runtime_source)] = "";
     if (player_runtime_package_cache_entry_is_for(entry, game)) {
         snprintf(prior_reason, sizeof(prior_reason), "%s", entry->reason);
+        snprintf(prior_runtime_source, sizeof(prior_runtime_source), "%s",
+                 entry->runtime_source);
     }
     memset(entry, 0, sizeof(*entry));
     player_runtime_cache_set_game_key(entry, game);
     snprintf(entry->reason, sizeof(entry->reason), "%s", prior_reason);
+    snprintf(entry->runtime_source, sizeof(entry->runtime_source), "%s",
+             prior_runtime_source);
     entry->status_valid = true;
     entry->identity_valid = identity_valid;
     entry->runtime_available = runtime_available;
@@ -472,6 +477,39 @@ void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
         game_index >= app->game_count) return;
     snprintf(app->runtime_package_cache[game_index].reason,
              sizeof(app->runtime_package_cache[game_index].reason), "%s", reason);
+}
+
+NkRuntimePackageStatus player_runtime_package_status_check(const char *user_data_root,
+                                                           const GameRecord *game,
+                                                           NkRuntimePackageInfo *info,
+                                                           char *reason, size_t reason_size) {
+    NkRuntimePackageInfo local;
+    NkRuntimePackageInfo *out = info ? info : &local;
+    memset(out, 0, sizeof(*out));
+    return nk_launch_validate_runtime_package(user_data_root, game, out, reason, reason_size);
+}
+
+void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int game_index,
+                                                         const char *commit,
+                                                         const char *origin,
+                                                         const char *reason) {
+    if (!app || game_index < 0 || game_index >= app->game_count) return;
+    char *out = app->runtime_package_cache[game_index].runtime_source;
+    const size_t cap = sizeof(app->runtime_package_cache[game_index].runtime_source);
+    out[0] = '\0';
+    if (!origin || !origin[0]) return;
+    if (commit && commit[0]) {
+        snprintf(out, cap, "%s (%s)", commit,
+                 strcmp(origin, "install-record") == 0 ? "install record" :
+                 strcmp(origin, "git") == 0 ? "git checkout" : origin);
+    } else {
+        snprintf(out, cap, "unknown (%s)", reason && reason[0] ? reason : "not recorded");
+    }
+    /* One report line: the validator refuses control characters; a caller's string is
+     * kept to one line here too. */
+    for (char *c = out; *c; c++) {
+        if ((unsigned char)*c < 0x20u || (unsigned char)*c == 0x7fu) *c = ' ';
+    }
 }
 
 const char *player_app_runtime_package_reason(const PlayerApp *app,
@@ -1438,6 +1476,9 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->ui_sounds = false;
     settings->launcher_music = false;
     settings->launcher_music_volume = 80;
+    settings->launcher_theme[0] = '\0';
+    memset(settings->theme_unlocks, 0, sizeof(settings->theme_unlocks));
+    settings->theme_unlock_count = 0;
     settings->library_sort = PLAYER_LIBRARY_SORT_PLAYED;
     settings->launcher_window_maximized = false;
     settings->launcher_window_position_valid = false;
@@ -1781,20 +1822,12 @@ static bool title_pack_store(PlayerSettings *settings, const char *key, const ch
 /* Strict UTF-8: no overlong form, surrogate or code point past U+10FFFF. */
 static bool texpack_utf8_valid(const char *s) {
     const unsigned char *p = (const unsigned char *)s;
-    while (*p) {
-        unsigned c = *p++;
-        int more;
-        unsigned cp, min;
-        if (c < 0x80u) continue;
-        if ((c & 0xE0u) == 0xC0u) { more = 1; cp = c & 0x1Fu; min = 0x80u; }
-        else if ((c & 0xF0u) == 0xE0u) { more = 2; cp = c & 0x0Fu; min = 0x800u; }
-        else if ((c & 0xF8u) == 0xF0u) { more = 3; cp = c & 0x07u; min = 0x10000u; }
-        else return false;
-        for (int k = 0; k < more; k++, p++) {
-            if ((*p & 0xC0u) != 0x80u) return false;
-            cp = (cp << 6) | (*p & 0x3Fu);
-        }
-        if (cp < min || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) return false;
+    size_t left = strlen(s);
+    while (left > 0u) {
+        size_t len = nk_utf8_char_len(p, left, 0u);
+        if (len == 0u) return false;
+        p += len;
+        left -= len;
     }
     return true;
 }
@@ -1859,6 +1892,8 @@ static bool font_note_hidden_store(PlayerSettings *settings, const char *key) {
            PLAYER_DISC_ID_KEY_LEN);
     return true;
 }
+
+static bool theme_unlock_store(PlayerSettings *settings, const char *unlock);
 
 /* Reads "font_note_hidden": ["<disc ID>", ...]. A member that is not a disc ID is not kept; the
    return says how many, so the player is told. */
@@ -2349,6 +2384,19 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         if (music_vol_val > 100) music_vol_val = 100;
         app->settings.launcher_music_volume = (int)music_vol_val;
     }
+    /* The launcher theme: an id that is not one is left out, as if never written. */
+    const char *theme_id = nk_json_get_string(nk_json_obj_get(root, "launcher_theme"));
+    if (theme_id && player_theme_id_valid(theme_id)) {
+        snprintf(app->settings.launcher_theme, sizeof(app->settings.launcher_theme), "%s",
+                 theme_id);
+    }
+    const NkJsonNode *unlock_list = nk_json_obj_get(root, "theme_unlocks");
+    if (unlock_list && nk_json_is_array(unlock_list)) {
+        for (size_t i = 0; i < nk_json_array_count(unlock_list); i++) {
+            const char *unlock = nk_json_get_string(nk_json_array_get(unlock_list, i));
+            if (unlock) (void)theme_unlock_store(&app->settings, unlock);
+        }
+    }
 
     NkJsonNode *vol_node = nk_json_obj_get(root, "master_volume");
     int64_t vol_val = 0;
@@ -2541,6 +2589,14 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
     fprintf(f, "  \"ui_sounds\": %s,\n", app->settings.ui_sounds ? "true" : "false");
     fprintf(f, "  \"launcher_music\": %s,\n", app->settings.launcher_music ? "true" : "false");
     fprintf(f, "  \"launcher_music_volume\": %d,\n", app->settings.launcher_music_volume);
+    fprintf(f, "  \"launcher_theme\": \"%s\",\n",
+            player_theme_id_valid(app->settings.launcher_theme) ? app->settings.launcher_theme
+                                                                : "");
+    fprintf(f, "  \"theme_unlocks\": [");
+    for (int i = 0; i < app->settings.theme_unlock_count; i++) {
+        fprintf(f, "%s\"%s\"", i ? ", " : "", app->settings.theme_unlocks[i]);
+    }
+    fprintf(f, "],\n");
     fprintf(f, "  \"library_sort\": \"%s\",\n",
             kLibrarySortKeys[(int)app->settings.library_sort >= 0 &&
                                      app->settings.library_sort < PLAYER_LIBRARY_SORT_COUNT
@@ -3195,6 +3251,52 @@ void player_app_toggle_launcher_music(PlayerApp *app) {
     if (!app) return;
     app->settings.launcher_music = !app->settings.launcher_music;
     maybe_persist_settings(app);
+}
+
+bool player_theme_id_valid(const char *id) {
+    size_t length = 0;
+    if (!id || !id[0]) return false;
+    for (; id[length]; length++) {
+        char c = id[length];
+        if (length + 1 >= PLAYER_THEME_ID_MAX) return false;
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
+    }
+    return true;
+}
+
+static bool theme_unlock_kept(const PlayerSettings *settings, const char *unlock) {
+    for (int i = 0; i < settings->theme_unlock_count; i++) {
+        if (strcmp(settings->theme_unlocks[i], unlock) == 0) return true;
+    }
+    return false;
+}
+
+static bool theme_unlock_store(PlayerSettings *settings, const char *unlock) {
+    if (!player_theme_id_valid(unlock) || theme_unlock_kept(settings, unlock) ||
+        settings->theme_unlock_count >= PLAYER_THEME_UNLOCK_MAX) {
+        return false;
+    }
+    snprintf(settings->theme_unlocks[settings->theme_unlock_count++], PLAYER_THEME_ID_MAX, "%s",
+             unlock);
+    return true;
+}
+
+bool player_app_has_theme_unlock(const PlayerApp *app, const char *unlock) {
+    return app && unlock && theme_unlock_kept(&app->settings, unlock);
+}
+
+bool player_app_record_theme_unlock(PlayerApp *app, const char *unlock) {
+    if (!app || !theme_unlock_store(&app->settings, unlock)) return false;
+    maybe_persist_settings(app);
+    return true;
+}
+
+bool player_app_set_launcher_theme(PlayerApp *app, const char *id) {
+    if (!app || (id && id[0] && !player_theme_id_valid(id))) return false;
+    snprintf(app->settings.launcher_theme, sizeof(app->settings.launcher_theme), "%s",
+             id ? id : "");
+    maybe_persist_settings(app);
+    return true;
 }
 
 bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_t out_size) {
@@ -5671,6 +5773,11 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
                      package->package_identity[0] ? ", identity " : "",
                      package->package_identity);
             player_report_append(raw, sizeof(raw), &used, "Package: ", line);
+            /* Beside the player's own commit on the version line (#2875). */
+            if (package->runtime_source[0]) {
+                player_report_append(raw, sizeof(raw), &used, "Runtime source: ",
+                                     package->runtime_source);
+            }
         }
     }
     player_report_append(raw, sizeof(raw), &used, "Boundary: ", error->stop_boundary);
@@ -6289,6 +6396,14 @@ static void player_clear_stalled_game_notice(PlayerApp *app, bool restore_game_w
     app->stalled_game_delay = 0;
     app->stalled_game_wait = 0;
     app->stalled_game_spin = 0;
+    app->stalled_game_running_known = false;
+    app->stalled_game_running = 0;
+    app->stalled_game_busy_known = false;
+    app->stalled_game_busy_uid = 0;
+    app->stalled_game_busy_priority = 0;
+    app->stalled_game_busy_import[0] = '\0';
+    app->stalled_game_busy_import_ret = 0;
+    app->stalled_game_busy_repeats = 0;
 }
 
 void player_app_next_boot_event_path(char *out, size_t out_size) {
@@ -6899,19 +7014,35 @@ void player_app_stop_game(PlayerApp *app) {
     }
 }
 
+/* The problem report's Details for a stopped stall. The original fields keep their order; a
+   runtime that reports its RUNNING thread (#2875) adds the count and, when one is running, the
+   busy thread: a thread that never blocks starves the ones listed before it. */
+static void player_format_stall_details(const PlayerApp *app, char *out, size_t out_size) {
+    int n = snprintf(out, out_size,
+                     "%s=%u seconds=%u; scheduler summary: "
+                     "ready=%u delay=%u wait=%u spin=%u",
+                     app->stalled_game_dark_picture ? "dark_vblanks" : "no_frame_vblanks",
+                     app->stalled_game_no_frame_vblanks, app->stalled_game_seconds,
+                     app->stalled_game_ready, app->stalled_game_delay,
+                     app->stalled_game_wait, app->stalled_game_spin);
+    if (n < 0 || (size_t)n >= out_size || !app->stalled_game_running_known) return;
+    int m = snprintf(out + n, out_size - (size_t)n, " running=%u", app->stalled_game_running);
+    if (m < 0 || (size_t)(n + m) >= out_size || !app->stalled_game_busy_known) return;
+    n += m;
+    (void)snprintf(out + n, out_size - (size_t)n,
+                   "; busy thread uid=0x%x priority=%d last import %s -> 0x%08x x%u",
+                   app->stalled_game_busy_uid, (int)app->stalled_game_busy_priority,
+                   app->stalled_game_busy_import[0] ? app->stalled_game_busy_import : "-",
+                   app->stalled_game_busy_import_ret, app->stalled_game_busy_repeats);
+}
+
 void player_app_stop_stalled_game(PlayerApp *app) {
     if (!app || !app->is_game_running || !app->stalled_game_notice_visible) return;
 
     char disc_id[sizeof(app->launch_session.disc_id)];
     snprintf(disc_id, sizeof(disc_id), "%s", app->launch_session.disc_id);
-    char stall_details[256];
-    snprintf(stall_details, sizeof(stall_details),
-             "%s=%u seconds=%u; scheduler summary: "
-             "ready=%u delay=%u wait=%u spin=%u",
-             app->stalled_game_dark_picture ? "dark_vblanks" : "no_frame_vblanks",
-             app->stalled_game_no_frame_vblanks, app->stalled_game_seconds,
-             app->stalled_game_ready, app->stalled_game_delay,
-             app->stalled_game_wait, app->stalled_game_spin);
+    char stall_details[384];
+    player_format_stall_details(app, stall_details, sizeof(stall_details));
 
     printf("[PLAYER] Stopping stalled game session...\n");
     nk_launch_stop(&app->launch_session);
@@ -7312,6 +7443,33 @@ static void player_consume_stall_event_line(PlayerApp *app, const char *line) {
     app->stalled_game_delay = (uint32_t)delay;
     app->stalled_game_wait = (uint32_t)wait;
     app->stalled_game_spin = (uint32_t)spin;
+    /* Fields a runtime from #2875 on adds after spin; absent from older runtimes. */
+    app->stalled_game_running_known = false;
+    app->stalled_game_busy_known = false;
+    {
+        const char *running_field = strstr(fields, " running=");
+        unsigned int running = 0u;
+        if (running_field && sscanf(running_field, " running=%u", &running) == 1) {
+            app->stalled_game_running_known = true;
+            app->stalled_game_running = (uint32_t)running;
+            unsigned int uid = 0u, ret = 0u, repeats = 0u;
+            int priority = 0;
+            char import_name[sizeof(app->stalled_game_busy_import)];
+            const char *busy_field = strstr(running_field, " busy_uid=");
+            if (busy_field &&
+                sscanf(busy_field, " busy_uid=0x%x busy_pri=%d busy_import=%47s "
+                                   "busy_import_ret=0x%x busy_repeats=%u",
+                       &uid, &priority, import_name, &ret, &repeats) == 5) {
+                app->stalled_game_busy_known = true;
+                app->stalled_game_busy_uid = (uint32_t)uid;
+                app->stalled_game_busy_priority = (int32_t)priority;
+                snprintf(app->stalled_game_busy_import, sizeof(app->stalled_game_busy_import),
+                         "%s", import_name);
+                app->stalled_game_busy_import_ret = (uint32_t)ret;
+                app->stalled_game_busy_repeats = (uint32_t)repeats;
+            }
+        }
+    }
     if (app->stalled_game_seconds >= PLAYER_STALLED_NOTICE_SECONDS &&
         !app->stalled_game_notice_dismissed &&
         !app->stalled_game_notice_visible) {

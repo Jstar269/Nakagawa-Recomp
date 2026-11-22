@@ -269,6 +269,12 @@
       "prx": "nakagawa_psp_oracle.prx",
       "apis": ["sceKernelSysClock2USecWide", "sceCtrlGetSamplingMode", "sceKernelReferThreadProfiler", "sceKernelReferGlobalProfiler", "sceKernelCreateVTimer", "sceKernelGetVTimerTime", "sceKernelStartVTimer", "sceKernelStopVTimer", "sceKernelDeleteVTimer", "sceDisplaySetHoldMode", "sceDisplayWaitVblankStartMultiCB", "sceImposeGetBatteryIconStatus", "sceImposeSetUMDPopup"],
       "case_ids": ["sysclock-wide", "ctrl-sampling-mode", "thread-profiler", "global-profiler", "vtimer-basic", "display-basic", "impose-basic", "kernel-misc-done"],
+      "case_apis": {
+        "display-basic": [
+          {"call": "sceDisplaySetHoldMode(0)", "cell": "mode 0 from a user thread"},
+          {"call": "sceDisplayWaitVblankStartMultiCB(1u)", "cell": "argument 1 from a user thread"}
+        ]
+      },
       "invariant": "raw API results and bounded VTimer observations are emitted as scalar records",
       "issues": [],
       "risk": "low-medium; no persistent settings are changed",

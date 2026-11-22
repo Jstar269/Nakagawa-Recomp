@@ -58,7 +58,7 @@ class LdLauncherTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         compiler = shutil.which(os.environ.get("CC", "cc")) or shutil.which("gcc")
         if compiler is None:
-            raise unittest.SkipTest("no C compiler")
+            raise unittest.SkipTest("TOOLCHAIN_MISSING: no C compiler")
         cls._tmp = tempfile.TemporaryDirectory(prefix="nk-ld-launcher-")
         root = Path(cls._tmp.name)
         cls.folder = root / "lib" / "arm64"
@@ -446,6 +446,36 @@ class MakeNoticeTests(unittest.TestCase):
         self.assertIn('stage_make_notices(cfg.make_src, assets / "NOTICES"', body)
 
 
+class ProjectNoticeTests(unittest.TestCase):
+    """The APK carries the desktop packages' notice bundle, and refuses to stage without it."""
+
+    def test_the_bundle_holds_the_project_pages_and_component_texts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            toolchain.stage_project_notices(Path(tmp) / "NOTICES")
+            folder = Path(tmp) / "NOTICES" / "project"
+            names = {path.name for path in folder.iterdir()}
+            self.assertLessEqual({"NOTICE.md", "CREDITS.md", "THIRD_PARTY_NOTICES.txt", "THIRD_PARTY_NOTICES", "SOURCE.txt"}, names)
+            texts = {path.name for path in (folder / "THIRD_PARTY_NOTICES").iterdir()}
+            for notice in ("rcheevos.txt", "JPCSP.txt", "uOFW.txt", "PSPSDK.txt"):
+                self.assertIn(notice, texts)
+
+    def test_a_tree_without_the_pages_stops_the_stage(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            root = Path(tmp) / "repo"
+            (root / "assets").mkdir(parents=True)
+            shutil.copy2(Path(toolchain.__file__).resolve().parent.parent / "assets" / "third_party_components.json",
+                         root / "assets" / "third_party_components.json")
+            with self.assertRaises(Exception) as caught:
+                toolchain.stage_project_notices(Path(tmp) / "NOTICES", repo_root=root)
+            self.assertIn("LICENSE_TEXT_MISSING", str(caught.exception))
+            self.assertFalse((Path(tmp) / "NOTICES" / "project").exists())
+
+    def test_stage_output_stages_them(self) -> None:
+        source = Path(toolchain.__file__).read_text(encoding="utf-8")
+        body = source[source.index("def stage_output("):source.index("def main(")]
+        self.assertIn('stage_project_notices(assets / "NOTICES")', body)
+
+
 class GradleWiringTests(unittest.TestCase):
     """The app bundles the staged toolchain only when nk.toolchain names a staged folder."""
 
@@ -546,14 +576,22 @@ class ToolchainArchiveTests(unittest.TestCase):
                 self.assertTrue(os.access(Path(tmp) / "out" / "lib/python3.15/lib-dynload/_ssl.so", os.X_OK))
                 self.assertFalse(os.access(Path(tmp) / "out" / "usr/include/stdio.h", os.X_OK))
 
-    def refused(self, build: object) -> str:
+    def refused(self, build: object, written: frozenset[str] = frozenset()) -> str:
+        """Unpacks the archive ``build`` writes and returns the refusal line.
+
+        Nothing may land anywhere but the target folder, and in it only ``written`` (the folders
+        and files an archive cut short leaves behind): a refusal comes before any write.
+        """
         with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
             archive = Path(tmp) / "a.tar"
             assert callable(build)
             build(archive)
-            result = self.unpack(archive, Path(tmp) / "out" / "target")
+            target = Path(tmp) / "out" / "target"
+            result = self.unpack(archive, target)
             self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-            self.assertFalse((Path(tmp) / "out" / "evil").exists())
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["a.tar", "out"])
+            self.assertEqual(sorted(p.name for p in (Path(tmp) / "out").iterdir()), ["target"])
+            self.assertEqual({p.relative_to(target).as_posix() for p in target.rglob("*")}, set(written))
             return result.stdout
 
     @staticmethod
@@ -569,9 +607,18 @@ class ToolchainArchiveTests(unittest.TestCase):
         self.assertIn("is not a folder or a file", self.refused(lambda a: self._tar(a, (link, b""))))
 
     def test_a_path_out_of_the_folder_is_refused(self) -> None:
-        for name in ("../evil", "usr/../../evil", "/evil", "usr//evil", "./evil"):
+        # relativePath refuses each name before resolve() could say ": outside": no name reaches it.
+        refusals = {
+            "../evil": ": not a plain relative path",
+            "usr/../../evil": ": not a plain relative path",
+            "/evil": ": not a relative path",
+            "usr//evil": ": not a plain relative path",
+            "./evil": ": not a plain relative path",
+        }
+        for name, reason in refusals.items():
             with self.subTest(name=name):
-                self.assertIn("path", self.refused(lambda a, n=name: self._tar(a, (tarfile.TarInfo(n), b"x"))))
+                out = self.refused(lambda a, n=name: self._tar(a, (tarfile.TarInfo(n), b"x")))
+                self.assertEqual(out.strip(), f"REFUSED {name}{reason}")
 
     def test_a_damaged_header_is_refused(self) -> None:
         def build(archive: Path) -> None:
@@ -585,7 +632,8 @@ class ToolchainArchiveTests(unittest.TestCase):
         def build(archive: Path) -> None:
             self._tar(archive, (tarfile.TarInfo("usr/a.h"), b"a" * 2000))
             archive.write_bytes(archive.read_bytes()[:1024])
-        self.assertIn("ends inside a file", self.refused(build))
+        # The file was being written when the archive ended; nothing else was.
+        self.assertIn("ends inside a file", self.refused(build, frozenset({"usr", "usr/a.h"})))
 
     def test_a_pax_record_length_that_overflows_is_refused(self) -> None:
         # The second record's length, added to its offset, passes Integer.MAX_VALUE; the bound
@@ -1082,7 +1130,7 @@ class StageOutputTests(unittest.TestCase):
         with mock.patch.object(toolchain, "_run", run), \
                 mock.patch.object(toolchain, "read_pinned", lambda *args: b"notice"), \
                 mock.patch.object(toolchain, "third_party_notices", lambda src: "notices\n"), \
-                mock.patch.object(package_notices, "source_reference", lambda: reference):
+                mock.patch.object(package_notices, "source_reference", lambda *args: reference):
             staged: dict[str, str] = toolchain.stage_output(cfg, out)
         return staged
 

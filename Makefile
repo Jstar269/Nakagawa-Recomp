@@ -404,18 +404,25 @@ endif
 # only a build for the Mac itself: a Mac building for Android links with the NDK's lld, so the
 # choice reads the target (NK_TARGET_OS, #360) as well as the host. Every link line uses this
 # variable, never the raw option.
-# test_disc_expand's and ge-patch-tess-selftest's failing-allocator cases wrap malloc: GNU ld,
+# test_nk_zip counts the reads of its nested-header archive by wrapping fread (NK_ZIP_WRAP_FREAD,
+# the same linkers and the same SKIP on a Mac). test_disc_expand's and ge-patch-tess-selftest's failing-allocator cases wrap malloc: GNU ld,
 # lld and the MinGW linker take -Wl,--wrap, ld64 has no such option, so a Mac's own build leaves
 # the define and the flag out and each test prints a named SKIP for its case (CMakeLists.txt
-# makes the same choice for test_disc_expand, the only one of the two it builds).
+# makes the same choice for test_disc_expand, the only one of the two it builds). The
+# shared-helpers-selftest's bounded-reader out-of-memory case wraps malloc the same way
+# (SHARED_HELPERS_WRAP_MALLOC; CMakeLists.txt makes the same choice for test_shared_helpers).
 ifeq ($(NK_TARGET_OS)-$(HOST_KIND),posix-Darwin)
 LD_GC_SECTIONS := -Wl,-dead_strip
 DISC_EXPAND_WRAP_MALLOC :=
 GE_PATCH_TESS_WRAP_MALLOC :=
+SHARED_HELPERS_WRAP_MALLOC :=
+NK_ZIP_WRAP_FREAD :=
 else
 LD_GC_SECTIONS := -Wl,--gc-sections
 DISC_EXPAND_WRAP_MALLOC := -DNK_TEST_WRAP_MALLOC -Wl,--wrap=malloc
 GE_PATCH_TESS_WRAP_MALLOC := -DNK_TEST_WRAP_MALLOC -Wl,--wrap=malloc
+SHARED_HELPERS_WRAP_MALLOC := -DNK_TEST_WRAP_MALLOC -Wl,--wrap=malloc
+NK_ZIP_WRAP_FREAD := -DNK_TEST_WRAP_FREAD -Wl,--wrap=fread
 endif
 
 # Portable H.264 backend (src/rt/h264_ffmpeg.c): the pinned FFmpeg n4.4 H.264 decoder subset

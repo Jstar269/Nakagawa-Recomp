@@ -2061,7 +2061,7 @@ static void test_native_transport_user_agent_limit(void) {
     memset(too_long, 'b', sizeof too_long - 1u);
     too_long[sizeof too_long - 1u] = '\0';
 
-    PackageHttpOptions options = {longest};
+    PackageHttpOptions options = {longest, NULL};
     const char *refused = package_builder_native_session_user_agent(&options, carried,
                                                                     sizeof carried);
     printf("   longest (%u bytes): %s\n", (unsigned)strlen(longest), refused ? refused : "carried");
@@ -2092,6 +2092,99 @@ static void test_native_transport_user_agent_limit(void) {
     assert(!package_builder_native_transport_request(&options, "https://example.invalid/", "",
                                                      "GET", NULL, NULL, 0u, &response));
     assert(!response.refused); /* refused for its host, which names no user agent */
+}
+
+/* Audit F-32444050: the player's shutdown waited for a RetroAchievements request on its way,
+ * up to WinHTTP's timeouts. A cancel ends the request using it (its handle is closed, which
+ * ends the blocked call) and refuses every later one before anything is opened. Nothing can be
+ * sent here: no request names an allowed host, so the refusal's text tells the cancel's check,
+ * which comes first, from the host's. A request blocked on the network is not made: tests send
+ * nothing. */
+static void test_native_transport_cancel(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: a cancelled native request is refused unsent\n");
+    PackageHttpCancel *cancel = package_http_cancel_create();
+    assert(cancel != NULL);
+    PackageHttpOptions options = {"NakagawaRecomp/0.0.0 (test) rcheevos/0.0.0", cancel};
+    PackageHttpResponse response;
+    assert(!package_builder_native_transport_request(&options, "https://example.invalid/", "",
+                                                     "GET", NULL, NULL, 0u, &response));
+    assert(!response.refused); /* before the cancel: refused for its host only */
+    package_http_cancel(cancel);
+    package_http_cancel(cancel); /* a second cancel changes nothing */
+    assert(!package_builder_native_transport_request(&options, "https://example.invalid/", "",
+                                                     "POST", "application/x-www-form-urlencoded",
+                                                     "r=ping", 6u, &response));
+    printf("   after the cancel: %s\n", response.refused ? response.refused : "(none)");
+    assert(response.refused &&
+           strcmp(response.refused, "refused: the request was cancelled") == 0);
+    assert(!response.context && !response.read && !response.close && response.http_status == 0);
+    package_http_cancel_destroy(cancel);
+    package_http_cancel(NULL);
+    package_http_cancel_destroy(NULL);
+}
+
+/* Review of #2890: the cancel closed the request's handle and the worker went on calling WinHTTP
+ * with it, a value Windows may since have given another request. The transport's protocol, with
+ * a fake handle: the cancel closes only the handle of a call in progress, no call starts after a
+ * cancel, and each handle is closed once, by one side. */
+typedef struct {
+    int closes;
+    int calls;
+    char order[64];
+} FakeHandleLog;
+
+static FakeHandleLog s_fake_handle_log;
+
+static void fake_handle_close(void *handle) {
+    FakeHandleLog *log = (FakeHandleLog *)handle;
+    log->closes++;
+    strncat(log->order, "x", sizeof log->order - strlen(log->order) - 1u);
+}
+
+/* One call on the slot, as the transport makes it: the cancel may come during it. */
+static bool fake_call(PackageHttpCancel *cancel, PackageHttpCallSlot *slot, bool cancel_during) {
+    if (!package_http_call_begin(cancel, slot)) return false;
+    FakeHandleLog *log = (FakeHandleLog *)slot->handle;
+    assert(log->closes == 0); /* a call never starts on a closed handle */
+    log->calls++;
+    strncat(log->order, "c", sizeof log->order - strlen(log->order) - 1u);
+    if (cancel_during) package_http_cancel(cancel); /* the other thread, while this call blocks */
+    return package_http_call_end(cancel, slot);
+}
+
+static void test_native_transport_cancel_ordering(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: a cancel closes only a call in progress, once\n");
+    for (int when = 0; when < 4; when++) {
+        /* 0: no cancel; 1: before the first call; 2: during the second; 3: after the second */
+        PackageHttpCancel *cancel = package_http_cancel_create();
+        assert(cancel != NULL);
+        memset(&s_fake_handle_log, 0, sizeof s_fake_handle_log);
+        PackageHttpCallSlot slot = {&s_fake_handle_log, fake_handle_close, false};
+        if (when == 1) package_http_cancel(cancel);
+        bool open = fake_call(cancel, &slot, false);
+        if (open) open = fake_call(cancel, &slot, when == 2);
+        if (when == 3) package_http_cancel(cancel);
+        if (open) open = fake_call(cancel, &slot, false);
+        const bool more = fake_call(cancel, &slot, false);
+        package_http_call_release(cancel, &slot);
+        package_http_call_release(cancel, &slot); /* a second release closes nothing */
+        printf("   cancel %s: %s\n",
+               when == 0 ? "never" : when == 1 ? "first" : when == 2 ? "in a call" : "between",
+               s_fake_handle_log.order);
+        static const char *const k_order[] = {"ccccx", "x", "ccx", "ccx"};
+        assert(strcmp(s_fake_handle_log.order, k_order[when]) == 0);
+        assert(s_fake_handle_log.closes == 1);
+        assert(more == (when == 0));
+        assert(slot.handle == NULL && !slot.closed_by_cancel);
+        package_http_cancel_destroy(cancel);
+    }
+    /* No cancel object: the slot is the request's own. */
+    memset(&s_fake_handle_log, 0, sizeof s_fake_handle_log);
+    PackageHttpCallSlot own = {&s_fake_handle_log, fake_handle_close, false};
+    assert(fake_call(NULL, &own, false));
+    package_http_call_release(NULL, &own);
+    assert(strcmp(s_fake_handle_log.order, "cx") == 0);
+    assert(!package_http_call_begin(NULL, &own)); /* released: no handle */
 }
 #endif
 
@@ -2181,6 +2274,8 @@ int main(int argc, char *argv[]) {
 #if defined(_WIN32) || defined(_WIN64)
     test_native_download_verification();
     test_native_transport_user_agent_limit();
+    test_native_transport_cancel();
+    test_native_transport_cancel_ordering();
 #else
     puts("[PACKAGE_BUILDER_TEST] SKIP native WinHTTP/SHA-256 transport tests (non-Windows host)");
 #endif

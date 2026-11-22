@@ -211,7 +211,7 @@ class FpuOracleStructureTests(unittest.TestCase):
                       {cosim.decode_form(w) for w in cosim.cell_layout()["fpu_interp"][1]})
 
 
-@unittest.skipUnless(shutil.which("gcc"), "gcc is required for the C.cond truth-table regression")
+@unittest.skipUnless(shutil.which("gcc"), "TOOLCHAIN_MISSING: gcc is required for the C.cond truth-table regression")
 class FpuCcondTruthTableTests(unittest.TestCase):
     def test_predicates_match_the_mips_table_for_all_relation_classes(self):
         with scratch_dir.TemporaryDirectory(prefix="cosim_ccond_") as tmp:

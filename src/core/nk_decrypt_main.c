@@ -54,6 +54,7 @@
 #include "nk_psp_keystore.h"
 #include "nk_psp_npumdimg.h"
 #include "nk_psp_sha1.h"
+#include "nk_shared_helpers.h"
 
 /* --------------------------- helpers --------------------------------- */
 
@@ -68,24 +69,19 @@ static void to_hex(const u8 *bytes, size_t n, char *out)
     out[n * 2] = '\0';
 }
 
+/* The whole input file, 1 byte to 512 MiB. */
 static int read_file(const char *path, u8 **data, size_t *size)
 {
-    FILE *f = nk_fopen_utf8(path, "rb");
-    long len;
-    u8 *buf;
-    size_t got;
-    if (f == NULL) return -1;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
-    len = ftell(f);
-    if (len <= 0 || len > (long)(512u * 1024u * 1024u)) { fclose(f); return -1; }
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return -1; }
-    buf = (u8 *)malloc((size_t)len);
-    if (buf == NULL) { fclose(f); return -1; }
-    got = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    if (got != (size_t)len) { free(buf); return -1; }
+    unsigned char *buf = NULL;
+    size_t len = 0;
+    if (nk_read_file_bounded(path, 512u * 1024u * 1024u, &buf, &len) != NK_READ_FILE_OK)
+        return -1;
+    if (len == 0) {
+        free(buf);
+        return -1;
+    }
     *data = buf;
-    *size = (size_t)len;
+    *size = len;
     return 0;
 }
 

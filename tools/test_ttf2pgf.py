@@ -1072,7 +1072,7 @@ class MetricTargetTests(unittest.TestCase):
         self.assertLessEqual(conversion.ppem, 24)
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class CodePointSetTests(unittest.TestCase):
     """--codepoints converts exactly the listed code points, and a sparse set is written sparse."""
 

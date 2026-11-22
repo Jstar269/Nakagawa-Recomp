@@ -372,7 +372,7 @@ class Reporting(unittest.TestCase):
 CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
 
 
-@unittest.skipUnless(CC, "needs a host C compiler (gcc, cc or clang)")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: needs a host C compiler (gcc, cc or clang)")
 class HarnessVerdict(unittest.TestCase):
     """The harness's per-instance verdict (``instance_verdict`` in src/rt/form_sweep.c), built on
     its own with -DSR_FORM_SWEEP_VERDICT_SELFTEST. Each argument of the selftest is one state's

@@ -199,7 +199,7 @@ def _fixture_words() -> dict[int, int]:
     return words
 
 
-@unittest.skipUnless(CC, "gcc is required for the generated-C execution regression")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required for the generated-C execution regression")
 class EntrySemanticsPipelineTests(unittest.TestCase):
     def test_indirect_resume_preserves_guest_epilogue_sp(self):
         assert CC is not None
@@ -1534,7 +1534,7 @@ class SymbolMapPipelineTests(unittest.TestCase):
         self.assertNotIn("SrGuestSymbol", "".join(self.plain.values()))
         self.assertNotIn("symbol map:", self.plain_run.stderr)
 
-    @unittest.skipUnless(CC, "gcc is required to compile the table against src/rt/recomp.h")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required to compile the table against src/rt/recomp.h")
     def test_runtime_names_a_start_an_offset_and_nothing_outside(self):
         assert CC is not None
         main = self.named["fixture.c"]
@@ -2011,7 +2011,7 @@ int main(void) {{
 """
 
 
-@unittest.skipUnless(CC, "gcc is required for the generated-C execution regression")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required for the generated-C execution regression")
 class FormatterAtRetiredSprintfBridgeTests(unittest.TestCase):
     """The function at 0x000143b0 runs its own instructions under every profile (#363).
 

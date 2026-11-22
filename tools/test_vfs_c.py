@@ -33,7 +33,7 @@ def _require_compiler() -> None:
         raise AssertionError("NK_REQUIRE_CC=1 but no C compiler (gcc, cc or clang) is on PATH")
 
 
-@unittest.skipUnless(CC or REQUIRE_CC, "no C compiler on PATH")
+@unittest.skipUnless(CC or REQUIRE_CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestVfsSelftestC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -554,7 +554,7 @@ int main(int argc, char **argv) {
 """
 
 
-@unittest.skipUnless(CC or REQUIRE_CC, "no C compiler on PATH")
+@unittest.skipUnless(CC or REQUIRE_CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestPublicIsoVfsC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

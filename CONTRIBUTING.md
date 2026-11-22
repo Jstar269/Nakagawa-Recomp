@@ -271,7 +271,11 @@ mingw32-make contrib-check   # Windows (MSYS2 UCRT64 on PATH)
 `contrib-check` looks at the files your branch changed against `origin/main` and runs only the
 gates that apply to them — Ruff, the Python test modules matching the changed `tools/` modules, a
 strict `-Werror` C compile of the changed C, markdownlint and the documentation-freshness lint for
-changed Markdown, and the publication-safety audit. It finishes in minutes, and a documentation
+changed Markdown, and the publication-safety audit. A changed C file that a vendored folder's
+`PROVENANCE.md` lists as imported upstream code (byte-identical or a LOCAL DELTA, in the FFmpeg
+subsets under `src/rt/` or in libchdr) is compiled with the flags the build uses for that folder
+instead, so upstream's own warnings do not fail it; project files in those folders keep the strict
+line. It finishes in minutes, and a documentation
 change usually takes seconds. It is a *subset*: `make check` and `make readiness` remain the
 authoritative gates, and CI still runs the hosted matrix.
 

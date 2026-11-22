@@ -149,7 +149,7 @@ int main(int argc, char **argv) {
 """
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class Mp3PrivateBitsDecodeTests(unittest.TestCase):
     """The decoder's output and carried state never depend on what the host stack held.
 

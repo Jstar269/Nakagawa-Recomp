@@ -2298,6 +2298,29 @@ class TextHygieneTests(unittest.TestCase):
     def test_missing_final_newline_is_reported(self):
         self.assertEqual(self._codes(b"one" + LF + b"two"), ["TEXT_FINAL_NEWLINE"])
 
+    def test_spdx_final_newline_exceptions_bind_exact_bytes_at_exact_paths(self):
+        # spdx/spdx-spec v2.3 ends LICENSE and schemas/spdx-schema.json without a final newline;
+        # third_party/spdx/ keeps them byte-identical, so each path is excused for one SHA-256 only.
+        entries = {
+            "third_party/spdx/LICENSE": "017e38491cccbd2bdb6da0a32a33db9ec245b5dab30fdcd09f2c742c975e5b35",
+            "third_party/spdx/spdx-schema-2.3.json":
+                "239208b7ac287b3cf5d9a9af23f9d69863971102a5e1587a27a398b43490b89b",
+        }
+        exceptions = publish_audit.TEXT_HYGIENE_FINAL_NEWLINE_EXCEPTIONS
+        for path, digest in entries.items():
+            with self.subTest(path):
+                self.assertEqual(exceptions[path], digest)
+                # Other bytes at the excused path are still refused.
+                self.assertEqual(self._codes(b"{" + LF + b"}", path=path), ["TEXT_FINAL_NEWLINE"])
+                # The excused bytes (stood in for by synthetic bytes bound to the same entry) pass
+                # only at that path: a copy elsewhere is refused.
+                synthetic = b"synthetic upstream text without a final newline " + path.encode()
+                with mock.patch.dict(exceptions, {path: hashlib.sha256(synthetic).hexdigest()}):
+                    self.assertEqual(self._codes(synthetic, path=path), [])
+                    self.assertEqual(self._codes(synthetic, path=path + ".copy"), ["TEXT_FINAL_NEWLINE"])
+                    self.assertEqual(self._codes(synthetic, path="third_party/other/LICENSE"),
+                                     ["TEXT_FINAL_NEWLINE"])
+
     def test_exact_clay_upstream_license_keeps_its_byte_identity(self):
         path = "third_party/clay/LICENSE.md"
         data = (publish_audit.ROOT / path).read_bytes()
@@ -2318,6 +2341,19 @@ class TextHygieneTests(unittest.TestCase):
         )
         self.assertNotIn("TEXT_FINAL_NEWLINE", self._codes(data, path=path))
         self.assertIn("TEXT_FINAL_NEWLINE", self._codes(data + b" ", path=path))
+
+    def test_exact_spdx_upstream_files_keep_their_byte_identity(self):
+        # spdx/spdx-spec v2.3 ends LICENSE and schemas/spdx-schema.json without a final newline.
+        for path, digest in (
+            ("third_party/spdx/LICENSE", "017e38491cccbd2bdb6da0a32a33db9ec245b5dab30fdcd09f2c742c975e5b35"),
+            ("third_party/spdx/spdx-schema-2.3.json",
+             "239208b7ac287b3cf5d9a9af23f9d69863971102a5e1587a27a398b43490b89b"),
+        ):
+            with self.subTest(path):
+                data = (publish_audit.ROOT / path).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), digest)
+                self.assertNotIn("TEXT_FINAL_NEWLINE", self._codes(data, path=path))
+                self.assertIn("TEXT_FINAL_NEWLINE", self._codes(data + b" ", path=path))
 
     def test_binary_content_is_never_reported(self):
         # NUL-bearing data is binary; CRLF inside it is not a line-ending defect.

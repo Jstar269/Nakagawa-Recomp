@@ -255,8 +255,8 @@ class FpMutationVerdictTests(unittest.TestCase):
         self.assertFalse(_sse_backend_selected("#define __aarch64__ 1\n#define __ARM_NEON 1\n"))
         self.assertFalse(_sse_backend_selected("#define __SSE2_MATH__ 1\n"))
 
-    @unittest.skipUnless(CC and platform.machine().lower() in X86_MACHINES,
-                         "gcc on an x86 host required")
+    @unittest.skipUnless(platform.machine().lower() in X86_MACHINES, "an x86 host required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc required")
     def test_an_x86_host_compiles_the_sse_backend(self):
         """The skip below must never fire where the MXCSR mutants are live code."""
         self.assertTrue(_cc_compiles_sse_backend(CC),
@@ -433,7 +433,7 @@ class FpScalarHeaderMutantTests(unittest.TestCase):
 
     def _require_sse_backend(self) -> None:
         if CC is None:
-            self.skipTest("gcc required")
+            self.skipTest("TOOLCHAIN_MISSING: gcc required")
         if not _cc_compiles_sse_backend(CC):
             self.skipTest(f"{CC} does not build fp_convert.h's MXCSR backend, where these "
                           "mutant anchors live: they would be dead code there")
@@ -453,7 +453,7 @@ class FpScalarHeaderMutantTests(unittest.TestCase):
         print(f"MUTANT_EXECUTED_AND_SEMANTIC_TEST_FAILED ({verdict}) "
               f"run_rc={staged.run_rc}")
 
-    @unittest.skipUnless(CC, "gcc required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc required")
     def test_pristine_header_passes_the_same_harness(self):
         """Control for the staged kills below: the unmutated header must build,
         execute and pass, so the mutant diagnostics cannot be vacuous."""
@@ -466,32 +466,32 @@ class FpScalarHeaderMutantTests(unittest.TestCase):
         self.assertIn(SELFTEST_PRISTINE_MARKER, staged.run_output,
                       "PRISTINE_NO_SELFTEST_ACCOUNTING\n" + staged.run_output)
 
-    @unittest.skipUnless(CC, "gcc required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc required")
     def test_M1_ignore_rounding_mode(self):
         self.assert_killed(
             "csr |= rm_to_mxcsr[fcr31 & SR_FCR31_RM_MASK] << 13;",
             "csr |= 0u << 13;",
             ("FAIL: mul RM anchors RZ", "FAIL: div 1/3 RZ"))
 
-    @unittest.skipUnless(CC, "gcc required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc required")
     def test_M2_force_RN(self):
         self.assert_killed(
             "{0u, 3u, 2u, 1u}", "{0u, 0u, 0u, 0u}",
             ("FAIL: mul RM anchors RZ", "FAIL: add tie RP bumps"))
 
-    @unittest.skipUnless(CC, "gcc required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc required")
     def test_M3_ignore_FS_flush_gate(self):
         self.assert_killed(
             "csr |= 1u << 15;", "(void)fcr31;",
             ("FAIL: mul FS=1 flush",))
 
-    @unittest.skipUnless(CC, "gcc required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc required")
     def test_M4_force_FTZ_regardless_of_guest(self):
         self.assert_killed(
             "csr &= ~(1u << 15);", "csr |= 1u << 15;",
             ("FAIL: mul FS=0 gradual", "FAIL: mul subnormal input exact"))
 
-    @unittest.skipUnless(CC, "gcc required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc required")
     def test_M9_helper_leaks_modified_mxcsr(self):
         # The anchor ends sr_fpu_mul_s: the software FS flush (AArch64 only) sits between
         # the product and the closing barrier.
@@ -506,14 +506,14 @@ class FpScalarHeaderMutantTests(unittest.TestCase):
             ("FAIL: hostile-env restoration inexact",
              "FAIL: helper left host FP env modified"))
 
-    @unittest.skipUnless(CC, "gcc required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc required")
     def test_M11_preserve_ambient_DAZ(self):
         self.assert_killed(
             "csr &= ~(1u << 6);                              /* DAZ off: inputs stay gradual */",
             "",
             ("FAIL: subnormal input keeps weight under hostile DAZ",))
 
-    @unittest.skipUnless(CC, "gcc required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc required")
     def test_M12_drop_volatile_result_window(self):
         # The pre-fix mechanism: barrier-bracketed plain expression. Killed by
         # the folding/reorder guards and the hostile matrix at -O2.
@@ -527,7 +527,7 @@ class FpScalarHeaderMutantTests(unittest.TestCase):
             "volatile float vr = va * vb;", "const float vr = va * vb;",
             ("FAIL: mul gradual out under FTZ", "FAIL: mul subnormal in under FTZ"))
 
-    @unittest.skipUnless(CC, "gcc required")
+    @unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc required")
     def test_M13_partial_restore_preserves_stickies(self):
         """A helper that restores control fields but leaves sticky flags raised
         inside its window violates bit-for-bit caller restoration.
@@ -689,7 +689,7 @@ class FastPathRemovedStructuralTests(unittest.TestCase):
         rejected as evidence.
         """
         if CC is None:
-            self.skipTest("gcc required")
+            self.skipTest("TOOLCHAIN_MISSING: gcc required")
         original = CODEGEN.read_text(encoding="utf-8")
         original_sha = hashlib.sha256(original.encode("utf-8")).hexdigest()
 
@@ -853,7 +853,7 @@ class Ctc1MeasuredMaskTests(unittest.TestCase):
         never touched. Generation or compilation failure is not a kill.
         """
         if CC is None:
-            self.skipTest("gcc required")
+            self.skipTest("TOOLCHAIN_MISSING: gcc required")
         original = CODEGEN.read_text(encoding="utf-8")
         original_sha = hashlib.sha256(original.encode("utf-8")).hexdigest()
         self.assertEqual(original.count(self.EMITTED), 1, "ctc1 emission anchor drifted")

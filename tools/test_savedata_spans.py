@@ -584,7 +584,7 @@ def _build(tmp, savedata_override=None):
     return exe
 
 
-@unittest.skipUnless(CC, "no C compiler on PATH")
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
 class TestSavedataSfoProduction(unittest.TestCase):
     """Executable evidence: the real entry point over the real implementation."""
 

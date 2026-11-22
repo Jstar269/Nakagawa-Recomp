@@ -585,6 +585,47 @@ def _assignments(text: str) -> dict[str, list[str]]:
         # would split a flag such as -I$(DIR)/include into "-Idir dir/include".
         if value not in values:
             values.append(value)
+    # A `define NAME ... endef` block is a variable too; a recipe uses it as
+    # `$(call NAME)` (the achievements selftest's command, for one).
+    for name, body in re.findall(r"^define\s+([A-Za-z0-9_.-]+)[ \t]*\n(.*?)^endef\b", text, re.M | re.S):
+        values = found.setdefault(name, [])
+        if body not in values:
+            values.append(body)
+    return found
+
+
+_CONDITIONAL_OPEN = re.compile(r"^\s*(?:ifeq|ifneq|ifdef|ifndef)\b")
+_CONDITIONAL_CLOSE = re.compile(r"^\s*endif\b")
+_DEFINE_OPEN = re.compile(r"^\s*(?:override\s+)?define\b")
+_DEFINE_CLOSE = re.compile(r"^\s*endef\b")
+
+
+def _default_assignments(text: str) -> dict[str, list[str]]:
+    """The values assigned outside every conditional: the default build.
+
+    Unlike `_assignments`, an append inside an ``ifeq``/``ifdef`` branch (an
+    opt-in debug or trace switch, a platform's SDK folder) is left out, so a
+    rule expanded with this map carries exactly the flags every default build
+    passes, and in the order it passes them.
+    """
+    found: dict[str, list[str]] = {}
+    pattern = re.compile(r"^(?:override\s+)?([A-Za-z0-9_.-]+)\s*(?::=|\?=|\+=|=)\s*(.*)$")
+    depth = 0
+    in_define = False
+    for line in text.splitlines():
+        if in_define:
+            in_define = _DEFINE_CLOSE.match(line) is None
+            continue
+        if _DEFINE_OPEN.match(line):
+            in_define = True
+        elif _CONDITIONAL_OPEN.match(line):
+            depth += 1
+        elif _CONDITIONAL_CLOSE.match(line):
+            depth -= 1
+        elif depth == 0 and (match := pattern.match(line)) is not None:
+            values = found.setdefault(match.group(1), [])
+            if match.group(2) not in values:
+                values.append(match.group(2))
     return found
 
 
@@ -592,7 +633,7 @@ def _expand(text: str, assignments: dict[str, list[str]], depth: int = 0) -> str
     if depth > 10:
         return text
     return re.sub(
-        r"\$\(([A-Za-z0-9_.-]+)\)",
+        r"\$\((?:call\s+)?([A-Za-z0-9_.-]+)\)",
         lambda match: _expand(" ".join(assignments.get(match.group(1), [])), assignments, depth + 1),
         text,
     )
@@ -719,6 +760,7 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
                 unit.generated,
                 f"{source} uses a Python builder and cannot name Makefile generated headers",
             )
+            self.assertFalse(unit.leading_includes, f"{source} uses a Python builder and cannot order Makefile includes")
             return
 
         building: list[str] = []
@@ -750,6 +792,15 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
                 _has_flag(recipe, warning),
                 f"{warning} is listed for {source} but is not on {unit.recipes}",
             )
+        for include in unit.leading_includes:
+            flag = f"-I{include}"
+            commands = [_expand(" ".join(block.splitlines()[1:]), self.assignments).split() for block in raw]
+            self.assertTrue(any(flag in tokens for tokens in commands),
+                            f"{flag} is listed first for {source} but is not on {unit.recipes}")
+            for tokens in commands:
+                if flag in tokens and "-Isrc/rt" in tokens:
+                    self.assertLess(tokens.index(flag), tokens.index("-Isrc/rt"),
+                                    f"{flag} is listed first for {source} but {unit.recipes} passes it after -Isrc/rt")
         for header in unit.generated:
             self.assertTrue(
                 any(header.include in block for block in raw),
@@ -812,6 +863,29 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
                 result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=600)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_a_leading_include_comes_before_the_common_folders(self) -> None:
+        """Failing before: nk_h264_api.c failed strict-c-compile on unchanged main.
+
+        Its rule puts `-Isrc/rt/h264_ffmpeg_sub` before `$(CFLAGS)`, so the subset's
+        `config.h` is found first. The table could only append include folders, so the
+        strict line found another header first and the compile stopped.
+        """
+        source = "src/rt/h264_ffmpeg_sub/nk_h264_api.c"
+        command, reason = contrib_check.strict_compile_command("cc", source, [])
+        self.assertEqual(reason, "")
+        assert command is not None
+        self.assertLess(command.index("-Isrc/rt/h264_ffmpeg_sub"), command.index("-Isrc/rt"))
+        self.assertIn("-Werror", command)
+        self.assertEqual(command[-1], source)
+
+    def test_the_drift_check_catches_a_leading_include_the_recipe_does_not_pass(self) -> None:
+        """Guard the guard: a first folder the rule does not pass must fail."""
+        unit = contrib_check.STRICT_C_UNITS["src/rt/h264_ffmpeg_sub/nk_h264_api.c"]
+        wrong = contrib_check.StrictUnit(recipes=unit.recipes, defines=unit.defines,
+                                         leading_includes=("src/rt/h264_ffmpeg_sub/libavcodec",))
+        with self.assertRaises(AssertionError):
+            self._assert_unit_matches_build("src/rt/h264_ffmpeg_sub/nk_h264_api.c", wrong)
+
     def test_a_selftest_is_compiled_with_its_own_defines(self) -> None:
         command, reason = contrib_check.strict_compile_command("cc", "tests/native/hle_thread_selftest.c", [])
         self.assertEqual(reason, "")
@@ -837,6 +911,144 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
         self.assertIn(source, recipe)
         self.assertTrue(_has_flag(recipe, "-Ithird_party/rcheevos/include"))
         self.assertTrue(_has_flag(recipe, "-Ithird_party/rcheevos/src"))
+
+
+#: Flags that set a compile's language standard or warning policy.
+_POLICY_FLAG = re.compile(r"^(?:-std=\S+|-w|-W(?!l,|a,|p,)\S+|-pedantic\S*)$")
+
+
+class TestVendoredFilesUseTheirBuildFlags(unittest.TestCase):
+    """Imported upstream code is compiled with the flags its own build uses.
+
+    Failing before: any change to `src/rt/atrac3p/libavcodec/atrac3.c` (an
+    imported FFmpeg file) failed strict-c-compile on upstream `sign-compare` and
+    `pointer-sign` warnings under `-std=c11 -Werror`, flags the build never
+    compiles that file with.
+    """
+
+    makefile: str
+    assignments: dict[str, list[str]]
+    default_build: dict[str, list[str]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.makefile = _makefile_text()
+        cls.assignments = _assignments(cls.makefile)
+        cls.default_build = _default_assignments(cls.makefile)
+
+    def test_only_manifest_imports_take_the_vendored_flags(self) -> None:
+        for source in ("src/rt/atrac3p/libavcodec/atrac3.c",           # imported + LOCAL DELTA
+                       "src/rt/atrac3p/libavcodec/atrac3plusdsp.c",     # imported byte-identical
+                       "src/rt/h264_ffmpeg_sub/libavcodec/h264_slice.c",
+                       "third_party/libchdr/src/libchdr_chd.c",
+                       "third_party/libchdr/deps/zstd-1.5.7/zstddeclib.c"):
+            with self.subTest(source=source):
+                self.assertIsNotNone(contrib_check.vendored_build(source))
+        for source in ("src/rt/atrac3p/atrac3p_api.c",                 # AUTHORED stand-in
+                       "src/rt/h264_ffmpeg_sub/nk_h264_api.c",          # AUTHORED API layer
+                       "src/rt/atrac3p/libavcodec/not_in_manifest.c",
+                       "src/rt/hle.c"):
+            with self.subTest(source=source):
+                self.assertIsNone(contrib_check.vendored_build(source))
+
+    def test_project_files_keep_the_strict_line(self) -> None:
+        strict, _ = contrib_check.strict_compile_command("cc", "src/rt/atrac3p/atrac3p_api.c", [])
+        assert strict is not None
+        self.assertIn("-Werror", strict)
+        vendored, reason = contrib_check.strict_compile_command("cc", "src/rt/atrac3p/libavcodec/atrac3.c", [])
+        self.assertEqual(reason, "")
+        assert vendored is not None
+        self.assertNotIn("-Werror", vendored)
+        self.assertIn("-fsyntax-only", vendored)
+        self.assertEqual(vendored[-1], "src/rt/atrac3p/libavcodec/atrac3.c")
+
+    def test_vendored_flags_mirror_the_makefile_rules(self) -> None:
+        for folder, build in contrib_check.VENDORED_BUILDS.items():
+            with self.subTest(folder=folder):
+                self.assertTrue((ROOT / folder / "PROVENANCE.md").is_file(), folder)
+                blocks = [block for target in build.recipes for block in _rule_blocks(self.makefile, target)]
+                blocks = [block for block in blocks
+                          if _expand(block.splitlines()[0], self.assignments).split(":", 1)[1].strip()
+                          .startswith(folder)]
+                self.assertTrue(blocks, f"no rule in {build.recipes} compiles sources under {folder}")
+                for block in blocks:
+                    # The command lines only: the rule's header expands its prerequisites too.
+                    recipe = _expand(" ".join(block.splitlines()[1:]), self.assignments)
+                    flags = list(build.flags)
+                    while flags:
+                        flag = flags.pop(0)
+                        if flag == "-include":
+                            flag = f"-include {flags.pop(0)}"
+                            self.assertIn(flag, recipe, f"{flag} is listed for {folder} but not on its rule")
+                            continue
+                        self.assertTrue(_has_flag(recipe, flag),
+                                        f"{flag} is listed for {folder} but not on its rule")
+                    on_rule = {token for token in recipe.split() if _POLICY_FLAG.match(token)}
+                    listed = {flag for flag in build.flags if _POLICY_FLAG.match(flag)}
+                    self.assertEqual(listed, on_rule,
+                                     f"{folder}: the standard and warning flags differ from its rule")
+                    # Defines and include folders, both ways, against the default build's
+                    # expansion; the include folders also in order, since the compiler
+                    # searches them left to right.
+                    default = _expand(" ".join(block.splitlines()[1:]), self.default_build).split()
+                    self.assertEqual({flag for flag in build.flags if flag.startswith(("-D", "-U"))},
+                                     {token for token in default if token.startswith(("-D", "-U"))},
+                                     f"{folder}: the defines differ from its rule")
+                    self.assertEqual(list(dict.fromkeys(flag for flag in build.flags if flag.startswith("-I"))),
+                                     list(dict.fromkeys(token for token in default if token.startswith("-I"))),
+                                     f"{folder}: the include folders or their order differ from its rule")
+
+    def test_the_policy_check_catches_an_added_werror(self) -> None:
+        """Guard the guard: listing -Werror for a set its rule builds without it must fail."""
+        build = contrib_check.VENDORED_BUILDS["src/rt/atrac3p/"]
+        stricter = contrib_check.VendoredBuild(build.recipes, build.flags + ("-Werror",))
+        with mock.patch.dict(contrib_check.VENDORED_BUILDS, {"src/rt/atrac3p/": stricter}):
+            result = unittest.TestResult()
+            TestVendoredFilesUseTheirBuildFlags("test_vendored_flags_mirror_the_makefile_rules").run(result)
+        self.assertTrue(result.failures, "an invented -Werror was not caught")
+
+    def _mirror_check_fails(self, folder: str, flags: tuple[str, ...]) -> bool:
+        build = contrib_check.VendoredBuild(contrib_check.VENDORED_BUILDS[folder].recipes, flags)
+        with mock.patch.dict(contrib_check.VENDORED_BUILDS, {folder: build}):
+            result = unittest.TestResult()
+            TestVendoredFilesUseTheirBuildFlags("test_vendored_flags_mirror_the_makefile_rules").run(result)
+        return bool(result.failures)
+
+    def test_the_mirror_check_catches_define_and_include_drift(self) -> None:
+        """Guard the guard, both ways: a define or folder dropped, invented or reordered must fail."""
+        libchdr = contrib_check.VENDORED_BUILDS["third_party/libchdr/"].flags
+        h264 = contrib_check.VENDORED_BUILDS["src/rt/h264_ffmpeg_sub/"].flags
+        local = h264.index("-Isrc/rt/h264_ffmpeg_sub")
+        mutants = {
+            "a define dropped": ("third_party/libchdr/",
+                                 tuple(flag for flag in libchdr if flag != "-DMINIZ_NO_TIME")),
+            "an include dropped": ("third_party/libchdr/",
+                                   tuple(flag for flag in libchdr if flag != "-Ithird_party/libchdr/deps/miniz-3.1.2")),
+            "a define invented": ("third_party/libchdr/", libchdr + ("-DMINIZ_NO_MALLOC",)),
+            "an include invented": ("third_party/libchdr/", libchdr + ("-Ithird_party/libchdr/src",)),
+            "includes reordered": ("src/rt/h264_ffmpeg_sub/",
+                                   h264[:local] + h264[local + 1:] + (h264[local],)),
+        }
+        for name, (folder, flags) in mutants.items():
+            with self.subTest(mutant=name):
+                self.assertTrue(self._mirror_check_fails(folder, flags), f"{name} was not caught")
+
+    def test_the_default_build_leaves_out_conditional_appends(self) -> None:
+        text = ("X ?= -DA\nifeq ($(OPT),1)\nX += -DB\nelse\nX += -DC\nendif\n"
+                "define RULE\nX += -DD\nendef\nX += -DE\n")
+        self.assertEqual(_default_assignments(text), {"X": ["-DA", "-DE"]})
+        self.assertEqual(_assignments(text)["X"], ["-DA", "-DB", "-DC", "-DD", "-DE"])
+
+    def test_an_imported_file_compiles_with_its_build_flags(self) -> None:
+        compiler = contrib_check.os.environ.get("CC") or contrib_check.find_tool("gcc") or contrib_check.find_tool("cc")
+        if compiler is None:
+            self.skipTest("no C compiler on PATH")
+        for source in ("src/rt/atrac3p/libavcodec/atrac3.c",
+                       "src/rt/h264_ffmpeg_sub/libavcodec/h264_slice.c",
+                       "third_party/libchdr/src/libchdr_flac.c"):
+            with self.subTest(source=source):
+                gate = contrib_check.c_gate([source])
+                self.assertEqual(gate.status, contrib_check.PASS, gate.detail)
 
 
 class TestStrictCompileUnavailableInputs(unittest.TestCase):
@@ -987,6 +1199,7 @@ class TestStrictCompileOnUnchangedMain(unittest.TestCase):
         "tests/fixtures/cosim/cosim_selftest.c",
         "tests/native/texrepl_selftest.c",
         "src/rt/ge_vram_cli.c",
+        "src/rt/h264_ffmpeg_sub/nk_h264_api.c",
     )
 
     def test_no_unchanged_source_fails_the_strict_compile(self) -> None:

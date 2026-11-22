@@ -17,8 +17,9 @@ from pathlib import Path
 
 try:
     import flight_diff
+    import json_schema_subset
 except ModuleNotFoundError:
-    from tools import flight_diff
+    from tools import flight_diff, json_schema_subset
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -1601,6 +1602,240 @@ class RecorderTimingTests(unittest.TestCase):
                  "/* never sleep() or sched_yield() here */\n"
                  'static void f(void) { fprintf(stderr, "SDL_Delay(1)\\n"); } // Sleep(0)\n')
         self.assertEqual(recorder_timing_findings(clean), [])
+
+
+class JsonSchemaSubsetTests(unittest.TestCase):
+    """tools/json_schema_subset.py, the validator flight_diff and nk_cli share."""
+
+    def ok(self, schema, value):
+        json_schema_subset.SchemaValidator(schema).validate(value)
+
+    def bad(self, schema, value, reason=None):
+        with self.assertRaises(json_schema_subset.SchemaViolation) as caught:
+            json_schema_subset.SchemaValidator(schema).validate(value)
+        if reason is not None:
+            self.assertIn(reason, str(caught.exception))
+        return caught.exception
+
+    def test_both_shipped_schemas_are_built_and_fully_supported(self):
+        for name in ("flight_recorder_schema.json", "bringup_report.schema.json"):
+            schema = json.loads((ROOT / "assets" / name).read_text(encoding="utf-8"))
+            json_schema_subset.SchemaValidator(schema)
+
+    def test_type_names_and_lists(self):
+        for name, good, wrong in (
+            ("object", {}, []), ("array", [], {}), ("string", "x", 1), ("boolean", False, 0),
+            ("integer", 3, 3.5), ("number", 3.5, "3"), ("null", None, 0),
+        ):
+            with self.subTest(name):
+                self.ok({"type": name}, good)
+                self.bad({"type": name}, wrong, f"expected {name!r}")
+        self.ok({"type": ["string", "null"]}, None)
+        self.bad({"type": ["string", "null"]}, 1)
+
+    def test_a_boolean_is_never_a_number_and_an_integral_float_is_not_an_integer(self):
+        for name in ("integer", "number"):
+            self.bad({"type": name}, True)
+        self.bad({"type": "integer"}, 1.0)
+        self.bad({"type": "number", "minimum": 0}, False)
+        self.ok({"minimum": 5}, True)  # minimum constrains numbers only; a boolean is not one
+
+    def test_const_and_enum_compare_json_values(self):
+        self.ok({"const": 1}, 1)
+        self.ok({"const": 1}, 1.0)
+        self.bad({"const": 1}, True, "expected 1")
+        self.bad({"const": True}, 1)
+        self.ok({"const": {"a": [1, {"b": None}]}}, {"a": [1, {"b": None}]})
+        self.bad({"const": {"a": [1]}}, {"a": [True]})
+        self.ok({"enum": ["a", 2, None]}, None)
+        self.bad({"enum": [0, 1]}, False, "expected one of")
+        self.bad({"enum": [False]}, 0)
+
+    def test_string_keywords(self):
+        self.ok({"minLength": 2, "maxLength": 3}, "ab")
+        self.bad({"minLength": 2}, "a", "too short")
+        self.bad({"maxLength": 3}, "abcd", "too long")
+        self.ok({"maxLength": 1}, "\U0001F600")  # length counts code points
+        self.ok({"minLength": 9}, 5)  # a string keyword does not touch a number
+
+    def test_number_keywords(self):
+        self.ok({"minimum": 1, "maximum": 3}, 1)
+        self.ok({"minimum": 1, "maximum": 3}, 3.0)
+        self.bad({"minimum": 1}, 0.5, "below its minimum")
+        self.bad({"maximum": 3}, 4, "above its maximum")
+
+    def test_array_keywords(self):
+        self.ok({"minItems": 1, "maxItems": 2}, [1])
+        self.bad({"minItems": 1}, [], "too short")
+        self.bad({"maxItems": 1}, [1, 2], "too long")
+        self.bad({"items": {"type": "integer"}}, [1, "x"], "$[1]")
+        self.ok({"items": {"type": "integer"}}, [])
+        self.bad({"items": False}, [0])
+
+    def test_unique_items_follows_json_equality(self):
+        schema = {"uniqueItems": True}
+        self.ok(schema, [1, True, "1", None, [1], [True]])
+        self.bad(schema, [1, 1.0], "not unique")
+        self.bad(schema, [{"a": 1, "b": [2]}, {"b": [2], "a": 1}], "not unique")
+        self.ok(schema, [{"a": 1}, {"a": True}])
+        self.ok({"uniqueItems": False}, [1, 1])
+
+    def test_object_keywords(self):
+        self.bad({"required": ["a"]}, {}, "missing required property 'a'")
+        self.ok({"required": ["a"]}, {"a": 0})
+        self.bad({"minProperties": 1}, {}, "fewer than 1 properties")
+        schema = {"properties": {"a": {"type": "integer"}}}
+        self.ok(schema, {"a": 1, "extra": "anything"})
+        self.bad(schema, {"a": "x"}, "$.a")
+        closed = {"properties": {"a": {}}, "additionalProperties": False}
+        self.ok(closed, {"a": 1})
+        self.bad(closed, {"a": 1, "b": 2}, "property 'b' is not allowed")
+        self.ok({"additionalProperties": True}, {"b": 2})
+        typed = {"properties": {"a": {}}, "additionalProperties": {"type": "integer"}}
+        self.ok(typed, {"a": "x", "b": 2})
+        self.bad(typed, {"b": "x"}, "$.b")
+        names = {"propertyNames": {"pattern": "^[A-Z]+$"}}
+        self.ok(names, {"ABC": 1})
+        self.bad(names, {"abc": 1}, "property name 'abc'")
+
+    def test_combinators(self):
+        self.ok({"allOf": [{"type": "integer"}, {"minimum": 2}]}, 2)
+        self.bad({"allOf": [{"type": "integer"}, {"minimum": 2}]}, 1)
+        self.ok({"not": {"type": "string"}}, 1)
+        self.bad({"not": {"type": "string"}}, "x", "forbidden schema")
+        conditional = {"if": {"type": "string"}, "then": {"minLength": 2}, "else": {"minimum": 10}}
+        self.ok(conditional, "ab")
+        self.bad(conditional, "a", "too short")
+        self.ok(conditional, 10)
+        self.bad(conditional, 9, "below its minimum")
+        self.ok({"if": {"type": "string"}, "then": {"minLength": 2}}, 1)
+        self.ok({"if": {"type": "string"}, "else": {"minimum": 2}}, "a")
+        self.ok({"then": False, "else": False}, 1)  # without "if" they assert nothing
+
+    def test_boolean_schemas(self):
+        self.ok(True, {"any": "thing"})
+        self.bad(False, 1, "no value is allowed")
+        self.ok({"properties": {"a": True}}, {"a": 1})
+        self.bad({"properties": {"a": False}}, {"a": 1})
+
+    def test_references(self):
+        schema = {
+            "$defs": {"id": {"type": "string", "pattern": "^[a-z]+$"},
+                      "alias": {"$ref": "#/$defs/id"}, "a/b": {"const": 1}},
+            "properties": {"x": {"$ref": "#/$defs/alias"}, "y": {"$ref": "#/$defs/a~1b"}},
+            "items": {"$ref": "#"},
+        }
+        self.ok(schema, {"x": "abc", "y": 1})
+        self.bad(schema, {"x": "ABC"}, "$.x")
+        self.bad(schema, {"y": 2}, "$.y")
+        self.bad(schema, [{"x": 1}], "$[0].x")
+        sibling = {"$defs": {"s": {"type": "string"}}, "$ref": "#/$defs/s", "minLength": 3}
+        self.ok(sibling, "abc")
+        self.bad(sibling, "ab", "too short")
+        self.bad(sibling, 5)
+
+    def test_bad_references_and_malformed_schemas_are_definition_errors(self):
+        for schema in (
+            {"$ref": "other.json#/x"}, {"$ref": "#/$defs/missing"}, {"$ref": 5},
+            {"$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"$ref": "#/$defs/a"}}, "$ref": "#/$defs/a"},
+            {"type": "strng"}, {"type": []}, {"required": "a"}, {"minLength": -1}, {"minimum": "1"},
+            {"enum": 3}, {"allOf": []}, {"allOf": {}}, {"properties": []}, {"not": 3},
+            {"pattern": "("}, {"pattern": 3}, {"uniqueItems": 1}, 3, "x",
+        ):
+            with self.subTest(schema=schema):
+                with self.assertRaises(json_schema_subset.SchemaDefinitionError):
+                    json_schema_subset.SchemaValidator(schema)
+
+    def test_a_definition_error_is_never_a_value_error(self):
+        # nk_cli treats a ValueError as "this report field is invalid"; a broken schema must not hide there.
+        self.assertFalse(issubclass(json_schema_subset.SchemaDefinitionError, ValueError))
+        self.assertTrue(issubclass(json_schema_subset.UnsupportedKeywordError,
+                                   json_schema_subset.SchemaDefinitionError))
+        self.assertTrue(issubclass(json_schema_subset.SchemaViolation, ValueError))
+
+    def test_pattern_is_an_unanchored_search(self):
+        self.ok({"pattern": "[0-9]+"}, "abc123def")
+        self.ok({"pattern": "^abc"}, "abcdef")
+        self.bad({"pattern": "^abc"}, "xabc", "schema pattern")
+        self.bad({"pattern": "^abc$"}, "abcdef")
+        self.ok({"pattern": "b"}, "abc")
+        self.ok({"pattern": "b"}, 5)  # a pattern constrains strings only
+
+    def test_pattern_dollar_matches_only_at_the_end_of_the_string(self):
+        # Python's "$" also matches before a trailing newline; JSON Schema (ECMA-262) does not.
+        self.bad({"pattern": "^[a-f0-9]+$"}, "abc\n", "schema pattern")
+        self.ok({"pattern": "^[a-f0-9]+$"}, "abc")
+        self.ok({"pattern": "^[a-z$]+$"}, "a$b")  # "$" inside a class is a literal
+        self.ok({"pattern": r"^a\$$"}, "a$")  # an escaped "$" is a literal
+        self.bad({"pattern": r"^a\$$"}, "a\n")
+        self.ok({"pattern": "(?=b$)b"}, "ab")
+
+    def test_pattern_character_classes_are_ascii(self):
+        self.ok({"pattern": r"^\d+$"}, "123")
+        self.bad({"pattern": r"^\d+$"}, "٣")  # an Arabic-Indic digit
+        self.bad({"pattern": r"^\w+$"}, "é")
+
+    def test_annotations_are_accepted_and_assert_nothing(self):
+        self.ok({"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "x", "$comment": "c",
+                 "title": "t", "description": "d", "default": 1, "examples": [1], "type": "integer"}, 4)
+
+    def test_every_other_keyword_is_refused_by_name_before_any_value_is_checked(self):
+        for keyword, value in (
+            ("oneOf", [{}]), ("anyOf", [{}]), ("patternProperties", {}), ("format", "date"),
+            ("exclusiveMinimum", 0), ("exclusiveMaximum", 0), ("multipleOf", 2), ("contains", {}),
+            ("dependentRequired", {}), ("unevaluatedProperties", False), ("prefixItems", []),
+            ("$anchor", "a"), ("$dynamicRef", "#a"), ("contentEncoding", "base64"), ("readOnly", True),
+        ):
+            with self.subTest(keyword):
+                with self.assertRaises(json_schema_subset.UnsupportedKeywordError) as caught:
+                    json_schema_subset.SchemaValidator({"type": "object", keyword: value})
+                self.assertEqual(caught.exception.keyword, keyword)
+                self.assertIn(repr(keyword), str(caught.exception))
+                self.assertIn("#", caught.exception.pointer)
+
+    def test_an_unsupported_keyword_is_refused_in_a_branch_no_value_reaches(self):
+        for schema, pointer in (
+            ({"properties": {"a": {"oneOf": []}}}, "#/properties/a"),
+            ({"items": {"anyOf": []}}, "#/items"),
+            ({"allOf": [{}, {"format": "uri"}]}, "#/allOf/1"),
+            ({"not": {"multipleOf": 2}}, "#/not"),
+            ({"if": {}, "then": {}, "else": {"contains": {}}}, "#/else"),
+            ({"$defs": {"unused": {"patternProperties": {}}}}, "#/$defs/unused"),
+            ({"additionalProperties": {"oneOf": []}}, "#/additionalProperties"),
+            ({"propertyNames": {"format": "x"}}, "#/propertyNames"),
+        ):
+            with self.subTest(pointer):
+                with self.assertRaises(json_schema_subset.UnsupportedKeywordError) as caught:
+                    json_schema_subset.SchemaValidator(schema)
+                self.assertEqual(caught.exception.pointer, pointer)
+
+    def test_tuple_form_items_is_refused(self):
+        with self.assertRaises(json_schema_subset.SchemaDefinitionError):
+            json_schema_subset.SchemaValidator({"items": [{"type": "integer"}]})
+
+    def test_a_property_named_like_a_keyword_is_data(self):
+        schema = {"properties": {"oneOf": {"type": "integer"}, "format": {}}}
+        self.ok(schema, {"oneOf": 1})
+        self.bad(schema, {"oneOf": "x"})
+
+    def test_validate_checks_a_subschema_of_the_root_with_its_references(self):
+        validator = json_schema_subset.SchemaValidator(
+            {"$defs": {"n": {"type": "integer"}}, "properties": {"a": {"$ref": "#/$defs/n"}}})
+        validator.validate(1, "report.a", {"$ref": "#/$defs/n"})
+        with self.assertRaises(json_schema_subset.SchemaViolation) as caught:
+            validator.validate("x", "report.a", {"$ref": "#/$defs/n"})
+        self.assertEqual(caught.exception.path, "report.a")
+
+    def test_flight_diff_reports_a_violation_as_a_flight_diff_error_with_its_path(self):
+        bundle = make_bundle([event(1, "sched")])
+        bundle["recorder"] = "not an object"
+        with self.assertRaisesRegex(flight_diff.FlightDiffError, r"^\$\.recorder: expected "):
+            flight_diff.validate_bundle(bundle)
+
+    def test_flight_diff_refuses_a_schema_with_an_unsupported_keyword(self):
+        bundle = make_bundle([event(1, "sched")])
+        with self.assertRaises(json_schema_subset.UnsupportedKeywordError):
+            flight_diff.validate_bundle(bundle, {"oneOf": [{}]})
 
 
 if __name__ == "__main__":
