@@ -201,6 +201,8 @@ typedef struct {
     bool first_launch;
     bool server_mode;       /* false: console nickname; true: custom ad hoc relay host[:port] */
     bool port_mode;         /* Online play's port offset (#1139): digits, 0 to 65535 */
+    bool ra_username_mode;  /* RetroAchievements' sign-in form: the username (#1316) */
+    bool ra_password_mode;  /* its password: shown as one '*' per character, no count */
     UiKeyboard *keyboard;   /* what is typed, its cap and filter, and the letter case */
     const char *current;    /* the nickname or server in use, shown while nothing is typed */
     bool refused;           /* the last Done was refused */
@@ -605,7 +607,9 @@ typedef enum {
     PLAYER_UI_SETTINGS_PAGE_ACE,           /* VIEW_ACE_SETTINGS */
     PLAYER_UI_SETTINGS_PAGE_PROBLEM_REPORT, /* VIEW_PROBLEM_REPORT */
     PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD,   /* VIEW_ONLINE_PLAY_CARD: the consent card */
-    PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS /* VIEW_ONLINE_PLAY_SERVERS: the server picker */
+    PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS, /* VIEW_ONLINE_PLAY_SERVERS: the server picker */
+    PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_CARD,   /* VIEW_ACHIEVEMENTS_CARD: the consent card */
+    PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_SIGN_IN /* VIEW_ACHIEVEMENTS_SIGN_IN: the sign-in form */
 } PlayerUiSettingsPage;
 
 /* What a Settings control asks for (PLAYER_UI_ACTION_SETTINGS). main.c runs the
@@ -700,7 +704,13 @@ typedef enum {
     PLAYER_UI_SETTINGS_ONLINE_PLAY_NOT_NOW,      /* the card's NOT NOW */
     PLAYER_UI_SETTINGS_ONLINE_PLAY_CHANGE_SERVER,/* the card's CHANGE SERVER: the picker */
     PLAYER_UI_SETTINGS_NEW_CONSOLE_ID,           /* a new random console ID */
-    PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT     /* the port offset editor (advanced) */
+    PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT,    /* the port offset editor (advanced) */
+    PLAYER_UI_SETTINGS_ACHIEVEMENTS_AGREE,       /* RetroAchievements' card: AGREE AND TURN ON */
+    PLAYER_UI_SETTINGS_ACHIEVEMENTS_NOT_NOW,     /* its NOT NOW (and Back) */
+    PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_USERNAME, /* the sign-in form's Username: the editor */
+    PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_PASSWORD, /* its Password: the editor, masked */
+    PLAYER_UI_SETTINGS_ACHIEVEMENTS_SUBMIT,      /* its SIGN IN: the password is sent once */
+    PLAYER_UI_SETTINGS_ACHIEVEMENTS_SIGN_IN_CANCEL /* its CANCEL (and Back): the form is wiped */
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced: every PlayerEnhancedPart belongs to one visual group. The macro is the
@@ -874,6 +884,12 @@ typedef struct {
     bool achievements_signed_in;
     const char *achievements_account;
     const char *achievements_status;
+    /* The sign-in form (#1316): the username typed, how many characters the password has (the
+       form shows one '*' for each; the password itself never enters a model), and whether a
+       sign-in is on its way (SIGN IN waits for it). */
+    const char *achievements_username;
+    size_t achievements_password_chars;
+    bool achievements_sign_in_pending;
     /* Opt-in cover art (#2632): off by default, plus formatted cache size shown
        under Settings > Build tools and cache. */
     bool download_cover_art;
@@ -1374,6 +1390,8 @@ enum {
     PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE = 0x455Bu,   /* a title's Enhanced page: Remove texture pack */
     PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS = 0x455Cu,    /* Settings > Online: RA opt-in */
     PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS_ACCOUNT = 0x455Du,
+    PLAYER_UI_ID_ACHIEVEMENTS_AGREE = 0x455Eu,        /* RA's card: AGREE AND TURN ON */
+    PLAYER_UI_ID_ACHIEVEMENTS_NOT_NOW = 0x455Fu,      /* its NOT NOW */
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
@@ -1391,6 +1409,11 @@ enum {
     PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET = 0x456Eu, /* Online play: Server, opens the picker */
     PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER = 0x456Fu, /* the picker: Other server (editor) */
     PLAYER_UI_ID_NICKNAME_KEY_BASE = 0x4570u,         /* + its keyboard key's place */
+    PLAYER_UI_ID_ACHIEVEMENTS_USERNAME = 0x45B0u,     /* RA's sign-in form: Username */
+    PLAYER_UI_ID_ACHIEVEMENTS_PASSWORD = 0x45B1u,     /* its Password */
+    PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN = 0x45B2u,      /* its SIGN IN */
+    PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN_CANCEL = 0x45B3u, /* its CANCEL */
+    PLAYER_UI_ID_ACHIEVEMENTS_CONSENT_TEXT = 0x45B4u, /* RA's consent card: its scrolling text */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
     PLAYER_UI_ID_CONTROLLER_DEADZONE_UP = 0x4622u,
@@ -1664,6 +1687,28 @@ bool player_ui_nickname_accepts(uint32_t codepoint, void *user);
    in host[:lobby_port[,data_port]] strings. */
 bool player_ui_server_accepts(uint32_t codepoint, void *user);
 bool player_ui_port_accepts(uint32_t codepoint, void *user);
+/* RetroAchievements' sign-in form (#1316). RetroAchievements offers third-party clients no
+   browser or OAuth sign-in (rcheevos' rc_client signs in only with a password or a token it
+   gave), so the form takes the username and password here, as other emulators do; the password
+   is sent once, for the token, and never kept. The username takes printable ASCII without
+   spaces; the password takes any character but a control character. */
+#define PLAYER_UI_RA_USERNAME_MAX 64u
+#define PLAYER_UI_RA_PASSWORD_MAX 255u
+bool player_ui_ra_username_accepts(uint32_t codepoint, void *user);
+bool player_ui_ra_password_accepts(uint32_t codepoint, void *user);
+typedef struct {
+    char username[PLAYER_UI_RA_USERNAME_MAX + 1u];
+    char password[PLAYER_UI_RA_PASSWORD_MAX + 1u];
+} PlayerUiSignInForm;
+/* Overwrites the whole form, both buffers, with zero bytes (a compiler may not drop it). */
+void player_ui_sign_in_wipe(PlayerUiSignInForm *form);
+/* SIGN IN: copies the username and the password out for the one sign-in request, then wipes
+   the form's password whatever the result, so it is sent at most once; the username stays for a
+   retry. False, with nothing copied, when either is empty or does not fit its buffer. */
+bool player_ui_sign_in_take(PlayerUiSignInForm *form, char *username, size_t username_cap,
+                            char *password, size_t password_cap);
+/* How many characters (not bytes) the password has: the form shows that many '*'. */
+size_t player_ui_sign_in_password_chars(const PlayerUiSignInForm *form);
 /* The find box's character filter (UiKeyboardFilter): any character a title name or
    a disc ID can hold, so nothing but control characters is refused. */
 bool player_ui_find_accepts(uint32_t codepoint, void *user);
@@ -1730,6 +1775,10 @@ bool player_ui_nk_draws_view(int view);
 /* True while the library's find box is open on the library: what the keyboard
    types goes into it, so the host's letter shortcuts and Backspace-as-Back wait. */
 bool player_ui_nk_find_open(const PlayerUiNk *player);
+/* RetroAchievements' SIGN IN (#1316): hands the sign-in form's username and password to the one
+   sign-in request (player_ui_sign_in_take: the form's password is wiped whatever the result). */
+bool player_ui_nk_take_sign_in(PlayerUiNk *player, char *username, size_t username_cap,
+                               char *password, size_t password_cap);
 /* True while the nickname editor is open (#2197): the keyboard types into it in the same way. */
 bool player_ui_nk_nickname_open(const PlayerUiNk *player);
 /* True when the next UI shows the Library at the bottom of its stack (Esc

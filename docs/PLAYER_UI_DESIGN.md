@@ -420,7 +420,9 @@ hardware keyboard, "/" or Ctrl+F. The box takes TEST THIS PC's room: a field sho
 disc ID" until then) and, 4 px under it, the player's shared on-screen keyboard (`src/player/ui/ui_keyboard.c`, the
 nickname editor's too). Its keys are small controls (34 px at 100% text) in rows 4 px apart, the last 8 px below
 the others: digits, three QWERTY rows with `'`, `,`, `.` and `-`, a row of symbols, and SHIFT, SPACE, DELETE, CANCEL
-and DONE. The letters are lower case until SHIFT. The field is a key's height, so a row of cards still fits under
+and DONE. The letters are lower case until SHIFT, which also gives the other keys a second character
+(`$ % ^ = / \ ; " | ~` on the digits, `:` on `'`, ``< > ` `` on `, . -`, `[ ] { }` on `( ) _ +`), so the two layers
+type every printable ASCII character, as a RetroAchievements password may need. The field is a key's height, so a row of cards still fits under
 the box at 1280 x 720; with larger text the grid scrolls under it.
 The box takes printable characters, up to 63 bytes. The grid shows the games whose name or disc ID holds what is
 typed, ignoring case, without the add card or the demos; the count reads "3 of 40 titles", and no match says "No

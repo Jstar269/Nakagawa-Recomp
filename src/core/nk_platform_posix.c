@@ -499,17 +499,6 @@ bool nk_platform_credential_delete(const char *target) {
     return false;
 }
 
-int nk_platform_credential_prompt(const char *caption, const char *message, const char *target,
-                                  char *username, size_t username_size,
-                                  char *password, size_t password_size) {
-    (void)caption;
-    (void)message;
-    (void)target;
-    if (username && username_size) username[0] = '\0';
-    if (password && password_size) password[0] = '\0';
-    return -1;
-}
-
 bool nk_platform_guest_memory_channel_create(NkGuestMemoryChannel *channel,
                                              const char *name, size_t arena_size) {
     (void)name;

@@ -367,6 +367,8 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_DISC_GUIDED, FLOW_SETTINGS, FLOW_SETTINGS_ONLINE, FLOW_SETTINGS_ONLINE_ON,
                FLOW_SETTINGS_ONLINE_PLAY, FLOW_SETTINGS_ONLINE_PLAY_CARD,
                FLOW_SETTINGS_ONLINE_PLAY_SERVERS,
+               /* RetroAchievements (#1316): its consent card and its sign-in form. */
+               FLOW_SETTINGS_ACHIEVEMENTS_CARD, FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN,
                FLOW_SETTINGS_ONLINE_DISCORD_ON, FLOW_SETTINGS_ONLINE_NO_DISCORD,
                FLOW_SETTINGS_NOTICES,
                FLOW_SETTINGS_REMOVE, FLOW_SETTINGS_BUILD_CACHE, FLOW_SETTINGS_FONTS,
@@ -394,6 +396,8 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_TITLE_LONGEST_ACE,
                FLOW_CONSENT_FULL, FLOW_NICKNAME_FIRST, FLOW_NICKNAME_FULL,
                FLOW_NICKNAME_REFUSED,
+               /* RetroAchievements' password editor with a password typed (#1316). */
+               FLOW_RA_PASSWORD,
                /* Mouse aiming (#1791): its settings off and at their defaults, on with the
                   widest value every row can show, and the keyboard keys with aiming on. */
                FLOW_CONTROLLER_AIM, FLOW_CONTROLLER_AIM_ON, FLOW_CONTROLLER_KEYS_AIM_ON,
@@ -418,6 +422,9 @@ static bool g_online_play_list_shipped = false;
 /* What the card's server reads as, where a case names its own (the player's model reads it
    with nk_adhoc_relay_parse_server, unit-tested in test_nk_adhoc_relay.c). */
 static const char *g_online_play_card_host = NULL;
+/* RetroAchievements' sign-in form (#1316): empty instead of filled in. */
+static bool g_ra_form_empty = false;
+static void test_achievements_card_and_sign_in(void);
 static unsigned g_online_play_card_ports[2] = {0u, 0u};
 /* The server editor with a refused Done, and why (FLOW_NICKNAME_REFUSED). */
 static const char *g_server_refused_reason = NULL;
@@ -546,6 +553,9 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         : which == FLOW_SETTINGS_ONLINE_PLAY ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY
         : which == FLOW_SETTINGS_ONLINE_PLAY_CARD ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD
         : which == FLOW_SETTINGS_ONLINE_PLAY_SERVERS ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS
+        : which == FLOW_SETTINGS_ACHIEVEMENTS_CARD ? PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_CARD
+        : which == FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN
+            ? PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_SIGN_IN
         : which == FLOW_SETTINGS_NOTICES ? PLAYER_UI_SETTINGS_PAGE_NOTICES
         : which == FLOW_SETTINGS_REMOVE ? PLAYER_UI_SETTINGS_PAGE_REMOVE_TOOLS
         : which == FLOW_SETTINGS_BUILD_CACHE ? PLAYER_UI_SETTINGS_PAGE_BUILD_CACHE
@@ -691,6 +701,15 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.online_play_card_host = "relay-usa.arenaanywhere.site";
     settings.online_play_card_lobby_port = 27312u;
     settings.online_play_card_data_port = 27313u;
+    if (which == FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN) {
+        /* The form as Done leaves it: a username, a password of nine characters (the model
+           has its length only), or empty (g_ra_form_empty), and no sign-in on its way. */
+        settings.achievements_enabled = true;
+        settings.achievements_available = true;
+        settings.achievements_username = g_ra_form_empty ? "" : "player_one";
+        settings.achievements_password_chars = g_ra_form_empty ? 0u : 9u;
+        settings.achievements_status = "Sign in to connect.";
+    }
     if (g_online_play_host != NULL) {
         settings.online_play_server = g_online_play_host;
         settings.online_play_server_label = NULL; /* no list names it, as the player's model */
@@ -1556,6 +1575,21 @@ static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
         nickname.logical_width = g_flow_width;
         nickname.logical_height = g_flow_height;
         return player_ui_screen_nickname(ui, &nickname);
+    }
+    if (which == FLOW_RA_PASSWORD) {
+        /* #1316: RetroAchievements' password editor with a password typed. */
+        static char typed[PLAYER_UI_RA_PASSWORD_MAX + 1u];
+        static UiKeyboard keyboard;
+        PlayerUiNicknameModel editor;
+        (void)snprintf(typed, sizeof(typed), "%s", "hunter2 s\xc3\xa9" "cret");
+        ui_keyboard_init(&keyboard, typed, PLAYER_UI_RA_PASSWORD_MAX,
+                         player_ui_ra_password_accepts, NULL);
+        memset(&editor, 0, sizeof(editor));
+        editor.ra_password_mode = true;
+        editor.keyboard = &keyboard;
+        editor.logical_width = g_flow_width;
+        editor.logical_height = g_flow_height;
+        return player_ui_screen_nickname(ui, &editor);
     }
     if (which == FLOW_ERROR_STOP || which == FLOW_ERROR_CRASH) {
         /* #1282: a game that stopped early, with Restart game and Copy details,
@@ -4039,6 +4073,19 @@ static void test_settings_pages(void) {
          PLAYER_UI_SETTINGS_ONLINE_PLAY_NOT_NOW, "the card's NOT NOW changes nothing"},
         {FLOW_SETTINGS_ONLINE_PLAY_CARD, PLAYER_UI_ID_ONLINE_PLAY_CHANGE_SERVER,
          PLAYER_UI_SETTINGS_ONLINE_PLAY_CHANGE_SERVER, "the card's CHANGE SERVER opens the picker"},
+        {FLOW_SETTINGS_ACHIEVEMENTS_CARD, PLAYER_UI_ID_ACHIEVEMENTS_AGREE,
+         PLAYER_UI_SETTINGS_ACHIEVEMENTS_AGREE,
+         "RetroAchievements' card's AGREE AND TURN ON turns it on"},
+        {FLOW_SETTINGS_ACHIEVEMENTS_CARD, PLAYER_UI_ID_ACHIEVEMENTS_NOT_NOW,
+         PLAYER_UI_SETTINGS_ACHIEVEMENTS_NOT_NOW, "RetroAchievements' card's NOT NOW changes nothing"},
+        {FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, PLAYER_UI_ID_ACHIEVEMENTS_USERNAME,
+         PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_USERNAME, "the sign-in form's Username opens its editor"},
+        {FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, PLAYER_UI_ID_ACHIEVEMENTS_PASSWORD,
+         PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_PASSWORD, "the sign-in form's Password opens its editor"},
+        {FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN,
+         PLAYER_UI_SETTINGS_ACHIEVEMENTS_SUBMIT, "the filled sign-in form's SIGN IN signs in"},
+        {FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN_CANCEL,
+         PLAYER_UI_SETTINGS_ACHIEVEMENTS_SIGN_IN_CANCEL, "the sign-in form's CANCEL leaves it"},
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 2u,
          PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER, "a picker row picks its server"},
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
@@ -4552,6 +4599,7 @@ static void test_settings_pages(void) {
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_CARD, 1280, 800, NULL, 0u) &&
               online_play_card_reads(1280, 800, 100, false),
           "the Online play card offers TURN ON, NOT NOW and CHANGE SERVER");
+    test_achievements_card_and_sign_in();
     {
         /* The picker scrolls once it lists more than a few servers: each of these shows
            somewhere as it is scrolled through. */
@@ -8189,7 +8237,8 @@ static void test_online_play_text_is_never_cut(void) {
     static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
     static const int text_sizes[] = {100, 125, 150};
     static const FlowCase pages[] = {FLOW_SETTINGS_ONLINE_PLAY_SERVERS,
-                                     FLOW_SETTINGS_ONLINE_PLAY_CARD};
+                                     FLOW_SETTINGS_ONLINE_PLAY_CARD,
+                                     FLOW_SETTINGS_ACHIEVEMENTS_CARD};
     int saved = g_flow_text_size_pct;
     for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
         g_flow_text_size_pct = text_sizes[t];
@@ -8314,6 +8363,8 @@ static void test_game_page_text_is_never_cut(void) {
         {FLOW_SETTINGS_ONLINE, NULL, 0u, "Settings > Online", 125},
         {FLOW_SETTINGS_ONLINE_PLAY, NULL, 0u, "Settings > Online play", 125},
         {FLOW_SETTINGS_ONLINE_PLAY_CARD, NULL, 0u, "the Online play card", 125},
+        {FLOW_SETTINGS_ACHIEVEMENTS_CARD, NULL, 0u, "RetroAchievements' consent card", 125},
+        {FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, NULL, 0u, "RetroAchievements' sign-in form", 125},
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, NULL, 0u, "the Online play server picker", 125},
         {FLOW_SETTINGS_ONLINE_ON, NULL, 0u, "Settings > Online with Online mode on", 125},
         {FLOW_SETTINGS_ONLINE_DISCORD_ON, NULL, 0u, "Settings > Online with Discord status on",
@@ -9316,6 +9367,10 @@ static int capture_screens(const char *directory) {
              PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE},
             {FLOW_SETTINGS_ONLINE_PLAY_CARD, "settings-online-play-card",
              PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW},
+            {FLOW_SETTINGS_ACHIEVEMENTS_CARD, "settings-achievements-card",
+             PLAYER_UI_ID_ACHIEVEMENTS_NOT_NOW},
+            {FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, "settings-achievements-sign-in",
+             PLAYER_UI_ID_ACHIEVEMENTS_USERNAME},
             {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, "settings-online-play-servers",
              PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE},
             {FLOW_SETTINGS_NOTICES, "settings-notices", PLAYER_UI_ID_SETTINGS_BACK},
@@ -11408,8 +11463,10 @@ static void test_nickname_keyboard(void) {
           "Shift turns the letters to upper case");
     (void)nickname_press(ui, &model, q);
     (void)nickname_press(ui, &model, key + UI_KEYBOARD_KEY_SPACE);
+    /* Shift: the 0 key shows and types its second character, ~ (#1316). */
     (void)nickname_press(ui, &model, key + 9u);
-    CHECK(strcmp(typed, "qQ 0") == 0, "keys type in the case shown; Space types a space");
+    CHECK(strcmp(typed, "qQ ~") == 0 && nickname_dump_has(ui, &model, "\"~\""),
+          "keys type in the case shown; Space types a space");
     action = nickname_press(ui, &model, key + UI_KEYBOARD_KEY_DELETE);
     CHECK(nickname_op(action, PLAYER_UI_NICKNAME_EDITED) && strcmp(typed, "qQ ") == 0 &&
               nickname_dump_has(ui, &model, "\"3 / 32 bytes\""),
@@ -11831,6 +11888,221 @@ static void test_wizard_refused_pick_is_not_chosen(void) {
               strstr(dump, "TEST00007") == NULL,
           "a refused pick shows no disc as chosen");
     CHECK(strstr(dump, expect) != NULL, "the refusal reads in the warning colour");
+}
+
+/* #1316: RetroAchievements' consent card and sign-in form are launcher pages, not a Windows
+   message box and the Windows credential dialog. The card names both hosts and every item the
+   consent covers, whole, at the smallest window with Larger text; its buttons are AGREE AND TURN
+   ON and NOT NOW. The form shows the username and one star for each password character, and its
+   SIGN IN waits for both. The password editor shows stars, never the password. */
+/* Whether a dump's text, every drawn run's text in order joined by spaces, holds `sentence`:
+   a wrapped paragraph reads whole even where its box's border is dumped between its lines. */
+static bool dump_text_says(const char *dump, const char *sentence) {
+    static char text[CASE_DUMP_CAP];
+    size_t used = 0u;
+    for (const char *line = dump; line != NULL && *line != '\0';) {
+        const char *eol = strchr(line, '\n');
+        const char *end = eol != NULL ? eol : line + strlen(line);
+        const char *open = memchr(line, '"', (size_t)(end - line));
+        const char *close = end;
+        while (close > line && close[-1] != '"') --close;
+        if (open != NULL && close - 1 > open + 1) {
+            size_t n = (size_t)(close - 1 - (open + 1));
+            if (used + n + 2u >= sizeof(text)) return false;
+            if (used > 0u) text[used++] = ' ';
+            memcpy(text + used, open + 1, n);
+            used += n;
+        }
+        line = eol != NULL ? eol + 1 : NULL;
+    }
+    text[used] = '\0';
+    return strstr(text, sentence) != NULL;
+}
+
+/* Whether a text run containing `needle` is drawn whole in the window on the page's first,
+   unscrolled frame: not clipped at all, by a scroll container or by the window's edge. */
+static bool flow_case_shows_whole(FlowCase which, int width, int height, const char *needle) {
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
+    const size_t needle_length = strlen(needle);
+    bool whole = false;
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd && !whole; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        const NkUiTextRun *run = (const NkUiTextRun *)cmd->custom;
+        if (cmd->kind != NK_UI_DRAW_TEXT || run == NULL || run->length != needle_length ||
+            memcmp(run->text, needle, needle_length) != 0) {
+            continue;
+        }
+        whole = command_shows(cmd) && cmd->clip[0] == cmd->bounds[0] &&
+                cmd->clip[1] == cmd->bounds[1] && cmd->clip[2] == cmd->bounds[2] &&
+                cmd->clip[3] == cmd->bounds[3] && cmd->bounds[0] >= 0 && cmd->bounds[1] >= 0 &&
+                cmd->bounds[2] <= width && cmd->bounds[3] <= height;
+    }
+    if (ui != NULL) nk_ui_destroy(ui);
+    return whole;
+}
+
+static void test_achievements_card_and_sign_in(void) {
+    static char dump[CASE_DUMP_CAP];
+    /* The Windows message box this card replaces was wider than the screen, its buttons and even
+       its title bar's off the edge, so Enter (its default) agreed with no choice in sight. The
+       card shows both choices whole on its first frame, before any scroll, at every window and
+       text size; the UI test (test_player_ui.py) shows its focus starts on NOT NOW. */
+    static const int card_sizes[][3] = {
+        {960, 540, 100}, {960, 540, 150}, {1280, 720, 100}, {1280, 720, 150},
+        {1920, 1080, 100}, {1920, 1080, 150}
+    };
+    for (size_t i = 0u; i < sizeof(card_sizes) / sizeof(card_sizes[0]); ++i) {
+        const int saved = g_flow_text_size_pct;
+        bool both;
+        g_flow_text_size_pct = card_sizes[i][2];
+        both = flow_case_shows_whole(FLOW_SETTINGS_ACHIEVEMENTS_CARD, card_sizes[i][0],
+                                     card_sizes[i][1], "AGREE AND TURN ON") &&
+               flow_case_shows_whole(FLOW_SETTINGS_ACHIEVEMENTS_CARD, card_sizes[i][0],
+                                     card_sizes[i][1], "NOT NOW");
+        g_flow_text_size_pct = saved;
+        if (!both) {
+            fprintf(stderr, "  at %d x %d, %d%% text\n", card_sizes[i][0], card_sizes[i][1],
+                    card_sizes[i][2]);
+        }
+        CHECK(both, "the consent card shows AGREE AND TURN ON and NOT NOW whole on its first "
+                    "frame, before any scroll");
+    }
+    static const char *const card_says[] = {
+        "What Nakagawa sends to " NK_ACH_HOST,
+        "Your RetroAchievements username and its sign-in token.",
+        "Your password, once, when you sign in, to get that token. It is never saved; the token "
+        "is kept in Windows Credential Manager.",
+        "The game's RetroAchievements hash",
+        "The achievements you unlock.",
+        "Every two minutes while a game runs, its Rich Presence text: what the game's "
+        "achievement set says you are doing.",
+        "this player's name and version, your operating system and the rcheevos version.",
+        "downloaded from " NK_ACH_BADGE_HOST ", the only other host.",
+        "Those requests send no username, token or console ID",
+        "The pictures are kept on this PC until you sign out.",
+        "Hardcore is not available. Achievements are off while cheats are on or with 60 FPS game "
+        "logic.",
+        "Nakagawa never sends your game files, your saves, the game's memory",
+        "RetroAchievements stays off until you choose AGREE AND TURN ON."
+    };
+    /* Whole on one screen at 1920 x 1080, so the dump holds every line; at smaller windows the
+       card scrolls, and flow_case_text_whole below reads it to its end. */
+    bool says_all = flow_case_fits(FLOW_SETTINGS_ACHIEVEMENTS_CARD, 1920, 1080, dump,
+                                   sizeof(dump));
+    for (size_t i = 0u; says_all && i < sizeof(card_says) / sizeof(card_says[0]); ++i) {
+        if (!dump_text_says(dump, card_says[i])) {
+            fprintf(stderr, "  the card does not say: %s\n", card_says[i]);
+            says_all = false;
+        }
+    }
+    CHECK(says_all && strstr(dump, "\"AGREE AND TURN ON\"") != NULL &&
+              strstr(dump, "\"NOT NOW\"") != NULL,
+          "RetroAchievements' consent card says every host and item sent, with AGREE AND TURN "
+          "ON and NOT NOW");
+    /* The last word of each of the card's long lines, which no wrap splits (flow_case_text_whole
+       looks for 8 at most). */
+    static const char *const card_ends[] = {
+        "Manager.", "play.", "doing.", "version.", "out.", "logic.", "PC.", "Achievements."
+    };
+    for (int pct = 100; pct <= 150; pct += 50) {
+        const int saved = g_flow_text_size_pct;
+        g_flow_text_size_pct = pct;
+        CHECK(flow_case_fits(FLOW_SETTINGS_ACHIEVEMENTS_CARD, 960, 540, NULL, 0u) &&
+                  flow_case_text_whole(FLOW_SETTINGS_ACHIEVEMENTS_CARD, 960, 540,
+                                       PLAYER_UI_ID_ACHIEVEMENTS_CONSENT_TEXT,
+                                       card_ends, sizeof(card_ends) / sizeof(card_ends[0])),
+              "RetroAchievements' consent card fits 960 x 540 and shows every line whole as it "
+              "is scrolled, at 100% and 150% text");
+        g_flow_text_size_pct = saved;
+    }
+    CHECK(flow_case_fits(FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "\"USERNAME: PLAYER_ONE\"") != NULL &&
+              strstr(dump, "\"PASSWORD: *********\"") != NULL &&
+              dump_says(dump, "RetroAchievements has no sign-in web page for other apps"),
+          "the sign-in form shows the username and nine stars for a nine-character password");
+    CHECK(settings_op_is(activate_flow_button(PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN,
+                                              FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN),
+                         PLAYER_UI_SETTINGS_ACHIEVEMENTS_SUBMIT),
+          "a filled sign-in form's SIGN IN signs in");
+    g_ra_form_empty = true;
+    CHECK(flow_case_fits(FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "\"USERNAME: ENTER\"") != NULL &&
+              strstr(dump, "\"PASSWORD: ENTER\"") != NULL &&
+              activate_flow_button(PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN,
+                                   FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN).kind ==
+                  PLAYER_UI_ACTION_NONE,
+          "an empty sign-in form's SIGN IN does nothing");
+    g_ra_form_empty = false;
+    CHECK(flow_case_fits(FLOW_RA_PASSWORD, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "hunter2") == NULL && strstr(dump, "cret") == NULL &&
+              strstr(dump, "\"**************|\"") != NULL &&
+              strstr(dump, "bytes") == NULL,
+          "the password editor shows one star per character and neither the password nor its "
+          "byte count");
+    {
+        /* A controller types any password RetroAchievements takes: between its two layers, the
+           on-screen keyboard has every printable ASCII character but the space (its own key),
+           and the password field takes each of them. Failing before: no layer had
+           $ % ^ = / \ ; " | ~ < > ` [ ] { }. */
+        char missing[96];
+        size_t n_missing = 0u;
+        for (uint32_t ch = 0x21u; ch <= 0x7Eu; ++ch) {
+            bool found = false;
+            for (unsigned place = 0u; place < UI_KEYBOARD_CHAR_KEYS && !found; ++place) {
+                found = ui_keyboard_key_char(place, false) == ch ||
+                        ui_keyboard_key_char(place, true) == ch;
+            }
+            if (!found || !player_ui_ra_password_accepts(ch, NULL)) {
+                missing[n_missing++] = (char)ch;
+            }
+        }
+        missing[n_missing] = '\0';
+        if (n_missing != 0u) fprintf(stderr, "  not typeable: %s\n", missing);
+        CHECK(n_missing == 0u,
+              "the on-screen keyboard types every printable ASCII character into a password");
+        CHECK(ui_keyboard_key_char(0u, false) == '1' && ui_keyboard_key_char(0u, true) == '$' &&
+                  ui_keyboard_key_char(10u, true) == 'Q' &&
+                  ui_keyboard_key_char(29u, true) == ':',
+              "Shift gives the digits' row its symbols, upper-case letters, and ' its colon");
+    }
+    {
+        /* The form's helpers: SIGN IN takes the password once and wipes the form's copy. */
+        PlayerUiSignInForm form;
+        char user[PLAYER_UI_RA_USERNAME_MAX + 1u];
+        char pass[PLAYER_UI_RA_PASSWORD_MAX + 1u];
+        bool wiped = true;
+        memset(&form, 0, sizeof(form));
+        (void)snprintf(form.username, sizeof(form.username), "%s", "player_one");
+        (void)snprintf(form.password, sizeof(form.password), "%s", "p\xc3\xa4ss word");
+        CHECK(player_ui_sign_in_password_chars(&form) == 9u,
+              "the form counts the password's characters, not its bytes");
+        CHECK(player_ui_sign_in_take(&form, user, sizeof(user), pass, sizeof(pass)) &&
+                  strcmp(user, "player_one") == 0 && strcmp(pass, "p\xc3\xa4ss word") == 0,
+              "SIGN IN takes the username and the password");
+        for (size_t i = 0u; i < sizeof(form.password); ++i) wiped = wiped && form.password[i] == 0;
+        CHECK(wiped && strcmp(form.username, "player_one") == 0,
+              "taking the password wipes every byte of the form's copy; the username stays");
+        CHECK(!player_ui_sign_in_take(&form, user, sizeof(user), pass, sizeof(pass)),
+              "a second SIGN IN has no password to send: it is sent once");
+        (void)snprintf(form.password, sizeof(form.password), "%s", "secret");
+        CHECK(!player_ui_sign_in_take(&form, user, 4u, pass, sizeof(pass)) &&
+                  form.password[0] == 0,
+              "a username too long for the request is refused, and the password is wiped all "
+              "the same");
+        (void)snprintf(form.password, sizeof(form.password), "%s", "secret");
+        player_ui_sign_in_wipe(&form);
+        CHECK(form.username[0] == 0 && form.password[0] == 0,
+              "wiping the form empties both fields");
+        CHECK(player_ui_ra_username_accepts('a', NULL) && !player_ui_ra_username_accepts(' ', NULL) &&
+                  !player_ui_ra_username_accepts(0xE9u, NULL) &&
+                  player_ui_ra_password_accepts(' ', NULL) &&
+                  player_ui_ra_password_accepts(0xE9u, NULL) &&
+                  !player_ui_ra_password_accepts('\t', NULL) &&
+                  !player_ui_ra_password_accepts(0x85u, NULL),
+              "a username takes printable ASCII without spaces; a password anything but a "
+              "control character");
+    }
 }
 
 int main(int argc, char **argv) {

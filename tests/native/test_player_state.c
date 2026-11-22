@@ -18931,6 +18931,68 @@ int main(int argc, char **argv) {
             assert(strstr(s_app2->achievements_status, "Credential Manager") != NULL);
         }
 
+        /* #1316: the switch opens the consent card, a launcher page; nothing turns on while it
+           is open, NOT NOW (and Back) changes nothing, and only AGREE AND TURN ON, from the card,
+           turns the switch on. The sign-in form opens only once it is on. */
+        {
+            const bool store = s_app2->achievements_store_available;
+            player_app_settings_init_default(&s_app2->settings);
+            s_app2->achievements_store_available = false;
+            player_app_set_view(s_app2, VIEW_ONLINE_SETTINGS);
+            assert(!player_app_open_achievements_card(s_app2));
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            assert(strstr(s_app2->achievements_status, "Credential Manager") != NULL);
+
+            s_app2->achievements_store_available = true;
+            assert(!player_app_achievements_card_agree(s_app2)); /* no card is open */
+            assert(!s_app2->settings.achievements_enabled);
+            assert(!player_app_open_achievements_sign_in(s_app2)); /* not on yet */
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            /* --view=achievements-sign-in's preview opens the form with the switch off, and
+               AGREE ends the preview. */
+            s_app2->achievements_preview = true;
+            assert(player_app_open_achievements_sign_in(s_app2));
+            assert(s_app2->active_view == VIEW_ACHIEVEMENTS_SIGN_IN);
+            assert(!s_app2->settings.achievements_enabled);
+            player_app_close_achievements_sign_in(s_app2);
+            assert(!s_app2->achievements_sign_in_abandoned); /* nothing was on its way */
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            assert(player_app_open_achievements_card(s_app2));
+            assert(s_app2->active_view == VIEW_ACHIEVEMENTS_CARD);
+            assert(!s_app2->settings.achievements_enabled);
+            player_app_achievements_card_not_now(s_app2);
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            assert(!s_app2->settings.achievements_enabled);
+            assert(strcmp(s_app2->achievements_status, "RetroAchievements was not enabled.") == 0);
+
+            assert(player_app_open_achievements_card(s_app2));
+            assert(player_app_achievements_card_agree(s_app2));
+            assert(s_app2->settings.achievements_enabled);
+            assert(!s_app2->achievements_preview);
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            assert(!player_app_open_achievements_card(s_app2)); /* already on: no card */
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            assert(player_app_open_achievements_sign_in(s_app2));
+            assert(s_app2->active_view == VIEW_ACHIEVEMENTS_SIGN_IN);
+            player_app_close_achievements_sign_in(s_app2);
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            /* Leaving the form while its sign-in is on its way abandons that sign-in. */
+            assert(player_app_open_achievements_sign_in(s_app2));
+            s_app2->achievements_sign_in_pending = true;
+            player_app_close_achievements_sign_in(s_app2);
+            assert(s_app2->achievements_sign_in_abandoned);
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            s_app2->achievements_sign_in_pending = false;
+            s_app2->achievements_sign_in_abandoned = false;
+            /* Closing the form from another page leaves that page alone. */
+            player_app_set_view(s_app2, VIEW_SETTINGS);
+            player_app_close_achievements_sign_in(s_app2);
+            assert(s_app2->active_view == VIEW_SETTINGS);
+            player_app_set_achievements_enabled(s_app2, false);
+            s_app2->achievements_store_available = store;
+            player_app_settings_init_default(&s_app2->settings);
+        }
+
         /* RetroAchievements is off for a launch with cheats on or with the 60 FPS game-logic
            package (#1316, maintainer decision 2026-11-20); the presentation parts do not stop
            it, nor does a title's culling package alone. */
