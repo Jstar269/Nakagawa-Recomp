@@ -120,7 +120,7 @@ player-ui-tests: osk-overlay-paint-selftest ui-font-selftest nk-ui-player-screen
 		tests/native/test_player_ui_music.c src/player/ui/player_ui_music.c src/player/ui/player_ui_vorbis.c -lSDL3 -lm \
 		-o $(BUILD_ROOT)/test_player_ui_music$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_player_ui_music$(EXE_EXT) assets/music/launcher/ChillLofi.ogg
-	$(CC) -std=c99 -O2 -Wall -Wextra -Werror -DPLAYER_UI_SND0_TEST_SEAMS $(PLAYER_INCLUDES) $(LDFLAGS) \
+	$(CC) -std=c99 -O2 -Wall -Wextra -Werror -DPLAYER_UI_SND0_TEST_SEAMS -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(PLAYER_INCLUDES) $(LDFLAGS) \
 		tests/native/test_player_ui_snd0.c src/player/ui/player_ui_snd0.c src/player/ui/player_ui_music.c \
 		src/player/ui/player_ui_vorbis.c $(PLAYER_ATRAC_OBJS) -lSDL3 -lm \
 		-o $(BUILD_ROOT)/test_player_ui_snd0$(EXE_EXT)

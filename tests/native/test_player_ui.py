@@ -3866,8 +3866,8 @@ class NativePlayerUiTests(unittest.TestCase):
     ACHIEVEMENTS_TIMING_REASON = "60 FPS game logic changes the game's speed, so it earns nothing."
     # Settings > Online and developer. Tab goes by the order the hub declares its controls in,
     # whatever the window and text size (the arrows go by position, which Larger text moves):
-    # sixteen stops from Resolution to Online and developer.
-    TO_ONLINE_PAGE = ("WAIT_MS=100", *(("KEY_TAB", "WAIT_MS=40") * 16), "KEY_RETURN",
+    # seventeen stops from Resolution to Online and developer.
+    TO_ONLINE_PAGE = ("WAIT_MS=100", *(("KEY_TAB", "WAIT_MS=40") * 17), "KEY_RETURN",
                       "WAIT_MS=100", "WAIT_LAID_OUT=5000")
     OPEN_TITLE = ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300")
     # The packaged TEST00006's page with Ace chosen on it, so its 60 FPS game-logic package is
