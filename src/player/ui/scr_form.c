@@ -227,6 +227,62 @@ bool player_ui_server_accepts(uint32_t codepoint, void *user) {
            codepoint == ':' || codepoint == ',';
 }
 
+bool player_ui_ra_username_accepts(uint32_t codepoint, void *user) {
+    (void)user;
+    return codepoint > 0x20u && codepoint < 0x7Fu;
+}
+
+bool player_ui_ra_password_accepts(uint32_t codepoint, void *user) {
+    (void)user;
+    return codepoint >= 0x20u && codepoint != 0x7Fu && !(codepoint >= 0x80u && codepoint < 0xA0u);
+}
+
+void player_ui_sign_in_wipe(PlayerUiSignInForm *form) {
+    volatile unsigned char *bytes = (volatile unsigned char *)form;
+    if (form == NULL) return;
+    for (size_t i = 0u; i < sizeof(*form); ++i) bytes[i] = 0u;
+}
+
+static void sign_in_wipe_bytes(char *text, size_t cap) {
+    volatile char *bytes = text;
+    for (size_t i = 0u; i < cap; ++i) bytes[i] = '\0';
+}
+
+/* The text's length, never reading past cap bytes (strnlen is POSIX, not C11). */
+static size_t sign_in_length(const char *text, size_t cap) {
+    size_t length = 0u;
+    while (length < cap && text[length] != '\0') length++;
+    return length;
+}
+
+bool player_ui_sign_in_take(PlayerUiSignInForm *form, char *username, size_t username_cap,
+                            char *password, size_t password_cap) {
+    size_t user_len;
+    size_t pass_len;
+    bool ok;
+    if (form == NULL) return false;
+    user_len = sign_in_length(form->username, sizeof(form->username));
+    pass_len = sign_in_length(form->password, sizeof(form->password));
+    ok = username != NULL && password != NULL && user_len > 0u && pass_len > 0u &&
+         user_len < sizeof(form->username) && pass_len < sizeof(form->password) &&
+         user_len < username_cap && pass_len < password_cap;
+    if (ok) {
+        memcpy(username, form->username, user_len + 1u);
+        memcpy(password, form->password, pass_len + 1u);
+    }
+    sign_in_wipe_bytes(form->password, sizeof(form->password));
+    return ok;
+}
+
+size_t player_ui_sign_in_password_chars(const PlayerUiSignInForm *form) {
+    size_t count = 0u;
+    if (form == NULL) return 0u;
+    for (size_t i = 0u; i < sizeof(form->password) && form->password[i] != '\0'; ++i) {
+        if (((unsigned char)form->password[i] & 0xC0u) != 0x80u) count++;
+    }
+    return count;
+}
+
 /* The nickname / server editor (#2197, #1139): the box with what is typed (the value in use,
    dimmed, while nothing is), how many bytes it uses, why the last Done was refused, then the
    on-screen keyboard with Done and Skip (first launch) or Cancel (Settings). A physical keyboard
@@ -244,7 +300,7 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
     };
     const NkUiTheme *theme;
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
-    char scratch[NK_ADHOC_SERVER_MAX_LEN + 1u];
+    char scratch[PLAYER_UI_RA_PASSWORD_MAX + 1u];
     UiKeyboard empty;
     UiKeyboard *keyboard;
     UiKeyboardView view;
@@ -256,9 +312,13 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
         /* Nothing to type into: the keys show, and what they type is dropped. */
         scratch[0] = '\0';
         ui_keyboard_init(&empty, scratch,
-                         model->port_mode ? 5u
+                         model->ra_password_mode ? PLAYER_UI_RA_PASSWORD_MAX
+                         : model->ra_username_mode ? PLAYER_UI_RA_USERNAME_MAX
+                         : model->port_mode ? 5u
                          : model->server_mode ? NK_ADHOC_SERVER_MAX_LEN : NK_NICKNAME_MAX_BYTES,
-                         model->port_mode ? player_ui_port_accepts
+                         model->ra_password_mode ? player_ui_ra_password_accepts
+                         : model->ra_username_mode ? player_ui_ra_username_accepts
+                         : model->port_mode ? player_ui_port_accepts
                          : model->server_mode ? player_ui_server_accepts
                                               : player_ui_nickname_accepts,
                          NULL);
@@ -271,16 +331,26 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
                            640.0f);
     if (inner <= 0.0f) return result;
     scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND,
-                     model->server_mode || model->port_mode ? "Online play" : "Nickname",
+                     model->ra_username_mode || model->ra_password_mode ? "RetroAchievements"
+                     : model->server_mode || model->port_mode ? "Online play" : "Nickname",
                      theme->info);
     nk_ui_text_role(ui, FLOW_ID_TITLE,
-                    model->port_mode ? "Port offset"
+                    model->ra_username_mode ? "Username"
+                    : model->ra_password_mode ? "Password"
+                    : model->port_mode ? "Port offset"
                     : model->server_mode
                         ? "Other server"
                         : model->first_launch ? "Choose a nickname" : "Change your nickname",
                     NK_UI_TYPE_TITLE, theme->paper);
     nk_ui_text_role(ui, FLOW_ID_LEAD,
-                    model->port_mode
+                    model->ra_username_mode
+                        ? "Your RetroAchievements.org username. Done goes back to the sign-in "
+                          "form; nothing is sent until you choose SIGN IN there."
+                    : model->ra_password_mode
+                        ? "Your RetroAchievements.org password. It shows as stars. SIGN IN sends "
+                          "it once to retroachievements.org for a token, and Nakagawa then "
+                          "forgets it; it is never saved."
+                    : model->port_mode
                         ? "A whole number from 0 to 65535, added to the game's ports on the "
                           "server (10000 unless you change it). Players who want to play "
                           "together need the same value. It applies from the next game you start."
@@ -310,16 +380,26 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
         field.padding_left = NK_UI_SPACE_4;
         field.padding_right = NK_UI_SPACE_4;
         if (nk_ui_begin_container(ui, FLOW_ID_NICKNAME_FIELD, &field, &style)) {
-            char shown[NK_ADHOC_SERVER_MAX_LEN + 2u];
+            char shown[PLAYER_UI_RA_PASSWORD_MAX + 2u];
             NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY,
                                             typed[0] != '\0' ? theme->paper : theme->muted);
             text.wrap = false;
-            if (typed[0] != '\0') {
+            if (typed[0] != '\0' && model->ra_password_mode) {
+                /* One star for each character; the password itself is never drawn. */
+                size_t stars = 0u;
+                for (size_t i = 0u; typed[i] != '\0' && stars + 2u < sizeof(shown); ++i) {
+                    if (((unsigned char)typed[i] & 0xC0u) != 0x80u) shown[stars++] = '*';
+                }
+                shown[stars++] = '|';
+                shown[stars] = '\0';
+            } else if (typed[0] != '\0') {
                 (void)snprintf(shown, sizeof(shown), "%s|", typed);
             } else {
                 (void)snprintf(shown, sizeof(shown), "%s",
                                safe_text(model->current,
-                                         model->port_mode ? "10000"
+                                         model->ra_password_mode ? "Type your password"
+                                         : model->ra_username_mode ? "Type your username"
+                                         : model->port_mode ? "10000"
                                          : model->server_mode ? NK_ADHOC_DEFAULT_SERVER
                                                               : NK_NICKNAME_DEFAULT));
             }
@@ -329,8 +409,9 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
             nk_ui_end_container(ui);
         }
     }
-    {
-        /* The count, in the warning colour once the text is full. */
+    if (!model->ra_password_mode) {
+        /* The count, in the warning colour once the text is full. A password has none: its
+           stars already show how long it is. */
         char count[32];
         bool full = strlen(typed) >= keyboard->cap;
         (void)ui_keyboard_count_text(keyboard, count, sizeof(count));

@@ -155,7 +155,10 @@ typedef enum {
     VIEW_ACE_SETTINGS,          /* Settings > Enhanced, the library's or one title's (#2055) */
     VIEW_PROBLEM_REPORT,        /* Settings > Problem report (#1849) */
     VIEW_ONLINE_PLAY_CARD,      /* Settings > Online play: the consent card (#1139) */
-    VIEW_ONLINE_PLAY_SERVERS    /* Settings > Online play: the server picker; the last value */
+    VIEW_ONLINE_PLAY_SERVERS,   /* Settings > Online play: the server picker */
+    VIEW_ACHIEVEMENTS_CARD,     /* Settings > Online and developer: RetroAchievements' consent
+                                   card (#1316) */
+    VIEW_ACHIEVEMENTS_SIGN_IN   /* RetroAchievements' sign-in form (#1316); the last value */
 } PlayerView;
 
 typedef enum {
@@ -1076,6 +1079,8 @@ struct PlayerApp {
        settings.json or PlayerApp's persisted state. */
     bool achievements_store_available;
     bool achievements_signed_in;
+    /* A sign-in is on its way (main.c copies it each frame): the sign-in form's SIGN IN waits. */
+    bool achievements_sign_in_pending;
     char achievements_account[64];
     char achievements_status[192];
     /* A bounded, memory-only preview for the currently identified game's page: the unlocked
@@ -2808,6 +2813,20 @@ void player_app_toggle_update_check_at_start(PlayerApp *app);
 void player_app_toggle_discord_presence(PlayerApp *app);
 /* RetroAchievements is a separate opt-in, not the reserved network_mode setting. */
 void player_app_set_achievements_enabled(PlayerApp *app, bool enabled);
+/* RetroAchievements' consent card (#1316) is the only way to turn it on: the Achievements switch
+   opens it, and nothing is enabled, created or sent while it is open. False (and a status that
+   says why) when the platform has no credential store or it is already on. */
+bool player_app_open_achievements_card(PlayerApp *app);
+/* The card's AGREE AND TURN ON: the switch turns on and the card closes. False when no card is
+   open. The caller (main.c) then starts the client. */
+bool player_app_achievements_card_agree(PlayerApp *app);
+/* The card's NOT NOW (and Back): nothing changes. */
+void player_app_achievements_card_not_now(PlayerApp *app);
+/* The sign-in form: opens only while RetroAchievements is on with a credential store; closes
+   back to Online and developer options. The form's text stays in the UI (player_ui_nk.c),
+   never in PlayerApp. */
+bool player_app_open_achievements_sign_in(PlayerApp *app);
+void player_app_close_achievements_sign_in(PlayerApp *app);
 /* Why RetroAchievements is off for a game, or NULL when nothing stops it (#1316, maintainer
  * decision 2026-11-20): an unlock is earned only in the game as released. Cheats on (the stored
  * switch or this session's --cheats) or a launch with the title's 60 FPS game-logic package,

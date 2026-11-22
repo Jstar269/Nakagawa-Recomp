@@ -13,6 +13,7 @@
 
 #include "player_ui_nk.h"
 #include "nk_ui_widgets.h"
+#include "nk_achievements.h" /* NK_ACH_HOST, NK_ACH_BADGE_HOST: the consent card's hosts */
 
 #include <string.h>
 
@@ -168,6 +169,10 @@ typedef struct {
 #define SCR_ACHIEVEMENTS_UNAVAILABLE_SENTENCE \
     "Sign-in needs Windows Credential Manager, which this platform does not provide."
 #define SCR_ACHIEVEMENTS_ACCOUNT_NAME "RetroAchievements"
+/* The two hosts its consent card names: the bridge's own (src/core/nk_achievements.h), so the
+   card can never name a host the client does not use, or miss one it does. */
+#define SCR_ACHIEVEMENTS_HOST NK_ACH_HOST
+#define SCR_ACHIEVEMENTS_BADGE_HOST NK_ACH_BADGE_HOST
 /* A build that cannot show Discord status (no application ID, or no local pipes) hides the
    row, except for a stored On, which it shows with this sentence so it can be turned off. */
 #define SCR_DISCORD_STORED_ON_SENTENCE \

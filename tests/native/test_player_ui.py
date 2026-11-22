@@ -3757,42 +3757,105 @@ class NativePlayerUiTests(unittest.TestCase):
     SETTINGS_CHEATS = str(0x4565)
     SETTINGS_ACHIEVEMENTS = str(0x455C)
 
-    def test_next_ui_achievements_switch_is_refused_in_a_ui_regression_run(self) -> None:
-        """#1316: a UI regression run stays offline and opens no box, so the Achievements
-        switch is refused and says so. No consent is asked for, and nothing is saved. Where
-        the feature cannot run (no credential store), the row is its reason, not a switch."""
-        focus = self.SETTINGS_FOCUS
-        run = self.next_ui_run(
-            "settings",
-            ("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS +
-            ("KEY_LEFT", "KEY_RETURN", "WAIT_MS=100", "WAIT_LAID_OUT=5000") +
-            ("KEY_DOWN",) * 5 + ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200"),
-        )
+    ACHIEVEMENTS_AGREE = str(0x455E)
+    ACHIEVEMENTS_NOT_NOW = str(0x455F)
+    ACHIEVEMENTS_USERNAME = str(0x45B0)
+    ACHIEVEMENTS_PASSWORD = str(0x45B1)
+    ACHIEVEMENTS_SIGN_IN = str(0x45B2)
+
+    def achievements_said(self, run: dict[str, object], *, shown_on: bool = False) -> list[str]:
+        """The RetroAchievements status lines a run showed. Nothing is saved as on; nor is it on
+        in the run unless `shown_on` (the achievements-sign-in view shows the switch on)."""
         stdout = run["stdout"]
         assert isinstance(stdout, str)
-        said = [bytes.fromhex(status).decode("utf-8") for status in re.findall(
-            r"\[PLAYER_UI_TEST\] achievements frame=\d+ enabled=0 status_hex=([0-9a-f]+)", stdout)]
-        self.assertNotRegex(stdout, r"achievements frame=\d+ enabled=1")
+        if not shown_on:
+            self.assertNotRegex(stdout, r"achievements frame=\d+ enabled=1")
         settings = run.get("settings") or {}
         assert isinstance(settings, dict)
         self.assertIsNot(settings.get("achievements_enabled"), True)
-        trail = self.focus_trail(run)
-        if os.name == "nt":
-            self.assertEqual(
-                trail[-6:], [focus["developer"], self.SETTINGS_NICKNAME, focus["online_play"],
-                             self.SETTINGS_COVER_ART, self.SETTINGS_CHEATS,
-                             self.SETTINGS_ACHIEVEMENTS],
-                "the keyboard reaches the Achievements switch, the last row of the page")
-            self.assertEqual(
-                said, ["Sign in to connect.",
-                       "RetroAchievements is not available in a UI regression run."],
-                "the switch is refused before the consent box or the credential store is asked")
-        else:
+        return [bytes.fromhex(status).decode("utf-8") for status in re.findall(
+            r"\[PLAYER_UI_TEST\] achievements frame=\d+ enabled=\d status_hex=([0-9a-f]+)",
+            stdout)]
+
+    def test_next_ui_achievements_switch_opens_the_consent_card(self) -> None:
+        """#1316: the Achievements switch opens the launcher's consent card, not a Windows
+        message box. Its focus starts on NOT NOW, which changes nothing; Esc does the same.
+        AGREE AND TURN ON is refused in a UI regression run, which stays offline, so nothing
+        is ever enabled or saved. Where the feature cannot run (no credential store), the row
+        is its reason, not a switch.
+
+        Failing before: the switch, refused in a regression run, opened no page; outside one
+        it opened SDL's message box (player_achievements_consent)."""
+        focus = self.SETTINGS_FOCUS
+        to_switch = (("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS +
+                     ("KEY_LEFT", "KEY_RETURN", "WAIT_MS=100", "WAIT_LAID_OUT=5000") +
+                     ("KEY_DOWN",) * 5 + ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200"))
+        not_now = self.next_ui_run("settings", to_switch + ("KEY_RETURN", "WAIT_MS=200"))
+        said = self.achievements_said(not_now)
+        trail = self.focus_trail(not_now)
+        if os.name != "nt":
             self.assertNotIn(self.SETTINGS_ACHIEVEMENTS, trail)
             self.assertEqual(
                 said, ["Sign-in requires Windows Credential Manager; this platform is "
                        "unsupported."],
                 "no credential store here: the row is its reason, and nothing is asked")
+            return
+        at = trail.index(self.SETTINGS_ACHIEVEMENTS)
+        self.assertEqual(
+            trail[at - 5:at + 2],
+            [focus["developer"], self.SETTINGS_NICKNAME, focus["online_play"],
+             self.SETTINGS_COVER_ART, self.SETTINGS_CHEATS, self.SETTINGS_ACHIEVEMENTS,
+             self.ACHIEVEMENTS_NOT_NOW],
+            "the keyboard reaches the Achievements switch, and the card opens on NOT NOW")
+        views = [view for view, _ in self.screens(not_now)]
+        self.assertIn("achievements_card", views, "the switch opens the consent card")
+        self.assertEqual(views[-1], "online_settings", "NOT NOW returns to the page")
+        self.assertIn(self.ACHIEVEMENTS_NOT_NOW, trail, "the card's focus starts on NOT NOW")
+        self.assertEqual(said, ["Sign in to connect.", "RetroAchievements was not enabled."])
+
+        agree = self.next_ui_run(
+            "settings", to_switch + ("KEY_LEFT", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200",
+                                     "KEY_ESCAPE", "WAIT_MS=200"))
+        self.assertIn(self.ACHIEVEMENTS_AGREE, self.focus_trail(agree))
+        self.assertEqual(
+            self.achievements_said(agree),
+            ["Sign in to connect.", "RetroAchievements is not available in a UI regression run.",
+             "RetroAchievements was not enabled."],
+            "AGREE is refused before anything starts; Esc then leaves the card as NOT NOW does")
+        self.assertEqual([view for view, _ in self.screens(agree)][-1], "online_settings")
+
+    @unittest.skipUnless(os.name == "nt", "the sign-in page needs Windows Credential Manager")
+    def test_next_ui_achievements_sign_in_page_types_with_the_on_screen_keyboard(self) -> None:
+        """#1316: the sign-in page is the launcher's own, not Windows' credential dialog.
+        Username and Password each open the on-screen keyboard editor; a keyboard types there
+        too, the password shows as stars, and SIGN IN (refused in a UI regression run, which
+        stays offline) is reached by the keyboard once both are filled. Esc leaves the page.
+
+        Failing before: there was no such page; Sign in called CredUIPromptForCredentialsW."""
+        run = self.next_ui_run(
+            "achievements-sign-in",
+            ("WAIT_MS=100", "WAIT_LAID_OUT=5000", "KEY_RETURN", "WAIT_MS=100",
+             "TEXT=player_one", "KEY_RETURN", "WAIT_MS=100",
+             "KEY_DOWN", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100",
+             "TEXT=hunter2", "KEY_RETURN", "WAIT_MS=200",
+             "KEY_RETURN", "WAIT_MS=200", "KEY_ESCAPE", "WAIT_MS=200"))
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        self.assertNotIn("hunter2", stdout, "the password is never printed")
+        trail = self.focus_trail(run)
+        for control in (self.ACHIEVEMENTS_USERNAME, self.ACHIEVEMENTS_PASSWORD,
+                        self.ACHIEVEMENTS_SIGN_IN):
+            self.assertIn(control, trail)
+        self.assertLess(trail.index(self.ACHIEVEMENTS_PASSWORD),
+                        trail.index(self.ACHIEVEMENTS_SIGN_IN),
+                        "Done on the password moves the focus to SIGN IN")
+        self.assertEqual(
+            self.achievements_said(run, shown_on=True)[-1],
+            "RetroAchievements is not available in a UI regression run.",
+            "SIGN IN is refused in a regression run, before anything is sent")
+        views = [view for view, _ in self.screens(run)]
+        self.assertEqual(views[0], "achievements_sign_in")
+        self.assertEqual(views[-1], "online_settings", "Esc leaves the sign-in page")
 
     # #1316: why a title earns nothing (player_state.c achievements_block_reason).
     # The page's notice heading says "No achievements this session"; the reason does not repeat it.

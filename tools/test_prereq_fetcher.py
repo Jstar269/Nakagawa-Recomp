@@ -1982,6 +1982,46 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
                     offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}: {match.group(0)}")
         self.assertEqual(offenders, [], "the achievements bridge and rcheevos open no connection")
 
+    def test_achievements_consent_and_sign_in_are_launcher_pages(self) -> None:
+        # #1316: the consent is the launcher's own card and the sign-in its own page, not SDL's
+        # message box or Windows' credential dialog. The card names the two hosts through the
+        # bridge's own macros, so it names exactly the hosts the client uses.
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        self.assertNotIn("RetroAchievements consent", main)
+        self.assertNotIn("player_achievements_consent", main)
+        self.assertIn("player_app_open_achievements_card(app)", main)
+        shared = (REPO_ROOT / "src" / "player" / "ui" / "scr_shared.h").read_text(encoding="utf-8")
+        self.assertRegex(shared, r"#define SCR_ACHIEVEMENTS_HOST NK_ACH_HOST\b")
+        self.assertRegex(shared, r"#define SCR_ACHIEVEMENTS_BADGE_HOST NK_ACH_BADGE_HOST\b")
+        card = (REPO_ROOT / "src" / "player" / "ui" / "scr_settings.c").read_text(encoding="utf-8")
+        card = card[card.index("case PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_CARD: {"):
+                    card.index("case PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_SIGN_IN: {")]
+        self.assertIn("SCR_ACHIEVEMENTS_HOST", card)
+        self.assertIn("SCR_ACHIEVEMENTS_BADGE_HOST", card)
+        self.assertNotRegex(card, r"[A-Za-z0-9-]+\.(?:org|com|net)\b",
+                            "the card names its hosts only through the bridge's macros")
+        # No credential dialog is left anywhere: the password is typed in the launcher's form.
+        for rel in ("src/core/nk_platform.h", "src/core/nk_platform_win32.c",
+                    "src/core/nk_platform_posix.c", "src/player/main.c"):
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            self.assertNotIn("CredUIPrompt", text, rel)
+            self.assertNotIn("credui.dll", text, rel)
+            self.assertNotIn("nk_platform_credential_prompt", text, rel)
+        # SIGN IN sends the password once: one password sign-in in main.c, in the form's submit,
+        # which takes the password out of the form (wiping it there) and wipes its own copy.
+        self.assertEqual(main.count("nk_ach_begin_login_with_password("), 1)
+        submit = main[main.index("static bool player_achievements_submit_sign_in(PlayerRun *run) {"):]
+        submit = submit[:submit.index("\n}\n")]
+        self.assertIn("nk_ach_begin_login_with_password(run->achievements, username, password)",
+                      submit)
+        self.assertLess(submit.index("player_ui_nk_take_sign_in("),
+                        submit.index("nk_ach_begin_login_with_password("))
+        self.assertIn("nk_secure_zero(password, sizeof password);", submit)
+        # Only the token the server answers with is stored, never the form's password.
+        for call in re.findall(r"nk_platform_credential_write\([^;]*\);", main):
+            self.assertIn("token", call)
+            self.assertNotIn("password", call)
+
     def test_achievements_use_the_player_native_transport(self) -> None:
         # rc_client's only egress is the player's already allowlisted WinHTTP facility.
         source = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
@@ -2145,11 +2185,20 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
                      main.index("static void player_achievements_stop_channel", serve_start)]
         self.assertIn("nk_ach_frame(run->achievements);", serve)
         self.assertNotRegex(serve, r"\bSDL_|\bapp\b")
-        # A native UI regression run refuses the three Achievements actions before anything else.
+        # A native UI regression run refuses every Achievements action that could connect or
+        # read a credential before anything else; only the consent card's and the sign-in page's
+        # opening and closing (player_app_* view changes, #1316) come before the refusal.
         action = main[main.index("static void player_achievements_settings_action(PlayerRun *run, "
                                  "PlayerUiSettingsOp op) {"):]
-        self.assertLess(action.index("player_ui_test_active(&run->ui_test)"),
-                        action.index("switch (op)"))
+        guard = action.index("player_ui_test_active(&run->ui_test)")
+        self.assertLess(guard, action.index("switch (op)"))
+        before = action[action.index("{"):guard]
+        self.assertEqual(sorted(set(re.findall(r"\b(player_\w+)\(", before))),
+                         ["player_app_achievements_card_not_now",
+                          "player_app_close_achievements_sign_in",
+                          "player_app_open_achievements_card",
+                          "player_app_open_achievements_sign_in"])
+        self.assertNotRegex(before, r"\bnk_(?:ach|platform)_")
         # The queue is one account's, so the user's Sign out discards what is still waiting
         # (nk_ach_sign_out) and rewrites the file; only the switch turned off keeps the records.
         sign_out = main[main.index("static void player_achievements_end_account"):

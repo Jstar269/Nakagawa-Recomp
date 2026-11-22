@@ -44,7 +44,7 @@ static bool player_ui_test_parse_views(char *names, uint32_t *mask) {
         if (next) *next++ = '\0';
         if (!name[0]) return false;
         bool found = false;
-        for (int view = VIEW_LIBRARY; view <= VIEW_ONLINE_PLAY_SERVERS; view++) {
+        for (int view = VIEW_LIBRARY; view <= VIEW_ACHIEVEMENTS_SIGN_IN; view++) {
             if (strcmp(name, player_ui_test_view_name((PlayerView)view)) == 0) {
                 if ((unsigned)view >= 32) return false;
                 parsed_mask |= UINT32_C(1) << (unsigned)view;
@@ -612,6 +612,8 @@ const char *player_ui_test_view_name(PlayerView view) {
     case VIEW_ONLINE_PLAY_SETTINGS: return "online_play_settings";
     case VIEW_ONLINE_PLAY_CARD: return "online_play_card";
     case VIEW_ONLINE_PLAY_SERVERS: return "online_play_servers";
+    case VIEW_ACHIEVEMENTS_CARD: return "achievements_card";
+    case VIEW_ACHIEVEMENTS_SIGN_IN: return "achievements_sign_in";
     case VIEW_UPDATES: return "updates";
     case VIEW_CONFIRM_FACTORY_RESET: return "confirm_factory_reset";
     case VIEW_ACCESSIBILITY_SETTINGS: return "accessibility_settings";
@@ -1387,8 +1389,8 @@ void player_ui_test_report_startup(const PlayerUiTest *t, const PlayerUiNk *next
         player_ui_nk_test_report_compatibility();
     }
     if (t->mode && getenv("NK_UI_TEST_REPORT_VIEWS") != NULL) {
-        /* Every PlayerView, VIEW_LIBRARY through the last, VIEW_ONLINE_PLAY_SERVERS. */
-        for (int view = (int)VIEW_LIBRARY; view <= (int)VIEW_ONLINE_PLAY_SERVERS; ++view) {
+        /* Every PlayerView, VIEW_LIBRARY through the last, VIEW_ACHIEVEMENTS_SIGN_IN. */
+        for (int view = (int)VIEW_LIBRARY; view <= (int)VIEW_ACHIEVEMENTS_SIGN_IN; ++view) {
             printf("[PLAYER_UI_TEST] view_coverage value=%d name=%s nk=%d\n", view,
                    player_ui_test_view_name((PlayerView)view),
                    player_ui_nk_draws_view(view) ? 1 : 0);
