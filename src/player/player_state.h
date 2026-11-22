@@ -463,7 +463,7 @@ typedef struct {
        from the game's volume, as the menu sounds are. */
     bool launcher_music;
     int launcher_music_volume; /* 0..100 */
-    /* A highlighted game's own startup clip (its disc's PSP_GAME/SND0.AT3), at the
+    /* A game's own startup clip on its page (its disc's PSP_GAME/SND0.AT3), at the
        Music volume (player_ui_snd0.h): "launcher_game_music" in settings.json, on by
        default, as a PSP's home menu plays it. */
     bool launcher_game_music;

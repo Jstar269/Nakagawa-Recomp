@@ -240,8 +240,8 @@ struct PlayerUiNk {
     PlayerUiArt *art;                /* disc ICON0 / PIC1, decoded at run time */
     PlayerUiSounds *sounds;          /* optional launcher sounds (ui_sounds) */
     PlayerUiMusic *music;            /* optional launcher music (launcher_music, #2207) */
-    PlayerUiSnd0 *snd0;              /* a highlighted game's SND0.AT3 (launcher_game_music) */
-    size_t snd0_index;               /* the library card highlighted this frame, or SIZE_MAX */
+    PlayerUiSnd0 *snd0;              /* the open game page's SND0.AT3 (launcher_game_music) */
+    size_t snd0_index;               /* the game whose page this frame shows, or SIZE_MAX */
     int snd0_reported;               /* the last PlayerUiSnd0State written to the log */
     bool window_unfocused;           /* the launcher window lost input focus */
     int music_reported;              /* the last PlayerUiMusicState written to the log */
@@ -767,10 +767,9 @@ uint32_t player_ui_nk_wait_ms(const PlayerUiNk *player, uint32_t idle_ms) {
     }
     /* The hidden moment and Love All's roll move every frame. */
     if (player->secret_animating && wait_s > NK_UI_MOTION_FRAME) wait_s = NK_UI_MOTION_FRAME;
-    /* A highlighted game's clip: the rest's end, or a frame while it loads or fades. */
+    /* A game page's clip: a frame while it loads or fades. */
     {
-        uint32_t snd0_ms = player_ui_snd0_wait_ms(player->snd0, SDL_GetTicks(),
-                                                  (uint32_t)ceil(wait_s * 1000.0));
+        uint32_t snd0_ms = player_ui_snd0_wait_ms(player->snd0, (uint32_t)ceil(wait_s * 1000.0));
         if ((double)snd0_ms / 1000.0 < wait_s) wait_s = (double)snd0_ms / 1000.0;
     }
     /* Each read serves one disc and is collected on a frame; without this a
@@ -3174,7 +3173,7 @@ void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app) {
     request.focused = !player->window_unfocused;
     request.volume = app->settings.launcher_music_volume;
     {
-        /* A highlighted game's own clip, at the Music volume; the launcher music
+        /* The open game page's own clip, at the Music volume; the launcher music
            pauses while one loads or plays, and picks up where it stopped. */
         PlayerUiSnd0Request clip;
         clip.enabled = app->settings.launcher_game_music;
@@ -4322,7 +4321,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         nk_ui_push_event(player->ui, &repeats[i]);
     }
     player_ui_art_pump(player->art);
-    player->snd0_index = SIZE_MAX;   /* set again below while the library shows */
+    player->snd0_index = SIZE_MAX;   /* set again below while a game's page shows */
     player_ui_nk_follow_sounds(player, app);
     player_ui_follow_theme(player, app);
     player_ui_secret_begin(player, app, now_s);
@@ -4523,15 +4522,6 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 app->selected_game_index = (int)focused_index;
                 if (position < count) player->library_page = position / page_size;
             }
-            /* The card highlighted for its startup clip: the one under the pointer,
-               else the one with focus (last frame's layout, as hover is). */
-            player->snd0_index = focused_index < count ? focused_index : SIZE_MAX;
-            for (size_t i = 0u; i < count; ++i) {
-                if (nk_ui_hovered(player->ui, PLAYER_UI_ID_LIBRARY_ITEM(i))) {
-                    player->snd0_index = i;
-                    break;
-                }
-            }
         }
         if (nk_ui_focused(player->ui) == PLAYER_UI_ID_LIBRARY_ADD && slots > 0u) {
             player->library_page = (slots - 1u) / page_size;
@@ -4695,6 +4685,8 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         } else {
             PlayerUiTitleModel model;
             const GameRecord *game = &app->games[index];
+            /* The page plays this game's own startup clip (player_ui_snd0.h). */
+            player->snd0_index = (size_t)index;
             if (!app->launch_pending && !app->is_game_running &&
                 !player_app_cached_game_has_runtime(app, game) &&
                 !player_app_runtime_package_check_pending(app, game) &&

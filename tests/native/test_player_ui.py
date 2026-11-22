@@ -2165,46 +2165,50 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("next_ui_disc_icon", missing["stdout"],
                          "an unreadable disc keeps the placeholder")
 
-    def library_game_music(self, run: dict[str, object]) -> list[tuple[int, str]]:
-        """Each library frame's (ticks, game_music state)."""
+    def game_music_by_route(self, run: dict[str, object]) -> list[tuple[str, str]]:
+        """Each frame's (next_route, game_music state): route 1 is the library, 2 a game's page."""
         frames = run["frames"]
         assert isinstance(frames, list)
-        return [(int(frame["ticks_ms"]), frame["game_music"]) for frame in frames
-                if frame["view"] in ("library", "ready_library")]
+        return [(frame["next_route"], frame["game_music"]) for frame in frames]
 
-    def test_next_ui_highlighted_game_plays_its_own_startup_clip(self) -> None:
-        """A highlighted game's own startup clip (PSP_GAME/SND0.AT3, player_ui_snd0.h): focus
-        resting on the card for 0.6 s reads the synthetic clip from the synthetic disc image,
-        decodes it with the ATRAC3+ decoder and plays it, on SDL's dummy audio device (never a
-        speaker). A disc without a clip stays silent with no message, and with Preview music off
-        nothing is read."""
+    def test_next_ui_game_page_plays_its_own_startup_clip(self) -> None:
+        """A game's own startup clip on its page (PSP_GAME/SND0.AT3, player_ui_snd0.h): the
+        library list stays silent; opening the game's page reads the synthetic clip from the
+        synthetic disc image, decodes it with the ATRAC3+ decoder and plays it, on SDL's dummy
+        audio device (never a speaker); going back to the library fades it out and lets go. A
+        disc without a clip stays silent with no message, and with the setting off nothing is
+        read."""
         audio = {"SDL_AUDIO_DRIVER": "dummy"}
-        played = self.run_player("ready", ("FOCUS_GAINED", "WAIT_MS=3000"), art_iso="clip",
-                                 env_extra=audio)
+        steps = ("FOCUS_GAINED", "WAIT_MS=1500", "KEY_RETURN", "WAIT_MS=2000", "KEY_ESCAPE",
+                 "WAIT_MS=1500")
+        played = self.run_player("ready", steps, art_iso="clip", env_extra=audio)
         self.assert_next_ui_active(str(played["stdout"]))
-        states = self.library_game_music(played)
-        self.assertTrue(states, played["stdout"])
-        start = states[0][0]
-        # The first frames come before the clip's first update ("off").
-        self.assertLessEqual({state for ticks, state in states if ticks - start < 500},
-                             {"off", "idle"},
-                             f"nothing is read before the highlight rests: {states[:8]}")
-        self.assertIn("playing", [state for _, state in states],
-                      f"the rested card's clip plays: {states}")
+        frames = self.game_music_by_route(played)
+        routes = [route for route, _ in frames]
+        self.assertIn("2", routes, f"Enter opens the game's page: {routes}")
+        page = routes.index("2")
+        listed = {state for route, state in frames[:page]}
+        self.assertLessEqual(listed, {"off", "idle"},
+                             f"the library list, its card focused, stays silent: {listed}")
+        on_page = [state for route, state in frames if route == "2"]
+        self.assertIn("playing", on_page, f"the game's page plays its clip: {on_page}")
+        back = len(routes) - 1 - routes[::-1].index("2")
+        after = [state for route, state in frames[back + 1:]]
+        self.assertTrue(after, f"Escape goes back to the library: {routes}")
+        self.assertEqual(after[-1], "idle", f"leaving the page fades the clip out: {after}")
         self.assertNotIn("GAME_MUSIC_", str(played["stdout"]) + str(played["stderr"]))
 
-        silent = self.run_player("ready", ("FOCUS_GAINED", "WAIT_MS=2000"), art_iso="available",
-                                 env_extra=audio)
-        seen = {state for _, state in self.library_game_music(silent)}
-        self.assertIn("no_clip", seen, "a disc without SND0.AT3 is looked at once rested")
+        silent = self.run_player("ready", steps, art_iso="available", env_extra=audio)
+        seen = {state for _, state in self.game_music_by_route(silent)}
+        self.assertIn("no_clip", seen, "a disc without SND0.AT3 is looked at on its page")
         self.assertFalse(seen & {"playing", "damaged"}, seen)
         self.assertNotIn("GAME_MUSIC_", str(silent["stdout"]) + str(silent["stderr"]),
                          "a disc without a clip is not an error")
 
-        off = self.run_player("ready", ("FOCUS_GAINED", "WAIT_MS=2000"), art_iso="clip",
+        off = self.run_player("ready", steps, art_iso="clip",
                               settings={"launcher_game_music": False}, env_extra=audio)
-        self.assertEqual({state for _, state in self.library_game_music(off)}, {"off"},
-                         "with Preview music off the clip is never read")
+        self.assertEqual({state for _, state in self.game_music_by_route(off)}, {"off"},
+                         "with the setting off the clip is never read")
 
     def test_next_ui_wait_wakes_each_frame_while_disc_art_is_read(self) -> None:
         """Audit 2026-11-17 (F-8100ccc0): the launcher loop's wait (player_ui_nk_wait_ms)

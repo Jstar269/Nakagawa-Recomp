@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
-/* A game's startup clip on highlight (SND0.AT3): synthetic RIFF files built here
+/* A game's startup clip on its page (SND0.AT3): synthetic RIFF files built here
    (no game data) decode through the player's ATRAC3 and ATRAC3+ path, damaged
-   and hostile headers are refused by name, and the clip player rests before it
-   reads, reads nothing while off, away or at volume 0, stays silent with no
+   and hostile headers are refused by name, and the clip player reads nothing
+   with no game's page open, off, away or at volume 0, stays silent with no
    error for a disc without a clip, fades out and lets go of the audio device
-   when the highlight moves or a game starts, and joins a read still running
+   when the page is left or a game starts, and joins a read still running
    before a game starts. Runs on SDL's dummy audio driver, with the module's
    test seams (PLAYER_UI_SND0_TEST_SEAMS). */
 
@@ -303,7 +303,7 @@ static int test_player(void) {
     CHECK(snd0 != NULL, "the clip player is made");
     CHECK(player_ui_snd0_create(NULL, NULL) == NULL, "a clip player needs a reader");
 
-    /* Off: nothing is read and no device is held, whatever is highlighted. */
+    /* Off: nothing is read and no device is held, whatever page is open. */
     request = request_for("clip.iso");
     request.enabled = false;
     t0 = SDL_GetTicks();
@@ -313,21 +313,17 @@ static int test_player(void) {
               !player_ui_snd0_holds_audio(snd0),
           "off reads nothing and holds no audio");
 
-    /* Browsing past cards reads nothing: each highlight rests anew. */
+    /* No game's page open (the library list): nothing is read. */
     t0 = SDL_GetTicks();
-    request = request_for("clip.iso");
+    request = request_for(NULL);
     player_ui_snd0_update(snd0, &request, t0);
-    request.iso_path = "missing.iso";
-    player_ui_snd0_update(snd0, &request, t0 + 400u);
-    request.iso_path = "clip.iso";
-    player_ui_snd0_update(snd0, &request, t0 + 800u);
-    player_ui_snd0_update(snd0, &request, t0 + 800u + PLAYER_UI_SND0_REST_MS - 1u);
-    CHECK(player_ui_snd0_state(snd0) == PLAYER_UI_SND0_IDLE && player_ui_snd0_test_reads(snd0) == 0u,
-          "a highlight that has not rested reads nothing");
-    CHECK(player_ui_snd0_wait_ms(snd0, t0 + 800u + PLAYER_UI_SND0_REST_MS - 1u, 1000u) == 1u,
-          "the launcher wakes when the rest ends");
+    player_ui_snd0_update(snd0, &request, t0 + 5000u);
+    CHECK(player_ui_snd0_state(snd0) == PLAYER_UI_SND0_IDLE && player_ui_snd0_test_reads(snd0) == 0u &&
+              player_ui_snd0_wait_ms(snd0, 1000u) == 1000u,
+          "with no game's page open nothing is read and the launcher may sleep");
 
-    /* At volume 0 or away from the window, nothing is read either. */
+    /* At volume 0 or away from the window, a page reads nothing either. */
+    request = request_for("clip.iso");
     request.volume = 0;
     player_ui_snd0_update(snd0, &request, t0 + 5000u);
     CHECK(player_ui_snd0_test_reads(snd0) == 0u && player_ui_snd0_state(snd0) == PLAYER_UI_SND0_IDLE,
@@ -337,9 +333,9 @@ static int test_player(void) {
     player_ui_snd0_update(snd0, &request, t0 + 5000u);
     CHECK(player_ui_snd0_test_reads(snd0) == 0u, "an unfocused window reads nothing");
 
-    /* Rested: the clip is read once, decoded and heard. */
+    /* The page opens: the clip is read once, decoded and heard. */
     request = request_for("clip.iso");
-    CHECK(wait_for(snd0, &request, PLAYER_UI_SND0_PLAYING), "the rested clip plays");
+    CHECK(wait_for(snd0, &request, PLAYER_UI_SND0_PLAYING), "the open page plays its clip");
     CHECK(player_ui_snd0_test_reads(snd0) == 1u && player_ui_snd0_holds_audio(snd0) &&
               player_ui_snd0_test_pcm_frames(snd0) == 16u * 2048u &&
               player_ui_snd0_quiets_music(snd0),
@@ -362,12 +358,12 @@ static int test_player(void) {
     CHECK(wait_for(snd0, &request, PLAYER_UI_SND0_PLAYING) && player_ui_snd0_test_reads(snd0) == 1u,
           "back, it plays again without another read");
 
-    /* The highlight moves to a disc without a clip: a fade, then silence, no error. */
+    /* Another game's page, whose disc has no clip: a fade, then silence, no error. */
     request.iso_path = "missing.iso";
     player_ui_snd0_update(snd0, &request, SDL_GetTicks());
     CHECK(player_ui_snd0_state(snd0) == PLAYER_UI_SND0_FADING_OUT ||
               !player_ui_snd0_holds_audio(snd0),
-          "moving on fades the last clip out");
+          "another page fades the last clip out");
     CHECK(wait_for(snd0, &request, PLAYER_UI_SND0_NO_CLIP), "a disc without SND0.AT3 is silent");
     CHECK(!player_ui_snd0_holds_audio(snd0) && player_ui_snd0_test_pcm_frames(snd0) == 0u &&
               player_ui_snd0_detail(snd0)[0] == '\0' && !player_ui_snd0_quiets_music(snd0),
@@ -406,11 +402,11 @@ static int test_player(void) {
     request = request_for("slow.iso");
     t0 = SDL_GetTicks();
     player_ui_snd0_update(snd0, &request, t0);
-    player_ui_snd0_update(snd0, &request, t0 + PLAYER_UI_SND0_REST_MS);
+    player_ui_snd0_update(snd0, &request, t0);
     CHECK(player_ui_snd0_decoding(snd0) && player_ui_snd0_quiets_music(snd0),
           "the slow clip is being read");
     request.in_launcher = false;
-    player_ui_snd0_update(snd0, &request, t0 + PLAYER_UI_SND0_REST_MS + 1u);
+    player_ui_snd0_update(snd0, &request, t0 + 1u);
     CHECK(!player_ui_snd0_decoding(snd0) && !player_ui_snd0_holds_audio(snd0) &&
               player_ui_snd0_state(snd0) == PLAYER_UI_SND0_STOPPED,
           "a game start joins the read before the game may start");

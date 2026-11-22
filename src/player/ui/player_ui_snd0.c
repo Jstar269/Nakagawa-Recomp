@@ -22,9 +22,8 @@ struct PlayerUiSnd0 {
     void *reader_user;
     PlayerUiSnd0State state;
     char detail[256];
-    /* The highlighted game's disc image, and when the highlight came to it. */
+    /* The disc image of the game whose page is open. */
     char path[PLAYER_UI_SND0_PATH_MAX];
-    uint64_t since_ms;
     /* The worker that reads and decodes a clip. It owns load_path and writes
        only the load_* fields, which this thread reads after SDL_WaitThread. */
     SDL_Thread *loader;
@@ -295,15 +294,14 @@ void player_ui_snd0_update(PlayerUiSnd0 *snd0, const PlayerUiSnd0Request *reques
     want = request->iso_path != NULL ? request->iso_path : "";
     if (strlen(want) >= sizeof(snd0->path)) want = "";
     if (strcmp(want, snd0->path) != 0) {
-        /* The highlight moved: the last game's read stops, and its clip fades
-           out before the next one may open the device. */
+        /* Another page: the last game's read stops, and its clip fades out
+           before the next one may open the device. */
         player_ui_snd0_cancel_load(snd0);
         if (snd0->stream != NULL) snd0->stale = true;
         else player_ui_snd0_free_clip(snd0);
         snd0->failure = PLAYER_UI_SND0_IDLE;
         snd0->detail[0] = '\0';
         (void)snprintf(snd0->path, sizeof(snd0->path), "%s", want);
-        snd0->since_ms = now_ms;
     }
     gain = (float)(request->volume < 0 ? 0 : request->volume > 100 ? 100 : request->volume) /
            100.0f;
@@ -335,10 +333,6 @@ void player_ui_snd0_update(PlayerUiSnd0 *snd0, const PlayerUiSnd0Request *reques
         return;
     }
     if (!snd0->have_pcm) {
-        if (now_ms - snd0->since_ms < PLAYER_UI_SND0_REST_MS) {
-            snd0->state = PLAYER_UI_SND0_IDLE;
-            return;
-        }
         player_ui_snd0_start_load(snd0);
         if (snd0->loader != NULL) {
             snd0->state = PLAYER_UI_SND0_LOADING;
@@ -351,7 +345,7 @@ void player_ui_snd0_update(PlayerUiSnd0 *snd0, const PlayerUiSnd0Request *reques
     }
     if (snd0->stream == NULL) {
         if (!player_ui_snd0_open_device(snd0, gain)) {
-            /* Sticky for this game: another highlight tries again. */
+            /* Sticky for this page: opening a game's page again tries again. */
             snd0->failure = PLAYER_UI_SND0_NO_DEVICE;
             snd0->state = PLAYER_UI_SND0_NO_DEVICE;
             return;
@@ -386,18 +380,9 @@ bool player_ui_snd0_quiets_music(const PlayerUiSnd0 *snd0) {
     return snd0 != NULL && ((snd0->stream != NULL && !snd0->fading_out) || snd0->loader != NULL);
 }
 
-uint32_t player_ui_snd0_wait_ms(const PlayerUiSnd0 *snd0, uint64_t now_ms, uint32_t idle_ms) {
-    uint32_t wait = idle_ms;
-    if (snd0 == NULL) return idle_ms;
-    if (snd0->loader != NULL || snd0->fading_out) {
-        wait = 16u;
-    } else if (snd0->state == PLAYER_UI_SND0_IDLE && snd0->path[0] != '\0' && !snd0->have_pcm &&
-               snd0->failure == PLAYER_UI_SND0_IDLE) {
-        uint64_t due = snd0->since_ms + PLAYER_UI_SND0_REST_MS;
-        uint64_t left = due > now_ms ? due - now_ms : 0u;
-        if (left < wait) wait = (uint32_t)left;
-    }
-    return wait < idle_ms ? wait : idle_ms;
+uint32_t player_ui_snd0_wait_ms(const PlayerUiSnd0 *snd0, uint32_t idle_ms) {
+    if (snd0 == NULL || (snd0->loader == NULL && !snd0->fading_out)) return idle_ms;
+    return idle_ms < 16u ? idle_ms : 16u;
 }
 
 float player_ui_snd0_gain(const PlayerUiSnd0 *snd0) {

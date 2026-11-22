@@ -665,7 +665,7 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     /* Launcher music (#2207): off, the default, at its default level. */
     settings.launcher_music_value = "Off";
     settings.music_volume = 80;
-    /* A highlighted game's SND0.AT3 clip: on, the default. */
+    /* The game page's SND0.AT3 clip: on, the default. */
     settings.game_music = true;
     settings.controller_line = "keyboard and mouse";
     settings.saves_folder = "C:/synthetic/Nakagawa/saves";
@@ -3937,7 +3937,7 @@ static void test_settings_pages(void) {
         {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP, PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP,
          "plus raises the music volume"},
         {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_GAME_MUSIC, PLAYER_UI_SETTINGS_TOGGLE_GAME_MUSIC,
-         "the preview music button toggles a highlighted game's clip"},
+         "the game page music button toggles the page's clip"},
         {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_ACCESSIBILITY,
          PLAYER_UI_SETTINGS_OPEN_ACCESSIBILITY, "Accessibility opens its page"},
         {FLOW_SETTINGS_ACCESSIBILITY, PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE,

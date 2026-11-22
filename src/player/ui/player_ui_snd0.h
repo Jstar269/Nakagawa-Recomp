@@ -12,17 +12,16 @@
 extern "C" {
 #endif
 
-/* A game's own startup clip on highlight: while a game's card in the library is
-   highlighted (it has focus, or the pointer is over it) the launcher plays that
-   game's PSP_GAME/SND0.AT3, the clip a PSP's home menu plays for it. The clip is
-   read from the user's own disc image only when it would be heard, decoded in
-   memory on a worker thread (player_ui_at3.c) and never written anywhere.
+/* A game's own startup clip on its page: while a game's page is open in the
+   launcher, the launcher plays that game's PSP_GAME/SND0.AT3, the clip a PSP's
+   home menu plays for it. The library list stays silent. The clip is read from
+   the user's own disc image only when it would be heard, decoded in memory on a
+   worker thread (player_ui_at3.c) and never written anywhere.
 
-   - It starts once the highlight has rested on the game for
-     PLAYER_UI_SND0_REST_MS, so browsing past cards reads nothing, fades in over
-     PLAYER_UI_SND0_FADE_IN_MS and loops (player_ui_music_mix_*).
+   - It starts when the page opens, fades in over PLAYER_UI_SND0_FADE_IN_MS and
+     loops (player_ui_music_mix_*).
    - It fades out over PLAYER_UI_SND0_FADE_OUT_MS, and releases the audio
-     device, when the highlight moves, the window loses focus, the setting turns
+     device, when the page is left, the window loses focus, the setting turns
      off or a game starts; a game's launch waits for that
      (player_ui_snd0_holds_audio, player_ui_snd0_decoding).
    - A disc without SND0.AT3 is silent with no error (PLAYER_UI_SND0_NO_CLIP). A
@@ -32,13 +31,13 @@ extern "C" {
 
 typedef enum {
     PLAYER_UI_SND0_OFF = 0,     /* the setting is off: nothing read, no audio */
-    PLAYER_UI_SND0_IDLE,        /* no game highlighted, the highlight still resting,
-                                   or the window away or the volume 0 */
+    PLAYER_UI_SND0_IDLE,        /* no game's page open, or the window away or the
+                                   volume 0 */
     PLAYER_UI_SND0_LOADING,     /* the clip is being read and decoded */
     PLAYER_UI_SND0_PLAYING,     /* audible, or fading in */
     PLAYER_UI_SND0_FADING_OUT,  /* fading before the device is released */
     PLAYER_UI_SND0_STOPPED,     /* a game starts or runs: nothing held */
-    PLAYER_UI_SND0_NO_CLIP,     /* the highlighted disc has no SND0.AT3 (or no image) */
+    PLAYER_UI_SND0_NO_CLIP,     /* the game's disc has no SND0.AT3 (or no image) */
     PLAYER_UI_SND0_DAMAGED,     /* the clip could not be read or decoded, or is silent */
     PLAYER_UI_SND0_NO_DEVICE,   /* no audio device could be opened */
     PLAYER_UI_SND0_STATE_COUNT
@@ -49,11 +48,9 @@ typedef struct {
     bool in_launcher;      /* no game is starting or running */
     bool focused;          /* the launcher window has input focus */
     int volume;            /* launcher_music_volume, 0 to 100 */
-    const char *iso_path;  /* the highlighted game's disc image; NULL or "" for none */
+    const char *iso_path;  /* the disc image of the game whose page is open; NULL or "" for none */
 } PlayerUiSnd0Request;
 
-/* As the art rest (NK_UI_MOTION_ART_REST, 0.6 s). */
-#define PLAYER_UI_SND0_REST_MS 600u
 #define PLAYER_UI_SND0_FADE_IN_MS 300u
 #define PLAYER_UI_SND0_FADE_OUT_MS 300u
 /* A volume step, and turning the setting off, ramps this long. */
@@ -101,9 +98,9 @@ bool player_ui_snd0_holds_audio(const PlayerUiSnd0 *snd0);
 bool player_ui_snd0_decoding(const PlayerUiSnd0 *snd0);
 /* Whether the launcher music should pause for a clip: one is loading or heard. */
 bool player_ui_snd0_quiets_music(const PlayerUiSnd0 *snd0);
-/* The milliseconds until the clip needs a frame (the rest's end, or a frame
-   while it loads or fades), at most `idle_ms`. */
-uint32_t player_ui_snd0_wait_ms(const PlayerUiSnd0 *snd0, uint64_t now_ms, uint32_t idle_ms);
+/* The milliseconds until the clip needs a frame (one while it loads or fades),
+   at most `idle_ms`. */
+uint32_t player_ui_snd0_wait_ms(const PlayerUiSnd0 *snd0, uint32_t idle_ms);
 /* The gain the clip is rendered at now, 0 to 1 (0 while it holds no stream). */
 float player_ui_snd0_gain(const PlayerUiSnd0 *snd0);
 
