@@ -2079,6 +2079,7 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS: player_app_toggle_ui_sounds(app); break;
         case PLAYER_UI_SETTINGS_CYCLE_LAUNCHER_THEME: player_ui_cycle_launcher_theme(app); break;
         case PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC: player_app_toggle_launcher_music(app); break;
+        case PLAYER_UI_SETTINGS_TOGGLE_GAME_MUSIC: player_app_toggle_launcher_game_music(app); break;
         case PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN:
             player_app_adjust_launcher_music_volume(app, -5);
             break;

@@ -7,6 +7,7 @@
 #include "cover_art.h"
 #include "player_ui_art.h"
 #include "player_ui_music.h"
+#include "player_ui_snd0.h"
 #include "player_ui_sound.h"
 #include "iso_reader.h"
 #include "nk_adhoc_relay.h"
@@ -239,6 +240,9 @@ struct PlayerUiNk {
     PlayerUiArt *art;                /* disc ICON0 / PIC1, decoded at run time */
     PlayerUiSounds *sounds;          /* optional launcher sounds (ui_sounds) */
     PlayerUiMusic *music;            /* optional launcher music (launcher_music, #2207) */
+    PlayerUiSnd0 *snd0;              /* the open game page's SND0.AT3 (launcher_game_music) */
+    size_t snd0_index;               /* the game whose page this frame shows, or SIZE_MAX */
+    int snd0_reported;               /* the last PlayerUiSnd0State written to the log */
     bool window_unfocused;           /* the launcher window lost input focus */
     int music_reported;              /* the last PlayerUiMusicState written to the log */
     int pending_sound;               /* a PlayerUiSound for this frame, or -1 */
@@ -359,6 +363,20 @@ struct PlayerUiNk {
 #endif
     bool ready;
 };
+
+/* The clip reader: PSP_GAME/SND0.AT3 from the user's disc image, read into memory
+   only (player_ui_snd0.h); a disc without one is silent. */
+static PlayerUiSnd0ReadResult player_ui_read_snd0(const char *iso_path, uint8_t **bytes,
+                                                  size_t *size, void *user) {
+    NkIconStatus status;
+    (void)user;
+    status = nk_iso_read_bounded_entry(iso_path, PLAYER_UI_SND0_PATH,
+                                       PLAYER_UI_SND0_MAX_FILE_BYTES, bytes, size);
+    if (status == NK_ICON_OK) return PLAYER_UI_SND0_READ_OK;
+    return status == NK_ICON_ERR_MISSING || status == NK_ICON_ERR_INVALID_PARAM
+               ? PLAYER_UI_SND0_READ_MISSING
+               : PLAYER_UI_SND0_READ_FAILED;
+}
 
 /* The player's art reader: ICON0.PNG and PIC1.PNG from the user's disc image,
    through the ISO reader's own size and header checks. */
@@ -613,6 +631,9 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
     player->sounds = player_ui_sounds_create();
     player->music = player_ui_music_create_beside(base_path);
     player->music_reported = PLAYER_UI_MUSIC_OFF;
+    player->snd0 = player_ui_snd0_create(player_ui_read_snd0, NULL);
+    player->snd0_index = SIZE_MAX;
+    player->snd0_reported = PLAYER_UI_SND0_OFF;
     player->pending_sound = -1;
     player->last_view = VIEW_LIBRARY;
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
@@ -650,6 +671,7 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
 
 void player_ui_nk_destroy(PlayerUiNk *player) {
     if (player == NULL) return;
+    player_ui_snd0_destroy(player->snd0);
     player_ui_music_destroy(player->music);
     player_ui_sounds_destroy(player->sounds);
     player_ui_art_destroy(player->art);
@@ -745,6 +767,11 @@ uint32_t player_ui_nk_wait_ms(const PlayerUiNk *player, uint32_t idle_ms) {
     }
     /* The hidden moment and Love All's roll move every frame. */
     if (player->secret_animating && wait_s > NK_UI_MOTION_FRAME) wait_s = NK_UI_MOTION_FRAME;
+    /* A game page's clip: a frame while it loads or fades. */
+    {
+        uint32_t snd0_ms = player_ui_snd0_wait_ms(player->snd0, (uint32_t)ceil(wait_s * 1000.0));
+        if ((double)snd0_ms / 1000.0 < wait_s) wait_s = (double)snd0_ms / 1000.0;
+    }
     /* Each read serves one disc and is collected on a frame; without this a
        library page filled in one card per idle wake (audit 2026-11-17). */
     return player_ui_art_wait_ms(player->art, (uint32_t)ceil(wait_s * 1000.0));
@@ -1384,6 +1411,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.launcher_music_value = player_ui_music_row_value(app->settings.launcher_music,
                                                            player_ui_music_state(player->music));
     model.music_volume = app->settings.launcher_music_volume;
+    model.game_music = app->settings.launcher_game_music;
     model.launcher_fullscreen = app->settings.launcher_fullscreen;
     model.nickname = app->settings.nickname;
     model.build_speed = package_build_speed_name(app->settings.build_speed);
@@ -3120,6 +3148,20 @@ static void player_ui_nk_follow_sounds(PlayerUiNk *player, const PlayerApp *app)
                                                      !app->launch_pending);
 }
 
+/* A clip that could not be read or decoded, or no audio device for it, is logged
+   once by state, never with the game's path or title. A disc without one is not. */
+static void player_ui_nk_report_snd0(PlayerUiNk *player, PlayerApp *app) {
+    PlayerUiSnd0State state = player_ui_snd0_state(player->snd0);
+    if ((int)state == player->snd0_reported) return;
+    player->snd0_reported = (int)state;
+    if (state == PLAYER_UI_SND0_DAMAGED || state == PLAYER_UI_SND0_NO_DEVICE) {
+        const char *code = state == PLAYER_UI_SND0_DAMAGED ? "GAME_MUSIC_DAMAGED"
+                                                           : "GAME_MUSIC_NO_DEVICE";
+        fprintf(stderr, "[PLAYER] %s: %s\n", code, player_ui_snd0_detail(player->snd0));
+        player_dev_log_add(app, "audio", "%s: %s", code, player_ui_snd0_detail(player->snd0));
+    }
+}
+
 void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app) {
     PlayerUiMusicRequest request;
     PlayerUiMusicState state;
@@ -3132,6 +3174,21 @@ void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app) {
     request.in_launcher = !app->is_game_running && !app->launch_pending;
     request.focused = !player->window_unfocused;
     request.volume = app->settings.launcher_music_volume;
+    {
+        /* The open game page's own clip, at the Music volume; the launcher music
+           pauses while one loads or plays, and picks up where it stopped. */
+        PlayerUiSnd0Request clip;
+        clip.enabled = app->settings.launcher_game_music;
+        clip.in_launcher = request.in_launcher;
+        clip.focused = request.focused;
+        clip.volume = request.volume;
+        clip.iso_path = player->snd0_index < (size_t)(app->game_count > 0 ? app->game_count : 0)
+                            ? app->games[player->snd0_index].iso_path
+                            : NULL;
+        player_ui_snd0_update(player->snd0, &clip, SDL_GetTicks());
+        if (player_ui_snd0_quiets_music(player->snd0)) request.focused = false;
+        player_ui_nk_report_snd0(player, app);
+    }
     player_ui_music_update(player->music, &request, SDL_GetTicks());
     {
         uint32_t timeout_ms = player_ui_music_take_release_timeout(player->music);
@@ -3160,6 +3217,8 @@ void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app) {
 bool player_ui_nk_launcher_audio_closed(const PlayerUiNk *player) {
     return player == NULL || (!player_ui_music_holds_audio(player->music) &&
                               !player_ui_music_decoding(player->music) &&
+                              !player_ui_snd0_holds_audio(player->snd0) &&
+                              !player_ui_snd0_decoding(player->snd0) &&
                               !player_ui_sounds_hold_audio(player->sounds));
 }
 
@@ -3177,6 +3236,11 @@ int player_ui_nk_music_state(const PlayerUiNk *player) {
 
 const char *player_ui_nk_music_state_name(const PlayerUiNk *player) {
     return player_ui_music_state_name((PlayerUiMusicState)player_ui_nk_music_state(player));
+}
+
+const char *player_ui_nk_snd0_state_name(const PlayerUiNk *player) {
+    return player_ui_snd0_state_name(player != NULL ? player_ui_snd0_state(player->snd0)
+                                                    : PLAYER_UI_SND0_OFF);
 }
 
 void player_ui_nk_note_gamepad(PlayerUiNk *player, uint32_t which, bool connected) {
@@ -4259,6 +4323,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         nk_ui_push_event(player->ui, &repeats[i]);
     }
     player_ui_art_pump(player->art);
+    player->snd0_index = SIZE_MAX;   /* set again below while a game's page shows */
     player_ui_nk_follow_sounds(player, app);
     player_ui_follow_theme(player, app);
     player_ui_secret_begin(player, app, now_s);
@@ -4622,6 +4687,8 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         } else {
             PlayerUiTitleModel model;
             const GameRecord *game = &app->games[index];
+            /* The page plays this game's own startup clip (player_ui_snd0.h). */
+            player->snd0_index = (size_t)index;
             if (!app->launch_pending && !app->is_game_running &&
                 !player_app_cached_game_has_runtime(app, game) &&
                 !player_app_runtime_package_check_pending(app, game) &&

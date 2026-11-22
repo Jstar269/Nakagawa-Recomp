@@ -331,7 +331,25 @@ $(PLAYER_DISC_EXPAND_O): $(PLAYER_DISC_EXPAND_SRC)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(@D)').mkdir(parents=True, exist_ok=True)"
 	$(CC) $(PLAYER_DISC_EXPAND_OPT) -Wall -Wextra $(PLAYER_INCLUDES) $(DEPFLAGS) -c $(PLAYER_DISC_EXPAND_SRC) -o $@
 -include $(PLAYER_DISC_EXPAND_O:.o=.d)
-PLAYER_LINK_SRCS = $(filter-out $(PLAYER_DISC_EXPAND_SRC),$(PLAYER_SRCS)) $(PLAYER_DISC_EXPAND_O)
+# A highlighted game's startup clip (PSP_GAME/SND0.AT3, src/player/ui/player_ui_snd0.h) is
+# decoded with the runtime's ATRAC import (ATRAC3P_SRCS, FFmpeg n4.4). Those units and the
+# player's wrapper over them (player_ui_at3.c) are compiled on their own with the import's
+# include paths, which no other player unit sees (its libavutil/ headers would shadow
+# others), at the runtime's level for them. CMakeLists.txt builds the same set the same way.
+PLAYER_ATRAC_INCLUDES := -Isrc/player/ui -Isrc/rt/atrac3p -Isrc/rt/atrac3p/libavcodec -Isrc/rt/atrac3p/libavutil
+PLAYER_ATRAC_SRC := src/player/ui/player_ui_at3.c
+PLAYER_ATRAC_DIR := $(BUILD_ROOT)/player-objects/atrac
+PLAYER_ATRAC_IMPORT_OBJS := $(patsubst src/rt/atrac3p/%.c,$(PLAYER_ATRAC_DIR)/%.o,$(ATRAC3P_SRCS))
+PLAYER_ATRAC_O := $(PLAYER_ATRAC_DIR)/player_ui_at3.o
+PLAYER_ATRAC_OBJS := $(PLAYER_ATRAC_IMPORT_OBJS) $(PLAYER_ATRAC_O)
+$(PLAYER_ATRAC_IMPORT_OBJS): $(PLAYER_ATRAC_DIR)/%.o: src/rt/atrac3p/%.c
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(@D)').mkdir(parents=True, exist_ok=True)"
+	$(CC) -O2 -fno-strict-aliasing -w $(PLAYER_ATRAC_INCLUDES) $(DEPFLAGS) -c $< -o $@
+$(PLAYER_ATRAC_O): $(PLAYER_ATRAC_SRC) src/player/ui/player_ui_at3.h src/player/ui/player_ui_vorbis.h
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(@D)').mkdir(parents=True, exist_ok=True)"
+	$(CC) -std=c99 -O2 -Wall -Wextra $(PLAYER_ATRAC_INCLUDES) $(DEPFLAGS) -c $(PLAYER_ATRAC_SRC) -o $@
+-include $(PLAYER_ATRAC_OBJS:.o=.d)
+PLAYER_LINK_SRCS = $(filter-out $(PLAYER_DISC_EXPAND_SRC),$(PLAYER_SRCS)) $(PLAYER_DISC_EXPAND_O) $(PLAYER_ATRAC_OBJS)
 
 # Both icon objects come from one rule over a per-target generated script: the player's
 # says "Nakagawa Recomp", a title's "<display name> (Nakagawa Recomp)" from its manifest
@@ -350,7 +368,7 @@ endif
 
 $(PLAYER_EXE): | player-vulkan-check sdl3-check
 
-$(PLAYER_EXE): $(PLAYER_SRCS) $(PLAYER_DISC_EXPAND_O) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) $(LIBCHDR_PUBLIC_HDRS) $(PLAYER_IDENTITY_STAMP) src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/player/adhoc_servers.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE)) $(PLAYER_ICON_OBJ)
+$(PLAYER_EXE): $(PLAYER_SRCS) $(PLAYER_DISC_EXPAND_O) $(PLAYER_ATRAC_OBJS) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) $(LIBCHDR_PUBLIC_HDRS) $(PLAYER_IDENTITY_STAMP) src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/player/adhoc_servers.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE)) $(PLAYER_ICON_OBJ)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) $(RUNTIME_OPT) -Wall -Wextra $(PLAYER_NK_UI_DEFS) $(NK_UPDATE_KEY_DEFS) $(PLAYER_INCLUDES) $(LDFLAGS) $(PLAYER_VULKAN_LIB) $(PLAYER_GUI_LDFLAGS) $(PLAYER_CHD_SRCS) $(LIBCHDR_INC) $(PLAYER_LINK_SRCS) $(PLAYER_ICON_OBJ) -lSDL3 $(LIBCHDR_LIB) $(PLAYER_EXTRA_LIBS) $(REPRODUCIBLE_LINK_FLAG) -o $@
 
@@ -363,7 +381,7 @@ player: $(PLAYER_EXE)
 
 $(PLAYER_UI_TEST_EXE): | player-vulkan-check sdl3-check
 
-$(PLAYER_UI_TEST_EXE): $(PLAYER_SRCS) $(PLAYER_DISC_EXPAND_O) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) $(LIBCHDR_PUBLIC_HDRS) $(PLAYER_IDENTITY_STAMP) src/player/player_ui_test.h src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/player/adhoc_servers.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE))
+$(PLAYER_UI_TEST_EXE): $(PLAYER_SRCS) $(PLAYER_DISC_EXPAND_O) $(PLAYER_ATRAC_OBJS) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) $(LIBCHDR_PUBLIC_HDRS) $(PLAYER_IDENTITY_STAMP) src/player/player_ui_test.h src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/player/adhoc_servers.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE))
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) $(RUNTIME_OPT) -Wall -Wextra -DNK_PLAYER_UI_REGRESSION_TEST $(PLAYER_NK_UI_DEFS) $(NK_UPDATE_KEY_DEFS) $(PLAYER_INCLUDES) $(LDFLAGS) $(PLAYER_VULKAN_LIB) $(PLAYER_LINK_SRCS) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_INC) $(LIBCHDR_LIB) -lSDL3 $(PLAYER_EXTRA_LIBS) $(REPRODUCIBLE_LINK_FLAG) -o $@
 
