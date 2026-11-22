@@ -175,7 +175,8 @@ typedef enum {
     PLAYER_UI_QUEUE_LATER,      /* a queue row's Down: one place later */
     PLAYER_UI_QUEUE_RESUME,     /* a paused queue goes on */
     PLAYER_UI_QUEUE_PAGE_BACK,  /* the queue's earlier page */
-    PLAYER_UI_QUEUE_PAGE_NEXT   /* the queue's next page */
+    PLAYER_UI_QUEUE_PAGE_NEXT,  /* the queue's next page */
+    PLAYER_UI_QUEUE_PAUSE       /* Pause: the build that runs finishes, then the queue waits */
 } PlayerUiQueueOp;
 
 /* What an Add to Steam dialog control asks for (PLAYER_UI_ACTION_STEAM). Back is
@@ -1336,7 +1337,7 @@ enum {
     PLAYER_UI_ID_TITLE_QUEUE = 0x2022u,               /* Add to / Remove from queue */
     PLAYER_UI_ID_LIBRARY_QUEUE = 0x4A01u,             /* the queue line's Queue */
     PLAYER_UI_ID_QUEUE_BACK = 0x4A02u,
-    PLAYER_UI_ID_QUEUE_RESUME = 0x4A03u,
+    PLAYER_UI_ID_QUEUE_PAUSE = 0x4A03u,               /* one button: Pause, or Resume */
     PLAYER_UI_ID_QUEUE_PAGE_BACK = 0x4A04u,
     PLAYER_UI_ID_QUEUE_PAGE_NEXT = 0x4A05u,
     PLAYER_UI_ID_QUEUE_UP_BASE = 0x4A10u,             /* + the row on this page */
@@ -1622,7 +1623,7 @@ PlayerUiAction player_ui_screen_rebuild(NkUi *ui, const PlayerUiRebuildModel *mo
 
 /* The build queue: the games that wait, in the order they build, a page at a
    time. The one building comes first with its progress; each one that waits
-   has Up, Down and Remove. A paused queue offers Resume. */
+   has Up, Down and Remove. One button pauses the queue and resumes it. */
 #define PLAYER_UI_QUEUE_ROW_CAP 4u
 typedef struct {
     const char *title;          /* the game's name */
@@ -1639,6 +1640,8 @@ typedef struct {
     size_t first_row;           /* the page's first row, from 0 */
     size_t total;               /* games waiting or building */
     bool paused;                /* a build could not start: Resume goes on */
+    bool held;                  /* the person paused it: Resume goes on */
+    bool building;              /* a game builds now (it finishes while paused) */
     float logical_width;
     float logical_height;
 } PlayerUiQueueModel;

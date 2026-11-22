@@ -4369,6 +4369,7 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     char sep = nk_platform_path_separator();
     char path[NATIVE_TEST_PATH_MAX + 192];
     char queue_path[MAX_PATH_LEN];
+    char paused_path[MAX_PATH_LEN];
     char text[256];
     char reason[2048];
     bool offers = true;
@@ -4460,6 +4461,8 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     /* The file keeps the order and each title's kind, as schema 2, and a
        restart resumes the queue from it. */
     assert(queue_file_has(queue_path, "\"schema_version\": 2"));
+    assert(player_app_rebuild_queue_paused_path(app, paused_path, sizeof(paused_path)));
+    assert(!nk_platform_file_exists(paused_path));
     assert(queue_file_has(queue_path,
         "{\"disc_id\": \"ULUS99998\", \"kind\": \"build\", \"state\": \"pending\"},\n"
         "    {\"disc_id\": \"ULUS99997\", \"kind\": \"rebuild\", \"state\": \"pending\"}"));
@@ -4480,6 +4483,47 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     }
     printf("[PLAYER_STATE_TEST] the build queue persists and resumes after a restart PASS\n");
 
+    /* Pause with nothing building: no game starts, the file says paused, a
+       restart keeps it paused, and Add to queue does not resume it. */
+    assert(player_app_build_queue_pause(app));
+    assert(!player_app_build_queue_pause(app));                    /* already paused */
+    assert(player_app_build_queue_held(app) && queue->active && !queue->paused);
+    /* The pause is a marker beside the queue file, which keeps the schema 2
+       shape every released player reads. */
+    assert(nk_platform_file_exists(paused_path));
+    assert(queue_file_has(queue_path, "\"schema_version\": 2"));
+    assert(!queue_file_has(queue_path, "paused"));
+    player_app_rebuild_queue_step(app);
+    assert(!app->build_session.is_building);
+    assert(queue->entries[0].state == PLAYER_REBUILD_PENDING &&
+           queue->entries[1].state == PLAYER_REBUILD_PENDING);
+    (void)player_app_rebuild_banner_text(app, text, sizeof(text), &offers);
+    assert(strcmp(text, "The build queue is paused. 2 games wait.") == 0);
+    {
+        PlayerApp *resumed = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        assert(resumed != NULL);
+        snprintf(resumed->settings_path, sizeof(resumed->settings_path), "%s",
+                 app->settings_path);
+        memcpy(resumed->games, app->games, sizeof(GameRecord) * 4u);
+        resumed->game_count = 4;
+        assert(player_app_rebuild_queue_load(resumed));
+        assert(resumed->rebuild_queue.active && resumed->rebuild_queue.held &&
+               resumed->rebuild_queue.count == 2);
+        player_app_rebuild_queue_step(resumed);
+        assert(!resumed->build_session.is_building &&
+               resumed->rebuild_queue.entries[0].state == PLAYER_REBUILD_PENDING);
+        free(resumed);
+    }
+    assert(player_app_build_queue_add(app, 3));
+    assert(player_app_build_queue_held(app) && queue->count == 3);
+    assert(player_app_build_queue_remove(app, "ULUS99995"));
+    assert(player_app_build_queue_held(app));
+    assert(player_app_build_queue_resume(app));
+    assert(!player_app_build_queue_resume(app));                   /* not paused now */
+    assert(!player_app_build_queue_held(app) && !nk_platform_file_exists(paused_path));
+    printf("[PLAYER_STATE_TEST] a paused build queue starts nothing and stays paused after a "
+           "restart PASS\n");
+
     /* A first build that fails says so on its card, and the queue goes on:
        ULUS99997's disc is missing, so it is skipped, and the queue ends. */
     nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "failure");
@@ -4495,9 +4539,40 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     assert(!player_app_build_queue_move(app, "ULUS99997", -1));    /* not past it */
     player_app_rebuild_queue_step(app);                            /* one build at a time */
     assert(queue->entries[1].state == PLAYER_REBUILD_PENDING);
+    /* Pause while it builds: that build goes on to its end, then nothing
+       starts until Resume. */
+    assert(player_app_build_queue_pause(app));
+    (void)player_app_rebuild_banner_text(app, text, sizeof(text), &offers);
+    assert(strcmp(text, "Building 1 of 2") == 0);                  /* it still builds */
+    {
+        /* Closed while it builds under Pause: the build is saved as waiting,
+           and after a restart it waits for Resume instead of starting again. */
+        PlayerApp *resumed = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        assert(resumed != NULL);
+        assert(queue_file_has(queue_path,
+            "{\"disc_id\": \"ULUS99998\", \"kind\": \"build\", \"state\": \"pending\"}"));
+        snprintf(resumed->settings_path, sizeof(resumed->settings_path), "%s",
+                 app->settings_path);
+        memcpy(resumed->games, app->games, sizeof(GameRecord) * 4u);
+        resumed->game_count = 4;
+        assert(player_app_rebuild_queue_load(resumed));
+        assert(resumed->rebuild_queue.active && resumed->rebuild_queue.held);
+        player_app_rebuild_queue_step(resumed);
+        assert(!resumed->build_session.is_building);
+        assert(resumed->rebuild_queue.entries[0].state == PLAYER_REBUILD_PENDING &&
+               resumed->rebuild_queue.entries[1].state == PLAYER_REBUILD_PENDING);
+        free(resumed);
+    }
+    player_app_rebuild_queue_step(app);
+    assert(app->build_session.is_building && player_app_rebuild_queue_owns_build(app));
     poll_player_package_build_to_terminal(app);
     assert(app->build_session.is_failed);
     assert(!player_app_apply_build_outcome(app));
+    assert(queue->entries[0].state == PLAYER_REBUILD_FAILED);
+    player_app_rebuild_queue_step(app);
+    assert(queue->active && player_app_build_queue_held(app) && !app->build_session.is_building);
+    assert(queue->entries[1].state == PLAYER_REBUILD_PENDING);     /* not started */
+    assert(player_app_build_queue_resume(app));
     assert(app->active_view == VIEW_LIBRARY && app->last_error.error_code[0] == '\0');
     assert(queue->entries[0].state == PLAYER_REBUILD_FAILED);
     assert(player_app_rebuild_card(app, &app->games[0], &card));
@@ -4509,7 +4584,9 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     assert(!queue->active && !nk_platform_file_exists(queue_path));
     assert(player_app_rebuild_card(app, &app->games[0], &card) &&
            strcmp(card.word, "Build failed") == 0);
+    assert(!queue->held && !nk_platform_file_exists(paused_path)); /* a finished queue */
     printf("[PLAYER_STATE_TEST] a failed queued build goes to its card and the queue goes on PASS\n");
+    printf("[PLAYER_STATE_TEST] Pause lets the running build finish and starts no next one PASS\n");
 
     /* Added again, a finished game waits again; this time its build passes. */
     nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "success");
@@ -4547,6 +4624,14 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     assert(queue_file_has(queue_path, "\"schema_version\": 2"));
     assert(queue_file_has(queue_path,
         "{\"disc_id\": \"ULUS99997\", \"kind\": \"rebuild\", \"state\": \"pending\"}"));
+    /* The pause marker: a queue file beside it loads paused; with no queue
+       file it is stale (an older player finished the queue) and goes. */
+    write_text_file(paused_path, "paused\n");
+    memset(queue, 0, sizeof(*queue));
+    assert(player_app_rebuild_queue_load(app) && queue->active && queue->held);
+    assert(nk_remove_utf8(queue_path) == 0);
+    memset(queue, 0, sizeof(*queue));
+    assert(!player_app_rebuild_queue_load(app) && !nk_platform_file_exists(paused_path));
     /* A schema 2 title must say its kind; a repeated title is refused too. */
     write_text_file(queue_path,
         "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":2,"
@@ -4560,6 +4645,7 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     assert(!player_app_rebuild_queue_load(app) && !queue->active);
     assert(nk_remove_utf8(queue_path) == 0);
     printf("[PLAYER_STATE_TEST] a schema 1 rebuild queue migrates to schema 2 PASS\n");
+    printf("[PLAYER_STATE_TEST] the pause marker loads with its queue and goes without one PASS\n");
 
     /* A newer Nakagawa's queue is not resumed, and stays as it is while this
        player's own queue comes and goes. */

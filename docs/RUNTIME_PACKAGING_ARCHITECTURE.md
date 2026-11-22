@@ -514,9 +514,13 @@ What the player does (it suggests a rebuild and never forces one):
 * The same queue takes first builds: a game with no package offers Add to
   queue beside BUILD PACKAGE on its page, and Remove from queue while it
   waits. The library line's Queue opens the queue: the game building first,
-  then the ones that wait, each with Up, Down and Remove, and Resume when a
-  build could not start for a reason outside its game. The build card says how
-  many games follow.
+  then the ones that wait, each with Up, Down and Remove, and one Pause button
+  that becomes Resume while the queue is paused. Pause lets the build that
+  runs finish (a build cannot be suspended halfway; Cancel build stops one),
+  then no next game starts until Resume; the screen's title, lead and hint say
+  so, and Add to queue or Rebuild all add games without resuming it. The queue
+  also pauses by itself, with Resume, when a build could not start for a reason
+  outside its game. The build card says how many games follow.
 * The queue survives a restart in `rebuild-queue.json` beside `settings.json`:
   `{"format": "nakagawa-rebuild-queue", "schema_version": 2, "titles":
   [{"disc_id": "...", "kind": "build" | "rebuild", "state": "pending" |
@@ -526,6 +530,13 @@ What the player does (it suggests a rebuild and never forces one):
   with another format or an unknown member is left in place and not resumed;
   a file with a newer `schema_version` is not resumed and is never replaced or
   removed. The file goes when nothing is pending.
+* The person's Pause is the marker file `rebuild-queue-paused` beside it, there
+  only while a queue is paused; its presence is the whole record and its bytes
+  are never read. A paused queue's build that was running starts again only
+  after Resume. The queue file keeps the shape every released player reads, so
+  an older player resumes the queue and ignores the pause. A marker with no
+  queue file beside it (an older player finished the queue) is removed at
+  start.
 
 A rebuild never removes the old package first. The build runs in the
 content-addressed cache entry, is validated, copied next to the package,
