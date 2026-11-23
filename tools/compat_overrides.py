@@ -226,12 +226,15 @@ CODEGEN_CUSTOM_STUBS = [
     # 0x00011090 and 0x000110dc (native memcpy, sr_native_memmove) and 0x000114c0 and
     # 0x000114a8 (native sceKernelMemset, sr_native_memset): retired under #363 (2026-11-23).
     # They were recorded as faithful ABI bridges with the translated body's semantics, kept
-    # for speed. The copy had memmove semantics for every overlap, and neither left the
-    # registers its routine leaves, so the claim held only for callers that never overlap a
-    # copy forwards and never read a clobbered register. The title's own code at the four
-    # addresses now translates as written; a kernel sceKernelMemset or sceKernelMemcpy import
+    # for speed. The copy had memmove semantics whatever the routine at its address does on
+    # overlap, the fill used only the low byte of its value, and both left every register but
+    # v0 as the caller set it, so equivalence with the translated body was never shown.
+    # Whatever the title has at the four addresses now takes the generator's general path:
+    # guest code translates as written, and a kernel sceKernelMemset or sceKernelMemcpy import
     # is the generic handler's (src/rt/hle_kernel_utils.c), as before
     # (tools/test_codegen_hst_stubs.py RetiredCopyAndFillBodiesRunAsWrittenTests).
+    # With these and the allocator bridges gone the table is empty: --profile=hst emits no
+    # hand-written body.
 ]
 
 # --- tools/codegen.py: HST profile entry roles -----------------------------

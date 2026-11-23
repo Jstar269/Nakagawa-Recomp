@@ -466,7 +466,8 @@ class ProfileHstCouplingTests(unittest.TestCase):
 
 
 class ProfileHstLegacyTests(unittest.TestCase):
-    """profile=hst must still emit each legacy behavior, in production config."""
+    """What profile=hst emits in production config. Every body it used to put in place of the
+    title's own code is retired (#363), so the checks left are that none comes back."""
 
     @classmethod
     def setUpClass(cls):
@@ -477,10 +478,9 @@ class ProfileHstLegacyTests(unittest.TestCase):
         _CodegenRun._cache.clear()
 
     def test_legacy_hst_emission_is_unchanged(self):
-        expected = (
-        )
-        missing = [s for s in expected if s not in self.combined]
-        self.assertEqual(missing, [], "profile=hst lost legacy HST emission")
+        # Nothing is left to expect: the last legacy bodies (the allocator bridges and the
+        # native copy and fill) are retired, and no "custom stub" may be emitted at all.
+        self.assertNotIn("custom stub", self.combined, "profile=hst emits a hand-written body")
         # Retired under #363: the guest's own loops and abort() run as written.
         # The native sprintf went on 2026-11-11: the title's own formatter runs.
         # The native copy and fill went on 2026-11-23: the title's own routines run.

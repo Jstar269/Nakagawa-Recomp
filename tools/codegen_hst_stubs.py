@@ -35,9 +35,10 @@ tables.  Both are discovered entries and translate faithfully;
 (a native fill, ``sr_native_memset``) were retired under #363 on 2026-11-23.  They stood in for
 the title's own copy and fill routines for speed.  The copy had memmove semantics whatever the
 routine at its address does with overlapping spans, and both left every register but v0 as the
-caller set it.  The title's own instructions now run at all four
-(``tools/test_codegen_hst_stubs.py``, ``RetiredCopyAndFillBodiesRunAsWrittenTests``).
+caller set it.  Whatever the title has at the four addresses now takes the generator's
+general path (``tools/test_codegen_hst_stubs.py``, ``RetiredCopyAndFillBodiesRunAsWrittenTests``).
+
+With those eight gone the table is empty: ``--profile=hst`` emits no hand-written body.
 """
 
-HST_CUSTOM_STUBS = {
-}
+HST_CUSTOM_STUBS: dict[int, str] = {}

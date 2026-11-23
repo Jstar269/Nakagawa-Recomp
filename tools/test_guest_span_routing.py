@@ -87,7 +87,7 @@ def _blank_vram_decoder_cli(text: str) -> str:
 
 
 class TestGuestSpanRouting(unittest.TestCase):
-    def test_generated_bulk_stubs_use_complete_span_helpers(self) -> None:
+    def test_no_generated_body_calls_the_bulk_helpers_and_they_keep_their_span_checks(self) -> None:
         # The native memcpy/memset stub bodies were retired under #363: no generated body
         # calls the bulk helpers now, and none may form a host pointer of its own instead. The
         # span helpers in codegen.py's own emitters stay in its source.
