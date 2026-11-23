@@ -37,7 +37,7 @@ does not make this file stale. `--details` prints them to stdout.
 ## Summary
 
 - helpers: **548** (declared in `recomp.h`: 463)
-- reach class: emitter-reached 93, production-runtime-only 414, selftest-only 0, address-only 8, none 33
+- reach class: emitter-reached 89, production-runtime-only 416, selftest-only 0, address-only 8, none 35
 - provenance class of the home definition: declared-only 1, project_authored_attested 53, upstream_derived 494
 
 ## Helpers
@@ -448,10 +448,10 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_native_memmove_checked` | `rt/recomp.h` | yes | none | `rt/recomp.h`: upstream_derived |
 | `sr_native_memset` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_native_memset_checked` | `rt/recomp.h` | yes | none | `rt/recomp.h`: upstream_derived |
-| `sr_newlib_free` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
-| `sr_newlib_malloc` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
-| `sr_newlib_memalign` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
-| `sr_newlib_realloc` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
+| `sr_newlib_free` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `sr_newlib_malloc` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `sr_newlib_memalign` | `rt/recomp.c` | yes | none | `rt/recomp.c`: upstream_derived |
+| `sr_newlib_realloc` | `rt/recomp.c` | yes | none | `rt/recomp.c`: upstream_derived |
 | `sr_null_code_entry` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_null_code_pointer` | `rt/recomp.c` | yes | emitter-reached (via `SR_CODE_POINTER`) | `rt/recomp.c`: upstream_derived |
 | `sr_null_data_pointer` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |

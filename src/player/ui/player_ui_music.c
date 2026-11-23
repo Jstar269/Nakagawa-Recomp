@@ -2,6 +2,7 @@
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
 #include "player_ui_music.h"
+#include "nk_ui_text.h"
 
 #include <SDL3/SDL.h>
 
@@ -576,12 +577,12 @@ const char *player_ui_music_detail(const PlayerUiMusic *music) {
 }
 
 const char *player_ui_music_row_value(bool on, PlayerUiMusicState state) {
-    if (!on) return "Off";
+    if (!on) return NK_UI_STR(ADAPTER_CONTROL_OFF);
     switch (state) {
-    case PLAYER_UI_MUSIC_MISSING: return "On: file missing";
-    case PLAYER_UI_MUSIC_DAMAGED: return "On: file damaged";
-    case PLAYER_UI_MUSIC_NO_DEVICE: return "On: no sound device";
-    default: return "On";
+    case PLAYER_UI_MUSIC_MISSING: return NK_UI_STR(ADAPTER_MUSIC_FILE_MISSING);
+    case PLAYER_UI_MUSIC_DAMAGED: return NK_UI_STR(ADAPTER_MUSIC_FILE_DAMAGED);
+    case PLAYER_UI_MUSIC_NO_DEVICE: return NK_UI_STR(ADAPTER_MUSIC_NO_DEVICE);
+    default: return NK_UI_STR(ADAPTER_CONTROL_ON);
     }
 }
 

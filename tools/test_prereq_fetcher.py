@@ -1996,6 +1996,10 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         card = (REPO_ROOT / "src" / "player" / "ui" / "scr_settings.c").read_text(encoding="utf-8")
         card = card[card.index("case PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_CARD: {"):
                     card.index("case PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_SIGN_IN: {")]
+        catalog = (REPO_ROOT / "src/ui/nk_ui_text.h").read_text(encoding="utf-8")
+        entries = dict(re.findall(r"^#define NK_UI_EN_(\w+) (.+)$", catalog, re.MULTILINE))
+        # Check the content selected by the consent card, including every displayed hostname.
+        card = re.sub(r"\bNK_UI_STR\((\w+)\)", lambda match: entries[match[1]], card)
         self.assertIn("SCR_ACHIEVEMENTS_HOST", card)
         self.assertIn("SCR_ACHIEVEMENTS_BADGE_HOST", card)
         self.assertNotRegex(card, r"[A-Za-z0-9-]+\.(?:org|com|net)\b",
@@ -2460,9 +2464,13 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         # Softcore -> Casual Mode). No string a user reads says Softcore; the heading says Casual.
         title_page = (REPO_ROOT / "src" / "player" / "ui" / "scr_title.c").read_text(
             encoding="utf-8")
-        self.assertIn('"RetroAchievements \\xC2\\xB7 Casual"', title_page)
+        catalog = REPO_ROOT / "src" / "ui" / "nk_ui_text.h"
+        self.assertIn('nk_ui_eyebrow(ui, TITLE_ID_ACHIEVEMENTS_HEAD, '
+                      'NK_UI_STR(TITLE_ACHIEVEMENTS_HEADING));', title_page)
+        self.assertIn('#define NK_UI_EN_TITLE_ACHIEVEMENTS_HEADING '
+                      '"RetroAchievements \\xC2\\xB7 Casual"', catalog.read_text(encoding="utf-8"))
         for path in sorted((REPO_ROOT / "src" / "player").rglob("*.[ch]")) + [
-                REPO_ROOT / "src" / "rt" / "gui.c"]:
+                REPO_ROOT / "src" / "rt" / "gui.c", catalog]:
             for literal in re.findall(r'"(?:[^"\\\n]|\\.)*"', path.read_text(encoding="utf-8")):
                 with self.subTest(path=path.name, literal=literal[:40]):
                     self.assertNotIn("softcore", literal.lower())

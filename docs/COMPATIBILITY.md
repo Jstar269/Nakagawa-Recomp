@@ -77,10 +77,23 @@ python tools/homebrew_corpus.py build gu-cube --pspdev /usr/local/pspdev --out b
 ```
 
 Use a new output path for each build. The tool checks the sample's source hashes and builds from a temporary
-copy. Runtime smoke results are still unmeasured. The [corpus provenance](../tests/fixtures/homebrew_corpus/PROVENANCE.md)
-records the source pins, licences and the deferred savedata sample.
+copy. The [corpus provenance](../tests/fixtures/homebrew_corpus/PROVENANCE.md) records the source pins, licences
+and the deferred savedata sample.
 
-| Program | PSPSDK sample | Smoke checks | Result |
+The Linux native CI player leg exercises `gu-cube`. With the pinned PSPDEV tools, the native player build
+dependencies, Xvfb and a Vulkan device installed, run the same check offline:
+
+```sh
+NK_HOMEBREW_RUNTIME_REQUIRED=1 SDL_VIDEODRIVER=x11 PYTHON="$(command -v python)" \
+  xvfb-run -a python -m unittest -v tools.test_homebrew_corpus.CorpusRuntimeSmokeTests.test_gu_cube_runtime_smoke
+```
+
+Use a supported Python and select the intended Vulkan ICD when several devices are installed. The test imports
+the sample, validates the built package, and requires 120 accepted presents with a moving textured cube on the
+expected background. A fresh profile must refuse the same PBP bytes under the wrong filename. The table below
+shows the results recorded in the versioned corpus manifest; the CI log gives the result for each tested head.
+
+| Program | PSPSDK sample | Smoke checks | Recorded result |
 | :--- | :--- | :--- | :--- |
 | `gu-cube` | `gu/cube` | first_frame, nonblank_frame | unmeasured |
 | `controller-basic` | `controller/basic` | first_frame, scripted_input | unmeasured |
@@ -120,9 +133,9 @@ missing, and stays **Untested** unless someone has seen it start (see [Status wo
 | *Ridge Racer 2* (European release) | Experimental | A user report, on a version it didn't name, says it draws something and then stops. On a private route with the current development build it goes through the loading mini-game, the intro movie and the name entry to a race. Nothing past the start of that race has been checked, and neither has sound. | [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308) |
 | Any other commercial game (not listed above) | Untested | A valid PSP disc image that isn't listed imports with the **EXPERIMENTAL** badge, which only means no one knows yet how well it runs. The player reads `PSP_GAME/PARAM.SFO` directly to show the title and disc ID for UMD and PS Store images (PR [#426](https://github.com/Jstar269/nakagawa-recomp/pull/426)), never an update SFO or the volume ID. The game card says compatibility is unknown. The player decrypts an encrypted executable or module from your own disc; when it can't, the card names the file (`ENCRYPTED_EXECUTABLE` or `ENCRYPTED_MODULE`) with the reason and the per-game folder where a decrypted copy from your own disc can go ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)). It also names PGD-protected content, which isn't supported and is part of the wider ISO-to-Play work ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)). **BUILD PACKAGE** builds a package for a retail disc with the public backends, and the build report lists what still isn't supported (PR [#473](https://github.com/Jstar269/nakagawa-recomp/pull/473)). It translates the game's own modules from its disc (`.prx` files under `PSP_GAME`) along with the main program, each placed in memory when the game loads it, so their startup code runs as the game's code; a module the runtime replaces completely is left to the runtime, and a module that can't be prepared stops the build by name. Play stays off until a valid package exists, because an experimental game never starts from a developer runtime (PR [#483](https://github.com/Jstar269/nakagawa-recomp/pull/483)). Games beyond the listed ones are tracked under [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308). Images that aren't PSP discs are refused. | [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308) |
 
-Hot Shots Tennis runs with 0 title-specific compatibility patches today, as `python tools/compat_overrides.py --debt-census` counts them: the census counts only the entries marked as temporary compatibility patches, it lists none of them as active, and each run's log still names every one that fired in its `COMPAT_PATCH_REPORT` lines. That does not mean its build has no title-specific code. Under the Hot Shots Tennis profile (`--profile=hst`) the code generator still puts 4 hand-written bodies in place of the game's own functions (`tools/codegen_hst_stubs.py`): four allocator bridges, which hand the game's `_malloc_r` (`0x00010738`), `_free_r` (`0x0000f538`), `_memalign_r` (`0x000101c4`) and `_realloc_r` (`0x00013524`) to the runtime's own heap, because the game's allocator edits its block headers in a layout the runtime's heap does not share. The four native copy and fill bodies are gone: the game's own routines at `0x00011090`, `0x000110dc`, `0x000114c0` and `0x000114a8` run as written, where the generator used to put the host's `memmove` and `memset`.
+Hot Shots Tennis runs with 0 title-specific compatibility patches today, as `python tools/compat_overrides.py --debt-census` counts them: the census counts only the entries marked as temporary compatibility patches, it lists none of them as active, and each run's log still names every one that fired in its `COMPAT_PATCH_REPORT` lines. Under the Hot Shots Tennis profile (`--profile=hst`) the code generator no longer puts any hand-written body in place of the game's own functions: the table of such bodies (`HST_CUSTOM_STUBS` in `tools/codegen_hst_stubs.py`) holds 0, down from 8. The four allocator bridges are gone: the game's own `_malloc_r` (`0x00010738`), `_free_r` (`0x0000f538`), `_memalign_r` (`0x000101c4`) and `_realloc_r` (`0x00013524`) run as written and keep their block headers in the game's memory, where they used to be handed to a heap the runtime owned. The four native copy and fill bodies are gone: the game's own routines at `0x00011090`, `0x000110dc`, `0x000114c0` and `0x000114a8` run as written, where the generator used to put the host's `memmove` and `memset`.
 
-The census files the allocator bridges as an HLE boundary, not as temporary patches, so it does not count them, and they do not appear in `COMPAT_PATCH_REPORT`. Their removal is tracked in [#363](https://github.com/Jstar269/nakagawa-recomp/issues/363). This is the live count; the release notes keep the count each release shipped with.
+That does not mean the profile names no title address. It still lists entry roles for the analyzer (`HST_ENTRY_ROLES` in `tools/compat_overrides.py`), whose code is translated from the game's own instructions. That list and the rest of the retirement work are tracked in [#363](https://github.com/Jstar269/nakagawa-recomp/issues/363). This is the live count; the release notes keep the count each release shipped with.
 
 ## Whole library
 

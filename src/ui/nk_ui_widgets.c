@@ -6,11 +6,16 @@
    focused element, so a control never changes size when focus moves. */
 
 #include "nk_ui_widgets.h"
+#include "nk_ui_text.h"
 
 #include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+void nk_ui_pseudo_buffer_truncated(const char *source);
+#endif
 
 static NkUiSizing nk_ui_fixed(float value) {
     NkUiSizing sizing = {NK_UI_SIZE_FIXED, value, 0.0f, 0.0f};
@@ -92,6 +97,9 @@ const char *nk_ui_caps(NkUi *ui, const char *text) {
         buffer[i] = c < 0x80u ? (char)toupper(c) : (char)c;
     }
     if (text[i] != '\0') {
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+        nk_ui_pseudo_buffer_truncated(text);
+#endif
         /* Cut before a whole UTF-8 sequence, never inside one: step back over the
            continuation bytes (at most three) to the lead byte they follow. */
         size_t back = 0u;
@@ -625,7 +633,8 @@ bool nk_ui_tile(NkUi *ui, NkUiId id, const NkUiTileSpec *spec) {
                        0u, NK_UI_RADIUS_TILE);
     style.square_corners = NK_UI_CORNER_SQUARE_BL | NK_UI_CORNER_SQUARE_BR;
     if (nk_ui_begin_container(ui, nk_ui_child_id(id, 1u), &layout, &style)) {
-        const char *badge = spec->badge != NULL && spec->badge[0] != '\0' ? spec->badge : "Your disc";
+        const char *badge = spec->badge != NULL && spec->badge[0] != '\0'
+                               ? spec->badge : NK_UI_STR(SHARED_DISC_TILE_BADGE);
         if (spec->badge_right != NULL && spec->badge_right[0] != '\0') {
             /* The second badge sits at the top right, on the row of the first. */
             NkUiLayout badges = nk_ui_row(nk_ui_grow(), nk_ui_fit(), NK_UI_SPACE_2);
@@ -645,7 +654,7 @@ bool nk_ui_tile(NkUi *ui, NkUiId id, const NkUiTileSpec *spec) {
                           art_h - NK_UI_SPACE_2 * 2.0f -
                               nk_ui_chip_height(ui, NK_UI_BADGE_HEIGHT, NK_UI_TYPE_MICRO),
                           0.82f,
-                          "ART FROM YOUR DISC");
+                          NK_UI_STR(SHARED_DISC_ART_BADGE));
         nk_ui_end_container(ui);
     }
 
@@ -661,7 +670,7 @@ bool nk_ui_tile(NkUi *ui, NkUiId id, const NkUiTileSpec *spec) {
             NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_TILE_TITLE,
                                             spec->muted_title ? theme->muted : theme->paper);
             const char *title = spec->title != NULL && spec->title[0] != '\0'
-                ? spec->title : "Untitled PSP game";
+                ? spec->title : NK_UI_STR(SHARED_DISC_TILE_UNTITLED);
             nk_ui_text(ui, nk_ui_child_id(id, 6u),
                        nk_ui_text_clamp(ui, title, &text, spec->width - 28.0f, 2), &text);
             nk_ui_end_container(ui);
@@ -672,9 +681,9 @@ bool nk_ui_tile(NkUi *ui, NkUiId id, const NkUiTileSpec *spec) {
         if (nk_ui_begin_container(ui, nk_ui_child_id(id, 7u), &layout, NULL)) {
             const char *word = nk_ui_caps(ui, spec->status_word);
             if (spec->status_marker != NULL && spec->status_marker[0] != '\0') {
-                (void)snprintf(meta, sizeof(meta), "%s %s", spec->status_marker, word);
+                (void)snprintf(meta, sizeof(meta), NK_UI_STR(SHARED_DISC_TILE_STATUS_MARKED), spec->status_marker, word);
             } else {
-                (void)snprintf(meta, sizeof(meta), "%s", word);
+                (void)snprintf(meta, sizeof(meta), NK_UI_STR(SHARED_DISC_TILE_STATUS), word);
             }
             nk_ui_text_role(ui, nk_ui_child_id(id, 8u), meta, NK_UI_TYPE_LABEL_S,
                             spec->status_rgba != 0u ? spec->status_rgba : theme->muted);
@@ -756,7 +765,7 @@ void nk_ui_hero(NkUi *ui, NkUiId id, NkUiArtKind art, const char *art_key,
     }
     nk_ui_art_content(ui, nk_ui_child_id(id, 1u), art, icon, picture,
                       height - NK_UI_SPACE_3 * 2.0f - caption_h - NK_UI_SPACE_2,
-                      0.78f, "ART FROM YOUR DISC SHOWS HERE");
+                      0.78f, NK_UI_STR(SHARED_DISC_ART_PLACEHOLDER));
     layout = nk_ui_row(nk_ui_grow(), nk_ui_fixed(caption_h), NK_UI_SPACE_2);
     if (nk_ui_begin_container(ui, nk_ui_child_id(id, 2u), &layout, NULL)) {
         if (caption != NULL && caption[0] != '\0') {
@@ -860,12 +869,12 @@ int nk_ui_section_tabs(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t 
    labels follow, never by the glyph set's internal name. */
 const char *nk_ui_input_label(NkUiPromptStyle style) {
     switch (style) {
-    case NK_UI_PROMPT_KEYCAPS: return "KEYBOARD AND MOUSE";
-    case NK_UI_PROMPT_LETTERS_A_SOUTH: return "XBOX-STYLE CONTROLLER";
-    case NK_UI_PROMPT_LETTERS_A_EAST: return "NINTENDO-STYLE CONTROLLER";
-    case NK_UI_PROMPT_SHAPES: return "PLAYSTATION-STYLE CONTROLLER";
+    case NK_UI_PROMPT_KEYCAPS: return NK_UI_STR(SHARED_INPUT_KEYBOARD_MOUSE);
+    case NK_UI_PROMPT_LETTERS_A_SOUTH: return NK_UI_STR(SHARED_INPUT_XBOX_CONTROLLER);
+    case NK_UI_PROMPT_LETTERS_A_EAST: return NK_UI_STR(SHARED_INPUT_NINTENDO_CONTROLLER);
+    case NK_UI_PROMPT_SHAPES: return NK_UI_STR(SHARED_INPUT_PLAYSTATION_CONTROLLER);
     case NK_UI_PROMPT_NEUTRAL:
-    default: return "CONTROLLER";
+    default: return NK_UI_STR(SHARED_INPUT_CONTROLLER);
     }
 }
 
@@ -884,7 +893,7 @@ int nk_ui_top_bar(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t count
     if (nk_ui_begin_container(ui, nk_ui_child_id(id, 1u), &layout, NULL)) {
         nk_ui_shapes(ui, nk_ui_child_id(id, 2u), nk_ui_fixed(28.0f), nk_ui_fixed(28.0f),
                      nk_ui_art_n1_mark());
-        nk_ui_text_role(ui, nk_ui_child_id(id, 3u), "NAKAGAWA RECOMP", NK_UI_TYPE_WORDMARK,
+        nk_ui_text_role(ui, nk_ui_child_id(id, 3u), NK_UI_STR(SHARED_LAUNCHER_WORDMARK), NK_UI_TYPE_WORDMARK,
                         theme->paper);
         nk_ui_end_container(ui);
     }

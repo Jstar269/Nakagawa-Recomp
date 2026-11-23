@@ -109,6 +109,8 @@ PUBLIC_TARGETS := \
 	nk-cheats-selftest \
 	nk-ui-core-selftest \
 	nk-ui-player-screens-selftest \
+	nk-ui-player-pseudo-selftest \
+	player-ui-pseudo-smoke \
 	nk-ui-player-screens-capture \
 	nk-ui-overlay-screens-selftest \
 	nk-ui-overlay-screens-capture \
@@ -336,6 +338,8 @@ HELP_DESCRIPTION_ed25519-verify-selftest := check nk_ed25519_verify (vendored Mo
 HELP_DESCRIPTION_nk-nickname-selftest := check the console nickname rule (src/core/nk_nickname.h): the Player default, the 32-byte cap and the refused values
 HELP_DESCRIPTION_nk-cheats-selftest := check cheat files (src/core/nk_cheats.h): the CWCheat reader, each code form on a synthetic guest, and the refusals by name
 HELP_DESCRIPTION_nk-ui-player-screens-selftest := build and run nk_ui Library, Title detail and router snapshots
+HELP_DESCRIPTION_nk-ui-player-pseudo-selftest := compare English and accented launcher layouts across window and text sizes, reporting clipped or truncated controls
+HELP_DESCRIPTION_player-ui-pseudo-smoke := launch the SDL player with a test catalog and verify an accented Settings message on the rendered route
 HELP_DESCRIPTION_nk-ui-player-screens-capture := save offscreen synthetic Library and Title detail captures (set NK_UI_CAPTURE_DIR)
 HELP_DESCRIPTION_nk-ui-overlay-host-selftest := build and run the in-game overlay host on SDL3_ttf, real key events and the SDL_Renderer backend (#1159)
 HELP_DESCRIPTION_nk-ui-overlay-screens-selftest := build and run the in-game overlay page snapshots and flow checks (#1159)

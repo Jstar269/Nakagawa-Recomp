@@ -478,18 +478,16 @@ class ProfileHstLegacyTests(unittest.TestCase):
 
     def test_legacy_hst_emission_is_unchanged(self):
         expected = (
-            "sr_newlib_malloc(s->r[5], owner_ra)",
-            "sr_newlib_free(s->r[5], owner_ra)",
-            "sr_newlib_memalign",
-            "sr_newlib_realloc",
         )
         missing = [s for s in expected if s not in self.combined]
         self.assertEqual(missing, [], "profile=hst lost legacy HST emission")
         # Retired under #363: the guest's own loops and abort() run as written.
         # The native sprintf went on 2026-11-11: the title's own formatter runs.
         # The native copy and fill went on 2026-11-23: the title's own routines run.
+        # The four allocator bridges went together: the title's own allocator runs.
         for retired in ("MEMSET_FASTPATH", "ARRSHIFT_FASTPATH", "GUEST_ABORT", "_Exit(9)",
-                        "sr_guest_sprintf", "sr_native_memmove", "sr_native_memset"):
+                        "sr_guest_sprintf", "sr_newlib_", "sr_native_memmove",
+                        "sr_native_memset"):
             self.assertNotIn(retired, self.combined, f"profile=hst still emits {retired}")
 
     def test_diagnostic_probes_stay_compiled_out_in_production(self):
@@ -1172,10 +1170,13 @@ class RetiredAddressGuardTests(unittest.TestCase):
 #: on 2026-11-11). Under profile=hst each of these addresses used to emit a title stub (a
 #: static-success simple stub, the heap-statistics walk skip, the backdrop chooser's
 #: postcondition wrapper, or a native sprintf) in place of, or around, its own body. Each
-#: now translates its own instructions under every profile.
+#: now translates its own instructions under every profile. The last four are the allocator
+#: family (_free_r, _memalign_r, _malloc_r, _realloc_r), whose bridges to the runtime's own
+#: heap were retired together.
 RETIRED_363_STUB_ADDRESSES: tuple[int, ...] = (
     0x00015F98, 0x0001034C, 0x0001C010, 0x0001C0FC, 0x0001C104, 0x0001C560,
     0x0001C604, 0x0001C810, 0x0001C818, 0x001D9EB0, 0x000143B0,
+    0x0000F538, 0x000101C4, 0x00010738, 0x00013524,
 ) + (
     # The native copy (sr_native_memmove) and fill (sr_native_memset) bodies, retired on
     # 2026-11-23: the title's own copy and fill routines translate as written.
