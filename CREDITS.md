@@ -65,7 +65,7 @@ Nakagawa has since substantially extended and modified that codebase. This repos
   [`third_party/rcheevos/`](third_party/rcheevos/PROVENANCE.md). Its MD5 (`src/rhash/md5.c`, `md5.h`) is
   L. Peter Deutsch's (Aladdin Enterprises), under the zlib licence.
 - **PSPSDK / PSPDEV contributors** — BSD-family notices for public ABI definitions and source-owned fixtures ([`third_party/licenses/PSPSDK.txt`](third_party/licenses/PSPSDK.txt)).
-- **PSPSDK sample programs — Jesper Svennevid, Donour Sizemore, James Forshaw, John Kelley, Marcus R. Brown, Frank Buss and weltall** — BSD-3-Clause. The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) names four PSPSDK samples, pinned to the PSPDEV release; nothing is built or copied into the repository ([`tests/fixtures/homebrew_corpus/PROVENANCE.md`](tests/fixtures/homebrew_corpus/PROVENANCE.md)).
+- **PSPSDK sample programs — Jesper Svennevid, Donour Sizemore, James Forshaw, John Kelley, Marcus R. Brown, Frank Buss and weltall** — BSD-3-Clause. The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) pins the sample inputs to the PSPDEV release. Source and build products stay outside the tracked tree ([`tests/fixtures/homebrew_corpus/PROVENANCE.md`](tests/fixtures/homebrew_corpus/PROVENANCE.md)).
 - **SDL, SDL_ttf and their dependencies** — staged beside the player with their licence texts (listed in [`NOTICE.md`](NOTICE.md)).
 - **stb_image 2.34 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The PNG
   decoder in [`third_party/stb/`](third_party/stb/), for the player's prompt glyphs, the disc art read from your own disc

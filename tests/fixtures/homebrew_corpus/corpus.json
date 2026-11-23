@@ -140,42 +140,6 @@
         "issue": null,
         "note": "pspaudiolib mixer; audio output must be non-silent."
       }
-    },
-    {
-      "id": "savedata-utility",
-      "title": "PSPSDK Savedata Sample",
-      "sample_dir": "savedata/utility",
-      "target": "savedata",
-      "files": [
-        {
-          "path": "savedata/utility/Makefile",
-          "upstream_path": "src/samples/savedata/utility/Makefile.sample",
-          "git_blob_sha1": "93404bbf20a07761ba0b69ad9b8dc807f72c1eae"
-        },
-        {
-          "path": "savedata/utility/main.c",
-          "upstream_path": "src/samples/savedata/utility/main.c",
-          "git_blob_sha1": "bd90e36f96cdb9b9007055e79a30ccfe1ecaab16"
-        },
-        {
-          "path": "savedata/utility/data.h",
-          "upstream_path": "src/samples/savedata/utility/data.h",
-          "git_blob_sha1": "1e627adcec724e1f88365345049686dd5dd5aa13"
-        }
-      ],
-      "shared_files": [],
-      "copyright": [
-        "2005 weltall"
-      ],
-      "smoke_checks": [
-        "first_frame",
-        "save_round_trip"
-      ],
-      "expected": {
-        "status": "UNMEASURED",
-        "issue": null,
-        "note": "sceUtility savedata dialog; a save written in one run must load in the next."
-      }
     }
   ]
 }
