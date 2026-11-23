@@ -1396,7 +1396,7 @@ class UninstallTests(unittest.TestCase):
 
 
 class ReleaseAssetContractTests(unittest.TestCase):
-    """One player ZIP per platform, with every other file droppable by name (#1876)."""
+    """One player archive per platform, with the installer as a ranked exception (#1876)."""
 
     def _codes(self, names):
         return sorted(problem.split(":", 1)[0] for problem in stage_install.check_release_assets(names))
@@ -1405,6 +1405,32 @@ class ReleaseAssetContractTests(unittest.TestCase):
         self.assertEqual(stage_install.check_release_assets(_GOOD_ASSETS), [])
         # The signature is optional: a release without it falls back to its page in the player.
         self.assertEqual(stage_install.check_release_assets([n for n in _GOOD_ASSETS if "minisig" not in n]), [])
+
+    def test_linux_archive_and_checksum_are_accepted(self):
+        linux = f"nakagawa-recomp-{_V}-linux-x64.tar.gz"
+        self.assertEqual(self._codes(_GOOD_ASSETS + [linux, f"{linux}.sha256"]), [])
+        self.assertEqual(self._codes(_GOOD_ASSETS + [linux, f"{linux}.sha256", f"{linux}.sha256.minisig"]), [])
+        self.assertEqual(self._codes(_GOOD_ASSETS + [linux]), ["ASSET_CHECKSUM_MISSING"])
+        self.assertEqual(self._codes(_GOOD_ASSETS + [f"{linux}.sha256"]), ["ASSET_ORPHAN"])
+        self.assertEqual(self._codes(_GOOD_ASSETS + [linux, f"{linux}.sha256.minisig"]),
+                         ["ASSET_CHECKSUM_MISSING", "ASSET_ORPHAN"])
+
+    def test_linux_archive_does_not_replace_windows_zip(self):
+        linux = f"nakagawa-recomp-{_V}-linux-x64.tar.gz"
+        self.assertEqual(self._codes(_GOOD_ASSETS[3:] + [linux, f"{linux}.sha256"]), ["ASSET_PLAYER_MISSING"])
+
+    def test_two_linux_archives_fail(self):
+        linux = f"nakagawa-recomp-{_V}-linux-x64.tar.gz"
+        other = "nakagawa-recomp-0.0.1-linux-x64.tar.gz"
+        self.assertEqual(self._codes(_GOOD_ASSETS + [linux, f"{linux}.sha256", other, f"{other}.sha256"]),
+                         ["ASSET_PLATFORM_DUPLICATE", "ASSET_VERSION_MIXED"])
+
+    def test_unlisted_linux_archive_names_fail(self):
+        for suffix in ("linux-arm64.tar.gz", "linux-x64.tgz", "linux-x64.zip", "windows-x64.tar.gz"):
+            with self.subTest(suffix=suffix):
+                archive = f"nakagawa-recomp-{_V}-{suffix}"
+                self.assertEqual(self._codes(_GOOD_ASSETS + [archive, f"{archive}.sha256"]),
+                                 ["ASSET_FILTER_MISMATCH", "ASSET_NAME_UNKNOWN", "ASSET_SECOND_ARCHIVE"])
 
     def test_the_recipe_names_what_the_contract_accepts(self):
         recipe = (TOOLS.parent / "docs" / "PREVIEW_RELEASE.md").read_text(encoding="utf-8")
