@@ -69,14 +69,22 @@ custom-firmware-only imports are refused later, when code generation reads the p
 
 ## Homebrew corpus
 
-The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) lists four open-source PSPSDK sample programs, pinned to the PSPDEV release, for a smoke run with no per-title patches. Nothing builds or runs them, and no smoke run has measured any of them. The list, pins and licences are in [`tests/fixtures/homebrew_corpus/`](../tests/fixtures/homebrew_corpus/PROVENANCE.md); nothing is copied into the repository. Every result is *unmeasured*. The list accepts a result other than unmeasured only for a known failure, and that entry must name its issue.
+The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) lists
+three PSPSDK samples shipped in the pinned PSPDEV release. Build a guest ELF with the installed release:
+
+```sh
+python tools/homebrew_corpus.py build gu-cube --pspdev /usr/local/pspdev --out build/cube.elf
+```
+
+Use a new output path for each build. The tool checks the sample's source hashes and builds from a temporary
+copy. Runtime smoke results are still unmeasured. The [corpus provenance](../tests/fixtures/homebrew_corpus/PROVENANCE.md)
+records the source pins, licences and the deferred savedata sample.
 
 | Program | PSPSDK sample | Smoke checks | Result |
 | :--- | :--- | :--- | :--- |
 | `gu-cube` | `gu/cube` | first_frame, nonblank_frame | unmeasured |
 | `controller-basic` | `controller/basic` | first_frame, scripted_input | unmeasured |
 | `audio-polyphonic` | `audio/polyphonic` | first_frame, audio_output | unmeasured |
-| `savedata-utility` | `savedata/utility` | first_frame, save_round_trip | unmeasured |
 
 ## Title compatibility
 

@@ -3,7 +3,7 @@
 
 """The public homebrew corpus must stay pinned, licence-compatible and honest (#2144).
 
-These tests build nothing and use no network. They check ``tests/fixtures/homebrew_corpus/corpus.json``
+These tests use no network. The build integration runs only when explicitly requested. They check ``tests/fixtures/homebrew_corpus/corpus.json``
 against the PSPDEV lock, against PROVENANCE.md and CREDITS.md, and against the unit rules in
 ``tools/homebrew_corpus.py``. Where a PSPDEV is installed (``PSPDEV`` or ``/usr/local/pspdev``)
 they also recompute every pinned file's Git blob ID from its samples, so a toolchain that
@@ -16,7 +16,9 @@ import copy
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -66,6 +68,7 @@ class CorpusPinTests(unittest.TestCase):
         refused(lambda c: c["programs"][0]["files"].append(dict(c["programs"][0]["files"][0])), "listed twice")
         refused(lambda c: c["programs"][0]["files"].__delitem__(0), "Makefile is not pinned")
         refused(lambda c: c["programs"][0].pop("sample_dir"), "sample_dir is required")
+        refused(lambda c: c["programs"][0].update(target="../cube"), "plain filename stem")
         refused(lambda c: c["programs"][0].update(smoke_checks=["first_frame", "bogus"]), "only the vocabulary")
         refused(lambda c: c["programs"][0]["files"][0].update(upstream_path="elsewhere/x.c"), "under src/samples/")
         # Windows joins a backslash or drive-qualified path outside the root, so none passes.
@@ -114,8 +117,6 @@ class CorpusPinTests(unittest.TestCase):
         self.assertEqual(homebrew_corpus.verify_sources(self.corpus, root), [])
 
     def test_verify_sources_reports_a_changed_and_a_missing_file(self) -> None:
-        import tempfile
-
         with tempfile.TemporaryDirectory(prefix="nk-corpus-") as tmp:
             root = Path(tmp)
             first = self.corpus["programs"][0]["files"][0]
@@ -127,8 +128,6 @@ class CorpusPinTests(unittest.TestCase):
         self.assertTrue(any("missing" in line for line in differences))
 
     def test_verify_sources_never_reads_outside_the_samples_root(self) -> None:
-        import tempfile
-
         with tempfile.TemporaryDirectory(prefix="nk-corpus-") as tmp:
             outside = Path(tmp) / "outside.c"
             outside.write_bytes(b"outside")
@@ -140,6 +139,40 @@ class CorpusPinTests(unittest.TestCase):
             differences = homebrew_corpus.verify_sources(broken, root)
         self.assertTrue(any("outside.c" in line and "inside the samples root" in line
                             for line in differences), differences)
+
+
+    def test_build_refuses_modified_sources_before_make(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-corpus-tamper-") as tmp:
+            pspdev = Path(tmp)
+            for tool in ("psp-gcc", "psp-config"):
+                binary = pspdev / "bin" / tool
+                binary.parent.mkdir(exist_ok=True)
+                binary.touch()
+            root = pspdev / self.corpus["source"]["delivery"]["samples_root"]
+            first = root / self.corpus["programs"][0]["files"][0]["path"]
+            first.parent.mkdir(parents=True)
+            first.write_text("other bytes", encoding="ascii")
+            output = pspdev / "sample.elf"
+            with patch.object(homebrew_corpus.subprocess, "run") as make:
+                with self.assertRaisesRegex(homebrew_corpus.CorpusError, "pinned"):
+                    homebrew_corpus.build_program("gu-cube", pspdev, output)
+            make.assert_not_called()
+            self.assertFalse(output.exists())
+
+    @unittest.skipUnless(os.environ.get(REQUIRED_ENV) == "1", "NOT_RUN: corpus build was not requested")
+    def test_pinned_samples_build_to_guest_elfs(self) -> None:
+        root = installed_samples_root()
+        self.assertIsNotNone(root, "PSPDEV samples are not installed on this host")
+        assert root is not None
+        prefix = root.parents[2]
+        with tempfile.TemporaryDirectory(prefix="nk-corpus-build-") as tmp:
+            for program in self.corpus["programs"]:
+                with self.subTest(program=program["id"]):
+                    output = Path(tmp) / (program["id"] + ".elf")
+                    homebrew_corpus.build_program(program["id"], prefix, output)
+                    header = output.read_bytes()[:20]
+                    self.assertEqual(header[:6], b"\x7fELF\x01\x01")
+                    self.assertEqual(int.from_bytes(header[18:20], "little"), 8)  # EM_MIPS
 
 
 class CorpusRecordsTests(unittest.TestCase):

@@ -9,14 +9,23 @@ pins by SHA-256, and each file is named here by the Git blob SHA-1 it has at one
 commit. ``verify_sources`` recomputes those blob IDs from an installed PSPDEV, so a PSPDEV that
 carries different sources than the pin is reported, never used silently.
 
-Nothing here touches the network or builds anything.
+Build one guest ELF from an installed copy of the locked PSPDEV release:
+
+    python tools/homebrew_corpus.py build gu-cube --pspdev /usr/local/pspdev --out build/cube.elf
+
+The command runs the sample Makefile offline from pinned copies in a temporary tree.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, NoReturn, TypeGuard
 
@@ -31,6 +40,7 @@ MIN_PROGRAMS = 3
 _SHA1 = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ID = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+_TARGET = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 
 class CorpusError(ValueError):
@@ -124,8 +134,11 @@ def validate(corpus: dict[str, Any], lock: dict[str, Any] | None = None) -> None
             _fail(f"{program_id}: sample_dir must be relative and stay inside the samples root: {sample_dir!r}")
         if f"{sample_dir}/Makefile" not in seen:
             _fail(f"{program_id}: the program's Makefile is not pinned")
-        if not program.get("copyright") or not program.get("title") or not program.get("target"):
-            _fail(f"{program_id}: title, target and copyright holders are required")
+        if not program.get("copyright") or not program.get("title"):
+            _fail(f"{program_id}: title and copyright holders are required")
+        target = program.get("target")
+        if not isinstance(target, str) or not _TARGET.fullmatch(target):
+            _fail(f"{program_id}: target must be a plain filename stem")
         checks = program.get("smoke_checks", [])
         if "first_frame" not in checks or not set(checks) <= vocabulary:
             _fail(f"{program_id}: smoke_checks must include first_frame and use only the vocabulary")
@@ -143,19 +156,82 @@ def validate(corpus: dict[str, Any], lock: dict[str, Any] | None = None) -> None
             _fail(f"{program_id}: KNOWN_FAIL needs the number of the issue that tracks it")
 
 
+def _pinned_source(entry: dict[str, Any], samples_root: Path) -> bytes:
+    path = entry["path"]
+    if not _is_contained_relative(path):
+        _fail(f"{path!r}: not a relative path inside the samples root")
+    source = (samples_root / path).resolve()
+    if not source.is_relative_to(samples_root):
+        _fail(f"{path}: resolves outside the samples root")
+    if not source.is_file():
+        _fail(f"{path}: missing under {samples_root}")
+    data = source.read_bytes()
+    actual = git_blob_sha1(data)
+    if actual != entry["git_blob_sha1"]:
+        _fail(f"{path}: blob {actual}, pinned {entry['git_blob_sha1']}")
+    return data
+
+
 def verify_sources(corpus: dict[str, Any], samples_root: Path) -> list[str]:
     """Recompute every pinned file's Git blob ID under ``samples_root``; return the differences."""
+    root = samples_root.resolve()
     differences: list[str] = []
     for program in corpus["programs"]:
         for entry in program["files"] + program["shared_files"]:
-            if not _is_contained_relative(entry["path"]):
-                differences.append(f"{entry['path']!r}: not a relative path inside the samples root")
-                continue
-            file_path = samples_root / entry["path"]
-            if not file_path.is_file():
-                differences.append(f"{entry['path']}: missing under {samples_root}")
-                continue
-            actual = git_blob_sha1(file_path.read_bytes())
-            if actual != entry["git_blob_sha1"]:
-                differences.append(f"{entry['path']}: blob {actual}, pinned {entry['git_blob_sha1']}")
+            try:
+                _pinned_source(entry, root)
+            except CorpusError as error:
+                differences.append(str(error))
     return differences
+
+
+def build_program(program_id: str, pspdev: Path, out: Path) -> None:
+    """Build a pinned sample's guest ELF in scratch and write it to a new output file."""
+    corpus = load_corpus()
+    validate(corpus)
+    program = next((item for item in corpus["programs"] if item["id"] == program_id), None)
+    if program is None:
+        _fail(f"unknown corpus program: {program_id}")
+
+    pspdev = pspdev.resolve()
+    samples_root = (pspdev / corpus["source"]["delivery"]["samples_root"]).resolve()
+    env = dict(os.environ, PSPDEV=str(pspdev), PATH=str(pspdev / "bin") + os.pathsep + os.environ.get("PATH", ""))
+    for key in ("MAKEFLAGS", "GNUMAKEFLAGS", "MFLAGS", "MAKEFILES"):
+        env.pop(key, None)
+    target = program["target"] + ".elf"
+    for tool in ("psp-gcc", "psp-config"):
+        if not (pspdev / "bin" / tool).is_file():
+            _fail(f"PSPDEV installation is missing bin/{tool}")
+    with tempfile.TemporaryDirectory(prefix="nk-homebrew-") as temp:
+        root = Path(temp)
+        for entry in program["files"] + program["shared_files"]:
+            data = _pinned_source(entry, samples_root)
+            destination = root / entry["path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        sample = root / program["sample_dir"]
+        subprocess.run(["make", target], cwd=sample, env=env, check=True, timeout=180)
+        with (sample / target).open("rb") as elf:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with out.open("xb") as output:
+                shutil.copyfileobj(elf, output)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    build = commands.add_parser("build", help="build one sample's PSP ELF from a locked PSPDEV installation")
+    build.add_argument("program", help="sample ID from the corpus manifest")
+    build.add_argument("--pspdev", type=Path, required=True)
+    build.add_argument("--out", type=Path, required=True, help="new output ELF file")
+    args = parser.parse_args()
+    try:
+        build_program(args.program, args.pspdev, args.out)
+    except (CorpusError, OSError, subprocess.SubprocessError) as error:
+        parser.exit(1, f"homebrew corpus: {error}\n")
+    print(f"Built {args.program}: {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
