@@ -1926,61 +1926,72 @@ _FORMATTER_OUTCOME = (
     "out=[Aserve|q|L|set|match] ret=20 sp=0x0001f000 ra=0x12345678 s0=0x5a5a5a5a")
 
 
+def _executing_harness_support(funcs_header: str) -> str:
+    """The C every executing fixture's harness starts with: 128 KiB of guest memory behind
+    the stand-in recomp.h's accessors, the TAIL protocol, and a dispatch() that runs what the
+    generated registration recorded. `funcs_header` is the generated `<name>_funcs.h`."""
+    return f'#include "{funcs_header}"\n' + _EXECUTING_HARNESS_SUPPORT
+
+
+_EXECUTING_HARNESS_SUPPORT = """\
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+""" + _TAIL_PROTOCOL_IMPL + """
+static uint8_t mem[0x20000];
+static uint8_t *at(uint32_t addr, uint32_t size) {
+    if (addr > sizeof mem - size) abort();
+    return mem + addr;
+}
+uint32_t test_mem_r8(uint32_t addr) { return *at(addr, 1u); }
+void test_mem_w8(uint32_t addr, uint32_t value) { *at(addr, 1u) = (uint8_t)value; }
+uint32_t test_mem_r32(uint32_t addr) {
+    const uint8_t *p = at(addr, 4u);
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+void test_mem_w32(uint32_t addr, uint32_t value) {
+    uint8_t *p = at(addr, 4u);
+    p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8);
+    p[2] = (uint8_t)(value >> 16); p[3] = (uint8_t)(value >> 24);
+}
+/* dispatch() runs what the generated registration recorded, as the runtime's does. */
+static struct { uint32_t addr; void (*fn)(CpuState *); } registered[32];
+static unsigned registered_count;
+void sr_register(uint32_t addr, void (*fn)(CpuState *)) {
+    if (registered_count == 32u) abort();
+    registered[registered_count].addr = addr;
+    registered[registered_count++].fn = fn;
+}
+void sr_exec_span_reset(void) {}
+int sr_exec_span_register(uint32_t start, uint32_t end) { (void)start; (void)end; return 1; }
+void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) { (void)s; (void)code; (void)pc; }
+void sr_hle_call(CpuState *s, uint32_t nid) { (void)s; (void)nid; }
+void sr_syscall(CpuState *s, uint32_t nid) { (void)s; (void)nid; }
+void sr_unimplemented(uint32_t addr, const char *reason) { (void)addr; (void)reason; abort(); }
+void dispatch(CpuState *s, uint32_t target) {
+    for (unsigned i = 0; i < registered_count; i++) {
+        if (registered[i].addr == target) { registered[i].fn(s); sr_tail_drain(s); return; }
+    }
+    abort();
+}
+void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc) {
+    (void)resume_pc;
+    dispatch(s, target);
+}
+int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc) {
+    dispatch_call(s, target, resume_pc);
+    return 0;
+}
+"""
+
+
 def _formatter_harness(at: dict[str, int]) -> str:
     table = "\n".join(
         f"    test_mem_w32(0x{at['table'] + 4 * index:08x}u, 0x{at[label]:08x}u);"
         for index, label in enumerate(FORMATTER_CASES))
     return f"""\
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "formatter_funcs.h"
-{_TAIL_PROTOCOL_IMPL}
-static uint8_t mem[0x20000];
-static uint8_t *at(uint32_t addr, uint32_t size) {{
-    if (addr > sizeof mem - size) abort();
-    return mem + addr;
-}}
-uint32_t test_mem_r8(uint32_t addr) {{ return *at(addr, 1u); }}
-void test_mem_w8(uint32_t addr, uint32_t value) {{ *at(addr, 1u) = (uint8_t)value; }}
-uint32_t test_mem_r32(uint32_t addr) {{
-    const uint8_t *p = at(addr, 4u);
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}}
-void test_mem_w32(uint32_t addr, uint32_t value) {{
-    uint8_t *p = at(addr, 4u);
-    p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8);
-    p[2] = (uint8_t)(value >> 16); p[3] = (uint8_t)(value >> 24);
-}}
-/* dispatch() runs what the generated registration recorded, as the runtime's does. */
-static struct {{ uint32_t addr; void (*fn)(CpuState *); }} registered[32];
-static unsigned registered_count;
-void sr_register(uint32_t addr, void (*fn)(CpuState *)) {{
-    if (registered_count == 32u) abort();
-    registered[registered_count].addr = addr;
-    registered[registered_count++].fn = fn;
-}}
-void sr_exec_span_reset(void) {{}}
-int sr_exec_span_register(uint32_t start, uint32_t end) {{ (void)start; (void)end; return 1; }}
-void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) {{ (void)s; (void)code; (void)pc; }}
-void sr_hle_call(CpuState *s, uint32_t nid) {{ (void)s; (void)nid; }}
-void sr_syscall(CpuState *s, uint32_t nid) {{ (void)s; (void)nid; }}
-void sr_unimplemented(uint32_t addr, const char *reason) {{ (void)addr; (void)reason; abort(); }}
-void dispatch(CpuState *s, uint32_t target) {{
-    for (unsigned i = 0; i < registered_count; i++) {{
-        if (registered[i].addr == target) {{ registered[i].fn(s); sr_tail_drain(s); return; }}
-    }}
-    abort();
-}}
-void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc) {{
-    (void)resume_pc;
-    dispatch(s, target);
-}}
-int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc) {{
-    dispatch_call(s, target, resume_pc);
-    return 0;
-}}
+{_executing_harness_support("formatter_funcs.h")}
 static uint32_t put(uint32_t addr, const char *text) {{
     memcpy(at(addr, (uint32_t)strlen(text) + 1u), text, strlen(text) + 1u);
     return addr;

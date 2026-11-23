@@ -197,37 +197,25 @@ CODEGEN_CUSTOM_STUBS = [
     # 0x0000fe3c (_getmodreent), 0x00015ea0 (CSV tokenizer) and 0x000149a8 (strcpy):
     # retired under #363. Each now translates as written: the guest's own frame
     # registration, reent lookup through the thread's k0, strtok and strcpy.
-    dict(address=0x00010738, category="hle_boundary", name="_malloc_r -> sr_newlib_malloc bridge",
-         reason="bridges retail dlmalloc to the host-owned arena. Retail memalign/realloc edit "
-                "dlmalloc headers directly, where bit 0 is PREV_INUSE; the host header uses bit "
-                "0 for the current block's allocation state. Mixing those metadata ABIs "
-                "deterministically quarantined a valid free list.",
-         test="tools/test_codegen_retail_allocator.py"),
-    dict(address=0x0000f538, category="hle_boundary", name="_free_r -> sr_newlib_free bridge",
-         reason="see 0x10738 -- same bridge, the free half",
-         test="tools/test_codegen_retail_allocator.py"),
-    dict(address=0x000101c4, category="hle_boundary",
-         name="_memalign_r -> sr_newlib_memalign bridge",
-         reason="the retail body directly carves dlmalloc chunks. A captured write at pc "
-                "0x000102b0 set PREV_INUSE on a host free header, whose bit 0 instead means "
-                "current block allocated; the host bridge preserves alignment without crossing "
-                "allocator metadata ABIs.",
-         test="tools/test_codegen_retail_allocator.py"),
-    dict(address=0x00013524, category="hle_boundary",
-         name="_realloc_r -> sr_newlib_realloc bridge",
-         reason="the retail body walks, unlinks, and rewrites dlmalloc chunks, so it must share "
-                "the host metadata ABI used by malloc/free/memalign.",
-         test="tools/test_codegen_retail_allocator.py"),
+    # 0x00010738 (_malloc_r), 0x0000f538 (_free_r), 0x000101c4 (_memalign_r) and 0x00013524
+    # (_realloc_r), the four bridges to the runtime's own heap (sr_newlib_malloc and its
+    # siblings): retired together under #363. They could only go together: the title's
+    # allocator keeps its chunk headers, bins and top chunk in guest memory, with header bit
+    # 0 meaning PREV_INUSE, while the runtime's block header used bit 0 for the block's own
+    # state. With malloc and free bridged, the title's memalign once set PREV_INUSE on a
+    # runtime free header (a captured write at pc 0x000102b0), which is why memalign and
+    # realloc were bridged too. All four now translate as written
+    # (tools/test_codegen_retail_allocator.py RetailAllocatorFamilyRunsAsWrittenTests).
     # 0x000143b0 (native sprintf): retired under #363 (2026-11-11). Its recorded reason was
     # that the translated formatter corrupted %s arguments during boot. On the private
     # full-match route the title's own sprintf and the native one agreed on every call, so
     # the title's own now runs (tools/test_codegen_entry_semantics.py
     # FormatterAtRetiredSprintfBridgeTests).
     # 0x0001034c (heap-statistics walk skip) and 0x001d9eb0 (title backdrop selector
-    # postcondition): retired under #363 (2026-10-26). The walk reads the retail
-    # allocator's statically linked bins, which nothing writes once malloc/free/memalign/
-    # realloc are host-bridged, so it terminates; the chooser never returned 0 on the
-    # private route. Both now translate as written.
+    # postcondition): retired under #363 (2026-10-26). The allocator was still bridged
+    # then, so the walk read bins that nothing wrote; since the bridges went it reads the
+    # bins the title's allocator maintains. The chooser never returned 0 on the private
+    # route. Both translate as written.
     # 0x0001a5f8 / 0x0001c008: constant-return stubs removed 2026-07-18 after a
     # Ghidra-assisted review proved both shadowed real translatable code (a
     # delay-slot setter and a computed-goto resume point). The real translations
