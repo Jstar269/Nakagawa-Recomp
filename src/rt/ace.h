@@ -390,7 +390,7 @@ typedef struct {
     uint64_t wall_ns;          /* the window's length */
     uint32_t new_frames;       /* observed new display frames */
     uint32_t display_vblanks;  /* actual guest service episodes */
-    int display_clock_valid;   /* paced, with no guest-masked deadlines */
+    int display_clock_valid;   /* paced, with no masked or earlier-clock episodes */
     uint64_t gpu_wait_ns;      /* host time blocked on the GPU's fences */
     int smooth;                /* Smooth motion is on for the run */
     uint32_t betweens;         /* in-betweens that reached the screen in the window */
@@ -414,7 +414,7 @@ typedef struct {
 
 /* Judge display service against wall time, independently of the game's frame
  * cadence. A shortfall must exceed 3% and one VBLANK of sampling uncertainty.
- * Missing or guest-masked clock evidence gives FPS with no speed verdict.
+ * Unqualified clock evidence gives FPS with no speed verdict.
  * Smooth motion still reports the real and weighted in-between pictures
  * that reached the display, or SMOOTH OFF when none did. */
 void ace_readout_judge(const AceWindow *w, AceReadoutView *out);
@@ -429,8 +429,9 @@ void ace_note_target_draw(uint32_t fb);
 /* A CPU write (a store, a movie frame, a software-raster result) reached VRAM offsets
  * [off, off + bytes): every flipped buffer it overlaps has changed. */
 void ace_note_vram_write(uint32_t off, uint32_t bytes);
-/* Count one actual service episode on the scheduler's current clock. */
-void ace_note_display_vblank(int host_paced);
+/* Observe one actual service episode. Earlier-clock debt leaves the
+ * window's speed unqualified even if it was serviced at 1x. */
+void ace_note_display_vblank(int host_paced, int normal_epoch);
 /* A source edge fell under guest interrupt masking, so this window's
  * delivery count cannot supply a host-speed verdict. */
 void ace_note_display_masked(void);
@@ -442,8 +443,8 @@ void ace_pause_readout(void);
 void ace_note_gpu_wait(uint64_t ns);
 /* Fast forward started (1) or stopped (0) (sched.c; recomp.h, sched_fast_forward_on). The
  * readout's window is a second of wall time, so time at the fast-forward speed is never judged:
- * the readout hides, no window counts towards the report, and the first full second at normal
- * speed brings the readout back. */
+ * the readout hides and no window counts towards the report. An overlapping window after
+ * resume gives FPS with no speed verdict when it includes earlier-clock service. */
 void ace_note_fast_forward(int on);
 /* The display flipped to the `bytes`-long buffer at VRAM offset `fb` at `vcount`
  * (display_present_active, before the presenter's own slot rule). Feeds the detector and,

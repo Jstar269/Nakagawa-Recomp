@@ -778,8 +778,9 @@ the device is created with no feature outside Ace.
   VBLANKs against the wall time of the same window at 60000/1001 Hz. A 20 FPS scene can run at
   full speed, including after a 30 FPS menu. The readout warns when the display clock falls
   behind by more than 3% and more than one VBLANK period, which allows for window endpoints between
-  display edges. A window that includes guest-masked deadlines or runs without the paced clock
-  shows FPS and a dash for speed. A pause resets the readout window.
+  display edges. A window that includes guest-masked deadlines, receives service owed under
+  fast forward, or runs without the paced clock shows FPS and a dash for speed. A pause resets
+  the readout window.
 - **PC LIMITED and GPU LIMITED (#2623).** The warning says GPU LIMITED when measured scheduler
   waits on GPU fences cover the display-clock shortfall. Other qualified shortfalls say PC
   LIMITED. The GE renderer's submission-slot, drain and readback waits and the presenter's

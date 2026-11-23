@@ -472,7 +472,7 @@ static uint64_t s_win_start_ns;
 static int s_win_started;
 static uint32_t s_win_frames, s_win_betweens, s_win_shown, s_win_motion_milli;
 static uint32_t s_win_display_vblanks;
-static int s_display_host_paced, s_win_display_masked;
+static int s_display_host_paced, s_win_display_unqualified;
 static uint64_t s_shown_seq;   /* AcePace.frame_seq of the newest real frame that reached the screen */
 static uint64_t s_win_gpu_wait_ns;   /* ace_note_gpu_wait in the window */
 
@@ -481,7 +481,7 @@ static void win_reset(uint64_t now_ns) {
     s_win_start_ns = now_ns;
     s_win_frames = 0; s_win_betweens = 0; s_win_shown = 0;
     s_win_display_vblanks = 0;
-    s_win_display_masked = 0;
+    s_win_display_unqualified = 0;
     s_win_motion_milli = 0; s_win_gpu_wait_ns = 0;
 }
 static uint32_t s_last_flip_vcount, s_last_flip_fb;
@@ -1164,17 +1164,18 @@ void ace_pause_readout(void) {
     s_win_started = 0;
 }
 
-void ace_note_display_vblank(int host_paced) {
+void ace_note_display_vblank(int host_paced, int normal_epoch) {
     if (!g_ace_on || s_ff_running) return;
     if (s_display_host_paced != host_paced) {
         s_display_host_paced = host_paced;
         ace_pause_readout();
     }
-    if (host_paced && s_win_display_vblanks < UINT32_MAX) s_win_display_vblanks++;
+    if (!normal_epoch) s_win_display_unqualified = 1;
+    else if (host_paced && s_win_display_vblanks < UINT32_MAX) s_win_display_vblanks++;
 }
 
 void ace_note_display_masked(void) {
-    if (g_ace_on) s_win_display_masked = 1;
+    if (g_ace_on) s_win_display_unqualified = 1;
 }
 
 void ace_note_gpu_wait(uint64_t ns) {
@@ -1228,7 +1229,7 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         w.wall_ns = now_ns - s_win_start_ns;
         w.new_frames = s_win_frames;
         w.display_vblanks = s_win_display_vblanks;
-        w.display_clock_valid = s_display_host_paced && !s_win_display_masked;
+        w.display_clock_valid = s_display_host_paced && !s_win_display_unqualified;
         w.gpu_wait_ns = s_win_gpu_wait_ns;
         w.smooth = s_req.smooth != 0;  /* asked for: off for the run (no GPU) still says so */
         w.betweens = s_win_betweens;

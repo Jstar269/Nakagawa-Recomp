@@ -835,7 +835,7 @@ static void cell_switch(void) {
     CHECK(strcmp(ace_spec_text(), "off") == 0, "off run's line");
     /* A3's counter part: with Ace off the feed does nothing. */
     ace_note_target_draw(0x44000u);
-    ace_note_display_vblank(1);
+    ace_note_display_vblank(1, 1);
     ace_note_display_masked();
     CHECK(ace_flip(0x44000u, 0x22000u, 1u, 1000u) == 0, "an off flip reports nothing");
     ace_counters(&n);
@@ -1811,7 +1811,7 @@ static void cell_feed(void) {
     for (uint32_t vc = 1; vc <= 601; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(ace_rate_stable() == ACE_RATE_K2, "single-buffered 30 Hz: %s", ace_rate_name(ace_rate_stable()));
@@ -1821,7 +1821,7 @@ static void cell_feed(void) {
     for (uint32_t vc = 602; vc <= 661; vc++) {
         if (vc % 3 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(ace_rate_stable() != ACE_RATE_K3,
@@ -1946,7 +1946,7 @@ static void cell_readout_smooth(void) {
     for (uint32_t vc = 1; vc <= 600; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
         if (ace_smooth_take() == ACE_SHOW_BETWEEN) {
             ace_smooth_shown_between(ns);
@@ -1966,7 +1966,7 @@ static void cell_readout_smooth(void) {
     for (uint32_t vc = 1; vc <= 600; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
         if (ace_smooth_take() == ACE_SHOW_BETWEEN) {
             ace_smooth_shown_between(ns);
@@ -1986,7 +1986,7 @@ static void cell_readout_smooth(void) {
     for (uint32_t vc = 1; vc <= 600; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
         int between = ace_smooth_take() == ACE_SHOW_BETWEEN;
         if (between) ace_smooth_shown_between(ns);
@@ -2004,7 +2004,7 @@ static void cell_readout_smooth(void) {
     for (uint32_t vc = 1; vc <= 600; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
         (void)ace_smooth_take();
         ace_smooth_note_present(ACE_PRESENT_REAL, ns);
@@ -2047,7 +2047,7 @@ static void cell_readout_clock_boundaries(void) {
     AceReadoutView v;
     (void)ace_init_spec(k_good, NULL);
     for (uint32_t vc = 0; vc <= 120u; vc++) {
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
         if (vc == 30u) ace_note_display_masked();
         if (vc % 3u == 0) ace_note_target_draw(0u);
         (void)ace_flip(0u, 0x22000u, vc, (uint64_t)vc * 1001000000ull / 60u);
@@ -2060,13 +2060,13 @@ static void cell_readout_clock_boundaries(void) {
           "an unmasked window restores the speed readout: '%s'", v.text);
     ace_pause_readout();
     CHECK(!ace_readout_view(&v), "pause discards its partial window");
-    ace_note_display_vblank(1);
+    ace_note_display_vblank(1, 1);
     (void)ace_flip(0u, 0x22000u, 121u, 8000000000ull);
     CHECK(!ace_readout_view(&v), "elapsed pause time cannot trigger a verdict on resume");
-    ace_note_display_vblank(0);
+    ace_note_display_vblank(0, 1);
     (void)ace_flip(0u, 0x22000u, 122u, 8000000000ull);
     for (uint32_t vc = 123u; vc <= 182u; vc++) {
-        ace_note_display_vblank(0);
+        ace_note_display_vblank(0, 1);
         if ((vc - 122u) % 3u == 0) ace_note_target_draw(0u);
         (void)ace_flip(0u, 0x22000u, vc, 8000000000ull + (uint64_t)(vc - 122u) * 1001000000ull / 60u);
     }
@@ -2127,7 +2127,7 @@ static void cell_readout_gpu_feed(void) {
     for (; vc <= 300; vc++) {             /* five seconds at 30 FPS: the class settles at 30 Hz */
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS") == 0, "before: '%s'", v.text);
@@ -2137,8 +2137,8 @@ static void cell_readout_gpu_feed(void) {
     while (ns < end_ns) {
         ace_note_target_draw(0x0u);
         ace_note_gpu_wait(20000000u);
-        ace_note_display_vblank(1);
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
+        ace_note_display_vblank(1, 1);
         vc += 3u;
         ns += 3u * 16683333u;
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
@@ -2154,7 +2154,7 @@ static void cell_readout_gpu_feed(void) {
     for (uint32_t end = vc + 150; vc < end; vc++) {    /* back on time, no waits */
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(ace_readout_view(&v) && !v.pc_limited && !v.gpu_limited, "on time again: '%s'", v.text);
@@ -2180,7 +2180,7 @@ static void cell_fast_forward(void) {
     for (; vc <= 300; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS") == 0, "before fast forward '%s'", v.text);
@@ -2190,7 +2190,7 @@ static void cell_fast_forward(void) {
     for (uint32_t end = vc + 900; vc < end; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u / 3u;
-        if (vc % 10 != 0) ace_note_display_vblank(1);
+        if (vc % 10 != 0) ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     ace_counters(&c1);
@@ -2201,14 +2201,14 @@ static void cell_fast_forward(void) {
     for (uint32_t end = vc + 30; vc < end; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(!ace_readout_view(&v), "half a second after fast forward the readout is still hidden");
     for (uint32_t end = vc + 60; vc < end; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_display_vblank(1);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS") == 0,
