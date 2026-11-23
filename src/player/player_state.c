@@ -13234,8 +13234,10 @@ static int player_rebuild_active_index(const PlayerRebuildQueue *queue) {
     return -1;
 }
 
+/* The queue goes on, or a paused one still finishes the build that runs. */
 static bool player_rebuild_queue_running(const PlayerApp *app) {
-    return app && app->rebuild_queue.active && !app->rebuild_queue.paused;
+    return app && app->rebuild_queue.active && !app->rebuild_queue.paused &&
+           (!app->rebuild_queue.held || player_rebuild_active_index(&app->rebuild_queue) >= 0);
 }
 
 bool player_app_rebuild_banner_visible(const PlayerApp *app) {
@@ -13269,7 +13271,8 @@ size_t player_app_rebuild_banner_text(const PlayerApp *app, char *out, size_t ou
                            app->rebuild_queue.count);
     } else if (player_app_build_queue_has_waiting(app) &&
                (app->outdated.count == 0 || app->outdated.banner_dismissed)) {
-        /* Paused: a build could not start. Nothing builds until Resume. */
+        /* Paused (the person's Pause, or a build could not start): nothing
+           builds until Resume. */
         int total = 0;
         (void)player_app_build_queue_place(app, "", &total);
         written = total == 1
@@ -13416,6 +13419,40 @@ static bool player_rebuild_disc_id_valid(const char *disc_id) {
     return disc_id && player_disc_id_text_ok(disc_id, strlen(disc_id));
 }
 
+bool player_app_rebuild_queue_paused_path(const PlayerApp *app, char *out, size_t out_size) {
+    char path[MAX_PATH_LEN];
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    if (!player_app_rebuild_queue_path(app, path, sizeof(path))) return false;
+    size_t length = strlen(path);
+    size_t name = strlen(PLAYER_REBUILD_QUEUE_FILE);
+    if (length < name) return false;
+    path[length - name] = '\0';
+    int written = snprintf(out, out_size, "%s%s", path, PLAYER_REBUILD_QUEUE_PAUSED_FILE);
+    if (written <= 0 || (size_t)written >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+/* The pause marker follows the queue: there while a queue is paused, gone
+   otherwise. Its presence is the whole record. */
+static bool player_rebuild_queue_sync_paused(const PlayerApp *app) {
+    char marker[MAX_PATH_LEN];
+    if (!player_app_rebuild_queue_paused_path(app, marker, sizeof(marker))) return false;
+    if (!(app->rebuild_queue.active && app->rebuild_queue.held)) {
+        return !nk_platform_file_exists(marker) || nk_remove_utf8(marker) == 0;
+    }
+    if (nk_platform_file_exists(marker)) return true;
+    FILE *f = nk_fopen_utf8(marker, "wb");
+    if (!f) return false;
+    bool ok = fputs("paused\n", f) >= 0;
+    ok = fclose(f) == 0 && ok;
+    if (!ok) nk_remove_utf8(marker);
+    return ok;
+}
+
 bool player_app_rebuild_queue_save(const PlayerApp *app) {
     char path[MAX_PATH_LEN];
     char tmp_path[MAX_PATH_LEN + 8];
@@ -13423,8 +13460,9 @@ bool player_app_rebuild_queue_save(const PlayerApp *app) {
     /* A newer Nakagawa's queue is neither replaced nor removed. */
     if (app->rebuild_queue.file_is_newer) return false;
     if (!app->rebuild_queue.active) {
-        /* Nothing is pending: there is nothing to resume. */
-        return !nk_platform_file_exists(path) || nk_remove_utf8(path) == 0;
+        /* Nothing is pending: there is nothing to resume, nor to pause. */
+        bool removed = !nk_platform_file_exists(path) || nk_remove_utf8(path) == 0;
+        return player_rebuild_queue_sync_paused(app) && removed;
     }
     char folder[MAX_PATH_LEN];
     if (player_path_parent_folder(path, folder, sizeof(folder)) &&
@@ -13452,13 +13490,22 @@ bool player_app_rebuild_queue_save(const PlayerApp *app) {
         nk_remove_utf8(tmp_path);
         return false;
     }
-    return true;
+    return player_rebuild_queue_sync_paused(app);
 }
 
 bool player_app_rebuild_queue_load(PlayerApp *app) {
     char path[MAX_PATH_LEN];
-    if (!app || !player_app_rebuild_queue_path(app, path, sizeof(path)) ||
-        !nk_platform_file_exists(path)) return false;
+    char marker[MAX_PATH_LEN];
+    if (!app || !player_app_rebuild_queue_path(app, path, sizeof(path))) return false;
+    bool marked = player_app_rebuild_queue_paused_path(app, marker, sizeof(marker)) &&
+                  nk_platform_file_exists(marker);
+    if (!nk_platform_file_exists(path)) {
+        /* An older player finished the queue and left the pause behind. */
+        if (marked && nk_remove_utf8(marker) == 0) {
+            player_dev_log_add(app, "rebuild", "a pause marker with no queue was removed");
+        }
+        return false;
+    }
     FILE *f = nk_fopen_utf8(path, "rb");
     if (!f) return false;
     char *text = NULL;
@@ -13539,7 +13586,9 @@ bool player_app_rebuild_queue_load(PlayerApp *app) {
     for (int i = 0; i < count; i++) {
         if (queue->entries[i].state == PLAYER_REBUILD_PENDING) queue->active = true;
     }
-    player_dev_log_add(app, "rebuild", "build queue resumed with %d titles%s", count,
+    queue->held = queue->active && marked;
+    player_dev_log_add(app, "rebuild", "build queue %s with %d titles%s",
+                       queue->held ? "loaded, paused," : "resumed", count,
                        schema == 1 ? " (from a schema 1 rebuild queue)" : "");
     /* Schema 1 becomes schema 2 on disk at once: every title a rebuild. */
     if (schema == 1 && !player_app_rebuild_queue_save(app)) {
@@ -13665,6 +13714,7 @@ bool player_app_build_queue_remove(PlayerApp *app, const char *disc_id) {
         /* Nothing waits: the queue ends, and its file goes. */
         queue->active = false;
         queue->paused = false;
+        queue->held = false;
         queue->build_generation = 0;
         player_dev_log_add(app, "rebuild", "build queue emptied");
     }
@@ -13704,10 +13754,34 @@ bool player_app_build_queue_move(PlayerApp *app, const char *disc_id, int direct
     return true;
 }
 
+bool player_app_build_queue_pause(PlayerApp *app) {
+    if (!app || !app->rebuild_queue.active || app->rebuild_queue.held) return false;
+    app->rebuild_queue.held = true;
+    player_dev_log_add(app, "rebuild", player_rebuild_active_index(&app->rebuild_queue) >= 0
+                       ? "build queue paused; the current build finishes, then it waits"
+                       : "build queue paused");
+    if (!player_app_rebuild_queue_save(app)) {
+        player_dev_log_add(app, "rebuild", "the paused queue could not be saved; "
+                           "it will not stay paused after a restart");
+    }
+    return true;
+}
+
+bool player_app_build_queue_held(const PlayerApp *app) {
+    return app && app->rebuild_queue.active && app->rebuild_queue.held;
+}
+
 bool player_app_build_queue_resume(PlayerApp *app) {
-    if (!app || !app->rebuild_queue.active || !app->rebuild_queue.paused) return false;
+    PlayerRebuildQueue *queue = app ? &app->rebuild_queue : NULL;
+    if (!queue || !queue->active || (!queue->paused && !queue->held)) return false;
+    queue->paused = false;
+    queue->held = false;
     player_dev_log_add(app, "rebuild", "build queue resumed");
-    return player_rebuild_queue_start(app, 0);
+    if (!player_app_rebuild_queue_save(app)) {
+        player_dev_log_add(app, "rebuild", "the rebuild queue could not be saved; "
+                           "it will not resume after a restart");
+    }
+    return true;
 }
 
 bool player_app_rebuild_all(PlayerApp *app) {
@@ -13742,6 +13816,7 @@ static void player_rebuild_queue_settle(PlayerApp *app) {
     if (!remaining && queue->active) {
         queue->active = false;
         queue->paused = false;
+        queue->held = false;
         app->outdated.scan_requested = true;
         player_dev_log_add(app, "rebuild", "rebuild queue finished");
     }
@@ -13807,8 +13882,10 @@ void player_app_rebuild_queue_step(PlayerApp *app) {
         (void)player_app_rebuild_queue_save(app);
         return;
     }
-    if (queue->paused || app->build_session.is_building || app->launch_pending ||
-        player_prerequisite_flow_active(app)) return;
+    /* Paused: the person's Pause, or a build that could not start. A build
+       that ran when Pause came was followed above; no next one starts. */
+    if (queue->paused || queue->held || app->build_session.is_building ||
+        app->launch_pending || player_prerequisite_flow_active(app)) return;
     for (int i = 0; i < queue->count; i++) {
         PlayerRebuildEntry *entry = &queue->entries[i];
         if (entry->state != PLAYER_REBUILD_PENDING) continue;

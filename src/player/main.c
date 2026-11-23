@@ -2368,10 +2368,12 @@ static void player_ui_nk_apply_action(PlayerRun *run, PlayerApp *app,
     }
     if (action->kind == PLAYER_UI_ACTION_QUEUE) {
         /* The build queue: the title page's Add to queue and Remove from
-           queue, and the queue screen's Up, Down, Remove and Resume. */
+           queue, and the queue screen's Up, Down, Remove, and Pause or Resume. */
         PlayerUiQueueOp op = (PlayerUiQueueOp)action->primary;
         if (op == PLAYER_UI_QUEUE_RESUME) {
             (void)player_app_build_queue_resume(app);
+        } else if (op == PLAYER_UI_QUEUE_PAUSE) {
+            (void)player_app_build_queue_pause(app);
         } else if (action->title_index < (size_t)app->game_count) {
             int index = (int)action->title_index;
             const char *disc_id = app->games[index].disc_id;
