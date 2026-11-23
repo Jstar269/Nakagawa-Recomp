@@ -149,9 +149,12 @@ Built for v0.1.0 (#1316): an opt-in client using the MIT-licensed rcheevos clien
   `NakagawaRecomp/<numeric version> (<operating system and version>) rcheevos/<version>`, for example
   `NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5`. A version that is not numeric, or a
   system part that would break the form, means no request is sent.
-- **Sign-in.** The player sends the RetroAchievements user name and password once to exchange them for a
-  token, clears the password from its temporary buffers and from rcheevos' request buffer once the request
-  is handed over, and stores only the token in Windows Credential
+- **Sign-in.** The launcher's own sign-in page takes the RetroAchievements user name and password (the
+  password shown as stars), since RetroAchievements has no browser or OAuth sign-in for other clients and
+  rcheevos' `rc_client` signs in only with a password or a token it issued. **Sign in** takes the password
+  out of the form, wiping the form's copy, and the player sends the user name and password once to exchange
+  them for a token, clears the password from its temporary buffers and from rcheevos' request buffer once the
+  request is handed over, and stores only the token in Windows Credential
   Manager. Sign-out removes that credential. Other platforms without the Windows credential store refuse
   sign-in rather than saving a token in a plain file.
 - **What is sent**, as form fields of RetroAchievements' `dorequest.php` API:
@@ -240,8 +243,9 @@ Built for v0.1.0 (#1316): an opt-in client using the MIT-licensed rcheevos clien
   never sends a frame: the player stops the channel and says the package must be rebuilt to track
   achievements. When the game's achievement set cannot be loaded, the player stops serving frames, so
   the runtime's next VBLANK stops waiting for it; the shared memory stays mapped until the game exits.
-- **UI regression runs** refuse the switch, **Sign in** and **Sign out**, and say so: they stay offline,
-  open no consent or credential box and read no credential.
+- **UI regression runs** open the consent card and the sign-in page, which connect nothing, but refuse
+  **Agree and turn on**, the sign-in page's **Sign in** (whose password is wiped all the same), the switch's
+  Off and **Sign out**, and say so: they stay offline and read no credential.
 - **Hardcore is unavailable.** The bridge turns rcheevos' hardcore mode off before every sign-in, game
   load and frame, and refuses to send any request that claims it (`h=` other than `0`, or a leaderboard
   entry); neither the player nor the runtime has a setting, option or variable that turns it on.
