@@ -152,11 +152,16 @@ struct PlayerUiNk {
     bool nickname_first_launch;
     bool nickname_is_server;
     bool nickname_is_port;      /* Online play's port offset (#1139) */
+    bool nickname_is_ra_user;   /* RetroAchievements' sign-in form: its username (#1316) */
+    bool nickname_is_ra_password; /* its password, shown as stars */
     bool nickname_refused;
     NkUiId nickname_focus;
     NkUiId nickname_return_focus;
-    char nickname_text[NK_ADHOC_SERVER_MAX_LEN + 1u];
+    char nickname_text[PLAYER_UI_RA_PASSWORD_MAX + 1u];
     UiKeyboard nickname_keyboard;
+    /* RetroAchievements' sign-in form (#1316): what SIGN IN sends once. It lives only here,
+       is wiped as soon as the form's page closes or SIGN IN takes it, and at exit. */
+    PlayerUiSignInForm ra_form;
     char status_text[PLAYER_UI_TITLE_CAP][256];
     char library_page_label[64];
     char flow_title[NK_MAX_TITLE_LEN + NK_MAX_DISC_ID_LEN + 16];
@@ -671,6 +676,12 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
 
 void player_ui_nk_destroy(PlayerUiNk *player) {
     if (player == NULL) return;
+    player_ui_sign_in_wipe(&player->ra_form);
+    /* The editor's buffer may still hold a password typed into it. */
+    {
+        volatile char *text = player->nickname_text;
+        for (size_t i = 0u; i < sizeof(player->nickname_text); ++i) text[i] = '\0';
+    }
     player_ui_snd0_destroy(player->snd0);
     player_ui_music_destroy(player->music);
     player_ui_sounds_destroy(player->sounds);
@@ -711,7 +722,8 @@ static bool player_ui_settings_view(PlayerView view) {
            view == VIEW_PSP_FONTS || view == VIEW_UPDATES ||
            view == VIEW_CONFIRM_FACTORY_RESET || view == VIEW_ACCESSIBILITY_SETTINGS ||
            view == VIEW_ACE_SETTINGS || view == VIEW_PROBLEM_REPORT ||
-           view == VIEW_ONLINE_PLAY_CARD || view == VIEW_ONLINE_PLAY_SERVERS;
+           view == VIEW_ONLINE_PLAY_CARD || view == VIEW_ONLINE_PLAY_SERVERS ||
+           view == VIEW_ACHIEVEMENTS_CARD || view == VIEW_ACHIEVEMENTS_SIGN_IN;
 }
 
 /* The views the next UI draws: the library (router screens), the setup wizard,
@@ -1362,6 +1374,10 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         case VIEW_ONLINE_PLAY_SERVERS:
             model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS;
             break;
+        case VIEW_ACHIEVEMENTS_CARD: model.page = PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_CARD; break;
+        case VIEW_ACHIEVEMENTS_SIGN_IN:
+            model.page = PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_SIGN_IN;
+            break;
         case VIEW_ACCESSIBILITY_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ACCESSIBILITY; break;
         case VIEW_ACE_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ACE; break;
         case VIEW_PREREQ_ABOUT: model.page = PLAYER_UI_SETTINGS_PAGE_NOTICES; break;
@@ -1545,6 +1561,9 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.achievements_signed_in = app->achievements_signed_in;
     model.achievements_account = app->achievements_account[0] ? app->achievements_account : NULL;
     model.achievements_status = app->achievements_status[0] ? app->achievements_status : NULL;
+    model.achievements_username = player->ra_form.username;
+    model.achievements_password_chars = player_ui_sign_in_password_chars(&player->ra_form);
+    model.achievements_sign_in_pending = app->achievements_sign_in_pending;
     /* Cheats turn achievements off for every game, so this page says so too
        (player_app_achievements_block; the title page adds the 60 FPS package). */
     if (model.achievements_enabled) {
@@ -2409,6 +2428,9 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                 break;
             /* The card's safe answer, NOT NOW, has the focus. */
             case VIEW_ONLINE_PLAY_CARD: focus = PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW; break;
+            /* RetroAchievements' card: NOT NOW too; its sign-in form: Username. */
+            case VIEW_ACHIEVEMENTS_CARD: focus = PLAYER_UI_ID_ACHIEVEMENTS_NOT_NOW; break;
+            case VIEW_ACHIEVEMENTS_SIGN_IN: focus = PLAYER_UI_ID_ACHIEVEMENTS_USERNAME; break;
             case VIEW_ONLINE_PLAY_SERVERS: focus = PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE; break;
             case VIEW_ACCESSIBILITY_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE; break;
             /* Settings > Enhanced, the library's or a game's, opens on its first row. */
@@ -2476,6 +2498,17 @@ const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, si
     if (count != NULL && cap > 0u) count[0] = '\0';
     if (player == NULL || !player->nickname_open) return NULL;
     if (count != NULL) (void)ui_keyboard_count_text(&player->nickname_keyboard, count, cap);
+    if (player->nickname_is_ra_password) {
+        /* A password is reported as the editor shows it: one star per character. */
+        static char stars[PLAYER_UI_RA_PASSWORD_MAX + 1u];
+        size_t n = 0u;
+        for (const unsigned char *c = (const unsigned char *)player->nickname_text;
+             *c != '\0' && n + 1u < sizeof(stars); ++c) {
+            if ((*c & 0xC0u) != 0x80u) stars[n++] = '*';
+        }
+        stars[n] = '\0';
+        return stars;
+    }
     return player->nickname_text;
 }
 
@@ -2898,6 +2931,8 @@ static void player_ui_nickname_open(PlayerUiNk *player, bool first_launch, bool 
     player->nickname_first_launch = first_launch && !server_mode;
     player->nickname_is_server = server_mode;
     player->nickname_is_port = false;
+    player->nickname_is_ra_user = false;
+    player->nickname_is_ra_password = false;
     player->nickname_refused = false;
     player->nickname_focus = PLAYER_UI_ID_NICKNAME_KEY_BASE + UI_KEYBOARD_KEY_DEFAULT;
     player->nickname_text[0] = '\0';
@@ -2915,6 +2950,20 @@ static void player_ui_port_open(PlayerUiNk *player) {
                      player_ui_port_accepts, NULL);
 }
 
+/* The same editor for RetroAchievements' sign-in form (#1316): it opens on what the form holds,
+   so a typo can be deleted, and its Done copies the text back into the form. */
+static void player_ui_ra_field_open(PlayerUiNk *player, bool password) {
+    const char *from = password ? player->ra_form.password : player->ra_form.username;
+    player_ui_nickname_open(player, false, false);
+    player->nickname_is_ra_user = !password;
+    player->nickname_is_ra_password = password;
+    ui_keyboard_init(&player->nickname_keyboard, player->nickname_text,
+                     password ? PLAYER_UI_RA_PASSWORD_MAX : PLAYER_UI_RA_USERNAME_MAX,
+                     password ? player_ui_ra_password_accepts : player_ui_ra_username_accepts,
+                     NULL);
+    (void)snprintf(player->nickname_text, sizeof(player->nickname_text), "%s", from);
+}
+
 /* What Done saves: the typed text without the spaces (U+0020) before and after
    it, so "  Kai " is "Kai" and a nickname of spaces alone is empty, which
    nk_nickname_valid refuses. The typed text itself is left as it is. */
@@ -2929,11 +2978,15 @@ static const char *player_ui_nickname_trimmed(const char *text, char *out, size_
 }
 
 static void player_ui_nickname_close(PlayerUiNk *player) {
+    volatile char *text = player->nickname_text;
     player->nickname_open = false;
     player->nickname_is_server = false;
     player->nickname_is_port = false;
+    player->nickname_is_ra_user = false;
+    player->nickname_is_ra_password = false;
     player->nickname_refused = false;
-    player->nickname_text[0] = '\0';
+    /* The whole buffer: it may have held a password. */
+    for (size_t i = 0u; i < sizeof(player->nickname_text); ++i) text[i] = '\0';
 }
 
 /* A physical keyboard types through the on-screen keyboard's rules (its filter
@@ -2950,6 +3003,12 @@ static void player_ui_nickname_delete(PlayerUiNk *player) {
     (void)ui_keyboard_delete(&player->nickname_keyboard);
     player->nickname_focus = PLAYER_UI_ID_NICKNAME_SAVE;
     player->nickname_refused = false;
+}
+
+bool player_ui_nk_take_sign_in(PlayerUiNk *player, char *username, size_t username_cap,
+                               char *password, size_t password_cap) {
+    return player != NULL && player_ui_sign_in_take(&player->ra_form, username, username_cap,
+                                                    password, password_cap);
 }
 
 bool player_ui_nk_nickname_open(const PlayerUiNk *player) {
@@ -4376,6 +4435,13 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             route = nk_ui_router_current(player->router);
         }
     }
+    /* RetroAchievements' sign-in form (#1316) keeps what was typed only while its page or one of
+       its fields is open: any other page wipes it. */
+    if (app->active_view != VIEW_ACHIEVEMENTS_SIGN_IN && !player->nickname_is_ra_user &&
+        !player->nickname_is_ra_password &&
+        (player->ra_form.username[0] != '\0' || player->ra_form.password[0] != '\0')) {
+        player_ui_sign_in_wipe(&player->ra_form);
+    }
     /* The nickname editor (#2197) draws over every screen while it is open: the
        first-launch prompt until it is answered, or Settings > Nickname. */
     if (!player->nickname_open && player_app_nickname_prompt_visible(app)) {
@@ -4395,8 +4461,11 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         model.first_launch = player->nickname_first_launch;
         model.server_mode = player->nickname_is_server;
         model.port_mode = player->nickname_is_port;
+        model.ra_username_mode = player->nickname_is_ra_user;
+        model.ra_password_mode = player->nickname_is_ra_password;
         model.keyboard = &player->nickname_keyboard;
-        model.current = player->nickname_is_port ? player->settings_online_play_port
+        model.current = player->nickname_is_ra_user || player->nickname_is_ra_password ? NULL
+                        : player->nickname_is_port ? player->settings_online_play_port
                         : player->nickname_is_server ? app->settings.online_play_server
                                                      : app->settings.nickname;
         model.refused = player->nickname_refused;
@@ -4412,6 +4481,26 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         if (action.kind == PLAYER_UI_ACTION_NICKNAME &&
             (unsigned)action.primary == PLAYER_UI_NICKNAME_EDITED) {
             player->nickname_refused = false;
+            action.kind = PLAYER_UI_ACTION_NONE;
+        } else if (action.kind == PLAYER_UI_ACTION_NICKNAME &&
+                   (player->nickname_is_ra_user || player->nickname_is_ra_password)) {
+            const bool save = (unsigned)action.primary == PLAYER_UI_NICKNAME_SAVE;
+            /* RetroAchievements' sign-in form (#1316): Done keeps what is typed, untrimmed
+               (a password may begin or end with a space); Cancel keeps the form as it was.
+               Focus goes back to the field, or to SIGN IN once both are filled. */
+            const bool password = player->nickname_is_ra_password;
+            if (save) {
+                char *into = password ? player->ra_form.password : player->ra_form.username;
+                const size_t cap = password ? sizeof(player->ra_form.password)
+                                            : sizeof(player->ra_form.username);
+                (void)snprintf(into, cap, "%s", player->nickname_text);
+            }
+            player->nickname_return_focus =
+                save && player->ra_form.username[0] && player->ra_form.password[0]
+                    ? PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN
+                    : password ? PLAYER_UI_ID_ACHIEVEMENTS_PASSWORD
+                               : PLAYER_UI_ID_ACHIEVEMENTS_USERNAME;
+            player_ui_nickname_close(player);
             action.kind = PLAYER_UI_ACTION_NONE;
         } else if (action.kind == PLAYER_UI_ACTION_NICKNAME) {
             /* Skip keeps the value; a Save the rule refuses keeps the editor open, with the old
@@ -4454,6 +4543,15 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                    (unsigned)action.primary == PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT) {
             player->nickname_return_focus = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT;
             player_ui_port_open(player);
+            action.kind = PLAYER_UI_ACTION_NONE;
+        } else if (action.kind == PLAYER_UI_ACTION_SETTINGS &&
+                   ((unsigned)action.primary == PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_USERNAME ||
+                    (unsigned)action.primary == PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_PASSWORD)) {
+            const bool password =
+                (unsigned)action.primary == PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_PASSWORD;
+            player->nickname_return_focus = password ? PLAYER_UI_ID_ACHIEVEMENTS_PASSWORD
+                                                     : PLAYER_UI_ID_ACHIEVEMENTS_USERNAME;
+            player_ui_ra_field_open(player, password);
             action.kind = PLAYER_UI_ACTION_NONE;
         }
         if ((player_ui_settings_view(app->active_view) ||

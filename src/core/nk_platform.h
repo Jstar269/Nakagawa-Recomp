@@ -157,13 +157,6 @@ bool nk_platform_credential_read(const char *target, char *username, size_t user
                                 char *secret, size_t secret_size);
 bool nk_platform_credential_write(const char *target, const char *username, const char *secret);
 bool nk_platform_credential_delete(const char *target);
-/* Asks for a user name and password in the operating system's own credential dialog, which
- * names target; nothing is stored. 1 when both were entered, 0 when the user cancelled, -1 when
- * there is no such dialog or it failed. On anything but 1 both buffers are empty. The caller
- * clears the password after use. */
-int nk_platform_credential_prompt(const char *caption, const char *message, const char *target,
-                                  char *username, size_t username_size,
-                                  char *password, size_t password_size);
 
 /* A local, per-launch view of the runtime's generic guest arena. The parent player creates it;
  * the runtime opens the named view and synchronizes once at its vblank boundary. Unsupported
