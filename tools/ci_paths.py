@@ -585,6 +585,9 @@ def _is_native_tool(path: str) -> bool:
     logical_path = _logical_tool_path(path)
     if logical_path is None:
         return False
+    # The pinned corpus smoke checks native presentations with the shared PPM reader.
+    if logical_path in {"tools/homebrew_corpus.py", "tools/make_showcase_animation.py"}:
+        return True
     name = PurePosixPath(logical_path).name
     prefixes = (
         "analyze",

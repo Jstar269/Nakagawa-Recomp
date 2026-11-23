@@ -77,10 +77,23 @@ python tools/homebrew_corpus.py build gu-cube --pspdev /usr/local/pspdev --out b
 ```
 
 Use a new output path for each build. The tool checks the sample's source hashes and builds from a temporary
-copy. Runtime smoke results are still unmeasured. The [corpus provenance](../tests/fixtures/homebrew_corpus/PROVENANCE.md)
-records the source pins, licences and the deferred savedata sample.
+copy. The [corpus provenance](../tests/fixtures/homebrew_corpus/PROVENANCE.md) records the source pins, licences
+and the deferred savedata sample.
 
-| Program | PSPSDK sample | Smoke checks | Result |
+The Linux native CI player leg exercises `gu-cube`. With the pinned PSPDEV tools, the native player build
+dependencies, Xvfb and a Vulkan device installed, run the same check offline:
+
+```sh
+NK_HOMEBREW_RUNTIME_REQUIRED=1 SDL_VIDEODRIVER=x11 PYTHON="$(command -v python)" \
+  xvfb-run -a python -m unittest -v tools.test_homebrew_corpus.CorpusRuntimeSmokeTests.test_gu_cube_runtime_smoke
+```
+
+Use a supported Python and select the intended Vulkan ICD when several devices are installed. The test imports
+the sample, validates the built package, and requires 120 accepted presents with a moving textured cube on the
+expected background. A fresh profile must refuse the same PBP bytes under the wrong filename. The table below
+shows the results recorded in the versioned corpus manifest; the CI log gives the result for each tested head.
+
+| Program | PSPSDK sample | Smoke checks | Recorded result |
 | :--- | :--- | :--- | :--- |
 | `gu-cube` | `gu/cube` | first_frame, nonblank_frame | unmeasured |
 | `controller-basic` | `controller/basic` | first_frame, scripted_input | unmeasured |
