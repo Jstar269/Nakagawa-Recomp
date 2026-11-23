@@ -1393,8 +1393,7 @@ enum {
     PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE = 0x455Bu,   /* a title's Enhanced page: Remove texture pack */
     PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS = 0x455Cu,    /* Settings > Online: RA opt-in */
     PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS_ACCOUNT = 0x455Du,
-    PLAYER_UI_ID_ACHIEVEMENTS_AGREE = 0x455Eu,        /* RA's card: AGREE AND TURN ON */
-    PLAYER_UI_ID_ACHIEVEMENTS_NOT_NOW = 0x455Fu,      /* its NOT NOW */
+    PLAYER_UI_ID_ACHIEVEMENTS_NOT_NOW = 0x455Fu,      /* RA's card: NOT NOW */
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
@@ -1417,6 +1416,7 @@ enum {
     PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN = 0x45B2u,      /* its SIGN IN */
     PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN_CANCEL = 0x45B3u, /* its CANCEL */
     PLAYER_UI_ID_ACHIEVEMENTS_CONSENT_TEXT = 0x45B4u, /* RA's consent card: its scrolling text */
+    PLAYER_UI_ID_ACHIEVEMENTS_AGREE = 0x45B5u,        /* RA's card: AGREE AND TURN ON */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
     PLAYER_UI_ID_CONTROLLER_DEADZONE_UP = 0x4622u,
